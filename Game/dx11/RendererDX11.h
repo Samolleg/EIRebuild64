@@ -1,0 +1,137 @@
+#pragma once
+#include <CommonStates.h>
+#include <dxgidebug.h>
+
+#include "vertexbuffer.h"
+#include "SpriteBatch.h"
+#include "SpriteFont.h"
+#include "FakeDX7.h"
+#include "Caches.h"
+#include "DirectXHelpers.h"
+#include <WICTextureLoader.h>
+#include <wrl/client.h>
+#include <d3d11.h>
+
+// #define DRAWABLE_BACKBUFFER
+class ModShadowDX11;
+class CDXGISurface;
+class CConstantBuffers;
+class CShadersMain;
+class FakeD3D7State;
+class CEffectProcessor;
+class CBatchers;
+
+class CRenderState
+{
+    uint32_t alphaRef;   
+};
+
+class CDX11
+{
+private:
+    std::shared_ptr<ModShadowDX11> modShadows;
+    DWORD m_width, m_height;
+    DirectX::XMFLOAT4 background_color;
+    BOOL m_bMakeScreenShot = 0;
+
+    std::unique_ptr<CConstantBuffers> m_cbs = std::make_unique<CConstantBuffers>();
+    std::unique_ptr<CShadersMain> m_shaders = std::make_unique<CShadersMain>();   
+    std::unique_ptr<CEffectProcessor> m_effproc = std::make_unique<CEffectProcessor>(this);    
+
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> deviceContext;
+    Microsoft::WRL::ComPtr<IDXGISwapChain> swapchain;
+
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> renderTargetView;
+
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depthStencilView;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depthStencilBuffer;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilStateDisableWrite;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilStateDisable;
+
+    Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
+    Microsoft::WRL::ComPtr<ID3D11BlendState> blendStateDisable;
+
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerStateNoCull;
+
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> samplerState;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> blackTexture;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> blackTextureView;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture2;
+
+    std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
+    std::unique_ptr<DirectX::SpriteFont> spriteFont;
+    std::unique_ptr<DirectX::CommonStates> m_states;
+    std::unique_ptr<CVertexCaches> m_caches;
+    std::unique_ptr<CBatchers> m_batchers;
+    FakeD3D7State fake_dx7, fake_dx7_prev;
+
+    void MakeScreenShot();
+    bool InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
+    bool ReportLiveObjects();
+
+public:
+    bool Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
+    ~CDX11();
+    void UpdateTerrainShadow(unsigned width,unsigned height,const unsigned char *pixels);
+    void SetTerrainShadowPass(bool enabled);
+    bool GetTerrainShadowSize(unsigned &width,unsigned &height) const;
+    void BeginModShadows();
+    void EndModShadows();
+    std::vector<WORD> ReadModShadowAlpha(ID3D11ShaderResourceView *source);
+    void BeginFrame();
+    void EndFrame();
+    void ClearColorBuffer(DWORD value);
+    void ClearZBuffer(DWORD value);
+    int DrawFigurePrimitive(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
+               DWORD dwFlags);
+    int DrawParticles(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
+                      DWORD dwFlags);
+    int DrawSimplePrimitive(LPVOID pvVertices, DWORD dwVertexCount,
+                            LPWORD pwIndices, DWORD dwIndexCount, DWORD dwFlags);
+    int TriggerRedraw();
+    template <typename TVertexType>
+    int DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
+ VertexBuffer<TVertexType> *vbVertices,
+                             LPWORD pwIndices, DWORD dwIndexCount);
+    template <typename TVertexType>
+    int DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVertexType> *vbVertices);
+
+    BOOL BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture);
+    void SetAlphaRef(float value);
+    void SetBackgroundColor(DWORD value);
+    void SetFogColor(DWORD value);
+    void ScreenShot();
+    bool RenderStateCheck();
+    bool SetRenderStates();
+    void CreateShaderResource(Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
+                              Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &textureView);
+    void CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d,
+                       Microsoft::WRL::ComPtr<ID3D11Texture2D> &texture);
+    void UpdateTexture(ID3D11Texture2D *texture, UINT subresource_index, D3D11_BOX *region,
+                       D3D11_SUBRESOURCE_DATA *srd);
+    void GetCurrentMode(DWORD &widthOut, DWORD &heightOut)
+    {
+        widthOut = m_width;
+        heightOut = m_height;
+    };
+    Microsoft::WRL::ComPtr<IDXGISwapChain> GetSwapChain() { return swapchain; };
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> GetDeviceContext() { return deviceContext; };
+    Microsoft::WRL::ComPtr<ID3D11Device> GetDevice() { return device; };
+    DirectX::SpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
+    DirectX::CommonStates *GetCommonStates() { return m_states.get(); };
+    CConstantBuffers *GetConstantBuffers() { return m_cbs.get(); };
+    CEffectProcessor *GetEffectProcessor() { return m_effproc.get(); }
+    CShadersMain *GetShaders() { return m_shaders.get(); };
+    CBatchers *GetBatchers() { return m_batchers.get(); };
+
+    void SetFakeRenderState(int key, DWORD value) { fake_dx7.SetRenderState(key, value); };
+    void GetFakeRenderState(int key, DWORD *value) { fake_dx7.GetRenderState(key, value); };
+    void DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *tex2d);    
+};
+
+const int N_QUAD_VERTICES = 4;

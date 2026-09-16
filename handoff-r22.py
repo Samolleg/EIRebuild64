@@ -1,0 +1,38 @@
+from pathlib import Path
+import json,hashlib,shutil,struct,datetime
+r=Path(__file__).resolve().parent;e=r/'evidence/addon-integration';sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest().upper()
+exe=r/'out/Win32/Release/EI_Rebuild_dx11_Release_Win32.exe';pdb=exe.with_suffix('.pdb')
+data=json.loads((e/'r22-runtime.json').read_text());assert data['engineDispatch']['mobRegistryParserNumericRoundTrip']
+registry=json.loads((e/'r22-command-registry.json').read_text());assert registry['nativeTokenParity'] and len(registry['customCommands'])==93
+b=exe.read_bytes();pe=struct.unpack_from('<I',b,60)[0];assert struct.unpack_from('<H',b,pe+4)[0]==0x14c
+pkg=r.parent/'handoffs/eirebuild-x86-mob-commands-20260916-r22';pkg.mkdir(exist_ok=False);symbols=r/'symbols/20260916-r22';symbols.mkdir(exist_ok=False)
+shutil.copy2(exe,pkg/'EIRebuild.exe');shutil.copy2(pdb,symbols/'EIRebuild.pdb')
+sources={str(p.relative_to(e/'pre-r22')):{'before':sha(p),'after':sha(r/p.relative_to(e/'pre-r22'))} for p in (e/'pre-r22').rglob('*') if p.is_file()};sources['Game/ModMobCommands.h']={'before':None,'after':sha(r/'Game/ModMobCommands.h')}
+manifest={'sourceRoot':str(r),'branchCommit':'N/A - copied engine snapshot','referenceCommit':registry['sourceReference'],'referenceBranch':'feature/world-background-data-20260916','build':'Build57 Release Win32','created':datetime.datetime.now().isoformat(),'exe':sha(exe),'pdb':sha(pdb),'symbols':str(symbols),'sources':sources,'originalExe':registry['sha256'],'checks':['r22-command-registry.json','r22-runtime.json','PE32 x86'],'installed':False,'interactiveTest':False,'mergePushAuthorized':False}
+for p in [pkg/'manifest.json',e/'r22-manifest.json']:p.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
+report='''# R22 — exact MOB command registry and fixed-format native dispatch
+
+Parent GAME-EXE-EIREBUILD-ADDON-INTEGRATION-001 ACTIVE. Full transfer remains the goal; user requires no gameplay tests until migration finishes. Source root work/eirebuild-local, branch/commit N/A copied snapshot. Addon reference57b8e0c, feature/world-background-data-20260916; R20/R21 installed522EEF9E provenance reused. No installation, interactive launch, merge or push.
+
+## Provenance and source change
+inventory-mob-r22.py reads the original executable PE sections and token table at78BCA0 as identified in Patches/Scripts.cpp. All225 original name/token pairs match the engine parser/enumeration. It then follows the actual Release addon registration order: existing names retain their original ID; new names use300 plus total registered handler count, including overrides.93 custom handlers recorded, excluding the DEBUG-only block. RefreshUnitStats is385. Exact original EXE hash and registry recorded in r22-command-registry.json. No guessed token or enum renumbering.
+
+ModMobCommands.h preserves all93 registry entries.19 fixed-format handlers are integrated: RefreshUnitStats; Sin, Cos, Pow, Abs, Round, Ceil, Floor, StrToFloat, StrLen; GetDexterity, GetIntelligence, GetStrength, GetActions, GetActionsBase, GetEncumbrance, GetMaxEncumbrance, GetUnitPose, GetUnitAggression. The parser replaces/appends only implemented entries when a mod Session is active; unsupported entries reserve identity without advertising a nonexistent implementation. Float and action dispatch run after native parameter evaluation, before the original command switch. Known unported float/actions throw an explicit error rather than fabricate a result. Broader string/object/group dispatch remains pending, including handling saved unsupported commands of those return types.
+
+RefreshUnitStats resolves the authoritative server object and routes to the existing queue. Existing JMVNpcStatRefresh enabled mode rejects dead/owned/invalid units and accepts duplicate requests without enqueuing twice. Disabled mode retains the addon's invisibility{d05;d05} cast through the native spell manager, with original zero source position. No new configuration switch. No installed main.lua, maps, save or data changes.
+
+## Checks and delivery
+Final Build57 Release Win32 PASS; PE32 x86. Native pre-window inspector PASS: complete registry count/RefreshUnitStats385, actual CScript parser of a WorldScript with nine numeric operations, native execution results including negative half rounding, RefreshUnitStats action on an empty object, text export/reparse, invalid arity rejection, explicit rejection of an unported float command. Shared fullstats/regeneration/queue regression remains clean. Build56 was the source build before adding these parser fixtures; Build57 is final source/artifact. Original token-table comparison performed once, not repeated as a broad audit.
+
+Clean handoff work/handoffs/eirebuild-x86-mob-commands-20260916-r22: EXE, README, manifest; matching PDB separate symbols/20260916-r22. Source preimages in pre-r22 and manifest hashes. Requires game runtime dependencies. Existing installed R8/test game and reference mod/Starter untouched. No merge/push authorized.
+
+## Remaining scope / confidence audit
+74 registry handlers remain unported; variable/optional arguments and string/object/group result bridges are not supplied by this block.19 handlers does not mean19 full gameplay scenarios verified: the headless numeric script validates nine math/string-to-number operations and the empty-object refresh dispatch, not populated NPC refresh or equipped/owned stat getters. Those getters map directly to inspected native fields, but real script object ownership, queued NPC refresh and disabled-mode casting require later gameplay checks. Binary saved-script reload was not tested; original numbering is proved, complete save compatibility is not. Native text round-trip is not binary save/load proof.
+
+Found reference defect: DistancePointPoint is declared Fff but its handler reads floatParams[0..3]. Left that entry pending and recorded the mismatch; did not silently alter its serialized/argument contract. Lexer keyword-boundary/CP1251 fixes and addon if/then/else lowering remain pending along with broader custom command registration behavior. Full NPC equipment migration, combat/AI/loot/audio/UI/network transfer and R17 startup defects remain open.
+
+Next coherent block: general optional/variadic argument parser and remaining scalar/string/object commands, preserving the same registry IDs; handle branch commands and compiled-script round-trip before claiming saved MOB parity. Then return to NPC equipment/AI migration. After migration, manual scenarios: compile/load actual mod MOB, read unit stats through scripts, call RefreshUnitStats on live NPCs, repeat requests across zone/load and validate the existing disabled legacy behavior. Do not launch now.
+'''
+(e/'R22-REPORT.md').write_text(report,encoding='utf-8');(pkg/'README.md').write_text('R22: exact93-entry Release MOB registry,19 native fixed-format handlers including RefreshUnitStats385. Build57/parser+native execution checks PASS. Not installed; gameplay deferred. Copied source branch/commit N/A. Requires game dependencies.74 handlers and binary saved-script compatibility remain pending. See manifest and work/eirebuild-local/evidence/addon-integration/R22-REPORT.md. PDB separately symbols/20260916-r22. No merge/push authorized.\n',encoding='utf-8')
+p=e/'FEATURE-MATRIX.md';b=p.read_bytes();p.write_bytes(b+b'\r\nR22:225 original tokens PE-verified;93 Release addon handler identities preserved,19 fixed-format handlers integrated incl RefreshUnitStats385. Build57/native parser+numeric execution+text round-trip PASS.74 handlers, variadics and binary-save parity pending; DistancePointPoint Fff/4-read mismatch recorded. See R22-REPORT.md.\r\n')
+print(manifest['exe']);print(pkg)

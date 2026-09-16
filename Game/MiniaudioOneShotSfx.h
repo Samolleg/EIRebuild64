@@ -1,0 +1,162 @@
+#pragma once
+
+#include <stdint.h>
+
+namespace MiniaudioOneShotSfx
+{
+struct PartyVoiceBinding
+{
+    uint32_t speakerId;
+    float nearDistance;
+    float farDistance;
+};
+
+enum EStartResult
+{
+    START_NOT_HANDLED,
+    STARTED,
+    START_SUPPRESSED,
+    START_FAILED
+};
+
+typedef float (*VirtualDynamicGainResolver)(
+    void *soundManager,
+    const char *soundName,
+    bool spatial,
+    bool looping,
+    bool speech,
+    bool dialog,
+    int manualVolume,
+    const float *position,
+    float minDistance,
+    float maxDistance);
+
+bool CaptureEncoded(
+    const char *soundName,
+    const void *data,
+    uint32_t size,
+    const char *source = "stock_beginfxll");
+bool IsCaptured(const char *soundName);
+const char *LastStartReason();
+void SetVirtualDynamicGainResolver(VirtualDynamicGainResolver resolver);
+void RecordMissingAudioResource(
+    const char *requestedName,
+    const char *domain,
+    const char *targetName,
+    const char *path,
+    const char *soundClass,
+    const char *reason);
+void DumpMissingAudioCatalog(const char *reason);
+
+EStartResult TryStartFlat(
+    void *soundManager,
+    const char *soundName,
+    int priority,
+    int percentVolume,
+    int percentPan,
+    float gainFactor,
+    float pitchFactor);
+
+EStartResult TryStart3D(
+    void *soundManager,
+    const char *soundName,
+    int priority,
+    const void *source,
+    float minDistance,
+    float maxDistance,
+    float gainFactor,
+    float pitchFactor);
+
+EStartResult TryStartManaged(
+    void *soundManager,
+    void *fxControl,
+    void *milesSample,
+    const char *soundName,
+    int priority,
+    int finalVolume,
+    int percentPan,
+    int playbackRate,
+    bool looping,
+    bool speech);
+
+EStartResult TryStartVirtualFlat(
+    void *soundManager,
+    uint32_t virtualId,
+    const char *soundName,
+    int priority,
+    int percentVolume,
+    int percentPan,
+    bool looping,
+    bool affectedWithHeight,
+    bool speech,
+    bool dialog,
+    float gainFactor,
+    float pitchFactor,
+    const PartyVoiceBinding *partyVoice = nullptr,
+    bool scenarioSpeech = false);
+
+EStartResult TryStartVirtual3D(
+    void *soundManager,
+    uint32_t virtualId,
+    const char *soundName,
+    int priority,
+    const void *source,
+    float minDistance,
+    float maxDistance,
+    bool looping,
+    bool speech,
+    float gainFactor,
+    float pitchFactor);
+
+uint32_t CaptureVoiceWait(void *soundManager, uint32_t soundId);
+bool IsVoiceWaitActive(uint32_t ticket);
+bool IsVirtualSound(void *soundManager, uint32_t virtualId);
+bool UpdateVirtualFlat(
+    void *soundManager,
+    uint32_t virtualId,
+    int percentVolume,
+    int percentPan);
+bool UpdateVirtual3D(
+    void *soundManager,
+    uint32_t virtualId,
+    const void *source,
+    float minDistance,
+    float maxDistance);
+bool CancelVirtual(void *soundManager, uint32_t virtualId);
+float GetVirtualPlaybackTime(void *soundManager, uint32_t virtualId);
+unsigned int CountAudibleVirtualSpeech(void *soundManager);
+bool IsManagedSample(void *milesSample);
+void StopManagedSample(void *milesSample, const char *reason);
+
+bool SetStreamingResource(
+    void *soundManager,
+    const char *resourcePath,
+    const char *markersPath);
+bool BeginStreaming(void *soundManager, const char *soundName, int markerType);
+void EndStreaming(int markerType, const char *reason);
+void SetStreamingVolume(int percentVolume);
+void FadeOutStreaming();
+void FadeInStreaming();
+void PauseStreaming(const char *reason);
+void ResumeStreaming(const char *reason);
+bool IsStreamingSample(void *sample);
+
+bool IsSupportedBinkAudioAbi(
+    const void *setSoundSystem,
+    const void *milesSystemOpen);
+void ConfigureBinkMilesFallback(void *milesSystemOpen, uintptr_t param);
+void *GetBinkMiniaudioSystemOpen();
+unsigned int CountActiveBinkVoices();
+
+void PrepareNativeManager(void *soundManager);
+const char* GetNativeStreamingName();
+void Tick(void *soundManager);
+void StopAll(const char *reason);
+void Pause(const char *reason);
+void Resume(const char *reason);
+void SetModalSpeechPaused(
+    bool paused,
+    bool gameplayPause,
+    const char *reason);
+void Shutdown(const char *reason);
+} // namespace MiniaudioOneShotSfx

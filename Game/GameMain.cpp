@@ -1,0 +1,1127 @@
+#include "StdAfx.h"
+static const char LOCAL_FILE[] = __FILE__;
+/////////////////////////////////////////////////////////////////////////////////////
+#include <io.h>
+#include <new.h>
+
+#include "dx11/RendererDX11.h"
+#include "GameMain.h"
+#include "StringProcessing.h"
+#include "WorldClient.h"
+#include "WorldServer.h"
+#include "WorldInterface.h"
+#include "ScenarioTracker.h"
+#include "Camera.h"
+#include "Renderer.h"
+#include "PerkDatabase.h"
+#include "QuestDatabase.h"
+#include "UnitDatabase.h"
+#include "SpellDatabase.h"
+#include "ItemDatabase.h"
+#include "LeverDatabase.h"
+#include "AckDatabase.h"
+#include "TerrainPrintsDatabase.h"
+#include "I3DMain.h"
+#include "A3Cursor.h"
+#include "BinkVideo.h"
+#include "aiSettings.h"
+#include "Console.h"
+#include "DXGeometryProcessor.h"
+#include "TextureManager.h"
+#include "PlayerClient.h"
+#include "IniFile.h"
+#include "2DScreenWait.h"
+#include "ChatServer.h"
+#include "DebugAlloc.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
+/////////////////////////////////////////////////////////////////////////////////////
+// __DEMO__,__SINGLEONLY__,NODEBUGINFO,DONT_DISPLAY_DEBUG_IDS
+// ,NOGETDC,NOBLIT,SURFACE_BACKUP
+// #define USE_SETTINGS_INI 1
+/*#define DONT_DISPLAY_DEBUG_IDS
+#define DONT_USE_SETTINGS_INI 1*/
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+static inline double GetI64(_ULARGE_INTEGER *t)
+{
+    double fpRes;
+    _asm
+    {
+		mov eax, t
+		fild qword ptr [eax]
+		fstp fpRes
+    }
+    return fpRes;
+}
+
+double NGame::GetFreeDiskSpace(const char *pszDrive)
+{
+    typedef BOOL(WINAPI * GDFSE)(LPCTSTR, PULARGE_INTEGER, PULARGE_INTEGER, PULARGE_INTEGER);
+
+    GDFSE pfnGetDiskFreeSpaceEx = (GDFSE)GetProcAddress(GetModuleHandle("kernel32.dll"),
+                                                        "GetDiskFreeSpaceExA");
+    BOOL bRetVal = FALSE;
+    double fRetVal = 0;
+    if (pfnGetDiskFreeSpaceEx)
+    {
+        ULARGE_INTEGER i64FreeBytesToCaller, i64TotalBytes, i64FreeBytes;
+        bRetVal = (*pfnGetDiskFreeSpaceEx)(pszDrive, &i64FreeBytesToCaller, &i64TotalBytes,
+                                           &i64FreeBytes);
+        fRetVal = GetI64(&i64FreeBytesToCaller);
+    }
+    else
+    {
+        DWORD dwSectPerClust, dwBytesPerSect, dwFreeClusters, dwTotalClusters;
+        bRetVal = GetDiskFreeSpace(pszDrive, &dwSectPerClust, &dwBytesPerSect, &dwFreeClusters,
+                                   &dwTotalClusters);
+        fRetVal = double(dwFreeClusters) * double(dwSectPerClust) * double(dwBytesPerSect);
+    }
+
+    return (bRetVal == 0 ? 0 : fRetVal);
+}
+
+bool NGame::DumpMemUsage(bool bByFile, const char *pszFileName)
+{
+    SExternalDebugAllocStat *stats = 0;
+    int nNumStats = 0;
+    if (!GetAllocStats(stats, nNumStats))
+        return false;
+    // collect total mem usage
+    unsigned int uUsedMemory = 0;
+    for (int i = 0; i < nNumStats; ++i)
+        uUsedMemory += stats[i].uAllocatedMemory - stats[i].uFreedMemory;
+    //
+    OutputDebugString("\n********************Begin Memory Usage Dump********************\n\n");
+    if (bByFile)
+    {
+        std::map<std::string, DWORD> allocs;
+        for (int i = 0; i < nNumStats; ++i)
+            allocs[stats[i].pszFileName] += stats[i].uAllocatedMemory - stats[i].uFreedMemory;
+        //
+        if (pszFileName == 0)
+        {
+            char buff[1024];
+            for (auto pos = allocs.begin(); pos != allocs.end(); ++pos)
+            {
+                if (pos->second == 0)
+                    continue;
+                sprintf(buff, "%s: %d bytes\n", pos->first.c_str(), pos->second);
+                OutputDebugString(buff);
+            }
+        }
+    }
+    else
+    {
+        char buff[1024];
+        for (int i = 0; i < nNumStats; ++i)
+        {
+            if (stats[i].uAllocatedMemory - stats[i].uFreedMemory == 0)
+                continue;
+            if (!(((pszFileName != 0) && (strcmp(stats[i].pszFileName, pszFileName) == 0)) ||
+                  (pszFileName == 0)))
+                continue;
+            sprintf(buff, "%s(%d): %d bytes\n", stats[i].pszFileName, stats[i].uLineNumber,
+                    stats[i].uAllocatedMemory - stats[i].uFreedMemory);
+            OutputDebugString(buff);
+        }
+    }
+    // total memory usage
+    {
+        OutputDebugString("-----------------------------------------------------------\n");
+        char buff[1024];
+        sprintf(buff, "Total memory usage: %d bytes (~%dMB)\n", uUsedMemory,
+                uUsedMemory / (1024 * 1024));
+        OutputDebugString(buff);
+    }
+    //
+    delete[] stats;
+    OutputDebugString("\n********************End Memory Usage Dump********************\n\n");
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// MEMORY counting code
+/////////////////////////////////////////////////////////////////////////////////////
+DWORD GetDXVersion();
+/////////////////////////////////////////////////////////////////////////////////////
+struct _CrtMemBlockHeader
+{
+    // Pointer to the block allocated just before this one:
+    struct _CrtMemBlockHeader *pBlockHeaderNext;
+    // Pointer to the block allocated just after this one:
+    struct _CrtMemBlockHeader *pBlockHeaderPrev;
+    char *szFileName; // File name
+    int nLine;        // Line number
+    size_t nDataSize; // Size of user block
+    int nBlockUse;    // Type of block
+    long lRequest;    // Allocation number
+    // Buffer just before (lower than) the user's memory:
+    // unsigned char gap[nNoMansLandSize];
+};
+
+struct SAllocInfo
+{
+    char pszFileName[256];
+    int nAllocNum;
+    int nAllocSize;
+};
+
+int __cdecl AllocInfoCompare(const void *elem1, const void *elem2)
+{
+    if (((SAllocInfo *)elem1)->nAllocSize < ((SAllocInfo *)elem2)->nAllocSize)
+        return 1;
+    if (((SAllocInfo *)elem1)->nAllocSize > ((SAllocInfo *)elem2)->nAllocSize)
+        return -1;
+    return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void TypeMemoryUsage()
+{
+#ifdef _DEBUG
+    std::vector<SAllocInfo> info(1024, SAllocInfo{});
+
+    // FILE *f = fopen( "Strings.txt", "wt" );
+    _CrtMemBlockHeader *pCur;
+    _CrtMemState state;
+    _CrtMemCheckpoint(&state);
+
+    int nFileMax = 0;
+    for (pCur = state.pBlockHeader; pCur; pCur = pCur->pBlockHeaderNext)
+    {
+        if (pCur->nBlockUse != _NORMAL_BLOCK)
+            continue;
+        const char *pszFileName = "Unknown";
+        if (pCur->szFileName)
+            pszFileName = pCur->szFileName;
+        int i = 0;
+        for (; i < nFileMax; i++)
+            if (strcmp(info[i].pszFileName, pszFileName) == 0)
+                break;
+        if (i == nFileMax)
+        {
+            nFileMax++;
+            strcpy(info[i].pszFileName, pszFileName);
+            info[i].nAllocNum = 0;
+            info[i].nAllocSize = 0;
+        }
+        /*
+        if ( strcmp( pszFileName + strlen(pszFileName) - 11, "strcore.cpp" ) == 0 )
+        {
+                const char *pStr = ((const char*)pCur)+44;
+                fwrite( pStr, strlen(pStr), 1, f );
+                fwrite( "\n", 1, 1, f );
+        }*/
+        info[i].nAllocNum++;
+        info[i].nAllocSize += pCur->nDataSize;
+    }
+    // fclose( f );
+
+    TRACE0("Current memory usage:\n");
+    qsort(info.data(), nFileMax, sizeof(SAllocInfo), AllocInfoCompare);
+    for (int i = 0; i < nFileMax; i++)
+    {
+        char buf[1024];
+        sprintf(buf, " File \"%s\": Number of blocks: %i, Number of bytes: %i\n",
+                info[i].pszFileName, info[i].nAllocNum, info[i].nAllocSize);
+        TRACE0(buf);
+    }
+#endif
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// namespace, which represent all global Windows-related variables and functions
+// this file additions to the NGame
+namespace NGame {
+const DWORD MAX_LOADSTRING = 256;
+// Windows identification variables
+HWND hWnd;                            // window handler
+HINSTANCE hInstance;                  // current instance
+TCHAR szAppTitleName[MAX_LOADSTRING]; // application title ( will be loaded during initialization )
+TCHAR szWndClassName[MAX_LOADSTRING]; // user window class name ( will be loaded during
+                                      // initialization )
+ATOM atomWndClassName; // atom window class name identification (assigned during registration)
+bool bNeedRender = true; // crap
+DWORD dwMovieFrameNumber = 0;
+//
+CString szCameraFileName;
+CString szScriptFileName;
+CString szObjectsFileName;
+CString szMapFileName;
+CString szMovieDir(".\\capture\\");
+//
+bool bEnableRender = false;
+bool bEnableRenderStateChanged = false;
+bool bEnableQuit = true;
+bool bEnableFlip = true;
+//
+ATOM MyRegisterClass(HINSTANCE hInstance);
+BOOL InitInstance(HINSTANCE hInstance, int nCmdShow);
+LRESULT WndProc(UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+void UpdateRenderEnable();
+bool ProcessMessages();
+void EnableFlip(bool bVal)
+{
+    bEnableFlip = bVal;
+}
+bool IsFlipEnable()
+{
+    return bEnableFlip;
+}
+//
+BOOL LoadGame();
+}; // namespace NGame
+using namespace NGame;
+/////////////////////////////////////////////////////////////////////////////////////
+void NGame::AllowQuit(bool bAllow)
+{
+    bEnableQuit = bAllow;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool NGame::QuitProgram(int nExitCode)
+{
+    if (bEnableQuit)
+    {
+        PostQuitMessage(nExitCode);
+        return true;
+    }
+    else
+        return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+//  FUNCTION: MyRegisterClass()
+//
+//  PURPOSE: Registers the window class.
+//
+//  COMMENTS:
+//
+//    This function and its usage is only necessary if you want this code
+//    to be compatible with Win32 systems prior to the 'RegisterClassEx'
+//    function that was added to Windows 95. It is important to call this function
+//    so that the application will get 'well formed' small icons associated
+//    with it.
+ATOM NGame::MyRegisterClass(HINSTANCE hInst)
+{
+    WNDCLASSEX wcex;
+
+    wcex.cbSize = sizeof(WNDCLASSEX);
+
+    wcex.style = CS_DBLCLKS;
+    wcex.lpfnWndProc = reinterpret_cast<WNDPROC>(ShortWndProc);
+    wcex.cbClsExtra = 0;
+    wcex.cbWndExtra = 0;
+    wcex.hInstance = hInst;
+    wcex.hIcon = LoadIcon(hInst, reinterpret_cast<LPCTSTR>(IDI_MAIN));   // main icon
+    wcex.hIconSm = LoadIcon(hInst, reinterpret_cast<LPCTSTR>(IDI_MAIN)); // small icon
+    wcex.hCursor = 0; // LoadCursor( NULL, IDC_ARROW ); <= we don't need cursor in our window!
+    wcex.hbrBackground =
+        0; // reinterpret_cast<HBRUSH>( COLOR_WINDOW + 1 ); <= we don't need any color filling
+    wcex.lpszMenuName = 0; // <= no menu
+    wcex.lpszClassName = szWndClassName;
+
+    return RegisterClassEx(&wcex);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+//   FUNCTION: InitInstance(HANDLE, int)
+//
+//   PURPOSE: Saves instance handle and creates main window
+//
+//   COMMENTS:
+//
+//        In this function, we save the instance handle in a global variable and
+//        create and display the main program window.
+BOOL NGame::InitInstance(HINSTANCE hInstance, int nCmdShow)
+{
+    // Store instance handle in our global variable
+    NGame::hInstance = hInstance;
+    // create window with sysmenu on the taskbar
+    hWnd = CreateWindowEx(0, LPCSTR(atomWndClassName), szAppTitleName,
+                          /*WS_OVERLAPPED | WS_SYSMENU */ WS_POPUP /*| WS_SYSMENU*/ |
+                              WS_CLIPSIBLINGS,
+                          0, 0, theSettings.dwWidth, theSettings.dwHeight, 0, 0, hInstance, 0);
+    // return with FALSE if window wasn't created
+    if (!hWnd)
+        return FALSE;
+    // show & update window
+    ShowWindow(hWnd, nCmdShow);
+    UpdateWindow(hWnd);
+    // eliminate cursor once for this widow
+    SetCursor(0);
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL NGame::CheckPreviousApp(LPCSTR pszMainClass, LPCSTR pszMainTitle)
+{
+    return TRUE;
+    HWND hwndFind, hwndLast, hwndForeGround;
+    DWORD dwFindID, dwForeGroundID;
+    // Check if application is already running
+    hwndFind = FindWindow(pszMainClass, pszMainTitle);
+    if (hwndFind)
+    {
+        // Bring previously running application's main
+        // window to the user's attention
+        hwndForeGround = GetForegroundWindow();
+        dwForeGroundID = GetWindowThreadProcessId(hwndForeGround, 0);
+        dwFindID = GetWindowThreadProcessId(hwndFind, 0);
+
+        // Don't do anything if window is already in foreground
+        // Unless it is iconized.
+        if ((dwFindID != dwForeGroundID) || IsIconic(hwndFind))
+        {
+            hwndLast = GetLastActivePopup(hwndFind);
+            if (IsIconic(hwndLast))
+                ShowWindow(hwndLast, SW_RESTORE);
+
+            BringWindowToTop(hwndLast);
+            SetForegroundWindow(hwndLast);
+        }
+
+        // Prevent additional instance's of this application
+        // from running
+        return FALSE;
+    }
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int NGame::MessageBox(LPCSTR pszText, UINT uType)
+{
+    HCURSOR hCursor = GetCursor(); // remember old cursor before message box call
+    /*if (pVis && pRend->IsFullscreen())
+        pRend->FlipToGDISurface();*/
+    int nRetVal = ::MessageBox(hWnd, pszText, szAppTitleName, uType);
+    SetCursor(hCursor); // restore old cursor after message box usage
+    return nRetVal;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL NGame::LoadGame()
+{
+    // load terrain
+    CString szTerrainFileName;
+    if (!szMapFileName.IsEmpty())
+        szTerrainFileName = szMapFileName;
+    else
+        szTerrainFileName = theSettings.szDefaultMapName;
+
+    if (szObjectsFileName == "")
+    {
+        // action on startup
+        IWorldConnector.ReqGoMainMenu();
+        IWorldConnector.DoGo();
+        // IWorld.NewGame();
+    }
+    else
+    {
+        if (theWorldServer.NewZone(szTerrainFileName, szObjectsFileName) == FALSE)
+            return ReportError("Can't load map \"%s\".\n", szTerrainFileName);
+        theWorldServer.StartServer(SERV_MODE_LOCAL);
+        theWorld.ConnectLocal(theWorldServer.GetLocalNetDriver());
+        theWorld.GetPlayer()->SetSendParty(false);
+        theWorldServer.curInterface = IFACE_DEBUG;
+        if (!szScriptFileName.IsEmpty())
+        {
+            if (theWorldServer.LoadScript(CString(theWorld.GetWorkPath()) + "Scripts\\" +
+                                          szScriptFileName) == FALSE)
+            {
+                SScriptError scriptError = theWorldServer.script.GetLastError();
+                return ReportError("%s, line %i", scriptError.text, scriptError.nLine);
+            }
+        }
+    }
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int nShowClientTimeBalance = 0;
+/////////////////////////////////////////////////////////////////////////////////////
+// function advances current game time and processes segments
+// time sync problem is to be refined
+static bool CountTime()
+{
+    static DWORD dwLastTime = timeGetTime();
+    static DWORD dwPassedTime = 0;
+    static DWORD dwClientPassedTime = 0;
+    static float fpClientTimeSpeed = 1;
+
+    DWORD dwTimeStep = timeGetTime() - dwLastTime;
+    DWORD dwFracTime; // for client
+    dwLastTime += dwTimeStep;
+    // check if focus is in application
+    /*if (!GetRenderer()->IsActive())
+    {
+        IWorld.SetActiveState(false);
+        return false;
+    }*/
+    IWorld.SetActiveState(true);
+    //
+    if (theWorld.IsFailedConnection())
+    {
+        if (IWorldConnector.IsLMP())
+            IWorldConnector.LMPFinishOnTcpDisconnect();
+        else
+        {
+            ASSERT(0);
+            // MessageBox( NULL, "Client side connection lost", "ERROR", MB_OK | MB_ICONERROR );
+            IWorldConnector.ReqGoMainMenu();
+        }
+    }
+    // calc general timestep
+    if (dwTimeStep > 0x80000000)
+        dwTimeStep = 0;
+    // LMP time elapsed
+    LMPTimePassed();
+    // limit maximal passed time
+    if (dwTimeStep > DW_SEGMENT_TIME * 5)
+        dwTimeStep = DW_SEGMENT_TIME * 5;
+    /*if (b25fpsMode)
+        dwTimeStep = int(ceil(1000.0f / float(theSettings.nMovieCapturingFPS)));*/
+    dwPassedTime += dwTimeStep;
+    // calc client timestep
+    if (!theWorld.IsConnected())
+        fpClientTimeSpeed = 1;
+    dwClientPassedTime += fpClientTimeSpeed * dwTimeStep;
+    ASSERT(dwClientPassedTime < 0x4000000);
+    if (dwClientPassedTime > 0x4000000)
+        dwClientPassedTime = 0;
+
+    // segments processing
+    dwFracTime = 0;
+    for (;;)
+    {
+        bool bBreak = true;
+        if (dwPassedTime >= DW_SEGMENT_TIME)
+        {
+            bBreak = false;
+            if (!theWorldServer.Segment())
+                return true;
+            dwPassedTime -= DW_SEGMENT_TIME;
+            LMPTimePassed();
+        }
+
+        if (dwClientPassedTime >= DW_SEGMENT_TIME)
+        {
+            if (theWorld.HasPacket() || !theWorld.IsConnected())
+            {
+                bBreak = false;
+                if (!theWorld.Segment())
+                    return true;
+                dwClientPassedTime -= DW_SEGMENT_TIME;
+                theCamera.Step(static_cast<float>(DW_SEGMENT_TIME) /
+                               static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
+                LMPTimePassed();
+            }
+        }
+
+        if (bBreak)
+            break;
+    }
+
+    IWorldConnector.DoGo();
+    // setup client frac position
+    dwFracTime += dwClientPassedTime;
+    float fpFracTime = float(dwFracTime) / float(DW_SEGMENT_TIME);
+    if (!theWorld.IsCombatPause())
+        theWorld.SetTimeFraction(fpFracTime);
+    //	here we make hard decision about changing speed of time on client
+    // CRAP very first estimation, it is bad because it is fps dependent and does not account
+    // statistics
+    float fpPacketBalance = theWorld.GetInputPacketsNum() - fpFracTime;
+    if (fpPacketBalance < 0)
+        fpClientTimeSpeed = (float)exp(fpPacketBalance * 0.1f);
+    else if (fpPacketBalance > 1)
+        fpClientTimeSpeed = 1 + ((float)sqrt(fpPacketBalance)) * 0.1f - 0.1f;
+    else
+        fpClientTimeSpeed = 1;
+    fpClientTimeSpeed = Max(fpClientTimeSpeed, 0.1f);
+    fpClientTimeSpeed = Min(fpClientTimeSpeed, 10.0f);
+    if (nShowClientTimeBalance)
+        NConsole::net << "Client speed = " << fpClientTimeSpeed << " balance = " << fpPacketBalance
+                      << endl;
+
+    // step camera
+    while (dwTimeStep > DW_SEGMENT_TIME)
+    {
+        theCamera.Step(static_cast<float>(DW_SEGMENT_TIME) /
+                       static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
+        dwTimeStep -= DW_SEGMENT_TIME;
+    }
+    theCamera.Step(static_cast<float>(dwTimeStep) / static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
+
+    // save camera position
+    if (!theWorld.IsCombatPause())
+    {
+        if (theCamera.CheckFlag(CAM_SAVE_PLACEMENTS))
+            theCamera.SaveCurrentCameraPlacement(theWorld.GetPreciseTime());
+        if (theCamera.CheckFlag(CAM_USE_PLACEMENTS))
+            theCamera.PlayCamera(theWorld.GetPreciseTime());
+    }
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+static void NGame::UpdateRenderEnable()
+{
+    if (bEnableRenderStateChanged)
+    {
+        if (bEnableRender)
+        {
+            if (theRenderer.IsInited()) // can restore surfaces only for initialized visualizator
+                GetRenderer()->SetFlag(VIS_ACTIVE);
+            SetCursor(0);
+        }
+        else
+        {
+            GetRenderer()->ResetFlag(VIS_ACTIVE);
+            InvalidateRect(0, 0, TRUE);
+        }
+        bEnableRenderStateChanged = false;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+static bool NGame::ProcessMessages()
+{
+    MSG msg;
+    bool bActive = true;
+    // Idle processing until no new message come
+    while (!PeekMessage(&msg, 0, 0, 0,
+                        PM_NOREMOVE)) // no messages in the queue => process OnIdle
+    {
+        // Update render state
+        UpdateRenderEnable();
+        bActive = CountTime();
+        if (bActive)
+        {
+            theInterface.OnIdle();
+            NGame::DrawFrame(bEnableFlip);
+        }
+    }
+    if (!GetMessage(&msg, 0, 0, 0))
+        return false;
+    TranslateMessage(&msg);
+    // DispatchMessage( &msg );
+    if (bActive)
+        NGame::WndProc(msg.message, msg.wParam, msg.lParam);
+    else
+        NGame::ShortWndProc(NGame::hWnd, msg.message, msg.wParam, msg.lParam);
+    return true;
+}
+
+const int BAD_RESULT = 0xDEAD;
+
+int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+{
+    //_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
+    CStringArray szParams;
+    CStringArray szSysMsgs;
+    // load system messages
+    {
+        FILE *file = fopen(".\\res\\sysmsg.txt", "rt");
+        if (file == 0)
+        {
+            szSysMsgs.Add("This Game requires DX7 in order to run!");
+            szSysMsgs.Add("Not enough free disk space - play on your own risk!");
+            szSysMsgs.Add("Please, insert EI disc 2 in the CD-ROM and press OK");
+        }
+        else
+        {
+            int nLen = _filelength(_fileno(file));
+            char *pBuffer = dbgnew char[nLen];
+            memset(pBuffer, 0, nLen);
+            fread(pBuffer, 1, nLen, file);
+            fclose(file);
+            file = 0;
+            //
+            NStrProc::SplitString(pBuffer, szSysMsgs, 10);
+            if (szSysMsgs.GetSize() < 3)
+            {
+                szSysMsgs.RemoveAll();
+                szSysMsgs.Add("This Game requires DX7 in order to run!");
+                szSysMsgs.Add("Not enough free disk space - play on your own risk!");
+                szSysMsgs.Add("Please, insert EI disc 2 in the CD-ROM and press OK");
+            }
+            //
+            delete[] pBuffer;
+        }
+    }
+    //
+
+#ifdef FINALRELEASE
+    DWORD dwDXVersion = GetDXVersion();
+    if (dwDXVersion < 0x700)
+    {
+        ::MessageBox(0, szSysMsgs[0], "CRITICAL ERROR", MB_OK | MB_ICONEXCLAMATION);
+        return 0xDEAD;
+    }
+#endif // FINALRELEASE
+    //
+    // register classes for save/load
+    REGISTER_SAVELOAD_CLASS(1, CShop);
+    REGISTER_SAVELOAD_CLASS(2, CSingleParty);
+
+    // split command line
+    NStrProc::SplitString(lpCmdLine, szParams, ' ');
+    // process command line
+    NGame::szCameraFileName = ".\\camera.cam";
+    NGame::szScriptFileName.Empty();
+    NGame::szObjectsFileName.Empty();
+    NGame::szMapFileName.Empty();
+    for (int i = 0; i < szParams.GetSize(); i++)
+    {
+        if (szParams[i].Find("-moviepath_") == 0)
+        {
+            theWorld.ResetFlag(WC_MAKE_MOVIE);
+            NGame::szMovieDir = szParams[i].Right(szParams[i].GetLength() - 11);
+            if (NGame::szMovieDir[NGame::szMovieDir.GetLength() - 1] != '\\')
+                NGame::szMovieDir += '\\';
+        }
+        else if (!theWorld.CheckFlag(WC_SAVE_CAMERA) && (szParams[i].CompareNoCase("-nocam") == 0))
+            theWorld.ResetFlag(WC_USE_CAMERA_SCRIPT);
+        else if (!theWorld.CheckFlag(WC_SAVE_CAMERA) && (szParams[i].Find(".cam") != -1))
+            NGame::szCameraFileName = szParams[i];
+        else if (szParams[i].Find(".scr") != -1)
+            NGame::szScriptFileName = szParams[i];
+        else if (szParams[i].Find(".mob") != -1)
+            NGame::szObjectsFileName = szParams[i];
+        else if (szParams[i].Find(".mpr") != -1)
+            NGame::szMapFileName = szParams[i];
+        else if (szParams[i].Find("-benchmark_") == 0)
+        {
+            theSettings.nNumberOfFrames = atoi(szParams[i].Right(szParams[i].GetLength() - 11));
+            theSettings.nCreateOutputFile = 1;
+        }
+        else if (szParams[i].Find("-devicetarget_") == 0)
+            theSettings.nDrawingTarget = atoi(szParams[i].Right(szParams[i].GetLength() - 14));
+    }
+    // Initialize global strings
+    LoadString(hInstance, IDS_APP_TITLE, NGame::szAppTitleName, NGame::MAX_LOADSTRING);
+    LoadString(hInstance, IDS_WND_CLASS, NGame::szWndClassName, NGame::MAX_LOADSTRING);
+    // create and register class style
+    NGame::atomWndClassName = NGame::MyRegisterClass(hInstance);
+    // check for this app already runed
+    if (!NGame::CheckPreviousApp(reinterpret_cast<LPCSTR>(NGame::atomWndClassName),
+                                 NGame::szAppTitleName))
+        exit(-1);
+    // setup registry key
+    CWorld::SetRegistryKey("Software\\Nival Interactive\\EIRebuildTest");
+    CWorld::InitCurrentDir();
+    // read ai settings
+    theAIGeneralSettings.ReadFromFile(CWorld::GetCurrentPath() + "config\\ai.reg");
+    theSettings.ReadSettingsFromRegistry(CWorld::GetRegistryKey());
+#if !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
+    theSettings.ReadSettingsFromFile(CWorld::GetCurrentPath() + "config\\" + "settings.ini");
+#endif // !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
+       //
+       //
+       // set new memory depleted handler
+       // create worlds and establish connection to local server
+    theWorld.Create();
+    theWorldServer.Create();
+    theCamera.Create(&theSettings, theSettings.fpNearClipDistance, theSettings.fpFarClipDistance,
+                     static_cast<float>(pi / 3.5));
+    theWorld.SetCamera(&theCamera);
+    //
+    // CD-2 check
+    {
+        CString szCDPath = theWorld.GetCDPath();
+        CString szWorkPath = theWorld.GetWorkPath();
+        // check disk free space
+        char drive[128], dir[1024], fname[128], ext[128];
+        _splitpath(szWorkPath, drive, dir, fname, ext);
+        strcat(drive, "\\.");
+        double fDiskFreeSpace = GetFreeDiskSpace(drive);
+        if (fDiskFreeSpace != 0)
+        {
+            if (fDiskFreeSpace < 300.0 * double(1L << 20))
+            {
+                int nRetCode = ::MessageBox(0, szSysMsgs[1], "Warning",
+                                            MB_OKCANCEL | MB_ICONWARNING);
+                if (nRetCode == IDCANCEL)
+                    return 0xDEAD;
+            }
+        }
+        // check CD2 in CD-ROM for non-full install
+        if (szWorkPath != szCDPath) // non-full install
+        {
+            char name[1024];
+            memset(name, 0, sizeof(name));
+            // retrieve CD volume information
+            _splitpath(szCDPath, drive, dir, fname, ext);
+            strcat(drive, "\\.");
+            GetVolumeInformation(drive, name, 1024, 0, 0, 0, 0, 0);
+            while (theSettings.szCD2Label != name)
+            {
+                int nRetCode = ::MessageBox(0, szSysMsgs[2], "Warning",
+                                            MB_OKCANCEL | MB_ICONWARNING);
+                if (nRetCode == IDCANCEL)
+                    return BAD_RESULT;
+                GetVolumeInformation(drive, name, 1024, 0, 0, 0, 0, 0);
+            }
+        }
+    }
+
+    //
+    // create saves\current
+    CString szPath;
+    szPath.Format("%ssaves\\", theWorld.GetWorkPath());
+    CreateDirectory(szPath, 0);
+    // create multiplayer dir
+    szPath.Format("%smp\\", theWorld.GetWorkPath());
+    CreateDirectory(szPath, 0);
+    // create textures directory
+    szPath.Format("%stextures\\", theWorld.GetWorkPath());
+    CreateDirectory(szPath, 0);
+    // Perform application initialization
+    if (!NGame::InitInstance(hInstance, nCmdShow))
+        return BAD_RESULT;
+
+    // setup camera placement
+    {
+        CPlot3D cameraCP;
+        cameraCP.x = theSettings.fpCameraDefaultXDeploy;
+        cameraCP.y = theSettings.fpCameraDefaultYDeploy;
+        cameraCP.z = theSettings
+                         .fpCameraDefaultHeight; // + theWorld.GetZValue( cameraCP.x, cameraCP.y );
+        theCamera.SetCP(cameraCP);
+    }
+
+    // create CRenderer object and CDXGeometryProcessor object in visualizator
+    GetRenderer()->Create(NGame::hWnd, theSettings);
+    // initialize sound manager, if audio enabled
+    if (theSettings.nAudio)
+    {
+        CString szResourcesPath = theWorld.GetResourcePath();
+        CString szWorkPath = theWorld.GetWorkPath();
+        CString szCDPath = theWorld.GetCDPath();
+        // create all data structures for sound manager
+        theWorld.GetSoundManager()->Create(NGame::hWnd, TRUE);
+        // select resource for streaming sound
+        theWorld.GetSoundManager()->SelectStreamingResource(szWorkPath + "stream\\",
+                                                            szResourcesPath + "streamsn.reg");
+        //		theWorld.GetSoundManager()->SelectMIDIResource( szResourcesPath +
+        //"midisn.res", szResourcesPath + "midisn.reg" );
+        // select resource for SFXes
+        theWorld.GetSoundManager()->SelectFXResource(szResourcesPath + "sfx.res");
+        {
+            CString szSpeechRes = szCDPath + "res\\speech.res";
+#ifdef __DEMO__
+            CFileFind find;
+            if (find.FindFile(szSpeechRes) != FALSE)
+                theWorld.GetSoundManager()->AddFXResource(szCDPath + "res\\speech.res");
+            find.Close();
+#else
+            theWorld.GetSoundManager()->AddFXResource(szCDPath + "res\\speech.res");
+#endif // __DEMO__
+        }
+        // set sound volumes
+        theWorld.GetSoundManager()->SetFXMasterVolume(theSettings.nAudioSFX);
+        theWorld.GetSoundManager()->SetSpeechMasterVolume(theSettings.nAudioSpeech);
+        theWorld.GetSoundManager()->SetMusicMasterVolume(theSettings.nAudioStreaming);
+        theWorld.GetSoundManager()->SetStereoReverse(theSettings.nReverseStereo ? true : false);
+    }
+
+    {
+        // play start movie sequence
+        NGame::PlayMoviesSequence("Start");
+        // play static logo
+        C2DScreenWait::pszProgressName = "Progres.bik";
+        C2DScreenWait::Step(0);
+        C2DScreenWait::Clear();
+    }
+#if !defined(NODEBUGINFO) && !defined(_DEBUG)
+    PUSH_EXCEPTION_HANDLER(NDebugCallStack::SEHandler);
+#endif // !defined( NODEBUGINFO ) && !defined( _DEBUG )
+       // load databases
+    thePerkDatabase.LoadDatabase(theSettings.szResourcePath, "database.res");
+    theQuestDatabase.Load(theSettings.szResourcePath);
+    theUnitDatabase.Load(theSettings.szResourcePath, "database.res");
+    theSpellDatabase.Load(theSettings.szResourcePath, "database.res");
+    theItemDatabase.Load(theSettings.szResourcePath, "database.res");
+    theLeverDatabase.Load(theSettings.szResourcePath);
+    theAckDatabase.Load(theSettings.szResourcePath);
+    theTPDatabase.Load(theSettings.szResourcePath);
+    // final world initialization
+    theWorld.Init(&theRenderer);
+    TheCursorInit();
+    theInterface.Init(&theRenderer);
+    theMap.Init();
+    // go to game
+    LoadGame();
+    return 0;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+{
+    int inspectionResult=0;
+    if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
+    std::unique_ptr<ModRuntime::Host> modHost;
+    try { modHost=ModRuntime::Host::FromCommandLine(); }
+    catch(const std::exception&e){MessageBoxA(nullptr,e.what(),"Mod startup failed",MB_OK|MB_ICONERROR);return BAD_RESULT;}
+    OutputDebugStringA("Hello!\n");
+    if (WinMainInit(hInstance, hPrevInstance, lpCmdLine, nCmdShow) == BAD_RESULT)
+        return BAD_RESULT;
+
+        //
+        // Main message loop:
+#if defined(FINALRELEASE) && defined(NODEBUGINFO)
+    try
+#endif // defined( FINALRELEASE ) && defined( NODEBUGINFO )
+    {
+        while (true)
+        {
+            if (!NGame::ProcessMessages())
+                break;
+        }
+    }
+#if defined(FINALRELEASE) && defined(NODEBUGINFO)
+    catch (...)
+    {
+        MessageBox(NGame::hWnd, "General Game Error", "ERROR", MB_OK | MB_ICONEXCLAMATION);
+    }
+#endif // defined( FINALRELEASE ) && defined( NODEBUGINFO )
+    //
+#if !defined(NODEBUGINFO) && !defined(_DEBUG)
+    POP_EXCEPTION_HANDLER;
+#endif // !defined( NODEBUGINFO ) && !defined( _DEBUG )
+
+    // FINI
+    theWorld.GetTextureManager()->DeleteUnitLayerTextures();
+    theInterface.Fini();
+    theCursor.Fini();
+    GetRenderer()->Destroy();
+    //
+    theSettings.WriteSettingsToRegistry(theWorld.GetRegistryKey());
+#if !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
+    theSettings.WriteSettingsToFile(theSettings.szWorkPath + "config\\" + "settings.ini");
+#endif // !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
+       //
+    theWorld.SetCamera(0);
+    theWorldServer.Destroy();
+    theWorld.Destroy();
+
+    DumpUnfreedMemory(AMTS_BYFILENAME);
+    //_CrtDumpMemoryLeaks();
+    // return msg.wParam;
+    return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+//  FUNCTION: WndProc( HWND, unsigned, WORD, LONG )
+//
+//  PURPOSE:  Processes messages for the main window.
+//
+//  WM_COMMAND	- process the application menu
+//  WM_DESTROY	- post a quit message and return
+LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
+{
+    theInterface.CheckScreensMustDie();
+    switch (message)
+    {
+    case WM_SYSKEYDOWN:
+        if (wParam == VK_F4 && (lParam & 0x20000000))
+            NGame::QuitProgram(0);
+        else
+            theInterface.OnKeyDown((UINT)wParam, lParam & 0xFFFF, lParam >> 16);
+        break;
+    case WM_SYSKEYUP:
+        NConsole::game << wParam << ':' << lParam << endl;
+        if (wParam == VK_TAB && (lParam & 0x20000000))
+            ShortWndProc(NGame::hWnd, WM_ACTIVATE, (IsIconic(NGame::hWnd) << 16) | WA_INACTIVE, 0);
+        else
+            theInterface.OnKeyUp((UINT)wParam, lParam & 0xFFFF, lParam >> 16);
+        break;
+    case WM_KEYDOWN:
+        theInterface.OnKeyDown((UINT)wParam, lParam & 0xFFFF, lParam >> 16);
+        break;
+    case WM_KEYUP:
+        theInterface.OnKeyUp((UINT)wParam, lParam & 0xFFFF, lParam >> 16);
+        break;
+    case WM_CHAR:
+        theInterface.OnChar((UINT)wParam, lParam & 0xFFFF, lParam >> 16);
+        break;
+
+    case WM_MOUSEMOVE:
+        theInterface.OnMouseMove(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    case WM_MOUSEWHEEL:
+        theInterface.OnMouseWheel(LOWORD(wParam), (short)HIWORD(wParam),
+                                  CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+
+    // CRAP{ noone knows why Genius mouse driver sends this message instead of WM_MOUSEWHEEL =
+    // 0x020A
+    case 0xCC54:
+        theInterface.OnMouseWheel(0, (short)(signed)(wParam),
+                                  CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+        // CRAP} parameters are also different from default
+
+    case WM_LBUTTONDOWN:
+        theInterface.OnLButtonDown(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    case WM_LBUTTONUP:
+        theInterface.OnLButtonUp(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    case WM_LBUTTONDBLCLK:
+        theInterface.OnLButtonDblClk(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    case WM_RBUTTONDOWN:
+        theInterface.OnRButtonDown(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    case WM_RBUTTONUP:
+        theInterface.OnRButtonUp(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    case WM_RBUTTONDBLCLK:
+        theInterface.OnRButtonDblClk(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        break;
+    default:
+        // return DefWindowProc( hWnd, message, wParam, lParam );
+        return ShortWndProc(hWnd, message, wParam, lParam);
+        break;
+        //
+    }
+    theInterface.CheckScreensMustDie();
+    return 1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    WORD wID;
+
+    switch (message)
+    {
+    case WM_PAINT:
+        // DefWindowProc( NGame::hWnd, message, wParam, lParam );
+        PAINTSTRUCT ps;
+        RECT rect;
+        if (GetUpdateRect(hWnd, &rect, FALSE))
+        {
+            BeginPaint(hWnd, &ps);
+            EndPaint(hWnd, &ps);
+        }
+        break;
+    case WM_ACTIVATE:
+        if (!(HIWORD(wParam))) // if window is not minimized
+        {
+            CSoundManager *pSoundManager = theWorld.GetSoundManager();
+            switch (LOWORD(wParam))
+            {
+            case WA_CLICKACTIVE:
+            case WA_ACTIVE:
+                bEnableRender = true;
+                bEnableRenderStateChanged = true;
+                ShowWindow(NGame::hWnd, SW_RESTORE);
+                theCursor.Show(true);
+                if (pSoundManager)
+                    pSoundManager->UnpauseAllSounds();
+                theInterface.ResetInputState();
+                break;
+            case WA_INACTIVE:
+                bEnableRender = false;
+                bEnableRenderStateChanged = true;
+                theCursor.Show(false);
+                if (pSoundManager)
+                    pSoundManager->PauseAllSounds();
+                ShowWindow(NGame::hWnd, SW_MINIMIZE);
+                break;
+            }
+        }
+        else
+        {
+            bEnableRender = false;
+            bEnableRenderStateChanged = true;
+        }
+        break;
+    case WM_DESTROY:
+        NGame::QuitProgram(0);
+        break;
+    case WM_SYSCOMMAND:
+        wID = wParam & 0xFFF0;
+        switch (wID)
+        {
+        case SC_SCREENSAVE:
+        case SC_MONITORPOWER:
+            // ???
+            return 0;
+        case SC_NEXTWINDOW:
+        case SC_PREVWINDOW:
+        case SC_TASKLIST:
+            NConsole::game << "switch task" << endl;
+        default:
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        break;
+    case WM_SETCURSOR:
+        SetCursor(0);
+        break;
+    default:
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+    return 1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void NGame::DrawFrame(bool bFlip, bool bDraw2D)
+{
+    if (!bEnableRender)
+        return;
+    if (!bNeedRender)
+        return;
+    if (!theInterface.GetCurrentScreen())
+    {
+        Sleep(50);
+        return;
+    }
+
+    auto pDX11 = theRenderer.GetD3D();
+
+    if (theRenderer.BeginDrawFrame())
+    {
+        pDX11->BeginFrame();
+        auto m_states = pDX11->GetCommonStates();
+        // dx11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, m_states->AlphaBlend());
+        pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Immediate);
+        theInterface.Draw();
+        pDX11->GetSpriteBatch()->End();
+        theRenderer.EndDrawFrame();
+        if (bDraw2D)
+        {
+            theInterface.Draw2D();
+        }
+
+        if (bFlip && bEnableRender && bNeedRender)
+        {
+            theCursor.Draw();
+            pDX11->EndFrame();
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void NGame::DestroyInputMessages()
+{
+    MSG msg;
+    // destroy all messages in the queue
+    while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
+        NGame::ShortWndProc(NGame::hWnd, msg.message, msg.wParam, msg.lParam);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
+                               bool bClearSurfaceBetweenMovies, bool bStopAllSounds,
+                               bool bUseOverlays)
+{
+    CStringArray szNames;
+    CIniFile reg;
+    reg.Open(theWorld.GetWorkPath() + "config\\movie.ini");
+    reg.GetStringArray(pszSection, "movies", szNames);
+
+    // removed clr primary surface
+    // if (bInitialClear)
+    //    theRenderer.GetD3D()->ClearPrimarySurface(0);
+
+    // for (int i = 0; i < szNames.GetSize(); ++i)
+    //{
+    //     CBinkVideo::Play(theWorld.GetCDPath() + "Movies\\" + szNames[i], 0, true, false, false,
+    //                      bStopAllSounds, bUseOverlays);
+    //     if (bClearSurfaceBetweenMovies)
+    //         theRenderer.GetD3D()->ClearPrimarySurface(0);
+    // }
+}
+/////////////////////////////////////////////////////////////////////////////////////

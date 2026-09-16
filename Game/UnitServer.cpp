@@ -1,0 +1,5669 @@
+#include "StdAfx.h"
+#include "ModRuntime.h"
+#include "StuffMapObjects.h"
+#include "ModRuntime.h"
+static const char LOCAL_FILE[] = __FILE__;
+/////////////////////////////////////////////////////////////////////////////////////
+/*==========================================================================================================
+
+        Server specific unit class implementation
+
+        Written by Ivanov Evgeny
+        Nival Interactive, 1998
+
+==========================================================================================================*/
+
+/////////////////////////////////////////////////////////////////////////////////////
+// радиус, на котором юниты слышат друг друга
+const float FP_FOF_HEARRADIUS = 20;
+// коэффициент прозрачности, начианая с которого возможна атака
+const float FP_MIN_ATTACK_OPACITY = 0.1f;
+/////////////////////////////////////////////////////////////////////////////////////
+#include "WorldServer.h"
+#include "UnitServer.h"
+#include "MapObjectServer.h"
+#include "mapFormat.h"
+#include "ServerConsts.h"
+#include "player.h"
+#include "aiMap.h"
+#include "events.h"
+#include "PlayerServer.h"
+#include "randomGen.h"
+#include "mapObjectManager.h"
+#include "console.h"
+#include "effect.h"
+#include "EffectManager.h"
+#include "ackFormat.h"
+#include "ItemManager.h"
+#include "aiSettings.h"
+#include "WorldInterface.h"
+/////////////////////////////////////////////////////////////////////////////////////
+#ifndef _DEBUG
+#pragma optimize("agw", on)
+#endif
+/////////////////////////////////////////////////////////////////////////////////////
+static ostream &aiLog = NConsole::ai;
+/////////////////////////////////////////////////////////////////////////////////////
+// N_MAXIMUM_HIT_FRAME - максимальное значение кадра в анимации на котором наносится удар
+const int N_MAXIMUM_HIT_FRAME = 16;
+/////////////////////////////////////////////////////////////////////////////////////
+const float FP_CHECK_VISIBILITY_HEIGHT = 1; // высота точки над террейном в которую
+const float FP_MINIMAL_DISTANCE_TO_POU =
+    0.2f; // максимально допустимое расстояние до точки использования
+// трейсится луч в случае необходимости прямой видимости цели для спела
+/////////////////////////////////////////////////////////////////////////////////////
+// SUnitCommand
+void SUnitCommand::Load(CSave &file)
+{
+    file.Read(&cmd, sizeof(cmd));
+    file.Read(&nQSpellNum, sizeof(nQSpellNum));
+    pTarget.Load(file, theWorldServer);
+    file.Read(&ptTarget, sizeof(ptTarget));
+    file.Read(fpParam);
+    file.Read(bDoItFast);
+    if (file.GetVersion() < 72)
+        return;
+    file.Read(bUsePoint);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SUnitCommand::Store(CSave &file)
+{
+    file.Write(&cmd, sizeof(cmd));
+    file.Write(&nQSpellNum, sizeof(nQSpellNum));
+    pTarget.Store(file);
+    file.Write(&ptTarget, sizeof(ptTarget));
+    file.Write(fpParam);
+    file.Write(bDoItFast);
+    file.Write(bUsePoint);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// SL0AnimationSeq
+SL0AnimationSeq &SL0AnimationSeq::operator+=(const SL0AnimationSeq &add)
+{
+    for (int i = 0; i < add.animations.GetSize(); i++)
+    {
+        auto &a = add.animations[i];
+        if (a.bStart != 0xff)
+        {
+            if (a.bCyclic == 0xff)
+                AddSimple(a.bStart, a.nLength);
+            else
+                animations.Add(a);
+        }
+        else
+            AddCycle(a.bCyclic);
+    }
+    return *this;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+EUnitAnimationSpeed SL0AnimationSeq::GetAnimationSpeed()
+{
+    if (animations.GetSize() == 0)
+        return UAS_NORMAL_;
+    return animations[0].animationSpeed;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::AddSimple(BYTE bStart, int nLength)
+{
+    animations.Add(SL0Animation());
+    SL0Animation &a = animations[animations.GetSize() - 1];
+    a.bStart = bStart;
+    a.nLength = nLength;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::AddCycle(BYTE bCycle)
+{
+    if (animations.GetSize() == 0 || animations[animations.GetSize() - 1].bCyclic != 0xff)
+        animations.Add(SL0Animation());
+    SL0Animation &a = animations[animations.GetSize() - 1];
+    a.bCyclic = bCycle;
+    a.nLength = -1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::SetSpeed(EUnitAnimationSpeed speed)
+{
+    for (int i = 0; i < animations.GetSize(); i++)
+        animations[i].animationSpeed = speed;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::SetSoundSet(BYTE bSoundSet)
+{
+    for (int i = 0; i < animations.GetSize(); i++)
+        animations[i].bSoundSet = bSoundSet;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool SL0AnimationSeq::IsEndless()
+{
+    for (int i = 0; i < animations.GetSize(); i++)
+    {
+        if (animations[i].nLength < 0)
+            return true;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// returns -1 if animation is endless
+int SL0AnimationSeq::GetLength()
+{
+    int nLeng = 0;
+    for (int i = 0; i < animations.GetSize(); i++)
+    {
+        if (animations[i].nLength < 0)
+            return -1;
+        nLeng += animations[i].nLength;
+    }
+    return nLeng;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool SL0AnimationSeq::IsSame(SL0AnimationSeq &cmp)
+{
+    if (animations.GetSize() != cmp.animations.GetSize())
+        return false;
+    for (int i = 0; i < animations.GetSize(); i++)
+    {
+        if (animations[i] != cmp.animations[i])
+            return false;
+    }
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::Load(CSave &file)
+{
+    LoadCArray(animations, file);
+    file.Read(nStartSegment);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::Store(CSave &file)
+{
+    StoreCArray(animations, file);
+    file.Write(nStartSegment);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// SL0Command
+void SL1Command::Clear()
+{
+    attackAnimation.Clear();
+    nTargetID = -1;
+    nTimeStrikeMoment = nHitTime = 0;
+    eAttackLocation = RPGHL_BODY;
+    fpHitDist2 = 1e38f;
+    bCast = false;
+    bCalledShot = false;
+    castType = RPGMST_UNKNOWN;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL1Command::CreateCastAttack(SL0AnimationSeq animation, int nTime, int nHit,
+                                  ERPGMagicSubtypes magicType)
+{
+    Clear();
+    nTimeStrikeMoment = nTime;
+    nHitTime = nHit + nTime;
+    attackAnimation = animation;
+    bCast = true;
+    castType = magicType;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL1Command::CreateAimlessAttack(SL0AnimationSeq animation, int nTime, int nHit)
+{
+    Clear();
+    nTimeStrikeMoment = nTime;
+    nHitTime = nHit + nTime;
+    attackAnimation = animation;
+    bCast = false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL1Command::Load(CSave &file)
+{
+    attackAnimation.Load(file);
+    file.Read(nTimeStrikeMoment);
+    file.Read(nHitTime);
+    file.Read(nTargetID);
+    file.Read(&eAttackLocation, sizeof(eAttackLocation));
+    file.Read(fpHitDist2);
+    file.Read(bCast);
+    file.Read(bCalledShot);
+    file.Read(&castType, sizeof(castType));
+    if (file.GetVersion() < 72)
+        return;
+    file.Read(&ptDir, sizeof(ptDir));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL1Command::Store(CSave &file)
+{
+    attackAnimation.Store(file);
+    file.Write(nTimeStrikeMoment);
+    file.Write(nHitTime);
+    file.Write(nTargetID);
+    file.Write(&eAttackLocation, sizeof(eAttackLocation));
+    file.Write(fpHitDist2);
+    file.Write(bCast);
+    file.Write(bCalledShot);
+    file.Write(&castType, sizeof(castType));
+    file.Write(&ptDir, sizeof(ptDir));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// SContSpellInfo
+/////////////////////////////////////////////////////////////////////////////////////
+void SContSpellInfo::Load(CSave &file)
+{
+    // kind of CRAP, use of theWorldServer has little grounds
+    pItem = LoadGBSmartPtr<CItem>(file, theWorldServer.GetItemManager());
+    file.Read(nDelay);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SContSpellInfo::Store(CSave &file)
+{
+    StoreGBPtr(file, pItem);
+    file.Write(nDelay);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// STrainInfo
+/////////////////////////////////////////////////////////////////////////////////////
+void STrainInfo::RemoveReferencesOn(CMapObject *pTarget)
+{
+    if (master == pTarget)
+    {
+        bIsTrain = false;
+        master = 0;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void STrainInfo::Load(CSave &file)
+{
+    file.Read(bIsTrain);
+    master = LoadGBSmartPtr<CUnit>(file, theWorldServer.GetMapObjectManager());
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void STrainInfo::Store(CSave &file)
+{
+    file.Write(bIsTrain);
+    StoreGBPtr(file, master);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CUnitServer
+/////////////////////////////////////////////////////////////////////////////////////
+// ----------------------------- Create/destroy
+// ------------------------------------------------------------
+CUnitServer::CUnitServer()
+{
+#ifdef _DEBUG
+    pszGameClassName = GetGameClassName();
+#endif // _DEBUG
+    Clear();
+}
+CUnitServer::~CUnitServer()
+{
+    Clear();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CUnitServer::Create()
+{
+    Clear();
+    logic.Set(this);
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::Destroy()
+{
+    Clear();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::Clear()
+{
+    curCommand.Clear();
+    nextCommand.Clear();
+    // level0 clear
+    bL0Frozen = false;
+    bL0MovementFrozen = false;
+    level0Animation.Clear();
+    // level1 clear
+    path.Clear();
+    level1Command.Clear();
+    level1AP.Clear();
+    sufferAnimationMem.Clear();
+    eL1State = UL1_NONE;
+    nL1SufferDirection = -1;
+    bL1PlayingSuffer = false;
+    bL1MovementFailed = false;
+    bL1SpeedChanged = false;
+    bL1MoveAnimationSet = false;
+    currentPose.Clear();
+    wishPose.Clear();
+    pCastParticle = 0;
+    nAttackParamsSetTime = -1;
+    // command level clear
+    curCommand.cmd = UC_IDLE;
+    nextCommand.cmd = UC_NONE;
+    nCanAttackTime = 0;
+    nMoveToTargetTime = 0;
+    bLcCommandFail = false;
+    bLcCompletelyDead = false;
+    train.Clear();
+    // oldPose = UP_STAND;
+    bLcChangingPoseToAttack = false;
+    // general data clear
+    logic.Clear();
+    // logic.SetPlayer();
+    acknowledgements.Clear();
+    lastFootstep = NULL;
+    fpModSound = 1;
+    fpModVision = 1;
+    fpSModVision = 1;
+    fpSModSound = 1;
+    rpgUnitStats.Clear();
+    tameLevel = UTL_NONE;
+    nOriginalPlayerNum = -1;
+    nPlayerWhoTamed = -1;
+    nFootstepGenInterval = 15;
+    dwFutureEnemies = 0;
+    fpZSpeed = 0;
+    animMoveCache.Clear();
+    animIdleCache.Clear();
+    nBoredCounter = 0;
+    activeContSpells.RemoveAll();
+    animCallback = 0;
+    nCommandExecStart = 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Lowest level interface funtions
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::LowSetDead(BOOL bDead)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    if (lpUnit->bDead == bDead)
+        return;
+    pWS->aiMap.RemoveObject(lpUnit);
+    lpUnit->bDead = bDead;
+    BOOL bRv = pWS->aiMap.AddObject(lpUnit);
+    ASSERT(bRv);
+    if (bDead)
+    {
+        if (!pCastParticle.IsEmpty())
+        {
+            pWS->RemoveEffect(pCastParticle->GetID());
+            pCastParticle = 0;
+        }
+    }
+    AddUpdateMask(CMapObject::VLD_MASK_FFLAGS);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::LowSetMoving(BOOL bMoving)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    if (lpUnit->bMoving == bMoving)
+        return;
+    pWS->aiMap.RemoveObject(lpUnit);
+    lpUnit->bMoving = bMoving;
+    BOOL bRv = pWS->aiMap.AddObject(lpUnit);
+    ASSERT(bRv);
+    AddUpdateMask(CMapObject::VLD_MASK_FFLAGS);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::LowNewPose(EUnitPose pose)
+{
+    if (pose == lpUnit->currentPose)
+        return;
+    lpUnit->currentPose = pose;
+    AddUpdateMask(CMapObject::VLD_MASK_POSE);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::LowNewWishPose(EUnitPose pose)
+{
+    if (pose == lpUnit->wishPose)
+        return;
+    lpUnit->wishPose = pose;
+    AddUpdateMask(CMapObject::VLD_MASK_POSE);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
+                              float fpMaxPathLength)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    if (pPlayer)
+        res.bTryAnyPath = false;
+    else
+        res.bTryAnyPath = true;
+    //
+    BOOL bSaveFastPath = lpUnit->bNeedFastPath;
+    lpUnit->bNeedFastPath = bFastPath;
+    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength);
+    lpUnit->bNeedFastPath = bSaveFastPath;
+    return bFound;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::LowRemoveUnitsForPathFind(CUnitList &units, const CPlot3D &ptDest, bool bGroup)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    POSITION pos, oldPos;
+    units.RemoveAll();
+    if (pPlayer && pPlayer->curInterface == IFACE_MISSION)
+    {
+        CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
+        if (fabs2(ptDest, lpUnit->GetCP()) > 16)
+        {
+            pWS->aiMap.GetUnitsNear(ptDest, units, 4);
+            for (pos = units.GetHeadPosition(); pos;)
+            {
+                oldPos = pos;
+                CUnit *pUnit = units.GetNext(pos);
+                if (!pPS->currentVisible.HasMapObject(pUnit))
+                    pWS->aiMap.RemoveObject(pUnit);
+                else
+                    units.RemoveAt(oldPos);
+            }
+        }
+        // remove allies
+        CUnitPtrHashIterator unitIter;
+        CUnit *pAlly = unitIter.GetFirst(&pPlayer->unitsUnderControl);
+        for (; pAlly; pAlly = unitIter.GetNext())
+        {
+            if (pAlly == lpUnit)
+                continue;
+            CUnitServer *pUS = (CUnitServer *)pAlly->GetUnitSpecific();
+            bool bRemove = false;
+            if (bGroup && pUS->HasMove())
+                bRemove = true;
+            else if (pUS->logic.GetPlayerLeader() == lpUnit)
+                bRemove = true;
+            //
+            if (bRemove)
+            {
+                units.AddTail(pAlly);
+                theWorldServer.aiMap.RemoveObject(pAlly);
+            }
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Level 0 of commands execution
+/////////////////////////////////////////////////////////////////////////////////////
+// здесь проверяется не пришло ли время сменить текущий фрагмент анимации на следующий
+bool CUnitServer::L0ShiftAnimations()
+{
+    bool bRv = false;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    int nTime = pWS->GetSegmentTimeCounter();
+    for (;;)
+    {
+        if (level0Animation.animations.GetSize() == 0)
+            return bRv;
+        SL0Animation &a = level0Animation.animations[0];
+        if (a.nLength == -1)
+            return bRv;
+        if (a.nLength + level0Animation.nStartSegment > nTime)
+            return bRv;
+        bRv = true;
+        // перейдем к следующей анимации
+        bool bShiftStartTime = true;
+        if (level0Animation.animations.GetSize() > 1)
+        {
+            if (level0Animation.animations[1].IsEmpty())
+            {
+                level0Animation.animations[1].bStart = level0Animation.animations[0].bStart;
+                level0Animation.animations[1].bCyclic = level0Animation.animations[0].bCyclic;
+                level0Animation.animations[1].nLength += a.nLength;
+                if (level0Animation.animations[1].animationSpeed == UAS_FROZEN)
+                {
+                    int nSomeTime = nTime - level0Animation.nStartSegment - a.nLength;
+                    nSomeTime = Min(nSomeTime, a.nLength);
+                    if (nSomeTime > 0)
+                        level0Animation.nStartSegment += nSomeTime;
+                }
+                bShiftStartTime = false;
+            }
+        }
+        if (bShiftStartTime)
+            level0Animation.nStartSegment += a.nLength;
+        level0Animation.animations.RemoveAt(0);
+    }
+    return bRv;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L0StartNextAnimationSegment()
+{
+    if (level0Animation.animations.GetSize() != 0)
+    {
+        SL0Animation &a = level0Animation.animations[0];
+        if (!a.IsEmpty())
+            lpUnit->LowStartAnimation(a.bStart, a.bCyclic, level0Animation.nStartSegment,
+                                      a.bSoundSet);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L0StartAnimation(SL0AnimationSeq &anim)
+{
+    level0Animation = anim;
+    level0Animation = anim; // CRAP - compiler generates wrong code without this line
+    if (level0Animation.nStartSegment == -1)
+        level0Animation.nStartSegment = GetWorldBase()->GetSegmentTimeCounter();
+
+    L0ShiftAnimations();
+    L0StartNextAnimationSegment();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L0GetAnimation(SL0AnimationSeq &curAnimation)
+{
+    curAnimation = level0Animation;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L0Freeze(bool bFreeze)
+{
+    bL0Frozen = bFreeze;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L0FreezeMovement(bool bFreeze)
+{
+    bL0MovementFrozen = bFreeze;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::L0HasAnimation()
+{
+    return !level0Animation.IsEmpty();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::L0IsPlayingSuffer()
+{
+    if (level0Animation.animations.GetSize() > 0)
+    {
+        const SADEntry *pEntry = lpUnit->GetAnimationByIndex(level0Animation.animations[0].bStart);
+        if (pEntry && (pEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_SUFFER)
+        {
+            if (level0Animation.nStartSegment + pEntry->dwAnimationLength >
+                GetWorldBase()->GetSegmentTimeCounter())
+                return true;
+        }
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L0Segment()
+{
+    if (bL0Frozen)
+    {
+        lpUnit->LowLocomotionSpeed(ULS_FROZEN);
+        lpUnit->LowAnimationSpeed(UAS_FROZEN);
+        path.curSegment.Freeze(1);
+        level0Animation.Freeze(1);
+        sufferAnimationMem.Freeze(1);
+        level1Command.Freeze(1);
+        lpUnit->nAnimationStartSegment++;
+        return;
+    }
+    if (bL0MovementFrozen)
+    {
+        path.curSegment.Freeze(1);
+        sufferAnimationMem.Freeze(1);
+        level1Command.Freeze(1);
+        lpUnit->LowLocomotionSpeed(ULS_FROZEN);
+    }
+    else
+        lpUnit->LowLocomotionSpeed(ULS_NORMAL);
+
+    if (L0ShiftAnimations())
+        L0StartNextAnimationSegment();
+
+    EUnitAnimationSpeed animSpeed = level0Animation.GetAnimationSpeed();
+    if (animSpeed == UAS_FROZEN)
+    {
+        level0Animation.Freeze(1);
+        if (level0Animation.animations.GetSize())
+            level0Animation.animations[0].nLength--;
+        else
+            ASSERT(0);
+    }
+    lpUnit->LowAnimationSpeed(animSpeed);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Level I of commands execution
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1ChangeWeapon()
+{
+    if (lpUnit->dwWishWeapon == lpUnit->dwCurrentWeapon)
+        return;
+    lpUnit->ChangeWeapon(lpUnit->dwWishWeapon);
+    // InformFailure( ACK_HERO_REFUSE_CHANGE_WEAPON ); // never called
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1SetPhase(EUnitL1State phase)
+{
+    /*
+            NConsole::game << "unit = " << lpUnit->GetID() << " phase = ";
+            switch ( phase )
+            {
+                    case UL1_MOVE:    NConsole::game << "move" << endl; break;
+                    case UL1_ROTATE:  NConsole::game << "rotate" << endl; break;
+                    case UL1_IDLE:    NConsole::game << "idle" << endl; break;
+                    case UL1_SPECIAL: NConsole::game << "spec" << endl; break;
+                    case UL1_SPECIAL_CYCLE: NConsole::game << "spec_cycle" << endl; break;
+                    case UL1_ATTACK:  NConsole::game << "attack" << endl; break;
+                    case UL1_NONE:    NConsole::game << "none" << endl; break;
+                    default:          NConsole::game << "crap" << endl; break;
+            }*/
+    eL1State = phase;
+    if (phase != UL1_ATTACK)
+        lpUnit->RecalcAIParams();
+    else
+        nAttackParamsSetTime = ((CWorldServer *)GetWorld())->GetSegmentTimeCounter() + 10;
+    //
+    if (phase != UL1_ATTACK) //&& phase != UL1_SPECIAL )
+    {
+        if (!pCastParticle.IsEmpty())
+        {
+            theWorldServer.RemoveEffect(pCastParticle->GetID());
+            pCastParticle = 0;
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StartSuffer()
+{
+    SL0AnimationSeq suffer;
+    ASSERT(!bL1PlayingSuffer);
+    if (currentPose.pose == UP_LAY && L1IsMoving())
+        return;
+    GetSufferAnimation(suffer, nL1SufferDirection, false, false);
+    if (!LcCanPlaySuffer(suffer.GetLength()))
+        return;
+    bL1PlayingSuffer = true;
+    L0GetAnimation(sufferAnimationMem);
+    L0StartAnimation(suffer);
+    L0FreezeMovement(true);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StandStill()
+{
+    path.Clear();
+    if (path.curSegment.SetStartPos(lpUnit->GetCP(), -lpUnit->GetYAxis(),
+                                    GetWorldBase()->GetSegmentTimeCounter()))
+        lpUnit->LowNewRoute();
+    LowSetMoving(FALSE);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StopMovement(bool bFailed)
+{
+    L1StandStill();
+    L1SetPhase(UL1_NONE);
+    bL1MovementFailed = bFailed;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// start rotate animation - depends on previous L1 state
+void CUnitServer::L1StartRotateAnimation()
+{
+    switch (eL1State)
+    {
+    case UL1_MOVE:
+    case UL1_ROTATE:
+        break;
+    case UL1_IDLE:
+        break;
+    default: {
+        // здесь по идее должна использоватся анимация поворота
+        L0StartAnimation(*GetIdleAnimation());
+    }
+    break;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// начался новый сегмент пути, выставляется начальная анимация поворота для него
+void CUnitServer::L1NewPathSegment()
+{
+    lpUnit->LowNewRoute();
+    L1StartRotateAnimation();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1ExecMove()
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CPlot3D pos, vec;
+    float fpSpeed;
+    bool bMoved, bSegmentFinished, bRotating;
+    EAILock lock;
+    int nCheckTileX, nCheckTileY;
+    bool bConvertLocks = false, bPathFound;
+    int nTime = pWS->GetSegmentTimeCounter();
+    CAIFullRoute &segment = path.curSegment;
+
+    pos = lpUnit->GetCP();
+    pos.x = Meter2AITile(pos.x);
+    pos.y = Meter2AITile(pos.y);
+    bSegmentFinished = !lpUnit->walker.GetPosition(pWS, segment, pWS->GetSegmentTimeCounter(),
+                                                   bRotating, pos, vec, fpSpeed, nCheckTileX,
+                                                   nCheckTileY);
+    pos.x = AITile2Meter(pos.x);
+    pos.y = AITile2Meter(pos.y);
+
+    if (!bRotating && !bL1MoveAnimationSet)
+    {
+        L0StartAnimation(*GetMoveAnimation());
+        bL1MoveAnimationSet = true;
+    }
+    if (nL1SufferDirection != -1)
+    {
+        if (bRotating)
+        {
+            L1StartSuffer();
+            return;
+        }
+        else
+        {
+            // check if current animation is suffer then ignore new suffer
+            if (!L0IsPlayingSuffer())
+            {
+                // set animation to suffermove + move
+                SL0AnimationSeq move, suffer;
+                GetMoveAnimation(move);
+                GetSufferAnimation(suffer, nL1SufferDirection, false, true);
+                suffer += move;
+                L0StartAnimation(suffer);
+            }
+        }
+    }
+
+    if (nCheckTileX >= 0)
+    {
+        CUnit *pObstacle;
+        pWS->aiMap.RemoveObject(lpUnit);
+        bMoved = pWS->aiMap.CanMoveTo(lpUnit, nCheckTileX, nCheckTileY, lock);
+        if (!bMoved)
+        {
+            pObstacle = pWS->aiMap.CheckCircleCollision(lpUnit, pos);
+            if (pObstacle)
+            {
+                bool bTestMore = true;
+                if (lpUnit->GetOwner() && pObstacle->GetOwner() == lpUnit->GetOwner())
+                {
+                    CUnitServer *pOb = (CUnitServer *)pObstacle->GetUnitSpecific();
+                    if (pOb->logic.GetPlayerLeader() == lpUnit &&
+                        theWorldServer.GetSegmentTimeCounter() < nCommandExecStart + 2)
+                    {
+                        lock = AI_LOCK_DYNAMIC;
+                        bTestMore = false;
+                    }
+                }
+                if (bTestMore)
+                {
+                    if (train.bIsTrain && pObstacle == train.master)
+                        lock = AI_LOCK_DYNAMIC;
+                    else
+                    {
+                        CUnitServer *pMaster = (CUnitServer *)pObstacle->GetUnitSpecific();
+                        if (pObstacle->GetPlayerNum() == GetUnit()->GetPlayerNum() &&
+                            IsAttacking() && pMaster->IsAttacking() &&
+                            (CMapObject *)pMaster->curCommand.pTarget == curCommand.pTarget &&
+                            pObstacle->GetAIClass() == GetUnit()->GetAIClass() &&
+                            !pMaster->L1IsAttacking() &&
+                            fabs2(curCommand.pTarget->GetCP() - lpUnit->GetCP()) > 60)
+                        {
+                            bool bCanTrain = true;
+                            // проверим не приведет ли огранизация паровоза к зацикленному
+                            // локомотиву
+                            CUnitServer *pTest = pMaster;
+                            while (pTest->train.bIsTrain)
+                            {
+                                if (pTest->train.master == 0)
+                                    break;
+                                if (pTest->train.master == lpUnit)
+                                {
+                                    bCanTrain = false; // однако приведет
+                                    break;
+                                }
+                                pTest = (CUnitServer *)pTest->train.master->GetUnitSpecific();
+                            }
+                            //
+                            if (!bCanTrain)
+                            {
+                                // we can run into problems - break train
+                                pMaster->train.bIsTrain = false;
+                                pMaster->train.master = 0;
+                                train.bIsTrain = false;
+                                train.master = 0;
+                                lock = AI_LOCK_STATIC;
+                                bConvertLocks = TRUE;
+                            }
+                            else
+                            {
+                                train.bIsTrain = true;
+                                train.master = pObstacle;
+                                lock = AI_LOCK_DYNAMIC;
+                            }
+                        }
+                        else
+                        {
+                            if (GetUnit()->GetSpeed() > pObstacle->GetSpeed() &&
+                                lock == AI_LOCK_DYNAMIC)
+                            {
+                                lock = AI_LOCK_STATIC;
+                                bConvertLocks = TRUE;
+                            }
+                        }
+                    }
+                }
+            }
+            else
+                bMoved = true;
+        }
+        pWS->aiMap.AddObject(lpUnit);
+    }
+    else
+        bMoved = true;
+    // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
+    if (eL1State == UL1_MOVE && pWS->aiMap.IsDangerous(pos) &&
+        segment.GetStartSegment() < pWS->aiMap.GetLastDangerAddTime())
+    {
+        if (!IsAggressive())
+        {
+            // simulate static lock
+            bMoved = false;
+            lock = AI_LOCK_STATIC;
+        }
+    }
+    if (bMoved)
+    {
+        bMoved = pWS->aiMap.MoveObject(
+            lpUnit,
+            pos); // SetCP( pos ); setcp нельзя использовать, теперь только aimap::moveobject
+        ASSERT(bMoved);
+    }
+    if (!bMoved)
+    {
+        // юнит не может двигатся дальше по различным причинам
+        switch (lock)
+        {
+        case AI_LOCK_NO:
+            ASSERT(0 && "Incorrect failure of CAIMap::MoveObject");
+            break;
+        case AI_LOCK_STATIC:
+            // создадим новый путь, чтобы обойти возникшее вдруг препятствие
+            // если нам помешал динамический блок от более медленного юнита обойдем его
+            if (bConvertLocks)
+            {
+                pWS->aiMap.RemoveObject(lpUnit);
+                pWS->aiMap.ConvertLocks(pos, TRUE);
+                pWS->aiMap.AddObject(lpUnit);
+            }
+            path.ClearCalcedPath();
+            bPathFound = LowFindPath(path.ptDestination, path, lpUnit->bNeedFastPath,
+                                     path.ptDestination.z);
+            if (bConvertLocks)
+            {
+                pWS->aiMap.RemoveObject(lpUnit);
+                pWS->aiMap.ConvertLocks(pos, FALSE);
+                pWS->aiMap.AddObject(lpUnit);
+            }
+            if (bPathFound)
+                L1NewPathSegment();
+            else
+                L1StopMovement(path.bRouteFailed == TRUE);
+            break;
+        case AI_LOCK_DYNAMIC:
+            // подождем, пока динамический лок от движущегося юнита снимут
+            if (rpgUnitStats.dwLocomotion == 2)
+                L0FreezeMovement(true);
+            else
+                L0Freeze(true);
+            LowSetMoving(FALSE);
+            break;
+        }
+    }
+    else
+    {
+        // юнит продолжает путь
+        LowSetMoving(eL1State == UL1_MOVE);
+        lpUnit->SetOrientationXY(vec);
+        if (bSegmentFinished)
+        {
+            if (path.IsPathFinished())
+            {
+                L1StopMovement(path.bRouteFailed == TRUE);
+            }
+            else
+            {
+                if (!pWS->aiMap.ContinuePath(lpUnit, path))
+                    L1StopMovement(false);
+                else
+                    L1NewPathSegment();
+            }
+        }
+    }
+    // run state processing (here we determine if unit is running or not)
+    if (!lpUnit->bMoving)
+        return;
+    if (currentPose.pose != UP_STAND || wishPose.pose != UP_STAND)
+        return;
+    if (currentPose.bRun && lpUnit->GetOwner() && !lpUnit->GetOwner()->bGod &&
+        theWorldServer.curInterface != IFACE_BASE)
+    {
+        // вычтем ману за трудоемкие усилия по передвижению бегом у юнитов под управлением игрока :)
+        SRPGCommonStats &stats = *GetMapObjectServer()->GetRPGStats();
+        if (stats.ssMP.fpCurrent == 0)
+        {
+            wishPose.bRun = 0;
+            LowNewWishPose(wishPose.Get());
+        }
+        else
+        {
+            ModRuntime::SpendRunningMana(rpgUnitStats, *lpUnit, stats);
+            if (stats.ssMP.fpCurrent < 0)
+            {
+                InformFailure(ACK_HERO_NOTIFY_OUT_OF_STAMINA);
+                stats.ssMP.fpCurrent = 0;
+                wishPose.bRun = 0;
+                LowNewWishPose(wishPose.Get());
+            }
+            AddUpdateMask(CMapObject::VLD_MASK_STATS);
+        }
+    }
+    L1CheckRun();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1CheckRun()
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+
+    ECanRun ecr = rpgUnitStats.CanRun(true);
+    if (ecr != ECR_CAN_RUN && wishPose.WantRun())
+    {
+        InformFailure(ecr == ECR_INJURED ? ACK_HERO_REFUSE_CANT_RUN_INJURED
+                                         : ACK_HERO_REFUSE_CANT_RUN_OVERLOADED);
+        if (curCommand.bDoItFast)
+            curCommand.bDoItFast = false;
+        wishPose.bRun = 0;
+        LowNewWishPose(wishPose.Get());
+    }
+    if (currentPose.bRun)
+    {
+        if (!wishPose.WantRun() || !pWS->aiMap.CanRun(lpUnit) || (ecr != ECR_CAN_RUN))
+        {
+            nL1RunFailCounter++;
+            if (nL1RunFailCounter > 5 || !wishPose.WantRun())
+            {
+                currentPose.SetRun(0);
+                // currentPose.bRun = 0;
+                LowNewPose(currentPose.Get());
+                lpUnit->RecalcAIParams();
+                L1SpeedChanged();
+            }
+        }
+        else
+            nL1RunFailCounter = 0;
+    }
+    else
+    {
+        SRPGCommonStats &stats = *GetMapObjectServer()->GetRPGStats();
+        CPlayer *pOwner = lpUnit->GetOwner();
+        BOOL bGod = pOwner ? pOwner->bGod : 1;
+        if (currentPose.pose == UP_STAND && wishPose.WantRun() &&
+            (bGod || stats.ssMP.fpCurrent > 0) && pWS->aiMap.CanRun(lpUnit) && (ecr == ECR_CAN_RUN))
+        {
+            nL1RunFailCounter = 0;
+            currentPose.SetRun(1);
+            // currentPose.bRun = 1;
+            LowNewPose(currentPose.Get());
+            lpUnit->RecalcAIParams();
+            L1SpeedChanged();
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+
+    L1CheckRun();
+    // if ( eL1State != UL1_MOVE )
+    // bL1MoveAnimationSet = false;
+    bL1SpeedChanged = false;
+    bL1MovementFailed = false;
+    path.Clear();
+    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength))
+    {
+        bL1MoveAnimationSet = false;
+        L1StopMovement(path.bRouteFailed == TRUE);
+        return false;
+    }
+    path.ptDestination.z = fpMaxPathLength;
+    nL1RunFailCounter = 0;
+    L1NewPathSegment();
+    L1SetPhase(UL1_MOVE);
+    if (bL1MoveAnimationSet)
+    {
+        SL0AnimationSeq move(*GetMoveAnimation()), tek;
+        L0GetAnimation(tek);
+        if (tek.animations.GetSize() != 1 || move.animations.GetSize() != 1 ||
+            tek.animations[0].bCyclic != move.animations[0].bCyclic)
+            L0StartAnimation(move);
+    }
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1SpeedChanged()
+{
+    bL1SpeedChanged = true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StartRotate(const CPlot3D &vecDest, float fpAngSpeed)
+{
+    ASSERT(L1IsInterruptable());
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+
+    path.CreateRotation(pWS->GetSegmentTimeCounter(), lpUnit, vecDest, fpAngSpeed);
+    lpUnit->LowNewRoute();
+    L1StartRotateAnimation();
+    L1SetPhase(UL1_ROTATE);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StartIdle()
+{
+    ASSERT(L1IsInterruptable());
+    if (eL1State == UL1_IDLE)
+        return;
+    SL0AnimationSeq *pIdle = GetIdleAnimation();
+    if (!level0Animation.IsSame(*pIdle))
+    {
+        // художники запретили это делать: make idle start from random position
+        // теперь должно стартовать со случайной позиции только во время старта игры
+        if (level0Animation.IsEmpty() && level0Animation.nStartSegment == -1)
+            pIdle->nStartSegment = GetWorldBase()->GetSegmentTimeCounter() - random.Get(0, 50);
+        L0StartAnimation(*pIdle);
+    }
+
+    L1StandStill();
+    L1SetPhase(UL1_IDLE);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// сбросить текущее состояние L1 для смены позы (для правильного выбора анимации поворота)
+void CUnitServer::L1ResetState()
+{
+    L1StandStill();
+    L1SetPhase(UL1_NONE);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StartSpecial(SL0AnimationSeq animation)
+{
+    L1SetPhase(UL1_SPECIAL);
+    L0StartAnimation(animation);
+    L1StandStill();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StartSpecialCycle(SL0AnimationSeq animation)
+{
+    ASSERT(L1IsInterruptable());
+    L1SetPhase(UL1_SPECIAL_CYCLE);
+    L0StartAnimation(animation);
+    L1StandStill();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1ExecAttack()
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    int nTime = pWS->GetSegmentTimeCounter();
+    CAIFullRoute &segment = path.curSegment;
+    if (nTime == nAttackParamsSetTime)
+        lpUnit->RecalcAIParams();
+    if (nTime == level1Command.nTimeStrikeMoment)
+    {
+        L0StartAnimation(level1Command.attackAnimation);
+        // start casting effect
+        if (level1Command.bCast && lpUnit->GetRaceModel()->dwCastingType != 0)
+        {
+            CEffectParticle *pParticle;
+            pParticle = (CEffectParticle *)((CEffectManager *)theWorldServer.GetEffectManager())
+                            ->CreateData(ETypeIDs(HPC_EFFECTPARTICLE));
+            switch (level1Command.castType)
+            {
+            case RPGMST_FIRE:
+                pParticle->typeID = PTID_CASTINGFIRE;
+                break;
+            case RPGMST_LIGHTNING:
+                pParticle->typeID = PTID_CASTINGELECTRICITY;
+                break;
+            case RPGMST_ACID:
+                pParticle->typeID = PTID_CASTINGACID;
+                break;
+            case RPGMST_ILLUSION:
+                pParticle->typeID = PTID_CASTINGILLUSION;
+                break;
+            case RPGMST_DIVINATION:
+                pParticle->typeID = PTID_CASTINGDIVINATION;
+                break;
+            case RPGMST_ENCHANTMENTS:
+                pParticle->typeID = PTID_CASTINGENCHANTMENT;
+                break;
+            case RPGMST_HEALING:
+                pParticle->typeID = PTID_CASTINGHEALING;
+                break;
+            case RPGMST_DOMINATION:
+                pParticle->typeID = PTID_CASTINGDOMINATION;
+                break;
+            default:
+                pParticle->typeID = PTID_CASTING;
+                break;
+            }
+            pParticle->fpScale = 1;
+            pParticle->Attach(lpUnit->GetID());
+            pWS->AddEffect(pParticle);
+            pCastParticle = pParticle;
+        }
+    }
+    if (nTime >= level1Command.nHitTime)
+    {
+        ASSERT(nTime == level1Command.nHitTime);
+        LcAttackCallback(level1Command.eAttackLocation, level1Command.bCalledShot);
+        // convert current state to simple non interruptable idle
+        level1Command.Clear();
+        if (eL1State == UL1_ATTACK)
+            L1SetPhase(UL1_SPECIAL);
+        L1StandStill();
+        return;
+    }
+    // set new position and orientation
+    {
+        CWorldServer *pWS = (CWorldServer *)GetWorld();
+        CPlot3D pos, vec;
+        float fpSpeed;
+        bool bRotating;
+        int nCheckTileX, nCheckTileY;
+
+        pos = lpUnit->GetCP();
+        lpUnit->walker.GetPosition(pWS, segment, pWS->GetSegmentTimeCounter(), bRotating, pos, vec,
+                                   fpSpeed, nCheckTileX, nCheckTileY);
+        LowSetMoving(eL1State == UL1_MOVE);
+        lpUnit->OrientInYDirection(vec, FALSE);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1StartAttack(bool bPredictTarget, BYTE nSoundSet)
+{
+    ASSERT(L1IsInterruptable());
+    level1Command.attackAnimation.SetSoundSet(nSoundSet);
+    L1StartRotateAnimation();
+    L1SetPhase(UL1_ATTACK);
+    // если это не вырожденная атака (не каст в точку)
+    if (level1Command.nTargetID != -1)
+    {
+        int nHitTime = bPredictTarget ? level1Command.nHitTime : 0;
+        // set motion to attacking
+        path.CreateAttack(GetWorldBase()->GetSegmentTimeCounter(), lpUnit, level1Command.nTargetID,
+                          nHitTime, level1Command.nTimeStrikeMoment);
+        lpUnit->LowNewRoute();
+        LowSetMoving(FALSE);
+    }
+    else
+    {
+        path.CreatePointAttack(GetWorldBase()->GetSegmentTimeCounter(), lpUnit, level1Command.ptDir,
+                               level1Command.nHitTime, level1Command.nTimeStrikeMoment);
+        lpUnit->LowNewRoute();
+        LowSetMoving(FALSE);
+        // L1StandStill();
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// should clear pointer to target
+void CUnitServer::L1CancelAttack(bool bAbortAnimation)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    int nTime = pWS->GetSegmentTimeCounter();
+    // if attack animation has begun then wait to its end, else stop everything
+    if (!bAbortAnimation &&
+        (nTime >= level1Command.nTimeStrikeMoment && !level0Animation.IsEndless()))
+    {
+        if (level1Command.attackAnimation.animations.GetSize() == 3)
+        {
+            // for complex animations with idling in the middle in this case we should
+            // proceed to final stage of animation
+            if (level0Animation.animations.GetSize() == 2)
+            {
+                SL0AnimationSeq anim = level1Command.attackAnimation;
+                if (anim.animations[1].animationSpeed == UAS_FROZEN)
+                {
+                    anim.nStartSegment = nTime - anim.animations[0].nLength;
+                    anim.animations[0].nLength += anim.animations[2].nLength;
+                    anim.animations.SetSize(1);
+                    L0StartAnimation(anim);
+                }
+            }
+            else if (level0Animation.animations.GetSize() == 3)
+            {
+                SL0AnimationSeq anim = level1Command.attackAnimation;
+                if (anim.animations[1].animationSpeed == UAS_FROZEN)
+                {
+                    anim.animations[0].nLength += anim.animations[2].nLength;
+                    anim.nStartSegment = level0Animation.nStartSegment;
+                    anim.animations.SetSize(1);
+                    L0StartAnimation(anim);
+                }
+                else
+                {
+                    anim.nStartSegment = level0Animation.nStartSegment;
+                    anim.animations.RemoveAt(1);
+                    L0StartAnimation(anim);
+                }
+            }
+        }
+        L1SetPhase(UL1_SPECIAL);
+    }
+    else
+        L1SetPhase(UL1_NONE);
+    level1Command.Clear();
+    L1StandStill();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// current L1 command can be interrupted with new L1 command
+bool CUnitServer::L1IsInterruptable()
+{
+    if (lpUnit->CheckFlag(UNIT_STUN))
+        return false;
+    if (bL1PlayingSuffer)
+        return false;
+    switch (eL1State)
+    {
+    case UL1_IDLE:
+    case UL1_MOVE:
+    case UL1_ROTATE:
+    case UL1_NONE:
+        return true;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1NeedPlaySuffer(int nSufferDirection)
+{
+    if (bL1PlayingSuffer)
+        return;
+    nL1SufferDirection = nSufferDirection;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::L1Segment()
+{
+    L0FreezeMovement(false);
+    L0Freeze(false);
+    // перепроверим атаку
+    if (eL1State == UL1_ATTACK && !LcRecheckAttack())
+        L1CancelAttack();
+    // а не застанили ли нас ?
+    if (lpUnit->CheckFlag(UNIT_STUN))
+    {
+        L0Freeze(true);
+        nL1SufferDirection = -1;
+        return;
+    }
+    if (bL1PlayingSuffer)
+    {
+        if (L0HasAnimation())
+        {
+            L0FreezeMovement(true);
+            nL1SufferDirection = -1;
+            return;
+        }
+        // suffer is over
+        L0StartAnimation(sufferAnimationMem);
+        bL1PlayingSuffer = false;
+    }
+    switch (eL1State)
+    {
+    case UL1_ROTATE:
+        L1ChangeWeapon();
+        L1ExecMove();
+        break;
+    case UL1_MOVE:
+        L1ChangeWeapon();
+        if (bL1SpeedChanged)
+        {
+            if (!L1StartMove(path.ptDestination, path.ptDestination.z))
+                break;
+        }
+        L1ExecMove();
+        break;
+    case UL1_SPECIAL:
+        if (!L0HasAnimation())
+        {
+            L1SetPhase(UL1_NONE);
+            if (animCallback)
+            {
+                animCallback(lpUnit);
+                LcSegment(); // CRAP for continous animations
+            }
+        }
+        break;
+    case UL1_SPECIAL_CYCLE:
+    case UL1_IDLE:
+        L1ChangeWeapon();
+        if (nL1SufferDirection != -1)
+            L1StartSuffer();
+        break;
+    case UL1_ATTACK:
+        L1ExecAttack();
+        break;
+    }
+    nL1SufferDirection = -1;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Command level of unit operation
+/////////////////////////////////////////////////////////////////////////////////////
+// проверить подходит ли цель под команду
+bool CUnitServer::LcTargetIsValid(const SUnitCommand &cmd)
+{
+    bool bCast = cmd.IsCast();
+    CMapObject *pTarget = cmd.pTarget;
+    if (bCast)
+    {
+        if (lpUnit->CheckFlag(UNIT_FEEBLED))
+            return false;
+    }
+    if (!pTarget)
+    {
+        if (bCast)
+        {
+            CSpell *pSpell = GetSpell(cmd);
+            if (pSpell && pSpell->IsOnTile())
+                return true;
+        }
+        return false;
+    }
+    if (pTarget->IsDead() && !cmd.IsLoot() && !cmd.IsScience())
+        return false;
+    return true;
+}
+// проверка возможности в текущий момент проиграть анимацию хита длиной nSufferLeng
+bool CUnitServer::LcCanPlaySuffer(int nSufferLeng)
+{
+    if (curCommand.IsAttack() && eL1State == UL1_IDLE)
+    {
+        if (GetWorldBase()->GetSegmentTimeCounter() + nSufferLeng > nCanAttackTime)
+            return false;
+    }
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::LcRecheckAttack()
+{
+    if (curCommand.cmd == UC_CASTPOINT || curCommand.cmd == UC_CASTUNIT)
+    {
+        if (lpUnit->CheckFlag(UNIT_FEEBLED))
+            return false;
+    }
+    if (curCommand.cmd == UC_CASTPOINT || curCommand.cmd == UC_TRAP)
+        return true;
+    if (!curCommand.IsAttack() && curCommand.cmd != UC_SKILL && curCommand.cmd != UC_CASTUNIT)
+        return false;
+    CMapObject *pTarget = curCommand.pTarget;
+    CPlot3D ptTargetPos;
+    // может цель уже подохла ?
+    if (!LcTargetIsValid(curCommand))
+        return false;
+    // цель находится в пределах досягаемости?
+    ptTargetPos = pTarget->GetFuturePosition(level1Command.nHitTime);
+    CPlot3D ptOurPos = lpUnit->GetCP();
+    float fpDist2 = sqr(ptTargetPos.x - ptOurPos.x) + sqr(ptTargetPos.y - ptOurPos.y);
+    return fpDist2 < level1Command.fpHitDist2;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// this function is called when attack is to be performed
+void CUnitServer::LcAttackCallback(ERPGHitLocations eAttackLocation, bool bCalledShot)
+{
+    switch (curCommand.cmd)
+    {
+    case UC_CASTPOINT:
+    case UC_CASTUNIT:
+        UseSpell();
+        LcCancelCommand();
+        break;
+    case UC_SKILL:
+        UseSkill(curCommand.pTarget);
+        LcCancelCommand();
+        break;
+    case UC_ATTACK:
+        UseAttack(curCommand.pTarget, level1AP); // eAttackLocation, bCalledShot );
+        if (!curCommand.pTarget.IsEmpty() && curCommand.pTarget->WhoAmI() == HPC_UNIT &&
+            eAttackLocation < RPGHL_ALL)
+        {
+            CUnit *pTarget = (CUnit *)curCommand.pTarget;
+            CUnitServer *pUS = (CUnitServer *)pTarget->GetUnitSpecific();
+            if (pUS->rpgUnitStats.hls[eAttackLocation].state != RPGALS_ACTIVE)
+            {
+                if (eAttackLocation == (ERPGHitLocations)curCommand.nQSpellNum)
+                    curCommand.nQSpellNum = (int)RPGHL_ALL;
+            }
+        }
+        break;
+    case UC_TRAP:
+        UseTrap();
+        LcCancelCommand();
+        break;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// перезапустить текущую команду
+void CUnitServer::LcRestartCommand()
+{
+    if (nextCommand.cmd == UC_NONE)
+        nextCommand = curCommand;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::LcChangePose()
+{
+    bool bRv;
+    if (currentPose.pose == wishPose.pose && currentPose.bAggressive == wishPose.bAggressive)
+        return false;
+    bool bChangePose = currentPose.pose != wishPose.pose;
+    // пытаемся менять текущую позу на новую
+    SL1Pose prevPose = currentPose;
+    theWorldServer.aiMap.RemoveObject(lpUnit);
+    // bTest - был ли исходный тайл проходимым
+    bool bTest = theWorldServer.aiMap.CanPutUnit(lpUnit), bCanChange = false;
+    // хитрый способ определения возможности смены позы
+    if (currentPose.pose == wishPose.pose)
+        bCanChange = true;
+    currentPose = wishPose;
+    lpUnit->currentPose = currentPose.Get();
+    lpUnit->RecalcAIParams();
+    //
+    if (!bCanChange)
+    {
+        if (bTest)
+            bCanChange = theWorldServer.aiMap.CanPutUnit(lpUnit);
+        else
+            bCanChange = theWorldServer.aiMap.CanPutUnitRelaxed(lpUnit);
+    }
+    //
+    if (bCanChange)
+        bRv = theWorldServer.aiMap.AddObject(lpUnit);
+    else
+        bRv = false;
+
+    AddUpdateMask(CMapObject::VLD_MASK_POSE);
+    if (!bRv)
+    {
+        currentPose = prevPose;
+        lpUnit->currentPose = currentPose.Get();
+        wishPose.pose = currentPose.pose;
+        if (wishPose.pose != UP_STAND)
+            wishPose.bRun = 0;
+        lpUnit->wishPose = wishPose.Get();
+        lpUnit->RecalcAIParams();
+        bRv = theWorldServer.aiMap.AddObject(lpUnit);
+        InformFailure(ACK_HERO_REFUSE_CANT_CHANGE_POSE);
+        ASSERT(bRv);
+        return false;
+    }
+    // if ( lpUnit->GetTypeID() == MOTID_HUMAN )
+    // !IsMoveAnimation( level0Animation )
+    if (L1IsMoving() && bChangePose)
+        L1ResetState();
+    if ((!L1IsMoving() || bChangePose) && (curCommand.cmd != UC_ATTACK))
+    {
+        // here we start transition animation with L1StartSpecial
+        SL0AnimationSeq res;
+        if (GetTransAnimation(res, prevPose, currentPose))
+        {
+            L1ResetState();
+            L1StartSpecial(res);
+        }
+    }
+    lpUnit->RecalcAIParams();
+    LcRestartCommand();
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::LcCanChangePose(EUnitPose p)
+{
+    SL1Pose pp;
+    pp.Convert(p);
+    if (pp.pose == currentPose.pose)
+        return true;
+    //
+    EUnitPose prevUPose = lpUnit->currentPose;
+    theWorldServer.aiMap.RemoveObject(lpUnit);
+    lpUnit->currentPose = p;
+    lpUnit->RecalcAIParams();
+    //
+    bool bCanChange = theWorldServer.aiMap.CanPutUnit(lpUnit);
+    lpUnit->currentPose = prevUPose;
+    lpUnit->RecalcAIParams();
+    bool bRv = theWorldServer.aiMap.AddObject(lpUnit);
+    ASSERT(bRv);
+    return bCanChange;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// конвертировать позы - текущую и желаемую из нескольких источников
+void CUnitServer::LcConvertPoses()
+{
+    if (curCommand.IsAttack()) //|| curCommand.cmd == UC_SKILL )
+        SetAggression(true);
+    else
+    {
+        // if unit is under player control
+        if (lpUnit->GetOwner())
+            SetAggression(false);
+    }
+    currentPose.Convert(lpUnit->currentPose);
+    wishPose.Convert(lpUnit->wishPose);
+    if (curCommand.bDoItFast && currentPose.pose == UP_STAND)
+        wishPose.bRun |= 2;
+    // животные бегают в агрессивном состоянии
+    if (!lpUnit->GetOwner() && wishPose.bAggressive)
+        wishPose.bRun |= 1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// nextCommand заменияет curCommand
+void CUnitServer::LcStartNextCommand()
+{
+    curCommand = nextCommand;
+    nextCommand.Clear();
+    if (curCommand.bDoItFast && currentPose.pose != UP_STAND)
+    {
+        if (!(curCommand.IsAttack() || curCommand.IsCast() || curCommand.IsSkill()) ||
+            !CanAttack(curCommand))
+            LowNewWishPose(UP_STAND);
+    }
+    LcConvertPoses();
+    nCommandExecStart = theWorldServer.GetSegmentTimeCounter();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// stop execution of current command
+void CUnitServer::LcCancelCommand()
+{
+    // if ( curCommand.cmd == UC_SKILL )
+    // LowNewWishPose( oldPose );
+    curCommand.Clear();
+    if (nextCommand.cmd == UC_NONE)
+        CmdWait();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::LcProcessNewCommand()
+{
+    if (nextCommand.cmd == UC_NONE)
+        return false;
+    //
+    /*
+            NConsole::game << "unit = " << lpUnit->GetID() << " cmd = ";
+            switch ( nextCommand.cmd )
+            {
+                    case UC_IDLE: NConsole::game << "idle" << endl; break;
+                    case UC_MOVETO: NConsole::game << "moveto" << endl; break;
+                    case UC_ROTATE: NConsole::game << "rotate" << endl; break;
+                    case UC_ATTACK: NConsole::game << "attack" << endl; break;
+                    case UC_CASTPOINT: NConsole::game << "castp" << endl; break;
+                    case UC_CASTUNIT: NConsole::game << "castu" << endl; break;
+                    case UC_SKILL: NConsole::game << "skill" << endl; break;
+                    case UC_PLAYANIM: NConsole::game << "playanim" << endl; break;
+                    case UC_PLAYANIMCYCLE: NConsole::game << "playanimc" << endl; break;
+                    case UC_NONE: NConsole::game << "none" << endl; break;
+                    case UC_TRAP: NConsole::game << "trap" << endl; break;
+                    case UC_REST: NConsole::game << "rest" << endl; break;
+                    default: NConsole::game << "crap" << endl; break;
+            }*/
+    // из состояния rest юнит способен выполнить только команду rest или умереть :)
+    if (nextCommand.cmd != UC_REST && currentPose.pose == UP_REST)
+    {
+        lpUnit->wishPose = wishPose.pose = UP_STAND;
+        if (LcChangePose())
+            return true;
+        ASSERT(0);
+        // даже не знаю что делать в этом случае - выход из реста всегда должен происходить успешно
+        // иначе юнит попадает в беспомощное положение
+        // так как условия проходимости для положения stand и rest идентичны (см
+        // CUnit::RecalcAIParams()) сюда программа доходить не должна
+    }
+    switch (nextCommand.cmd)
+    {
+    case UC_IDLE:
+        LcStartNextCommand();
+        L1StartIdle();
+        return true;
+    case UC_REST:
+        if (currentPose.pose != UP_REST)
+        {
+            wishPose.pose = UP_REST;
+            lpUnit->wishPose = UP_REST;
+            if (LcChangePose())
+                return true;
+            InformFailure(ACK_HERO_REFUSE_CANT_START_REST);
+            LcCancelCommand();
+            return false;
+        }
+        LcStartNextCommand();
+        L1StartIdle();
+        return true;
+    case UC_MOVETO: {
+        CWorldServer *pWS = (CWorldServer *)GetWorld();
+        bool bRemoveAllies = false;
+        CList<CUnit *, CUnit *> removed;
+
+        bLcCommandFail = false;
+        LcStartNextCommand();
+        // change pose if requested before pathfinding
+        if (LcChangePose())
+            return TRUE;
+        //
+        bool bFound;
+        if (fabs2(lpUnit->GetCP() - curCommand.ptTarget) < 0.02)
+        {
+            LcCancelCommand();
+            return LcProcessNewCommand();
+        }
+        LowRemoveUnitsForPathFind(removed, curCommand.ptTarget, curCommand.nQSpellNum != 0);
+        lpUnit->bNeedFastPath = ((CWorldServer *)GetWorld())->aiMap.IsWater(lpUnit->GetCP());
+        bFound = L1StartMove(curCommand.ptTarget, curCommand.ptTarget.z);
+        //
+        for (POSITION pos = removed.GetHeadPosition(); pos;)
+            pWS->aiMap.AddObject(removed.GetNext(pos));
+        // if there is flag to show found path
+        if (curCommand.dwParam)
+        {
+            curCommand.dwParam = 0;
+            if (bFound || distanceXY2(curCommand.ptTarget, lpUnit->GetCP()) >= 0.001f)
+                ShowFoundMovePath(path, bFound);
+        }
+        // check for failure
+        if (!bFound)
+        {
+            bLcCommandFail = true;
+            LcCancelCommand();
+            LcProcessNewCommand();
+            return false;
+        }
+        return true;
+    }
+    break;
+    case UC_ROTATE:
+        LcStartNextCommand();
+        L1StartRotate(curCommand.ptTarget, curCommand.fpParam);
+        return true;
+    case UC_ATTACK:
+    case UC_CASTUNIT:
+    case UC_SKILL:
+    case UC_CASTPOINT:
+        bLcCommandFail = false;
+        LcStartNextCommand();
+        L1ResetMoveFailed();
+        StartAttack();
+        return true;
+    case UC_PLAYANIM: {
+        LcStartNextCommand();
+        SL0AnimationSeq anim;
+        anim.Clear();
+        anim.AddSimple((BYTE)curCommand.dwParam, GetAnimationLength((BYTE)curCommand.dwParam));
+        L1StartSpecial(anim);
+    }
+        return true;
+    case UC_PLAYANIMCYCLE: {
+        LcStartNextCommand();
+        SL0AnimationSeq anim;
+        anim.Clear();
+        anim.AddCycle((BYTE)curCommand.dwParam);
+        L1StartSpecialCycle(anim);
+    }
+        return true;
+    case UC_TRAP: {
+        LcStartNextCommand();
+        int nHit;
+        SL0AnimationSeq anim;
+        GetAttackAnimation(anim, nHit, UC_SKILL, 0);
+        level1Command.CreateAimlessAttack(anim, GetWorldBase()->GetSegmentTimeCounter(), nHit);
+        L1StartAttack(true, 0);
+    }
+        return true;
+        break;
+    }
+    ASSERT(0 && "No such command found");
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::LcSegment()
+{
+    if (LcProcessNewCommand())
+    {
+        nBoredCounter = 0;
+        return;
+    }
+
+    LcConvertPoses();
+
+    if (LcChangePose())
+        return;
+
+    switch (curCommand.cmd)
+    {
+    case UC_PLAYANIMCYCLE:
+    case UC_IDLE:
+        break;
+    case UC_MOVETO:
+    case UC_ROTATE:
+        if (L1IsFree())
+        {
+            if (L1IsMoveFailed())
+            {
+                bLcCommandFail = true;
+                // в follow не информировать о траблах
+                if (!logic.GetPlayerLeader())
+                    InformFailure(ACK_HERO_REFUSE_PATH_NOT_FOUND);
+            }
+            CmdWait();
+            LcProcessNewCommand();
+        }
+        break;
+    case UC_ATTACK:
+    case UC_CASTUNIT:
+    case UC_SKILL:
+    case UC_CASTPOINT:
+        ExecAttack();
+        break;
+    case UC_PLAYANIM:
+        CmdWait();
+        LcProcessNewCommand();
+        break;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::GetPathDestination(CPlot3D &ptRes)
+{
+    if (curCommand.IsMove())
+    {
+        ptRes = curCommand.ptTarget;
+        return true;
+    }
+    if (nextCommand.IsMove())
+    {
+        ptRes = nextCommand.ptTarget;
+        return true;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::IsDanger()
+{
+    if (curCommand.IsCast())
+    {
+        CSpell *pSpell = GetSpell(curCommand);
+        if (pSpell)
+        {
+            switch (pSpell->GetSubtypeID() >> 16)
+            {
+            case SPELL_ID_FIREARROW:
+            case SPELL_ID_LIGHTNING:
+            case SPELL_ID_ACIDRAY:
+            case SPELL_ID_FIREBALL:
+            case SPELL_ID_INVOKE_LGHTNG:
+            case SPELL_ID_COLUMN_ACID:
+            case SPELL_ID_FIREWALL:
+            case SPELL_ID_WALL_LGHTNG:
+            case SPELL_ID_POISONFOG:
+            case SPELL_ID_ANTIMAGIC:
+                return true;
+                /*
+                case SPELL_ID_PROT_FIRE:
+                case SPELL_ID_PROT_ELECTRIC:
+                case SPELL_ID_PROT_ACID:
+                case SPELL_ID_EAGLE_SIGHT:
+                case SPELL_ID_INFRAVISION:
+                case SPELL_ID_DETECT_LIFE:
+                case SPELL_ID_INVISIBILITY:
+                case SPELL_ID_SILENCE:
+                case SPELL_ID_LICHDOM:
+                case SPELL_ID_FIREWORKS:
+                case SPELL_ID_STENCH:
+                case SPELL_ID_CLAIRVOYENCE:
+                case SPELL_ID_POSSESSION:
+                case SPELL_ID_SHAPECHANGE:
+                case SPELL_ID_VISIONFOG:
+                case SPELL_ID_HEALING:
+                case SPELL_ID_LINK:
+                case SPELL_ID_TELEPORT:
+                case SPELL_ID_STRENGTHEN:
+                case SPELL_ID_WEAKEN:
+                case SPELL_ID_REGENERATION:
+                case SPELL_ID_FEEBLEMIND:
+                case SPELL_ID_SPEED:
+                case SPELL_ID_SLOW:
+                case SPELL_ID_COMPREHEND:
+                case SPELL_ID_STUN:
+                case SPELL_ID_CHARM:
+                case SPELL_ID_ENLARGE:
+                case SPELL_ID_SHRINK:
+                case SPELL_ID_CAMPFIRE:*/
+            }
+        }
+    }
+    return curCommand.IsAttack();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! SOME WEAPON PARAMS
+/////////////////////////////////////////////////////////////////////////////////////
+// get attack range of the current weapon. If there is no weapon, get Native Attack Weapon range
+float CUnitServer::GetCurrentWeaponRange()
+{
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    if (pWeapon)
+        return pWeapon->GetRange();
+    else
+        return rpgUnitStats.fpNAWRange;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+ERPGWeaponTypes CUnitServer::GetCurrentWeaponType() const
+{
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    if (pWeapon)
+        return pWeapon->GetWeaponType();
+    return rpgUnitStats.rpgNAWWeaponType;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::IsCurrentWeaponABow()
+{
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    if (pWeapon)
+        return (pWeapon->GetWeaponType() == RPGWST_BOW) ||
+               (pWeapon->GetWeaponType() == RPGWST_CROSSBOW);
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::HasRangedAttack()
+{
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    if (pWeapon)
+        return IsCurrentWeaponABow();
+    return rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC && rpgUnitStats.fpNAWRange > 1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+float CUnitServer::GetSpellRange(CSpell *pSpell)
+{
+    ASSERT(pSpell);
+    if (pSpell)
+        return pSpell->GetRange();
+    return 10;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int CUnitServer::GetSpellCastTime(CSpell *pSpell)
+{
+    if (!pSpell)
+        return 0;
+    float fpAction = rpgUnitStats.action.fpEffectiveValue;
+    if (fpAction != 0)
+        fpAction = 15 / fpAction;
+    return Float2Int(pSpell->GetActionPoints() * fpAction);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// получить итем со спелом по номеру
+CItemQuick *CUnitServer::GetSpellQuickItem(int nQSpellNum)
+{
+    CItemQuick *pItem = lpUnit->GetQItem(nQSpellNum & 0x7fffffff);
+    if (!pItem)
+        return 0;
+    if (pItem->WhoAmI() != HPC_ITEM_QUICK)
+        return 0;
+    if (pItem->GetQuickItemType() != IDB_WAND && pItem->GetQuickItemType() != IDB_SCROLL)
+        return 0;
+    return pItem;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// проверить является ли итем под номером nQSpellNum поушеном
+bool CUnitServer::IsPotion(int nQSpellNum)
+{
+    if ((nQSpellNum & 0x80000000) == 0)
+        return false;
+    CItemQuick *pItem = GetSpellQuickItem(nQSpellNum);
+    if (!pItem || pItem->GetQuickItemType() != IDB_SCROLL)
+        return false;
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// получить спелл по его номеру - либо из quickspells либо из wands или scrolls
+CSpell *CUnitServer::GetSpell(int nQSpellNum)
+{
+    if (nQSpellNum & 0x80000000)
+    {
+        // wand
+        CItemQuick *pItem = GetSpellQuickItem(nQSpellNum);
+        if (!pItem)
+            return 0;
+        return pItem->GetSpell(0);
+    }
+    // simple quick spell
+    return lpUnit->GetQSpell(nQSpellNum);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CSpell *CUnitServer::GetSpell(const SUnitBasicCmd &cmd)
+{
+    return GetSpell(cmd.nQSpellNum);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// check cast possibility with rpg system
+bool CUnitServer::CanCastSpell(CSpell *pSpell, bool bCheckRPG)
+{
+    // lets check if this unit can cast the spell
+    if (pSpell && lpUnit->IsHero() && bCheckRPG &&
+        !rpgUnitStats.CanCastSpell(pSpell->GetMagicSubtype(), pSpell->GetComplexity()))
+        return false;
+    if (lpUnit->CheckFlag(UNIT_FEEBLED))
+        return false;
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// вычисляет продолжительность одного периода атаки - от начала атакующего движения до
+// возможности начать следующее в сегментах
+int CUnitServer::GetAttackCycleTime(EUnitCommand cmd, CItemWeapon *pWeapon)
+{
+    // calc delay to next attack
+    float fpAction = rpgUnitStats.action.fpEffectiveValue;
+    if (fpAction != 0)
+        fpAction = 15 / fpAction;
+    int nAttackCycle = 0;
+    if (cmd == UC_ATTACK)
+    {
+        int nActions = 60;
+        if (pWeapon)
+            nActions = pWeapon->GetActionPoints();
+        else
+            nActions = rpgUnitStats.fpNAWActionPoints;
+        nAttackCycle = Float2Int(nActions * fpAction);
+    }
+    return nAttackCycle;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GetWeaponAttack(SRPGGeneralAttack &res) const
+{
+    int i;
+    bool bHero = lpUnit->GetOwner() != 0;
+    if (!bHero || (lpUnit->dwCurrentWeapon >= QI_MAX_WEAPONS) ||
+        (lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon] == NULL))
+    {
+        float fpDamage = rpgUnitStats.fpNAWDamageMin + rpgUnitStats.fpNAWDamageRnd;
+        fpDamage = rpgUnitStats.GetModifiedDamage(lpUnit, fpDamage);
+        for (i = 0; i < RPG_NUM_ATTACK_TYPES; i++)
+            res.wAttacks[i] = Float2Int(rpgUnitStats.fpNAWAttacks[i] * fpDamage);
+    }
+    else
+    {
+        float fpAttacks[RPG_NUM_ATTACK_TYPES];
+        CItemWeapon *pWeapon = lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon];
+        float fpDamage = pWeapon->GetDamageMax();
+        fpDamage = rpgUnitStats.GetModifiedDamage(lpUnit, fpDamage);
+        pWeapon->GetDamageDistribution(fpAttacks);
+        for (i = 0; i < RPG_NUM_ATTACK_TYPES; i++)
+            res.wAttacks[i] = Float2Int(fpDamage * fpAttacks[i]);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GetSpellAttack(int nSpellNum, SRPGGeneralAttack &res)
+{
+    CSpell *pSpell = GetSpell(nSpellNum);
+    ASSERT(pSpell);
+    memset(&res, 0, sizeof(res));
+    if (pSpell)
+        res.wAttacks[pSpell->GetAttackType()] = pSpell->GetPower();
+    res.wToHit = 0x7fff;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! ATTACK CHECKS
+/////////////////////////////////////////////////////////////////////////////////////
+bool IsSpellCastingDirect(CWorldServer *pWS, CSpell *pSpell, CUnit *pWho, const CPlot3D &ptFrom,
+                          CUnit *pTarget, const CPlot3D &ptTarget)
+{
+    if (!pSpell->IsRequireTrace())
+        return true;
+    CPlot3D ptDest;
+    if (!pTarget)
+    {
+        ptDest = ptTarget;
+        ptDest.z = FP_CHECK_VISIBILITY_HEIGHT + pWS->GetBridgeSurfaceZValue(ptDest.x, ptDest.y);
+    }
+    else
+    {
+        ptDest = pTarget->GetCP();
+        ptDest.z = pTarget->GetUnitHeadHeight() + pTarget->CalcZ(ptDest.x, ptDest.y);
+    }
+    CPlot3D ptTest = ptFrom;
+    if (pWho)
+        ptTest.z = pWho->GetStandUnitHeadHeight() + pWho->CalcZ(ptTest.x, ptTest.y);
+    CAIMap &aiMap = pWS->aiMap;
+    if (aiMap.TraceRelief(ptTest, ptDest) < FP_MIN_ATTACK_OPACITY)
+        return false;
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// определить нужно ли для команды cmd трассировать террейн и если да заполнить структуру
+// info
+bool CUnitServer::NeedReliefTrace(const SUnitBasicCmd &cmd, SUCTraceInfo &info)
+{
+    if (cmd.HasPointOfUse())
+        return false;
+    //
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CMapObject *pTarget = cmd.pTarget;
+    if (cmd.IsCast())
+    {
+        CSpell *pSpell = GetSpell(cmd);
+        ASSERT(pSpell);
+        if (!pSpell || !pSpell->IsRequireTrace())
+            return false;
+        info.Clear();
+        // trace to target point
+        if (!pTarget || pTarget->WhoAmI() != HPC_UNIT) // pSpell->IsOnTile() ||
+        {
+            info.ptDest = cmd.ptTarget;
+            info.ptDest.z = FP_CHECK_VISIBILITY_HEIGHT +
+                            pWS->GetBridgeSurfaceZValue(info.ptDest.x, info.ptDest.y);
+        }
+        else
+        {
+            info.pTarget = (CUnit *)pTarget;
+            info.fpMinDist2 = sqr(lpUnit->GetCollisionDistance() +
+                                  ((CUnit *)pTarget)->GetCollisionDistance() + 0.3f);
+        }
+    }
+    else
+    {
+        if (!pTarget || pTarget->WhoAmI() != HPC_UNIT)
+        {
+            // use science or something like that
+            return false;
+        }
+        info.Clear();
+        info.fpMinDist2 = 10;
+        info.pTarget = (CUnit *)pTarget;
+    }
+    info.fpOurHeadH = lpUnit->GetStandUnitHeadHeight();
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::SetReliefTraceDest(SUCTraceInfo &info, const CPlot3D &ptUnitPos)
+{
+    if (info.pTarget)
+    {
+        info.ptDest = ptUnitPos;
+        info.ptDest.z = info.pTarget->GetUnitHeadHeight() +
+                        info.pTarget->CalcZ(ptUnitPos.x, ptUnitPos.y);
+        info.pTarget = 0;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// осуществить проверку видимости цели из позиции ptFrom
+bool CUnitServer::CheckRelief(SUCTraceInfo &info, const CPlot3D &ptFrom)
+{
+    if (info.pTarget)
+    {
+        info.ptDest = info.pTarget->GetUnitHeadPosition();
+        info.pTarget = 0;
+    }
+    if (distanceXY2(info.ptDest, ptFrom) < info.fpMinDist2)
+        return true;
+    //
+    CPlot3D ptTest = ptFrom;
+    ptTest.z = info.fpOurHeadH + lpUnit->CalcZ(ptTest.x, ptTest.y);
+    CAIMap &aiMap = ((CWorldServer *)GetWorld())->aiMap;
+    if (aiMap.TraceRelief(ptTest, info.ptDest) < FP_MIN_ATTACK_OPACITY)
+        return false;
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// check up mand // and distance to target for specified spell/wand
+bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
+{
+    CSpell *pSpell;
+    int nQSpellNum = cmd.nQSpellNum;
+    // when updating this code don`t forget about unit::checkiscastpossible
+    if (nQSpellNum & 0x80000000)
+    {
+        // wand casting
+        CItemQuick *pItem = GetSpellQuickItem(nQSpellNum);
+        if (!pItem)
+            return false;
+        pSpell = pItem->GetSpell(0);
+        if (!pSpell)
+            return false;
+        if (pItem->GetQuickItemType() == IDB_WAND && pSpell->GetManaCost() > pItem->GetMP())
+            return false;
+    }
+    else
+    {
+        // spell casting
+        pSpell = lpUnit->GetQSpell(nQSpellNum);
+        if (!pSpell)
+            return false;
+        if (lpUnit->IsHero() && pSpell->GetManaCost() * rpgUnitStats.GetManaBonusMultiplier() >
+                                    GetMapObjectServer()->GetCurrentMP())
+            return false;
+    }
+    // range checking is disabled
+    /*if ( fabs2( ptTarget - lpUnit->GetCP() ) > sqr( pSpell->GetRange() * 0.98f ) )
+    {
+            if ( !bFixTarget )
+                    return false;
+            ptTarget = ptTarget - lpUnit->GetCP();
+            ptTarget *= pSpell->GetRange() / fabs( ptTarget );
+            ptTarget = lpUnit->GetCP() + ptTarget;
+    }*/
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// calc distance for action for command
+float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
+{
+    float fpHitDist = 0; //, fpMinDist;
+    if (cmd.HasPointOfUse())
+        return FP_MINIMAL_DISTANCE_TO_POU;
+    CMapObject *pTarget = cmd.pTarget;
+    switch (cmd.cmd)
+    {
+    case UC_CASTUNIT:
+    case UC_CASTPOINT:
+        if (!lpUnit->GetOwner() && rpgUnitStats.rpgNAWWeaponType == RPGWST_MAGIC)
+            fpHitDist = rpgUnitStats.fpNAWRange;
+        else
+            fpHitDist = GetSpellRange(GetSpell(cmd));
+        break;
+    case UC_SKILL:
+        if (cmd.IsLoot())
+            fpHitDist = lpUnit->GetAttackDistance() + 0.3f * pTarget->GetAttackDistance();
+        else
+        {
+            if (pTarget->WhoAmI() == HPC_UNIT)
+                fpHitDist = lpUnit->GetCollisionDistance() +
+                            ((CUnit *)pTarget)->GetCollisionDistance() + 0.6f;
+            else
+                fpHitDist = lpUnit->GetAttackDistance() + pTarget->GetAttackDistance() - 0.1f;
+        }
+        break;
+    case UC_ATTACK:
+    default:
+        //
+        if (pTarget->WhoAmI() == HPC_UNIT)
+        {
+            float fpWeaponRange = 0.6f;
+            if (((CUnit *)pTarget)->GetOwner() && lpUnit->GetOwner())
+                fpWeaponRange -= 0.4f;
+            fpWeaponRange = Max(GetCurrentWeaponRange(), fpWeaponRange);
+            fpHitDist = lpUnit->GetCollisionDistance() +
+                        ((CUnit *)pTarget)->GetCollisionDistance() + fpWeaponRange;
+        }
+        else
+            fpHitDist = lpUnit->GetAttackDistance() + pTarget->GetAttackDistance() +
+                        GetCurrentWeaponRange();
+        break;
+    }
+    return fpHitDist;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// расстояние атаки для выбора между "короткой" и "длинной" атаками
+float CUnitServer::GetCloseAttackDist(const SUnitBasicCmd &cmd)
+{
+    ASSERT(cmd.cmd == UC_ATTACK);
+    float fpHitDist = 0;
+    CMapObject *pTarget = cmd.pTarget;
+    float fpAttackDistance = lpUnit->GetAttackDistance();
+    fpHitDist = fpAttackDistance + pTarget->GetAttackDistance(); // + GetCurrentWeaponRange();
+    if (pTarget && pTarget->WhoAmI() == HPC_UNIT)
+    {
+        // насколько монстр выпрыгивает во время атаки в единицах собственной длины ( 1 - монстр
+        // выпрыгивает на половину собственной длины)
+        float fpAttackKoef = rpgUnitStats.fpAttackDistance;
+        // fpAttackKoef = ( 1 - complection.tall ) + complection.tall * fpAttackKoef;
+        fpAttackDistance *= (1 + fpAttackKoef);
+        fpHitDist = fpAttackDistance + ((CUnit *)pTarget)->GetCollisionDistance();
+    }
+    return fpHitDist;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// вернет TRUE, если в момент nSegment никакие юниты не будут мешать нанесению удара
+// по pTarget в точке ptTarget из текущего положения юнита
+// можно использовать список потенциально видимых юнитов для проверки на столкновения так как
+// атаковать можно только видимого юнита ( по крайней мере способом для которого необходима
+// проверка AttackIsDirect()
+bool CUnitServer::AttackIsDirect(const SUnitBasicCmd &cmd, const CPlot3D &ptTarget, int nSegment)
+{
+    float fpDist2;
+    if (((CUnit *)cmd.pTarget) == lpUnit)
+        return true;
+
+    if (cmd.HasPointOfUse())
+        return true;
+    // CRAP (actually this should account vision) ai units can not attack from too far
+    if (!lpUnit->GetOwner() && !cmd.pTarget.IsEmpty())
+    {
+        float fpSight = Max(GetVisionSense(), GetLifeSense()) * 1.05f;
+        if (distanceXY2(lpUnit->GetCP(), ptTarget) > sqr(fpSight))
+            return false;
+    }
+    //
+    if (!cmd.IsCast())
+    {
+        // here we get an attack/skill, check if we are not using a bow or a long range weapon
+        // then no units should be on the path
+        if (cmd.cmd == UC_SKILL ||
+            (cmd.IsAttack() && (!IsCurrentWeaponABow() && GetCurrentWeaponRange() < 3)))
+        {
+            CPlot3D ptVec1, ptVec2;
+            ptVec1 = ptTarget - lpUnit->GetCP();
+            fpDist2 = fabs2(ptVec1);
+            ptVec1 /= fpDist2;
+            ptVec2.x = ptVec1.y;
+            ptVec2.y = -ptVec1.x;
+            ptVec2.z = 0;
+            ptVec2 /= fabs(ptVec2);
+            CMapObjectPtrList &list = *logic.environment.GetUnitsList();
+            for (POSITION pos = list.GetHeadPosition(); pos;)
+            {
+                CUnit *pUnit = (CUnit *)list.GetNext(pos);
+                if (pUnit == cmd.pTarget)
+                    continue;
+                if (pUnit->IsDead())
+                    continue;
+                float fpC1, fpC2;
+                CPlot3D ptToUnit = pUnit->GetFuturePosition(nSegment) - lpUnit->GetCP();
+                fpC1 = ptToUnit * ptVec1;
+                fpC2 = ptToUnit * ptVec2;
+                if (fpC1 > 0.1f && fpC1 < 0.9f && fpC2 > -0.3f && fpC2 < 0.3f)
+                    return false;
+            }
+        }
+    }
+    else
+    {
+        if (lpUnit->CheckFlag(UNIT_FEEBLED))
+            return false;
+    }
+    SUCTraceInfo info;
+    if (NeedReliefTrace(cmd, info))
+    {
+        SetReliefTraceDest(info, ptTarget);
+        if (!CheckRelief(info, lpUnit->GetCP()))
+            return false;
+    }
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// отличается от простого CreateAttackPlan тем, что не возвращает результат и фиксирует
+// цель на одном месте
+bool CUnitServer::CreateTestAttackPlan(const SUnitBasicCmd &cmd)
+{
+    SL1Command tmp;
+    CMapObject *pTarget = cmd.pTarget;
+    if (pTarget && pTarget->WhoAmI() == HPC_UNIT)
+        pTarget->SetFlag(UNIT_GETFUTUREPOS);
+    bool bRv = CreateAttackPlan(cmd, tmp);
+    if (pTarget && pTarget->WhoAmI() == HPC_UNIT)
+        pTarget->ResetFlag(UNIT_GETFUTUREPOS);
+    return bRv;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// а не лутит ли уже кто pTarget?
+bool CUnitServer::IsLootLocked(CMapObject *pTarget)
+{
+    if (pTarget->CheckFlag(UNIT_LOOT_LOCKED))
+        return !theWorldServer.CanLoot(pTarget->GetID(), GetUnit()->GetID());
+    CMapObjectPtrList &list = *logic.environment.GetUnitsList();
+    for (POSITION pos = list.GetHeadPosition(); pos;)
+    {
+        CUnit *pUnit = (CUnit *)list.GetNext(pos);
+        if (!pUnit || pUnit->IsDead())
+            continue;
+        CUnitServer *pUS = (CUnitServer *)pUnit->GetUnitSpecific();
+        if (pUS->curCommand.IsLoot() && pUS->curCommand.pTarget == pTarget &&
+            (pUS->L1IsAttacking() || pUS->bLcChangingPoseToAttack))
+            return true;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// проверить, достаем ли мы цель по высоте
+bool CUnitServer::IsTargetReachable(const SUnitBasicCmd &cmd)
+{
+    if (cmd.cmd != UC_ATTACK && cmd.cmd != UC_SKILL)
+        return true;
+    CUnit *pTarget = (CUnit *)cmd.pTarget;
+    if (!pTarget || pTarget->WhoAmI() != HPC_UNIT)
+        return true;
+    if (pTarget->IsDead())
+        return true;
+    if (pTarget->GetAIClass() != 0)
+        return true;
+    // now we have to check heights
+    if (cmd.cmd == UC_ATTACK && IsCurrentWeaponABow())
+        return true;
+    return pTarget->GetPrototype()->fAltitude + pTarget->GetCP().z < 1.5f;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::CanAttack(const SUnitBasicCmd &cmd)
+{
+    if (!IsTargetReachable(cmd))
+        return false;
+    return CreateTestAttackPlan(cmd);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::CanAttackFrom(const SUnitBasicCmd &cmd, const CPlot3D &ptPos)
+{
+    if (!IsTargetReachable(cmd))
+        return false;
+    CPlot3D prevCP = lpUnit->GetCP();
+
+    lpUnit->cp = ptPos;
+    bool bRv = CreateTestAttackPlan(cmd);
+    lpUnit->cp = prevCP;
+    return bRv;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Attack planning system
+/////////////////////////////////////////////////////////////////////////////////////
+// function to create attack plans return TRUE if attack plan creation succeded
+// attack should be made from point unit standing on
+// calcs attackInfo
+bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
+{
+    int nHit;
+    SL0AnimationSeq animation;
+    CPlot3D unitPos = lpUnit->GetCP(), unitOrientation;
+    int nCurSegment = GetWorldBase()->GetSegmentTimeCounter();
+    float fpRotationSpeed, fpOriginalAngle, fpTargetAngle, fpAngle, fpMoveSpeed;
+    float fpDist, fpPrevDist, fpHitDist, fpHitDistRun;
+    int nRotationTimeMax;
+    CSpell *pSpell = 0;
+
+    // check if we arrived to use point, if one is specified
+    if (atk.HasPointOfUse())
+    {
+        if (distanceXY2(atk.ptTarget, lpUnit->GetCP()) > sqr(GetHitDist(atk)))
+            return false;
+    }
+    cmd.Clear();
+    // choose animation
+    switch (atk.cmd)
+    {
+    case UC_ATTACK:
+        CalcAttackDirection(cmd, animation, nHit, atk.pTarget);
+        break;
+    case UC_CASTPOINT:
+    case UC_CASTUNIT: {
+        pSpell = GetSpell(atk);
+        GetCastAnimation(animation, nHit, atk.cmd, GetSpellCastTime(pSpell));
+    }
+    break;
+    default:
+        GetAttackAnimation(animation, nHit, atk.cmd, atk.nQSpellNum);
+        break;
+    }
+    if (nHit <= 0)
+    {
+#ifdef _DEBUG
+        CString szTemp;
+        szTemp.Format("Attack has zero nHit\n");
+        OutputDebugString(szTemp);
+#endif
+        nHit = 1;
+    }
+    // calc distance from which hit is possible
+    fpHitDist = GetHitDist(atk);
+    if (atk.HasPointOfUse())
+        fpHitDist = 1e10f;
+    // determine start orientation and acquire some rotation parameters
+    unitOrientation = -lpUnit->GetYAxis();
+    fpOriginalAngle = float(atan2(unitOrientation.y, unitOrientation.x));
+    lpUnit->GetSpeeds(fpMoveSpeed, fpRotationSpeed);
+    nRotationTimeMax = Float2Int(FP_PI / fpRotationSpeed) + 3;
+
+    // по убегающему юниту расстояние больше, эквивалентно атаке из бега
+    bool bPredictTargetPos = false;
+    int nPredictShift = 0;
+    CUnit *pTargetUnit = 0;
+    CPlot3D ptTargetDestPos = atk.GetTargetCP(); // положение цели
+    CPlot3D ptDir = ptTargetDestPos - unitPos;   // направление на цель
+    float fpStartDist2 = distanceXY2(unitPos, ptTargetDestPos);
+    float fpTargetMove = 0;
+    if (!atk.pTarget.IsEmpty() && atk.pTarget->WhoAmI() == HPC_UNIT)
+        pTargetUnit = (CUnit *)atk.pTarget;
+    if (pTargetUnit)
+    {
+        fpTargetMove = atk.GetTargetSpeed();
+        // если юнит находится в пределах досягаемости в начале атаки, то атака возможна
+        // и ее расстояние учитывает перемещение
+        if (fpStartDist2 <= sqr(fpHitDist) && (unitOrientation * ptDir) > 0.5f * sqrt(fpStartDist2))
+        {
+            fpHitDistRun = sqr(fpHitDist +
+                               (nHit + nRotationTimeMax / 2) * AITile2Meter(fpTargetMove) + 0.5f);
+        }
+        else
+        {
+            // в обычной ситуации атака производится по юниту на расстоянии атаки
+            fpHitDistRun = sqr(fpHitDist + 0.5f);
+            if (pTargetUnit->IsMoving())
+                bPredictTargetPos = true;
+        }
+        if (atk.IsCast() && !atk.HasPointOfUse() && pTargetUnit->IsMoving())
+        {
+            bPredictTargetPos = true;
+            float fpSpeed;
+            CSpell *pSpell = GetSpell(atk);
+            if (pSpell && pSpell->IsOnTile() && (fpSpeed = pSpell->GetSpeed()) > 0)
+                nPredictShift = 15 * sqrt(fpStartDist2) / fpSpeed - 3;
+        }
+    }
+    else
+    {
+        fpHitDistRun = sqr(fpHitDist);
+    }
+    cmd.fpHitDist2 = fpHitDistRun; // допустимое расстояние атаки
+
+    // test attack possibility in i segments
+    fpHitDist = sqr(fpHitDist); // square distance beforehand to avoid multiple sqrt
+    fpPrevDist = 1e30f;
+
+    for (int i = 0; i < nRotationTimeMax; i++, fpPrevDist = fpDist)
+    {
+        if (bPredictTargetPos)
+        {
+            ptTargetDestPos = pTargetUnit->GetFuturePosition(nCurSegment + i + nHit +
+                                                             nPredictShift);
+            ptDir = ptTargetDestPos - unitPos;
+        }
+        // check if distance is ok to hit
+        fpDist = ptDir.x * ptDir.x + ptDir.y * ptDir.y;
+        if (fpDist > fpHitDist)
+        {
+            if (fpDist <= fpPrevDist)
+                continue;
+            // если цель удаляется
+            if (fpDist > fpPrevDist)
+            {
+                // цель слишком далеко - дальше проверять бесполезно
+                if (fpDist >= fpHitDistRun)
+                    return FALSE;
+            }
+        }
+        // check time to rotate is enough
+        if (ptDir.x == 0 && ptDir.y == 0)
+            fpAngle = 0;
+        else
+        {
+            if (pTargetUnit && pTargetUnit->GetID() ==
+                                   lpUnit->GetID()) // не надо поворачиваться, чтобы атаковать себя
+                fpAngle = 0;
+            else
+            {
+                fpTargetAngle = float(atan2(ptDir.y, ptDir.x));
+                fpAngle = fabs(fpTargetAngle - fpOriginalAngle);
+                if (fpAngle > FP_PI)
+                    fpAngle = 2 * FP_PI - fpAngle;
+                if (fpAngle > 0.01f && int(fpAngle / fpRotationSpeed) + 1 > i)
+                    continue;
+            }
+        }
+        // all tests are ok, create attack plan
+        if (!AttackIsDirect(atk, ptTargetDestPos, nCurSegment + i + nHit))
+            return false;
+        // fill rest of cmd
+        cmd.nTargetID = atk.GetTargetID();
+        cmd.nTimeStrikeMoment = nCurSegment + i;
+        cmd.nHitTime = cmd.nTimeStrikeMoment + nHit;
+        cmd.attackAnimation = animation;
+        cmd.bCalledShot = ERPGHitLocations(atk.nQSpellNum) != RPGHL_ALL;
+        cmd.ptDir = ptDir;
+        if (atk.IsCast())
+        {
+            ASSERT(pSpell);
+            cmd.bCast = true;
+            if (pSpell)
+            {
+                if (pSpell->IsOnTile())
+                    cmd.nTargetID = -1;
+                switch (pSpell->GetSubtypeID() >> 16)
+                {
+                case SPELL_ID_RICKMAGIC:
+                    cmd.castType = RPGMST_LIGHTNING;
+                    break;
+                case SPELL_ID_CURSEMAGIC:
+                    cmd.castType = RPGMST_FIRE;
+                    break;
+                default:
+                    cmd.castType = pSpell->GetMagicSubtype();
+                    break;
+                }
+            }
+            else
+                cmd.castType = RPGMST_UNKNOWN;
+        }
+        return true;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// move to target during attack - rather difficult function for ranged attacks :)
+// failures to move to target currently are untracked
+void CUnitServer::MoveToTarget()
+{
+    CPlot3D ptDest;
+    float fpDistance, fpSpeed, fpChaseTime, fpHitDist;
+    CWorldServer *pWS = (CWorldServer *)GetWorldBase();
+    int nCurSegment = pWS->GetSegmentTimeCounter(), nTimeToHit, nForwardTime;
+
+    lpUnit->bNeedFastPath = TRUE;
+    // if we need to move to the point of use or point of cast destination
+    if (curCommand.HasPointOfUse() || curCommand.pTarget.IsEmpty())
+    {
+        ptDest = curCommand.ptTarget;
+        if (L1IsMoving() && distanceXY2(ptDest, path.ptDestination) <= sqr(0.3f))
+            return;
+        bool bFound = L1StartMove(ptDest);
+        if (bFound)
+        {
+            // а туда ли путь-то нашли? :)
+            if (distanceXY2(path.GetFinalPoint(), ptDest) > sqr(0.3f))
+            {
+                if (!CanAttackFrom(curCommand, path.GetFinalPoint()))
+                    bFound = false;
+            }
+        }
+        if (!bFound)
+        {
+            InformAttackPathNotFound(curCommand);
+            LcCancelCommand();
+            bLcCommandFail = true;
+        }
+        return;
+    }
+    // more conventional path - we have some target and move to it
+    CMapObject *pTarget = curCommand.pTarget;
+    fpHitDist = GetHitDist(curCommand);
+    CPlot3D ptTargetPos = pTarget->GetTargetCP();
+    if (!pTarget->IsMoving() && distanceXY2(ptTargetPos, lpUnit->GetCP()) <= sqr(fpHitDist) &&
+        AttackIsDirect(curCommand, ptTargetPos, nCurSegment))
+    {
+        L1StartIdle();
+        return;
+    }
+    // проверим, надо ли бежать за движущейсся целью или мы и так успеем и можно отдохнуть
+    if (pTarget->IsMoving())
+    {
+        nTimeToHit = nCanAttackTime + N_MAXIMUM_HIT_FRAME - nCurSegment;
+        if (nTimeToHit > 0)
+        {
+            fpDistance = fabs(pTarget->GetFuturePosition(nTimeToHit + nCurSegment) -
+                              lpUnit->GetCP());
+            fpSpeed = AITile2Meter(lpUnit->GetSpeed());
+            if (fpSpeed > 0)
+            {
+                fpChaseTime = (fpDistance - fpHitDist) / fpSpeed;
+                if (fpChaseTime < nTimeToHit)
+                {
+                    L1StartIdle();
+                    return;
+                }
+            }
+        }
+    }
+    // move to target
+    if (L1IsFree() || L1IsIdle() || nMoveToTargetTime - nCurSegment < 16)
+    {
+        if (train.bIsTrain)
+        {
+            CUnitServer *pMaster = (CUnitServer *)train.master->GetUnitSpecific();
+            if (pMaster->curCommand.pTarget == pTarget && pMaster->IsAttacking() &&
+                !pMaster->L1IsAttacking())
+                pTarget = train.master;
+            else
+                train.Clear();
+        }
+        float fpTargetDist = fabs(pTarget->GetTargetCP() - lpUnit->GetCP());
+        float fpMaxSpeed = lpUnit->GetSpeed();
+        if (pTarget->IsMoving())
+        {
+            CPlot3D ptDir = pTarget->GetCP() - lpUnit->GetCP();
+            float fpDirLeng = fabs(ptDir);
+            if (fpDirLeng > 0)
+                ptDir /= fpDirLeng;
+            fpMaxSpeed += pTarget->GetSpeed() * (ptDir * pTarget->GetYAxis());
+        }
+        fpMaxSpeed = Max(0.1f, fpMaxSpeed);
+        nForwardTime = Min(64, Float2Int((fpTargetDist - fpHitDist) / fpMaxSpeed)); // 0.1f ) );
+        nForwardTime = Max(2, nForwardTime);
+        ptDest = pTarget->GetFuturePosition(nCurSegment + nForwardTime);
+        if (L1IsMoving() &&
+            distanceXY2(ptDest, path.ptDestination) < sqr(0.1f + fpTargetDist * 0.1f))
+        {
+            // set maximal path length
+            path.ptDestination.z = lpUnit->GetMaxAttackPathLength(fpTargetDist) + 5;
+            return;
+        }
+        // если это юнит под управлением ai, то в атаку в обход он не пойдет
+        float fpMaxPathLength = lpUnit->GetMaxAttackPathLength(fpTargetDist) + 5;
+        // если до цели дойти нельзя, то облом
+        bool bGraphRebuild = theWorldServer.aiMap.SetGraphRebuild(false);
+        if (distanceXY2(lpUnit->cp, ptDest) > 0.1f)
+        {
+            theWorldServer.aiMap.RemoveObject(pTarget);
+            CPlot3D ptPathDest(lpUnit->GetCP() * 0.001f + ptDest * 0.999f);
+            ptPathDest.z = ptDest.z;
+            if (!L1StartMove(ptPathDest, fpMaxPathLength))
+                L1SetMoveFailed();
+            theWorldServer.aiMap.AddObject(pTarget);
+            theWorldServer.aiMap.SetGraphRebuild(bGraphRebuild);
+            // если к цели нельзя подойти достаточно близко, то облом
+            if (distanceXY2(ptDest, path.GetFinalPoint()) > sqr(fpHitDist))
+                L1StopMovement(true); //( L1SetMoveFailed();
+            nMoveToTargetTime = nCurSegment + nForwardTime;
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::StartAttack()
+{
+    CPlot3D ptFuture;
+    int nCurSegment = GetWorldBase()->GetSegmentTimeCounter();
+    bLcChangingPoseToAttack = false;
+    if (nCanAttackTime > nCurSegment && curCommand.IsAttack())
+    {
+        MoveToTarget(); // including ResetAttackPlan();
+        return;
+    }
+    // allow weapon change in case of attacking without pauses
+    L1ChangeWeapon();
+    if (CreateAttackPlan(curCommand, level1Command))
+    {
+        /*
+        if ( curCommand.cmd == UC_SKILL && pTarget && pTarget->IsMoving() )
+        {
+                InformFailure( UAF_CANT_USE_SKILL_ON_MOVE );
+                bLcCommandFail = true;
+                if ( nextCommand.cmd != UC_IDLE )
+                        CmdWait();
+                return;
+        }*/
+        // если кто-то уже начал лутить этого товарища, то мы не успели
+        if (curCommand.IsLoot() && IsLootLocked(curCommand.pTarget))
+        {
+            LcCancelCommand();
+            return;
+        }
+        // примем позу, удобную для выбранного действия
+        bool bNeedPose = false;
+        if (curCommand.IsSkill())
+        {
+            /*if ( currentPose.pose != UP_CRAWL )
+            {
+                    LowNewWishPose( UP_CRAWL );
+                    bNeedPose = true;
+            }*/
+        }
+        else if (curCommand.IsCast() && lpUnit->GetTypeID() == MOTID_HUMAN)
+        {
+            if (currentPose.pose == UP_LAY)
+            {
+                LowNewWishPose(UP_CRAWL);
+                bNeedPose = true;
+            }
+        }
+        else
+        {
+            if (currentPose.pose != UP_STAND)
+            {
+                LowNewWishPose(UP_STAND);
+                bNeedPose = true;
+            }
+        }
+        //
+        LcConvertPoses();
+        if (!LcChangePose())
+        {
+            if (bNeedPose)
+            {
+                bLcCommandFail = true;
+                LcCancelCommand();
+                return;
+            }
+        }
+        else
+        {
+            bLcChangingPoseToAttack = true;
+            return;
+        }
+        // а доступна ли цель для текущего оружия
+        if (!IsTargetReachable(curCommand))
+        {
+            InformFailure(ACK_HERO_REFUSE_TARGET_TOO_HIGH);
+            LcCancelCommand();
+            return;
+        }
+        // последние проверки перед атакой
+        if (nCanAttackTime > level1Command.nTimeStrikeMoment && curCommand.IsAttack())
+            MoveToTarget(); // including ResetAttackPlan();
+        else
+        {
+            // calc delay to next attack
+            if (curCommand.IsAttack())
+            {
+                int nAttackCycle = GetAttackCycleTime(curCommand.cmd, lpUnit->GetCurrentQWeapon());
+                nCanAttackTime = Max(nCanAttackTime, nCurSegment + nAttackCycle);
+            }
+            if (curCommand.IsCast() && !IsCastPossible(curCommand))
+            {
+                if ((curCommand.nQSpellNum & 0x80000000) == 0)
+                    InformFailure(ACK_HERO_REFUSE_CANT_CAST);
+                else
+                    InformFailure(ACK_HERO_REFUSE_SCIENCE_FAILED);
+                bLcCommandFail = true;
+                LcCancelCommand();
+                return;
+            }
+            // determine if we need to predict target position
+            bool bPredictTarget = true;
+            if (!curCommand.pTarget.IsEmpty() && curCommand.pTarget->WhoAmI() == HPC_UNIT)
+            {
+                CUnit *pTarget = (CUnit *)curCommand.pTarget;
+                CUnitServer *pUS = (CUnitServer *)pTarget->GetUnitSpecific();
+                if (((CUnit *)pUS->curCommand.pTarget) == lpUnit)
+                    bPredictTarget = false;
+            }
+            // start attack itself
+            BYTE nSoundSet = 0;
+            if (curCommand.cmd == UC_ATTACK)
+            {
+                CUnit *pTarget = (CUnit *)curCommand.pTarget;
+                if (pTarget->WhoAmI() == HPC_UNIT)
+                {
+                    CUnitServer *pUS = (CUnitServer *)pTarget->GetUnitSpecific();
+                    UseAttackStart(curCommand.pTarget, level1Command.eAttackLocation,
+                                   level1Command.bCalledShot);
+                    if (!pUS->DetermineHit(&level1AP, GetUnit()))
+                        nSoundSet = 1;
+                }
+            }
+            L1StartAttack(bPredictTarget, nSoundSet);
+        }
+    }
+    else
+    {
+        // атака не удалась - сообщим об этом
+        /*
+        if ( curCommand.cmd == UC_CASTUNIT && lpUnit->GetOwner() )
+        {
+                InformFailure( UAF_CANT_CAST );
+                bLcCommandFail = true;
+                LcCancelCommand();
+                return;
+        }*/
+        MoveToTarget();
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// выполнить атаку, включая подход на расстояние атаки
+void CUnitServer::ExecAttack()
+{
+    CPlayer *pPlayer;
+    bool bTargetVisible = true;
+    pPlayer = lpUnit->GetOwner();
+    // check if command is canceled due to out of sight
+    CUnit *pTarget = (CUnit *)curCommand.pTarget;
+    if (pPlayer && pTarget && pTarget->WhoAmI() == HPC_UNIT)
+    {
+        if (!logic.environment.IsUnitVisible(lpUnit, pTarget))
+            bTargetVisible = ((CPlayerServer *)pPlayer->GetPlayerSpecific())
+                                 ->IsUnitVisibleToParty(pTarget);
+    }
+    // не пора ли прекратить выполнение команды по тем или иным причинам
+    if (!LcTargetIsValid(curCommand) || L1IsMoveFailed() || !bTargetVisible)
+    {
+        if (L1IsMoveFailed())
+        {
+            bLcCommandFail = true;
+            InformAttackPathNotFound(curCommand);
+        }
+        if (!bTargetVisible)
+        {
+            bLcCommandFail = true;
+            InformFailure(ACK_HERO_REFUSE_CANT_SEE_TARGET);
+        }
+        LcCancelCommand();
+        L1CancelAttack();
+        return;
+    }
+    StartAttack();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::CalcAttackDest(SUnitCommand &cmd, CAIFullRoute *pRes)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorldBase();
+    CMapObject *pTarget = cmd.pTarget;
+
+    cmd.ptTarget.z = -1;
+    if (cmd.cmd == UC_SKILL && !cmd.pTarget.IsEmpty())
+    {
+        switch (cmd.nQSpellNum)
+        {
+        case RPGMSKL_SCIENCE: {
+            const bool fallback=ModRuntime::Current() && pTarget->WhoAmI()==HPC_LEVER && !static_cast<CLeverObject*>(pTarget)->UsesAuthoredInteraction();
+            if(fallback)cmd.bUsePoint=false;
+            CArray<CPlot3D, CPlot3D &> points;
+            cmd.pTarget->GetUsePoints(points, lpUnit->GetAttackDistance());
+            if(fallback && points.GetSize()==0)return false;
+            if (points.GetSize() > 0)
+            {
+                SAIPath pathFake;
+                int nBestCost = 0x7fffffff;
+                // choose closest use point
+                CPlot3D ptBestPoint;
+                for (int i = 0; i < points.GetSize(); i++)
+                {
+                    bool bFound;
+                    CPlot3D ptDest = points[i];
+                    pathFake.Clear();
+                    bFound = pWS->aiMap.NewPath(lpUnit, ptDest, pathFake);
+                    //
+                    if (bFound)
+                        bFound = distanceXY2(pathFake.GetFinalPoint(), ptDest) <
+                                 sqr(FP_MINIMAL_DISTANCE_TO_POU);
+                    if (bFound)
+                    {
+                        if (pathFake.nPathCost < nBestCost)
+                        {
+                            nBestCost = pathFake.nPathCost;
+                            ptBestPoint = ptDest;
+                            if (pRes)
+                                pathFake.GetWholeRoute(*pRes);
+                        }
+                    }
+                }
+                //
+                if (nBestCost == 0x7fffffff)
+                    return false;
+                cmd.ptTarget = ptBestPoint;
+                cmd.bUsePoint = true;
+            }
+        }
+        break;
+        }
+    }
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+float CUnitServer::CalcAttackPathLeng(const SUnitCommand &cmd, CAIFullRoute &move)
+{
+    if (!move.IsMoving())
+        return 0;
+    //
+    CWorldServer *pWS = (CWorldServer *)GetWorldBase();
+    bool bNeedTrace;
+    CPlot3D ptTraceSrc, ptPrevPos, ptTarget, ptFrom;
+    SUCTraceInfo trace;
+    CRouteWalker walk;
+    float fpTime, fpDist2;
+    //
+    walk.SetSpeeds(FP_SHOW_PATH_SPEED, 1e10f);
+    walk.CreateWalkerRoute(move);
+    bNeedTrace = NeedReliefTrace(cmd, trace);
+    ptPrevPos = CPlot3D(0, 0, -1000);
+    fpDist2 = sqr(GetHitDist(cmd));
+    ptTarget = cmd.GetTargetCP();
+    //
+    for (fpTime = 0;; fpTime += 5)
+    {
+        CPlot3D vec;
+        float fpSpeed;
+        bool bRotate;
+        int nTileX, nTileY;
+
+        walk.GetPosition(0, move, fpTime + move.GetStartSegment(), bRotate, ptTraceSrc, vec,
+                         fpSpeed, nTileX, nTileY);
+        if (ptTraceSrc == ptPrevPos)
+            break;
+        ptPrevPos = ptTraceSrc;
+        ptTraceSrc.x = AITile2Meter(ptTraceSrc.x);
+        ptTraceSrc.y = AITile2Meter(ptTraceSrc.y);
+        // расстояние
+        if (distanceXY2(ptTraceSrc, ptTarget) > fpDist2)
+            continue;
+        if (!bNeedTrace)
+            break;
+        // террейн
+        if (CheckRelief(trace, ptTraceSrc))
+            break;
+    }
+    return fpTime;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// найти точку использования, если нужно. Для юнитов игрока найти путь использования и
+// показать его
+bool CUnitServer::FindAttackPath(SUnitCommand &cmd, DWORD dwPositiveAck)
+{
+    bool bRv = true;
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    if (cmd.cmd != UC_SKILL && !pPlayer)
+        return true;
+    float fpPathLeng = 1e6f;
+    CAIFullRoute showPath;
+    CPlayerServer *pPS = (CPlayerServer *)(lpUnit->GetOwner()->GetPlayerSpecific());
+    CPlot3D ptTargetCP = cmd.GetTargetCP();
+
+    if (CalcAttackDest(cmd, &showPath))
+    {
+        if (!pPlayer)
+            return true;
+        if (CanAttack(cmd))
+        {
+            ShowFoundPath(showPath, ptTargetCP, CPlayer::PPT_NOPATH, CPlayer::PPR_OK);
+            InformFailure(dwPositiveAck);
+            return true;
+        }
+        // определим тип атаки
+        CPlayer::EPathType type = CPlayer::PPT_USE;
+        if (cmd.cmd == UC_ATTACK)
+            type = CPlayer::PPT_ATTACK;
+        if (cmd.IsCast())
+        {
+            CSpell *pSpell = GetSpell(curCommand.nQSpellNum);
+            if (pSpell && pSpell->GetMagicSchool() == RPGMS_ELEMENTAL)
+                type = CPlayer::PPT_ATTACK;
+        }
+        bool bCanAttack = false;
+        // если это обычная атака движущегося юнита нарисум просто путь до юнита
+        if (!cmd.HasPointOfUse())
+        {
+            SAIPath pathFake;
+            bool bGraphRebuild;
+            CMapObject *pTarget = cmd.pTarget;
+            // если путь найти не удалось, то все равно надо показать, что все Ok
+            // потому что может быть можно атаковать с текущей позиции
+            if (pTarget)
+            {
+                bGraphRebuild = theWorldServer.aiMap.SetGraphRebuild(false);
+                theWorldServer.aiMap.RemoveObject(pTarget);
+            }
+            if (!LowFindPath(ptTargetCP, pathFake, TRUE))
+                pathFake.CreateStand(lpUnit);
+            //
+            if (pTarget)
+            {
+                theWorldServer.aiMap.AddObject(pTarget);
+                theWorldServer.aiMap.SetGraphRebuild(bGraphRebuild);
+            }
+            //
+            pathFake.GetWholeRoute(showPath);
+            bCanAttack = CanAttackFrom(cmd, showPath.GetFinalPoint());
+            if (bCanAttack)
+                fpPathLeng = CalcAttackPathLeng(cmd, showPath);
+        }
+        else
+            bCanAttack = CanAttackFrom(cmd, showPath.GetFinalPoint());
+        // visualize found info
+        CPlayer::EPathResult res = bCanAttack ? CPlayer::PPR_OK : CPlayer::PPR_FAILED;
+        ShowFoundPath(showPath, ptTargetCP, type, res, fpPathLeng);
+        bRv = bCanAttack;
+    }
+    else
+    {
+        ShowFoundPath(showPath, ptTargetCP, CPlayer::PPT_NOPATH, CPlayer::PPR_FAILED);
+        bRv = false;
+    }
+    if (bRv)
+        InformFailure(dwPositiveAck);
+    else
+        InformAttackPathNotFound(cmd);
+    return bRv;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::ShowFoundPath(CAIFullRoute &move, const CPlot3D &ptDest, int pathType,
+                                int pathResult, float fpShowLeng)
+{
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    if (!pPlayer)
+        return;
+    CPlayer::EPathType type = (CPlayer::EPathType)pathType;
+    CPlayer::EPathResult res = (CPlayer::EPathResult)pathResult;
+    CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
+    // show found path
+    pPS->SendShowPath(lpUnit, move, ptDest, type, res, fpShowLeng);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::ShowFoundMovePath(SAIPath &move, bool bFound)
+{
+    if (logic.IsFollowing())
+        return;
+    CAIFullRoute full;
+    if (!bFound)
+    {
+        ShowFoundPath(full, move.ptDestination, CPlayer::PPT_NOPATH, CPlayer::PPR_FAILED);
+        if (!logic.GetPlayerLeader())
+            InformFailure(ACK_HERO_REFUSE_PATH_NOT_FOUND);
+    }
+    else
+    {
+        move.GetWholeRoute(full);
+        float fpLength = distanceXY2(lpUnit->GetCP(), move.ptDestination);
+        if (distanceXY2(move.GetFinalPoint(), move.ptDestination) < sqr(0.1f) * fpLength)
+        {
+            ShowFoundPath(full, move.ptDestination, CPlayer::PPT_MOVE, CPlayer::PPR_OK);
+            if (!logic.GetPlayerLeader())
+                InformFailure(ACK_HERO_ACK_MOVE);
+        }
+        else
+        {
+            ShowFoundPath(full, move.ptDestination, CPlayer::PPT_MOVE, CPlayer::PPR_FAILED);
+            if (!logic.GetPlayerLeader())
+                InformFailure(ACK_HERO_REFUSE_PATH_NOT_FOUND);
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Attack execution code
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseTrap()
+{
+    int nQItemIdx = curCommand.nQSpellNum;
+    CItemQuick *pTrap = lpUnit->GetQItem(nQItemIdx);
+    if (!pTrap || pTrap->GetQuickItemType() != IDB_TRAP)
+    {
+        ASSERT(0);
+        return;
+    }
+    pTrap->AddRef();
+    lpUnit->RemoveQItem(nQItemIdx);
+    theWorldServer.SetupTrap(pTrap, lpUnit);
+    pTrap->Release();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UsePotion(int nQSpellNum, CMapObject *pTarget, const CPlot3D &ptCastTo)
+{
+    CSpell *pSpell;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CItemQuick *pItem = lpUnit->GetQItem(nQSpellNum & 0x7fffffff);
+    ASSERT(pItem && pItem->GetCount() > 0);
+    if (!pItem || pItem->GetCount() == 0)
+        return;
+    pSpell = GetSpell(nQSpellNum);
+    ASSERT(pSpell);
+    if (!pSpell)
+        return;
+    pWS->CastSpell(pSpell, lpUnit, lpUnit->GetCP(), pTarget, ptCastTo);
+    // reduce items count and remove if everything is spent
+    pWS->ReduceQItemCount(lpUnit, pItem);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseSpell()
+{
+    CPlot3D ptCastTo;
+    SUnitCommand &cmd = curCommand;
+    CMapObjectServer *pMOS = GetMapObjectServer();
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CSpell *pSpell;
+    CItem *pItem = 0;
+    int nQSpellNum = cmd.nQSpellNum;
+
+    // take spell either from wand or from spell
+    if (nQSpellNum & 0x80000000)
+    {
+        pItem = GetSpellQuickItem(nQSpellNum);
+        if (!pItem)
+            return;
+        pSpell = pItem->GetSpell(0);
+    }
+    else
+        pSpell = lpUnit->GetQSpell(nQSpellNum);
+    if (!pSpell)
+        return;
+    // determine cast target
+    if (cmd.pTarget.IsEmpty()) // cmd == UC_CASTPOINT )
+        ptCastTo = cmd.ptTarget;
+    else
+        ptCastTo = cmd.pTarget->GetTargetCP();
+    // perform cast
+    ASSERT(IsCastPossible(cmd)); // nQSpellNum, ptCastTo, cmd.cmd == UC_CASTPOINT ) )
+    bool bDoCast = true;
+    if (pItem)
+    {
+        if (pItem->GetMP() < pSpell->GetManaCost())
+            bDoCast = false;
+        else
+            SpendItemMana(pItem, pSpell->GetManaCost());
+    }
+    else
+    {
+        if (lpUnit->IsHero())
+        {
+            GetMapObjectServer()->ChangeCurrentMP(-pSpell->GetManaCost() *
+                                                  rpgUnitStats.GetManaBonusMultiplier());
+            AddUpdateMask(CMapObject::VLD_MASK_STATS);
+        }
+    }
+    if (bDoCast)
+    {
+        pWS->CastSpell(pSpell, lpUnit, lpUnit->GetCP(), cmd.pTarget, ptCastTo);
+        // produce some sound so enemies should know that you are doing something
+        if (pSpell->GetMagicSchool() != RPGMS_SENSES)
+            pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_ATTACK_SOUND);
+    }
+    // mark spell as casted
+    cmd.nQSpellNum = -1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseSkill(CMapObject *pTarget)
+{
+    SUnitCommand &cmd = curCommand;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    if (cmd.IsLoot())
+    {
+        ASSERT(pTarget->WhoAmI() == HPC_UNIT);
+        if (!pTarget || pTarget->WhoAmI() != HPC_UNIT)
+            return;
+        if (lpUnit->GetOwner())
+            theWorldServer.HooverUnit((CUnit *)pTarget, lpUnit->GetOwner());
+        theWorldServer.RemoveMapObject(pTarget->GetID());
+        // note, here pTarget does not exist anymore
+        pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_LOOT_SOUND);
+        return;
+    }
+    // check chances to steal something
+    float fpOurSkill, fpTargetSkill;
+    ERPGManualSkills eSkill;
+    if (cmd.nQSpellNum == RPGMSKL_STEALING)
+        eSkill = RPGMSKL_SCIENCE; // RPGMSKL_STEALING;
+    else if (cmd.nQSpellNum == RPGMSKL_SCIENCE)
+        eSkill = RPGMSKL_SCIENCE;
+    else if (cmd.nQSpellNum == RPGMSKL_TAME)
+        return; // eSkill = RPGMSKL_TAME;
+    else
+    {
+        ASSERT(0);
+        return;
+    }
+    CUnit *pTargetUnit = 0;
+    if (pTarget->WhoAmI() == HPC_UNIT)
+        pTargetUnit = (CUnit *)pTarget;
+    fpOurSkill = rpgUnitStats.GetManualSkillLevel(eSkill, GetUnit());
+    fpTargetSkill = 0;
+    if (pTargetUnit)
+        fpTargetSkill = ((CUnitServer *)pTargetUnit->GetUnitSpecific())
+                            ->rpgUnitStats.GetManualSkillLevel(eSkill, pTargetUnit);
+    aiLog << "Unit" << lpUnit->GetID() << " is using skill ";
+    switch (cmd.nQSpellNum) // use this var instead of eSkill due to stealing=>science redefinition
+    {
+    case RPGMSKL_STEALING:
+        aiLog << "stealing";
+        break;
+    case RPGMSKL_SCIENCE:
+        aiLog << "science";
+        break;
+    case RPGMSKL_TAME:
+        aiLog << "tame";
+        break;
+    default:
+        aiLog << "unknown";
+        break;
+    }
+    aiLog << " his_skill = " << fpOurSkill << " target_skill = " << fpTargetSkill << endl;
+
+    if (cmd.nQSpellNum != RPGMSKL_SCIENCE && fpTargetSkill >= fpOurSkill)
+    {
+        // skill failed - not a fact in case
+        pWS->fof.MakeDamage(GetUnit(), pTargetUnit, 10);
+    }
+    else
+    {
+        // skill succeded
+        switch (
+            cmd.nQSpellNum) // use this var instead of eSkill due to stealing=>science redefinition
+        {
+        case RPGMSKL_STEALING:
+            if (pTargetUnit && pTargetUnit->GetOwner() == 0)
+            {
+                // stealing success - some item transmission
+                if (CItem *pSubj = pTargetUnit->RemoveRandomItem())
+                {
+                    aiLog << "Item has been stolen from" << endl;
+                    if (CPlayer *pPlayer = GetUnit()->GetOwner())
+                    {
+                        CList<CItem *, CItem *> items;
+                        items.AddHead(pSubj);
+                        pPlayer->AddItemsToHoover(items);
+                    }
+                    pSubj->Release();
+                }
+                else
+                {
+                    bool bSuccess = false;
+                    if (GetUnit()->GetOwner())
+                        bSuccess = pWS->HooverUnit(pTargetUnit, GetUnit()->GetOwner());
+                    if (!bSuccess && GetUnit()->GetOwner())
+                        InformFailure(ACK_HERO_NOTIFY_STEAL_EMPTY);
+                }
+            }
+            else
+                ASSERT(0);
+            break;
+        case RPGMSKL_SCIENCE: {
+            SRPGScienceStats tool;
+            // item ID of tool is stored at nQSpellNum
+            CItem *pTool = (CItem *)pWS->GetItemManager()->Find(cmd.dwParam);
+            tool.dwKeyNumber = 0;
+            tool.dwTools = RPGTOOL_HAND;
+            tool.dwSkill = 0;
+            if (pTool && pTool->IsTool())
+                tool = pTool->GetTool();
+            tool.dwSkill += Float2Int(fpOurSkill);
+            if (!pTarget->ApplyScience(tool, GetUnit()))
+                InformFailure(ACK_HERO_REFUSE_SCIENCE_FAILED);
+        }
+        break;
+        case RPGMSKL_TAME:
+            if (pTargetUnit)
+            {
+                CUnitServer *pTargetServer = (CUnitServer *)pTargetUnit->GetUnitSpecific();
+                if (!pTargetServer->Tame(lpUnit, fpOurSkill))
+                    InformFailure(ACK_HERO_REFUSE_TAME);
+            }
+            else
+                ASSERT(0);
+            break;
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// create damage directly or create an arrow
+void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    // check if we are using a bow then create arrow else process damage directly
+    if (IsCurrentWeaponABow())
+    {
+        CEffectArrowFigure *pArrow;
+        pArrow = (CEffectArrowFigure *)(pWS->GetEffectManager())
+                     ->CreateData(ETypeIDs(HPC_EFFECTARROWFIGURE));
+        if (!pArrow)
+            return;
+        pArrow->SetCP(GetUnit()->GetUnitHeadPosition());
+        pArrow->SetTarget(pTarget->GetID());
+        pArrow->nAttackerID = GetUnit()->GetID();
+        pArrow->bNewArrow = true;
+        pArrow->attackPortion = attackPortion;
+        pWS->AddEffect(pArrow);
+    }
+    else
+        pTarget->ProcessAttackPortion(&attackPortion, GetUnit(), GetUnit());
+    UseCurrentWeaponSpell(pTarget);
+    // produce some sound so enemies should know that you are doing something
+    if (attackPortion.fBackStabMultiplier == 1) // not a backstab
+        pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_ATTACK_SOUND);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseAttackStart(CMapObject *pTarget, ERPGHitLocations eAttackLocation,
+                                 bool bCalledShot)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    BOOL bBackstab = FALSE;
+    //
+    ASSERT(eAttackLocation < RPGHL_UNKNOWN);
+    bBackstab = GetUnit()->IsBackstab(pTarget);
+    // backstab по агрессивным не проходит
+    if (pTarget->WhoAmI() == HPC_UNIT &&
+        ((CUnitServer *)((CUnit *)pTarget)->GetUnitSpecific())->IsAggressive())
+        bBackstab = FALSE;
+    // check if we are using a bow then create arrow else process damage directly
+    if (IsCurrentWeaponABow())
+        CreateCurrentWeaponAttackPortion(level1AP, FALSE, eAttackLocation, bCalledShot);
+    else
+        CreateCurrentWeaponAttackPortion(level1AP, bBackstab, eAttackLocation, bCalledShot);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// create attack portion with current weapon.
+// take in account skills in weapon proficiency class
+BOOL CUnitServer::CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL bBackstab,
+                                                   ERPGHitLocations eAttackLocation,
+                                                   bool bCalledShot)
+{
+    bool bHero = IsIDofPersonage(lpUnit->GetID());
+    float fpDamageRandom = 0;
+
+    ap.Clear();
+
+    if (!bHero || (lpUnit->dwCurrentWeapon >= QI_MAX_WEAPONS) ||
+        (lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon] == NULL))
+    {
+        // create attack portion with native weapon
+        memcpy(ap.fpAttacks, rpgUnitStats.fpNAWAttacks, sizeof(float) * RPG_NUM_ATTACK_TYPES);
+        ap.nSkill = 0;
+        ap.fpToHit = rpgUnitStats.fpNAWToHit *
+                     (bHero ? 1.0f
+                            : theAIGeneralSettings.fAttackLevels[theSettings.nDifficultyLevel]);
+        if (rpgUnitStats.fpNAWDamageRnd)
+            fpDamageRandom = float(random.Get(MINT(rpgUnitStats.fpNAWDamageRnd * 100.0f))) * 0.01f;
+        ap.fpDamage = rpgUnitStats.fpNAWDamageMin + fpDamageRandom;
+        // ap.hl = ERPGHitLocations( Random(RPG_NUM_HIT_LOCATIONS) );
+    }
+    else
+    {
+        CItemWeapon *lpWeapon = lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon];
+
+        lpWeapon->GetDamageDistribution(ap.fpAttacks);
+        ap.nSkill = lpWeapon->GetProficiencyClass();
+        ap.fpToHit = 2 * Dice(RPG_CONST_X) - (RPG_CONST_X + 1);
+        ap.fpDamage = lpWeapon->GetRandomDamage();
+        // ap.hl = ERPGHitLocations( Random(RPG_NUM_HIT_LOCATIONS) );
+    }
+    //
+    ap.fpDamage = rpgUnitStats.GetModifiedDamage(lpUnit, ap.fpDamage);
+    //
+    ap.hl = eAttackLocation;
+    ap.bAreaEffect = FALSE;
+    if (bBackstab)
+        ap.fBackStabMultiplier = rpgUnitStats.GetBackstabDamageMultiplier(GetUnit());
+    else
+        ap.fBackStabMultiplier = 1.0f;
+
+    if (lpUnit->GetOwner() && lpUnit->GetOwner()->bGod >= 2)
+        ap.MakeDeadlyAttack();
+    ap.bCalledShot = bCalledShot;
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseCurrentWeaponSpell(CMapObject *pTarget)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CItemWeapon *pWeapon;
+    CSpell *pSpell;
+    pWeapon = lpUnit->GetCurrentQWeapon();
+    if (!pWeapon)
+        return;
+    pSpell = pWeapon->GetSpell(0);
+    if (pSpell && pSpell->IsItemTrigger() && pWeapon->GetMP() >= pSpell->GetManaCost())
+    {
+        SpendItemMana(pWeapon, pSpell->GetManaCost());
+        theWorldServer.CastSpell(pSpell, GetUnit(), GetUnit()->GetCP(), pTarget,
+                                 pTarget->GetTargetCP());
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseArmorSpells(bool bBeforeAttack)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CItemArmor *GetQArmor(DWORD dwSlotIndex);
+    for (int i = 0; i < RPG_NUM_ARMOR_TYPES; i++)
+    {
+        CItemArmor *pArmor = lpUnit->GetQArmor(i);
+        if (!pArmor)
+            continue;
+        CSpell *pSpell = pArmor->GetSpell(0);
+        if (pSpell && pSpell->IsItemTrigger() && pArmor->GetMP() >= pSpell->GetManaCost())
+        {
+            bool bCast = false;
+            switch (pSpell->GetSubtypeID() >> 16)
+            {
+            case SPELL_ID_HEALING:
+                bCast = !bBeforeAttack;
+                break;
+            default:
+                bCast = bBeforeAttack;
+                break;
+            }
+            if (bCast)
+            {
+                SpendItemMana(pArmor, pSpell->GetManaCost());
+                theWorldServer.CastSpell(pSpell, GetUnit(), GetUnit()->GetCP(), GetUnit(),
+                                         GetUnit()->GetCP());
+            }
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Different animations handling code
+/////////////////////////////////////////////////////////////////////////////////////
+// works for UC_ATTACK only
+bool CUnitServer::CalcAttackDirection(SL1Command &cmd, SL0AnimationSeq &res, int &nHit,
+                                      CMapObject *pMO)
+{
+    DWORD dwAttackFlags;
+    if (pMO->WhoAmI() != HPC_UNIT) // this is non-unit map object
+    {
+        cmd.eAttackLocation = RPGHL_BODY;
+        dwAttackFlags = ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
+    }
+    else // unit
+    {
+        SUnitBasicCmd atkCmd;
+        atkCmd.MakeAttack(pMO);
+        CUnit *pVictim = static_cast<CUnit *>(pMO);
+        CPlot3D ptWe = lpUnit->GetCP();
+        CPlot3D ptVictim = pVictim->GetTargetCP();
+        float fVictimDistance = fabs(ptWe - ptVictim);
+        float fAttackDistance = Min(GetHitDist(atkCmd), fVictimDistance);
+
+        const SRPGUnitStats &rpgVictimUnitStats =
+            static_cast<CUnitServer *>(pVictim->GetUnitSpecific())->rpgUnitStats;
+        float fAttackerZ = ptWe.z + lpUnit->CalcZ(ptWe.x, ptWe.y);
+        float fAttackerHeight = lpUnit->GetUnitHeight();
+        float fVictimZ = ptVictim.z + pVictim->CalcZ(ptVictim.x, ptVictim.y);
+        float fVictimHeight = pVictim->GetUnitHeight();
+        ERPGHitLocations hl;
+        ERPGHitLocations targetHL = (ERPGHitLocations)curCommand.nQSpellNum;
+        DWORD dir = ADB_MODIFIER_VDIRECTION1_MIDDLE;
+        // выбираем HitLocation, куда будет нанесён удар
+        // по новым веяниям (24.05.2000) он (HL) не должен зависеть от взаимного расположения юнитов
+        if (targetHL == RPGHL_ALL) // если targetHL не определён, то выбираем рандомно
+        {
+            ERPGHitLocations hls[20] = { RPGHL_HEAD,  RPGHL_HEAD,  RPGHL_BODY,  RPGHL_BODY,
+                                         RPGHL_BODY,  RPGHL_BODY,  RPGHL_BODY,  RPGHL_BODY,
+                                         RPGHL_LHAND, RPGHL_LHAND, RPGHL_LHAND, RPGHL_RHAND,
+                                         RPGHL_RHAND, RPGHL_RHAND, RPGHL_LLEG,  RPGHL_LLEG,
+                                         RPGHL_LLEG,  RPGHL_RLEG,  RPGHL_RLEG,  RPGHL_RLEG };
+            DWORD dwProbability = random.Get(0, 19);
+            hl = rpgVictimUnitStats.GetNearestHitLocation(hls[dwProbability]);
+        }
+        else if ((targetHL >= 0) &&
+                 (targetHL <
+                  RPGHL_ALL)) // если targetHL определён, то берём его (с validation check)
+            hl = targetHL;
+        else // в случае непоняток бьём в тело
+            hl = rpgVictimUnitStats.GetNearestHitLocation(RPGHL_BODY);
+        // после того, как мы выбрали HL, выбираем направление анимации удара, исходя из hl
+        float fTgValue = 0;
+        if (fAttackerZ + fAttackerHeight < fVictimZ)
+        {
+            dir = ADB_MODIFIER_VDIRECTION1_UP;
+            // tangent value to correct attack direction
+            fTgValue = (fVictimZ - (fAttackerZ + fAttackerHeight)) / fAttackDistance;
+        }
+        else if (fVictimZ + fVictimHeight < fAttackerZ)
+        {
+            dir = ADB_MODIFIER_VDIRECTION1_DOWN;
+            // tangent value to correct attack direction
+            fTgValue = (fAttackerZ - (fVictimZ + fVictimHeight)) / fAttackDistance;
+        }
+        else
+        {
+            // выбираем высоту удара, исходя из пересечения отрезков
+            float fMax = Min(fAttackerZ + fAttackerHeight, fVictimZ + fVictimHeight);
+            float fMin = Max(fAttackerZ, fVictimZ);
+            float fValue = fMin;
+            float fMin2, fMax2;
+            switch (hl)
+            {
+            case RPGHL_LLEG:
+            case RPGHL_RLEG:
+                fMin2 = Max(fMin, fVictimZ);
+                fMax2 = Min(fMax, fVictimZ + fVictimHeight * 0.4f);
+                break;
+            case RPGHL_LHAND:
+            case RPGHL_RHAND:
+            case RPGHL_BODY:
+                fMin2 = Max(fMin, fVictimZ + fVictimHeight * 0.4f);
+                fMax2 = Min(fMax, fVictimZ + fVictimHeight * 0.8f);
+                break;
+            case RPGHL_HEAD:
+                fMin2 = Max(fMin, fVictimZ + fVictimHeight * 0.8f);
+                fMax2 = Min(fMax, fVictimZ + fVictimHeight);
+                break;
+            default:
+                ASSERT(0); // этого не должно случаться
+            }
+            if (MINT((fMax2 - fMin2) * 100.0f) > 0)
+                fValue = fMin2 + random.Get(MINT((fMax2 - fMin2) * 100.0f) - 1) * 0.01f;
+            else if (MINT((fMax - fMin) * 100.0f) > 0)
+                fValue = fMin + random.Get(MINT((fMax - fMin) * 100.0f) - 1) * 0.01f;
+            // attacker range (vertical attack direction modifier)
+            if (IsValInRange<bool>(fValue, fAttackerZ,
+                                   fAttackerZ + fAttackerHeight * 0.4f)) // range 0 - 0.4
+                dir = ADB_MODIFIER_VDIRECTION1_DOWN;
+            else if (IsValInRange<bool>(fValue, fAttackerZ + fAttackerHeight * 0.4f,
+                                        fAttackerZ + fAttackerHeight * 0.8f)) // range 0.4 - 0.8
+                dir = ADB_MODIFIER_VDIRECTION1_MIDDLE;
+            else if (IsValInRange<bool>(fValue, fAttackerZ + fAttackerHeight * 0.8f,
+                                        fAttackerZ + fAttackerHeight)) // range 0.8 - 1
+                dir = ADB_MODIFIER_VDIRECTION1_UP;
+            // tangent value to correct attack direction
+            fTgValue = fabs(fValue - fAttackerZ + fAttackerHeight * 0.7f) / fAttackDistance;
+        }
+        // angle correction for ranged attack (attack distance > 5)
+        if (fAttackDistance > 5)
+        {
+            if (fTgValue > 1.73205f)
+                dir = ADB_MODIFIER_VDIRECTION1_UP;
+            else if (fTgValue < -1.73205f)
+                dir = ADB_MODIFIER_VDIRECTION1_DOWN;
+            else
+                dir = ADB_MODIFIER_VDIRECTION1_MIDDLE;
+        }
+        // выбираем горизонтальное направление удара
+        dir |= ADB_MODIFIER_HDIRECTION1_MIDDLE;
+        // 'long' and 'short' attacks for non-humans
+        if (lpUnit->GetTypeID() != MOTID_HUMAN)
+        {
+            float fCheckHitDistance = GetCloseAttackDist(atkCmd);
+            if (fVictimDistance < fCheckHitDistance - 0.15f)
+                dir = ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_DOWN;
+            else
+                dir = ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
+        }
+
+        cmd.eAttackLocation = hl;
+        dwAttackFlags = dir;
+    }
+    // assert for correct Hit Location
+    ASSERT(cmd.eAttackLocation < RPGHL_UNKNOWN);
+    //
+    GetAttackAnimation(res, nHit, UC_ATTACK, dwAttackFlags);
+    /*
+    if ( IsCurrentWeaponABow() && !res.IsEmpty() )
+    {
+            int nCycle = GetAttackCycleTime( UC_ATTACK, lpUnit->GetCurrentQWeapon() );
+            nCycle -= 10;
+            if ( nCycle > res.animations[0].nLength )
+            {
+                    SL0Animation anim = res.animations[0];
+                    res.Clear();
+                    // make animation with freezing at the middle
+                    int nPause = nCycle - anim.nLength;
+                    nHit = Max( 2, nHit );
+                    res.AddSimple( anim.bStart, nHit - 2 );
+                    res.AddSimple( 0xff, nPause );
+                    res.AddSimple( 0xff, anim.nLength - nHit + 2 );
+                    res.SetSpeed( UAS_NORMAL_ );
+                    res.animations[1].animationSpeed = UAS_FROZEN;
+                    nHit += nPause;
+            }
+    }
+    */
+
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// Animation flags related functions
+DWORD CUnitServer::GetAnimationWeaponMask()
+{
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    if (pWeapon)
+        return (1 << pWeapon->GetWeaponType());
+    else if (rpgUnitStats.rpgNAWWeaponType < RPGWST_UNKNOWN)
+        return (1 << rpgUnitStats.rpgNAWWeaponType);
+
+    return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// only humans have attack/neutral (i.e. aggressive) states
+DWORD CUnitServer::GetPoseAnimationMask(const SL1Pose &pose)
+{
+    switch (pose.pose)
+    {
+    case UP_LAY:
+        return ADB_STATE_LIE;
+    case UP_CRAWL:
+        return ADB_STATE_WARRY;
+    case UP_STAND:
+        if (pose.bAggressive || (lpUnit->GetTypeID() != MOTID_HUMAN))
+            return ADB_STATE_ATTACK;
+        else
+            return ADB_STATE_NEUTRAL;
+    case UP_REST:
+        return ADB_STATE_REST;
+    }
+    ASSERT(0);
+    return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// uc_attack/uc_skill
+void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand cmd,
+                                     DWORD dwAttackFlags)
+{
+    bool bAddPoseChange = false;
+    EUnitPose actionPose = UP_CRAWL;
+    const SADEntry *pEntry;
+    DWORD dwAnimationFlags, dwWeaponFlags = 0;
+    res.Clear();
+    if (cmd == UC_SKILL)
+    {
+        switch (dwAttackFlags)
+        {
+        case RPGMSKL_TAME:
+            dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 19;
+            bAddPoseChange = currentPose.pose != UP_CRAWL;
+            break;
+        case RPGMSKL_STEALING:
+            dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 20;
+            bAddPoseChange = currentPose.pose != UP_CRAWL;
+            break;
+        case RPGMSKL_SCIENCE:
+            dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 21;
+            bAddPoseChange = currentPose.pose != UP_CRAWL;
+            break;
+        case RPGMSKL_LOOT:
+            if (currentPose.pose == UP_STAND)
+            {
+                if (IsCurrentWeaponABow())
+                    dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 52;
+                else
+                    dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 48;
+                bAddPoseChange = false;
+            }
+            else
+            {
+                if (IsCurrentWeaponABow())
+                    dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 22;
+                else
+                    dwAnimationFlags = ADB_MODIFIER_SPECIAL_1 * 53;
+                bAddPoseChange = currentPose.pose != UP_CRAWL;
+            }
+            if (GetAnimationWeaponMask() == 0)
+                dwAnimationFlags |= ADB_WEAPON_BOW;
+            else
+                dwAnimationFlags |= GetAnimationWeaponMask();
+            break;
+        }
+        dwAnimationFlags |= ADB_ACTION_SPECIAL | ADB_STAGE_UNIQUE | ADB_STATE_NEUTRAL;
+    }
+    else
+    {
+        dwWeaponFlags = GetAnimationWeaponMask();
+        dwAnimationFlags = dwAttackFlags | dwWeaponFlags | ADB_ACTION_ATTACK | ADB_STAGE_UNIQUE |
+                           ADB_STATE_ATTACK;
+    }
+    /*
+    if ( (dwAnimationFlags & ADB_ACTIONS) != ADB_ACTION_SPECIAL )
+            dwAnimationFlags |= ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
+    */
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false);
+    if ((pEntry == 0 || (pEntry->dwFlags & dwWeaponFlags) != dwWeaponFlags) && cmd == UC_ATTACK)
+    {
+        // OutputDebugString( "no attack animation found, using mm\n" );
+        dwAttackFlags = ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
+        dwAnimationFlags = dwAttackFlags | dwWeaponFlags | ADB_ACTION_ATTACK | ADB_STAGE_UNIQUE |
+                           ADB_STATE_ATTACK;
+        pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+        if (pEntry == 0)
+        {
+            OutputDebugString(
+                "Fucking ShITTT!!! ArtIsTs MuSt diE!!! CaN'T FiNd pRoPER ANiMatioN!!!\n");
+            //			dwAttackFlags = 0;
+            //			dwAnimationFlags = GetAnimationWeaponMask() | ADB_ACTION_ATTACK |
+            // ADB_STAGE_CYCLE | ADB_STATE_ATTACK;
+            pEntry = lpUnit->GetAnimationByIndex(0); // GetAnimation( dwAnimationFlags );
+        }
+    }
+    ASSERT(pEntry);
+    nHit = 0;
+    if (pEntry)
+    {
+        if (bAddPoseChange)
+        {
+            SL0AnimationSeq t;
+            SL1Pose srcPose, dstPose;
+            dstPose.Convert(actionPose);
+            srcPose = currentPose;
+            if (GetTransAnimation(t, srcPose, dstPose))
+            {
+                res.animations.Add(t.animations[0]);
+                nHit += t.animations[0].nLength;
+            }
+        }
+        res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
+        nHit += GetAnimationHit(pEntry->dwEntryIndex);
+        if (bAddPoseChange)
+        {
+            SL0AnimationSeq t;
+            SL1Pose srcPose, dstPose;
+            srcPose.Convert(actionPose);
+            dstPose = currentPose;
+            if (GetTransAnimation(t, srcPose, dstPose))
+                res.animations.Add(t.animations[0]);
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// uc_castpoint, uc_castunit, length in segments
+void CUnitServer::GetCastAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand cmd, int nLength)
+{
+    const SADEntry *pEntry;
+    DWORD dwAnimationFlags;
+    res.Clear();
+    if (lpUnit->GetTypeID() == MOTID_HUMAN)
+    {
+        dwAnimationFlags = GetAnimationWeaponMask() | ADB_ACTION_CAST | ADB_STAGE_UNIQUE;
+        if (currentPose.pose == UP_CRAWL)
+            dwAnimationFlags |= ADB_STATE_WARRY | ADB_MODIFIER_HDIRECTION1_MIDDLE |
+                                ADB_MODIFIER_VDIRECTION1_MIDDLE;
+        else
+        {
+            if (currentPose.bAggressive)
+                dwAnimationFlags |= ADB_STATE_ATTACK;
+            else
+                dwAnimationFlags |= ADB_STATE_NEUTRAL;
+            if (random.Get(0, 1) == 0)
+                dwAnimationFlags |= ADB_MODIFIER_HDIRECTION1_MIDDLE |
+                                    ADB_MODIFIER_VDIRECTION1_MIDDLE;
+            else
+                dwAnimationFlags |= ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_UP;
+        }
+    }
+    else
+    {
+        dwAnimationFlags = ADB_ACTION_ATTACK | ADB_STAGE_UNIQUE | ADB_STATE_ATTACK;
+        dwAnimationFlags |= ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
+    }
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    ASSERT(pEntry);
+    nHit = 0;
+    if (pEntry)
+    {
+        if (nLength > GetAnimationLength(pEntry->dwEntryIndex))
+        {
+            // if this is a levitating unit then it should continue previous animation (rotate)
+            // until its possible to play cast animation
+            if (rpgUnitStats.dwLocomotion == 2)
+            {
+                nHit = GetAnimationHit(pEntry->dwEntryIndex);
+                int nPause = nLength - GetAnimationLength(pEntry->dwEntryIndex);
+                res.AddSimple(0xff, nPause);
+                res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
+                nHit += nPause;
+            }
+            else
+            {
+                // make animation with freezing at the middle
+                nHit = GetAnimationHit(pEntry->dwEntryIndex);
+                int nPause = nLength - GetAnimationLength(pEntry->dwEntryIndex);
+                res.AddSimple(pEntry->dwEntryIndex, nHit);
+                res.AddSimple(0xff, nPause);
+                res.AddSimple(0xff, GetAnimationLength(pEntry->dwEntryIndex) - nHit);
+                res.SetSpeed(UAS_NORMAL_);
+                res.animations[1].animationSpeed = UAS_FROZEN;
+                nHit += nPause;
+            }
+        }
+        else
+        {
+            res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
+            nHit = GetAnimationHit(pEntry->dwEntryIndex);
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// юнит получил по репе или другому месту и должен изобразить что ему хреново
+void CUnitServer::GetSufferAnimation(SL0AnimationSeq &res, int nSufferDirection, bool bDiyng,
+                                     bool bMoving)
+{
+    const SADEntry *pEntry;
+    DWORD dwAnimationFlags;
+
+    res.Clear();
+    dwAnimationFlags = GetAnimationWeaponMask();
+    dwAnimationFlags |= GetPoseAnimationMask(currentPose);
+    if (lpUnit->GetTypeID() == MOTID_HUMAN)
+    {
+        if (bDiyng) // suffer direction are valid only for humans
+        {
+            if (currentPose.pose == UP_REST)
+                dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM;
+            else if ((currentPose.pose == UP_LAY) || (currentPose.pose == UP_CRAWL))
+            {
+                if (currentPose.pose == UP_CRAWL && bMoving)
+                {
+                    dwAnimationFlags &= ~ADB_MODIFIERS;
+                    dwAnimationFlags |= random.Get(0, 1) == 0 ? ADB_MODIFIER_DIRECTION2_FM
+                                                              : ADB_MODIFIER_DIRECTION2_BM;
+                }
+                else
+                    dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM;
+            }
+            else
+            {
+                dwAnimationFlags |= nSufferDirection;
+                // if moving only forward/backward directions
+                if (bMoving)
+                {
+                    // TODO: похоже здесь потерялись скобки, вернул на место
+                    if (((dwAnimationFlags & ADB_MODIFIERS) != ADB_MODIFIER_DIRECTION2_FM) ||
+                        ((dwAnimationFlags & ADB_MODIFIERS) != ADB_MODIFIER_DIRECTION2_BM))
+                    {
+                        dwAnimationFlags &= ~ADB_MODIFIERS;
+                        dwAnimationFlags |= random.Get(0, 1) == 0 ? ADB_MODIFIER_DIRECTION2_FM
+                                                                  : ADB_MODIFIER_DIRECTION2_BM;
+                    }
+                }
+            }
+        }
+        else // suffer
+            dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM;
+        dwAnimationFlags &= ~(ADB_STATE_ATTACK | ADB_STATE_NEUTRAL);
+        if (bMoving && (currentPose.pose != UP_LAY))
+        {
+            if (currentPose.bRun && currentPose.pose == UP_STAND)
+                dwAnimationFlags |= ADB_MODIFIER_ACTION_RUN | ADB_STATE_ATTACK;
+            else
+                dwAnimationFlags |= ADB_MODIFIER_ACTION_WALK | ADB_STATE_NEUTRAL;
+        }
+        else if (currentPose.pose == UP_LAY)
+            dwAnimationFlags |= ADB_MODIFIER_ACTION_STAY | ADB_STATE_LIE;
+        else
+            dwAnimationFlags |= ADB_MODIFIER_ACTION_STAY | ADB_STATE_NEUTRAL;
+    }
+    else
+    {
+        if (bMoving && !bDiyng)
+            return;
+        if ((nSufferDirection == ADB_MODIFIER_DIRECTION2_ML) ||
+            (nSufferDirection == ADB_MODIFIER_DIRECTION2_MR))
+            dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM | ADB_MODIFIER_ACTION_STAY;
+        else
+            dwAnimationFlags |= nSufferDirection | ADB_MODIFIER_ACTION_STAY;
+    }
+
+    if (bDiyng)
+        dwAnimationFlags |= ADB_ACTION_DEATH | ADB_STAGE_UNIQUE;
+    else
+        dwAnimationFlags |= ADB_ACTION_SUFFER | ADB_STAGE_UNIQUE;
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+
+    // try to find 'MM' animation for dying
+    if (bDiyng && (pEntry == 0))
+    {
+        dwAnimationFlags &= ~ADB_MODIFIER_DIRECTION2_MASK;
+        dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM;
+        pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    }
+
+    // TODO: Эта проверка в текущей версии довольно часто фейлится, что приводит к раздражающе
+    // частым вылетам. После ее выключения визуально ничего неестественного в анимациях не произошло
+    // ASSERT(pEntry);
+
+    // в положении лёжа нет анимаций ранения
+    if (!bDiyng && (currentPose.pose == UP_LAY))
+        pEntry = 0;
+    //
+    if (pEntry)
+        res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
+    if (bMoving)
+        res.SetSpeed(UAS_MOVEMENT);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GetIdleAnimation(SL0AnimationSeq &res)
+{
+    const SADEntry *pEntry;
+    res.Clear();
+    if (currentPose.pose == UP_STAND && currentPose.bAggressive == false)
+    {
+        res.AddCycle(0xfe);
+        return;
+    }
+    DWORD dwAnimationFlags = GetAnimationWeaponMask();
+    dwAnimationFlags |= GetPoseAnimationMask(currentPose);
+    dwAnimationFlags |= ADB_ACTION_IDLE | ADB_STAGE_CYCLE | ADB_MODIFIER_IDLE_STAY;
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    if (pEntry)
+        res.AddCycle(pEntry->dwEntryIndex);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+SL0AnimationSeq *CUnitServer::GetIdleAnimation()
+{
+    DWORD dwAnimationFlags = GetAnimationWeaponMask();
+    dwAnimationFlags |= GetPoseAnimationMask(currentPose);
+    if (animIdleCache.dwAnimationFlags != dwAnimationFlags)
+    {
+        animIdleCache.dwAnimationFlags = dwAnimationFlags;
+        GetIdleAnimation(animIdleCache.anim);
+    }
+    else
+        animIdleCache.anim.nStartSegment = -1;
+    return &animIdleCache.anim;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GetMoveAnimation(SL0AnimationSeq &res, bool bStart)
+{
+    const SADEntry *pEntry;
+    res.Clear();
+    DWORD dwAnimationFlags = GetAnimationWeaponMask(), dwPose;
+    dwPose = GetPoseAnimationMask(currentPose);
+    if (dwPose == ADB_STATE_NEUTRAL && !bStart && lpUnit->GetTypeID() == MOTID_HUMAN)
+        dwPose = ADB_STATE_ATTACK;
+    dwAnimationFlags |= dwPose;
+    if (lpUnit->IsRunning())
+        dwAnimationFlags |= ADB_ACTION_RUN;
+    else
+        dwAnimationFlags |= ADB_ACTION_WALK;
+    if (bStart)
+        dwAnimationFlags |= ADB_STAGE_START;
+    else
+    {
+        dwAnimationFlags |= ADB_STAGE_CYCLE;
+        if (lpUnit->GetTypeID() == MOTID_HUMAN)
+        {
+            if (rpgUnitStats.GetMoveDamageModifier() <= theAIGeneralSettings.fDamageLevel2Value)
+                dwAnimationFlags |= ADB_MODIFIER_WALK_LAME2;
+            else if (rpgUnitStats.GetMoveDamageModifier() <=
+                     theAIGeneralSettings.fDamageLevel1Value)
+                dwAnimationFlags |= ADB_MODIFIER_WALK_LAME1;
+        }
+    }
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    if (pEntry)
+    {
+        if (bStart)
+            res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
+        else
+            res.AddCycle(pEntry->dwEntryIndex);
+    }
+    res.SetSpeed(UAS_MOVEMENT);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+SL0AnimationSeq *CUnitServer::GetMoveAnimation()
+{
+    DWORD dwAnimationFlags = GetAnimationWeaponMask();
+    dwAnimationFlags |= GetPoseAnimationMask(currentPose);
+    if (lpUnit->IsRunning())
+        dwAnimationFlags |= ADB_ACTION_RUN;
+    else
+    {
+        dwAnimationFlags |= ADB_ACTION_WALK;
+        if (lpUnit->GetTypeID() == MOTID_HUMAN)
+        {
+            if (rpgUnitStats.GetMoveDamageModifier() <= theAIGeneralSettings.fDamageLevel2Value)
+                dwAnimationFlags |= ADB_MODIFIER_WALK_LAME2;
+            else if (rpgUnitStats.GetMoveDamageModifier() <=
+                     theAIGeneralSettings.fDamageLevel1Value)
+                dwAnimationFlags |= ADB_MODIFIER_WALK_LAME1;
+        }
+    }
+    if (animMoveCache.dwAnimationFlags != dwAnimationFlags)
+    {
+        animMoveCache.dwAnimationFlags = dwAnimationFlags;
+        SL0AnimationSeq &move = animMoveCache.anim;
+        if (lpUnit->GetTypeID() == MOTID_HUMAN)
+        {
+            // we are using startmove + cyclemove for humans
+            SL0AnimationSeq moveCyc;
+            GetMoveAnimation(moveCyc);
+            GetMoveAnimation(move, true);
+            move += moveCyc;
+        }
+        else
+            GetMoveAnimation(move);
+    }
+    return &animMoveCache.anim;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::IsMoveAnimation(SL0AnimationSeq &res)
+{
+    return animMoveCache.anim.IsSame(res);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::GetTransAnimation(SL0AnimationSeq &res, const SL1Pose &srcPose,
+                                    const SL1Pose &dstPose)
+{
+    const SADEntry *pEntry;
+    res.Clear();
+    if ((lpUnit->GetTypeID() != MOTID_HUMAN) && (dstPose.pose != UP_REST) &&
+        (srcPose.pose != UP_REST))
+        return false;
+    if (srcPose.pose == dstPose.pose &&
+        (srcPose.pose != UP_STAND || srcPose.bAggressive == dstPose.bAggressive))
+        return false;
+    DWORD dwAnimationFlags = GetAnimationWeaponMask();
+    dwAnimationFlags |= GetPoseAnimationMask(srcPose);
+    dwAnimationFlags |= ADB_ACTION_CROSS;
+    switch (dstPose.pose)
+    {
+    case UP_STAND:
+        if (dstPose.bAggressive || (lpUnit->GetTypeID() != MOTID_HUMAN))
+            dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_ATTACK;
+        else
+            dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_NEUTRAL;
+        break;
+    case UP_CRAWL:
+        dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_WARRY;
+        break;
+    case UP_LAY:
+        dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_LIE;
+        break;
+    case UP_REST:
+        dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_REST;
+        break;
+    }
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    // ASSERT( pEntry );
+    if (pEntry)
+    {
+        res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
+        return true;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int CUnitServer::CalcSufferDirection(CUnit *pAttacker, BOOL bAreaSpell)
+{
+    int nSufferDirection;
+    CPlot3D ptDamageFrom;
+    float fpForward, fpRight;
+    // определим direction в котором колбаснет геро
+    nSufferDirection = 0;
+    nSufferDirection = ADB_MODIFIER_DIRECTION2_MM;
+    if (pAttacker)
+    {
+        if (bAreaSpell)
+            nSufferDirection = ADB_MODIFIER_DIRECTION2_MM;
+        else
+        {
+            ptDamageFrom = pAttacker->GetCP() - lpUnit->GetCP();
+            fpForward = -(ptDamageFrom * lpUnit->GetYAxis());
+            fpRight = -(ptDamageFrom * lpUnit->GetXAxis());
+            if (fabs(fpForward) > fabs(fpRight))
+            {
+                if (fpForward > 0)
+                    nSufferDirection = ADB_MODIFIER_DIRECTION2_BM;
+                else
+                    nSufferDirection = ADB_MODIFIER_DIRECTION2_FM;
+            }
+            else
+            {
+                if (fpRight > 0)
+                    nSufferDirection = ADB_MODIFIER_DIRECTION2_ML;
+                else
+                    nSufferDirection = ADB_MODIFIER_DIRECTION2_MR;
+            }
+        }
+    }
+    return nSufferDirection;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int CUnitServer::GetAnimationLength(BYTE bAnim)
+{
+    const SADEntry *pEntry = lpUnit->GetAnimationByIndex(bAnim);
+    if (pEntry)
+        return pEntry->dwAnimationLength / lpUnit->GetAnimationCoeff(pEntry);
+    return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int CUnitServer::GetAnimationHit(BYTE bAnim)
+{
+    const SADEntry *pEntry = lpUnit->GetAnimationByIndex(bAnim);
+    if (pEntry)
+        return pEntry->dwHit / lpUnit->GetAnimationCoeff(pEntry);
+    return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! TAME
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CUnitServer::Tame(CUnit *pWho, float fpWhoSkill)
+{
+    CPlayer *pPlayer;
+    float fpOurSkill;
+
+    fpOurSkill = rpgUnitStats.GetManualSkillLevel(RPGMSKL_TAME, GetUnit());
+    fpOurSkill += GetCurrentTameLevel() * 10;
+    if (GetUnit()->GetOwner())
+        return TameFailed(pWho);
+    // any tries to tame already maximally tamed monster should succeed
+    if (GetUnit()->GetOwner() == pWho->GetOwner() && pWho->GetOwner() != 0)
+        return TRUE;
+    if (fpOurSkill >= fpWhoSkill)
+        return TameFailed(pWho);
+    switch (tameLevel)
+    {
+    case UTL_NONE:
+        lpUnit->SetPossibleEnemiesMask(~(1 << pWho->GetPlayerNum()));
+        tameLevel = UTL_NOTENEMY;
+        break;
+    case UTL_NOTENEMY:
+        nOriginalPlayerNum = lpUnit->GetPlayerNum();
+        lpUnit->SetPlayerNum(pWho->GetPlayerNum());
+        tameLevel = UTL_ALLY;
+        break;
+    case UTL_ALLY:
+        pPlayer = pWho->GetOwner();
+        if (pPlayer)
+        {
+            pPlayer->RemoveTamedFromControl();
+            lpUnit->SetPlayerNum(pWho->GetPlayerNum());
+            lpUnit->SetOwner(pPlayer);
+            logic.AddMotivation(dbgnew CUMTamed);
+            logic.environment.seenCorpses.RemoveAll();
+            logic.environment.freshCorpses.RemoveAll();
+            tameLevel = UTL_CONTROL;
+        }
+        break;
+    }
+    nPlayerWhoTamed = pWho->GetPlayerNum();
+    logic.StartIdle();
+    CmdWait();
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// попытка приручить провалилась
+BOOL CUnitServer::TameFailed(CUnit *pWho)
+{
+    // if tame on next level failed remove all tame
+    if (GetPlayerWhoTamed() == pWho->GetPlayerNum())
+        RemoveTame();
+    ((CWorldServer *)GetWorld())->fof.MakeDamage(pWho, GetUnit(), 10);
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RemoveTame()
+{
+    if (tameLevel == UTL_NONE)
+        return;
+    logic.RemoveMotivation(AI_UM_TAMED);
+    lpUnit->SetOwner(0);
+    lpUnit->SetPossibleEnemiesMask(0xFFFFFFFF);
+    if (tameLevel > UTL_NOTENEMY)
+        lpUnit->SetPlayerNum(nOriginalPlayerNum);
+    tameLevel = UTL_NONE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int CUnitServer::GetPlayerWhoTamed()
+{
+    if (tameLevel == UTL_NONE)
+        return -1;
+    return nPlayerWhoTamed;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! Supporting code
+/////////////////////////////////////////////////////////////////////////////////////
+// main function, processing units low level commands and actions
+int CUnitServer::Segment()
+{
+    if (!lpUnit->bDead)
+    {
+#ifdef __DEMO__
+        if (curCommand.cmd == UC_IDLE)
+        {
+#endif // __DEMO__
+       // mana and health regeneration
+            if (((CMapObjectServer *)lpUnit->GetMapObjectSpecific())
+                    ->GetRPGStats()
+                    ->Regenerate(rpgUnitStats, lpUnit, curCommand.cmd != UC_IDLE))
+            {
+                rpgUnitStats.RecalcStats(GetMapObjectServer()->GetRPGStats(), lpUnit);
+                AddUpdateMask(CMapObject::VLD_MASK_STATS);
+                AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+            }
+#ifdef __DEMO__
+        }
+#endif // __DEMO__
+       //
+        CreateFootstep();
+        UseContinousSpells();
+        // CRAP перерасчет заметности объекта
+        if (lpUnit->IsHero()) //>CheckFlag( UNIT_RECALC_DETECT ) )
+        {
+            logic.environment.CalcNotability(this, lpUnit->sensesDetection);
+            AddUpdateMask(CMapObject::VLD_MASK_DETECTIONS);
+            // bored processing
+            nBoredCounter++;
+            if (nBoredCounter > 500 && random.Get(0, 1000) == 0)
+            {
+                if (lpUnit->GetOwner() &&
+                    ((CPlayerServer *)lpUnit->GetOwner()->GetPlayerSpecific())->dangerState ==
+                        WDS_NORMAL)
+                {
+                    InformFailure(ACK_HERO_BORED);
+                    nBoredCounter = 400;
+                }
+                else
+                    nBoredCounter = 0;
+            }
+        }
+        // process acknowledgements
+        acknowledgements.Segment(this);
+        // process logic
+        logic.Segment();
+        lpUnit->ResetFlag(MAPOBJ_MOVED);
+        RecalcEnemy();
+        // commands execution
+        if (L1IsInterruptable())
+            LcSegment();
+        else
+        {
+            if (L1IsAttacking() && nextCommand.IsMove())
+                L1CancelAttack(true);
+        }
+        L1Segment();
+    }
+    else
+    {
+        CWorldServer *pWS = (CWorldServer *)GetWorld();
+        if (lpUnit->cp.z > 0)
+        {
+            fpZSpeed += 0.01f;
+            lpUnit->cp.z -= fpZSpeed;
+            lpUnit->cp.z = Max(0.0f, lpUnit->cp.z);
+            AddUpdateMask(CMapObject::VLD_MASK_POSROT);
+        }
+        if (!bLcCompletelyDead && level0Animation.animations.GetSize() == 0)
+        {
+            bLcCompletelyDead = true;
+            // find suitable rot for corpse to be lootable
+            /*
+            for ( int nTry = 0; nTry < 10; nTry++ )
+            {
+                    if ( !pWS->aiMap.CanPutUnit( 3, lpUnit->GetTargetCP() ) )
+                    {
+                            CPlot3D ptDir(0,0,0);
+                            float fpAlpha = random.GetFloat( 0, 6.28f );
+                            ptDir.x = cos( fpAlpha );
+                            ptDir.y = sin( fpAlpha );
+                            lpUnit->OrientInYDirection( ptDir );
+                            path.curSegment.SetStartPos( lpUnit->GetCP(), ptDir,
+            pWS->GetSegmentTimeCounter() ); lpUnit->LowNewRoute();
+                    }
+                    else
+                            break;
+            }*/
+            // inform everybody about this event
+            pWS->InformAboutUnitDeath(lpUnit);
+            // remove from owner, and maybe this is gameover
+            CPlayer *pPlayer = lpUnit->GetOwner();
+            lpUnit->SetOwner(0);
+            if (pPlayer && pPlayer->IsMainHero(lpUnit))
+                pPlayer->GetPlayerSpecific()->GameOver();
+            else
+            {
+                logic.ClearRefs();
+                acknowledgements.Clear();
+            }
+            curCommand.Clear();
+            nextCommand.Clear();
+        }
+    }
+    L0Segment();
+    return 1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RemoveReferencesOn(CMapObject *pTarget)
+{
+    if (pTarget == 0)
+        return;
+    if (curCommand.pTarget == pTarget)
+        LcCancelCommand();
+    if (nextCommand.pTarget == pTarget)
+        CmdWait();
+    if (level1Command.nTargetID == pTarget->GetID())
+        L1CancelAttack();
+    logic.RemoveReferencesOn(pTarget);
+    train.RemoveReferencesOn(pTarget);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// послать сообщение пользователю, что какое-либо действие окончилось неудачей
+void CUnitServer::InformFailure(DWORD dwAction)
+{
+    if (!IsHeroAck(dwAction) && dwAction != ACK_UNIT_BECOME_KILLER)
+        return;
+    if (dwAction == ACK_NOTHING)
+        return;
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    if (pPlayer)
+        ((CPlayerServer *)pPlayer->GetPlayerSpecific())->SendFailure(lpUnit, dwAction);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::InformAttackPathNotFound(const SUnitCommand &cmd)
+{
+    if (cmd.cmd == UC_ATTACK)
+        InformFailure(ACK_HERO_REFUSE_NO_WAY_TO_ATTACK);
+    else
+        InformFailure(ACK_HERO_REFUSE_PATH_NOT_FOUND);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! FOOTSTEPs
+/////////////////////////////////////////////////////////////////////////////////////
+// расстояние между соседними следами не должно превосходить 1.5 метра, из этих
+// соображений выбирается nFootstepGenInterval
+void CUnitServer::CreateFootstep()
+{
+    if ((theWorldServer.GetSegmentTimeCounter() & nFootstepGenInterval) == 0)
+    {
+        if (lastFootstep)
+        {
+            lastFootstep->ptPointPosition.x = lpUnit->GetCP().x;
+            lastFootstep->ptPointPosition.y = lpUnit->GetCP().y;
+        }
+        lastFootstep = theWorldServer.aiMap.marks.AddFootStep(lpUnit->GetCP(), this);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// числа указанные здесь зависят от расстояния на котором распознаются следы ( здесь
+// считается, что это расстояние равно 3-м ai тайлам) и количества сегментов в секунду
+// считается, что 15
+void CUnitServer::CalcNewFootstepGenInterval()
+{
+    if (L1IsMoving())
+    {
+        float fpSpeed = lpUnit->GetSpeed();
+        if (fpSpeed > 1.2f) // 1.5f ) is exact value
+            nFootstepGenInterval = 0;
+        else if (fpSpeed > 0.6f) // 75f )
+            nFootstepGenInterval = 1;
+        else if (fpSpeed > 0.3f) // 375f )
+            nFootstepGenInterval = 3;
+        else if (fpSpeed > 0.15f) // 19f )
+            nFootstepGenInterval = 7;
+        else
+            nFootstepGenInterval = 15;
+    }
+    else
+        nFootstepGenInterval = 15;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! CONTINOUS spells in items
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RebuildContinousSpellsList()
+{
+    POSITION pos, pos1;
+    CList<CItem *, CItem *> items;
+    CList<CSpell *, CSpell *> spells;
+
+    lpUnit->GetAllItemsList((CGameBaseList &)items, (CGameBaseList &)spells);
+    // remove inactive weapons from list
+    for (pos = items.GetHeadPosition(); pos;)
+    {
+        pos1 = pos;
+        CItemWeapon *pWeapon = (CItemWeapon *)items.GetNext(pos);
+        if (pWeapon->WhoAmI() == HPC_ITEM_WEAPON && pWeapon != lpUnit->GetCurrentQWeapon())
+            items.RemoveAt(pos1);
+    }
+    // mark current spells as inactive
+    for (pos = activeContSpells.GetHeadPosition(); pos;)
+        activeContSpells.GetNext(pos).bIsUsed = false;
+    // walk through items and mark already used items and create new
+    for (pos = items.GetHeadPosition(); pos;)
+    {
+        CItem *pItem = items.GetNext(pos);
+        CSpell *pSpell;
+        if (pItem)
+            pSpell = pItem->GetSpell(0);
+        if (!pSpell || !pSpell->IsItemContinuous())
+            continue;
+        bool bFound = false;
+        for (pos1 = activeContSpells.GetHeadPosition(); pos1;)
+        {
+            SContSpellInfo &info = activeContSpells.GetNext(pos1);
+            if (info.bIsUsed || info.pItem != pItem)
+                continue;
+            info.bIsUsed = true;
+            bFound = true;
+            break;
+        }
+        if (bFound)
+            continue;
+        SContSpellInfo &newInfo = activeContSpells.GetAt(
+            activeContSpells.AddTail(SContSpellInfo()));
+        newInfo.pItem = pItem;
+        newInfo.bIsUsed = true;
+    }
+    // remove unused items with continous effect
+    for (pos = activeContSpells.GetHeadPosition(); pos;)
+    {
+        pos1 = pos;
+        if (!activeContSpells.GetNext(pos).bIsUsed)
+            activeContSpells.RemoveAt(pos1);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::UseContinousSpells()
+{
+    CWorldServer *pWS = ((CWorldServer *)GetWorld());
+    bool bWasHealing = false;
+    for (POSITION pos = activeContSpells.GetHeadPosition(); pos;)
+    {
+        SContSpellInfo &info = activeContSpells.GetNext(pos);
+        if (info.nDelay > 0)
+            info.nDelay--;
+        else if (!info.pItem.IsEmpty())
+        {
+            CItem *pItem = info.pItem;
+            CSpell *pSpell = pItem->GetSpell(0);
+            if (pItem->GetMP() > pSpell->GetManaCost())
+            {
+                if ((pSpell->GetSubtypeID() >> 16) == SPELL_ID_HEALING)
+                {
+                    if (bWasHealing || lpUnit->GetHP() == lpUnit->GetMaxHP())
+                        continue;
+                    bWasHealing = true;
+                }
+                SpendItemMana(pItem, pSpell->GetManaCost());
+                pWS->CastSpell(pSpell, lpUnit, lpUnit->GetCP(), lpUnit, lpUnit->GetCP(), true);
+                info.nDelay = pSpell->GetDuration() - 3;
+                if (info.nDelay <= 0)
+                    info.nDelay = 8;
+            }
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::SpendItemMana(CItem *pItem, float fpMana)
+{
+    ASSERT(pItem);
+    if (!pItem)
+        return;
+    CWorldServer *pWS = ((CWorldServer *)GetWorld());
+
+    pItem->ChangeCurrentMP(-fpMana);
+    pWS->AddActiveItem(pItem);
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    CItemSrcInfo *pInfo = (CItemSrcInfo *)pItem->GetUserData();
+    if (pPlayer && pInfo)
+    {
+        CItem *pPItem = (CItem *)pPlayer->party.GetItemManager()->Find(pInfo->nSrcItemID);
+        ASSERT(pPItem);
+        if (pPItem)
+        {
+            pPItem->SetMP(pItem->GetMP());
+            pPlayer->AddActiveItem(pPItem);
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! DIPLOMACY spreading
+/////////////////////////////////////////////////////////////////////////////////////
+union UFloatInt
+{
+    float fp;
+    int n;
+};
+static UFloatInt maxRange = { 0 }; // FP_FOF_HEARRADIUS * FP_FOF_HEARRADIUS };
+
+static inline int CanHear(const CUnit *pA, const CUnit *pB)
+{
+    UFloatInt range;
+    float fpx = pA->GetCP().x - pB->GetCP().x, fpy = pA->GetCP().y - pB->GetCP().y;
+    range.fp = fpx * fpx + fpy * fpy;
+    return range.n < maxRange.n;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RemovePendingDiplomacy()
+{
+    dwFutureEnemies = 0;
+    logic.environment.RemoveDiplomacyMsgs();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::HearNewEnemiesMsg(DWORD dwNewEnemies)
+{
+    lpUnit->AddEnemyMask(dwNewEnemies);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::InformAboutEnemy(CUnit *pWho, DWORD dwNewEnemiesMask)
+{
+    dwFutureEnemies |= dwNewEnemiesMask;
+    CString szInfo;
+    for (int i = 0; i < 32; i++)
+    {
+        if (dwNewEnemiesMask & (1 << i))
+        {
+            CString szCur;
+            szCur.Format("Unit %i claims that player %i are enemies! ", pWho->GetID(), i);
+            szInfo = szInfo + szCur;
+        }
+    }
+    logic.environment.HearNewEnemies(dwNewEnemiesMask, 30, szInfo);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RecalcEnemy()
+{
+    if (!lpUnit->CheckFlag(UNIT_RECALCENEMY))
+        return;
+    lpUnit->ResetFlag(UNIT_RECALCENEMY);
+
+    dwFutureEnemies |= lpUnit->GetEnemyMask();
+
+    CFofTracker &fof = ((CWorldServer *)lpUnit->GetWorld())->fof;
+    CMapObjectPtrList &nearUnits =
+        *logic.GetUnitsList(); // using nearUnits from logic, this is reasonable and fast
+    POSITION pos;
+    int nCurrentPlayer, nOtherPlayer;
+    nCurrentPlayer = lpUnit->GetPlayerNum();
+    ASSERT("unit has invalid playernum" && nCurrentPlayer >= 0 && nCurrentPlayer < N_MAX_PLAYERS);
+    pos = nearUnits.GetHeadPosition();
+    maxRange.fp = sqr(logic.GetCallForHelpRadius());
+    while (pos)
+    {
+        CUnit *pOther = (CUnit *)nearUnits.GetNext(pos);
+        nOtherPlayer = pOther->GetPlayerNum();
+        ASSERT("unit has invalid playernum" && nOtherPlayer >= 0 && nOtherPlayer < N_MAX_PLAYERS);
+        if (fof.IsPlayerAlly(nCurrentPlayer, nOtherPlayer))
+        {
+            if (CanHear(pOther, lpUnit))
+            {
+                DWORD dwOtherFutureEnemies = ((CUnitServer *)(pOther->GetUnitSpecific()))
+                                                 ->dwFutureEnemies;
+                if ((lpUnit->GetEnemyMask() ^ dwOtherFutureEnemies) != 0)
+                {
+                    int nEnemyHasChanged = lpUnit->GetEnemyMask() & ~dwOtherFutureEnemies;
+                    int nReverseInfo = pOther->GetEnemyMask() & ~dwFutureEnemies;
+                    if (nEnemyHasChanged)
+                        ((CUnitServer *)pOther->GetUnitSpecific())
+                            ->InformAboutEnemy(lpUnit, nEnemyHasChanged);
+                    if (nReverseInfo)
+                        InformAboutEnemy(pOther, nReverseInfo);
+                }
+            }
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! RPG system work
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::TimeOfDayChanged()
+{
+    // recalc bonuses to vision/ detection
+    RecalcAIParams();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// определить AI класс юнита по его радиусу и высоте
+static DWORD CalcUnitClass(float fpR, float fpH)
+{
+    if (fpR > 1.5f)
+        return 7;
+    if (fpR > 0.85f)
+    {
+        if (fpH > 1.7f)
+            return 6;
+        else
+            return 5;
+    }
+    if (fpH < 0.6f)
+        return 1;
+    if (fpH < 1.2f)
+        return 2;
+    if (fpH < 1.9f)
+        return 3;
+    return 4;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::SetRPGStats(SRPGUnitStats *lpRPGNewUnitStats)
+{
+    rpgUnitStats = *lpRPGNewUnitStats;
+    lpUnit->SetUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+    //
+    RecalcRPGStats();       // perform first stage recalc with health distribution
+    rpgUnitStats.HealAll(); // heal all hit locations
+    RecalcRPGStats();       // perform recalc damage modifiers with distributed health
+    // restore HP and MP
+    GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent =
+        GetMapObjectServer()->GetRPGStats()->ssHP.fpMax;
+    GetMapObjectServer()->GetRPGStats()->ssMP.fpCurrent =
+        GetMapObjectServer()->GetRPGStats()->ssMP.fpMax;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// calc AI class for this unit, assuming bounding volume has been loaded here
+void CUnitServer::RecalcAIClass()
+{
+    ASSERT(lpUnit->bv.fpRadius > 0);
+    if (rpgUnitStats.dwLocomotion == 2)
+    {
+        rpgUnitStats.wAIClassLie = 0;
+        rpgUnitStats.wAIClassStay = 0;
+    }
+    else
+    {
+        // CRAP - ai class calc is incorrect, radius is incorrect
+        float fpRadius = lpUnit->GetUnitRadius(); // * 2;
+        float fpHeight = lpUnit->GetUnitHeight() * GetUnit()->GetRaceModel()->fHeadHeight;
+        if (lpUnit->GetTypeID() == MOTID_HUMAN)
+            fpHeight = Min(fpHeight, 1.89f);
+        rpgUnitStats.wAIClassStay = CalcUnitClass(fpRadius, fpHeight);
+        rpgUnitStats.wAIClassLie = CalcUnitClass(fpRadius, fpHeight * 0.2f);
+        rpgUnitStats.wAIClassCrawl = CalcUnitClass(fpRadius, fpHeight * 0.6f);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::ChangeSpeedWithSpell()
+{
+    if (lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND) &&
+        rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC)
+        lpUnit->SetFlag(UNIT_FEEBLED);
+    else
+        lpUnit->ResetFlag(UNIT_FEEBLED);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::ComplectionChanged()
+{
+    bool bRv;
+    if (lpUnit->IsDead())
+        return;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    pWS->aiMap.RemoveObject(lpUnit);
+    // reload bounding volumes
+    lpUnit->LoadFigureBoundingVolumes(lpUnit->GetMaskName());
+    //
+    lpUnit->RecalcAIClass();
+    lpUnit->RecalcAIParams();
+    if (!pWS->aiMap.CanPutUnitRelaxed(lpUnit))
+    {
+        // оказывается юнит теперь нельзя поставить на старое место - перенесем его на новое
+        CPlot3D ptNewPlace = lpUnit->GetCP();
+        if (!pWS->aiMap.FindUnitPosition(lpUnit, lpUnit->GetCP(), ptNewPlace))
+        {
+            // this unit is unlucky :)
+            SRPGAttackPortion overDose;
+            overDose.MakeDeadlyAttack();
+            ProcessAttackPortion(&overDose, 0, 0);
+            ASSERT(lpUnit->IsDead());
+            ptNewPlace = lpUnit->GetCP();
+        }
+        else
+            lpUnit->SetCP(ptNewPlace);
+    }
+    //
+    bRv = theWorldServer.aiMap.AddObject(lpUnit);
+    ASSERT(bRv);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GetRPGStats(SRPGUnitStats *pRPGNewUnitStats)
+{
+    *pRPGNewUnitStats = rpgUnitStats;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GainExperience(float fpExp)
+{
+    rpgUnitStats.GainExperienceInCombat(lpUnit, fpExp);
+    RecalcRPGStats();
+    //	rpgUnitStats.Heal( GetMapObjectServer()->GetRPGStats(), 10000 );
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CUnitServer::RecalcRPGStats(bool bStrengthChanged)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    int nTime = pWS->GetSegmentTimeCounter();
+    float fpOldAction = rpgUnitStats.action.fpEffectiveValue;
+    //
+    if (bStrengthChanged)
+        rpgUnitStats.StrengthChanged(GetMapObjectServer()->GetRPGStats(), lpUnit);
+    rpgUnitStats.RecalcStats(GetMapObjectServer()->GetRPGStats(), lpUnit);
+    if (nCanAttackTime > nTime)
+        nCanAttackTime = nTime + Float2Int((nCanAttackTime - nTime) * fpOldAction /
+                                           rpgUnitStats.action.fpEffectiveValue);
+    AddUpdateMask(CMapObject::VLD_MASK_STATS); // this will force exportstats
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::CalcUnifiedDefend()
+{
+    SRPGCommonStats &stats = *GetMapObjectServer()->GetRPGStats();
+    rpgUnitStats.ExportAbsorbs(GetUnit(), &stats, rpgDefend);
+    // calc to hit for defender
+    float fDefenceModifier = lpUnit->IsHero() ? 1.0f
+                                              : theAIGeneralSettings
+                                                    .fDefenceLevels[theSettings.nDifficultyLevel];
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    if (!lpUnit->GetOwner() || pWeapon == 0)
+        rpgDefend.wToHit = rpgUnitStats.fpNAWParry * fDefenceModifier;
+    else
+        rpgDefend.wToHit = rpgUnitStats.GetWeaponSkillLevel(pWeapon->GetWeaponType(), lpUnit) *
+                           fDefenceModifier;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::ExportStats()
+{
+    BYTE bSpeeds[4];
+    memcpy(bSpeeds, lpUnit->rpgUserUnitStats.cSpeeds, 4);
+    rpgUnitStats.Export(lpUnit, &lpUnit->rpgUserUnitStats);
+    rpgUnitStats.bFlags = 0;
+    CalcUnifiedDefend();
+    AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+    if (memcmp(bSpeeds, lpUnit->rpgUserUnitStats.cSpeeds, 4) != 0)
+        L1SpeedChanged();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// wear new armor
+bool CUnitServer::Wear(DWORD dwArmor)
+{
+    DWORD dwArmorType = theItemDatabase.armors[CItem::GetShape(dwArmor)]->dwTypeID;
+    rpgUnitStats.Wear(lpUnit->lpArmors[dwArmorType]);
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::Remove(ERPGArmorTypes type)
+{
+    rpgUnitStats.RecalcHitLocations(lpUnit);
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RemoveAllArmors()
+{
+    rpgUnitStats.RemoveAllArmors();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CUnitServer::NotifyItemsUpdated()
+{
+    RebuildContinousSpellsList();
+    logic.caster.Initialize(lpUnit);
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// select quick weapon
+BOOL CUnitServer::ChangeWeapon(DWORD dwQWeaponIndex)
+{
+    DWORD dwNewWeaponIndex = dwQWeaponIndex;
+    CItem *lpNewWeapon = lpUnit->GetQWeapon(dwQWeaponIndex);
+
+    if (lpNewWeapon && !lpNewWeapon->IsBroken())
+        dwNewWeaponIndex = dwQWeaponIndex;
+    else
+        dwNewWeaponIndex = DWORD(-1);
+    // assign new weapon
+    AddUpdateMask(CMapObject::VLD_MASK_POSE);
+    lpUnit->dwWishWeapon = lpUnit->dwCurrentWeapon = dwNewWeaponIndex;
+    //
+    if (lpUnit->GetOwner())
+        logic.caster.Initialize(lpUnit);
+    RebuildContinousSpellsList();
+
+    if (!lpNewWeapon || lpNewWeapon->IsBroken())
+        return FALSE;
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::RecalcAIParams()
+{
+    CWorldServer *pWorld = (CWorldServer *)GetWorld();
+    float fpNight = pWorld->GetNightPower();
+    fpModSound = 1;
+    fpModVision = 1;
+    fpSModSound = 1;
+    fpSModVision = rpgUnitStats.senses[RPGS_INFRA].fpEffectiveValue * fpNight / 100 + (1 - fpNight);
+    fpSModVision *= pWorld->GetVisionBonus();
+
+    switch (lpUnit->currentPose)
+    {
+    case UP_LAY:
+        fpModVision *= AI_LAY_VISION;
+        fpSModVision *= AI_LAY_SENSE_VISION;
+        break;
+    case UP_CRAWL:
+        fpModVision *= AI_CRAWL_VISION;
+        break;
+    }
+
+    if (L1IsMoving())
+    {
+        switch (lpUnit->currentPose)
+        {
+        case UP_LAY:
+            fpModSound *= AI_LAY_SOUND;
+            break;
+        case UP_CRAWL:
+            fpModSound *= AI_CRAWL_SOUND;
+            break;
+        }
+        if (lpUnit->IsRunning())
+        {
+            fpModSound *= AI_RUN_SOUND;
+            fpSModSound *= AI_RUN_SENSE_SOUND;
+        }
+    }
+    else
+        fpModSound = 0;
+    if (L1IsAttacking())
+    {
+        // для кастования сферы senses увеличивать заметность не надо
+        if (curCommand.cmd == UC_CASTPOINT || curCommand.cmd == UC_CASTUNIT)
+        {
+            CSpell *pSpell = GetSpell(curCommand.nQSpellNum);
+            ASSERT(pSpell);
+            if (pSpell && pSpell->GetMagicSchool() != RPGMS_SENSES)
+                fpModVision *= AI_ATTACK_VISION;
+        }
+        //
+    }
+    CalcNewFootstepGenInterval();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! DAMAGE, processing of some actions concerning health of unit
+/////////////////////////////////////////////////////////////////////////////////////
+// перебрать всех друзей из units и если они видят pTest, то pEnemy становится также им
+// виден и к тому же становится их врагом
+void CUnitServer::MakeNewEnemies(CMapObjectPtrList &units, CUnit *pTest, CUnit *pEnemy)
+{
+    int nCurrentPlayer, nOtherPlayer;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CFofTracker &fof = ((CWorldServer *)lpUnit->GetWorld())->fof;
+    nCurrentPlayer = lpUnit->GetPlayerNum();
+
+    for (POSITION pos = units.GetHeadPosition(); pos;)
+    {
+        CUnit *pBrother = units.GetNext(pos);
+        nOtherPlayer = pBrother->GetPlayerNum();
+        if (fof.IsPlayerAlly(nOtherPlayer, nCurrentPlayer))
+        {
+            // прочувствуем кого видит наш брат
+            CUnitServer *pBr = (CUnitServer *)pBrother->lpUnitSpecific;
+            pBrother->SetFlag(UNIT_LOOKATALLIES);
+            CAIUnitEnvironment &brotherEnv = pBr->logic.environment;
+            pWS->aiMap.marks.Feel(pBr, brotherEnv);
+            // если он видел pTest, то он поимел нового врага
+            if (brotherEnv.visibleUnits.Find(pTest))
+            {
+                if (!brotherEnv.visibleUnits.Find(pEnemy))
+                {
+                    brotherEnv.visibleUnits.AddTail(pEnemy);
+                    aiLog << "Unit " << pBrother->GetID()
+                          << " has seen murder and is forced to see unit " << pEnemy->GetID()
+                          << endl;
+                }
+                pWS->fof.MakeDamage(pEnemy, pBrother, 10);
+            }
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// переберем всех ближайших друзей, если кто-либо из них видел в этот момент того кого
+// атаковали или того кто атаковал, то они становятся врагами pAttacker`a
+void CUnitServer::AlarmEverybodyWhoSawDeath(CUnit *pAttacker)
+{
+    if (!pAttacker || pAttacker->WhoAmI() != HPC_UNIT)
+        return;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    CMapObjectPtrList &nearUnits =
+        *logic.GetUnitsList(); // using nearUnits from logic, this is reasonable and fast
+    CUnitServer *pAttackerS = (CUnitServer *)pAttacker->GetUnitSpecific();
+
+    // все кто видел жертву
+    MakeNewEnemies(logic.GetUnitsList()[0], GetUnit(), pAttacker);
+    // все кто видел атакера
+    MakeNewEnemies(pAttackerS->logic.GetUnitsList()[0], pAttacker, pAttacker);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::TakeDamage(CUnit *pAttacker, BOOL bAreaSpell)
+{
+    CPlot3D ptDamageFrom;
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    // float fpForward, fpRight;
+    switch (lpUnit->GetTypeID())
+    {
+    case MOTID_HUMAN:
+    case MOTID_MONSTER:
+    case MOTID_ANIMAL:
+    case MOTID_TREE:
+    case MOTID_BUILDING:
+        break;
+    default:
+        ASSERT(0);
+        lpUnit->Invalidate();
+        return;
+    }
+    // определим степень повреждения героя
+    if (((CMapObjectServer *)lpUnit->GetMapObjectSpecific())->IsDead())
+    {
+        // say ack
+        if (pAttacker)
+        {
+            if (pAttacker->IsHero())
+                ((CUnitServer *)pAttacker->GetUnitSpecific())
+                    ->InformFailure(ACK_UNIT_BECOME_KILLER);
+            else if (lpUnit->IsHero())
+                ((CUnitServer *)pAttacker->GetUnitSpecific())
+                    ->acknowledgements.SayAck(AI_ACK_KILLED);
+        }
+        //
+        AlarmEverybodyWhoSawDeath(pAttacker);
+        // this boy is done
+        lpUnit->RemoveAllSpellEffects();
+
+        LowSetDead(true);
+        //
+        aiLog << "Unit " << lpUnit->GetID() << " damaged to death" << endl;
+        // play last animation
+        SL0AnimationSeq suffer;
+        GetSufferAnimation(suffer, CalcSufferDirection(pAttacker, bAreaSpell), true, false);
+        L0FreezeMovement(false);
+        L0Freeze(false);
+        L1StartSpecial(suffer);
+        pWS->aiMap.marks.RemoveFootSteps(this);
+
+        CPlayer *pPlayer = lpUnit->GetOwner();
+        if (pPlayer)
+        {
+            // some lpUnit allies should see his corpse
+            CUnitPtrHashIterator unitIter;
+            CUnit *pAlly = unitIter.GetFirst(&pPlayer->unitsUnderControl);
+            while (pAlly && pAlly == lpUnit)
+                pAlly = unitIter.GetNext();
+            if (pAlly)
+                ((CUnitServer *)pAlly->GetUnitSpecific())
+                    ->logic.environment.SeeNewCorpse(pAlly, lpUnit);
+            if (IWorldConnector.IsLMP())
+                GetUnit()->SetFlag(UNIT_LOOT_LOCKED);
+        }
+        return;
+    }
+    UseArmorSpells(false);
+    // modify friend or foe information
+    if (pAttacker)
+    {
+        if (pAttacker->WhoAmI() == HPC_UNIT)
+            pWS->fof.MakeDamage(pAttacker, lpUnit, 10); // 10 - amount of damage
+    }
+    //
+    logic.TakeDamage(pAttacker);
+    lpUnit->SetFlag(UNIT_RECALCENEMY);
+    RecalcEnemy();
+    L1NeedPlaySuffer(CalcSufferDirection(pAttacker, bAreaSpell));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// warning, non magic attack will be modified by this function, use with care
+bool CUnitServer::DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttacker)
+{
+    ASSERT(fabs(pAttackPortion->fpToHit) < FLT_MAX);
+    float fToHit = FLT_MAX;
+    bool bMagicAttack = pAttackPortion->IsMagicAttack();
+    if (!bMagicAttack)
+    {
+        // if unit is in aggressive mode then backstab is failed
+        if (IsAggressive())
+            pAttackPortion->fBackStabMultiplier = 1;
+        if (pAttacker)
+            fToHit = GetToHit(static_cast<CUnitServer *>(pAttacker->GetUnitSpecific()),
+                              pAttackPortion->fBackStabMultiplier > 1);
+        // Пенальти за избранный удар - 10, при ударе в голову - 25
+        if (pAttackPortion->bCalledShot)
+        {
+            if (pAttackPortion->hl == RPGHL_HEAD)
+                fToHit = Max(0.0f, fToHit - 25.0f);
+            else if (pAttackPortion->hl != RPGHL_BODY)
+                fToHit = Max(0.0f, fToHit - 10.0f);
+        }
+    }
+    //
+    SAttackParams apDefender;
+    GetAttackParams(apDefender);
+    //
+    if (pAttackPortion->fBackStabMultiplier > 1)
+        apDefender.nDefense = 0;
+    //
+    if (fToHit >= apDefender.nDefense)
+        fToHit = FLT_MAX;
+    else
+        fToHit = -FLT_MAX;
+    pAttackPortion->fpToHit = fToHit; // store new 'to-hit' value in the attack portion
+    return fToHit > 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// warning, non magic attack will be modified by this function, use with care
+BOOL CUnitServer::ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit *pAttacker,
+                                       CUnit *pExpDest)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+    BOOL bWasCorpse = GetUnit()->IsDead();
+    bool bHadOwner = GetUnit()->GetOwner() != 0;
+    //
+    // if ToHit is not initiated then calc it
+    if (fabs(lpAttackPortion->fpToHit) < FLT_MAX)
+        DetermineHit(lpAttackPortion, pAttacker);
+    //
+    if (!bWasCorpse)
+    {
+        pWS->AddObjectToActiveSet(GetUnit());
+        if (pAttacker)
+            aiLog << "Unit " << lpUnit->GetID() << " was attacked by " << pAttacker->GetID();
+        else
+            aiLog << "Unit " << lpUnit->GetID() << " was attacked by xz";
+        aiLog << " skill=" << lpAttackPortion->fpToHit << " damage=" << lpAttackPortion->fpDamage;
+        if (lpAttackPortion->fBackStabMultiplier > 1.0f)
+            aiLog << " backstab with power=" << lpAttackPortion->fBackStabMultiplier;
+        if (lpAttackPortion->bCalledShot)
+            aiLog << " called shot";
+        aiLog << " destHL=";
+        switch (lpAttackPortion->hl)
+        {
+        case RPGHL_HEAD:
+            aiLog << "Head!";
+            break;
+        case RPGHL_BODY:
+            aiLog << "Body";
+            break;
+        case RPGHL_LHAND:
+            aiLog << "LHand";
+            break;
+        case RPGHL_RHAND:
+            aiLog << "RHand";
+            break;
+        case RPGHL_LLEG:
+            aiLog << "LLeg";
+            break;
+        case RPGHL_RLEG:
+            aiLog << "RLeg";
+            break;
+        case RPGHL_ALL:
+            aiLog << "all";
+            break;
+        default:
+            aiLog << "xz";
+            break;
+        }
+        aiLog << endl;
+    }
+    // are not we in god mode?
+    CPlayer *pPlayer = GetUnit()->GetOwner();
+    if (pPlayer)
+    {
+        if (pPlayer->bGod)
+            return FALSE;
+        if (pExpDest && pExpDest->GetOwner() && pPlayer != pExpDest->GetOwner())
+            return FALSE;
+    }
+    //
+    SAttackParams apDefender;
+    GetAttackParams(apDefender);
+    //
+    if (lpAttackPortion->fBackStabMultiplier > 1)
+        apDefender.nDefense = 0;
+    if (lpAttackPortion->fpToHit >= apDefender.nDefense)
+    {
+        rpgUnitStats.bFlags |= RPGSTAT_SHOWHPFLY;
+        AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+        //
+        UseArmorSpells(true);
+        CItemWeapon *pAttackerWeapon = pAttacker != 0 ? pAttacker->GetCurrentQWeapon() : 0;
+        if (rpgUnitStats.ProcessAttackPortion(lpUnit, GetMapObjectServer()->GetRPGStats(),
+                                              lpAttackPortion, pAttackerWeapon))
+        {
+            if (pAttacker && !lpAttackPortion->IsMagicAttack())
+            {
+                if (pAttacker->GetTypeID() != MOTID_HUMAN)
+                    lpUnit->rpgUserUnitStats.wAttackerPrototype = pAttacker->GetSubtypeID() +
+                                                                  RPGWST_MAGIC;
+                else
+                    lpUnit->rpgUserUnitStats.wAttackerPrototype = static_cast<CUnitServer *>(
+                                                                      pAttacker->GetUnitSpecific())
+                                                                      ->GetCurrentWeaponType();
+            }
+            else
+                lpUnit->rpgUserUnitStats.wAttackerPrototype = RPGWST_UNKNOWN;
+            rpgUnitStats.RecalcStats(GetMapObjectServer()->GetRPGStats(), lpUnit);
+            AddUpdateMask(CMapObject::VLD_MASK_STATS);
+            AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+            if (!bWasCorpse)
+            {
+                TakeDamage(pAttacker, lpAttackPortion->bAreaEffect);
+                // if unit was killed pExpDest will get exp for that
+                // killing units with owner does not give you exp
+                if (!bWasCorpse && GetUnit()->IsDead() && pExpDest && pExpDest->GetOwner() &&
+                    !bHadOwner)
+                {
+                    if (IWorldConnector.IsLMP())
+                        pWS->GainExperience(0, GetUnit()->GetPrototype()->fExp);
+                    else
+                        pWS->GainExperience(pExpDest->GetOwner(), GetUnit()->GetPrototype()->fExp);
+                }
+            }
+            return TRUE;
+        }
+    }
+    // modify friend or foe information
+    if (pAttacker)
+    {
+        if (pAttacker->WhoAmI() == HPC_UNIT)
+            ((CWorldServer *)GetWorld())
+                ->fof.MakeDamage(pAttacker, lpUnit, 10); // 10 - amount of damage
+    }
+    //
+    logic.TakeDamage(pAttacker);
+
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CUnitServer::Heal(float fpPower)
+{
+    if (rpgUnitStats.Heal(GetMapObjectServer()->GetRPGStats(), fpPower))
+    {
+        rpgUnitStats.RecalcStats(GetMapObjectServer()->GetRPGStats(), lpUnit);
+        AddUpdateMask(CMapObject::VLD_MASK_STATS);
+        AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+
+        aiLog << "Unit " << lpUnit->GetID() << " was healed" << endl;
+        return TRUE;
+    }
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! New commands from user
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::InitializeUnit()
+{
+    curCommand.Clear();
+    CmdWait();
+    currentPose.Convert(lpUnit->currentPose);
+    wishPose.Convert(lpUnit->wishPose);
+    L1ResetState();
+    lpUnit->RecalcAIParams();
+    // select first weapon
+    lpUnit->dwWishWeapon = 0;
+    L1ChangeWeapon();
+    L1StartIdle();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
+{
+    nextCommand.Clear();
+    nextCommand.cmd = UC_ROTATE;
+    nextCommand.ptTarget = vecDest;
+    nextCommand.pTarget = NULL;
+    nextCommand.fpParam = fpAngSpeed;
+    nextCommand.bDoItFast = false;
+}
+
+void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, float fpMaxPathDist)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+
+    nextCommand.Clear();
+    nextCommand.cmd = UC_MOVETO;
+    nextCommand.ptTarget = ptDest;
+    nextCommand.pTarget = NULL;
+    nextCommand.bDoItFast = bRun;
+    nextCommand.nQSpellNum = bGroupCmd ? 1 : 0;
+    nextCommand.dwParam = 0;
+    nextCommand.ptTarget.z = fpMaxPathDist;
+
+    CPlayer *pPlayer = lpUnit->GetOwner();
+    if (pPlayer && ptDest.z != -1313)
+    {
+        if (!pWS->IsCombatPause())
+            nextCommand.dwParam = 1;
+        else
+        {
+            CmdShowMove(ptDest, bGroupCmd, bRun, fpMaxPathDist);
+        }
+    }
+}
+
+void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, float fpMaxPathDist)
+{
+    CWorldServer *pWS = (CWorldServer *)GetWorld();
+
+    SAIPath pathFake;
+    CUnitList removed;
+    LowRemoveUnitsForPathFind(removed, ptDest, bGroupCmd);
+    // change pose to stand in case of run pathfind
+    EUnitPose prevPose = lpUnit->currentPose;
+    if (bRun && lpUnit->currentPose != UP_STAND && lpUnit->currentPose != UP_RUN)
+    {
+        pWS->aiMap.RemoveObject(lpUnit);
+        lpUnit->currentPose = UP_STAND;
+        lpUnit->RecalcAIParams();
+        if (!pWS->aiMap.CanPutUnitRelaxed(lpUnit))
+            lpUnit->currentPose = prevPose;
+        pWS->aiMap.AddObject(lpUnit);
+    }
+    //
+    bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist);
+    //
+    if (bRun)
+    {
+        pWS->aiMap.RemoveObject(lpUnit);
+        lpUnit->currentPose = prevPose;
+        lpUnit->RecalcAIParams();
+        pWS->aiMap.AddObject(lpUnit);
+    }
+    //
+    for (POSITION pos = removed.GetHeadPosition(); pos;)
+        pWS->aiMap.AddObject(removed.GetNext(pos));
+    ShowFoundMovePath(pathFake, bFound);
+}
+
+void CUnitServer::CmdAttack(CMapObject *pTarget, ERPGHitLocations hl, bool bRun, DWORD dwAck)
+{
+    ASSERT(pTarget != lpUnit);
+    if (pTarget == 0 || pTarget == lpUnit)
+        return;
+    if (pTarget->WhoAmI() == HPC_UNIT && hl < RPGHL_ALL)
+    {
+        CUnit *pT = (CUnit *)pTarget;
+        CUnitServer *pUS = (CUnitServer *)pT->GetUnitSpecific();
+        if (pUS->rpgUnitStats.hls[hl].state != RPGALS_ACTIVE)
+            hl = RPGHL_ALL;
+    }
+    nextCommand.Clear();
+    nextCommand.cmd = UC_ATTACK;
+    nextCommand.pTarget = pTarget;
+    nextCommand.nQSpellNum = (int)hl;
+    nextCommand.bDoItFast = bRun;
+
+    if (!IsTargetReachable(nextCommand))
+    {
+        InformFailure(ACK_HERO_REFUSE_TARGET_TOO_HIGH);
+        nextCommand.Clear();
+        return;
+    }
+    if (!FindAttackPath(nextCommand, dwAck))
+        nextCommand.Clear();
+}
+
+void CUnitServer::CmdCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun)
+{
+    CPlot3D ptCastTo = pointToCast;
+    if (IsPotion(nQSpellNum))
+    {
+        UsePotion(nQSpellNum, 0, pointToCast);
+        return;
+    }
+    if (!CanCastSpell(GetSpell(nQSpellNum), (nQSpellNum & 0x80000000) == 0))
+    {
+        InformFailure(ACK_HERO_REFUSE_TOO_COMPLEX_SPELL_TO_CAST);
+        return;
+    }
+    nextCommand.Clear();
+    nextCommand.cmd = UC_CASTPOINT;
+    nextCommand.pTarget = NULL;
+    nextCommand.nQSpellNum = nQSpellNum;
+    nextCommand.ptTarget = ptCastTo;
+    nextCommand.bDoItFast = bRun;
+
+    DWORD dwPositiveAck = IsCastPossible(nextCommand) ? ACK_HERO_ACK_CAST : ACK_NOTHING;
+    if (!FindAttackPath(nextCommand, dwPositiveAck))
+        nextCommand.Clear();
+}
+
+void CUnitServer::CmdCast(int nQSpellNum, CMapObject *pTarget, bool bRun)
+{
+    CPlot3D ptCastTo = pTarget->GetTargetCP();
+    if (IsPotion(nQSpellNum))
+    {
+        UsePotion(nQSpellNum, pTarget, pTarget->GetCP());
+        return;
+    }
+    // lets check if this unit can cast the spell
+    if (!CanCastSpell(GetSpell(nQSpellNum), (nQSpellNum & 0x80000000) == 0))
+    {
+        InformFailure(ACK_HERO_REFUSE_TOO_COMPLEX_SPELL_TO_CAST);
+        return;
+    }
+    nextCommand.Clear();
+    nextCommand.cmd = UC_CASTUNIT;
+    nextCommand.pTarget = pTarget;
+    nextCommand.nQSpellNum = nQSpellNum;
+    nextCommand.ptTarget = CPlot3D(0, 0, 0);
+    nextCommand.bDoItFast = bRun;
+
+    DWORD dwPositiveAck = IsCastPossible(nextCommand) ? ACK_HERO_ACK_CAST : ACK_NOTHING;
+    if (!FindAttackPath(nextCommand, dwPositiveAck))
+        nextCommand.Clear();
+}
+
+void CUnitServer::CmdWait()
+{
+    if (curCommand.cmd == UC_IDLE)
+        return;
+    // CRAP
+    if (nextCommand.cmd == UC_PLAYANIM || nextCommand.cmd == UC_PLAYANIMCYCLE)
+        return;
+    // end of CRAP
+    nextCommand.Clear();
+    nextCommand.cmd = UC_IDLE;
+    nextCommand.pTarget = NULL;
+    nextCommand.bDoItFast = false;
+}
+
+void CUnitServer::CmdRest()
+{
+    if (curCommand.cmd == UC_REST)
+        return;
+    nextCommand.Clear();
+    nextCommand.cmd = UC_REST;
+    nextCommand.pTarget = NULL;
+    nextCommand.bDoItFast = false;
+}
+
+void CUnitServer::CmdNewPose(EUnitPose pose)
+{
+    nBoredCounter = 0;
+    lpUnit->wishPose = pose;
+    if (LcCanChangePose(pose))
+    {
+        if (pose != UP_RUN || rpgUnitStats.CanRun(true) == ECR_CAN_RUN)
+            InformFailure(ACK_HERO_ACK_CHANGE_POSE);
+    }
+    if (pose != UP_STAND && pose != UP_RUN)
+        curCommand.bDoItFast = false;
+}
+
+void CUnitServer::CmdNewWeapon(DWORD dwWeapon)
+{
+    nBoredCounter = 0;
+    lpUnit->dwWishWeapon = dwWeapon;
+}
+
+void CUnitServer::CmdSkill(CMapObject *pTarget, int nSkill, DWORD dwParam, bool bRun, DWORD dwAck)
+{
+    nextCommand.Clear();
+    nextCommand.cmd = UC_SKILL;
+    nextCommand.pTarget = pTarget;
+    nextCommand.nQSpellNum = nSkill;
+    nextCommand.dwParam = dwParam;
+    nextCommand.bDoItFast = bRun;
+    // if ( curCommand.cmd != UC_SKILL )
+    // oldPose = lpUnit->wishPose;
+
+    if (!FindAttackPath(nextCommand, dwAck))
+        nextCommand.Clear();
+}
+
+void CUnitServer::CmdSteal(CUnit *pTarget, bool bRun)
+{
+    // check for availability of stealing
+    //	if ( rpgUnitStats.cManualSkills[ RPGMSKL_STEALING ] == 0 )
+    //		return;
+    if (!pTarget || pTarget->IsDead() || pTarget == lpUnit)
+        return;
+    CmdSkill(pTarget, RPGMSKL_STEALING, 0, bRun, ACK_HERO_ACK_STEAL_FROM_UNIT);
+}
+
+void CUnitServer::CmdTame(CUnit *pTarget, bool bRun)
+{
+    // check for availability of stealing
+    //	if ( rpgUnitStats.cManualSkills[ RPGMSKL_TAME ] == 0 )
+    //		return;
+    if (!pTarget || pTarget->IsDead() || pTarget == lpUnit ||
+        pTarget->GetOwner() == lpUnit->GetOwner())
+        return;
+    if (pTarget->GetSubtypeID() == MOTID_HUMAN)
+        return;
+    CmdSkill(pTarget, RPGMSKL_TAME, 0, bRun, ACK_HERO_ACK_USE_OBJECT);
+}
+
+void CUnitServer::CmdScience(CMapObject *pTarget, int nItemID, bool bRun)
+{
+    // check for availability of stealing
+    // if ( rpgUnitStats.cManualSkills[ RPGMSKL_SCIENCE ] == 0 )
+    //	return;
+    if (!pTarget) //|| pTarget->IsDead() || pTarget == lpUnit )
+        return;
+    CmdSkill(pTarget, RPGMSKL_SCIENCE, (DWORD)nItemID, bRun, ACK_HERO_ACK_USE_OBJECT);
+}
+
+void CUnitServer::CmdLoot(CUnit *pTarget, bool bRun)
+{
+    if (!pTarget || !pTarget->IsDead() || pTarget == lpUnit)
+        return;
+    CmdSkill(pTarget, RPGMSKL_LOOT, 0, bRun, ACK_HERO_ACK_LOOT);
+}
+
+void CUnitServer::CmdPlayAnimation(const char *pszAnimation)
+{
+    const SADEntry *pEntry;
+    pEntry = ((CMapObjectManager *)GetUnit()->GetWorld()->GetMapObjectManager())
+                 ->GetAnimationEntry(GetUnit()->GetMaskName(), pszAnimation);
+    if (!pEntry)
+        return;
+    nextCommand.Clear();
+    nextCommand.dwParam = pEntry->dwEntryIndex;
+    if (pEntry->dwFlags & ADB_STAGE_CYCLE)
+        nextCommand.cmd = UC_PLAYANIMCYCLE;
+    else
+        nextCommand.cmd = UC_PLAYANIM;
+    nextCommand.bDoItFast = false;
+}
+
+void CUnitServer::CmdUseTrap(int nQItemNum)
+{
+    nextCommand.Clear();
+    nextCommand.cmd = UC_TRAP;
+    nextCommand.nQSpellNum = nQItemNum;
+    nextCommand.bDoItFast = false;
+}
+
+void CUnitServer::InterruptCommand()
+{
+    L1SetPhase(UL1_NONE);
+    level1Command.Clear();
+    L1StandStill();
+    curCommand.Clear();
+    nextCommand.Clear();
+    CmdWait();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::GetAttackParams(SAttackParams &params) const
+{
+    bool bHero = IsIDofPersonage(lpUnit->GetID());
+    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
+    int i;
+
+    if (!bHero || pWeapon == 0)
+    {
+        params.fDamageMin = rpgUnitStats.fpNAWDamageMin;
+        params.fDamageMax = rpgUnitStats.fpNAWDamageMin + rpgUnitStats.fpNAWDamageRnd;
+        params.nAttack = rpgUnitStats.fpNAWToHit;
+        params.nDefense = rpgUnitStats.fpNAWParry;
+        params.fWeaponWeight = rpgUnitStats.fpNAWWeight;
+        //
+        if (pWeapon != 0) // get attack and weapon type from the weapon
+        {
+            params.rpgWeaponType = pWeapon->GetWeaponType();
+            params.rpgAttackType = CItemWeapon::GetAttackType(pWeapon->GetSubtypeID());
+        }
+        else // get attack and weapon type from the race model
+        {
+            params.rpgWeaponType = rpgUnitStats.rpgNAWWeaponType;
+            const SUDBRaceModel *pRaceModel = lpUnit->GetRaceModel();
+            for (i = 0; i < RPG_NUM_ATTACK_TYPES; ++i)
+            {
+                if (pRaceModel->attacks[i] != 0)
+                {
+                    params.rpgAttackType = static_cast<ERPGAttackTypes>(i);
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        params.fDamageMin = pWeapon->GetDamageMin();
+        params.fDamageMax = pWeapon->GetDamageMax();
+        params.rpgWeaponType = pWeapon->GetWeaponType();
+        params.rpgAttackType = CItemWeapon::GetAttackType(pWeapon->GetSubtypeID());
+        params.fWeaponWeight = pWeapon->CItem::GetWeight();
+        params.nAttack = rpgUnitStats.GetWeaponSkillLevel(
+                             params.rpgWeaponType,
+                             const_cast<CUnit *>(const_cast<CUnitServer *>(this)->GetUnit())) +
+                         pWeapon->GetAtackBonus();
+        params.nDefense = rpgUnitStats.GetWeaponSkillLevel(
+                              params.rpgWeaponType,
+                              const_cast<CUnit *>(const_cast<CUnitServer *>(this)->GetUnit())) +
+                          pWeapon->GetDefenceBonus();
+        //
+        params.rpgAttackType = CItemWeapon::GetAttackType(pWeapon->GetSubtypeID());
+    }
+    // we can't defend with the bow class weapons
+    if ((params.rpgWeaponType == RPGWST_BOW) || (params.rpgWeaponType == RPGWST_CROSSBOW))
+        params.nDefense = 0;
+    // correct damage params with spells
+    params.fDamageMax = rpgUnitStats.GetModifiedDamage(lpUnit, params.fDamageMax);
+    params.fDamageMin = rpgUnitStats.GetModifiedDamage(lpUnit, params.fDamageMin);
+    //
+    params.fToHitRandom = rpgUnitStats.fpNAWToHitRandom;
+    //
+    params.ApplyDifficultyLevel(bHero);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// return random to-hit value
+float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
+{
+    SAttackParams apAttacker, apDefender;
+    pAttacker->GetAttackParams(apAttacker);
+    GetAttackParams(apDefender);
+    float fWeightBonus = apAttacker.fWeaponWeight / (RPG_CONST_Y * apDefender.fWeaponWeight);
+    float fDistanceModifier = fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f /
+                              (RPG_CONST_Z * lpUnit->GetAttackDistance() * 2.0f);
+    float fToHitRandom = 0;
+    if (apAttacker.fToHitRandom > 0)
+        fToHitRandom = 2.0f * random.Get(MINT(apAttacker.fToHitRandom)) -
+                       (apAttacker.fToHitRandom + 1);
+
+    float fToHit = static_cast<float>(apAttacker.nAttack) + fToHitRandom - fDistanceModifier;
+    if (!bBackstab)
+        fToHit += fWeightBonus;
+
+    return Max(0.0f, fToHit);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+// !!! SAVE/LOAD code
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::Load(CSave &file)
+{
+    lastFootstep = 0;
+    file.Read(bL0Frozen);
+    file.Read(bL0MovementFrozen);
+    level0Animation.Load(file);
+    path.Load(file);
+    level1Command.Load(file);
+    file.Read(bL1PlayingSuffer);
+    file.Read(bL1MovementFailed);
+    file.Read(bL1SpeedChanged);
+    file.Read(bL1MoveAnimationSet);
+    sufferAnimationMem.Load(file);
+    file.Read(nL1SufferDirection);
+    file.Read(&eL1State, sizeof(eL1State));
+    currentPose.Load(file);
+    wishPose.Load(file);
+    file.Read(nCanAttackTime);
+    file.Read(nMoveToTargetTime);
+    file.Read(nL1RunFailCounter);
+    curCommand.Load(file);
+    nextCommand.Load(file);
+    rpgUnitStats.Load(file);
+    if (file.GetVersion() < 80)
+        rpgUnitStats.fBaseHP = GetMapObjectServer()->GetRPGStats()->ssHP.fpMax;
+    file.Read(fpModSound);
+    file.Read(fpSModSound);
+    file.Read(fpModVision);
+    file.Read(fpSModVision);
+    // для реализации tame
+    file.Read(&tameLevel, sizeof(tameLevel));
+    file.Read(nOriginalPlayerNum);
+    file.Read(nPlayerWhoTamed);
+    file.Read(nFootstepGenInterval);
+
+    file.Read(dwFutureEnemies);
+    logic.Load(file);
+    acknowledgements.Load(file);
+    file.Read(bLcCommandFail);
+    file.Read(bLcCompletelyDead);
+    file.Read(fpZSpeed);
+    pCastParticle = LoadGBSmartPtr<CEffectParticle>(file, GetWorld()->GetEffectManager());
+    LoadCList(activeContSpells, file);
+    train.Load(file);
+    if (file.GetVersion() < 68)
+        return;
+    file.Read(nAttackParamsSetTime);
+    if (file.GetVersion() < 72)
+        return;
+    EUnitPose oldPose_fake;
+    file.Read(&oldPose_fake, sizeof(oldPose_fake));
+    if (file.GetVersion() < 74)
+        return;
+    file.Read(bLcChangingPoseToAttack);
+    if (file.GetVersion() < 76)
+        return;
+    rpgDefend.Load(file);
+    if (file.GetVersion() < 84)
+        return;
+    file.Read(nBoredCounter);
+    if (file.GetVersion() < 105)
+        return;
+    level1AP.Load(file);
+    if (file.GetVersion() < 115)
+        return;
+    file.Write(nCommandExecStart);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::Store(CSave &file)
+{
+    file.Write(bL0Frozen);
+    file.Write(bL0MovementFrozen);
+    level0Animation.Store(file);
+    path.Store(file);
+    level1Command.Store(file);
+    file.Write(bL1PlayingSuffer);
+    file.Write(bL1MovementFailed);
+    file.Write(bL1SpeedChanged);
+    file.Write(bL1MoveAnimationSet);
+    sufferAnimationMem.Store(file);
+    file.Write(nL1SufferDirection);
+    file.Write(&eL1State, sizeof(eL1State));
+    currentPose.Store(file);
+    wishPose.Store(file);
+    file.Write(nCanAttackTime);
+    file.Write(nMoveToTargetTime);
+    file.Write(nL1RunFailCounter);
+    curCommand.Store(file);
+    nextCommand.Store(file);
+    rpgUnitStats.Store(file);
+    file.Write(fpModSound);
+    file.Write(fpSModSound);
+    file.Write(fpModVision);
+    file.Write(fpSModVision);
+    // для реализации tame
+    file.Write(&tameLevel, sizeof(tameLevel));
+    file.Write(nOriginalPlayerNum);
+    file.Write(nPlayerWhoTamed);
+    file.Write(nFootstepGenInterval);
+
+    file.Write(dwFutureEnemies);
+    logic.Store(file);
+    acknowledgements.Store(file);
+    file.Write(bLcCommandFail);
+    file.Write(bLcCompletelyDead);
+    file.Write(fpZSpeed);
+    StoreGBPtr(file, pCastParticle);
+    StoreCList(activeContSpells, file);
+    train.Store(file);
+    file.Write(nAttackParamsSetTime);
+    EUnitPose oldPose_fake = UP_STAND;
+    file.Write(&oldPose_fake, sizeof(oldPose_fake));
+    file.Write(bLcChangingPoseToAttack);
+    rpgDefend.Store(file);
+    file.Write(nBoredCounter);
+    level1AP.Store(file);
+    file.Write(nCommandExecStart);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+int CUnitServer::GetHeroLevel() const
+{
+    float fPower = rpgUnitStats.fpExperience / theAIGeneralSettings.fConsiderModifier;
+    return MINT(log(fPower) / log(theAIGeneralSettings.fConsiderLogBase));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::HaveLowShapes() const
+{
+    return ((lpUnit->lpArmors[RPGAST_SHIRT] != 0) || (lpUnit->lpArmors[RPGAST_PANTS] != 0) ||
+            (lpUnit->lpArmors[RPGAST_BOOTS] != 0) || (lpUnit->lpArmors[RPGAST_GLOVES] != 0));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::HaveHighShapes() const
+{
+    return ((lpUnit->lpArmors[RPGAST_HELM] != 0) || (lpUnit->lpArmors[RPGAST_PLATE] != 0) ||
+            (lpUnit->lpArmors[RPGAST_LEGGINGS] != 0));
+}
+/////////////////////////////////////////////////////////////////////////////////////

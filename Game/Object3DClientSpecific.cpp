@@ -1,0 +1,1437 @@
+#include "StdAfx.h"
+static const char LOCAL_FILE[] = __FILE__;
+/////////////////////////////////////////////////////////////////////////////////////
+#include "WorldClient.h"
+
+#include "Renderer.h"
+#include "DXGeometryProcessor.h"
+
+#include "TextureManager.h"
+#include "ModShadowSchedule.h"
+#include "dx11/RendererDX11.h"
+#include "MaterialManager.h"
+#include "GraphicsProcessor.h"
+
+#include "Object3DClientSpecific.h"
+#include "FigureClientSpecific.h"
+
+#ifndef _A4
+#include "UnitClientSpecific.h"
+#include "Terrain.h"
+#else
+#include "ViewObject.h"
+#endif //_A4
+
+#include "LightManager.h"
+#include "Light.h"
+// #include "GSVars.h"
+/////////////////////////////////////////////////////////////////////////////////////
+bool IsPrimaryTextureTID(ETypeIDs tid)
+{
+    switch (tid)
+    {
+    case TTID_UNIT_MAIN:
+    case TTID_TREE_MAIN:
+    case TTID_HOUSE_MAIN:
+    case TTID_SPELL_MAIN:
+    case TTID_STONE_MAIN:
+    case TTID_OBJECT_MAIN:
+    case TTID_WATER_MAIN:
+    case TTID_TERRAIN:
+    case TTID_ANIMATED1:
+    case TTID_ANIMATED2:
+    case TTID_ANIMATED3:
+    case TTID_ANIMATED4:
+        return true;
+    default:
+        return false;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// ******************************************************************************** //
+// struct STextureMaterialSet functions                                             //
+// this struct contain material figure groups:                                      //
+// figures for this texture, which (figure) are sorted by materials                 //
+// ******************************************************************************** //
+//////////////////////////////////////////////////////////////////////////////////////
+STextureMaterialSet::STextureMaterialSet()
+{
+    lpTexture = NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+STextureMaterialSet::~STextureMaterialSet()
+{
+    RemoveAll();
+    lpTexture = NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL STextureMaterialSet::AddMaterial( CMaterial* lpMaterial )
+// adding new material in this set (with material set creation)
+BOOL STextureMaterialSet::AddMaterial(CMaterial *lpMaterial)
+{
+    int i;
+    // first, trying to find matgroup with such typeID and, if it is, return with FALSE
+    for (i = 0; i < matgroups.GetSize(); i++)
+    {
+        if (matgroups[i]->lpMaterial &&
+            (matgroups[i]->lpMaterial->GetTypeID() == lpMaterial->GetTypeID()))
+            return FALSE;
+    }
+    // if no one, add new
+    SMaterialFigureSet *pMatgroup = dbgnew SMaterialFigureSet;
+    pMatgroup->lpMaterial = lpMaterial;
+    pMatgroup->lpMaterial->AddRef();
+    matgroups.Add(pMatgroup);
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL STextureMaterialSet::AddFigure( CFigure* lpFigure, int nMaterialTypeID )
+// adds new figure to the specified material set
+BOOL STextureMaterialSet::AddFigure(CFigure *lpFigure, int nMaterialTypeID)
+{
+    int i;
+    // first, trying to find matgroup with such typeID and, if it is, add figure
+    for (i = 0; i < matgroups.GetSize(); i++)
+    {
+        if (matgroups[i]->lpMaterial && (matgroups[i]->lpMaterial->GetTypeID() == nMaterialTypeID))
+            return matgroups[i]->AddFigure(lpFigure);
+    }
+    // if no such material in the set, return with FALSE
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL STextureMaterialSet::RemoveFigure( CFigure* lpFigure )
+// remove specified figure
+BOOL STextureMaterialSet::RemoveFigure(CFigure *lpFigure)
+{
+    int i;
+
+    for (i = 0; i < matgroups.GetSize(); i++)
+    {
+        if (matgroups[i]->RemoveFigure(lpFigure))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void STextureMaterialSet::RemoveAll()
+// remove all material sets
+void STextureMaterialSet::RemoveAll()
+{
+    int i;
+    // delete all elements
+    for (i = 0; i < matgroups.GetSize(); i++)
+    {
+        if (matgroups[i])
+        {
+            delete matgroups[i];
+            matgroups[i] = NULL;
+        }
+    }
+    // free array
+    matgroups.RemoveAll();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL STextureMaterialSet::IsEmpty() const
+{
+    for (int i = 0; i < matgroups.GetSize(); i++)
+    {
+        if (!(matgroups[i]->IsEmpty()))
+            return FALSE;
+    }
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// ******************************************************************************** //
+// struct SMaterialFigureSet functions                                              //
+// this struct contain figure groups, associated with one material (and one texture)//
+// ******************************************************************************** //
+//////////////////////////////////////////////////////////////////////////////////////
+SMaterialFigureSet::SMaterialFigureSet()
+{
+    lpMaterial = NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+SMaterialFigureSet::~SMaterialFigureSet()
+{
+    RemoveAll();
+    if (lpMaterial)
+    {
+        lpMaterial->Release();
+        lpMaterial = NULL;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL SMaterialFigureSet::AddFigure( CFigure* lpFigure )
+// adds figure
+BOOL SMaterialFigureSet::AddFigure(CFigure *lpFigure)
+{
+    int i;
+    // first, trying to find such figue
+    for (i = 0; i < figures.GetSize(); i++)
+    {
+        if (figures[i] == lpFigure)
+            return FALSE;
+    }
+    // if no one, add it
+    figures.Add(lpFigure);
+    lpFigure->AddRef();
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL SMaterialFigureSet::RemoveFigure( CFigure* lpFigure )
+// removes figure
+BOOL SMaterialFigureSet::RemoveFigure(CFigure *lpFigure)
+{
+    int i;
+    // trying to find such figue
+    for (i = 0; i < figures.GetSize(); i++)
+    {
+        if (figures[i] == lpFigure)
+        {
+            figures.RemoveAt(i);
+            lpFigure->Release();
+            return TRUE;
+        }
+    }
+    // if no one, return with FALSE
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL SMaterialFigureSet::RemoveAll()
+// removes all figures
+BOOL SMaterialFigureSet::RemoveAll()
+{
+    int i;
+    // release figures
+    for (i = 0; i < figures.GetSize(); i++)
+    {
+        if (figures[i])
+        {
+            figures[i]->Release();
+            figures[i] = NULL;
+        }
+    }
+    // free array
+    figures.RemoveAll();
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// ******************************************************************************** //
+// 								     class CObject3DClientSpecific
+// methods
+// // this class handles client-specific 3d object data and work with it (ZB drawing)  //
+// ******************************************************************************** //
+//////////////////////////////////////////////////////////////////////////////////////
+CObject3DClientSpecific::CObject3DClientSpecific()
+{
+    pos = -1;
+    pShadowTexture = 0;
+    pWoundsTexture = 0;
+    shadowrect.SetRectEmpty();
+
+    fpTime = 0;
+
+#ifdef _DEBUG
+    pszGameClassName = GetGameClassName();
+#endif // _DEBUG
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CObject3DClientSpecific::~CObject3DClientSpecific()
+{
+    Destroy();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CObject3DClientSpecific::Create()
+{
+    pos = -1;
+    ResetAllFlags();
+    // initialize extended textures (shadow and wounds)
+    pShadowTexture = 0;
+    pWoundsTexture = 0;
+    //
+    shadowrect.SetRectEmpty();
+    memset(&bvShadowBV, 0, sizeof(bvShadowBV));
+    //
+    memset(sets, 0, sizeof(sets));
+    //
+    SetLastLightTime(0);
+    //
+    fScaleX = fScaleY = fScaleZ = 1.0f;
+    //
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CObject3DClientSpecific::Destroy()
+// destroy all internal data structures
+void CObject3DClientSpecific::Destroy()
+{
+    int i;
+    // remove extended textures (shadow and wounds)
+    pShadowTexture = 0;
+    pWoundsTexture = 0;
+    // remove sets (only 2 sets - primary and secondary)
+    for (i = 0; i < 2; ++i)
+    {
+        if (sets[i])
+            delete sets[i];
+    }
+    memset(sets, 0, sizeof(sets));
+    // remove textures
+    for (i = 0; i < textures.GetSize(); i++)
+    {
+        if (textures[i])
+        {
+            textures[i]->Release();
+            textures[i] = 0;
+        }
+    }
+    textures.RemoveAll();
+    // remove materials
+    for (i = 0; i < materials.GetSize(); i++)
+    {
+        if (materials[i])
+        {
+            materials[i]->Release();
+            materials[i] = NULL;
+        }
+    }
+    materials.RemoveAll();
+    //
+    RegisterObject3D(NULL);
+    SetLastLightTime(0);
+
+    ResetAllFlags();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CObject3DClientSpecific::AddFigure( CFigure* lpFigure, int nMaterialTypeID, int
+// nTextureTypeID ) adding figure with specified material and texture typeID to the object perform
+// it in four stages :
+// 		1. scan for such texture and add one, if need
+// 		2. scan for such material and add one, if need
+// 		3. scan for such figure
+// 		4. add figure to the specified place
+BOOL CObject3DClientSpecific::AddFigure(CFigure *lpFigure)
+{
+    ETypeIDs tidMaterialTypeID = lpFigure->GetMaterialTypeID();
+    ETypeIDs tidTextureTypeID = lpFigure->GetTextureTypeID();
+    int i;
+    // scan for such texture
+    if (FindTexture(tidTextureTypeID) == NULL)
+        AddNewTexture(tidTextureTypeID);
+    // scan for such material
+    if (FindMaterial(tidTextureTypeID, tidMaterialTypeID) == NULL)
+        AddNewMaterial(tidTextureTypeID, tidMaterialTypeID);
+    // add figure to the specified place
+    for (i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        if (sets[i]->lpTexture->GetTypeID() == tidTextureTypeID)
+        {
+            sets[i]->AddFigure(lpFigure, tidMaterialTypeID);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL CObject3DClientSpecific::RemoveFigure( CFigure* lpFigure )
+// trying to remove specified figure from object (both from 'figures' and from appropriate set)
+BOOL CObject3DClientSpecific::RemoveFigure(CFigure *lpFigure)
+{
+    int i;
+
+    for (i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        if (sets[i]->RemoveFigure(lpFigure))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CFigure* CObject3DClientSpecific::RemoveFigure( LPCSTR pszFigureName )
+// remove figure from object by name
+CFigure *CObject3DClientSpecific::RemoveFigure(LPCSTR pszFigureName)
+{
+    CFigure *lpFigure = FindFigure(pszFigureName);
+    int i;
+    //
+    if (lpFigure == NULL)
+        return NULL;
+    //
+    for (i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        if (sets[i]->RemoveFigure(lpFigure))
+            return lpFigure;
+    }
+
+    return NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CFigure* CObject3DClientSpecific::FindFigure( int nFigureTypeID )
+// search for figure with specified type id
+// returns NULL, if no such figure or pointer to one, if it is
+CFigure *CObject3DClientSpecific::FindFigure(int nFigureTypeID)
+{
+    return ((CObject3D *)lpObject)->FindFigure(nFigureTypeID);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CFigure* CObject3D::FindFigure( LPCSTR pszFigureName )
+// trying to find figure by name
+CFigure *CObject3DClientSpecific::FindFigure(LPCSTR pszFigureName)
+{
+    return ((CObject3D *)lpObject)->FindFigure(pszFigureName);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CTexture* CObject3DClientSpecific::AddNewTexture( ETypeIDs tidTextureTypeID )
+// add new texture with specified type id
+CTexture *CObject3DClientSpecific::AddNewTexture(ETypeIDs tidTextureTypeID)
+{
+    STextureMaterialSet *pSet = 0;
+    int i;
+    // scan for such type texture
+    for (i = 0; i < textures.GetSize(); i++)
+    {
+        if (textures[i]->GetTypeID() == tidTextureTypeID)
+            return textures[i];
+    }
+    // add new with such type
+    if (IsPrimaryTextureTID(tidTextureTypeID))
+    {
+        if (!sets[0])
+        {
+            pSet = dbgnew STextureMaterialSet();
+            pSet->lpTexture = ((CWorldClient *)GetWorld())->CreateTexture(tidTextureTypeID);
+            sets[0] = pSet;
+            textures.Add(pSet->lpTexture);
+            pSet->lpTexture->AddRef();
+        }
+        else
+        {
+            ReportWarning(
+                "Adding new primary texture set with one exist\nFor object \"%s\" with ID=%d!\n",
+                lpObject->GetMaskName(), lpObject->GetID());
+            sets[0]->lpTexture->SetTypeID(tidTextureTypeID);
+            pSet = sets[0];
+        }
+    }
+    else
+    {
+        if (!sets[1])
+        {
+            pSet = dbgnew STextureMaterialSet();
+            pSet->lpTexture = ((CWorldClient *)GetWorld())->CreateTexture(tidTextureTypeID);
+            sets[1] = pSet;
+            textures.Add(pSet->lpTexture);
+            pSet->lpTexture->AddRef();
+        }
+        else
+        {
+            sets[1]->lpTexture->SetTypeID(tidTextureTypeID);
+            pSet = sets[1];
+        }
+    }
+
+    return pSet->lpTexture;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CMaterial* CObject3DClientSpecific::AddNewMaterial( ETypeIDs tidTextureTypeID, ETypeIDs
+// tidMaterialTypeID ) add new material with specified type id for the specified texture
+CMaterial *CObject3DClientSpecific::AddNewMaterial(ETypeIDs tidTextureTypeID,
+                                                   ETypeIDs tidMaterialTypeID)
+{
+    int i, j;
+    // add new with such type
+    for (i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        if (sets[i]->lpTexture && (sets[i]->lpTexture->GetTypeID() == tidTextureTypeID))
+        {
+            for (j = 0; j < sets[i]->matgroups.GetSize(); j++)
+            {
+                if (sets[i]->matgroups[j]->lpMaterial &&
+                    (sets[i]->matgroups[j]->lpMaterial->GetTypeID() == tidMaterialTypeID))
+                {
+                    return sets[i]->matgroups[j]->lpMaterial;
+                }
+            }
+            SMaterialFigureSet *pSet = dbgnew SMaterialFigureSet();
+            pSet->lpMaterial = ((CWorldClient *)GetWorld())->CreateMaterial(tidMaterialTypeID);
+            pSet->lpMaterial->AddRef();
+            sets[i]->matgroups.Add(pSet);
+            materials.Add(pSet->lpMaterial);
+            pSet->lpMaterial->AddRef();
+
+            return pSet->lpMaterial;
+        }
+    }
+
+    return NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CTexture* CObject3DClientSpecific::FindTexture( ETypeIDs tidTextureTypeID )
+// find texture with such type id. if no one, return NULL
+CTexture *CObject3DClientSpecific::FindTexture(ETypeIDs tidTextureTypeID)
+{
+    int i;
+
+    for (i = 0; i < textures.GetSize(); i++)
+    {
+        if (textures[i]->GetTypeID() == tidTextureTypeID)
+            return textures[i];
+    }
+
+    return NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CMaterial* CObject3DClientSpecific::FindMaterial( ETypeIDs tidTextureTypeID, ETypeIDs
+// tidMaterialTypeID ) find material with specified type id. if no one, return NULL
+CMaterial *CObject3DClientSpecific::FindMaterial(ETypeIDs tidTextureTypeID,
+                                                 ETypeIDs tidMaterialTypeID)
+{
+    int i, j;
+    // find material with such type
+    for (i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        if (sets[i]->lpTexture && (sets[i]->lpTexture->GetTypeID() == tidTextureTypeID))
+        {
+            for (j = 0; j < sets[i]->matgroups.GetSize(); j++)
+            {
+                if (sets[i]->matgroups[j]->lpMaterial &&
+                    (sets[i]->matgroups[j]->lpMaterial->GetTypeID() == tidMaterialTypeID))
+                {
+                    return sets[i]->matgroups[j]->lpMaterial;
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CTexture* CObject3DClientSpecific::ChangeTexture( CTexture* lpNewTexture )
+// change texture with typeID from lpNewTexture
+CTexture *CObject3DClientSpecific::ChangeTexture(CTexture *lpNewTexture)
+{
+    CTexture *lpReturnTexture1 = NULL;
+    CTexture *lpReturnTexture2 = NULL;
+    int i;
+    // check params
+    if (lpNewTexture == NULL)
+        return NULL;
+    //
+    for (i = 0; i < textures.GetSize(); i++)
+    {
+        if (textures[i]->GetTypeID() == lpNewTexture->GetTypeID())
+        {
+            // change texture in textures list
+            lpReturnTexture1 = textures[i];
+            textures[i] = lpNewTexture;
+            textures[i]->AddRef();
+            lpReturnTexture1->Release();
+            break;
+        }
+    }
+    // change texture in texture/material set
+    for (i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        if (sets[i]->lpTexture->GetTypeID() == lpNewTexture->GetTypeID())
+        {
+            lpReturnTexture2 = sets[i]->lpTexture;
+            sets[i]->lpTexture = lpNewTexture;
+            break;
+        }
+    }
+
+#ifdef _DEBUG
+    if (lpReturnTexture1 != lpReturnTexture2)
+    {
+        ReportError("CObject3D::ChangeTexture.\n Ambiguity in textures.\n");
+        return NULL;
+    }
+#endif // _DEBUG
+
+    return lpReturnTexture1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CMaterial* CObject3DClientSpecific::GetFirstMaterial()
+// get first material from used in this object
+CMaterial *CObject3DClientSpecific::GetFirstMaterial()
+{
+    if (materials.GetSize() > 0)
+    {
+        pos = 0;
+        return materials[pos];
+    }
+    else
+    {
+        pos = -1;
+        return NULL;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CMaterial* CObject3DClientSpecific::GetNextMaterial()
+// get next material from used in this object
+CMaterial *CObject3DClientSpecific::GetNextMaterial()
+{
+    pos++;
+    if (materials.GetSize() > pos)
+        return materials[pos];
+    else
+        return NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CTexture* CObject3DClientSpecific::GetFirstTexture()
+// get first texture of this object
+CTexture *CObject3DClientSpecific::GetFirstTexture()
+{
+    if (textures.GetSize() > 0)
+    {
+        pos = 0;
+        return textures[pos];
+    }
+    else
+    {
+        pos = -1;
+        return NULL;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// CTexture* CObject3DClientSpecific::GetNextTexture()
+// get next texture of this object
+CTexture *CObject3DClientSpecific::GetNextTexture()
+{
+    pos++;
+    if (textures.GetSize() > pos)
+        return textures[pos];
+    else
+        return NULL;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::RecalcScreenRect()
+{
+    CObject3D *pObject = (CObject3D *)lpObject;
+    //
+    rcRect.SetRectEmpty();
+    for (int i = 0; i < pObject->figures.GetSize(); i++)
+    {
+        if (!pObject->figures[i]->CheckFlag(FIG_VISIBLE))
+            continue;
+        CRect rc = ((CFigureClientSpecific *)pObject->figures[i]->GetFigureSpecific())
+                       ->Get2DClipRect();
+
+        rc.NormalizeRect();
+        rcRect.UnionRect(rc, rcRect);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL CObject3DClientSpecific::Draw()
+// draw
+BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
+{
+    if (lpObject->CheckFlag(OBJ_HIDDEN))
+        return TRUE;
+    CDXGeometryProcessor *pGPU = pRend->GetGPU();
+    CPlot3D objectCP = (lpObject)->GetCP();
+    SHMatrix matrix;
+    int nFigureClipFlag = 0;
+    bool bHaveScale = false;
+    //
+    lpObject->FinalDataLoading();
+    //
+    if (!lpObject->CheckFlag(OBJ_STATIC))
+        lpObject->ResetFlag(OBJ_LIGHTED);
+    //
+    if (pRect != 0)
+    {
+        rcRect.SetRectEmpty();
+        lpObject->rcScreenRect.SetRectEmpty();
+    }
+    //
+    if (lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    // collect all light sources to lit this object
+    static CSimplyArray<CLight *, CLight *> lights;
+    CManagerIterator mi;
+    CLight *pLight = static_cast<CLight *>(mi.GetFirst(theWorld.GetLightManager()));
+    lights.SetSize(16); // ARRAY BOUNDS CHECK
+    lights.SetSize(0);  // ARRAY BOUNDS CHECK
+    while (pLight)
+    {
+        if ((pRend->GetSunlight() != pLight) &&
+            fabs2(lpObject->GetCP() - pLight->GetCP()) <= square(pLight->GetRange() + 10.0f) &&
+            !pLight->CheckFlag(LIT_INACTIVE))
+        {
+            if (pLight->CheckFlag(LIT_DYNAMIC))
+                lpObject->ResetFlag(OBJ_LIGHTED);
+            lights.Add(pLight);
+        }
+        pLight = static_cast<CLight *>(mi.GetNext());
+    }
+    // object placement matrix
+    lpObject->CreateCurrentPlacement();
+    lpObject->GetPlacement(matrix);
+    // DX11 relighting is unconditional, but must not invalidate a cached static shadow.
+    const DWORD shadowLightingWasValid = lpObject->CheckFlag(OBJ_LIGHTED);
+    lpObject->ResetFlag(OBJ_LIGHTED);
+    pGPU->PushMainMatrix(matrix);
+    if (!lpObject->CheckFlag(OBJ_LIGHTED)) // push matrix for lighting
+        pGPU->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+    // object scale matrix
+    Identity(matrix);
+
+    // TODO WORLD MATRIX SCALE
+    bHaveScale = GetScaleMatrix(matrix);
+    if (bHaveScale)
+    {
+        pGPU->PushMainMatrix(matrix);
+        if (!lpObject->CheckFlag(OBJ_LIGHTED)) // push matrix for lighting
+            pGPU->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+    }
+    // get fog value from terrain
+    BYTE cFog = 255; // default fog - completelly unfogged
+    if (!lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG))
+        cFog = ((CWorldClient *)GetWorld())->GetTerrain()->GetFogAlpha(objectCP);
+
+    // draw object
+    DWORD dwAllFiguresLighted = FIG_LIGHTED;
+    DWORD dwObjectWasLighted = shadowLightingWasValid;
+    for (int i = 0; i < 2; ++i)
+    {
+        if (!sets[i])
+            continue;
+        // set texture to use with this set
+        bool bCheck = pRend->BindTexture(0, sets[i]->lpTexture);
+
+        if (bCheck == FALSE)
+            return ReportError("CObject3DClientSpecific::Draw.\n SetTexture failed.\n");
+
+        theRenderer.BindTexture(1, (i == 0 && pWoundsTexture) ? pWoundsTexture : 0);
+        // process material groups for it texture
+        for (int j = 0; j < sets[i]->matgroups.GetSize(); j++)
+        {
+            // draw all figures for it material with current texture
+            for (int k = 0; k < sets[i]->matgroups[j]->figures.GetSize(); k++)
+            {
+                CFigure *pFigure = sets[i]->matgroups[j]->figures[k];
+                // CRAP - old bodypart
+                if (fabs2(pFigure->GetCP()) > 1e9f)
+                    continue;
+                // CRAP end
+                if (!lpObject->CheckFlag(OBJ_LIGHTED))
+                    pFigure->ResetFlag(FIG_LIGHTED); // reset figure lighting flag, if entire object
+                                                     // require lighting
+                // prepare placement matrix
+                pFigure->CreateCurrentPlacement();
+                pFigure->GetPlacement(matrix);
+                // TODO WORLD MATRIX TRANSLATION2
+                // push this placement to all necessary stacks
+                pGPU->PushMainMatrix(matrix);
+                pGPU->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+                // draw figure
+                {
+                    pRend->SetProjectionMatrix();
+                    SHMatrix world = pGPU->GetMatrix(MAT_STACK_WORLDSPACE);
+                    pRend->SetWorldMatrix(world);
+                }
+                CRect rcFigureRect;
+                bCheck = pRend->DrawFigure(pFigure, lights, sets[i]->matgroups[j]->lpMaterial, cFog,
+                                           0);
+                if (bCheck == FALSE)
+                    return ReportError("CObject3DClientSpecific::Draw.\n CFigure::Draw failed.\n");
+                nFigureClipFlag |= pFigure->CheckFlag(FIG_VISIBLE);
+                //
+                if (pRect && !rcFigureRect.IsRectEmpty() && pFigure->CheckFlag(FIG_VISIBLE))
+                    rcRect |= rcFigureRect;
+                // pop scaling
+                // pop placement from all stacks above
+                pGPU->PopMatrix(MAT_STACK_WORLDSPACE);
+                pGPU->PopMainMatrix();
+                if (!pFigure->CheckFlag(FIG_HIDDEN))
+                    dwAllFiguresLighted &= pFigure->CheckFlag(FIG_LIGHTED);
+            }
+        }
+    }
+    // pop scale matrix
+    if (bHaveScale)
+    {
+        if (!lpObject->CheckFlag(OBJ_LIGHTED)) // pop matrix for lighting
+            pGPU->PopMatrix(MAT_STACK_WORLDSPACE);
+        pGPU->PopMainMatrix();
+    }
+    // pop object placement matrix
+    if (!lpObject->CheckFlag(OBJ_LIGHTED)) // pop matrix for lighting
+        pGPU->PopMatrix(MAT_STACK_WORLDSPACE);
+    pGPU->PopMainMatrix();
+    //
+    if (dwAllFiguresLighted) // treat this object as lighted only if all figures was lighted!
+    {
+        lpObject->SetFlag(OBJ_LIGHTED);
+        if (!dwObjectWasLighted)
+        {
+            SetLastLightTime(timeGetTime());
+            SetFlag(OCS_RESHADOW);
+        }
+    }
+    else
+        lpObject->ResetFlag(OBJ_LIGHTED);
+    //
+    if (pRect != 0)
+        *pRect = lpObject->rcScreenRect = rcRect;
+    //
+    if (nFigureClipFlag)
+        lpObject->SetFlag(OBJ_VISIBLE);
+    else
+        lpObject->ResetFlag(OBJ_VISIBLE);
+
+    // remove blood texture
+    theRenderer.BindTexture(1, (CDXGISurface *)0);
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CObject3DClientSpecific::CanSelectRoughly(const CPoint &point) const
+{
+    if (!lpObject->CheckFlag(OBJ_VISIBLE))
+        return FALSE;
+    return lpObject->rcScreenRect.PtInRect(point);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL CObject3DClientSpecific::IsCanSelect( const CPoint& point )
+// test for selection
+BOOL CObject3DClientSpecific::IsCanSelect(const CPoint &point)
+{
+    CObject3D *pObject = (CObject3D *)lpObject;
+    int i;
+
+    if (!lpObject->CheckFlag(OBJ_VISIBLE))
+        return FALSE;
+
+    for (i = 0; i < pObject->figures.GetSize(); i++)
+    {
+        if (pObject->figures[i]->CheckFlag(FIG_VISIBLE) &&
+            static_cast<CFigureClientSpecific *>(pObject->figures[i]->GetFigureSpecific())
+                ->Get2DClipRect()
+                .PtInRect(point))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CObject3DClientSpecific::IsCanSelect(const CRect &rect)
+{
+    CObject3D *pObject = (CObject3D *)lpObject;
+    CRect rcIntersect;
+    int i;
+
+    if (!lpObject->CheckFlag(OBJ_VISIBLE))
+        return FALSE;
+
+    for (i = 0; i < pObject->figures.GetSize(); i++)
+    {
+        if (pObject->figures[i]->CheckFlag(FIG_VISIBLE))
+        {
+            rcIntersect.IntersectRect(static_cast<CFigureClientSpecific *>(
+                                          pObject->figures[i]->GetFigureSpecific())
+                                          ->Get2DClipRect(),
+                                      rect);
+            if (!rcIntersect.IsRectEmpty())
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL CObject3DClientSpecific::LoadTextures( LPCSTR pszPrimaryTextureName, pszSecondaryTextureName
+// ) load primary and secondary textures...
+BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
+                                           LPCSTR pszSecondaryTextureName)
+{
+    CTextureManager *lpTextureManager = (CTextureManager *)((CWorldClient *)GetWorld())
+                                            ->GetTextureManager();
+    CTexture *lpTexture = NULL;
+    CString szString;
+    // store new texture names
+    szPrimaryTextureName = pszPrimaryTextureName;
+    szSecondaryTextureName = pszSecondaryTextureName;
+    // load primary texture
+
+    if (pszPrimaryTextureName && *pszPrimaryTextureName &&
+        CString(pszPrimaryTextureName).CompareNoCase("none") != 0)
+    {
+        lpTexture = GetPrimaryTexture();
+        if (lpTexture)
+            lpTexture = lpTextureManager->FindTexture(lpTexture->GetTypeID(),
+                                                      pszPrimaryTextureName);
+        if (lpTexture)
+            ChangeTexture(lpTexture);
+        else
+        {
+            lpTexture = GetPrimaryTexture();
+            if (lpTexture != NULL)
+            {
+                lpTexture->SetName(pszPrimaryTextureName);
+                lpTextureManager->LoadTexture(lpTexture);
+            }
+        }
+    }
+    // load secondary texture
+    if (pszSecondaryTextureName && *pszSecondaryTextureName &&
+        CString(pszSecondaryTextureName).CompareNoCase("none") != 0)
+    {
+        lpTexture = GetSecondaryTexture();
+        if (lpTexture)
+            lpTexture = lpTextureManager->FindTexture(lpTexture->GetTypeID(),
+                                                      pszSecondaryTextureName);
+        if (lpTexture)
+            ChangeTexture(lpTexture);
+        else
+        {
+            lpTexture = GetSecondaryTexture();
+            if (lpTexture != NULL)
+            {
+                lpTexture->SetName(pszSecondaryTextureName);
+                lpTextureManager->LoadTexture(lpTexture);
+            }
+        }
+    }
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CObject3DClientSpecific::LoadWounds(LPCSTR pszWoundsTextureName)
+{
+    if (sets[0] == 0)
+        return FALSE;
+    CTextureManager *pTextureManager = theWorld.GetTextureManager();
+    // find or create texture
+    if (!pWoundsTexture)
+    {
+        pWoundsTexture = pTextureManager->FindTexture(TTID_SPELL_MAIN, pszWoundsTextureName);
+        if (!pWoundsTexture)
+            pWoundsTexture = pTextureManager->CreateTexture(TTID_SPELL_MAIN, pszWoundsTextureName);
+        if (!pWoundsTexture)
+            return ReportError("Can't create wounds texture for object \"%s\" ID = %d\n",
+                               lpObject->GetGameClassName(), lpObject->GetID());
+    }
+    // check user data
+    CBYTEArray userdata;
+    pTextureManager->GetUserData(pszWoundsTextureName, userdata);
+    if (!userdata.GetSize() || !pWoundsTexture->IsUserDataEqual(userdata))
+    {
+        // load new texture data
+        pWoundsTexture->ResetFlag(TEX_LOADED);
+        if (pTextureManager->LoadTexture(pWoundsTexture) == FALSE)
+        {
+            pWoundsTexture = 0;
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::ReleaseWounds()
+{
+    pWoundsTexture = 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// setup all materials in this specific with appropriate material data
+void CObject3DClientSpecific::SetMaterials()
+{
+    // set materials
+    CMaterialManager *lpMaterialManager = (CMaterialManager *)((CWorldClient *)GetWorld())
+                                              ->GetMaterialManager();
+    CMaterial *lpMaterial = GetFirstMaterial();
+    while (lpMaterial)
+    {
+        lpMaterialManager->SetMaterial(lpMaterial, lpMaterial->GetTypeID());
+        lpMaterial = GetNextMaterial();
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::Select(BOOL bSelect)
+{
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::Preselect(BOOL bSelect)
+{
+    Highlight(bSelect);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// set emissive component for all materials to 0 or 1
+void CObject3DClientSpecific::Highlight(BOOL bHighlight)
+{
+    D3DVECTOR dvEmissive;
+    int i;
+
+    if (bHighlight)
+    {
+        dvEmissive.x = 1;
+        dvEmissive.y = 1;
+        dvEmissive.z = 1;
+
+        for (i = 0; i < materials.GetSize(); i++)
+        {
+            materials[i]->StoreEmissive();
+            materials[i]->SetEmissive(dvEmissive);
+        }
+    }
+    else
+    {
+        for (i = 0; i < materials.GetSize(); i++)
+            materials[i]->RestoreEmissive();
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CObject3DClientSpecific::FinalDataLoading()
+// load textures and create materials
+void CObject3DClientSpecific::FinalDataLoading()
+{
+    //
+    SetMaterials();
+    //
+    if (szSecondaryTextureName != "none")
+        LoadTextures(szPrimaryTextureName, szSecondaryTextureName);
+    else
+        LoadTextures(szPrimaryTextureName, NULL);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+static CXYZW4Array shadow4;
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::StepInvisibility(float fpTimeStep)
+{
+    fpTime += fpTimeStep;
+    float fRemain = (float)fmod(fpTime, 2.0f * 15.0f);
+
+    if (fRemain > 15)
+        fRemain = 30.0f - fRemain;
+
+    fRemain *= (1.0f / 15.0f);
+
+    fRemain = 0.2f + fRemain * 0.5f;
+
+    for (int i = 0; i < materials.GetSize(); ++i)
+        materials[i]->SetAlpha(fRemain);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::SetAsVisible()
+{
+    for (int i = 0; i < materials.GetSize(); ++i)
+        materials[i]->SetAlpha(1);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::StepStun(float fpTimeStep)
+{
+    fpTime += fpTimeStep;
+    float fRemain = (float)fmod(fpTime, 2.0f * 15.0f);
+    if (fRemain > 15)
+        fRemain = 30.0f - fRemain;
+    fRemain *= (1.0f / 15.0f);
+    fRemain = 0.2f + fRemain * 0.5f;
+    //
+    for (int i = 0; i < materials.GetSize(); ++i)
+    {
+        materials[i]->SetSpecular(fRemain, 0, 0);
+        materials[i]->SetFlag(MAT_USE_SPECULAR);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::SetUnstun()
+{
+    for (int i = 0; i < materials.GetSize(); ++i)
+    {
+        materials[i]->SetSpecular(0, 0, 0);
+        materials[i]->ResetFlag(MAT_USE_SPECULAR);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CSimplyArray<CPlot2D, CPlot2D &> CObject3DClientSpecific::shadowbuffer;
+CSimplyArray<CPoint, CPoint &> CObject3DClientSpecific::shadowresult;
+CSize G_SHADOWSIZE = { 64, 64 };
+std::unique_ptr<WORD[]> pTexShadowBuffer = std::make_unique<WORD[]>(G_SHADOWSIZE.cx * G_SHADOWSIZE.cy);
+    /////////////////////////////////////////////////////////////////////////////////////
+// BOOL CObject3DClientSpecific::DrawRealisticShadow2()
+// draw realistic shadow with blur!
+// first, project object's bbox on zero-plane and calc all necessary information
+// to project object on the 64x64 texture.
+// Then, project and draw object's figures on the texture above
+// apply blur
+// create mesh with texture above and put it on terrain
+BOOL CObject3DClientSpecific::DrawRealisticShadow2(CRenderer *pRend)
+{
+    if (!IsNeedShadow() || lpObject->CheckFlag(OBJ_HIDDEN | OBJ_NOSHADOW) ||
+        lpObject->IsInvisible())
+        return TRUE;
+    CDXGeometryProcessor *pGPU = pRend->GetGPU();
+    // render new shadow
+    // create shadow rendering texture (if need)
+    if (!pShadowTexture)
+    {
+        pShadowTexture = theWorld.GetTextureManager()->CreateShadowTexture();
+        if (!pShadowTexture)
+            return ReportError("Can't create texture for shadow rendering!\n");
+        char buffer[64];
+        sprintf(buffer, "SR%d",
+                lpObject->GetID()); // all shadow rendering textures have a name 'SR' + object's ID
+        pShadowTexture->SetName(buffer);
+
+        SetFlag(OCS_RESHADOW);
+    }
+    //////////////////////////////////////////////////////////////////////
+    const DWORD shadowNow = GetTickCount();
+    bool rebuildShadow = IsNeedRecalcShadow();
+    if (!rebuildShadow && shadowvertices.GetSize()) {
+        DWORD width,height; pRend->GetD3D()->GetCurrentMode(width,height);
+        const CRect &screen = lpObject->rcScreenRect;
+        const unsigned long long area = static_cast<unsigned long long>(Max(0,screen.Width())) * Max(0,screen.Height());
+        rebuildShadow = ModShadowSchedule::ForceRefresh(shadowNow,modShadowLastBuild,
+            lpObject->CheckFlag(OBJ_VISIBLE)!=0,area*1000 >= static_cast<unsigned long long>(width)*height*10);
+    }
+    LARGE_INTEGER shadowStarted;
+    if (rebuildShadow)
+    {
+        QueryPerformanceCounter(&shadowStarted);
+        ++ModShadowSchedule::rebuilt;
+        LPGRAPHICSPROCESSOR pGrPU = pRend->GetGrPU();
+        LPTLPIPELINE lpGeometryProcessor = pGPU->GetGeometryProcessor();
+        SHMatrix matrix, matShift;
+        int i, j;
+        // enumerate light sources and build a median light direction, which takes in accout light's
+        // luminance and direction
+        CPlot3D ptLightDir = VNULL;
+        CManagerIterator mi;
+        CLight *pLight = static_cast<CLight *>(mi.GetFirst(theWorld.GetLightManager()));
+        while (pLight)
+        {
+            if (!pLight->CheckFlag(LIT_UNSHADOW) && !pLight->CheckFlag(LIT_INACTIVE))
+            {
+                if (pLight->GetTypeID() != LTID_POINTLIGHT)
+                {
+                    const D3DCOLORVALUE &color1 = pLight->GetDiffuse();
+                    float fLuminance = 0.6f * color1.g + 0.3f * color1.r + 0.1f * color1.b;
+                    ptLightDir += *reinterpret_cast<const CPlot3D *>(&(pLight->GetDirection())) *
+                                  fLuminance;
+                }
+                else
+                {
+                    float ldr2 = fabs2(lpObject->GetCP(), pLight->GetCP());
+                    if (ldr2 < pLight->GetRange2())
+                    {
+                        const D3DCOLORVALUE &color1 = pLight->GetDiffuse();
+                        float fLuminance = 0.6f * color1.g + 0.3f * color1.r + 0.1f * color1.b;
+                        fLuminance *= 1.0f - ldr2 * pLight->GetRcprRange2();
+                        CPlot3D ptDir = lpObject->GetCP() - pLight->GetCP();
+                        if (ldr2 != 0)
+                            ptDir *= 1.0f / sqrt(ldr2);
+                        else
+                            ptDir = VNULL;
+                        if (pLight->CheckFlag(LIT_MAGICSHADOW))
+                            fLuminance *= 10;
+                        ptLightDir += ptDir * fLuminance;
+                    }
+                }
+            }
+            pLight = static_cast<CLight *>(mi.GetNext());
+        }
+        // now normalize and correct result direction
+        CPlot3D direction(ptLightDir);
+        {
+            float fLen2 = fabs2(direction);
+            if (fLen2 != 0)
+                direction *= 1.0f / sqrt(fLen2);
+            // correct direction to be 20 degrees or more
+            float fXY = sqrt(direction.x * direction.x + direction.y * direction.y);
+            float fAngle = atan2(fabs(direction.z), fXY);
+            if (fAngle < ToRadian(20.0f))
+            {
+                direction.z = -fXY * 0.36397f; // * tan( 20 )
+                direction *= 1.0f / fabs(direction);
+            }
+        }
+        //
+        pGPU->CreateShadowProjectionMatrixWithCorrection(matrix, direction);
+        pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN); // push shadow projection matrix
+        // Geometry counts are groups of four, as returned by ProjectShadow.
+        DWORD shadowCapacity = 0;
+        for(int k=0;k<lpObject->figures.GetSize();++k) {
+            const SXYZW4 *plots; const SVertexComponents *components; const WORD *indices;
+            DWORD count=0,indexCount=0;
+            if(lpObject->pGeometry && lpObject->pGeometry->GetRangeGeometryData(lpObject->figures[k]->GetName(),plots,components,indices,count,indexCount)) shadowCapacity += count*4;
+        }
+        if(!shadowCapacity)return TRUE;
+        shadowbuffer.SetSize(shadowCapacity);
+        shadowresult.SetSize(shadowCapacity);
+        DWORD dwShadowBufferShift = 0;
+        // calc rotation angle and temporary rotate object
+        CQuaternion quat;
+        pGPU->CreateDirectionCorrection(direction, quat);
+        lpObject->Rotate(quat); // temporary rotate object for shadow matrix calculation
+        lpObject->CreateCurrentPlacement();
+        quat.ReverseAxis();
+        lpObject->Rotate(quat); // return object's native rotation
+        lpObject->GetPlacement(matrix);
+        matrix._14 = matrix._24 = matrix._34 = 0; // set object position to '0'
+        // project shadow vertices and store it in shadow buffer
+        shadowrect.x1 = FLT_MAX;
+        shadowrect.x2 = -FLT_MAX;
+        shadowrect.y1 = FLT_MAX;
+        shadowrect.y2 = -FLT_MAX;
+        pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN); // push object's matrix
+        // object's scale
+        bool bHaveScale = GetScaleMatrix(matrix);
+        if (bHaveScale)
+            pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN);
+        for (i = 0; i < lpObject->figures.GetSize(); i++)
+        {
+            // CRAP - old model with wrong bodyparts
+            if (fabs2(lpObject->figures[i]->GetCP()) > 1e+10f)
+                continue;
+            // end of CRAP
+            if (lpObject->figures[i]->CheckFlag(FIG_HIDDEN))
+                continue; // we don't need a shadow from the hidden figures
+            lpObject->figures[i]->CreateCurrentPlacement();
+            lpObject->figures[i]->GetPlacement(matrix);
+            pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN); // push figure matrix
+            assert(lpObject->pGeometry);
+            if (lpObject->pGeometry)
+            {
+                dwShadowBufferShift += lpObject->pGeometry->ProjectShadow(
+                    lpObject->figures[i]->GetName(), lpObject->figures[i]->morphs,
+                    pGPU->GetMatrix(MAT_STACK_SHADOWMAIN),
+                    shadowbuffer.GetData() + dwShadowBufferShift, &shadowrect);
+            }
+            pGPU->PopMatrix(MAT_STACK_SHADOWMAIN); // pop figure matrix
+        }
+        //
+        if (bHaveScale)
+            pGPU->PopMatrix(MAT_STACK_SHADOWMAIN);
+        // pop object matrix
+        pGPU->PopMatrix(MAT_STACK_SHADOWMAIN);
+        // pop shadow projection matrix
+        pGPU->PopMatrix(MAT_STACK_SHADOWMAIN);
+        shadowbuffer.SetSize(dwShadowBufferShift); // ARRAY BOUNDS CHECK
+        // create shadow rescale/shift matrix (to fit shadow in 64x64 rect)
+        CreateShadowShiftScaleMatrix(matShift);
+        // rescale and shift shadow
+        for (i = 0; i < shadowbuffer.GetSize(); i++)
+        {
+            shadowresult[i].x = MINT(shadowbuffer[i].x * matShift._11 + matShift._41);
+            shadowresult[i].y = MINT(shadowbuffer[i].y * matShift._22 + matShift._42);
+        }
+        shadowresult.SetSize(dwShadowBufferShift); // ARRAY BOUNDS CHECK
+        //////////////////////////////////////////////////////////////////////
+        /*CTexture *pShadowBuffer = ((CTextureManager *)((CWorldClient *)GetWorld())
+                                       ->GetTextureManager())
+                                      ->GetShadowBuffer();*/
+        DDSURFACEDESC2 ddsd;
+        // prepare render params
+        SShadowTextureRenderParam renderparam;
+        renderparam.lpSrcTexture = 0;
+        renderparam.dwSrcPitch = 256 * 2;
+        renderparam.dwDstPitch = G_SHADOWSIZE.cx * 2;
+        renderparam.lpDstTexture = pTexShadowBuffer.get();
+        // clear render surface for the new rendering
+        MemSetDWord(reinterpret_cast<DWORD *>(renderparam.lpDstTexture), 0,
+                    renderparam.dwDstPitch * G_SHADOWSIZE.cy /
+                        sizeof(DWORD)); // fill by DWORDs
+        // render figures to texture
+        dwShadowBufferShift = 0;
+        BOOL bBridge = FALSE;
+        for (j = 0; j < lpObject->figures.GetSize(); j++)
+        {
+            // CRAP - old figures with wrong position
+            if (fabs2(lpObject->figures[j]->GetCP()) > 1e+10f)
+                continue;
+            bBridge |= lpObject->figures[j]->GetBV().IsBridge();
+            // end of CRAP
+            if (lpObject->figures[j]->CheckFlag(FIG_HIDDEN))
+                continue; // we don't need a shadow from the hidden figures
+            assert(lpObject->pGeometry);
+            CTexture *casterTexture = FindTexture(lpObject->figures[j]->GetTextureTypeID());
+            renderparam.lpSrcTexture = lpObject->WhoAmI()==HPC_TREE && casterTexture
+                ? casterTexture->GetModShadowAlpha() : nullptr;
+            if (lpObject->pGeometry)
+                dwShadowBufferShift += lpObject->pGeometry->RenderShadow(
+                    lpObject->figures[j]->GetName(), shadowresult.GetData() + dwShadowBufferShift,
+                    renderparam);
+        }
+        //////////////////////////////////////////////////////////////////////
+        // performing BLUR by two linear filter (in perpendicular direction)
+        if (theSettings.nShadowQuality == 2)
+        {
+            pGrPU->BlurVertical(renderparam.lpDstTexture, 64, 64);
+            pGrPU->BlurHorizontal(renderparam.lpDstTexture, 64, 64);
+        }
+        pShadowTexture->GetSurface()->LoadFromByteDump(pTexShadowBuffer.get(), G_SHADOWSIZE.cx * 2, G_SHADOWSIZE.cy);
+        // Bounded diagnostic handoff: record the first generated silhouette per caster class.
+        static unsigned reportedShadowClasses = 0;
+        unsigned shadowClass = lpObject->WhoAmI()==HPC_TREE ? 1u : lpObject->WhoAmI()==HPC_UNIT ? 2u : 4u;
+        if(!(reportedShadowClasses & shadowClass)) {
+            reportedShadowClasses |= shadowClass;
+            unsigned covered=0; for(int pixel=0;pixel<4096;++pixel) if(pTexShadowBuffer[pixel]&0xf000)++covered;
+            FILE *log=fopen("eirebuild-shadow-port.log","a");
+            if(log){fprintf(log,"R5 class=%u projected_vertices=%u covered_pixels=%u alpha_foliage=%u max_union=1\n",shadowClass,dwShadowBufferShift,covered,shadowClass==1);fclose(log);}
+        }
+
+        // project new shadow mesh
+        CPlot3D objectCP = lpObject->GetCP();
+        quat.DecompEulerMatrix(
+            matrix); // this is an quaternion, which was used for direction correction
+        CPlot3D plot;
+
+        shadow4.SetSize(1);
+
+        plot.SetPlot(shadowrect.x1, shadowrect.y2, 0);
+        plot = matrix.RotateVector(plot);
+        shadow4[0].x[0] = objectCP.x + plot.x;
+        shadow4[0].y[0] = objectCP.y + plot.y;
+        shadow4[0].z[0] = objectCP.z;
+        shadow4[0].w[0] = 1;
+
+        plot.SetPlot(shadowrect.x2, shadowrect.y2, 0);
+        plot = matrix.RotateVector(plot);
+        shadow4[0].x[1] = objectCP.x + plot.x;
+        shadow4[0].y[1] = objectCP.y + plot.y;
+        shadow4[0].z[1] = objectCP.z;
+        shadow4[0].w[1] = 1;
+
+        plot.SetPlot(shadowrect.x2, shadowrect.y1, 0);
+        plot = matrix.RotateVector(plot);
+        shadow4[0].x[2] = objectCP.x + plot.x;
+        shadow4[0].y[2] = objectCP.y + plot.y;
+        shadow4[0].z[2] = objectCP.z;
+        shadow4[0].w[2] = 1;
+
+        plot.SetPlot(shadowrect.x1, shadowrect.y1, 0);
+        plot = matrix.RotateVector(plot);
+        shadow4[0].x[3] = objectCP.x + plot.x;
+        shadow4[0].y[3] = objectCP.y + plot.y;
+        shadow4[0].z[3] = objectCP.z;
+        shadow4[0].w[3] = 1;
+
+        plot = lpObject->GetPlacement().RotateVector(lpObject->bv.ptCenter);
+        theWorld.CastShadowToTerrain(direction, objectCP + plot, lpObject->bv.fpRadius, shadow4,
+                                     shadowvertices, shadowmaps, shadowindices, false,
+                                     bBridge == 0);
+
+        // Bound the projected mesh, not the caster: long shadows may remain visible offscreen.
+        bvShadowBV.dwFlags = 0;
+        if (shadowvertices.GetSize()) {
+            CPlot3D lo(FLT_MAX,FLT_MAX,FLT_MAX),hi(-FLT_MAX,-FLT_MAX,-FLT_MAX);
+            for(int v=0;v<shadowvertices.GetSize();v++)for(int lane=0;lane<4;lane++) {
+                const SXYZW4 &p=shadowvertices[v];
+                lo.x=Min(lo.x,p.x[lane]);lo.y=Min(lo.y,p.y[lane]);lo.z=Min(lo.z,p.z[lane]);
+                hi.x=Max(hi.x,p.x[lane]);hi.y=Max(hi.y,p.y[lane]);hi.z=Max(hi.z,p.z[lane]);
+            }
+            CPlot3D center=(lo+hi)*.5f;
+            bvShadowBV.ptCenter=center-lpObject->GetCP();
+            bvShadowBV.SetRadius(fabs(hi-center)+1.0f);
+        }
+        modShadowLastBuild=shadowNow;
+        LARGE_INTEGER finished;QueryPerformanceCounter(&finished);
+        ModShadowSchedule::generationTicks += finished.QuadPart-shadowStarted.QuadPart;
+        ResetFlag(OCS_RESHADOW);
+    }
+    //////////////////////////////////////////////////////////////////////
+    //
+    if(!rebuildShadow)++ModShadowSchedule::reused;
+    if (shadowvertices.GetSize() == 0)
+        return TRUE; // can't build shadow - shadow invisible
+                     //
+                     //
+    SBoundingVolume projected = bvShadowBV;
+    projected.ptCenter += lpObject->GetCP();
+    if(projected.dwFlags && pGPU->CheckVisibility(projected)==TRV_INVISIBLE) {
+        ++ModShadowSchedule::culled;return TRUE;
+    }
+    DWORD dwColor = RGBA_MAKE(255, 255, 255, 128);
+    if (lpObject->WhoAmI() == HPC_UNIT)
+    {
+        float fAlphaModulate = static_cast<CUnitClientSpecific *>(
+                                   static_cast<CUnit *>(lpObject)->GetUnitSpecific())
+                                   ->GetFadeOutAlpha();
+        dwColor = RGBA_MAKE(255, 255, 255, MINT(fAlphaModulate * 128.0f));
+    }
+    theRenderer.SetProjectionMatrix();
+
+    theRenderer.BindTexture(0, pShadowTexture);
+    BYTE cFogValue = theWorld.GetTerrain()->GetFogAlpha(lpObject->GetCP());
+    theRenderer.Render(shadowvertices.GetData(), shadowmaps.GetData(), shadowvertices.GetSize(),
+                       shadowindices.GetData(), shadowindices.GetSize(), dwColor,
+                       RGBA_MAKE(0, 0, 0, cFogValue), 0, 0.9999f);
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// check for shadow necessarility
+bool CObject3DClientSpecific::IsNeedShadow() const
+{
+#ifndef _A4
+    if (theSettings.nShadowQuality <= 0)
+        return false;
+    switch (lpObject->WhoAmI())
+    {
+    case HPC_UNIT:
+        return theSettings.nUnitShadow != 0;
+    case HPC_TREE:
+        return theSettings.nFloraShadow != 0;
+    default:
+        return theSettings.nBuildingShadow != 0;
+    }
+#else
+    return (theSettings.nShadowQuality > 0);
+#endif //_A4
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// check for shadow RECALCULATION necessarility
+bool CObject3DClientSpecific::IsNeedRecalcShadow() const
+{
+    return ((lpObject->CheckFlag(OBJ_STATIC | OBJ_LIGHTED) == OBJ_STATIC) ||
+            (lpObject->CheckFlag(OBJ_STATIC) == 0) || (CheckFlag(OCS_RESHADOW) != 0));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CObject3DClientSpecific::RemoveShadowInformation()
+{
+    modShadowLastBuild=0;
+    shadowvertices.RemoveAll();
+    shadowmaps.RemoveAll();
+    shadowindices.RemoveAll();
+    pShadowTexture = 0;
+    shadowrect.SetRectEmpty();
+    memset(&bvShadowBV, 0, sizeof(bvShadowBV));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CObject3DClientSpecific::IsShadowVisible() const
+{
+    // а нужна ли нам эта тень вообще?
+    if (IsNeedShadow() == false)
+        return false;
+    // если объект видимый, то его тень с ќ„≈Ќ№ большой веро€тностью тоже видима
+    if (CheckFlag(OBJ_VISIBLE))
+        return true;
+    else // ну а дл€ самого общего слеча€ проверим по BV тени
+    {
+        bvShadowBV.ptCenter += lpObject->GetCP();
+        int nVisibility = theRenderer.GetGPU()->CheckVisibility(bvShadowBV);
+        bvShadowBV.ptCenter -= lpObject->GetCP();
+
+        return nVisibility != TRV_INVISIBLE;
+    }
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <UIVisualizer ServiceId="{A452AFEA-3DF6-46BB-9177-C0B08F318025}" Id="1"
+              MenuName="Add to Image Watch"/>
+  <Type Name="_DDSURFACEDESC2">
+    <UIVisualizer ServiceId="{A452AFEA-3DF6-46BB-9177-C0B08F318025}" Id="1" />
+  </Type>
+  <Type Name="_DDSURFACEDESC2">
+    <Expand>
+      <Synthetic Name="[type]">
+        <DisplayString>UINT8</DisplayString>
+      </Synthetic>
+      <Synthetic Name="[channels]">
+        <DisplayString>RGB</DisplayString>
+      </Synthetic>
+      <!--<Item Name="[type]">"FLOAT16"</Item>-->
+      <!--<Item Name="[channels]">2</Item>-->
+      <Item Name="[width]">dwWidth</Item>
+      <Item Name="[height]">dwHeight</Item>
+      <Item Name="[data]">lpSurface</Item>
+      <Item Name="[stride]">dwWidth*2</Item>
+    </Expand>
+  </Type>
+  <Type Name="SMMPFileHeader">
+    <UIVisualizer ServiceId="{A452AFEA-3DF6-46BB-9177-C0B08F318025}" Id="1" />
+  </Type>
+  <Type Name="SMMPFileHeader">
+    <Expand>
+      <Synthetic Name="[type]">
+        <DisplayString>UINT8</DisplayString>
+      </Synthetic>
+      <Synthetic Name="[channelss]">
+        <DisplayString>RGBA</DisplayString>
+      </Synthetic>
+      <!--<Item Name="[type]">"FLOAT16"</Item>-->
+      <!--<Item Name="[channels]">2</Item>-->
+      <Item Name="[width]">dwDimentionX</Item>
+      <Item Name="[height]">dwDimentionY</Item>
+      <Item Name="[bits]">dwBitDepth</Item>
+      <!--<Item Name="[format]">(MMP_FORMATS)dwFormat</Item>-->
+      <Item Name="[format]">(void*)dwFormat</Item>
+      <Item Name="[data]">(void*)((int)(this) + sizeof(*this))</Item>
+      <Item Name="[stride]">dwDimentionX*dwBitDepth / 8</Item>
+    </Expand>
+  </Type>
+</AutoVisualizer>

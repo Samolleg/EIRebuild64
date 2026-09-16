@@ -1,0 +1,870 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="OptimizedDebug|Win32">
+      <Configuration>OptimizedDebug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="OptimizedDebug|x64">
+      <Configuration>OptimizedDebug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{042a52a4-cf8b-4868-b551-448520f97f44}</ProjectGuid>
+    <RootNamespace>EIRebuild</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <LinkIncremental>true</LinkIncremental>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(ProjectDir)SDKs\JSON;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
+    <OutDir>$(SolutionDir)out\$(Platform)\$(Configuration)\</OutDir>
+    <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
+    <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">
+    <LinkIncremental>true</LinkIncremental>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
+    <OutDir>$(SolutionDir)out\$(Platform)\$(Configuration)\</OutDir>
+    <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
+    <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <LinkIncremental>false</LinkIncremental>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
+    <OutDir>$(SolutionDir)out\$(Platform)\$(Configuration)\</OutDir>
+    <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
+    <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+    <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+    <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>BRANCH_DX11;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_DEBUG;_CONSOLE;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>mss32.lib;binkw32.lib;ddraw.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
+    </Link>
+    <Bscmake />
+    <FxCompile>
+      <ObjectFileOutput>$(OutDir)/shaders/$(Platform)_$(Configuration)/%(Filename).cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">
+    <ClCompile>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>BRANCH_DX11;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_DEBUG;_CONSOLE;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <Optimization>MaxSpeed</Optimization>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>mss32.lib;binkw32.lib;ddraw.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
+    </Link>
+    <Bscmake />
+    <FxCompile>
+      <ObjectFileOutput>$(OutDir)/shaders/$(Platform)_$(Configuration)/%(Filename).cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>BRANCH_DX11;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_CONSOLE;NODEBUGINFO;DONT_DISPLAY_DEBUG_IDS;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <EnableModules>false</EnableModules>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(OutDir)luajit-x86.lib;mss32.lib;binkw32.lib;ddraw.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
+    </Link>
+    <FxCompile>
+      <ObjectFileOutput>$(OutDir)/shaders/$(Platform)_$(Configuration)/%(Filename).cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>BRANCH_DX11;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <FxCompile>
+      <ObjectFileOutput>$(OutDir)/shaders/$(Platform)_$(Configuration)/%(Filename).cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>BRANCH_DX11;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <FxCompile>
+      <ObjectFileOutput>$(OutDir)/shaders/$(Platform)_$(Configuration)/%(Filename).cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>BRANCH_DX11;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <FxCompile>
+      <ObjectFileOutput>$(OutDir)/shaders/$(Platform)_$(Configuration)/%(Filename).cso</ObjectFileOutput>
+    </FxCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Game\2DScreenWait.cpp" />
+    <ClCompile Include="Game\A3Cursor.cpp" />
+    <ClCompile Include="Game\A3ServerDesc.cpp" />
+    <ClCompile Include="Game\AckDatabase.cpp" />
+    <ClCompile Include="Game\ackFormat.cpp" />
+    <ClCompile Include="Game\aiAck.cpp" />
+    <ClCompile Include="Game\aiGraph.cpp" />
+    <ClCompile Include="Game\aiMap.cpp" />
+    <ClCompile Include="Game\aiObjects.cpp" />
+    <ClCompile Include="Game\aiPathFinder.cpp" />
+    <ClCompile Include="Game\aiRoute.cpp" />
+    <ClCompile Include="Game\aiScanUnits.cpp" />
+    <ClCompile Include="Game\aiSettings.cpp" />
+    <ClCompile Include="Game\aiUnitLogic.cpp" />
+    <ClCompile Include="Game\AnimationSystem.cpp" />
+    <ClCompile Include="Game\AnimationSystem2.cpp" />
+    <ClCompile Include="Game\AssortmentGenerator.cpp" />
+    <ClCompile Include="Game\Base2D.cpp" />
+    <ClCompile Include="Game\Base3D.cpp" />
+    <ClCompile Include="Game\BaseManager.cpp" />
+    <ClCompile Include="Game\Basic.cpp" />
+    <ClCompile Include="Game\BasicChunk.cpp" />
+    <ClCompile Include="Game\BinkVideo.cpp" />
+    <ClCompile Include="Game\Camera.cpp" />
+    <ClCompile Include="Game\ChatServer.cpp" />
+    <ClCompile Include="Game\ChunkFile.cpp" />
+    <ClCompile Include="Game\ClientSpecificManager.cpp" />
+    <ClCompile Include="Game\CMappedResource.cpp" />
+    <ClCompile Include="Game\CMMIOResource.cpp" />
+    <ClCompile Include="Game\Collision.cpp" />
+    <ClCompile Include="Game\Console.cpp" />
+    <ClCompile Include="Game\CResourceBase.cpp" />
+    <ClCompile Include="Game\Cruncher.cpp" />
+    <ClCompile Include="Game\Crypto.cpp" />
+    <ClCompile Include="Game\CSbase.cpp" />
+    <ClCompile Include="Game\CSlink.cpp" />
+    <ClCompile Include="Game\CSmain.cpp" />
+    <ClCompile Include="Game\DebugAlloc.cpp" />
+    <ClCompile Include="Game\DebugInfoSystem.cpp" />
+    <ClCompile Include="Game\dx11\Batchers.cpp" />
+    <ClCompile Include="Game\dx11\Caches.cpp" />
+    <ClCompile Include="Game\dx11\ConstantBuffer.cpp" />
+    <ClCompile Include="Game\dx11\RendererDX11.cpp" />
+    <ClCompile Include="Game\dx11\DXShader.cpp" />
+    <ClCompile Include="Game\dx11\EffectProcessor.cpp" />
+    <ClCompile Include="Game\dx11\FakeDX7.cpp" />
+    <ClCompile Include="Game\dx11\Surface.cpp" />
+    <ClCompile Include="Game\dx11\Utils.cpp" />
+    <ClCompile Include="game\dx11\Vertex.cpp" />
+    <ClCompile Include="Game\dx11\VertexBuffer.cpp" />
+    <ClCompile Include="Game\DXGeometryProcessor.cpp" />
+    <ClCompile Include="Game\Effect.cpp" />
+    <ClCompile Include="Game\EffectManager.cpp" />
+    <ClCompile Include="Game\EffectSpell.cpp" />
+    <ClCompile Include="Game\EString.cpp" />
+    <ClCompile Include="Game\Figure.cpp" />
+    <ClCompile Include="Game\FigureClientSpecific.cpp" />
+    <ClCompile Include="Game\FigureManager.cpp" />
+    <ClCompile Include="Game\FileRegistry.cpp" />
+    <ClCompile Include="Game\FlyingHitPoints.cpp" />
+    <ClCompile Include="Game\FOFSystem.cpp" />
+    <ClCompile Include="Game\GameBase.cpp" />
+    <ClCompile Include="Game\GameMain.cpp" />
+    <ClCompile Include="Game\GeneralSettings.cpp" />
+    <ClCompile Include="Game\GeneralUnitLogic.cpp" />
+    <ClCompile Include="Game\Geometry.cpp" />
+    <ClCompile Include="Game\GeometryContainer.cpp" />
+    <ClCompile Include="Game\GeometryManager.cpp" />
+    <ClCompile Include="Game\GlobalMap.cpp" />
+    <ClCompile Include="Game\GraphicsProcessorMMX.cpp" />
+    <ClCompile Include="Game\GSVars.cpp" />
+    <ClCompile Include="Game\Hoover.cpp" />
+    <ClCompile Include="Game\I3DChat.cpp" />
+    <ClCompile Include="Game\I3DConsole.cpp" />
+    <ClCompile Include="Game\I3DCursor.cpp" />
+    <ClCompile Include="Game\I3DEffects.cpp" />
+    <ClCompile Include="Game\I3DFigure.cpp" />
+    <ClCompile Include="Game\I3DHandler.cpp" />
+    <ClCompile Include="Game\I3DInventory.cpp" />
+    <ClCompile Include="Game\I3DMain.cpp" />
+    <ClCompile Include="Game\I3DMapObjTranslation.cpp" />
+    <ClCompile Include="Game\I3DObject.cpp" />
+    <ClCompile Include="Game\I3DScreen.cpp" />
+    <ClCompile Include="Game\I3DScreenBase.cpp" />
+    <ClCompile Include="Game\I3DScreenCamp.cpp" />
+    <ClCompile Include="Game\I3DScreenChoosePers.cpp" />
+    <ClCompile Include="Game\I3DScreenConnection.cpp" />
+    <ClCompile Include="Game\I3DScreenConstructor.cpp" />
+    <ClCompile Include="Game\I3DScreenDebug.cpp" />
+    <ClCompile Include="Game\I3DScreenEcsapeMenu.cpp" />
+    <ClCompile Include="Game\I3DScreenEndGame.cpp" />
+    <ClCompile Include="Game\I3DScreenExchange.cpp" />
+    <ClCompile Include="Game\I3DScreenGlobalMap.cpp" />
+    <ClCompile Include="Game\I3DScreenMainMenu.cpp" />
+    <ClCompile Include="Game\I3DScreenMessageBox.cpp" />
+    <ClCompile Include="Game\I3DScreenMission.cpp" />
+    <ClCompile Include="Game\I3DScreenObjectives.cpp" />
+    <ClCompile Include="Game\I3DScreenOptions.cpp" />
+    <ClCompile Include="Game\I3DScreenSaveLoad.cpp" />
+    <ClCompile Include="Game\I3DScreenTutorial.cpp" />
+    <ClCompile Include="Game\I3DScrollBar.cpp" />
+    <ClCompile Include="Game\I3DScrollText.cpp" />
+    <ClCompile Include="Game\I3DToolTip.cpp" />
+    <ClCompile Include="Game\idbFormat.cpp" />
+    <ClCompile Include="Game\IniFile.cpp" />
+    <ClCompile Include="Game\Inventory.cpp" />
+    <ClCompile Include="Game\Item.cpp" />
+    <ClCompile Include="Game\ItemConstructor.cpp" />
+    <ClCompile Include="Game\ItemDatabase.cpp" />
+    <ClCompile Include="Game\ItemManager.cpp" />
+    <ClCompile Include="Game\KeyMap.cpp" />
+    <ClCompile Include="Game\ldbFormat.cpp" />
+    <ClCompile Include="Game\LeverDatabase.cpp" />
+    <ClCompile Include="Game\Light.cpp" />
+    <ClCompile Include="Game\LightManager.cpp" />
+    <ClCompile Include="Game\Lightning.cpp" />
+    <ClCompile Include="Game\LuaState.cpp" />
+    <ClCompile Include="Game\ModPackage.cpp" />
+    <ClCompile Include="Game\ModLuaBridge.cpp" />
+    <ClCompile Include="Game\ModRuntime.cpp" />
+    <ClCompile Include="Game\MapEditObject.cpp" />
+    <ClCompile Include="Game\MapObject.cpp" />
+    <ClCompile Include="Game\MapObjectClientSpecific.cpp" />
+    <ClCompile Include="Game\MapObjectManager.cpp" />
+    <ClCompile Include="Game\MapObjectServer.cpp" />
+    <ClCompile Include="Game\Material.cpp" />
+    <ClCompile Include="Game\MaterialManager.cpp" />
+    <ClCompile Include="Game\MEUnitStats.cpp" />
+    <ClCompile Include="Game\MusicSystem.cpp" />
+    <ClCompile Include="Game\Net.cpp" />
+    <ClCompile Include="Game\NetChat.cpp" />
+    <ClCompile Include="Game\NetPacker.cpp" />
+    <ClCompile Include="Game\NetProtocol.cpp" />
+    <ClCompile Include="Game\NetStream.cpp" />
+    <ClCompile Include="Game\NetTcp.cpp" />
+    <ClCompile Include="Game\NetUpdate.cpp" />
+    <ClCompile Include="Game\Notification.cpp" />
+    <ClCompile Include="Game\Object.cpp" />
+    <ClCompile Include="Game\Object3DClientSpecific.cpp" />
+    <ClCompile Include="Game\Object3DServer.cpp" />
+    <ClCompile Include="Game\ObjectDBReader.cpp" />
+    <ClCompile Include="Game\Particle.cpp" />
+    <ClCompile Include="Game\ParticleManager.cpp" />
+    <ClCompile Include="Game\Party.cpp" />
+    <ClCompile Include="Game\pdbFormat.cpp" />
+    <ClCompile Include="Game\PerkDatabase.cpp" />
+    <ClCompile Include="Game\Perlin.cpp" />
+    <ClCompile Include="Game\Player.cpp" />
+    <ClCompile Include="Game\PlayerClient.cpp" />
+    <ClCompile Include="Game\PlayerManager.cpp" />
+    <ClCompile Include="Game\PlayerServer.cpp" />
+    <ClCompile Include="Game\Plot.cpp" />
+    <ClCompile Include="Game\Polygon.cpp" />
+    <ClCompile Include="Game\PolyLine.cpp" />
+    <ClCompile Include="Game\qdbFormat.cpp" />
+    <ClCompile Include="Game\Quantizator.cpp" />
+    <ClCompile Include="Game\Quaternion.cpp" />
+    <ClCompile Include="Game\QuestDatabase.cpp" />
+    <ClCompile Include="Game\RandomGen.cpp" />
+    <ClCompile Include="Game\ResourceManager.cpp" />
+    <ClCompile Include="Game\RPGSystem.cpp" />
+    <ClCompile Include="Game\RTFText.cpp" />
+    <ClCompile Include="Game\SaveLoader.cpp" />
+    <ClCompile Include="Game\ScenarioTracker.cpp" />
+    <ClCompile Include="Game\Script.cpp" />
+    <ClCompile Include="Game\ScriptParser.cpp" />
+    <ClCompile Include="Game\sdbFormat.cpp" />
+    <ClCompile Include="Game\Sector.cpp" />
+    <ClCompile Include="Game\ServerSpecificManager.cpp" />
+    <ClCompile Include="Game\Shadow.cpp" />
+    <ClCompile Include="Game\SimpleCryptographer.cpp" />
+    <ClCompile Include="Game\sky.cpp" />
+    <ClCompile Include="Game\MiniaudioOneShotSfx.cpp" />
+    <ClCompile Include="Game\ModAudioPolicy.cpp" />
+    <ClCompile Include="Game\ModAudioConfig.cpp" />
+    <ClCompile Include="Game\SoundManager.cpp" />
+    <ClCompile Include="Game\SpellConstructor.cpp" />
+    <ClCompile Include="Game\SpellDatabase.cpp" />
+    <ClCompile Include="Game\SpellEffect.cpp" />
+    <ClCompile Include="Game\SpellManager.cpp" />
+    <ClCompile Include="Game\SpellSystem.cpp" />
+    <ClCompile Include="Game\Spline.cpp" />
+    <ClCompile Include="Game\Streams.cpp" />
+    <ClCompile Include="Game\StringProcessing.cpp" />
+    <ClCompile Include="Game\StuffMapObjects.cpp" />
+    <ClCompile Include="Game\StuffMOClientSpec.cpp" />
+    <ClCompile Include="Game\Terrain.cpp" />
+    <ClCompile Include="Game\TerrainPrints.cpp" />
+    <ClCompile Include="Game\TerrainPrintsDatabase.cpp" />
+    <ClCompile Include="Game\TextManager.cpp" />
+    <ClCompile Include="Game\Texture.cpp" />
+    <ClCompile Include="Game\TextureDescriptor.cpp" />
+    <ClCompile Include="Game\TextureManager.cpp" />
+    <ClCompile Include="Game\TLPipelineFPU.cpp" />
+    <ClCompile Include="Game\tpFormat.cpp" />
+    <ClCompile Include="Game\udbFormat.cpp" />
+    <ClCompile Include="Game\Unit.cpp" />
+    <ClCompile Include="Game\UnitClientSpecific.cpp" />
+    <ClCompile Include="Game\UnitDatabase.cpp" />
+    <ClCompile Include="Game\UnitServer.cpp" />
+    <ClCompile Include="Game\UnitStatisticsDriver.cpp" />
+    <ClCompile Include="Game\VisFog.cpp" />
+    <ClCompile Include="Game\Renderer.cpp" />
+    <ClCompile Include="Game\WaterLevels.cpp" />
+    <ClCompile Include="Game\weather.cpp" />
+    <ClCompile Include="Game\Win32Classes.cpp" />
+    <ClCompile Include="Game\WinRegistry.cpp" />
+    <ClCompile Include="Game\World.cpp" />
+    <ClCompile Include="Game\WorldClient.cpp" />
+    <ClCompile Include="Game\WorldInterface.cpp" />
+    <ClCompile Include="Game\WorldServer.cpp" />
+    <ClCompile Include="Game\ZoneExit.cpp" />
+    <ClCompile Include="shared\Common.cpp" />
+    <ClCompile Include="stdafx.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Create</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Game\2DScreenWait.h" />
+    <ClInclude Include="Game\A3Cursor.h" />
+    <ClInclude Include="Game\A3ServerDesc.h" />
+    <ClInclude Include="Game\AckDatabase.h" />
+    <ClInclude Include="Game\ackFormat.h" />
+    <ClInclude Include="Game\adFormat.h" />
+    <ClInclude Include="Game\aiAck.h" />
+    <ClInclude Include="Game\AIGraph.h" />
+    <ClInclude Include="Game\aiMap.h" />
+    <ClInclude Include="Game\aiObjects.h" />
+    <ClInclude Include="Game\aiPathFinder.h" />
+    <ClInclude Include="Game\aiRoute.h" />
+    <ClInclude Include="Game\aiScanUnits.h" />
+    <ClInclude Include="Game\aiSensesConst.h" />
+    <ClInclude Include="Game\aiSettings.h" />
+    <ClInclude Include="Game\aiUnitLogic.h" />
+    <ClInclude Include="Game\AnimationSystem.h" />
+    <ClInclude Include="Game\AnimationSystem2.h" />
+    <ClInclude Include="Game\AreaMap.h" />
+    <ClInclude Include="Game\AssortmentGenerator.h" />
+    <ClInclude Include="Game\Base2D.h" />
+    <ClInclude Include="Game\Base3D.h" />
+    <ClInclude Include="Game\BaseManager.h" />
+    <ClInclude Include="Game\Basic.h" />
+    <ClInclude Include="Game\BasicChunk.h" />
+    <ClInclude Include="Game\BasicFactory.h" />
+    <ClInclude Include="Game\BasicM.h" />
+    <ClInclude Include="Game\BinkVideo.h" />
+    <ClInclude Include="Game\BoundCube.h" />
+    <ClInclude Include="Game\Camera.h" />
+    <ClInclude Include="Game\ChatServer.h" />
+    <ClInclude Include="Game\ChunkFile.h" />
+    <ClInclude Include="Game\ClassIDs.h" />
+    <ClInclude Include="Game\ClientSpecificManager.h" />
+    <ClInclude Include="Game\CMappedResource.h" />
+    <ClInclude Include="Game\CMMIOResource.h" />
+    <ClInclude Include="Game\Collision.h" />
+    <ClInclude Include="Game\Console.h" />
+    <ClInclude Include="Game\CResourceBase.h" />
+    <ClInclude Include="Game\Cruncher.h" />
+    <ClInclude Include="Game\Crypto.h" />
+    <ClInclude Include="Game\CSbase.h" />
+    <ClInclude Include="Game\CSlink.h" />
+    <ClInclude Include="Game\CSmain.h" />
+    <ClInclude Include="Game\Database.h" />
+    <ClInclude Include="Game\DebugAlloc.h" />
+    <ClInclude Include="Game\DebugInfoSystem.h" />
+    <ClInclude Include="Game\DirElement.h" />
+    <ClInclude Include="Game\dx11\Batchers.h" />
+    <ClInclude Include="Game\dx11\Caches.h" />
+    <ClInclude Include="Game\dx11\RendererDX11.h" />
+    <ClInclude Include="Game\dx11\DXShader.h" />
+    <ClInclude Include="Game\dx11\ConstantBuffer.h" />
+    <ClInclude Include="Game\dx11\EffectProcessor.h" />
+    <ClInclude Include="Game\dx11\FakeDX7.h" />
+    <ClInclude Include="Game\dx11\Surface.h" />
+    <ClInclude Include="Game\dx11\Utils.h" />
+    <ClInclude Include="Game\dx11\Vertex.h" />
+    <ClInclude Include="Game\dx11\VertexBuffer.h" />
+    <ClInclude Include="Game\DXGeometryProcessor.h" />
+    <ClInclude Include="Game\Effect.h" />
+    <ClInclude Include="Game\EffectManager.h" />
+    <ClInclude Include="Game\EffectSpell.h" />
+    <ClInclude Include="Game\EString.h" />
+    <ClInclude Include="Game\Events.h" />
+    <ClInclude Include="Game\figFormat.h" />
+    <ClInclude Include="Game\Figure.h" />
+    <ClInclude Include="Game\FigureClientSpecific.h" />
+    <ClInclude Include="Game\FigureManager.h" />
+    <ClInclude Include="Game\FileRegistry.h" />
+    <ClInclude Include="Game\FlyingHitPoints.h" />
+    <ClInclude Include="Game\FofSystem.h" />
+    <ClInclude Include="Game\GameBase.h" />
+    <ClInclude Include="Game\GameMain.h" />
+    <ClInclude Include="Game\GeneralSettings.h" />
+    <ClInclude Include="Game\GeneralUnitLogic.h" />
+    <ClInclude Include="Game\Geometry.h" />
+    <ClInclude Include="Game\GeometryContainer.h" />
+    <ClInclude Include="Game\GeometryInterfaces.h" />
+    <ClInclude Include="Game\GeometryManager.h" />
+    <ClInclude Include="Game\GlobalMap.h" />
+    <ClInclude Include="Game\GraphicsProcessor.h" />
+    <ClInclude Include="Game\GraphicsProcessorMMX.h" />
+    <ClInclude Include="Game\GSVars.h" />
+    <ClInclude Include="Game\HashMap.h" />
+    <ClInclude Include="Game\Hoover.h" />
+    <ClInclude Include="Game\I3DChat.h" />
+    <ClInclude Include="Game\I3DConsole.h" />
+    <ClInclude Include="Game\I3DCursor.h" />
+    <ClInclude Include="Game\I3DEffects.h" />
+    <ClInclude Include="Game\I3DFigure.h" />
+    <ClInclude Include="Game\I3DHandler.h" />
+    <ClInclude Include="Game\I3DInventory.h" />
+    <ClInclude Include="Game\I3DMain.h" />
+    <ClInclude Include="Game\I3DMapObjTranslation.h" />
+    <ClInclude Include="Game\I3DMenuRects.h" />
+    <ClInclude Include="Game\I3DObject.h" />
+    <ClInclude Include="Game\I3DScreen.h" />
+    <ClInclude Include="Game\I3DScreenBase.h" />
+    <ClInclude Include="Game\I3DScreenCamp.h" />
+    <ClInclude Include="Game\I3DScreenChoosePers.h" />
+    <ClInclude Include="Game\I3DScreenConnection.h" />
+    <ClInclude Include="Game\I3DScreenConstructor.h" />
+    <ClInclude Include="Game\I3DScreenDebug.h" />
+    <ClInclude Include="Game\I3DScreenEcsapeMenu.h" />
+    <ClInclude Include="Game\I3DScreenEndGame.h" />
+    <ClInclude Include="Game\I3DScreenExchange.h" />
+    <ClInclude Include="Game\I3DScreenGlobalMap.h" />
+    <ClInclude Include="Game\I3DScreenMainMenu.h" />
+    <ClInclude Include="Game\I3DScreenMessageBox.h" />
+    <ClInclude Include="Game\I3DScreenMission.h" />
+    <ClInclude Include="Game\I3DScreenObjectives.h" />
+    <ClInclude Include="Game\I3DScreenOptions.h" />
+    <ClInclude Include="Game\I3DScreenSaveLoad.h" />
+    <ClInclude Include="Game\I3DScreenTutorial.h" />
+    <ClInclude Include="Game\I3DScrollBar.h" />
+    <ClInclude Include="Game\I3DScrollText.h" />
+    <ClInclude Include="Game\I3DToolTip.h" />
+    <ClInclude Include="Game\idbFormat.h" />
+    <ClInclude Include="Game\IDebugInfoSystem.h" />
+    <ClInclude Include="Game\IniFile.h" />
+    <ClInclude Include="Game\Internal.h" />
+    <ClInclude Include="Game\Inventory.h" />
+    <ClInclude Include="Game\Item.h" />
+    <ClInclude Include="Game\ItemConstructor.h" />
+    <ClInclude Include="Game\ItemDatabase.h" />
+    <ClInclude Include="Game\ItemManager.h" />
+    <ClInclude Include="Game\KeyMap.h" />
+    <ClInclude Include="Game\ldbFormat.h" />
+    <ClInclude Include="Game\LeverDatabase.h" />
+    <ClInclude Include="Game\Light.h" />
+    <ClInclude Include="Game\LightManager.h" />
+    <ClInclude Include="Game\Lightning.h" />
+    <ClInclude Include="Game\LRUStorage.h" />
+    <ClInclude Include="Game\LuaState.h" />
+    <ClInclude Include="Game\MapEditObject.h" />
+    <ClInclude Include="Game\MapEditorChunkIDs.h" />
+    <ClInclude Include="Game\mapFormat.h" />
+    <ClInclude Include="Game\MapObject.h" />
+    <ClInclude Include="Game\MapObjectClientSpecific.h" />
+    <ClInclude Include="Game\MapObjectManager.h" />
+    <ClInclude Include="Game\MapObjectServer.h" />
+    <ClInclude Include="Game\Material.h" />
+    <ClInclude Include="Game\MaterialManager.h" />
+    <ClInclude Include="Game\METraps.h" />
+    <ClInclude Include="Game\MEUnitStats.h" />
+    <ClInclude Include="Game\mmpFormat.h" />
+    <ClInclude Include="Game\mm_malloc.h" />
+    <ClInclude Include="Game\MusicSystem.h" />
+    <ClInclude Include="Game\Net.h" />
+    <ClInclude Include="Game\NetChat.h" />
+    <ClInclude Include="Game\NetPacker.h" />
+    <ClInclude Include="Game\NetProtocol.h" />
+    <ClInclude Include="Game\NetStream.h" />
+    <ClInclude Include="Game\NetTcp.h" />
+    <ClInclude Include="Game\NetUpdate.h" />
+    <ClInclude Include="Game\Notification.h" />
+    <ClInclude Include="Game\Object.h" />
+    <ClInclude Include="Game\Object3DClientSpecific.h" />
+    <ClInclude Include="Game\Object3DServer.h" />
+    <ClInclude Include="Game\ObjectDBReader.h" />
+    <ClInclude Include="Game\OldStdAfx.h" />
+    <ClInclude Include="Game\PacketIDs.h" />
+    <ClInclude Include="Game\Particle.h" />
+    <ClInclude Include="Game\ParticleManager.h" />
+    <ClInclude Include="Game\Party.h" />
+    <ClInclude Include="Game\pdbFormat.h" />
+    <ClInclude Include="Game\PerkDatabase.h" />
+    <ClInclude Include="Game\Perlin.h" />
+    <ClInclude Include="Game\Player.h" />
+    <ClInclude Include="Game\PlayerClient.h" />
+    <ClInclude Include="Game\PlayerManager.h" />
+    <ClInclude Include="Game\PlayerServer.h" />
+    <ClInclude Include="Game\Plot.h" />
+    <ClInclude Include="Game\Polygon.h" />
+    <ClInclude Include="Game\PolyLine.h" />
+    <ClInclude Include="Game\PtrList.h" />
+    <ClInclude Include="Game\qdbFormat.h" />
+    <ClInclude Include="Game\Quantizator.h" />
+    <ClInclude Include="Game\Quaternion.h" />
+    <ClInclude Include="Game\QuestDatabase.h" />
+    <ClInclude Include="Game\RandomGen.h" />
+    <ClInclude Include="Game\regFormat.h" />
+    <ClInclude Include="Game\resFormat.h" />
+    <ClInclude Include="Game\Resource.h" />
+    <ClInclude Include="Game\ResourceManager.h" />
+    <ClInclude Include="Game\RPGSystem.h" />
+    <ClInclude Include="Game\RPGSystemConsts.h" />
+    <ClInclude Include="Game\RTFText.h" />
+    <ClInclude Include="Game\sArray.h" />
+    <ClInclude Include="Game\SaveLoader.h" />
+    <ClInclude Include="Game\SavePrimitives.h" />
+    <ClInclude Include="Game\ScenarioTracker.h" />
+    <ClInclude Include="Game\Script.h" />
+    <ClInclude Include="Game\ScriptErrors.h" />
+    <ClInclude Include="Game\ScriptParser.h" />
+    <ClInclude Include="Game\sdbFormat.h" />
+    <ClInclude Include="Game\Sector.h" />
+    <ClInclude Include="Game\ServerConsts.h" />
+    <ClInclude Include="Game\ServerSpecificManager.h" />
+    <ClInclude Include="Game\Shadow.h" />
+    <ClInclude Include="Game\Shared.h" />
+    <ClInclude Include="Game\SimpleCryptographer.h" />
+    <ClInclude Include="Game\SimplyArray.h" />
+    <ClInclude Include="Game\sky.h" />
+    <ClInclude Include="Game\SmartPtr.h" />
+    <ClInclude Include="Game\SoundManager.h" />
+    <ClInclude Include="Game\SoundTypes.h" />
+    <ClInclude Include="Game\SpellConstructor.h" />
+    <ClInclude Include="Game\SpellDatabase.h" />
+    <ClInclude Include="Game\SpellEffect.h" />
+    <ClInclude Include="Game\SpellManager.h" />
+    <ClInclude Include="Game\SpellSystem.h" />
+    <ClInclude Include="Game\Spline.h" />
+    <ClInclude Include="Game\stl_user_config.h" />
+    <ClInclude Include="Game\Streams.h" />
+    <ClInclude Include="Game\StringProcessing.h" />
+    <ClInclude Include="Game\StuffMapObjects.h" />
+    <ClInclude Include="Game\StuffMOClientSpec.h" />
+    <ClInclude Include="Game\Terrain.h" />
+    <ClInclude Include="Game\TerrainPrints.h" />
+    <ClInclude Include="Game\TerrainPrintsDatabase.h" />
+    <ClInclude Include="Game\TextManager.h" />
+    <ClInclude Include="Game\Texture.h" />
+    <ClInclude Include="Game\TextureDescriptor.h" />
+    <ClInclude Include="Game\TextureManager.h" />
+    <ClInclude Include="Game\Time32.h" />
+    <ClInclude Include="Game\TLPipeline.h" />
+    <ClInclude Include="Game\TLPipelineFPU.h" />
+    <ClInclude Include="Game\Tools.h" />
+    <ClInclude Include="Game\tpFormat.h" />
+    <ClInclude Include="Game\typedefs.h" />
+    <ClInclude Include="Game\TypeIDs.h" />
+    <ClInclude Include="Game\udbFormat.h" />
+    <ClInclude Include="Game\Unit.h" />
+    <ClInclude Include="Game\UnitClientSpecific.h" />
+    <ClInclude Include="Game\UnitDatabase.h" />
+    <ClInclude Include="Game\UnitServer.h" />
+    <ClInclude Include="Game\UnitStatisticsDriver.h" />
+    <ClInclude Include="Game\VisFog.h" />
+    <ClInclude Include="Game\Renderer.h" />
+    <ClInclude Include="Game\WaterLevels.h" />
+    <ClInclude Include="Game\weather.h" />
+    <ClInclude Include="Game\Win32Classes.h" />
+    <ClInclude Include="Game\WinRegistry.h" />
+    <ClInclude Include="Game\World.h" />
+    <ClInclude Include="Game\WorldClient.h" />
+    <ClInclude Include="Game\WorldInterface.h" />
+    <ClInclude Include="Game\WorldServer.h" />
+    <ClInclude Include="Game\ZoneExit.h" />
+    <ClInclude Include="shared\Common.h" />
+    <ClInclude Include="stdafx.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Game\Game.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\vs_input.hlsl">
+      <FileType>Document</FileType>
+    </None>
+    <Text Include="shaders\constant_buffers.hlsl">
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+      </DeploymentContent>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">
+      </DeploymentContent>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+      </DeploymentContent>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      </DeploymentContent>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">
+      </DeploymentContent>
+      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+      </DeploymentContent>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+      </EntryPointName>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">
+      </EntryPointName>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+      </EntryPointName>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      </EntryPointName>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">
+      </EntryPointName>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+      </EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Library</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Library</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Library</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Library</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">Library</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Library</ShaderType>
+      <FileType>Document</FileType>
+    </Text>
+    <FxCompile Include="shaders\gs_point_to_quad.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Geometry</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Geometry</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Geometry</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Geometry</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">Geometry</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Geometry</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">4.1</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">4.1</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">4.1</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">4.1</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">4.1</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">4.1</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="shaders\pixelshader.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="shaders\vertexshader.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">5.0</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
+    </FxCompile>
+    <FxCompile Include="shaders\vertexshader_particles.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+    </FxCompile>
+    <FxCompile Include="shaders\vertexshader_simple.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|x64'">Vertex</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+    </FxCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+    <None Include="render.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="arrays.natvis" />
+    <Natvis Include="images.natvis" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="luajit-x86\luajit.vcxproj"><Project>{2714e7b7-71e0-484a-81df-495cfdb463ad}</Project></ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets" Condition="Exists('packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets')" />
+    <Import Project="packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets" Condition="Exists('packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets')" />
+    <Import Project="packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets" Condition="Exists('packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets')" />
+  </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>Данный проект ссылается на пакеты NuGet, отсутствующие на этом компьютере. Используйте восстановление пакетов NuGet, чтобы скачать их.  Дополнительную информацию см. по адресу: http://go.microsoft.com/fwlink/?LinkID=322105. Отсутствует следующий файл: {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets'))" />
+    <Error Condition="!Exists('packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets'))" />
+    <Error Condition="!Exists('packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets'))" />
+  </Target>
+</Project>

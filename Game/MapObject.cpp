@@ -1,0 +1,532 @@
+#include "StdAfx.h"
+static const char LOCAL_FILE[] = __FILE__;
+/////////////////////////////////////////////////////////////////////////////////////
+#include "MapObjectServer.h"
+#include "World.h"
+#include "FigureManager.h"
+#include "SpellSystem.h"
+#include "MapObjectManager.h"
+/////////////////////////////////////////////////////////////////////////////////////
+// MapObjectPtr
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObjectPtr::Load(CSave &file, CWorld &world)
+{
+    int nID;
+    file.Read(nID);
+    if (nID == -1)
+        Set(NULL);
+    else
+        Set((CMapObject *)world.GetMapObjectManager()->Find(nID));
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObjectPtr::Store(CSave &file)
+{
+    if (pObject)
+        file.Write((int)pObject->GetID());
+    else
+        file.Write((int)-1);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CMapObject::CMapObject()
+{
+    FreeReferences();
+    lpMapObjectSpecific = NULL;
+    rpgUserCommonStats.Clear();
+    fpAnimationCoeff = 1;
+
+    nTileMapX = -1;
+    nTileMapY = -1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CMapObject::~CMapObject()
+{
+    FreeReferences();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::FreeReferences()
+{
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// BOOL CMapObject::Create()
+// create
+BOOL CMapObject::Create()
+{
+    CObject3D::Create();
+    SetMapObjectSpecific(NULL);
+
+    rpgUserCommonStats.Clear();
+    fpAnimationCoeff = 1;
+    rpgUserCommonStats.Clear();
+    update.SetHistoriesNumber(VLD_MASK_MAPOBJMAX + 1);
+    update.Clear();
+    nUpdatedSegment = -1;
+    spellEffects.RemoveAll();
+    nActiveObjectCounter = 5;
+    szAttachedQuest = "";
+    memset(&baseComplection, 0, sizeof(baseComplection));
+
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CMapObject::Destroy()
+// destroy
+void CMapObject::Destroy()
+{
+    spellEffects.RemoveAll();
+    SetMapObjectSpecific(NULL);
+    CObject3D::Destroy();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CMapObject::SetSpecific( LPGAMEBASE lpNewSpecific )
+// set specific to location, depend on type id
+void CMapObject::SetSpecific(LPGAMEBASE lpNewSpecific)
+{
+    if (lpNewSpecific && (lpNewSpecific->GetTypeID() == SPTID_MAPOBJECT_SPECIFIC))
+        SetMapObjectSpecific(lpNewSpecific);
+    else
+        CObject3D::SetSpecific(lpNewSpecific);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CMapObject::SetMapObjectSpecific( LPGAMEBASE pNewSpecific )
+// set new unit specific data
+void CMapObject::SetMapObjectSpecific(LPGAMEBASE lpNewSpecific)
+{
+    if (lpMapObjectSpecific)
+    {
+        lpMapObjectSpecific->RegisterMapObject(NULL);
+        lpMapObjectSpecific->Release();
+    }
+
+    lpMapObjectSpecific = (CMapObjectSpecific *)lpNewSpecific;
+
+    if (lpMapObjectSpecific)
+    {
+        lpMapObjectSpecific->RegisterMapObject(this);
+        lpMapObjectSpecific->AddRef();
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::LeaveMap()
+{
+    lpMapObjectSpecific->LeaveMap();
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::ReturnOnMap()
+{
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::RecalcRPGStats(bool bStrengthChanged)
+{
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// export new stats from server specific (ONLY if this is a server object)
+BOOL CMapObject::ExportStats()
+{
+    CMapObjectServer *pMOSpec = (CMapObjectServer *)GetMapObjectSpecific();
+    if (pMOSpec->WhoAmI() == HPC_MAPOBJECTSERVERSPECIFIC)
+    {
+        pMOSpec->rpgCommonStats.Export(&rpgUserCommonStats);
+        return TRUE;
+    }
+    else
+        return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::LoadDefaultClientStats(const char *pszTemplate)
+{
+    CMapObjectManager *pM = (CMapObjectManager *)GetManager();
+    SRPGCommonStats s1;
+    pM->SetupStats(&s1, 0, pszTemplate);
+    s1.Export(&rpgUserCommonStats);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::SetUpdateMask(int nBit)
+{
+    CWorldBase *pWB;
+    if (nBit >= 0)
+        update.SetUpdateMask(nBit);
+    SetUpdated();
+    if (IsReferenced() && (pWB = GetWorldBase()))
+        nUpdatedSegment = pWB->GetUpdateCounter();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::UpdateInit()
+{
+    update.StartUpdateTo(utStart);
+    UpdateTo();
+    update.FinishUpdate();
+    ResetUpdated();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::UpdateFrame()
+{
+    if (update.IsUpdateMask(VLD_MASK_STATS) || update.IsUpdateMask(VLD_MASK_UNIT_STATS))
+        ExportStats();
+    update.StartUpdateTo(utFrame);
+    UpdateTo();
+    update.FinishUpdate();
+    ResetUpdated();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::UpdateFrom(EUpdateType tip, CPacket &pkt)
+{
+    BOOL bRv;
+    update.StartUpdateFrom(tip, pkt);
+    bRv = UpdateFrom(tip);
+    update.FinishUpdate();
+    return bRv;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::UpdateTo()
+{
+    CUpdateHistory *pPkt;
+    // common RPG stats
+    if (pPkt = update.GetHistory(VLD_MASK_STATS))
+    {
+        ::UpdateTo(rpgUserCommonStats, *pPkt);
+        pPkt->FinishUpdate();
+    }
+    // complection
+    if (pPkt = update.GetHistory(VLD_MASK_COMPLECTION))
+    {
+        pPkt->Write(&complection, sizeof(complection));
+        pPkt->FinishUpdate();
+    }
+    // placement: position and rotation
+    if (pPkt = update.GetHistory(VLD_MASK_POSROT))
+    {
+        BYTE bIsShadow = CheckFlag(OBJ_NOSHADOW) != 0;
+        (*pPkt) << bIsShadow;
+        pPkt->Write(&cp, sizeof(float) * 3);
+        pPkt->Write(&rotation, sizeof(float) * 4);
+        pPkt->FinishUpdate();
+    }
+    // spell effects
+    if (pPkt = update.GetHistory(VLD_MASK_SPELLEFFECTS))
+    {
+        BYTE bNumber = spellEffects.GetSize();
+        (*pPkt) << bNumber;
+        for (int k = 0; k < spellEffects.GetSize(); k++)
+        {
+            CSpellEffect &eff = spellEffects[k];
+            pPkt->WriteDirect(&eff.nSpellID, sizeof(eff.nSpellID));
+            pPkt->WriteDirect(&eff.nVisStrength, sizeof(eff.nVisStrength));
+            pPkt->WriteDirect(&eff.nDuration, 2);
+            pPkt->WriteDirect(&eff.bQuiet, 1);
+        }
+        pPkt->FinishUpdate();
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::UpdateFrom(EUpdateType tip)
+{
+    CUpdateHistory *pPkt;
+    BOOL bRv = TRUE;
+    // RPG common stats
+    if (pPkt = update.GetHistory(VLD_MASK_STATS))
+    {
+        int nOldHP = rpgUserCommonStats.nHP;
+        ::UpdateFrom(rpgUserCommonStats, *pPkt);
+        bRv &= pPkt->UpdateFromIsOk();
+        pPkt->FinishUpdate();
+        if ((nOldHP != rpgUserCommonStats.nHP) || (tip == utFrame))
+            NotifyHitPointsUpdated();
+    }
+    // complection
+    if (pPkt = update.GetHistory(VLD_MASK_COMPLECTION))
+    {
+        SComplection complection;
+        pPkt->Read(&complection, sizeof(complection));
+        SetComplection(complection);
+
+        bRv &= pPkt->UpdateFromIsOk();
+        pPkt->FinishUpdate();
+    }
+    // placement: position and rotation
+    if (pPkt = update.GetHistory(VLD_MASK_POSROT))
+    {
+        BYTE bIsShadow;
+        (*pPkt) >> bIsShadow;
+        if (bIsShadow)
+            SetFlag(OBJ_NOSHADOW);
+        else
+            ResetFlag(OBJ_NOSHADOW);
+        CPlot3D newCP;
+        pPkt->Read(&newCP, sizeof(float) * 3);
+        pPkt->Read(&rotation, sizeof(float) * 4);
+        GetWorldBase()->MoveObject(this, newCP);
+        NewVerticalPos(cp.z);
+
+        bRv &= pPkt->UpdateFromIsOk();
+        pPkt->FinishUpdate();
+    }
+    // spell effects
+    if (pPkt = update.GetHistory(VLD_MASK_SPELLEFFECTS))
+    {
+        BYTE bNumber;
+        (*pPkt) >> bNumber;
+        spellEffects.SetSize(bNumber);
+        for (int k = 0; k < spellEffects.GetSize(); k++)
+        {
+            CSpellEffect &eff = spellEffects[k];
+            eff.nDuration = 0;
+            pPkt->ReadDirect(&eff.nSpellID, sizeof(eff.nSpellID));
+            pPkt->ReadDirect(&eff.nVisStrength, sizeof(eff.nVisStrength));
+            pPkt->ReadDirect(&eff.nDuration, 2);
+            pPkt->ReadDirect(&eff.bQuiet, 1);
+        }
+        if (WhoAmI() != HPC_UNIT)
+            lpMapObjectSpecific->UpdateSpellEffectVisualization(tip == utStart);
+
+        bRv &= pPkt->UpdateFromIsOk();
+        pPkt->FinishUpdate();
+    }
+    return bRv;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::NewVerticalPos(float fpZ)
+{
+    cp.z = fpZ + GetWorldBase()->GetZValue(cp.x, cp.y);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// void CMapObject::SetRPGStats( SRPGCommonStats* lpRPGNewCommonStats )
+// setup new common RPG stats
+void CMapObject::SetRPGStats(SRPGCommonStats *lpRPGNewCommonStats)
+{
+    if (lpMapObjectSpecific->WhoAmI() == HPC_MAPOBJECTSERVERSPECIFIC)
+        ((CMapObjectServer *)lpMapObjectSpecific)->SetRPGStats(lpRPGNewCommonStats);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::ClearRPGAbsorbtions()
+{
+    if (lpMapObjectSpecific->WhoAmI() == HPC_MAPOBJECTSERVERSPECIFIC)
+    {
+        for (int i = 0; i < RPG_NUM_ATTACK_TYPES; ++i)
+            ((CMapObjectServer *)lpMapObjectSpecific)->rpgCommonStats.psAbsorbtions[i].fpBaseValue =
+                ((CMapObjectServer *)lpMapObjectSpecific)
+                    ->rpgCommonStats.psAbsorbtions[i]
+                    .fpBaseValue = 0;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::IsScientific()
+{
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::IsScientificDoor()
+{
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+DWORD CMapObject::GetScienceKeyNumber()
+{
+    return -123;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CMapObject::ApplyScience(const SRPGScienceStats &tool, CUnit *pWho)
+{
+    ReportWarning("Science is applied on wrong object");
+    return false;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::CanApplyScience(const SRPGScienceStats &tool)
+{
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnitRadius)
+{
+    points.SetSize(0);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::SetAttachedQuest(const char *pszQuest)
+{
+    szAttachedQuest = pszQuest;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::SetQuestVarValue(float fpVal)
+{
+    if (fpVal == 0)
+        SetQuestState(QS_NOT_AVAILABLE);
+    else if (fpVal == 1)
+        SetQuestState(QS_ACTIVE);
+    else
+        SetQuestState(QS_COMPLETED);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// step one segment
+int CMapObject::Segment()
+{
+    // first, segment in specific
+    if (lpMapObjectSpecific)
+        lpMapObjectSpecific->Segment();
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+// add spell effect to mapobject's spell effects list
+void CMapObject::AddSpellEffect(CSpellEffect &effect)
+{
+    // ADD: FixSpellEffectsOverflow
+    // With optimization below 20 is too much actually
+    if (spellEffects.GetSize() >= 20)
+    {
+        static int warnsCount = 0;
+        // if (warnsCount++ < 10)
+        //     LOGWARN("Too many spell effects on unit %d", target->id);
+        return;
+    }
+
+    spellEffects.Add(effect);
+    SetUpdateMask(VLD_MASK_SPELLEFFECTS);
+    bool bStrengthChanged = false;
+    switch (effect.nSpellID)
+    {
+    case SPELL_ID_STRENGTHEN:
+    case SPELL_ID_WEAKEN:
+    case SPELL_ID_ENLARGE:
+    case SPELL_ID_SHRINK:
+        bStrengthChanged = true;
+        break;
+    }
+    RecalcRPGStats(bStrengthChanged);
+    if (effect.nSpellID == SPELL_ID_STUN || effect.nSpellID == SPELL_ID_TELEPORT)
+        SetStunFlag(TRUE);
+    //
+    ChangeSpeedWithSpell();
+    // change complection
+    if (bStrengthChanged)
+        ChangeComplectionWithSpell();
+
+    // ADD: FixSpellEffectsOverflow
+    if (effect.nDuration > 1) // Avoid optimizing instant effects
+    {
+        assert(!spellEffects.IsEmpty());
+        assert(effect.nSpellID == spellEffects[spellEffects.GetSize() - 1].nSpellID);
+        for (int i = 0; i < spellEffects.GetSize() - 1; i++)
+        {
+            if (spellEffects[i].nSpellID == effect.nSpellID &&
+                spellEffects[i].nDuration <= effect.nDuration &&
+                spellEffects[i].fpPower <= effect.fpPower &&
+                // Not sure does it make sense to check radius and quiet but just in case...
+                spellEffects[i].bQuiet == effect.bQuiet &&
+                abs(spellEffects[i].fpRadius - effect.fpRadius) < 0.001
+                // Don't check visStrength as it doesn't really matter
+            )
+            {
+                spellEffects.RemoveAt(i);
+            }
+        }
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::ChangeComplectionWithSpell()
+{
+    RestoreComplection();
+    float fChange = HasSpellEffect(SPELL_ID_STRENGTHEN) - HasSpellEffect(SPELL_ID_WEAKEN);
+    float fChange2 = HasSpellEffect(SPELL_ID_ENLARGE) - HasSpellEffect(SPELL_ID_SHRINK);
+    float fTotalChange = fChange + fChange2;
+    // 'shrink' and 'enlarge' will affect all complection params
+    // while 'strengthen' and 'weaken' only 'strength' and 'tall' params in different cases
+    if (fChange2 != 0)
+    {
+        if (fTotalChange != 0)
+        {
+            complection.strength = Max(0.0f, complection.strength + 0.4f * fTotalChange);
+            complection.grace = Max(0.0f, complection.grace + 0.4f * fTotalChange);
+            complection.tall = Max(0.0f, complection.tall + 0.4f * fTotalChange);
+        }
+    }
+    else if (fChange != 0)
+    {
+        complection.strength = Max(0.0f, complection.strength + 0.4f * fChange);
+        if (GetTypeID() != MOTID_HUMAN)
+            complection.tall = Max(0.0f, complection.tall + 0.4f * fChange);
+    }
+    SetUpdateMask(VLD_MASK_COMPLECTION);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::RemoveAllSpellEffects()
+{
+    spellEffects.SetSize(0);
+    SetUpdateMask(VLD_MASK_SPELLEFFECTS);
+    RecalcRPGStats(true);
+    SetStunFlag(FALSE);
+    ChangeComplectionWithSpell();
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CMapObject::HasSpellEffect(int nSpellID) const
+{
+    for (int i = 0; i < spellEffects.GetSize(); i++)
+        if (spellEffects[i].nSpellID == nSpellID)
+            return TRUE;
+    return FALSE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+float CMapObject::GetEffectValue(int nSpellID) const
+{
+    float fEffectValue = 0;
+    for (int i = 0; i < spellEffects.GetSize(); ++i)
+    {
+        if (spellEffects[i].nSpellID == nSpellID)
+            fEffectValue = Max(fEffectValue, spellEffects[i].fpPower);
+    }
+    return fEffectValue;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CPlot3D CMapObject::GetUnitHeadPosition()
+{
+    CPlot3D ptRes = GetCP() + bv.ptCenter;
+    ptRes.z += GetWorldBase()->GetZValue(ptRes.x, ptRes.y);
+    return ptRes;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::Load(CSave &file)
+{
+    lpMapObjectSpecific->Load(file);
+    file.Read(fpAnimationCoeff);
+    file.Read(&cp, sizeof(cp));
+    file.Read(&rotation, sizeof(rotation));
+    SetMaskName(file.ReadString());
+    file.Read(&complection, sizeof(complection));
+    LoadCArray<CSpellEffect, CSpellEffect &>(spellEffects, file);
+    // read flags
+    DWORD dwNFlags;
+    file.Read(dwNFlags);
+    ResetAllFlags();
+    SetFlag(dwNFlags);
+    //
+    file.Read(szAttachedQuest);
+    //
+    if (file.GetVersion() > 78)
+        file.Read(&baseComplection, sizeof(baseComplection));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CMapObject::Store(CSave &file)
+{
+    lpMapObjectSpecific->Store(file);
+    file.Write(fpAnimationCoeff);
+    file.Write(&cp, sizeof(cp));
+    file.Write(&rotation, sizeof(rotation));
+    file.WriteString(GetMaskName());
+    file.Write(&complection, sizeof(complection));
+    StoreCArray<CSpellEffect, CSpellEffect &>(spellEffects, file);
+    file.Write(GetFlags());
+    file.Write(szAttachedQuest);
+    file.Write(&baseComplection, sizeof(baseComplection));
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CMapObject::IsInvisible() const
+{
+    return CheckFlag(MAPOBJ_TRANSPARENT) != 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CMapObject::IsStuned() const
+{
+    return CheckFlag(MAPOBJ_STUNED) != 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
