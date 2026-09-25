@@ -1,7 +1,9 @@
 #include "StdAfx.h"
 #include "ModRuntime.h"
+#include "ModPackage.h"
 #include "ModAudioPolicy.h"
 #include "WorldInterface.h"
+#include "ModStatRules.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "UnitClientSpecific.h"
@@ -35,32 +37,48 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 static const float FP_MIN_SOUND_RADIUS = 8.0f;
 static const float FP_MAX_SOUND_RADIUS = 40.0f;
+template<class WeaponAt> static int ResolveVisualLeftHand(const CUnit& unit, WeaponAt weaponAt);
 /////////////////////////////////////////////////////////////////////////////////////
 // helper function to load rect from one texture to the point in the another one
-void LoadTexture(ITexture *pDst, POINT *pPoint, ITexture *pSrc, RECT *pRect)
+static bool CopyMouthTexture(ITexture *pDst, const POINT *pPoint, ITexture *pSrc, const RECT *pRect)
 {
-    D3D11_BOX box = { pRect->left, pRect->top, 0, pRect->right, pRect->bottom, 1 };
-    POINT dstPoint = *pPoint;
-
-    D3D11_TEXTURE2D_DESC tex2d;
+    if (!pDst || !pSrc || !pDst->GetSurface() || !pSrc->GetSurface()) return false;
     auto sDst = pDst->GetSurface();
-    sDst->GetSurfaceDesc(&tex2d);
-    DWORD dwMips = tex2d.MipLevels;
     auto sSrc = pSrc->GetSurface();
-    sDst->GetSurfaceDesc(&tex2d);
-    dwMips = min(dwMips, tex2d.MipLevels);
-
-    for (int i = 0; i < dwMips; ++i)
+    D3D11_TEXTURE2D_DESC dst = {}, src = {};
+    sDst->GetSurfaceDesc(&dst);
+    sSrc->GetSurfaceDesc(&src);
+    if (dst.Format != src.Format || dst.SampleDesc.Count != 1 || src.SampleDesc.Count != 1 ||
+        pPoint->x < 0 || pPoint->y < 0 || pRect->left < 0 || pRect->top < 0 ||
+        pRect->right <= pRect->left || pRect->bottom <= pRect->top) return false;
+    // Mouth atlases are uncompressed; compressed rectangles need block alignment.
+    if (dst.Format != DXGI_FORMAT_B8G8R8A8_UNORM && dst.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+        dst.Format != DXGI_FORMAT_B5G5R5A1_UNORM && dst.Format != DXGI_FORMAT_B5G6R5_UNORM)
+        return false;
+    D3D11_BOX box = { UINT(pRect->left), UINT(pRect->top), 0,
+                       UINT(pRect->right), UINT(pRect->bottom), 1 };
+    UINT x = UINT(pPoint->x), y = UINT(pPoint->y);
+    DWORD mips = min(dst.MipLevels, src.MipLevels);
+    bool copied = false;
+    for (DWORD i = 0; i < mips; ++i)
     {
-        sDst->CopySubresourceRegion(i, dstPoint.x, dstPoint.y, 0, sSrc, i, &box);
-        box.left >>= 1;
-        box.top >>= 1;
-        box.right >>= 1;
-        box.bottom >>= 1;
-
-        dstPoint.x >>= 1;
-        dstPoint.y >>= 1;
+        if (box.right <= box.left || box.bottom <= box.top) break;
+        if (box.right > src.Width || box.bottom > src.Height ||
+            x > dst.Width || y > dst.Height ||
+            box.right - box.left > dst.Width - x || box.bottom - box.top > dst.Height - y)
+            return copied;
+        sDst->CopySubresourceRegion(i, x, y, 0, sSrc, i, &box);
+        copied = true;
+        box.left >>= 1; box.top >>= 1; box.right >>= 1; box.bottom >>= 1;
+        x >>= 1; y >>= 1;
+        src.Width = max(1U, src.Width >> 1); src.Height = max(1U, src.Height >> 1);
+        dst.Width = max(1U, dst.Width >> 1); dst.Height = max(1U, dst.Height >> 1);
     }
+    return copied;
+}
+static bool UseHDCharacterTextures()
+{
+    return ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics");
 }
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CParticle *CParticlePtr;
@@ -88,6 +106,7 @@ CUnitClientSpecific::CUnitClientSpecific()
 {
     // bNeedUpdateRoute = FALSE;
     fFadeOutAlpha = 1;
+    bWoundTextureDataCached = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CUnitClientSpecific::~CUnitClientSpecific()
@@ -107,6 +126,8 @@ BOOL CUnitClientSpecific::Create()
     fLastTime = 0;
     pLastADEntry = 0;
     bWeaponHidden = false;
+    bBriefingWeaponForcedHidden = false;
+    bWeaponHiddenBeforeBriefing = false;
     bArrowHidden = false;
     bFirstSetpos = true;
     fFadeOutAlpha = 1;
@@ -119,6 +140,7 @@ BOOL CUnitClientSpecific::Create()
     nTemporalHighlightSegmentsCounter = 0;
     nBloodyPrintsCounter = -1;
     nBloodyPrintsType = -1;
+    bWoundTextureDataCached = false;
     //
     bMouthSpeakingMode = false;
     nMouthSwitchTicks = 0;
@@ -141,6 +163,7 @@ void CUnitClientSpecific::Destroy()
     FreeEffect(pPathParticle[1]);
     //
     ReleaseMouthMimicTexture();
+    bWoundTextureDataCached = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::InventoryUpdated()
@@ -265,7 +288,7 @@ int CUnitClientSpecific::Segment()
         }
     }
     // special code for certain animations, now its idle in stand
-    if (lpUnit->nCycleAnimation == 0xfe &&
+    if (lpUnit->nCycleAnimation == 0xfe && !lpUnit->HasExtendedAnimationId() &&
         lpUnit->GetAnimationSystem2()->GetAnimationQueueSize() < 3)
         PumpAnimation(false);
 
@@ -613,14 +636,14 @@ void CUnitClientSpecific::NewAnimationWasReceived(float fSegmentTimeCounter)
     if (lpUnit->CheckFlag(UNIT_OLDROTATE))
         return;
     lpUnit->GetAnimationSystem2()->ClearAnimationsQueue();
-    if (lpUnit->nCycleAnimation == 0xfe)
+    if (lpUnit->nCycleAnimation == 0xfe && !lpUnit->HasExtendedAnimationId())
         PumpAnimation(true);
     else
     {
-        if (lpUnit->nStartAnimation != 0xff)
-            pEntry = lpUnit->GetAnimationByIndex(lpUnit->nStartAnimation);
-        if (lpUnit->nCycleAnimation != 0xff)
-            pEntryCycle = lpUnit->GetAnimationByIndex(lpUnit->nCycleAnimation);
+        if (lpUnit->GetStartAnimationId() != 0xffffffffu)
+            pEntry = lpUnit->GetAnimationByIndex(lpUnit->GetStartAnimationId());
+        if (lpUnit->GetCycleAnimationId() != 0xffffffffu)
+            pEntryCycle = lpUnit->GetAnimationByIndex(lpUnit->GetCycleAnimationId());
         ASSERT(pEntry || pEntryCycle);
         if (pEntry)
             lpUnit->GetAnimationSystem2()->SetAnimation(pEntry);
@@ -648,20 +671,30 @@ void CUnitClientSpecific::NewAnimationWasReceived(float fSegmentTimeCounter)
 /////////////////////////////////////////////////////////////////////////////////////
 DWORD CUnitClientSpecific::GetAnimationWeaponMask()
 {
-    DWORD dwWeapon = GetWeapon(lpUnit->dwCurrentWeapon);
+    const auto *mod = ModRuntime::Current();
+    const bool addonAttacks = mod && mod->CombatSetting("JMVAttacks");
+    DWORD dwWeapon = (!addonAttacks || lpUnit->dwCurrentWeapon < QI_MAX_WEAPONS)
+        ? GetWeapon(lpUnit->dwCurrentWeapon) : DWORD(-1);
     if (dwWeapon != -1)
     {
         DWORD dwShape = CItem::GetShape(dwWeapon);
         if (dwShape != 0xffff)
         {
+            if (!theItemDatabase.weapons[dwShape])
+                return 0;
             dwWeapon = theItemDatabase.weapons[dwShape]->dwTypeID;
-            return (1 << dwWeapon);
+            // The addon maps newly added weapon groups to its base animation mask.
+            if (addonAttacks && dwWeapon > 15)
+                dwWeapon = RPGWST_SWORD;
+            return dwWeapon < 32 ? (1u << dwWeapon) : 0;
         }
         ASSERT(0);
         return 0;
     }
-    else if (lpUnit->rpgUserUnitStats.cNAWWeaponType < RPGWST_UNKNOWN)
-        return (1 << lpUnit->rpgUserUnitStats.cNAWWeaponType);
+    else if (lpUnit->rpgUserUnitStats.cNAWWeaponType < RPGWST_UNKNOWN ||
+             (addonAttacks && lpUnit->rpgUserUnitStats.cNAWWeaponType > RPGWST_UNKNOWN &&
+              lpUnit->rpgUserUnitStats.cNAWWeaponType <= 15))
+        return (1u << lpUnit->rpgUserUnitStats.cNAWWeaponType);
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -705,40 +738,53 @@ void CUnitClientSpecific::PoseChanged()
 // change weapon - change models and notify to change texture
 BOOL CUnitClientSpecific::ChangeWeapon(DWORD dwToWeapon)
 {
-    DWORD dwFromWeapon = lpUnit->dwCurrentWeapon;
-    DWORD dwOldWeapon = GetWeapon(dwFromWeapon);
-    DWORD dwNewWeapon = GetWeapon(dwToWeapon);
+    const DWORD dwNewWeapon = GetWeapon(dwToWeapon);
     CStringArray szNames;
-
     CModelResourceEntry *pModel = ((CFigureManager *)theWorld.GetFigureManager())
                                       ->GetModel(lpUnit->GetMaskName());
-    // remove figures for old weapon
-    if (dwOldWeapon != -1)
+
+    // The addon clears both hand variants from every quick slot before reloading the active pair.
+    for (int slot = 0; slot < int(QI_MAX_WEAPONS); ++slot)
     {
-        CItemWeapon::GetWeaponModelNames(CItem::GetShape(dwOldWeapon), szNames);
-        for (int i = 0; i < szNames.GetSize(); i++)
-            lpUnit->RemoveFigure(szNames[i]);
+        const DWORD item = GetWeapon(DWORD(slot));
+        if (item == DWORD(-1)) continue;
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            CItemWeapon::GetWeaponModelNames(CItem::GetShape(item), szNames, hand == 0);
+            for (int i = 0; i < szNames.GetSize(); ++i)
+                lpUnit->RemoveFigure(szNames[i]);
+        }
     }
-    // assign new weapon index
+
     lpUnit->dwCurrentWeapon = dwToWeapon;
     bWeaponHidden = false;
-    // add figures for new weapon
-    if (dwNewWeapon != -1)
+    if (dwNewWeapon != DWORD(-1))
     {
-        CItemWeapon::GetWeaponModelNames(CItem::GetShape(dwNewWeapon), szNames);
-        for (int i = 0; i < szNames.GetSize(); i++)
+        CItemWeapon::GetWeaponModelNames(CItem::GetShape(dwNewWeapon), szNames, true);
+        for (int i = 0; i < szNames.GetSize(); ++i)
         {
             CFigure *pFigure = lpUnit->LoadFigure(szNames[i], pModel,
                                                   lpUnit->CheckFlag(OBJ_LOADED));
-            if (pFigure)
-                lpUnit->LinkFigure(pFigure);
+            if (pFigure) lpUnit->LinkFigure(pFigure);
         }
-        // hide arrow for the bow
+
+        const int leftSlot = ResolveVisualLeftHand(*lpUnit,
+            [this](int slot) { return GetWeapon(DWORD(slot)); });
+        const DWORD leftWeapon = leftSlot >= 0 ? GetWeapon(DWORD(leftSlot)) : DWORD(-1);
+        if (leftWeapon != DWORD(-1) && leftSlot != int(dwToWeapon))
+        {
+            CItemWeapon::GetWeaponModelNames(CItem::GetShape(leftWeapon), szNames, false);
+            for (int i = 0; i < szNames.GetSize(); ++i)
+            {
+                CFigure *pFigure = lpUnit->LoadFigure(szNames[i], pModel,
+                                                      lpUnit->CheckFlag(OBJ_LOADED));
+                if (pFigure) lpUnit->LinkFigure(pFigure);
+            }
+        }
         bArrowHidden = false;
         HideArrow(true);
     }
-    //
-    // notify about weapon updated - need reassemble texture
+
     NotifyWeaponUpdated();
     return TRUE;
 }
@@ -850,7 +896,7 @@ void CUnitClientSpecific::SetExactPosition(float fpTime)
     else
         lpUnit->SetAnimationCoeff(1.0f);
     // change animation
-    if (lpUnit->animationSpeed == UAS_MOVEMENT)
+    if (lpUnit->animationSpeed == UAS_MOVEMENT || (lpUnit->animationSpeed != UAS_FROZEN && ModRuntime::Current() && ModRuntime::Current()->CombatSetting("AttackAnimSpeed")))
         fpStep *= lpUnit->fpAnimationCoeff;
     if (lpUnit->lpAnimationSystem && lpUnit->animationSpeed != UAS_FROZEN)
     {
@@ -992,6 +1038,7 @@ BOOL CUnitClientSpecific::NotifyWeaponUpdated()
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+template<class WeaponAt> static int ResolveVisualLeftHand(const CUnit& unit, WeaponAt weaponAt);
 void CUnitClientSpecific::FormItemMMPData(BOOL bPrimary,
                                           CArray<SItemMMPData, SItemMMPData &> &userdata)
 {
@@ -1024,7 +1071,12 @@ void CUnitClientSpecific::FormItemMMPData(BOOL bPrimary,
     {
         // fill user data from current helm and weapon
         userdata.RemoveAll();
-        userdata.SetSize(2); // helm + weapon
+        userdata.SetSize(3); // helm + right-hand weapon + resolved left-hand item
+        for (int i = 0; i < 3; ++i) {
+            userdata[i].dwSubtypeID = DWORD(-1);
+            userdata[i].tidTypeID = ITID_ITEM_WEAPON;
+            userdata[i].dwType = DWORD(-1);
+        }
         // current weapon
         DWORD dwItem = armors[RPGAST_HELM];
         if (dwItem != -1) // helm
@@ -1046,6 +1098,16 @@ void CUnitClientSpecific::FormItemMMPData(BOOL bPrimary,
                 userdata[1].dwSubtypeID = dwItem;
                 userdata[1].tidTypeID = ITID_ITEM_WEAPON;
                 userdata[1].dwType = pShape->dwTypeID;
+            }
+        }
+        const int leftSlot = ResolveVisualLeftHand(*lpUnit, [this](int slot) { return GetWeapon(DWORD(slot)); });
+        dwItem = leftSlot >= 0 ? GetWeapon(DWORD(leftSlot)) : DWORD(-1);
+        if (dwItem != DWORD(-1)) {
+            const SIDBItemGeneralShape *pShape = theItemDatabase.weapons[CItem::GetShape(dwItem)];
+            if (pShape) {
+                userdata[2].dwSubtypeID = dwItem;
+                userdata[2].tidTypeID = ITID_ITEM_WEAPON;
+                userdata[2].dwType = pShape->dwTypeID;
             }
         }
     }
@@ -1082,6 +1144,51 @@ bool IsItemInArmorLayer(DWORD dwShape, ETypeIDs tidTypeID, DWORD dwALIndex)
     return false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Keep offhand atlas selection aligned with the installed addon's currentWeapons::GetWeapons.
+template<class WeaponAt> static int ResolveVisualLeftHand(const CUnit& unit, WeaponAt weaponAt)
+{
+    const int currentSlot = int(unit.GetCurrentWeaponSlotIndex());
+    if (currentSlot < 0 || currentSlot >= int(QI_MAX_WEAPONS) || weaponAt(currentSlot) == DWORD(-1)) return -1;
+    int shieldSlot = -1;
+    for (int i = 0; i < int(QI_MAX_WEAPONS); ++i) {
+        DWORD item = weaponAt(i);
+        if (item == DWORD(-1)) continue;
+        const auto shape = theItemDatabase.weapons[CItem::GetShape(item)];
+        if (shape && shape->dwTypeID == RPGWST_HANDS1) { shieldSlot = i; break; }
+    }
+    const int firstSlot = 0, dualSlot = 1;
+    const DWORD currentItem = weaponAt(currentSlot), firstItem = weaponAt(firstSlot), dualItem = weaponAt(dualSlot);
+    if (firstItem == DWORD(-1) || dualItem == DWORD(-1)) return -1;
+    const auto current = theItemDatabase.weapons[CItem::GetShape(currentItem)];
+    const auto first = theItemDatabase.weapons[CItem::GetShape(firstItem)];
+    const auto dual = theItemDatabase.weapons[CItem::GetShape(dualItem)];
+    if (!current || !first || !dual) return -1;
+    const int currentType = int(current->dwTypeID), firstType = int(first->dwTypeID), dualType = int(dual->dwTypeID);
+    const bool currentTwoHanded = ModStats::IsTwohandedWeapon(currentType, &unit);
+    const bool firstTwoHanded = ModStats::IsTwohandedWeapon(firstType, &unit);
+    const bool dualTwoHanded = ModStats::IsTwohandedWeapon(dualType, &unit);
+    const bool dualIsShield = dualType == RPGWST_HANDS1;
+    const bool currentIsStaff = currentType == RPGWST_HANDS3 || currentType == RPGWST_HANDS7;
+    const bool firstIsStaff = firstType == RPGWST_HANDS3 || firstType == RPGWST_HANDS7;
+    const bool dualIsStaff = dualType == RPGWST_HANDS3 || dualType == RPGWST_HANDS7;
+    if (currentTwoHanded) return -1;
+    if (currentIsStaff || dualIsStaff || firstIsStaff) {
+        if (currentSlot == dualSlot) {
+            if (dualIsShield) return shieldSlot;
+            return !firstTwoHanded && firstIsStaff && dualIsStaff ? firstSlot : -1;
+        }
+        if (shieldSlot >= 0) return shieldSlot;
+        return !dualTwoHanded && dualIsStaff && currentIsStaff ? dualSlot : -1;
+    }
+    if (currentSlot == dualSlot) {
+        if (dualIsShield) return shieldSlot;
+        if (!firstTwoHanded) return firstSlot;
+        return -1;
+    }
+    if (shieldSlot >= 0) return shieldSlot;
+    return !dualTwoHanded ? dualSlot : -1;
+}
+
 static const DWORD UCS_PRIMARY_TEXTURE_SIZE = 256;
 static const DWORD UCS_SECONDARY_TEXTURE_SIZE = 128;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1092,6 +1199,7 @@ BOOL CUnitClientSpecific::AssembleTexture(BOOL bPrimaryTexture, CString &szTextu
     CArray<SItemMMPData, SItemMMPData &> userdata;
     CString szResultFileName1, szResultFileName2, szFileName;
     STextureSetDescription set;
+    set.characterAtlas = bPrimaryTexture ? 1 : 2;
     int i;
     // fill user data from current armors and weapon
     FormItemMMPData(bPrimaryTexture, userdata);
@@ -1103,6 +1211,8 @@ BOOL CUnitClientSpecific::AssembleTexture(BOOL bPrimaryTexture, CString &szTextu
     {
         szResultFileName1.Format("mo%dp", lpUnit->GetID());
         szResultFileName2.Format("prot%dp", lpUnit->GetSubtypeID());
+        // Mouth animation writes into this atlas: never use a shared prototype texture.
+        if (UseHDCharacterTextures()) szResultFileName2 = szResultFileName1;
         set.dwTextureDimention = UCS_PRIMARY_TEXTURE_SIZE;
         // skin, non-shaped armors, shaped armos w/o helm
         // skin
@@ -1183,6 +1293,7 @@ BOOL CUnitClientSpecific::AssembleTexture(BOOL bPrimaryTexture, CString &szTextu
             CItemArmor::FormTextureNameMask(szFileName, CItem::GetShape(dwItem),
                                             CItem::GetMaterial(dwItem));
             szFileName = lpUnit->GetMaskName() + szFileName + ".mmp";
+            set.equipmentSlots[2] = int(set.szTextures.GetSize());
             set.szTextures.Add(szFileName);
         }
         // weapon
@@ -1192,7 +1303,20 @@ BOOL CUnitClientSpecific::AssembleTexture(BOOL bPrimaryTexture, CString &szTextu
             CItemWeapon::FormTextureNameMask(szFileName, CItem::GetShape(dwItem),
                                              CItem::GetMaterial(dwItem));
             szFileName = lpUnit->GetMaskName() + szFileName + ".mmp";
+            set.equipmentSlots[0] = int(set.szTextures.GetSize());
             set.szTextures.Add(szFileName);
+        }
+        const int leftSlot = ResolveVisualLeftHand(*lpUnit, [this](int slot) { return GetWeapon(DWORD(slot)); });
+        dwItem = leftSlot >= 0 ? GetWeapon(DWORD(leftSlot)) : DWORD(-1);
+        if (dwItem != DWORD(-1)) {
+            const SIDBItemGeneralShape *pShape = theItemDatabase.weapons[CItem::GetShape(dwItem)];
+            if (pShape) {
+                CItemWeapon::FormTextureNameMask(szFileName, CItem::GetShape(dwItem), CItem::GetMaterial(dwItem));
+                szFileName = lpUnit->GetMaskName() + szFileName + ".mmp";
+                const int atlasSlot = pShape->dwTypeID == RPGWST_HANDS1 ? 3 : 1;
+                set.equipmentSlots[atlasSlot] = int(set.szTextures.GetSize());
+                set.szTextures.Add(szFileName);
+            }
         }
     }
     //
@@ -1319,20 +1443,46 @@ BOOL CUnitClientSpecific::AssembleWoundsTexture()
     szFileName.Format("mo%dw", lpUnit->GetID());
     LPTEXTUREMANAGER pTextureManager = (LPTEXTUREMANAGER)theWorld.GetTextureManager();
     return pTextureManager->ComposeTexture(szTextureName, set, szFileName, szFileName, 3,
-                                           0 /*0x00FFFFFF*/, MMP_FORMAT_4444);
+                                           0 /*0x00FFFFFF*/, MMP_FORMAT_8888);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CUnitClientSpecific::NotifyHitPointsUpdated()
 {
-    if (AssembleWoundsTexture())
+    CBYTEArray currentWoundData;
+    currentWoundData.SetSize(RPG_NUM_HIT_LOCATIONS);
+    if (!FormWoundsMMPData(currentWoundData))
     {
-        char buff[128];
-        sprintf(buff, "mo%dw", lpUnit->GetID());
-        ((CObject3DClientSpecific *)lpUnit->GetObjectSpecific())->LoadWounds(buff);
+        bWoundTextureDataCached = false;
+        ((CObject3DClientSpecific *)lpUnit->GetObjectSpecific())->ReleaseWounds();
+        return TRUE;
+    }
+
+    bool unchanged = bWoundTextureDataCached;
+    for (int i = 0; unchanged && i < RPG_NUM_HIT_LOCATIONS; ++i)
+        unchanged = woundTextureData[i] == currentWoundData[i];
+
+    char textureName[128];
+    sprintf(textureName, "mo%dw", lpUnit->GetID());
+    CObject3DClientSpecific *objectSpecific =
+        (CObject3DClientSpecific *)lpUnit->GetObjectSpecific();
+    if (unchanged)
+    {
+        // Reattach/reload if needed, but avoid rerunning the wound-layer composer.
+        objectSpecific->LoadWounds(textureName);
+        return TRUE;
+    }
+
+    if (AssembleWoundsTexture() && objectSpecific->LoadWounds(textureName))
+    {
+        for (int i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i)
+            woundTextureData[i] = currentWoundData[i];
+        bWoundTextureDataCached = true;
     }
     else
-        ((CObject3DClientSpecific *)lpUnit->GetObjectSpecific())->ReleaseWounds();
-
+    {
+        bWoundTextureDataCached = false;
+        objectSpecific->ReleaseWounds();
+    }
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1425,42 +1575,71 @@ void CUnitClientSpecific::HLDamaged(ERPGHitLocations hl, float fpDamage, BYTE cF
         if (pPrototype)
             cWeaponType = pPrototype->rpgAttackWeaponType;
     }
-    switch (cWeaponType)
+    if (lpUnit->GetTypeID() != MOTID_HUMAN)
     {
-    case RPGWST_SWORD:
-    case RPGWST_AXE:
-        szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_DAGGER:
-    case RPGWST_SPEAR:
-    case RPGWST_BOW:
-    case RPGWST_CROSSBOW:
-        szSFXName.Format("weapons\\pierce\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HAMMER:
-        szSFXName.Format("weapons\\crash\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS1:
-        szSFXName.Format("weapons\\hands1\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS2:
-        szSFXName.Format("weapons\\pierce\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS3:
-        szSFXName.Format("weapons\\crash\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS4:
-        szSFXName.Format("weapons\\hands4\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS5:
-        szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS6:
-        szSFXName.Format("weapons\\hands6\\%s\\1.wav", szMaterialName);
-        break;
-    case RPGWST_HANDS7:
-        szSFXName.Format("weapons\\hands7\\%s\\1.wav", szMaterialName);
-        break;
+        switch (cWeaponType)
+        {
+        case RPGWST_SWORD:
+        case RPGWST_AXE:
+            szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_DAGGER:
+        case RPGWST_SPEAR:
+        case RPGWST_BOW:
+        case RPGWST_CROSSBOW:
+        case RPGWST_HANDS2:
+            szSFXName.Format("weapons\\pierce\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HAMMER:
+            szSFXName.Format("weapons\\crash\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS1:
+            szSFXName.Format("weapons\\hands1\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS3:
+            szSFXName.Format("weapons\\crash\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS4:
+            szSFXName.Format("weapons\\hands4\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS5:
+            szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS6:
+            szSFXName.Format("weapons\\hands6\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS7:
+            szSFXName.Format("weapons\\hands7\\%s\\1.wav", szMaterialName);
+            break;
+        }
+    }
+    else
+    {
+        switch (cWeaponType)
+        {
+        case RPGWST_SWORD:
+        case RPGWST_HANDS4:
+        case RPGWST_HANDS5:
+        case RPGWST_AXE:
+            szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_DAGGER:
+        case RPGWST_SPEAR:
+        case RPGWST_BOW:
+        case RPGWST_CROSSBOW:
+        case RPGWST_HANDS2:
+            szSFXName.Format("weapons\\pierce\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HAMMER:
+        case RPGWST_HANDS1:
+        case RPGWST_HANDS6:
+            szSFXName.Format("weapons\\hands6\\%s\\1.wav", szMaterialName);
+            break;
+        case RPGWST_HANDS3:
+        case RPGWST_HANDS7:
+            szSFXName.Format("weapons\\hands7\\%s\\1.wav", szMaterialName);
+            break;
+        }
     }
     if (!szSFXName.IsEmpty())
         ((CWorldClient *)GetWorld())
@@ -1577,9 +1756,22 @@ void CUnitClientSpecific::ElectricDamage(float fpStrength)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // hide weapon model
+void CUnitClientSpecific::SetBriefingWeaponHidden(bool hidden)
+{
+    if (bBriefingWeaponForcedHidden == hidden)
+    {
+        if (hidden) HideWeapon(true);
+        return;
+    }
+    if (hidden) bWeaponHiddenBeforeBriefing = bWeaponHidden;
+    bBriefingWeaponForcedHidden = hidden;
+    HideWeapon(hidden ? true : bWeaponHiddenBeforeBriefing);
+}
+
 void CUnitClientSpecific::HideWeapon(bool bHide)
 {
-    if (bWeaponHidden == bHide)
+    if (bBriefingWeaponForcedHidden) bHide = true;
+    if (bWeaponHidden == bHide && !bBriefingWeaponForcedHidden)
         return;
 
     DWORD dwWeapon = GetCurrentWeapon();
@@ -1950,6 +2142,7 @@ bool CUnitClientSpecific::RemoveWeapon(DWORD dwWeapon)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::GetAttackParams(SAttackParams &params) const
 {
+    if(auto*mod=ModRuntime::Current()){mod->AttackParams(lpUnit->rpgUserUnitStats,*lpUnit,params);return;}
     bool bHero = IsIDofPersonage(lpUnit->GetID());
     int i;
 
@@ -2071,9 +2264,10 @@ bool CUnitClientSpecific::LoadMouthMimicTexture()
         return false;
     char buff[1024];
     if (lpUnit->GetTypeID() == MOTID_HUMAN)
-        sprintf(buff, "%smouth_%.2d", lpUnit->GetMaskName(), pPrototype->dwSkinIndex);
+        sprintf(buff, UseHDCharacterTextures() ? "%smouth_%.2d.x4" : "%smouth_%.2d",
+                lpUnit->GetMaskName(), pPrototype->dwSkinIndex);
     else
-        sprintf(buff, "%smouth", lpUnit->GetMaskName());
+        sprintf(buff, UseHDCharacterTextures() ? "%smouth.x4" : "%smouth", lpUnit->GetMaskName());
     pMouthMimicTexture = theWorld.GetTextureManager()->CreateTexture(TCTID_STATIC_TEXTURE, buff);
     theWorld.GetTextureManager()->LoadTexture(pMouthMimicTexture);
     if (pMouthMimicTexture->CheckFlag(TEX_LOADED) == 0)
@@ -2103,6 +2297,20 @@ void CUnitClientSpecific::MouthOpen(bool bForce)
                                     ->GetPrimaryTexture();
     if (pPrimaryTexture == 0)
         return;
+    if (UseHDCharacterTextures())
+    {
+        const SUDBRaceModel *race = lpUnit->GetRaceModel();
+        if (!race) return;
+        const LONG width = race->nMouthRectSizeX * 4;
+        const LONG height = race->nMouthRectSizeY * 4;
+        const LONG top = LONG(pMouthMimicTexture->GetSizeY()) - 2 * height;
+        POINT point = { race->nMouthPointX * 4,
+                        LONG(pPrimaryTexture->GetSizeX()) - race->nMouthPointY * 4 - height };
+        RECT rect = { 0, top, width, top + height };
+        if (CopyMouthTexture(pPrimaryTexture, &point, pMouthMimicTexture, &rect))
+            nCurrentMouthState = 1;
+        return;
+    }
     // calc coeff for non high-quality textures
     float fCoeff = pPrimaryTexture->GetSizeX() / 256.0f;
     // текстура перевёрнута - не забывай
@@ -2113,9 +2321,8 @@ void CUnitClientSpecific::MouthOpen(bool bForce)
                     long((256 - pRace->nMouthPointY - pRace->nMouthRectSizeY) * fCoeff) };
     RECT rect = { 0, long(fYAdd), long(pRace->nMouthRectSizeX * fCoeff),
                   long((pRace->nMouthRectSizeY + fYAdd) * fCoeff) };
-    LoadTexture(pPrimaryTexture, &point, pMouthMimicTexture, &rect);
-
-    nCurrentMouthState = 1;
+    if (CopyMouthTexture(pPrimaryTexture, &point, pMouthMimicTexture, &rect))
+        nCurrentMouthState = 1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::MouthClose(bool bForce)
@@ -2131,6 +2338,20 @@ void CUnitClientSpecific::MouthClose(bool bForce)
                                     ->GetPrimaryTexture();
     if (pPrimaryTexture == 0)
         return;
+    if (UseHDCharacterTextures())
+    {
+        const SUDBRaceModel *race = lpUnit->GetRaceModel();
+        if (!race) return;
+        const LONG width = race->nMouthRectSizeX * 4;
+        const LONG height = race->nMouthRectSizeY * 4;
+        const LONG top = LONG(pMouthMimicTexture->GetSizeY()) - 1 * height;
+        POINT point = { race->nMouthPointX * 4,
+                        LONG(pPrimaryTexture->GetSizeX()) - race->nMouthPointY * 4 - height };
+        RECT rect = { 0, top, width, top + height };
+        if (CopyMouthTexture(pPrimaryTexture, &point, pMouthMimicTexture, &rect))
+            nCurrentMouthState = 0;
+        return;
+    }
     // calc coeff for non high-quality textures
     float fCoeff = pPrimaryTexture->GetSizeX() / 256.0f;
     // текстура перевёрнута - не забывай
@@ -2142,9 +2363,8 @@ void CUnitClientSpecific::MouthClose(bool bForce)
     RECT rect = { 0, long((pRace->nMouthRectSizeY + fYAdd) * fCoeff),
                   long(pRace->nMouthRectSizeX * fCoeff),
                   long((2.0f * pRace->nMouthRectSizeY + fYAdd) * fCoeff) };
-    LoadTexture(pPrimaryTexture, &point, pMouthMimicTexture, &rect);
-
-    nCurrentMouthState = 0;
+    if (CopyMouthTexture(pPrimaryTexture, &point, pMouthMimicTexture, &rect))
+        nCurrentMouthState = 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CUnitClientSpecific::GetHeroLevel() const

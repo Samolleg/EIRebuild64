@@ -269,9 +269,12 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
     DWORD dwNewSizeY = pHdr->dwDimentionY >> dwFromLevel;
     // fill mip surfaces
     int nTotalSize = 0;
-    for (int i = int(dwFromLevel); i < int(pHdr->dwMipMapLevel); i++)
+    D3D11_TEXTURE2D_DESC destination = {};
+    pDXDDS->GetSurfaceDesc(&destination);
+    for (int i = int(dwFromLevel); i < int(pHdr->dwMipMapLevel) &&
+         i - int(dwFromLevel) < int(destination.MipLevels); i++)
     {
-        int sub_index = D3D11CalcSubresource(i, 0, pHdr->dwMipMapLevel);
+        int sub_index = i - int(dwFromLevel);
 
         D3D11_SUBRESOURCE_DATA srd = { 0 };
         srd.pSysMem = lpData;

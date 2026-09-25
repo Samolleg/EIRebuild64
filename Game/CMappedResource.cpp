@@ -41,7 +41,32 @@ void CMappedResource::OpenOverlays(LPCSTR name,bool write){
  std::vector<std::string> paths;ModRuntime::Resources()->ResourcePlan(name,paths,ignoreOriginal);
  for(const auto&path:paths){if(!std::filesystem::is_regular_file(path))throw std::runtime_error("Missing mod resource: "+path);auto child=std::make_unique<CMappedResource>(true);if(!child->OpenResource(path.c_str()))throw std::runtime_error("Cannot open mod resource: "+path);overlays.push_back(std::move(child));}
 }
-LPBYTE CMappedResource::OverlayFile(LPCSTR name,LPDWORD size){for(auto&child:overlays)if(auto*p=child->GetFile(name,size))return p;return nullptr;}
+namespace {
+std::vector<std::string> BriefingCandidates(LPCSTR path)
+{
+    if (!path)
+        return {};
+    std::vector<std::string> names;
+    if ((_strnicmp(path, "s\\briefing\\", 11) != 0) &&
+        (_strnicmp(path, "t\\briefing\\", 11) != 0))
+        return {path};
+    const std::string canonical = std::string("s\\") + (path + 2);
+    names.push_back(canonical);
+    if (_stricmp(path, canonical.c_str()) != 0)
+        names.push_back(path);
+    names.push_back(path + 2);
+    if (_stricmp(path, canonical.c_str()) == 0)
+        names.push_back(std::string("t\\") + (path + 2));
+    return names;
+}
+}
+LPBYTE CMappedResource::OverlayFile(LPCSTR name,LPDWORD size)
+{
+    for (auto& child : overlays)
+        if (auto* data = child->GetFileExact(name, size))
+            return data;
+    return nullptr;
+}
 void CMappedResource::GetFileList(CStringArray&names,LPCSTR mask){
  names.RemoveAll();std::set<std::string> seen;CStringArray local;
  auto append=[&](){for(int i=0;i<local.GetSize();i++){std::string key=(LPCSTR)local[i];for(char&c:key)if(c>='A'&&c<='Z')c+=32;if(seen.insert(key).second)names.Add(local[i]);}local.RemoveAll();};
@@ -51,6 +76,9 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
 {
     CloseResource();
     bWriteAccess = _bWriteAccess;
+    const std::string resolvedName = (!rawResource && !_bWriteAccess)
+        ? ModRuntime::MapPath(pszFileName) : std::string(pszFileName);
+    pszFileName = resolvedName.c_str();
     OpenOverlays(pszFileName,_bWriteAccess);if(ignoreOriginal)return TRUE;
 
     hFile = _open(pszFileName, _O_BINARY | _O_RANDOM | (bWriteAccess ? _O_RDWR : _O_RDONLY));
@@ -123,18 +151,34 @@ void CMappedResource::CloseResource()
 
 bool CMappedResource::IsFileExist(LPCSTR pszFileName)
 {
-    for(auto&child:overlays)if(child->IsFileExist(pszFileName))return true;if(ignoreOriginal)return false;
-    if (!pHashTable || !pNamePool)
-        return false;
-    DWORD dwIndex = GetIndexOfName(pszFileName);
-    if (dwIndex == -1)
-        return false;
-    return true;
+    for (const auto& candidate : BriefingCandidates(pszFileName))
+    {
+        for (auto& child : overlays)
+            if (child->IsFileExistExact(candidate.c_str()))
+                return true;
+        if (!ignoreOriginal && IsFileExistExact(candidate.c_str()))
+            return true;
+    }
+    return false;
 }
-
+bool CMappedResource::IsFileExistExact(LPCSTR pszFileName)
+{
+    return pHashTable && pNamePool && GetIndexOfName(pszFileName) != DWORD(-1);
+}
 LPBYTE CMappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
-    if(auto*p=OverlayFile(pszFileName,pnDataSize))return p;if(ignoreOriginal)return nullptr;
+    for (const auto& candidate : BriefingCandidates(pszFileName))
+    {
+        if (auto* data = OverlayFile(candidate.c_str(), pnDataSize))
+            return data;
+        if (!ignoreOriginal)
+            if (auto* data = GetFileExact(candidate.c_str(), pnDataSize))
+                return data;
+    }
+    return nullptr;
+}
+LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
+{
     if (!pHashTable || !pNamePool)
         return NULL;
 
@@ -286,7 +330,18 @@ void CWin32MappedResource::Flush()
 // можно оставить равным NULL
 LPBYTE CWin32MappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
-    if(auto*p=OverlayFile(pszFileName,pnDataSize))return p;if(ignoreOriginal)return nullptr;
+    for (const auto& candidate : BriefingCandidates(pszFileName))
+    {
+        if (auto* data = OverlayFile(candidate.c_str(), pnDataSize))
+            return data;
+        if (!ignoreOriginal)
+            if (auto* data = GetFileExact(candidate.c_str(), pnDataSize))
+                return data;
+    }
+    return nullptr;
+}
+LPBYTE CWin32MappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
+{
     if (!pHashTable || !pNamePool)
         return NULL;
     DWORD dwIndex = GetIndexOfName(pszFileName);

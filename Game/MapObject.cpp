@@ -367,6 +367,19 @@ int CMapObject::Segment()
         lpMapObjectSpecific->Segment();
     return TRUE;
 }
+// Advance effects on an object excluded from normal active-set segments.
+bool CMapObject::TickInactiveSpellEffects()
+{
+    if (nActiveObjectCounter > 0 || !lpMapObjectSpecific || spellEffects.IsEmpty())
+        return false;
+    bool expired = false;
+    for (int i = 0; i < spellEffects.GetSize(); ++i)
+    {
+        --spellEffects[i].nDuration;
+        expired = expired || spellEffects[i].nDuration <= 0;
+    }
+    return expired;
+}
 /////////////////////////////////////////////////////////////////////////////////////
 // add spell effect to mapobject's spell effects list
 void CMapObject::AddSpellEffect(CSpellEffect &effect)
@@ -530,3 +543,11 @@ bool CMapObject::IsStuned() const
     return CheckFlag(MAPOBJ_STUNED) != 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+bool CMapObject::RefreshWeaponStatus(CSpellEffect& effect){
+ for(int i=0;i<spellEffects.GetSize();++i)if(spellEffects[i].nSpellID==effect.nSpellID&&spellEffects[i].nDuration>0){
+  spellEffects[i]=effect;SetUpdateMask(VLD_MASK_SPELLEFFECTS);ChangeSpeedWithSpell();return true;
+ }
+ if(spellEffects.GetSize()>=20)return false;
+ AddSpellEffect(effect);return true;
+}

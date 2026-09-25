@@ -32,6 +32,7 @@ class CUnitServer;
 class CAIScanUnits;
 class CAIUnitLogic;
 class CSpell;
+class CItemWeapon;
 
 /////////////////////////////////////////////////////////////////////////////////////
 struct SAITurnLookOrder
@@ -170,6 +171,10 @@ private:
     CArray<SAIPotentialAttack, SAIPotentialAttack &> heals;
     // средние наносимые юнитом повреждения, характеризуют его ценность
     float fpAvrgDamage;
+    CItemWeapon* skillWeapon=nullptr;
+    DWORD skillWeaponType=0;
+    CSpell* skillSlots[16]={};
+    bool skillCacheValid=false,skillCompanion=false;
     //
     void FillAttackData(SAIPotentialAttack &a, EAttackType type, int nNumber, float fpRange,
                         int nTargets, float fpDamageRadius, int nDuration);
@@ -189,6 +194,10 @@ private:
 
 public:
     void Initialize(CUnit *pUnit);
+    void RefreshSkillCache(CUnit*);
+    bool HasWeaponSkills(CUnit*);
+    bool IsWeaponSkillChoice(CAIUnitLogic&,const CEnemy&);
+    void SelectRevengeSpell(CAIUnitLogic&,CEnemy&);
     // интерфейс к системе выбора лучшей цели и выполнение выбранной команды
     void FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList &units,
                         const CPlot3D &ptPrefered, bool bHeal, bool bDoNotMove = false);

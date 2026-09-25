@@ -36,6 +36,7 @@ const DWORD SPELL_FILTER_HUMAN = 0x00000004;
 const DWORD SPELL_FILTER_GOBLIN = 0x00000008;
 const DWORD SPELL_FILTER_ORC = 0x00000010;
 const DWORD SPELL_FILTER_LIZARD = 0x00000020;
+const DWORD SPELL_FILTER_UNDEAD = 0x00000040;
 // item-only modifiers
 const DWORD SPELL_ITEM_TRIGGER = 0x00010000;
 const DWORD SPELL_ITEM_CONTINUOUS = 0x00020000;
@@ -96,6 +97,8 @@ public:
     float GetRange() const { return fpRange; }
     DWORD GetNumTargets() const { return dwNumTargets; }
     DWORD GetResolve() const { return dwResolve & 0x0FFFFFFF; }
+    DWORD GetResolveFlags() const { return dwResolve; }
+    const CSpellEffect &GetEffect() const { return effect; }
     DWORD GetFilters() const { return dwResolve & 0x0000FFFF; }
     float GetManaCost() const { return fpManaCost; }
     DWORD GetNumSlots() const { return dwSlots; }
@@ -104,6 +107,7 @@ public:
     // spell effect data
     DWORD GetDuration() const { return effect.nDuration; }
     float GetPower() const { return effect.fpPower; }
+    void SetPower(float value) { effect.fpPower = value; }
     float GetRadius() const { return effect.fpRadius; }
     float GetArea() const { return FP_PI * effect.fpRadius * effect.fpRadius; }
     void GetSpellEffect(CSpellEffect &res) const { res = effect; }

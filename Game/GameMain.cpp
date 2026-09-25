@@ -702,7 +702,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
                                  NGame::szAppTitleName))
         exit(-1);
     // setup registry key
-    CWorld::SetRegistryKey("Software\\Nival Interactive\\EIRebuildTest");
+    CWorld::SetRegistryKey("Software\\Gipat.ru\\EI_Starter\\EvilIslands");
     CWorld::InitCurrentDir();
     // read ai settings
     theAIGeneralSettings.ReadFromFile(CWorld::GetCurrentPath() + "config\\ai.reg");
@@ -762,10 +762,10 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     //
     // create saves\current
     CString szPath;
-    szPath.Format("%ssaves\\", theWorld.GetWorkPath());
+    szPath.Format("%ssaves\\", ModRuntime::SaveRoot(theWorld.GetWorkPath()).c_str());
     CreateDirectory(szPath, 0);
     // create multiplayer dir
-    szPath.Format("%smp\\", theWorld.GetWorkPath());
+    szPath.Format("%smp\\", ModRuntime::SaveRoot(theWorld.GetWorkPath()).c_str());
     CreateDirectory(szPath, 0);
     // create textures directory
     szPath.Format("%stextures\\", theWorld.GetWorkPath());
@@ -852,6 +852,10 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
 /////////////////////////////////////////////////////////////////////////////////////
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    if(strcmp(lpCmdLine,"--inspect-starter-selection")==0){
+        try { auto host=ModRuntime::Host::FromCommandLine();return host&&ModRuntime::Resources()?0:BAD_RESULT; }
+        catch(const std::exception&){return BAD_RESULT;}
+    }
     int inspectionResult=0;
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
     std::unique_ptr<ModRuntime::Host> modHost;
@@ -1112,16 +1116,10 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
     reg.Open(theWorld.GetWorkPath() + "config\\movie.ini");
     reg.GetStringArray(pszSection, "movies", szNames);
 
-    // removed clr primary surface
-    // if (bInitialClear)
-    //    theRenderer.GetD3D()->ClearPrimarySurface(0);
-
-    // for (int i = 0; i < szNames.GetSize(); ++i)
-    //{
-    //     CBinkVideo::Play(theWorld.GetCDPath() + "Movies\\" + szNames[i], 0, true, false, false,
-    //                      bStopAllSounds, bUseOverlays);
-    //     if (bClearSurfaceBetweenMovies)
-    //         theRenderer.GetD3D()->ClearPrimarySurface(0);
-    // }
+    for (int i = 0; i < szNames.GetSize(); ++i)
+    {
+        CBinkVideo::Play(theWorld.GetCDPath() + "Movies\\" + szNames[i], 0, true, false,
+                         bInitialClear || bClearSurfaceBetweenMovies, bStopAllSounds, bUseOverlays);
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////

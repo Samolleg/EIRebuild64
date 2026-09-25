@@ -14,6 +14,7 @@ c.JMVSfxReverbOutdoorDecay=reg.GetFloat("Addon","JMVSfxReverbOutdoorDecay",.55f)
 c.JMVSfxReverbCaveLevel=reg.GetFloat("Addon","JMVSfxReverbCaveLevel",.22f);
 c.JMVSfxReverbCaveReflection=reg.GetFloat("Addon","JMVSfxReverbCaveReflection",.12f);
 c.JMVSfxReverbCaveDecay=reg.GetFloat("Addon","JMVSfxReverbCaveDecay",1.8f);
+c.JMVMiniaudioBinkOutputPrototype=reg.GetInt("Addon","JMVMiniaudioBinkOutputPrototype",0)!=0;
 c.JMVMiniaudioBinkPreciseWaitPrototype=reg.GetInt("Addon","JMVMiniaudioBinkPreciseWaitPrototype",0)!=0;
 c.JMVMiniaudioBinkReadyBackpressurePrototype=reg.GetInt("Addon","JMVMiniaudioBinkReadyBackpressurePrototype",0)!=0;
 c.JMVMiniaudioMissingAudioCatalogDiagnostic=reg.GetInt("Addon","JMVMiniaudioMissingAudioCatalogDiagnostic",0)!=0;

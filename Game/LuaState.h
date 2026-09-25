@@ -138,6 +138,8 @@ public:
 	float GetWeaponPropsInside(const char* itemName, int prop);
 	float GetMaterialPropsInside(const char* itemName, int prop);
 	float GetJewelryPropsInside(const char* itemName, int prop);
+	int GetRegenBonusFromPerkMagicBlood(int level);
+	float GetComplexSummStats(CUnit *unit, int stat);
 	float GetUnitPerksInside(const char* unitName, int prop);
 	float GetShopConstructLimit(int shop, int prop);
 	float GetSpellAdds(const char* name, int prop);

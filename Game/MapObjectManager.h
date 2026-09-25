@@ -78,7 +78,7 @@ public:
     void GetAllAnimationEntries(CString &szMaskName, CADEntryPtrArray &szArray);
     SADEntry *GetAnimationEntry(const CString &szMaskName, LPCSTR pszAnimationName);
     SADEntry *GetAnimationEntry(CString &szMaskName, DWORD dwCaps);
-    SADEntry *GetAnimationEntryByIndex(CString &szMaskName, BYTE cIndex);
+    SADEntry *GetAnimationEntryByIndex(CString &szMaskName, DWORD cIndex);
     SADEntry *GetSpecialAnimationEntry(CString &szMaskName, DWORD dwSpecialIndex);
     SADEntry *GetRandomAnimationEntry(CString &szMaskName, DWORD dwCaps);
     // resource description string

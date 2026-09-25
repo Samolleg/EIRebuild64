@@ -224,6 +224,17 @@ void CUpdateHistory::Write(const void *pData, int nSize)
     CheckAndReplace(frame, pData, nSize, bFrameReplace, framePkt);
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool CUpdateHistory::CanRead(int nSize) const
+{
+    if (!pReference || !pSrcPacket || nSize < 0 ||
+        pReference->GetPosition() > pReference->GetSize() ||
+        pSrcPacket->GetPosition() > pSrcPacket->GetSize())
+        return false;
+    const unsigned long long remaining =
+        static_cast<unsigned long long>(pReference->GetSize() - pReference->GetPosition()) +
+        (pSrcPacket->GetSize() - pSrcPacket->GetPosition());
+    return remaining >= static_cast<unsigned>(nSize);
+}
 void CUpdateHistory::Read(void *pData, int nSize)
 {
     int nPos;

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModSpellTextures.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 /*==========================================================================================================
@@ -8,6 +9,9 @@ static const char LOCAL_FILE[] = __FILE__;
 ==========================================================================================================*/
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Effect.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+#include "player.h"
 #include "NetProtocol.h"
 #include "Net.h"
 #include "WorldClient.h"
@@ -673,8 +677,15 @@ int CEffectParticle::GetParticleEffectLength()
 {
     switch (typeID)
     {
+    // Standalone variant effects have the same native lifetime as their base families.
+    case PTID_FIREBLASTDARK:case PTID_FIREBLASTLIGHT:
+    case PTID_LIGHTNINGBLASTDARK:case PTID_LIGHTNINGBLASTLIGHT:
+    case PTID_NUKEDARK:case PTID_NUKELIGHT:
+    case PTID_ACIDSTARDARK:case PTID_ACIDSTARLIGHT:
+        return 60;
     case PTID_FIREBLAST:
     case PTID_LIGHTNINGBLAST:
+    case PTID_VAMP:
     case PTID_HEALING:
     case PTID_CASTING:
     case PTID_NUKE:
@@ -711,6 +722,7 @@ int CEffectParticle::GetParticleEffectLength()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectParticle::ApplyParams(EUpdateType tip)
 {
+    SpellTextures::ClientScope textureScope(this);
     if (tip == utStart && pParticle)
     {
         pParticle->FinishEffect();
@@ -1028,6 +1040,7 @@ void CEffectLightning::RecalcPosition()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectLightning::ApplyParams(EUpdateType tip)
 {
+    SpellTextures::ClientScope textureScope(this);
     if (tip == utStart)
     {
         pLightning = (CLightning *)theWorld.GetLightningManager()->CreateData(TID_EMPTY);
@@ -1200,8 +1213,39 @@ int CEffectArrowBase::Segment()
 /////////////////////////////////////////////////////////////////////////////////////
 // CEffectArrow
 /////////////////////////////////////////////////////////////////////////////////////
+void CEffectArrow::DiscardWeaponAttack()
+{
+    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(weaponAttack);
+    weaponAttackPending=false;weaponAttack.Clear();
+}
+void CEffectArrow::SetWeaponAttack(const SRPGAttackPortion&source)
+{
+    DiscardWeaponAttack();weaponAttack=source;weaponAttackPending=true;
+    if(auto*mod=ModRuntime::Current())mod->MoveAttack(source,weaponAttack);
+}
+BOOL CEffectArrow::DeliverWeaponAttack(CUnit*target,CUnit*attacker)
+{
+    if(!weaponAttackPending)return FALSE;
+    weaponAttackPending=false; // Consume before callbacks, including reentrant delivery.
+    struct Cleanup{CEffectArrow*arrow;~Cleanup(){arrow->DiscardWeaponAttack();}} cleanup{this};
+    if(!target||target->IsDead()||target->GetUserCommonStats().nHP<=0)return FALSE;
+    if(target->GetOwner()&&target->GetOwner()->bGod>=2)return FALSE;
+    CPlot3D delta=target->GetCP()-GetCP();
+    if(sqr(delta.x)+sqr(delta.y)>=1)return FALSE;
+    return target->ProcessAttackPortion(&weaponAttack,attacker,attacker);
+}
+int CEffectArrow::Segment()
+{
+    int result=CEffectArrowBase::Segment();
+    auto*world=GetWorldBase();
+    if(weaponAttackPending&&bDelivered&&world->IsServer())
+        DeliverWeaponAttack(world->GetUnit(nTargetID),world->GetUnit(nAttackerID));
+    return result;
+}
+
 void CEffectArrow::Clear()
 {
+    DiscardWeaponAttack();
     CEffectArrowBase::Clear();
     particle.Clear();
     pointLight.Clear();
@@ -1234,11 +1278,12 @@ void CEffectArrow::ApplyNewArrowPos()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrow::ApplyParams(EUpdateType tip)
 {
+    SpellTextures::ClientScope textureScope(this);
     particle.SetCP(GetCP());
     pointLight.SetCP(GetCP());
     sound.SetCP(GetCP());
     particle.typeID = typeID;
-    particle.fpScale = fpScale;
+    particle.fpScale = typeID>=PTID_STAFFARROWFIRE&&typeID<=PTID_STAFFARROWACID?.5f:fpScale;
     pointLight.color = color;
     pointLight.fpRange = fpRange;
     pointLight.SetSpeed(CPlot3D(0.0001f, 0.0f, 0.0f));
@@ -1297,6 +1342,7 @@ void CEffectArrow::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrow::Load(CSave &file)
 {
+    DiscardWeaponAttack(); // Legacy save format has no weapon payload.
     file.Read(&cp, sizeof(cp));
     file.Read(nTargetID);
     file.Read(&vecSpeed, sizeof(vecSpeed));
@@ -1331,6 +1377,8 @@ void CEffectArrow::Store(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrowFigure::Clear()
 {
+    attackProcessed=false;explosivePending=false;
+    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(attackPortion);
     CEffectArrowBase::Clear();
     if (!pMapObj.IsEmpty())
         theWorld.RemoveObject(pMapObj->GetID());
@@ -1347,17 +1395,24 @@ CEffectArrowFigure::CEffectArrowFigure()
     Clear();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+BOOL CEffectArrowFigure::DeliverAttack(CMapObject*target,CUnit*attacker)
+{
+    if(attackProcessed)return FALSE;
+    attackProcessed=true;
+    auto*mod=ModRuntime::Current();
+    struct Cleanup{CModPackage*mod;SRPGAttackPortion&ap;~Cleanup(){if(mod)mod->ForgetAttack(ap);}} cleanup{mod,attackPortion};
+    return target?target->ProcessAttackPortion(&attackPortion,attacker,attacker):FALSE;
+}
 int CEffectArrowFigure::Segment()
 {
-    // ASSERT( !bDelivered );
+    if(attackProcessed)return 0; // Arrival may already have been observed by UpdateTo.
     CEffectArrowBase::Segment();
     CWorldBase *pWorld = GetWorldBase();
     if (bDelivered && pWorld->IsServer())
     {
         CMapObject *pTarget = pWorld->GetMapObject(nTargetID);
         CUnit *pAttacker = pWorld->GetUnit(nAttackerID);
-        if (pTarget)
-            pTarget->ProcessAttackPortion(&attackPortion, pAttacker, pAttacker);
+        DeliverAttack(pTarget,pAttacker);
     }
     return !bDelivered;
 }
@@ -1431,6 +1486,8 @@ void CEffectArrowFigure::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrowFigure::Load(CSave &file)
 {
+    explosivePending=false;attackProcessed=false;
+    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(attackPortion);
     file.Read(&cp, sizeof(cp));
     file.Read(nTargetID);
     file.Read(nAttackerID);
@@ -1892,3 +1949,29 @@ void CEffectTornado::Store(CSave &file)
     file.Write(nStartSegment);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+BOOL CEffectArrowFigure::CalcSpeed(){
+ if(nTargetID!=-2)return CEffectArrowBase::CalcSpeed();
+ auto*base=GetWorldBase();if(base&&!base->IsServer())return TRUE;
+ if(!base||!explosivePending){bDelivered=TRUE;vecSpeed=CPlot3D(0,0,0);return FALSE;}
+ auto*world=static_cast<CWorldServer*>(base);CPlot3D next;
+ bool arrived=ModSkills::ExplosiveStep(GetCP(),explosivePoint,world->GetSegmentTimeCounter()-explosiveStart,next,
+  [world](const CPlot3D&a,const CPlot3D&b){return world->aiMap.TraceRelief(a,b);});
+ vecSpeed=next-GetCP();if(!arrived)return TRUE;
+ explosivePending=false;bDelivered=TRUE;attackProcessed=true; // Consume before nested damage/UpdateTo.
+ Explode(next);return FALSE;
+}
+void CEffectArrowFigure::Explode(const CPlot3D& point){
+ auto*world=static_cast<CWorldServer*>(GetWorldBase());auto*attacker=world->GetUnit(nAttackerID);
+ CUnitList units;world->aiMap.GetUnitsNear(point,units,explosiveRadius);
+ for(POSITION pos=units.GetHeadPosition();pos;){auto*target=units.GetNext(pos);
+  if(!target||!target->CanBeDamagedByAreaSpell())continue;
+  auto*server=dynamic_cast<CUnitServer*>(target->GetUnitSpecific());if(!server)continue;
+  SRPGAttackPortion portion=attackPortion;server->ProcessAttackPortion(&portion,attacker,attacker);
+ }
+ auto*manager=world->GetEffectManager();
+ auto*particle=static_cast<CEffectParticle*>(manager->CreateData(ETypeIDs(HPC_EFFECTPARTICLE)));
+ if(particle){particle->typeID=PTID_FIREBLAST;particle->SetCP(point);particle->fpScale=(std::max)(.5f,explosiveRadius/3);particle->fpPower=1;particle->SetSpeed(CPlot3D(0,0,0));world->AddEffect(particle);}
+ auto*sound=static_cast<CEffectSound*>(manager->CreateData(ETypeIDs(HPC_EFFECTSOUND)));
+ if(sound){sound->SetCP(point);sound->fpMinRadius=10;sound->fpMaxRadius=50;sound->bHighPriority=true;strcpy(sound->szSoundName,"magic\\fireball\\end.wav");sound->bLooping=FALSE;sound->SetSpeed(CPlot3D(0,0,0));world->AddEffect(sound);}
+}

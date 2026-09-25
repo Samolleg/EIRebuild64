@@ -9,6 +9,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScrollText.h"
 #include "I3DMain.h"
 #include "Camera.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "A3Cursor.h"
 #include "ScenarioTracker.h"
 #include "WorldInterface.h"
@@ -171,6 +173,8 @@ void CI3DScreenBase::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::OnDeactivate()
 {
+    briefingWeaponsHidden = false;
+    RestoreBriefingWeapons();
     theSettings.fpTerrainBorderFogDistance = fOldFogDist;
 
     IWorldClient.StopAllSounds();
@@ -441,6 +445,11 @@ void CI3DScreenBase::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     }
     // CRAP} - for advanced kick/ban
 
+    if (nChar == 'N' && ModRuntime::Current()) {
+        if ((nFlags & 0x4000) == 0) theCamera.ToggleFalloutMode();
+        SetProcessed();
+        return;
+    }
     CI3DScreen::OnKeyDown(nChar, nRepCnt, nFlags);
     switch (nChar)
     {
@@ -1243,6 +1252,7 @@ void CI3DScreenBase::CommandShow(LPCTSTR pszWhat, int nSlot, bool bHideWeapon)
         pPart = &parts.back();
         pPart->pUnit = pUnit;
         pPart->szName = pszWhat;
+        if (briefingWeaponsHidden) HideBriefingUnitWeapon(pUnit);
         CPlayerServer *pPS = ((CPlayerServer *)theWorldServer.GetPlayer(0)->GetPlayerSpecific());
         if (pPS)
             pPS->Select(PSEL_PRESELECT_TRUE, pUnit->GetID());
@@ -1695,6 +1705,11 @@ void CI3DScreenBase::PlayRndAnimation(CUnit *pUnit, bool bTalk, bool bShortPhras
             nAnim = 2;
     }
     PlayAnimation(pUnit, nAnim);
+    if (briefingWeaponsHidden)
+    {
+        HideBriefingUnitWeapon(pUnit);
+        HideCurrentBriefingWeapons();
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::PlaceCamera(CUnit *pUnit, float fAngle, float fDistance, float fHeight)
@@ -1813,8 +1828,45 @@ void CI3DScreenBase::PlaceDefinedCamera(int nCamera)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenBase::HideBriefingUnitWeapon(CUnit *unit)
+{
+    if (!unit) return;
+    const int id = unit->GetID();
+    bool known = false;
+    for (int saved : briefingWeaponUnitIds)
+        if (saved == id) { known = true; break; }
+    CUnitClientSpecific *specific = static_cast<CUnitClientSpecific *>(unit->GetUnitSpecific());
+    if (!specific) return;
+    if (!known) briefingWeaponUnitIds.push_back(id);
+    specific->SetBriefingWeaponHidden(true);
+}
+
+void CI3DScreenBase::HideCurrentBriefingWeapons()
+{
+    if (!briefingWeaponsHidden) return;
+    HideBriefingUnitWeapon(pMainHero);
+    HideBriefingUnitWeapon(pPersonToTalk);
+    HideBriefingUnitWeapon(pThirdPerson);
+    for (const SBriefingUnit &part : parts)
+        HideBriefingUnitWeapon(part.pUnit);
+}
+
+void CI3DScreenBase::RestoreBriefingWeapons()
+{
+    for (int id : briefingWeaponUnitIds)
+    {
+        CUnit *unit = IWorldClient.GetUnit(id);
+        if (!unit) continue;
+        CUnitClientSpecific *specific = static_cast<CUnitClientSpecific *>(unit->GetUnitSpecific());
+        if (specific) specific->SetBriefingWeaponHidden(false);
+    }
+    briefingWeaponUnitIds.clear();
+}
+
 void CI3DScreenBase::BeginBriefing()
 {
+    briefingWeaponsHidden = false;
+    RestoreBriefingWeapons();
     if (hPhraseSound != SND_EMPTY)
         theWorld.GetSoundManager()->CancelFX(hPhraseSound);
     hPhraseSound = SND_EMPTY;
@@ -1823,6 +1875,7 @@ void CI3DScreenBase::BeginBriefing()
     CTextManager *pTxtMng = theWorld.GetTextManager();
     if (pTxtMng->GetText(CString("briefing ") + szBriefing))
     {
+        theCamera.SuspendFalloutForBriefing();
         CPlayerServer *pPS = ((CPlayerServer *)theWorldServer.GetPlayer(0)->GetPlayerSpecific());
         if (pPS)
             pPS->Select(PSEL_RESETALL, 0);
@@ -1833,7 +1886,10 @@ void CI3DScreenBase::BeginBriefing()
         pScroll->SetText("");
         eMode = BSM_BRIEFING;
         bIsFirstPhrase = true;
+        briefingWeaponsHidden = ModRuntime::Current() &&
+            ModRuntime::Current()->BriefingWeaponsEnabled();
         NextCommand();
+        HideCurrentBriefingWeapons();
     }
     else
         eMode = BSM_MOVEMENT;
@@ -1841,6 +1897,7 @@ void CI3DScreenBase::BeginBriefing()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::EndBriefing()
 {
+    briefingWeaponsHidden = false;
     if (hPhraseSound != SND_EMPTY)
         theWorld.GetSoundManager()->CancelFX(hPhraseSound);
     hPhraseSound = SND_EMPTY;
@@ -1886,6 +1943,7 @@ void CI3DScreenBase::EndBriefing()
         }
     }
     parts.clear();
+    RestoreBriefingWeapons();
     pWhosTalking = 0;
 
     if (pMainHero)
@@ -1936,6 +1994,7 @@ void CI3DScreenBase::EndBriefing()
     else
         ((CPlayerServer *)theWorldServer.GetPlayer(0)->GetPlayerSpecific())
             ->SendMoveCamera(ptCameraFrom, ptCameraTo, false);
+    theCamera.ResumeFalloutAfterBriefing();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::AddWalkingUnit(CUnit *pUClient, CPlot3D ptDest, CPlot3D rotDest,

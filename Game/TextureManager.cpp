@@ -4,6 +4,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TextureManager.h"
 
 #include "mmpFormat.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "WorldClient.h"
 #include "Renderer.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -683,7 +685,10 @@ int CTextureManager::PutLayers(DWORD *pResultLayer, const CStringArray &szTextur
             BYTE *pBaseData = (BYTE *)pMMPHeader;
             if ((pMMPHeader->dwDimentionX != dwTextureDimention) ||
                 (pMMPHeader->dwDimentionY != dwTextureDimention))
-                return ReportError("Texture \"%s\" dimentions are incorrect.\n", szTextures[i]);
+            {
+                CloseFile(pBaseData);
+                return ReportError("Texture \"%s\" dimentions are incorrect.\n", (LPCSTR)szTextures[i]);
+            }
             if (pMMPHeader->dwFormat == MMP_FORMAT_PNT3)
             {
                 pGraphicsProcessor->PutOneLayer(pResultLayer,
@@ -710,6 +715,29 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                                      const CString &szDesiredName, const CString &szAlternateName,
                                      DWORD dwNumMipLevels, DWORD dwBGColor, DWORD dwResultFormat)
 {
+    // Match the installed addon's HD names and atlas geometry in both precache and live assembly.
+    if ((set.characterAtlas == 1 || set.characterAtlas == 2) &&
+        ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics"))
+    {
+        STextureSetDescription hd;
+        hd.data.Copy(set.data);
+        hd.characterAtlas = set.characterAtlas + 2;
+        hd.dwTextureDimention = 1024;
+        for (int slot = 0; slot < 4; ++slot) hd.equipmentSlots[slot] = set.equipmentSlots[slot];
+        for (int layer = 0; layer < set.szTextures.GetSize(); ++layer)
+        {
+            CString name = set.szTextures[layer];
+            if (name.GetLength() < 10 || name.Right(4).CompareNoCase(".mmp") != 0)
+                return ReportError("Invalid character layer name: %s", (LPCSTR)name);
+            name = name.Left(name.GetLength() - 4);
+            if (name.Find("skin_") < 0) name = CString("unhuma") + name.Mid(6);
+            name += set.characterAtlas == 1 ? ".x4.mmp" : ".x2.mmp";
+            hd.szTextures.Add(name);
+        }
+        return ComposeTexture(szResultName, hd, szDesiredName, szAlternateName,
+                              dwNumMipLevels, dwBGColor, MMP_FORMAT_8888);
+    }
+
     CString szResultFileName(theWorld.GetWorkPath() + "textures\\" + szDesiredName + ".mmp");
     SMMPFileHeader hdr;
     CBYTEArray data;
@@ -726,7 +754,10 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
             file.Read(data.GetData(), hdr.dwUserDataShift);
         file.Close();
         // compare user data
-        if ((data.GetSize() == set.data.GetSize()) &&
+        if ((hdr.dwDimentionX == set.dwTextureDimention) &&
+            (hdr.dwDimentionY == set.dwTextureDimention) &&
+            (hdr.dwFormat == dwResultFormat) &&
+            (data.GetSize() == set.data.GetSize()) &&
             (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
             return TRUE;
     }
@@ -744,7 +775,10 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                 file.Read(data.GetData(), hdr.dwUserDataShift);
             file.Close();
             // compare user data
-            if ((data.GetSize() == set.data.GetSize()) &&
+            if ((hdr.dwDimentionX == set.dwTextureDimention) &&
+            (hdr.dwDimentionY == set.dwTextureDimention) &&
+            (hdr.dwFormat == dwResultFormat) &&
+            (data.GetSize() == set.data.GetSize()) &&
                 (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
                 return TRUE;
             szResultName = szDesiredName;
@@ -760,7 +794,37 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     // compose texture
     DWORD *pResultLayer = mm_malloc<DWORD>(set.dwTextureDimention * set.dwTextureDimention);
     MemSetDWord(pResultLayer, dwBGColor, set.dwTextureDimention * set.dwTextureDimention);
-    int nCount = PutLayers(pResultLayer, set.szTextures, set.dwTextureDimention);
+    int nCount = 0;
+    if (set.characterAtlas == 4)
+    {
+        // Exact source quadrant layout: helm/shield above right/left weapon.
+        std::vector<DWORD> layer(512 * 512);
+        for (int slot = 0; slot < 4; ++slot)
+        {
+            int index = set.equipmentSlots[slot];
+            if (index < 0 || index >= set.szTextures.GetSize()) continue;
+            auto hdrLayer = reinterpret_cast<SMMPFileHeader *>(GetFile(set.szTextures[index]));
+            if (!hdrLayer) { ReportWarning("Missing HD equipment layer %s", (LPCSTR)set.szTextures[index]); continue; }
+            if (hdrLayer->dwDimentionX != 512 || hdrLayer->dwDimentionY != 512 ||
+                (hdrLayer->dwFormat != MMP_FORMAT_PNT3 && hdrLayer->dwFormat != MMP_FORMAT_PAINT32))
+            {
+                CloseFile(reinterpret_cast<BYTE *>(hdrLayer));
+                mm_free(pResultLayer);
+                return ReportError("Invalid HD equipment layer %s", (LPCSTR)set.szTextures[index]);
+            }
+            std::fill(layer.begin(), layer.end(), 0);
+            theRenderer.GetGraphicsProcessor()->PutOneLayer(layer.data(),
+                reinterpret_cast<DWORD *>(hdrLayer->GetMipLevelData(0)), 512 * 512,
+                hdrLayer->dwFormat == MMP_FORMAT_PNT3);
+            CloseFile(reinterpret_cast<BYTE *>(hdrLayer));
+            int x = (slot == 1 || slot == 3) ? 512 : 0;
+            int y = slot < 2 ? 512 : 0;
+            for (int row = 0; row < 512; ++row)
+                memcpy(pResultLayer + (y + row) * 1024 + x, layer.data() + row * 512, 512 * sizeof(DWORD));
+            ++nCount;
+        }
+    }
+    else nCount = PutLayers(pResultLayer, set.szTextures, set.dwTextureDimention);
     // check for any textures exist on this layer
     if (!nCount)
     {
@@ -802,9 +866,13 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     DWORD *pMipLevel = mm_malloc<DWORD>(dwNewSizeX * dwNewSizeY);
     // 0th mip level
     CGraphicsProcessor *pGraphicsProcessor = theRenderer.GetGraphicsProcessor();
-    pGraphicsProcessor->Convert32To16Bit(pResultMipLevel, pResultLayer, texFormat,
-                                         dwNewSizeX * dwNewSizeY);
-    file.Write(pResultMipLevel, sizeof(WORD) * (dwNewSizeX * dwNewSizeY));
+    if (dwResultFormat == MMP_FORMAT_8888)
+        file.Write(pResultLayer, sizeof(DWORD) * dwNewSizeX * dwNewSizeY);
+    else
+    {
+        pGraphicsProcessor->Convert32To16Bit(pResultMipLevel, pResultLayer, texFormat, dwNewSizeX * dwNewSizeY);
+        file.Write(pResultMipLevel, sizeof(WORD) * dwNewSizeX * dwNewSizeY);
+    }
     // generate 1st and 2nd mip levels
     for (int i = 1; i < dwNumMipLevels; ++i)
     {
@@ -812,9 +880,13 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
         dwNewSizeY >>= 1;
 
         pGraphicsProcessor->GenerateMipmapLevel(pMipLevel, pResultLayer, dwNewSizeX);
-        pGraphicsProcessor->Convert32To16Bit(pResultMipLevel, pMipLevel, texFormat,
-                                             dwNewSizeX * dwNewSizeY);
-        file.Write(pResultMipLevel, sizeof(WORD) * (dwNewSizeX * dwNewSizeY));
+        if (dwResultFormat == MMP_FORMAT_8888)
+            file.Write(pMipLevel, sizeof(DWORD) * dwNewSizeX * dwNewSizeY);
+        else
+        {
+            pGraphicsProcessor->Convert32To16Bit(pResultMipLevel, pMipLevel, texFormat, dwNewSizeX * dwNewSizeY);
+            file.Write(pResultMipLevel, sizeof(WORD) * dwNewSizeX * dwNewSizeY);
+        }
 
         DWORD *pTmp = pMipLevel;
         pMipLevel = pResultLayer;

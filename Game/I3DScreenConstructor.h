@@ -116,7 +116,10 @@ class CI3DObjectSpellSlots : public CI3DItemObject
 private:
     int nTopHeight; // level of placing on screen
     int nCurrentSpell;
-    int nFirstSpell; // first visible spell, 0 or 8
+    int nFirstSpell;
+    float fSpellPosition;
+    float fSpellToScroll;
+    float fSpellScrollSpeed;
 
 public:
     CI3DObjectSpellSlots(CInterface3D *pI, CI3DItemScreen *pScr)
@@ -128,6 +131,7 @@ public:
     void SetCurrentSpell(CItem *pSpell);
 
     virtual CItem *GetMouseItem(CPoint point, int &nSlotType);
+    virtual void OnLButtonDown(UINT nFlags, CPoint point);
     virtual BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
     virtual BOOL Draw(CRenderer *pRend);
 };

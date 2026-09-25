@@ -71,12 +71,16 @@ private:
     CStringArray szModes;
 
     bool bShadowSettingsChanged;
+    CI3DSwitcher *helmetSwitcher = nullptr;
+    CI3DSwitcher *upperArmorSwitcher = nullptr;
     SKbdKeyDesc *pKeyDesc;
 
 private:
     void FormActionsList();
     void FormControlsList();
     void Redraw();
+    void UpdatePartyVisualOptionsVisibility();
+    void CommitPartyVisualOptions();
 
     void NextLine();
     void PrevLine();

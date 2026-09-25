@@ -2,6 +2,11 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Particle.h"
+#include "Effect.h"
+#include "EffectManager.h"
+#include "UnitServer.h"
+#include "WorldServer.h"
+#include <map>
 
 #include "Object.h"
 #include "tools.h"
@@ -126,8 +131,24 @@ static CPlot3D GetCenteredRandomRoundPoint()
 // --------------------------------- Initialization
 // --------------------------------------------------------
 
+namespace {
+std::map<CParticle*,CSmartPtr<CEffectPointLight>> powerHitLights;
+bool PowerHitCarrierActive(CObject3D*carrier,const void*world,int hit,bool delivered,int weapon){
+ if(!carrier||!world||world!=theWorldServer.GetSpecificManager()||theWorld.GetUnit(carrier->GetID())!=carrier)return false;
+ auto*unit=theWorldServer.GetUnit(carrier->GetID());auto*server=unit?dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()):nullptr;
+ return server&&server->PowerHitTrailActive(hit,delivered,weapon);
+}
+void UpdatePowerHitLight(CParticle*particle,const CPlot3D&point,float strength){
+ if(strength<=0||!theWorld.GetEffectManager()){powerHitLights.erase(particle);return;}
+ auto found=powerHitLights.find(particle);bool first=found==powerHitLights.end();
+ if(first){auto*effect=static_cast<CEffectPointLight*>(theWorld.GetEffectManager()->CreateData(ETypeIDs(HPC_EFFECTPOINTLIGHT)));if(!effect)return;found=powerHitLights.emplace(particle,CSmartPtr<CEffectPointLight>(effect)).first;}
+ auto*effect=static_cast<CEffectPointLight*>(found->second);effect->SetCP(point);effect->color=CPlot3D(1,.65f,.22f)*strength;effect->fpRange=2;effect->dwFlags=0x840;effect->ApplyParams(first?utStart:utFrame);
+}
+}
+void CParticle::StopPowerHitLights(){for(auto&entry:powerHitLights)entry.first->SetParam2(-1);powerHitLights.clear();}
 void CParticle::Destroy()
 {
+    powerHitLights.erase(this);
     while (!particles.IsEmpty())
         ((CParticleManager *)lpManager)->deleteParticle(particles.RemoveHead());
     pTexture.Clear();
@@ -435,6 +456,27 @@ void CParticle::EmptyLocSourceSegmentFunc(SLocalSource *)
 // ------------------------------------ Create
 // -------------------------------------------------------------
 
+const char* CParticle::ConfigureArrow(ETypeIDs type)
+{
+    const char* texture;
+    switch(type){
+    case PTID_RICKARROW: texture="RikArrowSmoke";break;
+    case PTID_FIREARROW: case PTID_STAFFARROWFIRE: texture="FireArrowSmoke";break;
+    case PTID_STAFFARROWLIGHT: texture="lightArrowSmoke";break;
+    case PTID_STAFFARROWWATER: texture="acidray";break;
+    case PTID_STAFFARROWACID: texture="acidrayorig";break;
+    default:return nullptr;
+    }
+    nMinTrys=1;fpLenToSingleDice=.06f;nLifeSpan=15;nAnimPhases=15;nLifeOfPhase=1;
+    posRespectMinRnd=CPlot3D(-.2f,-.2f,-.2f);posRespectMaxRnd=CPlot3D(.2f,.2f,.2f);
+    fpSize=.3f;fpSizeFactor=1.03f;dwPFlags=0;
+    createFunc=&CParticle::FireArrowSingleCreate;segmentFunc=&CParticle::FireArrowSingleSegment;
+    if(type>=PTID_STAFFARROWFIRE&&type<=PTID_STAFFARROWACID)fpSpeedFactor=0;
+    return texture;
+}
+
+#include "ModExtendedParticle.inl"
+
 BOOL CParticle::Create()
 {
     int i;
@@ -448,7 +490,8 @@ BOOL CParticle::Create()
     nBornProbability = 100;
     nParticlesMax = 500;
     nAnimPhases = 16;
-    switch (GetTypeID())
+    if(ConfigureExtendedSpell(GetTypeID(),pszTexName))InitializeExtendedSpellSources();
+    else switch (GetTypeID())
     {
     case PTID_SPHEREACID:
     case PTID_SPHEREELECTRICITY:
@@ -501,23 +544,11 @@ BOOL CParticle::Create()
         break;
     case PTID_RICKARROW:
     case PTID_FIREARROW:
-        nMinTrys = 1;
-        fpLenToSingleDice = 0.06f;
-        nLifeSpan = 15;
-        nAnimPhases = 15;
-        nLifeOfPhase = 1;
-        posRespectMinRnd = CPlot3D(-0.2f, -0.2f, -0.2f);
-        posRespectMaxRnd = CPlot3D(0.2f, 0.2f, 0.2f);
-        fpSize = 0.3f;
-        fpSizeFactor = 1.03f;
-        dwPFlags = 0;
-
-        createFunc = &CParticle::FireArrowSingleCreate;
-        segmentFunc = &CParticle::FireArrowSingleSegment;
-        if (GetTypeID() == PTID_RICKARROW)
-            strcpy(pszTexName, "RikArrowSmoke");
-        else
-            strcpy(pszTexName, "FireArrowSmoke");
+    case PTID_STAFFARROWFIRE:
+    case PTID_STAFFARROWLIGHT:
+    case PTID_STAFFARROWWATER:
+    case PTID_STAFFARROWACID:
+        strcpy(pszTexName,ConfigureArrow(GetTypeID()));
         break;
     case PTID_ACIDRAY:
         nMinTrys = 1;
@@ -2197,49 +2228,47 @@ const float FP_POISON_PARTICLE_SIZE = 1.f;
 const DWORD DW_POISON_ALPHA_DEC = 9;
 const float FP_POISON_SQ_SIZE = 1;
 
-BOOL CParticle::PoisonFogSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::PoisonFogSingleCreate(SSingleParticle * pSPart, int)
 {
-    int nDX, nDY, nSize;
-    if (particles.GetCount() == 0)
-    {
-        // Get sectors area
-        const float fpRad = fpSize;
-        nSize = (int)((fpSize + 1) / FP_POISON_SQ_SIZE);
-        for (nDY = -nSize; nDY <= nSize; nDY++)
-            for (nDX = -nSize; nDX <= nSize; nDX++)
-            {
-                float fpX = nDX * FP_POISON_SQ_SIZE;
-                float fpY = nDY * FP_POISON_SQ_SIZE;
-                fpX += random.GetFloat(-FP_POISON_SQ_SIZE * 0.25f, FP_POISON_SQ_SIZE * 0.25f);
-                fpY += random.GetFloat(-FP_POISON_SQ_SIZE * 0.25f, FP_POISON_SQ_SIZE * 0.25f);
-                if (sqr(fpX) + sqr(fpY) < fpRad * fpRad)
-                {
-                    SSingleParticle *pPart = ((CParticleManager *)lpManager)->newParticle();
-                    if (pPart)
-                    {
-                        fpX += cp.x;
-                        fpY += cp.y;
-                        pPart->coord.x = fpX;
-                        pPart->coord.y = fpY;
-                        pPart->coord.w = FP_POISON_PARTICLE_SIZE + random.GetFloat(-0.25f, 0.25f);
-                        pPart->coord.z = theWorld.GetSurfaceValue(fpX, fpY) + pPart->coord.w;
-                        // Set start values of color and lifetime
-                        if (GetTypeID() == PTID_AGGRESSIONFOG)
-                            pPart->dwColor = RGBA_MAKE(0xFF, 0xAF, 0x7F, 0xFF);
-                        else
-                            pPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF,
-                                                       Min(0xFF,
-                                                           Float2Int(fpPower * 0xA0))); // 0xFF );
-                        pPart->nLifeTime = nLifeSpan;
-                        pPart->nPhase = random.Get(0, nAnimPhases - 1);
-                        pPart->nPhaseLifeTime = nLifeOfPhase;
-
-                        AddNewParticle(pPart);
-                    }
-                }
-            }
-    }
-    return FALSE;
+	int nDX, nDY, nSize;
+	if (particles.GetCount() == 0)
+	{
+		
+		const float fpRad = fpSize;
+		nSize = (int)((fpSize + 1) / FP_POISON_SQ_SIZE);
+		for (nDY = -nSize; nDY <= nSize; nDY++)
+			for (nDX = -nSize; nDX <= nSize; nDX++)
+			{
+				float fpX = nDX * FP_POISON_SQ_SIZE;
+				float fpY = nDY * FP_POISON_SQ_SIZE;
+				fpX += random.GetFloat(-FP_POISON_SQ_SIZE * 0.25f, FP_POISON_SQ_SIZE * 0.25f);
+				fpY += random.GetFloat(-FP_POISON_SQ_SIZE * 0.25f, FP_POISON_SQ_SIZE * 0.25f);
+				if ((fpX * fpX) + (fpY * fpY) < fpRad * fpRad)
+				{
+					SSingleParticle* pPart = ((CParticleManager*)lpManager)->newParticle();
+					if ( pPart )
+					{
+						fpX += cp.x;
+						fpY += cp.y;
+						pPart->coord.x = fpX;
+						pPart->coord.y = fpY;
+						pPart->coord.w = FP_POISON_PARTICLE_SIZE + random.GetFloat( -0.25f, 0.25f );
+						pPart->coord.z = theWorld.GetSurfaceValue( fpX, fpY ) + pPart->coord.w;
+						
+						if ( GetTypeID() == PTID_AGGRESSIONFOG )
+							pPart->dwColor = RGBA_MAKE( 0xFF, 0xAF, 0x7F, 0xFF );
+						else
+							pPart->dwColor = RGBA_MAKE( 0xFF, 0xFF, 0xFF, Min( 0xFF, Float2Int( fpPower * 0xA0 ) ) );
+						pPart->nLifeTime = nLifeSpan;
+						pPart->nPhase = random.Get( 0, nAnimPhases-1 );
+						pPart->nPhaseLifeTime = nLifeOfPhase;							
+											
+						AddNewParticle( pPart );
+					}
+				}
+			}
+	}
+	return FALSE;
 }
 
 BOOL CParticle::PoisonFogSingleSegment(SSingleParticle *pSPart)
@@ -2490,63 +2519,61 @@ BOOL CParticle::VulcanSmokeSingleSegment(SSingleParticle *pSPart)
 
 // ----------------------------------
 // FireBlast-------------------------------------------------------------
-BOOL CParticle::FireBlastSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::FireBlastSingleCreate(SSingleParticle * pSPart, int)
 {
-    SLocalSource *pLSrc = locSources.GetData();
-    int nSrc = random.Get(-14, 14);
-    pSPart->nSpecial = nSrc;
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-    if (particles.GetCount() == 0 && pLSrc->nPhase == 1)
-    {
-        pSPart->nSpecial = -1222;
-        pSPart->coord = carrierCP;
-        pSPart->nPhase = 15;
-        pSPart->coord.w = 0;
-        return TRUE;
-    }
-    if (nSrc < 0)
-    {
-        // Set start values of color and lifetime
-        pSPart->nLifeTime = 0; // nLifeSpan;
+	SLocalSource* pLSrc = locSources.GetData();
+	int nSrc = random.Get(-14, 14);
+	pSPart->nSpecial = nSrc;
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
+	if (particles.GetCount() == 0 && pLSrc->nPhase == 1)
+	{
+		pSPart->nSpecial = -1222;
+		pSPart->coord = carrierCP;
+		pSPart->nPhase = 15;
+		pSPart->coord.w = 0;
+		return TRUE;
+	}
+	if (nSrc < 0)
+	{
+		
+		pSPart->nLifeTime = 0;
 
-        CPlot3D vec = GetRandomBallPoint();
-        float fpPSize = 1 - fabs2(vec);
-        vec *= fpSize;
-        pSPart->coord = carrierCP + vec * locSources[0].reserved.x;
-        pSPart->reserved = vec * locSources[0].reserved.y;
-        pSPart->coord.w = 0;
-        float fpBorder = 0.2f + float(pLSrc->nPhase) / 7.0f; //-0.2f + pLSrc->nPhase / 5;
-        if (fpPSize < fpBorder)
-        {
-            pSPart->nPhase = 8; // + random.Get( 0, 2 );
-            pSPart->reserved2.x = fpSize * 0.6f * pLSrc->reserved.x * random.GetFloat(0.8f, 1.2f);
-            pSPart->reserved2.y = pSPart->nPhase;
-            pSPart->reserved2.z = random.GetFloat(0.35f, 0.7f); // * 0.5f;
-        }
-        else
-        {
-            pSPart->nPhase = random.Get(0, 2);
-            pSPart->reserved2.x = fpSize * 0.6f * pLSrc->reserved.x * random.GetFloat(0.8f, 1.2f);
-            pSPart->reserved2.y = pSPart->nPhase;
-            pSPart->reserved2.z = random.GetFloat(0.35f, 0.7f) * 0.5f +
-                                  0.35f * fpPSize / fpBorder; // 1;
-        }
-    }
-    else
-    {
-        pSPart->nPhase = random.Get(0, 2);
-        pLSrc += nSrc;
-        if (pLSrc->reserved2.x == 0)
-            pSPart->nPhase = 8;
-        float fpAlpha = random.GetFloat(0, 1);
-        pSPart->coord = carrierCP + pLSrc->respectCP - pLSrc->vSpeed * fpAlpha * fpSize;
-        pSPart->coord.w = (0.3f - 0.15f * fpAlpha) * random.GetFloat(0.7f, 1.5f) *
-                          (pLSrc->reserved.x / 7 + 0.3f);
-        pSPart->coord.w *= fpSize * pLSrc->reserved2.y;
-        pSPart->reserved = fpSize * pLSrc->vSpeed;
-    }
-    // Check for end generation
-    return TRUE;
+		CPlot3D vec = GetRandomBallPoint();
+		float fpPSize = 1 - fabs2(vec);
+		vec *= fpSize;
+		pSPart->coord = carrierCP + vec * locSources[0].reserved.x;
+		pSPart->reserved = vec * locSources[0].reserved.y;
+		pSPart->coord.w = 0;
+		float fpBorder = 0.2f + pLSrc->nPhase / 7;
+		if (fpPSize < fpBorder)
+		{
+			pSPart->nPhase = 8;
+			pSPart->reserved2.x = fpSize * 0.6f * pLSrc->reserved.x * random.GetFloat(0.8f, 1.2f);
+			pSPart->reserved2.y = pSPart->nPhase;
+			pSPart->reserved2.z = random.GetFloat(0.35f, 0.7f);
+		}
+		else
+		{
+			pSPart->nPhase = random.Get(0, 2);
+			pSPart->reserved2.x = fpSize * 0.6f * pLSrc->reserved.x * random.GetFloat(0.8f, 1.2f);
+			pSPart->reserved2.y = pSPart->nPhase;
+			pSPart->reserved2.z = random.GetFloat(0.35f, 0.7f) * 0.5f + 0.35f * fpPSize / fpBorder; 
+		}
+	}
+	else
+	{
+		pSPart->nPhase = random.Get(0, 2);
+		pLSrc += nSrc;
+		if (pLSrc->reserved2.x == 0)
+			pSPart->nPhase = 8;
+		float fpAlpha = random.GetFloat(0, 1);
+		pSPart->coord = carrierCP + pLSrc->respectCP - pLSrc->vSpeed * fpAlpha * fpSize;
+		pSPart->coord.w = (0.3f - 0.15f * fpAlpha) * random.GetFloat(0.7f, 1.5f) * (pLSrc->reserved.x / 7 + 0.3f);
+		pSPart->coord.w *= fpSize * pLSrc->reserved2.y;
+		pSPart->reserved = fpSize * pLSrc->vSpeed;
+	}
+	
+	return TRUE;
 }
 
 DWORD dwFireBlastAlpha[16] = { 0xFF, 0xFF, 0xcF, 0xaF, 0x80, 0x80, 0x80, 0x80,
@@ -2749,57 +2776,57 @@ BOOL CParticle::FireArrowSingleCreate(SSingleParticle *pSPart, int nNumber)
     return TRUE;
 }
 
-BOOL CParticle::FireArrowSingleSegment(SSingleParticle *pSPart)
+BOOL CParticle::FireArrowSingleSegment(SSingleParticle * pSPart)
 {
-    if (pSPart->nSpecial == 2)
-    {
-        pSPart->coord.x = carrierCP.x + vCarrierSpeed.x;
-        pSPart->coord.y = carrierCP.y + vCarrierSpeed.y;
-        pSPart->coord.z = carrierCP.z + vCarrierSpeed.z;
-        /*  с этим кодом не будет зазора между первым партиклом и последующими, но первый партикл
-           будет дергаться pSPart->coord.x = carrierCP.x; pSPart->coord.y = carrierCP.y;
-                        pSPart->coord.z = carrierCP.z;
-                        pSPart->prevcoord = pSPart->coord;*/
-        pSPart->nPhase = random.Get(0, 2);
-        return CheckFlag(PS_GENERATE_PARTICLES) != 0;
-        // pSPart->nSpecial = 0;
-        // pSPart->coord.w *= 0.5f;
-    }
-    if (--(pSPart->nLifeTime) == 0)
-        return FALSE;
-    if (--(pSPart->nPhaseLifeTime) == 0)
-    {
-        if (++(pSPart->nPhase) >= nAnimPhases)
-            return FALSE;
-        pSPart->nPhaseLifeTime = nLifeOfPhase;
-    }
-    // Update coordinates and size
+	AttachCarrier(pCarrier);
+	
+	BindTo(bindPlace);
+	if (pSPart->nSpecial == 2)
+	{
+		pSPart->coord.x = carrierCP.x + vCarrierSpeed.x;
+		pSPart->coord.y = carrierCP.y + vCarrierSpeed.y;
+		pSPart->coord.z = carrierCP.z + vCarrierSpeed.z;
+		
+		pSPart->nPhase = random.Get(0, 2);
+		return CheckFlag(PS_GENERATE_PARTICLES) != 0;
+		
+		
+	}
+	if (--(pSPart->nLifeTime) == 0)
+		return FALSE;
+	if (--(pSPart->nPhaseLifeTime) == 0)
+	{
+		if (++(pSPart->nPhase) >= nAnimPhases)
+			return FALSE;
+		pSPart->nPhaseLifeTime = nLifeOfPhase;
+	}
+	
 
-    if (pSPart->nSpecial == 0)
-    {
-        if (pSPart->nPhase < 6)
-            pSPart->coord.w *= 1.4f;
-        else
-            pSPart->coord.w *= fpSizeFactor;
+	if (pSPart->nSpecial == 0)
+	{
+		if (pSPart->nPhase < 6)
+			pSPart->coord.w *= 1.4f;
+		else
+			pSPart->coord.w *= fpSizeFactor;
 
-        pSPart->coord.x -= pSPart->reserved.x;
-        pSPart->coord.y -= pSPart->reserved.y;
-        pSPart->coord.z -= pSPart->reserved.z;
+		pSPart->coord.x -= pSPart->reserved.x;
+		pSPart->coord.y -= pSPart->reserved.y;
+		pSPart->coord.z -= pSPart->reserved.z;
 
-        pSPart->reserved *= 1.1f;
+		pSPart->reserved *= 1.1f;
 
-        pSPart->coord.x += pSPart->reserved.x;
-        pSPart->coord.y += pSPart->reserved.y;
-        pSPart->coord.z += pSPart->reserved.z;
-    }
-    else
-    {
-        if (pSPart->nPhase < 6)
-            pSPart->coord.w *= 1.4f;
-        // pSPart->coord.w /= fpSizeFactor;
-        pSPart->reserved *= 0.95f;
-    }
-    return TRUE;
+		pSPart->coord.x += pSPart->reserved.x;
+		pSPart->coord.y += pSPart->reserved.y;
+		pSPart->coord.z += pSPart->reserved.z;
+	}
+	else
+	{
+		if (pSPart->nPhase < 6)
+			pSPart->coord.w *= 1.4f;
+		
+		pSPart->reserved *= 0.95f * random.Get(0, 2);
+	}
+	return TRUE;
 }
 
 // ---------------------------------- AcidRay
@@ -2957,88 +2984,92 @@ BOOL CParticle::BlueGasSingleSegment(SSingleParticle *pSPart)
 // ---------------------------------- Link
 // -------------------------------------------------------------
 
-BOOL CParticle::LinkSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::LinkSingleCreate(SSingleParticle * pSPart, int)
 {
-    // one time initialization
-    if (locSources.GetSize() == 0)
-    {
-        locSources.SetSize(4);
-        locSources[0].reserved.x = fabs(ptWallDirection);
-        locSources[0].reserved.y = 1 / locSources[0].reserved.x;
+	
+	if (locSources.GetSize() == 0)
+	{
+		locSources.SetSize(4);
+		locSources[0].reserved.x = fabs(ptWallDirection);
+		locSources[0].reserved.y = 1 / locSources[0].reserved.x;
 
-        CPlot3D vec1 = ptWallDirection ^ CPlot3D(0, 0, 1);
-        float fpLeng = fabs(vec1);
-        if (fpLeng < 1e-10)
-        {
-            vec1 = ptWallDirection ^ CPlot3D(0, 1, 1);
-            fpLeng = fabs(vec1);
-        }
-        vec1 *= 1 / fpLeng;
-        CPlot3D vec2 = ptWallDirection ^ vec1;
-        fpLeng = fabs(vec2);
-        vec2 *= 1 / fpLeng;
-        locSources[1].reserved = ptWallDirection / fabs(ptWallDirection);
-        locSources[2].reserved = vec1;
-        locSources[3].reserved = vec2;
-        locSources[0].nLifeTime = 0xFF; // maximal alpha
-    }
+		CPlot3D vec1 = ptWallDirection ^ CPlot3D(0, 0, 1);
+		float fpLeng = fabs(vec1);
+		if (fpLeng < 1e-10)
+		{
+			vec1 = ptWallDirection ^ CPlot3D(0, 1, 1);
+			fpLeng = fabs(vec1);
+		}
+		vec1 *= 1 / fpLeng;
+		CPlot3D vec2 = ptWallDirection ^ vec1;
+		fpLeng = fabs(vec2);
+		vec2 *= 1 / fpLeng;
+		locSources[1].reserved = ptWallDirection / fabs(ptWallDirection);
+		locSources[2].reserved = vec1;
+		locSources[3].reserved = vec2;
+		locSources[0].nLifeTime = 0xFF; 
+	}
 
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
 
-    float fpRandomX = random.GetFloat(-1, 1);
-    float fpRandomY = random.GetFloat(-1, 1);
-    pSPart->reserved = CPlot3D(fpRandomX * posRespectMinRnd.x, fpRandomY * posRespectMinRnd.y,
-                               random.GetFloat(posRespectMinRnd.z, posRespectMaxRnd.z));
+	float fpRandomX = random.GetFloat(-1, 1);
+	float fpRandomY = random.GetFloat(-1, 1);
+	pSPart->reserved = CPlot3D(
+		fpRandomX * posRespectMinRnd.x,
+		fpRandomY * posRespectMinRnd.y,
+		random.GetFloat(posRespectMinRnd.z, posRespectMaxRnd.z));
 
-    float fpRadius = float(sqrt(sqr(fpRandomX) + sqr(fpRandomY)));
-    float fpDAngle = 0.2f * fpRadius;
-    pSPart->reserved2.x = (float)cos(fpDAngle);
-    pSPart->reserved2.y = (float)sin(fpDAngle);
+	float fpRadius = float(sqrt((fpRandomX * fpRandomX) + (fpRandomY * fpRandomY)));
+	float fpDAngle = 0.2f * fpRadius;
+	pSPart->reserved2.x = (float)cos(fpDAngle);
+	pSPart->reserved2.y = (float)sin(fpDAngle);
 
-    pSPart->coord = carrierCP + pSPart->reserved;
-    if (random.Get(0, 3) == 0 && fpRadius < 0.5f)
-    {
-        pSPart->vSpeed.y = random.GetFloat(0.10f, 0.12f);
-        pSPart->vSpeed.z = fpSize * random.GetFloat(0.13f, 0.16f);
-    }
-    else
-    {
-        pSPart->vSpeed.y = random.GetFloat(0.17f, 0.25f);
-        pSPart->vSpeed.z = fpSize * random.GetFloat(0.03f, 0.05f);
-    }
-    //	pSPart->vSpeed.y = ( fpRadius + 0.8f ) * random.GetFloat( 0.10f, 0.19f );
-    pSPart->coord.w = pSPart->vSpeed.z;
+	pSPart->coord = carrierCP + pSPart->reserved;
+	if (random.Get(0, 3) == 0 && fpRadius < 0.5f)
+	{
+		pSPart->vSpeed.y = random.GetFloat(0.10f, 0.12f);
+		pSPart->vSpeed.z = fpSize * random.GetFloat(0.13f, 0.16f);
+	}
+	else
+	{
+		pSPart->vSpeed.y = random.GetFloat(0.17f, 0.25f);
+		pSPart->vSpeed.z = fpSize * random.GetFloat(0.03f, 0.05f);
+	}
+	
+	pSPart->coord.w = pSPart->vSpeed.z;
 
-    pSPart->vSpeed.x = 0;
-    pSPart->nPhase = random.Get(0, nAnimPhases);
-    return TRUE;
+	pSPart->vSpeed.x = 0;
+	pSPart->nPhase = random.Get(0, nAnimPhases);
+	return TRUE;
 }
 
-BOOL CParticle::LinkSingleSegment(SSingleParticle *pSPart)
+BOOL CParticle::LinkSingleSegment(SSingleParticle * pSPart)
 {
-    pSPart->nPhase = (pSPart->nPhase + 1) % nAnimPhases;
-    pSPart->vSpeed.x += pSPart->vSpeed.y;
-    float fpPart = pSPart->vSpeed.x * locSources[0].reserved.y;
-    if (pSPart->vSpeed.x > locSources[0].reserved.x)
-        return FALSE;
+	pSPart->nPhase = (pSPart->nPhase + 1) % nAnimPhases;
+	pSPart->vSpeed.x += pSPart->vSpeed.y;
+	float fpPart = pSPart->vSpeed.x * locSources[0].reserved.y;
+	if (pSPart->vSpeed.x > locSources[0].reserved.x)
+		return FALSE;
 
-    float fpX, fpY;
-    fpX = pSPart->reserved.x * pSPart->reserved2.x - pSPart->reserved.y * pSPart->reserved2.y;
-    fpY = pSPart->reserved.x * pSPart->reserved2.y + pSPart->reserved.y * pSPart->reserved2.x;
-    pSPart->reserved.x = fpX;
-    pSPart->reserved.y = fpY;
+	float fpX, fpY;
+	fpX = pSPart->reserved.x * pSPart->reserved2.x - pSPart->reserved.y * pSPart->reserved2.y;
+	fpY = pSPart->reserved.x * pSPart->reserved2.y + pSPart->reserved.y * pSPart->reserved2.x;
+	pSPart->reserved.x = fpX;
+	pSPart->reserved.y = fpY;
 
-    pSPart->coord = carrierCP + locSources[2].reserved * pSPart->reserved.x +
-                    locSources[3].reserved * pSPart->reserved.y +
-                    locSources[1].reserved * pSPart->reserved.z + ptWallDirection * fpPart;
-    pSPart->coord.z += (0.25f - sqr(fpPart - 0.5f)) * locSources[0].reserved.x * 0.9f;
-    pSPart->coord.w = pSPart->vSpeed.z;
+	pSPart->coord = carrierCP +
+		locSources[2].reserved * pSPart->reserved.x +
+		locSources[3].reserved * pSPart->reserved.y +
+		locSources[1].reserved * pSPart->reserved.z +
+		ptWallDirection * fpPart;
+	pSPart->coord.z += (0.25f - (fpPart - 0.5f) * (fpPart - 0.5f)) * locSources[0].reserved.x * 0.9f;
+	pSPart->coord.w = pSPart->vSpeed.z;
 
-    DWORD dwAlpha = (DWORD)((0.5f - fabs(fpPart - 0.5f)) * 2 * 500);
-    dwAlpha = Min((DWORD)locSources[0].nLifeTime, dwAlpha);
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwAlpha);
+	DWORD dwAlpha = (DWORD)((0.5f - fabs(fpPart - 0.5f)) * 2 * 500);
+	dwAlpha = Min((DWORD)locSources[0].nLifeTime, dwAlpha);
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwAlpha);
 
-    return TRUE;
+	return TRUE;
 }
 
 void CParticle::LinkLocSourceSegmentFunc(SLocalSource *pSrc)
@@ -3156,37 +3187,32 @@ BOOL CParticle::SphereSingleCreate(SSingleParticle *pSPart, int nNumber)
     return TRUE;
 }
 
-BOOL CParticle::SphereSingleSegment(SSingleParticle *pSPart)
+BOOL CParticle::SphereSingleSegment(SSingleParticle * pSPart)
 {
-    if (--(pSPart->nLifeTime) == 0)
-        return FALSE;
-    pSPart->nPhase = (pSPart->nPhase + 1) % nAnimPhases;
-    const float fpRadius = locSources[0].reserved.x;
+	if (--(pSPart->nLifeTime) == 0)
+		return FALSE;
+	pSPart->nPhase = (pSPart->nPhase + 1) % nAnimPhases;
+	const float fpRadius = locSources[0].reserved.x;
 
-    float fpX, fpY;
-    fpX = pSPart->reserved.x * locSources[1].reserved.x -
-          pSPart->reserved.y * locSources[1].reserved.y;
-    fpY = pSPart->reserved.x * locSources[1].reserved.y +
-          pSPart->reserved.y * locSources[1].reserved.x;
-    pSPart->reserved.x = fpX;
-    pSPart->reserved.y = fpY;
+	float fpX, fpY;
+	fpX = pSPart->reserved.x * locSources[1].reserved.x - pSPart->reserved.y * locSources[1].reserved.y;
+	fpY = pSPart->reserved.x * locSources[1].reserved.y + pSPart->reserved.y * locSources[1].reserved.x;
+	pSPart->reserved.x = fpX;
+	pSPart->reserved.y = fpY;
 
-    pSPart->coord = locSources[0].respectCP + carrierCP +
-                    CalcSpherePointPosition(pSPart->reserved, locSources[1].respectCP,
-                                            locSources[0].reserved.z);
+	pSPart->coord = locSources[0].respectCP + carrierCP +
+		CalcSpherePointPosition(pSPart->reserved, locSources[1].respectCP, locSources[0].reserved.z);
 
-    if (GetTypeID() == PTID_SPHEREFIRE)
-        pSPart->coord.w = pSPart->vSpeed.x * fpRadius * fpSphereParticleSize[pSPart->nLifeTime] *
-                          2; // 1.6f;
-    else if (GetTypeID() == PTID_ANTIMAGIC)
-        pSPart->coord.w = pSPart->vSpeed.x * fpRadius * fpSphereParticleSizeFire[pSPart->nLifeTime];
-    else if (GetTypeID() == PTID_SPHEREELECTRICITY)
-        pSPart->coord.w = pSPart->vSpeed.x * fpRadius * fpSphereParticleSize[pSPart->nLifeTime];
-    else
-        pSPart->coord.w = pSPart->vSpeed.x * fpRadius * fpSphereParticleSize[pSPart->nLifeTime] *
-                          1.6f;
+	if (GetTypeID() == PTID_SPHEREFIRE)
+		pSPart->coord.w = pSPart->vSpeed.x * fpRadius * 0.5f * fpSphereParticleSize[pSPart->nLifeTime] * 2;
+	else if (GetTypeID() == PTID_ANTIMAGIC)
+		pSPart->coord.w = pSPart->vSpeed.x * fpRadius * 0.5f * fpSphereParticleSizeFire[pSPart->nLifeTime];
+	else if (GetTypeID() == PTID_SPHEREELECTRICITY)
+		pSPart->coord.w = pSPart->vSpeed.x * fpRadius * 0.5f * fpSphereParticleSize[pSPart->nLifeTime];
+	else
+		pSPart->coord.w = pSPart->vSpeed.x * fpRadius * 0.5f * fpSphereParticleSize[pSPart->nLifeTime] * 1.6f;
 
-    return TRUE;
+	return TRUE;
 }
 
 // ---------------------------------- Campfire
@@ -3225,47 +3251,47 @@ BOOL CParticle::CampfireSingleCreate(SSingleParticle *pSPart, int)
     return TRUE;
 }
 
-BOOL CParticle::CampfireSingleSegment(SSingleParticle *pSPart)
+BOOL CParticle::CampfireSingleSegment(SSingleParticle * pSPart)
 {
-    // Update lifetime
-    if (--(pSPart->nLifeTime) == 0)
-        return FALSE;
-    // Update phase
-    if (--(pSPart->nPhaseLifeTime) == 0)
-    {
-        if (++(pSPart->nPhase) >= nAnimPhases)
-            return FALSE;
-        pSPart->nPhaseLifeTime = nLifeOfPhase;
-        if (pSPart->nPhase > 7)
-        {
-            if (GetTypeID() == PTID_FIRE || GetTypeID() == PTID_FIREWALL)
-                return FALSE;
-            pSPart->nPhaseLifeTime = nLifeOfPhase * 4;
-            if (random.Get(3) == 0)
-                return FALSE;
-        }
-        if (pSPart->nPhase == 8)
-            pSPart->vSpeed.z *= 0.5;
-    }
-    // Update coordinates and size
-    pSPart->coord.z += pSPart->vSpeed.z;
-    if (pSPart->nPhase < 2)
-    {
-        pSPart->coord.x += pSPart->reserved.x;
-        pSPart->coord.y += pSPart->reserved.y;
-        pSPart->coord.z += pSPart->reserved.z;
-    }
-    if (pSPart->nPhase < 7)
-        pSPart->coord.w *= fpSizeFactor;
-    else
-    {
-        pSPart->coord.w *= 1.06f;
-        float fpMult = fpWindForce * pSPart->coord.w * 0.15f;
-        pSPart->coord.x += windDir.x * fpMult;
-        pSPart->coord.y += windDir.y * fpMult;
-        pSPart->coord.z += windDir.z * fpMult;
-    }
-    return TRUE;
+	
+	if (--(pSPart->nLifeTime) == 0)
+		return FALSE;
+	
+	if (--(pSPart->nPhaseLifeTime) == 0)
+	{
+		if (++(pSPart->nPhase) >= nAnimPhases)
+			return FALSE;
+		pSPart->nPhaseLifeTime = nLifeOfPhase;
+		if (pSPart->nPhase > 7)
+		{
+			if (GetTypeID() == PTID_FIRE || GetTypeID() == PTID_FIREWALL || GetTypeID() == PTID_TORNADOFIRE)
+				return FALSE;
+			pSPart->nPhaseLifeTime = nLifeOfPhase * 4;
+			if (random.Get(3) == 0)
+				return FALSE;
+		}
+		if (pSPart->nPhase == 8)
+			pSPart->vSpeed.z *= 0.5;
+	}
+	
+	pSPart->coord.z += pSPart->vSpeed.z;
+	if (pSPart->nPhase < 2)
+	{
+		pSPart->coord.x += pSPart->reserved.x;
+		pSPart->coord.y += pSPart->reserved.y;
+		pSPart->coord.z += pSPart->reserved.z;
+	}
+	if (pSPart->nPhase < 7)
+		pSPart->coord.w *= fpSizeFactor;
+	else
+	{
+		pSPart->coord.w *= 1.06f;
+		float fpMult = fpWindForce * pSPart->coord.w * 0.15f;
+		pSPart->coord.x += windDir.x * fpMult;
+		pSPart->coord.y += windDir.y * fpMult;
+		pSPart->coord.z += windDir.z * fpMult;
+	}
+	return TRUE;
 }
 
 // ---------------------------------- Firewall
@@ -3520,46 +3546,44 @@ void CParticle::ClayRingLocSourceSegmentFunc(SLocalSource *pLSrc)
 }
 
 // --------------------------------- Teleport ------------------------------------------------
-BOOL CParticle::TeleportSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::TeleportSingleCreate(SSingleParticle * pSPart, int)
 {
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-    pSPart->nLifeTime = nLifeSpan;
-    pSPart->nPhase = 0;
-    pSPart->nPhaseLifeTime = nLifeOfPhase;
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
+	pSPart->nLifeTime = nLifeSpan;
+	pSPart->nPhase = 0;
+	pSPart->nPhaseLifeTime = nLifeOfPhase;
 
-    float fpX, fpY, fpR = fabs(fpSize), fpR2 = sqr(fpR), fpXYR;
+	float fpX, fpY, fpR = fabs(fpSize), fpR2 = (fpR * fpR), fpXYR;
 
-    fpX = random.GetFloat(0, 1);
-    fpX = (fpX * fpX + fpX) / 2;
-    float fpA = random.GetFloat(0, 2 * 3.1416f);
-    fpXYR = fpX;
-    fpX = fpR * fpXYR * sin(fpA);
-    fpY = fpR * fpXYR * cos(fpA);
+	fpX = random.GetFloat(0, 1); fpX = (fpX * fpX + fpX) / 2;
+	float fpA = random.GetFloat(0, 2 * 3.1416f);
+	fpXYR = fpX;
+	fpX = fpR * fpXYR * sin(fpA);
+	fpY = fpR * fpXYR * cos(fpA);
 
-    pSPart->coord = carrierCP + CPlot3D(fpX, fpY, 0);
-    pSPart->coord.z += random.GetFloat(-0.4f, -0.2f) * fpR;
-    pSPart->coord.w = 0;
-    pSPart->reserved2.x = 0.2f * (2 - fpXYR);
-    if (random.GetFloat(0, 1) > fpXYR)
-        pSPart->nPhase = random.Get(4, 15);
-    else
-        pSPart->nPhase = random.Get(0, 3);
-    if (fpSize > 0)
-    {
-        pSPart->reserved.z = fpR * 3 * 0.2f * (1 - fpXYR + 3) /
-                             4; // * random.GetFloat( 0.8f, 1.2f );
-        pSPart->reserved.x = 1.2f;
-        pSPart->nSpecial = -0x13;
-    }
-    else
-    {
-        pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0x00);
-        pSPart->reserved.z = fpR * 3 * 3 * (1 - fpXYR + 3) / 4;
-        pSPart->reserved.x = 1 / 1.2f;
-        pSPart->nSpecial = 0x13;
-    }
-    pSPart->coord.z += pSPart->reserved.z;
-    return TRUE;
+	pSPart->coord = carrierCP + CPlot3D(fpX, fpY, 0);
+	pSPart->coord.z += random.GetFloat(-0.4f, -0.2f) * fpR;
+	pSPart->coord.w = 0;
+	pSPart->reserved2.x = 0.2f * (2 - fpXYR);
+	if (random.GetFloat(0, 1) > fpXYR)
+		pSPart->nPhase = random.Get(4, 15);
+	else
+		pSPart->nPhase = random.Get(0, 3);
+	if (fpSize > 0)
+	{
+		pSPart->reserved.z = fpR * 3 * 0.2f * (1 - fpXYR + 3) / 4;
+		pSPart->reserved.x = 1.2f;
+		pSPart->nSpecial = -0x13;
+	}
+	else
+	{
+		pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0x00);
+		pSPart->reserved.z = fpR * 3 * 3 * (1 - fpXYR + 3) / 4;
+		pSPart->reserved.x = 1 / 1.2f;
+		pSPart->nSpecial = 0x13;
+	}
+	pSPart->coord.z += pSPart->reserved.z;
+	return TRUE;
 }
 
 BOOL CParticle::TeleportSingleSegment(SSingleParticle *pSPart)
@@ -3811,101 +3835,96 @@ void CParticle::ModifierLocSourceSegmentFunc(SLocalSource *pLSrc)
 const int CASTING_STAR_LIFETIME = 28;
 const float CASTING_ROTATION_SPEED1 = 0.5f; // rad/segment
 const float CASTING_ROTATION_SPEED2 = 0.3f; // rad/segment
-BOOL CParticle::CastingStarRoundSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::CastingStarRoundSingleCreate(SSingleParticle * pSPart, int)
 {
-    // Generate local sources at first time
-    if (locSources.GetSize() < nLifeSpan)
-    {
-        if (pCarrier == NULL)
-        {
-            ReportWarning("Particle effect CastingElemental without carrier\n");
-            return FALSE;
-        }
-        float fpRadius, fpHeight;
-        if (locSources.GetSize() == 0)
-        {
-            CPlot3D ptStart;
-            GetObjectBV(ptStart, fpRadius);
-            fpHeight = fpRadius;
-            ptStart.z -= fpRadius;
-            fpRadius *= 0.5f; // 1.1f;
-        }
-        else
-        {
-            fpRadius = locSources[0].reserved.x;
-            fpHeight = locSources[0].vSpeed.z;
-        }
-        // fpHeight *= 2;
+	
+	if (locSources.GetSize() < nLifeSpan)
+	{
+		if (pCarrier == NULL)
+		{
+			ReportWarning( "Particle effect CastingElemental without carrier\n");
+			return FALSE;
+		}
+		float fpRadius, fpHeight;
+		if (locSources.GetSize() == 0)
+		{
+			CPlot3D ptStart;
+			GetObjectBV(ptStart, fpRadius);
+			fpHeight = fpRadius;
+			ptStart.z -= fpRadius;
+			fpRadius *= 0.5f;
+		}
+		else
+		{
+			fpRadius = locSources[0].reserved.x;
+			fpHeight = locSources[0].vSpeed.z;
+		}
+		
 
-        int nSrcIdx = locSources.GetSize();
-        locSources.SetSize(nSrcIdx + 1);
-        SLocalSource &src = locSources[nSrcIdx];
-        float fpSrcAngle = 2 * FP_PI * nSrcIdx / nLifeSpan;
+		int nSrcIdx = locSources.GetSize();
+		locSources.SetSize(nSrcIdx + 1);
+		SLocalSource & src = locSources[nSrcIdx];
+		float fpSrcAngle = 2 * FP_PI * nSrcIdx / nLifeSpan;
 
-        float fpRotationSpeed, fpEffectHeight, fpEffectDir;
-        fpEffectHeight = fpHeight * 0.4f;
-        fpEffectDir = 1;
-        switch (GetTypeID())
-        {
-        default:
-        case PTID_CASTINGILLUSION:
-        case PTID_CASTINGENCHANTMENT:
-            fpRotationSpeed = CASTING_ROTATION_SPEED2;
-            break;
-        case PTID_CASTINGDOMINATION:
-            fpRotationSpeed = CASTING_ROTATION_SPEED1;
-            fpEffectHeight = fpHeight * 1.6f;
-            fpEffectDir = -1;
-            break;
-        case PTID_CASTINGHEALING:
-            fpRotationSpeed = CASTING_ROTATION_SPEED1;
-            break;
-        }
+		float fpRotationSpeed, fpEffectHeight, fpEffectDir;
+		fpEffectHeight = fpHeight * 0.4f;
+		fpEffectDir = 1;
+		switch (GetTypeID())
+		{
+		case PTID_CASTINGILLUSION:     fpRotationSpeed = CASTING_ROTATION_SPEED2; break;
+		case PTID_CASTINGENCHANTMENT:  fpRotationSpeed = CASTING_ROTATION_SPEED2; break;
+		case PTID_CASTINGDOMINATION:
+			fpRotationSpeed = CASTING_ROTATION_SPEED1;
+			fpEffectHeight = fpHeight * 1.6f;
+			fpEffectDir = -1;
+			break;
+		case PTID_CASTINGHEALING:      fpRotationSpeed = CASTING_ROTATION_SPEED1; break;
+		}
 
-        src.nPhase = 0;
-        src.nLifeTime = 1;
-        src.reserved.x = fpRadius * cos(fpSrcAngle);
-        src.reserved.y = fpRadius * sin(fpSrcAngle);
-        src.reserved.z = fpEffectHeight;
-        src.respectCP = carrierCP + src.reserved;
-        src.reserved2 = src.respectCP;
-        src.vSpeed.x = (float)cos(fpRotationSpeed);
-        src.vSpeed.y = (float)sin(fpRotationSpeed);
-        src.vSpeed.z = fpHeight * fpEffectDir;
+		src.nPhase = 0;
+		src.nLifeTime = 1;
+		src.reserved.x = fpRadius * cos(fpSrcAngle);
+		src.reserved.y = fpRadius * sin(fpSrcAngle);
+		src.reserved.z = fpEffectHeight;
+		src.respectCP = carrierCP + src.reserved;
+		src.reserved2 = src.respectCP;
+		src.vSpeed.x = (float)cos(fpRotationSpeed);
+		src.vSpeed.y = (float)sin(fpRotationSpeed);
+		src.vSpeed.z = fpHeight * fpEffectDir;
 
-        // create main large particle
-        pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-        pSPart->nPhase = 0;
-        pSPart->nLifeTime = 6;
-        pSPart->nPhaseLifeTime = 1;
-        pSPart->nSpecial = -1 - nSrcIdx;
-        pSPart->coord = src.respectCP;
-        pSPart->coord.w = 0;
-        return TRUE;
-    }
+		
+		pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
+		pSPart->nPhase = 0;
+		pSPart->nLifeTime = 6;
+		pSPart->nPhaseLifeTime = 1;
+		pSPart->nSpecial = -1 - nSrcIdx;
+		pSPart->coord = src.respectCP;
+		pSPart->coord.w = 0;
+		return TRUE;
+	}
 
-    int nSrc = random.Get(0, nLifeSpan - 1);
-    SLocalSource &src = locSources[nSrc];
-    float fpAlpha = random.GetFloat(0, 1);
+	int nSrc = random.Get(0, nLifeSpan - 1);
+	SLocalSource & src = locSources[nSrc];
+	float fpAlpha = random.GetFloat(0, 1);
 
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-    pSPart->nPhase = 1;
-    pSPart->nLifeTime = CASTING_STAR_LIFETIME;
-    pSPart->nPhaseLifeTime = 1;
-    pSPart->nSpecial = nSrc;
-    pSPart->reserved2.z = 0.03f * src.vSpeed.z * random.GetFloat(0.85f, 1.2f); // 0.7f, 1.3f );
-    // if ( random.Get(0,3) == 0 )
-    // pSPart->camera.y = 1.10f;
-    // else
-    pSPart->reserved2.y = 1.03f;
-    pSPart->reserved.x = random.GetFloat(posRespectMinRnd.x, posRespectMaxRnd.x);
-    pSPart->reserved.y = random.GetFloat(posRespectMinRnd.y, posRespectMaxRnd.y);
-    pSPart->reserved.z = random.GetFloat(posRespectMinRnd.z, posRespectMaxRnd.z);
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
+	pSPart->nPhase = 1;
+	pSPart->nLifeTime = CASTING_STAR_LIFETIME;
+	pSPart->nPhaseLifeTime = 1;
+	pSPart->nSpecial = nSrc;
+	pSPart->reserved2.z = 0.03f * src.vSpeed.z * random.GetFloat(0.85f, 1.2f);
+	
+		
+	
+	pSPart->reserved2.y = 1.03f;
+	pSPart->reserved.x = random.GetFloat(posRespectMinRnd.x, posRespectMaxRnd.x);
+	pSPart->reserved.y = random.GetFloat(posRespectMinRnd.y, posRespectMaxRnd.y);
+	pSPart->reserved.z = random.GetFloat(posRespectMinRnd.z, posRespectMaxRnd.z);
 
-    pSPart->coord = pSPart->reserved + src.reserved2;
-    pSPart->reserved += src.reserved2 * fpAlpha + src.respectCP * (1 - fpAlpha);
-    pSPart->coord.w = fpSize * 0.20f * random.GetFloat(0.6f, 1.4f);
-    return TRUE;
+	pSPart->coord = pSPart->reserved + src.reserved2;
+	pSPart->reserved += src.reserved2 * fpAlpha + src.respectCP * (1 - fpAlpha);
+	pSPart->coord.w = fpSize * 0.20f * random.GetFloat(0.6f, 1.4f);
+	return TRUE;
 }
 
 static DWORD dwCastElemAlpha[] = { 0, 0x20, 0x40, 0x70, 0xa0, 0xd0, 0xff };
@@ -4027,109 +4046,109 @@ void CParticle::CastingFailedLocSourceSegmentFunc(SLocalSource *pLSrc)
 const float FP_CASTING_S_SRC_LENG = 10;
 const float FP_CASTING_S_SRC_RND_LENG = 0.1f;
 const float FP_CASTING_S_SRC_RND_STEP = 0.1f;
-BOOL CParticle::CastingGatherSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::CastingGatherSingleCreate(SSingleParticle * pSPart, int)
 {
-    // Generate local sources at first time
-    if (locSources.GetSize() == 0)
-    {
-        if (pCarrier == NULL)
-        {
-            ReportWarning("Particle effect CastingElemental without carrier\n");
-            return FALSE;
-        }
-        float fpRadius, fpHeight;
-        CPlot3D ptCenter;
-        GetObjectBV(ptCenter, fpRadius);
-        fpHeight = fpRadius;
-        fpRadius *= 0.8f; // 1.1f;
+	
+	if (locSources.GetSize() == 0)
+	{
+		if (pCarrier == NULL)
+		{
+			ReportWarning( "Particle effect CastingElemental without carrier\n");
+			return FALSE;
+		}
+		float fpRadius, fpHeight;
+		CPlot3D ptCenter;
+		GetObjectBV(ptCenter, fpRadius);
+		fpHeight = fpRadius;
+		fpRadius *= 0.8f;
 #ifndef _A4
-        if (pCarrier->WhoAmI() == HPC_UNIT)
-            fpRadius = ((CMapObject *)pCarrier)->GetAttackDistance();
-#endif //_A4
-        if (GetTypeID() == PTID_CASTINGDIVINATION)
-            fpRadius *= 2;
-        else
-            fpRadius *= 3;
+		if (pCarrier->WhoAmI() == HPC_UNIT)
+			fpRadius = ((CMapObject*)pCarrier)->GetAttackDistance();
+#endif 
+		if (GetTypeID() == PTID_CASTINGDIVINATION)
+			fpRadius *= 2;
+		else
+			fpRadius *= 3;
 
-        locSources.SetSize(nLifeSpan + 1);
-        locSources[0].nPhase = 0xFF; // maximal alpha of whole effect
-        locSources[0].nLifeTime = 6; // number of fade steps
-        locSources[0].reserved.x = fpRadius;
-        if (GetTypeID() == PTID_CASTINGDIVINATION)
-        {
-            locSources[0].reserved.y = 0.07f; // particles size multiplier
-            locSources[0].vSpeed.x = 1.05f;   // growth speed;
-        }
-        else
-        {
-            locSources[0].reserved.y = 0.08f; // 0.10f;
-            locSources[0].vSpeed.x = 1.07f;
-        }
-        locSources[0].respectCP.x = 1; // sign that this is special source
-        for (int i = 1; i <= nLifeSpan; i++)
-        {
-            locSources[i].reserved = GetRandomBallPoint() * FP_CASTING_S_SRC_LENG;
-            locSources[i].reserved2 = GetRandomBallPoint() * FP_CASTING_S_SRC_RND_LENG;
-            locSources[i].respectCP.x = 0; // sign that this is ordinary source
-        }
+		locSources.SetSize(nLifeSpan + 1);
+		locSources[0].nPhase = 0xFF;  
+		locSources[0].nLifeTime = 6;  
+		locSources[0].reserved.x = fpRadius;
+		if (GetTypeID() == PTID_CASTINGDIVINATION)
+		{
+			locSources[0].reserved.y = 0.07f;   
+			locSources[0].vSpeed.x = 1.05f;     
+		}
+		else
+		{
+			locSources[0].reserved.y = 0.08f;
+			locSources[0].vSpeed.x = 1.07f;
+		}
+		locSources[0].respectCP.x = 1;  
+		for (int i = 1; i <= nLifeSpan; i++)
+		{
+			locSources[i].reserved = GetRandomBallPoint() * FP_CASTING_S_SRC_LENG;
+			locSources[i].reserved2 = GetRandomBallPoint() * FP_CASTING_S_SRC_RND_LENG;
+			locSources[i].respectCP.x = 0; 
+		}
 
-        // create main large particle
-        if (GetTypeID() == PTID_CASTINGDIVINATION)
-        {
-            pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
-            pSPart->nPhase = 0;
-            pSPart->nSpecial = 1;
-            pSPart->coord = carrierCP; // + locSources[0].camera;
-            pSPart->coord.w = 0;
-            return TRUE;
-        }
-    }
+		
+		if (GetTypeID() == PTID_CASTINGDIVINATION)
+		{
+			pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
+			pSPart->nPhase = 0;
+			pSPart->nSpecial = 1;
+			pSPart->coord = carrierCP;
+			pSPart->coord.w = 0;
+			return TRUE;
+		}
+	}
 
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
-    pSPart->nPhase = 14;
-    pSPart->nLifeTime = 13;
-    pSPart->nSpecial = 0;
-    pSPart->nPhaseLifeTime = 1;
-    float fpX, fpY, fpZ, fpLeng;
-    for (;;)
-    {
-        fpX = random.GetFloat(-1, 1);
-        fpY = random.GetFloat(-1, 1);
-        fpZ = random.GetFloat(-1, 1);
-        fpLeng = fpX * fpX + fpY * fpY + fpZ * fpZ;
-        if (fpLeng <= 1 && fpLeng > 0)
-            break;
-    }
-    int nSrc = random.Get(0, nLifeSpan * nLifeOfPhase);
-    if (nSrc > 0)
-    {
-        nSrc = (nSrc - 1) % nLifeSpan;
-        fpX += locSources[nSrc].reserved.x;
-        fpY += locSources[nSrc].reserved.y;
-        fpZ += locSources[nSrc].reserved.z;
-        fpLeng = fpX * fpX + fpY * fpY + fpZ * fpZ;
-    }
-    fpLeng = 1 / FSqrt(fpLeng);
-    pSPart->reserved.x = fpX * fpLeng;
-    pSPart->reserved.y = fpY * fpLeng;
-    pSPart->reserved.z = fpZ * fpLeng;
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
+	pSPart->nPhase = 14;
+	pSPart->nLifeTime = 13;
+	pSPart->nSpecial = 0;
+	pSPart->nPhaseLifeTime = 1;
+	float fpX, fpY, fpZ, fpLeng;
+	for (;;)
+	{
+		fpX = random.GetFloat(-1, 1);
+		fpY = random.GetFloat(-1, 1);
+		fpZ = random.GetFloat(-1, 1);
+		fpLeng = fpX * fpX + fpY * fpY + fpZ * fpZ;
+		if (fpLeng <= 1 && fpLeng > 0)
+			break;
+	}
+	int nSrc = random.Get(0, nLifeSpan * nLifeOfPhase);
+	if (nSrc > 0)
+	{
+		nSrc = (nSrc - 1) % nLifeSpan;
+		fpX += locSources[nSrc].reserved.x;
+		fpY += locSources[nSrc].reserved.y;
+		fpZ += locSources[nSrc].reserved.z;
+		fpLeng = fpX * fpX + fpY * fpY + fpZ * fpZ;
+	}
+	fpLeng = 1 / sqrt(fpLeng);
+	pSPart->reserved.x = fpX * fpLeng;
+	pSPart->reserved.y = fpY * fpLeng;
+	pSPart->reserved.z = fpZ * fpLeng;
 
-    if (GetTypeID() == PTID_CASTINGDIVINATION)
-    {
-        pSPart->reserved2.x = locSources[0].reserved.x * 0.6f; // starting radius multiplier
-        pSPart->reserved2.y = pSPart->reserved2.x / 26.0f;     // radius multiplier delta
-    }
-    else
-    {
-        pSPart->reserved2.x = locSources[0].reserved.x * 0.6f;
-        pSPart->reserved2.y = pSPart->reserved2.x / 13.0f;
-    }
-    pSPart->reserved2.z = locSources[0].vSpeed.x; // particle size growth speed
+	if (GetTypeID() == PTID_CASTINGDIVINATION)
+	{
+		pSPart->reserved2.x = locSources[0].reserved.x * 0.6f;  
+		pSPart->reserved2.y = pSPart->reserved2.x / 26.0f;      
+	}
+	else
+	{
+		pSPart->reserved2.x = locSources[0].reserved.x * 0.6f;
+		pSPart->reserved2.y = pSPart->reserved2.x / 13.0f;
+	}
+	pSPart->reserved2.z = locSources[0].vSpeed.x;      
 
-    pSPart->coord = carrierCP + pSPart->reserved * pSPart->reserved2.x;
-    // pSPart->coord.z += locSources[0].camera.z;
-    pSPart->coord.w = pSPart->reserved2.x * locSources[0].reserved.y * random.GetFloat(0.6f, 1.4f);
-    return TRUE;
+	pSPart->coord = carrierCP + pSPart->reserved * pSPart->reserved2.x;
+	
+	pSPart->coord.w = pSPart->reserved2.x * locSources[0].reserved.y * random.GetFloat(0.6f, 1.4f);
+	return TRUE;
 }
 
 static DWORD dwCastGatherFade[] = { 0x00, 0x20, 0x40, 0x70, 0xa0, 0xd0, 0xff };
@@ -4195,111 +4214,102 @@ void CParticle::CastingGatherLocSourceSegmentFunc(SLocalSource *pLSrc)
 }
 
 // ------------------------------ LightningBlast ----------------------------------------------
-BOOL CParticle::LightningBlastSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::LightningBlastSingleCreate(SSingleParticle * pSPart, int)
 {
-    // Generate local sources at first time
-    if (locSources.GetSize() == 0)
-    {
-        // Create local sources
-        locSources.SetSize(10);
-        for (int i = 0; i < locSources.GetSize(); i++)
-        {
-            CPlot3D vec = GetCenteredRandomRoundPoint(), newCP;
-            if (i == 0)
-                vec = CPlot3D(0, 0, 0);
-            newCP = vec * fpSize * 0.3f + carrierCP;
-            newCP.z = theWorld.GetSurfaceValue(newCP.x, newCP.y) + 0.3f;
-            locSources[i].respectCP = newCP;
-            locSources[i].reserved = newCP;
-            vec.z = 0.5f;
-            vec *= 1 / fabs(vec);
-            locSources[i].vSpeed = vec * 0.5f;
-            locSources[i].nPhase = 0;
-            locSources[i].nLifeTime = 0;
-            // locSources[i].camera.x = random.Get(0,3);
-        }
-    }
-    if (locSources[0].nPhase < locSources.GetSize() * 2)
-    {
-        pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-        int nSrc = locSources[0].nPhase / 2;
-        // if ( locSources[nSrc].camera.x )
-        {
-            pSPart->nPhase = 0;
-            pSPart->nLifeTime = 10;
-        }
-        /*else
-        {
-                pSPart->nPhase = random.Get(8,11);
-                pSPart->nLifeTime = 6;
-        }*/
-        pSPart->nLifeTime = 10;
-        pSPart->nPhaseLifeTime = locSources[0].nPhase & 1;
-        pSPart->nSpecial = nSrc + 1;
-        pSPart->coord = locSources[nSrc].respectCP;
-        pSPart->coord.w = 0;
-        pSPart->reserved2.x = 0.05f * 2; // fpSize *
-        locSources[0].nPhase++;
-        if (pSPart->nPhaseLifeTime)
-        {
-            pSPart->reserved2.x = fpSize * 0.2f * random.GetFloat(0.5f, 1.4f); // fpSize * 0.05f;
-            pSPart->nPhase = random.Get(12, 15);
-            if (nSrc == 0)
-                pSPart->reserved2.x = fpSize * 0.4f;
-            pSPart->coord.w = pSPart->reserved2.x;
-        }
-        return TRUE;
-    }
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-    pSPart->nSpecial = 0;
-    if (particles.GetCount() < 200 && locSources[0].nLifeTime < 5)
-    {
-        pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0x40);
-        pSPart->nPhase = 8;
-        int nSrc = random.Get(0, locSources.GetSize() - 1); // 6 );
-        float fpR = 1 - sqr(random.GetFloat(0, 1));
-        float fpAng = random.GetFloat(0, 6.28f);
-        pSPart->vSpeed = GetRandomRoundPoint();
-        pSPart->vSpeed.x = fpR * cos(fpAng);
-        pSPart->vSpeed.y = fpR * sin(fpAng);
-        pSPart->vSpeed *= fpSize * 0.3f;
-        pSPart->vSpeed.z = 0;
-        pSPart->coord.x = locSources[0].respectCP.x + pSPart->vSpeed.x;
-        pSPart->coord.y = locSources[0].respectCP.y + pSPart->vSpeed.y;
-        pSPart->coord.z = locSources[0].respectCP.z + (1 - fpR) * fpSize * 0.1f;
-        pSPart->coord.w = 0;
-        pSPart->nLifeTime = Float2Int(9 - 3 * fpR);
-        pSPart->nPhaseLifeTime = 0;
-        pSPart->reserved2.x = random.GetFloat(0.1f, 0.14f) * fpSize;
-        pSPart->reserved2.x *= 2 - fpR;
-        return TRUE;
-    }
-    int nSrc;
-    // for( int nCount = 0; nCount < 10; nCount++ )
-    {
-        nSrc = random.Get(0, locSources.GetSize() - 1);
-        // if ( locSources[0].nLifeTime <= 6 || locSources[nSrc].camera.x )
-        // break;
-    }
+	
+	if (locSources.GetSize() == 0)
+	{
+		
+		locSources.SetSize(10);
+		for (int i = 0; i < locSources.GetSize(); i++)
+		{
+			CPlot3D vec = GetCenteredRandomRoundPoint(), newCP;
+			if (i == 0)
+				vec = CPlot3D(0, 0, 0);
+			newCP = vec * fpSize * 0.3f + carrierCP;
+			newCP.z = theWorld.GetSurfaceValue(newCP.x, newCP.y) + 0.3f;
+			locSources[i].respectCP = newCP;
+			locSources[i].reserved = newCP;
+			vec.z = 0.5f;
+			vec *= 1 / fabs(vec);
+			locSources[i].vSpeed = vec * 0.5f;
+			locSources[i].nPhase = 0;
+			locSources[i].nLifeTime = 0;
+			
+		}
+	}
+	if (locSources[0].nPhase < locSources.GetSize() * 2)
+	{
+		pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
+		int nSrc = locSources[0].nPhase / 2;
+		
+		{
+			pSPart->nPhase = 0;
+			pSPart->nLifeTime = 10;
+		}
+		
+		pSPart->nLifeTime = 10;
+		pSPart->nPhaseLifeTime = locSources[0].nPhase & 1;
+		pSPart->nSpecial = nSrc + 1;
+		pSPart->coord = locSources[nSrc].respectCP;
+		pSPart->coord.w = 0;
+		pSPart->reserved2.x = 0.05f * 2; 
+		locSources[0].nPhase++;
+		if (pSPart->nPhaseLifeTime)
+		{
+			pSPart->reserved2.x = fpSize * 0.2f * random.GetFloat(0.5f, 1.4f);
+			pSPart->nPhase = random.Get(12, 15);
+			if (nSrc == 0)
+				pSPart->reserved2.x = fpSize * 0.4f;
+			pSPart->coord.w = pSPart->reserved2.x;
+		}
+		return TRUE;
+	}
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
+	pSPart->nSpecial = 0;
+	if (particles.GetCount() < 200 && locSources[0].nLifeTime < 5)
+	{
+		pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0x40);
+		pSPart->nPhase = 8;
+		int nSrc = random.Get(0, locSources.GetSize() - 1);
+		float fpR = 1 - (random.GetFloat(0, 1) * random.GetFloat(0, 1));
+		float fpAng = random.GetFloat(0, 6.28f);
+		pSPart->vSpeed = GetRandomRoundPoint();
+		pSPart->vSpeed.x = fpR * cos(fpAng);
+		pSPart->vSpeed.y = fpR * sin(fpAng);
+		pSPart->vSpeed *= fpSize * 0.3f;
+		pSPart->vSpeed.z = 0;
+		pSPart->coord.x = locSources[0].respectCP.x + pSPart->vSpeed.x;
+		pSPart->coord.y = locSources[0].respectCP.y + pSPart->vSpeed.y;
+		pSPart->coord.z = locSources[0].respectCP.z + (1 - fpR) * fpSize * 0.1f;
+		pSPart->coord.w = 0;
+		pSPart->nLifeTime = Float2Int(9 - 3 * fpR);
+		pSPart->nPhaseLifeTime = 0;
+		pSPart->reserved2.x = random.GetFloat(0.1f, 0.14f) * fpSize;
+		pSPart->reserved2.x *= 2 - fpR;
+		return TRUE;
+	}
+	int nSrc;
+	
+	{
+		nSrc = random.Get(0, locSources.GetSize() - 1);
+		
+			
+	}
 
-    // if ( locSources[nSrc].camera.x )
-    {
-        pSPart->nPhase = 1;
-        pSPart->reserved2.x = random.GetFloat(0.02f, 0.03f) * 3; // fpSize
-    }
-    /*else
-    {
-            pSPart->nPhase = random.Get(8,11);
-            pSPart->camera.x = random.GetFloat( 0.02f, 0.03f ) * 6; // fpSize
-    }*/
-    pSPart->nLifeTime = 6;
-    pSPart->nPhaseLifeTime = 1;
-    float fpPart = random.GetFloat(0, 1);
-    pSPart->coord = locSources[nSrc].respectCP;
-    pSPart->coord.w = 0;
-    pSPart->reserved = locSources[nSrc].respectCP * fpPart +
-                       locSources[nSrc].reserved * (1 - fpPart);
-    return TRUE;
+	
+	{
+		pSPart->nPhase = 1;
+		pSPart->reserved2.x = random.GetFloat(0.02f, 0.03f) * 3; 
+	}
+	
+	pSPart->nLifeTime = 6;
+	pSPart->nPhaseLifeTime = 1;
+	float fpPart = random.GetFloat(0, 1);
+	pSPart->coord = locSources[nSrc].respectCP;
+	pSPart->coord.w = 0;
+	pSPart->reserved = locSources[nSrc].respectCP * fpPart + locSources[nSrc].reserved * (1 - fpPart);
+	return TRUE;
 }
 
 static DWORD dwLBAlpha[] = { 0,    0x50, 0xb0, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -5112,16 +5122,16 @@ void CParticle::VStarLocSourceSegmentFunc(SLocalSource *pLSrc)
 }
 
 // ------------------------------ Regeneration -----------------------------------------------
-BOOL CParticle::RegenerationSingleCreate(SSingleParticle *pSPart, int)
+BOOL CParticle::RegenerationSingleCreate(SSingleParticle * pSPart, int)
 {
-    if (particles.GetCount() > 1)
-        return FALSE;
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
-    pSPart->nPhase = 3;
-    pSPart->coord = carrierCP;
-    pSPart->coord.w = 0;
-    pSPart->reserved.x = particles.GetCount() ? 1 : -1;
-    return TRUE;
+	if (particles.GetCount() > 1)
+		return FALSE;
+	pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
+	pSPart->nPhase = 3;
+	pSPart->coord = carrierCP;
+	pSPart->coord.w = 0;
+	pSPart->reserved.x = particles.GetCount() ? 1.0f : -1.0f;
+	return TRUE;
 }
 
 BOOL CParticle::RegenerationSingleSegment(SSingleParticle *pSPart)
@@ -5355,23 +5365,23 @@ BOOL CParticle::FeetCloudSingleSegment(SSingleParticle *pSPart)
     return TRUE;
 }
 
-void CParticle::FeetCloudLocSourceSegmentFunc(SLocalSource *pLSrc)
+void CParticle::FeetCloudLocSourceSegmentFunc(SLocalSource * pLSrc)
 {
 #ifndef _A4
-    if (GetCarrier() && GetCarrier()->WhoAmI() == HPC_UNIT)
-    {
-        CUnit *pUnit = (CUnit *)GetCarrier();
-        if (pLSrc->nLifeTime)
-            pLSrc->respectCP = GetBodyPartCP(pUnit, "ll3");
-        else
-            pLSrc->respectCP = GetBodyPartCP(pUnit, "rl3");
-    }
-    else
+	if (GetCarrier() && GetCarrier()->WhoAmI() == HPC_UNIT)
+	{
+		CUnit* pUnit = (CUnit*)GetCarrier();
+		if (pLSrc->nLifeTime)
+			pLSrc->respectCP = GetBodyPartCP(pUnit, "ll3");
+		else
+			pLSrc->respectCP = GetBodyPartCP(pUnit, "rl3");
+	}
+	else
 #endif
-        pLSrc->respectCP = carrierCP;
-    CPlot3D ptTemp;
-    GetObjectBV(ptTemp, pLSrc->reserved.x);
-    pLSrc->nPhase = 0;
+		pLSrc->respectCP = carrierCP;
+	CPlot3D ptTemp;
+	GetObjectBV(ptTemp, pLSrc->reserved.x);
+	pLSrc->nPhase = 0;
 }
 
 // ------------------------------- BallStars -----------------------------------------------
@@ -5731,4 +5741,145 @@ BOOL CParticle::Draw(CRenderer *pTarget)
         pParticle->pUV = uvOfPhases.GetData() + pPart->nPrevPhase;
     }
     return pTarget->DrawParticles(bUseAddEffect != FALSE, inCoords, resParts);
+}
+
+void CParticle::ConfigurePowerHit(CUnit* carrier, const CPlot3D& point,
+    const CPlot3D& direction, int hitTime)
+{
+    SetCP(point);
+    powerHitWorld=theWorldServer.GetSpecificManager();
+    carrierCP = point;
+    // A two-layer additive weapon glow; contact dust stays alpha blended.
+    bUseAddEffect = carrier ? TRUE : FALSE;
+    dwPFlags = PS_GENERATE_PARTICLES;
+    nBornProbability = 100;
+    nParticlesMax = carrier ? 2 : 36;
+    nMinTrys = carrier ? 2 : 14;
+    fpLenToSingleDice = 1.0f;
+    nLifeSpan = carrier ? 128 : 9;
+    nLifeOfPhase = 1;
+    fpSize = carrier ? 0.55f : 0.26f;
+    fpParam2 = 0.0f;
+    fpPower2 = 0.0f;
+    fpParam1 = carrier ? 0.0f : 1.0f;
+    createFunc = &CParticle::PowerHitSingleCreate;
+    segmentFunc = &CParticle::PowerHitSingleSegment;
+    locSourceSegmentFunc = &CParticle::PowerHitSourceSegment;
+    locSources.SetSize(1);
+    SLocalSource source = {};
+    source.nLifeTime = carrier ? 128 : 1;
+    source.reserved.x = 3.0f;
+    source.reserved.y = 6.0f;
+    source.nPhase = hitTime;
+    source.vSpeed = direction;
+    locSources[0] = source;
+    if (carrier)
+    {
+        BindTo(bpRHand);
+        SetFlag(PS_BIND_TO_BODYPART);
+        SetFlag(PS_NEED_CARRIER_TO_GENERATE);
+        AttachCarrier(carrier);
+        carrierCP = GetCarrierCP(carrier);
+    }
+}
+
+void CParticle::PowerHitSourceSegment(SLocalSource* source)
+{
+    if (fpParam1 == 0.0f)
+    {
+        if (fpParam2 < 0.0f || source->nLifeTime-- <= 0 ||
+            (fpPower2 > 0.0f && source->reserved.y <= 0.0f) ||
+            !PowerHitCarrierActive(pCarrier,powerHitWorld,source->nPhase,fpPower2>0,nLifeOfPhase) ||
+            !static_cast<CUnit*>(pCarrier)->MatchFigure("rh3"))
+        {
+            fpParam2 = -1.0f;
+            powerHitLights.erase(this);
+            ResetFlag(PS_GENERATE_PARTICLES);
+            return;
+        }
+        carrierCP=GetBodyPartCP(static_cast<CUnit*>(pCarrier),"rh3");
+        fpParam2 += 1.0f;
+        if (fpPower2 > 0.0f) source->reserved.y -= 1.0f;
+        const float lightStrength = fpPower2 > 0.0f ?
+            max(0.0f, source->reserved.y / 6.0f) :
+            min(1.0f, 0.35f + 0.65f * fpParam2 / max(1.0f, source->reserved.x - 1.0f));
+        UpdatePowerHitLight(this,carrierCP,lightStrength);
+        // Create exactly one core and one halo, then only update them.
+        if (fpParam2 > 1.0f)
+            ResetFlag(PS_GENERATE_PARTICLES);
+    }
+    else if (source->nLifeTime-- <= 0)
+        ResetFlag(PS_GENERATE_PARTICLES);
+}
+
+BOOL CParticle::PowerHitSingleCreate(SSingleParticle* particle, int index)
+{
+    particle->coord = carrierCP;
+    if (fpParam1 == 0.0f)
+    {
+        particle->nSpecial = index;
+        particle->nLifeTime = nLifeSpan;
+        particle->nPhase = 0; // white light cell; no blue smoke/arc frames
+        particle->nPhaseLifeTime = 1;
+        particle->vSpeed = CPlot3D(0, 0, 0);
+        particle->coord.w = fpSize * (index == 0 ? 0.45f : 1.0f) * 0.65f;
+        particle->dwColor = index == 0 ? RGBA_MAKE(110, 105, 90, 255) :
+            RGBA_MAKE(75, 47, 12, 255);
+        return TRUE;
+    }
+    else
+    {
+        particle->coord.x += random.GetFloat(-0.06f, 0.06f);
+        particle->coord.y += random.GetFloat(-0.06f, 0.06f);
+        particle->coord.z += random.GetFloat(-0.06f, 0.06f);
+    }
+    particle->coord.w = fpSize;
+    particle->nLifeTime = nLifeSpan;
+    // The shared atlas uses phases 0-7 for fire and 8-14 for smoke.
+    particle->nPhase = fpParam1 == 0.0f ? 12 : 8;
+    particle->nPhaseLifeTime = 1;
+    particle->nSpecial = 0;
+    particle->vSpeed = fpParam1 == 0.0f ? CPlot3D(0, 0, 0) :
+        locSources[0].vSpeed * random.GetFloat(0.03f, 0.08f) +
+        CPlot3D(random.GetFloat(-0.02f, 0.02f),
+                random.GetFloat(-0.02f, 0.02f), random.GetFloat(0.01f, 0.03f));
+    particle->dwColor = RGBA_MAKE(225, 215, 195, 215);
+    return TRUE;
+}
+
+BOOL CParticle::PowerHitSingleSegment(SSingleParticle* particle)
+{
+    if (fpParam1 == 0.0f)
+    {
+        if (fpParam2 < 0.0f || --particle->nLifeTime <= 0)
+        {
+            // Segment restores previous color on deletion; clear both to avoid
+            // one extra visible interpolation frame after a cancelled swing.
+            particle->dwColor = particle->dwPrevColor = 0;
+            return FALSE;
+        }
+        const float strength = fpPower2 > 0.0f ?
+            max(0.0f, locSources[0].reserved.y / 6.0f) :
+            min(1.0f, 0.35f + 0.65f * fpParam2 / max(1.0f, locSources[0].reserved.x - 1.0f));
+        particle->coord = carrierCP;
+        particle->coord.w = fpSize * (particle->nSpecial == 0 ? 0.45f : 1.0f) *
+            (0.5f + 0.5f * strength);
+        // Additive rendering uses RGB intensity, not alpha, for fading.
+        particle->dwColor = particle->nSpecial == 0 ?
+            RGBA_MAKE(int(255 * strength), int(245 * strength), int(215 * strength), 255) :
+            RGBA_MAKE(int(180 * strength), int(115 * strength), int(30 * strength), 255);
+        return TRUE;
+    }
+    if (--particle->nLifeTime <= 0)
+        return FALSE;
+    particle->coord += particle->vSpeed;
+    particle->vSpeed *= 0.82f;
+    particle->coord.w *= fpParam1 == 0.0f ? 1.04f : 1.12f;
+    const int age = nLifeSpan - particle->nLifeTime;
+    const int firstPhase = fpParam1 == 0.0f ? 12 : 8;
+    particle->nPhase = min(nAnimPhases - 1, firstPhase +
+        (15 - firstPhase) * age / nLifeSpan);
+    particle->dwColor = RGBA_MAKE(225, 215, 195,
+        215 * particle->nLifeTime / nLifeSpan);
+    return TRUE;
 }

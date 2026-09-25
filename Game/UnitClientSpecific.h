@@ -42,6 +42,8 @@ private:
     float fpPrevSetPosTime;       // previous time of set exact position
     CAIFullRoute route;           // low level moving description
     bool bWeaponHidden;           // is weapon hidden ?
+    bool bBriefingWeaponForcedHidden = false;
+    bool bWeaponHiddenBeforeBriefing = false;
     bool bArrowHidden;
     bool bFirstSetpos;
     float fFadeOutAlpha; // alpha-value для проявления монстра
@@ -59,6 +61,8 @@ private:
     //
     DWORD armors[RPG_NUM_ARMOR_TYPES]; // armors, currently weared (shape + material)
     DWORD weapons[QI_MAX_WEAPONS];     // weapons. the same format...
+    BYTE woundTextureData[RPG_NUM_HIT_LOCATIONS];
+    bool bWoundTextureDataCached;
     //
     // std::unique_ptr<DWORD[]> pMouthMimicTexture;
     ITexturePtr pMouthMimicTexture;
@@ -100,6 +104,8 @@ private:
     void MouthClose(bool bForce = false);
 
 public:
+    DWORD GetWeaponSubtype(DWORD index) const { return GetWeapon(index); }
+    void SetBriefingWeaponHidden(bool hidden);
     CUnitClientSpecific();
     virtual ~CUnitClientSpecific();
     // phase changed

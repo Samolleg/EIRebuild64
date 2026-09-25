@@ -1,6 +1,12 @@
 #include "StdAfx.h"
+#include "ModPackage.h"
+#include "ModSpellRules.h"
+#include "ModTacticalSpells.h"
+#include "ModCombat.h"
 #include "ModRuntime.h"
 #include "StuffMapObjects.h"
+#include <cctype>
+#include <string>
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -20,6 +26,7 @@ const float FP_FOF_HEARRADIUS = 20;
 const float FP_MIN_ATTACK_OPACITY = 0.1f;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldServer.h"
+#include "WorldClient.h"
 #include "UnitServer.h"
 #include "MapObjectServer.h"
 #include "mapFormat.h"
@@ -33,6 +40,7 @@ const float FP_MIN_ATTACK_OPACITY = 0.1f;
 #include "console.h"
 #include "effect.h"
 #include "EffectManager.h"
+#include "ParticleManager.h"
 #include "ackFormat.h"
 #include "ItemManager.h"
 #include "aiSettings.h"
@@ -86,12 +94,14 @@ SL0AnimationSeq &SL0AnimationSeq::operator+=(const SL0AnimationSeq &add)
         if (a.bStart != 0xff)
         {
             if (a.bCyclic == 0xff)
-                AddSimple(a.bStart, a.nLength);
+                AddSimple(add.GetStartId(i), a.nLength);
             else
-                animations.Add(a);
+                Append(a, add.GetStartId(i), add.GetCycleId(i));
         }
+        else if (a.bCyclic == 0xfe && add.GetCycleId(i) == 0xffffffffu)
+            AddPumpCycle();
         else
-            AddCycle(a.bCyclic);
+            AddCycle(add.GetCycleId(i));
     }
     return *this;
 }
@@ -103,21 +113,67 @@ EUnitAnimationSpeed SL0AnimationSeq::GetAnimationSpeed()
     return animations[0].animationSpeed;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SL0AnimationSeq::AddSimple(BYTE bStart, int nLength)
+void SL0AnimationSeq::EnsureIds()
 {
-    animations.Add(SL0Animation());
-    SL0Animation &a = animations[animations.GetSize() - 1];
-    a.bStart = bStart;
-    a.nLength = nLength;
+    while (startIds.GetSize() < animations.GetSize())
+    {
+        const int index = startIds.GetSize();
+        startIds.Add(animations[index].bStart);
+        cycleIds.Add(animations[index].bCyclic);
+    }
+}
+DWORD SL0AnimationSeq::GetStartId(int index) const
+{
+    return index < startIds.GetSize() ? startIds[index] : animations[index].bStart;
+}
+DWORD SL0AnimationSeq::GetCycleId(int index) const
+{
+    return index < cycleIds.GetSize() ? cycleIds[index] : animations[index].bCyclic;
+}
+void SL0AnimationSeq::SetStartId(int index, DWORD id)
+{
+    EnsureIds();
+    startIds[index] = id;
+    animations[index].bStart = id == 0xffffffffu ? 0xff :
+        (id > 253 && id != 0xff ? 0xfe : BYTE(id));
+}
+void SL0AnimationSeq::SetCycleId(int index, DWORD id)
+{
+    EnsureIds();
+    cycleIds[index] = id;
+    animations[index].bCyclic = id == 0xffffffffu ? 0xff :
+        (id > 253 && id != 0xff ? 0xfe : BYTE(id));
+}
+void SL0AnimationSeq::Append(const SL0Animation &animation, DWORD startId, DWORD cycleId)
+{
+    EnsureIds();
+    animations.Add(animation);
+    startIds.Add(startId);
+    cycleIds.Add(cycleId);
+}
+void SL0AnimationSeq::AddSimple(DWORD bStart, int nLength)
+{
+    SL0Animation animation;
+    animation.nLength = nLength;
+    Append(animation, bStart, 0xff);
+    SetStartId(animations.GetSize() - 1, bStart);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SL0AnimationSeq::AddCycle(BYTE bCycle)
+void SL0AnimationSeq::AddCycle(DWORD bCycle)
 {
-    if (animations.GetSize() == 0 || animations[animations.GetSize() - 1].bCyclic != 0xff)
-        animations.Add(SL0Animation());
+    if (animations.GetSize() == 0 ||
+        (GetCycleId(animations.GetSize() - 1) != 0xff &&
+         GetCycleId(animations.GetSize() - 1) != 0xffffffffu))
+        Append(SL0Animation(), 0xff, 0xff);
     SL0Animation &a = animations[animations.GetSize() - 1];
-    a.bCyclic = bCycle;
+    SetCycleId(animations.GetSize() - 1, bCycle);
     a.nLength = -1;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void SL0AnimationSeq::AddPumpCycle()
+{
+    AddCycle(0xfe);
+    cycleIds[animations.GetSize() - 1] = 0xffffffffu;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SL0AnimationSeq::SetSpeed(EUnitAnimationSpeed speed)
@@ -161,7 +217,8 @@ bool SL0AnimationSeq::IsSame(SL0AnimationSeq &cmp)
         return false;
     for (int i = 0; i < animations.GetSize(); i++)
     {
-        if (animations[i] != cmp.animations[i])
+        if (animations[i] != cmp.animations[i] ||
+            GetStartId(i) != cmp.GetStartId(i) || GetCycleId(i) != cmp.GetCycleId(i))
             return false;
     }
     return true;
@@ -170,6 +227,12 @@ bool SL0AnimationSeq::IsSame(SL0AnimationSeq &cmp)
 void SL0AnimationSeq::Load(CSave &file)
 {
     LoadCArray(animations, file);
+    startIds.SetSize(0);
+    cycleIds.SetSize(0);
+    EnsureIds();
+    for (int i = 0; i < animations.GetSize(); ++i)
+        if (animations[i].bStart == 0xff && animations[i].bCyclic == 0xfe)
+            cycleIds[i] = 0xffffffffu; // stock PumpAnimation, unless companion data restores an ID
     file.Read(nStartSegment);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -311,6 +374,7 @@ void CUnitServer::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Clear()
 {
+    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
     curCommand.Clear();
     nextCommand.Clear();
     // level0 clear
@@ -506,8 +570,8 @@ bool CUnitServer::L0ShiftAnimations()
         {
             if (level0Animation.animations[1].IsEmpty())
             {
-                level0Animation.animations[1].bStart = level0Animation.animations[0].bStart;
-                level0Animation.animations[1].bCyclic = level0Animation.animations[0].bCyclic;
+                level0Animation.SetStartId(1, level0Animation.GetStartId(0));
+                level0Animation.SetCycleId(1, level0Animation.GetCycleId(0));
                 level0Animation.animations[1].nLength += a.nLength;
                 if (level0Animation.animations[1].animationSpeed == UAS_FROZEN)
                 {
@@ -522,6 +586,8 @@ bool CUnitServer::L0ShiftAnimations()
         if (bShiftStartTime)
             level0Animation.nStartSegment += a.nLength;
         level0Animation.animations.RemoveAt(0);
+        level0Animation.startIds.RemoveAt(0);
+        level0Animation.cycleIds.RemoveAt(0);
     }
     return bRv;
 }
@@ -532,8 +598,14 @@ void CUnitServer::L0StartNextAnimationSegment()
     {
         SL0Animation &a = level0Animation.animations[0];
         if (!a.IsEmpty())
-            lpUnit->LowStartAnimation(a.bStart, a.bCyclic, level0Animation.nStartSegment,
-                                      a.bSoundSet);
+        {
+            if (a.bCyclic == 0xfe && level0Animation.GetCycleId(0) == 0xffffffffu)
+                lpUnit->LowStartAnimation(a.bStart, a.bCyclic,
+                    level0Animation.nStartSegment, a.bSoundSet);
+            else
+                lpUnit->LowStartAnimationExtended(level0Animation.GetStartId(0),
+                    level0Animation.GetCycleId(0), level0Animation.nStartSegment, a.bSoundSet);
+        }
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -572,7 +644,7 @@ bool CUnitServer::L0IsPlayingSuffer()
 {
     if (level0Animation.animations.GetSize() > 0)
     {
-        const SADEntry *pEntry = lpUnit->GetAnimationByIndex(level0Animation.animations[0].bStart);
+        const SADEntry *pEntry = lpUnit->GetAnimationByIndex(level0Animation.GetStartId(0));
         if (pEntry && (pEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_SUFFER)
         {
             if (level0Animation.nStartSegment + pEntry->dwAnimationLength >
@@ -672,6 +744,7 @@ void CUnitServer::L1StartSuffer()
     if (currentPose.pose == UP_LAY && L1IsMoving())
         return;
     GetSufferAnimation(suffer, nL1SufferDirection, false, false);
+    if(suffer.IsEmpty()&&powerHitSuffer)suffer.AddSimple(powerHitSuffer->dwEntryIndex,GetAnimationLength(powerHitSuffer->dwEntryIndex));
     if (!LcCanPlaySuffer(suffer.GetLength()))
         return;
     bL1PlayingSuffer = true;
@@ -1040,7 +1113,7 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength)
         SL0AnimationSeq move(*GetMoveAnimation()), tek;
         L0GetAnimation(tek);
         if (tek.animations.GetSize() != 1 || move.animations.GetSize() != 1 ||
-            tek.animations[0].bCyclic != move.animations[0].bCyclic)
+            tek.GetCycleId(0) != move.GetCycleId(0))
             L0StartAnimation(move);
     }
     return true;
@@ -1105,6 +1178,7 @@ void CUnitServer::L1StartSpecialCycle(SL0AnimationSeq animation)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L1ExecAttack()
 {
+    StartPowerHitGlow(GetWorldBase()->GetSegmentTimeCounter());
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     int nTime = pWS->GetSegmentTimeCounter();
     CAIFullRoute &segment = path.curSegment;
@@ -1155,10 +1229,32 @@ void CUnitServer::L1ExecAttack()
             pCastParticle = pParticle;
         }
     }
-    if (nTime >= level1Command.nHitTime)
+    bool dualAttack=false;int finishTime=level1Command.nHitTime;
+    if(curCommand.cmd==UC_ATTACK&&!level1Command.attackAnimation.IsEmpty())if(auto*mod=ModRuntime::Current())
+    if(mod->CombatSetting("JMVAttacks")){
+        const auto&animation=level1Command.attackAnimation.animations[0];
+        const SADEntry*entry=lpUnit->GetAnimationByIndex(level1Command.attackAnimation.GetStartId(0));
+        if(entry&&strncmp(entry->pszAnimationName,"dat",3)==0){
+            auto strikes=mod->DualStrikes(entry->pszAnimationName,animation.nLength);dualAttack=!strikes.empty();
+            if(dualAttack){
+                if(curCommand.pTarget.IsEmpty()||curCommand.pTarget->IsDead()){L1CancelAttack(true);nCanAttackTime=0;return;}
+                for(const auto&strike:strikes){
+                    int when=level1Command.nTimeStrikeMoment+strike.first;finishTime=(std::max)(finishTime,when+1);
+                    if(nTime==when){
+                        UseAttackStart(curCommand.pTarget,level1Command.eAttackLocation,level1Command.bCalledShot,strike.second);
+                        LcAttackCallback(level1Command.eAttackLocation,level1Command.bCalledShot);
+                        if(curCommand.pTarget.IsEmpty()||curCommand.pTarget->IsDead()){L1CancelAttack(true);nCanAttackTime=0;return;}
+                    }
+                }
+            }
+        }
+    }
+    if (nTime >= finishTime)
     {
-        ASSERT(nTime == level1Command.nHitTime);
-        LcAttackCallback(level1Command.eAttackLocation, level1Command.bCalledShot);
+        if(!dualAttack){
+            ASSERT(nTime == level1Command.nHitTime);
+            LcAttackCallback(level1Command.eAttackLocation, level1Command.bCalledShot);
+        }
         // convert current state to simple non interruptable idle
         level1Command.Clear();
         if (eL1State == UL1_ATTACK)
@@ -1211,6 +1307,7 @@ void CUnitServer::L1StartAttack(bool bPredictTarget, BYTE nSoundSet)
 // should clear pointer to target
 void CUnitServer::L1CancelAttack(bool bAbortAnimation)
 {
+    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     int nTime = pWS->GetSegmentTimeCounter();
     // if attack animation has begun then wait to its end, else stop everything
@@ -1229,6 +1326,8 @@ void CUnitServer::L1CancelAttack(bool bAbortAnimation)
                     anim.nStartSegment = nTime - anim.animations[0].nLength;
                     anim.animations[0].nLength += anim.animations[2].nLength;
                     anim.animations.SetSize(1);
+                    anim.startIds.SetSize(1);
+                    anim.cycleIds.SetSize(1);
                     L0StartAnimation(anim);
                 }
             }
@@ -1240,12 +1339,16 @@ void CUnitServer::L1CancelAttack(bool bAbortAnimation)
                     anim.animations[0].nLength += anim.animations[2].nLength;
                     anim.nStartSegment = level0Animation.nStartSegment;
                     anim.animations.SetSize(1);
+                    anim.startIds.SetSize(1);
+                    anim.cycleIds.SetSize(1);
                     L0StartAnimation(anim);
                 }
                 else
                 {
                     anim.nStartSegment = level0Animation.nStartSegment;
                     anim.animations.RemoveAt(1);
+                    anim.startIds.RemoveAt(1);
+                    anim.cycleIds.RemoveAt(1);
                     L0StartAnimation(anim);
                 }
             }
@@ -1390,6 +1493,7 @@ bool CUnitServer::LcCanPlaySuffer(int nSufferLeng)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::LcRecheckAttack()
 {
+    if(curCommand.cmd==UC_CASTPOINT&&ModSkills::Slot(curCommand.dwParam)>=0)return CanRequestPointSkill(ModSkills::Slot(curCommand.dwParam),curCommand.ptTarget);
     if (curCommand.cmd == UC_CASTPOINT || curCommand.cmd == UC_CASTUNIT)
     {
         if (lpUnit->CheckFlag(UNIT_FEEBLED))
@@ -1414,6 +1518,11 @@ bool CUnitServer::LcRecheckAttack()
 // this function is called when attack is to be performed
 void CUnitServer::LcAttackCallback(ERPGHitLocations eAttackLocation, bool bCalledShot)
 {
+    int pointSkill=PrepareExplosiveShot();if(pointSkill){LcCancelCommand();return;}
+    const int activeSkillSlot=ModSkills::Slot(curCommand.dwParam);
+    int skill=PrepareWeaponSkill();if(skill<0){LcCancelCommand();return;}
+    const char* activeSkillCode=nullptr;
+    if(skill>0&&activeSkillSlot>=0){auto*activeSpell=GetSpell(activeSkillSlot);if(activeSpell&&activeSpell->GetPrototype())activeSkillCode=activeSpell->GetPrototype()->szCodeName;}
     switch (curCommand.cmd)
     {
     case UC_CASTPOINT:
@@ -1426,7 +1535,8 @@ void CUnitServer::LcAttackCallback(ERPGHitLocations eAttackLocation, bool bCalle
         LcCancelCommand();
         break;
     case UC_ATTACK:
-        UseAttack(curCommand.pTarget, level1AP); // eAttackLocation, bCalledShot );
+        if(skill==2)ModRuntime::Current()->ScheduleDoubleShot(*lpUnit,curCommand.pTarget,level1AP);
+        UseAttack(curCommand.pTarget, level1AP,true,0,skill?skill:1,activeSkillCode);
         if (!curCommand.pTarget.IsEmpty() && curCommand.pTarget->WhoAmI() == HPC_UNIT &&
             eAttackLocation < RPGHL_ALL)
         {
@@ -1576,6 +1686,7 @@ void CUnitServer::LcStartNextCommand()
 // stop execution of current command
 void CUnitServer::LcCancelCommand()
 {
+    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
     // if ( curCommand.cmd == UC_SKILL )
     // LowNewWishPose( oldPose );
     curCommand.Clear();
@@ -1696,7 +1807,7 @@ bool CUnitServer::LcProcessNewCommand()
         LcStartNextCommand();
         SL0AnimationSeq anim;
         anim.Clear();
-        anim.AddSimple((BYTE)curCommand.dwParam, GetAnimationLength((BYTE)curCommand.dwParam));
+        anim.AddSimple(curCommand.dwParam, GetAnimationLength(curCommand.dwParam));
         L1StartSpecial(anim);
     }
         return true;
@@ -1704,7 +1815,7 @@ bool CUnitServer::LcProcessNewCommand()
         LcStartNextCommand();
         SL0AnimationSeq anim;
         anim.Clear();
-        anim.AddCycle((BYTE)curCommand.dwParam);
+        anim.AddCycle(curCommand.dwParam);
         L1StartSpecialCycle(anim);
     }
         return true;
@@ -1888,8 +1999,19 @@ float CUnitServer::GetSpellRange(CSpell *pSpell)
     return 10;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::CancelFollowOnLostSight(CUnit* target)
+{
+    if (!target || !lpUnit || curCommand.pTarget != target ||
+        !lpUnit->GetOwner() || !target->GetOwner())
+        return;
+    curCommand.cmd = UC_IDLE;
+    curCommand.nQSpellNum = 0;
+    curCommand.pTarget.Clear();
+}
+/////////////////////////////////////////////////////////////////////////////////////
 int CUnitServer::GetSpellCastTime(CSpell *pSpell)
 {
+    if(auto*mod=ModRuntime::Current())if(mod->CombatSetting("UsePrototypeActionsForMobCast"))return ModSpells::CastTime(rpgUnitStats,pSpell,lpUnit&&lpUnit->GetOwner(),theSettings.nDifficultyLevel);
     if (!pSpell)
         return 0;
     float fpAction = rpgUnitStats.action.fpEffectiveValue;
@@ -1943,8 +2065,24 @@ CSpell *CUnitServer::GetSpell(const SUnitBasicCmd &cmd)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // check cast possibility with rpg system
+void CUnitServer::SyncNpcMagicState()
+{
+    if(!ModRuntime::Current()||!lpUnit||lpUnit->IsHero())return;
+    if(lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND)&&rpgUnitStats.rpgNAWWeaponType!=RPGWST_MAGIC)lpUnit->SetFlag(UNIT_FEEBLED);
+    else lpUnit->ResetFlag(UNIT_FEEBLED);
+}
+bool CUnitServer::HasAISpellMana(int slot)
+{
+    auto*mod=ModRuntime::Current();
+    if(!mod||!lpUnit||slot<0||slot>=8||(lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit)))return true;
+    auto*spell=GetSpell(slot);auto*owner=GetMapObjectServer();if(!spell||!owner)return true;
+    ModSkills::Config config;float cost=mod->SkillConfig(spell,config)?config.Cost(spell->GetManaCost()):ModSpells::ManaCost(spell->GetManaCost(),rpgUnitStats.GetManaBonusMultiplier());
+    return ModSpells::HasMana(owner->GetCurrentMP(),cost);
+}
 bool CUnitServer::CanCastSpell(CSpell *pSpell, bool bCheckRPG)
 {
+    if(auto*mod=ModRuntime::Current()){ModSkills::Config config;if(bCheckRPG&&mod->SkillConfig(pSpell,config))return config.allowNpc&&mod->SkillReady(*lpUnit,pSpell,config,true);}
+    SyncNpcMagicState();
     // lets check if this unit can cast the spell
     if (pSpell && lpUnit->IsHero() && bCheckRPG &&
         !rpgUnitStats.CanCastSpell(pSpell->GetMagicSubtype(), pSpell->GetComplexity()))
@@ -1958,6 +2096,7 @@ bool CUnitServer::CanCastSpell(CSpell *pSpell, bool bCheckRPG)
 // возможности начать следующее в сегментах
 int CUnitServer::GetAttackCycleTime(EUnitCommand cmd, CItemWeapon *pWeapon)
 {
+    if(auto*mod=ModRuntime::Current())if(mod->CombatSetting("UsePrototypeActionsForMobAttack"))return mod->AttackCycle(rpgUnitStats,*lpUnit,cmd==UC_ATTACK);
     // calc delay to next attack
     float fpAction = rpgUnitStats.action.fpEffectiveValue;
     if (fpAction != 0)
@@ -2004,7 +2143,7 @@ void CUnitServer::GetSpellAttack(int nSpellNum, SRPGGeneralAttack &res)
     CSpell *pSpell = GetSpell(nSpellNum);
     ASSERT(pSpell);
     memset(&res, 0, sizeof(res));
-    if (pSpell)
+    if (pSpell && !(ModRuntime::Current()&&(pSpell->GetSubtypeID()>>16)==SPELL_ID_VAMP&&3+pSpell->GetMagicSubtype()>=int(RPG_NUM_ATTACK_TYPES)))
         res.wAttacks[pSpell->GetAttackType()] = pSpell->GetPower();
     res.wToHit = 0x7fff;
 }
@@ -2116,6 +2255,10 @@ bool CUnitServer::CheckRelief(SUCTraceInfo &info, const CPlot3D &ptFrom)
 // check up mand // and distance to target for specified spell/wand
 bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
 {
+    SyncNpcMagicState();
+    if(!HasAISpellMana(cmd.nQSpellNum))return false;
+    auto*mod=ModRuntime::Current();auto*skill=cmd.nQSpellNum>=0&&cmd.nQSpellNum<int(lpUnit->GetSpellSlotCount())?GetSpell(cmd.nQSpellNum):nullptr;
+    if(cmd.cmd==UC_CASTPOINT&&mod&&mod->PointSkill(skill)){ModSkills::Config config;if(mod->SkillConfig(skill,config))return CanRequestPointSkill(cmd.nQSpellNum,cmd.ptTarget);}
     CSpell *pSpell;
     int nQSpellNum = cmd.nQSpellNum;
     // when updating this code don`t forget about unit::checkiscastpossible
@@ -2393,7 +2536,9 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
     case UC_CASTPOINT:
     case UC_CASTUNIT: {
         pSpell = GetSpell(atk);
-        GetCastAnimation(animation, nHit, atk.cmd, GetSpellCastTime(pSpell));
+        auto*mod=ModRuntime::Current();ModSkills::Config config;
+        if(atk.cmd==UC_CASTPOINT&&mod&&mod->PointSkill(pSpell)&&mod->SkillConfig(pSpell,config)){cmd.eAttackLocation=RPGHL_BODY;GetAttackAnimation(animation,nHit,UC_ATTACK,ADB_MODIFIER_HDIRECTION1_MIDDLE|ADB_MODIFIER_VDIRECTION1_MIDDLE);}
+        else GetCastAnimation(animation, nHit, atk.cmd, GetSpellCastTime(pSpell));
     }
     break;
     default:
@@ -2533,6 +2678,7 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
                     break;
                 default:
                     cmd.castType = pSpell->GetMagicSubtype();
+                    if(auto*mod=ModRuntime::Current())if(mod->CombatSetting("LoadSpellAnimationFromSlotsField"))cmd.castType=static_cast<ERPGMagicSubtypes>(pSpell->GetPrototype()->dwSlots);
                     break;
                 }
             }
@@ -2780,7 +2926,7 @@ void CUnitServer::StartAttack()
                     CUnitServer *pUS = (CUnitServer *)pTarget->GetUnitSpecific();
                     UseAttackStart(curCommand.pTarget, level1Command.eAttackLocation,
                                    level1Command.bCalledShot);
-                    if (!pUS->DetermineHit(&level1AP, GetUnit()))
+                    if (ModSkills::Slot(curCommand.dwParam)<0 && !pUS->DetermineHit(&level1AP, GetUnit()))
                         nSoundSet = 1;
                 }
             }
@@ -3091,11 +3237,42 @@ void CUnitServer::UsePotion(int nQSpellNum, CMapObject *pTarget, const CPlot3D &
     ASSERT(pSpell);
     if (!pSpell)
         return;
+    if (CModPackage *mod = ModRuntime::Current())
+        if (mod->CombatSetting("usePotionAcks"))
+        {
+            InformFailure(ACK_HERO_ACK_USE_POTION);
+            theWorld.ReceiveDamage(lpUnit->GetID(), 0, HLDAMAGE_POTION);
+        }
     pWS->CastSpell(pSpell, lpUnit, lpUnit->GetCP(), pTarget, ptCastTo);
     // reduce items count and remove if everything is spent
     pWS->ReduceQItemCount(lpUnit, pItem);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+class ScopedRandomSpellPower {
+public:
+    ScopedRandomSpellPower(CSpell *spell, float limit)
+        : spell_(spell), original_(spell->GetPower()), active_(limit >= 0.0f)
+    {
+        if (active_)
+        {
+            const float roll = float(rand());
+            spell_->SetPower(original_ +
+                (roll - 16384.0f) * original_ * limit / 16384.0f);
+        }
+    }
+    ~ScopedRandomSpellPower()
+    {
+        if (active_)
+            spell_->SetPower(original_);
+    }
+private:
+    CSpell *spell_;
+    float original_;
+    bool active_;
+};
+}
+
 void CUnitServer::UseSpell()
 {
     CPlot3D ptCastTo;
@@ -3118,11 +3295,14 @@ void CUnitServer::UseSpell()
         pSpell = lpUnit->GetQSpell(nQSpellNum);
     if (!pSpell)
         return;
+    if(ModRuntime::Current()&&!pItem&&ModTactical::ObsoleteHeal(this,pSpell,cmd.pTarget)){cmd.nQSpellNum=-1;return;}
     // determine cast target
     if (cmd.pTarget.IsEmpty()) // cmd == UC_CASTPOINT )
         ptCastTo = cmd.ptTarget;
     else
         ptCastTo = cmd.pTarget->GetTargetCP();
+    // Mana may have changed while the casting animation was running.
+    if(ModRuntime::Current()&&!IsCastPossible(cmd)){cmd.nQSpellNum=-1;return;}
     // perform cast
     ASSERT(IsCastPossible(cmd)); // nQSpellNum, ptCastTo, cmd.cmd == UC_CASTPOINT ) )
     bool bDoCast = true;
@@ -3135,7 +3315,7 @@ void CUnitServer::UseSpell()
     }
     else
     {
-        if (lpUnit->IsHero())
+        if (lpUnit->IsHero() || ModRuntime::Current())
         {
             GetMapObjectServer()->ChangeCurrentMP(-pSpell->GetManaCost() *
                                                   rpgUnitStats.GetManaBonusMultiplier());
@@ -3144,7 +3324,12 @@ void CUnitServer::UseSpell()
     }
     if (bDoCast)
     {
-        pWS->CastSpell(pSpell, lpUnit, lpUnit->GetCP(), cmd.pTarget, ptCastTo);
+        {
+            const CModPackage *mod = ModRuntime::Current();
+            ScopedRandomSpellPower randomPower(
+                pSpell, mod ? mod->MagicRandomLimit() : -1.0f);
+            pWS->CastSpell(pSpell, lpUnit, lpUnit->GetCP(), cmd.pTarget, ptCastTo);
+        }
         // produce some sound so enemies should know that you are doing something
         if (pSpell->GetMagicSchool() != RPGMS_SENSES)
             pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_ATTACK_SOUND);
@@ -3276,34 +3461,62 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // create damage directly or create an arrow
-void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion)
+void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion,bool applyWeaponSpell,int projectileIndex,int projectileCount,const char* activeSkillCode)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
-    // check if we are using a bow then create arrow else process damage directly
-    if (IsCurrentWeaponABow())
+    auto*mod=ModRuntime::Current();
+    auto weapon=mod?mod->AttackWeapon(attackPortion):std::shared_ptr<CItemWeapon>();
+    CItemWeapon*usedWeapon=weapon?weapon.get():lpUnit->GetCurrentQWeapon();
+    // Keep the launch weapon alive through delivery and its trigger spell.
+    struct Cleanup{CModPackage*mod;SRPGAttackPortion&ap;~Cleanup(){if(mod)mod->ForgetAttack(ap);}} cleanup{mod,attackPortion};
+    bool bow=usedWeapon?(usedWeapon->GetWeaponType()==RPGWST_BOW||usedWeapon->GetWeaponType()==RPGWST_CROSSBOW):IsCurrentWeaponABow();
+    if (bow)
     {
         CEffectArrowFigure *pArrow;
         pArrow = (CEffectArrowFigure *)(pWS->GetEffectManager())
                      ->CreateData(ETypeIDs(HPC_EFFECTARROWFIGURE));
         if (!pArrow)
             return;
-        pArrow->SetCP(GetUnit()->GetUnitHeadPosition());
+        CPlot3D launch=GetUnit()->GetUnitHeadPosition();if(projectileCount>1)launch.x+=projectileIndex==0?-.08f:.08f;
+        pArrow->SetCP(launch);
         pArrow->SetTarget(pTarget->GetID());
         pArrow->nAttackerID = GetUnit()->GetID();
         pArrow->bNewArrow = true;
         pArrow->attackPortion = attackPortion;
+        if(auto*mod=ModRuntime::Current())mod->MoveAttack(attackPortion,pArrow->attackPortion);
         pWS->AddEffect(pArrow);
+        if(projectileIndex==0&&activeSkillCode){
+            const char* resource=!_stricmp(activeSkillCode,"doubleshot")?"skills\\doubleshot\\1.wav":
+                !_stricmp(activeSkillCode,"preciseshot")?"skills\\preciseshot\\1.wav":nullptr;
+            if(resource)if(auto*sound=theWorld.GetSoundManager())sound->BeginFX(resource,8000,launch,5,25,FALSE);
+        }
+    }
+    else if(mod&&mod->CombatSetting("JMVAttacks")&&usedWeapon&&
+            (usedWeapon->GetWeaponType()==RPGWST_HANDS3||usedWeapon->GetWeaponType()==RPGWST_HANDS7))
+    {
+        auto*arrow=static_cast<CEffectArrow*>(pWS->GetEffectManager()->CreateData(ETypeIDs(HPC_EFFECTARROW)));
+        if(!arrow)return;
+        bool left=mod->AttackIsLeft(attackPortion);
+        CUnit*model=theWorld.GetMapObjectManager()?theWorld.GetUnit(lpUnit->GetID()):nullptr;
+        arrow->SetCP((model?model:lpUnit)->GetWeaponCastPoint(usedWeapon,left));
+        arrow->SetTarget(pTarget->GetID());arrow->nAttackerID=lpUnit->GetID();
+        arrow->color=CPlot3D(1,1,1);arrow->fpRange=1;arrow->fpScale=.25f;
+        auto type=CItemWeapon::GetAttackType(usedWeapon->GetSubtypeID());
+        arrow->typeID=type==RPGAT_TERMICAL?PTID_STAFFARROWFIRE:type==RPGAT_ELECTRICAL?PTID_STAFFARROWLIGHT:PTID_STAFFARROWWATER;
+        arrow->szSoundName="magic\\Firearrow\\circle.wav";
+        arrow->SetWeaponAttack(attackPortion);
+        pWS->AddEffect(arrow);
     }
     else
         pTarget->ProcessAttackPortion(&attackPortion, GetUnit(), GetUnit());
-    UseCurrentWeaponSpell(pTarget);
+    if(applyWeaponSpell)UseCurrentWeaponSpell(pTarget,usedWeapon);
     // produce some sound so enemies should know that you are doing something
     if (attackPortion.fBackStabMultiplier == 1) // not a backstab
         pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_ATTACK_SOUND);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::UseAttackStart(CMapObject *pTarget, ERPGHitLocations eAttackLocation,
-                                 bool bCalledShot)
+                                 bool bCalledShot, bool leftHand)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     BOOL bBackstab = FALSE;
@@ -3316,24 +3529,34 @@ void CUnitServer::UseAttackStart(CMapObject *pTarget, ERPGHitLocations eAttackLo
         bBackstab = FALSE;
     // check if we are using a bow then create arrow else process damage directly
     if (IsCurrentWeaponABow())
-        CreateCurrentWeaponAttackPortion(level1AP, FALSE, eAttackLocation, bCalledShot);
+    {
+        CModPackage *mod = ModRuntime::Current();
+        const BOOL rangedBackstab = mod &&
+            (mod->CombatSetting("JMVRangedBackstab") || mod->CombatSetting("JMV136"));
+        CreateCurrentWeaponAttackPortion(level1AP, rangedBackstab ? bBackstab : FALSE,
+                                         eAttackLocation, bCalledShot, leftHand);
+    }
     else
-        CreateCurrentWeaponAttackPortion(level1AP, bBackstab, eAttackLocation, bCalledShot);
+        CreateCurrentWeaponAttackPortion(level1AP, bBackstab, eAttackLocation, bCalledShot,leftHand);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // create attack portion with current weapon.
 // take in account skills in weapon proficiency class
 BOOL CUnitServer::CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL bBackstab,
                                                    ERPGHitLocations eAttackLocation,
-                                                   bool bCalledShot)
+                                                   bool bCalledShot, bool leftHand)
 {
     bool bHero = IsIDofPersonage(lpUnit->GetID());
     float fpDamageRandom = 0;
+    auto*mod=ModRuntime::Current();float roll=mod?float(random.Get(100)):0;
+    int weaponSlot=mod?mod->AttackSlot(*lpUnit,leftHand):int(lpUnit->dwCurrentWeapon);
+    CItemWeapon*selectedWeapon=weaponSlot>=0&&weaponSlot<QI_MAX_WEAPONS?lpUnit->GetQWeapon(weaponSlot):nullptr;
+    if(mod){mod->ForgetAttack(ap);if(leftHand)bBackstab=FALSE;}
+    if(mod&&bBackstab){auto*w=lpUnit->GetCurrentQWeapon();if(mod->CombatSetting("JMVDaggerCritical"))roll=w&&w->GetWeaponType()==RPGWST_DAGGER?-2.f:0.f;else if(mod->CombatSetting("JMV136"))roll=0;}
 
     ap.Clear();
 
-    if (!bHero || (lpUnit->dwCurrentWeapon >= QI_MAX_WEAPONS) ||
-        (lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon] == NULL))
+    if ((!mod && !bHero) || !selectedWeapon)
     {
         // create attack portion with native weapon
         memcpy(ap.fpAttacks, rpgUnitStats.fpNAWAttacks, sizeof(float) * RPG_NUM_ATTACK_TYPES);
@@ -3348,16 +3571,18 @@ BOOL CUnitServer::CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL b
     }
     else
     {
-        CItemWeapon *lpWeapon = lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon];
+        CItemWeapon *lpWeapon = selectedWeapon;
 
         lpWeapon->GetDamageDistribution(ap.fpAttacks);
         ap.nSkill = lpWeapon->GetProficiencyClass();
         ap.fpToHit = 2 * Dice(RPG_CONST_X) - (RPG_CONST_X + 1);
         ap.fpDamage = lpWeapon->GetRandomDamage();
+        if(mod){int leftSlot=mod->AttackSlot(*lpUnit,true);float lo=mod->ModifiedDamage(rpgUnitStats,*lpUnit,lpWeapon->GetDamageMin(),roll,leftSlot,leftHand);float hi=mod->ModifiedDamage(rpgUnitStats,*lpUnit,lpWeapon->GetDamageMax(),roll,leftSlot,leftHand);ap.fpDamage=random.GetFloat(lo,hi);}
         // ap.hl = ERPGHitLocations( Random(RPG_NUM_HIT_LOCATIONS) );
     }
     //
-    ap.fpDamage = rpgUnitStats.GetModifiedDamage(lpUnit, ap.fpDamage);
+    if(mod){if(!selectedWeapon)ap.fpDamage=mod->ModifiedDamage(rpgUnitStats,*lpUnit,ap.fpDamage,roll);}
+    else ap.fpDamage = rpgUnitStats.GetModifiedDamage(lpUnit, ap.fpDamage);
     //
     ap.hl = eAttackLocation;
     ap.bAreaEffect = FALSE;
@@ -3369,16 +3594,17 @@ BOOL CUnitServer::CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL b
     if (lpUnit->GetOwner() && lpUnit->GetOwner()->bGod >= 2)
         ap.MakeDeadlyAttack();
     ap.bCalledShot = bCalledShot;
+    if(mod&&mod->CombatSetting("JMVAttacks"))mod->RememberAttack(rpgUnitStats,*lpUnit,ap,roll,leftHand);
 
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CUnitServer::UseCurrentWeaponSpell(CMapObject *pTarget)
+void CUnitServer::UseCurrentWeaponSpell(CMapObject *pTarget, CItemWeapon *attackWeapon)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     CItemWeapon *pWeapon;
     CSpell *pSpell;
-    pWeapon = lpUnit->GetCurrentQWeapon();
+    pWeapon = attackWeapon?attackWeapon:lpUnit->GetCurrentQWeapon();
     if (!pWeapon)
         return;
     pSpell = pWeapon->GetSpell(0);
@@ -3406,7 +3632,9 @@ void CUnitServer::UseArmorSpells(bool bBeforeAttack)
             switch (pSpell->GetSubtypeID() >> 16)
             {
             case SPELL_ID_HEALING:
-                bCast = !bBeforeAttack;
+                bCast = ModRuntime::Current() &&
+                    ModRuntime::Current()->CombatSetting("JMVHealAfterHit")
+                    ? bBeforeAttack : !bBeforeAttack;
                 break;
             default:
                 bCast = bBeforeAttack;
@@ -3696,6 +3924,11 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
             pEntry = lpUnit->GetAnimationByIndex(0); // GetAnimation( dwAnimationFlags );
         }
     }
+    if(cmd==UC_ATTACK)if(auto*mod=ModRuntime::Current()){
+        std::string name=mod->DualAnimation(*lpUnit);
+        if(!name.empty())if(const SADEntry*dual=lpUnit->GetAnimationEntry(name.c_str()))
+            if(!mod->DualStrikes(name.c_str(),GetAnimationLength(dual->dwEntryIndex)).empty())pEntry=dual;
+    }
     ASSERT(pEntry);
     nHit = 0;
     if (pEntry)
@@ -3708,7 +3941,7 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
             srcPose = currentPose;
             if (GetTransAnimation(t, srcPose, dstPose))
             {
-                res.animations.Add(t.animations[0]);
+                res.Append(t.animations[0], t.GetStartId(0), t.GetCycleId(0));
                 nHit += t.animations[0].nLength;
             }
         }
@@ -3721,7 +3954,7 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
             srcPose.Convert(actionPose);
             dstPose = currentPose;
             if (GetTransAnimation(t, srcPose, dstPose))
-                res.animations.Add(t.animations[0]);
+                res.Append(t.animations[0], t.GetStartId(0), t.GetCycleId(0));
         }
     }
 }
@@ -3898,7 +4131,7 @@ void CUnitServer::GetIdleAnimation(SL0AnimationSeq &res)
     res.Clear();
     if (currentPose.pose == UP_STAND && currentPose.bAggressive == false)
     {
-        res.AddCycle(0xfe);
+        res.AddPumpCycle();
         return;
     }
     DWORD dwAnimationFlags = GetAnimationWeaponMask();
@@ -4080,7 +4313,7 @@ int CUnitServer::CalcSufferDirection(CUnit *pAttacker, BOOL bAreaSpell)
     return nSufferDirection;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-int CUnitServer::GetAnimationLength(BYTE bAnim)
+int CUnitServer::GetAnimationLength(DWORD bAnim)
 {
     const SADEntry *pEntry = lpUnit->GetAnimationByIndex(bAnim);
     if (pEntry)
@@ -4088,7 +4321,7 @@ int CUnitServer::GetAnimationLength(BYTE bAnim)
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-int CUnitServer::GetAnimationHit(BYTE bAnim)
+int CUnitServer::GetAnimationHit(DWORD bAnim)
 {
     const SADEntry *pEntry = lpUnit->GetAnimationByIndex(bAnim);
     if (pEntry)
@@ -4181,6 +4414,8 @@ int CUnitServer::GetPlayerWhoTamed()
 // main function, processing units low level commands and actions
 int CUnitServer::Segment()
 {
+    // Observe loaded status without serializing cached speed.
+    if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*lpUnit);if(factor!=lastCrippledFactor){lastCrippledFactor=factor;L1SpeedChanged();}}
     if (!lpUnit->bDead)
     {
 #ifdef __DEMO__
@@ -4434,7 +4669,7 @@ void CUnitServer::UseContinousSpells()
         {
             CItem *pItem = info.pItem;
             CSpell *pSpell = pItem->GetSpell(0);
-            if (pItem->GetMP() > pSpell->GetManaCost())
+            if (ModRuntime::Current()?ModSpells::ItemCanCast(pItem->GetMP(),pSpell->GetManaCost()):pItem->GetMP()>pSpell->GetManaCost())
             {
                 if ((pSpell->GetSubtypeID() >> 16) == SPELL_ID_HEALING)
                 {
@@ -4634,6 +4869,8 @@ void CUnitServer::RecalcAIClass()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::ChangeSpeedWithSpell()
 {
+    float factor=ModRuntime::Current()?ModRuntime::Current()->CrippledSpeed(*lpUnit):1;
+    if(factor!=lastCrippledFactor){lastCrippledFactor=factor;L1SpeedChanged();}
     if (lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND) &&
         rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC)
         lpUnit->SetFlag(UNIT_FEEBLED);
@@ -4891,8 +5128,52 @@ void CUnitServer::AlarmEverybodyWhoSawDeath(CUnit *pAttacker)
     MakeNewEnemies(pAttackerS->logic.GetUnitsList()[0], pAttacker, pAttacker);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+std::string GenocideMobName(const CString& mobFile){
+ std::string name=(LPCSTR)mobFile;
+ const auto slash=name.find_last_of("\\/");
+ if(slash!=std::string::npos)name.erase(0,slash+1);
+ const auto extension=name.find_last_of('.');
+ if(extension!=std::string::npos)name.erase(extension);
+ for(char& c:name)c=char(std::tolower(static_cast<unsigned char>(c)));
+ return name;
+}
+void TrackGenocidePlayerKill(CWorldServer& world,CUnit& victim,CUnit* attacker){
+ auto* mod=ModRuntime::Current();
+ if(!mod||!mod->CombatSetting("JMVGenocidePlayerKillTracking")||!attacker)return;
+ CPlayer* player=world.GetPlayer(0);
+ if(!player||attacker->GetOwner()!=player||victim.GetOwner())return;
+ const std::string mobName=GenocideMobName(world.szMobFileName);
+ ModGenocideConfig config;
+ if(mobName.empty()||!mod->GenocideMapConfig(mobName.c_str(),config))return;
+ auto& groups=world.script.GetGlobalVars().gVars;
+ const int index=groups.GetVariableIndex(config.eligibleGroup.c_str());
+ if(index<0||index>=groups.GetSize()||groups.GetSize()>10000)return;
+ CScriptObjectGroup* group=groups.GetVar(index);
+ if(!group||group->GetSize()<0||group->GetSize()>10000)return;
+ bool eligible=false;
+ for(int i=0;i<group->GetSize();++i){
+  CMapObject* object=group->GetAt(i).GetObject();
+  if(object&&!object->IsInvalid()&&object==&victim){eligible=true;break;}
+ }
+ if(!eligible)return;
+ const std::string counter="jmv.genocide.kills."+config.resultVar;
+ float stored=player->party.vars.GetVar(counter.c_str());
+ if(!(stored>=0))stored=0;
+ if(stored>config.population)stored=float(config.population);
+ const int oldKills=int(stored);
+ const int kills=oldKills<config.population?oldKills+1:config.population;
+ player->party.vars.SetVar(counter.c_str(),float(kills));
+ const float previous=player->party.vars.GetVar(config.resultVar.c_str());
+ const int oldStage=previous>=2?2:previous>=1?1:0;
+ const int stage=kills*100>=config.population*config.stageTwoPercent?2:
+   kills*100>=config.population*config.stageOnePercent?1:0;
+ if(stage>oldStage)player->party.vars.SetVar(config.resultVar.c_str(),float(stage));
+}
+}
 void CUnitServer::TakeDamage(CUnit *pAttacker, BOOL bAreaSpell)
 {
+    const bool wasDead = lpUnit->IsDead() != FALSE;
     CPlot3D ptDamageFrom;
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     // float fpForward, fpRight;
@@ -4952,6 +5233,8 @@ void CUnitServer::TakeDamage(CUnit *pAttacker, BOOL bAreaSpell)
             if (IWorldConnector.IsLMP())
                 GetUnit()->SetFlag(UNIT_LOOT_LOCKED);
         }
+        if (!wasDead)
+            TrackGenocidePlayerKill(*pWS, *lpUnit, pAttacker);
         return;
     }
     UseArmorSpells(false);
@@ -4969,11 +5252,13 @@ void CUnitServer::TakeDamage(CUnit *pAttacker, BOOL bAreaSpell)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // warning, non magic attack will be modified by this function, use with care
-bool CUnitServer::DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttacker)
+bool CUnitServer::DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttacker,float accuracyBonus)
 {
     ASSERT(fabs(pAttackPortion->fpToHit) < FLT_MAX);
     float fToHit = FLT_MAX;
     bool bMagicAttack = pAttackPortion->IsMagicAttack();
+    auto*mod=ModRuntime::Current();
+    if(mod){auto weapon=mod->AttackWeapon(*pAttackPortion);if(weapon&&(weapon->GetWeaponType()==RPGWST_HANDS3||weapon->GetWeaponType()==RPGWST_HANDS7))bMagicAttack=false;}
     if (!bMagicAttack)
     {
         // if unit is in aggressive mode then backstab is failed
@@ -4985,13 +5270,15 @@ bool CUnitServer::DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttack
         // Пенальти за избранный удар - 10, при ударе в голову - 25
         if (pAttackPortion->bCalledShot)
         {
-            if (pAttackPortion->hl == RPGHL_HEAD)
+            if(mod&&mod->CombatSetting("JMVAttacks"))fToHit=Max(0.f,fToHit+mod->HitLocationModifier(int(pAttackPortion->hl)));
+            else if (pAttackPortion->hl == RPGHL_HEAD)
                 fToHit = Max(0.0f, fToHit - 25.0f);
             else if (pAttackPortion->hl != RPGHL_BODY)
                 fToHit = Max(0.0f, fToHit - 10.0f);
         }
     }
     //
+    if(!bMagicAttack)fToHit+=Max(0.f,accuracyBonus);
     SAttackParams apDefender;
     GetAttackParams(apDefender);
     //
@@ -5002,6 +5289,12 @@ bool CUnitServer::DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttack
         fToHit = FLT_MAX;
     else
         fToHit = -FLT_MAX;
+    if(mod&&mod->CombatSetting("JMVAttacks")){
+        float avoidance=0;bool avoid=false,stun=false;
+        const auto&effects=lpUnit->GetSpellEffects();for(int i=0;i<effects.GetSize();++i){const auto&e=effects[i];if(e.nSpellID==SPELL_ID_STUN)stun=true;if(e.nSpellID==SPELL_ID_SHRINK){avoid=true;avoidance=Max(avoidance,e.fpPower);}}
+        float roll=float((rand()*100/RAND_MAX)%100);
+        if(avoid&&avoidance>roll&&pAttackPortion->fBackStabMultiplier<=1&&!stun){fToHit=-FLT_MAX;rpgUnitStats.bFlags|=RPGSTAT_SHOWHPFLY|RPGSTAT_PARRY;if(auto*sound=theWorld.GetSoundManager())sound->BeginFX("weapons\\miss.wav",1000,lpUnit->GetCP(),8,40,FALSE);}
+    }
     pAttackPortion->fpToHit = fToHit; // store new 'to-hit' value in the attack portion
     return fToHit > 0;
 }
@@ -5011,6 +5304,8 @@ BOOL CUnitServer::ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit
                                        CUnit *pExpDest)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
+    int skillImpact=ModRuntime::Current()?ModRuntime::Current()->TakeSkillImpact(*lpAttackPortion):0;
+    float beforeSkillHp=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent;
     BOOL bWasCorpse = GetUnit()->IsDead();
     bool bHadOwner = GetUnit()->GetOwner() != 0;
     //
@@ -5075,6 +5370,18 @@ BOOL CUnitServer::ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit
     //
     if (lpAttackPortion->fBackStabMultiplier > 1)
         apDefender.nDefense = 0;
+    if (CModPackage *mod = ModRuntime::Current())
+        if (!mod->CombatSetting("JMVBackstabDefenderEquipment"))
+        {
+            const CItemWeapon *weapon = lpUnit->GetCurrentQWeapon();
+            if (weapon)
+            {
+                const ERPGWeaponTypes type = weapon->GetWeaponType();
+                if ((type >= RPGWST_HANDS1 && type <= RPGWST_HANDS7) ||
+                    type == RPGWST_BOW || type == RPGWST_CROSSBOW)
+                    lpAttackPortion->fBackStabMultiplier = 1.0f;
+            }
+        }
     if (lpAttackPortion->fpToHit >= apDefender.nDefense)
     {
         rpgUnitStats.bFlags |= RPGSTAT_SHOWHPFLY;
@@ -5082,8 +5389,11 @@ BOOL CUnitServer::ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit
         //
         UseArmorSpells(true);
         CItemWeapon *pAttackerWeapon = pAttacker != 0 ? pAttacker->GetCurrentQWeapon() : 0;
-        if (rpgUnitStats.ProcessAttackPortion(lpUnit, GetMapObjectServer()->GetRPGStats(),
-                                              lpAttackPortion, pAttackerWeapon))
+        auto* mod=ModRuntime::Current();
+        BOOL damageApplied;
+        if(mod&&mod->CombatSetting("JMVAttacks")){auto defense=mod->IncomingAttack(rpgUnitStats,*lpUnit,pAttacker,*lpAttackPortion,random.Get(100));auto weapon=mod->AttackWeapon(*lpAttackPortion);if(weapon)pAttackerWeapon=weapon.get();defense.critical=mod->ConsumeCritical(*lpAttackPortion);damageApplied=rpgUnitStats.ProcessModAttackPortion(lpUnit,GetMapObjectServer()->GetRPGStats(),lpAttackPortion,pAttackerWeapon,pAttacker,defense);}
+        else damageApplied=rpgUnitStats.ProcessAttackPortion(lpUnit,GetMapObjectServer()->GetRPGStats(),lpAttackPortion,pAttackerWeapon);
+        if (damageApplied)
         {
             if (pAttacker && !lpAttackPortion->IsMagicAttack())
             {
@@ -5103,12 +5413,21 @@ BOOL CUnitServer::ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit
             if (!bWasCorpse)
             {
                 TakeDamage(pAttacker, lpAttackPortion->bAreaEffect);
+                if(skillImpact==ModSkills::ImpactCripple&&!lpUnit->IsDead()&&mod)mod->ApplyCripple(*lpUnit);
+                if(skillImpact==ModSkills::ImpactPowerHit&&pAttacker)PowerHitFeedback(pAttacker,beforeSkillHp);
+                if(pAttacker&&beforeSkillHp>GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent&&
+                   (skillImpact==ModSkills::ImpactCripple||skillImpact==ModSkills::ImpactPreciseHit)){
+                    const char* resource=skillImpact==ModSkills::ImpactCripple?"skills\\cripplinghit\\1.wav":"skills\\precisehit\\1.wav";
+                    if(auto*sound=theWorld.GetSoundManager())sound->BeginFX(resource,8000,lpUnit->GetCP(),5,25,FALSE);
+                }
                 // if unit was killed pExpDest will get exp for that
                 // killing units with owner does not give you exp
                 if (!bWasCorpse && GetUnit()->IsDead() && pExpDest && pExpDest->GetOwner() &&
                     !bHadOwner)
                 {
-                    if (IWorldConnector.IsLMP())
+                    if(mod)
+                        pWS->GainExperience(pExpDest->GetOwner(),ModSpells::KillExperience(GetUnit()->GetPrototype()->fExp,mod->CombatSetting("JMVExpMult")));
+                    else if (IWorldConnector.IsLMP())
                         pWS->GainExperience(0, GetUnit()->GetPrototype()->fExp);
                     else
                         pWS->GainExperience(pExpDest->GetOwner(), GetUnit()->GetPrototype()->fExp);
@@ -5286,6 +5605,15 @@ void CUnitServer::CmdCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun)
 
 void CUnitServer::CmdCast(int nQSpellNum, CMapObject *pTarget, bool bRun)
 {
+    if(!pTarget)return;
+    auto*mod=ModRuntime::Current();CUnit*target=pTarget->WhoAmI()==HPC_UNIT?static_cast<CUnit*>(pTarget):nullptr;
+    CSpell*tacticalSpell=target&&ModTactical::Enabled(lpUnit)?ModTactical::Spell(lpUnit,nQSpellNum):nullptr;ModSkills::Config active;
+    bool track=tacticalSpell&&!mod->SkillConfig(tacticalSpell,active);
+    if(track&&!lpUnit->IsHero()&&!lpUnit->GetOwner()){
+        if(ModTactical::KeepCommand(this,curCommand)||ModTactical::KeepCommand(this,nextCommand))return;
+        if(ModTactical::ObsoleteHeal(this,tacticalSpell,target))return;
+    }
+    bool had=track&&ModTactical::HasCommand(this,nQSpellNum,target);
     CPlot3D ptCastTo = pTarget->GetTargetCP();
     if (IsPotion(nQSpellNum))
     {
@@ -5308,6 +5636,7 @@ void CUnitServer::CmdCast(int nQSpellNum, CMapObject *pTarget, bool bRun)
     DWORD dwPositiveAck = IsCastPossible(nextCommand) ? ACK_HERO_ACK_CAST : ACK_NOTHING;
     if (!FindAttackPath(nextCommand, dwPositiveAck))
         nextCommand.Clear();
+    if(track&&!had&&ModTactical::HasCommand(this,nQSpellNum,target))ModTactical::Record(lpUnit,tacticalSpell,nQSpellNum,target);
 }
 
 void CUnitServer::CmdWait()
@@ -5445,6 +5774,7 @@ void CUnitServer::InterruptCommand()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::GetAttackParams(SAttackParams &params) const
 {
+    if(auto*mod=ModRuntime::Current()){mod->AttackParams(rpgUnitStats,*lpUnit,params,float(random.Get(100)));return;}
     bool bHero = IsIDofPersonage(lpUnit->GetID());
     CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
     int i;
@@ -5512,6 +5842,7 @@ float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
     SAttackParams apAttacker, apDefender;
     pAttacker->GetAttackParams(apAttacker);
     GetAttackParams(apDefender);
+    bool jmv=ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVAttacks");
     float fWeightBonus = apAttacker.fWeaponWeight / (RPG_CONST_Y * apDefender.fWeaponWeight);
     float fDistanceModifier = fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f /
                               (RPG_CONST_Z * lpUnit->GetAttackDistance() * 2.0f);
@@ -5520,14 +5851,27 @@ float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
         fToHitRandom = 2.0f * random.Get(MINT(apAttacker.fToHitRandom)) -
                        (apAttacker.fToHitRandom + 1);
 
+    if(!jmv)if(auto*mod=ModRuntime::Current()){if(mod->CombatSetting("DistanceModifier"))fDistanceModifier=0;if(mod->CombatSetting("WeightBonus"))fWeightBonus=0;}
     float fToHit = static_cast<float>(apAttacker.nAttack) + fToHitRandom - fDistanceModifier;
-    if (!bBackstab)
+    if (!jmv&&!bBackstab)
         fToHit += fWeightBonus;
 
     return Max(0.0f, fToHit);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
+SL0AnimationSeq *CUnitServer::GetExtendedAnimationSequence(unsigned kind)
+{
+    switch (kind)
+    {
+    case 1: return &level0Animation;
+    case 2: return &level1Command.attackAnimation;
+    case 3: return &sufferAnimationMem;
+    case 4: return &animMoveCache.anim;
+    case 5: return &animIdleCache.anim;
+    default: return nullptr;
+    }
+}
 // !!! SAVE/LOAD code
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Load(CSave &file)
@@ -5667,3 +6011,107 @@ bool CUnitServer::HaveHighShapes() const
             (lpUnit->lpArmors[RPGAST_LEGGINGS] != 0));
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+bool CUnitServer::CanRequestWeaponSkill(int slot,CMapObject*target){
+ auto*mod=ModRuntime::Current();auto*spell=slot>=0&&slot<int(lpUnit->GetSpellSlotCount())?GetSpell(slot):nullptr;ModSkills::Config config;
+ return mod&&mod->TargetSkill(spell)&&mod->SkillConfig(spell,config)&&target&&target!=lpUnit&&target->WhoAmI()==HPC_UNIT&&!target->IsDead()&&spell->IsValidTarget(lpUnit,static_cast<CUnit*>(target))&&mod->SkillReady(*lpUnit,spell,config,true)&&GetMapObjectServer()&&config.Cost(spell->GetManaCost())<=GetMapObjectServer()->GetRPGStats()->ssMP.fpCurrent;
+}
+bool CUnitServer::TagWeaponSkill(int slot,CMapObject*target){
+ if(slot<0||slot>=int(lpUnit->GetSpellSlotCount())||nextCommand.cmd!=UC_ATTACK||nextCommand.pTarget!=target)return false;
+ nextCommand.dwParam=ModSkills::CommandTag|DWORD(slot);return true;
+}
+int CUnitServer::PrepareWeaponSkill(){
+ if(curCommand.cmd!=UC_ATTACK)return 0;int slot=ModSkills::Slot(curCommand.dwParam);if(slot<0)return 0;
+ auto*mod=ModRuntime::Current();if(!CanRequestWeaponSkill(slot,curCommand.pTarget)){InformFailure(ACK_HERO_REFUSE_CANT_CAST);return -1;}
+ CSpell*spell=GetSpell(slot);ModSkills::Config config;if(!mod->SkillConfig(spell,config))return -1;
+ auto weapon=mod->AttackWeapon(level1AP);auto*used=weapon?weapon.get():lpUnit->GetCurrentQWeapon();if(!used||!config.Weapon(used->GetWeaponType()))return -1;
+ auto*target=dynamic_cast<CUnitServer*>(static_cast<CUnit*>(curCommand.pTarget)->GetUnitSpecific());if(!target)return -1;
+ bool cripple=!_stricmp(spell->GetPrototype()->szCodeName,"cripplinghit");
+ if(cripple&&!mod->CanCripple(*target->GetUnit()))return -1;
+ if(fabs(level1AP.fpToHit)<FLT_MAX)target->DetermineHit(&level1AP,lpUnit,config.accuracyBonus);
+ if(config.scaleDamageWithMelee)level1AP.fpDamage*=config.damageMultiplier;
+ if(cripple)mod->MarkSkillImpact(level1AP,ModSkills::ImpactCripple);
+ if(!_stricmp(spell->GetPrototype()->szCodeName,"precisehit"))mod->MarkSkillImpact(level1AP,ModSkills::ImpactPreciseHit);
+ if((!_stricmp(spell->GetPrototype()->szCodeName,"powerhit")||!_stricmp(spell->GetPrototype()->szCodeName,"test"))&&(used->GetWeaponType()==4||used->GetWeaponType()==14)){mod->MarkSkillImpact(level1AP,ModSkills::ImpactPowerHit);auto*visible=theWorld.GetUnit(lpUnit->GetID());if(visible)if(auto*glow=visible->FindPowerHitGlow(level1Command.nHitTime))glow->MarkPowerHitDelivered();}
+ mod->StartSkillCooldown(*lpUnit,spell,config);curCommand.dwParam=0;
+ GetMapObjectServer()->ChangeCurrentMP(-config.Cost(spell->GetManaCost()));return config.projectileCount;
+}
+
+bool CUnitServer::CanRequestPointSkill(int slot,const CPlot3D& point){
+ auto*mod=ModRuntime::Current();auto*spell=slot>=0&&slot<int(lpUnit->GetSpellSlotCount())?GetSpell(slot):nullptr;ModSkills::Config config;
+ if(!mod||!mod->PointSkill(spell)||!mod->SkillConfig(spell,config)||!mod->SkillReady(*lpUnit,spell,config,true)||!GetMapObjectServer())return false;
+ if(!(lpUnit->GetOwner()!=nullptr||(!lpUnit->IsHero()&&config.allowNpc)))return false;
+ return config.areaRadius>0&&spell->GetRange()>0&&distanceXY2(lpUnit->GetCP(),point)<=sqr(spell->GetRange())&&config.Cost(spell->GetManaCost())<=GetMapObjectServer()->GetRPGStats()->ssMP.fpCurrent;
+}
+bool CUnitServer::TagPointSkill(int slot){
+ if(nextCommand.cmd!=UC_CASTPOINT||nextCommand.nQSpellNum!=slot||slot<0||slot>=16)return false;
+ nextCommand.dwParam=ModSkills::CommandTag|DWORD(slot);return true;
+}
+int CUnitServer::PrepareExplosiveShot(){
+ if(curCommand.cmd!=UC_CASTPOINT)return 0;int slot=ModSkills::Slot(curCommand.dwParam);if(slot<0)return 0;
+ if(!CanRequestPointSkill(slot,curCommand.ptTarget)){InformFailure(ACK_HERO_REFUSE_CANT_CAST);return -1;}
+ auto*mod=ModRuntime::Current();auto*spell=GetSpell(slot);ModSkills::Config config;if(!mod->SkillConfig(spell,config))return -1;
+ SRPGAttackPortion ap;CreateCurrentWeaponAttackPortion(ap,FALSE,RPGHL_ALL,false,false);
+ if(config.scaleDamageWithMelee)ap.fpDamage*=config.damageMultiplier;
+ ModSkills::ExplosiveDamage(ap);mod->ForgetAttack(ap);
+ auto*world=static_cast<CWorldServer*>(GetWorld());
+ auto*arrow=static_cast<CEffectArrowFigure*>(world->GetEffectManager()->CreateData(ETypeIDs(HPC_EFFECTARROWFIGURE)));if(!arrow)return -1;
+ CPlot3D start=lpUnit->GetUnitHeadPosition();CPlot3D point=curCommand.ptTarget;point.z=world->GetSurfaceValue(point.x,point.y)+1;
+ arrow->SetCP(start);arrow->SetTarget(-2);arrow->nAttackerID=lpUnit->GetID();arrow->bNewArrow=true;arrow->attackPortion=ap;
+ arrow->SetExplosivePoint(point,config.areaRadius,world->GetSegmentTimeCounter());world->AddEffect(arrow);
+ mod->StartSkillCooldown(*lpUnit,spell,config);curCommand.dwParam=0;GetMapObjectServer()->ChangeCurrentMP(-config.Cost(spell->GetManaCost()));return 1;
+}
+
+bool CUnitServer::PowerHitTrailActive(int hit,bool delivered,int weaponToken){
+ if(lpUnit->IsDead()||lpUnit->CheckFlag(UNIT_STUN)||bL1PlayingSuffer)return false;
+ auto*weapon=lpUnit->GetCurrentQWeapon();if(!weapon||(weapon->GetWeaponType()!=4&&weapon->GetWeaponType()!=14))return false;
+ if(delivered)return (L1IsFree()||L1IsIdle()||(L1IsAttacking()&&level1Command.nHitTime==hit))&&reinterpret_cast<int>(weapon)==weaponToken;
+ if(!L1IsAttacking()||level1Command.nHitTime!=hit)return false;
+ int slot=ModSkills::Slot(curCommand.dwParam);if(slot<0||curCommand.cmd!=UC_ATTACK)return false;
+ auto*spell=GetSpell(slot);if(!spell||!spell->GetPrototype())return false;
+ const char*name=spell->GetPrototype()->szCodeName;
+ return (!_stricmp(name,"powerhit")||!_stricmp(name,"test"))&&CanRequestWeaponSkill(slot,curCommand.pTarget);
+}
+void CUnitServer::StartPowerHitGlow(int now){
+ int hit=level1Command.nHitTime;if(now>=hit-1||hit-now>120||!PowerHitTrailActive(hit,false,0))return;
+ auto*carrier=theWorld.GetUnit(lpUnit->GetID());auto*manager=static_cast<CParticleManager*>(theWorld.GetParticleManager());
+ if(!carrier||!manager||carrier->FindPowerHitGlow(hit))return;
+ auto*particle=manager->CreateParticleSystem(PTID_LIGHTNINGBLAST);if(!particle)return;
+ particle->ConfigurePowerHit(carrier,CPlot3D(0,0,0),CPlot3D(0,0,0),hit);
+ particle->SetPowerHitWindup(hit-now,reinterpret_cast<int>(lpUnit->GetCurrentQWeapon()));
+}
+void CUnitServer::PowerHitFeedback(CUnit*attacker,float beforeHp){
+ if(beforeHp<=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent)return;
+ CPlot3D direction=lpUnit->GetCP()-attacker->GetCP();direction.z=0;float length=sqrtf(direction.x*direction.x+direction.y*direction.y);
+ if(length>.001f)direction*=1/length;else direction=CPlot3D(1,0,0);
+ auto*visible=theWorld.GetUnit(lpUnit->GetID());CPlot3D point=visible?visible->GetCP():lpUnit->GetCP();
+ float radius=(std::max)(.2f,(std::min)(.8f,lpUnit->bv.fpRadius));point-=direction*(radius*.6f);point.z+=radius;
+ if(auto*manager=static_cast<CParticleManager*>(theWorld.GetParticleManager()))if(auto*p=manager->CreateParticleSystem(PTID_SMOKE))p->ConfigurePowerHit(nullptr,point,direction,-1);
+ if(auto*sound=theWorld.GetSoundManager())sound->BeginFX("skills\\powerhit\\1.wav",8000,point,5,25,FALSE);
+ if(lpUnit->IsDead()||GetMapObjectServer()->IsDead()||lpUnit->CheckFlag(UNIT_STUN)||bL1PlayingSuffer||eL1State==UL1_SPECIAL||eL1State==UL1_SPECIAL_CYCLE||nL1SufferDirection<0)return;
+ int directionCode=nL1SufferDirection;SL0AnimationSeq animation;animation.Clear();GetSufferAnimation(animation,directionCode,false,false);
+ const SADEntry*best=nullptr;int score=-1;DWORD pose=GetPoseAnimationMask(currentPose),weapons=GetAnimationWeaponMask();
+ if(animation.IsEmpty())for(unsigned i=0;i<255;++i){auto*entry=lpUnit->GetAnimationEntryByIndex(BYTE(i));if(!entry)break;
+  if(!entry->pszAnimationName[0]||entry->dwEntryIndex!=i||entry->GetAction()!=ADB_ACTION_SUFFER||entry->GetStage()!=ADB_STAGE_UNIQUE||!entry->dwAnimationLength||(entry->dwFlags&ADB_MODIFIER_ACTION_STAY)!=ADB_MODIFIER_ACTION_STAY)continue;
+  DWORD state=entry->GetState();if(state!=pose&&!((pose==ADB_STATE_NEUTRAL||pose==ADB_STATE_ATTACK)&&(state==ADB_STATE_NEUTRAL||state==ADB_STATE_ATTACK)))continue;
+  int value=(state==pose?4:0)+((entry->GetWeapons()&weapons)==weapons?2:0)+((entry->dwFlags&ADB_MODIFIER_DIRECTION2_MASK)==(DWORD(directionCode)&ADB_MODIFIER_DIRECTION2_MASK)?1:0);
+  if(value>score&&GetAnimationLength(BYTE(i))>0){best=entry;score=value;}
+ }
+ if(animation.IsEmpty()&&!best)return;
+ bool active=L1IsAttacking(),waiting=L1IsIdle()&&curCommand.cmd==UC_ATTACK;
+ if(active||waiting){if(active)L1CancelAttack(true);LcCancelCommand();L1StartIdle();}
+ nL1SufferDirection=directionCode;powerHitSuffer=best;L1StartSuffer();powerHitSuffer=nullptr;
+}
+
+bool CUnitServer::CanRequestAISkill(int slot,CUnit*target){
+ auto*mod=ModRuntime::Current();auto*spell=slot>=0&&slot<int(lpUnit->GetSpellSlotCount())?GetSpell(slot):nullptr;ModSkills::Config config;
+ if(!mod||!mod->SkillConfig(spell,config)||!config.allowNpc||(lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit))||!target||target==lpUnit||target->IsDead()||!spell->IsValidTarget(lpUnit,target)||!mod->SkillReady(*lpUnit,spell,config,true)||!GetMapObjectServer())return false;
+ return config.Cost(spell->GetManaCost())<=GetMapObjectServer()->GetRPGStats()->ssMP.fpCurrent+.0001f;
+}
+bool CUnitServer::HasAISkillCommand(int slot,CUnit*target){for(auto*cmd:{&curCommand,&nextCommand})if(ModSkills::Slot(cmd->dwParam)==slot&&((cmd->cmd==UC_ATTACK&&cmd->pTarget==target)||cmd->cmd==UC_CASTPOINT))return true;return false;}
+bool CUnitServer::TagAISkill(int slot,CUnit*target){
+ auto*mod=ModRuntime::Current();if(!mod||slot<0||slot>=int(lpUnit->GetSpellSlotCount()))return false;
+ for(auto*cmd:{&nextCommand,&curCommand})if(cmd->cmd==UC_ATTACK&&cmd->pTarget==target){cmd->dwParam=ModSkills::CommandTag|DWORD(slot);
+  if(mod->PointSkill(GetSpell(slot))){cmd->cmd=UC_CASTPOINT;cmd->nQSpellNum=slot;cmd->ptTarget=target->GetCP();cmd->pTarget=nullptr;cmd->bUsePoint=false;}return true;
+ }return false;
+}

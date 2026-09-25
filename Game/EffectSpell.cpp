@@ -1,4 +1,8 @@
 #include "StdAfx.h"
+#include "ModSpellRules.h"
+#include "ModSpellTextures.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "EffectSpell.h"
@@ -44,6 +48,8 @@ CEffectSpell::~CEffectSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CEffectSpell::Segment()
 {
+    auto*prototype=spell.GetPrototype();
+    SpellTextures::Scope textureScope(spell.GetSubtypeID()>>16,prototype?prototype->GetCodeName():nullptr);
     ASSERT(pWS);
     if (!pWS)
         return FALSE;
@@ -91,6 +97,7 @@ void CEffectSpell::Load(CSave &file)
 
     int nKind = spell.GetSubtypeID() >> 16;
     AddRemoveDangerArea(nKind, TRUE);
+    if(SpellTextures::HasBindings()&&!pEffect.IsEmpty()){auto*prototype=spell.GetPrototype();if(prototype)SpellTextures::RecordOwner(pWS->GetEffectManager(),pEffect.GetPtr(),prototype->GetCodeName());}
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::Store(CSave &file)
@@ -246,6 +253,8 @@ void CEffectSpell::InformFailure(DWORD dwAction)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::AddRemoveDangerArea(int nKind, BOOL bAdd)
 {
+    if(ModRuntime::Current()){nKind=ModSpells::ElementalBase(nKind);if(nKind==SPELL_ID_TEST_3)nKind=SPELL_ID_FIREWALL;}
+    if((bAdd!=FALSE)==bDangerIsMapped)return;
     CPlot3D ptDir;
     if (!pEffect)
         return;
@@ -313,7 +322,7 @@ CEffectParticle *CEffectSpell::CreateParticles(BOOL bKeepPointer, ETypeIDs tid,
                                                const CPlot3D &ptSpeed, CMapObject *pAttach)
 {
     CEffectParticle *pParticle;
-    if (tid == PTID_FIREWALL || tid == PTID_LINK)
+    if (tid == PTID_FIREWALL || tid == PTID_LINK || tid == PTID_FIREWALLDARK || tid == PTID_FIREWALLLIGHT)
         pParticle = (CEffectParticle *)((CEffectManager *)pWS->GetEffectManager())
                         ->CreateData(ETypeIDs(HPC_EFFECTWALL));
     else
@@ -443,8 +452,10 @@ void CEffectSpell::CreateLight(const CPlot3D &ptWhere, const CPlot3D &color, flo
 /////////////////////////////////////////////////////////////////////////////////////
 // !!! Spell lifetime cycle
 /////////////////////////////////////////////////////////////////////////////////////
+#include "ModLifeSpell.inl"
 void CEffectSpell::StartSpell(int nKind)
 {
+    if(ModLifeSpellStart(nKind)||ExtendedStart(nKind))return;
     float fpDist;
     CPlot3D ptSpeed, ptTarg, ptSrc;
     ResetFlag(DW_SPELL_HIDE_CASTER);
@@ -695,7 +706,8 @@ void CEffectSpell::StartSpell(int nKind)
         CreateSound(FALSE, "magic\\Teleport\\start.wav", ptTarg, CPlot3D(0, 0, 0));
         CreateLight(ptTarg, GetLightColor(), GetLightRadius(),
                     CPlot3D(0, 0, 0)); // GetLightSpeed() );
-        nTimeLeft = 30 + Max(1, GetDuration());
+        nTimeLeft = (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("FastTeleport") ? 1 : 30)
+                    + Max(1, GetDuration());
         castPhase = CP_ACTION;
         break;
     case SPELL_ID_HEALING:
@@ -772,6 +784,7 @@ void CEffectSpell::StartSpell(int nKind)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::DeliverSpell(int nKind)
 {
+    if(ExtendedDeliver(nKind))return;
     CPlot3D ptExplosion;
     switch (nKind)
     {
@@ -861,6 +874,7 @@ void CEffectSpell::DeliverSpell(int nKind)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::ActionSpell(int nKind)
 {
+    if(ExtendedAction(nKind))return;
     POSITION pos;
     CUnitList unitList;
     switch (nKind)
@@ -1182,6 +1196,7 @@ void CEffectSpell::InflictTargetedDamage()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CEffectSpell::CreateAttackPortion(SRPGAttackPortion &ap)
 {
+    if(ModRuntime::Current()&&ModSpells::ExtendedElementalPortion(spell.GetSubtypeID()>>16,GetPower(),GetDuration(),ap))return TRUE;
     ap.Clear();
     ap.hl = RPGHL_ALL;
     ap.fpToHit = FLT_MAX;
@@ -1246,3 +1261,5 @@ BOOL CEffectSpell::CreateAttackPortion(SRPGAttackPortion &ap)
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+#include "ModExtendedSpell.inl"

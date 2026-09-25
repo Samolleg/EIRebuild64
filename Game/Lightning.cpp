@@ -595,6 +595,14 @@ void CLightning::CreateLightning(const CPlot3D &ptNSrc, const CPlot3D &ptNDst, f
         pTextureBall.SetDesc(TTID_SPELL_MAIN, "SmtgLight"); // FireSmoke" );
         pTexture.SetDesc(TTID_SPELL_MAIN, "Lightning");     // FireSmoke" );
         break;
+    case 2:
+        pTextureBall.SetDesc(TTID_SPELL_MAIN,"SmtgLight2");
+        pTexture.SetDesc(TTID_SPELL_MAIN,"Lightning2");
+        break;
+    case 3:
+        pTextureBall.SetDesc(TTID_SPELL_MAIN,"SmtgLight3");
+        pTexture.SetDesc(TTID_SPELL_MAIN,"Lightning3");
+        break;
     default:
         pTextureBall.SetDesc(TTID_SPELL_MAIN, "DemonLight"); // FireSmoke" );
         pTexture.SetDesc(TTID_SPELL_MAIN, "DemonLightning"); // FireSmoke" );

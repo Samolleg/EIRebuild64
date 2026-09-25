@@ -6,6 +6,7 @@ struct ModAudioConfig {
  bool JMVSpeechMusicDucking=false,JMVFixStepSoundVariantGenerator=false,JMVSuppressEmptyStartSfx=false;
  bool JMVMiniaudioModalSpeechPausePrototype=false,JMVMiniaudioGamePauseSpeechPrototype=false;
  bool JMVMiniaudioBinauralPrototype=true;
+ bool JMVMiniaudioBinkOutputPrototype=false;
  bool JMVMiniaudioBinkPreciseWaitPrototype=false;
  bool JMVMiniaudioBinkReadyBackpressurePrototype=false;
  bool JMVMiniaudioFullBackendPrototype=true;

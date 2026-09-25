@@ -478,6 +478,14 @@ bool CAIObjects::RemoveObject(CMapObject *pObject)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIObjects::MoveObject(CMapObject *pObject, const CPlot3D &newPlot)
 {
+    // Reject coordinates outside the AI map before integer cell conversion.
+    if (!(newPlot.x >= 0.0f && newPlot.y >= 0.0f))
+    {
+        ReportWarning("Failed to move object %d to (%.1f, %.1f, %.1f)",
+                      pObject->GetID(), newPlot.x, newPlot.y, newPlot.z);
+        return false;
+    }
+
     bool bRv, bTemp;
 
     // 1) retrieve object's coordinates
@@ -490,13 +498,13 @@ bool CAIObjects::MoveObject(CMapObject *pObject, const CPlot3D &newPlot)
     // 2) calculate old objects map coordinates
     int nObjectMapX = nObjectX / AI_N_OM_CELL_SIZE, nObjectMapY = nObjectY / AI_N_OM_CELL_SIZE;
     ASSERT(nObjectMapX < nObjectsMapSizeX && nObjectMapY < nObjectsMapSizeY);
-    if (nObjectMapX >= nObjectsMapSizeX || nObjectMapY >= nObjectsMapSizeY)
+    if (nObjectMapX < 0 || nObjectMapY < 0 || nObjectMapX >= nObjectsMapSizeX || nObjectMapY >= nObjectsMapSizeY)
         return false;
     // 2.5) calculate new object map coordinates
     int nObjectMapNewX = nNewObjectX / AI_N_OM_CELL_SIZE,
         nObjectMapNewY = nNewObjectY / AI_N_OM_CELL_SIZE;
     //	ASSERT( nObjectMapNewX < nObjectsMapSizeX && nObjectMapNewY < nObjectsMapSizeY );
-    if (nObjectMapNewX >= nObjectsMapSizeX || nObjectMapNewY >= nObjectsMapSizeY)
+    if (nObjectMapNewX < 0 || nObjectMapNewY < 0 || nObjectMapNewX >= nObjectsMapSizeX || nObjectMapNewY >= nObjectsMapSizeY)
         return false;
 
     bool bChangeCell = (nObjectMapNewX != nObjectMapX || nObjectMapNewY != nObjectMapY) ? true

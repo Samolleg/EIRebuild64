@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "ModSpellTextures.h"
 #include "WorldClient.h"
 #include "TextureManager.h"
 
@@ -25,6 +26,8 @@ void CTextureDescriptor::SetName(LPCSTR pszName)
 // set name to texture and create 'tid' texture object if need
 void CTextureDescriptor::SetDesc(ETypeIDs tid, LPCSTR pszName)
 {
+    std::string replacement=tid==TTID_SPELL_MAIN?SpellTextures::Resolve(pszName):std::string();
+    if(!replacement.empty())pszName=replacement.c_str();
     if (pTexture)
         pTexture = 0;
 

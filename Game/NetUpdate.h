@@ -61,6 +61,7 @@ public:
     void FinishUpdate();
     void Write(const void *pData, int nSize);
     void Read(void *pData, int nSize);
+    bool CanRead(int nSize) const;
     void WriteDirect(const void *pData, int nSize);
     void ReadDirect(void *pData, int nSize);
     void WriteDirect(CMemorySave &packet);

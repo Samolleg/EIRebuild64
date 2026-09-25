@@ -113,12 +113,17 @@ private:
 
 public:
     std::vector<SBriefingUnit> parts;
+    bool briefingWeaponsHidden = false;
+    std::vector<int> briefingWeaponUnitIds;
     EKickMode eKickMode;
 
 private:
     void PlayBriefing(bool bForce = true, bool bNeedMemorizePos = true);
     void BeginBriefing();
     void EndBriefing();
+    void HideBriefingUnitWeapon(CUnit *unit);
+    void HideCurrentBriefingWeapons();
+    void RestoreBriefingWeapons();
     void FillBriefingsList(int nUnitID);
     CString GetBriefingLocalName(LPCTSTR pszName);
     void InitTopicMode(CUnit *pUnit);

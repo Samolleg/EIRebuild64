@@ -20,7 +20,8 @@ class CItemWeapon;
 const DWORD QI_MAX_WEAPONS = 4; // max number of quick weapon slots
 const DWORD QI_MAX_ITEMS = 4;   // max numner of quick item slots
 const DWORD QI_LEGACY_SPELLS = 8; // spell slots stored by save versions up to 116
-const DWORD QI_MAX_SPELLS = 16;  // max number of quick spell slots
+const DWORD QI_MAX_SPELLS = 16;  // physical storage/wire layout since save 117
+const DWORD QI_NPC_SPELLS = 8;   // NPC logical slots; hero UI exposes all 16
 
 const DWORD UNIT_RECALCENEMY = MAKE_FLAG(MAPOBJ_LAST_BIT, 0);
 const DWORD UNIT_ALREADY_HOOVER = MAKE_FLAG(MAPOBJ_LAST_BIT, 1);
@@ -40,6 +41,7 @@ const DWORD UNIT_OLDROTATE = MAKE_FLAG(MAPOBJ_LAST_BIT,
 const DWORD UNIT_FEEBLED = MAKE_FLAG(MAPOBJ_LAST_BIT, 9); // cast is forbidden (server)
 const DWORD UNIT_LOOT_LOCKED = MAKE_FLAG(MAPOBJ_LAST_BIT, 10);
 const DWORD UNIT_HELMET_REMOVE = MAKE_FLAG(MAPOBJ_LAST_BIT, 11);
+const DWORD UNIT_ALREADY_MHOOVER = 0x80000000u; // installed addon murder/steal loot marker
 
 const DWORD UNIT_LAST_BIT = MAKE_LAST_BIT(MAPOBJ_LAST_BIT, 10);
 /////////////////////////////////////////////////////////////////////////////////////
@@ -185,6 +187,7 @@ class CUnit : public CMapObject
     friend class CUnitSpecific;
     friend class CUnitClientSpecific;
     friend class CUnitServer;
+    friend struct ModNpcMigrationAccess;
 
 protected:
     // just a name :)
@@ -201,6 +204,8 @@ protected:
     // Lowest level of commands execution - animations and movement description
     BYTE nStartAnimation,
         nCycleAnimation;  // startAnimation should not by cycle, 0xff - no animation
+    DWORD fullStartAnimation, fullCycleAnimation; // companion IDs; not serialized here
+    bool bExtendedAnimationId;
     BYTE nAnimationSound; // set of sounds used for the animation (0=default)
     int nAnimationStartSegment;
     EUnitAnimationSpeed animationSpeed;   // determines speed of animation
@@ -262,6 +267,13 @@ public:
     //  animation & route functions
     void LowNewRoute();
     void LowStartAnimation(BYTE start, BYTE cycle, int nStartSegment, BYTE nSoundSet);
+    void LowStartAnimationExtended(DWORD start, DWORD cycle, int nStartSegment, BYTE nSoundSet);
+    void RestoreExtendedAnimationIds(DWORD start, DWORD cycle);
+    DWORD GetStartAnimationId() const { return fullStartAnimation; }
+    DWORD GetCycleAnimationId() const { return fullCycleAnimation; }
+    bool HasExtendedAnimationId() const { return bExtendedAnimationId; }
+    BYTE GetAnimationStartByte() const { return nStartAnimation; }
+    BYTE GetAnimationCycleByte() const { return nCycleAnimation; }
     void LowAnimationSpeed(EUnitAnimationSpeed speed);
     void LowLocomotionSpeed(EUnitLocomotionSpeed speed);
     void LowSetPoses(EUnitPose cur, EUnitPose wish);
@@ -338,12 +350,15 @@ public:
                                // quest, quest have priority
     BOOL HasQuickSlot();
     void ShowHelmet(bool bShow);
+    void RefreshPartyVisualArmor();
     // spells
+    DWORD GetSpellSlotCount() const;
     int AddQSpell(CItemSpell *lpSpell);
     CItemSpell *RemoveQSpell(DWORD dwQSpellIndex);
     CItemSpell *GetQSpellItem(DWORD dwQSpellIndex);
     CSpell *GetQSpell(DWORD dwQSpellIndex);
     CPlot3D GetCastPointPosition();
+    CPlot3D GetWeaponCastPoint(const CItemWeapon*,bool left);
     // quest items
     void AddQuestItem(CItemQuest *pItem);
     int GetQuestItemsNum() const { return questItems.GetSize(); }
@@ -451,7 +466,7 @@ public:
     virtual void Store(CSave &file);
     // Animation entry
     const SADEntry *GetAnimation(DWORD dwAnimationFlags, bool bWeapon = true);
-    const SADEntry *GetAnimationByIndex(BYTE nIndex);
+    const SADEntry *GetAnimationByIndex(DWORD nIndex);
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnit"; };
     virtual EClassIDs WhoAmI() const { return HPC_UNIT; };

@@ -1702,7 +1702,10 @@ void CSoundManager::LoadStreamingMarkers(SStreamControl &sm)
 
 BOOL CSoundManager::SelectStreamingResource(LPCSTR pszResourceName, LPCSTR pszMarkersRegFileName)
 {
-    if(ModRuntime::Current())return MiniaudioOneShotSfx::SetStreamingResource(this,pszResourceName,pszMarkersRegFileName);
+    if(ModRuntime::Current()){
+        std::string markerPath=ModRuntime::ConfigPath(pszMarkersRegFileName);
+        return MiniaudioOneShotSfx::SetStreamingResource(this,pszResourceName,markerPath.c_str());
+    }
 #ifndef SM_SUPPORT_STREAMING
     return FALSE;
 #endif // SM_SUPPORT_STREAMING

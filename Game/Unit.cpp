@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Unit.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 
 #include "WinRegistry.h"
 #include "FigureManager.h"
@@ -27,6 +29,32 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PlayerServer.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #define _NOTIFY_FILE 0
+
+#pragma pack(push, 1)
+struct SAnimationIdPayload
+{
+    char magic[4];
+    BYTE version, flags;
+    WORD reserved;
+    DWORD start, cycle;
+};
+#pragma pack(pop)
+static_assert(sizeof(SAnimationIdPayload) == 16, "AIDX payload layout");
+
+static DWORD NormalizeAnimationId(DWORD id)
+{
+    return id == 0xff ? 0xffffffffu : id;
+}
+static bool HasWideAnimationId(DWORD start, DWORD cycle)
+{
+    return (start > 253 && start != 0xffffffffu) ||
+           (cycle > 253 && cycle != 0xffffffffu);
+}
+static BYTE EncodeAnimationId(DWORD id)
+{
+    return id == 0xff || id == 0xffffffffu ? 0xff :
+        (id > 253 ? 0xfe : static_cast<BYTE>(id));
+}
 
 /////////////////////////////////////////////////////////////////////////////////////
 void SAttackParams::ApplyDifficultyLevel(BOOL bHero)
@@ -99,6 +127,8 @@ void CUnit::Clear()
     lpOwner = 0;
     nStartAnimation = 0xff;
     nCycleAnimation = 0xff;
+    fullStartAnimation = fullCycleAnimation = 0xffffffffu;
+    bExtendedAnimationId = false;
     nAnimationSound = 0;
     nAnimationStartSegment = 0;
     animationSpeed = UAS_NORMAL_;
@@ -269,13 +299,33 @@ void CUnit::LowStartAnimation(BYTE start, BYTE cycle, int nStartSegment, BYTE nS
                     ShowAnimationName( GetAnimationByIndex( cycle ) );
             }
             */
-    nStartAnimation = start;
+    nStartAnimation = start == 0xfe ? 0xff : start;
     nCycleAnimation = cycle;
+    fullStartAnimation = NormalizeAnimationId(nStartAnimation);
+    fullCycleAnimation = NormalizeAnimationId(cycle);
+    bExtendedAnimationId = false;
     nAnimationSound = nSoundSet;
     nAnimationStartSegment = nStartSegment;
     SetUpdateMask(CMapObject::VLD_MASK_ANIM);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CUnit::RestoreExtendedAnimationIds(DWORD start, DWORD cycle)
+{
+    fullStartAnimation = NormalizeAnimationId(start);
+    fullCycleAnimation = NormalizeAnimationId(cycle);
+    bExtendedAnimationId = HasWideAnimationId(fullStartAnimation, fullCycleAnimation);
+}
+void CUnit::LowStartAnimationExtended(DWORD start, DWORD cycle, int segment, BYTE sound)
+{
+    start = NormalizeAnimationId(start);
+    cycle = NormalizeAnimationId(cycle);
+    LowStartAnimation(EncodeAnimationId(start), EncodeAnimationId(cycle), segment, sound);
+    if (HasWideAnimationId(start, cycle))
+    {
+        nStartAnimation = 0xfe; // AIDX packet marker, including cycle-only extensions.
+        RestoreExtendedAnimationIds(start, cycle);
+    }
+}
 // note - this function should be called before LowSegment() (or mess with Freeze() will arise)
 void CUnit::LowAnimationSpeed(EUnitAnimationSpeed speed)
 {
@@ -334,11 +384,33 @@ void CUnit::LoadDefaultClientStats(const char *pszTemplate)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::ShowHelmet(bool bShow)
 {
-    if (bShow)
-        ResetFlag(UNIT_HELMET_REMOVE);
-    else
-        SetFlag(UNIT_HELMET_REMOVE);
-    SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
+    CModPackage *mod = ModRuntime::Current();
+    auto apply = [mod, bShow](CUnit *unit) {
+        if (!unit)
+            return;
+        const bool show = bShow && !(mod && mod->HidePartyHelmets() && mod->IsLocalPartyUnit(*unit));
+        if (show)
+            unit->ResetFlag(UNIT_HELMET_REMOVE);
+        else
+            unit->SetFlag(UNIT_HELMET_REMOVE);
+        unit->SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
+    };
+    apply(this);
+    if (mod && mod->PartyVisualOptionsEnabled())
+    {
+        if (theWorld.GetMapObjectManager())
+        {
+            CUnit *client = theWorld.GetUnit(GetID());
+            if (client != this)
+                apply(client);
+        }
+        if (theWorldServer.GetMapObjectManager())
+        {
+            CUnit *server = theWorldServer.GetUnit(GetID());
+            if (server != this)
+                apply(server);
+        }
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::ConvertItemsIDs(SItemIDs &res)
@@ -358,6 +430,18 @@ void CUnit::ConvertItemsIDs(SItemIDs &res)
         else
             res.dwArmorsID[i] = -1;
     }
+    if (auto *mod = ModRuntime::Current())
+        mod->FilterPartyVisualArmor(*this, res.dwArmorsID);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CUnit::RefreshPartyVisualArmor()
+{
+    if (!lpUnitSpecific)
+        return;
+    SItemIDs visualItems;
+    ConvertItemsIDs(visualItems);
+    lpUnitSpecific->SetArmors(visualItems.dwArmorsID, RPG_NUM_ARMOR_TYPES);
+    lpUnitSpecific->NotifyItemsUpdated();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 struct SUnitFFlags
@@ -468,6 +552,17 @@ void CUnit::UpdateTo()
             pkt << nCycleAnimation;
             pkt << nAnimationStartSegment; // can be optimized to byte by storing difference
             pkt << nAnimationSound;
+            if (auto* mod = ModRuntime::Current())
+                if (mod->CombatSetting("AttackAnimSpeed"))
+                    pkt.Write(&fpAnimationCoeff, sizeof(fpAnimationCoeff));
+            if (nStartAnimation == 0xfe && bExtendedAnimationId)
+            {
+                SAnimationIdPayload payload = { { 'A', 'I', 'D', 'X' }, 1,
+                    static_cast<BYTE>((fullStartAnimation != 0xffffffffu ? 1 : 0) |
+                                      (fullCycleAnimation != 0xffffffffu ? 2 : 0)),
+                    0, fullStartAnimation, fullCycleAnimation };
+                pkt.Write(&payload, sizeof(payload));
+            }
             pkt.FinishUpdate();
         }
     }
@@ -696,6 +791,35 @@ BOOL CUnit::UpdateFrom(EUpdateType tip)
             pkt >> nCycleAnimation;
             pkt >> nAnimationStartSegment; // can be optimized to byte by storing difference
             pkt >> nAnimationSound;
+            if (auto* mod = ModRuntime::Current())
+                if (mod->CombatSetting("AttackAnimSpeed"))
+                    pkt.Read(&fpAnimationCoeff, sizeof(fpAnimationCoeff));
+            fullStartAnimation = NormalizeAnimationId(nStartAnimation);
+            fullCycleAnimation = NormalizeAnimationId(nCycleAnimation);
+            bExtendedAnimationId = false;
+            if (nStartAnimation == 0xfe)
+            {
+                SAnimationIdPayload payload = {};
+                if (pkt.CanRead(sizeof(payload)))
+                {
+                    pkt.Read(&payload, sizeof(payload));
+                    const BYTE flags = static_cast<BYTE>(
+                        (payload.start != 0xffffffffu ? 1 : 0) |
+                        (payload.cycle != 0xffffffffu ? 2 : 0));
+                    if (memcmp(payload.magic, "AIDX", 4) == 0 &&
+                        payload.version == 1 && payload.reserved == 0 &&
+                        payload.flags == flags &&
+                        HasWideAnimationId(payload.start, payload.cycle) &&
+                        (payload.start == 0xffffffffu || GetAnimationByIndex(payload.start)) &&
+                        (payload.cycle == 0xffffffffu || GetAnimationByIndex(payload.cycle)))
+                        RestoreExtendedAnimationIds(payload.start, payload.cycle);
+                }
+                if (!bExtendedAnimationId)
+                {
+                    nStartAnimation = nCycleAnimation = 0xff;
+                    fullStartAnimation = fullCycleAnimation = 0xffffffffu;
+                }
+            }
             if (animationSpeed == UAS_FROZEN)
                 nAnimationStartSegment--;
             lpUnitSpecific->NewAnimationWasReceived(GetWorldBase()->GetSegmentTimeCounter());
@@ -827,13 +951,16 @@ EUnitCastFailure CUnit::CheckIsCastPossible(DWORD dwQSpellIndex, CPlot3D &ptTarg
 {
     // when updating this code don`t forget to update CUnitServer::IsCastPossible
     CSpell *pSpell;
-    if (dwQSpellIndex >= QI_MAX_SPELLS)
+    if (dwQSpellIndex >= GetSpellSlotCount())
         return UCS_NOSPELL;
-    if (HasSpellEffect(SPELL_ID_FEEBLEMIND))
-        return UCS_FEEBLED;
     pSpell = GetQSpell(dwQSpellIndex);
     if (!pSpell)
         return UCS_NOSPELL;
+    if(auto*mod=ModRuntime::Current()){
+        ModSkills::Config config;if((mod->TargetSkill(pSpell)||mod->PointSkill(pSpell))&&mod->SkillConfig(pSpell,config))
+            return mod->SkillReady(*this,pSpell,config,false)&&config.Cost(pSpell->GetManaCost())<=GetMP()?UCS_OK:UCS_NOMANA;
+    }
+    if (HasSpellEffect(SPELL_ID_FEEBLEMIND))return UCS_FEEBLED;
     if (pSpell->GetManaCost() * rpgUserUnitStats.GetManaBonusMultiplier() > GetMP())
         return UCS_NOMANA;
     // if ( fabs2( ptTarget - GetCP() ) > sqr( pSpell->GetRange() * 1.02f ) )
@@ -885,6 +1012,7 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
         fpRotateSpeed = fpMoveSpeed;
         break;
     }
+    if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this);fpMoveSpeed*=factor;fpRotateSpeed*=factor;}
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -912,6 +1040,7 @@ float CUnit::GetShowSpeed(EUnitPose pose)
         fpMoveSpeed *= rpgUserUnitStats.cSpeeds[0] * FP_RPG_MAX_SPEED / 255.0f;
         break;
     }
+    if(auto*mod=ModRuntime::Current())fpMoveSpeed*=mod->CrippledSpeed(*this);
     return fpMoveSpeed;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -963,7 +1092,7 @@ CPlot3D CUnit::GetTargetCP()
     if (IsDead())
     {
         CPlot3D ptAdd(0, 0, 0);
-        const SADEntry *pAnim = GetAnimationByIndex(nStartAnimation);
+        const SADEntry *pAnim = GetAnimationByIndex(fullStartAnimation);
         if (pAnim)
         {
             if ((pAnim->dwFlags & ADB_ACTIONS) == ADB_ACTION_DEATH)
@@ -1086,10 +1215,32 @@ const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
         }
 #endif
     }
+    // Redirect the addon's two-handed interaction clips before their indices
+    // enter the byte-sized animation sequence.
+    if (pEntry && GetTypeID() == MOTID_HUMAN &&
+        ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVAttacks"))
+    {
+        const char *name = pEntry->pszAnimationName;
+        const char *suffix = nullptr;
+        if (_strnicmp(name, "2hauspecial", 11) == 0 ||
+            _strnicmp(name, "2hsuspecial", 11) == 0)
+            suffix = name + 11;
+        if (suffix && (_stricmp(suffix, "22") == 0 ||
+                       _stricmp(suffix, "04") == 0 ||
+                       _stricmp(suffix, "05") == 0 ||
+                       _stricmp(suffix, "06") == 0 ||
+                       _stricmp(suffix, "07") == 0 ||
+                       _stricmp(suffix, "24") == 0))
+        {
+            CString ordinary = CString("uspecial") + suffix;
+            if (const SADEntry *replacement = GetAnimationEntry(ordinary))
+                pEntry = replacement;
+        }
+    }
     return pEntry;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-const SADEntry *CUnit::GetAnimationByIndex(BYTE nIndex)
+const SADEntry *CUnit::GetAnimationByIndex(DWORD nIndex)
 {
     const SADEntry *pEntry = GetAnimationEntryByIndex(nIndex);
     if (pEntry == NULL)
@@ -1330,13 +1481,30 @@ void CUnit::RecalcAIClass()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnit::IsBackstab(CMapObject *pTarget) const
 {
-    if (!GetOwner())
+    if (!GetOwner() || !pTarget)
         return false;
     CPlot3D ptToTarget = pTarget->GetCP() - GetCP();
     float fpLeng = fabs(ptToTarget);
     if (fpLeng > 0)
         ptToTarget /= fpLeng;
-    return (!IsCurrentWeaponABow() && (pTarget->GetYAxis() * ptToTarget < -0.5f));
+    CModPackage *mod = ModRuntime::Current();
+    if (!mod)
+        return !IsCurrentWeaponABow() && pTarget->GetYAxis() * ptToTarget < -0.5f;
+    float weaponRange = 0.5f;
+    bool excluded = false;
+    if (dwCurrentWeapon < 4)
+    {
+        const CItemWeapon *weapon = GetCurrentQWeapon();
+        if (weapon)
+        {
+            const ERPGWeaponTypes type = weapon->GetWeaponType();
+            excluded = type == RPGWST_HANDS3 || type == RPGWST_HANDS7 ||
+                (!mod->CombatSetting("JMVRangedBackstab") &&
+                 (type == RPGWST_BOW || type == RPGWST_CROSSBOW));
+            weaponRange += weapon->GetRange();
+        }
+    }
+    return !excluded && pTarget->GetYAxis() * ptToTarget < weaponRange;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // return random to-hit value
@@ -1352,13 +1520,15 @@ float CUnit::GetToHit(CMapObject *pMO, bool bBackstab, bool bCalcDistance) const
     float fWeightBonus = apAttacker.fWeaponWeight / (RPG_CONST_Y * apDefender.fWeaponWeight);
     float fToHit = static_cast<float>(apAttacker.nAttack);
 
-    if (bCalcDistance)
+    const auto* mod = ModRuntime::Current();
+    const bool jmvAttacks = mod && mod->CombatSetting("JMVAttacks");
+    if (bCalcDistance && (jmvAttacks || !mod || !mod->CombatSetting("DistanceModifier")))
     {
         float fDistanceModifier = fabs(GetCP() - pUnit->GetCP()) * 2.0f / (RPG_CONST_Z);
         fToHit -= fDistanceModifier;
     }
 
-    if (!bBackstab)
+    if (!jmvAttacks && !bBackstab && (!mod || !mod->CombatSetting("WeightBonus")))
         fToHit += fWeightBonus;
 
     return Max(0.0f, fToHit);
@@ -1582,12 +1752,21 @@ void CUnit::GetAllItemsList(CGameBaseList &items, CGameBaseList &spells)
         AddItemToLists(items, spells, questItems[i]);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+DWORD CUnit::GetSpellSlotCount() const
+{
+    return IsIDofPersonage(GetID()) ? QI_MAX_SPELLS : QI_NPC_SPELLS;
+}
+
 int CUnit::AddQSpell(CItemSpell *lpSpell)
 {
-    for (int i = 0; i < QI_MAX_SPELLS; i++)
+    if (!lpSpell)
+        return -1;
+    // Search all occupied slots before selecting a hole: avoid duplicate ownership.
+    for (DWORD i = 0; i < GetSpellSlotCount(); ++i)
+        if (lpQSpells[i] == lpSpell)
+            return int(i);
+    for (DWORD i = 0; i < GetSpellSlotCount(); i++)
     {
-        if (lpQSpells[i] == lpSpell) // prevent adding one spell twice
-            return TRUE;
         if (lpQSpells[i] == NULL) // can add spell only in empty slot
         {
             lpQSpells[i] = lpSpell;
@@ -1661,6 +1840,8 @@ CItemQuick *CUnit::GetQItem(DWORD dwQItemIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 CItemSpell *CUnit::GetQSpellItem(DWORD dwQSpellIndex)
 {
+    if (dwQSpellIndex >= GetSpellSlotCount())
+        return nullptr;
     CItemSpell *pSpell;
     if (lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
     {
@@ -1684,6 +1865,8 @@ CItemSpell *CUnit::GetQSpellItem(DWORD dwQSpellIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 CSpell *CUnit::GetQSpell(DWORD dwQSpellIndex)
 {
+    if (dwQSpellIndex >= GetSpellSlotCount())
+        return nullptr;
     CSpell *pSpell;
     if (lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
     {
@@ -1696,6 +1879,8 @@ CSpell *CUnit::GetQSpell(DWORD dwQSpellIndex)
             return 0;
         if (dwQSpellIndex >= pPers->spells.GetSize())
             return 0;
+        if (!pPers->spells[dwQSpellIndex])
+            return nullptr;
         pSpell = pPers->spells[dwQSpellIndex]->GetSpell();
         return pSpell;
     }
@@ -1725,6 +1910,9 @@ void CUnit::Load(CSave &file)
 
     file.Read(nStartAnimation);
     file.Read(nCycleAnimation);
+    fullStartAnimation = NormalizeAnimationId(nStartAnimation);
+    fullCycleAnimation = NormalizeAnimationId(nCycleAnimation);
+    bExtendedAnimationId = false;
     file.Read(nAnimationStartSegment);
     file.Read(&animationSpeed, sizeof(animationSpeed));
     file.Read(&locomotionSpeed, sizeof(locomotionSpeed));
@@ -1931,6 +2119,23 @@ float CUnit::GetAnimationCoeff(const SADEntry *pADEntry)
     // return 10;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+CPlot3D CUnit::GetWeaponCastPoint(const CItemWeapon*weapon,bool left)
+{
+    // Use the selected hand on the animated client model; server models may have no bones.
+    if(GetWorld()&&!GetWorld()->IsServer()&&GetTypeID()==MOTID_HUMAN)
+        if(CFigure*hand=MatchFigure(left?"lh3":"rh3"))return GetFigureWorldPosition(hand);
+    auto*animation=GetAnimationSystem2();
+    if(!animation)return GetCP()+bv.ptCenter;
+    CString name=left?"lh3":"baserh3";
+    if(weapon){auto*shape=weapon->GetShapeEntry();
+        if(shape->dwTypeID==RPGWST_HANDS3||shape->dwTypeID==RPGWST_HANDS7)
+            name.Format("%s%s%.2d",left?"l.":"",shape->dwTypeID==RPGWST_HANDS3?"basestaff":"basedstaff",int(shape->dwTextureTypeIndex));
+    }
+    const CAnimationNode*node=animation->FindNode(name);
+    if(!node)node=animation->FindNode("rh3");
+    return node?GetCP()+rotation.Rotate(node->GetPosition()):GetCP()+bv.ptCenter;
+}
+
 CPlot3D CUnit::GetCastPointPosition()
 {
     CPlot3D position;

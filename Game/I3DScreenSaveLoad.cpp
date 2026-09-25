@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenSaveLoad.h"
+#include "ModRuntime.h"
 #include "I3DScreenMessageBox.h"
 #include "I3DScrollBar.h"
 #include "WorldInterface.h"
@@ -615,7 +616,7 @@ void CI3DScreenSaveLoad::Save()
     }
 
     CString szFullPath;
-    szFullPath.Format("%ssaves\\%s\\", IWorld.GetWorkPath(), pSlot->szPath);
+    szFullPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pSlot->szPath);
     CString szMsg;
     IWorld.GetTextManager()->GetSystemString("notify_saving", szMsg);
     theInterface.DrawTextOverFrame(szMsg);
@@ -668,7 +669,7 @@ void CI3DScreenSaveLoad::Delete()
         return;
 
     CString szDelPath;
-    szDelPath.Format("%ssaves\\%s", IWorld.GetWorkPath(), slots[nCurrentSlot].szPath);
+    szDelPath.Format("%ssaves\\%s", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), slots[nCurrentSlot].szPath);
 
     CFileFind find;
     BOOL bFind = find.FindFile(szDelPath + "\\*.*");
@@ -702,7 +703,7 @@ public:
 void CI3DScreenSaveLoad::FormSlotsList()
 {
     CString szWildcard;
-    szWildcard.Format("%ssaves\\save*", IWorld.GetWorkPath());
+    szWildcard.Format("%ssaves\\save*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     CFileFind find;
 
     slots.clear();
@@ -925,7 +926,7 @@ void CI3DScreenSaveLoad::ReloadPicture()
     }
 
     CString szTexPath;
-    szTexPath.Format("%ssaves\\%s\\", IWorld.GetWorkPath(), pSlot->szPath);
+    szTexPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pSlot->szPath);
     CFileFind find;
     if (find.FindFile(szTexPath + "shot.sav"))
     {
@@ -972,7 +973,7 @@ void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
         slot.szAllodName = pZone->szAllodName;
 
     CString szFullPath;
-    szFullPath.Format("%ssaves\\%s\\", IWorld.GetWorkPath(), pszSlotName);
+    szFullPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSlotName);
     CFileSave file;
     file.OpenWrite(szFullPath + "info.sav");
     slot.Store(file);
@@ -989,7 +990,7 @@ void CI3DScreenSaveLoad::QuickLoad(LPCTSTR pszSlotName)
     if (IWorldConnector.IsLMP())
         return;
     CString szFullPath;
-    szFullPath.Format("%ssaves\\%s\\", IWorld.GetWorkPath(), pszSlotName);
+    szFullPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSlotName);
 
     if (_access(szFullPath, 0) != -1)
     {
@@ -1046,7 +1047,7 @@ bool CI3DScreenSaveLoad::IsSystemSlot(int nSlot)
 bool CI3DScreenSaveLoad::IsEnoughSpace()
 {
     // check disk free space
-    double fFreeSpace = NGame::GetFreeDiskSpace(IWorld.GetWorkPath());
+    double fFreeSpace = NGame::GetFreeDiskSpace(ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     if (fFreeSpace != 0)
     {
         if (fFreeSpace < double(IWorldConnector.GetSaveSize()))

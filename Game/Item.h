@@ -172,6 +172,7 @@ public:
     virtual CString GetI3DFigureName() const;
     void GetWeaponModelNames(CStringArray &szNames);
     static void GetWeaponModelNames(DWORD dwShape, CStringArray &szNames);
+    static void GetWeaponModelNames(DWORD dwShape, CStringArray &szNames, bool bRightHand);
 
     static void GetWeaponModelNames(DWORD dwWeapon, std::vector<std::string> &szNames);
     bool GetCastPointName(CString &szName);

@@ -150,9 +150,9 @@ inline bool Float(SSCCmd&cmd,float&result){
  if(cmd.command==315){auto*p=theWorldServer.GetPlayer(CheckedInt(a));result=p?p->party.vars.GetVar(cmd.szParams[0]):0;return true;}
  if(cmd.command==373||cmd.command==375){auto*m=theWorld.GetMusicSystem();result=m?float(cmd.command==373?m->GetScriptNextPlayTime():m->GetScriptForced()):0;return true;}
  if(cmd.command==356){std::string name=cmd.szParams[0];std::replace(name.begin(),name.end(),'\\','/');if(name==".."||name.find("/../")!=std::string::npos||name.rfind("../",0)==0||(name.size()>=3&&name.substr(name.size()-3)=="/.."))throw std::runtime_error("MOB parent path forbidden");std::string path=ModRuntime::Current()->Directory()+"/"+name;auto attrs=GetFileAttributesA(path.c_str());result=attrs!=INVALID_FILE_ATTRIBUTES&&!(attrs&FILE_ATTRIBUTE_DIRECTORY)?1.f:0.f;return true;}
- if(cmd.command==358||cmd.command==368||cmd.command==369||cmd.command==370||cmd.command==362||cmd.command==367){auto*object=ObjectArg(cmd);DWORD flag=cmd.command==358?0x80000000u:cmd.command==368?UNIT_FEEBLED:cmd.command==369?UNIT_STUN:UNIT_DONTMOVE;if(cmd.command==362)flag=DWORD(CheckedInt(a));if(cmd.command==367)flag=1u<<Index(a,32);result=object&&object->CheckFlag(flag)?1.f:0.f;return true;}
+ if(cmd.command==358||cmd.command==368||cmd.command==369||cmd.command==370||cmd.command==362||cmd.command==367){auto*object=ObjectArg(cmd);DWORD flag=cmd.command==358?UNIT_ALREADY_MHOOVER:cmd.command==368?UNIT_FEEBLED:cmd.command==369?UNIT_STUN:UNIT_DONTMOVE;if(cmd.command==362)flag=DWORD(CheckedInt(a));if(cmd.command==367)flag=1u<<Index(a,32);result=object&&object->CheckFlag(flag)?1.f:0.f;return true;}
  if(cmd.command==386){result=JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0])?1.f:0.f;return true;}
- if(cmd.command==359){auto*s=ServerArg(cmd);if(s){s->InformFailure(ACK_HERO_ACK_USE_POTION);theWorld.ReceiveDamage(UnitArg(cmd)->GetID(),0,HLDAMAGE_POTION);}result=0;return true;}
+ if(cmd.command==359){auto*s=ServerArg(cmd);auto*u=UnitArg(cmd);auto*mod=ModRuntime::Current();if(s&&u&&mod&&mod->CombatSetting("usePotionAcks")){s->InformFailure(ACK_HERO_ACK_USE_POTION);theWorld.ReceiveDamage(u->GetID(),0,HLDAMAGE_POTION);}result=0;return true;}
  if(cmd.command==300){auto*u=UnitArg(cmd);result=u&&(u->GetID()>=1000000000)&&u->GetOwner()?float(u->GetOwner()->GetPlayerNumber()):-1.f;return true;}
  if(cmd.command==363){auto*u=UnitArg(cmd);int damage=CheckedInt(a);result=float(damage);auto*item=u&&ServerArg(cmd)?u->GetQWeapon(0):nullptr;if(item&&damage>0&&damage<1000){float old=item->GetHP(),critical=item->GetMaxHP()*theAIGeneralSettings.fItemDurabilityCritical;item->ApplyDamage(float(damage));if(item->IsBroken()||(old>=critical&&item->GetHP()<critical))ServerArg(cmd)->InformFailure(0);}return true;}
  if(!strcmp(n,"Add")||!strcmp(n,"Mul")||!strcmp(n,"And")||!strcmp(n,"Or")||!strcmp(n,"Max")||!strcmp(n,"Min")){
@@ -192,7 +192,7 @@ inline bool Float(SSCCmd&cmd,float&result){
   else if(!strcmp(n,"GetSkill")){
    const char*skill=cmd.szParams[0];
    if(!_stricmp(skill,"science"))result=s.cManualSkills[RPGMSKL_SCIENCE];
-   else if(!_stricmp(skill,"tame"))throw std::runtime_error("Addon GetSkill tame references unavailable autoSkills[8]");
+   else if(!_stricmp(skill,"tame"))result=s.cManualSkills[RPGMSKL_TAME];
    else {const char*names[]={"melee","archery","elemental","sense","astral"};const int indices[]={RPGASKL_MELEE,RPGASKL_ARCHERY,RPGASKL_ELEMENTAL,RPGASKL_SENSE,RPGASKL_ASTRAL};for(int i=0;i<5;i++)if(!_stricmp(skill,names[i]))result=s.cAutoSkills[indices[i]];}
   }
   else if(!strcmp(n,"GetPerk")){

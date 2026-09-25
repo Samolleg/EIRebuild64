@@ -1215,15 +1215,28 @@ float Lua::CLuaState::GetMaterialPropsInside(const char* itemName, int prop)
 	ReportOnError(DoCall(2, 1));
 	return LuaPop<float>(STATE);
 }
-float Lua::CLuaState::GetJewelryPropsInside(const char* itemName, int prop)
+int Lua::CLuaState::GetRegenBonusFromPerkMagicBlood(int level)
+{
+	lua_getglobal(STATE, "GetRegenBonusFromPerkMagicBlood");
+	LuaPush(STATE, level);
+	ReportOnError(DoCall(1, 1));
+	return LuaPop<int>(STATE);
+}
+float Lua::CLuaState::GetComplexSummStats(CUnit *unit, int stat)
+{
+	lua_getglobal(STATE, "GetComplexSummStats");
+	LuaPushAddr(STATE, unit);
+	LuaPush(STATE, stat);
+	ReportOnError(DoCall(2, 1));
+	return LuaPop<float>(STATE);
+}float Lua::CLuaState::GetJewelryPropsInside(const char* itemName, int prop)
 {
 	lua_getglobal(STATE, "GetJewelryPropsInside");
 	LuaPush(STATE, itemName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
 	return LuaPop<float>(STATE);
-}
-float Lua::CLuaState::GetUnitPerksInside(const char* unitName, int prop)
+}float Lua::CLuaState::GetUnitPerksInside(const char* unitName, int prop)
 {
 	lua_getglobal(STATE, "GetUnitPerksInside");
 	LuaPush(STATE, unitName);

@@ -11,14 +11,18 @@
 class CBinkVideo
 {
 private:
-#ifdef __VIDEO__
-#endif // __VIDEO__
+struct Player;
+    Player *player;
+    CBinkVideo(const CBinkVideo &) = delete;
+    CBinkVideo &operator=(const CBinkVideo &) = delete;
     CRect rectOnScreen;
     bool bWasCursorHided;
 
 public:
     CBinkVideo();
     ~CBinkVideo();
+
+    static bool DecoderAvailable();
 
     static bool Play(LPCSTR lpszName, DWORD dwFramePause = 0, bool bAllowSkipMovie = true,
                      bool bAllowSkipFrame = true, bool bClearPrimarySurface = true,

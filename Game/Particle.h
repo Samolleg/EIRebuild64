@@ -79,6 +79,7 @@ const int PS_DONT_DRAW = 64;        // do not draw particle effect
 // --------------------------- CParticle -----------------------------------------------------
 class CParticle : public CBase3D
 {
+    void InitializeExtendedSpellSources();
 public:
     enum EBindPlace
     {
@@ -163,6 +164,13 @@ public:
     CParticle() { Clear(); }
     virtual ~CParticle() { Destroy(); }
     virtual BOOL Create();
+    void ConfigurePowerHit(CUnit*,const CPlot3D&,const CPlot3D&,int);
+    bool IsPowerHitGlow(int hit) const {return createFunc==&CParticle::PowerHitSingleCreate&&fpParam1==0&&locSources.GetSize()==1&&locSources[0].nPhase==hit;}
+    void MarkPowerHitDelivered(){if(fpParam2>=0&&fpPower2==0){fpPower2=1;locSources[0].reserved.y=6;}}
+    void SetPowerHitWindup(int ticks,int token){locSources[0].reserved.x=float(ticks);nLifeOfPhase=token;}
+    static void StopPowerHitLights();
+    const char* ConfigureArrow(ETypeIDs type);
+    bool ConfigureExtendedSpell(ETypeIDs type,char*texture); // Configuration only; texture binding is owned by Create.
     virtual void Destroy();
     void FinishEffect();
     void BindTo(EBindPlace bind) { bindPlace = bind; }
@@ -211,6 +219,10 @@ private:
     void UpdateBV(SSingleParticle *);
     void FinishBV();
     // Single particles processing
+    const void* powerHitWorld=nullptr;
+    BOOL PowerHitSingleCreate(SSingleParticle*,int);
+    BOOL PowerHitSingleSegment(SSingleParticle*);
+    void PowerHitSourceSegment(SLocalSource*);
     BOOL FireballSingleCreate(SSingleParticle *, int);
     BOOL FireballSingleSegment(SSingleParticle *);
     BOOL CampfireSingleCreate(SSingleParticle *, int);

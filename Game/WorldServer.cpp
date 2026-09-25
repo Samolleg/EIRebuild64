@@ -45,6 +45,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "NetChat.h"
 #include "ChatServer.h"
 #include "GameMain.h"
+#include "ModAnimationIdSave.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
@@ -692,7 +693,14 @@ void CWorldServer::UnitSayAck(CUnit *pUnit, DWORD dwAck)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ********************* Active units set
-const int N_ACTIVITY_PERIOD = 128; // this number should be greater then any death animation
+static int ActiveObjectPeriod(CMapObject *object)
+{
+    const CModPackage *mod = ModRuntime::Current();
+    const bool extended = mod && mod->ExtendActiveObjectsArea();
+    // The installed addon extends both the base period and the stagger.
+    return (extended ? 256 : 128) +
+           ((((int)object) >> (extended ? 4 : 5)) & (extended ? 30 : 15));
+}
 void CWorldServer::AddActiveSpot(const CPlot3D &ptCenter, float fpRadius)
 {
     int nGridCount;
@@ -715,7 +723,7 @@ void CWorldServer::AddActiveSpot(const CPlot3D &ptCenter, float fpRadius)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::AddActiveObject(CMapObject *pObject)
 {
-    pObject->SetActivityCounter(N_ACTIVITY_PERIOD + ((((int)pObject) >> 5) & 15));
+    pObject->SetActivityCounter(ActiveObjectPeriod(pObject));
     activeSet.SeekNew(pObject->GetID()) = pObject;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -756,10 +764,16 @@ void CWorldServer::ActiveObjectsSegment()
                 if (!pUS->IsAggressive() && !pUS->IsAlwaysActive() && !pUS->logic.bEnemyVisible)
                     notActiveObjects.Add(pMO->GetID());
                 else
-                    pMO->SetActivityCounter(N_ACTIVITY_PERIOD + ((((int)pMO) >> 5) & 15));
+                    pMO->SetActivityCounter(ActiveObjectPeriod(pMO));
             }
             pMO = mapobjIter.GetNext();
         }
+    }
+    // The addon keeps spell durations moving for objects outside the active set.
+    for (pMO = mapobjIter.GetFirst(&dynamicObjs); pMO; pMO = mapobjIter.GetNext())
+    {
+        if (!pMO->IsInvalid() && !pMO->IsUnreferenced() && pMO->TickInactiveSpellEffects())
+            AddActiveObject(pMO);
     }
     // call segment for items
     for (pos = activeItems.GetHeadPosition(); pos;)
@@ -907,7 +921,7 @@ BOOL CWorldServer::Segment()
                 AddActiveSpot(pUnit->GetCP(),
                               ((CUnitServer *)pUnit->GetUnitSpecific())->GetMaxVisionRange() *
                                       AI_MAX_VISION_BONUS +
-                                  20);
+                                  ((ModRuntime::Current() && ModRuntime::Current()->ExtendActiveObjectsArea()) ? 100 : 20));
         }
     }
 
@@ -1063,12 +1077,15 @@ void CWorldServer::CastSpell(CSpell *pSpell, CUnit *pWho, const CPlot3D &ptFrom,
     ASSERT(pSpell);
     if (!pSpell || (curInterface != IFACE_MISSION && pWho != 0))
         return;
-    switch (pSpell->GetSubtypeID() >> 16)
+    if (!(ModRuntime::Current() && ModRuntime::Current()->CombatSetting("UnlockExperimentalSpells")))
     {
-    case SPELL_ID_LINK:
-    case SPELL_ID_CHARM:
-    case SPELL_ID_POSSESSION:
-        return;
+        switch (pSpell->GetSubtypeID() >> 16)
+        {
+        case SPELL_ID_LINK:
+        case SPELL_ID_CHARM:
+        case SPELL_ID_POSSESSION:
+            return;
+        }
     }
     int nTargets = pSpell->GetNumTargets();
     if (pSpell->GetFilters() == 0 && nTargets <= 1)
@@ -2530,6 +2547,13 @@ int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
                 pEff->fpMaxRadius = float(pMapEditSound->p_nR2);
                 pEff->nMsToPlayMin = pMapEditSound->p_nMin;
                 pEff->nMsToPlayMax = pMapEditSound->p_nMax;
+                if (pEff->nMsToPlayMin >= pEff->nMsToPlayMax)
+                {
+                    TRACE("Invalid ambient sound interval: map object %d, min=%d, max=%d; using defaults 1500-3000 ms\n",
+                          pMapEditSound->p_nID, pEff->nMsToPlayMin, pEff->nMsToPlayMax);
+                    pEff->nMsToPlayMin = 1500;
+                    pEff->nMsToPlayMax = 3000;
+                }
                 assert(pEff->nMsToPlayMin < pEff->nMsToPlayMax);
                 AddEffect(pEff);
                 nResID = pEff->GetID();
@@ -2589,8 +2613,7 @@ int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
 void CWorldServer::RemoveMapObject(int nID)
 {
     CMapObject **ppObj = mapObjects.Seek(nID);
-    assert(ppObj);
-    if (ppObj[0] == 0)
+    if (ppObj == NULL || ppObj[0] == NULL)
         return;
     CMapObject *pMODel = ppObj[0];
     if (pMODel->WhoAmI() != HPC_MAGICTRAP)
@@ -3079,6 +3102,10 @@ void CWorldServer::SetupScreenWait(const char *pszZoneName)
 
     if (szAllodName == "gipat")
         C2DScreenWait::pszProgressName = "progres2.bik";
+    else if (szAllodName == "gipat2")
+        C2DScreenWait::pszProgressName = "progres2.bik";
+    else if (szAllodName == "jigran")
+        C2DScreenWait::pszProgressName = "progres5.bik";
     else if (szAllodName == "ingos")
         C2DScreenWait::pszProgressName = "progres3.bik";
     else if (szAllodName == "suslanger")
@@ -3092,6 +3119,25 @@ void CWorldServer::SetupScreenWait(const char *pszZoneName)
             C2DScreenWait::pszProgressName = "progres1.bik";
         if (stricmp(pszZoneName, "bz7g") == 0)
             C2DScreenWait::pszProgressName = "progres1.bik";
+    }
+    // The installed addon asks main.lua after the original allod/zone choice.
+    // Keep the returned filename alive while the loading screen consumes it.
+    static std::string modProgressName;
+    if (auto *mod = ModRuntime::Current())
+    {
+        try
+        {
+            std::string overrideName = mod->LoadVideo(pszZoneName);
+            if (!overrideName.empty())
+            {
+                modProgressName = overrideName;
+                C2DScreenWait::pszProgressName = modProgressName.c_str();
+            }
+        }
+        catch (const std::exception &error)
+        {
+            TRACE("GetLoadVideo failed: %s\n", error.what());
+        }
     }
     // CRAP}
 }
@@ -3147,13 +3193,15 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     C2DScreenWait::Step(0);
 
     // if Map file does not exist
-    if (pszMapName != NULL && access(pszMapName, 0) == -1 &&
-        access(GetMobPath() + pszMapName, 0) == -1)
+    if (pszMapName != NULL &&
+        access(ModRuntime::MapPath(pszMapName).c_str(), 0) == -1 &&
+        access(ModRuntime::MapPath(GetMobPath() + pszMapName).c_str(), 0) == -1)
         return FALSE;
 
     // if Mob file does not exist
-    if (pszMobName != NULL && access(pszMobName, 0) == -1 &&
-        access(GetMobPath() + pszMobName, 0) == -1)
+    if (pszMobName != NULL &&
+        access(ModRuntime::MapPath(pszMobName).c_str(), 0) == -1 &&
+        access(ModRuntime::MapPath(GetMobPath() + pszMobName).c_str(), 0) == -1)
         return FALSE;
 
     CMemorySave graphChunk;
@@ -3181,6 +3229,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     }
 #endif
 
+    JMV_NpcConsumablesLoaded(WorldLoadOrigin::ZoneEntry);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3553,7 +3602,7 @@ void CWorldServer::RemoveDynamicObjects()
 /////////////////////////////////////////////////////////////////////////////////////
 // when this function is called server should be connected to local client
 // and should not be in local or multiplayer mode
-BOOL CWorldServer::LoadSave(CSave &file, const char *pszTerrain)
+BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *pszTerrain)
 {
     char ch;
     int nID, i;
@@ -3810,7 +3859,8 @@ BOOL CWorldServer::LoadSave(CSave &file, const char *pszTerrain)
     pSpellManager->CheckReferences();
     pItemManager->CheckReferences();
 
-    if(auto*mod=ModRuntime::Current())mod->SuccessfulWorldLoad();
+    if(auto*mod=ModRuntime::Current())mod->SuccessfulWorldLoad(origin);
+    ModAnimationIdSave::AfterSuccessfulLoad(*this);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3934,3 +3984,5 @@ void CWorldServer::StoreSave(CSave &file)
     StoreCList(LMPCorpses, file);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+#include "ModAnimationIdSave.inl"

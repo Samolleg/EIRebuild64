@@ -2,6 +2,9 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "BaseManager.h"
+#include "WorldServer.h"
+#include "EffectManager.h"
+#include "ModSpellTextures.h"
 #include "SaveLoader.h"
 // #include "World.h"
 
@@ -116,6 +119,7 @@ BOOL CBaseManager::Create(CWorld *lpWorld)
 // destroy all data, this manager contain in and all internal data structures
 void CBaseManager::Destroy()
 {
+    if(this==theWorldServer.GetEffectManager())SpellTextures::ResetWorld();
     CHashMapIterator<int, LPGAMEBASE> hmi;
     LPGAMEBASE lpData = NULL;
     //
@@ -171,6 +175,7 @@ void CBaseManager::Destroy()
 // remove all data from main hash map
 void CBaseManager::RemoveAll()
 {
+    if(this==theWorldServer.GetEffectManager())SpellTextures::ResetWorld();
     CHashMapIterator<int, LPGAMEBASE> hmi;
     LPGAMEBASE lpData;
     // set used mark for every object
@@ -225,6 +230,7 @@ LPGAMEBASE CBaseManager::CreateData(ETypeIDs tidTypeID, int id)
         RegisterInstantAs(id, lpData);
     //
     lpData->Create();
+    if(SpellTextures::HasBindings()&&this==theWorldServer.GetEffectManager())SpellTextures::RecordOwner(this,lpData,SpellTextures::currentCode);
 
     return lpData;
 }

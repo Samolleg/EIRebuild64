@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 
 #include "WorldInterface.h"
 #include "ScenarioTracker.h"
@@ -30,6 +32,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Terrain.h"
 
 #include "Camera.h"
+#include "ModFalloutProjection.h"
 
 #include "PlayerClient.h"
 #include "PlayerManager.h"
@@ -582,7 +585,8 @@ void CWorldClient::RemoveQuickItemsAndSpells()
             CItem *pItem = itemIter->GetFirst(GetItemManager());
             while (pItem)
             {
-                pItem->Release();
+                if (*reinterpret_cast<void *const *>(pItem))
+                    pItem->Release();
                 pItem = itemIter->GetNext();
             }
             delete itemIter;
@@ -597,7 +601,8 @@ void CWorldClient::RemoveQuickItemsAndSpells()
             CGameBase *pThing = spellIter->GetFirst(GetSpellManager());
             while (pThing)
             {
-                pThing->Release();
+                if (*reinterpret_cast<void *const *>(pThing))
+                    pThing->Release();
                 pThing = spellIter->GetNext();
             }
             delete spellIter;
@@ -609,6 +614,8 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    theCamera.ResetFalloutMode();
+    CParticle::StopPowerHitLights();
     theCamera.SetCarrier((CObject3D *)0);
     if (pFlyingHP)
     {
@@ -2133,6 +2140,14 @@ void CWorldClient::DeployClientPersonages(CPersonages &people, bool bShowHelm)
         pUnit->SetName(pers.szName);
 
         AddObject(pUnit);
+        if (auto *mod = ModRuntime::Current())
+        {
+            if (mod->PartyVisualOptionsEnabled() && mod->IsLocalPartyUnit(*pUnit))
+            {
+                pUnit->ShowHelmet(!mod->HidePartyHelmets());
+                pUnit->RefreshPartyVisualArmor();
+            }
+        }
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2624,6 +2639,7 @@ void CWorldClient::PrecacheData(std::vector<SUnitStatistics> &statistics,
             else
                 szResultFileName.Format("prot%dp", it->wPrototype);
 
+            set.characterAtlas = 1;
             set.dwTextureDimention = 256;
             pTextureManager->ComposeTexture(szTextureName, set, szResultFileName, szResultFileName,
                                             3, 0, MMP_FORMAT_5551);
@@ -2636,11 +2652,13 @@ void CWorldClient::PrecacheData(std::vector<SUnitStatistics> &statistics,
             memcpy(set.data.GetData(), &*userdata.begin(), set.data.GetSize());
             // form texture names
             set.szTextures.RemoveAll();
+            set.characterAtlas = 2;
             // helm
             if (it->armors[0] != -1)
             {
                 char buff[256];
                 FormArmorTextureName(it->armors[0], pRace->szMaskName, buff);
+                set.equipmentSlots[2] = int(set.szTextures.GetSize());
                 set.szTextures.Add(buff);
             }
             // weapon
@@ -2650,6 +2668,7 @@ void CWorldClient::PrecacheData(std::vector<SUnitStatistics> &statistics,
                 char buff[256];
                 FormWeaponTextureName(it->weapons[it->cCurrentWeaponIndex], pRace->szMaskName,
                                       buff);
+                set.equipmentSlots[0] = int(set.szTextures.GetSize());
                 set.szTextures.Add(buff);
             }
             // make secondary texture
@@ -2890,6 +2909,16 @@ BOOL CWorldClient::Draw()
 {
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
     CRenderer *pRend = &theRenderer;
+    const DWORD falloutWorldStacks[] = {
+        MAT_STACK_PROJECTION, MAT_STACK_VIEW2CLIP, MAT_STACK_PROJSPACE,
+        MAT_STACK_SCRNSPACE, MAT_STACK_SCRNSPACE2
+    };
+    CModFalloutTelephotoFrame falloutFrame(theCamera,
+        pTerrain && pCamera == &theCamera && theCamera.IsFalloutModeActive(),
+        theCamera.GetFalloutTelephotoMultiplier());
+    CModFalloutProjectionScope falloutProjection(pGPU, falloutFrame.IsActive(),
+        theCamera.GetFalloutTelephotoMultiplier(), falloutWorldStacks, 5);
+    if (!falloutProjection.IsActive()) falloutFrame.Reset();
     //
     AdjustLightingWithTime();
     // flush all previos renders
@@ -2929,7 +2958,9 @@ BOOL CWorldClient::Draw()
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
-        pTerrain->SetClip(pCamera->GetCPX(), pCamera->GetCPY(), 100.0f);
+        pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
+                          falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
+                          100.0f);
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
         pTerrain->DrawBase(&theRenderer);
         pRend->FlushBuffers();
@@ -2941,7 +2972,9 @@ BOOL CWorldClient::Draw()
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
-        pTerrain->SetClip(pCamera->GetCPX(), pCamera->GetCPY(), 100.0f);
+        pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
+                          falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
+                          100.0f);
         // flush previous renders
         pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
@@ -3442,6 +3475,9 @@ CPlot3D CWorldClient::GetTerrainXYZFromScreenXY(int sx, int sy)
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
     if (!pGPU->IsHaveMatrix(MAT_STACK_CAMERA))
         return VNULL;
+    const DWORD falloutTerrainStacks[] = { MAT_STACK_SCRNSPACE2 };
+    CModFalloutProjectionScope falloutPicking(pGPU, theCamera.IsFalloutModeActive(),
+        theCamera.GetFalloutTelephotoMultiplier(), falloutTerrainStacks, 1);
     pGPU->PushMatrix(pGPU->GetMatrix(MAT_STACK_CAMERA), MAT_STACK_SCRNSPACE2);
     //
     const SHMatrix &m = theRenderer.GetGPU()->GetMatrix(MAT_STACK_SCRNSPACE2);
@@ -3512,6 +3548,9 @@ CPlot3D CWorldClient::GetTerrainXYZFromScreenXYWithBridge(int sx, int sy)
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
     if (!pGPU->IsHaveMatrix(MAT_STACK_CAMERA))
         return VNULL;
+    const DWORD falloutTerrainStacks[] = { MAT_STACK_SCRNSPACE2 };
+    CModFalloutProjectionScope falloutPicking(pGPU, theCamera.IsFalloutModeActive(),
+        theCamera.GetFalloutTelephotoMultiplier(), falloutTerrainStacks, 1);
     pGPU->PushMatrix(pGPU->GetMatrix(MAT_STACK_CAMERA), MAT_STACK_SCRNSPACE2);
     //
     const SHMatrix &m = theRenderer.GetGPU()->GetMatrix(MAT_STACK_SCRNSPACE2);

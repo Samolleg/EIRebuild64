@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 #include "ModMessages.h"
 #include "ModRuntime.h"
 #include "WideScreen.h"
@@ -38,10 +40,45 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GameMain.h"
 #include "SpellDatabase.h"
 #include "Renderer.h"
+#include <set>
+#include <vector>
 /////////////////////////////////////////////////////////////////////////////////////
 const float SLIDE_TIME = .3f;
 const float DISTANCE_DRAW_UNIT = 9.f;
 const float RULER_UNIT_SCALE = 15.f;
+
+static bool UseModInterfaceHD()
+{
+    return ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2");
+}
+
+static bool PasteModInterfaceIcon(CTexture *texture, LPCTSTR name, int size, int x, int y)
+{
+    CString resource(name);
+    resource += ".x2.mmp";
+    if (PasteTexture(texture, resource, size, size, size, size, x, y))
+        return true;
+    // The addon clears a missing HD tile to opaque white. Leaving this atlas
+    // region untouched exposes uninitialized red pixels from the render surface.
+    if (!texture || !texture->GetSurface() || size <= 0 || size > 512 || x < 0 || y < 0 ||
+        x + size > int(texture->GetSizeX()) || y + size > int(texture->GetSizeY()))
+        return false;
+    std::vector<WORD> blank(size_t(size) * size, 0xffff);
+    D3D11_BOX region = {};
+    region.left = x;
+    region.right = x + size;
+    region.top = y;
+    region.bottom = y + size;
+    region.back = 1;
+    D3D11_SUBRESOURCE_DATA data = {};
+    data.pSysMem = blank.data();
+    data.SysMemPitch = size * sizeof(WORD);
+    texture->GetSurface()->UpdateTexture(0, &region, &data);
+    static std::set<std::string> reported;
+    if (reported.size() < 32 && reported.insert((LPCSTR)resource).second)
+        ReportWarning("Missing HD interface icon %s", (LPCSTR)resource);
+    return false;
+}
 
 const int HL_XS[6] = { 50, 50, 95, 5, 95, 5 };
 const int HL_YS[6] = { 35, 105, 70, 70, 140, 140 };
@@ -109,15 +146,25 @@ void CI3DScreenMission::OnActivate()
     AddTexture(256, 256);   // weapons and items	// 0
     AddTexture(256, 256);   // spells and skills	// 1
     AddTexture("battle00"); // 2
+    const bool hdInterface = UseModInterfaceHD();
+    if (hdInterface)
+    {
+        // Source useAWATG2: independent canvases for HD equipment, quick items,
+        // spells and effect icons. Existing 256-pixel canvases remain for base UI art.
+        AddTexture(1024, 1024); // 3: equipped weapons
+        AddTexture(2048, 2048); // 4: quick items
+        AddTexture(2048, 2048); // 5: spells
+        AddTexture(2048, 2048); // 6: active effects
+    }
 
     AddObject(pWeapons = dbgnew CI3DObjectWeapons(pI3D, this)); // 0
-    pWeapons->SetTexture(textures[0]);
+    pWeapons->SetTexture(textures[hdInterface ? 3 : 0]);
 
     AddObject(pItems = dbgnew CI3DObjectItems(pI3D, this)); // 1
-    pItems->SetTexture(textures[0]);
+    pItems->SetTexture(textures[hdInterface ? 4 : 0]);
 
     AddObject(pSpells = dbgnew CI3DObjectSpells(pI3D, this)); // 2
-    pSpells->SetTexture(textures[1]);
+    pSpells->SetTexture(textures[hdInterface ? 5 : 1]);
 
     AddObject(pSkills = dbgnew CI3DObjectSkills(pI3D, this)); // 3
     pSkills->SetTexture(textures[1]);
@@ -128,6 +175,7 @@ void CI3DScreenMission::OnActivate()
     AddObject(pInfo = dbgnew CI3DObjectInfo(pI3D, this)); // 5
     pInfo->SetTexture(textures[2]);
     pInfo->SetTexture(textures[1]);
+    if (hdInterface) pInfo->SetTexture(textures[6]);
     pInfo->Init(pI3D->nInfoMode, pI3D->bInfoClosed);
 
     AddObject(pMap = dbgnew CI3DObjectMap(pI3D, this)); // 6
@@ -1479,6 +1527,27 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
+    if (pI3D && pI3D->IsAltDown())
+    {
+        int extendedSpellSlot = -1;
+        switch (nChar)
+        {
+        case 'Q': extendedSpellSlot = 8; break;
+        case 'W': extendedSpellSlot = 9; break;
+        case 'E': extendedSpellSlot = 10; break;
+        case 'R': extendedSpellSlot = 11; break;
+        case 'T': extendedSpellSlot = 12; break;
+        case 'Y': extendedSpellSlot = 13; break;
+        case 'U': extendedSpellSlot = 14; break;
+        case 'I': extendedSpellSlot = 15; break;
+        }
+        if (extendedSpellSlot >= 0 && pSpells)
+        {
+            pSpells->ChangeSpell(extendedSpellSlot);
+            SetProcessed();
+            return;
+        }
+    }
     // CRAP{ - for advanced kick/ban
     if (eKickMode != KM_NONE)
     {
@@ -1950,6 +2019,9 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 {
     WideScreen::Scope wideScope(-1);
     int x, y;
+    const bool hdInterface = UseModInterfaceHD();
+    const int iconSize = hdInterface ? 512 : 128;
+    const int canvasSize = hdInterface ? 1024 : 256;
 
     switch (nWeapons)
     {
@@ -1959,24 +2031,28 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
         break;
     case 1:
         x = 0;
-        y = 128;
+        y = iconSize;
         break;
     case 2:
-        x = 42;
+        x = hdInterface ? iconSize : 42;
         y = 0;
         break;
     case 3:
-        x = 42;
-        y = 128;
+        x = hdInterface ? iconSize : 42;
+        y = iconSize;
         break;
     }
 
-    PasteTexture(textures[0], pszTextureName, 128, 128, 42, 128, x, y);
+    if (hdInterface)
+        PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
+    else
+        PasteTexture(textures[0], pszTextureName, 128, 128, 42, 128, x, y);
 
     CI3DFigure *pFig;
     pFig = AddFigure(pszFigureName);
     if (pFig)
     {
+        if (hdInterface) pFig->SetTexture(textures[0]);
         pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), -FP_PI / 20) *
                              CQuaternion(CPlot3D(0, 1, 0), -FP_PI / 3) *
                              CQuaternion(CPlot3D(0, 0, 1), FP_PI * 3 / 4));
@@ -1987,8 +2063,8 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
         pFig->MakeBar(12, 40, 80.f + nWeapons * 40, 520, 120.f + nWeapons * 40, 600, 0, 0, 42, 128);
     }
 
-    pFig->SetUShift(x / 256.f);
-    pFig->SetVShift((128 + y) / 256.f);
+    pFig->SetUShift(x / float(canvasSize));
+    pFig->SetVShift((iconSize + y) / float(canvasSize));
     pFig->SetDefaultColor(0xffffffff);
     pFig->UseDefaultColors(TRUE);
 
@@ -2201,6 +2277,9 @@ void CI3DObjectItems::AddItem(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 {
     WideScreen::Scope wideScope(1);
     int x, y;
+    const bool hdInterface = UseModInterfaceHD();
+    const int iconSize = hdInterface ? 512 : 64;
+    const int canvasSize = hdInterface ? 2048 : 256;
 
     if (nItems > 7)
         return;
@@ -2241,10 +2320,18 @@ void CI3DObjectItems::AddItem(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
         break;
     }
 
-    PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
+    if (hdInterface)
+    {
+        x = (nItems % 4) * iconSize;
+        y = (2 + nItems / 4) * iconSize;
+        PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
+    }
+    else
+        PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
 
     CI3DFigure *pFig;
     pFig = AddFigure(pszFigureName);
+    if (hdInterface && pFig) pFig->SetTexture(textures[0]);
     if (pFig)
         pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI));
     else
@@ -2253,8 +2340,8 @@ void CI3DObjectItems::AddItem(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
         pFig->MakeBar(20, 20, 680, 560, 720, 600, 0, 0, 64, 64);
     }
 
-    pFig->SetUShift(x / 256.f);
-    pFig->SetVShift((64 + y) / 256.f);
+    pFig->SetUShift(x / float(canvasSize));
+    pFig->SetVShift((iconSize + y) / float(canvasSize));
     pFig->SetDefaultColor(0xffffffff);
     pFig->UseDefaultColors(TRUE);
 
@@ -2698,13 +2785,22 @@ void CI3DObjectSpells::AddSpell(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
                                         490.f - (figureColumnCount - 1 - figureRow) * 40, 40);
     }
 
-    const int x = 128 + (row / 4) * 64;
-    const int y = (row % 4) * 64;
-    PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
+    const bool hdInterface = UseModInterfaceHD();
+    const int iconSize = hdInterface ? 512 : 64;
+    const int canvasSize = hdInterface ? 2048 : 256;
+    const int x = hdInterface ? (nSpells >= 8 ? 0 : 2 * iconSize) +
+                                ((row / 4) * iconSize)
+                              : 128 + (row / 4) * 64;
+    const int y = (row % 4) * iconSize;
+    if (hdInterface)
+        PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
+    else
+        PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
 
     CI3DFigure *pFig = AddFigure(pszFigureName);
-    pFig->SetUShift(x / 256.f);
-    pFig->SetVShift((64 + y) / 256.f);
+    if (hdInterface) pFig->SetTexture(textures[0]);
+    pFig->SetUShift(x / float(canvasSize));
+    pFig->SetVShift((iconSize + y) / float(canvasSize));
     pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
     pFig->SetRelativeToScreen(left + 20, top + 20, 40);
     pFig->SetDefaultColor(0xffffffff);
@@ -2837,6 +2933,16 @@ void CI3DObjectSpells::ChangeSpell(int nSlot)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::SelfCast(int nSlot)
 {
+    if(auto*mod=ModRuntime::Current();mod&&pUnit&&nSlot>=0&&nSlot<int(pUnit->GetSpellSlotCount())){
+        auto*spell=pUnit->GetQSpell(nSlot);ModSkills::Config config;
+        if(mod->SkillConfig(spell,config)){
+            if(pUnit->IsDead()||!mod->SkillReady(*pUnit,spell,config,false)||config.Cost(spell->GetManaCost())>pUnit->GetMP())return;
+            auto*target=theWorld.GetNearestEnemy(pUnit);if(!target||target==pUnit||target->IsDead())return;
+            pScreen->SetInputMode(MODE_SPELL_TARGET_UNIT,nSlot);
+            if(mod->PointSkill(spell)){CPlot3D point=target->GetCP();pScreen->CastSpell(point,pUnit);}else pScreen->CastSpell(target);
+            pScreen->SetInputMode(MODE_SIMPLE);return;
+        }
+    }
     if (pUnit && nSlot >= 0 && nSlot < nSpells)
     {
         pScreen->SetInputMode(MODE_SPELL_TARGET_UNIT, nSlot);
@@ -2875,6 +2981,11 @@ void CI3DObjectSpells::SelfCast(int nSlot)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectSpells::Draw(CRenderer *pRend)
 {
+    if(auto*mod=ModRuntime::Current())if(pUnit)for(int slot=0;slot<nSpells&&slot<int(pUnit->GetSpellSlotCount())&&slot<figures.GetSize();++slot){
+        auto*spell=pUnit->GetQSpell(slot);ModSkills::Config config;if(!figures[slot]||!mod->SkillConfig(spell,config))continue;
+        bool ready=mod->SkillReady(*pUnit,spell,config,false)&&config.Cost(spell->GetManaCost())<=pUnit->GetMP();
+        figures[slot]->SetDefaultColor(ready?0xffffffff:RGBA_MAKE(128,128,128,255));figures[slot]->UseDefaultColors(TRUE);
+    }
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
     CI3DObject::Draw(pRend);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
@@ -3166,28 +3277,34 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
                               bool bNotOnZone)
 {
     int x, y, i = nFaces % 6, j = nFaces / 6;
+    const bool hdInterface = UseModInterfaceHD();
+    const int faceSize = hdInterface ? 512 : 128;
+    const int canvasSize = hdInterface ? 1024 : 256;
     switch (nFaces % 4)
     {
     case 0:
         x = 0;
         y = 0;
-        AddTexture(256, 256);
+        AddTexture(canvasSize, canvasSize);
         break;
     case 1:
-        x = 128;
+        x = faceSize;
         y = 0;
         break;
     case 2:
         x = 0;
-        y = 128;
+        y = faceSize;
         break;
     case 3:
-        x = 128;
-        y = 128;
+        x = faceSize;
+        y = faceSize;
         break;
     }
 
-    PasteTexture(textures[textures.GetSize() - 1], pszTextureName, 128, 128, 128, 128, x, y);
+    if (hdInterface)
+        PasteModInterfaceIcon(textures[textures.GetSize() - 1], pszTextureName, faceSize, x, y);
+    else
+        PasteTexture(textures[textures.GetSize() - 1], pszTextureName, 128, 128, 128, 128, x, y);
 
     faces.emplace_back();
     faces[nFaces].bNotOnZone = bNotOnZone;
@@ -3239,8 +3356,8 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
 
     if (bNotOnZone)
         pFig->SetAmbient(.5f, .5f, .5f);
-    pFig->SetUShift(x / 256.f);
-    pFig->SetVShift((128 + y) / 256.f);
+    pFig->SetUShift(x / float(canvasSize));
+    pFig->SetVShift((faceSize + y) / float(canvasSize));
     pFig->SetTexture(textures[textures.GetSize() - 1]);
 
     pFig = AddFigure();
@@ -3274,6 +3391,8 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
 void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
 {
     int x, y;
+    const bool hdInterface = UseModInterfaceHD();
+    const int faceSize = hdInterface ? 512 : 128;
     switch (nFace % 4)
     {
     case 0:
@@ -3281,16 +3400,16 @@ void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
         y = 0;
         break;
     case 1:
-        x = 128;
+        x = faceSize;
         y = 0;
         break;
     case 2:
         x = 0;
-        y = 128;
+        y = faceSize;
         break;
     case 3:
-        x = 128;
-        y = 128;
+        x = faceSize;
+        y = faceSize;
         break;
     }
 
@@ -3308,7 +3427,13 @@ void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
         break;
     }
 
-    if (!PasteTexture(textures[nFace / 4 + 1], szTexName, 128, 128, 128, 128, x, y))
+    if (hdInterface)
+    {
+        if (!PasteModInterfaceIcon(textures[nFace / 4 + 1], szTexName, faceSize, x, y))
+            PasteModInterfaceIcon(textures[nFace / 4 + 1], faces[nFace].szTexName,
+                                  faceSize, x, y);
+    }
+    else if (!PasteTexture(textures[nFace / 4 + 1], szTexName, 128, 128, 128, 128, x, y))
         PasteTexture(textures[nFace / 4 + 1], faces[nFace].szTexName, 128, 128, 128, 128, x, y);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3728,8 +3853,15 @@ void CI3DObjectMap::Init(float fInitZoom, bool bClosed)
     SScenarioZone *pZ = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
     if (pZ)
     {
-        fXMapSize = float(pZ->nSizeX) * 32;
-        fYMapSize = float(pZ->nSizeY) * 32;
+        // Use the dimensions of the terrain actually loaded for this zone.
+        // Mod map art and an old map.txt can otherwise disagree at runtime.
+        CTerrain *terrain = theWorld.GetTerrain();
+        const int sectorsX = terrain && terrain->GetXSectors() > 0
+                                 ? terrain->GetXSectors() : pZ->nSizeX;
+        const int sectorsY = terrain && terrain->GetYSectors() > 0
+                                 ? terrain->GetYSectors() : pZ->nSizeY;
+        fXMapSize = float(sectorsX) * 32;
+        fYMapSize = float(sectorsY) * 32;
         AddTexture(pZ->szMinimapTexture);
     }
     else
@@ -4593,7 +4725,7 @@ void CI3DObjectMap::InvertClosedState()
 void CI3DObjectMap::NormalizeCamera()
 {
     pI3D->BeginFX("buttons\\battle\\click.wav");
-    theCamera.InitRotate();
+    theCamera.ToggleFalloutMode();
     fNormTime = 0.5f;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -4825,7 +4957,7 @@ void CI3DObjectInfo::Init(int iMode, bool bClosed)
     {
         pFig = AddFigure();
         pFig->MakeBar(5, 30, 28, 38 + n * 30, 52, 62 + n * 30, 0, 0, 64, 64);
-        pFig->SetTexture(textures[1]);
+        pFig->SetTexture(textures[UseModInterfaceHD() ? 2 : 1]);
     }
 
     AddSurface(dbgnew CI3DSurface(pI3D, 20, 0, 180, 220));
@@ -4936,7 +5068,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 
     if (pDrawUnit && pDrawUnit->GetObjectSpecific())
     {
-        if (nMode != 2)
+        if (nMode != 2 || (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVShowCharacterModelInStats")))
         {
             D3DRECT rects[3];
             CRect rcTmp(180 - slide_nCurPixels, 0, 400 - slide_nCurPixels, 220);
@@ -5039,7 +5171,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
         }
 #endif // NOGETDC
 
-        if (nMode != 2)
+        if (nMode != 2 || (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVShowCharacterModelInStats")))
         {
             ((CObject3DClientSpecific *)pDrawUnit->GetObjectSpecific())->SetScale(1.f, 1.f, 1.f);
 
@@ -5133,44 +5265,50 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
             bNeedPaste = true;
         }
 
+        const bool hdInterface = UseModInterfaceHD();
+        const int iconSize = hdInterface ? 512 : 64;
         switch (nSubst[i])
         {
         case 0:
             x = 0;
-            y = 128;
+            y = iconSize * 2;
             break;
         case 1:
             x = 0;
-            y = 192;
+            y = iconSize * 3;
             break;
         case 2:
-            x = 64;
+            x = iconSize;
             y = 0;
             break;
         case 3:
-            x = 64;
-            y = 64;
+            x = iconSize;
+            y = iconSize;
             break;
         case 4:
-            x = 64;
-            y = 128;
+            x = iconSize;
+            y = iconSize * 2;
             break;
         case 5:
-            x = 64;
-            y = 192;
+            x = iconSize;
+            y = iconSize * 3;
             break;
         }
 
         if (bNeedPaste)
         {
             szTextureName.Format("spell%04d", nNewEffects[i]);
-            PasteTexture(textures[1], szTextureName, 64, 64, 64, 64, x, y);
+            if (hdInterface)
+                PasteModInterfaceIcon(textures[2], szTextureName, iconSize, x, y);
+            else
+                PasteTexture(textures[1], szTextureName, 64, 64, 64, 64, x, y);
             nEffectsLoaded[j] = nNewEffects[i];
         }
 
         CI3DFigure *pFig = figures[N_HL_FIGURE + 12 + i];
-        pFig->SetUShift(x / 256.f);
-        pFig->SetVShift((64 + y) / 256.f);
+        const float canvasSize = hdInterface ? 2048.f : 256.f;
+        pFig->SetUShift(x / canvasSize);
+        pFig->SetVShift((iconSize + y) / canvasSize);
         pFig->Show(TRUE);
     }
 }
@@ -5230,7 +5368,12 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
     rc += shift;
 
     // SIGHT
-    int nSight = MINT(pStats->GetSightRange(theWorld.GetNightPowerSlow()));
+    float nightPower = theWorld.GetNightPowerSlow();
+    if (theWorld.IsCaveZone())
+        nightPower = 1.0f;
+    if (IWorldClient.GetCurrentZoneName().CompareNoCase("gz20g") == 0)
+        nightPower = 0.0f;
+    int nSight = MINT(pStats->GetSightRange(nightPower));
     //
     szOut.Format("%s %d%s", szStrings[SIGHT], nSight, szStrings[METERS]);
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);

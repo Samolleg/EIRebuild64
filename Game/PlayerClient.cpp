@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModRuntime.h"
+#include "ModSpellRules.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 /*==========================================================================================================
@@ -292,6 +294,7 @@ BOOL CPlayerClient::PrsMoveCamera()
     else
         theCamera.ActivateShortcut(7);
     theCamera.InitRotate(fAngle);
+    theCamera.ReapplyFalloutAfterMove();
     return bRv;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1100,7 +1103,7 @@ BOOL CPlayerClient::PrsGainExp()
          pUnit = unitIter.GetNext())
     {
         float fpExpM = pUnit->GetUserUnitStats()->GetExpMultiplier() * fpExp;
-        theWorld.ReceiveDamage(pUnit->GetID(), Float2Int(fpExpM), HLDAMAGE_EXPERIENCE);
+        theWorld.ReceiveDamage(pUnit->GetID(), ModRuntime::Current()?ModSpells::DisplayExperience(fpExpM):Float2Int(fpExpM), HLDAMAGE_EXPERIENCE);
     }
 
     return TRUE;
@@ -1116,7 +1119,7 @@ BOOL CPlayerClient::PrsUnitGainExp()
     if (pUnit)
     {
         float fpExpM = pUnit->GetUserUnitStats()->GetExpMultiplier() * fpExp;
-        theWorld.ReceiveDamage(nID, Float2Int(fpExpM), HLDAMAGE_EXPERIENCE);
+        theWorld.ReceiveDamage(nID, ModRuntime::Current()?ModSpells::DisplayExperience(fpExpM):Float2Int(fpExpM), HLDAMAGE_EXPERIENCE);
     }
     return TRUE;
 }

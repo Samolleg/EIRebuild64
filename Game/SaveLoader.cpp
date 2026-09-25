@@ -13,6 +13,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "SaveLoader.h"
+#include "TypeIDs.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 // CSave implementation
@@ -119,102 +120,136 @@ void CSave::CopyFrom(CSave &file)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-static void StoreLength(CSave &file, int &nStorePosition, unsigned char nNum)
+// A save delta alternates equal-byte and changed-byte runs. Keep the final
+// marker aligned with the following dynamic-object registry.
+static void StoreDeltaLength(CSave &file, unsigned int &lengthPosition, unsigned char length, bool appendNextLength)
 {
-    int nPos = file.GetPosition();
-    file.Seek(nStorePosition);
-    file.Write(nNum);
-    file.Seek(nPos);
-    nStorePosition = file.GetPosition();
-    file.Write((char)0);
+    unsigned int endPosition = file.GetPosition();
+    file.Seek(lengthPosition);
+    file.Write(length);
+    file.Seek(endPosition);
+    if (appendNextLength)
+    {
+        lengthPosition = endPosition;
+        file.Write((unsigned char)0);
+    }
 }
-/////////////////////////////////////////////////////////////////////////////////////
+
+static bool IsDynamicObjectType(unsigned int typeId)
+{
+    return (typeId >= MOTID_HUMAN && typeId <= MOTID_LEVER) || typeId == MOTID_KAPKAN;
+}
+
+static bool IsDynamicRegistry(CSave &file, unsigned int position)
+{
+    const unsigned int savedPosition = file.GetPosition();
+    const unsigned int size = file.GetSize();
+    unsigned int rows = 0;
+    bool valid = false;
+    file.Seek(position);
+    while (position <= size && size - position >= sizeof(unsigned int))
+    {
+        unsigned int id = 0;
+        if (file.Read(&id, sizeof(id)) != sizeof(id))
+            break;
+        position += sizeof(id);
+        if (id == 0xFFFFFFFF)
+        {
+            valid = true;
+            break;
+        }
+        if (size - position < sizeof(unsigned int) * 2)
+            break;
+        unsigned int typeId = 0, subtype = 0;
+        if (file.Read(&typeId, sizeof(typeId)) != sizeof(typeId) ||
+            file.Read(&subtype, sizeof(subtype)) != sizeof(subtype))
+            break;
+        position += sizeof(unsigned int) * 2;
+        if (!IsDynamicObjectType(typeId) || ++rows > 10000)
+            break;
+    }
+    file.Seek(savedPosition);
+    return valid;
+}
+
 void CSave::StoreDifference(CSave &original, CSave &subj)
 {
-    int i, nLen;
-    ASSERT(original.GetSize() == subj.GetSize());
-    if (original.GetSize() != subj.GetSize())
+    const unsigned int length = original.GetSize();
+    ASSERT(length == subj.GetSize());
+    if (length != subj.GetSize() || length == 0)
         return;
     original.Seek(0);
     subj.Seek(0);
-    nLen = original.GetSize();
-
-    bool bSame = true;
-    int nCurCount = 0, nStorePos = GetPosition();
-    Write((char)0);
-    for (i = 0; i < nLen; i++)
+    bool sameRun = true;
+    unsigned int runLength = 0;
+    unsigned int lengthPosition = GetPosition();
+    Write((unsigned char)0);
+    for (unsigned int i = 0; i < length; ++i)
     {
-        char ch1, ch2;
-        original.Read(ch1);
-        subj.Read(ch2);
-        if (ch1 != ch2)
+        unsigned char originalByte = 0, subjectByte = 0;
+        original.Read(originalByte);
+        subj.Read(subjectByte);
+        const bool bytesSame = originalByte == subjectByte;
+        if (bytesSame == sameRun)
         {
-            if (!bSame)
+            if (++runLength == 256)
             {
-                nCurCount++;
-                if (nCurCount == 256)
-                {
-                    StoreLength(*this, nStorePos, 255);
-                    StoreLength(*this, nStorePos, 0);
-                    nCurCount = 1;
-                }
+                StoreDeltaLength(*this, lengthPosition, 255, true);
+                StoreDeltaLength(*this, lengthPosition, 0, true);
+                runLength = 1;
             }
-            else
-            {
-                StoreLength(*this, nStorePos, (unsigned char)nCurCount);
-                bSame = false;
-                nCurCount = 1;
-            }
-            Write(ch2);
         }
         else
         {
-            if (bSame)
-            {
-                nCurCount++;
-                if (nCurCount == 256)
-                {
-                    StoreLength(*this, nStorePos, 255);
-                    StoreLength(*this, nStorePos, 0);
-                    nCurCount = 1;
-                }
-            }
-            else
-            {
-                StoreLength(*this, nStorePos, (unsigned char)nCurCount);
-                bSame = true;
-                nCurCount = 1;
-            }
+            StoreDeltaLength(*this, lengthPosition, static_cast<unsigned char>(runLength), true);
+            sameRun = bytesSame;
+            runLength = 1;
         }
+        if (!bytesSame)
+            Write(subjectByte);
     }
-    StoreLength(*this, nStorePos, (unsigned char)nCurCount);
+    StoreDeltaLength(*this, lengthPosition, static_cast<unsigned char>(runLength), sameRun);
 }
-/////////////////////////////////////////////////////////////////////////////////////
+
 void CSave::LoadFromDifference(CSave &original, CSave &dif)
 {
-    int nLeng = 0, nCurPos = 0, nTotalLeng = original.GetSize();
-    char buf[256];
+    unsigned int current = 0;
+    const unsigned int total = original.GetSize();
+    unsigned char buffer[256];
+    bool endedAfterChangedRun = false;
     original.Seek(0);
     Seek(0);
-    while (nCurPos < nTotalLeng)
+    while (current < total)
     {
-        dif.Read(&nLeng, 1);
-        original.Read(buf, nLeng);
-        Write(buf, nLeng);
-        nCurPos += nLeng;
-
-        if (dif.Read(&nLeng, 1) == 0)
-        {
-            ASSERT(0);
+        unsigned char sameLength = 0;
+        if (dif.Read(&sameLength, sizeof(sameLength)) != sizeof(sameLength))
             break;
-        }
-        original.Read(buf, nLeng);
-        dif.Read(buf, nLeng);
-        Write(buf, nLeng);
-        nCurPos += nLeng;
+        original.Read(buffer, sameLength);
+        Write(buffer, sameLength);
+        current += sameLength;
+        unsigned char changedLength = 0;
+        if (dif.Read(&changedLength, sizeof(changedLength)) != sizeof(changedLength))
+            break;
+        original.Read(buffer, changedLength);
+        dif.Read(buffer, changedLength);
+        Write(buffer, changedLength);
+        current += changedLength;
+        endedAfterChangedRun = current == total && changedLength != 0;
     }
+    if (!endedAfterChangedRun)
+        return;
+    const unsigned int registryPosition = dif.GetPosition();
+    if (registryPosition >= dif.GetSize())
+        return;
+    unsigned char marker = 0xFF;
+    dif.Read(&marker, sizeof(marker));
+    dif.Seek(registryPosition);
+    if (marker == 0 &&
+        !IsDynamicRegistry(dif, registryPosition) &&
+        IsDynamicRegistry(dif, registryPosition + 1))
+        dif.Seek(registryPosition + 1);
 }
-/////////////////////////////////////////////////////////////////////////////////////
+//\f///////////////////////////////////////////////////////////////////////////////////
 void CSave::Read(CSave &res)
 {
     unsigned int nSize;

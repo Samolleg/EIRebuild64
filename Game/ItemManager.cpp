@@ -86,6 +86,8 @@ CItem *CItemManager::CreateItem(LPCSTR pszString)
     for (i = 0; i < szStrings.GetSize(); ++i)
         szStrings[i].MakeLower();
     //
+    if (szStrings.GetSize() == 0)
+        return NULL;
     if (szStrings[0] == "spell container")
         return CreateItemSpell(szSpell, GetWorld()->GetSpellManager());
     //
@@ -97,7 +99,11 @@ CItem *CItemManager::CreateItem(LPCSTR pszString)
     }
 
     lpConstructor->SetItemManager(this);
-    lpConstructor->BeginConstructItem(lpShape->GetTypeID());
+    if (!lpConstructor->BeginConstructItem(lpShape->GetTypeID()))
+    {
+        lpConstructor->SetItemManager(NULL);
+        return NULL;
+    }
 
     const SIDBMaterial *lpMaterial = NULL;
     if (szStrings.GetSize() > 1)
@@ -121,6 +127,8 @@ CItem *CItemManager::CreateItem(LPCSTR pszString)
         ReportError("Can't create item \"%s\".\nCheck shape and material names\n", pszString);
 
     lpConstructor->SetItemManager(NULL);
+    if (!lpItem)
+        return NULL;
     //
     if ((lpItem->WhoAmI() == HPC_ITEM_LOOT) &&
         (((CItemLoot *)lpItem)->GetLootType() == IDBLIT_INSTRUCTION) && (szStrings.GetSize() > 1))

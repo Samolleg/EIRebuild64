@@ -87,6 +87,12 @@ private:
     void InflictWallDamage(const CPlot3D &ptWallDir);
     void InflictDamageInRadius();
     void InflictTargetedDamage();
+    bool ModLifeSpellStart(int kind);
+    bool ExtendedStart(int nKind);
+    bool ExtendedDeliver(int nKind);
+    bool ExtendedAction(int nKind);
+    void CreateLightningWithColor(const CPlot3D&src,const CPlot3D&dst,float scale,int color);
+    friend bool JMV_CheckExtendedSpellLifecycle();
     void StartSpell(int nKind);
     void DeliverSpell(int nKind);
     void ActionSpell(int nKind);

@@ -1,4 +1,5 @@
 #pragma once
+namespace ModCombat {struct Defense;struct Feedback;}
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // **	RPG System structures                                                      ** //
@@ -349,6 +350,7 @@ public:
     //
     float fExpPenalty; // пенальти по экспе. пока оно не заполнится, экспа расти не будет
 private:
+    BOOL ProcessModAttackSingle(CUnit*,SRPGCommonStats*,const SRPGAttackPortion*,CItem*,CUnit*,const ModCombat::Defense&,ModCombat::Feedback&);
     BOOL ProcessAttackPortionSingle(CUnit *pUnit, SRPGCommonStats *pCommonStats,
                                     const SRPGAttackPortion *pAttackPortion, CItem *pWeapon);
     void ApplyDamageToArmors(CUnit *pUnit, ERPGHitLocations hlType, int nArmorLayerIndex,
@@ -405,6 +407,7 @@ public:
     float RecalcActionDamageModifier(bool bHero) const;
     ECanRun CanRun(bool bHero) const;
     //
+    BOOL ProcessModAttackPortion(CUnit*,SRPGCommonStats*,const SRPGAttackPortion*,CItem*,CUnit*,const ModCombat::Defense&,ModCombat::Feedback* = nullptr);
     BOOL ProcessAttackPortion(CUnit *pUnit, SRPGCommonStats *pCommonStats,
                               const SRPGAttackPortion *pAttackPortion, CItem *pWeapon = 0);
     BOOL Heal(SRPGCommonStats *lpCommonStats, float fpHeal);

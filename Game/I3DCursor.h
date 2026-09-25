@@ -66,6 +66,7 @@ public:
     int SetMode(int nType); // возвращает предыдущий тип курсора
     int GetMode() const { return m_eCursorType; }
     void Show(BOOL bShow);
+    bool IsShown() const { return m_isShow != FALSE; }
 
     CPoint GetPos() const { return m_ptCursor; }
     void SetPos(CPoint ptPos);

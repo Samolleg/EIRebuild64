@@ -479,7 +479,7 @@ int CI3DSurface::DrawText(LPCTSTR pszStr, const CRect &rc, int nFont, COLORREF c
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DSurface::DrawMultiText(LPCTSTR pszStr, CRect rc, int nLines, int nFont, COLORREF crColor,
-                               int nFormat, BOOL bShadow)
+                               int nFormat, BOOL bShadow, int nLineStep)
 {
     if (!pSurface)
         return 0;
@@ -544,7 +544,7 @@ int CI3DSurface::DrawMultiText(LPCTSTR pszStr, CRect rc, int nLines, int nFont, 
     }
 
     CRect rcTmp = rc;
-    CPoint shift(0, rc.Height());
+    CPoint shift(0, nLineStep > 0 ? nLineStep : rc.Height());
     for (int i = 0; i < nLines && i < szFText.GetSize(); i++)
     {
         DrawText(szFText[i], rcTmp, nFont, crColor, nFormat, bShadow);
@@ -912,8 +912,11 @@ bool PasteTexture(LPTEXTURE pDstTex, LPCTSTR pszTexName, int nSrcSizeX, int nSrc
                   int nSizeY, int nDstX, int nDstY, int nSrcX, int nSrcY)
 {
     CDXGISurface *pSurface = pDstTex->GetSurface();
+    CString resourceName(pszTexName);
+    if (resourceName.Right(4).CompareNoCase(".mmp") != 0)
+        resourceName += ".mmp";
     LPBYTE pTexData = ((CTextureManager *)(theWorld.GetTextureManager()))
-                          ->GetMMPData(CString(pszTexName) + ".mmp");
+                          ->GetMMPData(resourceName);
 
     SMMPFileHeader *pHdr = (SMMPFileHeader *)pTexData;
     std::unique_ptr<DWORD[]> pRGBA = 0;

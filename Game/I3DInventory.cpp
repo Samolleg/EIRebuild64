@@ -6,6 +6,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TextManager.h"
 #include "FigureManager.h"
 #include "TextureManager.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "SpellManager.h"
 #include "ItemManager.h"
 #include "WorldClient.h"
@@ -16,6 +18,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "RandomGen.h"
 #include "Party.h"
 #include "GameMain.h"
+#include "LuaState.h"
+#include "UnitServer.h"
+#include "WorldServer.h"
 /////////////////////////////////////////////////////////////////////////////////////
 const COLORREF INV_COLOR_INFO = RGB(228, 215, 167);
 const COLORREF INV_COLOR_HEADER = RGB(255, 255, 255);
@@ -52,31 +57,67 @@ CTexture *CTextureLRUAllocator::CreateObject(const char *pszTexName)
 {
     // copy texture content to new object
     CTextureManager *pTexMng = (CTextureManager *)theWorld.GetTextureManager();
-    CTexture *pTex = pTexMng->CreateInterfaceTexture(256, 256);
-    if (!pTex)
-        return 0;
-    pTex->AddRef();
+    const bool modGraphics = ModRuntime::Current() &&
+        ModRuntime::Current()->CombatSetting("JMVGraphics2");
+    CString resourceName = pszTexName;
+    LPBYTE pTexData = nullptr;
+    int atlasSize = 256;
+    if (modGraphics)
+    {
+        // The mod's inventory atlas selects the highest available resource first.
+        const char *suffixes[] = {".x4.mmp", ".x2.mmp", ".mmp"};
+        for (int variant = 0; variant < 3; ++variant)
+        {
+            CString candidate = CString(pszTexName) + suffixes[variant];
+            pTexData = pTexMng->GetMMPData(candidate);
+            if (!pTexData) continue;
+            resourceName = candidate;
+            atlasSize = variant == 0 ? 2048 : variant == 1 ? 1024 : 256;
+            if (variant != 2)
+            {
+                CString base(pszTexName);
+                base.MakeLower();
+                if (base.Left(6) == "unhuma" || base.Left(2) == "pl" ||
+                    base.Left(2) == "lg" || base.Left(2) == "sh" ||
+                    base.Left(2) == "pt" || base.Left(2) == "gl" ||
+                    base.Left(2) == "bt")
+                    atlasSize = 1024;
+                else if (base.Left(5) == "spell" || base.Left(8) == "modifier" ||
+                         base.Left(8) == "material" || base.Left(5) == "qitem" ||
+                         base.Left(5) == "litem" || base.Left(6) == "quitem" ||
+                         base.Left(11) == "prototype00")
+                    atlasSize = 2048;
+            }
+            break;
+        }
+    }
+    else
+    {
+        resourceName += ".mmp";
+        pTexData = pTexMng->GetMMPData(resourceName);
+    }
 
-    LPBYTE pTexData = pTexMng->GetMMPData(CString(pszTexName) + ".mmp");
-
-    int nSrcSizeX, nSrcSizeY;
-
-    nSrcSizeX = 256;
-    nSrcSizeY = 256;
+    int nSrcSizeX = 256, nSrcSizeY = 256;
     if (pTexData)
     {
         nSrcSizeX = ((SMMPFileHeader *)pTexData)->dwDimentionX;
         nSrcSizeY = ((SMMPFileHeader *)pTexData)->dwDimentionY;
     }
-
+    const bool hasSource = pTexData != nullptr;
     pTexMng->CloseAllFiles();
+    if (nSrcSizeX <= 0 || nSrcSizeY <= 0 || nSrcSizeX > atlasSize || nSrcSizeY > atlasSize)
+        return 0;
 
-    int nSizeX = nSrcSizeX;
-    int nSizeY = nSrcSizeY;
-    int dstX = 0;
-    int dstY = 256 - nSrcSizeY;
-
-    PasteTexture(pTex, pszTexName, nSrcSizeX, nSrcSizeY, nSizeX, nSizeY, dstX, dstY);
+    CTexture *pTex = pTexMng->CreateInterfaceTexture(atlasSize, atlasSize);
+    if (!pTex) return 0;
+    pTex->AddRef();
+    const int dstY = atlasSize - nSrcSizeY;
+    if (hasSource && !PasteTexture(pTex, resourceName, nSrcSizeX, nSrcSizeY,
+                                  nSrcSizeX, nSrcSizeY, 0, dstY))
+    {
+        pTex->Release();
+        return 0;
+    }
     return pTex;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -731,11 +772,11 @@ void CI3DObjectItemInfo::FormTextInfo()
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -857,6 +898,98 @@ void CI3DObjectItemInfo::FormTextInfo()
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
         }
+
+        const CString armorName = pArmor->GetShapeEntry()->szName;
+        const CString armorMaterial = pItmMng->GetMaterial(pItem->GetMaterial())->szName;
+        auto drawSignedPercent = [&](const CString &label, float value)
+        {
+            if (value == 0.0f)
+                return;
+            szOut.Format("%s %+.0f%%", label, value * 100.0f);
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+        };
+        auto drawArmorProperty = [&](const CString &label, float value, bool percent)
+        {
+            if (value == 0.0f)
+                return;
+            if (percent)
+                szOut.Format("%s %+.0f%%", label, value * 100.0f);
+            else
+                szOut.Format("%s %+.0f", label, value);
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+        };
+
+        drawArmorProperty(szStrings[MODDEFENSE],
+                          Lua::State.GetArmorPropsInside(armorName, 2), false);
+        drawArmorProperty(szStrings[MODATTACK],
+                          Lua::State.GetArmorPropsInside(armorName, 3), false);
+
+        float visibility = Lua::State.GetArmorPropsInside(armorName, 5) +
+                           Lua::State.GetMaterialPropsInside(armorMaterial, 13);
+        szTmp = "Unknown";
+        if (visibility != 0.0f)
+        {
+            if (pTxtMng->GetText("string infoitem_53"))
+                pTxtMng->GetLine(szTmp);
+            drawSignedPercent(szTmp, visibility);
+        }
+        float hearing = Lua::State.GetArmorPropsInside(armorName, 6) +
+                        Lua::State.GetMaterialPropsInside(armorMaterial, 14);
+        szTmp = "Unknown";
+        if (hearing != 0.0f)
+        {
+            if (pTxtMng->GetText("string infoitem_51"))
+                pTxtMng->GetLine(szTmp);
+            drawSignedPercent(szTmp, hearing);
+        }
+
+        float regeneration = Lua::State.GetMaterialPropsInside(armorMaterial, 2);
+        szTmp = "Unknown";
+        if (regeneration > 0.00001f)
+        {
+            if (pTxtMng->GetText("string infoitem_80"))
+                pTxtMng->GetLine(szTmp);
+            szOut.Format("%s +%.2f%%", szTmp, regeneration);
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+        }
+        float restoration = Lua::State.GetMaterialPropsInside(armorMaterial, 3);
+        szTmp = "Unknown";
+        if (restoration > 0.00001f)
+        {
+            if (pTxtMng->GetText("string infoitem_81"))
+                pTxtMng->GetLine(szTmp);
+            szOut.Format("%s +%.2f%%", szTmp, restoration);
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+        }
+
+        float movement = Lua::State.GetMaterialPropsInside(armorMaterial, 9);
+        szTmp = "Unknown";
+        if (movement != 0.0f)
+        {
+            if (pTxtMng->GetText("string infounit_2"))
+                pTxtMng->GetLine(szTmp);
+            szOut.Format("%s %+.1f%%", szTmp, movement);
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+        }
+        const int materialProperties[] = {10, 11, 12};
+        const char *materialLabels[] = {"PERK Strength", "PERK Dexterity", "PERK Intelligence"};
+        for (int i = 0; i < 3; ++i)
+        {
+            float value = Lua::State.GetMaterialPropsInside(armorMaterial, materialProperties[i]);
+            if (value <= 0.0f)
+                continue;
+            szTmp = "Unknown";
+            if (pTxtMng->GetText(materialLabels[i]))
+                pTxtMng->GetLine(szTmp);
+            szOut.Format("%s +%.2f", szTmp, value);
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+        }
     }
 
     // LATER: SKILLS MODIFIED
@@ -867,12 +1000,12 @@ void CI3DObjectItemInfo::FormTextInfo()
     {
         pTxtMng->GetSystemString("loot_item", szTmp);
         szDesc += szTmp;
-        pSurf->DrawMultiText(szDesc, rc, 7, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 7, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
         pSurf->ReleaseDC();
         return;
     }
 
-    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     rc += shift;
@@ -918,11 +1051,11 @@ void CI3DObjectItemInfo::FormPotionInfo()
 
     CString szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -954,7 +1087,7 @@ void CI3DObjectItemInfo::FormPotionInfo()
     }
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
@@ -987,11 +1120,11 @@ void CI3DObjectItemInfo::FormSpellInfo()
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -1062,7 +1195,7 @@ void CI3DObjectItemInfo::FormSpellInfo()
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     rc += shift;
@@ -1088,7 +1221,7 @@ void CI3DObjectItemInfo::FormSpellInfo()
         }
         szOut.TrimRight(",");
         szOut += ".";
-        pSurf->DrawMultiText(szOut, rc, 3, 0, color, DT_LEFT | DT_WORDBREAK);
+        pSurf->DrawMultiText(szOut, rc, 3, 0, color, DT_LEFT | DT_WORDBREAK, TRUE, 12);
     }
 
     pSurf->ReleaseDC();
@@ -1117,11 +1250,11 @@ void CI3DObjectItemInfo::FormMaterialInfo()
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -1189,7 +1322,7 @@ void CI3DObjectItemInfo::FormMaterialInfo()
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
@@ -1243,11 +1376,11 @@ void CI3DObjectItemInfo::FormInstructionInfo()
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -1356,7 +1489,7 @@ void CI3DObjectItemInfo::FormInstructionInfo()
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
@@ -1382,11 +1515,11 @@ void CI3DObjectItemInfo::FormPrototypeInfo()
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -1454,7 +1587,7 @@ void CI3DObjectItemInfo::FormPrototypeInfo()
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
@@ -1479,11 +1612,11 @@ void CI3DObjectItemInfo::FormModifierInfo()
 
     CString szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -1503,7 +1636,7 @@ void CI3DObjectItemInfo::FormModifierInfo()
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
@@ -1560,7 +1693,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
@@ -1587,7 +1720,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         break;
     }
 
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
 
@@ -1604,6 +1737,70 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                          int(pSkillInfo->pStats->GetMaxEncumbrance()));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
+            if (pSkillInfo->pUnit)
+            {
+                CUnit *serverUnit = theWorldServer.GetUnit(pSkillInfo->pUnit->GetID());
+                CUnitServer *regenServer = serverUnit && serverUnit->WhoAmI() == HPC_UNIT
+                                               ? dynamic_cast<CUnitServer *>(serverUnit->GetUnitSpecific())
+                                               : nullptr;
+                CMapObjectServer *commonServer = regenServer ? regenServer->GetMapObjectServer() : nullptr;
+                const SUDBRaceModel *race = pSkillInfo->pUnit->GetRaceModel();
+                if (regenServer && commonServer && race)
+                {
+                    const SRPGUnitStats *serverStats = regenServer->GetRPGStats();
+                    const SRPGCommonStats *commonStats = commonServer->GetRPGStats();
+                    const int magicBloodLevel = min(3, int(serverStats->cPerks[27]));
+                    const float magicBloodBonus =
+                        float(Lua::State.GetRegenBonusFromPerkMagicBlood(magicBloodLevel));
+                    float jewelryRegeneration = 0.0f;
+                    for (int i = 0; i < pScreen->GetCurrentPers()->items.GetSize(); ++i)
+                    {
+                        CItem *item = pScreen->GetCurrentPers()->items[i];
+                        if (item && item->GetShapeEntry())
+                            jewelryRegeneration +=
+                                Lua::State.GetJewelryPropsInside(item->GetShapeEntry()->szName, 14) * 0.01f;
+                    }
+                    float armorRegeneration = 0.0f;
+                    for (int i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
+                    {
+                        CItemArmor *armor = serverUnit->GetQArmor(i);
+                        if (armor)
+                            armorRegeneration +=
+                                Lua::State.GetMaterialPropsInside(armor->GetMaterialCode(), 2) * 0.01f;
+                    }
+                    const float complexRegeneration =
+                        Lua::State.GetComplexSummStats(serverUnit, 10) * 0.01f;
+                    const float hpRegeneration = race->fpRegenerateHP *
+                        (magicBloodBonus + jewelryRegeneration + armorRegeneration + complexRegeneration);
+                    const float maxHp = max(1.0f, commonStats->ssHP.fpMax);
+                    const float regenerationSpell = hpRegeneration > 0.0f
+                        ? serverUnit->GetEffectValue(SPELL_ID_REGENERATION) / 30.0f
+                        : 0.0f;
+                    const float result = maxHp * hpRegeneration * float(2 + theSettings.nDifficultyLevel) +
+                                         regenerationSpell;
+                    const float fullResult = result > 0.000001f ? maxHp / result : 0.0f;
+
+                    CString szTmp2;
+                    if (pTxtMng->GetText("string infoskill_50")) pTxtMng->GetLine(szTmp);
+                    szOut.Format("%s", szTmp);
+                    pSurf->DrawText(szOut, rc, 0, color, DT_CENTER);
+                    rc += shift;
+                    if (pTxtMng->GetText("string infoskill_45")) pTxtMng->GetLine(szTmp);
+                    szOut.Format("%s %.4f/100", szTmp, hpRegeneration * 100.0f);
+                    pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+                    rc += shift;
+                    if (pTxtMng->GetText("string infoskill_46")) pTxtMng->GetLine(szTmp);
+                    if (pTxtMng->GetText("string infoskill_47")) pTxtMng->GetLine(szTmp2);
+                    szOut.Format("%s %.2f%s", szTmp, result, szTmp2);
+                    pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+                    rc += shift;
+                    if (pTxtMng->GetText("string infoskill_51")) pTxtMng->GetLine(szTmp);
+                    if (pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(szTmp2);
+                    szOut.Format("%s %.1f%s", szTmp, fullResult, szTmp2);
+                    pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+                    rc += shift;
+                }
+            }
             rc += shift;
             break;
         case 1: // dex
@@ -1629,7 +1826,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             break;
         }
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 1)
@@ -1665,7 +1862,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 2)
@@ -1686,7 +1883,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 3)
@@ -1846,7 +2043,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         */
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 6, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 6, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 4)
@@ -1875,7 +2072,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 5)
@@ -1885,7 +2082,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             (type == RPGWST_BOW || type == RPGWST_CROSSBOW))
         {
             pSurf->DrawMultiText(szStrings[WSLBOWDEFENSE], rc, 2, 0, color,
-                                 DT_CENTER | DT_WORDBREAK);
+                                 DT_CENTER | DT_WORDBREAK, TRUE, 12);
             rc += shift;
         }
         else
@@ -1931,7 +2128,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         rc += shift;
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 6)
@@ -1951,11 +2148,11 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
     if (pSkillInfo->nType == 7)
-        pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK);
+        pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
@@ -1972,7 +2169,7 @@ void CI3DObjectItemInfo::SetHelp(int nHelpID)
     CTextManager *pTxtMng = theWorld.GetTextManager();
 
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 15);
+    CPoint shift(0, 12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
@@ -1984,12 +2181,12 @@ void CI3DObjectItemInfo::SetHelp(int nHelpID)
         pTxtMng->GetLine(szDesc);
     }
     // szName.Format( "Help #%d", nHelpID );
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     rc += shift;
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC

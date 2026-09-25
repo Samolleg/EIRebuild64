@@ -4,6 +4,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "SpellSystem.h"
 #include "SpellManager.h"
 #include "Unit.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+#include "ModSpellRules.h"
 
 #include <functional>
 #include <algorithm>
@@ -114,7 +117,7 @@ BOOL CSpell::Setup(const SSDBSpellPrototype *pPrototype)
 /////////////////////////////////////////////////////////////////////////////////////
 static bool AreFriends(CUnit *p1, CUnit *p2)
 {
-    return !p1->IsEnemy(p2->GetPlayerNum()) && !p2->IsEnemy(p1->GetPlayerNum());
+    return (ModRuntime::Current() && p1 == p2) || (!p1->IsEnemy(p2->GetPlayerNum()) && !p2->IsEnemy(p1->GetPlayerNum()));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CSpell::IsValidTarget(CUnit *pCaster, CUnit *pTarget)
@@ -135,6 +138,7 @@ bool CSpell::IsValidTarget(CUnit *pCaster, CUnit *pTarget)
             return false;
     }
     const char *pszMaskName = pTarget->GetMaskName();
+    if (ModRuntime::Current() && ModSpells::ExcludesUndead(dwFilter, pszMaskName)) return false;
     if ((dwFilter & SPELL_FILTER_HUMAN) &&
         (strcmp(pszMaskName, "unhuma") == 0 || strcmp(pszMaskName, "unhufe") == 0))
         return false;
@@ -150,7 +154,8 @@ bool CSpell::IsValidTarget(CUnit *pCaster, CUnit *pTarget)
 /////////////////////////////////////////////////////////////////////////////////////
 ERPGAttackTypes CSpell::GetAttackType() const
 {
-    switch (GetSubtypeID() >> 16)
+    if(ModRuntime::Current()&&(GetSubtypeID()>>16)==SPELL_ID_VAMP){int attack=3+GetMagicSubtype();return attack>=0&&attack<int(RPG_NUM_ATTACK_TYPES)?ERPGAttackTypes(attack):RPGAT_GENERAL;}
+    switch (ModRuntime::Current()?ModSpells::ElementalBase(GetSubtypeID() >> 16):int(GetSubtypeID() >> 16))
     {
     case SPELL_ID_INVOKE_LGHTNG:
     case SPELL_ID_LIGHTNING:
@@ -175,7 +180,8 @@ ERPGAttackTypes CSpell::GetAttackType() const
 /////////////////////////////////////////////////////////////////////////////////////
 bool CSpell::IsOffensive() const
 {
-    switch (GetSubtypeID() >> 16)
+    if(ModRuntime::Current()&&((GetSubtypeID()>>16)==SPELL_ID_VAMP||(GetSubtypeID()>>16)==SPELL_ID_VISIONFOG))return true;
+    switch (ModRuntime::Current()?ModSpells::ElementalBase(GetSubtypeID() >> 16):int(GetSubtypeID() >> 16))
     {
     case SPELL_ID_FIREARROW:
     case SPELL_ID_LIGHTNING:
@@ -395,22 +401,24 @@ BOOL CSpellContainer::Recalculate()
     {
         const SSDBModifier *pRune = *iter;
         //
-        switch (pRune->pszCode[0])
+        auto*mod=ModRuntime::Current();
+        bool handled=mod&&mod->CombatSetting("NewRunes")&&ModSpells::ApplyRune(*pRune,*pPrototype,spell.dwActions,spell.effect.fpPower,spell.effect.nDuration,spell.dwResolve);
+        if(!handled) switch (pRune->pszCode[0])
         {
         case 'r': // range
             spell.fpRange += pPrototype->fpRange * pRune->fpValue;
-            spell.fpRange = Max(0.0f, spell.fpRange); // can't be negative
+            if(!mod||!mod->CombatSetting("AllowMagicNegative"))spell.fpRange = Max(0.0f, spell.fpRange); // can't be negative
             break;
         case 't': // num targets
             spell.dwNumTargets += DWORD(pPrototype->dwNumTargets * pRune->fpValue);
             break;
         case 'a': // area
             spell.effect.fpRadius += pPrototype->fpArea * pRune->fpValue;
-            spell.effect.fpRadius = Max(0.0f, spell.effect.fpRadius);
+            if(!mod||!mod->CombatSetting("AllowMagicNegative"))spell.effect.fpRadius = Max(0.0f, spell.effect.fpRadius);
             break;
         case 'e': // effect power
             spell.effect.fpPower += pPrototype->fpEffect * pRune->fpValue;
-            spell.effect.fpPower = Max(0.0f, spell.effect.fpPower);
+            if(!mod||!mod->CombatSetting("AllowMagicNegative"))spell.effect.fpPower = Max(0.0f, spell.effect.fpPower);
             break;
         case 'd': // duration
             spell.effect.nDuration += static_cast<DWORD>(pPrototype->dwDuration * pRune->fpValue);
@@ -418,7 +426,7 @@ BOOL CSpellContainer::Recalculate()
             break;
         case 'm': // mana
             spell.fpManaCost += pPrototype->fpMana * pRune->fpValue;
-            spell.fpManaCost = Max(0.0f, spell.fpManaCost);
+            if(!mod||!mod->CombatSetting("AllowMagicNegative"))spell.fpManaCost = Max(0.0f, spell.fpManaCost);
             break;
         case 'f': // filters
             switch (pRune->pszCode[1])

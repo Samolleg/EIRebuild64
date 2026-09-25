@@ -1,4 +1,5 @@
 #pragma once
+#include "WorldLoadOrigin.h"
 /*==========================================================================================================
 
         Server class header
@@ -193,7 +194,7 @@ public:
     //
     BOOL IsMapLoaded() { return bMapLoaded; }
     // load&store
-    BOOL LoadSave(CSave &file, const char *pszTerrain = 0);
+    BOOL LoadSave(CSave &file, WorldLoadOrigin origin, const char *pszTerrain = 0);
     void StoreSave(CSave &file);
     //
     BOOL GetExitDirection(int nExit, CString &szZone, int &nZoneEntrance);

@@ -80,6 +80,7 @@ private:
     void ClickOnWagonItem(CItem *pItem);
 
     void TransactionOK();
+    bool SkillTransactionBlocked();
     void TransactionCancel();
     void CheckValidTransaction();
 

@@ -170,6 +170,7 @@ public:
     virtual void GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnitRadius);
     // spell-effects-in-mapobject management
     virtual void AddSpellEffect(CSpellEffect &effect);
+    bool RefreshWeaponStatus(CSpellEffect &effect);
     const CSpellEffectArray &GetSpellEffects() const { return spellEffects; }
     virtual void SetStunFlag(BOOL bStun) {}
     BOOL HasSpellEffect(int nSpellID) const;
@@ -199,6 +200,7 @@ public:
     // Segment
     virtual int Segment();
     bool CountActivity() { return --nActiveObjectCounter > 0; }
+    bool TickInactiveSpellEffects();
     void SetActivityCounter(int nValue) { nActiveObjectCounter = nValue; }
     virtual void RemoveReferencesOn(CMapObject *pTarget) {}
     virtual void TimeOfDayChanged() {}

@@ -9,6 +9,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FileRegistry.h"
 #include <io.h>
 #include <fstream>
+#include <set>
 #include "Notification.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CResourceManager::CResourceManager()
@@ -135,7 +136,38 @@ void CResourceManager::CloseAllFiles()
 // Ordered visual overlays: first archive containing an entry wins.
 BOOL CResourceManager::AddGraphicsResources(LPCSTR category)
 {
-    if(ModRuntime::Resources())return TRUE; // The selected mod owns its ordered graphics archives.
+    if (auto *mod = ModRuntime::Resources())
+    {
+        // The addon searches the complete figure/texture override list before
+        // any original archive, not each base archive's overlays in isolation.
+        const bool textures = _stricmp(category, "textures.res") == 0;
+        const bool figures = _stricmp(category, "figures.res") == 0;
+        if (!textures && !figures) return TRUE;
+        const char *groups[3] = {category, textures ? "redress.res" : "menus.res",
+                                 textures ? "menus.res" : nullptr};
+        std::set<std::string> seen;
+        for (const char *group : groups)
+        {
+            if (!group) continue;
+            std::vector<std::string> paths;
+            bool ignore = false;
+            mod->ResourcePlan(group, paths, ignore);
+            for (const auto &path : paths)
+            {
+                std::string key = path;
+                for (char &ch : key) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+                if (!seen.insert(key).second) continue;
+                auto *archive = dbgnew CMappedResource(true);
+                if (!archive->OpenResource(path.c_str()))
+                {
+                    delete archive;
+                    return ReportError("Cannot open mod graphics archive %s", path.c_str());
+                }
+                resources.push_back(CResourcePair(path, archive));
+            }
+        }
+        return TRUE;
+    }
     CString path = CWorld::GetCurrentPath() + "config\\graphics-resources.ini";
     if (_access(path, 0) != 0)
         return TRUE;

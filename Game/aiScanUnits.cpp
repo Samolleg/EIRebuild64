@@ -11,6 +11,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiScanUnits.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "aiMap.h"
 #include "UnitServer.h"
 #include "mapObjectServer.h"
@@ -674,6 +676,8 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
     float fpLostVisionCoef = bHero ? 1 : FP_AI_LOST_FROM_SIGHT_MUL;
     if (!pUnit)
         return;
+    const bool deagrOnLostSight = ModRuntime::Current() &&
+                                  ModRuntime::Current()->CombatSetting("DeagrPlayerOnLoose");
     PrepareVision(pUnit);
     FormLists(pUnit, env);
     // remove visible units that are out of range
@@ -703,7 +707,7 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
             if (!pUnit->IsEnemy(pVUnit) || bHero)
             {
                 // unit attacking us should remain visible
-                if (pTarget->IsAggressive() && pTarget->logic.GetCurrentTarget() == pUnit)
+                if (!deagrOnLostSight && pTarget->IsAggressive() && pTarget->logic.GetCurrentTarget() == pUnit)
                     continue;
                 // а не пропал ли юнит из вида ?
                 fpVision = pHero->GetVisionSense() * pTarget->GetVisionDetect() * fpLostVisionCoef;
@@ -713,7 +717,7 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
                 if (fpVision > fpDist)
                     continue;
                 // expensive check
-                if (pTarget->logic.GetAggressionTarget() == pUnit)
+                if (!deagrOnLostSight && pTarget->logic.GetAggressionTarget() == pUnit)
                     continue;
             }
             else
@@ -723,6 +727,7 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
               << std::endl;
         if (pUnit->IsEnemy(pVUnit))
             env.AddPoI(pVUnit->GetCP(), AI_PPOWER_SEEENEMY, AI_PPDEC_SEEENEMY);
+        if (deagrOnLostSight) pHero->CancelFollowOnLostSight(pVUnit);
         env.visibleUnits.RemoveAt(posCheck);
     }
     // perform vision tests

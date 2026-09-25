@@ -183,20 +183,31 @@ struct SL0Animation
 struct SL0AnimationSeq
 {
     CAArray<SL0Animation> animations;
+    // Full ADB indices live beside the byte-sized, on-disk animation records.
+    CAArray<DWORD> startIds, cycleIds;
     int nStartSegment; // -1 if start from current
 
     SL0AnimationSeq &operator+=(const SL0AnimationSeq &add);
     void Clear()
     {
         animations.SetSize(0);
+        startIds.SetSize(0);
+        cycleIds.SetSize(0);
         nStartSegment = -1;
     }
     void Freeze(int nTime) { nStartSegment += nTime; }
     EUnitAnimationSpeed GetAnimationSpeed();
     bool IsEmpty() { return animations.GetSize() == 0; }
     bool IsSame(SL0AnimationSeq &cmp);
-    void AddSimple(BYTE bStart, int nLength);
-    void AddCycle(BYTE bCycle);
+    void AddSimple(DWORD bStart, int nLength);
+    void AddCycle(DWORD bCycle);
+    void AddPumpCycle();
+    void Append(const SL0Animation &animation, DWORD startId, DWORD cycleId);
+    DWORD GetStartId(int index) const;
+    DWORD GetCycleId(int index) const;
+    void SetStartId(int index, DWORD id);
+    void SetCycleId(int index, DWORD id);
+    void EnsureIds();
     void SetSpeed(EUnitAnimationSpeed speed);
     void SetSoundSet(BYTE bSoundSet);
     bool IsEndless();
@@ -392,7 +403,20 @@ private:
     DWORD dwFutureEnemies; // маска, показывающая врагов, о которых уже сообщили но они еще не
                            // активизированы
 public:
+    friend class CModPackage;
+    bool CanRequestWeaponSkill(int slot,CMapObject*target);
+    bool CanRequestPointSkill(int slot,const CPlot3D& point);
+    bool TagPointSkill(int slot);
+    bool CanRequestAISkill(int slot,CUnit* target);
+    void SyncNpcMagicState();
+    bool HasAISpellMana(int slot);
+    bool HasAISkillCommand(int slot,CUnit* target);
+    bool TagAISkill(int slot,CUnit* target);
+    bool PowerHitTrailActive(int hit,bool delivered,int weaponToken);
+    bool TagWeaponSkill(int slot,CMapObject*target);
+    void CancelFollowOnLostSight(CUnit* target);
     const SUnitCommand& GetScriptCommand() const { return curCommand; }
+    const SUnitCommand& GetNextScriptCommand() const { return nextCommand; }
     EUnitPose GetScriptPose() const { return currentPose.pose; }
     CAIUnitLogic logic;
     CAIAcknowledgements acknowledgements;
@@ -480,8 +504,8 @@ private:
     bool IsMoveAnimation(SL0AnimationSeq &res);
     bool GetTransAnimation(SL0AnimationSeq &res, const SL1Pose &srcPose, const SL1Pose &dstPose);
     int CalcSufferDirection(CUnit *pAttacker, BOOL bAreaSpell);
-    int GetAnimationLength(BYTE bAnim);
-    int GetAnimationHit(BYTE bAnim);
+    int GetAnimationLength(DWORD bAnim);
+    int GetAnimationHit(DWORD bAnim);
     // вычисление hit location и attack direction исходя из роста и расположения охотника и жертвы
     // возвращает указатель на анимацию атаки, хит локейшн в который наносится удар записывается в
     // cmd, момент нанесения удара в nHit
@@ -545,17 +569,23 @@ private:
     // bBackstab в данном случае показывает, что взаимное положение юнитов допускает
     // использование навыка backstab, направление удара вычисляется в CalcAttackDirection()
     BOOL CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL bBackstab,
-                                          ERPGHitLocations eAttackLocation, bool bCalledShot);
+                                          ERPGHitLocations eAttackLocation, bool bCalledShot, bool leftHand=false);
     // вычислить попали ли по цели
-    bool DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttacker);
+    bool DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttacker, float accuracyBonus=0);
     // если в оружии есть спелл он должен быть использован
-    void UseCurrentWeaponSpell(CMapObject *pTarget);
+    void UseCurrentWeaponSpell(CMapObject *pTarget, CItemWeapon *attackWeapon=nullptr);
     void UseArmorSpells(bool bBeforeAttack);
     void UseSpell();
     void UseTrap();
     void UseSkill(CMapObject *pTarget);
-    void UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion);
-    void UseAttackStart(CMapObject *pTarget, ERPGHitLocations eAttackLocation, bool bCalledShot);
+    int PrepareWeaponSkill();
+    int PrepareExplosiveShot();
+    void StartPowerHitGlow(int now);
+    void PowerHitFeedback(CUnit* attacker,float beforeHp);
+    const SADEntry* powerHitSuffer=nullptr;
+    float lastCrippledFactor=1;
+    void UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion,bool applyWeaponSpell=true,int projectileIndex=0,int projectileCount=1,const char* activeSkillCode=nullptr);
+    void UseAttackStart(CMapObject *pTarget, ERPGHitLocations eAttackLocation, bool bCalledShot, bool leftHand=false);
     void UsePotion(int nQSpellNum, CMapObject *pTarget, const CPlot3D &ptCastTo);
 
     // TAME, taming support functions
@@ -746,6 +776,7 @@ public:
     float GetMaxVisionRange() const { return Max(GetVisionSense(), GetLifeSense()); }
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnitServer"; }
+    SL0AnimationSeq *GetExtendedAnimationSequence(unsigned kind);
     virtual EClassIDs WhoAmI() const { return HPC_UNITSERVERSPECIFIC; }
 };
 /////////////////////////////////////////////////////////////////////////////////////

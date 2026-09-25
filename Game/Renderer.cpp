@@ -1084,6 +1084,8 @@ DXGI_FORMAT TextureFormatFromMMPFormat(DWORD mmpFormat)
         return DXGI_FORMAT_B5G5R5A1_UNORM;
     case MMP_FORMAT_4444:
         return DXGI_FORMAT_B4G4R4A4_UNORM;
+    case MMP_FORMAT_8888:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     default:
         ReportError("Can't find texture format (MMP format %d).\n", mmpFormat);
         return DXGI_FORMAT_UNKNOWN;
@@ -1093,7 +1095,7 @@ BOOL CRenderer::FindBestTextureFormat(const SMMPFileHeader *pHdr, DXGI_FORMAT &f
 {
     const DWORD mmpFormat = pHdr->dwFormat;
     format = TextureFormatFromMMPFormat(mmpFormat);
-    return TRUE;
+    return format != DXGI_FORMAT_UNKNOWN;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1102,7 +1104,7 @@ BOOL CRenderer::FindBestTextureFormat(const SMMPFileHeader *pHdr, DXGI_FORMAT &f
 BOOL CRenderer::FindTextureFormat(DWORD dwTextureFormat, DXGI_FORMAT &format) const
 {
     format = TextureFormatFromMMPFormat(dwTextureFormat);
-    return TRUE;
+    return format != DXGI_FORMAT_UNKNOWN;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 __inline void ComposeVerticesMain(PNTVertex *vertices, SXYZW4 *geoms, SXYZW4 *norms, LPDWORD colors,

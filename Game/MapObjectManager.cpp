@@ -167,7 +167,7 @@ SADEntry *CMapObjectManager::GetAnimationEntry(CString &szMaskName, DWORD dwCaps
     return NULL;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-SADEntry *CMapObjectManager::GetAnimationEntryByIndex(CString &szMaskName, BYTE cIndex)
+SADEntry *CMapObjectManager::GetAnimationEntryByIndex(CString &szMaskName, DWORD cIndex)
 {
     LPBYTE lpData = GetFile(szMaskName + ".adb");
     SADBFileHeader *pHdr = (SADBFileHeader *)lpData;

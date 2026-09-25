@@ -306,7 +306,7 @@ protected:
     BOOL bDelivered;
     int nTargetID;
 
-    BOOL CalcSpeed();
+    virtual BOOL CalcSpeed();
     virtual void ApplyNewArrowPos() = 0;
 
 public:
@@ -325,6 +325,9 @@ class CEffectArrow : public CEffectArrowBase
     CEffectParticle particle;
     CEffectPointLight pointLight;
     CEffectSound sound;
+    SRPGAttackPortion weaponAttack;
+    bool weaponAttackPending;
+    void DiscardWeaponAttack();
 
     virtual void ApplyNewArrowPos();
 
@@ -338,7 +341,10 @@ public:
 
 public:
     CEffectArrow();
-    virtual ~CEffectArrow() { Destroy(); }
+    virtual ~CEffectArrow() { Clear(); Destroy(); }
+    void SetWeaponAttack(const SRPGAttackPortion&);
+    BOOL DeliverWeaponAttack(CUnit*target,CUnit*attacker);
+    virtual int Segment();
     virtual void Clear();
     // Update
     virtual void ApplyParams(EUpdateType tip);
@@ -356,6 +362,13 @@ public:
 class CEffectArrowFigure : public CEffectArrowBase
 {
     CMapObjectPtr pMapObj;
+    bool attackProcessed;
+    bool explosivePending=false;
+    CPlot3D explosivePoint;
+    float explosiveRadius=0;
+    int explosiveStart=0;
+    BOOL CalcSpeed() override;
+    void Explode(const CPlot3D&);
 
     virtual void ApplyNewArrowPos();
 
@@ -364,6 +377,8 @@ public:
     SRPGAttackPortion attackPortion;
 
     CEffectArrowFigure();
+    BOOL DeliverAttack(CMapObject*target,CUnit*attacker);
+    void SetExplosivePoint(const CPlot3D& point,float radius,int tick){explosivePoint=point;explosiveRadius=radius;explosiveStart=tick;explosivePending=true;}
     virtual ~CEffectArrowFigure()
     {
         CEffectArrowFigure::Clear();

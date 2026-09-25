@@ -3,13 +3,17 @@
 #include "ScenarioSpeechDucking.h"
 #include "ModAudioPolicy.h"
 #include "ModPackage.h"
+#include "ModCombat.h"
 #include "RpgSystem.h"
 #include "Unit.h"
 #include "PerkDatabase.h"
 #include "ItemDatabase.h"
 #include "Item.h"
 #include "SpellSystem.h"
+#include "SpellDatabase.h"
 #include "UnitServer.h"
+#include "Effect.h"
+#include "Particle.h"
 #include "UnitDatabase.h"
 #include "GeneralSettings.h"
 #include "ModStatRules.h"
@@ -17,6 +21,9 @@
 #include "ModNpcRefresh.h"
 #include "ModMobCommands.h"
 #include "SpellManager.h"
+#include "ModSpellRules.h"
+#include "Party.h"
+#include "ItemManager.h"
 #include "WorldServer.h"
 #include "ServerSpecificManager.h"
 #include "luajit-x86/lua.hpp"
@@ -24,11 +31,18 @@
 #include <filesystem>
 #include <shellapi.h>
 
+bool JMV_CheckExtendedSpellLifecycle();
+
 namespace ModRuntime {
 namespace { thread_local CModPackage *current = nullptr;thread_local CModPackage *resources = nullptr; }
 CModPackage *Current() { return current; }
 CModPackage *Resources(){return resources;}
 std::string ConfigPath(const char*path){return resources?resources->ResolveConfig(std::filesystem::path(path).filename().string(),path):path;}
+std::string CameraPath(const char*path){return resources?resources->ResolveCamera(std::filesystem::path(path).filename().string(),path):path;}
+std::string MoviePath(const char*path){return resources?resources->ResolveMovie(path,path):path;}
+std::string SaveRoot(const char*fallback){return resources?resources->ResolveSaveRoot(fallback):fallback;}
+bool SinglePlayerAllowed(){return !resources||resources->SinglePlayerAllowed();}
+bool MultiplayerAllowed(){return !resources||resources->MultiplayerAllowed();}
 std::string MapPath(const char*path){
  if(!resources)return path;std::string normalized=path;for(char&c:normalized){if(c=='/')c='\\';else if(c>='A'&&c<='Z')c+=32;}
  auto ext=std::filesystem::path(normalized).extension().string();if(ext!=".mpr"&&ext!=".mob"&&ext!=".mq")return path;
@@ -44,6 +58,47 @@ std::unique_ptr<Host> Host::FromCommandLine(){
  int count=0;LPWSTR*args=CommandLineToArgvW(GetCommandLineW(),&count);if(!args)throw std::runtime_error("Cannot parse command line");
  struct Free{LPWSTR*p;~Free(){LocalFree(p);}} free{args};std::string directory;bool found=false;
  for(int i=1;i<count;i++)if(wcscmp(args[i],L"--mod")==0){if(found||i+1>=count)throw std::runtime_error("Expected one --mod directory");found=true;std::filesystem::path p(args[++i]);directory=p.string();}
+ if(!found){
+  // EIStarter starts Engine/game.exe without arguments. Its selected mod is
+  // stored here before Process.Start, so use the same source as addon.dll.
+  HKEY key=nullptr;
+  LONG status=RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Gipat.ru\\EI_Starter\\Settings",0,KEY_READ,&key);
+  if(status==ERROR_SUCCESS){
+   DWORD type=0,bytes=0;
+   status=RegQueryValueExW(key,L"AddonPath",nullptr,&type,nullptr,&bytes);
+   if(status==ERROR_SUCCESS){
+    if((type!=REG_SZ&&type!=REG_EXPAND_SZ)||bytes<sizeof(wchar_t)||bytes%sizeof(wchar_t)){
+     RegCloseKey(key);throw std::runtime_error("Invalid EIStarter AddonPath registry value");
+    }
+    std::wstring value(bytes/sizeof(wchar_t),L'\0');
+    status=RegQueryValueExW(key,L"AddonPath",nullptr,&type,reinterpret_cast<LPBYTE>(&value[0]),&bytes);
+    if(status!=ERROR_SUCCESS){RegCloseKey(key);throw std::runtime_error("Cannot read EIStarter AddonPath");}
+    value.resize(wcsnlen_s(value.c_str(),value.size()));
+    if(!value.empty()){directory=std::filesystem::path(value).string();found=true;}
+   }
+   RegCloseKey(key);
+  }
+ }
+ if(!found){
+  // Persisted launcher choice is available even when its per-user registry
+  // value is absent. A live registry selection always takes precedence.
+  wchar_t modulePath[1024]={};
+  DWORD length=GetModuleFileNameW(nullptr,modulePath,_countof(modulePath));
+  if(length&&length<_countof(modulePath)){
+   auto starter=std::filesystem::path(modulePath).parent_path().parent_path();
+   auto config=starter/L"starter.config";
+   if(std::filesystem::is_regular_file(config)){
+    wchar_t selection[1024]={};
+    GetPrivateProfileStringW(L"Settings",L"ModSel",L"",selection,_countof(selection),config.c_str());
+    if(selection[0]){
+     auto selected=(starter/selection).lexically_normal();
+     if(!std::filesystem::is_regular_file(selected))
+      throw std::runtime_error("EIStarter selected mod config is missing");
+     directory=selected.parent_path().string();found=true;
+    }
+   }
+  }
+ }
  return found?std::make_unique<Host>(directory):nullptr;
 }
 Session::Session(CModPackage &package) {
@@ -62,9 +117,9 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
     namespace fs = std::filesystem;
     // The headless test temporarily owns the real engine DB, restoring the prior database on exit.
     struct DatabaseGuard {
-        CPerkDatabase previous;SItemDatabase previousItems;SUnitDatabase previousUnits;
-        DatabaseGuard() { std::swap(previous, thePerkDatabase);std::swap(previousItems,theItemDatabase);std::swap(previousUnits,theUnitDatabase); }
-        ~DatabaseGuard() { std::swap(previous, thePerkDatabase);std::swap(previousItems,theItemDatabase);std::swap(previousUnits,theUnitDatabase); }
+        CPerkDatabase previous;SItemDatabase previousItems;SUnitDatabase previousUnits;SSpellDatabase previousSpells;
+        DatabaseGuard() { std::swap(previous, thePerkDatabase);std::swap(previousItems,theItemDatabase);std::swap(previousUnits,theUnitDatabase);std::swap(previousSpells,theSpellDatabase); }
+        ~DatabaseGuard() { std::swap(previous, thePerkDatabase);std::swap(previousItems,theItemDatabase);std::swap(previousUnits,theUnitDatabase);std::swap(previousSpells,theSpellDatabase); }
     } database;
     const fs::path path(perkArchive);
     if (!thePerkDatabase.LoadDatabase((path.parent_path().string()+"\\").c_str(), path.filename().string().c_str()) ||
@@ -73,6 +128,8 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
     if(!theItemDatabase.Load((itemPath.parent_path().string()+"\\").c_str(),itemPath.filename().string().c_str()))throw std::runtime_error("Native items DB failed to load");
     const fs::path unitPath(unitArchive);
     if(!theUnitDatabase.Load((unitPath.parent_path().string()+"\\").c_str(),unitPath.filename().string().c_str()))throw std::runtime_error("Native unit DB failed to load");
+    std::string spellOwner;package.ReadResource("database.res","spells.sdb","",spellOwner);if(spellOwner.empty())throw std::runtime_error("Package has no spells.sdb owner");
+    const fs::path spellPath(spellOwner);if(!theSpellDatabase.Load((spellPath.parent_path().string()+"\\").c_str(),spellPath.filename().string().c_str()))throw std::runtime_error("Native spell DB failed to load");
     SRPGUnitStats stats = {};
     stats.fpExperience=2000; stats.psStrength={25,50}; stats.psDexterity={25,25};
     stats.fpMaxEncumbrance=100; stats.fpCurrEncumbrance=50;
@@ -108,7 +165,7 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
     }
 
     {
-        require(!theWorldServer.IsMapLoaded(),"Headless lifecycle fixture requires unloaded world");package.SuccessfulWorldLoad();package.TickStatRefresh();
+        require(!theWorldServer.IsMapLoaded(),"Headless lifecycle fixture requires unloaded world");package.SuccessfulWorldLoad(WorldLoadOrigin::SavedGame);package.TickStatRefresh();
         ModNpcRefreshQueue queue;for(int id=0;id<29;id++)require(queue.Add(id),"Refresh enqueue failed");
         require(!queue.Add(0),"Refresh queue accepts duplicate");std::vector<int> seen;
         auto record=[&](int id){seen.push_back(id);};
@@ -123,6 +180,23 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
     int perkCases=0;bool nonzeroJewelryFixture=false;int preparedCases=0,npcCases=0,fullCases=0,fullHeroCases=0,leftHandCases=0;bool stunRollback=false;int armorCases=0;bool effectsRollback=false;
     {
         Session session(package);
+        {
+            struct SlotUnit : CUnit {void Bind(CUnitSpecific*p){lpUnitSpecific=p;} ~SlotUnit(){lpUnitSpecific=nullptr;}};
+            for(int id:{4515,1000000001}){
+                CUnitServer specific;SlotUnit actor;actor.SetID(id);actor.Bind(&specific);
+                CItemSpell spells[17];for(auto&spell:spells)spell.AddRef();
+                struct ReleaseSlots {CUnit&u;CItemSpell*s;~ReleaseSlots(){for(DWORD i=0;i<QI_MAX_SPELLS;++i)u.RemoveQSpell(i);for(int i=0;i<17;++i)s[i].DecRefCount();}} release{actor,spells};
+                int count=id==4515?8:16;require(actor.GetSpellSlotCount()==count,"Logical spell slot count");
+                require(actor.AddQSpell(nullptr)==-1,"Null spell insertion");
+                for(int i=0;i<count;++i)require(actor.AddQSpell(&spells[i])==i,"Spell insertion index");
+                require(actor.AddQSpell(&spells[count])==-1,"Spell insertion overflow");
+                actor.RemoveQSpell(0);int refs=spells[count-1].GetRefCount();
+                require(actor.AddQSpell(&spells[count-1])==count-1&&spells[count-1].GetRefCount()==refs,"Duplicate spell after a hole");
+                require(actor.AddQSpell(&spells[count])==0,"Reuse empty spell slot");
+                require(actor.GetQSpellItem(count-1)==&spells[count-1]&&!actor.GetQSpellItem(count)&&!actor.GetQSpellItem(DWORD(-1)),"Native spell read bounds");
+            }
+        }
+
         {
             require(_countof(ModMob::registry)==93&&ModMob::Find(385)&&!strcmp(ModMob::Find(385)->name,"RefreshUnitStats"),"Release MOB registry identity mismatch");
             CScript script;CString source="GlobalVars(a:float,b:float,c:float,d:float,e:float,f:float,g:float,h:float,i:float,u:object) WorldScript(a=Round(-2.5) b=Abs(-7) c=Ceil(1.2) d=Floor(-1.2) e=Sin(0) f=Cos(0) g=Pow(2,3) h=StrLen(\"abcd\") i=StrToFloat(\"12.5\") RefreshUnitStats(u))";
@@ -152,6 +226,13 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
                 require(strings.LoadText(code),"String query parsing failed");CString exported;strings.StoreText(exported);CScript again;require(again.LoadText(exported),"String query text round-trip failed");strings.Segment();again.Segment();
                 for(auto*p:{&strings,&again}){CString value;require(p->GetGlobalVars().szVars.GetVar("a",value)&&value=="de","Negative string position mismatch");require(p->GetGlobalVars().szVars.GetVar("b",value)&&value=="abc","Lowercase mismatch");require(p->GetGlobalVars().szVars.GetVar("c",value)&&value=="ABC","Uppercase mismatch");require(p->GetGlobalVars().szVars.GetVar("d",value)&&value=="bcdef","Zero string length mismatch");}
             }
+            {
+                CScript loops;CString code="GlobalVars(target:object,score:float) Script LoopArgs(value:float,members:group)(if(Add(1,0))then(For(target,members)(score=Add(score,value) ForIf(target,members,1)(score=Add(score,value)))))";
+                if(!loops.LoadText(code,FALSE))throw std::runtime_error(std::string("Loop script parameters: ")+(LPCSTR)loops.GetLastError().text);
+                CString text;loops.StoreText(text);CScript again;if(!again.LoadText(text,FALSE))throw std::runtime_error(std::string("Nested loop parameter export/reparse: ")+(LPCSTR)again.GetLastError().text+"; text="+(LPCSTR)text);
+                CScript invalid;CString bad="GlobalVars(target:object,score:float) Script LoopArgs(value:float,members:group)(if(Add(1,0))then(For(target,members)(score=Add(score,missing))))";
+                require(!invalid.LoadText(bad,FALSE),"Unknown loop parameter was accepted");
+            }
             CScript invalid;CString bad="GlobalVars(u:object) WorldScript(RefreshUnitStats(u,1))";require(!invalid.LoadText(bad,FALSE),"MOB parser accepts wrong arity");
             {
                 CScript commands;CString code="GlobalVars(d:float,r:float,f:float,g:group,o:object) WorldScript(d=DistancePointPoint(0,0,3,4) r=Random(7,7) f=IsFileExists(\"main.lua\") o=RandObj(g))";
@@ -164,6 +245,7 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
             }
             {ModConsumableConfig config;require(package.GetNpcCombatConsumableConfig("zone5_1",4515,"CyclopsA16",3,0,config)&&config.automatic&&config.charges==1&&config.spellFormula=="strength {e0;e0;e0;d0}","Installed NPC consumable profile mismatch");require(!package.GetNpcCombatConsumableConfig("zone5_1",4515,"__absent_fixture__",3,0,config),"Absent NPC profile was invented");}
             require(JMV_CheckNpcConsumablePacking(),"NPC consumable persistence packing mismatch");
+            require(JMV_CheckNpcVisitLifecycle(),"Explicit save/zone visit lifecycle mismatch");
             require(JMV_CheckRegisteredLootCodec(),"Registered loot marker codec mismatch");
             SSCCmd pending;pending.command=387;float value=0;bool rejected=false;try{ModMob::Float(pending,value);}catch(const std::runtime_error&){rejected=true;}require(rejected,"Pending addon command silently executed");
         }
@@ -287,6 +369,259 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
             actor.SelectWeapon(0);require(ModStats::LeftHand(actor)==2,"Shield priority from primary slot mismatch");leftHandCases++;
             actor.SelectWeapon(1);require(ModStats::LeftHand(actor)==0,"Dual slot must retain first staff despite shield");leftHandCases++;
         }
+        // R35: current installed skill table, exact cost and admission boundary contracts.
+        {
+            ModSkills::Config power,precise,doubled,shot,explosive,cripple,missing;
+            require(package.SkillConfig("powerhit",power)&&package.SkillConfig("precisehit",precise)&&package.SkillConfig("doubleshot",doubled)&&package.SkillConfig("preciseshot",shot)&&package.SkillConfig("explosiveshot",explosive)&&package.SkillConfig("cripplinghit",cripple),"Installed active skills unavailable");
+            require(!package.SkillConfig("__absent_skill__",missing),"Unknown active skill accepted");
+            require(power.Cost(999)==50&&power.Duration()==360&&power.damageMultiplier==1.25f,"PowerHit installed policy drift");
+            require(precise.Cost(999)==35&&precise.accuracyBonus==20&&precise.damageMultiplier==1,"PreciseHit installed policy drift");
+            require(doubled.projectileCount==2&&doubled.damageMultiplier==.75f&&doubled.Weapon(RPGWST_BOW)&&!doubled.Weapon(RPGWST_CROSSBOW),"DoubleShot bow-only policy");
+            require(shot.accuracyBonus==20&&shot.projectileCount==1,"PreciseShot accuracy policy");
+            require(power.Weapon(RPGWST_HAMMER)&&power.Weapon(RPGWST_HANDS6)&&!power.Weapon(RPGWST_AXE)&&!power.Weapon(RPGWST_SWORD)&&!power.Weapon(-1)&&!power.Weapon(32),"PowerHit weapon mask boundary");
+            ModSkills::Config fallback;fallback.requiredMelee=-1;fallback.staminaMultiplier=1.5f;
+            require(fallback.Cost(20)==30&&fallback.Requirement(17)==17,"Prototype fallback policy");
+            ModSkills::Cooldowns clock;int world1,world2;
+            clock.Start(&world1,100,7,"powerhit",power.Duration());require(clock.Remaining(&world1,459,7,"POWERHIT")==1&&clock.Remaining(&world1,459,8,"powerhit")==0,"Cooldown identity or final tick");
+            require(clock.Remaining(&world1,460,7,"powerhit")==0,"Cooldown expiry");
+            clock.Start(&world1,500,7,"powerhit",360);require(clock.Remaining(&world1,499,7,"powerhit")==0,"Cooldown clock rollback");
+            clock.Start(&world1,500,7,"powerhit",360);require(clock.Remaining(&world2,500,7,"powerhit")==0,"Cooldown world replacement");
+            require(ModSkills::Slot(ModSkills::CommandTag|15)==15&&ModSkills::Slot(ModSkills::CommandTag|16)==-1&&ModSkills::Slot(15)==-1,"Skill command slot bounds");
+        }
+        // R36: shared flight algorithm and native status owner, without an interactive world.
+        {
+            CPlot3D next;auto clear=[](const CPlot3D&,const CPlot3D&){return 1.f;};
+            require(!ModSkills::ExplosiveStep(CPlot3D(0,0,0),CPlot3D(10,0,5),0,next,clear)&&fabs(next.x-4.f/3)<.0001&&fabs(next.z-2.f/3)<.0001,"Explosive XY flight speed");
+            require(ModSkills::ExplosiveStep(CPlot3D(0,0,0),CPlot3D(1,0,1),1,next,clear)&&next.x==1&&next.z==1,"Explosive target arrival");
+            int traces=0;auto wall=[&](const CPlot3D&,const CPlot3D&b){++traces;return b.x>=.5f?0.f:1.f;};
+            require(ModSkills::ExplosiveStep(CPlot3D(0,0,0),CPlot3D(10,0,0),1,next,wall)&&next.x<.5f&&next.x>.49f&&traces==9,"Explosive relief bisection");
+            require(ModSkills::ExplosiveStep(CPlot3D(2,3,4),CPlot3D(10,0,0),150,next,clear)&&next.x==2&&next.y==3,"Explosive timeout");
+            require(ModSkills::ExplosiveStep(CPlot3D(2,3,4),CPlot3D(10,0,0),-1,next,clear)&&next.z==4,"Explosive rollback termination");
+            SRPGAttackPortion portion;portion.Clear();portion.fpDamage=37;for(auto&v:portion.fpAttacks)v=.5f;portion.bCalledShot=true;portion.fBackStabMultiplier=3;
+            ModSkills::ExplosiveDamage(portion);require(portion.fpDamage==37&&portion.fpToHit==FLT_MAX&&portion.hl==RPGHL_ALL&&portion.bAreaEffect&&!portion.bCalledShot&&portion.fBackStabMultiplier==1,"Explosive portion conversion");
+            for(int i=0;i<RPG_NUM_ATTACK_TYPES;++i)require(portion.fpAttacks[i]==(i==RPGAT_TERMICAL?1.f:0.f),"Explosive fire distribution");
+            package.MarkSkillImpact(portion,1);SRPGAttackPortion second=portion;package.MoveAttack(portion,second);
+            require(package.TakeSkillImpact(portion)==0&&package.TakeSkillImpact(second)==1&&package.TakeSkillImpact(second)==0,"Skill impact delivered more than once");package.ForgetAttack(second);
+            struct StatusUnit: CUnit {
+                int speedChanges=0;
+                BOOL RecalcRPGStats(bool=false) override{return TRUE;}
+                void ChangeSpeedWithSpell() override{++speedChanges;}
+                void Fill(){while(spellEffects.GetSize()<20){CSpellEffect e;e.nSpellID=255;e.nDuration=10;spellEffects.Add(e);}}
+                void SetStatusPower(float value){spellEffects[0].fpPower=value;}
+                void Expire(){spellEffects[0].nDuration=0;}
+                ~StatusUnit(){spellEffects.RemoveAll();}
+            } actor;
+            int id=package.CrippledSpellId();require(id>=0,"Installed crippled prototype missing");CSpell spell;spell.SetSubtypeID(DWORD(id)<<16);spell.Setup(theSpellDatabase.spells[id]);CSpellEffect effect;spell.GetSpellEffect(effect);
+            require(effect.nDuration>0&&effect.fpPower>0&&effect.fpPower<100,"Installed crippled template invalid");
+            require(package.CrippledSpeed(actor)==1&&actor.RefreshWeaponStatus(effect)&&actor.GetSpellEffects().GetSize()==1,"Cripple status add");
+            float expected=(std::max)(.05f,1-theSpellDatabase.spells[id]->fpEffect/100.f);actor.SetStatusPower(99);
+            require(fabs(package.CrippledSpeed(actor)-expected)<.0001,"Client status power incorrectly used instead of prototype");
+            actor.Fill();effect.nDuration+=15;require(actor.RefreshWeaponStatus(effect)&&actor.GetSpellEffects().GetSize()==20&&actor.GetSpellEffects()[0].nDuration==effect.nDuration,"Full capacity status refresh");
+            CSpellEffect other=effect;other.nSpellID=254;require(!actor.RefreshWeaponStatus(other)&&actor.GetSpellEffects().GetSize()==20,"Status capacity overflow");
+            actor.Expire();require(package.CrippledSpeed(actor)==1&&actor.speedChanges==2,"Status expiration speed factor");
+            CParticle dust;dust.ConfigurePowerHit(nullptr,CPlot3D(1,2,3),CPlot3D(1,0,0),-1);require(!dust.IsUseAddEffect()&&!dust.IsPowerHitGlow(-1),"PowerHit contact configuration");
+        }
+        // R40: real phase owners and native particle configuration, without graphics creation.
+        {
+            require(JMV_CheckExtendedSpellLifecycle(),"Extended spell phase ownership failed");
+            struct ParticleCase{ETypeIDs id;const char*texture;};
+            const ParticleCase cases[]={
+                {PTID_FIREBALLDARK,"FireSmoke2"},{PTID_FIREBALLLIGHT,"FireSmoke3"},
+                {PTID_FIREARROWDARK,"FireArrowSmoke2"},{PTID_FIREARROWLIGHT,"FireArrowSmoke3"},
+                {PTID_FIREWALLDARK,"TendriSmoke2"},{PTID_FIREWALLLIGHT,"TendriSmoke3"},
+                {PTID_FIREBLASTDARK,"Explosion2"},{PTID_FIREBLASTLIGHT,"Explosion3"},
+                {PTID_ACIDRAYDARK,"AcidRay2"},{PTID_ACIDRAYLIGHT,"AcidRay3"},
+                {PTID_ACIDSTARDARK,"AcidRay2"},{PTID_ACIDSTARLIGHT,"AcidRay3"},
+                {PTID_NUKEDARK,"AcidRay"},{PTID_NUKELIGHT,"AcidRay"},
+                {PTID_POISONFOGDARK,"PoisonCloud"},{PTID_POISONFOGLIGHT,"PoisonCloud"},
+                {PTID_LIGHTNINGBLASTDARK,"TendriLight"},{PTID_LIGHTNINGBLASTLIGHT,"TendriLight"}};
+            for(auto&test:cases){CParticle particle;particle.SetTypeID(test.id);char texture[256]={};require(particle.ConfigureExtendedSpell(test.id,texture)&&strcmp(texture,test.texture)==0,"Extended particle source texture mismatch");}
+            CParticle base;char original[256]="untouched";require(!base.ConfigureExtendedSpell(PTID_FIREBALL,original)&&strcmp(original,"untouched")==0,"Extended factory stole base effect");
+            struct Lifetime:CEffectParticle{int Length(){return GetParticleEffectLength();}};
+            for(auto id:{PTID_FIREBLASTDARK,PTID_FIREBLASTLIGHT,PTID_LIGHTNINGBLASTDARK,PTID_LIGHTNINGBLASTLIGHT,PTID_NUKEDARK,PTID_NUKELIGHT,PTID_ACIDSTARDARK,PTID_ACIDSTARLIGHT}){Lifetime effect;effect.typeID=id;require(effect.Length()==60,"Unowned one-shot particle lifetime");}
+        }
+        // R39: source-derived elemental matrix and authoritative Feeble state.
+        {
+            const int bases[]={SPELL_ID_FIREBALL,SPELL_ID_FIREARROW,SPELL_ID_FIREWALL,SPELL_ID_LIGHTNING,SPELL_ID_INVOKE_LGHTNG,SPELL_ID_WALL_LGHTNG,SPELL_ID_ACIDRAY,SPELL_ID_COLUMN_ACID,SPELL_ID_POISONFOG};
+            for(int id=57;id<=74;++id){
+                int family=(id-57)/2;int element=family<3?RPGAT_TERMICAL:family<6?RPGAT_ELECTRICAL:RPGAT_CHEMICAL;
+                CSpell spell;spell.SetSubtypeID(DWORD(id)<<16);
+                require(ModSpells::ElementalBase(id)==bases[family]&&spell.GetAttackType()==element&&spell.IsOffensive(),"Extended native elemental identity");
+                for(int duration:{0,1,20}){SRPGAttackPortion ap;ap.fpDamage=999;
+                    require(ModSpells::ExtendedElementalPortion(id,100,duration,ap),"Extended attack not handled");
+                    require(ap.fpDamage==(duration>1?20.f:100.f)&&!ap.bAreaEffect&&ap.fpToHit==FLT_MAX&&ap.fBackStabMultiplier==1&&!ap.bCalledShot,"Extended damage source mismatch");
+                    if(duration>1)require(ap.fpDamagePercentage==1,"Source 5/3 integer arithmetic lost");
+                    for(int i=0;i<RPG_NUM_ATTACK_TYPES;++i)require(ap.fpAttacks[i]==(i==element?1.f:0.f),"Extended element shares mismatch");
+                }
+            }
+            SRPGAttackPortion untouched;untouched.fpDamage=123;require(!ModSpells::ExtendedElementalPortion(SPELL_ID_FIREBALL,100,20,untouched)&&untouched.fpDamage==123,"Base spell stolen by extended path");
+            require(ModSpells::ExtendedElementalPortion(SPELL_ID_VAMP,100,20,untouched)&&untouched.fpDamage==0,"Invented generic Vamp damage");
+            require(ModSpells::HasMana(10,10)&&ModSpells::HasMana(9.99995f,10)&&!ModSpells::HasMana(9.999f,10),"AI mana tolerance mismatch");
+            require(ModSpells::ManaCost(20,.5f)==10&&ModSpells::ManaCost(-20,.5f)==0,"AI mana bonus/clamp mismatch");
+            CUnitServer server;EffectUnit actor;actor.Bind(&server);server.RegisterUnit(&actor);
+            struct UnbindMagic{CUnitServer&s;~UnbindMagic(){s.RegisterUnit(nullptr);}} unbind{server};
+            *server.GetRPGStats()={};actor.SetFlag(UNIT_FEEBLED);server.SyncNpcMagicState();require(!actor.CheckFlag(UNIT_FEEBLED),"Stale NPC Feeble flag survived");
+            actor.Power(SPELL_ID_FEEBLEMIND,1);server.SyncNpcMagicState();require(actor.CheckFlag(UNIT_FEEBLED),"NPC Feeble effect ignored");
+            server.GetRPGStats()->rpgNAWWeaponType=RPGWST_MAGIC;server.SyncNpcMagicState();require(!actor.CheckFlag(UNIT_FEEBLED),"Natural magic exemption lost");
+        }
+        // R38: native constructor with controlled values, installed DB identity and native manager.
+        {
+            require(package.CombatSetting("NewRunes")!=0,"Installed new-rune policy disabled");
+            CSpellManager manager;SSDBSpellPrototype prototype=*theSpellDatabase.spells[0];
+            prototype.dwActions=60;prototype.fpEffect=100;prototype.dwDuration=101;prototype.fpMana=10;prototype.fpPrice=20;prototype.dwSlots=1;prototype.dwComplexity=2;
+            struct RuneCase{const char*code;float value;DWORD actions,duration;float power;DWORD flags;};
+            const RuneCase cases[]={{"xa",50,22,101,100,0},{"xb",.5f,30,101,100,0},{"xt",0,60,50,25,SPELL_ITEM_TRIGGER},{"xc",0,60,50,25,SPELL_ITEM_CONTINUOUS},{"xd",0,60,50,100,0},{"it",0,60,75,25,SPELL_ITEM_TRIGGER},{"ic",0,60,75,25,SPELL_ITEM_CONTINUOUS},{"fu",0,60,101,100,SPELL_FILTER_UNDEAD}};
+            for(auto&tc:cases){
+                SSDBModifier rune={};strcpy(rune.pszCode,tc.code);rune.fpValue=tc.value;rune.fpMana=3;rune.fpPrice=5;rune.dwComplexity=4;
+                CSmartPtr<CSpellContainer> container=manager.CreateSpellContainer();container->SetPrototype(&prototype);container->AddRune(&rune);require(container->Recalculate()!=FALSE,"Native rune recalc failed");
+                const CSpell&spell=container->GetSpell();require(spell.GetActionPoints()==tc.actions&&spell.GetDuration()==tc.duration&&spell.GetPower()==tc.power,"Native extended rune value mismatch");
+                require((spell.GetResolve()&(SPELL_ITEM_TRIGGER|SPELL_ITEM_CONTINUOUS|SPELL_FILTER_UNDEAD))==tc.flags,"Native rune flags mismatch");
+                require(spell.GetNumSlots()==2&&spell.GetComplexity()==6&&spell.GetManaCost()==13&&spell.GetPrice()==25,"Extended rune skipped common bookkeeping");
+            }
+            require(ModSpells::ExcludesUndead(SPELL_FILTER_UNDEAD,"unhusk")&&ModSpells::ExcludesUndead(SPELL_FILTER_UNDEAD,"unhuzf")&&ModSpells::ExcludesUndead(SPELL_FILTER_UNDEAD,"unhuzm")&&!ModSpells::ExcludesUndead(SPELL_FILTER_UNDEAD,"unhuma")&&!ModSpells::ExcludesUndead(0,"unhusk"),"Undead filter mismatch");
+            CSpell spell;spell.Setup(&prototype);CUnitServer server;auto&st=*server.GetRPGStats();st={};st.action.fpEffectiveValue=15;st.hls[0].state=RPGALS_ACTIVE;st.hls[0].fpHP=st.hls[0].fpMaxHP=100;
+            require(ModSpells::CastTime(st,&spell,false,theSettings.nDifficultyLevel)==60,"Shared cast time mismatch");st.hls[0].fpHP=50;require(ModSpells::CastTime(st,&spell,false,theSettings.nDifficultyLevel)==75,"Head injury cast time");
+            require(ModSpells::CastTime(st,&spell,true,1)==60&&ModSpells::CastTime(st,&spell,true,0)==75,"Player difficulty cast time");
+            st.cPerks[21]=1;auto*perk=st.GetPerk(21);require(perk&&perk->nPerkExclusive==21,"Installed Caster perk identity");
+            require(ModSpells::CastTime(st,&spell,false,theSettings.nDifficultyLevel)==Float2Int(75*(1-perk->dwModifier*.01f)),"Caster perk not applied");
+            st.cPerks[21]=0;st.action.fpEffectiveValue=0;require(ModSpells::CastTime(st,&spell,false,theSettings.nDifficultyLevel)==0&&ModSpells::CastTime(st,nullptr,false,theSettings.nDifficultyLevel)==0,"Zero/null cast time");
+            require(ModSpells::ItemCanCast(10,10)&&!ModSpells::ItemCanCast(9.99f,10),"Continuous item exact charge boundary");
+            require(ModSpells::KillExperience(1,1)==3&&ModSpells::KillExperience(7.9f,2)==15&&ModSpells::DisplayExperience(7.9f)==7&&ModSpells::DisplayExperience(-7.9f)==-7,"Experience truncation/minimum");
+            SRPGUnitStats earned={};earned.psIntelligence.fpEffectiveValue=25;earned.fpExperience=100;earned.fExpPenalty=-50;float multiplier=earned.GetExpMultiplier();earned.GainExperience(1);
+            require(earned.fpExperience==100&&fabs(earned.fExpPenalty-(-50+multiplier))<.0001f,"Experience penalty consumption");
+            earned.GainExperience(100);require(fabs(earned.fpExperience-(100-50+101*multiplier))<.001f&&earned.fExpPenalty==0,"Experience native award path");
+        }
+        // R37: actual party/item owners, including stale grant marker recovery.
+        {
+            CParty party;require(party.Create()!=FALSE,"Skill grant party setup");
+            int expected=0;for(const char*name:{"powerhit","doubleshot","preciseshot","precisehit","cripplinghit","explosiveshot"}){ModSkills::Config c;require(package.SkillConfig(name,c),"Skill grant config");expected+=c.grantPrototype?1:0;}
+            package.GrantSkillPrototypes(party);require(party.allWagonItems.GetSize()==expected&&expected>0,"Skill grants not stored in wagon");
+            package.GrantSkillPrototypes(party);require(party.allWagonItems.GetSize()==expected,"Duplicate skill grants");
+            for(int i=0;i<party.allWagonItems.GetSize();++i){auto*item=party.allWagonItems[i];ModSkills::Config c;require(package.SkillConfig(item->GetSpell(0),c),"Granted wrong prototype");
+                require(package.SkillItemBlocked(item,0)==!c.allowDeconstruction&&package.SkillItemBlocked(item,1)==!c.allowItemInsertion&&package.SkillItemBlocked(item,2)==!c.allowSale,"Skill item restrictions mismatch");
+            }
+            auto*lost=party.allWagonItems[0];party.RemoveItemFromWagon(lost,true);package.GrantSkillPrototypes(party);require(party.allWagonItems.GetSize()==expected,"Grant marker prevented missing item recovery");
+            require(!package.SkillItemBlocked(nullptr,0)&&!package.SkillContainerBlocked(nullptr,2),"Null restriction admission");
+            require(package.SkillContainerBlocked(&party,0)&&package.SkillContainerBlocked(&party,1),"Container restriction owner not connected");
+        }
+        // R31: real installed Lua callbacks through native combat entry points.
+        {
+            CUnitServer specific;EffectUnit actor;actor.Bind(&specific);specific.RegisterUnit(&actor);actor.SetSubtypeID(0);actor.SetID(1000000001);actor.SelectWeapon(-1);
+            struct UnbindCombat{CUnitServer&s;~UnbindCombat(){s.RegisterUnit(nullptr);}} unbindCombat{specific};
+            auto& live=*specific.GetRPGStats();live={};live.psStrength={25,25};live.psDexterity={25,25};live.psIntelligence={25,25};live.action={10,10};live.fpNAWActionPoints=30;live.fpMaxEncumbrance=100;live.fpNAWDamageMin=10;live.fpNAWDamageRnd=5;live.fpNAWToHit=20;live.fpNAWParry=20;
+            live.cAutoSkills[RPGASKL_MELEE]=25;live.cAutoSkills[RPGASKL_ARCHERY]=25;
+            auto& client=*const_cast<SRPGUserUnitStats*>(actor.GetUserUnitStats());client={};client.wEncumbrance=100;client.cStrength=25;client.cDexterity=25;client.cIntelligence=25;client.cNAWDamageMin=10;client.cNAWDamageRnd=5;client.cNAWToHit=20;client.cNAWParry=20;client.cAutoSkills[RPGASKL_MELEE]=25;client.cAutoSkills[RPGASKL_ARCHERY]=25;
+            for(int i=0;i<RPG_NUM_HIT_LOCATIONS;i++){auto&h=live.hls[i];h.state=RPGALS_ACTIVE;h.hlt=RPGHLT_BODY;h.fpHP=h.fpMaxHP=100;client.hls[i].hlt=RPGHLT_BODY;client.hls[i].wHP=client.hls[i].wMaxHP=100;}
+            require(package.AttackCycle(live,actor,true)==45&&package.AttackCycle(live,actor,false)==15,"Native unarmed cycle contract");
+            float plain=package.ModifiedDamage(live,actor,10,0);require(fabs(plain-10*(1+theSettings.nDifficultyLevel*.25f))<.0001f,"Unarmed reference damage formula");
+            SAttackParams serverAttack={},clientAttack={};package.AttackParams(live,actor,serverAttack,0);package.AttackParams(client,actor,clientAttack);require(std::isfinite(serverAttack.fDamageMax)&&std::isfinite(clientAttack.fDamageMax),"Native combat callback failed");
+            for(int type:{int(RPGWST_SWORD),int(RPGWST_BOW),int(RPGWST_HANDS3),int(RPGWST_HANDS4)}){
+                int shape=-1;for(int i=0;i<theItemDatabase.weapons.GetNumEntries();i++)if(theItemDatabase.weapons[i]->dwTypeID==type){shape=i;break;}require(shape>=0,"Combat weapon fixture missing");
+                CItemWeapon weapon;weapon.SetTypeID(ITID_ITEM_WEAPON);weapon.SetSubtypeID(DWORD(shape)<<16);weapon.AddRef();int slot=actor.AddWeapon(&weapon);actor.SelectWeapon(slot);
+                struct RemoveCombatWeapon{EffectUnit&u;CItemWeapon&w;int slot;~RemoveCombatWeapon(){u.RemoveWeapon(slot);w.DecRefCount();u.SelectWeapon(-1);}} removeCombatWeapon{actor,weapon,slot};
+                SRPGAttackPortion incoming;incoming.Clear();incoming.hl=RPGHL_BODY;incoming.fpDamage=10;incoming.fBackStabMultiplier=1;incoming.fpAttacks[RPGAT_SLASHING]=1;auto defenseLua=package.IncomingAttack(live,actor,nullptr,incoming,99);require(std::isfinite(defenseLua.block)&&std::isfinite(defenseLua.parryChance),"Weapon defense Lua contract");
+                SRPGAttackPortion other=incoming,flying=incoming;
+                package.RememberAttack(live,actor,incoming,-2);package.RememberAttack(live,actor,other,0);
+                require(package.ConsumeCritical(incoming)&&!package.ConsumeCritical(other),"Equal-damage attacks exchanged critical state");
+                package.RememberAttack(live,actor,incoming,-2);package.MoveAttack(incoming,flying);
+                package.RememberAttack(live,actor,incoming,0);actor.SelectWeapon(-1);
+                require(package.AttackWeapon(flying).get()==&weapon,"Projectile lost its launch weapon on equipment change");
+                require(package.ConsumeCritical(flying)&&!package.ConsumeCritical(flying)&&!package.ConsumeCritical(incoming),"Projectile reuse or duplicate critical delivery");actor.SelectWeapon(slot);
+                package.RememberAttack(live,actor,incoming,-2);package.ForgetAttack(incoming);
+                require(!package.ConsumeCritical(incoming)&&!package.AttackWeapon(incoming),"Cancelled attack retained metadata");
+                package.RememberAttack(live,actor,incoming,-2);package.RememberAttack(live,actor,flying,0);package.MoveAttack(incoming,flying);package.MoveAttack(flying,flying);
+                require(package.ConsumeCritical(flying)&&!package.ConsumeCritical(incoming),"Moved attack retained source or lost destination metadata");
+                require(package.AttackSlot(actor,false)==slot,"Primary weapon slot changed");
+                // Native server/client admission uses actual equipped objects and installed prototypes.
+                int skillIndex=theSpellDatabase.spells.GetEntryIndex(type==RPGWST_BOW?"preciseshot":"precisehit");
+                require(skillIndex>=0,"Skill prototype missing");CSpell activeSkill;activeSkill.SetSubtypeID(DWORD(skillIndex)<<16);activeSkill.Setup(theSpellDatabase.spells[skillIndex]);
+                ModSkills::Config activeConfig;require(package.SkillConfig(&activeSkill,activeConfig),"Skill config through prototype failed");
+                BYTE previousMelee=live.cAutoSkills[RPGASKL_MELEE],previousArchery=live.cAutoSkills[RPGASKL_ARCHERY];
+                BYTE previousClientMelee=client.cAutoSkills[RPGASKL_MELEE],previousClientArchery=client.cAutoSkills[RPGASKL_ARCHERY];
+                live.cAutoSkills[RPGASKL_MELEE]=live.cAutoSkills[RPGASKL_ARCHERY]=60;client.cAutoSkills[RPGASKL_MELEE]=client.cAutoSkills[RPGASKL_ARCHERY]=60;
+                bool expectedSkill=type==RPGWST_SWORD||type==RPGWST_BOW||type==RPGWST_HANDS4;
+                require(package.SkillReady(actor,&activeSkill,activeConfig,true)==expectedSkill&&package.SkillReady(actor,&activeSkill,activeConfig,false)==expectedSkill,"Native server/client weapon admission mismatch");
+                auto autoSkill=activeConfig.requiredArchery>=0?RPGASKL_ARCHERY:RPGASKL_MELEE;BYTE savedSkill=live.cAutoSkills[autoSkill];live.cAutoSkills[autoSkill]=0;
+                require(!package.SkillReady(actor,&activeSkill,activeConfig,true),"Under-skilled server admitted");live.cAutoSkills[autoSkill]=savedSkill;
+                live.cAutoSkills[RPGASKL_MELEE]=previousMelee;live.cAutoSkills[RPGASKL_ARCHERY]=previousArchery;client.cAutoSkills[RPGASKL_MELEE]=previousClientMelee;client.cAutoSkills[RPGASKL_ARCHERY]=previousClientArchery;
+                package.RememberAttack(live,actor,incoming,-2);package.CopyAttack(incoming,other);package.MoveAttack(incoming,flying);
+                require(package.ConsumeCritical(other)&&package.ConsumeCritical(flying)&&!package.ConsumeCritical(incoming),"Double shot did not independently retain critical ownership");package.ForgetAttack(other);package.ForgetAttack(flying);
+                // R34: call native delivery owners; world motion/rendering are outside this headless check.
+                struct ImpactTarget:EffectUnit{
+                    CModPackage&mod;int calls=0;float damage=0;bool critical=false;CItemWeapon*launch=nullptr;
+                    explicit ImpactTarget(CModPackage&m):mod(m){rpgUserCommonStats.nHP=100;}
+                    void Health(int hp){rpgUserCommonStats.nHP=hp;}
+                    BOOL ProcessAttackPortion(SRPGAttackPortion*ap,CUnit*,CUnit*)override{calls++;damage=ap->fpDamage;launch=mod.AttackWeapon(*ap).get();critical=mod.ConsumeCritical(*ap);return TRUE;}
+                } target(package);
+                struct ArrivedArrow:CEffectArrowFigure{void MarkArrival(){bDelivered=TRUE;}} arrow;
+                arrow.attackPortion=incoming;package.RememberAttack(live,actor,incoming,-2);package.MoveAttack(incoming,arrow.attackPortion);
+                arrow.MarkArrival();require(arrow.DeliverAttack(&target,&actor)&&target.calls==1&&target.critical,"Arrival before Segment lost arrow impact");
+                require(!arrow.DeliverAttack(&target,&actor)&&arrow.Segment()==0&&target.calls==1,"Arrow duplicate manager tick delivered twice");
+                CEffectArrow staff;staff.SetCP(target.GetCP());package.RememberAttack(live,actor,incoming,-2);staff.SetWeaponAttack(incoming);
+                float expected=incoming.fpDamage;incoming.fpDamage=777;actor.SelectWeapon(-1);
+                require(staff.DeliverWeaponAttack(&target,&actor)&&target.calls==2&&target.damage==expected&&target.critical&&target.launch==&weapon,"Staff flight lost copied portion or launch weapon");
+                require(!staff.DeliverWeaponAttack(&target,&actor)&&target.calls==2,"Staff double impact");incoming.fpDamage=expected;actor.SelectWeapon(slot);
+                package.RememberAttack(live,actor,incoming,-2);staff.SetWeaponAttack(incoming);require(!staff.DeliverWeaponAttack(nullptr,&actor)&&!staff.DeliverWeaponAttack(&target,&actor),"Removed staff target retained pending hit");
+                package.RememberAttack(live,actor,incoming,-2);staff.SetWeaponAttack(incoming);staff.Clear();require(!staff.DeliverWeaponAttack(&target,&actor),"Cleared staff retained hit");
+                package.RememberAttack(live,actor,incoming,-2);staff.SetWeaponAttack(incoming);target.Health(0);require(!staff.DeliverWeaponAttack(&target,&actor),"Staff hit zero-HP target");target.Health(100);
+                package.RememberAttack(live,actor,incoming,-2);staff.SetWeaponAttack(incoming);staff.SetCP(target.GetCP()+CPlot3D(2,0,0));require(!staff.DeliverWeaponAttack(&target,&actor),"Staff ignored impact distance");
+
+                {CEffectArrowFigure arrow;arrow.attackPortion=incoming;package.RememberAttack(live,actor,incoming,-2);package.MoveAttack(incoming,arrow.attackPortion);arrow.Clear();require(!package.AttackWeapon(arrow.attackPortion)&&!package.ConsumeCritical(arrow.attackPortion),"Native arrow clear retained attack");}
+                if(type==RPGWST_SWORD){CItemWeapon left;left.SetTypeID(ITID_ITEM_WEAPON);left.SetSubtypeID(DWORD(shape)<<16);left.AddRef();int leftSlot=actor.AddWeapon(&left);RemoveCombatWeapon removeLeft{actor,left,leftSlot};
+                    require(package.AttackSlot(actor,true)==leftSlot,"Left hand selected primary weapon");
+                    require(package.DualAnimation(actor)=="dat01sws44","Twin sword animation selection failed");
+                    package.RememberAttack(live,actor,incoming,-2,true);require(package.AttackWeapon(incoming).get()==&left,"Offhand attack captured wrong weapon");package.ForgetAttack(incoming);
+                    require(std::isfinite(package.ModifiedDamage(live,actor,10,1,leftSlot,true)),"Offhand Lua damage failed");
+                    actor.SelectWeapon(leftSlot);require(package.AttackSlot(actor,true)==slot,"Swapped hands lost secondary weapon");
+                }
+                actor.SelectWeapon(slot);
+                for(float roll:{0.f,1.f,99.f}){float damage=package.ModifiedDamage(live,actor,10,roll);require(std::isfinite(damage)&&damage>=1,"Invalid real weapon damage");package.AttackParams(live,actor,serverAttack,roll);package.AttackParams(client,actor,clientAttack);require(serverAttack.rpgWeaponType==type&&clientAttack.rpgWeaponType==type,"Weapon type lost by combat bridge");}
+            }
+            {const char*names[]={"dat01crcr37","dat01dagg75","dat01sws44","dat01axes42","dat01hams24","dat01axes37","dat01sprs37","dat01crst37","dat01stcr37","dat01st237"};
+             const int lengths[]={37,75,44,42,24,25,37,37,37,37};
+             const std::vector<std::vector<int>> expected={{12,24},{15,26,35,44,53,65},{15,16,34,35},{15,16,29,32},{15,16},{15,16},{11,23},{11,24},{11,24},{15,23}};
+             for(int i=0;i<10;i++){auto strikes=package.DualStrikes(names[i],lengths[i]);require(strikes.size()==expected[i].size(),"Dual strike count differs from installed rows");
+               for(size_t j=0;j<strikes.size();j++)require(strikes[j].first==expected[i][j]&&strikes[j].second==(j%2!=0),"Dual frame/hand differs from installed rows");
+               auto fast=package.DualStrikes(names[i],1);require(fast.size()==strikes.size(),"Compressed animation discarded coincident strikes");
+               for(auto hit:fast)require(hit.first==0,"Reference float timing truncation changed");
+             }
+             require(package.DualStrikes("unknown-animation",20).empty(),"Unknown dual animation synthesized");
+             bool bad=false;try{package.DualStrikes(names[0],0);}catch(const std::runtime_error&){bad=true;}require(bad,"Zero animation duration admitted");}
+            {CParticle particle;const ETypeIDs types[]={PTID_STAFFARROWFIRE,PTID_STAFFARROWLIGHT,PTID_STAFFARROWWATER,PTID_STAFFARROWACID,PTID_FIREARROW,PTID_RICKARROW};
+             const char*names[]={"FireArrowSmoke","lightArrowSmoke","acidray","acidrayorig","FireArrowSmoke","RikArrowSmoke"};
+             for(int i=0;i<6;i++)require(std::string(particle.ConfigureArrow(types[i]))==names[i],"Native arrow particle texture mismatch");
+             require(particle.ConfigureArrow(TID_EMPTY)==nullptr,"Unknown arrow particle admitted");}
+            // R32: invoke the actual native incoming damage owner without a world RNG/audio device.
+            struct Feedback:ModCombat::Feedback {int draws=0,sounds=0;std::string last;int Random(int maximum)override{draws++;return maximum;}void Sound(CUnit*,const char*name)override{sounds++;last=name;}} feedback;
+            SRPGCommonStats common={};common.ssHP.fpMax=common.ssHP.fpCurrent=100;
+            auto resetHit=[&](){common.ssHP.fpCurrent=100;for(auto&a:common.psAbsorbtions)a={};live.bFlags=0;for(auto&h:live.hls){h={};h.state=RPGALS_ACTIVE;h.hlt=RPGHLT_BODY;h.fpHP=h.fpMaxHP=100;h.fpVitality=1.f/6;h.fpHPWeight=1;}feedback.sounds=0;feedback.last.clear();};
+            SRPGAttackPortion hit;hit.Clear();hit.hl=RPGHL_BODY;hit.fBackStabMultiplier=1;hit.fpDamage=40;hit.fpAttacks[RPGAT_SLASHING]=1;
+            ModCombat::Defense defense;
+            resetHit();common.psAbsorbtions[RPGAT_SLASHING].fpEffectiveValue=10;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&fabs(live.hls[RPGHL_BODY].fpHP-70)<.001f,"General absorption order mismatch");
+            resetHit();defense.block=15;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&live.hls[RPGHL_BODY].fpHP==75&&feedback.sounds==1&&(live.bFlags&RPGSTAT_BLOCK),"Physical block native path mismatch");
+            resetHit();defense.parry=true;require(!live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&live.hls[RPGHL_BODY].fpHP==100&&(live.bFlags&RPGSTAT_PARRY),"Parried damage reached HP");
+            resetHit();defense={};defense.critical=true;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&(live.bFlags&RPGSTAT_CRIT)&&feedback.sounds==1,"Applied critical feedback missing");
+            resetHit();common.psAbsorbtions[RPGAT_SLASHING].fpEffectiveValue=100;require(!live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&feedback.sounds==0&&!(live.bFlags&RPGSTAT_CRIT),"Absorbed hit produced critical feedback");
+            resetHit();defense={};live.hls[RPGHL_LHAND].state=RPGALS_CRIPPLED;hit.hl=RPGHL_LHAND;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&live.hls[RPGHL_BODY].fpHP==60&&live.hls[RPGHL_LHAND].fpHP==100,"Inactive limb not redirected to body");
+            resetHit();hit.hl=RPGHL_BODY;live.hls[RPGHL_BODY].layers[2].state=RPGALS_ACTIVE;live.hls[RPGHL_BODY].layers[2].fpAbsorbtions[RPGAT_SLASHING]=12;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&live.hls[RPGHL_BODY].fpHP==72,"Armor layer reduction mismatch");
+            resetHit();hit.hl=RPGHL_ALL;hit.fpAttacks[RPGAT_SLASHING]=0;hit.fpAttacks[RPGAT_TERMICAL]=1;defense.block=10;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&fabs(live.hls[RPGHL_BODY].fpHP-65)<.001f,"Distributed magic half block mismatch");
+            resetHit();defense={};hit.hl=RPGHL_BODY;hit.fpAttacks[RPGAT_TERMICAL]=0;hit.fpAttacks[RPGAT_SLASHING]=1;
+            struct WearWeapon:CItemWeapon{WearWeapon(){fpHP=fpMaxHP=1000;SetCount(1);}} wearWeapon;
+            int wearShape=-1;for(int i=0;i<theItemDatabase.weapons.GetNumEntries();i++)if(theItemDatabase.weapons[i]->dwTypeID==RPGWST_SWORD){wearShape=i;break;}require(wearShape>=0,"Wear fixture missing");wearWeapon.SetTypeID(ITID_ITEM_WEAPON);wearWeapon.SetSubtypeID(DWORD(wearShape)<<16);
+            common.psAbsorbtions[RPGAT_SLASHING].fpEffectiveValue=10;require(live.ProcessModAttackPortion(&actor,&common,&hit,&wearWeapon,nullptr,defense,&feedback)&&wearWeapon.GetHP()==960,"Weapon wear must use full incoming damage once");
+            resetHit();hit.hl=RPGHL_BODY;hit.fpDamage=120;live.hls[RPGHL_BODY].dwCrippleMask=1<<RPGAT_SLASHING;require(live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback)&&live.hls[RPGHL_BODY].state==RPGALS_CRIPPLED&&live.hls[RPGHL_BODY].fpHP==-1000,"Reference cripple threshold mismatch");
+            resetHit();hit.fpDamage=40;
+            require(ModCombat::Passed(40,3,10,true,true)==35&&ModCombat::Passed(40,0,10,true,true)==0,"Magic parry policy mismatch");
+            require(fabs(ModCombat::ParryUnion(30,20)-38)<.001f&&fabs(ModCombat::ParryUnion(30,0)-.3f)<.001f,"Reference dual-parry branches changed");
+            resetHit();hit.hl=RPGHL_UNKNOWN;bool invalidHit=false;try{live.ProcessModAttackPortion(&actor,&common,&hit,nullptr,nullptr,defense,&feedback);}catch(const std::runtime_error&){invalidHit=true;}require(invalidHit&&common.ssHP.fpCurrent==100,"Invalid location changed HP");
+            hit.hl=RPGHL_BODY;defense=package.IncomingAttack(live,actor,nullptr,hit,99);require(std::isfinite(defense.block)&&std::isfinite(defense.parryChance),"Installed defense Lua failed");
+            run("__combat_damage=GetModifiedDamageOnServerJmv; __combat_rolls={}; GetModifiedDamageOnServerJmv=function(s,u,d,roll,...) __combat_rolls[#__combat_rolls+1]=roll; return __combat_damage(s,u,d,roll,...) end");
+            package.AttackParams(live,actor,serverAttack,37);
+            run("GetModifiedDamageOnServerJmv=__combat_damage; __combat_damage=nil; assert(#__combat_rolls==2 and __combat_rolls[1]==37 and __combat_rolls[2]==37); __combat_rolls=nil");
+            run("__combat_old=CalcAttackParamsOnServer; CalcAttackParamsOnServer=function(s,u,p,e) p=AttackParams(p); p.attack=123; error('combat rollback') end");
+            SAttackParams sentinel={};sentinel.nAttack=77;bool rejected=false;try{package.AttackParams(live,actor,sentinel,0);}catch(const std::runtime_error&){rejected=true;}
+            run("CalcAttackParamsOnServer=__combat_old; __combat_old=nil");require(rejected&&sentinel.nAttack==77,"Combat result escaped failed callback");
+        }
         // Actual native RecalcStats callsite, with native ownership and real UDB/race records.
         CServerSpecificManager specificManager;specificManager.SetWorld(&theWorldServer);
         for(int i=0;i<theUnitDatabase.prototypes.GetNumEntries() && fullCases<8;i++){
@@ -323,7 +658,7 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
                 for(int k=0;k<RPG_NUM_PERKS;k++)require(number(381,float(k),nullptr)==30+k,"Perk index query mismatch");
                 require(number(348,0,"SCIENCE")==10&&number(348,0,"elemental")==23&&number(353,0,"INTELLIGENCE")==55&&number(353,0,"unknown")==0,"Named stat query mismatch");
                 for(int id:{379,380,381}){bool rejected=false;try{number(id,1000,nullptr);}catch(const std::runtime_error&){rejected=true;}require(rejected,"Out-of-bounds stat index accepted");}
-                bool tameRejected=false;try{number(348,0,"tame");}catch(const std::runtime_error&){tameRejected=true;}require(tameRejected,"Invalid reference tame index silently mapped");
+                require(number(348,0,"tame")==10+RPGMSKL_TAME&&number(348,0,"TAME")==10+RPGMSKL_TAME,"Tame must read the raw manual skill, not autoSkills or intelligence bonus");
                 auto string=[&](int id,int slot){SSCCmd cmd;cmd.command=id;cmd.oParams.Add(&object);if(id==377||id==378)cmd.params.Add(float(slot));CString value;cmd.CalcFunction(&context,vars,value);return value;};
                 require(string(354,0)==prototype->szName&&string(355,0)==prototype->szRace,"Prototype/race query mismatch");
                 for(int k=0;k<2;k++)require(string(378,slots[k])==armorPieces[k].GetShapeEntry()->szName,"Worn armor query mismatch");
@@ -452,7 +787,7 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
     require(Current()==nullptr,"Session outlived its package binding");
     common.ssMP={100,100,0}; SpendRunningMana(stats,unit,common);
     require(fabs(common.ssMP.fpCurrent-(100-100.0/150))<.0001,"Base movement path changed without package session");
-    return {{"audioPolicy",true},{"voiceLifetimeNoDevice",true},{"npcConsumablePacking",true},{"messageQueueLifecycle",true},{"registeredLootMarkerCodec",true},{"mobWorldCommands",true},{"mobUnitAndStringQueries",true},{"mobNestedBranchesAndSuspendedBinaryRoundTrip",true},{"mobOptionalVariadicStringRoundTrip",true},{"mobRegistryParserNumericRoundTrip",true},{"refreshQueueBatchDedupReset",true},{"regenerationCadenceHpMpRollback",true},{"armorLocationCases",armorCases},{"fullHeroRecalcCases",fullHeroCases},{"leftHandCases",leftHandCases},{"stunUpvalueRollback",stunRollback},{"fullNativeRecalcCases",fullCases},{"npcPreparedCases",npcCases},{"preparedStatCases",preparedCases},{"effectsEquipmentRollback",effectsRollback},{"nativeHpMpCallsites",true},{"modifiedHealthEquipmentSpell",true},{"nonzeroJewelryFixture",nonzeroJewelryFixture},{"modifiedHealthMutationSentinels",true},{"heroRecalculationCases",3},{"heroMutationRollback",true},{"skillPriceCases",6},{"realPerkPriceCases",perkCases},
+    return {{"extendedSpellNativePhases",true},{"extendedParticleConfigurations",18},{"extendedOneShotLifetimes",8},{"extendedElementalNativeCases",18},{"extendedDamageSharedCases",54},{"npcFeebleNativeState",true},{"npcManaSharedBoundaries",true},{"extendedRuneNativeCases",8},{"spellCastTimingShared",true},{"undeadRuneFilter",true},{"continuousManaBoundary",true},{"experienceAwardAndDisplay",true},{"foundationLoopArguments",true},{"foundationVisitLifecycle",true},{"foundationSpellSlots",true},{"foundationTame",true},{"combatInstalledLua",true},{"combatSharedRoll",true},{"combatRollback",true},{"combatWeaponClasses",4},{"combatAttackCycle",true},{"attackOwnershipEqualDamage",true},{"attackOwnershipMoveReuseCancel",true},{"attackLaunchWeaponRetained",true},{"explosiveFlightReliefTimeout",true},{"explosiveFireConversion",true},{"crippledAddRefreshCapacity",true},{"crippledClientPrototypeSpeed",true},{"skillImpactSingleDelivery",true},{"powerHitContactConfiguration",true},{"skillGrantIdempotenceRecovery",true},{"skillItemRestrictions",true},{"weaponSkillInstalledPolicies",6},{"weaponSkillCooldownBoundaries",true},{"weaponSkillNativeAdmission",true},{"doubleShotIndependentOwnership",true},{"weaponSkillCommandBounds",true},{"dualInstalledRows",10},{"dualCompressedCoincidentStrikes",true},{"dualSwordAnimationSelection",true},{"staffOwnedPayloadDelivery",true},{"staffCancelledMissingDeadDistant",true},{"arrowArrivalBeforeSegment",true},{"arrowNativeParticleConfiguration",6},{"attackNativeArrowClear",true},{"attackOffhandSelection",true},{"incomingDamageNative",true},{"incomingProtectionCases",11},{"audioPolicy",true},{"voiceLifetimeNoDevice",true},{"npcConsumablePacking",true},{"messageQueueLifecycle",true},{"registeredLootMarkerCodec",true},{"mobWorldCommands",true},{"mobUnitAndStringQueries",true},{"mobNestedBranchesAndSuspendedBinaryRoundTrip",true},{"mobOptionalVariadicStringRoundTrip",true},{"mobRegistryParserNumericRoundTrip",true},{"refreshQueueBatchDedupReset",true},{"regenerationCadenceHpMpRollback",true},{"armorLocationCases",armorCases},{"fullHeroRecalcCases",fullHeroCases},{"leftHandCases",leftHandCases},{"stunUpvalueRollback",stunRollback},{"fullNativeRecalcCases",fullCases},{"npcPreparedCases",npcCases},{"preparedStatCases",preparedCases},{"effectsEquipmentRollback",effectsRollback},{"nativeHpMpCallsites",true},{"modifiedHealthEquipmentSpell",true},{"nonzeroJewelryFixture",nonzeroJewelryFixture},{"modifiedHealthMutationSentinels",true},{"heroRecalculationCases",3},{"heroMutationRollback",true},{"skillPriceCases",6},{"realPerkPriceCases",perkCases},
             {"movementCallsite",true},{"failedMutationRolledBack",true},{"invalidNumberRejected",true},
             {"constStatsPreserved",true},{"callbackReferenceExpired",true},{"sessionOwnership",true},{"baseMovementPreserved",true},
             {"perkArchive",perkArchive},{"itemArchive",itemArchive}};

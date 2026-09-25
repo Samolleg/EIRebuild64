@@ -6,6 +6,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "GameMain.h"
+#include "ModRuntime.h"
 
 #include "I3DMain.h"
 #include "I3DScreenMainMenu.h"
@@ -215,6 +216,9 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
 {
     CI3DScreen *pVideoScr = NULL;
     int nHit = HitTest(point);
+    if (((nHit == MMBT_NEWGAME || nHit == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed()) ||
+        (nHit == MMBT_MULTIPLAYER && !ModRuntime::MultiplayerAllowed()))
+        return;
 
     switch (nHit)
     {
@@ -294,6 +298,9 @@ void CI3DScreenMainMenu::OnMouseMove(UINT nFlags, CPoint point)
     if (lpUnit)
     {
         int nHitTest = HitTest(point);
+        if (((nHitTest == MMBT_NEWGAME || nHitTest == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed()) ||
+            (nHitTest == MMBT_MULTIPLAYER && !ModRuntime::MultiplayerAllowed()))
+            nHitTest = -1;
         CString szUnitMaskName = lpUnit->GetMaskName();
         if (nHitTest != m_nPrevHitTest)
             switch (nHitTest)

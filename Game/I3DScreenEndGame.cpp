@@ -103,6 +103,7 @@ void CI3DScreenEndGame::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenEndGame::OnDeactivate()
 {
+    bink.StopPlaying();
     m_aTexts.clear();
     SystemParametersInfo(SPI_SETFONTSMOOTHING, m_isFontSmooth, 0, 0);
 

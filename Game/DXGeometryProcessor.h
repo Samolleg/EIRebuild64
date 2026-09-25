@@ -101,6 +101,10 @@ public:
     void PopMatrix(const DWORD dwMatrixStackID);
     void PushMainMatrix(const SHMatrix &matrix);
     void PopMainMatrix();
+    DWORD GetMatrixDepth(const DWORD dwMatrixStackID) const
+    {
+        return mstacks[dwMatrixStackID].dwNumMatrices;
+    }
     bool IsHaveMatrix(const DWORD dwMatrixStackID) const
     {
         return (mstacks[dwMatrixStackID].dwNumMatrices != 0);

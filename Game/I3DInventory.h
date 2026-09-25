@@ -104,6 +104,7 @@ struct SCampSkillMouseInfo
     ERPGHitLocations eHL;
     CItemWeapon *pWeapon;
     SRPGUnitStats *pStats;  // stats of unit
+    CUnit *pUnit = nullptr; // unit owning these displayed stats
     CString szNonlocalName; // nonlocal name of skill or hl
 };
 /////////////////////////////////////////////////////////////////////////////////////

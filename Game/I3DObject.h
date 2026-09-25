@@ -116,7 +116,7 @@ public:
         DrawText(pszStr, rc, nFont, crColor, nFormat);
     }
     int DrawMultiText(LPCTSTR pszStr, CRect rc, int nLines, int nFont, COLORREF crColor,
-                      int nFormat, BOOL bShadow = TRUE);
+                      int nFormat, BOOL bShadow = TRUE, int nLineStep = 0);
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DMapObjTranslation;

@@ -183,7 +183,7 @@ public:
     const SADEntry *GetCurrentAnimation() const;
     void GetAllAnimationEntries(CADEntryPtrArray &szArray) const;
     const SADEntry *GetAnimationEntry(LPCSTR pszAnimationName) const;
-    const SADEntry *GetAnimationEntryByIndex(BYTE cIndex) const;
+    const SADEntry *GetAnimationEntryByIndex(DWORD cIndex) const;
     const SADEntry *GetSpecialAnimationEntry(DWORD dwSpecialIndex) const;
     const SADEntry *GetAnimationEntry(DWORD dwCaps) const;
     const SADEntry *GetRandomAnimationEntry(DWORD dwCaps) const;
@@ -282,6 +282,7 @@ public:
     void AttachParticleSource(CParticle *pParticleSource);
     void DetachParticleSource(CParticle *pParticleSource);
     void DetachParticles();
+    CParticle* FindPowerHitGlow(int hit);
     // service : save/load
     virtual void Save(CFile &file) const;
     virtual void Load(CFile &file);

@@ -2,6 +2,9 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldInterface.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+#include "ModAnimationIdSave.h"
 #include "WorldClient.h"
 #include "WorldServer.h"
 #include "Camera.h"
@@ -641,7 +644,7 @@ BOOL CWorldConnector::LoadSave(CSave &file)
         interfaceState.SetVersion(f.GetVersion());
     }
     //
-    return theWorldServer.LoadSave(f);
+    return theWorldServer.LoadSave(f, WorldLoadOrigin::SavedGame);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::StoreSave(CSave &file)
@@ -694,7 +697,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party)
         // check if we have to load zone from .mob or from save
         if (party.VisitedZone(szZone))
         {
-            szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+            szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
             CString szFileName = szZone + ".sav";
             if (!file.OpenRead(szCurrentPath + szFileName))
                 return FALSE;
@@ -705,7 +708,9 @@ BOOL CWorldConnector::LoadZoneState(CParty &party)
                 ReportError("Save file %s is corrupt", (const char *)szFileName);
                 return FALSE;
             }
-            bRv = theWorldServer.LoadSave(f, pszSpecialTerrain);
+            bRv = theWorldServer.LoadSave(f, WorldLoadOrigin::ZoneEntry, pszSpecialTerrain);
+            if (!bRv)
+                return FALSE;
             file.CloseFile();
             // process world for some time that should pass on zone during us being absent
             if (party.nEntrance >= 0 && party.nEntrance < pZone->exits.GetSize())
@@ -758,8 +763,10 @@ BOOL CWorldConnector::StoreZoneState(CParty &party)
         theCamera.SetCurrentAsShortcut(7);
     else if (theWorldServer.curInterface == IFACE_BASE)
         theCamera.SetCurrentAsShortcut(6);
-    szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     szCurrentPath += szZone + ".sav";
+    if (!ModAnimationIdSave::PrepareSave(theWorldServer, party.vars))
+        return FALSE;
     if (!file.OpenWrite(szCurrentPath))
     {
         ReportError("Can`t write to %s", (const char *)szCurrentPath);
@@ -809,8 +816,8 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
     CString szSavePath;
     CString szCurrentPath;
 
-    szSavePath.Format("%ssaves\\%s\\", IWorld.GetWorkPath(), pszSaveName);
-    szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+    szSavePath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSaveName);
+    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     // check directory existing
     // clear directory
     ClearDirectory(szCurrentPath);
@@ -894,8 +901,8 @@ BOOL CWorldConnector::SaveGame(const char *pszSaveName)
     if (theWorldServer.GetServerMode() != SERV_MODE_LOCAL)
         return FALSE;
     theCursor.SetMode(CT_WAIT);
-    szSavePath.Format("%ssaves\\%s\\", IWorld.GetWorkPath(), pszSaveName);
-    szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+    szSavePath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSaveName);
+    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     // check directory existing
     // clear directory
     ClearDirectory(szSavePath);
@@ -912,6 +919,8 @@ BOOL CWorldConnector::SaveGame(const char *pszSaveName)
     //
     CParty party;
     theHat.GetSinglePlayerParty(party);
+    if (!ModAnimationIdSave::PrepareSave(theWorldServer, party.vars))
+        return FALSE;
     //
     // copy zone saves from current to save
     CString szCurrentAllod;
@@ -973,7 +982,7 @@ int CWorldConnector::GetSaveSize()
 {
     CFileFind find;
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\*.*", IWorld.GetWorkPath());
+    szCurrentPath.Format("%ssaves\\current\\*.*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     BOOL bFind = find.FindFile(szCurrentPath);
     int nRes = 1000000; // this should be enough for single zone
     while (bFind)
@@ -998,7 +1007,7 @@ void CWorldConnector::NewGame()
     theHat.NewSingleGame();
     // clear directory with current saves
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     ClearDirectory(szCurrentPath);
     // fetch party
     CParty party;
@@ -1018,13 +1027,13 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
 
     CString szCurrentPath;
     CFileSave file;
-    szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     if (file.OpenRead(szCurrentPath + pszZone + ".sav"))
     {
         CMemorySave f;
         if (!DecompressTo(f, 0x102, N_CURRENT_SAVE_VERSION, N_CURRENT_MINIMAL_SAVE_VERSION, file))
             return FALSE;
-        if (!theWorldServer.LoadSave(f, 0))
+        if (!theWorldServer.LoadSave(f, WorldLoadOrigin::ZoneEntry, 0))
             return FALSE;
         file.CloseFile();
     }
@@ -1345,7 +1354,7 @@ void CWorldConnector::LMPConnectAbort()
 void CWorldConnector::SelectLMPZone(const char *pszZone)
 {
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\", IWorld.GetWorkPath());
+    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     // clear directory current dir
     ClearDirectory(szCurrentPath);
     //
@@ -1604,7 +1613,12 @@ void CWorldConnector::LMPGetQuests(std::vector<std::string> &szQuests, ELMPAllod
             for (auto k = zoneQuests.begin(); k != zoneQuests.end();)
             {
                 if (k->szQuest == pszExclude)
+                {
                     k = zoneQuests.erase(k);
+                    // The committed addon patch exits this exclusion scan after one erase.
+                    if (auto *mod = ModRuntime::Current(); mod && mod->CombatSetting("ShowAllQuests"))
+                        break;
+                }
                 else
                     ++k;
             }
@@ -1955,6 +1969,7 @@ void CWorldConnector::ClientGoZone(const char *pszZoneName, int nEntrance)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::ReqGoMainMenu()
 {
+    theCamera.ResetFalloutMode();
     // ATM: TODO: "check pers storing in this case"
     // CRAP - check pers storing in this case
     StopLMP();

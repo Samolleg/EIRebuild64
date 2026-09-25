@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenOptions.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 #include "I3DScrollBar.h"
 #include "I3DScreenMessageBox.h"
 #include "WorldInterface.h"
@@ -26,6 +28,12 @@ const float OPTIONS_FLY_BEGIN = 700.f;
 const float OPTIONS_FLY_END = 480.f;
 
 const COLORREF OPTIONS_COLOR_TEXT = RGB(228, 215, 167);
+const char *PARTY_HELMET_LABEL = "\xD1\xEA\xF0\xFB\xE2\xE0\xF2\xFC\x20\xF8\xEB\xE5\xEC\xFB";
+const char *PARTY_ARMOR_LABEL = "\xD1\xEA\xF0\xFB\xE2\xE0\xF2\xFC\x20\xE4\xEE\xF1\xEF\xE5\xF5\xE8";
+const char *PARTY_HELMET_TIP = "\xD1\xEA\xF0\xFB\xE2\xE0\xF2\xFC\x20\xF8\xEB\xE5\xEC\xFB\n"
+    "\xF2\xEE\xEB\xFC\xEA\xEE\x20\xF3\x20\xF7\xEB\xE5\xED\xEE\xE2\x20\xE3\xF0\xF3\xEF\xEF\xFB.";
+const char *PARTY_ARMOR_TIP = "\xD1\xEA\xF0\xFB\xE2\xE0\xF2\xFC\x20\xE4\xEE\xF1\xEF\xE5\xF5\xE8\n"
+    "\xC2\xE5\xF0\xF5\xED\xE8\xE5\x20\xE4\xEE\xF1\xEF\xE5\xF5\xE8\x20\xF7\xEB\xE5\xED\xEE\xE2\x20\xE3\xF0\xF3\xEF\xEF\xFB.";
 
 const int NUM_ALTERN_KEYS = 1;
 
@@ -137,7 +145,28 @@ void CI3DScreenOptions::OnActivate()
 
     bShadowSettingsChanged = false;
 
+    helmetSwitcher = nullptr;
+    upperArmorSwitcher = nullptr;
     SetScreenMode(0);
+    if (auto *mod = ModRuntime::Current())
+    {
+        if (mod->PartyVisualOptionsEnabled())
+        {
+            CString offText("OFF"), onText("ON");
+            IWorld.GetTextManager()->GetSystemString("option_off", offText);
+            IWorld.GetTextManager()->GetSystemString("option_on", onText);
+            helmetSwitcher = dbgnew CI3DSwitcher(pI3D, CRect(530, 232, 690, 248), offText);
+            helmetSwitcher->AddState(onText);
+            helmetSwitcher->SetState(mod->HidePartyHelmets() ? 1 : 0);
+            AddObject(helmetSwitcher);
+            upperArmorSwitcher = dbgnew CI3DSwitcher(pI3D, CRect(530, 376, 690, 392), offText);
+            upperArmorSwitcher->AddState(onText);
+            upperArmorSwitcher->SetState(mod->HidePartyUpperArmor() ? 1 : 0);
+            AddObject(upperArmorSwitcher);
+            UpdatePartyVisualOptionsVisibility();
+            Redraw();
+        }
+    }
     if (!bIntro)
         pI3D->CheckTutorial();
 }
@@ -295,7 +324,11 @@ void CI3DScreenOptions::OnLButtonDown(UINT nFlags, CPoint point)
             Redraw();
         }
     }
+    const bool visualClicked = (helmetSwitcher && helmetSwitcher->IsInside(point))
+        || (upperArmorSwitcher && upperArmorSwitcher->IsInside(point));
     CI3DScreen::OnLButtonDown(nFlags, point);
+    if (visualClicked)
+        CommitPartyVisualOptions();
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenOptions::OnLButtonDblClk(UINT nFlags, CPoint point)
@@ -322,7 +355,11 @@ void CI3DScreenOptions::OnLButtonDblClk(UINT nFlags, CPoint point)
             Redraw();
         }
     }
+    const bool visualClicked = (helmetSwitcher && helmetSwitcher->IsInside(point))
+        || (upperArmorSwitcher && upperArmorSwitcher->IsInside(point));
     CI3DScreen::OnLButtonDblClk(nFlags, point);
+    if (visualClicked)
+        CommitPartyVisualOptions();
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenOptions::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
@@ -461,6 +498,36 @@ void CI3DScreenOptions::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     }
 }
 ////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenOptions::UpdatePartyVisualOptionsVisibility()
+{
+    const BOOL visible = nCurrentMode == 0;
+    if (helmetSwitcher)
+        helmetSwitcher->Show(visible);
+    if (upperArmorSwitcher)
+        upperArmorSwitcher->Show(visible);
+    if (visible)
+    {
+        const int first = 2 + TOTAL_NUM_OPTION_GROUPS;
+        if (helmetSwitcher)
+            areas[first + 3]->SetToolTip(PARTY_HELMET_TIP);
+        if (upperArmorSwitcher)
+            areas[first + 9]->SetToolTip(PARTY_ARMOR_TIP);
+    }
+}
+void CI3DScreenOptions::CommitPartyVisualOptions()
+{
+    if (nCurrentMode != 0 || !helmetSwitcher || !upperArmorSwitcher)
+        return;
+    CModPackage *mod = ModRuntime::Current();
+    if (!mod || !mod->PartyVisualOptionsEnabled())
+        return;
+    int helmet = 0, upperArmor = 0;
+    helmetSwitcher->GetState(helmet);
+    upperArmorSwitcher->GetState(upperArmor);
+    if ((helmet != 0) != mod->HidePartyHelmets()
+        || (upperArmor != 0) != mod->HidePartyUpperArmor())
+        mod->SetPartyVisualOptions(helmet != 0, upperArmor != 0);
+}
 void CI3DScreenOptions::Redraw()
 {
 #ifndef NOGETDC
@@ -519,6 +586,13 @@ void CI3DScreenOptions::Redraw()
         rc2 += shift;
     }
 
+    if (nCurrentMode == 0)
+    {
+        if (helmetSwitcher)
+            pSurf->DrawText(PARTY_HELMET_LABEL, CRect(160, 132, 420, 152), 1, OPTIONS_COLOR_TEXT, DT_LEFT);
+        if (upperArmorSwitcher)
+            pSurf->DrawText(PARTY_ARMOR_LABEL, CRect(160, 276, 420, 296), 1, OPTIONS_COLOR_TEXT, DT_LEFT);
+    }
     pSurf->ReleaseDC();
 #endif // NOGETDC
 }
@@ -681,6 +755,7 @@ void CI3DScreenOptions::SetScreenMode(int nMode)
     if (nCurrentLine == -1)
         nCurrentLine = 0;
     bKeyInput = false;
+    UpdatePartyVisualOptionsVisibility();
     Redraw();
 }
 ////////////////////////////////////////////////////////////////////////////////

@@ -400,6 +400,8 @@ void CItemWeapon::FormTextureNameMask(CString &szName, DWORD dwShape, DWORD dwMa
 void CItemWeapon::FormTextureNameMask(CString &szName, const SIDBItemGeneralShape *pShape,
                                       const SIDBMaterial *pMaterial)
 {
+    szName.Empty();
+    if (!pShape || !pMaterial) return;
     char buff[4];
     // armor type code
     switch (pShape->dwTypeID)
@@ -425,6 +427,30 @@ void CItemWeapon::FormTextureNameMask(CString &szName, const SIDBItemGeneralShap
     case RPGWST_CROSSBOW:
         strcpy(buff, "cb");
         break;
+    case RPGWST_HANDS1:
+        strcpy(buff, "sd");
+        break;
+    case RPGWST_HANDS4:
+        strcpy(buff, "ts");
+        break;
+    case RPGWST_HANDS5:
+        strcpy(buff, "ta");
+        break;
+    case RPGWST_HANDS2:
+        strcpy(buff, "tp");
+        break;
+    case RPGWST_HANDS6:
+        strcpy(buff, "th");
+        break;
+    case RPGWST_HANDS3:
+        strcpy(buff, "sf");
+        break;
+    case RPGWST_HANDS7:
+        strcpy(buff, "tf");
+        break;
+    default:
+        ReportWarning("Unsupported weapon texture type %u", pShape->dwTypeID);
+        return;
     }
     //
     szName.Format("%s_%.2d.%s.%d", buff, pShape->dwTextureTypeIndex, pMaterial->szCodeName,
@@ -500,83 +526,77 @@ CString CItemWeapon::GetFigureName() const
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemWeapon::GetWeaponModelNames(DWORD dwShape, CStringArray &szNames)
 {
-    char szBuffer[64];
-    char szTTI[8];
+    GetWeaponModelNames(dwShape, szNames, true);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CItemWeapon::GetWeaponModelNames(DWORD dwShape, CStringArray &szNames, bool bRightHand)
+{
     szNames.RemoveAll();
-
     const SIDBWeaponShape *pShape = theItemDatabase.weapons[dwShape];
-    if (pShape == 0)
-        return;
-    sprintf(szTTI, "%.2d", pShape->dwTextureTypeIndex);
+    if (!pShape) return;
+
+    char textureIndex[8];
+    sprintf(textureIndex, "%.2d", pShape->dwTextureTypeIndex);
+    const char *prefix = 0;
     switch (pShape->dwTypeID)
     {
-    case RPGWST_SWORD:
-        strcpy(szBuffer, "rh3.sword");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        break;
-    case RPGWST_AXE:
-        strcpy(szBuffer, "rh3.axe");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        break;
-    case RPGWST_DAGGER:
-        strcpy(szBuffer, "rh3.dagger");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        break;
-    case RPGWST_SPEAR:
-        strcpy(szBuffer, "rh3.pike");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        break;
-    case RPGWST_HAMMER:
-        strcpy(szBuffer, "rh3.club");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        break;
+    case RPGWST_SWORD: prefix = bRightHand ? "rh3.sword" : "lh3.sword"; break;
+    case RPGWST_AXE: prefix = bRightHand ? "rh3.axe" : "lh3.axe"; break;
+    case RPGWST_DAGGER: prefix = bRightHand ? "rh3.dagger" : "lh3.dagger"; break;
+    case RPGWST_SPEAR: prefix = bRightHand ? "rh3.pike" : "lh3.pike"; break;
+    case RPGWST_HAMMER: prefix = bRightHand ? "rh3.club" : "lh3.club"; break;
+    case RPGWST_HANDS1: prefix = "lh2.shield"; break;
+    case RPGWST_HANDS4: prefix = bRightHand ? "rh3.dsword" : "lh3.dsword"; break;
+    case RPGWST_HANDS5: prefix = bRightHand ? "rh3.daxe" : "lh3.daxe"; break;
+    case RPGWST_HANDS2: prefix = bRightHand ? "rh3.dpike" : "lh3.dpike"; break;
+    case RPGWST_HANDS6: prefix = bRightHand ? "rh3.dclub" : "lh3.dclub"; break;
+    case RPGWST_HANDS3:
+    case RPGWST_HANDS7:
+        if (bRightHand)
+        {
+            CString model;
+            model.Format("%s%.2s", pShape->dwTypeID == RPGWST_HANDS3 ? "rh3.staff" : "rh3.dstaff", textureIndex);
+            szNames.Add(model);
+            model.Format("%s%.2s", pShape->dwTypeID == RPGWST_HANDS3 ? "basestaff" : "basedstaff", textureIndex);
+            szNames.Add(model);
+        }
+        else
+        {
+            CString model;
+            model.Format("%s%.2s", pShape->dwTypeID == RPGWST_HANDS3 ? "lh3.staff" : "lh3.dstaff", textureIndex);
+            szNames.Add(model);
+            model.Format("%s%.2s", pShape->dwTypeID == RPGWST_HANDS3 ? "l.basestaff" : "l.basedstaff", textureIndex);
+            szNames.Add(model);
+        }
+        return;
     case RPGWST_BOW:
-        strcpy(szBuffer, "lh3.bwpartb");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "bwparta");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "bwtetivaa");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "bwtetivab");
-        strcat(szBuffer, szTTI);
-        szNames.Add(szBuffer);
-        szNames.Add("quiver");
-        szNames.Add("arrows");
-        szNames.Add("rh3.arrow00");
-        break;
+        if (!bRightHand) return;
+        szNames.Add("lh3.bwpartb" + CString(textureIndex));
+        szNames.Add("bwparta" + CString(textureIndex));
+        szNames.Add("bwtetivaa" + CString(textureIndex));
+        szNames.Add("bwtetivab" + CString(textureIndex));
+        szNames.Add("quiver"); szNames.Add("arrows"); szNames.Add("rh3.arrow00");
+        return;
     case RPGWST_CROSSBOW:
-        strcpy(szBuffer, "rh3.crbow");
-        strcat(szBuffer, szTTI);
-        strcat(szBuffer, "main");
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "crbow");
-        strcat(szBuffer, szTTI);
-        strcat(szBuffer, "part01");
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "crbow");
-        strcat(szBuffer, szTTI);
-        strcat(szBuffer, "part02");
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "crbow");
-        strcat(szBuffer, szTTI);
-        strcat(szBuffer, "tetiva01");
-        szNames.Add(szBuffer);
-        strcpy(szBuffer, "crbow");
-        strcat(szBuffer, szTTI);
-        strcat(szBuffer, "tetiva02");
-        szNames.Add(szBuffer);
-        szNames.Add("quiver");
-        szNames.Add("arrows");
-        break;
+        if (!bRightHand) return;
+        szNames.Add("rh3.crbow" + CString(textureIndex) + "main");
+        szNames.Add("crbow" + CString(textureIndex) + "part01");
+        szNames.Add("crbow" + CString(textureIndex) + "part02");
+        szNames.Add("crbow" + CString(textureIndex) + "tetiva01");
+        szNames.Add("crbow" + CString(textureIndex) + "tetiva02");
+        szNames.Add("quiver"); szNames.Add("arrows");
+        return;
+    default: return;
     }
+
+    if (bRightHand)
+    {
+        szNames.Add("eyepoint1");
+        szNames.Add("eyepoint2");
+    }
+    CString model(prefix);
+    model += textureIndex;
+    szNames.Add(model);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemWeapon::GetWeaponModelNames(CStringArray &szNames)
@@ -1230,6 +1250,27 @@ CString CItemLoot::GetI3DTextureName() const
             case RPGWST_CROSSBOW:
                 szFormat = "cb";
                 break;
+            case RPGWST_HANDS1:
+                szFormat = "sd";
+                break;
+            case RPGWST_HANDS4:
+                szFormat = "ts";
+                break;
+            case RPGWST_HANDS5:
+                szFormat = "ta";
+                break;
+            case RPGWST_HANDS2:
+                szFormat = "tp";
+                break;
+            case RPGWST_HANDS6:
+                szFormat = "th";
+                break;
+            case RPGWST_HANDS3:
+                szFormat = "sf";
+                break;
+            case RPGWST_HANDS7:
+                szFormat = "tf";
+                break;
             }
             szName.Format("%s_%.2d.%d", szFormat, lpShape->dwTextureTypeIndex,
                           lpShape->dwTextureTypeIndex2);
@@ -1327,6 +1368,27 @@ CString CItemLoot::GetI3DFigureName() const
                 break;
             case RPGWST_CROSSBOW:
                 szFormat = "cb";
+                break;
+            case RPGWST_HANDS1:
+                szFormat = "sd";
+                break;
+            case RPGWST_HANDS4:
+                szFormat = "ts";
+                break;
+            case RPGWST_HANDS5:
+                szFormat = "ta";
+                break;
+            case RPGWST_HANDS2:
+                szFormat = "tp";
+                break;
+            case RPGWST_HANDS6:
+                szFormat = "th";
+                break;
+            case RPGWST_HANDS3:
+                szFormat = "sf";
+                break;
+            case RPGWST_HANDS7:
+                szFormat = "tf";
                 break;
             }
             szName.Format("initwe%s%dweapon", szFormat, lpShape->dwTextureTypeIndex);

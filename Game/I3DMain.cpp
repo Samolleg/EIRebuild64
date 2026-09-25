@@ -3,6 +3,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
+#include "ModRuntime.h"
 #include "I3DScreen.h"
 #include "I3DConsole.h"
 #include "A3Cursor.h"
@@ -168,7 +169,9 @@ void CInterface3D::Init(CRenderer *pNewRend)
     bNeedAutosave = false;
 
     CStdioFile file;
-    if (file.Open(IWorld.GetWorkPath() + "config\\tutorial.ini", CFile::modeRead | CFile::typeText))
+    CString tutorialPath = IWorld.GetWorkPath() + "config\\tutorial.ini";
+    std::string resolvedTutorialPath = ModRuntime::ConfigPath((LPCSTR)tutorialPath);
+    if (file.Open(resolvedTutorialPath.c_str(), CFile::modeRead | CFile::typeText))
     {
         CString szStr;
         CStringArray szStrArray;
@@ -197,7 +200,9 @@ void CInterface3D::Fini()
     DestroyScreens();
 
     CStdioFile file;
-    if (file.Open(IWorld.GetWorkPath() + "config\\tutorial.ini",
+    CString tutorialPath = IWorld.GetWorkPath() + "config\\tutorial.ini";
+    std::string resolvedTutorialPath = ModRuntime::ConfigPath((LPCSTR)tutorialPath);
+    if (file.Open(resolvedTutorialPath.c_str(),
                   CFile::modeCreate | CFile::modeWrite))
     {
         CString szStr;
@@ -965,6 +970,17 @@ void CInterface3D::StringEvent(LPCTSTR pszMsg)
         }
         else if (szTmpArray[0] == "autosave")
             bNeedAutosave = true;
+        else if (szTmpArray[0] == "gameover")
+        {
+            IWorldClient.StopAllSounds();
+            IWorldClient.DisableAmbientSounds();
+            BeginFX("buttons\\gameover.wav");
+            const CString title = szTmpArray.GetSize() > 1 ? szTmpArray[1] : "game_over";
+            const CString message = szTmpArray.GetSize() > 2 ? szTmpArray[2] : "game_over_msg";
+            CI3DScreenMessageBox *pScr = dbgnew CI3DScreenMessageBox(this, title, message,
+                                                                      0x00020000);
+            DoModal(pScr);
+        }
         else if (szTmpArray[0] == "endofgame")
         {
             if (!pScreens.empty())

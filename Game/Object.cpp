@@ -944,7 +944,7 @@ const SADEntry *CObject3D::GetAnimationEntry(LPCSTR pszAnimationName) const
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-const SADEntry *CObject3D::GetAnimationEntryByIndex(BYTE cIndex) const
+const SADEntry *CObject3D::GetAnimationEntryByIndex(DWORD cIndex) const
 {
     // acquire pointer to ADB file header
     if (SetADFileHdr() == 0)
@@ -1084,3 +1084,5 @@ void CObject3D::SetDefaultSpecular(DWORD dwColor)
         figures[i]->SetDefaultSpecular(dwColor);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+CParticle* CObject3D::FindPowerHitGlow(int hit){for(POSITION pos=particles.GetHeadPosition();pos;){auto*p=particles.GetNext(pos);if(p&&p->IsPowerHitGlow(hit))return p;}return nullptr;}

@@ -8,6 +8,9 @@ struct SRPGCommonStats;
 struct SRPGUserUnitStats;
 class CUnit;
 class CItem;
+class CItemWeapon;
+class CSpell;
+struct SAttackParams;
 struct SPDBPerk;
 namespace ModLua {
 struct Scope {
@@ -16,6 +19,10 @@ struct Scope {
  SRPGUnitStats *stagedStats=nullptr;
  std::map<CItem*,float> itemRegeneration;
  std::map<CItem*,float> itemMana;
+ std::map<CItem*,int> itemCounts;
+ std::map<std::pair<const CUnit*,int>,std::shared_ptr<CItemWeapon>> weaponViews;
+ CItemWeapon* Weapon(const CUnit&,int);
+ int LeftHand(const CUnit&);
  void CommitItems();
  ~Scope(){active=false;}
 };
@@ -28,6 +35,8 @@ void Push(lua_State*,SRPGUnitStats*,const std::shared_ptr<Scope>&);
 void Push(lua_State*,SRPGCommonStats*,const std::shared_ptr<Scope>&);
 void Push(lua_State*,const CUnit*,const std::shared_ptr<Scope>&);
 void Push(lua_State*,CItem*,const std::shared_ptr<Scope>&);
+void Push(lua_State*,const CSpell*,const std::shared_ptr<Scope>&);
+void Push(lua_State*,SAttackParams*,const std::shared_ptr<Scope>&);
 void Push(lua_State*,const SPDBPerk*,const std::shared_ptr<Scope>&);
 nlohmann::json CheckNativeBridge(lua_State*);
 }

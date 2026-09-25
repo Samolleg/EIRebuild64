@@ -10,6 +10,10 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiUnitLogic.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+#include "ModSpellRules.h"
+#include "ModTacticalSpells.h"
 #include "WorldServer.h"
 #include "UnitServer.h"
 #include "PlayerServer.h"
@@ -28,6 +32,7 @@ static const char LOCAL_FILE[] = __FILE__;
 const int AI_NO_MOTIVATION_POWER = -1000;
 /////////////////////////////////////////////////////////////////////////////////////
 static ostream &aiLog = NConsole::ai;
+namespace {thread_local bool manualWeaponSkill=false;}
 /////////////////////////////////////////////////////////////////////////////////////
 #ifndef _DEBUG
 #pragma optimize("agw", on)
@@ -180,6 +185,8 @@ CAISpellCaster::EAttackType CAISpellCaster::GetSpellType(CSpell *pSpell)
 {
     if (!pSpell)
         return AT_WEAPON;
+    if(auto*mod=ModRuntime::Current()){ModSkills::Config config;if(mod->SkillConfig(pSpell,config))return AT_DIRECT_DAMAGE;}
+    if(ModRuntime::Current())return EAttackType(ModTactical::SpellType(pSpell));
     switch (pSpell->GetSubtypeID() >> 16)
     {
     case SPELL_ID_ACIDRAY:
@@ -249,11 +256,12 @@ void CAISpellCaster::Initialize(CUnit *pUnit)
     CUnitServer *pUS = (CUnitServer *)pUnit->GetUnitSpecific();
     attacks.SetSize(0);
     heals.SetSize(0);
-    if (!IsIDofPersonage(pUnit->GetID()))
+    auto*mod=ModRuntime::Current();bool companion=mod&&mod->CompanionSkillAI(*pUnit);
+    if (!IsIDofPersonage(pUnit->GetID())||companion)
     {
         if (pUS->GetNativeWeaponType() != RPGWST_MAGIC)
             pUS->GetWeaponAttack(AddAttack(AT_WEAPON, -1, pUS->GetCurrentWeaponRange()));
-        for (i = 0; i < QI_MAX_SPELLS; i++)
+        for (i = 0; i < pUnit->GetSpellSlotCount(); i++)
         {
             CSpell *pSpell = pUnit->GetQSpell(i);
             if (pSpell)
@@ -317,14 +325,28 @@ void CAISpellCaster::Initialize(CUnit *pUnit)
     }
     else
         pUS->GetWeaponAttack(AddAttack(AT_WEAPON, -1, pUS->GetCurrentWeaponRange()));
+    skillCacheValid=true;skillWeapon=pUnit->GetCurrentQWeapon();skillWeaponType=skillWeapon?skillWeapon->GetSubtypeID():0;skillCompanion=companion;
+    for(int s=0;s<16;++s)skillSlots[s]=s<int(pUnit->GetSpellSlotCount())?pUnit->GetQSpell(s):nullptr;
     // calc average damage
     fpAvrgDamage = 0;
     for (i = 0; i < attacks.GetSize(); i++)
         fpAvrgDamage = Max(fpAvrgDamage, attacks[i].GetDamage());
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CAISpellCaster::SelectRevengeSpell(CAIUnitLogic&logic,CEnemy&current)
+{
+    if(!ModRuntime::Current()||!logic.GetUnitServer()||!current.pEnemy||logic.GetUnit()->IsHero())return;
+    CUnitList targets;targets.AddTail(current.pEnemy);CEnemy selected=current;
+    FindBestTarget(logic,selected,targets,logic.GetUnit()->GetCP(),false,false);
+    if(selected.pEnemy==current.pEnemy&&selected.nAttackNumber>=0)current=selected;
+}
 void CAISpellCaster::AttackEnemy(CAIUnitLogic &logic, const CEnemy &target)
 {
+    if(IsWeaponSkillChoice(logic,target)){
+        auto*server=logic.GetUnitServer();if(!target.pEnemy||target.pEnemy->IsDead()||server->HasAISkillCommand(target.nAttackNumber,target.pEnemy))return;
+        bool ready=server->CanRequestAISkill(target.nAttackNumber,target.pEnemy);logic.StartAttack(target.pEnemy);
+        if(ready)server->TagAISkill(target.nAttackNumber,target.pEnemy);return;
+    }
     // if ( pEnemy->WhoAmI() == HPC_UNIT && !logic.environment.IsUnitVisible( logic.GetUnit(),
     // (CUnit*) pEnemy ) ) return;
     ASSERT(target.pEnemy);
@@ -375,6 +397,7 @@ bool CAISpellCaster::IsEngaging(CAIUnitLogic &logic, const CEnemy &target)
 {
     CEnemy test;
     GetCurrentEnemy(logic, test);
+    if(IsWeaponSkillChoice(logic,target))return logic.GetUnitServer()->HasAISkillCommand(target.nAttackNumber,target.pEnemy);
     return test == target;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -382,7 +405,7 @@ bool CAISpellCaster::CanAttackEnemyFrom(CAIUnitLogic &logic, const CPlot3D &ptFr
                                         const CEnemy &target)
 {
     SUnitBasicCmd cmd;
-    if (target.nAttackNumber < 0)
+    if (target.nAttackNumber < 0||IsWeaponSkillChoice(logic,target))
         cmd.MakeAttack(target.pEnemy);
     else
         cmd.MakeCast(target.nAttackNumber, target.pEnemy);
@@ -391,6 +414,7 @@ bool CAISpellCaster::CanAttackEnemyFrom(CAIUnitLogic &logic, const CPlot3D &ptFr
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAISpellCaster::CanAttackEnemy(CAIUnitLogic &logic, const CEnemy &target, bool bDoNotMove)
 {
+    if(IsWeaponSkillChoice(logic,target)){CEnemy weapon=target;weapon.nAttackNumber=-1;return CanAttackEnemy(logic,weapon,bDoNotMove);}
     SAIPath fakePath;
     CUnit *pAttacker = logic.GetUnit();
     CPlot3D ptFrom;
@@ -491,8 +515,22 @@ const float FP_C_RANGECOST = 25; // for meter of range
 const float FP_C_KICKPRICE = 2;
 float CAISpellCaster::CalcAttackCost(const CPlot3D &ptPreferred, CUnit *pCaster, CUnitList &units,
                                      CUnit *pCurrentTarget, CUnit *pTarget, float fpLowBorder,
-                                     SAIPotentialAttack &attack)
+                                     SAIPotentialAttack &sourceAttack)
 {
+    SAIPotentialAttack attack=sourceAttack;auto*mod=ModRuntime::Current();ModSkills::Config config;
+    auto*server=dynamic_cast<CUnitServer*>(pCaster->GetUnitSpecific());auto*spell=sourceAttack.nAttackNumber>=0&&sourceAttack.nAttackNumber<int(pCaster->GetSpellSlotCount())?pCaster->GetQSpell(sourceAttack.nAttackNumber):nullptr;
+    if(mod&&server){server->SyncNpcMagicState();if(!server->HasAISpellMana(sourceAttack.nAttackNumber))return -1e30f;}
+    if(mod&&mod->SkillConfig(spell,config)){
+        if(!server||!server->CanRequestAISkill(sourceAttack.nAttackNumber,pTarget))return -1e30f;
+        auto*cached=GetAttack(-1);if(cached)attack=*cached;WORD toHit=attack.attack.wToHit;server->GetWeaponAttack(attack.attack);attack.attack.wToHit=toHit;
+        attack.nAttackNumber=sourceAttack.nAttackNumber;attack.type=AT_WEAPON;attack.fpRange=server->GetCurrentWeaponRange();attack.nTargets=0;attack.fpDamageRadius=0;attack.nDuration=0;
+        float mult=config.scaleDamageWithMelee?(std::max)(0.f,config.damageMultiplier)*(std::max)(1,config.projectileCount):1;
+        auto scale=[&](float value){float d=value*mult;return WORD(d<=0?0:d>=65535?65535:Float2Int(d));};
+        if(mod->PointSkill(spell)){float sum=0;for(auto d:attack.attack.wAttacks)sum+=d;for(auto&d:attack.attack.wAttacks)d=0;attack.attack.wAttacks[RPGAT_TERMICAL]=scale(sum);attack.type=AT_AREA_DAMAGE;attack.fpDamageRadius=config.areaRadius;}
+        else for(auto&d:attack.attack.wAttacks)d=scale(d);
+    }
+    bool tactical=ModTactical::Enabled(pCaster)&&spell&&!mod->SkillConfig(spell,config);
+    if(tactical)fpLowBorder=-1e30f; // Native early pruning must not discard later utility bonuses.
     WORD wDamage = 0;
     // (+) for keeping target
     float fpCost = pTarget == pCurrentTarget ? FP_C_SAMETARGET : 0;
@@ -627,7 +665,7 @@ float CAISpellCaster::CalcAttackCost(const CPlot3D &ptPreferred, CUnit *pCaster,
     }
     // (-) for being unable attack from current position
     // CRAP not accounted for yet
-    return fpCost;
+    return tactical?ModTactical::Score(pCaster,pTarget,spell,sourceAttack.nAttackNumber,sourceAttack.type,fpAvrgDamage,fpCost):fpCost;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAISpellCaster::CastHeals(CAIUnitLogic &logic, bool bDoNotMove)
@@ -651,6 +689,8 @@ bool CAISpellCaster::IsValidHealToCast(EAttackType type, bool bHealOnly)
 void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList &units,
                                     const CPlot3D &ptPrefered, bool bHeal, bool bDoNotMove)
 {
+    ModTactical::Selection tacticalSelection(logic.GetUnit(),units,bHeal);
+    RefreshSkillCache(logic.GetUnit());
     POSITION pos, posBest;
     if (heals.GetSize() == 0 && (units.GetCount() == 0 || attacks.GetSize() == 0))
     {
@@ -673,7 +713,7 @@ void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList 
     if (pCurrentTarget)
     {
         // если потенциальный враг только один, то нефиг париться - выбираем его
-        if (units.GetCount() == 1 && heals.GetSize() == 0)
+        if (units.GetCount() == 1 && heals.GetSize() == 0 && !HasWeaponSkills(pThis) && (!ModRuntime::Current() || attacks.GetSize() == 1))
         {
             res = curEnemy;
             return;
@@ -794,6 +834,7 @@ void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList 
 /////////////////////////////////////////////////////////////////////////////////////
 void CAISpellCaster::Load(CSave &file)
 {
+    skillCacheValid=false;
     fpAvrgDamage = 0;
     LoadCArray(attacks, file);
     if (file.GetVersion() < 90)
@@ -1137,6 +1178,7 @@ void CUMSuspection::Store(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 int CUMAggression::GetPower(CAIUnitLogic &logic)
 {
+    if(logic.GetUnitServer())logic.GetUnitServer()->SyncNpcMagicState();
     // CMapObjectPtr pOldTarget = pTarget;
     // pick up target
     tempEnemy.Clear();
@@ -1165,6 +1207,7 @@ int CUMAggression::GetPower(CAIUnitLogic &logic)
         if (!logic.environment.IsUnitVisible(logic.GetUnit(), pTarget))
             return AI_NO_MOTIVATION_POWER;
         tempEnemy = CAISpellCaster::CEnemy((CUnit *)pTarget);
+        logic.caster.SelectRevengeSpell(logic,tempEnemy);
         // if target is not in range add it to ignored list with some timing
         /*if ( !logic.IsInAttackRange( pTarget->GetCP(), this ) )
         {
@@ -1619,6 +1662,11 @@ void CUMPlayer::DoAttack(CAIUnitLogic &logic, CMapObject *_pTarget, ERPGHitLocat
     cmdState = PC_IDLE;
     pTarget = _pTarget;
     logic.StartPlayerAttack(_pTarget, hl, _bRun);
+    if(auto*mod=ModRuntime::Current();!manualWeaponSkill&&mod&&mod->CompanionSkillAI(*logic.GetUnit())&&_pTarget&&_pTarget->WhoAmI()==HPC_UNIT&&!_pTarget->IsDead()){
+        CUnitList one;one.AddTail(static_cast<CUnit*>(_pTarget));CAISpellCaster::CEnemy choice;
+        logic.caster.FindBestTarget(logic,choice,one,logic.GetUnit()->GetCP(),false,false);
+        if(static_cast<CUnit*>(choice)==_pTarget&&logic.caster.IsWeaponSkillChoice(logic,choice))logic.caster.AttackEnemy(logic,choice);
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoSkill(CAIUnitLogic &logic, CMapObject *pTarget, int nSkill, int nItemID,
@@ -1630,14 +1678,28 @@ void CUMPlayer::DoSkill(CAIUnitLogic &logic, CMapObject *pTarget, int nSkill, in
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoCast(CAIUnitLogic &logic, int nSpell, CMapObject *pTarget, bool _bRun)
 {
+    auto*mod=ModRuntime::Current();auto*server=logic.GetUnitServer();
+    auto*spell=server&&nSpell>=0&&nSpell<int(logic.GetUnit()->GetSpellSlotCount())?logic.GetUnit()->GetQSpell(nSpell):nullptr;ModSkills::Config config;
+    if(mod&&mod->TargetSkill(spell)&&mod->SkillConfig(spell,config)){
+        if(!server->CanRequestWeaponSkill(nSpell,pTarget)){server->InformFailure(ACK_HERO_REFUSE_CANT_CAST);return;}
+        struct ManualSkillScope{bool old;ManualSkillScope():old(manualWeaponSkill){manualWeaponSkill=true;}~ManualSkillScope(){manualWeaponSkill=old;}} manualScope;
+        DoAttack(logic,pTarget,RPGHL_BODY,_bRun);
+        if(!server->TagWeaponSkill(nSpell,pTarget))server->InformFailure(ACK_HERO_REFUSE_CANT_CAST);
+        return;
+    }
     cmdState = PC_IDLE;
     logic.StartCast(nSpell, pTarget, bRun);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoCast(CAIUnitLogic &logic, int nSpell, const CPlot3D &ptTarget, bool _bRun)
 {
+    auto*mod=ModRuntime::Current();auto*server=logic.GetUnitServer();
+    auto*spell=server&&nSpell>=0&&nSpell<int(logic.GetUnit()->GetSpellSlotCount())?logic.GetUnit()->GetQSpell(nSpell):nullptr;ModSkills::Config config;
+    bool pointSkill=mod&&mod->PointSkill(spell)&&mod->SkillConfig(spell,config);
+    if(pointSkill&&!server->CanRequestPointSkill(nSpell,ptTarget)){server->InformFailure(ACK_HERO_REFUSE_CANT_CAST);return;}
     cmdState = PC_IDLE;
     logic.StartCast(nSpell, ptTarget, bRun);
+    if(pointSkill&&!server->TagPointSkill(nSpell))server->InformFailure(ACK_HERO_REFUSE_CANT_CAST);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoFollow(CAIUnitLogic &logic, CUnit *pLeader)
@@ -1732,7 +1794,10 @@ void CUMPlayer::SeekTargets(CAIUnitLogic &logic)
             CAISpellCaster::CEnemy enemy(pTarget);
             if (logic.caster.CanAttackEnemy(logic, enemy, true))
             {
-                logic.StartAttack(pTarget);
+                if(auto*mod=ModRuntime::Current();mod&&mod->CompanionSkillAI(*pThis)){
+                    CUnitList one;one.AddTail(static_cast<CUnit*>(pTarget));logic.caster.FindBestTarget(logic,enemy,one,pThis->GetCP(),false,true);
+                    if(!enemy.IsEmpty())logic.caster.AttackEnemy(logic,enemy);
+                }else logic.StartAttack(pTarget);
                 return;
             }
         }
@@ -1786,8 +1851,10 @@ void CUMPlayer::SeekTargets(CAIUnitLogic &logic)
                     }
                 }
             }
-            if (!logic.caster.IsEngaging(logic, enemy))
-                logic.StartAttack(pEnemy);
+            if (!logic.caster.IsEngaging(logic, enemy)){
+                if(auto*mod=ModRuntime::Current();mod&&mod->CompanionSkillAI(*pThis))logic.caster.AttackEnemy(logic,enemy);
+                else logic.StartAttack(pEnemy);
+            }
             pTarget = 0; // automatic attack mode
         }
     }
@@ -3134,3 +3201,9 @@ void CAIUnitLogic::Store(CSave &file)
     file.Write(nCurrentAlarm);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+bool CAISpellCaster::HasWeaponSkills(CUnit*unit){auto*mod=ModRuntime::Current();if(!mod||!unit)return false;for(int i=0;i<int(unit->GetSpellSlotCount());++i){ModSkills::Config config;if(mod->SkillConfig(unit->GetQSpell(i),config))return true;}return false;}
+void CAISpellCaster::RefreshSkillCache(CUnit*unit){if(!ModRuntime::Current()||!unit)return;auto*weapon=unit->GetCurrentQWeapon();bool changed=!skillCacheValid||skillWeapon!=weapon||skillWeaponType!=(weapon?weapon->GetSubtypeID():0)||skillCompanion!=ModRuntime::Current()->CompanionSkillAI(*unit);
+ for(int i=0;i<16;++i)changed|=skillSlots[i]!=(i<int(unit->GetSpellSlotCount())?unit->GetQSpell(i):nullptr);if(changed)Initialize(unit);
+}
+bool CAISpellCaster::IsWeaponSkillChoice(CAIUnitLogic&logic,const CEnemy&choice){auto*mod=ModRuntime::Current();auto*unit=logic.GetUnit();if(!mod||!unit||choice.nAttackNumber<0||choice.nAttackNumber>=int(unit->GetSpellSlotCount())||(unit->IsHero()&&!mod->CompanionSkillAI(*unit)))return false;ModSkills::Config config;return mod->SkillConfig(unit->GetQSpell(choice.nAttackNumber),config)&&config.allowNpc;}

@@ -7,8 +7,28 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "WinRegistry.h"
 #include "IniFile.h"
+#include <filesystem>
 /////////////////////////////////////////////////////////////////////////////////////
 SGeneralSettings theSettings;
+namespace {
+std::filesystem::path InstalledGameRoot()
+{
+    char modulePath[1024] = {};
+    DWORD length = GetModuleFileNameA(nullptr, modulePath, sizeof(modulePath));
+    if (!length || length >= sizeof(modulePath)) return {};
+    const auto root = std::filesystem::path(modulePath).parent_path().parent_path().parent_path();
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(root / "Res" / "database.res", error) || error)
+        return {};
+    if (!std::filesystem::is_directory(root / "Maps", error) || error)
+        return {};
+    return root;
+}
+CString DirectoryWithSlash(const std::filesystem::path &path)
+{
+    return CString((path.string() + "\\").c_str());
+}
+}
 /////////////////////////////////////////////////////////////////////////////////////
 SGeneralSettings::SGeneralSettings()
 {
@@ -631,9 +651,18 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
     ////////////////////////////////////////////////////////////////////////////////////
     // COMMON SETTINGS (independent from user).
     // pathes settings
-    szWorkPath = reg.GetString(szPathSettings, "Work path", szWorkPath);
-    szResourcePath = reg.GetString(szPathSettings, "Resources path", szResourcePath);
-    szCDPath = reg.GetString(szPathSettings, "CD-ROM Path", szCDPath);
+    // EIStarter starts in Starter/Engine, while loose game data lives in the
+    // installation root. Keep every explicitly configured path unchanged.
+    const auto gameRoot = InstalledGameRoot();
+    CString configuredWork = reg.GetString(szPathSettings, "Work path", "");
+    CString configuredResources = reg.GetString(szPathSettings, "Resources path", "");
+    CString configuredCD = reg.GetString(szPathSettings, "CD-ROM Path", "");
+    szWorkPath = !configuredWork.IsEmpty() ? configuredWork
+        : !gameRoot.empty() ? DirectoryWithSlash(gameRoot) : szWorkPath;
+    szResourcePath = !configuredResources.IsEmpty() ? configuredResources
+        : !gameRoot.empty() ? DirectoryWithSlash(gameRoot / "Res") : szResourcePath;
+    szCDPath = !configuredCD.IsEmpty() ? configuredCD
+        : !gameRoot.empty() ? DirectoryWithSlash(gameRoot) : szCDPath;
     //
     ////////////////////////////////////////////////////////////////////////////////////
     // GENERAL SETTINGS

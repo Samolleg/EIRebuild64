@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "IniFile.h"
+#include "ModRuntime.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CIniFile::CIniFile(LPCSTR pszIniFileName)
 {
@@ -10,7 +11,7 @@ CIniFile::CIniFile(LPCSTR pszIniFileName)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CIniFile::Open(LPCSTR pszIniFileName)
 {
-    szIniFileName = pszIniFileName;
+    szIniFileName = ModRuntime::ConfigPath(pszIniFileName).c_str();
 
     return TRUE;
 }

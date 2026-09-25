@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "RPGSystem.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModSpellRules.h"
 
 #include "aiSettings.h"
 #include "GeneralSettings.h"
@@ -52,7 +53,7 @@ BOOL SRPGScienceStats::CanOpen(const SRPGScienceStats &door) const
                 return TRUE;
         }
         if (dwTools & door.dwTools & (RPGTOOL_HAND | RPGTOOL_PICKLOCK | RPGTOOL_CROWBAR))
-            return dwSkill >= door.dwSkill;
+            return door.dwSkill == 0 || static_cast<LONG>(dwSkill) >= static_cast<LONG>(door.dwSkill);
     }
     return FALSE;
 }
@@ -888,6 +889,18 @@ void SRPGUnitStats::AddExperience(float fExp)
 // also, recalc all stats
 void SRPGUnitStats::GainExperience(float fpGainedExperience)
 {
+    if (auto* mod = ModRuntime::Current())
+    {
+        const float limit = mod->ExperienceLimit();
+        if (limit >= 0.0f)
+        {
+            // ExpLimitCheck uses the original intelligence multiplier for the award and cap.
+            const float multiplier = float(pow(1.04, psIntelligence.fpEffectiveValue - 25.0f));
+            AddExperience(fpGainedExperience * multiplier);
+            fpExperience = Min(fpExperience, limit * multiplier);
+            return;
+        }
+    }
     AddExperience(fpGainedExperience * GetExpMultiplier());
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -957,6 +970,7 @@ float SRPGUnitStats::GetDamageModifier(const CUnit *pUnit) const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUnitStats::GetModifiedDamage(const CUnit *pUnit, float fDamage) const
 {
+    if(pUnit)if(auto*mod=ModRuntime::Current())return mod->ModifiedDamage(*this,*pUnit,fDamage,float(random.Get(100)));
     return Max(1.0f, fDamage * GetDamageModifier(pUnit));
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1148,19 +1162,18 @@ void SRPGUnitStats::RecalcStats(SRPGCommonStats *lpCommonStats, CUnit *pUnit)
                                                                .fpBaseValue;
     float fSpellEffectModifiers[40];
     MemSetDWord(reinterpret_cast<DWORD *>(fSpellEffectModifiers), 0, 40);
+    bool negativeMagic=ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("AllowMagicNegative");
     // collect effects
     for (i = 0; i < effects.GetSize(); i++)
     {
         const CSpellEffect &effect = effects[i];
         int nEffectType = effect.GetEffectType();
         if (nEffectType < 40)
-            fSpellEffectModifiers[nEffectType] = Max(fSpellEffectModifiers[nEffectType],
-                                                     effect.GetPower());
+            fSpellEffectModifiers[nEffectType] = negativeMagic?ModSpells::StrongestSignedEffect(fSpellEffectModifiers[nEffectType],effect.GetPower()):Max(fSpellEffectModifiers[nEffectType],effect.GetPower());
     }
     // apply effects
     // SPELL_ID_PROT_FIRE :         // protection from fire
-    lpCommonStats->psAbsorbtions[RPGAT_TERMICAL].fpEffectiveValue += Max(
-        fSpellEffectModifiers[SPELL_ID_PROT_FIRE], fSpellEffectModifiers[SPELL_ID_ANTIMAGIC]);
+    lpCommonStats->psAbsorbtions[RPGAT_TERMICAL].fpEffectiveValue += negativeMagic?ModSpells::StrongestSignedEffect(fSpellEffectModifiers[SPELL_ID_PROT_FIRE],fSpellEffectModifiers[SPELL_ID_ANTIMAGIC]):Max(fSpellEffectModifiers[SPELL_ID_PROT_FIRE],fSpellEffectModifiers[SPELL_ID_ANTIMAGIC]);
     // SPELL_ID_PROT_ELECTRIC :     // protection from electricity
     lpCommonStats->psAbsorbtions[RPGAT_ELECTRICAL].fpEffectiveValue += Max(
         fSpellEffectModifiers[SPELL_ID_PROT_ELECTRIC], fSpellEffectModifiers[SPELL_ID_ANTIMAGIC]);
@@ -1399,8 +1412,9 @@ BOOL SRPGUnitStats::ProcessAttackPortionSingle(CUnit *pUnit, SRPGCommonStats *lp
             fpPassedDamage *= lpAttackPortion->fBackStabMultiplier;
         hl.fpHP -= fpPassedDamage;
         //
-        if (((fpPassedDamage >= hl.fpMaxHP) && (hl.dwCrippleMask & (1 << j))) ||
-            (hl.fpHP < -5.0f * hl.fpMaxHP))
+        if (!(ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("DisableCrippledHL")) &&
+            (((fpPassedDamage >= hl.fpMaxHP) && (hl.dwCrippleMask & (1 << j))) ||
+            (hl.fpHP < -5.0f * hl.fpMaxHP)))
         {
             // notify about crippled legs/hands
             if (hl.state > RPGALS_CRIPPLED)
@@ -1470,6 +1484,7 @@ BOOL SRPGUnitStats::ProcessAttackPortionSingle(CUnit *pUnit, SRPGCommonStats *lp
 // after armor layers pass, apply passed damage to hit location's HP.
 // check for crippling, dead, etc.
 // collect total HP (soul) from all hit location's stats
+#include "ModCombat.inl"
 BOOL SRPGUnitStats::ProcessAttackPortion(CUnit *pUnit, SRPGCommonStats *lpCommonStats,
                                          const SRPGAttackPortion *lpAttackPortion, CItem *pWeapon)
 {
@@ -2327,6 +2342,7 @@ float SRPGUserUnitStats::GetDamageModifier(const CUnit *pUnit) const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUserUnitStats::GetModifiedDamage(const CUnit *pUnit, float fDamage) const
 {
+    if(pUnit)if(auto*mod=ModRuntime::Current())return mod->ModifiedDamage(*this,*pUnit,fDamage);
     return Max(1.0f, fDamage * GetDamageModifier(pUnit));
 }
 /////////////////////////////////////////////////////////////////////////////////////

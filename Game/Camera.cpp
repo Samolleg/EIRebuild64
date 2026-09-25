@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Camera.h"
+#include "ModRuntime.h"
+#include "FileRegistry.h"
 
 #include "WorldClient.h"
 #include "SoundManager.h"
@@ -89,6 +91,7 @@ BOOL CCamera::Create()
 // destroy camera: remove all objects and release carrier
 void CCamera::Destroy()
 {
+    ResetFalloutMode();
     dwCarrierID = -1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -458,7 +461,9 @@ BOOL CCamera::LoadCameraPlacements(LPCSTR pszFileName, int nRemove)
 {
     CFile file;
 
-    if (file.Open(CString(theWorld.GetWorkPath()) + "camera\\" + pszFileName, CFile::modeRead) ==
+    CString cameraPath = CString(theWorld.GetWorkPath()) + "camera\\" + pszFileName;
+    std::string resolvedCamera = ModRuntime::CameraPath((LPCSTR)cameraPath);
+    if (file.Open(resolvedCamera.c_str(), CFile::modeRead) ==
         FALSE)
         return FALSE;
 
@@ -578,12 +583,14 @@ void CCamera::SetScrollValue(const CPlot2D &ptScroll)
 }
 void CCamera::SetRotateValue(const float fpValue)
 {
+    if (IsFalloutModeActive()) return;
     rotate.desired = fpValue;
     if (fabs(fpValue) > fabs(rotate.value))
         rotate.value = rotate.desired;
 }
 void CCamera::SetPitchValue(const float fpValue)
 {
+    if (IsFalloutModeActive()) return;
     pitch.desired = fpValue;
     if (fabs(fpValue) > fabs(pitch.value))
         pitch.value = pitch.desired;
@@ -904,6 +911,100 @@ void CCamera::InitRotate(float fRotateAngle)
 {
     qRotate.FromAxisAngle(CPlot3D(0, 0, 1), fRotateAngle);
     ReconstructCameraPlacement();
+}
+void CCamera::ResetFalloutMode()
+{
+    falloutMode = FALLOUT_STOCK;
+    falloutBriefingMode = FALLOUT_STOCK;
+    falloutBriefing = false;
+    falloutBaselineValid = false;
+}
+
+void CCamera::ReapplyFalloutAfterMove()
+{
+    if (!IsFalloutModeActive() || !ModRuntime::Current()) return;
+    falloutBaselineRotation = qRotate;
+    falloutBaselinePitch = fPitch;
+    falloutBaselineValid = true;
+    ApplyFalloutPlacement();
+}
+
+void CCamera::ApplyFalloutPlacement()
+{
+    if (!IsFalloutModeActive() || !ModRuntime::Current()) return;
+    CFileRegistry reg;
+    float yaw = 45.0f, angle = 35.264f, multiplier = 2.0f;
+    const std::string path = ModRuntime::ConfigPath("config\\ai.reg");
+    if (reg.Open(path.c_str())) {
+        yaw = reg.GetFloat("Addon", "JMVFalloutCameraYaw", yaw);
+        angle = reg.GetFloat("Addon", "JMVFalloutCameraPitch", angle);
+        multiplier = reg.GetFloat("Addon", "JMVFalloutCameraTelephotoMultiplier", multiplier);
+    }
+    if (!(yaw == yaw)) yaw = 45.0f;
+    if (!(angle == angle)) angle = 35.264f;
+    if (!(multiplier == multiplier)) multiplier = 2.0f;
+    falloutTelephotoMultiplier = Max(1.0f, Min(4.0f, multiplier));
+    while (yaw >= 180.0f) yaw -= 360.0f;
+    while (yaw < -180.0f) yaw += 360.0f;
+    yaw = -yaw + (falloutMode == FALLOUT_NORTHEAST ? 180.0f : 0.0f);
+    angle = Max(5.0f, Min(80.0f, angle));
+    rotate.value = rotate.desired = 0.0f;
+    pitch.value = pitch.desired = 0.0f;
+    qRotate.FromAxisAngle(CPlot3D(0, 0, 1), ToRadian(yaw));
+    fPitch = ToRadian(angle);
+    ReconstructCameraPlacement();
+}
+
+void CCamera::ToggleFalloutMode(float normalizeAngle)
+{
+    if (!ModRuntime::Current()) { InitRotate(normalizeAngle); return; }
+    if (falloutBriefing) return;
+    if (falloutMode == FALLOUT_STOCK) {
+        falloutBaselineRotation = qRotate;
+        falloutBaselinePitch = fPitch;
+        falloutBaselineValid = true;
+        InitRotate(normalizeAngle);
+        falloutMode = FALLOUT_SOUTHWEST;
+        ApplyFalloutPlacement();
+    } else if (falloutMode == FALLOUT_SOUTHWEST) {
+        InitRotate(normalizeAngle);
+        falloutMode = FALLOUT_NORTHEAST;
+        ApplyFalloutPlacement();
+    } else {
+        falloutMode = FALLOUT_STOCK;
+        InitRotate(normalizeAngle);
+        if (falloutBaselineValid) {
+            rotate.value = rotate.desired = 0.0f;
+            pitch.value = pitch.desired = 0.0f;
+            qRotate = falloutBaselineRotation;
+            fPitch = falloutBaselinePitch;
+            ReconstructCameraPlacement();
+        }
+        falloutBaselineValid = false;
+    }
+}
+
+void CCamera::SuspendFalloutForBriefing()
+{
+    if (falloutBriefing) return;
+    falloutBriefing = true;
+    falloutBriefingMode = falloutMode;
+    if (!IsFalloutModeActive()) return;
+    falloutMode = FALLOUT_STOCK;
+    if (falloutBaselineValid) {
+        qRotate = falloutBaselineRotation;
+        fPitch = falloutBaselinePitch;
+        ReconstructCameraPlacement();
+    }
+}
+
+void CCamera::ResumeFalloutAfterBriefing()
+{
+    if (!falloutBriefing) return;
+    falloutBriefing = false;
+    falloutMode = falloutBriefingMode;
+    falloutBriefingMode = FALLOUT_STOCK;
+    if (IsFalloutModeActive()) ReapplyFalloutAfterMove();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 float CCamera::GetRotateAngle()

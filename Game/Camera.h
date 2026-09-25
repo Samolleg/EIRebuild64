@@ -133,6 +133,14 @@ private:
     float fDistance; // rod in polar coords
     CQuaternion qRotate;
     float fPitch; // pitch angle
+    enum FalloutMode { FALLOUT_STOCK, FALLOUT_SOUTHWEST, FALLOUT_NORTHEAST };
+    FalloutMode falloutMode = FALLOUT_STOCK;
+    FalloutMode falloutBriefingMode = FALLOUT_STOCK;
+    bool falloutBriefing = false;
+    bool falloutBaselineValid = false;
+    CQuaternion falloutBaselineRotation;
+    float falloutBaselinePitch = 0.0f;
+    float falloutTelephotoMultiplier = 2.0f;
     // some camera effects
     std::list<SEarthquakeEffect> earthquakes;
     // scroll restrictions
@@ -175,6 +183,14 @@ public:
     //
     void InitPlacement(float fRotateAngle = 0);
     void InitRotate(float fRotateAngle = 0);
+    void ToggleFalloutMode(float normalizeAngle = 0);
+    void ReapplyFalloutAfterMove();
+    void ApplyFalloutPlacement();
+    void SuspendFalloutForBriefing();
+    void ResumeFalloutAfterBriefing();
+    void ResetFalloutMode();
+    bool IsFalloutModeActive() const { return falloutMode != FALLOUT_STOCK; }
+    float GetFalloutTelephotoMultiplier() const { return falloutTelephotoMultiplier; }
     //
     void SetAnchorPoint(const CPlot3D &pt);
     const CPlot3D &GetAnchorPoint() const { return ptAnchorPoint; }

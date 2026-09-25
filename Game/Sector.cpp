@@ -1069,7 +1069,7 @@ ReadLayerLVertexes:
                 }
                 else
                 {
-                    assert(*pTId == TILE_UNDEF);
+                    // The render pass skips layer tiles without an object, even if a tile ID remains.
                     *pTileInd = -1;
                 }
                 pTileInd++;

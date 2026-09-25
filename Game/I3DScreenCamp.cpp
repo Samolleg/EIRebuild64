@@ -1,4 +1,8 @@
 #include "StdAfx.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
+#include "ModStatRules.h"
+#include "Object3DClientSpecific.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -376,6 +380,54 @@ void CI3DScreenCamp::OnActivate()
 #endif // __DEMO__
     }
 
+    if (auto *mod = ModRuntime::Current())
+    {
+        if (mod->CombatSetting("JMVShopUpdate"))
+        {
+            CUnit *current = nCurPers >= 0 && nCurPers < pUnits.GetSize() ? pUnits[nCurPers] : 0;
+            if (current)
+            {
+                if (CItemWeapon *weapon = current->GetCurrentQWeapon())
+                {
+                    const int type = weapon->GetShapeEntry()->dwTypeID;
+                    const bool twoHanded = ModStats::IsTwohandedWeapon(type, current);
+                    const char *idle = type == RPGWST_HANDS4 && twoHanded ? "2hscidle08" :
+                        (type == RPGWST_HANDS5 || type == RPGWST_HANDS6) && twoHanded ?
+                        "2hacidle08" : "cidle09";
+                    if (const SADEntry *entry = current->GetAnimationEntry(idle))
+                    {
+                        const float animationTime = (timeGetTime() / 1024.0f) * 15;
+                        current->LowStartAnimation(0xff, entry->dwEntryIndex,
+                                                   int(animationTime - random.Get(0, 50)), 0);
+                        current->GetUnitSpecific()->NewAnimationWasReceived(animationTime);
+                    }
+                }
+                current->RecalcRPGStats();
+            }
+            if (pShop)
+            {
+                const float limit = float(mod->ShopConstructLimit(pShop->nID));
+                float minLevels[RPG_NUM_MAGIC_SUBTYPES], maxLevels[RPG_NUM_MAGIC_SUBTYPES];
+                for (int i = 0; i < RPG_NUM_MAGIC_SUBTYPES; ++i)
+                {
+                    minLevels[i] = 1e20f;
+                    maxLevels[i] = -1e20f;
+                    const ERPGMagicSubtypes subtype = ERPGMagicSubtypes(i);
+                    for (int j = 0; j < IWorldClient.GetParty().people.GetSize(); ++j)
+                    {
+                        const float skill = IWorldClient.GetParty().people[j].stats.GetMagicSkill(subtype);
+                        minLevels[i] = Max(Min(minLevels[i], skill), 10.0f);
+                        maxLevels[i] = Max(Max(maxLevels[i], skill), limit);
+                    }
+                }
+                pShop->SetAssortmentParameters(minLevels, maxLevels);
+                pShop->bNeedUpdate = true;
+            }
+            for (int i = 0; i < pUnits.GetSize(); ++i)
+                if (pUnits[i] && pUnits[i]->GetObjectSpecific())
+                    static_cast<CObject3DClientSpecific *>(pUnits[i]->GetObjectSpecific())->ReleaseWounds();
+        }
+    }
     const SScenarioZone *pZone = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
     if (pZone)
         theWorld.GetMusicSystem()->SetConstructorMode(pZone->szAllodName);
@@ -1148,6 +1200,13 @@ void CI3DScreenCamp::GetMaxManaAndComplexity(ERPGMagicSubtypes subtype, int &nCo
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenCamp::CanClickOnItem(CItem *pItem, EItemScreenParts eFrom)
 {
+    if(auto*mod=ModRuntime::Current()){
+        if(eScreenMode==ISM_SPELLCONSTR&&(eFrom==ISP_WAGON||eFrom==ISP_SPELLASSORT)&&mod->SkillItemBlocked(pItem,0))return false;
+        if(eScreenMode==ISM_ITEMCONSTR&&(eFrom==ISP_WAGON||eFrom==ISP_ITEMASSORT)&&mod->SkillItemBlocked(pItem,1))return false;
+        if(eScreenMode==ISM_SPELLTRADE&&eFrom==ISP_WAGON&&mod->SkillItemBlocked(pItem,2))return false;
+    }
+    const bool removeSpellConstructReqs = ModRuntime::Current() &&
+        ModRuntime::Current()->CombatSetting("RemoveSpellConstructReqs");
     switch (eScreenMode)
     {
     case ISM_WEAPONS: {
@@ -1208,9 +1267,9 @@ bool CI3DScreenCamp::CanClickOnItem(CItem *pItem, EItemScreenParts eFrom)
                     pLoot->GetInstructionItemIndex());
                 int nMaxComplexity = 0, nMaxMana = 0;
                 GetMaxManaAndComplexity(pPrototype->mstSubtype, nMaxComplexity, nMaxMana);
-                if (nMaxMana < (int)pPrototype->fpMana)
+                if (!removeSpellConstructReqs && nMaxMana < (int)pPrototype->fpMana)
                     return false;
-                if (nMaxComplexity < (int)pPrototype->dwComplexity)
+                if (!removeSpellConstructReqs && nMaxComplexity < (int)pPrototype->dwComplexity)
                     return false;
                 return true;
             }
@@ -1266,9 +1325,9 @@ bool CI3DScreenCamp::CanClickOnItem(CItem *pItem, EItemScreenParts eFrom)
                     fMana += pModifier->fpMana;
                     int nMaxComplexity = 0, nMaxMana = 0;
                     GetMaxManaAndComplexity(subtype, nMaxComplexity, nMaxMana);
-                    if (nMaxComplexity < (int)dwComplexity)
+                    if (!removeSpellConstructReqs && nMaxComplexity < (int)dwComplexity)
                         return false;
-                    if (nMaxMana < (int)fMana)
+                    if (!removeSpellConstructReqs && nMaxMana < (int)fMana)
                         return false;
                     return true;
                 }
@@ -1589,6 +1648,7 @@ void CI3DScreenCamp::ClickOnSlot(int nSlotType, EItemScreenParts eFrom)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::TransactionOK()
 {
+    if(SkillTransactionBlocked()){bValidOK=false;return;}
     pI3D->BeginFX("buttons\\camp\\buy.wav");
 
     CItem *pItem;
@@ -2019,6 +2079,7 @@ void CI3DScreenCamp::CheckValidTransaction()
     pSurf->ReleaseDC();
 #endif // NOGETDC
 
+    if(SkillTransactionBlocked())bValidOK=false;
     if (bValidOK)
         figures[0]->SetAmbient(1, 1, 1);
     else
@@ -2088,11 +2149,13 @@ bool CI3DScreenCamp::ConstructSpell()
         return false;
     pConstrSpell->AddRef();
 
+    const bool removeSpellConstructReqs = ModRuntime::Current() &&
+        ModRuntime::Current()->CombatSetting("RemoveSpellConstructReqs");
     int nMaxComplexity = 0, nMaxMana = 0;
     GetMaxManaAndComplexity(pPrototype->mstSubtype, nMaxComplexity, nMaxMana);
-    if (nMaxMana < (int)pSpell->GetManaCost())
+    if (!removeSpellConstructReqs && nMaxMana < (int)pSpell->GetManaCost())
         return false;
-    if (nMaxComplexity < (int)pSpell->GetComplexity())
+    if (!removeSpellConstructReqs && nMaxComplexity < (int)pSpell->GetComplexity())
         return false;
 
     return true;
@@ -2100,6 +2163,7 @@ bool CI3DScreenCamp::ConstructSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenCamp::DeconstructSpell()
 {
+    if(auto*mod=ModRuntime::Current())if(mod->SkillContainerBlocked(pSpellsConstr,0))return false;
     CItemLoot *pLoot = 0;
     ASSERT(pSpellsConstr->allWagonItems.GetSize() == 1);
     pConstrSpell = pSpellsConstr->DuplicateItem(pSpellsConstr->allWagonItems[0]);
@@ -2130,6 +2194,7 @@ bool CI3DScreenCamp::DeconstructSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenCamp::ConstructItem()
 {
+    if(auto*mod=ModRuntime::Current())if(mod->SkillContainerBlocked(pItemsConstr,1))return false;
     CItemConstructor *pIC = pItemsConstr->GetItemConstructor();
     CItemManager *pIM = pItemsConstr->GetItemManager();
     CSpellManager *pSM = pItemsConstr->GetSpellManager();
@@ -2417,3 +2482,10 @@ void CI3DScreenCamp::GenerateCheatAssortment()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+bool CI3DScreenCamp::SkillTransactionBlocked(){auto*mod=ModRuntime::Current();if(!mod)return false;
+ if(eScreenMode==ISM_SPELLCONSTR)return mod->SkillContainerBlocked(pSpellsConstr,0);
+ if(eScreenMode==ISM_ITEMCONSTR)return mod->SkillContainerBlocked(pItemsConstr,1)||mod->SkillItemBlocked(pConstrItem,1);
+ if(eScreenMode==ISM_SPELLTRADE)return mod->SkillContainerBlocked(pSpellsSell,2);
+ return false;
+}

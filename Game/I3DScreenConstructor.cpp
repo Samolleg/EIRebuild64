@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenConstructor.h"
@@ -990,108 +992,237 @@ void CI3DObjectQuickSlots::SetCurrentQItem(CItem *pQuick)
         }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectSpellSlots::Init(bool bUp)
-{
-    if (bUp)
-        nTopHeight = 0;
-    else
-        nTopHeight = 500;
-
-    SetRect(0, nTopHeight, 800, nTopHeight + 100);
-    ePartType = ISP_CAMPSLOTS;
-
-    for (int i = 0; i < 8; i++)
-        AddArea()->MakeRect(i * 100, nTopHeight, (i + 1) * 100, nTopHeight + 100);
-
-    CI3DFigure *pFig = AddFigure();
-    pFig->MakeBarFrame2(3, 100, -40, -40, 40, 40, 5);
-    pFig->UseDefaultColors(TRUE);
-    pFig->SetDefaultColor(RGBA_MAKE(139, 139, 55, 255));
-    pFig->SetTexture(0);
-    pFig->Show(FALSE);
-
-    pFig = AddFigure();
-    pFig->MakeTilingBar(16, 100, 0, nTopHeight, 800, nTopHeight + 100, 14, 142, 114, 242, 8);
-
-    nCurrentSpell = -1;
-    nFirstSpell = 0;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectSpellSlots::SetCurrentSpell(CItem *pSpell)
-{
-    CPersonage *pPers = pScreen->GetCurrentPers();
-    nCurrentSpell = -1;
-    for (int i = 0; i < pPers->spells.GetSize(); i++)
-        if (pPers->spells[i] == pSpell)
-        {
-            nCurrentSpell = i;
-            nFirstSpell = (i / 8) * 8;
-            break;
-        }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
-{
-    SDrawItem item;
-    CPersonage *pPers = pScreen->GetCurrentPers();
-    if (nFirstSpell >= pPers->spells.GetSize())
-        nFirstSpell = pPers->spells.GetSize() > 8 ? 8 : 0;
-
-    if (nCurrentSpell >= nFirstSpell && nCurrentSpell < nFirstSpell + 8 &&
-        nCurrentSpell < pPers->spells.GetSize())
-    {
-        figures[0]->Show(TRUE);
-        figures[0]->SetRelativeToScreen(50 + (nCurrentSpell - nFirstSpell) * 100,
-                                        nTopHeight + 50, 3);
-    }
-    else
-        figures[0]->Show(FALSE);
-
-    const int end = min(nFirstSpell + 8, pPers->spells.GetSize());
-    for (int i = nFirstSpell; i < end; i++)
-    {
-        item.pItem = pPers->spells[i];
-        item.fX = 50 + (i - nFirstSpell) * 100;
-        item.fY = nTopHeight + 50;
-        item.fZ = 12;
-        item.fPixSize = 100;
-        item.eFrom = ePartType;
-        pScreen->DrawItem(pRend, item);
-    }
-    return CI3DObject::Draw(pRend);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-CItem *CI3DObjectSpellSlots::GetMouseItem(CPoint point, int &nSlotType)
-{
-    nSlotType = 0;
-    if (!IsVisible())
-        return 0;
-    int ht = HitTest(point);
-    CPersonage *pPers = pScreen->GetCurrentPers();
-    if (ht >= 0 && ht < 8)
-    {
-        nSlotType = IST_SPELL;
-        const int spellIndex = nFirstSpell + ht;
-        if (spellIndex < pPers->spells.GetSize())
-            return pPers->spells[spellIndex];
-    }
-    return 0;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-BOOL CI3DObjectSpellSlots::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
-{
-    if (!IsVisible() || HitTest(pt) < 0)
-        return FALSE;
-
-    CPersonage *pPers = pScreen->GetCurrentPers();
-    if (pPers->spells.GetSize() > 8)
-        nFirstSpell = zDelta < 0 ? 8 : 0;
-    else
-        nFirstSpell = 0;
-    SetProcessed();
-    return TRUE;
-}
-/////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectSpellSlots::Init(bool bUp)
+{
+    if(auto*mod=ModRuntime::Current())mod->GrantSkillPrototypes(IWorldClient.GetParty());
+    nTopHeight = bUp ? 0 : 500;
+    const float inventoryDepth = bUp ? 8.f : 4.f;
+
+    SetRect(0, nTopHeight, 800, nTopHeight + 100);
+    ePartType = ISP_CAMPSLOTS;
+    nCurrentSpell = -1;
+    nFirstSpell = 0;
+    fSpellPosition = 0.f;
+    fSpellToScroll = 0.f;
+    fSpellScrollSpeed = 0.f;
+
+    for (int i = 0; i < 7; ++i)
+        AddArea()->MakeRect(50 + i * 100, nTopHeight,
+                            150 + i * 100, nTopHeight + 100);
+    AddArea()->MakeRect(0, 0, 0, 0);
+    AddArea()->MakeRect(30, 35 + nTopHeight, 50, 65 + nTopHeight);
+    AddArea()->MakeRect(750, 35 + nTopHeight, 770, 65 + nTopHeight);
+    GetArea(8)->SetToolTip(20400);
+    GetArea(9)->SetToolTip(20401);
+
+    CI3DFigure *pFig = AddFigure();
+    pFig->MakeBarFrame2(3, 100, -40, -40, 40, 40, 5);
+    pFig->UseDefaultColors(TRUE);
+    pFig->SetDefaultColor(RGBA_MAKE(139, 139, 55, 255));
+    pFig->SetTexture(0);
+    pFig->Show(FALSE);
+
+    pFig = AddFigure();
+    pFig->MakeTilingBar(inventoryDepth * 2.f, 100,
+                        50, nTopHeight, 850, nTopHeight + 100,
+                        14, 142, 114, 242, 8);
+
+    pFig = AddFigure();
+    pFig->MakeBar(inventoryDepth * .8f, 100, 0, nTopHeight,
+                  50, 100.f + nTopHeight, 192, 14, 142, 114);
+    pFig = AddFigure();
+    pFig->MakeBar(inventoryDepth * .8f, 100, 750, nTopHeight,
+                  800, 100.f + nTopHeight, 142, 14, 192, 114);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectSpellSlots::SetCurrentSpell(CItem *pSpell)
+{
+    CPersonage *pPers = pScreen ? pScreen->GetCurrentPers() : 0;
+    nCurrentSpell = -1;
+    if (!pPers)
+        return;
+
+    for (int i = 0; i < pPers->spells.GetSize(); ++i)
+        if (pPers->spells[i] == pSpell)
+        {
+            nCurrentSpell = i;
+            const int maxFirst = max(0, min(pPers->spells.GetSize(),
+                static_cast<int>(QI_MAX_SPELLS)) - 7);
+            nFirstSpell = min(maxFirst, max(0, i - 6));
+            fSpellPosition = static_cast<float>(nFirstSpell);
+            fSpellToScroll = 0.f;
+            fSpellScrollSpeed = 0.f;
+            break;
+        }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
+{
+    CPersonage *pPers = pScreen ? pScreen->GetCurrentPers() : 0;
+    if (!pPers || figures.GetSize() < 4)
+        return CI3DObject::Draw(pRend);
+
+    const int spellCount = min(pPers->spells.GetSize(),
+                               static_cast<int>(QI_MAX_SPELLS));
+    const int maxFirst = max(0, spellCount - 7);
+    if (fSpellPosition < 0.f || fSpellPosition > static_cast<float>(maxFirst))
+    {
+        fSpellPosition = min(static_cast<float>(maxFirst), max(0.f, fSpellPosition));
+        fSpellToScroll = 0.f;
+        fSpellScrollSpeed = 0.f;
+    }
+
+    if (fSpellToScroll != 0.f)
+    {
+        const float frameTime = max(.001f, GetFrameTime());
+        float speed;
+        if (fabs(fSpellToScroll) <= INV_BREAK_PATH)
+        {
+            speed = fSpellToScroll > 0.f
+                ? static_cast<float>(sqrt(fSpellToScroll * INV_BREAK_PATH) / INV_DECEL_TIME)
+                : static_cast<float>(-sqrt(-fSpellToScroll * INV_BREAK_PATH) / INV_DECEL_TIME);
+        }
+        else if (fSpellToScroll > 0.f)
+        {
+            fSpellScrollSpeed = min(INV_MAX_SPEED,
+                                    fSpellScrollSpeed + INV_ACCELERATE * frameTime);
+            speed = min((fSpellToScroll - INV_BREAK_PATH) / frameTime,
+                        fSpellScrollSpeed);
+            speed = (speed + fSpellScrollSpeed) / 2.f;
+        }
+        else
+        {
+            fSpellScrollSpeed = max(-INV_MAX_SPEED,
+                                    fSpellScrollSpeed - INV_ACCELERATE * frameTime);
+            speed = max((fSpellToScroll + INV_BREAK_PATH) / frameTime,
+                        fSpellScrollSpeed);
+            speed = (speed + fSpellScrollSpeed) / 2.f;
+        }
+
+        fSpellScrollSpeed = speed;
+        float offset = speed * frameTime;
+        if (fabs(offset) > fabs(fSpellToScroll))
+            offset = fSpellToScroll;
+        fSpellPosition += offset;
+        fSpellToScroll -= offset;
+
+        const int roundedPosition = static_cast<int>(floor(fSpellPosition + .5f));
+        if (fabs(fSpellPosition - roundedPosition) < .01f &&
+            fabs(fSpellToScroll) < .02f)
+        {
+            fSpellPosition = static_cast<float>(roundedPosition);
+            fSpellToScroll = 0.f;
+        }
+    }
+    if (fSpellToScroll == 0.f)
+        fSpellScrollSpeed = 0.f;
+
+    fSpellPosition = min(static_cast<float>(maxFirst), max(0.f, fSpellPosition));
+    nFirstSpell = static_cast<int>(floor(fSpellPosition));
+    const float shift = fSpellPosition - static_cast<float>(nFirstSpell);
+    const int visibleEnd = min(nFirstSpell + 7, spellCount);
+    const int renderEnd = min(nFirstSpell + 8, spellCount);
+    const float inventoryDepth = nTopHeight == 0 ? 8.f : 4.f;
+
+    figures[1]->SetRelativeToScreen(50.f - shift * 100.f,
+                                    static_cast<float>(nTopHeight),
+                                    inventoryDepth * 2.f);
+    if (nCurrentSpell >= nFirstSpell && nCurrentSpell < visibleEnd)
+    {
+        figures[0]->Show(TRUE);
+        figures[0]->SetRelativeToScreen(
+            100.f + (nCurrentSpell - nFirstSpell - shift) * 100.f,
+            nTopHeight + 50.f, 3.f);
+    }
+    else
+        figures[0]->Show(FALSE);
+
+    figures[2]->SetUShift(fSpellPosition > 0.f ? 50.f / 256.f : 0.f);
+    figures[3]->SetUShift(fSpellPosition < static_cast<float>(maxFirst)
+                              ? 50.f / 256.f : 0.f);
+    CI3DObject::Draw(pRend);
+
+    for (int i = nFirstSpell; i < renderEnd; ++i)
+    {
+        SDrawItem item;
+        item.pItem = pPers->spells[i];
+        item.fX = 100.f + (i - nFirstSpell - shift) * 100.f;
+        item.fY = nTopHeight + 50;
+        item.fZ = 12;
+        item.fPixSize = 100;
+        item.eFrom = ePartType;
+        pScreen->DrawItem(pRend, item);
+    }
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+CItem *CI3DObjectSpellSlots::GetMouseItem(CPoint point, int &nSlotType)
+{
+    nSlotType = 0;
+    if (!IsVisible())
+        return 0;
+
+    const int hit = HitTest(point);
+    CPersonage *pPers = pScreen ? pScreen->GetCurrentPers() : 0;
+    if (!pPers || hit < 0 || hit >= 7)
+        return 0;
+
+    nSlotType = IST_SPELL;
+    const int spellIndex = static_cast<int>(floor(fSpellPosition)) + hit;
+    return spellIndex < min(pPers->spells.GetSize(), static_cast<int>(QI_MAX_SPELLS))
+        ? pPers->spells[spellIndex]
+        : 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectSpellSlots::OnLButtonDown(UINT nFlags, CPoint point)
+{
+    const int hit = HitTest(point);
+    if (hit == 8 || hit == 9)
+    {
+        CPersonage *pPers = pScreen ? pScreen->GetCurrentPers() : 0;
+        if (!pPers)
+            return;
+        const int spellCount = min(pPers->spells.GetSize(),
+                                   static_cast<int>(QI_MAX_SPELLS));
+        const int maxFirst = max(0, spellCount - 7);
+        const float destination = pI3D->IsShiftDown()
+            ? (hit == 8 ? 0.f : static_cast<float>(maxFirst))
+            : min(static_cast<float>(maxFirst), max(0.f,
+                fSpellPosition + (hit == 8 ? -1.f : 1.f)));
+        fSpellToScroll = destination - fSpellPosition;
+        if (fSpellToScroll == 0.f)
+            fSpellScrollSpeed = 0.f;
+        pI3D->BeginFX("buttons\\camp\\scroll.wav");
+        SetProcessed();
+        return;
+    }
+    CI3DItemObject::OnLButtonDown(nFlags, point);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+BOOL CI3DObjectSpellSlots::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
+{
+    if (!IsVisible() || HitTest(pt) < 0)
+        return FALSE;
+
+    CPersonage *pPers = pScreen ? pScreen->GetCurrentPers() : 0;
+    if (!pPers)
+        return FALSE;
+    const int spellCount = min(pPers->spells.GetSize(),
+                               static_cast<int>(QI_MAX_SPELLS));
+    const int maxFirst = max(0, spellCount - 7);
+    if (maxFirst == 0)
+        return FALSE;
+
+    const float wheelSteps = -static_cast<float>(zDelta) /
+                             static_cast<float>(WHEEL_DELTA);
+    const float destination = min(static_cast<float>(maxFirst),
+        max(0.f, fSpellPosition + wheelSteps));
+    fSpellToScroll = destination - fSpellPosition;
+    pI3D->BeginFX("buttons\\camp\\scroll.wav");
+    SetProcessed();
+    return TRUE;
+}
+/////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectNameStats::Init()
 {
     SetRect(0, 100, 200, 400);
@@ -1709,6 +1840,7 @@ void CI3DObjectNameStats::GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkil
     CPersonage *pPers = pScreen->GetCurrentPers();
     pSkillInfo->nType = -1;
     pSkillInfo->pStats = &pPers->stats;
+    pSkillInfo->pUnit = pScreen->GetUnit(nCurPers);
     int ht = HitTest(point);
     if (((eCurMode == ISM_SPELLS || eCurMode == ISM_STATS) && ht >= 2) ||
         (eCurMode == ISM_SKIN && ht >= 2 && ht < 5))

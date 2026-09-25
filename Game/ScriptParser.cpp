@@ -979,7 +979,7 @@ BOOL CScript::LoadCommandsList(SScriptThread &res, POSITION &pos, CLexemeList &l
                 if (!CheckNextLexeme(lexemes, pos, SC_OPEN_FUNCTION))
                     return FALSE;
                 command.pLoopBody = AllocateNewThread();
-                if (!LoadCommandsList(*command.pLoopBody, pos, lexemes))
+                if (!LoadCommandsList(*command.pLoopBody, pos, lexemes, pVars))
                     return FALSE;
             }
         }
@@ -1573,7 +1573,7 @@ void CScript::StoreTextThread(int nIndent, CString &res, SScriptThread &thread,
     {
         res = res + GetNSpaces(nIndent + 2);
         StoreTextFunction(res, thread.commands[i], pOneScript);
-        if (thread.commands[i].command == SC_FOR)
+        if (thread.commands[i].command == SC_FOR || thread.commands[i].command == SC_FORIF)
         {
             ASSERT(thread.commands[i].pLoopBody);
             res = res + "\n";

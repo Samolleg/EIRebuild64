@@ -29,6 +29,8 @@ public:
     std::vector<std::unique_ptr<CMappedResource>> overlays;
     void OpenOverlays(LPCSTR,bool);
     LPBYTE OverlayFile(LPCSTR,LPDWORD);
+    virtual LPBYTE GetFileExact(LPCSTR, LPDWORD);
+    bool IsFileExistExact(LPCSTR);
     virtual void GetFileList(CStringArray&,LPCSTR mask=NULL);
     virtual BOOL CheckFileExist(LPCSTR name){return IsFileExist(name);}
     virtual ~CMappedResource();
@@ -63,6 +65,7 @@ public:
     // NULL если не найден, если размер ресурса не требуется,
     // можно оставить равным NULL
     virtual LPBYTE GetFile(LPCSTR pszFileName, LPDWORD pnDataSize = NULL);
+    LPBYTE GetFileExact(LPCSTR, LPDWORD) override;
     virtual bool CloseFile(LPBYTE pFileImage);
     virtual void CloseAllFiles();
 };

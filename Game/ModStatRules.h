@@ -36,7 +36,7 @@ inline bool IsTwohandedWeapon(int typeID, const CUnit* unit)
 		else
 			return false;
 }
-inline int LeftHand(const CUnit& unit)
+template<class WeaponAt> inline int LeftHand(const CUnit& unit,WeaponAt weaponAt)
 {
 	int iLeftHand = -1;
     int atFirstSlot = 0;
@@ -46,12 +46,12 @@ inline int LeftHand(const CUnit& unit)
 	ERPGWeaponTypes isShieldType = RPGWST_HANDS1;
 	ERPGWeaponTypes isStaffType = RPGWST_HANDS3;
 	ERPGWeaponTypes isDStaffType = RPGWST_HANDS7;
-    CItemWeapon *CurWeaponItem = unit.GetQWeapon(CurrweaponAtSlot);
-    CItemWeapon *FirstSlotItem = unit.GetQWeapon(atFirstSlot);
-    CItemWeapon *DualSlotItem  = unit.GetQWeapon(atDualSlot);
+    CItemWeapon *CurWeaponItem = weaponAt(CurrweaponAtSlot);
+    CItemWeapon *FirstSlotItem = weaponAt(atFirstSlot);
+    CItemWeapon *DualSlotItem  = weaponAt(atDualSlot);
 	for (int i = 0; i < 4; i++)
 	{
-		CItemWeapon* curWeapon = unit.GetQWeapon(i);
+		CItemWeapon* curWeapon = weaponAt(i);
 		if (curWeapon == NULL)
 			continue;
 		else
@@ -154,6 +154,8 @@ inline int LeftHand(const CUnit& unit)
     }
 	return iLeftHand;
 }
+
+inline int LeftHand(const CUnit&unit){return LeftHand(unit,[&](int slot){return unit.GetQWeapon(slot);});}
 
 inline void Armor(SRPGCommonStats& common,CUnit&unit,bool correctedNpc){
  if(unit.GetSubtypeID()>=unsigned(theUnitDatabase.prototypes.GetNumEntries()))throw std::runtime_error("Unit prototype index out of range");

@@ -11,6 +11,8 @@ struct STextureSetDescription
     CStringArray szTextures;
     // resulting texture dimention
     DWORD dwTextureDimention;
+    int characterAtlas = 0; // 1 body, 2 equipment; native composition metadata only
+    int equipmentSlots[4] = {-1, -1, -1, -1}; // right, left, helm, shield
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // class CTextureManager : public CResourceManager

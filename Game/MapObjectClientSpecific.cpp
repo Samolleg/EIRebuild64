@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModSpellTextures.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Object3DClientSpecific.h"
@@ -302,6 +303,7 @@ void CMapObjectClientSpecific::UpdateEffectParticles(bool bStart)
         }
         if (bFoundEffect)
             continue;
+        SpellTextures::Scope textureScope(eff.nSpellID);
         // ok ok we got to create a new one
         SMOSpellEffectShow newEff;
         newEff.bCorrect = true;
