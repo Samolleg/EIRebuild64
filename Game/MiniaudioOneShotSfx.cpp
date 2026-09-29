@@ -1,7 +1,13 @@
 #include "StdAfx.h"
 #include "MiniaudioOneShotSfx.h"
 #include "VoiceWaitState.h"
+#include "EngineDiagnostics.h"
 #include "ScenarioSpeechDucking.h"
+#include "WorldSfxPause.h"
+
+#ifndef JMV_MINIAUDIO_WORLD_SFX_PAUSE_DIAGNOSTICS
+#define JMV_MINIAUDIO_WORLD_SFX_PAUSE_DIAGNOSTICS 0
+#endif
 
 #include "ModAudioConfig.h"
 #include "SoundManager.h"
@@ -270,6 +276,7 @@ struct SVoice
     char partyVoiceZone[MAX_PATH];
     bool partyVoiceEnabled;
     bool scenarioSpeech;
+    bool diagnosticPartyVoiceLogged;
 #if JMV_CREATEVOICEFX_DIAGNOSTICS
     DWORD partyVoiceLogTick;
     int partyVoiceLogGain;
@@ -303,6 +310,8 @@ struct SVoice
     bool spatial;
     bool pausedByApp;
     bool pausedByModalSpeech;
+    bool pausedByWorld;
+    bool worldSfx;
     bool managed;
     bool looping;
     bool speech;
@@ -511,6 +520,7 @@ bool BinauralFlatBypassLogged = false;
 bool EngineInitialized = false;
 bool InitAttempted = false;
 bool AppAudioSuspended = false;
+bool WorldSfxSuspended = false;
 bool ModalSpeechSuspended = false;
 bool GamePauseSpeechSelectorActive = false;
 bool BinkDeferredEngineShutdown = false;
@@ -2290,6 +2300,35 @@ void UninitMiniaudioBinauralNode(SVoice &voice)
     voice.binauralGraphInitialized = false;
 }
 
+// A stopped sound still feeds silence to attached processing nodes. Freeze only
+// its private graph; the shared reverb must keep rendering its existing tail.
+// Node state changes are atomic. Do not reset DSP history from the game thread.
+void SetVoiceProcessingState(SVoice &voice, ma_node_state state)
+{
+    if (voice.binauralNodeInitialized)
+        ma_node_set_state(&voice.binauralNode.baseNode, state);
+    if (voice.occlusionSplitterInitialized)
+        ma_node_set_state(&voice.occlusionSplitter, state);
+    if (voice.occlusionLowPassInitialized)
+        ma_node_set_state(&voice.occlusionLowPass, state);
+}
+
+ma_result StopVoiceSound(SVoice &voice)
+{
+    const ma_result result = ma_sound_stop(&voice.sound);
+    if (result == MA_SUCCESS)
+        SetVoiceProcessingState(voice, ma_node_state_stopped);
+    return result;
+}
+
+ma_result StartVoiceSound(SVoice &voice)
+{
+    const ma_result result = ma_sound_start(&voice.sound);
+    if (result == MA_SUCCESS)
+        SetVoiceProcessingState(voice, ma_node_state_started);
+    return result;
+}
+
 ma_result InitMiniaudioBinauralNode(
     ma_uint32 sampleRate,
     SMiniaudioBinauralNode &node)
@@ -2362,6 +2401,7 @@ bool EnsureMiniaudioBinauralGraph(SVoice &voice)
         return false;
     }
     voice.binauralNodeInitialized = true;
+    SetVoiceProcessingState(voice, ma_node_get_state(&voice.sound));
 
     ma_node *destination = GetMiniaudioVoiceBinauralDestination(voice);
     result = ma_node_attach_output_bus(
@@ -2771,6 +2811,7 @@ bool EnsureOcclusionGraph(SVoice &voice)
         return false;
     }
     voice.occlusionLowPassInitialized = true;
+    SetVoiceProcessingState(voice, ma_node_get_state(&voice.sound));
 
     result = ma_node_set_output_bus_volume(
         &voice.occlusionSplitter, 0, 1.0f);
@@ -3111,6 +3152,7 @@ float GetPartyVoiceGain(SVoice &voice)
         }
     }
     const float distance = nearestSquared == FLT_MAX ? FLT_MAX : sqrtf(nearestSquared);
+    if(!voice.diagnosticPartyVoiceLogged){voice.diagnosticPartyVoiceLogged=true;EngineDiagnostics::Event("ScenarioVoice audibility id=%u speaker=%u listener=%u sameWorld=%d party=%d distance=%g near=%g far=%g appPaused=%d modalPaused=%d",voice.virtualId,voice.partyVoice.speakerId,listenerId,sameWorld,player?player->party.people.GetSize():-1,distance,voice.partyVoice.nearDistance,voice.partyVoice.farDistance,voice.pausedByApp,voice.pausedByModalSpeech);}
     const float gain = distance <= voice.partyVoice.nearDistance ? 1.0f :
         (distance >= voice.partyVoice.farDistance ? 0.0f :
             (voice.partyVoice.farDistance - distance) /
@@ -3273,7 +3315,7 @@ void ReleaseVoice(SVoice &voice, const char *reason)
 
     if (voice.soundInitialized)
     {
-        ma_sound_stop(&voice.sound);
+        StopVoiceSound(voice);
         ma_sound_uninit(&voice.sound);
     }
     UninitOcclusionNodes(voice);
@@ -3419,13 +3461,14 @@ unsigned int PauseVoicesForApp()
         SVoice &voice = Voices[i];
         if (!voice.active || !voice.soundInitialized || voice.pausedByApp)
             continue;
-        if (voice.pausedByModalSpeech)
+        if (!WorldSfxPause::CanResume(false, voice.pausedByModalSpeech,
+                voice.pausedByWorld))
         {
             voice.pausedByApp = true;
             ++paused;
             continue;
         }
-        const ma_result result = ma_sound_stop(&voice.sound);
+        const ma_result result = StopVoiceSound(voice);
         if (result == MA_SUCCESS)
         {
             voice.pausedByApp = true;
@@ -3453,7 +3496,8 @@ unsigned int ResumeVoicesForApp(unsigned int &ended)
         if (!voice.active || !voice.soundInitialized || !voice.pausedByApp)
             continue;
         voice.pausedByApp = false;
-        if (voice.pausedByModalSpeech)
+        if (!WorldSfxPause::CanResume(false, voice.pausedByModalSpeech,
+                voice.pausedByWorld))
             continue;
         if (ma_sound_at_end(&voice.sound))
         {
@@ -3461,7 +3505,7 @@ unsigned int ResumeVoicesForApp(unsigned int &ended)
             ReleaseVoice(voice, "paused_eos");
             continue;
         }
-        const ma_result result = ma_sound_start(&voice.sound);
+        const ma_result result = StartVoiceSound(voice);
         if (result == MA_SUCCESS)
         {
             ++resumed;
@@ -3505,13 +3549,14 @@ unsigned int PauseVoicesForModalSpeech(unsigned int &alreadyPausedByApp)
         {
             continue;
         }
-        if (voice.pausedByApp)
+        if (!WorldSfxPause::CanResume(voice.pausedByApp, false,
+                voice.pausedByWorld))
         {
             voice.pausedByModalSpeech = true;
             ++alreadyPausedByApp;
             continue;
         }
-        const ma_result result = ma_sound_stop(&voice.sound);
+        const ma_result result = StopVoiceSound(voice);
         if (result == MA_SUCCESS)
         {
             voice.pausedByModalSpeech = true;
@@ -3545,7 +3590,8 @@ unsigned int ResumeVoicesForModalSpeech(
             continue;
         }
         voice.pausedByModalSpeech = false;
-        if (voice.pausedByApp)
+        if (!WorldSfxPause::CanResume(voice.pausedByApp, false,
+                voice.pausedByWorld))
         {
             ++stillPausedByApp;
             continue;
@@ -3556,7 +3602,7 @@ unsigned int ResumeVoicesForModalSpeech(
             ReleaseVoice(voice, "modal_speech_paused_eos");
             continue;
         }
-        const ma_result result = ma_sound_start(&voice.sound);
+        const ma_result result = StartVoiceSound(voice);
         if (result == MA_SUCCESS)
         {
             ++resumed;
@@ -3596,6 +3642,7 @@ bool EnsureEngine()
     ma_engine_config config = ma_engine_config_init();
     config.listenerCount = 1;
     const ma_result result = ma_engine_init(&config, &Engine);
+    EngineDiagnostics::Event("Audio engine init attempt=%u result=%d description=%s",EngineInitAttemptCount,int(result),ma_result_description(result));
     if (result != MA_SUCCESS)
     {
         if (ShouldLogLimited(DeviceErrorDiagnosticCount))
@@ -3618,6 +3665,9 @@ bool EnsureEngine()
     LastDeviceState = device != nullptr
         ? ma_device_get_state(device)
         : ma_device_state_uninitialized;
+    EngineDiagnostics::Event("Audio engine ready backend=%s state=%d manager=%p bink=%ld",
+        device && device->pContext ? ma_get_backend_name(device->pContext->backend):"none",
+        int(LastDeviceState),CurrentSoundManager,InterlockedCompareExchange(&BinkActiveVoiceCount,0,0));
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
     const char *backend = device != nullptr && device->pContext != nullptr
         ? ma_get_backend_name(device->pContext->backend)
@@ -3663,6 +3713,11 @@ bool EnsureDeviceStarted(const char *phase)
         : ma_device_state_uninitialized;
     const bool recovered = result == MA_SUCCESS &&
         after == ma_device_state_started;
+    static unsigned recoveryNotes=0;
+    if(recoveryNotes++<24)EngineDiagnostics::Event("Audio device recovery phase=%s backend=%s before=%d after=%d result=%d description=%s recovered=%d voices=%u bink=%ld deferred=%d",
+        phase?phase:"unknown",device && device->pContext?ma_get_backend_name(device->pContext->backend):"none",
+        int(before),int(after),int(result),ma_result_description(result),recovered?1:0,ActiveVoiceCount,
+        InterlockedCompareExchange(&BinkActiveVoiceCount,0,0),BinkDeferredEngineShutdown?1:0);
     if (recovered)
         LastDeviceRecoveryAttemptTick = 0;
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
@@ -3689,6 +3744,54 @@ bool EnsureDeviceStarted(const char *phase)
                DeviceErrorDiagnosticCount);
     }
     return recovered;
+}
+
+void SyncWorldSfxPause()
+{
+    // The simulation freezes on combat pause, while miniaudio renders on its
+    // own thread. Keep world voices aligned without pausing UI/music/speech.
+    const bool paused = theWorld.IsCombatPause();
+#if JMV_MINIAUDIO_WORLD_SFX_PAUSE_DIAGNOSTICS
+    if (WorldSfxSuspended != paused)
+        LOGINFO("MINIAUDIO_WORLD_SFX_STATE paused=%d world_ready=%d active=%u",
+            paused ? 1 : 0, 1,
+            ActiveVoiceCount);
+#endif
+    WorldSfxSuspended = paused;
+    for (unsigned int i = 0; i < MAX_ACTIVE_VOICES; ++i)
+    {
+        SVoice &voice = Voices[i];
+        if (!voice.active || !voice.soundInitialized ||
+            !voice.worldSfx ||
+            voice.pausedByWorld == paused)
+            continue;
+
+        if (!WorldSfxPause::CanResume(voice.pausedByApp,
+                voice.pausedByModalSpeech, false))
+        {
+            // Ownership transfer only: another pause owner still holds it.
+            voice.pausedByWorld = paused;
+            continue;
+        }
+        if (!paused && ma_sound_at_end(&voice.sound))
+        {
+            ReleaseVoice(voice, "world_paused_eos");
+            continue;
+        }
+        if (!paused && !EnsureDeviceStarted("world_sfx_resume"))
+            continue; // Retain ownership and retry on a later tick.
+        const ma_result result = paused
+            ? StopVoiceSound(voice) : StartVoiceSound(voice);
+        if (result == MA_SUCCESS)
+        {
+            voice.pausedByWorld = paused;
+        }
+        else if (ShouldLogLimited(DeviceErrorDiagnosticCount))
+        {
+            LOGERR("MINIAUDIO_WORLD_SFX_ERROR name=%s id=%u paused=%d result=%d retry=next_tick",
+                voice.name, voice.virtualId, paused ? 1 : 0, result);
+        }
+    }
 }
 
 int FindDecodedIndex(const char *soundName)
@@ -3743,6 +3846,25 @@ int FindOldestUsedEvictableIndex()
         }
     }
     return result;
+}
+
+bool HasCaptureCapacity()
+{
+    bool hasEntry = false;
+    size_t pinnedBytes = 0;
+    for (unsigned int i = 0; i < MAX_CACHED_SOUNDS; ++i)
+    {
+        const SDecodedSound &decoded = DecodedSounds[i];
+        if (!decoded.used || decoded.references == 0)
+        {
+            hasEntry = true;
+            continue;
+        }
+        if (decoded.bytes >= MAX_CACHE_BYTES - pinnedBytes)
+            return false;
+        pinnedBytes += decoded.bytes;
+    }
+    return hasEntry;
 }
 
 bool MakeCacheRoom(size_t bytes, int &targetIndex)
@@ -3871,6 +3993,7 @@ EStartResult StartDecoded(
     if (CurrentSoundManager != soundManager)
         ResetForManager(soundManager, "manager_change");
     SynchronizeUniqueCounter(soundManager);
+    SyncWorldSfxPause();
 
     if (AppAudioSuspended)
     {
@@ -4184,9 +4307,12 @@ EStartResult StartDecoded(
 
     const bool holdForModalSpeech =
         speech && ModalSpeechSuspended;
-    result = holdForModalSpeech
-        ? MA_SUCCESS
-        : ma_sound_start(&voice->sound);
+    const bool worldSfx = WorldSfxPause::Applies(spatial, speech,
+        virtualStart != nullptr && virtualStart->dialog);
+    const bool holdForWorld = WorldSfxSuspended && worldSfx;
+    result = (holdForModalSpeech || holdForWorld)
+        ? StopVoiceSound(*voice)
+        : StartVoiceSound(*voice);
     if (result != MA_SUCCESS)
     {
         SetLastStartReason("start_failed");
@@ -4208,6 +4334,8 @@ EStartResult StartDecoded(
     voice->active = true;
     voice->spatial = spatial;
     voice->pausedByModalSpeech = holdForModalSpeech;
+    voice->pausedByWorld = holdForWorld;
+    voice->worldSfx = worldSfx;
     voice->managed = managed;
     voice->looping = looping;
     voice->speech = speech;
@@ -4745,9 +4873,9 @@ bool RegisterBinkVoice(SBinkVoice *voice)
         return false;
 
     bool registered = false;
-    AcquireSRWLockExclusive(&BinkVoiceRegistryLock);
     try
     {
+        SExclusiveSrwLockGuard registryLock(BinkVoiceRegistryLock);
         bool duplicate = false;
         for (size_t i = 0; i < BinkVoiceRegistry.size(); ++i)
         {
@@ -4766,11 +4894,11 @@ bool RegisterBinkVoice(SBinkVoice *voice)
             registered = true;
         }
     }
-    catch (...)
+    catch (const std::exception &error)
     {
-        registered = false;
+        LOGERR("MINIAUDIO_BINK_REGISTRY_ERROR reason=std_exception detail=%s",
+            error.what());
     }
-    ReleaseSRWLockExclusive(&BinkVoiceRegistryLock);
     return registered;
 }
 
@@ -4803,6 +4931,7 @@ void FinalizeDeferredBinkEngineShutdown()
 #if JMV_MINIAUDIO_BINK_DIAGNOSTICS
     LOGINFO("MINIAUDIO_BINK_ENGINE_RELEASE reason=deferred_sound_manager_shutdown active=0");
 #endif
+    EngineDiagnostics::Event("Audio engine release phase=bink_deferred manager=%p bink=0",CurrentSoundManager);
     ma_engine_uninit(&Engine);
     memset(&Engine, 0, sizeof(Engine));
     EngineInitialized = false;
@@ -6070,6 +6199,8 @@ bool CaptureEncoded(
     }
     if (FindDecodedIndex(soundName) >= 0)
         return true;
+    if (!HasCaptureCapacity())
+        return false;
 
     ma_decoder_config probeConfig = ma_decoder_config_init(
         ma_format_f32, 0, 0);
@@ -6614,6 +6745,9 @@ bool UpdateVirtual3D(
     voice->virtualManualVolumes = false;
     voice->virtualAffectedWithHeight = true;
     voice->spatial = true;
+    const bool becameWorldSfx = !voice->worldSfx &&
+        WorldSfxPause::Applies(true, voice->speech, voice->dialog);
+    voice->worldSfx = voice->worldSfx || becameWorldSfx;
     voice->virtualPosition[0] = position[0];
     voice->virtualPosition[1] = position[1];
     voice->virtualPosition[2] = position[2];
@@ -6627,6 +6761,8 @@ bool UpdateVirtual3D(
     UpdateVirtualVoiceBinaural(*voice);
     UpdateVirtualVoiceOcclusion(*voice, GetTickCount());
     ApplyVirtualVoiceMix(*voice);
+    if (becameWorldSfx)
+        SyncWorldSfxPause();
     return true;
 }
 
@@ -8197,6 +8333,7 @@ void PrepareNativeManager(void *soundManager)
 const char* GetNativeStreamingName(){return Streaming.playing ? Streaming.currentName : "";}
 void Tick(void *soundManager)
 {
+    SyncWorldSfxPause();
     if (!EngineInitialized)
         return;
     if (!IsManagerReady(soundManager))
@@ -8348,6 +8485,7 @@ void Resume(const char *reason)
 {
     if (!AppAudioSuspended)
         return;
+    SyncWorldSfxPause();
     AppAudioSuspended = false;
     if (!EngineInitialized && InitAttempted)
         LastInitAttemptTick = 0;
@@ -8497,6 +8635,8 @@ void Shutdown(const char *reason)
     const LONG activeBink = InterlockedCompareExchange(
         &BinkActiveVoiceCount, 0, 0);
     const bool keepEngineForBink = EngineInitialized && activeBink != 0;
+    EngineDiagnostics::Event("Audio shutdown reason=%s initialized=%d bink=%ld deferred=%d manager=%p",
+        reason?reason:"unknown",EngineInitialized?1:0,activeBink,keepEngineForBink?1:0,CurrentSoundManager);
     if (EngineInitialized && !keepEngineForBink)
     {
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
@@ -8521,6 +8661,7 @@ void Shutdown(const char *reason)
     InitAttempted = keepEngineForBink;
     AppAudioSuspended = false;
     ModalSpeechSuspended = false;
+    WorldSfxSuspended = false;
     GamePauseSpeechSelectorActive = false;
     LastInitAttemptTick = 0;
     LastDeviceRecoveryAttemptTick = 0;

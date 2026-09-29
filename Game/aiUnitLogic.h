@@ -544,6 +544,9 @@ private:
 
 public:
     EUnitState GetScriptState() const { return state; }
+    int GetGroupSearchAlarm() const { return static_cast<int>(nCurrentAlarm); }
+    void TurnGroupSearch(float angle);
+    bool ChangeCurrentAggressionMode(int mode);
     void ResetScriptTarget(){environment.Clear();if(nCurrentAlarm>=0 && nCurrentAlarm<alarmLogics.GetSize())SetLogic(alarmLogics[nCurrentAlarm],nCurrentAlarm);}
     CAISpellCaster caster;
     CAIUnitEnvironment environment; // окружающая обстановка юнита, регулярно обновляется
@@ -588,6 +591,16 @@ public:
     CMapObjectPtrList *GetUnitsList() { return environment.GetUnitsList(); };
     CUnitServer *GetUnitServer() { return pUnitServer; }
     CUnit *GetUnit();
+    const SGeneralUnitLogic *GetCurrentGeneralLogic() const
+    {
+        const int index = static_cast<int>(nCurrentAlarm);
+        return index >= 0 && index < alarmLogics.GetSize()
+            ? &alarmLogics[index] : nullptr;
+    }
+    const SGeneralUnitLogic *GetBaseGeneralLogic() const
+    {
+        return alarmLogics.GetSize() > 0 ? &alarmLogics[0] : nullptr;
+    }
     // проверки на принадлежность точки области интересов юнита, если спрашивает текущая
     // активная мотивация, она имеет бонус по дальности, заданный константой
     bool IsInSuspectionRange(const CPlot3D &ptPlace, CAIUnitMotivation *pWhoAsk);

@@ -1,6 +1,8 @@
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 #include "ModPackage.h"
 #include "ModSpellRules.h"
+#include "ModMonsterProjectiles.h"
 #include "ModTacticalSpells.h"
 #include "ModCombat.h"
 #include "ModRuntime.h"
@@ -25,6 +27,7 @@ const float FP_FOF_HEARRADIUS = 20;
 // коэффициент прозрачности, начианая с которого возможна атака
 const float FP_MIN_ATTACK_OPACITY = 0.1f;
 /////////////////////////////////////////////////////////////////////////////////////
+#include "Hoover.h"
 #include "WorldServer.h"
 #include "WorldClient.h"
 #include "UnitServer.h"
@@ -118,31 +121,31 @@ void SL0AnimationSeq::EnsureIds()
     while (startIds.GetSize() < animations.GetSize())
     {
         const int index = startIds.GetSize();
-        startIds.Add(animations[index].bStart);
-        cycleIds.Add(animations[index].bCyclic);
+        startIds.Add(animations[index].bStart == 0xff ? 0xffffffffu : animations[index].bStart);
+        cycleIds.Add(animations[index].bCyclic == 0xff ? 0xffffffffu : animations[index].bCyclic);
     }
 }
 DWORD SL0AnimationSeq::GetStartId(int index) const
 {
-    return index < startIds.GetSize() ? startIds[index] : animations[index].bStart;
+    return index < startIds.GetSize() ? startIds[index] : (animations[index].bStart == 0xff ? 0xffffffffu : animations[index].bStart);
 }
 DWORD SL0AnimationSeq::GetCycleId(int index) const
 {
-    return index < cycleIds.GetSize() ? cycleIds[index] : animations[index].bCyclic;
+    return index < cycleIds.GetSize() ? cycleIds[index] : (animations[index].bCyclic == 0xff ? 0xffffffffu : animations[index].bCyclic);
 }
 void SL0AnimationSeq::SetStartId(int index, DWORD id)
 {
     EnsureIds();
     startIds[index] = id;
     animations[index].bStart = id == 0xffffffffu ? 0xff :
-        (id > 253 && id != 0xff ? 0xfe : BYTE(id));
+        (id > 253 ? 0xfe : BYTE(id));
 }
 void SL0AnimationSeq::SetCycleId(int index, DWORD id)
 {
     EnsureIds();
     cycleIds[index] = id;
     animations[index].bCyclic = id == 0xffffffffu ? 0xff :
-        (id > 253 && id != 0xff ? 0xfe : BYTE(id));
+        (id > 253 ? 0xfe : BYTE(id));
 }
 void SL0AnimationSeq::Append(const SL0Animation &animation, DWORD startId, DWORD cycleId)
 {
@@ -155,16 +158,15 @@ void SL0AnimationSeq::AddSimple(DWORD bStart, int nLength)
 {
     SL0Animation animation;
     animation.nLength = nLength;
-    Append(animation, bStart, 0xff);
+    Append(animation, bStart, 0xffffffffu);
     SetStartId(animations.GetSize() - 1, bStart);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SL0AnimationSeq::AddCycle(DWORD bCycle)
 {
     if (animations.GetSize() == 0 ||
-        (GetCycleId(animations.GetSize() - 1) != 0xff &&
-         GetCycleId(animations.GetSize() - 1) != 0xffffffffu))
-        Append(SL0Animation(), 0xff, 0xff);
+        GetCycleId(animations.GetSize() - 1) != 0xffffffffu)
+        Append(SL0Animation(), 0xffffffffu, 0xffffffffu);
     SL0Animation &a = animations[animations.GetSize() - 1];
     SetCycleId(animations.GetSize() - 1, bCycle);
     a.nLength = -1;
@@ -415,6 +417,8 @@ void CUnitServer::Clear()
     fpModVision = 1;
     fpSModVision = 1;
     fpSModSound = 1;
+    // A new/recycled server may be recalculated before prototype stats are assigned.
+    rpgUnitStats = SRPGUnitStats{};
     rpgUnitStats.Clear();
     tameLevel = UTL_NONE;
     nOriginalPlayerNum = -1;
@@ -3026,6 +3030,8 @@ bool CUnitServer::CalcAttackDest(SUnitCommand &cmd, CAIFullRoute *pRes)
                     }
                 }
                 //
+                static unsigned leverPathSamples=0;
+                if(ModRuntime::Current()&&leverPathSamples++<24)EngineDiagnostics::Event("Lever route object=%d candidates=%d fallback=%d found=%d radius=%g",pTarget->GetID(),points.GetSize(),fallback,nBestCost!=0x7fffffff,lpUnit->GetAttackDistance());
                 if (nBestCost == 0x7fffffff)
                     return false;
                 cmd.ptTarget = ptBestPoint;
@@ -3340,12 +3346,13 @@ void CUnitServer::UseSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::UseSkill(CMapObject *pTarget)
 {
+    if (!pTarget)
+        return;
     SUnitCommand &cmd = curCommand;
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     if (cmd.IsLoot())
     {
-        ASSERT(pTarget->WhoAmI() == HPC_UNIT);
-        if (!pTarget || pTarget->WhoAmI() != HPC_UNIT)
+        if (pTarget->WhoAmI() != HPC_UNIT)
             return;
         if (lpUnit->GetOwner())
             theWorldServer.HooverUnit((CUnit *)pTarget, lpUnit->GetOwner());
@@ -3364,13 +3371,14 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
     else if (cmd.nQSpellNum == RPGMSKL_TAME)
         return; // eSkill = RPGMSKL_TAME;
     else
-    {
-        ASSERT(0);
         return;
-    }
     CUnit *pTargetUnit = 0;
     if (pTarget->WhoAmI() == HPC_UNIT)
         pTargetUnit = (CUnit *)pTarget;
+    CModPackage *modPackage = ModRuntime::Current();
+    const bool addonSteals = modPackage && modPackage->CombatSetting("JMVSteals");
+    const bool onlyQuest = addonSteals && pTargetUnit &&
+        pTargetUnit->GetOwner() == 0 && pTargetUnit->GetQuestItemsNum() > 0;
     fpOurSkill = rpgUnitStats.GetManualSkillLevel(eSkill, GetUnit());
     fpTargetSkill = 0;
     if (pTargetUnit)
@@ -3394,7 +3402,7 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
     }
     aiLog << " his_skill = " << fpOurSkill << " target_skill = " << fpTargetSkill << endl;
 
-    if (cmd.nQSpellNum != RPGMSKL_SCIENCE && fpTargetSkill >= fpOurSkill)
+    if (cmd.nQSpellNum != RPGMSKL_SCIENCE && !onlyQuest && fpTargetSkill >= fpOurSkill)
     {
         // skill failed - not a fact in case
         pWS->fof.MakeDamage(GetUnit(), pTargetUnit, 10);
@@ -3408,6 +3416,62 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
         case RPGMSKL_STEALING:
             if (pTargetUnit && pTargetUnit->GetOwner() == 0)
             {
+                if (addonSteals)
+                {
+                    if (CPlayer *owner = GetUnit()->GetOwner())
+                    {
+                        CPlayerServer *playerServer =
+                            (CPlayerServer *)owner->GetPlayerSpecific();
+                        if (playerServer && playerServer->dangerState != WDS_COMBAT)
+                        {
+                            InformFailure(ACK_HERO_REFUSE_NO_WAY_TO_ATTACK);
+                            break;
+                        }
+                    }
+                    // Transfer quest inventory separately, as the addon does.
+                    if (pTargetUnit->GetQuestItemsNum() > 0)
+                    {
+                        if (CPlayer *pPlayer = GetUnit()->GetOwner())
+                        {
+                            CList<CItem *, CItem *> allItems;
+                            CList<CItem *, CItem *> newItems;
+                            CList<CSpell *, CSpell *> newSpells;
+                            int ignoredMoney = 0;
+                            pWS->pHoover->HooverAddon(
+                                pWS, pTargetUnit, allItems, newItems,
+                                newSpells, ignoredMoney,
+                                GetRPGStats()->GetManualSkillLevel(
+                                    RPGMSKL_SCIENCE, GetUnit()),
+                                GetRPGStats()->psDexterity.fpEffectiveValue,
+                                true);
+                            CList<CItem *, CItem *> questItems;
+                            for (POSITION pos = allItems.GetHeadPosition(); pos;)
+                            {
+                                POSITION current = pos;
+                                CItem *item = allItems.GetNext(pos);
+                                if (item && item->WhoAmI() == HPC_ITEM_QUEST)
+                                {
+                                    questItems.AddTail(item);
+                                    allItems.RemoveAt(current);
+                                }
+                            }
+                            if (!questItems.IsEmpty())
+                                pPlayer->AddItemsToHoover(questItems);
+                            for (POSITION pos = questItems.GetHeadPosition(); pos;)
+                                questItems.GetNext(pos)->Release();
+                            for (POSITION pos = allItems.GetHeadPosition(); pos;)
+                                allItems.GetNext(pos)->Release();
+                        }
+                    }
+                    bool bSuccess = false;
+                    if (!onlyQuest && GetUnit()->GetOwner())
+                        bSuccess = pWS->HooverUnitAddon(
+                            pTargetUnit, GetUnit()->GetOwner(), this, false);
+                    if (!bSuccess && !onlyQuest && GetUnit()->GetOwner())
+                        InformFailure(ACK_HERO_NOTIFY_STEAL_EMPTY);
+                    break;
+                }
+
                 // stealing success - some item transmission
                 if (CItem *pSubj = pTargetUnit->RemoveRandomItem())
                 {
@@ -3424,7 +3488,7 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
                 {
                     bool bSuccess = false;
                     if (GetUnit()->GetOwner())
-                        bSuccess = pWS->HooverUnit(pTargetUnit, GetUnit()->GetOwner());
+                    { CModPackage *mod=ModRuntime::Current(); if(mod&&mod->CombatSetting("JMVSteals"))bSuccess=pWS->HooverUnitAddon(pTargetUnit,GetUnit()->GetOwner(),this,false); else bSuccess=pWS->HooverUnit(pTargetUnit,GetUnit()->GetOwner()); }
                     if (!bSuccess && GetUnit()->GetOwner())
                         InformFailure(ACK_HERO_NOTIFY_STEAL_EMPTY);
                 }
@@ -3506,6 +3570,28 @@ void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortio
         arrow->szSoundName="magic\\Firearrow\\circle.wav";
         arrow->SetWeaponAttack(attackPortion);
         pWS->AddEffect(arrow);
+    }
+    else if(mod && mod->CombatSetting("JMVAttacks") &&
+            ModMonsterProjectiles::Classify(lpUnit->GetPrototype()->szName).ranged)
+    {
+        const auto kind=ModMonsterProjectiles::Classify(lpUnit->GetPrototype()->szName);
+        auto*arrow=static_cast<CEffectArrow*>(pWS->GetEffectManager()->CreateData(ETypeIDs(HPC_EFFECTARROW)));
+        if(!arrow)return;
+        CUnit*model=theWorld.GetMapObjectManager()?theWorld.GetUnit(lpUnit->GetID()):nullptr;
+        arrow->SetCP((model?model:lpUnit)->GetWeaponCastPoint(nullptr,false));
+        arrow->SetTarget(pTarget->GetID());arrow->nAttackerID=lpUnit->GetID();
+        SAttackParams params;lpUnit->GetAttackParams(params);
+        arrow->typeID=kind.acid?PTID_STAFFARROWACID:
+            params.rpgAttackType==RPGAT_TERMICAL?PTID_STAFFARROWFIRE:
+            params.rpgAttackType==RPGAT_ELECTRICAL?PTID_STAFFARROWLIGHT:PTID_STAFFARROWWATER;
+        arrow->color=CPlot3D(1,1,1);arrow->fpRange=kind.acid?.01f:1.f;arrow->fpScale=.25f;
+        arrow->szSoundName="magic\\Firearrow\\circle.wav";
+        // Existing engine-owned payload is retained through delivery, not a stack pointer.
+        arrow->SetWeaponAttack(attackPortion);
+        pWS->AddEffect(arrow);
+        static unsigned notes=0;
+        if(notes++<48)EngineDiagnostics::Event("Monster projectile attacker=%d target=%d prototype=%s type=%d acid=%d",
+            lpUnit->GetID(),pTarget->GetID(),lpUnit->GetPrototype()->szName,int(arrow->typeID),kind.acid?1:0);
     }
     else
         pTarget->ProcessAttackPortion(&attackPortion, GetUnit(), GetUnit());
@@ -3801,8 +3887,8 @@ bool CUnitServer::CalcAttackDirection(SL1Command &cmd, SL0AnimationSeq &res, int
                     int nPause = nCycle - anim.nLength;
                     nHit = Max( 2, nHit );
                     res.AddSimple( anim.bStart, nHit - 2 );
-                    res.AddSimple( 0xff, nPause );
-                    res.AddSimple( 0xff, anim.nLength - nHit + 2 );
+                    res.AddSimple( 0xffffffffu, nPause );
+                    res.AddSimple( 0xffffffffu, anim.nLength - nHit + 2 );
                     res.SetSpeed( UAS_NORMAL_ );
                     res.animations[1].animationSpeed = UAS_FROZEN;
                     nHit += nPause;
@@ -4002,7 +4088,7 @@ void CUnitServer::GetCastAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand
             {
                 nHit = GetAnimationHit(pEntry->dwEntryIndex);
                 int nPause = nLength - GetAnimationLength(pEntry->dwEntryIndex);
-                res.AddSimple(0xff, nPause);
+                res.AddSimple(0xffffffffu, nPause);
                 res.AddSimple(pEntry->dwEntryIndex, GetAnimationLength(pEntry->dwEntryIndex));
                 nHit += nPause;
             }
@@ -4012,8 +4098,8 @@ void CUnitServer::GetCastAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand
                 nHit = GetAnimationHit(pEntry->dwEntryIndex);
                 int nPause = nLength - GetAnimationLength(pEntry->dwEntryIndex);
                 res.AddSimple(pEntry->dwEntryIndex, nHit);
-                res.AddSimple(0xff, nPause);
-                res.AddSimple(0xff, GetAnimationLength(pEntry->dwEntryIndex) - nHit);
+                res.AddSimple(0xffffffffu, nPause);
+                res.AddSimple(0xffffffffu, GetAnimationLength(pEntry->dwEntryIndex) - nHit);
                 res.SetSpeed(UAS_NORMAL_);
                 res.animations[1].animationSpeed = UAS_FROZEN;
                 nHit += nPause;
@@ -5639,6 +5725,27 @@ void CUnitServer::CmdCast(int nQSpellNum, CMapObject *pTarget, bool bRun)
     if(track&&!had&&ModTactical::HasCommand(this,nQSpellNum,target))ModTactical::Record(lpUnit,tacticalSpell,nQSpellNum,target);
 }
 
+bool CUnitServer::GroupSearchPathMatches(const CPlot3D &target, float tolerance)
+{
+    const CPlot3D end = path.GetFinalPoint();
+    const float dx = path.ptDestination.x - target.x, dy = path.ptDestination.y - target.y;
+    const float ex = end.x - target.x, ey = end.y - target.y;
+    return !path.bRouteFailed && dx*dx + dy*dy < 0.0001f &&
+        ex*ex + ey*ey <= tolerance*tolerance;
+}
+void CUnitServer::StopGroupSearchMotion()
+{
+    if (curCommand.cmd == UC_IDLE &&
+        (nextCommand.cmd == UC_MOVETO || nextCommand.cmd == UC_ROTATE))
+    {
+        nextCommand.Clear();
+        nextCommand.cmd = UC_IDLE;
+        nextCommand.pTarget = nullptr;
+        nextCommand.bDoItFast = false;
+    }
+    CmdWait();
+}
+
 void CUnitServer::CmdWait()
 {
     if (curCommand.cmd == UC_IDLE)
@@ -6091,11 +6198,11 @@ void CUnitServer::PowerHitFeedback(CUnit*attacker,float beforeHp){
  if(lpUnit->IsDead()||GetMapObjectServer()->IsDead()||lpUnit->CheckFlag(UNIT_STUN)||bL1PlayingSuffer||eL1State==UL1_SPECIAL||eL1State==UL1_SPECIAL_CYCLE||nL1SufferDirection<0)return;
  int directionCode=nL1SufferDirection;SL0AnimationSeq animation;animation.Clear();GetSufferAnimation(animation,directionCode,false,false);
  const SADEntry*best=nullptr;int score=-1;DWORD pose=GetPoseAnimationMask(currentPose),weapons=GetAnimationWeaponMask();
- if(animation.IsEmpty())for(unsigned i=0;i<255;++i){auto*entry=lpUnit->GetAnimationEntryByIndex(BYTE(i));if(!entry)break;
+ if(animation.IsEmpty())for(DWORD i=0;;++i){auto*entry=lpUnit->GetAnimationEntryByIndex(i);if(!entry)break;
   if(!entry->pszAnimationName[0]||entry->dwEntryIndex!=i||entry->GetAction()!=ADB_ACTION_SUFFER||entry->GetStage()!=ADB_STAGE_UNIQUE||!entry->dwAnimationLength||(entry->dwFlags&ADB_MODIFIER_ACTION_STAY)!=ADB_MODIFIER_ACTION_STAY)continue;
   DWORD state=entry->GetState();if(state!=pose&&!((pose==ADB_STATE_NEUTRAL||pose==ADB_STATE_ATTACK)&&(state==ADB_STATE_NEUTRAL||state==ADB_STATE_ATTACK)))continue;
   int value=(state==pose?4:0)+((entry->GetWeapons()&weapons)==weapons?2:0)+((entry->dwFlags&ADB_MODIFIER_DIRECTION2_MASK)==(DWORD(directionCode)&ADB_MODIFIER_DIRECTION2_MASK)?1:0);
-  if(value>score&&GetAnimationLength(BYTE(i))>0){best=entry;score=value;}
+  if(value>score&&GetAnimationLength(i)>0){best=entry;score=value;}
  }
  if(animation.IsEmpty()&&!best)return;
  bool active=L1IsAttacking(),waiting=L1IsIdle()&&curCommand.cmd==UC_ATTACK;

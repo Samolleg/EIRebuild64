@@ -353,6 +353,10 @@ BOOL CMapObjectManager::SetupDefaultStats(SRPGCommonStats *pCommonStats, SRPGUni
 
     if (pUnitStats != 0)
     {
+        // Clear() intentionally preserves race fields; this fresh default has no race yet.
+        // Initialize storage before publishing ACTIVE locations to native/Lua HP collection.
+        *pUnitStats = SRPGUnitStats{};
+        pUnitStats->Clear();
         pUnitStats->fpExperience = 0;
         pUnitStats->fSpentExp = 0;
         pUnitStats->psStrength.fpBaseValue = 50;

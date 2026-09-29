@@ -9,6 +9,7 @@
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiMap.h"
@@ -696,6 +697,8 @@ int CAIMap::DepthFloatToInt(float fpDepth)
 
 BOOL CAIMap::Load(LPCSTR pszMapName)
 {
+    EngineDiagnostics::Note("CAIMap::Load");
+    EngineDiagnostics::Note(pszMapName);
     ASSERT(!bIsLoaded);
     // Load map header
     CMappedResource mapRes;
@@ -988,13 +991,16 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
             {
                 pSector -= sizeof(TILE_ID) * N_TILES_PSECTOR;
                 TILE_ID *pTID = (TILE_ID *)pSector;
+                const WORD *pLayerObjectIDs = (const WORD *)(pSector + sizeof(TILE_ID) * N_TILES_PSECTOR);
                 for (int js = 0; js < N_CL_PSECTOR_S; js += 2)
                 {
                     int nYIndex = j * N_CL_PSECTOR_S * 2 + js * 2;
                     for (int is = 0; is < N_CL_PSECTOR_S; is += 2)
                     {
                         int nXIndex = i * N_CL_PSECTOR_S * 2 + is * 2;
-                        if (*pTID != TILE_UNDEF)
+                        // Match sector rendering: an absent layer object leaves no active tile.
+                        const WORD layerObjectID = *pLayerObjectIDs++;
+                        if (layerObjectID != TILE_UNDEF && *pTID != TILE_UNDEF)
                         {
                             int nTile = GetTileInd(*pTID);
                             BYTE nti = GetTerrainType(nTile);

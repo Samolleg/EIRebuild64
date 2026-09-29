@@ -10,6 +10,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GeneralSettings.h"
 
 #include "Console.h"
+#include "dx11/RendererDX11.h"
 /////////////////////////////////////////////////////////////////////////////////////
 const CPoint ptIncTip(24, 24);
 const int N_TOOLTIP_FONT = 0;
@@ -268,7 +269,15 @@ BOOL CI3DToolTip::Draw(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DToolTip::Draw2D()
 {
-    if (m_eMode != TT_WAIT && m_eMode != TT_HIDE)
+    if (m_eMode != TT_WAIT && m_eMode != TT_HIDE) {
+        // GDI writes RGB and leaves alpha zero. A tooltip is a filled rectangle,
+        // not a premultiplied sprite: otherwise its background adds to the scene.
+        auto *dx = pI3D->GetD3D();
+        dx->GetSpriteBatch()->End();
+        dx->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, dx->GetCommonStates()->Opaque());
         CI3DObject::Draw2D();
+        dx->GetSpriteBatch()->End();
+        dx->GetSpriteBatch()->Begin();
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////

@@ -1,6 +1,8 @@
 #include "StdAfx.h"
 #include "ScenarioTracker.h"
 #include "ModPackage.h"
+#include "SocialStealthLua.h"
+#include "EngineDiagnostics.h"
 #include "ModCombat.h"
 #include "ModAudioConfig.h"
 #include "BinkVideo.h"
@@ -12,6 +14,7 @@
 #include "ModStatInitialization.h"
 #include "ModNpcRefresh.h"
 #include "MapObjectServer.h"
+#include "MapObjectManager.h"
 #include "SpellManager.h"
 #include "WorldServer.h"
 #include "WorldClient.h"
@@ -35,11 +38,14 @@
 #include "luajit-x86/lua.hpp"
 #include <filesystem>
 #include <fstream>
+void ModDeathFearReset();
+
 #include <stdexcept>
 #include <set>
 #include <shellapi.h>
 #include "ModSpellTextures.inl"
 #include "ModTacticalSpells.h"
+#include "ModGroupSearch/Native.h"
 #include "ModNpcMigration.inl"
 struct ModDelayedShot {SRPGAttackPortion ap;int target,start,due;const void*world;};
 namespace fs=std::filesystem;
@@ -100,7 +106,7 @@ void CModPackage::Load(const std::string &directory){
  entries.RemoveAll();config.GetEntries("CAMERA",entries);
  for(int i=0;i<entries.GetSize();i++){CString path=config.GetString("CAMERA",entries[i],"");if(!path.IsEmpty())cameras[Lower((LPCSTR)entries[i])]=Join(root,(LPCSTR)path);}
  for(const auto &kv:cameras)if(!fs::is_regular_file(kv.second))throw std::runtime_error("Missing camera: "+kv.second);
- mainScript="main.lua";auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry r;if(!r.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon AI registry");mainScript=(LPCSTR)r.GetString("Addon","LuaMainScriptPath","main.lua");}
+ mainScript="main.lua";combatSettings["JMVGoCamp"]=1;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry r;if(!r.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon AI registry");combatSettings["JMVGoCamp"]=r.GetInt("Addon","JMVGoCamp",1);mainScript=(LPCSTR)r.GetString("Addon","LuaMainScriptPath","main.lua");}
  if(!fs::is_regular_file(Join(root,mainScript)))throw std::runtime_error("Missing main script");
  fs::path mapRoot=fs::path(root)/"Maps";
  if(fs::exists(mapRoot))for(const auto &entry:fs::recursive_directory_iterator(mapRoot))if(entry.is_regular_file())maps[Lower(fs::relative(entry.path(),mapRoot).string())]=entry.path().string();
@@ -118,7 +124,7 @@ void CModPackage::InitializeScript(){
  if(!state)throw std::runtime_error("Load package before initializing Lua script");
  Stack stack(state);
  ModLua::Register(state);
- {bool enabled=false;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry settings;if(!settings.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon settings");enabled=(settings.GetInt("Addon","JMVSetItemsComplex",0)!=0);ConfigureModAudio(settings,root);for(const char*key:{"JMVGraphics","JMVGraphics2","AllowMagicNegative","JMVParticles","NewRunes","JMVExpMult","ArchersDefence","DeagrPlayerOnLoose","DistanceModifier","WeightBonus","DisableCrippledHL","UsePrototypeActionsForMobAttack","LoadSpellAnimationFromSlotsField","JMVPowerHit","JMVDoubleShot","JMVPreciseShot","JMVExplosiveShot","JMVAttacks","JMVDaggerCritical","JMV136","JMVPerks","JMVWeaponBlocking","JMVAnatomyLimbDamage","JMVFixCriticalHitSoundTrigger","JMVRangedBackstab","JMVBackstabDefenderEquipment","JMVHealAfterHit","usePotionAcks","AttackAnimSpeed","UsePrototypeActionsForMobCast","RemoveSpellConstructReqs","JMVShowCharacterModelInStats","JMVShopUpdate","JMVLoadVideos","JMVGenocidePlayerKillTracking","ShowAllQuests","FastTeleport","UnlockExperimentalSpells"})combatSettings[key]=settings.GetInt("Addon",key,strcmp(key,"JMVExpMult")==0||strcmp(key,"JMVPowerHit")==0||strcmp(key,"JMVDoubleShot")==0||strcmp(key,"JMVPreciseShot")==0||strcmp(key,"JMVExplosiveShot")==0||strcmp(key,"JMVDaggerCritical")==0||strcmp(key,"JMVFixCriticalHitSoundTrigger")==0||strcmp(key,"JMVWeaponBlocking")==0||strcmp(key,"JMVAnatomyLimbDamage")==0||strcmp(key,"JMVRangedBackstab")==0||strcmp(key,"JMVBackstabDefenderEquipment")==0||strcmp(key,"usePotionAcks")==0||strcmp(key,"JMVShowCharacterModelInStats")==0||strcmp(key,"JMVLoadVideos")==0?1:0);registeredLoot=settings.GetInt("Addon","JMVRegisterLoot",0)!=0;npcStatRefresh=settings.GetInt("Addon","JMVNpcStatRefresh",1)!=0;npcDatabaseMigration=settings.GetInt("Addon","JMVNpcDatabaseMigration",0)!=0;extendActiveObjectsArea=settings.GetInt("Addon","JMVExtendActiveObjectsArea",0)!=0;briefingWeapons=settings.GetInt("Addon","JMVBriefingWeapons",1)!=0;partyVisualOptions=settings.GetInt("Addon","JMVPartyVisualOptions",1)!=0;if(partyVisualOptions){hidePartyHelmets=ReadPartyVisualOption(hideHelmetsValue);hidePartyUpperArmor=ReadPartyVisualOption(hideUpperArmorValue);}npcArmorCalculation=settings.GetInt("Addon","JMVNpcArmorCalculation",1)!=0;npcTrickster=settings.GetInt("Addon","JMVNpcTrickster",1)!=0;npcMaterialEffects=settings.GetInt("Addon","JMVNpcArmorMaterialEffects",1)!=0;experienceLimit=settings.GetFloat("AddonExp","Limit",-1.0f);magicRandomLimit=settings.GetFloat("Addon","MagicRandom",-1.0f);}lua_pushboolean(state,enabled);lua_setglobal(state,"JMVSetItemsComplexEnabled");}
+ {bool enabled=false;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry settings;if(!settings.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon settings");enabled=(settings.GetInt("Addon","JMVSetItemsComplex",0)!=0);ConfigureModAudio(settings,root);for(const char*key:{"useLS_DrawStats","useLS_ShowEnemyConsider","useLS_NewFont","JMVGraphics","JMVGraphics2","AllowMagicNegative","JMVParticles","NewRunes","JMVExpMult","ArchersDefence","DeagrPlayerOnLoose","DisableRunaway","DistanceModifier","WeightBonus","DisableCrippledHL","UsePrototypeActionsForMobAttack","LoadSpellAnimationFromSlotsField","JMVPowerHit","JMVDoubleShot","JMVPreciseShot","JMVExplosiveShot","JMVAttacks","JMVDaggerCritical","JMV136","JMVPerks","JMVWeaponBlocking","JMVAnatomyLimbDamage","JMVFixCriticalHitSoundTrigger","JMVRangedBackstab","JMVBackstabDefenderEquipment","JMVHealAfterHit","usePotionAcks","AttackAnimSpeed","UsePrototypeActionsForMobCast","RemoveSpellConstructReqs","improveInfoWindows","JMVItemInfoLineHeight","JMVRegenerationTooltip","JMVArmorMaterialStats","JMVShowCharacterModelInStats","JMVShopUpdate","JMVLoadVideos","JMVGenocidePlayerKillTracking","ShowAllQuests","FastTeleport","UnlockExperimentalSpells","JMVSteals"})combatSettings[key]=settings.GetInt("Addon",key,strcmp(key,"JMVExpMult")==0||strcmp(key,"JMVPowerHit")==0||strcmp(key,"JMVDoubleShot")==0||strcmp(key,"JMVPreciseShot")==0||strcmp(key,"JMVExplosiveShot")==0||strcmp(key,"JMVDaggerCritical")==0||strcmp(key,"JMVFixCriticalHitSoundTrigger")==0||strcmp(key,"JMVWeaponBlocking")==0||strcmp(key,"JMVAnatomyLimbDamage")==0||strcmp(key,"JMVRangedBackstab")==0||strcmp(key,"JMVBackstabDefenderEquipment")==0||strcmp(key,"usePotionAcks")==0||strcmp(key,"JMVShowCharacterModelInStats")==0||strcmp(key,"JMVItemInfoLineHeight")==0||strcmp(key,"JMVRegenerationTooltip")==0||strcmp(key,"JMVArmorMaterialStats")==0||strcmp(key,"JMVLoadVideos")==0?1:0);registeredLoot=settings.GetInt("Addon","JMVRegisterLoot",0)!=0;npcStatRefresh=settings.GetInt("Addon","JMVNpcStatRefresh",1)!=0;npcDatabaseMigration=settings.GetInt("Addon","JMVNpcDatabaseMigration",0)!=0;extendActiveObjectsArea=settings.GetInt("Addon","JMVExtendActiveObjectsArea",1)!=0;briefingWeapons=settings.GetInt("Addon","JMVBriefingWeapons",1)!=0;partyVisualOptions=settings.GetInt("Addon","JMVPartyVisualOptions",1)!=0;if(partyVisualOptions){hidePartyHelmets=ReadPartyVisualOption(hideHelmetsValue);hidePartyUpperArmor=ReadPartyVisualOption(hideUpperArmorValue);}npcArmorCalculation=settings.GetInt("Addon","JMVNpcArmorCalculation",1)!=0;npcTrickster=settings.GetInt("Addon","JMVNpcTrickster",1)!=0;npcMaterialEffects=settings.GetInt("Addon","JMVNpcArmorMaterialEffects",1)!=0;experienceLimit=settings.GetFloat("AddonExp","Limit",-1.0f);magicRandomLimit=settings.GetFloat("Addon","MagicRandom",-1.0f);}lua_pushboolean(state,enabled);lua_setglobal(state,"JMVSetItemsComplexEnabled");}
  // Build the missing derived index from main.lua's own local rows, without modifying installed Lua.
  std::ifstream input(Join(root,mainScript),std::ios::binary);if(!input)throw std::runtime_error("Cannot read main script");
  std::string source((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
@@ -130,6 +136,8 @@ void CModPackage::InitializeScript(){
  if(source.compare(0,3,"\xEF\xBB\xBF")==0)source.erase(0,3);
  if(luaL_loadbuffer(state,source.data(),source.size(),("@"+Join(root,mainScript)).c_str()))throw std::runtime_error(lua_tostring(state,-1));
  Call(0,0);ModLua::InstallFactories(state);
+  SocialStealth::LoadConfig(state,Join(root,"lua/social_stealth.lua"));
+  disguiseProfiles.clear();
   scriptInitialized=true;
 }
 
@@ -195,7 +203,7 @@ bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*un
  if(mpOnly){unit->SetUpdateMask(CMapObject::VLD_MASK_STATS);unit->SetUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);}
  return changed&&!mpOnly;
 }
-void CModPackage::ResetRuntimeState(){ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
+void CModPackage::ResetRuntimeState(){ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
 void CModPackage::SyncRuntimeState(){
  const void*world=theWorldServer.GetSpecificManager();std::string zone;
  zone=(LPCSTR)theWorldServer.szMobFileName;
@@ -267,7 +275,7 @@ void CModPackage::MigrateNpcEquipment(){
  // A failed batch is retried after the next successful saved-game load.
  npcEquipmentMigrationPending=false;
 }
-void CModPackage::SuccessfulWorldLoad(WorldLoadOrigin origin){ResetRuntimeState();SyncRuntimeState();JMV_RegisteredLootOnSuccessfulSaveLoad();JMV_NpcConsumablesLoaded(origin);npcEquipmentMigrationPending=npcDatabaseMigration&&origin==WorldLoadOrigin::SavedGame;InitializeLoadedHeroes();ApplyPartyVisualOptions();}
+void CModPackage::SuccessfulWorldLoad(WorldLoadOrigin origin){ResetRuntimeState();SyncRuntimeState();LoadSkillCooldowns();JMV_RegisteredLootOnSuccessfulSaveLoad();JMV_NpcConsumablesLoaded(origin);npcEquipmentMigrationPending=npcDatabaseMigration&&origin==WorldLoadOrigin::SavedGame;InitializeLoadedHeroes();ApplyPartyVisualOptions();}
 bool CModPackage::SuppressLegacyRefreshSpell(const char*name)const{return npcStatRefresh&&name&&_stricmp(name,"invisibility{d05;d05}")==0;}
 bool CModPackage::CollectArmor(CUnit&unit,ArmorModifiers&mods){
  bool has=false;mods.subtype=unit.GetSubtypeID();
@@ -279,6 +287,8 @@ bool CModPackage::CollectArmor(CUnit&unit,ArmorModifiers&mods){
  }return has;
 }
 bool CModPackage::RecalcUnitStats(SRPGUnitStats&stats,SRPGCommonStats&common,CUnit&unit){
+ auto statsFailure=[&](const char* reason,const SRPGUnitStats& s,const SRPGCommonStats& c){char message[768];
+ snprintf(message,sizeof(message),"%s\nUnit ID=%u prototype=%s\nHP=%g MP=%g bodyWeight=%g\nMove=%g sight=%g hearing=%g",reason,unsigned(unit.GetID()),unit.GetPrototype()?unit.GetPrototype()->szName:"<none>",double(c.ssHP.fpMax),double(c.ssMP.fpMax),double(s.hls[RPGHL_BODY].fpHPWeight),double(s.move.fpEffectiveValue),double(s.percepts[RPGS_SIGHT].fpEffectiveValue),double(s.percepts[RPGS_HEARING].fpEffectiveValue));return std::runtime_error(message);};
  CallbackFrame frame(state);StunEntry stun(state,unit.GetID());SyncRuntimeState();
  initialization->Invalidate(unit.GetID());const unsigned epoch=initialization->epoch;
  SRPGUnitStats staged=stats;SRPGCommonStats stagedCommon=common;frame.scope->unit=&unit;frame.scope->stagedStats=&staged;
@@ -286,11 +296,11 @@ bool CModPackage::RecalcUnitStats(SRPGUnitStats&stats,SRPGCommonStats&common,CUn
  // A fresh skeleton has no previous distribution to preserve proportionally.
  bool used=false,fresh=true;for(const auto&h:staged.hls)if(h.state>RPGALS_NOTUSED){used=true;fresh=fresh&&h.fpHP==0&&h.fpMaxHP==0;}
  if(used&&fresh){
-  if(!std::isfinite(stagedCommon.ssHP.fpMax)||stagedCommon.ssHP.fpMax<=0||!std::isfinite(staged.hls[RPGHL_BODY].fpHPWeight)||staged.hls[RPGHL_BODY].fpHPWeight<=0)throw std::runtime_error("Fresh unit requires prototype HP and body weight");
+  if(!std::isfinite(stagedCommon.ssHP.fpMax)||stagedCommon.ssHP.fpMax<=0||!std::isfinite(staged.hls[RPGHL_BODY].fpHPWeight)||staged.hls[RPGHL_BODY].fpHPWeight<=0)throw statsFailure("Fresh unit requires prototype HP and body weight",staged,stagedCommon);
   staged.DistributeHP(stagedCommon.ssHP.fpMax);
  }
  ModStats::Armor(stagedCommon,unit,npcArmorCalculation);
- float effects[53]={};for(int i=0;i<unit.GetSpellEffects().GetSize();i++){const auto&e=unit.GetSpellEffects()[i];int id=e.GetEffectType();float power=e.GetPower();if(id>=0&&id<53){if(!std::isfinite(power))throw std::runtime_error("Non-finite spell effect");effects[id]=(std::max)(effects[id],power);}}
+ float effects[53]={};for(int i=0;i<unit.GetSpellEffects().GetSize();i++){const auto&e=unit.GetSpellEffects()[i];int id=e.GetEffectType();float power=e.GetPower();if(id>=0&&id<53){if(!std::isfinite(power))throw statsFailure("Non-finite spell effect",staged,stagedCommon);effects[id]=(std::max)(effects[id],power);}}
  BeginCallback("RecalcUnitStatsJmv");ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,&stagedCommon,frame.scope);ModLua::Push(state,&unit,frame.scope);ModLua::PushEffects(state,effects,53,frame.scope);lua_pushboolean(state,true);lua_pushboolean(state,true);lua_pushstring(state,unit.GetPrototype()->szName);lua_pushboolean(state,true);Call(8,0);
  bool npc=unit.GetOwner()==nullptr;ArmorModifiers mods;bool hasMods=false;
  if(npc&&npcTrickster){int level=(std::min)(3,int(staged.cPerks[11]));if(level>0){const float day[]={0,1,3,6},night[]={0,.15f,.30f,.65f},speed[]={1,1.05f,1.1f,1.2f};staged.senses[RPGS_SIGHT].fpEffectiveValue=(std::max)(staged.senses[RPGS_SIGHT].fpEffectiveValue,staged.senses[RPGS_SIGHT].fpBaseValue+day[level]);staged.senses[RPGS_INFRA].fpEffectiveValue=(std::max)(staged.senses[RPGS_INFRA].fpEffectiveValue,staged.senses[RPGS_INFRA].fpBaseValue*(1+night[level]));staged.move.fpEffectiveValue*=speed[level];}}
@@ -298,7 +308,7 @@ bool CModPackage::RecalcUnitStats(SRPGUnitStats&stats,SRPGCommonStats&common,CUn
  for(auto*c:candidates)if(c&&c->GetID()==unit.GetID()&&c->GetSubtypeID()==unit.GetSubtypeID()){ArmorModifiers found;if(CollectArmor(*c,found)){mods=found;hasMods=true;break;}}
  if(!hasMods){auto it=npcArmorCache.find(unit.GetID());if(it!=npcArmorCache.end()&&it->second.subtype==unit.GetSubtypeID()){mods=it->second;hasMods=true;}}
  if(hasMods){staged.move.fpEffectiveValue*=(std::max)(0.f,1+mods.speed*.01f);staged.percepts[RPGS_SIGHT].fpEffectiveValue=(std::max)(0.f,staged.percepts[RPGS_SIGHT].fpEffectiveValue+mods.sight);staged.percepts[RPGS_HEARING].fpEffectiveValue=(std::max)(0.f,staged.percepts[RPGS_HEARING].fpEffectiveValue+mods.hearing);}}
- if(!std::isfinite(staged.move.fpEffectiveValue)||!std::isfinite(staged.percepts[RPGS_SIGHT].fpEffectiveValue)||!std::isfinite(staged.percepts[RPGS_HEARING].fpEffectiveValue)||!std::isfinite(stagedCommon.ssHP.fpMax)||!std::isfinite(stagedCommon.ssMP.fpMax))throw std::runtime_error("Invalid final unit stats");
+ if(!std::isfinite(staged.move.fpEffectiveValue)||!std::isfinite(staged.percepts[RPGS_SIGHT].fpEffectiveValue)||!std::isfinite(staged.percepts[RPGS_HEARING].fpEffectiveValue)||!std::isfinite(stagedCommon.ssHP.fpMax)||!std::isfinite(stagedCommon.ssMP.fpMax))throw statsFailure("Invalid final unit stats",staged,stagedCommon);
  // Map allocation happens before publication. The remaining assignments/setters do not throw.
  if(hasMods)npcArmorCache[unit.GetID()]=mods;else if(npc)npcArmorCache.erase(unit.GetID());
  frame.scope->CommitItems();stats=staged;common=stagedCommon;stun.committed=true;if(epoch==initialization->epoch)initialization->Finish(unit,common,stats);return npc&&npcTrickster&&staged.cPerks[11]>0;
@@ -406,6 +416,36 @@ Json CModPackage::Describe(){
  report["success"]=true;return report;
 }
 namespace {
+Json CheckDefaultStats(){
+ CMapObjectManager manager;
+ lua_State* lua=luaL_newstate();if(!lua)throw std::runtime_error("Cannot create default stats probe Lua");
+ struct CloseLua{lua_State*s;~CloseLua(){lua_close(s);}} close{lua};
+ luaL_openlibs(lua);ModLua::Register(lua);
+ auto scope=std::make_shared<ModLua::Scope>();
+ for(int poison:{0xff,0xcd}){
+  CUnitServer server;
+  memset(server.GetRPGStats(),poison,sizeof(SRPGUnitStats));
+  if(!server.Create()||server.GetRPGStats()->fBaseHP!=0)throw std::runtime_error("Server recycled stats not initialized");
+  SRPGCommonStats early={};
+  ModLua::Push(lua,server.GetRPGStats(),scope);lua_setglobal(lua,"s");ModLua::Push(lua,&early,scope);lua_setglobal(lua,"c");
+  if(luaL_loadstring(lua,"c.hp.max=s.baseHp; assert(c.hp.max==0)")||lua_pcall(lua,0,0,0))throw std::runtime_error(lua_tostring(lua,-1));
+  server.GetRPGStats()->fBaseHP=137;
+  if(luaL_loadstring(lua,"c.hp.max=s.baseHp; assert(c.hp.max==137)")||lua_pcall(lua,0,0,0))throw std::runtime_error(lua_tostring(lua,-1));
+  SRPGUnitStats stats;memset(&stats,poison,sizeof(stats));stats.Clear();
+  // Demonstrate the old path: Clear leaves the NaN race coefficient untouched.
+  if(poison==0xff&&std::isfinite(stats.hls[5].fpVitality))throw std::runtime_error("Poisoned default reproduction changed");
+  SRPGCommonStats common={};common.ssHP.fpCurrent=common.ssHP.fpMax=1;
+  manager.SetupDefaultStats(&common,&stats);
+  for(const auto&h:stats.hls)if(!std::isfinite(h.fpVitality)||h.fpVitality!=0||h.fpHPWeight!=1)throw std::runtime_error("Default race fields not initialized");
+  stats.DistributeHP(1);
+  ModLua::Push(lua,&stats,scope);lua_setglobal(lua,"s");ModLua::Push(lua,&common,scope);lua_setglobal(lua,"c");
+  if(luaL_loadstring(lua,"c.hp.curr=s:collectHp(c.hp.max); assert(c.hp.curr==1)")||lua_pcall(lua,0,0,0))throw std::runtime_error(lua_tostring(lua,-1));
+  // Once a real race is assigned, its damage contribution must still apply.
+  stats.hls[5].fpVitality=.25f;stats.hls[5].fpHP=0;
+  if(luaL_loadstring(lua,"c.hp.curr=s:collectHp(c.hp.max); assert(c.hp.curr==0.75)")||lua_pcall(lua,0,0,0))throw std::runtime_error(lua_tostring(lua,-1));
+ }
+ scope->active=false;return {{"success",true},{"poisonCases",2},{"serverCreateToLuaBaseHp",true},{"nativeDefaultToLuaHp",true},{"assignedRaceDamage",true},{"gameplayActivated",false}};
+}
 Json CheckStartup(const std::string&directory){
  CModPackage expected;expected.Load(directory);
  CFileRegistry activeAudioConfig;
@@ -450,7 +490,7 @@ Json CheckStartup(const std::string&directory){
    for(DWORD i=0;i<adbHeader.dwCount;i++){
     const SADEntry*entry=reinterpret_cast<const SADEntry*>(adb+sizeof(SADBFileHeader)+i*sizeof(SADEntry));
     for(int n=0;n<6;n++){
-     if(strncmp(entry->pszAnimationName,ordinary[n],16)==0 && entry->dwEntryIndex<256)ordinaryFound[n]=true;
+     if(strncmp(entry->pszAnimationName,ordinary[n],16)==0)ordinaryFound[n]=true;
      if(strncmp(entry->pszAnimationName,axe[n],16)==0 || strncmp(entry->pszAnimationName,sword[n],16)==0)sourceFound[n]=true;
     }
     if(strcmp(adbName,"unhufe.adb")==0){
@@ -458,7 +498,7 @@ Json CheckStartup(const std::string&directory){
      if(strncmp(entry->pszAnimationName,"2hsuspecial22",16)==0)twoHandedLootSword=entry->dwEntryIndex;
     }
    }
-   for(int n=0;n<6;n++)if(sourceFound[n]&&!ordinaryFound[n])throw std::runtime_error("Two-handed interaction has no byte-sized replacement");
+   for(int n=0;n<6;n++)if(sourceFound[n]&&!ordinaryFound[n])throw std::runtime_error("Two-handed interaction has no ordinary replacement");
    mapped.CloseFile(adb);
   }
   CFileRegistry config;if(!config.Open("config\\ai.reg"))throw std::runtime_error("Config consumer did not resolve mod registry");
@@ -635,11 +675,20 @@ nlohmann::json CModPackage::CheckEconomy(){
 }
 bool InspectModPackageCommandLine(int &result){
  int argc=0;LPWSTR *argv=CommandLineToArgvW(GetCommandLineW(),&argc);if(!argv)return false;
+ bool mob=argc>=2&&wcscmp(argv[1],L"--inspect-mob-script")==0;
+ bool defaults=argc>=2&&wcscmp(argv[1],L"--inspect-default-stats")==0;
  bool economy=argc>=2&&wcscmp(argv[1],L"--inspect-mod-economy")==0;
  bool startup=argc>=2&&wcscmp(argv[1],L"--inspect-mod-startup")==0;
- if(argc<2||(!economy&&!startup&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
+ if(argc<2||(!mob&&!defaults&&!economy&&!startup&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
  result=2;Json report;std::wstring output;
- if(argc==4){output=argv[3];try{if(economy){CModPackage package;package.Load(Ansi(argv[2]));report=package.CheckEconomy();}else if(startup)report=CheckStartup(Ansi(argv[2]));else{CModPackage package;package.Load(Ansi(argv[2]));report=package.Describe();}result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
+ if(mob&&argc==5){output=argv[4];try{
+  ModRuntime::Host host(Ansi(argv[2]));std::ifstream file(fs::path(argv[3]),std::ios::binary);
+  if(!file)throw std::runtime_error("Cannot open script input");
+  std::string bytes((std::istreambuf_iterator<char>(file)),{});CString source(bytes.c_str());CScript script;
+  bool ok=script.LoadText(source,FALSE)!=FALSE;auto error=script.GetLastError();
+  report={{"success",ok},{"line",error.nLine},{"error",std::string((LPCSTR)error.text)}};result=ok?0:1;
+ }catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
+ else if(argc==4){output=argv[3];try{if(defaults)report=CheckDefaultStats();else if(economy){CModPackage package;package.Load(Ansi(argv[2]));report=package.CheckEconomy();}else if(startup)report=CheckStartup(Ansi(argv[2]));else{CModPackage package;package.Load(Ansi(argv[2]));report=package.Describe();}result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
  else report={{"success",false},{"error","Expected --inspect-addon MOD_DIRECTORY OUTPUT_JSON"}};
  LocalFree(argv);if(!output.empty()){std::ofstream file{fs::path(output)};file<<report.dump(2,' ',false,Json::error_handler_t::replace);if(!file)result=3;}return true;
 }
@@ -699,6 +748,92 @@ void CModPackage::AttackParams(const SRPGUserUnitStats&stats,CUnit&unit,SAttackP
 }
 
 int CModPackage::CombatSetting(const char*key)const{auto i=combatSettings.find(key);return i==combatSettings.end()?0:i->second;}
+float CModPackage::GoCampEnemyRadius(){
+ CallbackFrame frame(state);BeginCallback("GetGoCampConfigValue");lua_pushinteger(state,1);lua_pushnumber(state,25.0);Call(2,1);
+ const double value=Number(state,"GoCamp enemy radius");if(value<0.0||value>500.0)throw std::runtime_error("GoCamp enemy radius is outside 0..500");return static_cast<float>(value);
+}
+bool CModPackage::DeathFearSettings(float &enterHp,float &exitHp,float &fleeDistance,float &speedPercent){
+ enterHp=15.0f;exitHp=30.0f;fleeDistance=25.0f;speedPercent=65.0f;CallbackFrame frame(state);
+ auto read=[&](int property,float fallback){BeginCallback("GetDeathFearConfigValue");lua_pushinteger(state,property);lua_pushnumber(state,fallback);Call(2,1);return float(Number(state,"DeathFear configuration"));};
+ enterHp=read(1,enterHp);fleeDistance=read(2,fleeDistance);speedPercent=read(3,speedPercent);exitHp=read(4,exitHp);return true;
+}
+bool CModPackage::DeathFearExcludedPrototype(const char*prototype){
+ if(!prototype||!*prototype)return false;CallbackFrame frame(state);BeginCallback("IsDeathFearExcludedPrototype");lua_pushstring(state,prototype);Call(1,1);
+ if(!lua_isboolean(state,-1))throw std::runtime_error("DeathFear exclusion policy must return boolean");return lua_toboolean(state,-1)!=0;
+}
+bool CModPackage::GoCampZoneExcluded(const char*zone){
+ if(!zone||!*zone)return true;CallbackFrame frame(state);BeginCallback("IsGoCampExcludedZone");lua_pushstring(state,zone);Call(1,1);
+ if(!lua_isboolean(state,-1))throw std::runtime_error("GoCamp zone policy must return boolean");return lua_toboolean(state,-1)!=0;
+}
+bool CModPackage::PartyDisguiseMatches(const char*name){
+ if(!name||!*name)return false;
+ auto*player=theWorldServer.GetPlayer(0);if(!player)return false;
+ auto*server=dynamic_cast<CPlayerServer*>(player->GetPlayerSpecific());
+ if(!server||!server->IsPartyDeployed()||server->GetStatus()==CPlayerServer::PSS_CAMP)return false;
+ auto found=disguiseProfiles.find(name);
+ if(found==disguiseProfiles.end()){
+  auto utf8=[](const char*s){int n=MultiByteToWideChar(1251,0,s,-1,nullptr,0);std::vector<wchar_t>w(n);MultiByteToWideChar(1251,0,s,-1,w.data(),n);int k=WideCharToMultiByte(CP_UTF8,0,w.data(),-1,nullptr,0,nullptr,nullptr);std::string out(k,'\0');WideCharToMultiByte(CP_UTF8,0,w.data(),-1,&out[0],k,nullptr,nullptr);out.pop_back();return out;};
+  SocialStealth::Config config;SocialStealth::Profile profile;
+  if(SocialStealth::ReadConfig(state,utf8(name).c_str(),config,profile.error)){
+   std::unordered_map<std::string,int> index;
+   for(int i=0;i<theItemDatabase.armors.GetNumEntries();++i){auto inserted=index.emplace(utf8(theItemDatabase.armors.GetEntry(i)->szName),i);if(!inserted.second)inserted.first->second=-1;}
+   SocialStealth::Compile(profile,config,index);
+  }
+  EngineDiagnostics::Event("PartyDisguiseMatches profile=%s valid=%d reason=%s",name,profile.valid,profile.error.c_str());
+  found=disguiseProfiles.emplace(name,std::move(profile)).first;
+ }
+ const auto&profile=found->second;if(!profile.valid)return false;
+ int living=0;bool matches=true;
+ for(int i=0;i<player->party.people.GetSize();++i){
+  CUnit*unit=theWorldServer.GetUnit(player->party.people[i].nID);if(!unit)return false;
+  if(unit->IsDead())continue;if(unit->GetOwner()!=player)return false;++living;
+  std::array<int,SocialStealth::ArmorSlots> armor;
+  for(int slot=0;slot<SocialStealth::ArmorSlots;++slot){auto*item=unit->GetQArmor(slot);armor[slot]=!item?-1:item->GetShape()<unsigned(theItemDatabase.armors.GetNumEntries())?int(item->GetShape()):-2;}
+  // Resolve current equipment directly; no stale member cache across camp, saves or zones.
+  matches=SocialStealth::Evaluate(profile,armor).matches&&matches;
+ }
+ return living>0&&matches;
+}
+// Camp presentation follows addon CI3DObjectNameStats::UpdateStats, not combat wound modifiers.
+void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds,float*displayActions,float*displayMana){
+ const auto&stats=pers.stats;
+ float jewelry=1,complex=1,sets=1;
+ for(int i=0;i<pers.items.GetSize();++i)if(auto*q=pers.items[i])
+  jewelry+=InfoProperty("GetJewelryPropsInside",q->GetShapeEntry()->szName,12)*.01f;
+ float strength=stats.psStrength.fpEffectiveValue;
+ if(unit){
+  strength=unit->GetUserUnitStats()->cStrength; complex+=InfoComplex(*unit,8)*.01f;
+  CallbackFrame frame(state);BeginCallback("GetSetsEncumbrance");ModLua::Push(state,unit,frame.scope);Call(1,1);sets=float(Number(state,"Camp sets encumbrance"));
+ }
+ capacity=int(strength*12*(1+stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT)*.01f)*jewelry*complex*sets);
+ float actions=(10+stats.psDexterity.fpEffectiveValue*.2f)*(1+stats.GetPerkModifier(14)*.01f);
+ int slot=int(pers.dwCurrentWeapon),left=unit?ModStats::LeftHand(*unit):-1;
+ auto*right=slot>=0&&slot<pers.weapons.GetSize()?pers.weapons[slot]:nullptr;
+ auto*off=left>=0&&left<pers.weapons.GetSize()?pers.weapons[left]:nullptr;
+ if(right&&left<0&&stats.cPerks[28]){
+  int t=right->GetWeaponType();
+  if(t!=RPGWST_HANDS2&&t!=RPGWST_HANDS4&&t!=RPGWST_HANDS5&&t!=RPGWST_HANDS6&&t!=RPGWST_HANDS7&&t!=RPGWST_BOW&&t!=RPGWST_CROSSBOW)actions*=1.15f;
+ }
+ auto weight=[&](CItemWeapon*w){return int(InfoProperty("GetWeaponPropsInside",w->GetShapeEntry()->szName,7));};
+ if(CombatSetting("JMV136")&&right){int w=weight(right);actions*=1+stats.GetPerkModifier(w==3?6:w==2?24:0)*(w==3?3:1)*.01f;}
+ float armor=0;for(int i=0;i<pers.armors.GetSize();++i)if(auto*a=pers.armors[i])armor+=InfoProperty("GetArmorPropsInside",a->GetShapeEntry()->szName,7);
+ actions*=1+armor;if(unit)actions*=1+InfoComplex(*unit,18)*.01f;
+ if(displayActions)*displayActions=actions;
+ if(displayMana){
+  CallbackFrame frame(state);BeginCallback("OverloadManacostModsOnServer");
+  lua_pushinteger(state,int(pers.GetItemsWeight()));lua_pushinteger(state,capacity);Call(2,1);
+  *displayMana=pers.stats.RecalcMP()*float(Number(state,"Camp overload mana"));
+ }
+ float points=actions;int attacks=1;
+ if(right&&(CombatSetting("JMVAttacks")||(unit&&IsIDofPersonage(unit->GetID()))))points=float(right->GetActionPoints());
+ if(CombatSetting("JMVAttacks")&&right&&off&&off->GetWeaponType()!=RPGWST_HANDS1){
+  points=(right->GetActionPoints()+off->GetActionPoints())*.5f;attacks=2;
+  int rt=right->GetWeaponType(),lt=off->GetWeaponType(),delta=abs(weight(right)-weight(off));
+  if(rt==lt&&!delta){if(rt==RPGWST_DAGGER){points*=3;attacks=6;}else if(rt==RPGWST_SWORD||rt==RPGWST_AXE){points*=2;attacks=4;}}
+  points*=1+delta*.125f;points*=1+float(rt!=lt)*.25f;
+ }
+ seconds=int(points*(fabs(actions)>.00001f?15/actions:1))/15.0f/attacks;
+}
 int CModPackage::AttackCycle(const SRPGUnitStats&stats,const CUnit&unit,bool attack){
  float cycle=15,action=stats.action.fpEffectiveValue;if(fabs(action)>.00001f)action=15/action;
  if(attack){float points=stats.fpNAWActionPoints;auto*right=unit.GetCurrentQWeapon();
@@ -873,8 +1008,24 @@ bool CModPackage::TargetSkill(CSpell*spell)const{
  if(!spell||!spell->GetPrototype())return false;std::string code=Lower((LPCSTR)spell->GetPrototype()->szCodeName);
  return code=="powerhit"||code=="test"||code=="precisehit"||code=="doubleshot"||code=="preciseshot"||code=="cripplinghit";
 }
+float CModPackage::InfoProperty(const char*callback,const char*name,int property){
+ CallbackFrame frame(state);BeginCallback(callback);lua_pushstring(state,name);lua_pushinteger(state,property);Call(2,1);double n=Number(state,callback);if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Info property overflow");return float(n);
+}
+float CModPackage::InfoMagicBlood(int level){
+ CallbackFrame frame(state);BeginCallback("GetRegenBonusFromPerkMagicBlood");lua_pushinteger(state,level);Call(1,1);return float(Number(state,"MagicBlood"));
+}
+float CModPackage::InfoComplex(CUnit&unit,int property){
+ CallbackFrame frame(state);BeginCallback("GetComplexSummStats");ModLua::Push(state,&unit,frame.scope);lua_pushinteger(state,property);Call(2,1);return float(Number(state,"Complex stats"));
+}
+void CModPackage::SaveSkillCooldowns(CGSVariableSet&vars){
+ SyncRuntimeState();const void*w=theWorldServer.GetSpecificManager();int tick=theWorldServer.GetSegmentTimeCounter();std::string zone=(LPCSTR)theWorldServer.szMobFileName;
+ skillCooldowns.Save(w,tick,zone,vars);auto*p=theWorldServer.GetPlayer(0);if(p&&&p->party.vars!=&vars)skillCooldowns.Save(w,tick,zone,p->party.vars);
+}
+void CModPackage::LoadSkillCooldowns(){
+ auto*p=theWorldServer.GetPlayer(0);if(p)skillCooldowns.Load(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),std::string((LPCSTR)theWorldServer.szMobFileName),p->party.vars);
+}
 int CModPackage::SkillCooldown(CUnit&unit,CSpell*spell){return !spell||!spell->GetPrototype()?0:skillCooldowns.Remaining(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),unit.GetID(),(LPCSTR)spell->GetPrototype()->szCodeName);}
-void CModPackage::StartSkillCooldown(CUnit&unit,CSpell*spell,const ModSkills::Config&config){if(spell&&spell->GetPrototype())skillCooldowns.Start(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),unit.GetID(),(LPCSTR)spell->GetPrototype()->szCodeName,config.Duration());}
+void CModPackage::StartSkillCooldown(CUnit&unit,CSpell*spell,const ModSkills::Config&config){if(spell&&spell->GetPrototype())skillCooldowns.Start(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),unit.GetID(),(LPCSTR)spell->GetPrototype()->szCodeName,config.Duration(),config.requiredArchery<0);}
 bool CModPackage::SkillReady(CUnit&unit,CSpell*spell,const ModSkills::Config&config,bool server){
  auto*w=unit.GetCurrentQWeapon();if(!w||!config.Weapon(w->GetWeaponType()))return false;
  int left=ModStats::LeftHand(unit);auto*off=left>=0&&left!=int(unit.GetCurrentWeaponSlotIndex())?unit.GetQWeapon(left):nullptr;
@@ -954,3 +1105,33 @@ void CModPackage::GrantSkillPrototypes(CParty&party){
  }
 }
 bool CModPackage::CompanionSkillAI(CUnit&unit) const{if(!unit.IsHero()||!unit.GetOwner())return false;CString key;key.Format("jmv.companion.ai.v1.%d",unit.GetID());return unit.GetOwner()->party.vars.GetVar(key)>=.5f;}
+
+float CModPackage::PanelDamage(CUnit&unit,float damage,int slot,bool left){
+ CallbackFrame frame(state);auto*w=slot>=0?frame.scope->Weapon(unit,slot):nullptr;
+ BeginCallback("GetModifiedDamageOnClientJmv");ModLua::Push(state,unit.GetUserUnitStats(),frame.scope);ModLua::Push(state,&unit,frame.scope);
+ lua_pushnumber(state,damage);lua_pushnumber(state,-1);lua_pushstring(state,unit.GetPrototype()->szName);
+ lua_pushinteger(state,w?w->GetWeaponType():0);lua_pushinteger(state,slot);
+ lua_pushboolean(state,IsIDofPersonage(unit.GetID())&&unit.GetTypeID()!=MOTID_ANIMAL&&unit.GetTypeID()!=MOTID_MONSTER);
+ lua_pushboolean(state,CombatSetting("JMVFixCriticalHitSoundTrigger")!=0);Call(9,1);return CombatNumber(state,"Panel damage");
+}
+float CModPackage::PanelCritical(CUnit&unit,int slot,bool left,bool power){
+ CallbackFrame frame(state);auto*w=slot>=0?frame.scope->Weapon(unit,slot):nullptr;
+ BeginCallback(power?"GetCritDamageOnClientJmv":"GetCritOnClientJmv");ModLua::Push(state,&unit,frame.scope);
+ lua_pushnumber(state,unit.GetUserUnitStats()->GetPerkModifier(power?4:12));
+ lua_pushinteger(state,left?slot:-1);lua_pushboolean(state,left);lua_pushstring(state,unit.GetPrototype()->szName);
+ lua_pushinteger(state,w?w->GetWeaponType():0);lua_pushinteger(state,slot);Call(7,1);return CombatNumber(state,"Panel critical");
+}
+void CModPackage::PanelDefense(CUnit&unit,int weight,int capacity,float&block,float&parry){
+ CallbackFrame frame(state);
+ auto finish=[&](const char*fn,int count){Call(count,1);float v=CombatNumber(state,fn);lua_pop(state,1);return v;};
+ auto overload=[&](const char*fn){BeginCallback(fn);lua_pushinteger(state,weight);lua_pushinteger(state,capacity);return finish(fn,2);};
+ auto value=[&](const char*fn,int slot){BeginCallback(fn);ModLua::Push(state,unit.GetUserUnitStats(),frame.scope);ModLua::Push(state,&unit,frame.scope);if(slot>=0)lua_pushinteger(state,slot);return finish(fn,slot>=0?3:2);};
+ block=value("GetShieldBlockChance",-1)*overload("GetOverloadBlockOnServer");
+ const int slot=int(unit.GetCurrentWeaponSlotIndex()),left=frame.scope->LeftHand(unit);
+ parry=0;if(slot<0||slot>=4||!frame.scope->Weapon(unit,slot))return;
+ const float factor=overload("GetOverloadParryOnServer");
+ float first=value("GetWeaponParryChance",slot)*.01f*factor;
+ if(left<0){parry=first*100;return;}
+ float second=value("GetWeaponParryChance",left)*.01f*factor;
+ parry=(first<.0001f?second:second<.0001f?first:first+second-2*first*second)*100;
+}

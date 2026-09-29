@@ -49,7 +49,6 @@ const int NPC_CONSUMABLE_EFFECT_IDS[NPC_CONSUMABLE_COUNT] = {
 	31, -1, 29, 33, 37
 };
 const int NPC_CONSUMABLE_POLL_SEGMENTS = 4;
-const int NPC_CONSUMABLE_ZONE_CHECK_SEGMENTS = 64;
 const int NPC_CONSUMABLE_HEALING_COOLDOWN_SEGMENTS = 109;
 const int NPC_CONSUMABLE_MAX_VISIT_TOKEN = 511;
 const int NPC_CONSUMABLE_STATE_TOKEN_SHIFT = 15;
@@ -95,11 +94,10 @@ struct SNpcCombatConsumableState
 static std::unordered_map<int, SNpcCombatConsumableState>
 	G_npcCombatConsumableStates;
 static std::string G_npcCombatConsumableZone;
+static std::string G_npcCombatConsumableRawMobName;
 static int G_npcCombatConsumableVisitToken = 0;
 static bool G_npcCombatConsumableFreshVisit = false;
 static CGSVariableSet *G_npcCombatConsumableVars = nullptr;
-static int G_npcCombatConsumableNextZoneCheckTick = 0;
-static int G_npcCombatConsumableLastObservedTick = 0;
 static std::string NPC_NormalizeMobName(const char *rawName)
 {
 	if (!rawName || !rawName[0])
@@ -362,53 +360,45 @@ static void NPC_ResolveVisit(CGSVariableSet &vars, int tick)
 	}
 }
 
+static bool NPC_RejectMenuWorld()
+{
+    return !WorldServer || WorldServer->curInterface == IFACE_MAINMENU;
+}
+
 static CGSVariableSet *NPC_EnsureVisitContext()
 {
-	if (!WorldServer)
-		return nullptr;
-
-	const int tick = WorldServer->GetSegmentTimeCounter();
-	const bool clockRestarted =
-		tick < G_npcCombatConsumableLastObservedTick;
-	const bool checkZone = G_npcCombatConsumableZone.empty() ||
-		clockRestarted || tick >= G_npcCombatConsumableNextZoneCheckTick;
-	G_npcCombatConsumableLastObservedTick = tick;
-
-	if (checkZone)
-	{
-		const std::string zone = NPC_CurrentMobName();
-		if (zone.empty())
-			return nullptr;
-
-		G_npcCombatConsumableNextZoneCheckTick =
-			tick + NPC_CONSUMABLE_ZONE_CHECK_SEGMENTS;
-		if (zone != G_npcCombatConsumableZone)
-		{
-			// Mission transitions normally arrive through RestartScript. This
-			// fallback also handles base maps, which use LoadScriptFromMOB.
-			if (!G_npcCombatConsumableZone.empty())
-				G_npcCombatConsumableFreshVisit = true;
-			G_npcCombatConsumableStates.clear();
-			G_npcCombatConsumableZone = zone;
-			G_npcCombatConsumableVisitToken = 0;
-			G_npcCombatConsumableVars = nullptr;
-			NPC_Log("ZONE_CONTEXT", nullptr, nullptr, nullptr, -1,
-				tick, -1.0f, -1.0f, -1, -1,
-				"source=periodic_or_initial_check");
-		}
-	}
-
-	if (!G_npcCombatConsumableVars)
-	{
-		CPlayer *player = WorldServer->GetPlayer(0);
-		if (!player)
-			return nullptr;
-		G_npcCombatConsumableVars = &player->party.vars;
-	}
-
-	CGSVariableSet &vars = *G_npcCombatConsumableVars;
-	NPC_ResolveVisit(vars, tick);
-	return &vars;
+    if (NPC_RejectMenuWorld() || !WorldServer->GetPlayerManager()) return nullptr;
+    const char *rawName = (LPCSTR)theWorldServer.szMobFileName;
+    if (!rawName || !rawName[0]) return nullptr;
+    CPlayer *player = WorldServer->GetPlayer(0);
+    if (!player) return nullptr;
+    const int tick = WorldServer->GetSegmentTimeCounter();
+    if (G_npcCombatConsumableRawMobName != rawName)
+    {
+        const std::string zone = NPC_NormalizeMobName(rawName);
+        if (zone.empty()) return nullptr;
+        G_npcCombatConsumableRawMobName = rawName;
+        if (zone != G_npcCombatConsumableZone)
+        {
+            if (!G_npcCombatConsumableZone.empty()) G_npcCombatConsumableFreshVisit = true;
+            G_npcCombatConsumableStates.clear();
+            G_npcCombatConsumableZone = zone;
+            G_npcCombatConsumableVisitToken = 0;
+            G_npcCombatConsumableVars = nullptr;
+        }
+    }
+    CGSVariableSet *currentVars = &player->party.vars;
+    if (G_npcCombatConsumableVars != currentVars)
+    {
+        if (G_npcCombatConsumableVars)
+        {
+            G_npcCombatConsumableStates.clear();
+            G_npcCombatConsumableVisitToken = 0;
+        }
+        G_npcCombatConsumableVars = currentVars;
+    }
+    NPC_ResolveVisit(*currentVars, tick);
+    return currentVars;
 }
 
 static bool NPC_LoadSlotConfig(CUnit *unit,
@@ -751,7 +741,8 @@ static int NPC_ConditionGate(int kind,
 static void NPC_Update(SRPGCommonStats *stats, CUnit *unit)
 {
 	if (!true || !stats || !unit ||
-		unit->IsHero() || unit->GetOwner() ||
+		unit->IsHero() || unit->GetOwner() || NPC_RejectMenuWorld() ||
+        !std::isfinite(stats->ssHP.fpMax) || !std::isfinite(stats->ssHP.fpCurrent) ||
 		stats->ssHP.fpMax <= 0.0f || stats->ssHP.fpCurrent <= 0.0f)
 		return;
 
@@ -865,11 +856,10 @@ static void NPC_BeginVisit(WorldLoadOrigin origin, const std::string &zone)
 {
     G_npcCombatConsumableStates.clear();
     G_npcCombatConsumableZone = zone;
+    G_npcCombatConsumableRawMobName.clear();
     G_npcCombatConsumableVisitToken = 0;
     G_npcCombatConsumableFreshVisit = origin == WorldLoadOrigin::ZoneEntry;
     G_npcCombatConsumableVars = nullptr;
-    G_npcCombatConsumableNextZoneCheckTick = 0;
-    G_npcCombatConsumableLastObservedTick = 0;
     NPC_Log("LOAD_RUNTIME_RESET", nullptr, nullptr, nullptr, -1, 0,
         -1.0f, -1.0f, -1, -1,
         origin == WorldLoadOrigin::SavedGame ? "reason=save_load_resume" : "reason=mission_zone_entry");
@@ -899,7 +889,7 @@ bool JMV_RegisterNpcCombatConsumable(CUnit *unit,
 void JMV_NpcConsumablesUpdate(SRPGCommonStats*s,CUnit*u){if(ModRuntime::Current()&&theWorldServer.GetPlayerManager())NPC_Update(s,u);}
 void JMV_NpcConsumablesLoaded(WorldLoadOrigin origin){if(ModRuntime::Current())NPC_BeginVisit(origin,NPC_CurrentMobName());}
 void JMV_NpcConsumablesRestart(){if(ModRuntime::Current())NPC_OnScriptRestart();}
-void JMV_NpcConsumablesReset(){G_npcCombatConsumableStates.clear();G_npcCombatConsumableZone.clear();G_npcCombatConsumableVars=nullptr;G_npcCombatConsumableVisitToken=0;G_npcCombatConsumableFreshVisit=false;G_npcCombatConsumableNextZoneCheckTick=0;G_npcCombatConsumableLastObservedTick=0;}
+void JMV_NpcConsumablesReset(){G_npcCombatConsumableStates.clear();G_npcCombatConsumableZone.clear();G_npcCombatConsumableRawMobName.clear();G_npcCombatConsumableVars=nullptr;G_npcCombatConsumableVisitToken=0;G_npcCombatConsumableFreshVisit=false;}
 bool JMV_CheckNpcConsumablePacking(){CGSVariableSet vars;SNpcCombatConsumableState state;state.visitToken=511;state.nextHealingTick=109;for(int i=0;i<5;i++){state.slots[i].remainingCharges=7;state.slots[i].selection=3;state.slots[i].phase=2;}NPC_PersistState(vars,123,state);auto bits=NPC_ReadPacked(vars,NPC_UnitKey("state",G_npcCombatConsumableZone,123));auto meta=NPC_ReadPacked(vars,NPC_UnitKey("meta",G_npcCombatConsumableZone,123));if((bits>>15)!=511)return false;for(int i=0;i<5;i++)if(((bits>>(i*3))&7)!=7||((meta>>(i*2))&3)!=3||((meta>>(10+i*2))&3)!=2)return false;return NPC_ParseKind("HEALING")==1&&NPC_NormalizeMobName("Maps/ZONE_1.mob")=="zone_1";}
 
 bool JMV_CheckNpcVisitLifecycle()

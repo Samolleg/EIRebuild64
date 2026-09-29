@@ -748,9 +748,9 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
                     SHMatrix world = pGPU->GetMatrix(MAT_STACK_WORLDSPACE);
                     pRend->SetWorldMatrix(world);
                 }
-                CRect rcFigureRect;
+                CRect rcFigureRect(0, 0, 0, 0);
                 bCheck = pRend->DrawFigure(pFigure, lights, sets[i]->matgroups[j]->lpMaterial, cFog,
-                                           0);
+                                           pRect ? &rcFigureRect : nullptr);
                 if (bCheck == FALSE)
                     return ReportError("CObject3DClientSpecific::Draw.\n CFigure::Draw failed.\n");
                 nFigureClipFlag |= pFigure->CheckFlag(FIG_VISIBLE);

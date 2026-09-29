@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -46,6 +47,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ChatServer.h"
 #include "GameMain.h"
 #include "ModAnimationIdSave.h"
+#include <vector>
+#include <cmath>
 
 /////////////////////////////////////////////////////////////////////////////////////
 const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
@@ -61,6 +64,42 @@ const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
 
 CWorldServer theWorldServer;
 
+namespace {
+struct SFieldCampSnapshot {
+    int id;
+    float hp, mp;
+    SRPGHitLocation hitLocations[RPG_NUM_HIT_LOCATIONS];
+};
+bool fieldCampArmed = false;
+bool fieldCampInCamp = false;
+int fieldCampReturnHeroId = -1;
+struct SFieldCampVarSnapshot { const char *name; float value; bool existed; };
+CGSVariableSet *fieldCampCommerceVars = nullptr;
+SFieldCampVarSnapshot fieldCampCommerceValues[6] = {};
+std::vector<SFieldCampSnapshot> fieldCampSnapshots;
+const SFieldCampSnapshot *FindFieldCampSnapshot(int id) {
+    for (const auto &snapshot : fieldCampSnapshots) if (snapshot.id == id) return &snapshot;
+    return nullptr;
+}
+void RestoreFieldCampHitLocations(SRPGUnitStats &stats, const SFieldCampSnapshot &snapshot) {
+    for (int i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i) {
+        auto &hit = stats.hls[i];
+        hit.fpHP = max(0.0f, min(hit.fpMaxHP, snapshot.hitLocations[i].fpHP));
+        hit.dwCrippleMask = snapshot.hitLocations[i].dwCrippleMask;
+        hit.state = snapshot.hitLocations[i].state;
+    }
+}
+void ZeroFieldCampItem(CItem *item) {
+    if (item && (item->GetTypeID() == ITID_ITEM_WEAPON || item->GetTypeID() == ITID_ITEM_ARMOR || item->GetTypeID() == ITID_ITEM_QUICK))
+        item->SetMP(0.0f);
+}
+void ZeroFieldCampPersonage(CPersonage &personage) {
+    for (int i = 0; i < personage.weapons.GetSize(); ++i) ZeroFieldCampItem(personage.weapons[i]);
+    for (int i = 0; i < personage.armors.GetSize(); ++i) ZeroFieldCampItem(personage.armors[i]);
+    for (int i = 0; i < personage.items.GetSize(); ++i) ZeroFieldCampItem(personage.items[i]);
+}
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::SCorpseItems::Store(CSave &file)
 {
@@ -71,6 +110,25 @@ void CWorldServer::SCorpseItems::Store(CSave &file)
     file.Write(n);
     for (int i = 0; i < n; i++)
         file.Write(items[i]->GetID());
+}
+static void SynchronizeFieldCampItemEnergy(CUnitServer &unitServer, CItem *item) {
+    if (!item || !item->GetUserData() || !item->GetSpell(0)) return;
+    const float mp = item->GetMP();
+    const float maxMp = item->GetMaxMP();
+    if (!std::isfinite(mp) || !std::isfinite(maxMp) || mp < 0.0f || maxMp <= 0.0f) return;
+    unitServer.SynchronizeItemMana(item);
+}
+static void SynchronizeFieldCampUnitEnergy(CUnit *unit) {
+    if (!unit || !unit->GetOwner()) return;
+    CUnitSpecific *specific = unit->GetUnitSpecific();
+    if (!specific || specific->WhoAmI() != HPC_UNITSERVERSPECIFIC) return;
+    CUnitServer &unitServer = *static_cast<CUnitServer *>(specific);
+    for (int i = 0; i < QI_MAX_WEAPONS; ++i)
+        SynchronizeFieldCampItemEnergy(unitServer, unit->GetQWeapon(i));
+    for (int i = 0; i < QI_MAX_ITEMS; ++i)
+        SynchronizeFieldCampItemEnergy(unitServer, unit->GetQItem(i));
+    for (int i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
+        SynchronizeFieldCampItemEnergy(unitServer, unit->GetQArmor(i));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::SCorpseItems::Load(CSave &file)
@@ -254,6 +312,10 @@ void CWorldServer::RemoveEverything()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Clear()
 {
+    fieldCampSnapshots.clear();
+    fieldCampArmed = fieldCampInCamp = false;
+    fieldCampReturnHeroId = -1;
+    fieldCampCommerceVars = nullptr;
     RemoveEverything();
     szZoneFileName = "";
     // clear other objects
@@ -695,7 +757,7 @@ void CWorldServer::UnitSayAck(CUnit *pUnit, DWORD dwAck)
 // ********************* Active units set
 static int ActiveObjectPeriod(CMapObject *object)
 {
-    const CModPackage *mod = ModRuntime::Current();
+    CModPackage *mod = ModRuntime::Current();
     const bool extended = mod && mod->ExtendActiveObjectsArea();
     // The installed addon extends both the base period and the stagger.
     return (extended ? 256 : 128) +
@@ -1246,6 +1308,14 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
                                     const CQuaternion rot, SDeployPlayerInfo *pInfo)
 {
     int i, k;
+    const bool fieldCampReturn = fieldCampInCamp;
+    if (fieldCampReturn) {
+        for (i = 0; i < people.GetSize(); ++i) ZeroFieldCampPersonage(*people[i]);
+        if (pPlayer) {
+            for (i = 0; i < pPlayer->party.allWagonItems.GetSize(); ++i) ZeroFieldCampItem(pPlayer->party.allWagonItems[i]);
+            for (POSITION pos = pPlayer->items.GetHeadPosition(); pos;) ZeroFieldCampItem(pPlayer->items.GetNext(pos));
+        }
+    }
     CMEUnit me;
     CUnit *pUnit;
     const char *pszBPs[] = { "hd",  "bd",  "hp",  "hr",  "lh1", "lh2", "lh3", "rh1", "rh2",
@@ -1254,9 +1324,10 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
     const char **ppBPs;
     CString szAddToScript, szTemp;
     bool bFirstDeploy;
-    bFirstDeploy = strnicmp(szZoneFileName, "zone1", 5) == 0 &&
+    bFirstDeploy = !fieldCampReturn && strnicmp(szZoneFileName, "zone1", 5) == 0 &&
                    fabs2(ptPlace - CPlot3D(54, 138, 0)) < 300;
 
+    if (fieldCampReturn) EngineDiagnostics::Event("Camp deploy: initial animation suppressed zone=%s", szZoneFileName.GetString());
     szAddToScript = "WorldScript(";
     for (i = 0; i < people.GetSize(); i++)
     {
@@ -1422,6 +1493,36 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
     szAddToScript += ")";
     if (pPlayer)
         script.LoadText(szAddToScript);
+    if (fieldCampReturn) {
+        bool restored = !fieldCampSnapshots.empty();
+        for (i = 0; i < static_cast<int>(fieldCampSnapshots.size()); ++i) {
+            const SFieldCampSnapshot &snapshot = fieldCampSnapshots[i];
+            CUnit *unit = GetUnit(snapshot.id);
+            CUnitServer *unitServer = unit && unit->GetUnitSpecific() && unit->GetUnitSpecific()->WhoAmI() == HPC_UNITSERVERSPECIFIC
+                ? static_cast<CUnitServer *>(unit->GetUnitSpecific()) : nullptr;
+            CMapObjectServer *commonServer = unitServer ? unitServer->GetMapObjectServer() : nullptr;
+            if (!unit || !unitServer || !commonServer) { restored = false; continue; }
+            unitServer->RecalcRPGStats(false);
+            RestoreFieldCampHitLocations(*unitServer->GetRPGStats(), snapshot);
+            SRPGCommonStats *common = commonServer->GetRPGStats();
+            float hp = unitServer->GetRPGStats()->CollectHP(common->ssHP.fpMax);
+            common->ssHP.fpCurrent = max(0.0f, min(common->ssHP.fpMax, hp));
+            common->ssMP.fpCurrent = max(0.0f, min(common->ssMP.fpMax, snapshot.mp));
+            for (int slot = 0; slot < QI_MAX_WEAPONS; ++slot) ZeroFieldCampItem(unit->GetQWeapon(slot));
+            for (int slot = 0; slot < QI_MAX_ITEMS; ++slot) ZeroFieldCampItem(unit->GetQItem(slot));
+            for (int slot = 0; slot < RPG_NUM_ARMOR_TYPES; ++slot) ZeroFieldCampItem(unit->GetQArmor(slot));
+            unit->SetUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+            unit->SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
+            unit->SetUpdated();
+        }
+        const int mainHeroId = fieldCampSnapshots.empty() ? -1 : fieldCampSnapshots.front().id;
+        for (const SFieldCampSnapshot &snapshot : fieldCampSnapshots)
+            SynchronizeFieldCampUnitEnergy(GetUnit(snapshot.id));
+        fieldCampReturnHeroId = mainHeroId;
+        fieldCampSnapshots.clear();
+        fieldCampInCamp = false;
+        if (!restored) fieldCampArmed = false;
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::DeployHooverItems(CPlayer *pPlayer, CList<CItem *, CItem *> &items)
@@ -1444,6 +1545,24 @@ void CWorldServer::DeployHooverItems(CPlayer *pPlayer, CList<CItem *, CItem *> &
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeployPlayerInfo *pInfo)
 {
+    if (fieldCampArmed) {
+        fieldCampSnapshots.clear();
+        for (int index = 0; index < people.GetSize(); ++index) {
+            CPersonage &personage = *people[index];
+            CUnit *unit = GetUnit(personage.nID);
+            CUnitServer *unitServer = unit && unit->GetUnitSpecific() && unit->GetUnitSpecific()->WhoAmI() == HPC_UNITSERVERSPECIFIC
+                ? static_cast<CUnitServer *>(unit->GetUnitSpecific()) : nullptr;
+            CMapObjectServer *commonServer = unitServer ? unitServer->GetMapObjectServer() : nullptr;
+            if (!unit || unit->IsDead() || !unitServer || !commonServer) { fieldCampSnapshots.clear(); fieldCampArmed = false; break; }
+            SFieldCampSnapshot snapshot = {};
+            snapshot.id = personage.nID;
+            snapshot.hp = commonServer->GetCurrentHP();
+            snapshot.mp = commonServer->GetCurrentMP();
+            for (int hit = 0; hit < RPG_NUM_HIT_LOCATIONS; ++hit) snapshot.hitLocations[hit] = unitServer->GetRPGStats()->hls[hit];
+            fieldCampSnapshots.push_back(snapshot);
+        }
+        if (fieldCampSnapshots.size() != static_cast<size_t>(people.GetSize())) { fieldCampSnapshots.clear(); fieldCampArmed = false; }
+    }
     int i, k;
     // store follow info
     if (curInterface == IFACE_MISSION)
@@ -1533,6 +1652,11 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
             else
                 pUnit->SetOwner(0);
         }
+    }
+    if (fieldCampArmed && fieldCampSnapshots.size() == static_cast<size_t>(people.GetSize())) {
+        for (i = 0; i < people.GetSize(); ++i) if (const SFieldCampSnapshot *snapshot = FindFieldCampSnapshot((*people[i]).nID)) RestoreFieldCampHitLocations((*people[i]).stats, *snapshot);
+        fieldCampArmed = false;
+        fieldCampInCamp = true;
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2804,6 +2928,74 @@ void CWorldServer::InvokeAlarm(int nAlarm, const CPlot3D &ptOrigin, bool bForceA
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CWorldServer::CanBeginFieldCamp()
+{
+    CModPackage *mod = ModRuntime::Current();
+    if (!mod || !mod->CombatSetting("JMVGoCamp") || !IsMapLoaded() || curInterface != IFACE_MISSION || fieldCampArmed || fieldCampInCamp || fieldCampReturnHeroId >= 0)
+        return false;
+    CPlayer *player = const_cast<CWorldServer *>(this)->GetPlayer(0);
+    CPlayerServer *playerServer = player ? dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
+    if (!player || !playerServer || playerServer->dangerState == WDS_COMBAT || player->party.people.GetSize() <= 0 || player->party.people.GetSize() > 8)
+        return false;
+    try { if (mod->GoCampZoneExcluded((LPCSTR)player->party.szCurrentZone)) return false; }
+    catch (...) { return false; }
+    std::vector<CUnit *> partyUnits;
+    for (int i = 0; i < player->party.people.GetSize(); ++i) {
+        CUnit *unit = GetUnit(player->party.people[i].nID);
+        if (!unit || unit->IsDead() || !unit->GetUnitSpecific() || unit->GetUnitSpecific()->WhoAmI() != HPC_UNITSERVERSPECIFIC) return false;
+        partyUnits.push_back(unit);
+    }
+    float radius = 25.0f;
+    try { radius = mod->GoCampEnemyRadius(); }
+    catch (...) { return false; }
+    const float radiusSquared = radius * radius;
+    CMapObjPtrHashIterator iterator;
+    for (CMapObject *object = iterator.GetFirst(const_cast<CMapObjPtrHash *>(&dynamicObjs)); !iterator.IsReachEnd(); object = iterator.GetNext()) {
+        if (!object || object->IsInvalid() || object->WhoAmI() != HPC_UNIT) continue;
+        CUnit *enemy = static_cast<CUnit *>(object);
+        if (enemy->IsDead() || !enemy->IsEnemy(player->GetPlayerNumber())) continue;
+        for (CUnit *member : partyUnits) if (distanceXY2(enemy->GetCP(), member->GetCP()) <= radiusSquared) return false;
+    }
+    return true;
+}
+
+bool CWorldServer::BeginFieldCamp()
+{
+    if (!CanBeginFieldCamp()) return false;
+    fieldCampSnapshots.clear();
+    fieldCampArmed = true;
+    return true;
+}
+int CWorldServer::FieldCampReturnHeroID() const { return fieldCampReturnHeroId; }
+void CWorldServer::CompleteFieldCampReturn() { fieldCampReturnHeroId = -1; }
+bool CWorldServer::BeginFieldCampCommerceSuppression()
+{
+    CModPackage *mod = ModRuntime::Current();
+    CPlayer *player = GetPlayer(0);
+    if (!fieldCampInCamp || !mod || !mod->CombatSetting("JMVGoCamp") || !player || fieldCampCommerceVars) return false;
+    static const char *names[6] = { "constr.current", "i.noconstr", "i.offspellconstr", "i.onspellconstr", "i.offitemconstr", "i.onitemconstr" };
+    static const float values[6] = { 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f };
+    CGSVariableSet &vars = player->party.vars;
+    fieldCampCommerceVars = &vars;
+    for (int i = 0; i < 6; ++i) {
+        auto found = vars.find(names[i]);
+        fieldCampCommerceValues[i].name = names[i];
+        fieldCampCommerceValues[i].existed = found != vars.end();
+        fieldCampCommerceValues[i].value = found != vars.end() ? found->second : 0.0f;
+        vars.SetVar(names[i], values[i]);
+    }
+    return true;
+}
+void CWorldServer::EndFieldCampCommerceSuppression(bool active)
+{
+    if (!active || !fieldCampCommerceVars) return;
+    for (int i = 0; i < 6; ++i) {
+        const SFieldCampVarSnapshot &snapshot = fieldCampCommerceValues[i];
+        if (snapshot.existed) fieldCampCommerceVars->SetVar(snapshot.name, snapshot.value);
+        else fieldCampCommerceVars->DelVar(snapshot.name);
+    }
+    fieldCampCommerceVars = nullptr;
+}
 CPlayer *CWorldServer::GetPlayer(int nPlayer)
 {
     CManagerIterator iter;
@@ -2894,6 +3086,7 @@ bool CWorldServer::HooverUnit(CUnit *pVictim, CPlayer *pWho)
     }
     if (pHoover->Hoover(this, pVictim, hooveredItems, newItems, newSpells, nMoney))
     {
+        pHoover->HooverCarriedLoot(this, pVictim, hooveredItems, newItems, nMoney);
         // в случае мп квестовые итема идут лидеру
         if (IWorldConnector.IsLMP())
         {
@@ -2928,6 +3121,24 @@ bool CWorldServer::HooverUnit(CUnit *pVictim, CPlayer *pWho)
     return false;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool CWorldServer::HooverUnitAddon(CUnit *victim,CPlayer *player,CUnitServer *unitServer,bool loot)
+{
+ if(!victim||!player||!unitServer||(victim->IsHero()&&!victim->IsDead())) return false;
+ if(victim->CheckFlag(UNIT_LOOT_LOCKED)) return HooverUnit(victim,player);
+ int money=0; POSITION pos; CList<CItem*,CItem*> items,newItems; CList<CSpell*,CSpell*> newSpells;
+ if(loot&&!victim->CheckFlag(UNIT_ALREADY_HOOVER))
+ {
+  pHoover->HooverAddon(this,victim,items,newItems,newSpells,money,unitServer->GetRPGStats()->GetManualSkillLevel(RPGMSKL_SCIENCE,victim),unitServer->GetRPGStats()->psDexterity.fpEffectiveValue,false);
+  if(IWorldConnector.IsLMP()) if(CPlayer *leader=GetPlayer(0))
+  { CList<CItem*,CItem*> quest; for(pos=items.GetHeadPosition();pos;){POSITION cur=pos;CItem *item=items.GetNext(pos);if(item->WhoAmI()==HPC_ITEM_QUEST){quest.AddTail(item);items.RemoveAt(cur);}} if(quest.GetCount())leader->AddItemsToHoover(quest);for(pos=quest.GetHeadPosition();pos;)quest.GetNext(pos)->Release(); }
+  if(!victim->CheckFlag(UNIT_ALREADY_MHOOVER)){newItems.RemoveAll();pHoover->HooverAddon(this,victim,items,newItems,newSpells,money,unitServer->GetRPGStats()->GetManualSkillLevel(RPGMSKL_SCIENCE,victim),unitServer->GetRPGStats()->psDexterity.fpEffectiveValue,true);player->party.nMoney+=money;victim->SetFlag(UNIT_ALREADY_MHOOVER);}pHoover->HooverCarriedLoot(this,victim,items,newItems,money);
+  if(items.GetCount())player->AddItemsToHoover(items);for(pos=items.GetHeadPosition();pos;)items.GetNext(pos)->Release();victim->SetFlag(UNIT_ALREADY_HOOVER);return items.GetCount()>0||money>0;
+ }
+ if(!loot&&!victim->CheckFlag(UNIT_ALREADY_MHOOVER))
+ {pHoover->HooverAddon(this,victim,items,newItems,newSpells,money,unitServer->GetRPGStats()->GetManualSkillLevel(RPGMSKL_SCIENCE,victim),unitServer->GetRPGStats()->psDexterity.fpEffectiveValue,true);player->party.nMoney+=money;victim->SetFlag(UNIT_ALREADY_MHOOVER);if(items.GetCount())player->AddItemsToHoover(items);for(pos=items.GetHeadPosition();pos;)items.GetNext(pos)->Release();return money>0;}
+ return false;
+}
+
 void CWorldServer::AddCorpse(int nID, int nLootByID, DWORD dwMoney, CList<CItem *, CItem *> &items)
 {
     int nWho = -1;
@@ -3861,6 +4072,14 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
 
     if(auto*mod=ModRuntime::Current())mod->SuccessfulWorldLoad(origin);
     ModAnimationIdSave::AfterSuccessfulLoad(*this);
+
+    // Keep equipped enchanted-item energy synchronized with the owning player after load.
+    CMapObjPtrHashIterator loadedUnitIter;
+    for (pMO = loadedUnitIter.GetFirst(&dynamicObjs); !loadedUnitIter.IsReachEnd(); pMO = loadedUnitIter.GetNext())
+    {
+        if (pMO && pMO->WhoAmI() == HPC_UNIT)
+            SynchronizeFieldCampUnitEnergy(static_cast<CUnit *>(pMO));
+    }
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////

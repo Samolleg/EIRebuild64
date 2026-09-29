@@ -1,8 +1,16 @@
 #include "StdAfx.h"
+#include "ModStatsFont.h"
+#include "ModStatRules.h"
+#include "ModInfoHitChance.h"
+#include "NotificationJournal.h"
+#include "EngineDiagnostics.h"
+#include "GlobalMap.h"
+#include "MusicSystem.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
 #include "ModMessages.h"
-#include "ModRuntime.h"
+#include "UnitServer.h"
+#include "aiUnitLogic.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -196,7 +204,7 @@ void CI3DScreenMission::OnActivate()
     AddObject(pOutput = dbgnew CI3DObjectOutput(pI3D, this)); // 10
     pOutput->SetTexture(textures[2]);
     pOutput->Init(pI3D->nTextMode, pI3D->bTextClosed);
-    pOutput->AddOutput(szInitOutput);
+    pOutput->RestoreOutput(szInitOutput);
     pOutput->SetMoney(nTotalMoney);
 
     AddHandler(dbgnew CI3DHandlerNewCamera(pI3D));
@@ -576,6 +584,8 @@ void CI3DScreenMission::AllLoot(CUnit *pUnit, bool bRun)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::CastSpell(CUnit *pUnit, bool bWand, bool bRun)
 {
+    static unsigned castNotes = 0;
+    if (castNotes++ < 64) EngineDiagnostics::Event("Spell target unit=%d slot=%d wand=%d run=%d", pUnit ? pUnit->GetID() : -1, nQSlot, int(bWand), int(bRun));
     for (int i = 0; i < pUnits.GetSize(); i++)
         if (pUnits[i] && pUnits[i]->CheckFlag(OBJ_SELECTED))
         {
@@ -845,6 +855,61 @@ bool SLMPFacesState::operator==(const SLMPFacesState &a) const
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnIdle()
 {
+    static int fieldCampHeroId = -1;
+    static DWORD fieldCampFinalizeStart = 0;
+    static bool fieldCampMusicReady = false;
+    static bool fieldCampCameraReady = false;
+    static bool fieldCampPauseRequested = false;
+    const int returnHeroId = theWorldServer.FieldCampReturnHeroID();
+    if (returnHeroId < 0) {
+        fieldCampHeroId = -1;
+        fieldCampFinalizeStart = 0;
+        fieldCampMusicReady = fieldCampCameraReady = fieldCampPauseRequested = false;
+    } else {
+        if (fieldCampHeroId != returnHeroId) {
+            fieldCampHeroId = returnHeroId;
+            fieldCampFinalizeStart = GetTickCount();
+            fieldCampMusicReady = fieldCampCameraReady = fieldCampPauseRequested = false;
+        }
+        if (GetTickCount() - fieldCampFinalizeStart > 30000) {
+            theWorldServer.CompleteFieldCampReturn();
+            fieldCampHeroId = -1;
+            fieldCampFinalizeStart = 0;
+            fieldCampMusicReady = fieldCampCameraReady = fieldCampPauseRequested = false;
+        } else {
+            CUnit *fieldCampHero = IWorldClient.GetUnit(returnHeroId);
+            if (fieldCampHero) {
+                if (!fieldCampMusicReady) {
+                    CMusicSystem *music = theWorld.GetMusicSystem();
+                    if (music) {
+                        CString zone = IWorldClient.GetCurrentZoneName();
+                        CString theme("gipat");
+                        const SScenarioZone *zoneInfo = theMap.GetZoneByName(zone);
+                        if (zoneInfo) theme = zoneInfo->szAllodName;
+                        if (zone.CompareNoCase("gz20g") == 0) theme = "final";
+                        music->SetZoneMode(theme, theWorld.IsCaveZone() ? TRUE : FALSE);
+                        music->UnpauseZoneMode();
+                        fieldCampMusicReady = true;
+                    }
+                }
+                if (!fieldCampCameraReady) {
+                    theCamera.SetCarrier(fieldCampHero);
+                    fieldCampCameraReady = true;
+                }
+                if (fieldCampMusicReady && fieldCampCameraReady) {
+                    if (!fieldCampPauseRequested && pClock) {
+                        if (!IWorld.IsMissionCombatPause()) pClock->TogglePause();
+                        fieldCampPauseRequested = true;
+                    } else if (fieldCampPauseRequested && IWorld.IsMissionCombatPause()) {
+                        theWorldServer.CompleteFieldCampReturn();
+                        fieldCampHeroId = -1;
+                        fieldCampFinalizeStart = 0;
+                        fieldCampMusicReady = fieldCampCameraReady = fieldCampPauseRequested = false;
+                    }
+                }
+            }
+        }
+    }
     int nSelected = 0, nIndex = -1;
     CUnit *pUnit = GetSelection(nSelected, nIndex);
     if (pUnit && pUnit->IsDead() && nSelected == 1)
@@ -980,6 +1045,17 @@ void CI3DScreenMission::ResetInputState()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    // Addon LS_MissionOnLButtonDown/DoubleClickExtendedSpells intercepts the
+    // icon before native screen routing; single click only selects a target mode.
+    if (eKickMode == KM_NONE && ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
+        const int slot = pSpells->HitTest(point);
+        if (slot >= 0 && slot < QI_MAX_SPELLS) {
+            SetProcessed(); bLButDown = bRubberSel = false;
+            pSpells->ChangeSpell(slot);
+            return;
+        }
+    }
+
     // CRAP{ - for advanced kick/ban
     if (eKickMode != KM_NONE)
     {
@@ -1002,6 +1078,17 @@ void CI3DScreenMission::OnLButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
+    // Addon LS_MissionOnLButtonDown/DoubleClickExtendedSpells intercepts the
+    // icon before native screen routing; single click only selects a target mode.
+    if (eKickMode == KM_NONE && ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
+        const int slot = pSpells->HitTest(point);
+        if (slot >= 0 && slot < QI_MAX_SPELLS) {
+            SetProcessed(); bLButDown = bRubberSel = false;
+            pSpells->SelfCast(slot);
+            return;
+        }
+    }
+
     // CRAP{ - for advanced kick/ban
     if (eKickMode != KM_NONE)
         return;
@@ -1165,6 +1252,8 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
         else
         {
             pObj = theWorld.PickFirstMapObject(point);
+            static unsigned pickSamples=0;
+            if(ModRuntime::Current()&&pickSamples++<24)EngineDiagnostics::Event("Interaction click object=%d scientific=%d door=%d selected=%d",pObj?pObj->GetID():-1,pObj?pObj->IsScientific():0,pObj?pObj->IsScientificDoor():0,nSelected);
             if (pObj && pObj->IsScientific() && !pObj->IsScientificDoor() && nSelected == 1)
             {
                 theWorld.GetPlayer()->UnitCommandSkill(pHero, pObj, (BYTE)RPGMSKL_SCIENCE, -1,
@@ -1188,7 +1277,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
         {
             plot = pU->GetCP();
             if (pHero) //&& pHero->CheckIsCastPossible( nQSlot, plot ) == UCS_OK )
-                CastSpell(pU, pI3D->IsLDblClk());
+                CastSpell(pU, false, pI3D->IsLDblClk());
         }
         break;
 
@@ -1527,6 +1616,9 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
+    if (nChar == VK_ESCAPE && !(nFlags & 0x4000) && pOutput && pOutput->CloseHistory()) {
+        SetProcessed(); return;
+    }
     if (pI3D && pI3D->IsAltDown())
     {
         int extendedSpellSlot = -1;
@@ -1936,8 +2028,9 @@ BOOL CI3DScreenMission::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
     pInfo->OnMouseWheel(nFlags, zDelta, pt);
     if (pInfo->GetProcessed())
         return TRUE;
+    if (pOutput->ScrollHistory(nFlags, zDelta, pt)) return TRUE;
     pScrollText->SetProcessed(false);
-    pScrollText->OnMouseWheel(nFlags, zDelta, pt);
+    if (!ModRuntime::Current()) pScrollText->OnMouseWheel(nFlags, zDelta, pt);
     if (pScrollText->GetProcessed())
         return TRUE;
     pOutput->SetProcessed(false);
@@ -2409,6 +2502,8 @@ void CI3DObjectItems::DeselectItems()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
 {
+    const auto *mod = ModRuntime::Current();
+    const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
     CItemQuick *pQuick = pUnit->GetQItem(nQItem);
     if (!pQuick)
         return;
@@ -2428,7 +2523,10 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
         if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
             szOut.Format("%s %s  ", szStrings[EFFECT], szStrings[FIXEDEFF]);
         else
-            szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
+            if (improveInfoWindows)
+                szOut.Format("%s %.1f  ", szStrings[EFFECT], pSpell->GetPower());
+            else
+                szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
         szName += szOut;
 
         if (pSpell->GetSpeed() < 1.f)
@@ -2463,7 +2561,10 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
         if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
             szOut.Format("%s %s\n", szStrings[EFFECT], szStrings[FIXEDEFF]);
         else
-            szOut.Format("%s %d\n", szStrings[EFFECT], (int)pSpell->GetPower());
+            if (improveInfoWindows)
+                szOut.Format("%s %.1f\n", szStrings[EFFECT], pSpell->GetPower());
+            else
+                szOut.Format("%s %d\n", szStrings[EFFECT], (int)pSpell->GetPower());
         szName += szOut;
 
         if (pSpell->GetDuration() < 2)
@@ -2839,6 +2940,8 @@ void CI3DObjectSpells::DeselectSpells()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 {
+    auto *mod = ModRuntime::Current();
+    const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
     CString szName, szDesc;
     pUnit = pNewUnit;
     RemoveAllSpells();
@@ -2856,10 +2959,29 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                 {
                     CString szOut;
                     szName += " \n";
+                    ModSkills::Config skillConfig;
+                    if(mod && mod->SkillConfig(pSpell,skillConfig)) {
+                        const char* requiredSkill=skillConfig.requiredArchery>=0.f
+                            ? "\xD1\xF2\xF0\xE5\xEB\xFC\xE1\xE0"
+                            : "\xC1\xEB\xE8\xE6\xED\xE8\xE9 \xE1\xEE\xE9";
+                        szOut.Format("\xC7\xE0\xEF\xE0\xF1 \xF1\xE8\xEB: %.0f  \n"
+                            "%s: %.0f  \n\xD3\xF0\xEE\xED: %.0f%%  \n"
+                            "\xCF\xE5\xF0\xE5\xE7\xE0\xF0\xFF\xE4\xEA\xE0: %.0f \xF1\xE5\xEA.  ",
+                            skillConfig.Cost(pSpell->GetManaCost()),requiredSkill,
+                            skillConfig.Requirement(float(pSpell->GetComplexity())),
+                            skillConfig.damageMultiplier*100.f,skillConfig.cooldownSeconds);
+                        szName+=szOut;
+                        if(skillConfig.areaRadius>0.f) {
+                            szOut.Format("  \n\xD0\xE0\xE4\xE8\xF3\xF1: %.0f \xEC.  ",skillConfig.areaRadius);
+                            szName+=szOut;
+                        }
+                        GetArea(j)->SetToolTip(szName,1,j<8?KA_SPELL1+j:KA_UNKNOWN);
+                        continue;
+                    }
                     szOut.Format("%s %d  ", szStrings[MANA], (int)pSpell->GetManaCost());
                     szName += szOut;
                     szOut = "Unknown";
-                    szDesc.Format("school_%d", pSpell->GetMagicSchool());
+                    szDesc.Format("school_%d", mod ? pSpell->GetMagicSubtype() : pSpell->GetMagicSchool());
                     theWorld.GetTextManager()->GetSystemString(szDesc, szOut);
 
                     szOut = szStrings[MAGICSCHOOL] + " " + szOut + " \n";
@@ -2868,7 +2990,10 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                     if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
                         szOut.Format("%s %s  ", szStrings[EFFECT], szStrings[FIXEDEFF]);
                     else
-                        szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
+                        if (improveInfoWindows)
+                szOut.Format("%s %.1f  ", szStrings[EFFECT], pSpell->GetPower());
+            else
+                szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
                     szName += szOut;
 
                     if (pSpell->GetSpeed() < 1.f)
@@ -2884,7 +3009,7 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                     if (pSpell->IsOnUnit())
                         szOut.Format("%s %s \n", szStrings[AREA], szStrings[AREAUNIT]);
                     else
-                        szOut.Format("%s %.1f%s \n", szStrings[AREA], pSpell->GetArea(),
+                        szOut.Format("%s %.1f%s \n", szStrings[AREA], mod ? pSpell->GetRadius() : pSpell->GetArea(),
                                      szStrings[METERS]);
                     szName += szOut;
 
@@ -2906,6 +3031,8 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::ChangeSpell(int nSlot)
 {
+    static unsigned selectionNotes = 0;
+    if (selectionNotes++ < 64) EngineDiagnostics::Event("Spell select unit=%d slot=%d count=%d previous=%d", pUnit ? pUnit->GetID() : -1, nSlot, nSpells, iSelected);
     if (nSlot >= 0 && nSlot < nSpells)
         if (iSelected != nSlot)
         {
@@ -3038,6 +3165,11 @@ void CI3DObjectSpells::OnMouseMove(UINT nFlags, CPoint point)
 CI3DObjectSkills::CI3DObjectSkills(CInterface3D *pI, CI3DScreenMission *pScr)
     : CI3DObject(pI)
     , pScreen(pScr)
+    , nSkills(0)
+    , iSelected(-1)
+    , pUnit(0)
+    , fieldCampButtonLastUpdate(0)
+    , fieldCampButtonAvailability(-1)
 {
     WideScreen::Scope wideScope(-1);
     SetRect(0 + WideScreen::currentShift, 250, 40 + WideScreen::currentShift, 510);
@@ -3116,6 +3248,8 @@ void CI3DObjectSkills::RemoveAllSkills()
     nTypes.RemoveAll();
     nSkills = 0;
     iSelected = -1;
+    fieldCampButtonLastUpdate = 0;
+    fieldCampButtonAvailability = -1;
     for (int i = 0; i < 6; i++)
         GetArea(i)->SetToolTip(0);
 }
@@ -3139,6 +3273,40 @@ void CI3DObjectSkills::DeselectSkills()
     iSelected = -1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+enum LSCompanionFollowMenuCommand
+{
+	LS_COMPANION_MENU_CLOSE = -0x7101,
+	LS_COMPANION_MENU_MEDIUM = -0x7102,
+	LS_COMPANION_MENU_FAR = -0x7103,
+	LS_COMPANION_MENU_AI = -0x7104,
+	LS_COMPANION_MENU_BACK = -0x7105
+};
+
+
+
+static const char LS_COMPANION_TOOLTIP_CLOSE[] =
+	"\xC1\xEB\xE8\xE7\xEA\xEE\x20\x28\x33\x2D\x35\x20\xEC\x29\n"
+	"\xD1\xEB\xE5\xE4\xEE\xE2\xE0\xF2\xFC\x20\xF0\xFF\xE4\xEE\xEC\x20\xF1\x20\xF6\xE5\xEB\xFC\xFE\x2E";
+static const char LS_COMPANION_TOOLTIP_MEDIUM[] =
+	"\xD1\xF0\xE5\xE4\xED\xFF\xFF\x20\xE4\xE8\xF1\xF2\xE0\xED\xF6\xE8\xFF\x20\x28\x36\x2D\x39\x20\xEC\x29\n"
+	"\xC4\xE5\xF0\xE6\xE0\xF2\xFC\xF1\xFF\x20\xEF\xEE\xE7\xE0\xE4\xE8\x20\xF6\xE5\xEB\xE8\x2E";
+static const char LS_COMPANION_TOOLTIP_FAR[] =
+	"\xC4\xE0\xEB\xE5\xEA\xEE\x20\x28\x31\x30\x2D\x31\x34\x20\xEC\x29\n"
+	"\xC4\xE5\xF0\xE6\xE0\xF2\xFC\xF1\xFF\x20\xE2\x20\xF2\xFB\xEB\xF3\x20\xE3\xF0\xF3\xEF\xEF\xFB\x2E";
+static const char LS_COMPANION_TOOLTIP_AI_ENABLED[] =
+	"\xC1\xEE\xE5\xE2\xEE\xE9\x20\xC8\xC8\x3A\x20\xE2\xEA\xEB\xFE\xF7\xB8\xED\n"
+	"\xC0\xE2\xF2\xEE\xEC\xE0\xF2\xE8\xF7\xE5\xF1\xEA\xE8\xE9\x20\xE2\xFB\xE1\xEE\xF0\x20\xE2\xEA\xEB\xFE\xF7\xE5\xED\x2E";
+static const char LS_COMPANION_TOOLTIP_AI_DISABLED[] =
+	"\xC1\xEE\xE5\xE2\xEE\xE9\x20\xC8\xC8\x3A\x20\xE2\xFB\xEA\xEB\xFE\xF7\xE5\xED\n"
+	"\xC0\xE2\xF2\xEE\xEC\xE0\xF2\xE8\xF7\xE5\xF1\xEA\xE8\x20\xE2\xFB\xE1\xE8\xF0\xE0\xF2\xFC\x20\xED\xE0\xE2\xFB\xEA\xE8\x20\xE8\x20\xE7\xE0\xEA\xEB\xE8\xED\xE0\xED\xE8\xFF\x20\xE8\xE7\x20\xEF\xE5\xF0\xE2\xFB\xF5\x20\x38\x20\xFF\xF7\xE5\xE5\xEA\x2E";
+static const char LS_COMPANION_TOOLTIP_BACK[] =
+	"\xCD\xE0\xE7\xE0\xE4\n"
+	"\xC2\xE5\xF0\xED\xF3\xF2\xFC\xF1\xFF\x20\xEA\x20\xED\xE0\xE2\xFB\xEA\xE0\xEC\x2E";
+static const char LS_COMPANION_TOOLTIP_TACTICS[] =
+	"\xD2\xE0\xEA\xF2\xE8\xEA\xE0\n"
+	"\xCD\xE0\xF1\xF2\xF0\xEE\xE8\xF2\xFC\x20\xE4\xE8\xF1\xF2\xE0\xED\xF6\xE8\xFE\x20\xF1\xEB\xE5\xE4\xEE\xE2\xE0\xED\xE8\xFF\x20\xE8\x20\xE1\xEE\xE5\xE2\xEE\xE9\x20\xC8\xC8\x2E";
+
+
 void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
 {
     int i;
@@ -3146,8 +3314,9 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
     RemoveAllSkills();
     if (bIsSomeone)
     {
-        AddSkill("initqi1item", "skill0011", -1); // follow
-        GetArea(nSkills - 1)->SetToolTip(10510, 1, KA_FOLLOW);
+        AddSkill("initqi1item", ModRuntime::Current() ? "jmv_follow" : "skill0011", -1);
+        if (ModRuntime::Current()) GetArea(nSkills - 1)->SetToolTip(LS_COMPANION_TOOLTIP_TACTICS, 1, KA_FOLLOW);
+        else GetArea(nSkills - 1)->SetToolTip(10510, 1, KA_FOLLOW);
     }
     if (pUnit)
     {
@@ -3163,7 +3332,7 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
                 AddSkill("initqi1item", "skill0008", i);
                 break;
             case RPGMSKL_SCIENCE:
-                AddSkill("initqi1item", "skill0009", i);
+                AddSkill("initqi1item", ModRuntime::Current() ? "jmv_stealing" : "skill0009", i);
                 szSkill = "Science";
                 break;
             case RPGMSKL_TAME:
@@ -3178,33 +3347,109 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
             szName = szName + "\n" + szSkill + szDesc;
             GetArea(nSkills - 1)->SetToolTip(szName, 1, KA_SKILL_SCIENCE);
         }
+        if (bIsSomeone && pUnit->GetOwner() && theWorld.GetPlayer() &&
+            pUnit->GetOwner() == theWorld.GetPlayer()->GetPlayer() &&
+            ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCamp"))
+        {
+            AddSkill("initqi1item", "jmv_gocamp", -2);
+            CString goCampToolTip;
+            if (pTxtMng->GetText("SPELL jmv_gocamp"))
+            {
+                pTxtMng->GetUntilNextCommand(goCampToolTip);
+                goCampToolTip.TrimRight("\r\n");
+                pTxtMng->CloseText();
+            }
+            if (!goCampToolTip.IsEmpty())
+                GetArea(nSkills - 1)->SetToolTip(goCampToolTip, 1);
+        }
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSkills::ChangeSkill(LPCTSTR pszSkillName)
 {
-    if (strcmp(pszSkillName, "follow") == 0)
-        ChangeSkill(0);
-    else
-        ChangeSkill(1);
-    /*
-            ERPGManualSkills eSkill = RPGMSKL_SCIENCE;
-            if ( strcmp( pszSkillName, "tame" ) == 0 )
-                    eSkill = RPGMSKL_TAME;
-            else if ( strcmp( pszSkillName, "stealing" ) == 0 )
-                    eSkill = RPGMSKL_STEALING;
+    const int type = strcmp(pszSkillName, "follow") == 0 ? -1 : RPGMSKL_SCIENCE;
+    // Resolve the action, not a slot shifted by camp or a tactics submenu.
+    if (nSkills && nTypes[0] <= LS_COMPANION_MENU_CLOSE) RestoreSkillBar();
+    for (int i = 0; i < nSkills; ++i)
+        if (nTypes[i] == type) { ChangeSkill(i); return; }
 
-            for ( int i=0; i<nSkills; i++ )
-                    if ( nTypes[i] == eSkill )
-                    {
-                            ChangeSkill(i);
-                            return;
-                    }
-    */
 }
 /////////////////////////////////////////////////////////////////////////////////////
+static std::vector<CUnit *> SelectedTacticsUnits(CI3DScreenMission *screen)
+{
+    std::vector<CUnit *> result;
+    if (!screen || !theWorldServer.GetMapObjectManager()) return result;
+    for (int i = 0; i < screen->GetNumUnits(); ++i) {
+        CUnit *client = screen->GetUnit(i);
+        if (!client || !client->CheckFlag(OBJ_SELECTED)) continue;
+        CUnit *unit = theWorldServer.GetUnit(client->GetID());
+        if (unit && unit->IsHero() && unit->GetOwner()) result.push_back(unit);
+    }
+    return result;
+}
+void CI3DObjectSkills::RestoreSkillBar()
+{
+    int count = 0, index = -1;
+    CUnit *unit = pScreen->GetSelection(count, index);
+    SetUnit(count == 1 ? unit : nullptr, count > 0);
+}
+void CI3DObjectSkills::ShowTacticsMenu()
+{
+    const auto units = SelectedTacticsUnits(pScreen);
+    if (units.empty()) return;
+    bool allAI = true;
+    for (auto *unit : units) allAI = allAI && ModRuntime::Current()->CompanionSkillAI(*unit);
+    pScreen->SetInputMode(MODE_SIMPLE);
+    RemoveAllSkills();
+    const char *icons[] = {"jmv_follow_close", "jmv_follow_medium", "jmv_follow_far",
+        allAI ? "jmv_follow_ai_enabled" : "jmv_follow_ai_disabled", "jmv_follow_back"};
+    const char *tips[] = {LS_COMPANION_TOOLTIP_CLOSE, LS_COMPANION_TOOLTIP_MEDIUM,
+        LS_COMPANION_TOOLTIP_FAR, allAI ? LS_COMPANION_TOOLTIP_AI_ENABLED : LS_COMPANION_TOOLTIP_AI_DISABLED,
+        LS_COMPANION_TOOLTIP_BACK};
+    for (int i = 0; i < 5; ++i) {
+        AddSkill("initqi1item", icons[i], LS_COMPANION_MENU_CLOSE - i);
+        GetArea(nSkills - 1)->SetToolTip(tips[i], 1);
+    }
+}
 void CI3DObjectSkills::ChangeSkill(int nSlot)
 {
+    if (ModRuntime::Current() && nSlot >= 0 && nSlot < nSkills) {
+        const int command = nTypes[nSlot];
+        if (command == -1) { pI3D->BeginFX("buttons\\battle\\click.wav"); ShowTacticsMenu(); return; }
+        if (command <= LS_COMPANION_MENU_CLOSE && command >= LS_COMPANION_MENU_BACK) {
+            auto units = SelectedTacticsUnits(pScreen);
+            pI3D->BeginFX("buttons\\battle\\click.wav");
+            if (command == LS_COMPANION_MENU_BACK || units.empty()) {
+                RestoreSkillBar(); pScreen->SetInputMode(MODE_SIMPLE); return;
+            }
+            if (command == LS_COMPANION_MENU_AI) {
+                bool allAI = true;
+                for (auto *unit : units) allAI = allAI && ModRuntime::Current()->CompanionSkillAI(*unit);
+                for (auto *unit : units) {
+                    CString key; key.Format("jmv.companion.ai.v1.%d", unit->GetID());
+                    if (allAI) unit->GetOwner()->party.vars.DelVar(key);
+                    else unit->GetOwner()->party.vars.SetVar(key, 1.f);
+                    if (auto *server = dynamic_cast<CUnitServer *>(unit->GetUnitSpecific()))
+                        server->logic.caster.RefreshSkillCache(unit);
+                    EngineDiagnostics::Event("Tactics", "ai unit=%d enabled=%d", unit->GetID(), !allAI);
+                }
+                ShowTacticsMenu(); return;
+            }
+            const int profile = LS_COMPANION_MENU_CLOSE - command + 1;
+            for (auto *unit : units) {
+                CString key; key.Format("jmv.companion.follow.v1.%d", unit->GetID());
+                unit->GetOwner()->party.vars.SetVar(key, float(profile));
+                EngineDiagnostics::Event("Tactics", "follow unit=%d profile=%d", unit->GetID(), profile);
+            }
+            RestoreSkillBar(); pScreen->SetInputMode(MODE_SKILL_TARGET_UNIT, 0, -1); return;
+        }
+    }
+
+    if (nSlot >= 0 && nSlot < nSkills && nTypes[nSlot] == -2) {
+        pI3D->BeginFX("buttons\\battle\\click.wav");
+        IWorldClient.GoFieldCamp();
+        return;
+    }
     if (nSlot >= 0 && nSlot < nSkills)
         if (iSelected != nSlot)
         {
@@ -3213,6 +3458,7 @@ void CI3DObjectSkills::ChangeSkill(int nSlot)
             ShowSelectSkill(nSlot, TRUE);
             iSelected = nSlot;
             pI3D->BeginFX("buttons\\battle\\click.wav");
+            EngineDiagnostics::Event("Skills", "activate slot=%d type=%d", nSlot, nTypes[nSlot]);
             // notify game
             if (nTypes[nSlot] == RPGMSKL_SCIENCE)
                 pScreen->SetInputMode(MODE_SKILL_TARGET_OBJECT, nSlot, nTypes[nSlot]);
@@ -3228,6 +3474,33 @@ void CI3DObjectSkills::ChangeSkill(int nSlot)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectSkills::Draw(CRenderer *pRend)
 {
+    bool hasFieldCampButton = false;
+    for (int i = 0; i < nSkills; ++i)
+    {
+        if (nTypes[i] != -2)
+            continue;
+        hasFieldCampButton = true;
+        const DWORD now = GetTickCount();
+        if (fieldCampButtonLastUpdate == 0 || now - fieldCampButtonLastUpdate >= 250)
+        {
+            fieldCampButtonLastUpdate = now;
+            const int availability = theWorldServer.CanBeginFieldCamp() ? 1 : 0;
+            if (availability != fieldCampButtonAvailability)
+            {
+                const int x = (i / 4) * 64;
+                const int y = (i % 4) * 64;
+                PasteTexture(textures[0], availability ? "jmv_gocamp" : "jmv_gocamp_disabled",
+                             64, 64, 64, 64, x, y);
+                fieldCampButtonAvailability = availability;
+            }
+        }
+        break;
+    }
+    if (!hasFieldCampButton)
+    {
+        fieldCampButtonLastUpdate = 0;
+        fieldCampButtonAvailability = -1;
+    }
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
     CI3DObject::Draw(pRend);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
@@ -3390,6 +3663,11 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
 {
+    if (nFace < 0 || static_cast<size_t>(nFace) >= faces.size())
+        return;
+    const int textureIndex = nFace / 4 + 1;
+    if (textureIndex >= textures.GetSize() || !textures[textureIndex])
+        return;
     int x, y;
     const bool hdInterface = UseModInterfaceHD();
     const int faceSize = hdInterface ? 512 : 128;
@@ -3411,6 +3689,8 @@ void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
         x = faceSize;
         y = faceSize;
         break;
+    default:
+        return;
     }
 
     CString szTexName(faces[nFace].szTexName);
@@ -3429,12 +3709,12 @@ void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
 
     if (hdInterface)
     {
-        if (!PasteModInterfaceIcon(textures[nFace / 4 + 1], szTexName, faceSize, x, y))
-            PasteModInterfaceIcon(textures[nFace / 4 + 1], faces[nFace].szTexName,
+        if (!PasteModInterfaceIcon(textures[textureIndex], szTexName, faceSize, x, y))
+            PasteModInterfaceIcon(textures[textureIndex], faces[nFace].szTexName,
                                   faceSize, x, y);
     }
-    else if (!PasteTexture(textures[nFace / 4 + 1], szTexName, 128, 128, 128, 128, x, y))
-        PasteTexture(textures[nFace / 4 + 1], faces[nFace].szTexName, 128, 128, 128, 128, x, y);
+    else if (!PasteTexture(textures[textureIndex], szTexName, 128, 128, 128, 128, x, y))
+        PasteTexture(textures[textureIndex], faces[nFace].szTexName, 128, 128, 128, 128, x, y);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::AddFaces(bool bIsMainHero)
@@ -5315,6 +5595,101 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::DrawStats(CUnit *pUnit)
 {
+    auto*mod=ModRuntime::Current();
+    if(mod && mod->CombatSetting("useLS_DrawStats")) {
+        static StatsFontCache cache;
+        ModStatsFont font(pI3D->GetFontSlot(0),pI3D->GetHeight(),cache);
+        auto*text=theWorld.GetTextManager();auto*surface=surfaces[0];
+        const auto*stats=pUnit->GetUserUnitStats();
+        CUnit*serverUnit=theWorldServer.GetUnit(pUnit->GetID());
+        auto*server=serverUnit?dynamic_cast<CUnitServer*>(serverUnit->GetUnitSpecific()):nullptr;
+        CUnit&data=serverUnit?*serverUnit:*pUnit;
+        CString value,label;CRect row(5,35,155,50);CPoint step(0,12);
+        auto draw=[&](const CString&line,COLORREF color=INFO_COLOR){surface->DrawText(line,row,0,color,DT_LEFT);row+=step;};
+        auto get=[&](const char*key){CString result;text->GetSystemString(key,result);return result;};
+        auto raw=[&](const char*key){CString result;if(text->GetText(key))text->GetLine(result);return result;};
+        bool alien=true;for(int i=0;i<pScreen->GetNumUnits();++i)if(pScreen->GetUnit(i)==pUnit){alien=false;break;}
+        value.Format("%s %d/%d",szStrings[HEALTH],(std::max)(0,pUnit->GetHP()),pUnit->GetMaxHP());draw(value);
+        value.Format("%s %d/%d",szStrings[MANA],(std::max)(0,pUnit->GetMP()),pUnit->GetMaxMP());draw(value);
+        if(!pI3D->IsAltDown()) {
+            if(stats->cLocomotion>1&&pUnit->GetShowPose()>1){value.Format("move_%d",int(pUnit->GetShowPose())-1);text->GetSystemString(value,label);}
+            value.Format("%s %.1f %s",szStrings[SPEED],(alien?pUnit->GetShowSpeed(UP_RUN):pUnit->GetShowSpeed())*FP_CL_MP_SIZE*7.5f,label);draw(value);
+            float night=theWorld.IsCaveZone()?1.f:theWorld.GetNightPowerSlow();
+            if(IWorldClient.GetCurrentZoneName().CompareNoCase("gz20g")==0)night=0;
+            value.Format("%s %d%s(%d%%)",szStrings[SIGHT],MINT(stats->GetSightRange(night)),szStrings[METERS],int((stats->cSenses[RPGS_INFRA]*night*.01f+1-night)*100));draw(value);
+            SAttackParams params;data.GetAttackParams(params);
+            value.Format("%s %d",szStrings[ATTACK],params.nAttack);draw(value);
+            value.Format("%s %d",szStrings[DEFENSE],params.nDefense);draw(value);
+            int selectionCount=0,selectionIndex=-1;auto*selected=pScreen->GetSelection(selectionCount,selectionIndex);
+            auto*comparison=selected?theWorldServer.GetUnit(selected->GetID()):nullptr;
+            if(serverUnit&&comparison&&serverUnit!=comparison){
+                SAttackParams other;comparison->GetAttackParams(other);float incoming=0,outgoing=0;
+                float distance=sqrtf(sqr(serverUnit->GetCP().x-comparison->GetCP().x)+sqr(serverUnit->GetCP().y-comparison->GetCP().y)+sqr(serverUnit->GetCP().z-comparison->GetCP().z));
+                if(LS_InfoPhysicalHitChance(serverUnit,comparison,params,other,distance,0,incoming)&&
+                   LS_InfoPhysicalHitChance(comparison,serverUnit,other,params,distance,1,outgoing)){
+                    value.Format("\xCF\xEE\xEF\xE0\xE4\xE0\xED\xE8\xE5 \xEF\xEE \xE2\xF0\xE0\xE3\xF3: %.0f%%",outgoing);draw(value);
+                    value.Format("\xCF\xEE\xEF\xE0\xE4\xE0\xED\xE8\xE5 \xEF\xEE \xED\xE0\xEC: %.0f%%",incoming);draw(value);
+                }
+            }
+            auto damage=[&](int slot,bool left,int type,float minimum,float maximum){
+                if(type<RPG_NUM_ATTACK_TYPES){value.Format("dmg_%d",type);text->GetSystemString(value,label);}
+                float lo=mod->PanelDamage(data,minimum,slot,left),hi=mod->PanelDamage(data,maximum,slot,left);
+                float chance=mod->PanelCritical(data,slot,left,false),critical=mod->PanelCritical(data,slot,left,true)*.01f;
+                if(fabs(lo-hi)<.0001f){
+                    if(chance>0)value.Format("%s %s%.0f[%.0f%%]%.0f",szStrings[DAMAGE],label,lo,chance,lo+lo*critical);
+                    else value.Format("%s %s%.0f",szStrings[DAMAGE],label,lo);
+                }else {
+                    if(chance>0)value.Format("%s %s%.0f-%.0f[%.0f%%]%.0f-%.0f",szStrings[DAMAGE],label,lo,hi,chance,lo+lo*critical,hi+hi*critical);
+                    else value.Format("%s %s%.0f-%.0f",szStrings[DAMAGE],label,lo,hi);
+                }draw(value);
+            };
+            if(pUnit->GetTypeID()==MOTID_HUMAN){
+                auto*w=data.GetCurrentQWeapon();int slot=int(data.GetCurrentWeaponSlotIndex());
+                if(w)damage(slot,false,CItemWeapon::GetAttackType(w->GetSubtypeID()),w->GetDamageMin(),w->GetDamageMax());
+                else damage(-1,false,params.rpgAttackType,data.GetUserUnitStats()->cNAWDamageMin,data.GetUserUnitStats()->cNAWDamageMin+data.GetUserUnitStats()->cNAWDamageRnd);
+                int left=ModStats::LeftHand(data);auto*off=left>=0?data.GetQWeapon(left):nullptr;
+                if(off&&left!=slot&&off->GetWeaponType()!=RPGWST_HANDS1)damage(left,true,CItemWeapon::GetAttackType(off->GetSubtypeID()),off->GetDamageMin(),off->GetDamageMax());
+            }else {
+                const auto*race=pUnit->GetRaceModel();
+                for(int i=0;i<RPG_NUM_ATTACK_TYPES;++i)if(race->attacks[i]!=0)
+                    damage(-1,false,i,data.GetUserUnitStats()->cNAWDamageMin,data.GetUserUnitStats()->cNAWDamageMin+data.GetUserUnitStats()->cNAWDamageRnd);
+            }
+            // Read effective authoritative actions, not a client byte or UI-only recalculation.
+            float actions=server?server->GetRPGStats()->action.fpEffectiveValue:float(stats->cAction);
+            value.Format("%s %.1f(%d%%)",szStrings[ACTIONS],actions,int(actions*100/15));draw(value);
+            float absorbs[RPG_NUM_ATTACK_TYPES]={};
+            if(IsIDofPersonage(pUnit->GetID()))stats->GetAbsorbtions(&pUnit->GetUserCommonStats(),absorbs,true);
+            else for(int i=0;i<RPG_NUM_ATTACK_TYPES;++i)absorbs[i]=pUnit->GetUserCommonStats().wAbsorbtions[i];
+            for(int group=0;group<2;++group){CString line;for(int i=0;i<3;++i){int type=group*3+i;CString key;key.Format("dmg_%d",type);value.Format("%s%d",get(key),int(absorbs[type]));if(i)line+="|";line+=value;}value.Format("%s %s",szStrings[ABSORPTION],line);draw(value);}
+            if(mod->CombatSetting("useLS_ShowEnemyConsider")&&!pUnit->GetOwner())alien=true;
+            if(alien&&pScreen->GetNumUnits()>0){int delta=(std::max)(-25,(std::min)(25,pUnit->GetLevel()-pScreen->GetUnit(0)->GetLevel()));
+                value.Format(delta>=0?"consider_more%d":"consider_less%d",abs(delta));text->GetSystemString(value,label);
+                value.Format("%s %s",szStrings[CONSIDER],label);
+                draw(value,RGB((std::min)(255,delta>0?225+delta*6:0),(std::min)(255,(delta<0?185:215)-delta*6),0));
+            }
+            if(IWorldConnector.IsLMP()&&!alien){value.Format("%s %d",get("camp_current_exp"),stats->nFreeExp);draw(value);}
+        }else {
+            value.Format("%s: %d",raw("perk Strength"),stats->cStrength);draw(value);
+            value.Format("%s: %d",raw("perk Dexterity"),stats->cDexterity);draw(value);
+            value.Format("%s: %d",raw("perk Intelligence"),stats->cIntelligence);draw(value);
+            float jewelry=1,extra=0;
+            for(int i=0;i<4;++i)if(auto*q=data.GetQItem(i))jewelry+=mod->InfoProperty("GetJewelryPropsInside",q->GetShapeEntry()->szName,12)*.01f;
+            if(server){const auto&effects=data.GetSpellEffects();for(int i=0;i<effects.GetSize();++i){const auto&e=effects[i];if(e.nSpellID==SPELL_ID_STRENGTHEN)extra+=e.fpPower;if(e.nSpellID==SPELL_ID_WEAKEN)extra-=e.fpPower;}}
+            int capacity=int(stats->cStrength*12.f*(1+stats->GetPerkModifier(1)*.01f)*jewelry*(1+mod->InfoComplex(data,8)*.01f)+extra);
+            int weight=int(data.GetItemsWeight());
+            if(pUnit->GetTypeID()==MOTID_HUMAN){value.Format("%s: %d/%d(%d%%)",raw("perk Encumbrance"),weight,capacity,capacity>0?int((weight+1)*100.f/capacity):0);draw(value);}
+            value.Format("%s: %d",raw("perk Experience"),alien?int(pUnit->GetPrototype()->fExp):int(stats->dwExperience));draw(value);
+            value.Format("%s %.0f%%",raw("string infoitem_51"),(server?server->GetFSSoundDetect():1.f)*100);draw(value);
+            value.Format("%s %.0f%%",raw("string infoitem_53"),(server?server->GetVisionDetect():1.f)*100);draw(value);
+            int count=0;if(auto*player=theWorldServer.GetPlayer(0))count=player->party.allWagonItems.GetSize()+player->items.GetCount();
+            value.Format("%s: %d",raw("camphelp 22"),count);draw(value);
+            float block=0,parry=0;mod->PanelDefense(data,weight,capacity,block,parry);
+            if(block>0){value.Format("%s %.0f%%",raw("string infoitem_45"),block);draw(value);}
+            value.Format("%s %.0f%%",raw("string infoitem_47"),parry);draw(value);
+        }
+        return;
+    }
+
     int i;
     const SRPGUserUnitStats *pStats = pUnit->GetUserUnitStats();
 
@@ -6204,7 +6579,10 @@ void CI3DObjectCommands::SetAggr(int iAggr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::Init(int iMode, bool bClosed)
 {
-    if(ModRuntime::Current())ModMessages::queue.Bind(this);
+    if(ModRuntime::Current()) {
+        ModMessages::queue.Bind(this); iMode=0; bClosed=true;
+        notificationMode=Hidden; lastNotification=0;
+    }
     SetRect(180, 0, 620, 100);
 
     slide_bIsSlide = TRUE;
@@ -6259,8 +6637,14 @@ void CI3DObjectOutput::Init(int iMode, bool bClosed)
     pFig->MakeBarFrame(18, 80, 180, -5, 620, 100, 5, 4, 55, 90, 60);
 
     nMode = iMode;
-    ShowCurrentMode();
+    if (ModRuntime::Current()) {
+        GetArea(0)->MakeRect(180, 0, 620, 20);
+        GetArea(1)->MakeRect(-10000,-10000,-10000,-10000);
+        GetArea(2)->MakeRect(-10000,-10000,-10000,-10000);
+        ((CI3DScrollText*)pScreen->GetObject(9))->SetText(szOutputText);
+    } else ShowCurrentMode();
     ScrollFigures();
+    if (ModRuntime::Current()) SyncNotificationVisibility();
     /*
             for ( int j=0; j<6; j++ )
                     figures[j]->Show( FALSE );
@@ -6288,6 +6672,10 @@ void CI3DObjectOutput::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ActivateMode(int nNewMode)
 {
+    if (ModRuntime::Current()) {
+        if (notificationMode != History) ((CI3DScrollText*)pScreen->GetObject(9))->SetPosToEnd();
+        SetNotificationMode(notificationMode == History ? Hidden : History); return;
+    }
     if (slide_dir == 1)
     {
         nMode = nNewMode;
@@ -6312,7 +6700,9 @@ void CI3DObjectOutput::ActivateMode(int nNewMode)
 void CI3DObjectOutput::OnIdle()
 {
     auto messages=ModMessages::queue.Take(this);
-    if(!messages.empty()){if(nMode!=0){nMode=0;ShowCurrentMode();}slide_dir=-1;slide_bIsSlide=TRUE;for(const auto&message:messages)AddOutput(message.c_str());}
+    for(const auto&message:messages)AddOutput(message.c_str());
+    if (ModRuntime::Current() && notificationMode == Transient && DWORD(GetTickCount()-lastNotification)>=4000)
+        SetNotificationMode(Hidden);
     float fPart;
 
     if (slide_bIsSlide)
@@ -6349,6 +6739,7 @@ void CI3DObjectOutput::OnIdle()
     }
     pI3D->bTextClosed = slide_dir > 0;
     pI3D->nTextMode = nMode;
+    if (ModRuntime::Current()) SyncNotificationVisibility();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::OnLButtonDown(UINT nFlags, CPoint point)
@@ -6367,6 +6758,9 @@ void CI3DObjectOutput::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
+    if (ModRuntime::Current()) {
+        SetProcessed(); if (ht == 0) ActivateMode(0); return;
+    }
     switch (ht)
     {
     case 0:
@@ -6404,6 +6798,7 @@ BOOL CI3DObjectOutput::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ShowCurrentMode()
 {
+    if (ModRuntime::Current()) { ActivateMode(0); return; }
     for (int i = 0; i < 2; i++)
     {
         if (nMode == i)
@@ -6435,11 +6830,66 @@ void CI3DObjectOutput::ClearOutput()
         ((CI3DScrollText *)pScreen->GetObject(9))->SetText("");
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectOutput::SyncNotificationVisibility()
+{
+    auto* scroll = (CI3DScrollText*)pScreen->GetObject(9);
+    scroll->Show(notificationMode != Hidden, TRUE);
+    bool shell = notificationMode != Hidden || (slide_bIsSlide && slide_fCurTime < 1);
+    for (int i=0;i<6;++i) figures[i]->Show(shell && i!=3 && i!=4);
+}
+void CI3DObjectOutput::SetNotificationMode(NotificationMode mode)
+{
+    if (notificationMode != mode) {
+        notificationMode=mode; nMode=0;
+        slide_dir=mode==Hidden?1.f:-1.f; slide_bIsSlide=TRUE;
+    }
+    SyncNotificationVisibility();
+}
+bool CI3DObjectOutput::CloseHistory()
+{
+    if (!ModRuntime::Current() || notificationMode != History) return false;
+    SetNotificationMode(Hidden); return true;
+}
+bool CI3DObjectOutput::ScrollHistory(UINT flags, short delta, CPoint point)
+{
+    if (!ModRuntime::Current() || notificationMode == Hidden) return false;
+    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
+    if (scroll->HitTest(point)!=2) return false;
+    SetNotificationMode(History); scroll->OnMouseWheel(flags,delta,point); return true;
+}
+void CI3DObjectOutput::RestoreOutput(LPCTSTR text)
+{
+    if (!ModRuntime::Current()) { AddOutput(text); return; }
+    szOutputText=text;
+    auto tail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
+    if(tail.removed)szOutputText=tail.text.c_str();
+    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
+    scroll->SetText(szOutputText);scroll->SetPosToEnd();SyncNotificationVisibility();
+}
 void CI3DObjectOutput::AddOutput(LPCTSTR pszText)
 {
-    szOutputText += pszText;
-    if (nMode == 0)
-        ((CI3DScrollText *)pScreen->GetObject(9))->AddText(pszText);
+    if (!ModRuntime::Current()) {
+        szOutputText+=pszText;
+        if(nMode==0)((CI3DScrollText*)pScreen->GetObject(9))->AddText(pszText);
+        return;
+    }
+    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
+    int oldPos=scroll->CurrentPosition();
+    bool hold=notificationMode==History && oldPos<scroll->GetRange();
+    auto oldTail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
+    szOutputText+=pszText;
+    auto tail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
+    if(tail.removed && (!hold || tail.removed>=oldTail.lines)) {
+        szOutputText=tail.text.c_str();scroll->SetText(szOutputText);
+        if(hold)scroll->SetPos(0);else scroll->SetPosToEnd();
+    } else {
+        scroll->AddText(pszText);int appended=scroll->GetRange();
+        if(tail.removed){szOutputText=tail.text.c_str();scroll->SetText(szOutputText);}
+        int removed=(std::max)(0,appended-scroll->GetRange());
+        if(hold)scroll->SetPos((std::max)(0,oldPos-removed));else scroll->SetPosToEnd();
+    }
+    if(pszText && *pszText){lastNotification=GetTickCount();if(notificationMode!=History)SetNotificationMode(Transient);}
+    SyncNotificationVisibility();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::AddHoover(CItem *pNewItem, bool bCrippled)

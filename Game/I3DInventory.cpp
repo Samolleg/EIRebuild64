@@ -8,8 +8,15 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TextureManager.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+static float ModInfoProperty(const char*callback,const char*name,int property)
+{
+    auto*mod=ModRuntime::Current();
+    return mod ? mod->InfoProperty(callback,name,property) : 0.f;
+}
+
 #include "SpellManager.h"
 #include "ItemManager.h"
+#include "ItemDatabase.h"
 #include "WorldClient.h"
 #include "StringProcessing.h"
 #include "PerkDatabase.h"
@@ -22,6 +29,12 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "UnitServer.h"
 #include "WorldServer.h"
 /////////////////////////////////////////////////////////////////////////////////////
+static LPCSTR ModInfoMaterialName(const CItem *item)
+{
+    if (!item || item->GetMaterial() >= unsigned(theItemDatabase.materials.GetNumEntries())) return "";
+    return theItemDatabase.materials.GetEntry(item->GetMaterial())->szName;
+}
+
 const COLORREF INV_COLOR_INFO = RGB(228, 215, 167);
 const COLORREF INV_COLOR_HEADER = RGB(255, 255, 255);
 const float INVROT_MAX_SPEED = 5.f; // rad/sec
@@ -176,28 +189,7 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
 
     DWORD oldamb;
     oldamb = pRend->GetAmbientColor();
-    //pRend->SetAmbientColor(1, 1, 1);
-
-	D3DCOLORVALUE dcvColor;
-
-	D3DCOLORVALUE dcvAmbient;
-	dcvAmbient.r = 120;
-	dcvAmbient.g = 120;
-	dcvAmbient.b = 155;
-	dcvColor.r = 255;
-	dcvColor.g = 255;
-	dcvColor.b = 255;
-	
-		LPLIGHT lpSunlight = pRend->GetSunlight();
-	lpSunlight->SetDiffuse(D3DVECTOR(dcvColor.r, dcvColor.g, dcvColor.b));
-	// set direction of sunlight/moonlight
-	CPlot3D ptVector(1.3f, 0.7f, 0.707106f);
-	lpSunlight->SetDirection(D3DVECTOR(ptVector.x, ptVector.y, ptVector.z));
-	// setup ambient and directional light
-	pRend->SetLighting(lpSunlight, dcvAmbient.r, dcvAmbient.g, dcvAmbient.b);
-
-
-
+    pRend->SetAmbientColor(1, 1, 1);
 
     pDrawUnit->SetFlag(OBJ_USE_DEFAULT_FOG);
 
@@ -228,9 +220,8 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
     pDrawUnit->SetOrientation(rot);
 
     pDrawUnit->ResetFlag(OBJ_USE_DEFAULT_FOG);
-    //pRend->SetAmbientColor(oldamb);
-
     pI3D->GetRenderer()->FlushBuffers();
+    pRend->SetAmbientColor(oldamb);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, { 0, 1, 0, 1 },
@@ -704,6 +695,9 @@ CSpell *CI3DObjectItemInfo::GetSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormTextInfo()
 {
+    const auto *mod = ModRuntime::Current();
+    const bool compactInfoLines = !mod || mod->CombatSetting("JMVItemInfoLineHeight");
+    const int descriptionLineStep = compactInfoLines ? 12 : 0;
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -772,11 +766,11 @@ void CI3DObjectItemInfo::FormTextInfo()
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 12);
+    CPoint shift(0, compactInfoLines ? 12 : 14);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, descriptionLineStep);
     rc += shift;
     rc += shift;
     // ITEM TYPE
@@ -922,12 +916,12 @@ void CI3DObjectItemInfo::FormTextInfo()
         };
 
         drawArmorProperty(szStrings[MODDEFENSE],
-                          Lua::State.GetArmorPropsInside(armorName, 2), false);
+                          ModInfoProperty("GetArmorPropsInside", armorName, 2), false);
         drawArmorProperty(szStrings[MODATTACK],
-                          Lua::State.GetArmorPropsInside(armorName, 3), false);
+                          ModInfoProperty("GetArmorPropsInside", armorName, 3), false);
 
-        float visibility = Lua::State.GetArmorPropsInside(armorName, 5) +
-                           Lua::State.GetMaterialPropsInside(armorMaterial, 13);
+        float visibility = ModInfoProperty("GetArmorPropsInside", armorName, 5) +
+                           ModInfoProperty("GetMaterialPropsInside", armorMaterial, 13);
         szTmp = "Unknown";
         if (visibility != 0.0f)
         {
@@ -935,8 +929,8 @@ void CI3DObjectItemInfo::FormTextInfo()
                 pTxtMng->GetLine(szTmp);
             drawSignedPercent(szTmp, visibility);
         }
-        float hearing = Lua::State.GetArmorPropsInside(armorName, 6) +
-                        Lua::State.GetMaterialPropsInside(armorMaterial, 14);
+        float hearing = ModInfoProperty("GetArmorPropsInside", armorName, 6) +
+                        ModInfoProperty("GetMaterialPropsInside", armorMaterial, 14);
         szTmp = "Unknown";
         if (hearing != 0.0f)
         {
@@ -945,7 +939,7 @@ void CI3DObjectItemInfo::FormTextInfo()
             drawSignedPercent(szTmp, hearing);
         }
 
-        float regeneration = Lua::State.GetMaterialPropsInside(armorMaterial, 2);
+        float regeneration = ModInfoProperty("GetMaterialPropsInside", armorMaterial, 2);
         szTmp = "Unknown";
         if (regeneration > 0.00001f)
         {
@@ -955,7 +949,7 @@ void CI3DObjectItemInfo::FormTextInfo()
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
         }
-        float restoration = Lua::State.GetMaterialPropsInside(armorMaterial, 3);
+        float restoration = ModInfoProperty("GetMaterialPropsInside", armorMaterial, 3);
         szTmp = "Unknown";
         if (restoration > 0.00001f)
         {
@@ -966,28 +960,37 @@ void CI3DObjectItemInfo::FormTextInfo()
             rc += shift;
         }
 
-        float movement = Lua::State.GetMaterialPropsInside(armorMaterial, 9);
+    }
+    const bool fixedMaterialStats = !ModRuntime::Current() || ModRuntime::Current()->CombatSetting("JMVArmorMaterialStats");
+    if ((!fixedMaterialStats || tid == ITID_ITEM_ARMOR) && ModInfoMaterialName(pItem))
+    {
+        const CString armorMaterial = ModInfoMaterialName(pItem);
+        const COLORREF materialColor = fixedMaterialStats ? color : INV_COLOR_HEADER;
+        float movement = ModInfoProperty("GetMaterialPropsInside", armorMaterial, 9);
         szTmp = "Unknown";
-        if (movement != 0.0f)
+        if (fixedMaterialStats ? movement != 0.0f : movement > 0.0f)
         {
             if (pTxtMng->GetText("string infounit_2"))
                 pTxtMng->GetLine(szTmp);
-            szOut.Format("%s %+.1f%%", szTmp, movement);
-            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            if (fixedMaterialStats)
+                szOut.Format("%s %+.1f%%", szTmp, movement);
+            else
+                szOut.Format("%s +%.2f", szTmp, ModInfoProperty("GetMaterialPropsInside", armorMaterial, 10));
+            pSurf->DrawText(szOut, rc, 0, materialColor, DT_LEFT);
             rc += shift;
         }
         const int materialProperties[] = {10, 11, 12};
         const char *materialLabels[] = {"PERK Strength", "PERK Dexterity", "PERK Intelligence"};
         for (int i = 0; i < 3; ++i)
         {
-            float value = Lua::State.GetMaterialPropsInside(armorMaterial, materialProperties[i]);
+            float value = ModInfoProperty("GetMaterialPropsInside", armorMaterial, materialProperties[i]);
             if (value <= 0.0f)
                 continue;
             szTmp = "Unknown";
             if (pTxtMng->GetText(materialLabels[i]))
                 pTxtMng->GetLine(szTmp);
             szOut.Format("%s +%.2f", szTmp, value);
-            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            pSurf->DrawText(szOut, rc, 0, materialColor, DT_LEFT);
             rc += shift;
         }
     }
@@ -1000,12 +1003,12 @@ void CI3DObjectItemInfo::FormTextInfo()
     {
         pTxtMng->GetSystemString("loot_item", szTmp);
         szDesc += szTmp;
-        pSurf->DrawMultiText(szDesc, rc, 7, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 7, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, descriptionLineStep);
         pSurf->ReleaseDC();
         return;
     }
 
-    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+    pSurf->DrawMultiText(szDesc, rc, 4, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, descriptionLineStep);
     rc += shift;
     rc += shift;
     rc += shift;
@@ -1497,6 +1500,8 @@ void CI3DObjectItemInfo::FormInstructionInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormPrototypeInfo()
 {
+    const auto *mod = ModRuntime::Current();
+    const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -1546,7 +1551,10 @@ void CI3DObjectItemInfo::FormPrototypeInfo()
     if (!pProt->bRuneAllowed[SDBAR_EFFECT])
         szOut.Format("%s %s", szStrings[EFFECT], szStrings[FIXEDEFF]);
     else
-        szOut.Format("%s %d", szStrings[EFFECT], (int)pProt->fpEffect);
+        if (improveInfoWindows)
+            szOut.Format("%s %.1f", szStrings[EFFECT], pProt->fpEffect);
+        else
+            szOut.Format("%s %d", szStrings[EFFECT], (int)pProt->fpEffect);
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
 
@@ -1739,46 +1747,65 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             rc += shift;
             if (pSkillInfo->pUnit)
             {
-                CUnit *serverUnit = theWorldServer.GetUnit(pSkillInfo->pUnit->GetID());
+                CUnit *serverUnit = theWorldServer.GetMapObjectManager()
+                    ? theWorldServer.GetUnit(pSkillInfo->pUnit->GetID()) : nullptr;
                 CUnitServer *regenServer = serverUnit && serverUnit->WhoAmI() == HPC_UNIT
                                                ? dynamic_cast<CUnitServer *>(serverUnit->GetUnitSpecific())
                                                : nullptr;
                 CMapObjectServer *commonServer = regenServer ? regenServer->GetMapObjectServer() : nullptr;
                 const SUDBRaceModel *race = pSkillInfo->pUnit->GetRaceModel();
-                if (regenServer && commonServer && race)
+                if (race && ModRuntime::Current())
                 {
-                    const SRPGUnitStats *serverStats = regenServer->GetRPGStats();
-                    const SRPGCommonStats *commonStats = commonServer->GetRPGStats();
-                    const int magicBloodLevel = min(3, int(serverStats->cPerks[27]));
+                    const bool accurate = ModRuntime::Current()->CombatSetting("JMVRegenerationTooltip") != 0;
+                    CUnit *regenUnit = accurate && regenServer && commonServer ? serverUnit : pSkillInfo->pUnit;
+                    const int magicBloodLevel = accurate
+                        ? min(3, int(regenUnit->GetUserUnitStats()->cPerks[27]))
+                        : thePerkDatabase.GetPerkIndex(thePerkDatabase.GetPerk(27));
                     const float magicBloodBonus =
-                        float(Lua::State.GetRegenBonusFromPerkMagicBlood(magicBloodLevel));
+                        float(ModRuntime::Current()->InfoMagicBlood(magicBloodLevel));
                     float jewelryRegeneration = 0.0f;
-                    for (int i = 0; i < pScreen->GetCurrentPers()->items.GetSize(); ++i)
+                    CPersonage *regenPerson = pScreen->GetCurrentPers();
+                    for (int i = 0; regenPerson && i < regenPerson->items.GetSize(); ++i)
                     {
-                        CItem *item = pScreen->GetCurrentPers()->items[i];
+                        CItem *item = regenPerson->items[i];
                         if (item && item->GetShapeEntry())
                             jewelryRegeneration +=
-                                Lua::State.GetJewelryPropsInside(item->GetShapeEntry()->szName, 14) * 0.01f;
+                                ModInfoProperty("GetJewelryPropsInside", item->GetShapeEntry()->szName, 14) * 0.01f;
                     }
                     float armorRegeneration = 0.0f;
-                    for (int i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
+                    if (accurate)
                     {
-                        CItemArmor *armor = serverUnit->GetQArmor(i);
-                        if (armor)
-                            armorRegeneration +=
-                                Lua::State.GetMaterialPropsInside(armor->GetMaterialCode(), 2) * 0.01f;
+                        for (int i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
+                            if (CItemArmor *armor = regenUnit->GetQArmor(i))
+                                armorRegeneration += ModInfoProperty("GetMaterialPropsInside", ModInfoMaterialName(armor), 2) * 0.01f;
                     }
-                    const float complexRegeneration =
-                        Lua::State.GetComplexSummStats(serverUnit, 10) * 0.01f;
+                    else if (regenPerson)
+                    {
+                        for (int i = 0; i < regenPerson->armors.GetSize(); ++i)
+                            if (CItemArmor *armor = regenPerson->armors[i])
+                                armorRegeneration += ModInfoProperty("GetMaterialPropsInside", ModInfoMaterialName(armor), 2) * 0.01f;
+                    }
+                    const float complexRegeneration = accurate
+                        ? ModRuntime::Current()->InfoComplex(*regenUnit, 10) * 0.01f : 0.0f;
                     const float hpRegeneration = race->fpRegenerateHP *
                         (magicBloodBonus + jewelryRegeneration + armorRegeneration + complexRegeneration);
-                    const float maxHp = max(1.0f, commonStats->ssHP.fpMax);
-                    const float regenerationSpell = hpRegeneration > 0.0f
-                        ? serverUnit->GetEffectValue(SPELL_ID_REGENERATION) / 30.0f
-                        : 0.0f;
-                    const float result = maxHp * hpRegeneration * float(2 + theSettings.nDifficultyLevel) +
-                                         regenerationSpell;
-                    const float fullResult = result > 0.000001f ? maxHp / result : 0.0f;
+                    float result, fullResult;
+                    if (accurate)
+                    {
+                        const float maxHp = max(1.0f, float(regenUnit->GetMaxHP()));
+                        const float regenerationSpell = hpRegeneration > 0.0f
+                            ? regenUnit->GetEffectValue(SPELL_ID_REGENERATION) / 30.0f : 0.0f;
+                        result = maxHp * hpRegeneration * float(2 + theSettings.nDifficultyLevel) + regenerationSpell;
+                        fullResult = result > 0.000001f ? maxHp / result : 0.0f;
+                    }
+                    else
+                    {
+                        const float health = 1 + pSkillInfo->pStats->GetPerkModifier(2) * 0.01f;
+                        const float hp = 30.0f * powf(1.10f, logf(pSkillInfo->pStats->fpExperience / 500.0f) / logf(1.61f));
+                        const float hpResult = (hp * (pSkillInfo->pUnit->GetUserUnitStats()->cStrength / 25.0f) - 5) * health;
+                        result = hpResult * hpRegeneration;
+                        fullResult = hpResult / result;
+                    }
 
                     CString szTmp2;
                     if (pTxtMng->GetText("string infoskill_50")) pTxtMng->GetLine(szTmp);
@@ -2134,7 +2161,9 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
     if (pSkillInfo->nType == 6)
     {
         int nStr = MSLFIRE;
-        for (int i = 0; i < RPG_NUM_MAGIC_SUBTYPES; i++)
+        // Addon has three elemental subtypes; retain native storage for save compatibility.
+        const int subtypeCount = ModRuntime::Current() ? 3 : RPG_NUM_MAGIC_SUBTYPES;
+        for (int i = 0; i < subtypeCount; i++)
         {
             ERPGMagicSubtypes subtype = (ERPGMagicSubtypes)i;
             if (subtype == RPGMST_DIVINATION || subtype == RPGMST_HEALING ||
@@ -2142,7 +2171,12 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                 continue;
             szOut.Format("     %s", szStrings[nStr++]);
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
-            szOut.Format("%d", (int)pSkillInfo->pStats->GetMagicSkill(subtype));
+            float knowledge = pSkillInfo->pStats->GetMagicSkill(subtype);
+            if (ModRuntime::Current() && pSkillInfo->pUnit)
+                knowledge = pSkillInfo->pStats->GetBaseMagicSkill(subtype) +
+                    pSkillInfo->pStats->GetPerkModifier(RPGPRK_FIRE + subtype) +
+                    int(pSkillInfo->pUnit->GetUserUnitStats()->cIntelligence) - 25;
+            szOut.Format("%d", (int)knowledge);
             pSurf->DrawText(szOut, rc - CPoint(10, 0), 0, color, DT_RIGHT);
             rc += shift;
         }

@@ -1,15 +1,17 @@
 #pragma once
 #include "VoiceWaitState.h"
 #include "SoundManager.h"
+#include "EngineDiagnostics.h"
 namespace ModMob {
 inline thread_local unsigned synchronousDepth=0;
 struct SynchronousScope {SynchronousScope(){++synchronousDepth;}~SynchronousScope(){--synchronousDepth;}};
 inline bool Voice(SSCCmd& cmd,int* state,BOOL* next) {
  if(cmd.command!=387 && cmd.command!=390)return false;
  const bool wait=cmd.command==390;
- auto error=[](const char* text){NConsole::game << "CreateVoiceFX: " << text << std::endl;};
+ auto error=[](const char* text){EngineDiagnostics::Event("CreateVoiceFX rejected: %s",text);NConsole::game << "CreateVoiceFX: " << text << std::endl;};
  if(wait && (!state || !next || synchronousDepth)){error("Use outside synchronous loops");return true;}
  auto start=[&]()->uint32_t {
+  EngineDiagnostics::Event("CreateVoiceFX request command=%d",cmd.command);
   auto* unit=UnitArg(cmd);auto* server=ServerArg(cmd);
   if(!server || !unit || unit->IsDead()){error("Speaker is absent or dead");return 0;}
   const char* name=cmd.szParams[0];float volume=cmd.params[0];int count=cmd.params.GetSize();

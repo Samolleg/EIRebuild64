@@ -59,6 +59,22 @@ std::unique_ptr<Host> Host::FromCommandLine(){
  struct Free{LPWSTR*p;~Free(){LocalFree(p);}} free{args};std::string directory;bool found=false;
  for(int i=1;i<count;i++)if(wcscmp(args[i],L"--mod")==0){if(found||i+1>=count)throw std::runtime_error("Expected one --mod directory");found=true;std::filesystem::path p(args[++i]);directory=p.string();}
  if(!found){
+  wchar_t module[1024]={};
+  DWORD length=GetModuleFileNameW(nullptr,module,_countof(module));
+  if(length && length<_countof(module)){
+   auto root=std::filesystem::path(module).parent_path().parent_path();
+   if(std::filesystem::is_directory(root/L"Base") && std::filesystem::is_regular_file(root/L"starter.config")){
+    wchar_t selection[1024]={};
+    GetPrivateProfileStringW(L"Settings",L"ModSel",L"",selection,_countof(selection),(root/L"starter.config").c_str());
+    if(selection[0]){
+     auto selected=(root/selection).lexically_normal();
+     if(!std::filesystem::is_regular_file(selected))throw std::runtime_error("Portable selected mod config is missing");
+     directory=selected.parent_path().string();found=true;
+    }
+   }
+  }
+ }
+ if(!found){
   // EIStarter starts Engine/game.exe without arguments. Its selected mod is
   // stored here before Process.Start, so use the same source as addon.dll.
   HKEY key=nullptr;

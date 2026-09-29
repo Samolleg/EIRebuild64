@@ -16,7 +16,11 @@ std::filesystem::path InstalledGameRoot()
     char modulePath[1024] = {};
     DWORD length = GetModuleFileNameA(nullptr, modulePath, sizeof(modulePath));
     if (!length || length >= sizeof(modulePath)) return {};
-    const auto root = std::filesystem::path(modulePath).parent_path().parent_path().parent_path();
+    const auto engine = std::filesystem::path(modulePath).parent_path();
+    const auto portable = engine.parent_path() / "Base";
+    if (std::filesystem::is_regular_file(portable / "Res" / "database.res") &&
+        std::filesystem::is_directory(portable / "Maps")) return portable;
+    const auto root = engine.parent_path().parent_path();
     std::error_code error;
     if (!std::filesystem::is_regular_file(root / "Res" / "database.res", error) || error)
         return {};
@@ -654,14 +658,15 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
     // EIStarter starts in Starter/Engine, while loose game data lives in the
     // installation root. Keep every explicitly configured path unchanged.
     const auto gameRoot = InstalledGameRoot();
+    const bool portableLayout = gameRoot.filename() == "Base";
     CString configuredWork = reg.GetString(szPathSettings, "Work path", "");
     CString configuredResources = reg.GetString(szPathSettings, "Resources path", "");
     CString configuredCD = reg.GetString(szPathSettings, "CD-ROM Path", "");
-    szWorkPath = !configuredWork.IsEmpty() ? configuredWork
+    szWorkPath = portableLayout ? DirectoryWithSlash(gameRoot) : !configuredWork.IsEmpty() ? configuredWork
         : !gameRoot.empty() ? DirectoryWithSlash(gameRoot) : szWorkPath;
-    szResourcePath = !configuredResources.IsEmpty() ? configuredResources
+    szResourcePath = portableLayout ? DirectoryWithSlash(gameRoot / "Res") : !configuredResources.IsEmpty() ? configuredResources
         : !gameRoot.empty() ? DirectoryWithSlash(gameRoot / "Res") : szResourcePath;
-    szCDPath = !configuredCD.IsEmpty() ? configuredCD
+    szCDPath = portableLayout ? DirectoryWithSlash(gameRoot) : !configuredCD.IsEmpty() ? configuredCD
         : !gameRoot.empty() ? DirectoryWithSlash(gameRoot) : szCDPath;
     //
     ////////////////////////////////////////////////////////////////////////////////////

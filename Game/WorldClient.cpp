@@ -1507,7 +1507,7 @@ CMapObject *CWorldClient::RoughlyPickFirstMapObject(const CPoint &point)
 // pick all map objects, which maps to this screen point, sort it and select first by respectCP.z
 CMapObject *CWorldClient::PickFirstMapObject(const CPoint &point)
 {
-    return RayPickFirstMapObject(point);
+    // Use visible figure bounds, including attached lever body parts.
     // first, remove all the old picked elements
     vcPicked.clear();
     //

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 #include "ModRegisteredLoot.h"
 #include "ModRuntime.h"
 #include "UnitServer.h"
@@ -665,7 +666,10 @@ void CLeverObject::SetNewScience(const SRPGScienceStats &_science)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CLeverObject::ApplyScience(const SRPGScienceStats &tool, CUnit *pWho)
 {
-    if(ModRuntime::Current() && !ScriptActivationAllowed(pWho))return false;
+    const bool approach=!ModRuntime::Current()||ScriptActivationAllowed(pWho);
+    static unsigned activationSamples=0;
+    if(ModRuntime::Current()&&activationSamples++<24)EngineDiagnostics::Event("Lever activate object=%d approach=%d tool=%u required=%u skill=%u requiredSkill=%u canOpen=%d",GetID(),approach,tool.dwTools,science.dwTools,tool.dwSkill,science.dwSkill,tool.CanOpen(science));
+    if(!approach)return false;
     if (tool.CanOpen(science))
     {
         SwitchState(-1);

@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cfloat>
 #include "RPGSystemConsts.h"
+#include "ModMeleeCooldownCodec.h"
+#include <vector>
 namespace ModSkills {
 enum ImpactKind { ImpactNone=0, ImpactCripple=1, ImpactPowerHit=2,
                   ImpactPreciseHit=3 };
@@ -16,7 +18,7 @@ struct Config {
  int projectileCount=1;float accuracyBonus=0,areaRadius=0;bool allowNpc=true;
  float Cost(float prototypeCost)const {float c=staminaCost>=0?staminaCost:prototypeCost*staminaMultiplier;return c>0?c:0;}
  float Requirement(float complexity)const{return requiredArchery>=0?requiredArchery:requiredMelee>=0?requiredMelee:complexity;}
- int Duration()const{return cooldownSeconds>0?(std::max)(1,int(cooldownSeconds*15.f+.999f)):0;}
+ int Duration()const{return static_cast<int>(MeleeCooldown::DurationTicks(cooldownSeconds));}
  bool Weapon(int type)const {
   if(type<0||type>=32)return false;
   if(requiredArchery>=0){if(type!=5&&type!=6)return false;}
@@ -27,13 +29,25 @@ struct Config {
 constexpr uint32_t CommandTag=0x4D530000u;
 inline int Slot(uint32_t param){return (param&0xFFFF0000u)==CommandTag&&(param&0xFFFFu)<16?int(param&0xFFFFu):-1;}
 class Cooldowns {
- struct Entry{int start,end;};std::map<std::pair<int,std::string>,Entry> entries;const void*world=nullptr;int last=-1;
+ struct Entry { MeleeCooldown::State state; bool persistent; };
+ std::map<uint64_t,Entry> entries; const void*world=nullptr; int last=-1;
  void Sync(const void*w,int tick){if(!w||w!=world||(last>=0&&tick<last))entries.clear();world=w;last=tick;}
- static std::string Key(std::string s){for(char&c:s)if(c>='A'&&c<='Z')c+=32;return s;}
+ static uint64_t Key(int unit,const std::string&code){return (uint64_t(uint32_t(unit))<<32)|Hash(code);}
 public:
+ static uint32_t Hash(const std::string&s){uint32_t h=2166136261u;for(unsigned char c:s){if(c>='A'&&c<='Z')c+=32;h=(h^c)*16777619u;}return h;}
  void Clear(){entries.clear();world=nullptr;last=-1;}
- int Remaining(const void*w,int tick,int unit,const std::string&code){Sync(w,tick);auto i=entries.find({unit,Key(code)});if(i==entries.end())return 0;int n=i->second.end-tick;if(n<=0){entries.erase(i);return 0;}return n;}
- void Start(const void*w,int tick,int unit,const std::string&code,int duration){Sync(w,tick);if(w&&duration>0)entries[{unit,Key(code)}]={tick,tick+duration};}
+ int Remaining(const void*w,int tick,int unit,const std::string&code){Sync(w,tick);auto i=entries.find(Key(unit,code));if(i==entries.end())return 0;auto n=MeleeCooldown::Remaining(i->second.state,uint32_t(tick));if(!n)entries.erase(i);return int(n);}
+ void Start(const void*w,int tick,int unit,const std::string&code,int duration,bool persistent=true){Sync(w,tick);if(w&&duration>0)entries[Key(unit,code)]={{uint32_t(tick),uint32_t(duration),uint32_t(duration)},persistent};}
+ template<class Vars> void Save(const void*w,int tick,const std::string&zone,Vars&vars){
+  Sync(w,tick);std::vector<std::string> obsolete;
+  for(const auto&v:vars)if(v.first.compare(0,sizeof(MeleeCooldown::MarkerPrefix)-1,MeleeCooldown::MarkerPrefix)==0)obsolete.push_back(v.first);
+  for(const auto&name:obsolete)vars.DelVar(name.c_str());
+  for(const auto&e:entries){auto remaining=MeleeCooldown::Remaining(e.second.state,uint32_t(tick));if(e.second.persistent&&remaining)vars.SetVar(MeleeCooldown::Marker(Hash(zone),e.first,e.second.state.totalTicks,remaining).c_str(),1.f);}
+ }
+ template<class Vars> void Load(const void*w,int tick,const std::string&zone,const Vars&vars){
+  Clear();Sync(w,tick);if(!w)return;
+  for(const auto&v:vars){uint64_t key=0;uint32_t total=0,remaining=0;if(v.second==1.f&&MeleeCooldown::ReadMarker(v.first.c_str(),Hash(zone),key,total,remaining))entries.emplace(key,Entry{{uint32_t(tick),total,remaining},true});}
+ }
 };
 }
 

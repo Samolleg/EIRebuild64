@@ -5,6 +5,8 @@
 #include "Unit.h"
 #include "World.h"
 
+class CWorldServer;
+
 // --------------------------------------------------------------------------------------------
 class CHoover : public CGameBase
 {
@@ -19,6 +21,12 @@ public:
     BOOL Hoover(CWorld *pWorld, CUnit *lpUnit, CList<CItem *, CItem *> &allItems,
                 CList<CItem *, CItem *> &newItems, CList<CSpell *, CSpell *> &newSpells,
                 int &nHooveredMoney);
+    int HooverCarriedLoot(CWorldServer *world, CUnit *carrier,
+                          CList<CItem *, CItem *> &allItems,
+                          CList<CItem *, CItem *> &newItems, int &money);
+    BOOL HooverAddon(CWorld *pWorld, CUnit *lpUnit, CList<CItem *, CItem *> &allItems,
+                     CList<CItem *, CItem *> &newItems, CList<CSpell *, CSpell *> &newSpells,
+                     int &nHooveredMoney, int scienceSkill, float dexterity, bool questOnly);
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CHoover"; };
     virtual EClassIDs WhoAmI() const { return HPC_HOOVER; };

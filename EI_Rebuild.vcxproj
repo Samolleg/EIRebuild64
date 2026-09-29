@@ -206,6 +206,7 @@
       <EnableModules>false</EnableModules>
     </ClCompile>
     <Link>
+      <LargeAddressAware>true</LargeAddressAware>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
@@ -333,6 +334,8 @@
     <ClCompile Include="Game\FOFSystem.cpp" />
     <ClCompile Include="Game\GameBase.cpp" />
     <ClCompile Include="Game\GameMain.cpp" />
+    <ClCompile Include="Game\CrashEvidence.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\EngineDiagnostics.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\GeneralSettings.cpp" />
     <ClCompile Include="Game\GeneralUnitLogic.cpp" />
     <ClCompile Include="Game\Geometry.cpp" />

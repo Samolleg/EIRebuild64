@@ -1,5 +1,5 @@
 // Direct source-derived elemental lifecycle. Keep original IDs for damage/FX.
-static bool ExtendedSpellEnabled(int kind){auto*mod=ModRuntime::Current();return mod&&mod->CombatSetting("JMVParticles")&&((kind>=57&&kind<=74)||kind==SPELL_ID_TEST_2||kind==SPELL_ID_TEST_3);}
+static bool ExtendedSpellEnabled(int kind){auto*mod=ModRuntime::Current();return mod&&mod->CombatSetting("JMVParticles")&&(kind>=SPELL_ID_FIREBALLDARK&&kind<=SPELL_ID_POISONFOGLIGHT);}
 bool CEffectSpell::ExtendedStart(int nKind){
  if(!ExtendedSpellEnabled(nKind))return false;
  float fpDist;
@@ -13,7 +13,6 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		}
 		switch (nKind)
 		{
-		case SPELL_ID_TEST_2:
 		case SPELL_ID_FIREARROWDARK:
 		case SPELL_ID_FIREARROWLIGHT: {
 			if (pTarget.IsEmpty() || pTarget->WhoAmI() != HPC_UNIT)
@@ -47,7 +46,6 @@ bool CEffectSpell::ExtendedStart(int nKind){
 			CreateSound(FALSE, "magic\\Acidray\\start.wav", GetCP(), CPlot3D(0, 0, 0));
 			castPhase = CP_DELIVERY;
 			break; }
-		case SPELL_ID_TEST_3:
 		case SPELL_ID_FIREWALLDARK:
 		case SPELL_ID_FIREWALLLIGHT: {
 			ptTarg = ptTarget;
@@ -82,7 +80,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 				fpSpeed = 5;
 			nTimeLeft = Float2Int(fpDist / fpSpeed * 15.0f) - 2;
 			ptSpeed *= fpSpeed / 15.0f / fabs(ptSpeed);
-			if (nKind == SPELL_ID_FIREWALLDARK)
+			if (nKind == SPELL_ID_FIREBALLDARK)
 				CreateParticles(TRUE, PTID_FIREBALLDARK, ptSrc, 0.3f * GetShowPower(), 1, ptSpeed); 
 			else
 				CreateParticles(TRUE, PTID_FIREBALLLIGHT, ptSrc, 0.3f * GetShowPower(), 1, ptSpeed); 
@@ -145,7 +143,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		case SPELL_ID_COLUMN_ACIDDARK:
 		case SPELL_ID_COLUMN_ACIDLIGHT: {
 			SetCP(ptTarget);
-			if (nKind == SPELL_ID_INVOKE_LGHTNGDARK)
+			if (nKind == SPELL_ID_COLUMN_ACIDDARK)
 				CreateParticles(FALSE, PTID_NUKEDARK, ptTarget, 1, 1, CPlot3D(0, 0, 0)); 
 			else
 				CreateParticles(FALSE, PTID_NUKELIGHT, ptTarget, 1, 1, CPlot3D(0, 0, 0)); 
@@ -180,7 +178,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		case SPELL_ID_POISONFOGLIGHT: {
 			ptTarg = ptTarget;
 			ptTarg.z = 1 + pWS->GetZValue(ptTarg.x, ptTarg.y);
-			if (nKind == SPELL_ID_INVOKE_LGHTNGDARK)
+			if (nKind == SPELL_ID_POISONFOGDARK)
 				CreateParticles(TRUE, PTID_POISONFOGDARK, ptTarg, GetRadius(), GetShowPower(), CPlot3D(0, 0, 0)); 
 			else
 				CreateParticles(TRUE, PTID_POISONFOGLIGHT, ptTarg, GetRadius(), GetShowPower(), CPlot3D(0, 0, 0)); 
@@ -203,7 +201,6 @@ bool CEffectSpell::ExtendedDeliver(int nKind){
  if(!ExtendedSpellEnabled(nKind))return false;
 CPlot3D ptExplosion;
 switch(nKind){
-		case SPELL_ID_TEST_2:
 		case SPELL_ID_FIREARROWDARK:
 		case SPELL_ID_FIREARROWLIGHT: {
 			if (pEffect)
@@ -232,7 +229,6 @@ switch(nKind){
 				castPhase = CP_FINISH;
 			break; 
 		}
-		case SPELL_ID_TEST:
 		case SPELL_ID_FIREBALLDARK:
 		case SPELL_ID_FIREBALLLIGHT: {
 			if (nTimeLeft-- < 0)
@@ -305,7 +301,6 @@ bool CEffectSpell::ExtendedAction(int nKind){
  if(nKind==SPELL_ID_VAMP&&ModRuntime::Current()){if(nTimeLeft--<0)castPhase=CP_FINISH;return true;}
  if(!ExtendedSpellEnabled(nKind))return false;
 		switch (nKind) {
-		case SPELL_ID_TEST_2:
 		case SPELL_ID_FIREARROWDARK:
 		case SPELL_ID_FIREARROWLIGHT:
 		case SPELL_ID_ACIDRAYDARK:
@@ -313,7 +308,6 @@ bool CEffectSpell::ExtendedAction(int nKind){
 			if (nTimeLeft-- < 0)
 				castPhase = CP_FINISH;
 			break;
-		case SPELL_ID_TEST_3:
 		case SPELL_ID_FIREWALLDARK:
 		case SPELL_ID_FIREWALLLIGHT: 
 		{
@@ -345,7 +339,6 @@ bool CEffectSpell::ExtendedAction(int nKind){
 			}
 			break;
 		}
-		case SPELL_ID_TEST:
 		case SPELL_ID_FIREBALLDARK:
 		case SPELL_ID_FIREBALLLIGHT: {
 			if (nTimeLeft-- < 0)

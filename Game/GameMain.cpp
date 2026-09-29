@@ -1,6 +1,8 @@
 #include "StdAfx.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
+#include "EngineDiagnostics.h"
+#include <stdexcept>
 #include <io.h>
 #include <new.h>
 
@@ -828,7 +830,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
         C2DScreenWait::Clear();
     }
 #if !defined(NODEBUGINFO) && !defined(_DEBUG)
-    PUSH_EXCEPTION_HANDLER(NDebugCallStack::SEHandler);
+    // EngineDiagnostics owns the outer exception boundary.
 #endif // !defined( NODEBUGINFO ) && !defined( _DEBUG )
        // load databases
     thePerkDatabase.LoadDatabase(theSettings.szResourcePath, "database.res");
@@ -850,7 +852,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     if(strcmp(lpCmdLine,"--inspect-starter-selection")==0){
         try { auto host=ModRuntime::Host::FromCommandLine();return host&&ModRuntime::Resources()?0:BAD_RESULT; }
@@ -860,10 +862,18 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
     std::unique_ptr<ModRuntime::Host> modHost;
     try { modHost=ModRuntime::Host::FromCommandLine(); }
-    catch(const std::exception&e){MessageBoxA(nullptr,e.what(),"Mod startup failed",MB_OK|MB_ICONERROR);return BAD_RESULT;}
+    catch(const std::exception&e){EngineDiagnostics::Caught(e.what());return BAD_RESULT;}
     OutputDebugStringA("Hello!\n");
-    if (WinMainInit(hInstance, hPrevInstance, lpCmdLine, nCmdShow) == BAD_RESULT)
+    try
+    {
+        if (WinMainInit(hInstance, hPrevInstance, lpCmdLine, nCmdShow) == BAD_RESULT)
+            return BAD_RESULT;
+    }
+    catch (const std::exception& e)
+    {
+        EngineDiagnostics::Caught(e.what());
         return BAD_RESULT;
+    }
 
         //
         // Main message loop:
@@ -880,12 +890,13 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 #if defined(FINALRELEASE) && defined(NODEBUGINFO)
     catch (...)
     {
-        MessageBox(NGame::hWnd, "General Game Error", "ERROR", MB_OK | MB_ICONEXCLAMATION);
+        EngineDiagnostics::Caught("Unhandled game-loop exception");
+        return BAD_RESULT;
     }
 #endif // defined( FINALRELEASE ) && defined( NODEBUGINFO )
     //
 #if !defined(NODEBUGINFO) && !defined(_DEBUG)
-    POP_EXCEPTION_HANDLER;
+    // EngineDiagnostics owns the outer exception boundary.
 #endif // !defined( NODEBUGINFO ) && !defined( _DEBUG )
 
     // FINI
@@ -1123,3 +1134,26 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
+{
+    const bool probe = strncmp(command, "--diagnostics-selftest=", 23) == 0;
+    EngineDiagnostics::Initialize(probe);
+    __try
+    {
+        if (probe)
+        {
+            EngineDiagnostics::Note(command);
+            if (strcmp(command + 23, "cpp") == 0) throw std::runtime_error("diagnostic probe");
+            if (strcmp(command + 23, "crt") == 0) _invalid_parameter_noinfo();
+            RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+        }
+        EngineDiagnostics::Note("Entering game startup");
+        return RunGame(instance, previous, command, show);
+    }
+    __except (EngineDiagnostics::Filter(GetExceptionInformation()))
+    {
+        TerminateProcess(GetCurrentProcess(), 0xE0000135);
+        return BAD_RESULT;
+    }
+}

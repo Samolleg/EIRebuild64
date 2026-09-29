@@ -205,7 +205,14 @@ public:
     void RequestSendStartCamera(bool bFlag) { bSendCenterCamera = bFlag; }
     //
     void RequestCombatPause(bool bPause);
+    bool CanBeginFieldCamp();
+    bool BeginFieldCamp();
+    int FieldCampReturnHeroID() const;
+    void CompleteFieldCampReturn();
+    bool BeginFieldCampCommerceSuppression();
+    void EndFieldCampCommerceSuppression(bool active);
     bool HooverUnit(CUnit *pVictim, CPlayer *pWho);
+    bool HooverUnitAddon(CUnit *pVictim, CPlayer *pWho, CUnitServer *unitServer, bool loot);
     void AddCorpse(int nID, int nLootByID, DWORD dwMoney, CList<CItem *, CItem *> &items);
     bool CanLoot(int nTargetID, int nUnitID);
     void GetCorpses(int nUnitID, CScriptObjectGroup &res);

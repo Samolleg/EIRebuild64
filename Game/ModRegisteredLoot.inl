@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 #include "ModRegisteredLoot.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
@@ -246,6 +247,7 @@ bool EnsureCurrentWorld()
 void LogReject(const char *reason, CMapObject *object, const char *itemSpec)
 {
     ++G_registeredLoot.rejects;
+    if(G_registeredLoot.rejects<=16)EngineDiagnostics::Event("RegisterLoot rejected object=%d reason=%s item=%s",object?object->GetID():-1,reason?reason:"",itemSpec?itemSpec:"");
 #if JMV_REGISTERED_LOOT_DIAGNOSTICS
     char objectId[32] = {};
     _snprintf_s(objectId,
@@ -281,7 +283,10 @@ bool ValidateItemSpec(const std::string &itemSpec)
     CItem *probe = WorldServer->CreateItem(itemSpec.c_str());
     const bool valid = probe != nullptr;
     if (probe)
+    {
+        probe->AddRef();
         probe->Release();
+    }
     G_registeredLoot.validatedItemSpecs[itemSpec] = valid;
     return valid;
 }
@@ -380,6 +385,7 @@ bool GrantRegisteredItems(SRegisteredObject &entry)
 #endif
                 return false;
             }
+            item->AddRef(); // Temporary owner, separate from the player inventory.
             created.push_back(item);
             items.AddTail(item);
         }
@@ -393,6 +399,7 @@ bool GrantRegisteredItems(SRegisteredObject &entry)
         item->Release();
 
     ++G_registeredLoot.grants;
+    if(G_registeredLoot.grants<=24)EngineDiagnostics::Event("RegisterLoot granted object=%d count=%u",entry.objectId,unsigned(created.size()));
 #if JMV_REGISTERED_LOOT_DIAGNOSTICS
     LOGINFO("event=GRANT object=%d player=%d item_types=%u item_count=%u",
             entry.objectId,
@@ -469,6 +476,7 @@ bool JMV_RegisterLoot(CMapObject *object, const char *itemSpec)
     }
 
     ++G_registeredLoot.registrations;
+    if(G_registeredLoot.registrations<=24)EngineDiagnostics::Event("RegisterLoot registered object=%d item=%s consumed=%d",objectId,spec.c_str(),entry.consumed);
 #if JMV_REGISTERED_LOOT_DIAGNOSTICS
     if (G_registeredLoot.registrations <= 12 ||
         (G_registeredLoot.registrations % 64) == 0)
@@ -519,6 +527,7 @@ void JMV_RegisteredLootOnLeverActivated(CLeverObject *lever, CUnit *who)
     SetPendingMarkers(entry, REGISTERED_LOOT_DELAY_SEGMENTS);
     G_registeredLoot.pendingObjects.push_back(entry.objectId);
     ++G_registeredLoot.activations;
+    if(G_registeredLoot.activations<=24)EngineDiagnostics::Event("RegisterLoot activated object=%d player=%d due=%d",entry.objectId,entry.playerNumber,entry.dueSegment);
 #if JMV_REGISTERED_LOOT_DIAGNOSTICS
     LOGINFO("event=ACTIVATE seq=%u zone=%s object=%d player=%d current_segment=%d due_segment=%d delay_segments=%d item_types=%u",
             G_registeredLoot.activations,

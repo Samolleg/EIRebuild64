@@ -36,6 +36,11 @@ const COLORREF CONSTR_COLOR_NUMBERS = RGB(255, 255, 255);
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::OnActivate()
 {
+    struct SFieldCampCommerceGuard {
+        bool active;
+        SFieldCampCommerceGuard() : active(IWorldClient.BeginFieldCampCommerceSuppression()) {}
+        ~SFieldCampCommerceGuard() { IWorldClient.EndFieldCampCommerceSuppression(active); }
+    } commerceGuard;
     bIsSpellConstr = false;
     bIsItemConstr = false;
     pSpellsAssort = 0;
@@ -302,7 +307,7 @@ void CI3DScreenCamp::OnActivate()
             pUnits[i] = IWorldClient.GetUnit(party.people[i].nID);
             const SADEntry *pEntry = pUnits[i]->GetSpecialAnimationEntry(33);
             if (pEntry)
-                pUnits[i]->LowStartAnimation(0xff, pEntry->dwEntryIndex,
+                pUnits[i]->LowStartAnimationExtended(0xffffffffu, pEntry->dwEntryIndex,
                                              (timeGetTime() / 1024.0f) * 15 - random.Get(0, 50), 0);
             pUnits[i]->ChangeWeapon(-1);
             pUnits[i]->GetUnitSpecific()->NotifyWeaponUpdated();
@@ -397,7 +402,7 @@ void CI3DScreenCamp::OnActivate()
                     if (const SADEntry *entry = current->GetAnimationEntry(idle))
                     {
                         const float animationTime = (timeGetTime() / 1024.0f) * 15;
-                        current->LowStartAnimation(0xff, entry->dwEntryIndex,
+                        current->LowStartAnimationExtended(0xffffffffu, entry->dwEntryIndex,
                                                    int(animationTime - random.Get(0, 50)), 0);
                         current->GetUnitSpecific()->NewAnimationWasReceived(animationTime);
                     }
@@ -439,15 +444,17 @@ void CI3DScreenCamp::OnActivate()
         theRenderer.SetRenderState(D3DRENDERSTATE_ANTIALIAS,
                                                     D3DANTIALIAS_SORTINDEPENDENT);*/
     //
+    // Current mod has no battle00.x2; use neutral black margins from the reference.
     LPTEXTURE wideTexture = AddTexture("battle00");
+    float sideAmbient = ModRuntime::Current()?0.0f:.3f;
 
     // WideScreen.cpp side fillers; keep the original center layout.
     CI3DFigure *wideLeft = AddFigure();
     wideLeft->MakeBar(2, 100, -float(WideScreen::VirtualShift()), 0, 0, 600, 227, 62, 256, 176);
-    wideLeft->SetAmbient(.3f, .3f, .3f);
+    wideLeft->SetAmbient(sideAmbient, sideAmbient, sideAmbient);
     CI3DFigure *wideRight = AddFigure();
     wideRight->MakeBar(2, 100, 800, 0, 800 + float(WideScreen::VirtualShift()), 600, 256, 176, 227, 62);
-    wideRight->SetAmbient(.3f, .3f, .3f);
+    wideRight->SetAmbient(sideAmbient, sideAmbient, sideAmbient);
     wideLeft->SetTexture(wideTexture);
     wideRight->SetTexture(wideTexture);
 }
@@ -1795,7 +1802,8 @@ void CI3DScreenCamp::TransactionOK()
     case ISM_ITEMCONSTR:
         if (bDeconstruct)
         {
-            DeconstructItem();
+            if (!DeconstructItem())
+                return;
         }
         else
         {
@@ -2076,6 +2084,11 @@ void CI3DScreenCamp::CheckValidTransaction()
     theWorld.GetTextManager()->GetSystemString(szAmount, szTmp);
     szOut.Format("%s %d", szTmp, nOutputAmount);
     pSurf->DrawText(szOut, CRect(0, 10, 200, 30), 1, CONSTR_COLOR_PRICE, DT_CENTER);
+    if(ModRuntime::Current()&&theWorld.GetTextManager()->GetText("camphelp 22")){
+        theWorld.GetTextManager()->GetLine(szTmp);
+        szOut.Format("%s %d",(LPCSTR)szTmp,IWorldClient.GetParty().allWagonItems.GetSize());
+        pSurf->DrawText(szOut,CRect(0,-3,200,14),1,CONSTR_COLOR_PRICE,DT_CENTER);
+    }
     pSurf->ReleaseDC();
 #endif // NOGETDC
 
@@ -2294,8 +2307,34 @@ bool CI3DScreenCamp::DeconstructItem()
     CItemLoot *pLoot = 0;
     CItemSpell *pItemSpell = 0;
 
-    ASSERT(pItemsConstr->allWagonItems.GetSize() == 1);
-    pConstrItem = pItemsConstr->DuplicateItem(pItemsConstr->allWagonItems[0]);
+    if (!pItemsConstr || pItemsConstr->allWagonItems.GetSize() != 1 ||
+        !pItemsConstr->allWagonItems[0])
+        return false;
+    CItem *pInput = pItemsConstr->allWagonItems[0];
+    if (pInput->GetSpell(0))
+    {
+        CItemManager *pIM = pItemsConstr->GetItemManager();
+        if (!pIM)
+            return false;
+        const SIDBQuickItemShape *pShape = pIM->GetQuickItemShape("spell container");
+        if (!pShape)
+            return false;
+        const int shapeIndex = pIM->GetShapeIndex(pShape);
+        if (shapeIndex < 0)
+            return false;
+        pItemSpell = static_cast<CItemSpell *>(
+            pIM->CreateItem(ITID_ITEM_SPELL, shapeIndex, 0, -1));
+        if (!pItemSpell)
+            return false;
+        pItemSpell->AddRef();
+    }
+    pConstrItem = pItemsConstr->DuplicateItem(pInput);
+    if (!pConstrItem)
+    {
+        if (pItemSpell)
+            pItemSpell->Release();
+        return false;
+    }
     pConstrItem->AddRef();
     pItemsConstr->RemoveItemFromWagon(pItemsConstr->allWagonItems[0]);
 
@@ -2336,21 +2375,12 @@ bool CI3DScreenCamp::DeconstructItem()
         }
     }
 
-    if (pConstrItem->GetSpell(0))
+    if (pItemSpell)
     {
-        CItemManager *pIM = pItemsConstr->GetItemManager();
-        // this part is from CItemManager::CreateItemSpell
-        pItemSpell = static_cast<CItemSpell *>(
-            pIM->CreateItem(ITID_ITEM_SPELL,
-                            pIM->GetShapeIndex(pIM->GetQuickItemShape("spell container")), 0, -1));
-        if (pItemSpell)
-        {
-            pItemSpell->AddRef();
-            pItemSpell->AddSpell(
-                pConstrItem->GetSpell(0)->Duplicate(pItemsConstr->GetSpellManager()));
-            pItemsConstr->AddItemToWagon(pItemSpell, false, false);
-            pItemSpell->Release();
-        }
+        pItemSpell->AddSpell(
+            pConstrItem->GetSpell(0)->Duplicate(pItemsConstr->GetSpellManager()));
+        pItemsConstr->AddItemToWagon(pItemSpell, false, false);
+        pItemSpell->Release();
     }
 
     pConstrItem->Release();

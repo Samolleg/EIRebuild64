@@ -376,11 +376,12 @@ void CI3DSurface::Draw()
 
     if (HasFlag(BS_COLOR_KEY))
     {
-        // DDBLTFX ddbltfx;
-        // ddbltfx.ddckSrcColorkey.dwColorSpaceHighValue = colorKey;
-        // ddbltfx.ddckSrcColorkey.dwColorSpaceLowValue = colorKey;
-        pSurface->BltToRenderSurface(rectScreen, pSrcRect,
-                                     DDBLT_KEYSRCOVERRIDE | DDBLT_ASYNC | DDBLT_WAIT, 0);
+        DDBLTFX ddbltfx = {};
+        ddbltfx.dwSize = sizeof(ddbltfx);
+        ddbltfx.ddckSrcColorkey.dwColorSpaceHighValue = colorKey;
+        ddbltfx.ddckSrcColorkey.dwColorSpaceLowValue = colorKey;
+        IfFailedThrowHR(pSurface->BltToRenderSurface(rectScreen, pSrcRect,
+            DDBLT_KEYSRCOVERRIDE | DDBLT_ASYNC | DDBLT_WAIT, &ddbltfx), "UI color-key blit");
     }
     else
     {

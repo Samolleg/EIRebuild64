@@ -4,6 +4,8 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
 #include "ModRuntime.h"
+#include "ModPackage.h"
+#include "EngineDiagnostics.h"
 #include "I3DScreen.h"
 #include "I3DConsole.h"
 #include "A3Cursor.h"
@@ -69,10 +71,25 @@ void CInterface3D::Init(CRenderer *pNewRend)
     nScreenWidth = w;
     nScreenHeight = h;
 
+    const char* face = "Times New Roman";
+    if (auto* mod = ModRuntime::Current()) {
+        if (mod->CombatSetting("useLS_NewFont")) {
+            // Private registration also supports direct EXE startup without EIStarter.
+            static std::string registeredFont;
+            std::string path = mod->Directory() + "/Evil Font.ttf";
+            if (registeredFont != path) {
+                if (!registeredFont.empty()) RemoveFontResourceExA(registeredFont.c_str(), FR_PRIVATE, nullptr);
+                registeredFont.clear();
+                if (AddFontResourceExA(path.c_str(), FR_PRIVATE, nullptr)) registeredFont = path;
+            }
+            face = "Evil Font";
+            EngineDiagnostics::Event("Interface font=%s private=%d", face, !registeredFont.empty());
+        }
+    }
     LOGFONT lf;
     float fScale;
     pTTFonts[0] = new CFont();
-    if (!pTTFonts[0]->CreatePointFont(750, _T("Times New Roman")))
+    if (!pTTFonts[0]->CreatePointFont(750, face))
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
@@ -83,19 +100,19 @@ void CInterface3D::Init(CRenderer *pNewRend)
         delete pTTFonts[0];
 
     pTTFonts[0] = new CFont();
-    if (!pTTFonts[0]->CreatePointFont(int(104 * WideScreen::Effective() / fScale / 800), _T("Times New Roman"))) // was 96
+    if (!pTTFonts[0]->CreatePointFont(int(104 * WideScreen::Effective() / fScale / 800), face)) // was 96
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
     }
     pTTFonts[1] = new CFont();
-    if (!pTTFonts[1]->CreatePointFont(int(112 * WideScreen::Effective() / fScale / 800), _T("Times New Roman")))
+    if (!pTTFonts[1]->CreatePointFont(int(112 * WideScreen::Effective() / fScale / 800), face))
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
     }
     pTTFonts[2] = new CFont();
-    if (!pTTFonts[2]->CreatePointFont(int(144 * WideScreen::Effective() / fScale / 800), _T("Times New Roman")))
+    if (!pTTFonts[2]->CreatePointFont(int(144 * WideScreen::Effective() / fScale / 800), face))
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;

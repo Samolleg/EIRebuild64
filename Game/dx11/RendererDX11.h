@@ -14,6 +14,7 @@
 
 // #define DRAWABLE_BACKBUFFER
 class ModShadowDX11;
+class UIColorKeyBlit;
 class CDXGISurface;
 class CConstantBuffers;
 class CShadersMain;
@@ -30,6 +31,7 @@ class CDX11
 {
 private:
     std::shared_ptr<ModShadowDX11> modShadows;
+    std::shared_ptr<UIColorKeyBlit> uiColorKey;
     DWORD m_width, m_height;
     DirectX::XMFLOAT4 background_color;
     BOOL m_bMakeScreenShot = 0;
@@ -123,6 +125,8 @@ public:
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> GetDeviceContext() { return deviceContext; };
     Microsoft::WRL::ComPtr<ID3D11Device> GetDevice() { return device; };
     DirectX::SpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
+    HRESULT DrawColorKeySurface(ID3D11ShaderResourceView* image, const RECT& destination,
+                                const RECT* source, COLORREF key);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };
     CConstantBuffers *GetConstantBuffers() { return m_cbs.get(); };
     CEffectProcessor *GetEffectProcessor() { return m_effproc.get(); }

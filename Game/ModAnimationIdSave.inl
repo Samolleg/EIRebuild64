@@ -19,7 +19,7 @@ struct Record {
     uint32_t startName, cycleName;
 };
 
-uint32_t Normalize(DWORD id) { return id == 0xff ? kNoAnimation : id; }
+// Full IDs already use kNoAnimation; 255 is a real ADB entry.
 bool HasExtended(uint32_t start, uint32_t cycle)
 {
     return (start > 253 && start != kNoAnimation) ||
@@ -131,8 +131,8 @@ void RecordSequence(std::vector<Record> &records, CUnit *unit,
                     SL0AnimationSeq &sequence, unsigned kind)
 {
     for (int slot = 0; slot < sequence.animations.GetSize(); ++slot) {
-        const uint32_t start = Normalize(sequence.GetStartId(slot));
-        const uint32_t cycle = Normalize(sequence.GetCycleId(slot));
+        const uint32_t start = sequence.GetStartId(slot);
+        const uint32_t cycle = sequence.GetCycleId(slot);
         if (!HasExtended(start, cycle)) continue;
         const SL0Animation &animation = sequence.animations[slot];
         records.push_back({ static_cast<uint32_t>(unit->GetID()), kind,

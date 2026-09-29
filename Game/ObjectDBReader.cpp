@@ -9,6 +9,7 @@
 //////////////////////////////////////////////////
 
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ObjectDBReader.h"
@@ -136,8 +137,11 @@ bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript)
             {
                     AfxMessageBox( "CGameMOBFile::Load\nScript not found." );
             }*/
-    if (!bSkipScript)
-        theWorldServer.script.LoadText(szScript);
+    if (!bSkipScript){
+        BOOL parsed=theWorldServer.script.LoadText(szScript);
+        auto error=theWorldServer.script.GetLastError();
+        EngineDiagnostics::Event("MOB script parsed=%d bytes=%d line=%d error=%s",parsed,szScript.GetLength(),error.nLine,(LPCSTR)error.text);
+    }
     return true;
 }
 

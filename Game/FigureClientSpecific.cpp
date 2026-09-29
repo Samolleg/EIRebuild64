@@ -12,6 +12,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/ConstantBuffer.h"
 
 #include "Light.h"
+#include "FigureScreenBounds.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CFigureClientSpecific::CFigureClientSpecific()
 {
@@ -262,6 +263,9 @@ BOOL CFigureClientSpecific::Draw(CRenderer *pRend, CSimplyArray<CLight *, CLight
                                  LPGAMEBASE lpNewMaterial, BYTE cFog, CRect *pRect,
                                  CTexture *pTexture0, CTexture *pTexture1)
 {
+    // Bounds are consumed by native object/figure picking, independently of GPU drawing.
+    rcClip.SetRectEmpty();
+    if (pRect) pRect->SetRectEmpty();
     // draw with lighting
     // check visibility, move texture, account for morphs
     // setup lights positions in world space
@@ -395,6 +399,42 @@ BOOL CFigureClientSpecific::Draw(CRenderer *pRend, CSimplyArray<CLight *, CLight
                                   pFigure->nComponents, pFigure->lightcomponents,
                                   pFigure->nLightComponents, pFigure->indices, pFigure->nIndices,
                                   pFigure->GetUShift(), pFigure->GetVShift(), cFog, dwRenderFlags);
+    }
+    if (pRect)
+    {
+        const SXYZW4 *plots = pFigure->plots4;
+        const SVertexComponents *components = pFigure->components;
+        const WORD *indices = pFigure->indices;
+        DWORD count = pFigure->nNumPlots, indexCount = pFigure->nIndices;
+        const bool haveGeometry = !pGeometry || pGeometry->GetRangeGeometryData(
+            pFigure->GetName(), plots, components, indices, count, indexCount);
+        FigureScreenBounds::Bounds bounds;
+        if (haveGeometry && plots && components && indices)
+        {
+            CDXGeometryProcessor *gpu = pRend->GetGeometryProcessor();
+            const SHMatrix matrix = gpu->GetWorldToScreenMatrix() *
+                                    gpu->GetMatrix(MAT_STACK_WORLDSPACE);
+            for (DWORD i = 0; i + 2 < indexCount; i += 3)
+            {
+                FigureScreenBounds::Point triangle[3];
+                bool valid = true;
+                for (int j = 0; j < 3; ++j)
+                {
+                    const DWORD vertex = components[indices[i + j]].gv;
+                    if (vertex / 4 >= count) { valid = false; break; }
+                    const SXYZW4 &quad = plots[vertex / 4];
+                    const int lane = vertex % 4;
+                    CPlot3D local(quad.x[lane], quad.y[lane], quad.z[lane]);
+                    if (vertex < DWORD(pFigure->morphs.GetSize())) local += pFigure->morphs[vertex];
+                    const SXYZW projected = matrix.Rotate4Vector(local);
+                    triangle[j] = { projected.x, projected.y, projected.w };
+                }
+                if (valid) bounds.AddTriangle(triangle);
+            }
+        }
+        if (bounds.valid)
+            rcClip.SetRect(bounds.Left(), bounds.Top(), bounds.Right(), bounds.Bottom());
+        *pRect = rcClip;
     }
     //
     DrawBBox(&theRenderer);

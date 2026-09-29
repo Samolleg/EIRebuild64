@@ -172,7 +172,7 @@ void CUnitClientSpecific::InventoryUpdated()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::SetOwner(CPlayer *pOwner)
 {
-    if (pOwner)
+    if (pOwner && !(ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2")))
     {
         //			D3DCOLORVALUE dcvColor = { 144.0f/255.0f, 191.0f/255.0f,
         // 255.0f/255.0f, 1.0f };

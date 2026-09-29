@@ -78,6 +78,9 @@ public:
     CString GetCurrentZoneName();
     // camping
     void GoCamp(EInterface iface = IFACE_CAMP);
+    void GoFieldCamp();
+    bool BeginFieldCampCommerceSuppression();
+    void EndFieldCampCommerceSuppression(bool active);
     void FinishConstructing();
     // rendering
     void Draw();

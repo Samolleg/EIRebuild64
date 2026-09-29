@@ -443,10 +443,9 @@ BOOL CDXGISurface::GetTextureFormat(DXGI_FORMAT &texFormat)
 HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                          LPDDBLTFX pDDBltFx)
 {
-    DWORD width, height;
-    pDX11->GetCurrentMode(width, height);
-    float x = pDestRect->left / width;
-    float y = pDestRect->top / height;
+    if (dwFlags & DDBLT_KEYSRCOVERRIDE)
+        return pDX11->DrawColorKeySurface(textureView.Get(), *pDestRect, pSrcRect,
+            pDDBltFx ? pDDBltFx->ddckSrcColorkey.dwColorSpaceLowValue : 0);
     pDX11->GetSpriteBatch()->Draw(textureView.Get(), *pDestRect, pSrcRect);
     return S_OK;
 }

@@ -1,8 +1,10 @@
 #pragma once
 #include "ModNpcConsumables.h"
+#include "SocialStealthRules.h"
 #include "ModWeaponSkills.h"
 class CSpell;
 class CParty;
+class CGSVariableSet;
 class CItem;
 class CMapObject;
 struct ModDelayedShot;
@@ -102,8 +104,17 @@ public:
     std::string DualAnimation(const CUnit&);
     std::vector<std::pair<int,bool>> DualStrikes(const char*animation,int length);
     bool SkillConfig(const char*,ModSkills::Config&);
+    bool PartyDisguiseMatches(const char*);
     bool SkillConfig(CSpell*,ModSkills::Config&);
     bool SkillReady(CUnit&,CSpell*,const ModSkills::Config&,bool server);
+    float InfoProperty(const char* callback,const char* name,int property);
+    float InfoMagicBlood(int level);
+    float PanelDamage(CUnit&,float damage,int slot,bool left);
+    float PanelCritical(CUnit&,int slot,bool left,bool power);
+    void PanelDefense(CUnit&,int weight,int capacity,float&block,float&parry);
+    float InfoComplex(CUnit&,int property);
+    void SaveSkillCooldowns(CGSVariableSet&);
+    void LoadSkillCooldowns();
     int SkillCooldown(CUnit&,CSpell*);
     void StartSkillCooldown(CUnit&,CSpell*,const ModSkills::Config&);
     bool TargetSkill(CSpell*) const;
@@ -123,8 +134,14 @@ public:
     void ScheduleDoubleShot(CUnit&,CMapObject*,const SRPGAttackPortion&);
     void TickDoubleShots();
     int CombatSetting(const char*) const;
+    float GoCampEnemyRadius();
+    bool GoCampZoneExcluded(const char* zone);
+    bool DeathFearSettings(float &enterHp, float &exitHp, float &fleeDistance, float &speedPercent);
+    bool DeathFearExcludedPrototype(const char *prototype);
+    float DeathFearSpeedFactor(const CUnit &) const;
     float VampSpellValue(const char* prototype,int column);
     int AttackCycle(const SRPGUnitStats&,const CUnit&,bool attack);
+    void CampInfo(class CPersonage&, CUnit*, int &capacity, float &attackSeconds, float *displayActions=nullptr, float *displayMana=nullptr);
     float ModifiedDamage(const SRPGUnitStats&, const CUnit&, float damage, float roll, int leftSlot=-1, bool left=false);
     float ModifiedDamage(const SRPGUserUnitStats&, const CUnit&, float damage);
     void AttackParams(const SRPGUnitStats&, CUnit&, SAttackParams&, float roll);
@@ -136,6 +153,7 @@ private:
     float StatsNumber(const char*,const SRPGUnitStats&);
     void BeginCallback(const char*);
     void Require(const char *name);
+    std::unordered_map<std::string,SocialStealth::Profile> disguiseProfiles;
     bool registeredLoot=false;
     float experienceLimit=-1.0f;
     float magicRandomLimit=-1.0f;

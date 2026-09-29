@@ -14,6 +14,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModPackage.h"
 #include "ModSpellRules.h"
 #include "ModTacticalSpells.h"
+#include "ModGroupSearch/Native.h"
 #include "WorldServer.h"
 #include "UnitServer.h"
 #include "PlayerServer.h"
@@ -26,13 +27,64 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "aiSettings.h"
 #include "ackFormat.h"
 #include "GSVars.h"
+#include "UnitDatabase.h"
 #include "ServerConsts.h"
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 /////////////////////////////////////////////////////////////////////////////////////
 const int AI_NO_MOTIVATION_POWER = -1000;
 /////////////////////////////////////////////////////////////////////////////////////
 static ostream &aiLog = NConsole::ai;
 namespace {thread_local bool manualWeaponSkill=false;}
+static bool ModDeathFearActive(const CUnit *unit);
+static bool ModDeathFearRoutePending(const CUnit *unit);
+static void ModDeathFearUpdate(CAIUnitLogic &logic);
+void ModDeathFearReset();
+namespace {
+struct SModDeathFearState {
+ CUnit* unit=nullptr; DWORD subtype=0; bool active=false; int originalMode=-1;
+ DWORD lastCommand=0,lastCheck=0; int direction=0; bool pending=false,safe=false;
+ CPlot3D commandStart; std::string marker;
+};
+std::unordered_map<int,SModDeathFearState> modDeathFearStates;
+std::unordered_map<std::string,bool> modDeathFearExcluded;
+bool modDeathFearConfigReady=false;
+float modDeathFearEnter=15,modDeathFearExit=30,modDeathFearDistance=25,modDeathFearSpeed=.65f;
+static DWORD DF_Tick(){return DWORD(theWorldServer.GetSegmentTimeCounter());}
+static CPlayer* DF_Player(){return theWorldServer.GetPlayer(0);}
+static std::string DF_Marker(CUnit*u){CPlayer*p=DF_Player();const char*z=p?p->party.szCurrentZone.GetString():nullptr;if(!z||!*z)z="unknown";char b[160];_snprintf_s(b,sizeof(b),_TRUNCATE,"jmv.deathfear.%s.%d",z,u?u->GetID():-1);return b;}
+static bool DF_Eligible(CUnit*u,CUnitServer*s){
+ if(!u||!s||u->GetOwner()||s->IsTamed()||u->CheckFlag(UNIT_DONTMOVE)||!u->GetPrototype())return false;
+ const char*r=u->GetPrototype()->szRace.GetString();static const char*allowed[]={"Human Male","Human Female","Orc Male","Orc Female","Goblin","GoblinAxe","Goblin_Sling","Boar","BoarBl","Dog","Hyena","Fox","LizardmanGreen","LizardmanBlue","LizardmanBlack","Leopard","Rat","TigerRed","TigerWhite","WolfGrey","WolfWhite","WolfBlack","Warg"};
+ bool ok=false;for(auto*x:allowed)if(r&&_stricmp(r,x)==0){ok=true;break;}if(!ok)return false;
+ const char*n=u->GetPrototype()->szName.GetString();if(!n||!*n)return false;auto i=modDeathFearExcluded.find(n);if(i!=modDeathFearExcluded.end())return !i->second;
+ bool excluded=false;if(auto*m=ModRuntime::Current())try{excluded=m->DeathFearExcludedPrototype(n);}catch(...){excluded=true;}modDeathFearExcluded[n]=excluded;return !excluded;
+}
+static bool DF_SetMode(CUnitServer*s,int mode){return s&&s->logic.ChangeCurrentAggressionMode(mode);}
+static void DF_Config(){if(modDeathFearConfigReady)return;modDeathFearConfigReady=true;float e=15,x=30,d=25,v=65;if(auto*m=ModRuntime::Current())try{m->DeathFearSettings(e,x,d,v);}catch(...){return;}if(std::isfinite(x)&&x>.1f&&x<=100)modDeathFearExit=x;if(std::isfinite(e)&&e>=.1f&&e<modDeathFearExit)modDeathFearEnter=e;if(std::isfinite(d)&&d>=1&&d<=100)modDeathFearDistance=d;if(std::isfinite(v)&&v>=1&&v<=100)modDeathFearSpeed=v*.01f;}
+static float DF_Distance(const CPlot3D&a,const CPlot3D&b){return std::sqrt((a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y));}
+static CUnit* DF_Nearest(CUnit*u,float&distance){distance=-1;CPlayer*p=DF_Player();if(!u||!p)return nullptr;CUnitPtrHashIterator it;CUnit*best=nullptr;float best2=0;auto at=u->GetCP();for(CUnit*h=it.GetFirst(&p->unitsUnderControl);!it.IsReachEnd();h=it.GetNext())if(h&&!h->IsDead()){auto hp=h->GetCP();float dx=at.x-hp.x,dy=at.y-hp.y,d=dx*dx+dy*dy;if(!best||d<best2){best=h;best2=d;}}if(best)distance=std::sqrt(best2);return best;}
+static void DF_Flee(SModDeathFearState&st,CUnitServer*s,float distance,CUnit*hero){
+ CUnit*u=st.unit;if(!u||!s||!hero)return;DWORD tick=DF_Tick();bool cur=s->GetScriptCommand().IsMove(),next=s->GetNextScriptCommand().IsMove();
+ if(!cur&&!next&&(s->HasAttack()||s->HasCast()||s->HasSkill()))return;if(next)return;
+ if(cur){if(tick-st.lastCommand<2||distance>=modDeathFearDistance)return;auto end=s->GetScriptMoveFinalPoint();if(DF_Distance(end,hero->GetCP())>=modDeathFearDistance||DF_Distance(u->GetCP(),end)>2)return;st.pending=false;}
+ else if(st.pending&&tick-st.lastCommand<2)return;else if(st.pending&&s->IsCmdFailed())st.direction=(st.direction+1)%5;
+ if(!cur&&st.safe&&tick-st.lastCheck<5)return;st.lastCheck=tick;
+ float reengage=modDeathFearDistance-(std::max)(.5f,(std::min)(2.0f,modDeathFearDistance*.1f));if(st.safe&&distance>=reengage)return;
+ if(distance>=modDeathFearDistance){st.safe=true;st.direction=0;return;}st.safe=false;
+ static const float offsets[]={0,.785398163f,-.785398163f,1.570796327f,-1.570796327f};
+ auto p=u->GetCP(),e=hero->GetCP();float ax=p.x-e.x,ay=p.y-e.y,len=std::sqrt(ax*ax+ay*ay);if(len>.01f){ax/=len;ay/=len;}else{float a=float(u->GetID()&7)*.785398163f;ax=std::cos(a);ay=std::sin(a);}
+ float off=offsets[st.direction%5],c=std::cos(off),q=std::sin(off),dx=ax*c-ay*q,dy=ax*q+ay*c;
+ float target=modDeathFearDistance+(std::max)(1.0f,(std::min)(5.0f,modDeathFearDistance*.2f)),along=distance*c,perp=distance*q;
+ float travel=(std::max)(1.0f,-along+std::sqrt((std::max)(0.0f,target*target-perp*perp)));
+ CPlot3D dest(p.x+dx*travel,p.y+dy*travel,p.z);s->logic.StartMove(dest,false,false);st.commandStart=p;st.lastCommand=tick;st.pending=true;
+}
+}
 /////////////////////////////////////////////////////////////////////////////////////
 #ifndef _DEBUG
 #pragma optimize("agw", on)
@@ -898,6 +950,7 @@ void CUMGuard::Set(const CPlot3D &point, float fpRadius, float fpIdleTime)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMGuard::CommandUnit(CAIUnitLogic &logic)
 {
+    if (ModGroupSearch::CommandDuty(this, logic)) return;
     float fpRad;
     CPlot3D majorLook;
     CUMDuty::CommandUnit(logic);
@@ -994,6 +1047,7 @@ int CUMPatrol::GetPower(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPatrol::CommandUnit(CAIUnitLogic &logic)
 {
+    if (ModGroupSearch::CommandDuty(this, logic)) return;
     ASSERT(patrol.GetSize());
     CUMDuty::CommandUnit(logic);
     if (patrol.GetSize() == 0)
@@ -1033,6 +1087,7 @@ void CUMSentry::Set(const CPlot3D &point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMSentry::CommandUnit(CAIUnitLogic &logic)
 {
+    if (ModGroupSearch::CommandDuty(this, logic)) return;
     CUMDuty::CommandUnit(logic);
     if (logic.IsIdling())
     {
@@ -1376,7 +1431,9 @@ int CUMFear::GetPower(CAIUnitLogic &logic)
         if (pEnemy)
         {
             // bow shooters run from enemies
-            if (pUS->HasRangedAttack() && pThis->GetAIClass() < 6 &&
+            const auto *modRuntime = ModRuntime::Current();
+            if ((!modRuntime || !modRuntime->CombatSetting("DisableRunaway")) &&
+                pUS->HasRangedAttack() && pThis->GetAIClass() < 6 &&
                 pUS->GetUnit()->GetQSpell(0) == 0 &&
                 pUS->GetRPGStats()->CanRun(false) == ECR_CAN_RUN &&
                 pUS->GetRPGStats()->GetMoveDamageModifier() > 0.6f)
@@ -1483,6 +1540,7 @@ int CUMFear::GetPower(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFear::CommandUnit(CAIUnitLogic &logic)
 {
+    if (ModDeathFearActive(logic.GetUnit())) return;
     // if idle and range is lower then required try to find path away with increasing random search
     // radius if range is ok emulate sentry and try to have fun
     float fpLeng;
@@ -1561,6 +1619,14 @@ void CUMFear::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFear::StartUsing(CAIUnitLogic &logic)
 {
+    if (ModDeathFearActive(logic.GetUnit()))
+    {
+        CUnitServer *server = logic.GetUnitServer();
+        server->SetAggression(true);
+        const bool action = server->HasAttack() || server->HasCast() || server->HasSkill();
+        if (!ModDeathFearRoutePending(logic.GetUnit()) && !action) logic.StartIdle();
+        return;
+    }
     // set aggression to unitserver if logic has aggressive motivation (this means unit can run)
     // if ( logic.FindMotivation( AI_UM_AGGRESSION ) )
     logic.GetUnitServer()->SetAggression(true);
@@ -1911,6 +1977,19 @@ bool CUMPlayer::IsCombat(CAIUnitLogic &logic)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // followers are searched among units belonging same player
+static bool CompanionFollowBand(CUnit *unit, float &minimum, float &maximum)
+{
+    if (!ModRuntime::Current() || !unit || !unit->IsHero() || !unit->GetOwner()) return false;
+    CString key; key.Format("jmv.companion.follow.v1.%d", unit->GetID());
+    const float value = unit->GetOwner()->party.vars.GetVar(key);
+    const int profile = value >= 0 ? int(value + .5f) : int(value - .5f);
+    switch (profile) {
+    case 1: minimum = 3; maximum = 5; return true;
+    case 2: minimum = 6; maximum = 9; return true;
+    case 3: minimum = 10; maximum = 14; return true;
+    default: return false;
+    }
+}
 bool CUMPlayer::AreFollowersInRange(CAIUnitLogic &logic, bool bWider)
 {
     CUnit *pThis = logic.GetUnit();
@@ -1925,8 +2004,10 @@ bool CUMPlayer::AreFollowersInRange(CAIUnitLogic &logic, bool bWider)
             CUMPlayer *pUP = ((CUnitServer *)pAlly->GetUnitSpecific())->logic.GetPlayer();
             if (((CUnit *)pUP->pFollowTo) == pThis)
             {
-                if (fabs2(pAlly->GetCP(), pThis->GetCP()) >
-                    sqr(theAIGeneralSettings.fpFollowMaxDist * fpKoef + 1))
+                float minimum = theAIGeneralSettings.fpFollowMinDist;
+                float maximum = theAIGeneralSettings.fpFollowMaxDist;
+                CompanionFollowBand(pAlly, minimum, maximum);
+                if (fabs2(pAlly->GetCP(), pThis->GetCP()) > sqr(maximum * fpKoef + 1))
                     return false;
             }
         }
@@ -2190,6 +2271,772 @@ void CAIUnitLogic::InvokeAlarm()
     nAlarmInvoked = 1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace
+{
+struct SAddonCorpseSearch
+{
+    int corpseId = -1;
+    DWORD corpseSubtype = 0;
+    DWORD observerSubtype = 0;
+    unsigned pointSerial = 0;
+    unsigned seed = 0;
+    CPlot3D center = CPlot3D(0, 0, 0);
+    int step = 0;
+    int nextScanTick = 0;
+    int nextStepTick = 0;
+    int reactionDeadline = 0;
+    bool waiting = false;
+    bool sawAggressive = false;
+    bool initialReaction = true;
+    int haulClaimTick = 0;
+    int nextHaulTick = 0;
+    int haulAttempts = 0;
+    int haulAnimationCount = 0;
+    int haulAnimationClip = 0;
+    int haulAnimationPhase = 0;
+    int haulAnimationQueuedTick = 0;
+    int haulAnimationDeadline = 0;
+    DWORD haulAnimationEntry[2] = { 0, 0 };
+    DWORD haulAnimationFrames[2] = { 0, 0 };
+    std::string haulAnimationName[2];
+    std::string haulAnimationStrategy;
+};
+
+std::unordered_map<int, SAddonCorpseSearch> g_addonCorpseSearch;
+std::string g_addonCorpseSearchZone;
+
+bool AddonRaceCanInvestigate(const char *race)
+{
+    if (!race) return false;
+    return _strnicmp(race, "Human", 5) == 0 ||
+        _strnicmp(race, "Orc", 3) == 0 ||
+        _strnicmp(race, "Goblin", 6) == 0 ||
+        _strnicmp(race, "Lizardman", 9) == 0 ||
+        _strnicmp(race, "Driad", 5) == 0 ||
+        _strnicmp(race, "Octopus", 7) == 0 ||
+        _strnicmp(race, "DeathKnight", 11) == 0 ||
+        _strnicmp(race, "Lich", 4) == 0 ||
+        _strnicmp(race, "Undead", 6) == 0 ||
+        _strnicmp(race, "Ogre", 4) == 0 ||
+        _strnicmp(race, "Cyclope", 7) == 0;
+}
+
+std::string AddonCorpseMarker(CUnit *observer, CUnit *corpse,
+                              const char *zone)
+{
+    char key[224];
+    _snprintf_s(key, sizeof(key), _TRUNCATE,
+        "jmv.murderawareness.corpse.%s.%d.%u.%d.%u",
+        zone, observer->GetID(), observer->GetSubtypeID(),
+        corpse->GetID(), corpse->GetSubtypeID());
+    return key;
+}
+
+bool AddonHasDutyForCorpseSearch(CAIUnitLogic &logic)
+{
+    const SGeneralUnitLogic *active = logic.GetCurrentGeneralLogic();
+    const SGeneralUnitLogic *base = logic.GetBaseGeneralLogic();
+    if (!active || !base ||
+        (active->aggressionMode != UAM_AGGRESSIVE &&
+         active->aggressionMode != UAM_REVENGE))
+        return false;
+    const bool duty = active->eLogicModel == UM_GUARD ||
+        active->eLogicModel == UM_PATROL ||
+        active->eLogicModel == UM_SENTRY ||
+        (active->eLogicModel == UM_GUARD_ALARM &&
+         (base->eLogicModel == UM_GUARD ||
+          base->eLogicModel == UM_PATROL ||
+          base->eLogicModel == UM_SENTRY));
+    return duty && logic.FindMotivation(AI_UM_SUSPECTION) != nullptr &&
+        logic.FindMotivation(AI_UM_CORPSEWATCHER) != nullptr;
+}
+
+CPlayer *AddonCorpsePlayer()
+{
+    return theWorldServer.GetPlayer(0);
+}
+
+int AddonCorpseReadInt(CPlayer *player, const char *key)
+{
+    if (!player || !key) return 0;
+    const float value = player->party.vars.GetVar(key);
+    if (!std::isfinite(value)) return 0;
+    return value >= 0.0f ? static_cast<int>(value + 0.5f)
+                         : static_cast<int>(value - 0.5f);
+}
+
+std::string AddonHaulMarker(const char *zone, CUnit *corpse)
+{
+    char key[224];
+    _snprintf_s(key, sizeof(key), _TRUNCATE,
+        "jmv.murderawareness.haul.%s.%d.%u", zone,
+        corpse->GetID(), corpse->GetSubtypeID());
+    return key;
+}
+
+bool AddonCorpseProtected(CUnit *corpse)
+{
+    return !corpse || !corpse->IsDead() || corpse->IsHero() ||
+        corpse->GetOwner() || (corpse->GetAttachedQuest() &&
+        corpse->GetAttachedQuest()[0]) || corpse->GetQuestItemsNum() > 0 ||
+        corpse->CheckFlag(UNIT_ALREADY_HOOVER) || !corpse->GetPrototype();
+}
+
+struct SAddonCarryEntry
+{
+    DWORD subtype;
+    int money;
+};
+
+bool AddonReadCarry(CPlayer *player, CUnit *unit,
+                    std::vector<SAddonCarryEntry> &entries)
+{
+    char base[224], key[256], suffix[48];
+    const char *zone = player->party.szCurrentZone.GetString();
+    if (!zone || !*zone) zone = "unknown";
+    _snprintf_s(base, sizeof(base), _TRUNCATE,
+        "jmv.murderawareness.carry.%s.%d.%u.", zone,
+        unit->GetID(), unit->GetSubtypeID());
+    _snprintf_s(key, sizeof(key), _TRUNCATE, "%scount", base);
+    const int count = AddonCorpseReadInt(player, key);
+    if (count < 0 || count > 128) return false;
+    entries.clear();
+    entries.reserve(count);
+    for (int i = 0; i < count; ++i)
+    {
+        _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "entry.%d", i);
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+        const int encodedSubtype = AddonCorpseReadInt(player, key);
+        _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "moneylo.%d", i);
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+        const int low = AddonCorpseReadInt(player, key);
+        _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "moneyhi.%d", i);
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+        const int high = AddonCorpseReadInt(player, key);
+        if (encodedSubtype <= 0 ||
+            encodedSubtype - 1 >= theUnitDatabase.prototypes.GetNumEntries() ||
+            low < 0 || low >= 32768 || high < 0 || high >= 65536)
+            return false;
+        const unsigned long long total =
+            static_cast<unsigned long long>(high) * 32768ull +
+            static_cast<unsigned long long>(low);
+        if (total > static_cast<unsigned long long>((std::numeric_limits<int>::max)()))
+            return false;
+        SAddonCarryEntry entry;
+        entry.subtype = static_cast<DWORD>(encodedSubtype - 1);
+        entry.money = static_cast<int>(total);
+        entries.push_back(entry);
+    }
+    return true;
+}
+
+bool AddonCarryPlan(CPlayer *player, CUnit *corpse, CUnit *collector,
+                    bool rollMoney, std::vector<SAddonCarryEntry> &entries,
+                    int &destinationCount, int &ownCount)
+{
+    std::vector<SAddonCarryEntry> source, destination;
+    if (!player || !corpse || !collector || corpse == collector ||
+        !AddonReadCarry(player, collector, destination) ||
+        !AddonReadCarry(player, corpse, source)) return false;
+    destinationCount = static_cast<int>(destination.size());
+    entries.clear();
+    ownCount = 0;
+    const SUDBUnitPrototype *prototype = corpse->GetPrototype();
+    if (!prototype) return false;
+    const SUDBUnitLoot &common = prototype->ulCommon;
+    const SUDBUnitLoot &rare = prototype->ulRare;
+    const bool moneyPossible =
+        (common.fpProbability > 0.0f &&
+         (common.fpPriceMin > 0.0f || common.fpPriceMax > 0.0f)) ||
+        (rare.fpProbability > 0.0f &&
+         (rare.fpPriceMin > 0.0f || rare.fpPriceMax > 0.0f));
+    if (!prototype->szDrops.empty() || moneyPossible)
+    {
+        SAddonCarryEntry own = { corpse->GetSubtypeID(), 0 };
+        if (rollMoney && moneyPossible)
+        {
+            int commonMoney = MINT(common.fpPriceMin);
+            if (common.fpPriceMax > common.fpPriceMin)
+                commonMoney = random.GetFloat(common.fpPriceMin, common.fpPriceMax);
+            if (float(Dice(100)) > common.fpProbability) commonMoney = 0;
+            int rareMoney = MINT(rare.fpPriceMin);
+            if (rare.fpPriceMax > rare.fpPriceMin)
+                rareMoney = random.GetFloat(rare.fpPriceMin, rare.fpPriceMax);
+            if (float(Dice(100)) > rare.fpProbability) rareMoney = 0;
+            const long long combined = static_cast<long long>(commonMoney) + rareMoney;
+            own.money = combined > (std::numeric_limits<int>::max)()
+                ? (std::numeric_limits<int>::max)()
+                : combined < 0 ? 0 : static_cast<int>(combined);
+        }
+        if (!rollMoney || !prototype->szDrops.empty() || own.money > 0)
+        {
+            entries.push_back(own);
+            ownCount = 1;
+        }
+    }
+    entries.insert(entries.end(), source.begin(), source.end());
+    return destinationCount + static_cast<int>(entries.size()) <= 128;
+}
+
+void AddonWriteCarryEntry(CPlayer *player, CUnit *carrier,
+                          int index, const SAddonCarryEntry &entry)
+{
+    char base[224], key[256], suffix[48];
+    const char *zone = player->party.szCurrentZone.GetString();
+    if (!zone || !*zone) zone = "unknown";
+    _snprintf_s(base, sizeof(base), _TRUNCATE,
+        "jmv.murderawareness.carry.%s.%d.%u.", zone,
+        carrier->GetID(), carrier->GetSubtypeID());
+    _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "entry.%d", index);
+    _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+    player->party.vars.SetVar(key, static_cast<float>(entry.subtype + 1));
+    const int low = entry.money % 32768;
+    const int high = entry.money / 32768;
+    _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "moneylo.%d", index);
+    _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+    player->party.vars.SetVar(key, static_cast<float>(low));
+    _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "moneyhi.%d", index);
+    _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+    player->party.vars.SetVar(key, static_cast<float>(high));
+}
+
+void AddonCommitCarry(CPlayer *player, CUnit *corpse, CUnit *collector,
+                      const std::vector<SAddonCarryEntry> &entries,
+                      int destinationCount)
+{
+    char base[224], key[256], suffix[48];
+    const char *zone = player->party.szCurrentZone.GetString();
+    if (!zone || !*zone) zone = "unknown";
+    _snprintf_s(base, sizeof(base), _TRUNCATE,
+        "jmv.murderawareness.carry.%s.%d.%u.", zone,
+        collector->GetID(), collector->GetSubtypeID());
+    for (size_t i = 0; i < entries.size(); ++i)
+        AddonWriteCarryEntry(player, collector,
+            destinationCount + static_cast<int>(i), entries[i]);
+    _snprintf_s(key, sizeof(key), _TRUNCATE, "%scount", base);
+    player->party.vars.SetVar(key,
+        static_cast<float>(destinationCount + entries.size()));
+    std::vector<SAddonCarryEntry> discarded;
+    if (AddonReadCarry(player, corpse, discarded))
+    {
+        _snprintf_s(base, sizeof(base), _TRUNCATE,
+            "jmv.murderawareness.carry.%s.%d.%u.", zone,
+            corpse->GetID(), corpse->GetSubtypeID());
+        for (size_t i = 0; i < discarded.size(); ++i)
+        {
+            const char *formats[] = { "entry.%d", "moneylo.%d", "moneyhi.%d" };
+            for (int k = 0; k < 3; ++k)
+            {
+                _snprintf_s(suffix, sizeof(suffix), _TRUNCATE, formats[k], static_cast<int>(i));
+                _snprintf_s(key, sizeof(key), _TRUNCATE, "%s%s", base, suffix);
+                player->party.vars.DelVar(key);
+            }
+        }
+        _snprintf_s(key, sizeof(key), _TRUNCATE, "%scount", base);
+        player->party.vars.DelVar(key);
+    }
+}
+
+bool AddonQueuePickupClip(SAddonCorpseSearch &search, CUnitServer *server,
+                          CUnit *unit, int tick)
+{
+    if (search.haulAnimationClip < 0 ||
+        search.haulAnimationClip >= search.haulAnimationCount) return false;
+    const SADEntry *entry = unit->GetAnimationEntry(
+        search.haulAnimationName[search.haulAnimationClip].c_str());
+    if (!entry || entry->dwEntryIndex !=
+        search.haulAnimationEntry[search.haulAnimationClip]) return false;
+    server->CmdPlayAnimation(entry->pszAnimationName);
+    search.haulAnimationPhase = 1;
+    search.haulAnimationQueuedTick = tick;
+    search.haulAnimationDeadline = tick + 55;
+    return true;
+}
+
+bool AddonSelectPickupAnimation(SAddonCorpseSearch &search,
+                                CUnitServer *server, CUnit *unit)
+{
+    const SADEntry *first = nullptr, *second = nullptr;
+    const SADEntry *stock = unit->GetAnimationEntry("uspecial22");
+    if (stock)
+    {
+        const bool bow = server->IsCurrentWeaponABow();
+        const bool standing = server->GetScriptPose() == UP_STAND;
+        const char *preferred = standing ? (bow ? "uspecial23" : "uspecial22")
+            : (bow ? "uspecial07" : "uspecial24");
+        first = unit->GetAnimationEntry(preferred);
+        if (!first) first = stock;
+        search.haulAnimationStrategy = "stock-loot";
+    }
+    else
+    {
+        first = unit->GetAnimationEntry("scross28");
+        second = unit->GetAnimationEntry("scross29");
+        if (first && second) search.haulAnimationStrategy = "kneel-cross";
+        else
+        {
+            first = unit->GetAnimationEntry("ucross01");
+            second = unit->GetAnimationEntry("ucross02");
+            if (first && second) search.haulAnimationStrategy = "pose-cross";
+            else
+            {
+                second = nullptr;
+                const DWORD flags = ADB_ACTION_ATTACK | ADB_STAGE_UNIQUE |
+                    ADB_STATE_ATTACK | ADB_MODIFIER_HDIRECTION1_MIDDLE |
+                    ADB_MODIFIER_VDIRECTION1_DOWN |
+                    server->GetCorpseAnimationWeaponMask();
+                first = unit->GetRandomAnimationEntry(flags);
+                if (!first) first = unit->GetRandomAnimationEntryNoWeapon(flags);
+                if (!first) first = unit->GetAnimationEntry("uattack");
+                if (!first) first = unit->GetAnimationEntry("uattack01");
+                search.haulAnimationStrategy = "downward-grab";
+            }
+        }
+    }
+    if (!first) return false;
+    search.haulAnimationCount = second ? 2 : 1;
+    search.haulAnimationClip = 0;
+    const SADEntry *entries[2] = { first, second };
+    for (int i = 0; i < search.haulAnimationCount; ++i)
+    {
+        search.haulAnimationName[i] = entries[i]->pszAnimationName;
+        search.haulAnimationEntry[i] = entries[i]->dwEntryIndex;
+        search.haulAnimationFrames[i] = entries[i]->dwAnimationLength;
+    }
+    return true;
+}
+
+bool AddonPickupAnimationRunning(const SUnitCommand &command, DWORD entry)
+{
+    return command.cmd == UC_PLAYANIM && command.dwParam == entry;
+}
+
+bool AddonDetachCorpseFromAIMap(CUnit *corpse)
+{
+    if (!corpse) return false;
+    if (corpse->nTileMapX < 0 && corpse->nTileMapY < 0) return true;
+    if (corpse->nTileMapX < 0 || corpse->nTileMapY < 0) return false;
+    return theWorldServer.aiMap.RemoveObject(corpse);
+}
+
+bool AddonUpdateCorpseHaul(CAIUnitLogic &logic, SAddonCorpseSearch &search,
+                           CUnit *observer, CUnitServer *server,
+                           CUnit *corpse, CPlayer *player,
+                           const std::string &zone, int tick)
+{
+    const std::string key = AddonHaulMarker(zone.c_str(), corpse);
+    const int owner = observer->GetID() + 1;
+    int claim = AddonCorpseReadInt(player, key.c_str());
+    if (claim < 0)
+    {
+        if (!AddonDetachCorpseFromAIMap(corpse))
+        {
+            search.nextHaulTick = tick + 91;
+            return true;
+        }
+        corpse->SetFlag(OBJ_HIDDEN | OBJ_UNSELECTABLE | UNIT_ALREADY_HOOVER);
+        corpse->SetUpdated();
+        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
+        player->party.vars.SetVar(memoryKey.c_str(), 0.0f);
+        search.corpseId = -1;
+        return true;
+    }
+    if (claim > 0 && claim != owner)
+    {
+        CUnit *other = theWorldServer.GetUnit(claim - 1);
+        CUnitSpecific *specific = other ? other->GetUnitSpecific() : nullptr;
+        if (other && !other->IsDead() && specific &&
+            specific->WhoAmI() == HPC_UNITSERVERSPECIFIC &&
+            !static_cast<CUnitServer *>(specific)->IsTamed() &&
+            AddonHasDutyForCorpseSearch(
+                static_cast<CUnitServer *>(specific)->logic))
+        {
+            search.nextHaulTick = tick + 91;
+            return true;
+        }
+        player->party.vars.SetVar(key.c_str(), 0.0f);
+        claim = 0;
+    }
+    if (AddonCorpseProtected(corpse))
+    {
+        if (claim == owner) player->party.vars.SetVar(key.c_str(), 0.0f);
+        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
+        player->party.vars.SetVar(memoryKey.c_str(), 3.0f);
+        search.corpseId = -1;
+        search.step = 0;
+        return true;
+    }
+    std::vector<SAddonCarryEntry> validation;
+    int destinationCount = 0, ownCount = 0;
+    if (!AddonCarryPlan(player, corpse, observer, false, validation,
+                        destinationCount, ownCount))
+    {
+        if (claim == owner) player->party.vars.SetVar(key.c_str(), 0.0f);
+        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
+        player->party.vars.SetVar(memoryKey.c_str(), 3.0f);
+        search.corpseId = -1;
+        search.step = 0;
+        return true;
+    }
+    if (!claim)
+    {
+        player->party.vars.SetVar(key.c_str(), static_cast<float>(owner));
+        if (AddonCorpseReadInt(player, key.c_str()) != owner) return true;
+        search.haulClaimTick = tick;
+        search.haulAttempts = 0;
+    }
+    if (search.haulClaimTick == 0) search.haulClaimTick = tick;
+    if (tick - search.haulClaimTick > 5455)
+    {
+        if (AddonCorpseReadInt(player, key.c_str()) == owner)
+            player->party.vars.SetVar(key.c_str(), 0.0f);
+        search.corpseId = -1;
+        search.step = 0;
+        return true;
+    }
+    if (search.haulAnimationPhase == 0 &&
+        (server->IsAggressive() || logic.GetScriptState() == US_ATTACK ||
+         logic.GetScriptState() == US_CAST || logic.GetScriptState() == US_SKILL))
+        return true;
+    if (search.haulAnimationPhase == 1)
+    {
+        const DWORD entry = search.haulAnimationEntry[search.haulAnimationClip];
+        const SUnitCommand &current = server->GetScriptCommand();
+        const SUnitCommand &next = server->GetNextScriptCommand();
+        if (AddonPickupAnimationRunning(current, entry))
+        {
+            search.haulAnimationPhase = 2;
+            const int frames = static_cast<int>(search.haulAnimationFrames[search.haulAnimationClip]);
+            search.haulAnimationDeadline = tick + ((frames > 0 ? frames : 30) * 40 + 32) / 33 + 55;
+            return true;
+        }
+        if (!AddonPickupAnimationRunning(next, entry) && tick > search.haulAnimationQueuedTick)
+            search.haulAnimationPhase = 0;
+        else if (tick < search.haulAnimationDeadline) return true;
+        else search.haulAnimationPhase = 0;
+    }
+    if (search.haulAnimationPhase == 2)
+    {
+        const DWORD entry = search.haulAnimationEntry[search.haulAnimationClip];
+        const SUnitCommand &current = server->GetScriptCommand();
+        const SUnitCommand &next = server->GetNextScriptCommand();
+        if (AddonPickupAnimationRunning(current, entry) ||
+            AddonPickupAnimationRunning(next, entry))
+        {
+            if (tick < search.haulAnimationDeadline) return true;
+            search.haulAnimationPhase = 0;
+        }
+        else
+        {
+            ++search.haulAnimationClip;
+            search.haulAnimationPhase = 0;
+            if (search.haulAnimationClip < search.haulAnimationCount)
+            {
+                if (AddonQueuePickupClip(search, server, observer, tick)) return true;
+                search.haulAnimationCount = 0;
+            }
+            else search.haulAnimationPhase = 3;
+        }
+    }
+    const CPlot3D position = corpse->GetCP();
+    const CPlot3D here = observer->GetCP();
+    const float dx = here.x - position.x, dy = here.y - position.y;
+    if (dx * dx + dy * dy <= 6.25f && search.haulAnimationPhase != 3)
+    {
+        if (server->GetScriptCommand().cmd != UC_PLAYANIM &&
+            server->GetNextScriptCommand().cmd != UC_PLAYANIM)
+        {
+            if (!search.haulAnimationCount &&
+                !AddonSelectPickupAnimation(search, server, observer))
+            {
+                player->party.vars.SetVar(key.c_str(), 0.0f);
+                search.corpseId = -1;
+                return true;
+            }
+            if (search.haulAnimationPhase == 0)
+            {
+                if (!AddonQueuePickupClip(search, server, observer, tick))
+                {
+                    player->party.vars.SetVar(key.c_str(), 0.0f);
+                    search.corpseId = -1;
+                }
+                return true;
+            }
+        }
+        return true;
+    }
+    if (search.haulAnimationPhase == 3 && dx * dx + dy * dy <= 6.25f)
+    {
+        if (tick < search.nextHaulTick) return true;
+        std::vector<SAddonCarryEntry> validationPlan;
+        if (!AddonCarryPlan(player, corpse, observer, false, validationPlan,
+                            destinationCount, ownCount))
+        {
+            player->party.vars.SetVar(key.c_str(), 0.0f);
+            search.corpseId = -1;
+            return true;
+        }
+        if (!AddonDetachCorpseFromAIMap(corpse))
+        {
+            search.nextHaulTick = tick + 91;
+            return true;
+        }
+        std::vector<SAddonCarryEntry> plan;
+        if (!AddonCarryPlan(player, corpse, observer, true, plan,
+                            destinationCount, ownCount))
+        {
+            player->party.vars.SetVar(key.c_str(), 0.0f);
+            search.corpseId = -1;
+            return true;
+        }
+        AddonCommitCarry(player, corpse, observer, plan, destinationCount);
+        player->party.vars.SetVar(key.c_str(), -static_cast<float>(owner));
+        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
+        player->party.vars.SetVar(memoryKey.c_str(), 0.0f);
+        corpse->SetFlag(OBJ_HIDDEN | OBJ_UNSELECTABLE | UNIT_ALREADY_HOOVER);
+        corpse->SetUpdated();
+        CMapObjPtrHashIterator iterator;
+        for (CMapObject *object = iterator.GetFirst(&theWorldServer.dynamicObjs);
+             object; object = iterator.GetNext())
+        {
+            if (object->WhoAmI() != HPC_UNIT) continue;
+            CUnit *unit = static_cast<CUnit *>(object);
+            CUnitSpecific *specific = unit->GetUnitSpecific();
+            if (!specific || specific->WhoAmI() != HPC_UNITSERVERSPECIFIC) continue;
+            CAIUnitEnvironment &environment =
+                static_cast<CUnitServer *>(specific)->logic.environment;
+            CMapObjectPtrList *lists[] = { &environment.units,
+                &environment.visibleUnits, &environment.seenCorpses,
+                &environment.freshCorpses };
+            for (int n = 0; n < 4; ++n)
+            {
+                POSITION pos = lists[n]->GetHeadPosition();
+                while (pos)
+                {
+                    POSITION current = pos;
+                    if (lists[n]->GetNext(pos) == corpse)
+                        lists[n]->RemoveAt(current);
+                }
+            }
+        }
+        search.corpseId = -1;
+        search.step = 0;
+        search.haulAnimationCount = 0;
+        search.haulAnimationPhase = 0;
+        search.nextScanTick = tick + 18;
+        return true;
+    }
+    if (tick >= search.nextHaulTick)
+    {
+        CAIUnitEnvironment &environment = logic.environment;
+        if (environment.GetPoIPower() < 900)
+            environment.AddPoI(position, 900, -3);
+        search.nextHaulTick = tick + 91;
+        ++search.haulAttempts;
+    }
+    return true;
+}
+void AddonUpdateCorpseInvestigation(CAIUnitLogic &logic)
+{
+    CUnit *observer = logic.GetUnit();
+    CUnitServer *server = logic.GetUnitServer();
+    if (!observer || !server || observer->IsDead() || observer->IsHero() ||
+        observer->GetOwner() || server->IsTamed() ||
+        !observer->GetPrototype() ||
+        !AddonRaceCanInvestigate(observer->GetPrototype()->szRace.GetString()) ||
+        !AddonHasDutyForCorpseSearch(logic))
+        return;
+
+    CPlayer *player = theWorldServer.GetPlayer(0);
+    const char *zoneName = player ? player->party.szCurrentZone.GetString() : nullptr;
+    const std::string zone = zoneName && *zoneName ? zoneName : "unknown";
+    if (!player) return;
+    if (zone != g_addonCorpseSearchZone)
+    {
+        g_addonCorpseSearchZone = zone;
+        g_addonCorpseSearch.clear();
+    }
+    const int tick = theWorldServer.GetSegmentTimeCounter();
+    SAddonCorpseSearch &search = g_addonCorpseSearch[observer->GetID()];
+    if (search.observerSubtype != observer->GetSubtypeID())
+    {
+        search = SAddonCorpseSearch();
+        search.observerSubtype = observer->GetSubtypeID();
+    }
+
+    if (tick >= search.nextScanTick)
+    {
+        search.nextScanTick = tick + 18;
+        CMapObjectPtrList &corpses = logic.environment.seenCorpses;
+        int candidateId = -1;
+        DWORD candidateSubtype = 0;
+        CPlot3D candidateCenter(0, 0, 0);
+        int candidatePhase = 0;
+        float candidateDistance2 = 0.0f;
+        for (POSITION pos = corpses.GetHeadPosition(); pos;)
+        {
+            CUnit *corpse = static_cast<CUnit *>(corpses.GetNext(pos));
+            if (!corpse || corpse == observer || !corpse->IsDead() ||
+                !theWorldServer.fof.IsPlayerAlly(
+                    observer->GetPlayerNum(), corpse->GetPlayerNum()))
+                continue;
+            const std::string key = AddonCorpseMarker(
+                observer, corpse, zone.c_str());
+            float stored = player ? player->party.vars.GetVar(key.c_str()) : 0.0f;
+            if (!std::isfinite(stored)) stored = 0.0f;
+            const int phase = static_cast<int>(stored + (stored >= 0 ? 0.5f : -0.5f));
+            if (phase < 1)
+            {
+                if (player) player->party.vars.SetVar(key.c_str(), 1.0f);
+                char alert[192];
+                _snprintf_s(alert, sizeof(alert), _TRUNCATE,
+                    "jmv.murderawareness.%s.%d", zone.c_str(), observer->GetID());
+                if (player)
+                {
+                    player->party.vars.SetVar(alert, 1.0f);
+                    player->party.vars.SetVar((std::string(alert) + ".until").c_str(),
+                        static_cast<float>(tick + 5455));
+                }
+            }
+            if (phase <= 2)
+            {
+                const CPlot3D position = corpse->GetCP();
+                const float dx = observer->GetCP().x - position.x;
+                const float dy = observer->GetCP().y - position.y;
+                const float distance2 = dx * dx + dy * dy;
+                if (candidateId < 0 || distance2 < candidateDistance2 ||
+                    (distance2 == candidateDistance2 && corpse->GetID() < candidateId))
+                {
+                    candidateId = corpse->GetID();
+                    candidateSubtype = corpse->GetSubtypeID();
+                    candidateCenter = position;
+                    candidatePhase = phase;
+                    candidateDistance2 = distance2;
+                }
+            }
+        }
+        if (search.corpseId < 0 && candidateId >= 0)
+        {
+            search.corpseId = candidateId;
+            search.corpseSubtype = candidateSubtype;
+            search.center = candidateCenter;
+            search.step = candidatePhase >= 2 ? 3 : 0;
+            ++search.pointSerial;
+            search.seed = static_cast<unsigned>(observer->GetID()) * 2654435761u ^
+                static_cast<unsigned>(candidateId + 1) * 2246822519u ^
+                static_cast<unsigned>(tick) ^
+                search.pointSerial * 3266489917u;
+            search.waiting = candidatePhase == 0;
+            search.sawAggressive = false;
+            search.initialReaction = candidatePhase == 0;
+            search.reactionDeadline = tick + 91;
+        }
+    }
+
+    if (search.corpseId < 0) return;
+    CUnit *corpse = theWorldServer.GetUnit(search.corpseId);
+    if (!corpse || corpse->GetSubtypeID() != search.corpseSubtype ||
+        !corpse->IsDead())
+    {
+        search.corpseId = -1;
+        search.waiting = false;
+        return;
+    }
+
+    if (search.step >= 3 && !search.waiting)
+    {
+        const std::string key = AddonCorpseMarker(
+            observer, corpse, zone.c_str());
+        if (player) player->party.vars.SetVar(key.c_str(), 2.0f);
+        AddonUpdateCorpseHaul(logic, search, observer, server, corpse,
+                              player, zone, tick);
+        return;
+    }
+
+    if (search.waiting)
+    {
+        if (server->IsAggressive())
+        {
+            search.sawAggressive = true;
+            return;
+        }
+        if (search.sawAggressive || tick >= search.reactionDeadline)
+        {
+            search.waiting = false;
+            search.initialReaction = false;
+            search.nextStepTick = tick + 18;
+        }
+        return;
+    }
+    if (tick < search.nextStepTick || server->IsAggressive() ||
+        logic.GetScriptState() == US_ATTACK ||
+        logic.GetScriptState() == US_CAST ||
+        logic.GetScriptState() == US_SKILL)
+        return;
+
+    CAIUnitEnvironment &environment = logic.environment;
+    if (environment.GetPoIPower() >= 800)
+    {
+        search.nextStepTick = tick + 18;
+        return;
+    }
+
+
+    static const float directions[16][2] = {
+        {1.0f,0.0f},{0.9239f,0.3827f},{0.7071f,0.7071f},{0.3827f,0.9239f},
+        {0.0f,1.0f},{-0.3827f,0.9239f},{-0.7071f,0.7071f},{-0.9239f,0.3827f},
+        {-1.0f,0.0f},{-0.9239f,-0.3827f},{-0.7071f,-0.7071f},{-0.3827f,-0.9239f},
+        {0.0f,-1.0f},{0.3827f,-0.9239f},{0.7071f,-0.7071f},{0.9239f,-0.3827f}
+    };
+    const unsigned index = (search.seed + static_cast<unsigned>(search.step) *
+        ((search.seed & 0x10u) ? 5u : 7u)) & 15u;
+    const float radius = search.step == 0 ? 5.0f : search.step == 1 ? 10.0f : 15.0f;
+    CPlot3D point = search.center;
+    point.x += directions[index][0] * radius;
+    point.y += directions[index][1] * radius;
+    if (environment.AddPoI(point, 800, -3))
+    {
+        ++search.step;
+        search.waiting = true;
+        search.sawAggressive = false;
+        search.reactionDeadline = tick + 91;
+        search.nextStepTick = tick + 18;
+    }
+    else
+    {
+        search.nextStepTick = tick + 18;
+    }
+}
+}
+#include "ModGroupSearch/Native.inl"
+static bool ModDeathFearActive(const CUnit *unit){if(!unit)return false;auto i=modDeathFearStates.find(unit->GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit->GetSubtypeID();}
+static bool ModDeathFearRoutePending(const CUnit *unit){if(!unit)return false;auto i=modDeathFearStates.find(unit->GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit->GetSubtypeID()&&i->second.pending;}
+void ModDeathFearReset(){modDeathFearStates.clear();modDeathFearExcluded.clear();modDeathFearConfigReady=false;modDeathFearEnter=15;modDeathFearExit=30;modDeathFearDistance=25;modDeathFearSpeed=.65f;}
+float CModPackage::DeathFearSpeedFactor(const CUnit&unit)const{auto i=modDeathFearStates.find(unit.GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit.GetSubtypeID()?modDeathFearSpeed:1.0f;}
+static void ModDeathFearUpdate(CAIUnitLogic &logic){
+ CUnitServer*s=logic.GetUnitServer();CUnit*u=logic.GetUnit();if(!s||!u||u->GetID()<0)return;DF_Config();
+ auto&st=modDeathFearStates[u->GetID()];if(st.unit!=u||st.subtype!=u->GetSubtypeID()){st=SModDeathFearState();st.unit=u;st.subtype=u->GetSubtypeID();st.marker=DF_Marker(u);}
+ auto*map=s->GetMapObjectServer();auto*stats=map?map->GetRPGStats():nullptr;if(!stats||stats->ssHP.fpMax<=0||!std::isfinite(stats->ssHP.fpMax))return;
+ const float hp=stats->ssHP.fpCurrent,maxhp=stats->ssHP.fpMax,pct=hp*100.0f/maxhp;const auto*current=logic.GetCurrentGeneralLogic();const bool valid=DF_Eligible(u,s);
+ CPlayer*player=DF_Player();const float marker=player?player->party.vars.GetVar(st.marker.c_str()):0.0f;
+ auto clearMarker=[&](){if(player)player->party.vars.DelVar(st.marker.c_str());};
+ auto writeMarker=[&](int mode){if(player)player->party.vars.SetVar(st.marker.c_str(),float(mode+1));};
+ auto leave=[&](){int mode=st.originalMode;st.active=false;st.pending=false;st.safe=false;st.direction=0;clearMarker();s->NotifyModSpeedChanged();if(mode==0||mode==1)DF_SetMode(s,mode);};
+ if(u->IsDead()||hp<=0){st.active=false;st.pending=false;st.safe=false;clearMarker();return;}
+ if(!valid){if(st.active)leave();else if(marker>0)clearMarker();return;}
+ current=logic.GetCurrentGeneralLogic();int mode=current?int(current->aggressionMode):-1;
+ if(!st.active&&(marker==1||marker==2)&&pct<modDeathFearExit){st.originalMode=int(marker+.5f)-1;st.active=true;st.pending=false;if(!DF_SetMode(s,3)){st.active=false;clearMarker();return;}s->NotifyModSpeedChanged();}
+ else if(!st.active&&marker>0&&pct>=modDeathFearExit){int restore=int(marker+.5f)-1;clearMarker();if(restore==0||restore==1)DF_SetMode(s,restore);}
+ if(!st.active){
+  const bool combat=current&&current->eLogicModel!=UM_IDLE&&current->eLogicModel!=UM_PLAYER&&(mode==UAM_AGGRESSIVE||mode==UAM_REVENGE);
+  if(pct<modDeathFearEnter&&combat&&(s->IsAggressive()||s->HasAttack()||s->HasCast())){
+   st.originalMode=mode;st.active=true;st.pending=false;st.safe=false;st.direction=0;writeMarker(mode);
+   if(!DF_SetMode(s,3)){st.active=false;clearMarker();return;}s->NotifyModSpeedChanged();
+  }else return;
+ }
+ if(pct>=modDeathFearExit){leave();return;}
+ float nearestDistance=-1;CUnit*hero=DF_Nearest(u,nearestDistance);if(hero)DF_Flee(st,s,nearestDistance,hero);
+}
 void CAIUnitLogic::Segment()
 {
     int nBestPower, nPower;
@@ -2212,6 +3059,10 @@ void CAIUnitLogic::Segment()
 
     // update environment
     environment.Segment(pUnitServer);
+
+    AddonUpdateCorpseInvestigation(*this);
+
+    ModDeathFearUpdate(*this);
 
     RecalcEnemyVisible();
 
@@ -2580,8 +3431,23 @@ void CAIUnitLogic::PatchCallForHelpRadius()
         fpCallForHelpRadius = theAIGeneralSettings.fpCallForHelpRadius;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CAIUnitLogic::ChangeCurrentAggressionMode(int mode)
+{
+    const int alarm = static_cast<int>(nCurrentAlarm);
+    if (alarm < 0 || alarm >= alarmLogics.GetSize()) return false;
+    SGeneralUnitLogic updated = alarmLogics[alarm];
+    updated.aggressionMode = static_cast<EUnitAggressionMode>(mode);
+    SetLogic(updated, alarm);
+    return true;
+}
 void CAIUnitLogic::SetLogic(SGeneralUnitLogic &logic, int nAlarm)
 {
+    CUnitServer *deathFearServer = GetUnitServer();
+    CUnit *deathFearUnit = deathFearServer ? deathFearServer->GetUnit() : nullptr;
+    auto deathFearIt = deathFearUnit ? modDeathFearStates.find(deathFearUnit->GetID()) : modDeathFearStates.end();
+    const bool forceDeathFear = deathFearIt != modDeathFearStates.end() && deathFearIt->second.active && deathFearIt->second.unit == deathFearUnit && logic.eLogicModel != UM_IDLE && logic.eLogicModel != UM_PLAYER;
+    const int requestedDeathFearMode = static_cast<int>(logic.aggressionMode);
+    if (forceDeathFear) { if (requestedDeathFearMode == UAM_AGGRESSIVE || requestedDeathFearMode == UAM_REVENGE) { deathFearIt->second.originalMode = requestedDeathFearMode; if (CPlayer *p = DF_Player()) p->party.vars.SetVar(DF_Marker(deathFearUnit).c_str(), float(requestedDeathFearMode + 1)); } logic.aggressionMode = UAM_FEARPLAYER; }
     int i, k;
     CUMPatrol *pPatrol;
     ClearMotivations();
@@ -2668,6 +3534,7 @@ void CAIUnitLogic::SetLogic(SGeneralUnitLogic &logic, int nAlarm)
     caster.Initialize(GetUnit());
     if (bAlwaysOnTheRun)
         theWorldServer.AddObjectToActiveSet(GetUnit());
+    if (forceDeathFear) logic.aggressionMode = static_cast<EUnitAggressionMode>(requestedDeathFearMode);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitLogic::SetLogics(SGeneralUnitLogic *pLogics, int nNumber)
@@ -2695,10 +3562,17 @@ void CAIUnitLogic::ExecFollow()
     if (nFollowRest++ < 8)
         return;
     //
-    float FP_FOLLOW_DISTANCE_2 = sqr(theAIGeneralSettings.fpFollowMaxDist);
-    float FP_MIN_FOLLOW_DISTANCE_2 = sqr(theAIGeneralSettings.fpFollowMinDist);
-    float FP_GETAWAY = 1.3f;
     CUnit *pUnit = pUnitServer->GetUnit();
+    float minimum = theAIGeneralSettings.fpFollowMinDist;
+    float maximum = theAIGeneralSettings.fpFollowMaxDist;
+    if (CompanionFollowBand(pUnit, minimum, maximum) && pTarget->WhoAmI() == HPC_UNIT) {
+        const EUnitPose pose = static_cast<CUnit *>((CMapObject *)pTarget)->GetShowPose();
+        if (pose >= UP_LAY && pose <= UP_RUN && pUnit->GetShowPose() != pose)
+            pUnitServer->LowNewWishPose(pose);
+    }
+    float FP_FOLLOW_DISTANCE_2 = sqr(maximum);
+    float FP_MIN_FOLLOW_DISTANCE_2 = sqr(minimum);
+    float FP_GETAWAY = 1.3f;
     float fpTargetDist = fabs(pTarget->GetCP() - pUnit->GetCP());
     int nTime = theWorldServer.GetSegmentTimeCounter();
     //
@@ -2872,6 +3746,12 @@ void CAIUnitLogic::ExecAttack()
 /////////////////////////////////////////////////////////////////////////////////////
 // low level commands starting
 /////////////////////////////////////////////////////////////////////////////////////
+void CAIUnitLogic::TurnGroupSearch(float angle)
+{
+    pUnitServer->CmdRotate(CPlot3D(std::cos(angle), std::sin(angle), 0), 2.0f);
+    state = US_MOVE;
+}
+
 void CAIUnitLogic::StartIdle()
 {
     pTarget = NULL;

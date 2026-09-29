@@ -439,7 +439,7 @@ void CI3DLevelMessageBox::OnActivate()
                                       RGB(0, 0, 0), DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
     }
 
-    nMBHeight = nTitleHeight + 48 + 4 * MB_FRAME_WIDTH + nHelpHeight;
+    nMBHeight = nTitleHeight + 72 + 4 * MB_FRAME_WIDTH + nHelpHeight;
     nTop = (550 - nMBHeight) / 2;
 
     pSurf->DrawText(szTitle,
@@ -449,21 +449,26 @@ void CI3DLevelMessageBox::OnActivate()
 
     pSurf->DrawText(szDamnCasualHelp,
                     CRect(MB_FRAME_WIDTH,
-                          nTop - nSurfaceShift + 48 + 3 * MB_FRAME_WIDTH + nTitleHeight,
+                          nTop - nSurfaceShift + 72 + 3 * MB_FRAME_WIDTH + nTitleHeight,
                           400 - MB_FRAME_WIDTH, 450),
                     1, RGB(228, 215, 167), DT_LEFT | DT_WORDBREAK);
 
-    CString szEasy, szHard;
+    CString szEasy, szNormal, szHard;
+    theWorld.GetTextManager()->GetSystemString("difficulty_norm", szNormal);
     theWorld.GetTextManager()->GetSystemString("difficulty_easy", szEasy);
     theWorld.GetTextManager()->GetSystemString("difficulty_hard", szHard);
-    int nTempWidth = (pI3D->TextSize(szEasy, 2).cx + pI3D->TextSize(szHard, 2).cx) / 2;
+    int nTempWidth = Max(pI3D->TextSize(szNormal, 2).cx,
+        Max(pI3D->TextSize(szEasy, 2).cx, pI3D->TextSize(szHard, 2).cx));
     int nWidth = (nTempWidth + 30) / 2;
 
     int nLevel1 = nTop + 2 * MB_FRAME_WIDTH + nTitleHeight;
     pSurf->DrawText(szEasy, CRect(230 - nWidth, nLevel1 - nSurfaceShift, 400 - MB_FRAME_WIDTH, 450),
                     2, RGB(228, 215, 167), DT_LEFT);
-    pSurf->DrawText(szHard,
+    pSurf->DrawText(szNormal,
                     CRect(230 - nWidth, nLevel1 - nSurfaceShift + 24, 400 - MB_FRAME_WIDTH, 450), 2,
+                    RGB(228, 215, 167), DT_LEFT);
+    pSurf->DrawText(szHard,
+                    CRect(230 - nWidth, nLevel1 - nSurfaceShift + 48, 400 - MB_FRAME_WIDTH, 450), 2,
                     RGB(228, 215, 167), DT_LEFT);
     pSurf->ReleaseDC();
 
@@ -475,6 +480,8 @@ void CI3DLevelMessageBox::OnActivate()
     pFig = AddFigure();
     pFig->MakeBar(2.5f, 100, 400 - nWidth, nLevel1 + 24, 421 - nWidth, nLevel1 + 45, 209, 55, 230,
                   76);
+    pFig = AddFigure();
+    pFig->MakeBar(2.5f, 100, 400 - nWidth, nLevel1 + 48, 421 - nWidth, nLevel1 + 69, 209, 55, 230, 76);
     pFig->SetUShift(-23 / 256.f);
 
     pFig = AddFigure();
@@ -505,6 +512,8 @@ void CI3DLevelMessageBox::OnActivate()
     pArea->MakeRect(400 - nWidth, nLevel1, 421 - nWidth, nLevel1 + 21);
     pArea = AddArea();
     pArea->MakeRect(400 - nWidth, nLevel1 + 24, 421 - nWidth, nLevel1 + 45);
+    pArea = AddArea();
+    pArea->MakeRect(400 - nWidth, nLevel1 + 48, 421 - nWidth, nLevel1 + 69);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DLevelMessageBox::OnLButtonDown(UINT nFlags, CPoint point)
@@ -522,14 +531,11 @@ void CI3DLevelMessageBox::OnLButtonDown(UINT nFlags, CPoint point)
         pI3D->ExitFromModal(dwParam | 0x00000002);
         break;
     case 2:
-        figures[0]->SetUShift(-23 / 256.f);
-        figures[1]->SetUShift(0);
-        nDifficulty = 1;
-        break;
     case 3:
-        figures[1]->SetUShift(-23 / 256.f);
-        figures[0]->SetUShift(0);
-        nDifficulty = 0;
+    case 4:
+        for (int i = 0; i < 3; ++i)
+            figures[i]->SetUShift(i == ht - 2 ? -23 / 256.f : 0);
+        nDifficulty = 4 - ht; // easy=2, normal=1, hard=0, as consumed by mod Lua
         break;
     }
 }

@@ -41,6 +41,7 @@ public:
     virtual ~CI3DScrollBar() {}
 
     int GetRange();
+    int CurrentPosition() const { return m_nCurPos; }
     BOOL GetPos(int &nPos); // if position changed return true
     virtual void SetPos(int nPos);
     void SetPosToEnd()

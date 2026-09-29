@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "Notification.h"
+#include "EngineDiagnostics.h"
 #include "Console.h"
 #include "adFormat.h"
 
@@ -28,6 +29,7 @@ static std::string FormatTime(const SYSTEMTIME &time)
 
 static void TraceString(const char *str)
 {
+    EngineDiagnostics::Note(str);
     SYSTEMTIME time;
     GetLocalTime(&time);
 

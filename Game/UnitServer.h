@@ -404,6 +404,7 @@ private:
                            // активизированы
 public:
     friend class CModPackage;
+    friend class CAIUnitLogic; // source-equivalent follower wish-pose synchronization
     bool CanRequestWeaponSkill(int slot,CMapObject*target);
     bool CanRequestPointSkill(int slot,const CPlot3D& point);
     bool TagPointSkill(int slot);
@@ -515,6 +516,7 @@ private:
 public:
     float GetCurrentWeaponRange();
     bool IsCurrentWeaponABow();
+    DWORD GetCorpseAnimationWeaponMask() { return GetAnimationWeaponMask(); }
 
 private:
     ERPGWeaponTypes GetCurrentWeaponType() const;
@@ -618,6 +620,7 @@ public:
     void Clear();
     // some additional function that simplify some calls
     void AddUpdateMask(int nBit) { lpUnit->SetUpdateMask(nBit); }
+    void NotifyModSpeedChanged() { L1SpeedChanged(); }
     virtual CAIFullRoute *GetRoute() { return &path.curSegment; }
     CMapObjectServer *GetMapObjectServer()
     {
@@ -653,6 +656,7 @@ public:
     virtual int GetHeroLevel() const;
     // some item notifications
     virtual BOOL NotifyItemsUpdated();
+    void SynchronizeItemMana(CItem *pItem) { if (pItem) SpendItemMana(pItem, 0.0f); }
     virtual void InventoryUpdated() {}
     BOOL ChangeWeapon(DWORD dwQWeaponIndex);
     virtual bool Wear(DWORD dwArmor);
@@ -680,11 +684,13 @@ public:
     void InitializeUnit();
     void SetAggression(bool bAggr) { wishPose.bAggressive = bAggr; }
     bool IsAggressive() { return wishPose.bAggressive; }
+    CPlot3D GetScriptMoveFinalPoint() { return path.GetFinalPoint(); }
     bool IsCmdFailed()
     {
         return bLcCommandFail;
     } // previous Cast/Skill/Loot/Attack/Move command failed
     bool IsAlwaysActive() { return logic.IsAlwaysActive(); }
+    bool IsTamed() const { return tameLevel != UTL_NONE; }
     void CmdRotate(const CPlot3D &vecDest, float fpAngSpeed);
     void CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd = false,
                    float fpMaxPathDist = 1e6f);
@@ -699,6 +705,8 @@ public:
     void CmdScience(CMapObject *pTarget, int nItemID, bool bRun);
     void CmdLoot(CUnit *pTarget, bool bRun);
     void CmdWait();
+    void StopGroupSearchMotion();
+    bool GroupSearchPathMatches(const CPlot3D &target, float tolerance);
     void CmdRest();
     void CmdNewPose(EUnitPose pose);
     void CmdNewWeapon(DWORD dwWeapon);

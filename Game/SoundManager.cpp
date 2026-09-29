@@ -9,9 +9,12 @@
  *>	Copyright (c) 1998, Nival Entertainment
  **********************************************************************/
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "SoundManager.h"
+#include "MilesCodecDirectory.h"
+#include "MilesTestPluginFilter.h"
 #include "ModRuntime.h"
 #include "ModAudioConfig.h"
 #include "ModAudioPolicy.h"
@@ -178,6 +181,9 @@ void SFadeControl::RecalcMixerVolume()
 
 CSoundManager::CSoundManager()
 {
+    const std::string codecs = EIRebuildMilesCodecDirectory();
+    MilesTestPluginFilter::Install();
+    AIL_set_redist_directory(codecs.c_str());
     AIL_startup();
     Create();
 }
@@ -718,9 +724,10 @@ bool CSoundManager::CaptureModSound(const char* name)
 }
 HSOUND CSoundManager::BeginScenarioVoice(const char* name,int volume,const MiniaudioOneShotSfx::PartyVoiceBinding* party)
 {
-    if(!ModRuntime::Current() || !CaptureModSound(name))return SND_EMPTY;
+    EngineDiagnostics::Event("ScenarioVoice file=%s volume=%d speechMaster=%d ready=%d",name,volume,nSpeechMasterVolume,bReady);
+    if(!ModRuntime::Current() || !CaptureModSound(name)){EngineDiagnostics::Event("ScenarioVoice capture failed: %s",name);return SND_EMPTY;}
     const DWORD id=dwUniqueCnt;if(id==DWORD(SND_EMPTY))return SND_EMPTY;
-    if(MiniaudioOneShotSfx::TryStartVirtualFlat(this,id,name,ModAudioPolicy::Priority(1000,name,false,true,false),volume,0,false,false,true,false,1.f,1.f,party,true)==MiniaudioOneShotSfx::STARTED){dwUniqueCnt=id+1;return id;}return SND_EMPTY;
+    if(MiniaudioOneShotSfx::TryStartVirtualFlat(this,id,name,ModAudioPolicy::Priority(1000,name,false,true,false),volume,0,false,false,true,false,1.f,1.f,party,true)==MiniaudioOneShotSfx::STARTED){EngineDiagnostics::Event("ScenarioVoice started id=%lu",id);dwUniqueCnt=id+1;return id;}EngineDiagnostics::Event("ScenarioVoice start failed: %s",MiniaudioOneShotSfx::LastStartReason());return SND_EMPTY;
 }
 
 HSOUND CSoundManager::BeginFXInt(LPCSTR pszSoundName, int nPriority, int nPercentVolume,

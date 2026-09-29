@@ -666,7 +666,11 @@ void CI3DScreenOptions::FormControlsList()
             szState = "ON";
             IWorld.GetTextManager()->GetSystemString("option_on", szState);
             if (i == OPTION_DIFFICULTY)
+            {
+                IWorld.GetTextManager()->GetSystemString("difficulty_norm", szState);
+                pControl->pSwitcher->AddState(szState);
                 IWorld.GetTextManager()->GetSystemString("difficulty_easy", szState);
+            }
             pControl->pSwitcher->AddState(szState);
             AddObject(pControl->pSwitcher);
             pControl->pSlider = 0;

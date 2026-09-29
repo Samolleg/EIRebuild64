@@ -9,6 +9,7 @@
 #include "DXShader.h"
 #include "RendererDX11.h"
 #include "ModShadowDX11.h"
+#include "UIColorKeyBlit.h"
 
 #include "batchers.h"
 #include "Utils.h"
@@ -247,8 +248,17 @@ void CDX11::ScreenShot()
     m_bMakeScreenShot = true;
 }
 
+HRESULT CDX11::DrawColorKeySurface(ID3D11ShaderResourceView* image,
+    const RECT& destination, const RECT* source, COLORREF key)
+{
+    if (!uiColorKey) uiColorKey = std::make_shared<UIColorKeyBlit>();
+    return uiColorKey->Draw(deviceContext.Get(), spriteBatch.get(), m_states.get(),
+        image, destination, source, key);
+}
+
 CDX11::~CDX11()
 {
+    uiColorKey.reset();
     this->spriteBatch.reset();
     this->spriteFont.reset();
     this->m_states.reset();

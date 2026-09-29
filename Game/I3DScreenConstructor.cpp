@@ -13,6 +13,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PerkDatabase.h"
 #include "Party.h"
 #include "MapFormat.h"
+#include "GeneralSettings.h"
 /////////////////////////////////////////////////////////////////////////////////////
 const COLORREF INV_COLOR_NUMBERS = RGB(228, 215, 167);
 const COLORREF INV_COLOR_PRICE = RGB(228, 215, 167);
@@ -1521,13 +1522,49 @@ void CI3DObjectNameStats::UpdateStats()
 
         int nWeight = (int)pScreen->GetCurrentPers()->GetItemsWeight();
         int nEncumbr = (int)pStats->fpMaxEncumbrance;
-        OutputSkill(rc, pszStatsNames[7], nWeight, nEncumbr);
-        rc += shift;
-        if (nWeight > nEncumbr)
-            pSurf->DrawText(szStrings[OVERLOAD], rc, 0, RGB(255, 0, 0), DT_RIGHT);
-        rc += shift;
-
+        if(auto*mod=ModRuntime::Current()){
+            float seconds=0;mod->CampInfo(*pPers,pUnit,nEncumbr,seconds);
+            if(pTxtMng->GetText("perk Encumbrance"))pTxtMng->GetLine(szTmp);
+            pSurf->DrawText(szTmp,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
+            int percent=nEncumbr>0?int(100.0f*nWeight/nEncumbr):0;
+            szOut.Format(nWeight>nEncumbr?"%d/%d(%d%%)!":"%d/%d(%d%%)",nWeight,nEncumbr,percent);
+            COLORREF color=percent>=100?RGB(255,110,70):percent>=80?RGB(245,130,90):percent>=65?RGB(240,150,110):percent>=50?RGB(235,170,130):CAMP_COLOR_SKILLS;
+            pSurf->DrawText(szOut,rc,0,color,DT_RIGHT);rc+=shift;
+            CString unitText;if(pTxtMng->GetText("string infounit_18"))pTxtMng->GetLine(szTmp);
+            if(pTxtMng->GetText("string infoskill_49"))pTxtMng->GetLine(unitText);
+            szOut.Format("%s %.1f%s",(LPCSTR)szTmp,seconds,(LPCSTR)unitText);
+            pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);rc+=shift;
+        }else{
+            OutputSkill(rc, pszStatsNames[7], nWeight, nEncumbr);rc+=shift;
+            if(nWeight>nEncumbr)pSurf->DrawText(szStrings[OVERLOAD],rc,0,RGB(255,0,0),DT_RIGHT);
+            rc+=shift;
+        }
         pSurf->DrawText(szStrings[MAGICSKILLS], rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+    }
+    else if (ModRuntime::Current() && pUnit)
+    {
+        // Current addon UpdateStats uses replicated primary stats, difficulty HP,
+        // overload-adjusted mana and unwounded camp action rate.
+        int capacity=0;float seconds=0,actions=0,mana=0;
+        ModRuntime::Current()->CampInfo(*pPers,pUnit,capacity,seconds,&actions,&mana);
+        auto* user=pUnit->GetUserUnitStats();
+        rc=CRect(20,65,180,80);
+        OutputSkill(rc,"Strength",int(user->cStrength));rc+=shift;
+        OutputSkill(rc,"Dexterity",int(user->cDexterity));rc+=shift;
+        OutputSkill(rc,"Intelligence",int(user->cIntelligence));rc+=shift;rc+=shift;
+        OutputSkill(rc,"Health",int(pUnit->GetMaxHP()*(1+theSettings.nDifficultyLevel*.25f)));rc+=shift;
+        OutputSkill(rc,"Mana",int(mana));rc+=shift;
+        OutputSkill(rc,"Actions",actions);rc+=shift;
+        OutputSkill(rc,"Experience",int(pStats->GetRealExp()));rc+=shift;
+        int weight=int(pPers->GetItemsWeight());
+        OutputSkill(rc,"Encumbrance",weight,capacity);rc+=shift;
+        if(weight>capacity)pSurf->DrawText(szStrings[OVERLOAD],rc,0,RGB(255,0,0),DT_RIGHT);
+        CString sight,meters;
+        if(pTxtMng->GetText("string infounit_6"))pTxtMng->GetLine(sight);
+        if(pTxtMng->GetText("string infounit_13"))pTxtMng->GetLine(meters);
+        pSurf->DrawText(sight,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
+        szOut.Format("%d%s",int(MINT(pStats->senses[RPGS_SIGHT].fpEffectiveValue)+pStats->GetPerkModifier(11)),(LPCSTR)meters);
+        pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);
     }
     else
     {
@@ -1622,13 +1659,22 @@ void CI3DObjectNameStats::OutputHLAbsorb(CRect &rc, LPCTSTR pszHLName, ERPGHitLo
     {
         fpAbsorbtions[i] = 0;
         for (int j = 0; j < RPG_NUM_ARMOR_LAYERS; j++)
-            fpAbsorbtions[i] += pStats->hls[eHL].layers[j].fpAbsorbtions[i];
+            fpAbsorbtions[i] += pStats->hls[eHL].layers[j].fpAbsorbtions[i] *
+                (ModRuntime::Current()?1+pStats->GetPerkModifier(i<3?5:22)*.01f:1);
     }
 
     float fMaxAbsorb = 0;
     for (int i = 0; i < RPG_NUM_ATTACK_TYPES - 1; i++)
         fMaxAbsorb = Max(fpAbsorbtions[i], fMaxAbsorb);
-    szTmp.Format("%.1f", fMaxAbsorb);
+    if(ModRuntime::Current()){
+        float physical=0,magic=0;
+        for(int i=0;i<3;++i)physical=Max(physical,fpAbsorbtions[i]);
+        for(int i=3;i<RPG_NUM_ATTACK_TYPES-1;++i)magic=Max(magic,fpAbsorbtions[i]);
+        CString physicalIcon,magicIcon;
+        if(pTxtMng->GetText("string infoitem_83"))pTxtMng->GetLine(physicalIcon);
+        if(pTxtMng->GetText("string infoitem_82"))pTxtMng->GetLine(magicIcon);
+        szTmp.Format("%s%.1f %s%.1f",(LPCSTR)physicalIcon,physical,(LPCSTR)magicIcon,magic);
+    }else szTmp.Format("%.1f", fMaxAbsorb);
     surfaces[0]->DrawText(szTmp, rc, 0, CAMP_COLOR_SKILLS, DT_RIGHT);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1971,6 +2017,10 @@ void CI3DObjectPerks::Init()
     pTxtMng->GetSystemString("perks_av", szTmp);
     szStrings.Add(szTmp);
 
+    if(ModRuntime::Current()){
+        GetArea(8)->MakeRect(0,0,0,0);
+        GetArea(9)->MakeRect(0,0,0,0);
+    }
     UpdateBackup();
 
     nLock = -1;
@@ -2235,6 +2285,15 @@ void CI3DObjectPerks::RedrawPerks()
     CPoint shift(0, 15);
     int i, n;
     COLORREF cr, cr2;
+    auto perkColor=[&](const CString& code,COLORREF fallback){
+        if(!ModRuntime::Current())return fallback;
+        int index=thePerkDatabase.GetPerkIndex(code);if(index<0)return fallback;
+        int group=index/3;
+        if(group<=6||group==29)return RGB(230,160,160);
+        if((group>=10&&group<=16)||group==30||group==23)return RGB(160,230,160);
+        if((group>=17&&group<=23)||(group>=7&&group<=9)||group==31)return RGB(160,160,200);
+        return CAMP_COLOR_SKILLS;
+    };
 
     while (figures.GetSize() > 4)
         RemoveFigure(figures.GetSize() - 1);
@@ -2244,7 +2303,7 @@ void CI3DObjectPerks::RedrawPerks()
     pSurf->DrawText(szStrings[PERKSAV], CRect(200, 10, 400, 25), 0, CAMP_COLOR_HEADER, DT_CENTER);
 
     CRect rc(15, 35, 180, 50);
-    for (i = 0; i < RPG_NUM_ACTUAL_AUTO_SKILLS; i++)
+    for (i = 0; i < (ModRuntime::Current()?4:RPG_NUM_ACTUAL_AUTO_SKILLS); i++)
     {
         if (i == 2)
         {
@@ -2255,7 +2314,7 @@ void CI3DObjectPerks::RedrawPerks()
         pSurf->DrawText(skillsAuto[i].szName, rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
         szOut.Format("%d", skillsAuto[i].nValue);
         pSurf->DrawText(szOut, rc - CPoint(40, 0), 0, CAMP_COLOR_SKILLS, DT_RIGHT);
-        if (skillsAuto[i].nValue < 100)
+        if (skillsAuto[i].nValue < (ModRuntime::Current()?120:100))
         {
             FormPerkPrice(skillsAuto[i].nPrice, szOut);
             if (skillsAuto[i].nPrice <= nCharPoints)
@@ -2277,7 +2336,7 @@ void CI3DObjectPerks::RedrawPerks()
         pSurf->DrawText(skillsManual[i].szName, rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
         szOut.Format("%d", skillsManual[i].nValue);
         pSurf->DrawText(szOut, rc - CPoint(40, 0), 0, CAMP_COLOR_SKILLS, DT_RIGHT);
-        if (skillsManual[i].nValue < 100)
+        if (skillsManual[i].nValue < (ModRuntime::Current()?120:100))
         {
             FormPerkPrice(skillsManual[i].nPrice, szOut);
             if (skillsManual[i].nPrice <= nCharPoints)
@@ -2294,7 +2353,7 @@ void CI3DObjectPerks::RedrawPerks()
     rc = CRect(15, 230, 180, 245);
     for (i = 0, n = nPosReal; i < CAMP_NUM_REAL_PERKS_VISIBLE && n < perksReal.size(); i++, n++)
     {
-        pSurf->DrawText(perksReal[n].szName, rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+        pSurf->DrawText(perksReal[n].szName, rc, 0, perkColor(perksReal[n].szCode,CAMP_COLOR_SKILLS), DT_LEFT);
         if (!perksReal[n].szNextCode.IsEmpty())
         {
             if (perksReal[n].nPrice <= nCharPoints)
@@ -2326,7 +2385,7 @@ void CI3DObjectPerks::RedrawPerks()
             cr = CAMP_COLOR_SKILLS_DIS;
             cr2 = CAMP_COLOR_SKILLS_DIS;
         }
-        pSurf->DrawText(perksAv[n].szName, rc, 0, cr, DT_LEFT);
+        pSurf->DrawText(perksAv[n].szName, rc, 0, perkColor(perksAv[n].szCode,cr), DT_LEFT);
         FormPerkPrice(perksAv[n].nPrice, szOut);
         pSurf->DrawText(szOut, rc, 0, cr2, DT_RIGHT);
         AddFigure()->MakeBar(6, 100, 550, rc.top + 100, 590, rc.bottom + 100, 124, 138, 164, 153);
@@ -2370,7 +2429,7 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
     if (ht >= 4 && ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS)
     {
         num = ht - 4;
-        if (skillsAuto[num].nValue >= 100 || skillsAuto[num].nPrice > nCharPoints)
+        if (skillsAuto[num].nValue >= (ModRuntime::Current()?120:100) || skillsAuto[num].nPrice > nCharPoints)
             return;
         pStats->cAutoSkills[num]++;
         pStats->fSpentExp += skillsAuto[num].nPrice;
@@ -2385,7 +2444,7 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
         ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS)
     {
         num = ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS;
-        if (skillsManual[num].nValue >= 100 || skillsManual[num].nPrice > nCharPoints)
+        if (skillsManual[num].nValue >= (ModRuntime::Current()?120:100) || skillsManual[num].nPrice > nCharPoints)
             return;
         pStats->cManualSkills[num]++;
         pStats->fSpentExp += skillsManual[num].nPrice;
@@ -2445,7 +2504,7 @@ void CI3DObjectPerks::OnIdle()
     if (ht >= 4 && ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS)
     {
         num = ht - 4;
-        if (skillsAuto[num].nValue >= 100 || skillsAuto[num].nPrice > nCharPoints)
+        if (skillsAuto[num].nValue >= (ModRuntime::Current()?120:100) || skillsAuto[num].nPrice > nCharPoints)
         {
             pI3D->ReleaseCapture();
             nLock = -1;
@@ -2460,7 +2519,7 @@ void CI3DObjectPerks::OnIdle()
         ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS)
     {
         num = ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS;
-        if (skillsManual[num].nValue >= 100 || skillsManual[num].nPrice > nCharPoints)
+        if (skillsManual[num].nValue >= (ModRuntime::Current()?120:100) || skillsManual[num].nPrice > nCharPoints)
         {
             pI3D->ReleaseCapture();
             nLock = -1;

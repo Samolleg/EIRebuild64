@@ -27,6 +27,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "aiSettings.h"
 #include "PlayerClient.h"
 #include "PlayerServer.h"
+#include "ModAnimationRules.h"
+#include "EngineDiagnostics.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #define _NOTIFY_FILE 0
 
@@ -52,7 +54,7 @@ static bool HasWideAnimationId(DWORD start, DWORD cycle)
 }
 static BYTE EncodeAnimationId(DWORD id)
 {
-    return id == 0xff || id == 0xffffffffu ? 0xff :
+    return id == 0xffffffffu ? 0xff :
         (id > 253 ? 0xfe : static_cast<BYTE>(id));
 }
 
@@ -311,14 +313,12 @@ void CUnit::LowStartAnimation(BYTE start, BYTE cycle, int nStartSegment, BYTE nS
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::RestoreExtendedAnimationIds(DWORD start, DWORD cycle)
 {
-    fullStartAnimation = NormalizeAnimationId(start);
-    fullCycleAnimation = NormalizeAnimationId(cycle);
+    fullStartAnimation = start;
+    fullCycleAnimation = cycle;
     bExtendedAnimationId = HasWideAnimationId(fullStartAnimation, fullCycleAnimation);
 }
 void CUnit::LowStartAnimationExtended(DWORD start, DWORD cycle, int segment, BYTE sound)
 {
-    start = NormalizeAnimationId(start);
-    cycle = NormalizeAnimationId(cycle);
     LowStartAnimation(EncodeAnimationId(start), EncodeAnimationId(cycle), segment, sound);
     if (HasWideAnimationId(start, cycle))
     {
@@ -1012,7 +1012,7 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
         fpRotateSpeed = fpMoveSpeed;
         break;
     }
-    if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this);fpMoveSpeed*=factor;fpRotateSpeed*=factor;}
+    if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this),fear=mod->DeathFearSpeedFactor(*this);if(fear<factor)factor=fear;fpMoveSpeed*=factor;fpRotateSpeed*=factor;}
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1187,6 +1187,18 @@ const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
         return nullptr;
     }
 
+    // Source GetAnimation supplements the native mask for extended weapon types.
+    if (GetTypeID() == MOTID_HUMAN && ModRuntime::Current() &&
+        ModRuntime::Current()->CombatSetting("JMVAttacks"))
+        if (CItemWeapon *weapon = GetCurrentQWeapon()) {
+            switch (weapon->GetWeaponType()) {
+            case RPGWST_HANDS7: dwAnimationFlags &= ~ADB_STATE_REST; dwAnimationFlags |= ADB_WEAPON_SPEAR; break;
+            case RPGWST_HANDS4: dwAnimationFlags |= ADB_WEAPON_SWORD; break;
+            case RPGWST_HANDS5: dwAnimationFlags |= ADB_WEAPON_AXE; break;
+            case RPGWST_HANDS6: dwAnimationFlags |= ADB_WEAPON_HAMMER; break;
+            case RPGWST_CROSSBOW: dwAnimationFlags |= ADB_WEAPON_CROSSBOW; break;
+            }
+        }
     const SADEntry *pEntry = GetRandomAnimationEntry(dwAnimationFlags);
     if (!pEntry)
     {
@@ -1215,27 +1227,17 @@ const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
         }
 #endif
     }
-    // Redirect the addon's two-handed interaction clips before their indices
-    // enter the byte-sized animation sequence.
-    if (pEntry && GetTypeID() == MOTID_HUMAN &&
-        ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVAttacks"))
+    if (pEntry && GetTypeID() == MOTID_HUMAN && ModRuntime::Current() &&
+        ModRuntime::Current()->CombatSetting("JMVAttacks"))
     {
-        const char *name = pEntry->pszAnimationName;
-        const char *suffix = nullptr;
-        if (_strnicmp(name, "2hauspecial", 11) == 0 ||
-            _strnicmp(name, "2hsuspecial", 11) == 0)
-            suffix = name + 11;
-        if (suffix && (_stricmp(suffix, "22") == 0 ||
-                       _stricmp(suffix, "04") == 0 ||
-                       _stricmp(suffix, "05") == 0 ||
-                       _stricmp(suffix, "06") == 0 ||
-                       _stricmp(suffix, "07") == 0 ||
-                       _stricmp(suffix, "24") == 0))
-        {
-            CString ordinary = CString("uspecial") + suffix;
-            if (const SADEntry *replacement = GetAnimationEntry(ordinary))
-                pEntry = replacement;
-        }
+        const SADEntry *selected = ModAnimationRules::Check2hAnimation(this, pEntry->pszAnimationName, dwAnimationFlags);
+        static unsigned notes = 0;
+        if (selected != pEntry && notes++ < 80)
+            EngineDiagnostics::Event("Animation map unit=%d weapon=%d from=%s/%u to=%s/%u", GetID(),
+                GetCurrentQWeapon() ? int(GetCurrentQWeapon()->GetWeaponType()) : -1,
+                pEntry->pszAnimationName, pEntry->dwEntryIndex,
+                selected ? selected->pszAnimationName : "missing", selected ? selected->dwEntryIndex : 0xffffffffu);
+        pEntry = selected;
     }
     return pEntry;
 }

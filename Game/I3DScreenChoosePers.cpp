@@ -720,7 +720,7 @@ void CI3DScreenChoosePers::DeployUnit(bool bShowHelm)
 
     const SADEntry *pEntry = pUnit->GetSpecialAnimationEntry(33);
     if (pEntry)
-        pUnit->LowStartAnimation(0xff, pEntry->dwEntryIndex,
+        pUnit->LowStartAnimationExtended(0xffffffffu, pEntry->dwEntryIndex,
                                  (timeGetTime() / 1024.0f) * 15 - random.Get(0, 50), 0);
     pUnit->ChangeWeapon(-1);
     pUnit->GetUnitSpecific()->NotifyWeaponUpdated();

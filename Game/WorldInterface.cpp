@@ -256,6 +256,23 @@ void CWorldClientInterface::GoCamp(EInterface iface)
     theWorld.GetPlayer()->GoCamp(iface);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CWorldClientInterface::GoFieldCamp()
+{
+    CPlayer *player = theWorldServer.GetPlayer(0);
+    CPlayerServer *server = player ? static_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
+    if (!server || !theWorldServer.BeginFieldCamp()) return;
+    server->SetVar("Camp", 2.0f);
+    GoCamp(IFACE_CAMP);
+}
+/////////////////////////////////////////////////////////////////////////////////////
+bool CWorldClientInterface::BeginFieldCampCommerceSuppression()
+{
+    return theWorldServer.BeginFieldCampCommerceSuppression();
+}
+void CWorldClientInterface::EndFieldCampCommerceSuppression(bool active)
+{
+    theWorldServer.EndFieldCampCommerceSuppression(active);
+}
 void CWorldClientInterface::FinishConstructing()
 {
     theInterface.SetScreensMustDie();
@@ -765,6 +782,7 @@ BOOL CWorldConnector::StoreZoneState(CParty &party)
         theCamera.SetCurrentAsShortcut(6);
     szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     szCurrentPath += szZone + ".sav";
+    if (auto* mod = ModRuntime::Current()) mod->SaveSkillCooldowns(party.vars);
     if (!ModAnimationIdSave::PrepareSave(theWorldServer, party.vars))
         return FALSE;
     if (!file.OpenWrite(szCurrentPath))
@@ -919,6 +937,7 @@ BOOL CWorldConnector::SaveGame(const char *pszSaveName)
     //
     CParty party;
     theHat.GetSinglePlayerParty(party);
+    if (auto* mod = ModRuntime::Current()) mod->SaveSkillCooldowns(party.vars);
     if (!ModAnimationIdSave::PrepareSave(theWorldServer, party.vars))
         return FALSE;
     //

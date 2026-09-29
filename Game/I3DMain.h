@@ -148,6 +148,7 @@ public:
 
     // fonts
     CFont *GetFont(int i) { return pTTFonts[i]; }
+    CFont **GetFontSlot(int i) { return &pTTFonts[i]; }
     CSize TextSize(CString szStr, int nFont);
 
     // sounds
