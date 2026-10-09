@@ -107,7 +107,13 @@ public:
     OwnedRendererClient() = default;
     OwnedRendererClient(const OwnedRendererClient&) = delete;
     OwnedRendererClient& operator=(const OwnedRendererClient&) = delete;
-    ~OwnedRendererClient() { if (host) api.destroy_host(host); }
+    ~OwnedRendererClient() { Shutdown(); }
+    void Shutdown() noexcept {
+        // Release the client's SRV leases before destroying the host/device.
+        figureTextures.clear();figureMeshes.clear();figureIdentities.clear();
+        if(host){api.destroy_host(host);host=nullptr;}
+        figureScene=0;figureScopeActive=false;
+    }
 
     HRESULT Initialize(HWND window, unsigned width, unsigned height) {
         wchar_t executable[32768] = {};

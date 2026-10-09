@@ -948,7 +948,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     theWorld.GetTextureManager()->DeleteUnitLayerTextures();
     theInterface.Fini();
     theCursor.Fini();
-    GetRenderer()->Destroy();
+    // GPU-backed world resources are released before the renderer session.
     //
     theSettings.WriteSettingsToRegistry(theWorld.GetRegistryKey());
 #if !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
@@ -958,6 +958,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     theWorld.SetCamera(0);
     theWorldServer.Destroy();
     theWorld.Destroy();
+    GetRenderer()->Destroy();
 
     DumpUnfreedMemory(AMTS_BYFILENAME);
     //_CrtDumpMemoryLeaks();
