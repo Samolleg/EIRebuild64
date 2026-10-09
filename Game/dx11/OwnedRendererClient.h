@@ -14,6 +14,9 @@
 class OwnedRendererClient {
     HMODULE module = nullptr;
     EIRenderApiV5 terrainApi = {};
+    EIRenderMeshReportApiV1 meshReportApi = {};
+    std::string figureModel,figurePart;
+    std::unordered_map<uint64_t,std::string> meshFailures;
     EIRenderApiV4& figureApi = terrainApi.base;
     EIRenderApiV3& sourceApi = figureApi.base;
     uint64_t figureScene = 0, nextFigureIdentity = 1;
@@ -135,7 +138,7 @@ public:
     void Shutdown() noexcept {
         FinishPackets();
         // Release the client's SRV leases before destroying the host/device.
-        figureTextures.clear();figureMeshes.clear();figureIdentities.clear();
+        figureTextures.clear();figureMeshes.clear();figureIdentities.clear();meshFailures.clear();
         if(host){api.destroy_host(host);host=nullptr;}
         figureScene=0;figureScopeActive=false;
     }
@@ -171,13 +174,16 @@ public:
         if (FAILED(result)) return result;
         if (statusApi.base.size != sizeof(statusApi) || statusApi.base.version != EI_RENDERER_STATUS_API_VERSION ||
             !statusApi.get_status_v2) return E_NOINTERFACE;
+        result=query(EI_RENDERER_MESH_REPORT_API_VERSION,sizeof(meshReportApi),&meshReportApi);
+        if(FAILED(result)||!meshReportApi.register_mesh_report)return E_NOINTERFACE;
         const EIRenderHostDescV1 desc = {sizeof(desc), window, width, height};
         result = api.create_host(&desc, &host);
         if (SUCCEEDED(result)) { ownerThread = GetCurrentThreadId(); JournalRendererState(); }
         return result;
     }
 
-    void BeginFigure(const EIRenderFigureV4& input,const char* name) {
+    void BeginFigure(const EIRenderFigureV4& input,const char* name,const char* model=nullptr) {
+        figurePart=name?name:"";figureModel=model?model:"unknown";
         figureScope=input;figureScope.scene_generation=figureScene;
         const auto key=std::make_pair(input.object_id,std::string(name?name:""));
         auto found=figureIdentities.find(key);
@@ -209,8 +215,24 @@ public:
         auto found=figureMeshes.find(geometryIdentity);
         HRESULT hr=S_OK;
         if(found==figureMeshes.end()||found->second.revision!=geometryRevision) {
-            uint64_t handle=0;hr=figureApi.register_mesh(host,&mesh,&handle);
-            if(FAILED(hr)){FigureFallback("mesh_registration_failed");return false;}
+            uint64_t handle=0;EIRenderMeshReportV1 report{sizeof(report),1,{}};
+            // The original registration entry remains compatible; Initialize
+            // queries the independent table for precise validator failures.
+            hr=meshReportApi.register_mesh_report?meshReportApi.register_mesh_report(host,&mesh,&handle,&report):figureApi.register_mesh(host,&mesh,&handle);
+            if(FAILED(hr)) {
+                const std::string reason=report.reason[0]?report.reason:"mesh_registration_failed";
+                const std::string key=std::to_string(geometryRevision)+":"+std::to_string(hr)+":"+reason;
+                auto failed=meshFailures.find(geometryIdentity);
+                if(failed==meshFailures.end()||failed->second!=key) {
+                    meshFailures[geometryIdentity]=key;
+                    GameJournal::Event("RENDER","mesh_rejected",
+                        "object=%llu model=%s part_name=%s part=%u scene=%llu geometry=%llu revision=%llu hr=%08lx positions=%u normals=%u uv=%u components=%u indices=%u reason=%s",
+                        figureScope.object_id,figureModel.c_str(),figurePart.c_str(),figureScope.part,figureScene,
+                        geometryIdentity,geometryRevision,static_cast<unsigned long>(hr),mesh.position_groups,mesh.normal_groups,mesh.uv_count,mesh.component_count,mesh.index_count,reason.c_str());
+                }
+                FigureFallback(reason.c_str());return false;
+            }
+            meshFailures.erase(geometryIdentity);
             found=figureMeshes.insert_or_assign(geometryIdentity,MeshEntry{handle,geometryRevision,figureFrame}).first;
         }
         found->second.lastUsed=figureFrame;
@@ -252,7 +274,7 @@ public:
     HRESULT BeginWorld(const EIRenderWorldFrameV2& frame, uint32_t& skyConsumed) {
         const HRESULT hr=worldApi.begin_world(host, &frame, &skyConsumed);
         if(SUCCEEDED(hr)) {
-            if(figureScene!=frame.world_generation){FinishPackets();figureIdentities.clear();figureMeshes.clear();figureTextures.clear();figureFrame=0;packetHistory=false;}
+            if(figureScene!=frame.world_generation){FinishPackets();figureIdentities.clear();figureMeshes.clear();figureTextures.clear();meshFailures.clear();figureFrame=0;packetHistory=false;}
             ++figureFrame;
             figureScene=frame.world_generation;packets={};figureScopeActive=false;
         }
