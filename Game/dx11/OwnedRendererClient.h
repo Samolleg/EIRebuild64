@@ -62,21 +62,45 @@ class OwnedRendererClient {
         std::map<std::string,uint64_t> reasons;
         bool operator==(const PacketCounts& b) const {return accepted==b.accepted&&rejected==b.rejected&&legacy==b.legacy&&reasons==b.reasons;}
     };
-    std::array<PacketCounts,4> packets{}, previousPackets{};
+    std::array<PacketCounts,4> packets{}, previousPackets{}, packetTotals{};
     bool packetHistory = false;
-    void PublishPackets() {
+    std::array<ULONGLONG,4> packetLastMs{};
+    std::array<bool,4> packetKnown{};
+    static bool SameReasonSet(const PacketCounts& a,const PacketCounts& b) {
+        if(a.reasons.size()!=b.reasons.size())return false;
+        auto x=a.reasons.begin(),y=b.reasons.begin();
+        for(;x!=a.reasons.end();++x,++y)if(x->first!=y->first)return false;
+        return true;
+    }
+    void PacketLine(const char* event,unsigned i,const PacketCounts& p) {
         const char* names[]={"static","characters","equipment","terrain"};
-        for(unsigned i=0;i<4;++i)if(!packetHistory || !(packets[i]==previousPackets[i])) {
-            const auto& p=packets[i];
-            std::string reasons;
-            for(const auto& reason:p.reasons) {
-                if(!reasons.empty())reasons+=",";
-                reasons+=reason.first+":"+std::to_string(reason.second);
-            }
-            GameJournal::Event("RENDER","packets","category=%s accepted=%llu rejected=%llu legacy=%llu reason=%s",
-                names[i],p.accepted,p.rejected,p.legacy,reasons.empty()?"none":reasons.c_str());
+        std::string reasons;
+        for(const auto& reason:p.reasons) {
+            if(!reasons.empty())reasons+=",";
+            reasons+=reason.first+":"+std::to_string(reason.second);
         }
-        previousPackets=packets;packetHistory=true;
+        GameJournal::Event("RENDER",event,"scene=%llu category=%s accepted=%llu rejected=%llu legacy=%llu reason=%s",
+            figureScene,names[i],p.accepted,p.rejected,p.legacy,reasons.empty()?"none":reasons.c_str());
+    }
+    void FinishPackets() {
+        if(!packetHistory)return;
+        for(unsigned i=0;i<4;++i)PacketLine("packets_summary",i,packetTotals[i]);
+        packetTotals={};packetKnown={};packetLastMs={};packetHistory=false;
+    }
+    void PublishPackets(ULONGLONG now=GetTickCount64()) {
+        for(unsigned i=0;i<4;++i) {
+            const auto& p=packets[i];auto& total=packetTotals[i];
+            total.accepted+=p.accepted;total.rejected+=p.rejected;total.legacy+=p.legacy;
+            for(const auto& reason:p.reasons)total.reasons[reason.first]+=reason.second;
+            // Counts fluctuate each frame; only a changed set of reasons is
+            // actionable. Delayed changes are compared with the last log.
+            if((!packetKnown[i]||!SameReasonSet(p,previousPackets[i]))&&
+               (!packetKnown[i]||now-packetLastMs[i]>=5000)) {
+                PacketLine("packets",i,p);previousPackets[i]=p;
+                packetLastMs[i]=now;packetKnown[i]=true;
+            }
+        }
+        packetHistory=true;
     }
     EIRenderApiV2& worldApi = sourceApi.base;
     EIRenderApiV1& api = worldApi.base;
@@ -109,6 +133,7 @@ public:
     OwnedRendererClient& operator=(const OwnedRendererClient&) = delete;
     ~OwnedRendererClient() { Shutdown(); }
     void Shutdown() noexcept {
+        FinishPackets();
         // Release the client's SRV leases before destroying the host/device.
         figureTextures.clear();figureMeshes.clear();figureIdentities.clear();
         if(host){api.destroy_host(host);host=nullptr;}
@@ -227,7 +252,7 @@ public:
     HRESULT BeginWorld(const EIRenderWorldFrameV2& frame, uint32_t& skyConsumed) {
         const HRESULT hr=worldApi.begin_world(host, &frame, &skyConsumed);
         if(SUCCEEDED(hr)) {
-            if(figureScene!=frame.world_generation){figureIdentities.clear();figureMeshes.clear();figureTextures.clear();figureFrame=0;packetHistory=false;}
+            if(figureScene!=frame.world_generation){FinishPackets();figureIdentities.clear();figureMeshes.clear();figureTextures.clear();figureFrame=0;packetHistory=false;}
             ++figureFrame;
             figureScene=frame.world_generation;packets={};figureScopeActive=false;
         }
