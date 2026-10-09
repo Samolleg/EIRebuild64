@@ -5754,7 +5754,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     CPlayer *pPlayer = GetUnit()->GetOwner();
     if (pPlayer)
     {
-        if (pPlayer->bGod)
+        if (pPlayer->bGod >= 2)
             return FALSE;
         if (ModConditionalCombat::RejectOtherExperienceOwner(inheritedDefense,
                 pExpDest && pExpDest->GetOwner() && pPlayer != pExpDest->GetOwner()))
