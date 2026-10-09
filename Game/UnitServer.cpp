@@ -4463,7 +4463,7 @@ void CUnitServer::SelectStandingIdle(SL0AnimationSeq &sequence)
 
     const DWORD flags = GetAnimationWeaponMask() | ADB_STATE_NEUTRAL |
         ADB_ACTION_IDLE | ADB_STAGE_CYCLE | ADB_MODIFIER_IDLE_STAY;
-    if (!lpUnit->GetAnimationByIndex(254) || !lpUnit->pADFileHdr)
+    if (!lpUnit->GetAnimationEntryByIndex(254) || !lpUnit->pADFileHdr)
         return;
 
     const SADEntry *entry = nullptr;
