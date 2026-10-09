@@ -1,16 +1,20 @@
 #include "stdafx.h"
+#include "GameJournal.h"
 
 #include <string>
 #include <fstream>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 
 #include "Notification.h"
+#include "GameMain.h"
 #include "EngineDiagnostics.h"
 #include "Console.h"
 #include "adFormat.h"
+#include "ModCliTool.h"
 
 // DirectX error to string conversion
 #include "Notification.inl"
@@ -51,21 +55,53 @@ static void TraceString(const char *str)
 #endif
 }
 
-static void Report(const char *reportType, const char *additionalInfo, const char *format,
-                   va_list argList)
+static void ReportMessage(const char *reportType, const char *buffer, const char *additionalInfo,
+                          bool plainError)
 {
-    char buffer[1024] = { 0 };
-    wvsprintf(buffer, format, argList);
+    if (plainError && !strcmp(reportType, "Error")) GameJournal::MemoryErrorText(buffer);
+    GameJournal::Event("ERROR", "notification", "type=%s text=%s extra=%s", GameJournal::Quote(reportType).c_str(), GameJournal::Quote(buffer).c_str(), GameJournal::Quote(additionalInfo).c_str());
+    GameJournal::FlushCritical();
+    if (ModCliTool::Active())
+    {
+        printf("[%s]: %s%s\n", reportType, buffer, additionalInfo);
+        if (!strcmp(reportType, "Error") &&
+            ModCliTool::StopAfterError(plainError, EngineDiagnostics::AntiCrashEnabled()))
+            std::exit(-1); // Proven original CRT exit; no exception/fault policy substitute.
+        return;
+    }
+    if (!strcmp(reportType, "Error"))
+    {
+        const bool suppressed = plainError && EngineDiagnostics::AntiCrashEnabled();
+        if (suppressed)
+            EngineDiagnostics::Report(buffer, true);
+        else
+        {
+            const std::string message = std::string(buffer) + additionalInfo;
+            NGame::MessageBox(message.c_str(), MB_OK | MB_ICONERROR);
+        }
+        const std::uint32_t count = ++ModCliTool::ErrorCount();
+        if (!suppressed && count < 0x80000000u && count >= 1u)
+            std::exit(-1);
+        return;
+    }
     std::stringstream ss;
     ss << "[" << reportType << "]: " << buffer << additionalInfo << std::endl;
     TraceString(ss.str().c_str());
+}
+
+static void Report(const char *reportType, const char *additionalInfo, const char *format,
+                   va_list argList, bool plainError = false)
+{
+    char buffer[1024] = { 0 };
+    wvsprintf(buffer, format, argList);
+    ReportMessage(reportType, buffer, additionalInfo, plainError);
 }
 
 bool ReportError(const char *format, ...)
 {
     va_list argList;
     va_start(argList, format);
-    Report("Error", "", format, argList);
+    Report("Error", "", format, argList, true);
     va_end(argList);
 
     return false;
@@ -73,6 +109,7 @@ bool ReportError(const char *format, ...)
 
 bool ReportError(HRESULT code, const char *format, ...)
 {
+    if (code == E_OUTOFMEMORY) GameJournal::AllocationFailure("ReportError_hresult");
     char buffer[1024] = { 0 };
     sprintf(buffer, " (0x%.8lX) %s", code, ErrorToString(code));
 
@@ -86,7 +123,12 @@ bool ReportError(HRESULT code, const char *format, ...)
 
 bool ReportError(HRESULT code)
 {
-    return ReportError(code, "");
+    if (code == E_OUTOFMEMORY) GameJournal::AllocationFailure("ReportError_hresult");
+    char buffer[1024] = { 0 };
+    sprintf(buffer, "(0x%.8lX) %s", code, ErrorToString(code));
+    ReportMessage("Error", buffer, "", false);
+
+    return false;
 }
 
 void ReportWarning(const char *format, ...)

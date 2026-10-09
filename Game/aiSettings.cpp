@@ -6,7 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Notification.h"
 #include "WinRegistry.h"
 #include "FileRegistry.h"
-#include "IniFile.h"
+#include "EngineDiagnostics.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CAIGeneralSettings theAIGeneralSettings;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -77,8 +77,8 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
 {
     if (bLoaded)
         return;
-    // CFileRegistry reg;
-    CIniFile reg;
+// The configured ai.reg is a binary registry, including float arrays.
+    CFileRegistry reg;
 
     if (!reg.Open(pszFileName))
     {
@@ -149,9 +149,8 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
         fDefenceLevels[i] = 1;
     }
 
-    // TODO: почему INI файл не умеет читать массивы?
     // absorption
-    /* reg.GetFloatArray("DifficultyLevels", "Absorption", floats);
+    reg.GetFloatArray("DifficultyLevels", "Absorption", floats);
     for (int i = 0; i < Min(floats.GetSize(), 3); ++i)
         fAbsorptionLevels[i] = floats[i];
     // attacks
@@ -163,6 +162,9 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
     floats.RemoveAll();
     reg.GetFloatArray("DifficultyLevels", "Defence", floats);
     for (int i = 0; i < Min(floats.GetSize(), 3); ++i)
-        fDefenceLevels[i] = floats[i];*/
+        fDefenceLevels[i] = floats[i];
+    bLoaded = true;
+    EngineDiagnostics::Event("AI_SETTINGS source=%s ranged_run=%.3f ranged_attack=%.3f follow=%.3f/%.3f backstab=%.3f/%.3f",
+        pszFileName, fpRangedRunDist, fpRangedAttackDist, fpFollowMinDist, fpFollowMaxDist, fpBackstabAdd, fpBackstabMult);
 }
 /////////////////////////////////////////////////////////////////////////////////////

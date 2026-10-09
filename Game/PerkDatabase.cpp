@@ -113,6 +113,8 @@ BOOL CPerkDatabase::LoadDatabase(LPCSTR pszPath, LPCSTR pszFName)
     file.Seek(0);
     file.StartLoading();
     saver.Start(file, true);
+    // Invalidate borrowed records before any existing vector replacement, including partial load.
+    recordIdentity = std::make_shared<RecordIdentity>();
     saver.AddT(1, skills);
     saver.AddT(2, perks);
     saver.Finish(file);

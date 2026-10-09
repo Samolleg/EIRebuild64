@@ -720,8 +720,20 @@ bool CSoundManager::CaptureModSound(const char* name)
     void* bytes=GetFXFileFromResources(name,&size,&resource);
     if(!bytes)return false;
     struct Release {CMappedResource* r;void* b;~Release(){r->CloseFile((BYTE*)b);}} release{resource,bytes};
-    return MiniaudioOneShotSfx::CaptureEncoded(name,bytes,size,"native_res");
+    return MiniaudioOneShotSfx::CaptureEncoded(name,bytes,size,"native_res",
+        reinterpret_cast<uintptr_t>(resource));
 }
+HSOUND CSoundManager::BeginPartySignalFX(const char* name,int priority,unsigned sourceId,float nearDistance,float farDistance)
+{
+    if(!ModRuntime::Current() || !CaptureModSound(name))return SND_EMPTY;
+    const DWORD id=dwUniqueCnt;if(id==DWORD(SND_EMPTY))return SND_EMPTY;
+    const MiniaudioOneShotSfx::PartyVoiceBinding binding={sourceId,nearDistance,farDistance};
+    float gain=1.f,pitch=1.f;ModAudioPolicy::Variation(name,false,false,false,gain,pitch);
+    // Party binding changes gain only; priority, master volume and pause remain FX.
+    if(MiniaudioOneShotSfx::TryStartVirtualFlat(this,id,name,priority,100,0,false,false,false,false,gain,pitch,&binding,false)==MiniaudioOneShotSfx::STARTED){dwUniqueCnt=id+1;return id;}
+    return SND_EMPTY;
+}
+
 HSOUND CSoundManager::BeginScenarioVoice(const char* name,int volume,const MiniaudioOneShotSfx::PartyVoiceBinding* party)
 {
     EngineDiagnostics::Event("ScenarioVoice file=%s volume=%d speechMaster=%d ready=%d",name,volume,nSpeechMasterVolume,bReady);

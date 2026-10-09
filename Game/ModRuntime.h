@@ -34,6 +34,7 @@ public:
  ~Host();
  Host(const Host&)=delete;Host&operator=(const Host&)=delete;
  static std::unique_ptr<Host> FromCommandLine();
+ static std::unique_ptr<Host> FromStarterSelection();
 };
 // Shared with CUnitServer::L1ExecMove; caller retains pose/notification/clamping logic.
 void SpendRunningMana(SRPGUnitStats&, CUnit&, SRPGCommonStats&);

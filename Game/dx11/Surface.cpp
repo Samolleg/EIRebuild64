@@ -1,7 +1,9 @@
 #include "stdafx.h"
+#include "../GameJournal.h"
 #include "surface.h"
 #include <io.h>
 #include "RendererDX11.h"
+#include "../FrameDiagnostics.h"
 #include "EffectProcessor.h"
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
@@ -357,6 +359,44 @@ void CDXGISurface::GetPixel(int nX, int nY)
 {
 }
 
+HRESULT CDXGISurface::CopyPixelBuffer(DWORD *destination, size_t pixelCount)
+{
+    if (!destination || pixelCount < size_t(dwSurfaceWidth) * dwSurfaceHeight)
+        return E_INVALIDARG;
+    if (!pixelReadbackStaging)
+    {
+        D3D11_TEXTURE2D_DESC desc = {};
+        GetSurfaceDesc(&desc);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        HRESULT hr = pDX11->GetDevice()->CreateTexture2D(&desc, nullptr,
+                                                      pixelReadbackStaging.GetAddressOf());
+        if (hr == E_OUTOFMEMORY) GameJournal::AllocationFailure("texture_readback_staging");
+        if (FAILED(hr))
+            return hr;
+    }
+    auto context = pDX11->GetDeviceContext();
+    context->CopyResource(pixelReadbackStaging.Get(), texture.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT hr = context->Map(pixelReadbackStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr))
+        return hr;
+    const size_t rowBytes = size_t(dwSurfaceWidth) * sizeof(DWORD);
+    if (mapped.RowPitch < rowBytes)
+    {
+        context->Unmap(pixelReadbackStaging.Get(), 0);
+        return E_FAIL;
+    }
+    for (DWORD y = 0; y < dwSurfaceHeight; ++y)
+        memcpy(destination + size_t(y) * dwSurfaceWidth,
+               static_cast<const BYTE *>(mapped.pData) + size_t(y) * mapped.RowPitch,
+               rowBytes);
+    context->Unmap(pixelReadbackStaging.Get(), 0);
+    return S_OK;
+}
+
 std::unique_ptr<DWORD[]> CDXGISurface::GetPixelBuffer()
 {
     int pixelCount = dwSurfaceWidth * dwSurfaceHeight;
@@ -379,8 +419,16 @@ std::unique_ptr<DWORD[]> CDXGISurface::GetPixelBuffer()
     hr = pDX11->GetDeviceContext()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &srd);
     if (FAILED(hr))
         return nullptr;
+    const size_t rowBytes = size_t(dwSurfaceWidth) * sizeof(DWORD);
+    if (srd.RowPitch < rowBytes)
+    {
+        pDX11->GetDeviceContext()->Unmap(staging.Get(), 0);
+        return nullptr;
+    }
     std::unique_ptr<DWORD[]> pixelBuffer = std::make_unique<DWORD[]>(pixelCount);
-    memcpy(pixelBuffer.get(), srd.pData, srd.RowPitch * dwSurfaceHeight);
+    for (DWORD y = 0; y < dwSurfaceHeight; ++y)
+        memcpy(pixelBuffer.get() + size_t(y) * dwSurfaceWidth,
+               static_cast<const BYTE *>(srd.pData) + size_t(y) * srd.RowPitch, rowBytes);
     pDX11->GetDeviceContext()->Unmap(staging.Get(), 0);
 
     return pixelBuffer;
@@ -398,6 +446,7 @@ void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CDXGISurface::AcquireDC(HDC *pDC)
 {
+    FrameDiagnostics::Scope timing(FrameDiagnostics::GetDC);
 #ifdef DXGI_ENABLED
     Microsoft::WRL::ComPtr<IDXGISurface1> surf;
     IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
@@ -412,6 +461,7 @@ BOOL CDXGISurface::AcquireDC(HDC *pDC)
 // BOOL CDXGISurface::ReleaseDC( HDC hDC )
 BOOL CDXGISurface::ReleaseDC(HDC hDC)
 {
+    FrameDiagnostics::Scope timing(FrameDiagnostics::ReleaseDC);
 #ifdef DXGI_ENABLED
     Microsoft::WRL::ComPtr<IDXGISurface1> surf;
     texture->QueryInterface(IID_PPV_ARGS(&surf));
@@ -452,10 +502,35 @@ HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWOR
 HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                            LPDDBLTFX pDDBltFx)
 {
-    auto swapchain = pDX11->GetSwapChain();
+    auto context = pDX11->GetDeviceContext();
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> boundTarget;
+    context->OMGetRenderTargets(1, boundTarget.GetAddressOf(), nullptr);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+    captureUsedBoundTarget = false;
+    captureDifferentFromBufferZero = false;
+    if (boundTarget)
+    {
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+        boundTarget->GetResource(resource.GetAddressOf());
+        if (resource && SUCCEEDED(resource.As(&source)))
+            captureUsedBoundTarget = true;
+    }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
-    IfFailedThrowHR(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer)));
-    pDX11->GetDeviceContext()->CopyResource(texture.Get(), backbuffer.Get());
+    HRESULT hr = pDX11->GetSwapChain()->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
+    if (FAILED(hr))
+        return hr;
+    if (!source)
+        source = backbuffer;
+    captureDifferentFromBufferZero = source.Get() != backbuffer.Get();
+    D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
+    source->GetDesc(&sourceDesc);
+    texture->GetDesc(&destinationDesc);
+    if (sourceDesc.Width != destinationDesc.Width ||
+        sourceDesc.Height != destinationDesc.Height ||
+        sourceDesc.Format != destinationDesc.Format ||
+        sourceDesc.SampleDesc.Count != destinationDesc.SampleDesc.Count)
+        return E_INVALIDARG;
+    context->CopyResource(texture.Get(), source.Get());
     return S_OK;
 }
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,

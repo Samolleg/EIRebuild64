@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenEcsapeMenu.h"
@@ -132,6 +133,7 @@ void CI3DScreenEscapeMenu::OnMouseMove(UINT nFlags, CPoint point)
 void CI3DScreenEscapeMenu::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= 0)
     {
         pI3D->BeginFX("buttons\\menu\\ok.wav");

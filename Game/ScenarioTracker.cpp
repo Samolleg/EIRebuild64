@@ -1,6 +1,11 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
+#include "ModNativeCrtRandom.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModAssortment.h"
+#include "WorldInterface.h"
+#include "Tools.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ScenarioTracker.h"
@@ -201,12 +206,19 @@ void CShop::Serialize(CStructureSaver &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CShop::SetAssortmentParameters(float *fMinLevels, float *fMaxLevels)
 {
+    if(auto* mod=ModRuntime::Current();mod&&mod->AdvancedUI("useLS_SetAssortmentParameters")){
+        const int limit=mod->ShopConstructLimit(nID);
+        auto& people=IWorldClient.GetParty().people;std::vector<const SRPGUnitStats*> stats;
+        stats.reserve(people.GetSize());for(int person=0;person<people.GetSize();++person)stats.push_back(&people[person].stats);
+        ModAssortment::Apply(stats,limit,[](int maximum){return ModNativeCrtRandom::Random(maximum);},itemGenerator,spellGenerator);return;
+    }
     itemGenerator.SetParameters(fMinLevels, fMaxLevels);
     spellGenerator.SetParameters(fMinLevels, fMaxLevels);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CShop::GenerateItems()
 {
+    GameJournal::Event("SHOP", "generate_items", "shop=%d enabled=%d", nID, bItem);
     if (bItem)
     {
         std::list<CItem *> items;
@@ -232,6 +244,7 @@ void CShop::GenerateItems()
 /////////////////////////////////////////////////////////////////////////////////////
 void CShop::GenerateSpells()
 {
+    GameJournal::Event("SHOP", "generate_spells", "shop=%d enabled=%d", nID, bSpell);
     if (bSpell)
     {
         std::list<CItem *> items;
@@ -251,6 +264,7 @@ void CShop::GenerateSpells()
 /////////////////////////////////////////////////////////////////////////////////////
 void CShop::FillStartAssortment()
 {
+    GameJournal::Event("SHOP", "assortment_start", "shop=%d", nID);
     int i;
     CStringArray szTmpArray;
     CItemManager *pIM = itemAssort.GetItemManager();

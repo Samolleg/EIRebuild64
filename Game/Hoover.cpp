@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModNativeCrtRandom.h"
+#include "ModStealingPolicy.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Hoover.h"
@@ -261,17 +263,19 @@ int CHoover::HooverCarriedLoot(CWorldServer *world, CUnit *carrier,
         }
         return TRUE;
     }
-    for(int i=0;i<lpUnit->GetQuestItemsNum();++i) if(CItemQuest *item=lpUnit->GetQuestItem(i)){item->AddRef();allItems.AddTail(item);}
-    while(lpUnit->GetQuestItemsNum()) lpUnit->RemoveQuestItem(0);
+    ModStealing::CollectQuestItems([&]{return lpUnit->GetQuestItemsNum();},
+        [&](int i){return lpUnit->GetQuestItem(i);},
+        [&](CItemQuest* item){allItems.AddTail(item);},
+        [&](int i){lpUnit->RemoveQuestItem(i);});
     if(!prototype) return TRUE;
     int money=MINT(prototype->ulCommon.fpPriceMin);
     if(prototype->ulCommon.fpPriceMax>prototype->ulCommon.fpPriceMin) money=random.GetFloat(prototype->ulCommon.fpPriceMin,prototype->ulCommon.fpPriceMax);
-    if(float(Dice(100))<=prototype->ulCommon.fpProbability) nHooveredMoney+=money;
+    if(float(ModNativeCrtRandom::Dice(100))<=prototype->ulCommon.fpProbability) nHooveredMoney+=money;
     const int skill=scienceSkill;
     const int stat=static_cast<int>(Max(25.0f,dexterity))-25;
     money=MINT(prototype->ulRare.fpPriceMin);
     if(prototype->ulRare.fpPriceMax>prototype->ulRare.fpPriceMin)
     { const int currentSkill=stat+skill; const float price=prototype->ulRare.fpPriceMin+(prototype->ulRare.fpPriceMax-prototype->ulRare.fpPriceMin)*(currentSkill*0.01f); money=static_cast<int>(price); }
-    if(float(Dice(100))<=prototype->ulRare.fpProbability||skill>0||stat>0) nHooveredMoney+=money;
+    if(float(ModNativeCrtRandom::Dice(100))<=prototype->ulRare.fpProbability||skill>0||stat>0) nHooveredMoney+=money;
     nHooveredMoney=Max(0,nHooveredMoney); return TRUE;
 }

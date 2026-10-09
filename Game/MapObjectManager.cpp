@@ -12,6 +12,12 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "StringProcessing.h"
 #include "BasicChunk.h"
 #include "PerkDatabase.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+#include "ModNpcEquipment.h"
+#include "WorldServer.h"
+#include "UnitServer.h"
+#include "EngineDiagnostics.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CMapObjectManager::CMapObjectManager()
 {
@@ -793,6 +799,8 @@ BOOL CMapObjectManager::CreateNewHero(SRPGUnitStats *lpStats, LPCSTR pszPrototyp
 // CRAP
 BOOL CMapObjectManager::WearAll(LPGAMEBASE lpMapObject, LPCSTR pszPrototype)
 {
+    auto originalWearAll=[&]() -> BOOL
+    {
     CSpellManager *lpSpellManager = (CSpellManager *)((CWorld *)GetWorld())->GetSpellManager();
     CItemManager *lpItemManager = (CItemManager *)((CWorld *)GetWorld())->GetItemManager();
     const SUDBUnitPrototype *pPrototype = theUnitDatabase.prototypes[pszPrototype];
@@ -850,6 +858,26 @@ BOOL CMapObjectManager::WearAll(LPGAMEBASE lpMapObject, LPCSTR pszPrototype)
     }
 
     return TRUE;
+    };
+    const BOOL result=originalWearAll();
+    auto* mod=ModRuntime::Current();
+    auto* unit=dynamic_cast<CUnit*>(lpMapObject);
+    static unsigned quickNotes=0;
+    if(mod && unit && unit->GetPrototype())
+        ModNpcEquipment::GrantQuicks([&](int property){return mod->GetQuickAdds(unit->GetPrototype()->szName,property);},
+            [&](const char* name) -> CItemQuick* {
+                auto* item=theWorldServer.CreateItem(name);
+                if(!item){if(quickNotes++<24)EngineDiagnostics::Event("P03 WearAll create failed unit=%d item=%s",unit->GetID(),name);return nullptr;}
+                if(item->WhoAmI()!=HPC_ITEM_QUICK)throw std::runtime_error("GetQuickAdds returned a non-quick item");
+                return static_cast<CItemQuick*>(item);
+            },[&](CItemQuick* item){int slot=unit->AddQItem(item);if(quickNotes++<24)EngineDiagnostics::Event("P03 WearAll local unit=%d item=%d slot=%d",unit->GetID(),item->GetID(),slot);},[&]() -> CUnit* {
+                auto* specific=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());
+                return specific && specific->GetUnit() && theWorldServer.GetMapObjectManager() ? theWorldServer.GetUnit(specific->GetUnit()->GetID()) : nullptr;
+            },[&](CUnit* server,CItemQuick* item){int slot=server->AddQItem(item);if(quickNotes++<24)EngineDiagnostics::Event("P03 WearAll server unit=%d item=%d slot=%d",server->GetID(),item->GetID(),slot);},[&]{
+                unit->GetUnitSpecific()->NotifyItemsUpdated();
+                if(quickNotes++<24)EngineDiagnostics::Event("P03 WearAll quick update unit=%d prototype=%s original=%d",unit->GetID(),unit->GetPrototype()->szName,result);
+            });
+    return result;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CMapObjectManager::GetItemsByPrototype(LPCSTR pszPrototype, CStringArray &szWears,

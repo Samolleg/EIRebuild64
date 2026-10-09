@@ -2,8 +2,15 @@
 #include "ModNpcConsumables.h"
 #include "SocialStealthRules.h"
 #include "ModWeaponSkills.h"
+#include "ModCampDescriptions.h"
+#include "ModCustomLower.h"
+#include "ModSettingsPolicy.h"
 class CSpell;
+class CFileRegistry;
+bool InspectModConfigurationCommandLine(int& result);
+namespace ModSpellTooltip { struct Values; }
 class CParty;
+class CPerkDatabase;
 class CGSVariableSet;
 class CItem;
 class CMapObject;
@@ -16,10 +23,13 @@ struct ModDelayedShot;
 struct lua_State;
 struct ModNpcRefreshQueue;
 namespace ModInitialization {struct Ledger;}
+namespace ModInfoStats {struct State;}
+namespace ModLua {struct PerkHostLifetime;}
 class CMappedResource;
 class CUnit;
 class CItemWeapon;
 struct SRPGUnitStats;
+struct ModCampSpellLimitInput {const SRPGUnitStats* partyStats;int displayedIntelligence;};
 struct SRPGCommonStats;
 struct SPDBPerk;
 struct SRPGUserUnitStats;
@@ -44,8 +54,11 @@ public:
     bool RegisteredLootEnabled() const { return registeredLoot; }
     bool SinglePlayerAllowed() const { return singlePlayerAllowed; }
     bool MultiplayerAllowed() const { return multiplayerAllowed; }
+    bool CustomMpZones() const { return customMpZones; }
+    bool MatchesMpZone(int allod, const char *terrain) const;
     bool ExtendActiveObjectsArea() const { return extendActiveObjectsArea; }
     bool BriefingWeaponsEnabled() const { return briefingWeapons; }
+    bool WorldBackgroundEnabled() const { return worldBackground; }
     bool PartyVisualOptionsEnabled() const { return partyVisualOptions; }
     bool HidePartyHelmets() const { return partyVisualOptions && hidePartyHelmets; }
     bool HidePartyUpperArmor() const { return partyVisualOptions && hidePartyUpperArmor; }
@@ -61,6 +74,7 @@ public:
     std::string ResolveMovie(const std::string &name,const std::string &fallback) const;
     std::string ResolveSaveRoot(const std::string &fallback) const;
     std::string ResolveMap(const std::string &relative,const std::string &fallback) const;
+    float MurderAwarenessValue(int property,float fallback);
     nlohmann::json Lookup(const std::string &table,const nlohmann::json &key,int column,const nlohmann::json &fallback);
     std::vector<unsigned char> ReadResource(const std::string &category,const std::string &entry,const std::string &base,std::string &owner);
     bool ResourcePlan(const std::string&,std::vector<std::string>&,bool&) const;
@@ -79,6 +93,8 @@ public:
     float GetModifiedHealth(SRPGUnitStats&, const CUnit&, float health);
     float CalcBaseHealth(const SRPGUnitStats&);
     float CalcBaseMana(const SRPGUnitStats&);
+    void RedistributeResources(SRPGUnitStats&,SRPGCommonStats&,CUnit&);
+    std::string GetQuickAdds(const char* prototype,int property);
     int GetSkillPriceDiff(int from, int to);
     int GetPerkPrice(const SRPGUnitStats&, const SPDBPerk&);
     void CalcRunningManaCost(SRPGUnitStats&, CUnit&, SRPGCommonStats&);
@@ -89,11 +105,25 @@ public:
     float ManaBonus(const SRPGUnitStats&);
     float ManaBonus(const SRPGUserUnitStats&);
     float DistributeExperience(float experience,int players);
+    float ChargeExperience(float exp,int count) const { return settingsProfile.Experience(exp,count); }
+    int AutomaticSkillLimit(int index,bool nativeRedraw=false) const { return settingsProfile.SkillLimit(index,nativeRedraw); }
+    bool ForceTutorial() const { return forceTutorial; }
+    void LogChat(unsigned color,const char* nickname,const char* text) const;
+    void SpellTooltipOverrides(CUnit* server,ModSpellTooltip::Values&,float& durationTicks);
     void RecalcShops(SShopSet&,bool lmp);
     int ShopConstructLimit(int shop);
+    void CampSpellLimits(int shop,int subtype,const std::vector<ModCampSpellLimitInput>& party,int& complexity,int& mana);
     std::string LoadVideo(const char* zoneName);
     bool GenocideMapConfig(const char* mobName, ModGenocideConfig& config);
     ModCombat::Defense IncomingAttack(const SRPGUnitStats&,CUnit&,CUnit*,const SRPGAttackPortion&,int parryRoll);
+    ModCombat::Defense IncomingCustomAttack0(const SRPGUnitStats&,CUnit&,CUnit*,const SRPGAttackPortion&);
+    void RememberCustomAttack0(const SRPGUnitStats&,const CUnit&,const SRPGAttackPortion&,float roll);
+    bool CustomCriticalHit(const SRPGAttackPortion&);
+    void ClearCustomCriticals(){customCriticals.Clear();}
+    int CustomLeft(const CUnit&) const;
+    float ScaleCustomMagic0(CUnit&,const SRPGAttackPortion&,float);
+    float ScaleCustomSingle0(CUnit&,ERPGHitLocations,float);
+    void CompensateHitHistory(const SRPGUnitStats& defender,CUnit& victim,CUnit* attacker,SRPGAttackPortion&,int defense,bool directCustom);
     void RememberAttack(const SRPGUnitStats&,const CUnit&,const SRPGAttackPortion&,float roll,bool left=false);
     bool ConsumeCritical(const SRPGAttackPortion&);
     void MoveAttack(const SRPGAttackPortion&,const SRPGAttackPortion&);
@@ -108,10 +138,31 @@ public:
     bool SkillConfig(CSpell*,ModSkills::Config&);
     bool SkillReady(CUnit&,CSpell*,const ModSkills::Config&,bool server);
     float InfoProperty(const char* callback,const char* name,int property);
+    bool InfoForbiddenSpell(const char* name, int shop);
+    float InfoPerkBonus(const char* callback, int level);
+    int InfoSetPosition(const char* name, int position, int property);
+    int InfoComplexProperty(int set, int property, int position = -1);
+    std::vector<std::pair<int,int>> InfoSetBonuses(const char* name, int count, int set, bool complex);
     float InfoMagicBlood(int level);
+    ModSpellTooltip::Values SpellTooltip(const SRPGUserUnitStats&, const CSpell&, float manaIntelligence, int difficulty);
+    void BeginInfoStats();
+    void EndInfoStats();
+    void InvalidateInfoStatsCache();
+    struct InfoStatsScope {
+        CModPackage* owner;
+        explicit InfoStatsScope(CModPackage* package):owner(package){if(owner)owner->BeginInfoStats();}
+        ~InfoStatsScope(){if(owner)owner->EndInfoStats();}
+        InfoStatsScope(const InfoStatsScope&)=delete;
+        InfoStatsScope& operator=(const InfoStatsScope&)=delete;
+    };
     float PanelDamage(CUnit&,float damage,int slot,bool left);
     float PanelCritical(CUnit&,int slot,bool left,bool power);
     void PanelDefense(CUnit&,int weight,int capacity,float&block,float&parry);
+    void IdleShieldValues(CUnit&,float&power,float&block,float&parry);
+    ModCampDescriptions::Result EvaluateCampDescriptions(const ModCampDescriptions::Input&);
+    ModCampDescriptions::Result CampDescriptions(class CPersonage&,CUnit&,bool skillCapacity=false);
+    std::string CampMissingRequirement(const SRPGUnitStats&,const char* code);
+    std::string ProgressionRequirementCode(const char* code,int field);
     float InfoComplex(CUnit&,int property);
     void SaveSkillCooldowns(CGSVariableSet&);
     void LoadSkillCooldowns();
@@ -134,6 +185,8 @@ public:
     void ScheduleDoubleShot(CUnit&,CMapObject*,const SRPGAttackPortion&);
     void TickDoubleShots();
     int CombatSetting(const char*) const;
+    bool AdvancedUI(const char*) const;
+    std::string InstructionComponent(bool prototype,bool figure,const char* code,const char* fallback);
     float GoCampEnemyRadius();
     bool GoCampZoneExcluded(const char* zone);
     bool DeathFearSettings(float &enterHp, float &exitHp, float &fleeDistance, float &speedPercent);
@@ -141,26 +194,40 @@ public:
     float DeathFearSpeedFactor(const CUnit &) const;
     float VampSpellValue(const char* prototype,int column);
     int AttackCycle(const SRPGUnitStats&,const CUnit&,bool attack);
-    void CampInfo(class CPersonage&, CUnit*, int &capacity, float &attackSeconds, float *displayActions=nullptr, float *displayMana=nullptr);
+    void CampInfo(class CPersonage&, CUnit*, int &capacity, float &attackSeconds, float *displayActions=nullptr, float *displayMana=nullptr, bool baseStats=false);
+    float CampDisplayMana(const SRPGUnitStats&,int carried,int capacity,bool baseStats);
+    int CampSkillCapacity(class CPersonage&,CUnit*);
     float ModifiedDamage(const SRPGUnitStats&, const CUnit&, float damage, float roll, int leftSlot=-1, bool left=false);
     float ModifiedDamage(const SRPGUserUnitStats&, const CUnit&, float damage);
     void AttackParams(const SRPGUnitStats&, CUnit&, SAttackParams&, float roll);
+    float ConditionalRetailDamage(SRPGUnitStats&, CUnit&, float damage);
+    void ConditionalAttackParams(SRPGUnitStats&, CUnit&, SAttackParams&, bool inherited);
     void AttackParams(const SRPGUserUnitStats&, CUnit&, SAttackParams&);
     nlohmann::json CheckEconomy();
     nlohmann::json Describe();
 private:
+    friend bool InspectModConfigurationCommandLine(int&);
+    bool ConfigureAddonSettings(CFileRegistry&);
     void Call(int args,int results);
     float StatsNumber(const char*,const SRPGUnitStats&);
+    float ScalarManaBonus(float intelligence);
     void BeginCallback(const char*);
+    bool IsNpcManaCaster(CUnit*);
     void Require(const char *name);
     std::unordered_map<std::string,SocialStealth::Profile> disguiseProfiles;
     bool registeredLoot=false;
     float experienceLimit=-1.0f;
+    ModSettingsPolicy::Profile settingsProfile;
+    bool forceTutorial=false;
+    std::string chatHtmlFile;
     float magicRandomLimit=-1.0f;
     bool saveInMod=true;
     bool singlePlayerAllowed=true,multiplayerAllowed=true;
+    bool customMpZones=false;
+    std::vector<std::string> mpZones[3];
     bool extendActiveObjectsArea=false;
     bool briefingWeapons=true;
+    bool worldBackground=true;
     bool partyVisualOptions=false, hidePartyHelmets=false, hidePartyUpperArmor=false;
     std::string root;
     std::map<std::string,std::vector<std::string>> archives;
@@ -168,9 +235,13 @@ private:
     std::map<std::string,std::string> configs,maps,cameras;
     std::map<std::string,std::unique_ptr<CMappedResource>> opened;
     lua_State *state=nullptr;
+    std::shared_ptr<ModLua::PerkHostLifetime> perkHostLifetime;
     int lookupRef=-1,indexRef=-1;
     std::string mainScript;
     bool scriptInitialized=false;
+    bool scalarManaBonus=false;
+    std::map<std::string,float> manaBonusCache;
+    bool scheduledRegeneration=false;
     std::unique_ptr<ModNpcRefreshQueue> refreshQueue;
     bool npcStatRefresh=true;
     bool npcDatabaseMigration=false;
@@ -182,6 +253,7 @@ private:
     const void* cacheWorld=nullptr;std::string cacheZone;int cacheSegment=-1;
     void SyncRuntimeState();
     std::unique_ptr<ModInitialization::Ledger> initialization;
+    std::unique_ptr<ModInfoStats::State> infoStats;
     bool CollectArmor(CUnit&,ArmorModifiers&);
     std::map<std::string,int> combatSettings;
     std::map<std::string,std::pair<bool,ModSkills::Config>> skillConfigs;
@@ -189,6 +261,7 @@ private:
     std::map<int,std::shared_ptr<ModDelayedShot>> delayedShots;
     struct CriticalRecord {bool critical;std::shared_ptr<CItemWeapon> weapon;bool left;int skillImpact=0;};
     std::map<const SRPGAttackPortion*,CriticalRecord> criticalAttacks;
+    ModCustomLower::CriticalCache customCriticals;
     CMappedResource &Open(const std::string &path);
 };
 // Returns false for normal launches. Diagnostic mode never creates a window.

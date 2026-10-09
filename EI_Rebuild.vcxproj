@@ -156,7 +156,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>mss32.lib;binkw32.lib;ddraw.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <Bscmake />
@@ -181,7 +181,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>mss32.lib;binkw32.lib;ddraw.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <Bscmake />
@@ -211,7 +211,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(OutDir)luajit-x86.lib;mss32.lib;binkw32.lib;ddraw.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(OutDir)luajit-x86.lib;mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <FxCompile>
@@ -333,6 +333,9 @@
     <ClCompile Include="Game\FlyingHitPoints.cpp" />
     <ClCompile Include="Game\FOFSystem.cpp" />
     <ClCompile Include="Game\GameBase.cpp" />
+    <ClCompile Include="Game\GameJournal.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="Game\GameMain.cpp" />
     <ClCompile Include="Game\CrashEvidence.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\EngineDiagnostics.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
@@ -445,6 +448,9 @@
     <ClCompile Include="Game\Shadow.cpp" />
     <ClCompile Include="Game\SimpleCryptographer.cpp" />
     <ClCompile Include="Game\sky.cpp" />
+    <ClCompile Include="Game\AudioResourceManager.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="Game\MiniaudioOneShotSfx.cpp" />
     <ClCompile Include="Game\ModAudioPolicy.cpp" />
     <ClCompile Include="Game\ModAudioConfig.cpp" />
@@ -481,6 +487,12 @@
     <ClCompile Include="Game\Win32Classes.cpp" />
     <ClCompile Include="Game\WinRegistry.cpp" />
     <ClCompile Include="Game\World.cpp" />
+    <ClCompile Include="Game\ModWorldBackground\WorldBackgroundData.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\ModWorldBackground\WorldBackgroundFiles.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\ModWorldBackground\WorldBackgroundPixels.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\ModWorldBackground\WorldBackgroundStreaming.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\ModWorldBackground\WorldBackgroundVisual.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\ModWorldBackground\Native.cpp" />
     <ClCompile Include="Game\WorldClient.cpp" />
     <ClCompile Include="Game\WorldInterface.cpp" />
     <ClCompile Include="Game\WorldServer.cpp" />
@@ -544,6 +556,7 @@
     <ClInclude Include="Game\dx11\Batchers.h" />
     <ClInclude Include="Game\dx11\Caches.h" />
     <ClInclude Include="Game\dx11\RendererDX11.h" />
+    <ClInclude Include="Game\dx11\OwnedRendererClient.h" />
     <ClInclude Include="Game\dx11\DXShader.h" />
     <ClInclude Include="Game\dx11\ConstantBuffer.h" />
     <ClInclude Include="Game\dx11\EffectProcessor.h" />
@@ -566,6 +579,7 @@
     <ClInclude Include="Game\FlyingHitPoints.h" />
     <ClInclude Include="Game\FofSystem.h" />
     <ClInclude Include="Game\GameBase.h" />
+    <ClInclude Include="Game\GameJournal.h" />
     <ClInclude Include="Game\GameMain.h" />
     <ClInclude Include="Game\GeneralSettings.h" />
     <ClInclude Include="Game\GeneralUnitLogic.h" />
@@ -699,6 +713,7 @@
     <ClInclude Include="Game\SimplyArray.h" />
     <ClInclude Include="Game\sky.h" />
     <ClInclude Include="Game\SmartPtr.h" />
+    <ClInclude Include="Game\AudioResourceManager.h" />
     <ClInclude Include="Game\SoundManager.h" />
     <ClInclude Include="Game\SoundTypes.h" />
     <ClInclude Include="Game\SpellConstructor.h" />

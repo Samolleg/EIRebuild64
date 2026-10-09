@@ -13,6 +13,9 @@ class CSpell;
 struct SAttackParams;
 struct SPDBPerk;
 namespace ModLua {
+// Owned by a finite CModPackage; Lua registry and perk handles hold weak references only.
+struct PerkHostLifetime {};
+void BindPerkDatabase(lua_State*,const std::shared_ptr<PerkHostLifetime>&);
 struct Scope {
  bool active=true;
  const CUnit *unit=nullptr;

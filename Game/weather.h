@@ -78,6 +78,12 @@ public:
 
     EWeather GetCurrentWeather() const { return curWeather; }
     EWeather GetNextWeather() const { return nextWeather; }
+    // Read transition before the particle draw updates power; inactive is >1,
+    // matching the renderer's existing rain-density reader. No weather mutation.
+    float GetRenderTransitionProgress(float tick) const
+    {
+        return fpWeatherTransformTime != 0 ? (tick - fpWeatherStartTime) / fpWeatherTransformTime : 2.f;
+    }
 
     virtual LPCSTR GetGameClassName() const { return "CWeather"; };
     virtual EClassIDs WhoAmI() const { return HPC_WEATHER; }

@@ -11,6 +11,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModAudioConfig.h"
 #include "ModAudioConfig.h"
 #include "ModRuntime.h"
+#include "ModPackage.h"
 
 // Only the stable public prefix is shared by the retail and newer Bink SDKs.
 // Do not use the SDK 1.9 structure to access the retail 1.0 private fields.
@@ -32,7 +33,7 @@ struct CBinkVideo::Player
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     bool decoded = false, finished = false, paused = false;
     unsigned displayedFrame = 0;
-    std::unique_ptr<DirectX::SpriteBatch> batch;
+    std::unique_ptr<OwnedSpriteBatch> batch;
     ~Player() { if (movie) close(movie); if (module) FreeLibrary(module); }
     FARPROC Symbol(const char *decorated, const char *plain)
     {
@@ -43,7 +44,12 @@ struct CBinkVideo::Player
     {
         // The game may already have loaded Bink. The standalone EXE can also
         // live outside the game directory, with the game as working directory.
-        GetModuleHandleExA(0, "binkw32.dll", &module);
+        bool selected=false;
+        const auto* mod=ModRuntime::Resources();const std::string candidate=mod?mod->Directory()+"\\binkw32.dll":std::string();
+        if(!ModSettingsPolicy::ModBink(candidate,
+            [](const std::string& p){DWORD a=GetFileAttributesA(p.c_str());return a!=INVALID_FILE_ATTRIBUTES&&!(a&FILE_ATTRIBUTE_DIRECTORY);},
+            [&](const std::string& p){module=LoadLibraryA(p.c_str());return module!=nullptr;},selected))return false;
+        if(!selected)GetModuleHandleExA(0, "binkw32.dll", &module);
         if (!module)
         {
             char path[MAX_PATH] = {};
@@ -116,7 +122,7 @@ struct CBinkVideo::Player
         if (present)
         {
             // A separate batch also allows movie sequences invoked from an UI draw callback.
-            if (!batch) batch.reset(new DirectX::SpriteBatch(dx->GetDeviceContext().Get()));
+            if (!batch) batch.reset(new OwnedSpriteBatch(dx->GetOwnedRenderer()));
             dx->BeginFrame();
             dx->ClearColorBuffer(0);
             batch->Begin(DirectX::SpriteSortMode_Immediate);

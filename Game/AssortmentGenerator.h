@@ -41,6 +41,7 @@ enum EAGItemType
 /////////////////////////////////////////////////////////////////////////////////////
 class CAssortmentGenerator
 {
+    friend struct ModAssortmentInspection;
 private:
     CWorld *pWorld;
     // current shop index
@@ -92,6 +93,7 @@ public:
     void AddSpellModifier(const SSDBModifier *pSpellModifier);
     // adding material (with amount range)
     void AddMaterial(const SIDBMaterial *pMaterial, int nMin, int nMax);
+    int GetMaterialAmount(const SIDBMaterial *pMaterial) const;
     void RemoveMaterial(const SIDBMaterial *pMaterial);
     void RestoreMaterials();
     // setting parameters

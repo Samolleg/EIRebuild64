@@ -40,6 +40,7 @@ public:
     void Deactivate() { m_eMode = TT_DEC; }
     void Process(CPoint point);
 
+    const char* JournalText() const noexcept { return szStrings.GetSize() ? (LPCSTR)szStrings[0] : ""; }
     void UpdateText(LPCTSTR pszText);
 
     BOOL Draw(CRenderer *pRend);

@@ -2,6 +2,7 @@
 #include "EffectProcessor.h"
 #include "RendererDX11.h"
 #include "PostProcess.h"
+#include "RetailModalFade.h"
 
 void CEffectProcessor::SaveState()
 {
@@ -53,7 +54,8 @@ void CEffectProcessor::GetTextureDesc(ID3D11ShaderResourceView *texView, D3D11_T
 }
 
 void CEffectProcessor::ApplyEffect(ID3D11ShaderResourceView *texView,
-                                  DirectX::BasicPostProcess::Effect effect, ID3D11Texture2D *result)
+                                  DirectX::BasicPostProcess::Effect effect, ID3D11Texture2D *result,
+                                  ID3D11PixelShader *customShader)
 {
     // postProcess->SetSourceTexture needs ID3D11ShaderResourceView...maybe can pass texture and
     // create one, but eh
@@ -70,7 +72,9 @@ void CEffectProcessor::ApplyEffect(ID3D11ShaderResourceView *texView,
         postProcess = std::make_unique<DirectX::BasicPostProcess>(device);
         postProcess->SetSourceTexture(texView);
         postProcess->SetEffect(effect);
-        postProcess->Process(dc);
+        postProcess->Process(dc, [dc, customShader]() {
+            if (customShader) dc->PSSetShader(customShader, nullptr, 0);
+        });
     }
     RestoreState();
 }
@@ -84,7 +88,15 @@ void CEffectProcessor::Fade(ID3D11ShaderResourceView *texView)
     Microsoft::WRL::ComPtr<ID3D11Texture2D> target;
     pDX11->CreateTexture(&tex2d, target);
 
-    ApplyEffect(texView, DirectX::BasicPostProcess::Effect::Monochrome, target.Get());
+    if (!modalFadeShader)
+    {
+        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+        IfFailedThrowHR(RetailModalFade::Compile(bytecode.GetAddressOf()));
+        IfFailedThrowHR(pDX11->GetDevice()->CreatePixelShader(bytecode->GetBufferPointer(),
+            bytecode->GetBufferSize(), nullptr, modalFadeShader.GetAddressOf()));
+    }
+    ApplyEffect(texView, DirectX::BasicPostProcess::Effect::Copy, target.Get(),
+                modalFadeShader.Get());
 
     Microsoft::WRL::ComPtr<ID3D11Resource> resource;
     texView->GetResource(resource.GetAddressOf());

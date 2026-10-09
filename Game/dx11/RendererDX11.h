@@ -4,6 +4,7 @@
 
 #include "vertexbuffer.h"
 #include "SpriteBatch.h"
+#include "OwnedRendererClient.h"
 #include "SpriteFont.h"
 #include "FakeDX7.h"
 #include "Caches.h"
@@ -11,8 +12,12 @@
 #include <WICTextureLoader.h>
 #include <wrl/client.h>
 #include <d3d11.h>
+#include <array>
 
 // #define DRAWABLE_BACKBUFFER
+namespace ModWorldBackground { struct FrameSnapshot; }
+namespace WorldBackground { struct VisualEnvironment; }
+class ModWorldBackgroundDX11;
 class ModShadowDX11;
 class UIColorKeyBlit;
 class CDXGISurface;
@@ -30,6 +35,7 @@ class CRenderState
 class CDX11
 {
 private:
+    std::shared_ptr<ModWorldBackgroundDX11> modBackground;
     std::shared_ptr<ModShadowDX11> modShadows;
     std::shared_ptr<UIColorKeyBlit> uiColorKey;
     DWORD m_width, m_height;
@@ -65,7 +71,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture2;
 
-    std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
+    OwnedRendererClient ownedRenderer;
+    bool ownedWorldActive = false;
+    std::unique_ptr<OwnedSpriteBatch> spriteBatch;
     std::unique_ptr<DirectX::SpriteFont> spriteFont;
     std::unique_ptr<DirectX::CommonStates> m_states;
     std::unique_ptr<CVertexCaches> m_caches;
@@ -73,6 +81,7 @@ private:
     FakeD3D7State fake_dx7, fake_dx7_prev;
 
     void MakeScreenShot();
+    void RefreshOwnedTargets();
     bool InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
     bool ReportLiveObjects();
 
@@ -85,10 +94,17 @@ public:
     void BeginModShadows();
     void EndModShadows();
     std::vector<WORD> ReadModShadowAlpha(ID3D11ShaderResourceView *source);
+    void DrawWorldBackground(const std::shared_ptr<ModWorldBackground::FrameSnapshot>&,const WorldBackground::VisualEnvironment&,const std::array<float,4>& depthRow,unsigned long fogColor,bool transparentPass=false);
+    void ResetWorldBackground();
     void BeginFrame();
+    bool BeginWorld(const EIRenderWorldFrameV2& frame);
+    void EndWorld();
+    bool IsOwnedWorldActive() const { return ownedWorldActive; }
     void EndFrame();
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
+    bool SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet);
+    bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
     int DrawFigurePrimitive(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
                DWORD dwFlags);
     int DrawParticles(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
@@ -124,7 +140,8 @@ public:
     Microsoft::WRL::ComPtr<IDXGISwapChain> GetSwapChain() { return swapchain; };
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> GetDeviceContext() { return deviceContext; };
     Microsoft::WRL::ComPtr<ID3D11Device> GetDevice() { return device; };
-    DirectX::SpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
+    OwnedSpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
+    OwnedRendererClient &GetOwnedRenderer() { return ownedRenderer; };
     HRESULT DrawColorKeySurface(ID3D11ShaderResourceView* image, const RECT& destination,
                                 const RECT* source, COLORREF key);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };

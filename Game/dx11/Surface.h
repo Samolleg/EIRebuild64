@@ -16,6 +16,9 @@ private:
     DXGI_FORMAT tfFormat = DXGI_FORMAT::DXGI_FORMAT_UNKNOWN;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture = 0;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> textureView = 0;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelReadbackStaging;
+    bool captureUsedBoundTarget = false;
+    bool captureDifferentFromBufferZero = false;
     HDC hDc;
     BOOL CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d);
     BOOL ExtractSurfaceParams();
@@ -60,6 +63,9 @@ public:
                                CDXGISurface *src, UINT srcSubresource, D3D11_BOX *pBox);
     void GetPixel(int nX, int nY);
     std::unique_ptr<DWORD[]> GetPixelBuffer();
+    HRESULT CopyPixelBuffer(DWORD *destination, size_t pixelCount);
+    bool CaptureUsedBoundTarget() const { return captureUsedBoundTarget; }
+    bool CaptureDifferentFromBufferZero() const { return captureDifferentFromBufferZero; }
     void Fade();
     void StretchTo(const CDXGISurface *src, const RECT& rect);
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> GetShaderResource() const

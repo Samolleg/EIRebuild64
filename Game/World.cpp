@@ -22,6 +22,9 @@ class CChatNetDriver : public CObjectBase
 #include "EffectManager.h"
 #include "SpellManager.h"
 #include "SpellConstructor.h"
+#include "ModConstructorLifetime.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "ItemManager.h"
 #include "unit.h"
 #include "player.h"
@@ -241,8 +244,16 @@ void CWorldBase::Destroy()
     // delete spell constructor
     if (pSpellConstructor)
     {
-        pSpellConstructor->DecRefCount();
-        delete pSpellConstructor;
+        if (ModConstructorLifetime::PolicyBound())
+            ModConstructorLifetime::ReleaseOwned(pSpellConstructor,
+                [](const void* object, const void* vtable) {
+                    ModConstructorLifetime::NoteInvalid(ModConstructorLifetime::World, object, vtable);
+                });
+        else
+        {
+            pSpellConstructor->DecRefCount();
+            delete pSpellConstructor;
+        }
         pSpellConstructor = NULL;
     }
     // delete spell manager

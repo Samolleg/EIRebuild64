@@ -1,6 +1,8 @@
 // Included in aiUnitLogic.cpp after its existing corpse/death-fear helpers.
-// Source: ac9778d GroupSearchNative.inl / GroupSearchPath.inl; native types only.
+// Source: 39454a3 GroupSearchNative.inl / GroupSearchPath.inl; native types only.
 namespace ModGroupSearch {
+static void ResetCoordinator();
+static bool OwnsPickupAnimation(CUnit*,CUnitServer*,int);
 namespace {
 struct Lease {
     GroupSearch::Movement movement;
@@ -10,6 +12,7 @@ struct Lease {
     GroupSearch::Action action = GroupSearch::Action::Native;
     int tick = -1;
     uint32_t serial = 0;
+    int diagnosticTick=-1;
 };
 std::map<GroupSearch::Identity, Lease> leases;
 std::set<GroupSearch::Identity> active, revoked;
@@ -34,16 +37,18 @@ bool Eligible(CAIUnitLogic& logic) {
                     general->eLogicModel == UM_PATROL || general->eLogicModel == UM_SENTRY) &&
         (general->aggressionMode == UAM_AGGRESSIVE || general->aggressionMode == UAM_REVENGE);
 }
-bool Protected(CAIUnitLogic& logic) {
+bool PriorityBlocked(CAIUnitLogic& logic) {
     CUnitServer* s = logic.GetUnitServer();
     const EUnitState state = logic.GetScriptState();
-    const auto& current = s->GetScriptCommand();
-    const auto& next = s->GetNextScriptCommand();
     return ModDeathFearActive(logic.GetUnit()) || state == US_ATTACK ||
         state == US_CAST || state == US_SKILL || s->HasAttack() ||
-        s->HasCast() || s->HasSkill() || s->IsAggressive() ||
-        current.cmd == UC_PLAYANIM || current.cmd == UC_PLAYANIMCYCLE ||
-        next.cmd == UC_PLAYANIM || next.cmd == UC_PLAYANIMCYCLE;
+        s->HasCast() || s->HasSkill() || s->IsAggressive();
+}
+bool Protected(CAIUnitLogic& logic) {
+    const auto& current=logic.GetUnitServer()->GetScriptCommand();
+    const auto& next=logic.GetUnitServer()->GetNextScriptCommand();
+    return PriorityBlocked(logic) || current.cmd==UC_PLAYANIM || current.cmd==UC_PLAYANIMCYCLE ||
+        next.cmd==UC_PLAYANIM || next.cmd==UC_PLAYANIMCYCLE;
 }
 struct Commands {
     CAIUnitLogic& logic;
@@ -53,7 +58,7 @@ struct Commands {
     void Turn(float angle) { Stop(); logic.TurnGroupSearch(angle); }
 };
 }
-void Reset() { leases.clear(); active.clear(); revoked.clear(); zone.clear(); }
+void Reset() { leases.clear(); active.clear(); revoked.clear(); zone.clear(); ResetCoordinator(); }
 void SetActive(const std::set<GroupSearch::Identity>& units) {
     if (!Context()) return;
     active = units;
@@ -89,6 +94,8 @@ bool CommandDuty(void* duty, CAIUnitLogic& logic) {
     }
     auto* server=logic.GetUnitServer(); GroupSearch::MotionInput input;
     input.tick=theWorldServer.GetSegmentTimeCounter(); input.dutySelected=true; input.eligible=true;
+    const bool pickupOwned=!PriorityBlocked(logic) && lease.duty && lease.movement.OwnsCommand() &&
+        lease.intent.order==GroupSearch::Order::Hold && OwnsPickupAnimation(unit,server,input.tick);
     input.protectedCommand=Protected(logic); input.position=Point(unit->GetCP());
     input.moving=server->HasMove(); input.turning=server->HasRotate(); input.failed=server->IsCmdFailed();
     if (lease.intent.requireNativeArrival)
@@ -100,7 +107,14 @@ bool CommandDuty(void* duty, CAIUnitLogic& logic) {
     if (lease.movement.OwnsCommand() && !lease.duty) {
         lease.duty=duty; lease.alarm=logic.GetGroupSearchAlarm(); lease.model=int(general->eLogicModel);
     }
+    if((lease.action!=action || lease.serial!=lease.intent.serial) &&
+        (lease.diagnosticTick<0 || input.tick-lease.diagnosticTick>=182)){
+        EngineDiagnostics::Event("GroupSearch event=COMMAND zone=%s side=%d unit=%d subtype=%u serial=%u order=%d action=%d blocked=%d pickup_owned=%d reason=%s",
+            zone.c_str(),lease.side,id.id,id.subtype,lease.intent.serial,int(lease.intent.order),int(action),
+            input.protectedCommand?1:0,pickupOwned?1:0,lease.movement.Reason());lease.diagnosticTick=input.tick;
+    }
     lease.action=action; lease.tick=input.tick; lease.serial=lease.intent.serial;
+    if (pickupOwned) return true; // exact owned clip suppresses only the selected duty
     if (action==GroupSearch::Action::Released || action==GroupSearch::Action::Native) {
         if (lease.intent.order==GroupSearch::Order::Release || lease.intent.order==GroupSearch::Order::None)
             leases.erase(it);

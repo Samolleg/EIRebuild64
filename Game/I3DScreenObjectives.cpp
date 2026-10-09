@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenObjectives.h"
@@ -636,7 +637,9 @@ void CI3DScreenObjectives::OnLButtonDown(UINT nFlags, CPoint point)
 {
     CI3DScreen::OnLButtonDown(nFlags, point);
     int ht;
-    switch (ht = HitTest(point))
+    ht = HitTest(point);
+    JournalHit(ht);
+    switch (ht)
     {
     case 0:
         pI3D->BeginFX("buttons\\tutorial\\ok.wav");
@@ -814,6 +817,7 @@ void CI3DScreenObjectives::GoToZone()
     int nE = descEntrances[nSelEntrance].nE;
     // add global time
     IWorldServer.AddPlayersGlobalTime(descEntrances[nSelEntrance].fTime);
+    GameJournal::Source journalSource("global_map");
     IWorldConnector.ClientGoZone(szZoneName, nE);
 }
 /////////////////////////////////////////////////////////////////////////////////////

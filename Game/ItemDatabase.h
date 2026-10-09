@@ -16,8 +16,9 @@ public:
 public:
     void Clear()
     {
-        SItemDatabase::~SItemDatabase();
-        ::new (this) SItemDatabase;
+        // Keep the old owner alive if constructing the empty containers throws.
+        SItemDatabase empty;
+        *this = std::move(empty);
     }
     BOOL Load(LPCSTR pszPath, LPCSTR pszFName);
 };

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenSaveLoad.h"
@@ -367,6 +368,7 @@ void CI3DScreenSaveLoad::OnLButtonDown(UINT nFlags, CPoint point)
     if (bIntro)
         return;
     int ht = HitTest(point);
+    JournalHit(ht);
     switch (ht)
     {
     case 0: // OK
@@ -403,6 +405,7 @@ void CI3DScreenSaveLoad::OnLButtonDblClk(UINT nFlags, CPoint point)
     if (bIntro)
         return;
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= NUM_BUTTONS) // another slot
     {
         int n = nPos + ht - NUM_BUTTONS;
@@ -621,6 +624,7 @@ void CI3DScreenSaveLoad::Save()
     IWorld.GetTextManager()->GetSystemString("notify_saving", szMsg);
     theInterface.DrawTextOverFrame(szMsg);
 
+    GameJournal::Source journalSave("manual");
     IWorldConnector.ReqSaveGame(pSlot->szPath);
 
     theCursor.SetMode(CT_WAIT);
@@ -941,6 +945,7 @@ void CI3DScreenSaveLoad::ReloadPicture()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
 {
+    GameJournal::Source journalSave(bIsAuto?"auto":"manual_quick");
     if (IWorldConnector.IsLMP())
         return;
     if (!IsEnoughSpace())

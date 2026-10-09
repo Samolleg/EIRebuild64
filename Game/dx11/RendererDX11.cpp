@@ -8,7 +8,9 @@
 #include "ConstantBuffer.h"
 #include "DXShader.h"
 #include "RendererDX11.h"
+#include "../FrameDiagnostics.h"
 #include "ModShadowDX11.h"
+#include "ModWorldBackgroundDX11.h"
 #include "UIColorKeyBlit.h"
 
 #include "batchers.h"
@@ -126,6 +128,61 @@ int CDX11::DrawSimplePrimitive(LPVOID pVertices, DWORD dwVertexCount,
                                 dwIndexCount);
 }
 
+
+bool CDX11::SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet)
+{
+    unsigned width=0,height=0;
+    if(!ownedWorldActive || (modShadows&&modShadows->active) || GetTerrainShadowSize(width,height))return false;
+    uint32_t states[256]={};
+    states[D3DRENDERSTATE_ZENABLE]=D3DZB_TRUE;states[D3DRENDERSTATE_ZWRITEENABLE]=TRUE;
+    states[D3DRENDERSTATE_ZFUNC]=D3DCMP_LESSEQUAL;states[D3DRENDERSTATE_CULLMODE]=D3DCULL_CCW;
+    states[D3DRENDERSTATE_FILLMODE]=D3DFILL_SOLID;states[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_ONE;
+    states[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_ZERO;states[D3DRENDERSTATE_TEXTUREFACTOR]=0xffffffff;
+    states[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATEREQUAL;
+    for(const auto& value:fake_dx7.render_state)if(value.first>=0&&value.first<256)states[value.first]=value.second;
+    uint32_t stages[32]={};stages[D3DTSS_COLOROP]=D3DTOP_MODULATE;
+    stages[D3DTSS_COLORARG1]=D3DTA_TEXTURE;stages[D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
+    stages[D3DTSS_ALPHAOP]=D3DTOP_SELECTARG1;stages[D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;
+    stages[D3DTSS_ADDRESSU]=stages[D3DTSS_ADDRESSV]=D3DTADDRESS_WRAP;
+    stages[D3DTSS_MINFILTER]=stages[D3DTSS_MAGFILTER]=D3DTFG_LINEAR;stages[D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
+    packet.render_states=states;packet.render_state_count=256;packet.texture_states=stages;packet.texture_state_count=32;
+    return ownedRenderer.SubmitTerrain(packet);
+}
+
+bool CDX11::SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet)
+{
+    if(!ownedWorldActive||!ownedRenderer.FigureActive())return false;
+    if(modShadows&&modShadows->active) {
+        ownedRenderer.FigureFallback("legacy_shadow_pass");return false;
+    }
+    uint32_t states[256]={};
+    states[D3DRENDERSTATE_ZENABLE]=D3DZB_TRUE;states[D3DRENDERSTATE_ZWRITEENABLE]=TRUE;
+    states[D3DRENDERSTATE_ZFUNC]=D3DCMP_LESSEQUAL;states[D3DRENDERSTATE_CULLMODE]=D3DCULL_CCW;
+    states[D3DRENDERSTATE_FILLMODE]=D3DFILL_SOLID;states[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_ONE;
+    states[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_ZERO;states[D3DRENDERSTATE_TEXTUREFACTOR]=0xffffffff;
+    states[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATEREQUAL;
+    for(const auto& pair:fake_dx7.render_state)if(pair.first>=0&&pair.first<256)states[pair.first]=pair.second;
+    // Both compatibility and native PS use the same source alphaRef/256.
+    // Retain the actual alpha mode and threshold byte.
+    states[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATEREQUAL;
+    uint32_t stages[32]={};
+    stages[D3DTSS_COLOROP]=D3DTOP_MODULATE;
+    stages[D3DTSS_COLORARG1]=D3DTA_TEXTURE;stages[D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
+    stages[D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;stages[D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
+    const auto alphaMode=GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
+    stages[D3DTSS_ALPHAOP]=alphaMode==0?D3DTOP_SELECTARG1:alphaMode==2?D3DTOP_SELECTARG2:D3DTOP_MODULATE;
+    stages[D3DTSS_ADDRESSU]=stages[D3DTSS_ADDRESSV]=D3DTADDRESS_WRAP;
+    stages[D3DTSS_MINFILTER]=stages[D3DTSS_MAGFILTER]=D3DTFG_LINEAR;
+    stages[D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
+    packet.render_states=states;packet.render_state_count=256;
+    packet.texture_states=stages;packet.texture_state_count=32;
+    ID3D11ShaderResourceView* images[2]={};deviceContext->PSGetShaderResources(0,2,images);
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> primary,secondary;
+    primary.Attach(images[0]);secondary.Attach(images[1]);
+    packet.primary=primary.Get();packet.secondary=secondary.Get();
+    return ownedRenderer.SubmitFigure(mesh,packet);
+}
+
 int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIndices, DWORD dwIndexCount,
                   DWORD dwFlags)
 {
@@ -170,7 +227,12 @@ int CDX11::DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
                                             vbVertices->StridePtr(), &offset);
     this->deviceContext->IASetIndexBuffer(idxBuf->Get(), DXGI_FORMAT_R16_UINT, 0);
     if(modShadows && modShadows->terrainPass)modShadows->BindTerrainResource();
+    if(ownedWorldActive && (!modShadows||!modShadows->active))
+        IfFailedThrowHR(ownedRenderer.BindWorldPixels(theRenderer.IsAddFog()!=0));
     this->deviceContext->DrawIndexed(dwIndexCount, 0, 0);
+    const uint32_t triangles = primitive == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST ? dwIndexCount / 3 :
+        primitive == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && dwIndexCount > 2 ? dwIndexCount - 2 : 0;
+    IfFailedThrowHR(ownedRenderer.RecordDraw(triangles));
     return TRV_VISIBLE_NOCLIP;
 }
 
@@ -182,27 +244,64 @@ int CDX11::DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVerte
 
 void CDX11::BeginFrame()
 {
-    this->deviceContext->OMSetRenderTargets(1, this->renderTargetView.GetAddressOf(),
-                                            this->depthStencilView.Get());
-    this->deviceContext->ClearRenderTargetView(this->renderTargetView.Get(),
-                                               (FLOAT *)&this->background_color);
-    this->deviceContext->ClearDepthStencilView(this->depthStencilView.Get(),
-                                               D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
-                                               G_CLEAR_DEPTH_VALUE, 0);
+    IfFailedThrowHR(ownedRenderer.BeginFrame((FLOAT *)&background_color, G_CLEAR_DEPTH_VALUE));
+    RefreshOwnedTargets();
     SetRenderStates();
+}
+
+bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
+{
+    uint32_t skyConsumed = 0;
+    IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
+    ownedWorldActive = true;
+    RefreshOwnedTargets();
+    SetRenderStates();
+    return skyConsumed != 0;
+}
+
+void CDX11::EndWorld()
+{
+    IfFailedThrowHR(ownedRenderer.EndWorld());
+    ownedWorldActive = false;
+    RefreshOwnedTargets();
+    SetRenderStates();
+}
+
+void CDX11::RefreshOwnedTargets()
+{
+    EIRenderD3D11BridgeV1 bridge = {};
+    IfFailedThrowHR(ownedRenderer.AcquireBridge(bridge));
+    // Device/context/swapchain remain immutable while the existing loading
+    // worker presents and the main thread creates resources. Refresh targets.
+    bridge.device->Release();
+    bridge.context->Release();
+    bridge.swap_chain->Release();
+    renderTargetView.Reset();
+    depthStencilView.Reset();
+    renderTargetView.Attach(bridge.color_target);
+    depthStencilView.Attach(bridge.depth_target);
+    ComPtr<ID3D11Resource> resource;
+    renderTargetView->GetResource(resource.GetAddressOf());
+    ComPtr<ID3D11Texture2D> target;
+    IfFailedThrowHR(resource.As(&target));
+    D3D11_TEXTURE2D_DESC desc = {};
+    target->GetDesc(&desc);
+    D3D11_VIEWPORT viewport = {0, 0, float(desc.Width), float(desc.Height), 0, 1};
+    deviceContext->OMSetRenderTargets(1, renderTargetView.GetAddressOf(), depthStencilView.Get());
+    deviceContext->RSSetViewports(1, &viewport);
 }
 
 void CDX11::EndFrame()
 {
+    FrameDiagnostics::Scope timing(FrameDiagnostics::Present);
     if (m_bMakeScreenShot)
     {
         MakeScreenShot();
         m_bMakeScreenShot = false;
     }
-    if (G_VSYNC)
-        this->swapchain->Present(1, NULL);
-    else
-        this->swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+    const HRESULT presented = ownedRenderer.Present();
+    FrameDiagnostics::Presented(presented);
+    IfFailedThrowHR(presented);
 }
 
 void CDX11::ClearColorBuffer(DWORD value)
@@ -251,9 +350,11 @@ void CDX11::ScreenShot()
 HRESULT CDX11::DrawColorKeySurface(ID3D11ShaderResourceView* image,
     const RECT& destination, const RECT* source, COLORREF key)
 {
-    if (!uiColorKey) uiColorKey = std::make_shared<UIColorKeyBlit>();
-    return uiColorKey->Draw(deviceContext.Get(), spriteBatch.get(), m_states.get(),
-        image, destination, source, key);
+    spriteBatch->End();
+    const HRESULT result = ownedRenderer.DrawUi(image, destination, source,
+        EI_RENDERER_UI_COLOR_KEY | EI_RENDERER_UI_OPAQUE | EI_RENDERER_UI_POINT, key);
+    spriteBatch->Begin();
+    return result;
 }
 
 CDX11::~CDX11()
@@ -279,8 +380,6 @@ CDX11::~CDX11()
 
 bool CDX11::Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
 {
-    m_width = dwWidth;
-    m_height = dwHeight;
     if (!InitializeDX(hWnd, dwWidth, dwHeight))
         return false;
 
@@ -302,77 +401,28 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
         ReportError("No IDXGI Adapters found.");
         return false;
     }*/
-    DXGI_SWAP_CHAIN_DESC scd;
-    ZeroMemory(&scd, sizeof(DXGI_SWAP_CHAIN_DESC));
-
-    scd.BufferDesc.Width = dwWidth;
-    scd.BufferDesc.Height = dwHeight;
-    scd.BufferDesc.RefreshRate.Numerator = 660;
-    scd.BufferDesc.RefreshRate.Denominator = 1;
-    // scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    scd.BufferDesc.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED;
-    scd.BufferDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
-
-    scd.SampleDesc.Count = G_BUFFER_SAMPLES;
-    scd.SampleDesc.Quality = G_BUFFER_QUALITY;
-
-    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scd.BufferCount = 2;
-    scd.OutputWindow = hWnd;
-    scd.Windowed = TRUE;
-    scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    scd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-#ifdef DRAWABLE_BACKBUFFER
-    // swapchain in DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE breaks ALT+F5 graphics debug
-    scd.Flags |= DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
-#endif
-
-    D3D_FEATURE_LEVEL featureLevel;
-    const D3D_FEATURE_LEVEL featureLevelArray[2] = {
-        D3D_FEATURE_LEVEL_11_0,
-        D3D_FEATURE_LEVEL_10_0,
-    };
-    UINT createDeviceFlags = 0;
-
-#if defined(_DEBUG)
-    createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        // adapters[0].pAdapter, // IDXGI Adapter
-        NULL, D3D_DRIVER_TYPE_HARDWARE,
-        NULL,              // FOR SOFTWARE DRIVER TYPE
-        createDeviceFlags, // FLAGS FOR RUNTIME LAYERS
-        featureLevelArray, // FEATURE LEVELS ARRAY
-        2,                 // # OF FEATURE LEVELS IN ARRAY
-        D3D11_SDK_VERSION,
-        &scd,                                // Swapchain description
-        this->swapchain.GetAddressOf(),      // Swapchain Address
-        this->device.GetAddressOf(),         // Device Address
-        &featureLevel,                       // Supported feature level
-        this->deviceContext.GetAddressOf()); // Device Context Address
+    HRESULT hr = ownedRenderer.Initialize(hWnd, dwWidth, dwHeight);
     if (FAILED(hr))
     {
-        ReportError(hr, "Failed to create device and swapchain.");
+        ReportError(hr, "Cannot initialize the shared renderer. Place the source-API RDDraw.dll next to EIRebuild.exe.");
         throw hr;
-        return false;
     }
+    EIRenderD3D11BridgeV1 bridge = {};
+    IfFailedThrowHR(ownedRenderer.AcquireBridge(bridge));
+    device.Attach(bridge.device);
+    deviceContext.Attach(bridge.context);
+    swapchain.Attach(bridge.swap_chain);
+    renderTargetView.Attach(bridge.color_target);
+    depthStencilView.Attach(bridge.depth_target);
 
-    // ReportLiveObjects();
-
-    /*ComPtr<IDXGIDebug> d3dDebug2;
-    IfFailedThrowHR(device->QueryInterface(IID_PPV_ARGS(&d3dDebug2)));
-    d3dDebug2->ReportLiveObjects(DXGI_DEBUG_D3D11, DXGI_DEBUG_RLO_ALL);*/
-
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
-    IfFailedThrowHR(this->swapchain->GetBuffer(0, IID_PPV_ARGS(&backBuffer)));
-    D3D11_TEXTURE2D_DESC tex2d;
-    backBuffer->GetDesc(&tex2d);
-
-    int create_flags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
-    IfFailedThrowHR(this->device->CreateRenderTargetView(backBuffer.Get(), NULL,
-                                                         this->renderTargetView.GetAddressOf()));
+    // Window policy belongs to the DLL. Use its actual target extent before
+    // creating the viewport; the bootstrap settings may still be 800x600.
+    DXGI_SWAP_CHAIN_DESC output = {};
+    IfFailedThrowHR(swapchain->GetDesc(&output));
+    if (!output.BufferDesc.Width || !output.BufferDesc.Height)
+        IfFailedThrowHR(E_INVALIDARG);
+    dwWidth = m_width = output.BufferDesc.Width;
+    dwHeight = m_height = output.BufferDesc.Height;
 
     // Create Blend State
     D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
@@ -400,29 +450,6 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     blendDesc.RenderTarget[0] = rtbd;
     IfFailedThrowHR(
         this->device->CreateBlendState(&blendDesc, this->blendStateDisable.GetAddressOf()));
-
-    // Describe our Depth/Stencil Buffer
-    D3D11_TEXTURE2D_DESC depthStencilDesc;
-    depthStencilDesc.Width = dwWidth;
-    depthStencilDesc.Height = dwHeight;
-    depthStencilDesc.MipLevels = 1;
-    depthStencilDesc.ArraySize = 1;
-    depthStencilDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    depthStencilDesc.SampleDesc.Count = G_BUFFER_SAMPLES;
-    depthStencilDesc.SampleDesc.Quality = G_BUFFER_QUALITY;
-    depthStencilDesc.Usage = D3D11_USAGE_DEFAULT;
-    depthStencilDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    depthStencilDesc.CPUAccessFlags = 0;
-    depthStencilDesc.MiscFlags = 0;
-
-    IfFailedThrowHR(this->device->CreateTexture2D(&depthStencilDesc, NULL,
-                                                  this->depthStencilBuffer.GetAddressOf()));
-
-    IfFailedThrowHR(this->device->CreateDepthStencilView(this->depthStencilBuffer.Get(), NULL,
-                                                         this->depthStencilView.GetAddressOf()));
-
-    this->deviceContext->OMSetRenderTargets(1, this->renderTargetView.GetAddressOf(),
-                                            this->depthStencilView.Get());
 
     // Create depth stencil state
     D3D11_DEPTH_STENCIL_DESC depthstencildesc;
@@ -484,7 +511,7 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
         this->device->CreateRasterizerState(&rasterizerDesc,
                                             this->rasterizerStateNoCull.GetAddressOf()));
 
-    spriteBatch = std::make_unique<DirectX::SpriteBatch>(this->deviceContext.Get());
+    spriteBatch = std::make_unique<OwnedSpriteBatch>(ownedRenderer);
     // spriteBatch->Begin();
     // spriteFont = std::make_unique<DirectX::SpriteFont>(this->device.Get(),
     // L"Data\\comic_sans_ms_16.spritefont"); spriteFont->SetDefaultCharacter(L'Z');
@@ -611,4 +638,11 @@ bool CDX11::GetTerrainShadowSize(unsigned &width,unsigned &height) const {
     if(!modShadows || !modShadows->terrainPass)return false;
     width=modShadows->TerrainWidth();height=modShadows->TerrainHeight();
     return width && height;
+}
+
+void CDX11::ResetWorldBackground(){modBackground.reset();}
+void CDX11::DrawWorldBackground(const std::shared_ptr<ModWorldBackground::FrameSnapshot>& snapshot,const WorldBackground::VisualEnvironment& environment,const std::array<float,4>& depthRow,unsigned long fogColor,bool transparentPass){
+    if(!snapshot)return;
+    try{if(!modBackground)modBackground=std::make_shared<ModWorldBackgroundDX11>(device.Get(),deviceContext.Get());modBackground->Frame(snapshot,environment,depthRow,fogColor,transparentPass);}
+    catch(const std::exception& e){GameJournal::AllocationFailureInCatch("world_background");OutputDebugStringA(e.what());modBackground.reset();if(snapshot->publication)snapshot->publication->Reset(environment.epoch);}
 }

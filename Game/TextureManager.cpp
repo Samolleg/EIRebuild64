@@ -2,10 +2,18 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "TextureManager.h"
+#include "GameJournal.h"
+#include "ModSecondaryAtlas.h"
+#include "ModPrimaryAtlas.h"
+#include "ModTextureMemory.h"
+#include "ModPnt3Texture.h"
 
 #include "mmpFormat.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModCriticalLifecycle.h"
+#include "ModHitHistory.h"
+#include <stdexcept>
 #include "WorldClient.h"
 #include "Renderer.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -95,8 +103,176 @@ void CTextureManager::Destroy()
     CResourceManager::Destroy();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+// Direct PNT3 uses the selected addon decoder, then the existing surface upload.
+// Its linear-size field is an encoded byte count, never a mip count.
+BOOL LoadPnt3Texture(CRenderer* renderer, LPTEXTURE texture, const void* source, std::size_t bytes) {
+    const char* reason = "exception";
+    BOOL loaded = FALSE;
+    try {
+        std::vector<uint32_t> decoded;
+        if(Pnt3Texture::Decode(source,bytes,decoded,reason)) {
+            auto* header=reinterpret_cast<SMMPFileHeader*>(decoded.data());
+            DXGI_FORMAT format;
+            if(renderer->FindBestTextureFormat(header,format) ||
+               renderer->FindTextureFormat(MMP_FORMAT_4444,format)) {
+                texture->SetTextureFormat(format);
+                loaded=texture->Load(renderer,header,0);
+                reason=loaded?"loaded":"surface-load-failed";
+            } else reason="surface-format-unavailable";
+        }
+    } catch(...) { GameJournal::AllocationFailureInCatch("TextureManager");reason="decode-or-load-exception";}
+    if(!loaded)ReportWarning("CTextureManager::LoadPnt3Texture. Texture \"%s\" rejected (%s).\n",
+                            texture->GetName(),reason);
+    return loaded;
+}
+// Process-lifetime storage avoids static World destructor ordering. Entries are
+// bounded and cleared at the existing layer/world teardown; no texture ownership.
+ModSecondaryAtlas::Registry& SecondaryAtlasRecipes() {
+    static auto* registry=new ModSecondaryAtlas::Registry;return *registry;
+}
+}
+BOOL CTextureManager::ComposeTexturesInMemory() const {
+    const auto* package=ModRuntime::Current();
+    return package && package->CombatSetting("JMVGraphics") && package->CombatSetting("writeComposeInMemory");
+}
+BOOL CTextureManager::RebuildSharedAtlasCpu(LPTEXTURE texture) {
+    if(!texture || !ShareSecondaryCharacterAtlas() || !ComposeTexturesInMemory())return FALSE;
+    const char* name=texture->GetName();
+    const bool primary=ModPrimaryAtlas::Canonical(name);
+    if((!primary && !ModSecondaryAtlas::Canonical(name)) ||
+       texture->GetTypeID()!=(primary?TTID_UNIT_MAIN:TTID_UNIT_WEAPON))return FALSE;
+    const auto* encoded=SecondaryAtlasRecipes().Find(name);
+    if(!encoded || ModSecondaryAtlas::Name(*encoded,primary)!=name)return FALSE;
+    ModSecondaryAtlas::DecodedRecipe recipe;
+    if(!ModSecondaryAtlas::Decode(*encoded,recipe) || recipe.size!=1024 ||
+       !recipe.mips || recipe.mips>11 || recipe.format!=MMP_FORMAT_8888)return FALSE;
+    STextureSetDescription set;
+    set.characterAtlas=primary?3:4;
+    set.dwTextureDimention=recipe.size;
+    set.data.SetSize(recipe.data.size());
+    if(!recipe.data.empty())std::memcpy(set.data.GetData(),recipe.data.data(),recipe.data.size());
+    for(int i=0;i<4;++i)set.equipmentSlots[i]=recipe.slots[i];
+    for(const auto& layer:recipe.layers) {
+        // A replay must not silently invent a replacement for an absent layer.
+        auto* header=reinterpret_cast<SMMPFileHeader*>(GetFile(layer.c_str()));
+        if(!header)return FALSE;
+        struct CloseLayer {CTextureManager* manager;BYTE* bytes;~CloseLayer(){manager->CloseFile(bytes);}} close{this,reinterpret_cast<BYTE*>(header)};
+        const DWORD dimension=primary?recipe.size:512;
+        if(header->dwDimentionX!=dimension || header->dwDimentionY!=dimension)return FALSE;
+        set.szTextures.Add(layer.c_str());
+    }
+    // Direct memory composition uses the original resolved HD names and slots;
+    // it cannot recurse into provider reuse, select current equipment, or write disk.
+    CString result;
+    if(!ComposeTextureMemory(result,set,name,recipe.mips,recipe.format) || result!=name)return FALSE;
+    return ModTextureMemory::Exact(ModTextureMemory::State().cache.Get(name),recipe.size,
+                                  recipe.mips,recipe.format,recipe.data)?TRUE:FALSE;
+}
+BOOL CTextureManager::LoadTextureMemory(LPTEXTURE texture) {
+    const bool privateAlias=SharePrimaryCharacterAtlas() && ModPrimaryAtlas::Private(texture->GetName());
+    const bool shared=(texture->GetTypeID()==TTID_UNIT_MAIN && ModPrimaryAtlas::Canonical(texture->GetName())) ||
+        (texture->GetTypeID()==TTID_UNIT_WEAPON && ModSecondaryAtlas::Canonical(texture->GetName()));
+    struct RestoreShared {
+        CTexture* texture;bool active,ready=false;
+        ~RestoreShared(){if(active && !ready)texture->Unload();}
+    } restoring{texture,shared && !texture->GetSurface()};
+    if(restoring.active)texture->ResetFlag(TEX_LOADED);
+    DWORD pnt3SourceSize=0;
+    const bool loaded=ModTextureMemory::LoadSource(ModTextureMemory::State().cache,ModPrimaryAtlas::State(),
+        texture->GetName(),privateAlias,
+        [&](){return reinterpret_cast<SMMPFileHeader*>(GetFile(CString(texture->GetName())+".mmp",&pnt3SourceSize));},
+        [&](SMMPFileHeader* header,bool resource) {
+            struct CloseResource {CTextureManager* manager;BYTE* bytes;~CloseResource(){if(bytes)manager->CloseFile(bytes);}} close{this,resource?reinterpret_cast<BYTE*>(header):nullptr};
+            if(resource && pnt3SourceSize>=sizeof(SMMPFileHeader) && header->dwFormat==MMP_FORMAT_PNT3)
+                return LoadPnt3Texture(pRend,texture,header,pnt3SourceSize)!=FALSE;
+            DXGI_FORMAT format;
+            if(!pRend->FindBestTextureFormat(header,format)) {
+                if(!resource || header->dwFormat!=MMP_FORMAT_8888 || !pRend->FindTextureFormat(MMP_FORMAT_4444,format))return false;
+            }
+            texture->SetTextureFormat(format);
+            const DWORD first=resource && wStartMipMapLevel>=header->dwMipMapLevel?header->dwMipMapLevel-1:wStartMipMapLevel;
+            const BOOL loaded=texture->Load(pRend,header,first);
+            return resource?loaded!=FALSE:true;
+        },[&](const char*){return RebuildSharedAtlasCpu(texture)!=FALSE;});
+    restoring.ready=loaded && texture->GetSurface()!=nullptr;
+    return (shared?restoring.ready:loaded)?TRUE:FALSE;
+}
+BOOL CTextureManager::ComposeTextureMemory(CString& result,const STextureSetDescription& set,
+                                          const CString& desired,DWORD mips,DWORD format) {
+    result=desired;
+    std::string user;
+    if(set.data.GetSize())user.assign(reinterpret_cast<const char*>(set.data.GetData()),set.data.GetSize());
+    auto& cache=ModTextureMemory::State().cache;
+    const bool canonical=ModPrimaryAtlas::Canonical(desired)||ModSecondaryAtlas::Canonical(desired);
+    if(ShareSecondaryCharacterAtlas() && canonical && ModTextureMemory::Exact(cache.Get((LPCSTR)desired),set.dwTextureDimention,mips,format,user))return TRUE;
+    if(!set.szTextures.GetSize()){cache.Remove((LPCSTR)desired);return FALSE;}
+    try {
+        SMMPFileHeader h;h.dwSignature=MMP_SIGNATURE;h.InitializeDefaultFormat(format);
+        h.dwDimentionX=set.dwTextureDimention;h.dwDimentionY=set.dwTextureDimention;
+        h.dwMipMapLevel=mips;h.dwUserDataShift=DWORD(user.size());
+        ETextureFormats conversion=TEX_FORMAT_565;
+        if(format==MMP_FORMAT_5551)conversion=TEX_FORMAT_1555;
+        else if(format==MMP_FORMAT_4444)conversion=TEX_FORMAT_4444;
+        else if(format!=MMP_FORMAT_5650 && format!=MMP_FORMAT_8888)return FALSE;
+        // Native complete-MMP allocation precedes temporary pixels and layers.
+        ModTextureMemory::Payload output;
+        if(!ModTextureMemory::ReserveOutput(output,h,user.size(),theSettings.nDrawVisibleOnly,
+            [](std::vector<DWORD>& words,std::size_t count){words.resize(count);return true;})){
+            GameJournal::AllocationFailure("complete_mmp_output");return FALSE;
+        }
+        // Native memory composition initializes to zero, independently of BGColor.
+        std::vector<DWORD> pixels(std::size_t(set.dwTextureDimention)*set.dwTextureDimention,0);
+        auto* graphics=theRenderer.GetGraphicsProcessor();
+        const auto* package=ModRuntime::Current();
+        const bool debug=package && package->CombatSetting("showJmvDebug");
+        const bool equipment=set.characterAtlas==4;
+        std::vector<DWORD> layer(equipment?512*512:0);
+        int x=0,y=0;
+        for(int i=0;i<set.szTextures.GetSize();++i) {
+            auto* h=reinterpret_cast<SMMPFileHeader*>(GetFile(set.szTextures[i]));
+            if(!h){
+                ReportWarning("Missing memory texture layer %s",(LPCSTR)set.szTextures[i]);
+                if(!equipment && debug)std::fill(pixels.begin(),pixels.end(),0);
+                continue; // Native counts missing layers; zero pixels still compose.
+            }
+            struct CloseLayer {CTextureManager* manager;BYTE* bytes;~CloseLayer(){manager->CloseFile(bytes);}} close{this,reinterpret_cast<BYTE*>(h)};
+            const DWORD dimension=equipment?512:set.dwTextureDimention;
+            if(h->dwDimentionX!=dimension || h->dwDimentionY!=dimension)return FALSE;
+            DWORD* output=pixels.data();
+            if(equipment){std::fill(layer.begin(),layer.end(),0);output=layer.data();}
+            graphics->PutOneLayer(output,reinterpret_cast<DWORD*>(h->GetMipLevelData(0)),int(dimension*dimension),h->dwFormat==MMP_FORMAT_PNT3);
+            if(equipment){
+                if(set.equipmentSlots[0]==i){x=0;y=512;}
+                else if(set.equipmentSlots[1]==i){x=512;y=512;}
+                else if(set.equipmentSlots[2]==i){x=0;y=0;}
+                else if(set.equipmentSlots[3]==i){x=512;y=0;}
+                for(int row=0;row<512;++row)std::memcpy(pixels.data()+(y+row)*1024+x,layer.data()+row*512,512*sizeof(DWORD));
+            }
+        }
+        auto payload=ModTextureMemory::EncodeInto(std::move(output),h,user,std::move(pixels),
+            [&](WORD* dst,DWORD* src,int count){graphics->Convert32To16Bit(dst,src,conversion,count);},
+            [&](DWORD* dst,DWORD* src,int dimension){graphics->GenerateMipmapLevel(dst,src,dimension);});
+        cache.Put((LPCSTR)desired,std::move(payload));return TRUE;
+    }catch(const std::bad_alloc&){ GameJournal::AllocationFailureInCatch("TextureManager");return FALSE;}
+}
+
+BOOL CTextureManager::ShareSecondaryCharacterAtlas() const {
+    auto* package=ModRuntime::Current();
+    return package && package->CombatSetting("JMVGraphics") &&
+           package->CombatSetting("JMVCharacterAtlasSharing");
+}
+BOOL CTextureManager::SharePrimaryCharacterAtlas() const {
+    return ShareSecondaryCharacterAtlas();
+}
 void CTextureManager::DeleteUnitLayerTextures()
 {
+    ModTextureMemory::State().cache.Clear();
+    ModTextureMemory::State().forceCanonicalCpu=false;
+    SecondaryAtlasRecipes().Clear();
+    ModPrimaryAtlas::State().Clear();
+    ModCriticalLifecycle::Clear(ModRuntime::Current());
+    ModHitHistory::ClearRuntimeHitHistory("texture-layer-delete");
     CFileFind find;
     CString szMaskName = CString(((CWorld *)GetWorld())->GetWorkPath()) + "textures\\*.mmp";
     BOOL bCheck = find.FindFile(szMaskName);
@@ -361,12 +537,17 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
         return TRUE;
     }
 
+    if(ComposeTexturesInMemory())return LoadTextureMemory(lpTexture);
+    const bool privateAlias=SharePrimaryCharacterAtlas() && ModPrimaryAtlas::Private(lpTexture->GetName());
+    const char* textureName=lpTexture->GetName();
+    std::string sourceName=textureName?textureName:"";
+    if(privateAlias && !ModPrimaryAtlas::State().Source(lpTexture->GetName(),sourceName))return FALSE;
     ETypeIDs tidTextureFormat = TID_EMPTY;
     BOOL bCheck = FALSE;
     DXGI_FORMAT texFormat;
     // open file
     CFileFind find;
-    CString szString = theSettings.szWorkPath + "textures\\" + lpTexture->GetName() + ".bmp";
+    CString szString = theSettings.szWorkPath + "textures\\" + sourceName.c_str() + ".bmp";
     DWORD dwTextureFormat;
     if (find.FindFile(szString)) // first, trying to open .bmp file
     {
@@ -401,10 +582,16 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
     }
     else
     {
-        szString = CString(lpTexture->GetName()) + ".mmp";
-        LPMMPFILEHEADER lpHdr = reinterpret_cast<SMMPFileHeader *>(GetFile(szString));
+        szString = CString(sourceName.c_str()) + ".mmp";
+        DWORD pnt3SourceSize=0;
+        LPMMPFILEHEADER lpHdr = reinterpret_cast<SMMPFileHeader *>(GetFile(szString,&pnt3SourceSize));
         if (lpHdr)
         {
+            if(pnt3SourceSize>=sizeof(SMMPFileHeader) && lpHdr->dwFormat==MMP_FORMAT_PNT3) {
+                const BOOL loaded=LoadPnt3Texture(pRend,lpTexture,lpHdr,pnt3SourceSize);
+                CloseFile(reinterpret_cast<BYTE*>(lpHdr));
+                return loaded;
+            }
             if (pRend->FindBestTextureFormat(lpHdr, texFormat))
                 lpTexture->SetTextureFormat(texFormat);
             else
@@ -429,16 +616,23 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
         {
             CFile file;
             szString.Format("%stextures\\%s.mmp", ((CWorld *)GetWorld())->GetWorkPath(),
-                            lpTexture->GetName());
+                            sourceName.c_str());
             if (file.Open(szString, CFile::modeRead) == FALSE)
             {
                 ReportWarning("CTextureManager::LoadTexture.\n Can't find texture \"%s\"\n",
                               lpTexture->GetName());
-                return TRUE;
+                return privateAlias?FALSE:TRUE;
             }
-            LPBYTE lpData = dbgnew BYTE[file.GetLength()];
-            file.Read(lpData, file.GetLength());
+            const DWORD pnt3DiskSize=static_cast<DWORD>(file.GetLength());
+            LPBYTE lpData = dbgnew BYTE[pnt3DiskSize];
+            const UINT pnt3ReadSize=file.Read(lpData,pnt3DiskSize);
             file.Close();
+            if(pnt3ReadSize>=sizeof(SMMPFileHeader) &&
+               reinterpret_cast<SMMPFileHeader*>(lpData)->dwFormat==MMP_FORMAT_PNT3) {
+                const BOOL loaded=LoadPnt3Texture(pRend,lpTexture,lpData,pnt3ReadSize);
+                delete[] lpData;
+                return loaded;
+            }
 
             if (pRend->FindBestTextureFormat(reinterpret_cast<SMMPFileHeader *>(lpData), texFormat))
                 lpTexture->SetTextureFormat(texFormat);
@@ -483,9 +677,16 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture, LPCSTR pszDirectoryName)
         return TRUE;
     }
 
-    LPBYTE lpData = dbgnew BYTE[file.GetLength()];
-    file.Read(lpData, file.GetLength());
+    const DWORD pnt3DiskSize=static_cast<DWORD>(file.GetLength());
+    LPBYTE lpData = dbgnew BYTE[pnt3DiskSize];
+    const UINT pnt3ReadSize=file.Read(lpData,pnt3DiskSize);
     file.Close();
+    if(pnt3ReadSize>=sizeof(SMMPFileHeader) &&
+       reinterpret_cast<SMMPFileHeader*>(lpData)->dwFormat==MMP_FORMAT_PNT3) {
+        const BOOL loaded=LoadPnt3Texture(pRend,lpTexture,lpData,pnt3ReadSize);
+        delete[] lpData;
+        return loaded;
+    }
 
     DXGI_FORMAT texFormat;
     if (pRend->FindBestTextureFormat(reinterpret_cast<SMMPFileHeader *>(lpData), texFormat))
@@ -738,12 +939,39 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                               dwNumMipLevels, dwBGColor, MMP_FORMAT_8888);
     }
 
-    CString szResultFileName(theWorld.GetWorkPath() + "textures\\" + szDesiredName + ".mmp");
+    CString desiredName=szDesiredName,alternateName=szAlternateName;
+    if((set.characterAtlas==3 || set.characterAtlas==4) && ShareSecondaryCharacterAtlas()) {
+        const bool primary=set.characterAtlas==3;
+        std::string data;
+        if(set.data.GetSize())data.assign(reinterpret_cast<const char*>(set.data.GetData()),set.data.GetSize());
+        std::vector<std::string> layers;
+        for(int i=0;i<set.szTextures.GetSize();++i)layers.emplace_back((LPCSTR)set.szTextures[i]);
+        std::array<int,4> slots;
+        for(int i=0;i<4;++i)slots[i]=primary?-1:set.equipmentSlots[i];
+        const auto recipe=ModSecondaryAtlas::Recipe(set.dwTextureDimention,dwNumMipLevels,
+            dwBGColor,dwResultFormat,data,layers,slots);
+        std::string canonical;
+        if(SecondaryAtlasRecipes().Resolve(recipe,canonical,primary)) {
+            desiredName=canonical.c_str();alternateName=desiredName;
+            if(!ModTextureMemory::State().forceCanonicalCpu && ModSecondaryAtlas::ReuseLoaded<CTexture>(
+                [&](){return FindTexture(primary?TTID_UNIT_MAIN:TTID_UNIT_WEAPON,canonical.c_str());},
+                [&](CTexture* provider){
+                    if(!provider->GetSurface())LoadTexture(provider);
+                    return provider->GetSurface()!=nullptr;
+                },
+                [](CTexture* provider){provider->AddRef();},
+                [](CTexture* provider){provider->Release();})) {
+                szResultName=desiredName;return TRUE;
+            }
+        }
+    }
+    if(ComposeTexturesInMemory())return ComposeTextureMemory(szResultName,set,desiredName,dwNumMipLevels,dwResultFormat);
+    CString szResultFileName(theWorld.GetWorkPath() + "textures\\" + desiredName + ".mmp");
     SMMPFileHeader hdr;
     CBYTEArray data;
     CFile file;
     // first, check for such texture already exist
-    szResultName = szDesiredName;
+    szResultName = desiredName;
     // check primary name texture
     if (file.Open(szResultFileName, CFile::modeRead))
     {
@@ -761,11 +989,11 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
             (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
             return TRUE;
     }
-    else if (szDesiredName != szAlternateName)
+    else if (desiredName != alternateName)
     {
         // check alternate name texture
-        szResultName = szAlternateName;
-        szResultFileName = theWorld.GetWorkPath() + "textures\\" + szAlternateName + ".mmp";
+        szResultName = alternateName;
+        szResultFileName = theWorld.GetWorkPath() + "textures\\" + alternateName + ".mmp";
         if (file.Open(szResultFileName, CFile::modeRead))
         {
             // read user data
@@ -781,8 +1009,8 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
             (data.GetSize() == set.data.GetSize()) &&
                 (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
                 return TRUE;
-            szResultName = szDesiredName;
-            szResultFileName = theWorld.GetWorkPath() + "textures\\" + szDesiredName + ".mmp";
+            szResultName = desiredName;
+            szResultFileName = theWorld.GetWorkPath() + "textures\\" + desiredName + ".mmp";
         }
     }
     //
@@ -792,7 +1020,24 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
         return FALSE;
     }
     // compose texture
-    DWORD *pResultLayer = mm_malloc<DWORD>(set.dwTextureDimention * set.dwTextureDimention);
+    DWORD *pResultLayer = ModCriticalLifecycle::DiskLayer(
+        [&](){return mm_malloc<DWORD>(set.dwTextureDimention * set.dwTextureDimention);},
+        [](){ModCriticalLifecycle::Clear(ModRuntime::Current());ModHitHistory::ClearRuntimeHitHistory("disk-layer-allocation-failed");});
+    if(!pResultLayer)return FALSE;
+    WORD *pResultMipLevel = nullptr;
+    DWORD *pMipLevel = nullptr;
+    struct DiskComposeBuffers
+    {
+        DWORD *&layer;
+        WORD *&converted;
+        DWORD *&mip;
+        ~DiskComposeBuffers()
+        {
+            if (converted) mm_free(converted);
+            if (layer) mm_free(layer);
+            if (mip) mm_free(mip);
+        }
+    } ownedBuffers{pResultLayer, pResultMipLevel, pMipLevel};
     MemSetDWord(pResultLayer, dwBGColor, set.dwTextureDimention * set.dwTextureDimention);
     int nCount = 0;
     if (set.characterAtlas == 4)
@@ -809,7 +1054,6 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                 (hdrLayer->dwFormat != MMP_FORMAT_PNT3 && hdrLayer->dwFormat != MMP_FORMAT_PAINT32))
             {
                 CloseFile(reinterpret_cast<BYTE *>(hdrLayer));
-                mm_free(pResultLayer);
                 return ReportError("Invalid HD equipment layer %s", (LPCSTR)set.szTextures[index]);
             }
             std::fill(layer.begin(), layer.end(), 0);
@@ -828,7 +1072,6 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     // check for any textures exist on this layer
     if (!nCount)
     {
-        mm_free(pResultLayer);
         return FALSE;
     }
     // generate mip levels and write result texture
@@ -852,18 +1095,45 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
         texFormat = TEX_FORMAT_4444;
         break;
     }
-    //
+    // Allocate both temporary mip buffers before creating/truncating the MMP.
+    DWORD dwNewSizeX = hdr.dwDimentionX;
+    DWORD dwNewSizeY = hdr.dwDimentionY;
+    try
+    {
+        pResultMipLevel = mm_malloc<WORD>(dwNewSizeX * dwNewSizeY);
+        pMipLevel = mm_malloc<DWORD>(dwNewSizeX * dwNewSizeY);
+    }
+    catch (const std::bad_alloc &)
+    { GameJournal::AllocationFailureInCatch("TextureManager");
+        return FALSE;
+    }
+    if (!pResultMipLevel || !pMipLevel) { GameJournal::AllocationFailure("compose_layer_null"); return FALSE; }
     if (file.Open(szResultFileName, CFile::modeWrite | CFile::modeCreate) == FALSE)
         return ReportError("Can't open file \"%s\" to write result texture.\n", szResultFileName);
+    struct PartialMmpFile
+    {
+        CFile &file;
+        const CString &path;
+        bool complete = false;
+        ~PartialMmpFile()
+        {
+            if (!complete)
+            {
+                file.Abort(); // Non-throwing handle cleanup during unwinding.
+                if (!DeleteFile(path))
+                {
+                    OutputDebugStringA("Failed to remove incomplete composed MMP: ");
+                    OutputDebugStringA((LPCSTR)path);
+                    OutputDebugStringA("\n");
+                }
+            }
+        }
+    } outputFile{file, szResultFileName};
     // write header and user data
     file.Write(&hdr, sizeof(hdr));
     if (hdr.dwUserDataShift)
         file.Write(set.data.GetData(), hdr.dwUserDataShift);
     //
-    DWORD dwNewSizeX = hdr.dwDimentionX;
-    DWORD dwNewSizeY = hdr.dwDimentionY;
-    WORD *pResultMipLevel = mm_malloc<WORD>(dwNewSizeX * dwNewSizeY);
-    DWORD *pMipLevel = mm_malloc<DWORD>(dwNewSizeX * dwNewSizeY);
     // 0th mip level
     CGraphicsProcessor *pGraphicsProcessor = theRenderer.GetGraphicsProcessor();
     if (dwResultFormat == MMP_FORMAT_8888)
@@ -894,10 +1164,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     }
     //
     file.Close();
-    //
-    mm_free(pResultMipLevel);
-    mm_free(pResultLayer);
-    mm_free(pMipLevel);
+    outputFile.complete = true;
 
     return TRUE;
 }
@@ -992,6 +1259,7 @@ ITexture *CTextureManager::GetFromLRU(LPCSTR pszName)
         {
             TRACE1("Get texture \"%s\" from LRU map.\n", pTexture->GetName());
             lru.RemoveAt(lastpos);     // remove from LRU list
+            nTotalLRUSize -= pTexture->GetTotalSize();
             RegisterInstant(pTexture); // register in main hash table
             return pTexture;
         }
@@ -999,6 +1267,46 @@ ITexture *CTextureManager::GetFromLRU(LPCSTR pszName)
     }
 
     return 0;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+std::string CTextureManager::CheckLRUAccountingG3()
+{
+    // CPU containers and empty providers only: do not call texture-manager Create,
+    // load resources, create surfaces or initialize a renderer/live world.
+    CTextureManager manager;
+    if (!manager.CBaseManager::Create()) throw std::runtime_error("LRU fixture containers failed");
+    CTexture* first = new CTexture();
+    CTexture* last = new CTexture();
+    first->SetName("lru-cpu-a"); first->SetTypeID(TTID_UNIT_MAIN); first->SetTotalSize(4096);
+    last->SetName("lru-cpu-b"); last->SetTypeID(TTID_UNIT_MAIN); last->SetTotalSize(12288);
+    manager.lru.AddTail(first); manager.lru.AddTail(last);
+    manager.nTotalLRUSize = 16384;
+    ITexture* hit = manager.GetAndLoadTexture(TTID_UNIT_MAIN, "lru-cpu-a");
+    nlohmann::json cases = nlohmann::json::array();
+    cases.push_back({{"id","name-hit"},{"same",hit==first},
+        {"remainingBytes",manager.nTotalLRUSize},{"lruCount",manager.GetNumLRUElements()},
+        {"registered",first->GetManager()==&manager}});
+    POSITION head = manager.lru.GetHeadPosition();
+    ITexture* miss = manager.GetTexture("lru-cpu-absent");
+    cases.push_back({{"id","miss"},{"found",miss!=nullptr},
+        {"remainingBytes",manager.nTotalLRUSize},{"lruCount",manager.GetNumLRUElements()},
+        {"orderUnchanged",head==manager.lru.GetHeadPosition()}});
+    ITexture* registered = manager.GetTexture("lru-cpu-a");
+    ITexture* finalHit = manager.GetTexture("lru-cpu-b");
+    const int afterLast = manager.nTotalLRUSize;
+    ITexture* repeat = manager.GetTexture("lru-cpu-a");
+    cases.push_back({{"id","registered-and-last"},{"sameRegistered",registered==first},
+        {"lastSame",finalHit==last},{"remainingBytes",afterLast},
+        {"lruCount",manager.GetNumLRUElements()},{"repeatSame",repeat==first},
+        {"repeatBytes",manager.nTotalLRUSize}});
+    // Both fixture pointers have transferred to the main hash; detach explicitly.
+    manager.RemoveInstantAt(first->GetID()); first->SetManager(nullptr); delete first;
+    manager.RemoveInstantAt(last->GetID()); last->SetManager(nullptr); delete last;
+    return nlohmann::json({{"success",true},{"actualCpuManager",true},{"cpuTextures",2},
+        {"cases",cases},{"resourceOpened",false},{"rendererCreated",false},
+        {"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},
+        {"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},
+        {"saveRead",false},{"uiExecuted",false}}).dump();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 ITexture *CTextureManager::GetAndLoadTexture(ETypeIDs tid, LPCSTR pszName)
@@ -1050,6 +1358,25 @@ void CTextureManager::ShrinkLRU()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+GameJournal::TextureMemory CTextureManager::ReadMemoryCounters() const noexcept
+{
+    GameJournal::TextureMemory result;result.available=true;
+    // Both registered providers and LRU providers still belong to the manager.
+    auto count=[&](const CTexture* texture){
+        ++result.count;if(texture->CheckFlag(TEX_LOADED))++result.loaded;
+        const int bytes=texture->GetTotalSize();if(bytes>0)result.bytes+=bytes;
+    };
+    POSITION pos=list.GetHeadPosition();
+    while(pos)count(static_cast<const CTexture*>(list.GetNext(pos)));
+    pos=lru.GetHeadPosition();while(pos)count(lru.GetNext(pos));
+    result.lruCount=lru.GetCount();result.lruBytes=nTotalLRUSize>0?nTotalLRUSize:0;
+    result.lruAllowed=pRend && nAllowedLRUSize>0?nAllowedLRUSize:0;
+    if(const auto* state=ModTextureMemory::PeekState()){
+        result.cacheCount=state->cache.Size();result.cacheBytes=state->cache.Bytes();
+    }
+    return result;
+}
+
 void CTextureManager::UnloadAllTextures()
 {
     return;

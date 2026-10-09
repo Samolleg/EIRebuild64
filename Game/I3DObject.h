@@ -5,6 +5,7 @@
 #include "I3DHandler.h"
 #include "Material.h"
 #include "Texture.h"
+#include <memory>
 
 class CInterface3D;
 class CI3DToolTip;
@@ -35,6 +36,7 @@ public:
 
     BOOL PtInArea(CPoint point);
 
+    const char* JournalTip() const noexcept;
     bool IsToolTipActive();
     void UpdateToolTip(LPCTSTR pszText);
     void SetToolTip(LPCTSTR pszText, int nHeaderLines = 1, int nKbdAction = 0);
@@ -60,6 +62,9 @@ private:
     DWORD dwBlitFlags;
     std::unique_ptr<CDXGISurface> pSurface;
     std::unique_ptr<CDXGISurface> pCopy;
+    std::unique_ptr<DWORD[]> pixelBuffer;
+    bool pixelBufferValid = false;
+    HRESULT pixelReadbackStatus = E_PENDING;
     int nRealWidth, nRealHeight;
     int nCopyBytes;
 
@@ -96,7 +101,8 @@ public:
     }
     void ClearFlags() { dwBlitFlags = 0; }
 
-    DWORD GetPixel(int nX, int nY); // in relative coords (800x600)
+    DWORD GetPixel(int nX, int nY); // in surface pixel coordinates
+    HRESULT GetPixelReadbackStatus() const { return pixelReadbackStatus; }
 
     void StretchTo(CDXGISurface *result, const RECT &rect);
 
@@ -192,6 +198,7 @@ public:
     void RemoveArea(int num);
     void RemoveAllAreas();
     int HitTest(CPoint pt);
+    void JournalHit(int hit) noexcept;
 
     void SetRect(CRect rc) { rect = rc; }
     void SetRect(int x1, int y1, int x2, int y2)
@@ -218,4 +225,5 @@ public:
 };
 
 bool PasteTexture(LPTEXTURE pDstTex, LPCTSTR pszTexName, int nSrcSizeX, int nSrcSizeY, int nSizeX,
-                  int nSizeY, int nDstX, int nDstY, int nSrcX = 0, int nSrcY = 0);
+                  int nSizeY, int nDstX, int nDstY, int nSrcX = 0, int nSrcY = 0,
+                  std::unique_ptr<WORD[]> *uploadedPixels = nullptr);

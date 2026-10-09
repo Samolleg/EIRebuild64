@@ -15,6 +15,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "aiGraph.h"
 #include "unit.h"
 #include "aiMap.h"
+#include "ModCliTool.h"
 
 #ifdef __AI_GRAPHGENERATOR
 #include <iostream>
@@ -487,6 +488,40 @@ void CAIGraph::FindNodePlace(CAIMap *pMap, int x, int y)
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIGraph::FindLinkWeights(CAIMap *pMap, int x, int y)
 {
+    if (ModCliTool::GeneratingGraph())
+    {
+        CAIRoute r;
+        int dir, kind;
+        for (dir = 0; dir < 8; dir++)
+        {
+            int nx = x + nDX[dir + 1], ny = y + nDY[dir + 1];
+            if (nx < 0 || ny < 0 || nx >= XSize() || ny >= YSize())
+            {
+                // destination node is out of map
+                for (kind = 0; kind < N_AI_UNIT_KINDS; kind++)
+                    vertices[kind][y][x].nWeights[dir] = -1;
+                continue;
+            }
+            for (kind = 0; kind < N_AI_UNIT_KINDS; kind++)
+            {
+                int nCost;
+                int nSrcX = x * N_AI_GRAPH_CELL_SIZE + places[kind][y][x].nX;
+                int nSrcY = y * N_AI_GRAPH_CELL_SIZE + places[kind][y][x].nY;
+                int nDstX = nx * N_AI_GRAPH_CELL_SIZE + places[kind][ny][nx].nX;
+                int nDstY = ny * N_AI_GRAPH_CELL_SIZE + places[kind][ny][nx].nY;
+                if (pMap->FindPath(kind, nSrcX, nSrcY, nDstX, nDstY, r, &nCost))
+                {
+                    nCost /= N_GRAPH_COST_DIVISOR;
+                    if (nCost > 0x7fff) // overflow check
+                        nCost = 0x7fff;
+                    vertices[kind][y][x].nWeights[dir] = nCost;
+                }
+                else
+                    vertices[kind][y][x].nWeights[dir] = -1;
+            }
+        }
+        return;
+    }
 // в графогенераторе используется сравнительно медленный, но более точный метод, для
 // генерации графа realtime используется более быстрый вариант, но этот вариант может
 // дать неверные результаты в некоторых вырожденных случаях

@@ -2,8 +2,11 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Camera.h"
+#include "FrameDiagnostics.h"
+#include "ServerConsts.h"
 #include "ModRuntime.h"
 #include "FileRegistry.h"
+#include "ModConfiguration.h"
 
 #include "WorldClient.h"
 #include "SoundManager.h"
@@ -664,6 +667,12 @@ const CPlot3D &CCamera::GetObservationPosition() const
 /////////////////////////////////////////////////////////////////////////////////////
 void CCamera::Step(float fpStep)
 {
+    FrameDiagnostics::Scope timing(FrameDiagnostics::Camera);
+    FrameDiagnostics::CameraStep(fpStep * DW_DEFAULT_SEGMENT_TIME,
+        fabs2(scroll.desired) > 0 || fabs2(scroll.value) > 0 ||
+        rotate.desired != 0 || rotate.value != 0 || pitch.desired != 0 || pitch.value != 0 ||
+        zoom.desired != 0 || zoom.value != 0,
+        CheckFlag(CAM_CANT_SCROLL | CAM_USE_PLACEMENTS | CAM_FPS_MODE));
     // set sound listener
     {
         CPlot3D ptListener = GetCP();
@@ -936,9 +945,9 @@ void CCamera::ApplyFalloutPlacement()
     float yaw = 45.0f, angle = 35.264f, multiplier = 2.0f;
     const std::string path = ModRuntime::ConfigPath("config\\ai.reg");
     if (reg.Open(path.c_str())) {
-        yaw = reg.GetFloat("Addon", "JMVFalloutCameraYaw", yaw);
-        angle = reg.GetFloat("Addon", "JMVFalloutCameraPitch", angle);
-        multiplier = reg.GetFloat("Addon", "JMVFalloutCameraTelephotoMultiplier", multiplier);
+        yaw = ModConfiguration::Float(reg,"Addon","JMVFalloutCameraYaw",yaw);
+        angle = ModConfiguration::Float(reg,"Addon","JMVFalloutCameraPitch",angle);
+        multiplier = ModConfiguration::Float(reg,"Addon","JMVFalloutCameraTelephotoMultiplier",multiplier);
     }
     if (!(yaw == yaw)) yaw = 45.0f;
     if (!(angle == angle)) angle = 35.264f;

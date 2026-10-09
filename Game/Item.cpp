@@ -18,6 +18,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ItemManager.h"
 #include "SpellManager.h"
 #include "RandomGen.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 /////////////////////////////////////////////////////////////////////////////////////
 void AddItemToLists(CGameBaseList &items, CGameBaseList &spells, CItem *pItem)
 {
@@ -1314,12 +1316,14 @@ CString CItemLoot::GetI3DTextureName() const
         }
         break;
         case IDBINS_PROTOTYPE: {
-            int nSpell = theSpellDatabase.spells[GetInstructionItemIndex()]->dwTextureTypeIndex;
-            szName.Format("prototype%04d", nSpell);
+            const auto* shape=theSpellDatabase.spells[GetInstructionItemIndex()];
+            szName.Format("prototype%04d", shape->dwTextureTypeIndex);
+            if(auto*mod=ModRuntime::Current())szName=mod->InstructionComponent(true,false,shape->szCodeName,szName).c_str();
         }
         break;
         case IDBINS_RUNE:
             szName.Format("modifier%04d", GetInstructionItemIndex());
+            if(auto*mod=ModRuntime::Current())szName=mod->InstructionComponent(false,false,theSpellDatabase.runes[GetInstructionItemIndex()]->GetCodeName(),szName).c_str();
             break;
         }
     }
@@ -1431,11 +1435,16 @@ CString CItemLoot::GetI3DFigureName() const
             szName.Format("initqi%ditem", lpShape->dwTextureTypeIndex);
         }
         break;
-        case IDBINS_PROTOTYPE:
+        case IDBINS_PROTOTYPE: {
             szName = "initqi1item";
+            const auto*shape=theSpellDatabase.spells[GetInstructionItemIndex()];
+            if(auto*mod=ModRuntime::Current())szName=mod->InstructionComponent(true,true,shape?LPCSTR(shape->szCodeName):nullptr,szName).c_str();
             break;
+        }
         case IDBINS_RUNE:
-            szName = "initqi1item";
+            if(auto*mod=ModRuntime::Current();mod && mod->CombatSetting("JMVGraphics2"))
+                szName=mod->InstructionComponent(false,true,theSpellDatabase.runes[GetInstructionItemIndex()]->GetCodeName(),"initqiRUNEitem").c_str();
+            else szName = "initqi1item";
             break;
         }
     }

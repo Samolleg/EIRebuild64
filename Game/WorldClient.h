@@ -183,6 +183,8 @@ private:
     int nFirstSegmentsCounter;
     //
     float fpTimeFraction; // time fraction from last segment (between last and next: 0...1)
+    // Render-only scene lifetime; never serialized or sent as gameplay state.
+    ULONGLONG ownedRenderGeneration = 1;
 private:
     void AddQuickReferences();
     void CreateSky();
@@ -263,6 +265,7 @@ public:
     {
         return GetTerrainXYZFromScreenXY(ptOnScreen.x, ptOnScreen.y);
     }
+    const CString& GetBackgroundAllod() const { return szCurrentAllodName; }
     CTerrain *GetTerrain() { return pTerrain; }
     CSkyObject *GetSky() { return pSky; }
     //

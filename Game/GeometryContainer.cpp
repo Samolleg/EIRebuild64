@@ -6,9 +6,17 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GeometryManager.h"
 
 #include "Material.h"
+#include "dx11/RendererDX11.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 static CXYZW4Array plots41;
+// Geometry is created/mutated on the existing source render thread. No RNG or
+// save state is touched; an exhausted ID space refuses native submission.
+static uint64_t NextOwnedGeometryIdentity() {
+    static uint64_t next = 1;
+    if(next==UINT64_MAX)return 0;
+    return next++;
+}
 /////////////////////////////////////////////////////////////////////////////////////
 DWORD GetFVFVertexSize(DWORD dwFVFFlags)
 {
@@ -78,6 +86,7 @@ void CGeometryContainer::SetNewComplection(float fNewStrength, float fNewGrace, 
     fStrength = fNewStrength;
     fGrace = fNewGrace;
     fTall = fNewTall;
+    ++ownedRevision;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CGeometryContainer::GetRangeNames(std::vector<std::string> &szNames) const
@@ -107,6 +116,7 @@ bool CGeometryContainer::AddRange(const std::string &szRangeName, SXYZW4 *rangeP
     if (iter != ranges.end())
         return false; // such range already exist
     SGeometryRangeSW range;
+    range.ownedIdentity = NextOwnedGeometryIdentity();
     // fill data and range structure
     range.dwPlotsStart = plots4.GetSize();
     range.dwNumPlots = dwNumPlots;
@@ -141,6 +151,7 @@ bool CGeometryContainer::AddRange(const std::string &szRangeName, SXYZW4 *rangeP
     memcpy(indices.GetData() + range.dwIndicesStart, rangeIndices, dwNumIndices * sizeof(WORD));
     // store range structure
     ranges[szRangeName] = range;
+    ++ownedRevision;
 
     return true;
 }
@@ -154,6 +165,7 @@ bool CGeometryContainer::RemoveRange(const std::string &szRangeName)
     SGeometryRangeSW range = iter->second;
     // remove range
     ranges.erase(iter);
+    ++ownedRevision;
     // remove range data
     plots4.RemoveAt(range.dwPlotsStart, range.dwNumPlots);
     norms4.RemoveAt(range.dwNormsStart, range.dwNumNorms);
@@ -206,6 +218,7 @@ bool CGeometryContainer::ChangeRangeGeometry(const std::string &szRangeName, SXY
     const SGeometryRangeSW &range = iter->second;
     memcpy(plots4.GetData() + range.dwPlotsStart, rangePlots4,
            Min(range.dwNumPlots, dwNumPlots) * sizeof(SXYZW4));
+    ++ownedRevision;
 
     return true;
 }
@@ -264,6 +277,23 @@ int CGeometryContainer::Render(const std::string &szRangeName, DWORD dwRenderFla
     const SGeometryRangeSW &range = iter->second;
     SXYZW4 *plots = plots4.GetData() + range.dwPlotsStart;
     SXYZW4 *renderPlots = plots;
+    CRenderer* sourceRenderer=pGeometryManager->GetD3D();
+    if(sourceRenderer->GetD3D()->IsOwnedWorldActive() && sourceRenderer->GetD3D()->GetOwnedRenderer().FigureActive()) {
+        if(dwRenderFlags & DXD3D_USE_SPECULAR)sourceRenderer->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,TRUE);
+        sourceRenderer->GetD3D()->GetOwnedRenderer().SelectFigureGeometry(range.ownedIdentity,ownedRevision);
+        const bool accepted=sourceRenderer->TryOwnedFigure(plots,range.dwNumPlots,
+            norms4.GetData()+range.dwNormsStart,range.dwNumNorms,colors.GetData(),speculars.GetData(),
+            maps.GetData()+range.dwMapsStart,range.dwNumMaps,components.GetData()+range.dwComponentsStart,
+            range.dwNumComponents,indices.GetData()+range.dwIndicesStart,range.dwNumIndices,
+            fUShift,fVShift,255,dwRenderFlags,morphs.GetData(),morphs.GetSize());
+        if(accepted) {
+            if(dwRenderFlags & DXD3D_USE_SPECULAR)sourceRenderer->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,FALSE);
+            return TRV_VISIBLE_NOCLIP;
+        }
+        // The rejection is already counted; continue the unmodified legacy
+        // morph/render path once, without resubmitting at its lower boundary.
+        sourceRenderer->GetD3D()->GetOwnedRenderer().EndFigure();
+    }
 
     if ((morphs.GetSize() != 0) || (morphs.GetSize() > range.dwNumPlots * 4))
     {

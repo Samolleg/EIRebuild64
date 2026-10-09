@@ -889,7 +889,8 @@ void CI3DScreenOptions::ApplyParameters()
     theSettings.nSelectionType = controls[OPTION_SELECTION_TYPE].nValue;
     theSettings.nDrawPath = controls[OPTION_SHOW_PATH].nValue;
     theSettings.nDrawFlyingHP = controls[OPTION_SHOW_FLYINGHP].nValue;
-    theSettings.nShowTutorial = controls[OPTION_SHOW_TUTORIAL].nValue;
+    if(!ModRuntime::Resources()||!ModRuntime::Resources()->ForceTutorial())
+        theSettings.nShowTutorial = controls[OPTION_SHOW_TUTORIAL].nValue;
     theSettings.nDoAutosave = controls[OPTION_AUTOSAVE].nValue;
     theSettings.nSwitchFilters = controls[OPTION_SWITCH_FILTERS].nValue;
 

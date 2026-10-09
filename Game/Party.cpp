@@ -8,6 +8,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldClient.h"
 #include "MapObjectManager.h"
 #include "SpellConstructor.h"
+#include "ModConstructorLifetime.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "Item.h"
 #include "ItemManager.h"
 #include "ItemConstructor.h"
@@ -384,8 +387,16 @@ void CParty::Destroy()
     //
     if (pSpellConstructor)
     {
-        pSpellConstructor->DecRefCount();
-        delete pSpellConstructor;
+        if (ModConstructorLifetime::PolicyBound())
+            ModConstructorLifetime::ReleaseOwned(pSpellConstructor,
+                [](const void* object, const void* vtable) {
+                    ModConstructorLifetime::NoteInvalid(ModConstructorLifetime::Party, object, vtable);
+                });
+        else
+        {
+            pSpellConstructor->DecRefCount();
+            delete pSpellConstructor;
+        }
         pSpellConstructor = 0;
     }
     //
@@ -790,7 +801,7 @@ void CLMPPartySet::Load()
             p.szFileName = fd.cFileName;
             if (!p.Load(szDir))
                 continue;
-            p.party.vars.clear();
+            ClearLMPPartyVariables(p.party.vars);
             if (p.party.people.GetSize() == 1)
                 parties.push_back(p);
         } while (FindNextFile(h, &fd));

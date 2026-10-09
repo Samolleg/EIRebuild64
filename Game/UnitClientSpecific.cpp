@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModNativeCrtRandom.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModAudioPolicy.h"
@@ -34,6 +35,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/Surface.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 /////////////////////////////////////////////////////////////////////////////////////
 static const float FP_MIN_SOUND_RADIUS = 8.0f;
 static const float FP_MAX_SOUND_RADIUS = 40.0f;
@@ -995,7 +998,11 @@ BOOL CUnitClientSpecific::NotifyItemsUpdated()
         // primary texture
         CObject3DClientSpecific *lpSpec = (CObject3DClientSpecific *)lpUnit->GetObjectSpecific();
         CTexture *pTexture = lpSpec->GetPrimaryTexture();
-        if (AssemblePrimaryTexture(szString) || (szString != pTexture->GetName()))
+        auto* primaryTextureManager=static_cast<CTextureManager*>(theWorld.GetTextureManager());
+        if(primaryTextureManager->SharePrimaryCharacterAtlas()) {
+            if(AssemblePrimaryTexture(szString))lpSpec->RebindPrimaryTexture(szString);
+        }
+        else if (AssemblePrimaryTexture(szString) || (szString != pTexture->GetName()))
         {
             pTexture->SetName(szString);
             pTexture->ResetFlag(TEX_LOADED);
@@ -1003,7 +1010,11 @@ BOOL CUnitClientSpecific::NotifyItemsUpdated()
         }
         // secondary texture
         pTexture = lpSpec->GetSecondaryTexture();
-        if (AssembleSecondaryTexture(szString) || (pTexture && (szString != pTexture->GetName())))
+        auto* textureManager=static_cast<CTextureManager*>(theWorld.GetTextureManager());
+        if(textureManager->ShareSecondaryCharacterAtlas()) {
+            if(AssembleSecondaryTexture(szString))lpSpec->RebindSecondaryTexture(szString);
+        }
+        else if (AssembleSecondaryTexture(szString) || (pTexture && (szString != pTexture->GetName())))
         {
             if (pTexture)
             {
@@ -1024,7 +1035,11 @@ BOOL CUnitClientSpecific::NotifyWeaponUpdated()
         CString szString;
         CObject3DClientSpecific *lpSpec = (CObject3DClientSpecific *)lpUnit->GetObjectSpecific();
         CTexture *pTexture = lpSpec->GetSecondaryTexture();
-        if (AssembleSecondaryTexture(szString) || (pTexture && (szString != pTexture->GetName())))
+        auto* textureManager=static_cast<CTextureManager*>(theWorld.GetTextureManager());
+        if(textureManager->ShareSecondaryCharacterAtlas()) {
+            if(AssembleSecondaryTexture(szString))lpSpec->RebindSecondaryTexture(szString);
+        }
+        else if (AssembleSecondaryTexture(szString) || (pTexture && (szString != pTexture->GetName())))
         {
             if (pTexture)
             {
@@ -1211,7 +1226,7 @@ BOOL CUnitClientSpecific::AssembleTexture(BOOL bPrimaryTexture, CString &szTextu
     {
         szResultFileName1.Format("mo%dp", lpUnit->GetID());
         szResultFileName2.Format("prot%dp", lpUnit->GetSubtypeID());
-        // Mouth animation writes into this atlas: never use a shared prototype texture.
+        // Baseline private fallback; canonical sharing detaches before mouth writes.
         if (UseHDCharacterTextures()) szResultFileName2 = szResultFileName1;
         set.dwTextureDimention = UCS_PRIMARY_TEXTURE_SIZE;
         // skin, non-shaped armors, shaped armos w/o helm
@@ -1413,13 +1428,16 @@ static const char *pszWoundMonsterBPNames[] = { "hd", // head
                                                 "l",  // right leg
                                                 "" };
 
-BOOL CUnitClientSpecific::AssembleWoundsTexture()
+BOOL CUnitClientSpecific::AssembleWoundsTexture(const CBYTEArray *requiredData)
 {
     STextureSetDescription set;
     CString szFileName, szTextureName;
     // form user data
     set.data.SetSize(RPG_NUM_HIT_LOCATIONS); // ARRAY BOUNDS CHECK
     if (FormWoundsMMPData(set.data) == false)
+        return FALSE;
+    if (requiredData && (requiredData->GetSize() != set.data.GetSize() ||
+        std::memcmp(requiredData->GetData(), set.data.GetData(), set.data.GetSize()) != 0))
         return FALSE;
     // setup dimention
     set.dwTextureDimention = 64;
@@ -1442,10 +1460,38 @@ BOOL CUnitClientSpecific::AssembleWoundsTexture()
     //
     szFileName.Format("mo%dw", lpUnit->GetID());
     LPTEXTUREMANAGER pTextureManager = (LPTEXTUREMANAGER)theWorld.GetTextureManager();
+    if (requiredData) {
+        // Recovery must not replace a missing original layer with zero pixels.
+        for(int i=0;i<set.szTextures.GetSize();++i) {
+            auto* header=reinterpret_cast<SMMPFileHeader*>(pTextureManager->GetFile(set.szTextures[i]));
+            if(!header)return FALSE;
+            struct CloseLayer {CTextureManager* manager;BYTE* bytes;~CloseLayer(){manager->CloseFile(bytes);}} close{pTextureManager,reinterpret_cast<BYTE*>(header)};
+            if(header->dwDimentionX!=set.dwTextureDimention ||
+               header->dwDimentionY!=set.dwTextureDimention)return FALSE;
+        }
+    }
     return pTextureManager->ComposeTexture(szTextureName, set, szFileName, szFileName, 3,
                                            0 /*0x00FFFFFF*/, MMP_FORMAT_8888);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+BOOL CUnitClientSpecific::EnsureWoundsTextureReady()
+{
+    if(!bWoundTextureDataCached)return FALSE;
+    CBYTEArray current;
+    current.SetSize(RPG_NUM_HIT_LOCATIONS);
+    if(!FormWoundsMMPData(current))return FALSE;
+    for(int i=0;i<RPG_NUM_HIT_LOCATIONS;++i)
+        if(current[i]!=woundTextureData[i])return FALSE;
+    auto* specific=static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific());
+    if(!specific)return FALSE;
+    char name[128];std::sprintf(name,"mo%dw",lpUnit->GetID());
+    // Try existing RES/disk/CPU data first; actual surface+userdata are required.
+    if(specific->LoadWounds(name,&current))return TRUE;
+    // Existing owner forms exactly the same userdata before rebuilding its MMP.
+    // No HP/cache-state change is used to force this local recovery.
+    if(!AssembleWoundsTexture(&current))return FALSE;
+    return specific->LoadWounds(name,&current);
+}
 BOOL CUnitClientSpecific::NotifyHitPointsUpdated()
 {
     CBYTEArray currentWoundData;
@@ -1467,12 +1513,12 @@ BOOL CUnitClientSpecific::NotifyHitPointsUpdated()
         (CObject3DClientSpecific *)lpUnit->GetObjectSpecific();
     if (unchanged)
     {
-        // Reattach/reload if needed, but avoid rerunning the wound-layer composer.
-        objectSpecific->LoadWounds(textureName);
+        // A missing CPU payload is rebuilt only for matching retained wound data.
+        EnsureWoundsTextureReady();
         return TRUE;
     }
 
-    if (AssembleWoundsTexture() && objectSpecific->LoadWounds(textureName))
+    if (AssembleWoundsTexture() && objectSpecific->LoadWounds(textureName, &currentWoundData))
     {
         for (int i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i)
             woundTextureData[i] = currentWoundData[i];
@@ -1733,11 +1779,12 @@ void CUnitClientSpecific::HLDamaged(ERPGHitLocations hl, float fpDamage, BYTE cF
         const CPlot3D &ptMax = pBPDamaged->GetBoundingVolume()->ptMax;
         float fBloodSize = 0.3f * ((ptMax.x + ptMax.y) * 0.5f);
         CPlot3D plot = lpUnit->GetFigureWorldPosition(pBPDamaged);
-        plot.x += 2.0f * float(Random(MINT(fBloodPrintsRandom * 100.0f))) * 0.01f -
+        auto draw = [&](int maximum) { auto* mod=ModRuntime::Current(); return mod&&mod->CombatSetting("JMVAttacks") ? ModNativeCrtRandom::Random(maximum) : Random(maximum); };
+        plot.x += 2.0f * float(draw(MINT(fBloodPrintsRandom * 100.0f))) * 0.01f -
                   fBloodPrintsRandom;
-        plot.y += 2.0f * float(Random(MINT(fBloodPrintsRandom * 100.0f))) * 0.01f -
+        plot.y += 2.0f * float(draw(MINT(fBloodPrintsRandom * 100.0f))) * 0.01f -
                   fBloodPrintsRandom;
-        DWORD dwBloodType = ((dwBlood - 1) << 16) | Random(2);
+        DWORD dwBloodType = ((dwBlood - 1) << 16) | draw(2);
         theWorld.AddBloodPrints(plot.x, plot.y, fBloodSize, fBloodSize * 3, dwBloodType, true);
     }
 }
@@ -2290,6 +2337,8 @@ void CUnitClientSpecific::MouthOpen(bool bForce)
         return;
     if (!bForce && (nCurrentMouthState == 1))
         return;
+    auto* objectSpec=static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific());
+    if(!objectSpec || !objectSpec->EnsurePrivatePrimaryAtlas(lpUnit->GetID()))return;
     // 32x32 texture
     // mouth open are in (0,16) coords with size 32x16
     // mouth close are in (0,0) coords with size 32x16
@@ -2331,6 +2380,8 @@ void CUnitClientSpecific::MouthClose(bool bForce)
         return;
     if (!bForce && (nCurrentMouthState == 0))
         return;
+    auto* objectSpec=static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific());
+    if(!objectSpec || !objectSpec->EnsurePrivatePrimaryAtlas(lpUnit->GetID()))return;
     // 32x32 texture
     // mouth open are in (0,16) coords with size 32x16
     // mouth close are in (0,0) coords with size 32x16

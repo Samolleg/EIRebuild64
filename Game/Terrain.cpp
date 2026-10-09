@@ -28,6 +28,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "SoundManager.h"
 #include "dx11/RendererDX11.h"
+#include "dx11/OwnedTerrainInputs.inl"
 /////////////////////////////////////////////////////////////////////////////////////
 
 // Sector manager constants
@@ -327,6 +328,8 @@ BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo)
             pSector->SetClipFlag(pRend);
         }
     }
+    if(nMatFrom==0 && nMapTo==nTextures+N_NUMBER_OF_LONG_TEXTURES-1 && TryOwnedTerrain(pRend))
+        return TRUE;
     // Transform sectors
     for (ys = 0; ys < viewableSectorsMinX.GetSize(); ys++)
     {
@@ -620,6 +623,9 @@ BOOL CTerrain::Load(LPCSTR pszFileName, LPCSTR pszAllodName, bool bCave)
 /////////////////////////////////////////////////////////////////////////////////////
 void CTerrain::Free()
 {
+    ChangeRendererRevision();
+    ReleaseOwnedTerrain(&theRenderer);
+    rendererSectorRows.clear();rendererSectorPhases.clear();
     modTerrainShadow.reset();
     for (int i = 0; i < N_LASRC_NUM; i++)
     {
@@ -2062,6 +2068,7 @@ void CTerrain::SetVertex(int nX, int nY, CPlot3D vertexToSet)
 
         for (int i = 0; i < aVertexs.GetSize(); i++)
             *aVertexs[i] = vertexToSet;
+        ChangeRendererRevision();
     }
 }
 
@@ -2169,6 +2176,7 @@ void CTerrain::GetDupleLVertex(int nX, int nY, CLVertexPtrArray &aVertexs)
 // Normal building
 void CTerrain::CalculateNormals(int nX, int nY)
 {
+    ChangeRendererRevision();
     CPlot3D *aBar[3][3] = {};
     aBar[0][0] = NULL;
     aBar[0][1] = GetVertex(nX, nY - 1);

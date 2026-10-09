@@ -1,12 +1,19 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
 #include "ModStatRules.h"
+#include "ModCampEquipment.h"
+#include "ModCampRepair.h"
+#include "ModCampItemPrice.h"
+#include "ModCampSale.h"
+#include "ModAlchemyItem.h"
 #include "Object3DClientSpecific.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenCamp.h"
+#include "ModProgression.h"
 #include "I3DMain.h"
 #include "I3DScreenGlobalMap.h"
 #include "I3DScreenMessageBox.h"
@@ -28,6 +35,12 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "aiSettings.h"
 #include "Renderer.h"
 /////////////////////////////////////////////////////////////////////////////////////
+static bool CampUsesNativeRepair(){
+ auto* mod=ModRuntime::Current();return mod&&mod->CombatSetting("JMVPerks");
+}
+static bool CampRepairMetal(CItem* item){
+ return theItemDatabase.materials[item->GetMaterial()]->szType.CompareNoCase("Metal")==0;
+}
 const COLORREF CAMP_COLOR_SKILLS = RGB(228, 215, 167);
 const COLORREF CAMP_COLOR_HEADER = RGB(255, 255, 255);
 
@@ -51,6 +64,7 @@ void CI3DScreenCamp::OnActivate()
     pShop = 0;
     // get current shop
     int nShop = (int)IWorldClient.GSGetVar("constr.current");
+    GameJournal::Event("SHOP", "select", "constr.current=%d suppressed=%d", nShop, commerceGuard.active);
     if (nShop > 0)
     {
         pShop = theHat.shops.GetShop(nShop);
@@ -352,6 +366,7 @@ void CI3DScreenCamp::OnActivate()
         eScreenMode = ISM_SPELLTRADE;
     else
         eScreenMode = ISM_WEAPONS;
+    GameJournal::Event("SHOP", "resolved", "shop=%d found=%d item_trade=%d spell_trade=%d", nShop, pShop != nullptr, bIsItemConstr, bIsSpellConstr);
     SetScreenMode(eScreenMode);
 
     CheckValidTransaction();
@@ -556,6 +571,7 @@ LPCTSTR CI3DScreenCamp::GetTutorialScreenName()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::SetScreenMode(EItemScreenModes eNewMode)
 {
+    GameJournal::Event("SCREEN", "camp_mode", "old=%d old_name=%s new=%d new_name=%s shop=%d item_trade=%d spell_trade=%d", int(eScreenMode), GameJournal::CampMode(int(eScreenMode)), int(eNewMode), GameJournal::CampMode(int(eNewMode)), pShop ? pShop->nID : 0, bIsItemConstr, bIsSpellConstr);
     pSlots->Show(FALSE);
     pSpells->Show(FALSE);
     pPerks->Show(FALSE);
@@ -708,6 +724,7 @@ BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
     int nSlotType = 0;
 
     int ht = HitTest(point);
+
     if (ht >= 4 && ht < 4 + ISM_TOTAL)
     {
         switch ((EItemScreenModes)(ht - 4))
@@ -785,6 +802,7 @@ BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
     {
         SCampSkillMouseInfo skillInfo;
         skillInfo.nType = -1;
+        skillInfo.pUnit = GetCurrentUnit();
         if (pPerks->IsVisible())
             pPerks->GetMouseSkill(point, &skillInfo);
         if (skillInfo.nType < 0)
@@ -813,6 +831,7 @@ void CI3DScreenCamp::OnLButtonDown(UINT nFlags, CPoint point)
 {
     CI3DScreen::OnLButtonDown(nFlags, point);
     int ht = HitTest(point);
+    JournalHit(ht);
     switch (ht)
     {
     case 0:
@@ -974,6 +993,14 @@ void CI3DScreenCamp::UpdatePersonage()
     pPerks->SetPersonage(nCurPers);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenCamp::RefreshProgression()
+{
+    if(nCurPers<0 || nCurPers>=pUnits.GetSize() || !pUnits[nCurPers] || !pNameStats || !pPerks)return;
+    pNameStats->UpdateStats();
+    UpdatePersonage();
+    UpdateWeapons();
+}
+
 void CI3DScreenCamp::UpdateAttributes()
 {
     if (pUnits[nCurPers])
@@ -1073,21 +1100,75 @@ void CI3DScreenCamp::DropFromItemConstr(CItem *pItem)
         pWagon->SetToItem(MoveItem(pItem, &IWorldClient.GetParty(), pItemsConstr));
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+bool CampEquipmentActive()
+{
+    auto* mod=ModRuntime::Current();return mod&&mod->CombatSetting("JMVPerks");
+}
+void ClearCampArmorShells(CUnit* unit)
+{
+    if(unit&&unit->GetTypeID()==MOTID_HUMAN)
+        ModCampEquipment::ClearShells([&](const std::string& name){unit->RemoveFigure(name.c_str());});
+}
+void RebuildCampArmorShells(CUnit* unit)
+{
+    if(!unit)return;
+    ClearCampArmorShells(unit);CStringArray names;
+    for(int i=0;i<RPG_NUM_ARMOR_TYPES;++i)if(auto* armor=unit->GetQArmor(i)){
+        const auto* shape=armor->GetShapeEntry();
+        if(shape)ModCampEquipment::ArmorShells(int(shape->dwTypeID),int(shape->dwTextureTypeIndex),
+            [&](const std::string& name){names.Add(name.c_str());});
+    }
+    unit->LoadFigures(unit->GetMaskName(),names,unit->CheckFlag(OBJ_LOADED));
+}
+void RefreshCampEquipmentPose(CUnit* unit,CPersonage* pers,bool allowEmpty)
+{
+    if(!unit)return;
+    const int slot=int(unit->GetCurrentWeaponSlotIndex());
+    const bool valid=slot>=0&&slot<pers->weapons.GetSize()&&slot<QI_MAX_WEAPONS&&pers->weapons[slot];
+    if(!valid&&!allowEmpty)return;
+    const auto* shape=valid?pers->weapons[slot]->GetShapeEntry():nullptr;
+    const int type=shape?int(shape->dwTypeID):-1;
+    const auto* entry=unit->GetAnimationEntry(ModCampEquipment::IdlePose(type,shape&&ModStats::IsTwohandedWeapon(type,unit)));
+    if(entry){unit->LowStartAnimationExtended(0xffffffffu,entry->dwEntryIndex,
+        (timeGetTime()/1024.0f)*15-random.Get(0,50),0);
+        unit->GetUnitSpecific()->NewAnimationWasReceived((timeGetTime()/1024.0f)*15);}
+}
+void NotifyCampEquipment(CUnit* unit)
+{
+    if(unit){unit->GetUnitSpecific()->NotifyItemsUpdated();unit->GetUnitSpecific()->NotifyWeaponUpdated();}
+}
+}
+
 void CI3DScreenCamp::InventoryToPers(CItem *pItem)
 {
     pI3D->BeginFX("buttons\\camp\\put_on.wav");
 
     CPersonage *pPers = GetCurrentPers();
+    const bool nativeEquipment=CampEquipmentActive();
+    CUnit* equipmentUnit=GetCurrentUnit();
     switch (pItem->GetTypeID())
     {
-    case ITID_ITEM_WEAPON:
+    case ITID_ITEM_WEAPON: {
+        if(nativeEquipment){const auto* shape=static_cast<CItemWeapon*>(pItem)->GetShapeEntry();
+            ModCampEquipment::ReplaceShields(shape&&shape->dwTypeID==RPGWST_HANDS1,
+                [&](){return pPers->weapons.GetSize();},
+                [&](int i){const auto* old=pPers->weapons[i]->GetShapeEntry();return old&&old->dwTypeID==RPGWST_HANDS1;},
+                [&](int i){PersToInventory(pPers->weapons[i]);});}
         if (pPers->weapons.GetSize() >= QI_MAX_WEAPONS)
             return;
+        const ModCampEquipment::PrimarySnapshot primaries(nativeEquipment?pPers->stats.psStrength.fpEffectiveValue:0,
+            nativeEquipment?pPers->stats.psDexterity.fpEffectiveValue:0,nativeEquipment?pPers->stats.psIntelligence.fpEffectiveValue:0);
         pPers->AddWeapon((CItemWeapon *)pItem);
         if (pPers->weapons.GetSize() == 1)
             pPers->dwCurrentWeapon = 0;
         UpdateWeapons();
+        if(nativeEquipment){primaries.Restore(pPers->stats.psStrength.fpEffectiveValue,
+            pPers->stats.psDexterity.fpEffectiveValue,pPers->stats.psIntelligence.fpEffectiveValue);
+            const EItemScreenModes oldMode=eScreenMode;SetScreenMode(ISM_SPELLS);SetScreenMode(oldMode);
+            pNameStats->UpdateStats();RefreshCampEquipmentPose(equipmentUnit,pPers,false);}
         break;
+    }
     case ITID_ITEM_ARMOR: {
         int type = ((CItemArmor *)pItem)->GetArmorType();
         for (int i = 0; i < pPers->armors.GetSize(); i++)
@@ -1101,12 +1182,23 @@ void CI3DScreenCamp::InventoryToPers(CItem *pItem)
         pPers->stats.RemoveAllArmors();
         for (int i = 0; i < pPers->armors.GetSize(); i++)
             pPers->stats.Wear(pPers->armors[i]);
+        if(nativeEquipment)RebuildCampArmorShells(equipmentUnit);
     }
     break;
     case ITID_ITEM_QUICK:
         if (pPers->items.GetSize() >= QI_MAX_ITEMS)
             return;
+        if(nativeEquipment){
+            auto* mod=ModRuntime::Current();
+            if(!ModSettingsPolicy::EquipQuick(pItem->GetShapeEntry()->GetCode(),
+                mod->CombatSetting("JMVOneAmuletLimit")!=0,mod->CombatSetting("JMVRingsLimit")!=0,
+                [&](){return pPers->items.GetSize();},
+                [&](int i){return std::string(pPers->items[i]->GetShapeEntry()->GetCode());},
+                [&](int i){PersToInventory(pPers->items[i]);}))return;
+        }
+        if(nativeEquipment&&equipmentUnit)equipmentUnit->AddCampQItem(static_cast<CItemQuick*>(pItem));
         pPers->AddQuick((CItemQuick *)pItem);
+        if(nativeEquipment)SetScreenMode(eScreenMode);
         break;
     case ITID_ITEM_SPELL:
         if (pPers->spells.GetSize() >= QI_MAX_SPELLS)
@@ -1118,6 +1210,7 @@ void CI3DScreenCamp::InventoryToPers(CItem *pItem)
     }
     IWorldClient.GetParty().RemoveItemFromWagon(pItem);
     pNameStats->UpdateStats();
+    if(nativeEquipment)NotifyCampEquipment(equipmentUnit);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CItem *CI3DScreenCamp::PersToInventory(CItem *pItem)
@@ -1146,6 +1239,8 @@ CItem *CI3DScreenCamp::PersToInventory(CItem *pItem)
        "last_weapon_msg", 0x00010000 ); pI3D->DoModal( pScr ); return 0;
             }
     */
+    const bool nativeEquipment=CampEquipmentActive();
+    CUnit* equipmentUnit=GetCurrentUnit();
     pItemRes = IWorldClient.GetParty().AddItemToWagon(pItem);
     switch (pItem->GetTypeID())
     {
@@ -1163,9 +1258,14 @@ CItem *CI3DScreenCamp::PersToInventory(CItem *pItem)
         if (pPers->dwCurrentWeapon >= pPers->weapons.GetSize())
             pPers->dwCurrentWeapon = pPers->weapons.GetSize() - 1;
         UpdateWeapons();
+        if(nativeEquipment){const EItemScreenModes oldMode=eScreenMode;SetScreenMode(ISM_SPELLS);SetScreenMode(oldMode);
+            pNameStats->UpdateStats();RefreshCampEquipmentPose(equipmentUnit,pPers,true);}
     }
     break;
     case ITID_ITEM_ARMOR: {
+        // Capture while party/unit still own input; wagon holds a duplicate.
+        const auto* removedShape=nativeEquipment?static_cast<CItemArmor*>(pItem)->GetShapeEntry():nullptr;
+        const bool removedLeggings=removedShape&&removedShape->dwTypeID==2;
         if (pUnits[nCurPers])
         {
             pUnits[nCurPers]->Remove(((CItemArmor *)pItem)->GetArmorType());
@@ -1177,22 +1277,43 @@ CItem *CI3DScreenCamp::PersToInventory(CItem *pItem)
         pPers->stats.RemoveAllArmors();
         for (int i = 0; i < pPers->armors.GetSize(); i++)
             pPers->stats.Wear(pPers->armors[i]);
+        if(nativeEquipment&&removedLeggings)ClearCampArmorShells(equipmentUnit);
     }
     break;
-    case ITID_ITEM_QUICK:
+    case ITID_ITEM_QUICK: {
+        int quick=-1;
+        if(nativeEquipment)for(int i=0;i<pPers->items.GetSize();++i)if(pPers->items[i]==pItem){quick=i;break;}
         pPers->RemoveQuick((CItemQuick *)pItem);
+        if(nativeEquipment){if(equipmentUnit)equipmentUnit->RemoveCampQItem(quick);
+            NotifyCampEquipment(equipmentUnit);SetScreenMode(eScreenMode);}
         break;
+    }
     case ITID_ITEM_SPELL:
         pPers->RemoveSpell((CItemSpell *)pItem);
         break;
     }
     pNameStats->UpdateStats();
+    if(nativeEquipment)NotifyCampEquipment(equipmentUnit);
     return pItemRes;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::GetMaxManaAndComplexity(ERPGMagicSubtypes subtype, int &nComplexity,
                                              int &nMana)
 {
+    if (auto* mod=ModRuntime::Current();mod && mod->AdvancedUI("useLS_GetMaxManaAndComplexity") && pShop) {
+        const auto& people=IWorldClient.GetParty().people;
+        std::vector<ModCampSpellLimitInput> inputs;
+        inputs.reserve(people.GetSize());
+        bool displayed=true;
+        for (int i=0;i<people.GetSize();++i) {
+            if (i>=pUnits.GetSize() || !pUnits[i]) {displayed=false;break;}
+            inputs.push_back({&people[i].stats,int(pUnits[i]->GetUserUnitStats()->cIntelligence)});
+        }
+        if (displayed) {
+            mod->CampSpellLimits(pShop->nID,int(subtype),inputs,nComplexity,nMana);
+            return;
+        }
+    }
     int nMaxComplexity = 0, nMaxMana = 0;
     SRPGUnitStats *pStats;
     for (int i = 0; i < IWorldClient.GetParty().people.GetSize(); i++)
@@ -1280,6 +1401,8 @@ bool CI3DScreenCamp::CanClickOnItem(CItem *pItem, EItemScreenParts eFrom)
                     return false;
                 return true;
             }
+            else if (ModAlchemy::Scroll(pItem,false))
+                return true;
             else if (IsItemModifier(pItem))
             {
                 int nMods = 0;
@@ -1655,41 +1778,35 @@ void CI3DScreenCamp::ClickOnSlot(int nSlotType, EItemScreenParts eFrom)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::TransactionOK()
 {
+    GameJournal::Event("TRADE", "request", "mode=%d shop=%d price=%d money=%d valid=%d", int(eScreenMode), pShop ? pShop->nID : 0, nPrice, IWorldClient.GetParty().nMoney, bValidOK);
     if(SkillTransactionBlocked()){bValidOK=false;return;}
     pI3D->BeginFX("buttons\\camp\\buy.wav");
 
     CItem *pItem;
+    const bool nativeRepair=CampUsesNativeRepair();const int repairShop=pShop?pShop->nID:0;
     switch (eScreenMode)
     {
     case ISM_WEAPONS:
         if (bIsItemConstr && !bCrapNoConstr)
         {
-            CItem *pItem = 0;
             CPersonage *pPers = GetCurrentPers();
-            for (int i = 0; i < pPers->weapons.GetSize(); i++)
-            {
-                pItem = pPers->weapons[i];
-                pItem->RestoreHP();
-            }
-            for (int i = 0; i < pPers->armors.GetSize(); i++)
-            {
-                pItem = pPers->armors[i];
-                pItem->RestoreHP();
-            }
+            ModCampRepair::RestoreItems(nativeRepair,ModCampRepair::Mode::Equipped,repairShop,pPers->weapons.GetSize(),
+                [&](int i){return CampRepairMetal(pPers->weapons[i]);},[&](int i){pPers->weapons[i]->RestoreHP();});
+            ModCampRepair::RestoreItems(nativeRepair,ModCampRepair::Mode::Equipped,repairShop,pPers->armors.GetSize(),
+                [&](int i){return CampRepairMetal(pPers->armors[i]);},[&](int i){pPers->armors[i]->RestoreHP();});
         }
         break;
 
     case ISM_SPELLS:
+        if(auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVPerks") &&
+           !ModProgression::CampAffordable(pPerks->GetExpPrice(),pPerks->GetExpTotal())){bValidOK=false;return;}
         pPerks->Confirm(true);
         return;
 
     case ISM_ITEMREPAIR: {
-        CItem *pItem;
-        for (int i = 0; i < pItemsRepair->allWagonItems.GetSize(); i++)
-        {
-            pItem = pItemsRepair->allWagonItems[i];
-            pItem->RestoreHP();
-        }
+        ModCampRepair::RestoreItems(nativeRepair,ModCampRepair::Mode::Selected,repairShop,pItemsRepair->allWagonItems.GetSize(),
+            [&](int i){return CampRepairMetal(pItemsRepair->allWagonItems[i]);},
+            [&](int i){pItemsRepair->allWagonItems[i]->RestoreHP();});
         pWagon->SetToItem(MoveAllItems(&IWorldClient.GetParty(), pItemsRepair));
     }
     break;
@@ -1724,74 +1841,128 @@ void CI3DScreenCamp::TransactionOK()
     }
     break;
 
-    case ISM_SPELLCONSTR:
+    case ISM_SPELLCONSTR: {
+        const bool scroll=pSpellsConstr->allWagonItems.GetSize()>0&&
+            ModAlchemy::Scroll(pSpellsConstr->allWagonItems[0]);
         if (bDeconstruct)
         {
-            DeconstructSpell();
+            if(scroll){if(!DeconstructItemIn(pSpellsConstr,pConstrItem))return;}
+            else DeconstructSpell();
         }
         else
         {
-            if (pConstrSpell)
-            {
+            auto* mod=ModRuntime::Current();
+            const bool alchemy=mod&&ModAlchemy::Enabled(mod->CombatSetting("JMVPerks")!=0,mod->CombatSetting("JMVAlchemy")!=0);
+            auto consume=[&](){
                 while (pSpellsConstr->allWagonItems.GetSize())
                 {
                     pItem = pSpellsConstr->allWagonItems[0];
                     pSpellsConstr->RemoveItemFromWagon(pItem);
                 }
-                pSpellsConstr->AddItemToWagon(pConstrSpell, false, false);
-                pConstrSpell->Release();
-                pConstrSpell = 0;
-            }
+            };
+            auto create=[&](const char* name){return pSpellsConstr->GetItemManager()->CreateItem(name);};
+            auto publish=[&](CItem* result){pSpellsConstr->AddItemToWagon(result,false,false);};
+            if(scroll)ModAlchemy::Commit(false,pConstrItem,consume,create,publish);
+            else ModAlchemy::Commit(alchemy,pConstrSpell,consume,create,publish);
         }
         break;
+    }
 
     case ISM_ITEMTRADE: {
-        CItemManager *pIM = pShop->itemAssort.GetItemManager();
-        CItem *pItem;
-        for (int i = pItemsSell->allWagonItems.GetSize() - 1; i >= 0; i--)
-        {
-            pItem = pItemsSell->allWagonItems[i];
-            pItem->RestoreHP();
-            if (IsItemConstructed(pItem))
-            {
-                switch (pItem->GetTypeID())
-                {
-                case ITID_ITEM_WEAPON:
-                    pShop->itemGenerator.AddWeaponShape(pIM->GetWeaponShape(pItem->GetShape()));
+        if(nativeRepair){
+            auto* mod=ModRuntime::Current();
+            if(pShop)for(int i=pItemsSell->allWagonItems.GetSize()-1;i>=0;--i){
+                CItem* item=pItemsSell->allWagonItems[i];
+                const int shop=pShop->nID;
+                if(shop==2)continue;
+                auto& generator=pShop->itemGenerator;
+                CItemManager* manager=pShop->itemAssort.GetItemManager();
+                const SIDBMaterial* material=manager->GetMaterial(item->GetMaterial());
+                const SIDBItemGeneralShape* shape=nullptr;ETypeIDs shapeType=TID_EMPTY;
+                ModCampSale::Process(shop,material->szType.CompareNoCase("Metal")==0,[&](){
+                    ModCampSale::Role role=ModCampSale::Role::Other;int components=0;
+                    DWORD index=item->GetShape();
+                    if(IsItemConstructed(item)){
+                        shapeType=item->GetTypeID();
+                        if(shapeType==ITID_ITEM_WEAPON){role=ModCampSale::Role::Weapon;shape=manager->GetWeaponShape(index);}
+                        else if(shapeType==ITID_ITEM_ARMOR){role=ModCampSale::Role::Armor;shape=manager->GetArmorShape(index);}
+                        else if(shapeType==ITID_ITEM_QUICK){role=ModCampSale::Role::Quick;shape=manager->GetQuickItemShape(index);}
+                        components=int(item->GetMaterialAmount());
+                    }else if(IsItemInstruction(item)){
+                        auto* loot=static_cast<CItemLoot*>(item);index=loot->GetInstructionItemIndex();
+                        role=ModCampSale::Role::Instruction;
+                        switch(loot->GetInstructionType()){
+                        case IDBINS_WEAPON:shapeType=ITID_ITEM_WEAPON;shape=manager->GetWeaponShape(index);break;
+                        case IDBINS_ARMOR:shapeType=ITID_ITEM_ARMOR;shape=manager->GetArmorShape(index);break;
+                        case IDBINS_QUICK:shapeType=ITID_ITEM_QUICK;shape=manager->GetQuickItemShape(index);break;
+                        default:break;
+                        }
+                    }else if(item->GetTypeID()==ITID_ITEM_LOOT){
+                        const auto type=static_cast<CItemLoot*>(item)->GetLootType();
+                        if(type==IDBLIT_TREASURE)role=ModCampSale::Role::Treasure;
+                        else if(type==IDBLIT_MATERIAL)role=ModCampSale::Role::Material;
+                    }
+                    return ModCampSale::Info{role,components,item->GetCount()};
+                },[&](bool forShape){return mod->InfoForbiddenSpell(forShape?shape->szName:material->szName,shop);},
+                [&](ModCampSale::Event event,int low,int high){switch(event){
+                case ModCampSale::Event::Restore:item->RestoreHP();break;
+                case ModCampSale::Event::Shape:
+                    if(shapeType==ITID_ITEM_WEAPON)generator.AddWeaponShape(static_cast<const SIDBWeaponShape*>(shape));
+                    else if(shapeType==ITID_ITEM_ARMOR)generator.AddArmorShape(static_cast<const SIDBArmorShape*>(shape));
+                    else if(shapeType==ITID_ITEM_QUICK)generator.AddQuickItemShape(static_cast<const SIDBQuickItemShape*>(shape));
                     break;
-                case ITID_ITEM_ARMOR:
-                    pShop->itemGenerator.AddArmorShape(pIM->GetArmorShape(pItem->GetShape()));
-                    break;
-                case ITID_ITEM_QUICK:
-                    pShop->itemGenerator.AddQuickItemShape(
-                        pIM->GetQuickItemShape(pItem->GetShape()));
-                    break;
-                }
+                case ModCampSale::Event::Material:{const int count=generator.GetMaterialAmount(material);generator.AddMaterial(material,count+low,count+high);break;}
+                case ModCampSale::Event::TreasureErase:pItemsSell->RemoveItemFromWagon(item,true);break;
+                }});
             }
-            else if (IsItemInstruction(pItem))
+        }else{
+            CItemManager *pIM = pShop->itemAssort.GetItemManager();
+            CItem *pItem;
+            for (int i = pItemsSell->allWagonItems.GetSize() - 1; i >= 0; i--)
             {
-                CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
-                switch (pLoot->GetInstructionType())
+                pItem = pItemsSell->allWagonItems[i];
+                pItem->RestoreHP();
+                if (IsItemConstructed(pItem))
                 {
-                case IDBINS_WEAPON:
-                    pShop->itemGenerator.AddWeaponShape(
-                        pIM->GetWeaponShape(pLoot->GetInstructionItemIndex()));
-                    break;
-                case IDBINS_ARMOR:
-                    pShop->itemGenerator.AddArmorShape(
-                        pIM->GetArmorShape(pLoot->GetInstructionItemIndex()));
-                    break;
-                case IDBINS_QUICK:
-                    pShop->itemGenerator.AddQuickItemShape(
-                        pIM->GetQuickItemShape(pLoot->GetInstructionItemIndex()));
-                    break;
+                    switch (pItem->GetTypeID())
+                    {
+                    case ITID_ITEM_WEAPON:
+                        pShop->itemGenerator.AddWeaponShape(pIM->GetWeaponShape(pItem->GetShape()));
+                        break;
+                    case ITID_ITEM_ARMOR:
+                        pShop->itemGenerator.AddArmorShape(pIM->GetArmorShape(pItem->GetShape()));
+                        break;
+                    case ITID_ITEM_QUICK:
+                        pShop->itemGenerator.AddQuickItemShape(
+                            pIM->GetQuickItemShape(pItem->GetShape()));
+                        break;
+                    }
                 }
-            }
-            else if (pItem->GetTypeID() == ITID_ITEM_LOOT)
-            {
-                CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
-                if (pLoot->GetLootType() == IDBLIT_TREASURE)
-                    pItemsSell->RemoveItemFromWagon(pItem, true);
+                else if (IsItemInstruction(pItem))
+                {
+                    CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
+                    switch (pLoot->GetInstructionType())
+                    {
+                    case IDBINS_WEAPON:
+                        pShop->itemGenerator.AddWeaponShape(
+                            pIM->GetWeaponShape(pLoot->GetInstructionItemIndex()));
+                        break;
+                    case IDBINS_ARMOR:
+                        pShop->itemGenerator.AddArmorShape(
+                            pIM->GetArmorShape(pLoot->GetInstructionItemIndex()));
+                        break;
+                    case IDBINS_QUICK:
+                        pShop->itemGenerator.AddQuickItemShape(
+                            pIM->GetQuickItemShape(pLoot->GetInstructionItemIndex()));
+                        break;
+                    }
+                }
+                else if (pItem->GetTypeID() == ITID_ITEM_LOOT)
+                {
+                    CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
+                    if (pLoot->GetLootType() == IDBLIT_TREASURE)
+                        pItemsSell->RemoveItemFromWagon(pItem, true);
+                }
             }
         }
         pAssortItems->SetToItem(MoveAllItems(pItemsAssort, pItemsSell));
@@ -1822,11 +1993,14 @@ void CI3DScreenCamp::TransactionOK()
         break;
     }
 
+    if(eScreenMode==ISM_ITEMTRADE || eScreenMode==ISM_SPELLTRADE) GameJournal::TradeCommit(this, pShop?pShop->nID:0, nPrice);
     IWorldClient.GetParty().nMoney -= nPrice;
+    GameJournal::Event("TRADE", "committed", "mode=%d shop=%d price=%d money=%d", int(eScreenMode), pShop ? pShop->nID : 0, nPrice, IWorldClient.GetParty().nMoney);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::TransactionCancel()
 {
+    GameJournal::Event("TRADE", "cancel", "mode=%d shop=%d", int(eScreenMode), pShop ? pShop->nID : 0);
     pI3D->BeginFX("buttons\\messbox\\cancel.wav");
     switch (eScreenMode)
     {
@@ -1864,27 +2038,33 @@ void CI3DScreenCamp::TransactionCancel()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::CheckValidTransaction()
 {
+    GameJournal::TradeReset(this);
     CString szActionToDo, szAmount("camp_current_money");
     nPrice = 0;
     bValidOK = false;
     bValidCancel = false;
+    const bool nativeRepair=CampUsesNativeRepair();const int repairShop=pShop?pShop->nID:0;
+    // The native internal quote method is separate from retail virtual UI prices.
+    auto quotePrice=[&](CItem* item,EItemScreenKoeffs coefficient){
+        if(nativeRepair&&coefficient==ISK_ITEM_REPAIR)
+            return ModCampRepair::Price(item->GetPrice(),fPriceKoeffs[ISK_ITEM_REPAIR],item->GetHP(),item->GetMaxHP());
+        if(nativeRepair&&coefficient!=ISK_ITEM_REPAIR&&
+           (item->GetTypeID()==ITID_ITEM_WEAPON||item->GetTypeID()==ITID_ITEM_ARMOR))
+            return ModCampItemPrice::WeaponArmor(item->GetPrice(),fPriceKoeffs[coefficient],fPriceKoeffs[ISK_ITEM_REPAIR],item->GetHP(),item->GetMaxHP());
+        return GetItemPrice(item,coefficient);
+    };
     switch (eScreenMode)
     {
     case ISM_WEAPONS:
         if (bIsItemConstr && !bCrapNoConstr)
         {
-            CItem *pItem = 0;
             CPersonage *pPers = GetCurrentPers();
-            for (int i = 0; i < pPers->weapons.GetSize(); i++)
-            {
-                pItem = pPers->weapons[i];
-                nPrice += GetItemPrice(pItem, ISK_ITEM_REPAIR);
-            }
-            for (int i = 0; i < pPers->armors.GetSize(); i++)
-            {
-                pItem = pPers->armors[i];
-                nPrice += GetItemPrice(pItem, ISK_ITEM_REPAIR);
-            }
+            nPrice += ModCampRepair::Quote(nativeRepair,repairShop,pPers->weapons.GetSize(),
+                [&](int i){return CampRepairMetal(pPers->weapons[i]);},
+                [&](int i){return quotePrice(pPers->weapons[i],ISK_ITEM_REPAIR);});
+            nPrice += ModCampRepair::Quote(nativeRepair,repairShop,pPers->armors.GetSize(),
+                [&](int i){return CampRepairMetal(pPers->armors[i]);},
+                [&](int i){return quotePrice(pPers->armors[i],ISK_ITEM_REPAIR);});
 
             bValidOK = (nPrice > 0);
             if (bValidOK)
@@ -1895,6 +2075,8 @@ void CI3DScreenCamp::CheckValidTransaction()
     case ISM_SPELLS: {
         bValidOK = bValidCancel = pPerks->IsModified();
         nPrice = pPerks->GetExpPrice();
+        if(auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVPerks") &&
+           !ModProgression::CampAffordable(nPrice,pPerks->GetExpTotal()))bValidOK=false;
         if (bValidOK)
             szActionToDo = "camp_level_up";
         szAmount = "camp_current_exp";
@@ -1911,12 +2093,16 @@ void CI3DScreenCamp::CheckValidTransaction()
             for (int i = 0; i < pSpellsBuy->allWagonItems.GetSize(); i++)
             {
                 pItem = pSpellsBuy->allWagonItems[i];
-                nPrice += GetItemPrice(pItem, ISK_SPELL_BUY) * pItem->GetCount();
+                const int journalPrice=quotePrice(pItem, ISK_SPELL_BUY);
+                GameJournal::TradeQuote(this, pItem, "buy", journalPrice);
+                nPrice += journalPrice * pItem->GetCount();
             }
             for (int i = 0; i < pSpellsSell->allWagonItems.GetSize(); i++)
             {
                 pItem = pSpellsSell->allWagonItems[i];
-                nPrice -= GetItemPrice(pItem, ISK_SPELL_SELL) * pItem->GetCount();
+                const int journalPrice=quotePrice(pItem, ISK_SPELL_SELL);
+                GameJournal::TradeQuote(this, pItem, "sell", journalPrice);
+                nPrice -= journalPrice * pItem->GetCount();
             }
         }
     }
@@ -1935,18 +2121,18 @@ void CI3DScreenCamp::CheckValidTransaction()
             for (int i = 0; i < pSpellsConstr->allWagonItems.GetSize(); i++)
             {
                 CItem *pItem = pSpellsConstr->allWagonItems[i];
-                nPrice += GetItemPrice(pItem, ISK_SPELL_CREATE);
+                nPrice += quotePrice(pItem, ISK_SPELL_CREATE);
                 if (pItem->GetUserData() &&
                     static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                    nPrice += GetItemPrice(pItem, ISK_SPELL_BUY);
-                if (IsItemSpell(pItem))
+                    nPrice += quotePrice(pItem, ISK_SPELL_BUY);
+                if (IsItemSpell(pItem) || ModAlchemy::Scroll(pItem))
                 {
                     bValidOK = true;
                     // recalc price for deconstructing
-                    nPrice = GetItemPrice(pItem, ISK_SPELL_DESTROY);
+                    nPrice = quotePrice(pItem, ISK_SPELL_DESTROY);
                     if (pItem->GetUserData() &&
                         static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                        nPrice += GetItemPrice(pItem, ISK_SPELL_BUY);
+                        nPrice += quotePrice(pItem, ISK_SPELL_BUY);
                     bDeconstruct = true;
                     pConstrInfo->SetItem(pItem);
                     bIsThereItemWhichWeNeedToShowInInfoView = true;
@@ -1980,12 +2166,16 @@ void CI3DScreenCamp::CheckValidTransaction()
             for (int i = 0; i < pItemsBuy->allWagonItems.GetSize(); i++)
             {
                 pItem = pItemsBuy->allWagonItems[i];
-                nPrice += GetItemPrice(pItem, ISK_ITEM_BUY) * pItem->GetCount();
+                const int journalPrice=quotePrice(pItem, ISK_ITEM_BUY);
+                GameJournal::TradeQuote(this, pItem, "buy", journalPrice);
+                nPrice += journalPrice * pItem->GetCount();
             }
             for (int i = 0; i < pItemsSell->allWagonItems.GetSize(); i++)
             {
                 pItem = pItemsSell->allWagonItems[i];
-                nPrice -= GetItemPrice(pItem, ISK_ITEM_SELL) * pItem->GetCount();
+                const int journalPrice=quotePrice(pItem, ISK_ITEM_SELL);
+                GameJournal::TradeQuote(this, pItem, "sell", journalPrice);
+                nPrice -= journalPrice * pItem->GetCount();
             }
         }
     }
@@ -1994,15 +2184,13 @@ void CI3DScreenCamp::CheckValidTransaction()
     case ISM_ITEMREPAIR: {
         if (pItemsRepair->allWagonItems.GetSize() > 0)
         {
-            szActionToDo = "camp_item_repair";
-            bValidOK = true;
-            bValidCancel = true;
-            CItem *pItem;
-            for (int i = 0; i < pItemsRepair->allWagonItems.GetSize(); i++)
-            {
-                pItem = pItemsRepair->allWagonItems[i];
-                nPrice += GetItemPrice(pItem, ISK_ITEM_REPAIR) * pItem->GetCount();
-            }
+            if(!nativeRepair||pShop)
+                nPrice += ModCampRepair::Quote(nativeRepair,repairShop,pItemsRepair->allWagonItems.GetSize(),
+                    [&](int i){return CampRepairMetal(pItemsRepair->allWagonItems[i]);},
+                    [&](int i){CItem* item=pItemsRepair->allWagonItems[i];return quotePrice(item,ISK_ITEM_REPAIR)*item->GetCount();});
+            const auto valid=ModCampRepair::SelectedValidity(nativeRepair,pItemsRepair->allWagonItems.GetSize(),nPrice);
+            bValidOK=valid.confirm;bValidCancel=valid.cancel;
+            if(bValidOK)szActionToDo = "camp_item_repair";
         }
     }
     break;
@@ -2020,18 +2208,18 @@ void CI3DScreenCamp::CheckValidTransaction()
             for (int i = 0; i < pItemsConstr->allWagonItems.GetSize(); i++)
             {
                 CItem *pItem = pItemsConstr->allWagonItems[i];
-                nPrice += GetItemPrice(pItem, ISK_ITEM_CREATE);
+                nPrice += quotePrice(pItem, ISK_ITEM_CREATE);
                 if (pItem->GetUserData() &&
                     static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                    nPrice += GetItemPrice(pItem, ISK_ITEM_BUY);
+                    nPrice += quotePrice(pItem, ISK_ITEM_BUY);
                 if (IsItemConstructed(pItem))
                 {
                     bValidOK = true;
                     // recalc price for deconstructing
-                    nPrice = GetItemPrice(pItem, ISK_ITEM_DESTROY);
+                    nPrice = quotePrice(pItem, ISK_ITEM_DESTROY);
                     if (pItem->GetUserData() &&
                         static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                        nPrice += GetItemPrice(pItem, ISK_ITEM_BUY);
+                        nPrice += quotePrice(pItem, ISK_ITEM_BUY);
                     bDeconstruct = true;
                     pConstrInfo->SetItem(pItem);
                     bIsThereItemWhichWeNeedToShowInInfoView = true;
@@ -2304,16 +2492,18 @@ bool CI3DScreenCamp::ConstructItem()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenCamp::DeconstructItem()
 {
+    return DeconstructItemIn(pItemsConstr,pConstrItem);
+}
+bool CI3DScreenCamp::DeconstructItemIn(CParty* party,CItem*& result)
+{
     CItemLoot *pLoot = 0;
-    CItemSpell *pItemSpell = 0;
-
-    if (!pItemsConstr || pItemsConstr->allWagonItems.GetSize() != 1 ||
-        !pItemsConstr->allWagonItems[0])
+    if (!party || party->allWagonItems.GetSize() != 1 || !party->allWagonItems[0])
         return false;
-    CItem *pInput = pItemsConstr->allWagonItems[0];
+    CItem *pInput = party->allWagonItems[0];
+    return ModAlchemy::Deconstruct<CItemSpell>(result,[&](CItemSpell*& pItemSpell){
     if (pInput->GetSpell(0))
     {
-        CItemManager *pIM = pItemsConstr->GetItemManager();
+        CItemManager *pIM = party->GetItemManager();
         if (!pIM)
             return false;
         const SIDBQuickItemShape *pShape = pIM->GetQuickItemShape("spell container");
@@ -2328,49 +2518,43 @@ bool CI3DScreenCamp::DeconstructItem()
             return false;
         pItemSpell->AddRef();
     }
-    pConstrItem = pItemsConstr->DuplicateItem(pInput);
-    if (!pConstrItem)
-    {
-        if (pItemSpell)
-            pItemSpell->Release();
-        return false;
-    }
-    pConstrItem->AddRef();
-    pItemsConstr->RemoveItemFromWagon(pItemsConstr->allWagonItems[0]);
-
-    switch (pConstrItem->GetTypeID())
+    return true;
+    },[&](){return party->DuplicateItem(pInput);},[&](){
+        party->RemoveItemFromWagon(party->allWagonItems[0]);
+    },[&](CItem* result,CItemSpell* pItemSpell){
+    switch (result->GetTypeID())
     {
     case ITID_ITEM_WEAPON:
         pLoot = static_cast<CItemLoot *>(
-            pItemsConstr->GetItemManager()->CreateItem("Instruction Weapon"));
+            party->GetItemManager()->CreateItem("Instruction Weapon"));
         break;
     case ITID_ITEM_ARMOR:
         pLoot = static_cast<CItemLoot *>(
-            pItemsConstr->GetItemManager()->CreateItem("Instruction Armor"));
+            party->GetItemManager()->CreateItem("Instruction Armor"));
         break;
     case ITID_ITEM_QUICK:
         pLoot = static_cast<CItemLoot *>(
-            pItemsConstr->GetItemManager()->CreateItem("Instruction Quick Item"));
+            party->GetItemManager()->CreateItem("Instruction Quick Item"));
         break;
     }
     if (pLoot)
     {
         pLoot->AddRef();
-        pLoot->SetInstructionItemIndex(pConstrItem->GetShape());
-        pItemsConstr->AddItemToWagon(pLoot, false, false);
+        pLoot->SetInstructionItemIndex(result->GetShape());
+        party->AddItemToWagon(pLoot, false, false);
         pLoot->Release();
     }
 
-    for (int i = 0; i < pConstrItem->GetMaterialAmount(); i++)
+    for (int i = 0; i < result->GetMaterialAmount(); i++)
     {
         CString szMaterialName = CString("material") + '.' +
-                                 theItemDatabase.materials[pConstrItem->GetMaterial()]->szName;
+                                 theItemDatabase.materials[result->GetMaterial()]->szName;
         pLoot = static_cast<CItemLoot *>(
-            pItemsConstr->GetItemManager()->CreateItem(szMaterialName));
+            party->GetItemManager()->CreateItem(szMaterialName));
         if (pLoot)
         {
             pLoot->AddRef();
-            pItemsConstr->AddItemToWagon(pLoot, false, false);
+            party->AddItemToWagon(pLoot, false, false);
             pLoot->Release();
         }
     }
@@ -2378,14 +2562,11 @@ bool CI3DScreenCamp::DeconstructItem()
     if (pItemSpell)
     {
         pItemSpell->AddSpell(
-            pConstrItem->GetSpell(0)->Duplicate(pItemsConstr->GetSpellManager()));
-        pItemsConstr->AddItemToWagon(pItemSpell, false, false);
-        pItemSpell->Release();
+            result->GetSpell(0)->Duplicate(party->GetSpellManager()));
+        party->AddItemToWagon(pItemSpell, false, false);
     }
 
-    pConstrItem->Release();
-    pConstrItem = 0;
-    return true;
+    });
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::GenerateCheatAssortment()

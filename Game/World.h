@@ -184,6 +184,10 @@ public:
         return std::fmod(float(nSegmentTimeCounter) * fpTimeScale + fpTimeModifier, 24.0f);
     }
     float GetTimeInHours(int nSegments) const { return float(nSegments) * fpTimeScale; }
+    double GetUnwrappedWorldTime() const
+    {
+        return double(nSegmentTimeCounter) * fpTimeScale + fpTimeModifier;
+    }
     CString GetTimeName() const;
     virtual void SetWorldTime(float fpCurrentTime);
     virtual void SetWorldTimeScale(float fpScale);

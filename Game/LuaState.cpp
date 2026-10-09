@@ -5,6 +5,7 @@
 #include "Notification.h"
 #include "luajit-x86/lua.hpp"
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "GameBase.h"
 #include "RpgSystemConsts.h"
 #include "RpgSystem.h"
@@ -95,13 +96,18 @@ static int Traceback(lua_State *state)
 
 int Lua::CLuaState::DoCall(int args, int results)
 {
+    GameJournal::Callback journalCallback;
+    GameJournal::Source journalSource("Lua.legacy");
     int base = lua_gettop(STATE) - args;
     lua_pushcfunction(STATE, Traceback);
     lua_insert(STATE, base);
     int status = lua_pcall(STATE, args, results, base);
     lua_remove(STATE, base);
     if (status != LUA_OK)
+    {
+        GameJournal::Event("ERROR", "lua", "text=%s", GameJournal::Quote(lua_tostring(STATE, -1)).c_str());
         lua_gc(STATE, LUA_GCCOLLECT, 0);
+    }
     return status;
 }
 
@@ -779,6 +785,7 @@ Lua::CLuaState::CLuaState()
 int Lua::CLuaState::GetSkillPriceDiff(int from, int to)
 {
     lua_getglobal(STATE, "GetSkillPriceDiff");
+    GameJournal::SetCallback("GetSkillPriceDiff");
     LuaPush(STATE, from);
     LuaPush(STATE, to);
     ReportOnError(DoCall(2, 1));
@@ -788,6 +795,7 @@ int Lua::CLuaState::GetSkillPriceDiff(int from, int to)
 float Lua::CLuaState::CalcBaseHealth(SRPGUnitStats *stats)
 {
     lua_getglobal(STATE, "CalcBaseHealth");
+    GameJournal::SetCallback("CalcBaseHealth");
     LuaPushAddr(STATE, stats);
     ReportOnError(DoCall(1, 1));
     return LuaPop<float>(STATE);
@@ -795,6 +803,7 @@ float Lua::CLuaState::CalcBaseHealth(SRPGUnitStats *stats)
 float Lua::CLuaState::CalcBaseHealthJmv(SRPGUnitStats *stats, CUnit* unit, const char* unitName)
 {
     lua_getglobal(STATE, "CalcBaseHealthJmv");
+    GameJournal::SetCallback("CalcBaseHealthJmv");
     LuaPushAddr(STATE, stats);
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, unitName);
@@ -805,6 +814,7 @@ float Lua::CLuaState::CalcBaseHealthJmv(SRPGUnitStats *stats, CUnit* unit, const
 float Lua::CLuaState::CalcBaseMana(SRPGUnitStats *stats)
 {
     lua_getglobal(STATE, "CalcBaseMana");
+    GameJournal::SetCallback("CalcBaseMana");
     LuaPushAddr(STATE, stats);
     ReportOnError(DoCall(1, 1));
     return LuaPop<float>(STATE);
@@ -812,6 +822,7 @@ float Lua::CLuaState::CalcBaseMana(SRPGUnitStats *stats)
 float Lua::CLuaState::CalcBaseManaJmv(SRPGUnitStats *stats, CUnit* unit, const char* unitName)
 {
     lua_getglobal(STATE, "CalcBaseManaJmv");
+    GameJournal::SetCallback("CalcBaseManaJmv");
     LuaPushAddr(STATE, stats);
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, unitName);
@@ -822,6 +833,7 @@ float Lua::CLuaState::CalcBaseManaJmv(SRPGUnitStats *stats, CUnit* unit, const c
 void Lua::CLuaState::CalcRunningManaCost(SRPGUnitStats *unitStats, CUnit *unit, SRPGCommonStats *commonStats)
 {
     lua_getglobal(STATE, "CalcRunningManaCost");
+    GameJournal::SetCallback("CalcRunningManaCost");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
     LuaPushAddr(STATE, commonStats);
@@ -831,6 +843,7 @@ void Lua::CLuaState::CalcRunningManaCost(SRPGUnitStats *unitStats, CUnit *unit, 
 const char* Lua::CLuaState::GetPerkRequiredJmv(const char* perkName, int num)
 {
 	lua_getglobal(STATE, "GetPerkRequiredJmv");
+    GameJournal::SetCallback("GetPerkRequiredJmv");
 	LuaPush(STATE, perkName);
 	LuaPush(STATE, num);
 	ReportOnError(DoCall(2, 1));
@@ -840,6 +853,7 @@ const char* Lua::CLuaState::GetPerkRequiredJmv(const char* perkName, int num)
 int Lua::CLuaState::GetPerkPrice(SRPGUnitStats *stats, SPDBPerk *perk)
 {
     lua_getglobal(STATE, "GetPerkPrice");
+    GameJournal::SetCallback("GetPerkPrice");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, perk);
     ReportOnError(DoCall(2, 1));
@@ -849,6 +863,7 @@ int Lua::CLuaState::GetPerkPrice(SRPGUnitStats *stats, SPDBPerk *perk)
 int Lua::CLuaState::GetPerkVal(SRPGUnitStats *stats, int index)
 {
     lua_getglobal(STATE, "GetPerkVal");
+    GameJournal::SetCallback("GetPerkVal");
     LuaPushAddr(STATE, stats);
     LuaPush(STATE, index);
     ReportOnError(DoCall(2, 1));
@@ -858,6 +873,7 @@ int Lua::CLuaState::GetPerkVal(SRPGUnitStats *stats, int index)
 float Lua::CLuaState::GetModifiedHealth(SRPGUnitStats *stats, CUnit *unit, float health)
 {
     lua_getglobal(STATE, "GetModifiedHealth");
+    GameJournal::SetCallback("GetModifiedHealth");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, unit);
     LuaPush(STATE, health);
@@ -871,6 +887,7 @@ float Lua::CLuaState::GetModifiedDamageOnServer(SRPGUnitStats *stats,
 												float *spellEffects)
 {
     lua_getglobal(STATE, "GetModifiedDamageOnServer");
+    GameJournal::SetCallback("GetModifiedDamageOnServer");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, unit);
     LuaPush(STATE, damage);
@@ -888,6 +905,7 @@ float Lua::CLuaState::GetModifiedDamageOnServerJmv(SRPGUnitStats *stats,
 )
 {
     lua_getglobal(STATE, "GetModifiedDamageOnServerJmv");
+    GameJournal::SetCallback("GetModifiedDamageOnServerJmv");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, unit);
     LuaPush(STATE, damage);
@@ -908,6 +926,7 @@ float Lua::CLuaState::GetCritOnServerJmv(SRPGUnitStats *stats,
 												const char* unitName, int TypeID, int weapNum)
 {
     lua_getglobal(STATE, "GetCritOnServerJmv");
+    GameJournal::SetCallback("GetCritOnServerJmv");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, unit);
     LuaPush(STATE, leftHandNum);
@@ -925,6 +944,7 @@ float Lua::CLuaState::GetCritOnClientJmv(CUnit* unit,
 	const char* unitName, int weapNum, int TypeID)
 {
 	lua_getglobal(STATE, "GetCritOnClientJmv");
+    GameJournal::SetCallback("GetCritOnClientJmv");
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, critPerkMod);
 	LuaPush(STATE, leftHandNum);
@@ -942,6 +962,7 @@ float Lua::CLuaState::GetCritDamageOnClientJmv(CUnit* unit,
 	const char* unitName, int weapNum, int TypeID)
 {
 	lua_getglobal(STATE, "GetCritDamageOnClientJmv");
+    GameJournal::SetCallback("GetCritDamageOnClientJmv");
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, critPerkMod);
 	LuaPush(STATE, leftHandNum);
@@ -958,6 +979,7 @@ float Lua::CLuaState::GetModifiedDamageOnClient(SRPGUserUnitStats *stats,
 												float* spellEffects)
 {
     lua_getglobal(STATE, "GetModifiedDamageOnClient");
+    GameJournal::SetCallback("GetModifiedDamageOnClient");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, unit);
     LuaPush(STATE, damage);
@@ -973,6 +995,7 @@ float Lua::CLuaState::GetModifiedDamageOnClientJmv(SRPGUserUnitStats *stats,
 												float* spellEffects)
 {
     lua_getglobal(STATE, "GetModifiedDamageOnClientJmv");
+    GameJournal::SetCallback("GetModifiedDamageOnClientJmv");
     LuaPushAddr(STATE, stats);
     LuaPushAddr(STATE, unit);
     LuaPush(STATE, damage);
@@ -991,6 +1014,7 @@ bool Lua::CLuaState::RegenerateHpAndMp(SRPGCommonStats *commonStats,
                                        bool hpOnly)
 {
     lua_getglobal(STATE, "RegenerateHpAndMp");
+    GameJournal::SetCallback("RegenerateHpAndMp");
     LuaPushAddr(STATE, commonStats);
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
@@ -1005,6 +1029,7 @@ bool Lua::CLuaState::RegenerateHpAndMpJmv(SRPGCommonStats *commonStats,
 									   bool inDanger)
 {
     lua_getglobal(STATE, "RegenerateHpAndMpJmv");
+    GameJournal::SetCallback("RegenerateHpAndMpJmv");
     LuaPushAddr(STATE, commonStats);
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
@@ -1020,6 +1045,7 @@ void Lua::CLuaState::RecalcUnitStats(SRPGUnitStats *unitStats,
                                      float *spellEffects)
 {
     lua_getglobal(STATE, "RecalcUnitStats");
+    GameJournal::SetCallback("RecalcUnitStats");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, commonStats);
     LuaPushAddr(STATE, unit);
@@ -1036,6 +1062,7 @@ void Lua::CLuaState::RecalcUnitStatsJmv(SRPGUnitStats* unitStats,
 	bool inDanger)
 {
 	lua_getglobal(STATE, "RecalcUnitStatsJmv");
+    GameJournal::SetCallback("RecalcUnitStatsJmv");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, commonStats);
 	LuaPushAddr(STATE, unit);
@@ -1053,6 +1080,7 @@ void Lua::CLuaState::RecalcInitialJmvStatsExt(SRPGUnitStats* unitStats,
 	const char* unitName)
 {
 	lua_getglobal(STATE, "RecalcInitialJmvStatsExt");
+    GameJournal::SetCallback("RecalcInitialJmvStatsExt");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, commonStats);
 	LuaPushAddr(STATE, unit);
@@ -1065,6 +1093,7 @@ void Lua::CLuaState::RecalcInitialJmvStatsExt(SRPGUnitStats* unitStats,
 float Lua::CLuaState::RecalcHeadDamageModifierLS(SRPGUnitStats *unitStats)
 {
     lua_getglobal(STATE, "RecalcHeadDamageModifierLS");
+    GameJournal::SetCallback("RecalcHeadDamageModifierLS");
     LuaPushAddr(STATE, unitStats);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<float>(STATE);
@@ -1073,6 +1102,7 @@ float Lua::CLuaState::RecalcHeadDamageModifierLS(SRPGUnitStats *unitStats)
 float Lua::CLuaState::GetAnatomyModifierLS(SRPGUnitStats* unitStats)
 {
 	lua_getglobal(STATE, "GetAnatomyModifierLS");
+    GameJournal::SetCallback("GetAnatomyModifierLS");
 	LuaPushAddr(STATE, unitStats);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<float>(STATE);
@@ -1081,6 +1111,7 @@ float Lua::CLuaState::GetAnatomyModifierLS(SRPGUnitStats* unitStats)
 float Lua::CLuaState::GetWeaponsMasterLS(SRPGUnitStats* unitStats)
 {
 	lua_getglobal(STATE, "GetWeaponsMasterLS");
+    GameJournal::SetCallback("GetWeaponsMasterLS");
 	LuaPushAddr(STATE, unitStats);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<float>(STATE);
@@ -1089,6 +1120,7 @@ float Lua::CLuaState::GetWeaponsMasterLS(SRPGUnitStats* unitStats)
 float Lua::CLuaState::GetWiseManDamageModiferLS(CUnit* unit, SRPGUnitStats* unitStats, int intelligence)
 {
 	lua_getglobal(STATE, "GetWiseManDamageModiferLS");
+    GameJournal::SetCallback("GetWiseManDamageModiferLS");
 	LuaPushAddr(STATE, unit);
 	LuaPushAddr(STATE, unitStats);
 	LuaPush(STATE, intelligence);
@@ -1099,6 +1131,7 @@ float Lua::CLuaState::GetWiseManDamageModiferLS(CUnit* unit, SRPGUnitStats* unit
 void Lua::CLuaState::RecalcInternalHeroStats(SRPGUnitStats *stats, float itemsWeigh)
 {
     lua_getglobal(STATE, "RecalcInternalHeroStats");
+    GameJournal::SetCallback("RecalcInternalHeroStats");
     LuaPushAddr(STATE, stats);
     LuaPush(STATE, itemsWeigh);
     ReportOnError(DoCall(2, 0));
@@ -1108,6 +1141,7 @@ float Lua::CLuaState::CheckShieldBlock(SRPGUserUnitStats*unitStats,
                                               CUnit *unit)
 {
     lua_getglobal(STATE, "CheckShieldBlock");
+    GameJournal::SetCallback("CheckShieldBlock");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
     ReportOnError(DoCall(2, 1));
@@ -1118,6 +1152,7 @@ float Lua::CLuaState::GetShieldBlockChance(SRPGUserUnitStats*unitStats,
                                               CUnit *unit)
 {
     lua_getglobal(STATE, "GetShieldBlockChance");
+    GameJournal::SetCallback("GetShieldBlockChance");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
     ReportOnError(DoCall(2, 1));
@@ -1127,6 +1162,7 @@ float Lua::CLuaState::GetShieldBlockChance(SRPGUserUnitStats*unitStats,
 int Lua::CLuaState::GetDualAnims(const char* animName, int prop)
 {
 	lua_getglobal(STATE, "GetDualAnims");
+    GameJournal::SetCallback("GetDualAnims");
 	LuaPush(STATE, animName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1136,6 +1172,7 @@ int Lua::CLuaState::GetDualAnims(const char* animName, int prop)
 float Lua::CLuaState::GetDamageModAttr(int weapon_type, int strength, int dexterity, int intelligence, float mod)
 {
 	lua_getglobal(STATE, "GetDamageModAttr");
+    GameJournal::SetCallback("GetDamageModAttr");
 	LuaPush(STATE, weapon_type);
 	LuaPush(STATE, strength);
 	LuaPush(STATE, dexterity);
@@ -1149,6 +1186,7 @@ float Lua::CLuaState::CheckWeaponParry(SRPGUserUnitStats* unitStats,
 	CUnit* unit, int num)
 {
 	lua_getglobal(STATE, "CheckWeaponParry");
+    GameJournal::SetCallback("CheckWeaponParry");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, num);
@@ -1159,6 +1197,7 @@ float Lua::CLuaState::GetWeaponParryChance(SRPGUserUnitStats* unitStats,
 	CUnit* unit, int num)
 {
 	lua_getglobal(STATE, "GetWeaponParryChance");
+    GameJournal::SetCallback("GetWeaponParryChance");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, num);
@@ -1169,6 +1208,7 @@ float Lua::CLuaState::CheckShieldParry(SRPGUserUnitStats* unitStats,
 	CUnit* unit)
 {
 	lua_getglobal(STATE, "CheckShieldParry");
+    GameJournal::SetCallback("CheckShieldParry");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, unit);
 	ReportOnError(DoCall(2, 1));
@@ -1178,6 +1218,7 @@ float Lua::CLuaState::GetShieldParryChance(SRPGUserUnitStats* unitStats,
 	CUnit* unit)
 {
 	lua_getglobal(STATE, "GetShieldParryChance");
+    GameJournal::SetCallback("GetShieldParryChance");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, unit);
 	ReportOnError(DoCall(2, 1));
@@ -1186,6 +1227,7 @@ float Lua::CLuaState::GetShieldParryChance(SRPGUserUnitStats* unitStats,
 float Lua::CLuaState::GetAttackModiferFromHL(int hit_location)
 {
 	lua_getglobal(STATE, "GetAttackModiferFromHL");
+    GameJournal::SetCallback("GetAttackModiferFromHL");
 	LuaPush(STATE, hit_location);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<float>(STATE);
@@ -1194,6 +1236,7 @@ float Lua::CLuaState::GetAttackModiferFromHL(int hit_location)
 float Lua::CLuaState::GetArmorPropsInside(const char* itemName, int prop)
 {
 	lua_getglobal(STATE, "GetArmorPropsInside");
+    GameJournal::SetCallback("GetArmorPropsInside");
 	LuaPush(STATE, itemName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1202,6 +1245,7 @@ float Lua::CLuaState::GetArmorPropsInside(const char* itemName, int prop)
 float Lua::CLuaState::GetWeaponPropsInside(const char* itemName, int prop)
 {
 	lua_getglobal(STATE, "GetWeaponPropsInside");
+    GameJournal::SetCallback("GetWeaponPropsInside");
 	LuaPush(STATE, itemName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1210,6 +1254,7 @@ float Lua::CLuaState::GetWeaponPropsInside(const char* itemName, int prop)
 float Lua::CLuaState::GetMaterialPropsInside(const char* itemName, int prop)
 {
 	lua_getglobal(STATE, "GetMaterialPropsInside");
+    GameJournal::SetCallback("GetMaterialPropsInside");
 	LuaPush(STATE, itemName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1218,6 +1263,7 @@ float Lua::CLuaState::GetMaterialPropsInside(const char* itemName, int prop)
 int Lua::CLuaState::GetRegenBonusFromPerkMagicBlood(int level)
 {
 	lua_getglobal(STATE, "GetRegenBonusFromPerkMagicBlood");
+    GameJournal::SetCallback("GetRegenBonusFromPerkMagicBlood");
 	LuaPush(STATE, level);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<int>(STATE);
@@ -1225,6 +1271,7 @@ int Lua::CLuaState::GetRegenBonusFromPerkMagicBlood(int level)
 float Lua::CLuaState::GetComplexSummStats(CUnit *unit, int stat)
 {
 	lua_getglobal(STATE, "GetComplexSummStats");
+    GameJournal::SetCallback("GetComplexSummStats");
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, stat);
 	ReportOnError(DoCall(2, 1));
@@ -1232,6 +1279,7 @@ float Lua::CLuaState::GetComplexSummStats(CUnit *unit, int stat)
 }float Lua::CLuaState::GetJewelryPropsInside(const char* itemName, int prop)
 {
 	lua_getglobal(STATE, "GetJewelryPropsInside");
+    GameJournal::SetCallback("GetJewelryPropsInside");
 	LuaPush(STATE, itemName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1239,6 +1287,7 @@ float Lua::CLuaState::GetComplexSummStats(CUnit *unit, int stat)
 }float Lua::CLuaState::GetUnitPerksInside(const char* unitName, int prop)
 {
 	lua_getglobal(STATE, "GetUnitPerksInside");
+    GameJournal::SetCallback("GetUnitPerksInside");
 	LuaPush(STATE, unitName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1247,6 +1296,7 @@ float Lua::CLuaState::GetComplexSummStats(CUnit *unit, int stat)
 float Lua::CLuaState::GetShopConstructLimit(int shop, int prop)
 {
 	lua_getglobal(STATE, "GetShopConstructLimit");
+    GameJournal::SetCallback("GetShopConstructLimit");
 	LuaPush(STATE, shop);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1255,6 +1305,7 @@ float Lua::CLuaState::GetShopConstructLimit(int shop, int prop)
 float Lua::CLuaState::GetSpellAdds(const char* name, int prop)
 {
 	lua_getglobal(STATE, "GetSpellAdds");
+    GameJournal::SetCallback("GetSpellAdds");
 	LuaPush(STATE, name);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1263,6 +1314,7 @@ float Lua::CLuaState::GetSpellAdds(const char* name, int prop)
 bool Lua::CLuaState::IsForbiddenItem(const char* itemName, int prop, int shop)
 {
 	lua_getglobal(STATE, "IsForbiddenItem");
+    GameJournal::SetCallback("IsForbiddenItem");
 	LuaPush(STATE, itemName);
 	LuaPush(STATE, prop);
 	LuaPush(STATE, shop);
@@ -1272,6 +1324,7 @@ bool Lua::CLuaState::IsForbiddenItem(const char* itemName, int prop, int shop)
 float Lua::CLuaState::GetUnitStatsInside(const char* statName, int prop)
 {
 	lua_getglobal(STATE, "GetUnitStatsInside");
+    GameJournal::SetCallback("GetUnitStatsInside");
 	LuaPush(STATE, statName);
 	LuaPush(STATE, prop);
 	ReportOnError(DoCall(2, 1));
@@ -1284,6 +1337,7 @@ void Lua::CLuaState::CalcAttackParamsOnClient(SRPGUserUnitStats *unitStats,
                                               float *spellEffects, int leftHandNum)
 {
     lua_getglobal(STATE, "CalcAttackParamsOnClient");
+    GameJournal::SetCallback("CalcAttackParamsOnClient");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
     LuaPushAddr(STATE, attackParams);
@@ -1300,6 +1354,7 @@ void Lua::CLuaState::CalcAttackParamsOnServer(SRPGUnitStats *unitStats,
                                               float *spellEffects)
 {
     lua_getglobal(STATE, "CalcAttackParamsOnServer");
+    GameJournal::SetCallback("CalcAttackParamsOnServer");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, unit);
     LuaPushAddr(STATE, attackParams);
@@ -1312,6 +1367,7 @@ void Lua::CLuaState::ApplySpellEffectsOnServer(SRPGUnitStats *unitStats,
                                               float *spellEffects)
 {
     lua_getglobal(STATE, "ApplySpellEffectsOnServer");
+    GameJournal::SetCallback("ApplySpellEffectsOnServer");
     LuaPushAddr(STATE, unitStats);
     LuaPushAddr(STATE, commonStats);
     LuaPushAddr(STATE, spellEffects);
@@ -1323,6 +1379,7 @@ void Lua::CLuaState::ApplySpellEffectsOnServer(SRPGUnitStats *unitStats,
 float Lua::CLuaState::GetHitLocDecr(SRPGUnitStats* unitStats, CUnit* unit, bool server)
 {
 	lua_getglobal(STATE, "GetHitLocDecr");
+    GameJournal::SetCallback("GetHitLocDecr");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, server);
@@ -1332,6 +1389,7 @@ float Lua::CLuaState::GetHitLocDecr(SRPGUnitStats* unitStats, CUnit* unit, bool 
 float Lua::CLuaState::GetHitLocDecrDamage(SRPGUnitStats* unitStats, CUnit* unit, bool server)
 {
 	lua_getglobal(STATE, "GetHitLocDecrDamage");
+    GameJournal::SetCallback("GetHitLocDecrDamage");
 	LuaPushAddr(STATE, unitStats);
 	LuaPushAddr(STATE, unit);
 	LuaPush(STATE, server);
@@ -1343,6 +1401,7 @@ float Lua::CLuaState::GetHitLocDecrDamage(SRPGUnitStats* unitStats, CUnit* unit,
 float Lua::CLuaState::GetOverloadDefenceOnServer(float currEncumbrance, float maxEncumbrance)
 {
 	lua_getglobal(STATE, "GetOverloadDefenceOnServer");
+    GameJournal::SetCallback("GetOverloadDefenceOnServer");
 	LuaPush(STATE, currEncumbrance);
 	LuaPush(STATE, maxEncumbrance);
 	ReportOnError(DoCall(2, 1));
@@ -1351,6 +1410,7 @@ float Lua::CLuaState::GetOverloadDefenceOnServer(float currEncumbrance, float ma
 float Lua::CLuaState::GetOverloadAttackOnServer(float currEncumbrance, float maxEncumbrance)
 {
 	lua_getglobal(STATE, "GetOverloadAttackOnServer");
+    GameJournal::SetCallback("GetOverloadAttackOnServer");
 	LuaPush(STATE, currEncumbrance);
 	LuaPush(STATE, maxEncumbrance);
 	ReportOnError(DoCall(2, 1));
@@ -1359,6 +1419,7 @@ float Lua::CLuaState::GetOverloadAttackOnServer(float currEncumbrance, float max
 float Lua::CLuaState::OverloadManacostModsOnServer(float currEncumbrance, float maxEncumbrance)
 {
 	lua_getglobal(STATE, "OverloadManacostModsOnServer");
+    GameJournal::SetCallback("OverloadManacostModsOnServer");
 	LuaPush(STATE, currEncumbrance);
 	LuaPush(STATE, maxEncumbrance);
 	ReportOnError(DoCall(2, 1));
@@ -1367,6 +1428,7 @@ float Lua::CLuaState::OverloadManacostModsOnServer(float currEncumbrance, float 
 float Lua::CLuaState::GetOverloadDamageOnServer(float currEncumbrance, float maxEncumbrance)
 {
 	lua_getglobal(STATE, "GetOverloadDamageOnServer");
+    GameJournal::SetCallback("GetOverloadDamageOnServer");
 	LuaPush(STATE, currEncumbrance);
 	LuaPush(STATE, maxEncumbrance);
 	ReportOnError(DoCall(2, 1));
@@ -1375,6 +1437,7 @@ float Lua::CLuaState::GetOverloadDamageOnServer(float currEncumbrance, float max
 float Lua::CLuaState::GetOverloadBlockOnServer(float currEncumbrance, float maxEncumbrance)
 {
 	lua_getglobal(STATE, "GetOverloadBlockOnServer");
+    GameJournal::SetCallback("GetOverloadBlockOnServer");
 	LuaPush(STATE, currEncumbrance);
 	LuaPush(STATE, maxEncumbrance);
 	ReportOnError(DoCall(2, 1));
@@ -1383,6 +1446,7 @@ float Lua::CLuaState::GetOverloadBlockOnServer(float currEncumbrance, float maxE
 float Lua::CLuaState::GetOverloadParryOnServer(float currEncumbrance, float maxEncumbrance)
 {
 	lua_getglobal(STATE, "GetOverloadParryOnServer");
+    GameJournal::SetCallback("GetOverloadParryOnServer");
 	LuaPush(STATE, currEncumbrance);
 	LuaPush(STATE, maxEncumbrance);
 	ReportOnError(DoCall(2, 1));
@@ -1392,6 +1456,7 @@ float Lua::CLuaState::GetOverloadParryOnServer(float currEncumbrance, float maxE
 float Lua::CLuaState::GetOverloadPercentOnServer(SRPGUnitStats* unitStats)
 {
 	lua_getglobal(STATE, "GetOverloadPercentOnServer");
+    GameJournal::SetCallback("GetOverloadPercentOnServer");
 	LuaPushAddr(STATE, unitStats);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<float>(STATE);
@@ -1400,6 +1465,7 @@ float Lua::CLuaState::GetOverloadPercentOnServer(SRPGUnitStats* unitStats)
 float Lua::CLuaState::GetOverloadPercentCurOnServer(SRPGUnitStats* unitStats)
 {
 	lua_getglobal(STATE, "GetOverloadPercentCurOnServer");
+    GameJournal::SetCallback("GetOverloadPercentCurOnServer");
 	LuaPushAddr(STATE, unitStats);
 	ReportOnError(DoCall(1, 1));
 	return LuaPop<float>(STATE);
@@ -1412,6 +1478,7 @@ float Lua::CLuaState::GetManaBonusMultiplier(void *stats, bool isServer)
         lua_getglobal(STATE, "GetManaBonusOnServer");
     else
         lua_getglobal(STATE, "GetManaBonusOnClient");
+    GameJournal::SetCallback(isServer?"GetManaBonusOnServer":"GetManaBonusOnClient");
     LuaPushAddr(STATE, stats);
     ReportOnError(DoCall(1, 1));
     return LuaPop<float>(STATE);
@@ -1423,6 +1490,7 @@ float Lua::CLuaState::GetExpMultiplier(void *stats, bool isServer)
         lua_getglobal(STATE, "GetExpMultiplierOnServer");
     else
         lua_getglobal(STATE, "GetExpMultiplierOnClient");
+    GameJournal::SetCallback(isServer?"GetExpMultiplierOnServer":"GetExpMultiplierOnClient");
     LuaPushAddr(STATE, stats);
     ReportOnError(DoCall(1, 1));
     return LuaPop<float>(STATE);
@@ -1431,6 +1499,7 @@ float Lua::CLuaState::GetExpMultiplier(void *stats, bool isServer)
 float Lua::CLuaState::GetExpMultiplier2(float intelligence, bool isServer)
 {
 	lua_getglobal(STATE, "GetExpMultiplier2");
+    GameJournal::SetCallback("GetExpMultiplier2");
     LuaPush(STATE, intelligence);
     ReportOnError(DoCall(1, 1));
     return LuaPop<float>(STATE);
@@ -1439,6 +1508,7 @@ float Lua::CLuaState::GetExpMultiplier2(float intelligence, bool isServer)
 void Lua::CLuaState::RecalcShopsPriceMultipliers(std::vector<float> *mults, bool isLmp)
 {
     lua_getglobal(STATE, "RecalcShopsPriceMultipliers");
+    GameJournal::SetCallback("RecalcShopsPriceMultipliers");
     LuaPushAddr(STATE, mults->data());
     LuaPush(STATE, isLmp);
     ReportOnError(DoCall(2, 0));
@@ -1447,6 +1517,7 @@ void Lua::CLuaState::RecalcShopsPriceMultipliers(std::vector<float> *mults, bool
 float Lua::CLuaState::DistributeLmpExp(float exp, int playersNum)
 {
     lua_getglobal(STATE, "DistributeLmpExp");
+    GameJournal::SetCallback("DistributeLmpExp");
     LuaPush(STATE, exp);
     LuaPush(STATE, playersNum);
     ReportOnError(DoCall(2, 1));

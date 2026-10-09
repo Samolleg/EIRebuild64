@@ -15,6 +15,10 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PlayerManager.h"
 #include "Player.h"
 #include "PlayerServer.h"
+#include "WorldServer.h"
+#include "ModRuntime.h"
+#include "ModPlayerNumbers.h"
+#include "EngineDiagnostics.h"
 
 // ---------------------------------- Create/destroy
 // -------------------------------------------------------
@@ -54,7 +58,18 @@ CPlayer *CPlayerManager::CreatePlayer()
         ((CWorld *)GetWorld())->GetSpecificManager()->CreateData(SPTID_PLAYER_SPECIFIC);
     pPlayer->SetPlayerSpecific(pSpecific);
     pPlayer->AddRef();
-    pPlayer->SetPlayerNumber(0);
+    if (ModRuntime::Current())
+    {
+        CManagerIterator iter;
+        CBaseManager* manager = theWorldServer.GetPlayerManager();
+        ModPlayerNumbers::Assign(pPlayer, 0, manager, iter);
+        static volatile LONG reports = 0;
+        if (InterlockedIncrement(&reports) <= 8)
+            EngineDiagnostics::Event("Player number assigned id=%d number=%d serverManager=%d callerServer=%d",
+                pPlayer->GetID(), pPlayer->GetPlayerNumber(), manager != nullptr, GetWorld()->IsServer());
+    }
+    else
+        pPlayer->SetPlayerNumber(0);
 
     return pPlayer;
 }

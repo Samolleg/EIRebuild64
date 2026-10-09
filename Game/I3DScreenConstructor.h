@@ -177,6 +177,7 @@ public:
     void SetScreenMode(EItemScreenModes eCampMode);
 
     void SetPersonage(int nNewCurPers, LPCTSTR pszName);
+    void StopPrimaryRepeat();
     void UpdateStats();
     void GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkillInfo);
 

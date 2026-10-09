@@ -1,6 +1,10 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "ModPackage.h"
+#include "ModCampStats.h"
+#include "ModProgression.h"
 #include "ModRuntime.h"
+#include "ModAlchemyItem.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenConstructor.h"
@@ -310,6 +314,7 @@ void CI3DObjectInventory::OnIdle()
 void CI3DObjectInventory::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht == 0)
     {
         if (pI3D->IsShiftDown())
@@ -958,6 +963,7 @@ void CI3DObjectQuickSlots::OnRButtonDown(UINT nFlags, CPoint point)
     if (!IsVisible())
         return;
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht < 0)
         return;
     CPersonage *pPers = pScreen->GetCurrentPers();
@@ -1285,6 +1291,7 @@ void CI3DObjectNameStats::Init()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectNameStats::SetPersonage(int nNewCurPers, LPCTSTR pszName)
 {
+    StopPrimaryRepeat();
     if (IWorldClient.GetParty().people.GetSize() > 1)
     {
         figures[0]->Show(TRUE);
@@ -1310,6 +1317,7 @@ void CI3DObjectNameStats::SetPersonage(int nNewCurPers, LPCTSTR pszName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectNameStats::SetScreenMode(EItemScreenModes eCampMode)
 {
+    StopPrimaryRepeat();
     eCurMode = eCampMode;
     CPoint shift(0, 15);
     CRect rc(20, 165, 180, 180);
@@ -1394,9 +1402,6 @@ void CI3DObjectNameStats::SetScreenMode(EItemScreenModes eCampMode)
     UpdateStats();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-const float FP_MIN_PRIMARY = 15;
-const float FP_MAX_PRIMARY = 35;
-const float FP_SUM_PRIMARY = 75;
 void CI3DObjectNameStats::UpdateStats()
 {
 #ifndef NOGETDC
@@ -1406,6 +1411,8 @@ void CI3DObjectNameStats::UpdateStats()
 
     pSurf->DrawText(szPersName, CRect(0, 27, 200, 43), 1, CAMP_COLOR_HEADER, DT_CENTER);
 
+    auto* statsMod=ModRuntime::Current();
+    if(statsMod && !statsMod->AdvancedUI("useLS_UpdateStats"))statsMod=nullptr;
     CPersonage *pPers = pScreen->GetCurrentPers();
     SRPGUnitStats *pStats = &pPers->stats;
     CUnit *pUnit = pScreen->GetUnit(nCurPers);
@@ -1416,11 +1423,16 @@ void CI3DObjectNameStats::UpdateStats()
     CRect rc;
     if (eCurMode == ISM_SKIN)
     {
+        int points;
+        if (!pScreen->GetCreationPrimaryPoints(points))
+        {
+            pSurf->ReleaseDC();
+            return;
+        }
         COLORREF cr;
         int nStr = (int)pStats->psStrength.fpBaseValue;
         int nDex = (int)pStats->psDexterity.fpBaseValue;
         int nInt = (int)pStats->psIntelligence.fpBaseValue;
-        int nSum = nStr + nDex + nInt;
         rc = CRect(20, 65, 130, 80);
         OutputSkill(rc, pszStatsNames[0], nStr);
         rc += shift;
@@ -1428,19 +1440,19 @@ void CI3DObjectNameStats::UpdateStats()
         rc += shift;
         OutputSkill(rc, pszStatsNames[2], nInt);
         rc += shift;
-        OutputSkill(rc, szStrings[POINTSLEFT], (int)(FP_SUM_PRIMARY - nSum));
+        OutputSkill(rc, szStrings[POINTSLEFT], points);
         rc += shift;
         rc += shift;
         OutputSkill(rc, szStrings[TALL], nTall);
 
         rc = CRect(140, 65, 160, 80);
-        cr = (nStr > FP_MIN_PRIMARY) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+        cr = (pScreen->CanAdjustCreationPrimary(0, -1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
         rc += shift;
-        cr = (nDex > FP_MIN_PRIMARY) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+        cr = (pScreen->CanAdjustCreationPrimary(1, -1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
         rc += shift;
-        cr = (nInt > FP_MIN_PRIMARY) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+        cr = (pScreen->CanAdjustCreationPrimary(2, -1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
         rc += shift;
         rc += shift;
@@ -1448,15 +1460,14 @@ void CI3DObjectNameStats::UpdateStats()
         cr = (nTall > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
 
-        nSum = FP_SUM_PRIMARY - nSum;
         rc = CRect(160, 65, 180, 80);
-        cr = (nStr < FP_MAX_PRIMARY && nSum > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+        cr = (pScreen->CanAdjustCreationPrimary(0, 1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
         rc += shift;
-        cr = (nDex < FP_MAX_PRIMARY && nSum > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+        cr = (pScreen->CanAdjustCreationPrimary(1, 1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
         rc += shift;
-        cr = (nInt < FP_MAX_PRIMARY && nSum > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+        cr = (pScreen->CanAdjustCreationPrimary(2, 1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
         pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
         rc += shift;
         rc += shift;
@@ -1480,7 +1491,26 @@ void CI3DObjectNameStats::UpdateStats()
         rc += shift;
         rc += shift;
 
-        if (pScreen->GetCurrentPers()->dwCurrentWeapon != -1)
+        if (auto* mod=statsMod;mod && pUnit)
+        {
+            const auto display=mod->CampDescriptions(*pPers,*pUnit);
+            const int slot=int(pPers->dwCurrentWeapon);
+            const bool weapon=slot>=0&&slot<pPers->weapons.GetSize()&&pPers->weapons[slot];
+            if(weapon){
+                pSurf->DrawText(szStrings[CURWEAPON],rc,0,CAMP_COLOR_SKILLS,DT_LEFT);rc+=shift;
+                szOut.Format("     %s",(LPCSTR)szStrings[ATTACK]);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
+                szOut.Format("%d",display.attack);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);rc+=shift;
+                szOut.Format("     %s",(LPCSTR)szStrings[DEFENSE]);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
+                szOut.Format("%d",display.defense);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);rc+=shift;
+                for(const auto& damage:display.damages){
+                    szOut.Format("damage_%d",damage.type);pTxtMng->GetSystemString(szOut,szTmp);
+                    szOut.Format("     %s %s",(LPCSTR)szStrings[DAMAGE],(LPCSTR)szTmp);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
+                    szOut.Format("%.0f-%.0f",damage.minimum,damage.maximum);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);rc+=shift;
+                }
+                rc+=shift;
+            }else for(int i=0;i<5;++i)rc+=shift;
+        }
+        else if (pScreen->GetCurrentPers()->dwCurrentWeapon != -1)
         {
             pSurf->DrawText(szStrings[CURWEAPON], rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
             rc += shift;
@@ -1522,7 +1552,7 @@ void CI3DObjectNameStats::UpdateStats()
 
         int nWeight = (int)pScreen->GetCurrentPers()->GetItemsWeight();
         int nEncumbr = (int)pStats->fpMaxEncumbrance;
-        if(auto*mod=ModRuntime::Current()){
+        if(auto*mod=statsMod){
             float seconds=0;mod->CampInfo(*pPers,pUnit,nEncumbr,seconds);
             if(pTxtMng->GetText("perk Encumbrance"))pTxtMng->GetLine(szTmp);
             pSurf->DrawText(szTmp,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
@@ -1541,12 +1571,12 @@ void CI3DObjectNameStats::UpdateStats()
         }
         pSurf->DrawText(szStrings[MAGICSKILLS], rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
     }
-    else if (ModRuntime::Current() && pUnit)
+    else if (statsMod && pUnit)
     {
         // Current addon UpdateStats uses replicated primary stats, difficulty HP,
         // overload-adjusted mana and unwounded camp action rate.
         int capacity=0;float seconds=0,actions=0,mana=0;
-        ModRuntime::Current()->CampInfo(*pPers,pUnit,capacity,seconds,&actions,&mana);
+        statsMod->CampInfo(*pPers,pUnit,capacity,seconds,&actions,&mana,eCurMode==ISM_STATS);
         auto* user=pUnit->GetUserUnitStats();
         rc=CRect(20,65,180,80);
         OutputSkill(rc,"Strength",int(user->cStrength));rc+=shift;
@@ -1556,14 +1586,16 @@ void CI3DObjectNameStats::UpdateStats()
         OutputSkill(rc,"Mana",int(mana));rc+=shift;
         OutputSkill(rc,"Actions",actions);rc+=shift;
         OutputSkill(rc,"Experience",int(pStats->GetRealExp()));rc+=shift;
-        int weight=int(pPers->GetItemsWeight());
+        int weight=ModCampStats::Weight(int(pPers->GetItemsWeight()),eCurMode==ISM_STATS);
         OutputSkill(rc,"Encumbrance",weight,capacity);rc+=shift;
         if(weight>capacity)pSurf->DrawText(szStrings[OVERLOAD],rc,0,RGB(255,0,0),DT_RIGHT);
         CString sight,meters;
         if(pTxtMng->GetText("string infounit_6"))pTxtMng->GetLine(sight);
         if(pTxtMng->GetText("string infounit_13"))pTxtMng->GetLine(meters);
         pSurf->DrawText(sight,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
-        szOut.Format("%d%s",int(MINT(pStats->senses[RPGS_SIGHT].fpEffectiveValue)+pStats->GetPerkModifier(11)),(LPCSTR)meters);
+        // The addon displays the character's day sight range with the
+        // Trickster perk bonus.
+        szOut.Format("%d%s", ModCampStats::Sight(*pStats), (LPCSTR)meters);
         pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);
     }
     else
@@ -1660,13 +1692,13 @@ void CI3DObjectNameStats::OutputHLAbsorb(CRect &rc, LPCTSTR pszHLName, ERPGHitLo
         fpAbsorbtions[i] = 0;
         for (int j = 0; j < RPG_NUM_ARMOR_LAYERS; j++)
             fpAbsorbtions[i] += pStats->hls[eHL].layers[j].fpAbsorbtions[i] *
-                (ModRuntime::Current()?1+pStats->GetPerkModifier(i<3?5:22)*.01f:1);
+                ((ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_UpdateStats"))?1+pStats->GetPerkModifier(i<3?5:22)*.01f:1);
     }
 
     float fMaxAbsorb = 0;
     for (int i = 0; i < RPG_NUM_ATTACK_TYPES - 1; i++)
         fMaxAbsorb = Max(fpAbsorbtions[i], fMaxAbsorb);
-    if(ModRuntime::Current()){
+    if((ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_UpdateStats"))){
         float physical=0,magic=0;
         for(int i=0;i<3;++i)physical=Max(physical,fpAbsorbtions[i]);
         for(int i=3;i<RPG_NUM_ATTACK_TYPES-1;++i)magic=Max(magic,fpAbsorbtions[i]);
@@ -1681,39 +1713,26 @@ void CI3DObjectNameStats::OutputHLAbsorb(CRect &rc, LPCTSTR pszHLName, ERPGHitLo
 void CI3DObjectNameStats::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (eCurMode == ISM_SKIN)
     {
+        StopPrimaryRepeat();
+        if (!pScreen->CanEditCreationPrimary())
+            return;
         CPersonage *pPers = pScreen->GetCurrentPers();
-        int nSum = (int)pPers->stats.psStrength.fpBaseValue +
-                   (int)pPers->stats.psDexterity.fpBaseValue +
-                   (int)pPers->stats.psIntelligence.fpBaseValue;
-        nLock = -1;
         switch (ht)
         {
         case 6:
-            if (pPers->stats.psStrength.fpBaseValue > FP_MIN_PRIMARY)
-            {
-                pPers->stats.psStrength.fpBaseValue -= 1;
-                pPers->stats.psStrength.fpEffectiveValue = pPers->stats.psStrength.fpBaseValue;
+            if (pScreen->AdjustCreationPrimary(0, -1))
                 nLock = ht;
-            }
             break;
         case 7:
-            if (pPers->stats.psDexterity.fpBaseValue > FP_MIN_PRIMARY)
-            {
-                pPers->stats.psDexterity.fpBaseValue -= 1;
-                pPers->stats.psDexterity.fpEffectiveValue = pPers->stats.psDexterity.fpBaseValue;
+            if (pScreen->AdjustCreationPrimary(1, -1))
                 nLock = ht;
-            }
             break;
         case 8:
-            if (pPers->stats.psIntelligence.fpBaseValue > FP_MIN_PRIMARY)
-            {
-                pPers->stats.psIntelligence.fpBaseValue -= 1;
-                pPers->stats.psIntelligence.fpEffectiveValue = pPers->stats.psIntelligence
-                                                                   .fpBaseValue;
+            if (pScreen->AdjustCreationPrimary(2, -1))
                 nLock = ht;
-            }
             break;
         case 9:
             if (nTall >= 1)
@@ -1724,29 +1743,16 @@ void CI3DObjectNameStats::OnLButtonDown(UINT nFlags, CPoint point)
             }
             break;
         case 10:
-            if (pPers->stats.psStrength.fpBaseValue < FP_MAX_PRIMARY && nSum < FP_SUM_PRIMARY)
-            {
-                pPers->stats.psStrength.fpBaseValue += 1;
-                pPers->stats.psStrength.fpEffectiveValue = pPers->stats.psStrength.fpBaseValue;
+            if (pScreen->AdjustCreationPrimary(0, 1))
                 nLock = ht;
-            }
             break;
         case 11:
-            if (pPers->stats.psDexterity.fpBaseValue < FP_MAX_PRIMARY && nSum < FP_SUM_PRIMARY)
-            {
-                pPers->stats.psDexterity.fpBaseValue += 1;
-                pPers->stats.psDexterity.fpEffectiveValue = pPers->stats.psDexterity.fpBaseValue;
+            if (pScreen->AdjustCreationPrimary(1, 1))
                 nLock = ht;
-            }
             break;
         case 12:
-            if (pPers->stats.psIntelligence.fpBaseValue < FP_MAX_PRIMARY && nSum < FP_SUM_PRIMARY)
-            {
-                pPers->stats.psIntelligence.fpBaseValue += 1;
-                pPers->stats.psIntelligence.fpEffectiveValue = pPers->stats.psIntelligence
-                                                                   .fpBaseValue;
+            if (pScreen->AdjustCreationPrimary(2, 1))
                 nLock = ht;
-            }
             break;
         case 13:
             if (nTall <= 99)
@@ -1784,52 +1790,51 @@ void CI3DObjectNameStats::OnLButtonDown(UINT nFlags, CPoint point)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectNameStats::OnLButtonUp(UINT nFlags, CPoint point)
+void CI3DObjectNameStats::StopPrimaryRepeat()
 {
-    pI3D->ReleaseCapture();
+    if (pI3D->GetCapture() == this)
+        pI3D->ReleaseCapture();
     nLock = -1;
     fTime = 0;
+}
+
+void CI3DObjectNameStats::OnLButtonUp(UINT nFlags, CPoint point)
+{
+    StopPrimaryRepeat();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectNameStats::OnIdle()
 {
     if (eCurMode != ISM_SKIN)
+    {
+        StopPrimaryRepeat();
         return;
+    }
     if (nLock < 0)
         return;
+    if (!pScreen->CanEditCreationPrimary() || pI3D->GetCapture() != this)
+    {
+        StopPrimaryRepeat();
+        return;
+    }
     fTime += GetFrameTime();
     if (fTime < .25f)
         return;
     CPersonage *pPers = pScreen->GetCurrentPers();
-    int nSum = (int)pPers->stats.psStrength.fpBaseValue +
-               (int)pPers->stats.psDexterity.fpBaseValue +
-               (int)pPers->stats.psIntelligence.fpBaseValue;
     bool bUnlock = true;
     switch (nLock)
     {
     case 6:
-        if (pPers->stats.psStrength.fpBaseValue > FP_MIN_PRIMARY)
-        {
-            pPers->stats.psStrength.fpBaseValue -= 1;
-            pPers->stats.psStrength.fpEffectiveValue = pPers->stats.psStrength.fpBaseValue;
+        if (pScreen->AdjustCreationPrimary(0, -1))
             bUnlock = false;
-        }
         break;
     case 7:
-        if (pPers->stats.psDexterity.fpBaseValue > FP_MIN_PRIMARY)
-        {
-            pPers->stats.psDexterity.fpBaseValue -= 1;
-            pPers->stats.psDexterity.fpEffectiveValue = pPers->stats.psDexterity.fpBaseValue;
+        if (pScreen->AdjustCreationPrimary(1, -1))
             bUnlock = false;
-        }
         break;
     case 8:
-        if (pPers->stats.psIntelligence.fpBaseValue > FP_MIN_PRIMARY)
-        {
-            pPers->stats.psIntelligence.fpBaseValue -= 1;
-            pPers->stats.psIntelligence.fpEffectiveValue = pPers->stats.psIntelligence.fpBaseValue;
+        if (pScreen->AdjustCreationPrimary(2, -1))
             bUnlock = false;
-        }
         break;
     case 9:
         if (nTall >= 1)
@@ -1840,28 +1845,16 @@ void CI3DObjectNameStats::OnIdle()
         }
         break;
     case 10:
-        if (pPers->stats.psStrength.fpBaseValue < FP_MAX_PRIMARY && nSum < FP_SUM_PRIMARY)
-        {
-            pPers->stats.psStrength.fpBaseValue += 1;
-            pPers->stats.psStrength.fpEffectiveValue = pPers->stats.psStrength.fpBaseValue;
+        if (pScreen->AdjustCreationPrimary(0, 1))
             bUnlock = false;
-        }
         break;
     case 11:
-        if (pPers->stats.psDexterity.fpBaseValue < FP_MAX_PRIMARY && nSum < FP_SUM_PRIMARY)
-        {
-            pPers->stats.psDexterity.fpBaseValue += 1;
-            pPers->stats.psDexterity.fpEffectiveValue = pPers->stats.psDexterity.fpBaseValue;
+        if (pScreen->AdjustCreationPrimary(1, 1))
             bUnlock = false;
-        }
         break;
     case 12:
-        if (pPers->stats.psIntelligence.fpBaseValue < FP_MAX_PRIMARY && nSum < FP_SUM_PRIMARY)
-        {
-            pPers->stats.psIntelligence.fpBaseValue += 1;
-            pPers->stats.psIntelligence.fpEffectiveValue = pPers->stats.psIntelligence.fpBaseValue;
+        if (pScreen->AdjustCreationPrimary(2, 1))
             bUnlock = false;
-        }
         break;
     case 13:
         if (nTall <= 99)
@@ -1875,9 +1868,7 @@ void CI3DObjectNameStats::OnIdle()
     pScreen->UpdateAttributes();
     if (bUnlock)
     {
-        pI3D->ReleaseCapture();
-        nLock = -1;
-        fTime = 0;
+        StopPrimaryRepeat();
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1887,6 +1878,22 @@ void CI3DObjectNameStats::GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkil
     pSkillInfo->nType = -1;
     pSkillInfo->pStats = &pPers->stats;
     pSkillInfo->pUnit = pScreen->GetUnit(nCurPers);
+    if(eCurMode==ISM_WEAPONS && ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_UpdateStats") && pSkillInfo->pUnit){
+        if(point.x<20||point.x>=180||point.y<165||point.y>=500)return;
+        const int row=(point.y-165)/15,slot=int(pPers->dwCurrentWeapon);
+        const bool weapon=slot>=0&&slot<pPers->weapons.GetSize()&&pPers->weapons[slot];
+        const auto display=ModRuntime::Current()->CampDescriptions(*pPers,*pSkillInfo->pUnit);
+        pSkillInfo->nType=ModCampDescriptions::WeaponHover(row,weapon,int(display.damages.size()));
+        if(pSkillInfo->nType==4){
+            const ERPGHitLocations locations[]={RPGHL_HEAD,RPGHL_LHAND,RPGHL_BODY,RPGHL_LLEG};
+            const char* names[]={"hl_skull","hl_arms","hl_torso","hl_legs"};
+            pSkillInfo->eHL=locations[row-1];pSkillInfo->szNonlocalName=names[row-1];
+        }else if(pSkillInfo->nType==5){pSkillInfo->pWeapon=pPers->weapons[slot];pSkillInfo->szNonlocalName=row==7?"attack":"defense";}
+        else if(pSkillInfo->nType==7)pSkillInfo->szNonlocalName="camp_damage";
+        else if(pSkillInfo->nType==0){pSkillInfo->nSkill=7;pSkillInfo->szNonlocalName=pszStatsNames[7];}
+        else if(pSkillInfo->nType==6)pSkillInfo->szNonlocalName="magic_skills";
+        return;
+    }
     int ht = HitTest(point);
     if (((eCurMode == ISM_SPELLS || eCurMode == ISM_STATS) && ht >= 2) ||
         (eCurMode == ISM_SKIN && ht >= 2 && ht < 5))
@@ -2041,17 +2048,19 @@ void CI3DObjectPerks::UpdateBackup()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DObjectPerks::IsModified()
 {
-    return backup[nCurPers].bModified;
+    return ModProgression::Index(nCurPers,int(backup.size())) && backup[nCurPers].bModified;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObjectPerks::GetExpTotal()
 {
+    if(!ModProgression::Index(nCurPers,int(backup.size())))return 0;
     SPerksBackup *pBackup = &backup[nCurPers];
     return int(pBackup->fExperienceCopy + pBackup->fExpPenaltyCopy - pBackup->fSpentExpCopy);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObjectPerks::GetExpPrice()
 {
+    if(!ModProgression::Index(nCurPers,int(backup.size())) || !pScreen || !pScreen->GetCurrentPers())return 0;
     SPerksBackup *pBackup = &backup[nCurPers];
     SRPGUnitStats *pStats = &pScreen->GetCurrentPers()->stats;
     return int(pStats->fSpentExp - pBackup->fSpentExpCopy);
@@ -2059,6 +2068,7 @@ int CI3DObjectPerks::GetExpPrice()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectPerks::Confirm(bool bConfirm, bool bForAll)
 {
+    if(!ModProgression::Index(nCurPers,int(backup.size())))return;
     if (bForAll)
     {
         int nPersTmp = nCurPers;
@@ -2081,6 +2091,7 @@ void CI3DObjectPerks::Confirm(bool bConfirm, bool bForAll)
             RestoreSkillsAndPerks();
         UpdatePerks();
     }
+    if(auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVPerks") && pScreen)pScreen->RefreshProgression();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectPerks::GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkillInfo)
@@ -2303,7 +2314,7 @@ void CI3DObjectPerks::RedrawPerks()
     pSurf->DrawText(szStrings[PERKSAV], CRect(200, 10, 400, 25), 0, CAMP_COLOR_HEADER, DT_CENTER);
 
     CRect rc(15, 35, 180, 50);
-    for (i = 0; i < (ModRuntime::Current()?4:RPG_NUM_ACTUAL_AUTO_SKILLS); i++)
+    for (i = 0; i < ((ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVPerks"))?4:RPG_NUM_ACTUAL_AUTO_SKILLS); i++)
     {
         if (i == 2)
         {
@@ -2314,7 +2325,7 @@ void CI3DObjectPerks::RedrawPerks()
         pSurf->DrawText(skillsAuto[i].szName, rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
         szOut.Format("%d", skillsAuto[i].nValue);
         pSurf->DrawText(szOut, rc - CPoint(40, 0), 0, CAMP_COLOR_SKILLS, DT_RIGHT);
-        if (skillsAuto[i].nValue < (ModRuntime::Current()?120:100))
+        if (skillsAuto[i].nValue < (ModRuntime::Current()?ModRuntime::Current()->AutomaticSkillLimit(i,ModRuntime::Current()->CombatSetting("JMVPerks")!=0):100))
         {
             FormPerkPrice(skillsAuto[i].nPrice, szOut);
             if (skillsAuto[i].nPrice <= nCharPoints)
@@ -2336,7 +2347,7 @@ void CI3DObjectPerks::RedrawPerks()
         pSurf->DrawText(skillsManual[i].szName, rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
         szOut.Format("%d", skillsManual[i].nValue);
         pSurf->DrawText(szOut, rc - CPoint(40, 0), 0, CAMP_COLOR_SKILLS, DT_RIGHT);
-        if (skillsManual[i].nValue < (ModRuntime::Current()?120:100))
+        if (skillsManual[i].nValue < ((ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVPerks"))?120:100))
         {
             FormPerkPrice(skillsManual[i].nPrice, szOut);
             if (skillsManual[i].nPrice <= nCharPoints)
@@ -2398,6 +2409,7 @@ void CI3DObjectPerks::RedrawPerks()
 void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
 
     switch (ht)
     {
@@ -2422,6 +2434,8 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
     if (ht >= 4)
         pI3D->BeginFX("buttons\\camp\\perk.wav");
 
+    auto* mod=ModRuntime::Current();const bool native=mod && mod->CombatSetting("JMVPerks");
+    if(!pScreen || !pScreen->GetCurrentPers() || !ModProgression::Index(nCurPers,int(backup.size())))return;
     SRPGUnitStats *pStats = &pScreen->GetCurrentPers()->stats;
     SPerksBackup *pBackup = &backup[nCurPers];
 
@@ -2429,7 +2443,7 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
     if (ht >= 4 && ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS)
     {
         num = ht - 4;
-        if (skillsAuto[num].nValue >= (ModRuntime::Current()?120:100) || skillsAuto[num].nPrice > nCharPoints)
+        if (!ModProgression::SkillPending(native,true,num,true,skillsAuto[num].nValue,skillsAuto[num].nPrice,nCharPoints,pStats->fSpentExp,mod?mod->AutomaticSkillLimit(num):100))
             return;
         pStats->cAutoSkills[num]++;
         pStats->fSpentExp += skillsAuto[num].nPrice;
@@ -2438,13 +2452,14 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
         nLock = ht;
         fTime = -.5f;
         pI3D->SetCapture(this);
+        if(native)pScreen->RefreshProgression();
         return;
     }
     if (ht >= 4 + RPG_NUM_ACTUAL_AUTO_SKILLS &&
         ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS)
     {
         num = ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS;
-        if (skillsManual[num].nValue >= (ModRuntime::Current()?120:100) || skillsManual[num].nPrice > nCharPoints)
+        if (!ModProgression::SkillPending(native,false,num,true,skillsManual[num].nValue,skillsManual[num].nPrice,nCharPoints,pStats->fSpentExp,100))
             return;
         pStats->cManualSkills[num]++;
         pStats->fSpentExp += skillsManual[num].nPrice;
@@ -2453,6 +2468,7 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
         nLock = ht;
         fTime = -.5f;
         pI3D->SetCapture(this);
+        if(native)pScreen->RefreshProgression();
         return;
     }
     if (ht >= 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS &&
@@ -2460,12 +2476,14 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
                  CAMP_NUM_AV_PERKS_VISIBLE)
     {
         num = nPosAv + ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS - RPG_NUM_ACTUAL_MANUAL_SKILLS;
-        if (num >= perksAv.size() || perksAv[num].nPrice > nCharPoints || !perksAv[num].bValid)
+        if (!ModProgression::Index(num,int(perksAv.size())) || !ModProgression::PerkPending(native,perksAv[num].bValid,perksAv[num].nPrice,nCharPoints,pStats->fSpentExp))
             return;
-        pStats->AddPerk(&thePerkDatabase, thePerkDatabase.GetPerk(perksAv[num].szCode));
+        const auto* perk=thePerkDatabase.GetPerk(perksAv[num].szCode);if(!perk)return;
+        pStats->AddPerk(&thePerkDatabase, perk);
         pStats->fSpentExp += perksAv[num].nPrice;
         pBackup->bModified = true;
         UpdatePerks();
+        if(native)pScreen->RefreshProgression();
         return;
     }
     if (ht >=
@@ -2473,13 +2491,18 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
     {
         num = nPosReal + ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS - RPG_NUM_ACTUAL_MANUAL_SKILLS -
               CAMP_NUM_AV_PERKS_VISIBLE;
-        if (num >= perksReal.size() || perksReal[num].nPrice > nCharPoints ||
-            perksReal[num].szNextCode.IsEmpty())
+        if (!ModProgression::Index(num,int(perksReal.size())) ||
+            !ModProgression::PerkPending(native,!perksReal[num].szNextCode.IsEmpty(),perksReal[num].nPrice,nCharPoints,pStats->fSpentExp))
             return;
-        pStats->AddPerk(&thePerkDatabase, thePerkDatabase.GetPerk(perksReal[num].szNextCode));
+        if(native && !ModProgression::Additional(*pStats,
+            [&](int field){return mod->ProgressionRequirementCode(perksReal[num].szNextCode,field);},
+            [&](const char* code){return thePerkDatabase.GetPerkIndex(code);})){pI3D->BeginFX("buttons\\MessBox\\Cancel.wav");return;}
+        const auto* perk=thePerkDatabase.GetPerk(perksReal[num].szNextCode);if(!perk)return;
+        pStats->AddPerk(&thePerkDatabase, perk);
         pStats->fSpentExp += perksReal[num].nPrice;
         pBackup->bModified = true;
         UpdatePerks();
+        if(native)pScreen->RefreshProgression();
         return;
     }
 }
@@ -2500,11 +2523,12 @@ void CI3DObjectPerks::OnIdle()
         return;
     int ht = nLock;
     int num;
+    if(!pScreen || !pScreen->GetCurrentPers() || !ModProgression::Index(nCurPers,int(backup.size())))return;
     SRPGUnitStats *pStats = &pScreen->GetCurrentPers()->stats;
     if (ht >= 4 && ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS)
     {
         num = ht - 4;
-        if (skillsAuto[num].nValue >= (ModRuntime::Current()?120:100) || skillsAuto[num].nPrice > nCharPoints)
+        if (skillsAuto[num].nValue >= (ModRuntime::Current()?ModRuntime::Current()->AutomaticSkillLimit(num):100) || skillsAuto[num].nPrice > nCharPoints)
         {
             pI3D->ReleaseCapture();
             nLock = -1;
@@ -2519,7 +2543,7 @@ void CI3DObjectPerks::OnIdle()
         ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS)
     {
         num = ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS;
-        if (skillsManual[num].nValue >= (ModRuntime::Current()?120:100) || skillsManual[num].nPrice > nCharPoints)
+        if (skillsManual[num].nValue >= 100 || skillsManual[num].nPrice > nCharPoints)
         {
             pI3D->ReleaseCapture();
             nLock = -1;
@@ -2563,25 +2587,18 @@ void CI3DObjectPerks::CheckRanges()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectPerks::CopySkillsAndPerks()
 {
-    if (nCurPers < 0)
+    if (!ModProgression::Index(nCurPers,int(backup.size())) ||
+        !ModProgression::Index(nCurPers,IWorldClient.GetParty().people.GetSize()))
         return;
     SPerksBackup *pBackup = &backup[nCurPers];
     SRPGUnitStats *pStats = &IWorldClient.GetParty().people[nCurPers].stats;
-    for (int i = 0; i < RPG_NUM_ACTUAL_AUTO_SKILLS; i++)
-        pBackup->cAutoSkillsCopy[i] = pStats->cAutoSkills[i];
-    for (int i = 0; i < RPG_NUM_ACTUAL_MANUAL_SKILLS; i++)
-        pBackup->cManualSkillsCopy[i] = pStats->cManualSkills[i];
-    for (int i = 0; i < RPG_NUM_PERKS; i++)
-        pBackup->cPerksCopy[i] = pStats->cPerks[i];
-    pBackup->fExperienceCopy = pStats->fpExperience;
-    pBackup->fExpPenaltyCopy = pStats->fExpPenalty;
-    pBackup->fSpentExpCopy = pStats->fSpentExp;
-    pBackup->bModified = false;
+    ModProgression::Copy(*pStats,*pBackup);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectPerks::RestoreSkillsAndPerks()
 {
-    if (nCurPers < 0)
+    if (!ModProgression::Index(nCurPers,int(backup.size())) ||
+        !ModProgression::Index(nCurPers,IWorldClient.GetParty().people.GetSize()))
         return;
     SPerksBackup *pBackup = &backup[nCurPers];
     SRPGUnitStats *pStats = &IWorldClient.GetParty().people[nCurPers].stats;
@@ -2589,16 +2606,7 @@ void CI3DObjectPerks::RestoreSkillsAndPerks()
     float fOldMaxHP = pStats->RecalcHP();
     float fOldCurHP = pStats->CollectHP(fOldMaxHP);
 
-    for (int i = 0; i < RPG_NUM_ACTUAL_AUTO_SKILLS; i++)
-        pStats->cAutoSkills[i] = pBackup->cAutoSkillsCopy[i];
-    for (int i = 0; i < RPG_NUM_ACTUAL_MANUAL_SKILLS; i++)
-        pStats->cManualSkills[i] = pBackup->cManualSkillsCopy[i];
-    for (int i = 0; i < RPG_NUM_PERKS; i++)
-        pStats->cPerks[i] = pBackup->cPerksCopy[i];
-    pStats->fpExperience = pBackup->fExperienceCopy;
-    pStats->fExpPenalty = pBackup->fExpPenaltyCopy;
-    pStats->fSpentExp = pBackup->fSpentExpCopy;
-    pBackup->bModified = false;
+    ModProgression::Restore(*pStats,*pBackup);
 
     float fNewMaxHP = pStats->RecalcHP();
     if ((fOldMaxHP > 1) && (fNewMaxHP > 1))
@@ -2982,7 +2990,27 @@ BOOL CI3DConstrSpell::Draw(CRenderer *pRend)
     for (int i = 0; i < pTableParty->allWagonItems.GetSize(); i++)
     {
         item.pItem = pTableParty->allWagonItems[i];
-        if (pScreen->IsItemSpell(item.pItem))
+        // Native37753-37829 output roles use the existing typed DrawItem owner.
+        if(ModAlchemy::PipelineEnabled())
+        {
+            if(pScreen->IsItemInstruction(item.pItem))
+            {
+                item.fX=350;item.fY=300;item.fZ=6;item.fPixSize=100;item.eFrom=ePartType;
+                pScreen->DrawItem(pRend,item);
+            }
+            else if(pScreen->IsItemMaterial(item.pItem))
+            {
+                item.fX=x*100+450.f;item.fY=y*100+150.f;item.fZ=6;item.fPixSize=100;item.eFrom=ePartType;
+                pScreen->DrawItem(pRend,item);
+                if(++y>3){y=0;x++;}
+            }
+            else if(pScreen->IsItemSpell(item.pItem))
+            {
+                item.fX=300;item.fY=176;item.fZ=6;item.fPixSize=200;item.eFrom=ePartType;
+                pScreen->DrawItem(pRend,item);
+            }
+        }
+        if (pScreen->IsItemSpell(item.pItem) || ModAlchemy::Scroll(item.pItem))
         {
             item.fX = 250;
             item.fY = 300;
@@ -3121,7 +3149,8 @@ CItem *CI3DConstrSpell::GetMouseItem(CPoint point, int &nSlotType)
     {
         nSlotType = IST_SPELL_READY;
         for (int i = 0; i < pTableParty->allWagonItems.GetSize(); i++)
-            if (pScreen->IsItemSpell(pTableParty->allWagonItems[i]))
+            if (pScreen->IsItemSpell(pTableParty->allWagonItems[i]) ||
+                ModAlchemy::Scroll(pTableParty->allWagonItems[i]))
                 return pTableParty->allWagonItems[i];
     }
     if (ht == 1)
@@ -3482,6 +3511,7 @@ void CI3DObjectInventoryFaces::OnLButtonDown(UINT nFlags, CPoint point)
 {
     CI3DObjectInventory::OnLButtonDown(nFlags, point);
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht == 8)
     {
         CPoint pt(point);

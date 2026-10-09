@@ -4,6 +4,7 @@
 #include "UnitServer.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
+#include "ModMobFlagArguments.h"
 #include "ModMessages.h"
 #include "ModRegisteredLoot.h"
 #include <cmath>
@@ -119,6 +120,10 @@ inline const Entry registry[]={
  {393,"PartyDisguiseMatches","Fs",true},
 };
 inline const Entry* Find(int id){for(const auto&e:registry)if(e.id==id)return &e;return nullptr;}
+// Native added command 372 owns the direct custom consumer, not recipient virtual dispatch.
+template<class Server> inline void InflictDamageExConsumer(Server* server,SRPGAttackPortion& portion){
+ server->ProcessCustomAttackPortion(&portion,nullptr,nullptr);
+}
 inline std::string Expand(const char*format,const SSCCmd&cmd){
  int counts[]={cmd.params.GetSize(),cmd.szParams.GetSize(),cmd.oParams.GetSize(),cmd.gParams.GetSize()};
  std::string result;char previous=0;
@@ -151,7 +156,7 @@ inline bool Float(SSCCmd&cmd,float&result){
  if(cmd.command==315){auto*p=theWorldServer.GetPlayer(CheckedInt(a));result=p?p->party.vars.GetVar(cmd.szParams[0]):0;return true;}
  if(cmd.command==373||cmd.command==375){auto*m=theWorld.GetMusicSystem();result=m?float(cmd.command==373?m->GetScriptNextPlayTime():m->GetScriptForced()):0;return true;}
  if(cmd.command==356){std::string name=cmd.szParams[0];std::replace(name.begin(),name.end(),'\\','/');if(name==".."||name.find("/../")!=std::string::npos||name.rfind("../",0)==0||(name.size()>=3&&name.substr(name.size()-3)=="/.."))throw std::runtime_error("MOB parent path forbidden");std::string path=ModRuntime::Current()->Directory()+"/"+name;auto attrs=GetFileAttributesA(path.c_str());result=attrs!=INVALID_FILE_ATTRIBUTES&&!(attrs&FILE_ATTRIBUTE_DIRECTORY)?1.f:0.f;return true;}
- if(cmd.command==358||cmd.command==368||cmd.command==369||cmd.command==370||cmd.command==362||cmd.command==367){auto*object=ObjectArg(cmd);DWORD flag=cmd.command==358?UNIT_ALREADY_MHOOVER:cmd.command==368?UNIT_FEEBLED:cmd.command==369?UNIT_STUN:UNIT_DONTMOVE;if(cmd.command==362)flag=DWORD(CheckedInt(a));if(cmd.command==367)flag=1u<<Index(a,32);result=object&&object->CheckFlag(flag)?1.f:0.f;return true;}
+ if(cmd.command==358||cmd.command==368||cmd.command==369||cmd.command==370||cmd.command==362||cmd.command==367){auto*object=ObjectArg(cmd);DWORD flag=cmd.command==358?UNIT_ALREADY_MHOOVER:cmd.command==368?UNIT_FEEBLED:cmd.command==369?UNIT_STUN:UNIT_DONTMOVE;if(cmd.command==362||cmd.command==367){std::uint32_t decoded;if(!(cmd.command==362?ModMobFlagArguments::Mask(a,decoded):ModMobFlagArguments::Bit(a,decoded))){result=0;return true;}flag=decoded;}result=object&&object->CheckFlag(flag)?1.f:0.f;return true;}
  if(cmd.command==393){result=ModRuntime::Current()->PartyDisguiseMatches(cmd.szParams[0])?1.f:0.f;return true;}
  if(cmd.command==386){result=JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0])?1.f:0.f;return true;}
  if(cmd.command==359){auto*s=ServerArg(cmd);auto*u=UnitArg(cmd);auto*mod=ModRuntime::Current();if(s&&u&&mod&&mod->CombatSetting("usePotionAcks")){s->InformFailure(ACK_HERO_ACK_USE_POTION);theWorld.ReceiveDamage(u->GetID(),0,HLDAMAGE_POTION);}result=0;return true;}
@@ -274,7 +279,7 @@ inline bool Action(SSCCmd&cmd){
  case 364:if(server)server->logic.StartCast(CheckedInt(cmd.params[2]),CPlot3D(a,cmd.params[1],theWorldServer.GetZValue(a,cmd.params[1])),false);break;
  case 365:if(server)server->logic.StartCast(CheckedInt(a),ObjectArg(cmd,1),false);break;
  case 371:if(auto*p=PlayerServer(0))p->LeaveToZone(cmd.szParams[0],0);break;
- case 372:if(server){SRPGAttackPortion portion;portion.Clear();portion.nSkill=0;portion.fpToHit=100;portion.fpAttacks[Index(cmd.params[1],RPG_NUM_ATTACK_TYPES)]=1;portion.hl=ERPGHitLocations(Index(cmd.params[2],RPG_NUM_HIT_LOCATIONS));portion.fBackStabMultiplier=cmd.params[3];portion.fpDamage=a;server->ProcessAttackPortion(&portion,nullptr,nullptr);}break;
+ case 372:if(server){SRPGAttackPortion portion;portion.Clear();portion.nSkill=0;portion.fpToHit=100;portion.fpAttacks[Index(cmd.params[1],RPG_NUM_ATTACK_TYPES)]=1;portion.hl=ERPGHitLocations(Index(cmd.params[2],RPG_NUM_HIT_LOCATIONS));portion.fBackStabMultiplier=cmd.params[3];portion.fpDamage=a;InflictDamageExConsumer(server,portion);}break;
  case 376:if(server)server->CmdSkill(ObjectArg(cmd,1),CheckedInt(cmd.params[1]),DWORD(CheckedInt(cmd.params[2])),a!=0,DWORD(CheckedInt(cmd.params[3])));break;
  case 388:if(!JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0]))throw std::runtime_error("RegisterLoot registration rejected");break;
  case 389:if(IWorldConnector.IsLMP())throw std::runtime_error("ShowMessage requires single player");if(const char*error=ModMessages::Show(cmd.szParams[0]))throw std::runtime_error(error);break;

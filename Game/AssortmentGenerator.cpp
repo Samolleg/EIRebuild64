@@ -1,6 +1,6 @@
 #include "StdAfx.h"
+#include "ModRetailShuffle.h"
 
-#include <random>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "AssortmentGenerator.h"
@@ -25,8 +25,6 @@ std::vector<const SSDBSpellPrototype *> selectedSpellPrototypes;
 std::vector<const SSDBModifier *> selectedSpellModifiers;
 std::vector<SMaterialAmount *> selectedMaterials;
 std::vector<SMaterialAmount> selectedMaterials2;
-std::random_device rd;
-std::mt19937 rng(rd());
 //
 class CMaterialMatchFunctional
 {
@@ -99,6 +97,12 @@ void CAssortmentGenerator::AddMaterial(const SIDBMaterial *pMaterial, int nMin, 
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+int CAssortmentGenerator::GetMaterialAmount(const SIDBMaterial *pMaterial) const
+{
+    if(!pMaterial)return 0;
+    auto iter=std::find_if(materials.begin(),materials.end(),CMaterialMatchFunctional(pMaterial));
+    return iter==materials.end()?0:iter->nMax; // bound native stock means maximum, not depleted amount
+}
 void CAssortmentGenerator::RemoveMaterial(const SIDBMaterial *pMaterial)
 {
     auto iter = std::remove_if(materials.begin(), materials.end(),
@@ -344,7 +348,7 @@ void CAssortmentGenerator::GenerateMaterials(int nAmount1, int nAmount2, std::li
     // select 'nAmount' shapes from the all shapes
     if (materials.size() > nAmount)
     {
-        std::shuffle(materials.begin(), materials.end(), rng);
+        ModRetailShuffle::Shuffle(materials.begin(), materials.end());
         selectedMaterials2.insert(selectedMaterials2.begin(), materials.begin(),
                                   materials.begin() + nAmount);
     }
@@ -571,7 +575,7 @@ void CAssortmentGenerator::GenerateItems(std::vector<const SIDBItemGeneralShape 
     selectedShapes.clear();
     if (shapes.size() > nAmount)
     {
-        std::shuffle(shapes.begin(), shapes.end(), rng);
+        ModRetailShuffle::Shuffle(shapes.begin(), shapes.end());
         selectedShapes.insert(selectedShapes.begin(), shapes.begin(), shapes.begin() + nAmount);
     }
     else
@@ -623,7 +627,7 @@ void CAssortmentGenerator::GenerateItems(std::vector<const SIDBItemGeneralShape 
             }
             else // select random material
             {
-                std::shuffle(selectedMaterials.begin(), selectedMaterials.end(), rng);
+                ModRetailShuffle::Shuffle(selectedMaterials.begin(), selectedMaterials.end());
                 pMaterialAmount = selectedMaterials[0];
             }
         }

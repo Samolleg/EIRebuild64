@@ -1,5 +1,6 @@
 // Direct source-derived elemental lifecycle. Keep original IDs for damage/FX.
-static bool ExtendedSpellEnabled(int kind){auto*mod=ModRuntime::Current();return mod&&mod->CombatSetting("JMVParticles")&&(kind>=SPELL_ID_FIREBALLDARK&&kind<=SPELL_ID_POISONFOGLIGHT);}
+#include "ModSpellPhase.h"
+static bool ExtendedSpellEnabled(int kind){auto*mod=ModRuntime::Current();return ModSpellPhase::Enabled(mod!=nullptr,mod&&mod->CombatSetting("JMVParticles"),kind);}
 bool CEffectSpell::ExtendedStart(int nKind){
  if(!ExtendedSpellEnabled(nKind))return false;
  float fpDist;
@@ -13,6 +14,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		}
 		switch (nKind)
 		{
+		case ModSpellIdentity::NativeTestArrow:
 		case SPELL_ID_FIREARROWDARK:
 		case SPELL_ID_FIREARROWLIGHT: {
 			if (pTarget.IsEmpty() || pTarget->WhoAmI() != HPC_UNIT)
@@ -46,6 +48,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 			CreateSound(FALSE, "magic\\Acidray\\start.wav", GetCP(), CPlot3D(0, 0, 0));
 			castPhase = CP_DELIVERY;
 			break; }
+		case ModSpellIdentity::NativeTestWall:
 		case SPELL_ID_FIREWALLDARK:
 		case SPELL_ID_FIREWALLLIGHT: {
 			ptTarg = ptTarget;
@@ -80,10 +83,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 				fpSpeed = 5;
 			nTimeLeft = Float2Int(fpDist / fpSpeed * 15.0f) - 2;
 			ptSpeed *= fpSpeed / 15.0f / fabs(ptSpeed);
-			if (nKind == SPELL_ID_FIREBALLDARK)
-				CreateParticles(TRUE, PTID_FIREBALLDARK, ptSrc, 0.3f * GetShowPower(), 1, ptSpeed); 
-			else
-				CreateParticles(TRUE, PTID_FIREBALLLIGHT, ptSrc, 0.3f * GetShowPower(), 1, ptSpeed); 
+			CreateParticles(TRUE, ModSpellPhase::StartParticle(nKind), ptSrc, 0.3f * GetShowPower(), 1, ptSpeed); 
 			if (!pWho.IsEmpty())
 				GetEffectParticle()->nStartID = pWho->GetID();
 			ptTarget.z = pWS->GetSurfaceValue(ptTarget.x, ptTarget.y) + 1;
@@ -143,10 +143,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		case SPELL_ID_COLUMN_ACIDDARK:
 		case SPELL_ID_COLUMN_ACIDLIGHT: {
 			SetCP(ptTarget);
-			if (nKind == SPELL_ID_COLUMN_ACIDDARK)
-				CreateParticles(FALSE, PTID_NUKEDARK, ptTarget, 1, 1, CPlot3D(0, 0, 0)); 
-			else
-				CreateParticles(FALSE, PTID_NUKELIGHT, ptTarget, 1, 1, CPlot3D(0, 0, 0)); 
+			CreateParticles(FALSE, ModSpellPhase::StartParticle(nKind), ptTarget, 1, 1, CPlot3D(0, 0, 0)); 
 			CreateSound(FALSE, "magic\\Acidcolumn\\start.wav", ptTarget, CPlot3D(0, 0, 0));
 			CreateLight(ptTarget, GetLightColor(), GetLightRadius(), GetLightSpeed());
 			nTimeLeft = 30;
@@ -178,10 +175,7 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		case SPELL_ID_POISONFOGLIGHT: {
 			ptTarg = ptTarget;
 			ptTarg.z = 1 + pWS->GetZValue(ptTarg.x, ptTarg.y);
-			if (nKind == SPELL_ID_POISONFOGDARK)
-				CreateParticles(TRUE, PTID_POISONFOGDARK, ptTarg, GetRadius(), GetShowPower(), CPlot3D(0, 0, 0)); 
-			else
-				CreateParticles(TRUE, PTID_POISONFOGLIGHT, ptTarg, GetRadius(), GetShowPower(), CPlot3D(0, 0, 0)); 
+			CreateParticles(TRUE, ModSpellPhase::StartParticle(nKind), ptTarg, GetRadius(), GetShowPower(), CPlot3D(0, 0, 0)); 
 			CreateSoundSeq(ptTarg, CPlot3D(0, 0, 0), "magic\\poison\\start.wav",
 				"magic\\poison\\circle.wav");
 			CreateLight(ptTarg, GetLightColor(), GetRadius() + GetLightRadius(), CPlot3D(0, 0, 0));
@@ -193,14 +187,15 @@ bool CEffectSpell::ExtendedStart(int nKind){
 
 
 		}
- // Native owner pairs admission with removal; source wrapper omitted admission.
- if(castPhase==CP_ACTION)AddRemoveDangerArea(nKind,TRUE);
+ // Registered native extended Start bypasses original danger admission for all IDs.
+ if(ModSpellOwner::AdmitExtendedDangerAfterStart(nKind,castPhase==CP_ACTION))AddRemoveDangerArea(nKind,TRUE);
  return true;
 }
 bool CEffectSpell::ExtendedDeliver(int nKind){
  if(!ExtendedSpellEnabled(nKind))return false;
 CPlot3D ptExplosion;
 switch(nKind){
+		case ModSpellIdentity::NativeTestArrow:
 		case SPELL_ID_FIREARROWDARK:
 		case SPELL_ID_FIREARROWLIGHT: {
 			if (pEffect)
@@ -298,146 +293,33 @@ switch(nKind){
  return true;
 }
 bool CEffectSpell::ExtendedAction(int nKind){
+ if(nKind==ModSpellIdentity::NativeTest){auto*mod=ModRuntime::Current();if(mod&&mod->CombatSetting("JMVParticles")){if(ModSpellOwner::ActionExpired(nTimeLeft))castPhase=CP_FINISH;return true;}}
  if(nKind==SPELL_ID_VAMP&&ModRuntime::Current()){if(nTimeLeft--<0)castPhase=CP_FINISH;return true;}
  if(!ExtendedSpellEnabled(nKind))return false;
-		switch (nKind) {
-		case SPELL_ID_FIREARROWDARK:
-		case SPELL_ID_FIREARROWLIGHT:
-		case SPELL_ID_ACIDRAYDARK:
-		case SPELL_ID_ACIDRAYLIGHT:
-			if (nTimeLeft-- < 0)
-				castPhase = CP_FINISH;
-			break;
-		case SPELL_ID_FIREWALLDARK:
-		case SPELL_ID_FIREWALLLIGHT: 
-		{
-			if (nTimeLeft >= 0)
-			{
-				if ((nTimeLeft & /*3*/7 /*"5<0 A?5;;044>=0 8 60<52N*/) == 0 && pEffect)
-				{
-					InflictWallDamage(GetEffectWall()->ptWallDirection);
-					SetFlag(DW_SPELL_HIDE_CASTER); 
-				}
-				nTimeLeft--;
-			}
-			else
-			{
-				if (nTimeLeft == -1)
-				{
-					CPlot3D ptTarg = GetCP();
-					if (pEffectSound)
-						ptTarg = pEffectSound->GetCP();
-					AddRemoveDangerArea(nKind, FALSE);
-					RemoveSoundEffect();
-					RemoveMainEffect();
-					CreateSound(FALSE, "magic\\Firewall\\end.wav", ptTarg, CPlot3D(0, 0, 0));
-					pEffectLight->SetSpeed(GetLightSpeed());
-				}
-				if (nTimeLeft < -80)
-					castPhase = CP_FINISH;
-				--nTimeLeft;
-			}
-			break;
-		}
-		case SPELL_ID_FIREBALLDARK:
-		case SPELL_ID_FIREBALLLIGHT: {
-			if (nTimeLeft-- < 0)
-				castPhase = CP_FINISH;
-			break;
-		}
-		case SPELL_ID_INVOKE_LGHTNGDARK:
-		case SPELL_ID_INVOKE_LGHTNGLIGHT: {
-			RemoveMainEffect();
-			if (nTimeLeft == 5)
-			{
-				CPlot3D ptSrc = GetCP();
-				ptSrc.z += 30;
-				int color = 2;
-				if(nKind == SPELL_ID_INVOKE_LGHTNGLIGHT)
-					color = 3;
-				CreateLightningWithColor(ptSrc, GetCP(), -7, color);
-			}
-			if (nTimeLeft-- < 0)
-				castPhase = CP_FINISH;
-			break;
-		}
-		case SPELL_ID_COLUMN_ACIDDARK:
-		case SPELL_ID_COLUMN_ACIDLIGHT: {
-			if (nTimeLeft-- < 0)
-				castPhase = CP_FINISH;
-			if (nTimeLeft == 15)
-				InflictDamageInRadius();
-			break;
-		}
-		case SPELL_ID_POISONFOGDARK:
-		case SPELL_ID_POISONFOGLIGHT: {
-			if (nTimeLeft >= 0)
-			{
-				if ((nTimeLeft & 3) == 0)
-				{
-					InflictDamageInRadius();
-					SetFlag(DW_SPELL_HIDE_CASTER); 
-				}
-				nTimeLeft--;
-			}
-			else
-			{
-				if (nTimeLeft == -1)
-				{
-					CreateSound(FALSE, "magic\\poison\\end.wav", ptTarget, CPlot3D(0, 0, 0));
-					pEffectLight->SetSpeed(GetLightSpeed());
-					AddRemoveDangerArea(nKind, FALSE);
-					RemoveSoundEffect();
-					RemoveMainEffect();
-				}
-				if (nTimeLeft < -80)
-					castPhase = CP_FINISH;
-				nTimeLeft--;
-			}
-			break;
-		}
-		case SPELL_ID_WALL_LGHTNGDARK:
-		case SPELL_ID_WALL_LGHTNGLIGHT: {
-			if (nTimeLeft >= 0)
-			{
-				if ((nTimeLeft & 3) == 0 && pEffect)
-				{
-					InflictWallDamage(GetEffectLightning()->ptDst - GetEffectLightning()->ptSrc);
-					SetFlag(DW_SPELL_HIDE_CASTER); 
-				}
-				nTimeLeft--;
-			}
-			else
-			{
-				if (nTimeLeft == -1)
-				{
-					pEffectLight->SetSpeed(GetLightSpeed());
-					AddRemoveDangerArea(nKind, FALSE);
-					RemoveSoundEffect();
-					RemoveMainEffect();
-				}
-				if (nTimeLeft < -80)
-					castPhase = CP_FINISH;
-				nTimeLeft--;
-			}
-			break;
-		}
-		case SPELL_ID_LIGHTNINGDARK:
-		case SPELL_ID_LIGHTNINGLIGHT: {
-			if (nTimeLeft == 0)
-			{
-				RemoveMainEffect();
-				RemoveSoundEffect();
-				pEffectLight->SetSpeed(GetLightSpeed());
-			}
-			if (nTimeLeft < -80)
-				castPhase = CP_FINISH;
-			nTimeLeft--;
-			break;
-
-		}
-
-		}
+ CPlot3D firewallSoundCP;
+ ModSpellPhase::Action(nKind,nTimeLeft,!pEffect.IsEmpty(),[&](ModSpellPhase::Event event){
+  switch(event){
+  case ModSpellPhase::Event::WallDamage:
+   if(ModSpellIdentity::Wall(nKind))InflictWallDamage(GetEffectWall()->ptWallDirection);
+   else InflictWallDamage(GetEffectLightning()->ptDst-GetEffectLightning()->ptSrc);
+   break;
+  case ModSpellPhase::Event::RadiusDamage:InflictDamageInRadius();break;
+  case ModSpellPhase::Event::HideCaster:SetFlag(DW_SPELL_HIDE_CASTER);break;
+  case ModSpellPhase::Event::CaptureFirewallSoundCP:
+   firewallSoundCP=GetCP();if(pEffectSound)firewallSoundCP=pEffectSound->GetCP();break;
+  case ModSpellPhase::Event::DangerRemove:AddRemoveDangerArea(nKind,FALSE);break;
+  case ModSpellPhase::Event::SoundRemove:RemoveSoundEffect();break;
+  case ModSpellPhase::Event::MainRemove:RemoveMainEffect();break;
+  case ModSpellPhase::Event::FirewallEndSound:CreateSound(FALSE,"magic\\Firewall\\end.wav",firewallSoundCP,CPlot3D(0,0,0));break;
+  case ModSpellPhase::Event::PoisonEndSound:CreateSound(FALSE,"magic\\poison\\end.wav",ptTarget,CPlot3D(0,0,0));break;
+  case ModSpellPhase::Event::LightFade:pEffectLight->SetSpeed(GetLightSpeed());break;
+  case ModSpellPhase::Event::InvokeStrike:{
+   CPlot3D ptSrc=GetCP();ptSrc.z+=30;int color=nKind==SPELL_ID_INVOKE_LGHTNGLIGHT?3:2;
+   CreateLightningWithColor(ptSrc,GetCP(),-7,color);break;
+  }
+  case ModSpellPhase::Event::Finish:castPhase=CP_FINISH;break;
+  }
+ });
  return true;
 }
 void CEffectSpell::CreateLightningWithColor(const CPlot3D&src,const CPlot3D&dst,float scale,int color){

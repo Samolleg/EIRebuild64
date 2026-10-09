@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "ModRuntime.h"
 #include "ModSpellRules.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -867,6 +868,7 @@ BOOL CPlayerClient::PrsWind()
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::PrsGSSetVar()
 {
+    GameJournal::Source journalSource("network");
     CString szName;
     float fpVal;
     pkt.Read(szName);
@@ -883,6 +885,7 @@ BOOL CPlayerClient::PrsGSSetVar()
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::PrsGSDelVar()
 {
+    GameJournal::Source journalSource("network");
     CString szName;
     pkt.Read(szName);
     pPlayer->party.vars.DelVar(szName);
@@ -1165,7 +1168,10 @@ static void WriteUnitArray(CPacket &wpkt, CArray<CUnit *, CUnit *> &units)
         CUnit *pUnit = units[i];
         ASSERT(pUnit);
         if (pUnit)
+        {
+            GameJournal::Event("CMD", "member", "id=%d prototype=%s player=%d", pUnit->GetID(), GameJournal::Quote(pUnit->GetPrototype() ? (const char*)pUnit->GetPrototype()->szName : "unknown").c_str(), pUnit->GetPlayerNum());
             wpkt.Write(pUnit->GetID());
+        }
         else
             wpkt.Write(-1);
     }
@@ -1173,6 +1179,7 @@ static void WriteUnitArray(CPacket &wpkt, CArray<CUnit *, CUnit *> &units)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::UnitCommandSwarm(CArray<CUnit *, CUnit *> &units, CPlot3D &ptTarget, BOOL bRun)
 {
+    GameJournal::Event("CMD", "swarm", "units=%d x=%g y=%g run=%d", units.GetSize(), ptTarget.x, ptTarget.y, bRun);
     wpkt.Write(PID_CMD_SWARM);
     WriteUnitArray(wpkt, units);
     wpkt.Write(bRun);
@@ -1182,6 +1189,7 @@ BOOL CPlayerClient::UnitCommandSwarm(CArray<CUnit *, CUnit *> &units, CPlot3D &p
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::UnitCommandMoveTo(CArray<CUnit *, CUnit *> &units, CPlot3D &ptTarget, BOOL bRun)
 {
+    GameJournal::Event("CMD", "move", "units=%d x=%g y=%g run=%d", units.GetSize(), ptTarget.x, ptTarget.y, bRun);
     wpkt.Write(PID_CMD_MOVETO);
     WriteUnitArray(wpkt, units);
     wpkt.Write(bRun);
@@ -1192,6 +1200,7 @@ BOOL CPlayerClient::UnitCommandMoveTo(CArray<CUnit *, CUnit *> &units, CPlot3D &
 BOOL CPlayerClient::UnitCommandAttack(CArray<CUnit *, CUnit *> &units, CMapObject *pTarget,
                                       ERPGHitLocations hl, BOOL bRun)
 {
+    GameJournal::Event("CMD", "attack", "units=%d target=%d location=%d run=%d", units.GetSize(), pTarget->GetID(), int(hl), bRun);
     wpkt.Write(PID_CMD_ATTACK);
     WriteUnitArray(wpkt, units);
     wpkt.Write(bRun);
@@ -1203,6 +1212,8 @@ BOOL CPlayerClient::UnitCommandAttack(CArray<CUnit *, CUnit *> &units, CMapObjec
 BOOL CPlayerClient::UnitCommandSkill(CArray<CUnit *, CUnit *> &units, CMapObject *pTarget,
                                      int nSkill, int nItemID, BOOL bRun)
 {
+    GameJournal::ObserveObject(pTarget, nSkill==RPGMSKL_LOOT?"take":nSkill==RPGMSKL_STEALING?"steal":"use");
+    GameJournal::Event("CMD", "skill", "units=%d target=%d skill=%d item=%d run=%d", units.GetSize(), pTarget->GetID(), nSkill, nItemID, bRun);
     wpkt.Write(PID_CMD_SKILL);
     WriteUnitArray(wpkt, units);
     wpkt.Write(bRun);
@@ -1227,6 +1238,7 @@ BOOL CPlayerClient::UnitCommandLoot(CArray<CUnit *, CUnit *> &units, CUnit *pTar
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::UnitCommandCast(int nQSpellNum, CUnit *pUnit, CMapObject *pTarget, BOOL bRun)
 {
+    GameJournal::Event("CMD", "cast_target", "id=%d target=%d spell_slot=%d run=%d", pUnit->GetID(), pTarget->GetID(), nQSpellNum, bRun);
     SNP_CMD_CAST_UNIT cast;
     cast.spellNum = nQSpellNum;
     cast.mapobjID = pUnit->GetID();
@@ -1240,6 +1252,7 @@ BOOL CPlayerClient::UnitCommandCast(int nQSpellNum, CUnit *pUnit, CMapObject *pT
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::UnitCommandCast(int nQSpellNum, CUnit *pUnit, CPlot3D &targetCoord, BOOL bRun)
 {
+    GameJournal::Event("CMD", "cast_point", "id=%d spell_slot=%d x=%g y=%g run=%d", pUnit->GetID(), nQSpellNum, targetCoord.x, targetCoord.y, bRun);
     SNP_CMD_CAST_POINT cast;
     cast.spellNum = nQSpellNum;
     cast.mapobjID = pUnit->GetID();

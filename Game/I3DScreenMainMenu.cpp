@@ -3,6 +3,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "GameMain.h"
@@ -216,6 +217,7 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
 {
     CI3DScreen *pVideoScr = NULL;
     int nHit = HitTest(point);
+    JournalHit(nHit);
     if (((nHit == MMBT_NEWGAME || nHit == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed()) ||
         (nHit == MMBT_MULTIPLAYER && !ModRuntime::MultiplayerAllowed()))
         return;
@@ -519,6 +521,7 @@ void CI3DLevelMessageBox::OnActivate()
 void CI3DLevelMessageBox::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     switch (ht)
     {
     case 0:

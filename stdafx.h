@@ -10,16 +10,19 @@
 #include <afxtempl.h> // CList, ...
 
 #include <mmsystem.h>
+#include "Game/GameJournal.h"
 
 #define IfFailedThrowHR(expr) \
     {                         \
         HRESULT hr = (expr);  \
+        if (hr == E_OUTOFMEMORY) GameJournal::AllocationFailure("HRESULT"); \
         if (FAILED(hr))       \
             throw hr;         \
     }
 #define IfFailedThrowHR(expr, msg) \
     {                              \
         HRESULT hr = (expr);       \
+        if (hr == E_OUTOFMEMORY) GameJournal::AllocationFailure("HRESULT"); \
         if (FAILED(hr))            \
             throw hr;              \
     }

@@ -1,6 +1,7 @@
 #pragma once
 #include "SpellSystem.h"
 #include "RPGSystem.h"
+#include "ModSpellIdentity.h"
 #include <algorithm>
 #include <cmath>
 
@@ -21,16 +22,17 @@ inline int ElementalBase(int id){
  default:return id;
  }
 }
-inline bool ExtendedElementalPortion(int id,float power,int duration,SRPGAttackPortion&ap){
+inline bool ExtendedElementalPortion(int id,float power,int duration,SRPGAttackPortion&ap,int magicSubtype=0){
  if(id<SPELL_ID_VAMP)return false;
  ap.Clear();ap.hl=RPGHL_ALL;ap.fpToHit=FLT_MAX;ap.fBackStabMultiplier=1;ap.bCalledShot=false;
  int attack=-1;
  switch(ElementalBase(id)){
- case SPELL_ID_TEST_2:case SPELL_ID_TEST_3:case SPELL_ID_FIREBALL:case SPELL_ID_FIREARROW:case SPELL_ID_FIREWALL:attack=RPGAT_TERMICAL;break;
+ case ModSpellIdentity::NativeTestArrow:case ModSpellIdentity::NativeTestWall:case SPELL_ID_FIREBALL:case SPELL_ID_FIREARROW:case SPELL_ID_FIREWALL:attack=RPGAT_TERMICAL;break;
  case SPELL_ID_LIGHTNING:case SPELL_ID_INVOKE_LGHTNG:case SPELL_ID_WALL_LGHTNG:attack=RPGAT_ELECTRICAL;break;
  case SPELL_ID_ACIDRAY:case SPELL_ID_COLUMN_ACID:case SPELL_ID_POISONFOG:attack=RPGAT_CHEMICAL;break;
  }
- if(attack>=0){ap.fpAttacks[attack]=1;ap.fpDamage=power;ap.bAreaEffect=FALSE;}
+ if(id==ModSpellIdentity::NativeTest)attack=3+magicSubtype;
+ if(attack>=0&&attack<int(RPG_NUM_ATTACK_TYPES)){ap.fpAttacks[attack]=1;ap.fpDamage=power;ap.bAreaEffect=id==ModSpellIdentity::NativeTest;}
  // Reference coPercent = 5 / 3 is integer division, hence exactly one.
  if(duration>1){ap.fpDamagePercentage=1;ap.fpDamage*=4.f/float(duration);}
  return true;

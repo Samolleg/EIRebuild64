@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "TLPipelineFPU.h"
+#include "Renderer.h"
 #include "Polygon.h"
 #include "dx11\RendererDX11.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2358,6 +2359,9 @@ void CTLPipelineFPU::CastProjectionToScreenC(SXYZW *plots, int nPlots)
 // add fog to all vertices
 void CTLPipelineFPU::AddFog(D3DTLVERTEX *vertices, int nSize)
 {
+    // World stock-distance fog now belongs to the shared pixel consumer.
+    // Keep the original vertex alpha that already contains border fog.
+    if(theRenderer.GetD3D() && theRenderer.GetD3D()->IsOwnedWorldActive())return;
     register float fpPrj43 = projection._43;
     register float fpPrj34 = projection._34;
     register float fpPrj33 = projection._33;

@@ -6,6 +6,7 @@
 #include "ChatServer.h"
 #include <map>
 /////////////////////////////////////////////////////////////////////////////////////
+class CWorldClient;
 const int MAX_NUM_WEAPONS = 4;
 const int MAX_NUM_ITEMS = 4;
 const int MAX_NUM_FACES = 5;
@@ -167,6 +168,7 @@ public:
     void CastSpell(CPlot3D plot, CUnit *pTarget = 0, bool bWand = false);
     void SetInputMode(int nMode, int nQSlot = -1, int nParam = -1);
     void GetInputMode(int &nMode, int &nQSlot);
+    bool GetAreaTargetPreview(CWorldClient& world,CPlot3D& center,float& radius) const;
     void CheckAction(CUnit *pU, CPoint point);
     void PerformAction(CUnit *pU, CPoint point);
     void GetUnitName(CUnit *pUnit, CString &szOut);
@@ -210,6 +212,7 @@ public:
 
     void AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName);
     void RemoveAllWeapons();
+    void FormToolTipW(int slot,CString& text);
     void ShowSelectWeapon(int num, BOOL bSelect);
 
     void ChangeWeapon(int nSlot);
@@ -323,6 +326,7 @@ public:
 
     void ChangeSpell(int nSlot);
     void SelfCast(int nSlot);
+    CSpell* GetAreaPreviewSpell(const CI3DScreenMission* owner,int slot) const;
 
     void SetUnit(CUnit *pNewUnit);
 
@@ -543,6 +547,10 @@ public:
 class CI3DObjectClock : public CI3DObject
 {
 private:
+    friend class CI3DScreenMission;
+    void AccelerateFromKeyboard();
+    void DecelerateFromKeyboard();
+    void SetSpeedMode(int mode);
     CI3DScreenMission *pScreen;
     float fIdleTime;
     float fAngleSeconds;

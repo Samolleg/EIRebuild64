@@ -88,6 +88,7 @@ private:
     bool DeconstructSpell();
     bool ConstructItem();
     bool DeconstructItem();
+    bool DeconstructItemIn(CParty* party,CItem*& result);
 
     void UpdatePersonage();
 
@@ -105,9 +106,12 @@ public:
     void GetMaxManaAndComplexity(ERPGMagicSubtypes subtype, int &nComplexity, int &nMana);
     void UpdateWeapons();
     void UpdateAttributes();
+    void RefreshProgression() override;
     void NextPersonage();
     void PrevPersonage();
     CUnit *GetUnit(int num) { return pUnits[num]; }
+    CUnit *GetCurrentUnit() { return nCurPers >= 0 && nCurPers < pUnits.GetSize() ? pUnits[nCurPers] : nullptr; }
+    CShop *GetCurrentShop() { return pShop; }
     CPersonage *GetCurrentPers();
 
     virtual void GenerateCheatAssortment();

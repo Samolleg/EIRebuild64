@@ -1,5 +1,6 @@
 #pragma once
 class ModTerrainShadow;
+float SectorBackgroundInverseDepth();
 /**********************************************************************
  *<
         FILE: Tarrain.H
@@ -11,6 +12,7 @@ class ModTerrainShadow;
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 #include "Base3D.h"
+#include "../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
 #include "Sector.h"
 #include "mapFormat.h"
 #include "SoundTypes.h"
@@ -239,6 +241,9 @@ private:
     CString szAllodDependentSndDir;
     //
     int nLongTile; // Number of long Tile 0 or 1 or 2 NOT GREAT!!!
+    std::vector<EIRenderTerrainSectorV5> rendererSectorRows;
+    std::vector<std::vector<uint32_t>> rendererSectorPhases;
+    uint64_t rendererRevision = 1; // render-only, not part of save/network state
 
 public:
     //
@@ -291,6 +296,8 @@ public:
 
     D3DCOLORVALUE &GetAmbient() { return dcvAmbient; }
     CLight *GetSunLight() { return pSunLight; }
+    void GetBackgroundSun(float &ca,float &cb,float &inverseDepth,int &stepsX,int &stepsY,bool &trace) const
+    { ca=fpCA;cb=fpCB;inverseDepth=SectorBackgroundInverseDepth();stepsX=nAddCellsX;stepsY=nAddCellsY;trace=(renderState&ETRS_TRACE_SHADOWS)!=0; }
     void UpdateLightsForSector(CSector *);
 
     // Level of detail - 0(max detail) .. 2(min detail)
@@ -331,6 +338,12 @@ public:
     CRect GetTileRect(int nTile);
     int GetShortTextureNumbers() const { return nTextures; }
     const CString &GetBaseName() const { return szBaseName; }
+    uint64_t GetRendererRevision() const {return rendererRevision;}
+    void ChangeRendererRevision() {if(++rendererRevision==0)++rendererRevision;}
+    HRESULT CopyRendererMember(const char* name,void* destination,uint32_t capacity,uint32_t* size);
+    HRESULT CopyRendererBaseVertices(uint32_t sector,float* rows,uint32_t count);
+    bool TryOwnedTerrain(CRenderer* renderer);
+    void ReleaseOwnedTerrain(CRenderer* renderer);
     // Segement processing
     virtual int Segment();
 

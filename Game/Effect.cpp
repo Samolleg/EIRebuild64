@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModSpellTextures.h"
+#include "ModSpellOwner.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 /*==========================================================================================================
@@ -1232,7 +1233,9 @@ BOOL CEffectArrow::DeliverWeaponAttack(CUnit*target,CUnit*attacker)
     if(target->GetOwner()&&target->GetOwner()->bGod>=2)return FALSE;
     CPlot3D delta=target->GetCP()-GetCP();
     if(sqr(delta.x)+sqr(delta.y)>=1)return FALSE;
-    return target->ProcessAttackPortion(&weaponAttack,attacker,attacker);
+    auto *server=dynamic_cast<CUnitServer*>(target->GetUnitSpecific());
+    return server?server->ProcessCustomAttackPortion(&weaponAttack,attacker,attacker):
+        target->ProcessAttackPortion(&weaponAttack,attacker,attacker);
 }
 int CEffectArrow::Segment()
 {
@@ -1962,16 +1965,18 @@ BOOL CEffectArrowFigure::CalcSpeed(){
  Explode(next);return FALSE;
 }
 void CEffectArrowFigure::Explode(const CPlot3D& point){
- auto*world=static_cast<CWorldServer*>(GetWorldBase());auto*attacker=world->GetUnit(nAttackerID);
+ auto*base=GetWorldBase();if(base!=&theWorldServer)return;
+ auto*world=static_cast<CWorldServer*>(base);auto*attacker=world->GetUnit(nAttackerID);
  CUnitList units;world->aiMap.GetUnitsNear(point,units,explosiveRadius);
  for(POSITION pos=units.GetHeadPosition();pos;){auto*target=units.GetNext(pos);
   if(!target||!target->CanBeDamagedByAreaSpell())continue;
   auto*server=dynamic_cast<CUnitServer*>(target->GetUnitSpecific());if(!server)continue;
-  SRPGAttackPortion portion=attackPortion;server->ProcessAttackPortion(&portion,attacker,attacker);
+  SRPGAttackPortion portion=attackPortion;server->ProcessCustomAttackPortion(&portion,attacker,attacker);
  }
+ // One local client request after all targets, including an empty target list.
+ ModSpellOwner::ExplosiveSound(world==&theWorldServer,theWorld.GetSoundManager(),
+  [&](CSoundManager*sound,const ModSpellOwner::SoundRequest&request){sound->BeginFX(request.resource,request.priority,point,request.nearDistance,request.farDistance,request.loop);});
  auto*manager=world->GetEffectManager();
  auto*particle=static_cast<CEffectParticle*>(manager->CreateData(ETypeIDs(HPC_EFFECTPARTICLE)));
  if(particle){particle->typeID=PTID_FIREBLAST;particle->SetCP(point);particle->fpScale=(std::max)(.5f,explosiveRadius/3);particle->fpPower=1;particle->SetSpeed(CPlot3D(0,0,0));world->AddEffect(particle);}
- auto*sound=static_cast<CEffectSound*>(manager->CreateData(ETypeIDs(HPC_EFFECTSOUND)));
- if(sound){sound->SetCP(point);sound->fpMinRadius=10;sound->fpMaxRadius=50;sound->bHighPriority=true;strcpy(sound->szSoundName,"magic\\fireball\\end.wav");sound->bLooping=FALSE;sound->SetSpeed(CPlot3D(0,0,0));world->AddEffect(sound);}
 }

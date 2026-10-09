@@ -1,4 +1,5 @@
 #pragma once
+#include "ModNativeCrtRandom.h"
 #include "ModStatRules.h"
 // Check2hAnimation, addon source 39454a3. Engine accessors adapted; no client casts.
 namespace ModAnimationRules {
@@ -73,7 +74,7 @@ inline const SADEntry *Check2hAnimation(CUnit *Unit, CString AnimName, DWORD &dw
 			if (AnimName.Left(3) == animDuals)
 				finalAnimName = "uattack04";
 			if (finalAnimName.Mid(3).Left(7) == "uattack" || finalAnimName.Left(7) == "uattack") {
-				int rand = random.Get(1);
+				int rand = ModNativeCrtRandom::Random(2);
 				if (rand)
 					finalAnimName = "2hauattack04";
 				else
@@ -85,7 +86,7 @@ inline const SADEntry *Check2hAnimation(CUnit *Unit, CString AnimName, DWORD &dw
 				finalAnimName = clearAnimName;
 			}
 				if (clearAnimName.Mid(3).Left(7) == "uattack") {
-					int rand = random.Get(1);
+					int rand = ModNativeCrtRandom::Random(2);
 					if (rand)
 						pEntry = Unit->GetAnimationEntry("2hauattack04");
 					else
@@ -138,7 +139,7 @@ inline const SADEntry *Check2hAnimation(CUnit *Unit, CString AnimName, DWORD &dw
 			if (AnimName.Left(3) == animDuals)
 				finalAnimName = "uattack04";
 			if (finalAnimName.Mid(3).Left(7) == "uattack" || finalAnimName.Left(7) == "uattack") {
-				int rand = random.Get(1);
+				int rand = ModNativeCrtRandom::Random(2);
 				if (rand)
 					finalAnimName = "2hsuattack04";
 				else
@@ -150,7 +151,7 @@ inline const SADEntry *Check2hAnimation(CUnit *Unit, CString AnimName, DWORD &dw
 				finalAnimName = clearAnimName;
 			}
 			if (clearAnimName.Mid(3).Left(7) == "uattack") {
-				int rand = random.Get(1);
+				int rand = ModNativeCrtRandom::Random(2);
 				if(rand)
 					pEntry = Unit->GetAnimationEntry("2hsuattack04");
 				else

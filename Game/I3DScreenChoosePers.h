@@ -9,6 +9,8 @@ class CI3DScreenChoosePers : public CI3DItemScreen
 {
 private:
     EItemScreenModes eScreenMode;
+    bool bPrimaryCreationActive;
+    int nPrimaryCreationWeight;
 
     int nCurrentParty;
 
@@ -54,6 +56,11 @@ private:
     void DeployUnit(bool bShowHelm = true);
     void MoveScrollToSelection();
     void Connect();
+    void BeginPrimaryCreation();
+    void EndPrimaryCreation();
+    bool GetCreationPrimaryValues(int values[3]);
+    bool HasCompletePrimaryDistribution();
+    bool CanProceedToStats();
     void CheckProceedToStats();
     void ReturnToSkinSelect();
     void RedrawVoiceList();
@@ -63,6 +70,9 @@ private:
 public:
     CI3DScreenChoosePers(CInterface3D *pI)
         : CI3DItemScreen(pI)
+        , bPrimaryCreationActive(false)
+        , nPrimaryCreationWeight(0)
+        , pNameStats(0)
     {
     }
     virtual void OnActivate();
@@ -70,8 +80,13 @@ public:
     virtual void OnExitFromModal(DWORD dwRetValue);
 
     void UpdateAttributes();
+    void RefreshProgression() override;
     CPersonage *GetCurrentPers();
     void SetPrototype(LPCTSTR pszPrototype);
+    bool GetCreationPrimaryPoints(int &points) override;
+    bool CanEditCreationPrimary() override;
+    bool CanAdjustCreationPrimary(int primary, int delta) override;
+    bool AdjustCreationPrimary(int primary, int delta) override;
     float GetItemsWeight();
 
     virtual bool CanClickOnItem(CItem *pItem, EItemScreenParts eFrom);

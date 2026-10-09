@@ -1,9 +1,23 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
+#include "ModNativeCrtRandom.h"
 #include "ScenarioTracker.h"
 #include "ModPackage.h"
+#include "ModNpcEquipment.h"
+#include "ModHitHistory.h"
+#include "ModCampStats.h"
+#include "GeneralSettings.h"
 #include "SocialStealthLua.h"
 #include "EngineDiagnostics.h"
 #include "ModCombat.h"
+#include "ModConditionalCombat.h"
+#include "ModCriticalLifecycle.h"
+#include "ModAlchemy.h"
+#include "dx11/RetailModalFade.h"
+#include "ModAttackTiming.h"
+#include "ModPreparedAttack.h"
+#include "TextureManager.h"
+#include "ModMobCommands.h"
 #include "ModAudioConfig.h"
 #include "BinkVideo.h"
 #include "ModRegisteredLoot.inl"
@@ -16,6 +30,16 @@
 #include "MapObjectServer.h"
 #include "MapObjectManager.h"
 #include "SpellManager.h"
+#include "SpellDatabase.h"
+#include "ModSpellTooltip.h"
+#include "ModCampSpellInfo.h"
+#include "ModItemInfo.h"
+#include "ModItemDetails.h"
+#include "ModConstructorLifetime.h"
+#include "ModPlayerNumbers.h"
+#include "SpellConstructor.h"
+#include "ItemDatabase.h"
+#include "ModDescriptionFont.h"
 #include "WorldServer.h"
 #include "WorldClient.h"
 #include "Player.h"
@@ -26,12 +50,15 @@
 #include "Party.h"
 #include "ItemManager.h"
 #include "ModLuaBridge.h"
+#include "ModInfoStatsCache.h"
 #include "ModRuntime.h"
 #include "RpgSystem.h"
 #include "PerkDatabase.h"
 #include <limits>
 #include <cmath>
 #include "FileRegistry.h"
+#include "aiSettings.h"
+#include "ItemDatabase.h"
 #include "CMappedResource.h"
 #include "mapFormat.h"
 #include "adFormat.h"
@@ -46,6 +73,9 @@ void ModDeathFearReset();
 #include "ModSpellTextures.inl"
 #include "ModTacticalSpells.h"
 #include "ModGroupSearch/Native.h"
+#include "ModConfiguration.h"
+#include "ModItemUiPolicy.h"
+#include "Console.h"
 #include "ModNpcMigration.inl"
 struct ModDelayedShot {SRPGAttackPortion ap;int target,start,due;const void*world;};
 namespace fs=std::filesystem;
@@ -77,13 +107,16 @@ bool WritePartyVisualOption(const wchar_t* name,bool enabled){
  RegCloseKey(key);
  return status==ERROR_SUCCESS;
 }
+int LuaInvalidateInfoStatsCache(lua_State* s){
+ static_cast<CModPackage*>(lua_touserdata(s,lua_upvalueindex(1)))->InvalidateInfoStatsCache();return 0;
+}
 struct Stack {lua_State *s;int n;Stack(lua_State *p):s(p),n(lua_gettop(p)){}~Stack(){lua_settop(s,n);}};
 Json Value(lua_State*s,int i){switch(lua_type(s,i)){case LUA_TNIL:return nullptr;case LUA_TBOOLEAN:return lua_toboolean(s,i)!=0;case LUA_TNUMBER:return lua_tonumber(s,i);case LUA_TSTRING:{size_t n;const char*p=lua_tolstring(s,i,&n);return std::string(p,n);}default:throw std::runtime_error("Non-scalar Lua lookup result");}}
 void Push(lua_State*s,const Json&v){if(v.is_null())lua_pushnil(s);else if(v.is_boolean())lua_pushboolean(s,v.get<bool>());else if(v.is_number())lua_pushnumber(s,v.get<double>());else if(v.is_string()){auto a=v.get<std::string>();lua_pushlstring(s,a.data(),a.size());}else throw std::runtime_error("Non-scalar lookup argument");}
 }
-CModPackage::CModPackage():initialization(std::make_unique<ModInitialization::Ledger>()),refreshQueue(std::make_unique<ModNpcRefreshQueue>()){}
-CModPackage::~CModPackage(){if(state)lua_close(state);}
-void CModPackage::Call(int args,int results){if(lua_pcall(state,args,results,0)){const char*p=lua_tostring(state,-1);throw std::runtime_error(p?p:"Lua package call failed");}}
+CModPackage::CModPackage():initialization(std::make_unique<ModInitialization::Ledger>()),refreshQueue(std::make_unique<ModNpcRefreshQueue>()),infoStats(std::make_unique<ModInfoStats::State>()){}
+CModPackage::~CModPackage(){perkHostLifetime.reset();if(state)lua_close(state);}
+void CModPackage::Call(int args,int results){GameJournal::Callback journalCallback;GameJournal::Source journalSource("Lua.mod");if(lua_pcall(state,args,results,0)){const char*p=lua_tostring(state,-1);GameJournal::Event("ERROR","lua","text=%s",GameJournal::Quote(p).c_str());throw std::runtime_error(p?p:"Lua package call failed");}}
 void CModPackage::Require(const char *name){lua_getglobal(state,"require");lua_pushstring(state,name);Call(1,1);}
 void CModPackage::Load(const std::string &directory){
  if(state)throw std::runtime_error("Package already loaded; create a fresh package for reload");
@@ -91,8 +124,26 @@ void CModPackage::Load(const std::string &directory){
  SpellTextures::Load(root);
  CFileRegistry config;if(!config.Open(Join(root,"config.reg").c_str()))throw std::runtime_error("Cannot open mod config.reg");
  saveInMod=config.GetInt("MOD","GameSaves",1)!=0;
+  forceTutorial=ModConfiguration::Bool(config,"MOD","ForceShowTutorial",false);
+  chatHtmlFile=(LPCSTR)config.GetString("Dev","ChatHtmlFile","");
+  combatSettings["PreventZone1Animation"]=int(ModConfiguration::Bool(config,"MOD","PreventZone1Animation",false));
  singlePlayerAllowed=config.GetInt("MOD","Single",1)!=0;
  multiplayerAllowed=config.GetInt("MOD","Multi",1)!=0;
+  CStringArray zoneLists[3];
+  customMpZones=config.GetStringArray("MPZone","Gipath",zoneLists[0]) &&
+                config.GetStringArray("MPZone","Ingos",zoneLists[1]) &&
+                config.GetStringArray("MPZone","Suslanger",zoneLists[2]);
+  if(customMpZones){
+   for(int a=0;a<3;++a){
+    for(int i=0;i<zoneLists[a].GetSize();++i)mpZones[a].push_back((LPCSTR)zoneLists[a][i]);
+    if(!mpZones[a].empty()&&mpZones[a].back().empty())mpZones[a].pop_back();
+   }
+   // Validate the complete arrays, including entries after an internal empty.
+   for(int a=0;a<3;++a)for(size_t i=0;i<mpZones[a].size();++i)
+    for(int b=a;b<3;++b)for(size_t j=b==a?i+1:0;j<mpZones[b].size();++j)
+     if(_stricmp(mpZones[a][i].c_str(),mpZones[b][j].c_str())==0)
+      throw std::runtime_error("Duplicate zone name found in file: "+Join(root,"config.reg"));
+  }
  CStringArray entries;config.GetEntries("RES",entries);
  for(int i=0;i<entries.GetSize();i++){
    std::string key=Lower((LPCSTR)entries[i]);CStringArray paths;config.GetStringArray("RES",entries[i],paths);
@@ -106,7 +157,7 @@ void CModPackage::Load(const std::string &directory){
  entries.RemoveAll();config.GetEntries("CAMERA",entries);
  for(int i=0;i<entries.GetSize();i++){CString path=config.GetString("CAMERA",entries[i],"");if(!path.IsEmpty())cameras[Lower((LPCSTR)entries[i])]=Join(root,(LPCSTR)path);}
  for(const auto &kv:cameras)if(!fs::is_regular_file(kv.second))throw std::runtime_error("Missing camera: "+kv.second);
- mainScript="main.lua";combatSettings["JMVGoCamp"]=1;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry r;if(!r.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon AI registry");combatSettings["JMVGoCamp"]=r.GetInt("Addon","JMVGoCamp",1);mainScript=(LPCSTR)r.GetString("Addon","LuaMainScriptPath","main.lua");}
+ mainScript="main.lua";combatSettings["JMVGoCamp"]=1;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry r;if(!r.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon AI registry");worldBackground=ModConfiguration::Bool(r,"Addon","JMVWorldBackground",true);combatSettings["JMVGoCamp"]=int(ModConfiguration::Bool(r,"Addon","JMVGoCamp",true));mainScript=(LPCSTR)r.GetString("Addon","LuaMainScriptPath","main.lua");}
  if(!fs::is_regular_file(Join(root,mainScript)))throw std::runtime_error("Missing main script");
  fs::path mapRoot=fs::path(root)/"Maps";
  if(fs::exists(mapRoot))for(const auto &entry:fs::recursive_directory_iterator(mapRoot))if(entry.is_regular_file())maps[Lower(fs::relative(entry.path(),mapRoot).string())]=entry.path().string();
@@ -119,12 +170,47 @@ void CModPackage::Load(const std::string &directory){
  Require("table_indexes");indexRef=luaL_ref(state,LUA_REGISTRYINDEX);
  Require("static_table_values");lua_getfield(state,-1,"new");lua_rawgeti(state,LUA_REGISTRYINDEX,indexRef);Call(1,1);lua_getfield(state,-1,"last");lookupRef=luaL_ref(state,LUA_REGISTRYINDEX);
 }
+bool CModPackage::MatchesMpZone(int allod,const char* terrain) const{
+ if(!customMpZones||allod<0||allod>=3)return false;
+ for(const auto& zone:mpZones[allod]){
+  if(zone.empty())break;
+  if(_stricmp(zone.c_str(),terrain)==0)return true;
+ }
+ return false;
+}
+bool CModPackage::ConfigureAddonSettings(CFileRegistry& settings){
+ ConfigureModAudio(settings,root);
+  settingsProfile.Read(settings);
+  EngineDiagnostics::Event("SETTINGS P06 charge=%u factor=%g maxima=%u,%u,%u,%u,%u",settingsProfile.charge,settingsProfile.factor,settingsProfile.skills[0],settingsProfile.skills[1],settingsProfile.skills[3],settingsProfile.skills[4],settingsProfile.skills[5]);
+ size_t count=0;const auto* rules=ModConfiguration::CombatRules(count);
+ for(size_t i=0;i<count;++i)combatSettings[rules[i].key]=ModConfiguration::Bool(settings,"Addon",rules[i].key,rules[i].fallback)?1:0;
+ combatSettings["JMVExpMult"]=int(settings.GetDWord("Addon","JMVExpMult",1));
+ registeredLoot=ModConfiguration::Bool(settings,"Addon","JMVRegisterLoot",false);
+ npcStatRefresh=ModConfiguration::Bool(settings,"Addon","JMVNpcStatRefresh",true);
+ npcDatabaseMigration=ModConfiguration::Bool(settings,"Addon","JMVNpcDatabaseMigration",true);
+ extendActiveObjectsArea=ModConfiguration::Bool(settings,"Addon","JMVExtendActiveObjectsArea",true);
+ briefingWeapons=ModConfiguration::Bool(settings,"Addon","JMVBriefingWeapons",true);
+ worldBackground=ModConfiguration::Bool(settings,"Addon","JMVWorldBackground",true);
+ partyVisualOptions=ModConfiguration::Bool(settings,"Addon","JMVPartyVisualOptions",true);
+ if(partyVisualOptions){hidePartyHelmets=ReadPartyVisualOption(hideHelmetsValue);hidePartyUpperArmor=ReadPartyVisualOption(hideUpperArmorValue);}
+ npcArmorCalculation=ModConfiguration::Bool(settings,"Addon","JMVNpcArmorCalculation",true);
+ npcTrickster=ModConfiguration::Bool(settings,"Addon","JMVNpcTrickster",true);
+ npcMaterialEffects=ModConfiguration::Bool(settings,"Addon","JMVNpcArmorMaterialEffects",true);
+ experienceLimit=ModConfiguration::Float(settings,"AddonExp","Limit",-1.0f);
+ magicRandomLimit=ModConfiguration::Float(settings,"Addon","MagicRandom",-1.0f);
+ return ModConfiguration::Bool(settings,"Addon","JMVSetItemsComplex",false);
+}
 void CModPackage::InitializeScript(){
  if(scriptInitialized)return;
  if(!state)throw std::runtime_error("Load package before initializing Lua script");
+ scalarManaBonus=false;
+ manaBonusCache.clear();
  Stack stack(state);
  ModLua::Register(state);
- {bool enabled=false;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry settings;if(!settings.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon settings");enabled=(settings.GetInt("Addon","JMVSetItemsComplex",0)!=0);ConfigureModAudio(settings,root);for(const char*key:{"useLS_DrawStats","useLS_ShowEnemyConsider","useLS_NewFont","JMVGraphics","JMVGraphics2","AllowMagicNegative","JMVParticles","NewRunes","JMVExpMult","ArchersDefence","DeagrPlayerOnLoose","DisableRunaway","DistanceModifier","WeightBonus","DisableCrippledHL","UsePrototypeActionsForMobAttack","LoadSpellAnimationFromSlotsField","JMVPowerHit","JMVDoubleShot","JMVPreciseShot","JMVExplosiveShot","JMVAttacks","JMVDaggerCritical","JMV136","JMVPerks","JMVWeaponBlocking","JMVAnatomyLimbDamage","JMVFixCriticalHitSoundTrigger","JMVRangedBackstab","JMVBackstabDefenderEquipment","JMVHealAfterHit","usePotionAcks","AttackAnimSpeed","UsePrototypeActionsForMobCast","RemoveSpellConstructReqs","improveInfoWindows","JMVItemInfoLineHeight","JMVRegenerationTooltip","JMVArmorMaterialStats","JMVShowCharacterModelInStats","JMVShopUpdate","JMVLoadVideos","JMVGenocidePlayerKillTracking","ShowAllQuests","FastTeleport","UnlockExperimentalSpells","JMVSteals"})combatSettings[key]=settings.GetInt("Addon",key,strcmp(key,"JMVExpMult")==0||strcmp(key,"JMVPowerHit")==0||strcmp(key,"JMVDoubleShot")==0||strcmp(key,"JMVPreciseShot")==0||strcmp(key,"JMVExplosiveShot")==0||strcmp(key,"JMVDaggerCritical")==0||strcmp(key,"JMVFixCriticalHitSoundTrigger")==0||strcmp(key,"JMVWeaponBlocking")==0||strcmp(key,"JMVAnatomyLimbDamage")==0||strcmp(key,"JMVRangedBackstab")==0||strcmp(key,"JMVBackstabDefenderEquipment")==0||strcmp(key,"usePotionAcks")==0||strcmp(key,"JMVShowCharacterModelInStats")==0||strcmp(key,"JMVItemInfoLineHeight")==0||strcmp(key,"JMVRegenerationTooltip")==0||strcmp(key,"JMVArmorMaterialStats")==0||strcmp(key,"JMVLoadVideos")==0?1:0);registeredLoot=settings.GetInt("Addon","JMVRegisterLoot",0)!=0;npcStatRefresh=settings.GetInt("Addon","JMVNpcStatRefresh",1)!=0;npcDatabaseMigration=settings.GetInt("Addon","JMVNpcDatabaseMigration",0)!=0;extendActiveObjectsArea=settings.GetInt("Addon","JMVExtendActiveObjectsArea",1)!=0;briefingWeapons=settings.GetInt("Addon","JMVBriefingWeapons",1)!=0;partyVisualOptions=settings.GetInt("Addon","JMVPartyVisualOptions",1)!=0;if(partyVisualOptions){hidePartyHelmets=ReadPartyVisualOption(hideHelmetsValue);hidePartyUpperArmor=ReadPartyVisualOption(hideUpperArmorValue);}npcArmorCalculation=settings.GetInt("Addon","JMVNpcArmorCalculation",1)!=0;npcTrickster=settings.GetInt("Addon","JMVNpcTrickster",1)!=0;npcMaterialEffects=settings.GetInt("Addon","JMVNpcArmorMaterialEffects",1)!=0;experienceLimit=settings.GetFloat("AddonExp","Limit",-1.0f);magicRandomLimit=settings.GetFloat("Addon","MagicRandom",-1.0f);}lua_pushboolean(state,enabled);lua_setglobal(state,"JMVSetItemsComplexEnabled");}
+ if(!perkHostLifetime)perkHostLifetime=std::make_shared<ModLua::PerkHostLifetime>();
+ ModLua::BindPerkDatabase(state,perkHostLifetime);
+ lua_pushlightuserdata(state,this);lua_pushcclosure(state,LuaInvalidateInfoStatsCache,1);lua_setglobal(state,"InvalidateInfoStatsCache");
+ {bool enabled=false;combatSettings["JMVFixConstructorShutdownRelease"]=1;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry settings;if(!settings.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon settings");enabled=ConfigureAddonSettings(settings);}lua_pushboolean(state,enabled);lua_setglobal(state,"JMVSetItemsComplexEnabled");ModConstructorLifetime::BindPolicy(CombatSetting("JMVFixConstructorShutdownRelease")!=0);}
  // Build the missing derived index from main.lua's own local rows, without modifying installed Lua.
  std::ifstream input(Join(root,mainScript),std::ios::binary);if(!input)throw std::runtime_error("Cannot read main script");
  std::string source((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
@@ -138,6 +224,13 @@ void CModPackage::InitializeScript(){
  Call(0,0);ModLua::InstallFactories(state);
   SocialStealth::LoadConfig(state,Join(root,"lua/social_stealth.lua"));
   disguiseProfiles.clear();
+  lua_getglobal(state,"GetManaBonusFromIntelligence");
+  scalarManaBonus=lua_isfunction(state,-1)!=0;
+  lua_pop(state,1);
+  lua_getglobal(state,"RegenerateHpAndMpJmvDue");
+  scheduledRegeneration=lua_isfunction(state,-1)!=0;
+  lua_pop(state,1);
+  infoStats->Initialize(state);
   scriptInitialized=true;
 }
 
@@ -166,6 +259,8 @@ double Number(lua_State*s,const char*name){
 int Price(lua_State*s,const char*name){double value=Number(s,name);if(value<std::numeric_limits<int>::lowest()||value>(std::numeric_limits<int>::max)()||floor(value)!=value)throw std::runtime_error(std::string(name)+": invalid integer price");return static_cast<int>(value);}
 }
 void CModPackage::BeginCallback(const char*name){
+    GameJournal::SetCallback(name);
+    GameJournal::Count("SCRIPT", "lua_callback", name);
  if(!scriptInitialized)throw std::runtime_error("Mod script has not been initialized");
  lua_getglobal(state,name);if(!lua_isfunction(state,-1))throw std::runtime_error(std::string("Missing mod callback: ")+name);
 }
@@ -174,16 +269,51 @@ float CModPackage::StatsNumber(const char*name,const SRPGUnitStats&stats){
  BeginCallback(name);ModLua::Push(state,&snapshot,frame.scope);Call(1,1);
  double value=Number(state,name);if(fabs(value)>(std::numeric_limits<float>::max)())throw std::runtime_error(std::string(name)+": float overflow");return static_cast<float>(value);
 }
+bool CModPackage::IsNpcManaCaster(CUnit*unit){
+ if(!unit||unit->IsHero())return false;
+ auto*server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());
+ if(!server||server->logic.GetUnitServer()!=server)return false;
+ // Native QI_MAX_SPELLS is eight; keep the NPC scan independent of physical storage.
+ for(DWORD slot=0;slot<QI_NPC_SPELLS;++slot){
+  CSpell*spell=unit->GetQSpell(slot);
+  if(!spell)continue;
+  const auto*prototype=spell->GetPrototype();
+  const char*name=prototype?(LPCSTR)prototype->szCodeName:nullptr;
+  std::string code=name?Lower(name):std::string();
+  const char*gate=code=="powerhit"||code=="test"?"JMVPowerHit":
+                   code=="doubleshot"?"JMVDoubleShot":
+                   code=="preciseshot"?"JMVPreciseShot":
+                   code=="explosiveshot"?"JMVExplosiveShot":nullptr;
+  // Named stamina config and whitelisted magic classification are separate branches.
+  ModSkills::Config stamina;
+  bool configured=false;
+  if(prototype&&(!gate||CombatSetting(gate))){
+   configured=SkillConfig(name,stamina);
+   if(!configured&&code=="test")configured=SkillConfig("powerhit",stamina);
+  }
+  if(configured&&stamina.allowNpc&&stamina.Cost(spell->GetManaCost())>0.f)return true;
+  if(spell->GetManaCost()<=0.f)continue;
+  ModSkills::Config attack;
+  ModTactical::Type type=SkillConfig(spell,attack)?ModTactical::Direct:ModTactical::SpellType(spell);
+  if(type>=ModTactical::Direct&&type<=ModTactical::Heal)return true;
+ }
+ return false;
+}
 bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*unit,bool hpOnly){
  if(!unit||!unit->GetUnitSpecific())throw std::runtime_error("Mod regeneration requires a native unit-specific component");
- if(common.ssHP.fpCurrent<=0)return false;
- // The same serialized counter and unsigned increment as RegenerationSchedule.h.
- unsigned next=static_cast<unsigned>(common.nRegenerateCounter)+1u;
- if(next>0&&next<15){common.nRegenerateCounter=static_cast<int>(next);JMV_NpcConsumablesUpdate(&common,unit);return false;}
+ if(scheduledRegeneration&&common.ssHP.fpCurrent<=0)return false;
+ ModGroupSearch::Update(); // native awareness producer, before the regen cadence gate
+ if(scheduledRegeneration){
+  // The same serialized counter and unsigned increment as RegenerationSchedule.h.
+  unsigned next=static_cast<unsigned>(common.nRegenerateCounter)+1u;
+  if(next>0&&next<15){common.nRegenerateCounter=static_cast<int>(next);JMV_NpcConsumablesUpdate(&common,unit);return false;}
+  common.nRegenerateCounter=0;
+ }
  SyncRuntimeState();const unsigned epoch=initialization->epoch;bool ready=initialization->Ready(*unit,common,stats);
  ModInitialization::Inputs inputs(common,stats,*unit);
+ if(IsNpcManaCaster(unit))hpOnly=false;
  CallbackFrame frame(state);SRPGCommonStats stagedCommon=common;SRPGUnitStats staged=stats;
- stagedCommon.nRegenerateCounter=0;frame.scope->unit=unit;frame.scope->stagedStats=&staged;
+ frame.scope->unit=unit;frame.scope->stagedStats=&staged;
  bool safe=false;
  if(theWorldServer.GetPlayerManager())if(auto*player=theWorldServer.GetPlayer(0)){
   if(player==unit->GetOwner()){
@@ -191,7 +321,7 @@ bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*un
    if(auto*server=dynamic_cast<CPlayerServer*>(specific))safe=server->dangerState!=WDS_COMBAT;
   }else if(auto*server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()))safe=!server->IsAggressive();
  }
- BeginCallback("RegenerateHpAndMpJmvDue");ModLua::Push(state,&stagedCommon,frame.scope);ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,unit,frame.scope);lua_pushboolean(state,hpOnly);lua_pushboolean(state,safe);Call(5,1);
+ BeginCallback(scheduledRegeneration?"RegenerateHpAndMpJmvDue":"RegenerateHpAndMpJmv");ModLua::Push(state,&stagedCommon,frame.scope);ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,unit,frame.scope);lua_pushboolean(state,hpOnly);lua_pushboolean(state,safe);Call(5,1);
  if(!lua_isboolean(state,-1))throw std::runtime_error("Regeneration callback must return boolean");
  bool changed=lua_toboolean(state,-1)!=0;
  if(!std::isfinite(stagedCommon.ssHP.fpCurrent)||!std::isfinite(stagedCommon.ssHP.fpMax)||!std::isfinite(stagedCommon.ssMP.fpCurrent)||!std::isfinite(stagedCommon.ssMP.fpMax))throw std::runtime_error("Invalid regenerated resource");
@@ -203,12 +333,17 @@ bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*un
  if(mpOnly){unit->SetUpdateMask(CMapObject::VLD_MASK_STATS);unit->SetUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);}
  return changed&&!mpOnly;
 }
-void CModPackage::ResetRuntimeState(){ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
+float CModPackage::MurderAwarenessValue(int property,float fallback){
+ CallbackFrame frame(state);BeginCallback("GetMurderAwarenessConfigValue");
+ lua_pushinteger(state,property);lua_pushnumber(state,fallback);Call(2,1);
+ return lua_isnumber(state,-1)?static_cast<float>(lua_tonumber(state,-1)):fallback;
+}
+void CModPackage::ResetRuntimeState(){InvalidateInfoStatsCache();ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();customCriticals.Clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
 void CModPackage::SyncRuntimeState(){
  const void*world=theWorldServer.GetSpecificManager();std::string zone;
  zone=(LPCSTR)theWorldServer.szMobFileName;
  int segment=theWorldServer.GetSegmentTimeCounter();
- if(world!=cacheWorld||zone!=cacheZone||(cacheSegment>=0&&segment<cacheSegment)){for(auto&i:delayedShots)ForgetAttack(i.second->ap);delayedShots.clear();skillCooldowns.Clear();JMV_RegisteredLootReset("world-epoch");npcArmorCache.clear();initialization->Reset();refreshQueue->Reset();}
+ if(world!=cacheWorld||zone!=cacheZone||(cacheSegment>=0&&segment<cacheSegment)){for(auto&i:delayedShots)ForgetAttack(i.second->ap);delayedShots.clear();skillCooldowns.Clear();JMV_RegisteredLootReset("world-epoch");npcArmorCache.clear();initialization->Reset();InvalidateInfoStatsCache();refreshQueue->Reset();}
  cacheWorld=world;cacheZone=zone;cacheSegment=segment;
 }
 namespace {
@@ -337,6 +472,28 @@ float CModPackage::GetModifiedHealth(SRPGUnitStats&stats,const CUnit&unit,float 
 }
 float CModPackage::CalcBaseHealth(const SRPGUnitStats&s){return StatsNumber("CalcBaseHealth",s);}
 float CModPackage::CalcBaseMana(const SRPGUnitStats&s){return StatsNumber("CalcBaseMana",s);}
+void CModPackage::RedistributeResources(SRPGUnitStats&stats,SRPGCommonStats&common,CUnit&unit){
+ CallbackFrame frame(state);SRPGUnitStats staged=stats;frame.scope->unit=&unit;frame.scope->stagedStats=&staged;
+ auto npcNumber=[&](const char*callback){BeginCallback(callback);ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,&unit,frame.scope);lua_pushstring(state,unit.GetPrototype()->szName);Call(3,1);double value=Number(state,callback);if(fabs(value)>(std::numeric_limits<float>::max)())throw std::runtime_error("NPC resource overflow");lua_pop(state,1);return float(value);};
+ int carried=0,capacity=0;float jewelry=0,overload=1;
+ auto resources=ModNpcEquipment::BaseResources(unit.GetOwner()!=nullptr,
+  [&]{return CalcBaseHealth(staged);},[&]{return CalcBaseMana(staged);},
+  [&]{return npcNumber("CalcBaseHealthJmv");},[&]{
+   for(int i=0;i<4;++i)if(auto*item=unit.GetQItem(i))jewelry+=InfoProperty("GetJewelryPropsInside",item->GetShapeEntry()->szName,12)*.01f;
+   capacity=ModNpcEquipment::Capacity(staged.GetMaxEncumbrance(),jewelry);carried=ModNpcEquipment::Truncate(unit.GetItemsWeight());
+   BeginCallback("OverloadManacostModsOnServer");lua_pushinteger(state,carried);lua_pushinteger(state,capacity);Call(2,1);overload=float(Number(state,"NPC overload mana"));lua_pop(state,1);
+   return ModNpcEquipment::Mana(npcNumber("CalcBaseManaJmv"),overload);
+  },[&](float health){return GetModifiedHealth(staged,unit,health);});
+ if(!std::isfinite(resources.hp)||!std::isfinite(resources.mp))throw std::runtime_error("Invalid redistributed resources");
+ frame.scope->CommitItems();stats=staged;common.ssHP.fpMax=resources.hp;common.ssMP.fpMax=resources.mp;
+ static unsigned notes=0;if(notes++<24)EngineDiagnostics::Event("P03 resources unit=%d hero=%d hp=%g mp=%g jewelry=%g weight=%d capacity=%d overload=%g",unit.GetID(),unit.GetOwner()!=nullptr,double(resources.hp),double(resources.mp),double(jewelry),carried,capacity,double(overload));
+}
+std::string CModPackage::GetQuickAdds(const char*prototype,int property){
+ CallbackFrame frame(state);BeginCallback("GetQuickAdds");lua_pushstring(state,prototype);lua_pushinteger(state,property);Call(2,1);
+ // Installed GetQuickAdds returns numeric zero when no extra item is configured.
+ if(lua_type(state,-1)==LUA_TNUMBER && lua_tonumber(state,-1)==0)return {};
+ const char*name=lua_tostring(state,-1);if(!name)throw std::runtime_error("GetQuickAdds requires a string-compatible result");return name;
+}
 int CModPackage::GetSkillPriceDiff(int from,int to){
  CallbackFrame frame(state);BeginCallback("GetSkillPriceDiff");lua_pushinteger(state,from);lua_pushinteger(state,to);Call(2,1);return Price(state,"GetSkillPriceDiff");
 }
@@ -534,9 +691,57 @@ Json CheckStartup(const std::string&directory){
 }
 float CModPackage::ExperienceMultiplier(const SRPGUnitStats&stats){return StatsNumber("GetExpMultiplierOnServer",stats);}
 float CModPackage::ExperienceMultiplier(const SRPGUserUnitStats&stats){CallbackFrame frame(state);BeginCallback("GetExpMultiplierOnClient");ModLua::Push(state,&stats,frame.scope);Call(1,1);double n=Number(state,"Client experience multiplier");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Experience multiplier overflow");return float(n);}
-float CModPackage::ManaBonus(const SRPGUnitStats&stats){return StatsNumber("GetManaBonusOnServer",stats);}
+float CModPackage::ScalarManaBonus(float intelligence){
+ CallbackFrame frame(state);
+ if(!scriptInitialized)throw std::runtime_error("Mod script has not been initialized");
+ const bool cacheable=std::isfinite(intelligence);
+ const std::string key(reinterpret_cast<const char*>(&intelligence),sizeof(intelligence));
+ if(cacheable){
+  auto it=manaBonusCache.find(key);
+  if(it!=manaBonusCache.end())return it->second;
+ }
+ BeginCallback("GetManaBonusFromIntelligence");
+ lua_pushnumber(state,intelligence);
+ Call(1,1);
+ double n=Number(state,"GetManaBonusFromIntelligence");
+ if(fabs(n)>(std::numeric_limits<float>::max)())
+  throw std::runtime_error("GetManaBonusFromIntelligence: float overflow");
+ const float value=static_cast<float>(n);
+ if(cacheable){
+  if(manaBonusCache.size()>=4096)manaBonusCache.clear();
+  manaBonusCache[key]=value;
+ }
+ return value;
+}
+float CModPackage::ManaBonus(const SRPGUnitStats&stats){if(scalarManaBonus)return ScalarManaBonus(stats.psIntelligence.fpEffectiveValue);return StatsNumber("GetManaBonusOnServer",stats);}
 float CModPackage::VampSpellValue(const char*prototype,int column){CallbackFrame frame(state);BeginCallback("GetVampSpellAdds");lua_pushstring(state,prototype);lua_pushinteger(state,column);Call(2,1);double n=Number(state,"Vamp spell property");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Vamp property overflow");return float(n);}
-float CModPackage::ManaBonus(const SRPGUserUnitStats&stats){CallbackFrame frame(state);BeginCallback("GetManaBonusOnClient");ModLua::Push(state,&stats,frame.scope);Call(1,1);double n=Number(state,"Client mana multiplier");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Mana multiplier overflow");return float(n);}
+ModSpellTooltip::Values CModPackage::SpellTooltip(const SRPGUserUnitStats &stats,
+    const CSpell &spell, float manaIntelligence, int difficulty)
+{
+ const float additional = InfoProperty("GetSpellAdds", spell.GetPrototype()->szCodeName, 2);
+ return ModSpellTooltip::Calculate(stats, spell, additional, manaIntelligence, difficulty);
+}
+
+void CModPackage::SpellTooltipOverrides(CUnit* server,ModSpellTooltip::Values& values,float& ticks)
+{
+ ModSettingsPolicy::Tooltip(server!=nullptr,CombatSetting("P100MCalcSpellManaCostTooltip")!=0,
+  CombatSetting("P100MCalcSpellEffectTooltip")!=0,CombatSetting("P100MCalcSpellDurationTooltip")!=0,
+  server?float(server->GetUserUnitStats()->cIntelligence):1.f,values.mana,values.effect,ticks,
+  [&](int field){const char*names[]={"CalcSpellManaCostTooltip","CalcSpellEffectTooltip","CalcSpellDurationTooltip"};
+   CallbackFrame frame(state);BeginCallback(names[field]);ModLua::Push(state,server->GetUserUnitStats(),frame.scope);
+   ModLua::Push(state,server,frame.scope);Call(2,1);return float(Number(state,names[field]));});
+}
+void CModPackage::LogChat(unsigned color,const char* nick,const char* text) const
+{
+ if(chatHtmlFile.empty())return;
+ if(GetFileAttributesA(chatHtmlFile.c_str())==INVALID_FILE_ATTRIBUTES){
+  FILE* file=nullptr;if(!fopen_s(&file,chatHtmlFile.c_str(),"a")&&file){
+   fputs("<html><head><title>Chat log</title><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1251\"><style type=\"text/css\"><!--body{background-color:#000000;color:#FFFFFF}.1{color:#0000FF}.2{color:#00FF00}.3{color:#00FFFF}.4{color:#FF0000}.5{color:#FF00FF}.6{color:#FFFF00}.7{color:#FFFFFF)}--></style></head>\n",file);fclose(file);}}
+ FILE* file=nullptr;if(!fopen_s(&file,chatHtmlFile.c_str(),"a")&&file){
+  const auto line=ModSettingsPolicy::Chat(color,nick,text);fputs(line.c_str(),file);fclose(file);}
+}
+
+float CModPackage::ManaBonus(const SRPGUserUnitStats&stats){if(scalarManaBonus)return ScalarManaBonus(static_cast<float>(stats.cIntelligence));CallbackFrame frame(state);BeginCallback("GetManaBonusOnClient");ModLua::Push(state,&stats,frame.scope);Call(1,1);double n=Number(state,"Client mana multiplier");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Mana multiplier overflow");return float(n);}
 float CModPackage::DistributeExperience(float experience,int players){
  if(!std::isfinite(experience)||players<=0)throw std::runtime_error("Invalid LMP experience input");
  CallbackFrame frame(state);BeginCallback("DistributeLmpExp");lua_pushnumber(state,experience);lua_pushinteger(state,players);Call(2,1);double n=Number(state,"LMP experience");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("LMP experience overflow");return float(n);
@@ -628,6 +833,22 @@ void CModPackage::SetPartyVisualOptions(bool helmets,bool upperArmor){
  WritePartyVisualOption(hideUpperArmorValue,upperArmor);
  ApplyPartyVisualOptions();
 }
+// Native camp aggregate (Patch.cpp GetMaxManaAndComplexity), separate from
+// individual spell casting and the mission/camp tooltip calculators.
+void CModPackage::CampSpellLimits(int shop,int subtype,const std::vector<ModCampSpellLimitInput>& party,int& complexity,int& mana){
+ int maxComplexity=0,maxMana=0;const int limit=ShopConstructLimit(shop);
+ for(const auto& person:party){
+  if(!person.partyStats)throw std::runtime_error("Camp spell limits require party stats");
+  const auto& stats=*person.partyStats;
+  const float skill=stats.GetBaseMagicSkill(ERPGMagicSubtypes(subtype))+stats.GetPerkModifier(RPGPRK_FIRE+subtype);
+  const int intelligence=person.displayedIntelligence-25;
+  const int candidate=int(skill+intelligence);
+  maxComplexity=(std::max)(maxComplexity,candidate);
+  maxMana=(std::max)(maxMana,int(CalcBaseMana(stats)));
+  maxComplexity=(std::max)(limit,maxComplexity);
+ }
+ complexity=maxComplexity;mana=maxMana;
+}
 int CModPackage::ShopConstructLimit(int shop){
  CallbackFrame frame(state);
  BeginCallback("GetShopConstructLimit");
@@ -673,13 +894,680 @@ nlohmann::json CModPackage::CheckEconomy(){
  }
  return {{"success",true},{"shopCoefficients",shopResults},{"scalarCases",scalarCases},{"shareCases",shareCases},{"shopModes",2},{"shopRollback",true},{"expiredShopArrayRejected",true},{"nativeExperiencePenalty",true},{"clientServerParity",true},{"gameplayActivated",false}};
 }
+namespace {
+Json CheckItemDetails(const std::string &directory){
+ // Presentation component only: installed DB/Lua, no world/window/save/audio device.
+ ModRuntime::Host host(directory);auto*package=ModRuntime::Current();std::string owner;
+ const std::string base=(fs::path(directory).parent_path().parent_path()/"Base/res/database.res").string();
+ package->ReadResource("database.res","items.idb",base,owner);
+ if(!theItemDatabase.Load("",owner.c_str()))throw std::runtime_error("Item details DB unavailable");
+ Json report={{"success",true},{"gameplayActivated",false},{"itemOwner",owner},{"weapons",Json::array()},
+  {"materials",Json::array()},{"armors",Json::array()},{"sets",Json::array()},{"flow",Json::array()}};
+ for(int level=0;level<4;++level){Json row={{"level",level}};for(const char*kind:{"Item","Wand","Staff"}){
+  std::string callback=std::string("Get")+kind+"RestBonusFromPerkFlow";float bonus=package->InfoPerkBonus(callback.c_str(),level);
+  row[kind]={{"bonus",bonus},{"regen",ModItemDetails::EnergyRegen(100,level,bonus)}};
+ }report["flow"].push_back(row);}
+ auto properties=[&](const char*callback,const char*name,int first,int last){Json row=Json::array();for(int p=first;p<=last;++p)row.push_back(package->InfoProperty(callback,name,p));return row;};
+ auto setInfo=[&](const char*name){int set=int(package->InfoProperty("GetSetItemStats",name,2));if(!set)return;
+  Json row={{"name",name},{"set",set},{"size",package->InfoComplexProperty(set,3)},{"counts",Json::array()}};
+  for(int count=0;count<=13;++count)row["counts"].push_back({{"count",count},{"item",package->InfoSetBonuses(name,count,set,false)},{"complex",package->InfoSetBonuses(name,count,set,true)}});
+  report["sets"].push_back(row);
+ };
+ for(int i=0;i<theItemDatabase.weapons.GetNumEntries();++i){auto*p=theItemDatabase.weapons[i];CItemWeapon item;item.Setup(p);
+  float chance=package->InfoProperty("GetWeaponPropsInside",p->szName,4),critical=package->InfoProperty("GetWeaponPropsInside",p->szName,5);
+  float dps=ModItemDetails::Dps(item.GetDamageMin(),item.GetDamageRandomRange(),p->dwActionPoints,chance,critical);
+  report["weapons"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},{"type",p->dwTypeID},{"minimum",item.GetDamageMin()},
+   {"random",item.GetDamageRandomRange()},{"actions",p->dwActionPoints},{"range",item.GetRange()},{"distribution",Json::array()},
+   {"dps",dps},{"dpsText",std::string((LPCSTR)ModItemDetails::DpsText(dps))},{"props",properties("GetWeaponPropsInside",p->szName,2,7)},{"unique",!p->bDeconstructable}});
+  for(float value:p->fpDamageDistributions)report["weapons"].back()["distribution"].push_back(value);setInfo(p->szName);
+ }
+ for(int i=0;i<theItemDatabase.armors.GetNumEntries();++i){auto*p=theItemDatabase.armors[i];report["armors"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},
+  {"props",properties("GetArmorPropsInside",p->szName,2,7)},{"unique",!p->bDeconstructable}});setInfo(p->szName);}
+ for(int i=0;i<theItemDatabase.quickItems.GetNumEntries();++i)setInfo(theItemDatabase.quickItems[i]->szName);
+ for(int i=0;i<theItemDatabase.materials.GetNumEntries();++i){auto*p=theItemDatabase.materials[i];report["materials"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},{"props",properties("GetMaterialPropsInside",p->szName,2,14)}});}
+ return report;
+}
+Json CheckItemInfo(const std::string &directory){
+ // Database/presentation component only, no window/world/save/audio device.
+ ModRuntime::Host host(directory);auto*package=ModRuntime::Current();std::string spellOwner,itemOwner;
+ const std::string base=(fs::path(directory).parent_path().parent_path()/"Base/res/database.res").string();
+ package->ReadResource("database.res","spells.sdb",base,spellOwner);
+ package->ReadResource("database.res","items.idb",base,itemOwner);
+ if(!theSpellDatabase.Load("",spellOwner.c_str())||!theItemDatabase.Load("",itemOwner.c_str()))throw std::runtime_error("Item-info databases unavailable");
+ Json report={{"success",true},{"gameplayActivated",false},{"spellOwner",spellOwner},{"itemOwner",itemOwner},
+  {"spells",Json::array()},{"materials",Json::array()},{"weapons",Json::array()},{"armors",Json::array()},{"quickItems",Json::array()},
+  {"compactRows",package->CombatSetting("JMVItemInfoLineHeight")}};
+ auto forbidden=[&](const char*name){Json rows=Json::array();for(int shop=0;shop<=12;++shop)rows.push_back(package->InfoForbiddenSpell(name,shop));return rows;};
+ auto absorption=[](const float*values){CString labels[RPG_NUM_ATTACK_TYPES-1];for(int i=0;i<RPG_NUM_ATTACK_TYPES-1;++i)labels[i].Format("d%d",i);
+  CStringArray rows;ModItemInfo::Absorptions(values,labels,rows,false);Json result=Json::array();for(int i=0;i<rows.GetSize();++i)result.push_back(std::string((LPCSTR)rows[i]));return result;};
+ for(int i=0;i<theSpellDatabase.spells.GetNumEntries();++i){auto*p=theSpellDatabase.spells[i];const float additional=package->InfoProperty("GetSpellAdds",p->szCodeName,2);
+  report["spells"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szCodeName)},{"mana",p->fpMana},{"effect",p->fpEffect},{"actions",p->dwActions},
+   {"area",p->fpArea},{"subtype",int(p->mstSubtype)},{"effectRune",p->bRuneAllowed[SDBAR_EFFECT]},
+   {"effectText",std::string((LPCSTR)ModItemInfo::PrototypeEffect(p->fpEffect,additional))},
+   {"potionText",std::string((LPCSTR)ModItemInfo::PotionEffect(p->fpEffect,additional,p->bRuneAllowed[SDBAR_EFFECT],"fixed"))},
+   {"castSeconds",ModItemInfo::PrototypeCast(p->dwActions)},{"radius",ModItemInfo::PrototypeRadius(p->fpArea)}});
+ }
+ for(int i=0;i<theItemDatabase.materials.GetNumEntries();++i){auto*p=theItemDatabase.materials[i];Json absorbs=Json::array();
+  for(float value:p->fpAbsorbtionMultipliers)absorbs.push_back(value);
+  report["materials"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},{"weight",p->fpWeight},{"mana",p->fpManaCapacity},
+   {"slots",p->dwSpellSlots},{"durability",p->fpDurability},{"damageModifier",p->fpDamageModifier},{"absorbs",absorbs},{"absorptionText",absorption(p->fpAbsorbtionMultipliers)}});
+ }
+ for(int i=0;i<theItemDatabase.weapons.GetNumEntries();++i){auto*p=theItemDatabase.weapons[i];const int weight=int(package->InfoProperty("GetWeaponPropsInside",p->szName,7));
+  const char*typeKey=ModItemInfo::WeaponTypeKey(p->dwTypeID);const char*weightKey=ModItemInfo::WeaponWeightKey(p->dwTypeID,weight);
+  report["weapons"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},{"type",p->dwTypeID},{"weightClass",weight},
+   {"typeKey",typeKey?typeKey:""},{"weightKey",weightKey?weightKey:"NOT SET"},{"forbidden",forbidden(p->szName)}});
+ }
+ for(int i=0;i<theItemDatabase.armors.GetNumEntries();++i){auto*p=theItemDatabase.armors[i];const char*weightKey=ModItemInfo::ArmorWeightKey(p->szName);
+  CItemArmor item;item.Setup(p);float main[RPG_NUM_ATTACK_TYPES];item.GetAbsorbtions(main,0);Json values=Json::array(),recipe=Json::array();
+  for(int n=0;n<RPG_NUM_ATTACK_TYPES;++n){values.push_back(main[n]);recipe.push_back(p->main.fpDistributions[n]*p->main.fpAbsorbtion*10);}
+  float recipeValues[RPG_NUM_ATTACK_TYPES];for(int n=0;n<RPG_NUM_ATTACK_TYPES;++n)recipeValues[n]=p->main.fpDistributions[n]*p->main.fpAbsorbtion*10;
+  report["armors"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},{"weightKey",weightKey?weightKey:std::string((LPCSTR)p->szName)},
+   {"main",values},{"recipe",recipe},{"armorText",absorption(main)},{"recipeText",absorption(recipeValues)},{"forbidden",forbidden(p->szName)}});
+ }
+ for(int i=0;i<theItemDatabase.quickItems.GetNumEntries();++i){auto*p=theItemDatabase.quickItems[i];report["quickItems"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szName)},{"weight",p->fpWeight},{"forbidden",forbidden(p->szName)}});}
+ return report;
+}
+Json CheckCampSpellInfo(const std::string &directory){
+ ModRuntime::Host host(directory);auto*package=ModRuntime::Current();
+ std::string spellOwner,perkOwner;
+ const std::string base=(fs::path(directory).parent_path().parent_path()/"Base/res/database.res").string();
+ package->ReadResource("database.res","spells.sdb",base,spellOwner);
+ package->ReadResource("database.res","perks.pdb",base,perkOwner);
+ if(!theSpellDatabase.Load("",spellOwner.c_str())||!thePerkDatabase.LoadDatabase("",perkOwner.c_str()))throw std::runtime_error("Camp info databases unavailable");
+ Json report={{"success",true},{"gameplayActivated",false},{"spellOwner",spellOwner},{"perkOwner",perkOwner},
+  {"profiles",Json::array()},{"spells",Json::array()},{"skills",Json::array()},{"fonts",Json::array()},
+  {"compactRows",package->CombatSetting("JMVItemInfoLineHeight")}};
+ const int intellect[]={25,60,80,80,80,80,80,10},actions[]={15,19,17,0,200,11,17,15};
+ const int wise[]={0,1,2,1,1,1,1,3},caster[]={0,1,1,0,1,0,1,0},difficulty[]={0,0,2,1,2,0,2,1};
+ SRPGUserUnitStats profiles[8]={};
+ for(int c=0;c<8;++c){auto&stats=profiles[c];stats.cIntelligence=BYTE(intellect[c]);stats.cAction=BYTE(actions[c]);
+  stats.cAutoSkills[RPGASKL_ELEMENTAL]=37;stats.cAutoSkills[RPGASKL_SENSE]=61;stats.cAutoSkills[RPGASKL_ASTRAL]=93;
+  stats.cPerks[31]=BYTE(wise[c]);stats.cPerks[21]=BYTE(caster[c]);
+  if(c)for(int perk=RPGPRK_FIRE;perk<=RPGPRK_DOMINATION;++perk)stats.cPerks[perk]=1;
+  stats.hls[0].state=RPGALS_ACTIVE;stats.hls[0].wHP=0;stats.hls[0].wMaxHP=0; // Camp never reads head HP.
+  Json perks=Json::array();for(int i=0;i<RPG_NUM_PERKS;++i){auto*p=stats.GetPerk(i);perks.push_back({{"index",i},{"level",stats.cPerks[i]},{"modifier",p?p->dwModifier:0},{"exclusive",p?p->nPerkExclusive:-1}});}
+  report["profiles"].push_back({{"intelligence",intellect[c]},{"action",actions[c]},{"wise",wise[c]},
+   {"difficulty",difficulty[c]},{"ctrl",c==6},{"skills",{37,61,93}},{"perks",perks}});
+ }
+ for(int i=0;i<theSpellDatabase.spells.GetNumEntries();++i){auto*p=theSpellDatabase.spells[i];
+  CSpell spell;spell.SetSubtypeID(DWORD(i)<<16);if(!spell.Setup(p))throw std::runtime_error("Camp spell setup failed");
+  ModSkills::Config skill;
+  if(package->SkillConfig(&spell,skill)){report["skills"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szCodeName)},
+   {"cost",skill.Cost(spell.GetManaCost())},{"requirement",skill.Requirement(float(spell.GetComplexity()))},
+   {"archery",skill.requiredArchery>=0},{"damagePercent",skill.damageMultiplier*100.f},{"accuracy",skill.accuracyBonus},
+   {"radius",skill.areaRadius},{"cooldown",skill.cooldownSeconds}});continue;}
+  const float addition=package->InfoProperty("GetSpellAdds",p->szCodeName,2);Json values=Json::array(),forbidden=Json::array();
+  for(int c=0;c<8;++c){auto v=ModCampSpellInfo::Calculate(profiles[c],spell,addition,difficulty[c],c==6);Json extras=Json::array();
+   for(const auto&row:ModCampSpellInfo::Extras(spell,v))extras.push_back({{"label",row.label},{"value",std::string((LPCSTR)row.value)},{"perSecond",row.perSecond}});
+   values.push_back({{"manaBonus",v.manaBonus},{"basePower",v.basePower},{"powerBonus",v.powerBonus},{"castBonus",v.castBonus},
+    {"manaText",std::string((LPCSTR)ModCampSpellInfo::Mana(spell,v))},{"effectText",std::string((LPCSTR)ModCampSpellInfo::Effect(v))},
+    {"castText",std::string((LPCSTR)ModCampSpellInfo::Cast(spell,v))},{"extras",extras}});
+  }
+  for(int shop=0;shop<=12;++shop)forbidden.push_back(package->InfoForbiddenSpell(p->szCodeName,shop));
+  report["spells"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szCodeName)},{"subtype",int(spell.GetMagicSubtype())},
+   {"mana",spell.GetManaCost()},{"power",spell.GetPower()},{"actions",spell.GetActionPoints()},{"duration",spell.GetDuration()},
+   {"prototypeDuration",p->dwDuration},{"range",spell.GetRange()},{"radius",spell.GetRadius()},
+   {"values",values},{"forbidden",forbidden}});
+ }
+ for(int height:{600,1080,2160})for(int sign:{-1,1}){LOGFONTA originalData{};originalData.lfHeight=sign*(15*height/600);
+  strcpy_s(originalData.lfFaceName,"Arial");CFont original;if(!original.CreateFontIndirect(&originalData))throw std::runtime_error("GDI component font creation failed");
+  CFont*slot=&original;LOGFONTA during{};bool changed=false;
+  {ModDescriptionFont smaller(&slot,height);changed=slot!=&original;GetObjectA(slot->GetSafeHandle(),sizeof(during),&during);}
+  report["fonts"].push_back({{"screenHeight",height},{"before",originalData.lfHeight},{"after",during.lfHeight},
+   {"changed",changed},{"restored",slot==&original},{"originalAlive",GetObjectType(original.GetSafeHandle())==OBJ_FONT}});
+ }
+ return report;
+}
+Json CheckSpellTooltips(const std::string &directory){
+ // Component calculation only: no map, world tick, window, audio device or saved game.
+ ModRuntime::Host host(directory);auto*package=ModRuntime::Current();
+ std::string spellOwner,perkOwner;
+ const std::string base=(fs::path(directory).parent_path().parent_path()/"Base/res/database.res").string();
+ package->ReadResource("database.res","spells.sdb",base,spellOwner);
+ package->ReadResource("database.res","perks.pdb",base,perkOwner);
+ if(!theSpellDatabase.Load("",spellOwner.c_str()) || !thePerkDatabase.LoadDatabase("",perkOwner.c_str()))
+  throw std::runtime_error("Spell tooltip component databases unavailable");
+ Json report={{"success",true},{"gameplayActivated",false},{"spellOwner",spellOwner},
+  {"perkOwner",perkOwner},{"profiles",Json::array()},{"spells",Json::array()},{"excludedSkills",Json::array()}};
+ const int intellect[]={25,60,80,80,80,80,80,80},manaInt[]={25,60,80,80,80,99,80,80};
+ const int actions[]={15,19,17,0,200,11,17,17},wise[]={0,1,2,1,1,1,1,1};
+ const int caster[]={0,1,1,0,1,0,1,1},difficulty[]={0,0,2,1,2,0,2,1};
+ const int headHp[]={100,50,0,100,100,25,100,0};
+ SRPGUserUnitStats profiles[8]={};
+ for(int c=0;c<8;++c){
+  auto&stats=profiles[c];stats.cIntelligence=BYTE(intellect[c]);stats.cAction=BYTE(actions[c]);
+  stats.cAutoSkills[RPGASKL_ELEMENTAL]=37;stats.cAutoSkills[RPGASKL_SENSE]=61;stats.cAutoSkills[RPGASKL_ASTRAL]=93;
+  stats.cPerks[31]=BYTE(wise[c]);stats.cPerks[21]=BYTE(caster[c]);
+  if(c)for(int perk=RPGPRK_FIRE;perk<=RPGPRK_DOMINATION;++perk)stats.cPerks[perk]=1;
+  stats.hls[0].state=(c==0||c==5)?RPGALS_NOTUSED:RPGALS_ACTIVE;
+  stats.hls[0].wHP=WORD(headHp[c]);stats.hls[0].wMaxHP=100;
+  Json perks=Json::array();for(int i=0;i<RPG_NUM_PERKS;++i){auto*p=stats.GetPerk(i);perks.push_back({{"index",i},{"level",stats.cPerks[i]},{"modifier",p?p->dwModifier:0},{"exclusive",p?p->nPerkExclusive:-1}});}
+  report["profiles"].push_back({{"intelligence",intellect[c]},{"manaIntelligence",manaInt[c]},
+   {"action",actions[c]},{"wise",wise[c]},{"difficulty",difficulty[c]},
+   {"headUsed",c!=0&&c!=5},{"headHp",headHp[c]},{"headMaxHp",100},
+   {"skills",{37,61,93}},{"perks",perks}});
+ }
+ for(int i=0;i<theSpellDatabase.spells.GetNumEntries();++i){
+  auto*p=theSpellDatabase.spells[i];ModSkills::Config skill;
+  if(package->SkillConfig(p->szCodeName,skill)){report["excludedSkills"].push_back(std::string((LPCSTR)p->szCodeName));continue;}
+  CSpell spell;spell.SetSubtypeID(DWORD(i)<<16);if(!spell.Setup(p))throw std::runtime_error("Spell setup failed");
+  Json values=Json::array();
+  for(int c=0;c<8;++c){auto v=package->SpellTooltip(profiles[c],spell,float(manaInt[c]),difficulty[c]);
+   values.push_back({{"mana",v.mana},{"effect",v.effect},{"castSeconds",v.castSeconds}});}
+  report["spells"].push_back({{"id",i},{"name",std::string((LPCSTR)p->szCodeName)},
+   {"subtype",int(spell.GetMagicSubtype())},{"mana",spell.GetManaCost()},
+   {"power",spell.GetPower()},{"actions",spell.GetActionPoints()},{"projectileSpeed",spell.GetSpeed()},
+   {"effectRune",p->bRuneAllowed[SDBAR_EFFECT]},{"values",values}});
+ }
+ return report;
+}
+Json CheckUIRange(const std::string& directory){
+ ModRuntime::Host host(directory);
+ auto* package=ModRuntime::Resources();
+ const std::string path=package->ResolveConfig("ai.reg", "config\\ai.reg");
+ CAIGeneralSettings settings;settings.ReadFromFile(path.c_str());
+ Json report={{"success",true},{"aiRegistry",path},{"settings",Json::object()}};
+ report["settings"]["Logic/GuardStayTime"]=settings.fpGuardStayTime;
+ report["settings"]["Logic/SentryStayTime"]=settings.fpSentryStayTime;
+ report["settings"]["Logic/FollowMinDist"]=settings.fpFollowMinDist;
+ report["settings"]["Logic/FollowMaxDist"]=settings.fpFollowMaxDist;
+ report["settings"]["Logic/GuardRadius"]=settings.fpGuardRadius;
+ report["settings"]["Logic/CallForHelpRadius"]=settings.fpCallForHelpRadius;
+ report["settings"]["Logic/CallForHelpRadiusDefault"]=settings.fpCallForHelpRadiusDefault;
+ report["settings"]["Logic/FollowLimit"]=settings.fpFollowLimit;
+ report["settings"]["Logic/PlayerCallForHelp"]=settings.fpPlayerCallForHelp;
+ report["settings"]["Logic/RangedRunDist"]=settings.fpRangedRunDist;
+ report["settings"]["Logic/RangedAttackDist"]=settings.fpRangedAttackDist;
+ report["settings"]["Logic/SwarmRadius"]=settings.fpSwarmRadius;
+ report["settings"]["RPG/HumanCrossAnimationSpeed"]=settings.fpHumanCrossAnimationSpeed;
+ report["settings"]["RPG/BackstabAdd"]=settings.fpBackstabAdd;
+ report["settings"]["RPG/BackstabMult"]=settings.fpBackstabMult;
+ report["settings"]["RPG/RotateSpeedMult"]=settings.fpRotateSpeedMult;
+ report["settings"]["RPG/DamageLevel1"]=settings.fDamageLevel1;
+ report["settings"]["RPG/DamageLevel1Value"]=settings.fDamageLevel1Value;
+ report["settings"]["RPG/DamageLevel2"]=settings.fDamageLevel2;
+ report["settings"]["RPG/DamageLevel2Value"]=settings.fDamageLevel2Value;
+ report["settings"]["RPG/DamageLevelRunLimit"]=settings.fDamageLevelRunLimit;
+ report["settings"]["RPG/Int1ExpBonus"]=settings.fInt1ExpBonus;
+ report["settings"]["RPG/HP Val 1"]=settings.fHPVal1;
+ report["settings"]["RPG/HP Val 2"]=settings.fHPVal2;
+ report["settings"]["RPG/HP Val 3"]=settings.fHPVal3;
+ report["settings"]["RPG/HP Val 4"]=settings.fHPVal4;
+ report["settings"]["RPG/HP Val 5"]=settings.fHPVal5;
+ report["settings"]["RPG/MP Val 1"]=settings.fMPVal1;
+ report["settings"]["RPG/MP Val 2"]=settings.fMPVal2;
+ report["settings"]["RPG/MP Val 3"]=settings.fMPVal3;
+ report["settings"]["RPG/MP Val 4"]=settings.fMPVal4;
+ report["settings"]["RPG/MP Val 5"]=settings.fMPVal5;
+ report["settings"]["RPG/Skill Val 1"]=settings.fSkillVal1;
+ report["settings"]["RPG/Skill Val 2"]=settings.fSkillVal2;
+ report["settings"]["RPG/Perk Power Base"]=settings.fPerkPowerBase;
+ report["settings"]["RPG/Consider Modifier"]=settings.fConsiderModifier;
+ report["settings"]["RPG/Consider Log Base"]=settings.fConsiderLogBase;
+ report["settings"]["RPG/Item Durability Critical"]=settings.fItemDurabilityCritical;
+ report["settings"]["Scenario/QuestsToRespawn"]=settings.nQuestsToRespawn;
+ report["settings"]["LMP/Lost Money"]=settings.fpLMPLostMoney;
+ report["settings"]["LMP/Lost XP"]=settings.fpLMPLostXP;
+ report["settings"]["DifficultyLevels/Absorption"]={settings.fAbsorptionLevels[0],settings.fAbsorptionLevels[1],settings.fAbsorptionLevels[2]};
+ report["settings"]["DifficultyLevels/Attack"]={settings.fAttackLevels[0],settings.fAttackLevels[1],settings.fAttackLevels[2]};
+ report["settings"]["DifficultyLevels/Defence"]={settings.fDefenceLevels[0],settings.fDefenceLevels[1],settings.fDefenceLevels[2]};
+ const fs::path game=fs::path(directory).parent_path().parent_path();
+ const std::string resources=(game/"Base"/"Res").string()+"\\";
+ if(!theItemDatabase.Load(resources.c_str(),"database.res"))
+  throw std::runtime_error("Cannot load installed weapon database");
+ std::string owner;package->ReadResource("database.res","items.idb",resources+"database.res",owner);
+ report["itemsOwner"]=owner;report["weapons"]=Json::array();
+ for(int i=0;i<theItemDatabase.weapons.GetNumEntries();++i){
+  const auto* shape=theItemDatabase.weapons[i];
+  CItemWeapon item;item.Setup(shape);
+  if(item.GetRange()!=shape->fpRange || !std::isfinite(item.GetRange()))
+   throw std::runtime_error("Weapon range differs after native Setup");
+  report["weapons"].push_back({{"name",std::string((LPCSTR)shape->szName)},
+   {"type",shape->dwTypeID},{"range",item.GetRange()},{"actions",shape->dwActionPoints}});
+ }
+ report["gameplayActivated"]=false;return report;
+}
+
+Json CheckConstructorLifetime(const std::string& directory)
+{
+ ModRuntime::Host host(directory);auto* package=ModRuntime::Current();
+ Json report={{"success",true},{"gameplayActivated",false},{"guardEnabled",package->CombatSetting("JMVFixConstructorShutdownRelease")!=0},{"cases",Json::array()}};
+ struct Probe {
+  const void* vtable;int references;int* decrements;int* deletes;int* deletedReferences;
+  int DecRefCount(){++*decrements;return --references;}
+  ~Probe(){++*deletes;*deletedReferences=references;}
+ };
+ for(int site=0;site<2;++site)for(bool guarded:{false,true})for(bool table:{false,true}){
+  int decrements=0,deletes=0,deletedReferences=-9,skips=0,skippedReferences=-9;
+  auto* object=new Probe{table?reinterpret_cast<const void*>(1):nullptr,1,&decrements,&deletes,&deletedReferences};
+  auto* retained=object;
+  bool released=ModConstructorLifetime::Release(object,guarded,[&](const void* value,const void* vtable){
+   if(value!=retained||vtable!=nullptr)throw std::runtime_error("Wrong shutdown observer input");
+   ++skips;skippedReferences=retained->references;
+  });
+  bool expected=!guarded||table;
+  if(object!=nullptr||decrements!=1||released!=expected||deletes!=int(expected)||skips!=int(!expected)||
+    (expected?deletedReferences:skippedReferences)!=0)throw std::runtime_error("Constructor shutdown decision/order differs");
+  report["cases"].push_back({{"owner",site},{"guarded",guarded},{"vtable",table},{"released",released},{"decrements",decrements},{"deletes",deletes},{"skips",skips},{"referencesAtDecision",expected?deletedReferences:skippedReferences},{"ownerCleared",object==nullptr}});
+  // The deliberately invalid probe was skipped; restore its fixture ownership.
+  if(!released)delete retained;
+ }
+ Probe* absent=nullptr;int notes=0;
+ if(ModConstructorLifetime::Release(absent,true,[&](const void*,const void*){++notes;})||notes||absent)
+  throw std::runtime_error("Null owner was changed");
+ report["nullOwner"]={ {"released",false},{"observerCalls",notes} };
+ for(bool guarded:{false,true}){
+  auto* object=new CSpellConstructor;object->AddRef();int notes=0;
+  if(!ModConstructorLifetime::Release(object,guarded,[&](const void*,const void*){++notes;})||object||notes)
+   throw std::runtime_error("Real CSpellConstructor teardown changed");
+ }
+ report["realConstructorsDeleted"]=2;return report;
+}
+
+Json CheckConstructorLifetimeContext(const std::string& directory)
+{
+ Json report={{"success",true},{"gameplayActivated",false},{"initialPolicyBound",ModConstructorLifetime::PolicyBound()},{"initialGuardEnabled",ModConstructorLifetime::GuardEnabled()},{"paths",Json::array()}};
+ if(ModRuntime::Current()||ModRuntime::Resources()||ModConstructorLifetime::PolicyBound())
+  throw std::runtime_error("Context fixture requires a fresh inspection process");
+ struct Probe {
+  const void* vtable;int references;int* decrements;int* deletes;int* deletedReferences;
+  int DecRefCount(){++*decrements;return --references;}
+  ~Probe(){++*deletes;*deletedReferences=references;}
+ };
+ // Unbound/no-mod policy preserves the old delete body; the probe is nonvirtual.
+ int plainDecrements=0,plainDeletes=0,plainReferences=-1;
+ auto* plain=new Probe{nullptr,1,&plainDecrements,&plainDeletes,&plainReferences};
+ if(!ModConstructorLifetime::ReleaseOwned(plain,[](const void*,const void*){})||plain||plainDecrements!=1||plainDeletes!=1||plainReferences!=0)
+  throw std::runtime_error("Unbound constructor release changed");
+ report["unboundDeletes"]=plainDeletes;
+ for(bool interrupted:{false,true}){
+  bool configured=false;CSpellConstructor* lateReal[4]={};
+  struct Interrupted {};
+  try {
+   auto host=std::make_unique<ModRuntime::Host>(directory);
+   auto* package=ModRuntime::Current();
+   configured=package && package->CombatSetting("JMVFixConstructorShutdownRelease")!=0;
+   if(!configured||!ModConstructorLifetime::PolicyBound()||!ModConstructorLifetime::GuardEnabled())
+    throw std::runtime_error("Installed constructor policy was not bound");
+   for(auto& object:lateReal){object=new CSpellConstructor;object->AddRef();}
+   if(interrupted)throw Interrupted{};
+   host.reset();
+  }catch(const Interrupted&){}
+  if(ModRuntime::Current()||ModRuntime::Resources()||!ModConstructorLifetime::PolicyBound()||!ModConstructorLifetime::GuardEnabled())
+   throw std::runtime_error("Native shutdown policy lost on Host teardown");
+  Json path={{"unwind",interrupted},{"installedEnabled",configured},{"currentNull",ModRuntime::Current()==nullptr},{"resourcesNull",ModRuntime::Resources()==nullptr},{"policyBound",ModConstructorLifetime::PolicyBound()},{"guardEnabled",ModConstructorLifetime::GuardEnabled()},{"cases",Json::array()}};
+  for(int site=0;site<2;++site)for(bool table:{false,true}){
+   int decrements=0,deletes=0,deletedReferences=-1,skips=0,skippedReferences=-1;
+   auto* object=new Probe{table?reinterpret_cast<const void*>(1):nullptr,1,&decrements,&deletes,&deletedReferences};
+   auto* retained=object;
+   bool released=ModConstructorLifetime::ReleaseOwned(object,[&](const void* value,const void* vtable){
+    if(value!=retained||vtable!=nullptr)throw std::runtime_error("Late release observer input differs");
+    ++skips;skippedReferences=retained->references;
+   });
+   if(object||released!=table||decrements!=1||deletes!=int(table)||skips!=int(!table)||(table?deletedReferences:skippedReferences)!=0)
+    throw std::runtime_error("Post-context constructor release differs from native");
+   path["cases"].push_back({{"owner",site},{"vtable",table},{"released",released},{"decrements",decrements},{"deletes",deletes},{"skips",skips},{"referencesAtDecision",table?deletedReferences:skippedReferences},{"ownerCleared",object==nullptr},{"oldR163Guarded",ModRuntime::Current()!=nullptr}});
+   if(!released)delete retained; // Clean only this deliberately invalid fixture.
+   auto*& real=lateReal[site*2+int(table)];int realSkips=0;
+   if(!ModConstructorLifetime::ReleaseOwned(real,[&](const void*,const void*){++realSkips;})||real||realSkips)
+    throw std::runtime_error("Real late CSpellConstructor release failed");
+  }
+  path["realConstructorsDeleted"]=4;report["paths"].push_back(path);
+ }
+ report["worldActivated"]=false;report["audioDeviceActivated"]=false;return report;
+}
+
+Json CheckPlayerNumbers()
+{
+ // CPlayer constructs a Party world: use only the number/identity contract here.
+ struct NumberRecord {
+  int number,writes=0;
+  int GetPlayerNumber(){return number;}
+  void SetPlayerNumber(int value){number=value;++writes;}
+ };
+ struct NumberManager {std::vector<NumberRecord*> records;};
+ struct NumberIterator {
+  NumberManager* manager=nullptr;size_t index=0;
+  NumberRecord* GetFirst(NumberManager* value){manager=value;index=0;return GetNext();}
+  NumberRecord* GetNext(){return index<manager->records.size()?manager->records[index++]:nullptr;}
+ };
+ Json report={{"success",true},{"gameplayActivated",false},{"worldActivated",false},{"audioDeviceActivated",false},{"cases",Json::array()}};
+ auto check=[&](const char* name,std::vector<int> existing,int self,int fallback,bool available,int expected){
+  std::vector<NumberRecord> owners;for(int value:existing)owners.push_back({value});
+  NumberRecord fresh{self};NumberManager manager;
+  for(auto& owner:owners)manager.records.push_back(&owner);
+  manager.records.insert(manager.records.begin()+manager.records.size()/2,&fresh);
+  NumberIterator iter;
+  ModPlayerNumbers::Assign(&fresh,fallback,available?&manager:nullptr,iter);
+  bool untouched=true;for(size_t k=0;k<owners.size();++k)untouched&=owners[k].number==existing[k]&&owners[k].writes==0;
+  if(fresh.number!=expected||fresh.writes!=1||!untouched)throw std::runtime_error("Player number reference mismatch");
+  report["cases"].push_back({{"name",name},{"existing",existing},{"self",self},{"fallback",fallback},{"managerAvailable",available},{"actual",fresh.number},{"writes",fresh.writes},{"otherOwnersUnchanged",untouched}});
+ };
+ check("no-manager",{0,7},999,9,false,9);
+ check("first-player",{},-1,0,true,0);
+ check("empty-custom-fallback",{},999,5,true,5);
+ check("negative-owners",{-3,-1},999,0,true,0);
+ check("second-player",{0},999,0,true,1);
+ check("gaps-and-unsorted",{7,0,2},999,0,true,8);
+ check("existing-duplicates",{5,5,0},999,0,true,6);
+ check("exclude-new-self",{2,0},999,0,true,3);
+ check("removed-highest",{0,2},-1,0,true,3);
+ check("fallback-not-a-minimum",{0},-1,9,true,1);
+ check("maximum-representable",{2147483646},-1,0,true,2147483647);
+ NumberManager manager;std::vector<NumberRecord> owners(3);
+ Json numbers=Json::array();for(auto& owner:owners){
+  owner.number=-1;manager.records.push_back(&owner);NumberIterator iter;
+  ModPlayerNumbers::Assign(&owner,0,&manager,iter);numbers.push_back(owner.number);
+ }
+ if(owners[0].number!=0||owners[1].number!=1||owners[2].number!=2)throw std::runtime_error("Players are not individually addressable");
+ int count=0;for(const auto& owner:owners)if(owner.number==1)++count;
+ if(count!=1)throw std::runtime_error("Second player number is ambiguous");
+ report["sequence"]=numbers;report["oldConstantSequence"]={0,0,0};report["secondPlayerMatches"]=count;
+ return report;
+}
+}
+// Borrowed stack stats + actual installed Lua/perks; no screen, unit/world,
+// device/audio or save object is constructed by this component inspector.
+Json CheckUiDescriptions(const std::string& directory){
+ ModRuntime::Host host(directory);auto* package=ModRuntime::Current();std::string perkOwner;
+ const std::string base=(fs::path(directory).parent_path().parent_path()/"Base/res/database.res").string();
+ package->ReadResource("database.res","perks.pdb",base,perkOwner);
+ if(!thePerkDatabase.LoadDatabase("",perkOwner.c_str()))throw std::runtime_error("UI-description perk database unavailable");
+ Json report={{"success",true},{"gameplayActivated",false},{"worldCreated",false},{"deviceCreated",false},{"audioStarted",false},{"screenCreated",false},{"luaMainExecuted",true},{"perkOwner",perkOwner},{"profiles",Json::array()},{"cases",Json::array()}};
+ size_t assertions=0;auto require=[&](bool good,const char* reason){++assertions;if(!good)throw std::runtime_error(reason);};
+ SRPGUnitStats stats[7]={};const int effective[]={25,80,30,80,10,25,25},displayed[]={25,25,80,50,10,25,25};
+ const int skills[][3]={{20,20,20},{20,20,20},{60,65,70},{120,90,90},{0,0,0},{39,39,39},{0,0,0}};
+ const float experience[]={1500,1500,10000,200000,500,5000,100000};const int dexterity[]={25,25,25,70,10,25,95};
+ const int manaPerks[]={0,0,1,2,0,0,3};const float weights[]={0,0,0,0,80,0,0};
+ for(int i=0;i<7;++i){auto& st=stats[i];st.fpExperience=experience[i];st.psStrength.fpBaseValue=st.psStrength.fpEffectiveValue=25;
+  st.psDexterity.fpBaseValue=st.psDexterity.fpEffectiveValue=float(dexterity[i]);st.psIntelligence.fpBaseValue=st.psIntelligence.fpEffectiveValue=float(effective[i]);
+  st.fpMaxEncumbrance=100;st.fpCurrEncumbrance=weights[i];st.cPerks[RPGPRK_MANA]=BYTE(manaPerks[i]);
+  st.cAutoSkills[RPGASKL_ELEMENTAL]=BYTE(skills[i][0]);st.cAutoSkills[RPGASKL_SENSE]=BYTE(skills[i][1]);st.cAutoSkills[RPGASKL_ASTRAL]=BYTE(skills[i][2]);
+  if(i==2)for(int p=RPGPRK_FIRE;p<=RPGPRK_DOMINATION;++p)st.cPerks[p]=1;
+  if(i==3){st.cPerks[RPGPRK_DIVINATION]=2;st.cPerks[RPGPRK_HEALING]=3;st.cPerks[RPGPRK_DOMINATION]=1;}
+  Json profile={{"id",i},{"effectiveIntelligence",effective[i]},{"displayedIntelligence",displayed[i]},{"skills",{skills[i][0],skills[i][1],skills[i][2]}},{"experience",st.fpExperience},{"dexterity",dexterity[i]},{"currentEncumbrance",st.fpCurrEncumbrance},{"maxEncumbrance",st.fpMaxEncumbrance},{"manaPerkModifier",st.GetPerkModifier(RPGPRK_MANA)},{"baseMana",package->CalcBaseMana(st)},{"manaBonus",st.GetManaBonusMultiplier()},{"subtypes",Json::array()}};
+  for(int t=0;t<RPG_NUM_MAGIC_SUBTYPES;++t)profile["subtypes"].push_back({{"subtype",t},{"baseSkill",st.GetBaseMagicSkill(ERPGMagicSubtypes(t))},{"perkModifier",st.GetPerkModifier(RPGPRK_FIRE+t)},{"oldComplexity",st.GetAvailableComplexity(ERPGMagicSubtypes(t))}});
+  report["profiles"].push_back(profile);
+ }
+ const SRPGUnitStats original[7]={stats[0],stats[1],stats[2],stats[3],stats[4],stats[5],stats[6]};
+ const std::vector<std::vector<int>> parties={{},{0},{1},{2},{3},{4},{0,3,6},{6,3,0}};
+ for(int shop:{1,2,3,4,12})for(int t=0;t<RPG_NUM_MAGIC_SUBTYPES;++t)for(const auto& party:parties){
+  std::vector<ModCampSpellLimitInput> inputs;int oldComplexity=0,oldMana=0;
+  for(int i:party){inputs.push_back({&stats[i],displayed[i]});oldComplexity=(std::max)(oldComplexity,stats[i].GetAvailableComplexity(ERPGMagicSubtypes(t)));oldMana=(std::max)(oldMana,int(stats[i].RecalcMP()/stats[i].GetManaBonusMultiplier()));}
+  int complexity=-999,mana=-999;package->CampSpellLimits(shop,t,inputs,complexity,mana);
+  if(party.empty())require(complexity==0&&mana==0,"Empty party acquired shop capability");
+  if(shop==1&&t==RPGMST_FIRE&&party==std::vector<int>{0})require(complexity==40&&oldComplexity==20,"Original missing shop floor was not reproduced");
+  report["cases"].push_back({{"shop",shop},{"shopFloor",package->ShopConstructLimit(shop)},{"subtype",t},{"party",party},{"complexity",complexity},{"mana",mana},{"beforeComplexity",oldComplexity},{"beforeMana",oldMana}});
+ }
+ for(int i=0;i<7;++i)require(memcmp(&original[i],&stats[i],sizeof(stats[i]))==0,"UI limits changed party state");
+ require(!theWorldServer.IsMapLoaded(),"UI-description component loaded a server map");
+ report["assertions"]=assertions;return report;
+}
+// Detached camp display fixtures: borrowed stats + installed Lua/perks only.
+Json CheckCampStatsG3(const std::string& directory){
+ ModRuntime::Host host(directory);auto* package=ModRuntime::Current();std::string perkOwner;
+ const std::string base=(fs::path(directory).parent_path().parent_path()/"Base/res/database.res").string();
+ package->ReadResource("database.res","perks.pdb",base,perkOwner);
+ if(!thePerkDatabase.LoadDatabase("",perkOwner.c_str()))throw std::runtime_error("Camp stat perks unavailable");
+ Json report={{"success",true},{"gameplayActivated",false},{"worldCreated",false},{"unitCreated",false},{"deviceCreated",false},{"audioStarted",false},{"screenCreated",false},{"luaMainExecuted",true},{"perkOwner",perkOwner},{"profiles",Json::array()},{"perks",Json::array()},{"capacities",Json::array()}};
+ size_t assertions=0;auto require=[&](bool good,const char* reason){++assertions;if(!good)throw std::runtime_error(reason);};
+ SRPGUnitStats stats[8]={};SRPGUserUnitStats shown[8]={};
+ const int effective[]={25,80,30,80,10,25,25,95},displayed[]={25,25,80,50,10,25,25,95};
+ const int dexterity[]={25,25,25,70,10,25,95,60},skills[]={20,20,60,120,0,39,100,120};
+ const float experience[]={1500,1500,10000,200000,500,5000,100000,200000};
+ for(int i=0;i<8;++i){auto& st=stats[i];auto& us=shown[i];
+  st.psStrength.fpBaseValue=st.psStrength.fpEffectiveValue=float(effective[i]);st.psDexterity.fpBaseValue=st.psDexterity.fpEffectiveValue=float(dexterity[i]);st.psIntelligence.fpBaseValue=st.psIntelligence.fpEffectiveValue=float(effective[i]);
+  st.fpExperience=experience[i];st.fpMaxEncumbrance=100;st.fpCurrEncumbrance=i==4?160.0f:0;
+  st.senses[RPGS_SIGHT].fpEffectiveValue=18.6f+i;st.cPerks[11]=BYTE(i%4);st.cPerks[23]=BYTE(i%4);
+  us.cStrength=BYTE(displayed[i]);us.cDexterity=BYTE(displayed[(i+1)%8]);us.cIntelligence=BYTE(displayed[i]);us.cSenses[RPGS_SIGHT]=9;
+  us.cManualSkills[RPGMSKL_SCIENCE]=BYTE(skills[i]);us.cAutoSkills[RPGASKL_MELEE]=BYTE(skills[i]);us.cAutoSkills[RPGASKL_ARCHERY]=BYTE(skills[(i+1)%8]);
+  for(int s=RPGASKL_ELEMENTAL;s<=RPGASKL_ASTRAL;++s)st.cAutoSkills[s]=BYTE(skills[i]+(s-RPGASKL_ELEMENTAL));
+  if(i==2||i==3)for(int p=RPGPRK_FIRE;p<=RPGPRK_DOMINATION;++p)st.cPerks[p]=BYTE(i==2?1:2);
+ }
+ const auto originalStats=std::vector<SRPGUnitStats>(stats,stats+8);const auto originalShown=std::vector<SRPGUserUnitStats>(shown,shown+8);
+ for(int i=0;i<8;++i){const auto& st=stats[i];const auto& us=shown[i];
+  Json p={{"id",i},{"effective",effective[i]},{"partyDexterity",dexterity[i]},{"displayStrength",us.cStrength},{"displayDexterity",us.cDexterity},{"displayIntelligence",us.cIntelligence},{"experience",st.fpExperience},{"partyWeight",st.fpCurrEncumbrance},{"partyCapacity",st.fpMaxEncumbrance},{"magicModifier",st.GetPerkModifier(23)},{"rawSight",st.senses[RPGS_SIGHT].fpEffectiveValue},{"sightModifier",st.GetPerkModifier(11)},{"shownSight",us.cSenses[RPGS_SIGHT]},{"sight",ModCampStats::Sight(st)},{"baseMana",st.RecalcMP()},{"scienceBase",us.cManualSkills[RPGMSKL_SCIENCE]},{"science",ModCampStats::ScienceSkill(us)},{"primary",Json::array()},{"mana",Json::array()},{"schools",Json::array()},{"damage",Json::array()}};
+  const float exp=package->InfoPerkBonus("GetExpMultiplier2",us.cIntelligence);p["experienceMultiplier"]=exp;
+  for(const auto& divisors:std::vector<std::pair<float,float>>{{25,25},{20,30}}){const auto primary=ModCampStats::PrimaryValues(us,divisors.first,divisors.second,exp);
+   p["primary"].push_back({{"hpDivisor",divisors.first},{"mpDivisor",divisors.second},{"health",primary.healthPercent},{"stamina",primary.staminaPercent},{"exp",primary.experiencePercent},{"mana",primary.manaPercent}});
+  }
+  for(int carried:{0,240,300,375,450,480})for(bool baseStats:{false,true})p["mana"].push_back({{"carried",carried},{"capacity",300},{"baseStats",baseStats},{"displayWeight",ModCampStats::Weight(carried,baseStats)},{"value",package->CampDisplayMana(st,carried,300,baseStats)}});
+  for(int t=0;t<RPG_NUM_MAGIC_SUBTYPES;++t){int skill=ModCampStats::MagicSkill(st,us.cIntelligence,t);p["schools"].push_back({{"subtype",t},{"base",st.GetBaseMagicSkill(ERPGMagicSubtypes(t))},{"perk",st.GetPerkModifier(RPGPRK_FIRE+t)},{"skill",skill},{"damage",ModCampStats::MagicDamagePercent(skill)}});}
+  for(int s:{RPGASKL_MELEE,RPGASKL_ARCHERY})p["damage"].push_back({{"skill",us.cAutoSkills[s]},{"percent",package->InfoPerkBonus("GetSkillMod",us.cAutoSkills[s])*100.0f}});
+  report["profiles"].push_back(p);
+ }
+ for(int index=0;index<thePerkDatabase.GetNumPerks();++index){const auto* perk=thePerkDatabase.GetPerk(index);if(!perk)continue;
+  for(bool jmv136:{false,true})for(bool anatomy:{false,true}){
+   Json rows=Json::array();for(const auto& row:ModCampStats::PerkRows(index/3,int(perk->dwModifier),jmv136,anatomy,3.0f))rows.push_back({{"label",row.label},{"value",row.value},{"format",row.format}});
+   report["perks"].push_back({{"index",index},{"group",index/3},{"level",index%3+1},{"active",perk->bActive},{"code",std::string((LPCSTR)perk->szCode)},{"modifier",perk->dwModifier},{"jmv136",jmv136},{"anatomy",anatomy},{"backstab",3.0f},{"rows",rows}});
+  }
+ }
+ const float factors[][5]={{25,0,1,1,1},{80,20,1.15f,1.3f,1.2f},{10,-20,1,1,1},{95,50,1.2f,1.4f,0.9f},{30,15,1.05f,1,1.1f}};
+ for(const auto& f:factors)report["capacities"].push_back({{"strength",f[0]},{"lift",f[1]},{"jewelry",f[2]},{"complex",f[3]},{"sets",f[4]},{"value",ModCampStats::Capacity(f[0],f[1],f[2],f[3],f[4])},{"skillValue",ModCampStats::Capacity(f[0],f[1],f[2],1,f[4])}});
+ for(int i=0;i<8;++i){require(memcmp(&originalStats[i],&stats[i],sizeof(stats[i]))==0,"Display mutated party stats");require(memcmp(&originalShown[i],&shown[i],sizeof(shown[i]))==0,"Display mutated shown stats");}
+ require(ModCampStats::Weight(480,true)==0&&ModCampStats::Weight(480,false)==480,"Original base-mode load divergence remains");
+ require(ModCampStats::Sight(stats[0])==19,"Native party sight rounding changed");
+ require(!theWorldServer.IsMapLoaded(),"Camp component loaded server world");report["assertions"]=assertions;return report;
+}
+#include "ModCampDescriptions.inl"
+#include "ModCampDescriptionsCheck.inl"
+#include "ModIdleTooltipsCheck.inl"
+#include "ModAssortmentCheck.inl"
+std::string CModPackage::ProgressionRequirementCode(const char* code,int field){
+ CallbackFrame frame(state);BeginCallback("GetPerkRequiredJmv");lua_pushstring(state,code);lua_pushinteger(state,field);Call(2,1);
+ const char* text=lua_tostring(state,-1);std::string result=text?text:"";lua_pop(state,1);return result;
+}
+namespace {
+Json CheckDownstreamOwnerG3(){
+ struct Item {
+  const char* name;int refs=0;std::vector<std::string>* events;
+  int AddRef(){events->push_back(std::string("retain:")+name);return ++refs;}
+  void Release(){events->push_back(std::string("release:")+name);--refs;}
+ };
+ Json cases=Json::array();
+ auto run=[&](const char* id,int inputs,bool duplicateOK){
+  std::vector<std::string>events,outputs;Item copy{"copy",0,&events},container{"container",0,&events};Item* result=nullptr;
+  int consumed=0,money=100;bool selected=ModAlchemy::ScrollAllowed(true,true,true);
+  bool success=ModAlchemy::Deconstruct<Item>(result,[&](Item*& spell){
+   if(inputs!=1)return false;events.push_back("container:create");spell=&container;spell->AddRef();return true;
+  },[&]()->Item*{events.push_back("duplicate");return duplicateOK?&copy:nullptr;},[&](){--inputs;++consumed;events.push_back("consume");},
+  [&](Item*,Item* spell){
+   outputs.push_back("Instruction Quick Item:21");events.push_back("instruction:21");
+   for(int i=0;i<2;++i){outputs.push_back("material:2");events.push_back("material:2");}
+   if(spell){outputs.push_back("spell:17");events.push_back("spell:17");}
+  });
+  if(success){money-=15;events.push_back("charge:15");}
+  int returned=0;if(!success){while(inputs){--inputs;++returned;}events.push_back("cancel:return:"+std::to_string(returned));}
+  cases.push_back({{"id",id},{"selected",selected},{"success",success},{"consumed",consumed},{"cancelReturned",returned},{"inputsRemaining",inputs},{"money",money},{"copyRefs",copy.refs},{"containerRefs",container.refs},{"resultCleared",result==nullptr},{"outputs",outputs},{"events",events}});
+ };
+ run("quick_deconstruct_owned_result",1,true);
+ run("duplicate_failure_returns_input",1,false);
+ run("multiple_input_rejected_then_cancelled",2,true);
+ return {{"success",true},{"productionHelper",true},{"cases",cases},{"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},{"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},{"saveRead",false},{"uiExecuted",false},{"realItemsCreated",false}};
+}
+Json CheckAttackCreationG3(){
+ using namespace ModConditionalCombat;
+ Json cases=Json::array();
+ auto run=[&](bool personage){
+  bool weapon=RetailWeapon(personage,0,true);int skill=0,isaac=0,gameCrt=0,addonCrt=0;
+  float hit=0,damage=0;std::vector<std::string> events;CreationBackend b;
+  b.clear=[&](){events.push_back("clear");};
+  b.native=[&](){events.push_back("naw");skill=0;hit=9.f*.5f;++isaac;damage=4.f+.5f;};
+  b.weapon=[&](){events.push_back("weapon");skill=3;++gameCrt;hit=WeaponToHit(4,5);++isaac;damage=2.f+3.f;};
+  b.modified=[&](){events.push_back("modified:0:-1");++addonCrt;damage*=2;};
+  b.metadata=[&](){events.push_back("metadata");};
+  CreateRetail(weapon,b);
+  cases.push_back({{"id",personage?"personage_cached_weapon":"armed_npc_uses_naw"},{"weapon",weapon},{"skill",skill},{"toHit",hit},{"damage",damage},{"events",events},{"isaacDraws",isaac},{"gameCrtDraws",gameCrt},{"addonCrtDraws",addonCrt}});
+ };
+ run(false);run(true);
+ cases.push_back({{"id","ordinary_owner_and_rear"},{"ordinary",OrdinaryCreation(true,false,false,false)},{"taggedSkill",OrdinaryCreation(true,false,true,false)},{"active",OrdinaryCreation(true,true,false,false)},{"left",OrdinaryCreation(true,false,false,true)},{"rear",RetailRear(true,false,-.75f)},{"front",RetailRear(true,false,0)},{"bowRear",RetailRear(true,true,-.75f)},{"unownedRear",RetailRear(false,false,-.75f)}});
+ return {{"success",true},{"productionHelper",true},{"cases",cases},{"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},{"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},{"saveRead",false}};
+}
+Json CheckConditionalCombatG3(){
+ using namespace ModConditionalCombat;
+ Json cases=Json::array();
+ auto producer=[&](Owner owner){
+  int strength=owner==Owner::Inherited?25:40,attack=0,defense=0,cursor=0;
+  const std::vector<int> draws=owner==Owner::Inherited?std::vector<int>{12,34,56}:std::vector<int>{7};
+  std::vector<std::string> events;
+  Backend b;
+  b.retailSeed=[&](){events.push_back("retail");};
+  b.roll=[&](){if(cursor>=int(draws.size()))throw std::runtime_error("Unexpected producer draw");return float(draws[cursor++]);};
+  b.retailDamage=[&](bool maximum,float roll){events.push_back(std::string(maximum?"max:":"min:")+std::to_string(int(roll))+":0:shadow");};
+  b.initialStats=[&](){events.push_back("initial");strength=30;};
+  b.raw=[&](Owner selected){bool direct=selected==Owner::DirectDefender;events.push_back(direct?"raw:direct":"raw:inherited");attack=Unarmed(20,4,direct);defense=Unarmed(21,4,direct);};
+  b.damagePair=[&](float roll){events.push_back("max:"+std::to_string(int(roll))+":-1:current");events.push_back("min:"+std::to_string(int(roll))+":-1:current");};
+  b.difficulty=[&](){events.push_back("difficulty");};
+  b.attackCallback=[&](int count){events.push_back("attack:"+std::to_string(count));};
+  Produce(owner,b);
+  if(cursor!=int(draws.size()))throw std::runtime_error("Producer omitted an explicit draw");
+  cases.push_back({{"id",owner==Owner::Inherited?"inherited_order_writeback":"direct_unarmed_owner"},{"draws",draws},{"events",events},{"committedStrength",strength},{"attack",attack},{"defense",defense}});
+ };
+ producer(Owner::Inherited);producer(Owner::DirectDefender);
+ float base=Base(20,0,4),called=Location(base,-5),bonus=called+2;
+ int draws=0;bool avoided=Avoidance(false,90,1,false,[&](){++draws;return 33.f;});
+ size_t count=0;auto*rules=ModConfiguration::CombatRules(count);bool found=false,defaultShit=true;
+ for(size_t i=0;i<count;i++)if(strcmp(rules[i].key,"JMVShit")==0){found=true;defaultShit=rules[i].fallback;}
+ if(!found)throw std::runtime_error("Existing native Shit rule missing");
+ cases.push_back({{"id","conditional_score_and_routing"},{"base",base},{"called",called},{"withBonus",bonus},{"thresholdEqualityHit",bonus>=13},{"avoidanceDraws",draws},{"avoided",avoided},{"fallback",Fallback(true,false)},{"activeFallback",Fallback(true,true)},{"defaultShit",defaultShit}});
+ return {{"success",true},{"productionHelper",true},{"cases",cases},{"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},{"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},{"saveRead",false}};
+}
+}
+
+#include "ModHudAssignmentCheck.inl"
+#include "ModProgressionCheck.inl"
+#include "ModSafetyLookupCheck.inl"
+#include "ModEquipmentSwitchCheck.inl"
+#include "ModCampEquipmentCheck.inl"
+#include "ModCampRepairCheck.inl"
+#include "ModCampItemPriceCheck.inl"
+#include "ModCampSaleCheck.inl"
+#include "ModSecondaryAtlasCheck.inl"
+#include "ModPrimaryAtlasCheck.inl"
+#include "ModTextureMemoryCheck.inl"
+#include "ModSpellTargetingCheck.inl"
+#include "ModSpellMappingCheck.inl"
+#include "ModSpellOwnerCheck.inl"
+#include "ModSpellDangerCheck.inl"
+#include "ModSpellPhaseCheck.inl"
+#include "ModCampReferencesCheck.inl"
+static Json CheckPreparedAttackG3() {
+    std::vector<std::string> twice, single, ordinary, rejected;
+    int liveTarget = 42, metadata = 7;
+    const int heldTarget = liveTarget;
+    ModPreparedAttack::DeliverProjectiles(2,
+        [&] { twice.push_back("retain:7"); return metadata; },
+        [&](int index, int count, bool spell) {
+            twice.push_back("apply:"+std::to_string(heldTarget)+":"+std::to_string(index)+":"+std::to_string(count)+":"+std::to_string(spell));
+            metadata = 0; liveTarget = 0;
+        },
+        [&](int retained) { twice.push_back("publish:"+std::to_string(heldTarget)+":"+std::to_string(retained)); });
+    ModPreparedAttack::CancelReady(true, [&] { twice.push_back("cancel"); });
+    auto run = [&](bool ready, std::vector<std::string>& events) {
+        ModPreparedAttack::DeliverProjectiles(1, [] { return 0; },
+            [&](int index, int count, bool spell) { events.push_back("apply:"+std::to_string(index)+":"+std::to_string(count)+":"+std::to_string(spell)); },
+            [&](int) { events.push_back("unexpected-schedule"); });
+        ModPreparedAttack::CancelReady(ready, [&] { events.push_back("cancel"); });
+    };
+    run(true, single); run(false, ordinary);
+    bool refused = ModPreparedAttack::RejectPreparation(-1, [&] { rejected.push_back("cancel"); });
+    return {{"success",true},{"productionHelper",true},
+        {"cases",Json::array({
+            {{"id","ready-double"},{"slot",ModPreparedAttack::HitSlot(true,0,2)},{"events",twice},{"heldTarget",heldTarget},{"liveTarget",liveTarget},{"liveMetadata",metadata}},
+            {{"id","ready-single"},{"slot",ModPreparedAttack::HitSlot(false,0,2)},{"invalidLeft",ModPreparedAttack::HitSlot(true,0,-1)},{"events",single}},
+            {{"id","ordinary-rejected"},{"ordinaryEvents",ordinary},{"rejected",refused},{"rejectedEvents",rejected}}
+        })},{"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},
+        {"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},{"saveRead",false},{"uiExecuted",false}};
+}
+
+static Json CheckMeleeTimingG3() {
+    auto speeds = ModAttackTiming::ScaleMovement({2.f, .8f}, .25f);
+    auto sequence = [](bool enabled, bool alive) {
+        std::vector<std::string> events;
+        for (int tick=99; tick<=101; ++tick)
+            ModAttackTiming::ExecuteImpact(enabled, alive, tick, 101,
+                [&] { events.push_back(std::to_string(tick)+":build"); },
+                [&] { events.push_back(std::to_string(tick)+":apply"); });
+        return events;
+    };
+    return {{"success",true},{"productionHelper",true},
+        {"cases",Json::array({
+            {{"id","slowdown"},{"move",speeds.move},{"rotate",speeds.rotate}},
+            {{"id","ordinary"},{"enabled",ModAttackTiming::UsesImpactFrame(true,true,false,"crsuattack01")},
+             {"events",sequence(ModAttackTiming::UsesImpactFrame(true,true,false,"crsuattack01"),true)},
+             {"deadEvents",sequence(ModAttackTiming::UsesImpactFrame(true,true,false,"uattack01"),false)}},
+            {{"id","retained"},{"dual",ModAttackTiming::UsesImpactFrame(true,true,false,"dat01crcr37")},
+             {"skill",ModAttackTiming::UsesImpactFrame(true,true,true,"uattack01")},
+             {"cast",ModAttackTiming::UsesImpactFrame(true,false,false,"uattack01")},
+             {"vanilla",ModAttackTiming::UsesImpactFrame(false,true,false,"uattack01")},
+             {"nativeFailedRecheckCancel",ModAttackTiming::CancelFailedRecheck(true)},
+             {"defaultFailedRecheckCancel",ModAttackTiming::CancelFailedRecheck(false)}}
+        })},{"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},
+        {"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},{"saveRead",false},{"uiExecuted",false}};
+}
+
+static Json CheckModalFadeG3() {
+    Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+    HRESULT compiled = RetailModalFade::Compile(bytecode.GetAddressOf());
+    Json cases = Json::array();
+    struct Sample { const char* id; unsigned r, g, b, a; };
+    const Sample samples[] = {{"black",0,0,0,0},{"white",255,255,255,255},{"colored",32,160,240,80}};
+    for (const auto& sample : samples)
+        cases.push_back({{"id",sample.id},{"rgb",{sample.r,sample.g,sample.b}},
+            {"alpha",sample.a},{"gray",RetailModalFade::Gray(sample.r,sample.g,sample.b)}});
+    return {{"success",SUCCEEDED(compiled)},{"productionHelper",true},
+        {"shaderCompiled",SUCCEEDED(compiled)},{"cases",cases},
+        {"luaExecuted",false},{"unitCreated",false},{"worldCreated",false},
+        {"hostCreated",false},{"deviceCreated",false},{"audioStarted",false},
+        {"saveRead",false},{"uiExecuted",false}};
+}
+
 bool InspectModPackageCommandLine(int &result){
  int argc=0;LPWSTR *argv=CommandLineToArgvW(GetCommandLineW(),&argc);if(!argv)return false;
  bool mob=argc>=2&&wcscmp(argv[1],L"--inspect-mob-script")==0;
  bool defaults=argc>=2&&wcscmp(argv[1],L"--inspect-default-stats")==0;
  bool economy=argc>=2&&wcscmp(argv[1],L"--inspect-mod-economy")==0;
+ bool uiRange=argc>=2&&wcscmp(argv[1],L"--inspect-ui-range")==0;
+ bool playerNumbers=argc>=2&&wcscmp(argv[1],L"--inspect-player-numbers")==0;
+ bool constructorContext=argc>=2&&wcscmp(argv[1],L"--inspect-constructor-lifetime-context")==0;
+ bool constructorLifetime=argc>=2&&wcscmp(argv[1],L"--inspect-constructor-lifetime")==0;
+ bool itemDetails=argc>=2&&wcscmp(argv[1],L"--inspect-item-details")==0;
+ bool itemInfo=argc>=2&&wcscmp(argv[1],L"--inspect-item-info")==0;
+ bool campSpellInfo=argc>=2&&wcscmp(argv[1],L"--inspect-camp-spell-info")==0;
+ bool campStats=argc>=2&&wcscmp(argv[1],L"--inspect-camp-stats-g3")==0;
+ bool fullDescriptions=argc>=2&&wcscmp(argv[1],L"--inspect-full-descriptions-g3")==0;
+ bool idleTooltips=argc>=2&&wcscmp(argv[1],L"--inspect-idle-tooltips-g3")==0;
+ bool assortment=argc>=2&&wcscmp(argv[1],L"--inspect-assortment-g3")==0;
+ bool hudAssignment=argc>=2&&wcscmp(argv[1],L"--inspect-hud-assignment-g3")==0;
+ bool progression=argc>=2&&wcscmp(argv[1],L"--inspect-progression-g3")==0;
+ bool safetyLookup=argc>=2&&wcscmp(argv[1],L"--inspect-safety-lookup-g3")==0;
+ bool equipmentSwitch=argc>=2&&wcscmp(argv[1],L"--inspect-equipment-switch-g3")==0;
+ bool spellMapping=argc>=2&&wcscmp(argv[1],L"--inspect-spell-mapping-g3")==0;
+ bool spellOwner=argc>=2&&wcscmp(argv[1],L"--inspect-spell-owner-g3")==0;
+ bool spellLoad=argc>=2&&wcscmp(argv[1],L"--inspect-spell-load-g3")==0;
+ bool spellPhase=argc>=2&&wcscmp(argv[1],L"--inspect-spell-phase-g3")==0;
+ bool campReferences=argc>=2&&wcscmp(argv[1],L"--inspect-camp-references-g3")==0;
+ bool spellTargeting=argc>=2&&wcscmp(argv[1],L"--inspect-spell-targeting-g3")==0;
+ bool campEquipment=argc>=2&&wcscmp(argv[1],L"--inspect-camp-equipment-g3")==0;
+ bool campRepair=argc>=2&&wcscmp(argv[1],L"--inspect-camp-repair-g3")==0;
+ bool campItemPrice=argc>=2&&wcscmp(argv[1],L"--inspect-camp-item-price-g3")==0;
+ bool campSale=argc>=2&&wcscmp(argv[1],L"--inspect-camp-sale-g3")==0;
+ bool secondaryAtlas=argc>=2&&wcscmp(argv[1],L"--inspect-secondary-atlas-g3")==0;
+ bool primaryAtlas=argc>=2&&wcscmp(argv[1],L"--inspect-primary-atlas-g3")==0;
+ bool textureMemory=argc>=2&&wcscmp(argv[1],L"--inspect-texture-memory-g3")==0;
+ bool memoryOutputAllocation=argc>=2&&wcscmp(argv[1],L"--inspect-memory-output-allocation-g3")==0;
+ bool modalFade=argc>=2&&wcscmp(argv[1],L"--inspect-modal-fade-g3")==0;
+ bool meleeTiming=argc>=2&&wcscmp(argv[1],L"--inspect-melee-timing-g3")==0;
+ bool preparedAttack=argc>=2&&wcscmp(argv[1],L"--inspect-prepared-attack-g3")==0;
+ bool lruAccounting=argc>=2&&wcscmp(argv[1],L"--inspect-lru-accounting-g3")==0;
+ bool downstreamOwner=argc>=2&&wcscmp(argv[1],L"--inspect-downstream-owner-g3")==0;
+ bool attackCreation=argc>=2&&wcscmp(argv[1],L"--inspect-attack-creation-g3")==0;
+ bool conditionalCombat=argc>=2&&wcscmp(argv[1],L"--inspect-conditional-combat-g3")==0;
+ bool consoleDrawAll=argc>=2&&wcscmp(argv[1],L"--inspect-console-drawall-g3")==0;
+ bool uiDescriptions=argc>=2&&wcscmp(argv[1],L"--inspect-ui-descriptions-g3")==0;
+ bool spellTooltips=argc>=2&&wcscmp(argv[1],L"--inspect-spell-tooltips")==0;
  bool startup=argc>=2&&wcscmp(argv[1],L"--inspect-mod-startup")==0;
- if(argc<2||(!mob&&!defaults&&!economy&&!startup&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
+ if(argc<2||(!mob&&!defaults&&!economy&&!startup&&!uiRange&&!spellTooltips&&!campSpellInfo&&!campStats&&!fullDescriptions&&!idleTooltips&&!assortment&&!hudAssignment&&!progression&&!safetyLookup&&!equipmentSwitch&&!campEquipment&&!campRepair&&!campItemPrice&&!campSale&&!secondaryAtlas&&!primaryAtlas&&!textureMemory&&!memoryOutputAllocation&&!conditionalCombat&&!attackCreation&&!downstreamOwner&&!modalFade&&!meleeTiming&&!preparedAttack&&!lruAccounting&&!consoleDrawAll&&!spellTargeting&&!spellMapping&&!spellOwner&&!spellLoad&&!spellPhase&&!campReferences&&!uiDescriptions&&!itemInfo&&!itemDetails&&!constructorLifetime&&!constructorContext&&!playerNumbers&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
  result=2;Json report;std::wstring output;
  if(mob&&argc==5){output=argv[4];try{
   ModRuntime::Host host(Ansi(argv[2]));std::ifstream file(fs::path(argv[3]),std::ios::binary);
@@ -688,7 +1576,7 @@ bool InspectModPackageCommandLine(int &result){
   bool ok=script.LoadText(source,FALSE)!=FALSE;auto error=script.GetLastError();
   report={{"success",ok},{"line",error.nLine},{"error",std::string((LPCSTR)error.text)}};result=ok?0:1;
  }catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
- else if(argc==4){output=argv[3];try{if(defaults)report=CheckDefaultStats();else if(economy){CModPackage package;package.Load(Ansi(argv[2]));report=package.CheckEconomy();}else if(startup)report=CheckStartup(Ansi(argv[2]));else{CModPackage package;package.Load(Ansi(argv[2]));report=package.Describe();}result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
+ else if(argc==4){output=argv[3];try{if(playerNumbers)report=CheckPlayerNumbers();else if(constructorContext)report=CheckConstructorLifetimeContext(Ansi(argv[2]));else if(constructorLifetime)report=CheckConstructorLifetime(Ansi(argv[2]));else if(itemDetails)report=CheckItemDetails(Ansi(argv[2]));else if(itemInfo)report=CheckItemInfo(Ansi(argv[2]));else if(equipmentSwitch)report=CheckEquipmentSwitchG3(Ansi(argv[2]));else if(campEquipment)report=CheckCampEquipmentG3(Ansi(argv[2]));else if(campRepair)report=CheckCampRepairG3(Ansi(argv[2]));else if(campItemPrice)report=CheckCampItemPriceG3(Ansi(argv[2]));else if(campSale)report=CheckCampSaleG3(Ansi(argv[2]));else if(secondaryAtlas)report=CheckSecondaryAtlasG3(Ansi(argv[2]));else if(primaryAtlas)report=CheckPrimaryAtlasG3(Ansi(argv[2]));else if(textureMemory)report=CheckTextureMemoryG3(Ansi(argv[2]));else if(memoryOutputAllocation)report=CheckMemoryOutputAllocationG3(Ansi(argv[2]));else if(conditionalCombat)report=CheckConditionalCombatG3();else if(attackCreation)report=CheckAttackCreationG3();else if(modalFade)report=CheckModalFadeG3();else if(meleeTiming)report=CheckMeleeTimingG3();else if(preparedAttack)report=CheckPreparedAttackG3();else if(lruAccounting)report=Json::parse(CTextureManager::CheckLRUAccountingG3());else if(downstreamOwner)report=CheckDownstreamOwnerG3();else if(consoleDrawAll)report=Json::parse(NConsole::CheckDrawAllCommand());else if(campReferences)report=CheckCampReferencesG3(Ansi(argv[2]));else if(spellPhase)report=CheckSpellPhaseG3(Ansi(argv[2]));else if(spellLoad)report=CheckSpellLoadG3(Ansi(argv[2]));else if(spellOwner)report=CheckSpellOwnerG3(Ansi(argv[2]));else if(spellMapping)report=CheckSpellMappingG3(Ansi(argv[2]));else if(spellTargeting)report=CheckSpellTargetingG3(Ansi(argv[2]));else if(safetyLookup)report=CheckSafetyLookupG3(Ansi(argv[2]));else if(progression)report=CheckProgressionG3(Ansi(argv[2]));else if(hudAssignment)report=CheckHudAssignmentG3(Ansi(argv[2]));else if(assortment)report=CheckAssortmentG3(Ansi(argv[2]));else if(idleTooltips)report=CheckIdleTooltipsG3(Ansi(argv[2]));else if(fullDescriptions)report=CheckFullDescriptionsG3(Ansi(argv[2]));else if(campStats)report=CheckCampStatsG3(Ansi(argv[2]));else if(uiDescriptions)report=CheckUiDescriptions(Ansi(argv[2]));else if(campSpellInfo)report=CheckCampSpellInfo(Ansi(argv[2]));else if(spellTooltips)report=CheckSpellTooltips(Ansi(argv[2]));else if(uiRange)report=CheckUIRange(Ansi(argv[2]));else if(defaults)report=CheckDefaultStats();else if(economy){CModPackage package;package.Load(Ansi(argv[2]));report=package.CheckEconomy();}else if(startup)report=CheckStartup(Ansi(argv[2]));else{CModPackage package;package.Load(Ansi(argv[2]));report=package.Describe();}result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
  else report={{"success",false},{"error","Expected --inspect-addon MOD_DIRECTORY OUTPUT_JSON"}};
  LocalFree(argv);if(!output.empty()){std::ofstream file{fs::path(output)};file<<report.dump(2,' ',false,Json::error_handler_t::replace);if(!file)result=3;}return true;
 }
@@ -735,6 +1623,48 @@ void CModPackage::AttackParams(const SRPGUnitStats&stats,CUnit&unit,SAttackParam
  p.ApplyDifficultyLevel(IsIDofPersonage(unit.GetID()));float effects[53]={};CombatEffects(unit,effects);
  BeginCallback("CalcAttackParamsOnServer");ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,&unit,frame.scope);ModLua::Push(state,&p,frame.scope);ModLua::PushEffects(state,effects,53,frame.scope);Call(4,0);CheckAttack(p);result=p;
 }
+float CModPackage::ConditionalRetailDamage(SRPGUnitStats& stats,CUnit& unit,float damage){
+ CallbackFrame frame(state);frame.scope->unit=&unit;frame.scope->stagedStats=&stats;
+ int slot=int(unit.GetCurrentWeaponSlotIndex());auto*weapon=slot>=0&&slot<int(QI_MAX_WEAPONS)?unit.GetQWeapon(slot):nullptr;
+ bool hasOwner=IsIDofPersonage(unit.GetID())&&unit.GetTypeID()!=MOTID_ANIMAL&&unit.GetTypeID()!=MOTID_MONSTER;
+ float roll=float(ModNativeCrtRandom::Random(100));
+ BeginCallback("GetModifiedDamageOnServerJmv");ModLua::Push(state,&stats,frame.scope);ModLua::Push(state,&unit,frame.scope);lua_pushnumber(state,damage);lua_pushnumber(state,roll);lua_pushinteger(state,0);lua_pushboolean(state,false);lua_pushstring(state,unit.GetPrototype()->szName);lua_pushinteger(state,weapon?weapon->GetShapeEntry()->dwTypeID:0);lua_pushinteger(state,-1);lua_pushboolean(state,hasOwner);lua_pushboolean(state,CombatSetting("JMVFixCriticalHitSoundTrigger")!=0);Call(11,1);
+ double value=Number(state,"Conditional retail damage");lua_pop(state,1);if(fabs(value)>(std::numeric_limits<float>::max)())throw std::runtime_error("Conditional retail damage overflow");return float(value);
+}
+void CModPackage::ConditionalAttackParams(SRPGUnitStats& stats,CUnit& unit,SAttackParams& result,bool inherited){
+ using namespace ModConditionalCombat;
+ CallbackFrame frame(state);frame.scope->unit=&unit;frame.scope->stagedStats=&stats;
+ SAttackParams p={};
+ auto raceAttack=[&](){const auto*race=unit.GetRaceModel();for(int i=0;i<RPG_NUM_ATTACK_TYPES;i++)if(race->attacks[i]!=0){p.rpgAttackType=ERPGAttackTypes(i);break;}};
+ auto customSkill=[&](ERPGWeaponTypes type){bool archery=type==RPGWST_BOW||type==RPGWST_CROSSBOW||type==RPGWST_HANDS3||type==RPGWST_HANDS7;return stats.GetAutoSkillLevel(archery?RPGASKL_ARCHERY:RPGASKL_MELEE,&unit);};
+ auto modified=[&](float damage,float roll,bool retail){
+  int slot=int(unit.GetCurrentWeaponSlotIndex());auto*weapon=slot>=0&&slot<int(QI_MAX_WEAPONS)?unit.GetQWeapon(slot):nullptr;
+  bool personage=IsIDofPersonage(unit.GetID()),living=unit.GetTypeID()!=MOTID_ANIMAL&&unit.GetTypeID()!=MOTID_MONSTER;
+  bool hasOwner=personage&&living&&(retail||(unit.GetID()>=1000000000&&unit.GetOwner()!=nullptr));
+  BeginCallback("GetModifiedDamageOnServerJmv");ModLua::Push(state,&stats,frame.scope);ModLua::Push(state,&unit,frame.scope);lua_pushnumber(state,retail?damage:(std::max)(1.f,damage));lua_pushnumber(state,roll);lua_pushinteger(state,retail?0:-1);lua_pushboolean(state,false);lua_pushstring(state,unit.GetPrototype()->szName);lua_pushinteger(state,weapon?weapon->GetShapeEntry()->dwTypeID:0);lua_pushinteger(state,retail?-1:slot);lua_pushboolean(state,hasOwner);lua_pushboolean(state,CombatSetting("JMVFixCriticalHitSoundTrigger")!=0);Call(11,1);
+  double value=Number(state,"Conditional server damage");lua_pop(state,1);if(fabs(value)>(std::numeric_limits<float>::max)())throw std::runtime_error("Conditional damage overflow");return float(value);
+ };
+ Backend b;
+ b.roll=[](){return float(ModNativeCrtRandom::Random(100));};
+ b.retailSeed=[&](){
+  auto*w=unit.GetCurrentQWeapon();
+  if(IsIDofPersonage(unit.GetID())&&w){p.fDamageMin=w->GetDamageMin();p.fDamageMax=w->GetDamageMax();p.rpgWeaponType=w->GetWeaponType();p.rpgAttackType=CItemWeapon::GetAttackType(w->GetSubtypeID());p.fWeaponWeight=w->CItem::GetWeight();p.nAttack=stats.GetWeaponSkillLevel(p.rpgWeaponType,&unit)+w->GetAtackBonus();p.nDefense=stats.GetWeaponSkillLevel(p.rpgWeaponType,&unit)+w->GetDefenceBonus();}
+  else {p.fDamageMin=stats.fpNAWDamageMin;p.fDamageMax=stats.fpNAWDamageMin+stats.fpNAWDamageRnd;p.nAttack=int(stats.fpNAWToHit);p.nDefense=int(stats.fpNAWParry);p.fWeaponWeight=stats.fpNAWWeight;p.rpgWeaponType=w?w->GetWeaponType():stats.rpgNAWWeaponType;if(w)p.rpgAttackType=CItemWeapon::GetAttackType(w->GetSubtypeID());else raceAttack();}
+  if(p.rpgWeaponType==RPGWST_BOW||p.rpgWeaponType==RPGWST_CROSSBOW)p.nDefense=0;
+ };
+ b.retailDamage=[&](bool maximum,float roll){if(maximum)p.fDamageMax=modified(p.fDamageMax,roll,true);else p.fDamageMin=modified(p.fDamageMin,roll,true);};
+ b.initialStats=[&](){if(!IsIDofPersonage(unit.GetID())){auto*server=AuthoritativeServer(&unit);if(!server||!server->GetMapObjectServer())throw std::runtime_error("Conditional attack needs server common stats");BeginCallback("RecalcInitialJmvStatsExt");ModLua::Push(state,&stats,frame.scope);ModLua::Push(state,server->GetMapObjectServer()->GetRPGStats(),frame.scope);ModLua::Push(state,&unit,frame.scope);lua_pushstring(state,unit.GetPrototype()->szName);Call(4,0);}};
+ b.raw=[&](Owner owner){
+  auto*w=unit.GetCurrentQWeapon();
+  if(w){p.fDamageMin=CItemWeapon::GetDamageMin(w->GetSubtypeID());p.fDamageMax=CItemWeapon::GetDamageMax(w->GetSubtypeID());p.rpgWeaponType=w->GetWeaponType();p.rpgAttackType=CItemWeapon::GetAttackType(w->GetSubtypeID());p.fWeaponWeight=w->CItem::GetWeight();float skill=customSkill(p.rpgWeaponType);p.nAttack=int(skill+w->GetAtackBonus());p.nDefense=int(skill+w->GetDefenceBonus());}
+  else {p.rpgWeaponType=stats.rpgNAWWeaponType;p.fDamageMin=stats.fpNAWDamageMin;p.fDamageMax=stats.fpNAWDamageMin+stats.fpNAWDamageRnd;bool direct=owner==Owner::DirectDefender;float skill=direct?customSkill(p.rpgWeaponType):0;p.nAttack=Unarmed(stats.fpNAWToHit,skill,direct);p.nDefense=Unarmed(stats.fpNAWParry,skill,direct);p.fWeaponWeight=stats.fpNAWWeight;raceAttack();}
+ };
+ b.damagePair=[&](float roll){p.fDamageMax=modified(p.fDamageMax,roll,false);p.fDamageMin=modified(p.fDamageMin,roll,false);};
+ b.difficulty=[&](){p.fToHitRandom=stats.fpNAWToHitRandom;p.ApplyDifficultyLevel(IsIDofPersonage(unit.GetID()));};
+ b.attackCallback=[&](int nativeCount){float effects[53]={};const auto&source=unit.GetSpellEffects();for(int i=0;i<source.GetSize();i++){const auto&e=source[i];int id=e.GetEffectType();if(id>=0&&id<nativeCount){if(!std::isfinite(e.GetPower()))throw std::runtime_error("Invalid conditional combat effect");effects[id]=(std::max)(effects[id],e.GetPower());}}BeginCallback("CalcAttackParamsOnServer");ModLua::Push(state,&stats,frame.scope);ModLua::Push(state,&unit,frame.scope);ModLua::Push(state,&p,frame.scope);ModLua::PushEffects(state,effects,53,frame.scope);Call(4,0);};
+ Produce(inherited?Owner::Inherited:Owner::DirectDefender,b);CheckAttack(p);result=p;
+}
+
 void CModPackage::AttackParams(const SRPGUserUnitStats&stats,CUnit&unit,SAttackParams&result){
  CallbackFrame frame(state);SAttackParams p={};auto*w=frame.scope->Weapon(unit,int(unit.GetCurrentWeaponSlotIndex()));bool hero=IsIDofPersonage(unit.GetID());
  if(hero&&w){p.fDamageMin=w->GetDamageMin();p.fDamageMax=w->GetDamageMax();p.rpgWeaponType=w->GetWeaponType();p.rpgAttackType=CItemWeapon::GetAttackType(w->GetSubtypeID());p.fWeaponWeight=w->CItem::GetWeight();const auto*shape=static_cast<const SIDBWeaponShape*>(w->GetShapeEntry());p.nAttack=stats.GetWeaponSkillLevel(p.rpgWeaponType,shape)+w->GetAtackBonus();p.nDefense=stats.GetWeaponSkillLevel(p.rpgWeaponType,shape)+w->GetDefenceBonus();}
@@ -748,6 +1678,16 @@ void CModPackage::AttackParams(const SRPGUserUnitStats&stats,CUnit&unit,SAttackP
 }
 
 int CModPackage::CombatSetting(const char*key)const{auto i=combatSettings.find(key);return i==combatSettings.end()?0:i->second;}
+bool CModPackage::AdvancedUI(const char*key)const{
+ return ModItemUiPolicy::Advanced(key,[&](const char*name){return CombatSetting(name);});
+}
+std::string CModPackage::InstructionComponent(bool prototype,bool figure,const char*code,const char*fallback){
+ const bool enabled=CombatSetting("JMVGraphics2")!=0;
+ const auto result=ModItemUiPolicy::Instruction(enabled,prototype,figure,code,fallback,
+  [&](const char*name,int column){CallbackFrame frame(state);BeginCallback("GetComponents");lua_pushstring(state,name);lua_pushinteger(state,column);Call(2,1);const char*value=lua_tostring(state,-1);std::string result=value?value:"";lua_pop(state,1);return result;});
+ static unsigned notes=0;if(notes++<16)EngineDiagnostics::Event("P05 instruction graphics2=%d prototype=%d figure=%d code=%s resolved=%s",enabled,prototype,figure,code?code:"",result.c_str());
+ return result;
+}
 float CModPackage::GoCampEnemyRadius(){
  CallbackFrame frame(state);BeginCallback("GetGoCampConfigValue");lua_pushinteger(state,1);lua_pushnumber(state,25.0);Call(2,1);
  const double value=Number(state,"GoCamp enemy radius");if(value<0.0||value>500.0)throw std::runtime_error("GoCamp enemy radius is outside 0..500");return static_cast<float>(value);
@@ -795,7 +1735,18 @@ bool CModPackage::PartyDisguiseMatches(const char*name){
  return living>0&&matches;
 }
 // Camp presentation follows addon CI3DObjectNameStats::UpdateStats, not combat wound modifiers.
-void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds,float*displayActions,float*displayMana){
+float CModPackage::CampDisplayMana(const SRPGUnitStats&stats,int carried,int capacity,bool baseStats){
+ CallbackFrame frame(state);BeginCallback("OverloadManacostModsOnServer");
+ lua_pushinteger(state,ModCampStats::Weight(carried,baseStats));lua_pushinteger(state,capacity);Call(2,1);
+ return stats.RecalcMP()*float(Number(state,"Camp overload mana"));
+}
+int CModPackage::CampSkillCapacity(CPersonage&pers,CUnit*unit){
+ float jewelry=1,sets=1;float strength=pers.stats.psStrength.fpEffectiveValue;
+ for(int i=0;i<pers.items.GetSize();++i)if(auto*q=pers.items[i])jewelry+=InfoProperty("GetJewelryPropsInside",q->GetShapeEntry()->szName,12)*.01f;
+ if(unit){strength=unit->GetUserUnitStats()->cStrength;CallbackFrame frame(state);BeginCallback("GetSetsEncumbrance");ModLua::Push(state,unit,frame.scope);Call(1,1);sets=float(Number(state,"Skill sets encumbrance"));}
+ return ModCampStats::Capacity(strength,pers.stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT),jewelry,1,sets);
+}
+void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds,float*displayActions,float*displayMana,bool baseStats){
  const auto&stats=pers.stats;
  float jewelry=1,complex=1,sets=1;
  for(int i=0;i<pers.items.GetSize();++i)if(auto*q=pers.items[i])
@@ -805,7 +1756,7 @@ void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds
   strength=unit->GetUserUnitStats()->cStrength; complex+=InfoComplex(*unit,8)*.01f;
   CallbackFrame frame(state);BeginCallback("GetSetsEncumbrance");ModLua::Push(state,unit,frame.scope);Call(1,1);sets=float(Number(state,"Camp sets encumbrance"));
  }
- capacity=int(strength*12*(1+stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT)*.01f)*jewelry*complex*sets);
+ capacity=ModCampStats::Capacity(strength,stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT),jewelry,complex,sets);
  float actions=(10+stats.psDexterity.fpEffectiveValue*.2f)*(1+stats.GetPerkModifier(14)*.01f);
  int slot=int(pers.dwCurrentWeapon),left=unit?ModStats::LeftHand(*unit):-1;
  auto*right=slot>=0&&slot<pers.weapons.GetSize()?pers.weapons[slot]:nullptr;
@@ -819,11 +1770,7 @@ void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds
  float armor=0;for(int i=0;i<pers.armors.GetSize();++i)if(auto*a=pers.armors[i])armor+=InfoProperty("GetArmorPropsInside",a->GetShapeEntry()->szName,7);
  actions*=1+armor;if(unit)actions*=1+InfoComplex(*unit,18)*.01f;
  if(displayActions)*displayActions=actions;
- if(displayMana){
-  CallbackFrame frame(state);BeginCallback("OverloadManacostModsOnServer");
-  lua_pushinteger(state,int(pers.GetItemsWeight()));lua_pushinteger(state,capacity);Call(2,1);
-  *displayMana=pers.stats.RecalcMP()*float(Number(state,"Camp overload mana"));
- }
+ if(displayMana)*displayMana=CampDisplayMana(pers.stats,int(pers.GetItemsWeight()),capacity,baseStats);
  float points=actions;int attacks=1;
  if(right&&(CombatSetting("JMVAttacks")||(unit&&IsIDofPersonage(unit->GetID()))))points=float(right->GetActionPoints());
  if(CombatSetting("JMVAttacks")&&right&&off&&off->GetWeaponType()!=RPGWST_HANDS1){
@@ -871,6 +1818,54 @@ ModCombat::Defense CModPackage::IncomingAttack(const SRPGUnitStats&stats,CUnit&u
  }
  if(!std::isfinite(d.block)||!std::isfinite(d.parryChance)||!std::isfinite(d.damageMultiplier))throw std::runtime_error("Invalid incoming combat result");return d;
 }
+ModCombat::Defense CModPackage::IncomingCustomAttack0(const SRPGUnitStats&stats,CUnit&unit,CUnit*attacker,const SRPGAttackPortion&ap){
+ CallbackFrame frame(state);ModCombat::Defense d;d.custom0=true;SRPGUnitStats staged=stats;frame.scope->unit=&unit;frame.scope->stagedStats=&staged;
+ auto finish=[&](const char*fn,int n){Call(n,1);float result=CombatNumber(state,fn);lua_pop(state,1);return result;};
+ auto unitNumber=[&](const char*fn,CUnit&u){BeginCallback(fn);ModLua::Push(state,&u,frame.scope);return finish(fn,1);};
+ auto clientNumber=[&](const char*fn,int slot){BeginCallback(fn);ModLua::Push(state,unit.GetUserUnitStats(),frame.scope);ModLua::Push(state,&unit,frame.scope);if(slot>=0)lua_pushinteger(state,slot);return finish(fn,slot>=0?3:2);};
+ const int left=frame.scope->LeftHand(unit),current=int(unit.GetCurrentWeaponSlotIndex());auto*lw=left>=0?frame.scope->Weapon(unit,left):nullptr;auto*rw=frame.scope->Weapon(unit,current);
+ if((lw&&lw->GetWeaponType()==RPGWST_HANDS1)||(CombatSetting("JMVWeaponBlocking")&&rw))d.block=clientNumber("CheckShieldBlock",-1);
+ float jewelry=0;for(int i=0;i<4;i++)if(auto*q=unit.GetQItem(i))jewelry+=InfoProperty("GetJewelryPropsInside",q->GetShapeEntry()->szName,12)*.01f;
+ float sets=unitNumber("GetSetsEncumbrance",unit);
+ float capacity=float(unit.GetUserUnitStats()->cStrength)*12;capacity+=capacity*stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT)*.01f;
+ int maxWeight=CombatInt((capacity+capacity*jewelry)*sets),weight=CombatInt(unit.GetItemsWeight());
+ auto overload=[&](){BeginCallback("GetOverloadParryOnServer");lua_pushinteger(state,weight);lua_pushinteger(state,maxWeight);return finish("GetOverloadParryOnServer",2);};
+ d.parryChance=ModCustomLower::Parry(current,left,current>=0&&current<4,[&](int slot){return clientNumber("GetWeaponParryChance",slot);},overload,[](){return ModCustomLower::CrtRoll(100);},d.parry);
+ if(ap.fBackStabMultiplier!=1||unit.HasSpellEffect(SPELL_ID_STUN)){d.block=0;d.parry=false;}
+ if(attacker){
+  if(ap.hl==RPGHL_ALL)d.scaleMagic=[this,attacker,ap](float damage){return ScaleCustomMagic0(*attacker,ap,damage);};
+  else d.scaleSingle=[this,attacker,location=ap.hl](float damage){return ScaleCustomSingle0(*attacker,location,damage);};
+ }
+ d.rekeyCritical=[this](float original,float scaled){if(CombatSetting("JMVDaggerCritical"))customCriticals.Rekey(original,scaled);};
+ d.resolveCritical=[this](float damage,float total){return customCriticals.Resolve(damage,total);};
+ if(!std::isfinite(d.block)||!std::isfinite(d.parryChance)||!std::isfinite(d.damageMultiplier))throw std::runtime_error("Invalid custom0 combat result");return d;
+}
+float CModPackage::ScaleCustomMagic0(CUnit&attacker,const SRPGAttackPortion&ap,float damage){
+ CallbackFrame frame(state);int type=3;for(int i=3;i<RPG_NUM_ATTACK_TYPES;i++)if(ap.fpAttacks[i]>0){type=i;break;}
+ auto*client=attacker.GetUserUnitStats();int intelligence=int(client->cIntelligence)-25,perkType=type==4?5:type==5?4:type;
+ float skill=float(client->cAutoSkills[(type-3)<=RPGMST_ACID?RPGASKL_ELEMENTAL:(type-3)<=RPGMST_DIVINATION?RPGASKL_SENSE:RPGASKL_ASTRAL]);skill+=client->GetPerkModifier(RPGPRK_FIRE+perkType-3);
+ int totalSkill=CombatInt(skill+intelligence);float skillModifier=.8f+(totalSkill*30.f/120.f)/100.f,difficulty=attacker.GetOwner()?1+theSettings.nDifficultyLevel*.25f:1;
+ auto*server=AuthoritativeServer(&attacker);if(!server)throw std::runtime_error("Custom0 magic attacker has no stats");SRPGUnitStats staged=*server->GetRPGStats();frame.scope->unit=&attacker;frame.scope->stagedStats=&staged;
+ BeginCallback("GetWiseManDamageModiferLS");ModLua::Push(state,&attacker,frame.scope);ModLua::Push(state,&staged,frame.scope);lua_pushnumber(state,staged.psIntelligence.fpEffectiveValue);Call(3,1);float wise=CombatNumber(state,"GetWiseManDamageModiferLS");lua_pop(state,1);
+ BeginCallback("GetComplexSummStats");ModLua::Push(state,&attacker,frame.scope);lua_pushinteger(state,12);Call(2,1);float complexModifier=1+CombatNumber(state,"GetComplexSummStats");lua_pop(state,1);
+ return damage*wise*skillModifier*difficulty*complexModifier;
+}
+float CModPackage::ScaleCustomSingle0(CUnit&attacker,ERPGHitLocations location,float damage){
+ const bool limbs=CombatSetting("JMVAnatomyLimbDamage")!=0;
+ if(location!=RPGHL_HEAD&&(!limbs||location<RPGHL_LHAND||location>RPGHL_RLEG))return damage;
+ float anatomy=1+attacker.GetUserUnitStats()->GetPerkModifier(20)*.01f;
+ if(location!=RPGHL_HEAD)return damage*anatomy;
+ CallbackFrame frame(state);BeginCallback("GetComplexSummStats");ModLua::Push(state,&attacker,frame.scope);lua_pushinteger(state,19);Call(2,1);float complex=1+CombatNumber(state,"GetComplexSummStats")*.01f;lua_pop(state,1);
+ return limbs?damage*(anatomy*complex):damage*anatomy*complex;
+}
+int CModPackage::CustomLeft(const CUnit&unit)const{ModLua::Scope scope;return scope.LeftHand(unit);}
+void CModPackage::RememberCustomAttack0(const SRPGUnitStats&stats,const CUnit&unit,const SRPGAttackPortion&ap,float roll){
+ CallbackFrame frame(state);SRPGUnitStats staged=stats;frame.scope->unit=&unit;frame.scope->stagedStats=&staged;int current=int(unit.GetCurrentWeaponSlotIndex()),left=frame.scope->LeftHand(unit);auto*w=frame.scope->Weapon(unit,current);float chance=0;
+ if(current>=0&&current<4&&w){BeginCallback("GetCritOnServerJmv");ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,&unit,frame.scope);lua_pushinteger(state,left);lua_pushboolean(state,false);lua_pushstring(state,unit.GetPrototype()->szName);lua_pushinteger(state,w->GetWeaponType());lua_pushinteger(state,current);Call(7,1);chance=CombatNumber(state,"Custom0 critical chance");}
+ customCriticals.Put(ap.fpDamage,roll<chance&&roll!=0,unit.GetTypeID()!=MOTID_HUMAN);
+}
+bool CModPackage::CustomCriticalHit(const SRPGAttackPortion&ap){return customCriticals.Hit(ap.fpDamage);}
+
 std::string CModPackage::DualAnimation(const CUnit&unit)
 {
  if(!CombatSetting("JMVAttacks"))return {};
@@ -913,6 +1908,14 @@ std::vector<std::pair<int,bool>> CModPackage::DualStrikes(const char*animation,i
 
 int CModPackage::AttackSlot(const CUnit&unit,bool left){
  ModLua::Scope scope;int slot=int(unit.GetCurrentWeaponSlotIndex());if(left){int candidate=scope.LeftHand(unit);auto*w=scope.Weapon(unit,candidate);if(w&&w->GetWeaponType()!=RPGWST_HANDS1)slot=candidate;}return slot;
+}
+void ModHitHistory::ClearRuntimeHitHistory(const char* reason){
+ const auto count=State().Size();State().Clear();static unsigned notes=0;if(count && notes++<16)EngineDiagnostics::Event("P04 hit history reset reason=%s records=%u",reason,unsigned(count));
+}
+void CModPackage::CompensateHitHistory(const SRPGUnitStats&stats,CUnit&victim,CUnit*attacker,SRPGAttackPortion&ap,int defense,bool directCustom){
+ const float before=ap.fpToHit;auto result=ModHitHistory::State().Observe(ModHitHistory::Enabled(CombatSetting("JMVAttacks")!=0,directCustom),attacker!=nullptr,attacker?attacker->GetID():0,victim.GetID(),ap.hl==RPGHL_ALL,before,defense,[&]{return StatsNumber("GetWeaponsMasterLS",stats);});
+ ap.fpToHit=result.score;
+ static unsigned notes=0;if(result.reason!=ModHitHistory::Reason::Disabled && notes++<32)EngineDiagnostics::Event("P04 hit history attacker=%d victim=%d reason=%d all=%d score=%g->%g defense=%d counts=%d/%d->%d/%d zero=%d maximum=%d missCap=%d",attacker?int(attacker->GetID()):-1,victim.GetID(),int(result.reason),ap.hl==RPGHL_ALL,double(before),double(ap.fpToHit),defense,result.before.hits,result.before.misses,result.after.hits,result.after.misses,result.zero,result.maximum,result.missCap);
 }
 void CModPackage::RememberAttack(const SRPGUnitStats&stats,const CUnit&unit,const SRPGAttackPortion&ap,float roll,bool left){
  CallbackFrame frame(state);SRPGUnitStats staged=stats;frame.scope->unit=&unit;frame.scope->stagedStats=&staged;int slot=AttackSlot(unit,left);auto*w=frame.scope->Weapon(unit,slot);float chance=0;
@@ -1006,10 +2009,34 @@ bool CModPackage::SkillConfig(CSpell*spell,ModSkills::Config&config){
 }
 bool CModPackage::TargetSkill(CSpell*spell)const{
  if(!spell||!spell->GetPrototype())return false;std::string code=Lower((LPCSTR)spell->GetPrototype()->szCodeName);
- return code=="powerhit"||code=="test"||code=="precisehit"||code=="doubleshot"||code=="preciseshot"||code=="cripplinghit";
+ return code=="powerhit"||code=="test"||code=="precisehit"||code=="doubleshot"||code=="preciseshot"||code=="cripplinghit"||code=="explosiveshot";
 }
 float CModPackage::InfoProperty(const char*callback,const char*name,int property){
  CallbackFrame frame(state);BeginCallback(callback);lua_pushstring(state,name);lua_pushinteger(state,property);Call(2,1);double n=Number(state,callback);if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Info property overflow");return float(n);
+}
+bool CModPackage::InfoForbiddenSpell(const char*name,int shop){
+ CallbackFrame frame(state);BeginCallback("IsForbiddenItem");lua_pushstring(state,name);lua_pushinteger(state,1);lua_pushinteger(state,shop);Call(3,1);return Number(state,"IsForbiddenItem")!=0;
+}
+float CModPackage::InfoPerkBonus(const char*callback,int level){
+ CallbackFrame frame(state);BeginCallback(callback);lua_pushinteger(state,level);Call(1,1);return float(Number(state,callback));
+}
+int CModPackage::InfoSetPosition(const char*name,int position,int property){
+ CallbackFrame frame(state);BeginCallback("GetSetItemStatsPos");lua_pushstring(state,name);lua_pushinteger(state,position);lua_pushinteger(state,property);Call(3,1);
+ // Native LuaPop<int32_t> converts a missing table field to zero.
+ return lua_isnil(state,-1)?0:int(Number(state,"GetSetItemStatsPos"));
+}
+int CModPackage::InfoComplexProperty(int set,int property,int position){
+ const char*callback=position<0?"GetComplex":"GetComplexPos";CallbackFrame frame(state);BeginCallback(callback);lua_pushinteger(state,set);
+ if(position>=0)lua_pushinteger(state,position);lua_pushinteger(state,property);Call(position<0?2:3,1);
+ return lua_isnil(state,-1)?0:int(float(Number(state,callback)));
+}
+std::vector<std::pair<int,int>> CModPackage::InfoSetBonuses(const char*name,int count,int set,bool complex){
+ std::vector<std::pair<int,int>> result;
+ // Installed FormTextInfo loops 3..JMVUS_MAX(22), count1..equipped, and three columns.
+ for(int stat=3;stat<=22;++stat){int sum=0;for(int c=1;c<=count;++c)for(int i=1;i<=3;++i){
+  int type=complex?InfoComplexProperty(set,4+i,c):InfoSetPosition(name,c,2+i);
+  if(type&&type==stat)sum+=complex?InfoComplexProperty(set,7+i,c):InfoSetPosition(name,c,5+i);
+ }if(sum)result.emplace_back(stat,sum);}return result;
 }
 float CModPackage::InfoMagicBlood(int level){
  CallbackFrame frame(state);BeginCallback("GetRegenBonusFromPerkMagicBlood");lua_pushinteger(state,level);Call(1,1);return float(Number(state,"MagicBlood"));
@@ -1106,20 +2133,48 @@ void CModPackage::GrantSkillPrototypes(CParty&party){
 }
 bool CModPackage::CompanionSkillAI(CUnit&unit) const{if(!unit.IsHero()||!unit.GetOwner())return false;CString key;key.Format("jmv.companion.ai.v1.%d",unit.GetID());return unit.GetOwner()->party.vars.GetVar(key)>=.5f;}
 
+void CModPackage::BeginInfoStats(){infoStats->Begin(initialization->epoch,theWorld.GetMapObjectManager(),theWorldServer.GetSpecificManager(),(LPCSTR)theWorldServer.szMobFileName,theWorldServer.GetSegmentTimeCounter());}
+void CModPackage::EndInfoStats(){infoStats->End();}
+void CModPackage::InvalidateInfoStatsCache(){infoStats->Invalidate();}
 float CModPackage::PanelDamage(CUnit&unit,float damage,int slot,bool left){
  CallbackFrame frame(state);auto*w=slot>=0?frame.scope->Weapon(unit,slot):nullptr;
+ std::string args;
+ if(infoStats->depth==1){
+  ModInfoStats::KeyValue(args,damage);const float roll=-1;ModInfoStats::KeyValue(args,roll);
+  const auto weaponType=w?w->GetWeaponType():0;ModInfoStats::KeyValue(args,weaponType);ModInfoStats::KeyValue(args,slot);
+  const bool owner=IsIDofPersonage(unit.GetID())&&unit.GetTypeID()!=MOTID_ANIMAL&&unit.GetTypeID()!=MOTID_MONSTER;
+  ModInfoStats::KeyValue(args,owner);const bool fix=CombatSetting("JMVFixCriticalHitSoundTrigger")!=0;ModInfoStats::KeyValue(args,fix);
+  ModInfoStats::KeyString(args,unit.GetPrototype()->szName);
+ }
+ return ModInfoStats::Call(*infoStats,state,ModInfoStats::Damage,unit,*frame.scope,args,
+  std::isfinite(damage)&&CombatSetting("JMVFixCriticalHitSoundTrigger")!=0,[&](){
  BeginCallback("GetModifiedDamageOnClientJmv");ModLua::Push(state,unit.GetUserUnitStats(),frame.scope);ModLua::Push(state,&unit,frame.scope);
  lua_pushnumber(state,damage);lua_pushnumber(state,-1);lua_pushstring(state,unit.GetPrototype()->szName);
  lua_pushinteger(state,w?w->GetWeaponType():0);lua_pushinteger(state,slot);
  lua_pushboolean(state,IsIDofPersonage(unit.GetID())&&unit.GetTypeID()!=MOTID_ANIMAL&&unit.GetTypeID()!=MOTID_MONSTER);
  lua_pushboolean(state,CombatSetting("JMVFixCriticalHitSoundTrigger")!=0);Call(9,1);return CombatNumber(state,"Panel damage");
+ });
 }
 float CModPackage::PanelCritical(CUnit&unit,int slot,bool left,bool power){
  CallbackFrame frame(state);auto*w=slot>=0?frame.scope->Weapon(unit,slot):nullptr;
+ const float modifier=unit.GetUserUnitStats()->GetPerkModifier(power?4:12);std::string args;
+ if(infoStats->depth==1){
+  ModInfoStats::KeyValue(args,modifier);const int hand=left?slot:-1;ModInfoStats::KeyValue(args,hand);ModInfoStats::KeyValue(args,left);
+  ModInfoStats::KeyValue(args,slot);const auto weaponType=w?w->GetWeaponType():0;ModInfoStats::KeyValue(args,weaponType);
+  ModInfoStats::KeyString(args,unit.GetPrototype()->szName);
+ }
+ return ModInfoStats::Call(*infoStats,state,power?ModInfoStats::CritDamage:ModInfoStats::CritChance,unit,*frame.scope,args,std::isfinite(modifier),[&](){
  BeginCallback(power?"GetCritDamageOnClientJmv":"GetCritOnClientJmv");ModLua::Push(state,&unit,frame.scope);
- lua_pushnumber(state,unit.GetUserUnitStats()->GetPerkModifier(power?4:12));
+ lua_pushnumber(state,modifier);
  lua_pushinteger(state,left?slot:-1);lua_pushboolean(state,left);lua_pushstring(state,unit.GetPrototype()->szName);
  lua_pushinteger(state,w?w->GetWeaponType():0);lua_pushinteger(state,slot);Call(7,1);return CombatNumber(state,"Panel critical");
+ });
+}
+void CModPackage::IdleShieldValues(CUnit& unit,float& power,float& block,float& parry){
+ CallbackFrame frame(state);
+ auto value=[&](const char* fn,bool hand){BeginCallback(fn);ModLua::Push(state,unit.GetUserUnitStats(),frame.scope);ModLua::Push(state,&unit,frame.scope);
+  if(hand)lua_pushinteger(state,frame.scope->LeftHand(unit));Call(hand?3:2,1);float result=CombatNumber(state,fn);lua_pop(state,1);return result;};
+ power=value("GetShieldBlock",false);block=value("GetShieldBlockChance",false);parry=value("GetWeaponParryChance",true);
 }
 void CModPackage::PanelDefense(CUnit&unit,int weight,int capacity,float&block,float&parry){
  CallbackFrame frame(state);
@@ -1134,4 +2189,66 @@ void CModPackage::PanelDefense(CUnit&unit,int weight,int capacity,float&block,fl
  if(left<0){parry=first*100;return;}
  float second=value("GetWeaponParryChance",left)*.01f*factor;
  parry=(first<.0001f?second:second<.0001f?first:first+second-2*first*second)*100;
+}
+
+// Returns before Host/WinMain startup. Exercises the actual settings stage and
+// actual registry reader only: no Lua main, engine bindings, world/device/audio.
+bool InspectModConfigurationCommandLine(int& result){
+ int count=0;LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&count);if(!args)return false;
+ struct Free{LPWSTR* p;~Free(){LocalFree(p);}} free{args};
+ if(count<2||wcscmp(args[1],L"--check-config-g3"))return false;
+ result=1;Json report={{"success",false},{"gameplayActivated",false},{"worldCreated",false},{"deviceCreated",false},{"audioStarted",false},{"luaMainExecuted",false},{"cases",Json::array()}};
+ fs::path output=count>=5?args[4]:L"config-g3.json";
+ try{
+  if(count!=5)throw std::runtime_error("Expected mod directory, configuration fixture spec and report path");
+  std::ifstream specification(fs::path(args[3]),std::ios::binary);Json spec;specification>>spec;
+  CModPackage package;package.Load(fs::path(args[2]).string());
+  const auto ai=package.configs.find("ai.reg");if(ai==package.configs.end())throw std::runtime_error("Installed package has no AI registry");
+  report["aiRegistry"]=ai->second;size_t assertions=0;
+  auto require=[&](bool good,const char* reason){++assertions;if(!good)throw std::runtime_error(reason);};
+  auto values=[&](CFileRegistry& reg){
+   const bool complex=package.ConfigureAddonSettings(reg);Json out=Json::object();
+   size_t n=0;const auto* rules=ModConfiguration::CombatRules(n);
+   for(size_t i=0;i<n;++i)out[rules[i].key]=package.CombatSetting(rules[i].key);
+   out["JMVExpMult"]=package.CombatSetting("JMVExpMult");
+   out["JMVGoCamp"]=int(ModConfiguration::Bool(reg,"Addon","JMVGoCamp",true));
+   out["JMVRegisterLoot"]=int(package.registeredLoot);out["JMVNpcStatRefresh"]=int(package.npcStatRefresh);
+   out["JMVNpcDatabaseMigration"]=int(package.npcDatabaseMigration);out["JMVExtendActiveObjectsArea"]=int(package.extendActiveObjectsArea);
+   out["JMVBriefingWeapons"]=int(package.briefingWeapons);out["JMVWorldBackground"]=int(package.worldBackground);
+   out["JMVPartyVisualOptions"]=int(package.partyVisualOptions);out["JMVNpcArmorCalculation"]=int(package.npcArmorCalculation);
+   out["JMVNpcTrickster"]=int(package.npcTrickster);out["JMVNpcArmorMaterialEffects"]=int(package.npcMaterialEffects);
+   out["JMVSetItemsComplex"]=int(complex);out["AddonExp/Limit"]=package.experienceLimit;out["MagicRandom"]=package.magicRandomLimit;
+   const auto& a=ModAudioSettings();
+   out["JMVSpeechMusicDucking"]=int(a.JMVSpeechMusicDucking);out["JMVFixStepSoundVariantGenerator"]=int(a.JMVFixStepSoundVariantGenerator);
+   out["JMVSuppressEmptyStartSfx"]=int(a.JMVSuppressEmptyStartSfx);out["JMVMiniaudioModalSpeechPausePrototype"]=int(a.JMVMiniaudioModalSpeechPausePrototype);
+   out["JMVMiniaudioGamePauseSpeechPrototype"]=int(a.JMVMiniaudioGamePauseSpeechPrototype);out["JMVMiniaudioBinkOutputPrototype"]=int(a.JMVMiniaudioBinkOutputPrototype);
+   out["JMVMiniaudioBinkPreciseWaitPrototype"]=int(a.JMVMiniaudioBinkPreciseWaitPrototype);out["JMVMiniaudioBinkReadyBackpressurePrototype"]=int(a.JMVMiniaudioBinkReadyBackpressurePrototype);
+   out["JMVMiniaudioMissingAudioCatalogDiagnostic"]=int(a.JMVMiniaudioMissingAudioCatalogDiagnostic);
+   out["JMVSfxReverbOutdoorLevel"]=a.JMVSfxReverbOutdoorLevel;out["JMVSfxReverbOutdoorReflection"]=a.JMVSfxReverbOutdoorReflection;out["JMVSfxReverbOutdoorDecay"]=a.JMVSfxReverbOutdoorDecay;
+   out["JMVSfxReverbCaveLevel"]=a.JMVSfxReverbCaveLevel;out["JMVSfxReverbCaveReflection"]=a.JMVSfxReverbCaveReflection;out["JMVSfxReverbCaveDecay"]=a.JMVSfxReverbCaveDecay;
+   out["JMVFalloutCameraYaw"]=ModConfiguration::Float(reg,"Addon","JMVFalloutCameraYaw",45.0f);
+   out["JMVFalloutCameraPitch"]=ModConfiguration::Float(reg,"Addon","JMVFalloutCameraPitch",35.264f);
+   out["JMVFalloutCameraTelephotoMultiplier"]=ModConfiguration::Float(reg,"Addon","JMVFalloutCameraTelephotoMultiplier",2.0f);
+   require(!package.scriptInitialized,"Settings fixture executed Lua main");return out;
+  };
+  Json installed;
+  for(const auto& item:spec.at("cases")){
+   CFileRegistry reg;require(reg.Open(item.at("path").get<std::string>().c_str())!=FALSE,"Cannot open configuration fixture");
+   const Json observed=values(reg);const Json& expected=item.at("expected");require(observed.size()==expected.size(),"Configuration fixture scope differs");
+   for(auto it=expected.begin();it!=expected.end();++it){
+    require(observed.contains(it.key()),"Mapped setting not observed");
+    const double want=it.value().get<double>(),got=observed.at(it.key()).get<double>();
+    if(!std::isfinite(got)||std::abs(got-want)>1e-6*(std::max)(1.0,std::abs(want)))throw std::runtime_error(item.at("name").get<std::string>()+": "+it.key()+" differs");++assertions;
+   }
+   if(item.at("name")=="actual installed AI registry"){
+    require(fs::equivalent(item.at("path").get<std::string>(),ai->second),"Fixture does not use installed config owner");
+    require(package.CombatSetting("JMVGoCamp")==observed.at("JMVGoCamp"),"Early Load GoCamp mapping differs");installed=observed;
+   }
+   report["cases"].push_back({{"name",item.at("name")},{"settings",observed.size()},{"observed",observed}});
+  }
+  CFileRegistry active;require(active.Open(ai->second.c_str())!=FALSE,"Cannot restore actual settings fixture");require(values(active)==installed,"Settings reload retained stale values");
+  require(package.mainScript=="main.lua","Current main script selection changed");
+  report["assertions"]=assertions;report["success"]=true;result=0;
+ }catch(const std::exception& e){report["error"]=e.what();}
+ std::ofstream stream(output,std::ios::binary);stream<<report.dump(2);return true;
 }

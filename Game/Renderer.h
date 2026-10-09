@@ -223,6 +223,10 @@ public:
     BOOL SetTexturingAlphaMode(ER_TEXTURING_ALPHA_MODE alphaMode);
     HRESULT SetRenderState(D3DRENDERSTATETYPE dwRenderStateType, DWORD dwRenderState);
     HRESULT GetRenderState(D3DRENDERSTATETYPE dwRenderStateType, DWORD *pdwRenderState);
+    bool TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* norms,int nNumNorms,
+        const DWORD* colors,const DWORD* speculars,const CPlot2D* maps,int nNumMaps,
+        const SVertexComponents* components,int nNumComponents,const WORD* indices,int nNumIndices,
+        float u,float v,BYTE fog,DWORD flags,const CPlot3D* morphs,int morphCount);
     int Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const int nNumNorms,
                LPDWORD colors, LPDWORD speculars, CPlot2D *maps, const int nNumMaps,
                SVertexComponents *components, const int nNumComponents,

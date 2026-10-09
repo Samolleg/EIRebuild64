@@ -18,6 +18,15 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Party.h"
 
 #include "AckDatabase.h"
+
+namespace
+{
+int CreationPrimaryWeight(int value)
+{
+    // Integral of the native 15..32 step prices; start 25 has weight 10.
+    return value - 15 + (value >= 26) + (value >= 27) + (value >= 29);
+}
+}
 /////////////////////////////////////////////////////////////////////////////////////
 const int PERS_NUM_SLOTS_VISIBLE = 10;
 const int VOICE_NUM_SLOTS_VISIBLE = 11;
@@ -26,6 +35,8 @@ const int NUM_AREAS = 9;
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::OnActivate()
 {
+    bPrimaryCreationActive = false;
+    nPrimaryCreationWeight = 0;
     IWorldConnector.LMPReloadDatabases(true);
 
     int i;
@@ -267,6 +278,7 @@ void CI3DScreenChoosePers::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::OnDeactivate()
 {
+    EndPrimaryCreation();
     LMPPartySet.Store();
 
     // remove
@@ -372,6 +384,10 @@ BOOL CI3DScreenChoosePers::Draw(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::SetMode(EItemScreenModes eNewMode)
 {
+    if (eNewMode == ISM_CHOOSEPERS)
+        EndPrimaryCreation();
+    else
+        pNameStats->StopPrimaryRepeat();
     GetMapObjTranslation(0)->ShowAllBodyParts(false);
     pSlots->Show(FALSE);
     pSpells->Show(FALSE);
@@ -569,6 +585,7 @@ CPersonage *CI3DScreenChoosePers::GetCurrentPers()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::ChooseParty(int nParty)
 {
+    EndPrimaryCreation();
     // remove
     CPersonages personages;
     CParty &party = IWorldClient.GetParty();
@@ -605,6 +622,10 @@ void CI3DScreenChoosePers::ChooseParty(int nParty)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::SetPrototype(LPCTSTR pszPrototype)
 {
+    if (!bPrimaryCreationActive ||
+        (eScreenMode != ISM_CHOOSEPERS && eScreenMode != ISM_SKIN))
+        return;
+    pNameStats->StopPrimaryRepeat();
     // deploy
     CPersonages personages;
     CParty &party = IWorldClient.GetParty();
@@ -613,9 +634,9 @@ void CI3DScreenChoosePers::SetPrototype(LPCTSTR pszPrototype)
     if (party.people.GetSize() > 0)
     {
         SRPGUnitStats *pStats = &party.people[0].stats;
-        fStr = pStats->psStrength.fpEffectiveValue;
-        fDex = pStats->psDexterity.fpEffectiveValue;
-        fInt = pStats->psIntelligence.fpEffectiveValue;
+        fStr = pStats->psStrength.fpBaseValue;
+        fDex = pStats->psDexterity.fpBaseValue;
+        fInt = pStats->psIntelligence.fpBaseValue;
         fTall = party.people[0].complection.tall;
         personages.Add(&party.people[0]);
         IWorldClient.RemoveClientPersonages(personages);
@@ -761,6 +782,9 @@ void CI3DScreenChoosePers::OnLButtonDown(UINT nFlags, CPoint point)
             break;
         case 4: {
             pI3D->BeginFX("buttons\\messbox\\cancel.wav");
+            if (!bPrimaryCreationActive)
+                break;
+            BeginPrimaryCreation();
             ASSERT(males.size() > 0);
             SetPrototype(males[0]);
             CPersonage *pPers = GetCurrentPers();
@@ -909,13 +933,7 @@ void CI3DScreenChoosePers::OnIdle()
     }
     if (eScreenMode == ISM_SKIN)
     {
-        CString szName = pPersName->GetString();
-        CPersonage *pPers = GetCurrentPers();
-        SRPGUnitStats *pStats = &pPers->stats;
-        if (pStats->psStrength.fpBaseValue + pStats->psDexterity.fpBaseValue +
-                    pStats->psIntelligence.fpBaseValue ==
-                75 &&
-            !szName.IsEmpty())
+        if (CanProceedToStats())
             figures[9]->SetAmbient(1, 1, 1);
         else
             figures[9]->SetAmbient(.5f, .5f, .5f);
@@ -924,6 +942,9 @@ void CI3DScreenChoosePers::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::NewParty()
 {
+    if (eScreenMode != ISM_CHOOSEPERS)
+        return;
+    BeginPrimaryCreation();
     ASSERT(males.size() > 0);
     SetPrototype(males[0]);
     pNameStats->SetPersonage(0, "");
@@ -939,6 +960,12 @@ void CI3DScreenChoosePers::NewParty()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::FinishCreateParty()
 {
+    if (eScreenMode != ISM_STATS || !HasCompletePrimaryDistribution() ||
+        GetCurrentPers()->szName.IsEmpty())
+    {
+        pI3D->BeginFX("buttons\\messbox\\cancel.wav");
+        return;
+    }
     pI3D->BeginFX("buttons\\messbox\\ok.wav");
     CPersonage *pPers = GetCurrentPers();
 
@@ -1079,6 +1106,7 @@ void CI3DScreenChoosePers::Connect()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenChoosePers::ReturnToSkinSelect()
 {
+    pNameStats->StopPrimaryRepeat();
     pI3D->BeginFX("buttons\\messbox\\cancel.wav");
     pNameStats->SetPersonage(0, "");
 #ifndef NOGETDC
@@ -1091,16 +1119,108 @@ void CI3DScreenChoosePers::ReturnToSkinSelect()
     pPersName->SetString(GetCurrentPers()->szName);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenChoosePers::BeginPrimaryCreation()
+{
+    pNameStats->StopPrimaryRepeat();
+    nPrimaryCreationWeight = 3 * CreationPrimaryWeight(25);
+    bPrimaryCreationActive = true;
+}
+
+void CI3DScreenChoosePers::EndPrimaryCreation()
+{
+    if (pNameStats)
+        pNameStats->StopPrimaryRepeat();
+    bPrimaryCreationActive = false;
+    nPrimaryCreationWeight = 0;
+}
+
+bool CI3DScreenChoosePers::GetCreationPrimaryValues(int values[3])
+{
+    if (!bPrimaryCreationActive || IWorldClient.GetParty().people.GetSize() != 1)
+        return false;
+    const SRPGUnitStats &stats = IWorldClient.GetParty().people[0].stats;
+    const float base[3] = { stats.psStrength.fpBaseValue, stats.psDexterity.fpBaseValue,
+                            stats.psIntelligence.fpBaseValue };
+    for (int i = 0; i < 3; ++i)
+    {
+        // Check before the cast: rejects nonfinite and nonintegral values unchanged.
+        if (!(base[i] >= 15 && base[i] <= 32))
+            return false;
+        values[i] = static_cast<int>(base[i]);
+        if (base[i] != values[i])
+            return false;
+    }
+    return true;
+}
+
+bool CI3DScreenChoosePers::GetCreationPrimaryPoints(int &points)
+{
+    points = -1;
+    int values[3];
+    if (!GetCreationPrimaryValues(values))
+        return false;
+    const int remaining = nPrimaryCreationWeight - CreationPrimaryWeight(values[0]) -
+                          CreationPrimaryWeight(values[1]) - CreationPrimaryWeight(values[2]);
+    if (remaining < 0)
+        return false;
+    points = remaining;
+    return true;
+}
+
+bool CI3DScreenChoosePers::CanEditCreationPrimary()
+{
+    int points;
+    return eScreenMode == ISM_SKIN && GetCreationPrimaryPoints(points);
+}
+
+bool CI3DScreenChoosePers::CanAdjustCreationPrimary(int primary, int delta)
+{
+    if (primary < 0 || primary >= 3 || (delta != -1 && delta != 1))
+        return false;
+    int points, values[3];
+    if (!GetCreationPrimaryPoints(points) || !GetCreationPrimaryValues(values))
+        return false;
+    const int value = values[primary];
+    if (delta < 0)
+        return value > 15;
+    return value < 32 &&
+           points >= CreationPrimaryWeight(value + 1) - CreationPrimaryWeight(value);
+}
+
+bool CI3DScreenChoosePers::AdjustCreationPrimary(int primary, int delta)
+{
+    if (eScreenMode != ISM_SKIN || !CanAdjustCreationPrimary(primary, delta))
+        return false;
+    SRPGUnitStats &stats = IWorldClient.GetParty().people[0].stats;
+    float *base[3] = { &stats.psStrength.fpBaseValue, &stats.psDexterity.fpBaseValue,
+                       &stats.psIntelligence.fpBaseValue };
+    float *effective[3] = { &stats.psStrength.fpEffectiveValue,
+                            &stats.psDexterity.fpEffectiveValue,
+                            &stats.psIntelligence.fpEffectiveValue };
+    *base[primary] += delta;
+    *effective[primary] = *base[primary];
+    return true;
+}
+
+bool CI3DScreenChoosePers::HasCompletePrimaryDistribution()
+{
+    int points;
+    return GetCreationPrimaryPoints(points) && points == 0;
+}
+
+bool CI3DScreenChoosePers::CanProceedToStats()
+{
+    CString name = pPersName->GetString();
+    return eScreenMode == ISM_SKIN && HasCompletePrimaryDistribution() &&
+           !name.IsEmpty();
+}
+
 void CI3DScreenChoosePers::CheckProceedToStats()
 {
     CString szName = pPersName->GetString();
-    CPersonage *pPers = GetCurrentPers();
-    SRPGUnitStats *pStats = &pPers->stats;
-    if (pStats->psStrength.fpBaseValue + pStats->psDexterity.fpBaseValue +
-                pStats->psIntelligence.fpBaseValue ==
-            75 &&
-        !szName.IsEmpty())
+    if (CanProceedToStats())
     {
+        CPersonage *pPers = GetCurrentPers();
         pI3D->BeginFX("buttons\\messbox\\ok.wav");
         pSelWeapon = (pPers->weapons.GetSize() > 0) ? pPers->weapons[0] : 0;
         pSlots->SetCurrentWeapon(pSelWeapon);
@@ -1117,6 +1237,19 @@ void CI3DScreenChoosePers::CheckProceedToStats()
         pI3D->BeginFX("buttons\\messbox\\cancel.wav");
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenChoosePers::RefreshProgression()
+{
+    if(!pCurUnit || !pNameStats)return;
+    CPersonage* pers=GetCurrentPers();if(!pers)return;
+    pCurUnit->ChangeWeapon(-1);
+    for(int i=0;i<QI_MAX_WEAPONS;++i)pCurUnit->RemoveWeapon(i);
+    for(int i=0;i<pers->weapons.GetSize();++i)pCurUnit->AddWeapon(pers->weapons[i]);
+    pCurUnit->ConvertWeaponsOnClient();
+    pCurUnit->ChangeWeapon(pers->dwCurrentWeapon);
+    pCurUnit->GetUnitSpecific()->NotifyWeaponUpdated();
+    UpdateAttributes();
+}
+
 void CI3DScreenChoosePers::UpdateAttributes()
 {
     if (pCurUnit)

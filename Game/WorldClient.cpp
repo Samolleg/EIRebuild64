@@ -1,9 +1,14 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
 #include "ModPackage.h"
+#include "EngineDiagnostics.h"
 #include "ModRuntime.h"
+#include "ModSpellTargeting.h"
+#include "I3DScreenMission.h"
+#include "I3DMain.h"
 
 #include "WorldInterface.h"
 #include "ScenarioTracker.h"
@@ -30,6 +35,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "2DScreenWait.h"
 
 #include "Terrain.h"
+#include "ModWorldBackground/Native.h"
 
 #include "Camera.h"
 #include "ModFalloutProjection.h"
@@ -61,6 +67,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Renderer.h"
 #include "ModShadowSchedule.h"
 #include "dx11/RendererDX11.h"
+#include "dx11/OwnedWorldInputs.h"
 #include "GeometryManager.h"
 
 #include "I3DMain.h"
@@ -614,6 +621,8 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
+    ModWorldBackground::Unload();
     theCamera.ResetFalloutMode();
     CParticle::StopPowerHitLights();
     theCamera.SetCarrier((CObject3D *)0);
@@ -967,7 +976,7 @@ int CWorldClient::Segment()
             pPlayer->PrepareNewSegment();
         if (pPC->ParseIncomingPackets() == FALSE)
         {
-            pPlayer->Disconnect();
+            if (!EngineDiagnostics::AntiCrashEnabled()) pPlayer->Disconnect();
             ReportError(
                 "CWorldClient::Segment().\nDisconnecting client due to packet parsing error.\n");
             return FALSE;
@@ -1644,6 +1653,7 @@ void CWorldClient::SelectObject(LPGAMEBASE lpNewObject)
         selectedObjects.end())
         selectedObjects.push_back(lpObject->GetID());
 
+    GameJournal::ObserveSelection(selectedObjects);
     return;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1677,6 +1687,7 @@ void CWorldClient::ResetSelection(LPGAMEBASE lpNewObject)
             pObject->Select(FALSE);
         }
     }
+    GameJournal::ObserveSelection(selectedObjects);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClient::ResetSelection(int nID)
@@ -2323,6 +2334,7 @@ BOOL CWorldClient::NewItems(CMemorySave &packet)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
+    if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     IWorldConnector.LMPClientRecvZone();
     CString szZone, szMob;
     EGMZoneSky sky;
@@ -2367,6 +2379,8 @@ BOOL CWorldClient::NewZone(CMemorySave &packet)
     CTerrain *lpTerrain = GetTerrain();
     if (szZone.GetLength() > 1 && szZone[1] != ':')
         szZone = GetMobPath() + szZone;
+    // Join background/decor workers and release DX11 ownership before replacing terrain.
+    ModWorldBackground::Unload();
     // free old terrain data
     lpTerrain->Free();
     //	remove all the old textures from LRU (and from video memory)
@@ -2549,6 +2563,9 @@ void FormWeaponTextureName(DWORD dwItem, const CString &szMaskName, char *buff)
 void CWorldClient::PrecacheData(std::vector<SUnitStatistics> &statistics,
                                 std::vector<SUnitWearsStatistics> &wears)
 {
+    // Native JMVGraphics replaces the entire precache entry with a no-op.
+    const auto* package=ModRuntime::Current();
+    if(package && package->CombatSetting("JMVGraphics"))return;
     // **************************** pre-assemble layered textures ************************* //
     for (auto it = wears.begin(); it != wears.end(); ++it)
     {
@@ -2931,9 +2948,57 @@ BOOL CWorldClient::Draw()
     pRend->SetProjectionMatrixOne();
     pGPU->PushMainMatrix(pGPU->GetMatrix(MAT_STACK_CAMERA));
     pGPU->PushMatrix(pGPU->GetMatrix(MAT_STACK_CAMERA), MAT_STACK_VIEW2CLIP);
+    // Publish actual source values after camera/Fallout projection setup and
+    // before any sky/terrain geometry. No retail hooks or world pointers cross.
+    EIRenderWorldFrameV2 ownedWorld = {};
+    ownedWorld.size = sizeof(ownedWorld);
+    ownedWorld.world_generation = ownedRenderGeneration;
+    ownedWorld.flags = (CheckFlag(WC_RENDER_SKY) && pSky ? EI_RENDERER_WORLD_SKY : 0) |
+        (IsCaveZone() ? EI_RENDERER_WORLD_CAVE : 0) | (pRend->IsAddFog() ? EI_RENDERER_WORLD_FOG : 0) |
+        (pTerrain && pTerrain->IsLoaded() ? EI_RENDERER_WORLD_TERRAIN : 0);
+    const SHMatrix& worldClip = pGPU->GetMatrix(MAT_STACK_VIEW2CLIP);
+    static_assert(sizeof(worldClip) == sizeof(ownedWorld.world_to_clip), "world clip layout");
+    memcpy(ownedWorld.world_to_clip, &worldClip, sizeof(worldClip));
+    const CPlot3D& eye = theCamera.GetCP();
+    ownedWorld.eye[0] = eye.x; ownedWorld.eye[1] = eye.y; ownedWorld.eye[2] = eye.z;
+    ownedWorld.region = szCurrentAllodName.CompareNoCase("Gipat") == 0 ? 1 :
+        szCurrentAllodName.CompareNoCase("Ingos") == 0 ? 2 :
+        szCurrentAllodName.CompareNoCase("Suslanger") == 0 ? 3 : 0;
+    ownedWorld.game_hours = GetUnwrappedWorldTime();
+    ownedWorld.world_time = GetPreciseTime();
+    ownedWorld.weather_current = weather.GetCurrentWeather();
+    ownedWorld.weather_next = weather.GetNextWeather();
+    ownedWorld.rain_progress = weather.GetRenderTransitionProgress(float(GetSegmentTimeCounter()));
+    ownedWorld.weather_progress = (std::max)(0.f, (std::min)(1.f, ownedWorld.rain_progress));
+    const D3DVECTOR& direction = pRend->GetSunlight()->GetDirection();
+    const D3DCOLORVALUE& sunlight = pRend->GetSunlight()->GetDiffuse();
+    // Core lighting points toward the sun; source D3DLIGHT points along its rays.
+    ownedWorld.sunlight_direction[0] = -direction.x; ownedWorld.sunlight_direction[1] = -direction.y; ownedWorld.sunlight_direction[2] = -direction.z;
+    ownedWorld.sunlight_diffuse[0] = sunlight.r; ownedWorld.sunlight_diffuse[1] = sunlight.g; ownedWorld.sunlight_diffuse[2] = sunlight.b;
+    const DWORD ambientColor = pRend->GetAmbientColor();
+    ownedWorld.ambient[0] = float((ambientColor >> 16) & 255) / 255.f;
+    ownedWorld.ambient[1] = float((ambientColor >> 8) & 255) / 255.f;
+    ownedWorld.ambient[2] = float(ambientColor & 255) / 255.f;
+    const DWORD fogColor = pRend->GetBGColor();
+    ownedWorld.fog_color[0] = float((fogColor >> 16) & 255) / 255.f;
+    ownedWorld.fog_color[1] = float((fogColor >> 8) & 255) / 255.f;
+    ownedWorld.fog_color[2] = float(fogColor & 255) / 255.f;
+    if (auto* pipeline = dynamic_cast<CTLPipelineFPU*>(pRend->GetTransformPipeline())) {
+        pipeline->GetBackgroundFog(ownedWorld.fog_range, ownedWorld.fog_projection);
+    }
+    if (pTerrain) {
+        const CPlot3D& wind = pTerrain->GetWind();
+        ownedWorld.wind_direction[0] = wind.x; ownedWorld.wind_direction[1] = wind.y;
+        ownedWorld.wind_force = pTerrain->GetWindForce();
+    }
+    if(pTerrain && pTerrain->IsLoaded())
+        OwnedWorldInputs::Terrain(pRend->GetD3D()->GetOwnedRenderer(),*pTerrain,
+            static_cast<CTextureManager*>(GetTextureManager()),ownedRenderGeneration,
+            ModRuntime::Resources(),GetWorkPath(),GetResourcePath());
+    const bool ownedSky = pRend->GetD3D()->BeginWorld(ownedWorld);
     // render sky object
 #ifndef _A4
-    if (CheckFlag(WC_RENDER_SKY) && pSky)
+    if (CheckFlag(WC_RENDER_SKY) && pSky && !ownedSky)
     {
         //			pRend->SetRenderState( D3DRENDERSTATE_ALPHAREF, 10 );
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
@@ -2960,21 +3025,33 @@ BOOL CWorldClient::Draw()
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
-                          100.0f);
+                          NConsole::LandscapeDrawRadius());
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
         pTerrain->DrawBase(&theRenderer);
         pRend->FlushBuffers();
     }
+    ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
     // render main 3D scene: objects and their shadows
     Draw3DScene();
     LMPTimePassed();
+    if(pTerrain && pTerrain->IsLoaded()){
+        // Visibility and interpolated positions have just been prepared by
+        // Draw3DScene. Source rows are copied before the liquid/effect passes.
+        OwnedWorldInputs::Scene scene;
+        const bool drawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
+        const float night=GetNightPowerSlow();
+        for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
+        for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
+        scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
+        if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
+    }
     // render terrain's transparent part (water)
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
-                          100.0f);
+                          NConsole::LandscapeDrawRadius());
         // flush previous renders
         pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
@@ -2983,6 +3060,7 @@ BOOL CWorldClient::Draw()
         pRend->FlushBuffers();
     }
     LMPTimePassed();
+    ModWorldBackground::DrawTransparent();
     // render effects
     if (CheckFlag(WC_RENDER_EFFECTS))
     {
@@ -3019,6 +3097,8 @@ BOOL CWorldClient::Draw()
     LMPTimePassed();
     //
     DrawPolyLines();
+    pRend->FlushBuffers();
+    pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
     // pop main and camera matrix
     pGPU->PopMatrix(MAT_STACK_VIEW2CLIP);
     pGPU->PopMainMatrix();
@@ -3314,7 +3394,7 @@ BOOL CWorldClient::Draw3DScene()
     if (pMoshka)
         pMoshka->SetTime(fpTime);
     // puck objects from the area map
-    const float fPickRadius = 100;
+    const float fPickRadius = NConsole::ObjectsDrawRadius();
     std::list<CSmartPtr<CMapObject>> *pObjects = areaObjects.GetFirstList(
         Max(0.0f, Min(pTerrain->GetMaxX() - 1, ptObservationPosition.x - fPickRadius)),
         Max(0.0f, Min(pTerrain->GetMaxY() - 1, ptObservationPosition.y - fPickRadius)),
@@ -3464,6 +3544,24 @@ BOOL CWorldClient::Draw3DScene()
     }
     // remove this render frame data
     NWorldClient::ClearLists();
+    // Native preview is a post-scene overlay, through the existing world projection.
+    if(auto* mission=dynamic_cast<CI3DScreenMission*>(theInterface.GetCurrentScreen())) {
+        CPlot3D center;float radius=0.0f;
+        if(mission->GetAreaTargetPreview(*this,center,radius)) {
+            auto ring=ModSpellTargeting::AreaRing({center.x,center.y,center.z},radius,
+                [&](float x,float y){return GetBridgeSurfaceZValue(x,y);});
+            SXYZW4 plots[16]={};CPlot2D maps[64]={};WORD indices[192]={};
+            for(int i=0;i<64;++i) {
+                const auto& v=ring.vertices[i];const int block=i>>2,lane=i&3;
+                plots[block].x[lane]=v.x;plots[block].y[lane]=v.y;
+                plots[block].z[lane]=v.z;plots[block].w[lane]=v.w;
+            }
+            for(int i=0;i<192;++i)indices[i]=ring.indices[i];
+            pRend->BindTexture(0,(CDXGISurface*)nullptr);
+            pRend->SetProjectionMatrix();
+            pRend->Render(plots,maps,16,indices,192,RGBA_MAKE(64,232,96,255),RGBA_MAKE(0,0,0,255),nullptr,1.0f);
+        }
+    }
     //
     return TRUE;
 }

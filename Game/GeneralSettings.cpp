@@ -7,6 +7,8 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "WinRegistry.h"
 #include "IniFile.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 #include <filesystem>
 /////////////////////////////////////////////////////////////////////////////////////
 SGeneralSettings theSettings;
@@ -407,7 +409,8 @@ void SGeneralSettings::ReadSettingsFromFile(LPCSTR szSettingsFileName)
     nDrawVisibleOnly = reg.GetInt(szGameSpecificSettings, "DrawVisibleOnly", nDrawVisibleOnly);
     nDrawPath = reg.GetInt(szGameSpecificSettings, "DrawPath", nDrawPath);
     nDrawFlyingHP = reg.GetInt(szGameSpecificSettings, "DrawFlyingHP", nDrawFlyingHP);
-    nShowTutorial = reg.GetInt(szGameSpecificSettings, "ShowTutorial", nShowTutorial);
+    if(!ModRuntime::Resources()||!ModRuntime::Resources()->ForceTutorial())
+        nShowTutorial = reg.GetInt(szGameSpecificSettings, "ShowTutorial", nShowTutorial);
     nDoAutosave = reg.GetInt(szGameSpecificSettings, "Autosave", nDoAutosave);
     fToolTipTime = reg.GetFloat(szGameSpecificSettings, "ToolTip Time", fToolTipTime);
     nSwitchFilters = reg.GetInt(szGameSpecificSettings, "SwitchFilters", nSwitchFilters);

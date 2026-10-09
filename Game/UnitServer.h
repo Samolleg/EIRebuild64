@@ -406,7 +406,7 @@ public:
     friend class CModPackage;
     friend class CAIUnitLogic; // source-equivalent follower wish-pose synchronization
     bool CanRequestWeaponSkill(int slot,CMapObject*target);
-    bool CanRequestPointSkill(int slot,const CPlot3D& point);
+    bool CanRequestPointSkill(int slot,const CPlot3D& point,bool release=false);
     bool TagPointSkill(int slot);
     bool CanRequestAISkill(int slot,CUnit* target);
     void SyncNpcMagicState();
@@ -480,9 +480,14 @@ private:
     bool LcCanPlaySuffer(int nSufferLeng);
     bool LcTargetIsValid(const SUnitCommand &cmd);
     bool LcRecheckAttack();
+    void TraceMeleeReach(int phase, CMapObject *target, CItemWeapon *weapon = nullptr,
+                         float predictedDistance2 = -1, float hpBefore = -1,
+                         float hpAfter = -1);
+    enum class AttackCallbackOrigin { Ordinary = 0, Dual = 1, Original = 2 };
     void
     LcAttackCallback(ERPGHitLocations eAttackLocation,
-                     bool bCalledShot); // this function is called when attack is to be performed
+                     bool bCalledShot, bool leftHand=false,
+                     AttackCallbackOrigin origin=AttackCallbackOrigin::Ordinary); // this function is called when attack is to be performed
     void LcRestartCommand();
     bool LcChangePose();
     bool LcCanChangePose(EUnitPose p);
@@ -519,6 +524,7 @@ public:
     DWORD GetCorpseAnimationWeaponMask() { return GetAnimationWeaponMask(); }
 
 private:
+    void SelectStandingIdle(SL0AnimationSeq &sequence);
     ERPGWeaponTypes GetCurrentWeaponType() const;
     float GetSpellRange(CSpell *pSpell);
     int GetSpellCastTime(CSpell *pSpell);
@@ -570,23 +576,27 @@ private:
     // ATTACK EXECUTION
     // bBackstab в данном случае показывает, что взаимное положение юнитов допускает
     // использование навыка backstab, направление удара вычисляется в CalcAttackDirection()
+    BOOL ProcessAttackPortionOwned(SRPGAttackPortion*, CUnit*, CUnit*, bool inheritedDefense, bool explicitCustom);
+    BOOL CreateCustomAttackPortion0(SRPGAttackPortion&);
+    BOOL CreateConditionalRetailAttackPortion(SRPGAttackPortion &ap, BOOL bBackstab,
+                                             ERPGHitLocations eAttackLocation, bool bCalledShot);
     BOOL CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL bBackstab,
                                           ERPGHitLocations eAttackLocation, bool bCalledShot, bool leftHand=false);
     // вычислить попали ли по цели
     bool DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttacker, float accuracyBonus=0);
     // если в оружии есть спелл он должен быть использован
-    void UseCurrentWeaponSpell(CMapObject *pTarget, CItemWeapon *attackWeapon=nullptr);
+    void UseCurrentWeaponSpell(CMapObject *pTarget, CItemWeapon *attackWeapon=nullptr, bool leftHand=false);
     void UseArmorSpells(bool bBeforeAttack);
     void UseSpell();
     void UseTrap();
     void UseSkill(CMapObject *pTarget);
-    int PrepareWeaponSkill();
+    int PrepareWeaponSkill(bool leftHand=false);
     int PrepareExplosiveShot();
     void StartPowerHitGlow(int now);
     void PowerHitFeedback(CUnit* attacker,float beforeHp);
     const SADEntry* powerHitSuffer=nullptr;
     float lastCrippledFactor=1;
-    void UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion,bool applyWeaponSpell=true,int projectileIndex=0,int projectileCount=1,const char* activeSkillCode=nullptr);
+    void UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortion,bool applyWeaponSpell=true,int projectileIndex=0,int projectileCount=1,const char* activeSkillCode=nullptr,AttackCallbackOrigin origin=AttackCallbackOrigin::Ordinary);
     void UseAttackStart(CMapObject *pTarget, ERPGHitLocations eAttackLocation, bool bCalledShot, bool leftHand=false);
     void UsePotion(int nQSpellNum, CMapObject *pTarget, const CPlot3D &ptCastTo);
 
@@ -671,6 +681,7 @@ public:
     virtual void RecalcAIParams();
     //
     // DAMAGE Processing of some actions influencing health of unit
+    BOOL ProcessCustomAttackPortion(SRPGAttackPortion*, CUnit*, CUnit*);
     virtual BOOL ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit *pAttacker,
                                       CUnit *pExpDest);
     virtual BOOL Heal(float fpPower);

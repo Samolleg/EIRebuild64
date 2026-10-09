@@ -1,10 +1,12 @@
 #include "StdAfx.h"
+#include "ModNativeCrtRandom.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "RPGSystem.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModSpellRules.h"
+#include "ModProgression.h"
 
 #include "aiSettings.h"
 #include "GeneralSettings.h"
@@ -15,6 +17,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PerkDatabase.h"
 #include "GSVars.h"
 #include "Unit.h"
+#include "UnitDatabase.h"
+#include <stdexcept>
 #include "UnitServer.h"
 #include "ackFormat.h"
 #include "ItemDatabase.h"
@@ -970,7 +974,7 @@ float SRPGUnitStats::GetDamageModifier(const CUnit *pUnit) const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUnitStats::GetModifiedDamage(const CUnit *pUnit, float fDamage) const
 {
-    if(pUnit)if(auto*mod=ModRuntime::Current())return mod->ModifiedDamage(*this,*pUnit,fDamage,float(random.Get(100)));
+    if(pUnit)if(auto*mod=ModRuntime::Current())return mod->ModifiedDamage(*this,*pUnit,fDamage,float(ModNativeCrtRandom::Random(100)));
     return Max(1.0f, fDamage * GetDamageModifier(pUnit));
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1678,6 +1682,57 @@ float SRPGUnitStats::CollectHP(float fpSoulMaxHP) const
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // distribute HP from soul to each (active) hit location
+void SRPGUnitStats::FixHls(CUnit* unit, float maxHp)
+{
+    (void)maxHp; // Native FixHls requires this argument but does not use it.
+    if (hls[0].fpHPWeight <= 0 || hls[1].fpHPWeight <= 0 || hls[2].fpHPWeight <= 0 ||
+        hls[0].fpHPWeight <= -100000.0f || hls[1].fpHPWeight <= -100000.0f ||
+        hls[2].fpHPWeight <= -100000.0f || hls[3].fpHPWeight <= -100000.0f ||
+        hls[4].fpHPWeight <= -100000.0f || hls[5].fpHPWeight <= -100000.0f)
+    {
+        for (DWORD i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i)
+        {
+            if (hls[i].state >= RPGALS_DEAD)
+            {
+                hls[i].dwCrippleMask = 0;
+                hls[i].state = RPGALS_ACTIVE;
+                hls[i].fpHP = 1000;
+                hls[i].fpMaxHP = 1000;
+                hls[i].fpHP = hls[i].fpMaxHP;
+                const SUDBUnitPrototype* prototype = unit->GetPrototype();
+                if (!prototype)
+                    break;
+                const SUDBRaceModel* race = theUnitDatabase.races[prototype->dwRaceIndex];
+                if (!race)
+                    throw std::runtime_error("FixHls race record unavailable");
+                const SUDBHitLocationType* type = theUnitDatabase.hlts[race->hls[i].dwHLTypeIndex];
+                if (!type)
+                    throw std::runtime_error("FixHls hit-location type unavailable");
+                hls[i].hlt = type->hlt;
+                hls[i].fpHPWeight = race->hls[i].fpWeight;
+                hls[i].fpVitality = race->hls[i].fpVitality;
+                hls[i].dwCrippleMask = type->dwCrippleMask;
+                hls[i].layers[0].dwCrippleMask = 0;
+                hls[i].layers[0].state = RPGALS_NOTUSED;
+                hls[i].layers[1].state = RPGALS_NOTUSED;
+                hls[i].layers[2].state = RPGALS_NOTUSED;
+                hls[i].state = RPGALS_ACTIVE;
+            }
+        }
+        for (DWORD i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i)
+        {
+            float weightHP = hls[i].fpMaxHP / hls[RPGHL_BODY].fpHPWeight;
+            if (hls[i].state > RPGALS_NOTUSED)
+            {
+                hls[i].fpMaxHP = weightHP * hls[i].fpHPWeight;
+                if (hls[i].fpMaxHP != 0)
+                    hls[i].fpHP = hls[i].fpHP < hls[i].fpMaxHP ? hls[i].fpHP : hls[i].fpMaxHP;
+                else
+                    hls[i].fpHP = hls[i].fpMaxHP;
+            }
+        }
+    }
+}
 void SRPGUnitStats::DistributeHP(float fpSoulMaxHP)
 {
     float fWeightHP = fpSoulMaxHP / hls[RPGHL_BODY].fpHPWeight;
@@ -1857,6 +1912,9 @@ float SRPGUnitStats::GetAutoSkillLevel(ERPGAutoSkills skill, CUnit *pUnit) const
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL SRPGUnitStats::CanAddPerk(const CPerkDatabase *pPDB, const SPDBPerk *pPerk) const
 {
+    auto* mod=ModRuntime::Current();
+    const bool native=mod && mod->CombatSetting("JMVPerks");
+    if(!pPDB || !pPerk)return FALSE;
     if (!pPerk->bActive)
         return FALSE;
     // check primary attributes
@@ -1867,7 +1925,7 @@ BOOL SRPGUnitStats::CanAddPerk(const CPerkDatabase *pPDB, const SPDBPerk *pPerk)
     // check required skill level
     if (!pPerk->szSkillRequired.IsEmpty() && pPerk->szSkillRequired != "none")
     {
-        if (pPerk->rpgAutoSkill == RPGASKL_FORCE_DWORD)
+        if (!ModProgression::Index(int(pPerk->rpgAutoSkill),int(RPG_NUM_ACTUAL_AUTO_SKILLS)))
             return FALSE;
         if (cAutoSkills[pPerk->rpgAutoSkill] < pPerk->dwSkillLevel)
             return FALSE;
@@ -1876,16 +1934,18 @@ BOOL SRPGUnitStats::CanAddPerk(const CPerkDatabase *pPDB, const SPDBPerk *pPerk)
     if (!pPerk->szPerkRequired.IsEmpty() && pPerk->szPerkRequired != "none")
     {
         int nIndex = pPDB->GetPerkIndex(pPerk->szPerkRequired);
+        if(!ModProgression::Index(nIndex,int(RPG_NUM_PERKS)*3))return FALSE;
         int nBaseIndex = nIndex / 3;
         int nFractIndex = nIndex % 3;
-        if (cPerks[nBaseIndex] != nFractIndex + 1)
+        if (native ? !ModProgression::Minimum(*this,nIndex) : cPerks[nBaseIndex] != nFractIndex + 1)
             return FALSE;
     }
     // check exclusive perk
     {
         int nIndex = pPDB->GetPerkIndex(pPerk);
+        if(!ModProgression::Index(nIndex,int(RPG_NUM_PERKS)*3))return FALSE;
         int nBaseIndex = nIndex / 3;
-        for (int i = 0; i < RPGPRK_LASTPERK; ++i)
+        for (int i = 0; i < (native?35:int(RPGPRK_LASTPERK)); ++i)
         {
             const SPDBPerk *pPerk2 = GetPerk(i);
             if (pPerk2 != 0)
@@ -1898,11 +1958,15 @@ BOOL SRPGUnitStats::CanAddPerk(const CPerkDatabase *pPDB, const SPDBPerk *pPerk)
     }
     // check for such (or greater) perk exist
     int nIndex = pPDB->GetPerkIndex(pPerk->szCode);
+    if(!ModProgression::Index(nIndex,int(RPG_NUM_PERKS)*3))return FALSE;
     int nBaseIndex = nIndex / 3;
     int nFractIndex = nIndex % 3;
     if (nFractIndex <= (cPerks[nBaseIndex] - 1))
         return FALSE;
     //
+    if(native)return ModProgression::Additional(*this,
+        [&](int field){return mod->ProgressionRequirementCode(pPerk->szCode,field);},
+        [&](const char* code){return pPDB->GetPerkIndex(code);});
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2398,8 +2462,13 @@ void SRPGUnitStats::RecalcComplectionFromPrimaryStats(float &fStrength, float &f
 /////////////////////////////////////////////////////////////////////////////////////
 void SRPGUnitStats::RedistributeHPMP(SRPGCommonStats *pCommonStats, CUnit *pUnit)
 {
-    pCommonStats->ssHP.fpMax = GetModifiedHealth(pUnit, RecalcHP());
-    pCommonStats->ssMP.fpMax = RecalcMP();
+    if (auto* mod=ModRuntime::Current())
+        mod->RedistributeResources(*this,*pCommonStats,*pUnit);
+    else
+    {
+        pCommonStats->ssHP.fpMax = GetModifiedHealth(pUnit, RecalcHP());
+        pCommonStats->ssMP.fpMax = RecalcMP();
+    }
     // redistribute HP and heal to achive last HP percentage
     DistributeHPProportional(pCommonStats->ssHP.fpMax);
     pCommonStats->ssHP.fpCurrent = CollectHP(pCommonStats->ssHP.fpMax);

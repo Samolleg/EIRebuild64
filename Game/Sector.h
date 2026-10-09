@@ -9,6 +9,8 @@
 
  *>	Copyright (c) 1998, Nival Entertainment
  **********************************************************************/
+#include <cstdint>
+#include <vector>
 #include "Base3D.h"
 #include "CMappedResource.h"
 #include "Geometry.h"
@@ -68,6 +70,8 @@ typedef unsigned ESectorState;
 typedef BYTE ETileMasks;
 //------------------------------------- CSector ----------------------------------------------
 
+struct EIRenderTerrainSectorV5;
+
 class CSector
 {
 public:
@@ -120,6 +124,7 @@ private:
     CArray<CSTXVertexArray, CSTXVertexArray &> txVertexes[4]; // Texture vertexes
 
     CTileAnimArray tilesAnimation; // Tiles animation information
+    uint64_t rendererPhaseRevision = 1;
     CIntArray tilesCounts;         // Number of tiles each type
 
     // For sector manager
@@ -188,6 +193,9 @@ public:
     // Segement processing
     void Segment(CTerrain *pTerrain, int nSegmentNumber);
 
+    // Source render values: read-only; no animation/RNG advancement.
+    void CopyRendererState(EIRenderTerrainSectorV5& row,std::vector<uint32_t>& phases) const;
+    void CopyRendererSector(void* destination);
     // Information methods
     int GetMapX() { return nMapX; }
     int GetMapY() { return nMapY; }

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include <io.h>
 
 #if (_MSC_VER >= 1700)
 #define CLASS_ENUM enum class
@@ -181,6 +182,7 @@ public:
     CriticalSection() { InitializeCriticalSection(&_lock); }
     ~CriticalSection() { DeleteCriticalSection(&_lock); }
     void Lock() { EnterCriticalSection(&_lock); }
+    bool TryLock() { return TryEnterCriticalSection(&_lock) != 0; }
     void Unlock() { LeaveCriticalSection(&_lock); }
 
 private:
@@ -249,6 +251,13 @@ public:
     }
 
     bool Started() { return _started; }
+    void EnterCrashMode() { InterlockedExchange(&_crashMode, 1); }
+    size_t RecentLineCount() const { return _recentCount; }
+    const char *RecentLine(size_t index) const
+    {
+        return index < _recentCount
+            ? _recent[(_recentPos + RecentLines - _recentCount + index) % RecentLines] : nullptr;
+    }
 
     bool IsDebug() const { return _level <= ELogLevel::LL_DEBUG; }
     bool IsInfo() const { return _level <= ELogLevel::LL_INFO; }
@@ -309,7 +318,9 @@ protected:
         , _shortTimestamp(false)
         , _shortLevel(false)
         , _separator("\t")
+        , _crashMode(0), _recentPos(0), _recentCount(0)
     {
+        memset(_recent, 0, sizeof(_recent));
     }
 
     bool Start(ELogLevel level)
@@ -331,6 +342,7 @@ protected:
     virtual void StopLocked() = 0;
     virtual void FlushLocked() = 0;
     virtual void WriteLineLocked(const char *line, size_t length) = 0;
+    bool InCrashMode() const { return _crashMode != 0; }
 
 private:
     FILE *_file;
@@ -344,6 +356,11 @@ private:
     bool _shortTimestamp;
     bool _shortLevel;
     std::string _separator;
+    volatile LONG _crashMode;
+    static const size_t RecentLines = 24, RecentLineSize = 200;
+    char _recent[RecentLines][RecentLineSize];
+    size_t _recentPos, _recentCount;
+    void StoreRecentLocked(const char *line, size_t length);
 
     void Write(const char *levelStr, const char *section, const char *format, va_list args);
 };
@@ -353,7 +370,7 @@ class CFileLogger : public CLogger
 public:
     CFileLogger()
         : CLogger()
-        , _file(nullptr)
+        , _file(nullptr), _rawFile(nullptr)
     {
         WithTimestamp();
         WithLevel();
@@ -383,6 +400,10 @@ private:
     {
         assert(!Started() && !_file);
         _file = _wfopen(_path.c_str(), _mode.c_str());
+        if (_file) {
+            intptr_t handle = _get_osfhandle(_fileno(_file));
+            _rawFile = handle != -1 ? reinterpret_cast<HANDLE>(handle) : nullptr;
+        }
         return _file != nullptr;
     }
 
@@ -392,6 +413,7 @@ private:
         fflush(_file);
         fclose(_file);
         _file = nullptr;
+        _rawFile = nullptr;
     }
 
     void FlushLocked() override
@@ -403,10 +425,16 @@ private:
     void WriteLineLocked(const char *line, size_t length) override
     {
         assert(Started() && _file);
-        fwrite(line, 1, length, _file);
+        if (InCrashMode()) {
+            if (_rawFile) {
+                DWORD written = 0;
+                WriteFile(_rawFile, line, static_cast<DWORD>(length), &written, nullptr);
+            }
+        } else fwrite(line, 1, length, _file);
     }
 
     FILE *_file;
+    HANDLE _rawFile;
     std::wstring _path;
     std::wstring _mode;
 };

@@ -1,7 +1,20 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
+#include "ModRandomOwnershipCheck.inl"
+#include "ModMobFlagArgumentsCheck.inl"
+#include "ModItemSpellPolicyCheck.inl"
+#include "ModStealingPolicyCheck.inl"
+#include "ModNpcEquipmentCheck.inl"
+#include "ModHitHistoryCheck.inl"
+#include "ModItemUiCheck.inl"
+#include "ModSettingsCheck.inl"
+#include "ModDiagnosticsCheck.inl"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "EngineDiagnostics.h"
+#include "FrameDiagnostics.h"
+#include "ModShadowSchedule.h"
+#include "ModWorldBackground/Native.h"
 #include <stdexcept>
 #include <io.h>
 #include <new.h>
@@ -37,6 +50,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "DebugAlloc.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
+#include "ModCli.inl"
 /////////////////////////////////////////////////////////////////////////////////////
 // __DEMO__,__SINGLEONLY__,NODEBUGINFO,DONT_DISPLAY_DEBUG_IDS
 // ,NOGETDC,NOBLIT,SURFACE_BACKUP
@@ -389,6 +403,8 @@ BOOL NGame::CheckPreviousApp(LPCSTR pszMainClass, LPCSTR pszMainTitle)
 /////////////////////////////////////////////////////////////////////////////////////
 int NGame::MessageBox(LPCSTR pszText, UINT uType)
 {
+    GameJournal::Event("ERROR", "message_box", "type=%u text=%s", uType, GameJournal::Quote(pszText).c_str());
+    GameJournal::FlushCritical();
     HCURSOR hCursor = GetCursor(); // remember old cursor before message box call
     /*if (pVis && pRend->IsFullscreen())
         pRend->FlipToGDISurface();*/
@@ -447,6 +463,7 @@ static bool CountTime()
     static float fpClientTimeSpeed = 1;
 
     DWORD dwTimeStep = timeGetTime() - dwLastTime;
+    FrameDiagnostics::RawDelta(dwTimeStep);
     DWORD dwFracTime; // for client
     dwLastTime += dwTimeStep;
     // check if focus is in application
@@ -509,8 +526,6 @@ static bool CountTime()
                 if (!theWorld.Segment())
                     return true;
                 dwClientPassedTime -= DW_SEGMENT_TIME;
-                theCamera.Step(static_cast<float>(DW_SEGMENT_TIME) /
-                               static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
                 LMPTimePassed();
             }
         }
@@ -541,7 +556,8 @@ static bool CountTime()
         NConsole::net << "Client speed = " << fpClientTimeSpeed << " balance = " << fpPacketBalance
                       << endl;
 
-    // step camera
+    // Advance the camera only by wall-clock time. Client segments above already
+    // consume that same interval and must not add another camera step.
     while (dwTimeStep > DW_SEGMENT_TIME)
     {
         theCamera.Step(static_cast<float>(DW_SEGMENT_TIME) /
@@ -588,17 +604,31 @@ static bool NGame::ProcessMessages()
     while (!PeekMessage(&msg, 0, 0, 0,
                         PM_NOREMOVE)) // no messages in the queue => process OnIdle
     {
+        GameJournal::MemoryFrame(GetTickCount());
         // Update render state
         UpdateRenderEnable();
-        bActive = CountTime();
+        bool diagnosticFrameOwner = FrameDiagnostics::Begin(ModShadowSchedule::generationTicks);
+        {
+            FrameDiagnostics::Scope timing(FrameDiagnostics::Simulation);
+            bActive = CountTime();
+        }
         if (bActive)
         {
-            theInterface.OnIdle();
+            {
+                FrameDiagnostics::Scope timing(FrameDiagnostics::Idle);
+                theInterface.OnIdle();
+            }
             NGame::DrawFrame(bEnableFlip);
+        }
+        if (diagnosticFrameOwner)
+        {
+            const CPlot3D &anchor = theCamera.GetAnchorPoint();
+            FrameDiagnostics::End(ModShadowSchedule::generationTicks, anchor.x, anchor.y);
         }
     }
     if (!GetMessage(&msg, 0, 0, 0))
         return false;
+    FrameDiagnostics::Message();
     TranslateMessage(&msg);
     // DispatchMessage( &msg );
     if (bActive)
@@ -841,6 +871,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     theLeverDatabase.Load(theSettings.szResourcePath);
     theAckDatabase.Load(theSettings.szResourcePath);
     theTPDatabase.Load(theSettings.szResourcePath);
+    GameJournal::Event("SESSION", "settings", "resource_path=%s mod=%s width=%lu height=%lu language=unknown system_ui_lang=%u", GameJournal::Quote(theSettings.szResourcePath).c_str(), GameJournal::Quote(ModRuntime::Resources() ? ModRuntime::Resources()->Directory().c_str() : "stock").c_str(), theSettings.dwWidth, theSettings.dwHeight, unsigned(GetUserDefaultUILanguage()));
     // final world initialization
     theWorld.Init(&theRenderer);
     TheCursorInit();
@@ -852,17 +883,29 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
-int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow,
+            std::unique_ptr<ModRuntime::Host> modHost = nullptr, bool legacyRun = false)
 {
     if(strcmp(lpCmdLine,"--inspect-starter-selection")==0){
         try { auto host=ModRuntime::Host::FromCommandLine();return host&&ModRuntime::Resources()?0:BAD_RESULT; }
-        catch(const std::exception&){return BAD_RESULT;}
+        catch(const std::exception&){ GameJournal::AllocationFailureInCatch("GameMain");return BAD_RESULT;}
     }
     int inspectionResult=0;
+    if(InspectSettingsCommandLine(inspectionResult))return inspectionResult;
+    if(InspectItemUiCommandLine(inspectionResult))return inspectionResult;
+    if(InspectHitHistoryCommandLine(inspectionResult))return inspectionResult;
+    if(InspectNpcEquipmentCommandLine(inspectionResult))return inspectionResult;
+    if(InspectStealingPolicyCommandLine(inspectionResult))return inspectionResult;
+    if(InspectItemSpellPolicyCommandLine(inspectionResult))return inspectionResult;
+    if(InspectMobFlagArgumentsCommandLine(inspectionResult))return inspectionResult;
+    if(InspectNativeRandomCommandLine(inspectionResult))return inspectionResult;
+    if(InspectModConfigurationCommandLine(inspectionResult))return inspectionResult;
+    if(InspectWorldBackgroundCommandLine(inspectionResult))return inspectionResult;
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
-    std::unique_ptr<ModRuntime::Host> modHost;
-    try { modHost=ModRuntime::Host::FromCommandLine(); }
-    catch(const std::exception&e){EngineDiagnostics::Caught(e.what());return BAD_RESULT;}
+    GameJournal::Start();
+    struct JournalEnd { ~JournalEnd() { GameJournal::Stop(); } } journalEnd;
+    try { NConsole::InitializeNetworkSettings(); if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
+    catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("GameMain");EngineDiagnostics::Caught(e.what());return BAD_RESULT;}
     OutputDebugStringA("Hello!\n");
     try
     {
@@ -870,7 +913,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
             return BAD_RESULT;
     }
     catch (const std::exception& e)
-    {
+    { GameJournal::AllocationFailureInCatch("GameMain");
         EngineDiagnostics::Caught(e.what());
         return BAD_RESULT;
     }
@@ -889,7 +932,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     }
 #if defined(FINALRELEASE) && defined(NODEBUGINFO)
     catch (...)
-    {
+    { GameJournal::AllocationFailureInCatch("GameMain");
         EngineDiagnostics::Caught("Unhandled game-loop exception");
         return BAD_RESULT;
     }
@@ -899,6 +942,8 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     // EngineDiagnostics owns the outer exception boundary.
 #endif // !defined( NODEBUGINFO ) && !defined( _DEBUG )
 
+    FrameDiagnostics::Flush();
+    GameJournal::Stop();
     // FINI
     theWorld.GetTextureManager()->DeleteUnitLayerTextures();
     theInterface.Fini();
@@ -1094,11 +1139,15 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
         auto m_states = pDX11->GetCommonStates();
         // dx11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, m_states->AlphaBlend());
         pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Immediate);
-        theInterface.Draw();
+        {
+            FrameDiagnostics::Scope timing(FrameDiagnostics::Draw3D);
+            theInterface.Draw();
+        }
         pDX11->GetSpriteBatch()->End();
         theRenderer.EndDrawFrame();
         if (bDraw2D)
         {
+            FrameDiagnostics::Scope timing(FrameDiagnostics::Draw2D);
             theInterface.Draw2D();
         }
 
@@ -1135,21 +1184,52 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
+// Keep C++ ownership in a callee, outside the SEH frame's local variables.
+static int RunLegacyEntry(HINSTANCE instance, HINSTANCE previous, int show)
+{
+    std::unique_ptr<ModRuntime::Host> host;
+    bool run = false;
+    const int result = ModCli::Dispatch(host, run);
+    if (!run) return result;
+    EngineDiagnostics::Initialize(false);
+    char emptyCommand[] = "";
+    return RunGame(instance, previous, emptyCommand, show, std::move(host), true);
+}
+
+static int GuardLegacyEntry(HINSTANCE instance, HINSTANCE previous, int show)
+{
+    __try { return RunLegacyEntry(instance, previous, show); }
+    __except (EngineDiagnostics::Filter(GetExceptionInformation()))
+    {
+        TerminateProcess(GetCurrentProcess(), 0xE0000135);
+        return BAD_RESULT;
+    }
+}
+
+static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show, bool probe)
+{
+    if (probe)
+    {
+        EngineDiagnostics::Note(command);
+        if (strcmp(command + 23, "cpp") == 0) throw std::runtime_error("diagnostic probe");
+        if (strcmp(command + 23, "crt") == 0) _invalid_parameter_noinfo();
+        RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+    }
+    EngineDiagnostics::Note("Entering game startup");
+    return RunGame(instance, previous, command, show);
+}
+
 int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
 {
+    const int cliResult = GuardLegacyEntry(instance, previous, show);
+    if (cliResult != ModCli::NotCli) return cliResult;
+    int diagnosticResult = 0;
+    if (InspectDiagnosticsCommandLine(diagnosticResult)) return diagnosticResult;
     const bool probe = strncmp(command, "--diagnostics-selftest=", 23) == 0;
     EngineDiagnostics::Initialize(probe);
     __try
     {
-        if (probe)
-        {
-            EngineDiagnostics::Note(command);
-            if (strcmp(command + 23, "cpp") == 0) throw std::runtime_error("diagnostic probe");
-            if (strcmp(command + 23, "crt") == 0) _invalid_parameter_noinfo();
-            RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
-        }
-        EngineDiagnostics::Note("Entering game startup");
-        return RunGame(instance, previous, command, show);
+        return RunMainEntry(instance, previous, command, show, probe);
     }
     __except (EngineDiagnostics::Filter(GetExceptionInformation()))
     {

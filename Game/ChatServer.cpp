@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ChatServer.h"
@@ -878,6 +880,7 @@ void OnAddSay(CChatServer *pThis, CChatCSay *pObj)
     if (!pState->IsValid())
         return;
     CString szText;
+    if(auto* mod=ModRuntime::Resources())mod->LogChat(pState->pPerson->nChatColor,pState->pPerson->szName.c_str(),pObj->szText.c_str());
     szText.Format("^%i%s^7: %s", pState->pPerson->nChatColor, pState->pPerson->szName.c_str(),
                   pObj->szText.c_str());
     pThis->AddChatPhrase(szText);
@@ -1574,6 +1577,8 @@ struct SCompareBLOBs
 void OnAddBLOB(CChatClient *pThis, CChatBLOBPart *pObj)
 {
     pThis->blobs.push_back(MakePtr(pObj));
+    if (NConsole::RejectServerMQ())
+        return;
     // test if every blob of some file has arrived if so file can be composed an request canceled
     CChatMQFile *pFile = pObj->pFile;
     // if pFile has not arrived yet

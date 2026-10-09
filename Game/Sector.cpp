@@ -12,6 +12,8 @@
 
 #include "dx11/Batchers.h"
 static const char LOCAL_FILE[] = __FILE__;
+static uint64_t NextTerrainPhaseRevision(){static uint64_t value=1;return ++value;}
+
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Terrain.h"
 #include "mapFormat.h"
@@ -30,6 +32,7 @@ const int N_SECTOR_LAYER_OFFSET = N_V_PSECTOR;
 // Underlayer lighting constants
 const float FP_MAX_LIGHTED_DEPTH = 15.f;
 const float FP_MAX_LIGHTED_DEPTH_INV = 1.f / FP_MAX_LIGHTED_DEPTH;
+float SectorBackgroundInverseDepth(){return FP_MAX_LIGHTED_DEPTH_INV;}
 // Use this def to calculate depth sun absorbtion using square function instead of linear
 #define SQUARE_DEPTH_LIGHT_ABSORBTION
 
@@ -1090,6 +1093,7 @@ ReadLayerLVertexes:
     }
 
     tilesAnimation.SetSize(nAnimCount);
+    rendererPhaseRevision=NextTerrainPhaseRevision();
     if (bHaveLayerTiles)
         bHaveLayerTiles = TRUE;
 
@@ -1536,6 +1540,7 @@ void CSector::Clear()
     nClipFlag = TRV_INVISIBLE;
     m_isModifid = false;
     m_fShiftHieght = 0.0f;
+    rendererPhaseRevision=NextTerrainPhaseRevision();
     bHaveSpecular = false;
 }
 
@@ -1585,6 +1590,7 @@ void CSector::Segment(CTerrain *pTerrain, int nSegmentNumber)
                     if (random.Get(1, 1000) > pAInf->nAnimProbability)
                         continue;
             pAInf->nCurPhase = (pAInf->nCurPhase + 1) % pAInf->nPhasesTotal;
+            rendererPhaseRevision=NextTerrainPhaseRevision();
             SUVInfo *pUVInfo = pTerrain->GetUVInfo(pAInf->nTileRot,
                                                    pAInf->nTilePos + pAInf->nCurPhase);
             STXVertex *pTXVert = pAInf->pTXVertexes;
@@ -1720,6 +1726,28 @@ void CSector::Save(LPBYTE pData)
     m_isModifid = false;
 }
 
+void CSector::CopyRendererState(EIRenderTerrainSectorV5& row,std::vector<uint32_t>& phases) const
+{
+    row.lod=nLOD;row.subparts=0;row.stitch=(bLUHigher?1u:0u)|(bRDHigher?2u:0u);
+    if(nClipFlag!=TRV_INVISIBLE)for(unsigned i=0;i<4;++i)
+        if(subPartClipFlags[i]!=TRV_INVISIBLE)row.subparts|=1u<<i;
+    if(row.phase_revision!=rendererPhaseRevision || phases.size()!=tilesAnimation.GetSize()){
+        phases.resize(tilesAnimation.GetSize());
+        for(size_t i=0;i<phases.size();++i)phases[i]=tilesAnimation[int(i)].nCurPhase;
+    }
+    row.phase_revision=rendererPhaseRevision;row.phases=phases.data();row.phase_count=uint32_t(phases.size());
+}
+void CSector::CopyRendererSector(void* destination)
+{
+    LPBYTE bytes=static_cast<LPBYTE>(destination)+sizeof(SSectorHeader);
+    if(IsHaveState(ESS_D3D))for(int i=0;i<N_V_PSECTOR;++i)
+        GetSaveVertex(i,reinterpret_cast<SSectVert2*>(bytes+i*sizeof(SSectVert2)));
+    bytes+=sizeof(SSectVert2)*N_V_PSECTOR*(bHaveLayers?2:1);
+    TILE_ID* tiles=reinterpret_cast<TILE_ID*>(bytes);
+    for(int i=0;i<N_TILES_PSECTOR;++i)tiles[i]=FormTileID(m_aTileRotation[i],nTileIndexes[i]);
+    // Deliberately does not call Save: source modified/save state is preserved.
+}
+
 void CSector::GetSaveVertex(int nNum, SSectVert2 *pVertexToSave)
 {
     CPlot3D *pVertex = &mesh[nNum];
@@ -1743,6 +1771,7 @@ void CSector::SetTile(int nX, int nY, int nRot, int nTile)
 {
     nTileIndexes[nY * N_TILES_PSECTOR_S + nX] = nTile;
     m_aTileRotation[nY * N_TILES_PSECTOR_S + nX] = nRot;
+    pTerrain->ChangeRendererRevision();
     m_isModifid = true;
 }
 

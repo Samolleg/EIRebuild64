@@ -7,6 +7,7 @@
  *>	Copyright (c) 1999, Nival Interactive
  **********************************************************************/
 #include "StdAfx.h"
+#include "ModNativeCrtRandom.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiUnitLogic.h"
@@ -15,6 +16,13 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModSpellRules.h"
 #include "ModTacticalSpells.h"
 #include "ModGroupSearch/Native.h"
+#include "ModGroupSearch/GroupSearchSave.h"
+#include "ModGroupSearch/GroupSearchBodySave.h"
+#include "ModGroupSearch/GroupSearchWitnessSave.h"
+#include "EngineDiagnostics.h"
+#include "GameJournal.h"
+#include "WorldClient.h"
+#include "SoundManager.h"
 #include "WorldServer.h"
 #include "UnitServer.h"
 #include "PlayerServer.h"
@@ -2275,6 +2283,10 @@ namespace
 {
 struct SAddonCorpseSearch
 {
+    CUnit *observer = nullptr;
+    CUnitServer *server = nullptr;
+    std::string zone;
+    std::map<GroupSearch::Identity,int> retry;
     int corpseId = -1;
     DWORD corpseSubtype = 0;
     DWORD observerSubtype = 0;
@@ -2458,11 +2470,11 @@ bool AddonCarryPlan(CPlayer *player, CUnit *corpse, CUnit *collector,
             int commonMoney = MINT(common.fpPriceMin);
             if (common.fpPriceMax > common.fpPriceMin)
                 commonMoney = random.GetFloat(common.fpPriceMin, common.fpPriceMax);
-            if (float(Dice(100)) > common.fpProbability) commonMoney = 0;
+            if (float(ModNativeCrtRandom::Dice(100)) > common.fpProbability) commonMoney = 0;
             int rareMoney = MINT(rare.fpPriceMin);
             if (rare.fpPriceMax > rare.fpPriceMin)
                 rareMoney = random.GetFloat(rare.fpPriceMin, rare.fpPriceMax);
-            if (float(Dice(100)) > rare.fpProbability) rareMoney = 0;
+            if (float(ModNativeCrtRandom::Dice(100)) > rare.fpProbability) rareMoney = 0;
             const long long combined = static_cast<long long>(commonMoney) + rareMoney;
             own.money = combined > (std::numeric_limits<int>::max)()
                 ? (std::numeric_limits<int>::max)()
@@ -2619,396 +2631,93 @@ bool AddonDetachCorpseFromAIMap(CUnit *corpse)
     return theWorldServer.aiMap.RemoveObject(corpse);
 }
 
-bool AddonUpdateCorpseHaul(CAIUnitLogic &logic, SAddonCorpseSearch &search,
-                           CUnit *observer, CUnitServer *server,
-                           CUnit *corpse, CPlayer *player,
-                           const std::string &zone, int tick)
+bool AddonApplyHauledCorpseState(CUnit* corpse)
 {
-    const std::string key = AddonHaulMarker(zone.c_str(), corpse);
-    const int owner = observer->GetID() + 1;
-    int claim = AddonCorpseReadInt(player, key.c_str());
-    if (claim < 0)
-    {
-        if (!AddonDetachCorpseFromAIMap(corpse))
-        {
-            search.nextHaulTick = tick + 91;
-            return true;
-        }
-        corpse->SetFlag(OBJ_HIDDEN | OBJ_UNSELECTABLE | UNIT_ALREADY_HOOVER);
-        corpse->SetUpdated();
-        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
-        player->party.vars.SetVar(memoryKey.c_str(), 0.0f);
-        search.corpseId = -1;
-        return true;
+    if(!AddonDetachCorpseFromAIMap(corpse))return false;
+    corpse->SetFlag(OBJ_HIDDEN|OBJ_UNSELECTABLE|UNIT_ALREADY_HOOVER);corpse->SetUpdated();
+    CMapObjPtrHashIterator iterator;
+    for(auto* object=iterator.GetFirst(&theWorldServer.dynamicObjs);object;object=iterator.GetNext()){
+        if(object->WhoAmI()!=HPC_UNIT)continue;auto* specific=static_cast<CUnit*>(object)->GetUnitSpecific();
+        if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)continue;
+        auto& environment=static_cast<CUnitServer*>(specific)->logic.environment;
+        CMapObjectPtrList* lists[]={&environment.units,&environment.visibleUnits,&environment.seenCorpses,&environment.freshCorpses};
+        for(auto* list:lists)for(POSITION pos=list->GetHeadPosition();pos;){POSITION here=pos;if(list->GetNext(pos)==corpse)list->RemoveAt(here);}
     }
-    if (claim > 0 && claim != owner)
-    {
-        CUnit *other = theWorldServer.GetUnit(claim - 1);
-        CUnitSpecific *specific = other ? other->GetUnitSpecific() : nullptr;
-        if (other && !other->IsDead() && specific &&
-            specific->WhoAmI() == HPC_UNITSERVERSPECIFIC &&
-            !static_cast<CUnitServer *>(specific)->IsTamed() &&
-            AddonHasDutyForCorpseSearch(
-                static_cast<CUnitServer *>(specific)->logic))
-        {
-            search.nextHaulTick = tick + 91;
-            return true;
-        }
-        player->party.vars.SetVar(key.c_str(), 0.0f);
-        claim = 0;
-    }
-    if (AddonCorpseProtected(corpse))
-    {
-        if (claim == owner) player->party.vars.SetVar(key.c_str(), 0.0f);
-        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
-        player->party.vars.SetVar(memoryKey.c_str(), 3.0f);
-        search.corpseId = -1;
-        search.step = 0;
-        return true;
-    }
-    std::vector<SAddonCarryEntry> validation;
-    int destinationCount = 0, ownCount = 0;
-    if (!AddonCarryPlan(player, corpse, observer, false, validation,
-                        destinationCount, ownCount))
-    {
-        if (claim == owner) player->party.vars.SetVar(key.c_str(), 0.0f);
-        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
-        player->party.vars.SetVar(memoryKey.c_str(), 3.0f);
-        search.corpseId = -1;
-        search.step = 0;
-        return true;
-    }
-    if (!claim)
-    {
-        player->party.vars.SetVar(key.c_str(), static_cast<float>(owner));
-        if (AddonCorpseReadInt(player, key.c_str()) != owner) return true;
-        search.haulClaimTick = tick;
-        search.haulAttempts = 0;
-    }
-    if (search.haulClaimTick == 0) search.haulClaimTick = tick;
-    if (tick - search.haulClaimTick > 5455)
-    {
-        if (AddonCorpseReadInt(player, key.c_str()) == owner)
-            player->party.vars.SetVar(key.c_str(), 0.0f);
-        search.corpseId = -1;
-        search.step = 0;
-        return true;
-    }
-    if (search.haulAnimationPhase == 0 &&
-        (server->IsAggressive() || logic.GetScriptState() == US_ATTACK ||
-         logic.GetScriptState() == US_CAST || logic.GetScriptState() == US_SKILL))
-        return true;
-    if (search.haulAnimationPhase == 1)
-    {
-        const DWORD entry = search.haulAnimationEntry[search.haulAnimationClip];
-        const SUnitCommand &current = server->GetScriptCommand();
-        const SUnitCommand &next = server->GetNextScriptCommand();
-        if (AddonPickupAnimationRunning(current, entry))
-        {
-            search.haulAnimationPhase = 2;
-            const int frames = static_cast<int>(search.haulAnimationFrames[search.haulAnimationClip]);
-            search.haulAnimationDeadline = tick + ((frames > 0 ? frames : 30) * 40 + 32) / 33 + 55;
-            return true;
-        }
-        if (!AddonPickupAnimationRunning(next, entry) && tick > search.haulAnimationQueuedTick)
-            search.haulAnimationPhase = 0;
-        else if (tick < search.haulAnimationDeadline) return true;
-        else search.haulAnimationPhase = 0;
-    }
-    if (search.haulAnimationPhase == 2)
-    {
-        const DWORD entry = search.haulAnimationEntry[search.haulAnimationClip];
-        const SUnitCommand &current = server->GetScriptCommand();
-        const SUnitCommand &next = server->GetNextScriptCommand();
-        if (AddonPickupAnimationRunning(current, entry) ||
-            AddonPickupAnimationRunning(next, entry))
-        {
-            if (tick < search.haulAnimationDeadline) return true;
-            search.haulAnimationPhase = 0;
-        }
-        else
-        {
-            ++search.haulAnimationClip;
-            search.haulAnimationPhase = 0;
-            if (search.haulAnimationClip < search.haulAnimationCount)
-            {
-                if (AddonQueuePickupClip(search, server, observer, tick)) return true;
-                search.haulAnimationCount = 0;
-            }
-            else search.haulAnimationPhase = 3;
-        }
-    }
-    const CPlot3D position = corpse->GetCP();
-    const CPlot3D here = observer->GetCP();
-    const float dx = here.x - position.x, dy = here.y - position.y;
-    if (dx * dx + dy * dy <= 6.25f && search.haulAnimationPhase != 3)
-    {
-        if (server->GetScriptCommand().cmd != UC_PLAYANIM &&
-            server->GetNextScriptCommand().cmd != UC_PLAYANIM)
-        {
-            if (!search.haulAnimationCount &&
-                !AddonSelectPickupAnimation(search, server, observer))
-            {
-                player->party.vars.SetVar(key.c_str(), 0.0f);
-                search.corpseId = -1;
-                return true;
-            }
-            if (search.haulAnimationPhase == 0)
-            {
-                if (!AddonQueuePickupClip(search, server, observer, tick))
-                {
-                    player->party.vars.SetVar(key.c_str(), 0.0f);
-                    search.corpseId = -1;
-                }
-                return true;
-            }
-        }
-        return true;
-    }
-    if (search.haulAnimationPhase == 3 && dx * dx + dy * dy <= 6.25f)
-    {
-        if (tick < search.nextHaulTick) return true;
-        std::vector<SAddonCarryEntry> validationPlan;
-        if (!AddonCarryPlan(player, corpse, observer, false, validationPlan,
-                            destinationCount, ownCount))
-        {
-            player->party.vars.SetVar(key.c_str(), 0.0f);
-            search.corpseId = -1;
-            return true;
-        }
-        if (!AddonDetachCorpseFromAIMap(corpse))
-        {
-            search.nextHaulTick = tick + 91;
-            return true;
-        }
-        std::vector<SAddonCarryEntry> plan;
-        if (!AddonCarryPlan(player, corpse, observer, true, plan,
-                            destinationCount, ownCount))
-        {
-            player->party.vars.SetVar(key.c_str(), 0.0f);
-            search.corpseId = -1;
-            return true;
-        }
-        AddonCommitCarry(player, corpse, observer, plan, destinationCount);
-        player->party.vars.SetVar(key.c_str(), -static_cast<float>(owner));
-        const std::string memoryKey = AddonCorpseMarker(observer, corpse, zone.c_str());
-        player->party.vars.SetVar(memoryKey.c_str(), 0.0f);
-        corpse->SetFlag(OBJ_HIDDEN | OBJ_UNSELECTABLE | UNIT_ALREADY_HOOVER);
-        corpse->SetUpdated();
-        CMapObjPtrHashIterator iterator;
-        for (CMapObject *object = iterator.GetFirst(&theWorldServer.dynamicObjs);
-             object; object = iterator.GetNext())
-        {
-            if (object->WhoAmI() != HPC_UNIT) continue;
-            CUnit *unit = static_cast<CUnit *>(object);
-            CUnitSpecific *specific = unit->GetUnitSpecific();
-            if (!specific || specific->WhoAmI() != HPC_UNITSERVERSPECIFIC) continue;
-            CAIUnitEnvironment &environment =
-                static_cast<CUnitServer *>(specific)->logic.environment;
-            CMapObjectPtrList *lists[] = { &environment.units,
-                &environment.visibleUnits, &environment.seenCorpses,
-                &environment.freshCorpses };
-            for (int n = 0; n < 4; ++n)
-            {
-                POSITION pos = lists[n]->GetHeadPosition();
-                while (pos)
-                {
-                    POSITION current = pos;
-                    if (lists[n]->GetNext(pos) == corpse)
-                        lists[n]->RemoveAt(current);
-                }
-            }
-        }
-        search.corpseId = -1;
-        search.step = 0;
-        search.haulAnimationCount = 0;
-        search.haulAnimationPhase = 0;
-        search.nextScanTick = tick + 18;
-        return true;
-    }
-    if (tick >= search.nextHaulTick)
-    {
-        CAIUnitEnvironment &environment = logic.environment;
-        if (environment.GetPoIPower() < 900)
-            environment.AddPoI(position, 900, -3);
-        search.nextHaulTick = tick + 91;
-        ++search.haulAttempts;
+    if(auto* client=theWorld.GetUnit(corpse->GetID())){
+        client->SetFlag(OBJ_HIDDEN|OBJ_UNSELECTABLE|UNIT_ALREADY_HOOVER);client->SetUpdated();
     }
     return true;
 }
-void AddonUpdateCorpseInvestigation(CAIUnitLogic &logic)
+bool AddonUpdateCorpseHaul(CAIUnitLogic& logic,SAddonCorpseSearch& search,CUnit* observer,CUnitServer* server,
+    CUnit* corpse,CPlayer* player,const std::string& zone,int tick,float pickupDistance)
 {
-    CUnit *observer = logic.GetUnit();
-    CUnitServer *server = logic.GetUnitServer();
-    if (!observer || !server || observer->IsDead() || observer->IsHero() ||
-        observer->GetOwner() || server->IsTamed() ||
-        !observer->GetPrototype() ||
-        !AddonRaceCanInvestigate(observer->GetPrototype()->szRace.GetString()) ||
-        !AddonHasDutyForCorpseSearch(logic))
-        return;
-
-    CPlayer *player = theWorldServer.GetPlayer(0);
-    const char *zoneName = player ? player->party.szCurrentZone.GetString() : nullptr;
-    const std::string zone = zoneName && *zoneName ? zoneName : "unknown";
-    if (!player) return;
-    if (zone != g_addonCorpseSearchZone)
-    {
-        g_addonCorpseSearchZone = zone;
-        g_addonCorpseSearch.clear();
-    }
-    const int tick = theWorldServer.GetSegmentTimeCounter();
-    SAddonCorpseSearch &search = g_addonCorpseSearch[observer->GetID()];
-    if (search.observerSubtype != observer->GetSubtypeID())
-    {
-        search = SAddonCorpseSearch();
-        search.observerSubtype = observer->GetSubtypeID();
-    }
-
-    if (tick >= search.nextScanTick)
-    {
-        search.nextScanTick = tick + 18;
-        CMapObjectPtrList &corpses = logic.environment.seenCorpses;
-        int candidateId = -1;
-        DWORD candidateSubtype = 0;
-        CPlot3D candidateCenter(0, 0, 0);
-        int candidatePhase = 0;
-        float candidateDistance2 = 0.0f;
-        for (POSITION pos = corpses.GetHeadPosition(); pos;)
-        {
-            CUnit *corpse = static_cast<CUnit *>(corpses.GetNext(pos));
-            if (!corpse || corpse == observer || !corpse->IsDead() ||
-                !theWorldServer.fof.IsPlayerAlly(
-                    observer->GetPlayerNum(), corpse->GetPlayerNum()))
-                continue;
-            const std::string key = AddonCorpseMarker(
-                observer, corpse, zone.c_str());
-            float stored = player ? player->party.vars.GetVar(key.c_str()) : 0.0f;
-            if (!std::isfinite(stored)) stored = 0.0f;
-            const int phase = static_cast<int>(stored + (stored >= 0 ? 0.5f : -0.5f));
-            if (phase < 1)
-            {
-                if (player) player->party.vars.SetVar(key.c_str(), 1.0f);
-                char alert[192];
-                _snprintf_s(alert, sizeof(alert), _TRUNCATE,
-                    "jmv.murderawareness.%s.%d", zone.c_str(), observer->GetID());
-                if (player)
-                {
-                    player->party.vars.SetVar(alert, 1.0f);
-                    player->party.vars.SetVar((std::string(alert) + ".until").c_str(),
-                        static_cast<float>(tick + 5455));
-                }
-            }
-            if (phase <= 2)
-            {
-                const CPlot3D position = corpse->GetCP();
-                const float dx = observer->GetCP().x - position.x;
-                const float dy = observer->GetCP().y - position.y;
-                const float distance2 = dx * dx + dy * dy;
-                if (candidateId < 0 || distance2 < candidateDistance2 ||
-                    (distance2 == candidateDistance2 && corpse->GetID() < candidateId))
-                {
-                    candidateId = corpse->GetID();
-                    candidateSubtype = corpse->GetSubtypeID();
-                    candidateCenter = position;
-                    candidatePhase = phase;
-                    candidateDistance2 = distance2;
-                }
-            }
-        }
-        if (search.corpseId < 0 && candidateId >= 0)
-        {
-            search.corpseId = candidateId;
-            search.corpseSubtype = candidateSubtype;
-            search.center = candidateCenter;
-            search.step = candidatePhase >= 2 ? 3 : 0;
-            ++search.pointSerial;
-            search.seed = static_cast<unsigned>(observer->GetID()) * 2654435761u ^
-                static_cast<unsigned>(candidateId + 1) * 2246822519u ^
-                static_cast<unsigned>(tick) ^
-                search.pointSerial * 3266489917u;
-            search.waiting = candidatePhase == 0;
-            search.sawAggressive = false;
-            search.initialReaction = candidatePhase == 0;
-            search.reactionDeadline = tick + 91;
-        }
-    }
-
-    if (search.corpseId < 0) return;
-    CUnit *corpse = theWorldServer.GetUnit(search.corpseId);
-    if (!corpse || corpse->GetSubtypeID() != search.corpseSubtype ||
-        !corpse->IsDead())
-    {
-        search.corpseId = -1;
-        search.waiting = false;
-        return;
-    }
-
-    if (search.step >= 3 && !search.waiting)
-    {
-        const std::string key = AddonCorpseMarker(
-            observer, corpse, zone.c_str());
-        if (player) player->party.vars.SetVar(key.c_str(), 2.0f);
-        AddonUpdateCorpseHaul(logic, search, observer, server, corpse,
-                              player, zone, tick);
-        return;
-    }
-
-    if (search.waiting)
-    {
-        if (server->IsAggressive())
-        {
-            search.sawAggressive = true;
-            return;
-        }
-        if (search.sawAggressive || tick >= search.reactionDeadline)
-        {
-            search.waiting = false;
-            search.initialReaction = false;
-            search.nextStepTick = tick + 18;
-        }
-        return;
-    }
-    if (tick < search.nextStepTick || server->IsAggressive() ||
-        logic.GetScriptState() == US_ATTACK ||
-        logic.GetScriptState() == US_CAST ||
-        logic.GetScriptState() == US_SKILL)
-        return;
-
-    CAIUnitEnvironment &environment = logic.environment;
-    if (environment.GetPoIPower() >= 800)
-    {
-        search.nextStepTick = tick + 18;
-        return;
-    }
-
-
-    static const float directions[16][2] = {
-        {1.0f,0.0f},{0.9239f,0.3827f},{0.7071f,0.7071f},{0.3827f,0.9239f},
-        {0.0f,1.0f},{-0.3827f,0.9239f},{-0.7071f,0.7071f},{-0.9239f,0.3827f},
-        {-1.0f,0.0f},{-0.9239f,-0.3827f},{-0.7071f,-0.7071f},{-0.3827f,-0.9239f},
-        {0.0f,-1.0f},{0.3827f,-0.9239f},{0.7071f,-0.7071f},{0.9239f,-0.3827f}
+    const auto key=AddonHaulMarker(zone.c_str(),corpse);const int owner=observer->GetID()+1;
+    auto release=[&](){
+        if(AddonCorpseReadInt(player,key.c_str())==owner)player->party.vars.SetVar(key.c_str(),0.0f);
+        search.retry[{search.corpseId,search.corpseSubtype}]=tick+909;
+        search.corpseId=-1;search.haulAnimationCount=search.haulAnimationPhase=0;
     };
-    const unsigned index = (search.seed + static_cast<unsigned>(search.step) *
-        ((search.seed & 0x10u) ? 5u : 7u)) & 15u;
-    const float radius = search.step == 0 ? 5.0f : search.step == 1 ? 10.0f : 15.0f;
-    CPlot3D point = search.center;
-    point.x += directions[index][0] * radius;
-    point.y += directions[index][1] * radius;
-    if (environment.AddPoI(point, 800, -3))
-    {
-        ++search.step;
-        search.waiting = true;
-        search.sawAggressive = false;
-        search.reactionDeadline = tick + 91;
-        search.nextStepTick = tick + 18;
+    if(AddonCorpseReadInt(player,key.c_str())!=owner||tick<search.haulClaimTick||
+        tick-search.haulClaimTick>=1091||AddonCorpseProtected(corpse)){release();return false;}
+    const bool blocked=ModDeathFearActive(observer)||server->IsAggressive()||server->HasAttack()||server->HasCast()||server->HasSkill()||
+        logic.GetScriptState()==US_ATTACK||logic.GetScriptState()==US_CAST||logic.GetScriptState()==US_SKILL;
+    if(blocked){search.haulAnimationCount=search.haulAnimationPhase=0;search.nextHaulTick=tick+18;return true;}
+    const auto& current=server->GetScriptCommand();const auto& next=server->GetNextScriptCommand();
+    const int clip=search.haulAnimationClip;
+    if(search.haulAnimationPhase){
+        if(clip<0||clip>=search.haulAnimationCount||search.haulAnimationCount>2){release();return false;}
+        const DWORD entry=search.haulAnimationEntry[clip];
+        const bool cur=AddonPickupAnimationRunning(current,entry),queued=AddonPickupAnimationRunning(next,entry);
+        auto retry=[&](){search.haulAnimationCount=search.haulAnimationPhase=0;search.nextHaulTick=tick+18;};
+        const bool curFree=current.cmd==UC_IDLE||current.cmd==UC_NONE,nextFree=next.cmd==UC_IDLE||next.cmd==UC_NONE;
+        if((!cur&&!curFree)||(!queued&&!nextFree)){retry();return true;}
+        if(search.haulAnimationPhase==1){
+            if(cur){
+                search.haulAnimationPhase=2;
+                const int frames=static_cast<int>(search.haulAnimationFrames[clip]);
+                search.haulAnimationDeadline=tick+((frames>0?frames:30)*40+32)/33+55;
+                return true;
+            }
+            if((!queued&&tick>search.haulAnimationQueuedTick)||tick>=search.haulAnimationDeadline){retry();return true;}
+            return true;
+        }
+        if(search.haulAnimationPhase==2){
+            if(cur||queued){if(tick>=search.haulAnimationDeadline)retry();return true;}
+            ++search.haulAnimationClip;
+            if(search.haulAnimationClip<search.haulAnimationCount){
+                if(!AddonQueuePickupClip(search,server,observer,tick))retry();return true;
+            }
+            search.haulAnimationPhase=3;
+        }
     }
-    else
-    {
-        search.nextStepTick = tick + 18;
+    const auto here=observer->GetCP(),there=corpse->GetCP();
+    const float distance2=(here.x-there.x)*(here.x-there.x)+(here.y-there.y)*(here.y-there.y);
+    if(distance2>pickupDistance*pickupDistance){search.haulAnimationCount=search.haulAnimationPhase=0;search.nextHaulTick=tick+18;return true;}
+    if(search.haulAnimationPhase!=3){
+        if(tick<search.nextHaulTick||current.cmd==UC_PLAYANIM||current.cmd==UC_PLAYANIMCYCLE||next.cmd==UC_PLAYANIM||next.cmd==UC_PLAYANIMCYCLE)return true;
+        std::vector<SAddonCarryEntry> validation;int destination=0,own=0;
+        if(!AddonCarryPlan(player,corpse,observer,false,validation,destination,own)||!AddonSelectPickupAnimation(search,server,observer)){release();return false;}
+        if(!AddonQueuePickupClip(search,server,observer,tick)){search.haulAnimationCount=search.haulAnimationPhase=0;search.nextHaulTick=tick+18;}
+        return true;
     }
+    std::vector<SAddonCarryEntry> plan;int destination=0,own=0;
+    if(!AddonCarryPlan(player,corpse,observer,true,plan,destination,own)){release();return false;}
+    AddonCommitCarry(player,corpse,observer,plan,destination);
+    player->party.vars.SetVar(key.c_str(),-float(owner));
+    player->party.vars.DelVar(AddonCorpseMarker(observer,corpse,zone.c_str()).c_str());
+    // Commit only once. Negative GS claims reapply hidden/detached state after
+    // save/load and retry a failed detach without rolling/duplicating loot.
+    AddonApplyHauledCorpseState(corpse);
+    EngineDiagnostics::Event("GroupSearch event=PICKUP_COMMIT zone=%s owner=%d body=%d subtype=%u entries=%u",
+        zone.c_str(),observer->GetID(),corpse->GetID(),corpse->GetSubtypeID(),unsigned(plan.size()));
+    search.corpseId=-1;search.haulAnimationCount=search.haulAnimationPhase=0;
+    return false;
 }
+
+
 }
 #include "ModGroupSearch/Native.inl"
+#include "ModGroupSearch/Runtime.inl"
 static bool ModDeathFearActive(const CUnit *unit){if(!unit)return false;auto i=modDeathFearStates.find(unit->GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit->GetSubtypeID();}
 static bool ModDeathFearRoutePending(const CUnit *unit){if(!unit)return false;auto i=modDeathFearStates.find(unit->GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit->GetSubtypeID()&&i->second.pending;}
 void ModDeathFearReset(){modDeathFearStates.clear();modDeathFearExcluded.clear();modDeathFearConfigReady=false;modDeathFearEnter=15;modDeathFearExit=30;modDeathFearDistance=25;modDeathFearSpeed=.65f;}
@@ -3060,7 +2769,7 @@ void CAIUnitLogic::Segment()
     // update environment
     environment.Segment(pUnitServer);
 
-    AddonUpdateCorpseInvestigation(*this);
+    // Corpse sensing/commands belong exclusively to ModGroupSearch::Update.
 
     ModDeathFearUpdate(*this);
 

@@ -159,6 +159,7 @@ public:
     //
     DWORD GetProficiencyClass() const { return dwProficiencyClass; }
     float GetRandomDamage() const;
+    float GetDamageRandomRange() const { return fpDamageRnd; }
     float GetDamageMin() const { return fpDamageMin; }
     float GetDamageMax() const { return fpDamageMin + fpDamageRnd; }
     float GetRange() const { return fpRange; }

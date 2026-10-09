@@ -1,7 +1,10 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "EngineDiagnostics.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModItemUiPolicy.h"
+#include "ModCliTool.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "io.h"
@@ -49,6 +52,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModAnimationIdSave.h"
 #include <vector>
 #include <cmath>
+#include "ModCampReferences.inl"
 
 /////////////////////////////////////////////////////////////////////////////////////
 const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
@@ -312,6 +316,7 @@ void CWorldServer::RemoveEverything()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Clear()
 {
+    ModCampReferences::ResetWorld();
     fieldCampSnapshots.clear();
     fieldCampArmed = fieldCampInCamp = false;
     fieldCampReturnHeroId = -1;
@@ -895,6 +900,7 @@ void CWorldServer::NetDriverSegment(CLowLevelNetDriver *pDriver)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::StartServer(EServerMode mode)
 {
+    GameJournal::Event("SESSION", "role", "server_mode=%d role=%s", int(mode), mode == SERV_MODE_LOCAL ? "single" : mode == SERV_MODE_LMP ? "server" : mode == SERV_MODE_MMP ? "multiplayer" : "interface");
     ASSERT(GetPlayerManager()->GetNumElements() == 0);
     ASSERT(serverMode == SERV_MODE_NONE);
     ASSERT(mode != SERV_MODE_NONE);
@@ -916,6 +922,7 @@ void CWorldServer::WorldSegment(bool bForceScriptRun)
     CMapObjPtrHashIterator mapobjIter;
 
     SetSegmentTimeCounter(GetSegmentTimeCounter() + 1);
+    GameJournal::Tick(static_cast<unsigned long>(GetSegmentTimeCounter()));
     // Determine new night vision power
     if ((GetSegmentTimeCounter() & N_TIMERECALCINTERVAL) == 3)
         RecalcNightPower();
@@ -1309,6 +1316,7 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
 {
     int i, k;
     const bool fieldCampReturn = fieldCampInCamp;
+    if(fieldCampReturn)if(auto* mod=ModRuntime::Current())mod->InvalidateInfoStatsCache();
     if (fieldCampReturn) {
         for (i = 0; i < people.GetSize(); ++i) ZeroFieldCampPersonage(*people[i]);
         if (pPlayer) {
@@ -1324,9 +1332,12 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
     const char **ppBPs;
     CString szAddToScript, szTemp;
     bool bFirstDeploy;
-    bFirstDeploy = !fieldCampReturn && strnicmp(szZoneFileName, "zone1", 5) == 0 &&
-                   fabs2(ptPlace - CPlot3D(54, 138, 0)) < 300;
+    const auto* introMod=ModRuntime::Current();
+    bFirstDeploy = ModItemUiPolicy::FirstDeploy(fieldCampReturn,
+        introMod && introMod->CombatSetting("PreventZone1Animation"),szZoneFileName,
+        fabs2(ptPlace - CPlot3D(54, 138, 0)) < 300);
 
+    static unsigned introNotes=0;if(introNotes++<16)EngineDiagnostics::Event("P05 intro zone=%s campReturn=%d prevent=%d firstDeploy=%d",szZoneFileName.GetString(),int(fieldCampReturn),int(introMod && introMod->CombatSetting("PreventZone1Animation")),int(bFirstDeploy));
     if (fieldCampReturn) EngineDiagnostics::Event("Camp deploy: initial animation suppressed zone=%s", szZoneFileName.GetString());
     szAddToScript = "WorldScript(";
     for (i = 0; i < people.GetSize(); i++)
@@ -1494,6 +1505,9 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
     if (pPlayer)
         script.LoadText(szAddToScript);
     if (fieldCampReturn) {
+        if (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCampRebindScriptReferences"))
+            ModCampReferences::RestoreWorld(*this);
+        ModCampReferences::ResetWorld();
         bool restored = !fieldCampSnapshots.empty();
         for (i = 0; i < static_cast<int>(fieldCampSnapshots.size()); ++i) {
             const SFieldCampSnapshot &snapshot = fieldCampSnapshots[i];
@@ -1562,6 +1576,11 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
             fieldCampSnapshots.push_back(snapshot);
         }
         if (fieldCampSnapshots.size() != static_cast<size_t>(people.GetSize())) { fieldCampSnapshots.clear(); fieldCampArmed = false; }
+        if (fieldCampArmed && ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCampRebindScriptReferences")) {
+            std::vector<int> ids;
+            for (const auto& snapshot : fieldCampSnapshots) ids.push_back(snapshot.id);
+            ModCampReferences::CaptureWorld(*this,ids);
+        } else ModCampReferences::ResetWorld();
     }
     int i, k;
     // store follow info
@@ -2074,7 +2093,8 @@ void CWorldServer::GainExperience(CPlayer *pPlayer, float fpExp)
     ASSERT(dudes.GetSize() > 0);
     if (dudes.GetSize() < 1)
         return;
-    fpExp /= dudes.GetSize();
+    if(auto* mod=ModRuntime::Current())fpExp=mod->ChargeExperience(fpExp,dudes.GetSize());
+    else fpExp /= dudes.GetSize();
     for (int i = 0; i < dudes.GetSize(); i++)
     {
         CUnit *pUnit = GetUnit(dudes[i]);
@@ -2821,6 +2841,8 @@ CMapObject *CWorldServer::GetMapObject(int nID)
 // inform every player that somebody died if that player saw corpse
 void CWorldServer::InformAboutUnitDeath(CUnit *pUnit)
 {
+    GameJournal::CombatBoundary("death", pUnit->GetID());
+    GameJournal::Event("COMBAT", "death", "id=%d prototype=%s player=%d", pUnit->GetID(), GameJournal::Quote(pUnit->GetPrototype() ? (const char*)pUnit->GetPrototype()->szName : "unknown").c_str(), pUnit->GetPlayerNum());
     CPlayer *pPl;
     CPlayerIterator playerIter;
     pPl = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
@@ -2938,7 +2960,7 @@ bool CWorldServer::CanBeginFieldCamp()
     if (!player || !playerServer || playerServer->dangerState == WDS_COMBAT || player->party.people.GetSize() <= 0 || player->party.people.GetSize() > 8)
         return false;
     try { if (mod->GoCampZoneExcluded((LPCSTR)player->party.szCurrentZone)) return false; }
-    catch (...) { return false; }
+    catch (...) { GameJournal::AllocationFailureInCatch("WorldServer"); return false; }
     std::vector<CUnit *> partyUnits;
     for (int i = 0; i < player->party.people.GetSize(); ++i) {
         CUnit *unit = GetUnit(player->party.people[i].nID);
@@ -2947,7 +2969,7 @@ bool CWorldServer::CanBeginFieldCamp()
     }
     float radius = 25.0f;
     try { radius = mod->GoCampEnemyRadius(); }
-    catch (...) { return false; }
+    catch (...) { GameJournal::AllocationFailureInCatch("WorldServer"); return false; }
     const float radiusSquared = radius * radius;
     CMapObjPtrHashIterator iterator;
     for (CMapObject *object = iterator.GetFirst(const_cast<CMapObjPtrHash *>(&dynamicObjs)); !iterator.IsReachEnd(); object = iterator.GetNext()) {
@@ -2962,6 +2984,7 @@ bool CWorldServer::CanBeginFieldCamp()
 bool CWorldServer::BeginFieldCamp()
 {
     if (!CanBeginFieldCamp()) return false;
+    ModCampReferences::ResetWorld();
     fieldCampSnapshots.clear();
     fieldCampArmed = true;
     return true;
@@ -2970,12 +2993,13 @@ int CWorldServer::FieldCampReturnHeroID() const { return fieldCampReturnHeroId; 
 void CWorldServer::CompleteFieldCampReturn() { fieldCampReturnHeroId = -1; }
 bool CWorldServer::BeginFieldCampCommerceSuppression()
 {
+    GameJournal::Source journalSource("engine.field_camp_suppression");
     CModPackage *mod = ModRuntime::Current();
-    CPlayer *player = GetPlayer(0);
+    CPlayerClient *player = IWorldClient.GetPlayer();
     if (!fieldCampInCamp || !mod || !mod->CombatSetting("JMVGoCamp") || !player || fieldCampCommerceVars) return false;
     static const char *names[6] = { "constr.current", "i.noconstr", "i.offspellconstr", "i.onspellconstr", "i.offitemconstr", "i.onitemconstr" };
     static const float values[6] = { 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f };
-    CGSVariableSet &vars = player->party.vars;
+    CGSVariableSet &vars = IWorldClient.GetParty().vars;
     fieldCampCommerceVars = &vars;
     for (int i = 0; i < 6; ++i) {
         auto found = vars.find(names[i]);
@@ -2988,10 +3012,15 @@ bool CWorldServer::BeginFieldCampCommerceSuppression()
 }
 void CWorldServer::EndFieldCampCommerceSuppression(bool active)
 {
+    GameJournal::Source journalSource("engine.field_camp_restore");
     if (!active || !fieldCampCommerceVars) return;
     for (int i = 0; i < 6; ++i) {
         const SFieldCampVarSnapshot &snapshot = fieldCampCommerceValues[i];
-        if (snapshot.existed) fieldCampCommerceVars->SetVar(snapshot.name, snapshot.value);
+        // SetVar(0) deletes the key; preserve zero-valued keys loaded from saves.
+        if (snapshot.existed) {
+            GameJournal::Variable(fieldCampCommerceVars, snapshot.name, fieldCampCommerceVars->find(snapshot.name) != fieldCampCommerceVars->end(), fieldCampCommerceVars->GetVar(snapshot.name), snapshot.value, false);
+            (*fieldCampCommerceVars)[snapshot.name] = snapshot.value;
+        }
         else fieldCampCommerceVars->DelVar(snapshot.name);
     }
     fieldCampCommerceVars = nullptr;
@@ -3293,6 +3322,7 @@ void CWorldServer::ReduceQItemCount(CUnit *pUnit, CItem *pItem)
 // for screen wait
 void CWorldServer::SetupScreenWait(const char *pszZoneName)
 {
+    if (ModCliTool::GeneratingGraph()) return;
     SScenarioZone *pZone = 0;
     CString szAllodName;
 
@@ -3346,7 +3376,7 @@ void CWorldServer::SetupScreenWait(const char *pszZoneName)
             }
         }
         catch (const std::exception &error)
-        {
+        { GameJournal::AllocationFailureInCatch("WorldServer");
             TRACE("GetLoadVideo failed: %s\n", error.what());
         }
     }
@@ -3398,6 +3428,8 @@ void CWorldServer::CreateInitialUpdate()
 // начать функционирование нового сервера
 BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneName)
 {
+    GameJournal::Event("ZONE", "resources", "mpr=%s mob=%s", GameJournal::Quote(pszMapName).c_str(), GameJournal::Quote(pszMobName).c_str());
+    GameJournal::Operation journal("ZONE", "new_zone", pszZoneName);
     SetSky(GMS_NORMAL);
     SetupScreenWait(pszZoneName);
     ASSERT(GetPlayerManager()->GetNumElements() == 0);
@@ -3416,7 +3448,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
         return FALSE;
 
     CMemorySave graphChunk;
-    if (!LoadAIGraph(pszMapName, pszMobName, graphChunk))
+    if (!ModCliTool::GeneratingGraph() && !LoadAIGraph(pszMapName, pszMobName, graphChunk))
         return ReportError("CWorldServer::LoadMap.\n Can't load AIGraph.\n");
 
     szLoadedMobs.RemoveAll();
@@ -3441,7 +3473,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
 #endif
 
     JMV_NpcConsumablesLoaded(WorldLoadOrigin::ZoneEntry);
-    return TRUE;
+    { journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::HealAllUnits()
@@ -3461,6 +3493,7 @@ void CWorldServer::HealAllUnits()
 // this simply erases everything dynamic from server and sets it to single player mode
 void CWorldServer::RemoveEverythingDynamic()
 {
+    GameJournal::MemorySnapshot("zone_unload");
     for (;;)
     {
         CPlayerIterator playerIter;
@@ -3815,6 +3848,8 @@ void CWorldServer::RemoveDynamicObjects()
 // and should not be in local or multiplayer mode
 BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *pszTerrain)
 {
+    GameJournal::Event("LOAD", "origin", "value=%d reason=%s", int(origin), origin==WorldLoadOrigin::SavedGame?"saved_game":"zone_entry");
+    GameJournal::Operation journal("LOAD", "world", pszTerrain);
     char ch;
     int nID, i;
     BOOL bRv;
@@ -4029,7 +4064,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
     if (deadUnits.GetSize() != 0)
     {
         CString szString(
-            "This Map Objects have incorrect placement and will be deleted from the map!!!\n");
+            "Some units have invalid placement; attempting to move them to passable terrain:\n");
         char buff[256];
         for (i = 0; i < deadUnits.GetSize(); ++i)
         {
@@ -4037,7 +4072,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
             szString += buff;
         }
 
-        ReportError("%s", szString.GetString());
+        ReportWarning("%s", szString.GetString());
 
         //::MessageBox(0, szString, "WARNING", MB_OK | MB_ICONWARNING);
     }
@@ -4080,7 +4115,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
         if (pMO && pMO->WhoAmI() == HPC_UNIT)
             SynchronizeFieldCampUnitEnergy(static_cast<CUnit *>(pMO));
     }
-    return TRUE;
+    { journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::StoreSave(CSave &file)

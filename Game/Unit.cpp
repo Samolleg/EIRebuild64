@@ -4,6 +4,10 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Unit.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
+#include "ModEquipmentSwitch.h"
+#include "ModCampEquipment.h"
+#include "ModAttackTiming.h"
+#include "ModItemSpellPolicy.h"
 
 #include "WinRegistry.h"
 #include "FigureManager.h"
@@ -980,7 +984,7 @@ EUnitCastFailure CUnit::CheckIsWandPossible(DWORD dwQItemIndex, CPlot3D &ptTarge
     // check mana capacity only for wands
     if (((CItemQuick *)pItem)->GetQuickItemType() == IDB_WAND)
     {
-        if (pSpell->GetManaCost() > pItem->GetMP())
+        if (ModItemSpells::WandLacksMana(true,pSpell!=nullptr,pSpell?pSpell->GetManaCost():0,pItem->GetMP()))
             return UCS_NOMANA;
     }
     // if ( fabs2( ptTarget - GetCP() ) > sqr( pSpell->GetRange() * 1.02f ) )
@@ -1012,7 +1016,7 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
         fpRotateSpeed = fpMoveSpeed;
         break;
     }
-    if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this),fear=mod->DeathFearSpeedFactor(*this);if(fear<factor)factor=fear;fpMoveSpeed*=factor;fpRotateSpeed*=factor;}
+    if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this),fear=mod->DeathFearSpeedFactor(*this);if(fear<factor)factor=fear;auto speeds=ModAttackTiming::ScaleMovement({fpMoveSpeed,fpRotateSpeed},factor);fpMoveSpeed=speeds.move;fpRotateSpeed=speeds.rotate;}
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1417,6 +1421,38 @@ float CUnit::GetItemsWeight() const
     return fItemsWeight;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+float CUnit::GetItemsWeight(DWORD spellSlots) const
+{
+    float fItemsWeight = 0;
+    int i;
+    // weapons
+    for (i = 0; i < QI_MAX_WEAPONS; ++i)
+    {
+        if (lpQWeapons[i])
+            fItemsWeight += lpQWeapons[i]->CItem::GetWeight();
+    }
+    // quick items
+    for (i = 0; i < QI_MAX_ITEMS; ++i)
+    {
+        if (lpQItems[i])
+            fItemsWeight += lpQItems[i]->GetWeight();
+    }
+    // spells
+    for (i = 0; i < spellSlots && i < QI_MAX_SPELLS; ++i)
+    {
+        if (lpQSpells[i])
+            fItemsWeight += lpQSpells[i]->GetWeight();
+    }
+    // armors
+    for (i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
+    {
+        if (lpArmors[i])
+            fItemsWeight += lpArmors[i]->GetWeight();
+    }
+    //
+    return fItemsWeight;
+}
+/////////////////////////////////////////////////////////////////////////////////////
 CItemArmor *CUnit::GetQArmor(DWORD dwSlotIndex)
 {
     return lpArmors[dwSlotIndex];
@@ -1668,6 +1704,19 @@ void CUnit::RemoveQItem(DWORD dwQItemIndex)
     SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Camp native hooks use borrowed quick refs and compact removal; stock slots stay stock.
+int CUnit::AddCampQItem(CItemQuick* item)
+{
+    const int index=ModCampEquipment::AddQuick(lpQItems,QI_MAX_ITEMS,item);
+    if(index>=0)SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
+    return index;
+}
+void CUnit::RemoveCampQItem(int index)
+{
+    if(ModCampEquipment::RemoveQuick(lpQItems,QI_MAX_ITEMS,index))
+        SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
+}
+
 void CUnit::AddQuestItem(CItemQuest *pItem)
 {
     pItem->AddRef();
@@ -1845,12 +1894,11 @@ CItemSpell *CUnit::GetQSpellItem(DWORD dwQSpellIndex)
     if (dwQSpellIndex >= GetSpellSlotCount())
         return nullptr;
     CItemSpell *pSpell;
-    if (lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
+    if (lpUnitSpecific && lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
     {
         CPlayer *pPlayer = GetOwner();
-        ASSERT(pPlayer);
         if (!pPlayer)
-            return 0;
+            return lpQSpells[dwQSpellIndex];
         CPersonage *pPers = pPlayer->party.GetPersonage(GetID());
         if (!pPers)
             return 0;
@@ -1898,6 +1946,10 @@ CSpell *CUnit::GetQSpell(DWORD dwQSpellIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::Load(CSave &file)
 {
+    auto completeWeaponSwitchLoad=[this](){
+        if (auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVAttacks"))
+            ModEquipmentSwitch::AfterLoad(ModEquipmentSwitch::RuntimeCache(),int(GetID()),true);
+    };
     int i, k, _nPlayer;
     CMapObject::Load(file);
     lpUnitSpecific->Load(file);
@@ -1953,11 +2005,15 @@ void CUnit::Load(CSave &file)
     for (k = 0; k < i; k++)
         questItems[k] = LoadGBPtr<CItemQuest>(file, GetWorld()->GetItemManager());
     file.Read(fpCollisionDistance);
-    if (file.GetVersion() < 73)
+    if (file.GetVersion() < 73) {
+        completeWeaponSwitchLoad();
         return;
+    }
     file.Read(&aggression, sizeof(aggression));
-    if (file.GetVersion() < 77)
+    if (file.GetVersion() < 77) {
+        completeWeaponSwitchLoad();
         return;
+    }
     CString szProto;
     // unit prototype
     file.Read(szProto);
@@ -1965,11 +2021,13 @@ void CUnit::Load(CSave &file)
     if (file.GetVersion() < 106)
     {
         SetVoicePrototype(szProto);
+        completeWeaponSwitchLoad();
         return;
     }
     // voice prototype
     file.Read(szProto);
     SetVoicePrototype(szProto);
+    completeWeaponSwitchLoad();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::Store(CSave &file)
@@ -2128,11 +2186,10 @@ CPlot3D CUnit::GetWeaponCastPoint(const CItemWeapon*weapon,bool left)
         if(CFigure*hand=MatchFigure(left?"lh3":"rh3"))return GetFigureWorldPosition(hand);
     auto*animation=GetAnimationSystem2();
     if(!animation)return GetCP()+bv.ptCenter;
-    CString name=left?"lh3":"baserh3";
-    if(weapon){auto*shape=weapon->GetShapeEntry();
-        if(shape->dwTypeID==RPGWST_HANDS3||shape->dwTypeID==RPGWST_HANDS7)
-            name.Format("%s%s%.2d",left?"l.":"",shape->dwTypeID==RPGWST_HANDS3?"basestaff":"basedstaff",int(shape->dwTextureTypeIndex));
-    }
+    const auto* shape=weapon?weapon->GetShapeEntry():nullptr;
+    const bool validShape=weapon&&weapon->GetShape()!=0&&shape;
+    CString name=ModItemSpells::CastPointNode(validShape,shape?shape->dwTypeID:0,
+                                           shape?int(shape->dwTextureTypeIndex):0,left).c_str();
     const CAnimationNode*node=animation->FindNode(name);
     if(!node)node=animation->FindNode("rh3");
     return node?GetCP()+rotation.Rotate(node->GetPosition()):GetCP()+bv.ptCenter;

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "EngineDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "World.h"
@@ -94,7 +95,8 @@ CItem *CItemManager::CreateItem(LPCSTR pszString)
     const SIDBItemGeneralShape *lpShape = GetGeneralShape(szStrings[0]);
     if (!lpShape)
     {
-        ReportError("Can't find prototype for item \"%s\".\n", szStrings[0]);
+        if (EngineDiagnostics::AntiCrashEnabled()) EngineDiagnostics::ItemCreationError("can't find prototype", szStrings[0]);
+        else ReportError("Can't find prototype for item \"%s\".\n", szStrings[0]);
         return NULL;
     }
 
@@ -123,8 +125,10 @@ CItem *CItemManager::CreateItem(LPCSTR pszString)
 
     CItem *lpItem = lpConstructor->EndConstructItem();
 
-    if (lpItem == 0)
-        ReportError("Can't create item \"%s\".\nCheck shape and material names\n", pszString);
+    if (lpItem == 0) {
+        if (EngineDiagnostics::AntiCrashEnabled()) EngineDiagnostics::ItemCreationError("invalid prototype or material", pszString);
+        else ReportError("Can't create item \"%s\".\nCheck shape and material names\n", pszString);
+    }
 
     lpConstructor->SetItemManager(NULL);
     if (!lpItem)

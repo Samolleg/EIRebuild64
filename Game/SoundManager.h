@@ -392,6 +392,7 @@ public:
                        float fpMinDistance, float fpMaxDistance, BOOL bLooping = FALSE);
     BOOL UpdateFX(HSOUND hSnd, const CPlot3D &sourceCP, float fpMinDistance, float fpMaxDistance);
     HSOUND CancelFX(HSOUND hSnd);
+    HSOUND BeginPartySignalFX(const char*,int,unsigned,float,float);
     HSOUND BeginScenarioVoice(const char*,int,const MiniaudioOneShotSfx::PartyVoiceBinding* = nullptr);
     bool CaptureModSound(const char*);
     unsigned CountNativeAudibleSpeech(unsigned& mask) const;

@@ -6,6 +6,16 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FigureManager.h"
 #include "SpellSystem.h"
 #include "MapObjectManager.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+
+namespace {
+bool SpellEffectPowerEnabled()
+{
+    auto *mod = ModRuntime::Current();
+    return mod && mod->CombatSetting("SendSpellEffectValueToPlayers") != 0;
+}
+}
 /////////////////////////////////////////////////////////////////////////////////////
 // MapObjectPtr
 /////////////////////////////////////////////////////////////////////////////////////
@@ -208,6 +218,7 @@ void CMapObject::UpdateTo()
     // spell effects
     if (pPkt = update.GetHistory(VLD_MASK_SPELLEFFECTS))
     {
+        const bool sendSpellEffectPower = SpellEffectPowerEnabled();
         BYTE bNumber = spellEffects.GetSize();
         (*pPkt) << bNumber;
         for (int k = 0; k < spellEffects.GetSize(); k++)
@@ -217,6 +228,8 @@ void CMapObject::UpdateTo()
             pPkt->WriteDirect(&eff.nVisStrength, sizeof(eff.nVisStrength));
             pPkt->WriteDirect(&eff.nDuration, 2);
             pPkt->WriteDirect(&eff.bQuiet, 1);
+            if (sendSpellEffectPower)
+                pPkt->WriteDirect(&eff.fpPower, 4);
         }
         pPkt->FinishUpdate();
     }
@@ -267,6 +280,7 @@ BOOL CMapObject::UpdateFrom(EUpdateType tip)
     // spell effects
     if (pPkt = update.GetHistory(VLD_MASK_SPELLEFFECTS))
     {
+        const bool sendSpellEffectPower = SpellEffectPowerEnabled();
         BYTE bNumber;
         (*pPkt) >> bNumber;
         spellEffects.SetSize(bNumber);
@@ -278,6 +292,11 @@ BOOL CMapObject::UpdateFrom(EUpdateType tip)
             pPkt->ReadDirect(&eff.nVisStrength, sizeof(eff.nVisStrength));
             pPkt->ReadDirect(&eff.nDuration, 2);
             pPkt->ReadDirect(&eff.bQuiet, 1);
+            if (sendSpellEffectPower)
+            {
+                eff.fpPower = 0;
+                pPkt->ReadDirect(&eff.fpPower, 4);
+            }
         }
         if (WhoAmI() != HPC_UNIT)
             lpMapObjectSpecific->UpdateSpellEffectVisualization(tip == utStart);

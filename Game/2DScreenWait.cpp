@@ -1,4 +1,5 @@
 // 2DScreenWait.cpp: implementation of the C2DScreenWait class.
+#include "GameJournal.h"
 //
 //////////////////////////////////////////////////////////////////////
 #include "StdAfx.h"
@@ -8,6 +9,12 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TextureManager.h"
 #include "2DScreenWait.h"
 #include "dx11/RendererDX11.h"
+#include "BinkVideo.h"
+#include "EngineDiagnostics.h"
+#include "ModCliTool.h"
+#include <d3d11_4.h>
+#include <atomic>
+#include <thread>
 
 #if defined(__VIDEO__) || defined(__GAME__)
 #include "I3DCursor.h"
@@ -26,47 +33,162 @@ extern void LMPTimePassed();
 const char *C2DScreenWait::pszProgressName = "progres.bik";
 std::unique_ptr<CDXGISurface> C2DScreenWait::pSurface = 0;
 
-///////////////////////////////////////////////////////////////////////////////////////////////
-void StartBinkThread();
-void StopBinkThread();
-///////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace {
+#ifndef __VIDEO__
+std::unique_ptr<CBinkVideo> progressVideo;
+std::thread progressThread;
+std::atomic<bool> stopProgress{false};
+std::atomic<bool> progressFault{false};
+Microsoft::WRL::ComPtr<ID3D11Multithread> videoContextLock;
+BOOL previousMultithreadProtection = FALSE;
+bool videoAttempted = false;
+std::string selectedVideo;
+
+class VideoContextGuard {
+public:
+    explicit VideoContextGuard(ID3D11Multithread *lock) : lock(lock) { lock->Enter(); }
+    ~VideoContextGuard() { lock->Leave(); }
+private:
+    ID3D11Multithread *lock;
+};
+
+void ProgressVideoLoop()
+{
+    try
+    {
+        while (!stopProgress.load())
+        {
+            {
+                VideoContextGuard guard(videoContextLock.Get());
+                progressVideo->PlayNextFrame(true, true);
+            }
+            Sleep(16);
+        }
+    }
+    catch (...)
+    { GameJournal::AllocationFailureInCatch("2DScreenWait");
+        progressFault = true;
+    }
+}
+
+void StopProgressVideo()
+{
+    stopProgress = true;
+    if (progressThread.joinable()) progressThread.join();
+    progressVideo.reset();
+    if (videoContextLock)
+    {
+        videoContextLock->SetMultithreadProtected(previousMultithreadProtection);
+        videoContextLock.Reset();
+    }
+    selectedVideo.clear();
+    progressFault = false;
+    videoAttempted = false;
+}
+
+// A failed zone load can leave the wait screen without its usual Clear call.
+// Join before the static std::thread destructor in that shutdown path.
+struct ProgressShutdown {
+    ~ProgressShutdown()
+    {
+        stopProgress = true;
+        if (progressThread.joinable()) progressThread.join();
+    }
+};
+ProgressShutdown progressShutdown;
+
+bool StartProgressVideo()
+{
+    videoAttempted = true;
+    selectedVideo = C2DScreenWait::pszProgressName ? C2DScreenWait::pszProgressName : "";
+    if (selectedVideo.empty()) return false;
+
+    // The installed mod supplies a movie with this name when present; otherwise
+    // CBinkVideo::BeginPlay retains the original game's Movies path.
+    CString originalPath = theWorld.GetCDPath() + "Movies\\" + selectedVideo.c_str();
+    std::unique_ptr<CBinkVideo> candidate(new CBinkVideo);
+    if (!candidate->BeginPlay(originalPath, false, false))
+    {
+        EngineDiagnostics::Event("Loading video failed name=%s reason=open", selectedVideo.c_str());
+        return false;
+    }
+
+    progressVideo = std::move(candidate);
+    auto context = theRenderer.GetD3D()->GetDeviceContext();
+    if (SUCCEEDED(context.As(&videoContextLock)) && videoContextLock)
+        previousMultithreadProtection = videoContextLock->SetMultithreadProtected(TRUE);
+    else
+        videoContextLock.Reset();
+
+    // Present a real frame before loading can block the main thread.
+    progressVideo->DrawFrame(1, true, true);
+
+    if (videoContextLock)
+    {
+        stopProgress = false;
+        try { progressThread = std::thread(ProgressVideoLoop); }
+        catch (const std::exception &)
+        { GameJournal::AllocationFailureInCatch("2DScreenWait");
+            videoContextLock->SetMultithreadProtected(previousMultithreadProtection);
+            videoContextLock.Reset();
+        }
+    }
+    return true;
+}
+#endif
+}
 
 #ifndef __VIDEO__
 void C2DScreenWait::LoadLogo()
 {
     SMMPFileHeader *pHdr = (SMMPFileHeader *)(theWorld.GetTextureManager()->GetFile("Logo.mmp"));
     if (pHdr)
-    {
         pSurface = std::make_unique<CDXGISurface>(theRenderer.GetD3D(), pHdr);
-    }
 }
 #endif
-//////////////////////////////////////////////////////////////////////
+
 void C2DScreenWait::Clear()
 {
 #ifdef __VIDEO__
-    /*
-            // CRAP
-            StopBinkThread();
-            return;
-    // CRAP
-    */
     BinkClose(hBink);
     hBink = 0;
+#else
+    StopProgressVideo();
 #endif
-
     pSurface = 0;
     theCursor.Show(true);
 }
-//////////////////////////////////////////////////////////////////////
+
 void C2DScreenWait::Step(int nNumb)
 {
+    if (ModCliTool::GeneratingGraph()) return;
     LMPTimePassed();
-    if (bIgnoreSteps)
-        return;
+    if (bIgnoreSteps) return;
     theCursor.Show(false);
-#ifdef __VIDEO__
-#else
+#ifndef __VIDEO__
+    if (!videoAttempted)
+    {
+        try { StartProgressVideo(); }
+        catch (const std::exception &error)
+        { GameJournal::AllocationFailureInCatch("2DScreenWait");
+            EngineDiagnostics::Event("Loading video failed name=%s reason=%s",
+                                     selectedVideo.c_str(), error.what());
+            StopProgressVideo();
+            videoAttempted = true;
+        }
+    }
+    if (progressVideo)
+    {
+        // A protected immediate context lets the worker present between load
+        // steps. If protection is unavailable, advance on the main thread.
+        if (!progressThread.joinable())
+        {
+            progressVideo->PlayNextFrame(true, true);
+                }
+        return;
+    }
+
     CDX11 *pDX11 = GetRenderer()->GetD3D();
     if (!pSurface)
     {
@@ -81,50 +203,9 @@ void C2DScreenWait::Step(int nNumb)
     pDX11->BeginFrame();
     pDX11->GetDeviceContext()->PSSetSamplers(0, 1, &sampler);
     pDX11->GetSpriteBatch()->Begin();
-    // doesn't work
-    pSurface->BltToRenderSurface(rectOnScreen, 0, 0);
+    if (pSurface) pSurface->BltToRenderSurface(rectOnScreen, 0, 0);
     pDX11->GetSpriteBatch()->End();
     theCursor.Draw();
     pDX11->EndFrame();
 #endif
 }
-///////////////////////////////////////////////////////////////////////////////////////////////
-HANDLE g_hExitEvent = 0;
-CWinThread *g_pBinkThread = 0;        // streaming thread object pointer
-volatile bool g_bShutDownReq = false; // request for shutdown stream thread
-///////////////////////////////////////////////////////////////////////////////////////////////
-UINT AFX_CDECL BinkThreadStarter(LPVOID pParam)
-{
-#ifdef __VIDEO__
-#endif
-    SetEvent(g_hExitEvent);
-    return 0;
-}
-///////////////////////////////////////////////////////////////////////////////////////////////
-void StartBinkThread()
-{
-    if (theWorld.GetTextureManager())
-        theWorld.GetTextureManager()->UnloadAllTextures();
-    ASSERT(!g_hExitEvent && !g_pBinkThread);
-    g_bShutDownReq = false;
-    theCursor.Show(false);
-    g_hExitEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    g_pBinkThread = AfxBeginThread(BinkThreadStarter, 0, THREAD_PRIORITY_NORMAL);
-}
-///////////////////////////////////////////////////////////////////////////////////////////////
-void StopBinkThread()
-{
-    if (g_pBinkThread)
-    {
-        ASSERT(g_hExitEvent);
-        g_bShutDownReq = true; // Signal to exit streaming thread
-        DWORD dwRes;
-        dwRes = WaitForSingleObject(g_hExitEvent, INFINITE);
-    }
-    CloseHandle(g_hExitEvent);
-    g_hExitEvent = 0;
-    g_pBinkThread = 0;
-    // theCursor.Flip(true);
-    theCursor.Show(TRUE);
-}
-///////////////////////////////////////////////////////////////////////////////////////////////

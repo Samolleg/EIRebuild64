@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "ModMobCommands.h"
 #include "ModNpcConsumables.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -1492,6 +1493,7 @@ static CParty *GetPartyAndName(CPlayer *pPlayer, CString &szName)
 // вернет FALSE, если в скрипте больше нет команд
 BOOL CScriptThreadState::Segment(CScript *pScript)
 {
+    GameJournal::Source journalSource("MQ");
     int i;
     float fpParam;
     CPlot3D objectPos;
@@ -2650,6 +2652,7 @@ void SScriptCondition::RunCheck(CScript *pScript, SOneScript *pOneScript)
         if (fCheck == 0)
             return;
     }
+    GameJournal::Event("SCRIPT", "trigger", "script=%s thread=%d", GameJournal::Quote(pOneScript->szScriptName).c_str(), pActions->GetNumber());
     pScript->RunThread(pActions, pOneScript);
 }
 
@@ -2777,6 +2780,7 @@ void SOneScript::Store(CSave &file)
 
 void CScript::RunScript(SSCCmd *pCmd)
 {
+    GameJournal::Event("SCRIPT", "run", "name=%s", GameJournal::Quote(pCmd->szParams[0]).c_str());
     int i;
     POSITION pos;
     SOneScript *pNewScript;

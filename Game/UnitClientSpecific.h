@@ -153,7 +153,8 @@ public:
     }
     // wounds
     virtual BOOL NotifyHitPointsUpdated();
-    BOOL AssembleWoundsTexture();
+    BOOL AssembleWoundsTexture(const CBYTEArray *requiredData = nullptr);
+    BOOL EnsureWoundsTextureReady();
     // hook on update inventory
     virtual void InventoryUpdated();
     // hook on set owner

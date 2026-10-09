@@ -153,6 +153,7 @@ class CTextureLRUAllocator
 {
 public:
     static CTexture *CreateObject(const char *pszName);
+    static bool EnsureReady(CTexture *pTex);
     static void DestroyObject(CTexture *pFig);
 };
 /////////////////////////////////////////////////////////////////////////////////////
@@ -211,11 +212,16 @@ public:
     }
     virtual void UpdateWeapons() {}
     virtual void UpdateAttributes() {}
+    virtual void RefreshProgression() {UpdateAttributes();}
     virtual void NextPersonage() {}
     virtual void PrevPersonage() {}
     virtual CUnit *GetUnit(int num) { return 0; }
     virtual CPersonage *GetCurrentPers() { return 0; }
     virtual void SetPrototype(LPCTSTR pszPrototype) {}
+    virtual bool GetCreationPrimaryPoints(int &points) { points = -1; return false; }
+    virtual bool CanEditCreationPrimary() { return false; }
+    virtual bool CanAdjustCreationPrimary(int primary, int delta) { return false; }
+    virtual bool AdjustCreationPrimary(int primary, int delta) { return false; }
     virtual float GetItemsWeight() { return 0; }
 
     virtual int GetItemPrice(CItem *pItem, EItemScreenKoeffs eKoeffType) { return 0; }

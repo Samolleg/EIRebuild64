@@ -167,6 +167,7 @@ public:
     void StartServer(EServerMode mode);
     CString GetFullMobName(const char *pszFileName);
     CString GetCurrentZoneName() { return szCurrentZoneName; }
+    const CString& GetJournalZoneName() const noexcept { return szCurrentZoneName; }
     void HealAllUnits();
     // this function is used to restart script on zone after loading a saved zone on personages
     // reenter
@@ -239,6 +240,8 @@ public:
     void RemoveAllUnits();
     virtual CMapObject *GetMapObject(int nID);
     void UnitSayAck(CUnit *pUnit, DWORD dwAck);
+    // Read iteration only: group sensing must never insert or wake an NPC.
+    CMapObjPtrHash *GetActiveSet() { return &activeSet; }
     void AddObjectToActiveSet(CMapObject *pObject) { AddActiveObject(pObject); }
     //
     void InformAboutUnitDeath(CUnit *pUnit);

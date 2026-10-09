@@ -125,6 +125,9 @@ public:
     CTexture *AddNewTexture(ETypeIDs tidTextureTypeID);
     CTexture *FindTexture(ETypeIDs tidTextureTypeID);
     CTexture *ChangeTexture(CTexture *lpNewTexture);
+    BOOL RebindSecondaryTexture(LPCSTR name);
+    BOOL RebindPrimaryTexture(LPCSTR name);
+    BOOL EnsurePrivatePrimaryAtlas(DWORD unitID);
     CMaterial *AddNewMaterial(ETypeIDs tidTextureTypeID, ETypeIDs tidMaterialTypeID);
     CMaterial *FindMaterial(ETypeIDs tidTextureTypeID, ETypeIDs tidMaterialTypeID);
     //
@@ -138,7 +141,7 @@ public:
     void StepStun(float fpTime);
     void SetUnstun();
     // wounds
-    BOOL LoadWounds(LPCSTR pszWoundsTextureName);
+    BOOL LoadWounds(LPCSTR pszWoundsTextureName, const CBYTEArray *expectedData = nullptr);
     void ReleaseWounds();
     const CTexture *GetWoundsTexture() const { return pWoundsTexture; }
     // texture/material iterating

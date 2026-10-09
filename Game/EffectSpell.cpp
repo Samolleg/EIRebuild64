@@ -1,5 +1,8 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "ModSpellRules.h"
+#include "ModSpellOwner.h"
+#include "ModSpellDanger.h"
 #include "ModSpellTextures.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
@@ -48,6 +51,8 @@ CEffectSpell::~CEffectSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CEffectSpell::Segment()
 {
+    GameJournal::Actor journalActor(pWho.IsEmpty()?-1:pWho->GetID());
+    const int journalPhase=castPhase;
     auto*prototype=spell.GetPrototype();
     SpellTextures::Scope textureScope(spell.GetSubtypeID()>>16,prototype?prototype->GetCodeName():nullptr);
     ASSERT(pWS);
@@ -72,6 +77,7 @@ BOOL CEffectSpell::Segment()
         bRv = FALSE;
         break;
     }
+    if(journalPhase!=castPhase || !bRv) GameJournal::ObserveSpell(pWho, pTarget, prototype?prototype->GetCodeName():"unknown", journalPhase, int(castPhase), ptTarget.x, ptTarget.y, ptTarget.z, spell.IsOffensive());
     return bRv;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -96,7 +102,10 @@ void CEffectSpell::Load(CSave &file)
     file.Read(&cp, sizeof(cp));
 
     int nKind = spell.GetSubtypeID() >> 16;
-    AddRemoveDangerArea(nKind, TRUE);
+    if(ModRuntime::Current())
+        ModSpellDanger::ReconstructNativeLoad(nKind,!pEffect.IsEmpty(),[&](int stockKind){AddRemoveDangerArea(stockKind,TRUE);});
+    else
+        AddRemoveDangerArea(nKind, TRUE);
     if(SpellTextures::HasBindings()&&!pEffect.IsEmpty()){auto*prototype=spell.GetPrototype();if(prototype)SpellTextures::RecordOwner(pWS->GetEffectManager(),pEffect.GetPtr(),prototype->GetCodeName());}
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -253,8 +262,8 @@ void CEffectSpell::InformFailure(DWORD dwAction)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::AddRemoveDangerArea(int nKind, BOOL bAdd)
 {
-    if(ModRuntime::Current()){nKind=ModSpells::ElementalBase(nKind);if(nKind==SPELL_ID_TEST_3)nKind=SPELL_ID_FIREWALL;}
-    if((bAdd!=FALSE)==bDangerIsMapped)return;
+    if(ModRuntime::Current()){nKind=ModSpells::ElementalBase(nKind);if(nKind==ModSpellIdentity::NativeTestWall)nKind=SPELL_ID_FIREWALL;}
+    if(!ModSpellDanger::ChangeNeeded(bAdd!=FALSE,bDangerIsMapped))return;
     CPlot3D ptDir;
     if (!pEffect)
         return;
@@ -277,18 +286,15 @@ void CEffectSpell::AddRemoveDangerArea(int nKind, BOOL bAdd)
     default:
         return;
     }
-    if (bAdd)
-    {
-        ASSERT(!bDangerIsMapped);
-        pWS->aiMap.AddDangerArea(pWS->GetSegmentTimeCounter(), dangerArea);
-        bDangerIsMapped = true;
-    }
-    else
-    {
-        ASSERT(bDangerIsMapped);
-        pWS->aiMap.RemoveDangerArea(dangerArea);
-        bDangerIsMapped = false;
-    }
+    ModSpellDanger::Change(bAdd!=FALSE,bDangerIsMapped,[&](bool add){
+        if(add){
+            ASSERT(!bDangerIsMapped);
+            pWS->aiMap.AddDangerArea(pWS->GetSegmentTimeCounter(), dangerArea);
+        }else{
+            ASSERT(bDangerIsMapped);
+            pWS->aiMap.RemoveDangerArea(dangerArea);
+        }
+    });
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // !!! Create different effects
@@ -779,7 +785,7 @@ void CEffectSpell::StartSpell(int nKind)
         castPhase = CP_FINISH;
         break;
     }
-    AddRemoveDangerArea(nKind, TRUE);
+    if(!ModRuntime::Current()||ModSpellDanger::StockLoadKind(nKind))AddRemoveDangerArea(nKind, TRUE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::DeliverSpell(int nKind)
@@ -1028,6 +1034,7 @@ void CEffectSpell::ActionSpell(int nKind)
                 break;
             }
             BOOL bRv = pWS->aiMap.MoveObject(pWho, ptTarget);
+            GameJournal::Event("WORLD", "teleport", "reason=teleport actor=%d x=%g y=%g z=%g result=%d", pWho->GetID(), ptTarget.x, ptTarget.y, ptTarget.z, bRv);
             ASSERT(bRv);
             RemoveMainEffect();
             RemoveSoundEffect();
@@ -1196,7 +1203,7 @@ void CEffectSpell::InflictTargetedDamage()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CEffectSpell::CreateAttackPortion(SRPGAttackPortion &ap)
 {
-    if(ModRuntime::Current()&&ModSpells::ExtendedElementalPortion(spell.GetSubtypeID()>>16,GetPower(),GetDuration(),ap))return TRUE;
+    if(ModRuntime::Current()&&ModSpells::ExtendedElementalPortion(spell.GetSubtypeID()>>16,GetPower(),GetDuration(),ap,spell.GetMagicSubtype()))return TRUE;
     ap.Clear();
     ap.hl = RPGHL_ALL;
     ap.fpToHit = FLT_MAX;

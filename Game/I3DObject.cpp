@@ -1,8 +1,10 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DObject.h"
+#include <new>
 #include "I3DMapObjTranslation.h"
 #include "I3DMain.h"
 #include "I3DToolTip.h"
@@ -264,18 +266,32 @@ CI3DSurface::CI3DSurface(CInterface3D *pI, CString szName)
     nCopyBytes = 0;
     SetFlag(BS_COLOR_KEY, TRUE);
 }
-std::unique_ptr<DWORD[]> pixelBuffer;
 /////////////////////////////////////////////////////////////////////////////////////
 DWORD CI3DSurface::GetPixel(int nX, int nY)
 {
     if (!pSurface || nX < 0 || nY < 0 || nX >= pSurface->GetWidth() || nY >= pSurface->GetHeight())
         return 0;
-    int width = pSurface->GetWidth();
+    const size_t width = pSurface->GetWidth();
+    const size_t pixelCount = width * pSurface->GetHeight();
     if (!pixelBuffer)
-    pixelBuffer = pSurface->GetPixelBuffer();
-    if (!pixelBuffer) return 0;
-    int pixelIdx = nY * width + nX;
-    return pixelBuffer[pixelIdx];
+    {
+        pixelBuffer.reset(new (std::nothrow) DWORD[pixelCount]);
+        if (!pixelBuffer)
+        {
+            pixelReadbackStatus = E_OUTOFMEMORY;
+            return 0;
+        }
+    }
+    if (!pixelBufferValid)
+    {
+        if (FAILED(pixelReadbackStatus))
+            return 0;
+        pixelReadbackStatus = pSurface->CopyPixelBuffer(pixelBuffer.get(), pixelCount);
+        if (FAILED(pixelReadbackStatus))
+            return 0;
+        pixelBufferValid = true;
+    }
+    return pixelBuffer[size_t(nY) * width + nX];
 
     //return pSurface->GetPixel(nX, nY);
     /*HDC hDc;
@@ -302,8 +318,8 @@ void CI3DSurface::GetFromScreen()
     if (!pSurface)
         return;
     // must match screen's sampling
-    pSurface->BltFromRenderSurface(0, rect, 0);
-    pixelBuffer = 0;
+    pixelReadbackStatus = pSurface->BltFromRenderSurface(0, rect, 0);
+    pixelBufferValid = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DSurface::Fade()
@@ -910,7 +926,8 @@ void CI3DObject::RemoveAllMapObjTranslations()
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool PasteTexture(LPTEXTURE pDstTex, LPCTSTR pszTexName, int nSrcSizeX, int nSrcSizeY, int nSizeX,
-                  int nSizeY, int nDstX, int nDstY, int nSrcX, int nSrcY)
+                  int nSizeY, int nDstX, int nDstY, int nSrcX, int nSrcY,
+                  std::unique_ptr<WORD[]> *uploadedPixels)
 {
     CDXGISurface *pSurface = pDstTex->GetSurface();
     CString resourceName(pszTexName);
@@ -974,6 +991,8 @@ bool PasteTexture(LPTEXTURE pDstTex, LPCTSTR pszTexName, int nSrcSizeX, int nSrc
 
     pSurface->UpdateTexture(0, &region, &srd);
     ((CTextureManager *)(theWorld.GetTextureManager()))->CloseAllFiles();
+    // Optional inventory owner retains the exact pixels used by this upload.
+    if (uploadedPixels) *uploadedPixels = std::move(pSixteenBit);
 
     return TRUE;
 }
@@ -1005,3 +1024,9 @@ void CI3DObject::MemoryBackup(BOOL bShow)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+const char* CI3DPolyArea::JournalTip() const noexcept { return pTip ? pTip->JournalText() : ""; }
+void CI3DObject::JournalHit(int hit) noexcept {
+    if(hit<0)return;
+    GameJournal::Event("INPUT","element","element=%p class=%s area=%d label=%s",this,GameJournal::Quote(typeid(*this).name()).c_str(),hit,GameJournal::Quote(hit<areas.GetSize()?areas[hit]->JournalTip():"").c_str());
+}

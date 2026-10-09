@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
@@ -8,6 +9,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TextureManager.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModItemUiPolicy.h"
+#include "ModCampStats.h"
 static float ModInfoProperty(const char*callback,const char*name,int property)
 {
     auto*mod=ModRuntime::Current();
@@ -28,6 +31,35 @@ static float ModInfoProperty(const char*callback,const char*name,int property)
 #include "LuaState.h"
 #include "UnitServer.h"
 #include "WorldServer.h"
+#include "I3DScreenCamp.h"
+#include "ScenarioTracker.h"
+#include "ModCampSpellInfo.h"
+#include "ModDescriptionFont.h"
+#include "ModItemInfo.h"
+#include "ModItemDetails.h"
+#include "SpellDatabase.h"
+static void ModInfoAbsorptionStrings(const float *values, CStringArray &rows, bool round)
+{
+    CString labels[RPG_NUM_ATTACK_TYPES - 1];
+    for (int i = 0; i < RPG_NUM_ATTACK_TYPES - 1; ++i) {
+        CString key; key.Format("dmg_%i", i);
+        theWorld.GetTextManager()->GetSystemString(key, labels[i]);
+    }
+    ModItemInfo::Absorptions(values, labels, rows, round);
+}
+static int ModInfoMultiText(CI3DSurface *surface, LPCTSTR text, CRect rect,
+    int lines, int font, COLORREF color, int format)
+{
+    auto *mod = ModRuntime::Current();
+    return surface->DrawMultiText(text, rect, lines, font, color, format, TRUE,
+        mod && mod->AdvancedUI("useLS_FormTextInfo") && mod->CombatSetting("JMVItemInfoLineHeight") ? 12 : 0);
+}
+static int ModInfoDescription(CInterface3D *ui, CI3DSurface *surface, LPCTSTR text,
+    CRect rect, int lines, int font, COLORREF color, int format)
+{
+    ModDescriptionFont smaller(ui->GetFontSlot(font), ui->GetHeight());
+    return ModInfoMultiText(surface, text, rect, lines, font, color, format);
+}
 /////////////////////////////////////////////////////////////////////////////////////
 static LPCSTR ModInfoMaterialName(const CItem *item)
 {
@@ -66,6 +98,21 @@ void CI3DFigureLRUAllocator::DestroyObject(CI3DFigure *pFig)
     pFig->Release();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace {
+struct InventoryAtlasRecipe
+{
+    CString resourceName;
+    int atlasSize, sourceWidth, sourceHeight, dstY;
+    bool hasSource;
+    std::unique_ptr<WORD[]> uploadedPixels;
+};
+std::map<CTexture *, InventoryAtlasRecipe> &InventoryAtlasRecipes()
+{
+    // Non-owning keys; cache allocator destruction removes each matching recipe.
+    static auto *recipes = new std::map<CTexture *, InventoryAtlasRecipe>;
+    return *recipes;
+}
+}
 CTexture *CTextureLRUAllocator::CreateObject(const char *pszTexName)
 {
     // copy texture content to new object
@@ -123,19 +170,64 @@ CTexture *CTextureLRUAllocator::CreateObject(const char *pszTexName)
 
     CTexture *pTex = pTexMng->CreateInterfaceTexture(atlasSize, atlasSize);
     if (!pTex) return 0;
-    pTex->AddRef();
+    CSmartPtr<CTexture> creating(pTex);
     const int dstY = atlasSize - nSrcSizeY;
+    InventoryAtlasRecipe recipe;
+    recipe.resourceName = resourceName;
+    recipe.atlasSize = atlasSize;
+    recipe.sourceWidth = nSrcSizeX;
+    recipe.sourceHeight = nSrcSizeY;
+    recipe.dstY = dstY;
+    recipe.hasSource = hasSource;
     if (hasSource && !PasteTexture(pTex, resourceName, nSrcSizeX, nSrcSizeY,
-                                  nSrcSizeX, nSrcSizeY, 0, dstY))
-    {
-        pTex->Release();
+                                  nSrcSizeX, nSrcSizeY, 0, dstY, 0, 0,
+                                  &recipe.uploadedPixels))
         return 0;
-    }
+    InventoryAtlasRecipes().emplace(pTex, std::move(recipe));
+    pTex->AddRef(); // Transfer the existing cache reference after publication.
     return pTex;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CTextureLRUAllocator::EnsureReady(CTexture *pTex)
+{
+    if (!pTex) return false;
+    if (pTex->GetSurface()) return true;
+    auto &recipes = InventoryAtlasRecipes();
+    auto found = recipes.find(pTex);
+    if (found == recipes.end()) return false;
+    const auto &recipe = found->second;
+    if (recipe.hasSource && !recipe.uploadedPixels) return false;
+    struct RestoreAtlas
+    {
+        CTexture *texture;
+        bool ready = false;
+        ~RestoreAtlas() { if (!ready) texture->Unload(); }
+    } restoring{pTex};
+    SMMPFileHeader hdr;
+    hdr.InitializeDefaultFormat(MMP_FORMAT_5551);
+    hdr.dwSignature = MMP_SIGNATURE;
+    hdr.dwDimentionX = recipe.atlasSize;
+    hdr.dwDimentionY = recipe.atlasSize;
+    hdr.dwMipMapLevel = 1;
+    if (!pTex->Create(&theRenderer, &hdr)) return false;
+    if (recipe.hasSource)
+    {
+        D3D11_BOX region = {0};
+        region.right = recipe.sourceWidth;
+        region.top = recipe.dstY;
+        region.bottom = recipe.dstY + recipe.sourceHeight;
+        region.back = 1;
+        D3D11_SUBRESOURCE_DATA data = {0};
+        data.pSysMem = recipe.uploadedPixels.get();
+        data.SysMemPitch = 2 * recipe.sourceWidth;
+        pTex->GetSurface()->UpdateTexture(0, &region, &data);
+    }
+    restoring.ready = true;
+    return true;
+}
 void CTextureLRUAllocator::DestroyObject(CTexture *pTex)
 {
+    InventoryAtlasRecipes().erase(pTex);
     pTex->Release();
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -231,7 +323,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
 {
     CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName());
     CTexture *pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
-    if (!pFig || !pTex)
+    if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
         return;
     pFig->SetTexture(pTex);
     pFig->SetRelativeToScreen(item.fX, item.fY, item.fZ);
@@ -427,7 +519,7 @@ void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
 
     CI3DFigure *pFig = figuresLRU.GetObject(szFigureName);
     CTexture *pTex = texturesLRU.GetObject(szTextureName);
-    if (!pFig || !pTex)
+    if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
         return;
     pFig->SetTexture(pTex);
     pFig->SetRelativeToScreen(head.fX, head.fY, head.fZ);
@@ -582,8 +674,9 @@ CItem *CI3DItemScreen::MoveAllItems(CParty *pDst, CParty *pSrc)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DItemObject::OnLButtonDown(UINT nFlags, CPoint point)
 {
-    int nSlotType;
+    int nSlotType = 0;
     CItem *pItem = GetMouseItem(point, nSlotType);
+    if(pItem || nSlotType) GameJournal::Event("INPUT", "inventory", "element=%p class=%s part=%d part_name=%s slot=%d item=%d type=%u count=%d", this, GameJournal::Quote(typeid(*this).name()).c_str(), int(ePartType), GameJournal::ItemPart(int(ePartType)), nSlotType, pItem?pItem->GetID():-1, pItem?unsigned(pItem->GetSubtypeID()):0, pItem?pItem->GetCount():0);
     if (pItem)
         pScreen->ClickOnItem(pItem, ePartType);
     else if (nSlotType)
@@ -626,8 +719,10 @@ BOOL CI3DObjectItemInfo::Draw(CRenderer *pRend)
         item.pItem = pItem;
         item.fX = nX + 100.f;
         item.fY = nY + 200.f;
-        item.fZ = 3;
-        item.fPixSize = 120;
+        const auto* iconMod=ModRuntime::Current();
+        const auto icon=ModItemUiPolicy::ItemIcon(iconMod && iconMod->AdvancedUI("useLS_ObjItemInfoDraw"));
+        item.fZ = icon.z;
+        item.fPixSize = icon.size;
         item.eFrom = ISP_UNKNOWN;
         pScreen->DrawItem(pRend, item);
     }
@@ -639,6 +734,7 @@ void CI3DObjectItemInfo::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     CItem *pItem = GetItem();
     switch (nChar)
     {
+    case VK_MENU:
     case VK_CONTROL:
         if (!(nFlags & 0x4000) && pItem)
             FormTextInfo();
@@ -651,6 +747,7 @@ void CI3DObjectItemInfo::OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags)
     CItem *pItem = GetItem();
     switch (nChar)
     {
+    case VK_MENU:
     case VK_CONTROL:
         if (pItem)
             FormTextInfo();
@@ -695,8 +792,758 @@ CSpell *CI3DObjectItemInfo::GetSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormTextInfo()
 {
+    if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
+
+	CItem* pItem = GetItem();
+	CSpell* pSpelll = GetSpell();
+	CString szTmp, szTmp2, szOut;
+#ifndef NOGETDC
+	surfaces[0]->GetDC();
+	surfaces[0]->Clear();
+	surfaces[0]->ReleaseDC();
+#endif 
+	if (!pItem)
+		return;
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	CI3DSurface* pSurf = surfaces[0];
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, mod->CombatSetting("JMVItemInfoLineHeight") ? 12 : 14);
+	COLORREF color = INV_COLOR_INFO;
+	COLORREF color2 = RGB(255, 242, 194);
+	if (pScreen->IsItemMaterial(pItem))
+	{
+		FormMaterialInfo();
+#ifndef NOGETDC
+		pSurf->GetDC();
+		CItemLoot* pLoot = static_cast<CItemLoot*>(pItem);
+		const SIDBMaterial* pMat = theItemDatabase.materials.GetEntry(pLoot->GetMaterialIndex());
+		CI3DScreenCamp* camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+		int nShop = 0;
+		if (camp && camp->GetCurrentShop()) {
+			nShop = camp->GetCurrentShop()->nID;
+			if (mod->InfoForbiddenSpell(pMat->szCodeName.GetString(), nShop)) {
+				if (pTxtMng->GetText("string infoitem_91")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s", szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, RGB(255, 200, 0), DT_LEFT);
+				rc += shift;
+			}
+		}
+		pSurf->ReleaseDC();
+#endif 
+		return;
+	}
+	if (pScreen->IsItemInstruction(pItem))
+	{
+		FormInstructionInfo();
+#ifndef NOGETDC
+		pSurf->GetDC();
+		const SIDBItemGeneralShape* pProt = pItem->GetShapeEntry();
+		CI3DScreenCamp* camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+		int nShop = 0;
+		if (camp && camp->GetCurrentShop()) {
+			nShop = camp->GetCurrentShop()->nID;
+			if (mod->InfoForbiddenSpell(pProt->szName.GetString(), nShop)) {
+				if (pTxtMng->GetText("string infoitem_91")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s", szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, RGB(255, 200, 0), DT_LEFT);
+				rc += shift;
+			}
+		}
+		pSurf->ReleaseDC();
+#endif 
+		return;
+	}
+	if (pScreen->IsItemPrototype(pItem))
+	{
+		FormPrototypeInfo();
+		return;
+	}
+	if (pScreen->IsItemModifier(pItem))
+	{
+		FormModifierInfo();
+#ifndef NOGETDC
+		pSurf->GetDC();
+		CI3DScreenCamp* camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+		int nShop = 0;
+		if (camp && camp->GetCurrentShop()) {
+			nShop = camp->GetCurrentShop()->nID;
+			CItemLoot* pModLoot = static_cast<CItemLoot*>(pItem);
+			const SSDBModifier* pModifier = theSpellDatabase.runes.GetEntry(pModLoot->GetInstructionItemIndex());
+			if (mod->InfoForbiddenSpell(pModifier->GetCodeName(), nShop)) {
+				CPoint shift2(0, 12);
+				rc += shift2;
+				rc += shift2;
+				rc += shift2;
+				rc += shift2;
+				rc += shift2;
+				rc += shift2;
+				if (pTxtMng->GetText("string infoitem_91")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s", szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, RGB(255, 200, 0), DT_LEFT);
+				rc += shift;
+			}
+		}
+		pSurf->ReleaseDC();
+#endif 
+		return;
+	}
+	ETypeIDs tid = pItem->GetTypeID();
+	if (tid == ITID_ITEM_QUICK &&
+		static_cast<CItemQuick*>(pItem)->GetQuickItemType() == IDB_SCROLL)
+	{
+		FormPotionInfo();
+		return;
+	}
+	if ((pI3D->IsCtrlDown() && pSpelll) || pItem->GetTypeID() == ITID_ITEM_SPELL)
+	{
+		FormSpellInfo();
+		return;
+	}
+	CString szMaterial;
+	szMaterial = theItemDatabase.materials.GetEntry(pItem->GetMaterial())->szName;
+	NStrProc::ReplaceChars(szMaterial, ' ', '_');
+	szMaterial.MakeLower();
+	CString szName, szDesc, szType;
+	pTxtMng->GetItemNameAndDesc(pItem, szName, szDesc, szType);
+#ifndef NOGETDC
+	pSurf->GetDC();
+	int typeID = pItem->GetShapeEntry()->dwTypeID;
+	bool deconstructable = pItem->GetShapeEntry()->bDeconstructable;
+	CString itemName = pItem->GetShapeEntry()->szName;
+	int complexNum = mod->InfoProperty("GetSetItemStats", itemName.GetString(), 2);
+	int complexSize = mod->InfoComplexProperty(complexNum, 3);
+	int currentComplexSize = 0;
+	if (mod->InfoProperty("GetSetItemStats", itemName.GetString(), 2)) {
+		CI3DScreenCamp* currentCamp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+        CUnit* pUnit = currentCamp ? currentCamp->GetCurrentUnit() : nullptr;
+		if (pUnit) {
+			for (int i = 0; i < 7; i++) {
+				if (pUnit->GetQArmor(i)) {
+					CString checkItemName = pUnit->GetQArmor(i)->GetShapeEntry()->szName;
+					int checkComplexNum = mod->InfoProperty("GetSetItemStats", checkItemName.GetString(), 2);
+					if (checkComplexNum == complexNum)
+						currentComplexSize += 1;
+				}
+			}
+			for (int i = 0; i < 3; i++) {
+				if (pUnit->GetQWeapon(i)) {
+					CString checkItemName = pUnit->GetQWeapon(i)->GetShapeEntry()->szName;
+					int checkComplexNum = mod->InfoProperty("GetSetItemStats", checkItemName.GetString(), 2);
+					if (checkComplexNum == complexNum)
+						currentComplexSize += 1;
+				}
+			}
+			for (int i = 0; i < 3; i++) {
+				if (pUnit->GetQItem(i)) {
+					CString checkItemName = pUnit->GetQItem(i)->GetShapeEntry()->szName;
+					int checkComplexNum = mod->InfoProperty("GetSetItemStats", checkItemName.GetString(), 2);
+					if (checkComplexNum == complexNum)
+						currentComplexSize += 1;
+				}
+			}
+		}
+		szOut.Format("%s %d/%d", szName, currentComplexSize, complexSize);
+		ModInfoMultiText(pSurf, szOut.GetString(), rc, 2, 0, RGB(0, 215, 0), DT_CENTER | DT_WORDBREAK); 
+	}
+	else if (!deconstructable && (tid == ITID_ITEM_WEAPON || tid == ITID_ITEM_ARMOR || tid == ITID_ITEM_QUICK))
+		ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, RGB(155, 155, 255), DT_CENTER | DT_WORDBREAK);	
+	else
+		ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+		if (tid == ITID_ITEM_WEAPON) {
+			if (pItem->GetShapeEntry()->dwTypeID == 9) {
+				szTmp = "string infoitem_65";
+				if (pTxtMng->GetText(szTmp.GetString()))
+				{
+					pTxtMng->GetLine(szTmp);
+				}
+				szOut.Format("%s %s", szStrings[ITEMTYPE], szTmp);
+			}
+			else {
+				if (typeID == RPGWST_HANDS2 || typeID == RPGWST_HANDS4 || typeID == RPGWST_HANDS5 || 
+					typeID == RPGWST_HANDS6 || typeID == RPGWST_HANDS7 || 
+					typeID == RPGWST_BOW    || typeID == RPGWST_CROSSBOW) 
+				{
+					szTmp = "string infoitem_99";
+					if (pTxtMng->GetText(szTmp.GetString())) pTxtMng->GetLine(szTmp);
+					szOut.Format("%s %s", szStrings[ITEMTYPE], szTmp);
+				}
+				else {
+					szTmp = "string infoitem_98";
+					if (pTxtMng->GetText(szTmp.GetString())) pTxtMng->GetLine(szTmp);
+					szOut.Format("%s %s", szStrings[ITEMTYPE], szTmp);
+				}
+			}
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+            if (!pI3D->IsAltDown())
+            {
+				DWORD dwShape = pItem->GetShape();
+				CString szShape = theItemDatabase.weapons.GetEntry(dwShape)->szName;
+				int weightType = mod->InfoProperty("GetWeaponPropsInside", szShape.GetString(), 7);
+				if (typeID == 9) {
+					if (weightType == 1)
+						szTmp = "string infoitem_70";
+					else if (weightType == 2)
+						szTmp = "string infoitem_71";
+					else if (weightType == 3)
+						szTmp = "string infoitem_72";
+					else
+						szTmp = "NOT SET";
+				}
+				else {
+					if (weightType == 1)
+						szTmp = "string infoitem_67";
+					else if (weightType == 2)
+						szTmp = "string infoitem_68";
+					else
+						szTmp = "string infoitem_69";
+				}
+				if (pTxtMng->GetText(szTmp.GetString()))
+				{
+					pTxtMng->GetLine(szTmp);
+				}
+				szTmp2 = "string infoitem_66";
+				if (pTxtMng->GetText(szTmp2.GetString()))
+				{
+					pTxtMng->GetLine(szTmp2);
+				}
+				szOut.Format("%s %s", szTmp2, szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+				rc += shift;
+			}
+		}
+		else if (tid == ITID_ITEM_ARMOR) {
+			szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+			DWORD dwShape = pItem->GetShape();
+			CString szShape = theItemDatabase.armors.GetEntry(dwShape)->szName;
+            if (!pI3D->IsAltDown())
+            {
+				szTmp2 = "string infoitem_66";
+				if (pTxtMng->GetText(szTmp2.GetString())) pTxtMng->GetLine(szTmp2);
+				if (szShape.Left(2) == "vl")
+					szType = "string infoitem_74";
+				else if (szShape.Left(1) == "l")
+					szType = "string infoitem_75";
+				else if (szShape.Left(1) == "m")
+					szType = "string infoitem_76";
+				else if (szShape.Left(1) == "h")
+					szType = "string infoitem_77";
+				else if (szShape.Left(2) == "vh")
+					szType = "string infoitem_78";
+				else
+					szType = szShape;
+				if (pTxtMng->GetText(szType.GetString()))
+				{
+					pTxtMng->GetLine(szType);
+				}
+				szOut.Format("%s %s", szTmp2, szType);
+				pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+				rc += shift;
+			}
+		}
+		else {
+			szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+		bool bNeedOut = true;
+		if (tid == ITID_ITEM_QUICK)
+		{
+			if (pItem->GetShapeEntry() && pItem->GetShapeEntry()->szMaterialType.CompareNoCase(CString("none")) == 0)
+				bNeedOut = false;
+		}
+		if (bNeedOut && tid != ITID_ITEM_LOOT && tid != ITID_ITEM_QUEST)
+		{
+			szTmp.Format("MATSHORT %s", szMaterial.GetString());
+			if (pTxtMng->GetText(szTmp.GetString()))
+			{
+				pTxtMng->GetLine(szTmp);
+			}
+			szOut.Format("%s %s x%d", szStrings[MATERIAL], szTmp, pItem->GetMaterialAmount());
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+		if (tid != ITID_ITEM_QUEST)
+		{
+			if (deconstructable)
+				szOut.Format("%s %d", szStrings[WEIGHT], (int)pItem->GetWeight());
+			else {
+				szTmp = "string infoitem_101"; if (pTxtMng->GetText(szTmp.GetString())) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s %d (%s)", szStrings[WEIGHT], (int)pItem->GetWeight(), szTmp);
+			}
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+		int slots = pItem->GetSpellSlots();
+		if (slots > 0) {
+			if (tid == ITID_ITEM_ARMOR || tid == ITID_ITEM_WEAPON ||
+				(tid == ITID_ITEM_QUICK &&
+					static_cast<CItemQuick*>(pItem)->GetQuickItemType() == IDB_WAND))
+			{
+				CI3DScreenCamp* currentCamp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+        CUnit* pUnit = currentCamp ? currentCamp->GetCurrentUnit() : nullptr;
+				int perk = pUnit ? pUnit->GetUserUnitStats()->cPerks[22] : 0;
+				float item_rest_bonus  = mod->InfoPerkBonus("GetItemRestBonusFromPerkFlow", perk);
+				float wand_rest_bonus  = mod->InfoPerkBonus("GetWandRestBonusFromPerkFlow", perk);
+				float staff_rest_bonus = mod->InfoPerkBonus("GetStaffRestBonusFromPerkFlow", perk);
+				float result_bonus = item_rest_bonus;
+				if (tid == ITID_ITEM_QUICK) result_bonus = wand_rest_bonus;
+				else if(tid == ITID_ITEM_WEAPON) result_bonus = staff_rest_bonus;
+
+				szTmp = "string infoitem_88"; if (pTxtMng->GetText(szTmp.GetString())) pTxtMng->GetLine(szTmp);
+				float regenMp = ModItemDetails::EnergyRegen(pItem->GetMaxMP(), perk, result_bonus);
+				szOut.Format("%s %d(%.2f%s)", szStrings[ENERGY], (int)pItem->GetMaxMP(), regenMp, szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+				rc += shift;
+				int nSlotsFilled = 0;
+				if (pSpelll)
+					nSlotsFilled = pSpelll->GetComplexity();
+					szOut.Format("%s %d/%d", szStrings[SLOTS], nSlotsFilled, pItem->GetSpellSlots());
+				pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+				rc += shift;
+			}
+		}
+		else
+		{
+			if (tid == ITID_ITEM_ARMOR || tid == ITID_ITEM_WEAPON)
+			{
+				szTmp = "string infoitem_79";
+				if (pTxtMng->GetText("string infoitem_79")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s%s", szStrings[SLOTS], szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+				rc += shift;
+			}
+		}
+		if (tid == ITID_ITEM_ARMOR || tid == ITID_ITEM_WEAPON)
+		{
+			int nHP = pItem->GetHP() > 0 ? (int)pItem->GetHP() : 0;
+			szOut.Format("%s %d/%d", szStrings[DURABILITY], nHP, (int)pItem->GetMaxHP());
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+		if (tid == ITID_ITEM_WEAPON) 
+		{
+			float damages[RPG_NUM_ATTACK_TYPES];
+			CItemWeapon* pWeapon = static_cast<CItemWeapon*>(pItem);
+			if (pWeapon) {
+				pWeapon->GetDamageDistribution(damages);
+				int i = 0;
+				if ((int)pWeapon->GetDamageMax() != 0)
+				{
+					for (; i < RPG_NUM_ATTACK_TYPES; i++)
+					{
+						if (damages[i] != 0)
+						{
+							if (i < RPG_NUM_ATTACK_TYPES)
+							{
+								szOut.Format("dmg_%d", i);
+								pTxtMng->GetSystemString(szOut.GetString(), szTmp);
+							}
+							CString weaponProt = pWeapon->GetShapeEntry()->szName;
+
+							float DPS = ModItemDetails::Dps(pWeapon->GetDamageMin(), pWeapon->GetDamageRandomRange(), pWeapon->GetActionPoints(),
+                                mod->InfoProperty("GetWeaponPropsInside", weaponProt, 4), mod->InfoProperty("GetWeaponPropsInside", weaponProt, 5));
+							szOut.Format("%s %.0f-%.0f%s", szStrings[DAMAGE], 
+								(pWeapon->GetDamageMin() * damages[i]), 
+								(pWeapon->GetDamageMax() * damages[i]), 
+								szTmp);
+							pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+							rc += shift;
+							if (!(pI3D->IsAltDown()))
+							{
+								if (pTxtMng->GetText("string infoitem_100")) pTxtMng->GetLine(szTmp2);
+                                szOut.Format("%s %s", szTmp2, (LPCSTR)ModItemDetails::DpsText(DPS));
+								pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+								rc += shift; 
+							}
+						}
+					}
+				} 
+				int actions = pWeapon->GetActionPoints();
+				if (pWeapon->GetWeaponType() != 9) {
+					if (actions != 0) {
+						float result = actions / 15.0f;
+						if (pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(szTmp);
+						szOut.Format("%s %.1f%s", szStrings[ACTIONPTS], result, szTmp);
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+					if ( (int)pWeapon->GetRange() > 0 ) {
+						szOut.Format("%s %d", szStrings[RANGE], (int)pWeapon->GetRange());
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+				}
+				if (pWeapon->GetWeaponType() != 9) {
+					szOut.Format("%s %d", szStrings[MODATTACK], (int)pWeapon->GetAtackBonus());
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+					szOut.Format("%s %d", szStrings[MODDEFENSE], (int)pWeapon->GetDefenceBonus());
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				else {
+					int attack = pWeapon->GetAtackBonus();
+					if (attack != 0) {
+						szOut.Format("%s %d", szStrings[MODATTACK], (int)attack);
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+					int defence = pWeapon->GetDefenceBonus();
+					if (defence != 0) {
+						szOut.Format("%s %d", szStrings[MODDEFENSE], (int)defence);
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+				}
+				if (pI3D->IsAltDown())
+                {
+                }
+                else
+				{	
+					CString weaponProt = pWeapon->GetShapeEntry()->szName;
+					CString weaponMat = ModInfoMaterialName(pWeapon);
+					const bool showWeaponBlocking = mod->CombatSetting("JMVWeaponBlocking") ||
+						pWeapon->GetWeaponType() == 9;
+					if (showWeaponBlocking)
+					{
+						float blockChance = mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 2) * mod->InfoProperty("GetMaterialPropsInside", weaponMat.GetString(), 4);
+						if (blockChance >= 0.001f)
+						{
+							szTmp2 = "Unknown";
+							if (pTxtMng->GetText("string infoitem_45")) pTxtMng->GetLine(szTmp2);
+							szTmp.Format("%.0f", blockChance);
+							szOut = szTmp2 + " " + CString(blockChance > 0 ? "" : "") + szTmp + "%";
+							pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+							rc += shift;
+						}
+						float blockProt = mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 3);
+						float blockMat = mod->InfoProperty("GetMaterialPropsInside", weaponMat.GetString(), 5);
+						float blockPower = blockProt * blockMat;
+						if (blockPower >= 0.001f)
+						{
+							szTmp2 = "Unknown";
+							if (pTxtMng->GetText("string infoitem_46")) pTxtMng->GetLine(szTmp2);
+							szTmp.Format("%.0f", blockPower);
+							szOut = szTmp2 + " " + CString(blockPower > 0 ? "" : "") + szTmp;
+							pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+							rc += shift;
+						}
+					}
+					if (mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 4) != 0)
+					{
+						szTmp2 = "Unknown";
+						if (pTxtMng->GetText("string infoitem_48"))
+						{
+							pTxtMng->GetLine(szTmp2);
+						}
+						szTmp.Format("%.0f", mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 4));
+						szOut = szTmp2 + " " + CString(mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 4) > 0 ? "" : "") + szTmp + "%";
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+					if (mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 5) != 0)
+					{
+						szTmp2 = "Unknown";
+						if (pTxtMng->GetText("string infoitem_49"))
+						{
+							pTxtMng->GetLine(szTmp2);
+						}
+						szTmp.Format("%.0f", mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 5));
+						szOut = szTmp2 + " " + CString(mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 5) > 0 ? "+" : "") + szTmp + "%";
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+					if (mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 6) != 0)
+					{
+						szTmp2 = "Unknown";
+						if (pTxtMng->GetText("string infoitem_47"))
+						{
+							pTxtMng->GetLine(szTmp2);
+						}
+						szTmp.Format("%.0f", mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 6) * mod->InfoProperty("GetMaterialPropsInside", weaponMat.GetString(), 8));
+						szOut = szTmp2 + " " + CString(mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 6) > 0 ? "" : "") + szTmp + "%";
+						pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+						rc += shift;
+					}
+				}
+			}
+		}
+		if (tid == ITID_ITEM_ARMOR)
+		{
+			float absorbs[RPG_NUM_ATTACK_TYPES];
+			CItemArmor* pArmor = static_cast<CItemArmor*>(pItem);
+			pArmor->GetAbsorbtions(absorbs, 0);
+			CStringArray szResArray;
+			ModInfoAbsorptionStrings(absorbs, szResArray, false);
+			szOut = szStrings[ABSORPARMOR] + " " + szResArray[0] + " " + szResArray[1] + " " + szResArray[2];
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+			if (!szResArray[2].IsEmpty())
+			{
+				szOut = szStrings[ABSORPARMOR] + " " + szResArray[3] + " " + szResArray[4] + " " + szResArray[5];
+				pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+				rc += shift;
+			}
+            bool alt = pI3D->IsAltDown();
+                        bool ctrl = pI3D->IsCtrlDown();
+            if (pI3D->IsAltDown())
+            {
+            }
+			else
+			{	
+				CString armorProt = pArmor->GetShapeEntry()->szName;
+				CString armorMat = ModInfoMaterialName(pItem);
+				if (mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 2) != 0)
+				{
+					szTmp.Format("%.0f", mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 2));
+					szOut = szStrings[MODDEFENSE] + " " + CString(mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 2) > 0 ? "+" : "") + szTmp;
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				if (mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 3) != 0)
+				{
+					szTmp.Format("%.0f", mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 3));
+					szOut = szStrings[MODATTACK] + " " + CString(mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 3) > 0 ? "+" : "") + szTmp;
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				if (mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 4) != 0)
+				{
+					szTmp2 = "Unknown";
+					if (pTxtMng->GetText("string infoitem_50"))
+					{
+						pTxtMng->GetLine(szTmp2);
+					}
+					szTmp.Format("%.0f", mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 4) * 100);
+					szOut = szTmp2 + " " + CString(mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 4) > 0 ? "+" : "") + szTmp + "%";
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				float visibilityProt = mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 5);
+				float visibilityMat = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 13);
+				if (visibilityProt != 0 || visibilityMat != 0)
+				{
+					szTmp2 = "Unknown";
+					if (pTxtMng->GetText("string infoitem_53")) pTxtMng->GetLine(szTmp2);
+					szTmp.Format("%.0f", (visibilityProt + visibilityMat) * 100);
+					szOut = szTmp2 + " " + CString( visibilityProt + visibilityMat > 0 ? "+" : "") + szTmp + "%";
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				float hearingProt = mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 6);
+				float hearingMat = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 14);
+				if (hearingProt != 0 || hearingMat != 0)
+				{
+					szTmp2 = "Unknown";
+					if (pTxtMng->GetText("string infoitem_51")) pTxtMng->GetLine(szTmp2);
+					szTmp.Format("%.0f", (hearingProt + hearingMat) * 100);
+					szOut = szTmp2 + " " + CString(hearingProt + hearingMat > 0 ? "+" : "") + szTmp + "%";
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				if (mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 7) != 0)
+				{
+					szTmp2 = "Unknown";
+					if (pTxtMng->GetText("string infoitem_52"))
+					{
+						pTxtMng->GetLine(szTmp2);
+					}
+					szTmp.Format("%.0f", mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 7) * 100);
+					szOut = szTmp2 + " " + CString(mod->InfoProperty("GetArmorPropsInside", armorProt.GetString(), 7) > 0 ? "+" : "") + szTmp + "%";
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				float regen = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 2);
+				if (regen >= 0.00001f)
+				{
+					szTmp2 = "Unknown";
+					if (pTxtMng->GetText("string infoitem_80")) pTxtMng->GetLine(szTmp2);
+					szTmp.Format("+%.2f", regen);
+					szOut = szTmp2 + " " + CString(regen > 0 ? "" : "") + szTmp + "%";
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+				float restor = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 3);
+				if (restor >= 0.00001f)
+				{
+					szTmp2 = "Unknown";
+					if (pTxtMng->GetText("string infoitem_81")) pTxtMng->GetLine(szTmp2);
+					szTmp.Format("+%.2f", restor);
+					szOut = szTmp2 + " " + CString(restor > 0 ? "" : "") + szTmp + "%";
+					pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+					rc += shift;
+				}
+			}
+		}
+		const bool fixedArmorMaterialStats = mod->CombatSetting("JMVArmorMaterialStats");
+		const COLORREF materialStatColor = fixedArmorMaterialStats ? color : INV_COLOR_HEADER;
+		if (!fixedArmorMaterialStats || tid == ITID_ITEM_ARMOR)
+		{
+			float str = 0;
+			float dex = 0;
+			float inte = 0;
+			float run = 0;
+			CItemArmor* pArmor = static_cast<CItemArmor*>(pItem);
+			CString armorMat = ModInfoMaterialName(pItem);
+			str = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 10);
+			dex = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 11);
+			inte = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 12);
+			run = mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 9);
+			if (fixedArmorMaterialStats ? run != 0.0f : run > 0) {
+				if (pTxtMng->GetText("string infounit_2")) pTxtMng->GetLine(szTmp);
+				if (fixedArmorMaterialStats)
+					szOut.Format("%s %+.1f%%", szTmp, run);
+				else
+					szOut.Format("%s +%.2f", szTmp, str);
+				pSurf->DrawText(szOut.GetString(), rc, 0, materialStatColor, DT_LEFT);
+				rc += shift;
+			}
+			if (str > 0) {
+				if (pTxtMng->GetText("PERK Strength")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s +%.2f", szTmp, str);
+				pSurf->DrawText(szOut.GetString(), rc, 0, materialStatColor, DT_LEFT);
+				rc += shift;
+			}
+			if (dex > 0) {
+				if (pTxtMng->GetText("PERK Dexterity")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s +%.2f", szTmp, dex);
+				pSurf->DrawText(szOut.GetString(), rc, 0, materialStatColor, DT_LEFT);
+				rc += shift;
+			}
+			if (inte > 0) {
+				if (pTxtMng->GetText("PERK Intelligence")) pTxtMng->GetLine(szTmp);
+				szOut.Format("%s +%.2f", szTmp, inte);
+				pSurf->DrawText(szOut.GetString(), rc, 0, materialStatColor, DT_LEFT);
+				rc += shift;
+			}
+		}
+		const SIDBItemGeneralShape* pProt = pItem->GetShapeEntry();
+		CI3DScreenCamp* camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+		int nShop = 0;
+		if (!(pI3D->IsAltDown())) {
+			CString itemName = pItem->GetShapeEntry()->szName;
+            const auto itemBonuses = mod->InfoSetBonuses(itemName, currentComplexSize, complexNum, false);
+            for (const auto &bonus : itemBonuses) {
+                int s = bonus.first, statSizeSumm = bonus.second;
+				if (statSizeSumm != 0) {
+					if (s == 3)	if (pTxtMng->GetText("PERK Strength")) pTxtMng->GetLine(szTmp);
+					if (s == 4)	if (pTxtMng->GetText("PERK Dexterity")) pTxtMng->GetLine(szTmp);
+					if (s == 5)if (pTxtMng->GetText("PERK Intelligence")) pTxtMng->GetLine(szTmp);
+					if (s == 6)	if (pTxtMng->GetText("string infoitem_48")) pTxtMng->GetLine(szTmp);
+					if (s == 7)	if (pTxtMng->GetText("string infoitem_49")) pTxtMng->GetLine(szTmp);
+					if (s == 8)		if (pTxtMng->GetText("string infoitem_105")) pTxtMng->GetLine(szTmp);
+					if (s == 9)		if (pTxtMng->GetText("string infoitem_47")) pTxtMng->GetLine(szTmp);
+					if (s == 10)	if (pTxtMng->GetText("string infoitem_80")) pTxtMng->GetLine(szTmp);
+					if (s == 11)		
+						if (pTxtMng->GetText("string infoitem_84")) pTxtMng->GetLine(szTmp);
+					if (s == 12)		if (pTxtMng->GetText("string infoitem_107")) pTxtMng->GetLine(szTmp);
+					if (s == 13)			if (pTxtMng->GetText("string infoitem_39")) pTxtMng->GetLine(szTmp);
+					if (s == 14)			if (pTxtMng->GetText("string infoitem_38")) pTxtMng->GetLine(szTmp);
+					if (s == 15)			if (pTxtMng->GetText("string infoitem_7")) pTxtMng->GetLine(szTmp);
+					if (s == 16)			if (pTxtMng->GetText("string infoitem_53")) pTxtMng->GetLine(szTmp);
+					if (s == 17)			if (pTxtMng->GetText("string infoitem_51")) pTxtMng->GetLine(szTmp);
+					if (s == 18)			if (pTxtMng->GetText("string infoitem_87")) pTxtMng->GetLine(szTmp);
+					if (s == 19)		if (pTxtMng->GetText("string infoitem_106")) pTxtMng->GetLine(szTmp);
+					if (s == 20)	if (pTxtMng->GetText("string infoskill_22")) pTxtMng->GetLine(szTmp);
+					if (s == 21)		if (pTxtMng->GetText("string infoitem_81")) pTxtMng->GetLine(szTmp);
+					if (s <= 5 || s == 13 || s == 14) {
+						if (statSizeSumm > 0) szOut.Format("%s +%d", szTmp, statSizeSumm); else szOut.Format("%s %d", szTmp, statSizeSumm);
+					}else {
+						if (statSizeSumm > 0) szOut.Format("%s +%d%%", szTmp, statSizeSumm); else szOut.Format("%s %d%%", szTmp, statSizeSumm);
+					}
+					pSurf->DrawText(szOut.GetString(), rc, 0, RGB(0, 215, 0), DT_LEFT);
+					rc += shift;
+				}
+            }
+			int str = 0;
+			int dex = 0;
+			int inte = 0;
+			bool showComplexText = true;
+            const auto complexBonuses = mod->InfoSetBonuses(itemName, currentComplexSize, complexNum, true);
+            for (const auto &bonus : complexBonuses) {
+                int s = bonus.first, statSizeSumm = bonus.second;
+				if (statSizeSumm != 0) {
+					if (showComplexText) {
+						if (pTxtMng->GetText("string infoitem_104")) pTxtMng->GetLine(szOut);
+						pSurf->DrawText(szOut.GetString(), rc, 0, RGB(0, 215, 0), DT_CENTER);
+						rc += shift;
+					}
+					showComplexText = false;
+					if (s == 3) if (pTxtMng->GetText("PERK Strength")) pTxtMng->GetLine(szTmp);
+					if (s == 4) if (pTxtMng->GetText("PERK Dexterity")) pTxtMng->GetLine(szTmp);
+					if (s == 5) if (pTxtMng->GetText("PERK Intelligence")) pTxtMng->GetLine(szTmp);
+					if (s == 6) if (pTxtMng->GetText("string infoitem_48")) pTxtMng->GetLine(szTmp);
+					if (s == 7) if (pTxtMng->GetText("string infoitem_49")) pTxtMng->GetLine(szTmp);
+					if (s == 8) if (pTxtMng->GetText("string infoitem_105")) pTxtMng->GetLine(szTmp);
+					if (s == 9) if (pTxtMng->GetText("string infoitem_47")) pTxtMng->GetLine(szTmp);
+					if (s == 10) if (pTxtMng->GetText("string infoitem_80")) pTxtMng->GetLine(szTmp);
+					if (s == 11) if (pTxtMng->GetText("string infoitem_84")) pTxtMng->GetLine(szTmp);
+					if (s == 12) if (pTxtMng->GetText("DMG MAGIC")) pTxtMng->GetLine(szTmp);
+					if (s == 13) if (pTxtMng->GetText("string infoitem_39")) pTxtMng->GetLine(szTmp);
+					if (s == 14) if (pTxtMng->GetText("string infoitem_38")) pTxtMng->GetLine(szTmp);
+					if (s == 15) if (pTxtMng->GetText("string infoitem_7")) pTxtMng->GetLine(szTmp);
+					if (s == 16) if (pTxtMng->GetText("string infoitem_53")) pTxtMng->GetLine(szTmp);
+					if (s == 17) if (pTxtMng->GetText("string infoitem_51")) pTxtMng->GetLine(szTmp);
+					if (s == 18) if (pTxtMng->GetText("string infoitem_87")) pTxtMng->GetLine(szTmp);
+					if (s == 19) if (pTxtMng->GetText("DMG HEAD")) pTxtMng->GetLine(szTmp);
+					if (s == 20) if (pTxtMng->GetText("DMG BACKSTAB")) pTxtMng->GetLine(szTmp);
+					if (s == 21) if (pTxtMng->GetText("string infoitem_81")) pTxtMng->GetLine(szTmp);
+					if (s <= 5 || s == 13 || s == 14) {
+						if (statSizeSumm > 0) szOut.Format("%s +%d", szTmp, statSizeSumm); else szOut.Format("%s %d", szTmp, statSizeSumm);
+					}
+					else {
+						if (statSizeSumm > 0) szOut.Format("%s +%d%%", szTmp, statSizeSumm); else szOut.Format("%s %d%%", szTmp, statSizeSumm);
+					}
+					pSurf->DrawText(szOut.GetString(), rc, 0, RGB(0, 215, 0), DT_CENTER);
+					rc += shift;
+				}
+            }
+		}
+		if (tid == ITID_ITEM_ARMOR || tid == ITID_ITEM_WEAPON ||
+			(tid == ITID_ITEM_QUICK &&
+				static_cast<CItemQuick*>(pItem)->GetQuickItemType() == IDB_WAND))
+		{
+			CSpell* pSpell = pSpelll;
+			if (pSpell)
+			{
+				szTmp = "Unknown";
+				CString plu;
+				szTmp.Format("SPELL %s", pSpell->GetPrototype()->szCodeName.GetString());
+				if (pTxtMng->GetText(szTmp.GetString()))
+					pTxtMng->GetLine(szTmp);
+				szOut.Format("%s %s", szStrings[SPELL], szTmp);
+				pSurf->DrawText(szOut.GetString(), rc, 0, color2, DT_LEFT);
+			}
+			rc += shift;
+			rc += shift;
+		}
+    if (tid == ITID_ITEM_LOOT )
+	{
+		pTxtMng->GetSystemString("loot_item", szTmp);
+		szDesc = szDesc + szTmp;
+		ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+		pSurf->ReleaseDC();
+		return;
+	}
+	if (tid == ITID_ITEM_SPELL)
+		ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+    else if ((tid == ITID_ITEM_WEAPON || tid == ITID_ITEM_ARMOR) && pI3D->IsAltDown())
+		ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_LEFT | DT_WORDBREAK);
+    else
+        if ((tid != ITID_ITEM_WEAPON && tid != ITID_ITEM_ARMOR) && !pI3D->IsAltDown())
+			ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+    pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     const auto *mod = ModRuntime::Current();
-    const bool compactInfoLines = !mod || mod->CombatSetting("JMVItemInfoLineHeight");
+    const bool compactInfoLines = mod && mod->AdvancedUI("useLS_FormTextInfo") && mod->CombatSetting("JMVItemInfoLineHeight");
     const int descriptionLineStep = compactInfoLines ? 12 : 0;
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
@@ -873,6 +1720,17 @@ void CI3DObjectItemInfo::FormTextInfo()
         pArmor->GetAbsorbtions(absorbs, 0);
 
         CStringArray szResArray;
+        if (ModRuntime::Current()) {
+            ModInfoAbsorptionStrings(absorbs, szResArray, false);
+            szOut = szStrings[ABSORPARMOR] + " " + szResArray[0] + " " + szResArray[1] + " " + szResArray[2];
+            pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+            rc += shift;
+            if (!szResArray[2].IsEmpty()) {
+                szOut = szStrings[ABSORPARMOR] + " " + szResArray[3] + " " + szResArray[4] + " " + szResArray[5];
+                pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+                rc += shift;
+            }
+        } else {
         FormAbsorptionStrings(absorbs, szResArray, false);
 
         szOut = szStrings[ABSORPARMOR] + " " + szResArray[0];
@@ -893,6 +1751,8 @@ void CI3DObjectItemInfo::FormTextInfo()
             rc += shift;
         }
 
+        }
+        if(mod && mod->AdvancedUI("useLS_FormTextInfo")){
         const CString armorName = pArmor->GetShapeEntry()->szName;
         const CString armorMaterial = pItmMng->GetMaterial(pItem->GetMaterial())->szName;
         auto drawSignedPercent = [&](const CString &label, float value)
@@ -961,8 +1821,9 @@ void CI3DObjectItemInfo::FormTextInfo()
         }
 
     }
+        }
     const bool fixedMaterialStats = !ModRuntime::Current() || ModRuntime::Current()->CombatSetting("JMVArmorMaterialStats");
-    if ((!fixedMaterialStats || tid == ITID_ITEM_ARMOR) && ModInfoMaterialName(pItem))
+    if (mod && mod->AdvancedUI("useLS_FormTextInfo") && (!fixedMaterialStats || tid == ITID_ITEM_ARMOR) && ModInfoMaterialName(pItem))
     {
         const CString armorMaterial = ModInfoMaterialName(pItem);
         const COLORREF materialColor = fixedMaterialStats ? color : INV_COLOR_HEADER;
@@ -1040,6 +1901,69 @@ void CI3DObjectItemInfo::FormTextInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormPotionInfo()
 {
+    if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
+
+	CItem* pItem = GetItem();
+	CSpell* pSpell = GetSpell();
+    if (!pItem || !pSpell) return;
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	CString szName, szDesc, szType;
+	pTxtMng->GetItemNameAndDesc(pItem, szName, szDesc, szType);
+#ifndef NOGETDC
+	CI3DSurface* pSurf = surfaces[0];
+	pSurf->GetDC();
+	CString szOut, szTmp, szTmp2;
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, mod->CombatSetting("JMVItemInfoLineHeight") ? 12 : 15);
+	COLORREF color = INV_COLOR_INFO;
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+	if (pTxtMng->GetText(CString(CString("spell ") + pSpell->GetPrototype()->szCodeName).GetString())) pTxtMng->GetLine(szName);
+	pTxtMng->GetSystemString("item_spell", szType);
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	CSpell * pSpellIn = pItem->GetSpell(0);
+	if (pSpellIn)
+	{
+		CString name = pSpell->GetPrototype()->szCodeName;
+		float subeffect = mod->InfoProperty("GetSpellAdds", name, 2);
+        szOut.Format("%s %s", szStrings[EFFECT], (LPCSTR)ModItemInfo::PotionEffect(
+            pSpellIn->GetPower(), subeffect, pSpellIn->GetPrototype()->bRuneAllowed[SDBAR_EFFECT], szStrings[FIXEDEFF]));
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		if (pSpellIn->GetDuration() < 2)
+			szOut.Format("%s %s", szStrings[DURATION], szStrings[INSTANT]);
+		else
+			szOut.Format("%s %.1f%s", szStrings[DURATION], pSpellIn->GetDuration() / 15.f,
+				szStrings[SECONDS]);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		szOut.Format("%s %d", szStrings[WEIGHT], (int)pItem->GetWeight());
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		rc += shift;
+	}
+	const SIDBItemGeneralShape* pProt = pItem->GetShapeEntry();
+	CI3DScreenCamp* camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+	int nShop = 0;
+	if (camp && camp->GetCurrentShop())
+		nShop = camp->GetCurrentShop()->nID;
+	if (mod->InfoForbiddenSpell(pProt->szName.GetString(), nShop)) {
+		if (pTxtMng->GetText("string infoitem_91")) pTxtMng->GetLine(szTmp);
+		szOut.Format("%s", szTmp);
+		pSurf->DrawText(szOut.GetString(), rc, 0, RGB(255, 200, 0), DT_LEFT);
+		rc += shift;
+	}
+	ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+	pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -1098,6 +2022,194 @@ void CI3DObjectItemInfo::FormPotionInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormSpellInfo()
 {
+    if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
+
+	CItem* pItem = GetItem();
+	CSpell* pSpell = GetSpell();
+	if (!pSpell)
+	{
+		surfaces[0]->ReleaseDC();
+		return;
+	}
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	CString szName, szDesc, szType, szCode;
+	if (pTxtMng->GetText(CString(CString("spell ") + pSpell->GetPrototype()->szCodeName).GetString()))
+	{
+		pTxtMng->GetLine(szName);
+		pTxtMng->GetUntilNextCommand(szDesc);
+	}
+	pTxtMng->GetSystemString("item_spell", szType);
+#ifndef NOGETDC
+	CI3DSurface* pSurf = surfaces[0];
+	pSurf->GetDC();
+	CString szTmp,szTmp2,szTmp3, szOut;
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, mod->CombatSetting("JMVItemInfoLineHeight") ? 12 : 15);
+	COLORREF color = INV_COLOR_INFO;
+    CI3DScreenCamp *camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+    CUnit *pUnit = camp ? camp->GetCurrentUnit() : nullptr;
+    if (!pUnit) { pSurf->ReleaseDC(); return; }
+    ModSkills::Config meleeActiveConfig;
+	if (mod->SkillConfig(pSpell, meleeActiveConfig))
+	{
+		ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0,
+			INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+		rc += shift;
+		rc += shift;
+		szOut.Format("%s \xC1\xEE\xE5\xE2\xEE\xE9 \xED\xE0\xE2\xFB\xEA",
+			szStrings[ITEMTYPE]);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		szOut.Format("\xC7\xE0\xEF\xE0\xF1 \xF1\xE8\xEB: %.0f",
+			meleeActiveConfig.Cost(pSpell->GetManaCost()));
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		const char* requiredSkillName = meleeActiveConfig.requiredArchery >= 0.0f
+			? "\xD1\xF2\xF0\xE5\xEB\xFC\xE1\xE0"
+			: "\xC1\xEB\xE8\xE6\xED\xE8\xE9 \xE1\xEE\xE9";
+		szOut.Format("%s: %.0f", requiredSkillName,
+			meleeActiveConfig.Requirement(float(pSpell->GetComplexity())));
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		szOut.Format("\xD3\xF0\xEE\xED: %.0f%%",
+			meleeActiveConfig.damageMultiplier * 100.0f);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		if (meleeActiveConfig.accuracyBonus > 0.0f)
+		{
+			szOut.Format("\xD2\xEE\xF7\xED\xEE\xF1\xF2\xFC: +%.0f",
+				meleeActiveConfig.accuracyBonus);
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+		if (meleeActiveConfig.areaRadius > 0.0f)
+		{
+			szOut.Format("\xD0\xE0\xE4\xE8\xF3\xF1: %.0f \xEC.",
+				meleeActiveConfig.areaRadius);
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+		szOut.Format(
+			"\xCF\xE5\xF0\xE5\xE7\xE0\xF0\xFF\xE4\xEA\xE0: %.0f \xF1\xE5\xEA.",
+			meleeActiveConfig.cooldownSeconds);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		for (int i = 0; i < 7; ++i)
+			rc += shift;
+		ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color,
+			DT_LEFT | DT_WORDBREAK);
+		pSurf->ReleaseDC();
+		return;
+	}
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+	szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+    const float additional = mod->InfoProperty("GetSpellAdds", pSpell->GetPrototype()->szCodeName, 2);
+    const auto info = ModCampSpellInfo::Calculate(*pUnit->GetUserUnitStats(), *pSpell,
+        additional, theSettings.nDifficultyLevel, pI3D->IsCtrlDown());
+    szOut.Format("%s %s", szStrings[MANA], (LPCSTR)ModCampSpellInfo::Mana(*pSpell, info));
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[SLOTS], pSpell->GetComplexity());
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szTmp.Format("school_%d", pSpell->GetMagicSubtype());
+	pTxtMng->GetSystemString(szTmp.GetString(), szOut);
+	szOut = szStrings[MAGICSCHOOL] + " " + szOut;
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+    const int spellID = pSpell->GetSubtypeID() >> 16;
+    const bool attacking = spellID <= SPELL_ID_POISONFOG || spellID == SPELL_ID_VAMP;
+    if (pSpell->GetMagicSubtype() == 0) szTmp.Format("damage_%d", 3);
+    else if (pSpell->GetMagicSubtype() == 1) szTmp.Format("damage_%d", 5);
+    else if (pSpell->GetMagicSubtype() == 2) szTmp.Format("damage_%d", 4);
+    pTxtMng->GetSystemString(szTmp, szTmp);
+    if (!attacking) szTmp = "";
+    szOut.Format("%s %s%s", szStrings[EFFECT], (LPCSTR)ModCampSpellInfo::Effect(info), (LPCSTR)szTmp);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+    if (pSpell->GetActionPoints() < 1.f)
+        szOut.Format("%s %s", szStrings[SPEED], szStrings[INSTANT]);
+    else
+        szOut.Format("%s %s%s", szStrings[SPEED], (LPCSTR)ModCampSpellInfo::Cast(*pSpell, info), (LPCSTR)szStrings[SECONDS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d%s", szStrings[RANGE], (int)pSpell->GetRange(), szStrings[METERS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	if (pSpell->IsOnUnit())
+		szOut.Format("%s %s", szStrings[AREA], szStrings[AREAUNIT]);
+	else
+		szOut.Format("%s %.1f%s", szStrings[AREA], pSpell->GetRadius(), szStrings[METERS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	if (pSpell->GetDuration() < 2)
+		szOut.Format("%s %s", szStrings[DURATION], szStrings[INSTANT]);
+	else
+		szOut.Format("%s %.1f%s", szStrings[DURATION], pSpell->GetDuration() / 15.f,
+			szStrings[SECONDS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[TARGETS], pSpell->GetNumTargets());
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+    // Paired per-second/total suffixes are one row, as in the addon.
+    const auto extras = ModCampSpellInfo::Extras(*pSpell, info);
+    for (size_t i = 0; i < extras.size(); ++i) {
+        const auto &extra = extras[i];
+        szTmp = CString("string ") + extra.label;
+        if (pTxtMng->GetText(szTmp)) pTxtMng->GetLine(szTmp);
+        szOut = szTmp + " " + extra.value;
+        if (extra.perSecond) {
+            szTmp2 = "string infoitem_88";
+            if (pTxtMng->GetText(szTmp2)) pTxtMng->GetLine(szTmp2);
+            szOut += szTmp2;
+            szOut += extras[++i].value;
+        }
+        pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
+        rc += shift;
+    }
+	int nShop = 0;
+	if (camp->GetCurrentShop()) {
+		nShop = camp->GetCurrentShop()->nID;
+		if (mod->InfoForbiddenSpell(pSpell->GetPrototype()->szCodeName, nShop)) {
+			if (pTxtMng->GetText("string infoitem_91")) pTxtMng->GetLine(szTmp);
+			szOut.Format("%s", szTmp);
+			pSurf->DrawText(szOut.GetString(), rc, 0, RGB(255, 200, 0), DT_LEFT);
+			rc += shift;
+		}
+	}
+	if (pSpell->GetRunesCount() > 0)
+	{
+		szOut = szStrings[MODIFIERS];
+		for (int i = 0; i < pSpell->GetRunesCount(); i++)
+		{
+			szOut = szOut + " ";
+			szTmp = "?";
+			szCode = theWorld.GetSpellManager()->GetModifier(pSpell->GetRunes()[i] - 1)->pszCode;
+			if (pTxtMng->GetText(CString(CString("modifier ") + szCode).GetString()))
+			{
+				pTxtMng->SkipLine();
+				pTxtMng->SkipLine();
+				pTxtMng->GetLine(szTmp);
+			}
+			szOut = szOut + szTmp + ",";
+		}
+		szOut.TrimRight(",");
+		szOut = szOut + ".";
+		ModInfoMultiText(pSurf, szOut.GetString(), rc, 3, 0, color, DT_LEFT | DT_WORDBREAK);
+	}
+	for (int descriptionGapLine = 0; descriptionGapLine < 3; ++descriptionGapLine)
+		rc += shift;
+	if (pSpell->GetSubtypeID() >> 16 != SPELL_ID_STRENGTHEN && pSpell->GetSubtypeID() >> 16 != SPELL_ID_WEAKEN)
+		ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_LEFT | DT_WORDBREAK);
+	pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -1233,6 +2345,80 @@ void CI3DObjectItemInfo::FormSpellInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormMaterialInfo()
 {
+    if (ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_FormTextInfo") && ModRuntime::Current()->CombatSetting("JMVItemInfoLineHeight")) {
+        auto *mod = ModRuntime::Current();
+
+	CItem* pItem = GetItem();
+	CItemLoot* pLoot = static_cast<CItemLoot*>(pItem);
+	const SIDBMaterial* pMat = pLoot
+		? theItemDatabase.materials.GetEntry(pLoot->GetMaterialIndex())
+		: nullptr;
+	if (!pMat)
+		return;
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	CString szName, szDesc, szType;
+	pTxtMng->GetItemNameAndDesc(pItem, szName, szDesc, szType);
+#ifndef NOGETDC
+	CI3DSurface* pSurf = surfaces[0];
+	pSurf->GetDC();
+	CString szTmp, szOut;
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, 12);
+	COLORREF color = INV_COLOR_INFO;
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0,
+		INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+	szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szTmp = pMat->szType;
+	szTmp.MakeLower();
+	szTmp = CString("mattype_") + szTmp;
+	pTxtMng->GetSystemString(szTmp.GetString(), szOut);
+	szOut = szStrings[MATTYPE] + " " + szOut;
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[WEIGHT], static_cast<int>(pMat->fpWeight));
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[ENERGY], static_cast<int>(pMat->fpManaCapacity));
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[SLOTS], pMat->dwSpellSlots);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[DURABILITY], static_cast<int>(pMat->fpDurability));
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %.1f", szStrings[DAMAGE], pMat->fpDamageModifier);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	CStringArray szResArray;
+	float absorbs[RPG_NUM_ATTACK_TYPES];
+	for (int i = 0; i < RPG_NUM_ATTACK_TYPES; ++i)
+		absorbs[i] = pMat->fpAbsorbtionMultipliers[i];
+	ModInfoAbsorptionStrings(absorbs, szResArray, false);
+	if (szResArray.GetSize() > 0)
+	{
+		szOut = szStrings[ABSORPTION] + " " + szResArray[0];
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+	}
+	if (szResArray.GetSize() > 2 && !szResArray[2].IsEmpty())
+	{
+		szOut = szStrings[VULNERABLE] + " " + szResArray[2];
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+	}
+	rc += shift;
+	ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color,
+		DT_CENTER | DT_WORDBREAK);
+	pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -1333,6 +2519,200 @@ void CI3DObjectItemInfo::FormMaterialInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormInstructionInfo()
 {
+    if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
+
+	CItem* pItem = GetItem();
+	CSpell* pSpell = GetSpell();
+	enum
+	{
+		INSTR_WEAPON,
+		INSTR_ARMOR,
+		INSTR_WAND,
+		INSTR_TRAP,
+		INSTR_OTHER
+	};
+	int nType;
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	const SIDBItemGeneralShape* pShape = nullptr;
+	CItemLoot* pLoot = static_cast<CItemLoot*>(pItem);
+	assert((pLoot->GetInstructionType() >= IDBINS_WEAPON) &&
+		(pLoot->GetInstructionType() <= IDBINS_QUICK));
+	CString szTmp, szTmp2, szOut;
+	switch (pLoot->GetInstructionType())
+	{
+	case IDBINS_WEAPON:
+		nType = INSTR_WEAPON;
+		pShape = theItemDatabase.weapons.GetEntry(pLoot->GetInstructionItemIndex());
+		break;
+	case IDBINS_ARMOR:
+		nType = INSTR_ARMOR;
+		pShape = theItemDatabase.armors.GetEntry(pLoot->GetInstructionItemIndex());
+		break;
+	case IDBINS_QUICK:
+		nType = INSTR_WAND;
+		pShape = theItemDatabase.quickItems.GetEntry(pLoot->GetInstructionItemIndex());
+		break;
+	default:
+		return;
+	}
+    if (!pShape) return;
+	CString szName, szDesc, szType;
+	pTxtMng->GetItemNameAndDesc(pItem, szName, szDesc, szType);
+#ifndef NOGETDC
+	CI3DSurface* pSurf = surfaces[0];
+	pSurf->GetDC();
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, mod->CombatSetting("JMVItemInfoLineHeight") ? 12 : 15);
+	COLORREF color = INV_COLOR_INFO;
+	COLORREF colorRare = INV_COLOR_INFO;
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+	EIDBInstructionType tid = pLoot->GetInstructionType();
+	int typeID = pShape->dwTypeID;
+	if (tid == IDBINS_WEAPON) {
+        const char *typeKey = ModItemInfo::WeaponTypeKey(typeID);
+        if (typeKey) {
+            szTmp = CString("string ") + typeKey;
+            if (pTxtMng->GetText(szTmp)) pTxtMng->GetLine(szTmp);
+            szOut.Format("%s %s", szStrings[ITEMTYPE], szTmp);
+        } else szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		DWORD dwShape = pItem->GetShape();
+		CString szShape = pShape->szName;
+		int weightType = mod->InfoProperty("GetWeaponPropsInside", szShape, 7);
+        const char *weightKey = ModItemInfo::WeaponWeightKey(typeID, weightType);
+        szTmp = weightKey ? CString("string ") + weightKey : CString("NOT SET");
+		if (pTxtMng->GetText(szTmp.GetString()))
+		{
+			pTxtMng->GetLine(szTmp);
+		}
+		szTmp2 = "string infoitem_66";
+		if (pTxtMng->GetText(szTmp2.GetString()))
+		{
+			pTxtMng->GetLine(szTmp2);
+		}
+		if (typeID == RPGWST_HANDS2 || typeID == RPGWST_HANDS4 || typeID == RPGWST_HANDS5 || typeID == RPGWST_HANDS6 || typeID == RPGWST_HANDS7 
+			|| typeID == RPGWST_BOW || typeID == RPGWST_CROSSBOW) 
+			szOut.Format("%s %s", szTmp2, szTmp);
+		else
+			szOut.Format("%s %s", szTmp2, szTmp);
+	}
+	else if (tid == IDBINS_ARMOR) {
+		szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		DWORD dwShape = pItem->GetShape();
+		CString szShape = pShape->szName;
+		szTmp2 = "string infoitem_66";
+		if (pTxtMng->GetText(szTmp2.GetString()))
+		{
+			pTxtMng->GetLine(szTmp2);
+		}
+        const char *armorKey = ModItemInfo::ArmorWeightKey(szShape);
+        szType = armorKey ? CString("string ") + armorKey : szShape;
+		if (pTxtMng->GetText(szType.GetString()))
+		{
+			pTxtMng->GetLine(szType);
+		}
+		szOut.Format("%s %s", szTmp2, szType);
+	}
+	else
+		szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szTmp = pShape->szMaterialType;
+	szTmp.MakeLower();
+	szTmp = CString("mattype_") + szTmp;
+	pTxtMng->GetSystemString(szTmp.GetString(), szOut);
+	szTmp = szOut;
+	szOut.Format("%s %s x %d", szStrings[MATERIAL], szTmp, pShape->dwComponents);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[WEIGHT], (int)pShape->fpWeight);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	if (nType <= INSTR_WAND)
+	{
+		szOut.Format("%s %d", szStrings[ENERGY], (int)pShape->fpManaCapacity);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		szOut.Format("%s %d", szStrings[SLOTS], pShape->dwSpellSlots);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+	}
+	if (nType <= INSTR_ARMOR)
+	{
+		szOut.Format("%s %d", szStrings[DURABILITY], (int)pShape->fpDurability);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+	}
+	if (nType == INSTR_WEAPON)
+	{
+		const SIDBWeaponShape* pWeaponShape = static_cast<const SIDBWeaponShape*>(pShape);
+		int i = 0;
+		for (; i < RPG_NUM_ATTACK_TYPES; i++)
+			if (pWeaponShape->fpDamageDistributions[i] != 0)
+				break;
+		if (i < RPG_NUM_ATTACK_TYPES)
+		{
+			szOut.Format("damage_%d", i);
+			pTxtMng->GetSystemString(szOut.GetString(), szTmp);
+		}
+		szOut.Format("%s %d-%d %s", szStrings[DAMAGE], (int)(pWeaponShape->fpDamageMin * 10),
+			(int)((pWeaponShape->fpDamageMin + pWeaponShape->fpDamageRandom) * 10), szTmp);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		szOut.Format("%s %d", szStrings[ACTIONPTS], pWeaponShape->dwActionPoints);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		szOut.Format("%s %d", szStrings[MODATTACK], (int)pWeaponShape->GetAttackBonus());
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		if (pWeaponShape->dwTypeID == RPGWST_BOW || pWeaponShape->dwTypeID == RPGWST_CROSSBOW)
+			szOut.Format("%s %d", szStrings[RANGE], (int)pWeaponShape->fpRange);
+		else
+			szOut.Format("%s %d", szStrings[MODDEFENSE], (int)pWeaponShape->GetDefenceBonus());
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+	}
+	if (nType == INSTR_ARMOR)
+	{
+		const SIDBArmorShape* pArmorShape = static_cast<const SIDBArmorShape*>(pShape);
+		float absorbs[RPG_NUM_ATTACK_TYPES];
+		for (int i = 0; i < RPG_NUM_ATTACK_TYPES; i++)
+			absorbs[i] = pArmorShape->main.fpDistributions[i] * pArmorShape->main.fpAbsorbtion * 10;
+		CStringArray szResArray;
+		ModInfoAbsorptionStrings(absorbs, szResArray, false);
+		szOut = szStrings[ABSORPTION] + " " + szResArray[0];
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		rc += shift;
+		if (!szResArray[2].IsEmpty())
+		{
+			szOut = szStrings[VULNERABLE] + " " + szResArray[2];
+			pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+			rc += shift;
+		}
+	}
+	CI3DScreenCamp* camp = dynamic_cast<CI3DScreenCamp*>(pScreen);
+	int nShop = 0;
+	if (camp && camp->GetCurrentShop()) {
+		nShop = camp->GetCurrentShop()->nID;
+		if (mod->InfoForbiddenSpell(pShape->szName.GetString(), nShop)) {
+			if (pTxtMng->GetText("string infoitem_91")) pTxtMng->GetLine(szTmp);
+			szOut.Format("%s", szTmp);
+			pSurf->DrawText(szOut.GetString(), rc, 0, RGB(255, 200, 0), DT_LEFT);
+			rc += shift;
+		}
+	}
+	rc += shift;
+	ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+	pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -1500,6 +2880,77 @@ void CI3DObjectItemInfo::FormInstructionInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormPrototypeInfo()
 {
+    if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
+
+	CItem* pItem = GetItem();
+	CSpell* pSpell = GetSpell();
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	CItemLoot* pLoot = static_cast<CItemLoot*>(pItem);
+	const SSDBSpellPrototype* pProt = theSpellDatabase.spells.GetEntry( pLoot->GetInstructionItemIndex() );
+    if (!pProt) return;
+	CString szName, szDesc, szType;
+	pTxtMng->GetItemNameAndDesc(pItem, szName, szDesc, szType);
+#ifndef NOGETDC
+	CI3DSurface* pSurf = surfaces[0];
+	pSurf->GetDC();
+	CString szTmp,szTmp2, szOut;
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, mod->CombatSetting("JMVItemInfoLineHeight") ? 12 : 15);
+	COLORREF color = INV_COLOR_INFO;
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+	szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[MANA], (int)pProt->fpMana);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[SLOTS], pProt->dwComplexity);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szTmp.Format("school_%d", pProt->mstSubtype);
+	pTxtMng->GetSystemString(szTmp.GetString(), szOut);
+	szOut = szStrings[MAGICSCHOOL] + " " + szOut;
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	CString name = pProt->szCodeName;
+	float subeffect = mod->InfoProperty("GetSpellAdds", name, 2);
+    szOut.Format("%s %s", szStrings[EFFECT], (LPCSTR)ModItemInfo::PrototypeEffect(pProt->fpEffect, subeffect));
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	if (pProt->dwActions < 1.f)
+		szOut.Format("%s %s", szStrings[SPEED], szStrings[INSTANT]);
+	else
+		szOut.Format("%s %.1f%s", szStrings[SPEED], ModItemInfo::PrototypeCast(pProt->dwActions), szStrings[SECONDS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d%s", szStrings[RANGE], (int)pProt->fpRange, szStrings[METERS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	if (pProt->fpArea < 1.f)
+		szOut.Format("%s %s", szStrings[AREA], szStrings[AREAUNIT]);
+	else
+		szOut.Format("%s %.1f%s", szStrings[AREA], ModItemInfo::PrototypeRadius(pProt->fpArea), szStrings[METERS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	if (pProt->dwDuration < 2)
+		szOut.Format("%s %s", szStrings[DURATION], szStrings[INSTANT]);
+	else
+		szOut.Format("%s %.1f%s", szStrings[DURATION], pProt->dwDuration / 15.f,
+			szStrings[SECONDS]);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[TARGETS], pProt->dwNumTargets);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	rc += shift;
+	ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color, DT_CENTER | DT_WORDBREAK);
+	pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     const auto *mod = ModRuntime::Current();
     const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
     CItem *pItem = GetItem();
@@ -1603,6 +3054,47 @@ void CI3DObjectItemInfo::FormPrototypeInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormModifierInfo()
 {
+    if (ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_FormTextInfo") && ModRuntime::Current()->CombatSetting("JMVItemInfoLineHeight")) {
+        auto *mod = ModRuntime::Current();
+
+	CItem* pItem = GetItem();
+	CItemLoot* pLoot = static_cast<CItemLoot*>(pItem);
+	const SSDBModifier* pMod = pLoot
+		? theSpellDatabase.runes.GetEntry(pLoot->GetInstructionItemIndex())
+		: nullptr;
+	if (!pMod)
+		return;
+	CTextManager* pTxtMng = theWorld.GetTextManager();
+	CString szName, szDesc, szType;
+	pTxtMng->GetItemNameAndDesc(pItem, szName, szDesc, szType);
+#ifndef NOGETDC
+	CI3DSurface* pSurf = surfaces[0];
+	pSurf->GetDC();
+	CString szOut;
+	CRect rc(15, 10, 185, 25);
+	CPoint shift(0, 12);
+	COLORREF color = INV_COLOR_INFO;
+	ModInfoMultiText(pSurf, szName.GetString(), rc, 2, 0,
+		INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK);
+	rc += shift;
+	rc += shift;
+	szOut.Format("%s %s", szStrings[ITEMTYPE], szType);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[MANA], static_cast<int>(pMod->fpMana));
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	szOut.Format("%s %d", szStrings[SLOTS], pMod->dwComplexity);
+	pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+	rc += shift;
+	rc += shift;
+	ModInfoDescription(pI3D, pSurf, szDesc.GetString(), rc, 8, 0, color,
+		DT_CENTER | DT_WORDBREAK);
+	pSurf->ReleaseDC();
+#endif 
+
+        return;
+    }
     CItem *pItem = GetItem();
     CSpell *pSpell = GetSpell();
 
@@ -1698,14 +3190,53 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
     pSurf->GetDC();
 
     CTextManager *pTxtMng = theWorld.GetTextManager();
+    auto* mod=ModRuntime::Current();
+    if(mod && !mod->AdvancedUI("useLS_SetSkill"))mod=nullptr;
+    const auto* shown=pSkillInfo->pUnit?pSkillInfo->pUnit->GetUserUnitStats():nullptr;
+    ModCampStats::Primary primary={};
+    if(mod && shown && pSkillInfo->nType==0 && pSkillInfo->nSkill>=0 && pSkillInfo->nSkill<=2)
+        primary=ModCampStats::PrimaryValues(*shown,theAIGeneralSettings.fHPVal1,theAIGeneralSettings.fMPVal1,
+            pSkillInfo->nSkill==2?mod->InfoPerkBonus("GetExpMultiplier2",shown->cIntelligence):1.0f);
 
     CString szTmp, szOut;
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 12);
+    CPoint shift(0, mod?15:12);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
     CString szName, szDesc;
+    const bool full=mod && shown && pScreen->GetCurrentPers();
+    ModCampDescriptions::Result display;
+    if(full && ((pSkillInfo->nType==0 && (pSkillInfo->nSkill==1||pSkillInfo->nSkill==7)) ||
+        (pSkillInfo->nType==1&&pSkillInfo->nSkill==RPGASKL_BACKSTAB) || pSkillInfo->nType==5 ||
+        (pSkillInfo->nType==7&&pSkillInfo->szNonlocalName=="camp_damage")))
+        display=mod->CampDescriptions(*pScreen->GetCurrentPers(),*pSkillInfo->pUnit,true);
+    auto drawRows=[&](const std::vector<ModCampDescriptions::Row>& rows){
+        for(const auto& row:rows){
+            CString label,value;std::string key=row.label;const auto suffix=key.find('|');std::string unitLabel;
+            if(suffix!=std::string::npos){unitLabel=key.substr(suffix+1);key.resize(suffix);}
+            if(key=="$WSLDEXT")label=szStrings[WSLDEXT];else if(key=="$WSLWEAPON")label=szStrings[WSLWEAPON];
+            else if(key=="$WSLPERK")label=szStrings[WSLPERK];else if(key=="$WSLSUM")label=szStrings[WSLSUM];
+            else if(row.damageType>=0){value.Format("damage_%d",row.damageType);pTxtMng->GetSystemString(value,label);}
+            else{
+                const bool second=key=="infoitem_58#2";if(second)key="infoitem_58";
+                const CString text=key.find("PERK ")==0?CString(key.c_str()):CString("string ")+key.c_str();
+                if(pTxtMng->GetText(text))pTxtMng->GetLine(label);else label=key.c_str();
+                if(key=="infoitem_58")label=label+(second?" 2":" 1");
+            }
+            if(unitLabel=="difficulty"){
+                CString difficulty,levelText;if(pTxtMng->GetText("string infoskill_53"))pTxtMng->GetLine(difficulty);
+                levelText.Format("%s%.0f",(LPCSTR)difficulty,row.second);label+=levelText;
+            }
+            if(row.heading)pSurf->DrawText(label,rc,0,INV_COLOR_HEADER,DT_CENTER);
+            else{
+                if(row.damageType>=0||key=="infoskill_1")value.Format(row.format,row.value,row.second);else value.Format(row.format,row.value);
+                if(!unitLabel.empty()&&unitLabel!="difficulty"){CString text;if(pTxtMng->GetText(CString("string ")+unitLabel.c_str()))pTxtMng->GetLine(text);value+=text;}
+                pSurf->DrawText(CString("     ")+label,rc,0,color,DT_LEFT);pSurf->DrawText(value,rc-CPoint(10,0),0,color,DT_RIGHT);
+            }
+            rc+=shift;
+        }
+    };
 
     switch (pSkillInfo->nType)
     {
@@ -1738,11 +3269,11 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         {
         case 0: // str
             szOut.Format("%s %d%%", szSkillStr[HEALTHMULT],
-                         int(pSkillInfo->pStats->GetHealthMultiplier() * 100));
+                         mod && shown?primary.healthPercent:int(pSkillInfo->pStats->GetHealthMultiplier() * 100));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             szOut.Format("%s %d", szSkillStr[ENCUMBRANCE],
-                         int(pSkillInfo->pStats->GetMaxEncumbrance()));
+                         mod && shown?mod->CampSkillCapacity(*pScreen->GetCurrentPers(),pSkillInfo->pUnit):int(pSkillInfo->pStats->GetMaxEncumbrance()));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             if (pSkillInfo->pUnit)
@@ -1754,15 +3285,15 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                                                : nullptr;
                 CMapObjectServer *commonServer = regenServer ? regenServer->GetMapObjectServer() : nullptr;
                 const SUDBRaceModel *race = pSkillInfo->pUnit->GetRaceModel();
-                if (race && ModRuntime::Current())
+                if (race && mod)
                 {
-                    const bool accurate = ModRuntime::Current()->CombatSetting("JMVRegenerationTooltip") != 0;
+                    const bool accurate = mod->CombatSetting("JMVRegenerationTooltip") != 0;
                     CUnit *regenUnit = accurate && regenServer && commonServer ? serverUnit : pSkillInfo->pUnit;
                     const int magicBloodLevel = accurate
                         ? min(3, int(regenUnit->GetUserUnitStats()->cPerks[27]))
                         : thePerkDatabase.GetPerkIndex(thePerkDatabase.GetPerk(27));
                     const float magicBloodBonus =
-                        float(ModRuntime::Current()->InfoMagicBlood(magicBloodLevel));
+                        float(mod->InfoMagicBlood(magicBloodLevel));
                     float jewelryRegeneration = 0.0f;
                     CPersonage *regenPerson = pScreen->GetCurrentPers();
                     for (int i = 0; regenPerson && i < regenPerson->items.GetSize(); ++i)
@@ -1786,7 +3317,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                                 armorRegeneration += ModInfoProperty("GetMaterialPropsInside", ModInfoMaterialName(armor), 2) * 0.01f;
                     }
                     const float complexRegeneration = accurate
-                        ? ModRuntime::Current()->InfoComplex(*regenUnit, 10) * 0.01f : 0.0f;
+                        ? mod->InfoComplex(*regenUnit, 10) * 0.01f : 0.0f;
                     const float hpRegeneration = race->fpRegenerateHP *
                         (magicBloodBonus + jewelryRegeneration + armorRegeneration + complexRegeneration);
                     float result, fullResult;
@@ -1832,21 +3363,26 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             break;
         case 1: // dex
             szOut.Format("%s %d%%", szSkillStr[STAMINAMULT],
-                         int(pSkillInfo->pStats->GetStaminaMultiplier() * 100));
+                         mod && shown?primary.staminaPercent:int(pSkillInfo->pStats->GetStaminaMultiplier() * 100));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             szOut.Format("%s %d", szSkillStr[ACTIONS], int(pSkillInfo->pStats->GetActionPoints()));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
+            if(full)drawRows(display.mpRows);
             rc += shift;
+            break;
+        case 7: // encumbrance: native loss breakdown
+            if(full)drawRows(display.overloadRows);
+            rc+=shift;
             break;
         case 2: // int
             szOut.Format("%s %d%%", szSkillStr[BONUSCP],
-                         int(pSkillInfo->pStats->GetExpMultiplier() * 100));
+                         mod && shown?primary.experiencePercent:int(pSkillInfo->pStats->GetExpMultiplier() * 100));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             szOut.Format("%s %d%%", szSkillStr[BONUSMANA],
-                         int(pSkillInfo->pStats->GetManaBonusMultiplier() * 100));
+                         mod && shown?primary.manaPercent:int(pSkillInfo->pStats->GetManaBonusMultiplier() * 100));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             rc += shift;
@@ -1871,21 +3407,43 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                          int(pSkillInfo->pStats->GetAutoSkill(eSkill)));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
+            if(mod && shown) {
+                szTmp="string defense";if(pTxtMng->GetText(szTmp))pTxtMng->GetLine(szTmp);
+                szOut.Format("%s %d",(LPCSTR)szTmp,int(pSkillInfo->pStats->GetAutoSkill(eSkill)));
+                pSurf->DrawText(szOut,rc,0,color,DT_LEFT);rc+=shift;
+                szOut.Format("%s %.0f%%",(LPCSTR)szSkillStr[DAMAGEMULT],mod->InfoPerkBonus("GetSkillMod",shown->cAutoSkills[eSkill])*100.0f);
+                pSurf->DrawText(szOut,rc,0,color,DT_LEFT);rc+=shift;
+            }
             break;
         case RPGASKL_BACKSTAB:
             szOut.Format("%s %d%%", szSkillStr[DAMAGEMULT],
-                         int(pSkillInfo->pStats->GetBaseBackstabDamageMultiplier() * 100));
+                         int((full?display.backstab:pSkillInfo->pStats->GetBaseBackstabDamageMultiplier()) * 100));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             break;
-            /*
-            case RPGASKL_ELEMENTAL:
-            case RPGASKL_SENSE:
-            case RPGASKL_ASTRAL:
-                    szOut.Format( "%s %d", szSkillStr[SPELLCOMPLEX],
-            int(pSkillInfo->pStats->GetAutoSkill( eSkill )) ); pSurf->DrawText( szOut, rc, 0, color,
-            DT_LEFT ); rc += shift; break;
-            */
+        case RPGASKL_ELEMENTAL:
+        case RPGASKL_SENSE:
+        case RPGASKL_ASTRAL:
+            if(mod && shown) {
+                const int intelligence=int(shown->cIntelligence)-25;
+                if(intelligence>0) {
+                    szTmp="PERK Intelligence";if(pTxtMng->GetText(szTmp))pTxtMng->GetLine(szTmp);
+                    szOut.Format("%s +%d",(LPCSTR)szTmp,intelligence);
+                    pSurf->DrawText(szOut,rc,0,color,DT_LEFT);rc+=shift;
+                }
+                rc+=shift;
+                int label=MSLFIRE;
+                for(int subtype=0;subtype<RPG_NUM_MAGIC_SUBTYPES;++subtype) {
+                    if(subtype==RPGMST_DIVINATION||subtype==RPGMST_HEALING||subtype==RPGMST_DOMINATION)continue;
+                    const int skill=ModCampStats::MagicSkill(*pSkillInfo->pStats,shown->cIntelligence,subtype);
+                    szOut.Format(" %s",(LPCSTR)szStrings[label++]);pSurf->DrawText(szOut,rc,0,color,DT_LEFT);
+                    szOut.Format("%d",skill);pSurf->DrawText(szOut,rc,0,color,DT_RIGHT);rc+=shift;
+                    szOut.Format("  %s",(LPCSTR)szSkillStr[DAMAGEMULT]);pSurf->DrawText(szOut,rc,0,color,DT_LEFT);
+                    szOut.Format("%.0f%%",ModCampStats::MagicDamagePercent(skill));pSurf->DrawText(szOut,rc,0,color,DT_RIGHT);rc+=shift;
+                }
+                rc+=shift;
+            }
+            break;
         }
         rc += shift;
         // DESCRIPTION
@@ -1903,7 +3461,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         {
         case RPGMSKL_SCIENCE:
             szOut.Format("%s %d", szSkillStr[USECOMPLEX],
-                         int(pSkillInfo->pStats->GetManualSkill(eSkill)));
+                         mod && shown?ModCampStats::ScienceSkill(*shown):int(pSkillInfo->pStats->GetManualSkill(eSkill)));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
             break;
@@ -1924,16 +3482,47 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         for (int j = 0; j < 3; j++)
         {
             const SPDBPerk *pPerk = thePerkDatabase.GetPerk(nPerkGroup * 3 + j);
-            if (!pPerk)
+            if (!pPerk || (mod && !pPerk->bActive))
                 continue;
             if (pTxtMng->GetText(CString("perk ") + pPerk->szCode))
                 pTxtMng->GetLine(szName);
             pSurf->DrawText(szName, rc, 0, color, DT_LEFT);
             if (pSkillInfo->nSkill > j)
                 pSurf->DrawText(szSkillStr[PERKTAKEN], rc, 0, color, DT_RIGHT);
+            else if(mod){
+                const std::string missing=mod->CampMissingRequirement(*pSkillInfo->pStats,pPerk->szCode);
+                if(!missing.empty()){
+                    CString code=missing.c_str(),name;const CString title=CString("perk ")+code.Left(code.GetLength()-1)+"0";
+                    if(pTxtMng->GetText(title))pTxtMng->GetLine(name);else name=code;
+                    szOut.Format("%s %c",(LPCSTR)name,code[code.GetLength()-1]);
+                    pSurf->DrawText(szOut,rc,0,RGB(255,15,15),DT_RIGHT);
+                }
+            }
             rc += shift;
 
             // EFFECT
+            if(mod) {
+                const auto rows=ModCampStats::PerkRows(nPerkGroup,int(pPerk->dwModifier),mod->CombatSetting("JMV136")!=0,
+                    mod->CombatSetting("JMVAnatomyLimbDamage")!=0,theAIGeneralSettings.fpBackstabAdd);
+                for(size_t rowIndex=0;rowIndex<rows.size();++rowIndex) {
+                    const auto& row=rows[rowIndex];CString label;
+                    if(strcmp(row.label,"ATTRIBPLUS")==0)label=szSkillStr[ATTRIBPLUS];
+                    else if(strcmp(row.label,"DAMAGEMULT")==0)label=szSkillStr[DAMAGEMULT];
+                    else if(strcmp(row.label,"ACTIONS")==0)label=szSkillStr[ACTIONS];
+                    else if(strcmp(row.label,"SPELLBONUS")==0)label=szSkillStr[SPELLBONUS];
+                    else if(strcmp(row.label,"HEALTH")==0)label=szSkillStr[HEALTH];
+                    else if(strcmp(row.label,"STAMINA")==0)label=szSkillStr[STAMINA];
+                    else if(strcmp(row.label,"STAMINARGNR")==0)label=szSkillStr[STAMINARGNR];
+                    else if(strcmp(row.label,"ENCUMBRANCE")==0)label=szSkillStr[ENCUMBRANCE];
+                    else if(strcmp(row.label,"BSTABMULT")==0)label=szSkillStr[BSTABMULT];
+                    else if(strcmp(row.label,"TOHITDEFENSE")==0){if(pTxtMng->GetText("string infoskill_25"))pTxtMng->GetLine(szTmp);label=szSkillStr[TOHITBONUS]+CString("/")+szTmp;}
+                    else if(strcmp(row.label,"ANATOMYLIMBS")==0)label="\xD3\xE4\xE0\xF0 \xE2 \xEA\xEE\xED\xE5\xF7\xED\xEE\xF1\xF2\xE8";
+                    else if(pTxtMng->GetText(CString("string ")+row.label))pTxtMng->GetLine(label);
+                    CString format=CString("     ")+row.format;szOut.Format((LPCSTR)format,(LPCSTR)label,row.value);
+                    if(strcmp(row.label,"infoskill_29")==0){CString meters;if(pTxtMng->GetText("string infounit_13"))pTxtMng->GetLine(meters);szOut+=meters;}
+                    pSurf->DrawText(szOut,rc,0,color,DT_LEFT);if(rowIndex+1<rows.size())rc+=shift;
+                }
+            } else {
             switch (nPerkGroup)
             {
             case RPGPRK_SWORD:
@@ -2005,6 +3594,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                 pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
                 break;
             }
+            }
             rc += shift;
 
             // COST
@@ -2075,7 +3665,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
 
     if (pSkillInfo->nType == 4)
     {
-        pSurf->DrawText(szStrings[ABSORPARMOR], rc, 0, color, DT_LEFT);
+        pSurf->DrawText(szStrings[ABSORPARMOR], rc, 0, mod?INV_COLOR_HEADER:color, mod?DT_CENTER:DT_LEFT);
         rc += shift;
 
         float fpAbsorbtions[RPG_NUM_ATTACK_TYPES];
@@ -2084,7 +3674,9 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             fpAbsorbtions[i] = 0;
             for (int j = 0; j < RPG_NUM_ARMOR_LAYERS; j++)
                 fpAbsorbtions[i] +=
-                    pSkillInfo->pStats->hls[pSkillInfo->eHL].layers[j].fpAbsorbtions[i];
+                    mod?ModCampDescriptions::Absorption(pSkillInfo->pStats->hls[pSkillInfo->eHL].layers[j].fpAbsorbtions[i],i,
+                        pSkillInfo->pStats->GetPerkModifier(5),pSkillInfo->pStats->GetPerkModifier(22)):
+                        pSkillInfo->pStats->hls[pSkillInfo->eHL].layers[j].fpAbsorbtions[i];
         }
         for (int i = 0; i < RPG_NUM_ATTACK_TYPES - 1; i++)
         {
@@ -2102,7 +3694,12 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
-    if (pSkillInfo->nType == 5)
+    if (pSkillInfo->nType == 5 && full){
+        pSurf->DrawText(szStrings[pSkillInfo->szNonlocalName=="defense"?MODDEFENSE:MODATTACK],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;rc+=shift;
+        drawRows(pSkillInfo->szNonlocalName=="defense"?display.defenseRows:display.attackRows);rc+=shift;
+        pSurf->DrawMultiText(szDesc,rc,9,0,color,DT_CENTER|DT_WORDBREAK,TRUE,15);
+    }
+    else if (pSkillInfo->nType == 5)
     {
         ERPGWeaponTypes type = pSkillInfo->pWeapon->GetWeaponType();
         if (pSkillInfo->szNonlocalName == "defense" &&
@@ -2162,7 +3759,8 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
     {
         int nStr = MSLFIRE;
         // Addon has three elemental subtypes; retain native storage for save compatibility.
-        const int subtypeCount = ModRuntime::Current() ? 3 : RPG_NUM_MAGIC_SUBTYPES;
+        if(mod){pSurf->DrawText(szStrings[MAGICSCHOOL],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;}
+        const int subtypeCount = RPG_NUM_MAGIC_SUBTYPES;
         for (int i = 0; i < subtypeCount; i++)
         {
             ERPGMagicSubtypes subtype = (ERPGMagicSubtypes)i;
@@ -2172,7 +3770,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             szOut.Format("     %s", szStrings[nStr++]);
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             float knowledge = pSkillInfo->pStats->GetMagicSkill(subtype);
-            if (ModRuntime::Current() && pSkillInfo->pUnit)
+            if (mod && pSkillInfo->pUnit)
                 knowledge = pSkillInfo->pStats->GetBaseMagicSkill(subtype) +
                     pSkillInfo->pStats->GetPerkModifier(RPGPRK_FIRE + subtype) +
                     int(pSkillInfo->pUnit->GetUserUnitStats()->cIntelligence) - 25;
@@ -2185,7 +3783,10 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
     }
 
-    if (pSkillInfo->nType == 7)
+    if(pSkillInfo->nType==7 && pSkillInfo->szNonlocalName=="camp_damage" && full){
+        pSurf->DrawText(szStrings[DAMAGE],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;
+        drawRows(display.damageRows);
+    }else if (pSkillInfo->nType == 7)
         pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
 
     pSurf->ReleaseDC();

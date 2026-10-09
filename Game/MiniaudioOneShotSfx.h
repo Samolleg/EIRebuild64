@@ -35,7 +35,8 @@ bool CaptureEncoded(
     const char *soundName,
     const void *data,
     uint32_t size,
-    const char *source = "stock_beginfxll");
+    const char *source = "stock_beginfxll",
+    uintptr_t providerIdentity = 0);
 bool IsCaptured(const char *soundName);
 const char *LastStartReason();
 void SetVirtualDynamicGainResolver(VirtualDynamicGainResolver resolver);

@@ -13,6 +13,7 @@
 #include "sArray.h"
 #include "ScriptErrors.h"
 #include "MapObject.h"
+#include "ModCampReferences.h"
 
 class CWorld;
 class CPlayerClient;
@@ -258,6 +259,11 @@ public:
     void SetAt(int i, VAR_TYPE &newVar) { vars[i] = newVar; }
     // получить им€ i-й переменной
     const char *GetName(int nIdx) const { return varNames[nIdx]; }
+    bool TryGetVarName(int index,const char*& name) const {
+        name=nullptr;
+        if(!ModCampReferences::MetadataAvailable(index,vars.GetSize(),varNames.GetSize(),varNames.GetData()!=nullptr))return false;
+        name=varNames[index];return true;
+    }
     VAR_TYPE &operator[](int nIdx) { return vars[nIdx]; }
     void AddVars(const CScriptVars<VAR_TYPE> &a);
     // скопировать только значени€ переменных, без имен
@@ -440,6 +446,7 @@ typedef SScriptThread *HScriptThread;
 // объект, выполн€ющий команды треда скрипта
 class CScriptThreadState
 {
+    friend struct ModCampReferences::Access;
     SScriptThread *pThread;
     int nCurCommand;
     int nSegment, nSleepStart;
@@ -539,6 +546,7 @@ public:
 
 class CScript
 {
+    friend struct ModCampReferences::Access;
     // описатели объектов, управл€емых из скрипта
     CAArray<SScriptLightInfo> lights;
     CList<SParticleInfo> particles;

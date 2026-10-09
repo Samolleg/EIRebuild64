@@ -5740,7 +5740,27 @@ BOOL CParticle::Draw(CRenderer *pTarget)
                                            RGBA_GETALPHA(pPart->dwColor) * fpCurrentStep), );
         pParticle->pUV = uvOfPhases.GetData() + pPart->nPrevPhase;
     }
-    return pTarget->DrawParticles(bUseAddEffect != FALSE, inCoords, resParts);
+    // Alpha-test only fully transparent exit texels. Without this, the DX11
+    // pass writes zero into the target alpha even when RGB blending leaves
+    // the background untouched. Restore the caller's state after this draw.
+    const bool clipTransparentExit = GetTypeID() == PTID_ZONEEXIT ||
+                                     GetTypeID() == PTID_STARTTRANS;
+    DWORD oldAlphaTest = 0;
+    DWORD oldAlphaRef = 0;
+    if (clipTransparentExit)
+    {
+        pTarget->GetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, &oldAlphaTest);
+        pTarget->GetRenderState(D3DRENDERSTATE_ALPHAREF, &oldAlphaRef);
+        pTarget->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, TRUE);
+        pTarget->SetRenderState(D3DRENDERSTATE_ALPHAREF, 1);
+    }
+    const BOOL drawn = pTarget->DrawParticles(bUseAddEffect != FALSE, inCoords, resParts);
+    if (clipTransparentExit)
+    {
+        pTarget->SetRenderState(D3DRENDERSTATE_ALPHAREF, oldAlphaRef);
+        pTarget->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, oldAlphaTest);
+    }
+    return drawn;
 }
 
 void CParticle::ConfigurePowerHit(CUnit* carrier, const CPlot3D& point,

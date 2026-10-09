@@ -15,6 +15,7 @@ class CTLPipeline;
 struct SGeometryRangeSW
 {
 public:
+    uint64_t ownedIdentity = 0; // shared range lifetime, independent of object ID
     DWORD dwPlotsStart;           // index of the first plot quad in this range
     DWORD dwNumPlots;             // number of plot quads in this range
     DWORD dwNormsStart;           // index of the first normale quad in this range
@@ -35,6 +36,7 @@ class CGeometryContainer : public IGeometry
 {
 private:
     // identification
+    uint64_t ownedRevision = 1;
     float fStrength;
     float fGrace;
     float fTall;

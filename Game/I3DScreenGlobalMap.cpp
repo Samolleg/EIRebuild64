@@ -1,5 +1,5 @@
 #include "StdAfx.h"
-#include "WideScreen.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenEcsapeMenu.h"
@@ -28,11 +28,31 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Renderer.h"
 #include "IDebugInfoSystem.h"
 #include "dx11/Surface.h"
+#include <cstdarg>
+#include <cstdio>
 #include <vector>
 /////////////////////////////////////////////////////////////////////////////////////
 const int GM_NF = 3;
 const int GM_NA = 3;
 const float GM_DEFAULT_SCALE = .3f;
+// R150 diagnostic: bounded, event-driven evidence for the live map selection path.
+static int gGlobalMapDiagnosticEvents = 0;
+static int gGlobalMapHoverEvents = 0;
+static void LogGlobalMap(const char *format, ...)
+{
+    if (gGlobalMapDiagnosticEvents >= 96)
+        return;
+    ++gGlobalMapDiagnosticEvents;
+    FILE *file = fopen("eirebuild-globalmap-r151.log", "a");
+    if (!file)
+        return;
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+    fputc('\n', file);
+    fclose(file);
+}
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::StoreSpecific()
 {
@@ -41,6 +61,8 @@ void CI3DScreenGlobalMap::StoreSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnActivate()
 {
+    gGlobalMapDiagnosticEvents = 0;
+    gGlobalMapHoverEvents = 0;
     bNeedAutosave = false;
     if (interfaceState.GetSize())
         interfaceState.SetSize(0);
@@ -200,6 +222,13 @@ void CI3DScreenGlobalMap::OnActivate()
     }
 
     nTotal = nZones + nObjectives + nBases;
+    LogGlobalMap("ACTIVATE screen=%dx%d zones=%d bases=%d objectives=%d current=%s",
+                 pI3D->GetWidth(), pI3D->GetHeight(), nZones, nBases, nObjectives,
+                 (LPCSTR)IWorldClient.GetCurrentZoneName());
+    for (int zoneIndex = 0; zoneIndex < nZones; ++zoneIndex)
+        LogGlobalMap("ZONE index=%d name=%s state=%d childBase=%d", zoneIndex,
+                     (LPCSTR)zones[zoneIndex].szName, zones[zoneIndex].state,
+                     zones[zoneIndex].iChildBase);
 
     // clouds - layer 1
     pFig = AddFigure();
@@ -241,7 +270,10 @@ void CI3DScreenGlobalMap::OnActivate()
     GetRenderer()->SetBGColor(RGBA_MAKE(60, 0, 90, 255));
 
     // hit test dds
-    pHitTestDDS = std::make_unique<CI3DSurface>(pI3D, 0, 0, 800, 600);
+    // DX11 copies the whole back buffer into this surface. These dimensions
+    // are already physical pixels; do not apply the virtual 800x600 transform.
+    pHitTestDDS = std::make_unique<CI3DSurface>(pI3D, 0, 0, pI3D->GetWidth(), pI3D->GetHeight(),
+                                                EBlitStyleFlag(BS_VISIBLE | BS_COLOR_KEY), false);
     // pHitTestDDS->SetRect(CRect(0, 0, 800, 600));
 
     // info about quests
@@ -590,6 +622,7 @@ int CI3DScreenGlobalMap::HitTestFiguresForCurrentZone(const CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    GameJournal::Source journalSource("global_map");
     int ht;
     int nCurZone;
     DWORD color;
@@ -598,7 +631,15 @@ void CI3DScreenGlobalMap::OnLButtonDown(UINT nFlags, CPoint point)
         return;
 
     CString szTmp;
-    switch (ht = HitTest(point))
+    ht = HitTest(point);
+    JournalHit(ht);
+    CPoint virtualPoint(point);
+    pI3D->ScreenToVirtual(virtualPoint);
+    const DWORD clickColor = pHitTestDDS ? pHitTestDDS->GetPixel(point.x, point.y) : 0;
+    LogGlobalMap("CLICK physical=%d,%d virtual=%d,%d area=%d color=%08X decoded=%d zones=%d bases=%d",
+                 point.x, point.y, virtualPoint.x, virtualPoint.y, ht, clickColor,
+                 int((clickColor >> 4) & 15) - 1, nZones, nBases);
+    switch (ht)
     {
     case 0:
         nRotate = -1;
@@ -634,11 +675,14 @@ void CI3DScreenGlobalMap::OnLButtonDown(UINT nFlags, CPoint point)
         return;
     }
     // after all checks we try to detect, which zone is under cursor
-    color = pHitTestDDS->GetPixel(point.x - WideScreen::ScreenShift() / 2, point.y);
+    color = pHitTestDDS->GetPixel(point.x, point.y);
     nCurZone = int((color >> 4) & 0x0000000f) - 1;
 
     if (nCurZone >= 0 && nCurZone < nZones)
     {
+        LogGlobalMap("ZONE_CLICK index=%d state=%d name=%s", nCurZone,
+                     zones[nCurZone].state, (LPCSTR)zones[nCurZone].szName);
+        GameJournal::Event("ZONE", "map_choice", "index=%d zone=%s state=%d", nCurZone, GameJournal::Quote(zones[nCurZone].szName).c_str(), zones[nCurZone].state);
         // go to zone
         if (zones[nCurZone].state != SCN_ZONE_UNKNOWN)
         {
@@ -750,8 +794,14 @@ void CI3DScreenGlobalMap::OnMouseMove(UINT nFlags, CPoint point)
         {
             // hittest for zone
 
-            DWORD color = pHitTestDDS->GetPixel(point.x - WideScreen::ScreenShift() / 2, point.y);
+            DWORD color = pHitTestDDS->GetPixel(point.x, point.y);
             nCurZone = int((color >> 4) & 0x0000000f) - 1;
+            if (gGlobalMapHoverEvents < 5)
+            {
+                ++gGlobalMapHoverEvents;
+                LogGlobalMap("HOVER physical=%d,%d color=%08X decoded=%d", point.x,
+                             point.y, color, nCurZone);
+            }
             // nCurZone = HitTestFiguresForCurrentZone(point);
             if (nCurZone >= nZones)
                 nCurZone = -1;
@@ -928,6 +978,33 @@ void CI3DScreenGlobalMap::GenerateHitTestDDS()
 
     // blit to surface
     pHitTestDDS->GetFromScreen();
+    int nonzeroSamples = 0;
+    int zoneColorSamples = 0;
+    for (int sampleY = 0; sampleY < 20; ++sampleY)
+        for (int sampleX = 0; sampleX < 20; ++sampleX)
+        {
+            const DWORD pixel = pHitTestDDS->GetPixel(
+                (sampleX * 2 + 1) * pI3D->GetWidth() / 40,
+                (sampleY * 2 + 1) * pI3D->GetHeight() / 40);
+            if (pixel & 0x00FFFFFF)
+                ++nonzeroSamples;
+            for (int zoneIndex = 0; zoneIndex < nZones; ++zoneIndex)
+            {
+                const DWORD gray = DWORD((zoneIndex + 1) * 16 + 8);
+                if ((pixel & 0x00FFFFFF) == gray * 0x00010101)
+                {
+                    ++zoneColorSamples;
+                    break;
+                }
+            }
+        }
+    LogGlobalMap("MASK size=%dx%d nonzero=%d exactZoneColors=%d center=%08X readback=%08X bound=%d differs=%d",
+                 pI3D->GetWidth(), pI3D->GetHeight(), nonzeroSamples,
+                 zoneColorSamples,
+                 pHitTestDDS->GetPixel(pI3D->GetWidth() / 2, pI3D->GetHeight() / 2),
+                 pHitTestDDS->GetPixelReadbackStatus(),
+                 pHitTestDDS->GetSurface()->CaptureUsedBoundTarget(),
+                 pHitTestDDS->GetSurface()->CaptureDifferentFromBufferZero());
 
     SetZonesColors();
 }
@@ -1074,6 +1151,9 @@ int CI3DScreenGlobalMap::FindPathes()
     bPathFound = false;
     bIsSecondaryPath = false;
     RecurseFindPath(theMap.GetZoneByName(IWorldClient.GetCurrentZoneName()));
+    LogGlobalMap("PATH from=%s to=%s found=%d entrances=%u",
+                 (LPCSTR)IWorldClient.GetCurrentZoneName(), (LPCSTR)szDestZoneName,
+                 bPathFound ? 1 : 0, unsigned(entrances.size()));
     if (bPathFound)
     {
         ASSERT(entrances.size());

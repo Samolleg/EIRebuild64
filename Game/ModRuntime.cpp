@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModRuntime.h"
+#include "ModWorldBackground/Native.h"
 #include "ScenarioSpeechDucking.h"
 #include "ModAudioPolicy.h"
 #include "ModPackage.h"
@@ -53,11 +54,11 @@ Host::Host(const std::string&directory){
  if(resources||current)throw std::runtime_error("A mod host is already active");
  package=std::make_unique<CModPackage>();package->Load(directory);session=std::make_unique<Session>(*package);resources=package.get();
 }
-Host::~Host(){resources=nullptr;session.reset();package.reset();}
-std::unique_ptr<Host> Host::FromCommandLine(){
+Host::~Host(){ModWorldBackground::Unload();resources=nullptr;session.reset();package.reset();}
+static std::unique_ptr<Host> SelectHost(bool commandLine){
  int count=0;LPWSTR*args=CommandLineToArgvW(GetCommandLineW(),&count);if(!args)throw std::runtime_error("Cannot parse command line");
  struct Free{LPWSTR*p;~Free(){LocalFree(p);}} free{args};std::string directory;bool found=false;
- for(int i=1;i<count;i++)if(wcscmp(args[i],L"--mod")==0){if(found||i+1>=count)throw std::runtime_error("Expected one --mod directory");found=true;std::filesystem::path p(args[++i]);directory=p.string();}
+ if(commandLine)for(int i=1;i<count;i++)if(wcscmp(args[i],L"--mod")==0){if(found||i+1>=count)throw std::runtime_error("Expected one --mod directory");found=true;std::filesystem::path p(args[++i]);directory=p.string();}
  if(!found){
   wchar_t module[1024]={};
   DWORD length=GetModuleFileNameW(nullptr,module,_countof(module));
@@ -117,6 +118,8 @@ std::unique_ptr<Host> Host::FromCommandLine(){
  }
  return found?std::make_unique<Host>(directory):nullptr;
 }
+std::unique_ptr<Host> Host::FromCommandLine(){return SelectHost(true);}
+std::unique_ptr<Host> Host::FromStarterSelection(){return SelectHost(false);}
 Session::Session(CModPackage &package) {
     if (current) throw std::runtime_error("A mod simulation session is already active");
     package.InitializeScript();

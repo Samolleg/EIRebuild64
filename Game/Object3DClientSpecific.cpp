@@ -7,6 +7,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "DXGeometryProcessor.h"
 
 #include "TextureManager.h"
+#include "ModSecondaryAtlas.h"
+#include "ModPrimaryAtlas.h"
+#include "ModTextureMemory.h"
 #include "ModShadowSchedule.h"
 #include "dx11/RendererDX11.h"
 #include "MaterialManager.h"
@@ -652,6 +655,27 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     bool bHaveScale = false;
     //
     lpObject->FinalDataLoading();
+    // Only immutable shared providers are replayable here; never use a base
+    // canonical alias to overwrite current private mouth/wound state.
+    for(int i=0;i<2;++i) {
+        CTexture* texture=sets[i]?sets[i]->lpTexture:nullptr;
+        const bool shared=texture &&
+            ((texture->GetTypeID()==TTID_UNIT_MAIN && ModPrimaryAtlas::Canonical(texture->GetName())) ||
+             (texture->GetTypeID()==TTID_UNIT_WEAPON && ModSecondaryAtlas::Canonical(texture->GetName())));
+        if(shared && !texture->GetSurface()) {
+            auto* manager=static_cast<CTextureManager*>(static_cast<CWorldClient*>(GetWorld())->GetTextureManager());
+            texture->ResetFlag(TEX_LOADED);
+            if(!manager->LoadTexture(texture) || !texture->GetSurface())return FALSE;
+        }
+    }
+    // A retained wound overlay must be restored by its unit owner before bind.
+    if(pWoundsTexture && !pWoundsTexture->GetSurface()) {
+        if(!lpObject || lpObject->WhoAmI()!=HPC_UNIT)return FALSE;
+        auto* unit=static_cast<CUnit*>(lpObject);
+        auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
+        if(!specific || !specific->EnsureWoundsTextureReady() ||
+           !pWoundsTexture || !pWoundsTexture->GetSurface())return FALSE;
+    }
     //
     if (!lpObject->CheckFlag(OBJ_STATIC))
         lpObject->ResetFlag(OBJ_LIGHTED);
@@ -857,6 +881,102 @@ BOOL CObject3DClientSpecific::IsCanSelect(const CRect &rect)
     return FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+BOOL CObject3DClientSpecific::RebindPrimaryTexture(LPCSTR name)
+{
+    CTexture* old=GetPrimaryTexture();
+    if(!old || !name || !*name || old->GetTypeID()!=TTID_UNIT_MAIN)return FALSE;
+    auto* manager=static_cast<CTextureManager*>(static_cast<CWorldClient*>(GetWorld())->GetTextureManager());
+    CString nextName(name),previousName(old->GetName());
+    const bool named=ModPrimaryAtlas::Canonical(name)||ModPrimaryAtlas::Private(name);
+    bool created=false;
+    const bool bound=ModSecondaryAtlas::Rebind(old,
+        [&]() -> CTexture* {
+            CTexture* provider=named?manager->FindTexture(old->GetTypeID(),name):nullptr;
+            if(!provider){provider=manager->CreateTexture(old->GetTypeID());created=true;}
+            return provider;
+        },
+        [&](CTexture* provider) {
+            if(created)provider->SetName(name);
+            if(!provider->GetSurface() && !manager->LoadTexture(provider))return false;
+            return provider->GetSurface()!=nullptr;
+        },
+        [&](CTexture* provider) {
+            if(GetPrimaryTexture()!=old || provider->GetTypeID()!=old->GetTypeID())return false;
+            int matches=0;
+            for(int i=0;i<textures.GetSize();++i)if(textures[i]->GetTypeID()==old->GetTypeID()){
+                if(textures[i]!=old)return false;++matches;
+            }
+            return matches==1 && sets[0] && sets[0]->lpTexture==old &&
+                (!sets[1] || !sets[1]->lpTexture || sets[1]->lpTexture->GetTypeID()!=old->GetTypeID());
+        },
+        [&](CTexture* provider){ChangeTexture(provider);},
+        [&](){return GetPrimaryTexture();},
+        [](CTexture* provider){provider->AddRef();},
+        [](CTexture* provider){provider->Release();});
+    // Draw binds the current primary and separate wound overlay on every draw;
+    // there is no captured primary shader to rebuild or mutate here.
+    if(bound){
+        szPrimaryTextureName=nextName;
+        if(previousName!=nextName)ModPrimaryAtlas::State().Remove(previousName);
+    }
+    return bound?TRUE:FALSE;
+}
+BOOL CObject3DClientSpecific::EnsurePrivatePrimaryAtlas(DWORD unitID)
+{
+    auto* manager=static_cast<CTextureManager*>(static_cast<CWorldClient*>(GetWorld())->GetTextureManager());
+    if(!manager->SharePrimaryCharacterAtlas())return TRUE;
+    CTexture* current=GetPrimaryTexture();if(!current)return FALSE;
+    if(current->GetSurface() && ModPrimaryAtlas::Canonical(current->GetName()) && manager->ComposeTexturesInMemory()) {
+        const std::string canonical(current->GetName());
+        if(!lpObject || lpObject->WhoAmI()!=HPC_UNIT || lpObject->GetID()!=unitID)return FALSE;
+        auto* unit=static_cast<CUnit*>(lpObject);
+        auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
+        if(!specific || !ModTextureMemory::EnsureCpu(ModTextureMemory::State(),canonical,[&](std::string& name){
+            CString rebuilt;const BOOL result=specific->AssemblePrimaryTexture(rebuilt);name=(LPCSTR)rebuilt;return result!=FALSE;
+        }))return FALSE;
+    }
+    return ModPrimaryAtlas::EnsurePrivate(ModPrimaryAtlas::State(),unitID,current->GetName(),
+        [&](){return current->GetSurface()!=nullptr;},
+        [&](const char* name){return RebindPrimaryTexture(name)!=FALSE;})?TRUE:FALSE;
+}
+BOOL CObject3DClientSpecific::RebindSecondaryTexture(LPCSTR name)
+{
+    CTexture* old=GetSecondaryTexture();
+    if(!old || !name || !*name || old->GetTypeID()!=TTID_UNIT_WEAPON)return FALSE;
+    auto* manager=static_cast<CTextureManager*>(static_cast<CWorldClient*>(GetWorld())->GetTextureManager());
+    // Prepare metadata before loading/committing. Failed loads retain the old name.
+    CString nextName(name);
+    const bool canonical=ModSecondaryAtlas::Canonical(name);
+    bool created=false;
+    const bool bound=ModSecondaryAtlas::Rebind(old,
+        [&]() -> CTexture* {
+            CTexture* provider=canonical?manager->FindTexture(old->GetTypeID(),name):nullptr;
+            // Collision/capacity fallback keeps baseline disk names/composition,
+            // but uses a fresh private provider instead of renaming a shared one.
+            if(!provider){provider=manager->CreateTexture(old->GetTypeID());created=true;}
+            return provider;
+        },
+        [&](CTexture* provider) {
+            if(created)provider->SetName(name);
+            if(!provider->GetSurface() && !manager->LoadTexture(provider))return false;
+            return provider->GetSurface()!=nullptr; // LoadTexture can report TRUE without a surface.
+        },
+        [&](CTexture* provider) {
+            if(GetSecondaryTexture()!=old || provider->GetTypeID()!=old->GetTypeID())return false;
+            int matches=0;
+            for(int i=0;i<textures.GetSize();++i)if(textures[i]->GetTypeID()==old->GetTypeID()){
+                if(textures[i]!=old)return false;++matches;
+            }
+            return matches==1 && sets[1] && sets[1]->lpTexture==old &&
+                (!sets[0] || !sets[0]->lpTexture || sets[0]->lpTexture->GetTypeID()!=old->GetTypeID());
+        },
+        [&](CTexture* provider){ChangeTexture(provider);},
+        [&](){return GetSecondaryTexture();},
+        [](CTexture* provider){provider->AddRef();},
+        [](CTexture* provider){provider->Release();});
+    if(bound)szSecondaryTextureName=nextName;
+    return bound?TRUE:FALSE;
+}
 // BOOL CObject3DClientSpecific::LoadTextures( LPCSTR pszPrimaryTextureName, pszSecondaryTextureName
 // ) load primary and secondary textures...
 BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
@@ -867,26 +987,38 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
     CTexture *lpTexture = NULL;
     CString szString;
     // store new texture names
-    szPrimaryTextureName = pszPrimaryTextureName;
-    szSecondaryTextureName = pszSecondaryTextureName;
+    CTexture* primary=GetPrimaryTexture();
+    const bool transactionalPrimary=pszPrimaryTextureName && *pszPrimaryTextureName &&
+        CString(pszPrimaryTextureName).CompareNoCase("none")!=0 && primary &&
+        primary->GetTypeID()==TTID_UNIT_MAIN && lpTextureManager->SharePrimaryCharacterAtlas();
+    if(!transactionalPrimary)szPrimaryTextureName = pszPrimaryTextureName;
+    CTexture* secondary=GetSecondaryTexture();
+    const bool transactionalSecondary=pszSecondaryTextureName && *pszSecondaryTextureName &&
+        CString(pszSecondaryTextureName).CompareNoCase("none")!=0 && secondary &&
+        secondary->GetTypeID()==TTID_UNIT_WEAPON && lpTextureManager->ShareSecondaryCharacterAtlas();
+    if(!transactionalSecondary)szSecondaryTextureName = pszSecondaryTextureName;
     // load primary texture
 
     if (pszPrimaryTextureName && *pszPrimaryTextureName &&
         CString(pszPrimaryTextureName).CompareNoCase("none") != 0)
     {
-        lpTexture = GetPrimaryTexture();
-        if (lpTexture)
-            lpTexture = lpTextureManager->FindTexture(lpTexture->GetTypeID(),
-                                                      pszPrimaryTextureName);
-        if (lpTexture)
-            ChangeTexture(lpTexture);
-        else
-        {
+        if(transactionalPrimary){
+            if(!RebindPrimaryTexture(pszPrimaryTextureName))return FALSE;
+        }else{
             lpTexture = GetPrimaryTexture();
-            if (lpTexture != NULL)
+            if (lpTexture)
+                lpTexture = lpTextureManager->FindTexture(lpTexture->GetTypeID(),
+                                                          pszPrimaryTextureName);
+            if (lpTexture)
+                ChangeTexture(lpTexture);
+            else
             {
-                lpTexture->SetName(pszPrimaryTextureName);
-                lpTextureManager->LoadTexture(lpTexture);
+                lpTexture = GetPrimaryTexture();
+                if (lpTexture != NULL)
+                {
+                    lpTexture->SetName(pszPrimaryTextureName);
+                    lpTextureManager->LoadTexture(lpTexture);
+                }
             }
         }
     }
@@ -894,6 +1026,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
     if (pszSecondaryTextureName && *pszSecondaryTextureName &&
         CString(pszSecondaryTextureName).CompareNoCase("none") != 0)
     {
+        if(transactionalSecondary)return RebindSecondaryTexture(pszSecondaryTextureName);
         lpTexture = GetSecondaryTexture();
         if (lpTexture)
             lpTexture = lpTextureManager->FindTexture(lpTexture->GetTypeID(),
@@ -914,7 +1047,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CObject3DClientSpecific::LoadWounds(LPCSTR pszWoundsTextureName)
+BOOL CObject3DClientSpecific::LoadWounds(LPCSTR pszWoundsTextureName, const CBYTEArray *expectedData)
 {
     if (sets[0] == 0)
         return FALSE;
@@ -929,20 +1062,27 @@ BOOL CObject3DClientSpecific::LoadWounds(LPCSTR pszWoundsTextureName)
             return ReportError("Can't create wounds texture for object \"%s\" ID = %d\n",
                                lpObject->GetGameClassName(), lpObject->GetID());
     }
-    // check user data
+    if(pWoundsTexture->GetTypeID()!=TTID_SPELL_MAIN ||
+       std::strcmp(pWoundsTexture->GetName(),pszWoundsTextureName)!=0)return FALSE;
+    if(expectedData && pWoundsTexture->GetSurface() &&
+       pWoundsTexture->IsUserDataEqual(*expectedData))return TRUE;
+    // GetUserData does not inspect the memory cache; an owner can supply its
+    // expected userdata, which is also checked after the actual upload.
     CBYTEArray userdata;
-    pTextureManager->GetUserData(pszWoundsTextureName, userdata);
-    if (!userdata.GetSize() || !pWoundsTexture->IsUserDataEqual(userdata))
-    {
-        // load new texture data
+    if(expectedData)userdata.Copy(*expectedData);
+    else pTextureManager->GetUserData(pszWoundsTextureName,userdata);
+    if(!pWoundsTexture->GetSurface() || !userdata.GetSize() ||
+       !pWoundsTexture->IsUserDataEqual(userdata)) {
+        struct RestoreWounds {
+            CTexture* texture;bool ready=false;
+            ~RestoreWounds(){if(!ready)texture->Unload();}
+        } restoring{pWoundsTexture};
         pWoundsTexture->ResetFlag(TEX_LOADED);
-        if (pTextureManager->LoadTexture(pWoundsTexture) == FALSE)
-        {
-            pWoundsTexture = 0;
-            return FALSE;
-        }
+        if(!pTextureManager->LoadTexture(pWoundsTexture) || !pWoundsTexture->GetSurface() ||
+           (expectedData && !pWoundsTexture->IsUserDataEqual(*expectedData)))return FALSE;
+        restoring.ready=true;
     }
-    return TRUE;
+    return pWoundsTexture->GetSurface()!=nullptr;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3DClientSpecific::ReleaseWounds()
@@ -1091,6 +1231,20 @@ BOOL CObject3DClientSpecific::DrawRealisticShadow2(CRenderer *pRend)
         pShadowTexture->SetName(buffer);
 
         SetFlag(OCS_RESHADOW);
+    }
+    if (!pShadowTexture->GetSurface())
+    {
+        // Unload keeps this referenced provider; restore its procedural surface.
+        // Force generation before upload/bind, including a retry after failure.
+        SetFlag(OCS_RESHADOW);
+        SMMPFileHeader hdr;
+        hdr.InitializeDefaultFormat4444();
+        hdr.dwSignature = MMP_SIGNATURE;
+        hdr.dwDimentionX = 64;
+        hdr.dwDimentionY = 64;
+        hdr.dwMipMapLevel = 1;
+        if (pShadowTexture->Create(pRend, &hdr) == FALSE)
+            return ReportError("Can't restore texture for shadow rendering!\n");
     }
     //////////////////////////////////////////////////////////////////////
     const DWORD shadowNow = GetTickCount();

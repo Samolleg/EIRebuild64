@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "MiniaudioOneShotSfx.h"
 #include "VoiceWaitState.h"
 #include "EngineDiagnostics.h"
@@ -79,6 +80,7 @@ struct ModAudioLayout {
 #pragma pop_macro("s8")
 #pragma pop_macro("u8")
 #pragma pop_macro("f64")
+#include "AudioResourceManager.h"
 
 
 static const char *LogSec = "MiniaudioOneShotSfx";
@@ -146,15 +148,10 @@ const size_t FX_IS_USED_OFFSET = offsetof(SFxControl,bIsUsed);
 const size_t FX_IS_LOOPED_OFFSET = offsetof(SFxControl,bIsLooped);
 const size_t FX_REQ_CLEANUP_OFFSET = offsetof(SFxControl,bReqCleanup);
 const size_t FX_UNIQUE_ID_OFFSET = offsetof(SFxControl,dwUniqueID);
-const unsigned int MAX_CACHED_SOUNDS = 64;
 const unsigned int MAX_ACTIVE_VOICES = 64;
 #if JMV_DETEST_BUILD
 const unsigned int DUPLICATE_DIAGNOSTIC_THRESHOLD = 3;
 #endif
-const size_t MAX_CACHE_BYTES = 32u * 1024u * 1024u;
-const size_t MAX_PREDECODED_SOUND_BYTES = 8u * 1024u * 1024u;
-const uint32_t MAX_ENCODED_BYTES = 16u * 1024u * 1024u;
-const unsigned int INVALID_CACHE_INDEX = 0xFFFFFFFFu;
 const DWORD ENGINE_INIT_RETRY_MS = 2000;
 const DWORD DEVICE_RECOVERY_RETRY_MS = 2000;
 const float MINIAUDIO_OCCLUSION_ATTENUATION = 0.35f;
@@ -213,21 +210,6 @@ enum EStreamingResolveResult
     STREAM_RESOLVE_SENTINEL
 };
 
-struct SDecodedSound
-{
-    char name[128];
-    void *frames;
-    void *encoded;
-    ma_uint64 frameCount;
-    ma_uint32 channels;
-    ma_uint32 sampleRate;
-    uint32_t encodedBytes;
-    size_t bytes;
-    DWORD lastUseTick;
-    unsigned int references;
-    bool used;
-};
-
 struct SMiniaudioBinauralNode
 {
     ma_node_base baseNode;
@@ -255,15 +237,13 @@ struct SMiniaudioBinauralNode
 
 struct SVoice
 {
-    ma_audio_buffer buffer;
-    ma_decoder decoder;
+    AudioResources::Handle resource;
     ma_sound sound;
     SMiniaudioBinauralNode binauralNode;
     ma_splitter_node occlusionSplitter;
     ma_lpf_node occlusionLowPass;
     char name[128];
     unsigned int sequence;
-    unsigned int decodedIndex;
     int priority;
     DWORD startTick;
     float gainWithoutMaster;
@@ -291,8 +271,6 @@ struct SVoice
     DWORD occlusionLastUpdateTick;
     LONG binauralLastDiagnosticBlocks;
     int binauralLastSector;
-    bool bufferInitialized;
-    bool decoderInitialized;
     bool soundInitialized;
     bool binauralNodeInitialized;
     bool binauralGraphInitialized;
@@ -453,7 +431,6 @@ ma_engine Engine = {};
 ma_sound_group ReverbSourceGroup = {};
 ma_splitter_node ReverbSplitter = {};
 SMiniaudioReverbNode ReverbNode = {};
-SDecodedSound DecodedSounds[MAX_CACHED_SOUNDS] = {};
 SVoice Voices[MAX_ACTIVE_VOICES] = {};
 static_assert(MAX_ACTIVE_VOICES == 64, "Voice wait slot encoding");
 VoiceWait::Registry VoiceLifetimes;
@@ -464,7 +441,6 @@ std::vector<unsigned char> StreamingMarkersData;
 void *CurrentSoundManager = nullptr;
 DWORD LastUniqueCounter = 0;
 ma_device_state LastDeviceState = ma_device_state_uninitialized;
-size_t CachedBytes = 0;
 unsigned int StartSequence = 0;
 unsigned int ActiveVoiceCount = 0;
 unsigned int CaptureDiagnosticCount = 0;
@@ -999,7 +975,7 @@ bool LoadStreamingMarkersCatalog(const char *markersPath)
             static_cast<size_t>(fileSize.QuadPart));
     }
     catch (const std::exception &)
-    {
+    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
         CloseHandle(file);
         StreamingMarkersData.clear();
 #if JMV_MINIAUDIO_STREAMING_MARKERS_DIAGNOSTICS
@@ -3274,7 +3250,6 @@ void ApplyVirtualVoiceMix(SVoice &voice)
 void ResetVoice(SVoice &voice)
 {
     memset(&voice, 0, sizeof(voice));
-    voice.decodedIndex = INVALID_CACHE_INDEX;
     voice.binauralLastSector = -1;
     voice.occlusionVisibility = 1.0f;
     voice.occlusionVolumeFactor = 1.0f;
@@ -3302,11 +3277,10 @@ void RequestManagedCleanup(SVoice &voice)
 void ReleaseVoice(SVoice &voice, const char *reason)
 {
     if (!voice.active && !voice.soundInitialized &&
-        !voice.bufferInitialized && !voice.decoderInitialized)
+        voice.resource == nullptr)
         return;
 
     const bool wasActive = voice.active;
-    const unsigned int decodedIndex = voice.decodedIndex;
     const unsigned int sequence = voice.sequence;
     char name[sizeof(voice.name)] = {};
     CopyName(name, sizeof(name), voice.name);
@@ -3320,18 +3294,8 @@ void ReleaseVoice(SVoice &voice, const char *reason)
     }
     UninitOcclusionNodes(voice);
     UninitMiniaudioBinauralNode(voice);
-    if (voice.decoderInitialized)
-        ma_decoder_uninit(&voice.decoder);
-    if (voice.bufferInitialized)
-        ma_audio_buffer_uninit(&voice.buffer);
-
-    if (decodedIndex < MAX_CACHED_SOUNDS &&
-        DecodedSounds[decodedIndex].used &&
-        DecodedSounds[decodedIndex].references > 0)
-    {
-        --DecodedSounds[decodedIndex].references;
-        DecodedSounds[decodedIndex].lastUseTick = GetTickCount();
-    }
+    AudioResources::Unpin(voice.resource);
+    voice.resource = nullptr;
     if (wasActive && ActiveVoiceCount > 0)
         --ActiveVoiceCount;
 
@@ -3370,47 +3334,9 @@ void ReleaseAllVoices(const char *reason)
         ReleaseVoice(Voices[i], reason);
 }
 
-void ReleaseDecodedSound(unsigned int index, const char *reason)
-{
-    if (index >= MAX_CACHED_SOUNDS || !DecodedSounds[index].used)
-        return;
-    SDecodedSound &decoded = DecodedSounds[index];
-    if (decoded.references != 0)
-        return;
-
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-    if (ShouldLogLimited(EvictDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_ONESHOT_EVICT name=%s bytes=%u reason=%s cache_bytes=%u total=%u",
-                decoded.name,
-                static_cast<unsigned int>(decoded.bytes),
-                reason != nullptr ? reason : "unknown",
-                static_cast<unsigned int>(CachedBytes),
-                EvictDiagnosticCount);
-    }
-#endif
-    if (decoded.frames != nullptr)
-        ma_free(decoded.frames, nullptr);
-    if (decoded.encoded != nullptr)
-        ma_free(decoded.encoded, nullptr);
-    if (CachedBytes >= decoded.bytes)
-        CachedBytes -= decoded.bytes;
-    else
-        CachedBytes = 0;
-    decoded = SDecodedSound();
-}
-
 void ReleaseDecodedSounds()
 {
-    for (unsigned int i = 0; i < MAX_CACHED_SOUNDS; ++i)
-    {
-        if (DecodedSounds[i].frames != nullptr)
-            ma_free(DecodedSounds[i].frames, nullptr);
-        if (DecodedSounds[i].encoded != nullptr)
-            ma_free(DecodedSounds[i].encoded, nullptr);
-        DecodedSounds[i] = SDecodedSound();
-    }
-    CachedBytes = 0;
+    AudioResources::ClearCache();
 }
 
 void ResetForManager(void *soundManager, const char *reason)
@@ -3623,6 +3549,26 @@ unsigned int ResumeVoicesForModalSpeech(
     return resumed;
 }
 
+bool IsGameAudioForeground()
+{
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr)
+        return false;
+    DWORD processId = 0;
+    GetWindowThreadProcessId(foreground, &processId);
+    return processId == GetCurrentProcessId();
+}
+
+void RenderMiniaudioOutput(ma_device *device, void *output,
+                            const void *input, ma_uint32 frames)
+{
+    // Render once so voices, music and Bink keep their playback positions.
+    ma_engine_data_callback_internal(device, output, input, frames);
+    if (!IsGameAudioForeground())
+        ma_silence_pcm_frames(output, frames, device->playback.format,
+                              device->playback.channels);
+}
+
 bool EnsureEngine()
 {
     if (EngineInitialized)
@@ -3641,6 +3587,10 @@ bool EnsureEngine()
     memset(&Engine, 0, sizeof(Engine));
     ma_engine_config config = ma_engine_config_init();
     config.listenerCount = 1;
+    config.pResourceManager = AudioResources::Manager();
+    if (config.pResourceManager == nullptr)
+        return false;
+    config.dataCallback = RenderMiniaudioOutput;
     const ma_result result = ma_engine_init(&config, &Engine);
     EngineDiagnostics::Event("Audio engine init attempt=%u result=%d description=%s",EngineInitAttemptCount,int(result),ma_result_description(result));
     if (result != MA_SUCCESS)
@@ -3677,8 +3627,8 @@ bool EnsureEngine()
             static_cast<int>(LastDeviceState),
             EngineInitAttemptCount,
             MAX_ACTIVE_VOICES,
-            MAX_CACHED_SOUNDS,
-            static_cast<unsigned int>(MAX_CACHE_BYTES),
+            AudioResources::GetStatistics().entries,
+            static_cast<unsigned int>(AudioResources::CacheLimitBytes),
             IsStrictTakeover() ? "resource_bootstrap" : "stock_beginfxll");
 #endif
     return true;
@@ -3794,103 +3744,12 @@ void SyncWorldSfxPause()
     }
 }
 
-int FindDecodedIndex(const char *soundName)
-{
-    if (soundName == nullptr)
-        return -1;
-    for (unsigned int i = 0; i < MAX_CACHED_SOUNDS; ++i)
-    {
-        if (DecodedSounds[i].used &&
-            _stricmp(DecodedSounds[i].name, soundName) == 0)
-        {
-            DecodedSounds[i].lastUseTick = GetTickCount();
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
-int FindEvictableIndex()
-{
-    int result = -1;
-    DWORD oldestTick = 0;
-    for (unsigned int i = 0; i < MAX_CACHED_SOUNDS; ++i)
-    {
-        const SDecodedSound &decoded = DecodedSounds[i];
-        if (!decoded.used)
-            return static_cast<int>(i);
-        if (decoded.references != 0)
-            continue;
-        if (result < 0 || decoded.lastUseTick < oldestTick)
-        {
-            result = static_cast<int>(i);
-            oldestTick = decoded.lastUseTick;
-        }
-    }
-    return result;
-}
-
-int FindOldestUsedEvictableIndex()
-{
-    int result = -1;
-    DWORD oldestTick = 0;
-    for (unsigned int i = 0; i < MAX_CACHED_SOUNDS; ++i)
-    {
-        const SDecodedSound &decoded = DecodedSounds[i];
-        if (!decoded.used || decoded.references != 0)
-            continue;
-        if (result < 0 || decoded.lastUseTick < oldestTick)
-        {
-            result = static_cast<int>(i);
-            oldestTick = decoded.lastUseTick;
-        }
-    }
-    return result;
-}
-
-bool HasCaptureCapacity()
-{
-    bool hasEntry = false;
-    size_t pinnedBytes = 0;
-    for (unsigned int i = 0; i < MAX_CACHED_SOUNDS; ++i)
-    {
-        const SDecodedSound &decoded = DecodedSounds[i];
-        if (!decoded.used || decoded.references == 0)
-        {
-            hasEntry = true;
-            continue;
-        }
-        if (decoded.bytes >= MAX_CACHE_BYTES - pinnedBytes)
-            return false;
-        pinnedBytes += decoded.bytes;
-    }
-    return hasEntry;
-}
-
-bool MakeCacheRoom(size_t bytes, int &targetIndex)
-{
-    while (CachedBytes + bytes > MAX_CACHE_BYTES)
-    {
-        const int evictIndex = FindOldestUsedEvictableIndex();
-        if (evictIndex < 0)
-            return false;
-        ReleaseDecodedSound(static_cast<unsigned int>(evictIndex), "byte_limit");
-    }
-    targetIndex = FindEvictableIndex();
-    if (targetIndex < 0)
-        return false;
-    if (DecodedSounds[targetIndex].used)
-        ReleaseDecodedSound(static_cast<unsigned int>(targetIndex), "entry_limit");
-    return true;
-}
-
 SVoice *FindVoice(int priority, const char *soundName)
 {
     for (unsigned int i = 0; i < MAX_ACTIVE_VOICES; ++i)
     {
         if (!Voices[i].active && !Voices[i].soundInitialized &&
-            !Voices[i].bufferInitialized &&
-            !Voices[i].decoderInitialized)
+            Voices[i].resource == nullptr)
         {
             ResetVoice(Voices[i]);
             return &Voices[i];
@@ -4010,8 +3869,7 @@ EStartResult StartDecoded(
         return IsStrictTakeover() ? START_SUPPRESSED : START_FAILED;
     }
 
-    const int decodedIndex = FindDecodedIndex(soundName);
-    if (decodedIndex < 0)
+    if (!AudioResources::Contains(soundName))
     {
         SetLastStartReason("cache_miss");
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
@@ -4106,91 +3964,20 @@ EStartResult StartDecoded(
         return START_FAILED;
     }
 
-    SDecodedSound &decoded = DecodedSounds[decodedIndex];
-    ma_data_source *dataSource = nullptr;
-    ma_result result = MA_ERROR;
-    if (decoded.frames != nullptr)
-    {
-        ma_audio_buffer_config bufferConfig = ma_audio_buffer_config_init(
-            ma_format_f32,
-            decoded.channels,
-            decoded.frameCount,
-            decoded.frames,
-            nullptr);
-        bufferConfig.sampleRate = decoded.sampleRate;
-        result = ma_audio_buffer_init(&bufferConfig, &voice->buffer);
-        if (result == MA_SUCCESS)
-        {
-            voice->bufferInitialized = true;
-            dataSource = reinterpret_cast<ma_data_source *>(
-                &voice->buffer);
-        }
-    }
-    else if (decoded.encoded != nullptr && decoded.encodedBytes != 0)
-    {
-        ma_decoder_config decoderConfig = ma_decoder_config_init(
-            ma_format_f32, 0, 0);
-        result = ma_decoder_init_memory(
-            decoded.encoded,
-            decoded.encodedBytes,
-            &decoderConfig,
-            &voice->decoder);
-        if (result == MA_SUCCESS)
-        {
-            voice->decoderInitialized = true;
-            dataSource = reinterpret_cast<ma_data_source *>(
-                &voice->decoder);
-        }
-    }
-    if (result != MA_SUCCESS || dataSource == nullptr)
-    {
-        SetLastStartReason(decoded.frames != nullptr
-                               ? "buffer_init"
-                               : "stream_decoder_init");
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-        if (ShouldLogLimited(FallbackDiagnosticCount))
-        {
-            LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=%s result=%d description=%s route=%s total=%u",
-                    soundName,
-                    decoded.frames != nullptr ? "buffer" : "stream_decoder",
-                    result,
-                    ma_result_description(result),
-                    FailureRoute(),
-                    FallbackDiagnosticCount);
-        }
-#endif
-        ReleaseVoice(*voice, "data_source_init_failed");
-        return START_FAILED;
-    }
-
+    // Pin before opening the VFS URI. Failed starts release the handle only
+    // after miniaudio has detached the sound and its asynchronous data source.
+    voice->resource = AudioResources::Pin(soundName);
     const bool reverbRouted = ShouldRouteMiniaudioReverb(
-        soundName,
-        speech,
-        virtualStart != nullptr && virtualStart->dialog);
-    ma_sound_group *initialGroup = reverbRouted
-        ? &ReverbSourceGroup
-        : nullptr;
-    result = ma_sound_init_from_data_source(
-        &Engine,
-        dataSource,
-        0,
-        initialGroup,
-        &voice->sound);
+        soundName, speech, virtualStart != nullptr && virtualStart->dialog);
+    ma_sound_group *initialGroup = reverbRouted ? &ReverbSourceGroup : nullptr;
+    ma_result result = static_cast<ma_result>(AudioResources::InitSound(
+        &Engine, voice->resource, looping, initialGroup, &voice->sound));
     if (result != MA_SUCCESS)
     {
-        SetLastStartReason("sound_init");
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-        if (ShouldLogLimited(FallbackDiagnosticCount))
-        {
-            LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=sound result=%d description=%s route=%s total=%u",
-                    soundName,
-                    result,
-                    ma_result_description(result),
-                    FailureRoute(),
-                    FallbackDiagnosticCount);
-        }
-#endif
-        ReleaseVoice(*voice, "sound_init_failed");
+        SetLastStartReason("resource_sound_init");
+        LOGERR("AUDIO_RESOURCE_START_ERROR result=%d description=%s", result,
+               ma_result_description(result));
+        ReleaseVoice(*voice, "resource_sound_init_failed");
         return START_FAILED;
     }
     voice->soundInitialized = true;
@@ -4307,7 +4094,8 @@ EStartResult StartDecoded(
 
     const bool holdForModalSpeech =
         speech && ModalSpeechSuspended;
-    const bool worldSfx = WorldSfxPause::Applies(spatial, speech,
+    const bool worldSfx = WorldSfxPause::Applies(spatial ||
+        (virtualStart != nullptr && virtualStart->partyVoice != nullptr), speech,
         virtualStart != nullptr && virtualStart->dialog);
     const bool holdForWorld = WorldSfxSuspended && worldSfx;
     result = (holdForModalSpeech || holdForWorld)
@@ -4345,10 +4133,7 @@ EStartResult StartDecoded(
     voice->priority = priority;
     voice->startTick = GetTickCount();
     voice->sequence = ++StartSequence;
-    voice->decodedIndex = static_cast<unsigned int>(decodedIndex);
     CopyName(voice->name, sizeof(voice->name), soundName);
-    ++decoded.references;
-    decoded.lastUseTick = voice->startTick;
     ++ActiveVoiceCount;
     SetLastStartReason("started");
     if (voice->virtualManaged && voice->scenarioSpeech)
@@ -4895,7 +4680,7 @@ bool RegisterBinkVoice(SBinkVoice *voice)
         }
     }
     catch (const std::exception &error)
-    {
+    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
         LOGERR("MINIAUDIO_BINK_REGISTRY_ERROR reason=std_exception detail=%s",
             error.what());
     }
@@ -4933,6 +4718,7 @@ void FinalizeDeferredBinkEngineShutdown()
 #endif
     EngineDiagnostics::Event("Audio engine release phase=bink_deferred manager=%p bink=0",CurrentSoundManager);
     ma_engine_uninit(&Engine);
+    AudioResources::Shutdown();
     memset(&Engine, 0, sizeof(Engine));
     EngineInitialized = false;
     InitAttempted = false;
@@ -5261,13 +5047,21 @@ int __stdcall BinkMiniaudioTrackOpen(
         voice->preferredFrames = 256;
     const ma_uint32 capacityFrames = voice->preferredFrames * 2;
 
+    // Video PCM is charged to the same 64 MiB resource budget.
+    if (!AudioResources::PrepareStreamMemory(
+            static_cast<size_t>(capacityFrames) * voice->bytesPerFrame))
+    {
+        delete voice;
+        return OpenBinkMilesFallback(soundInterface, frequency, bits, channels,
+            flags, bink, "track_open", "resource_budget");
+    }
     LogBinkTrackPhase(sequence, "ring_init", "begin");
     ma_result result = ma_pcm_rb_init(
         format,
         static_cast<ma_uint32>(channels),
         capacityFrames,
         nullptr,
-        nullptr,
+        AudioResources::Allocator(),
         &voice->ring);
     if (result != MA_SUCCESS)
     {
@@ -5829,7 +5623,7 @@ void RecordMissingAudioResource(
             ignoredCanonical);
     }
     catch (const std::exception &)
-    {
+    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
         LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=normalize\treason=std_exception\ttext_omitted=1");
         /* OutputDebugString is unbuffered. */
         return;
@@ -5926,7 +5720,7 @@ void RecordMissingAudioResource(
         loggedTotalRequests = MissingAudioTotalRequests;
     }
     catch (const std::exception &)
-    {
+    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
         LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=record\treason=std_exception\ttext_omitted=1");
         /* OutputDebugString is unbuffered. */
         return;
@@ -5980,7 +5774,7 @@ void RecordMissingAudioResource(
             /* OutputDebugString is unbuffered. */
         }
         catch (const std::exception &)
-        {
+        { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
             LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=emit_new\treason=std_exception\trecord=%llu\ttext_omitted=1",
                    static_cast<unsigned long long>(loggedRecordId));
             /* OutputDebugString is unbuffered. */
@@ -6002,7 +5796,7 @@ void RecordMissingAudioResource(
             /* OutputDebugString is unbuffered. */
         }
         catch (const std::exception &)
-        {
+        { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
             LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=emit_alias\treason=std_exception\trecord=%llu\ttext_omitted=1",
                    static_cast<unsigned long long>(loggedRecordId));
             /* OutputDebugString is unbuffered. */
@@ -6044,7 +5838,7 @@ void RecordMissingAudioResource(
             /* OutputDebugString is unbuffered. */
         }
         catch (const std::exception &)
-        {
+        { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
             LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=emit_context\treason=std_exception\trecord=%llu\ttext_omitted=1",
                    static_cast<unsigned long long>(loggedRecordId));
             /* OutputDebugString is unbuffered. */
@@ -6071,7 +5865,7 @@ void DumpMissingAudioCatalog(const char *reason)
         MissingAudioLastDumpRevision = revision;
     }
     catch (const std::exception &)
-    {
+    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
         LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=snapshot\treason=std_exception");
         /* OutputDebugString is unbuffered. */
         return;
@@ -6087,7 +5881,7 @@ void DumpMissingAudioCatalog(const char *reason)
         escapedDumpReasonText = escapedDumpReason.c_str();
     }
     catch (const std::exception &)
-    {
+    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
         LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=snapshot_reason\treason=std_exception");
         /* OutputDebugString is unbuffered. */
     }
@@ -6163,7 +5957,7 @@ void DumpMissingAudioCatalog(const char *reason)
             }
         }
         catch (const std::exception &)
-        {
+        { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
             LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=snapshot_entry\treason=std_exception\tindex=%llu",
                    static_cast<unsigned long long>(i + 1));
         }
@@ -6178,212 +5972,16 @@ void DumpMissingAudioCatalog(const char *reason)
 }
 
 bool CaptureEncoded(
-    const char *soundName,
-    const void *data,
-    uint32_t size,
-    const char *source)
+    const char *soundName, const void *data, uint32_t size, const char *source,
+    uintptr_t providerIdentity)
 {
-    if (soundName == nullptr || data == nullptr || size == 0 ||
-        size > MAX_ENCODED_BYTES)
-    {
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-        if (ShouldLogLimited(FallbackDiagnosticCount))
-        {
-            LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=capture reason=invalid bytes=%u total=%u",
-                    soundName != nullptr ? soundName : "<null>",
-                    size,
-                    FallbackDiagnosticCount);
-        }
-#endif
-        return false;
-    }
-    if (FindDecodedIndex(soundName) >= 0)
-        return true;
-    if (!HasCaptureCapacity())
-        return false;
-
-    ma_decoder_config probeConfig = ma_decoder_config_init(
-        ma_format_f32, 0, 0);
-    ma_decoder probe = {};
-    const ma_result probeResult = ma_decoder_init_memory(
-        data, static_cast<size_t>(size), &probeConfig, &probe);
-    ma_format format = ma_format_unknown;
-    ma_uint32 channels = 0;
-    ma_uint32 sampleRate = 0;
-    ma_uint64 frameCount = 0;
-    ma_result formatResult = MA_ERROR;
-    ma_result lengthResult = MA_ERROR;
-    if (probeResult == MA_SUCCESS)
-    {
-        formatResult = ma_decoder_get_data_format(
-            &probe, &format, &channels, &sampleRate, nullptr, 0);
-        lengthResult = ma_decoder_get_length_in_pcm_frames(
-            &probe, &frameCount);
-        ma_decoder_uninit(&probe);
-    }
-    if (probeResult != MA_SUCCESS || formatResult != MA_SUCCESS ||
-        channels == 0 || sampleRate == 0)
-    {
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-        if (ShouldLogLimited(FallbackDiagnosticCount))
-        {
-            LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=probe result=%d format_result=%d length_result=%d description=%s bytes=%u channels=%u rate=%u total=%u",
-                    soundName,
-                    probeResult,
-                    formatResult,
-                    lengthResult,
-                    ma_result_description(probeResult),
-                    size,
-                    channels,
-                    sampleRate,
-                    FallbackDiagnosticCount);
-        }
-#endif
-        return false;
-    }
-
-    const bool validFrameBytes = lengthResult == MA_SUCCESS &&
-        frameCount != 0 &&
-        frameCount <= static_cast<ma_uint64>(SIZE_MAX) /
-            (static_cast<ma_uint64>(channels) * sizeof(float));
-    const size_t probedFrameBytes = validFrameBytes
-        ? static_cast<size_t>(
-              frameCount * static_cast<ma_uint64>(channels) *
-              sizeof(float))
-        : 0;
-    const bool streamBacked = !validFrameBytes ||
-        probedFrameBytes > MAX_PREDECODED_SOUND_BYTES;
-
-    void *frames = nullptr;
-    void *encoded = nullptr;
-    size_t cacheBytes = 0;
-    if (streamBacked)
-    {
-        encoded = ma_malloc(size, nullptr);
-        if (encoded != nullptr)
-            memcpy(encoded, data, size);
-        cacheBytes = size;
-    }
-    else
-    {
-        ma_decoder_config decodeConfig = ma_decoder_config_init(
-            ma_format_f32, 0, 0);
-        ma_uint64 decodedFrameCount = 0;
-        const ma_result decodeResult = ma_decode_memory(
-            data,
-            static_cast<size_t>(size),
-            &decodeConfig,
-            &decodedFrameCount,
-            &frames);
-        if (decodeResult != MA_SUCCESS || frames == nullptr ||
-            decodedFrameCount == 0 || decodeConfig.channels == 0 ||
-            decodeConfig.sampleRate == 0 ||
-            decodedFrameCount > static_cast<ma_uint64>(SIZE_MAX) /
-                (static_cast<ma_uint64>(decodeConfig.channels) *
-                 sizeof(float)))
-        {
-            if (frames != nullptr)
-                ma_free(frames, nullptr);
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-            if (ShouldLogLimited(FallbackDiagnosticCount))
-            {
-                LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=decode result=%d description=%s bytes=%u frames=%llu channels=%u rate=%u total=%u",
-                        soundName,
-                        decodeResult,
-                        ma_result_description(decodeResult),
-                        size,
-                        static_cast<unsigned long long>(decodedFrameCount),
-                        decodeConfig.channels,
-                        decodeConfig.sampleRate,
-                        FallbackDiagnosticCount);
-            }
-#endif
-            return false;
-        }
-        frameCount = decodedFrameCount;
-        channels = decodeConfig.channels;
-        sampleRate = decodeConfig.sampleRate;
-        cacheBytes = static_cast<size_t>(
-            frameCount * static_cast<ma_uint64>(channels) * sizeof(float));
-    }
-
-    if (cacheBytes == 0 || cacheBytes > MAX_CACHE_BYTES ||
-        (streamBacked && encoded == nullptr))
-    {
-        if (frames != nullptr)
-            ma_free(frames, nullptr);
-        if (encoded != nullptr)
-            ma_free(encoded, nullptr);
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-        if (ShouldLogLimited(FallbackDiagnosticCount))
-        {
-            LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=cache reason=representation_invalid storage=%s bytes=%u total=%u",
-                    soundName,
-                    streamBacked ? "encoded_stream" : "decoded",
-                    static_cast<unsigned int>(cacheBytes),
-                    FallbackDiagnosticCount);
-        }
-#endif
-        return false;
-    }
-
-    int targetIndex = -1;
-    if (!MakeCacheRoom(cacheBytes, targetIndex) || targetIndex < 0)
-    {
-        if (frames != nullptr)
-            ma_free(frames, nullptr);
-        if (encoded != nullptr)
-            ma_free(encoded, nullptr);
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-        if (ShouldLogLimited(FallbackDiagnosticCount))
-        {
-            LOGWARN("MINIAUDIO_ONESHOT_FALLBACK name=%s phase=cache reason=no_evictable_entry storage=%s bytes=%u active=%u total=%u",
-                    soundName,
-                    streamBacked ? "encoded_stream" : "decoded",
-                    static_cast<unsigned int>(cacheBytes),
-                    ActiveVoiceCount,
-                    FallbackDiagnosticCount);
-        }
-#endif
-        return false;
-    }
-
-    SDecodedSound &decoded = DecodedSounds[targetIndex];
-    decoded.used = true;
-    decoded.frames = frames;
-    decoded.encoded = encoded;
-    decoded.frameCount = frameCount;
-    decoded.channels = channels;
-    decoded.sampleRate = sampleRate;
-    decoded.encodedBytes = streamBacked ? size : 0;
-    decoded.bytes = cacheBytes;
-    decoded.lastUseTick = GetTickCount();
-    decoded.references = 0;
-    CopyName(decoded.name, sizeof(decoded.name), soundName);
-    CachedBytes += cacheBytes;
-#if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
-    if (ShouldLogLimited(CaptureDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_ONESHOT_DECODE name=%s encoded_bytes=%u represented_bytes=%u storage=%s frames=%llu channels=%u rate=%u cache_entries=%u cache_bytes=%u source=%s total=%u",
-                soundName,
-                size,
-                static_cast<unsigned int>(cacheBytes),
-                streamBacked ? "encoded_stream" : "decoded",
-                static_cast<unsigned long long>(frameCount),
-                channels,
-                sampleRate,
-                MAX_CACHED_SOUNDS,
-                static_cast<unsigned int>(CachedBytes),
-                source != nullptr ? source : "unknown",
-                CaptureDiagnosticCount);
-    }
-#endif
-    return true;
+    (void)source;
+    return AudioResources::Capture(soundName, data, size, providerIdentity);
 }
 
 bool IsCaptured(const char *soundName)
 {
-    return FindDecodedIndex(soundName) >= 0;
+    return AudioResources::Contains(soundName);
 }
 
 const char *LastStartReason()
@@ -6510,14 +6108,11 @@ EStartResult TryStartManaged(
         return START_NOT_HANDLED;
     }
 
-    const int decodedIndex = FindDecodedIndex(soundName);
-    float pitchFactor = 1.0f;
-    if (decodedIndex >= 0 && playbackRate > 0 &&
-        DecodedSounds[decodedIndex].sampleRate > 0)
-    {
-        pitchFactor = static_cast<float>(playbackRate) /
-            static_cast<float>(DecodedSounds[decodedIndex].sampleRate);
-    }
+    AudioResources::Handle resource = AudioResources::Pin(soundName);
+    const uint32_t sampleRate = AudioResources::SampleRate(resource);
+    const float pitchFactor = playbackRate > 0 && sampleRate > 0
+        ? static_cast<float>(playbackRate) / sampleRate : 1.0f;
+    AudioResources::Unpin(resource);
     const uint8_t *fx = static_cast<const uint8_t *>(fxControl);
     const uint32_t uniqueId = *reinterpret_cast<const uint32_t *>(
         fx + FX_UNIQUE_ID_OFFSET);
@@ -6778,13 +6373,7 @@ bool CancelVirtual(void *soundManager, uint32_t virtualId)
 float GetVirtualPlaybackTime(void *soundManager, uint32_t virtualId)
 {
     SVoice *voice = FindVirtualVoice(soundManager, virtualId);
-    if (voice == nullptr || voice->decodedIndex >= MAX_CACHED_SOUNDS)
-        return 0.0f;
-    const SDecodedSound &decoded = DecodedSounds[voice->decodedIndex];
-    if (!decoded.used || decoded.sampleRate == 0)
-        return 0.0f;
-    return static_cast<float>(decoded.frameCount) /
-        static_cast<float>(decoded.sampleRate);
+    return voice != nullptr ? AudioResources::Duration(voice->resource) : 0.0f;
 }
 
 unsigned int CountAudibleVirtualSpeech(void *soundManager)
@@ -7156,7 +6745,7 @@ void RecordStreamingResolveDiagnostic(
                     "file_not_found");
             }
             catch (const std::exception &)
-            {
+            { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
                 LOGERR("MINIAUDIO_MISSING_AUDIO_UNTRACKED\tphase=stream_target\treason=std_exception\tdomain=stream_music\trequest_phase=%s",
                        requestPhase != nullptr ? requestPhase : "unknown");
                 /* OutputDebugString is unbuffered. */
@@ -7280,8 +6869,8 @@ bool ConfigureStreamingSlotMarkers(
     }
 
     ma_decoder markerDecoder = {};
-    const ma_result decoderInitResult = ma_decoder_init_file(
-        resolvedPath, nullptr, &markerDecoder);
+    const ma_result decoderInitResult = static_cast<ma_result>(
+        AudioResources::InitFileDecoder(resolvedPath, &markerDecoder));
     ma_result decoderFormatResult = MA_INVALID_OPERATION;
     ma_uint32 markerRate = 0;
     if (decoderInitResult == MA_SUCCESS)
@@ -7675,13 +7264,8 @@ bool ScheduleFastStreamingSwitch(const char *soundName)
     memset(candidate, 0, sizeof(*candidate));
     const ma_uint32 flags = MA_SOUND_FLAG_STREAM |
         MA_SOUND_FLAG_NO_SPATIALIZATION;
-    const ma_result initResult = ma_sound_init_from_file(
-        &Engine,
-        resolvedPath,
-        flags,
-        nullptr,
-        nullptr,
-        candidate);
+    const ma_result initResult = static_cast<ma_result>(AudioResources::InitFileSound(
+        &Engine, resolvedPath, flags, candidate));
     if (initResult != MA_SUCCESS)
     {
 #if JMV_MINIAUDIO_STREAMING_MARKERS_DIAGNOSTICS
@@ -7796,13 +7380,8 @@ bool StartStreamingNow(
     memset(candidate, 0, sizeof(*candidate));
     const ma_uint32 flags = MA_SOUND_FLAG_STREAM |
         MA_SOUND_FLAG_NO_SPATIALIZATION;
-    const ma_result initResult = ma_sound_init_from_file(
-        &Engine,
-        resolvedPath,
-        flags,
-        nullptr,
-        nullptr,
-        candidate);
+    const ma_result initResult = static_cast<ma_result>(AudioResources::InitFileSound(
+        &Engine, resolvedPath, flags, candidate));
     if (initResult != MA_SUCCESS)
     {
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
@@ -8455,7 +8034,7 @@ void StopAll(const char *reason)
     {
         LOGINFO("MINIAUDIO_ONESHOT_STOP_ALL reason=%s cache_bytes=%u",
                 reason != nullptr ? reason : "stop_all",
-                static_cast<unsigned int>(CachedBytes));
+                static_cast<unsigned int>(AudioResources::GetStatistics().bytes));
     }
 #endif
 }
@@ -8646,7 +8225,10 @@ void Shutdown(const char *reason)
         ma_engine_uninit(&Engine);
     }
     if (!keepEngineForBink)
+    {
+        AudioResources::Shutdown();
         memset(&Engine, 0, sizeof(Engine));
+    }
 #if JMV_MINIAUDIO_BINK_DIAGNOSTICS
     else
     {

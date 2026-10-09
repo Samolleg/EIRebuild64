@@ -770,6 +770,20 @@ void CLogger::Write(const char *levelStr, const char *section, const char *forma
     if (_withNewLine)
         len += sprintf_s(buf + len, bufSize - len, "\n");
 
-    SectionLock lock(_critSec);
+    if (InCrashMode()) {
+        if (!_critSec.TryLock()) return;
+    } else _critSec.Lock();
+    StoreRecentLocked(buf, len);
     WriteLineLocked(buf, len);
+    _critSec.Unlock();
+}
+
+void CLogger::StoreRecentLocked(const char *line, size_t length)
+{
+    if (length >= RecentLineSize) length = RecentLineSize - 1;
+    while (length && (line[length - 1] == '\n' || line[length - 1] == '\r')) --length;
+    memcpy(_recent[_recentPos], line, length);
+    _recent[_recentPos][length] = 0;
+    _recentPos = (_recentPos + 1) % RecentLines;
+    if (_recentCount < RecentLines) ++_recentCount;
 }

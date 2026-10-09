@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
 #include "ModInfoHitChance.h"
@@ -7,6 +8,13 @@
 #include "GlobalMap.h"
 #include "MusicSystem.h"
 #include "ModPackage.h"
+#include "ModItemUiPolicy.h"
+#include "ModSpellTooltip.h"
+#include "ModIdleTooltips.h"
+#include "ModHudAssignment.h"
+#include "ModSafetyLookup.h"
+#include "ModSpellTargeting.h"
+#include "ModSpellIdentity.h"
 #include "ModRuntime.h"
 #include "ModMessages.h"
 #include "UnitServer.h"
@@ -290,6 +298,8 @@ BOOL CI3DScreenMission::Draw(CRenderer *pRend)
         pRend->DrawFrameSelection(rcRubber.left, rcRubber.top, rcRubber.right, rcRubber.bottom);
     OnMouseMove(0, theCursor.GetPos());
     pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 1, 0);
+    bool guiShow=true;
+    if(NConsole::ApplyNoGui(guiShow))for(int i=0;i<pObjects.GetSize();++i)pObjects[i]->Show(guiShow,FALSE);
     CI3DScreen::Draw(pRend);
     return TRUE;
 }
@@ -1051,6 +1061,7 @@ void CI3DScreenMission::OnLButtonDown(UINT nFlags, CPoint point)
         const int slot = pSpells->HitTest(point);
         if (slot >= 0 && slot < QI_MAX_SPELLS) {
             SetProcessed(); bLButDown = bRubberSel = false;
+            pSpells->JournalHit(slot);
             pSpells->ChangeSpell(slot);
             return;
         }
@@ -1164,6 +1175,7 @@ void CI3DScreenMission::OnLButtonUp(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
 {
+    GameJournal::ObserveObject(pU, "click");
     int i, nSelected = 0, nIndex = -1;
     CMapObject *pObj = 0;
     CUnit *pHero = 0;
@@ -1252,6 +1264,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
         else
         {
             pObj = theWorld.PickFirstMapObject(point);
+            GameJournal::ObserveObject(pObj, "click");
             static unsigned pickSamples=0;
             if(ModRuntime::Current()&&pickSamples++<24)EngineDiagnostics::Event("Interaction click object=%d scientific=%d door=%d selected=%d",pObj?pObj->GetID():-1,pObj?pObj->IsScientific():0,pObj?pObj->IsScientificDoor():0,nSelected);
             if (pObj && pObj->IsScientific() && !pObj->IsScientificDoor() && nSelected == 1)
@@ -1320,6 +1333,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
             pObj = pU;
         else
             pObj = theWorld.PickFirstMapObject(point);
+            GameJournal::ObserveObject(pObj, "click");
         if (pObj && pHero && pObj->IsScientific())
         {
             theWorld.GetPlayer()->UnitCommandSkill(pHero, pObj, (BYTE)RPGMSKL_SCIENCE, nParam,
@@ -1334,6 +1348,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
             pObj = pU;
         else
             pObj = theWorld.PickFirstMapObject(point);
+            GameJournal::ObserveObject(pObj, "click");
         if (pObj && pHero && pObj->IsScientific() && pObj->CanApplyScience(tool))
         {
             theWorld.GetPlayer()->UnitCommandSkill(pHero, pObj, (BYTE)RPGMSKL_SCIENCE, nParam,
@@ -1348,6 +1363,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
             pObj = pU;
         else
             pObj = theWorld.PickFirstMapObject(point);
+            GameJournal::ObserveObject(pObj, "click");
         if (pObj && pHero)
         {
             if (pU)
@@ -1727,10 +1743,12 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         SetProcessed();
         return;
     case KA_ACCELERATE:
-        pClock->Accelerate();
+        if (!IWorldConnector.IsLMP() || NConsole::MpSpeedControlEnabled())
+            pClock->AccelerateFromKeyboard();
         break;
     case KA_DECELERATE:
-        pClock->Decelerate();
+        if (!IWorldConnector.IsLMP() || NConsole::MpSpeedControlEnabled())
+            pClock->DecelerateFromKeyboard();
         break;
     case KA_OBJECTIVES:
         pClock->ViewObjectives();
@@ -2167,6 +2185,7 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectWeapons::RemoveAllWeapons()
 {
+    RemoveAllSurfaces();
     RemoveAllFigures();
     nWeapons = 0;
     iSelected = -1;
@@ -2203,8 +2222,15 @@ void CI3DObjectWeapons::ShowSelectWeapon(int num, BOOL bSelect)
 void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
 {
     CString szName, szDesc, szOut;
+    auto* mod=ModRuntime::Current();
+    const bool nativeAssignment=mod && mod->AdvancedUI("useLS_SetUnitW");
     pUnit = pNewUnit;
     RemoveAllWeapons();
+    if(pUnit && UseModInterfaceHD()){
+        WideScreen::Scope wideScope(-1);
+        // Stable actual slot ownership; no native RemoveAt-in-loop leak or hole indexing.
+        for(int slot=0;slot<QI_MAX_WEAPONS;++slot){int x=-45+45*slot;AddSurface(new CI3DSurface(pI3D,x,560,x+100,660));}
+    }
     if (pUnit)
     {
         CItemWeapon *pWeapon;
@@ -2213,7 +2239,13 @@ void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
             pWeapon = pUnit->GetQWeapon(j);
             if (pWeapon)
             {
-                AddWeapon(pWeapon->GetI3DFigureName(), pWeapon->GetI3DTextureName());
+                const CString model=nativeAssignment
+                    ? ModHudAssignment::WeaponModel(*theItemDatabase.weapons[pWeapon->GetShape()])
+                    : pWeapon->GetI3DFigureName();
+                AddWeapon(model, pWeapon->GetI3DTextureName());
+                if(nativeAssignment){
+                    FormToolTipW(j,szName);GetArea(j)->SetToolTip(szName,1,KA_WEAPON1+j);continue;
+                }
                 theWorld.GetTextManager()->GetItemNameAndDesc(pWeapon, szName, szDesc, szOut);
 
                 szName += "\n";
@@ -2279,6 +2311,36 @@ BOOL CI3DObjectWeapons::Draw(CRenderer *pRend)
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectWeapons::FormToolTipW(int slot,CString& text)
+{
+    auto* mod=ModRuntime::Current();auto* weapon=pUnit?pUnit->GetQWeapon(slot):nullptr;
+    text.Empty();if(!mod||!weapon)return;
+    auto* tm=theWorld.GetTextManager();CString description,tmp;
+    ModIdleTooltips::WeaponInput in;tm->GetItemNameAndDesc(weapon,in.name,description,tmp);
+    in.damage=szStrings[DAMAGE];in.actionsLabel=szStrings[ACTIONPTS];in.rangeLabel=szStrings[RANGE];in.spellLabel=szStrings[SPELL];
+    auto label=[&](const char* key){CString result=key;if(tm->GetText(CString("string ")+key))tm->GetLine(result);return result;};
+    in.blockPowerLabel=label("infoitem_46");in.blockLabel=label("infoitem_45");in.parryLabel=label("infoitem_47");
+    in.hpLabel=label("infoitem_3");in.effectLabel=label("infoitem_8");in.manaLabel=label("infoitem_2");
+    in.shield=weapon->GetWeaponType()==RPGWST_HANDS1;in.broken=weapon->IsBroken();
+    in.minimum=weapon->GetDamageMin();in.maximum=weapon->GetDamageMax();in.actions=int(weapon->GetActionPoints());in.range=weapon->GetRange();
+    float distribution[RPG_NUM_ATTACK_TYPES];weapon->GetDamageDistribution(distribution);
+    for(int type=0;type<RPG_NUM_ATTACK_TYPES;++type)if(distribution[type]!=0){tmp.Format("damage_%d",type);tm->GetSystemString(tmp,in.damageType);break;}
+    if(in.shield)mod->IdleShieldValues(*pUnit,in.blockPower,in.block,in.parry);
+    CItemWeapon* durability=weapon;
+    if(!in.broken&&theWorldServer.GetMapObjectManager())if(auto* server=theWorldServer.GetUnit(pUnit->GetID()))if(auto* current=server->GetQWeapon(slot))durability=current;
+    in.hp=durability->GetHP();in.maxHP=durability->GetMaxHP();in.mp=weapon->GetMP();in.maxMP=weapon->GetMaxMP();
+    in.spell=weapon->GetSpellsCount()?weapon->GetSpell(0):nullptr;in.stats=pUnit->GetUserUnitStats();in.difficulty=theSettings.nDifficultyLevel;
+    if(in.spell){
+        if(tm->GetText(CString("spell ")+in.spell->GetPrototype()->szCodeName))tm->GetLine(in.spellName);
+        tmp.Format("damage_%d",ModIdleTooltips::DamageType(*in.spell));in.spellDamageType=label(tmp);
+    }
+    text=ModIdleTooltips::Weapon(in);
+    if(in.spell&&slot>=0&&slot<surfaces.GetSize()){
+        auto* surface=surfaces[slot];surface->GetDC();surface->Clear();
+        if(in.spell){tmp.Format("%d",int(in.mp));surface->DrawText(tmp,CRect(0,10,185,25),0,RGB(228,215,167),DT_LEFT);}
+        surface->ReleaseDC();
+    }
+}
 void CI3DObjectWeapons::OnIdle()
 {
     if (pUnit && iSelected != pUnit->GetCurrentWeaponIndex())
@@ -2286,6 +2348,12 @@ void CI3DObjectWeapons::OnIdle()
         ShowSelectWeapon(iSelected, FALSE);
         iSelected = pUnit->GetCurrentWeaponIndex(); // current slot
         ShowSelectWeapon(iSelected, TRUE);
+    }
+    if(auto* mod=ModRuntime::Current();pUnit&&mod&&mod->AdvancedUI("useLS_ObjectWeaponsOnIdle")){
+        CString text;
+        for(int slot=0;slot<QI_MAX_WEAPONS;++slot)if(pUnit->GetQWeapon(slot)){
+            FormToolTipW(slot,text);GetArea(slot)->UpdateToolTip(text);
+        }
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2309,6 +2377,7 @@ void CI3DObjectWeapons::ChangeWeapon(int nSlot)
 void CI3DObjectWeapons::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nWeapons)
     {
         SetProcessed();
@@ -2322,6 +2391,7 @@ void CI3DObjectWeapons::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nWeapons)
     {
         SetProcessed();
@@ -2513,6 +2583,16 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
     szName.Empty();
     theWorld.GetTextManager()->GetItemNameAndDesc(pQuick, szName, szOut, szOut);
     CSpell *pSpell = pQuick->GetSpell(0);
+    if(auto* current=ModRuntime::Current();current&&current->AdvancedUI("useLS_ObjectItemsOnIdle")){
+        using namespace ModIdleTooltips;
+        const CString labels[QUICK_LABELS]={szStrings[CI3DObjectItems::MANA],szStrings[CI3DObjectItems::EFFECT],
+            szStrings[CI3DObjectItems::SPEED],szStrings[CI3DObjectItems::RANGE],szStrings[CI3DObjectItems::AREA],
+            szStrings[CI3DObjectItems::DURATION],szStrings[CI3DObjectItems::TARGETS],szStrings[CI3DObjectItems::METERS],
+            szStrings[CI3DObjectItems::SECONDS],szStrings[CI3DObjectItems::INSTANT],szStrings[CI3DObjectItems::AREAUNIT],szStrings[CI3DObjectItems::FIXEDEFF]};
+        const int type=pQuick->GetQuickItemType();
+        const float additional=pSpell&&(type==IDB_WAND||type==IDB_SCROLL)?current->InfoProperty("GetSpellAdds",pSpell->GetPrototype()->szCodeName,2):0;
+        szName=Quick(szName,type,pSpell,*pUnit->GetUserUnitStats(),pQuick->GetMP(),pQuick->GetMaxMP(),additional,labels);return;
+    }
     if (pSpell && pQuick->GetQuickItemType() == IDB_WAND)
     {
         szName += " \n";
@@ -2685,6 +2765,7 @@ void CI3DObjectItems::OnIdle()
 void CI3DObjectItems::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (nSubst[ht] >= 0)
     {
         SetProcessed();
@@ -2695,6 +2776,7 @@ void CI3DObjectItems::OnLButtonDown(UINT nFlags, CPoint point)
 void CI3DObjectItems::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (nSubst[ht] >= 0)
     {
         SetProcessed();
@@ -2708,6 +2790,7 @@ void CI3DObjectItems::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int i = HitTest(point);
+    JournalHit(i);
     if (nSubst[i] >= 0)
     {
         int j = nSubst[i];
@@ -2859,56 +2942,41 @@ CI3DObjectSpells::CI3DObjectSpells(CInterface3D *pI, CI3DScreenMission *pScr)
 void CI3DObjectSpells::AddSpell(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 {
     WideScreen::Scope wideScope(1);
+    auto* mod=ModRuntime::Current();
+    const bool extended=!mod || mod->CombatSetting("JMVExtendedSpellSlots");
+    if(mod && extended) SetRect(720+WideScreen::currentShift,0,800+WideScreen::currentShift,600);
     const int newCount = nSpells + 1;
+    const bool hdInterface = UseModInterfaceHD();
     for (int i = 0; i < areas.GetSize(); i++)
     {
-        const int column = i / 8;
-        const int row = i % 8;
-        const int columnCount = column == 0 ? min(newCount, 8) : max(newCount - 8, 0);
-        const int left = 760 - column * 40;
-        const int top = 510 - (columnCount - row) * 40;
-        GetArea(i)->MakeRect(left, top, left + 40, top + 40);
+        const auto p=ModHudAssignment::SpellPlacement(i,newCount,extended,hdInterface);
+        GetArea(i)->MakeRect(p.left,p.top,p.left+40,p.top+40);
     }
-
-    const int column = nSpells / 8;
-    const int row = nSpells % 8;
-    const int columnCount = column == 0 ? min(newCount, 8) : max(newCount - 8, 0);
-    const int left = 760 - column * 40;
-    const int top = 510 - (columnCount - row) * 40;
-    AddArea()->MakeRect(left, top, left + 40, top + 40);
-
     for (int i = 0; i < figures.GetSize(); i++)
     {
-        const int figureColumn = i / 8;
-        const int figureRow = i % 8;
-        const int figureColumnCount = figureColumn == 0 ? min(newCount, 8) : max(newCount - 8, 0);
-        figures[i]->SetRelativeToScreen(780 - figureColumn * 40,
-                                        490.f - (figureColumnCount - 1 - figureRow) * 40, 40);
+        const auto p=ModHudAssignment::SpellPlacement(i,newCount,extended,hdInterface);
+        figures[i]->SetRelativeToScreen(p.left+20,p.top+20,40);
     }
-
-    const bool hdInterface = UseModInterfaceHD();
-    const int iconSize = hdInterface ? 512 : 64;
-    const int canvasSize = hdInterface ? 2048 : 256;
-    const int x = hdInterface ? (nSpells >= 8 ? 0 : 2 * iconSize) +
-                                ((row / 4) * iconSize)
-                              : 128 + (row / 4) * 64;
-    const int y = (row % 4) * iconSize;
+    const auto p=ModHudAssignment::SpellPlacement(nSpells,newCount,extended,hdInterface);
+    AddArea()->MakeRect(p.left,p.top,p.left+40,p.top+40);
+    const int iconSize=p.size,canvasSize=p.canvas;
+    const int x=mod ? p.x : 128+((nSpells%8)/4)*64,y=p.y;
     if (hdInterface)
         PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
     else
         PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
 
     CI3DFigure *pFig = AddFigure(pszFigureName);
-    if (hdInterface) pFig->SetTexture(textures[0]);
+    if (hdInterface || (mod && extended)) pFig->SetTexture(textures[0]);
     pFig->SetUShift(x / float(canvasSize));
     pFig->SetVShift((iconSize + y) / float(canvasSize));
     pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
-    pFig->SetRelativeToScreen(left + 20, top + 20, 40);
+    pFig->SetRelativeToScreen(p.left+20,p.top+20,40);
     pFig->SetDefaultColor(0xffffffff);
     pFig->UseDefaultColors(TRUE);
 
     nSpells++;
-    ShowSelectSpell(nSpells - 1, FALSE);
+    if(!mod) ShowSelectSpell(nSpells - 1, FALSE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::RemoveAllSpells()
@@ -2942,12 +3010,14 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 {
     auto *mod = ModRuntime::Current();
     const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
+    const int maxSpellSlots=mod ? ModHudAssignment::SpellSlots(mod->CombatSetting("JMVExtendedSpellSlots")) : QI_MAX_SPELLS;
+    auto* tooltipMod=mod && mod->AdvancedUI("useLS_SetUnitS")?mod:nullptr;
     CString szName, szDesc;
     pUnit = pNewUnit;
     RemoveAllSpells();
     if (pUnit)
     {
-        for (int j = 0; j < QI_MAX_SPELLS; j++)
+        for (int j = 0; j < maxSpellSlots; j++)
         {
             CItemSpell *pItemSpell = pUnit->GetQSpellItem(j);
             if (pItemSpell)
@@ -2958,9 +3028,10 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                 if (pSpell)
                 {
                     CString szOut;
+                    if(tooltipMod) ModHudAssignment::AppendSpellHotkey(szName,j);
                     szName += " \n";
                     ModSkills::Config skillConfig;
-                    if(mod && mod->SkillConfig(pSpell,skillConfig)) {
+                    if(tooltipMod && tooltipMod->SkillConfig(pSpell,skillConfig)) {
                         const char* requiredSkill=skillConfig.requiredArchery>=0.f
                             ? "\xD1\xF2\xF0\xE5\xEB\xFC\xE1\xE0"
                             : "\xC1\xEB\xE8\xE6\xED\xE8\xE9 \xE1\xEE\xE9";
@@ -2978,7 +3049,22 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                         GetArea(j)->SetToolTip(szName,1,j<8?KA_SPELL1+j:KA_UNKNOWN);
                         continue;
                     }
-                    szOut.Format("%s %d  ", szStrings[MANA], (int)pSpell->GetManaCost());
+                    float durationTicks=float(pSpell->GetDuration());
+                    ModSpellTooltip::Values tooltip = {pSpell->GetManaCost(), pSpell->GetPower(), 0};
+                    if (tooltipMod) {
+                        CUnit *serverUnit = theWorldServer.GetUnit(pUnit->GetID());
+                        const float manaIntelligence = serverUnit
+                            ? serverUnit->GetUserUnitStats()->cIntelligence : pUnit->GetUserUnitStats()->cIntelligence;
+                        tooltip = tooltipMod->SpellTooltip(*pUnit->GetUserUnitStats(), *pSpell,
+                            manaIntelligence, theSettings.nDifficultyLevel);
+                        tooltipMod->SpellTooltipOverrides(serverUnit,tooltip,durationTicks);
+                        static unsigned tooltipNotes = 0;
+                        if (tooltipNotes++ < 16) EngineDiagnostics::Event(
+                            "SPELL_TOOLTIP R159 unit=%d slot=%d spell=%s mana=%g effect=%g castSeconds=%g",
+                            pUnit->GetID(), j, (LPCSTR)pSpell->GetPrototype()->szCodeName,
+                            double(tooltip.mana), double(tooltip.effect), double(tooltip.castSeconds));
+                    }
+                    szOut.Format("%s %d  ", szStrings[MANA], (int)tooltip.mana);
                     szName += szOut;
                     szOut = "Unknown";
                     szDesc.Format("school_%d", mod ? pSpell->GetMagicSubtype() : pSpell->GetMagicSchool());
@@ -2987,17 +3073,23 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                     szOut = szStrings[MAGICSCHOOL] + " " + szOut + " \n";
                     szName += szOut;
 
-                    if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
+                    if (tooltipMod) {
+                        if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
+                            szOut.Format("%s %.1f", szStrings[EFFECT], tooltip.effect);
+                        else
+                            szOut.Format("%s %.0f  ", szStrings[EFFECT], tooltip.effect);
+                    } else if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
                         szOut.Format("%s %s  ", szStrings[EFFECT], szStrings[FIXEDEFF]);
+                    else if (improveInfoWindows)
+                        szOut.Format("%s %.1f  ", szStrings[EFFECT], pSpell->GetPower());
                     else
-                        if (improveInfoWindows)
-                szOut.Format("%s %.1f  ", szStrings[EFFECT], pSpell->GetPower());
-            else
-                szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
+                        szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
                     szName += szOut;
 
-                    if (pSpell->GetSpeed() < 1.f)
+                    if (mod ? pSpell->GetActionPoints() < 1 : pSpell->GetSpeed() < 1.f)
                         szOut.Format("%s %s \n", szStrings[SPEED], szStrings[INSTANT]);
+                    else if (mod)
+                        szOut.Format("%s %.1f%s\n", szStrings[SPEED], tooltip.castSeconds, szStrings[SECONDS]);
                     else
                         szOut.Format("%s %d \n", szStrings[SPEED], (int)pSpell->GetSpeed());
                     szName += szOut;
@@ -3013,11 +3105,11 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                                      szStrings[METERS]);
                     szName += szOut;
 
-                    if (pSpell->GetDuration() < 2)
+                    if (durationTicks < 2)
                         szOut.Format("%s %s  ", szStrings[DURATION], szStrings[INSTANT]);
                     else
                         szOut.Format("%s %.1f%s  ", szStrings[DURATION],
-                                     pSpell->GetDuration() / 15.f, szStrings[SECONDS]);
+                                     durationTicks / 15.f, szStrings[SECONDS]);
                     szName += szOut;
 
                     szOut.Format("%s %d \n", szStrings[TARGETS], pSpell->GetNumTargets());
@@ -3058,16 +3150,44 @@ void CI3DObjectSpells::ChangeSpell(int nSlot)
         }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+CSpell* CI3DObjectSpells::GetAreaPreviewSpell(const CI3DScreenMission* owner,int slot) const
+{
+    if(pScreen!=owner||!pUnit||slot<0||slot>=16||slot>=int(pUnit->GetSpellSlotCount()))return nullptr;
+    return pUnit->GetQSpell(slot);
+}
+
+bool CI3DScreenMission::GetAreaTargetPreview(CWorldClient& world,CPlot3D& center,float& radius) const
+{
+    radius=0.0f;
+    auto* mod=ModRuntime::Current();
+    if(!mod||!mod->CombatSetting("JMVAreaTargetPreview")||!pI3D||pI3D->GetCurrentScreen()!=this||
+       !pSpells||nInputMode!=MODE_SPELL_TARGET_TILE||nQSlot<0||nQSlot>=16)return false;
+    auto* spell=pSpells->GetAreaPreviewSpell(this,nQSlot);
+    if(!spell||!spell->IsOnTile())return false;
+    ModSkills::Config config;
+    radius=mod->SkillConfig(spell,config)&&mod->PointSkill(spell)?config.areaRadius:spell->GetRadius();
+    if(radius<=0.05f)return false;
+    const CPoint cursor=theCursor.GetPos();
+    CUnit* hovered=world.CombinedPickFirstUnit(cursor);
+    CPlot3D location;
+    if(hovered&&hovered->CheckFlag(UNIT_VISIBLE)&&!hovered->IsDead())location=hovered->GetCP();
+    else location=world.GetTerrainXYZFromScreenXYWithBridge(cursor.x,cursor.y);
+    center=location;
+    // Context was validated through the typed current screen and bar owner.
+    const std::array<bool,8> context={{true,true,true,true,true,true,true,true}};
+    return ModSpellTargeting::PreviewSelected(context,nQSlot,radius,{center.x,center.y,center.z});
+}
+
 void CI3DObjectSpells::SelfCast(int nSlot)
 {
     if(auto*mod=ModRuntime::Current();mod&&pUnit&&nSlot>=0&&nSlot<int(pUnit->GetSpellSlotCount())){
         auto*spell=pUnit->GetQSpell(nSlot);ModSkills::Config config;
         if(mod->SkillConfig(spell,config)){
+            auto* player=theWorld.GetPlayer();if(!player)return;
             if(pUnit->IsDead()||!mod->SkillReady(*pUnit,spell,config,false)||config.Cost(spell->GetManaCost())>pUnit->GetMP())return;
             auto*target=theWorld.GetNearestEnemy(pUnit);if(!target||target==pUnit||target->IsDead())return;
-            pScreen->SetInputMode(MODE_SPELL_TARGET_UNIT,nSlot);
-            if(mod->PointSkill(spell)){CPlot3D point=target->GetCP();pScreen->CastSpell(point,pUnit);}else pScreen->CastSpell(target);
-            pScreen->SetInputMode(MODE_SIMPLE);return;
+            ModSpellIdentity::ActiveSelfCast([&](){player->UnitCommandCast(nSlot,pUnit,target,false);});
+            return;
         }
     }
     if (pUnit && nSlot >= 0 && nSlot < nSpells)
@@ -3122,6 +3242,7 @@ BOOL CI3DObjectSpells::Draw(CRenderer *pRend)
 void CI3DObjectSpells::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nSpells)
     {
         SetProcessed();
@@ -3132,6 +3253,7 @@ void CI3DObjectSpells::OnLButtonDown(UINT nFlags, CPoint point)
 void CI3DObjectSpells::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nSpells)
     {
         SetProcessed();
@@ -3145,6 +3267,7 @@ void CI3DObjectSpells::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nSpells)
     {
         SetProcessed();
@@ -3510,6 +3633,7 @@ BOOL CI3DObjectSkills::Draw(CRenderer *pRend)
 void CI3DObjectSkills::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nSkills)
     {
         SetProcessed();
@@ -3523,6 +3647,7 @@ void CI3DObjectSkills::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0 && i < nSkills)
     {
         SetProcessed();
@@ -4039,6 +4164,7 @@ void CI3DObjectFaces::OnIdle()
 void CI3DObjectFaces::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int i = HitTest(point);
+    JournalHit(i);
 
     // CRAP{ - for advanced kick/ban
     EKickMode eKickMode = ((CI3DScreenMission *)pI3D->GetCurrentScreen())->eKickMode;
@@ -4093,6 +4219,7 @@ void CI3DObjectFaces::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int i = HitTest(point);
+    JournalHit(i);
     if (i >= 0)
     {
         SetProcessed();
@@ -5012,6 +5139,7 @@ void CI3DObjectMap::NormalizeCamera()
 void CI3DObjectMap::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= 0)
     {
         SetProcessed();
@@ -5040,6 +5168,7 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
     if (nMode == 0)
     {
         int ht = HitTest(point);
+        JournalHit(ht);
         CPlot2D pt;
         CPlot3D pos;
         switch (ht)
@@ -5470,7 +5599,9 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::DrawName(LPCTSTR pszName)
 {
-    CRect rc(5, 5, 155, 20);
+    const auto* nameMod=ModRuntime::Current();
+    const int inset=ModItemUiPolicy::NameInset(nameMod && nameMod->AdvancedUI("useLS_ShowEnemyConsider"));
+    CRect rc(inset, inset, 155, 20);
     COLORREF color = INFO_COLOR;
 
     // NAME
@@ -5514,7 +5645,49 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
         }
         pSurf->DrawText(szName, rc, 0, color, DT_LEFT);
         rc += shift;
-        szOut.Format("%d", effects[i].nDuration / 15);
+        if (auto *mod = ModRuntime::Current(); mod && mod->AdvancedUI("useLS_DrawSpellEffects") && pSpellProt)
+        {
+            const CUnit *serverUnit = theWorldServer.GetUnit(pUnit->GetID());
+            const CSpellEffect *serverEffect = nullptr;
+            if (serverUnit)
+            {
+                const auto &serverEffects = serverUnit->GetSpellEffects();
+                for (int effectIndex = 0; effectIndex < serverEffects.GetSize(); ++effectIndex)
+                    if (serverEffects[effectIndex].nSpellID == effects[i].nSpellID)
+                    {
+                        serverEffect = &serverEffects[effectIndex];
+                        break;
+                    }
+            }
+            float power = serverEffect ? serverEffect->fpPower : effects[i].fpPower;
+            const bool attacking = effects[i].nSpellID <= SPELL_ID_POISONFOG || effects[i].nSpellID == SPELL_ID_VAMP;
+            if (attacking)
+            {
+                const auto *stats = pUnit->GetUserUnitStats();
+                const auto subtype = pSpellProt->mstSubtype;
+                float baseSkill = 0;
+                if (subtype >= RPGMST_FIRE && subtype <= RPGMST_ACID)
+                    baseSkill = stats->cAutoSkills[RPGASKL_ELEMENTAL];
+                else if (subtype >= RPGMST_ILLUSION && subtype <= RPGMST_DIVINATION)
+                    baseSkill = stats->cAutoSkills[RPGASKL_SENSE];
+                else if (subtype >= RPGMST_ENCHANTMENTS && subtype <= RPGMST_DOMINATION)
+                    baseSkill = stats->cAutoSkills[RPGASKL_ASTRAL];
+                const float skill = baseSkill +
+                    stats->GetPerkModifier(RPGPRK_FIRE + subtype) +
+                    int(pUnit->GetUserUnitStats()->cIntelligence) - 25;
+                power *= 0.8f + skill * 30.0f / 120.0f / 100.0f;
+            }
+            CString prefix, seconds;
+            if (pTxtMng->GetText("string infoitem_82")) pTxtMng->GetLine(prefix);
+            if (pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(seconds);
+            const bool wholePower = serverUnit && serverUnit->GetEffectValue(effects[i].nSpellID) > 10;
+            if (wholePower)
+                szOut.Format("%s%.0f (%d%s)", (LPCSTR)prefix, power, effects[i].nDuration / 15, (LPCSTR)seconds);
+            else
+                szOut.Format("%s%.1f (%d%s)", (LPCSTR)prefix, power, effects[i].nDuration / 15, (LPCSTR)seconds);
+        }
+        else
+            szOut.Format("%d", effects[i].nDuration / 15);
         pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
         rc += shift;
     }
@@ -5596,7 +5769,8 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
 void CI3DObjectInfo::DrawStats(CUnit *pUnit)
 {
     auto*mod=ModRuntime::Current();
-    if(mod && mod->CombatSetting("useLS_DrawStats")) {
+    if(mod && mod->AdvancedUI("useLS_DrawStats")) {
+        CModPackage::InfoStatsScope infoStatsScope(mod);
         static StatsFontCache cache;
         ModStatsFont font(pI3D->GetFontSlot(0),pI3D->GetHeight(),cache);
         auto*text=theWorld.GetTextManager();auto*surface=surfaces[0];
@@ -5614,8 +5788,11 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         if(!pI3D->IsAltDown()) {
             if(stats->cLocomotion>1&&pUnit->GetShowPose()>1){value.Format("move_%d",int(pUnit->GetShowPose())-1);text->GetSystemString(value,label);}
             value.Format("%s %.1f %s",szStrings[SPEED],(alien?pUnit->GetShowSpeed(UP_RUN):pUnit->GetShowSpeed())*FP_CL_MP_SIZE*7.5f,label);draw(value);
-            float night=theWorld.IsCaveZone()?1.f:theWorld.GetNightPowerSlow();
-            if(IWorldClient.GetCurrentZoneName().CompareNoCase("gz20g")==0)night=0;
+            float night=theWorld.GetNightPowerSlow();
+            const bool finalBattle=ModSafetyLookup::FinalBattle(theWorldServer.GetPlayerManager()!=nullptr,
+                [](){return theWorldServer.GetPlayer(0);},
+                [](CPlayer* player){return player->party.szCurrentZone.CompareNoCase("gz20g")==0;});
+            night=ModSafetyLookup::NightPower(night,theWorld.IsCaveZone(),finalBattle);
             value.Format("%s %d%s(%d%%)",szStrings[SIGHT],MINT(stats->GetSightRange(night)),szStrings[METERS],int((stats->cSenses[RPGS_INFRA]*night*.01f+1-night)*100));draw(value);
             SAttackParams params;data.GetAttackParams(params);
             value.Format("%s %d",szStrings[ATTACK],params.nAttack);draw(value);
@@ -5661,7 +5838,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
             if(IsIDofPersonage(pUnit->GetID()))stats->GetAbsorbtions(&pUnit->GetUserCommonStats(),absorbs,true);
             else for(int i=0;i<RPG_NUM_ATTACK_TYPES;++i)absorbs[i]=pUnit->GetUserCommonStats().wAbsorbtions[i];
             for(int group=0;group<2;++group){CString line;for(int i=0;i<3;++i){int type=group*3+i;CString key;key.Format("dmg_%d",type);value.Format("%s%d",get(key),int(absorbs[type]));if(i)line+="|";line+=value;}value.Format("%s %s",szStrings[ABSORPTION],line);draw(value);}
-            if(mod->CombatSetting("useLS_ShowEnemyConsider")&&!pUnit->GetOwner())alien=true;
+            if(mod->AdvancedUI("useLS_ShowEnemyConsider")&&!pUnit->GetOwner())alien=true;
             if(alien&&pScreen->GetNumUnits()>0){int delta=(std::max)(-25,(std::min)(25,pUnit->GetLevel()-pScreen->GetUnit(0)->GetLevel()));
                 value.Format(delta>=0?"consider_more%d":"consider_less%d",abs(delta));text->GetSystemString(value,label);
                 value.Format("%s %s",szStrings[CONSIDER],label);
@@ -5884,6 +6061,11 @@ void CI3DObjectInfo::DrawTotalHP(CUnit *pUnit)
             break;
         }
 
+    const auto *mod = ModRuntime::Current();
+    if(mod && !mod->AdvancedUI("useLS_DrawTotalHP"))mod=nullptr;
+    if (mod && mod->AdvancedUI("useLS_DrawMonsterMana"))
+        bAlien = false;
+
     if (!bAlien)
     {
         figures[N_HL_FIGURE - 1]->Show(TRUE);
@@ -5912,6 +6094,21 @@ void CI3DObjectInfo::DrawTotalHP(CUnit *pUnit)
         CString szTmp;
         szTmp.Format("%d", pUnit->GetMP() > 0 ? pUnit->GetMP() : 0);
         surfaces[0]->DrawText(szTmp, CRect(130, 200, 160, 215), 0, INFO_COLOR, DT_LEFT);
+    }
+
+    if (mod && mod->AdvancedUI("useLS_ShowEnemyConsider") && !pUnit->GetOwner())
+        bAlien = true;
+    if (mod && bAlien && pScreen->GetNumUnits() > 0)
+    {
+        int levelDifference = pUnit->GetLevel() - pScreen->GetUnit(0)->GetLevel();
+        levelDifference = (std::max)(-25, (std::min)(25, levelDifference));
+        CString key, consider;
+        key.Format(levelDifference >= 0 ? "consider_more%d" : "consider_less%d", abs(levelDifference));
+        theWorld.GetTextManager()->GetSystemString(key, consider);
+        int red = levelDifference > 0 ? (std::min)(255, 225 + levelDifference * 6) : 0;
+        int green = (std::min)(255, (levelDifference < 0 ? 185 : 215) - levelDifference * 6);
+        surfaces[0]->DrawText(consider, CRect(5, 10, 155, 60), 0,
+                              RGB(red, green, 0), DT_CENTER);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -5980,9 +6177,23 @@ void CI3DObjectInfo::DrawHLState(CUnit *pUnit)
         {
             surfaces[0]->DrawText(szTmp, CRect(x, y, x + 60, y + 15), 0, INFO_COLOR, DT_CENTER);
 
-            // szTmp.Format( "%d", static_cast<signed short>(hl->wHP) > 0 ? hl->wHP : 0 );
-            // surfaces[0]->DrawText( szTmp, CRect( x, y + 20, x + 60, y + 35 ), 0, RGB( 255, 255,
-            // 255 ), DT_CENTER ); RGB( 228, 215, 167 )
+            const int currentHP = static_cast<signed short>(hl->wHP) > 0 ? hl->wHP : 0;
+            auto *mod = ModRuntime::Current();
+            if (mod && mod->AdvancedUI("useLS_DrawHLState"))
+            {
+                if (GetI3D() && GetI3D()->IsAltDown())
+                {
+                    const float modifier = mod->HitLocationModifier(int(eHL));
+                    if (modifier > 0)
+                        szTmp.Format("%d (+%.0f)", currentHP, modifier);
+                    else
+                        szTmp.Format("%d (%.0f)", currentHP, modifier);
+                }
+                else
+                    szTmp.Format("%d", currentHP);
+                surfaces[0]->DrawText(szTmp, CRect(x, y + 20, x + 60, y + 35), 0,
+                                      RGB(255, 255, 255), DT_CENTER);
+            }
         }
     }
 }
@@ -6101,6 +6312,7 @@ void CI3DObjectInfo::SetUnit(CUnit *pNewUnit)
 void CI3DObjectInfo::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= 0)
     {
         SetProcessed();
@@ -6114,6 +6326,7 @@ void CI3DObjectInfo::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
+    JournalHit(ht);
     switch (ht)
     {
     case 0:
@@ -6209,7 +6422,7 @@ void CI3DObjectClock::Init(int nInitSpeed)
 
     nMode = nInitSpeed;
     if (nMode)
-        DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME / (1 + nMode);
+        DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME / 2;
     else
         DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
     pI3D->nSpeed = nMode;
@@ -6290,6 +6503,7 @@ void CI3DObjectClock::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
+    JournalHit(ht);
     switch (ht)
     {
     case 0:
@@ -6298,8 +6512,8 @@ void CI3DObjectClock::OnLButtonUp(UINT nFlags, CPoint point)
         break;
     case 1:
         SetProcessed();
-        /*if (IWorldConnector.IsLMP())
-            break;*/
+        if (IWorldConnector.IsLMP() && !NConsole::MpSpeedControlEnabled())
+            break;
         if (IWorld.IsMissionCombatPause())
             IWorld.MissionCombatPause(false);
         nMode = 0;
@@ -6309,8 +6523,8 @@ void CI3DObjectClock::OnLButtonUp(UINT nFlags, CPoint point)
         break;
     case 2:
         SetProcessed();
-        /*if (IWorldConnector.IsLMP())
-            break;*/
+        if (IWorldConnector.IsLMP() && !NConsole::MpSpeedControlEnabled())
+            break;
         if (IWorld.IsMissionCombatPause())
             IWorld.MissionCombatPause(false);
         nMode = 1;
@@ -6345,24 +6559,37 @@ void CI3DObjectClock::NewObjectives()
     bNewObj = true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectClock::SetSpeedMode(int mode)
+{
+    pI3D->BeginFX("buttons\\battle\\clock.wav");
+    nMode = mode;
+    DW_SEGMENT_TIME = mode == 1 ? DW_DEFAULT_SEGMENT_TIME / 2 : DW_DEFAULT_SEGMENT_TIME;
+    pI3D->nSpeed = nMode;
+}
+void CI3DObjectClock::AccelerateFromKeyboard()
+{
+    if (IWorld.IsMissionCombatPause())
+        return;
+    SetSpeedMode(1);
+}
+void CI3DObjectClock::DecelerateFromKeyboard()
+{
+    if (IWorld.IsMissionCombatPause())
+        return;
+    SetSpeedMode(0);
+}
 void CI3DObjectClock::Accelerate()
 {
-    if (IWorld.IsMissionCombatPause() /*|| IWorldConnector.IsLMP()*/)
+    if (IWorld.IsMissionCombatPause() || IWorldConnector.IsLMP())
         return;
-    pI3D->BeginFX("buttons\\battle\\clock.wav");
-    nMode++;
-    pI3D->nSpeed++;
-    DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME / (nMode + 1);
+    SetSpeedMode(1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectClock::Decelerate()
 {
-    if (IWorld.IsMissionCombatPause() /*|| IWorldConnector.IsLMP()*/)
+    if (IWorld.IsMissionCombatPause() || IWorldConnector.IsLMP())
         return;
-    pI3D->BeginFX("buttons\\battle\\clock.wav");
-    nMode = 0;
-    DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
-    pI3D->nSpeed = nMode;
+    SetSpeedMode(0);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectClock::OnMouseMove(UINT nFlags, CPoint point)
@@ -6468,6 +6695,7 @@ void CI3DObjectCommands::OnIdle()
 void CI3DObjectCommands::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= 0)
     {
         SetProcessed();
@@ -6481,6 +6709,7 @@ void CI3DObjectCommands::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht == -1)
         return;
     SetProcessed();
@@ -6745,6 +6974,7 @@ void CI3DObjectOutput::OnIdle()
 void CI3DObjectOutput::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= 0)
     {
         SetProcessed();
@@ -6758,6 +6988,7 @@ void CI3DObjectOutput::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ModRuntime::Current()) {
         SetProcessed(); if (ht == 0) ActivateMode(0); return;
     }

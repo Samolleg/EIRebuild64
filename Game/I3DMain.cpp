@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
+#include <typeinfo>
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -73,7 +75,7 @@ void CInterface3D::Init(CRenderer *pNewRend)
 
     const char* face = "Times New Roman";
     if (auto* mod = ModRuntime::Current()) {
-        if (mod->CombatSetting("useLS_NewFont")) {
+        if (mod->AdvancedUI("useLS_NewFont")) {
             // Private registration also supports direct EXE startup without EIStarter.
             static std::string registeredFont;
             std::string path = mod->Directory() + "/Evil Font.ttf";
@@ -395,6 +397,7 @@ void CInterface3D::OnIdle()
         ResetInputState();
         if (!pScreens.empty())
         {
+            GameJournal::Event("SCREEN", "close", "class=%s", GameJournal::Quote(typeid(*pScreens.back()).name()).c_str());
             pScreens.back()->OnDeactivate();
             delete pScreens.back();
             pScreens.pop_back();
@@ -539,6 +542,7 @@ void CInterface3D::ActivateScreen(CI3DScreen *pScreen)
 
     NGame::bNeedRender = true;
 
+    GameJournal::Event("SCREEN", "open", "class=%s", GameJournal::Quote(typeid(*pScreen).name()).c_str());
     pScreen->OnActivate();
 
     NGame::DestroyInputMessages();
@@ -582,6 +586,7 @@ void CInterface3D::DoModal(CI3DScreen *pScreen, bool bSaveBack, bool bGrayBack)
     GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, 128);
 
     NGame::bNeedRender = true;
+    GameJournal::Event("SCREEN", "open", "class=%s", GameJournal::Quote(typeid(*pScreen).name()).c_str());
     pScreen->OnActivate();
     NGame::DestroyInputMessages();
     ReleaseCapture();
@@ -600,6 +605,7 @@ void CInterface3D::DestroyScreens()
     while (!pScreens.empty())
     {
         pScreens.back()->ResetInputState();
+        GameJournal::Event("SCREEN", "close", "class=%s", GameJournal::Quote(typeid(*pScreens.back()).name()).c_str());
         pScreens.back()->OnDeactivate();
         delete pScreens.back();
         pScreens.pop_back();
@@ -638,6 +644,7 @@ void CInterface3D::DrawTextOverFrame(LPCTSTR pszText)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    GameJournal::Event("INPUT", "left_down", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bLDblClk = false;
     if (m_pCapture)
         m_pCapture->OnLButtonDown(nFlags, point);
@@ -647,6 +654,7 @@ void CInterface3D::OnLButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnLButtonUp(UINT nFlags, CPoint point)
 {
+    GameJournal::Event("INPUT", "left_up", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     if (m_pCapture)
         m_pCapture->OnLButtonUp(nFlags, point);
     else if (!pScreens.empty())
@@ -664,6 +672,7 @@ void CInterface3D::OnMouseMove(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnRButtonDown(UINT nFlags, CPoint point)
 {
+    GameJournal::Event("INPUT", "right_down", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bRButDown = true;
     if (m_pCapture)
         m_pCapture->OnRButtonDown(nFlags, point);
@@ -673,6 +682,7 @@ void CInterface3D::OnRButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnRButtonUp(UINT nFlags, CPoint point)
 {
+    GameJournal::Event("INPUT", "right_up", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bRButDown = false;
     if (m_pCapture)
         m_pCapture->OnRButtonUp(nFlags, point);
@@ -682,6 +692,7 @@ void CInterface3D::OnRButtonUp(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
+    GameJournal::Event("INPUT", "left_double", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bLDblClk = true;
     if (m_pCapture)
         m_pCapture->OnLButtonDblClk(nFlags, point);
@@ -691,6 +702,7 @@ void CInterface3D::OnLButtonDblClk(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnRButtonDblClk(UINT nFlags, CPoint point)
 {
+    GameJournal::Event("INPUT", "right_double", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bRButDown = true;
     if (m_pCapture)
         m_pCapture->OnRButtonDblClk(nFlags, point);

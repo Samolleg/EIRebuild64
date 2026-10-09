@@ -7,6 +7,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModSpellRules.h"
+#include "ModSpellTargeting.h"
 
 #include <functional>
 #include <algorithm>
@@ -154,7 +155,7 @@ bool CSpell::IsValidTarget(CUnit *pCaster, CUnit *pTarget)
 /////////////////////////////////////////////////////////////////////////////////////
 ERPGAttackTypes CSpell::GetAttackType() const
 {
-    if(ModRuntime::Current()&&(GetSubtypeID()>>16)==SPELL_ID_VAMP){int attack=3+GetMagicSubtype();return attack>=0&&attack<int(RPG_NUM_ATTACK_TYPES)?ERPGAttackTypes(attack):RPGAT_GENERAL;}
+    if(ModRuntime::Current()){int attack=ModSpellIdentity::AttackOverride(int(GetSubtypeID()>>16));if(attack>=0)return ERPGAttackTypes(attack);}
     switch (ModRuntime::Current()?ModSpells::ElementalBase(GetSubtypeID() >> 16):int(GetSubtypeID() >> 16))
     {
     case SPELL_ID_INVOKE_LGHTNG:
@@ -180,8 +181,9 @@ ERPGAttackTypes CSpell::GetAttackType() const
 /////////////////////////////////////////////////////////////////////////////////////
 bool CSpell::IsOffensive() const
 {
-    if(ModRuntime::Current()&&((GetSubtypeID()>>16)==SPELL_ID_VAMP||(GetSubtypeID()>>16)==SPELL_ID_VISIONFOG))return true;
-    switch (ModRuntime::Current()?ModSpells::ElementalBase(GetSubtypeID() >> 16):int(GetSubtypeID() >> 16))
+    if(auto* mod=ModRuntime::Current())return ModSpellTargeting::Offensive(int(GetSubtypeID()>>16),
+        mod->CombatSetting("JMVSelfCast")!=0,mod->CombatSetting("JMVParticles")!=0);
+    switch (int(GetSubtypeID() >> 16))
     {
     case SPELL_ID_FIREARROW:
     case SPELL_ID_LIGHTNING:

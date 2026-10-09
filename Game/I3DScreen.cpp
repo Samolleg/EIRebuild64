@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
+#include <typeinfo>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
@@ -322,6 +324,7 @@ BOOL CI3DScreen::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreen::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
+    GameJournal::Event("INPUT", "key", "class=%s key=%u repeat=%u flags=%u", GameJournal::Quote(typeid(*this).name()).c_str(), nChar, nRepCnt, nFlags);
     SetProcessed(false);
     std::vector<CI3DHandler *>::const_iterator ci;
     for (ci = pHandlers.begin(); ci != pHandlers.end(); ++ci)

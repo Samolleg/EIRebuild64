@@ -42,6 +42,8 @@ public:
     virtual void SetProjectionMatrix(D3DMATRIX &proj);
     // set fog range
     virtual void SetFogRange(float fpNewFogStart, float fpNewFogEnd);
+    void GetBackgroundFog(float *range,float *coefficients) const
+    { range[0]=fpFogStart;range[1]=fpFogEnd;range[2]=fpRcprFogDiff255;coefficients[0]=projection._43;coefficients[1]=projection._34;coefficients[2]=projection._33; }
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // different vertex array transformation functions
     // transform vertices with homogenezation

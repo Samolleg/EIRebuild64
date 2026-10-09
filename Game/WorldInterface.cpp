@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldInterface.h"
@@ -244,6 +245,7 @@ CString CWorldClientInterface::GetCurrentZoneName()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClientInterface::ExitZone(int nExitPoint)
 {
+    GameJournal::Event("ZONE", "request", "reason=exit point=%d zone=%s", nExitPoint, GameJournal::Quote(theWorld.GetExitZoneName(nExitPoint)).c_str());
     if (pChatClient->IsValid())
         IWorldConnector.LMPExitZone();
     else
@@ -675,6 +677,8 @@ void CWorldConnector::StoreSave(CSave &file)
 // используется в movetozone, считывается зона при неподключенных плеерах
 BOOL CWorldConnector::LoadZoneState(CParty &party)
 {
+    GameJournal::CombatBoundary("zone_entry");
+    GameJournal::Operation journal("ZONE", "enter", party.szCurrentZone);
     BOOL bRv = TRUE;
     CFileSave file;
     SScenarioZone *pZone;
@@ -767,11 +771,12 @@ BOOL CWorldConnector::LoadZoneState(CParty &party)
             theWorldServer.script.RestartScript();
     }
     theWorldServer.SetExits(pZone->exits);
-    return bRv;
+    { journal.Result(bRv != FALSE); return bRv; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::StoreZoneState(CParty &party)
 {
+    GameJournal::Operation journal("SAVE", "zone", party.szCurrentZone);
     CFileSave file;
     CString szCurrentPath;
     CString szZone = theWorldServer.GetCurrentZoneName();
@@ -800,7 +805,7 @@ BOOL CWorldConnector::StoreZoneState(CParty &party)
     // set time of leaving the zone
     float fpCurTime = party.vars.GetVar(szPartyGlobalTimeVarName);
     party.vars.SetVar(CString("zt.") + szZone, fpCurTime);
-    return TRUE;
+    { journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void ClearDirectory(LPCTSTR pszPath)
@@ -818,11 +823,13 @@ void ClearDirectory(LPCTSTR pszPath)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::LoadGame(const char *pszSaveName)
 {
+    GameJournal::CombatBoundary("saved_game");
+    GameJournal::Operation journal("LOAD", "game", pszSaveName);
     // theWorldServer.RemoveEverythingDynamic();
     if (theWorldServer.GetServerMode() == SERV_MODE_LMP ||
         theWorldServer.GetServerMode() == SERV_MODE_MMP)
         return FALSE;
-    NConsole::Process("exec autoexec.cfg");
+    NConsole::RunAutoExec("exec autoexec.cfg");
     theCursor.SetMode(CT_WAIT);
     theInterface.SetScreensMustDie();
     // copy game state from somewhere, load hat and determine what server we should run
@@ -903,11 +910,13 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
     else
         MoveToZone(party.szCurrentZone);
     NConsole::game << "Loaded " << pszSaveName << endl;
-    return TRUE;
+    { journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::SaveGame(const char *pszSaveName)
 {
+    GameJournal::Event("SAVE", "kind", "source=%s name=%s", GameJournal::CurrentSource(), GameJournal::Quote(pszSaveName).c_str());
+    GameJournal::Operation journal("SAVE", "game", pszSaveName);
     // store current game state and copy files to specified path
     int i;
     CFileSave file;
@@ -994,7 +1003,7 @@ BOOL CWorldConnector::SaveGame(const char *pszSaveName)
 
     theCursor.SetMode(CT_DEFAULT);
     NConsole::game << "Saved " << pszSaveName << endl;
-    return TRUE;
+    { journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CWorldConnector::GetSaveSize()
@@ -1014,13 +1023,16 @@ int CWorldConnector::GetSaveSize()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::GoMainMenu()
 {
+    GameJournal::Event("ZONE", "main_menu");
     theInterface.SetScreensMustDie();
     MoveToZone("MainMenu", IFACE_MAINMENU);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::NewGame()
 {
-    NConsole::Process("exec autoexec.cfg");
+    GameJournal::CombatBoundary("new_game");
+    GameJournal::Event("ZONE", "reason", "reason=new_game");
+    NConsole::RunAutoExec("exec autoexec.cfg");
     theInterface.SetScreensMustDie();
     // lets start a new game
     theHat.NewSingleGame();
@@ -1327,6 +1339,7 @@ void CWorldConnector::ConnectLMPServer(const CCSNodeAddress &addr, const char *p
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::StartLMPClient()
 {
+    GameJournal::Event("SESSION", "role", "role=client");
     pCSLog = &NConsole::net;
     pChatServer = 0;
     pChatClient = dbgnew CChatClient;
@@ -1340,7 +1353,7 @@ void CWorldConnector::InitLMPInfo()
     LMPReloadDatabases(true);
     // clear party`s variables
     CParty &party = LMPPartySet.currentParty.party;
-    party.vars.clear();
+    ClearLMPPartyVariables(party.vars);
     party.RemoveAllQuestItems();
     if (party.people.GetSize() == 1)
     {
@@ -1556,6 +1569,13 @@ static bool IsOneOf(const char **pszTest, const char *pszString)
 }
 ELMPAllod Terrain2Allod(const char *pszAllod)
 {
+    if (auto *mod = ModRuntime::Current(); mod && mod->CustomMpZones())
+    {
+        if (mod->MatchesMpZone(0, pszAllod)) return LMPA_GIPAT;
+        if (mod->MatchesMpZone(1, pszAllod)) return LMPA_INGOS;
+        if (mod->MatchesMpZone(2, pszAllod)) return LMPA_SUSLANGER;
+        return LMPA_RIK;
+    }
     static const char *szAllods[][10] = { { "zone2", "zone3", "zone3obr", "zone4", "zone5", "zone6",
                                             "zone7", "zone8", "zone9", "" },
                                           { "zone12", "zone13", "" },
@@ -1751,7 +1771,7 @@ void CWorldConnector::LMPSyncBriefings()
     CGSVariableSet briefs;
     float fpConstr = party.vars.GetVar("constr.current");
     CGSVariableSet oldVars = party.vars;
-    party.vars.clear();
+    ClearLMPPartyVariables(party.vars);
     party.vars.SetVar("constr.current", fpConstr);
     /*party.vars.GetVars( "b.", briefs );
     for ( auto i =  briefs.begin(); i != briefs.end(); ++i )
@@ -1982,6 +2002,7 @@ void CWorldConnector::ClientSideDisconnect()
 // client side command
 void CWorldConnector::ClientGoZone(const char *pszZoneName, int nEntrance)
 {
+    GameJournal::Event("ZONE", "request", "reason=%s zone=%s entrance=%d", GameJournal::Quote(GameJournal::CurrentSource()).c_str(), GameJournal::Quote(pszZoneName).c_str(), nEntrance);
     theInterface.SetScreensMustDie();
     theWorld.GetPlayer()->GoZone(pszZoneName, nEntrance);
 }
@@ -2008,6 +2029,7 @@ void CWorldConnector::ReqLoadGame(const char *pszSaveName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::ReqMoveToZone(const char *pszZoneName, int nEntrance)
 {
+    GameJournal::Event("ZONE", "request", "reason=server_zone_change zone=%s entrance=%d", GameJournal::Quote(pszZoneName).c_str(), nEntrance);
     action = CD_MOVETOZONE;
     szConnectDest = pszZoneName;
     // nParam = nEntrance; // ATM: wtf is nEntrance, why to autoplay nParam variable?

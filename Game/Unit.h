@@ -339,13 +339,17 @@ public:
     int AddWeapon(CItemWeapon *lpWeapon);
     void RemoveWeapon(DWORD dwQWeaponIndex);
     CItemWeapon *GetQWeapon(DWORD dwQWeaponIndex) const;
+    CItemWeapon *GetStoredQWeapon(DWORD index) const { return index < QI_MAX_WEAPONS ? lpQWeapons[index] : nullptr; }
     CItemWeapon *GetCurrentQWeapon() const { return GetQWeapon(dwCurrentWeapon); }
     DWORD GetCurrentWeaponSlotIndex() const { return dwCurrentWeapon; }
     void ConvertWeaponsOnClient();
     // items
     int AddQItem(CItemQuick *lpQItem);
     void RemoveQItem(DWORD dwQItemIndex);
+    int AddCampQItem(CItemQuick *item);
+    void RemoveCampQItem(int index);
     CItemQuick *GetQItem(DWORD dwQItemIndex);
+    CItemQuick *GetStoredQItem(DWORD index) const { return index < QI_MAX_ITEMS ? lpQItems[index] : nullptr; }
     CItem *RemoveRandomItem(); // don`t release resulting item, for stealing purposes, quick or
                                // quest, quest have priority
     BOOL HasQuickSlot();
@@ -371,6 +375,7 @@ public:
     EUnitCastFailure CheckIsWandPossible(DWORD dwQItemIndex, CPlot3D &ptTarget);
     //
     float GetItemsWeight() const;
+    float GetItemsWeight(DWORD spellSlots) const;
     //
     virtual void NotifyHitPointsUpdated() { lpUnitSpecific->NotifyHitPointsUpdated(); }
     // player functions

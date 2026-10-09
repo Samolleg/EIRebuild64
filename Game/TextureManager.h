@@ -2,6 +2,8 @@
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ResourceManager.h"
 #include "Texture.h"
+#include <string>
+#include "GameMemorySnapshot.h"
 /////////////////////////////////////////////////////////////////////////////////////
 struct STextureSetDescription
 {
@@ -40,6 +42,9 @@ private:
     virtual LPGAMEBASE CreateInstant(ETypeIDs tidTypeID);
     //
     int PutLayers(DWORD *pResultLayer, const CStringArray &szTextures, DWORD dwTextureDimention);
+    BOOL LoadTextureMemory(LPTEXTURE texture);
+    BOOL RebuildSharedAtlasCpu(LPTEXTURE texture);
+    BOOL ComposeTextureMemory(CString& result,const STextureSetDescription& set,const CString& desired,DWORD mips,DWORD format);
 
 public:
     CTextureManager();
@@ -47,6 +52,9 @@ public:
     // create/destroy
     virtual void Destroy();
     void DeleteUnitLayerTextures();
+    BOOL ShareSecondaryCharacterAtlas() const;
+    BOOL SharePrimaryCharacterAtlas() const;
+    BOOL ComposeTexturesInMemory() const;
     // set interface function...
     void SetInterface(CRenderer *pNewRend);
     //
@@ -78,7 +86,9 @@ public:
     void RemoveLRUTextures(DWORD dwCurrentSegmentCount); // removes LPU textures from video memory
     void ShrinkLRU();
     void RemoveAllLRUTextures();
+    GameJournal::TextureMemory ReadMemoryCounters() const noexcept;
     int GetNumLRUElements() const { return lru.GetCount(); }
+    static std::string CheckLRUAccountingG3();
     //
     void UnloadAllTextures();
     // searching existed textures ( in main hash map and in LRU list )

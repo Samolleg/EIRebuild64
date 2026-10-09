@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Renderer.h"
+#include "ModWorldBackground/Native.h"
 
 #include "Camera.h"
 #include "Material.h"
@@ -28,6 +29,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/Batchers.h"
 #include "Particle.h"
 #include <DirectXCollision.h>
+#include "dx11/OwnedFigureInputs.h"
 /////////////////////////////////////////////////////////////////////////////////////
 namespace NDXDirect3D {
 // buffers
@@ -105,11 +107,14 @@ void CRenderer::Create(HWND hWnd, const SGeneralSettings &settings)
     pGeometryProcessor = std::make_unique<CDXGeometryProcessor>();
     pGraphicsProcessor = std::make_unique<CGraphicsProcessorMMX>();
 
-    rcScreen = { 0, 0, LONG(settings.dwWidth), LONG(settings.dwHeight) };
     dwDefaultAmbientColor = 0xFF000000;
 
     pDX11 = std::make_unique<CDX11>();
     pDX11->Initialize(hWnd, settings.dwWidth, settings.dwHeight);
+    // The shared renderer has now applied the display policy. Synchronize
+    // session dimensions before widescreen projection, UI/input and video.
+    pDX11->GetCurrentMode(theSettings.dwWidth, theSettings.dwHeight);
+    rcScreen = { 0, 0, LONG(theSettings.dwWidth), LONG(theSettings.dwHeight) };
 
     float fpFrontClip, fpBackClip, fpViewingAngle;
     SHMatrix matrix;
@@ -221,7 +226,7 @@ BOOL CRenderer::SetFogColor(DWORD dwColor)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::SetAlphaBlendMode(ERBLEND_MODE d3dSrcBlend, ERBLEND_MODE d3dDstBlend)
 {
-    SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND(d3dDstBlend));
+    SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND(d3dSrcBlend));
     SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND(d3dDstBlend));
     return TRUE;
 }
@@ -244,6 +249,7 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, CSimplyArray<CLight *, CLight *> &l
         return TRUE;
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
+    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,pDX11->IsOwnedWorldActive());
     return pFigureSpec->Draw(this, lights, pMaterial, cFog, pRect, pTexture0, pTexture1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -735,7 +741,6 @@ BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawA
         {
             pDX11->DrawParticles(reinterpret_cast<ParticleVertex *>(tlVertexes.GetData()),
                                  nVertices, tFaces.GetData(), nIndexes, 0);
-            return TRUE;
         }
     }
     // restore blending after ADD
@@ -1030,6 +1035,7 @@ BOOL CRenderer::DrawPolyLine(const CSimplyArray<POINT, POINT &> &plots, DWORD dw
 }
 void CRenderer::Destroy()
 {
+    ModWorldBackground::Unload();
     pGeometryProcessor = 0;
     pGraphicsProcessor = 0;
     pDX11 = 0;
@@ -1140,6 +1146,32 @@ __inline void ComposeVerticesMain(PNTVertex *vertices, SXYZW4 *geoms, SXYZW4 *no
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
+bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* norms,int nNumNorms,
+    const DWORD* colors,const DWORD* speculars,const CPlot2D* maps,int nNumMaps,
+    const SVertexComponents* components,int nNumComponents,const WORD* pwIndices,int nNumIndices,
+    float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
+{
+    if(pDX11->IsOwnedWorldActive() && pDX11->GetOwnedRenderer().FigureActive()) {
+        EIRenderMeshV4 mesh={};mesh.size=sizeof(mesh);mesh.version=4;
+        mesh.positions=reinterpret_cast<const EIRenderPackedV4*>(plots);mesh.position_groups=nNumPlots;
+        mesh.normals=reinterpret_cast<const EIRenderPackedV4*>(norms);mesh.normal_groups=nNumNorms;
+        mesh.uv=reinterpret_cast<const float*>(maps);mesh.uv_count=nNumMaps;
+        mesh.components=reinterpret_cast<const EIRenderComponentV4*>(components);mesh.component_count=nNumComponents;
+        mesh.indices=pwIndices;mesh.index_count=nNumIndices;
+        EIRenderFigureV4 packet=pDX11->GetOwnedRenderer().FigureValues();
+        packet.flags=dwRenderFlags;packet.diffuse=reinterpret_cast<const uint32_t*>(colors);
+        packet.specular=reinterpret_cast<const uint32_t*>(speculars);
+        packet.default_diffuse=dwDefaultAmbientColor;packet.default_specular=RGBA_MAKE(0,0,0,cFog);
+        packet.u_shift=fpUShift;packet.v_shift=fpVShift;
+        const SHMatrix& world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
+        const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
+        memcpy(packet.object_to_world,&world,sizeof(world));memcpy(packet.object_to_clip,&clip,sizeof(clip));
+        packet.morph_xyz=reinterpret_cast<const float*>(morphs);packet.morph_count=morphCount;
+        if(pDX11->SubmitOwnedFigure(mesh,packet))return true;
+    }
+    return false;
+}
+
 int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const int nNumNorms,
                       LPDWORD colors, LPDWORD speculars, CPlot2D *maps, const int nNumMaps,
                       SVertexComponents *components, const int nNumComponents,
@@ -1147,6 +1179,9 @@ int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const i
                       WORD *pwIndices, const int nNumIndices, const float fpUShift,
                       const float fpVShift, const BYTE cFog, DWORD dwRenderFlags)
 {
+    if(TryOwnedFigure(plots,nNumPlots,norms,nNumNorms,colors,speculars,maps,nNumMaps,
+        components,nNumComponents,pwIndices,nNumIndices,fpUShift,fpVShift,cFog,dwRenderFlags,nullptr,0))
+        return TRV_VISIBLE_NOCLIP;
     VertexBuffer<PNTVertex> vertexBuf;
     PNTVertex *pVertices = GetTempVertices(nNumComponents, (PNTVertex *)0);
 

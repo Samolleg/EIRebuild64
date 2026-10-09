@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenBase.h"
@@ -330,6 +331,7 @@ void CI3DScreenBase::OnLButtonDown(UINT nFlags, CPoint point)
                     return;
             }
             pI3D->BeginFX("buttons\\base\\click1.wav");
+            GameJournal::ObserveObject(pUnit, "talk");
             InitTopicMode(pUnit);
             return;
         }
@@ -364,10 +366,12 @@ void CI3DScreenBase::OnLButtonDown(UINT nFlags, CPoint point)
 
     case BSM_TOPIC: {
         int ht = HitTest(point);
+        JournalHit(ht);
         if (ht >= 0 && ht < BASE_NUM_BRIEFS_VISIBLE && ht + nPos < szBriefings.GetSize())
         {
             pI3D->BeginFX("buttons\\base\\click1.wav");
             szBriefing = szBriefings[ht + nPos];
+            GameJournal::Event("WORLD", "interaction", "action=talk topic=%s target=%d", GameJournal::Quote(szBriefing).c_str(), pPersonToTalk?pPersonToTalk->GetID():-1);
             RemoveAllAreas();
             PlayBriefing(false);
         }
@@ -2286,6 +2290,7 @@ void CI3DBaseFaces::OnIdle()
 void CI3DBaseFaces::OnLButtonDown(UINT nFlags, CPoint point)
 {
     int ht = HitTest(point);
+    JournalHit(ht);
     if (ht >= 0 && ht < pPersons.size())
     {
         SetProcessed();

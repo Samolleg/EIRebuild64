@@ -4,6 +4,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <sstream>
 
 #include "Console.h"
+#include "../shared/Common.h"
+#include "EngineDiagnostics.h"
 #include "StringProcessing.h"
 #include "WorldInterface.h"
 
@@ -11,6 +13,17 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScreen.h"
 #include "I3DEffects.h"
 #include "Time32.h"
+#include "GeneralSettings.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
+#include "ModConfiguration.h"
+#include <cstdlib>
+#include <stdexcept>
+#include <vector>
+#include <fstream>
+#include <iomanip>
+#include "I3DCursor.h"
+#include "ModSettingsPolicy.h"
 
 // CRAP - this include is related to interface and different options on writing statistics
 #include "WorldClient.h"
@@ -40,6 +53,7 @@ map<CString, ConsoleCommand> commands;
 map<CString, ConsoleCommand> commandsCommon;
 
 void ProcessHelp(const CStringArray &szParams);
+void ProcessDrawAll(const CStringArray &szParams);
 void ProcessConsole(const CStringArray &szParams);
 void ProcessHistory(const CStringArray &szParams);
 void ProcessFilter(const CStringArray &szParams);
@@ -152,10 +166,122 @@ static void ProcessScript(const CString &szStart, const CStringArray &szParams, 
 /////////////////////////////////////////////////////////////////////////////////////
 const char pszConsoleActivateWord[] = { 0x12, 0x0e, 0x0f, 0x08, 0x01, 0x07,
                                         0x0b, 0x07, 0x04, 0x09, 0x04, 0 };
+namespace {
+ModSettingsPolicy::Gui gui;
+struct StarterNetwork {
+    bool rejectServerMQ, mpSpeedControl, mpConsole;
+    StarterNetwork()
+    {
+        const wchar_t *key = L"Software\\Gipat.Ru\\EI_Starter\\Settings";
+        rejectServerMQ = RegGetBool(HKEY_CURRENT_USER, key, L"MQ client");
+        mpSpeedControl = RegGetBool(HKEY_CURRENT_USER, key, L"MP Speed-control");
+        mpConsole = RegGetBool(HKEY_CURRENT_USER, key, L"MP console");
+    }
+};
+const StarterNetwork& NetworkSettings()
+{
+    static const StarterNetwork settings;
+    return settings;
+}
+struct Starter {
+ std::vector<std::string> registry,file;DWORD objects=100,landscape=100;
+ Starter(){
+  HKEY key=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Gipat.Ru\\EI_Starter\\Settings",0,KEY_READ,&key)==ERROR_SUCCESS){
+   struct Close{HKEY key;~Close(){RegCloseKey(key);}}close{key};
+   auto dword=[&](const wchar_t* name){DWORD type=0,bytes=4,value=100;
+    return RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<LPBYTE>(&value),&bytes)==ERROR_SUCCESS&&type==REG_DWORD&&bytes==4?value:100u;};
+   objects=dword(L"ObjectsDrawRadius");landscape=dword(L"LandscapeDrawRadius");
+   DWORD type=0,bytes=0;
+   if(RegQueryValueExW(key,L"Console AutoExec",nullptr,&type,nullptr,&bytes)==ERROR_SUCCESS&&type==REG_MULTI_SZ&&bytes%sizeof(wchar_t)==0){
+    std::vector<wchar_t> data(bytes/sizeof(wchar_t));
+    if(RegQueryValueExW(key,L"Console AutoExec",nullptr,&type,reinterpret_cast<LPBYTE>(data.data()),&bytes)==ERROR_SUCCESS&&type==REG_MULTI_SZ){
+     for(const auto& line:ModSettingsPolicy::MultiString(data.data(),bytes/sizeof(wchar_t))){
+      int n=WideCharToMultiByte(CP_ACP,0,line.c_str(),int(line.size()),nullptr,0,nullptr,nullptr);std::string text(n,'\0');
+      if(n)WideCharToMultiByte(CP_ACP,0,line.c_str(),int(line.size()),&text[0],n,nullptr,nullptr);registry.push_back(text);}}}
+  }
+  std::ifstream input("2utoexec.cfg");std::string line;while(std::getline(input,line))file.push_back(line);
+ }
+};
+const Starter& StarterSettings(){static const Starter settings;return settings;}
+std::string ObjectText(CMapObject* object){return object?ModSettingsPolicy::Object(object->GetGameClassName(),object->GetID()):"null";}
+void SetAddonDebug(const CStringArray& args){
+ CString type; if(args.GetSize()>=2)type=args[1];
+ const int level=args.GetSize()>=3?atoi((LPCSTR)args[2]):-1;
+ if(type==""||type=="help"){
+  game<<"Usage:\n\taddon debug {type} [level]\n\n"
+        "Set debug level for type of addon's debugging settings\n"
+        "or show current value if level is not specified\n\n"
+        "Types:\n"
+        "* log      - addon log file (current: "<<EngineDiagnostics::GetLogLevel(false)<<")\n"
+        "* console  - addon's messages to console (current: "<<EngineDiagnostics::GetLogLevel(true)<<")\n"
+        "\nLevels:\n"
+        "* 4        - disable\n"
+        "* 3        - error\n"
+        "* 2        - warning\n"
+        "* 1        - information\n"
+        "* 0        - debug"<<endl;
+ }else if(type=="console"){
+  if(level>=0)EngineDiagnostics::SetLogLevel(true,level);
+  else game<<"Current console log level: "<<EngineDiagnostics::GetLogLevel(true)<<endl;
+ }else if(type=="log"){
+  if(level>=0)EngineDiagnostics::SetLogLevel(false,level);
+  else game<<"Current addon log level: "<<EngineDiagnostics::GetLogLevel(false)<<endl;
+ }else game<<"Unknown debug type: "<<(LPCSTR)type<<endl;
+}
+void ProcessAddon(const CStringArray& args){
+ auto* mod=ModRuntime::Resources();
+ if(args.GetSize()&&args[0]=="info"){game<<"Integrated EIRebuild addon source 39454a3; mod: "<<(mod?mod->Directory():"none")<<endl;return;}
+ if(args.GetSize()&&args[0]=="debug"){SetAddonDebug(args);return;}
+ if(args.GetSize()&&args[0]!="help"){game<<"Unknown command: "<<(LPCSTR)args[0]<<endl;return;}
+ game<<"addon info - integrated addon source and active mod\naddon debug [args]  - set addon's debug settings"<<endl;
+}
+void ProcessExecs(const CStringArray& args){
+ if(args.GetSize()!=1){game<<"execs [script file]"<<endl;return;}
+ if(!theWorldServer.script.Load(args[0])){auto error=theWorldServer.script.GetLastError();game<<"Script error: line "<<error.nLine<<", "<<error.text<<endl;}
+}
+void ProcessListGVar(const CStringArray&){
+ auto& vars=theWorldServer.script.GetGlobalVars();
+ auto list=[&](auto& set,const char* type,auto render){
+  for(int i=0;i<set.GetSize();++i){const char* name=nullptr;if(!set.TryGetVarName(i,name))continue;
+   game<<ModSettingsPolicy::Variable(name,type,render(set[i]))<<endl;}};
+ list(vars.fVars,"float",[](float value){std::ostringstream out;out<<std::fixed<<std::setprecision(6)<<value;return out.str();});
+ list(vars.szVars,"string",[](const CString& value){return "\""+std::string((LPCSTR)value)+"\"";});
+ list(vars.oVars,"object",[](CScriptObject& value){return ObjectText(value.GetObject());});
+ list(vars.gVars,"group",[](CScriptObjectGroup& value){std::string out;for(int i=0;i<value.GetSize();++i){if(i)out+=", ";out+=ObjectText(value.GetAt(i).GetObject());}return out.empty()?std::string("empty"):out;});
+}
+void ProcessNoGui(const CStringArray& args){
+ std::vector<std::string> input;for(int i=0;i<args.GetSize();++i)input.emplace_back((LPCSTR)args[i]);
+ if(!gui.Set(input)){game<<"nogui 0 - show all\nnogui 1 - hide GUI, show cursor\nnogui 2 - hide GUI and cursor"<<endl;return;}
+ theCursor.Show(gui.cursor);game<<"GUI: "<<(gui.controls?"show":"hide")<<", cursor: "<<(gui.cursor?"show":"hide")<<endl;
+}
+}
+void NConsole::InitializeNetworkSettings(){(void)NetworkSettings();}
+bool NConsole::RejectServerMQ(){return NetworkSettings().rejectServerMQ;}
+bool NConsole::MpSpeedControlEnabled(){return NetworkSettings().mpSpeedControl;}
+bool NConsole::MpConsoleEnabled(){return NetworkSettings().mpConsole;}
+bool NConsole::ApplyNoGui(bool& show){return gui.Apply(show);}
+float NConsole::ObjectsDrawRadius(){return ModRuntime::Resources()?float(StarterSettings().objects):100.f;}
+float NConsole::LandscapeDrawRadius(){return ModRuntime::Resources()?float(StarterSettings().landscape):100.f;}
+void NConsole::RunAutoExec(const char* original){
+ if(!ModRuntime::Resources()){Process(original);return;}
+ const auto& settings=StarterSettings();ModSettingsPolicy::AutoExec(settings.registry,settings.file,original,[](const char* command){Process(command);});
+}
+
 void NConsole::Process(const char *pszCommand)
 {
     // initialize commands map
     commands["help"] = ProcessHelp;
+    size_t addedCount=0;const auto* added=ModSettingsPolicy::Commands(addedCount);
+    for(size_t i=0;i<addedCount;++i){ConsoleCommand handler=nullptr;
+        switch(added[i].command){
+        case ModSettingsPolicy::Command::Addon:handler=ProcessAddon;break;
+        case ModSettingsPolicy::Command::Execs:handler=ProcessExecs;break;
+        case ModSettingsPolicy::Command::ListGvar:handler=ProcessListGVar;break;
+        case ModSettingsPolicy::Command::NoGui:handler=ProcessNoGui;break;}
+        (added[i].admin?commands:commandsCommon)[added[i].name]=handler;
+    }
+    commands["drawall"] = ProcessDrawAll;
     commands["debuginfo"] = ProcessDebugInfo;
     commandsCommon["console"] = ProcessConsole;
     commands["history"] = ProcessHistory;
@@ -194,11 +320,7 @@ void NConsole::Process(const char *pszCommand)
 
     szCmd = szParams[0];
     szParams.RemoveAt(0);
-    bool bAllowCheats = true;
-    // ATM: Script commands in MP - unlock?
-#ifdef FINALRELEASE
-    bAllowCheats = !IWorldConnector.IsLMP();
-#endif
+    const bool bAllowCheats = !IWorldConnector.IsLMP() || MpConsoleEnabled();
 
     // processing
     if (szCmd[0] == '@') // script commands
@@ -246,18 +368,88 @@ void NConsole::Process(const char *pszCommand)
         }
         else if (bConsoleActive && commands[szCmd]) // another console commands
         {
-#ifdef FINALRELEASE
-            if (!IWorldConnector.IsLMP())
+            if (bAllowCheats)
                 commands[szCmd](szParams);
-#else
-            commands[szCmd](szParams);
-#endif
         }
         else // unknown command
             game << "Unknown command" << endl;
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+template<class Output>
+static void ApplyDrawAll(const CStringArray &args, bool restricted, int &visibleOnly, Output output)
+{
+    if (args.GetSize() == 0)
+        return;
+    if (restricted)
+        output("Stop right now you criminal scum!");
+    else
+        visibleOnly = atoi(args[0].GetString()) ? 0 : 1;
+}
+
+void NConsole::ProcessDrawAll(const CStringArray &szParams)
+{
+    if (szParams.GetSize() == 0)
+        return;
+    CModPackage *package = ModRuntime::Current();
+    const bool restricted = package && package->CombatSetting("JMVNoDrawall") != 0;
+    ApplyDrawAll(szParams, restricted, theSettings.nDrawVisibleOnly,
+                 [](const char *line) { game << line << endl; });
+}
+
+std::string NConsole::CheckDrawAllCommand()
+{
+    using Json = nlohmann::json;
+    auto require = [](bool value, const char *message) {
+        if (!value) throw std::runtime_error(message);
+    };
+    size_t count = 0;
+    const auto *rules = ModConfiguration::CombatRules(count);
+    bool found = false;
+    for (size_t i = 0; i < count; ++i)
+        if (strcmp(rules[i].key, "JMVNoDrawall") == 0) {
+            require(!rules[i].fallback, "NoDrawall must default false");
+            found = true;
+        }
+    require(found, "NoDrawall configuration rule missing");
+    Json cases = Json::array();
+    auto run = [&](const char *command, bool restricted, int &visibility, std::vector<std::string> &lines) {
+        CStringArray args;
+        NStrProc::SplitStringQuotes(command, args);
+        require(args.GetSize() && args[0] == "drawall", "Local parser command mismatch");
+        args.RemoveAt(0);
+        for (int i = 0; i < args.GetSize(); ++i) args[i].MakeLower();
+        ApplyDrawAll(args, restricted, visibility, [&](const char *line) { lines.emplace_back(line); });
+    };
+    {
+        int visibility = 7; std::vector<std::string> lines;
+        run("drawall -2tail 0", false, visibility, lines);
+        require(visibility == 0 && lines.empty(), "First nonzero atoi argument differs");
+        cases.push_back({{"id", "allowed-first-nonzero"}, {"visibility", visibility}, {"lines", lines}});
+    }
+    {
+        int visibility = 0; std::vector<std::string> lines;
+        run("drawall 0", false, visibility, lines);
+        require(visibility == 1, "Zero argument differs");
+        run("drawall help", false, visibility, lines);
+        run("drawall", false, visibility, lines);
+        require(visibility == 1 && lines.empty(), "Text atoi or empty argument differs");
+        cases.push_back({{"id", "zero-text-and-no-argument"}, {"visibility", visibility}, {"lines", lines}});
+    }
+    {
+        int visibility = 7; std::vector<std::string> lines;
+        run("drawall 0", true, visibility, lines);
+        run("drawall", true, visibility, lines);
+        require(visibility == 7 && lines.size() == 1 && lines[0] == "Stop right now you criminal scum!",
+                "Restriction output or empty-argument order differs");
+        cases.push_back({{"id", "restricted-and-empty"}, {"visibility", visibility}, {"lines", lines}});
+    }
+    return Json({{"success", true}, {"cases", cases}, {"productionHelper", true}, {"realCStringParser", true},
+                 {"defaultFalseRule", true}, {"globalSettingsWritten", false}, {"consoleProcessRun", false},
+                 {"hostCreated", false}, {"worldCreated", false}, {"screenCreated", false}, {"deviceCreated", false},
+                 {"audioStarted", false}, {"saveRead", false}}).dump();
+}
+
 void NConsole::ProcessDebugInfo(const CStringArray &szParams)
 {
     if (!szParams.GetSize())
@@ -607,6 +799,7 @@ void NConsole::ProcessLootAll(const CStringArray &szParams)
 void NConsole::ProcessHelp(const CStringArray &szParams)
 {
     game << "Commands are:" << endl;
+    game << "ADDON [info|debug], EXECS [script file], LISTGVAR, NOGUI [0|1|2]" << endl;
 
     game << "HELP" << endl;
     game << "  show this screen" << endl;

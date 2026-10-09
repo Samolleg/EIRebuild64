@@ -418,6 +418,7 @@ public:
     void ResurrectAll();
     //
     float CollectHP(float fpSoulMaxHP) const;
+    void FixHls(CUnit* unit, float maxHp);
     void DistributeHP(float fpSoulMaxHP);
     void DistributeHPProportional(float fpSoulMaxHP);
     //

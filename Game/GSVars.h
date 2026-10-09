@@ -20,6 +20,7 @@ public:
     void Load(CSave &file);
     void Store(CSave &file);
 };
+void ClearLMPPartyVariables(CGSVariableSet &vars);
 /////////////////////////////////////////////////////////////////////////////////////
 // функция пребразования глобального имени персонажа в его идентификатор
 int GetPersonageIDByName(const char *pszGlobalName);
