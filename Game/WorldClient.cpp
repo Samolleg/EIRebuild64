@@ -2959,6 +2959,18 @@ BOOL CWorldClient::Draw()
     const SHMatrix& worldClip = pGPU->GetMatrix(MAT_STACK_VIEW2CLIP);
     static_assert(sizeof(worldClip) == sizeof(ownedWorld.world_to_clip), "world clip layout");
     memcpy(ownedWorld.world_to_clip, &worldClip, sizeof(worldClip));
+    static unsigned long long cameraGeneration=0;
+    static int cameraStep=-1;
+    const int zoomStep=int(theCamera.GetDistance()/5.f);
+    if(cameraGeneration!=ownedWorld.world_generation||cameraStep!=zoomStep) {
+        cameraGeneration=ownedWorld.world_generation;cameraStep=zoomStep;
+        float nearClip,farClip,fov;theCamera.GetViewingFrustum(nearClip,farClip,fov);
+        const float* m=ownedWorld.world_to_clip;
+        GameJournal::Event("RENDER","camera",
+            "scene=%llu zoom_step=%d distance=%.9g pitch=%.9g near=%.9g far=%.9g fov=%.9g matrix=%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g;%.9g,%.9g,%.9g,%.9g",
+            ownedWorld.world_generation,zoomStep,theCamera.GetDistance(),theCamera.GetPitch(),nearClip,farClip,fov,
+            m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],m[8],m[9],m[10],m[11],m[12],m[13],m[14],m[15]);
+    }
     const CPlot3D& eye = theCamera.GetCP();
     ownedWorld.eye[0] = eye.x; ownedWorld.eye[1] = eye.y; ownedWorld.eye[2] = eye.z;
     ownedWorld.region = szCurrentAllodName.CompareNoCase("Gipat") == 0 ? 1 :

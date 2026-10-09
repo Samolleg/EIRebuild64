@@ -359,6 +359,8 @@ HRESULT CDX11::DrawColorKeySurface(ID3D11ShaderResourceView* image,
 
 CDX11::~CDX11()
 {
+    modBackground.reset();modShadows.reset();
+    m_effproc.reset();m_caches.reset();m_batchers.reset();
     uiColorKey.reset();
     this->spriteBatch.reset();
     this->spriteFont.reset();
@@ -375,7 +377,12 @@ CDX11::~CDX11()
     this->deviceContext.Reset();
     this->swapchain.Reset();
     // ReportLiveObjects();
+    renderTargetView.Reset();depthStencilView.Reset();depthStencilBuffer.Reset();
+    depthStencilState.Reset();depthStencilStateDisableWrite.Reset();depthStencilStateDisable.Reset();
+    blendState.Reset();blendStateDisable.Reset();rasterizerState.Reset();rasterizerStateNoCull.Reset();
+    samplerState.Reset();blackTextureView.Reset();blackTexture.Reset();myTexture.Reset();myTexture2.Reset();
     this->device.Reset();
+    ownedRenderer.Shutdown();
 }
 
 bool CDX11::Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight)

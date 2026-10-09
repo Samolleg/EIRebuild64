@@ -28,7 +28,7 @@ public:
         p.material_alpha=m.diffuse.a;
         memcpy(p.emissive,&m.emissive,sizeof(p.emissive));
         memcpy(p.material_specular,&m.specular,sizeof(p.material_specular));
-        renderer.BeginFigure(p,figure->GetName());
+        renderer.BeginFigure(p,figure->GetName(),object->GetMaskName());
     }
     ~Scope(){renderer.EndFigure();}
 };
