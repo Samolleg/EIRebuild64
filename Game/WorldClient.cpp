@@ -2873,6 +2873,10 @@ class CObjectTextureLessThenFunctional
 public:
     bool operator()(CObject3D *pObject1, CObject3D *pObject2) const
     {
+        // SpellAddon mode 8 makes every object equivalent, without accessing resources.
+        if (const auto *mod = ModRuntime::Current())
+            if (mod->SpellAddon().Feature21() == 8)
+                return false;
 #if defined(__GAME__) && !defined(_A4)
         if (pObject1 && pObject2)
         {
