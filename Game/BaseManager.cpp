@@ -488,7 +488,7 @@ void CBaseManager::Load(CSave &file)
     ASSERT(list.GetCount() == 0);
     ClearTrash();
     file.Read(nCount);
-    if (nCount < 0 || static_cast<unsigned int>(nCount) > file.Remaining() / 12)
+    if (nCount > 0 && static_cast<unsigned int>(nCount) > file.Remaining() / 12)
     { file.Fail("invalid_registry_count"); return; }
     for (i = 0; i < nCount; i++)
     {
@@ -498,7 +498,6 @@ void CBaseManager::Load(CSave &file)
         file.Read(nID);
         file.Read(typeID);
         file.Read(dwSubtype);
-        if (nID < 0 || Find(nID)) { file.Fail("invalid_registry_id"); return; }
         LPGAMEBASE lpData = CreateData(ETypeIDs(typeID), nID);
         if (!lpData) { file.Fail("invalid_registry_type"); return; }
         lpData->SetSubtypeID(dwSubtype);
@@ -532,7 +531,6 @@ void CBaseManager::LoadData(CSave &file)
                 break;
         }
         CGameBase *pObj = Find(nID);
-        if (!pObj) { file.Fail("unknown_registry_reference"); return; }
         ASSERT(pObj);
         if (!pObj)
             return;

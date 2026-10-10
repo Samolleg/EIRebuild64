@@ -3785,9 +3785,6 @@ void CWorldServer::LoadDynamic(CSave &file)
             break;
         file.Read(typeID);
         file.Read(dwSubtype);
-        if (nID < 0 || pMapObjectManager->Find(nID) ||
-            !((typeID >= MOTID_HUMAN && typeID <= MOTID_LEVER) || typeID == MOTID_KAPKAN))
-        { file.Fail("invalid_dynamic_id_or_type"); return; }
         LPGAMEBASE lpData = pMapObjectManager->CreateData(ETypeIDs(typeID), nID);
         if (!lpData) { file.Fail("invalid_dynamic_type"); return; }
         lpData->SetSubtypeID(dwSubtype);
@@ -3804,7 +3801,7 @@ void CWorldServer::LoadDynamicData(CSave &file)
         if (nID == -1)
             break;
         CMapObject *pMO = (CMapObject *)pMapObjectManager->Find(nID);
-        if (!pMO || mapObjects.Seek(nID)) { file.Fail("unknown_or_duplicate_dynamic_id"); return; }
+        if (!pMO) { file.Fail("unknown_dynamic_id"); return; }
         if (file.GetVersion() > 88)
         {
             CString szTemplate;
@@ -3977,7 +3974,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
         if (nID == -1)
             break;
         CEffect *pEff = (CEffect *)pEffectManager->Find(nID);
-        if (!pEff || effects.Seek(nID)) { file.Fail("invalid_effect_reference"); return FALSE; }
+        if (!pEff) { file.Fail("invalid_effect_reference"); return FALSE; }
 
         pEff->AddRef();
         pEff->SetUpdateMask();
