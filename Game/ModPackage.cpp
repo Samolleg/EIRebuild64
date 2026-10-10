@@ -143,6 +143,8 @@ void CModPackage::Load(const std::string &directory){
  entries.RemoveAll();config.GetEntries("CONFIG",entries);
  for(int i=0;i<entries.GetSize();i++){CString path=config.GetString("CONFIG",entries[i],"");if(!path.IsEmpty())configs[Lower((LPCSTR)entries[i])]=Join(root,(LPCSTR)path);}
  for(const auto &kv:configs)if(!fs::is_regular_file(kv.second))throw std::runtime_error("Missing config: "+kv.second);
+ spellAddon.Load(ResolveConfig("SPELLADDON.INI",Join(root,"SPELLADDON.INI")));
+ GameJournal::Event("SPELLADDON","config","path=%s keys=%zu sha256=%s",GameJournal::Quote(spellAddon.Path().c_str()).c_str(),ModSpellAddon::KeyCount,spellAddon.Sha256().c_str());
  fs::path cameraRoot=fs::path(root)/"camera";
  if(fs::exists(cameraRoot))for(const auto &entry:fs::recursive_directory_iterator(cameraRoot))if(entry.is_regular_file())cameras[Lower(fs::relative(entry.path(),cameraRoot).string())]=entry.path().string();
  entries.RemoveAll();config.GetEntries("CAMERA",entries);

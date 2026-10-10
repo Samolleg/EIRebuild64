@@ -5,6 +5,7 @@
 #include "ModCampDescriptions.h"
 #include "ModCustomLower.h"
 #include "ModSettingsPolicy.h"
+#include "ModSpellAddonConfig.h"
 class CSpell;
 class CFileRegistry;
 bool InspectModConfigurationCommandLine(int& result);
@@ -66,6 +67,7 @@ public:
     bool IsLocalPartyUnit(const CUnit&) const;
     void FilterPartyVisualArmor(const CUnit&, unsigned long* armors) const;
     void ApplyPartyVisualOptions();
+    const ModSpellAddon::Profile& SpellAddon() const { return spellAddon; }
     const std::string& Directory() const { return root; }
     bool GetNpcCombatConsumableConfig(const char*zone,int id,const char*prototype,int kind,int variant,ModConsumableConfig&);
     void Load(const std::string &directory);
@@ -218,6 +220,7 @@ private:
     bool registeredLoot=false;
     float experienceLimit=-1.0f;
     ModSettingsPolicy::Profile settingsProfile;
+    ModSpellAddon::Profile spellAddon;
     bool forceTutorial=false;
     std::string chatHtmlFile;
     float magicRandomLimit=-1.0f;
