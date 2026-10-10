@@ -4045,6 +4045,11 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
     // load deploy info for items
     if (file.GetVersion() > 84)
     {
+        // ASI 4004FC lasts for the process, including successive worlds and loads.
+        // It is not saved and only the over-budget branch resets it.
+        static unsigned int spellAddonBindingCount = 0;
+        const auto *mod = ModRuntime::Current();
+        const bool limitBindings = mod && mod->SpellAddon().Feature21() == 8;
         int nID, nBind;
         for (;;)
         {
@@ -4052,6 +4057,16 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
             file.Read(nID);
             if (nID == -1)
                 break;
+            if (limitBindings)
+            {
+                // Compare before increment, and leave nBind unread on this exit.
+                if (spellAddonBindingCount > 0x19445u)
+                {
+                    spellAddonBindingCount = 0;
+                    break;
+                }
+                ++spellAddonBindingCount;
+            }
             file.Read(nBind);
             CItem *pItem = (CItem *)GetItemManager()->Find(nID);
             ASSERT(pItem);
