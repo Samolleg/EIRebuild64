@@ -310,7 +310,9 @@ void NConsole::Process(const char *pszCommand)
 
     szCmd = szParams[0];
     szParams.RemoveAt(0);
-    const bool bAllowCheats = !IWorldConnector.IsLMP() || MpConsoleEnabled();
+    const CModPackage *package = ModRuntime::Current();
+    const bool spellAddonCheats = package && package->SpellAddon().Feature04() == 1;
+    const bool bAllowCheats = spellAddonCheats || !IWorldConnector.IsLMP() || MpConsoleEnabled();
 
     // processing
     if (szCmd[0] == '@') // script commands

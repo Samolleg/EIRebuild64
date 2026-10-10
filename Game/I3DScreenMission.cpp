@@ -63,6 +63,8 @@ const float SLIDE_TIME = .3f;
 const float DISTANCE_DRAW_UNIT = 9.f;
 const float RULER_UNIT_SCALE = 15.f;
 
+static bool SpellAddonMpSpeedAllowed();
+
 static bool UseModInterfaceHD()
 {
     return ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2");
@@ -1743,11 +1745,11 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         SetProcessed();
         return;
     case KA_ACCELERATE:
-        if (!IWorldConnector.IsLMP() || NConsole::MpSpeedControlEnabled())
+        if (!IWorldConnector.IsLMP() || SpellAddonMpSpeedAllowed() || NConsole::MpSpeedControlEnabled())
             pClock->AccelerateFromKeyboard();
         break;
     case KA_DECELERATE:
-        if (!IWorldConnector.IsLMP() || NConsole::MpSpeedControlEnabled())
+        if (!IWorldConnector.IsLMP() || SpellAddonMpSpeedAllowed() || NConsole::MpSpeedControlEnabled())
             pClock->DecelerateFromKeyboard();
         break;
     case KA_OBJECTIVES:
@@ -6360,6 +6362,44 @@ BOOL CI3DObjectInfo::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+enum class ClockSpeedInput { Init, Button, Keyboard };
+
+static bool SpellAddonMpSpeedAllowed()
+{
+    const CModPackage *package = ModRuntime::Current();
+    return package && package->SpellAddon().Feature45() == 1;
+}
+
+static DWORD ClockSegmentTime(int mode, ClockSpeedInput input)
+{
+    const CModPackage *package = ModRuntime::Current();
+    if (package)
+    {
+        const auto &settings = package->SpellAddon();
+        using ModSpellAddon::ByteKey;
+        using ModSpellAddon::IntKey;
+        if (input == ClockSpeedInput::Init)
+        {
+            const int rewrite = settings.Mode(ByteKey::speed_rewriteotherspeed);
+            if (rewrite == 1 || rewrite == 3)
+            {
+                // ASI patches AND AL,imm8 and ADD EAX,sign-extended imm8.
+                // Keep byte wrapping and the high bytes of the nonzero flag.
+                const unsigned normal = settings.Byte(ByteKey::speed_normal2);
+                const unsigned fast = settings.Byte(ByteKey::speed_fast2);
+                const unsigned mask = (fast - normal) & 255u;
+                const DWORD flag = mode ? (0xffffff00u | mask) : 0u;
+                return flag + DWORD(normal < 128 ? int(normal) : int(normal) - 256);
+            }
+        }
+        else if (input == ClockSpeedInput::Button && settings.Mode(ByteKey::speed_rewritespeed) == 1)
+            return DWORD(settings.Int(mode ? IntKey::speed_fast : IntKey::speed_normal));
+        else if (input == ClockSpeedInput::Keyboard && settings.Mode(ByteKey::speed_rewritespeedkey) == 1)
+            return DWORD(settings.Int(mode ? IntKey::speed_fastkey : IntKey::speed_normalkey));
+    }
+    return mode ? DW_DEFAULT_SEGMENT_TIME / 2 : DW_DEFAULT_SEGMENT_TIME;
+}
+
 void CI3DObjectClock::Init(int nInitSpeed)
 {
     WideScreen::Scope wideScope(1);
@@ -6421,10 +6461,7 @@ void CI3DObjectClock::Init(int nInitSpeed)
     fIdleTime = 0;
 
     nMode = nInitSpeed;
-    if (nMode)
-        DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME / 2;
-    else
-        DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
+    DW_SEGMENT_TIME = ClockSegmentTime(nMode, ClockSpeedInput::Init);
     pI3D->nSpeed = nMode;
 
     bNewObj = false;
@@ -6512,23 +6549,23 @@ void CI3DObjectClock::OnLButtonUp(UINT nFlags, CPoint point)
         break;
     case 1:
         SetProcessed();
-        if (IWorldConnector.IsLMP() && !NConsole::MpSpeedControlEnabled())
+        if (IWorldConnector.IsLMP() && !SpellAddonMpSpeedAllowed() && !NConsole::MpSpeedControlEnabled())
             break;
         if (IWorld.IsMissionCombatPause())
             IWorld.MissionCombatPause(false);
         nMode = 0;
-        DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
+        DW_SEGMENT_TIME = ClockSegmentTime(nMode, ClockSpeedInput::Button);
         pI3D->nSpeed = nMode;
         pI3D->BeginFX("buttons\\battle\\clock.wav");
         break;
     case 2:
         SetProcessed();
-        if (IWorldConnector.IsLMP() && !NConsole::MpSpeedControlEnabled())
+        if (IWorldConnector.IsLMP() && !SpellAddonMpSpeedAllowed() && !NConsole::MpSpeedControlEnabled())
             break;
         if (IWorld.IsMissionCombatPause())
             IWorld.MissionCombatPause(false);
         nMode = 1;
-        DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME / 2;
+        DW_SEGMENT_TIME = ClockSegmentTime(nMode, ClockSpeedInput::Button);
         pI3D->nSpeed = nMode;
         pI3D->BeginFX("buttons\\battle\\clock.wav");
         break;
@@ -6559,24 +6596,24 @@ void CI3DObjectClock::NewObjectives()
     bNewObj = true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectClock::SetSpeedMode(int mode)
+void CI3DObjectClock::SetSpeedMode(int mode, bool fromKeyboard)
 {
     pI3D->BeginFX("buttons\\battle\\clock.wav");
     nMode = mode;
-    DW_SEGMENT_TIME = mode == 1 ? DW_DEFAULT_SEGMENT_TIME / 2 : DW_DEFAULT_SEGMENT_TIME;
+    DW_SEGMENT_TIME = ClockSegmentTime(mode, fromKeyboard ? ClockSpeedInput::Keyboard : ClockSpeedInput::Button);
     pI3D->nSpeed = nMode;
 }
 void CI3DObjectClock::AccelerateFromKeyboard()
 {
     if (IWorld.IsMissionCombatPause())
         return;
-    SetSpeedMode(1);
+    SetSpeedMode(1, true);
 }
 void CI3DObjectClock::DecelerateFromKeyboard()
 {
     if (IWorld.IsMissionCombatPause())
         return;
-    SetSpeedMode(0);
+    SetSpeedMode(0, true);
 }
 void CI3DObjectClock::Accelerate()
 {
