@@ -42,6 +42,10 @@ void CTerrain::ReleaseOwnedTerrain(CRenderer* renderer)
 
 bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
 {
+    // owned terrain via API5 retired; the renderer is embedded in stage 3
+    if(renderer && renderer->GetD3D())
+        renderer->GetD3D()->GetOwnedRenderer().TerrainFallback("owned_terrain_api5_retired_stage3");
+    return false;
     auto* dx=renderer->GetD3D();unsigned width=0,height=0;
     if(!dx||!dx->IsOwnedWorldActive()||dx->GetTerrainShadowSize(width,height))return false;
     if(!renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)){
