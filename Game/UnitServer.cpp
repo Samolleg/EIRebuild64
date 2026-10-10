@@ -2243,17 +2243,53 @@ CSpell *CUnitServer::GetSpell(const SUnitBasicCmd &cmd)
 // check cast possibility with rpg system
 void CUnitServer::SyncNpcMagicState()
 {
-    if(!ModRuntime::Current()||!lpUnit||lpUnit->IsHero())return;
-    if(lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND)&&rpgUnitStats.rpgNAWWeaponType!=RPGWST_MAGIC)lpUnit->SetFlag(UNIT_FEEBLED);
-    else lpUnit->ResetFlag(UNIT_FEEBLED);
+    auto* mod = ModRuntime::Current();
+    if (!lpUnit)
+        return;
+    if (mod && mod->SpellAddon().Feature29() == 1)
+    {
+        // ASI uses the actual HasSpellEffect return value as the quick-spell slot.
+        const int slot = lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND);
+        bool feebled = slot && rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC;
+        if (!feebled)
+        {
+            CSpell* spell = lpUnit->GetQSpell(slot);
+            feebled = spell && !lpUnit->IsHero() &&
+                double(spell->GetManaCost()) * rpgUnitStats.GetManaBonusMultiplier() >
+                    GetMapObjectServer()->GetCurrentMP();
+        }
+        if (feebled)
+            lpUnit->SetFlag(UNIT_FEEBLED);
+        else
+            lpUnit->ResetFlag(UNIT_FEEBLED);
+        return;
+    }
+    // Keep the existing NPC synchronization when f29 is inactive.
+    if (mod && !lpUnit->IsHero())
+    {
+        if (lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND) &&
+            rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC)
+            lpUnit->SetFlag(UNIT_FEEBLED);
+        else
+            lpUnit->ResetFlag(UNIT_FEEBLED);
+    }
 }
 bool CUnitServer::HasAISpellMana(int slot)
 {
     auto*mod=ModRuntime::Current();
-    if(!mod||!lpUnit||slot<0||slot>=8||(lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit)))return true;
+    if(!mod||!lpUnit||slot<0||slot>=8)return true;
+    const bool naturalMana = mod->SpellAddon().Feature18() == 4;
+    if(!naturalMana&&lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit))return true;
     auto*spell=GetSpell(slot);auto*owner=GetMapObjectServer();if(!spell||!owner)return true;
-    ModSkills::Config config;float cost=mod->SkillConfig(spell,config)?config.Cost(spell->GetManaCost()):ModSpells::ManaCost(spell->GetManaCost(),rpgUnitStats.GetManaBonusMultiplier());
-    return ModSpells::HasMana(owner->GetCurrentMP(),cost);
+    ModSkills::Config config;
+    if(mod->SkillConfig(spell,config))
+        return (lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit)) ||
+            ModSpells::HasMana(owner->GetCurrentMP(),config.Cost(spell->GetManaCost()));
+    if(naturalMana)
+        return rpgUnitStats.rpgNAWWeaponType==RPGWST_MAGIC ||
+            !(double(spell->GetManaCost())*rpgUnitStats.GetManaBonusMultiplier()>owner->GetCurrentMP());
+    if(lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit))return true;
+    return ModSpells::HasMana(owner->GetCurrentMP(),ModSpells::ManaCost(spell->GetManaCost(),rpgUnitStats.GetManaBonusMultiplier()));
 }
 bool CUnitServer::CanCastSpell(CSpell *pSpell, bool bCheckRPG)
 {
@@ -2432,8 +2468,11 @@ bool CUnitServer::CheckRelief(SUCTraceInfo &info, const CPlot3D &ptFrom)
 bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
 {
     SyncNpcMagicState();
-    if(!HasAISpellMana(cmd.nQSpellNum))return false;
     auto*mod=ModRuntime::Current();auto*skill=cmd.nQSpellNum>=0&&cmd.nQSpellNum<int(lpUnit->GetSpellSlotCount())?GetSpell(cmd.nQSpellNum):nullptr;
+    ModSkills::Config manaSkill;
+    const bool spellAddonMana = mod && mod->SpellAddon().Feature18() == 4 &&
+        !(mod->SkillConfig(skill,manaSkill));
+    if(!spellAddonMana&&!HasAISpellMana(cmd.nQSpellNum))return false;
     if(cmd.cmd==UC_CASTPOINT&&mod&&mod->PointSkill(skill)){ModSkills::Config config;if(mod->SkillConfig(skill,config))return CanRequestPointSkill(cmd.nQSpellNum,cmd.ptTarget);}
     CSpell *pSpell;
     int nQSpellNum = cmd.nQSpellNum;
@@ -2456,9 +2495,20 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
         pSpell = lpUnit->GetQSpell(nQSpellNum);
         if (!pSpell)
             return false;
-        if (lpUnit->IsHero() && pSpell->GetManaCost() * rpgUnitStats.GetManaBonusMultiplier() >
-                                    GetMapObjectServer()->GetCurrentMP())
+        const bool checkMana = spellAddonMana
+            ? rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC : lpUnit->IsHero();
+        const bool insufficient = spellAddonMana
+            ? double(pSpell->GetManaCost()) * rpgUnitStats.GetManaBonusMultiplier() >
+                GetMapObjectServer()->GetCurrentMP()
+            : pSpell->GetManaCost() * rpgUnitStats.GetManaBonusMultiplier() >
+                GetMapObjectServer()->GetCurrentMP();
+        if (checkMana && insufficient)
+        {
+            if (mod && mod->SpellAddon().Feature29() == 1 &&
+                !IsIDofPersonage(lpUnit->GetID()))
+                lpUnit->SetFlag(UNIT_FEEBLED);
             return false;
+        }
     }
     // range checking is disabled
     /*if ( fabs2( ptTarget - lpUnit->GetCP() ) > sqr( pSpell->GetRange() * 0.98f ) )
@@ -3509,7 +3559,12 @@ void CUnitServer::UseSpell()
     }
     else
     {
-        if (lpUnit->IsHero() || ModRuntime::Current())
+        auto* mod = ModRuntime::Current();
+        ModSkills::Config manaSkill;
+        const bool naturalMana = mod && mod->SpellAddon().Feature18() == 4 &&
+            !mod->SkillConfig(pSpell,manaSkill);
+        if (naturalMana ? rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC
+                        : (lpUnit->IsHero() || mod))
         {
             GetMapObjectServer()->ChangeCurrentMP(-pSpell->GetManaCost() *
                                                   rpgUnitStats.GetManaBonusMultiplier());
@@ -5272,11 +5327,16 @@ void CUnitServer::ChangeSpeedWithSpell()
 {
     float factor=ModRuntime::Current()?ModRuntime::Current()->CrippledSpeed(*lpUnit):1;
     if(factor!=lastCrippledFactor){lastCrippledFactor=factor;L1SpeedChanged();}
-    if (lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND) &&
-        rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC)
-        lpUnit->SetFlag(UNIT_FEEBLED);
+    if (auto* mod = ModRuntime::Current(); mod && mod->SpellAddon().Feature29() == 1)
+        SyncNpcMagicState();
     else
-        lpUnit->ResetFlag(UNIT_FEEBLED);
+    {
+        if (lpUnit->HasSpellEffect(SPELL_ID_FEEBLEMIND) &&
+            rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC)
+            lpUnit->SetFlag(UNIT_FEEBLED);
+        else
+            lpUnit->ResetFlag(UNIT_FEEBLED);
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::ComplectionChanged()
