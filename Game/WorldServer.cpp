@@ -1501,6 +1501,9 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
             //		"Sleep(570)"
             //		"BlockUnit(GetObjectByName( \"hero\" ),0)"
             ; //"Sleep( 25 ) Stand(GetObjectByName( \"hero\" ))";
+    if (const auto* mod = ModRuntime::Current())
+        if (mod->SpellAddon().Feature13() >= 1)
+            szAddToScript += "AddMob(\"AutoRunSpellAddon123.mob\")";
     szAddToScript += ")";
     if (pPlayer)
         script.LoadText(szAddToScript);
@@ -3535,10 +3538,15 @@ void CWorldServer::FinishZoneLoading()
 BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName)
 {
     // check if one is already loaded
-    for (int i = 0; i < szLoadedMobs.GetSize(); i++)
+    const auto* mod = ModRuntime::Current();
+    if (!(mod && mod->SpellAddon().Feature14() >= 1) ||
+        !pszMobName || strncmp(pszMobName, "Auto", 4) == 0)
     {
-        if (szLoadedMobs[i] == pszMobName)
-            return TRUE;
+        for (int i = 0; i < szLoadedMobs.GetSize(); i++)
+        {
+            if (szLoadedMobs[i] == pszMobName)
+                return TRUE;
+        }
     }
     //
     C2DScreenWait::Ignore(true);
