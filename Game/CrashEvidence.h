@@ -5,6 +5,24 @@
 
 namespace CrashEvidence
 {
+// Fixed storage; the fatal path must not depend on allocating a C++ container.
+struct Frame
+{
+    DWORD address, rva, line;
+    bool processImage;
+    char module[128], function[256], file[384];
+};
+struct Details
+{
+    DWORD code;
+    char kind[64], types[2048], message[1024], at[768];
+    char access[16];
+    ULONG_PTR accessAddress;
+    unsigned frameCount;
+    bool exactPdb;
+    Frame frames[64];
+};
+const Details &LastDetails();
 struct Result
 {
     bool reportWritten;

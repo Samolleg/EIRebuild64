@@ -13,6 +13,7 @@
 #include <dxgi1_4.h>
 #endif
 #include "GameJournal.h"
+#include "CrashEvidence.h"
 #include "GameMemorySnapshot.h"
 #include <new>
 #include <cstring>
@@ -528,7 +529,7 @@ void Event(const char* category,const char* event,const char* format,...) noexce
 }
 void Flush() noexcept {State* s=current.load();if(s)SetEvent(s->wake);}
 void FlushCritical() noexcept{State* s=current.load();if(s)Synchronize(*s);}
-void Crash(const wchar_t* dump,unsigned long code) noexcept {
+void Crash(const wchar_t* dump,unsigned long code,const CrashEvidence::Details* details) noexcept {
     State* s=current.load();if(!s)return;
     if(WaitForSingleObject(s->ready,2000)!=WAIT_OBJECT_0)return;
     DWORD start=GetTickCount();
@@ -538,7 +539,19 @@ void Crash(const wchar_t* dump,unsigned long code) noexcept {
     }
     try {
         Drain(*s,true);
-        Write(*s,Line("ERROR","crash","code="+std::to_string(code)+" dump="+Escape(WideUtf8(dump?dump:L""),true)).line);
+        std::string description="code="+std::to_string(code)+" dump="+Escape(WideUtf8(dump?dump:L""),true);
+        if(details) {
+            description+=" kind="+std::string(details->kind)+" type="+Escape(Utf8(details->types),true)+
+                " what="+Escape(Utf8(details->message),true)+" at="+Escape(Utf8(details->at),true);
+        }
+        Write(*s,Line("ERROR","crash",description).line);
+        if(details)for(unsigned i=0;i<details->frameCount&&i<12;++i) {
+            const auto& frame=details->frames[i]; char numbers[96];
+            _snprintf_s(numbers,_TRUNCATE,"n=%u rva=0x%08lX",i,frame.rva);
+            Write(*s,Line("ERROR","crash_frame",std::string(numbers)+" module="+Escape(Utf8(frame.module),true)+
+                " func="+Escape(Utf8(frame.function),true)+" line="+std::to_string(frame.line)+
+                " file="+Escape(Utf8(frame.file),true)).line);
+        }
         if(s->file!=INVALID_HANDLE_VALUE)FlushFileBuffers(s->file);
     }catch(...){}
     ReleaseSRWLockExclusive(&s->writeLock);
