@@ -44,6 +44,9 @@ bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
 {
     auto* dx=renderer->GetD3D();unsigned width=0,height=0;
     if(!dx||!dx->IsOwnedWorldActive()||dx->GetTerrainShadowSize(width,height))return false;
+    if(!renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)){
+        dx->GetOwnedRenderer().TerrainFallback("terrain_projection_stack_empty");return false;
+    }
     const size_t count=size_t(GetSectorsNumber());
     if(rendererSectorRows.size()!=count){rendererSectorRows.resize(count);rendererSectorPhases.resize(count);}
     std::vector<EIRenderTerrainSectorV5> rows;rows.reserve(count);
@@ -65,7 +68,9 @@ bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
         rows.push_back(row);
     }
     EIRenderTerrainFrameV5 packet{};packet.source_revision=rendererRevision;
-    const SHMatrix& world=renderer->GetGPU()->GetMatrix(MAT_STACK_WORLDSPACE);
+    // DrawBase/DrawTransparent publish this terrain's own placement and push
+    // it onto PROJSPACE only. WORLDSPACE belongs to object traversal.
+    const SHMatrix& world=GetPlacement();
     const SHMatrix& clip=renderer->GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
     memcpy(packet.object_to_world,&world,sizeof(world));memcpy(packet.object_to_clip,&clip,sizeof(clip));
     packet.camera[0]=theCamera.GetCP().x;packet.camera[1]=theCamera.GetCP().y;packet.camera[2]=theCamera.GetCP().z;

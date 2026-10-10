@@ -283,6 +283,9 @@ public:
     HRESULT EndWorld() { const HRESULT hr = worldApi.end_world(host); if(SUCCEEDED(hr))CollectFigureResources(); PublishPackets(); JournalRendererState(); return hr; }
     HRESULT SetTerrain(const EIRenderTerrainSourceV5& input){return terrainApi.set_terrain_source(host,&input);}
     void ReleaseTerrain() {if(host){const HRESULT hr=terrainApi.release_terrain(host);if(FAILED(hr))throw hr;}}
+    void TerrainFallback(const char* reason) {
+        auto& counts=packets[3];++counts.rejected;++counts.legacy;++counts.reasons[reason];
+    }
     bool SubmitTerrain(EIRenderTerrainFrameV5 input) {
         input.size=sizeof(input);input.version=5;input.scene_generation=figureScene;
         EIRenderTerrainResultV5 result{sizeof(result),5,0,0,{}};
