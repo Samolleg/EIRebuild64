@@ -530,6 +530,8 @@ bool CAISpellCaster::IsSafeAttack(CAIUnitLogic &logic, CEnemy &a)
     if (!pAttack)
         return false;
 
+    const auto* mod = ModRuntime::Current();
+    const bool allowUnsafeArea = mod && mod->SpellAddon().Feature33() == 1;
     float fpMinDistance = GetMinimalDistance(pThis, pAttack->type);
     if (fpMinDistance != 0)
     {
@@ -542,10 +544,10 @@ bool CAISpellCaster::IsSafeAttack(CAIUnitLogic &logic, CEnemy &a)
             if (distanceXY2(ptDst, pUnit->GetCP()) < fpMinDist &&
                 theWorldServer.fof.IsPlayerAlly(pUnit->GetPlayerNum(), nOurPlayer) &&
                 pUnit->CanBeDamagedByAreaSpell())
-                return false;
+                return allowUnsafeArea;
         }
         if (distanceXY2(pThis->GetCP(), ptDst) <= sqr(pAttack->fpDamageRadius))
-            return false;
+            return allowUnsafeArea;
     }
     return true;
 }

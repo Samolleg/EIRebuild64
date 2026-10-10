@@ -1218,7 +1218,11 @@ void CEffectSpell::FinishSpell(int nKind)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::InflictDamage(SRPGAttackPortion &ap, CUnit *pTarget)
 {
-    if (pWho.IsEmpty() || spell.IsValidTarget(pWho, pTarget))
+    const auto* mod = ModRuntime::Current();
+    const int filterMode = mod ? mod->SpellAddon().Feature36() : 0;
+    // The ASI applies f36 in modes 1 and 2; other modes keep the null-caster bypass.
+    if ((pWho.IsEmpty() && filterMode != 1 && filterMode != 2) ||
+        spell.IsValidTarget(pWho, pTarget))
     {
         if (CheckFlag(DW_SPELL_HIDE_CASTER))
             pTarget->ProcessAttackPortion(&ap, 0, pWho);

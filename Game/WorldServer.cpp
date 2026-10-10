@@ -1128,13 +1128,23 @@ void CWorldServer::CastSingleSpell(CSpell *pSpell, CUnit *pWho, CPlot3D ptFrom, 
         case SPELL_ID_WEAKEN:
         case SPELL_ID_FEEBLEMIND:
         case SPELL_ID_STUN:
-        case SPELL_ID_STENCH:
         case SPELL_ID_SLOW:
-        case SPELL_ID_SHRINK:
             pUS->logic.TakeDamage(pWho);
             fof.MakeDamage(pWho, _pTarget, 10); // 10 - amount of damage
             _pTarget->SetFlag(UNIT_RECALCENEMY);
             pWho->SetFlag(UNIT_RECALCENEMY);
+            break;
+        case SPELL_ID_STENCH:
+        case SPELL_ID_SHRINK:
+            // f27 changes only the cast-time attack reaction for these two IDs.
+            if (const auto* mod = ModRuntime::Current();
+                !mod || mod->SpellAddon().Feature27() != 1)
+            {
+                pUS->logic.TakeDamage(pWho);
+                fof.MakeDamage(pWho, _pTarget, 10);
+                _pTarget->SetFlag(UNIT_RECALCENEMY);
+                pWho->SetFlag(UNIT_RECALCENEMY);
+            }
             break;
         }
     }
