@@ -6,6 +6,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "UnitServer.h"
 #include "WorldServer.h"
 #include "SpellEffect.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 //---------------------------- Create / destroy
@@ -66,10 +68,13 @@ int CMapObjectServer::Segment()
             // remove effect
             int nEffectType = lpMapObject->spellEffects[i].nSpellID;
             lpMapObject->spellEffects.RemoveAt(i); // remove effect
+            auto *mod = ModRuntime::Current();
+            const int mode = mod ? mod->SpellAddon().Feature24() : 0;
             bool bStrengthChanged = (nEffectType == SPELL_ID_STRENGTHEN) ||
                                     (nEffectType == SPELL_ID_WEAKEN) ||
-                                    (nEffectType == SPELL_ID_ENLARGE) ||
-                                    (nEffectType == SPELL_ID_SHRINK);
+                                    ((mode != 1 && mode != 2) &&
+                                     ((nEffectType == SPELL_ID_ENLARGE) ||
+                                      (nEffectType == SPELL_ID_SHRINK)));
             if (bStrengthChanged)
                 lpMapObject->ChangeComplectionWithSpell();
             lpMapObject->SetUpdateMask(CMapObject::VLD_MASK_SPELLEFFECTS);
