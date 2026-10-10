@@ -62,6 +62,15 @@ LPCTSTR pszSkillNames[RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS]
     //	"Tame"
 };
 /////////////////////////////////////////////////////////////////////////////////////
+namespace
+{
+int ManualSkillTrainingLimit(int index, int fallback)
+{
+    const auto *mod = ModRuntime::Current();
+    // f01 patches the first displayed manual skill (Science), not a hidden skill.
+    return index == 0 && mod && mod->SpellAddon().Feature01() == 1 ? 120 : fallback;
+}
+}
 const int CAMP_NUM_STATS = 8;
 LPCTSTR pszStatsNames[CAMP_NUM_STATS] = {
     "Strength",
@@ -2347,7 +2356,7 @@ void CI3DObjectPerks::RedrawPerks()
         pSurf->DrawText(skillsManual[i].szName, rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
         szOut.Format("%d", skillsManual[i].nValue);
         pSurf->DrawText(szOut, rc - CPoint(40, 0), 0, CAMP_COLOR_SKILLS, DT_RIGHT);
-        if (skillsManual[i].nValue < ((ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVPerks"))?120:100))
+        if (skillsManual[i].nValue < ManualSkillTrainingLimit(i, (ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVPerks"))?120:100))
         {
             FormPerkPrice(skillsManual[i].nPrice, szOut);
             if (skillsManual[i].nPrice <= nCharPoints)
@@ -2459,7 +2468,7 @@ void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
         ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS)
     {
         num = ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS;
-        if (!ModProgression::SkillPending(native,false,num,true,skillsManual[num].nValue,skillsManual[num].nPrice,nCharPoints,pStats->fSpentExp,100))
+        if (!ModProgression::SkillPending(native,false,num,true,skillsManual[num].nValue,skillsManual[num].nPrice,nCharPoints,pStats->fSpentExp,ManualSkillTrainingLimit(num,100)))
             return;
         pStats->cManualSkills[num]++;
         pStats->fSpentExp += skillsManual[num].nPrice;
@@ -2543,7 +2552,7 @@ void CI3DObjectPerks::OnIdle()
         ht < 4 + RPG_NUM_ACTUAL_AUTO_SKILLS + RPG_NUM_ACTUAL_MANUAL_SKILLS)
     {
         num = ht - 4 - RPG_NUM_ACTUAL_AUTO_SKILLS;
-        if (skillsManual[num].nValue >= 100 || skillsManual[num].nPrice > nCharPoints)
+        if (skillsManual[num].nValue >= ManualSkillTrainingLimit(num,100) || skillsManual[num].nPrice > nCharPoints)
         {
             pI3D->ReleaseCapture();
             nLock = -1;
