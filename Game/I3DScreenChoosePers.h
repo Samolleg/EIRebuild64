@@ -10,6 +10,7 @@ class CI3DScreenChoosePers : public CI3DItemScreen
 private:
     EItemScreenModes eScreenMode;
     bool bPrimaryCreationActive;
+    bool bSpellAddonPrimaryCreation;
     int nPrimaryCreationWeight;
 
     int nCurrentParty;
@@ -71,6 +72,7 @@ public:
     CI3DScreenChoosePers(CInterface3D *pI)
         : CI3DItemScreen(pI)
         , bPrimaryCreationActive(false)
+        , bSpellAddonPrimaryCreation(false)
         , nPrimaryCreationWeight(0)
         , pNameStats(0)
     {

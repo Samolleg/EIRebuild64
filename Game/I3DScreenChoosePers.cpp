@@ -16,6 +16,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScrollBar.h"
 #include "TextManager.h"
 #include "Party.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 
 #include "AckDatabase.h"
 
@@ -36,6 +38,7 @@ const int NUM_AREAS = 9;
 void CI3DScreenChoosePers::OnActivate()
 {
     bPrimaryCreationActive = false;
+    bSpellAddonPrimaryCreation = false;
     nPrimaryCreationWeight = 0;
     IWorldConnector.LMPReloadDatabases(true);
 
@@ -1122,7 +1125,10 @@ void CI3DScreenChoosePers::ReturnToSkinSelect()
 void CI3DScreenChoosePers::BeginPrimaryCreation()
 {
     pNameStats->StopPrimaryRepeat();
-    nPrimaryCreationWeight = 3 * CreationPrimaryWeight(25);
+    const auto *mod = ModRuntime::Current();
+    bSpellAddonPrimaryCreation = mod && mod->SpellAddon().Feature03() == 1;
+    // Mode 1 writes 5/45/20000; parammin/parammax/balance belong to another mode.
+    nPrimaryCreationWeight = bSpellAddonPrimaryCreation ? 20000 : 3 * CreationPrimaryWeight(25);
     bPrimaryCreationActive = true;
 }
 
@@ -1131,6 +1137,7 @@ void CI3DScreenChoosePers::EndPrimaryCreation()
     if (pNameStats)
         pNameStats->StopPrimaryRepeat();
     bPrimaryCreationActive = false;
+    bSpellAddonPrimaryCreation = false;
     nPrimaryCreationWeight = 0;
 }
 
@@ -1144,7 +1151,9 @@ bool CI3DScreenChoosePers::GetCreationPrimaryValues(int values[3])
     for (int i = 0; i < 3; ++i)
     {
         // Check before the cast: rejects nonfinite and nonintegral values unchanged.
-        if (!(base[i] >= 15 && base[i] <= 32))
+        const int minimum = bSpellAddonPrimaryCreation ? 5 : 15;
+        const int maximum = bSpellAddonPrimaryCreation ? 45 : 32;
+        if (!(base[i] >= minimum && base[i] <= maximum))
             return false;
         values[i] = static_cast<int>(base[i]);
         if (base[i] != values[i])
@@ -1159,8 +1168,10 @@ bool CI3DScreenChoosePers::GetCreationPrimaryPoints(int &points)
     int values[3];
     if (!GetCreationPrimaryValues(values))
         return false;
-    const int remaining = nPrimaryCreationWeight - CreationPrimaryWeight(values[0]) -
-                          CreationPrimaryWeight(values[1]) - CreationPrimaryWeight(values[2]);
+    const int remaining = bSpellAddonPrimaryCreation
+        ? nPrimaryCreationWeight - values[0] - values[1] - values[2]
+        : nPrimaryCreationWeight - CreationPrimaryWeight(values[0]) -
+          CreationPrimaryWeight(values[1]) - CreationPrimaryWeight(values[2]);
     if (remaining < 0)
         return false;
     points = remaining;
@@ -1181,6 +1192,8 @@ bool CI3DScreenChoosePers::CanAdjustCreationPrimary(int primary, int delta)
     if (!GetCreationPrimaryPoints(points) || !GetCreationPrimaryValues(values))
         return false;
     const int value = values[primary];
+    if (bSpellAddonPrimaryCreation)
+        return delta < 0 ? value > 5 : value < 45 && points >= 1;
     if (delta < 0)
         return value > 15;
     return value < 32 &&
@@ -1205,7 +1218,8 @@ bool CI3DScreenChoosePers::AdjustCreationPrimary(int primary, int delta)
 bool CI3DScreenChoosePers::HasCompletePrimaryDistribution()
 {
     int points;
-    return GetCreationPrimaryPoints(points) && points == 0;
+    // The ASI budget exceeds the entire 5..45 range: a valid remainder is enough.
+    return GetCreationPrimaryPoints(points) && (bSpellAddonPrimaryCreation || points == 0);
 }
 
 bool CI3DScreenChoosePers::CanProceedToStats()
