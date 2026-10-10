@@ -229,26 +229,12 @@ public:
     template <class T>
     void AddT(const chunk_id idChunk, CPtr<T> &data)
     {
-        if (IsReading())
-        {
-            CFundament *object = LoadObject(idChunk);
-            T *typed = dynamic_cast<T *>(object);
-            if (object && !typed) { this->data.Fail("wrong_object_reference_type"); return; }
-            data = typed;
-        }
-        else Add(idChunk, (CPtrBase &)data);
+        Add(idChunk, (CPtrBase &)data);
     }
     template <class T>
     void AddT(const chunk_id idChunk, CObj<T> &data)
     {
-        if (IsReading())
-        {
-            CFundament *object = LoadObject(idChunk);
-            T *typed = dynamic_cast<T *>(object);
-            if (object && !typed) { this->data.Fail("wrong_object_reference_type"); return; }
-            ((CObjBase &)data).SetObjectBase((CObjectBase *)typed);
-        }
-        else Add(idChunk, (CObjBase &)data);
+        Add(idChunk, (CObjBase &)data);
     }
     // serializnig several standard containers
     // vector

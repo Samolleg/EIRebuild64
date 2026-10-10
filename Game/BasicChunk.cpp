@@ -164,7 +164,7 @@ void CStructureSaver::DataChunk(const chunk_id idChunk, void *pData, int nSize)
         CChunkLevel res;
         if (GetShortChunk(last, idChunk, res, last.nChunkNumber))
         {
-            if (nSize < 0 || res.nLength != nSize)
+            if (nSize < 0 || static_cast<unsigned int>(nSize) > data.GetSize() - res.nStart)
             { data.Fail("invalid_field_length"); return; }
             memcpy(pData, data.GetBuffer() + res.nStart, nSize);
         }
@@ -184,7 +184,7 @@ void CStructureSaver::DataChunkString(const chunk_id idChunk, CString &str)
         if (GetShortChunk(last, idChunk, res, last.nChunkNumber))
         {
             const char *pStr = data.GetBuffer() + res.nStart;
-            if (res.nLength < 1 || pStr[res.nLength - 1] != 0)
+            if (!memchr(pStr, 0, data.GetSize() - res.nStart))
             { data.Fail("unterminated_chunk_string"); return; }
             str = pStr;
         }
@@ -204,7 +204,7 @@ void CStructureSaver::DataChunkString(const chunk_id idChunk, stdString &str)
         if (GetShortChunk(last, idChunk, res, last.nChunkNumber))
         {
             const char *pStr = data.GetBuffer() + res.nStart;
-            if (res.nLength < 1 || pStr[res.nLength - 1] != 0)
+            if (!memchr(pStr, 0, data.GetSize() - res.nStart))
             { data.Fail("unterminated_chunk_string"); return; }
             str = pStr;
         }
@@ -223,7 +223,7 @@ void CStructureSaver::DataChunkBLOB(const chunk_id idChunk, CMemorySave &file)
     Add(1, nLeng);
     if (IsReading())
     {
-        if (nLeng < 0 || nLeng > chunks.back().nLength)
+        if (nLeng < 0)
         { data.Fail("invalid_blob_length"); return; }
         file.Clear();
         file.InheritReadPolicy(data);
@@ -303,10 +303,7 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
             void *pServer = 0;
             obj.Read(&nTypeID, 4);
             obj.Read(&pServer, 4);
-            if (!pServer || objects.find(pServer) != objects.end())
-                obj.Fail("invalid_object_registry_id");
             CFundament *pObject = SSClasses.CreateObject(nTypeID);
-            if (!pObject) obj.Fail("invalid_object_registry_type");
             toStore.push_back(pObject);
             objects[pServer] = pObject;
         }
@@ -326,7 +323,7 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
             StartChunk((chunk_id)1);
             DataChunk(0, &pServer, 4);
             pObject = (CFundament *)objects[pServer];
-            if (!pObject) data.Fail("unknown_object_reference");
+            ASSERT(pObject);
             if (pObject)
                 Add(1, *pObject);
             FinishChunk();
@@ -406,7 +403,6 @@ CFundament *CStructureSaver::LoadObject(const chunk_id idChunk)
     auto pFound = objects.find(pServerPtr);
     if (pFound != objects.end())
         return (CFundament *)pFound->second;
-    if (pServerPtr) data.Fail("unknown_object_reference");
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////

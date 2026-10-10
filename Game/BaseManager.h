@@ -148,8 +148,7 @@ void LoadGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager
     for (i = 0; i < count; i++)
     {
         file.Read(&nIdx, sizeof(nIdx));
-        ARG_TYPE object = nIdx == -1 ? nullptr : dynamic_cast<ARG_TYPE>(pManager->Find(nIdx));
-        if (nIdx != -1 && !object) { file.Fail("invalid_typed_reference"); return; }
+        ARG_TYPE object = (ARG_TYPE)pManager->Find(nIdx);
         arr.Add(object);
         if (object) object->AddRef();
     }
@@ -209,8 +208,7 @@ TYPE *LoadGBPtr(CSave &file, CBaseManager *pManager)
     file.Read(nID);
     if (nID == -1)
         return NULL;
-    TYPE *pRes = dynamic_cast<TYPE *>(pManager->Find(nID));
-    if (!pRes) { file.Fail("invalid_typed_reference"); return nullptr; }
+    TYPE *pRes = (TYPE *)pManager->Find(nID);
     if (pRes)
         pRes->AddRef();
     return pRes;
