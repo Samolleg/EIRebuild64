@@ -58,9 +58,11 @@ struct SUnitVisibilityInfo
                fpTracking == AI_MAX_VISIBILITY_INFO_MULT &&
                fpSenseLife == AI_MAX_VISIBILITY_INFO_MULT;
     }
-    bool IsRatherSafe()
+    bool IsRatherSafe(float fpSafetyMulDist = 2)
     {
-        return fpSight > 2 && fpSmell > 2 && fpSound > 2 && fpTracking > 2 && fpSenseLife > 2;
+        return fpSight > fpSafetyMulDist && fpSmell > fpSafetyMulDist &&
+               fpSound > fpSafetyMulDist && fpTracking > fpSafetyMulDist &&
+               fpSenseLife > fpSafetyMulDist;
     }
 };
 /////////////////////////////////////////////////////////////////////////////////////

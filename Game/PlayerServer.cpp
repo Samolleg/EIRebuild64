@@ -13,6 +13,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldServer.h"
 #include "WorldInterface.h"
 #include "PlayerServer.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "UnitServer.h"
 #include "MapObjectServer.h"
 #include "ServerConsts.h"
@@ -575,12 +577,20 @@ BOOL CPlayerServer::SendVisibleUnitsList()
     int i, nSize;
     dangerState = WDS_NORMAL;
 
+    float fpSafetyMulDist = 2;
+    if (auto *package = ModRuntime::Current())
+    {
+        const auto &spellAddon = package->SpellAddon();
+        if (spellAddon.Feature31() == 1)
+            fpSafetyMulDist = spellAddon.Scalar(ModSpellAddon::ScalarKey::gameplay_safetymuldist);
+    }
+
     CUnitPtrHashIterator unitIter;
     CUnit *pUnit = unitIter.GetFirst(&pPlayer->unitsUnderControl);
     while (pUnit)
     {
         // switch mode to warry if we are close to range
-        if (!pUnit->sensesDetection.IsRatherSafe())
+        if (!pUnit->sensesDetection.IsRatherSafe(fpSafetyMulDist))
             dangerState = WDS_WARRY;
         pUnit = unitIter.GetNext();
     }
