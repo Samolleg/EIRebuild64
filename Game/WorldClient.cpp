@@ -3990,8 +3990,39 @@ DWORD CWorldClient::FormBoredAckFlagsForUnit(CUnit *pUnit)
         dwAckFlags |= ACK_GIPATH;
     else if (szCurrentAllodName == "ingos")
         dwAckFlags |= ACK_INGOS;
-    else if (szCurrentAllodName == "suslanger")
-        dwAckFlags |= ACK_SUSLANGER;
+    else
+    {
+        const auto *package = ModRuntime::Current();
+        if (package && package->SpellAddon().Feature41() == 1)
+        {
+            // SpellAddon f41: exact allod names, preserving the accumulated mask.
+            static const struct
+            {
+                const char *name;
+                DWORD flag;
+            } allodAcks[] = {
+                {"jigran", 0x00008000},
+                {"neloya", 0x00010000},
+                {"eyn", 0x00020000},
+                {"bebesh", 0x00040000},
+                {"kvatokh", 0x00080000},
+                {"nokks", 0x00100000},
+                {"umoir", 0x00200000},
+                {"yazes", 0x00400000},
+                {"yiul", 0x00800000},
+            };
+            for (const auto &allod : allodAcks)
+            {
+                if (szCurrentAllodName == allod.name)
+                {
+                    dwAckFlags |= allod.flag;
+                    break;
+                }
+            }
+        }
+        if (szCurrentAllodName == "suslanger")
+            dwAckFlags |= ACK_SUSLANGER;
+    }
     // время суток
     if (IsNightTime())
         dwAckFlags |= ACK_NIGHT;
