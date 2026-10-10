@@ -632,6 +632,15 @@ static bool PrepareSave(PreparedSave &save, const CString &path, int signature)
     return save.Prepare(path, signature, N_CURRENT_SAVE_VERSION,
                          N_CURRENT_MINIMAL_SAVE_VERSION, lastSaveError);
 }
+static PreparedSave::Result PrepareOptionalSave(PreparedSave &save, const CString &path)
+{
+    return save.PrepareOptional(path, 0x102, N_CURRENT_SAVE_VERSION,
+                                N_CURRENT_MINIMAL_SAVE_VERSION, lastSaveError);
+}
+static void MissingSave(const CString &path, const char *event)
+{
+    GameJournal::Event("SAVE", event, "file=%s", GameJournal::Quote(path).c_str());
+}
 static BOOL SaveLoadFailure(const char *path, const char *reason, size_t offset)
 {
     GameJournal::Event("SAVE", "load_failed", "file=%s reason=%s offset=%u",
@@ -876,7 +885,14 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
             if (!party.VisitedZone(visited->szName) || !IsToBeStored(allod, visited)) continue;
             auto prepared = std::make_unique<PreparedSave>();
             failedPath = savePath + visited->szName + ".sav";
-            if (!PrepareSave(*prepared, failedPath, 0x102))
+            const auto result = PrepareOptionalSave(*prepared, failedPath);
+            if (result == PreparedSave::Result::Missing)
+            {
+                party.ResetVisitedZone(visited->szName);
+                MissingSave(failedPath, "zone_missing");
+                continue;
+            }
+            if (result == PreparedSave::Result::Failed)
                 return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
             zones.push_back(std::move(prepared));
         }
@@ -884,7 +900,10 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
         if (hasMission)
         {
             failedPath = savePath + "mission.sav";
-            if (!PrepareSave(mission, failedPath, 0x102))
+            const auto result = PrepareOptionalSave(mission, failedPath);
+            if (result == PreparedSave::Result::Missing)
+            { MissingSave(failedPath, "mission_missing"); return FALSE; }
+            if (result == PreparedSave::Result::Failed)
                 return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
         }
         // Stage B starts here. Nothing above clears current or changes the live world.
@@ -1108,8 +1127,10 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
     bool applying = false;
     try
     {
-        bool existing = GetFileAttributes(prepared.path) != INVALID_FILE_ATTRIBUTES;
-        if (existing && !PrepareSave(prepared, prepared.path, 0x102))
+        const auto result = PrepareOptionalSave(prepared, prepared.path);
+        const bool existing = result == PreparedSave::Result::Ready;
+        if (result == PreparedSave::Result::Missing) MissingSave(prepared.path, "zone_missing");
+        if (result == PreparedSave::Result::Failed)
             return SaveLoadFailure(prepared.path, lastSaveError.reason, lastSaveError.offset);
         CSaveReadScope strict;
         applying = true;
@@ -1182,7 +1203,12 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
             {
                 CString path;
                 path.Format("%ssaves\\current\\%s.sav", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszZoneName);
-                if (!PrepareSave(prepared, path, 0x102))
+                const auto result = PrepareOptionalSave(prepared, path);
+                // Legacy MoveToZone/LoadZoneState returns false for an absent
+                // visited-zone state; it does not invent a replacement world.
+                if (result == PreparedSave::Result::Missing)
+                { MissingSave(path, "zone_missing"); return FALSE; }
+                if (result == PreparedSave::Result::Failed)
                     return SaveLoadFailure(path, lastSaveError.reason, lastSaveError.offset);
                 havePrepared = true;
             }

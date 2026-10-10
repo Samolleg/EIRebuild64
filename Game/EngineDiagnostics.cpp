@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
+#include "ErrorDialog.h"
 #include "EngineDiagnostics.h"
 #include "SettingsProfile.h"
 #include "../shared/Common.h"
@@ -152,7 +153,7 @@ LONG WINAPI Filter(EXCEPTION_POINTERS *info) {
             L"EIRebuild stopped after an error. Code: 0x%08lX\nReport: %s (error %lu)\nDump: %s (error %lu)\nBackup: %s",
             code, CrashEvidence::ReportPath(), r.reportError, CrashEvidence::DumpPath(), r.dumpError,
             AnsiToWide(backup).c_str());
-        MessageBoxW(nullptr, text, L"EIRebuild crash diagnostics", MB_OK | MB_ICONERROR);
+        ErrorDialog::ShowW(GetActiveWindow(), text, L"EIRebuild crash diagnostics", MB_OK | MB_ICONERROR, false);
     }
     ExitProcess(code);
 }

@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
+#include "ErrorDialog.h"
 #include "SettingsProfile.h"
 #include "ModRandomOwnershipCheck.inl"
 #include "ModMobFlagArgumentsCheck.inl"
@@ -297,6 +298,7 @@ void NGame::AllowQuit(bool bAllow)
 /////////////////////////////////////////////////////////////////////////////////////
 bool NGame::QuitProgram(int nExitCode)
 {
+    if (ErrorDialog::RequestClose()) return true;
     if (bEnableQuit)
     {
         PostQuitMessage(nExitCode);
@@ -403,16 +405,15 @@ BOOL NGame::CheckPreviousApp(LPCSTR pszMainClass, LPCSTR pszMainTitle)
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-int NGame::MessageBox(LPCSTR pszText, UINT uType)
+int NGame::MessageBox(LPCSTR pszText, UINT uType, bool continuing)
 {
     GameJournal::Event("ERROR", "message_box", "type=%u text=%s", uType, GameJournal::Quote(pszText).c_str());
     GameJournal::FlushCritical();
-    HCURSOR hCursor = GetCursor(); // remember old cursor before message box call
-    /*if (pVis && pRend->IsFullscreen())
-        pRend->FlipToGDISurface();*/
-    int nRetVal = ::MessageBox(hWnd, pszText, szAppTitleName, uType);
-    SetCursor(hCursor); // restore old cursor after message box usage
-    return nRetVal;
+    const int result = ErrorDialog::ShowA(hWnd, pszText, szAppTitleName, uType, continuing);
+    GameJournal::Event("ERROR", "message_box_closed", "result=%d continuing=%d", result, continuing);
+    GameJournal::FlushCritical();
+    return result;
+
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL NGame::LoadGame()
@@ -683,7 +684,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     DWORD dwDXVersion = GetDXVersion();
     if (dwDXVersion < 0x700)
     {
-        ::MessageBox(0, szSysMsgs[0], "CRITICAL ERROR", MB_OK | MB_ICONEXCLAMATION);
+        ErrorDialog::ShowA(nullptr, szSysMsgs[0], "CRITICAL ERROR", MB_OK | MB_ICONEXCLAMATION);
         return 0xDEAD;
     }
 #endif // FINALRELEASE
@@ -767,7 +768,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
         {
             if (fDiskFreeSpace < 300.0 * double(1L << 20))
             {
-                int nRetCode = ::MessageBox(0, szSysMsgs[1], "Warning",
+                int nRetCode = ErrorDialog::ShowA(nullptr, szSysMsgs[1], "Warning",
                                             MB_OKCANCEL | MB_ICONWARNING);
                 if (nRetCode == IDCANCEL)
                     return 0xDEAD;
@@ -784,7 +785,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
             GetVolumeInformation(drive, name, 1024, 0, 0, 0, 0, 0);
             while (theSettings.szCD2Label != name)
             {
-                int nRetCode = ::MessageBox(0, szSysMsgs[2], "Warning",
+                int nRetCode = ErrorDialog::ShowA(nullptr, szSysMsgs[2], "Warning",
                                             MB_OKCANCEL | MB_ICONWARNING);
                 if (nRetCode == IDCANCEL)
                     return BAD_RESULT;
@@ -978,6 +979,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 //  WM_DESTROY	- post a quit message and return
 LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
     theInterface.CheckScreensMustDie();
     switch (message)
     {
@@ -1050,6 +1052,7 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 /////////////////////////////////////////////////////////////////////////////////////
 LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
     WORD wID;
 
     switch (message)

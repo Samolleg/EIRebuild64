@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ErrorDialog.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Unit.h"
@@ -293,7 +294,7 @@ static void ShowAnimationName(SADEntry *pAD)
     if (pAD)
     {
         szMsg.Format("Animation entry\n %s\n", AnimationFlagsToString(pAD->dwFlags));
-        AfxMessageBox(szMsg);
+        ErrorDialog::ShowA(GetActiveWindow(), szMsg, "EIRebuild", MB_OK | MB_ICONERROR);
     }
 }
 void CUnit::LowStartAnimation(BYTE start, BYTE cycle, int nStartSegment, BYTE nSoundSet)

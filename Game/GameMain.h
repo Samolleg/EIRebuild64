@@ -13,7 +13,7 @@ extern HWND hWnd;           // window handler
 extern HINSTANCE hInstance; // current instance
 extern bool bNeedRender; // crap
 // reporting function...
-int MessageBox(LPCSTR pszText, UINT uType = MB_OK);
+int MessageBox(LPCSTR pszText, UINT uType = MB_OK, bool continuing = true);
 double GetFreeDiskSpace(const char *pszDrive);
 // common use functions
 BOOL CheckPreviousApp(LPCSTR pszMainClass, LPCSTR pszMainTitle);

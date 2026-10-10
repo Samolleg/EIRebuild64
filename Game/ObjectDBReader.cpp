@@ -9,6 +9,7 @@
 //////////////////////////////////////////////////
 
 #include "StdAfx.h"
+#include "ErrorDialog.h"
 #include "EngineDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -135,7 +136,7 @@ bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript)
     }
     /*	if ( szScript.GetLength() < 100 )
             {
-                    AfxMessageBox( "CGameMOBFile::Load\nScript not found." );
+                    ErrorDialog::ShowA(GetActiveWindow(),  "CGameMOBFile::Load\nScript not found." , "EIRebuild", MB_OK | MB_ICONERROR);
             }*/
     if (!bSkipScript){
         BOOL parsed=theWorldServer.script.LoadText(szScript);
@@ -228,7 +229,7 @@ bool CGameMOBFile::Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &s
 #ifdef _DEBUG
                         CString szText;
                         szText.Format("Unknow chunk with ID = %X", sObjChunk.GetID());
-                        AfxMessageBox(szText);
+                        ErrorDialog::ShowA(GetActiveWindow(), szText, "EIRebuild", MB_OK | MB_ICONERROR);
 #endif
                         break;
                     }
