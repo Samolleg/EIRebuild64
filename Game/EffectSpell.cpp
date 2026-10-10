@@ -712,7 +712,7 @@ void CEffectSpell::StartSpell(int nKind)
         CreateSound(FALSE, "magic\\Teleport\\start.wav", ptTarg, CPlot3D(0, 0, 0));
         CreateLight(ptTarg, GetLightColor(), GetLightRadius(),
                     CPlot3D(0, 0, 0)); // GetLightSpeed() );
-        nTimeLeft = (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("FastTeleport") ? 1 : 30)
+        nTimeLeft = (ModRuntime::Current() && (ModRuntime::Current()->SpellAddon().Feature22() == 3 || ModRuntime::Current()->CombatSetting("FastTeleport")) ? 1 : 30)
                     + Max(1, GetDuration());
         castPhase = CP_ACTION;
         break;
@@ -864,7 +864,10 @@ void CEffectSpell::DeliverSpell(int nKind)
             if (!pWho.IsEmpty() && pWho->WhoAmI() == HPC_UNIT)
             {
                 CUnitServer *pUS = (CUnitServer *)((CUnit *)pWho)->GetUnitSpecific();
-                pWS->aiMap.marks.ProduceSoundFootstep(pUS, 5, AI_MAGIC_EFFECT_SOUND, &ptTarget);
+                const auto* soundMod = ModRuntime::Current();
+                const float strength = soundMod && soundMod->SpellAddon().Feature38() == 1
+                    ? soundMod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_fireboom) : 5.0f;
+                pWS->aiMap.marks.ProduceSoundFootstep(pUS, strength, AI_MAGIC_EFFECT_SOUND, &ptTarget);
             }
             nTimeLeft = 35;
             castPhase = CP_ACTION;
@@ -949,6 +952,9 @@ static void ExchangeLinkMana(float& casterMP, float casterMax,
 void CEffectSpell::ActionSpell(int nKind)
 {
     if(ExtendedAction(nKind))return;
+    const auto* wallMod = ModRuntime::Current();
+    const int wallMask = wallMod && wallMod->SpellAddon().Feature25() == 1
+        ? wallMod->SpellAddon().Byte(ModSpellAddon::ByteKey::gameplay_frequencyvalue) : 3;
     POSITION pos;
     CUnitList unitList;
     switch (nKind)
@@ -994,7 +1000,7 @@ void CEffectSpell::ActionSpell(int nKind)
         // inflict some damage to all near units
         if (nTimeLeft >= 0)
         {
-            if ((nTimeLeft & 3) == 0)
+            if ((nTimeLeft & wallMask) == 0)
             {
                 InflictDamageInRadius();
                 SetFlag(DW_SPELL_HIDE_CASTER); // forbid knowledge about author of poisonfog
@@ -1020,7 +1026,7 @@ void CEffectSpell::ActionSpell(int nKind)
         // inflict some damage to near units in the wall
         if (nTimeLeft >= 0)
         {
-            if ((nTimeLeft & 3) == 0 && pEffect)
+            if ((nTimeLeft & wallMask) == 0 && pEffect)
             {
                 InflictWallDamage(GetEffectWall()->ptWallDirection);
                 SetFlag(DW_SPELL_HIDE_CASTER); // forbid knowledge about author of firewall
@@ -1046,14 +1052,14 @@ void CEffectSpell::ActionSpell(int nKind)
         }
         break;
     case SPELL_ID_CAMPFIRE:
-        if ((nTimeLeft++ & 3) == 0)
+        if ((nTimeLeft++ & wallMask) == 0)
             InflictDamageInRadius();
         break;
     case SPELL_ID_WALL_LGHTNG:
         // inflict some damage to near units in the wall
         if (nTimeLeft >= 0)
         {
-            if ((nTimeLeft & 3) == 0 && pEffect)
+            if ((nTimeLeft & wallMask) == 0 && pEffect)
             {
                 InflictWallDamage(GetEffectLightning()->ptDst - GetEffectLightning()->ptSrc);
                 SetFlag(DW_SPELL_HIDE_CASTER); // forbid knowledge about author of lightning wall
@@ -1342,8 +1348,18 @@ BOOL CEffectSpell::CreateAttackPortion(SRPGAttackPortion &ap)
     //
     if (GetDuration() > 1) // continuous effect
     {
-        ap.fpDamagePercentage = 4.0f / float(GetDuration());
-        ap.fpDamage *= 4.0f / float(GetDuration());
+        const auto* wallMod = ModRuntime::Current();
+        float fraction = 4.0f / float(GetDuration());
+        if (wallMod && wallMod->SpellAddon().Feature26() == 2)
+        {
+            const int kind = spell.GetSubtypeID() >> 16;
+            const auto key = kind == SPELL_ID_FIREWALL ? ModSpellAddon::ScalarKey::gameplay_firepercentagevalue
+                : kind == SPELL_ID_WALL_LGHTNG ? ModSpellAddon::ScalarKey::gameplay_lightningpercentagevalue
+                : ModSpellAddon::ScalarKey::gameplay_acidpercentagevalue;
+            fraction = wallMod->SpellAddon().Scalar(key);
+        }
+        ap.fpDamagePercentage = fraction;
+        ap.fpDamage *= fraction;
     }
 
     //

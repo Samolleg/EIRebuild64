@@ -1871,7 +1871,9 @@ int CEffectTornado::Segment()
             attackPortion.fpToHit = 100;
             attackPortion.fpAttacks[RPGAT_GENERAL] = 1;
             attackPortion.hl = RPGHL_BODY;
-            attackPortion.fpDamage = 5;
+            const auto* tornadoMod = ModRuntime::Current();
+            attackPortion.fpDamage = tornadoMod && tornadoMod->SpellAddon().Feature37() == 1
+                ? tornadoMod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_tordmg) : 5.0f;
             for (pos = units.GetHeadPosition(); pos;)
             {
                 CUnit *pUnit = units.GetNext(pos);
