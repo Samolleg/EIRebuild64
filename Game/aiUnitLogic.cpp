@@ -581,7 +581,13 @@ float CAISpellCaster::CalcAttackCost(const CPlot3D &ptPreferred, CUnit *pCaster,
 {
     SAIPotentialAttack attack=sourceAttack;auto*mod=ModRuntime::Current();ModSkills::Config config;
     auto*server=dynamic_cast<CUnitServer*>(pCaster->GetUnitSpecific());auto*spell=sourceAttack.nAttackNumber>=0&&sourceAttack.nAttackNumber<int(pCaster->GetSpellSlotCount())?pCaster->GetQSpell(sourceAttack.nAttackNumber):nullptr;
-    if(mod&&server){server->SyncNpcMagicState();if(!server->HasAISpellMana(sourceAttack.nAttackNumber))return -1e30f;}
+    if(mod&&server){
+        server->SyncNpcMagicState();
+        if(!server->HasAISpellMana(sourceAttack.nAttackNumber))return -1e30f;
+        // f29's shared flag forbids ordinary magic, not weapon skills.
+        if(mod->SpellAddon().Feature29()==1&&spell&&!mod->SkillConfig(spell,config)&&
+           pCaster->CheckFlag(UNIT_FEEBLED))return -1e30f;
+    }
     if(mod&&mod->SkillConfig(spell,config)){
         if(!server||!server->CanRequestAISkill(sourceAttack.nAttackNumber,pTarget))return -1e30f;
         auto*cached=GetAttack(-1);if(cached)attack=*cached;WORD toHit=attack.attack.wToHit;server->GetWeaponAttack(attack.attack);attack.attack.wToHit=toHit;
