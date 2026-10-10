@@ -4045,9 +4045,9 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
     // load deploy info for items
     if (file.GetVersion() > 84)
     {
-        // ASI 4004FC lasts for the process, including successive worlds and loads.
-        // It is not saved and only the over-budget branch resets it.
-        static unsigned int spellAddonBindingCount = 0;
+        // Unlike ASI 4004FC, this unsaved counter starts at zero for each load.
+        // The binding limit and over-budget exit apply within this load only.
+        unsigned int spellAddonBindingCount = 0;
         const auto *mod = ModRuntime::Current();
         const bool limitBindings = mod && mod->SpellAddon().Feature21() == 8;
         int nID, nBind;
