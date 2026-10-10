@@ -1152,6 +1152,10 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
     if(pDX11->IsOwnedWorldActive() && pDX11->GetOwnedRenderer().FigureActive()) {
+        if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
+           !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
+            pDX11->GetOwnedRenderer().FigureFallback("figure_transform_stack_empty");return false;
+        }
         EIRenderMeshV4 mesh={};mesh.size=sizeof(mesh);mesh.version=4;
         mesh.positions=reinterpret_cast<const EIRenderPackedV4*>(plots);mesh.position_groups=nNumPlots;
         mesh.normals=reinterpret_cast<const EIRenderPackedV4*>(norms);mesh.normal_groups=nNumNorms;

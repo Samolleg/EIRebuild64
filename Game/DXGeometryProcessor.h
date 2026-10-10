@@ -170,6 +170,13 @@ inline void CDXGeometryProcessor::PopMainMatrix()
 // --------------------------------------------------------------------------------------------
 inline const SHMatrix &CDXGeometryProcessor::GetMatrix(const DWORD dwMatrixStackID) const
 {
+    const bool valid = dwMatrixStackID < MAT_NUM_STACKS &&
+        mstacks[dwMatrixStackID].dwNumMatrices != 0;
+    ASSERT(valid);
+    // A zero matrix is a safe, deliberately invalid packet value in Release.
+    // Producers reject a missing stack explicitly; never read matrices[-1].
+    static const SHMatrix unavailable = {};
+    if (!valid) return unavailable;
     return mstacks[dwMatrixStackID].matrices[mstacks[dwMatrixStackID].dwNumMatrices - 1];
 }
 
