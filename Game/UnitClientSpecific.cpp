@@ -2420,6 +2420,34 @@ void CUnitClientSpecific::MouthClose(bool bForce)
 /////////////////////////////////////////////////////////////////////////////////////
 int CUnitClientSpecific::GetHeroLevel() const
 {
+    const CModPackage *mod = ModRuntime::Current();
+    if (mod && mod->SpellAddon().Feature47() == 1)
+    {
+        const auto &profile = mod->SpellAddon();
+        const float divisor = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_divlvla);
+        const float multiplier = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_mullvla);
+        const float addOutside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvla);
+        const float addInside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvlb);
+        // ASI uses signed FILD even though the stored field is a DWORD.
+        int experience;
+        const DWORD rawExperience = lpUnit->rpgUserUnitStats.dwExperience;
+        std::memcpy(&experience, &rawExperience, sizeof(experience));
+        float storedResult;
+        int result;
+        // FST does not pop or round ST(0) before FISTP. Keep the current x87 RC.
+        __asm {
+            fld1
+            fild experience
+            fdiv divisor
+            fadd addInside
+            fyl2x
+            fmul multiplier
+            fadd addOutside
+            fst storedResult
+            fistp result
+        }
+        return result;
+    }
     float fPower = float(lpUnit->rpgUserUnitStats.dwExperience) /
                    theAIGeneralSettings.fConsiderModifier;
     return MINT(log(fPower) / log(theAIGeneralSettings.fConsiderLogBase));

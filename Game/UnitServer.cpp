@@ -6297,24 +6297,61 @@ void CUnitServer::GetAttackParams(SAttackParams &params) const
     params.ApplyDifficultyLevel(bHero);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Preserve the ASI x87 intermediates before the original float stores.
+static float SpellAddonWeightBonus(float divisor, float attacker, float defender)
+{
+    float result;
+    __asm {
+        fld divisor
+        fmul defender
+        fdivr attacker
+        fstp result
+    }
+    return result;
+}
+static float SpellAddonDistanceModifier(float numerator, float divisor, float defenderRange)
+{
+    float result;
+    __asm {
+        fld defenderRange
+        fmul divisor
+        fadd st(0), st(0)
+        fdivr numerator
+        fstp result
+    }
+    return result;
+}
 // return random to-hit value
 float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
 {
     SAttackParams apAttacker, apDefender;
     auto*mod=ModRuntime::Current();
+    const int spellAddonHitMode = mod ? mod->SpellAddon().Feature19() : 0;
+    const bool spellAddonHit = spellAddonHitMode >= 1;
+    const float rangeDivisor = spellAddonHit
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_range) : RPG_CONST_Z;
     if(mod&&ModConditionalCombat::Fallback(mod->CombatSetting("JMVShit")!=0,mod->CombatSetting("JMVAttacks")!=0)){
         mod->ConditionalAttackParams(*pAttacker->GetRPGStats(),*pAttacker->lpUnit,apAttacker,true);
         mod->ConditionalAttackParams(*const_cast<CUnitServer*>(this)->GetRPGStats(),*lpUnit,apDefender,true);
-        float distance=fabs(lpUnit->GetCP()-pAttacker->lpUnit->GetCP())*2.f/(RPG_CONST_Z*lpUnit->GetAttackDistance()*2.f);
+        float distance = spellAddonHit
+            ? SpellAddonDistanceModifier(fabs(lpUnit->GetCP()-pAttacker->lpUnit->GetCP())*2.f,
+                                         rangeDivisor, lpUnit->GetAttackDistance())
+            : fabs(lpUnit->GetCP()-pAttacker->lpUnit->GetCP())*2.f/(RPG_CONST_Z*lpUnit->GetAttackDistance()*2.f);
         float jitter=apAttacker.fToHitRandom>0?2.f*random.Get(MINT(apAttacker.fToHitRandom))-(apAttacker.fToHitRandom+1):0.f;
         return ModConditionalCombat::Base(float(apAttacker.nAttack),jitter,distance);
     }
     pAttacker->GetAttackParams(apAttacker);
     GetAttackParams(apDefender);
     bool jmv=ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVAttacks");
-    float fWeightBonus = apAttacker.fWeaponWeight / (RPG_CONST_Y * apDefender.fWeaponWeight);
-    float fDistanceModifier = fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f /
-                              (RPG_CONST_Z * lpUnit->GetAttackDistance() * 2.0f);
+    float fWeightBonus = spellAddonHit
+        ? SpellAddonWeightBonus(mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_weight),
+                               apAttacker.fWeaponWeight, apDefender.fWeaponWeight)
+        : apAttacker.fWeaponWeight / (RPG_CONST_Y * apDefender.fWeaponWeight);
+    float fDistanceModifier = spellAddonHit
+        ? SpellAddonDistanceModifier(fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f,
+                                     rangeDivisor, lpUnit->GetAttackDistance())
+        : fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f /
+          (RPG_CONST_Z * lpUnit->GetAttackDistance() * 2.0f);
     float fToHitRandom = 0;
     if (apAttacker.fToHitRandom > 0)
         fToHitRandom = 2.0f * random.Get(MINT(apAttacker.fToHitRandom)) -
@@ -6322,7 +6359,7 @@ float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
 
     if(!jmv)if(auto*mod=ModRuntime::Current()){if(mod->CombatSetting("DistanceModifier"))fDistanceModifier=0;if(mod->CombatSetting("WeightBonus"))fWeightBonus=0;}
     float fToHit = static_cast<float>(apAttacker.nAttack) + fToHitRandom - fDistanceModifier;
-    if (!jmv&&!bBackstab)
+    if (!jmv&&!bBackstab && spellAddonHitMode != 2)
         fToHit += fWeightBonus;
 
     return Max(0.0f, fToHit);
@@ -6464,6 +6501,31 @@ void CUnitServer::Store(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 int CUnitServer::GetHeroLevel() const
 {
+    const CModPackage *mod = ModRuntime::Current();
+    if (mod && mod->SpellAddon().Feature47() == 1)
+    {
+        const auto &profile = mod->SpellAddon();
+        const float divisor = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_divlvla);
+        const float multiplier = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_mullvla);
+        const float addOutside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvla);
+        const float addInside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvlb);
+        const float experience = rpgUnitStats.fpExperience;
+        float storedResult;
+        int result;
+        // FST does not pop or round ST(0) before FISTP. Keep the current x87 RC.
+        __asm {
+            fld1
+            fld experience
+            fdiv divisor
+            fadd addInside
+            fyl2x
+            fmul multiplier
+            fadd addOutside
+            fst storedResult
+            fistp result
+        }
+        return result;
+    }
     float fPower = rpgUnitStats.fpExperience / theAIGeneralSettings.fConsiderModifier;
     return MINT(log(fPower) / log(theAIGeneralSettings.fConsiderLogBase));
 }
