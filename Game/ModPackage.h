@@ -1,5 +1,6 @@
 #pragma once
 #include "ModNpcConsumables.h"
+#include "ModStaticLookupCache.h"
 #include "SocialStealthRules.h"
 #include "ModWeaponSkills.h"
 #include "ModCampDescriptions.h"
@@ -244,6 +245,7 @@ private:
     int lookupRef=-1,indexRef=-1;
     std::string mainScript;
     bool scriptInitialized=false;
+    ModStaticLookup::State staticLookups;
     bool scalarManaBonus=false;
     std::map<std::string,float> manaBonusCache;
     bool scheduledRegeneration=false;
