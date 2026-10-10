@@ -394,6 +394,7 @@ public:
     float GetMaxEncumbrance() const;
     float GetActionPoints() const;
     float GetManaBonusMultiplier() const;
+    float GetSpellAddonManaBonusMultiplier() const;
     //
     // some effects applying
     void StrengthChanged(SRPGCommonStats *lpCommonStats, const CUnit *pUnit);

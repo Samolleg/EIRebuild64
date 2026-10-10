@@ -105,6 +105,8 @@ public:
     float ExperienceLimit() const { return experienceLimit; }
     float MagicRandomLimit() const { return magicRandomLimit; }
     float ManaBonus(const SRPGUnitStats&);
+    // IEEE multiplier only for SpellAddon f18/f29; never populates the strict cache.
+    float SpellAddonManaBonus(const SRPGUnitStats&);
     float ManaBonus(const SRPGUserUnitStats&);
     float DistributeExperience(float experience,int players);
     float ChargeExperience(float exp,int count) const { return settingsProfile.Experience(exp,count); }
