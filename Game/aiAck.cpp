@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiAck.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "UnitServer.h"
 #include "WorldServer.h"
 #include "Console.h"
@@ -79,7 +81,18 @@ void CAIAcknowledgements::Segment(CUnitServer *pWho)
                 unitAcks << "to Suspection" << std::endl;
                 break;
             case AI_ACK_TO_AGGRESSION:
-                pWS->UnitSayAck(pWho->GetUnit(), ACK_UNIT_BECOME_AGGRESSIVE);
+            {
+                const CModPackage *mod = ModRuntime::Current();
+                if (mod && mod->SpellAddon().Feature06() == 6 &&
+                    mod->SpellAddon().Int(ModSpellAddon::IntKey::gameplay_improve))
+                {
+                    pWho->dwSpellAddonLostSight = 0;
+                    // ASI passes the logging stream/buffer as its stale ECX unit.
+                    // Visibility rejects it: preserve the absent ACK46 safely.
+                }
+                else
+                    pWS->UnitSayAck(pWho->GetUnit(), ACK_UNIT_BECOME_AGGRESSIVE);
+            }
                 unitAcks << "to Aggression" << std::endl;
                 break;
             case AI_ACK_ALARM:

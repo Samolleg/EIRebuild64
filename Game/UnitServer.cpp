@@ -442,6 +442,7 @@ void CUnitServer::Clear()
     // A new/recycled server may be recalculated before prototype stats are assigned.
     rpgUnitStats = SRPGUnitStats{};
     rpgUnitStats.Clear();
+    dwSpellAddonLostSight = 0;
     tameLevel = UTL_NONE;
     nOriginalPlayerNum = -1;
     nPlayerWhoTamed = -1;
@@ -6442,6 +6443,7 @@ SL0AnimationSeq *CUnitServer::GetExtendedAnimationSequence(unsigned kind)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Load(CSave &file)
 {
+    dwSpellAddonLostSight = 0;
     lastFootstep = 0;
     file.Read(bL0Frozen);
     file.Read(bL0MovementFrozen);
