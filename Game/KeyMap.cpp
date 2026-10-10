@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "KeyMap.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
 
 #include "StringProcessing.h"
 #include "WorldInterface.h"
@@ -237,6 +239,12 @@ SGameOptionDesc NKeyMap::allOptions[TOTAL_NUM_GAME_OPTIONS] = {
 };
 /////////////////////////////////////////////////////////////////////////////////////
 char NKeyMap::keyMap[TOTAL_NUM_SCANCODES];
+
+bool NKeyMap::SpellAddonDifficultyLevels()
+{
+    const CModPackage *package = ModRuntime::Current();
+    return package && package->SpellAddon().Feature35() == 1;
+}
 /////////////////////////////////////////////////////////////////////////////////////
 void NKeyMap::Init()
 {
