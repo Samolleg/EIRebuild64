@@ -707,6 +707,19 @@ float CModPackage::ScalarManaBonus(float intelligence){
  return value;
 }
 float CModPackage::ManaBonus(const SRPGUnitStats&stats){if(scalarManaBonus)return ScalarManaBonus(stats.psIntelligence.fpEffectiveValue);return StatsNumber("GetManaBonusOnServer",stats);}
+float CModPackage::SpellAddonManaBonus(const SRPGUnitStats&stats){
+ CallbackFrame frame(state);SRPGUnitStats snapshot=stats;
+ const char*callback=scalarManaBonus?"GetManaBonusFromIntelligence":"GetManaBonusOnServer";
+ BeginCallback(callback);
+ if(scalarManaBonus)lua_pushnumber(state,stats.psIntelligence.fpEffectiveValue);
+ else ModLua::Push(state,&snapshot,frame.scope);
+ Call(1,1);
+ if(lua_type(state,-1)!=LUA_TNUMBER)
+  throw std::runtime_error(std::string(callback)+": expected numeric result");
+ // ASI's FCOMP treats an unordered product as not greater. Keep IEEE values
+ // on this path alone, without reading or writing the strict R01 cache.
+ return static_cast<float>(lua_tonumber(state,-1));
+}
 float CModPackage::VampSpellValue(const char*prototype,int column){CallbackFrame frame(state);BeginCallback("GetVampSpellAdds");lua_pushstring(state,prototype);lua_pushinteger(state,column);Call(2,1);double n=Number(state,"Vamp spell property");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Vamp property overflow");return float(n);}
 ModSpellTooltip::Values CModPackage::SpellTooltip(const SRPGUserUnitStats &stats,
     const CSpell &spell, float manaIntelligence, int difficulty)

@@ -17,6 +17,7 @@
 #include "ModRuntime.h"
 #include "StuffMapObjects.h"
 #include <cctype>
+#include <cmath>
 #include <string>
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -2256,7 +2257,7 @@ void CUnitServer::SyncNpcMagicState()
         {
             CSpell* spell = lpUnit->GetQSpell(slot);
             feebled = spell && !lpUnit->IsHero() &&
-                double(spell->GetManaCost()) * rpgUnitStats.GetManaBonusMultiplier() >
+                double(spell->GetManaCost()) * rpgUnitStats.GetSpellAddonManaBonusMultiplier() >
                     GetMapObjectServer()->GetCurrentMP();
         }
         if (feebled)
@@ -2288,7 +2289,7 @@ bool CUnitServer::HasAISpellMana(int slot)
             ModSpells::HasMana(owner->GetCurrentMP(),config.Cost(spell->GetManaCost()));
     if(naturalMana)
         return rpgUnitStats.rpgNAWWeaponType==RPGWST_MAGIC ||
-            !(double(spell->GetManaCost())*rpgUnitStats.GetManaBonusMultiplier()>owner->GetCurrentMP());
+            !(double(spell->GetManaCost())*rpgUnitStats.GetSpellAddonManaBonusMultiplier()>owner->GetCurrentMP());
     if(lpUnit->IsHero()&&!mod->CompanionSkillAI(*lpUnit))return true;
     return ModSpells::HasMana(owner->GetCurrentMP(),ModSpells::ManaCost(spell->GetManaCost(),rpgUnitStats.GetManaBonusMultiplier()));
 }
@@ -2499,7 +2500,7 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
         const bool checkMana = spellAddonMana
             ? rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC : lpUnit->IsHero();
         const bool insufficient = spellAddonMana
-            ? double(pSpell->GetManaCost()) * rpgUnitStats.GetManaBonusMultiplier() >
+            ? checkMana && double(pSpell->GetManaCost()) * rpgUnitStats.GetSpellAddonManaBonusMultiplier() >
                 GetMapObjectServer()->GetCurrentMP()
             : pSpell->GetManaCost() * rpgUnitStats.GetManaBonusMultiplier() >
                 GetMapObjectServer()->GetCurrentMP();
@@ -3567,9 +3568,32 @@ void CUnitServer::UseSpell()
         if (naturalMana ? rpgUnitStats.rpgNAWWeaponType != RPGWST_MAGIC
                         : (lpUnit->IsHero() || mod))
         {
-            GetMapObjectServer()->ChangeCurrentMP(-pSpell->GetManaCost() *
-                                                  rpgUnitStats.GetManaBonusMultiplier());
-            AddUpdateMask(CMapObject::VLD_MASK_STATS);
+            const float cost = pSpell->GetManaCost();
+            const float multiplier = naturalMana
+                ? rpgUnitStats.GetSpellAddonManaBonusMultiplier()
+                : rpgUnitStats.GetManaBonusMultiplier();
+            const float change = -cost * multiplier;
+            if (naturalMana && !std::isfinite(change))
+            {
+                // Retail writes NaN for 0 * infinity. Preserve MP by the R36
+                // decision, and bound the passive journal event to once / 5s.
+                static bool logged = false;
+                static DWORD lastLog = 0;
+                const DWORD now = GetTickCount();
+                if (!logged || DWORD(now - lastLog) >= 5000)
+                {
+                    logged = true;
+                    lastLog = now;
+                    GameJournal::Event("SPELL", "mana_nonfinite",
+                        "unit=%d cost=%g mult=%g", lpUnit->GetID(),
+                        double(cost), double(multiplier));
+                }
+            }
+            else
+            {
+                GetMapObjectServer()->ChangeCurrentMP(change);
+                AddUpdateMask(CMapObject::VLD_MASK_STATS);
+            }
         }
     }
     if (bDoCast)

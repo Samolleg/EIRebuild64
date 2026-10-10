@@ -959,6 +959,11 @@ float SRPGUnitStats::GetManaBonusMultiplier() const
     if(auto*mod=ModRuntime::Current())return mod->ManaBonus(*this);
     return 25.0f / psIntelligence.fpEffectiveValue;
 }
+float SRPGUnitStats::GetSpellAddonManaBonusMultiplier() const
+{
+    if(auto*mod=ModRuntime::Current())return mod->SpellAddonManaBonus(*this);
+    return 25.0f / psIntelligence.fpEffectiveValue;
+}
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUnitStats::GetDamageModifier(const CUnit *pUnit) const
 {
