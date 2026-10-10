@@ -878,6 +878,74 @@ void CEffectSpell::DeliverSpell(int nKind)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Match the reachable ASI mana branch, including x87 comparisons and rounding.
+// Typed arguments avoid retail object offsets; no HP branch or extra clamping.
+static void ExchangeLinkMana(float& casterMP, float casterMax,
+                             float& targetMP, float targetMax, float power)
+{
+    float* caster = &casterMP;
+    float* target = &targetMP;
+    __asm
+    {
+        mov ecx, caster
+        mov edx, target
+        fld targetMax
+        fdivr casterMax
+        fld dword ptr [edx]
+        fadd dword ptr [ecx]
+        fld1
+        fadd st(0), st(2)
+        fdiv st(1), st(0)
+        fstp st(0)
+        fmul st(1), st(0)
+        fld dword ptr [ecx]
+        fdiv casterMax
+        fld dword ptr [edx]
+        fdiv targetMax
+        fcomp st(1)
+        fstp st(0)
+        fnstsw ax
+        test ah, 1
+        je casterReceives
+        fld dword ptr [edx]
+        fadd power
+        fcomp st(1)
+        fnstsw ax
+        test ah, 1
+        jne targetLimited
+        jmp balanced
+    casterReceives:
+        fld dword ptr [ecx]
+        fadd power
+        fcomp st(2)
+        fnstsw ax
+        test ah, 1
+        jne casterLimited
+    balanced:
+        fstp dword ptr [edx]
+        fstp dword ptr [ecx]
+        jmp done
+    targetLimited:
+        fld dword ptr [ecx]
+        fsub power
+        fstp dword ptr [ecx]
+        fld dword ptr [edx]
+        fadd power
+        fstp dword ptr [edx]
+        jmp discardBalances
+    casterLimited:
+        fld dword ptr [edx]
+        fsub power
+        fstp dword ptr [edx]
+        fld dword ptr [ecx]
+        fadd power
+        fstp dword ptr [ecx]
+    discardBalances:
+        fstp st(0)
+        fstp st(0)
+    done:
+    }
+}
 void CEffectSpell::ActionSpell(int nKind)
 {
     if(ExtendedAction(nKind))return;
@@ -1007,6 +1075,7 @@ void CEffectSpell::ActionSpell(int nKind)
         }
         break;
     case SPELL_ID_LINK:
+    {
         if (pTarget == (CMapObject *)nullptr || pWho == (CMapObject *)nullptr ||
             pTarget->IsMoving() || pWho->IsMoving() || pTarget->IsDead() || pWho->IsDead())
         {
@@ -1015,13 +1084,23 @@ void CEffectSpell::ActionSpell(int nKind)
             castPhase = CP_FINISH;
             break;
         }
-        // what is link function ???, here it should be done
+        const auto* linkMod = ModRuntime::Current();
+        if (linkMod && linkMod->SpellAddon().Feature34() == 1 && (nTimeLeft & 31) == 0)
+        {
+            auto* casterStats = ((CMapObjectServer*)pWho->GetMapObjectSpecific())->GetRPGStats();
+            auto* targetStats = ((CMapObjectServer*)pTarget->GetMapObjectSpecific())->GetRPGStats();
+            ExchangeLinkMana(casterStats->ssMP.fpCurrent, casterStats->ssMP.fpMax,
+                             targetStats->ssMP.fpCurrent, targetStats->ssMP.fpMax, GetPower());
+            pWho->SetUpdateMask(CMapObject::VLD_MASK_STATS);
+            pTarget->SetUpdateMask(CMapObject::VLD_MASK_STATS);
+        }
         if (--nTimeLeft < 0)
         {
             CreateSound(FALSE, "magic\\Link\\end.wav", GetCP(), CPlot3D(0, 0, 0));
             castPhase = CP_FINISH;
         }
         break;
+    }
     case SPELL_ID_TELEPORT:
         if (nTimeLeft-- < 0 || pWho == (CMapObject *)nullptr || pWho->IsDead())
             castPhase = CP_FINISH;

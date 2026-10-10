@@ -1146,7 +1146,9 @@ void CWorldServer::CastSpell(CSpell *pSpell, CUnit *pWho, const CPlot3D &ptFrom,
     ASSERT(pSpell);
     if (!pSpell || (curInterface != IFACE_MISSION && pWho != 0))
         return;
-    if (!(ModRuntime::Current() && ModRuntime::Current()->CombatSetting("UnlockExperimentalSpells")))
+    const auto* spellMod = ModRuntime::Current();
+    if (!(spellMod && (spellMod->SpellAddon().Feature02() == 1 ||
+                      spellMod->CombatSetting("UnlockExperimentalSpells"))))
     {
         switch (pSpell->GetSubtypeID() >> 16)
         {
