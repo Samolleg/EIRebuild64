@@ -208,6 +208,7 @@ extern SKbdKeyDesc allKeys[TOTAL_NUM_KBD_KEYS];
 extern SKbdActionDesc allActions[TOTAL_NUM_KBD_ACTIONS];
 extern char keyMap[TOTAL_NUM_SCANCODES];
 
+bool SpellAddonDifficultyLevels();
 void Init();
 void Fini();
 const char *GetKeyNameByAction(EKbdActions eAction);

@@ -630,6 +630,8 @@ void CI3DScreenOptions::FormActionsList()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenOptions::FormControlsList()
 {
+    NKeyMap::allOptions[OPTION_DIFFICULTY].eType = NKeyMap::SpellAddonDifficultyLevels()
+        ? OPTION_TYPE_SCROLL : OPTION_TYPE_SWITCH;
     controls.clear();
     for (int i = 0; i < TOTAL_NUM_GAME_OPTIONS; i++)
     {
@@ -850,7 +852,8 @@ void CI3DScreenOptions::GetParameters()
     controls[OPTION_CONTRAST].nValue = int((theSettings.fContrast + 1) * 50);
     controls[OPTION_GAMMA].nValue = int((theSettings.fGamma + 1) * 50);
 
-    controls[OPTION_DIFFICULTY].nValue = theSettings.nDifficultyLevel;
+    controls[OPTION_DIFFICULTY].nValue = NKeyMap::SpellAddonDifficultyLevels()
+        ? 2 - theSettings.nDifficultyLevel : theSettings.nDifficultyLevel;
 
     for (int i = 0; i < TOTAL_NUM_GAME_OPTIONS; i++)
         controls[i].ApplyValueToControl();
@@ -899,8 +902,11 @@ void CI3DScreenOptions::ApplyParameters()
     theSettings.fGamma = controls[OPTION_GAMMA].nValue / 50.f - 1;
 
     if (!IWorldConnector.IsLMP())
-        theSettings.nDifficultyLevel = theSettings.nDifficultyLevel2 = controls[OPTION_DIFFICULTY]
-                                                                           .nValue;
+    {
+        const int value = controls[OPTION_DIFFICULTY].nValue;
+        theSettings.nDifficultyLevel = theSettings.nDifficultyLevel2 =
+            NKeyMap::SpellAddonDifficultyLevels() ? 2 - value : value;
+    }
 
     if (bShadowSettingsChanged)
         theWorld.RemoveShadowInformationFromObjects();
