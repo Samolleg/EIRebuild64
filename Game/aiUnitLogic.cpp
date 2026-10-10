@@ -593,6 +593,22 @@ float CAISpellCaster::CalcAttackCost(const CPlot3D &ptPreferred, CUnit *pCaster,
     }
     bool tactical=ModTactical::Enabled(pCaster)&&spell&&!mod->SkillConfig(spell,config);
     if(tactical)fpLowBorder=-1e30f; // Native early pruning must not discard later utility bonuses.
+    // f20 replaces native coefficients once; tactical utility remains downstream.
+    const bool spellPriorities = mod && mod->SpellAddon().Feature20() == 1;
+    const float FP_C_SAMETARGET = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_sametarget) : ::FP_C_SAMETARGET;
+    const float FP_C_MAGICATTACK = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_magicattack) : ::FP_C_MAGICATTACK;
+    const float FP_C_DAMAGEMULT = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_damagemult) : ::FP_C_DAMAGEMULT;
+    const float FP_C_MAGICDAMAGEMULT = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_magicdamagemult) : ::FP_C_MAGICDAMAGEMULT;
+    const float FP_C_SAVEDAMAGEMULT = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_savedamagemult) : ::FP_C_SAVEDAMAGEMULT;
+    const float FP_C_RANGECOST = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_rangecost) : ::FP_C_RANGECOST;
+    const float FP_C_KICKPRICE = spellPriorities
+        ? mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_kickprice) : ::FP_C_KICKPRICE;
     WORD wDamage = 0;
     // (+) for keeping target
     float fpCost = pTarget == pCurrentTarget ? FP_C_SAMETARGET : 0;
