@@ -550,7 +550,7 @@ private:
     friend class CI3DScreenMission;
     void AccelerateFromKeyboard();
     void DecelerateFromKeyboard();
-    void SetSpeedMode(int mode);
+    void SetSpeedMode(int mode, bool fromKeyboard = false);
     CI3DScreenMission *pScreen;
     float fIdleTime;
     float fAngleSeconds;
