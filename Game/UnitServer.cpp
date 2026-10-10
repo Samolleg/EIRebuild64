@@ -20,6 +20,19 @@
 #include <string>
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
+namespace {
+bool IsEquippedRangedWeapon(CItemWeapon *weapon)
+{
+    if (!weapon)
+        return false;
+    const ERPGWeaponTypes type = weapon->GetWeaponType();
+    if (type == RPGWST_BOW || type == RPGWST_CROSSBOW)
+        return true;
+    const CModPackage *mod = ModRuntime::Current();
+    return mod && mod->SpellAddon().Feature23() == 1 &&
+           (type == RPGWST_HANDS3 || type == RPGWST_HANDS7);
+}
+}
 /////////////////////////////////////////////////////////////////////////////////////
 /*==========================================================================================================
 
@@ -1819,7 +1832,17 @@ void CUnitServer::LcConvertPoses()
     currentPose.Convert(lpUnit->currentPose);
     wishPose.Convert(lpUnit->wishPose);
     if (curCommand.bDoItFast && currentPose.pose == UP_STAND)
-        wishPose.bRun |= 2;
+    {
+        const CModPackage *mod = ModRuntime::Current();
+        const CMapObjectServer *specific = GetMapObjectServer();
+        const float mana = specific ? specific->GetCurrentMP() : 1.0f;
+        // The ASI x87 equality also treats unordered (NaN) as zero.
+        if (mod && mod->SpellAddon().Feature40() == 1 &&
+            specific && (mana == 0.0f || mana != mana))
+            curCommand.bDoItFast = false;
+        else
+            wishPose.bRun |= 2;
+    }
     // животные бегают в агрессивном состоянии
     if (!lpUnit->GetOwner() && wishPose.bAggressive)
         wishPose.bRun |= 1;
@@ -2133,11 +2156,7 @@ ERPGWeaponTypes CUnitServer::GetCurrentWeaponType() const
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::IsCurrentWeaponABow()
 {
-    CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
-    if (pWeapon)
-        return (pWeapon->GetWeaponType() == RPGWST_BOW) ||
-               (pWeapon->GetWeaponType() == RPGWST_CROSSBOW);
-    return false;
+    return IsEquippedRangedWeapon(lpUnit->GetCurrentQWeapon());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::HasRangedAttack()
@@ -2712,6 +2731,10 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
 #endif
         nHit = 1;
     }
+    // Only the two target predictions use the ASI's fixed hit offset.
+    const CModPackage *predictionMod = ModRuntime::Current();
+    const int nPredictionHit = predictionMod && predictionMod->SpellAddon().Feature28() == 1
+                                   ? 5 : nHit;
     // calc distance from which hit is possible
     fpHitDist = GetHitDist(atk);
     if (atk.HasPointOfUse())
@@ -2740,7 +2763,7 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
         if (fpStartDist2 <= sqr(fpHitDist) && (unitOrientation * ptDir) > 0.5f * sqrt(fpStartDist2))
         {
             fpHitDistRun = sqr(fpHitDist +
-                               (nHit + nRotationTimeMax / 2) * AITile2Meter(fpTargetMove) + 0.5f);
+                               (nPredictionHit + nRotationTimeMax / 2) * AITile2Meter(fpTargetMove) + 0.5f);
         }
         else
         {
@@ -2772,7 +2795,7 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
     {
         if (bPredictTargetPos)
         {
-            ptTargetDestPos = pTargetUnit->GetFuturePosition(nCurSegment + i + nHit +
+            ptTargetDestPos = pTargetUnit->GetFuturePosition(nCurSegment + i + nPredictionHit +
                                                              nPredictShift);
             ptDir = ptTargetDestPos - unitPos;
         }
@@ -3709,7 +3732,10 @@ void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortio
     const bool spellLeftHand=mod&&mod->AttackIsLeft(attackPortion);
     // Keep the launch weapon alive through delivery and its trigger spell.
     struct Cleanup{CModPackage*mod;SRPGAttackPortion&ap;~Cleanup(){if(mod)mod->ForgetAttack(ap);}} cleanup{mod,attackPortion};
-    bool bow=usedWeapon?(usedWeapon->GetWeaponType()==RPGWST_BOW||usedWeapon->GetWeaponType()==RPGWST_CROSSBOW):IsCurrentWeaponABow();
+    // Keep JMV staff projectiles; the retail/ASI path uses an arrow figure.
+    const bool staffProjectile = mod && mod->CombatSetting("JMVAttacks") && usedWeapon &&
+        (usedWeapon->GetWeaponType() == RPGWST_HANDS3 || usedWeapon->GetWeaponType() == RPGWST_HANDS7);
+    bool bow = IsEquippedRangedWeapon(usedWeapon) && !staffProjectile;
     if (bow)
     {
         CEffectArrowFigure *pArrow;
