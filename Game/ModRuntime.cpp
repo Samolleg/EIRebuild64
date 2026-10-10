@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModRuntime.h"
+#include "GameJournal.h"
 #include "SettingsProfile.h"
 #include "ModWorldBackground/Native.h"
 #include "ScenarioSpeechDucking.h"
@@ -57,32 +58,47 @@ Host::Host(const std::string&directory){
 }
 Host::~Host(){ModWorldBackground::Unload();resources=nullptr;session.reset();package.reset();}
 static std::unique_ptr<Host> SelectHost(bool commandLine){
+ namespace fs=std::filesystem;
  int count=0;LPWSTR*args=CommandLineToArgvW(GetCommandLineW(),&count);if(!args)throw std::runtime_error("Cannot parse command line");
- struct Free{LPWSTR*p;~Free(){LocalFree(p);}} free{args};std::string directory;bool found=false;
- if(commandLine)for(int i=1;i<count;i++)if(wcscmp(args[i],L"--mod")==0){if(found||i+1>=count)throw std::runtime_error("Expected one --mod directory");found=true;std::filesystem::path p(args[++i]);directory=p.string();}
- if(!found){
-  // The profile is authoritative. Accept the former Settings location during import.
-  auto selected=SettingsProfile::String(L"",L"AddonPath");
-  if(selected.empty()) selected=SettingsProfile::String(L"Settings",L"AddonPath");
-  if(!selected.empty()){
-   auto p=std::filesystem::path(selected);
-   if(p.is_relative()) p=std::filesystem::path(SettingsProfile::Path()).parent_path()/p;
-   directory=p.lexically_normal().string(); found=true;
+ struct Free{LPWSTR*p;~Free(){LocalFree(p);}} free{args};
+ const auto root=fs::path(SettingsProfile::Path()).parent_path();
+ std::string directory,source="none",rejectedDirectory,rejectedSource;bool found=false;
+ auto select=[&](fs::path path,const char*origin,bool filePath){
+  if(path.empty())return false;
+  if(path.is_relative())path=root/path;
+  path=path.lexically_normal();std::error_code error;
+  if(filePath&&fs::is_regular_file(path,error))path=path.parent_path();
+  error.clear();
+  if(!fs::is_regular_file(path/L"config.reg",error)){
+   if(rejectedSource.empty()){rejectedSource=origin;rejectedDirectory=path.string();}
+   return false;
   }
+  directory=path.string();source=origin;found=true;return true;
+ };
+ fs::path explicitMod;bool explicitFound=false;
+ if(commandLine)for(int i=1;i<count;i++)if(wcscmp(args[i],L"--mod")==0){
+  if(explicitFound||i+1>=count)throw std::runtime_error("Expected one --mod directory");
+  explicitFound=true;explicitMod=fs::path(args[++i]);
  }
+ if(explicitFound)select(explicitMod,"--mod",false);
+ if(!found)select(fs::path(SettingsProfile::String(L"Settings",L"AddonPath")),"Settings\\AddonPath",false);
+ if(!found)select(fs::path(SettingsProfile::String(L"",L"AddonPath")),"AddonPath",true);
  if(!found){
-  auto root=std::filesystem::path(SettingsProfile::Path()).parent_path();
-  auto config=root/L"restarter.config";
-  if(std::filesystem::is_regular_file(config)){
+  auto config=root/L"restarter.config";std::error_code error;
+  if(fs::is_regular_file(config,error)){
    wchar_t selection[32768]={};
    GetPrivateProfileStringW(L"Settings",L"ModSel",L"",selection,_countof(selection),config.c_str());
    if(selection[0]){
-    auto selected=(root/selection).lexically_normal();
-    if(!std::filesystem::is_regular_file(selected)) throw std::runtime_error("ReStarter selected mod config is missing");
-    directory=selected.parent_path().string();found=true;
+    auto selected=(fs::path(selection).is_relative()?root/selection:fs::path(selection)).lexically_normal();
+    error.clear();
+    if(fs::is_regular_file(selected,error))select(selected.parent_path(),"restarter.config ModSel",false);
+    else if(rejectedSource.empty()){rejectedSource="restarter.config ModSel";rejectedDirectory=selected.parent_path().string();}
    }
   }
  }
+ if(!found&&!rejectedSource.empty()){source=rejectedSource;directory=rejectedDirectory;}
+ GameJournal::Event("SESSION","mod_selection","source=%s path=%s",GameJournal::Quote(source.c_str()).c_str(),GameJournal::Quote(directory.c_str()).c_str());
+ if(!found&&!rejectedSource.empty())throw std::runtime_error("Cannot select mod: no source contains config.reg (first source: "+source+", directory: "+directory+")");
  return found?std::make_unique<Host>(directory):nullptr;
 }
 std::unique_ptr<Host> Host::FromCommandLine(){return SelectHost(true);}
