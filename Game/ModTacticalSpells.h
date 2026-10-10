@@ -10,8 +10,22 @@
 #include <unordered_map>
 namespace ModTactical {
 enum Type { Weapon, Direct, Area, Continuous, Debuff, CombatBuff, PeaceBuff, Heal, Useless };
+inline Type CasterTableType(int rawID,const ModSpellAddon::Profile& profile){
+ // ASI copies only 54 entries. ID 54 used padding as a jump-table index;
+ // the agreed typed contract rejects it and every higher ID safely.
+ if(rawID<0||rawID>=54)return Useless;
+ const auto key=static_cast<ModSpellAddon::ByteKey>(
+  static_cast<size_t>(ModSpellAddon::ByteKey::aicastertable_0)+rawID);
+ switch(profile.Byte(key)){
+ case 0:return Direct;case 1:return Area;case 2:return Continuous;
+ case 3:return CombatBuff;case 4:return PeaceBuff;case 5:return Useless;
+ case 6:return Heal;case 7:return Debuff;default:return Useless;
+ }
+}
 inline Type SpellType(CSpell*spell){
  if(!spell)return Weapon;
+ if(auto*mod=ModRuntime::Current())if(mod->SpellAddon().Feature48()==1)
+  return CasterTableType(int(spell->GetSubtypeID()>>16),mod->SpellAddon());
  switch(ModSpells::ElementalBase(spell->GetSubtypeID()>>16)){
  case SPELL_ID_ACIDRAY:case SPELL_ID_FIREARROW:case SPELL_ID_LIGHTNING:case SPELL_ID_RICKMAGIC:case SPELL_ID_CURSEMAGIC:case SPELL_ID_VAMP:return Direct;
  case SPELL_ID_FIREBALL:case SPELL_ID_INVOKE_LGHTNG:case SPELL_ID_COLUMN_ACID:return Area;

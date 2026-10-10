@@ -182,7 +182,7 @@ ERPGAttackTypes CSpell::GetAttackType() const
 bool CSpell::IsOffensive() const
 {
     if(auto* mod=ModRuntime::Current())return ModSpellTargeting::Offensive(int(GetSubtypeID()>>16),
-        mod->CombatSetting("JMVSelfCast")!=0,mod->CombatSetting("JMVParticles")!=0);
+        mod->CombatSetting("JMVSelfCast")!=0,mod->CombatSetting("JMVParticles")!=0,&mod->SpellAddon());
     switch (int(GetSubtypeID() >> 16))
     {
     case SPELL_ID_FIREARROW:
