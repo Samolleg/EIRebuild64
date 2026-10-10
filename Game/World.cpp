@@ -330,6 +330,19 @@ BOOL CWorldBase::IsNightTime()
 float CWorldBase::GetNightPowerSlow()
 {
     float fpTime = GetWorldTime(); // get current world time (in hours)
+    const CModPackage *mod = ModRuntime::Current();
+    if (mod && mod->SpellAddon().Feature32() == 1)
+    {
+        if (fpTime < 4.0f)
+            return 1.0f;
+        if (fpTime < 8.0f)
+            return (8.0f - fpTime) * 0.25f;
+        if (fpTime <= 18.0f)
+            return 0.0f;
+        if (fpTime < 22.0f)
+            return (fpTime - 18.0f) * 0.25f;
+        return 1.0f;
+    }
     float fpRes = 0;
     if (fpTime > 20)
         fpRes = (fpTime - 20) / 4;
