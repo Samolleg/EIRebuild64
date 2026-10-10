@@ -420,9 +420,15 @@ void CMapObject::AddSpellEffect(CSpellEffect &effect)
     {
     case SPELL_ID_STRENGTHEN:
     case SPELL_ID_WEAKEN:
+        bStrengthChanged = true;
+        break;
     case SPELL_ID_ENLARGE:
     case SPELL_ID_SHRINK:
-        bStrengthChanged = true;
+        {
+            auto *mod = ModRuntime::Current();
+            const int mode = mod ? mod->SpellAddon().Feature24() : 0;
+            bStrengthChanged = mode != 1 && mode != 2;
+        }
         break;
     }
     RecalcRPGStats(bStrengthChanged);
@@ -460,7 +466,11 @@ void CMapObject::ChangeComplectionWithSpell()
 {
     RestoreComplection();
     float fChange = HasSpellEffect(SPELL_ID_STRENGTHEN) - HasSpellEffect(SPELL_ID_WEAKEN);
-    float fChange2 = HasSpellEffect(SPELL_ID_ENLARGE) - HasSpellEffect(SPELL_ID_SHRINK);
+    auto *mod = ModRuntime::Current();
+    const int mode = mod ? mod->SpellAddon().Feature24() : 0;
+    const float strengthCoefficient = mode == 1 ? 0.1f : 0.4f;
+    float fChange2 = mode == 1 || mode == 2 ? 0.0f :
+        float(HasSpellEffect(SPELL_ID_ENLARGE) - HasSpellEffect(SPELL_ID_SHRINK));
     float fTotalChange = fChange + fChange2;
     // 'shrink' and 'enlarge' will affect all complection params
     // while 'strengthen' and 'weaken' only 'strength' and 'tall' params in different cases
@@ -475,9 +485,9 @@ void CMapObject::ChangeComplectionWithSpell()
     }
     else if (fChange != 0)
     {
-        complection.strength = Max(0.0f, complection.strength + 0.4f * fChange);
+        complection.strength = Max(0.0f, complection.strength + strengthCoefficient * fChange);
         if (GetTypeID() != MOTID_HUMAN)
-            complection.tall = Max(0.0f, complection.tall + 0.4f * fChange);
+            complection.tall = Max(0.0f, complection.tall + strengthCoefficient * fChange);
     }
     SetUpdateMask(VLD_MASK_COMPLECTION);
 }
