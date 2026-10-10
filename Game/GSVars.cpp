@@ -4,6 +4,9 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "GSVars.h"
 #include "ModRuntime.h"
+#include "ModPackage.h"
+#include "GeneralSettings.h"
+#include "ServerConsts.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 // диапазон в котором выдаются значения функцией GetPersonageIDByName
@@ -14,6 +17,17 @@ const int N_PERS_ID_NUMBER = 1000000000;
 /////////////////////////////////////////////////////////////////////////////////////
 float CGSVariableSet::GetVar(const char *pszName)
 {
+    const CModPackage *package = ModRuntime::Current();
+    if (package && package->SpellAddon().Feature46() == 1)
+    {
+        // ASI matches a prefix or four bytes at offset 4, case-sensitive.
+        // Read current fields on every call; stored variables stay unchanged.
+        if (strncmp(pszName, "Diff", 4) == 0)
+            return static_cast<float>(theSettings.nDifficultyLevel);
+        if (strlen(pszName) >= 8 && memcmp(pszName + 4, "peed", 4) == 0)
+            // Retail fild interprets this DWORD as a signed 32-bit integer.
+            return static_cast<float>(static_cast<LONG>(DW_SEGMENT_TIME));
+    }
     const_iterator it = find(pszName);
     if (it != end())
         return it->second;
@@ -28,7 +42,8 @@ void CGSVariableSet::SetVar(const char *pszName, float fpVal)
         DelVar(pszName);
     else
     {
-        GameJournal::Variable(this, pszName, find(pszName) != end(), GetVar(pszName), fpVal, false);
+        const_iterator it = find(pszName);
+        GameJournal::Variable(this, pszName, it != end(), it != end() ? it->second : 0, fpVal, false);
         (*this)[pszName] = fpVal;
     }
 }
@@ -55,7 +70,8 @@ void ClearLMPPartyVariables(CGSVariableSet &vars)
 }
 void CGSVariableSet::DelVar(const char *pszName)
 {
-    GameJournal::Variable(this, pszName, find(pszName) != end(), GetVar(pszName), 0, true);
+    const_iterator it = find(pszName);
+    GameJournal::Variable(this, pszName, it != end(), it != end() ? it->second : 0, 0, true);
     erase(pszName);
 }
 /////////////////////////////////////////////////////////////////////////////////////
