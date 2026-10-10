@@ -1,5 +1,6 @@
 #pragma once
 #include "RPGSystemConsts.h"
+#include "ModSpellAddonConfig.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -18,10 +19,23 @@ inline bool StockOffensive(int id) {
     }
     return false;
 }
-inline bool Offensive(int rawID,bool selfCast,bool particles) {
+inline bool TableOffensive(int rawID,const ModSpellAddon::Profile& profile) {
+    // Only 0..37 are overwritten. Retail ID 38 stays neutral; higher
+    // IDs fail the retail range check. Raw dispatch 0 means offensive.
+    if(rawID<0||rawID>=38)return false;
+    const auto key=static_cast<ModSpellAddon::ByteKey>(
+        static_cast<size_t>(ModSpellAddon::ByteKey::aioffendtable_0)+rawID);
+    return profile.Byte(key)==0;
+}
+inline bool Offensive(int rawID,bool selfCast,bool particles,
+    const ModSpellAddon::Profile* profile=nullptr) {
     // The native wire ID is 54. This tree's legacy SPELL_ID_TEST is 47;
     // changing the global enum would also change damage/save consumers.
-    if(StockOffensive(rawID)||(selfCast&&rawID==54))return true;
+    const bool base=profile&&profile->Feature49()==1?
+        TableOffensive(rawID,*profile):StockOffensive(rawID);
+    // The existing SelfCast/Particles owners extend the base classification;
+    // the ASI table must not disable those separately agreed features.
+    if(base||(selfCast&&rawID==54))return true;
     if(!particles)return false;
     switch(rawID) {
     case SPELL_ID_VAMP:case SPELL_ID_VISIONFOG:
