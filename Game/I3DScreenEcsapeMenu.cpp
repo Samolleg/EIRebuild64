@@ -11,6 +11,26 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DMain.h"
 #include "WorldInterface.h"
 #include "I3DMenuRects.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
+#include "WorldServer.h"
+#include "Player.h"
+
+// Shared by the Escape save button and the mission quicksave consumer only.
+bool ModSpellAddonAllowsSave()
+{
+    const CModPackage *package = ModRuntime::Current();
+    if (!package || package->SpellAddon().Feature44() != 1)
+        return true;
+    if (!theWorldServer.GetPlayerManager())
+        return true;
+    CPlayer *player = theWorldServer.GetPlayer(0);
+    if (!player)
+        return true;
+    const float value = player->party.vars.GetVar("Save");
+    // The ASI x87 comparison allows equal zero and unordered (NaN).
+    return value == 0.0f || value != value;
+}
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenEscapeMenu::OnActivate()
 {
@@ -78,7 +98,7 @@ void CI3DScreenEscapeMenu::OnMouseMove(UINT nFlags, CPoint point)
     switch (HitTest(point))
     {
     case 0:
-        if (m_nLastButton != 0 && !IWorldConnector.IsLMP())
+        if (m_nLastButton != 0 && ModSpellAddonAllowsSave() && !IWorldConnector.IsLMP())
         {
             pI3D->BeginFX("buttons\\menu\\stone.wav");
             pObj->PlaySpecialAnmation(2);
@@ -142,7 +162,7 @@ void CI3DScreenEscapeMenu::OnLButtonDown(UINT nFlags, CPoint point)
     switch (ht)
     {
     case 0:
-        if (!IWorldConnector.IsLMP())
+        if (ModSpellAddonAllowsSave() && !IWorldConnector.IsLMP())
         {
             CI3DScreenSaveLoad *pScreen = dbgnew CI3DScreenSaveLoad(pI3D);
             pScreen->SetParams(true, true);

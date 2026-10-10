@@ -21,6 +21,8 @@
 #include "aiUnitLogic.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
+// Defined in I3DScreenEcsapeMenu.cpp; keep f44 limited to the ASI consumers.
+bool ModSpellAddonAllowsSave();
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenMission.h"
 
@@ -1903,7 +1905,8 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         break;
 
     case KA_QSAVE:
-        CI3DScreenSaveLoad::QuickSave("saveq");
+        if (ModSpellAddonAllowsSave())
+            CI3DScreenSaveLoad::QuickSave("saveq");
         break;
     case KA_QLOAD:
         CI3DScreenSaveLoad::QuickLoad("saveq");
