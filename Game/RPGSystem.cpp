@@ -1084,7 +1084,9 @@ ECanRun SRPGUnitStats::CanRun(bool bHero) const
             fMinPercentage = Min(fMinPercentage, hls[i].fpHP / hls[i].fpMaxHP);
     }
     //
-    if (bHero && (fpCurrEncumbrance > fpMaxEncumbrance))
+    const CModPackage *mod = ModRuntime::Current();
+    const bool skipWeight = mod && mod->SpellAddon().Feature17() == 1;
+    if (bHero && !skipWeight && (fpCurrEncumbrance > fpMaxEncumbrance))
         return ECR_OVERLOADED;
     if (fMinPercentage < theAIGeneralSettings.fDamageLevelRunLimit)
         return ECR_INJURED;
