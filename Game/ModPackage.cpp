@@ -105,6 +105,22 @@ struct Stack {lua_State *s;int n;Stack(lua_State *p):s(p),n(lua_gettop(p)){}~Sta
 Json Value(lua_State*s,int i){switch(lua_type(s,i)){case LUA_TNIL:return nullptr;case LUA_TBOOLEAN:return lua_toboolean(s,i)!=0;case LUA_TNUMBER:return lua_tonumber(s,i);case LUA_TSTRING:{size_t n;const char*p=lua_tolstring(s,i,&n);return std::string(p,n);}default:throw std::runtime_error("Non-scalar Lua lookup result");}}
 void Push(lua_State*s,const Json&v){if(v.is_null())lua_pushnil(s);else if(v.is_boolean())lua_pushboolean(s,v.get<bool>());else if(v.is_number())lua_pushnumber(s,v.get<double>());else if(v.is_string()){auto a=v.get<std::string>();lua_pushlstring(s,a.data(),a.size());}else throw std::runtime_error("Non-scalar lookup argument");}
 }
+namespace {
+const char* const staticLookupNames[]={"GetDualAnims","GetVampSpellAdds","GetNpcCombatConsumableConfig"};
+}
+void ModStaticLookup::State::Initialize(lua_State* state){
+ *this=State{};
+ lua_getglobal(state,"JmvStaticLookupContract");
+ contract=lua_isnumber(state,-1) && lua_tointeger(state,-1)==1;
+ lua_pop(state,1);
+ for(int i=0;i<3;++i){lua_getglobal(state,staticLookupNames[i]);functions[i]=lua_isfunction(state,-1)?lua_topointer(state,-1):nullptr;lua_pop(state,1);}
+}
+bool ModStaticLookup::State::Eligible(lua_State* state,int index) const{
+ if(!state || !contract || !functions[index])return false;
+ lua_getglobal(state,staticLookupNames[index]);
+ const bool same=lua_isfunction(state,-1) && lua_topointer(state,-1)==functions[index];
+ lua_pop(state,1);return same;
+}
 CModPackage::CModPackage():initialization(std::make_unique<ModInitialization::Ledger>()),refreshQueue(std::make_unique<ModNpcRefreshQueue>()),infoStats(std::make_unique<ModInfoStats::State>()){}
 CModPackage::~CModPackage(){perkHostLifetime.reset();if(state)lua_close(state);}
 void CModPackage::Call(int args,int results){GameJournal::Callback journalCallback;GameJournal::Source journalSource("Lua.mod");if(lua_pcall(state,args,results,0)){const char*p=lua_tostring(state,-1);GameJournal::Event("ERROR","lua","text=%s",GameJournal::Quote(p).c_str());throw std::runtime_error(p?p:"Lua package call failed");}}
@@ -196,6 +212,7 @@ bool CModPackage::ConfigureAddonSettings(CFileRegistry& settings){
 void CModPackage::InitializeScript(){
  if(scriptInitialized)return;
  if(!state)throw std::runtime_error("Load package before initializing Lua script");
+ staticLookups=ModStaticLookup::State{};
  scalarManaBonus=false;
  manaBonusCache.clear();
  Stack stack(state);
@@ -223,6 +240,7 @@ void CModPackage::InitializeScript(){
   lua_getglobal(state,"RegenerateHpAndMpJmvDue");
   scheduledRegeneration=lua_isfunction(state,-1)!=0;
   lua_pop(state,1);
+  staticLookups.Initialize(state);
   infoStats->Initialize(state);
   scriptInitialized=true;
 }
@@ -720,7 +738,16 @@ float CModPackage::SpellAddonManaBonus(const SRPGUnitStats&stats){
  // on this path alone, without reading or writing the strict R01 cache.
  return static_cast<float>(lua_tonumber(state,-1));
 }
-float CModPackage::VampSpellValue(const char*prototype,int column){CallbackFrame frame(state);BeginCallback("GetVampSpellAdds");lua_pushstring(state,prototype);lua_pushinteger(state,column);Call(2,1);double n=Number(state,"Vamp spell property");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Vamp property overflow");return float(n);}
+float CModPackage::VampSpellValue(const char*prototype,int column){
+ CallbackFrame frame(state);
+ const bool validKey=ModStaticLookup::NameKey(prototype);std::string key;
+ if(validKey){ModStaticLookup::KeyString(key,prototype);ModStaticLookup::KeyValue(key,column);}
+ return staticLookups.vamp.Get(key,validKey && scriptInitialized && staticLookups.Eligible(state,1),[&](bool& valid){
+  BeginCallback("GetVampSpellAdds");lua_pushstring(state,prototype);lua_pushinteger(state,column);Call(2,1);
+  double n=Number(state,"Vamp spell property");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Vamp property overflow");
+  valid=true;return float(n);
+ });
+}
 ModSpellTooltip::Values CModPackage::SpellTooltip(const SRPGUserUnitStats &stats,
     const CSpell &spell, float manaIntelligence, int difficulty)
 {
@@ -1589,9 +1616,18 @@ bool InspectModPackageCommandLine(int &result){
 
 bool CModPackage::GetNpcCombatConsumableConfig(const char*zone,int id,const char*prototype,int kind,int variant,ModConsumableConfig&config){
  config={};if(!state||!zone||!zone[0]||id<0||kind<1||kind>5||variant<0||variant>2)return false;
- Stack stack(state);lua_getglobal(state,"GetNpcCombatConsumableConfig");if(!lua_isfunction(state,-1))return false;lua_pushstring(state,zone);lua_pushinteger(state,id);lua_pushstring(state,prototype?prototype:"");lua_pushinteger(state,kind);lua_pushinteger(state,variant);Call(5,4);
- if(!lua_isstring(state,-4)||!lua_isnumber(state,-3))return false;const char*formula=lua_tostring(state,-4);int charges=int(lua_tointeger(state,-3));if(!formula||!formula[0]||charges<1||charges>7)return false;
- config.spellFormula=formula;config.charges=charges;config.automatic=lua_toboolean(state,-2)!=0;config.prototypeFallback=lua_toboolean(state,-1)!=0;return true;
+ const char*name=prototype?prototype:"";
+ const bool validKey=ModStaticLookup::NameKey(zone) && ModStaticLookup::NameKey(name);std::string key;
+ if(validKey){ModStaticLookup::KeyString(key,zone);ModStaticLookup::KeyValue(key,id);ModStaticLookup::KeyString(key,name);ModStaticLookup::KeyValue(key,kind);ModStaticLookup::KeyValue(key,variant);}
+ const auto value=staticLookups.consumables.Get(key,validKey && staticLookups.Eligible(state,2),[&](bool& valid){
+  ModStaticLookup::ConsumableValue result;
+  Stack stack(state);lua_getglobal(state,"GetNpcCombatConsumableConfig");if(!lua_isfunction(state,-1))return result;lua_pushstring(state,zone);lua_pushinteger(state,id);lua_pushstring(state,name);lua_pushinteger(state,kind);lua_pushinteger(state,variant);Call(5,4);
+  if(lua_isnil(state,-4) && lua_isnil(state,-3) && lua_isboolean(state,-2) && !lua_toboolean(state,-2) && lua_isboolean(state,-1) && !lua_toboolean(state,-1)){valid=true;return result;}
+  if(!lua_isstring(state,-4)||!lua_isnumber(state,-3))return result;const char*formula=lua_tostring(state,-4);int charges=int(lua_tointeger(state,-3));if(!formula||!formula[0]||charges<1||charges>7)return result;
+  result.config.spellFormula=formula;result.config.charges=charges;result.config.automatic=lua_toboolean(state,-2)!=0;result.config.prototypeFallback=lua_toboolean(state,-1)!=0;
+  result.found=true;valid=true;return result;
+ });
+ config=value.config;return value.found;
 }
 
 namespace {
@@ -1901,9 +1937,21 @@ std::string CModPackage::DualAnimation(const CUnit&unit)
 std::vector<std::pair<int,bool>> CModPackage::DualStrikes(const char*animation,int length)
 {
  CallbackFrame frame(state);std::vector<std::pair<int,bool>> result;
- auto property=[&](int column){BeginCallback("GetDualAnims");lua_pushstring(state,animation);lua_pushinteger(state,column);Call(2,1);double n=Number(state,"Dual animation property");lua_pop(state,1);return n;};
+ const bool validKey=ModStaticLookup::NameKey(animation);
+ double frameLimit=0;
+ auto property=[&](int column){
+  std::string key;if(validKey){ModStaticLookup::KeyString(key,animation);ModStaticLookup::KeyValue(key,column);}
+  return staticLookups.dual.Get(key,validKey && scriptInitialized && staticLookups.Eligible(state,0),[&](bool& valid){
+   BeginCallback("GetDualAnims");lua_pushstring(state,animation);lua_pushinteger(state,column);Call(2,1);double n=Number(state,"Dual animation property");lua_pop(state,1);
+   if(column==4)valid=n==floor(n) && n>=0 && n<=6;
+   else if(column==17)valid=n>0 && n<=INT_MAX;
+   else if(column>=5 && column<=10)valid=n>=0 && n<=frameLimit && n==floor(n);
+   else valid=n==0 || n==1;
+   return n;
+  });
+ };
  double count=property(4);if(count==0)return result;
- double frames=property(17);if(count!=floor(count)||count<1||count>6||frames<=0||frames>INT_MAX||length<1)throw std::runtime_error("Invalid dual animation timing");
+ double frames=property(17);frameLimit=frames;if(count!=floor(count)||count<1||count>6||frames<=0||frames>INT_MAX||length<1)throw std::runtime_error("Invalid dual animation timing");
  for(int i=0;i<int(count);i++){double at=property(i+5),left=property(i+11);
      if(at<0||at>frames||at!=floor(at)||(left!=0&&left!=1))throw std::runtime_error("Invalid dual animation strike");
      // Match reference float scaling followed by truncation; coincident frames remain separate strikes.
