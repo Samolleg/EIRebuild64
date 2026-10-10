@@ -5,6 +5,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "SoundManager.h"
 #include "randomgen.h"
 #include "WorldClient.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
+#include "GameJournal.h"
 //----------------------------------------------------------------------------------------------------------
 
 const LPCSTR PSZ_MUSICINI_FILENAME = "music.reg";
@@ -84,6 +87,23 @@ void CMusicSystem::FadeInMusic()
 
 // ---------------------------------------------------------------------------------------------------------
 
+BOOL CMusicSystem::UseZoneSpecificMusic()
+{
+    const auto* package = ModRuntime::Current();
+    return package && package->SpellAddon().Feature39() == 2;
+}
+
+CString CMusicSystem::ResolveZoneMusicName(const CString& zone, const CString& allod)
+{
+    if (zone == "gz20g")
+        return "final";
+    if (!UseZoneSpecificMusic())
+        return allod;
+    // R32: the installed aligned ASCII compare leaves EDX four bytes into gz20*.
+    // Preserve this confirmed selector (including absent themes), with owned lifetime.
+    return zone.Left(4) == "gz20" ? zone.Mid(4) : zone;
+}
+
 void CMusicSystem::SetZoneMode(LPCSTR pszAllodName, BOOL bIsDungeon)
 {
     theWorld.GetSoundManager()->EndMIDI(EM_INSTANT);
@@ -100,9 +120,15 @@ void CMusicSystem::SetZoneMode(LPCSTR pszAllodName, BOOL bIsDungeon)
             theWorld.GetSoundManager()->EndStreaming(EM_INSTANT);
             bCombatState = FALSE;
             szLastCombatMusic = "";
+            GameJournal::Event("music", "zone_theme", "selector=%s dungeon=%d index=%d",
+                               GameJournal::Quote(pszAllodName).c_str(), bIsDungeon, i);
             return;
         }
     }
+    GameJournal::Event("music", "zone_theme_missing", "selector=%s dungeon=%d index=-1 silent=%d",
+                       GameJournal::Quote(pszAllodName).c_str(), bIsDungeon, UseZoneSpecificMusic());
+    if (UseZoneSpecificMusic())
+        return; // Keep the early stop/pause and all other old fields, as the ASI JMP does.
     ReportError("CMusicSystem::SetZoneMode()\nUnable to find sound theme for allod \"" +
                 CString(pszAllodName) + "\"");
 }
@@ -127,8 +153,15 @@ void CMusicSystem::SetBriefingMode(LPCSTR pszAllodName)
             break;
         }
     if (i == themes.GetSize())
+    {
+        GameJournal::Event("music", "briefing_theme_missing", "selector=%s index=-1",
+                           GameJournal::Quote(pszAllodName).c_str());
         return;
+    }
 
+    GameJournal::Event("music", "briefing_track", "selector=%s index=%d track=%s",
+                       GameJournal::Quote(pszAllodName).c_str(), i,
+                       GameJournal::Quote(szBriefingMusic + PSZ_MP3EXT).c_str());
     theWorld.GetSoundManager()->BeginStreaming(szBriefingMusic + PSZ_MP3EXT, EM_INSTANT);
 }
 
@@ -146,8 +179,15 @@ void CMusicSystem::SetConstructorMode(LPCSTR pszAllodName)
             break;
         }
     if (i == themes.GetSize())
+    {
+        GameJournal::Event("music", "constructor_theme_missing", "selector=%s index=-1",
+                           GameJournal::Quote(pszAllodName).c_str());
         return;
+    }
 
+    GameJournal::Event("music", "constructor_track", "selector=%s index=%d track=%s",
+                       GameJournal::Quote(pszAllodName).c_str(), i,
+                       GameJournal::Quote(szConstructorMusic + PSZ_MP3EXT).c_str());
     theWorld.GetSoundManager()->BeginStreaming(szConstructorMusic + PSZ_MP3EXT, EM_INSTANT);
 }
 
@@ -238,6 +278,10 @@ int CMusicSystem::Segment()
                         0, themes[nCurrentTheme].szCombatTheme.GetSize() - 1)];
                 szLastCombatMusic += PSZ_MP3EXT;
             }
+            GameJournal::Event("music", "combat_track", "selector=%s dungeon=%d index=%d track=%s",
+                               GameJournal::Quote(themes[nCurrentTheme].szAllodName).c_str(),
+                               themes[nCurrentTheme].bIsDungeon, nCurrentTheme,
+                               GameJournal::Quote(szLastCombatMusic).c_str());
             pSndMng->BeginStreaming(szLastCombatMusic, EM_FAST);
         }
         else
@@ -260,6 +304,10 @@ int CMusicSystem::Segment()
                             szPlayName = themes[nCurrentTheme].szCalmTheme[random.Get(
                                 0, themes[nCurrentTheme].szCalmTheme.GetSize() - 1)];
                         szPlayName += PSZ_MP3EXT;
+                        GameJournal::Event("music", "calm_track", "selector=%s dungeon=%d index=%d track=%s",
+                                           GameJournal::Quote(themes[nCurrentTheme].szAllodName).c_str(),
+                                           themes[nCurrentTheme].bIsDungeon, nCurrentTheme,
+                                           GameJournal::Quote(szPlayName).c_str());
                         pSndMng->BeginStreaming(szPlayName, EM_INSTANT);
                         while (pSndMng->IsStreamingSwitching())
                             Sleep(0);

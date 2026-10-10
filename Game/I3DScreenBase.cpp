@@ -123,11 +123,14 @@ void CI3DScreenBase::OnActivate()
     fOldFogDist = theSettings.fpTerrainBorderFogDistance;
     theSettings.fpTerrainBorderFogDistance = 4;
 
-    const SScenarioZone *pZone = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
-    if (pZone)
-        theWorld.GetMusicSystem()->SetBriefingMode(pZone->szAllodName);
-    else
-        theWorld.GetMusicSystem()->SetBriefingMode("gipat");
+    const CString szMusicZone = IWorldClient.GetCurrentZoneName();
+    const SScenarioZone *pZone = theMap.GetZoneByName(szMusicZone);
+    const CString szMusicSelector = pZone ?
+        (CMusicSystem::UseZoneSpecificMusic() ? szMusicZone : pZone->szAllodName) : CString("gipat");
+    GameJournal::Event("music", "briefing_selector", "zone=%s selector=%s zone_found=%d",
+                       GameJournal::Quote(szMusicZone).c_str(),
+                       GameJournal::Quote(szMusicSelector).c_str(), pZone != nullptr);
+    theWorld.GetMusicSystem()->SetBriefingMode(szMusicSelector);
     if (pZone)
         bCageBriefing = pZone->bCageBriefings;
     else
