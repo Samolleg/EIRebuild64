@@ -459,6 +459,107 @@ void CEffectSpell::CreateLight(const CPlot3D &ptWhere, const CPlot3D &color, flo
 // !!! Spell lifetime cycle
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ModLifeSpell.inl"
+// The mode-6 ASI dispatcher changes the live spell immediately before delivery.
+// Keep its x87 operation order and the caller's control word, including FISTP.
+static void PrepareControlMagic(int kind, CSpell& spell, CMapObject* caster, CMapObject* target)
+{
+    const auto* mod = ModRuntime::Current();
+    if (!mod || mod->SpellAddon().Feature15() != 6)
+        return;
+    using ByteKey = ModSpellAddon::ByteKey;
+    using ScalarKey = ModSpellAddon::ScalarKey;
+    struct Rule { int kind; ByteKey flags; ScalarKey base; };
+    static const Rule rules[] = {
+        { SPELL_ID_PROT_FIRE, ByteKey::gameplay_prot_fire, ScalarKey::gameplay_bprot_fire },
+        { SPELL_ID_PROT_ELECTRIC, ByteKey::gameplay_prot_electro, ScalarKey::gameplay_bprot_electro },
+        { SPELL_ID_PROT_ACID, ByteKey::gameplay_prot_acid, ScalarKey::gameplay_bprot_acid },
+        { SPELL_ID_EAGLE_SIGHT, ByteKey::gameplay_eagle_sight, ScalarKey::gameplay_beagle_sight },
+        { SPELL_ID_INFRAVISION, ByteKey::gameplay_infravision, ScalarKey::gameplay_binfravision },
+        { SPELL_ID_DETECT_LIFE, ByteKey::gameplay_detect_life, ScalarKey::gameplay_bdetect_life },
+        { SPELL_ID_INVISIBILITY, ByteKey::gameplay_invisibility, ScalarKey::gameplay_binvisibility },
+        { SPELL_ID_SILENCE, ByteKey::gameplay_silence, ScalarKey::gameplay_bsilence },
+        { SPELL_ID_LICHDOM, ByteKey::gameplay_lichdom, ScalarKey::gameplay_blichdom },
+        { SPELL_ID_STENCH, ByteKey::gameplay_stench, ScalarKey::gameplay_bstench },
+        { SPELL_ID_STUN, ByteKey::gameplay_stun, ScalarKey::gameplay_bstun },
+        { SPELL_ID_ANTIMAGIC, ByteKey::gameplay_antimagic, ScalarKey::gameplay_bantimagic },
+        { SPELL_ID_STRENGTHEN, ByteKey::gameplay_strength, ScalarKey::gameplay_bstrength },
+        { SPELL_ID_WEAKEN, ByteKey::gameplay_weak, ScalarKey::gameplay_bweak },
+        { SPELL_ID_REGENERATION, ByteKey::gameplay_regeneration, ScalarKey::gameplay_bregeneration },
+        { SPELL_ID_FEEBLEMIND, ByteKey::gameplay_feeblemind, ScalarKey::gameplay_bfeeblemind },
+        { SPELL_ID_SPEED, ByteKey::gameplay_speed, ScalarKey::gameplay_bspeed },
+        { SPELL_ID_SLOW, ByteKey::gameplay_slow, ScalarKey::gameplay_bslow },
+        { SPELL_ID_ENLARGE, ByteKey::gameplay_enlarge, ScalarKey::gameplay_benlarge },
+        { SPELL_ID_SHRINK, ByteKey::gameplay_shrink, ScalarKey::gameplay_bshrink },
+    };
+    for (const auto& rule : rules)
+    {
+        if (rule.kind != kind)
+            continue;
+        const auto& profile = mod->SpellAddon();
+        const int flags = profile.Mode(rule.flags);
+        if (flags != 11 && flags != 19)
+            return; // Other dispatcher flags/modes are outside this transfer.
+
+        // GetEffect exposes a const view; the owned spell itself is mutable.
+        // Mutate its existing fields so GetShowPower/Store see the ASI result.
+        auto& effect = const_cast<CSpellEffect&>(spell.GetEffect());
+        if (flags == 11 && caster && target &&
+            caster->WhoAmI() == HPC_UNIT && target->WhoAmI() == HPC_UNIT)
+        {
+            auto* source = static_cast<CUnit*>(caster);
+            auto* destination = static_cast<CUnit*>(target);
+            auto* sourceServer = dynamic_cast<CUnitServer*>(source->GetUnitSpecific());
+            auto* destinationServer = dynamic_cast<CUnitServer*>(destination->GetUnitSpecific());
+            if (sourceServer && destinationServer)
+            {
+                const int sourceLevel = source->GetLevel();
+                const int targetLevel = destination->GetLevel();
+                const float sourceInt = sourceServer->GetRPGStats()->psIntelligence.fpEffectiveValue;
+                const float targetInt = destinationServer->GetRPGStats()->psIntelligence.fpEffectiveValue;
+                const float levelCoeff = profile.Scalar(ScalarKey::gameplay_lvldurcoeff);
+                const float intCoeff = profile.Scalar(ScalarKey::gameplay_durcoeff);
+                const float one = 1.0f;
+                const float zero = 0.0f;
+                long duration = effect.nDuration;
+                __asm
+                {
+                    fild sourceLevel
+                    fild targetLevel
+                    fsubp st(1), st(0)
+                    fmul levelCoeff
+                    fild duration
+                    fmul st(1), st(0)
+                    fld targetInt
+                    fsubr sourceInt
+                    fmul intCoeff
+                    fmul st(0), st(1)
+                    faddp st(1), st(0)
+                    faddp st(1), st(0)
+                    fcom one
+                    fnstsw ax
+                    test ah, 1
+                    jz storeDuration
+                    fstp st(0)
+                    fld zero
+                storeDuration:
+                    fistp duration
+                }
+                effect.nDuration = duration;
+            }
+        }
+        // Flags 19 skip duration; flags 11 with no caster do so as well.
+        const float base = profile.Scalar(rule.base);
+        float power = effect.fpPower;
+        __asm
+        {
+            fld power
+            fadd base
+            fstp power
+        }
+        effect.fpPower = power;
+        return;
+    }
+}
 void CEffectSpell::StartSpell(int nKind)
 {
     if(ModLifeSpellStart(nKind)||ExtendedStart(nKind))return;
@@ -644,6 +745,7 @@ void CEffectSpell::StartSpell(int nKind)
     case SPELL_ID_SHRINK:
         if (!pTarget.IsEmpty())
         {
+            PrepareControlMagic(nKind, spell, pWho, pTarget);
             CSpellEffect effect;
             spell.GetSpellEffect(effect);
             effect.nVisStrength = GetShowPower() * 0x10;
