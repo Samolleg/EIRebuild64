@@ -21,6 +21,7 @@ static bool ReadShortChunkSave(CSave &file, chunk_id &dwID, CMemorySave &chunk)
     if (!file.IsOk())
         return false;
     if (!file.Require(dwLeng, "truncated_short_chunk")) return false;
+    chunk.InheritReadPolicy(file);
     chunk.SetSizeFast(dwLeng);
     dwRead = file.Read(chunk.GetBufferForWrite(), dwLeng);
     return dwRead == dwLeng;
@@ -225,6 +226,7 @@ void CStructureSaver::DataChunkBLOB(const chunk_id idChunk, CMemorySave &file)
         if (nLeng < 0 || nLeng > chunks.back().nLength)
         { data.Fail("invalid_blob_length"); return; }
         file.Clear();
+        file.InheritReadPolicy(data);
         file.SetSizeFast(nLeng);
     }
     DataChunk(2, file.GetBufferForWrite(), nLeng);
@@ -287,6 +289,8 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
     bIsReading = bRead;
     if (bRead)
     {
+        obj.InheritReadPolicy(res);
+        data.InheritReadPolicy(res);
         // read chunk with objects description
         GetShortChunkSave(res, 0, obj);
         GetShortChunkSave(res, 2, data);

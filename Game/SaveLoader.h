@@ -1,14 +1,18 @@
 #pragma once
 #include "ModRuntime.h"
 #include <limits>
-struct CSaveReadError { const char *reason; unsigned int offset; };
-// Only save application opts into immediate unwinding. Other stream users keep
-// their IsOk()/short-read contract, including the legacy network paths.
-inline int &SaveReadDepth() { static thread_local int depth = 0; return depth; }
-struct CSaveReadScope
+// The error owns its identity: the source stream can be destroyed during unwind.
+struct CSaveReadError
 {
-    CSaveReadScope() { ++SaveReadDepth(); }
-    ~CSaveReadScope() { --SaveReadDepth(); }
+    const char *reason;
+    unsigned int offset;
+    std::string stream, at;
+    void *stack[16] = {};
+    USHORT frames;
+    CSaveReadError(const char *why, unsigned int position,
+                   const std::string &source = {}, const std::string &reader = {})
+        : reason(why), offset(position), stream(source), at(reader),
+          frames(CaptureStackBackTrace(1, 16, stack, nullptr)) {}
 };
 /**********************************************************************
  *<
@@ -31,6 +35,8 @@ class CSave
 protected:
     bool bReading;
     bool bIsOk;
+    bool bStrictRead = false;
+    std::string readStream, readStage;
     int nVersion; // גונסטÿ save/load פאיכא
 public:
     CSave()
@@ -55,10 +61,18 @@ public:
     void SetVersion(int nVers) { nVersion = nVers; }
     int GetVersion() { return nVersion; }
 
+    // Only prepared save payloads and their serialized children inherit this.
+    // Unrelated resources/packets on the same thread keep their VRead contract.
+    void SetStrictRead(bool strict, const std::string &stream = {}, const std::string &stage = {})
+    { bStrictRead = strict; readStream = stream; readStage = stage; }
+    bool IsStrictRead() const { return bStrictRead; }
+    void InheritReadPolicy(const CSave &source)
+    { SetStrictRead(source.bStrictRead, source.readStream, source.readStage); }
+    void SetReadStage(const char *stage) { readStage = stage; }
     void Fail(const char *reason)
     {
         bIsOk = false;
-        if (SaveReadDepth()) throw CSaveReadError{reason, GetPosition()};
+        if (bStrictRead) throw CSaveReadError{reason, GetPosition(), readStream, readStage};
     }
     unsigned int Remaining()
     {
@@ -73,10 +87,10 @@ public:
     }
     UINT Read(void *lpBuf, UINT nCount)
     {
-        if (SaveReadDepth() && (!bIsOk || !Require(nCount, "truncated_read")))
+        if (bStrictRead && (!bIsOk || !Require(nCount, "truncated_read")))
             Fail("failed_stream");
         UINT read = VRead(lpBuf, nCount);
-        if (read != nCount) Fail("short_read");
+        if (bStrictRead && read != nCount) Fail("short_read");
         return read;
     }
     void Read(long &res) { Read(&res, sizeof(res)); }
@@ -140,7 +154,7 @@ public:
                 break;
             a = a + ch;
         }
-        if (ch != 0) Fail("unterminated_string");
+        if (bStrictRead && ch != 0) Fail("unterminated_string");
         return a;
     }
     void ReadString(char *pDst, int nMaxSize);
@@ -217,7 +231,7 @@ public:
     }
     void Seek(unsigned int nPos)
     {
-        if (bReading && nPos > GetSize()) { Fail("seek_out_of_bounds"); return; }
+        if (bStrictRead && bReading && nPos > GetSize()) { Fail("seek_out_of_bounds"); return; }
         file.Seek(nPos, CFile::begin);
     }
     unsigned int GetSize() { return file.GetLength(); }
@@ -239,6 +253,7 @@ class CMemorySave : public CSave
         nPos = 0;
         nFileSize = 0;
         bIsOk = true;
+        SetStrictRead(false);
         nBits = 0x80;
         nBitsWritePos = -1;
     }

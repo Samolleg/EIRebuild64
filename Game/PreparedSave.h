@@ -46,6 +46,7 @@ struct PreparedSave
         payload.SetVersion(version);
         if (!decoded.empty()) payload.Write(decoded.data(), static_cast<UINT>(decoded.size()));
         payload.Seek(0);
+        payload.SetStrictRead(true, static_cast<const char *>(path), "prepared_payload");
         return true;
     }
 };

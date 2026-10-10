@@ -44,6 +44,7 @@ bool CSave::ReadChunk(DWORD &dwID, CMemorySave &chunk)
     dwLeng -= 8;
     if (!Require(dwLeng, "truncated_chunk")) return false;
     chunk.Clear();
+    chunk.InheritReadPolicy(*this);
     chunk.StartSaving();
     char *buf = dbgnew char[dwLeng];
     dwRead = Read(buf, dwLeng);
@@ -267,6 +268,7 @@ void CSave::Read(CSave &res)
         Read(((char *)&nSize) + 2, 2);
     nSize >>= 1;
     res.Clear();
+    res.InheritReadPolicy(*this);
     res.Seek(0);
     if (!Require(nSize, "truncated_embedded_save")) return;
     if (nSize == 0)
@@ -361,7 +363,7 @@ void CMemorySave::VWrite(const void *lpBuf, UINT nCount)
 /////////////////////////////////////////////////////////////////////////////////////
 void CMemorySave::Seek(unsigned int nNPos)
 {
-    if (nNPos > nFileSize) { Fail("seek_out_of_bounds"); return; }
+    if (IsStrictRead() && nNPos > nFileSize) { Fail("seek_out_of_bounds"); return; }
     nPos = nNPos;
     FlushBits();
     nBits = 0x80;
@@ -410,6 +412,7 @@ void CMemorySave::CopyFrom(CSave &file)
 {
     file.Seek(0);
     SetSize(file.GetSize());
+    InheritReadPolicy(file);
     file.Read(pszData, nFileSize);
     Seek(0);
 }

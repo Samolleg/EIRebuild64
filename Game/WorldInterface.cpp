@@ -641,24 +641,54 @@ static void MissingSave(const CString &path, const char *event)
 {
     GameJournal::Event("SAVE", event, "file=%s", GameJournal::Quote(path).c_str());
 }
-static BOOL SaveLoadFailure(const char *path, const char *reason, size_t offset)
+static BOOL SaveLoadFailure(const char *path, const char *reason, size_t offset, const char *at = "")
 {
-    GameJournal::Event("SAVE", "load_failed", "file=%s reason=%s offset=%u",
-        GameJournal::Quote(path).c_str(), reason, static_cast<unsigned int>(offset));
-    ReportError("Save file %s is corrupt", path);
+    GameJournal::Event("SAVE", "load_failed", "file=%s stream=%s at=%s reason=%s offset=%u",
+        GameJournal::Quote(path).c_str(), GameJournal::Quote(path).c_str(),
+        GameJournal::Quote(*at ? at : path).c_str(), reason, static_cast<unsigned int>(offset));
+    if (strncmp(path, "stage=", 6) == 0)
+        ReportError("Save loading failed at %s (%s)", path + 6, reason);
+    else
+        ReportError("Save file %s is corrupt", path);
     return FALSE;
+}
+static BOOL SaveReadFailure(const char *fallback, const CSaveReadError &error)
+{
+    const char *source = error.stream.empty() ? fallback : error.stream.c_str();
+    const char *at = error.at.empty() ? fallback : error.at.c_str();
+    GameJournal::Event("SAVE", "read_context", "stream=%s at=%s",
+        GameJournal::Quote(source).c_str(), GameJournal::Quote(at).c_str());
+    // Addresses refer to the matching EXE/PDB, captured before stack unwinding.
+    for (USHORT i = 0; i < error.frames; ++i)
+    {
+        HMODULE module = nullptr;
+        char name[MAX_PATH] = {};
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(error.stack[i]), &module);
+        if (module) GetModuleFileNameA(module, name, sizeof(name));
+        GameJournal::Event("SAVE", "read_stack", "frame=%u address=%p module=%s rva=%08x",
+            static_cast<unsigned int>(i), error.stack[i], GameJournal::Quote(name).c_str(),
+            module ? static_cast<unsigned int>(reinterpret_cast<ULONG_PTR>(error.stack[i]) -
+                reinterpret_cast<ULONG_PTR>(module)) : 0);
+    }
+    return SaveLoadFailure(source, error.reason, error.offset, at);
 }
 static BOOL ApplyMission(CMemorySave &f)
 {
+    f.SetReadStage("CWorldServer::LoadSave/mission");
     f.Seek(0);
-    if (f.GetVersion() < 82) theCamera.Load(f);
+    if (f.GetVersion() < 82)
+    { f.SetReadStage("CCamera::Load"); theCamera.Load(f); }
     if (f.GetVersion() < 71)
     {
-        interfaceState.SetSize(0);
+        interfaceState.Clear();
+        f.SetReadStage("CInterface::Load");
         theInterface.Load(f);
+        f.SetReadStage("Read/interfaceState");
         f.Read(interfaceState);
         interfaceState.SetVersion(f.GetVersion());
     }
+    f.SetReadStage("CWorldServer::LoadSave/mission");
     return theWorldServer.LoadSave(f, WorldLoadOrigin::SavedGame);
 }
 }
@@ -670,14 +700,14 @@ BOOL CWorldConnector::LoadSave(CSave &file)
     {
         if (!DecompressTo(f, 0x102, N_CURRENT_SAVE_VERSION, N_CURRENT_MINIMAL_SAVE_VERSION, file))
             return SaveLoadFailure("mission.sav", lastSaveError.reason, lastSaveError.offset);
-        CSaveReadScope strict;
+        f.SetStrictRead(true, "mission.sav", "CWorldServer::LoadSave/mission");
         applying = true;
         IWorldClient.StopAllSounds();
         if (!ApplyMission(f)) throw CSaveReadError{"mission_apply_failed", f.GetPosition()};
         return TRUE;
     }
     catch (const CSaveReadError &e)
-    { if (applying) GoMainMenu(); return SaveLoadFailure("mission.sav", e.reason, e.offset); }
+    { if (applying) GoMainMenu(); return SaveReadFailure("mission.sav", e); }
     catch (CException *e)
     { e->Delete(); if (applying) GoMainMenu(); return SaveLoadFailure("mission.sav", "file_or_memory_error", 0); }
     catch (const std::bad_alloc &)
@@ -747,6 +777,9 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
                 file.CloseFile();
                 prepared = &f;
             }
+            if (!prepared->IsStrictRead())
+                prepared->SetStrictRead(true, static_cast<const char *>(szCurrentPath + szFileName));
+            prepared->SetReadStage("CWorldServer::LoadSave/zone");
             prepared->Seek(0);
             bRv = theWorldServer.LoadSave(*prepared, WorldLoadOrigin::ZoneEntry, pszSpecialTerrain);
             if (!bRv) return FALSE;
@@ -865,9 +898,9 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
         failedPath = savePath + "scenario.sav";
         if (!PrepareSave(scenario, failedPath, 0xDEAD))
             return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
-        CSaveReadScope strict;
         // Deserialize into a private hat to select the exact set of used files.
         CGlobalHat candidate;
+        scenario.payload.SetReadStage("CGlobalHat::Load/candidate");
         candidate.Load(scenario.payload);
         auto &partySet = candidate.GetSinglePlayerPartySet();
         for (const auto &entry : partySet.parties)
@@ -907,6 +940,7 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
                 return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
         }
         // Stage B starts here. Nothing above clears current or changes the live world.
+        failedPath = "stage=prepare_world";
         applying = true;
         GameJournal::CombatBoundary("saved_game");
         NConsole::RunAutoExec("exec autoexec.cfg");
@@ -917,21 +951,28 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
         IWorldClient.StopAllSounds();
         LMPReloadDatabases(IsLMP());
         ConnectLocalServer();
+        failedPath = "stage=start_server";
         theWorldServer.StartServer(SERV_MODE_LOCAL);
+        failedPath = "stage=initial_segments";
         theWorld.Segment(); theWorldServer.Segment();
         theWorld.Segment(); theWorldServer.Segment();
+        failedPath = "stage=clear_current";
         ClearDirectory(currentPath);
         failedPath = scenario.path;
         scenario.payload.Seek(0);
+        scenario.payload.SetReadStage("CGlobalHat::Load/live");
         theHat.Load(scenario.payload);
         if (scenario.payload.GetVersion() >= 71)
         {
-            interfaceState.SetSize(0);
+            interfaceState.Clear();
+            scenario.payload.SetReadStage("CInterface::Load");
             theInterface.Load(scenario.payload);
+            scenario.payload.SetReadStage("Read/interfaceState");
             scenario.payload.Read(interfaceState);
             interfaceState.SetVersion(scenario.payload.GetVersion());
         }
-        if (scenario.payload.GetVersion() >= 82) theCamera.Load(scenario.payload);
+        if (scenario.payload.GetVersion() >= 82)
+        { scenario.payload.SetReadStage("CCamera::Load"); theCamera.Load(scenario.payload); }
         for (const auto &prepared : zones)
         {
             failedPath = prepared->path;
@@ -955,8 +996,12 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
                 throw CSaveReadError{"mission_apply_failed", mission.payload.GetPosition()};
             theWorldServer.SetExits(zone->exits);
         }
-        else if (!MoveToZone(party.szCurrentZone))
-            throw CSaveReadError{"zone_apply_failed", 0};
+        else
+        {
+            failedPath = "stage=move_to_zone";
+            // MoveToZone already reports its own precise payload/stage failure.
+            if (!MoveToZone(party.szCurrentZone)) return FALSE;
+        }
         NConsole::game << "Loaded " << pszSaveName << endl;
         journal.Result(true);
         return TRUE;
@@ -964,7 +1009,7 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
     catch (const CSaveReadError &e)
     {
         if (applying) GoMainMenu();
-        return SaveLoadFailure(failedPath, e.reason, e.offset);
+        return SaveReadFailure(failedPath, e);
     }
     catch (CException *e)
     {
@@ -1044,10 +1089,10 @@ BOOL CWorldConnector::SaveGame(const char *pszSaveName)
     theHat.Store(f);
     // interface vars saving
     theInterface.Store(f);
-    interfaceState.SetSize(0);
+    interfaceState.Clear();
     theInterface.StoreSpecific();
     f.Write(interfaceState);
-    interfaceState.SetSize(0);
+    interfaceState.Clear();
     // camera storing
     theCamera.Store(f);
     //
@@ -1124,6 +1169,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
     szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     PreparedSave prepared;
     prepared.path = szCurrentPath + pszZone + ".sav";
+    CString failedPath = prepared.path;
     bool applying = false;
     try
     {
@@ -1132,7 +1178,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
         if (result == PreparedSave::Result::Missing) MissingSave(prepared.path, "zone_missing");
         if (result == PreparedSave::Result::Failed)
             return SaveLoadFailure(prepared.path, lastSaveError.reason, lastSaveError.offset);
-        CSaveReadScope strict;
+        failedPath = "stage=start_server_resources";
         applying = true;
         theInterface.SetScreensMustDie();
         theInterface.DestroyScreens();
@@ -1140,6 +1186,8 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
         theWorldServer.RemoveEverythingDynamic();
         if (existing)
         {
+            failedPath = prepared.path;
+            prepared.payload.SetReadStage("CWorldServer::LoadSave/zone");
             if (!theWorldServer.LoadSave(prepared.payload, WorldLoadOrigin::ZoneEntry, 0))
                 throw CSaveReadError{"zone_apply_failed", prepared.payload.GetPosition()};
         }
@@ -1150,6 +1198,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
                 return FALSE;
             theWorldServer.SetWorldTime(4.0f);
         }
+        failedPath = "stage=start_server";
         CAArray<SZoneExit, SZoneExit &> exits = pZone->exits;
         for (int i = 0; i < exits.GetSize(); i++)
             exits[i].szZone = "MPGame1";
@@ -1178,17 +1227,18 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
         return TRUE;
     }
     catch (const CSaveReadError &e)
-    { if (applying) GoMainMenu(); return SaveLoadFailure(prepared.path, e.reason, e.offset); }
+    { if (applying) GoMainMenu(); return SaveReadFailure(failedPath, e); }
     catch (CException *e)
-    { e->Delete(); if (applying) GoMainMenu(); return SaveLoadFailure(prepared.path, "file_or_memory_error", 0); }
+    { e->Delete(); if (applying) GoMainMenu(); return SaveLoadFailure(failedPath, "file_or_memory_error", 0); }
     catch (const std::bad_alloc &)
-    { if (applying) GoMainMenu(); return SaveLoadFailure(prepared.path, "allocation_failed", 0); }
+    { if (applying) GoMainMenu(); return SaveLoadFailure(failedPath, "allocation_failed", 0); }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // server side, spawning a new server (with disconnecting everyone from server)
 BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
 {
     PreparedSave prepared;
+    CString failedPath = "stage=move_to_zone";
     bool applying = false;
     try
     {
@@ -1203,6 +1253,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
             {
                 CString path;
                 path.Format("%ssaves\\current\\%s.sav", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszZoneName);
+                failedPath = path;
                 const auto result = PrepareOptionalSave(prepared, path);
                 // Legacy MoveToZone/LoadZoneState returns false for an absent
                 // visited-zone state; it does not invent a replacement world.
@@ -1213,7 +1264,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
                 havePrepared = true;
             }
         }
-        CSaveReadScope strict;
+        failedPath = "stage=move_to_zone_resources";
         applying = true;
         if (action == CD_MOVETOZONE)
         {
@@ -1292,6 +1343,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
             // starting server for single player only
             CParty party;
             theHat.GetSinglePlayerParty(party);
+            failedPath = havePrepared ? prepared.path : "stage=load_new_zone";
             if (!LoadZoneState(party, havePrepared ? &prepared.payload : nullptr))
                 throw CSaveReadError{"zone_apply_failed", havePrepared ? prepared.payload.GetPosition() : 0};
             theHat.SetSinglePlayerParty(party);
@@ -1310,16 +1362,17 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
         if (iface == IFACE_MISSION)
             theSettings.nDrawVisibleOnly = 1;
         // connect & start server
+        failedPath = "stage=start_server";
         theWorldServer.StartServer(servMode);
         ConnectLocalServer();
         return TRUE;
     }
     catch (const CSaveReadError &e)
-    { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(prepared.path, e.reason, e.offset); }
+    { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveReadFailure(failedPath, e); }
     catch (CException *e)
-    { e->Delete(); if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(prepared.path, "file_or_memory_error", 0); }
+    { e->Delete(); if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(failedPath, "file_or_memory_error", 0); }
     catch (const std::bad_alloc &)
-    { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(prepared.path, "allocation_failed", 0); }
+    { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(failedPath, "allocation_failed", 0); }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // main state transition place
