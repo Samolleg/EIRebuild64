@@ -67,6 +67,9 @@ public:
 
     // Segment processing
     virtual int Segment();
+    // SpellAddon f39 mode 2: explicit selectors, independent of volatile CRT registers.
+    static BOOL UseZoneSpecificMusic();
+    static CString ResolveZoneMusicName(const CString& zone, const CString& allod);
     void SetZoneMode(LPCSTR pszAllodName, BOOL bIsDungeon);
     void UnpauseZoneMode() { bZoneModeStartPause = FALSE; }
     void SetBriefingMode(LPCSTR pszAllodName);

@@ -2450,12 +2450,12 @@ BOOL CWorldClient::NewZone(CMemorySave &packet)
     //
     if (theSettings.nAudio && theSettings.nAudioStreaming)
     {
-        // CRAP - set special melody section for the final combat zone
-        if (IWorldClient.GetCurrentZoneName() == "gz20g")
-            pMusicSystem->SetZoneMode("final", IsCaveZone());
-        else
-            // CRAP ends
-            pMusicSystem->SetZoneMode(szCurrentAllodName, IsCaveZone());
+        const CString szMusicZone = IWorldClient.GetCurrentZoneName();
+        const CString szMusicSelector = CMusicSystem::ResolveZoneMusicName(szMusicZone, szCurrentAllodName);
+        GameJournal::Event("music", "zone_selector", "zone=%s selector=%s dungeon=%d",
+                           GameJournal::Quote(szMusicZone).c_str(),
+                           GameJournal::Quote(szMusicSelector).c_str(), IsCaveZone());
+        pMusicSystem->SetZoneMode(szMusicSelector, IsCaveZone());
     }
     //
     GetPlayer()->AppendPacket(IWorldServer.GetInitialUpdate());

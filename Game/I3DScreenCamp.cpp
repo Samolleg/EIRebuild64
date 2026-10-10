@@ -448,11 +448,14 @@ void CI3DScreenCamp::OnActivate()
                     static_cast<CObject3DClientSpecific *>(pUnits[i]->GetObjectSpecific())->ReleaseWounds();
         }
     }
-    const SScenarioZone *pZone = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
-    if (pZone)
-        theWorld.GetMusicSystem()->SetConstructorMode(pZone->szAllodName);
-    else
-        theWorld.GetMusicSystem()->SetConstructorMode("gipat");
+    const CString szMusicZone = IWorldClient.GetCurrentZoneName();
+    const SScenarioZone *pZone = theMap.GetZoneByName(szMusicZone);
+    const CString szMusicSelector = pZone ?
+        (CMusicSystem::UseZoneSpecificMusic() ? szMusicZone : pZone->szAllodName) : CString("gipat");
+    GameJournal::Event("music", "camp_selector", "zone=%s selector=%s zone_found=%d",
+                       GameJournal::Quote(szMusicZone).c_str(),
+                       GameJournal::Quote(szMusicSelector).c_str(), pZone != nullptr);
+    theWorld.GetMusicSystem()->SetConstructorMode(szMusicSelector);
     // set antialiasing - artists want it!!!
     /*theRenderer.GetD3D()->GetDeviceDesc(devdesc);
     if (devdesc.dpcTriCaps.dwRasterCaps & D3DPRASTERCAPS_ANTIALIASSORTINDEPENDENT)
