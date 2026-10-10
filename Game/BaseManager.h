@@ -139,15 +139,19 @@ void LoadGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager
 {
     int i, nIdx;
     for (i = 0; i < arr.GetSize(); i++)
-        arr[i]->Release();
-    file.Read(&i, sizeof(i));
-    arr.SetSize(i);
-    for (i = 0; i < arr.GetSize(); i++)
+        if (arr[i]) arr[i]->Release();
+    arr.RemoveAll();
+    int count = 0;
+    file.Read(count);
+    if (count < 0 || static_cast<unsigned int>(count) > file.Remaining() / sizeof(int))
+    { file.Fail("invalid_reference_count"); return; }
+    for (i = 0; i < count; i++)
     {
         file.Read(&nIdx, sizeof(nIdx));
-        arr[i] = (ARG_TYPE)pManager->Find(nIdx);
-        if (arr[i])
-            arr[i]->AddRef();
+        ARG_TYPE object = nIdx == -1 ? nullptr : dynamic_cast<ARG_TYPE>(pManager->Find(nIdx));
+        if (nIdx != -1 && !object) { file.Fail("invalid_typed_reference"); return; }
+        arr.Add(object);
+        if (object) object->AddRef();
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -205,7 +209,8 @@ TYPE *LoadGBPtr(CSave &file, CBaseManager *pManager)
     file.Read(nID);
     if (nID == -1)
         return NULL;
-    TYPE *pRes = (TYPE *)pManager->Find(nID);
+    TYPE *pRes = dynamic_cast<TYPE *>(pManager->Find(nID));
+    if (!pRes) { file.Fail("invalid_typed_reference"); return nullptr; }
     if (pRes)
         pRes->AddRef();
     return pRes;

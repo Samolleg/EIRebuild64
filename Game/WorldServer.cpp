@@ -3784,7 +3784,11 @@ void CWorldServer::LoadDynamic(CSave &file)
             break;
         file.Read(typeID);
         file.Read(dwSubtype);
+        if (nID < 0 || pMapObjectManager->Find(nID) ||
+            !((typeID >= MOTID_HUMAN && typeID <= MOTID_LEVER) || typeID == MOTID_KAPKAN))
+        { file.Fail("invalid_dynamic_id_or_type"); return; }
         LPGAMEBASE lpData = pMapObjectManager->CreateData(ETypeIDs(typeID), nID);
+        if (!lpData) { file.Fail("invalid_dynamic_type"); return; }
         lpData->SetSubtypeID(dwSubtype);
     }
 }
@@ -3799,6 +3803,7 @@ void CWorldServer::LoadDynamicData(CSave &file)
         if (nID == -1)
             break;
         CMapObject *pMO = (CMapObject *)pMapObjectManager->Find(nID);
+        if (!pMO || mapObjects.Seek(nID)) { file.Fail("unknown_or_duplicate_dynamic_id"); return; }
         if (file.GetVersion() > 88)
         {
             CString szTemplate;
@@ -3829,11 +3834,11 @@ void CWorldServer::LoadDynamicData(CSave &file)
         if (pMO->WhoAmI() == HPC_UNIT)
         {
             CUnit *pUnit = (CUnit *)pMO;
-            DWORD dwRace = ((CMapObjectManager *)pMapObjectManager)
-                               ->GetPrototype(pUnit->GetSubtypeID())
-                               ->dwRaceIndex;
-            pUnit->SetRaceAnimationCoeffs(
-                ((CMapObjectManager *)pMapObjectManager)->GetRace(dwRace)->fAnimationCoeffs);
+            auto *prototype = ((CMapObjectManager *)pMapObjectManager)->GetPrototype(pUnit->GetSubtypeID());
+            if (!prototype) { file.Fail("unknown_unit_prototype"); return; }
+            auto *race = ((CMapObjectManager *)pMapObjectManager)->GetRace(prototype->dwRaceIndex);
+            if (!race) { file.Fail("unknown_unit_race"); return; }
+            pUnit->SetRaceAnimationCoeffs(race->fAnimationCoeffs);
         }
         // set every
         int nMax = pMO->update.GetHistoriesNumber();
@@ -3971,6 +3976,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
         if (nID == -1)
             break;
         CEffect *pEff = (CEffect *)pEffectManager->Find(nID);
+        if (!pEff || effects.Seek(nID)) { file.Fail("invalid_effect_reference"); return FALSE; }
 
         pEff->AddRef();
         pEff->SetUpdateMask();
@@ -4011,10 +4017,9 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
     // CRAP - works correct only for single player
     if (GetPlayerManager())
     {
-        CPlayerIterator
-            *playerIter = dbgnew CPlayerIterator; // because iterator has refcount on manager
-        CPlayer *pPlayer = playerIter->GetFirst((CPlayerManager *)GetPlayerManager());
-        for (; pPlayer; pPlayer = playerIter->GetNext())
+        CPlayerIterator playerIter; // releases its manager reference during unwind
+        CPlayer *pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
+        for (; pPlayer; pPlayer = playerIter.GetNext())
         {
             CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
             pPlayer->partyID.Load(file);
@@ -4038,7 +4043,6 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
             pPS->SendParty();
             pPS->SetPartyIsDeployed(true);
         }
-        delete playerIter;
     }
     // end of CRAP
     file.Read(bCombatPause);

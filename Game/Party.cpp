@@ -44,13 +44,13 @@ void CPersonage::ClearItems()
 {
     int i;
     for (i = 0; i < weapons.GetSize(); i++)
-        weapons[i]->Release();
+        if (weapons[i]) weapons[i]->Release();
     for (i = 0; i < items.GetSize(); i++)
-        items[i]->Release();
+        if (items[i]) items[i]->Release();
     for (i = 0; i < armors.GetSize(); i++)
-        armors[i]->Release();
+        if (armors[i]) armors[i]->Release();
     for (i = 0; i < spells.GetSize(); i++)
-        spells[i]->Release();
+        if (spells[i]) spells[i]->Release();
     weapons.SetSize(0);
     items.SetSize(0);
     armors.SetSize(0);
@@ -375,7 +375,7 @@ void CParty::Destroy()
 {
     people.RemoveAll();
     for (int i = 0; i < allWagonItems.GetSize(); i++)
-        allWagonItems[i]->Release();
+        if (allWagonItems[i]) allWagonItems[i]->Release();
     allWagonItems.RemoveAll();
     //
     if (pItemConstructor)
@@ -419,7 +419,7 @@ void CParty::Clear(BOOL bDelVars, BOOL bDestructor)
 {
     int i;
     for (i = 0; i < allWagonItems.GetSize(); i++)
-        allWagonItems[i]->Release();
+        if (allWagonItems[i]) allWagonItems[i]->Release();
     allWagonItems.RemoveAll();
     if (pItemManager)
         pItemManager->RemoveAll();
@@ -470,6 +470,8 @@ void CParty::Load(CSave &file, BOOL bVars)
     LoadGBPtrArray<CItem *, CItem *>(allWagonItems, file, GetItemManager());
 
     file.Read(n);
+    if (n < 0 || static_cast<unsigned int>(n) > file.Remaining())
+    { file.Fail("invalid_party_size"); return; }
     people.SetSize(n);
     for (i = 0; i < n; i++)
         people[i].Load(file);
@@ -588,7 +590,7 @@ void CParty::RemoveAllQuestItems()
 void CParty::RemoveAllItems()
 {
     for (int i = 0; i < allWagonItems.GetSize(); i++)
-        allWagonItems[i]->Release();
+        if (allWagonItems[i]) allWagonItems[i]->Release();
     allWagonItems.RemoveAll();
 }
 /////////////////////////////////////////////////////////////////////////////////////

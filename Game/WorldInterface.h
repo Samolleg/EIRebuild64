@@ -145,7 +145,7 @@ class CWorldConnector
     BOOL LoadSave(CSave &file);
     void StoreSave(CSave &file);
     // служебные функции для считывания/записи состояния зоны
-    BOOL LoadZoneState(CParty &party);
+    BOOL LoadZoneState(CParty &party, CMemorySave *prepared = nullptr);
     BOOL StoreZoneState(CParty &party);
     // connections
     void ConnectLocalServer();
@@ -161,7 +161,7 @@ class CWorldConnector
     // переключить клиента на другой сервер, в случае сингла старый сервер убивается,
     // вместо него запускается новый, вызывается только из playerclient::prsserverchange()
     // для смены карты использовать IWorldClient::ExitZone() или GoZone()
-    void MoveToZone(const char *pszZoneName, EInterface iface = IFACE_NONE);
+    BOOL MoveToZone(const char *pszZoneName, EInterface iface = IFACE_NONE);
 
 public:
     CWorldConnector() { action = CD_NONE; }

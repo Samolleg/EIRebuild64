@@ -20,26 +20,29 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 void CSave::ReadString(char *pDst, int nMaxSize)
 {
-    while (nMaxSize > 0)
+    if (nMaxSize <= 0) { Fail("invalid_string_buffer"); return; }
+    int written = 0;
+    for (;;)
     {
-        char ch;
-        Read(ch);
-        *pDst++ = ch;
-        nMaxSize--;
-        if (ch == 0)
-            break;
+        char ch = 0;
+        if (Read(&ch, 1) != 1) { pDst[written] = 0; return; }
+        if (!ch) { pDst[written] = 0; return; }
+        if (written < nMaxSize - 1) pDst[written++] = ch;
     }
-    pDst[nMaxSize - 1] = 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CSave::ReadChunk(DWORD &dwID, CMemorySave &chunk)
 {
     DWORD dwLeng = 0, dwRead;
+    if (Eof()) return false;
+    if (!Require(8, "truncated_chunk_header")) return false;
     if (!Read(&dwID, sizeof(dwID)))
         return false;
     if (!Read(&dwLeng, sizeof(dwLeng)))
         return false;
+    if (dwLeng < 8) { Fail("invalid_chunk_length"); return false; }
     dwLeng -= 8;
+    if (!Require(dwLeng, "truncated_chunk")) return false;
     chunk.Clear();
     chunk.StartSaving();
     char *buf = dbgnew char[dwLeng];
@@ -224,18 +227,22 @@ void CSave::LoadFromDifference(CSave &original, CSave &dif)
         unsigned char sameLength = 0;
         if (dif.Read(&sameLength, sizeof(sameLength)) != sizeof(sameLength))
             break;
+        if (sameLength > total - current) { dif.Fail("delta_equal_overflow"); return; }
         original.Read(buffer, sameLength);
         Write(buffer, sameLength);
         current += sameLength;
         unsigned char changedLength = 0;
         if (dif.Read(&changedLength, sizeof(changedLength)) != sizeof(changedLength))
             break;
+        if (changedLength > total - current) { dif.Fail("delta_changed_overflow"); return; }
+        if (!dif.Require(changedLength, "truncated_delta")) return;
         original.Read(buffer, changedLength);
         dif.Read(buffer, changedLength);
         Write(buffer, changedLength);
         current += changedLength;
         endedAfterChangedRun = current == total && changedLength != 0;
     }
+    if (current != total) { dif.Fail("incomplete_delta"); return; }
     if (!endedAfterChangedRun)
         return;
     const unsigned int registryPosition = dif.GetPosition();
@@ -261,7 +268,7 @@ void CSave::Read(CSave &res)
     nSize >>= 1;
     res.Clear();
     res.Seek(0);
-    ASSERT(nSize < 10000000);
+    if (!Require(nSize, "truncated_embedded_save")) return;
     if (nSize == 0)
         return;
     pData = dbgnew char[nSize];
@@ -296,11 +303,10 @@ bool CSave::LoadSaveHeader(const int nSignature, const int nCurrentVersion,
                            const int nMinimalVersion)
 {
     int nID = 0;
-    Read(nID);
+    if (Read(&nID, sizeof(nID)) != sizeof(nID)) return false;
     if (nID != nSignature)
         return false;
-    Read(nID);
-    ASSERT(nID <= nCurrentVersion);
+    if (Read(&nID, sizeof(nID)) != sizeof(nID)) return false;
     if (nID > nCurrentVersion)
         return false;
     if (nID < nMinimalVersion)
@@ -321,16 +327,16 @@ void CSave::StoreSaveHeader(const int nSignature, const int nCurrentVersion)
 UINT CMemorySave::VRead(void *lpBuf, UINT nCount)
 {
     int rv;
-    if (nPos + nCount > nFileSize)
+    if (nPos > nFileSize || nCount > nFileSize - nPos)
     {
         bIsOk = false;
-        rv = nFileSize - nPos;
+        rv = nPos <= nFileSize ? nFileSize - nPos : 0;
         memset(lpBuf, 0, nCount);
         if (rv < 0)
             return 0;
         nCount = (UINT)rv;
     }
-    memcpy(lpBuf, pszData + nPos, nCount);
+    if (nCount) memcpy(lpBuf, pszData + nPos, nCount);
     nPos += nCount;
     return nCount;
 }
@@ -355,7 +361,7 @@ void CMemorySave::VWrite(const void *lpBuf, UINT nCount)
 /////////////////////////////////////////////////////////////////////////////////////
 void CMemorySave::Seek(unsigned int nNPos)
 {
-    ASSERT(nNPos >= 0 && nNPos <= nBufSize);
+    if (nNPos > nFileSize) { Fail("seek_out_of_bounds"); return; }
     nPos = nNPos;
     FlushBits();
     nBits = 0x80;

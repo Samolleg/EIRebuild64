@@ -1,5 +1,15 @@
 #pragma once
 #include "ModRuntime.h"
+#include <limits>
+struct CSaveReadError { const char *reason; unsigned int offset; };
+// Only save application opts into immediate unwinding. Other stream users keep
+// their IsOk()/short-read contract, including the legacy network paths.
+inline int &SaveReadDepth() { static thread_local int depth = 0; return depth; }
+struct CSaveReadScope
+{
+    CSaveReadScope() { ++SaveReadDepth(); }
+    ~CSaveReadScope() { --SaveReadDepth(); }
+};
 /**********************************************************************
  *<
         FILE: SaveLoader.H
@@ -45,7 +55,30 @@ public:
     void SetVersion(int nVers) { nVersion = nVers; }
     int GetVersion() { return nVersion; }
 
-    UINT Read(void *lpBuf, UINT nCount) { return VRead(lpBuf, nCount); }
+    void Fail(const char *reason)
+    {
+        bIsOk = false;
+        if (SaveReadDepth()) throw CSaveReadError{reason, GetPosition()};
+    }
+    unsigned int Remaining()
+    {
+        const unsigned int position = GetPosition(), size = GetSize();
+        if (position > size) { Fail("invalid_position"); return 0; }
+        return size - position;
+    }
+    bool Require(unsigned int count, const char *reason)
+    {
+        if (count > Remaining()) { Fail(reason); return false; }
+        return true;
+    }
+    UINT Read(void *lpBuf, UINT nCount)
+    {
+        if (SaveReadDepth() && (!bIsOk || !Require(nCount, "truncated_read")))
+            Fail("failed_stream");
+        UINT read = VRead(lpBuf, nCount);
+        if (read != nCount) Fail("short_read");
+        return read;
+    }
     void Read(long &res) { Read(&res, sizeof(res)); }
     void Read(unsigned long &res) { Read(&res, sizeof(res)); }
     void Read(int &res) { Read(&res, sizeof(res)); }
@@ -100,13 +133,14 @@ public:
     CString ReadString()
     {
         CString a;
-        char ch;
+        char ch = 1;
         while (Read(&ch, 1))
         {
             if (ch == 0)
                 break;
             a = a + ch;
         }
+        if (ch != 0) Fail("unterminated_string");
         return a;
     }
     void ReadString(char *pDst, int nMaxSize);
@@ -181,7 +215,11 @@ public:
         ASSERT(!bReading);
         file.Write(lpBuf, nCount);
     }
-    void Seek(unsigned int nPos) { file.Seek(nPos, CFile::begin); }
+    void Seek(unsigned int nPos)
+    {
+        if (bReading && nPos > GetSize()) { Fail("seek_out_of_bounds"); return; }
+        file.Seek(nPos, CFile::begin);
+    }
     unsigned int GetSize() { return file.GetLength(); }
     unsigned int GetPosition() { return file.GetPosition(); }
 };
@@ -348,6 +386,8 @@ void LoadCArray(CArray<TYPE, ARG_TYPE> &arr, CSave &file)
 {
     int i;
     file.Read(&i, sizeof(i));
+    if (i < 0 || static_cast<unsigned int>(i) > file.Remaining())
+    { file.Fail("invalid_array_count"); return; }
     arr.SetSize(i);
     for (i = 0; i < arr.GetSize(); i++)
         LoadObject<TYPE>(arr[i], file);
@@ -370,6 +410,8 @@ void LoadCList(CList<TYPE, ARG_TYPE> &arr, CSave &file)
 {
     int i, num;
     file.Read(&num, sizeof(num));
+    if (num < 0 || static_cast<unsigned int>(num) > file.Remaining())
+    { file.Fail("invalid_list_count"); return; }
     for (i = 0; i < num; i++)
         arr.AddTail(TYPE());
     POSITION pos = arr.GetHeadPosition();
@@ -382,6 +424,8 @@ inline void LoadCStringArray(CStringArray &arr, CSave &file)
 {
     int i, n;
     file.Read(n);
+    if (n < 0 || static_cast<unsigned int>(n) > file.Remaining())
+    { file.Fail("invalid_string_count"); return; }
     for (i = 0; i < n; i++)
         arr.Add(file.ReadString());
 }

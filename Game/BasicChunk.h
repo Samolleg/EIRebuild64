@@ -79,7 +79,17 @@ private:
     CFundament *LoadObject(const chunk_id idChunk);
     //
 public:
-    CStructureSaver() { nVersion = 1; }
+    CStructureSaver() { nVersion = 1; bIsReading = false; }
+    ~CStructureSaver()
+    {
+        if (bIsReading && !objects.empty())
+        {
+            // Pin every created object before releasing any of them during unwind.
+            std::vector<CPtr<CFundament>> keep;
+            for (const auto &entry : objects) keep.emplace_back((CFundament *)entry.second);
+            objects.clear();
+        }
+    }
     bool IsReading() { return bIsReading; }
     int GetVersion() { return nVersion; }
 
@@ -219,12 +229,26 @@ public:
     template <class T>
     void AddT(const chunk_id idChunk, CPtr<T> &data)
     {
-        Add(idChunk, (CPtrBase &)data);
+        if (IsReading())
+        {
+            CFundament *object = LoadObject(idChunk);
+            T *typed = dynamic_cast<T *>(object);
+            if (object && !typed) { this->data.Fail("wrong_object_reference_type"); return; }
+            data = typed;
+        }
+        else Add(idChunk, (CPtrBase &)data);
     }
     template <class T>
     void AddT(const chunk_id idChunk, CObj<T> &data)
     {
-        Add(idChunk, (CObjBase &)data);
+        if (IsReading())
+        {
+            CFundament *object = LoadObject(idChunk);
+            T *typed = dynamic_cast<T *>(object);
+            if (object && !typed) { this->data.Fail("wrong_object_reference_type"); return; }
+            ((CObjBase &)data).SetObjectBase((CObjectBase *)typed);
+        }
+        else Add(idChunk, (CObjBase &)data);
     }
     // serializnig several standard containers
     // vector

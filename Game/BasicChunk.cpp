@@ -12,6 +12,7 @@ CClassFactory<CFundament> SSClasses;
 static bool ReadShortChunkSave(CSave &file, chunk_id &dwID, CMemorySave &chunk)
 {
     DWORD dwLeng = 0, dwRead;
+    if (file.Eof()) return false;
     file.Read(&dwID, sizeof(dwID));
     file.Read(&dwLeng, 1);
     if (dwLeng & 1)
@@ -19,8 +20,7 @@ static bool ReadShortChunkSave(CSave &file, chunk_id &dwID, CMemorySave &chunk)
     dwLeng >>= 1;
     if (!file.IsOk())
         return false;
-    if (dwLeng > 10000000)
-        return false;
+    if (!file.Require(dwLeng, "truncated_short_chunk")) return false;
     chunk.SetSizeFast(dwLeng);
     dwRead = file.Read(chunk.GetBufferForWrite(), dwLeng);
     return dwRead == dwLeng;
@@ -78,17 +78,24 @@ static void WritePtrData(char *pDst, const void *pSrc, int &nPos, int nSize)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CStructureSaver::ReadShortChunk(CChunkLevel &src, int &nPos, CChunkLevel &res)
 {
-    const char *pSrc = data.GetBuffer() + src.nStart;
     DWORD dwLeng = 0;
-    if (nPos + 2 > src.nLength)
-        return false;
+    if (nPos == src.nLength) return false;
+    if (src.nStart < 0 || src.nLength < 0 || nPos < 0 || nPos > src.nLength ||
+        static_cast<unsigned int>(src.nStart) > data.GetSize() ||
+        static_cast<unsigned int>(src.nLength) > data.GetSize() - src.nStart ||
+        src.nLength - nPos < 2)
+    { data.Fail("invalid_short_chunk_header"); return false; }
+    const char *pSrc = data.GetBuffer() + src.nStart;
     ReadPtrData(pSrc, &res.idChunk, nPos, sizeof(res.idChunk));
     ReadPtrData(pSrc, &dwLeng, nPos, 1);
     if (dwLeng & 1)
+    {
+        if (src.nLength - nPos < 3) { data.Fail("truncated_short_chunk_length"); return false; }
         ReadPtrData(pSrc, ((char *)&dwLeng) + 1, nPos, 3);
+    }
     dwLeng >>= 1;
-    if (nPos + dwLeng > src.nLength)
-        return false;
+    if (dwLeng > static_cast<unsigned int>(src.nLength - nPos))
+    { data.Fail("invalid_short_chunk_length"); return false; }
     res.nStart = nPos + src.nStart;
     res.nLength = dwLeng;
     nPos += dwLeng;
@@ -156,7 +163,8 @@ void CStructureSaver::DataChunk(const chunk_id idChunk, void *pData, int nSize)
         CChunkLevel res;
         if (GetShortChunk(last, idChunk, res, last.nChunkNumber))
         {
-            ASSERT(res.nLength == nSize);
+            if (nSize < 0 || res.nLength != nSize)
+            { data.Fail("invalid_field_length"); return; }
             memcpy(pData, data.GetBuffer() + res.nStart, nSize);
         }
         else
@@ -175,7 +183,8 @@ void CStructureSaver::DataChunkString(const chunk_id idChunk, CString &str)
         if (GetShortChunk(last, idChunk, res, last.nChunkNumber))
         {
             const char *pStr = data.GetBuffer() + res.nStart;
-            ASSERT(pStr[res.nLength - 1] == 0);
+            if (res.nLength < 1 || pStr[res.nLength - 1] != 0)
+            { data.Fail("unterminated_chunk_string"); return; }
             str = pStr;
         }
         else
@@ -194,7 +203,8 @@ void CStructureSaver::DataChunkString(const chunk_id idChunk, stdString &str)
         if (GetShortChunk(last, idChunk, res, last.nChunkNumber))
         {
             const char *pStr = data.GetBuffer() + res.nStart;
-            ASSERT(pStr[res.nLength - 1] == 0);
+            if (res.nLength < 1 || pStr[res.nLength - 1] != 0)
+            { data.Fail("unterminated_chunk_string"); return; }
             str = pStr;
         }
         else
@@ -212,6 +222,8 @@ void CStructureSaver::DataChunkBLOB(const chunk_id idChunk, CMemorySave &file)
     Add(1, nLeng);
     if (IsReading())
     {
+        if (nLeng < 0 || nLeng > chunks.back().nLength)
+        { data.Fail("invalid_blob_length"); return; }
         file.Clear();
         file.SetSizeFast(nLeng);
     }
@@ -280,13 +292,17 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
         GetShortChunkSave(res, 2, data);
         chunks.back().nLength = data.GetSize();
         // create all objects from obj
+        if (obj.GetSize() % 8) obj.Fail("invalid_object_registry_length");
         while (obj.GetPosition() < obj.GetSize())
         {
             int nTypeID = 0;
             void *pServer = 0;
             obj.Read(&nTypeID, 4);
             obj.Read(&pServer, 4);
+            if (!pServer || objects.find(pServer) != objects.end())
+                obj.Fail("invalid_object_registry_id");
             CFundament *pObject = SSClasses.CreateObject(nTypeID);
+            if (!pObject) obj.Fail("invalid_object_registry_type");
             toStore.push_back(pObject);
             objects[pServer] = pObject;
         }
@@ -306,7 +322,7 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
             StartChunk((chunk_id)1);
             DataChunk(0, &pServer, 4);
             pObject = (CFundament *)objects[pServer];
-            ASSERT(pObject);
+            if (!pObject) data.Fail("unknown_object_reference");
             if (pObject)
                 Add(1, *pObject);
             FinishChunk();
@@ -386,8 +402,7 @@ CFundament *CStructureSaver::LoadObject(const chunk_id idChunk)
     auto pFound = objects.find(pServerPtr);
     if (pFound != objects.end())
         return (CFundament *)pFound->second;
-    // here  we are in very crappy position - stored object does not exist
-    // actually i think we got to throw the exception
+    if (pServerPtr) data.Fail("unknown_object_reference");
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
