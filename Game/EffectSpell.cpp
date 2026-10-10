@@ -20,6 +20,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "UnitServer.h"
 #include "player.h"
 #include "playerServer.h"
+#include "PlayerManager.h"
 #include "aiSensesConst.h"
 #include "ackFormat.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -560,9 +561,73 @@ static void PrepareControlMagic(int kind, CSpell& spell, CMapObject* caster, CMa
         return;
     }
 }
+// Mode 3 installs the shared f07/f08/f09/f10 dispatcher. Subkeys do not
+// independently change the installed ASI image (R30).
+static bool NewSpellsEnabled()
+{
+    const auto* mod = ModRuntime::Current();
+    return mod && mod->SpellAddon().Feature07() == 3;
+}
+static void RestoreInspirationMana(float& current, float maximum, float power)
+{
+    // The ASI stores the sum as float32 before the upper-bound comparison.
+    // Keep the ordered comparison: NaN and negative values have no lower clamp.
+    volatile float sum = current + power;
+    current = sum > maximum ? maximum : sum;
+}
 void CEffectSpell::StartSpell(int nKind)
 {
     if(ModLifeSpellStart(nKind)||ExtendedStart(nKind))return;
+    const bool newSpells = NewSpellsEnabled();
+    if (newSpells && (nKind == SPELL_ID_CHARM || nKind == SPELL_ID_ENSORCELL))
+    {
+        // Shared typed Charm36/42; do not reproduce the ASI's stack/FPU faults.
+        if (!pTarget.IsEmpty() && pTarget->WhoAmI() == HPC_UNIT &&
+            !pWho.IsEmpty() && pWho->WhoAmI() == HPC_UNIT)
+        {
+            auto* target = (CUnit*)pTarget;
+            auto* caster = (CUnit*)pWho;
+            bool success = target->GetOwner() == caster->GetOwner();
+            if (!success)
+            {
+                auto* stats = ((CUnitServer*)target->GetUnitSpecific())->GetRPGStats();
+                success = stats->GetManualSkillLevel(RPGMSKL_TAME, target) < GetPower();
+                if (success)
+                {
+                    target->SetEnemyMask(0);
+                    target->SetPlayerNum(0);
+                }
+                else
+                    InformFailure(ACK_HERO_REFUSE_SPELL_CHARM);
+            }
+            if (success)
+                CreateSound(FALSE, "magic\\Charm\\start.wav", pTarget->GetCP(), CPlot3D(0, 0, 0));
+        }
+        castPhase = CP_FINISH;
+        AddRemoveDangerArea(nKind, TRUE);
+        return;
+    }
+    if (newSpells && nKind >= SPELL_ID_GAMECHANGER && nKind <= SPELL_ID_MULTILIT)
+    {
+        CPlayerIterator iterator;
+        CPlayer* first = iterator.GetFirst((CPlayerManager*)pWS->GetPlayerManager());
+        if (first)
+        {
+            auto* server = (CPlayerServer*)first->GetPlayerSpecific();
+            server->SetVar("S3x", ptTarget.x);
+            server->SetVar("S4y", ptTarget.y);
+            server->SetVar("S0e", GetPower());
+            server->SetVar("S2t", float(short(nKind)));
+            server->SetVar("S1d", float(GetDuration()));
+            // Preserve the ASI reset; do not add the preceding global-time interval.
+            first->nTimeWasAddedSegment = pWS->GetSegmentTimeCounter();
+        }
+        else
+            GameJournal::Event("SPELL", "script_spell_no_player", "id=%d", nKind);
+        castPhase = CP_FINISH;
+        AddRemoveDangerArea(nKind, TRUE);
+        return;
+    }
     float fpDist;
     CPlot3D ptSpeed, ptTarg, ptSrc;
     ResetFlag(DW_SPELL_HIDE_CASTER);
@@ -611,7 +676,9 @@ void CEffectSpell::StartSpell(int nKind)
         nTimeLeft = 7;
         castPhase = CP_ACTION;
         break;
+    case SPELL_ID_FIRERAZE:
     case SPELL_ID_FIREBALL: {
+        if (nKind == SPELL_ID_FIRERAZE && !newSpells) { castPhase = CP_FINISH; break; }
         float fpSpeed = GetSpeed();
         ptSpeed = ptTarget - GetCP();
         ptSpeed.z = 0;
@@ -636,7 +703,9 @@ void CEffectSpell::StartSpell(int nKind)
         castPhase = CP_DELIVERY;
     }
     break;
+    case SPELL_ID_PANIC:
     case SPELL_ID_INVOKE_LGHTNG:
+        if (nKind == SPELL_ID_PANIC && !newSpells) { castPhase = CP_FINISH; break; }
         ptTarget.z = -3 + pWS->GetSurfaceValue(ptTarget.x, ptTarget.y);
         SetCP(ptTarget);
         ptSrc = GetCP();
@@ -651,7 +720,9 @@ void CEffectSpell::StartSpell(int nKind)
         nTimeLeft = 7;
         castPhase = CP_ACTION;
         break;
+    case SPELL_ID_STORM:
     case SPELL_ID_COLUMN_ACID:
+        if (nKind == SPELL_ID_STORM && !newSpells) { castPhase = CP_FINISH; break; }
         SetCP(ptTarget);
         CreateParticles(FALSE, PTID_NUKE, ptTarget, 1, 1, CPlot3D(0, 0, 0)); // nuke explosion
         CreateSound(FALSE, "magic\\Acidcolumn\\start.wav", ptTarget, CPlot3D(0, 0, 0));
@@ -818,6 +889,28 @@ void CEffectSpell::StartSpell(int nKind)
                     + Max(1, GetDuration());
         castPhase = CP_ACTION;
         break;
+    case SPELL_ID_INSPIRATION:
+        if (!newSpells || pTarget.IsEmpty() || pTarget->WhoAmI() != HPC_UNIT)
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
+        {
+            auto* stats = ((CMapObjectServer*)pTarget->GetMapObjectSpecific())->GetRPGStats();
+            RestoreInspirationMana(stats->ssMP.fpCurrent, stats->ssMP.fpMax, GetPower());
+            pTarget->SetUpdateMask(CMapObject::VLD_MASK_STATS);
+            CreateParticles(FALSE, PTID_HEALING, CPlot3D(0, 0, 0), 2.5f * GetShowPower() + 2.5f, 1,
+                            CPlot3D(0, 0, 0), pTarget);
+            // The reference retains Healing's quiet/HP predicate even for mana.
+            if (!bQuiet || pTarget->GetHP() != pTarget->GetMaxHP())
+            {
+                CreateSound(FALSE, "magic\\Inspiration\\start.mp3", pTarget->GetCP(), CPlot3D(0, 0, 0));
+                CreateLight(ptTarget, GetLightColor(), -GetLightRadius(), GetLightSpeed());
+            }
+            nTimeLeft = 30;
+            castPhase = CP_ACTION;
+        }
+        break;
     case SPELL_ID_HEALING:
         if (pTarget->WhoAmI() == HPC_UNIT)
         {
@@ -946,7 +1039,13 @@ void CEffectSpell::DeliverSpell(int nKind)
         if (nTimeLeft-- < 0)
             castPhase = CP_FINISH;
         break;
+    case SPELL_ID_FIRERAZE:
     case SPELL_ID_FIREBALL:
+        if (nKind == SPELL_ID_FIRERAZE && !NewSpellsEnabled())
+        {
+            ASSERT(0 && "Deliver phase not implemented for this spell");
+            break;
+        }
         if (nTimeLeft-- < 0)
         {
             SetCP(ptTarget);
@@ -1061,6 +1160,17 @@ void CEffectSpell::ActionSpell(int nKind)
     CUnitList unitList;
     switch (nKind)
     {
+    case SPELL_ID_INSPIRATION:
+    case SPELL_ID_FIRERAZE:
+        if (NewSpellsEnabled() && nTimeLeft-- < 0)
+            castPhase = CP_FINISH;
+        break;
+    case SPELL_ID_PANIC:
+    case SPELL_ID_STORM:
+        // R30 REVIEW: retain Start, finish instead of invalid/frozen Action.
+        if (NewSpellsEnabled())
+            castPhase = CP_FINISH;
+        break;
     case SPELL_ID_INVOKE_LGHTNG:
         RemoveMainEffect();
         if (nTimeLeft == 5)
@@ -1401,7 +1511,14 @@ BOOL CEffectSpell::CreateAttackPortion(SRPGAttackPortion &ap)
     ap.fBackStabMultiplier = 1.0f;
     ap.bCalledShot = false;
 
-    switch (spell.GetSubtypeID() >> 16)
+    const int attackKind = spell.GetSubtypeID() >> 16;
+    if (NewSpellsEnabled() && attackKind >= SPELL_ID_ENSORCELL && attackKind <= SPELL_ID_STORM)
+    {
+        ap.fpAttacks[RPGAT_TERMICAL] = 1;
+        ap.fpDamage = GetPower();
+        ap.bAreaEffect = FALSE;
+    }
+    else switch (attackKind)
     {
     case SPELL_ID_INVOKE_LGHTNG:
     case SPELL_ID_LIGHTNING:
