@@ -137,11 +137,11 @@ LONG WINAPI Filter(EXCEPTION_POINTERS *info) {
     const DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
     fileLog.EnterCrashMode(); consoleLog.EnterCrashMode();
     FrameDiagnostics::Flush();
-    GameJournal::Crash(CrashEvidence::DumpPath(), code);
     Freeze();
     CrashEvidence::Result r = CrashEvidence::Capture(info, fullDump, Count, Line);
     if (r.alreadyHandling)
         return previousHandler ? previousHandler(info) : EXCEPTION_CONTINUE_SEARCH;
+    GameJournal::Crash(CrashEvidence::DumpPath(), code, &CrashEvidence::LastDetails());
     const std::string backup = autoRecover ? RecoverSaves() : std::string();
     GameJournal::Event("SAVE", "crash_recovery", "enabled=%d result=%s folder=%s", autoRecover, !autoRecover?"disabled":backup.empty()?"unavailable":"written", GameJournal::Quote(backup.c_str()).c_str());
     GameJournal::FlushCritical();

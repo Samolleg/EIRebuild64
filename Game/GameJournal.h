@@ -9,6 +9,7 @@
 class CUnit;
 class CMapObject;
 class CItem;
+namespace CrashEvidence { struct Details; }
 namespace GameJournal {
 // Scalars are copied into bounded journal-owned aggregates. No game objects are retained.
 void Damage(int attacker, int target, const char* attackerPrototype, const char* targetPrototype,
@@ -53,7 +54,7 @@ void Event(const char* category, const char* event, const char* format = "", ...
 std::string Quote(const char* cp1251) noexcept;
 void Flush() noexcept; // Wake the writer; no disk I/O on the caller thread.
 void FlushCritical() noexcept; // Bounded lock wait for fatal errors/save boundaries.
-void Crash(const wchar_t* dump, unsigned long code) noexcept;
+void Crash(const wchar_t* dump, unsigned long code, const CrashEvidence::Details* details = nullptr) noexcept;
 void Variable(const void* set, const char* name, bool present, float oldValue,
               float newValue, bool deleting) noexcept;
 void Count(const char* category, const char* event, const char* key) noexcept;
