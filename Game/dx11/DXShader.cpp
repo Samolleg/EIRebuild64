@@ -49,25 +49,42 @@ void PrintShaderReflection(TShader *shader)
     }
 }
 
-bool CShadersMain::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device)
+static std::string ShaderPath(const char *name)
 {
-    std::string shaderfolder = ".\\shaders\\";
-    if (IsDebuggerPresent() != FALSE)
+    char executable[MAX_PATH] = { 0 };
+    DWORD length = GetModuleFileNameA(NULL, executable, ARRAYSIZE(executable));
+    if (length == 0 || length >= ARRAYSIZE(executable))
     {
-#pragma region DetermineShaderPath
-        // wont work for optimized debug...
+        HRESULT hr = HRESULT_FROM_WIN32(length == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
+        ReportError(hr, std::string("Failed to determine shader executable path."));
+        return std::string();
+    }
+    std::string shaderfolder(executable, length);
+    shaderfolder.erase(shaderfolder.find_last_of("\\/") + 1);
+    shaderfolder += "shaders\\";
 #ifdef _DEBUG
-        std::string config = "debug";
+    const std::string config = "Debug";
 #else
-        std::string config = "release";
+    const std::string config = "Release";
 #endif
 #ifdef _WIN64
-        assert(0); // probably "x64", who cares
+    const std::string platform = "x64";
 #else
-        std::string platform = "Win32";
+    const std::string platform = "Win32";
 #endif
-        shaderfolder += platform + "_" + config + "\\";
+    const std::string configuredFolder = shaderfolder + platform + "_" + config + "\\";
+    std::string path = configuredFolder + name;
+    if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            path = shaderfolder + name;
     }
+    return path;
+}
+
+bool CShadersMain::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device)
+{
 
     D3D11_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT::DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,
@@ -86,7 +103,7 @@ bool CShadersMain::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device)
 
     UINT numElements = ARRAYSIZE(layout);
 
-    if (!vs_main.Initialize(device, shaderfolder + "vertexshader.cso", layout, numElements))
+    if (!vs_main.Initialize(device, ShaderPath("vertexshader.cso"), layout, numElements))
         return false;
 
     D3D11_INPUT_ELEMENT_DESC layout2[] = {
@@ -102,7 +119,7 @@ bool CShadersMain::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device)
 
     numElements = ARRAYSIZE(layout2);
 
-    if (!vs_simple.Initialize(device, shaderfolder + "vertexshader_simple.cso", layout2,
+    if (!vs_simple.Initialize(device, ShaderPath("vertexshader_simple.cso"), layout2,
                               numElements))
         return false;
 
@@ -121,11 +138,11 @@ bool CShadersMain::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device)
 
     numElements = ARRAYSIZE(layout3);
 
-    if (!vs_particles.Initialize(device, shaderfolder + "vertexshader_particles.cso", layout3,
+    if (!vs_particles.Initialize(device, ShaderPath("vertexshader_particles.cso"), layout3,
                                  numElements))
         return false;
 
-    if (!ps_main.Initialize(device, shaderfolder + "pixelshader.cso"))
+    if (!ps_main.Initialize(device, ShaderPath("pixelshader.cso")))
         return false;
 
     PrintShaderReflection(&vs_main);
