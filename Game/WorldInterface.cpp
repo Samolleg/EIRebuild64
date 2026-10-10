@@ -543,6 +543,9 @@ void CWorldConnector::Disconnect()
 // CRAP - function to determine if info on pZone to be stored
 static bool IsToBeStored(const char *pszCurrentAllod, SScenarioZone *pZone)
 {
+    if (auto* mod = ModRuntime::Current())
+        if (mod->SpellAddon().Feature11() >= 1)
+            return true;
     if (pZone->szName == "bz7g")
         return true;
     return pZone->szAllodName == pszCurrentAllod;
@@ -740,7 +743,18 @@ BOOL CWorldConnector::LoadZoneState(CParty &party)
                 float fpCurTime = party.vars.GetVar(szPartyGlobalTimeVarName);
                 float fpZoneTime = party.vars.GetVar(CString("zt.") + szZone);
                 nSegments = (fpCurTime - fpZoneTime) * 100;
-                nSegments = Min(nSegments, 1000);
+                float fpActivityRadius = 70.0f;
+                if (auto* mod = ModRuntime::Current(); mod && mod->SpellAddon().Feature43() == 1)
+                {
+                    const auto& spellAddon = mod->SpellAddon();
+                    nSegments = Min(nSegments, spellAddon.Int(ModSpellAddon::IntKey::gameplay_maxsegments));
+                    // ASI adds after signed Min, with x86 32-bit wrap and no lower clamp.
+                    nSegments = static_cast<int32_t>(static_cast<uint32_t>(nSegments) +
+                        static_cast<uint32_t>(spellAddon.Int(ModSpellAddon::IntKey::gameplay_addsegments)));
+                    fpActivityRadius = spellAddon.Scalar(ModSpellAddon::ScalarKey::gameplay_exitenteractivityradius);
+                }
+                else
+                    nSegments = Min(nSegments, 1000);
                 if (nSegments > 0)
                 {
                     const SZoneExit &exit = pZone->exits[party.nEntrance];
@@ -749,7 +763,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party)
                     // make some world processing to make world like some time has elapsed
                     for (int i = 0; i < nSegments; i++)
                     {
-                        theWorldServer.AddActiveSpot(ptActive, 70);
+                        theWorldServer.AddActiveSpot(ptActive, fpActivityRadius);
                         theWorldServer.WorldSegment(true);
                     }
                 }
