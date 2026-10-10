@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
+#include "SettingsProfile.h"
 #include "ModRandomOwnershipCheck.inl"
 #include "ModMobFlagArgumentsCheck.inl"
 #include "ModItemSpellPolicyCheck.inl"
@@ -51,6 +52,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModPackage.h"
 #include "ModRuntime.h"
 #include "ModCli.inl"
+#include "SettingsProfileCheck.inl"
 /////////////////////////////////////////////////////////////////////////////////////
 // __DEMO__,__SINGLEONLY__,NODEBUGINFO,DONT_DISPLAY_DEBUG_IDS
 // ,NOGETDC,NOBLIT,SURFACE_BACKUP
@@ -904,7 +906,9 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
     GameJournal::Start();
     struct JournalEnd { ~JournalEnd() { GameJournal::Stop(); } } journalEnd;
-    try { NConsole::InitializeNetworkSettings(); if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
+    try { SettingsProfile::Initialize();
+        GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
+        NConsole::InitializeNetworkSettings(); if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
     catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("GameMain");EngineDiagnostics::Caught(e.what());return BAD_RESULT;}
     OutputDebugStringA("Hello!\n");
     try
@@ -1222,6 +1226,8 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
 
 int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
 {
+    int profileResult=0;
+    if(InspectSettingsProfileCommandLine(profileResult))return profileResult;
     const int cliResult = GuardLegacyEntry(instance, previous, show);
     if (cliResult != ModCli::NotCli) return cliResult;
     int diagnosticResult = 0;

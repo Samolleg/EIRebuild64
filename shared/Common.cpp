@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Common.h"
+#include "../Game/SettingsProfile.h"
 #include <cassert>
 #include <cstdarg>
 #include <cstdio>
@@ -192,53 +193,14 @@ string GetDirectoryName(const string &path)
     return result;
 }
 
-bool RegGetRawValue(HKEY hRoot, const wstring &key, const wstring &name, vector<char> &value,
-                    uint32_t &type, uint32_t flags)
-{
-    HKEY hKey;
-    LSTATUS status = RegOpenKeyExW(hRoot, key.c_str(), 0, KEY_READ | flags, &hKey);
-    if (status != ERROR_SUCCESS)
-        return false;
-
-    bool result = false;
-    do
-    {
-        DWORD size = 0;
-        status = RegQueryValueExW(hKey, name.c_str(), nullptr, (DWORD *)&type, nullptr, &size);
-        if (status != ERROR_SUCCESS || size == 0)
-            break;
-
-        value.resize(size);
-        status = RegQueryValueExW(hKey, name.c_str(), nullptr, (DWORD *)&type, (uint8_t *)&value[0],
-                                  &size);
-        if (status != ERROR_SUCCESS)
-            break;
-
-        value.resize(size);
-        result = true;
-    } while (false);
-
-    RegCloseKey(hKey);
-    return result;
+bool RegGetRawValue(HKEY, const wstring &key, const wstring &name, vector<char> &value,
+                    uint32_t &type, uint32_t) {
+    return SettingsProfile::GetRaw(SettingsProfile::Section(key), name, value, type);
 }
 
-bool RegSetRawValue(HKEY hRoot, const wstring &key, const wstring &name, const vector<char> &value,
-                    uint32_t type, uint32_t flags)
-{
-    HKEY hKey;
-    LSTATUS status = RegCreateKeyExW(hRoot, key.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
-                                     KEY_WRITE | flags, nullptr, &hKey, nullptr);
-    if (status != ERROR_SUCCESS)
-        return false;
-
-    status = RegSetValueExW(hKey, name.c_str(), 0, type,
-                            value.empty() ? nullptr : (const uint8_t *)&value[0], value.size());
-
-    RegCloseKey(hKey);
-    if (status != ERROR_SUCCESS)
-        return false;
-
-    return true;
+bool RegSetRawValue(HKEY, const wstring &key, const wstring &name, const vector<char> &value,
+                    uint32_t type, uint32_t) {
+    return SettingsProfile::SetRaw(SettingsProfile::Section(key), name, value, type);
 }
 
 wstring RegGetString(HKEY hRoot, const wstring &key, const wstring &name,

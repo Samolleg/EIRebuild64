@@ -59,9 +59,9 @@ public:
     BOOL SetBinInt(LPCSTR pszSection, LPCSTR pszEntry, LPVOID pData, int nDataLen);
 
 private:
-    HKEY hBaseKey; // base key of Windows registry
-    BOOL CreateKey(HKEY hParent, LPCSTR pszSubKey, PHKEY phResult);
-    BOOL OpenKey(HKEY hParent, LPCSTR pszSubKey, PHKEY phResult);
+    CString baseSection;
+    bool opened = false;
+    std::wstring ProfileSection(LPCSTR section) const;
     BOOL SetDWordInt(LPCSTR pszSection, LPCSTR pszEntry, DWORD dwData);
     BOOL SetStringInt(LPCSTR pszSection, LPCSTR pszEntry, CString szData);
     DWORD GetDWordInt(LPCSTR pszSection, LPCSTR pszEntry, DWORD dwDefault);

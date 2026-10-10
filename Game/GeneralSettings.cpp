@@ -13,6 +13,11 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 SGeneralSettings theSettings;
 namespace {
+float ImportedShortcutPitch(float value) {
+    // Legacy defaults/profiles persisted 45 degrees in a slot consumed as radians.
+    // Preserve normal radian shortcuts; convert only unambiguous degree-range values.
+    return value > FP_2PI && value <= 90.0f ? ToRadian(value) : value;
+}
 std::filesystem::path InstalledGameRoot()
 {
     char modulePath[1024] = {};
@@ -154,7 +159,7 @@ SGeneralSettings::SGeneralSettings()
     {
         camerashortcuts[i].fAxisZ = 1;
         camerashortcuts[i].fDistance = fpCameraDefaultDistanceToCarrier;
-        camerashortcuts[i].fPitch = 45;
+        camerashortcuts[i].fPitch = ToRadian(45.0f);
     }
     //
     fpNearClipDistance = 2;
@@ -394,7 +399,7 @@ void SGeneralSettings::ReadSettingsFromFile(LPCSTR szSettingsFileName)
         camerashortcuts[i].fDistance = reg.GetFloat(szCameraSettings, buff,
                                                     camerashortcuts[i].fDistance);
         sprintf(buff, "CameraShortcut %d Pitch", i);
-        camerashortcuts[i].fPitch = reg.GetFloat(szCameraSettings, buff, camerashortcuts[i].fPitch);
+        camerashortcuts[i].fPitch = ImportedShortcutPitch(reg.GetFloat(szCameraSettings, buff, camerashortcuts[i].fPitch));
     }
 
     fpNearClipDistance = reg.GetFloat(szCameraSettings, "NearClipDistance", fpNearClipDistance);
@@ -856,7 +861,7 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
         camerashortcuts[i].fDistance = reg.GetFloat(szCameraSettings, buff,
                                                     camerashortcuts[i].fDistance);
         sprintf(buff, "CameraShortcut %d Pitch", i);
-        camerashortcuts[i].fPitch = reg.GetFloat(szCameraSettings, buff, camerashortcuts[i].fPitch);
+        camerashortcuts[i].fPitch = ImportedShortcutPitch(reg.GetFloat(szCameraSettings, buff, camerashortcuts[i].fPitch));
     }
     // interface and world settings
     fpDefaultWindForce = reg.GetFloat(szGameSpecificSettings, "DefaultWindForce",

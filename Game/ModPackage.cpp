@@ -3,6 +3,7 @@
 #include "ModNativeCrtRandom.h"
 #include "ScenarioTracker.h"
 #include "ModPackage.h"
+#include "SettingsProfile.h"
 #include "ModNpcEquipment.h"
 #include "ModHitHistory.h"
 #include "ModCampStats.h"
@@ -91,21 +92,11 @@ std::string Join(const std::string &root,const std::string &relative){
 const wchar_t* const partyVisualRegistry = L"Software\\Gipat.Ru\\EI_Starter\\Settings";
 const wchar_t* const hideHelmetsValue = L"HidePartyHelmets";
 const wchar_t* const hideUpperArmorValue = L"HidePartyUpperArmor";
-bool ReadPartyVisualOption(const wchar_t* name){
- HKEY key=nullptr;
- if(RegOpenKeyExW(HKEY_CURRENT_USER,partyVisualRegistry,0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)return false;
- DWORD type=0,value=0,size=sizeof(value);
- LSTATUS status=RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<LPBYTE>(&value),&size);
- RegCloseKey(key);
- return status==ERROR_SUCCESS&&type==REG_DWORD&&size==sizeof(value)&&value!=0;
+bool ReadPartyVisualOption(const wchar_t* name) {
+ return SettingsProfile::Dword(L"Settings",name)!=0;
 }
-bool WritePartyVisualOption(const wchar_t* name,bool enabled){
- HKEY key=nullptr;
- if(RegCreateKeyExW(HKEY_CURRENT_USER,partyVisualRegistry,0,nullptr,REG_OPTION_NON_VOLATILE,KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
- DWORD value=enabled?1u:0u;
- LSTATUS status=RegSetValueExW(key,name,0,REG_DWORD,reinterpret_cast<const BYTE*>(&value),sizeof(value));
- RegCloseKey(key);
- return status==ERROR_SUCCESS;
+bool WritePartyVisualOption(const wchar_t* name,bool enabled) {
+ return SettingsProfile::SetDword(L"Settings",name,enabled?1u:0u);
 }
 int LuaInvalidateInfoStatsCache(lua_State* s){
  static_cast<CModPackage*>(lua_touserdata(s,lua_upvalueindex(1)))->InvalidateInfoStatsCache();return 0;
