@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
 #include "EngineDiagnostics.h"
+#include "SettingsProfile.h"
 #include "../shared/Common.h"
 #include "ModDiagnosticsPolicy.h"
 #include "ModRuntime.h"
@@ -18,6 +19,7 @@
 #include <cstdarg>
 #include <exception>
 #include <cstdlib>
+#include <filesystem>
 
 namespace EngineDiagnostics {
 namespace {
@@ -27,7 +29,6 @@ unsigned next = 0, count = 0, snapshotCount = 0;
 bool silent = false;
 bool fullDump = false, autoRecover = false;
 std::string configuredAddonPath;
-const wchar_t *settingsKey = L"Software\\Gipat.Ru\\EI_Starter\\Settings";
 LPTOP_LEVEL_EXCEPTION_FILTER previousHandler = nullptr;
 volatile LONG handling = 0;
 CFileLogger fileLog;
@@ -44,12 +45,7 @@ private:
     void WriteLineLocked(const char *line, size_t) override { NConsole::game << line << std::endl; }
 } consoleLog;
 DWORD Setting(const wchar_t *name, DWORD fallback) {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, settingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return fallback;
-    DWORD value = 0, type = 0, size = sizeof(value);
-    LSTATUS status = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size);
-    RegCloseKey(key);
-    return ModDiagnosticsPolicy::Dword(status, type, size, value, fallback);
+    return SettingsProfile::Dword(L"Settings",name,fallback);
 }
 std::string RecoverSaves() {
     if (!pChatServer || !pChatServer->IsValid()) return {};
@@ -113,8 +109,8 @@ void Initialize(bool quiet) {
     silent = quiet;
     fullDump = Setting(L"FullDump", 0) != 0;
     autoRecover = Setting(L"AutoRecover", 1) != 0;
-    configuredAddonPath = WideToAnsi(RegGetString(HKEY_CURRENT_USER, settingsKey, L"AddonPath"));
-    std::wstring starter = RegGetString(HKEY_CURRENT_USER, L"Software\\Gipat.Ru\\EI_Starter", L"path");
+    configuredAddonPath = SettingsProfile::Ansi(SettingsProfile::String(L"",L"AddonPath",SettingsProfile::String(L"Settings",L"AddonPath")));
+    std::wstring starter = std::filesystem::path(SettingsProfile::Path()).parent_path().wstring();
     if (starter.empty()) starter = GetDirectoryName(GetCurrentModulePath());
     AddTrailingSlash(starter);
     fileLog.Start(starter + L"addon.log", L"a", CLogger::LevelFromInt(int(Setting(L"LogLevel", 1))));

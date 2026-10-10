@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <sstream>
 
 #include "Console.h"
+#include "SettingsProfile.h"
 #include "../shared/Common.h"
 #include "EngineDiagnostics.h"
 #include "StringProcessing.h"
@@ -186,20 +187,9 @@ const StarterNetwork& NetworkSettings()
 struct Starter {
  std::vector<std::string> registry,file;DWORD objects=100,landscape=100;
  Starter(){
-  HKEY key=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Gipat.Ru\\EI_Starter\\Settings",0,KEY_READ,&key)==ERROR_SUCCESS){
-   struct Close{HKEY key;~Close(){RegCloseKey(key);}}close{key};
-   auto dword=[&](const wchar_t* name){DWORD type=0,bytes=4,value=100;
-    return RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<LPBYTE>(&value),&bytes)==ERROR_SUCCESS&&type==REG_DWORD&&bytes==4?value:100u;};
-   objects=dword(L"ObjectsDrawRadius");landscape=dword(L"LandscapeDrawRadius");
-   DWORD type=0,bytes=0;
-   if(RegQueryValueExW(key,L"Console AutoExec",nullptr,&type,nullptr,&bytes)==ERROR_SUCCESS&&type==REG_MULTI_SZ&&bytes%sizeof(wchar_t)==0){
-    std::vector<wchar_t> data(bytes/sizeof(wchar_t));
-    if(RegQueryValueExW(key,L"Console AutoExec",nullptr,&type,reinterpret_cast<LPBYTE>(data.data()),&bytes)==ERROR_SUCCESS&&type==REG_MULTI_SZ){
-     for(const auto& line:ModSettingsPolicy::MultiString(data.data(),bytes/sizeof(wchar_t))){
-      int n=WideCharToMultiByte(CP_ACP,0,line.c_str(),int(line.size()),nullptr,0,nullptr,nullptr);std::string text(n,'\0');
-      if(n)WideCharToMultiByte(CP_ACP,0,line.c_str(),int(line.size()),&text[0],n,nullptr,nullptr);registry.push_back(text);}}}
-  }
+  objects=SettingsProfile::Dword(L"Settings",L"ObjectsDrawRadius",100);
+  landscape=SettingsProfile::Dword(L"Settings",L"LandscapeDrawRadius",100);
+  for(const auto& line:SettingsProfile::MultiString(L"Settings",L"Console AutoExec")) registry.push_back(SettingsProfile::Ansi(line));
   std::ifstream input("2utoexec.cfg");std::string line;while(std::getline(input,line))file.push_back(line);
  }
 };

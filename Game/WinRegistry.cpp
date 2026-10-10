@@ -3,188 +3,50 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Notification.h"
 #include "WinRegistry.h"
+#include "SettingsProfile.h"
 /////////////////////////////////////////////////////////////////////////////////////
 
-// construcor
-CWinRegistry::CWinRegistry()
-{
-    hBaseKey = NULL;
+// Legacy typed interface backed exclusively by the ReStarter XML provider.
+CWinRegistry::CWinRegistry() = default;
+CWinRegistry::~CWinRegistry() { Close(); }
+BOOL CWinRegistry::Open(LPCSTR key, HKEY) {
+    SettingsProfile::Initialize();
+    baseSection = SettingsProfile::Ansi(SettingsProfile::Section(SettingsProfile::Wide(key))).c_str();
+    opened = true; return TRUE;
 }
-// destructor
-CWinRegistry::~CWinRegistry()
-{
-    Close();
+void CWinRegistry::Close() { opened = false; baseSection.Empty(); }
+std::wstring CWinRegistry::ProfileSection(LPCSTR section) const {
+    auto base = SettingsProfile::Wide(baseSection);
+    auto child = SettingsProfile::Wide(section);
+    return base.empty() ? child : child.empty() ? base : base + L"\\" + child;
 }
-
-BOOL CWinRegistry::CreateKey(HKEY hParent, LPCSTR pszSubKey, PHKEY phResult)
-{
-    DWORD dwDisposition;
-    char ts[2] = "";
-    return ERROR_SUCCESS == RegCreateKeyEx(hParent, pszSubKey, 0, ts, REG_OPTION_NON_VOLATILE,
-                                           KEY_ALL_ACCESS, 0, phResult, &dwDisposition);
+BOOL CWinRegistry::SetDWordInt(LPCSTR section,LPCSTR name,DWORD value) {
+    return opened && SettingsProfile::SetDword(ProfileSection(section),SettingsProfile::Wide(name),value);
 }
-
-BOOL CWinRegistry::OpenKey(HKEY hParent, LPCSTR pszSubKey, PHKEY phResult)
-{
-    return ERROR_SUCCESS == RegOpenKeyEx(hParent, pszSubKey, 0, KEY_ALL_ACCESS, phResult);
+BOOL CWinRegistry::SetStringInt(LPCSTR section,LPCSTR name,CString value) {
+    auto text=SettingsProfile::Wide(value); std::vector<char> bytes((text.size()+1)*2);
+    memcpy(bytes.data(),text.c_str(),bytes.size());
+    return opened && SettingsProfile::SetRaw(ProfileSection(section),SettingsProfile::Wide(name),bytes,REG_SZ);
 }
-// open registry to read/write
-BOOL CWinRegistry::Open(LPCSTR pszKeyName, HKEY hkRootKey)
-{
-    Close();
-    if (!CreateKey(hkRootKey, pszKeyName, &hBaseKey))
-    {
-        hBaseKey = NULL;
-        return FALSE;
-    }
-    return TRUE;
+BOOL CWinRegistry::SetBinInt(LPCSTR section,LPCSTR name,LPVOID data,int length) {
+    if(!opened || length<0 || (length && !data)) return FALSE;
+    std::vector<char> bytes(length); if(length) memcpy(bytes.data(),data,length);
+    return SettingsProfile::SetRaw(ProfileSection(section),SettingsProfile::Wide(name),bytes,REG_BINARY);
 }
-// close registry to read/write
-void CWinRegistry::Close()
-{
-    if (hBaseKey != NULL)
-    {
-        RegCloseKey(hBaseKey);
-        hBaseKey = NULL;
-    }
+DWORD CWinRegistry::GetDWordInt(LPCSTR section,LPCSTR name,DWORD fallback) {
+    return opened ? SettingsProfile::Dword(ProfileSection(section),SettingsProfile::Wide(name),fallback) : fallback;
 }
-
-//-------------- Internal read/write functions --------------------------------
-BOOL CWinRegistry::SetDWordInt(LPCSTR pszSection, LPCSTR pszEntry, DWORD dwData)
-{
-    HKEY hSection;
-    if (!CreateKey(hBaseKey, pszSection, &hSection))
-    {
-        ReportWarning("CWinRegistry::SetDWordInt().\nUnable to open key.\n");
-        return FALSE;
-    }
-    if (ERROR_SUCCESS !=
-        RegSetValueEx(hSection, pszEntry, 0, REG_DWORD, (BYTE *)&dwData, sizeof(DWORD)))
-    {
-        ReportWarning("CWinRegistry::SetDWordInt().\nUnable to access registry.\n");
-        RegCloseKey(hSection);
-        return FALSE;
-    }
-    RegCloseKey(hSection);
-    return TRUE;
+CString CWinRegistry::GetStringInt(LPCSTR section,LPCSTR name,CString fallback) {
+    if(!opened) return fallback;
+    std::vector<char> data; uint32_t type=0;
+    if(!SettingsProfile::GetRaw(ProfileSection(section),SettingsProfile::Wide(name),data,type) || type!=REG_SZ) return fallback;
+    return SettingsProfile::Ansi(SettingsProfile::String(ProfileSection(section),SettingsProfile::Wide(name))).c_str();
 }
-
-BOOL CWinRegistry::SetStringInt(LPCSTR pszSection, LPCSTR pszEntry, CString szData)
-{
-    HKEY hSection;
-    if (!CreateKey(hBaseKey, pszSection, &hSection))
-    {
-        ReportWarning("CWinRegistry::SetStringInt().\nUnable to open key.\n");
-        return FALSE;
-    }
-    if (ERROR_SUCCESS != RegSetValueEx(hSection, pszEntry, 0, REG_SZ, (LPBYTE)(LPCTSTR)szData,
-                                       szData.GetLength() + 1))
-    {
-        ReportWarning("CWinRegistry::SetStringInt().\nUnable to access registry.\n");
-        RegCloseKey(hSection);
-        return FALSE;
-    }
-    RegCloseKey(hSection);
-    return TRUE;
-}
-
-BOOL CWinRegistry::SetBinInt(LPCSTR pszSection, LPCSTR pszEntry, LPVOID pData, int nDataLen)
-{
-    HKEY hSection;
-    if (!CreateKey(hBaseKey, pszSection, &hSection))
-    {
-        ReportWarning("CWinRegistry::SetBinInt().\nUnable to open key.\n");
-        return FALSE;
-    }
-    if (ERROR_SUCCESS != RegSetValueEx(hSection, pszEntry, 0, REG_BINARY, (LPBYTE)pData, nDataLen))
-    {
-        ReportWarning("CWinRegistry::SetBinInt().\nUnable to access registry.\n");
-        RegCloseKey(hSection);
-        return FALSE;
-    }
-    RegCloseKey(hSection);
-    return TRUE;
-}
-
-DWORD CWinRegistry::GetDWordInt(LPCSTR pszSection, LPCSTR pszEntry, DWORD dwDefault)
-{
-    HKEY hSection;
-    if (!OpenKey(hBaseKey, pszSection, &hSection))
-        return dwDefault;
-    DWORD dwRet, dwSize = sizeof(DWORD), dwType;
-    if (ERROR_SUCCESS != RegQueryValueEx(hSection, pszEntry, 0, &dwType, (LPBYTE)&dwRet, &dwSize))
-    {
-        RegCloseKey(hSection);
-        return dwDefault;
-    }
-    RegCloseKey(hSection);
-    if (dwType != REG_DWORD)
-    {
-        ReportWarning("CWinRegistry::GetDWordInt().\nRegistry data type is not DWORD.\n");
-        return dwDefault;
-    }
-    return dwRet;
-}
-
-CString CWinRegistry::GetStringInt(LPCSTR pszSection, LPCSTR pszEntry, CString szDefault)
-{
-    HKEY hSection;
-    if (!OpenKey(hBaseKey, pszSection, &hSection))
-        return szDefault;
-    DWORD dwSize = 256, dwType;
-    BYTE szBuf[256], *pBuf = 0;
-    LONG rv = RegQueryValueEx(hSection, pszEntry, 0, &dwType, szBuf, &dwSize);
-    if (ERROR_MORE_DATA == rv)
-    {
-        pBuf = (LPBYTE)malloc(dwSize);
-        rv = RegQueryValueEx(hSection, pszEntry, 0, &dwType, pBuf, &dwSize);
-    }
-    RegCloseKey(hSection);
-    if (ERROR_SUCCESS != rv)
-    {
-        if (pBuf)
-            free(pBuf);
-        return szDefault;
-    }
-    if (dwType != REG_SZ)
-    {
-        ReportWarning("CWinRegistry::GetStringInt().\nRegistry data type is not SZ.\n");
-        if (pBuf)
-            free(pBuf);
-        return szDefault;
-    }
-    if (pBuf)
-    {
-        CString szRet(pBuf);
-        free(pBuf);
-        return szRet;
-    }
-    return CString(szBuf);
-}
-
-void CWinRegistry::GetBinInt(LPCSTR pszSection, LPCSTR pszEntry, LPVOID pDefault, int nDataLen,
-                             LPVOID pBuffer)
-{
-    HKEY hSection;
-    if (!OpenKey(hBaseKey, pszSection, &hSection))
-    {
-        memcpy(pBuffer, pDefault, nDataLen);
-        return;
-    }
-    DWORD dwSize = (DWORD)nDataLen, dwType;
-    if (ERROR_SUCCESS != RegQueryValueEx(hSection, pszEntry, 0, &dwType, (LPBYTE)pBuffer, &dwSize))
-    {
-        RegCloseKey(hSection);
-        memcpy(pBuffer, pDefault, nDataLen);
-        return;
-    }
-    RegCloseKey(hSection);
-    if (dwType != REG_BINARY)
-    {
-        ReportWarning("CWinRegistry::GetBinInt().\nRegistry data type is not BINARY.\n");
-        memcpy(pBuffer, pDefault, nDataLen);
-        return;
-    }
+void CWinRegistry::GetBinInt(LPCSTR section,LPCSTR name,LPVOID fallback,int length,LPVOID buffer) {
+    std::vector<char> data; uint32_t type=0;
+    if(opened && SettingsProfile::GetRaw(ProfileSection(section),SettingsProfile::Wide(name),data,type) &&
+       type==REG_BINARY && data.size()==static_cast<size_t>(length)) memcpy(buffer,data.data(),length);
+    else memcpy(buffer,fallback,length);
 }
 // ------------------ Write functions --------------------------------------
 
@@ -323,72 +185,22 @@ CSize CWinRegistry::GetCSize(LPCSTR pszSection, LPCSTR pszEntry, CSize siDefault
 
 //------------------------------ get sections and entries
 //--------------------------------------------------
-BOOL CWinRegistry::GetSections(CStringArray &sections)
-{
-    sections.SetSize(0);
-    if (hBaseKey == NULL)
-        return FALSE;
-
-    char buffer[256];
-    DWORD dwBufSize = 256;
-    FILETIME ftLastWriteTime;
-    for (DWORD dwIndex = 0; ERROR_SUCCESS == RegEnumKeyEx(hBaseKey, dwIndex, buffer, &dwBufSize,
-                                                          NULL, NULL, NULL, &ftLastWriteTime);
-         dwIndex++)
-    {
-        dwBufSize = 256;
-        sections.Add(CString(LPCTSTR(buffer), dwBufSize));
-    }
-
+BOOL CWinRegistry::GetSections(CStringArray& sections) {
+    sections.RemoveAll(); if(!opened) return FALSE;
+    for(const auto& value:SettingsProfile::Sections(SettingsProfile::Wide(baseSection))) sections.Add(SettingsProfile::Ansi(value).c_str());
     return TRUE;
 }
-
-BOOL CWinRegistry::GetEntries(LPCSTR pszSection, CStringArray &entries)
-{
-    entries.SetSize(0);
-    if (hBaseKey == NULL)
-        return FALSE;
-
-    HKEY hSection;
-    if (!OpenKey(hBaseKey, pszSection, &hSection))
-        return FALSE;
-
-    char buffer[256];
-    DWORD dwBufSize = 256;
-    for (DWORD dwIndex = 0; ERROR_SUCCESS == RegEnumValue(hSection, dwIndex, buffer, &dwBufSize,
-                                                          NULL, NULL, NULL, NULL);
-         dwIndex++)
-    {
-        dwBufSize = 256;
-        entries.Add(CString(LPCTSTR(buffer), dwBufSize));
-    }
-
-    RegCloseKey(hSection);
+BOOL CWinRegistry::GetEntries(LPCSTR section,CStringArray& entries) {
+    entries.RemoveAll(); if(!opened) return FALSE;
+    const auto values=SettingsProfile::Entries(ProfileSection(section));
+    if(values.empty()) return FALSE;
+    for(const auto& value:values) entries.Add(SettingsProfile::Ansi(value).c_str());
     return TRUE;
 }
-
-//---------------------------- delete sections and entries
-//-------------------------------------------------
-
-BOOL CWinRegistry::DeleteSection(LPCSTR pszSection)
-{
-    if (hBaseKey == NULL)
-        return FALSE;
-    return ERROR_SUCCESS == RegDeleteKey(hBaseKey, pszSection);
+BOOL CWinRegistry::DeleteSection(LPCSTR section) {
+    return opened && SettingsProfile::Delete(ProfileSection(section),nullptr);
 }
-
-BOOL CWinRegistry::DeleteEntry(LPCSTR pszSection, LPCSTR pszEntry)
-{
-    if (hBaseKey == NULL)
-        return FALSE;
-
-    HKEY hSection;
-    if (!OpenKey(hBaseKey, pszSection, &hSection))
-        return FALSE;
-
-    BOOL bRv = (ERROR_SUCCESS == RegDeleteValue(hSection, pszEntry));
-
-    RegCloseKey(hSection);
-
-    return bRv;
+BOOL CWinRegistry::DeleteEntry(LPCSTR section,LPCSTR name) {
+    auto entry=SettingsProfile::Wide(name);
+    return opened && SettingsProfile::Delete(ProfileSection(section),&entry);
 }

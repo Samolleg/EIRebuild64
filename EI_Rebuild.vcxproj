@@ -333,6 +333,7 @@
     <ClCompile Include="Game\FlyingHitPoints.cpp" />
     <ClCompile Include="Game\FOFSystem.cpp" />
     <ClCompile Include="Game\GameBase.cpp" />
+    <ClCompile Include="Game\SettingsProfile.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\GameJournal.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
