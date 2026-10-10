@@ -77,7 +77,7 @@ static void ReportMessage(const char *reportType, const char *buffer, const char
         else
         {
             const std::string message = std::string(buffer) + additionalInfo;
-            NGame::MessageBox(message.c_str(), MB_OK | MB_ICONERROR);
+            NGame::MessageBox(message.c_str(), MB_OK | MB_ICONERROR, false);
         }
         const std::uint32_t count = ++ModCliTool::ErrorCount();
         if (!suppressed && count < 0x80000000u && count >= 1u)

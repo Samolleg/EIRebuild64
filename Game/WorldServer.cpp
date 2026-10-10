@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ErrorDialog.h"
 #include "GameJournal.h"
 #include "EngineDiagnostics.h"
 #include "ModRuntime.h"
@@ -2727,7 +2728,7 @@ int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
                                          ->CreateData(ETypeIDs(HPC_EFFECTSOUND),
                                                       pMapEditSound->p_nID);
                 if (pMapEditSound->p_aResNames.GetSize() < 1)
-                    AfxMessageBox("Adding sound without wave name");
+                    ErrorDialog::ShowA(GetActiveWindow(), "Adding sound without wave name", "EIRebuild", MB_OK | MB_ICONERROR);
                 else
                     strcpy(pEff->szSoundName, pMapEditSound->p_aResNames[0]);
                 pEff->SetCP(pMapEditSound->p_ptPosition);
@@ -3487,7 +3488,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     {
         CString str;
         str.Format("Lever %i is not placed correctly", nWrongID);
-        AfxMessageBox(str);
+        ErrorDialog::ShowA(GetActiveWindow(), str, "EIRebuild", MB_OK | MB_ICONERROR);
     }
 #endif
 

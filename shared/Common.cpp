@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Common.h"
+#include "../Game/ErrorDialog.h"
 #include "../Game/SettingsProfile.h"
 #include <cassert>
 #include <cstdarg>
@@ -558,7 +559,7 @@ void ErrorMsgBoxNoExit(const char *format, ...)
     va_start(args, format);
     char buf[1024] = { 0 };
     vsprintf_s(buf, format, args);
-    MessageBoxA(nullptr, buf, GetCurrentAppName().c_str(), MB_OK | MB_ICONERROR);
+    ErrorDialog::ShowA(GetActiveWindow(), buf, GetCurrentAppName().c_str(), MB_OK | MB_ICONERROR);
     va_end(args);
 }
 
@@ -569,7 +570,7 @@ void ErrorMsgBoxWideNoExit(const wchar_t *format, ...)
     wchar_t buf[1024] = { 0 };
     vswprintf_s(buf, format, args);
     auto appName = AnsiToWide(GetCurrentAppName());
-    MessageBoxW(nullptr, buf, appName.c_str(), MB_OK | MB_ICONERROR);
+    ErrorDialog::ShowW(GetActiveWindow(), buf, appName.c_str(), MB_OK | MB_ICONERROR);
     va_end(args);
 }
 
@@ -579,7 +580,7 @@ void __declspec(noreturn) ErrorMsgBox(uint32_t exitCode, const char *format, ...
     va_start(args, format);
     char buf[1024] = { 0 };
     vsprintf_s(buf, format, args);
-    MessageBoxA(nullptr, buf, GetCurrentAppName().c_str(), MB_OK | MB_ICONERROR);
+    ErrorDialog::ShowA(GetActiveWindow(), buf, GetCurrentAppName().c_str(), MB_OK | MB_ICONERROR, false);
     va_end(args);
     ExitProcess(exitCode);
 }
@@ -594,7 +595,7 @@ void __declspec(noreturn) ErrorMsgBoxWide(uint32_t exitCode, const wchar_t *form
     wchar_t buf[1024] = { 0 };
     vswprintf_s(buf, format, args);
     auto appName = AnsiToWide(GetCurrentAppName());
-    MessageBoxW(nullptr, buf, appName.c_str(), MB_OK | MB_ICONERROR);
+    ErrorDialog::ShowW(GetActiveWindow(), buf, appName.c_str(), MB_OK | MB_ICONERROR, false);
     va_end(args);
     ExitProcess(exitCode);
 }
