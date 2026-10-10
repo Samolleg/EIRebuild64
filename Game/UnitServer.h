@@ -421,6 +421,8 @@ public:
     EUnitPose GetScriptPose() const { return currentPose.pose; }
     CAIUnitLogic logic;
     CAIAcknowledgements acknowledgements;
+    // Runtime-only ASI f06 counter; never part of RPG stats or the save stream.
+    DWORD dwSpellAddonLostSight;
 
 private:
     // LOWEST LEVEL interface

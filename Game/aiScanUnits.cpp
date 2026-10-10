@@ -13,6 +13,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "aiScanUnits.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "GeneralSettings.h"
 #include "aiMap.h"
 #include "UnitServer.h"
 #include "mapObjectServer.h"
@@ -667,13 +668,54 @@ void CAIMarkManager::Scan(CUnit *pUnit, CAIUnitEnvironment &env)
 
 /////////////////////////////////////////////////////////////////////////////////////
 // main function, refreshing unit`s environment
+// ASI f06: one WORD counter per observer, shared by the visible-list traversal.
+// The owner chose separate runtime storage instead of corrupting fExpPenalty.
+static bool KeepSpellAddonUnseenUnit(CUnitServer *pObserver, float fpDist,
+                                    const ModSpellAddon::Profile &profile)
+{
+    if (pObserver->GetUnit()->GetPlayerNum() == 0)
+        return false;
+    const WORD counter = WORD(pObserver->dwSpellAddonLostSight);
+    if (counter >= WORD(profile.Int(ModSpellAddon::IntKey::gameplay_losehardcore)))
+    {
+        pObserver->dwSpellAddonLostSight &= 0xffff0000u;
+        return false;
+    }
+    // FISTP writes a signed WORD into a zero DWORD, without sign extension.
+    // Preserve the caller's x87 rounding, including the indefinite WORD 8000h.
+    DWORD distance = 0;
+    __asm
+    {
+        fld fpDist
+        fistp word ptr distance
+    }
+    const DWORD factor1 = DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_losefactor1))));
+    const DWORD factor2 = DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_losefactor2))));
+    const DWORD factor3 = DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_losefactor3))));
+    const DWORD quotient = (distance * factor1 + factor3) /
+                           (DWORD(pObserver->GetUnit()->GetLevel()) + factor2);
+    const DWORD base = DWORD(theSettings.nDifficultyLevel) +
+                      DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_difffactor))));
+    const int maxadd = int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_maxadd)));
+    // The ASI uses signed JL here; q < maxadd adds base, not base * maxadd.
+    const DWORD increment = int(quotient) >= maxadd ? base * quotient : base;
+    pObserver->dwSpellAddonLostSight = (pObserver->dwSpellAddonLostSight & 0xffff0000u) |
+                                       WORD(counter + increment);
+    // The final mode-6 patch always jumps over RDTSC, even with follow != 0.
+    return true;
+}
+
 void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
 {
     POSITION pos, posCheck;
     CUnit *pUnit = pHero->GetUnit();
     ASSERT(pUnit);
     bool bHero = pUnit->IsHero() != FALSE;
-    float fpLostVisionCoef = bHero ? 1 : FP_AI_LOST_FROM_SIGHT_MUL;
+    const CModPackage *mod = ModRuntime::Current();
+    const bool spellAddonPursuit = mod && mod->SpellAddon().Feature06() == 6;
+    float fpLostVisionCoef = bHero ? 1 : (spellAddonPursuit ?
+        mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_visiondependence) :
+        FP_AI_LOST_FROM_SIGHT_MUL);
     if (!pUnit)
         return;
     const bool deagrOnLostSight = ModRuntime::Current() &&
@@ -703,8 +745,22 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
         }
         else
         {
-            // units under ai control never loose enemies from sight
-            if (!pUnit->IsEnemy(pVUnit) || bHero)
+            const bool enemy = pUnit->IsEnemy(pVUnit) != FALSE;
+            if (spellAddonPursuit)
+            {
+                // f06 owns the final f05 NOP as well: attackers get both sense tests.
+                fpVision = pHero->GetVisionSense() * pTarget->GetVisionDetect() * fpLostVisionCoef;
+                if (fpVision > fpDist)
+                    continue;
+                fpVision = pHero->GetLifeSense() * pTarget->GetLifeDetect() * fpLostVisionCoef;
+                if (fpVision > fpDist)
+                    continue;
+                if ((enemy || !mod->SpellAddon().Int(ModSpellAddon::IntKey::gameplay_loseallyfast)) &&
+                    KeepSpellAddonUnseenUnit(pHero, fpDist, mod->SpellAddon()))
+                    continue;
+            }
+            // Preserve the previous EIRebuild path when f06 mode 6 is inactive.
+            else if (!enemy || bHero)
             {
                 // unit attacking us should remain visible
                 if (!deagrOnLostSight && pTarget->IsAggressive() && pTarget->logic.GetCurrentTarget() == pUnit)
