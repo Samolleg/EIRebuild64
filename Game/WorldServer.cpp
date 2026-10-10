@@ -1429,7 +1429,9 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
             pUnit->SetName(pers.szName);
             pUnit->SetAggression(pers.aggression);
             //
-            pUnit->ClearRPGAbsorbtions(); // Hero absorbtions must be equal to '0'
+            const auto* armorMod = ModRuntime::Current();
+            if (!(armorMod && armorMod->SpellAddon().Feature30() == 1))
+                pUnit->ClearRPGAbsorbtions(); // Hero absorbtions must be equal to '0'
             pUnit->SetRPGStats(&pers.stats);
             // give unit some items etc
             pUnit->RemoveAllItems();
@@ -2173,6 +2175,8 @@ bool CWorldServer::HasMerc(CPlayer *pPlayer, int nID)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RecalcMercBriefings()
 {
+    const auto* mod = ModRuntime::Current();
+    const int mercLimit = mod && mod->SpellAddon().Feature12() >= 1 ? 5 : 2;
     CPlayerIterator playerIter;
     CPlayer *pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
     for (; pPlayer; pPlayer = playerIter.GetNext())
@@ -2242,7 +2246,7 @@ void CWorldServer::RecalcMercBriefings()
                         if (vars.GetVar(szHi) != 1)
                         {
                             // merc could be taken
-                            if (nTotalMercs < 2)
+                            if (nTotalMercs < mercLimit)
                             {
                                 if (fpAvail == 1)
                                 {
