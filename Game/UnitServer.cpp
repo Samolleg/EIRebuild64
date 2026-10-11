@@ -307,6 +307,7 @@ void SL1Command::Load(CSave &file)
     file.Read(nTimeStrikeMoment);
     file.Read(nHitTime);
     file.Read(nTargetID);
+    nTargetID = theWorldServer.GetMapObjectManager()->SavedObjectID(nTargetID);
     file.Read(&eAttackLocation, sizeof(eAttackLocation));
     file.Read(fpHitDist2);
     file.Read(bCast);

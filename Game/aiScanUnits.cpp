@@ -172,6 +172,7 @@ void SAIMark::Load(CSave &file)
     file.Read(nTime);
     file.Read(fpStrength, sizeof(fpStrength));
     file.Read(nUnitID);
+    nUnitID = theWorldServer.GetMapObjectManager()->SavedObjectID(nUnitID);
     file.Read(nPlayer);
 }
 

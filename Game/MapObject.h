@@ -293,7 +293,7 @@ public:
         if (pObject->IsInvalid())
             Clear();
     }
-    void Load(CSave &file, CWorld &world);
+    bool Load(CSave &file, CWorld &world); // false only for an intentionally omitted save ID
     void Store(CSave &file);
 };
 /////////////////////////////////////////////////////////////////////////////////////
@@ -317,7 +317,12 @@ inline void LoadMapObjectPtrList(CMapObjectPtrList &arr, CSave &file, CWorld &wo
     int i;
     file.Read(&i, sizeof(i));
     while (i-- > 0)
-        arr.GetAt(arr.AddTail(CMapObjectPtr())).Load(file, world);
+    {
+        POSITION added = arr.AddTail(CMapObjectPtr());
+        // Consumers of unit/environment/trap lists dereference every member.
+        // An omitted saved object is no member, rather than a null list node.
+        if (!arr.GetAt(added).Load(file, world)) arr.RemoveAt(added);
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CMapObject *LPMAPOBJECT;

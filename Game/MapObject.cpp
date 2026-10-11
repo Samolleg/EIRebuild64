@@ -19,7 +19,7 @@ bool SpellEffectPowerEnabled()
 /////////////////////////////////////////////////////////////////////////////////////
 // MapObjectPtr
 /////////////////////////////////////////////////////////////////////////////////////
-void CMapObjectPtr::Load(CSave &file, CWorld &world)
+bool CMapObjectPtr::Load(CSave &file, CWorld &world)
 {
     int nID;
     file.Read(nID);
@@ -27,6 +27,7 @@ void CMapObjectPtr::Load(CSave &file, CWorld &world)
         Set(NULL);
     else
         Set((CMapObject *)world.GetMapObjectManager()->Find(nID));
+    return !world.GetMapObjectManager()->IsOmittedSaveObject(nID);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////

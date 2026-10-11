@@ -6,6 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 // this one any how - mapobjectmanager for some strange reason handles database of units
 // and is stored in worldclient
 #include "WorldClient.h"
+#include "WorldServer.h"
 #include "MapObjectManager.h"
 #include "SpellConstructor.h"
 #include "ModConstructorLifetime.h"
@@ -95,6 +96,7 @@ void CPersonage::Load(CSave &file)
     if (file.GetVersion() < 91)
         return;
     file.Read(nFollowToID);
+    nFollowToID = theWorldServer.GetMapObjectManager()->SavedObjectID(nFollowToID);
     if (file.GetVersion() < 97)
         return;
     file.Read(&aggression, sizeof(aggression));

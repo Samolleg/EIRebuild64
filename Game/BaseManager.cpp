@@ -335,6 +335,7 @@ LPGAMEBASE CBaseManager::ChangeInstantID(int nOldID, int nNewID)
 // find data by it's id
 LPGAMEBASE CBaseManager::Find(int nID)
 {
+    if (IsOmittedSaveObject(nID)) return NULL;
     LPGAMEBASE pValue = NULL;
     hash.Lookup(nID, pValue);
     return pValue;

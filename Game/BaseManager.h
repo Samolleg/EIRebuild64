@@ -3,6 +3,7 @@
 #include "HashMap.h"
 #include "GameBase.h"
 #include "SaveLoader.h"
+#include <map>
 /////////////////////////////////////////////////////////////////////////////////////
 class CWorld;
 
@@ -10,6 +11,7 @@ class CWorld;
 class CBaseManager : public CGameBase
 {
     friend class CManagerIterator;
+    const std::map<int, int>* omittedSaveObjects = nullptr;
 
 protected:
     // main data
@@ -76,6 +78,23 @@ public:
     // data creating/releasing
     virtual LPGAMEBASE CreateData(ETypeIDs tidTypeID, int id = -1);
     virtual void Release(LPGAMEBASE lpData);
+    // Only while applying serialized state: omitted save IDs resolve to null.
+    // The guard restores normal map lookups on success and exception alike.
+    class SavedReferences {
+        CBaseManager& manager;
+        const std::map<int, int>* previous;
+    public:
+        SavedReferences(CBaseManager& m, const std::map<int, int>& omitted)
+            : manager(m), previous(m.omittedSaveObjects) { m.omittedSaveObjects = &omitted; }
+        ~SavedReferences() { End(); }
+        void End() { manager.omittedSaveObjects = previous; }
+        SavedReferences(const SavedReferences&) = delete;
+        SavedReferences& operator=(const SavedReferences&) = delete;
+    };
+    bool IsOmittedSaveObject(int id) const {
+        return omittedSaveObjects && omittedSaveObjects->find(id) != omittedSaveObjects->end();
+    }
+    int SavedObjectID(int id) const { return IsOmittedSaveObject(id) ? -1 : id; }
     // searching functions
     LPGAMEBASE Find(int nID);
     LPGAMEBASE FindType(ETypeIDs tidTypeID);
@@ -180,7 +199,7 @@ void LoadGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManag
             arr.AddTail((TYPE)pObj);
             pObj->AddRef();
         }
-        else
+        else if (!pManager->IsOmittedSaveObject(nID))
             break;
     }
 }
