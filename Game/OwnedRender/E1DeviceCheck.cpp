@@ -2,6 +2,7 @@
 #include "E1Surface.h"
 #include "E1DeviceAccess.h"
 #include "E1RenderGate.h"
+#include "E1RendererFacade.h"
 #include <atomic>
 #include <thread>
 #include <cstdio>
@@ -11,6 +12,15 @@ namespace {
 using Microsoft::WRL::ComPtr;
 int checks = 0;
 void check(bool value) { ++checks; if (!value) throw checks; }
+struct FacadeBackend {
+    HRESULT ensureResult = S_OK, resizeResult = S_OK, presentResult = S_OK;
+    unsigned ensures = 0, resizes = 0, begins = 0, ends = 0, presents = 0, visits = 0;
+    HRESULT ensure(HWND, UINT, UINT) { ++ensures; return ensureResult; }
+    HRESULT resize(UINT, UINT) { ++resizes; return resizeResult; }
+    void begin_scene() { ++begins; }
+    void end_scene() { ++ends; }
+    HRESULT present() { ++presents; return presentResult; }
+};
 struct Targets {
     ComPtr<ID3D11Texture2D> color, depth;
     ComPtr<ID3D11RenderTargetView> rtv;
@@ -86,6 +96,39 @@ void verifyPixels(ID3D11Device* device,ID3D11DeviceContext* context,Targets& tar
 }
 }
 int main() try {
+    {
+        OwnedRender::RendererFacadeCore<FacadeBackend> facade;
+        check(!facade.Ready() && !facade.FrameActive());
+        check(facade.BeginFrame() == E_UNEXPECTED);
+        check(facade.Resize(640, 480) == E_UNEXPECTED);
+        check(facade.Initialize(nullptr, 640, 480) == E_INVALIDARG);
+        const HWND window = reinterpret_cast<HWND>(std::uintptr_t(1));
+        check(facade.Initialize(window, 640, 480) == S_OK);
+        check(facade.Ready() && facade.Window() == window && facade.Width() == 640 && facade.Height() == 480);
+        check(facade.Initialize(window, 640, 480) == E_UNEXPECTED);
+        check(facade.Resize(640, 480) == S_FALSE);
+        check(facade.Resize(0, 480) == E_INVALIDARG);
+        check(facade.BeginFrame() == S_OK && facade.FrameActive());
+        check(facade.BeginFrame() == DXGI_ERROR_INVALID_CALL);
+        check(facade.Resize(800, 600) == DXGI_ERROR_INVALID_CALL);
+        check(facade.EndFrame() == S_OK && !facade.FrameActive());
+        check(facade.EndFrame() == E_UNEXPECTED);
+        facade.Visit([](FacadeBackend& backend) { backend.resizeResult = E_ABORT; return S_OK; });
+        check(facade.Resize(1024, 768) == E_ABORT && facade.Width() == 640 && facade.Height() == 480);
+        facade.Visit([](FacadeBackend& backend) { backend.resizeResult = S_OK; return S_OK; });
+        check(facade.Resize(800, 600) == S_OK && facade.Width() == 800 && facade.Height() == 600);
+        check(facade.Visit([](FacadeBackend& backend) { ++backend.visits; return S_OK; }) == S_OK);
+        check(facade.Visit([](FacadeBackend&) { return E_ABORT; }) == E_ABORT);
+        check(facade.Visit([](FacadeBackend&) -> HRESULT { throw std::runtime_error("visitor"); }) == E_FAIL);
+        check(facade.BeginFrame() == S_OK);
+        facade.Visit([](FacadeBackend& backend) { backend.presentResult = E_ABORT; return S_OK; });
+        check(facade.EndFrame() == E_ABORT && !facade.FrameActive());
+        check(facade.Visit([](FacadeBackend& backend) {
+            return backend.ensures == 1 && backend.begins == 2 &&
+                backend.ends == 2 && backend.presents == 2 && backend.visits == 1 &&
+                backend.resizes == 2 ? S_OK : E_FAIL;
+        }) == S_OK);
+    }
     OwnedRender::E1RenderGate gate;
     {
         const auto mainFrame=gate.Lock();
