@@ -15,6 +15,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Sector.h"
 #include "Terrain.h"
+#include "OwnedRender/NeighbourTerrain.h"
 #include "ModTerrainShadow.h"
 #include "mapFormat.h"
 
@@ -287,6 +288,12 @@ void CTerrain::PrepareForDraw(const CQuaternion &q)
 BOOL CTerrain::DrawBase(CRenderer *pRend)
 {
     CreateCurrentPlacement();
+    const auto& matrix = GetPlacement();
+    OwnedRender::PublishTerrainPlacement(this, {
+        matrix._11, matrix._12, matrix._13, matrix._14,
+        matrix._21, matrix._22, matrix._23, matrix._24,
+        matrix._31, matrix._32, matrix._33, matrix._34,
+        matrix._41, matrix._42, matrix._43, matrix._44});
     pRend->GetGPU()->PushMainMatrix(GetPlacement());
     BOOL bRet = Draw(pRend, 0, nTextures + N_NUMBER_OF_LONG_TEXTURES - 1);
     pRend->GetGPU()->PopMainMatrix();
@@ -296,6 +303,12 @@ BOOL CTerrain::DrawBase(CRenderer *pRend)
 BOOL CTerrain::DrawTransparent(CRenderer *pRend)
 {
     CreateCurrentPlacement();
+    const auto& matrix = GetPlacement();
+    OwnedRender::PublishTerrainPlacement(this, {
+        matrix._11, matrix._12, matrix._13, matrix._14,
+        matrix._21, matrix._22, matrix._23, matrix._24,
+        matrix._31, matrix._32, matrix._33, matrix._34,
+        matrix._41, matrix._42, matrix._43, matrix._44});
     pRend->GetGPU()->PushMainMatrix(GetPlacement());
     BOOL bRet = Draw(pRend, nTextures + N_NUMBER_OF_LONG_TEXTURES,
                      (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1);
@@ -623,6 +636,7 @@ BOOL CTerrain::Load(LPCSTR pszFileName, LPCSTR pszAllodName, bool bCave)
 /////////////////////////////////////////////////////////////////////////////////////
 void CTerrain::Free()
 {
+    OwnedRender::RetireTerrainPlacement(this);
     ChangeRendererRevision();
     ReleaseOwnedTerrain(&theRenderer);
     rendererSectorRows.clear();rendererSectorPhases.clear();

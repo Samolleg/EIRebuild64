@@ -339,6 +339,8 @@
     </ClCompile>
     <ClCompile Include="Game\GameMain.cpp" />
     <ClCompile Include="Game\OwnedRender\Startup.cpp" />
+    <ClCompile Include="Game\OwnedRender\NeighbourTerrain.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\OwnedRender\ResourceMapping.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\CrashEvidence.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\EngineDiagnostics.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\GeneralSettings.cpp" />
@@ -871,6 +873,7 @@
     <Natvis Include="images.natvis" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="OwnedRenderer\OwnedRenderer.vcxproj" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'"><Project>{8F045552-BA21-4F45-9902-631E6359DABD}</Project></ProjectReference>
     <ProjectReference Include="luajit-x86\luajit.vcxproj"><Project>{2714e7b7-71e0-484a-81df-495cfdb463ad}</Project></ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -1,9 +1,10 @@
 # RS02b resource bootstrap foundation
 
 This directory is **not yet an integrated renderer**. `ResourceBootstrap.h`
-accepts already resolved host paths and resource mounts. Its only caller is
-currently `HostPathsCheck.cpp`; the game still uses its previous renderer.
-Do not package the unchanged game executable as the RS02b rendering slice.
+accepts already resolved host paths and resource mounts. `Startup.cpp` calls it
+from the game startup after settings load and before world/device creation.
+The game still uses its previous renderer. Do not package this executable as
+the completed RS02b rendering slice.
 
 `EID3D11_EMBEDDED` is a build definition of OwnedRenderer.lib, not a runtime
 setting. It selects host-provided paths for renderer configuration, mounts and
@@ -23,12 +24,40 @@ INI fixtures there. It checks rejection before initialization, invalid paths,
 mount order and duplicates, snapshot isolation, rejection of reconfiguration,
 configuration creation/replacement/readback, and preservation of the legacy INI.
 
-Remaining integration: resolve paths and mounts from SettingsProfile/ModRuntime
-at the real startup boundary; connect resource/lifetime publications, scene
-generation, membership, object appearance/animation, camera and lighting;
-replace device/presentation ownership and the world/UI consumers; implement the
-remaining bridge dependencies with game data; link the embedded renderer into
-the executable. No fake bridge implementations are supplied here.
+`ResourceMapping.cpp` tracks actual CMappedFile views, not resource object
+addresses. Provenance is captured from the OS mapping, ranges are bounded by
+the actual file size, writable views cannot prove immutable source identity,
+and an entry retires with its successful unmap. The caller must own the view
+during a synchronous query; the query does not grant a lifetime lease.
+
+`NeighbourTerrain.cpp` publishes only CTerrain's prepared placement and clears
+it on Free. The prepare/upload algorithms live in the renderer submodule's
+`embedded_neighbour_terrain.cpp`, using its existing decoder and immutable MPR
+assets. No renderer geometry implementation is copied into this repository.
+SITES.csv boundaries: RS01-1075 / RS01-1078 (terrain draw/free), RS01-3253 through
+RS01-3260 (mapped resource lifetime, concretely CMappedFile in this source tree).
+
+The EXE project references OwnedRenderer.lib, but this is not proof that the
+complete Renderer is linked: a constructor/destructor link probe still has
+106 unresolved symbols. The remaining work includes scene generation,
+membership, appearance/poses, camera/light, UI/focus and supporting bridge
+dependencies. Device/presentation ownership stays unchanged until the next
+reviewed stage. No fake bridge implementations are supplied here.
+
+Additional console checks (neither launches the game nor creates a GPU/window):
+
+```powershell
+MSBuild OwnedRenderer/ResourceMappingCheck.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32
+out/Win32/Release/OwnedRenderer/ResourceMappingCheck.exe C:/absolute/new-fixture-file.bin
+MSBuild OwnedRenderer/NeighbourTerrainCheck.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32
+out/Win32/Release/OwnedRenderer/NeighbourTerrainCheck.exe C:/absolute/map.mpr C:/absolute/first-textures.res C:/absolute/fallback-textures.res
+```
+
+The terrain check reads explicit files, validates and decodes actual geometry,
+compares worker/submit streams, and exercises placement publication/retirement.
+Its texture archive arguments are an explicit test mount set, not automatic
+selection of the installed profile. It does not test offscreen rendering,
+camera composition, frame timing, or the complete game scene lifecycle.
 
 ## Paired capture after integration and owner authorization
 

@@ -8,6 +8,7 @@
   <Import Project="Renderer.props" />
   <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_draw.cpp" />
