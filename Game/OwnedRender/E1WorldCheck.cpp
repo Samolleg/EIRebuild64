@@ -91,6 +91,20 @@ int main() {
             check(!bridge_scene_world_to_clip_snapshot().valid);
             check(!bridge_world_fog_snapshot().valid);
         }
+        input.environment.world_time = 345.25;
+        input.camera.world_to_clip[6] = 7;
+        input.fog.fog.end = input.fog.fog.start;
+        {
+            E1WorldDraw draw(&owner, 5, input);
+            check(!bridge_world_fog_snapshot().valid && bridge_world_fog_snapshot().failure != nullptr);
+            check(bridge_read_world_environment(environment) && bridge_scene_world_to_clip_snapshot().valid);
+        }
+        input.fog.fog.end = 100;
+        input.fog.fog.projection_34 = std::numeric_limits<float>::infinity();
+        {
+            E1WorldDraw draw(&owner, 5, input);
+            check(!bridge_world_fog_snapshot().valid);
+        }
         E1RetireWorld(&owner);
         std::printf("E1 world frame: %d checks PASS\n", checks);
         return 0;

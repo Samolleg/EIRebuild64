@@ -42,7 +42,18 @@ E1WorldDraw::E1WorldDraw(const void* owner, std::uint64_t generation,
         if (!std::isfinite(v)) values.camera.valid = false;
     values.fog.scene_frame_serial = frame;
     values.fog.environment = environment;
-    values.fog.valid = values.fog.valid && environment.valid;
+    if (values.fog.valid) {
+        const auto& fog = values.fog.fog;
+        if (!std::isfinite(fog.start) || !std::isfinite(fog.end) || !std::isfinite(fog.scale) ||
+            !std::isfinite(fog.projection_33) || !std::isfinite(fog.projection_34) ||
+            !std::isfinite(fog.projection_43) || !(fog.end > fog.start) || !(fog.scale > 0.f)) {
+            values.fog.valid = false;
+            values.fog.failure = "host_fog_values_invalid";
+        } else if (!environment.valid) {
+            values.fog.valid = false;
+            values.fog.failure = "host_environment_unavailable";
+        } else values.fog.failure = "";
+    }
 }
 E1WorldDraw::~E1WorldDraw() noexcept {
     // An exception or an early return cannot publish a successful world draw.
