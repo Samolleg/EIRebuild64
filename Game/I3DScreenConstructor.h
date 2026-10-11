@@ -179,6 +179,7 @@ public:
     void SetPersonage(int nNewCurPers, LPCTSTR pszName);
     void StopPrimaryRepeat();
     void UpdateStats();
+    void UpdateModStats();
     void GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkillInfo);
 
     virtual void OnIdle();

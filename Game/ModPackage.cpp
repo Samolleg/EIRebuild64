@@ -2106,6 +2106,23 @@ std::vector<std::pair<int,int>> CModPackage::InfoSetBonuses(const char*name,int 
   if(type&&type==stat)sum+=complex?int(InfoComplexProperty(set,7+i,c)):InfoSetPosition(name,c,5+i);
  }if(sum)result.emplace_back(stat,sum);}return result;
 }
+float CModPackage::InfoDisplayScalar(const char* callback, std::initializer_list<float> args) {
+ CallbackFrame frame(state); BeginCallback(callback);
+ for (float value : args) lua_pushnumber(state, value);
+ Call(int(args.size()), 1); return float(Number(state, callback));
+}
+float CModPackage::InfoDisplayActor(const char* callback, CUnit& unit, int slot) {
+ CallbackFrame frame(state); BeginCallback(callback);
+ ModLua::Push(state, unit.GetUserUnitStats(), frame.scope); ModLua::Push(state, &unit, frame.scope);
+ if (slot >= 0) lua_pushinteger(state, slot);
+ Call(slot >= 0 ? 3 : 2, 1); return float(Number(state, callback));
+}
+float CModPackage::InfoDisplayWound(const SRPGUnitStats& stats) {
+ CallbackFrame frame(state); BeginCallback("GetHitLocDecr");
+ SRPGUnitStats displayStats = stats;
+ ModLua::Push(state, &displayStats, frame.scope); lua_pushnil(state); lua_pushinteger(state, 1);
+ Call(3, 1); return float(Number(state, "GetHitLocDecr"));
+}
 float CModPackage::InfoMagicBlood(int level){
  CallbackFrame frame(state);BeginCallback("GetRegenBonusFromPerkMagicBlood");lua_pushinteger(state,level);Call(1,1);return float(Number(state,"MagicBlood"));
 }

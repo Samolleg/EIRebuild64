@@ -149,6 +149,9 @@ public:
     float InfoComplexProperty(int set, int property, int position = -1);
     std::vector<std::pair<int,int>> InfoSetBonuses(const char* name, int count, int set, bool complex);
     float InfoMagicBlood(int level);
+    float InfoDisplayScalar(const char*, std::initializer_list<float>);
+    float InfoDisplayActor(const char*, CUnit&, int slot = -1);
+    float InfoDisplayWound(const SRPGUnitStats&);
     ModSpellTooltip::Values SpellTooltip(const SRPGUserUnitStats&, const CSpell&, float manaIntelligence, int difficulty);
     void BeginInfoStats();
     void EndInfoStats();
