@@ -1,4 +1,5 @@
 #include "E1World.h"
+#include "embedded_sky.h"
 #include <cmath>
 
 namespace {
@@ -7,6 +8,7 @@ std::uint64_t worldGeneration = 0, nextEpoch = 0, epoch = 0;
 std::uint64_t frame = 0, draw = 0, activeDraw = 0, completions = 0;
 OwnedRender::E1WorldFrame values{};
 owned::WorldDrawCompletionSnapshot completed{};
+std::uint64_t skyRevision = 0;
 std::uint64_t advance(std::uint64_t& counter) noexcept {
     if (++counter == 0) ++counter;
     return counter;
@@ -15,10 +17,17 @@ void clearFrame() noexcept {
     values = {};
     completed = {};
     activeDraw = 0;
+    skyRevision = 0;
 }
 }
 namespace OwnedRender {
 void E1BeginFrame() noexcept { advance(frame); clearFrame(); }
+bool E1ClaimSky(bool requested) noexcept {
+    const bool claim = requested && activeDraw && values.camera.valid &&
+        values.environment.valid && owned::embedded_sky().enabled();
+    skyRevision = claim ? owned::embedded_sky().revision() : 0;
+    return claim;
+}
 std::uint64_t E1WorldGeneration() noexcept { return values.camera.valid ? worldGeneration : 0; }
 void E1RetireWorld(const void* owner) noexcept {
     if (owner != worldOwner) return;
@@ -68,6 +77,9 @@ void E1WorldDraw::Complete() noexcept {
 }
 }
 namespace owned {
+void bridge_set_owned_sky(bool enabled) noexcept { embedded_sky().configure(enabled); }
+bool bridge_owned_sky_installed() noexcept { return embedded_sky().installed(); }
+bool bridge_owned_sky_requested() noexcept { return skyRevision && skyRevision == embedded_sky().revision() && embedded_sky().enabled(); }
 bool bridge_read_world_environment(WorldEnvironment& output) noexcept {
     output = values.environment;
     return output.valid;

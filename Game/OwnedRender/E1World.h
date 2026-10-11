@@ -9,6 +9,8 @@ struct E1WorldFrame {
     owned::WorldFogSnapshot fog{};
 };
 void E1BeginFrame() noexcept;
+// At the actual stock sky gate, true transfers the draw to c56.
+bool E1ClaimSky(bool requested) noexcept;
 std::uint64_t E1WorldGeneration() noexcept;
 void E1RetireWorld(const void* owner) noexcept;
 class E1WorldDraw {

@@ -3038,7 +3038,9 @@ BOOL CWorldClient::Draw()
     fog.fog = {ownedWorld.fog_range[0], ownedWorld.fog_range[1], ownedWorld.fog_range[2],
         ownedWorld.fog_projection[2], ownedWorld.fog_projection[1], ownedWorld.fog_projection[0]};
     OwnedRender::E1WorldDraw worldDraw(this, ownedRenderGeneration, frameValues);
-    const bool ownedSky = pRend->GetD3D()->BeginWorld(ownedWorld);
+    const bool sourceSky = pRend->GetD3D()->BeginWorld(ownedWorld);
+    const bool embeddedSky = OwnedRender::E1ClaimSky(CheckFlag(WC_RENDER_SKY) && pSky);
+    const bool ownedSky = sourceSky || embeddedSky;
     // render sky object
 #ifndef _A4
     if (CheckFlag(WC_RENDER_SKY) && pSky && !ownedSky)

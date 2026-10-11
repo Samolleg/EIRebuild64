@@ -1,4 +1,5 @@
 #include "E1World.h"
+#include "embedded_sky.h"
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
@@ -106,6 +107,65 @@ int main() {
             check(!bridge_world_fog_snapshot().valid);
         }
         E1RetireWorld(&owner);
+        // Real world adapter + embedded device lease. No window/device is opened.
+        int renderer = 0, otherRenderer = 0;
+        auto& sky = embedded_sky();
+        check(!bridge_owned_sky_installed() && !E1ClaimSky(true));
+        bridge_set_owned_sky(true); // Config alone must not suppress the stock draw.
+        check(!bridge_owned_sky_installed() && !E1ClaimSky(true));
+        check(!sky.attach(nullptr));
+        check(sky.attach(&renderer));
+        check(bridge_owned_sky_installed());
+        check(!sky.available_to(&otherRenderer) && !sky.attach(&otherRenderer));
+        sky.detach(&otherRenderer);
+        check(bridge_owned_sky_installed());
+        check(!E1ClaimSky(true)); // No current world.
+        input.fog.fog.projection_34 = 3;
+        E1BeginFrame();
+        {
+            E1WorldDraw draw(&owner, 8, input);
+            check(!bridge_owned_sky_requested());
+            check(!E1ClaimSky(false) && !bridge_owned_sky_requested());
+            check(E1ClaimSky(true) && bridge_owned_sky_requested());
+            const auto revision = sky.revision();
+            check(sky.attach(&renderer) && sky.revision() == revision);
+            bridge_set_owned_sky(true);
+            check(bridge_owned_sky_requested()); // Idempotent frame settings.
+            bridge_set_owned_sky(false);
+            check(!bridge_owned_sky_requested() && !E1ClaimSky(true));
+            bridge_set_owned_sky(true);
+            check(!bridge_owned_sky_requested()); // No revival of an old request.
+            check(E1ClaimSky(true));
+            sky.detach(&renderer);
+            check(!bridge_owned_sky_installed() && !bridge_owned_sky_requested());
+            check(sky.attach(&renderer));
+            bridge_set_owned_sky(true);
+            check(!bridge_owned_sky_requested()); // Same address, new device lease.
+            check(E1ClaimSky(true));
+            draw.Complete();
+        }
+        check(bridge_owned_sky_requested()); // Composition after world completion.
+        E1BeginFrame();
+        check(!bridge_owned_sky_requested());
+        {
+            E1WorldDraw draw(&owner, 8, input);
+            check(E1ClaimSky(true));
+        } // Aborted world cannot leave an owned sky request.
+        check(!bridge_owned_sky_requested());
+        {
+            E1WorldDraw draw(&owner, 9, input);
+            check(E1ClaimSky(true));
+            E1RetireWorld(&owner);
+            check(!bridge_owned_sky_requested());
+            draw.Complete();
+        }
+        input.camera.valid = false;
+        {
+            E1WorldDraw draw(&owner, 10, input);
+            check(!E1ClaimSky(true));
+        }
+        sky.detach(&renderer);
+        check(!bridge_owned_sky_installed() && !bridge_owned_sky_requested());
         std::printf("E1 world frame: %d checks PASS\n", checks);
         return 0;
     } catch (int failed) { std::printf("E1 world frame: check %d FAILED\n", failed); return 1; }
