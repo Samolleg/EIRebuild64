@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1Notices.h"
 #include "OwnedRender/E2EffectDistance.h"
 #include "ErrorDialog.h"
 #include "GameJournal.h"
@@ -223,6 +224,7 @@ BOOL CWorldServer::Create()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Destroy()
 {
+    OwnedRender::E1ClearSaveNotice();
     // Kill All clients
     CPlayer *pPlayer;
     CPlayerIterator
@@ -3855,6 +3857,9 @@ void CWorldServer::LoadDynamicData(CSave &file)
             pMO->LoadFigureBoundingVolumes(pMO->GetMaskName());
             aiMap.AddObject(pMO);
         }
+        CMapObject* previousMapObject = nullptr;
+        mapObjects.Lookup(pMO->GetID(),previousMapObject);
+        OwnedRender::E1ObserveSaveReplacement(pMO->GetID(),previousMapObject,pMO);
         assert(mapObjects.Seek(pMO->GetID()) == NULL);
         mapObjects.SetAt(pMO->GetID(), pMO);
         AddToDynamic(pMO);
@@ -3907,6 +3912,7 @@ void CWorldServer::RemoveDynamicObjects()
 // and should not be in local or multiplayer mode
 BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *pszTerrain)
 {
+    OwnedRender::E1ClearSaveNotice();
     GameJournal::Event("LOAD", "origin", "value=%d reason=%s", int(origin), origin==WorldLoadOrigin::SavedGame?"saved_game":"zone_entry");
     GameJournal::Operation journal("LOAD", "world", pszTerrain);
     char ch;

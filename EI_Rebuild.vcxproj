@@ -341,6 +341,7 @@
     <ClCompile Include="Game\GameMain.cpp" />
     <ClCompile Include="Game\OwnedRender\E4Camp.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\OwnedRender\E4CampHost.cpp" />
+    <ClCompile Include="Game\OwnedRender\E1Notices.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\OwnedRender\E1TextLifetime.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\OwnedRender\E1World.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E2Host.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
