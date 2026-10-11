@@ -1540,7 +1540,6 @@ void CI3DObjectNameStats::UpdateStats()
                     szOut.Format("     %s %s",(LPCSTR)szStrings[DAMAGE],(LPCSTR)szTmp);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
                     szOut.Format("%.0f-%.0f",damage.minimum,damage.maximum);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);rc+=shift;
                 }
-                rc+=shift;
             }else for(int i=0;i<5;++i)rc+=shift;
         }
         else if (pScreen->GetCurrentPers()->dwCurrentWeapon != -1)
