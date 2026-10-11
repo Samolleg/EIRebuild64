@@ -9,6 +9,7 @@ struct E1WorldFrame {
     owned::WorldFogSnapshot fog{};
 };
 void E1BeginFrame() noexcept;
+std::uint64_t E1WorldGeneration() noexcept;
 void E1RetireWorld(const void* owner) noexcept;
 class E1WorldDraw {
     std::uint64_t token = 0;

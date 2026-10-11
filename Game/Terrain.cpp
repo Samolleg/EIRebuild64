@@ -16,6 +16,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Sector.h"
 #include "Terrain.h"
 #include "OwnedRender/NeighbourTerrain.h"
+#include "OwnedRender/E1Terrain.h"
 #include "ModTerrainShadow.h"
 #include "mapFormat.h"
 

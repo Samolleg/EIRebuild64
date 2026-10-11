@@ -19,6 +19,7 @@ void clearFrame() noexcept {
 }
 namespace OwnedRender {
 void E1BeginFrame() noexcept { advance(frame); clearFrame(); }
+std::uint64_t E1WorldGeneration() noexcept { return values.camera.valid ? worldGeneration : 0; }
 void E1RetireWorld(const void* owner) noexcept {
     if (owner != worldOwner) return;
     worldOwner = nullptr; worldGeneration = epoch = 0;

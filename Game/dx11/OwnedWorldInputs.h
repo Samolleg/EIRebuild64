@@ -1,5 +1,6 @@
 #pragma once
 #include "OwnedRendererClient.h"
+#include "../OwnedRender/E1Terrain.h"
 #include "../Unit.h"
 #include "../UnitClientSpecific.h"
 #include "../Terrain.h"
@@ -61,6 +62,12 @@ inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureMana
     input.loose_roots=rootPointers.data();input.loose_count=uint32_t(rootPointers.size());
     input.archives=archivePointers.data();input.archive_count=uint32_t(archivePointers.size());
     input.layer_shifts=shifts.data();input.layer_count=uint32_t(shifts.size());Check(renderer.SetTerrain(source));
+    std::string failure;
+    if (!OwnedRender::E1PublishTerrainSource(&terrain, generation, source.source_revision,
+        project.c_str(), header.c_str(), ReadMap, &terrain, failure)) {
+        GameJournal::Event("RENDER", "terrain_publication_failed", "%s", failure.c_str());
+        throw E_FAIL;
+    }
 }
 inline bool Bounds(const CMapObject& object,float* out){
     const auto& volume=object.GetBoundingVolume();if(!volume.IsBox())return false;

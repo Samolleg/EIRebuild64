@@ -1,0 +1,108 @@
+#include "E1Terrain.h"
+#include "E1World.h"
+#include "world_mist_grid.h"
+#include <cmath>
+
+namespace {
+const void* sourceOwner = nullptr;
+std::uint64_t worldIdentity = 0, sourceRevision = 0, nextGeneration = 0, terrainFrame = 0, geometrySerial = 0;
+owned::RetainedTerrainSourceSnapshot source;
+std::array<float,16> transform{};
+owned::WorldMistGridCache mist;
+void clear() noexcept {
+    sourceOwner = nullptr; worldIdentity = sourceRevision = terrainFrame = 0;
+    source = {}; transform = {}; mist.retire();
+}
+bool current() noexcept {
+    const auto frame = owned::bridge_scene_world_to_clip_snapshot();
+    return sourceOwner && terrainFrame && frame.valid && frame.scene_frame_serial == terrainFrame &&
+        OwnedRender::E1WorldGeneration() == worldIdentity;
+}
+}
+namespace OwnedRender {
+bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_t revision,
+    const char* project, const char* header, E1TerrainRead read, void* context,
+    std::string& failure) noexcept try {
+    failure.clear();
+    if (!owner || !world || !revision || !project || !header || !read) {
+        clear(); failure = "terrain source identity missing"; return false;
+    }
+    if (owner == sourceOwner && world == worldIdentity && revision == sourceRevision) return true;
+    clear(); // A failed replacement must never expose the previous world's bytes.
+    if (++nextGeneration == 0) ++nextGeneration;
+    owned::ResourceIdentity identity;
+    identity.canonical_name = project; identity.container_incarnation = nextGeneration;
+    auto terrain = std::make_shared<owned::TerrainCpuAsset>();
+    owned::ResourceFailure error;
+    const auto resolve = [&](const std::string& name, owned::ResourceBlob& blob, owned::ResourceFailure& why) {
+        blob = {};
+        std::uint32_t bytes = 0;
+        HRESULT hr = read(context, name.c_str(), nullptr, 0, &bytes);
+        if (FAILED(hr) || !bytes) {
+            why = {owned::ResourceFailureCode::file_read, "terrain member size unavailable: " + name}; return false;
+        }
+        auto copy = std::make_shared<std::vector<std::uint8_t>>(bytes);
+        std::uint32_t actual = 0;
+        hr = read(context, name.c_str(), copy->data(), bytes, &actual);
+        if (FAILED(hr) || actual != bytes) {
+            why = {owned::ResourceFailureCode::file_read, "terrain member changed during copy: " + name}; return false;
+        }
+        blob.identity = identity; blob.identity.canonical_name = name; blob.identity.bytes = bytes;
+        blob.bytes = std::move(copy); return true;
+    };
+    if (!owned::parse_terrain_members(identity, project, header, resolve, *terrain, error) ||
+        !owned::validate_terrain_asset_descriptor_once(*terrain)) {
+        failure = error.message.empty() ? "terrain descriptor invalid" : error.message; return false;
+    }
+    source.source_generation = nextGeneration; source.source_revision = revision;
+    source.terrain = std::move(terrain);
+    sourceOwner = owner; worldIdentity = world; sourceRevision = revision;
+    return true;
+} catch (...) { clear(); try { failure = "terrain source allocation/read failed"; } catch (...) {} return false; }
+void E1RetireTerrain(const void* owner) noexcept { if (owner == sourceOwner) clear(); }
+bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
+    const std::array<float,16>& placement) noexcept try {
+    terrainFrame = 0;
+    const auto frame = owned::bridge_scene_world_to_clip_snapshot();
+    if (!owner || owner != sourceOwner || !source.terrain || !frame.valid || !frame.scene_frame_serial ||
+        E1WorldGeneration() != worldIdentity ||
+        !input.revision || input.layer_shifts.size() != source.terrain->objects.size()) return false;
+    for (float v : placement) if (!std::isfinite(v)) return false;
+    for (float v : input.layer_shifts) if (!std::isfinite(v)) return false;
+    for (float v : input.wind_noise) if (!std::isfinite(v)) return false;
+    const auto& a = input.animation;
+    if (!std::isfinite(a.wind_direction[0]) || !std::isfinite(a.wind_direction[1]) ||
+        !std::isfinite(a.wind_force) || !std::isfinite(a.wind_force_normalized) ||
+        !std::isfinite(a.wind_phase) || !std::isfinite(a.precise_time)) return false;
+    auto completed = std::make_shared<owned::OwnedTerrainGeometryValues>(input);
+    if (++geometrySerial == 0) ++geometrySerial;
+    completed->revision = geometrySerial;
+    if (source.geometry) completed->layer_shift_range = source.geometry->layer_shift_range;
+    owned::grow_owned_terrain_layer_shift_range(completed->layer_shift_range, completed->layer_shifts);
+    completed->structural_revision = source.geometry ? source.geometry->structural_revision : geometrySerial;
+    completed->noise_revision = source.geometry ? source.geometry->noise_revision : geometrySerial;
+    if (source.geometry && source.geometry->layer_shift_range != completed->layer_shift_range)
+        completed->structural_revision = geometrySerial;
+    if (source.geometry && source.geometry->wind_noise != completed->wind_noise)
+        completed->noise_revision = geometrySerial;
+    source.geometry = std::move(completed);
+    transform = placement; terrainFrame = frame.scene_frame_serial; return true;
+} catch (...) { terrainFrame = 0; return false; }
+}
+namespace owned {
+bool bridge_ambient_world_source(AmbientWorldSource& output) noexcept {
+    output = {};
+    if (!current() || !source.terrain || !source.geometry) return false;
+    output.terrain = source.terrain; output.geometry = source.geometry;
+    // No fabricated MOB snapshot: map-dependent effects remain unavailable
+    // until the main retained scene publisher supplies its real map source.
+    const auto& a = source.geometry->animation;
+    output.wind_direction[0] = a.wind_direction[0]; output.wind_direction[1] = a.wind_direction[1];
+    output.wind_force_normalized = a.wind_force_normalized;
+    return true;
+}
+std::shared_ptr<const WorldMistGrid> bridge_world_mist_grid() noexcept {
+    if (!current()) return {};
+    return mist.get(source, transform);
+}
+}

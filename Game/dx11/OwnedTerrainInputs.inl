@@ -37,11 +37,47 @@ HRESULT CTerrain::CopyRendererBaseVertices(uint32_t index,float* rows,uint32_t c
 
 void CTerrain::ReleaseOwnedTerrain(CRenderer* renderer)
 {
+    OwnedRender::E1RetireTerrain(this);
     if(renderer && renderer->GetD3D())renderer->GetD3D()->GetOwnedRenderer().ReleaseTerrain();
 }
 
 bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
 {
+    owned::OwnedTerrainGeometryValues values;
+    values.revision = rendererRevision; values.structural_revision = rendererRevision;
+    values.noise_revision = rendererRevision;
+    for (int i = 0; i < GetObjectsNumber(); ++i) {
+        values.layer_shifts.push_back(GetObject(i)->fGlobalShift);
+        values.animation.maximum_wind_multiplier = (std::max)(values.animation.maximum_wind_multiplier,
+            std::abs(GetObject(i)->fpWindMultiplier));
+    }
+    if (fpNoises.GetSize() != values.wind_noise.size()) {
+        OwnedRender::E1RetireTerrain(this);
+        GameJournal::Count("RENDER", "terrain_frame_publication_failed", "wind_noise_size");
+        return false;
+    }
+    std::copy_n(fpNoises.GetData(), values.wind_noise.size(), values.wind_noise.begin());
+    auto& animation = values.animation;
+    animation.wind_direction[0] = windDirection.x; animation.wind_direction[1] = windDirection.y;
+    animation.wind_force = fpWindForce; animation.wind_force_normalized = fpWindForce01;
+    animation.wind_phase = fpWindPhase; animation.precise_time = theWorld.GetPreciseTime();
+    animation.waves_enabled = (renderState & ETRS_WAVES) != 0;
+    animation.animated_tiles_enabled = (renderState & ETRS_ANIMATED_TILES) != 0;
+    animation.tiles_per_texture_side = nTilesPerTexSide;
+    animation.liquid_detail_time = animation.precise_time;
+    if (renderState & ETRS_BORDER_FOG) {
+        animation.fog_enabled = 1;
+        animation.fog_distance = theSettings.fpTerrainBorderFogDistance;
+        animation.fog_min[0] = animation.fog_min[1] = animation.fog_distance + FP_CL_MP_SIZE;
+        animation.fog_max[0] = GetMaxX() - animation.fog_distance - FP_CL_MP_SIZE;
+        animation.fog_max[1] = GetMaxY() - animation.fog_distance - FP_CL_MP_SIZE;
+    }
+    const auto& placement = GetPlacement();
+    std::array<float,16> matrix;
+    memcpy(matrix.data(), &placement, sizeof(placement));
+    if (!OwnedRender::E1PublishTerrainFrame(this, values, matrix)) {
+        GameJournal::Count("RENDER", "terrain_frame_publication_failed", "source_or_frame_unavailable");
+    }
     // owned terrain via API5 retired; the renderer is embedded in stage 3
     if(renderer && renderer->GetD3D())
         renderer->GetD3D()->GetOwnedRenderer().TerrainFallback("owned_terrain_api5_retired_stage3");
