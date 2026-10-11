@@ -60,6 +60,17 @@ struct Consumer {
         return S_OK;
     }
 };
+struct OutputConsumer {
+    ID3D11DeviceContext* context;
+    ID3D11Texture2D* expected;
+    unsigned calls=0;
+    HRESULT result=S_OK;
+    static HRESULT visit(void* user,ID3D11DeviceContext* context,ID3D11Texture2D* texture) {
+        auto& self=*static_cast<OutputConsumer*>(user);++self.calls;
+        check(context==self.context && texture==self.expected);
+        return self.result;
+    }
+};
 void verifyPixels(ID3D11Device* device,ID3D11DeviceContext* context,Targets& target) {
     D3D11_TEXTURE2D_DESC d{}; target.color->GetDesc(&d);
     d.BindFlags=0; d.Usage=D3D11_USAGE_STAGING; d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
@@ -127,6 +138,24 @@ int main() try {
     check(serializedFrames==64 && failedFrames==0);
     verifyPixels(device.Get(),context.Get(),scene);
     verifyPixels(device.Get(),context.Get(),ui);
+    OutputConsumer output{context.Get(),ui.color.Get()};
+    const auto visitOutput=[&](ID3D11DeviceContext* c,ID3D11RenderTargetView* target) {
+        return owned::visit_embedded_output(device.Get(),c,target,&output,&OutputConsumer::visit);
+    };
+    // Output selection is independent of the currently bound world target.
+    context->OMSetRenderTargets(1,scene.rtv.GetAddressOf(),scene.dsv.Get());
+    check(visitOutput(context.Get(),ui.rtv.Get())==S_OK);
+    check(output.calls==1);
+    check(visitOutput(nullptr,ui.rtv.Get())==DXGI_ERROR_INVALID_CALL);
+    check(visitOutput(context.Get(),nullptr)==DXGI_ERROR_INVALID_CALL);
+    check(visitOutput(foreignContext.Get(),ui.rtv.Get())==E_INVALIDARG);
+    check(visitOutput(deferred.Get(),ui.rtv.Get())==E_INVALIDARG);
+    check(visitOutput(context.Get(),alien.rtv.Get())==E_INVALIDARG);
+    check(owned::visit_embedded_output(device.Get(),context.Get(),ui.rtv.Get(),nullptr,nullptr)==E_INVALIDARG);
+    check(output.calls==1);
+    output.result=E_ABORT;
+    check(visitOutput(context.Get(),ui.rtv.Get())==E_ABORT);
+    check(output.calls==2);
     ComPtr<ID3D11Texture2D> captured;
     bool usedBound=false,different=false;
     context->OMSetRenderTargets(1,scene.rtv.GetAddressOf(),nullptr);
