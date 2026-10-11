@@ -98,6 +98,11 @@ bool CEffectSpell::ExtendedStart(int nKind){
 		}
 		case SPELL_ID_LIGHTNINGDARK:
 		case SPELL_ID_LIGHTNINGLIGHT: {
+			if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+			{
+			    castPhase = CP_FINISH;
+			    break;
+			}
 			
 			
 			
@@ -111,7 +116,6 @@ bool CEffectSpell::ExtendedStart(int nKind){
 				color = 3;
 			CreateLightningToUnit(ptSrc, pTarget, pWho, GetShowPower(), /*nKind == SPELL_ID_CURSEMAGIC, */color);
 			CreateSound(FALSE, "magic\\lightning\\start.wav", GetCP(), CPlot3D(0, 0, 0));
-			CUnit* pUnit = (CUnit*)pWho; ptSrc = pUnit->GetUnitHeadPosition();
 			CreateLight(ptSrc, GetLightColor(), GetLightRadius(), CPlot3D(0, 0, 0));
 			InflictTargetedDamage();
 			nTimeLeft = 7;
@@ -198,6 +202,11 @@ switch(nKind){
 		case ModSpellIdentity::NativeTestArrow:
 		case SPELL_ID_FIREARROWDARK:
 		case SPELL_ID_FIREARROWLIGHT: {
+			if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+			{
+			    castPhase = CP_FINISH;
+			    break;
+			}
 			if (pEffect)
 			{
 				SetCP(pEffect->GetCP());
@@ -263,6 +272,11 @@ switch(nKind){
 		}
 		case SPELL_ID_ACIDRAYDARK: 
 		case SPELL_ID_ACIDRAYLIGHT: {
+			if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+			{
+			    castPhase = CP_FINISH;
+			    break;
+			}
 			if (pEffect)
 			{
 				SetCP(pEffect->GetCP());
