@@ -2903,7 +2903,10 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
             {
                 if (pSpell->IsOnTile())
                     cmd.nTargetID = -1;
-                switch (pSpell->GetSubtypeID() >> 16)
+                auto *animationMod = ModRuntime::Current();
+                if (animationMod && animationMod->CombatSetting("LoadSpellAnimationFromSlotsField"))
+                    cmd.castType = static_cast<ERPGMagicSubtypes>(pSpell->GetPrototype()->dwSlots);
+                else switch (pSpell->GetSubtypeID() >> 16)
                 {
                 case SPELL_ID_RICKMAGIC:
                     cmd.castType = RPGMST_LIGHTNING;
@@ -2913,7 +2916,6 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
                     break;
                 default:
                     cmd.castType = pSpell->GetMagicSubtype();
-                    if(auto*mod=ModRuntime::Current())if(mod->CombatSetting("LoadSpellAnimationFromSlotsField"))cmd.castType=static_cast<ERPGMagicSubtypes>(pSpell->GetPrototype()->dwSlots);
                     break;
                 }
             }
@@ -4439,6 +4441,10 @@ void CUnitServer::GetCastAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand
     nHit = 0;
     if (pEntry)
     {
+        if (auto *mod = ModRuntime::Current(); mod && mod->CombatSetting("AttackAnimSpeed") &&
+            !mod->CombatSetting("JMVAttacks"))
+            lpUnit->fpAnimationCoeff = float(pEntry->dwAnimationLength) / float(nLength);
+
         if (nLength > GetAnimationLength(pEntry->dwEntryIndex))
         {
             // if this is a levitating unit then it should continue previous animation (rotate)

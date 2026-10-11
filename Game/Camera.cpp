@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FrameDiagnostics.h"
 #include "ServerConsts.h"
 #include "ModRuntime.h"
+#include "ModPackage.h"
 #include "FileRegistry.h"
 #include "ModConfiguration.h"
 
@@ -941,14 +942,8 @@ void CCamera::ReapplyFalloutAfterMove()
 void CCamera::ApplyFalloutPlacement()
 {
     if (!IsFalloutModeActive() || !ModRuntime::Current()) return;
-    CFileRegistry reg;
-    float yaw = 45.0f, angle = 35.264f, multiplier = 2.0f;
-    const std::string path = ModRuntime::ConfigPath("config\\ai.reg");
-    if (reg.Open(path.c_str())) {
-        yaw = ModConfiguration::Float(reg,"Addon","JMVFalloutCameraYaw",yaw);
-        angle = ModConfiguration::Float(reg,"Addon","JMVFalloutCameraPitch",angle);
-        multiplier = ModConfiguration::Float(reg,"Addon","JMVFalloutCameraTelephotoMultiplier",multiplier);
-    }
+    const auto &settings = ModRuntime::Current()->FalloutCameraSettings();
+    float yaw = settings.yaw, angle = settings.pitch, multiplier = settings.telephoto;
     if (!(yaw == yaw)) yaw = 45.0f;
     if (!(angle == angle)) angle = 35.264f;
     if (!(multiplier == multiplier)) multiplier = 2.0f;

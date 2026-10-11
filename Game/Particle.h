@@ -95,7 +95,9 @@ public:
         bpBody01,
         bpBody02,
         bpBody03,
-        bpBody04
+        bpBody04,
+        bpRStaff,
+        bpLStaff
     };
 
 private:

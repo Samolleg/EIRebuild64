@@ -670,6 +670,9 @@ BOOL CUnit::UpdateFrom(EUpdateType tip)
                 dwFlags |= HLDAMAGE_BACKSTAB;
             if (rpgUserUnitStats.bFlags & RPGSTAT_ELECTRIC)
                 dwFlags |= HLDAMAGE_ELECTRIC;
+            if (rpgUserUnitStats.bFlags & RPGSTAT_CRIT) dwFlags |= HLDAMAGE_CRIT;
+            if (rpgUserUnitStats.bFlags & RPGSTAT_PARRY) dwFlags |= HLDAMAGE_PARRY;
+            if (rpgUserUnitStats.bFlags & RPGSTAT_BLOCK) dwFlags |= HLDAMAGE_BLOCK;
             GetMapObjectSpecific()->ReceiveDamage((fOldHP - fCurrHP) * rpgUserCommonStats.nMaxHP,
                                                   dwFlags);
             if (dwFlags & HLDAMAGE_ELECTRIC)
@@ -2158,25 +2161,42 @@ int CUnit::GetNumSFXDeathes() const
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::GetAnimationCoeff(const SADEntry *pADEntry)
 {
+    if (auto *mod = ModRuntime::Current(); mod && mod->CombatSetting("AttackAnimSpeed") &&
+        !mod->CombatSetting("JMVAttacks")) {
+        const DWORD action = pADEntry->dwFlags & ADB_ACTIONS;
+        if (action == ADB_ACTION_CAST || (action == ADB_ACTION_ATTACK &&
+            GetUnitSpecific()->WhoAmI() == HPC_UNITCLIENTSPECIFIC)) return fpAnimationCoeff;
+        if (action == ADB_ACTION_ATTACK) {
+            auto *server = static_cast<CUnitServer *>(GetUnitSpecific());
+            const int cycle = server->GetAttackCycleTime(UC_ATTACK, GetCurrentQWeapon());
+            return fpAnimationCoeff = cycle ? float(pADEntry->dwAnimationLength) / float(cycle) : 1.0f;
+        }
+    }
+    auto remember = [this](float result) {
+        auto *mod = ModRuntime::Current();
+        if (mod && mod->CombatSetting("AttackAnimSpeed") && !mod->CombatSetting("JMVAttacks"))
+            fpAnimationCoeff = result;
+        return result;
+    };
     // attack, cast, hit, death, cross, special
     if ((pADEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_ATTACK)
-        return fAnimationCoeffs[0];
+        return remember(fAnimationCoeffs[0]);
     else if ((pADEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_CAST)
-        return fAnimationCoeffs[1];
+        return remember(fAnimationCoeffs[1]);
     else if ((pADEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_SUFFER)
-        return fAnimationCoeffs[2];
+        return remember(fAnimationCoeffs[2]);
     else if ((pADEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_DEATH)
-        return fAnimationCoeffs[3];
+        return remember(fAnimationCoeffs[3]);
     else if ((pADEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_CROSS)
     {
         if (GetTypeID() == MOTID_HUMAN)
-            return theAIGeneralSettings.fpHumanCrossAnimationSpeed;
-        return fAnimationCoeffs[4];
+            return remember(theAIGeneralSettings.fpHumanCrossAnimationSpeed);
+        return remember(fAnimationCoeffs[4]);
     }
     else if ((pADEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_SPECIAL)
-        return fAnimationCoeffs[5];
+        return remember(fAnimationCoeffs[5]);
     else
-        return 1;
+        return remember(1);
     // return 10;
 }
 /////////////////////////////////////////////////////////////////////////////////////

@@ -210,6 +210,9 @@ public:
     void AttackParams(const SRPGUserUnitStats&, CUnit&, SAttackParams&);
     nlohmann::json CheckEconomy();
     nlohmann::json Describe();
+    const std::string& GameDebugFile() const { return gameDebugFile; }
+    struct FalloutSettings { float yaw=45.0f, pitch=35.264f, telephoto=2.0f; };
+    const FalloutSettings& FalloutCameraSettings() const { return falloutSettings; }
 private:
     friend bool InspectModConfigurationCommandLine(int&);
     bool ConfigureAddonSettings(CFileRegistry&);
@@ -226,6 +229,8 @@ private:
     ModSpellAddon::Profile spellAddon;
     bool forceTutorial=false;
     std::string chatHtmlFile;
+    std::string gameDebugFile;
+    FalloutSettings falloutSettings;
     float magicRandomLimit=-1.0f;
     bool saveInMod=true;
     bool singlePlayerAllowed=true,multiplayerAllowed=true;

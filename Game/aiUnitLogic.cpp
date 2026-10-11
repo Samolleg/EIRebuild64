@@ -1549,9 +1549,7 @@ int CUMFear::GetPower(CAIUnitLogic &logic)
         if (pEnemy)
         {
             // bow shooters run from enemies
-            const auto *modRuntime = ModRuntime::Current();
-            if ((!modRuntime || !modRuntime->CombatSetting("DisableRunaway")) &&
-                (retreatEligible || pUS->HasRangedAttack()) && pThis->GetAIClass() < 6 &&
+            if ((retreatEligible || pUS->HasRangedAttack()) && pThis->GetAIClass() < 6 &&
                 (retreatEligible || pUS->GetUnit()->GetQSpell(0) == 0) &&
                 pUS->GetRPGStats()->CanRun(false) == ECR_CAN_RUN &&
                 pUS->GetRPGStats()->GetMoveDamageModifier() > 0.6f)
