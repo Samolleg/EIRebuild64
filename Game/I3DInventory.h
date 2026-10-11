@@ -362,6 +362,7 @@ public:
 
     void SetHelp(int nHelpID);
     void SetSkill(SCampSkillMouseInfo *pSkillInfo);
+    void SetModSkill(SCampSkillMouseInfo *pSkillInfo);
 
     void SetItem(CItem *pItem);
     virtual BOOL Draw(CRenderer *pRend);
