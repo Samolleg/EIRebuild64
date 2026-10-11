@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Input.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DHandler.h"
@@ -176,7 +177,7 @@ void CI3DHandlerNewCamera::OnRButtonUp(UINT nFlags, CPoint point)
     theCursor.ResetIncrement();
     CPoint pt = theCursor.GetPos();
     theCursor.LockPos(false);
-    SetCursorPos(pt.x, pt.y);
+    OwnedRender::E3WriteCursor(pt.x, pt.y);
     SetProcessed();
 }
 /////////////////////////////////////////////////////////////////////////////////////

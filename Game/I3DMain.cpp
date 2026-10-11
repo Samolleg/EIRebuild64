@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Input.h"
 #include "GameJournal.h"
 #include <typeinfo>
 #include "WideScreen.h"
@@ -216,6 +217,7 @@ void CInterface3D::Init(CRenderer *pNewRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Fini()
 {
+    OwnedRender::E3RetireInterface();
     DestroyScreens();
 
     CStdioFile file;
@@ -308,6 +310,7 @@ void CInterface3D::Draw2D()
     if (!pScreens.empty())
     {
         pScreens.back()->Draw2D();
+        OwnedRender::E3HudBoundary();
         pScreens.back()->Draw2DTips();
     }
     m_pEffects->Draw2D();

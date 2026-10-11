@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Scale.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3041,7 +3042,7 @@ BOOL CWorldClient::Draw()
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
-                          NConsole::LandscapeDrawRadius());
+                          OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
         pTerrain->DrawBase(&theRenderer);
         pRend->FlushBuffers();
@@ -3067,7 +3068,7 @@ BOOL CWorldClient::Draw()
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
-                          NConsole::LandscapeDrawRadius());
+                          OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
         // flush previous renders
         pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
@@ -3410,7 +3411,7 @@ BOOL CWorldClient::Draw3DScene()
     if (pMoshka)
         pMoshka->SetTime(fpTime);
     // puck objects from the area map
-    const float fPickRadius = NConsole::ObjectsDrawRadius();
+    const float fPickRadius = OwnedRender::E3DrawRadius(NConsole::ObjectsDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight());
     std::list<CSmartPtr<CMapObject>> *pObjects = areaObjects.GetFirstList(
         Max(0.0f, Min(pTerrain->GetMaxX() - 1, ptObservationPosition.x - fPickRadius)),
         Max(0.0f, Min(pTerrain->GetMaxY() - 1, ptObservationPosition.y - fPickRadius)),
