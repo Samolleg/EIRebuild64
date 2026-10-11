@@ -219,6 +219,7 @@ void CModPackage::InitializeScript(){
  staticLookups=ModStaticLookup::State{};
  scalarManaBonus=false;
  manaBonusCache.clear();
+ spellAddonManaBonusCache.clear();
  Stack stack(state);
  ModLua::Register(state);
  if(!perkHostLifetime)perkHostLifetime=std::make_shared<ModLua::PerkHostLifetime>();
@@ -436,6 +437,33 @@ bool CModPackage::CollectArmor(CUnit&unit,ArmorModifiers&mods){
  const char*material=theItemDatabase.materials.GetEntry(a->GetMaterial())->szName;const char*shape=theItemDatabase.armors.GetEntry(a->GetShape())->szName;
  mods.speed+=value("MaterialProp",material,9);mods.sight+=value("MaterialProp",material,13)+value("ArmorProp",shape,5);mods.hearing+=value("MaterialProp",material,14)+value("ArmorProp",shape,6);
  }return has;
+}
+bool CModPackage::NpcArmorPercepts(CUnit&unit,CUnit*fallback,float&sight,float&hearing){
+ sight=hearing=0;
+ if(!npcMaterialEffects || unit.GetOwner())return false;
+ // Opening the information panel must not reset combat/lifecycle state.
+ const void*world=theWorldServer.GetSpecificManager();
+ const std::string zone=(LPCSTR)theWorldServer.szMobFileName;
+ const int segment=theWorldServer.GetSegmentTimeCounter();
+ if(world!=npcArmorViewWorld||zone!=npcArmorViewZone||(npcArmorViewSegment>=0&&segment<npcArmorViewSegment))npcArmorViewCache.clear();
+ npcArmorViewWorld=world;npcArmorViewZone=zone;npcArmorViewSegment=segment;
+ CUnit*candidates[]={&unit,theWorldServer.GetMapObjectManager()?theWorldServer.GetUnit(unit.GetID()):nullptr,
+  fallback,theWorld.GetMapObjectManager()?theWorld.GetUnit(unit.GetID()):nullptr};
+ for(int i=0;i<4;++i){auto*c=candidates[i];if(!c||c->GetID()!=unit.GetID()||c->GetSubtypeID()!=unit.GetSubtypeID())continue;
+  bool duplicate=false;for(int j=0;j<i;++j)if(candidates[j]==c)duplicate=true;if(duplicate)continue;
+  ArmorModifiers found;if(!CollectArmor(*c,found))continue;
+  npcArmorViewCache[unit.GetID()]=found;sight=found.sight;hearing=found.hearing;return true;
+ }
+ // Reuse a current runtime observation before the panel's own fallback.
+ if(world==cacheWorld&&zone==cacheZone&&!(cacheSegment>=0&&segment<cacheSegment)){
+  auto live=npcArmorCache.find(unit.GetID());
+  if(live!=npcArmorCache.end()&&live->second.subtype==unit.GetSubtypeID())npcArmorViewCache[unit.GetID()]=live->second;
+ }
+ auto it=npcArmorViewCache.find(unit.GetID());if(it!=npcArmorViewCache.end()){
+  if(it->second.subtype==unit.GetSubtypeID()){sight=it->second.sight;hearing=it->second.hearing;return true;}
+  npcArmorViewCache.erase(it);
+ }
+ return false;
 }
 bool CModPackage::RecalcUnitStats(SRPGUnitStats&stats,SRPGCommonStats&common,CUnit&unit){
  auto statsFailure=[&](const char* reason,const SRPGUnitStats& s,const SRPGCommonStats& c){char message[768];
@@ -732,6 +760,11 @@ float CModPackage::ScalarManaBonus(float intelligence){
 float CModPackage::ManaBonus(const SRPGUnitStats&stats){if(scalarManaBonus)return ScalarManaBonus(stats.psIntelligence.fpEffectiveValue);return StatsNumber("GetManaBonusOnServer",stats);}
 float CModPackage::SpellAddonManaBonus(const SRPGUnitStats&stats){
  CallbackFrame frame(state);SRPGUnitStats snapshot=stats;
+ if(!scriptInitialized)throw std::runtime_error("Mod script has not been initialized");
+ const float intelligence=stats.psIntelligence.fpEffectiveValue;
+ const bool cacheable=scalarManaBonus && std::isfinite(intelligence);
+ const std::string key(reinterpret_cast<const char*>(&intelligence),sizeof(intelligence));
+ if(cacheable){auto it=spellAddonManaBonusCache.find(key);if(it!=spellAddonManaBonusCache.end())return it->second;}
  const char*callback=scalarManaBonus?"GetManaBonusFromIntelligence":"GetManaBonusOnServer";
  BeginCallback(callback);
  if(scalarManaBonus)lua_pushnumber(state,stats.psIntelligence.fpEffectiveValue);
@@ -739,9 +772,11 @@ float CModPackage::SpellAddonManaBonus(const SRPGUnitStats&stats){
  Call(1,1);
  if(lua_type(state,-1)!=LUA_TNUMBER)
   throw std::runtime_error(std::string(callback)+": expected numeric result");
- // ASI's FCOMP treats an unordered product as not greater. Keep IEEE values
- // on this path alone, without reading or writing the strict R01 cache.
- return static_cast<float>(lua_tonumber(state,-1));
+ // Keep IEEE results separate from the strict R01 cache. Only successful
+ // scalar calls with finite intelligence are cached, as in the addon reader.
+ const float value=static_cast<float>(lua_tonumber(state,-1));
+ if(cacheable){if(spellAddonManaBonusCache.size()>=4096)spellAddonManaBonusCache.clear();spellAddonManaBonusCache[key]=value;}
+ return value;
 }
 float CModPackage::VampSpellValue(const char*prototype,int column){
  CallbackFrame frame(state);
@@ -1391,9 +1426,10 @@ Json CheckCampStatsG3(const std::string& directory){
 #include "ModCampDescriptionsCheck.inl"
 #include "ModIdleTooltipsCheck.inl"
 #include "ModAssortmentCheck.inl"
-std::string CModPackage::ProgressionRequirementCode(const char* code,int field){
+std::optional<std::string> CModPackage::ProgressionRequirementCode(const char* code,int field){
  CallbackFrame frame(state);BeginCallback("GetPerkRequiredJmv");lua_pushstring(state,code);lua_pushinteger(state,field);Call(2,1);
- const char* text=lua_tostring(state,-1);std::string result=text?text:"";lua_pop(state,1);return result;
+ const char* text=lua_tostring(state,-1);
+ return text?std::optional<std::string>(text):std::nullopt;
 }
 namespace {
 Json CheckDownstreamOwnerG3(){

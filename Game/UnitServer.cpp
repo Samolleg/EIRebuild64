@@ -2479,6 +2479,7 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
         !(mod->SkillConfig(skill,manaSkill));
     if(!spellAddonMana&&!HasAISpellMana(cmd.nQSpellNum))return false;
     if(cmd.cmd==UC_CASTPOINT&&mod&&mod->PointSkill(skill)){ModSkills::Config config;if(mod->SkillConfig(skill,config))return CanRequestPointSkill(cmd.nQSpellNum,cmd.ptTarget);}
+    bool nativeResult=true;
     CSpell *pSpell;
     int nQSpellNum = cmd.nQSpellNum;
     // when updating this code don`t forget about unit::checkiscastpossible
@@ -2512,7 +2513,7 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
             if (mod && mod->SpellAddon().Feature29() == 1 &&
                 !IsIDofPersonage(lpUnit->GetID()))
                 lpUnit->SetFlag(UNIT_FEEBLED);
-            return false;
+            nativeResult=false;
         }
     }
     // LS applies an additional ordered mana check after the native ASI predicate.
@@ -2540,7 +2541,7 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
             ptTarget *= pSpell->GetRange() / fabs( ptTarget );
             ptTarget = lpUnit->GetCP() + ptTarget;
     }*/
-    return true;
+    return nativeResult;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // calc distance for action for command
