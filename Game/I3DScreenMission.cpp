@@ -3476,27 +3476,41 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
             }
             if (pTxtMng->GetText(CString("perk ") + szSkill))
                 pTxtMng->GetLine(szName);
-            szSkill.Format("%s %d\n", szStrings[0], pStats->cManualSkills[i]);
+            if (ModRuntime::Current())
+                szSkill.Format("%s %.0f\n", szStrings[0], ModHudAssignment::ManualSkill(*pStats, i));
+            else
+                szSkill.Format("%s %d\n", szStrings[0], pStats->cManualSkills[i]);
             if (pTxtMng->GetText("tip 10511"))
                 pTxtMng->GetUntilNextCommand(szDesc);
             szName = szName + "\n" + szSkill + szDesc;
             GetArea(nSkills - 1)->SetToolTip(szName, 1, KA_SKILL_SCIENCE);
         }
-        if (bIsSomeone && pUnit->GetOwner() && theWorld.GetPlayer() &&
-            pUnit->GetOwner() == theWorld.GetPlayer()->GetPlayer() &&
-            ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCamp"))
+    }
+    CUnit* goCampContext = pUnit;
+    if (!goCampContext && bIsSomeone && pScreen)
+    {
+        int count = 0, index = -1;
+        goCampContext = pScreen->GetSelection(count, index);
+        if (count < 2) goCampContext = nullptr;
+    }
+    if (goCampContext && goCampContext->GetOwner() && theWorld.GetPlayer() &&
+        goCampContext->GetOwner() == theWorld.GetPlayer()->GetPlayer() &&
+        ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCamp"))
+    {
+        const bool available = theWorldServer.CanBeginFieldCamp();
+        AddSkill("initqi1item", available ? "jmv_gocamp" : "jmv_gocamp_disabled", -2);
+        fieldCampButtonAvailability = available ? 1 : 0;
+        fieldCampButtonLastUpdate = GetTickCount();
+        CTextManager* text = theWorld.GetTextManager();
+        CString goCampToolTip;
+        if (text->GetText("SPELL jmv_gocamp"))
         {
-            AddSkill("initqi1item", "jmv_gocamp", -2);
-            CString goCampToolTip;
-            if (pTxtMng->GetText("SPELL jmv_gocamp"))
-            {
-                pTxtMng->GetUntilNextCommand(goCampToolTip);
-                goCampToolTip.TrimRight("\r\n");
-                pTxtMng->CloseText();
-            }
-            if (!goCampToolTip.IsEmpty())
-                GetArea(nSkills - 1)->SetToolTip(goCampToolTip, 1);
+            text->GetUntilNextCommand(goCampToolTip);
+            goCampToolTip.TrimRight("\r\n");
         }
+        else goCampToolTip = "Camp";
+        text->CloseText();
+        GetArea(nSkills - 1)->SetToolTip(goCampToolTip, 1);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////

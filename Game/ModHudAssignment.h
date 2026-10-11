@@ -2,6 +2,15 @@
 #include "ItemDatabase.h"
 
 namespace ModHudAssignment {
+// Display the same effective manual skill as addon, without changing mechanics.
+template<class Stats> inline float ManualSkill(const Stats& stats,int skill){
+    switch(skill){
+    case RPGMSKL_SCIENCE:case RPGMSKL_STEALING:
+        return stats.cManualSkills[skill]+stats.GetDexterityBonus();
+    case RPGMSKL_TAME:return stats.cManualSkills[skill]+stats.GetIntelligenceBonus();
+    default:return 0;
+    }
+}
 // Dedicated mission HUD model names from native GetI3DFigureNameW.
 inline const char* WeaponPrefix(int type){
     switch(type){
