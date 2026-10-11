@@ -1482,8 +1482,9 @@ void CEffectSpell::InflictDamage(SRPGAttackPortion &ap, CUnit *pTarget)
 {
     const auto* mod = ModRuntime::Current();
     const int filterMode = mod ? mod->SpellAddon().Feature36() : 0;
-    // The ASI applies f36 in modes 1 and 2; other modes keep the null-caster bypass.
-    if ((pWho.IsEmpty() && filterMode != 1 && filterMode != 2) ||
+    // LS replaces this body under JMVParticles; the ASI f36 patch is then unreachable.
+    const bool lsDamage = mod && mod->CombatSetting("JMVParticles");
+    if ((pWho.IsEmpty() && (lsDamage || (filterMode != 1 && filterMode != 2))) ||
         spell.IsValidTarget(pWho, pTarget))
     {
         if (CheckFlag(DW_SPELL_HIDE_CASTER))
