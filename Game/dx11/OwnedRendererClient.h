@@ -1,6 +1,7 @@
 #pragma once
 #include "../../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
 #include "RenderJournalState.h"
+#include "../../external/owned-renderer/Source/widescreen.h"
 #include <SpriteBatch.h>
 #include <wrl/client.h>
 #include <string>
@@ -321,6 +322,7 @@ class OwnedSpriteBatch {
         RECT destination, source;
         bool has_source;
         unsigned flags;
+        owned::widescreen::HudComposition composition;
     };
     OwnedRendererClient& renderer;
     std::vector<DrawCommand> pending;
@@ -353,6 +355,7 @@ public:
             command.destination = destination;
             if (source) { command.source = *source; command.has_source = true; }
             command.flags = flags;
+            command.composition = owned::widescreen::hud_blit;
             pending.push_back(std::move(command));
         }
     }
@@ -362,7 +365,12 @@ public:
         // Clear retained images even if a draw fails. No stale frame replay.
         std::vector<DrawCommand> commands;
         commands.swap(pending);
+        struct RestoreComposition {
+            owned::widescreen::HudComposition previous=owned::widescreen::hud_blit;
+            ~RestoreComposition(){owned::widescreen::hud_blit=previous;}
+        } restore;
         for (const auto& command : commands) {
+            owned::widescreen::hud_blit=command.composition;
             const HRESULT result = renderer.DrawUi(command.image.Get(), command.destination,
                 command.has_source ? &command.source : nullptr, command.flags);
             if (FAILED(result)) throw result;

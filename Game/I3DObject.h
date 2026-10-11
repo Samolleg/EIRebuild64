@@ -61,6 +61,7 @@ enum EBlitStyleFlag
 class CI3DSurface
 {
     friend struct E4CampAccess;
+    friend struct E3HudAccess;
 private:
     CInterface3D *pI3D;
     HDC hDC = nullptr; // used when locked

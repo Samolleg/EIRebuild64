@@ -3,6 +3,7 @@
 #include "E3Input.h"
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
+#include "../I3DScrollText.h"
 #include "../Unit.h"
 #include "../Item.h"
 #include "../Camera.h"
@@ -14,10 +15,49 @@ namespace {
 std::array<const CI3DObject*,10> inputOwners{};
 std::array<int,8> itemFigures{};
 int cameraSlot=-1;
+const CI3DObject* messageTextOwner=nullptr;
+thread_local CI3DSurface* drawingSurface=nullptr;
 }
 // This adapter only copies facts owned by the active mission. Slot geometry,
 // header docking, scaling and preview layout remain in the renderer library.
 struct E3HudAccess {
+    static bool Draw2D(CI3DObject* object) {
+        if(!object || !OwnedRender::E3HudRendererAttached())return false;
+        const bool text=object==messageTextOwner;
+        const int index=text?7:Panel(object);if(index<0)return false;
+        if(!object->bVisible)return true;
+        struct Restore {
+            owned::widescreen::HudComposition previous=owned::widescreen::hud_blit;
+            CI3DSurface* surface=drawingSurface;
+            ~Restore(){owned::widescreen::hud_blit=previous;drawingSurface=surface;}
+        } restore;
+        auto& context=owned::embedded_hud_layout();
+        for(int i=0;i<object->surfaces.GetSize();++i) {
+            auto* surface=object->surfaces[i];if(!surface || !surface->IsVisible())continue;
+            owned::widescreen::HudComposition composition;
+            const bool visible=text?context.message_text_composition(surface->rect,object->rect,composition):
+                context.surface_composition(owned::HudPanel(index),i,composition);
+            if(!visible)continue;
+            owned::widescreen::hud_blit=composition;drawingSurface=surface;
+            surface->Draw();
+        }
+        return true;
+    }
+    static bool Blit(CI3DSurface* surface) {
+        if(!surface || surface!=drawingSurface || !OwnedRender::E3HudRendererAttached())return false;
+        if(!surface->pSurface || !surface->IsVisible())return true;
+        // Clip only after the renderer has applied the HUD transform. A native
+        // rectangle outside the canvas can move into view after relocation.
+        CRect destination=surface->rect;
+        CRect source(0,0,destination.Width(),destination.Height());
+        DDBLTFX fx{};fx.dwSize=sizeof(fx);
+        fx.ddckSrcColorkey.dwColorSpaceHighValue=fx.ddckSrcColorkey.dwColorSpaceLowValue=surface->colorKey;
+        const bool keyed=surface->HasFlag(BS_COLOR_KEY)!=FALSE;
+        const HRESULT result=surface->pSurface->BltToRenderSurface(destination,
+            surface->HasFlag(BS_STRETCH)?nullptr:&source,DDBLT_ASYNC|DDBLT_WAIT|(keyed?DDBLT_KEYSRCOVERRIDE:0),keyed?&fx:nullptr);
+        IfFailedThrowHR(result,"HUD surface blit");
+        return true;
+    }
     static bool Draw(CI3DObject* object,CRenderer* renderer) {
         const int index=Panel(object);if(index<0)return false;
         if(!object->bVisible)return true;
@@ -151,6 +191,7 @@ struct E3HudAccess {
     }
     static void Publish(const CI3DScreenMission* mission,unsigned width,unsigned height) {
         inputOwners={};
+        messageTextOwner=nullptr;
         itemFigures.fill(-1);cameraSlot=-1;
         owned::HudLayoutFrame frame;
         // Current host ingress is full-width, unscaled placed space. Do not
@@ -158,6 +199,7 @@ struct E3HudAccess {
         frame.layout=owned::widescreen::make_layout(float(width),float(height));
         frame.active=mission && width && height;
         if(frame.active) {
+            messageTextOwner=mission->pScrollText;
             inputOwners={mission->pSpells,mission->pSkills,mission->pMap,mission->pInfo,mission->pFaces,
                 mission->pWeapons,mission->pItems,mission->pOutput,mission->pCommands,mission->pClock};
             auto& p=frame.panels;
@@ -194,6 +236,8 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+bool E3HudDraw2D(CI3DObject* object) {return E3HudAccess::Draw2D(object);}
+bool E3HudBlit(CI3DSurface* surface) {return E3HudAccess::Blit(surface);}
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer) {return E3HudAccess::Draw(object,renderer);}
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept {return E3HudAccess::Hit(object,pixel);}
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept {return E3HudAccess::Inside(object,pixel,inside);}
@@ -201,6 +245,6 @@ bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) 
 bool E3HudNativePoint(CI3DObject* object,unsigned area,POINT pixel,POINT& native) noexcept {return E3HudAccess::NativePoint(object,area,pixel,native);}
 void E3PublishHud(const CI3DScreenMission* mission,unsigned width,unsigned height) noexcept {
     try { E3HudAccess::Publish(mission,width,height); }
-    catch(const std::bad_alloc&) { inputOwners={};owned::embedded_hud_layout().retire(); }
+    catch(const std::bad_alloc&) { inputOwners={};messageTextOwner=nullptr;owned::embedded_hud_layout().retire(); }
 }
 }

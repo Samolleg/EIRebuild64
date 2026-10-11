@@ -405,6 +405,7 @@ void CI3DSurface::MemoryBackup(BOOL bShow)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DSurface::Draw()
 {
+    if (OwnedRender::E3HudBlit(this)) return;
     if (E4CampAccess::Blit(this)) return;
 #ifndef NOBLIT
     if (!pSurface || !HasFlag(BS_VISIBLE))
@@ -707,6 +708,7 @@ void CI3DObject::DrawTips(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObject::Draw2D()
 {
+    if (OwnedRender::E3HudDraw2D(this)) return;
     if (E4CampAccess::Draw2D(this)) return;
     OwnedRender::E4::Scope campScope(E4CampAccess::RoleOf(this));
     for (int k = 0; k < surfaces.GetSize(); k++)

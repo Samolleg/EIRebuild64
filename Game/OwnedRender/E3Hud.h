@@ -2,9 +2,12 @@
 #include <windows.h>
 class CI3DScreenMission;
 class CI3DObject;
+class CI3DSurface;
 class CRenderer;
 namespace OwnedRender {
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer);
+bool E3HudDraw2D(CI3DObject* object);
+bool E3HudBlit(CI3DSurface* surface);
 // -2 means an unrelated/non-owned object, -1 means a handled miss.
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept;
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept;
