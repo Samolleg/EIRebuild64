@@ -9,6 +9,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Item.h"
 #include "ItemManager.h"
 #include "SpellManager.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
+#include "ModItemUiPolicy.h"
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CMultipleResource::OpenResource(LPCSTR pszFileName, BOOL bWriteAccess)
 {
@@ -665,6 +668,23 @@ BOOL CTextManager::GetItemNameAndDesc(CItem *pItem, CString &szName, CString &sz
     }
     if (pszType)
         GetSystemString(pszType, szType);
+    if (auto* mod = ModRuntime::Current(); mod && tid == ITID_ITEM_SPELL)
+    {
+        CSpell* spell = pItem->GetSpell(0);
+        const char* code = spell && spell->GetPrototype()
+            ? LPCSTR(spell->GetPrototype()->szCodeName) : nullptr;
+        const char* name = ModItemUiPolicy::WeaponSkillName(code);
+        ModSkills::Config config;
+        if (name && mod->SkillConfig(spell, config))
+        {
+            if (!_stricmp(code, "test") && GetText("spell powerhit"))
+            {
+                GetLine(szName);
+                GetUntilNextCommand(szDesc);
+            }
+            szName = name;
+        }
+    }
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
