@@ -1,4 +1,5 @@
 #include "E1Terrain.h"
+#include "E1TerrainState.h"
 #include "E1World.h"
 #include "E1Surface.h"
 #include "world_mist_grid.h"
@@ -302,6 +303,58 @@ int wmain(int argc, wchar_t** argv) try {
         // resolver, not the map's texture art or an on-screen game frame.
         std::fill(atlases.begin(), atlases.end(), surface.Id());
         E1PublishTerrainAtlases(&owner, atlases);
+        // A prepared mesh is not a renderable command until the actual pass
+        // publishes its material. In particular vertex alpha must not become
+        // texture alpha merely because a later UI pass changed the state.
+        check(!E1PrepareTerrainCommand(false, 0, native));
+        std::map<int,DWORD> renderStates{{D3DRENDERSTATE_ALPHABLENDENABLE, TRUE},
+            {D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA},
+            {D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA},
+            {D3DRENDERSTATE_ALPHAREF, 173}, {D3DRENDERSTATE_SPECULARENABLE, TRUE},
+            {D3DRENDERSTATE_CULLMODE, D3DCULL_CW}};
+        const auto statesBefore = renderStates;
+        auto baseMaterial = E1TerrainMaterialState(renderStates, 0);
+        auto waterMaterial = E1TerrainMaterialState(renderStates, 2);
+        check(renderStates == statesBefore);
+        check(baseMaterial.alpha_op == D3DTOP_SELECTARG1 && waterMaterial.alpha_op == D3DTOP_SELECTARG2);
+        check(E1TerrainMaterialState(renderStates, 1).alpha_op == D3DTOP_MODULATE);
+        check(!E1TerrainMaterialState(renderStates, 3).enabled);
+        check(baseMaterial.alpha_ref == 173 && baseMaterial.specular_enable && baseMaterial.cull_mode == D3DCULL_CW);
+        check(!E1PublishTerrainMaterial(&owner, false, baseMaterial));
+        for (auto* material : {&baseMaterial, &waterMaterial}) {
+            material->replay_frame_state = true;
+            material->captured_viewport = {13, 17, 640, 480};
+            material->captured_depth_range = {.2f, .9f};
+            material->captured_fog_enable = TRUE;
+            material->captured_fog_color = 0x173951u;
+        }
+        check(E1PublishTerrainMaterial(&owner, false, baseMaterial));
+        check(E1PublishTerrainMaterial(&owner, true, waterMaterial));
+        check(E1PrepareTerrainCommand(false, 0, native));
+        auto heldState = native.view.owned_fixed_state;
+        check(heldState.enabled && heldState.replay_frame_state && !heldState.alpha_blend_enable &&
+            heldState.source_blend == D3DBLEND_ONE && heldState.destination_blend == D3DBLEND_ZERO);
+        check(heldState.captured_viewport == baseMaterial.captured_viewport &&
+            heldState.captured_depth_range == baseMaterial.captured_depth_range &&
+            heldState.captured_fog_color == baseMaterial.captured_fog_color && heldState.captured_fog_enable);
+        E1TerrainCommandSource waterCommand;
+        check(E1PrepareTerrainCommand(true, 0, waterCommand));
+        check(waterCommand.view.owned_fixed_state.alpha_blend_enable &&
+            waterCommand.view.owned_fixed_state.source_blend == D3DBLEND_SRCALPHA &&
+            waterCommand.view.owned_fixed_state.alpha_op == D3DTOP_SELECTARG2);
+        auto badMaterial = waterMaterial; badMaterial.captured_depth_range[1] = -1.f;
+        check(!E1PublishTerrainMaterial(&owner, true, badMaterial));
+        check(!E1PrepareTerrainCommand(true, 0, waterCommand));
+        check(E1PrepareTerrainCommand(false, 0, native)); // independent base state
+        check(!E1PublishTerrainMaterial(&foreign, false, baseMaterial));
+        check(!E1PrepareTerrainCommand(false, 0, native));
+        check(E1PublishTerrainMaterial(&owner, false, baseMaterial));
+        check(E1PublishTerrainMaterial(&owner, true, waterMaterial));
+        check(E1PublishTerrainFrame(&owner, geometry, matrix));
+        check(E1PublishTerrainSectors(&owner, phaseRows) && E1PublishTerrainView(&owner, view));
+        check(!E1PrepareTerrainCommand(false, 0, native) && !E1PrepareTerrainCommand(true, 0, waterCommand));
+        check(E1PublishTerrainMaterial(&owner, false, baseMaterial));
+        check(E1PublishTerrainMaterial(&owner, true, waterMaterial));
         check(E1PrepareTerrainCommand(false, 0, native));
         check(native.view.decode && native.view.decode_context == &native.context && native.atlas == updated);
         check(native.view.owned_texture.identity == updated->id && native.view.owned_texture.generation == updated->generation);
@@ -356,6 +409,16 @@ int wmain(int argc, wchar_t** argv) try {
             }
         }
         check(allTextures && baseCount && transparentCount);
+        check(E1PrepareTerrainCommand(false, 0, native));
+        const auto heldMaterial = native.view.owned_fixed_state;
+        baseMaterial.captured_fog_color = 0xabcdef;
+        baseMaterial.captured_viewport = {0, 0, 1920, 1080};
+        check(E1PublishTerrainMaterial(&owner, false, baseMaterial));
+        check(native.view.owned_fixed_state.captured_fog_color == heldMaterial.captured_fog_color &&
+            native.view.owned_fixed_state.captured_viewport == heldMaterial.captured_viewport);
+        E1TerrainCommandSource nextState;
+        check(E1PrepareTerrainCommand(false, 0, nextState));
+        check(nextState.view.owned_fixed_state.captured_viewport == baseMaterial.captured_viewport);
         std::printf("Atlas descriptor/resolver: base=%zu transparent=%zu\n", baseCount, transparentCount);
         // Camera-visible nonresident sectors need phases only for animated materials.
         check(E1PublishTerrainSectors(&owner, {}));

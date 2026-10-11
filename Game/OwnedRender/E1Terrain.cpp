@@ -14,12 +14,14 @@ owned::WorldMistGridCache mist;
 owned::OwnedTerrainFramePacket view;
 owned::OwnedTerrainPreparedResources prepared;
 bool viewReady = false, terrainLod = true;
+std::array<owned::NativeOwnedFixedState,2> materials{};
+std::array<std::uint64_t,2> materialGeometry{};
 std::vector<std::shared_ptr<const owned::OwnedTerrainDynamicSector>> sectors;
 std::uint64_t sectorFrame = 0, phaseSerial = 0;
 void clear() noexcept {
     sourceOwner = nullptr; worldIdentity = sourceRevision = terrainFrame = 0;
     source = {}; transform = {}; mist.retire(); atlasIds.clear(); view = {}; prepared = {}; viewReady = false;
-    sectors.clear(); sectorFrame = 0;
+    sectors.clear(); sectorFrame = 0; materials = {}; materialGeometry = {};
 }
 bool current() noexcept {
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
@@ -133,11 +135,26 @@ bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInput
 const owned::OwnedTerrainFramePacket* E1TerrainView() noexcept {
     return viewReady && current() ? &view : nullptr;
 }
+bool E1PublishTerrainMaterial(const void* owner, bool transparent,
+    const owned::NativeOwnedFixedState& state) noexcept {
+    const unsigned pass = transparent ? 1u : 0u;
+    materialGeometry[pass] = 0; materials[pass] = {};
+    if (!owner || owner != sourceOwner || !current() || !source.geometry || !state.enabled ||
+        !state.replay_frame_state || !state.captured_viewport[2] || !state.captured_viewport[3] ||
+        !std::isfinite(state.captured_depth_range[0]) || !std::isfinite(state.captured_depth_range[1]) ||
+        state.captured_depth_range[0] < 0.f || state.captured_depth_range[1] > 1.f ||
+        state.captured_depth_range[0] > state.captured_depth_range[1]) return false;
+    materials[pass] = transparent ? state : owned::owned_terrain_base_material(state);
+    materialGeometry[pass] = source.geometry->revision;
+    return true;
+}
 bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept try {
     output.view = {}; output.context = {};
     output.terrain.reset(); output.geometry.reset(); output.dynamic.reset(); output.atlas.reset();
     output.prepared.reset();
-    if (!E1TerrainView() || !source.geometry) return false;
+    const unsigned pass = transparent ? 1u : 0u;
+    if (!E1TerrainView() || !source.geometry ||
+        materialGeometry[pass] != source.geometry->revision || !materials[pass].enabled) return false;
     const auto& commands = transparent ? view.transparent_commands : view.base_commands;
     if (index >= commands.size()) return false;
     const auto& command = commands[index];
@@ -159,6 +176,7 @@ bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainComma
         return false;
     }
     output.view = *record;
+    output.view.owned_fixed_state = materials[pass];
     record->decode_context = nullptr; record->terrain_animation_phases = nullptr;
     record->terrain_phase_values = nullptr; record->owned_texture = {};
     output.context.borrowed_view = nullptr;
@@ -180,7 +198,7 @@ bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainComma
 }
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
     const std::array<float,16>& placement) noexcept try {
-    terrainFrame = 0; sectorFrame = 0; viewReady = false;
+    terrainFrame = 0; sectorFrame = 0; viewReady = false; materials = {}; materialGeometry = {};
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
     if (!owner || owner != sourceOwner || !source.terrain || !frame.valid || !frame.scene_frame_serial ||
         E1WorldGeneration() != worldIdentity ||

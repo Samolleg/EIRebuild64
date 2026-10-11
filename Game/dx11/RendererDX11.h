@@ -17,6 +17,7 @@
 // #define DRAWABLE_BACKBUFFER
 namespace ModWorldBackground { struct FrameSnapshot; }
 namespace WorldBackground { struct VisualEnvironment; }
+namespace owned { struct NativeOwnedFixedState; }
 class ModWorldBackgroundDX11;
 class ModShadowDX11;
 class UIColorKeyBlit;
@@ -102,6 +103,7 @@ public:
     void ClearZBuffer(DWORD value);
     bool SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet);
     bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
+    owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
     int DrawFigurePrimitive(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
                DWORD dwFlags);
     int DrawParticles(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,

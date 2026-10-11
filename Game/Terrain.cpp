@@ -358,6 +358,13 @@ BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo)
     }
     CBatchers *batchers = pRend->GetD3D()->GetBatchers();
     theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
+    // Capture after the source pass enables terrain specular/fog, before a
+    // later object/UI pass changes the device. Base and transparent are distinct.
+    if ((nMatFrom == 0 && nMapTo == nTextures + N_NUMBER_OF_LONG_TEXTURES - 1) ||
+        (nMatFrom == nTextures + N_NUMBER_OF_LONG_TEXTURES &&
+         nMapTo == (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1))
+        OwnedRender::E1PublishTerrainMaterial(this, nMatFrom != 0,
+            pRend->GetD3D()->CaptureOwnedTerrainMaterial());
     // Draw sectors by materials
     for (int i = nMatFrom; i <= nMapTo; i++)
     {

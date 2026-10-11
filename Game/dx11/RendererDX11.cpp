@@ -12,6 +12,8 @@
 #include "ModShadowDX11.h"
 #include "ModWorldBackgroundDX11.h"
 #include "UIColorKeyBlit.h"
+#include "../OwnedRender/E1TerrainState.h"
+#include "../OwnedRender/E1Terrain.h"
 
 #include "batchers.h"
 #include "Utils.h"
@@ -128,6 +130,26 @@ int CDX11::DrawSimplePrimitive(LPVOID pVertices, DWORD dwVertexCount,
                                 dwIndexCount);
 }
 
+
+owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
+{
+    auto state = OwnedRender::E1TerrainMaterialState(fake_dx7.render_state,
+        GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode);
+    D3D11_VIEWPORT viewport{}; UINT count = 1;
+    deviceContext->RSGetViewports(&count, &viewport);
+    if (count != 1 || viewport.TopLeftX < 0 || viewport.TopLeftY < 0 ||
+        viewport.Width < 1 || viewport.Height < 1) return {};
+    state.replay_frame_state = true;
+    state.captured_viewport = {UINT(viewport.TopLeftX), UINT(viewport.TopLeftY),
+        UINT(viewport.Width), UINT(viewport.Height)};
+    state.captured_depth_range = {viewport.MinDepth, viewport.MaxDepth};
+    const auto fog = owned::bridge_world_fog_snapshot();
+    state.captured_fog_enable = fog.valid && fog.enabled;
+    const auto& color = GetConstantBuffers()->cb_ps_pixelshader.data.fogColor;
+    const auto byte = [](float v) { return DWORD((std::max)(0.f, (std::min)(1.f, v)) * 255.f + .5f); };
+    state.captured_fog_color = (byte(color.x) << 16) | (byte(color.y) << 8) | byte(color.z);
+    return state;
+}
 
 bool CDX11::SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet)
 {

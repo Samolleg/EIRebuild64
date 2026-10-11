@@ -34,6 +34,9 @@ struct E1TerrainCommandSource {
     E1TerrainCommandSource(const E1TerrainCommandSource&) = delete;
     E1TerrainCommandSource& operator=(const E1TerrainCommandSource&) = delete;
 };
+// Completed pass state is invalidated by every geometry/frame publication.
+bool E1PublishTerrainMaterial(const void* owner, bool transparent,
+    const owned::NativeOwnedFixedState& state) noexcept;
 bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept;
 // The host publishes camera/visibility facts; c56 chooses LOD and commands.
 bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInputs& values) noexcept;
