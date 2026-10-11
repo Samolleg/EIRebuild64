@@ -211,6 +211,7 @@ void CAnimationNode::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAnimationNode::Clear()
 {
+    ownedBone.Clear();
     // names
     szName = "none";
     szParentName = "none";
@@ -506,6 +507,7 @@ void CAnimationSystem2::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAnimationSystem2::DeleteNodes()
 {
+    ownedSkeleton.Clear();
     POSITION pos = nodes.GetHeadPosition();
     CAnimationNode *lpNode = NULL;
     while (pos)
@@ -518,6 +520,7 @@ void CAnimationSystem2::DeleteNodes()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAnimationSystem2::Clear()
 {
+    ownedSkeleton.Clear();
     SwitchCallback = 0;
     lpObject3D = NULL;
     lpHeadNode = NULL;
@@ -724,6 +727,20 @@ BOOL CAnimationSystem2::SetupHeadNode()
     return FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+std::shared_ptr<const owned::ModelCpuAsset> CAnimationSystem2::GetOwnedSkeleton() noexcept try
+{
+    std::vector<OwnedRender::E1SkeletonNode> facts;
+    POSITION pos = nodes.GetHeadPosition();
+    while (pos)
+    {
+        CAnimationNode* node = nodes.GetNext(pos);
+        facts.push_back({node, node->GetParentNode(), (LPCSTR)node->GetNodeName(),
+            (LPCSTR)node->GetParentName(), node->GetOwnedBone()});
+    }
+    return ownedSkeleton.Complete(facts, lpHeadNode);
+}
+catch (...) { return nullptr; }
+
 void CAnimationSystem2::LoadSkeleton(LPCSTR pszMaskName)
 {
     bNeedRecalc = true;

@@ -641,10 +641,12 @@ BOOL CFigureManager::LoadSkeleton(CAnimationSystem2 *pAnimationSystem, LPCSTR ps
 {
     CModelResourceEntry *pModel = GetModel(pszMaskName);
     BYTE *pData;
+    DWORD ownedLinkSize = 0;
     if (pModel)
-        pData = pModel->GetModel()->GetFile(pszMaskName);
+        pData = pModel->GetModel()->GetFile(pszMaskName, &ownedLinkSize);
     else
-        pData = GetFile(CString(pszMaskName) + ".lnk");
+        pData = GetFile(CString(pszMaskName) + ".lnk", &ownedLinkSize);
+    pAnimationSystem->PublishOwnedLinks(pszMaskName, pData, ownedLinkSize);
     if (pData == 0)
         return ReportError("Can't load skeleton file for \"%s\"\n", pszMaskName);
     BYTE *pBaseData = pData;
@@ -746,6 +748,7 @@ BOOL CFigureManager::LoadAnimationNodeBone(CModelResourceEntry *pModel, CAnimati
         CString szFileName = CString(lpNode->GetMaskName()) + CString(lpNode->GetName()) + ".bon";
         lpData = GetFile(szFileName, &dwSize);
     }
+    lpNode->PublishOwnedBone(lpData, dwSize);
     if (lpData != NULL)
     {
         if (dwSize == 72) // old (6 models) bone

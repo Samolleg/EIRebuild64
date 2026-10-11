@@ -8,6 +8,7 @@
   <Import Project="Renderer.props" />
   <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="..\Game\OwnedRender\E1SkeletonSources.cpp" />
     <ClCompile Include="..\Game\OwnedRender\E1FigureSources.cpp" />
     <ClCompile Include="..\Game\OwnedRender\E1TerrainSubmission.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_unit_effects.cpp" />
