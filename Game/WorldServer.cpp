@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2EffectDistance.h"
 #include "ErrorDialog.h"
 #include "GameJournal.h"
 #include "EngineDiagnostics.h"
@@ -423,7 +424,7 @@ BOOL CWorldServer::UpdatePlayer(CPlayer *pPl)
                 float fpDx = cp.x - cpPlayer.x;
                 float fpDy = cp.y - cpPlayer.y;
                 float fpDist2 = fpDx * fpDx + fpDy * fpDy;
-                if (fpDist2 < FP_VISUAL_RANGE * FP_VISUAL_RANGE ||
+                if (fpDist2 < OwnedRender::E2EffectDistance() * OwnedRender::E2EffectDistance() ||
                     (pMO->WhoAmI() == HPC_UNIT && ((CUnit *)pMO)->GetOwner() == pPl))
                     *plpVis++ = pMO;
             }
@@ -458,7 +459,7 @@ BOOL CWorldServer::UpdatePlayer(CPlayer *pPl)
                     float fpDx = cp.x - cpPlayer.x;
                     float fpDy = cp.y - cpPlayer.y;
                     float fpDist2 = fpDx * fpDx + fpDy * fpDy;
-                    if (fpDist2 < FP_VISUAL_RANGE * FP_VISUAL_RANGE)
+                    if (fpDist2 < OwnedRender::E2EffectDistance() * OwnedRender::E2EffectDistance())
                         *plpVis++ = pMO;
                 }
             }
