@@ -2515,6 +2515,22 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
             return false;
         }
     }
+    // LS applies an additional ordered mana check after the native ASI predicate.
+    // Natural MAGIC bypasses f18 only; wands and non-NPC heroes keep their owners.
+    if (mod && (!lpUnit->IsHero() || mod->CompanionSkillAI(*lpUnit)) &&
+        cmd.IsCast() && nQSpellNum >= 0 && nQSpellNum < 8)
+    {
+        auto* owner = GetMapObjectServer();
+        if (owner)
+        {
+            ModSkills::Config config;
+            // Addon's Lua reader accepts IEEE values. Do not use the strict R01 cache.
+            float cost = mod->SkillConfig(pSpell, config) ? config.Cost(pSpell->GetManaCost())
+                : pSpell->GetManaCost() * rpgUnitStats.GetSpellAddonManaBonusMultiplier();
+            if (cost < 0.0f) cost = 0.0f;
+            if (!(cost <= owner->GetCurrentMP() + 0.0001f)) return false;
+        }
+    }
     // range checking is disabled
     /*if ( fabs2( ptTarget - lpUnit->GetCP() ) > sqr( pSpell->GetRange() * 0.98f ) )
     {
