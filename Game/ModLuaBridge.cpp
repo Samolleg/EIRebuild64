@@ -153,7 +153,7 @@ int AddPerkRecord(lua_State*s){auto&r=Get(s);int index=CheckedInteger(s,2),level
  if(r.kind!=Unit || r.object!=r.scope->unit || !r.scope->stagedStats)return luaL_error(s,"Perk mutation requires the active staged unit");
  if(index<0||index>=RPG_NUM_PERKS||level<0||level>=3||index*3+level>=thePerkDatabase.GetNumPerks())return luaL_error(s,"Invalid native perk record");
  try{r.scope->stagedStats->AddPerk(&thePerkDatabase,thePerkDatabase.GetPerk(index*3+level));}
- catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("ModLuaBridge");lua_pushstring(s,e.what());return lua_error(s);}return 0;
+ catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("ModLuaBridge");lua_pushstring(s,e.what());return lua_error(s);}lua_pushinteger(s,level);return 1;
 }
 int LeftHand(lua_State*s){auto&r=Get(s);if(r.kind!=Unit)return luaL_error(s,"Expected typed unit for left hand");auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Left hand requires native unit-specific component");lua_pushinteger(s,r.scope->LeftHand(*p));return 1;}
 int UnitWeapon(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=Unit||i<0||i>=QI_MAX_WEAPONS)return luaL_error(s,"Invalid weapon slot");auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Weapons require native unit-specific component");PushRef(s,r.scope->Weapon(*p,i),Item,r.scope);return 1;}

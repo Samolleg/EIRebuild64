@@ -124,19 +124,27 @@ inline const Entry* Find(int id){for(const auto&e:registry)if(e.id==id)return &e
 template<class Server> inline void InflictDamageExConsumer(Server* server,SRPGAttackPortion& portion){
  server->ProcessCustomAttackPortion(&portion,nullptr,nullptr);
 }
+struct ArgumentError:std::runtime_error{using std::runtime_error::runtime_error;};
+inline bool Reject(const char*command,const char*reason){NConsole::game<<"MOB "<<command<<": "<<reason<<std::endl;return true;}
 inline std::string Expand(const char*format,const SSCCmd&cmd){
  int counts[]={cmd.params.GetSize(),cmd.szParams.GetSize(),cmd.oParams.GetSize(),cmd.gParams.GetSize()};
  std::string result;char previous=0;
  auto total=[&](){return counts[0]+counts[1]+counts[2]+counts[3];};
- auto take=[&](char type){const char*types="fsog";auto*p=strchr(types,type);if(!p||counts[p-types]<=0)throw std::runtime_error("MOB argument type/count mismatch");--counts[p-types];result+=type;previous=type;};
+ auto take=[&](char type){const char*types="fsog";auto*p=strchr(types,type);if(!p||counts[p-types]<=0)throw ArgumentError("MOB argument type/count mismatch");--counts[p-types];result+=type;previous=type;};
  for(const char*p=format;*p;++p){
   if(*p=='?'){if(!total())break;continue;}
   if(*p=='+'){if(!previous||p[1])throw std::runtime_error("Invalid variadic MOB format");while(total())take(previous);}
   else take(*p);
  }
- if(total())throw std::runtime_error("Excess MOB arguments");return result;
+ if(total())throw ArgumentError("Excess MOB arguments");return result;
 }
 inline void Validate(const Entry&e,const SSCCmd&cmd){const char*p=e.format;if(*p&&strchr("FSOG",*p))++p;Expand(p,cmd);}
+inline bool ValidateDispatch(const Entry&e,const SSCCmd&cmd){
+ switch(cmd.command){case 302:case 311:case 365:case 372:case 384:case 388:case 389:case 391:case 392:
+  try{Validate(e,cmd);return true;}catch(const ArgumentError&error){Reject(e.name,error.what());return false;}
+ default:Validate(e,cmd);return true;}
+}
+inline bool IntegralArgument(float value,double lower,double upper){return std::isfinite(value)&&value==floorf(value)&&double(value)>=lower&&double(value)<upper;}
 inline int CheckedInt(float value){
  if(!std::isfinite(value)||value<-2147483648.f||value>=2147483648.f)throw std::runtime_error("Invalid MOB integer argument");return int(value);
 }
@@ -148,7 +156,7 @@ inline CPlayerServer* PlayerServer(int number){auto*p=theWorldServer.GetPlayer(n
 inline std::string Join(const SSCCmd&cmd){std::string s;for(int i=0;i<cmd.szParams.GetSize();i++)s+=(LPCSTR)cmd.szParams[i];return s;}
 inline bool Float(SSCCmd&cmd,float&result){
  if(!ModRuntime::Current())return false;auto*e=Find(cmd.command);if(!e)return false;
- if(!e->ready||e->format[0]!='F')throw std::runtime_error(std::string("Unported MOB float command: ")+e->name);Validate(*e,cmd);
+ if(!e->ready||e->format[0]!='F')throw std::runtime_error(std::string("Unported MOB float command: ")+e->name);if(!ValidateDispatch(*e,cmd)){result=0;return true;}
  const char*n=e->name;float a=cmd.params.GetSize()?cmd.params[0]:0;
  if(cmd.command==95){if(cmd.params.GetSize()==1)return false;result=a<cmd.params[1]?random.GetFloat(a,cmd.params[1]):a;return true;}
  if(cmd.command==311){float dx=cmd.params[2]-a,dy=cmd.params[3]-cmd.params[1];result=sqrtf(dx*dx+dy*dy);return true;}
@@ -159,16 +167,16 @@ inline bool Float(SSCCmd&cmd,float&result){
  if(cmd.command==358||cmd.command==368||cmd.command==369||cmd.command==370||cmd.command==362||cmd.command==367){auto*object=ObjectArg(cmd);DWORD flag=cmd.command==358?UNIT_ALREADY_MHOOVER:cmd.command==368?UNIT_FEEBLED:cmd.command==369?UNIT_STUN:UNIT_DONTMOVE;if(cmd.command==362||cmd.command==367){std::uint32_t decoded;if(!(cmd.command==362?ModMobFlagArguments::Mask(a,decoded):ModMobFlagArguments::Bit(a,decoded))){result=0;return true;}flag=decoded;}result=object&&object->CheckFlag(flag)?1.f:0.f;return true;}
  if(cmd.command==393){result=ModRuntime::Current()->PartyDisguiseMatches(cmd.szParams[0])?1.f:0.f;return true;}
  if(cmd.command==386){result=JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0])?1.f:0.f;return true;}
- if(cmd.command==359){auto*s=ServerArg(cmd);auto*u=UnitArg(cmd);auto*mod=ModRuntime::Current();if(s&&u&&mod&&mod->CombatSetting("usePotionAcks")){s->InformFailure(ACK_HERO_ACK_USE_POTION);theWorld.ReceiveDamage(u->GetID(),0,HLDAMAGE_POTION);}result=0;return true;}
+ if(cmd.command==359){auto*s=ServerArg(cmd);auto*u=UnitArg(cmd);if(s&&u){s->InformFailure(ACK_HERO_ACK_USE_POTION);theWorld.ReceiveDamage(u->GetID(),0,HLDAMAGE_POTION);}result=0;return true;}
  if(cmd.command==300){auto*u=UnitArg(cmd);result=u&&(u->GetID()>=1000000000)&&u->GetOwner()?float(u->GetOwner()->GetPlayerNumber()):-1.f;return true;}
  if(cmd.command==363){auto*u=UnitArg(cmd);int damage=CheckedInt(a);result=float(damage);auto*item=u&&ServerArg(cmd)?u->GetQWeapon(0):nullptr;if(item&&damage>0&&damage<1000){float old=item->GetHP(),critical=item->GetMaxHP()*theAIGeneralSettings.fItemDurabilityCritical;item->ApplyDamage(float(damage));if(item->IsBroken()||(old>=critical&&item->GetHP()<critical))ServerArg(cmd)->InformFailure(0);}return true;}
  if(!strcmp(n,"Add")||!strcmp(n,"Mul")||!strcmp(n,"And")||!strcmp(n,"Or")||!strcmp(n,"Max")||!strcmp(n,"Min")){
   result=(!strcmp(n,"Mul")||!strcmp(n,"And"))?1:(!strcmp(n,"Max")||!strcmp(n,"Min"))?a:0;
-  for(int i=0;i<cmd.params.GetSize();++i){float v=cmd.params[i];
+  for(int i=(!strcmp(n,"Max")||!strcmp(n,"Min"))?1:0;i<cmd.params.GetSize();++i){float v=cmd.params[i];
    if(!strcmp(n,"Add"))result+=v;else if(!strcmp(n,"Mul"))result*=v;
    else if(!strcmp(n,"And")){if(int(v)==0){result=0;break;}}
    else if(!strcmp(n,"Or")){if(int(v)!=0){result=1;break;}}
-   else if(!strcmp(n,"Max"))result=(std::max)(result,v);else result=(std::min)(result,v);
+   else if(!strcmp(n,"Max"))result=result>v?result:v;else result=result<v?result:v;
   }
  }
  else if(!strcmp(n,"StrHas"))result=strstr(cmd.szParams[0],cmd.szParams[1])?1.f:0.f;
@@ -188,7 +196,7 @@ inline bool Float(SSCCmd&cmd,float&result){
   auto*server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());if(!server)return true;auto&s=*server->GetRPGStats();
   if(cmd.command==361){result=float(server->GetScriptPose());return true;}
   if(cmd.command==366){result=float(server->logic.GetScriptState());return true;}
-  if(cmd.command==302){int part=CheckedInt(a),type=Index(cmd.params[1],RPG_NUM_ATTACK_TYPES);if(part>=0){if(part>=RPG_NUM_HIT_LOCATIONS)throw std::runtime_error("MOB armor location out of range");for(auto&layer:s.hls[part].layers)result+=layer.fpAbsorbtions[type];}else{float values[RPG_NUM_ATTACK_TYPES];unit->GetUserUnitStats()->GetAbsorbtions(&unit->GetUserCommonStats(),values,(unit->GetID()>=1000000000));result=values[type];}return true;}
+  if(cmd.command==302){if(!std::isfinite(a)||a<-2147483648.f||a>=2147483648.f||!std::isfinite(cmd.params[1])||cmd.params[1]<-2147483648.f||cmd.params[1]>=2147483648.f)return Reject(n,"Invalid armor argument");int part=int(a),type=int(cmd.params[1]);if(part>=RPG_NUM_HIT_LOCATIONS||type<0||type>=RPG_NUM_ATTACK_TYPES)return Reject(n,"Armor index out of range");if(part>=0){for(auto&layer:s.hls[part].layers)result+=layer.fpAbsorbtions[type];}else{float values[RPG_NUM_ATTACK_TYPES];unit->GetUserUnitStats()->GetAbsorbtions(&unit->GetUserCommonStats(),values,(unit->GetID()>=1000000000));result=values[type];}return true;}
   if(!strcmp(n,"GetUnitExp")){
    const char*type=cmd.szParams.GetSize()?(LPCSTR)cmd.szParams[0]:"max";
    if(!_stricmp(type,"max"))result=s.fpExperience;else if(!_stricmp(type,"spent"))result=s.fSpentExp;else if(!_stricmp(type,"penalty"))result=s.fExpPenalty;else if(!_stricmp(type,"real"))result=s.fpExperience+s.fExpPenalty;
@@ -277,13 +285,13 @@ inline bool Action(SSCCmd&cmd){
  case 357:{auto*p=theWorldServer.GetPlayer(CheckedInt(a));if(p)for(const auto&v:p->party.vars)NConsole::game<<v.first.c_str()<<" = "<<v.second<<std::endl;break;}
  case 360:if(server){auto*item=theWorldServer.CreateItem(cmd.szParams[0]);if(auto*quick=dynamic_cast<CItemQuick*>(item)){unit->AddQItem(quick);server->NotifyItemsUpdated();}else if(item)item->Release();}break;
  case 364:if(server)server->logic.StartCast(CheckedInt(cmd.params[2]),CPlot3D(a,cmd.params[1],theWorldServer.GetZValue(a,cmd.params[1])),false);break;
- case 365:if(server)server->logic.StartCast(CheckedInt(a),ObjectArg(cmd,1),false);break;
+ case 365:if(!server||!ObjectArg(cmd,1)||!IntegralArgument(a,0.0,2147483648.0))return Reject("CastSomeSpellTarget","Invalid server, target or spell");server->logic.StartCast(int(a),ObjectArg(cmd,1),false);break;
  case 371:if(auto*p=PlayerServer(0))p->LeaveToZone(cmd.szParams[0],0);break;
- case 372:if(server){SRPGAttackPortion portion;portion.Clear();portion.nSkill=0;portion.fpToHit=100;portion.fpAttacks[Index(cmd.params[1],RPG_NUM_ATTACK_TYPES)]=1;portion.hl=ERPGHitLocations(Index(cmd.params[2],RPG_NUM_HIT_LOCATIONS));portion.fBackStabMultiplier=cmd.params[3];portion.fpDamage=a;InflictDamageExConsumer(server,portion);}break;
+ case 372:if(!server||!IntegralArgument(cmd.params[1],0.0,RPG_NUM_ATTACK_TYPES)||!IntegralArgument(cmd.params[2],0.0,RPGHL_ALL+1.0))return Reject("InflictDamageEx","Invalid server, attack type or hit location");if(server){SRPGAttackPortion portion;portion.Clear();portion.nSkill=0;portion.fpToHit=100;portion.fpAttacks[int(cmd.params[1])]=1;portion.hl=ERPGHitLocations(int(cmd.params[2]));portion.fBackStabMultiplier=cmd.params[3];portion.fpDamage=a;InflictDamageExConsumer(server,portion);}break;
  case 376:if(server)server->CmdSkill(ObjectArg(cmd,1),CheckedInt(cmd.params[1]),DWORD(CheckedInt(cmd.params[2])),a!=0,DWORD(CheckedInt(cmd.params[3])));break;
- case 388:if(!JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0]))throw std::runtime_error("RegisterLoot registration rejected");break;
- case 389:if(IWorldConnector.IsLMP())throw std::runtime_error("ShowMessage requires single player");if(const char*error=ModMessages::Show(cmd.szParams[0]))throw std::runtime_error(error);break;
- case 384:if(server&&!JMV_RegisterNpcCombatConsumable(unit,cmd.szParams[0],cmd.szParams[1],CheckedInt(a)))throw std::runtime_error("NPC consumable profile rejected");break;
+ case 388:if(!JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0]))return Reject("RegisterLoot","Registration rejected");break;
+ case 389:if(IWorldConnector.IsLMP())return Reject("ShowMessage","Requires single player");if(const char*error=ModMessages::Show(cmd.szParams[0]))return Reject("ShowMessage",error);break;
+ case 384:if(!std::isfinite(a)||a<-2147483648.f||a>=2147483648.f)return Reject("NpcCombatConsumable","Invalid charges");if(server&&!JMV_RegisterNpcCombatConsumable(unit,cmd.szParams[0],cmd.szParams[1],int(a)))return Reject("NpcCombatConsumable","Profile rejected");break;
  case 382:if(unit)unit->SetAggression(EUnitAggression(CheckedInt(a)));break;
  default:return false;
  }return true;
@@ -299,10 +307,10 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
  auto*mod=ModRuntime::Current();if(!mod)return false;auto*e=Find(cmd.command);if(!e)return false;
  if(cmd.command==387||cmd.command==390){Validate(*e,cmd);return Voice(cmd,sleep,next);}
  if(e->ready&&(cmd.command==391||cmd.command==392)){
-  Validate(*e,cmd);bool skip=cmd.command==392||cmd.params[0]==0;float amount=cmd.params[cmd.command==391?1:0];
-  if(!index||!BranchForward(*index,count,skip,amount))throw std::runtime_error("Invalid MOB branch state/offset");return true;
+  if(!ValidateDispatch(*e,cmd))return true;bool skip=cmd.command==392||cmd.params[0]==0;float amount=cmd.params[cmd.command==391?1:0];
+  if(!index||!BranchForward(*index,count,skip,amount))return Reject(e->name,"Invalid branch state/offset");return true;
  }
- if(e->ready && cmd.command!=385){Validate(*e,cmd);if(Action(cmd))return true;}
+ if(e->ready && cmd.command!=385){if(!ValidateDispatch(*e,cmd))return true;if(Action(cmd))return true;}
  if(!e->ready||strcmp(e->name,"RefreshUnitStats"))throw std::runtime_error(std::string("Unported MOB action: ")+e->name);Validate(*e,cmd);
  auto*object=cmd.oParams[0]?cmd.oParams[0]->GetObject():nullptr;
  if(object&&object->WhoAmI()==HPC_UNIT)mod->RefreshUnitStatsFromMob(static_cast<CUnit*>(object));return true;

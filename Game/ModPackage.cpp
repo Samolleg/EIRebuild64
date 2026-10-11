@@ -345,7 +345,8 @@ bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*un
  return changed&&!mpOnly;
 }
 float CModPackage::MurderAwarenessValue(int property,float fallback){
- CallbackFrame frame(state);BeginCallback("GetMurderAwarenessConfigValue");
+ CallbackFrame frame(state);lua_getglobal(state,"GetMurderAwarenessConfigValue");
+ if(!lua_isfunction(state,-1))return fallback;
  lua_pushinteger(state,property);lua_pushnumber(state,fallback);Call(2,1);
  return lua_isnumber(state,-1)?static_cast<float>(lua_tonumber(state,-1)):fallback;
 }
@@ -1731,8 +1732,10 @@ std::string CModPackage::InstructionComponent(bool prototype,bool figure,const c
  return result;
 }
 float CModPackage::GoCampEnemyRadius(){
- CallbackFrame frame(state);BeginCallback("GetGoCampConfigValue");lua_pushinteger(state,1);lua_pushnumber(state,25.0);Call(2,1);
- const double value=Number(state,"GoCamp enemy radius");if(value<0.0||value>500.0)throw std::runtime_error("GoCamp enemy radius is outside 0..500");return static_cast<float>(value);
+ CallbackFrame frame(state);lua_getglobal(state,"GetGoCampConfigValue");if(!lua_isfunction(state,-1))return 25.0f;
+ lua_pushinteger(state,1);lua_pushnumber(state,25.0);Call(2,1);
+ if(!lua_isnumber(state,-1))return 25.0f;const float value=float(lua_tonumber(state,-1));
+ return value>=0.0f&&value<=500.0f?value:25.0f;
 }
 bool CModPackage::DeathFearSettings(float &enterHp,float &exitHp,float &fleeDistance,float &speedPercent){
  enterHp=15.0f;exitHp=30.0f;fleeDistance=25.0f;speedPercent=65.0f;CallbackFrame frame(state);
@@ -1740,8 +1743,9 @@ bool CModPackage::DeathFearSettings(float &enterHp,float &exitHp,float &fleeDist
  enterHp=read(1,enterHp);fleeDistance=read(2,fleeDistance);speedPercent=read(3,speedPercent);exitHp=read(4,exitHp);return true;
 }
 bool CModPackage::DeathFearExcludedPrototype(const char*prototype){
- if(!prototype||!*prototype)return false;CallbackFrame frame(state);BeginCallback("IsDeathFearExcludedPrototype");lua_pushstring(state,prototype);Call(1,1);
- if(!lua_isboolean(state,-1))throw std::runtime_error("DeathFear exclusion policy must return boolean");return lua_toboolean(state,-1)!=0;
+ if(!prototype||!*prototype)return false;CallbackFrame frame(state);lua_getglobal(state,"IsDeathFearExcludedPrototype");
+ if(!lua_isfunction(state,-1))return false;lua_pushstring(state,prototype);Call(1,1);
+ return lua_toboolean(state,-1)!=0;
 }
 bool CModPackage::GoCampZoneExcluded(const char*zone){
  if(!zone||!*zone)return true;CallbackFrame frame(state);BeginCallback("IsGoCampExcludedZone");lua_pushstring(state,zone);Call(1,1);
@@ -1983,15 +1987,19 @@ void CModPackage::MoveAttack(const SRPGAttackPortion&from,const SRPGAttackPortio
 bool CModPackage::AttackIsLeft(const SRPGAttackPortion&ap)const{auto i=criticalAttacks.find(&ap);return i!=criticalAttacks.end()&&i->second.left;}
 std::shared_ptr<CItemWeapon> CModPackage::AttackWeapon(const SRPGAttackPortion&ap)const{auto i=criticalAttacks.find(&ap);return i==criticalAttacks.end()?nullptr:i->second.weapon;}
 
-// Installed Lua policy; cache belongs to this package's immutable script instance.
+// Active skill policy has its own native ConstantValueCache contract, independent of R23.
 bool CModPackage::SkillConfig(const char*name,ModSkills::Config&config){
  config={};if(!name||!*name)return false;
- auto cached=skillConfigs.find(name);if(cached!=skillConfigs.end()){config=cached->second.second;return cached->second.first;}
+ const bool validKey=state&&strlen(name)<=256;bool cacheable=true;
+ if(validKey){auto cached=skillConfigs.find(name);if(cached!=skillConfigs.end()){config=cached->second.second;return cached->second.first;}}
  Stack stack(state);auto getValue=[&](int property,double fallback,double&value){
- lua_getglobal(state,"GetMeleeActiveSpellValue");if(!lua_isfunction(state,-1)){lua_pop(state,1);return false;}
+ lua_getglobal(state,"GetMeleeActiveSpellValue");if(!lua_isfunction(state,-1)){lua_pop(state,1);cacheable=false;return false;}
  lua_pushstring(state,name);lua_pushinteger(state,property);lua_pushnumber(state,fallback);Call(3,1);
- if(!lua_isnumber(state,-1))throw std::runtime_error("Non-numeric active skill policy");value=lua_tonumber(state,-1);lua_pop(state,1);
- if(!std::isfinite(value)||fabs(value)>float(INT_MAX)/32)throw std::runtime_error("Active skill policy out of range");return true;};
+ if(!lua_isnumber(state,-1)){lua_pop(state,1);cacheable=false;return false;}value=lua_tonumber(state,-1);lua_pop(state,1);
+ if(!std::isfinite(value))throw std::runtime_error("Non-finite active skill policy");
+ if(property==2||property==3||property==7||property==8||property==9||property==13||property==15||property==16){
+  if(fabs(value)>(std::numeric_limits<float>::max)())throw std::runtime_error("Active skill float policy out of range");
+ }return true;};
  auto read=[&](){
     double enabled = 0.0;
     double requiredMelee = 0.0;
@@ -2048,12 +2056,12 @@ bool CModPackage::SkillConfig(const char*name,ModSkills::Config&config){
     config.allowDeconstruction = allowDeconstruction != 0.0;
     config.allowItemInsertion = allowItemInsertion != 0.0;
     config.allowSale = allowSale != 0.0;
-    config.projectileCount = (std::max)(1, (std::min)(2, static_cast<int>(projectileCount)));
+    config.projectileCount = static_cast<int>((std::max)(1.0, (std::min)(2.0, projectileCount)));
     config.accuracyBonus = (std::max)(0.0f, static_cast<float>(accuracyBonus));
     config.areaRadius = (std::max)(0.0f, static_cast<float>(areaRadius));
     config.allowNpc = allowNpc != 0.0;
     return true;
- };bool result=read();skillConfigs[name]={result,config};return result;
+ };bool result=read();if(validKey&&cacheable){if(skillConfigs.size()>=4096)skillConfigs.clear();skillConfigs[name]={result,config};}return result;
 }
 bool CModPackage::SkillConfig(CSpell*spell,ModSkills::Config&config){
  if(!spell||!spell->GetPrototype())return false;const char*name=spell->GetPrototype()->szCodeName;
@@ -2066,7 +2074,9 @@ bool CModPackage::TargetSkill(CSpell*spell)const{
  return code=="powerhit"||code=="test"||code=="precisehit"||code=="doubleshot"||code=="preciseshot"||code=="cripplinghit"||code=="explosiveshot";
 }
 float CModPackage::InfoProperty(const char*callback,const char*name,int property){
- CallbackFrame frame(state);BeginCallback(callback);lua_pushstring(state,name);lua_pushinteger(state,property);Call(2,1);double n=Number(state,callback);if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Info property overflow");return float(n);
+ CallbackFrame frame(state);BeginCallback(callback);lua_pushstring(state,name);lua_pushinteger(state,property);Call(2,1);
+ if(!strcmp(callback,"GetSetItemStats"))return float(static_cast<int32_t>(lua_tointeger(state,-1)));
+ double n=Number(state,callback);if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Info property overflow");return float(n);
 }
 bool CModPackage::InfoForbiddenSpell(const char*name,int shop){
  CallbackFrame frame(state);BeginCallback("IsForbiddenItem");lua_pushstring(state,name);lua_pushinteger(state,1);lua_pushinteger(state,shop);Call(3,1);return Number(state,"IsForbiddenItem")!=0;
@@ -2079,17 +2089,17 @@ int CModPackage::InfoSetPosition(const char*name,int position,int property){
  // Native LuaPop<int32_t> converts a missing table field to zero.
  return lua_isnil(state,-1)?0:int(Number(state,"GetSetItemStatsPos"));
 }
-int CModPackage::InfoComplexProperty(int set,int property,int position){
+float CModPackage::InfoComplexProperty(int set,int property,int position){
  const char*callback=position<0?"GetComplex":"GetComplexPos";CallbackFrame frame(state);BeginCallback(callback);lua_pushinteger(state,set);
  if(position>=0)lua_pushinteger(state,position);lua_pushinteger(state,property);Call(position<0?2:3,1);
- return lua_isnil(state,-1)?0:int(float(Number(state,callback)));
+ return float(lua_tonumber(state,-1));
 }
 std::vector<std::pair<int,int>> CModPackage::InfoSetBonuses(const char*name,int count,int set,bool complex){
  std::vector<std::pair<int,int>> result;
  // Installed FormTextInfo loops 3..JMVUS_MAX(22), count1..equipped, and three columns.
  for(int stat=3;stat<=22;++stat){int sum=0;for(int c=1;c<=count;++c)for(int i=1;i<=3;++i){
-  int type=complex?InfoComplexProperty(set,4+i,c):InfoSetPosition(name,c,2+i);
-  if(type&&type==stat)sum+=complex?InfoComplexProperty(set,7+i,c):InfoSetPosition(name,c,5+i);
+  int type=complex?int(InfoComplexProperty(set,4+i,c)):InfoSetPosition(name,c,2+i);
+  if(type&&type==stat)sum+=complex?int(InfoComplexProperty(set,7+i,c)):InfoSetPosition(name,c,5+i);
  }if(sum)result.emplace_back(stat,sum);}return result;
 }
 float CModPackage::InfoMagicBlood(int level){

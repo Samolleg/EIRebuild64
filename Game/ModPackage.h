@@ -146,7 +146,7 @@ public:
     bool InfoForbiddenSpell(const char* name, int shop);
     float InfoPerkBonus(const char* callback, int level);
     int InfoSetPosition(const char* name, int position, int property);
-    int InfoComplexProperty(int set, int property, int position = -1);
+    float InfoComplexProperty(int set, int property, int position = -1);
     std::vector<std::pair<int,int>> InfoSetBonuses(const char* name, int count, int set, bool complex);
     float InfoMagicBlood(int level);
     ModSpellTooltip::Values SpellTooltip(const SRPGUserUnitStats&, const CSpell&, float manaIntelligence, int difficulty);
