@@ -3,6 +3,7 @@
   <PropertyGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
     <OutDir>$(MSBuildThisFileDirectory)..\out\Win32\Release\</OutDir>
     <TargetName>E1RendererFacadeWarpCheck</TargetName>
+    <TargetPath>$(OutDir)$(TargetName)$(TargetExt)</TargetPath>
   </PropertyGroup>
   <ItemGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
     <ClCompile Include="$(MSBuildThisFileDirectory)..\Game\OwnedRender\E1RendererFacadeWarpMain.cpp">
