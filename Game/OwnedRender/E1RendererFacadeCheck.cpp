@@ -6,11 +6,14 @@
 #undef max
 #endif
 #include "../../external/owned-renderer/Source/retained_static_scene.h"
+#include <embedded_host.h>
 #include "E1RendererFacade.h"
 #include <cstdio>
 #include <shellapi.h>
 
 namespace {
+const char* warpFailureStage = "unknown";
+
 void mark(const char* value) {
     char path[MAX_PATH]{};
     const DWORD length = GetModuleFileNameA(nullptr, path, MAX_PATH);
@@ -31,7 +34,18 @@ void mark(const char* value) {
 struct WarpRendererBackend {
     owned::Renderer renderer;
     HRESULT ensure(HWND window, UINT width, UINT height) {
-        return renderer.ensure_for_test_warp(window, width, height);
+        try {
+            const HRESULT result = renderer.ensure_for_test_warp(window, width, height);
+            if (FAILED(result)) warpFailureStage = renderer.test_initialization_failure_stage();
+            return result;
+        } catch (const std::exception& error) {
+            warpFailureStage = "renderer-ensure-exception";
+            std::printf("Renderer ensure exception: %s\n", error.what());
+            return E_FAIL;
+        } catch (...) {
+            warpFailureStage = "renderer-ensure-unknown-exception";
+            return E_FAIL;
+        }
     }
     HRESULT resize(UINT width, UINT height) { return renderer.resize(width, height); }
     void begin_scene() { renderer.begin_scene(); }
@@ -50,6 +64,35 @@ int RunE1RendererFacadeWarpCheck() {
         L"EID3D11_SHADERS", MAKEINTRESOURCEW(10)) != nullptr;
     std::printf("WARP shader resource: %s\n", shaderResourcePresent ? "present" : "missing");
     const HINSTANCE instance = GetModuleHandleW(nullptr);
+    wchar_t currentDirectory[MAX_PATH]{};
+    const DWORD currentLength = GetCurrentDirectoryW(MAX_PATH, currentDirectory);
+    if (!currentLength || currentLength >= MAX_PATH) {
+        std::puts("Cannot resolve the Engine working directory");
+        return 8;
+    }
+    const std::filesystem::path engine(currentDirectory);
+    const std::filesystem::path gameRoot = engine.parent_path();
+    const auto resources = gameRoot / L"Base" / L"Res";
+    owned::EmbeddedHostPaths host;
+    host.renderer_config = (std::filesystem::temp_directory_path() /
+        (L"E1RendererFacadeWarp-" + std::to_wstring(GetCurrentProcessId()) + L".ini")).wstring();
+    host.world_map_layouts = (gameRoot / L"MODS" / L"Dejavu" /
+        L"world-map-layouts.json").wstring();
+    host.mounts.loose_roots.push_back((gameRoot / L"Base" / L"Maps").wstring());
+    host.mounts.archives = {(resources / L"figures.res").wstring(),
+        (resources / L"menus.res").wstring(), (resources / L"textures.res").wstring()};
+    for (const auto& archive : host.mounts.archives) {
+        if (!std::filesystem::is_regular_file(archive)) {
+            std::printf("Required base resource archive is missing: %ls\n", archive.c_str());
+            return 9;
+        }
+    }
+    try {
+        owned::embedded_host_configuration().configure(std::move(host));
+    } catch (const std::exception& error) {
+        std::printf("Embedded host setup failed: %s\n", error.what());
+        return 10;
+    }
     WNDCLASSW cls{};
     cls.lpfnWndProc = window_proc;
     cls.hInstance = instance;
@@ -73,7 +116,8 @@ int RunE1RendererFacadeWarpCheck() {
         HRESULT hr = facade.Initialize(window, 320, 240);
         mark("after-initialize");
         if (FAILED(hr) || !facade.Ready()) {
-            std::printf("WARP ensure failed: 0x%08lx\n", static_cast<unsigned long>(hr));
+            std::printf("WARP ensure failed at %s: 0x%08lx\n",
+                warpFailureStage, static_cast<unsigned long>(hr));
             result = 3;
         } else if (FAILED(hr = facade.BeginFrame())) {
             std::printf("BeginFrame failed: 0x%08lx\n", static_cast<unsigned long>(hr));
