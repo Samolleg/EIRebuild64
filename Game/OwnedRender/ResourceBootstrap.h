@@ -1,5 +1,5 @@
 #pragma once
-#include "../../external/owned-renderer/Source/embedded_host.h"
+#include "embedded_host.h"
 
 namespace OwnedRender {
 // Values are resolved by SettingsProfile and ModRuntime, not by the renderer.

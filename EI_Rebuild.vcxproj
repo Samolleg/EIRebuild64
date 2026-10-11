@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(MSBuildThisFileDirectory)external\owned-renderer\</OwnedRendererRoot><OwnedRendererRoot>$([MSBuild]::EnsureTrailingSlash('$(OwnedRendererRoot)'))</OwnedRendererRoot></PropertyGroup>
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
       <Configuration>Debug</Configuration>
@@ -338,9 +339,13 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="Game\GameMain.cpp" />
-    <ClCompile Include="Game\OwnedRender\Startup.cpp" />
+    <ClCompile Include="Game\OwnedRender\E2Host.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <ClCompile Include="Game\OwnedRender\E2Diagnostics.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <ClCompile Include="Game\OwnedRender\E2EffectDistance.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\OwnedRender\E2Input.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <ClCompile Include="Game\OwnedRender\Startup.cpp"><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\NeighbourTerrain.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="Game\OwnedRender\ResourceMapping.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\OwnedRender\ResourceMapping.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\CrashEvidence.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\EngineDiagnostics.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\GeneralSettings.cpp" />

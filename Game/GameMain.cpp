@@ -24,6 +24,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "GameMain.h"
 #include "OwnedRender/Startup.h"
+#include "OwnedRender/E2Host.h"
 #include "StringProcessing.h"
 #include "WorldClient.h"
 #include "WorldServer.h"
@@ -461,12 +462,12 @@ int nShowClientTimeBalance = 0;
 // time sync problem is to be refined
 static bool CountTime()
 {
-    static DWORD dwLastTime = timeGetTime();
+    static DWORD dwLastTime = OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(NGame::hWnd));
     static DWORD dwPassedTime = 0;
     static DWORD dwClientPassedTime = 0;
     static float fpClientTimeSpeed = 1;
 
-    DWORD dwTimeStep = timeGetTime() - dwLastTime;
+    DWORD dwTimeStep = OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(NGame::hWnd)) - dwLastTime;
     FrameDiagnostics::RawDelta(dwTimeStep);
     DWORD dwFracTime; // for client
     dwLastTime += dwTimeStep;
@@ -982,6 +983,8 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
+    if (OwnedRender::E2BlockBackgroundInput(hWnd, message, wParam, lParam)) return 1;
+    if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     theInterface.CheckScreensMustDie();
     switch (message)
     {
@@ -1070,6 +1073,12 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         }
         break;
     case WM_ACTIVATE:
+        if (OwnedRender::E2BackgroundConfigured())
+        {
+            OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(hWnd));
+            theInterface.ResetInputState();
+            break;
+        }
         if (!(HIWORD(wParam))) // if window is not minimized
         {
             CSoundManager *pSoundManager = theWorld.GetSoundManager();
@@ -1131,6 +1140,8 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 /////////////////////////////////////////////////////////////////////////////////////
 void NGame::DrawFrame(bool bFlip, bool bDraw2D)
 {
+    if (OwnedRender::E2BackgroundPaused(hWnd)) { Sleep(50); return; }
+    OwnedRender::E2PassScope pass(OwnedRender::Pass::frame);
     if (!bEnableRender)
         return;
     if (!bNeedRender)
@@ -1158,6 +1169,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
         if (bDraw2D)
         {
             FrameDiagnostics::Scope timing(FrameDiagnostics::Draw2D);
+            OwnedRender::E2PassScope uiPass(OwnedRender::Pass::ui);
             theInterface.Draw2D();
         }
 
