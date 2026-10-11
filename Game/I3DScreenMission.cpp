@@ -5674,14 +5674,10 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
             if (serverUnit)
             {
                 const auto &serverEffects = serverUnit->GetSpellEffects();
-                for (int effectIndex = 0; effectIndex < serverEffects.GetSize(); ++effectIndex)
-                    if (serverEffects[effectIndex].nSpellID == effects[i].nSpellID)
-                    {
-                        serverEffect = &serverEffects[effectIndex];
-                        break;
-                    }
+                if (i < serverEffects.GetSize())
+                    serverEffect = &serverEffects[i];
             }
-            float power = serverEffect ? serverEffect->fpPower : effects[i].fpPower;
+            float power = serverEffect ? serverEffect->fpPower : 0.0f;
             const bool attacking = effects[i].nSpellID <= SPELL_ID_POISONFOG || effects[i].nSpellID == SPELL_ID_VAMP;
             if (attacking)
             {
@@ -5701,7 +5697,7 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
             }
             CString prefix, seconds;
             if (pTxtMng->GetText("string infoitem_82")) pTxtMng->GetLine(prefix);
-            if (pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(seconds);
+            if (serverUnit && pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(seconds);
             const bool wholePower = serverUnit && serverUnit->GetEffectValue(effects[i].nSpellID) > 10;
             if (wholePower)
                 szOut.Format("%s%.0f (%d%s)", (LPCSTR)prefix, power, effects[i].nDuration / 15, (LPCSTR)seconds);
@@ -5878,8 +5874,23 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
             int weight=int(data.GetItemsWeight());
             if(pUnit->GetTypeID()==MOTID_HUMAN){value.Format("%s: %d/%d(%d%%)",raw("perk Encumbrance"),weight,capacity,capacity>0?int((weight+1)*100.f/capacity):0);draw(value);}
             value.Format("%s: %d",raw("perk Experience"),alien?int(pUnit->GetPrototype()->fExp):int(stats->dwExperience));draw(value);
-            value.Format("%s %.0f%%",raw("string infoitem_51"),(server?server->GetFSSoundDetect():1.f)*100);draw(value);
-            value.Format("%s %.0f%%",raw("string infoitem_53"),(server?server->GetVisionDetect():1.f)*100);draw(value);
+            float hearing=1.f,sight=1.f;
+            if(server){
+                hearing=server->GetFSSoundDetect();sight=server->GetVisionDetect();
+                const auto&percepts=server->GetRPGStats()->percepts;
+                if(hearing==0.f)hearing=percepts[RPGS_HEARING].fpEffectiveValue;
+                if(sight==0.f)sight=percepts[RPGS_SIGHT].fpEffectiveValue;
+                const bool recoverHearing=!pUnit->GetOwner()&&percepts[RPGS_HEARING].fpEffectiveValue==1.f;
+                const bool recoverSight=!pUnit->GetOwner()&&percepts[RPGS_SIGHT].fpEffectiveValue==1.f;
+                if(recoverHearing||recoverSight){float armorSight=0,armorHearing=0;
+                    if(mod->NpcArmorPercepts(*serverUnit,pUnit,armorSight,armorHearing)){
+                        if(recoverHearing)hearing=(1.f+armorHearing)*server->GetFSSoundDetect();
+                        if(recoverSight)sight=(1.f+armorSight)*server->GetVisionDetect();
+                    }
+                }
+            }
+            value.Format("%s %.0f%%",raw("string infoitem_51"),hearing*100);draw(value);
+            value.Format("%s %.0f%%",raw("string infoitem_53"),sight*100);draw(value);
             int count=0;if(auto*player=theWorldServer.GetPlayer(0))count=player->party.allWagonItems.GetSize()+player->items.GetCount();
             value.Format("%s: %d",raw("camphelp 22"),count);draw(value);
             float block=0,parry=0;mod->PanelDefense(data,weight,capacity,block,parry);

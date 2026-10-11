@@ -18,6 +18,7 @@ class CItem;
 class CMapObject;
 struct ModDelayedShot;
 #include <string>
+#include <optional>
 #include <vector>
 #include <map>
 #include <memory>
@@ -108,6 +109,7 @@ public:
     float ManaBonus(const SRPGUnitStats&);
     // IEEE multiplier only for SpellAddon f18/f29; never populates the strict cache.
     float SpellAddonManaBonus(const SRPGUnitStats&);
+    bool NpcArmorPercepts(CUnit&,CUnit*,float& sight,float& hearing);
     float ManaBonus(const SRPGUserUnitStats&);
     float DistributeExperience(float experience,int players);
     float ChargeExperience(float exp,int count) const { return settingsProfile.Experience(exp,count); }
@@ -170,7 +172,7 @@ public:
     ModCampDescriptions::Result EvaluateCampDescriptions(const ModCampDescriptions::Input&);
     ModCampDescriptions::Result CampDescriptions(class CPersonage&,CUnit&,bool skillCapacity=false);
     std::string CampMissingRequirement(const SRPGUnitStats&,const char* code);
-    std::string ProgressionRequirementCode(const char* code,int field);
+    std::optional<std::string> ProgressionRequirementCode(const char* code,int field);
     float InfoComplex(CUnit&,int property);
     void SaveSkillCooldowns(CGSVariableSet&);
     void LoadSkillCooldowns();
@@ -256,6 +258,7 @@ private:
     ModStaticLookup::State staticLookups;
     bool scalarManaBonus=false;
     std::map<std::string,float> manaBonusCache;
+    std::map<std::string,float> spellAddonManaBonusCache;
     bool scheduledRegeneration=false;
     std::unique_ptr<ModNpcRefreshQueue> refreshQueue;
     bool npcStatRefresh=true;
@@ -265,6 +268,8 @@ private:
     bool npcArmorCalculation=true,npcTrickster=true,npcMaterialEffects=true;
     struct ArmorModifiers {unsigned subtype=0;float speed=0,sight=0,hearing=0;};
     std::map<int,ArmorModifiers> npcArmorCache;
+    std::map<int,ArmorModifiers> npcArmorViewCache;
+    const void* npcArmorViewWorld=nullptr;std::string npcArmorViewZone;int npcArmorViewSegment=-1;
     const void* cacheWorld=nullptr;std::string cacheZone;int cacheSegment=-1;
     void SyncRuntimeState();
     std::unique_ptr<ModInitialization::Ledger> initialization;

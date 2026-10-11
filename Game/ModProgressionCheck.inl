@@ -26,7 +26,7 @@ Json CheckProgressionG3(const std::string& directory){
     for(auto row:oracle["camp_cases"]){row["allowed"]=ModProgression::CampAffordable(row["price"].get<int>(),row["total"].get<int>());report["camp"].push_back(row);}
     const int count=thePerkDatabase.GetNumPerks();
     for(int i=0;i<count;++i){const auto* perk=thePerkDatabase.GetPerk(i);Json codes=Json::array(),indices=Json::array();
-        for(int field=3;field<=7;++field){auto code=package->ProgressionRequirementCode(perk->szCode,field);codes.push_back(code);indices.push_back(thePerkDatabase.GetPerkIndex(code.c_str()));}
+        for(int field=3;field<=7;++field){auto code=package->ProgressionRequirementCode(perk->szCode,field);codes.push_back(code?Json(*code):Json(nullptr));indices.push_back(code?thePerkDatabase.GetPerkIndex(code->c_str()):-1);}
         report["perks"].push_back({{"id",i},{"code",std::string((LPCSTR)perk->szCode)},{"active",perk->bActive!=0},
             {"attributes",{perk->fpAttributes[0],perk->fpAttributes[1],perk->fpAttributes[2]}},
             {"skillRequired",std::string((LPCSTR)perk->szSkillRequired)},{"autoSkill",int(perk->rpgAutoSkill)},
