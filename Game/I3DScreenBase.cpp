@@ -66,6 +66,7 @@ void CI3DScreenBase::StoreSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::OnActivate()
 {
+    journalTopicTarget = -1;
     eKickMode = KM_NONE;
 
     bNeedAutosave = false;
@@ -374,7 +375,7 @@ void CI3DScreenBase::OnLButtonDown(UINT nFlags, CPoint point)
         {
             pI3D->BeginFX("buttons\\base\\click1.wav");
             szBriefing = szBriefings[ht + nPos];
-            GameJournal::Event("WORLD", "interaction", "action=talk topic=%s target=%d", GameJournal::Quote(szBriefing).c_str(), pPersonToTalk?pPersonToTalk->GetID():-1);
+            GameJournal::Event("WORLD", "interaction", "action=talk topic=%s target=%d", GameJournal::Quote(szBriefing).c_str(), journalTopicTarget);
             RemoveAllAreas();
             PlayBriefing(false);
         }
@@ -2050,6 +2051,7 @@ void CI3DScreenBase::AddWalkingUnit(CUnit *pUClient, CPlot3D ptDest, CPlot3D rot
 void CI3DScreenBase::InitTopicMode(CUnit *pUnit)
 {
     int nUnitID = pUnit->GetID();
+    journalTopicTarget = nUnitID;
     FillBriefingsList(nUnitID);
     if (szBriefings.GetSize() > 0)
     {

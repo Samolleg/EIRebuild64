@@ -3811,8 +3811,9 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
                     if (CItemQuick *item = lpUnit->GetQItem(slot))
                         quickScience = Max(quickScience, int(item->GetSkillModifier(RPGMSKL_SCIENCE)));
             tool.dwSkill += Float2Int(fpOurSkill) + quickScience;
+            const int journalActor = lpUnit->GetID(), journalTarget = pTarget->GetID();
             const bool journalApplied=pTarget->ApplyScience(tool, GetUnit());
-            GameJournal::Event("COMBAT", "skill", "actor=%d target=%d skill=science result=%d", lpUnit->GetID(), pTarget->GetID(), journalApplied);
+            GameJournal::Event("COMBAT", "skill", "actor=%d target=%d skill=science result=%d", journalActor, journalTarget, journalApplied);
             if (!journalApplied)
                 InformFailure(ACK_HERO_REFUSE_SCIENCE_FAILED);
         }
@@ -3839,6 +3840,12 @@ void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortio
     auto weapon=mod?mod->AttackWeapon(attackPortion):std::shared_ptr<CItemWeapon>();
     CItemWeapon*usedWeapon=weapon?weapon.get():lpUnit->GetCurrentQWeapon();
     const bool spellLeftHand=mod&&mod->AttackIsLeft(attackPortion);
+    GameJournal::SpellObservation journalSpell;
+    CPlot3D journalPosition;
+    if (activeSkillCode) {
+        journalSpell = GameJournal::CaptureSpell(lpUnit, pTarget);
+        journalPosition = pTarget->GetCP();
+    }
     // Keep the launch weapon alive through delivery and its trigger spell.
     struct Cleanup{CModPackage*mod;SRPGAttackPortion&ap;~Cleanup(){if(mod)mod->ForgetAttack(ap);}} cleanup{mod,attackPortion};
     // Keep JMV staff projectiles; the retail/ASI path uses an arrow figure.
@@ -3913,7 +3920,7 @@ void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortio
         TraceMeleeReach(2, pTarget, usedWeapon, -1, hpBefore,
                         victimStats ? victimStats->GetCurrentHP() : -1);
     }
-    if(activeSkillCode) GameJournal::ObserveSpell(lpUnit, pTarget, activeSkillCode, -1, 1, pTarget->GetCP().x, pTarget->GetCP().y, pTarget->GetCP().z);
+    if(activeSkillCode) GameJournal::ObserveSpell(journalSpell, activeSkillCode, -1, 1, journalPosition.x, journalPosition.y, journalPosition.z);
     if(origin != AttackCallbackOrigin::Original && applyWeaponSpell)UseCurrentWeaponSpell(pTarget,usedWeapon,spellLeftHand);
     // produce some sound so enemies should know that you are doing something
     if (attackPortion.fBackStabMultiplier == 1) // not a backstab
