@@ -300,10 +300,24 @@ void CEffectSpell::AddRemoveDangerArea(int nKind, BOOL bAdd)
 /////////////////////////////////////////////////////////////////////////////////////
 // !!! Create different effects
 /////////////////////////////////////////////////////////////////////////////////////
+// Loaded object references can be empty after their target has disappeared.
+// Use the existing FINISH path; casterless and position-targeted spells remain valid.
+static bool SpellTargetMissing(CMapObject* target, DWORD id, int phase)
+{
+    if (target)
+        return false;
+    GameJournal::Event("SPELL", "target_missing", "id=%u kind=%u phase=%d", id, id >> 16, phase);
+    return true;
+}
 void CEffectSpell::CreateArrow(const CPlot3D &ptSrc, CMapObject *pTarg, ETypeIDs tid,
                                float fpParticleScale, const char *pszSound, const CPlot3D &color,
                                float fpLightRange)
 {
+    if (SpellTargetMissing(pTarg, spell.GetSubtypeID(), castPhase))
+    {
+        castPhase = CP_FINISH;
+        return;
+    }
     CEffectArrow *pArrow;
     pArrow = (CEffectArrow *)((CEffectManager *)pWS->GetEffectManager())
                  ->CreateData(ETypeIDs(HPC_EFFECTARROW));
@@ -668,6 +682,11 @@ void CEffectSpell::StartSpell(int nKind)
         break;
     case SPELL_ID_LIGHTNING:
     case SPELL_ID_CURSEMAGIC:
+        if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
         CreateLightningToUnit(ptSrc, pTarget, pWho, GetShowPower(), nKind == SPELL_ID_CURSEMAGIC);
         CreateSound(FALSE, "magic\\lightning\\start.wav", GetCP(), CPlot3D(0, 0, 0));
         CreateLight(pTarget->GetUnitHeadPosition(), GetLightColor(), GetLightRadius(),
@@ -912,6 +931,11 @@ void CEffectSpell::StartSpell(int nKind)
         }
         break;
     case SPELL_ID_HEALING:
+        if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
         if (pTarget->WhoAmI() == HPC_UNIT)
         {
             ((CUnitServer *)((CUnit *)pTarget)->GetUnitSpecific())->Heal(GetPower());
@@ -929,6 +953,11 @@ void CEffectSpell::StartSpell(int nKind)
             castPhase = CP_FINISH;
         break;
     case SPELL_ID_CHARM:
+        if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
         if (pTarget->WhoAmI() == HPC_UNIT && !pWho.IsEmpty() && pWho->WhoAmI() == HPC_UNIT)
         {
             CUnitServer *pTargServer = (CUnitServer *)((CUnit *)pTarget)->GetUnitSpecific();
@@ -991,6 +1020,11 @@ void CEffectSpell::DeliverSpell(int nKind)
     {
     case SPELL_ID_RICKMAGIC:
     case SPELL_ID_FIREARROW:
+        if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
         if (pEffect)
         {
             SetCP(pEffect->GetCP());
@@ -1016,6 +1050,11 @@ void CEffectSpell::DeliverSpell(int nKind)
             castPhase = CP_FINISH;
         break;
     case SPELL_ID_ACIDRAY:
+        if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
         if (pEffect)
         {
             SetCP(pEffect->GetCP());
@@ -1397,6 +1436,11 @@ void CEffectSpell::ActionSpell(int nKind)
         }
         break;
     case SPELL_ID_POSSESSION:
+        if (SpellTargetMissing(pTarget, spell.GetSubtypeID(), castPhase))
+        {
+            castPhase = CP_FINISH;
+            break;
+        }
         if (!pWho.IsEmpty() && pWho->WhoAmI() == HPC_UNIT)
         {
             CPlayer *pPlayer = ((CUnit *)pWho)->GetOwner();
