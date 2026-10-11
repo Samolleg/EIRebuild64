@@ -2,10 +2,13 @@
 #define NOMINMAX
 #endif
 #include "E1Scene.h"
+#include "E1AmbientEffects.h"
 #include "E1Terrain.h"
 #include "E1World.h"
 #include "ground_cover.h"
+#include "retained_static_submission.h"
 #include "world_scene_algorithms.h"
+#include <set>
 
 namespace {
 struct CurrentAmbientFrame {
@@ -52,15 +55,125 @@ AmbientCacheState& ambient_cache() {
     return value;
 }
 
+struct CreatedGroundFootprint {
+    owned::VisualResourceIncarnation creator{};
+    std::uint64_t world = 0;
+    std::int32_t tick = 0;
+    float center_x = 0, center_y = 0, half_extent = 0;
+    bool walks = false, captured = false;
+    owned::ground_cover::FootprintSplat stamp{};
+};
+std::map<const void*, CreatedGroundFootprint> created_ground_footprints;
+std::vector<owned::ground_cover::FootprintSplat> published_ground_footprints;
+std::vector<owned::FootprintTrailPoint> published_ground_trails;
+std::uint64_t published_ground_world = 0;
+bool published_ground_valid = false;
+
 const owned::TextureCpuAsset* tree_atlas(const owned::RetainedTerrainSourceSnapshot& terrain) noexcept {
     if (!terrain.map) return nullptr;
     const auto found = terrain.map->textures.find("tree02");
     return found != terrain.map->textures.end() && found->second && found->second->source
         ? found->second.get() : nullptr;
 }
+
+}
+
+namespace OwnedRender {
+void E1ResetGroundCoverFootprints() noexcept {
+    created_ground_footprints.clear();
+    published_ground_footprints.clear();
+    published_ground_trails.clear();
+    published_ground_world = 0;
+    published_ground_valid = false;
+}
+
+void E1RegisterGroundCoverFootprint(const void* host_marker, const void* owner,
+    std::uint64_t world, std::int32_t tick, float center_x, float center_y) noexcept try {
+    if (!host_marker || !owner || !world || !E1Scene().CurrentWorld(world) ||
+        !std::isfinite(center_x) || !std::isfinite(center_y)) return;
+    const auto creator = E1Scene().Resource(owner);
+    if (!creator.serial) return;
+    created_ground_footprints[host_marker] =
+        {creator, world, tick, center_x, center_y, 0.f, false, false, {}};
+} catch (...) {
+    published_ground_footprints.clear();
+    published_ground_trails.clear();
+    published_ground_valid = false;
+}
+
+bool E1PublishGroundCoverFootprints(const std::vector<E1GroundCoverFootprintFact>& facts,
+    bool enabled) noexcept try {
+    published_ground_footprints.clear();
+    published_ground_trails.clear();
+    published_ground_valid = false;
+    CurrentAmbientFrame frame;
+    if (!current_ambient_frame(frame)) return false;
+    published_ground_world = frame.world;
+    std::set<const void*> current_markers;
+    for (const auto& fact : facts) if (fact.host_marker) current_markers.insert(fact.host_marker);
+    for (auto item = created_ground_footprints.begin(); item != created_ground_footprints.end();) {
+        if (item->second.world != frame.world || !current_markers.count(item->first))
+            item = created_ground_footprints.erase(item);
+        else ++item;
+    }
+    if (enabled) for (const auto& fact : facts) {
+        if (!fact.host_marker || !fact.visible || fact.remaining_segments <= 0 || fact.fade_segments <= 0) continue;
+        const auto found = created_ground_footprints.find(fact.host_marker);
+        if (found == created_ground_footprints.end()) continue;
+        auto& created = found->second;
+        if (created.world != frame.world) continue;
+        if (!created.captured) {
+            for (const auto& unit : frame.visuals->entities) {
+                if (unit.resource.signed_id != created.creator.signed_id ||
+                    unit.resource.serial != created.creator.serial) continue;
+                if (unit.height_valid && retained_visual_sample_shown(unit, false) &&
+                    !unit.values.dead && !unit.values.invisible) {
+                    created.stamp = owned::ground_cover::live_unit_splat(
+                        created.center_x, created.center_y, unit.envelope_radius);
+                    created.half_extent = owned::snow_trail_extent(unit.values.target_half_extent);
+                    created.walks = owned::ground_cover::unit_presses_cover(unit.values.locomotion);
+                    created.captured = true;
+                }
+                break;
+            }
+        }
+        if (!created.captured) continue;
+        const float visibility = owned::ground_cover::footprint_visibility(
+            double(fact.remaining_segments), fact.fade_segments);
+        if (created.stamp.effect[2] > 0)
+            published_ground_footprints.push_back(
+                owned::ground_cover::footprint_splat(true, created.stamp, visibility));
+        if (created.walks && visibility > 0)
+            published_ground_trails.push_back({owned::snow_trail_key(created.creator), created.tick,
+                created.center_x, created.center_y, created.half_extent});
+    }
+    published_ground_valid = true;
+    return true;
+} catch (...) {
+    published_ground_footprints.clear();
+    published_ground_trails.clear();
+    published_ground_valid = false;
+    return false;
+}
 }
 
 namespace owned {
+bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
+    std::vector<FootprintTrailPoint>* trail_points) noexcept {
+    output.clear();
+    if (trail_points) trail_points->clear();
+    if (!published_ground_valid || published_ground_world != OwnedRender::E1WorldGeneration()) return false;
+    try {
+        output = published_ground_footprints;
+        if (trail_points) *trail_points = published_ground_trails;
+        return true;
+    } catch (...) {
+        output.clear();
+        if (trail_points) trail_points->clear();
+        return false;
+    }
+}
+
 bool bridge_ground_cover_units(float center_x, float center_y, float radius,
     std::vector<std::array<float,4>>& output, std::vector<GroundUnitDetail>* details,
     std::vector<GroundUnitTrail>* trails) noexcept {

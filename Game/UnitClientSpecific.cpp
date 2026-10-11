@@ -531,7 +531,7 @@ void CUnitClientSpecific::StepsSound()
                         break;
                     }
                     //
-                    int nBloodType = theWorld.AddFootPrints(plot.x - axis.x * fSizeX / 2,
+                    int nBloodType = theWorld.AddFootPrints(lpUnit, plot.x - axis.x * fSizeX / 2,
                                                             plot.y - axis.y * fSizeY / 2, fSizeX,
                                                             fSizeY, fAngle,
                                                             (bLeft << 16) | dwFootType, fDetection,

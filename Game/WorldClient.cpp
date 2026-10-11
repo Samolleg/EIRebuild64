@@ -71,6 +71,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
 #include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E1AmbientEffects.h"
 #include "OwnedRender/E2LoadReveal.h"
 #include "WorldServer.h"
 #include "GeometryManager.h"
@@ -420,6 +421,7 @@ BOOL CWorldClient::Create()
 {
     CWorldBase::Create();
     OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
     //
     szTexturesPath = GetWorkPath() + "textures\\";
     //
@@ -628,6 +630,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 void CWorldClient::Destroy()
 {
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
     OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     ModWorldBackground::Unload();
@@ -2347,9 +2350,11 @@ BOOL CWorldClient::NewItems(CMemorySave &packet)
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
     OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
     IWorldConnector.LMPClientRecvZone();
     CString szZone, szMob;
     EGMZoneSky sky;
@@ -3555,6 +3560,20 @@ BOOL CWorldClient::Draw3DScene()
         for_each(visibleUnits.begin(), visibleUnits.end(), lbAddObjScreenRects);
         pRend->FlushBuffers();
     }
+    // Publish only footprints with a known creator and current native lifetime.
+    try
+    {
+        std::vector<OwnedRender::E1GroundCoverFootprintFact> facts;
+        facts.reserve(footprints.size());
+        for (const auto &print : footprints)
+            facts.push_back({&print, print.GetRemainingSegments(), print.GetFadeoutSegments(),
+                             !print.IsInvisible()});
+        OwnedRender::E1PublishGroundCoverFootprints(facts, theSettings.nTerrainEnableFootprints != 0);
+    }
+    catch (...)
+    {
+        OwnedRender::E1PublishGroundCoverFootprints({}, false);
+    }
     // draw terrain prints (footprints, blood and fireprints)
     if (!bloodprints.empty() || !footprints.empty() || !fireprints.empty())
     {
@@ -3897,8 +3916,8 @@ void CWorldClient::AddBloodPrints(float fX, float fY, float fSize, float fFinalS
     }
 }
 // вернуть тип крови, в которую вступили
-int CWorldClient::AddFootPrints(float fX, float fY, float fSizeX, float fSizeY, float fRotate,
-                                int nType, float fDetection, bool bVisible, int nBloodType)
+int CWorldClient::AddFootPrints(CMapObject *owner, float fX, float fY, float fSizeX, float fSizeY,
+                                float fRotate, int nType, float fDetection, bool bVisible, int nBloodType)
 {
     bool bInBlood = false;
     if (theSettings.nTerrainEnableFootprints)
@@ -3935,9 +3954,14 @@ int CWorldClient::AddFootPrints(float fX, float fY, float fSizeX, float fSizeY, 
                 nFadeoutTime = pDesc->weather.nFadeoutTime;
             }
             if ((fPower > 0) && (nLifetime > 0) && (nFadeoutTime > 0))
+            {
                 footprints.push_back(CFootPrints(fX, fY, fSizeX, fSizeY, fRotate, fPower, nLifetime,
                                                  nFadeoutTime, nType, fDetection, bVisible,
                                                  nBloodType));
+                const auto &print = footprints.back();
+                OwnedRender::E1RegisterGroundCoverFootprint(&print, owner, ownedRenderGeneration,
+                    theWorld.GetSegmentTimeCounter(), print.GetCenterX(), print.GetCenterY());
+            }
         }
     }
     return bInBlood ? nBloodType : -1;
