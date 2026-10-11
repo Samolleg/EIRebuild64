@@ -8,6 +8,18 @@
   <Import Project="Renderer.props" />
   <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_draw.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_tables.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\render_profiler.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\attribution_ledger.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\system_telemetry.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay_config.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\graphics_settings.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_atlas_mutation.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_store.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_loader.cpp" />
@@ -42,5 +54,6 @@
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
   </ItemGroup>
 
+  <ItemDefinitionGroup><ClCompile><PreprocessorDefinitions>EID3D11_EMBEDDED;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
