@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "TextureManager.h"
+#include "ModHDEquipmentLayer.h"
 #include "GameJournal.h"
 #include "ModSecondaryAtlas.h"
 #include "ModPrimaryAtlas.h"
@@ -418,7 +419,8 @@ DWORD textureTypeToMMPFormat(ETypeIDs eTextureTypeID)
     case TFTID_8888:
         return MMP_FORMAT_8888;
     default:
-        ReportError("Can't find texture format %d.\n", eTextureTypeID);
+        GameJournal::Event("ERROR", "texture_format_skipped", "reason=unknown_type type_id=%d", eTextureTypeID);
+        ReportWarning("Can't find texture format %d.\n", eTextureTypeID);
         return -1;
     }
 }
@@ -433,6 +435,11 @@ LPTEXTURE CTextureManager::CreateInterfaceTexture(DWORD dwSizeX, DWORD dwSizeY,
     lpTexture->SetSize(dwSizeX, dwSizeY);
 
     DWORD mmpFormat = textureTypeToMMPFormat(eTextureTypeID);
+    if (mmpFormat == DWORD(-1))
+    {
+        lpTexture->Release();
+        return nullptr;
+    }
     if (mmpFormat == 0)
         return nullptr;
     DXGI_FORMAT texFormat;
@@ -466,8 +473,12 @@ LPTEXTURE CTextureManager::CreateShadowTexture()
     if (pRend->FindTextureFormat(MMP_FORMAT_4444, texFormat))
         lpTexture->SetTextureFormat(texFormat);
     else
-        return reinterpret_cast<LPTEXTURE>(
-            ReportError("Can't find texture format %d.\n", TFTID_4444));
+    {
+        lpTexture->Release();
+        GameJournal::Event("ERROR", "shadow_texture_skipped", "reason=unsupported_format format=0x%08X", MMP_FORMAT_4444);
+        ReportWarning("Can't find texture format %d.\n", TFTID_4444);
+        return NULL;
+    }
     // fill mmp header to create surfaces
     hdr.InitializeDefaultFormat4444();
     hdr.dwSignature = MMP_SIGNATURE;
@@ -500,8 +511,12 @@ LPTEXTURE CTextureManager::GetShadowBuffer()
     if (pRend->FindTextureFormat(MMP_FORMAT_4444, texFormat))
         lpTexture->SetTextureFormat(texFormat);
     else
-        return reinterpret_cast<LPTEXTURE>(
-            ReportError("Can't find texture format %d.\n", TFTID_4444));
+    {
+        lpTexture->Release();
+        GameJournal::Event("ERROR", "shadow_texture_skipped", "reason=unsupported_format format=0x%08X", MMP_FORMAT_4444);
+        ReportWarning("Can't find texture format %d.\n", TFTID_4444);
+        return NULL;
+    }
     // fill mmp header to create surfaces
     hdr.InitializeDefaultFormat4444();
     hdr.dwSignature = MMP_SIGNATURE;
@@ -574,9 +589,13 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
         if (pRend->FindTextureFormat(dwTextureFormat, texFormat))
             lpTexture->SetTextureFormat(texFormat);
         else
-            return ReportError("CTextureManager::LoadTexture.\n Can't find desired texture format "
-                               "%d for texture \"%s\".\n",
-                               tidTextureFormat, lpTexture->GetName());
+        {
+            GameJournal::Event("ERROR", "texture_load_skipped",
+                "name=%s reason=unsupported_source_format format=0x%08X", lpTexture->GetName(), dwTextureFormat);
+            ReportWarning("CTextureManager::LoadTexture.\n Can't find desired texture format "
+                          "%d for texture \"%s\".\n", tidTextureFormat, lpTexture->GetName());
+            return FALSE;
+        }
         //
         return lpTexture->Load(pRend, szString);
     }
@@ -600,9 +619,15 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
                     pRend->FindTextureFormat(MMP_FORMAT_4444, texFormat))
                     lpTexture->SetTextureFormat(texFormat);
                 else
-                    return ReportError("CTextureManager::LoadTexture.\n Can't find texture format "
-                                       "for texture \"%s\".\n",
-                                       lpTexture->GetName());
+                {
+                    const DWORD format=lpHdr->dwFormat;
+                    CloseFile(reinterpret_cast<BYTE*>(lpHdr));
+                    GameJournal::Event("ERROR", "texture_load_skipped",
+                        "name=%s reason=unsupported_source_format format=0x%08X", lpTexture->GetName(), format);
+                    ReportWarning("CTextureManager::LoadTexture.\n Can't find texture format "
+                                  "for texture \"%s\" (0x%08X).\n", lpTexture->GetName(), format);
+                    return FALSE;
+                }
             }
             BOOL bRetVal;
             if (wStartMipMapLevel >= lpHdr->dwMipMapLevel)
@@ -637,9 +662,15 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
             if (pRend->FindBestTextureFormat(reinterpret_cast<SMMPFileHeader *>(lpData), texFormat))
                 lpTexture->SetTextureFormat(texFormat);
             else
-                return ReportError("CTextureManager::LoadTexture.\n Can't find texture format for "
-                                   "texture \"%s\".\n",
-                                   lpTexture->GetName());
+            {
+                const DWORD format=reinterpret_cast<SMMPFileHeader*>(lpData)->dwFormat;
+                delete[] lpData;
+                GameJournal::Event("ERROR", "texture_load_skipped",
+                    "name=%s reason=unsupported_source_format format=0x%08X", lpTexture->GetName(), format);
+                ReportWarning("CTextureManager::LoadTexture.\n Can't find texture format for "
+                              "texture \"%s\" (0x%08X).\n", lpTexture->GetName(), format);
+                return FALSE;
+            }
             lpTexture->Load(pRend, reinterpret_cast<SMMPFileHeader *>(lpData), wStartMipMapLevel);
 
             delete[] lpData;
@@ -692,9 +723,15 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture, LPCSTR pszDirectoryName)
     if (pRend->FindBestTextureFormat(reinterpret_cast<SMMPFileHeader *>(lpData), texFormat))
         lpTexture->SetTextureFormat(texFormat);
     else
-        return ReportError(
-            "CTextureManager::LoadTexture.\n Can't find texture format for texture \"%s\".\n",
-            lpTexture->GetName());
+    {
+        const DWORD format=reinterpret_cast<SMMPFileHeader*>(lpData)->dwFormat;
+        delete[] lpData;
+        GameJournal::Event("ERROR", "texture_load_skipped",
+            "name=%s reason=unsupported_source_format format=0x%08X", lpTexture->GetName(), format);
+        ReportWarning("CTextureManager::LoadTexture.\n Can't find texture format for texture \"%s\" (0x%08X).\n",
+            lpTexture->GetName(), format);
+        return FALSE;
+    }
     lpTexture->Load(pRend, reinterpret_cast<SMMPFileHeader *>(lpData), wStartMipMapLevel);
 
     delete[] lpData;
@@ -887,8 +924,15 @@ int CTextureManager::PutLayers(DWORD *pResultLayer, const CStringArray &szTextur
             if ((pMMPHeader->dwDimentionX != dwTextureDimention) ||
                 (pMMPHeader->dwDimentionY != dwTextureDimention))
             {
+                GameJournal::Event("ERROR", "character_layer_skipped",
+                    "name=%s reason=dimensions actual=%ux%u expected=%ux%u",
+                    (LPCSTR)szTextures[i], pMMPHeader->dwDimentionX, pMMPHeader->dwDimentionY,
+                    dwTextureDimention, dwTextureDimention);
+                ReportWarning("Skipping character layer %s with dimensions %ux%u; expected %ux%u",
+                    (LPCSTR)szTextures[i], pMMPHeader->dwDimentionX, pMMPHeader->dwDimentionY,
+                    dwTextureDimention, dwTextureDimention);
                 CloseFile(pBaseData);
-                return ReportError("Texture \"%s\" dimentions are incorrect.\n", (LPCSTR)szTextures[i]);
+                continue;
             }
             if (pMMPHeader->dwFormat == MMP_FORMAT_PNT3)
             {
@@ -929,7 +973,12 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
         {
             CString name = set.szTextures[layer];
             if (name.GetLength() < 10 || name.Right(4).CompareNoCase(".mmp") != 0)
-                return ReportError("Invalid character layer name: %s", (LPCSTR)name);
+            {
+                GameJournal::Event("ERROR", "character_layer_skipped", "name=%s reason=invalid_name", (LPCSTR)name);
+                ReportWarning("Skipping invalid character layer name: %s", (LPCSTR)name);
+                hd.szTextures.Add("__EIRebuild_invalid_character_layer__.mmp");
+                continue;
+            }
             name = name.Left(name.GetLength() - 4);
             if (name.Find("skin_") < 0) name = CString("unhuma") + name.Mid(6);
             name += set.characterAtlas == 1 ? ".x4.mmp" : ".x2.mmp";
@@ -1049,17 +1098,30 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
             int index = set.equipmentSlots[slot];
             if (index < 0 || index >= set.szTextures.GetSize()) continue;
             auto hdrLayer = reinterpret_cast<SMMPFileHeader *>(GetFile(set.szTextures[index]));
-            if (!hdrLayer) { ReportWarning("Missing HD equipment layer %s", (LPCSTR)set.szTextures[index]); continue; }
-            if (hdrLayer->dwDimentionX != 512 || hdrLayer->dwDimentionY != 512 ||
-                (hdrLayer->dwFormat != MMP_FORMAT_PNT3 && hdrLayer->dwFormat != MMP_FORMAT_PAINT32))
+            if (!hdrLayer) {
+                GameJournal::Event("ERROR", "hd_equipment_layer_skipped",
+                    "name=%s reason=missing expected=512x512 formats=PNT3,PAINT32,8888",
+                    (LPCSTR)set.szTextures[index]);
+                ReportWarning("Missing HD equipment layer %s", (LPCSTR)set.szTextures[index]);
+                continue;
+            }
+            if (!ModHDEquipmentLayer::Supported(hdrLayer->dwDimentionX, hdrLayer->dwDimentionY,
+                                                hdrLayer->dwFormat))
             {
+                GameJournal::Event("ERROR", "hd_equipment_layer_skipped",
+                    "name=%s reason=unsupported_layer dimensions=%ux%u format=0x%08X expected=512x512 formats=PNT3,PAINT32,8888",
+                    (LPCSTR)set.szTextures[index], hdrLayer->dwDimentionX, hdrLayer->dwDimentionY,
+                    hdrLayer->dwFormat);
+                ReportWarning("Skipping incompatible HD equipment layer %s (%ux%u, format 0x%08X)",
+                    (LPCSTR)set.szTextures[index], hdrLayer->dwDimentionX, hdrLayer->dwDimentionY,
+                    hdrLayer->dwFormat);
                 CloseFile(reinterpret_cast<BYTE *>(hdrLayer));
-                return ReportError("Invalid HD equipment layer %s", (LPCSTR)set.szTextures[index]);
+                continue;
             }
             std::fill(layer.begin(), layer.end(), 0);
             theRenderer.GetGraphicsProcessor()->PutOneLayer(layer.data(),
                 reinterpret_cast<DWORD *>(hdrLayer->GetMipLevelData(0)), 512 * 512,
-                hdrLayer->dwFormat == MMP_FORMAT_PNT3);
+                ModHDEquipmentLayer::UsesRunLength(hdrLayer->dwFormat));
             CloseFile(reinterpret_cast<BYTE *>(hdrLayer));
             int x = (slot == 1 || slot == 3) ? 512 : 0;
             int y = slot < 2 ? 512 : 0;
@@ -1109,7 +1171,11 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     }
     if (!pResultMipLevel || !pMipLevel) { GameJournal::AllocationFailure("compose_layer_null"); return FALSE; }
     if (file.Open(szResultFileName, CFile::modeWrite | CFile::modeCreate) == FALSE)
-        return ReportError("Can't open file \"%s\" to write result texture.\n", szResultFileName);
+    {
+        GameJournal::Event("ERROR", "character_atlas_write_skipped", "path=%s", (LPCSTR)szResultFileName);
+        ReportWarning("Can't open file \"%s\" to write result texture.\n", szResultFileName);
+        return FALSE;
+    }
     struct PartialMmpFile
     {
         CFile &file;
@@ -1223,7 +1289,8 @@ BOOL CTextureManager::ComposeLayer(const STextureSetDescription &set, const CStr
     }
     else
     {
-        ReportError("Can't open file \"%s\" to write result layer texture.\n", szResultFileName);
+        GameJournal::Event("ERROR", "character_layer_write_skipped", "path=%s", (LPCSTR)szResultFileName);
+        ReportWarning("Can't open file \"%s\" to write result layer texture.\n", szResultFileName);
         mm_free(pResultLayer);
         return FALSE;
     }
