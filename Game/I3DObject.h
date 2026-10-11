@@ -61,7 +61,7 @@ class CI3DSurface
     friend struct E4CampAccess;
 private:
     CInterface3D *pI3D;
-    HDC hDC; // used when locked
+    HDC hDC = nullptr; // used when locked
     DWORD dwBlitFlags;
     std::unique_ptr<CDXGISurface> pSurface;
     std::unique_ptr<CDXGISurface> pCopy;
@@ -84,6 +84,8 @@ public:
     CI3DSurface(CInterface3D *pI3D, CString szName);
 
     void SetRect(CRect rect);
+    // Discards pixels on resize; the text owner must redraw after reflow.
+    void SetRectForRedraw(CRect rect);
     void Move(CPoint ptLeftTop);
 
     void Show(BOOL bShow, BOOL bNeedStore = FALSE);

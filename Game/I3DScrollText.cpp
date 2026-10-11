@@ -57,12 +57,15 @@ void CI3DScrollText::SetText(LPCSTR pszText)
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DScrollText::SetRect(CRect rect)
 {
-    CI3DScrollBar::SetRect(rect);
-
+    if (rect.Width() <= 14 || rect.Height() <= 0)
+        throw std::invalid_argument("Scroll text requires room for text and its scrollbar");
+    // Allocate first: failed growth must not leave new hit/line rectangles
+    // pointing beyond the old texture. Moving alone does not resize storage.
     CI3DSurface *pSurface = GetSurface(0);
     if (pSurface)
-        pSurface->Move(rect.TopLeft());
+        pSurface->SetRectForRedraw(rect);
 
+    CI3DScrollBar::SetRect(rect);
     m_rectText = CRect(CPoint(0, 0), rect.Size());
     m_rectText.right -= 14;
     RecalculateRange();

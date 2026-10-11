@@ -315,6 +315,30 @@ void CI3DSurface::SetRect(CRect rectr)
     pI3D->VirtualToScreen(rect);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DSurface::SetRectForRedraw(CRect desired)
+{
+    pI3D->VirtualToScreen(desired);
+    if (desired.Width() <= 0 || desired.Height() <= 0)
+        throw std::invalid_argument("Text surface requires a positive rectangle");
+    if (hDC)
+        throw std::logic_error("Cannot resize a locked text surface");
+
+    if (!pSurface || nRealWidth != desired.Width() || nRealHeight != desired.Height())
+    {
+        // Prepare before replacing live storage. A failed allocation leaves the
+        // previous surface, rectangle and readback/backup state intact.
+        auto replacement = std::make_unique<CDXGISurface>(pI3D->GetD3D(), desired.Width(), desired.Height());
+        pSurface.swap(replacement);
+        nRealWidth = desired.Width();
+        nRealHeight = desired.Height();
+        pCopy.reset();
+        nCopyBytes = 0;
+        pixelBuffer.reset();
+        pixelBufferValid = false;
+        pixelReadbackStatus = E_PENDING;
+    }
+    rect = desired;
+}
 void CI3DSurface::GetFromScreen()
 {
     if (!pSurface)
