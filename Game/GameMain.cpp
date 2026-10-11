@@ -1264,9 +1264,12 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
     return RunGame(instance, previous, command, show);
 }
 
+bool InspectRendererFacadeCheckCommandLine(int& result);
+
 int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
 {
     int profileResult=0;
+    if (InspectRendererFacadeCheckCommandLine(profileResult)) return profileResult;
     if(InspectSettingsProfileCommandLine(profileResult))return profileResult;
     const int cliResult = GuardLegacyEntry(instance, previous, show);
     if (cliResult != ModCli::NotCli) return cliResult;
