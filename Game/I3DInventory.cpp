@@ -3,6 +3,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
+#include "dx11/RendererDX11.h"
 #include "I3DInventory.h"
 #include "TextManager.h"
 #include "FigureManager.h"
@@ -326,6 +327,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
         return;
     pFig->SetTexture(pTex);
+    pFig->SetDefaultSpecular(0xff000000);
     pFig->SetRelativeToScreen(item.fX, item.fY, item.fZ);
     pFig->SetScale(item.fZ * VIEWING_ANGLE_TAN * item.fPixSize * .75f / 800);
     pFig->SetMaterial(pMat1);
@@ -450,11 +452,13 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     pFig->SetDefaultColor(
         D3DRGBA(pFig->GetAmbient().x, pFig->GetAmbient().y, pFig->GetAmbient().z, 1));
     pFig->UseDefaultColors(TRUE);
-    if (item.pItem->GetSpellsCount() != 0)
-        theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
+    DWORD oldSpecular=FALSE;
+    pRend->GetRenderState(D3DRENDERSTATE_SPECULARENABLE,&oldSpecular);
+    pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,item.pItem->GetSpellsCount()!=0);
+    const bool oldColorSum=pRend->GetD3D()->SetItemColorSum(true);
     pFig->Draw(pRend);
-    if (item.pItem->GetSpellsCount() != 0)
-        theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
+    pRend->GetD3D()->SetItemColorSum(oldColorSum);
+    pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,oldSpecular);
 
     if (IsItemSpell(item.pItem))
     {
@@ -533,6 +537,7 @@ void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
     if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
         return;
     pFig->SetTexture(pTex);
+    pFig->SetDefaultSpecular(0xff000000);
     pFig->SetRelativeToScreen(head.fX, head.fY, head.fZ);
     pFig->SetScale(head.fZ * VIEWING_ANGLE_TAN * head.fPixSize * .75f / 800);
     pFig->SetMaterial(pMat1);
