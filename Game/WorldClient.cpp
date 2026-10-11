@@ -70,6 +70,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
+#include "OwnedRender/E2LoadReveal.h"
+#include "WorldServer.h"
 #include "GeometryManager.h"
 
 #include "I3DMain.h"
@@ -3038,6 +3040,15 @@ BOOL CWorldClient::Draw()
     fog.fog = {ownedWorld.fog_range[0], ownedWorld.fog_range[1], ownedWorld.fog_range[2],
         ownedWorld.fog_projection[2], ownedWorld.fog_projection[1], ownedWorld.fog_projection[0]};
     OwnedRender::E1WorldDraw worldDraw(this, ownedRenderGeneration, frameValues);
+    OwnedRender::E2LoadRevealFrame(owned::bridge_current_world_epoch(),
+        theWorldServer.GetServerMode() == SERV_MODE_LOCAL && theWorldServer.IsMapLoaded() &&
+        theWorldServer.curInterface == IFACE_MISSION,
+        IWorld.IsMissionCombatPause() || IWorld.IsCombatPause(),
+        [](void* context, bool pause) -> bool {
+            auto* world = static_cast<CWorldClient*>(context);
+            if (!world->pPlayer || !world->pPlayer->GetPlayerSpecific()) return false;
+            world->CombatPause(pause); return true;
+        }, this);
     const bool sourceSky = pRend->GetD3D()->BeginWorld(ownedWorld);
     const bool embeddedSky = OwnedRender::E1ClaimSky(CheckFlag(WC_RENDER_SKY) && pSky);
     const bool ownedSky = sourceSky || embeddedSky;
