@@ -165,6 +165,7 @@ bool CGeometryContainer::RemoveRange(const std::string &szRangeName)
     SGeometryRangeSW range = iter->second;
     // remove range
     ranges.erase(iter);
+    ownedFigureSources.Remove(szRangeName);
     ++ownedRevision;
     // remove range data
     plots4.RemoveAt(range.dwPlotsStart, range.dwNumPlots);

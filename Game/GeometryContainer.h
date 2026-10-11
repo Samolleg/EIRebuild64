@@ -6,6 +6,7 @@
 #include "FigureManager.h"
 
 #include <map>
+#include "OwnedRender/E1FigureSources.h"
 /////////////////////////////////////////////////////////////////////////////////////
 class CLight;
 class CMaterial;
@@ -37,6 +38,7 @@ class CGeometryContainer : public IGeometry
 private:
     // identification
     uint64_t ownedRevision = 1;
+    OwnedRender::E1FigureSources ownedFigureSources;
     float fStrength;
     float fGrace;
     float fTall;
@@ -59,6 +61,9 @@ public:
     CGeometryContainer(CGeometryManager *pManager, const std::string &szName, float fStrength,
                        float fGrace, float fTall, CModelResourceEntry *pModel);
     virtual ~CGeometryContainer() {}
+    OwnedRender::E1FigureSources& OwnedFigureSources() { return ownedFigureSources; }
+    std::shared_ptr<const owned::FigureCpuAsset> GetOwnedFigure(const std::string& name) const override
+    { return ownedFigureSources.Find(name); }
     // for use with geometry manager
     bool AddRange(const std::string &szRangeName, SXYZW4 *plots4, DWORD dwNumPlots, SXYZW4 *norms4,
                   DWORD dwNumNorms, CPlot2D *maps, DWORD dwNumMaps, SVertexComponents *components,

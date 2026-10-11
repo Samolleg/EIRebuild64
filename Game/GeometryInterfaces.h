@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 /////////////////////////////////////////////////////////////////////////////////////
 class CMaterial;
 class CLight;
@@ -38,6 +39,7 @@ public:
     ~SRangeExternals() { memset(this, 0, sizeof(*this)); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
+namespace owned { struct FigureCpuAsset; }
 class IGeometry : public CRefCount
 {
 protected:
@@ -52,6 +54,7 @@ public:
     {
     }
     virtual ~IGeometry() {}
+    virtual std::shared_ptr<const owned::FigureCpuAsset> GetOwnedFigure(const std::string& name) const = 0;
     //
     std::string GetName() const { return szName; }
     // work with extents
