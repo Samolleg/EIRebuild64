@@ -22,6 +22,12 @@ void clearFrame() noexcept {
 }
 namespace OwnedRender {
 void E1BeginFrame() noexcept { advance(frame); clearFrame(); }
+bool E1ReadWorldFrame(E1WorldFrame& output) noexcept {
+    output = {};
+    if (!activeDraw || !values.camera.valid) return false;
+    output = values;
+    return true;
+}
 bool E1ReadWorldLighting(owned::NativeWorldLighting& output) noexcept {
     output = {};
     if (!values.camera.valid || !values.lightingValid) return false;

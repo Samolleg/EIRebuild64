@@ -13,6 +13,9 @@ struct E1WorldFrame {
     bool lightingValid = false;
 };
 void E1BeginFrame() noexcept;
+// Returns one copied camera/fog/environment/light tuple during the active
+// world draw. Invalid subfields remain explicit in the returned snapshot.
+bool E1ReadWorldFrame(E1WorldFrame& output) noexcept;
 // Copies the current world's light; unavailable after an aborted/retired frame.
 bool E1ReadWorldLighting(owned::NativeWorldLighting& output) noexcept;
 bool E1ReadWorldEnvironment(owned::WorldEnvironment& output) noexcept;

@@ -17,6 +17,8 @@ int main() {
         check(!bridge_current_world_time(time) && time == -1);
         check(bridge_current_world_epoch() == 0);
         check(!bridge_world_draw_completion_snapshot().valid);
+        E1WorldFrame published;
+        check(!E1ReadWorldFrame(published) && !published.camera.valid);
         E1WorldFrame input;
         input.environment.valid = true;
         input.environment.game_hours = 49.5;
@@ -43,6 +45,11 @@ int main() {
             E1WorldDraw draw(&owner, 5, input);
             epoch = bridge_current_world_epoch();
             check(epoch != 0);
+            check(E1ReadWorldFrame(published) && published.camera.valid &&
+                published.camera.world_to_clip == input.camera.world_to_clip &&
+                published.fog.valid && published.fog.fog.projection_34 == 3 &&
+                published.environment.world_time == input.environment.world_time &&
+                published.lightingValid && published.lighting.sunlight_diffuse == input.lighting.sunlight_diffuse);
             check(E1ReadWorldLighting(lighting) && lighting.ambient == input.lighting.ambient &&
                 lighting.sunlight_diffuse == input.lighting.sunlight_diffuse &&
                 lighting.sunlight_direction == input.lighting.sunlight_direction);
@@ -60,6 +67,7 @@ int main() {
             E1RetireWorld(&foreign);
             check(bridge_current_world_epoch() == epoch && bridge_scene_world_to_clip_snapshot().valid);
             draw.Complete();
+            check(!E1ReadWorldFrame(published) && !published.camera.valid);
             draw.Complete();
             check(bridge_world_draw_completion_counter() == 1);
         }
