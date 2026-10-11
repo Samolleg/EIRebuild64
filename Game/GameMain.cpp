@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 #include "ErrorDialog.h"
 #include "SettingsProfile.h"
@@ -983,6 +984,7 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
     theInterface.CheckScreensMustDie();
+    if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;
     switch (message)
     {
     case WM_SYSKEYDOWN:
@@ -1054,6 +1056,9 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 /////////////////////////////////////////////////////////////////////////////////////
 LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == WM_KILLFOCUS || message == WM_SETFOCUS || message == WM_ACTIVATE || message == WM_ACTIVATEAPP ||
+        message == WM_CANCELMODE || message == WM_CAPTURECHANGED || message == WM_SIZE || message == WM_DESTROY || message == WM_NCDESTROY)
+        owned::camp_inventory_input(hWnd, message, wParam, lParam, false);
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
     WORD wID;
 

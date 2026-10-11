@@ -25,6 +25,7 @@ public:
         nMaxSize = nSize;
         RemoveExcess();
     }
+    bool Contains(const char* name) const { return loadedObjects.find(name) != loadedObjects.end(); }
     T *GetObject(const char *pszName);
     void FreeObjects();
 };

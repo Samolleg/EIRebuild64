@@ -13,6 +13,7 @@ class CDXGISurface;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DPolyArea
 {
+    friend struct E4CampAccess;
 private:
     CInterface3D *pI3D;
     CSimplyArray<CPoint, CPoint> points;
@@ -56,6 +57,7 @@ enum EBlitStyleFlag
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DSurface
 {
+    friend struct E4CampAccess;
 private:
     CInterface3D *pI3D;
     HDC hDC; // used when locked
@@ -128,6 +130,7 @@ public:
 class CI3DMapObjTranslation;
 class CI3DObject : public CBase3D, public CI3DHandler
 {
+    friend struct E4CampAccess;
 private:
     SBoundingVolume bv;
     CRect rect;

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 #include "ModPackage.h"
 #include "ModCampStats.h"
@@ -45,7 +46,7 @@ const int FRAMEADD_B_TO = 160;
 const int FRAMEADD_A_TO = 240;
 /////////////////////////////////////////////////////////////////////////////////////
 const int CAMP_NUM_AV_PERKS_VISIBLE = 23;
-const int CAMP_NUM_REAL_PERKS_VISIBLE = 10;
+
 const COLORREF CAMP_COLOR_SKILLS = RGB(228, 215, 167);
 const COLORREF CAMP_COLOR_SKILLS_DIS = RGB(130, 130, 130);
 // const COLORREF CAMP_COLOR_NAME = RGB( 255, 255, 255 );
@@ -204,6 +205,7 @@ void CI3DObjectInventory::SetSortMode(int nMode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInventory::OnIdle()
 {
+    if (E4CampAccess::Idle(this)) return;
     // bool bNeedCheckStopScroll = false;
     int nCurPos;
     float ftime = GetFrameTime();
@@ -555,6 +557,7 @@ void CI3DObjectInventoryItems::SetToItem(CItem *pItem)
             }
     }
 
+    if (E4CampAccess::SetToItem(this, int(fNewCurPos))) return;
     if (fNewCurPos >= 0)
     {
         if (fCurPos[nSortMode] < fNewCurPos - NUM_VISIBLE_ITEMS + 2)
@@ -664,6 +667,7 @@ int CI3DObjectInventoryItems::SortFunction2(CItem *pItem)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectInventoryItems::Draw(CRenderer *pRend)
 {
+    if (E4CampAccess::DrawGrid(this, pRend)) return TRUE;
     CItem* pVisItems[NUM_VISIBLE_ITEMS];
     SDrawItem item;
     int i;
@@ -744,6 +748,8 @@ void CI3DObjectInventoryItems::SetPriceType(EItemScreenKoeffs eNewType)
 /////////////////////////////////////////////////////////////////////////////////////
 CItem *CI3DObjectInventoryItems::GetMouseItem(CPoint point, int &nSlotType)
 {
+    CItem* campItem = nullptr;
+    if (E4CampAccess::MouseItem(this, point, nSlotType, campItem)) return campItem;
     if (!IsVisible())
         return 0;
     int ht = HitTest(point);
@@ -1061,7 +1067,8 @@ void CI3DObjectSpellSlots::SetCurrentSpell(CItem *pSpell)
     for (int i = 0; i < pPers->spells.GetSize(); ++i)
         if (pPers->spells[i] == pSpell)
         {
-            nCurrentSpell = i;
+            nCurrentSpell = i;
+            E4CampAccess::SpellCurrent(this, i);
             const int maxFirst = max(0, min(pPers->spells.GetSize(),
                 static_cast<int>(QI_MAX_SPELLS)) - 7);
             nFirstSpell = min(maxFirst, max(0, i - 6));
@@ -1073,7 +1080,8 @@ void CI3DObjectSpellSlots::SetCurrentSpell(CItem *pSpell)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
-{
+{
+    if (E4CampAccess::DrawSpells(this, pRend)) return TRUE;
     CPersonage *pPers = pScreen ? pScreen->GetCurrentPers() : 0;
     if (!pPers || figures.GetSize() < 4)
         return CI3DObject::Draw(pRend);
@@ -1173,7 +1181,9 @@ BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CItem *CI3DObjectSpellSlots::GetMouseItem(CPoint point, int &nSlotType)
-{
+{
+    CItem* campItem = nullptr;
+    if (E4CampAccess::SpellMouse(this, point, nSlotType, campItem)) return campItem;
     nSlotType = 0;
     if (!IsVisible())
         return 0;
@@ -2011,7 +2021,7 @@ void CI3DObjectPerks::Init()
     AddArea()->MakeRect(215, 165, 385, 180);
     for (int i = 0; i < CAMP_NUM_AV_PERKS_VISIBLE; i++) // perks buttons
         AddArea()->MakeRect(415, 135 + i * 15, 585, 150 + i * 15);
-    for (int i = 0; i < CAMP_NUM_REAL_PERKS_VISIBLE; i++) // perks buttons
+    for (int i = 0; i < E4CampAccess::LearnedRows(this); i++) // perks buttons
         AddArea()->MakeRect(215, 330 + i * 15, 385, 345 + i * 15);
 
     CI3DFigure *pFig;
@@ -2319,7 +2329,7 @@ void CI3DObjectPerks::RedrawPerks()
         RemoveFigure(figures.GetSize() - 1);
 
     pSurf->DrawText(szStrings[SKILLS], CRect(0, 10, 200, 25), 0, CAMP_COLOR_HEADER, DT_CENTER);
-    pSurf->DrawText(szStrings[PERKS], CRect(0, 205, 200, 220), 0, CAMP_COLOR_HEADER, DT_CENTER);
+    pSurf->DrawText(szStrings[PERKS], CRect(0, E4CampAccess::LearnedRows(this) == 14 ? 145 : 205, 200, E4CampAccess::LearnedRows(this) == 14 ? 160 : 220), 0, CAMP_COLOR_HEADER, DT_CENTER);
     pSurf->DrawText(szStrings[PERKSAV], CRect(200, 10, 400, 25), 0, CAMP_COLOR_HEADER, DT_CENTER);
 
     CRect rc(15, 35, 180, 50);
@@ -2370,8 +2380,9 @@ void CI3DObjectPerks::RedrawPerks()
         rc += shift;
     }
 
-    rc = CRect(15, 230, 180, 245);
-    for (i = 0, n = nPosReal; i < CAMP_NUM_REAL_PERKS_VISIBLE && n < perksReal.size(); i++, n++)
+    const int learnedTop = E4CampAccess::LearnedRows(this) == 14 ? 170 : 230;
+    rc = CRect(15, learnedTop, 180, learnedTop + 15);
+    for (i = 0, n = nPosReal; i < E4CampAccess::LearnedRows(this) && n < perksReal.size(); i++, n++)
     {
         pSurf->DrawText(perksReal[n].szName, rc, 0, perkColor(perksReal[n].szCode,CAMP_COLOR_SKILLS), DT_LEFT);
         if (!perksReal[n].szNextCode.IsEmpty())
@@ -2567,8 +2578,8 @@ void CI3DObjectPerks::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectPerks::CheckRanges()
 {
-    if (nPosReal > static_cast<int>(perksReal.size()) - CAMP_NUM_REAL_PERKS_VISIBLE)
-        nPosReal = static_cast<int>(perksReal.size()) - CAMP_NUM_REAL_PERKS_VISIBLE;
+    if (nPosReal > static_cast<int>(perksReal.size()) - E4CampAccess::LearnedRows(this))
+        nPosReal = static_cast<int>(perksReal.size()) - E4CampAccess::LearnedRows(this);
     if (nPosReal < 0)
         nPosReal = 0;
     if (nPosAv > static_cast<int>(perksAv.size()) - CAMP_NUM_AV_PERKS_VISIBLE)
@@ -2579,7 +2590,7 @@ void CI3DObjectPerks::CheckRanges()
         figures[0]->Show(TRUE);
     else
         figures[0]->Show(FALSE);
-    if (nPosReal < static_cast<int>(perksReal.size()) - CAMP_NUM_REAL_PERKS_VISIBLE)
+    if (nPosReal < static_cast<int>(perksReal.size()) - E4CampAccess::LearnedRows(this))
         figures[1]->Show(TRUE);
     else
         figures[1]->Show(FALSE);

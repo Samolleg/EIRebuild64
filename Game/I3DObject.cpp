@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
+#include "I3DScreenCamp.h"
 #include "GameJournal.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -374,6 +376,7 @@ void CI3DSurface::MemoryBackup(BOOL bShow)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DSurface::Draw()
 {
+    if (E4CampAccess::Blit(this)) return;
 #ifndef NOBLIT
     if (!pSurface || !HasFlag(BS_VISIBLE))
         return;
@@ -649,9 +652,9 @@ CI3DObject::~CI3DObject()
 BOOL CI3DObject::Draw(CRenderer *pRend)
 {
     int k;
-
-    for (k = 0; k < figures.GetSize(); k++)
-        figures[k]->Draw(pRend);
+    if (!E4CampAccess::Draw(this, pRend))
+        for (k = 0; k < figures.GetSize(); k++)
+            figures[k]->Draw(pRend);
 
     for (k = 0; k < m_aMapObjTaranslation.GetSize(); k++)
         m_aMapObjTaranslation[k]->Draw(pRend);
@@ -672,10 +675,13 @@ void CI3DObject::DrawTips(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObject::Draw2D()
 {
+    if (E4CampAccess::Draw2D(this)) return;
+    OwnedRender::E4::Scope campScope(E4CampAccess::RoleOf(this));
     for (int k = 0; k < surfaces.GetSize(); k++)
         if (surfaces[k]->IsVisible())
             surfaces[k]->Draw();
 
+    if (auto* camp = dynamic_cast<CI3DScreenCamp*>(this)) E4CampAccess::CardText(camp);
     // for (int k = 0; k < areas.GetSize(); k++ )
     // areas[k]->Draw2D();
 }
@@ -894,6 +900,8 @@ void CI3DObject::RemoveAllSurfaces()
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObject::HitTest(CPoint pt)
 {
+    const int campHit = E4CampAccess::Hit(this, pt);
+    if (campHit != -2) return campHit;
     CPoint point(pt);
     pI3D->ScreenToVirtual(point);
     for (int i = 0; i < areas.GetSize(); i++)
@@ -904,6 +912,8 @@ int CI3DObject::HitTest(CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObject::IsInside(CPoint pt)
 {
+    bool campInside = false;
+    if (E4CampAccess::Inside(this, pt, campInside)) return campInside;
     CPoint point(pt);
     pI3D->ScreenToVirtual(point);
     return rect.PtInRect(point);

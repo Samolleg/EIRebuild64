@@ -9,6 +9,7 @@ typedef CSimplyArray<CItem *, CItem *> CItemsArray;
 // it can be wagon or assortment in shop or something
 class CI3DObjectInventory : public CI3DItemObject
 {
+    friend struct E4CampAccess;
 protected:
     int nSortMode; // sort mode ( 0 - 5 )
 
@@ -52,6 +53,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectInventoryItems : public CI3DObjectInventory
 {
+    friend struct E4CampAccess;
 private:
     int nSortType; // 0 - camp sorting, 1 - spellconstr sorting, 2 - itemconstr
 
@@ -113,6 +115,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectSpellSlots : public CI3DItemObject
 {
+    friend struct E4CampAccess;
 private:
     int nTopHeight; // level of placing on screen
     int nCurrentSpell;
@@ -209,6 +212,7 @@ struct SPerksBackup
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectPerks : public CI3DItemObject
 {
+    friend struct E4CampAccess;
 private:
     int nCurPers;
     int nPosAv;
