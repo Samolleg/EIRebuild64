@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <math.h>
 
 #include "Object.h"
+#include "Object3DClientSpecific.h"
 #include "OwnedRender/E1Scene.h"
 #include "World.h"
 #include "particle.h"
@@ -574,6 +575,8 @@ void CObject3D::SetComplection(SComplection &newcomplection)
             }
         }
         // resize animations
+        if (lpObjectSpecific && lpObjectSpecific->WhoAmI() == HPC_OBJECT3DCLIENTSPECIFIC)
+            static_cast<CObject3DClientSpecific *>(lpObjectSpecific)->InvalidateOwnedAppearance();
         if (lpAnimationSystem)
             lpAnimationSystem->SetComplection(complection.strength, complection.grace,
                                               complection.tall);

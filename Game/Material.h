@@ -58,6 +58,14 @@ public:
     void SetEmissive(const D3DVECTOR &color);
     D3DVECTOR GetEmissive() const;
     const D3DCOLORVALUE &GetCompleteEmissive() const { return material.emissive; }
+    bool GetStoredEmissive(D3DCOLORVALUE& mostRecent, D3DCOLORVALUE& oldest) const {
+        if (dcvStoreEmissive.empty()) return false;
+        auto values = dcvStoreEmissive;
+        mostRecent = values.top();
+        while (values.size() > 1) values.pop();
+        oldest = values.top();
+        return true;
+    }
     void SetSpecular(const D3DVECTOR &color);
     void SetSpecular(float r, float g, float b);
     D3DVECTOR GetSpecular() const;

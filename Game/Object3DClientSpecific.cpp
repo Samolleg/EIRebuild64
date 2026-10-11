@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include <algorithm>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
@@ -17,6 +18,10 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Object3DClientSpecific.h"
 #include "FigureClientSpecific.h"
+#include "AnimationSystem2.h"
+#include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E1Surface.h"
+#include "owned_asset_loader.h"
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
@@ -250,6 +255,8 @@ CObject3DClientSpecific::~CObject3DClientSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3DClientSpecific::Create()
 {
+    ownedAppearanceAttempted = false;
+    ownedAppearanceRevision = 0;
     pos = -1;
     ResetAllFlags();
     // initialize extended textures (shadow and wounds)
@@ -272,6 +279,7 @@ BOOL CObject3DClientSpecific::Create()
 // destroy all internal data structures
 void CObject3DClientSpecific::Destroy()
 {
+    ownedAppearanceAttempted = false;
     int i;
     // remove extended textures (shadow and wounds)
     pShadowTexture = 0;
@@ -336,6 +344,7 @@ BOOL CObject3DClientSpecific::AddFigure(CFigure *lpFigure)
         if (sets[i]->lpTexture->GetTypeID() == tidTextureTypeID)
         {
             sets[i]->AddFigure(lpFigure, tidMaterialTypeID);
+            InvalidateOwnedAppearance();
             return TRUE;
         }
     }
@@ -353,7 +362,10 @@ BOOL CObject3DClientSpecific::RemoveFigure(CFigure *lpFigure)
         if (!sets[i])
             continue;
         if (sets[i]->RemoveFigure(lpFigure))
+        {
+            InvalidateOwnedAppearance();
             return TRUE;
+        }
     }
 
     return FALSE;
@@ -374,7 +386,10 @@ CFigure *CObject3DClientSpecific::RemoveFigure(LPCSTR pszFigureName)
         if (!sets[i])
             continue;
         if (sets[i]->RemoveFigure(lpFigure))
+        {
+            InvalidateOwnedAppearance();
             return lpFigure;
+        }
     }
 
     return NULL;
@@ -568,6 +583,8 @@ CTexture *CObject3DClientSpecific::ChangeTexture(CTexture *lpNewTexture)
     }
 #endif // _DEBUG
 
+    if (lpReturnTexture1)
+        InvalidateOwnedAppearance();
     return lpReturnTexture1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -642,6 +659,148 @@ void CObject3DClientSpecific::RecalcScreenRect()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// c56 consumes owned copies only. Drop a previously published value as soon as a host owner changes.
+void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
+{
+    const bool hadAttempt = ownedAppearanceAttempted;
+    ownedAppearanceAttempted = false;
+    if (!hadAttempt)
+        return;
+    const auto resource = OwnedRender::E1Scene().Resource(this);
+    if (resource.serial)
+        OwnedRender::E1Scene().Scene().visual_reject(resource,
+            owned::RetainedVisualStatus::unsupported_appearance,
+            "appearance.source_changed", "host.object_appearance");
+}
+bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
+{
+    CObject3D* object = static_cast<CObject3D*>(lpObject);
+    auto* animation = object ? object->GetAnimationSystem2() : nullptr;
+    IGeometry* geometry = object ? object->GetGeometry() : nullptr;
+    const auto resource = OwnedRender::E1Scene().Resource(this);
+    auto& scene = OwnedRender::E1Scene().Scene();
+    auto reject = [&](const char* predicate) {
+        if (resource.serial)
+            scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_appearance,
+                                predicate, "host.object_appearance");
+        return false;
+    };
+    if (!resource.serial || !animation || !geometry || object->GetNumFigures() <= 0)
+        return reject("appearance.sources_ready");
+
+    auto skeleton = animation->GetOwnedSkeleton();
+    if (!skeleton || skeleton->links.empty())
+        return reject("appearance.selected_skeleton");
+    auto assembly = std::make_shared<owned::VisualAssemblyAsset>();
+    assembly->skeleton = skeleton;
+    assembly->revision = ++ownedAppearanceRevision;
+    if (!assembly->revision)
+        assembly->revision = ++ownedAppearanceRevision;
+    const CPlot3D center = object->GetCenterShift();
+    assembly->center_shift = {{center.x, center.y, center.z}};
+    const SComplection& complection = object->GetComplection();
+    assembly->shape = {{complection.strength, complection.grace, complection.tall}};
+    GetScaleCoeffs(assembly->scale[0], assembly->scale[1], assembly->scale[2]);
+
+    for (int index = 0; index < object->GetNumFigures(); ++index)
+    {
+        CFigure* figure = object->GetFigure(index);
+        if (!figure || !figure->GetName() || !*figure->GetName())
+            return reject("appearance.figure_owner");
+        const std::string partName(figure->GetName());
+        auto figureAsset = geometry->GetOwnedFigure(partName);
+        if (!figureAsset)
+            return reject("appearance.selected_fig");
+        auto node = std::find_if(skeleton->links.begin(), skeleton->links.end(),
+            [&](const owned::ModelLink& link) { return link.child == partName; });
+        if (node == skeleton->links.end())
+            return reject("appearance.figure_node");
+
+        CTexture* texture = nullptr;
+        CMaterial* material = nullptr;
+        for (int setIndex = 0; setIndex < 2 && !material; ++setIndex)
+        {
+            STextureMaterialSet* set = sets[setIndex];
+            if (!set || !set->lpTexture ||
+                set->lpTexture->GetTypeID() != figure->GetTextureTypeID())
+                continue;
+            for (int groupIndex = 0; groupIndex < set->matgroups.GetSize() && !material;
+                 ++groupIndex)
+            {
+                SMaterialFigureSet* group = set->matgroups[groupIndex];
+                if (!group || !group->lpMaterial ||
+                    group->lpMaterial->GetTypeID() != figure->GetMaterialTypeID())
+                    continue;
+                for (int figureIndex = 0; figureIndex < group->figures.GetSize(); ++figureIndex)
+                    if (group->figures[figureIndex] == figure)
+                    {
+                        texture = set->lpTexture;
+                        material = group->lpMaterial;
+                        break;
+                    }
+            }
+        }
+        if (!texture || !material || !texture->GetSurface())
+            return reject("appearance.selected_material_texture");
+        auto surface = OwnedRender::E1SurfaceValue(texture->GetSurface()->OwnedSurfaceId());
+        if (!surface)
+            return reject("appearance.completed_surface");
+
+        const D3DMATERIAL7& sourceMaterial = material->GetMaterial();
+        auto materialAsset = std::make_shared<owned::MaterialCpuAsset>();
+        materialAsset->source = owned::MaterialValueSource::completed_native;
+        materialAsset->diffuse = {{sourceMaterial.diffuse.r, sourceMaterial.diffuse.g,
+            sourceMaterial.diffuse.b, sourceMaterial.diffuse.a}};
+        materialAsset->ambient = {{sourceMaterial.ambient.r, sourceMaterial.ambient.g,
+            sourceMaterial.ambient.b, sourceMaterial.ambient.a}};
+        materialAsset->specular = {{sourceMaterial.specular.r, sourceMaterial.specular.g,
+            sourceMaterial.specular.b, sourceMaterial.specular.a}};
+        materialAsset->emissive = {{sourceMaterial.emissive.r, sourceMaterial.emissive.g,
+            sourceMaterial.emissive.b, sourceMaterial.emissive.a}};
+        materialAsset->power = sourceMaterial.power;
+        D3DCOLORVALUE recentEmissive{}, oldestEmissive{};
+        if (material->GetStoredEmissive(recentEmissive, oldestEmissive))
+        {
+            materialAsset->has_previous_highlight_emissive = true;
+            materialAsset->previous_highlight_emissive = {{recentEmissive.r,
+                recentEmissive.g, recentEmissive.b, recentEmissive.a}};
+            materialAsset->has_oldest_highlight_emissive = true;
+            materialAsset->oldest_highlight_emissive = {{oldestEmissive.r,
+                oldestEmissive.g, oldestEmissive.b, oldestEmissive.a}};
+        }
+
+        owned::VisualPartAsset part;
+        part.name = partName;
+        part.geometry = std::move(figureAsset);
+        part.skeleton_node = static_cast<std::uint32_t>(node - skeleton->links.begin());
+        part.surface = std::move(surface);
+        part.texture_source_name = texture->GetName() ? texture->GetName() : "";
+        part.material = std::move(materialAsset);
+        part.texture_type = static_cast<std::uint32_t>(texture->GetTypeID());
+        part.material_type = static_cast<std::uint32_t>(material->GetTypeID());
+        part.material_flags = material->CheckFlag(MAT_USE_SPECULAR) ? MAT_USE_SPECULAR : 0;
+        part.figure_flags = figure->CheckFlag(FIG_USE_DEFAULT_COLORS) ? FIG_USE_DEFAULT_COLORS : 0;
+        const DWORD textureFlags[] = {TEX_ALPHA0, TEX_ALPHA1, TEX_ALPHA4, TEX_ALPHA8};
+        for (DWORD textureFlag : textureFlags)
+            if (texture->CheckFlag(textureFlag)) part.texture_flags |= textureFlag;
+        part.diffuse = figure->GetDefaultColor();
+        part.specular = figure->GetDefaultSpecular();
+        part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN);
+        assembly->parts.push_back(std::move(part));
+    }
+    if (!scene.visual_publish_assembly(resource, std::move(assembly)))
+        return reject("appearance.publish_current_resource");
+    return true;
+}
+catch (...)
+{
+    const auto resource = OwnedRender::E1Scene().Resource(this);
+    if (resource.serial)
+        OwnedRender::E1Scene().Scene().visual_reject(resource,
+            owned::RetainedVisualStatus::unsupported_appearance,
+            "appearance.host_snapshot_exception", "host.object_appearance");
+    return false;
+}
 // BOOL CObject3DClientSpecific::Draw()
 // draw
 BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
@@ -675,6 +834,11 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
         auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
         if(!specific || !specific->EnsureWoundsTextureReady() ||
            !pWoundsTexture || !pWoundsTexture->GetSurface())return FALSE;
+    }
+    if (!ownedAppearanceAttempted)
+    {
+        ownedAppearanceAttempted = true;
+        PublishOwnedAppearance();
     }
     //
     if (!lpObject->CheckFlag(OBJ_STATIC))
@@ -1044,6 +1208,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
         }
     }
 
+    InvalidateOwnedAppearance();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1102,6 +1267,7 @@ void CObject3DClientSpecific::SetMaterials()
         lpMaterialManager->SetMaterial(lpMaterial, lpMaterial->GetTypeID());
         lpMaterial = GetNextMaterial();
     }
+    InvalidateOwnedAppearance();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3DClientSpecific::Select(BOOL bSelect)
@@ -1136,6 +1302,7 @@ void CObject3DClientSpecific::Highlight(BOOL bHighlight)
         for (i = 0; i < materials.GetSize(); i++)
             materials[i]->RestoreEmissive();
     }
+    InvalidateOwnedAppearance();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // void CObject3DClientSpecific::FinalDataLoading()

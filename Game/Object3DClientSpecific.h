@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 
 #include "Object.h"
 #include "Material.h"
@@ -78,11 +79,14 @@ private:
     //
     float fpTime;
     DWORD dwLastLightTime; // time, then this object was relighted (in milliseconds)
+    bool ownedAppearanceAttempted = false;
+    std::uint64_t ownedAppearanceRevision = 0;
     //
     float fScaleX, fScaleY, fScaleZ;
 
 private:
     void CreateShadowShiftScaleMatrix(SHMatrix &matrix);
+    bool PublishOwnedAppearance() noexcept;
 
 public:
     CObject3DClientSpecific();
@@ -102,6 +106,7 @@ public:
         fScaleY = fSY;
         fScaleZ = fSZ;
     }
+    void InvalidateOwnedAppearance() noexcept;
     virtual void GetScaleCoeffs(float &fSX, float &fSY, float &fSZ) const
     {
         fSX = fScaleX;
