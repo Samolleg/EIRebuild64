@@ -61,6 +61,8 @@
 #include "aiSettings.h"
 #include "ItemDatabase.h"
 #include "CMappedResource.h"
+#include "GraphicsProcessorMMX.h"
+#include "ModHDEquipmentLayer.h"
 #include "mapFormat.h"
 #include "adFormat.h"
 #include "luajit-x86/lua.hpp"
@@ -1519,6 +1521,7 @@ Json CheckConditionalCombatG3(){
 #include "ModSecondaryAtlasCheck.inl"
 #include "ModPrimaryAtlasCheck.inl"
 #include "ModTextureMemoryCheck.inl"
+#include "ModHDEquipmentLayerCheck.inl"
 #include "ModSpellTargetingCheck.inl"
 #include "ModSpellMappingCheck.inl"
 #include "ModSpellOwnerCheck.inl"
@@ -1641,7 +1644,8 @@ bool InspectModPackageCommandLine(int &result){
  bool uiDescriptions=argc>=2&&wcscmp(argv[1],L"--inspect-ui-descriptions-g3")==0;
  bool spellTooltips=argc>=2&&wcscmp(argv[1],L"--inspect-spell-tooltips")==0;
  bool startup=argc>=2&&wcscmp(argv[1],L"--inspect-mod-startup")==0;
- if(argc<2||(!mob&&!defaults&&!economy&&!startup&&!uiRange&&!spellTooltips&&!campSpellInfo&&!campStats&&!fullDescriptions&&!idleTooltips&&!assortment&&!hudAssignment&&!progression&&!safetyLookup&&!equipmentSwitch&&!campEquipment&&!campRepair&&!campItemPrice&&!campSale&&!secondaryAtlas&&!primaryAtlas&&!textureMemory&&!memoryOutputAllocation&&!conditionalCombat&&!attackCreation&&!downstreamOwner&&!modalFade&&!meleeTiming&&!preparedAttack&&!lruAccounting&&!consoleDrawAll&&!spellTargeting&&!spellMapping&&!spellOwner&&!spellLoad&&!spellPhase&&!campReferences&&!uiDescriptions&&!itemInfo&&!itemDetails&&!constructorLifetime&&!constructorContext&&!playerNumbers&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
+ bool hdEquipmentLayer=argc>=2&&wcscmp(argv[1],L"--inspect-hd-equipment-layer")==0;
+ if(argc<2||(!mob&&!defaults&&!economy&&!startup&&!hdEquipmentLayer&&!uiRange&&!spellTooltips&&!campSpellInfo&&!campStats&&!fullDescriptions&&!idleTooltips&&!assortment&&!hudAssignment&&!progression&&!safetyLookup&&!equipmentSwitch&&!campEquipment&&!campRepair&&!campItemPrice&&!campSale&&!secondaryAtlas&&!primaryAtlas&&!textureMemory&&!memoryOutputAllocation&&!conditionalCombat&&!attackCreation&&!downstreamOwner&&!modalFade&&!meleeTiming&&!preparedAttack&&!lruAccounting&&!consoleDrawAll&&!spellTargeting&&!spellMapping&&!spellOwner&&!spellLoad&&!spellPhase&&!campReferences&&!uiDescriptions&&!itemInfo&&!itemDetails&&!constructorLifetime&&!constructorContext&&!playerNumbers&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
  result=2;Json report;std::wstring output;
  if(mob&&argc==5){output=argv[4];try{
   ModRuntime::Host host(Ansi(argv[2]));std::ifstream file(fs::path(argv[3]),std::ios::binary);
@@ -1650,6 +1654,7 @@ bool InspectModPackageCommandLine(int &result){
   bool ok=script.LoadText(source,FALSE)!=FALSE;auto error=script.GetLastError();
   report={{"success",ok},{"line",error.nLine},{"error",std::string((LPCSTR)error.text)}};result=ok?0:1;
  }catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
+ else if(hdEquipmentLayer&&argc==4){output=argv[3];try{report=CheckHDEquipmentLayer(Ansi(argv[2]));result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
  else if(argc==4){output=argv[3];try{if(playerNumbers)report=CheckPlayerNumbers();else if(constructorContext)report=CheckConstructorLifetimeContext(Ansi(argv[2]));else if(constructorLifetime)report=CheckConstructorLifetime(Ansi(argv[2]));else if(itemDetails)report=CheckItemDetails(Ansi(argv[2]));else if(itemInfo)report=CheckItemInfo(Ansi(argv[2]));else if(equipmentSwitch)report=CheckEquipmentSwitchG3(Ansi(argv[2]));else if(campEquipment)report=CheckCampEquipmentG3(Ansi(argv[2]));else if(campRepair)report=CheckCampRepairG3(Ansi(argv[2]));else if(campItemPrice)report=CheckCampItemPriceG3(Ansi(argv[2]));else if(campSale)report=CheckCampSaleG3(Ansi(argv[2]));else if(secondaryAtlas)report=CheckSecondaryAtlasG3(Ansi(argv[2]));else if(primaryAtlas)report=CheckPrimaryAtlasG3(Ansi(argv[2]));else if(textureMemory)report=CheckTextureMemoryG3(Ansi(argv[2]));else if(memoryOutputAllocation)report=CheckMemoryOutputAllocationG3(Ansi(argv[2]));else if(conditionalCombat)report=CheckConditionalCombatG3();else if(attackCreation)report=CheckAttackCreationG3();else if(modalFade)report=CheckModalFadeG3();else if(meleeTiming)report=CheckMeleeTimingG3();else if(preparedAttack)report=CheckPreparedAttackG3();else if(lruAccounting)report=Json::parse(CTextureManager::CheckLRUAccountingG3());else if(downstreamOwner)report=CheckDownstreamOwnerG3();else if(consoleDrawAll)report=Json::parse(NConsole::CheckDrawAllCommand());else if(campReferences)report=CheckCampReferencesG3(Ansi(argv[2]));else if(spellPhase)report=CheckSpellPhaseG3(Ansi(argv[2]));else if(spellLoad)report=CheckSpellLoadG3(Ansi(argv[2]));else if(spellOwner)report=CheckSpellOwnerG3(Ansi(argv[2]));else if(spellMapping)report=CheckSpellMappingG3(Ansi(argv[2]));else if(spellTargeting)report=CheckSpellTargetingG3(Ansi(argv[2]));else if(safetyLookup)report=CheckSafetyLookupG3(Ansi(argv[2]));else if(progression)report=CheckProgressionG3(Ansi(argv[2]));else if(hudAssignment)report=CheckHudAssignmentG3(Ansi(argv[2]));else if(assortment)report=CheckAssortmentG3(Ansi(argv[2]));else if(idleTooltips)report=CheckIdleTooltipsG3(Ansi(argv[2]));else if(fullDescriptions)report=CheckFullDescriptionsG3(Ansi(argv[2]));else if(campStats)report=CheckCampStatsG3(Ansi(argv[2]));else if(uiDescriptions)report=CheckUiDescriptions(Ansi(argv[2]));else if(campSpellInfo)report=CheckCampSpellInfo(Ansi(argv[2]));else if(spellTooltips)report=CheckSpellTooltips(Ansi(argv[2]));else if(uiRange)report=CheckUIRange(Ansi(argv[2]));else if(defaults)report=CheckDefaultStats();else if(economy){CModPackage package;package.Load(Ansi(argv[2]));report=package.CheckEconomy();}else if(startup)report=CheckStartup(Ansi(argv[2]));else{CModPackage package;package.Load(Ansi(argv[2]));report=package.Describe();}result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
  else report={{"success",false},{"error","Expected --inspect-addon MOD_DIRECTORY OUTPUT_JSON"}};
  LocalFree(argv);if(!output.empty()){std::ofstream file{fs::path(output)};file<<report.dump(2,' ',false,Json::error_handler_t::replace);if(!file)result=3;}return true;
