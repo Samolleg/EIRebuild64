@@ -2,8 +2,11 @@
 #include "E3Hud.h"
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
+#include "../Unit.h"
+#include "../Item.h"
 #include "hud_layout_context.h"
 #include <algorithm>
+#include <cstring>
 
 // This adapter only copies facts owned by the active mission. Slot geometry,
 // header docking, scaling and preview layout remain in the renderer library.
@@ -37,6 +40,46 @@ struct E3HudAccess {
         dst.native_count=(std::min)(unsigned((std::max)(0,count)),unsigned(dst.slots.size()));
         for(unsigned i=0;i<dst.native_count;++i)dst.slots[i].active=true;
     }
+    static std::uint64_t FloatBits(float value) noexcept {
+        std::uint32_t bits;std::memcpy(&bits,&value,sizeof(bits));return bits;
+    }
+    static void UnitVitals(std::vector<std::uint64_t>& values,const CUnit* unit) {
+        if(!unit)return;
+        values.insert(values.end(),{std::uint64_t(unit->GetID()),std::uint64_t(unit->GetHP()),std::uint64_t(unit->GetMaxHP()),
+            std::uint64_t(unit->GetMP()),std::uint64_t(unit->GetMaxMP())});
+    }
+    static void Activity(owned::HudLayoutFrame& frame,const CI3DScreenMission* mission) {
+        auto& p=frame.panels;
+        p[0].activity_values={std::uint64_t(mission->pSpells->iSelected)};
+        p[1].activity_values={std::uint64_t(mission->pSkills->iSelected)};
+        p[2].activity_values={FloatBits(mission->pMap->fXCenter),FloatBits(mission->pMap->fYCenter)};
+        if(p[3].slide<1.f) {
+            const auto* unit=mission->pInfo->pTempUnit?mission->pInfo->pTempUnit:mission->pInfo->pUnit;
+            UnitVitals(p[3].activity_values,unit);
+            if(unit)for(const auto& limb:unit->GetUserUnitStats()->hls)
+                p[3].activity_values.insert(p[3].activity_values.end(),{std::uint64_t(limb.state),limb.wHP,limb.wMaxHP});
+            p[3].activity_available=true;
+        }
+        for(unsigned i=0;i<(std::min)(unsigned(mission->pUnits.GetSize()),p[4].native_count);++i) {
+            const auto* unit=mission->pUnits[i];
+            if(!unit)continue;
+            UnitVitals(p[4].activity_values,unit);
+            p[4].activity_values.push_back(unit->CheckFlag(OBJ_SELECTED)!=0);
+        }
+        p[5].activity_values={std::uint64_t(mission->pWeapons->iSelected)};
+        p[6].activity_values={std::uint64_t(mission->pItems->iSelected)};
+        for(unsigned i=0;i<4;++i) {
+            // Resolve the current quick item; cached UI descriptors can outlive it.
+            auto* item=mission->pItems->pUnit?mission->pItems->pUnit->GetQItem(i):nullptr;
+            p[6].activity_values.insert(p[6].activity_values.end(),{item?item->GetID():0u,item?std::uint64_t(item->GetCount()):0u});
+            if(item && item->GetSpell(0) && item->GetQuickItemType()==IDB_WAND)
+                p[6].activity_values.insert(p[6].activity_values.end(),{std::uint64_t(int(item->GetMP())),std::uint64_t(int(item->GetMaxMP()))});
+            else p[6].activity_values.insert(p[6].activity_values.end(),{0,0});
+        }
+        p[8].activity_values={std::uint64_t(mission->pCommands->nMode),std::uint64_t(mission->pCommands->nAggr)};
+        p[9].activity_values={std::uint64_t(mission->pClock->nMode),std::uint64_t(mission->pClock->bNewObj)};
+        for(unsigned i:{0u,1u,2u,4u,5u,6u,8u,9u})p[i].activity_available=true;
+    }
     static void Publish(const CI3DScreenMission* mission,unsigned width,unsigned height) {
         owned::HudLayoutFrame frame;
         // Current host ingress is full-width, unscaled placed space. Do not
@@ -63,6 +106,7 @@ struct E3HudAccess {
             p[2].slide=Slide(mission->pMap->slide_nCurPixels,mission->pMap->slide_nTotalPixels);
             p[3].slide=Slide(mission->pInfo->slide_nCurPixels,mission->pInfo->slide_nTotalPixels);
             p[7].slide=Slide(mission->pOutput->slide_nCurPixels,mission->pOutput->slide_nTotalPixels);
+            Activity(frame,mission);
         }
         owned::embedded_hud_layout().publish(std::move(frame));
     }

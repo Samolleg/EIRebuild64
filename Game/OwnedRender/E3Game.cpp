@@ -20,7 +20,11 @@ void E3RefreshInterface() noexcept {
         missionOwner && theInterface.GetScreensNum() == 1 &&
             theInterface.GetCurrentScreen() == missionOwner, &resetInput);
 }
-void E3MissionEnter(const void* owner) noexcept { missionOwner = owner; }
+void E3MissionEnter(const void* owner) noexcept {
+    // Reset HUD publication/fades even if an allocator reused the previous address.
+    E3PublishHud(nullptr,theInterface.GetWidth(),theInterface.GetHeight());
+    missionOwner = owner;
+}
 void E3MissionLeave(const void* owner) noexcept {
     if (missionOwner == owner) {
         missionOwner = nullptr;

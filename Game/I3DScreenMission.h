@@ -191,6 +191,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectWeapons : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -552,6 +553,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectClock : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     friend class CI3DScreenMission;
     void AccelerateFromKeyboard();
@@ -585,6 +587,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectCommands : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
     int nMode;
