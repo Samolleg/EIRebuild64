@@ -66,6 +66,7 @@ typedef CArray<SScrollTextLine *, SScrollTextLine *> CScrollTextLinePtrArray;
 
 class CI3DScrollText : public CI3DScrollBar
 {
+    friend struct E3HudAccess;
 private:
     int NextLexem(const CString &szText, int nStart, CString &szLexem);
     void AddLexems(const CString &szText); // эта функция не изменяет szText

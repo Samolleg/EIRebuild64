@@ -175,6 +175,30 @@ struct E3HudAccess {
         values.insert(values.end(),{std::uint64_t(unit->GetID()),std::uint64_t(unit->GetHP()),std::uint64_t(unit->GetMaxHP()),
             std::uint64_t(unit->GetMP()),std::uint64_t(unit->GetMaxMP())});
     }
+    static void TextActivity(std::vector<std::uint64_t>& values,const CI3DScrollText* text) {
+        if(!text)return;
+        // Compare semantic tokens exactly. Pixel sizes, surface redraws and
+        // line wrapping are not content changes and must not restart the fade.
+        values.push_back(std::uint64_t(text->m_aLexems.GetSize()));
+        for(int i=0;i<text->m_aLexems.GetSize();++i) {
+            const auto* token=text->m_aLexems[i];
+            values.push_back(token?std::uint64_t(token->m_eType):UINT64_MAX);
+            if(!token)continue;
+            if(token->m_eType==LT_WORD) {
+                const auto& word=static_cast<const SWordLexem*>(token)->szWord;
+                const int length=word.GetLength();values.push_back(std::uint64_t(length));
+                for(int start=0;start<length;start+=8) {
+                    std::uint64_t bytes=0;
+                    for(int j=0;j<8 && start+j<length;++j)
+                        bytes|=std::uint64_t(static_cast<unsigned char>(word[start+j]))<<(j*8);
+                    values.push_back(bytes);
+                }
+            } else if(token->m_eType==LT_STYLE) {
+                const auto* style=static_cast<const SStyleLexem*>(token);
+                values.insert(values.end(),{std::uint64_t(style->isNewLine),std::uint64_t(style->nFont),std::uint64_t(style->colorText)});
+            }
+        }
+    }
     static void Activity(owned::HudLayoutFrame& frame,const CI3DScreenMission* mission) {
         auto& p=frame.panels;
         p[0].activity_values={std::uint64_t(mission->pSpells->iSelected)};
@@ -205,7 +229,8 @@ struct E3HudAccess {
         }
         p[8].activity_values={std::uint64_t(mission->pCommands->nMode),std::uint64_t(mission->pCommands->nAggr)};
         p[9].activity_values={std::uint64_t(mission->pClock->nMode),std::uint64_t(mission->pClock->bNewObj)};
-        for(unsigned i:{0u,1u,2u,4u,5u,6u,8u,9u})p[i].activity_available=true;
+        TextActivity(p[7].activity_values,mission->pScrollText);
+        for(unsigned i:{0u,1u,2u,4u,5u,6u,7u,8u,9u})p[i].activity_available=true;
     }
     static void Publish(const CI3DScreenMission* mission,unsigned width,unsigned height) {
         inputOwners={};
