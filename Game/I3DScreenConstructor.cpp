@@ -607,7 +607,10 @@ int CI3DObjectInventoryItems::SortFunction1(CItem *pItem)
         CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
         CSpellManager *pSM = theWorld.GetSpellManager();
         const SSDBSpellPrototype *pPrototype = pSM->GetPrototype(pLoot->GetInstructionItemIndex());
-        switch (pPrototype->msSchool)
+        const auto* mod = ModRuntime::Current();
+        const int group = mod && mod->CombatSetting("JMVPerks")
+            ? int(pPrototype->mstSubtype) : int(pPrototype->msSchool);
+        switch (group)
         {
         case RPGMS_ELEMENTAL:
             return 0;
