@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
+#include "InterfaceFont.h"
 #include <typeinfo>
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -91,30 +92,33 @@ void CInterface3D::Init(CRenderer *pNewRend)
     LOGFONT lf;
     float fScale;
     pTTFonts[0] = new CFont();
-    if (!pTTFonts[0]->CreatePointFont(750, face))
+    if (!InterfaceFont::CreatePointFont(*pTTFonts[0], 750, face))
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
     }
     pTTFonts[0]->GetLogFont(&lf);
-    fScale = abs(lf.lfHeight) / 100.f;
+    // Preserve the installed addon divisor and retail x87 evaluation order.
+    const float fontFactor = w >= 800 && h >= 600 && w * 3 > h * 4 ?
+        w * 0.0075f / h : 0.01f;
+    fScale = abs(lf.lfHeight) * fontFactor;
     if (pTTFonts[0])
         delete pTTFonts[0];
 
     pTTFonts[0] = new CFont();
-    if (!pTTFonts[0]->CreatePointFont(int(104 * WideScreen::Effective() / fScale / 800), face)) // was 96
+    if (!InterfaceFont::CreatePointFont(*pTTFonts[0], int(double(104 * w) / fScale * 0.00125f), face)) // was 96
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
     }
     pTTFonts[1] = new CFont();
-    if (!pTTFonts[1]->CreatePointFont(int(112 * WideScreen::Effective() / fScale / 800), face))
+    if (!InterfaceFont::CreatePointFont(*pTTFonts[1], int(double(112 * w) / fScale * 0.00125f), face))
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
     }
     pTTFonts[2] = new CFont();
-    if (!pTTFonts[2]->CreatePointFont(int(144 * WideScreen::Effective() / fScale / 800), face))
+    if (!InterfaceFont::CreatePointFont(*pTTFonts[2], int(double(144 * w) / fScale * 0.00125f), face))
     {
         ReportError("CInterface3D::Create.\n Cannot create font.\n");
         return;
