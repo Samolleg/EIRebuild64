@@ -29,6 +29,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GameMain.h"
 #include "OwnedRender/Startup.h"
 #include "OwnedRender/E2Host.h"
+#include "OwnedRender/E1WorldLifecycle.h"
 #include "StringProcessing.h"
 #include "WorldClient.h"
 #include "WorldServer.h"
@@ -1160,6 +1161,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
 {
     if (OwnedRender::E2BackgroundPaused(hWnd)) { Sleep(50); return; }
     OwnedRender::E2PassScope pass(OwnedRender::Pass::frame);
+    OwnedRender::E1BeginFrame();
     if (!bEnableRender)
         return;
     if (!bNeedRender)

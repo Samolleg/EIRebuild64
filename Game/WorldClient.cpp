@@ -69,6 +69,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModShadowSchedule.h"
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
+#include "OwnedRender/E1World.h"
 #include "GeometryManager.h"
 
 #include "I3DMain.h"
@@ -622,6 +623,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     ModWorldBackground::Unload();
     theCamera.ResetFalloutMode();
@@ -2335,6 +2337,7 @@ BOOL CWorldClient::NewItems(CMemorySave &packet)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
+    OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     IWorldConnector.LMPClientRecvZone();
     CString szZone, szMob;
@@ -3012,6 +3015,29 @@ BOOL CWorldClient::Draw()
         OwnedWorldInputs::Terrain(pRend->GetD3D()->GetOwnedRenderer(),*pTerrain,
             static_cast<CTextureManager*>(GetTextureManager()),ownedRenderGeneration,
             ModRuntime::Resources(),GetWorkPath(),GetResourcePath());
+    OwnedRender::E1WorldFrame frameValues;
+    auto& environment = frameValues.environment;
+    environment.valid = true;
+    environment.game_hours = ownedWorld.game_hours;
+    environment.hour = float(std::fmod(ownedWorld.game_hours, 24.0));
+    if (environment.hour < 0.f) environment.hour += 24.f;
+    environment.world_time = ownedWorld.world_time;
+    environment.cave = (ownedWorld.flags & EI_RENDERER_WORLD_CAVE) != 0;
+    environment.region = ownedWorld.region;
+    environment.weather_current = ownedWorld.weather_current;
+    environment.weather_next = ownedWorld.weather_next;
+    environment.weather_progress = ownedWorld.weather_progress;
+    environment.rain_particles = owned::weather_particle_rain(ownedWorld.weather_current,
+        ownedWorld.weather_next, ownedWorld.rain_progress);
+    frameValues.camera.valid = true;
+    std::copy_n(ownedWorld.world_to_clip, 16, frameValues.camera.world_to_clip.begin());
+    auto& fog = frameValues.fog;
+    fog.enabled = (ownedWorld.flags & EI_RENDERER_WORLD_FOG) != 0;
+    fog.valid = dynamic_cast<CTLPipelineFPU*>(pRend->GetTransformPipeline()) != nullptr;
+    fog.failure = fog.valid ? nullptr : "host_fog_pipeline_unavailable";
+    fog.fog = {ownedWorld.fog_range[0], ownedWorld.fog_range[1], ownedWorld.fog_range[2],
+        ownedWorld.fog_projection[2], ownedWorld.fog_projection[1], ownedWorld.fog_projection[0]};
+    OwnedRender::E1WorldDraw worldDraw(this, ownedRenderGeneration, frameValues);
     const bool ownedSky = pRend->GetD3D()->BeginWorld(ownedWorld);
     // render sky object
 #ifndef _A4
@@ -3187,6 +3213,7 @@ BOOL CWorldClient::Draw()
         // batch->End();
     }
 
+    worldDraw.Complete();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
