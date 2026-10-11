@@ -78,6 +78,13 @@ bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
     if (!OwnedRender::E1PublishTerrainFrame(this, values, matrix)) {
         GameJournal::Count("RENDER", "terrain_frame_publication_failed", "source_or_frame_unavailable");
     }
+    std::vector<std::uint64_t> atlases;
+    atlases.reserve(textures.GetSize());
+    for (int i = 0; i < textures.GetSize(); ++i) {
+        const auto* surface = textures[i] ? textures[i]->GetSurface() : nullptr;
+        atlases.push_back(surface ? surface->OwnedSurfaceId() : 0);
+    }
+    OwnedRender::E1PublishTerrainAtlases(this, atlases);
     // owned terrain via API5 retired; the renderer is embedded in stage 3
     if(renderer && renderer->GetD3D())
         renderer->GetD3D()->GetOwnedRenderer().TerrainFallback("owned_terrain_api5_retired_stage3");

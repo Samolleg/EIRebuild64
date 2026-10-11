@@ -1,4 +1,5 @@
 #pragma once
+#include "../OwnedRender/E1Surface.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "../mmpFormat.h"
@@ -9,6 +10,7 @@ class CDX11;
 class CDXGISurface
 {
 private:
+    mutable OwnedRender::E1Surface ownedSurface;
     CDX11 *pDX11;
     DWORD dwSurfaceWidth;  // surface width
     DWORD dwSurfaceHeight; // surface height
@@ -32,6 +34,7 @@ public:
     BOOL GetSurfaceDesc(D3D11_TEXTURE2D_DESC *pDDSD);
     BOOL GetTextureFormat(DXGI_FORMAT &pDDPixelFormat);
     // access to surface's width/height/bpp, previously extracted during creating
+    std::uint64_t OwnedSurfaceId() const noexcept { return ownedSurface.Id(); }
     DWORD GetWidth() const { return dwSurfaceWidth; };
     DWORD GetHeight() const { return dwSurfaceHeight; };
     DWORD GetBPP() const { return dwSurfaceBPP; };

@@ -199,6 +199,7 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, D3D11_TEXTURE2D_DESC *ptex2d)
     , texture(0)
     , textureView(0)
 {
+    ownedSurface.BeginWrite();
     pDX11->CreateTexture(ptex2d, texture);
     pDX11->CreateShaderResource(texture, textureView);
 
@@ -219,6 +220,7 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, const SMMPFileHeader *pHdr, boo
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
 {
+    ownedSurface.BeginWrite();
     pDX11->CreateTexture(ptex2d, texture);
     pDX11->CreateShaderResource(texture, textureView);
     return ExtractSurfaceParams();
@@ -344,15 +346,19 @@ void CDXGISurface::DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *ptex2d)
 
 void CDXGISurface::CopyResource(CDXGISurface *src)
 {
+    ownedSurface.BeginWrite();
     pDX11->GetDeviceContext()->CopyResource(this->GetTexture().Get(), src->GetTexture().Get());
+    ownedSurface.Complete(texture.Get());
 }
 
 void CDXGISurface::CopySubresourceRegion(UINT dstSubresource, UINT dstX, UINT dstY, UINT dstZ,
                                          CDXGISurface *src, UINT srcSubresource, D3D11_BOX *pBox)
 {
+    ownedSurface.BeginWrite();
     pDX11->GetDeviceContext()->CopySubresourceRegion(this->GetTexture().Get(), dstSubresource, dstX,
                                                      dstY, dstZ, src->GetTexture().Get(),
                                                      srcSubresource, pBox);
+    ownedSurface.Complete(texture.Get());
 }
 
 void CDXGISurface::GetPixel(int nX, int nY)
@@ -436,12 +442,17 @@ std::unique_ptr<DWORD[]> CDXGISurface::GetPixelBuffer()
 
 void CDXGISurface::Fade()
 {
+    ownedSurface.BeginWrite();
     pDX11->GetEffectProcessor()->Fade(this->GetShaderResource().Get());
+    ownedSurface.Complete(texture.Get());
 }
 void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 {
+    // The historical argument named src is the actual destination (resultView).
+    src->ownedSurface.BeginWrite();
     auto effproc = pDX11->GetEffectProcessor();
     effproc->StretchTo(this->GetShaderResource().Get(), src->GetShaderResource().Get(), rect);
+    src->ownedSurface.Complete(src->texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CDXGISurface::AcquireDC(HDC *pDC)
@@ -450,7 +461,8 @@ BOOL CDXGISurface::AcquireDC(HDC *pDC)
 #ifdef DXGI_ENABLED
     Microsoft::WRL::ComPtr<IDXGISurface1> surf;
     IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
-    surf->GetDC(FALSE, pDC);
+    ownedSurface.BeginWrite();
+    IfFailedThrowHR(surf->GetDC(FALSE, pDC));
     hDc = *pDC;
     return TRUE;
 #else
@@ -464,8 +476,9 @@ BOOL CDXGISurface::ReleaseDC(HDC hDC)
     FrameDiagnostics::Scope timing(FrameDiagnostics::ReleaseDC);
 #ifdef DXGI_ENABLED
     Microsoft::WRL::ComPtr<IDXGISurface1> surf;
-    texture->QueryInterface(IID_PPV_ARGS(&surf));
-    surf->ReleaseDC(nullptr);
+    IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
+    IfFailedThrowHR(surf->ReleaseDC(nullptr));
+    ownedSurface.Complete(texture.Get());
     hDc = 0;
     return TRUE;
 #else
@@ -530,13 +543,17 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
         sourceDesc.Format != destinationDesc.Format ||
         sourceDesc.SampleDesc.Count != destinationDesc.SampleDesc.Count)
         return E_INVALIDARG;
+    ownedSurface.BeginWrite();
     context->CopyResource(texture.Get(), source.Get());
+    ownedSurface.Complete(texture.Get());
     return S_OK;
 }
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
                                  D3D11_SUBRESOURCE_DATA *srd)
 {
+    ownedSurface.BeginWrite();
     pDX11->UpdateTexture(this->texture.Get(), subresource_index, region, srd);
+    ownedSurface.Complete(texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 HRESULT CDXGISurface::Clear(DWORD dwColorFill)

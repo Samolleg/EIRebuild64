@@ -1,5 +1,6 @@
 #include "E1Terrain.h"
 #include "E1World.h"
+#include "E1Surface.h"
 #include "world_mist_grid.h"
 #include <cmath>
 
@@ -7,11 +8,12 @@ namespace {
 const void* sourceOwner = nullptr;
 std::uint64_t worldIdentity = 0, sourceRevision = 0, nextGeneration = 0, terrainFrame = 0, geometrySerial = 0;
 owned::RetainedTerrainSourceSnapshot source;
+std::vector<std::uint64_t> atlasIds;
 std::array<float,16> transform{};
 owned::WorldMistGridCache mist;
 void clear() noexcept {
     sourceOwner = nullptr; worldIdentity = sourceRevision = terrainFrame = 0;
-    source = {}; transform = {}; mist.retire();
+    source = {}; transform = {}; mist.retire(); atlasIds.clear();
 }
 bool current() noexcept {
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
@@ -59,6 +61,12 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
     sourceOwner = owner; worldIdentity = world; sourceRevision = revision;
     return true;
 } catch (...) { clear(); try { failure = "terrain source allocation/read failed"; } catch (...) {} return false; }
+void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>& surfaces) noexcept try {
+    if (owner != sourceOwner) return;
+    atlasIds.clear();
+    if (!source.terrain || surfaces.size() != std::size_t(source.terrain->texture_count)+2u) return;
+    atlasIds = surfaces;
+} catch (...) { atlasIds.clear(); }
 void E1RetireTerrain(const void* owner) noexcept { if (owner == sourceOwner) clear(); }
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
     const std::array<float,16>& placement) noexcept try {
@@ -90,6 +98,19 @@ bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryV
 } catch (...) { terrainFrame = 0; return false; }
 }
 namespace owned {
+bool bridge_terrain_atlas(std::uint32_t material, std::shared_ptr<const OwnedVisualSurface>& output,
+    const char** failure) noexcept {
+    output.reset();
+    if (failure) *failure = nullptr;
+    const char* why = "terrain frame unavailable";
+    if (current()) {
+        why = "terrain atlas not loaded";
+        if (material < atlasIds.size()) output = OwnedRender::E1SurfaceValue(atlasIds[material]);
+        if (output) return true;
+    }
+    if (failure) *failure = why;
+    return false;
+}
 bool bridge_ambient_world_source(AmbientWorldSource& output) noexcept {
     output = {};
     if (!current() || !source.terrain || !source.geometry) return false;

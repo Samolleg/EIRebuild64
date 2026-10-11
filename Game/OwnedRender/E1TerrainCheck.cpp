@@ -1,13 +1,26 @@
 #include "E1Terrain.h"
 #include "E1World.h"
+#include "E1Surface.h"
 #include "world_mist_grid.h"
 #include <cstdio>
 #include <filesystem>
 #include <limits>
 #include <cstring>
+#include <cstdlib>
 
 namespace {
 int checks = 0;
+struct ExitOwner {
+    std::unique_ptr<OwnedRender::E1Surface> surface;
+    ~ExitOwner() {
+        if (!surface) return;
+        const auto id = surface->Id();
+        if (!OwnedRender::E1SurfaceValue(id)) std::_Exit(2);
+        surface.reset();
+        if (OwnedRender::E1SurfaceValue(id)) std::_Exit(3);
+        std::puts("Surface global-owner teardown PASS");
+    }
+} exitOwner;
 void check(bool v) { ++checks; if (!v) throw checks; }
 struct Reader {
     owned::MemoryResourceArchive archive;
@@ -36,6 +49,55 @@ struct Reader {
 int wmain(int argc, wchar_t** argv) try {
     check(argc == 2);
     using namespace owned; using namespace OwnedRender;
+    Microsoft::WRL::ComPtr<ID3D11Device> device, foreignDevice;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL level;
+    check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &device, &level, &context)));
+    check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &foreignDevice, &level, nullptr)));
+    D3D11_TEXTURE2D_DESC textureDesc{};
+    textureDesc.Width = textureDesc.Height = 2; textureDesc.ArraySize = textureDesc.MipLevels = 1;
+    textureDesc.SampleDesc.Count = 1; textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const std::uint32_t pixels[]{0xff123456,0xffabcdef,0x00111111,0x80555555};
+    D3D11_SUBRESOURCE_DATA initial{pixels, 8, 16};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> image, resolved;
+    check(SUCCEEDED(device->CreateTexture2D(&textureDesc, &initial, &image)));
+    exitOwner.surface = std::make_unique<E1Surface>();
+    check(exitOwner.surface->Complete(image.Get()));
+    E1Surface surface;
+    check(surface.Id() && !E1SurfaceValue(surface.Id()));
+    check(surface.Complete(image.Get()));
+    auto value = E1SurfaceValue(surface.Id());
+    check(value && value->id == surface.Id() && value->generation && value->width == 2 && value->height == 2);
+    check(value->pitch == 8 && value->format.dwRBitMask == 0xff0000 && !value->alpha_fully_opaque && !value->alpha_cut_mask);
+    check(SUCCEEDED(E1ResolveSurface(nullptr, device.Get(), value->id, value->generation, resolved)) && resolved == image);
+    check(FAILED(E1ResolveSurface(nullptr, foreignDevice.Get(), value->id, value->generation, resolved)) && !resolved);
+    check(FAILED(E1ResolveSurface(nullptr, device.Get(), value->id, value->generation+1, resolved)) && !resolved);
+    surface.BeginWrite(); check(!E1SurfaceValue(surface.Id()));
+    check(FAILED(E1ResolveSurface(nullptr, device.Get(), value->id, value->generation, resolved)));
+    context->UpdateSubresource(image.Get(), 0, nullptr, pixels, 8, 16);
+    check(surface.Complete(image.Get()));
+    auto updated = E1SurfaceValue(surface.Id()); check(updated && updated->generation > value->generation);
+    check(FAILED(E1ResolveSurface(nullptr, device.Get(), value->id, value->generation, resolved)));
+    check(SUCCEEDED(E1ResolveSurface(nullptr, device.Get(), updated->id, updated->generation, resolved)));
+    auto stagingDesc = textureDesc; stagingDesc.BindFlags = 0; stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    check(SUCCEEDED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)));
+    context->CopyResource(staging.Get(), resolved.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{}; check(SUCCEEDED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)));
+    const bool correct = !memcmp(mapped.pData,pixels,8) && !memcmp(static_cast<char*>(mapped.pData)+mapped.RowPitch,pixels+2,8);
+    context->Unmap(staging.Get(),0); check(correct);
+    std::uint64_t retiredId = 0;
+    { E1Surface transient; retiredId = transient.Id(); check(transient.Complete(image.Get())); }
+    check(retiredId != surface.Id() && !E1SurfaceValue(retiredId));
+    { E1Surface replacement; check(replacement.Id() != retiredId); check(!replacement.Complete(nullptr)); }
+    textureDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> unsupported;
+    check(SUCCEEDED(device->CreateTexture2D(&textureDesc,nullptr,&unsupported)));
+    { E1Surface rejected; check(!rejected.Complete(unsupported.Get()) && !E1SurfaceValue(rejected.Id())); }
     ResourceStore store; ResourceStoreConfig config; ResourceFailure error;
     check(store.open(config, error));
     ResourceBlob blob; const std::filesystem::path path(argv[1]);
@@ -111,6 +173,18 @@ int wmain(int argc, wchar_t** argv) try {
         check(bridge_ambient_world_source(ambient) && ambient.terrain && ambient.geometry && !ambient.map);
         check(ambient.wind_direction[0] == .4f && ambient.wind_direction[1] == -.2f && ambient.wind_force_normalized == .7f);
         auto grid = bridge_world_mist_grid(); check(grid && grid->texels == g1->texels);
+        std::vector<std::uint64_t> atlases(original->texture_count+2u, 0); atlases[0] = surface.Id();
+        std::shared_ptr<const OwnedVisualSurface> atlas;
+        const char* atlasFailure = nullptr;
+        check(!bridge_terrain_atlas(0, atlas, &atlasFailure) && !atlas && atlasFailure);
+        E1PublishTerrainAtlases(&owner, atlases);
+        check(bridge_terrain_atlas(0, atlas, &atlasFailure) && atlas == updated && !atlasFailure);
+        surface.BeginWrite(); check(!bridge_terrain_atlas(0, atlas, &atlasFailure) && !atlas && atlasFailure);
+        check(surface.Complete(image.Get()));
+        check(bridge_terrain_atlas(0, atlas, &atlasFailure) && atlas->generation > updated->generation);
+        check(!bridge_terrain_atlas(static_cast<std::uint32_t>(atlases.size()), atlas, &atlasFailure) && !atlas);
+        E1PublishTerrainAtlases(&foreign, {}); check(bridge_terrain_atlas(0, atlas));
+        E1PublishTerrainAtlases(&owner, {}); check(!bridge_terrain_atlas(0, atlas));
         E1RetireTerrain(&foreign); check(bridge_world_mist_grid() == grid);
         draw.Complete(); check(bridge_world_mist_grid() == grid);
     }
@@ -147,7 +221,7 @@ int wmain(int argc, wchar_t** argv) try {
         check(!bridge_ambient_world_source(ambient) && !bridge_world_mist_grid());
         check(!E1PublishTerrainFrame(&owner, geometry, matrix));
     }
-    std::printf("E1 terrain: %d checks PASS; sectors=%zu grid=%ux%u; no window/game\n", checks,
+    std::printf("E1 terrain: %d checks PASS; sectors=%zu grid=%ux%u; WARP surface pixels/lifetime; no window/game\n", checks,
         original->sectors.size(), g1->width, g1->height);
     return 0;
 } catch (int n) { std::printf("E1 terrain check %d FAILED\n", n); return 1; }
