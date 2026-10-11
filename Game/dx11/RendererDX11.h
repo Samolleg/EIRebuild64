@@ -48,11 +48,8 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> deviceContext;
-    Microsoft::WRL::ComPtr<IDXGISwapChain> swapchain;
 
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> renderTargetView;
 
-    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depthStencilView;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depthStencilBuffer;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilStateDisableWrite;
@@ -137,7 +134,6 @@ public:
         widthOut = m_width;
         heightOut = m_height;
     };
-    Microsoft::WRL::ComPtr<IDXGISwapChain> GetSwapChain() { return swapchain; };
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> GetDeviceContext() { return deviceContext; };
     Microsoft::WRL::ComPtr<ID3D11Device> GetDevice() { return device; };
     OwnedSpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };

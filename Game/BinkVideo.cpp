@@ -106,6 +106,7 @@ struct CBinkVideo::Player
     }
     void Decode()
     {
+        const auto renderAccess = theRenderer.GetD3D()->GetOwnedRenderer().LockFrame();
         decode(movie);
         copy(movie, pixels.data(), movie->width * 4, movie->height, 0, 0, 0x80000003u);
         // BINKSURFACE32 is BGRX; SpriteBatch requires opaque alpha.
@@ -118,6 +119,7 @@ struct CBinkVideo::Player
     {
         if (!decoded) return;
         auto dx = theRenderer.GetD3D();
+        const auto renderAccess = dx->GetOwnedRenderer().LockFrame();
         RECT dest = {rect.left, rect.top, rect.right, rect.bottom};
         if (present)
         {

@@ -515,38 +515,26 @@ HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWOR
 HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                            LPDDBLTFX pDDBltFx)
 {
-    auto context = pDX11->GetDeviceContext();
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> boundTarget;
-    context->OMGetRenderTargets(1, boundTarget.GetAddressOf(), nullptr);
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-    captureUsedBoundTarget = false;
-    captureDifferentFromBufferZero = false;
-    if (boundTarget)
-    {
-        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-        boundTarget->GetResource(resource.GetAddressOf());
-        if (resource && SUCCEEDED(resource.As(&source)))
-            captureUsedBoundTarget = true;
-    }
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
-    HRESULT hr = pDX11->GetSwapChain()->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
-    if (FAILED(hr))
-        return hr;
-    if (!source)
-        source = backbuffer;
-    captureDifferentFromBufferZero = source.Get() != backbuffer.Get();
-    D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
-    source->GetDesc(&sourceDesc);
-    texture->GetDesc(&destinationDesc);
-    if (sourceDesc.Width != destinationDesc.Width ||
-        sourceDesc.Height != destinationDesc.Height ||
-        sourceDesc.Format != destinationDesc.Format ||
-        sourceDesc.SampleDesc.Count != destinationDesc.SampleDesc.Count)
-        return E_INVALIDARG;
-    ownedSurface.BeginWrite();
-    context->CopyResource(texture.Get(), source.Get());
-    ownedSurface.Complete(texture.Get());
-    return S_OK;
+    return pDX11->GetOwnedRenderer().VisitOutput(this,
+        [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {
+            auto& self = *static_cast<CDXGISurface*>(user);
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+            const HRESULT selected = OwnedRender::E1CaptureSource(context, backbuffer, source,
+                self.captureUsedBoundTarget, self.captureDifferentFromBufferZero);
+            if (FAILED(selected)) return selected;
+            D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
+            source->GetDesc(&sourceDesc);
+            self.texture->GetDesc(&destinationDesc);
+            if (sourceDesc.Width != destinationDesc.Width ||
+                sourceDesc.Height != destinationDesc.Height ||
+                sourceDesc.Format != destinationDesc.Format ||
+                sourceDesc.SampleDesc.Count != destinationDesc.SampleDesc.Count)
+                return E_INVALIDARG;
+            self.ownedSurface.BeginWrite();
+            context->CopyResource(self.texture.Get(), source.Get());
+            self.ownedSurface.Complete(self.texture.Get());
+            return S_OK;
+        });
 }
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
                                  D3D11_SUBRESOURCE_DATA *srd)

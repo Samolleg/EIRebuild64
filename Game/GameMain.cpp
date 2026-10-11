@@ -1175,6 +1175,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
     }
 
     auto pDX11 = theRenderer.GetD3D();
+    const auto renderAccess = pDX11->GetOwnedRenderer().LockFrame();
 
     if (theRenderer.BeginDrawFrame())
     {

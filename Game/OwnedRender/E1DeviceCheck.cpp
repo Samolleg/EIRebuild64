@@ -1,5 +1,9 @@
 #include "embedded_device.h"
 #include "E1Surface.h"
+#include "E1DeviceAccess.h"
+#include "E1RenderGate.h"
+#include <atomic>
+#include <thread>
 #include <cstdio>
 #include <stdexcept>
 
@@ -35,9 +39,19 @@ struct Consumer {
         check(v.device==self.device && v.color==self.expected->rtv.Get() &&
             v.depth==self.expected->dsv.Get() && v.width==self.width && v.height==self.height);
         if(self.fail)return E_ABORT;
-        const float green[]{0,1,0,1};
-        v.context->ClearRenderTargetView(v.color,green);
-        v.context->ClearDepthStencilView(v.depth,D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0.25f,7);
+        check(OwnedRender::E1BindTargets(nullptr,v)==S_OK);
+        ComPtr<ID3D11RenderTargetView> boundColor;
+        ComPtr<ID3D11DepthStencilView> boundDepth;
+        v.context->OMGetRenderTargets(1,&boundColor,&boundDepth);
+        check(boundColor.Get()==v.color && boundDepth.Get()==v.depth);
+        UINT count=1;D3D11_VIEWPORT viewport{};
+        v.context->RSGetViewports(&count,&viewport);
+        check(count==1 && viewport.Width==float(v.width) && viewport.Height==float(v.height));
+        float green[]{0,1,0,1},depth=0.25f;
+        check(OwnedRender::E1ClearColor(green,v)==S_OK);
+        check(OwnedRender::E1ClearDepth(&depth,v)==S_OK);
+        check(OwnedRender::E1ClearColor(nullptr,v)==E_INVALIDARG);
+        check(OwnedRender::E1ClearDepth(nullptr,v)==E_INVALIDARG);
         check(self.publication.Complete(self.expected->color.Get()));
         const auto value=OwnedRender::E1SurfaceValue(self.publication.Id());
         ComPtr<ID3D11Texture2D> resolved;
@@ -61,12 +75,72 @@ void verifyPixels(ID3D11Device* device,ID3D11DeviceContext* context,Targets& tar
 }
 }
 int main() try {
+    OwnedRender::E1RenderGate gate;
+    {
+        const auto mainFrame=gate.Lock();
+        const auto nestedMovie=gate.Lock();
+        check(mainFrame.owns_lock() && nestedMovie.owns_lock());
+        bool skipped=false;
+        std::thread loading([&] {
+            const auto attempt=gate.Try();
+            skipped=!attempt.owns_lock();
+        });
+        // Join while owning a frame, as in a nested loading-screen teardown.
+        loading.join();
+        check(skipped);
+    }
+    try { const auto access=gate.Lock(); throw 7; } catch(int) {}
+    bool recovered=false;
+    std::thread recovery([&] {const auto access=gate.Try();recovered=access.owns_lock();});
+    recovery.join();check(recovered);
+    unsigned shared=0;
+    const auto producer=[&] {
+        for(unsigned n=0;n<10000;++n) {const auto access=gate.Lock();++shared;}
+    };
+    std::thread a(producer),b(producer);a.join();b.join();check(shared==20000);
     ComPtr<ID3D11Device> device,foreign;
     ComPtr<ID3D11DeviceContext> context,foreignContext,deferred;
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)));
     check(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&foreign,nullptr,&foreignContext)));
     check(SUCCEEDED(device->CreateDeferredContext(0,&deferred)));
     Targets scene(device.Get(),8,4),ui(device.Get(),16,8),alien(foreign.Get(),8,4);
+    std::atomic<unsigned> serializedFrames{0},failedFrames{0};
+    const auto gpuProducer=[&](Targets& target) {
+        for(unsigned n=0;n<32;++n) {
+            const auto access=gate.Lock();
+            const HRESULT hr=owned::visit_embedded_device(device.Get(),context.Get(),
+                target.rtv.Get(),target.dsv.Get(),nullptr,
+                [](void*,const owned::EmbeddedDeviceView& view) -> HRESULT {
+                    OwnedRender::E1BindTargets(nullptr,view);
+                    std::this_thread::yield();
+                    ComPtr<ID3D11RenderTargetView> bound;
+                    view.context->OMGetRenderTargets(1,&bound,nullptr);
+                    if(bound.Get()!=view.color)return E_UNEXPECTED;
+                    float green[]{0,1,0,1};
+                    return OwnedRender::E1ClearColor(green,view);
+                });
+            if(SUCCEEDED(hr))++serializedFrames;else ++failedFrames;
+        }
+    };
+    std::thread sceneProducer(gpuProducer,std::ref(scene)),uiProducer(gpuProducer,std::ref(ui));
+    sceneProducer.join();uiProducer.join();
+    check(serializedFrames==64 && failedFrames==0);
+    verifyPixels(device.Get(),context.Get(),scene);
+    verifyPixels(device.Get(),context.Get(),ui);
+    ComPtr<ID3D11Texture2D> captured;
+    bool usedBound=false,different=false;
+    context->OMSetRenderTargets(1,scene.rtv.GetAddressOf(),nullptr);
+    check(OwnedRender::E1CaptureSource(context.Get(),ui.color.Get(),captured,usedBound,different)==S_OK);
+    check(captured.Get()==scene.color.Get() && usedBound && different);
+    context->OMSetRenderTargets(1,ui.rtv.GetAddressOf(),nullptr);
+    check(OwnedRender::E1CaptureSource(context.Get(),ui.color.Get(),captured,usedBound,different)==S_OK);
+    check(captured.Get()==ui.color.Get() && usedBound && !different);
+    context->OMSetRenderTargets(0,nullptr,nullptr);
+    check(OwnedRender::E1CaptureSource(context.Get(),ui.color.Get(),captured,usedBound,different)==S_OK);
+    check(captured.Get()==ui.color.Get() && !usedBound && !different);
+    check(OwnedRender::E1CaptureSource(nullptr,ui.color.Get(),captured,usedBound,different)==E_INVALIDARG);
+    check(!captured && !usedBound && !different);
+    check(OwnedRender::E1CaptureSource(context.Get(),nullptr,captured,usedBound,different)==E_INVALIDARG);
     Consumer consumer{device.Get(),&scene,8,4};
     const auto call=[&](ID3D11DeviceContext* c,ID3D11RenderTargetView* r,ID3D11DepthStencilView* d) {
         return owned::visit_embedded_device(device.Get(),c,r,d,&consumer,&Consumer::visit);

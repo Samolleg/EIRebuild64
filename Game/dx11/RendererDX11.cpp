@@ -269,26 +269,7 @@ void CDX11::EndWorld()
 
 void CDX11::RefreshOwnedTargets()
 {
-    EIRenderD3D11BridgeV1 bridge = {};
-    IfFailedThrowHR(ownedRenderer.AcquireBridge(bridge));
-    // Device/context/swapchain remain immutable while the existing loading
-    // worker presents and the main thread creates resources. Refresh targets.
-    bridge.device->Release();
-    bridge.context->Release();
-    bridge.swap_chain->Release();
-    renderTargetView.Reset();
-    depthStencilView.Reset();
-    renderTargetView.Attach(bridge.color_target);
-    depthStencilView.Attach(bridge.depth_target);
-    ComPtr<ID3D11Resource> resource;
-    renderTargetView->GetResource(resource.GetAddressOf());
-    ComPtr<ID3D11Texture2D> target;
-    IfFailedThrowHR(resource.As(&target));
-    D3D11_TEXTURE2D_DESC desc = {};
-    target->GetDesc(&desc);
-    D3D11_VIEWPORT viewport = {0, 0, float(desc.Width), float(desc.Height), 0, 1};
-    deviceContext->OMSetRenderTargets(1, renderTargetView.GetAddressOf(), depthStencilView.Get());
-    deviceContext->RSSetViewports(1, &viewport);
+    IfFailedThrowHR(ownedRenderer.VisitDevice(nullptr, &OwnedRender::E1BindTargets));
 }
 
 void CDX11::EndFrame()
@@ -307,13 +288,13 @@ void CDX11::EndFrame()
 void CDX11::ClearColorBuffer(DWORD value)
 {
     DirectX::XMFLOAT4 color = BGRAtoFloat4(value);
-    this->deviceContext->ClearRenderTargetView(this->renderTargetView.Get(), (FLOAT *)&color);
+    IfFailedThrowHR(ownedRenderer.VisitDevice(&color, &OwnedRender::E1ClearColor));
 }
 
 void CDX11::ClearZBuffer(DWORD dwValue)
 {
-    this->deviceContext->ClearDepthStencilView(this->depthStencilView.Get(),
-                                               D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, dwValue, 0);
+    float depth = float(dwValue);
+    IfFailedThrowHR(ownedRenderer.VisitDevice(&depth, &OwnedRender::E1ClearDepth));
 }
 
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture)
@@ -375,9 +356,8 @@ CDX11::~CDX11()
         this->deviceContext->Flush();
     }
     this->deviceContext.Reset();
-    this->swapchain.Reset();
     // ReportLiveObjects();
-    renderTargetView.Reset();depthStencilView.Reset();depthStencilBuffer.Reset();
+    depthStencilBuffer.Reset();
     depthStencilState.Reset();depthStencilStateDisableWrite.Reset();depthStencilStateDisable.Reset();
     blendState.Reset();blendStateDisable.Reset();rasterizerState.Reset();rasterizerStateNoCull.Reset();
     samplerState.Reset();blackTextureView.Reset();blackTexture.Reset();myTexture.Reset();myTexture2.Reset();
@@ -414,22 +394,24 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
         ReportError(hr, "Cannot initialize the shared renderer. Place the source-API RDDraw.dll next to EIRebuild.exe.");
         throw hr;
     }
-    EIRenderD3D11BridgeV1 bridge = {};
-    IfFailedThrowHR(ownedRenderer.AcquireBridge(bridge));
-    device.Attach(bridge.device);
-    deviceContext.Attach(bridge.context);
-    swapchain.Attach(bridge.swap_chain);
-    renderTargetView.Attach(bridge.color_target);
-    depthStencilView.Attach(bridge.depth_target);
-
-    // Window policy belongs to the DLL. Use its actual target extent before
-    // creating the viewport; the bootstrap settings may still be 800x600.
-    DXGI_SWAP_CHAIN_DESC output = {};
-    IfFailedThrowHR(swapchain->GetDesc(&output));
-    if (!output.BufferDesc.Width || !output.BufferDesc.Height)
-        IfFailedThrowHR(E_INVALIDARG);
-    dwWidth = m_width = output.BufferDesc.Width;
-    dwHeight = m_height = output.BufferDesc.Height;
+    IfFailedThrowHR(ownedRenderer.VisitDevice(this,
+        [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
+            auto& self = *static_cast<CDX11*>(user);
+            // Device/context live for the renderer session. Target references
+            // stay in the callback and are acquired again at each boundary.
+            self.device = view.device;
+            self.deviceContext = view.context;
+            return OwnedRender::E1BindTargets(nullptr, view);
+        }));
+    IfFailedThrowHR(ownedRenderer.VisitOutput(this,
+        [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {
+            D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
+            if (!desc.Width || !desc.Height) return E_INVALIDARG;
+            auto& self = *static_cast<CDX11*>(user);
+            self.m_width = desc.Width; self.m_height = desc.Height;
+            return S_OK;
+        }));
+    dwWidth = m_width; dwHeight = m_height;
 
     // Create Blend State
     D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
@@ -573,14 +555,12 @@ bool CDX11::ReportLiveObjects()
 
 void CDX11::MakeScreenShot()
 {
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT hr = swapchain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (SUCCEEDED(hr))
-    {
-        hr = DirectX::SaveWICTextureToFile(deviceContext.Get(), backBuffer.Get(),
-                                           GUID_ContainerFormatJpeg, L"SCREENSHOT.JPG");
-    }
-    // IfFailedThrowHR(hr);
+    // Capture the composed output while its renderer-owned lease is valid.
+    ownedRenderer.VisitOutput(nullptr,
+        [](void*, ID3D11DeviceContext* context, ID3D11Texture2D* output) -> HRESULT {
+            return DirectX::SaveWICTextureToFile(context, output,
+                GUID_ContainerFormatJpeg, L"SCREENSHOT.JPG");
+        });
 }
 
 void CDX11::UpdateTexture(ID3D11Texture2D *texture, UINT subresource_index, D3D11_BOX *region,
