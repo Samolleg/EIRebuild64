@@ -23,6 +23,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "dx11/RendererDX11.h"
 #include "GameMain.h"
+#include "OwnedRender/Startup.h"
 #include "StringProcessing.h"
 #include "WorldClient.h"
 #include "WorldServer.h"
@@ -749,6 +750,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
        //
        // set new memory depleted handler
        // create worlds and establish connection to local server
+    OwnedRender::ConfigureStartup();
     theWorld.Create();
     theWorldServer.Create();
     theCamera.Create(&theSettings, theSettings.fpNearClipDistance, theSettings.fpFarClipDistance,
