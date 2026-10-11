@@ -3228,7 +3228,15 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         (pSkillInfo->nType==7&&pSkillInfo->szNonlocalName=="camp_damage")))
         display=mod->CampDescriptions(*pScreen->GetCurrentPers(),*pSkillInfo->pUnit,true);
     auto drawRows=[&](const std::vector<ModCampDescriptions::Row>& rows){
+        const bool damagePanel=pSkillInfo->nType==7 && pSkillInfo->szNonlocalName=="camp_damage";
+        const bool dual=display.damageNumbered;
+        int hand=1;
         for(const auto& row:rows){
+            if(damagePanel && (row.label=="infoitem_58" || row.label=="infoitem_58#2")){
+                hand=row.label=="infoitem_58#2"?2:1;
+                if(hand==2){pSurf->DrawText("--------------------------",rc,0,INV_COLOR_INFO,DT_LEFT);rc+=shift;}
+                continue;
+            }
             CString label,value;std::string key=row.label;const auto suffix=key.find('|');std::string unitLabel;
             if(suffix!=std::string::npos){unitLabel=key.substr(suffix+1);key.resize(suffix);}
             if(key=="$WSLDEXT")label=szStrings[WSLDEXT];else if(key=="$WSLWEAPON")label=szStrings[WSLWEAPON];
@@ -3238,23 +3246,78 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                 const bool second=key=="infoitem_58#2";if(second)key="infoitem_58";
                 const CString text=key.find("PERK ")==0?CString(key.c_str()):CString("string ")+key.c_str();
                 if(pTxtMng->GetText(text))pTxtMng->GetLine(label);else label=key.c_str();
-                if(key=="infoitem_58")label=label+(second?" 2":" 1");
+                if(key=="infoitem_58")label=CString(second?"    2. ":"    1. ")+label;
+                if((damagePanel && key=="PERK dexter0") || (pSkillInfo->nType==5 && (key=="infoskill_26"||key=="infoskill_31"||key=="infoskill_32")))label+=":";
             }
             if(unitLabel=="difficulty"){
                 CString difficulty,levelText;if(pTxtMng->GetText("string infoskill_53"))pTxtMng->GetLine(difficulty);
-                levelText.Format("%s%.0f",(LPCSTR)difficulty,row.second);label+=levelText;
+                levelText.Format("(%.0f %s)",row.second,(LPCSTR)difficulty);label+=levelText;
             }
-            if(row.heading)pSurf->DrawText(label,rc,0,INV_COLOR_HEADER,DT_CENTER);
+            if(damagePanel && row.damageType>=0){
+                CString weapon;if(pTxtMng->GetText("string infoitem_58"))pTxtMng->GetLine(weapon);
+                CString combined;if(dual)combined.Format("  %d %s %s",hand,(LPCSTR)weapon,(LPCSTR)label);
+                else combined.Format("  %s %s",(LPCSTR)weapon,(LPCSTR)label);
+                value.Format(row.format,row.value,row.second);
+                pSurf->DrawText(combined,rc,0,INV_COLOR_INFO,DT_LEFT);
+                pSurf->DrawText(value,rc,0,INV_COLOR_INFO,DT_RIGHT);
+            }
+            else if(pSkillInfo->nType==0 && pSkillInfo->nSkill==1 && !row.heading){
+                value.Format(row.format,row.value);
+                if(!unitLabel.empty()){CString unit;if(pTxtMng->GetText(CString("string ")+unitLabel.c_str()))pTxtMng->GetLine(unit);value+=unit;}
+                pSurf->DrawText(label+" "+value,rc,0,color,DT_LEFT);
+            }
+            else if(row.heading)pSurf->DrawText(label,rc,0,damagePanel?INV_COLOR_INFO:color,
+                damagePanel||key=="infoitem_58"?DT_LEFT:DT_CENTER);
             else{
                 if(row.damageType>=0||key=="infoskill_1")value.Format(row.format,row.value,row.second);else value.Format(row.format,row.value);
                 if(!unitLabel.empty()&&unitLabel!="difficulty"){CString text;if(pTxtMng->GetText(CString("string ")+unitLabel.c_str()))pTxtMng->GetLine(text);value+=text;}
-                pSurf->DrawText(CString("     ")+label,rc,0,color,DT_LEFT);pSurf->DrawText(value,rc-CPoint(10,0),0,color,DT_RIGHT);
+                pSurf->DrawText(CString(damagePanel?(key=="infoitem_64"?"":"  "):"     ")+label,rc,0,damagePanel?INV_COLOR_INFO:color,DT_LEFT);
+                pSurf->DrawText(value,rc-CPoint(damagePanel||(pSkillInfo->nType==0&&pSkillInfo->nSkill==7&&key!="infoskill_1")?0:10,0),0,damagePanel?INV_COLOR_INFO:color,DT_RIGHT);
             }
             rc+=shift;
+            if(pSkillInfo->nType==5 && key=="$WSLSUM")rc+=shift;
         }
     };
 
-    switch (pSkillInfo->nType)
+    if(mod){
+switch (pSkillInfo->nType)
+	{
+	case 0: {
+		szName = CString("perk ") + pSkillInfo->szNonlocalName ;
+		if (pTxtMng->GetText(szName ) ) pTxtMng->GetLine(szName);
+		CString descKey=pSkillInfo->szNonlocalName+"_desc";
+        if(pTxtMng->GetText(CString("perk ")+descKey)) {
+            pTxtMng->GetUntilNextCommand(szDesc);szDesc.TrimRight("\r\n");pTxtMng->CloseText();
+        } else szDesc=descKey;
+		break;
+	}
+	case 1:
+	case 2:
+	case 3: {
+		ERPGAutoSkills eSkill = (ERPGAutoSkills)pSkillInfo->nSkill;
+
+		if (eSkill != 4 && eSkill != 5) {
+			if (pTxtMng->GetText(CString(CString("perk ") + pSkillInfo->szNonlocalName)))
+			{
+				pTxtMng->GetLine(szName);
+				pTxtMng->GetLine(szDesc);
+			}
+		}
+		break;
+	}
+	case 4:
+	case 5:
+	case 6:
+	case 7:
+	case 8:
+	{
+		if (pTxtMng->GetText(pSkillInfo->szNonlocalName)) pTxtMng->GetLine(szName);
+		pTxtMng->GetSystemString(CString(pSkillInfo->szNonlocalName + "_desc"), szDesc);
+		break;
+	}
+
+	}
+    }else switch (pSkillInfo->nType)
     {
     case 0:
     case 1:
@@ -3275,9 +3338,11 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         break;
     }
 
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
-    rc += shift;
-    rc += shift;
+    if(!mod || !szName.IsEmpty()) {
+        pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
+        rc += shift;
+    }
+    if(!mod || (pSkillInfo->nType==0 && pSkillInfo->nSkill==7))rc += shift;
 
     if (pSkillInfo->nType == 0)
     {
@@ -3405,10 +3470,10 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             break;
         }
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
     }
 
-    if (pSkillInfo->nType == 1)
+    if (pSkillInfo->nType == 1 && (!mod || pSkillInfo->nSkill<4))
     {
         ERPGAutoSkills eSkill = (ERPGAutoSkills)pSkillInfo->nSkill;
         int nValue = pSkillInfo->pStats->GetBaseAutoSkill(eSkill);
@@ -3449,7 +3514,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
                 }
                 rc+=shift;
                 int label=MSLFIRE;
-                for(int subtype=0;subtype<RPG_NUM_MAGIC_SUBTYPES;++subtype) {
+                for(int subtype=0;subtype<3;++subtype) {
                     if(subtype==RPGMST_DIVINATION||subtype==RPGMST_HEALING||subtype==RPGMST_DOMINATION)continue;
                     const int skill=ModCampStats::MagicSkill(*pSkillInfo->pStats,shown->cIntelligence,subtype);
                     szOut.Format(" %s",(LPCSTR)szStrings[label++]);pSurf->DrawText(szOut,rc,0,color,DT_LEFT);
@@ -3463,7 +3528,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
     }
 
     if (pSkillInfo->nType == 2)
@@ -3476,7 +3541,9 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         switch (eSkill)
         {
         case RPGMSKL_SCIENCE:
-            szOut.Format("%s %d", szSkillStr[USECOMPLEX],
+            szTmp=szSkillStr[USECOMPLEX];
+            if(mod && pTxtMng->GetText("string infoskill_44"))pTxtMng->GetLine(szTmp);
+            szOut.Format("%s %d", szTmp,
                          mod && shown?ModCampStats::ScienceSkill(*shown):int(pSkillInfo->pStats->GetManualSkill(eSkill)));
             pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
             rc += shift;
@@ -3484,7 +3551,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 13, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
     }
 
     if (pSkillInfo->nType == 3)
@@ -3676,13 +3743,14 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         */
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 6, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 6, 0, color, mod?(DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_WORD_ELLIPSIS):(DT_CENTER | DT_WORDBREAK), TRUE, mod?0:12);
     }
 
     if (pSkillInfo->nType == 4)
     {
         pSurf->DrawText(szStrings[ABSORPARMOR], rc, 0, mod?INV_COLOR_HEADER:color, mod?DT_CENTER:DT_LEFT);
         rc += shift;
+        if(mod)rc += shift;
 
         float fpAbsorbtions[RPG_NUM_ATTACK_TYPES];
         for (int i = 0; i < RPG_NUM_ATTACK_TYPES; i++)
@@ -3707,13 +3775,12 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 8, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
     }
 
     if (pSkillInfo->nType == 5 && full){
-        pSurf->DrawText(szStrings[pSkillInfo->szNonlocalName=="defense"?MODDEFENSE:MODATTACK],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;rc+=shift;
-        drawRows(pSkillInfo->szNonlocalName=="defense"?display.defenseRows:display.attackRows);rc+=shift;
-        pSurf->DrawMultiText(szDesc,rc,9,0,color,DT_CENTER|DT_WORDBREAK,TRUE,15);
+        pSurf->DrawText(CString("     ")+szStrings[pSkillInfo->szNonlocalName=="defense"?MODDEFENSE:MODATTACK],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;rc+=shift;
+        drawRows(pSkillInfo->szNonlocalName=="defense"?display.defenseRows:display.attackRows);
     }
     else if (pSkillInfo->nType == 5)
     {
@@ -3722,7 +3789,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
             (type == RPGWST_BOW || type == RPGWST_CROSSBOW))
         {
             pSurf->DrawMultiText(szStrings[WSLBOWDEFENSE], rc, 2, 0, color,
-                                 DT_CENTER | DT_WORDBREAK, TRUE, 12);
+                                 DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
             rc += shift;
         }
         else
@@ -3768,15 +3835,15 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         rc += shift;
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
     }
 
     if (pSkillInfo->nType == 6)
     {
         int nStr = MSLFIRE;
         // Addon has three elemental subtypes; retain native storage for save compatibility.
-        if(mod){pSurf->DrawText(szStrings[MAGICSCHOOL],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;}
-        const int subtypeCount = RPG_NUM_MAGIC_SUBTYPES;
+        if(mod){pSurf->DrawText(szStrings[MAGICSCHOOL],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;rc+=shift;}
+        const int subtypeCount = mod ? 3 : RPG_NUM_MAGIC_SUBTYPES;
         for (int i = 0; i < subtypeCount; i++)
         {
             ERPGMagicSubtypes subtype = (ERPGMagicSubtypes)i;
@@ -3796,14 +3863,18 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
         }
         rc += shift;
         // DESCRIPTION
-        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 9, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
     }
 
     if(pSkillInfo->nType==7 && pSkillInfo->szNonlocalName=="camp_damage" && full){
-        pSurf->DrawText(szStrings[DAMAGE],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;
-        drawRows(display.damageRows);
+        CPersonage* pers=pScreen->GetCurrentPers();
+        const int slot=int(pers->dwCurrentWeapon);
+        if(slot>=0 && slot<pers->weapons.GetSize() && pers->weapons[slot]){
+            pSurf->DrawText(szStrings[DAMAGE],rc,0,INV_COLOR_HEADER,DT_CENTER);rc+=shift;
+            drawRows(display.damageRows);
+        }
     }else if (pSkillInfo->nType == 7)
-        pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+        pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, mod?0:12);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC

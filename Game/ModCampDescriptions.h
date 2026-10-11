@@ -34,6 +34,7 @@ struct Damage {
     float rawMinimum=0,rawMaximum=0,minimum=0,maximum=0,skill=0,attribute=0,perk=0,overload=0,complex=0,sum=0,shownSum=0;
 };
 struct Result {
+    bool damageNumbered=false;
     int attack=0,defense=0;
     float mpRate=0,mpBase=0,mpPerSecond=0,mpSeconds=0,backstab=0;
     std::vector<Row> attackRows,defenseRows,overloadRows,mpRows,damageRows;
@@ -57,7 +58,7 @@ inline float OverloadParry(float right,float left,float factor,bool dual){
 inline int WeaponHover(int row,bool weapon,int damageRows){
     if(row>=1&&row<=4)return 4;
     if(weapon){if(row==7||row==8)return 5;if(row>=9&&row<9+damageRows)return 7;}
-    int weight=weapon?10+damageRows:11;
+    int weight=weapon?9+damageRows:11;
     if(row==weight)return 0;if(row==weight+2)return 6;return -1;
 }
 }

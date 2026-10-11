@@ -13,6 +13,7 @@ ModCampDescriptions::Result CModPackage::EvaluateCampDescriptions(const ModCampD
  const float attackOverload=overload("GetOverloadAttackOnServer"),defenseOverload=overload("GetOverloadDefenceOnServer"),damageOverload=overload("GetOverloadDamageOnServer");
  const float blockOverload=overload("GetOverloadBlockOnServer"),parryOverload=overload("GetOverloadParryOnServer");
  const bool dual=in.left.present,shield=dual&&in.left.type==RPGWST_HANDS1,strong=level(29)!=0,master=level(26)!=0,duelist=level(28)!=0;
+ out.damageNumbered=dual;
  const bool rightTwo=TwoHanded(in.right.type),leftTwo=TwoHanded(in.left.type);
  const int weightPerk=in.right.weightClass==1?16:in.right.weightClass==2?24:in.right.weightClass==3?6:-1;
  const int weightBonus=weightPerk<0?0:int(perk(weightPerk));
@@ -70,7 +71,7 @@ ModCampDescriptions::Result CModPackage::EvaluateCampDescriptions(const ModCampD
   for(const auto& d:out.damages)if(d.left==left)out.damageRows.push_back({"damage",d.rawMinimum,d.rawMaximum,"%.0f-%.0f",d.type,false});
   heading(out.damageRows,"infoitem_59");const auto it=std::find_if(out.damages.begin(),out.damages.end(),[&](const Damage& d){return d.left==left;});if(it==out.damages.end())return;const auto& d=*it;
   add(out.damageRows,"infoitem_62",d.skill,"%+.0f%%");add(out.damageRows,"infoitem_60",d.attribute,"%+.0f%%");add(out.damageRows,left?"PERK dexter0":"infoitem_61",left?attr(in.right.type,.25f*level(30)):d.perk,"%+.0f%%");add(out.damageRows,left?"infoitem_63":"infoitem_57",d.overload+(left?0:d.complex),"%+.0f%%");
-  add(out.damageRows,"infoitem_64",d.shownSum+in.difficulty*25,"%+.0f%%");if(in.difficulty>0){out.damageRows.back().label+="|difficulty";out.damageRows.back().second=in.difficulty==1?2:1;}
+  add(out.damageRows,"infoitem_64",d.shownSum+in.difficulty*25,"%.0f%%");out.damageRows.back().format=d.shownSum>0?"%+.0f%%":"%.0f%%";if(in.difficulty>0&&!left){out.damageRows.back().label+="|difficulty";out.damageRows.back().second=in.difficulty==1?2:1;}
   for(const auto& range:out.damages)if(range.left==left){float factor=(100+rightSum+wound)*.01f*(1+in.difficulty*.25f);out.damageRows.push_back({"damage",weapon.minimum*factor,weapon.maximum*factor,"%.0f-%.0f",range.type,false});}
  };
  detailedDamage(false);detailedDamage(true);return out;
