@@ -3,6 +3,8 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "BaseManager.h"
 #include "WorldServer.h"
+#include "WorldClient.h"
+#include "OwnedRender/E1Scene.h"
 #include "EffectManager.h"
 #include "ModSpellTextures.h"
 #include "SaveLoader.h"
@@ -229,7 +231,10 @@ LPGAMEBASE CBaseManager::CreateData(ETypeIDs tidTypeID, int id)
     else
         RegisterInstantAs(id, lpData);
     //
-    lpData->Create();
+    OwnedRender::E1ResourceCreation visualCreation(OwnedRender::E1Scene(),
+        this == theWorld.GetMapObjectManager() ? &theWorld : nullptr, lpData, lpData->GetID());
+    const BOOL created = lpData->Create();
+    visualCreation.Complete(created != FALSE);
     if(SpellTextures::HasBindings()&&this==theWorldServer.GetEffectManager())SpellTextures::RecordOwner(this,lpData,SpellTextures::currentCode);
 
     return lpData;

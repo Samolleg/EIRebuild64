@@ -69,5 +69,66 @@ int main() {
     check(count() == 1, "old owner cannot retire replacement");
     host.Retire(&worldB, 1);
     check(count() == 0 && !host.Added(&worldB, 1, 9), "retired scene rejects publication");
+    host.Begin(&worldA, 3);
+    int objectA = 0, objectB = 0;
+    check(!host.BeginResource(&worldB, &objectA, 21).serial,
+        "server or foreign world cannot publish a client resource");
+    check(!host.BeginResource(&worldA, &objectA, -21).serial,
+        "UI resource stays outside positive world domain");
+    owned::VisualResourceIncarnation createdResource{};
+    {
+        OwnedRender::E1ResourceCreation creation(host, &worldA, &objectA, 21);
+        createdResource = host.Resource(&objectA);
+        check(createdResource.serial && count() == 0,
+            "resource begins before membership without fabricating membership");
+        creation.Complete(true);
+    }
+    check(host.Resource(&objectA).serial == createdResource.serial,
+        "successful virtual creation survives scope exit");
+    host.Added(&worldA, 3, 21);
+    host.Removed(&worldA, 3, 21);
+    check(host.Resource(&objectA).serial == createdResource.serial,
+        "streamed membership removal does not destroy resource");
+    host.Added(&worldA, 3, 21);
+    host.DestroyResource(&objectA);
+    check(!scene.visual_resource(21).serial && count() == 1,
+        "resource destruction does not remove independent membership");
+    host.DestroyResource(&objectA);
+    check(count() == 1, "repeated destruction is harmless");
+    {
+        OwnedRender::E1ResourceCreation creation(host, &worldA, &objectA, 22);
+        creation.Complete(false);
+    }
+    check(!host.Resource(&objectA).serial && !scene.visual_resource(22).serial,
+        "failed virtual Create retires construction");
+    try {
+        OwnedRender::E1ResourceCreation creation(host, &worldA, &objectA, 23);
+        throw 1;
+    } catch (int) {}
+    check(!host.Resource(&objectA).serial && !scene.visual_resource(23).serial,
+        "unwound virtual Create retires construction");
+    const auto staleResource = host.BeginResource(&worldA, &objectA, 24);
+    const auto replacement = host.BeginResource(&worldA, &objectB, 24);
+    check(replacement.serial != staleResource.serial && !host.Resource(&objectA).serial,
+        "resource ID reuse rejects old owner lookup");
+    host.DestroyResource(&objectA);
+    check(host.Resource(&objectB).serial == replacement.serial,
+        "late old-object destructor preserves replacement ID");
+    check(!host.FinishResource(staleResource, false) && host.Resource(&objectB).serial,
+        "late failed completion preserves replacement");
+    host.ResetPositive(&worldA, 3);
+    check(host.Resource(&objectB).serial == replacement.serial,
+        "positive membership reset preserves resources");
+    {
+        OwnedRender::E1ResourceCreation late(host, &worldA, &objectA, 25);
+        host.Begin(&worldA, 4);
+        const auto next = host.BeginResource(&worldA, &objectB, 25);
+        late.Complete(true);
+        check(host.Resource(&objectB).serial == next.serial,
+            "old-world completion cannot finish or replace new-world resource");
+    }
+    host.Retire(&worldA, 4);
+    check(!host.Resource(&objectB).serial && !scene.visual_resource(25).serial,
+        "world retirement clears resource owners and scene");
     std::printf("E1SceneCheck: %u checks PASS\n", checks);
 }
