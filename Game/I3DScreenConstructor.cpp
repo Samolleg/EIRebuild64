@@ -586,9 +586,12 @@ int CI3DObjectInventoryItems::GetItemSortMode(CItem *pItem)
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObjectInventoryItems::SortFunction0(CItem *pItem)
 {
+    const auto* mod = ModRuntime::Current();
+    const bool native = mod && mod->CombatSetting("JMVPerks");
     if (pScreen->IsItemInstruction(pItem) || pScreen->IsItemMaterial(pItem))
         return 0;
-    else if (pScreen->IsItemPrototype(pItem) || pScreen->IsItemModifier(pItem))
+    else if (pScreen->IsItemPrototype(pItem) || pScreen->IsItemModifier(pItem) ||
+             (native && pItem->GetTypeID() == ITID_ITEM_SPELL))
         return 1;
     else if (pItem->GetTypeID() == ITID_ITEM_WEAPON || pItem->GetTypeID() == ITID_ITEM_ARMOR ||
              pItem->GetTypeID() == ITID_ITEM_QUICK || pItem->GetTypeID() == ITID_ITEM_SPELL)
@@ -607,7 +610,10 @@ int CI3DObjectInventoryItems::SortFunction1(CItem *pItem)
         CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
         CSpellManager *pSM = theWorld.GetSpellManager();
         const SSDBSpellPrototype *pPrototype = pSM->GetPrototype(pLoot->GetInstructionItemIndex());
-        switch (pPrototype->msSchool)
+        const auto* mod = ModRuntime::Current();
+        const int group = mod && mod->CombatSetting("JMVPerks")
+            ? int(pPrototype->mstSubtype) : int(pPrototype->msSchool);
+        switch (group)
         {
         case RPGMS_ELEMENTAL:
             return 0;
@@ -1374,6 +1380,11 @@ void CI3DObjectNameStats::SetScreenMode(EItemScreenModes eCampMode)
             }
         }
         AddArea()->MakeRect(20, 210, 180, 225);
+        if (const auto* mod = ModRuntime::Current(); mod && mod->CombatSetting("JMVPerks"))
+        {
+            // The addon has no height control. Keep the primary-stat area IDs.
+            for (int area : {5, 9, 13}) GetArea(area)->MakeRect(0, 0, 0, 0);
+        }
         break;
 
     case ISM_WEAPONS:
@@ -1452,7 +1463,7 @@ void CI3DObjectNameStats::UpdateStats()
         OutputSkill(rc, szStrings[POINTSLEFT], points);
         rc += shift;
         rc += shift;
-        OutputSkill(rc, szStrings[TALL], nTall);
+        if (!statsMod) OutputSkill(rc, szStrings[TALL], nTall);
 
         rc = CRect(140, 65, 160, 80);
         cr = (pScreen->CanAdjustCreationPrimary(0, -1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
@@ -1466,8 +1477,11 @@ void CI3DObjectNameStats::UpdateStats()
         rc += shift;
         rc += shift;
         rc += shift;
-        cr = (nTall > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
-        pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
+        if (!statsMod)
+        {
+            cr = (nTall > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+            pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
+        }
 
         rc = CRect(160, 65, 180, 80);
         cr = (pScreen->CanAdjustCreationPrimary(0, 1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
@@ -1481,8 +1495,11 @@ void CI3DObjectNameStats::UpdateStats()
         rc += shift;
         rc += shift;
         rc += shift;
-        cr = (nTall < 100) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
-        pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
+        if (!statsMod)
+        {
+            cr = (nTall < 100) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+            pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
+        }
     }
     else if (eCurMode == ISM_WEAPONS)
     {
@@ -2306,7 +2323,7 @@ void CI3DObjectPerks::RedrawPerks()
     int i, n;
     COLORREF cr, cr2;
     auto perkColor=[&](const CString& code,COLORREF fallback){
-        if(!ModRuntime::Current())return fallback;
+        if(!ModRuntime::Current() || !ModRuntime::Current()->CombatSetting("JMVPerks"))return fallback;
         int index=thePerkDatabase.GetPerkIndex(code);if(index<0)return fallback;
         int group=index/3;
         if(group<=6||group==29)return RGB(230,160,160);

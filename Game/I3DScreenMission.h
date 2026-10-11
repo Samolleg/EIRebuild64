@@ -616,11 +616,6 @@ private:
     float slide_dir;        // 1 show, -1 hide
 
     int nMode;
-    enum NotificationMode { Hidden, Transient, History };
-    NotificationMode notificationMode = Hidden;
-    DWORD lastNotification = 0;
-    void SetNotificationMode(NotificationMode mode);
-    void SyncNotificationVisibility();
 
     CString szOutputText;
     CString szHooverText;
@@ -650,8 +645,6 @@ public:
 
     void AddOutput(LPCTSTR pszText);
     void RestoreOutput(LPCTSTR text);
-    bool CloseHistory();
-    bool ScrollHistory(UINT flags, short delta, CPoint point);
     void AddHoover(CItem *pItem, bool bCrippled);
     void AddHoover(int nArrivedBucks);
     void UpdateHoover();

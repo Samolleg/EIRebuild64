@@ -20,6 +20,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "RandomGen.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModHudAssignment.h"
 /////////////////////////////////////////////////////////////////////////////////////
 void AddItemToLists(CGameBaseList &items, CGameBaseList &spells, CItem *pItem)
 {
@@ -694,6 +695,11 @@ CString CItemWeapon::GetI3DTextureName() const
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemWeapon::GetI3DFigureName() const
 {
+    if (const auto* mod = ModRuntime::Current(); mod && mod->CombatSetting("JMVGraphics2"))
+    {
+        const auto* shape = static_cast<const SIDBWeaponShape*>(GetShapeEntry());
+        if (shape) return ModHudAssignment::WeaponModel(*shape);
+    }
     CString szName;
     char buff[4];
 

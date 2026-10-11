@@ -1763,10 +1763,10 @@ void CI3DScreenCamp::ClickOnSlot(int nSlotType, EItemScreenParts eFrom)
         pAssortItems->SwitchToMode(4);
         break;
     case IST_ITEM_SPELL:
-        pWagon->SwitchToMode(2);
+        pWagon->SwitchToMode(CampEquipmentActive() ? 1 : 2);
         break;
     case IST_SPELL_READY:
-        pWagon->SwitchToMode(2);
+        pWagon->SwitchToMode(CampEquipmentActive() ? 1 : 2);
         pAssortSpells->SwitchToMode(5);
         break;
     case IST_SPELL_PROT:

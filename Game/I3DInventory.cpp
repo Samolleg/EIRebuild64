@@ -340,6 +340,15 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         item.pItem->AttachUserData(pInfo);
     }
 
+    const auto* itemMod = ModRuntime::Current();
+    const bool nativeItemGraphics = itemMod && itemMod->CombatSetting("JMVGraphics2");
+    // Retail comparisons at 5ECEDC/5ED25C: addon changes rune (4) to quick (2).
+    const bool flatInstruction = nativeItemGraphics
+        ? item.pItem->GetTypeID() == ITID_ITEM_LOOT &&
+          static_cast<CItemLoot*>(item.pItem)->GetLootType() == IDBLIT_INSTRUCTION &&
+          static_cast<CItemLoot*>(item.pItem)->GetInstructionType() == IDBINS_QUICK
+        : IsItemModifier(item.pItem);
+    const bool flatMagicItem = IsItemSpell(item.pItem) || IsItemPrototype(item.pItem) || flatInstruction;
     if (item.eFrom != ISP_UNKNOWN)
     {
         pFig->SetAmbient(1, 1, 1);
@@ -388,9 +397,11 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         while (pInfo->fAngle > FP_2PI)
             pInfo->fAngle -= FP_2PI;
 
-        if (IsItemSpell(item.pItem) || IsItemPrototype(item.pItem) || IsItemModifier(item.pItem))
+        if (flatMagicItem)
             pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
-        else if (tid == ITID_ITEM_WEAPON)
+        else if (tid == ITID_ITEM_WEAPON &&
+                 !(nativeItemGraphics &&
+                   static_cast<CItemWeapon*>(item.pItem)->GetWeaponType() == RPGWST_HANDS1))
         {
             pFig->SetOrientation(CQuaternion(CPlot3D(1, 1, 0), pInfo->fAngle) *
                                  CQuaternion(CPlot3D(1, 0, 0), FP_PI));
@@ -423,7 +434,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     else
     {
         pFig->SetAmbient(.5f, .5f, .5f);
-        if (IsItemSpell(item.pItem) || IsItemPrototype(item.pItem) || IsItemModifier(item.pItem))
+        if (flatMagicItem)
             pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
         else
             pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI));
@@ -3804,7 +3815,9 @@ void CI3DObjectItemInfo::SetHelp(int nHelpID)
     CTextManager *pTxtMng = theWorld.GetTextManager();
 
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 12);
+    const auto* mod = ModRuntime::Current();
+    const int lineHeight = mod && mod->CombatSetting("JMVPerks") ? 15 : 12;
+    CPoint shift(0, lineHeight);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
@@ -3816,12 +3829,12 @@ void CI3DObjectItemInfo::SetHelp(int nHelpID)
         pTxtMng->GetLine(szDesc);
     }
     // szName.Format( "Help #%d", nHelpID );
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, lineHeight);
     rc += shift;
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+    pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, lineHeight);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
