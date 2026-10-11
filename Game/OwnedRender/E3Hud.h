@@ -3,8 +3,10 @@
 class CI3DScreenMission;
 class CI3DObject;
 class CI3DSurface;
+class CI3DScrollText;
 class CRenderer;
 namespace OwnedRender {
+void E3MessageLayout(CI3DScrollText* text);
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer);
 bool E3HudDraw2D(CI3DObject* object);
 bool E3HudBlit(CI3DSurface* surface);

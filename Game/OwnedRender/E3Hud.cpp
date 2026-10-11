@@ -236,6 +236,12 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+void E3MessageLayout(CI3DScrollText* text) {
+    if(!text || text!=messageTextOwner || !E3HudRendererAttached())return;
+    RECT placed{};float scale=1.f;
+    if(owned::embedded_hud_layout().message_text_rect(placed,scale))
+        text->SetTextLayout(CRect(placed),scale);
+}
 bool E3HudDraw2D(CI3DObject* object) {return E3HudAccess::Draw2D(object);}
 bool E3HudBlit(CI3DSurface* surface) {return E3HudAccess::Blit(surface);}
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer) {return E3HudAccess::Draw(object,renderer);}

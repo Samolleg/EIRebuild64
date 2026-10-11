@@ -7,6 +7,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DObject.h"
+#include <cmath>
 #include <new>
 #include "I3DMapObjTranslation.h"
 #include "I3DMain.h"
@@ -320,15 +321,20 @@ void CI3DSurface::SetRect(CRect rectr)
     pI3D->VirtualToScreen(rect);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DSurface::SetRectForRedraw(CRect desired)
+bool CI3DSurface::SetRectForRedraw(CRect desired, float textScale)
 {
+    if (!std::isfinite(textScale) || textScale <= 0.f)
+        throw std::invalid_argument("Invalid text scale");
     pI3D->VirtualToScreen(desired);
+    desired.right = desired.left + LONG(std::ceil(desired.Width() / textScale));
+    desired.bottom = desired.top + LONG(std::ceil(desired.Height() / textScale));
     if (desired.Width() <= 0 || desired.Height() <= 0)
         throw std::invalid_argument("Text surface requires a positive rectangle");
     if (hDC)
         throw std::logic_error("Cannot resize a locked text surface");
 
-    if (!pSurface || nRealWidth != desired.Width() || nRealHeight != desired.Height())
+    const bool resized = !pSurface || nRealWidth != desired.Width() || nRealHeight != desired.Height();
+    if (resized)
     {
         // Prepare before replacing live storage. A failed allocation leaves the
         // previous surface, rectangle and readback/backup state intact.
@@ -342,7 +348,9 @@ void CI3DSurface::SetRectForRedraw(CRect desired)
         pixelBufferValid = false;
         pixelReadbackStatus = E_PENDING;
     }
+    const bool changed = resized || rect != desired;
     rect = desired;
+    return changed;
 }
 void CI3DSurface::GetFromScreen()
 {

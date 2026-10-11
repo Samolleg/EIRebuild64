@@ -7,6 +7,8 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
 #include "I3DScrollText.h"
+#include "OwnedRender/E3Hud.h"
+#include <cmath>
 #include "WorldClient.h"
 
 const int N_DEFAULT_FONT = 1;
@@ -57,22 +59,28 @@ void CI3DScrollText::SetText(LPCSTR pszText)
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DScrollText::SetRect(CRect rect)
 {
-    if (rect.Width() <= 14 || rect.Height() <= 0)
+    SetTextLayout(rect, 1.f);
+}
+void CI3DScrollText::SetTextLayout(CRect rect, float textScale)
+{
+    if (!std::isfinite(textScale) || textScale < .5f || textScale > 3.f || rect.Width() <= 14 || rect.Height() <= 0)
         throw std::invalid_argument("Scroll text requires room for text and its scrollbar");
     // Allocate first: failed growth must not leave new hit/line rectangles
     // pointing beyond the old texture. Moving alone does not resize storage.
     CI3DSurface *pSurface = GetSurface(0);
-    if (pSurface)
-        pSurface->SetRectForRedraw(rect);
+    const bool surfaceChanged = pSurface && pSurface->SetRectForRedraw(rect, textScale);
+    if (!surfaceChanged && GetRect() == rect && m_textScale == textScale && !m_rectText.IsRectEmpty()) return;
 
     CI3DScrollBar::SetRect(rect);
-    m_rectText = CRect(CPoint(0, 0), rect.Size());
-    m_rectText.right -= 14;
+    m_textScale = textScale;
+    m_rectText = CRect(0, 0, (std::max)(1, int(std::floor((rect.Width() - 14) / textScale))),
+        (std::max)(1, int(std::floor(rect.Height() / textScale))));
     RecalculateRange();
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScrollText::Draw(CRenderer *pRend)
 {
+    OwnedRender::E3MessageLayout(this);
     int nPos;
     if (GetPos(nPos))
         DrawCurrentTextPart(nPos);

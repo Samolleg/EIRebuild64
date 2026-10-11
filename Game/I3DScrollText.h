@@ -75,6 +75,7 @@ private:
 
     // Geometry data
     CRect m_rectText;
+    float m_textScale = 1.f;
 
     // Text data
     CBasicLexemPtrArray m_aLexems;
@@ -90,4 +91,5 @@ public:
     void SetText(LPCSTR pszText);
     virtual BOOL Draw(CRenderer *pRend);
     virtual void SetRect(CRect rect);
+    void SetTextLayout(CRect rect, float textScale);
 };

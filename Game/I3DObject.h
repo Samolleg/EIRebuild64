@@ -88,7 +88,7 @@ public:
 
     void SetRect(CRect rect);
     // Discards pixels on resize; the text owner must redraw after reflow.
-    void SetRectForRedraw(CRect rect);
+    bool SetRectForRedraw(CRect rect, float textScale = 1.f);
     void Move(CPoint ptLeftTop);
 
     void Show(BOOL bShow, BOOL bNeedStore = FALSE);
@@ -210,6 +210,7 @@ public:
     int HitTest(CPoint pt);
     void JournalHit(int hit) noexcept;
 
+    const CRect& GetRect() const { return rect; }
     void SetRect(CRect rc) { rect = rc; }
     void SetRect(int x1, int y1, int x2, int y2)
     {
