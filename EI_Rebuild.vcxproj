@@ -902,6 +902,7 @@
   <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(ProjectDir)external\owned-renderer\</OwnedRendererRoot></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(OwnedRendererRoot)\Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile></ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="OwnedRenderer\E1RendererFacadeWarpCheck.host.targets" Condition="'$(E1RendererFacadeWarpCheck)'=='true'" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets" Condition="Exists('packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets')" />
     <Import Project="packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets" Condition="Exists('packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets')" />
