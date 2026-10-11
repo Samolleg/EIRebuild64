@@ -339,6 +339,8 @@
     </ClCompile>
     <ClCompile Include="Game\GameMain.cpp" />
     <ClCompile Include="Game\OwnedRender\Startup.cpp" />
+    <ClCompile Include="Game\OwnedRender\E4Camp.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\OwnedRender\E4CampHost.cpp" />
     <ClCompile Include="Game\OwnedRender\NeighbourTerrain.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\OwnedRender\ResourceMapping.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\CrashEvidence.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
@@ -876,6 +878,8 @@
     <ProjectReference Include="OwnedRenderer\OwnedRenderer.vcxproj" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'"><Project>{8F045552-BA21-4F45-9902-631E6359DABD}</Project></ProjectReference>
     <ProjectReference Include="luajit-x86\luajit.vcxproj"><Project>{2714e7b7-71e0-484a-81df-495cfdb463ad}</Project></ProjectReference>
   </ItemGroup>
+  <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(ProjectDir)external\owned-renderer\</OwnedRendererRoot></PropertyGroup>
+  <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(OwnedRendererRoot)\Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile></ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets" Condition="Exists('packages\Microsoft.XAudio2.Redist.1.2.11\build\native\Microsoft.XAudio2.Redist.targets')" />

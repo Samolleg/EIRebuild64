@@ -1,5 +1,5 @@
 #include "ResourceMapping.h"
-#include "../../external/owned-renderer/Source/res_mapping.h"
+#include <res_mapping.h>
 #include <psapi.h>
 #include <map>
 #include <mutex>
