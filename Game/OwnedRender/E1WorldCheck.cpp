@@ -26,6 +26,12 @@ int main() {
         input.environment.weather_current = 1;
         input.environment.weather_next = 2;
         input.environment.rain_particles = .25f;
+        input.lightingValid = true;
+        input.lighting.ambient = {.1f, .2f, .3f, 1.f};
+        input.lighting.sunlight_diffuse = {.8f, .6f, .4f, 1.f};
+        input.lighting.sunlight_direction = {-.3f, .4f, .5f, 0.f};
+        NativeWorldLighting lighting;
+        check(!E1ReadWorldLighting(lighting));
         input.camera.valid = true;
         input.camera.world_to_clip = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
         input.fog.valid = input.fog.enabled = true;
@@ -37,6 +43,9 @@ int main() {
             E1WorldDraw draw(&owner, 5, input);
             epoch = bridge_current_world_epoch();
             check(epoch != 0);
+            check(E1ReadWorldLighting(lighting) && lighting.ambient == input.lighting.ambient &&
+                lighting.sunlight_diffuse == input.lighting.sunlight_diffuse &&
+                lighting.sunlight_direction == input.lighting.sunlight_direction);
             check(bridge_read_world_environment(environment));
             check(environment.game_hours == 49.5 && environment.hour == 1.5f &&
                 environment.region == 2 && environment.weather_current == 1 && environment.weather_next == 2);
@@ -57,7 +66,9 @@ int main() {
         auto complete = bridge_world_draw_completion_snapshot();
         check(complete.valid && complete.bridge_frame == serial && complete.completion_serial == 1);
         check(bridge_read_world_environment(environment)); // UI consumes the just-completed world.
+        check(E1ReadWorldLighting(lighting));
         E1BeginFrame(); // A menu frame with no world must not consume the old seam.
+        check(!E1ReadWorldLighting(lighting));
         check(!bridge_read_world_environment(environment));
         check(!bridge_scene_world_to_clip_snapshot().valid && !bridge_world_fog_snapshot().valid);
         check(!bridge_world_draw_completion_snapshot().valid && bridge_world_draw_completion_counter() == 1);
@@ -66,6 +77,7 @@ int main() {
             check(bridge_current_world_epoch() == epoch);
             throw std::runtime_error("interrupted world draw");
         } catch (const std::runtime_error&) {}
+        check(!E1ReadWorldLighting(lighting));
         check(!bridge_read_world_environment(environment));
         check(!bridge_world_draw_completion_snapshot().valid && bridge_world_draw_completion_counter() == 1);
         {
@@ -107,6 +119,47 @@ int main() {
             check(!bridge_world_fog_snapshot().valid);
         }
         E1RetireWorld(&owner);
+        check(!E1ReadWorldLighting(lighting));
+        // Missing/invalid lighting may not silently use NativeWorldLighting defaults.
+        const auto validLight = input.lighting;
+        input.lightingValid = false;
+        {
+            E1WorldDraw draw(&owner, 7, input);
+            check(!E1ReadWorldLighting(lighting));
+        }
+        input.lightingValid = true;
+        for (int field = 0; field != 12; ++field) {
+            input.lighting = validLight;
+            auto& row = field < 4 ? input.lighting.ambient : field < 8 ?
+                input.lighting.sunlight_diffuse : input.lighting.sunlight_direction;
+            row[field % 4] = std::numeric_limits<float>::quiet_NaN();
+            E1WorldDraw draw(&owner, 7, input);
+            check(!E1ReadWorldLighting(lighting));
+        }
+        for (float value : {0.f, 1.e-8f, std::numeric_limits<float>::max()}) {
+            input.lighting = validLight;
+            input.lighting.sunlight_direction = {value, value, value, 0.f};
+            E1WorldDraw draw(&owner, 7, input);
+            check(!E1ReadWorldLighting(lighting));
+        }
+        input.lighting = validLight;
+        {
+            E1WorldDraw draw(&owner, 7, input);
+            check(E1ReadWorldLighting(lighting));
+            const auto held = lighting;
+            input.lighting.ambient[0] = .9f;
+            check(E1ReadWorldLighting(lighting) && lighting.ambient == held.ambient);
+        }
+        {
+            E1WorldDraw draw(&owner, 8, input);
+            check(E1ReadWorldLighting(lighting) && lighting.ambient[0] == .9f);
+        }
+        input.camera.valid = false;
+        {
+            E1WorldDraw draw(&owner, 8, input);
+            check(!E1ReadWorldLighting(lighting));
+        }
+        input.camera.valid = true;
         // Real world adapter + embedded device lease. No window/device is opened.
         int renderer = 0, otherRenderer = 0;
         auto& sky = embedded_sky();

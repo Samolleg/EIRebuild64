@@ -180,6 +180,10 @@ int wmain(int argc, wchar_t** argv) try {
     check(E1PublishTerrainSource(&owner, 10, 1, path.filename().string().c_str(),
         original->map_header_resource.c_str(), Reader::read, &reader, why) && reads == reader.reads);
     E1WorldFrame frame; frame.camera.valid = true; frame.camera.world_to_clip = matrix;
+    frame.lightingValid = true;
+    frame.lighting.ambient = {.1f, .2f, .3f, 1.f};
+    frame.lighting.sunlight_diffuse = {.8f, .6f, .4f, 1.f};
+    frame.lighting.sunlight_direction = {-.3f, .4f, .5f, 0.f};
     E1BeginFrame();
     OwnedTerrainGeometryValues geometry;
     geometry.revision = 1; geometry.layer_shifts.assign(original->objects.size(), 0.f);
@@ -331,6 +335,9 @@ int wmain(int argc, wchar_t** argv) try {
         check(E1PublishTerrainMaterial(&owner, false, baseMaterial));
         check(E1PublishTerrainMaterial(&owner, true, waterMaterial));
         check(E1PrepareTerrainCommand(false, 0, native));
+        check(native.lighting.ambient == frame.lighting.ambient &&
+            native.lighting.sunlight_diffuse == frame.lighting.sunlight_diffuse &&
+            native.lighting.sunlight_direction == frame.lighting.sunlight_direction);
         auto heldState = native.view.owned_fixed_state;
         check(heldState.enabled && heldState.replay_frame_state && !heldState.alpha_blend_enable &&
             heldState.source_blend == D3DBLEND_ONE && heldState.destination_blend == D3DBLEND_ZERO);
@@ -484,6 +491,23 @@ int wmain(int argc, wchar_t** argv) try {
         check(!E1PrepareTerrainCommand(true, E1TerrainView()->transparent_commands.size(), native) &&
             !native.view.owned_texture.identity && !native.view.owned_texture.generation && !native.view.owned_texture.surface);
         check(!bridge_terrain_atlas(static_cast<std::uint32_t>(atlases.size()), atlas, &atlasFailure) && !atlas);
+        E1TerrainCommandSource heldLighting;
+        check(E1PrepareTerrainCommand(false, 0, heldLighting));
+        auto nextFrame = frame;
+        nextFrame.lightingValid = false;
+        {
+            E1WorldDraw missingLight(&owner, 10, nextFrame);
+            check(!E1PrepareTerrainCommand(false, 0, native) && !native.view.decode);
+            missingLight.Complete();
+        }
+        nextFrame.lightingValid = true;
+        nextFrame.lighting.ambient[0] = .75f;
+        {
+            E1WorldDraw changedLight(&owner, 10, nextFrame);
+            check(E1PrepareTerrainCommand(false, 0, native) && native.lighting.ambient[0] == .75f);
+            check(heldLighting.lighting.ambient == frame.lighting.ambient);
+            changedLight.Complete();
+        }
         E1PublishTerrainAtlases(&foreign, {}); check(bridge_terrain_atlas(0, atlas));
         E1PublishTerrainAtlases(&owner, {}); check(!bridge_terrain_atlas(0, atlas));
         E1RetireTerrain(&foreign); check(bridge_world_mist_grid() == grid);

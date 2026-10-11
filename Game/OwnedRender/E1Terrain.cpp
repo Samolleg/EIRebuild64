@@ -150,10 +150,11 @@ bool E1PublishTerrainMaterial(const void* owner, bool transparent,
 }
 bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept try {
     output.view = {}; output.context = {};
+    output.lighting = {};
     output.terrain.reset(); output.geometry.reset(); output.dynamic.reset(); output.atlas.reset();
     output.prepared.reset();
     const unsigned pass = transparent ? 1u : 0u;
-    if (!E1TerrainView() || !source.geometry ||
+    if (!E1ReadWorldLighting(output.lighting) || !E1TerrainView() || !source.geometry ||
         materialGeometry[pass] != source.geometry->revision || !materials[pass].enabled) return false;
     const auto& commands = transparent ? view.transparent_commands : view.base_commands;
     if (index >= commands.size()) return false;

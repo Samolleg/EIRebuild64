@@ -22,6 +22,12 @@ void clearFrame() noexcept {
 }
 namespace OwnedRender {
 void E1BeginFrame() noexcept { advance(frame); clearFrame(); }
+bool E1ReadWorldLighting(owned::NativeWorldLighting& output) noexcept {
+    output = {};
+    if (!values.camera.valid || !values.lightingValid) return false;
+    output = values.lighting;
+    return true;
+}
 bool E1ClaimSky(bool requested) noexcept {
     const bool claim = requested && activeDraw && values.camera.valid &&
         values.environment.valid && owned::embedded_sky().enabled();
@@ -43,6 +49,14 @@ E1WorldDraw::E1WorldDraw(const void* owner, std::uint64_t generation,
     }
     token = activeDraw = advance(draw);
     values = input;
+    const auto& light = values.lighting;
+    for (float v : light.ambient) if (!std::isfinite(v)) values.lightingValid = false;
+    for (float v : light.sunlight_diffuse) if (!std::isfinite(v)) values.lightingValid = false;
+    for (float v : light.sunlight_direction) if (!std::isfinite(v)) values.lightingValid = false;
+    const auto& d = light.sunlight_direction;
+    const float lengthSquared = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+    if (!std::isfinite(lengthSquared) || lengthSquared <= 1.0e-12f)
+        values.lightingValid = false;
     auto& environment = values.environment;
     environment.valid = environment.valid && std::isfinite(environment.game_hours) &&
         std::isfinite(environment.world_time) && std::isfinite(environment.hour) &&

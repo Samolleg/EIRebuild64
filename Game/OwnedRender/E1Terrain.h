@@ -24,6 +24,7 @@ std::shared_ptr<const owned::OwnedTerrainDynamicSector> E1TerrainSector(std::uin
 // Noncopyable because view.decode_context points to this object's context.
 struct E1TerrainCommandSource {
     owned::NativeGeometryView view{};
+    owned::NativeWorldLighting lighting{};
     owned::OwnedTerrainSourceDecodeContext context;
     std::shared_ptr<const owned::TerrainCpuAsset> terrain;
     std::shared_ptr<const owned::OwnedTerrainGeometryValues> geometry;

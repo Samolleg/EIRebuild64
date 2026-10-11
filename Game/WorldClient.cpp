@@ -3018,6 +3018,13 @@ BOOL CWorldClient::Draw()
             static_cast<CTextureManager*>(GetTextureManager()),ownedRenderGeneration,
             ModRuntime::Resources(),GetWorkPath(),GetResourcePath());
     OwnedRender::E1WorldFrame frameValues;
+    // The values above were read from this draw's renderer and sunlight.
+    // ownedWorld already reverses D3DLIGHT's ray direction exactly once.
+    frameValues.lightingValid = true;
+    frameValues.lighting.ambient = {ownedWorld.ambient[0], ownedWorld.ambient[1], ownedWorld.ambient[2], 1.f};
+    frameValues.lighting.sunlight_diffuse = {sunlight.r, sunlight.g, sunlight.b, 1.f};
+    frameValues.lighting.sunlight_direction = {ownedWorld.sunlight_direction[0],
+        ownedWorld.sunlight_direction[1], ownedWorld.sunlight_direction[2], 0.f};
     auto& environment = frameValues.environment;
     environment.valid = true;
     environment.game_hours = ownedWorld.game_hours;
