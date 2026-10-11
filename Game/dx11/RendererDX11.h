@@ -35,6 +35,7 @@ class CRenderState
 class CDX11
 {
 private:
+    bool itemColorSum = false; // Per-draw item state, never a configuration option.
     std::shared_ptr<ModWorldBackgroundDX11> modBackground;
     std::shared_ptr<ModShadowDX11> modShadows;
     std::shared_ptr<UIColorKeyBlit> uiColorKey;
@@ -126,6 +127,7 @@ public:
     void ScreenShot();
     bool RenderStateCheck();
     bool SetRenderStates();
+    bool SetItemColorSum(bool active);
     void CreateShaderResource(Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
                               Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &textureView);
     void CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d,

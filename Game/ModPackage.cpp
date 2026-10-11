@@ -1808,7 +1808,7 @@ void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds
  }
  capacity=ModCampStats::Capacity(strength,stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT),jewelry,complex,sets);
  float actions=(10+stats.psDexterity.fpEffectiveValue*.2f)*(1+stats.GetPerkModifier(14)*.01f);
- int slot=int(pers.dwCurrentWeapon),left=unit?ModStats::LeftHand(*unit):-1;
+ int slot=int(pers.dwCurrentWeapon),left=unit?ModStats::LeftHand(*unit,[&](int index)->CItemWeapon*{return index>=0&&index<pers.weapons.GetSize()?pers.weapons[index]:nullptr;}):-1;
  auto*right=slot>=0&&slot<pers.weapons.GetSize()?pers.weapons[slot]:nullptr;
  auto*off=left>=0&&left<pers.weapons.GetSize()?pers.weapons[left]:nullptr;
  if(right&&left<0&&stats.cPerks[28]){

@@ -11,6 +11,7 @@
 #include "Object3DClientSpecific.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
+namespace { void RefreshCampEquipmentPose(CUnit*, CPersonage*, bool); }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenCamp.h"
 #include "ModProgression.h"
@@ -407,20 +408,9 @@ void CI3DScreenCamp::OnActivate()
             CUnit *current = nCurPers >= 0 && nCurPers < pUnits.GetSize() ? pUnits[nCurPers] : 0;
             if (current)
             {
-                if (CItemWeapon *weapon = current->GetCurrentQWeapon())
+                if (CPersonage* pers=GetCurrentPers(); pers && int(pers->dwCurrentWeapon)>=0 && pers->dwCurrentWeapon<pers->weapons.GetSize() && pers->weapons[pers->dwCurrentWeapon])
                 {
-                    const int type = weapon->GetShapeEntry()->dwTypeID;
-                    const bool twoHanded = ModStats::IsTwohandedWeapon(type, current);
-                    const char *idle = type == RPGWST_HANDS4 && twoHanded ? "2hscidle08" :
-                        (type == RPGWST_HANDS5 || type == RPGWST_HANDS6) && twoHanded ?
-                        "2hacidle08" : "cidle09";
-                    if (const SADEntry *entry = current->GetAnimationEntry(idle))
-                    {
-                        const float animationTime = (timeGetTime() / 1024.0f) * 15;
-                        current->LowStartAnimationExtended(0xffffffffu, entry->dwEntryIndex,
-                                                   int(animationTime - random.Get(0, 50)), 0);
-                        current->GetUnitSpecific()->NewAnimationWasReceived(animationTime);
-                    }
+                    RefreshCampEquipmentPose(current,pers,true);
                 }
                 current->RecalcRPGStats();
             }
@@ -1027,6 +1017,7 @@ void CI3DScreenCamp::UpdateWeapons()
     pUnit->ChangeWeapon(pPers->dwCurrentWeapon);
     pUnit->GetUnitSpecific()->NotifyWeaponUpdated();
     UpdateAttributes();
+    RefreshCampEquipmentPose(pUnit,pPers,true);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CPersonage *CI3DScreenCamp::GetCurrentPers()
@@ -1127,7 +1118,7 @@ void RebuildCampArmorShells(CUnit* unit)
 void RefreshCampEquipmentPose(CUnit* unit,CPersonage* pers,bool allowEmpty)
 {
     if(!unit)return;
-    const int slot=int(unit->GetCurrentWeaponSlotIndex());
+    const int slot=int(pers->dwCurrentWeapon);
     const bool valid=slot>=0&&slot<pers->weapons.GetSize()&&slot<QI_MAX_WEAPONS&&pers->weapons[slot];
     if(!valid&&!allowEmpty)return;
     const auto* shape=valid?pers->weapons[slot]->GetShapeEntry():nullptr;

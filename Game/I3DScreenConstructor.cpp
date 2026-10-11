@@ -1049,12 +1049,16 @@ void CI3DObjectSpellSlots::Init(bool bUp)
                         50, nTopHeight, 850, nTopHeight + 100,
                         14, 142, 114, 242, 8);
 
+    // U04 legacy camp layout. Replace as a unit with c56 stage 3.
+    LPTEXTURE endCaps = AddTexture("Inventory01");
     pFig = AddFigure();
-    pFig->MakeBar(inventoryDepth * .8f, 100, 0, nTopHeight,
+    pFig->MakeBar(3.2f, 100, 0, nTopHeight,
                   50, 100.f + nTopHeight, 192, 14, 142, 114);
+    pFig->SetTexture(endCaps);
     pFig = AddFigure();
-    pFig->MakeBar(inventoryDepth * .8f, 100, 750, nTopHeight,
+    pFig->MakeBar(3.2f, 100, 750, nTopHeight,
                   800, 100.f + nTopHeight, 142, 14, 192, 114);
+    pFig->SetTexture(endCaps);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpellSlots::SetCurrentSpell(CItem *pSpell)
@@ -1162,7 +1166,8 @@ BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
     figures[2]->SetUShift(fSpellPosition > 0.f ? 50.f / 256.f : 0.f);
     figures[3]->SetUShift(fSpellPosition < static_cast<float>(maxFirst)
                               ? 50.f / 256.f : 0.f);
-    CI3DObject::Draw(pRend);
+    figures[0]->Draw(pRend);
+    figures[1]->Draw(pRend);
 
     for (int i = nFirstSpell; i < renderEnd; ++i)
     {
@@ -1175,6 +1180,8 @@ BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
         item.eFrom = ePartType;
         pScreen->DrawItem(pRend, item);
     }
+    figures[2]->Draw(pRend);
+    figures[3]->Draw(pRend);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1905,7 +1912,8 @@ void CI3DObjectNameStats::GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkil
     pSkillInfo->pStats = &pPers->stats;
     pSkillInfo->pUnit = pScreen->GetUnit(nCurPers);
     if(eCurMode==ISM_WEAPONS && ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_UpdateStats") && pSkillInfo->pUnit){
-        if(point.x<20||point.x>=180||point.y<165||point.y>=500)return;
+        pI3D->ScreenToVirtual(point);
+        if(point.x<20||point.x>=180||point.y<165||point.y>=400)return;
         const int row=(point.y-165)/15,slot=int(pPers->dwCurrentWeapon);
         const bool weapon=slot>=0&&slot<pPers->weapons.GetSize()&&pPers->weapons[slot];
         const auto display=ModRuntime::Current()->CampDescriptions(*pPers,*pSkillInfo->pUnit);
@@ -2009,7 +2017,7 @@ void CI3DObjectPerks::Init()
     AddArea()->MakeRect(560, 125, 580, 135); // scroll avail up
     AddArea()->MakeRect(560, 480, 580, 490); // scroll avail down
 
-    CRect rc(215, 135, 385, 150);
+    CRect rc(215, 135, 390, 150);
     CPoint shift(0, 15);
     for (int i = 0; i < 2; i++) // skills buttons
     {
@@ -2025,11 +2033,11 @@ void CI3DObjectPerks::Init()
         rc += shift;
     }
     rc += shift;
-    AddArea()->MakeRect(215, 165, 385, 180);
+    AddArea()->MakeRect(215, 165, 390, 180);
     for (int i = 0; i < CAMP_NUM_AV_PERKS_VISIBLE; i++) // perks buttons
-        AddArea()->MakeRect(415, 135 + i * 15, 585, 150 + i * 15);
+        AddArea()->MakeRect(415, 135 + i * 15, 590, 150 + i * 15);
     for (int i = 0; i < CAMP_NUM_REAL_PERKS_VISIBLE; i++) // perks buttons
-        AddArea()->MakeRect(215, 330 + i * 15, 385, 345 + i * 15);
+        AddArea()->MakeRect(215, 330 + i * 15, 390, 345 + i * 15);
 
     CI3DFigure *pFig;
     pFig = AddFigure();
