@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModRuntime.h"
+#include "ModPackage.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "FlyingHitPoints.h"
@@ -161,6 +162,10 @@ struct QuadBatch
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
 {
+    const bool addonGraphics = ModRuntime::Current() &&
+        ModRuntime::Current()->CombatSetting("JMVGraphics2");
+    const int digitWidth = addonGraphics ? 15 : FHP_WIDTH;
+    const int digitHeight = addonGraphics ? 23 : FHP_HEIGHT;
     CString szTmp;
     DWORD dwCurrentTime = timeGetTime();
     DWORD screenWidth, screenHeight;
@@ -205,20 +210,18 @@ BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
                     continue;
             }
         }
-        // AlexK: orig spawns flyhps from drawn unit's 2D bounding box
-        /*if (pFig->CheckFlag(FIG_VISIBLE))
-            pt = static_cast<CFigureClientSpecific *>(pFig->GetFigureSpecific())
-                     ->Get2DClipRect()
-                     .CenterPoint();
-        else
-            pt = pUnit->GetScreenRect().CenterPoint();*/
-        // can't have nice things, so spawn from unit center instead
-        // CPlot3D unit_pos = pUnit->GetCP() + pUnit->GetBoundingVolume().ptCenter;
-        // BUG:-ish?, as in both cases particle move with carrier movement
-        CPlot3D unit_pos = pUnit->GetCP();
-        // projected to screen
-        auto proj_pos = world_to_screen.Rotate4Vector(unit_pos);
-        CPoint pt = { int(proj_pos.x / proj_pos.w), int(proj_pos.y / proj_pos.w) };
+        CPoint pt;
+        if (addonGraphics) {
+            if (pFig->CheckFlag(FIG_VISIBLE))
+                pt = static_cast<CFigureClientSpecific *>(pFig->GetFigureSpecific())
+                         ->Get2DClipRect().CenterPoint();
+            else
+                pt = pUnit->GetScreenRect().CenterPoint();
+        } else {
+            CPlot3D unit_pos = pUnit->GetCP();
+            auto proj_pos = world_to_screen.Rotate4Vector(unit_pos);
+            pt = CPoint(int(proj_pos.x / proj_pos.w), int(proj_pos.y / proj_pos.w));
+        }
 
         // DEBUG - show all flags
         /*it->dwDamageFlags |= HLDAMAGE_BACKSTAB;
@@ -230,11 +233,23 @@ BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
 
         szTmp.Format("%d", it->nAmount);
         int nLength = szTmp.GetLength();
-        const bool potion=ModRuntime::Current()&&(it->dwDamageFlags&HLDAMAGE_POTION);
-        if(potion&&it->nAmount<1)nLength=0;
-
-        int nInfoWidth = (nLength+(potion?1:0)) * FHP_WIDTH;
-        int nInfoHeight = FHP_HEIGHT;
+        const DWORD iconFlags[] = { HLDAMAGE_CRIT, HLDAMAGE_PARRY, HLDAMAGE_BLOCK,
+                                    HLDAMAGE_CHEST, HLDAMAGE_POTION, HLDAMAGE_AVOID };
+        bool showIcons[6] = {};
+        int iconLength = 0;
+        for (int i = 0; i < 6; ++i) {
+            showIcons[i] = addonGraphics && (it->dwDamageFlags & iconFlags[i]);
+            iconLength += int(showIcons[i]);
+            if (addonGraphics && (((it->dwDamageFlags & HLDAMAGE_CRIT) && it->nAmount < 1) ||
+                ((it->dwDamageFlags & HLDAMAGE_PARRY) && it->nAmount > 0)))
+                iconLength = 0;
+        }
+        int nInfoWidth = (nLength + iconLength) * digitWidth;
+        int nInfoHeight = digitHeight;
+        if (addonGraphics && it->nAmount < 1) {
+            nLength = 0;
+            nInfoWidth = nInfoHeight = 0;
+        }
         if (it->dwDamageFlags & HLDAMAGE_BACKSTAB) // backstab
         {
             nInfoWidth = Max(nInfoWidth, FHP_BACKSTAB_WIDTH);
@@ -276,18 +291,37 @@ BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
                 color = RGBA_MAKE(64, 255, 64, alpha);
         }
 
-        if(potion)color=RGBA_MAKE(255,255,255,alpha);
+        if (addonGraphics && !(it->dwDamageFlags & HLDAMAGE_EXPERIENCE)) {
+            if (it->dwDamageFlags & (HLDAMAGE_CRIT | HLDAMAGE_PARRY | HLDAMAGE_AVOID | HLDAMAGE_BLOCK))
+                color = pUnit->GetOwner() ? RGBA_MAKE(255, 74, 74, alpha) : RGBA_MAKE(74, 255, 74, alpha);
+            else if (it->dwDamageFlags & (HLDAMAGE_CHEST | HLDAMAGE_POTION))
+                color = RGBA_MAKE(255, 255, 255, alpha);
+        }
         DWORD specular = RGBA_MAKE(0, 0, 0, 255);
 
         QuadBatch quads = {};
         quads.Reset();
 
-        x = xx + (nInfoWidth - (nLength+(potion?1:0)) * FHP_WIDTH) / 2.f;
-        if(potion){QuadRect tex={345.f/512.f,356.f/512.f,81.f/512.f,-FHP_DIGIT_HEIGHT};QuadRect pos={x-2,y,FHP_WIDTH*1.5f,FHP_HEIGHT};quads.AddQuad(pos,tex,color,specular);x+=FHP_WIDTH*1.5f;}
+        x = xx + (nInfoWidth - (nLength + iconLength) * digitWidth) / 2.f;
+        const QuadRect iconTexcoords[6] = {
+            {263.f/512.f,433.f/512.f,71.f/512.f,-FHP_DIGIT_HEIGHT},
+            {336.f/512.f,431.f/512.f,71.f/512.f,-FHP_DIGIT_HEIGHT},
+            {412.f/512.f,436.f/512.f,84.f/512.f,-FHP_DIGIT_HEIGHT},
+            {263.f/512.f,357.f/512.f,81.f/512.f,-FHP_DIGIT_HEIGHT},
+            {345.f/512.f,356.f/512.f,81.f/512.f,-FHP_DIGIT_HEIGHT},
+            {336.f/512.f,431.f/512.f,71.f/512.f,-FHP_DIGIT_HEIGHT}
+        };
+        for (int i = 0; i < 6; ++i) {
+            if (showIcons[i]) {
+                QuadRect coords = {x - 2, y, digitWidth * 1.5f, float(digitHeight)};
+                quads.AddQuad(coords, iconTexcoords[i], color, specular);
+                x += digitWidth * 1.5f;
+            }
+        }
         for (int i = 0; i < nLength; i++)
         {
             // Add damage / exp digits, quad for each digit
-            QuadRect coords = { x, y, FHP_WIDTH, FHP_HEIGHT };
+            QuadRect coords = { x, y, float(digitWidth), float(digitHeight) };
 
             int nDigit = szTmp[i] - '0';
             int digitCol = (nDigit & 3);
@@ -296,9 +330,9 @@ BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
             float tv = digitRow * FHP_DIGIT_ROW_HEIGHT;
             QuadRect texCoords = { tu, 1 - tv, FHP_DIGIT_WIDTH, -FHP_DIGIT_HEIGHT };
             quads.AddQuad(coords, texCoords, color, specular);
-            x += FHP_WIDTH;
+            x += digitWidth;
         }
-        y += FHP_HEIGHT;                           // draw next below
+        y += digitHeight;                           // draw next below
         if (it->dwDamageFlags & HLDAMAGE_BACKSTAB) // фраза "со спины"
         {
             x = xx + (nInfoWidth - FHP_BACKSTAB_WIDTH) / 2.f; // center
@@ -354,7 +388,7 @@ BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
         }
     }
     // remove excess
-    damages.remove_if(CNeedDeleteFlyingHPFunctional2());
+    if (!addonGraphics) damages.remove_if(CNeedDeleteFlyingHPFunctional2());
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////

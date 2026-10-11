@@ -442,7 +442,7 @@ public:
 
     void ScrollFigures();
     void ShowCurrentMode();
-    void NormalizeCamera();
+    void NormalizeCamera(bool cycleFallout = false);
 
     CPlot2D FromTerrainToFigure(CPlot2D pt, BOOL bZoom = FALSE);
     CPlot2D FromFigureToTerrain(CPlot2D pt, BOOL bZoom = FALSE);
