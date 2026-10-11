@@ -51,6 +51,8 @@ void Start() noexcept;
 void Stop() noexcept;
 void Tick(unsigned long tick) noexcept;
 void Event(const char* category, const char* event, const char* format = "", ...) noexcept;
+// Ordinary warnings are queued and repeated texts are counted on the writer cadence.
+void Notification(const char* type, const char* text, const char* extra) noexcept;
 std::string Quote(const char* cp1251) noexcept;
 void Flush() noexcept; // Wake the writer; no disk I/O on the caller thread.
 void FlushCritical() noexcept; // Bounded lock wait for fatal errors/save boundaries.
