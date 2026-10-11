@@ -373,11 +373,24 @@ void ObserveDamage(CUnit* a,CUnit* t,float amount,int outcome,int critical) noex
 void ObserveHeal(CUnit* t,float amount) noexcept {
     try{if(t&&amount>0)Healing(actor,t->GetID(),Prototype(t),amount);}catch(...){}
 }
-void ObserveSpell(CUnit* a,CMapObject* t,const char* code,int phase,int result,float x,float y,float z,bool combat) noexcept {
+SpellObservation CaptureSpell(CMapObject* a, CMapObject* t) noexcept {
+    SpellObservation captured;
+    if (a) {
+        captured.actor = a->GetID();
+        if (a->WhoAmI() == HPC_UNIT) {
+            auto* unit = static_cast<CUnit*>(a);
+            strncpy_s(captured.prototype, Prototype(unit), _TRUNCATE);
+            captured.squad = Squad(unit);
+        }
+    }
+    if (t) captured.target = t->GetID();
+    return captured;
+}
+void ObserveSpell(const SpellObservation& captured,const char* code,int phase,int result,float x,float y,float z,bool combat) noexcept {
     try {
-        char key[512];_snprintf_s(key,sizeof(key),_TRUNCATE,"actor=%d prototype=%s spell=%s target=%d x=%g y=%g z=%g phase=%d result_phase=%d",a?a->GetID():-1,Prototype(a),code?code:"unknown",t?t->GetID():-1,x,y,z,phase,result);
+        char key[512];_snprintf_s(key,sizeof(key),_TRUNCATE,"actor=%d prototype=%s spell=%s target=%d x=%g y=%g z=%g phase=%d result_phase=%d",captured.actor,captured.prototype,code?code:"unknown",captured.target,x,y,z,phase,result);
         Count("COMBAT","spell",key);
-        if(combat&&a&&Squad(a)){State* s=current.load();if(s&&!s->stopping){Lock guard(s->queueLock);DWORD now=CombatNow();if(!s->fighting){s->fighting=true;Append(*s,Line("COMBAT","begin","reason=squad_spell heuristic=true idle_threshold_ms=10000"));}s->lastCombat=now;}}
+        if(combat&&captured.squad){State* s=current.load();if(s&&!s->stopping){Lock guard(s->queueLock);DWORD now=CombatNow();if(!s->fighting){s->fighting=true;Append(*s,Line("COMBAT","begin","reason=squad_spell heuristic=true idle_threshold_ms=10000"));}s->lastCombat=now;}}
     }catch(...){}
 }
 void ObserveObject(CMapObject* object,const char* action) noexcept {

@@ -644,7 +644,7 @@ void CInterface3D::DrawTextOverFrame(LPCTSTR pszText)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnLButtonDown(UINT nFlags, CPoint point)
 {
-    GameJournal::Event("INPUT", "left_down", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
+    GameJournal::Event("INPUT", "left_down", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(m_pCapture?"captured":pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bLDblClk = false;
     if (m_pCapture)
         m_pCapture->OnLButtonDown(nFlags, point);
@@ -654,7 +654,7 @@ void CInterface3D::OnLButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnLButtonUp(UINT nFlags, CPoint point)
 {
-    GameJournal::Event("INPUT", "left_up", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
+    GameJournal::Event("INPUT", "left_up", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(m_pCapture?"captured":pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     if (m_pCapture)
         m_pCapture->OnLButtonUp(nFlags, point);
     else if (!pScreens.empty())
@@ -672,7 +672,7 @@ void CInterface3D::OnMouseMove(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnRButtonDown(UINT nFlags, CPoint point)
 {
-    GameJournal::Event("INPUT", "right_down", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
+    GameJournal::Event("INPUT", "right_down", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(m_pCapture?"captured":pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bRButDown = true;
     if (m_pCapture)
         m_pCapture->OnRButtonDown(nFlags, point);
@@ -682,7 +682,7 @@ void CInterface3D::OnRButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnRButtonUp(UINT nFlags, CPoint point)
 {
-    GameJournal::Event("INPUT", "right_up", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
+    GameJournal::Event("INPUT", "right_up", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(m_pCapture?"captured":pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bRButDown = false;
     if (m_pCapture)
         m_pCapture->OnRButtonUp(nFlags, point);
@@ -692,7 +692,7 @@ void CInterface3D::OnRButtonUp(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
-    GameJournal::Event("INPUT", "left_double", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
+    GameJournal::Event("INPUT", "left_double", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(m_pCapture?"captured":pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bLDblClk = true;
     if (m_pCapture)
         m_pCapture->OnLButtonDblClk(nFlags, point);
@@ -702,7 +702,7 @@ void CInterface3D::OnLButtonDblClk(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::OnRButtonDblClk(UINT nFlags, CPoint point)
 {
-    GameJournal::Event("INPUT", "right_double", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
+    GameJournal::Event("INPUT", "right_double", "screen=%s capture=%s x=%d y=%d flags=%u", GameJournal::Quote(m_pCapture?"captured":pScreens.empty()?"none":typeid(*pScreens.back()).name()).c_str(), GameJournal::Quote(m_pCapture?typeid(*m_pCapture).name():"none").c_str(), point.x, point.y, nFlags);
     bRButDown = true;
     if (m_pCapture)
         m_pCapture->OnRButtonDblClk(nFlags, point);

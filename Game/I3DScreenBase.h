@@ -71,7 +71,8 @@ private:
 
     CArray<CUnit *, CUnit *> pUnits;
     CUnit *pMainHero;
-    CUnit *pPersonToTalk;
+    CUnit *pPersonToTalk = nullptr;
+    int journalTopicTarget = -1; // Value captured while opening topics; never a retained unit.
     CUnit *pThirdPerson;
     CPlot3D ptLeftPers, ptRightPers, ptMidPers;
     CPlot3D dirLeftPers, dirRightPers, dirMidPers;

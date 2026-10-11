@@ -35,7 +35,14 @@ const char* ItemPart(int value) noexcept;
 #ifndef GAME_JOURNAL_STANDALONE
 void ObserveDamage(CUnit* attacker, CUnit* target, float amount, int outcome, int critical) noexcept;
 void ObserveHeal(CUnit* target, float amount) noexcept;
-void ObserveSpell(CUnit* actor, CMapObject* target, const char* code, int phase, int result, float x, float y, float z, bool combat = true) noexcept;
+struct SpellObservation {
+    int actor = -1, target = -1;
+    char prototype[128] = "unknown";
+    bool squad = false;
+};
+// Capture only at a live-object call site, before callbacks may remove the objects.
+SpellObservation CaptureSpell(CMapObject* actor, CMapObject* target) noexcept;
+void ObserveSpell(const SpellObservation& captured, const char* code, int phase, int result, float x, float y, float z, bool combat = true) noexcept;
 void ObserveObject(CMapObject* object, const char* action) noexcept;
 void ObserveSelection(const std::list<int>& ids) noexcept;
 void TradeReset(const void* screen) noexcept;
