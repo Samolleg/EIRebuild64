@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Input.h"
 static const char LOCAL_FILE[] = __FILE__;
 ///////////////////////////////////////////////////////////////////////////////////
 #include "I3DCursor.h"
@@ -116,7 +117,7 @@ bool CI3DCursor::UpdateCursorState()
         {
             // update increment
             CPoint cursorPos;
-            GetCursorPos(&cursorPos);
+            OwnedRender::E3ReadCursor(&cursorPos);
             m_ptLastInc = cursorPos - m_ptLastCursor;
 
             if (m_isLock)
@@ -132,7 +133,7 @@ bool CI3DCursor::UpdateCursorState()
                     cursorPos.y = 1;
                 else if (cursorPos.y == 0)
                     cursorPos.y = s_height - 2;
-                SetCursorPos(cursorPos.x, cursorPos.y);
+                OwnedRender::E3WriteCursor(cursorPos.x, cursorPos.y);
             }
             m_ptLastCursor = cursorPos;
         }
@@ -142,7 +143,7 @@ bool CI3DCursor::UpdateCursorState()
             point = m_ptLockedCursor;
         else
         {
-            GetCursorPos(&point);
+            OwnedRender::E3ReadCursor(&point);
             m_ptLockedCursor = point;
         }
         if (point.x < 0)
@@ -262,7 +263,7 @@ void CI3DCursor::SetPos(CPoint ptPos)
         m_ptLockedCursor = ptPos;
     }
     else
-        SetCursorPos(ptPos.x, ptPos.y);
+        OwnedRender::E3WriteCursor(ptPos.x, ptPos.y);
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::LockPos(bool bLock)

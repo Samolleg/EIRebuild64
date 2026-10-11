@@ -1,5 +1,8 @@
 #include "StdAfx.h"
 #include "OwnedRender/E4Camp.h"
+#include "OwnedRender/E3Input.h"
+#include <game_focus.h>
+#include <cursor_confinement.h>
 #include "GameJournal.h"
 #include "ErrorDialog.h"
 #include "SettingsProfile.h"
@@ -472,6 +475,8 @@ static bool CountTime()
     FrameDiagnostics::RawDelta(dwTimeStep);
     DWORD dwFracTime; // for client
     dwLastTime += dwTimeStep;
+    OwnedRender::E3RefreshInterface();
+    if (OwnedRender::E3EditorPaused()) return true;
     // check if focus is in application
     /*if (!GetRenderer()->IsActive())
     {
@@ -987,7 +992,13 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
     if (OwnedRender::E2BlockBackgroundInput(hWnd, message, wParam, lParam)) return 1;
     if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     theInterface.CheckScreensMustDie();
+    // Merge order (supervisor, RS02b): E3 interface refresh and input block, then
+    // E4 camp inventory, then native mouse remap. RS02c verifies against c56.
+    OwnedRender::E3RefreshInterface();
+    if (OwnedRender::E3BlockInput(message, wParam))
+        return SendMessage(hWnd, message, wParam, lParam);
     if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;
+    lParam = owned::game_native_mouse_message(message, lParam, false);
     switch (message)
     {
     case WM_SYSKEYDOWN:
@@ -1014,38 +1025,38 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_MOUSEMOVE:
-        theInterface.OnMouseMove(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnMouseMove(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_MOUSEWHEEL:
         theInterface.OnMouseWheel(LOWORD(wParam), (short)HIWORD(wParam),
-                                  CPoint(LOWORD(lParam), HIWORD(lParam)));
+                                  CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
 
     // CRAP{ noone knows why Genius mouse driver sends this message instead of WM_MOUSEWHEEL =
     // 0x020A
     case 0xCC54:
         theInterface.OnMouseWheel(0, (short)(signed)(wParam),
-                                  CPoint(LOWORD(lParam), HIWORD(lParam)));
+                                  CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
         // CRAP} parameters are also different from default
 
     case WM_LBUTTONDOWN:
-        theInterface.OnLButtonDown(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnLButtonDown(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_LBUTTONUP:
-        theInterface.OnLButtonUp(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnLButtonUp(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_LBUTTONDBLCLK:
-        theInterface.OnLButtonDblClk(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnLButtonDblClk(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_RBUTTONDOWN:
-        theInterface.OnRButtonDown(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnRButtonDown(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_RBUTTONUP:
-        theInterface.OnRButtonUp(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnRButtonUp(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_RBUTTONDBLCLK:
-        theInterface.OnRButtonDblClk(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnRButtonDblClk(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     default:
         // return DefWindowProc( hWnd, message, wParam, lParam );
@@ -1063,6 +1074,8 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         message == WM_CANCELMODE || message == WM_CAPTURECHANGED || message == WM_SIZE || message == WM_DESTROY || message == WM_NCDESTROY)
         owned::camp_inventory_input(hWnd, message, wParam, lParam, false);
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
+    OwnedRender::E3RefreshInterface();
+    if (owned::game_focus_swallow_activation(hWnd, message, wParam)) return 1;
     WORD wID;
 
     switch (message)
@@ -1210,7 +1223,7 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-
+
 // Keep C++ ownership in a callee, outside the SEH frame's local variables.
 static int RunLegacyEntry(HINSTANCE instance, HINSTANCE previous, int show)
 {

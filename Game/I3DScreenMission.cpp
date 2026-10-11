@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Input.h"
 #include "GameJournal.h"
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
@@ -255,10 +256,12 @@ void CI3DScreenMission::OnActivate()
     if (IWorldConnector.IsLMP())
         LMPPersonsUpdate(true);
     lmpState.nMainHeroID = -1;
+    OwnedRender::E3MissionEnter(this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnDeactivate()
 {
+    OwnedRender::E3MissionLeave(this);
     DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
 
     theCamera.SetFlag(CAM_CANT_SCROLL);
@@ -1408,6 +1411,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnMouseMove(UINT nFlags, CPoint point)
 {
+    if (OwnedRender::E3EditorPaused()) return;
     // CRAP{ - for advanced kick/ban
     if (eKickMode != KM_NONE)
     {
