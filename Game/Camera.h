@@ -184,6 +184,7 @@ public:
     void InitPlacement(float fRotateAngle = 0);
     void InitRotate(float fRotateAngle = 0);
     void ToggleFalloutMode(float normalizeAngle = 0);
+    void NormalizeNorth(float angle = 0);
     void ReapplyFalloutAfterMove();
     void ApplyFalloutPlacement();
     void SuspendFalloutForBriefing();

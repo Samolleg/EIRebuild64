@@ -52,6 +52,8 @@ const DWORD HLDAMAGE_ELECTRIC = 4;
 const DWORD HLDAMAGE_CRIT = 32;
 const DWORD HLDAMAGE_PARRY = 64;
 const DWORD HLDAMAGE_BLOCK = 128;
+const DWORD HLDAMAGE_CHEST = 256;
+const DWORD HLDAMAGE_AVOID = 1024;
 const DWORD HLDAMAGE_EXPERIENCE = 8; // not actually a damage, but exp points :)
 /////////////////////////////////////////////////////////////////////////////////////
 const float FP_SHOW_PATH_SPEED = 0.5f;

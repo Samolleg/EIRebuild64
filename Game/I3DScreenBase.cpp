@@ -452,12 +452,17 @@ void CI3DScreenBase::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     }
     // CRAP} - for advanced kick/ban
 
-    if (nChar == 'N' && ModRuntime::Current()) {
-        if ((nFlags & 0x4000) == 0) theCamera.ToggleFalloutMode();
+    CI3DScreen::OnKeyDown(nChar, nRepCnt, nFlags);
+    if (GetProcessed()) return;
+    if (nChar == 'N' && ModRuntime::Current() &&
+        !pI3D->IsAltDown() && !pI3D->IsCtrlDown()) {
+        if ((nFlags & 0x4000) == 0) {
+            if (pI3D->IsShiftDown()) theCamera.ToggleFalloutMode();
+            else theCamera.NormalizeNorth();
+        }
         SetProcessed();
         return;
     }
-    CI3DScreen::OnKeyDown(nChar, nRepCnt, nFlags);
     switch (nChar)
     {
     case VK_ESCAPE:

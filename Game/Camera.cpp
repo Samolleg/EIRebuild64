@@ -948,15 +948,33 @@ void CCamera::ApplyFalloutPlacement()
     if (!(angle == angle)) angle = 35.264f;
     if (!(multiplier == multiplier)) multiplier = 2.0f;
     falloutTelephotoMultiplier = Max(1.0f, Min(4.0f, multiplier));
+    yaw = -yaw;
     while (yaw >= 180.0f) yaw -= 360.0f;
     while (yaw < -180.0f) yaw += 360.0f;
-    yaw = -yaw + (falloutMode == FALLOUT_NORTHEAST ? 180.0f : 0.0f);
+    if (falloutMode == FALLOUT_NORTHEAST) yaw += 180.0f;
+    while (yaw >= 180.0f) yaw -= 360.0f;
+    while (yaw < -180.0f) yaw += 360.0f;
     angle = Max(5.0f, Min(80.0f, angle));
     rotate.value = rotate.desired = 0.0f;
     pitch.value = pitch.desired = 0.0f;
     qRotate.FromAxisAngle(CPlot3D(0, 0, 1), ToRadian(yaw));
     fPitch = ToRadian(angle);
     ReconstructCameraPlacement();
+}
+
+void CCamera::NormalizeNorth(float angle)
+{
+    if (falloutBriefing) return;
+    falloutMode = FALLOUT_STOCK;
+    if (falloutBaselineValid) {
+        rotate.value = rotate.desired = 0.0f;
+        pitch.value = pitch.desired = 0.0f;
+        qRotate = falloutBaselineRotation;
+        fPitch = falloutBaselinePitch;
+        ReconstructCameraPlacement();
+    }
+    falloutBaselineValid = false;
+    InitRotate(angle);
 }
 
 void CCamera::ToggleFalloutMode(float normalizeAngle)

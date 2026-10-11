@@ -1686,6 +1686,13 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     if (GetProcessed())
         return;
 
+    if (nChar == 'N' && ModRuntime::Current() && pI3D->IsShiftDown() &&
+        !pI3D->IsAltDown() && !pI3D->IsCtrlDown()) {
+        if ((nFlags & 0x4000) == 0) theCamera.ToggleFalloutMode();
+        SetProcessed();
+        return;
+    }
+
     if (nFlags & 0x4000)
         return;
 
@@ -5134,10 +5141,11 @@ void CI3DObjectMap::InvertClosedState()
     slide_dir = -slide_dir;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectMap::NormalizeCamera()
+void CI3DObjectMap::NormalizeCamera(bool cycleFallout)
 {
     pI3D->BeginFX("buttons\\battle\\click.wav");
-    theCamera.ToggleFalloutMode();
+    if (cycleFallout) theCamera.ToggleFalloutMode();
+    else theCamera.NormalizeNorth();
     fNormTime = 0.5f;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -5179,7 +5187,7 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
         switch (ht)
         {
         case 5:
-            NormalizeCamera();
+            NormalizeCamera(true);
             break;
         case 0:
             InvertClosedState();
