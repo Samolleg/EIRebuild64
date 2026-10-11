@@ -3804,7 +3804,9 @@ void CI3DObjectItemInfo::SetHelp(int nHelpID)
     CTextManager *pTxtMng = theWorld.GetTextManager();
 
     CRect rc(15, 10, 185, 25);
-    CPoint shift(0, 12);
+    const auto* mod = ModRuntime::Current();
+    const int lineHeight = mod && mod->CombatSetting("JMVPerks") ? 15 : 12;
+    CPoint shift(0, lineHeight);
     COLORREF color = INV_COLOR_INFO;
 
     // NAME
@@ -3816,12 +3818,12 @@ void CI3DObjectItemInfo::SetHelp(int nHelpID)
         pTxtMng->GetLine(szDesc);
     }
     // szName.Format( "Help #%d", nHelpID );
-    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+    pSurf->DrawMultiText(szName, rc, 2, 0, INV_COLOR_HEADER, DT_CENTER | DT_WORDBREAK, TRUE, lineHeight);
     rc += shift;
     rc += shift;
 
     // DESCRIPTION
-    pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, 12);
+    pSurf->DrawMultiText(szDesc, rc, 16, 0, color, DT_CENTER | DT_WORDBREAK, TRUE, lineHeight);
 
     pSurf->ReleaseDC();
 #endif // NOGETDC
