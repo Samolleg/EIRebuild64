@@ -3200,13 +3200,13 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 {
     const auto Log = [](float value, float base) { return static_cast<float>(log(value) / log(base)); };
 	SetItem(0);
-	if (pSkillInfo->nType < 0)
+	if (!pSkillInfo || pSkillInfo->nType < 0)
 		return;
 #ifndef NOGETDC
 	CI3DSurface* pSurf = surfaces[0];
 	pSurf->GetDC();
     auto* mod = ModRuntime::Current();
-    CPersonage* pPers = pScreen->GetCurrentPers();
+    CPersonage* pPers = pScreen ? pScreen->GetCurrentPers() : nullptr;
     CUnit* pUnit = pSkillInfo->pUnit;
     if (!mod || !pPers || !pUnit || !pSkillInfo->pStats) { pSurf->ReleaseDC(); return; }
     int nWeight = int(pPers->GetItemsWeight());
@@ -3345,7 +3345,7 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 				}
 			}
 		else
-			if (int(pUnit->GetCurrentWeaponSlotIndex()) != -1 && int(pUnit->GetCurrentWeaponSlotIndex()) >= 0 && int(pUnit->GetCurrentWeaponSlotIndex()) < 4) {
+			if (pUnit->GetQWeapon(pUnit->GetCurrentWeaponSlotIndex()) && pUnit->GetQWeapon(pUnit->GetCurrentWeaponSlotIndex())->GetShapeEntry()) {
 				int left = ModStats::LeftHand(*pUnit);
 				if (left == -1) {
 					float clrParry = mod->InfoDisplayActor("GetWeaponParryChance", *pUnit, int(pUnit->GetCurrentWeaponSlotIndex())) * 0.01;
@@ -4020,7 +4020,8 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 				nVal = 0;
 				if (pSkillInfo->pWeapon) nVal = mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 7);
 				bool duelist = int(pSkillInfo->pStats->cPerks[28]);
-				int rtID = pUnit->GetQWeapon(pPers->dwCurrentWeapon)->GetShapeEntry()->dwTypeID;
+				CItemWeapon* rightItem = pUnit->GetQWeapon(pPers->dwCurrentWeapon);
+				int rtID = rightItem && rightItem->GetShapeEntry() ? rightItem->GetShapeEntry()->dwTypeID : -1;
 				bool twoHandedWeaponRight = (rtID == RPGWST_HANDS2 || rtID == RPGWST_HANDS4 || rtID == RPGWST_HANDS5 || rtID == RPGWST_HANDS6 || rtID == RPGWST_HANDS7);
 				if (nVal != 0) {
 					if (duelist && !twoHandedWeaponRight) {
@@ -4075,8 +4076,9 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 				nSum += nVal;
 				rc += shift;
 				int left = ModStats::LeftHand(*pUnit);
-				if (left != -1) {
-					int rtID = pUnit->GetQWeapon(pPers->dwCurrentWeapon)->GetShapeEntry()->dwTypeID;
+				if (left != -1 && pUnit->GetQWeapon(left) && pUnit->GetQWeapon(left)->GetShapeEntry()) {
+					CItemWeapon* rightItem = pUnit->GetQWeapon(pPers->dwCurrentWeapon);
+					int rtID = rightItem && rightItem->GetShapeEntry() ? rightItem->GetShapeEntry()->dwTypeID : -1;
 					int ltID = pUnit->GetQWeapon(left)->GetShapeEntry()->dwTypeID;
 					bool twoHandedWeaponRight = (rtID == RPGWST_HANDS2 || rtID == RPGWST_HANDS4 || rtID == RPGWST_HANDS5 || rtID == RPGWST_HANDS6 || rtID == RPGWST_HANDS7);
 					bool twoHandedWeaponLeft = (ltID == RPGWST_HANDS2 || ltID == RPGWST_HANDS4 || ltID == RPGWST_HANDS5 || ltID == RPGWST_HANDS6 || ltID == RPGWST_HANDS7);
@@ -4296,11 +4298,11 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 					float CriticalChanceLeft = 0;
 					float CriticalDamageRight = 0;
 					float CriticalDamageLeft = 0;
-					if (int(pUnit->GetCurrentWeaponSlotIndex()) != -1 && int(pUnit->GetCurrentWeaponSlotIndex()) >= 0 && int(pUnit->GetCurrentWeaponSlotIndex()) < 4) {
+					if (pUnit->GetQWeapon(pUnit->GetCurrentWeaponSlotIndex()) && pUnit->GetQWeapon(pUnit->GetCurrentWeaponSlotIndex())->GetShapeEntry()) {
 						CriticalChanceRight = mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetShapeEntry()->szName.GetString(), 4) * 0.01f;
 						CriticalDamageRight = mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetShapeEntry()->szName.GetString(), 5) * 0.01f;
 					}
-					if (left != -1) {
+					if (left != -1 && pUnit->GetQWeapon(left) && pUnit->GetQWeapon(left)->GetShapeEntry()) {
 						CriticalChanceLeft = mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(left)->GetShapeEntry()->szName.GetString(), 4) * 0.01f;
 						CriticalDamageLeft = mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(left)->GetShapeEntry()->szName.GetString(), 5) * 0.01f;
 					}
@@ -4360,7 +4362,7 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 					szOut.Format("%.0f%%", CriticalDamageRight);
 					pSurf->DrawText(szOut.GetString(), rc - CPoint(10, 0), 0, color, DT_RIGHT);
 					rc += shift;
-					if (left != -1 && pUnit->GetQWeapon(left)->GetShapeEntry()->dwTypeID != 9) {
+					if (left != -1 && pUnit->GetQWeapon(left) && pUnit->GetQWeapon(left)->GetShapeEntry() && pUnit->GetQWeapon(left)->GetShapeEntry()->dwTypeID != 9) {
 						if (pTxtMng->GetText("string infoitem_58"))
 						{
 							pTxtMng->GetLine(szTmp);

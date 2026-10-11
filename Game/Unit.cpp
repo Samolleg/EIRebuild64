@@ -1850,12 +1850,19 @@ CItemSpell *CUnit::RemoveQSpell(DWORD dwQSpellIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 CItemWeapon *CUnit::GetQWeapon(DWORD dwQWeaponIndex) const
 {
+    if (!lpUnitSpecific)
+        return nullptr;
     if (lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
     {
         CPlayer *pPlayer = GetOwner();
-        ASSERT(pPlayer);
         if (!pPlayer)
-            return 0;
+        {
+            // Retail camp previews have no owner. The addon reads the local
+            // equipment populated by DeployClientPersonages/UpdateWeapons.
+            // Keep its selected-hand rule, but reject invalid requested slots.
+            return dwCurrentWeapon < QI_MAX_WEAPONS && dwQWeaponIndex < QI_MAX_WEAPONS
+                       ? lpQWeapons[dwQWeaponIndex] : nullptr;
+        }
         CPersonage *pPers = pPlayer->party.GetPersonage(GetID());
         if (!pPers)
             return 0;

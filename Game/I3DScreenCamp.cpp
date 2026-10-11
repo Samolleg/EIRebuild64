@@ -1022,8 +1022,10 @@ void CI3DScreenCamp::UpdateWeapons()
 /////////////////////////////////////////////////////////////////////////////////////
 CPersonage *CI3DScreenCamp::GetCurrentPers()
 {
-    ASSERT(nCurPers < IWorldClient.GetParty().people.GetSize());
-    return &IWorldClient.GetParty().people[nCurPers];
+    CParty &party = IWorldClient.GetParty();
+    if (nCurPers < 0 || nCurPers >= party.people.GetSize() || !GetCurrentUnit())
+        return nullptr;
+    return &party.people[nCurPers];
 }
 /*
 /////////////////////////////////////////////////////////////////////////////////////

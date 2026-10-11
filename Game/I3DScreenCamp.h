@@ -109,7 +109,7 @@ public:
     void RefreshProgression() override;
     void NextPersonage();
     void PrevPersonage();
-    CUnit *GetUnit(int num) { return pUnits[num]; }
+    CUnit *GetUnit(int num) { return num >= 0 && num < pUnits.GetSize() ? pUnits[num] : nullptr; }
     CUnit *GetCurrentUnit() { return nCurPers >= 0 && nCurPers < pUnits.GetSize() ? pUnits[nCurPers] : nullptr; }
     CShop *GetCurrentShop() { return pShop; }
     CPersonage *GetCurrentPers();
