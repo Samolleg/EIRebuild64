@@ -1,6 +1,7 @@
 #pragma once
 #include "../../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
 #include "RenderJournalState.h"
+#include "../OwnedRender/E2FrameTiming.h"
 #include "../../external/owned-renderer/Source/widescreen.h"
 #include <SpriteBatch.h>
 #include <wrl/client.h>
@@ -112,6 +113,21 @@ class OwnedRendererClient {
     EIRenderStatusApiV2 statusApi = {};
     RenderJournalState journalState;
     DWORD ownerThread = 0;
+    OwnedRender::E2FrameTiming frameTiming;
+    ULONGLONG lastTimingReport = 0;
+    void JournalFrameTiming(bool final = false) noexcept {
+        if (GetCurrentThreadId() != ownerThread) return;
+        const ULONGLONG now = GetTickCount64();
+        if (!final && now - lastTimingReport < 5000) return;
+        const auto sample = frameTiming.Read();
+        if (!sample.completed && !sample.aborted) return;
+        lastTimingReport = now;
+        GameJournal::Event("RENDER", "frame_time",
+            "backend=rddraw_api5 scope=device_session_tail240 cpu_scope=begin_to_present_return gpu_scope=timestamp_span_including_present final=%u frames=%llu cpu_n=%u cpu_median_ms=%.3f cpu_p95_ms=%.3f gpu_n=%u gpu_median_ms=%.3f gpu_p95_ms=%.3f gpu_status=%08lx gpu_state=%s gpu_dropped=%llu gpu_invalid=%llu aborted=%llu",
+            final ? 1u : 0u, sample.completed, sample.cpu.count, sample.cpu.median, sample.cpu.p95,
+            sample.gpu.count, sample.gpu.median, sample.gpu.p95,
+            static_cast<unsigned long>(sample.gpuStatus), FAILED(sample.gpuStatus) ? "unavailable" : sample.gpu.count ? "measured" : "pending", sample.dropped, sample.invalid, sample.aborted);
+    }
     HRESULT previousStatusError = S_OK;
     void JournalRendererState() noexcept {
         // Loading-video workers use API1 only; they do not read F10/world state.
@@ -137,6 +153,9 @@ public:
     OwnedRendererClient& operator=(const OwnedRendererClient&) = delete;
     ~OwnedRendererClient() { Shutdown(); }
     void Shutdown() noexcept {
+        if (GetCurrentThreadId() == ownerThread) frameTiming.End(false);
+        JournalFrameTiming(true);
+        frameTiming.Reset();
         FinishPackets();
         // Release the client's SRV leases before destroying the host/device.
         figureTextures.clear();figureMeshes.clear();figureIdentities.clear();meshFailures.clear();
@@ -179,7 +198,19 @@ public:
         if(FAILED(result)||!meshReportApi.register_mesh_report)return E_NOINTERFACE;
         const EIRenderHostDescV1 desc = {sizeof(desc), window, width, height};
         result = api.create_host(&desc, &host);
-        if (SUCCEEDED(result)) { ownerThread = GetCurrentThreadId(); JournalRendererState(); }
+        if (SUCCEEDED(result)) {
+            ownerThread = GetCurrentThreadId(); lastTimingReport = GetTickCount64();
+            EIRenderD3D11BridgeV1 bridge{};
+            HRESULT timingResult = AcquireBridge(bridge);
+            if (SUCCEEDED(timingResult)) {
+                timingResult = frameTiming.Attach(bridge.device, bridge.context);
+                bridge.device->Release(); bridge.context->Release(); bridge.swap_chain->Release();
+                bridge.color_target->Release(); bridge.depth_target->Release();
+            }
+            GameJournal::Event("RENDER", "frame_timing_attached", "gpu_status=%08lx",
+                static_cast<unsigned long>(timingResult));
+            JournalRendererState();
+        }
         return result;
     }
 
@@ -270,8 +301,20 @@ public:
         bridge.size = sizeof(bridge);
         return api.acquire_d3d11_bridge(host, &bridge);
     }
-    HRESULT BeginFrame(const float* color, float depth) { return api.begin_frame(host, color, depth); }
-    HRESULT Present() { const HRESULT hr = api.present(host); JournalRendererState(); return hr; }
+    HRESULT BeginFrame(const float* color, float depth) {
+        const bool measured = GetCurrentThreadId() == ownerThread;
+        if (measured) frameTiming.Begin();
+        const HRESULT hr = api.begin_frame(host, color, depth);
+        if (measured && FAILED(hr)) frameTiming.End(false);
+        return hr;
+    }
+    HRESULT Present() {
+        const HRESULT hr = api.present(host);
+        if (GetCurrentThreadId() == ownerThread) {
+            frameTiming.End(hr == S_OK); JournalFrameTiming();
+        }
+        JournalRendererState(); return hr;
+    }
     HRESULT BeginWorld(const EIRenderWorldFrameV2& frame, uint32_t& skyConsumed) {
         const HRESULT hr=worldApi.begin_world(host, &frame, &skyConsumed);
         if(SUCCEEDED(hr)) {
