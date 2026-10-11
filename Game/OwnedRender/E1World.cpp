@@ -28,6 +28,12 @@ bool E1ReadWorldLighting(owned::NativeWorldLighting& output) noexcept {
     output = values.lighting;
     return true;
 }
+bool E1ReadWorldEnvironment(owned::WorldEnvironment& output) noexcept {
+    output = {};
+    if (!activeDraw || !values.camera.valid || !values.environment.valid) return false;
+    output = values.environment;
+    return true;
+}
 bool E1ClaimSky(bool requested) noexcept {
     const bool claim = requested && activeDraw && values.camera.valid &&
         values.environment.valid && owned::embedded_sky().enabled();

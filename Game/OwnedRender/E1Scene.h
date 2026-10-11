@@ -32,6 +32,9 @@ public:
     E1SceneMembership(const E1SceneMembership&) = delete;
     E1SceneMembership& operator=(const E1SceneMembership&) = delete;
     void Begin(const void* source, std::uint64_t generation) noexcept;
+    bool CurrentWorld(std::uint64_t generation) const noexcept {
+        return owner && generation && world == generation && epoch;
+    }
     void Retire(const void* source, std::uint64_t generation) noexcept;
     bool Added(const void* source, std::uint64_t generation, std::int32_t id) noexcept;
     void Removed(const void* source, std::uint64_t generation, std::int32_t id) noexcept;

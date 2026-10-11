@@ -15,6 +15,7 @@ struct E1WorldFrame {
 void E1BeginFrame() noexcept;
 // Copies the current world's light; unavailable after an aborted/retired frame.
 bool E1ReadWorldLighting(owned::NativeWorldLighting& output) noexcept;
+bool E1ReadWorldEnvironment(owned::WorldEnvironment& output) noexcept;
 // At the actual stock sky gate, true transfers the draw to c56.
 bool E1ClaimSky(bool requested) noexcept;
 std::uint64_t E1WorldGeneration() noexcept;

@@ -9,6 +9,7 @@ using E1TerrainRead = HRESULT (__cdecl *)(void*, const char*, void*, std::uint32
 bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_t revision,
     const char* project, const char* header, E1TerrainRead read, void* context,
     std::string& failure) noexcept;
+bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept;
 void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>& surfaces) noexcept;
 void E1RetireTerrain(const void* owner) noexcept;
 struct E1TerrainSectorValues {

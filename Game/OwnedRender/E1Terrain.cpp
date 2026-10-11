@@ -30,6 +30,12 @@ bool current() noexcept {
 }
 }
 namespace OwnedRender {
+bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept {
+    output = {};
+    if (!current()) return false;
+    output = source;
+    return bool(output.terrain);
+}
 bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_t revision,
     const char* project, const char* header, E1TerrainRead read, void* context,
     std::string& failure) noexcept try {
