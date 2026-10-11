@@ -1803,6 +1803,7 @@ void CUnitClientSpecific::ElectricDamage(float fpStrength)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // hide weapon model
+namespace { thread_local bool restoringBriefingWeapon = false; }
 void CUnitClientSpecific::SetBriefingWeaponHidden(bool hidden)
 {
     if (bBriefingWeaponForcedHidden == hidden)
@@ -1812,6 +1813,11 @@ void CUnitClientSpecific::SetBriefingWeaponHidden(bool hidden)
     }
     if (hidden) bWeaponHiddenBeforeBriefing = bWeaponHidden;
     bBriefingWeaponForcedHidden = hidden;
+    struct RestoreBriefingContext {
+        bool previous;
+        RestoreBriefingContext(bool restoring) : previous(restoringBriefingWeapon) { restoringBriefingWeapon = restoring; }
+        ~RestoreBriefingContext() { restoringBriefingWeapon = previous; }
+    } context(!hidden);
     HideWeapon(hidden ? true : bWeaponHiddenBeforeBriefing);
 }
 
@@ -1822,6 +1828,11 @@ void CUnitClientSpecific::HideWeapon(bool bHide)
         return;
 
     DWORD dwWeapon = GetCurrentWeapon();
+    const auto *mod = ModRuntime::Current();
+    if (mod && mod->CombatSetting("JMVAttacks") && dwWeapon != DWORD(-1) &&
+        CItemWeapon::GetWeaponType(dwWeapon) != RPGWST_BOW && !bMouthSpeakingMode &&
+        (bHide ? !bBriefingWeaponForcedHidden : !restoringBriefingWeapon)) return;
+
     CStringArray szNames;
 
     if (dwWeapon != -1)
@@ -1837,6 +1848,19 @@ void CUnitClientSpecific::HideWeapon(bool bHide)
             pFigure->SetFlag(FIG_HIDDEN);
         else
             pFigure->ResetFlag(FIG_HIDDEN);
+    }
+
+    const int leftSlot = ResolveVisualLeftHand(*lpUnit,
+        [this](int slot) { return GetWeapon(DWORD(slot)); });
+    const DWORD leftWeapon = leftSlot >= 0 ? GetWeapon(DWORD(leftSlot)) : DWORD(-1);
+    if (leftWeapon != DWORD(-1) && leftSlot != int(lpUnit->dwCurrentWeapon)) {
+        CItemWeapon::GetWeaponModelNames(CItem::GetShape(leftWeapon), szNames, false);
+        for (int i = 0; i < szNames.GetSize(); ++i) {
+            CFigure *figure = lpUnit->FindFigure(szNames[i]);
+            if (!figure) continue;
+            if (bHide) figure->SetFlag(FIG_HIDDEN);
+            else figure->ResetFlag(FIG_HIDDEN);
+        }
     }
 
     bWeaponHidden = bHide;

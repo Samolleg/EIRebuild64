@@ -2332,7 +2332,9 @@ void CUnitServer::GetWeaponAttack(SRPGGeneralAttack &res) const
 {
     int i;
     bool bHero = lpUnit->GetOwner() != 0;
-    if (!bHero || (lpUnit->dwCurrentWeapon >= QI_MAX_WEAPONS) ||
+    const auto *mod = ModRuntime::Current();
+    const bool addonAttack = mod && mod->CombatSetting("JMVAttacks");
+    if ((!bHero && !addonAttack) || (lpUnit->dwCurrentWeapon >= QI_MAX_WEAPONS) ||
         (lpUnit->lpQWeapons[lpUnit->dwCurrentWeapon] == NULL))
     {
         float fpDamage = rpgUnitStats.fpNAWDamageMin + rpgUnitStats.fpNAWDamageRnd;
@@ -3627,7 +3629,9 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
             theWorldServer.HooverUnit((CUnit *)pTarget, lpUnit->GetOwner());
         theWorldServer.RemoveMapObject(pTarget->GetID());
         // note, here pTarget does not exist anymore
-        pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_LOOT_SOUND);
+        const auto *lootMod = ModRuntime::Current();
+        if (!lootMod || !lootMod->CombatSetting("JMVSteals"))
+            pWS->aiMap.marks.ProduceSoundFootstep(this, GetFSSoundNativeDetect() * AI_LOOT_SOUND);
         return;
     }
     // check chances to steal something
@@ -3781,7 +3785,12 @@ void CUnitServer::UseSkill(CMapObject *pTarget)
             tool.dwSkill = 0;
             if (pTool && pTool->IsTool())
                 tool = pTool->GetTool();
-            tool.dwSkill += Float2Int(fpOurSkill);
+            int quickScience = 0;
+            if (addonSteals)
+                for (DWORD slot = 0; slot < QI_MAX_ITEMS; ++slot)
+                    if (CItemQuick *item = lpUnit->GetQItem(slot))
+                        quickScience = Max(quickScience, int(item->GetSkillModifier(RPGMSKL_SCIENCE)));
+            tool.dwSkill += Float2Int(fpOurSkill) + quickScience;
             const bool journalApplied=pTarget->ApplyScience(tool, GetUnit());
             GameJournal::Event("COMBAT", "skill", "actor=%d target=%d skill=science result=%d", lpUnit->GetID(), pTarget->GetID(), journalApplied);
             if (!journalApplied)
@@ -4121,8 +4130,15 @@ bool CUnitServer::CalcAttackDirection(SL1Command &cmd, SL0AnimationSeq &res, int
                                          RPGHL_LHAND, RPGHL_LHAND, RPGHL_LHAND, RPGHL_RHAND,
                                          RPGHL_RHAND, RPGHL_RHAND, RPGHL_LLEG,  RPGHL_LLEG,
                                          RPGHL_LLEG,  RPGHL_RLEG,  RPGHL_RLEG,  RPGHL_RLEG };
+            ERPGHitLocations addonHls[20] = { RPGHL_HEAD,  RPGHL_HEAD,  RPGHL_BODY,  RPGHL_BODY,
+                                         RPGHL_BODY,  RPGHL_BODY,  RPGHL_BODY,  RPGHL_BODY,
+                                         RPGHL_BODY,  RPGHL_LHAND, RPGHL_LHAND, RPGHL_RHAND,
+                                         RPGHL_RHAND, RPGHL_LLEG,  RPGHL_LLEG,  RPGHL_LLEG,
+                                         RPGHL_LLEG,  RPGHL_RLEG,  RPGHL_RLEG,  RPGHL_RLEG };
+            const auto *hitMod = ModRuntime::Current();
+            const ERPGHitLocations *locations = hitMod && hitMod->CombatSetting("JMVAttacks") ? addonHls : hls;
             DWORD dwProbability = random.Get(0, 19);
-            hl = rpgVictimUnitStats.GetNearestHitLocation(hls[dwProbability]);
+            hl = rpgVictimUnitStats.GetNearestHitLocation(locations[dwProbability]);
         }
         else if ((targetHL >= 0) &&
                  (targetHL <

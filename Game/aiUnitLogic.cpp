@@ -1443,10 +1443,96 @@ CUMFear::CUMFear(bool _bFearPlayer)
 /////////////////////////////////////////////////////////////////////////////////////
 // in general case fear has less priority then suspection or aggression
 // this makes units more brave
+namespace {
+// Transient retreat phases belong to the current world, never to a save record.
+struct ModRetreatCycle {
+    CUnit *unit = nullptr;
+    int phase = 0;
+    DWORD since = 0;
+    CPlot3D start;
+    bool sawAttack = false;
+};
+std::unordered_map<int, ModRetreatCycle> modRetreatCycles;
+const void *modRetreatWorld = nullptr;
+std::string modRetreatZone;
+DWORD modRetreatLastTick = 0;
+void ModRetreatReset() {
+    modRetreatCycles.clear();
+    modRetreatWorld = nullptr;
+    modRetreatZone.clear();
+    modRetreatLastTick = 0;
+}
+void ModRetreatSync() {
+    const void *world = theWorldServer.GetSpecificManager();
+    const std::string zone = (LPCSTR)theWorldServer.szMobFileName;
+    const DWORD tick = DWORD(theWorldServer.GetSegmentTimeCounter());
+    if (world != modRetreatWorld || zone != modRetreatZone || tick < modRetreatLastTick) {
+        ModRetreatReset();
+        modRetreatWorld = world;
+        modRetreatZone = zone;
+    }
+    modRetreatLastTick = tick;
+    for (auto it = modRetreatCycles.begin(); it != modRetreatCycles.end();) {
+        if (theWorldServer.GetUnit(it->first) != it->second.unit)
+            it = modRetreatCycles.erase(it);
+        else ++it;
+    }
+}
+bool ModRetreatEligible(CAIUnitLogic &logic) {
+    auto *mod = ModRuntime::Current();
+    CUnitServer *server = logic.GetUnitServer();
+    CUnit *unit = server ? server->GetUnit() : nullptr;
+    if (!mod || !unit || unit->IsHero() || unit->GetOwner() || unit->IsDead() ||
+        ModDeathFearActive(unit)) return false;
+    if (server->HasRangedAttack()) return true;
+    for (DWORD slot = 0; slot < 8; ++slot) {
+        CSpell *spell = unit->GetQSpell(slot);
+        ModSkills::Config config;
+        if (!spell || mod->SkillConfig(spell, config)) continue;
+        const int type = ModTactical::SpellType(spell);
+        if (type >= ModTactical::Direct && type <= ModTactical::Debuff && spell->GetRange() > 0)
+            return true;
+    }
+    return false;
+}
+}
+
 int CUMFear::GetPower(CAIUnitLogic &logic)
 {
     CUnitServer *pUS = logic.GetUnitServer();
     CUnit *pThis = pUS->GetUnit();
+    ModRetreatSync();
+    const bool retreatEligible = ModRetreatEligible(logic);
+    if (!retreatEligible) modRetreatCycles.erase(pThis->GetID());
+    else {
+        ModRetreatCycle &cycle = modRetreatCycles[pThis->GetID()];
+        if (cycle.unit != pThis) {
+            cycle = ModRetreatCycle();
+            cycle.unit = pThis;
+            cycle.start = pThis->GetCP();
+        }
+        const DWORD now = DWORD(theWorldServer.GetSegmentTimeCounter());
+        const bool attacking = pUS->IsL1Attacking();
+        if (pUS->HasCast()) return 0;
+        if (cycle.phase == 1 && logic.GetCurrentMotivation() != this) cycle.phase = 0;
+        if (cycle.phase == 1) {
+            const CPlot3D delta = pThis->GetCP() - cycle.start;
+            if (!pUS->HasMove() || delta.x * delta.x + delta.y * delta.y >= 49.0f ||
+                now - cycle.since >= 91) {
+                if (pUS->HasMove()) logic.StartIdle();
+                cycle.phase = 2;
+                cycle.since = now;
+                cycle.sawAttack = false;
+            } else return 15000;
+        }
+        if (cycle.phase == 2) {
+            if (attacking) cycle.sawAttack = true;
+            if (!attacking && (cycle.sawAttack || now - cycle.since >= 55)) cycle.phase = 0;
+            else return 0;
+        }
+        if (attacking) return 0;
+    }
+
     // return random shift to normal value
     fpRandomShift = (fpRandomShift * 2 + 3) / 3;
     // if unit was attacked by some one - go away from this persons place, on some range
@@ -1465,8 +1551,8 @@ int CUMFear::GetPower(CAIUnitLogic &logic)
             // bow shooters run from enemies
             const auto *modRuntime = ModRuntime::Current();
             if ((!modRuntime || !modRuntime->CombatSetting("DisableRunaway")) &&
-                pUS->HasRangedAttack() && pThis->GetAIClass() < 6 &&
-                pUS->GetUnit()->GetQSpell(0) == 0 &&
+                (retreatEligible || pUS->HasRangedAttack()) && pThis->GetAIClass() < 6 &&
+                (retreatEligible || pUS->GetUnit()->GetQSpell(0) == 0) &&
                 pUS->GetRPGStats()->CanRun(false) == ECR_CAN_RUN &&
                 pUS->GetRPGStats()->GetMoveDamageModifier() > 0.6f)
             {
@@ -1647,6 +1733,16 @@ void CUMFear::CommandUnit(CAIUnitLogic &logic)
         logic.GenerateTurnNLookOrders(rp, majorLook);
         logic.StartTurnLook(rp);
     }
+    if (ModRetreatEligible(logic)) {
+        ModRetreatSync();
+        auto it = modRetreatCycles.find(logic.GetUnit()->GetID());
+        if (it != modRetreatCycles.end() && it->second.unit == logic.GetUnit() &&
+            it->second.phase == 0 && logic.GetUnitServer()->HasMove()) {
+            it->second.phase = 1;
+            it->second.start = logic.GetUnit()->GetCP();
+            it->second.since = DWORD(theWorldServer.GetSegmentTimeCounter());
+        }
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFear::StartUsing(CAIUnitLogic &logic)
@@ -1672,6 +1768,7 @@ void CUMFear::FinishUsing(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFear::Load(CSave &file)
 {
+    ModRetreatReset();
     file.Read(fpFearRadius);
     file.Read(fpRandomShift);
     file.Read(&ptDangerousPlace, sizeof(ptDangerousPlace));
@@ -2744,7 +2841,7 @@ bool AddonUpdateCorpseHaul(CAIUnitLogic& logic,SAddonCorpseSearch& search,CUnit*
 #include "ModGroupSearch/Runtime.inl"
 static bool ModDeathFearActive(const CUnit *unit){if(!unit)return false;auto i=modDeathFearStates.find(unit->GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit->GetSubtypeID();}
 static bool ModDeathFearRoutePending(const CUnit *unit){if(!unit)return false;auto i=modDeathFearStates.find(unit->GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit->GetSubtypeID()&&i->second.pending;}
-void ModDeathFearReset(){modDeathFearStates.clear();modDeathFearExcluded.clear();modDeathFearConfigReady=false;modDeathFearEnter=15;modDeathFearExit=30;modDeathFearDistance=25;modDeathFearSpeed=.65f;}
+void ModDeathFearReset(){ModRetreatReset();modDeathFearStates.clear();modDeathFearExcluded.clear();modDeathFearConfigReady=false;modDeathFearEnter=15;modDeathFearExit=30;modDeathFearDistance=25;modDeathFearSpeed=.65f;}
 float CModPackage::DeathFearSpeedFactor(const CUnit&unit)const{auto i=modDeathFearStates.find(unit.GetID());return i!=modDeathFearStates.end()&&i->second.active&&i->second.subtype==unit.GetSubtypeID()?modDeathFearSpeed:1.0f;}
 static void ModDeathFearUpdate(CAIUnitLogic &logic){
  CUnitServer*s=logic.GetUnitServer();CUnit*u=logic.GetUnit();if(!s||!u||u->GetID()<0)return;DF_Config();
