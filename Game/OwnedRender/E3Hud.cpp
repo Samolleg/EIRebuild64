@@ -106,6 +106,12 @@ struct E3HudAccess {
             p[2].slide=Slide(mission->pMap->slide_nCurPixels,mission->pMap->slide_nTotalPixels);
             p[3].slide=Slide(mission->pInfo->slide_nCurPixels,mission->pInfo->slide_nTotalPixels);
             p[7].slide=Slide(mission->pOutput->slide_nCurPixels,mission->pOutput->slide_nTotalPixels);
+            p[2].slide_pixels=mission->pMap->slide_nCurPixels;
+            p[3].slide_pixels=mission->pInfo->slide_nCurPixels;
+            p[7].slide_pixels=mission->pOutput->slide_nCurPixels;
+            p[2].slide_closing=mission->pMap->slide_dir>0.f;
+            p[3].slide_closing=mission->pInfo->slide_dir>0.f;
+            p[7].slide_closing=mission->pOutput->slide_dir>0.f;
             Activity(frame,mission);
         }
         owned::embedded_hud_layout().publish(std::move(frame));
