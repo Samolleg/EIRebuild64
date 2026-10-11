@@ -1,6 +1,7 @@
 #include "E3Input.h"
 #include "game_focus.h"
 #include "widescreen.h"
+#include "hud_layout_context.h"
 #include "../ErrorDialog.h"
 
 namespace {
@@ -14,6 +15,7 @@ void (*frameSink)(void*) noexcept = nullptr;
 void endEditing() noexcept {
     if (editing && resetInput) resetInput();
     editing = false;
+    owned::embedded_hud_layout().editing = false;
 }
 }
 
@@ -27,6 +29,7 @@ void E3PublishInterface(HWND next, unsigned w, unsigned h, bool active,
     resetInput = reset;
 }
 void E3RetireInterface() noexcept {
+    owned::embedded_hud_layout().retire();
     endEditing();
     window = nullptr; width = height = 0;
     running = mission = false; resetInput = nullptr;
@@ -60,6 +63,7 @@ void set_game_hud_editing(bool enabled) noexcept {
     if (enabled == editing) return;
     if (resetInput) resetInput();
     editing = enabled;
+    embedded_hud_layout().editing = enabled;
 }
 bool game_focus_swallow_activation(HWND target, UINT message, WPARAM) noexcept {
     if (message != WM_ACTIVATE || target != window || !running ||

@@ -48,6 +48,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\world_unit_effects.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_object_contacts.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_perches.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_context.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\camp_inventory.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\res_cache_release.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\addon_hook_chain.cpp" />

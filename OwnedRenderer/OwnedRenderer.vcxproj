@@ -11,6 +11,8 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\world_unit_effects.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_object_contacts.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_perches.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_context.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_embedded.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />

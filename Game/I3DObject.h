@@ -14,6 +14,7 @@ class CDXGISurface;
 class CI3DPolyArea
 {
     friend struct E4CampAccess;
+    friend struct E3HudAccess;
 private:
     CInterface3D *pI3D;
     CSimplyArray<CPoint, CPoint> points;
@@ -131,6 +132,7 @@ class CI3DMapObjTranslation;
 class CI3DObject : public CBase3D, public CI3DHandler
 {
     friend struct E4CampAccess;
+    friend struct E3HudAccess;
 private:
     SBoundingVolume bv;
     CRect rect;

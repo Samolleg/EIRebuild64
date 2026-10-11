@@ -84,6 +84,7 @@ class CI3DScrollText;
 class CI3DObjectOutput;
 class CI3DScreenMission : public CI3DScreen
 {
+    friend struct E3HudAccess;
 private:
     CUnit *pLMPUnit;
     CArray<CUnit *, CUnit *> pUnits;
@@ -235,6 +236,7 @@ struct SQItemDesc
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectItems : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -290,6 +292,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectSpells : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -339,6 +342,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectSkills : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -401,6 +405,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectMap : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -461,6 +466,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectInfo : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -606,6 +612,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectOutput : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 

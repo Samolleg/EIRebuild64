@@ -990,13 +990,13 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
     if (OwnedRender::E2BlockBackgroundInput(hWnd, message, wParam, lParam)) return 1;
-    if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     theInterface.CheckScreensMustDie();
-    // Merge order (supervisor, RS02b): E3 interface refresh and input block, then
-    // E4 camp inventory, then native mouse remap. RS02c verifies against c56.
+    // c56 focus/editor gate wraps overlay dispatch; both camp consumers see
+    // original mouse coordinates, before the single native remap.
     OwnedRender::E3RefreshInterface();
     if (OwnedRender::E3BlockInput(message, wParam))
         return SendMessage(hWnd, message, wParam, lParam);
+    if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;
     lParam = owned::game_native_mouse_message(message, lParam, false);
     switch (message)

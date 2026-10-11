@@ -310,6 +310,7 @@ void CInterface3D::Draw2D()
     if (!pScreens.empty())
     {
         pScreens.back()->Draw2D();
+        OwnedRender::E3RefreshInterface();
         OwnedRender::E3HudBoundary();
         pScreens.back()->Draw2DTips();
     }

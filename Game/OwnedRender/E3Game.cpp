@@ -1,5 +1,7 @@
 #include "StdAfx.h"
 #include "E3Input.h"
+#include "E3Hud.h"
+#include "../I3DScreenMission.h"
 #include "../GameMain.h"
 #include "../I3DMain.h"
 #include "../I3DScreen.h"
@@ -10,6 +12,9 @@ void resetInput() noexcept { theInterface.ResetInputState(); }
 }
 namespace OwnedRender {
 void E3RefreshInterface() noexcept {
+    E3PublishHud(missionOwner && theInterface.GetScreensNum() == 1 &&
+        theInterface.GetCurrentScreen() == missionOwner ? static_cast<const CI3DScreenMission*>(missionOwner) : nullptr,
+        theInterface.GetWidth(),theInterface.GetHeight());
     E3PublishInterface(NGame::hWnd, theInterface.GetWidth(), theInterface.GetHeight(),
         theInterface.GetScreensNum() > 0,
         missionOwner && theInterface.GetScreensNum() == 1 &&
@@ -17,7 +22,10 @@ void E3RefreshInterface() noexcept {
 }
 void E3MissionEnter(const void* owner) noexcept { missionOwner = owner; }
 void E3MissionLeave(const void* owner) noexcept {
-    if (missionOwner == owner) missionOwner = nullptr;
+    if (missionOwner == owner) {
+        missionOwner = nullptr;
+        E3PublishHud(nullptr,theInterface.GetWidth(),theInterface.GetHeight());
+    }
     E3PublishInterface(NGame::hWnd, theInterface.GetWidth(), theInterface.GetHeight(),
                         false, false, &resetInput);
 }
