@@ -124,7 +124,8 @@ bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInput
     values.force_full_detail = !terrainLod;
     if (!owned::prepare_owned_terrain_frame(source.terrain, values, view) ||
         view.status != owned::OwnedTerrainPacketStatus::ready ||
-        !owned::prepare_owned_terrain_spatial_parts(view, *source.geometry, transform, &prepared)) return false;
+        !owned::prepare_owned_terrain_spatial_parts(view, *source.geometry, transform, &prepared) ||
+        !owned::prepare_owned_terrain_render_commands(view)) return false;
     viewReady = true;
     return true;
 } catch (...) { viewReady = false; return false; }
@@ -151,6 +152,8 @@ bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainComma
         owned::owned_terrain_command_structure(*source.terrain, command, *source.geometry));
     output.view.lighting.object_to_world = transform;
     output.view.terrain_phase_values = &output.dynamic->phase_values;
+    output.view.owned_texture.identity = output.atlas->id;
+    output.view.owned_texture.generation = output.atlas->generation;
     output.view.owned_texture.surface = output.atlas.get();
     return true;
 }

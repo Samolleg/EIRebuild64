@@ -21,7 +21,8 @@ struct ExitOwner {
         std::puts("Surface global-owner teardown PASS");
     }
 } exitOwner;
-void check(bool v) { ++checks; if (!v) throw checks; }
+void checkAt(bool v, int line) { ++checks; if (!v) { std::printf("Failed source line: %d\n", line); throw checks; } }
+#define check(...) checkAt((__VA_ARGS__), __LINE__)
 struct Reader {
     owned::MemoryResourceArchive archive;
     bool fail = false, change = false, edited = false;
@@ -188,6 +189,15 @@ int wmain(int argc, wchar_t** argv) try {
         const auto* packet = E1TerrainView();
         check(packet && packet->status == OwnedTerrainPacketStatus::ready && packet->spatial_ready);
         check(!packet->base_commands.empty() && !packet->spatial_parts.empty());
+        auto spatialPacket = *packet;
+        bool boundsReady = true;
+        for (const auto* commands : {&spatialPacket.base_commands, &spatialPacket.transparent_commands})
+            for (const auto& command : *commands) {
+                NativeWorldBounds local, world;
+                boundsReady = boundsReady && owned_terrain_spatial_bounds(spatialPacket, command, local, world) &&
+                    local.valid && world.valid;
+            }
+        check(boundsReady);
         check(packet->inputs.source_generation && packet->inputs.source_revision == 1 && packet->inputs.world_frame_serial);
         check(std::all_of(packet->sectors.begin(),packet->sectors.end(),[](const auto& s){return s.lod == 2;}));
         bridge_set_terrain_lod_enabled(false);
@@ -200,6 +210,15 @@ int wmain(int argc, wchar_t** argv) try {
         check(E1PublishTerrainView(&owner, view) && !E1TerrainView()->inputs.force_full_detail);
         auto hidden = view; hidden.game_visibility_rows.clear();
         check(E1PublishTerrainView(&owner, hidden));
+        // c56 selects render envelopes independently of the game's sector
+        // admission. Keep the game-facing decisions, but render the source
+        // terrain visible to this camera, as the c56 world path does.
+        check(std::none_of(E1TerrainView()->sectors.begin(), E1TerrainView()->sectors.end(),
+            [](const auto& sector) { return sector.visible; }));
+        check(!E1TerrainView()->base_commands.empty());
+        auto offscreen = view;
+        offscreen.object_to_clip[3] = 100.f;
+        check(E1PublishTerrainView(&owner, offscreen));
         check(E1TerrainView()->base_commands.empty() && E1TerrainView()->transparent_commands.empty());
         auto badView = view; badView.camera_position[0] = std::numeric_limits<float>::quiet_NaN();
         check(!E1PublishTerrainView(&owner, badView) && !E1TerrainView());
@@ -268,6 +287,10 @@ int wmain(int argc, wchar_t** argv) try {
         E1PublishTerrainAtlases(&owner, atlases);
         check(E1PrepareTerrainCommand(false, 0, native));
         check(native.view.decode && native.view.decode_context == &native.context && native.atlas == updated);
+        check(native.view.owned_texture.identity == updated->id && native.view.owned_texture.generation == updated->generation);
+        check(native.view.owned_texture.surface == updated.get());
+        check(SUCCEEDED(E1ResolveSurface(nullptr, device.Get(), native.view.owned_texture.identity,
+            native.view.owned_texture.generation, resolved)) && resolved == image);
         check(native.context.geometry == native.geometry.get() && native.view.terrain_phase_values == &native.dynamic->phase_values);
         const auto& nv = native.view;
         std::vector<NativePackedGroup> positions(nv.position_groups), normals(nv.normal_groups);
@@ -292,6 +315,33 @@ int wmain(int argc, wchar_t** argv) try {
         check(!E1PrepareTerrainCommand(false, 0, native) && !native.view.decode);
         check(surface.Complete(image.Get()));
         check(bridge_terrain_atlas(0, atlas, &atlasFailure) && atlas->generation > updated->generation);
+        check(E1PrepareTerrainCommand(false, 0, native));
+        check(native.view.owned_texture.identity == surface.Id() &&
+            native.view.owned_texture.generation == atlas->generation &&
+            native.view.owned_texture.generation != updated->generation);
+        check(FAILED(E1ResolveSurface(nullptr, device.Get(), updated->id, updated->generation, resolved)) && !resolved);
+        check(SUCCEEDED(E1ResolveSurface(nullptr, device.Get(), native.view.owned_texture.identity,
+            native.view.owned_texture.generation, resolved)) && resolved == image);
+        // Every material/sector command must carry the completed surface's
+        // exact identity, including the ordered transparent range.
+        bool allTextures = true;
+        std::size_t baseCount = 0, transparentCount = 0;
+        for (bool transparent : {false, true}) {
+            const auto& commands = transparent ? E1TerrainView()->transparent_commands : E1TerrainView()->base_commands;
+            for (std::size_t i = 0; i < commands.size(); ++i) {
+                if (!E1PrepareTerrainCommand(transparent, i, native)) { allTextures = false; break; }
+                const auto& texture = native.view.owned_texture;
+                allTextures = allTextures && texture.surface && texture.identity == texture.surface->id &&
+                    texture.generation == texture.surface->generation &&
+                    SUCCEEDED(E1ResolveSurface(nullptr, device.Get(), texture.identity, texture.generation, resolved)) &&
+                    resolved == image;
+                if (transparent) ++transparentCount; else ++baseCount;
+            }
+        }
+        check(allTextures && baseCount && transparentCount);
+        std::printf("Atlas descriptor/resolver: base=%zu transparent=%zu\n", baseCount, transparentCount);
+        check(!E1PrepareTerrainCommand(true, E1TerrainView()->transparent_commands.size(), native) &&
+            !native.view.owned_texture.identity && !native.view.owned_texture.generation && !native.view.owned_texture.surface);
         check(!bridge_terrain_atlas(static_cast<std::uint32_t>(atlases.size()), atlas, &atlasFailure) && !atlas);
         E1PublishTerrainAtlases(&foreign, {}); check(bridge_terrain_atlas(0, atlas));
         E1PublishTerrainAtlases(&owner, {}); check(!bridge_terrain_atlas(0, atlas));
