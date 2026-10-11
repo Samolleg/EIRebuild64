@@ -3,7 +3,6 @@
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
 #include "ModInfoHitChance.h"
-#include "NotificationJournal.h"
 #include "EngineDiagnostics.h"
 #include "GlobalMap.h"
 #include "MusicSystem.h"
@@ -1636,9 +1635,6 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
-    if (nChar == VK_ESCAPE && !(nFlags & 0x4000) && pOutput && pOutput->CloseHistory()) {
-        SetProcessed(); return;
-    }
     if (pI3D && pI3D->IsAltDown())
     {
         int extendedSpellSlot = -1;
@@ -2058,9 +2054,8 @@ BOOL CI3DScreenMission::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
     pInfo->OnMouseWheel(nFlags, zDelta, pt);
     if (pInfo->GetProcessed())
         return TRUE;
-    if (pOutput->ScrollHistory(nFlags, zDelta, pt)) return TRUE;
     pScrollText->SetProcessed(false);
-    if (!ModRuntime::Current()) pScrollText->OnMouseWheel(nFlags, zDelta, pt);
+    pScrollText->OnMouseWheel(nFlags, zDelta, pt);
     if (pScrollText->GetProcessed())
         return TRUE;
     pOutput->SetProcessed(false);
@@ -6870,10 +6865,6 @@ void CI3DObjectCommands::SetAggr(int iAggr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::Init(int iMode, bool bClosed)
 {
-    if(ModRuntime::Current()) {
-        ModMessages::queue.Bind(this); iMode=0; bClosed=true;
-        notificationMode=Hidden; lastNotification=0;
-    }
     SetRect(180, 0, 620, 100);
 
     slide_bIsSlide = TRUE;
@@ -6928,14 +6919,10 @@ void CI3DObjectOutput::Init(int iMode, bool bClosed)
     pFig->MakeBarFrame(18, 80, 180, -5, 620, 100, 5, 4, 55, 90, 60);
 
     nMode = iMode;
-    if (ModRuntime::Current()) {
-        GetArea(0)->MakeRect(180, 0, 620, 20);
-        GetArea(1)->MakeRect(-10000,-10000,-10000,-10000);
-        GetArea(2)->MakeRect(-10000,-10000,-10000,-10000);
-        ((CI3DScrollText*)pScreen->GetObject(9))->SetText(szOutputText);
-    } else ShowCurrentMode();
+    ShowCurrentMode();
     ScrollFigures();
-    if (ModRuntime::Current()) SyncNotificationVisibility();
+    // Like StockOutputMessages, bind only after native panel initialization.
+    if (ModRuntime::Current()) ModMessages::queue.Bind(this);
     /*
             for ( int j=0; j<6; j++ )
                     figures[j]->Show( FALSE );
@@ -6963,10 +6950,6 @@ void CI3DObjectOutput::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ActivateMode(int nNewMode)
 {
-    if (ModRuntime::Current()) {
-        if (notificationMode != History) ((CI3DScrollText*)pScreen->GetObject(9))->SetPosToEnd();
-        SetNotificationMode(notificationMode == History ? Hidden : History); return;
-    }
     if (slide_dir == 1)
     {
         nMode = nNewMode;
@@ -6992,8 +6975,6 @@ void CI3DObjectOutput::OnIdle()
 {
     auto messages=ModMessages::queue.Take(this);
     for(const auto&message:messages)AddOutput(message.c_str());
-    if (ModRuntime::Current() && notificationMode == Transient && DWORD(GetTickCount()-lastNotification)>=4000)
-        SetNotificationMode(Hidden);
     float fPart;
 
     if (slide_bIsSlide)
@@ -7030,7 +7011,6 @@ void CI3DObjectOutput::OnIdle()
     }
     pI3D->bTextClosed = slide_dir > 0;
     pI3D->nTextMode = nMode;
-    if (ModRuntime::Current()) SyncNotificationVisibility();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::OnLButtonDown(UINT nFlags, CPoint point)
@@ -7051,9 +7031,6 @@ void CI3DObjectOutput::OnLButtonUp(UINT nFlags, CPoint point)
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
     JournalHit(ht);
-    if (ModRuntime::Current()) {
-        SetProcessed(); if (ht == 0) ActivateMode(0); return;
-    }
     switch (ht)
     {
     case 0:
@@ -7091,7 +7068,6 @@ BOOL CI3DObjectOutput::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ShowCurrentMode()
 {
-    if (ModRuntime::Current()) { ActivateMode(0); return; }
     for (int i = 0; i < 2; i++)
     {
         if (nMode == i)
@@ -7123,66 +7099,15 @@ void CI3DObjectOutput::ClearOutput()
         ((CI3DScrollText *)pScreen->GetObject(9))->SetText("");
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectOutput::SyncNotificationVisibility()
-{
-    auto* scroll = (CI3DScrollText*)pScreen->GetObject(9);
-    scroll->Show(notificationMode != Hidden, TRUE);
-    bool shell = notificationMode != Hidden || (slide_bIsSlide && slide_fCurTime < 1);
-    for (int i=0;i<6;++i) figures[i]->Show(shell && i!=3 && i!=4);
-}
-void CI3DObjectOutput::SetNotificationMode(NotificationMode mode)
-{
-    if (notificationMode != mode) {
-        notificationMode=mode; nMode=0;
-        slide_dir=mode==Hidden?1.f:-1.f; slide_bIsSlide=TRUE;
-    }
-    SyncNotificationVisibility();
-}
-bool CI3DObjectOutput::CloseHistory()
-{
-    if (!ModRuntime::Current() || notificationMode != History) return false;
-    SetNotificationMode(Hidden); return true;
-}
-bool CI3DObjectOutput::ScrollHistory(UINT flags, short delta, CPoint point)
-{
-    if (!ModRuntime::Current() || notificationMode == Hidden) return false;
-    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
-    if (scroll->HitTest(point)!=2) return false;
-    SetNotificationMode(History); scroll->OnMouseWheel(flags,delta,point); return true;
-}
 void CI3DObjectOutput::RestoreOutput(LPCTSTR text)
 {
-    if (!ModRuntime::Current()) { AddOutput(text); return; }
-    szOutputText=text;
-    auto tail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
-    if(tail.removed)szOutputText=tail.text.c_str();
-    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
-    scroll->SetText(szOutputText);scroll->SetPosToEnd();SyncNotificationVisibility();
+    AddOutput(text);
 }
 void CI3DObjectOutput::AddOutput(LPCTSTR pszText)
 {
-    if (!ModRuntime::Current()) {
-        szOutputText+=pszText;
-        if(nMode==0)((CI3DScrollText*)pScreen->GetObject(9))->AddText(pszText);
-        return;
-    }
-    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
-    int oldPos=scroll->CurrentPosition();
-    bool hold=notificationMode==History && oldPos<scroll->GetRange();
-    auto oldTail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
-    szOutputText+=pszText;
-    auto tail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
-    if(tail.removed && (!hold || tail.removed>=oldTail.lines)) {
-        szOutputText=tail.text.c_str();scroll->SetText(szOutputText);
-        if(hold)scroll->SetPos(0);else scroll->SetPosToEnd();
-    } else {
-        scroll->AddText(pszText);int appended=scroll->GetRange();
-        if(tail.removed){szOutputText=tail.text.c_str();scroll->SetText(szOutputText);}
-        int removed=(std::max)(0,appended-scroll->GetRange());
-        if(hold)scroll->SetPos((std::max)(0,oldPos-removed));else scroll->SetPosToEnd();
-    }
-    if(pszText && *pszText){lastNotification=GetTickCount();if(notificationMode!=History)SetNotificationMode(Transient);}
-    SyncNotificationVisibility();
+    szOutputText += pszText;
+    if (nMode == 0)
+        ((CI3DScrollText*)pScreen->GetObject(9))->AddText(pszText);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::AddHoover(CItem *pNewItem, bool bCrippled)
