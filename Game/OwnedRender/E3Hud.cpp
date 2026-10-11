@@ -75,7 +75,9 @@ struct E3HudAccess {
                 for(unsigned j=0;j<itemFigures.size();++j)if(itemFigures[j]==i){slot=int(j);break;}
             }
             owned::widescreen::HudComposition composition;
-            if(!context.figure_composition(owned::HudPanel(index),unsigned(i),slot,composition))continue;
+            const bool visible=object==messageTextOwner?context.surface_composition(owned::HudPanel::messages,-1,composition):
+                context.figure_composition(owned::HudPanel(index),unsigned(i),slot,composition);
+            if(!visible)continue;
             owned::widescreen::hud_blit=composition;
             figure->Draw(renderer);
         }
@@ -83,11 +85,23 @@ struct E3HudAccess {
     }
     static int Panel(const CI3DObject* object) noexcept {
         if(!object || !OwnedRender::E3HudRendererAttached())return -1;
+        if(object==messageTextOwner)return 7;
         for(unsigned i=0;i<inputOwners.size();++i)if(inputOwners[i]==object)return int(i);
         return -1;
     }
+    static bool MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured) noexcept {
+        if(!object || object!=messageTextOwner || !object->bVisible || !OwnedRender::E3HudRendererAttached())return false;
+        auto& context=owned::embedded_hud_layout();
+        owned::widescreen::HudComposition composition;
+        if(!context.surface_composition(owned::HudPanel::messages,-1,composition))return false;
+        // A captured drag must keep mapping outside the visible track so the
+        // scrollbar can clamp to either end. Normal hits keep body clipping.
+        if(captured)composition.clip_native_screen=false;
+        return context.inverse_composed_point(pixel,composition,native);
+    }
     static bool NativePoint(CI3DObject* object,unsigned area,POINT pixel,POINT& native) noexcept {
         const int panel=Panel(object);
+        if(object==messageTextOwner)return MessagePoint(object,pixel,native,false);
         return panel>=0 && object->bVisible &&
             owned::embedded_hud_layout().area_point(owned::HudPanel(panel),area,pixel,native);
     }
@@ -110,6 +124,10 @@ struct E3HudAccess {
     static bool Inside(CI3DObject* object,POINT pixel,bool& inside) noexcept {
         const int index=Panel(object);if(index<0)return false;
         inside=false;if(!object->bVisible)return true;
+        if(object==messageTextOwner) {
+            POINT native{};inside=MessagePoint(object,pixel,native,false) && object->rect.PtInRect(CPoint(native))!=FALSE;
+            return true;
+        }
         auto& context=owned::embedded_hud_layout();
         const auto panel=owned::HudPanel(index);
         // Slots may have gaps or be preview-only. Never swallow world input there.
@@ -236,6 +254,10 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,bool& valid) noexcept {
+    if(!object || object!=messageTextOwner || !E3HudRendererAttached())return false;
+    valid=E3HudAccess::MessagePoint(object,pixel,native,captured);return true;
+}
 void E3MessageLayout(CI3DScrollText* text) {
     if(!text || text!=messageTextOwner || !E3HudRendererAttached())return;
     RECT placed{};float scale=1.f;

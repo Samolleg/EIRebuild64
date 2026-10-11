@@ -6,6 +6,7 @@ class CI3DSurface;
 class CI3DScrollText;
 class CRenderer;
 namespace OwnedRender {
+bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,bool& valid) noexcept;
 void E3MessageLayout(CI3DScrollText* text);
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer);
 bool E3HudDraw2D(CI3DObject* object);

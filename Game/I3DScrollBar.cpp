@@ -6,6 +6,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScrollBar.h"
+#include "OwnedRender/E3Hud.h"
 #include "I3DMain.h"
 #include "A3Cursor.h"
 //////////////////////////////////////////////////////////////////////
@@ -100,7 +101,11 @@ void CI3DScrollBar::OnMouseMove(UINT nFlags, CPoint point)
 {
     if (m_eMode == SBM_TRACK)
     {
-        pI3D->ScreenToVirtual(point);
+        POINT native{};bool valid=false;
+        if(OwnedRender::E3MessagePoint(this,point,native,true,valid)) {
+            if(!valid)return;
+            point=CPoint(native);
+        } else pI3D->ScreenToVirtual(point);
         point -= m_ptInc;
         int nPos = int(float(point.y - m_rectView.top) * float(m_nRange) /
                        float(m_rectView.Height()));
@@ -112,7 +117,11 @@ void CI3DScrollBar::OnMouseMove(UINT nFlags, CPoint point)
 void CI3DScrollBar::OnLButtonDown(UINT nFlags, CPoint point)
 {
     CPoint ptView(point);
-    pI3D->ScreenToVirtual(point);
+    POINT native{};bool valid=false;
+    if(OwnedRender::E3MessagePoint(this,point,native,false,valid)) {
+        if(!valid)return;
+        point=CPoint(native);
+    } else pI3D->ScreenToVirtual(point);
     if (m_rectPointer.PtInRect(point))
     {
         pI3D->SetCapture(this);
