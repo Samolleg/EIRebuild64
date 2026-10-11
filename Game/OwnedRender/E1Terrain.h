@@ -35,6 +35,13 @@ struct E1TerrainCommandSource {
     E1TerrainCommandSource(const E1TerrainCommandSource&) = delete;
     E1TerrainCommandSource& operator=(const E1TerrainCommandSource&) = delete;
 };
+struct E1TerrainPassSource {
+    owned::NativeWorldLighting lighting{};
+    std::shared_ptr<const owned::OwnedTerrainGeometryValues> geometry;
+    std::size_t commands = 0;
+};
+// Validates even an empty pass, without substituting light/material defaults.
+bool E1PrepareTerrainPass(bool transparent, E1TerrainPassSource& output) noexcept;
 // Completed pass state is invalidated by every geometry/frame publication.
 bool E1PublishTerrainMaterial(const void* owner, bool transparent,
     const owned::NativeOwnedFixedState& state) noexcept;

@@ -8,6 +8,7 @@
   <Import Project="Renderer.props" />
   <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="..\Game\OwnedRender\E1TerrainSubmission.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_unit_effects.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_object_contacts.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_perches.cpp" />

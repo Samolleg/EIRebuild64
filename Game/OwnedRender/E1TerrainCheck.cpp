@@ -1,4 +1,5 @@
 #include "E1Terrain.h"
+#include "E1TerrainSubmission.h"
 #include "E1TerrainState.h"
 #include "E1World.h"
 #include "E1Surface.h"
@@ -41,6 +42,32 @@ bool decodeCommand(const owned::NativeGeometryView& view) {
     return view.decode && view.decode(view.decode_context, target) &&
         std::all_of(indices.begin(), indices.end(), [&](auto index){return index < components.size();});
 }
+struct SubmissionSink {
+    bool transparent = false;
+    int failAt = -1, throwAt = -1, calls = 0, aborts = 0, finishes = 0;
+    bool valid = true;
+    std::size_t next = 0;
+    OwnedRender::E1TerrainPassSource pass;
+    HRESULT step() {
+        const int call = calls++;
+        if (call == throwAt) throw std::bad_alloc();
+        return call == failAt ? E_ACCESSDENIED : S_OK;
+    }
+    HRESULT Begin(const OwnedRender::E1TerrainPassSource& input) { pass = input; return step(); }
+    HRESULT Queue(const OwnedRender::E1TerrainCommandSource& command) {
+        OwnedRender::E1TerrainCommandSource expected;
+        valid = valid && OwnedRender::E1PrepareTerrainCommand(transparent, next++, expected) &&
+            command.view.prepared_identity.part_index == expected.view.prepared_identity.part_index &&
+            command.view.prepared_identity.set_index == expected.view.prepared_identity.set_index &&
+            command.view.index_count == expected.view.index_count &&
+            command.view.owned_fixed_state.alpha_blend_enable == expected.view.owned_fixed_state.alpha_blend_enable &&
+            command.geometry == pass.geometry && command.lighting.ambient == pass.lighting.ambient &&
+            decodeCommand(command.view);
+        return step();
+    }
+    HRESULT Finish() { ++finishes; return step(); }
+    void Abort() noexcept { ++aborts; }
+};
 struct Reader {
     owned::MemoryResourceArchive archive;
     bool fail = false, change = false, edited = false;
@@ -311,6 +338,9 @@ int wmain(int argc, wchar_t** argv) try {
         // publishes its material. In particular vertex alpha must not become
         // texture alpha merely because a later UI pass changed the state.
         check(!E1PrepareTerrainCommand(false, 0, native));
+        SubmissionSink missingPass; E1TerrainSubmission missingResult;
+        check(E1SubmitTerrainPassTo(missingPass, false, missingResult) == E_PENDING);
+        check(!missingResult.completed && !missingResult.queued && !missingPass.calls && !missingPass.aborts);
         std::map<int,DWORD> renderStates{{D3DRENDERSTATE_ALPHABLENDENABLE, TRUE},
             {D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA},
             {D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA},
@@ -416,6 +446,35 @@ int wmain(int argc, wchar_t** argv) try {
             }
         }
         check(allTextures && baseCount && transparentCount);
+        // Exercise the production pass dispatcher with real map decoders.
+        // The sink is a fault injector, not evidence of a GPU frame.
+        for (bool transparent : {false, true}) {
+            const std::size_t count = transparent ? transparentCount : baseCount;
+            SubmissionSink sink; sink.transparent = transparent;
+            E1TerrainSubmission submitted;
+            check(E1SubmitTerrainPassTo(sink, transparent, submitted) == S_OK);
+            check(submitted.completed && !submitted.failure && submitted.queued == count);
+            check(sink.valid && sink.next == count && sink.finishes == 1 && sink.aborts == 0);
+            // Reject initialization, a partially queued pass, and final flush.
+            for (int failure : {0, 2, static_cast<int>(count + 1)}) {
+                SubmissionSink rejected; rejected.transparent = transparent; rejected.failAt = failure;
+                check(E1SubmitTerrainPassTo(rejected, transparent, submitted) == E_ACCESSDENIED);
+                check(!submitted.completed && submitted.failure && rejected.aborts == 1);
+                check(rejected.calls == failure + 1 && rejected.valid);
+                check(submitted.queued == (failure ? (std::min)(count, std::size_t(failure - 1)) : 0));
+                check(rejected.finishes == (failure == static_cast<int>(count + 1) ? 1 : 0));
+            }
+            SubmissionSink thrown; thrown.transparent = transparent; thrown.throwAt = 2;
+            check(E1SubmitTerrainPassTo(thrown, transparent, submitted) == E_OUTOFMEMORY);
+            check(!submitted.completed && submitted.queued == 1 && thrown.aborts == 1 && !thrown.finishes);
+        }
+        // No completed texture means no stale surface can enter submission.
+        surface.BeginWrite();
+        SubmissionSink unavailable; E1TerrainSubmission unavailableResult;
+        check(E1SubmitTerrainPassTo(unavailable, false, unavailableResult) == E_PENDING);
+        check(!unavailableResult.completed && !unavailableResult.queued && unavailable.calls == 1 &&
+            unavailable.aborts == 1 && !unavailable.finishes);
+        check(surface.Complete(image.Get()));
         check(E1PrepareTerrainCommand(false, 0, native));
         const auto heldMaterial = native.view.owned_fixed_state;
         baseMaterial.captured_fog_color = 0xabcdef;

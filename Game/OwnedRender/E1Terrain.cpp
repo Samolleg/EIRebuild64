@@ -148,6 +148,16 @@ bool E1PublishTerrainMaterial(const void* owner, bool transparent,
     materialGeometry[pass] = source.geometry->revision;
     return true;
 }
+bool E1PrepareTerrainPass(bool transparent, E1TerrainPassSource& output) noexcept {
+    output = {};
+    const unsigned pass = transparent ? 1u : 0u;
+    if (!E1TerrainView() || !source.geometry ||
+        materialGeometry[pass] != source.geometry->revision || !materials[pass].enabled ||
+        !E1ReadWorldLighting(output.lighting)) return false;
+    output.geometry = source.geometry;
+    output.commands = transparent ? view.transparent_commands.size() : view.base_commands.size();
+    return true;
+}
 bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept try {
     output.view = {}; output.context = {};
     output.lighting = {};
