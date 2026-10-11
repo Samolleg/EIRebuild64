@@ -10,6 +10,10 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
     std::string& failure) noexcept;
 void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>& surfaces) noexcept;
 void E1RetireTerrain(const void* owner) noexcept;
+// The host publishes camera/visibility facts; c56 chooses LOD and commands.
+bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInputs& values) noexcept;
+// Borrowed only during this world frame; invalidated by a new/failed publication.
+const owned::OwnedTerrainFramePacket* E1TerrainView() noexcept;
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& values,
     const std::array<float,16>& placement) noexcept;
 }

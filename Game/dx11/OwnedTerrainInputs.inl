@@ -85,6 +85,23 @@ bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
         atlases.push_back(surface ? surface->OwnedSurfaceId() : 0);
     }
     OwnedRender::E1PublishTerrainAtlases(this, atlases);
+    if (renderer && renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
+        owned::OwnedTerrainFrameInputs view;
+        view.terrain_origin = {placement._14, placement._24, placement._34};
+        view.camera_position = {theCamera.GetCP().x, theCamera.GetCP().y, theCamera.GetCP().z};
+        view.lod_distances = {theSettings.fpTerrainLODs[0], theSettings.fpTerrainLODs[1]};
+        view.maximum_lod = nMaxLOD;
+        view.runtime_texture_count = nTextures;
+        view.terrain_render_state = renderState;
+        const auto& clip = renderer->GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
+        memcpy(view.object_to_clip.data(), &clip, sizeof(clip));
+        view.game_visibility_domain_present = true;
+        view.game_visibility_min_y = nClipMinSectorY;
+        for (int i = 0; i < viewableSectorsMinX.GetSize(); ++i)
+            view.game_visibility_rows.push_back({viewableSectorsMinX[i], viewableSectorsMaxX[i]});
+        if (!OwnedRender::E1PublishTerrainView(this, view))
+            GameJournal::Count("RENDER", "terrain_view_publication_failed", "source_or_view_invalid");
+    }
     // owned terrain via API5 retired; the renderer is embedded in stage 3
     if(renderer && renderer->GetD3D())
         renderer->GetD3D()->GetOwnedRenderer().TerrainFallback("owned_terrain_api5_retired_stage3");

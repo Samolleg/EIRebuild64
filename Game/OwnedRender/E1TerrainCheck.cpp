@@ -173,6 +173,39 @@ int wmain(int argc, wchar_t** argv) try {
         check(bridge_ambient_world_source(ambient) && ambient.terrain && ambient.geometry && !ambient.map);
         check(ambient.wind_direction[0] == .4f && ambient.wind_direction[1] == -.2f && ambient.wind_force_normalized == .7f);
         auto grid = bridge_world_mist_grid(); check(grid && grid->texels == g1->texels);
+        OwnedTerrainFrameInputs view;
+        view.camera_position = {10000.f, 10000.f, 10000.f};
+        view.lod_distances = {1.f, 2.f}; view.maximum_lod = 2;
+        view.runtime_texture_count = original->texture_count;
+        view.object_to_clip = {2.f/(original->sector_count_x*32.f),0,0,-1,
+            0,2.f/(original->sector_count_y*32.f),0,-1,0,0,.0001f,.5f,0,0,0,1};
+        view.game_visibility_domain_present = true;
+        view.game_visibility_rows.assign(original->sector_count_y,
+            {0,static_cast<int>(original->sector_count_x)-1});
+        check(!E1TerrainView());
+        check(!E1PublishTerrainView(&foreign, view) && !E1TerrainView());
+        check(E1PublishTerrainView(&owner, view));
+        const auto* packet = E1TerrainView();
+        check(packet && packet->status == OwnedTerrainPacketStatus::ready && packet->spatial_ready);
+        check(!packet->base_commands.empty() && !packet->spatial_parts.empty());
+        check(packet->inputs.source_generation && packet->inputs.source_revision == 1 && packet->inputs.world_frame_serial);
+        check(std::all_of(packet->sectors.begin(),packet->sectors.end(),[](const auto& s){return s.lod == 2;}));
+        bridge_set_terrain_lod_enabled(false);
+        check(!E1TerrainView());
+        check(E1PublishTerrainView(&owner, view));
+        packet = E1TerrainView(); check(packet && packet->inputs.force_full_detail);
+        check(std::all_of(packet->sectors.begin(),packet->sectors.end(),[](const auto& s){return s.lod == 0 && !s.lu_higher && !s.rd_higher;}));
+        bridge_set_terrain_lod_enabled(false); check(E1TerrainView() == packet);
+        bridge_set_terrain_lod_enabled(true); check(!E1TerrainView());
+        check(E1PublishTerrainView(&owner, view) && !E1TerrainView()->inputs.force_full_detail);
+        auto hidden = view; hidden.game_visibility_rows.clear();
+        check(E1PublishTerrainView(&owner, hidden));
+        check(E1TerrainView()->base_commands.empty() && E1TerrainView()->transparent_commands.empty());
+        auto badView = view; badView.camera_position[0] = std::numeric_limits<float>::quiet_NaN();
+        check(!E1PublishTerrainView(&owner, badView) && !E1TerrainView());
+        check(E1PublishTerrainView(&owner, view));
+        check(E1PublishTerrainFrame(&owner, geometry, matrix) && !E1TerrainView());
+        check(E1PublishTerrainView(&owner, view));
         std::vector<std::uint64_t> atlases(original->texture_count+2u, 0); atlases[0] = surface.Id();
         std::shared_ptr<const OwnedVisualSurface> atlas;
         const char* atlasFailure = nullptr;
@@ -188,7 +221,7 @@ int wmain(int argc, wchar_t** argv) try {
         E1RetireTerrain(&foreign); check(bridge_world_mist_grid() == grid);
         draw.Complete(); check(bridge_world_mist_grid() == grid);
     }
-    E1BeginFrame(); check(!bridge_ambient_world_source(ambient) && !ambient.terrain && !bridge_world_mist_grid());
+    E1BeginFrame(); check(!E1TerrainView()); check(!bridge_ambient_world_source(ambient) && !ambient.terrain && !bridge_world_mist_grid());
     {
         E1WorldDraw draw(&owner, 10, frame);
         check(E1PublishTerrainFrame(&owner, geometry, matrix));

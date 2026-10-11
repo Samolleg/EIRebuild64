@@ -11,9 +11,12 @@ owned::RetainedTerrainSourceSnapshot source;
 std::vector<std::uint64_t> atlasIds;
 std::array<float,16> transform{};
 owned::WorldMistGridCache mist;
+owned::OwnedTerrainFramePacket view;
+owned::OwnedTerrainPreparedResources prepared;
+bool viewReady = false, terrainLod = true;
 void clear() noexcept {
     sourceOwner = nullptr; worldIdentity = sourceRevision = terrainFrame = 0;
-    source = {}; transform = {}; mist.retire(); atlasIds.clear();
+    source = {}; transform = {}; mist.retire(); atlasIds.clear(); view = {}; prepared = {}; viewReady = false;
 }
 bool current() noexcept {
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
@@ -68,9 +71,27 @@ void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>
     atlasIds = surfaces;
 } catch (...) { atlasIds.clear(); }
 void E1RetireTerrain(const void* owner) noexcept { if (owner == sourceOwner) clear(); }
+bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInputs& input) noexcept try {
+    viewReady = false;
+    if (!owner || owner != sourceOwner || !current() || !source.geometry) return false;
+    auto values = input;
+    values.source_generation = source.source_generation;
+    values.source_revision = source.source_revision;
+    values.world_frame_serial = terrainFrame;
+    values.dynamic_state_fingerprint = source.geometry->revision;
+    values.force_full_detail = !terrainLod;
+    if (!owned::prepare_owned_terrain_frame(source.terrain, values, view) ||
+        view.status != owned::OwnedTerrainPacketStatus::ready ||
+        !owned::prepare_owned_terrain_spatial_parts(view, *source.geometry, transform, &prepared)) return false;
+    viewReady = true;
+    return true;
+} catch (...) { viewReady = false; return false; }
+const owned::OwnedTerrainFramePacket* E1TerrainView() noexcept {
+    return viewReady && current() ? &view : nullptr;
+}
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
     const std::array<float,16>& placement) noexcept try {
-    terrainFrame = 0;
+    terrainFrame = 0; viewReady = false;
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
     if (!owner || owner != sourceOwner || !source.terrain || !frame.valid || !frame.scene_frame_serial ||
         E1WorldGeneration() != worldIdentity ||
@@ -98,6 +119,9 @@ bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryV
 } catch (...) { terrainFrame = 0; return false; }
 }
 namespace owned {
+void bridge_set_terrain_lod_enabled(bool enabled) noexcept {
+    if (terrainLod != enabled) { terrainLod = enabled; viewReady = false; }
+}
 bool bridge_terrain_atlas(std::uint32_t material, std::shared_ptr<const OwnedVisualSurface>& output,
     const char** failure) noexcept {
     output.reset();
