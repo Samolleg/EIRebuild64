@@ -26,6 +26,7 @@ private:
 
 public:
     CI3DChat(CInterface3D *pI);
+    ~CI3DChat() override;
 
     void ClearLines();
     void NewPhrase(LPCTSTR pszPhrase, int nOrder);

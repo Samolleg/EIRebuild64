@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1TextLifetime.h"
 #include "OwnedRender/E3Input.h"
 #include "GameJournal.h"
 #include <typeinfo>
@@ -213,10 +214,12 @@ void CInterface3D::Init(CRenderer *pNewRend)
     ShowFPS(true);
 
     bCheckDisconnect = false;
+    OwnedRender::E1TextInterfaceBegin();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Fini()
 {
+    OwnedRender::E1TextInterfaceEnd();
     OwnedRender::E3RetireInterface();
     DestroyScreens();
 
@@ -537,6 +540,8 @@ void CInterface3D::ActivateScreen(CI3DScreen *pScreen)
         ReportError("Cannot activate NULL interface screen\n");
         return;
     }
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);
     pScreens.push_back(pScreen);
 
     GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
@@ -582,6 +587,8 @@ void CInterface3D::DoModal(CI3DScreen *pScreen, bool bSaveBack, bool bGrayBack)
         // error
         ReportError("Cannot activate NULL interface screen\n");
     }
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);
     pScreens.push_back(pScreen);
 
     GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
@@ -606,6 +613,8 @@ void CInterface3D::ExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::DestroyScreens()
 {
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);
     theCursor.SetMode(CT_WAIT);
     while (!pScreens.empty())
     {

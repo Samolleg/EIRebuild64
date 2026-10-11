@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1TextLifetime.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DChat.h"
@@ -48,6 +49,10 @@ public:
     }
 };
 /////////////////////////////////////////////////////////////////////////////////////
+CI3DChat::~CI3DChat()
+{
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat,this);
+}
 void CI3DChat::OnIdle()
 {
     DWORD dwCurrentTime = timeGetTime();
@@ -56,6 +61,7 @@ void CI3DChat::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::Draw2D()
 {
+    OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::chat,this);
     int n = 0;
     std::list<SChatLine>::const_iterator it;
     for (n = 0, it = mLines.begin(); it != mLines.end(); ++it, ++n)
@@ -64,6 +70,7 @@ void CI3DChat::Draw2D()
         it->pSurface->Draw();
     }
     CI3DObject::Draw2D();
+    textDraw.Complete();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::NewPhrase(LPCTSTR pszPhrase, int nOrder)

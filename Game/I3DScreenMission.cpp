@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1TextLifetime.h"
 #include "OwnedRender/E3Input.h"
 #include "OwnedRender/E3Hud.h"
 #include "GameJournal.h"
@@ -262,6 +263,7 @@ void CI3DScreenMission::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnDeactivate()
 {
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
     OwnedRender::E3MissionLeave(this);
     DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
 
@@ -5453,6 +5455,7 @@ void CI3DObjectInfo::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 {
+    OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::pane,this);
     WideScreen::Scope wideScope(-1);
     CPlot3D pos;
     CQuaternion rot;
@@ -5606,6 +5609,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 
     CI3DObject::Draw(pRend);
 
+    textDraw.Complete();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
