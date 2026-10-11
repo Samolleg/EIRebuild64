@@ -29,6 +29,7 @@ struct E1TerrainCommandSource {
     std::shared_ptr<const owned::OwnedTerrainGeometryValues> geometry;
     std::shared_ptr<const owned::OwnedTerrainDynamicSector> dynamic;
     std::shared_ptr<const owned::OwnedVisualSurface> atlas;
+    std::shared_ptr<owned::OwnedTerrainPreparedResources> prepared;
     E1TerrainCommandSource() = default;
     E1TerrainCommandSource(const E1TerrainCommandSource&) = delete;
     E1TerrainCommandSource& operator=(const E1TerrainCommandSource&) = delete;

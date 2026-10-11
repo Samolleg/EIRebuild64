@@ -63,6 +63,7 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
         failure = error.message.empty() ? "terrain descriptor invalid" : error.message; return false;
     }
     source.source_generation = nextGeneration; source.source_revision = revision;
+    source.prepared = std::make_shared<owned::OwnedTerrainPreparedResources>();
     source.terrain = std::move(terrain);
     sourceOwner = owner; worldIdentity = world; sourceRevision = revision;
     return true;
@@ -132,30 +133,50 @@ bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInput
 const owned::OwnedTerrainFramePacket* E1TerrainView() noexcept {
     return viewReady && current() ? &view : nullptr;
 }
-bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept {
+bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept try {
     output.view = {}; output.context = {};
     output.terrain.reset(); output.geometry.reset(); output.dynamic.reset(); output.atlas.reset();
+    output.prepared.reset();
     if (!E1TerrainView() || !source.geometry) return false;
     const auto& commands = transparent ? view.transparent_commands : view.base_commands;
     if (index >= commands.size()) return false;
     const auto& command = commands[index];
     auto dynamic = E1TerrainSector(command.source_sector);
     std::shared_ptr<const owned::OwnedVisualSurface> atlas;
-    if (!dynamic || !owned::bridge_terrain_atlas(command.material % (source.terrain->texture_count+2u), atlas))
+    if (!owned::bridge_terrain_atlas(command.material % (source.terrain->texture_count+2u), atlas))
         return false;
-    if (!owned::prepare_owned_terrain_source_view(view, command, *dynamic, output.context, output.view))
+    owned::NativeGeometryView* record = nullptr;
+    if (!owned::prepare_owned_terrain_world_record(source, view, command, dynamic.get(),
+        {true, true, 0}, output.context, record) || !record) {
+        // A rejected color record may already have borrowed the cache slot.
+        // Release that borrow without exposing a partially prepared command.
+        if (record) {
+            record->decode_context = nullptr; record->terrain_animation_phases = nullptr;
+            record->terrain_phase_values = nullptr; record->owned_texture = {};
+        }
+        output.context.borrowed_view = nullptr;
+        output.context = {};
         return false;
+    }
+    output.view = *record;
+    record->decode_context = nullptr; record->terrain_animation_phases = nullptr;
+    record->terrain_phase_values = nullptr; record->owned_texture = {};
+    output.context.borrowed_view = nullptr;
     output.terrain = source.terrain; output.geometry = source.geometry;
+    output.prepared = source.prepared;
     output.dynamic = std::move(dynamic); output.atlas = std::move(atlas);
-    output.context.geometry = output.geometry.get();
-    output.view.geometry_revision = owned::owned_terrain_geometry_revision(view, command,
-        owned::owned_terrain_command_structure(*source.terrain, command, *source.geometry));
-    output.view.lighting.object_to_world = transform;
-    output.view.terrain_phase_values = &output.dynamic->phase_values;
+    output.view.world.object_to_world = output.view.lighting.object_to_world = transform;
+    output.view.world.world_to_clip = owned::bridge_scene_world_to_clip_snapshot().world_to_clip;
     output.view.owned_texture.identity = output.atlas->id;
     output.view.owned_texture.generation = output.atlas->generation;
     output.view.owned_texture.surface = output.atlas.get();
     return true;
+} catch (...) {
+    output.context.borrowed_view = nullptr;
+    output.view = {}; output.context = {};
+    output.terrain.reset(); output.geometry.reset(); output.dynamic.reset(); output.atlas.reset();
+    output.prepared.reset();
+    return false;
 }
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
     const std::array<float,16>& placement) noexcept try {

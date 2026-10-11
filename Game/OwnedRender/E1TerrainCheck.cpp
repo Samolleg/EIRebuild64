@@ -23,6 +23,23 @@ struct ExitOwner {
 } exitOwner;
 void checkAt(bool v, int line) { ++checks; if (!v) { std::printf("Failed source line: %d\n", line); throw checks; } }
 #define check(...) checkAt((__VA_ARGS__), __LINE__)
+bool decodeCommand(const owned::NativeGeometryView& view) {
+    using namespace owned;
+    std::vector<NativePackedGroup> positions(view.position_groups), normals(view.normal_groups);
+    std::vector<NativeTextureCoordinate> uvs(view.texture_coordinate_count);
+    std::vector<NativeVertexComponent> components(view.component_count);
+    std::vector<std::uint16_t> indices(view.index_count);
+    std::vector<NativeTerrainVertex> vertices(view.component_count);
+    NativeGeometryDecodeTarget target;
+    target.positions = positions.data(); target.position_groups = view.position_groups;
+    target.normals = normals.data(); target.normal_groups = view.normal_groups;
+    target.texture_coordinates = uvs.data(); target.texture_coordinate_count = view.texture_coordinate_count;
+    target.components = components.data(); target.component_count = view.component_count;
+    target.indices = indices.data(); target.index_count = view.index_count;
+    target.terrain_vertices = vertices.data(); target.terrain_vertex_count = view.component_count;
+    return view.decode && view.decode(view.decode_context, target) &&
+        std::all_of(indices.begin(), indices.end(), [&](auto index){return index < components.size();});
+}
 struct Reader {
     owned::MemoryResourceArchive archive;
     bool fail = false, change = false, edited = false;
@@ -340,6 +357,67 @@ int wmain(int argc, wchar_t** argv) try {
         }
         check(allTextures && baseCount && transparentCount);
         std::printf("Atlas descriptor/resolver: base=%zu transparent=%zu\n", baseCount, transparentCount);
+        // Camera-visible nonresident sectors need phases only for animated materials.
+        check(E1PublishTerrainSectors(&owner, {}));
+        std::size_t geometryOnly = 0, missingPhases = 0;
+        for (bool transparent : {false, true}) {
+            const auto& commands = transparent ? E1TerrainView()->transparent_commands : E1TerrainView()->base_commands;
+            for (std::size_t i = 0; i < commands.size(); ++i) {
+                const auto& command = commands[i];
+                const auto& material = original->sectors[command.source_sector].materials[command.material];
+                bool needsPhases = false;
+                float wave = 0;
+                for (unsigned part = 0; part < 4; ++part) if (command.subpart_mask & (1u << part)) {
+                    needsPhases |= material.subparts[part].required_animation_phases != 0;
+                    for (const auto& envelope : material.subparts[part].envelopes)
+                        wave = (std::max)(wave, envelope.maximum_wave_multiplier);
+                }
+                const bool ready = E1PrepareTerrainCommand(transparent, i, native);
+                check(ready != needsPhases);
+                if (needsPhases) {
+                    ++missingPhases;
+                    check(!native.view.decode && !native.view.owned_texture.surface);
+                    continue;
+                }
+                ++geometryOnly;
+                check(!native.dynamic && !native.view.terrain_phase_values &&
+                    !native.view.terrain_animation_phases && !native.view.terrain.animation_phase_count &&
+                    !native.view.terrain.animated_tiles_enabled);
+                check(native.view.world.enabled && native.view.world.identity && native.view.world.owner &&
+                    native.view.prepared_mesh && native.view.prepared_material &&
+                    native.view.contribution.known && native.view.contribution.color);
+                check(native.view.terrain.maximum_wind_multiplier == wave &&
+                    (wave != 0 || !native.view.terrain.waves_enabled));
+                check(native.view.world.object_to_world == matrix &&
+                    native.view.world.world_to_clip == frame.camera.world_to_clip);
+            }
+        }
+        check(geometryOnly != 0);
+        std::printf("Nonresident terrain: ready=%zu deferred_phases=%zu\n", geometryOnly, missingPhases);
+        // Decode both ranges without resident sector data, and keep a command
+        // alive across a later publication. Its borrowed asset/cache owners stay pinned.
+        for (bool transparent : {false, true}) {
+            const auto& commands = transparent ? E1TerrainView()->transparent_commands : E1TerrainView()->base_commands;
+            bool decoded = false;
+            for (std::size_t i = 0; i < commands.size(); ++i) {
+                if (!E1PrepareTerrainCommand(transparent, i, native)) continue;
+                check(decodeCommand(native.view));
+                const auto identity = native.view.prepared_identity;
+                const auto mesh = native.view.prepared_mesh;
+                const auto revision = native.view.world.record_revision;
+                E1TerrainCommandSource again;
+                check(E1PrepareTerrainCommand(transparent, i, again));
+                check(again.view.prepared_mesh == mesh && again.view.world.record_revision == revision &&
+                    again.view.prepared_identity.lifecycle_generation == identity.lifecycle_generation);
+                check(decodeCommand(native.view) && decodeCommand(again.view));
+                check(E1PublishTerrainSectors(&owner, phaseRows));
+                check(decodeCommand(native.view));
+                check(E1PublishTerrainSectors(&owner, {}));
+                decoded = true; break;
+            }
+            check(decoded);
+        }
+        check(E1PublishTerrainSectors(&owner, phaseRows));
         check(!E1PrepareTerrainCommand(true, E1TerrainView()->transparent_commands.size(), native) &&
             !native.view.owned_texture.identity && !native.view.owned_texture.generation && !native.view.owned_texture.surface);
         check(!bridge_terrain_atlas(static_cast<std::uint32_t>(atlases.size()), atlas, &atlasFailure) && !atlas);
