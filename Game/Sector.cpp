@@ -11,6 +11,7 @@
 #include "StdAfx.h"
 
 #include "dx11/Batchers.h"
+#include "OwnedRender/E2TerrainAnimation.h"
 static const char LOCAL_FILE[] = __FILE__;
 static uint64_t NextTerrainPhaseRevision(){static uint64_t value=1;return ++value;}
 
@@ -1577,6 +1578,31 @@ const float FP_SPECULAR_POWER = 50; // 30.f;
 
 void CSector::Segment(CTerrain *pTerrain, int nSegmentNumber)
 {
+    if (OwnedRender::E2TerrainAnimationOwned() &&
+        OwnedRender::E2AdvanceTerrainTiles(tilesAnimation.GetData(), tilesAnimation.GetSize(),
+            nSegmentNumber, pTerrain->IsHaveRenderState(CTerrain::ETRS_ANIMATED_TILES) != 0,
+            [] { return random.Get(1, 1000); },
+            [this] { rendererPhaseRevision = NextTerrainPhaseRevision(); }))
+    {
+        rendererUvsDeferred = true;
+        return;
+    }
+    if (rendererUvsDeferred)
+    {
+        // Returning to the stock consumer must restore every current UV,
+        // including a non-animation tick. This does not advance phases/RNG.
+        for (int i = 0; i < tilesAnimation.GetSize(); ++i)
+        {
+            SAnimatedTileInfo &tile = tilesAnimation[i];
+            SUVInfo *uv = pTerrain->GetUVInfo(tile.nTileRot, tile.nTilePos + tile.nCurPhase);
+            for (int j = 0; j < 9; ++j)
+            {
+                tile.pTXVertexes[j].fpU = uv->fpU[j];
+                tile.pTXVertexes[j].fpV = 1.f - uv->fpV[j];
+            }
+        }
+        rendererUvsDeferred = false;
+    }
     /////////////////////////////
     // Processing animated tiles
     /////////////////////////////
