@@ -87,39 +87,63 @@ void CAnimationTrack::SetAnimation(const SADEntry *lpNewADEntry)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // map animation track data from memory
-void CAnimationTrack::Load(LPBYTE &lpData)
+BOOL CAnimationTrack::Load(LPBYTE &lpData, DWORD dwDataSize)
 {
-    // rotation frames
-    dwNumRotationFrames = *((DWORD *)lpData);
-    lpData += sizeof(DWORD);
-    if (dwNumRotationFrames)
-        rotations = (CQuaternion *)lpData;
-    else
-        rotations = NULL;
-    lpData += dwNumRotationFrames * sizeof(CQuaternion);
-    // position frames
-    dwNumPositionFrames = *((DWORD *)lpData);
-    lpData += sizeof(DWORD);
-    if (dwNumPositionFrames)
-        positions = (CPlot3D *)lpData;
-    else
-        positions = NULL;
-    lpData += dwNumPositionFrames * sizeof(CPlot3D);
-    // morphing frames
-    dwNumMorphings = *((DWORD *)lpData);
-    lpData += sizeof(DWORD);
-    morphings.SetSize(dwNumMorphings);   // set number of morphing frames; ARRAY BOUNDS CHECK
-    dwNumMorphings = *((DWORD *)lpData); // set number of morphing data in each morphing frame
-    lpData += sizeof(DWORD);
+    LPBYTE pData = lpData;
+    DWORD dwOffset = 0;
+    auto readCount = [&](DWORD &value) -> BOOL {
+        if (dwOffset > dwDataSize || dwDataSize - dwOffset < sizeof(DWORD))
+            return FALSE;
+        memcpy(&value, pData + dwOffset, sizeof(value));
+        dwOffset += sizeof(value);
+        return TRUE;
+    };
+
+    DWORD numRotationFrames = 0;
+    DWORD numPositionFrames = 0;
+    DWORD numMorphingFrames = 0;
+    DWORD numMorphingPoints = 0;
+    if (!readCount(numRotationFrames) ||
+        numRotationFrames > (dwDataSize - dwOffset) / sizeof(CQuaternion))
+        return FALSE;
+    CQuaternion *rotationData = numRotationFrames
+                                    ? reinterpret_cast<CQuaternion *>(pData + dwOffset)
+                                    : NULL;
+    dwOffset += numRotationFrames * sizeof(CQuaternion);
+
+    if (!readCount(numPositionFrames) ||
+        numPositionFrames > (dwDataSize - dwOffset) / sizeof(CPlot3D))
+        return FALSE;
+    CPlot3D *positionData = numPositionFrames
+                                ? reinterpret_cast<CPlot3D *>(pData + dwOffset)
+                                : NULL;
+    dwOffset += numPositionFrames * sizeof(CPlot3D);
+
+    if (!readCount(numMorphingFrames))
+        return FALSE;
+    if (numMorphingFrames != 0 &&
+        (!readCount(numMorphingPoints) ||
+         numMorphingFrames > (dwDataSize - dwOffset) / sizeof(CPlot3D *) ||
+         numMorphingPoints > (dwDataSize - dwOffset) / sizeof(CPlot3D) / numMorphingFrames))
+        return FALSE;
+
+    dwNumRotationFrames = numRotationFrames;
+    rotations = rotationData;
+    dwNumPositionFrames = numPositionFrames;
+    positions = positionData;
+    dwNumMorphings = numMorphingPoints;
     morphing.SetSize(dwNumMorphings); // ARRAY BOUNDS CHECK
+    morphings.SetSize(numMorphingFrames); // set number of morphing frames; ARRAY BOUNDS CHECK
     if (morphings.GetSize())
     {
         for (int i = 0; i < morphings.GetSize(); i++)
         {
-            morphings[i] = (CPlot3D *)lpData;
-            lpData += dwNumMorphings * sizeof(CPlot3D);
+            morphings[i] = reinterpret_cast<CPlot3D *>(pData + dwOffset);
+            dwOffset += dwNumMorphings * sizeof(CPlot3D);
         }
     }
+    lpData = pData + dwOffset;
+    return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // void CAnimationTrack::SetTime( float fpNewTime )
@@ -466,9 +490,10 @@ void CAnimationNode::ClearCurrentTrack(const SADEntry *pADEntry)
     lpCurrent->SetADEntry(pADEntry);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CAnimationNode::LoadCurrentTrack(BYTE *pData, const SADEntry *pADEntry)
+void CAnimationNode::LoadCurrentTrack(BYTE *pData, DWORD dwDataSize, const SADEntry *pADEntry)
 {
-    lpCurrent->Load(pData);
+    if (!lpCurrent->Load(pData, dwDataSize))
+        lpCurrent->ClearAnimation();
     lpCurrent->SetADEntry(pADEntry);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -962,11 +987,12 @@ BOOL CAnimationSystem2::LoadAnimation(CMappedResource *pAnimation, const SADEntr
     while (pos)
     {
         CAnimationNode *pNode = nodes.GetNext(pos);
-        BYTE *pData = pAnimation->GetFile(pNode->GetNodeName());
+        DWORD dwSize = 0;
+        BYTE *pData = pAnimation->GetFile(pNode->GetNodeName(), &dwSize);
         if (pData == 0)
             pNode->ClearCurrentTrack(pADEntry);
         else
-            pNode->LoadCurrentTrack(pData, pADEntry);
+            pNode->LoadCurrentTrack(pData, dwSize, pADEntry);
     }
     return TRUE;
 }
