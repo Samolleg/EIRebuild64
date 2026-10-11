@@ -11,6 +11,8 @@ void E3RefreshInterface() noexcept;
 void E3MissionEnter(const void* owner) noexcept;
 void E3MissionLeave(const void* owner) noexcept;
 void E3HudBoundary() noexcept;
+// Input uses c56 layout only while its real renderer owns the HUD boundary.
+bool E3HudRendererAttached() noexcept;
 bool E3BlockInput(UINT message, WPARAM parameter) noexcept;
 bool E3EditorPaused() noexcept;
 HWND E3Window() noexcept;

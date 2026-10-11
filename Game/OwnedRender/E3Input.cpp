@@ -61,6 +61,7 @@ bool E3BlockInput(UINT message, WPARAM parameter) noexcept {
         (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) || message == 0xcc54;
     return input && (editing || (running && GetForegroundWindow() != window));
 }
+bool E3HudRendererAttached() noexcept { return running && mission && sinkOwner && frameSink; }
 void E3HudBoundary() noexcept {
     if (running && frameSink) frameSink(sinkOwner);
 }

@@ -44,6 +44,8 @@ public:
     void SetToolTip(LPCTSTR pszText, int nHeaderLines = 1, int nKbdAction = 0);
     void SetToolTip(int nTipID, int nHeaderLines = 1, int nKbdAction = 0);
     void ProcessIdle(CPoint point);
+    // Membership can be remapped while tooltip placement keeps the real cursor.
+    void ProcessIdle(CPoint point,bool inside);
 
     void Draw(CRenderer *pRend);
     void Draw2D();

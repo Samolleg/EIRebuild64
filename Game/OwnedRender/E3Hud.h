@@ -1,5 +1,11 @@
 #pragma once
+#include <windows.h>
 class CI3DScreenMission;
+class CI3DObject;
 namespace OwnedRender {
+// -2 means an unrelated/non-owned object, -1 means a handled miss.
+int E3HudHit(CI3DObject* object,POINT pixel) noexcept;
+bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept;
+bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept;
 void E3PublishHud(const CI3DScreenMission* mission,unsigned width,unsigned height) noexcept;
 }

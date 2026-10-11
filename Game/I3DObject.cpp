@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "OwnedRender/E4Camp.h"
+#include "OwnedRender/E3Hud.h"
 #include "I3DScreenCamp.h"
 #include "GameJournal.h"
 #include "WideScreen.h"
@@ -76,9 +77,13 @@ void CI3DPolyArea::SetToolTip(int nTipID, int nHeaderLines, int nKbdAction)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DPolyArea::ProcessIdle(CPoint point)
 {
+    ProcessIdle(point,PtInArea(point)!=FALSE);
+}
+void CI3DPolyArea::ProcessIdle(CPoint point,bool inside)
+{
     if (pTip)
     {
-        if (PtInArea(point))
+        if (inside)
         {
             if (!pTip->IsActive())
                 pTip->Activate();
@@ -692,7 +697,10 @@ void CI3DObject::DrawTips(CRenderer *pRend)
     pI3D->ScreenToVirtual(pt);
     for (int k = 0; k < areas.GetSize(); k++)
     {
-        areas[k]->ProcessIdle(pt);
+        bool hudInside=false;
+        if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
+            areas[k]->ProcessIdle(pt,hudInside);
+        else areas[k]->ProcessIdle(pt);
         // areas[k]->Draw( pRend );
     }
 }
@@ -716,7 +724,10 @@ void CI3DObject::Draw2DTips()
     pI3D->ScreenToVirtual(pt);
     for (int k = 0; k < areas.GetSize(); k++)
     {
-        areas[k]->ProcessIdle(pt);
+        bool hudInside=false;
+        if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
+            areas[k]->ProcessIdle(pt,hudInside);
+        else areas[k]->ProcessIdle(pt);
         areas[k]->Draw2D();
     }
 }
@@ -924,6 +935,8 @@ void CI3DObject::RemoveAllSurfaces()
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObject::HitTest(CPoint pt)
 {
+    const int hudHit=OwnedRender::E3HudHit(this,pt);
+    if(hudHit!=-2)return hudHit;
     const int campHit = E4CampAccess::Hit(this, pt);
     if (campHit != -2) return campHit;
     CPoint point(pt);
@@ -936,6 +949,8 @@ int CI3DObject::HitTest(CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObject::IsInside(CPoint pt)
 {
+    bool hudInside=false;
+    if(OwnedRender::E3HudInside(this,pt,hudInside))return hudInside;
     bool campInside = false;
     if (E4CampAccess::Inside(this, pt, campInside)) return campInside;
     CPoint point(pt);

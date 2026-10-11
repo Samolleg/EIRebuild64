@@ -123,12 +123,18 @@ int main() {
     config.set_boolean("confine_cursor", false);
     require(!cursor_confinement_option_enabled(config), "existing option disabled");
     widescreen_set_hud_frame_sink(host, frame);
+    require(!E3HudRendererAttached(), "modal screen keeps native input despite registered sink");
+    E3PublishInterface(host,800,600,true,true,reset);
+    require(E3HudRendererAttached(), "real sink attaches mission input consumer");
     widescreen_clear_hud_frame_sink(nullptr);
     E3HudBoundary(); require(frames == 1, "foreign owner cannot clear sink");
     widescreen_clear_hud_frame_sink(host);
+    require(!E3HudRendererAttached(), "sink owner retirement restores native input");
     E3HudBoundary(); require(frames == 1, "owner clears sink");
     widescreen_set_hud_frame_sink(host, frame);
+    require(E3HudRendererAttached(), "real sink attaches mission input consumer");
     E3RetireInterface(); E3HudBoundary();
+    require(!E3HudRendererAttached(), "interface retirement cannot leave HUD input owner");
     require(frames == 1 && !game_hud_editor_available() && !E3EditorPaused(), "teardown clears lifetime");
     require(!widescreen_interface_owned() && !widescreen::interface_owned, "teardown clears both renderer consumers");
     for (const POINT size : {POINT{800,600}, POINT{1920,1080}, POINT{3440,1440}, POINT{600,800}}) {

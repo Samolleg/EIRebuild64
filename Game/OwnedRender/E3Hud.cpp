@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "E3Hud.h"
+#include "E3Input.h"
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
 #include "../Unit.h"
@@ -8,9 +9,46 @@
 #include <algorithm>
 #include <cstring>
 
+namespace {
+std::array<const CI3DObject*,10> inputOwners{};
+}
 // This adapter only copies facts owned by the active mission. Slot geometry,
 // header docking, scaling and preview layout remain in the renderer library.
 struct E3HudAccess {
+    static int Panel(const CI3DObject* object) noexcept {
+        if(!object || !OwnedRender::E3HudRendererAttached())return -1;
+        for(unsigned i=0;i<inputOwners.size();++i)if(inputOwners[i]==object)return int(i);
+        return -1;
+    }
+    static bool AreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept {
+        const int panel=Panel(object);if(panel<0)return false;
+        inside=false;POINT native{};
+        if(object->bVisible && area<unsigned(object->areas.GetSize()) && object->areas[area] &&
+            owned::embedded_hud_layout().area_point(owned::HudPanel(panel),area,pixel,native))
+            inside=object->areas[area]->PtInArea(CPoint(native))!=FALSE;
+        return true;
+    }
+    static int Hit(CI3DObject* object,POINT pixel) noexcept {
+        if(Panel(object)<0)return -2;
+        for(int i=0;i<object->areas.GetSize();++i) {
+            bool inside=false;AreaInside(object,unsigned(i),pixel,inside);
+            if(inside)return i;
+        }
+        return -1;
+    }
+    static bool Inside(CI3DObject* object,POINT pixel,bool& inside) noexcept {
+        const int index=Panel(object);if(index<0)return false;
+        inside=false;if(!object->bVisible)return true;
+        auto& context=owned::embedded_hud_layout();
+        const auto panel=owned::HudPanel(index);
+        // Slots may have gaps or be preview-only. Never swallow world input there.
+        if(context.slot_panel(unsigned(index))) {inside=Hit(object,pixel)>=0;return true;}
+        owned::widescreen::HudComposition composition;POINT native{};
+        if(context.body_composition(panel,composition) && context.inverse_composed_point(pixel,composition,native))
+            inside=object->rect.PtInRect(CPoint(native))!=FALSE;
+        if(!inside)inside=Hit(object,pixel)>=0;
+        return true;
+    }
     static void Copy(owned::HudNativePanel& dst,const CI3DObject* object) {
         if(!object || !object->bVisible)return;
         dst.visible=true;dst.rect=object->rect;
@@ -81,12 +119,15 @@ struct E3HudAccess {
         for(unsigned i:{0u,1u,2u,4u,5u,6u,8u,9u})p[i].activity_available=true;
     }
     static void Publish(const CI3DScreenMission* mission,unsigned width,unsigned height) {
+        inputOwners={};
         owned::HudLayoutFrame frame;
         // Current host ingress is full-width, unscaled placed space. Do not
         // announce a different safe area until its drawing/input consumer exists.
         frame.layout=owned::widescreen::make_layout(float(width),float(height));
         frame.active=mission && width && height;
         if(frame.active) {
+            inputOwners={mission->pSpells,mission->pSkills,mission->pMap,mission->pInfo,mission->pFaces,
+                mission->pWeapons,mission->pItems,mission->pOutput,mission->pCommands,mission->pClock};
             auto& p=frame.panels;
             Copy(p[0],mission->pSpells);Copy(p[1],mission->pSkills);
             Copy(p[2],mission->pMap);Copy(p[3],mission->pInfo);
@@ -118,8 +159,11 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+int E3HudHit(CI3DObject* object,POINT pixel) noexcept {return E3HudAccess::Hit(object,pixel);}
+bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept {return E3HudAccess::Inside(object,pixel,inside);}
+bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept {return E3HudAccess::AreaInside(object,area,pixel,inside);}
 void E3PublishHud(const CI3DScreenMission* mission,unsigned width,unsigned height) noexcept {
     try { E3HudAccess::Publish(mission,width,height); }
-    catch(const std::bad_alloc&) { owned::embedded_hud_layout().retire(); }
+    catch(const std::bad_alloc&) { inputOwners={};owned::embedded_hud_layout().retire(); }
 }
 }
