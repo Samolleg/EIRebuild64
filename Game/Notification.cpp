@@ -77,8 +77,14 @@ static void ReportMessage(const char *reportType, const char *buffer, const char
                           bool plainError)
 {
     if (plainError && !strcmp(reportType, "Error")) GameJournal::MemoryErrorText(buffer);
-    GameJournal::Event("ERROR", "notification", "type=%s text=%s extra=%s", GameJournal::Quote(reportType).c_str(), GameJournal::Quote(buffer).c_str(), GameJournal::Quote(additionalInfo).c_str());
-    GameJournal::FlushCritical();
+    GameJournal::Notification(reportType, buffer, additionalInfo);
+    // Retail 0x44C470 is a no-op. Addon only redirects it to the optional debug file.
+    // Preserve the separate CLI stdout contract, without adding gameplay console/UI work.
+    if (!strcmp(reportType, "Warning") && !ModCliTool::Active())
+    {
+        if (!*additionalInfo) ReportGameDebug("%s", buffer);
+        return;
+    }
     if (ModCliTool::Active())
     {
         printf("[%s]: %s%s\n", reportType, buffer, additionalInfo);
