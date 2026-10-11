@@ -4,6 +4,20 @@
 #include <map>
 
 namespace OwnedRender {
+struct E1AnimationSelection {
+    owned::VisualClipSelection visual{};
+    std::uint64_t source_generation = 0;
+    bool valid = false;
+};
+// These spans are the exact ADB and ANM selections already made by the host
+// resource managers. The renderer copies and decodes them; it never searches
+// for a second resource or retains a host pointer.
+bool E1BuildAnimationSelection(const std::string& database_name,
+    const void* selected_database, std::uint32_t database_size,
+    const std::string& animation_name, const std::string& animation_resource_name,
+    const void* selected_animation, std::uint32_t animation_size,
+    std::uint32_t ordinal, E1AnimationSelection& output) noexcept;
+
 // Host membership is published at successful list mutations, not visibility
 // traversal. No engine object pointer enters the renderer's retained scene.
 class E1SceneMembership {
@@ -30,6 +44,10 @@ public:
     bool FinishResource(owned::VisualResourceIncarnation resource, bool success) noexcept;
     void DestroyResource(const void* object) noexcept;
     owned::VisualResourceIncarnation Resource(const void* object) const noexcept;
+    bool BindDatabase(owned::VisualResourceIncarnation resource,
+        const E1AnimationSelection& selection) noexcept;
+    bool PublishObjectPose(owned::VisualResourceIncarnation resource,
+        const owned::VisualObjectPose& pose) noexcept;
     owned::RetainedStaticScene& Scene() noexcept { return scene; }
 };
 class E1ResourceCreation {

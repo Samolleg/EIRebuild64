@@ -81,6 +81,8 @@ public:
     SADEntry *GetAnimationEntryByIndex(CString &szMaskName, DWORD cIndex);
     SADEntry *GetSpecialAnimationEntry(CString &szMaskName, DWORD dwSpecialIndex);
     SADEntry *GetRandomAnimationEntry(CString &szMaskName, DWORD dwCaps);
+    bool GetSelectedAnimationDatabase(const CString& maskName, const SADEntry* selected,
+        const void*& bytes, DWORD& size);
     // resource description string
     virtual LPCSTR GetResourceDescription() const { return "map objects"; };
     // class identification functions

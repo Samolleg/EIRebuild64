@@ -8,6 +8,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FigureManager.h"
 
 #include "World.h"
+#include "MapObjectManager.h"
+#include "OwnedRender/E1Scene.h"
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // **                   class CAnimationTrack functions                          ** //
@@ -740,6 +742,47 @@ std::shared_ptr<const owned::ModelCpuAsset> CAnimationSystem2::GetOwnedSkeleton(
     return ownedSkeleton.Complete(facts, lpHeadNode);
 }
 catch (...) { return nullptr; }
+
+bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
+    OwnedRender::E1AnimationSelection& output) noexcept try
+{
+    output = {};
+    const SADEntry* selected = lpADEntry;
+    if (!selected)
+    {
+        output.visual.neutral = true;
+        output.valid = true;
+        return true;
+    }
+    if (!lpObject3D || !selected->pszAnimationName[0]) return false;
+    const char* mask = lpObject3D->GetMaskName();
+    CWorld* world = GetWorld();
+    if (!mask || !*mask || !world) return false;
+
+    CString maskName(mask);
+    const void* databaseBytes = nullptr;
+    DWORD databaseSize = 0;
+    auto* mapObjects = static_cast<CMapObjectManager*>(world->GetMapObjectManager());
+    if (!mapObjects || !mapObjects->GetSelectedAnimationDatabase(maskName, selected,
+        databaseBytes, databaseSize)) return false;
+
+    auto* figures = static_cast<CFigureManager*>(world->GetFigureManager());
+    if (!figures) return false;
+    CModelResourceEntry* model = figures->GetModel(std::string(mask));
+    if (!model) return false;
+    const void* animationBytes = nullptr;
+    DWORD animationSize = 0;
+    if (!model->GetAnimationSourceBytes(selected->pszAnimationName,
+        animationBytes, animationSize)) return false;
+
+    const std::string animationName(selected->pszAnimationName);
+    const std::string databaseName = std::string(mask) + ".adb";
+    const std::string animationResourceName = std::string(mask) + "/" + animationName;
+    return OwnedRender::E1BuildAnimationSelection(databaseName, databaseBytes, databaseSize,
+        animationName, animationResourceName, animationBytes, animationSize,
+        selected->dwEntryIndex, output);
+}
+catch (...) { output = {}; return false; }
 
 void CAnimationSystem2::LoadSkeleton(LPCSTR pszMaskName)
 {

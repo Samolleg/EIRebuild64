@@ -1,4 +1,5 @@
 #include "E1Scene.h"
+#include "owned_resource_runtime.h"
 
 namespace {
 std::uint64_t advance(std::uint64_t& value) noexcept {
@@ -7,6 +8,40 @@ std::uint64_t advance(std::uint64_t& value) noexcept {
 }
 }
 namespace OwnedRender {
+bool E1BuildAnimationSelection(const std::string& databaseName,
+    const void* selectedDatabase, std::uint32_t databaseSize,
+    const std::string& animationName, const std::string& animationResourceName,
+    const void* selectedAnimation, std::uint32_t animationSize,
+    std::uint32_t ordinal, E1AnimationSelection& output) noexcept try {
+    output = {};
+    if (databaseName.empty() || animationName.empty() || animationResourceName.empty() ||
+        !selectedDatabase || !databaseSize || !selectedAnimation || !animationSize) return false;
+
+    owned::ResourceFailure failure;
+    std::uint64_t generation = 0;
+    auto database = owned::retained_visual_selected_database_asset(databaseName,
+        selectedDatabase, databaseSize, generation, failure);
+    if (!database || !generation || ordinal >= database->entries.size() ||
+        database->entries[ordinal].name != animationName) return false;
+
+    owned::ResourceBlob animation;
+    std::uint64_t animationGeneration = 0;
+    if (!owned::retained_visual_copy_selected_memory(animationResourceName,
+        selectedAnimation, animationSize, animation, animationGeneration, failure) ||
+        !animationGeneration) return false;
+    auto clip = owned::retained_visual_clip_asset(animation, animationName,
+        failure, database, generation);
+    if (!clip) return false;
+
+    output.visual.database = std::move(database);
+    output.visual.clip = std::move(clip);
+    output.visual.ordinal = ordinal;
+    output.visual.neutral = false;
+    output.source_generation = generation;
+    output.valid = true;
+    return true;
+} catch (...) { output = {}; return false; }
+
 bool E1SceneMembership::Matches(const void* source, std::uint64_t generation) const noexcept {
     return source && generation && owner == source && world == generation;
 }
@@ -89,6 +124,16 @@ owned::VisualResourceIncarnation E1SceneMembership::Resource(const void* object)
     if (it == resources.end()) return {};
     const auto current = scene.visual_resource(it->second.signed_id);
     return current.serial == it->second.serial ? current : owned::VisualResourceIncarnation{};
+}
+bool E1SceneMembership::BindDatabase(owned::VisualResourceIncarnation resource,
+    const E1AnimationSelection& selection) noexcept {
+    return resource.serial && selection.valid && !selection.visual.neutral &&
+        selection.visual.database && selection.source_generation &&
+        scene.visual_bind_database(resource, selection.source_generation, selection.visual.database);
+}
+bool E1SceneMembership::PublishObjectPose(owned::VisualResourceIncarnation resource,
+    const owned::VisualObjectPose& pose) noexcept {
+    return resource.serial && scene.visual_publish_object_pose(resource, pose);
 }
 owned::LifecycleIdentity E1SceneMembership::Identity(std::int32_t id) const noexcept {
     const auto found = members.find(id);

@@ -87,6 +87,7 @@ private:
 private:
     void CreateShadowShiftScaleMatrix(SHMatrix &matrix);
     bool PublishOwnedAppearance() noexcept;
+    bool PublishOwnedPose() noexcept;
 
 public:
     CObject3DClientSpecific();

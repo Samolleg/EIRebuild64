@@ -34,6 +34,7 @@ class CModelResourceEntry : public CRefCount
     CMappedResource *pResBones;
     CMappedResource *pResAllAnimations;
     CAnimationResource resAnimations;
+    std::unordered_map<std::string, std::pair<const BYTE *, DWORD>> animationSources;
 
 public:
     CModelResourceEntry(class CResourceManager *pManager);
@@ -43,6 +44,7 @@ public:
     void OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations);
     //
     CMappedResource *GetAnimation(const std::string &szName);
+    bool GetAnimationSourceBytes(const std::string& szName, const void*& bytes, DWORD& size);
     CMappedResource *GetModel() { return pResModel; }
     CMappedResource *GetBones() { return pResBones; }
 };

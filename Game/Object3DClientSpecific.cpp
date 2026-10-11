@@ -801,6 +801,53 @@ catch (...)
             "appearance.host_snapshot_exception", "host.object_appearance");
     return false;
 }
+bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
+{
+    CObject3D* object = static_cast<CObject3D*>(lpObject);
+    CAnimationSystem2* animation = object ? object->GetAnimationSystem2() : nullptr;
+    const auto resource = OwnedRender::E1Scene().Resource(this);
+    auto& hostScene = OwnedRender::E1Scene();
+    auto& scene = hostScene.Scene();
+    if (!resource.serial || !object || !animation) return false;
+
+    const auto assembly = scene.visual_assembly(resource);
+    if (!assembly) return false;
+    OwnedRender::E1AnimationSelection selected;
+    if (!animation->GetOwnedCurrentAnimationSelection(selected) || !selected.valid)
+    {
+        scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
+            "object_pose.selected_animation", "host.object_pose");
+        return false;
+    }
+    if (!selected.visual.neutral && !hostScene.BindDatabase(resource, selected))
+    {
+        scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
+            "object_pose.animation_database", "host.object_pose");
+        return false;
+    }
+
+    const CPlot3D position = object->GetCP();
+    const CQuaternion& orientation = object->GetOrientation();
+    const SComplection& shape = object->GetComplection();
+    owned::VisualObjectPose pose;
+    pose.position = {{position.x, position.y, position.z}};
+    float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+    orientation.GetComponents(qw, qx, qy, qz);
+    pose.quaternion = {{qw, qx, qy, qz}};
+    pose.shape = {{shape.strength, shape.grace, shape.tall}};
+    pose.selection = selected.visual;
+    pose.phase = selected.visual.neutral ? 0.0 : animation->GetTime();
+    pose.source_generation = selected.source_generation;
+    pose.appearance_revision = assembly->revision;
+    if (!hostScene.PublishObjectPose(resource, pose))
+    {
+        scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
+            "object_pose.publish", "host.object_pose");
+        return false;
+    }
+    return true;
+}
+catch (...) { return false; }
 // BOOL CObject3DClientSpecific::Draw()
 // draw
 BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
@@ -852,6 +899,7 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     //
     if (lpObject->GetAnimationSystem2())
         lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    PublishOwnedPose();
     // collect all light sources to lit this object
     static CSimplyArray<CLight *, CLight *> lights;
     CManagerIterator mi;

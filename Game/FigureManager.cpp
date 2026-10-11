@@ -103,11 +103,13 @@ CMappedResource *CModelResourceEntry::GetAnimation(const std::string &szName)
     auto pos = resAnimations.find(szName);
     if (pos == resAnimations.end())
     {
-        BYTE *pData = pResAllAnimations->GetFile(szName.c_str());
+        DWORD dataSize = 0;
+        BYTE *pData = pResAllAnimations->GetFile(szName.c_str(), &dataSize);
         if (pData)
         {
             resAnimations[szName] = dbgnew CWin32MappedResource();
             resAnimations[szName]->OpenResourceMem(pData);
+            animationSources.emplace(szName, std::make_pair(pData, dataSize));
         }
         pos = resAnimations.find(szName);
     }
@@ -116,6 +118,19 @@ CMappedResource *CModelResourceEntry::GetAnimation(const std::string &szName)
         return pos->second;
     else
         return 0;
+}
+bool CModelResourceEntry::GetAnimationSourceBytes(const std::string& szName,
+    const void*& bytes, DWORD& size)
+{
+    bytes = nullptr;
+    size = 0;
+    if (!GetAnimation(szName)) return false;
+    const auto found = animationSources.find(szName);
+    if (found == animationSources.end() || !found->second.first || !found->second.second)
+        return false;
+    bytes = found->second.first;
+    size = found->second.second;
+    return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CFigureManager::CFigureManager()

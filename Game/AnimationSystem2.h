@@ -8,6 +8,8 @@
 
 #include "adFormat.h"
 #include "OwnedRender/E1SkeletonSources.h"
+namespace OwnedRender { struct E1AnimationSelection; }
+
 /////////////////////////////////////////////////////////////////////////////////////
 class CFigure;
 class CAnimationNode;
@@ -215,6 +217,7 @@ public:
         ownedSkeleton.PublishLinks(name, data, size);
     }
     std::shared_ptr<const owned::ModelCpuAsset> GetOwnedSkeleton() noexcept;
+    bool GetOwnedCurrentAnimationSelection(OwnedRender::E1AnimationSelection& output) noexcept;
     void GetNodeNames(CStringArray &szNames) const;
     // linking
     BOOL LinkWithFigures(CSimplyArray<CFigure *, CFigure *> &figures);
