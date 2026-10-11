@@ -1437,14 +1437,14 @@ void CI3DObjectNameStats::UpdateModStats()
     CDC *pDC = pSurf->GetDC();
     pSurf->Clear();
     pSurf->DrawText(szPersName.GetString(), CRect(0, 27, 200, 43), 1, CAMP_COLOR_HEADER, DT_CENTER);
-    CPersonage *pPers = pScreen->GetCurrentPers();
-    SRPGUnitStats *pStats = &pPers->stats;
-    CUnit *pUnit = pScreen->GetUnit(nCurPers);
+    CUnit *pUnit = pScreen ? pScreen->GetUnit(nCurPers) : nullptr;
+    CPersonage *pPers = pUnit ? pScreen->GetCurrentPers() : nullptr;
 	CString szName, szTmp, szTmp2, szTmp3,  szOut;
 	CPoint shift(0, 15);
     CTextManager *pTxtMng = theWorld.GetTextManager();
     auto* mod = ModRuntime::Current();
     if (!mod || !pPers || !pUnit) { pSurf->ReleaseDC(); return; }
+    SRPGUnitStats *pStats = &pPers->stats;
     int nEncumbr = 0; float seconds = 0;
     mod->CampInfo(*pPers, pUnit, nEncumbr, seconds);
     int nWeight = eCurMode == ISM_STATS ? 0 : int(pPers->GetItemsWeight());
