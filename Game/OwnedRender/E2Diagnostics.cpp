@@ -33,6 +33,10 @@ bool bridge_game_sites_all_verified() noexcept { E2_UNAVAILABLE("retail game sit
 bool bridge_semantic_slots_installed() noexcept { E2_UNAVAILABLE("retail semantic hooks (direct frame/UI scopes only)"); return false; }
 const BridgeProfileSnapshot* bridge_latest_profile() noexcept { return nullptr; }
 void bridge_set_profile_enabled(bool enabled) { if (enabled) { E2_UNAVAILABLE("retail bridge profile"); } }
+void bridge_report_hovered_shadow() noexcept { E2_UNAVAILABLE("retail hovered-shadow capture"); }
+void bridge_post_engine_surface_material_group_scan() noexcept {
+    E2_UNAVAILABLE("retail post-engine surface material-group timing");
+}
 bool bridge_outer_frame_timing_supported() noexcept { return false; }
 void bridge_set_outer_frame_timing_active(bool active) noexcept { if (active) { E2_UNAVAILABLE("retail outer frame timing"); } }
 bool bridge_take_outer_frame_timing(std::int64_t, OuterFrameTimingSnapshot& out) noexcept { out = {}; return false; }
