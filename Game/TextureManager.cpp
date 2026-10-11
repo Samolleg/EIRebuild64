@@ -435,6 +435,11 @@ LPTEXTURE CTextureManager::CreateInterfaceTexture(DWORD dwSizeX, DWORD dwSizeY,
     lpTexture->SetSize(dwSizeX, dwSizeY);
 
     DWORD mmpFormat = textureTypeToMMPFormat(eTextureTypeID);
+    if (mmpFormat == DWORD(-1))
+    {
+        lpTexture->Release();
+        return nullptr;
+    }
     if (mmpFormat == 0)
         return nullptr;
     DXGI_FORMAT texFormat;
