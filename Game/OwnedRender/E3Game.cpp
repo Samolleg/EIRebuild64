@@ -12,13 +12,12 @@ void resetInput() noexcept { theInterface.ResetInputState(); }
 }
 namespace OwnedRender {
 void E3RefreshInterface() noexcept {
-    E3PublishHud(missionOwner && theInterface.GetScreensNum() == 1 &&
-        theInterface.GetCurrentScreen() == missionOwner ? static_cast<const CI3DScreenMission*>(missionOwner) : nullptr,
-        theInterface.GetWidth(),theInterface.GetHeight());
+    const bool soleMission = missionOwner && theInterface.GetScreensNum() == 1 &&
+        theInterface.GetCurrentScreen() == missionOwner;
     E3PublishInterface(NGame::hWnd, theInterface.GetWidth(), theInterface.GetHeight(),
-        theInterface.GetScreensNum() > 0,
-        missionOwner && theInterface.GetScreensNum() == 1 &&
-            theInterface.GetCurrentScreen() == missionOwner, &resetInput);
+        theInterface.GetScreensNum() > 0, soleMission, &resetInput);
+    E3PublishHud(soleMission ? static_cast<const CI3DScreenMission*>(missionOwner) : nullptr,
+        theInterface.GetWidth(),theInterface.GetHeight());
 }
 void E3MissionEnter(const void* owner) noexcept {
     // Reset HUD publication/fades even if an allocator reused the previous address.

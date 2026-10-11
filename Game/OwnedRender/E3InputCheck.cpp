@@ -45,6 +45,7 @@ int main() {
     using namespace owned;
     using namespace OwnedRender;
     require(!game_hud_editor_available(), "pre-interface editor unavailable");
+    require(!widescreen_interface_owned() && !widescreen::interface_owned, "pre-interface canvas unowned");
     set_game_hud_editing(true);
     require(!game_hud_editing(), "pre-interface enable rejected");
     require(game_native_mouse_message(WM_MOUSEMOVE, 77, false) == 77, "pre-interface mouse passthrough");
@@ -129,6 +130,51 @@ int main() {
     widescreen_set_hud_frame_sink(host, frame);
     E3RetireInterface(); E3HudBoundary();
     require(frames == 1 && !game_hud_editor_available() && !E3EditorPaused(), "teardown clears lifetime");
+    require(!widescreen_interface_owned() && !widescreen::interface_owned, "teardown clears both renderer consumers");
+    for (const POINT size : {POINT{800,600}, POINT{1920,1080}, POINT{3440,1440}, POINT{600,800}}) {
+        E3PublishInterface(host, size.x, size.y, true, false, reset);
+        require(widescreen_interface_owned() && widescreen::interface_owned && !game_hud_editor_available(),
+            "menu owns canvas without mission HUD");
+        require(widescreen_layout().width == size.x && widescreen_layout().height == size.y,
+            "renderer canvas follows host dimensions without HUD publication");
+        const POINT centre = game_output_to_native(host, {client.right/2, client.bottom/2});
+        require(centre.x == size.x/2 && centre.y == size.y/2, "input and renderer share canvas dimensions");
+        E3WriteCursor(centre.x, centre.y);
+        require(written.x == origin.x+client.right/2 && written.y == origin.y+client.bottom/2,
+            "canvas cursor inverse at each aspect");
+    }
+    E3PublishInterface(host, 1920, 1080, true, true, reset);
+    HudLayoutFrame hud;
+    hud.active = true; hud.layout = widescreen_layout();
+    hud.panels[2].visible = true; hud.panels[2].rect = {600,0,800,160};
+    embedded_hud_layout().publish(std::move(hud));
+    HudPanelBounds bounds;
+    require(widescreen_hud_panel_bounds(HudPanel::minimap,bounds), "mission publishes HUD bounds");
+    widescreen::hud_blit.opacity = .2f;
+    E3PublishInterface(host, 1920, 1080, true, false, reset);
+    require(widescreen_interface_owned() && !widescreen_hud_panel_bounds(HudPanel::minimap,bounds) &&
+        widescreen::same_composition(widescreen::hud_blit, {}), "modal retains canvas but retires HUD composition");
+    E3PublishInterface(host, 1920, 1080, true, true, reset);
+    set_game_hud_editing(true);
+    const unsigned beforeInvalid = resets;
+    E3PublishInterface(host, 0, 1080, true, true, reset);
+    require(!widescreen_interface_owned() && !widescreen::interface_owned && !E3EditorPaused() &&
+        resets == beforeInvalid+1, "zero-sized canvas exits editor and revokes ownership");
+    E3PublishInterface(nullptr, 1920, 1080, true, true, reset);
+    require(!widescreen_interface_owned(), "missing window cannot own canvas");
+    E3PublishInterface(host, 1920, 1080, false, true, reset);
+    require(!widescreen_interface_owned(), "inactive interface cannot own canvas");
+    E3PublishInterface(host, 1920, 1080, true, true, reset);
+    set_game_hud_editing(true);
+    E3PublishInterface(reinterpret_cast<HWND>(2), 1024, 768, true, true, reset);
+    require(widescreen_interface_owned() && !E3EditorPaused() && widescreen_layout().width == 1024,
+        "new host window replaces canvas and exits old editor");
+    widescreen::hud_blit.offset_x = 50.f;
+    E3RetireInterface();
+    unsigned retiredWidth=1,retiredHeight=1;
+    require(!widescreen_interface_owned() && !widescreen::interface_owned &&
+        !E3Canvas(retiredWidth,retiredHeight) && !retiredWidth && !retiredHeight &&
+        widescreen::same_composition(widescreen::hud_blit, {}), "retire leaves no old dimensions or composition");
     require(E3DrawRadius(123.f, 1920, 1080) == 123.f, "host radius preserved before renderer setting");
     widescreen_set_landscape_radius(600.f);
     require(E3DrawRadius(123.f, 1920, 1080) == 600.f, "renderer radius used by host");

@@ -22,17 +22,28 @@ void endEditing() noexcept {
 namespace OwnedRender {
 void E3PublishInterface(HWND next, unsigned w, unsigned h, bool active,
                         bool soleMission, void (*reset)() noexcept) noexcept {
-    if (window != next || !active || !soleMission) endEditing();
+    const bool nextRunning = active && next && w && h;
+    if (window != next || !nextRunning || !soleMission) {
+        endEditing();
+        owned::embedded_hud_layout().retire();
+        owned::widescreen::hud_blit = {};
+    }
     window = next; width = w; height = h;
-    running = active && next && w && h;
+    running = nextRunning;
     mission = running && soleMission;
     resetInput = reset;
+    // Match both c56 consumers: canvas_width/height query the function, while
+    // native geometry and 2D surface composition use this shared state.
+    owned::widescreen::interface_owned = running;
+    if (running) owned::embedded_hud_layout().publish_canvas(w, h);
 }
 void E3RetireInterface() noexcept {
     owned::embedded_hud_layout().retire();
     endEditing();
     window = nullptr; width = height = 0;
     running = mission = false; resetInput = nullptr;
+    owned::widescreen::interface_owned = false;
+    owned::widescreen::hud_blit = {};
     // Sink belongs to the renderer, not a particular mission. It is cleared
     // at interface teardown; mission transitions preserve its registration.
     sinkOwner = nullptr; frameSink = nullptr;
@@ -56,6 +67,9 @@ void E3HudBoundary() noexcept {
 }
 
 namespace owned {
+// Direct host ownership of the interface canvas, not ownership of the D3D
+// device or the world frame. The latter is established by the renderer startup.
+bool widescreen_interface_owned() noexcept { return running; }
 bool game_hud_editor_available() noexcept { return mission && resetInput; }
 bool game_hud_editing() noexcept { return editing; }
 void set_game_hud_editing(bool enabled) noexcept {

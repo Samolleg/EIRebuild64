@@ -283,6 +283,7 @@ void CInterface3D::ClearStates()
 BOOL CInterface3D::Draw()
 {
     CheckScreensMustDie();
+    OwnedRender::E3RefreshInterface();
     if (eBGFlag == BG_FLAG_DRAW || eBGFlag == BG_FLAG_DRAW_S || eBGFlag == BG_FLAG_CREATE_S)
     { // if we have background screen
         GetD3D()->ClearColorBuffer(0);
@@ -302,6 +303,7 @@ BOOL CInterface3D::Draw()
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Draw2D()
 {
+    OwnedRender::E3RefreshInterface();
     CDX11 *pDX11 = GetD3D();
     pDX11->GetSpriteBatch()->Begin();
 
@@ -310,7 +312,6 @@ void CInterface3D::Draw2D()
     if (!pScreens.empty())
     {
         pScreens.back()->Draw2D();
-        OwnedRender::E3RefreshInterface();
         OwnedRender::E3HudBoundary();
         pScreens.back()->Draw2DTips();
     }
