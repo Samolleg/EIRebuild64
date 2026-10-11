@@ -1331,6 +1331,7 @@ void CI3DScreenCamp::GetMaxManaAndComplexity(ERPGMagicSubtypes subtype, int &nCo
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenCamp::CanClickOnItem(CItem *pItem, EItemScreenParts eFrom)
 {
+    if (!pItem) return false;
     if(auto*mod=ModRuntime::Current()){
         if(eScreenMode==ISM_SPELLCONSTR&&(eFrom==ISP_WAGON||eFrom==ISP_SPELLASSORT)&&mod->SkillItemBlocked(pItem,0))return false;
         if(eScreenMode==ISM_ITEMCONSTR&&(eFrom==ISP_WAGON||eFrom==ISP_ITEMASSORT)&&mod->SkillItemBlocked(pItem,1))return false;

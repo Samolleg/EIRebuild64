@@ -9,6 +9,9 @@ bool ReportError(const char *format, ...);
 bool ReportError(HRESULT code, const char *format, ...);
 bool ReportError(HRESULT code);
 
+// Native 0x44C470 debug channel; ordinary notifications keep their own sinks.
+void ReportGameDebug(const char *format, ...);
+
 // Report warning
 void ReportWarning(const char *format, ...);
 void ReportWarning(HRESULT code, const char *format, ...);

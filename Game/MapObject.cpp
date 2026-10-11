@@ -468,8 +468,11 @@ void CMapObject::ChangeComplectionWithSpell()
     float fChange = HasSpellEffect(SPELL_ID_STRENGTHEN) - HasSpellEffect(SPELL_ID_WEAKEN);
     auto *mod = ModRuntime::Current();
     const int mode = mod ? mod->SpellAddon().Feature24() : 0;
-    const float strengthCoefficient = mode == 1 ? 0.1f : 0.4f;
-    float fChange2 = mode == 1 || mode == 2 ? 0.0f :
+    // The native JMVParticles entry hook bypasses the retail body patched by f24.
+    // Preserve f24's result when that entry hook is absent.
+    const bool nativeParticles = mod && mod->CombatSetting("JMVParticles");
+    const float strengthCoefficient = !nativeParticles && mode == 1 ? 0.1f : 0.4f;
+    float fChange2 = nativeParticles || mode == 1 || mode == 2 ? 0.0f :
         float(HasSpellEffect(SPELL_ID_ENLARGE) - HasSpellEffect(SPELL_ID_SHRINK));
     float fTotalChange = fChange + fChange2;
     // 'shrink' and 'enlarge' will affect all complection params

@@ -33,9 +33,12 @@ struct SAckDescriptor
 class CUnitClientSpecific : public CUnitSpecific
 {
     friend class CUnit;
+    friend class CParticle; // weapon attachment nodes
 
 private:
     CParticle *pCastingParticle;  // attached particles
+    CParticle *pWeaponParticles[2] = { nullptr, nullptr }; // owned transient staff effects
+    void RefreshWeaponParticles();
     CParticle *pPathParticle[2];  // attached particles for path
     float fLastTime;              // last animation time <= for SFX playing
     const SADEntry *pLastADEntry; // entry of the last checked animation
@@ -90,6 +93,7 @@ private:
     //
     void DeleteCastingParticle();
     void HideWeapon(bool bHide);
+    std::string GetWeaponParticleNode(bool left) const;
     // sound playing
     void StepsSound();
     BOOL GetActionSound(const SADEntry *pADEntry, float fTime1, float fTime2, CString &szSFXName,

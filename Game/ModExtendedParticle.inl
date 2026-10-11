@@ -72,6 +72,9 @@ bool CParticle::ConfigureExtendedSpell(ETypeIDs typeId,char*pszTexName)
 	}
 	case PTID_FIREWALLDARK:
 	case PTID_FIREWALLLIGHT:
+	case PTID_STAFFBALLFIRE:
+	case PTID_STAFFBALLLIGHT:
+	case PTID_STAFFBALLWATER:
 	{
 		nBornProbability = 88;
 		nMinTrys = 6;

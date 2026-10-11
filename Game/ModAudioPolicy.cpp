@@ -94,7 +94,7 @@ SStepSoundFamily StepSoundFamilies[MAX_STEP_SOUND_FAMILIES]={};
 SDuckingState DuckingState={};
 SSfxSpeechDuckingState SfxSpeechDuckingState={};
 uint32_t SfxVariationState=0;
-float ClampUnit(float v){return v<0?0:(v>1?1:v);}
+float ClampUnit(float v){return !(v>=0)?0:(v>1?1:v);}
 int GetSfxMasterVolume(void* m){return m?static_cast<CSoundManager*>(m)->GetFXMasterVolume():0;}
 bool IsFxResourcePresent(void* m,const char* n){return m && n && *n && static_cast<CSoundManager*>(m)->IsFXFileExist(n);}
 float GetLinearDistanceGain(void* m,const void* source,float nearDistance,float farDistance){if(!m||!source)return 1.f;CPlot3D listener,orientation;static_cast<CSoundManager*>(m)->GetFXListener(&listener,&orientation);const float* p=static_cast<const float*>(source);float dx=p[0]-listener.x,dy=p[1]-listener.y;float distance=sqrtf(dx*dx+dy*dy);if(!(distance>=0)||!(farDistance>nearDistance))return 1.f;if(distance<=nearDistance)return 1.f;if(distance>=farDistance)return 0.f;return 1.f-(distance-nearDistance)/(farDistance-nearDistance);}

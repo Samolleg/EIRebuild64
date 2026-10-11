@@ -133,6 +133,7 @@ void CModPackage::Load(const std::string &directory){
  saveInMod=config.GetInt("MOD","GameSaves",1)!=0;
   forceTutorial=ModConfiguration::Bool(config,"MOD","ForceShowTutorial",false);
   chatHtmlFile=(LPCSTR)config.GetString("Dev","ChatHtmlFile","");
+  gameDebugFile=(LPCSTR)config.GetString("Dev","GameDebugFile","");
   combatSettings["PreventZone1Animation"]=int(ModConfiguration::Bool(config,"MOD","PreventZone1Animation",false));
  singlePlayerAllowed=config.GetInt("MOD","Single",1)!=0;
  multiplayerAllowed=config.GetInt("MOD","Multi",1)!=0;
@@ -189,6 +190,9 @@ bool CModPackage::MatchesMpZone(int allod,const char* terrain) const{
 }
 bool CModPackage::ConfigureAddonSettings(CFileRegistry& settings){
  ConfigureModAudio(settings,root);
+ falloutSettings.yaw=ModConfiguration::Float(settings,"Addon","JMVFalloutCameraYaw",45.0f);
+ falloutSettings.pitch=ModConfiguration::Float(settings,"Addon","JMVFalloutCameraPitch",35.264f);
+ falloutSettings.telephoto=ModConfiguration::Float(settings,"Addon","JMVFalloutCameraTelephotoMultiplier",2.0f);
   settingsProfile.Read(settings);
   EngineDiagnostics::Event("SETTINGS P06 charge=%u factor=%g maxima=%u,%u,%u,%u,%u",settingsProfile.charge,settingsProfile.factor,settingsProfile.skills[0],settingsProfile.skills[1],settingsProfile.skills[3],settingsProfile.skills[4],settingsProfile.skills[5]);
  size_t count=0;const auto* rules=ModConfiguration::CombatRules(count);

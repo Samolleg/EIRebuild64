@@ -59,9 +59,9 @@ inline bool ApplyRune(const SSDBModifier&r,const SSDBSpellPrototype&p,DWORD&acti
 inline bool ExcludesUndead(DWORD filters,const char*mask){return (filters&SPELL_FILTER_UNDEAD)&&(!strcmp(mask,"unhusk")||!strcmp(mask,"unhuzf")||!strcmp(mask,"unhuzm"));}
 inline int CastTime(const SRPGUnitStats&stats,const CSpell*spell,bool player,int difficulty){
  if(!spell)return 0;float action=stats.action.fpEffectiveValue;if(std::abs(action)>.00001f)action=15.f/action;
- float perk=1;for(int i=0;i<RPG_NUM_PERKS;++i){auto*p=stats.GetPerk(i);if(p&&p->nPerkExclusive==21)perk=1-p->dwModifier*.01f;}
+ float perk=1;for(int i=0;i<RPG_NUM_PERKS;++i){auto*p=stats.GetPerk(i);if(p&&p->nPerkExclusive==21)perk=float(1-p->dwModifier*0.01);}
  float head=1;if(stats.hls[0].state!=RPGALS_NOTUSED)head=.6f+.4f*(stats.hls[0].fpHP<0?0:stats.hls[0].fpHP/stats.hls[0].fpMaxHP);
- return Float2Int(float(spell->GetActionPoints())*action/head*perk*(player&&difficulty>0?.8f:1.f));
+ return Float2Int(float(double(spell->GetActionPoints())*action/head*perk*(player&&difficulty>0?.8f:1.f)));
 }
 inline int KillExperience(float base,int multiplier){return (std::max)(3,int(base*multiplier));}
 inline int DisplayExperience(float scaled){return int(scaled);}

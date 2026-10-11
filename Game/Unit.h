@@ -49,6 +49,9 @@ const DWORD HLDAMAGE_POTION = 512;
 const DWORD HLDAMAGE_BACKSTAB = 1;
 const DWORD HLDAMAGE_CRITICAL = 2;
 const DWORD HLDAMAGE_ELECTRIC = 4;
+const DWORD HLDAMAGE_CRIT = 32;
+const DWORD HLDAMAGE_PARRY = 64;
+const DWORD HLDAMAGE_BLOCK = 128;
 const DWORD HLDAMAGE_EXPERIENCE = 8; // not actually a damage, but exp points :)
 /////////////////////////////////////////////////////////////////////////////////////
 const float FP_SHOW_PATH_SPEED = 0.5f;

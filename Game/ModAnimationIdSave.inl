@@ -70,6 +70,12 @@ bool ReadWord(const SavedValues &values, unsigned record, unsigned field,
     Key(key, record, field);
     return ReadValue(values, key, result);
 }
+// Only this private snapshot writer retains zero-valued words.
+void WriteValue(CGSVariableSet &vars, const char *key, float value)
+{
+    vars.SetVar(key, value);
+    if (value == 0) vars[key] = value;
+}
 void WriteWords(CGSVariableSet &vars, unsigned record, const Record &item)
 {
     const uint32_t values[kFields] = {
@@ -82,7 +88,7 @@ void WriteWords(CGSVariableSet &vars, unsigned record, const Record &item)
     for (unsigned field = 0; field < kFields; ++field) {
         char key[48];
         Key(key, record, field);
-        vars.SetVar(key, static_cast<float>(values[field]));
+        WriteValue(vars, key, static_cast<float>(values[field]));
     }
 }
 bool ReadRecord(const SavedValues &saved, unsigned version, unsigned index,
@@ -156,14 +162,14 @@ void WriteSnapshot(CGSVariableSet &vars, const std::vector<Record> &records,
     const SavedValues previous = Snapshot(vars);
     for (const auto &value : previous) vars.DelVar(value.first.c_str());
     if (records.empty()) return;
-    vars.SetVar("__jmv_aidx1_v", 0.0f);
+    WriteValue(vars, "__jmv_aidx1_v", 0.0f);
     for (unsigned i = 0; i < records.size(); ++i) WriteWords(vars, i, records[i]);
-    vars.SetVar("__jmv_aidx1_z0", static_cast<float>(zone & 0xffffu));
-    vars.SetVar("__jmv_aidx1_z1", static_cast<float>(zone >> 16));
+    WriteValue(vars, "__jmv_aidx1_z0", static_cast<float>(zone & 0xffffu));
+    WriteValue(vars, "__jmv_aidx1_z1", static_cast<float>(zone >> 16));
     const uint32_t count = static_cast<uint32_t>(records.size());
-    vars.SetVar("__jmv_aidx1_c0", static_cast<float>(count & 0xffffu));
-    vars.SetVar("__jmv_aidx1_c1", static_cast<float>(count >> 16));
-    vars.SetVar("__jmv_aidx1_v", 2.0f);
+    WriteValue(vars, "__jmv_aidx1_c0", static_cast<float>(count & 0xffffu));
+    WriteValue(vars, "__jmv_aidx1_c1", static_cast<float>(count >> 16));
+    WriteValue(vars, "__jmv_aidx1_v", 2.0f);
 }
 bool RestoreRecord(CWorldServer &world, const Record &item)
 {

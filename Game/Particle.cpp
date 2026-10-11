@@ -18,6 +18,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #ifndef _A4
 #include "ServerConsts.h"
 #include "Unit.h"
+#include "UnitClientSpecific.h"
 #include "Camera.h"
 #endif
 /**********************************************************************
@@ -294,6 +295,14 @@ CPlot3D CParticle::GetCarrierCP(CObject3D *pOldCarrier)
                 return GetBodyPartCP(pUnit, "body03");
             case bpBody04:
                 return GetBodyPartCP(pUnit, "body04");
+            case bpRStaff:
+            case bpLStaff:
+                if (pUnit->GetUnitSpecific()->WhoAmI() == HPC_UNITCLIENTSPECIFIC) {
+                    auto *specific = static_cast<CUnitClientSpecific *>(pUnit->GetUnitSpecific());
+                    const auto node = specific->GetWeaponParticleNode(bindPlace == bpLStaff);
+                    return GetBodyPartCP(pUnit, node.c_str());
+                }
+                return GetBodyPartCP(pUnit, bindPlace == bpLStaff ? "lh3" : "rh3");
             }
         }
 

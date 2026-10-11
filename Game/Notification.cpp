@@ -12,6 +12,8 @@
 #include "Notification.h"
 #include "GameMain.h"
 #include "EngineDiagnostics.h"
+#include "ModRuntime.h"
+#include "ModPackage.h"
 #include "Console.h"
 #include "adFormat.h"
 #include "ModCliTool.h"
@@ -22,6 +24,22 @@
 // -------------------------------------------------------------------------------------------------
 // Report an error or warning
 // -------------------------------------------------------------------------------------------------
+
+void ReportGameDebug(const char *format, ...)
+{
+    const auto *mod = ModRuntime::Current();
+    if (!mod || mod->GameDebugFile().empty()) return;
+    char buffer[2048];
+    va_list args;
+    va_start(args, format);
+    wvsprintfA(buffer, format, args);
+    va_end(args);
+    FILE *file = nullptr;
+    if (fopen_s(&file, mod->GameDebugFile().c_str(), "a") == 0 && file) {
+        fprintf(file, "%s\n", buffer);
+        fclose(file);
+    }
+}
 
 static std::string FormatTime(const SYSTEMTIME &time)
 {

@@ -32,6 +32,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Camera.h"
 #include "PlayerClient.h"
 #include "AISettings.h"
+#include "ModItemSpellPolicy.h"
 #include "dx11/Surface.h"
 
 #include <algorithm>
@@ -161,6 +162,8 @@ BOOL CUnitClientSpecific::Create()
 // destroy internal data structures
 void CUnitClientSpecific::Destroy()
 {
+    DeleteEffect(pWeaponParticles[0]);
+    DeleteEffect(pWeaponParticles[1]);
     FreeEffect(pCastingParticle);
     FreeEffect(pPathParticle[0]);
     FreeEffect(pPathParticle[1]);
@@ -739,6 +742,48 @@ void CUnitClientSpecific::PoseChanged()
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // change weapon - change models and notify to change texture
+std::string CUnitClientSpecific::GetWeaponParticleNode(bool left) const
+{
+    const int slot = left ? ResolveVisualLeftHand(*lpUnit,
+        [this](int i) { return GetWeapon(DWORD(i)); }) : int(lpUnit->dwCurrentWeapon);
+    const DWORD weapon = slot >= 0 ? GetWeapon(DWORD(slot)) : DWORD(-1);
+    if (weapon == DWORD(-1)) return left ? "lh3" : "rh3";
+    const SIDBWeaponShape *shape = theItemDatabase.weapons[CItem::GetShape(weapon)];
+    if (!shape) return left ? "lh3" : "rh3";
+    return ModItemSpells::CastPointNode(true, shape->dwTypeID, int(shape->dwTextureTypeIndex), left);
+}
+void CUnitClientSpecific::RefreshWeaponParticles()
+{
+    DeleteEffect(pWeaponParticles[0]);
+    DeleteEffect(pWeaponParticles[1]);
+    auto *mod = ModRuntime::Current();
+    if (!mod || !mod->CombatSetting("JMVParticles")) return;
+    const DWORD right = GetCurrentWeapon();
+    const SIDBWeaponShape *shape = right != DWORD(-1) ? theItemDatabase.weapons[CItem::GetShape(right)] : nullptr;
+    // The source owns a pair only when the right hand holds a staff.
+    if (!shape || (shape->dwTypeID != RPGWST_HANDS3 && shape->dwTypeID != RPGWST_HANDS7)) return;
+    const int leftSlot = ResolveVisualLeftHand(*lpUnit,
+        [this](int i) { return GetWeapon(DWORD(i)); });
+    const DWORD weapons[2] = { right, leftSlot >= 0 ? GetWeapon(DWORD(leftSlot)) : DWORD(-1) };
+    auto *manager = static_cast<CParticleManager *>(theWorld.GetParticleManager());
+    for (int hand = 0; hand < 2; ++hand) {
+        if (weapons[hand] == DWORD(-1)) continue;
+        shape = theItemDatabase.weapons[CItem::GetShape(weapons[hand])];
+        if (!shape || (shape->dwTypeID != RPGWST_HANDS3 && shape->dwTypeID != RPGWST_HANDS7)) continue;
+        ETypeIDs type = PTID_STAFFBALLFIRE;
+        if (shape->fpDamageDistributions[4] > 0) type = PTID_STAFFBALLWATER;
+        else if (shape->fpDamageDistributions[5] > 0) type = PTID_STAFFBALLLIGHT;
+        CParticle *particle = manager->CreateParticleSystem(type);
+        pWeaponParticles[hand] = particle;
+        particle->SetCP(CPlot3D(0, 0, 0));
+        particle->Scale(0.125f);
+        particle->SetPower(1);
+        particle->AttachCarrier(lpUnit);
+        particle->BindTo(hand ? CParticle::bpLStaff : CParticle::bpRStaff);
+        particle->SetFlag(PS_NEED_CARRIER_TO_GENERATE);
+        particle->SetFlag(PS_BIND_TO_BODYPART);
+    }
+}
 BOOL CUnitClientSpecific::ChangeWeapon(DWORD dwToWeapon)
 {
     const DWORD dwNewWeapon = GetWeapon(dwToWeapon);
@@ -788,6 +833,8 @@ BOOL CUnitClientSpecific::ChangeWeapon(DWORD dwToWeapon)
         HideArrow(true);
     }
 
+    RefreshWeaponParticles();
+    if (bBriefingWeaponForcedHidden) HideWeapon(true);
     NotifyWeaponUpdated();
     return TRUE;
 }
@@ -1863,6 +1910,11 @@ void CUnitClientSpecific::HideWeapon(bool bHide)
         }
     }
 
+    for (auto *particle : pWeaponParticles) {
+        if (!particle || particle->GetCarrier() != lpUnit) continue;
+        if (bHide) particle->HoldEffect();
+        else particle->RunEffect();
+    }
     bWeaponHidden = bHide;
     bArrowHidden = bHide;
 }
