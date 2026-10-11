@@ -830,6 +830,12 @@ void CWorldServer::ActiveObjectsSegment()
     }
     else
     {
+        // The addon keeps spell durations moving for objects outside the active set.
+        for (pMO = mapobjIter.GetFirst(&dynamicObjs); pMO; pMO = mapobjIter.GetNext())
+        {
+            if (!pMO->IsInvalid() && !pMO->IsUnreferenced() && pMO->TickInactiveSpellEffects())
+                AddActiveObject(pMO);
+        }
         pMO = mapobjIter.GetFirst(&activeSet);
         while (pMO)
         {
@@ -846,12 +852,6 @@ void CWorldServer::ActiveObjectsSegment()
             }
             pMO = mapobjIter.GetNext();
         }
-    }
-    // The addon keeps spell durations moving for objects outside the active set.
-    for (pMO = mapobjIter.GetFirst(&dynamicObjs); pMO; pMO = mapobjIter.GetNext())
-    {
-        if (!pMO->IsInvalid() && !pMO->IsUnreferenced() && pMO->TickInactiveSpellEffects())
-            AddActiveObject(pMO);
     }
     // call segment for items
     for (pos = activeItems.GetHeadPosition(); pos;)
@@ -1001,7 +1001,7 @@ BOOL CWorldServer::Segment()
                 AddActiveSpot(pUnit->GetCP(),
                               ((CUnitServer *)pUnit->GetUnitSpecific())->GetMaxVisionRange() *
                                       AI_MAX_VISION_BONUS +
-                                  ((ModRuntime::Current() && ModRuntime::Current()->ExtendActiveObjectsArea()) ? 100 : 20));
+                                  ((ModRuntime::Current() && ModRuntime::Current()->ExtendActiveObjectsArea()) ? 150 : 20));
         }
     }
 
