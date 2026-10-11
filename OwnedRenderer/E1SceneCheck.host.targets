@@ -1,0 +1,19 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Link the headless check against the real EIRebuild host providers. -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <OutDir>$(MSBuildThisFileDirectory)..\out\Win32\Release\</OutDir>
+    <TargetName>E1SceneCheck</TargetName>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\Game\OwnedRender\E1SceneCheck.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ObjectFileName>$(IntDir)E1SceneCheck-host.obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

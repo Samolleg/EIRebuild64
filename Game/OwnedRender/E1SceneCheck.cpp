@@ -1,16 +1,66 @@
 #include "E1Scene.h"
+#include "owned_resource_runtime.h"
+#include "owned_resource_store.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace { unsigned checks = 0;
 void check(bool value, const char* label) {
     ++checks;
     if (!value) { std::fprintf(stderr, "FAIL: %s\n", label); std::exit(1); }
 }
+void write_u32(std::vector<unsigned char>& bytes, std::size_t offset, std::uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i)
+        bytes[offset + i] = static_cast<unsigned char>(value >> (i * 8));
 }
-namespace owned {
-// Console diagnostic sink; no game, device, or bridge implementation is mocked.
-void bridge_append_probe_event(const char*, const char*) noexcept {}
+void write_float(std::vector<unsigned char>& bytes, std::size_t offset, float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    write_u32(bytes, offset, bits);
+}
+std::vector<unsigned char> animation_database() {
+    std::vector<unsigned char> bytes(44 + 88, 0);
+    write_u32(bytes, 0, 0x00424441u); // ADB\0
+    write_u32(bytes, 4, 1);
+    write_float(bytes, 32, 0.0f);
+    write_float(bytes, 36, 0.5f);
+    write_float(bytes, 40, 1.0f);
+    std::memcpy(bytes.data() + 44, "idle", 4);
+    write_u32(bytes, 44 + 16, 0x1234u); // metadata is not an entry index
+    write_u32(bytes, 44 + 32, 1);
+    write_float(bytes, 44 + 36, 1.0f);
+    return bytes;
+}
+std::vector<unsigned char> resource_archive(const char* name,
+    const std::vector<unsigned char>& payload) {
+    const auto nameBytes = static_cast<std::uint32_t>(std::strlen(name));
+    constexpr std::uint32_t table = 16, record = 22;
+    const std::uint32_t data = table + record + nameBytes;
+    std::vector<unsigned char> bytes(data + static_cast<std::uint32_t>(payload.size()), 0);
+    write_u32(bytes, 0, 0x019ce23cu); // one-entry RES containing root ANM data
+    write_u32(bytes, 4, 1);
+    write_u32(bytes, 8, table);
+    write_u32(bytes, 12, nameBytes);
+    write_u32(bytes, table, 0xffffffffu);
+    write_u32(bytes, table + 4, static_cast<std::uint32_t>(payload.size()));
+    write_u32(bytes, table + 8, data);
+    bytes[table + 16] = static_cast<unsigned char>(nameBytes);
+    bytes[table + 17] = 0;
+    write_u32(bytes, table + 18, 0);
+    std::memcpy(bytes.data() + table + record, name, nameBytes);
+    std::memcpy(bytes.data() + data, payload.data(), payload.size());
+    return bytes;
+}
+std::vector<unsigned char> animation_archive() {
+    std::vector<unsigned char> track(40, 0);
+    // One identity quaternion, zero translation, and no morph payload.
+    write_u32(track, 0, 1);
+    write_float(track, 4, 1.0f);
+    write_u32(track, 20, 1);
+    return resource_archive("idle", resource_archive("root", track));
+}
 }
 int main() {
     check(&OwnedRender::E1Scene().Scene() == &owned::retained_visual_scene(),
@@ -70,6 +120,59 @@ int main() {
     host.Retire(&worldB, 1);
     check(count() == 0 && !host.Added(&worldB, 1, 9), "retired scene rejects publication");
     host.Begin(&worldA, 3);
+    const auto adb = animation_database();
+    const auto anm = animation_archive();
+    owned::ResourceFailure animationFailure;
+    std::uint64_t animationGeneration = 0;
+    auto decodedDatabase = owned::retained_visual_selected_database_asset("fixture.adb",
+        adb.data(), static_cast<std::uint32_t>(adb.size()), animationGeneration, animationFailure);
+    if (!decodedDatabase)
+        std::fprintf(stderr, "ADB fixture rejected: %s\n", animationFailure.message.c_str());
+    check(decodedDatabase && animationGeneration, "selected ADB fixture decodes");
+    owned::ResourceBlob selectedAnimation;
+    check(owned::retained_visual_copy_selected_memory("idle.anm", anm.data(),
+        static_cast<std::uint32_t>(anm.size()), selectedAnimation, animationGeneration, animationFailure),
+        "selected ANM archive bytes are copied through production resolver");
+    owned::MemoryResourceArchive diagnosticArchive;
+    const bool diagnosticArchiveOpened = diagnosticArchive.open(selectedAnimation, animationFailure);
+    if (!diagnosticArchiveOpened)
+        std::fprintf(stderr, "RES direct open rejected: %s\n", animationFailure.message.c_str());
+    check(diagnosticArchiveOpened, "selected ANM bytes form a valid RES container");
+    auto decodedClip = owned::retained_visual_clip_asset(selectedAnimation, "idle",
+        animationFailure, decodedDatabase, animationGeneration);
+    if (!decodedClip)
+        std::fprintf(stderr, "ANM fixture rejected: %s\n", animationFailure.message.c_str());
+    check(decodedClip && decodedClip->tracks.count("root") == 1,
+        "selected ANM archive and track decode");
+    OwnedRender::E1AnimationSelection selected;
+    check(OwnedRender::E1BuildAnimationSelection("fixture.adb", adb.data(),
+        static_cast<std::uint32_t>(adb.size()), "idle", "idle.anm", anm.data(),
+        static_cast<std::uint32_t>(anm.size()), 0, selected) && selected.valid &&
+        selected.visual.clip && selected.visual.clip->tracks.count("root") == 1,
+        "selected ADB entry and selected ANM bytes decode through production resource path");
+    OwnedRender::E1AnimationSelection invalidSelection;
+    check(!OwnedRender::E1BuildAnimationSelection("fixture.adb", adb.data(),
+        static_cast<std::uint32_t>(adb.size()), "idle", "idle.anm", anm.data(),
+        static_cast<std::uint32_t>(anm.size()), 1, invalidSelection),
+        "selection ordinal outside the exact chosen ADB is rejected");
+    int animatedObject = 0;
+    auto animationResource = host.BeginResource(&worldA, &animatedObject, 26);
+    check(animationResource.serial && host.FinishResource(animationResource, true),
+        "animation object resource is created by production lifecycle");
+    check(host.BindDatabase(animationResource, selected),
+        "selected ADB is bound to the current renderer resource");
+    owned::VisualObjectPose selectedPose;
+    selectedPose.selection = selected.visual;
+    selectedPose.source_generation = selected.source_generation;
+    selectedPose.phase = 0.25;
+    selectedPose.appearance_revision = 0;
+    check(host.PublishObjectPose(animationResource, selectedPose),
+        "selected animation and completed host pose publish to retained scene");
+    owned::VisualObjectPose publishedPose;
+    check(host.Scene().visual_object_pose(animationResource, publishedPose) &&
+        publishedPose.source_generation == selected.source_generation &&
+        publishedPose.selection.clip == selected.visual.clip && publishedPose.phase == 0.25,
+        "retained scene preserves selected ADB/ANM identity and pose phase");
     int objectA = 0, objectB = 0;
     check(!host.BeginResource(&worldB, &objectA, 21).serial,
         "server or foreign world cannot publish a client resource");
