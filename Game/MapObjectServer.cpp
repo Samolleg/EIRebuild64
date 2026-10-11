@@ -75,7 +75,8 @@ int CMapObjectServer::Segment()
                                     ((mode != 1 && mode != 2) &&
                                      ((nEffectType == SPELL_ID_ENLARGE) ||
                                       (nEffectType == SPELL_ID_SHRINK)));
-            if (bStrengthChanged)
+            // ASI f24 NOPs only the expiry call, not the RPG recalculation.
+            if (bStrengthChanged && mode != 1 && mode != 2)
                 lpMapObject->ChangeComplectionWithSpell();
             lpMapObject->SetUpdateMask(CMapObject::VLD_MASK_SPELLEFFECTS);
             lpMapObject->RecalcRPGStats(bStrengthChanged);

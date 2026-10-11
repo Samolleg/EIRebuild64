@@ -22,9 +22,11 @@ inline Type CasterTableType(int rawID,const ModSpellAddon::Profile& profile){
  case 6:return Heal;case 7:return Debuff;default:return Useless;
  }
 }
-inline Type SpellType(CSpell*spell){
+// Owner selection is internal, not a runtime option. NPC magic AI always owns
+// GetSpellType in ModRuntime; the ASI table remains the unowned fallback.
+inline Type SpellType(CSpell*spell,bool lsReplacement=true){
  if(!spell)return Weapon;
- if(auto*mod=ModRuntime::Current())if(mod->SpellAddon().Feature48()==1)
+ if(!lsReplacement)if(auto*mod=ModRuntime::Current())if(mod->SpellAddon().Feature48()==1)
   return CasterTableType(int(spell->GetSubtypeID()>>16),mod->SpellAddon());
  switch(ModSpells::ElementalBase(spell->GetSubtypeID()>>16)){
  case SPELL_ID_ACIDRAY:case SPELL_ID_FIREARROW:case SPELL_ID_LIGHTNING:case SPELL_ID_RICKMAGIC:case SPELL_ID_CURSEMAGIC:case SPELL_ID_VAMP:return Direct;

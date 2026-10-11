@@ -42,6 +42,12 @@ inline bool Offensive(int rawID,bool selfCast,bool particles,
     if(base||(selfCast&&rawID==54))return true;
     if(!particles)return false;
     switch(rawID) {
+    // Complete LS IsOffensive2 set. Shrink is deliberately absent.
+    case SPELL_ID_FIREARROW:case SPELL_ID_LIGHTNING:case SPELL_ID_ACIDRAY:
+    case SPELL_ID_FIREBALL:case SPELL_ID_INVOKE_LGHTNG:case SPELL_ID_COLUMN_ACID:
+    case SPELL_ID_FIREWALL:case SPELL_ID_WALL_LGHTNG:case SPELL_ID_POISONFOG:
+    case SPELL_ID_LICHDOM:case SPELL_ID_STENCH:case SPELL_ID_STUN:
+    case SPELL_ID_WEAKEN:case SPELL_ID_FEEBLEMIND:case SPELL_ID_SLOW:case SPELL_ID_CHARM:
     case SPELL_ID_VAMP:case SPELL_ID_VISIONFOG:
     case SPELL_ID_FIREARROWDARK:case SPELL_ID_FIREARROWLIGHT:
     case SPELL_ID_LIGHTNINGDARK:case SPELL_ID_LIGHTNINGLIGHT:
