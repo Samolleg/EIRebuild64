@@ -2063,6 +2063,12 @@ float SRPGUnitStats::GetActionModifier() const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUnitStats::GetWSLBaseSkill(ERPGWeaponTypes rpgWeaponType) const
 {
+    if (const auto *mod = ModRuntime::Current())
+        if (mod->CombatSetting("JMVAttacks"))
+            return GetBaseAutoSkill((rpgWeaponType == RPGWST_BOW || rpgWeaponType == RPGWST_CROSSBOW ||
+                rpgWeaponType == RPGWST_HANDS3 || rpgWeaponType == RPGWST_HANDS7)
+                ? RPGASKL_ARCHERY : RPGASKL_MELEE);
+
     if (rpgWeaponType < RPGWST_BOW)
         return GetBaseAutoSkill(RPGASKL_MELEE);
     else if ((rpgWeaponType == RPGWST_BOW) || (rpgWeaponType == RPGWST_CROSSBOW))
@@ -2080,7 +2086,20 @@ float SRPGUnitStats::GetWSLPerkValue(ERPGWeaponTypes rpgWeaponType) const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUnitStats::GetWSLWeaponModifier(DWORD dwWeaponSubtypeID) const
 {
+    const auto *mod = ModRuntime::Current();
+    if (mod && mod->CombatSetting("JMVAttacks"))
+    {
+        const SIDBWeaponShape *pShape = theItemDatabase.weapons[CItem::GetShape(dwWeaponSubtypeID)];
+        if (!pShape) return 0;
+        const ERPGWeaponTypes rpgWeaponType = ERPGWeaponTypes(pShape->dwTypeID);
+        const ERPGAutoSkills skill = (rpgWeaponType == RPGWST_BOW || rpgWeaponType == RPGWST_CROSSBOW ||
+            rpgWeaponType == RPGWST_HANDS3 || rpgWeaponType == RPGWST_HANDS7)
+            ? RPGASKL_ARCHERY : RPGASKL_MELEE;
+        return pShape->GetSkillModifier(skill);
+    }
+
     const SIDBWeaponShape *pShape = theItemDatabase.weapons[CItem::GetShape(dwWeaponSubtypeID)];
+    if (!pShape) return 0;
     ERPGWeaponTypes rpgWeaponType = ERPGWeaponTypes(pShape->dwTypeID);
     ERPGAutoSkills rpgAutoSkill = RPGASKL_FORCE_DWORD;
     if ((rpgWeaponType < RPGWST_BOW) || (rpgWeaponType == RPGWST_HANDS))
@@ -2089,7 +2108,10 @@ float SRPGUnitStats::GetWSLWeaponModifier(DWORD dwWeaponSubtypeID) const
         rpgAutoSkill = RPGASKL_ARCHERY;
 
     if (rpgAutoSkill >= RPGASKL_FORCE_DWORD)
+    {
         ASSERT(0 && "Unsupported auto skill");
+        return 0;
+    }
 
     float fWeaponSkillModifier = 0;
     if (pShape)
@@ -2124,6 +2146,12 @@ float SRPGUnitStats::GetWeaponSkill(ERPGWeaponTypes rpgWeaponType) const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUnitStats::GetWeaponSkillLevel(ERPGWeaponTypes rpgWeaponType, CUnit *pUnit) const
 {
+    if (const auto *mod = ModRuntime::Current())
+        if (mod->CombatSetting("JMVAttacks"))
+            return GetAutoSkillLevel((rpgWeaponType == RPGWST_BOW || rpgWeaponType == RPGWST_CROSSBOW ||
+                rpgWeaponType == RPGWST_HANDS3 || rpgWeaponType == RPGWST_HANDS7)
+                ? RPGASKL_ARCHERY : RPGASKL_MELEE, pUnit);
+
     if (rpgWeaponType < RPGWST_BOW)
         return GetPerkModifier(rpgWeaponType) + GetAutoSkillLevel(RPGASKL_MELEE, pUnit);
     else if ((rpgWeaponType == RPGWST_BOW) || (rpgWeaponType == RPGWST_CROSSBOW))
@@ -2196,6 +2224,13 @@ float SRPGUserUnitStats::GetManaBonusMultiplier() const
 /////////////////////////////////////////////////////////////////////////////////////
 float SRPGUserUnitStats::GetSightRange(float fNightPower) const
 {
+    if (const auto *mod = ModRuntime::Current())
+        if (mod->CombatSetting("JMVAttacks"))
+        {
+            const float nightSight = float(cSenses[RPGS_INFRA]) * fNightPower / 100 + (1 - fNightPower);
+            return cSenses[RPGS_SIGHT] * (1 < nightSight ? 1 : nightSight);
+        }
+
     float fBaseSight = cSenses[RPGS_SIGHT];
     return (fBaseSight * (float(cSenses[RPGS_INFRA]) * fNightPower / 100 + (1 - fNightPower)));
 }
@@ -2226,6 +2261,12 @@ float SRPGUserUnitStats::GetWeaponSkillLevel(ERPGWeaponTypes rpgWeaponType, CUni
 float SRPGUserUnitStats::GetWeaponSkillLevel(ERPGWeaponTypes rpgWeaponType,
                                              const SIDBWeaponShape *pShape) const
 {
+    if (const auto *mod = ModRuntime::Current())
+        if (mod->CombatSetting("JMVAttacks"))
+            return GetAutoSkillLevel((rpgWeaponType == RPGWST_BOW || rpgWeaponType == RPGWST_CROSSBOW ||
+                rpgWeaponType == RPGWST_HANDS3 || rpgWeaponType == RPGWST_HANDS7)
+                ? RPGASKL_ARCHERY : RPGASKL_MELEE, pShape);
+
     if (rpgWeaponType < RPGWST_BOW)
         return GetPerkModifier(rpgWeaponType) + GetAutoSkillLevel(RPGASKL_MELEE, pShape);
     else if ((rpgWeaponType == RPGWST_BOW) || (rpgWeaponType == RPGWST_CROSSBOW))

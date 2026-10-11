@@ -1927,7 +1927,8 @@ void CEffectTornado::ApplyParams(EUpdateType tip)
         }
         //
         pParticle = ((CParticleManager *)theWorld.GetParticleManager())
-                        ->CreateParticleSystem(PTID_TORNADO);
+                        ->CreateParticleSystem(ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVParticles")
+                            ? PTID_EYEBALLFIRE : PTID_TORNADO);
         pParticle->SetCP(GetCP());
         pParticle->Scale(1); // fpScale / pParticle->GetScale() );
 
