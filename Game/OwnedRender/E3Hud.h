@@ -7,5 +7,6 @@ namespace OwnedRender {
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept;
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept;
 bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept;
+bool E3HudNativePoint(CI3DObject* object,unsigned area,POINT pixel,POINT& native) noexcept;
 void E3PublishHud(const CI3DScreenMission* mission,unsigned width,unsigned height) noexcept;
 }

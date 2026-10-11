@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "OwnedRender/E3Input.h"
+#include "OwnedRender/E3Hud.h"
 #include "GameJournal.h"
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
@@ -5189,7 +5190,8 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
             InvertClosedState();
             break;
         case 1:
-            pI3D->ScreenToVirtual(point);
+            if(!OwnedRender::E3HudNativePoint(this,unsigned(ht),point,point))
+                pI3D->ScreenToVirtual(point);
             pt.x = (point.x - 700 - WideScreen::VirtualShift()) / fPixInMeter;
             pt.y = (point.y - 80) / fPixInMeter;
             pt = FromFigureToTerrain(pt, TRUE);
@@ -5203,7 +5205,8 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
             }
             break;
         case 2:
-            pI3D->ScreenToVirtual(point);
+            if(!OwnedRender::E3HudNativePoint(this,unsigned(ht),point,point))
+                pI3D->ScreenToVirtual(point);
             pt.x = (point.x - 700 - WideScreen::VirtualShift()) / fPixInMeter;
             pt.y = (point.y - 80) / fPixInMeter;
             pt = FromFigureToTerrain(pt);

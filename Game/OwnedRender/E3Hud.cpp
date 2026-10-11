@@ -20,11 +20,16 @@ struct E3HudAccess {
         for(unsigned i=0;i<inputOwners.size();++i)if(inputOwners[i]==object)return int(i);
         return -1;
     }
+    static bool NativePoint(CI3DObject* object,unsigned area,POINT pixel,POINT& native) noexcept {
+        const int panel=Panel(object);
+        return panel>=0 && object->bVisible &&
+            owned::embedded_hud_layout().area_point(owned::HudPanel(panel),area,pixel,native);
+    }
     static bool AreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept {
         const int panel=Panel(object);if(panel<0)return false;
         inside=false;POINT native{};
         if(object->bVisible && area<unsigned(object->areas.GetSize()) && object->areas[area] &&
-            owned::embedded_hud_layout().area_point(owned::HudPanel(panel),area,pixel,native))
+            NativePoint(object,area,pixel,native))
             inside=object->areas[area]->PtInArea(CPoint(native))!=FALSE;
         return true;
     }
@@ -162,6 +167,7 @@ namespace OwnedRender {
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept {return E3HudAccess::Hit(object,pixel);}
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept {return E3HudAccess::Inside(object,pixel,inside);}
 bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept {return E3HudAccess::AreaInside(object,area,pixel,inside);}
+bool E3HudNativePoint(CI3DObject* object,unsigned area,POINT pixel,POINT& native) noexcept {return E3HudAccess::NativePoint(object,area,pixel,native);}
 void E3PublishHud(const CI3DScreenMission* mission,unsigned width,unsigned height) noexcept {
     try { E3HudAccess::Publish(mission,width,height); }
     catch(const std::bad_alloc&) { inputOwners={};owned::embedded_hud_layout().retire(); }
