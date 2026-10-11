@@ -70,6 +70,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
+#include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E2LoadReveal.h"
 #include "WorldServer.h"
 #include "GeometryManager.h"
@@ -418,6 +419,7 @@ CWorldClient::~CWorldClient()
 BOOL CWorldClient::Create()
 {
     CWorldBase::Create();
+    OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
     //
     szTexturesPath = GetWorkPath() + "textures\\";
     //
@@ -625,6 +627,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     ModWorldBackground::Unload();
@@ -1109,6 +1112,8 @@ BOOL CWorldClient::AddObject(CMapObject *lpObject)
     // add object
     lpObject->AddRef();
     objects.push_back(lpObject);
+    if (!OwnedRender::E1Scene().Added(this, ownedRenderGeneration, lpObject->GetID()))
+        GameJournal::Event("RENDER", "scene_membership_failed", "id=%d", lpObject->GetID());
     // add object to the area map, but first remove any copy...
     areaObjects.Remove(lpObject);
     areaObjects.Add(lpObject);
@@ -1161,6 +1166,7 @@ void CWorldClient::RemoveObject(int nID)
             }
             areaObjects.Remove(pObject);
             objects.erase(pos);
+            OwnedRender::E1Scene().Removed(this, ownedRenderGeneration, nID);
             pObject->Release();
             return;
         }
@@ -1191,6 +1197,7 @@ void CWorldClient::RemoveAllObjects()
     heroes.clear();
     //
     objects.remove_if(CReleasePositiveFunctional<CMapObject>());
+    OwnedRender::E1Scene().ResetPositive(this, ownedRenderGeneration);
 
     pPlayer->RemoveAllObjects();
 
@@ -2339,8 +2346,10 @@ BOOL CWorldClient::NewItems(CMemorySave &packet)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
+    OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
+    OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
     IWorldConnector.LMPClientRecvZone();
     CString szZone, szMob;
     EGMZoneSky sky;
