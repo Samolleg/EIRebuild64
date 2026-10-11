@@ -429,6 +429,8 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
             struct ParticleCase{ETypeIDs id;const char*texture;};
             const ParticleCase cases[]={
                 {PTID_FIREBALLDARK,"FireSmoke2"},{PTID_FIREBALLLIGHT,"FireSmoke3"},
+                {PTID_EYEBALLFIRE,"TendriSmoke"},{PTID_EYEBALLWATER,"TendriSmoke1"},
+                {PTID_EYEBALLACID,"TendriSmoke2"},
                 {PTID_FIREARROWDARK,"FireArrowSmoke2"},{PTID_FIREARROWLIGHT,"FireArrowSmoke3"},
                 {PTID_FIREWALLDARK,"TendriSmoke2"},{PTID_FIREWALLLIGHT,"TendriSmoke3"},
                 {PTID_FIREBLASTDARK,"Explosion2"},{PTID_FIREBLASTLIGHT,"Explosion3"},
