@@ -4,6 +4,10 @@
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
 #include "../I3DScrollText.h"
+#include "../I3DToolTip.h"
+#include "../I3DMain.h"
+#include <cmath>
+#include <cstdio>
 #include "../Unit.h"
 #include "../Item.h"
 #include "../Camera.h"
@@ -21,6 +25,55 @@ thread_local CI3DSurface* drawingSurface=nullptr;
 // This adapter only copies facts owned by the active mission. Slot geometry,
 // header docking, scaling and preview layout remain in the renderer library.
 struct E3HudAccess {
+    static bool ClockTooltip(CI3DToolTip* tip) {
+        if(!tip || tip->surfaces.GetSize()!=1 || !tip->surfaces[0])return false;
+        auto* surface=tip->surfaces[0];
+        bool isClock=false;
+        const auto* clock=inputOwners[9];
+        if(clock && OwnedRender::E3HudRendererAttached() && clock->bVisible)
+            for(int i=0;i<clock->areas.GetSize();++i)
+                if(clock->areas[i] && clock->areas[i]->pTip==tip){isClock=true;break;}
+        owned::WorldEnvironment environment{};
+        int minute=-1;
+        if(isClock && owned::bridge_read_world_environment(environment) && std::isfinite(environment.hour))
+            minute=int(std::clamp(environment.hour,0.f,23.999f)*60.f);
+        if(!isClock && tip->ownedClockMinute<0)return false;
+        const bool extra=minute>=0;
+        char time[32]{};
+        int width=(std::max)(int(tip->m_sizeTip.cx),tip->nFirstLineWidth),height=tip->m_sizeTip.cy;
+        const int top=4+tip->szStrings.GetSize()*tip->nStringHeight;
+        if(extra) {
+            std::snprintf(time,sizeof(time),"Game time: %02d:%02d",minute/60,minute%60);
+            width=(std::max)(width,int(tip->pI3D->TextSize(time,0).cx)+12);
+            height=(std::max)(height+tip->nStringHeight,top+tip->nStringHeight+4);
+        }
+        CRect desired=surface->rect;
+        tip->pI3D->ScreenToVirtual(desired);
+        desired.right=desired.left+width;desired.bottom=desired.top+height;
+        const bool resized=surface->SetRectForRedraw(desired);
+        if(resized || tip->ownedClockMinute!=minute || tip->ownedClockRevision!=tip->ownedTextRevision) {
+            // Redraw from original localized lines and current shortcut. Never
+            // append to szStrings: refreshes must not accumulate time lines.
+            tip->Update();
+            if(extra) {
+                if(!surface->GetDC())return false;
+                struct Release { CI3DSurface* value; ~Release(){value->ReleaseDC();} } release{surface};
+                surface->DrawText(time,CRect(6,top,width-6,top+tip->nStringHeight),0,RGB(228,215,167),DT_LEFT,FALSE);
+            }
+            tip->ownedClockMinute=minute;tip->ownedClockRevision=tip->ownedTextRevision;
+        }
+        if(!isClock)return false;
+        owned::widescreen::HudComposition composition;
+        if(!owned::embedded_hud_layout().clock_tooltip_composition(surface->rect,composition))return false;
+        struct Restore {
+            owned::widescreen::HudComposition previous=owned::widescreen::hud_blit;
+            CI3DSurface* surface=drawingSurface;
+            ~Restore(){owned::widescreen::hud_blit=previous;drawingSurface=surface;}
+        } restore;
+        owned::widescreen::hud_blit=composition;drawingSurface=surface;
+        surface->Draw();
+        return true;
+    }
     static bool Draw2D(CI3DObject* object) {
         if(!object || !OwnedRender::E3HudRendererAttached())return false;
         const bool text=object==messageTextOwner;
@@ -289,6 +342,7 @@ void E3MessageLayout(CI3DScrollText* text) {
     if(owned::embedded_hud_layout().message_text_rect(placed,scale))
         text->SetTextLayout(CRect(placed),scale);
 }
+bool E3ClockTooltip(CI3DToolTip* tooltip) {return E3HudAccess::ClockTooltip(tooltip);}
 bool E3HudDraw2D(CI3DObject* object) {return E3HudAccess::Draw2D(object);}
 bool E3HudBlit(CI3DSurface* surface) {return E3HudAccess::Blit(surface);}
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer) {return E3HudAccess::Draw(object,renderer);}

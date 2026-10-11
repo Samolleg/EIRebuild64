@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DMain.h"
 #include "I3DToolTip.h"
+#include "OwnedRender/E3Hud.h"
 #include "StringProcessing.h"
 #include "I3DCursor.h"
 #include "KeyMap.h"
@@ -195,6 +196,7 @@ void CI3DToolTip::Process(CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DToolTip::Update()
 {
+    ++ownedTextRevision;
     /*
             float fPart = m_fIdleTime / TOOLTIP_ACTIVATE_TIME;
             if ( fPart < 0 )
@@ -275,7 +277,7 @@ void CI3DToolTip::Draw2D()
         auto *dx = pI3D->GetD3D();
         dx->GetSpriteBatch()->End();
         dx->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, dx->GetCommonStates()->Opaque());
-        CI3DObject::Draw2D();
+        if (!OwnedRender::E3ClockTooltip(this)) CI3DObject::Draw2D();
         dx->GetSpriteBatch()->End();
         dx->GetSpriteBatch()->Begin();
     }
