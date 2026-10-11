@@ -14,9 +14,12 @@ owned::WorldMistGridCache mist;
 owned::OwnedTerrainFramePacket view;
 owned::OwnedTerrainPreparedResources prepared;
 bool viewReady = false, terrainLod = true;
+std::vector<std::shared_ptr<const owned::OwnedTerrainDynamicSector>> sectors;
+std::uint64_t sectorFrame = 0, phaseSerial = 0;
 void clear() noexcept {
     sourceOwner = nullptr; worldIdentity = sourceRevision = terrainFrame = 0;
     source = {}; transform = {}; mist.retire(); atlasIds.clear(); view = {}; prepared = {}; viewReady = false;
+    sectors.clear(); sectorFrame = 0;
 }
 bool current() noexcept {
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
@@ -71,6 +74,45 @@ void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>
     atlasIds = surfaces;
 } catch (...) { atlasIds.clear(); }
 void E1RetireTerrain(const void* owner) noexcept { if (owner == sourceOwner) clear(); }
+bool E1PublishTerrainSectors(const void* owner,
+    const std::vector<E1TerrainSectorValues>& input) noexcept try {
+    sectorFrame = 0;
+    if (!owner || owner != sourceOwner || !current() || !source.geometry) return false;
+    std::vector<std::shared_ptr<const owned::OwnedTerrainDynamicSector>> next(source.terrain->sectors.size());
+    for (const auto& row : input) {
+        if (row.sector >= next.size() || next[row.sector]) return false;
+        const auto& authored = source.terrain->sectors[row.sector];
+        if (row.phases.size() != authored.animation_count) return false;
+        for (const auto& tile : authored.tiles) {
+            if (tile.animation_ordinal == UINT_MAX) continue;
+            if (tile.animation_ordinal >= row.phases.size() ||
+                row.phases[tile.animation_ordinal] >= tile.animation_phases) return false;
+        }
+        auto value = std::make_shared<owned::OwnedTerrainDynamicSector>();
+        value->captured = true;
+        value->source_revision = source.source_revision;
+        value->animation = source.geometry->animation;
+        value->animation.waves_enabled = value->animation.waves_enabled && authored.has_layers;
+        value->animation.animation_phase_count = static_cast<std::uint32_t>(row.phases.size());
+        value->animation_phases = row.phases;
+        // Revisions describe actual phase bytes, not a host address or frame.
+        // Reuse the renderer's upload cache only when the completed bytes agree.
+        if (row.sector < sectors.size() && sectors[row.sector] &&
+            sectors[row.sector]->animation_phases == row.phases)
+            value->phase_values = sectors[row.sector]->phase_values;
+        else {
+            if (++phaseSerial == 0) ++phaseSerial;
+            value->phase_values.revision = phaseSerial;
+        }
+        next[row.sector] = std::move(value);
+    }
+    sectors.swap(next);
+    sectorFrame = terrainFrame;
+    return true;
+} catch (...) { sectorFrame = 0; return false; }
+std::shared_ptr<const owned::OwnedTerrainDynamicSector> E1TerrainSector(std::uint32_t sector) noexcept {
+    return current() && sectorFrame == terrainFrame && sector < sectors.size() ? sectors[sector] : nullptr;
+}
 bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInputs& input) noexcept try {
     viewReady = false;
     if (!owner || owner != sourceOwner || !current() || !source.geometry) return false;
@@ -89,9 +131,32 @@ bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInput
 const owned::OwnedTerrainFramePacket* E1TerrainView() noexcept {
     return viewReady && current() ? &view : nullptr;
 }
+bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainCommandSource& output) noexcept {
+    output.view = {}; output.context = {};
+    output.terrain.reset(); output.geometry.reset(); output.dynamic.reset(); output.atlas.reset();
+    if (!E1TerrainView() || !source.geometry) return false;
+    const auto& commands = transparent ? view.transparent_commands : view.base_commands;
+    if (index >= commands.size()) return false;
+    const auto& command = commands[index];
+    auto dynamic = E1TerrainSector(command.source_sector);
+    std::shared_ptr<const owned::OwnedVisualSurface> atlas;
+    if (!dynamic || !owned::bridge_terrain_atlas(command.material % (source.terrain->texture_count+2u), atlas))
+        return false;
+    if (!owned::prepare_owned_terrain_source_view(view, command, *dynamic, output.context, output.view))
+        return false;
+    output.terrain = source.terrain; output.geometry = source.geometry;
+    output.dynamic = std::move(dynamic); output.atlas = std::move(atlas);
+    output.context.geometry = output.geometry.get();
+    output.view.geometry_revision = owned::owned_terrain_geometry_revision(view, command,
+        owned::owned_terrain_command_structure(*source.terrain, command, *source.geometry));
+    output.view.lighting.object_to_world = transform;
+    output.view.terrain_phase_values = &output.dynamic->phase_values;
+    output.view.owned_texture.surface = output.atlas.get();
+    return true;
+}
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
     const std::array<float,16>& placement) noexcept try {
-    terrainFrame = 0; viewReady = false;
+    terrainFrame = 0; sectorFrame = 0; viewReady = false;
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
     if (!owner || owner != sourceOwner || !source.terrain || !frame.valid || !frame.scene_frame_serial ||
         E1WorldGeneration() != worldIdentity ||

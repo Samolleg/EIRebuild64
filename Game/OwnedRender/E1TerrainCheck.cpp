@@ -207,12 +207,89 @@ int wmain(int argc, wchar_t** argv) try {
         check(E1PublishTerrainFrame(&owner, geometry, matrix) && !E1TerrainView());
         check(E1PublishTerrainView(&owner, view));
         std::vector<std::uint64_t> atlases(original->texture_count+2u, 0); atlases[0] = surface.Id();
+        std::vector<E1TerrainSectorValues> phaseRows;
+        for (std::uint32_t i = 0; i < original->sectors.size(); ++i) {
+            E1TerrainSectorValues row; row.sector = i;
+            row.phases.assign(original->sectors[i].animation_count, 0);
+            phaseRows.push_back(std::move(row));
+        }
+        check(!E1TerrainSector(0));
+        check(E1PublishTerrainSectors(&owner, phaseRows));
+        auto firstPhases = E1TerrainSector(0);
+        check(firstPhases && firstPhases->captured && firstPhases->phase_values.revision);
+        check(firstPhases->animation_phases == phaseRows[0].phases);
+        check(firstPhases->animation.wind_force_normalized == .7f);
+        check(!E1TerrainSector(static_cast<std::uint32_t>(phaseRows.size())));
+        check(E1PublishTerrainSectors(&owner, phaseRows));
+        check(E1TerrainSector(0)->phase_values.revision == firstPhases->phase_values.revision);
+        auto duplicate = phaseRows; duplicate.push_back(phaseRows[0]);
+        check(!E1PublishTerrainSectors(&owner, duplicate) && !E1TerrainSector(0));
+        auto badPhases = phaseRows; badPhases[0].phases.push_back(0);
+        check(!E1PublishTerrainSectors(&owner, badPhases) && !E1TerrainSector(0));
+        badPhases = phaseRows; badPhases[0].sector = static_cast<std::uint32_t>(phaseRows.size());
+        check(!E1PublishTerrainSectors(&owner, badPhases));
+        check(E1PublishTerrainSectors(&owner, phaseRows));
+        check(!E1PublishTerrainSectors(&foreign, phaseRows) && !E1TerrainSector(0));
+        check(E1PublishTerrainSectors(&owner, {}) && !E1TerrainSector(0));
+        check(E1PublishTerrainSectors(&owner, phaseRows));
+        check(E1TerrainSector(0)->phase_values.revision != firstPhases->phase_values.revision);
+        unsigned animatedChecks = 0;
+        for (std::uint32_t i = 0; i < original->sectors.size() && !animatedChecks; ++i) {
+            for (const auto& tile : original->sectors[i].tiles) {
+                if (tile.animation_ordinal == UINT_MAX || tile.animation_phases < 2) continue;
+                const auto old = E1TerrainSector(i);
+                phaseRows[i].phases[tile.animation_ordinal] = 1;
+                check(E1PublishTerrainSectors(&owner, phaseRows));
+                const auto changed = E1TerrainSector(i);
+                check(changed && changed->phase_values.revision != old->phase_values.revision);
+                check(changed->animation_phases[tile.animation_ordinal] == 1 &&
+                    old->animation_phases[tile.animation_ordinal] == 0);
+                check(E1PublishTerrainSectors(&owner, phaseRows));
+                check(E1TerrainSector(i)->phase_values.revision == changed->phase_values.revision);
+                phaseRows[i].phases[tile.animation_ordinal] = tile.animation_phases;
+                check(!E1PublishTerrainSectors(&owner, phaseRows) && !E1TerrainSector(i));
+                phaseRows[i].phases[tile.animation_ordinal] = 0;
+                check(E1PublishTerrainSectors(&owner, phaseRows));
+                animatedChecks = 7; break;
+            }
+        }
+        std::printf("Actual animated tile checks: %u\n", animatedChecks);
+        check(E1PublishTerrainFrame(&owner, geometry, matrix) && !E1TerrainSector(0));
+        check(E1PublishTerrainSectors(&owner, phaseRows));
+        check(E1PublishTerrainView(&owner, view));
         std::shared_ptr<const OwnedVisualSurface> atlas;
         const char* atlasFailure = nullptr;
         check(!bridge_terrain_atlas(0, atlas, &atlasFailure) && !atlas && atlasFailure);
+        E1TerrainCommandSource native;
+        check(!E1PrepareTerrainCommand(false, 0, native) && !native.view.decode);
+        // One real completed WARP surface per slot; this tests the material
+        // resolver, not the map's texture art or an on-screen game frame.
+        std::fill(atlases.begin(), atlases.end(), surface.Id());
         E1PublishTerrainAtlases(&owner, atlases);
+        check(E1PrepareTerrainCommand(false, 0, native));
+        check(native.view.decode && native.view.decode_context == &native.context && native.atlas == updated);
+        check(native.context.geometry == native.geometry.get() && native.view.terrain_phase_values == &native.dynamic->phase_values);
+        const auto& nv = native.view;
+        std::vector<NativePackedGroup> positions(nv.position_groups), normals(nv.normal_groups);
+        std::vector<NativeTextureCoordinate> uvs(nv.texture_coordinate_count);
+        std::vector<NativeVertexComponent> components(nv.component_count);
+        std::vector<std::uint16_t> indices(nv.index_count);
+        std::vector<NativeTerrainVertex> vertices(nv.component_count);
+        NativeGeometryDecodeTarget target;
+        target.positions = positions.data(); target.position_groups = nv.position_groups;
+        target.normals = normals.data(); target.normal_groups = nv.normal_groups;
+        target.texture_coordinates = uvs.data(); target.texture_coordinate_count = nv.texture_coordinate_count;
+        target.components = components.data(); target.component_count = nv.component_count;
+        target.indices = indices.data(); target.index_count = nv.index_count;
+        target.terrain_vertices = vertices.data(); target.terrain_vertex_count = nv.component_count;
+        check(nv.decode(nv.decode_context, target));
+        check(std::all_of(indices.begin(), indices.end(), [&](auto index){return index < components.size();}));
+        --target.index_count; check(!nv.decode(nv.decode_context, target)); ++target.index_count;
+        check(!E1PrepareTerrainCommand(false, E1TerrainView()->base_commands.size(), native) && !native.view.decode && !native.atlas);
+        check(E1PrepareTerrainCommand(false, 0, native));
         check(bridge_terrain_atlas(0, atlas, &atlasFailure) && atlas == updated && !atlasFailure);
         surface.BeginWrite(); check(!bridge_terrain_atlas(0, atlas, &atlasFailure) && !atlas && atlasFailure);
+        check(!E1PrepareTerrainCommand(false, 0, native) && !native.view.decode);
         check(surface.Complete(image.Get()));
         check(bridge_terrain_atlas(0, atlas, &atlasFailure) && atlas->generation > updated->generation);
         check(!bridge_terrain_atlas(static_cast<std::uint32_t>(atlases.size()), atlas, &atlasFailure) && !atlas);
@@ -221,7 +298,7 @@ int wmain(int argc, wchar_t** argv) try {
         E1RetireTerrain(&foreign); check(bridge_world_mist_grid() == grid);
         draw.Complete(); check(bridge_world_mist_grid() == grid);
     }
-    E1BeginFrame(); check(!E1TerrainView()); check(!bridge_ambient_world_source(ambient) && !ambient.terrain && !bridge_world_mist_grid());
+    E1BeginFrame(); check(!E1TerrainSector(0)); check(!E1TerrainView()); check(!bridge_ambient_world_source(ambient) && !ambient.terrain && !bridge_world_mist_grid());
     {
         E1WorldDraw draw(&owner, 10, frame);
         check(E1PublishTerrainFrame(&owner, geometry, matrix));

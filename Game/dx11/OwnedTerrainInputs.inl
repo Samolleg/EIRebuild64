@@ -85,6 +85,19 @@ bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
         atlases.push_back(surface ? surface->OwnedSurfaceId() : 0);
     }
     OwnedRender::E1PublishTerrainAtlases(this, atlases);
+    std::vector<OwnedRender::E1TerrainSectorValues> sectorValues;
+    POSITION resident = sectorLRU.GetHeadPosition();
+    while (resident) {
+        CSector* sector = sectorLRU.GetNext(resident);
+        if (!sector->IsHaveState(CSector::ESS_LIGHTED)) continue;
+        OwnedRender::E1TerrainSectorValues value;
+        value.sector = uint32_t(sector->GetMapY()*nXSectors+sector->GetMapX());
+        EIRenderTerrainSectorV5 row{};
+        sector->CopyRendererState(row, value.phases);
+        sectorValues.push_back(std::move(value));
+    }
+    if (!OwnedRender::E1PublishTerrainSectors(this, sectorValues))
+        GameJournal::Count("RENDER", "terrain_sector_publication_failed", "source_or_phases_invalid");
     if (renderer && renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
         owned::OwnedTerrainFrameInputs view;
         view.terrain_origin = {placement._14, placement._24, placement._34};
