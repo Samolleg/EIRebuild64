@@ -5,16 +5,42 @@
 #include "../I3DObject.h"
 #include "../Unit.h"
 #include "../Item.h"
+#include "../Camera.h"
 #include "hud_layout_context.h"
 #include <algorithm>
 #include <cstring>
 
 namespace {
 std::array<const CI3DObject*,10> inputOwners{};
+std::array<int,8> itemFigures{};
+int cameraSlot=-1;
 }
 // This adapter only copies facts owned by the active mission. Slot geometry,
 // header docking, scaling and preview layout remain in the renderer library.
 struct E3HudAccess {
+    static bool Draw(CI3DObject* object,CRenderer* renderer) {
+        const int index=Panel(object);if(index<0)return false;
+        if(!object->bVisible)return true;
+        struct Restore {
+            owned::widescreen::HudComposition previous=owned::widescreen::hud_blit;
+            ~Restore(){owned::widescreen::hud_blit=previous;}
+        } restore;
+        auto& context=owned::embedded_hud_layout();
+        for(int i=0;i<object->figures.GetSize();++i) {
+            auto* figure=object->figures[i];if(!figure || !figure->IsVisible())continue;
+            int slot=i;
+            if(index==4)slot=i?(i-1)/5:cameraSlot;
+            else if(index==6) {
+                slot=-1;
+                for(unsigned j=0;j<itemFigures.size();++j)if(itemFigures[j]==i){slot=int(j);break;}
+            }
+            owned::widescreen::HudComposition composition;
+            if(!context.figure_composition(owned::HudPanel(index),unsigned(i),slot,composition))continue;
+            owned::widescreen::hud_blit=composition;
+            figure->Draw(renderer);
+        }
+        return true;
+    }
     static int Panel(const CI3DObject* object) noexcept {
         if(!object || !OwnedRender::E3HudRendererAttached())return -1;
         for(unsigned i=0;i<inputOwners.size();++i)if(inputOwners[i]==object)return int(i);
@@ -125,6 +151,7 @@ struct E3HudAccess {
     }
     static void Publish(const CI3DScreenMission* mission,unsigned width,unsigned height) {
         inputOwners={};
+        itemFigures.fill(-1);cameraSlot=-1;
         owned::HudLayoutFrame frame;
         // Current host ingress is full-width, unscaled placed space. Do not
         // announce a different safe area until its drawing/input consumer exists.
@@ -141,8 +168,11 @@ struct E3HudAccess {
             Copy(p[8],mission->pCommands);Copy(p[9],mission->pClock);
             Slots(p[0],mission->pSpells->nSpells);Slots(p[1],mission->pSkills->nSkills);
             PortraitFrames(p[4],mission->pFaces);Slots(p[5],mission->pWeapons->figures.GetSize());
+            for(unsigned i=0;i<(std::min)(unsigned(mission->pUnits.GetSize()),p[4].native_count);++i)
+                if(mission->pUnits[i] && mission->pUnits[i]->GetID()==theCamera.GetCarrierID()){cameraSlot=int(i);break;}
             for(unsigned i=0;i<(std::min)(unsigned(p[6].slots.size()),8u);++i) {
                 const int figure=mission->pItems->nSubst[i];
+                itemFigures[i]=figure;
                 if(figure>=0)p[6].native_count=i+1;
                 p[6].slots[i].active=figure>=0 && figure<mission->pItems->figures.GetSize();
             }
@@ -164,6 +194,7 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+bool E3HudDraw(CI3DObject* object,CRenderer* renderer) {return E3HudAccess::Draw(object,renderer);}
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept {return E3HudAccess::Hit(object,pixel);}
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept {return E3HudAccess::Inside(object,pixel,inside);}
 bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept {return E3HudAccess::AreaInside(object,area,pixel,inside);}

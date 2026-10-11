@@ -681,7 +681,7 @@ CI3DObject::~CI3DObject()
 BOOL CI3DObject::Draw(CRenderer *pRend)
 {
     int k;
-    if (!E4CampAccess::Draw(this, pRend))
+    if (!OwnedRender::E3HudDraw(this, pRend) && !E4CampAccess::Draw(this, pRend))
         for (k = 0; k < figures.GetSize(); k++)
             figures[k]->Draw(pRend);
 
