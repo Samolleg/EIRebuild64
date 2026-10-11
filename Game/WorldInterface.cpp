@@ -802,6 +802,9 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
                 }
                 else
                     nSegments = Min(nSegments, 1000);
+                const DWORD simulateStart = GetTickCount();
+                GameJournal::Event("ZONE", "simulate", "begin zone=%s segments=%d cur_time=%.9g zone_time=%.9g radius=%.9g",
+                    GameJournal::Quote(szZone).c_str(), nSegments, fpCurTime, fpZoneTime, fpActivityRadius);
                 if (nSegments > 0)
                 {
                     const SZoneExit &exit = pZone->exits[party.nEntrance];
@@ -812,8 +815,13 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
                     {
                         theWorldServer.AddActiveSpot(ptActive, fpActivityRadius);
                         theWorldServer.WorldSegment(true);
+                        if ((i + 1) % 250 == 0)
+                            GameJournal::Event("ZONE", "simulate", "progress segments=%d total=%d ms=%lu",
+                                i + 1, nSegments, GetTickCount() - simulateStart);
                     }
                 }
+                GameJournal::Event("ZONE", "simulate", "end segments=%d ms=%lu",
+                    nSegments > 0 ? nSegments : 0, GetTickCount() - simulateStart);
             }
         }
         else

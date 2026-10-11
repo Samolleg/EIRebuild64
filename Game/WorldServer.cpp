@@ -54,6 +54,16 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <vector>
 #include <cmath>
 #include "ModCampReferences.inl"
+#include "SavedMapObject.h"
+// Raw on-disk sizes used by the discard-only grammar, checked by this build.
+static_assert(sizeof(SRPGCommonStats) == 88 && sizeof(SRPGUnitStats) == 1796);
+static_assert(sizeof(SRPGAttackPortion) == 60 && sizeof(SRPGGeneralAttack) == 16);
+static_assert(sizeof(SL0Animation) == 12 && sizeof(SL1Pose) == 8);
+static_assert(sizeof(SRouteSegment) == 40 && sizeof(SRouteUnit) == 8);
+static_assert(sizeof(SWalkerWaypoint) == 28 && sizeof(SWalkerTempPoint) == 12);
+static_assert(sizeof(SActionPoint) == 20 && sizeof(SUnitVisibilityInfo) == 20);
+static_assert(QI_MAX_WEAPONS == 4 && QI_MAX_ITEMS == 4 && QI_MAX_SPELLS == 16 && QI_LEGACY_SPELLS == 8);
+static_assert(RPG_NUM_ARMOR_TYPES == 7 && sizeof(CPlot2D) == 8 && sizeof(CPlot3D) == 12);
 
 /////////////////////////////////////////////////////////////////////////////////////
 const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
@@ -2852,6 +2862,7 @@ void CWorldServer::RemoveAllUnits()
 /////////////////////////////////////////////////////////////////////////////////////
 CMapObject *CWorldServer::GetMapObject(int nID)
 {
+    if (pMapObjectManager->IsOmittedSaveObject(nID)) return NULL;
     CMapObject *pMO;
     if (!mapObjects.Lookup(nID, pMO))
         return NULL;
@@ -3775,6 +3786,7 @@ void CWorldServer::StoreDynamicData(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::LoadDynamic(CSave &file)
 {
+    omittedDynamicObjects.clear();
     int nID;
     int typeID;
     DWORD dwSubtype;
@@ -3785,6 +3797,17 @@ void CWorldServer::LoadDynamic(CSave &file)
             break;
         file.Read(typeID);
         file.Read(dwSubtype);
+        // Only a real object of the freshly loaded map wins; duplicates within
+        // the dynamic registry retain their original CreateData semantics.
+        CMapObject* mapObject = nullptr;
+        if (mapObjects.Lookup(nID, mapObject) && mapObject)
+        {
+            if (omittedDynamicObjects.emplace(nID, typeID).second)
+                GameJournal::Event("SAVE", "dynamic_conflict", "zone=%s id=%d type=%d subtype=%lu map_object=%s",
+                    GameJournal::Quote(szCurrentZoneName).c_str(), nID, typeID, dwSubtype,
+                    GameJournal::Quote(mapObject->GetMaskName()).c_str());
+            continue;
+        }
         LPGAMEBASE lpData = pMapObjectManager->CreateData(ETypeIDs(typeID), nID);
         if (!lpData) { file.Fail("invalid_dynamic_type"); return; }
         lpData->SetSubtypeID(dwSubtype);
@@ -3800,6 +3823,14 @@ void CWorldServer::LoadDynamicData(CSave &file)
         file.Read(nID);
         if (nID == -1)
             break;
+        auto omitted = omittedDynamicObjects.find(nID);
+        if (omitted != omittedDynamicObjects.end())
+        {
+            if (file.GetVersion() > 88) SavedMapObject::Text(file);
+            SavedMapObject::Skip(file, omitted->second);
+            file.Read(dwStartUpdate);
+            continue;
+        }
         CMapObject *pMO = (CMapObject *)pMapObjectManager->Find(nID);
         if (!pMO) { file.Fail("unknown_dynamic_id"); return; }
         if (file.GetVersion() > 88)
@@ -3955,6 +3986,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
 
     // load objects and other stuff
     LoadDynamic(file);
+    CBaseManager::SavedReferences savedReferences(*pMapObjectManager, omittedDynamicObjects);
     pEffectManager->Load(file);
     pSpellManager->Load(file);
     pItemManager->Load(file);
@@ -4080,6 +4112,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
             }
         }
     }
+    savedReferences.End(); // map IDs are available to live logic again
     C2DScreenWait::Step(7);
 
     szCurrentZoneName = szNewCurrentZoneName;

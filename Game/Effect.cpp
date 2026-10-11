@@ -869,6 +869,7 @@ void CEffectParticle::Load(CSave &file)
     file.Read(&typeID, sizeof(typeID));
     file.Read(fpScale);
     file.Read(nAttachedID);
+    nAttachedID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttachedID);
     file.Read(&vecSpeed, sizeof(vecSpeed));
     SetMoving();
     file.Read(nStartSegment);
@@ -876,6 +877,7 @@ void CEffectParticle::Load(CSave &file)
     if (file.GetVersion() < 67)
         return;
     file.Read(nStartID);
+    nStartID = GetWorld()->GetMapObjectManager()->SavedObjectID(nStartID);
     if (file.GetVersion() < 88)
         return;
     file.Read(fpPower);
@@ -1100,7 +1102,9 @@ void CEffectLightning::Load(CSave &file)
     file.Read(&ptDst, sizeof(ptDst));
     file.Read(fpWidth);
     file.Read(nAttachedID);
+    nAttachedID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttachedID);
     file.Read(nCasterID);
+    nCasterID = GetWorld()->GetMapObjectManager()->SavedObjectID(nCasterID);
     if (file.GetVersion() < 100)
         return;
     file.Read(&bColor, sizeof(bColor));
@@ -1348,6 +1352,7 @@ void CEffectArrow::Load(CSave &file)
     DiscardWeaponAttack(); // Legacy save format has no weapon payload.
     file.Read(&cp, sizeof(cp));
     file.Read(nTargetID);
+    nTargetID = GetWorld()->GetMapObjectManager()->SavedObjectID(nTargetID);
     file.Read(&vecSpeed, sizeof(vecSpeed));
     file.Read(bDelivered);
     file.Read(szSoundName);
@@ -1358,6 +1363,7 @@ void CEffectArrow::Load(CSave &file)
     if (file.GetVersion() < 67)
         return;
     file.Read(nAttackerID);
+    nAttackerID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttackerID);
     file.Read(bNewArrow);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1493,7 +1499,9 @@ void CEffectArrowFigure::Load(CSave &file)
     if(auto*mod=ModRuntime::Current())mod->ForgetAttack(attackPortion);
     file.Read(&cp, sizeof(cp));
     file.Read(nTargetID);
+    nTargetID = GetWorld()->GetMapObjectManager()->SavedObjectID(nTargetID);
     file.Read(nAttackerID);
+    nAttackerID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttackerID);
     file.Read(&vecSpeed, sizeof(vecSpeed));
     file.Read(bDelivered);
     pMapObj.Load(file, *GetWorld());
@@ -1588,7 +1596,9 @@ int CEffectShowVisibility::Segment()
 void CEffectShowVisibility::Load(CSave &file)
 {
     file.Read(nTargetID);
+    nTargetID = GetWorld()->GetMapObjectManager()->SavedObjectID(nTargetID);
     file.Read(nWatcherID);
+    nWatcherID = GetWorld()->GetMapObjectManager()->SavedObjectID(nWatcherID);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectShowVisibility::Store(CSave &file)

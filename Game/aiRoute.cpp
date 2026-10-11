@@ -8,6 +8,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "NetUpdate.h"
 #include "GameBase.h"
 #include "World.h"
+#include "WorldServer.h"
 #include "Unit.h"
 // #include "console.h"
 /**********************************************************************
@@ -816,6 +817,8 @@ void CAIFullRoute::Load(CSave &file)
     file.Read(fpStartAngle);
     file.Read(nStartSegment);
     file.Read(&attack, sizeof(attack));
+    if (moveType == Attack)
+        attack.nTargetID = theWorldServer.GetMapObjectManager()->SavedObjectID(attack.nTargetID);
     route.Load(file);
 }
 /////////////////////////////////////////////////////////////////////////////////////
