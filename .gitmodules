@@ -1,0 +1,3 @@
+[submodule "external/owned-renderer"]
+	path = external/owned-renderer
+	url = https://github.com/Ilufus/evil-islands-owned-renderer

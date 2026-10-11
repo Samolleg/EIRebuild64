@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{8F045552-BA21-4F45-9902-631E6359DABD}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>StaticLibrary</ConfigurationType><PlatformToolset>v143</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="Renderer.props" />
+  <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_atlas_mutation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_store.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_loader.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_visual_evaluation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_visual_publication.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\character_pane_owned_text.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_front_end.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_decode.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_runtime.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_layout.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_maps.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_scene.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_submission.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_neighbour_maps.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_liquid.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_particles.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_wind_trails.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ground_cover.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_critters.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_point_shadows.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fog.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain_bake.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\surface_upload.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\lifecycle_probe.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\frame_statistics.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_static_lod.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\simplifier.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

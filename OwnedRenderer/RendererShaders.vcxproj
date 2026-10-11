@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{F9F236B9-5E99-4BD6-B032-D727834B2329}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="Renderer.props" />
+  <PropertyGroup><TargetName>RendererShaderEmbed</TargetName></PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="$(OwnedRendererRoot)Tools\shader_embed.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\widescreen.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\test_harness.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\test_harness_command.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\cursor_image.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\res_mapping.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_atlas_mutation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_store.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_loader.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_visual_evaluation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_visual_publication.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\character_pane_owned_text.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_ui_layers.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_front_end.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_decode.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_runtime.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_layout.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_maps.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_scene.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_submission.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_neighbour_maps.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_liquid.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_particles.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_wind_trails.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ground_cover.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_critters.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_point_shadows.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fog.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain_bake.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\surface_upload.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\render_profiler.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\attribution_ledger.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\engine_bridge.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\camp_inventory.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\res_cache_release.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\addon_hook_chain.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\addon_discovery.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\lifecycle_probe.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\camera_rotation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\cursor_confinement.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\game_focus.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\frame_statistics.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\system_telemetry.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay_config.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\graphics_settings.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_draw.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_tables.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_static_lod.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\simplifier.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
+  </ItemGroup>
+  <ItemDefinitionGroup><Link><LargeAddressAware>true</LargeAddressAware><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dxguid.lib;user32.lib;gdi32.lib;comctl32.lib;bcrypt.lib;pdh.lib;psapi.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
+  <Target Name="GenerateRendererResources" AfterTargets="Build" Inputs="$(TargetPath);$(OwnedRendererRoot)Source\camp_art.rc;$(OwnedRendererRoot)Assets\camp\stone-bronze-frame.png;$(OwnedRendererRoot)Assets\camp\ui-art-atlas-v4.png;$(OwnedRendererRoot)Assets\camp\hammer-anvil-empty.png" Outputs="$(OutDir)eid3d11_shaders.bin;$(OutDir)eid3d11_shaders.res;$(OutDir)eid3d11_camp_art.res">
+    <Exec Command="&quot;$(TargetPath)&quot; eid3d11_shaders.bin" WorkingDirectory="$(OutDir)" />
+    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x86)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo eid3d11_shaders.res eid3d11_shaders.rc" WorkingDirectory="$(OutDir)" />
+    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x86)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo &quot;$(OutDir)eid3d11_camp_art.res&quot; Source\camp_art.rc" WorkingDirectory="$(OwnedRendererRoot)" />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
