@@ -84,13 +84,24 @@ struct CBinkVideo::Player
         pause = reinterpret_cast<decltype(pause)>(Symbol("_BinkPause@8", "BinkPause"));
         return open && close && decode && next && wait && copy && seek && pause;
     }
+    void SelectSilentAudioTrack()
+    {
+        // Retail 1.0t uses one track ID; -1 explicitly selects no sound.
+        auto single = reinterpret_cast<void (__stdcall *)(unsigned)>(
+            GetProcAddress(module, "_BinkSetSoundTrack@4"));
+        if (single) single(0xFFFFFFFFu);
+        else
+        {
+            auto multiple = reinterpret_cast<void (__stdcall *)(unsigned, unsigned *)>(
+                GetProcAddress(module, "_BinkSetSoundTrack@8"));
+            if (multiple) multiple(0, nullptr);
+        }
+    }
     unsigned ConfigureAudio(const char *name)
     {
         MiniaudioOneShotSfx::BeginBinkAudioMovie(name);
         auto set = reinterpret_cast<int (__stdcall *)(void *, uintptr_t)>(
             Symbol("_BinkSetSoundSystem@8", "BinkSetSoundSystem"));
-        auto tracks = reinterpret_cast<void (__stdcall *)(unsigned, unsigned *)>(
-            Symbol("_BinkSetSoundTrack@8", "BinkSetSoundTrack"));
         auto sound = theWorld.GetSoundManager();
         if (set && sound && MiniaudioOneShotSfx::IsSupportedBinkAudioAbi(reinterpret_cast<void *>(set)))
         {
@@ -98,14 +109,12 @@ struct CBinkVideo::Player
             void *adapter = MiniaudioOneShotSfx::GetBinkMiniaudioSystemOpen();
             if (adapter && set(adapter, 0))
             {
-                unsigned track = 0;
-                if (tracks) tracks(1, &track);
                 return 0;
             }
         }
         MiniaudioOneShotSfx::MuteBinkAudioMovie("adapter_unavailable");
-        if (tracks) tracks(0, nullptr);
-        // BINKSNDTRACK: the explicit empty track selection keeps video silent.
+        SelectSilentAudioTrack();
+        // BINKSNDTRACK applies the explicit disabled track selection.
         return 0x00004000u;
     }
     void Decode()
@@ -155,9 +164,7 @@ bool CBinkVideo::BeginPlay(LPCSTR name, bool stopSounds, bool hideCursor)
     p->movie = p->open(moviePath.c_str(), audioFlags);
     if (!p->movie && MiniaudioOneShotSfx::HasBinkAudioMovieFailed() && audioFlags == 0)
     {
-        auto tracks = reinterpret_cast<void (__stdcall *)(unsigned, unsigned *)>(
-            p->Symbol("_BinkSetSoundTrack@8", "BinkSetSoundTrack"));
-        if (tracks) tracks(0, nullptr);
+        p->SelectSilentAudioTrack();
         p->movie = p->open(moviePath.c_str(), 0x00004000u);
     }
     if (p->movie && MiniaudioOneShotSfx::HasBinkAudioMovieFailed())
