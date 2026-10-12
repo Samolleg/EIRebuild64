@@ -6,6 +6,8 @@
 #define DXGI_ENABLED
 
 class CDX11;
+namespace owned { class Renderer; }
+namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
 
 class CDXGISurface
 {
@@ -46,6 +48,9 @@ public:
     // special blit to and from primary/render surfaces
     HRESULT BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                LPDDBLTFX pDDBltFx = 0);
+    HRESULT BlitPublishedToFacade(OwnedRender::RendererFacadeCore<owned::Renderer>& facade,
+        const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey = nullptr,
+        bool interfaceSpace = true, bool nativeCanvas = true);
     HRESULT BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                  LPDDBLTFX pDDBltFx = 0);
     void UpdateTexture(UINT subresource_index, D3D11_BOX *region, D3D11_SUBRESOURCE_DATA *srd);

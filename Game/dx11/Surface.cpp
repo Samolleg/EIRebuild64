@@ -5,6 +5,13 @@
 #include "RendererDX11.h"
 #include "../FrameDiagnostics.h"
 #include "EffectProcessor.h"
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#include "../OwnedRender/E1SurfaceFacade.h"
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
 {
@@ -511,6 +518,17 @@ HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWOR
             pDDBltFx ? pDDBltFx->ddckSrcColorkey.dwColorSpaceLowValue : 0);
     pDX11->GetSpriteBatch()->Draw(textureView.Get(), *pDestRect, pSrcRect);
     return S_OK;
+}
+HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facade,
+    const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey,
+    bool interfaceSpace, bool nativeCanvas)
+{
+    if (!pDX11 || !texture || !facade.FrameActive()) return E_UNEXPECTED;
+    auto device = pDX11->GetDevice();
+    auto context = pDX11->GetDeviceContext();
+    if (!device || !context) return E_UNEXPECTED;
+    return OwnedRender::E1BlitPublishedSurface(facade, device.Get(), context.Get(),
+        OwnedSurfaceId(), destination, source, colorKey, interfaceSpace, nativeCanvas);
 }
 HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                            LPDDBLTFX pDDBltFx)
