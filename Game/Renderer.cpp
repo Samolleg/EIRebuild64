@@ -32,6 +32,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"
 #include "OwnedRender/E1VisualFrame.h"
+#include "OwnedRender/E1FogSubmission.h"
 #include "OwnedRender/E4Camp.h"
 /////////////////////////////////////////////////////////////////////////////////////
 namespace NDXDirect3D {
@@ -999,10 +1000,6 @@ int CRenderer::Render(SXYZW4 *plots, CPlot2D *maps, const int nNumPlots, WORD *i
 BOOL CRenderer::RenderTriangleSet(STLVertex1 *pVertices, DWORD dwVertexCount, LPWORD pIndices,
                                   DWORD dwIndexCount)
 {
-    if (bAddFog)
-        pGeometryProcessor->GetGeometryProcessor()->AddFog(reinterpret_cast<D3DTLVERTEX *>(
-                                                               pVertices),
-                                                           dwVertexCount);
 
     return DrawIndexedPrimitive(D3DPT_TRIANGLELIST, pVertices, dwVertexCount, pIndices,
                                 dwIndexCount, 0);
@@ -1031,7 +1028,18 @@ BOOL CRenderer::DrawIndexedPrimitive(D3DPRIMITIVETYPE primitiveType, LPVOID lpvV
 {
     if ((dwVertexCount == 0) || (dwIndexCount == 0))
         return TRUE;
-    pDX11->DrawSimplePrimitive(lpvVertices, dwVertexCount, pIndices, dwIndexCount, dwFlags);
+    // Completed host geometry and material are consumed only by c56.
+    // Distance/projection fog is applied by its pixel stage, never CPU AddFog.
+    OwnedRender::E1TrianglePacket packet;
+    if (primitiveType != D3DPT_TRIANGLELIST || !packet.Build(
+        static_cast<const STLVertex1*>(lpvVertices), dwVertexCount, pIndices, dwIndexCount)) {
+        pDX11->SubmitC56Triangles({});
+        return TRUE;
+    }
+    auto view = packet.View(pIndices, dwIndexCount);
+    const auto& projection = GetConstantBuffers()->cb_vs_vertexshader.data.ei_projspace;
+    std::memcpy(view.object_to_clip.data(), &projection, sizeof(view.object_to_clip));
+    pDX11->SubmitC56Triangles(view);
     return TRUE;
 }
 

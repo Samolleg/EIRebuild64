@@ -130,6 +130,8 @@ public:
     void EndFrame(bool present = true);
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
+    owned::FixedState CaptureC56MaterialState();
+    bool SubmitC56Triangles(const owned::NativeGeometryView& view);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
     bool SubmitC56CampFigure(const owned::NativeGeometryView& view);
@@ -146,8 +148,7 @@ public:
     bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
     OwnedTerrainPassResult SubmitC56TerrainPass(bool transparent);
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
-    int DrawSimplePrimitive(LPVOID pvVertices, DWORD dwVertexCount,
-                            LPWORD pwIndices, DWORD dwIndexCount, DWORD dwFlags);
+
     int TriggerRedraw();
     template <typename TVertexType>
     int DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,

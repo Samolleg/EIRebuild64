@@ -110,10 +110,9 @@ BOOL CVisibilityFog::Draw(CRenderer *pTarget)
 {
     if (particles.size() == 0)
         return TRUE;
-    if (particles.size() > 12000)
-
-        if (!bBVIsCorrect)
-            BuildBoundingVolume();
+    // Bounds must exist before c56 receives the visible cloud, at any size.
+    if (!bBVIsCorrect)
+        BuildBoundingVolume();
 
     int nClipFlag = pTarget->CheckVisibility(bv);
     if (nClipFlag == TRV_INVISIBLE)
@@ -146,6 +145,8 @@ BOOL CVisibilityFog::Draw(CRenderer *pTarget)
         pParticle->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwPower);
         pParticle->pUV = uv16 + i->second.nPhase;
     }
+    // c56 owns billboard expansion, the stock 511-point sorting and fog.
+    // Keep the simulation, phase UVs and source alpha unchanged.
     return pTarget->DrawParticles(false, inCoords, resParts);
 }
 /////////////////////////////////////////////////////////////////////////////////////

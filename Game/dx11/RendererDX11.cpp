@@ -111,24 +111,6 @@ bool CDX11::SetRenderStates()
 }
 
 
-int CDX11::DrawSimplePrimitive(LPVOID pVertices, DWORD dwVertexCount,
-                               LPWORD pIndices, DWORD dwIndexCount, DWORD dwFlags)
-{
-    //Terrain, Prints, FHP - no extra lighting
-    if (!dwIndexCount)
-        return 0;
-    RenderStateCheck();
-    
-    std::shared_ptr<VertexBuffer<STLVertex1>> vertexBuf = m_caches->CreateOrUpdate(
-        static_cast<STLVertex1 *>(pVertices), dwVertexCount);
-
-    this->deviceContext->IASetInputLayout(m_shaders->vs_simple.GetInputLayout());
-    this->deviceContext->VSSetShader(m_shaders->vs_simple.GetShader(), NULL, 0);
-    return DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, vertexBuf.get(), pIndices,
-                                dwIndexCount);
-}
-
-
 owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
 {
     auto state = OwnedRender::E1TerrainMaterialState(fake_dx7.render_state,
@@ -142,7 +124,7 @@ owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
         UINT(viewport.Width), UINT(viewport.Height)};
     state.captured_depth_range = {viewport.MinDepth, viewport.MaxDepth};
     const auto fog = owned::bridge_world_fog_snapshot();
-    state.captured_fog_enable = fog.valid && fog.enabled;
+    state.captured_fog_enable = theRenderer.IsAddFog() && fog.valid && fog.enabled;
     const auto& color = GetConstantBuffers()->cb_ps_pixelshader.data.fogColor;
     const auto byte = [](float v) { return DWORD((std::max)(0.f, (std::min)(1.f, v)) * 255.f + .5f); };
     state.captured_fog_color = (byte(color.x) << 16) | (byte(color.y) << 8) | byte(color.z);
@@ -192,18 +174,63 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     return OwnedTerrainPassResult::failed;
 }
 
+owned::FixedState CDX11::CaptureC56MaterialState()
+{
+    owned::FixedState state;
+    for (const auto& item : fake_dx7.render_state)
+        if (item.first >= 0 && std::size_t(item.first) < state.render.size())
+            state.render[item.first] = item.second;
+    D3D11_VIEWPORT viewport{}; UINT count = 1;
+    deviceContext->RSGetViewports(&count, &viewport);
+    state.viewport = {DWORD(viewport.TopLeftX), DWORD(viewport.TopLeftY),
+        DWORD(viewport.Width), DWORD(viewport.Height), viewport.MinDepth, viewport.MaxDepth};
+    const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
+    const bool textured = bool(boundFigureTextures[0]);
+    state.stage[0][D3DTSS_COLOROP] = textured ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
+    state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
+    state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
+    state.stage[0][D3DTSS_ALPHAOP] = !textured ? D3DTOP_SELECTARG2 :
+        pixel.alphaMode == 0 ? D3DTOP_SELECTARG1 : pixel.alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
+    state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
+    state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
+    state.stage[0][D3DTSS_ADDRESSU] = state.stage[0][D3DTSS_ADDRESSV] = D3DTADDRESS_WRAP;
+    state.stage[0][D3DTSS_MINFILTER] = state.stage[0][D3DTSS_MAGFILTER] = D3DTFG_LINEAR;
+    state.stage[0][D3DTSS_MIPFILTER] = D3DTFP_LINEAR;
+    const auto fog = owned::bridge_world_fog_snapshot();
+    state.render[D3DRENDERSTATE_FOGENABLE] = ownedWorldActive && theRenderer.IsAddFog() && fog.valid && fog.enabled;
+    const auto byte = [](float v) { return DWORD((std::max)(0.f, (std::min)(1.f, v)) * 255.f + .5f); };
+    state.render[D3DRENDERSTATE_FOGCOLOR] = (byte(pixel.fogColor.x) << 16) |
+        (byte(pixel.fogColor.y) << 8) | byte(pixel.fogColor.z);
+    return state;
+}
+
+bool CDX11::SubmitC56Triangles(const owned::NativeGeometryView& view)
+{
+    HRESULT hr = E_UNEXPECTED;
+    if (rendererFacade && rendererFacade->FrameActive() && view.positions && view.indices) {
+        const auto state = CaptureC56MaterialState();
+        hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+            return renderer.queue_embedded_figure(view, state, boundFigureTextures[0].Get(),
+                boundFigureTextures[1].Get(), nullptr, {});
+        });
+        RestoreHostBindings();
+    }
+    if (SUCCEEDED(hr)) return true;
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        GameJournal::Event("RENDER", "triangles_skipped", "owner=c56 hr=%08lx", static_cast<unsigned long>(hr));
+    }
+    return false;
+}
+
 bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
 {
     HRESULT hr=E_UNEXPECTED;
     if(rendererFacade && rendererFacade->FrameActive() && source.positions &&
        source.normals && source.components && source.indices) {
         auto view=source;
-        owned::FixedState state;
-        for(const auto& item:fake_dx7.render_state)
-            if(item.first>=0 && std::size_t(item.first)<state.render.size())state.render[item.first]=item.second;
-        D3D11_VIEWPORT viewport{};UINT count=1;
-        deviceContext->RSGetViewports(&count,&viewport);
-        state.viewport={DWORD(viewport.TopLeftX),DWORD(viewport.TopLeftY),DWORD(viewport.Width),DWORD(viewport.Height),viewport.MinDepth,viewport.MaxDepth};
+        owned::FixedState state = CaptureC56MaterialState();
         state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
         const auto& buffers=*GetConstantBuffers();
         const auto& pixel=buffers.cb_ps_pixelshader.data;
@@ -256,10 +283,8 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 {
     HRESULT hr = E_UNEXPECTED;
     if (ownedWorldActive && rendererFacade && rendererFacade->FrameActive()) {
-        owned::FixedState state;
-        for (const auto& value : fake_dx7.render_state)
-            if (value.first >= 0 && static_cast<std::size_t>(value.first) < state.render.size())
-                state.render[value.first] = value.second;
+        owned::FixedState state = CaptureC56MaterialState();
+        // Particle clip extents are logical host pixels, not the scaled target.
         state.viewport.dwX = state.viewport.dwY = 0;
         state.viewport.dwWidth = m_width;
         state.viewport.dwHeight = m_height;
@@ -435,6 +460,9 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
     frame.viewport.dwX = frame.viewport.dwY = 0;
     frame.viewport.dwWidth = m_width;
     frame.viewport.dwHeight = m_height;
+    const auto fogState = CaptureC56MaterialState();
+    frame.render[D3DRENDERSTATE_FOGENABLE] = fogState.render[D3DRENDERSTATE_FOGENABLE];
+    frame.render[D3DRENDERSTATE_FOGCOLOR] = fogState.render[D3DRENDERSTATE_FOGCOLOR];
     bool owned = false;
     const HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
         // The owned-visual frame draws shadows, point lights and every claimed
@@ -699,7 +727,7 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     };
     const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
-        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback game_particles=c56 effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",
+        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=c56 world_figures=c56 game_particles=c56 visfog=c56 fog=c56 triangles=c56 effects=category-migration shadows=c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));
     IfFailedThrowHR(rendererFacade->VisitOutput(this,
         [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {

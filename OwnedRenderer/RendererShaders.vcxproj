@@ -8,7 +8,9 @@
   <Import Project="Renderer.props" />
   <PropertyGroup><TargetName>RendererShaderEmbed</TargetName></PropertyGroup>
   <ItemGroup>
-    <ClCompile Include="$(OwnedRendererRoot)Tools\shader_embed.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Tools\shader_embed.cpp">
+      <PreprocessorDefinitions>EID3D11_EMBEDDED;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Include="$(OwnedRendererRoot)Source\widescreen.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\test_harness.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\test_harness_command.cpp" />
