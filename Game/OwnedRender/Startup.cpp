@@ -6,6 +6,7 @@
 #include "../ModRuntime.h"
 #include "../ModPackage.h"
 #include "../GameJournal.h"
+#include <owned_resource_runtime.h>
 
 namespace OwnedRender {
 void ConfigureStartup() {
@@ -22,5 +23,13 @@ void ConfigureStartup() {
     ConfigureResources(engine.wstring(), paths.world_map_layouts, std::move(paths.mounts));
     GameJournal::Event("RENDER", "resource_bootstrap",
         "source=SettingsProfile/ModRuntime roots=%zu archives=%zu device_created=0", roots, archives);
+}
+
+ResourceRuntimeLease::ResourceRuntimeLease() {
+    owned::owned_resource_runtime_acquire();
+}
+
+ResourceRuntimeLease::~ResourceRuntimeLease() {
+    owned::owned_resource_runtime_release();
 }
 }

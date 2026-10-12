@@ -760,6 +760,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
        // set new memory depleted handler
        // create worlds and establish connection to local server
     OwnedRender::ConfigureStartup();
+    OwnedRender::ResourceRuntimeLease ownedResourceRuntime;
     theWorld.Create();
     theWorldServer.Create();
     theCamera.Create(&theSettings, theSettings.fpNearClipDistance, theSettings.fpFarClipDistance,
