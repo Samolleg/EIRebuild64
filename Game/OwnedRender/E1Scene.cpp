@@ -45,11 +45,17 @@ bool E1BuildAnimationSelection(const std::string& databaseName,
 bool E1SceneMembership::Matches(const void* source, std::uint64_t generation) const noexcept {
     return source && generation && owner == source && world == generation;
 }
+void E1SceneMembership::RetireResources() noexcept {
+    for (const auto& entry : resources) scene.visual_finish_resource(entry.second, false);
+    resources.clear();
+}
 void E1SceneMembership::Begin(const void* source, std::uint64_t generation) noexcept {
     if (!source || !generation || Matches(source, generation)) return;
-    scene.reset();
+    // A new client world keeps the server-published MOB source: the main
+    // zone load publishes it before the client world begins, and a full
+    // reset here erased it (no static scene, shadows or point lamps).
+    RetireResources();
     members.clear();
-    resources.clear();
     owner = source;
     world = generation;
     epoch = advance(nextEpoch);
@@ -57,9 +63,9 @@ void E1SceneMembership::Begin(const void* source, std::uint64_t generation) noex
 }
 void E1SceneMembership::Retire(const void* source, std::uint64_t generation) noexcept {
     if (!Matches(source, generation)) return;
-    scene.reset();
+    RetireResources();
     members.clear();
-    resources.clear();
+    scene.positive_lifecycle_reset(advance(nextEpoch));
     owner = nullptr;
     world = epoch = 0;
 }

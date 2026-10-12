@@ -27,6 +27,7 @@ class E1SceneMembership {
     std::map<std::int32_t, owned::LifecycleIdentity> members;
     std::map<const void*, owned::VisualResourceIncarnation> resources;
     bool Matches(const void* source, std::uint64_t generation) const noexcept;
+    void RetireResources() noexcept;
 public:
     explicit E1SceneMembership(owned::RetainedStaticScene& target) noexcept : scene(target) {}
     E1SceneMembership(const E1SceneMembership&) = delete;
