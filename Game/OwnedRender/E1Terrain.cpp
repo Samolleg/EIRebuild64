@@ -79,8 +79,12 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
 void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>& surfaces) noexcept try {
     if (owner != sourceOwner) return;
     atlasIds.clear();
-    if (!source.terrain || surfaces.size() != std::size_t(source.terrain->texture_count)+2u) return;
+    if (!source.terrain) return;
+    const auto required = std::size_t(source.terrain->texture_count);
+    const auto capacity = required + 2u; // The two long-tile atlases are optional in the map.
+    if (surfaces.size() < required || surfaces.size() > capacity) return;
     atlasIds = surfaces;
+    atlasIds.resize(capacity, 0); // Preserve absent trailing slots without shifting real atlas indices.
 } catch (...) { atlasIds.clear(); }
 void E1RetireTerrain(const void* owner) noexcept { if (owner == sourceOwner) clear(); }
 bool E1PublishTerrainSectors(const void* owner,
