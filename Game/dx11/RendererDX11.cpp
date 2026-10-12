@@ -25,6 +25,7 @@
 #include "Vertex.h"
 #include "EffectProcessor.h"
 #include "../Renderer.h"
+#include "../OwnedRender/E1VisualFrame.h"
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -235,11 +236,32 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
     return fallback(c56WorldFigureQueueFailed);
 }
 
+void CDX11::FlushInterfaceBeforeLegacyDraw()
+{
+    // Interface images (panels, text, the modal world backdrop) queue in the
+    // renderer until present; a legacy figure drawn now (window 3D frames,
+    // escMenu model, interface bars) would end up beneath them. Draw the queue
+    // first, as the DirectDraw proxy does before its pending legacy draws.
+    if (ownedWorldActive || !rendererFacade)
+        return;
+    bool flushed = false;
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        if (!renderer.has_pending_ui()) return S_OK;
+        flushed = true;
+        return renderer.flush_ui();
+    }));
+    if (!flushed)
+        return;
+    RefreshOwnedTargets();
+    SetRenderStates();
+}
+
 int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIndices, DWORD dwIndexCount,
                   DWORD dwFlags)
 {
     if (!dwIndexCount)
         return 0;
+    FlushInterfaceBeforeLegacyDraw();
     if (ownedWorldActive)
         ++c56WorldFigureLegacyDraws;
     RenderStateCheck();
@@ -326,12 +348,13 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
     c56WorldPassRan = false;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
+    OwnedRender::E1OwnedVisualFrameNewDraw();
     RefreshOwnedTargets();
     SetRenderStates();
     return skyConsumed != 0;
 }
 
-void CDX11::RunC56WorldPass()
+void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
 {
     if (!ownedWorldActive || c56WorldPassRan || !rendererFacade)
         return;
@@ -339,13 +362,28 @@ void CDX11::RunC56WorldPass()
     for (const auto& value : fake_dx7.render_state)
         if (value.first >= 0 && static_cast<std::size_t>(value.first) < frame.render.size())
             frame.render[value.first] = value.second;
+    frame.viewport.dwX = frame.viewport.dwY = 0;
+    frame.viewport.dwWidth = m_width;
+    frame.viewport.dwHeight = m_height;
+    bool owned = false;
     const HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        // The owned-visual frame draws shadows, point lights and every claimed
+        // visual, and flushes the static set itself; without it (or when it
+        // was rejected before the flush) the static set is flushed here.
+        if (visuals)
+            owned = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, *visuals);
+        if (visuals && OwnedRender::E1OwnedVisualFrameFlushedStatics())
+            return S_OK;
         return renderer.flush_native_static(frame, ownedWorldToClip);
     });
     IfFailedThrowHR(pass);
     c56WorldPassRan = true;
-    GameJournal::Event("RENDER", "world_pass",
-        "owner=c56 path=flush_native_static position=after_scene_publication before=transparent_terrain,world_effects missing=shadow_casters,game_particles");
+    const int state = visuals ? (owned ? 2 : 1) : 0;
+    if (state != c56WorldPassState) {
+        c56WorldPassState = state;
+        GameJournal::Event("RENDER", "world_pass",
+            "owner=c56 owned_visual_frame=%s", state == 2 ? "drawn" : state == 1 ? "rejected" : "not_requested");
+    }
 }
 
 void CDX11::MarkLoadPicture()

@@ -11,6 +11,7 @@
     <ClCompile Include="..\Game\OwnedRender\E1SkeletonSources.cpp" />
     <ClCompile Include="..\Game\OwnedRender\E1FigureSources.cpp" />
     <ClCompile Include="..\Game\OwnedRender\E1TerrainSubmission.cpp" />
+    <ClCompile Include="..\Game\OwnedRender\E1VisualFrame.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_unit_effects.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_object_contacts.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\world_perches.cpp" />

@@ -6,6 +6,7 @@
 #include "SpriteBatch.h"
 #include "OwnedRendererClient.h"
 #include "../OwnedRender/E1RendererFacade.h"
+namespace OwnedRender { struct E1VisualInputs; }
 #include "SpriteFont.h"
 #include "FakeDX7.h"
 #include "Caches.h"
@@ -90,6 +91,7 @@ private:
     bool ownedWorldActive = false;
     std::array<float, 16> ownedWorldToClip{};
     bool c56WorldPassRan = false;
+    int c56WorldPassState = -1;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
     std::unique_ptr<DirectX::SpriteFont> spriteFont;
     std::unique_ptr<DirectX::CommonStates> m_states;
@@ -117,7 +119,7 @@ public:
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
-    void RunC56WorldPass();
+    void RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals = nullptr);
     void SubmitC56PointLights(const std::vector<owned::RetainedWorldPointLight>& lights,
                               double worldTime);
     bool IsOwnedWorldActive() const { return ownedWorldActive; }
@@ -128,6 +130,7 @@ public:
     // A loading picture (wait screen, movie frame): the renderer keeps it on
     // screen while the next world prepares, as retail shows the load screen.
     void MarkLoadPicture();
+    void FlushInterfaceBeforeLegacyDraw();
     // Presents a full-screen BGRX image (movie or wait-screen frame) through
     // the renderer, fitted to the output and kept as the loading picture.
     HRESULT PresentLoadingImage(const std::vector<unsigned char>& bgrx, UINT width, UINT height,

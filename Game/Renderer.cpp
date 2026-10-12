@@ -31,6 +31,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Particle.h"
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"
+#include "OwnedRender/E1VisualFrame.h"
 /////////////////////////////////////////////////////////////////////////////////////
 namespace NDXDirect3D {
 // buffers
@@ -1155,6 +1156,8 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
     if(!pDX11->IsOwnedWorldActive() || !pDX11->GetOwnedRenderer().FigureActive())return false;
+    // A visual the retained scene claims is drawn by the owned-visual frame.
+    if(OwnedRender::E1OwnedVisualDrawn(std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id)))return true;
     if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
        !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) return false;
 

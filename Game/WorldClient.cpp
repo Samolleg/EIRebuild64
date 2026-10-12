@@ -71,6 +71,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
 #include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E1AmbientEffects.h"
 #include "OwnedRender/E2LoadReveal.h"
 #include "WorldServer.h"
@@ -3111,6 +3112,8 @@ BOOL CWorldClient::Draw()
     // render main 3D scene: objects and their shadows
     Draw3DScene();
     LMPTimePassed();
+    std::vector<owned::RetainedWorldPointLight> ownedPointLights;
+    const bool ownedDrawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
     if(pTerrain && pTerrain->IsLoaded()){
         // Visibility and interpolated positions have just been prepared by
         // Draw3DScene. Source rows are copied before the liquid/effect passes.
@@ -3121,13 +3124,38 @@ BOOL CWorldClient::Draw()
         for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
         scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
         pRend->GetD3D()->SubmitC56PointLights(scene.c56Lights, ownedWorld.world_time);
+        ownedPointLights=scene.c56Lights;
         if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
     }
     // Publish this draw's visibility and interpolated scene facts before c56
     // consumes them for critters, ground cover, lights, and retained geometry.
     // Run after opaque terrain and scene preparation, before transparent water.
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
-        pRend->GetD3D()->RunC56WorldPass();
+    {
+        // The renderer's owned-visual frame (as the game.exe bridge's scene
+        // seam): the retained scene takes this draw's point lights and commits
+        // the tick after Draw3DScene published every object's pose; the frame
+        // then draws sun/point shadows and every claimed visual.
+        static_assert(WC_RENDER_OBJECTS == 0x40 && WC_RENDER_UNITS == 0x80 && WC_RENDER_TERRAIN == 0x100,
+                      "owned-visual class flags follow the game.exe world flags");
+        auto& retained = OwnedRender::E1Scene().Scene();
+        retained.visual_publish_world_point_lights(ownedPointLights);
+        retained.visual_commit_tick(double(GetSegmentTimeCounter()));
+        OwnedRender::E1VisualInputs visuals;
+        visuals.time = GetPreciseTime();
+        visuals.sceneFlags = GetFlags();
+        visuals.drawUndetected = ownedDrawUndetected;
+        visuals.worldToClip = frameValues.camera.world_to_clip;
+        visuals.ambient = frameValues.lighting.ambient;
+        visuals.sunDiffuse = frameValues.lighting.sunlight_diffuse;
+        visuals.sunDirection = frameValues.lighting.sunlight_direction;
+        visuals.lightingValid = frameValues.lightingValid;
+        visuals.fog = [](void* terrain, const float* p) -> unsigned char {
+            return static_cast<CTerrain*>(terrain)->GetFogAlpha(CPlot3D(p[0], p[1], p[2]));
+        };
+        visuals.fogContext = pTerrain;
+        pRend->GetD3D()->RunC56WorldPass(&visuals);
+    }
     // render terrain's transparent part (water)
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
@@ -3617,7 +3645,10 @@ BOOL CWorldClient::Draw3DScene()
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
         pTerrain->DrawModTerrainShadow(pRend);
-        auto lbObjDrawShadow = [pRend](CObject3D *obj) { obj->DrawRealisticShadow2(pRend); };
+        // Objects the owned-visual frame drew cast owned shadows instead.
+        auto lbObjDrawShadow = [pRend](CObject3D *obj) {
+            if (!OwnedRender::E1OwnedVisualDrawn(obj->GetID())) obj->DrawRealisticShadow2(pRend);
+        };
         for_each(shadowLevers.begin(), shadowLevers.end(), lbObjDrawShadow);
         for_each(shadowObjects.begin(), shadowObjects.end(), lbObjDrawShadow);
         for_each(shadowBuildings.begin(), shadowBuildings.end(), lbObjDrawShadow);

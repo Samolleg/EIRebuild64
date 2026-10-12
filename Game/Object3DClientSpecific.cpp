@@ -788,6 +788,10 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
         part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN);
         assembly->parts.push_back(std::move(part));
     }
+    // The retained scene claims this object's mesh (game.exe bridge:
+    // visual_publish_appearance); the owned-visual frame then draws it.
+    if (!scene.visual_declare_mesh(resource, object->GetNumFigures() > 0))
+        return reject("appearance.declaration_publish");
     if (!scene.visual_publish_assembly(resource, std::move(assembly)))
         return reject("appearance.publish_current_resource");
     return true;
