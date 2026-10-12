@@ -123,14 +123,14 @@ struct CBinkVideo::Player
         RECT dest = {rect.left, rect.top, rect.right, rect.bottom};
         if (present)
         {
-            // A separate batch also allows movie sequences invoked from an UI draw callback.
-            if (!batch) batch.reset(new OwnedSpriteBatch(dx->GetOwnedRenderer()));
+            // The embedded renderer has no RDDraw UI host: present the frame
+            // as a renderer image (fitted to the output; also the loading
+            // picture the renderer holds while the next world prepares).
             dx->BeginFrame();
             dx->ClearColorBuffer(0);
-            batch->Begin(DirectX::SpriteSortMode_Immediate);
-            batch->Draw(view.Get(), dest);
-            batch->End();
-            if (loadingPicture) dx->MarkLoadPicture();
+            dx->PresentLoadingImage(pixels, movie->width, movie->height,
+                (std::uint64_t(1) << 62) | std::uint64_t(reinterpret_cast<std::uintptr_t>(this)),
+                ++imageGeneration);
             dx->EndFrame();
         }
         else dx->GetSpriteBatch()->Draw(view.Get(), dest);

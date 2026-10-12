@@ -357,6 +357,29 @@ void CDX11::MarkLoadPicture()
     });
 }
 
+HRESULT CDX11::PresentLoadingImage(const std::vector<unsigned char>& bgrx, UINT width, UINT height,
+                                   std::uint64_t id, std::uint64_t generation)
+{
+    if (!rendererFacade || !width || !height || bgrx.size() < size_t(width) * height * 4)
+        return E_INVALIDARG;
+    owned::SurfaceImage image;
+    image.id = id;
+    image.generation = generation;
+    image.width = width;
+    image.height = height;
+    image.pitch = LONG(width * 4);
+    image.format.dwSize = sizeof(image.format);
+    image.format.dwFlags = DDPF_RGB;
+    image.format.dwRGBBitCount = 32;
+    image.format.dwRBitMask = 0x00ff0000;
+    image.format.dwGBitMask = 0x0000ff00;
+    image.format.dwBBitMask = 0x000000ff;
+    image.pixels = bgrx;
+    return rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.present_image(image, nullptr, nullptr);
+    });
+}
+
 void CDX11::SubmitC56PointLights(
     const std::vector<owned::RetainedWorldPointLight>& lights, double worldTime)
 {
