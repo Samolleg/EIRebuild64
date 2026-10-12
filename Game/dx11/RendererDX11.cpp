@@ -574,6 +574,13 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
             self.m_width = view.width; self.m_height = view.height;
             return OwnedRender::E1BindTargets(nullptr, view);
         }));
+    ownedRenderer.embeddedUi = [this](ID3D11ShaderResourceView* image, const RECT& destination,
+                                      const RECT* source, unsigned flags) -> HRESULT {
+        if (!rendererFacade) return S_FALSE;
+        return rendererFacade->Visit([&](owned::Renderer& renderer) {
+            return renderer.blit_srv(image, destination, source, (flags & EI_RENDERER_UI_OPAQUE) != 0);
+        });
+    };
     const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
         "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",

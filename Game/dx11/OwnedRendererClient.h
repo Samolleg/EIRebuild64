@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 #include <string>
 #include <vector>
+#include <functional>
 #include <map>
 #include <array>
 #include <unordered_map>
@@ -437,8 +438,12 @@ public:
         if (!host || !worldApi.record_draw) return S_FALSE;
         return worldApi.record_draw(host, triangles);
     }
+    // Embedded c56: the host draws SpriteBatch images through the renderer
+    // facade (there is no RDDraw UI host). Set by CDX11 after device creation.
+    std::function<HRESULT(ID3D11ShaderResourceView*, const RECT&, const RECT*, unsigned)> embeddedUi;
     HRESULT DrawUi(ID3D11ShaderResourceView* image, const RECT& destination,
                    const RECT* source, unsigned flags, COLORREF key = 0) {
+        if (embeddedUi) return embeddedUi(image, destination, source, flags);
         const auto access = renderGate.Lock();
         if (!host || !api.draw_ui) return S_FALSE;
         EIRenderUiBlitV1 request = {};
