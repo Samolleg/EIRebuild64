@@ -3496,11 +3496,34 @@ BOOL CWorldClient::Prepare3DScene()
     }
     // Publish current poses for off-screen casters as well as visible objects.
     std::set<int> prepared;
+    static std::uint64_t lastPublicationEpoch = 0;
+    const auto publicationEpoch = OwnedRender::E1Scene().Epoch();
+    const bool capturePublication = publicationEpoch && publicationEpoch != lastPublicationEpoch;
+    std::vector<std::pair<int, unsigned>> unclaimedPublicationStages;
     auto prepare = [&](CMapObject* object) {
         if (!object || !object->GetObjectSpecific() || !prepared.insert(object->GetID()).second)
             return;
-        static_cast<CObject3DClientSpecific*>(object->GetObjectSpecific())->PrepareOwnedVisual(
+        auto* specific = static_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
+        if (!capturePublication)
+        {
+            specific->PrepareOwnedVisual(pRend, object->CheckFlag(OBJ_VISIBLE) != 0);
+            return;
+        }
+        const auto identity = OwnedRender::E1Scene().Identity(object->GetID());
+        const auto resource = OwnedRender::E1Scene().Resource(specific);
+        auto& retained = OwnedRender::E1Scene().Scene();
+        unsigned stages = 0;
+        if (identity.generation) stages |= 1u;
+        if (resource.serial) stages |= 2u;
+        if (resource.serial && retained.visual_assembly(resource)) stages |= 4u;
+        const bool preparedVisual = specific->PrepareOwnedVisual(
             pRend, object->CheckFlag(OBJ_VISIBLE) != 0);
+        if (preparedVisual) stages |= 32u;
+        if (resource.serial && retained.visual_assembly(resource)) stages |= 64u;
+        owned::VisualObjectPose pose{};
+        if (resource.serial && retained.visual_object_pose(resource, pose)) stages |= 8u;
+        if (identity.generation && retained.visual_claims_mesh(identity)) stages |= 16u;
+        if (!(stages & 16u)) unclaimedPublicationStages.emplace_back(object->GetID(), stages);
     };
     for (const auto* list : {&visibleObjects, &visibleBuildings, &visibleTrees, &visibleLevers,
                             &visibleUnits, &shadowObjects, &shadowBuildings, &shadowTrees,
@@ -3513,6 +3536,23 @@ BOOL CWorldClient::Prepare3DScene()
         if (object && object->GetObjectSpecific() &&
             object->GetID() > 0)
             prepare(object);
+    if (capturePublication)
+    {
+        lastPublicationEpoch = publicationEpoch;
+        if (!unclaimedPublicationStages.empty())
+        {
+            char details[768]{};
+            std::size_t used = 0;
+            for (const auto& item : unclaimedPublicationStages)
+            {
+                const int written = _snprintf_s(details + used, sizeof(details) - used,
+                    _TRUNCATE, "%s%d:%02x", used ? "," : "", item.first, item.second);
+                if (written < 0) break;
+                used += static_cast<std::size_t>(written);
+            }
+            GameJournal::Event("RENDER", "world_visual_unclaimed_stages", "%s", details);
+        }
+    }
     // Publish only footprints with a known creator and current native lifetime.
     try
     {
