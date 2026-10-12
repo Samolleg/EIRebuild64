@@ -237,6 +237,8 @@ int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIn
 {
     if (!dwIndexCount)
         return 0;
+    if (ownedWorldActive)
+        ++c56WorldFigurePrimitives;
     RenderStateCheck();
 
     std::shared_ptr<VertexBuffer<PNTVertex>> vertexBuf = m_caches->CreateOrUpdate(static_cast<PNTVertex *>(pVertices), dwVertexCount);
@@ -310,6 +312,7 @@ void CDX11::BeginFrame()
 bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 {
     uint32_t skyConsumed = 0;
+    c56WorldFigurePrimitives = 0;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
     RefreshOwnedTargets();
@@ -320,6 +323,10 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 void CDX11::EndWorld()
 {
     IfFailedThrowHR(ownedRenderer.EndWorld());
+    GameJournal::Event("RENDER", "zone7_model_owner",
+        "owner=c56_device path=host_figure_draw primitives=%llu",
+        static_cast<unsigned long long>(c56WorldFigurePrimitives));
+    c56WorldFigurePrimitives = 0;
     ownedWorldActive = false;
     RefreshOwnedTargets();
     SetRenderStates();

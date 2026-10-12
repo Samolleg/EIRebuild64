@@ -75,6 +75,7 @@ private:
     std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
     OwnedRender::E2FrameTiming frameTiming;
     std::uint64_t frameSerial = 0;
+    std::uint64_t c56WorldFigurePrimitives = 0;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
