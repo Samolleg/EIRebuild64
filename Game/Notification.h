@@ -8,6 +8,7 @@
 bool ReportError(const char *format, ...);
 bool ReportError(HRESULT code, const char *format, ...);
 bool ReportError(HRESULT code);
+bool ReportRecoverableError(const char *format, ...);
 
 // Native 0x44C470 debug channel; ordinary notifications keep their own sinks.
 void ReportGameDebug(const char *format, ...);

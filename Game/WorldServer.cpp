@@ -3793,7 +3793,7 @@ void CWorldServer::StoreDynamicData(CSave &file)
     file.Write((int)-1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::LoadDynamic(CSave &file)
+void CWorldServer::LoadDynamic(CSave &file, const char* loadingZone)
 {
     omittedDynamicObjects.clear();
     int nID;
@@ -3813,7 +3813,7 @@ void CWorldServer::LoadDynamic(CSave &file)
         {
             if (omittedDynamicObjects.emplace(nID, typeID).second)
                 GameJournal::Event("SAVE", "dynamic_conflict", "zone=%s id=%d type=%d subtype=%lu map_object=%s",
-                    GameJournal::Quote(szCurrentZoneName).c_str(), nID, typeID, dwSubtype,
+                    GameJournal::Quote(loadingZone).c_str(), nID, typeID, dwSubtype,
                     GameJournal::Quote(mapObject->GetMaskName()).c_str());
             continue;
         }
@@ -3998,7 +3998,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
         return ReportError("CWorldServer::LoadSave()\n Can't load map.\n");
 
     // load objects and other stuff
-    LoadDynamic(file);
+    LoadDynamic(file, szNewCurrentZoneName);
     CBaseManager::SavedReferences savedReferences(*pMapObjectManager, omittedDynamicObjects);
     pEffectManager->Load(file);
     pSpellManager->Load(file);

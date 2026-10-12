@@ -1850,12 +1850,19 @@ CItemSpell *CUnit::RemoveQSpell(DWORD dwQSpellIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 CItemWeapon *CUnit::GetQWeapon(DWORD dwQWeaponIndex) const
 {
+    if (!lpUnitSpecific)
+        return nullptr;
     if (lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
     {
         CPlayer *pPlayer = GetOwner();
-        ASSERT(pPlayer);
         if (!pPlayer)
-            return 0;
+        {
+            // Retail camp previews have no owner. The addon reads the local
+            // equipment populated by DeployClientPersonages/UpdateWeapons.
+            // Keep its selected-hand rule, but reject invalid requested slots.
+            return dwCurrentWeapon < QI_MAX_WEAPONS && dwQWeaponIndex < QI_MAX_WEAPONS
+                       ? lpQWeapons[dwQWeaponIndex] : nullptr;
+        }
         CPersonage *pPers = pPlayer->party.GetPersonage(GetID());
         if (!pPers)
             return 0;
@@ -1895,57 +1902,21 @@ CItemQuick *CUnit::GetQItem(DWORD dwQItemIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 CItemSpell *CUnit::GetQSpellItem(DWORD dwQSpellIndex)
 {
-    if (dwQSpellIndex >= GetSpellSlotCount())
+    if (dwQSpellIndex >= QI_MAX_SPELLS || !lpUnitSpecific)
         return nullptr;
-    CItemSpell *pSpell;
-    if (lpUnitSpecific && lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
-    {
-        CPlayer *pPlayer = GetOwner();
-        if (!pPlayer)
-            return lpQSpells[dwQSpellIndex];
-        CPersonage *pPers = pPlayer->party.GetPersonage(GetID());
-        if (!pPers)
-            return 0;
-        if (dwQSpellIndex >= pPers->spells.GetSize())
-            return 0;
-        pSpell = pPers->spells[dwQSpellIndex];
-        return pSpell;
-    }
-    if ((dwQSpellIndex >= QI_MAX_SPELLS))
-        return NULL;
-    else
+    if (lpUnitSpecific->WhoAmI() != HPC_UNITCLIENTSPECIFIC && dwQSpellIndex < QI_NPC_SPELLS)
         return lpQSpells[dwQSpellIndex];
+    CPlayer *owner = GetOwner();
+    CPersonage *personage = owner ? owner->party.GetPersonage(GetID()) : nullptr;
+    if (personage && dwQSpellIndex < static_cast<DWORD>(personage->spells.GetSize()))
+        return personage->spells[dwQSpellIndex];
+    return nullptr;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CSpell *CUnit::GetQSpell(DWORD dwQSpellIndex)
 {
-    if (dwQSpellIndex >= GetSpellSlotCount())
-        return nullptr;
-    CSpell *pSpell;
-    if (lpUnitSpecific->WhoAmI() == HPC_UNITCLIENTSPECIFIC)
-    {
-        CPlayer *pPlayer = GetOwner();
-        ASSERT(pPlayer);
-        if (!pPlayer)
-            return 0;
-        CPersonage *pPers = pPlayer->party.GetPersonage(GetID());
-        if (!pPers)
-            return 0;
-        if (dwQSpellIndex >= pPers->spells.GetSize())
-            return 0;
-        if (!pPers->spells[dwQSpellIndex])
-            return nullptr;
-        pSpell = pPers->spells[dwQSpellIndex]->GetSpell();
-        return pSpell;
-    }
-    if ((dwQSpellIndex >= QI_MAX_SPELLS))
-        return NULL;
-    else
-    {
-        if (lpQSpells[dwQSpellIndex])
-            return lpQSpells[dwQSpellIndex]->GetSpell();
-    }
-    return NULL;
+    CItemSpell *item = GetQSpellItem(dwQSpellIndex);
+    return item ? item->GetSpell() : nullptr;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::Load(CSave &file)

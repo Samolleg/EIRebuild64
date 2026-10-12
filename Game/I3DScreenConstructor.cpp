@@ -3,6 +3,7 @@
 #include "GameJournal.h"
 #include "ModPackage.h"
 #include "ModCampStats.h"
+#include "ModStatRules.h"
 #include "ModProgression.h"
 #include "ModRuntime.h"
 #include "ModAlchemyItem.h"
@@ -589,9 +590,12 @@ int CI3DObjectInventoryItems::GetItemSortMode(CItem *pItem)
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObjectInventoryItems::SortFunction0(CItem *pItem)
 {
+    const auto* mod = ModRuntime::Current();
+    const bool native = mod && mod->CombatSetting("JMVPerks");
     if (pScreen->IsItemInstruction(pItem) || pScreen->IsItemMaterial(pItem))
         return 0;
-    else if (pScreen->IsItemPrototype(pItem) || pScreen->IsItemModifier(pItem))
+    else if (pScreen->IsItemPrototype(pItem) || pScreen->IsItemModifier(pItem) ||
+             (native && pItem->GetTypeID() == ITID_ITEM_SPELL))
         return 1;
     else if (pItem->GetTypeID() == ITID_ITEM_WEAPON || pItem->GetTypeID() == ITID_ITEM_ARMOR ||
              pItem->GetTypeID() == ITID_ITEM_QUICK || pItem->GetTypeID() == ITID_ITEM_SPELL)
@@ -610,7 +614,10 @@ int CI3DObjectInventoryItems::SortFunction1(CItem *pItem)
         CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
         CSpellManager *pSM = theWorld.GetSpellManager();
         const SSDBSpellPrototype *pPrototype = pSM->GetPrototype(pLoot->GetInstructionItemIndex());
-        switch (pPrototype->msSchool)
+        const auto* mod = ModRuntime::Current();
+        const int group = mod && mod->CombatSetting("JMVPerks")
+            ? int(pPrototype->mstSubtype) : int(pPrototype->msSchool);
+        switch (group)
         {
         case RPGMS_ELEMENTAL:
             return 0;
@@ -1049,12 +1056,16 @@ void CI3DObjectSpellSlots::Init(bool bUp)
                         50, nTopHeight, 850, nTopHeight + 100,
                         14, 142, 114, 242, 8);
 
+    // U04 legacy camp layout. Replace as a unit with c56 stage 3.
+    LPTEXTURE endCaps = AddTexture("Inventory01");
     pFig = AddFigure();
-    pFig->MakeBar(inventoryDepth * .8f, 100, 0, nTopHeight,
+    pFig->MakeBar(3.2f, 100, 0, nTopHeight,
                   50, 100.f + nTopHeight, 192, 14, 142, 114);
+    pFig->SetTexture(endCaps);
     pFig = AddFigure();
-    pFig->MakeBar(inventoryDepth * .8f, 100, 750, nTopHeight,
+    pFig->MakeBar(3.2f, 100, 750, nTopHeight,
                   800, 100.f + nTopHeight, 142, 14, 192, 114);
+    pFig->SetTexture(endCaps);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpellSlots::SetCurrentSpell(CItem *pSpell)
@@ -1164,7 +1175,8 @@ BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
     figures[2]->SetUShift(fSpellPosition > 0.f ? 50.f / 256.f : 0.f);
     figures[3]->SetUShift(fSpellPosition < static_cast<float>(maxFirst)
                               ? 50.f / 256.f : 0.f);
-    CI3DObject::Draw(pRend);
+    figures[0]->Draw(pRend);
+    figures[1]->Draw(pRend);
 
     for (int i = nFirstSpell; i < renderEnd; ++i)
     {
@@ -1177,6 +1189,8 @@ BOOL CI3DObjectSpellSlots::Draw(CRenderer *pRend)
         item.eFrom = ePartType;
         pScreen->DrawItem(pRend, item);
     }
+    figures[2]->Draw(pRend);
+    figures[3]->Draw(pRend);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1384,6 +1398,11 @@ void CI3DObjectNameStats::SetScreenMode(EItemScreenModes eCampMode)
             }
         }
         AddArea()->MakeRect(20, 210, 180, 225);
+        if (const auto* mod = ModRuntime::Current(); mod && mod->CombatSetting("JMVPerks"))
+        {
+            // The addon has no height control. Keep the primary-stat area IDs.
+            for (int area : {5, 9, 13}) GetArea(area)->MakeRect(0, 0, 0, 0);
+        }
         break;
 
     case ISM_WEAPONS:
@@ -1421,8 +1440,594 @@ void CI3DObjectNameStats::SetScreenMode(EItemScreenModes eCampMode)
     UpdateStats();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DObjectNameStats::UpdateModStats()
+{
+#ifndef NOGETDC
+    CI3DSurface *pSurf = surfaces[0];
+    CDC *pDC = pSurf->GetDC();
+    pSurf->Clear();
+    pSurf->DrawText(szPersName.GetString(), CRect(0, 27, 200, 43), 1, CAMP_COLOR_HEADER, DT_CENTER);
+    CUnit *pUnit = pScreen ? pScreen->GetUnit(nCurPers) : nullptr;
+    CPersonage *pPers = pUnit ? pScreen->GetCurrentPers() : nullptr;
+	CString szName, szTmp, szTmp2, szTmp3,  szOut;
+	CPoint shift(0, 15);
+    CTextManager *pTxtMng = theWorld.GetTextManager();
+    auto* mod = ModRuntime::Current();
+    if (!mod || !pPers || !pUnit) { pSurf->ReleaseDC(); return; }
+    SRPGUnitStats *pStats = &pPers->stats;
+    int nEncumbr = 0; float seconds = 0;
+    mod->CampInfo(*pPers, pUnit, nEncumbr, seconds);
+    int nWeight = eCurMode == ISM_STATS ? 0 : int(pPers->GetItemsWeight());
+    float ovrldManacost = mod->InfoDisplayScalar("OverloadManacostModsOnServer", {float(float(nWeight)), float(float(nEncumbr))});
+    CRect rc(0, 0, 0, 0);
+    if (eCurMode == ISM_WEAPONS)
+    {
+        rc = CRect(20, 65, 175, 80);
+        pTxtMng->GetSystemString("infoitem_25", szTmp);
+        pSurf->DrawText(szTmp.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+        rc += shift;
+        OutputHLAbsorb(rc, "skull", RPGHL_HEAD);
+        rc += shift;
+        OutputHLAbsorb(rc, "arms", RPGHL_LHAND);
+        rc += shift;
+        OutputHLAbsorb(rc, "torso", RPGHL_BODY);
+        rc += shift;
+        OutputHLAbsorb(rc, "legs", RPGHL_LLEG);
+        rc += shift;
+        rc += shift;
+		if (pPers->dwCurrentWeapon != -1 && pPers->weapons.GetSize() != 0)
+		{
+			pSurf->DrawText(szStrings[CURWEAPON].GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+			rc += shift;
+			SAttackParams attackParams;
+			if(pUnit)
+				pUnit->GetAttackParams(attackParams);
+			ERPGWeaponTypes type = RPGWST_UNKNOWN;
+			if (pPers->weapons[pPers->dwCurrentWeapon])
+				type = pPers->weapons[pPers->dwCurrentWeapon]->GetWeaponType();
+			int nSumAtt = 0;
+			int nSumDef = 0;
+			int nVal = 0;
+			int dexterity = 0;
+			if (pUnit)
+				dexterity = (int)pUnit->GetUserUnitStats()->cDexterity - 25;
+			nSumAtt += dexterity;
+			nSumDef += dexterity;
+			nSumAtt += (int)pStats->GetWSLBaseSkill(type);
+			nSumDef += (int)pStats->GetWSLBaseSkill(type);
+			int nWeight = (int)pPers->GetItemsWeight();
+			nSumDef += (int)mod->InfoDisplayScalar("GetOverloadDefenceOnServer", {float(nWeight), float(nEncumbr)});
+			nSumAtt += (int)mod->InfoDisplayScalar("GetOverloadAttackOnServer", {float(nWeight), float(nEncumbr)});
+			int defs = 0;
+			for (int i = 0; i < pPers->armors.GetSize(); i++) {
+				if (pPers->armors[i]) {
+					const SIDBItemGeneralShape* pNameShape = pPers->armors[i]->GetShapeEntry();
+					if (pNameShape) {
+						CString pName = pNameShape->szName;
+						defs += static_cast<int>(mod->InfoProperty("GetArmorPropsInside", pName.GetString(), 2));
+					}
+				}
+			}
+			int def_armor_mod = defs;
+			int atts = 0;
+			for (int i = 0; i < pPers->armors.GetSize(); i++) {
+				if (pPers->armors[i]) {
+					const SIDBItemGeneralShape* pNameShape = pPers->armors[i]->GetShapeEntry();
+					if (pNameShape) {
+						CString pName = pNameShape->szName;
+						atts += mod->InfoProperty("GetArmorPropsInside", pName.GetString(), 3);
+					}
+				}
+			}
+			int att_armor_mod = atts;
+			if (pPers->dwCurrentWeapon >= 0 && pPers->dwCurrentWeapon < 4) {
+				CItemWeapon* weap = pPers->weapons[pPers->dwCurrentWeapon];
+				if (weap) {
+					CString weaponProt = weap->GetShapeEntry()->szName;
+					nVal = mod->InfoProperty("GetWeaponPropsInside", weaponProt.GetString(), 7);
+				}
+			}
+			else
+				nVal = 0;
+			if (nVal == 1) {
+				nVal = int(pStats->GetPerkModifier(16));
+			}
+			else if (nVal == 2) {
+				nVal = int(pStats->GetPerkModifier(24));
+			}
+			else if (nVal == 3) {
+				nVal = int(pStats->GetPerkModifier(6));
+			}
+			nSumAtt += nVal;
+			nSumDef += nVal;
+			int left = ModStats::LeftHand(*pUnit);
+			if (pUnit->GetQWeapon(pPers->dwCurrentWeapon)) {
+				int rtID = 8;
+				if(pUnit->GetQWeapon(pPers->dwCurrentWeapon))
+					rtID = pUnit->GetQWeapon(pPers->dwCurrentWeapon)->GetShapeEntry()->dwTypeID;
+				bool twoHandedWeaponRight = (rtID == RPGWST_HANDS2 || rtID == RPGWST_HANDS4 || rtID == RPGWST_HANDS5 || rtID == RPGWST_HANDS6 || rtID == RPGWST_HANDS7);
+				if (left != -1) {
+					int ltID = 8;
+					if (pUnit->GetQWeapon(left))
+						ltID = pUnit->GetQWeapon(left)->GetShapeEntry()->dwTypeID;
+					bool strong = int(pStats->cPerks[29]);
+					int strong_mod = 0;
+					bool ShieldLeft = ltID == RPGWST_HANDS1;
+					if (ShieldLeft) {
+						nSumAtt += pStats->GetWSLWeaponModifier(pPers->weapons[pPers->dwCurrentWeapon]->GetSubtypeID());
+						nSumDef += pStats->GetWSLWeaponModifier(pPers->weapons[pPers->dwCurrentWeapon]->GetSubtypeID());
+						nSumDef += pPers->weapons[pPers->dwCurrentWeapon]->GetDefenceBonus();
+						nSumAtt += pPers->weapons[pPers->dwCurrentWeapon]->GetAtackBonus();
+						nSumDef += pPers->weapons[left]->GetDefenceBonus();
+						nSumAtt += pPers->weapons[left]->GetAtackBonus();
+						bool ShieldLeft = ltID == RPGWST_HANDS1;
+						bool twoHandedWeaponRight = (rtID == RPGWST_HANDS2 || rtID == RPGWST_HANDS4 || rtID == RPGWST_HANDS5 || rtID == RPGWST_HANDS6 || rtID == RPGWST_HANDS7);
+						if (strong && twoHandedWeaponRight && ShieldLeft)
+							strong_mod = mod->InfoDisplayScalar("GetStrongMod", {});
+						nSumAtt += strong_mod;
+					}
+					else {
+						nSumAtt += pStats->GetWSLWeaponModifier(pPers->weapons[pPers->dwCurrentWeapon]->GetSubtypeID());
+						nSumDef += pStats->GetWSLWeaponModifier(pPers->weapons[pPers->dwCurrentWeapon]->GetSubtypeID());
+						int def_curr_mod = pPers->weapons[pPers->dwCurrentWeapon]->GetDefenceBonus();
+						int def_lefth_mod = pPers->weapons[left]->GetDefenceBonus();
+						int weaps_def = float(def_curr_mod + def_lefth_mod) * 0.5f;
+						nSumDef += weaps_def;
+						int atk_curr_mod = pPers->weapons[pPers->dwCurrentWeapon]->GetAtackBonus();
+						int atk_lefth_mod = pPers->weapons[left]->GetAtackBonus();
+						int weaps_att = float(atk_curr_mod + atk_lefth_mod) * 0.5f;
+						nSumAtt += weaps_att;
+						bool master = int(pStats->cPerks[26]);
+						int master_mod = 0;
+						bool twoHandedWeaponLeft = (ltID == RPGWST_HANDS2 || ltID == RPGWST_HANDS4 || ltID == RPGWST_HANDS5 || ltID == RPGWST_HANDS6 || ltID == RPGWST_HANDS7);
+						if (strong && (twoHandedWeaponRight || twoHandedWeaponLeft))
+							strong_mod = mod->InfoDisplayScalar("GetStrongMod", {});
+						if (master) master_mod = mod->InfoDisplayScalar("GetMasterMod", {});
+						else		master_mod = mod->InfoDisplayScalar("GetMasterMod2", {});
+						nSumAtt += master_mod + strong_mod;
+					}
+				}
+				else
+				{
+					nSumAtt += pPers->weapons[pPers->dwCurrentWeapon] == NULL ? 0 : pStats->GetWSLWeaponModifier(pPers->weapons[pPers->dwCurrentWeapon]->GetSubtypeID());
+					nSumDef += pPers->weapons[pPers->dwCurrentWeapon] == NULL ? 0 : pStats->GetWSLWeaponModifier(pPers->weapons[pPers->dwCurrentWeapon]->GetSubtypeID());
+					nSumDef += pPers->weapons[pPers->dwCurrentWeapon] == NULL ? 0 : pPers->weapons[pPers->dwCurrentWeapon]->GetDefenceBonus();
+					nSumAtt += pPers->weapons[pPers->dwCurrentWeapon] == NULL ? 0 : pPers->weapons[pPers->dwCurrentWeapon]->GetAtackBonus();
+					bool duelist = int(pStats->cPerks[28]);
+					if (duelist && !twoHandedWeaponRight)
+						nSumDef += 3;
+				}
+			}
+			int armory = int(pStats->cPerks[5]);
+			int armorydef = mod->InfoDisplayScalar("GetArmoryDefenceDebuff", {float(armory)});
+			int armoryatt = mod->InfoDisplayScalar("GetArmoryAttackDebuff", {float(armory)});
+			nSumDef += def_armor_mod + max(0, min(-def_armor_mod, armorydef));
+			nSumAtt += att_armor_mod + max(0, min(-att_armor_mod, armoryatt));
+			szOut.Format("     %s", szStrings[ATTACK]);
+            pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+			float hitLocDecr = mod->InfoDisplayWound(*pStats);
+			szOut.Format("%d", nSumAtt);
+            pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_RIGHT);
+            rc += shift;
+            szOut.Format("     %s", szStrings[DEFENSE]);
+            pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+            szOut.Format("%d", nSumDef);
+            pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_RIGHT);
+            rc += shift;
+			float damages[RPG_NUM_ATTACK_TYPES];
+			CItemWeapon* pWeapon = pPers->weapons[pPers->dwCurrentWeapon];
+			float dificulty_mod = 1.0f;
+			dificulty_mod = 1.0f + theSettings.nDifficultyLevel * 0.25f;
+			if(pWeapon)
+				pWeapon->GetDamageDistribution(damages);
+			int i = 0;
+			if (pWeapon)
+				if ((int)pWeapon->GetDamageMax() != 0)
+				{
+					for (; i < RPG_NUM_ATTACK_TYPES; i++)
+					{
+						if (damages[i] != 0)
+						{
+							if (i < RPG_NUM_ATTACK_TYPES)
+							{
+								szOut.Format("damage_%d", i);
+								pTxtMng->GetSystemString(szOut.GetString(), szTmp);
+								szOut.Format("     %s %s", szStrings[DAMAGE], szTmp);
+								pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+								float skill_mod = 1;
+								int weapon_type = pWeapon->GetShapeEntry()->dwTypeID;
+								bool archery = (weapon_type == RPGWST_BOW || weapon_type == RPGWST_CROSSBOW || weapon_type == RPGWST_HANDS3 || weapon_type == RPGWST_HANDS7);
+								int curSkill = static_cast<float>(pStats->cAutoSkills[RPGASKL_MELEE]);
+								if (archery)
+									curSkill = static_cast<float>(pStats->cAutoSkills[RPGASKL_ARCHERY]);
+								skill_mod = mod->InfoDisplayScalar("GetSkillMod", {float(curSkill)});
+								skill_mod = skill_mod - 1;
+								skill_mod = skill_mod * 100;
+								const SPDBPerk* pPerk = thePerkDatabase.GetPerk(30);
+								float attr_mod = mod->InfoDisplayScalar("GetDamageModAttr", {float(weapon_type), float(int(pStats->psStrength.fpEffectiveValue)), float(int(pStats->psDexterity.fpEffectiveValue)), float(int(pStats->psIntelligence.fpEffectiveValue)), float(0.5f)});
+								attr_mod = attr_mod - 1;
+								attr_mod = attr_mod * 100;
+								float wperk_mod = 0;
+								if (mod->CombatSetting("JMV136")) {
+									int weightType = mod->InfoProperty("GetWeaponPropsInside", pWeapon->GetShapeEntry()->szName.GetString(), 7);
+									int perk = 24;
+									if (weightType == 1)
+										perk = 16;
+									if (weightType != 3)
+										wperk_mod = pStats->GetPerkModifier(perk);
+									if (weightType == 1)
+										wperk_mod = wperk_mod * 3;
+								}
+								float perk_mod = mod->InfoDisplayScalar("GetDamageModAttr", {float(weapon_type), float(int(pStats->psStrength.fpEffectiveValue)), float(int(pStats->psDexterity.fpEffectiveValue)), float(int(pStats->psIntelligence.fpEffectiveValue)), float(0.25f * int(pStats->cPerks[thePerkDatabase.GetPerkIndex(pPerk)]))});
+								perk_mod = perk_mod - 1;
+								perk_mod = perk_mod * 100;
+								float enc_mod = 1.0f;
+								float overloadDecr = mod->InfoDisplayScalar("GetOverloadDamageOnServer", {float(nWeight), float(nEncumbr)});
+								enc_mod = overloadDecr;
+								enc_mod = enc_mod - 1;
+								enc_mod = enc_mod * 100;
+								float compl = mod->InfoComplex(*pUnit, 11);
+								float sum = (skill_mod + attr_mod + perk_mod + enc_mod + wperk_mod + compl);
+								float hitLocDecr = mod->InfoDisplayWound(*pStats);
+								float minDamage = pWeapon->GetDamageMin();
+								float maxDamage = pWeapon->GetDamageMax();
+								minDamage = minDamage * (100 + sum + hitLocDecr) * 0.01;
+								maxDamage = maxDamage * (100 + sum + hitLocDecr) * 0.01;
+								szOut.Format("%0.f-%0.f", minDamage* dificulty_mod, maxDamage* dificulty_mod);
+								pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_RIGHT);
+								rc += shift;
+							}
+						}
+					}
+				}
+			int lefHand = ModStats::LeftHand(*pUnit);
+			if (lefHand != -1) {
+				CItemWeapon* pLeftWeapon = pPers->weapons[lefHand];
+				if (pLeftWeapon != NULL) {
+					float damagesL[RPG_NUM_ATTACK_TYPES];
+					pLeftWeapon->GetDamageDistribution(damagesL);
+					int i = 0;
+					if ((int)pLeftWeapon->GetDamageMax() != 0)
+					{
+						for (; i < RPG_NUM_ATTACK_TYPES; i++)
+						{
+							if (damagesL[i] != 0)
+							{
+								szOut.Format("damage_%d", i);
+								pTxtMng->GetSystemString(szOut.GetString(), szTmp);
+								szOut.Format("     %s %s", szStrings[DAMAGE], szTmp);
+								pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+								float skill_mod = 0;
+								int weapon_type = pLeftWeapon->GetShapeEntry()->dwTypeID;
+								bool archery = (weapon_type == RPGWST_BOW || weapon_type == RPGWST_CROSSBOW || weapon_type == RPGWST_HANDS3 || weapon_type == RPGWST_HANDS7);
+								int curSkill = static_cast<float>(pStats->cAutoSkills[RPGASKL_MELEE]);
+								if (archery)
+									curSkill = static_cast<float>(pStats->cAutoSkills[RPGASKL_ARCHERY]);
+								skill_mod = mod->InfoDisplayScalar("GetSkillMod", {float(curSkill)});
+								skill_mod = skill_mod - 1;
+								skill_mod = skill_mod * 100;
+								float wskill_mod = 0;
+								if (mod->CombatSetting("JMV136")) {
+									int weightType = mod->InfoProperty("GetWeaponPropsInside", pLeftWeapon->GetShapeEntry()->szName.GetString(), 7);
+									int skill = 6;
+									if (weightType == 1)
+										int skill = 16 * 3;
+									else if (weightType == 2)
+										int skill = 24;
+									wskill_mod = int(pStats->cPerks[skill]);
+								}
+								const SPDBPerk * pPerk = thePerkDatabase.GetPerk(30);
+								float attr_mod = mod->InfoDisplayScalar("GetDamageModAttr", {float(weapon_type), float(int(pStats->psStrength.fpEffectiveValue)), float(int(pStats->psDexterity.fpEffectiveValue)), float(int(pStats->psIntelligence.fpEffectiveValue)), float(0.5f)});
+								attr_mod = attr_mod - 1;
+								attr_mod = attr_mod * 100;
+								float perk_mod = mod->InfoDisplayScalar("GetDamageModAttr", {float(weapon_type), float(int(pStats->psStrength.fpEffectiveValue)), float(int(pStats->psDexterity.fpEffectiveValue)), float(int(pStats->psIntelligence.fpEffectiveValue)), float(0.25f * int(pStats->cPerks[thePerkDatabase.GetPerkIndex(pPerk)]))});
+								perk_mod = perk_mod - 1;
+								perk_mod = perk_mod * 100;
+								float enc_mod = 1.0f;
+								float overloadDecr = mod->InfoDisplayScalar("GetOverloadDamageOnServer", {float(nWeight), float(nEncumbr)});
+								enc_mod = overloadDecr;
+								enc_mod = enc_mod - 1;
+								enc_mod = enc_mod * 100;
+								float compl_mod = 1.0f;
+								float compl = mod->InfoComplex(*pUnit, 11);
+								compl_mod = compl;
+								compl_mod = compl_mod - 1;
+								compl_mod = compl_mod * 100;
+								float sum = (skill_mod + attr_mod + perk_mod + enc_mod + wskill_mod + compl);
+								float hitLocDecr = mod->InfoDisplayWound(*pStats);
+								float minDamageL = pLeftWeapon->GetDamageMin();
+								float maxDamageL = pLeftWeapon->GetDamageMax();
+								minDamageL = minDamageL * (100 + sum + hitLocDecr) * 0.01;
+								maxDamageL = maxDamageL * (100 + sum + hitLocDecr) * 0.01;
+								szOut.Format("%0.f-%0.f", minDamageL* dificulty_mod, maxDamageL* dificulty_mod);
+								pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_RIGHT);
+							}
+						}
+					}
+				}
+			}
+			rc += shift;
+        }
+        else
+        {
+            for (int i = 0; i < 5; i++)
+                rc += shift;
+        }
+        int nWeight = (int)pScreen->GetCurrentPers()->GetItemsWeight();
+		if (pTxtMng->GetText("perk Encumbrance")) pTxtMng->GetLine(szOut);
+		pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+		float percent = 100 * (float(nWeight) / float(nEncumbr));
+		if (nWeight > nEncumbr)
+			szOut.Format("%d/%d(%d%%)!" , nWeight, nEncumbr, int(percent));
+		else
+			szOut.Format("%d/%d(%d%%)" , nWeight, nEncumbr, int(percent));
+		COLORREF CAMP_COLOR_SKILLS_DEF = RGB(228, 215, 167);
+		COLORREF CAMP_COLOR_SKILLS_50 = RGB(235, 170, 130);
+		COLORREF CAMP_COLOR_SKILLS_65 = RGB(240, 150, 110);
+		COLORREF CAMP_COLOR_SKILLS_80 = RGB(245, 130, 90);
+		COLORREF CAMP_COLOR_SKILLS_100 = RGB(255, 110, 70);
+		COLORREF CAMP_COLOR_SKILLS_FIN = CAMP_COLOR_SKILLS_DEF;
+		if (int(percent) >= 50 && int(percent) < 65)
+			CAMP_COLOR_SKILLS_FIN = CAMP_COLOR_SKILLS_50;
+		else if (int(percent) >= 65 && int(percent) < 80)
+			CAMP_COLOR_SKILLS_FIN = CAMP_COLOR_SKILLS_65;
+		else if (int(percent) >= 80 && int(percent) < 100)
+			CAMP_COLOR_SKILLS_FIN = CAMP_COLOR_SKILLS_80;
+		else if (int(percent) >= 100)
+			CAMP_COLOR_SKILLS_FIN = CAMP_COLOR_SKILLS_100;
+		pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS_FIN, DT_RIGHT);
+		rc += shift;
+		float actionsbase = 10 + pStats->psDexterity.fpEffectiveValue * 0.2;
+		float actions_perk_mod = (pStats->GetPerkModifier(14)) * 0.01;
+		int lefHand = ModStats::LeftHand(*pUnit);
+		float actions_duelist_mod = 1.0f;
+		if (pUnit)
+			if (pPers->dwCurrentWeapon >= 0 && pPers->dwCurrentWeapon < 4)
+				if (pUnit->GetQWeapon(pPers->dwCurrentWeapon))
+				{
+					int rtID = pUnit->GetQWeapon(pPers->dwCurrentWeapon)->GetShapeEntry()->dwTypeID;
+					bool twoHandedWeaponRight = (rtID == RPGWST_HANDS2 ||
+						rtID == RPGWST_HANDS4 || rtID == RPGWST_HANDS5 ||
+						rtID == RPGWST_HANDS6 || rtID == RPGWST_HANDS7 ||
+						rtID == RPGWST_BOW || rtID == RPGWST_CROSSBOW);
+					if (lefHand == -1) {
+						bool duelist = int(pStats->cPerks[28]);
+						if (duelist == 1 && !twoHandedWeaponRight)
+							actions_duelist_mod = 1.15f;
+					}
+				}
+		float wperk_mod = 0;
+		if (mod->CombatSetting("JMV136")) {
+			if (pUnit)
+				if (int(pUnit->GetCurrentWeaponSlotIndex()) >= 0 && int(pUnit->GetCurrentWeaponSlotIndex()) < 4 && pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))) {
+					int weightType = 8;
+					if(pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex())))
+						weightType = mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetShapeEntry()->szName.GetString(), 7);
+					int perk = 0;
+					if (weightType == 3)
+						perk = 6;
+					else if (weightType == 2)
+						perk = 24;
+					perk = pStats->GetPerkModifier(perk);
+					if (weightType == 3)
+						perk = perk * 3;
+					wperk_mod = perk * 0.01f;
+				}
+		}
+		float actions_armors_mod = 0.0f;
+		for (int i = 0; i < pPers->armors.GetSize(); i++) {
+			if (pPers->armors[i]) {
+				const SIDBItemGeneralShape* pNameShape = pPers->armors[i]->GetShapeEntry();
+				if (pNameShape) {
+					CString pName = pNameShape->szName;
+					actions_armors_mod += mod->InfoProperty("GetArmorPropsInside", pName.GetString(), 7);
+				}
+			}
+		}
+		float actions_complex_mod = 1 + mod->InfoComplex(*pUnit, 18)* 0.01;
+		float actionscurr =
+			actionsbase *
+			(1 + actions_perk_mod) *
+			actions_duelist_mod *
+			(1 + wperk_mod) *
+			(1 + actions_armors_mod) *
+			actions_complex_mod;
+		{
+			int attackCycle = 0;
+			float actionPoints = 0.0f;
+			float nawActions = actionscurr;
+			float action = 1;
+			if (abs(nawActions) > 0.00001f) {
+				action = 15.0f / nawActions;
+			}
+			int numAttacksInCycle = 1;
+			if (!mod->CombatSetting("JMVAttacks")) {
+				if (pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex())) && IsIDofPersonage(pUnit->GetID()))
+					actionPoints = (float)pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetActionPoints();
+				else
+					actionPoints = nawActions;
+				attackCycle = (int)(actionPoints * action);
+			}
+			else {
+				if (int(pUnit->GetCurrentWeaponSlotIndex()) >= 0 && int(pUnit->GetCurrentWeaponSlotIndex()) < 4) {
+					if (pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))) {
+						int right = int(pUnit->GetCurrentWeaponSlotIndex());
+						int left = ModStats::LeftHand(*pUnit);
+						float rightActions = (float)pUnit->GetQWeapon(right)->GetActionPoints();
+						if (left != -1) {
+							CItemWeapon* leftWeapon = pUnit->GetQWeapon(left);
+							if (leftWeapon->GetShapeEntry()->dwTypeID != 9) {
+								float leftActions = (float)pUnit->GetQWeapon(left)->GetActionPoints();
+								ERPGWeaponTypes RightWeaponType = pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetWeaponType();
+								ERPGWeaponTypes LeftWeaponType = leftWeapon->GetWeaponType();
+								bool dual = RightWeaponType == LeftWeaponType;
+								bool twinSwords = (dual && LeftWeaponType == RPGWST_SWORD);
+								bool twinAxes = (dual && LeftWeaponType == RPGWST_AXE);
+								bool twinHammers = (dual && LeftWeaponType == RPGWST_HAMMER);
+								bool twinDaggers = (dual && LeftWeaponType == RPGWST_DAGGER);
+								bool twinPikes = (dual && LeftWeaponType == RPGWST_SPEAR);
+								if (twinDaggers) {
+									actionPoints = (rightActions + leftActions) * 0.5f * 3;
+									numAttacksInCycle = 6;
+								}
+								else if (twinSwords || twinAxes){
+									actionPoints = (rightActions + leftActions) * 0.5f * 2;
+									numAttacksInCycle = 4;
+								}
+								else {
+									actionPoints = (rightActions + leftActions) * 0.5f;
+									numAttacksInCycle = 2;
+								}
+								int WeightDiff = abs(
+									mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetShapeEntry()->szName.GetString(), 7) -
+									mod->InfoProperty("GetWeaponPropsInside", leftWeapon->GetShapeEntry()->szName.GetString(), 7));
+								if (WeightDiff > 0)
+								{
+									actionPoints = (rightActions + leftActions) * 0.5f;
+									numAttacksInCycle = 2;
+								}
+								actionPoints = actionPoints + actionPoints * ((float)WeightDiff * 0.125f);
+								int rightWeaponType = pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetShapeEntry()->dwTypeID;
+								int leftWeaponType = leftWeapon->GetShapeEntry()->dwTypeID;
+								bool differentTypes = rightWeaponType != leftWeaponType;
+								actionPoints = actionPoints + actionPoints * ((float)differentTypes * 0.25f);
+							}
+							else
+								actionPoints = rightActions;
+						}
+						else
+							actionPoints = rightActions;
+					}
+					else
+						actionPoints = nawActions;
+				}
+				else
+					actionPoints = nawActions;
+				attackCycle = (int)(actionPoints * action);
+			}
+			float result = attackCycle / 15.0f / numAttacksInCycle;
+			if (pTxtMng->GetText("string infounit_18")) pTxtMng->GetLine(szTmp);
+			if (pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(szTmp2);
+			szOut.Format("%s %.1f%s" , szTmp, result, szTmp2);
+			pSurf->DrawText(szOut.GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+			rc += shift;
+		}
+        pSurf->DrawText(szStrings[MAGICSKILLS].GetString(), rc, 0, CAMP_COLOR_SKILLS, DT_LEFT);
+    }
+	else
+	{
+		rc = CRect(20, 65, 180, 80);
+		CString name = pUnit->GetPrototype()->szName;
+		OutputSkill(rc, "Strength" , (int)pUnit->GetUserUnitStats()->cStrength);
+		rc += shift;
+		OutputSkill(rc, "Dexterity" , (int)pUnit->GetUserUnitStats()->cDexterity);
+		rc += shift;
+		OutputSkill(rc, "Intelligence" , (int)pUnit->GetUserUnitStats()->cIntelligence);
+		rc += shift;
+		rc += shift;
+		float val;
+        float dificulty_mod = 1.0f + theSettings.nDifficultyLevel * 0.25f;
+		OutputSkill(rc, "Health" , int(pUnit->GetMaxHP() * dificulty_mod));
+		rc += shift;
+		val = pStats->RecalcMP() * ovrldManacost;
+		OutputSkill(rc, "Mana" , (int)val);
+		rc += shift;
+		float actionsbase = 10 + pStats->psDexterity.fpEffectiveValue * 0.2;
+		float actions_perk_mod = (pStats->GetPerkModifier(14)) * 0.01;
+		int lefHand = ModStats::LeftHand(*pUnit);
+		float actions_duelist_mod = 1.0f;
+		if(pUnit)
+			if(pPers->dwCurrentWeapon >=0 && pPers->dwCurrentWeapon < 4)
+				if(pUnit->GetQWeapon(pPers->dwCurrentWeapon))
+				{
+					int rtID = pUnit->GetQWeapon(pPers->dwCurrentWeapon)->GetShapeEntry()->dwTypeID;
+					bool twoHandedWeaponRight = (rtID == RPGWST_HANDS2 ||
+						rtID == RPGWST_HANDS4 || rtID == RPGWST_HANDS5 ||
+						rtID == RPGWST_HANDS6 || rtID == RPGWST_HANDS7 ||
+						rtID == RPGWST_BOW    || rtID == RPGWST_CROSSBOW);
+					if (lefHand == -1) {
+						bool duelist = int(pStats->cPerks[28]);
+						if (duelist == 1 && !twoHandedWeaponRight)
+							actions_duelist_mod = 1.15f;
+					}
+				}
+		float wperk_mod = 0;
+		if (mod->CombatSetting("JMV136")) {
+			if (pUnit)
+				if (int(pUnit->GetCurrentWeaponSlotIndex()) >= 0 && int(pUnit->GetCurrentWeaponSlotIndex()) < 4 && pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))) {
+					int weightType = 8;
+					if(pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex())))
+						weightType = mod->InfoProperty("GetWeaponPropsInside", pUnit->GetQWeapon(int(pUnit->GetCurrentWeaponSlotIndex()))->GetShapeEntry()->szName.GetString(), 7);
+					int perk = 0;
+					if (weightType == 3)
+						perk = 6;
+					else if (weightType == 2)
+						perk = 24;
+					perk = pStats->GetPerkModifier(perk);
+					if (weightType == 3)
+						perk = perk * 3;
+					wperk_mod = perk * 0.01f;
+				}
+		}
+		float actions_armors_mod = 0.0f;
+		for (int i = 0; i < pPers->armors.GetSize(); i++) {
+			if (pPers->armors[i]) {
+				const SIDBItemGeneralShape* pNameShape = pPers->armors[i]->GetShapeEntry();
+				if (pNameShape) {
+					CString pName = pNameShape->szName;
+					actions_armors_mod += mod->InfoProperty("GetArmorPropsInside", pName.GetString(), 7);
+				}
+			}
+		}
+		float actions_complex_mod = 1 + mod->InfoComplex(*pUnit, 18) * 0.01;
+		float actionscurr =
+			actionsbase *
+			(1 + actions_perk_mod) *
+			actions_duelist_mod *
+			(1 + wperk_mod) *
+			(1 + actions_armors_mod)*
+			actions_complex_mod;
+		OutputSkill(rc, "Actions" , actionscurr);
+		rc += shift;
+		OutputSkill(rc, "Experience" , (int)pStats->GetRealExp());
+		rc += shift;
+		OutputSkill(rc, "Encumbrance" , nWeight, nEncumbr);
+		rc += shift;
+		if (nWeight > nEncumbr)
+			pSurf->DrawText(szStrings[OVERLOAD].GetString(), rc, 0, RGB(255, 0, 0), DT_RIGHT);
+		COLORREF color = CAMP_COLOR_SKILLS;
+		
+		int nSight = MINT(pStats->senses[RPGS_SIGHT].fpEffectiveValue);
+		float add = 0;
+		int perkLevel = int(pStats->cPerks[11]);
+		if (perkLevel == 1)
+			add = 1;
+		else if (perkLevel == 2)
+			add = 3;
+		else if (perkLevel == 2)
+			add = 6;
+		else
+			add = 0;
+		float sightModifier = pStats->GetPerkModifier(11);
+		nSight = nSight + sightModifier;
+		if (pTxtMng->GetText("string infounit_6")) pTxtMng->GetLine(szTmp2);
+		if (pTxtMng->GetText("string infounit_13")) pTxtMng->GetLine(szTmp3);
+		szOut.Format("%s",szTmp2);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_LEFT);
+		szOut.Format("%d%s",nSight, szTmp3);
+		pSurf->DrawText(szOut.GetString(), rc, 0, color, DT_RIGHT);
+		rc += shift;
+	}
+    pSurf->ReleaseDC();
+#endif
+}
 void CI3DObjectNameStats::UpdateStats()
 {
+    if (auto* mod = ModRuntime::Current(); eCurMode != ISM_SKIN && mod && mod->AdvancedUI("useLS_UpdateStats")) {
+        UpdateModStats();
+        return;
+    }
+
 #ifndef NOGETDC
     CI3DSurface *pSurf = surfaces[0];
     CDC *pDC = pSurf->GetDC();
@@ -1462,7 +2067,7 @@ void CI3DObjectNameStats::UpdateStats()
         OutputSkill(rc, szStrings[POINTSLEFT], points);
         rc += shift;
         rc += shift;
-        OutputSkill(rc, szStrings[TALL], nTall);
+        if (!statsMod) OutputSkill(rc, szStrings[TALL], nTall);
 
         rc = CRect(140, 65, 160, 80);
         cr = (pScreen->CanAdjustCreationPrimary(0, -1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
@@ -1476,8 +2081,11 @@ void CI3DObjectNameStats::UpdateStats()
         rc += shift;
         rc += shift;
         rc += shift;
-        cr = (nTall > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
-        pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
+        if (!statsMod)
+        {
+            cr = (nTall > 0) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+            pSurf->DrawText("-", rc, 0, cr, DT_CENTER);
+        }
 
         rc = CRect(160, 65, 180, 80);
         cr = (pScreen->CanAdjustCreationPrimary(0, 1)) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
@@ -1491,8 +2099,11 @@ void CI3DObjectNameStats::UpdateStats()
         rc += shift;
         rc += shift;
         rc += shift;
-        cr = (nTall < 100) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
-        pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
+        if (!statsMod)
+        {
+            cr = (nTall < 100) ? CAMP_COLOR_SKILLS : CAMP_COLOR_SKILLS_DIS;
+            pSurf->DrawText("+", rc, 0, cr, DT_CENTER);
+        }
     }
     else if (eCurMode == ISM_WEAPONS)
     {
@@ -1526,7 +2137,6 @@ void CI3DObjectNameStats::UpdateStats()
                     szOut.Format("     %s %s",(LPCSTR)szStrings[DAMAGE],(LPCSTR)szTmp);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_LEFT);
                     szOut.Format("%.0f-%.0f",damage.minimum,damage.maximum);pSurf->DrawText(szOut,rc,0,CAMP_COLOR_SKILLS,DT_RIGHT);rc+=shift;
                 }
-                rc+=shift;
             }else for(int i=0;i<5;++i)rc+=shift;
         }
         else if (pScreen->GetCurrentPers()->dwCurrentWeapon != -1)
@@ -1898,7 +2508,8 @@ void CI3DObjectNameStats::GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkil
     pSkillInfo->pStats = &pPers->stats;
     pSkillInfo->pUnit = pScreen->GetUnit(nCurPers);
     if(eCurMode==ISM_WEAPONS && ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_UpdateStats") && pSkillInfo->pUnit){
-        if(point.x<20||point.x>=180||point.y<165||point.y>=500)return;
+        pI3D->ScreenToVirtual(point);
+        if(point.x<20||point.x>=180||point.y<165||point.y>=400)return;
         const int row=(point.y-165)/15,slot=int(pPers->dwCurrentWeapon);
         const bool weapon=slot>=0&&slot<pPers->weapons.GetSize()&&pPers->weapons[slot];
         const auto display=ModRuntime::Current()->CampDescriptions(*pPers,*pSkillInfo->pUnit);
@@ -2002,7 +2613,7 @@ void CI3DObjectPerks::Init()
     AddArea()->MakeRect(560, 125, 580, 135); // scroll avail up
     AddArea()->MakeRect(560, 480, 580, 490); // scroll avail down
 
-    CRect rc(215, 135, 385, 150);
+    CRect rc(215, 135, 390, 150);
     CPoint shift(0, 15);
     for (int i = 0; i < 2; i++) // skills buttons
     {
@@ -2018,11 +2629,11 @@ void CI3DObjectPerks::Init()
         rc += shift;
     }
     rc += shift;
-    AddArea()->MakeRect(215, 165, 385, 180);
+    AddArea()->MakeRect(215, 165, 390, 180);
     for (int i = 0; i < CAMP_NUM_AV_PERKS_VISIBLE; i++) // perks buttons
-        AddArea()->MakeRect(415, 135 + i * 15, 585, 150 + i * 15);
+        AddArea()->MakeRect(415, 135 + i * 15, 590, 150 + i * 15);
     for (int i = 0; i < E4CampAccess::LearnedRows(this); i++) // perks buttons
-        AddArea()->MakeRect(215, 330 + i * 15, 385, 345 + i * 15);
+        AddArea()->MakeRect(215, 330 + i * 15, 390, 345 + i * 15);
 
     CI3DFigure *pFig;
     pFig = AddFigure();
@@ -2316,7 +2927,7 @@ void CI3DObjectPerks::RedrawPerks()
     int i, n;
     COLORREF cr, cr2;
     auto perkColor=[&](const CString& code,COLORREF fallback){
-        if(!ModRuntime::Current())return fallback;
+        if(!ModRuntime::Current() || !ModRuntime::Current()->CombatSetting("JMVPerks"))return fallback;
         int index=thePerkDatabase.GetPerkIndex(code);if(index<0)return fallback;
         int group=index/3;
         if(group<=6||group==29)return RGB(230,160,160);

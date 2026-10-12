@@ -54,6 +54,10 @@ float4 main(PS_INPUT input) : SV_TARGET
     if (pixelColor.a < alphaRef)
         discard;
         
+    // D3D7 color sum follows texture modulation; alpha is not specular.
+    if (useSpecular)
+        pixelColor.rgb = saturate(pixelColor.rgb + input.specular.rgb);
+
     float fogFactor = input.fogFactor;    
     //fogFactor = 0.0;
     pixelColor = lerp(fogColor, pixelColor, fogFactor);        

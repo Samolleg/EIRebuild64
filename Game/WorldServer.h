@@ -138,7 +138,7 @@ private:
     void StoreDynamic(CSave &file);
     void StoreDynamicData(CSave &file);
     std::map<int, int> omittedDynamicObjects; // ID -> saved type, per LoadDynamic
-    void LoadDynamic(CSave &file);
+    void LoadDynamic(CSave &file, const char* loadingZone);
     void LoadDynamicData(CSave &file);
     void RemoveDynamicObjects();
     // active objects handling

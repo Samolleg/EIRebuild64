@@ -63,6 +63,7 @@ struct State {
     SRWLOCK queueLock = SRWLOCK_INIT, writeLock = SRWLOCK_INIT;
     std::deque<Entry> queue;
     std::map<std::string, Repeat> repeats;
+    std::map<std::string, Repeat> notifications;
     std::map<std::string, Counter> counters;
     std::map<std::pair<int,int>, CombatPair> combat;
     bool fighting=false;
@@ -142,13 +143,25 @@ void Write(State& s, const std::string& value) {
     s.bytes += written;
 }
 void CombatDrain(State& s, std::deque<Entry>& pending, DWORD now, bool all);
-void Drain(State& s, bool tryQueue = false) {
+void Drain(State& s, bool tryQueue = false, bool critical = false) {
     std::deque<Entry> pending;
     {
         Lock guard(s.queueLock,tryQueue);
         if(!guard.lock)return;
         pending.swap(s.queue); s.queued = 0;
         DWORD now = GetTickCount();
+        for (auto it = s.notifications.begin(); it != s.notifications.end();) {
+            auto& repeat = it->second;
+            if (repeat.count && (critical || s.stopping || now - repeat.time >= 2000)) {
+                auto entry = Line("ERROR", "notification_repeat", repeat.detail + " count=" + std::to_string(repeat.count));
+                entry.important = false;
+                pending.push_back(std::move(entry));
+                repeat.count = 0;
+                repeat.time = now;
+            }
+            if (s.stopping || now - repeat.time >= 60000) it = s.notifications.erase(it);
+            else ++it;
+        }
         CombatDrain(s, pending, CombatNow(), true);
         for (auto it = s.repeats.begin(); it != s.repeats.end();) {
             if(it->second.count){
@@ -269,7 +282,7 @@ void Synchronize(State& s) noexcept {
         if(GetTickCount()-start>=2000)return;
         Sleep(1);
     }
-    try {Drain(s,true);}catch(...){}
+    try {Drain(s,true,true);}catch(...){}
     ReleaseSRWLockExclusive(&s.writeLock);
 }
 }
@@ -360,11 +373,24 @@ void ObserveDamage(CUnit* a,CUnit* t,float amount,int outcome,int critical) noex
 void ObserveHeal(CUnit* t,float amount) noexcept {
     try{if(t&&amount>0)Healing(actor,t->GetID(),Prototype(t),amount);}catch(...){}
 }
-void ObserveSpell(CUnit* a,CMapObject* t,const char* code,int phase,int result,float x,float y,float z,bool combat) noexcept {
+SpellObservation CaptureSpell(CMapObject* a, CMapObject* t) noexcept {
+    SpellObservation captured;
+    if (a) {
+        captured.actor = a->GetID();
+        if (a->WhoAmI() == HPC_UNIT) {
+            auto* unit = static_cast<CUnit*>(a);
+            strncpy_s(captured.prototype, Prototype(unit), _TRUNCATE);
+            captured.squad = Squad(unit);
+        }
+    }
+    if (t) captured.target = t->GetID();
+    return captured;
+}
+void ObserveSpell(const SpellObservation& captured,const char* code,int phase,int result,float x,float y,float z,bool combat) noexcept {
     try {
-        char key[512];_snprintf_s(key,sizeof(key),_TRUNCATE,"actor=%d prototype=%s spell=%s target=%d x=%g y=%g z=%g phase=%d result_phase=%d",a?a->GetID():-1,Prototype(a),code?code:"unknown",t?t->GetID():-1,x,y,z,phase,result);
+        char key[512];_snprintf_s(key,sizeof(key),_TRUNCATE,"actor=%d prototype=%s spell=%s target=%d x=%g y=%g z=%g phase=%d result_phase=%d",captured.actor,captured.prototype,code?code:"unknown",captured.target,x,y,z,phase,result);
         Count("COMBAT","spell",key);
-        if(combat&&a&&Squad(a)){State* s=current.load();if(s&&!s->stopping){Lock guard(s->queueLock);DWORD now=CombatNow();if(!s->fighting){s->fighting=true;Append(*s,Line("COMBAT","begin","reason=squad_spell heuristic=true idle_threshold_ms=10000"));}s->lastCombat=now;}}
+        if(combat&&captured.squad){State* s=current.load();if(s&&!s->stopping){Lock guard(s->queueLock);DWORD now=CombatNow();if(!s->fighting){s->fighting=true;Append(*s,Line("COMBAT","begin","reason=squad_spell heuristic=true idle_threshold_ms=10000"));}s->lastCombat=now;}}
     }catch(...){}
 }
 void ObserveObject(CMapObject* object,const char* action) noexcept {
@@ -528,6 +554,35 @@ void Event(const char* category,const char* event,const char* format,...) noexce
     if(strcmp(category,"ERROR")==0)Synchronize(*s);
 }
 void Flush() noexcept {State* s=current.load();if(s)SetEvent(s->wake);}
+void Notification(const char* type, const char* text, const char* extra) noexcept {
+    if (strcmp(type, "Warning") != 0) {
+        Event("ERROR", "notification", "type=%s text=%s extra=%s", Quote(type).c_str(), Quote(text).c_str(), Quote(extra).c_str());
+        return;
+    }
+    State* s = current.load(); if (!s || s->stopping) return;
+    try {
+        // Match the full raw text before quoting, conversion, timestamping or disk work.
+        std::string key(text ? text : ""); key += '\0'; key += extra ? extra : "";
+        Lock guard(s->queueLock);
+        if (s->stopping) return;
+        auto it = s->notifications.find(key);
+        if (it != s->notifications.end()) { ++it->second.count; return; }
+        if (s->notifications.size() >= 256) {
+            const DWORD now = GetTickCount();
+            auto oldest = std::min_element(s->notifications.begin(), s->notifications.end(),
+                [now](const auto& a, const auto& b) { return DWORD(now - a.second.time) > DWORD(now - b.second.time); });
+            if (oldest->second.count) {
+                auto entry = Line("ERROR", "notification_repeat", oldest->second.detail + " count=" + std::to_string(oldest->second.count));
+                entry.important = false; Append(*s, std::move(entry));
+            }
+            s->notifications.erase(oldest);
+        }
+        std::string detail = Utf8(("type=" + Quote(type) + " text=" + Quote(text) + " extra=" + Quote(extra)).c_str());
+        auto entry = Line("ERROR", "notification", detail); entry.important = false;
+        Append(*s, std::move(entry));
+        s->notifications.emplace(std::move(key), Repeat{GetTickCount(), 0, std::move(detail)});
+    } catch (...) {}
+}
 void FlushCritical() noexcept{State* s=current.load();if(s)Synchronize(*s);}
 void Crash(const wchar_t* dump,unsigned long code,const CrashEvidence::Details* details) noexcept {
     State* s=current.load();if(!s)return;
@@ -538,7 +593,7 @@ void Crash(const wchar_t* dump,unsigned long code,const CrashEvidence::Details* 
         Sleep(1);
     }
     try {
-        Drain(*s,true);
+        Drain(*s,true,true);
         std::string description="code="+std::to_string(code)+" dump="+Escape(WideUtf8(dump?dump:L""),true);
         if(details) {
             description+=" kind="+std::string(details->kind)+" type="+Escape(Utf8(details->types),true)+

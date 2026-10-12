@@ -65,7 +65,7 @@ public:
     void SetTime(float fpNewTime);
     float GetTime() const { return fpTime; }
     //
-    void Load(LPBYTE &lpData);
+    BOOL Load(LPBYTE &lpData, DWORD dwDataSize);
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CAnimationTrack"; };
     virtual EClassIDs WhoAmI() const { return HPC_ANIMATION_TRACK; };
@@ -126,7 +126,7 @@ public:
     void CreateMainTrack();
     //
     void ClearCurrentTrack(const SADEntry *pADEntry);
-    void LoadCurrentTrack(BYTE *pData, const SADEntry *pADEntry);
+    void LoadCurrentTrack(BYTE *pData, DWORD dwDataSize, const SADEntry *pADEntry);
     // name functions
     void SetName(LPCSTR pszNewName) { szName = pszNewName; }
     void SetParentName(LPCSTR pszNewName) { szParentName = pszNewName; }

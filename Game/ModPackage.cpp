@@ -61,6 +61,8 @@
 #include "aiSettings.h"
 #include "ItemDatabase.h"
 #include "CMappedResource.h"
+#include "GraphicsProcessorMMX.h"
+#include "ModHDEquipmentLayer.h"
 #include "mapFormat.h"
 #include "adFormat.h"
 #include "luajit-x86/lua.hpp"
@@ -219,6 +221,7 @@ void CModPackage::InitializeScript(){
  staticLookups=ModStaticLookup::State{};
  scalarManaBonus=false;
  manaBonusCache.clear();
+ spellAddonManaBonusCache.clear();
  Stack stack(state);
  ModLua::Register(state);
  if(!perkHostLifetime)perkHostLifetime=std::make_shared<ModLua::PerkHostLifetime>();
@@ -437,6 +440,33 @@ bool CModPackage::CollectArmor(CUnit&unit,ArmorModifiers&mods){
  mods.speed+=value("MaterialProp",material,9);mods.sight+=value("MaterialProp",material,13)+value("ArmorProp",shape,5);mods.hearing+=value("MaterialProp",material,14)+value("ArmorProp",shape,6);
  }return has;
 }
+bool CModPackage::NpcArmorPercepts(CUnit&unit,CUnit*fallback,float&sight,float&hearing){
+ sight=hearing=0;
+ if(!npcMaterialEffects || unit.GetOwner())return false;
+ // Opening the information panel must not reset combat/lifecycle state.
+ const void*world=theWorldServer.GetSpecificManager();
+ const std::string zone=(LPCSTR)theWorldServer.szMobFileName;
+ const int segment=theWorldServer.GetSegmentTimeCounter();
+ if(world!=npcArmorViewWorld||zone!=npcArmorViewZone||(npcArmorViewSegment>=0&&segment<npcArmorViewSegment))npcArmorViewCache.clear();
+ npcArmorViewWorld=world;npcArmorViewZone=zone;npcArmorViewSegment=segment;
+ CUnit*candidates[]={&unit,theWorldServer.GetMapObjectManager()?theWorldServer.GetUnit(unit.GetID()):nullptr,
+  fallback,theWorld.GetMapObjectManager()?theWorld.GetUnit(unit.GetID()):nullptr};
+ for(int i=0;i<4;++i){auto*c=candidates[i];if(!c||c->GetID()!=unit.GetID()||c->GetSubtypeID()!=unit.GetSubtypeID())continue;
+  bool duplicate=false;for(int j=0;j<i;++j)if(candidates[j]==c)duplicate=true;if(duplicate)continue;
+  ArmorModifiers found;if(!CollectArmor(*c,found))continue;
+  npcArmorViewCache[unit.GetID()]=found;sight=found.sight;hearing=found.hearing;return true;
+ }
+ // Reuse a current runtime observation before the panel's own fallback.
+ if(world==cacheWorld&&zone==cacheZone&&!(cacheSegment>=0&&segment<cacheSegment)){
+  auto live=npcArmorCache.find(unit.GetID());
+  if(live!=npcArmorCache.end()&&live->second.subtype==unit.GetSubtypeID())npcArmorViewCache[unit.GetID()]=live->second;
+ }
+ auto it=npcArmorViewCache.find(unit.GetID());if(it!=npcArmorViewCache.end()){
+  if(it->second.subtype==unit.GetSubtypeID()){sight=it->second.sight;hearing=it->second.hearing;return true;}
+  npcArmorViewCache.erase(it);
+ }
+ return false;
+}
 bool CModPackage::RecalcUnitStats(SRPGUnitStats&stats,SRPGCommonStats&common,CUnit&unit){
  auto statsFailure=[&](const char* reason,const SRPGUnitStats& s,const SRPGCommonStats& c){char message[768];
  snprintf(message,sizeof(message),"%s\nUnit ID=%u prototype=%s\nHP=%g MP=%g bodyWeight=%g\nMove=%g sight=%g hearing=%g",reason,unsigned(unit.GetID()),unit.GetPrototype()?unit.GetPrototype()->szName:"<none>",double(c.ssHP.fpMax),double(c.ssMP.fpMax),double(s.hls[RPGHL_BODY].fpHPWeight),double(s.move.fpEffectiveValue),double(s.percepts[RPGS_SIGHT].fpEffectiveValue),double(s.percepts[RPGS_HEARING].fpEffectiveValue));return std::runtime_error(message);};
@@ -625,10 +655,7 @@ Json CheckStartup(const std::string&directory){
  if(!activeAudioConfig.Open(expected.ResolveConfig("ai.reg","config\\ai.reg").c_str()))
   throw std::runtime_error("Installed audio registry could not be opened");
  ConfigureModAudio(activeAudioConfig,directory);
- bool binkOutputConfigured=activeAudioConfig.GetInt("Addon","JMVMiniaudioBinkOutputPrototype",0)!=0;
  bool showAllQuestsConfigured=activeAudioConfig.GetInt("Addon","ShowAllQuests",0)!=0;
- if(ModAudioSettings().JMVMiniaudioBinkOutputPrototype!=binkOutputConfigured)
-  throw std::runtime_error("Bink output setting differs from active registry");
  if(!CBinkVideo::DecoderAvailable())throw std::runtime_error("Game Bink decoder was not found");
  CMappedResource native;CWin32MappedResource mapped;int entries=0;std::string base=(fs::current_path()/"res/database.res").string();
  DWORD zoneXSectors=0,zoneYSectors=0;
@@ -702,7 +729,7 @@ Json CheckStartup(const std::string&directory){
  }
  if(ModRuntime::Current()||ModRuntime::Resources())throw std::runtime_error("Host leaked its binding");
  DWORD size=0;auto*p=mapped.GetFile("units.udb",&size);if(!p||!mapped.CloseFile(p))throw std::runtime_error("Resource handle lifetime depended on destroyed Host");
- return {{"success",true},{"hostLifecycle",true},{"nativeReaderEntries",entries},{"mappedReaderEntries",entries},{"resourceOwnership",true},{"enumeration",true},{"femaleAnimationCount",femaleAnimationCount},{"maleAnimationCount",maleAnimationCount},{"twoHandedLootAxeIndex",twoHandedLootAxe},{"twoHandedLootSwordIndex",twoHandedLootSword},{"configConsumer",true},{"binkMiniaudioSetting",binkOutputConfigured},{"showAllQuestsSetting",showAllQuestsConfigured},{"binkMiniaudioConfigMatched",true},{"binkDecoderAvailable",true},{"cameraConsumer",true},{"cameraPath",expected.ResolveCamera("mainmenu.cam","")},{"mapReadConsumer",true},{"gameplayMapReader",true},{"zone1XSectors",zoneXSectors},{"zone1YSectors",zoneYSectors},{"gameplayActivated",false}};
+ return {{"success",true},{"hostLifecycle",true},{"nativeReaderEntries",entries},{"mappedReaderEntries",entries},{"resourceOwnership",true},{"enumeration",true},{"femaleAnimationCount",femaleAnimationCount},{"maleAnimationCount",maleAnimationCount},{"twoHandedLootAxeIndex",twoHandedLootAxe},{"twoHandedLootSwordIndex",twoHandedLootSword},{"configConsumer",true},{"binkMiniaudioEnabled",true},{"showAllQuestsSetting",showAllQuestsConfigured},{"binkDecoderAvailable",true},{"cameraConsumer",true},{"cameraPath",expected.ResolveCamera("mainmenu.cam","")},{"mapReadConsumer",true},{"gameplayMapReader",true},{"zone1XSectors",zoneXSectors},{"zone1YSectors",zoneYSectors},{"gameplayActivated",false}};
 }
 }
 float CModPackage::ExperienceMultiplier(const SRPGUnitStats&stats){return StatsNumber("GetExpMultiplierOnServer",stats);}
@@ -732,6 +759,11 @@ float CModPackage::ScalarManaBonus(float intelligence){
 float CModPackage::ManaBonus(const SRPGUnitStats&stats){if(scalarManaBonus)return ScalarManaBonus(stats.psIntelligence.fpEffectiveValue);return StatsNumber("GetManaBonusOnServer",stats);}
 float CModPackage::SpellAddonManaBonus(const SRPGUnitStats&stats){
  CallbackFrame frame(state);SRPGUnitStats snapshot=stats;
+ if(!scriptInitialized)throw std::runtime_error("Mod script has not been initialized");
+ const float intelligence=stats.psIntelligence.fpEffectiveValue;
+ const bool cacheable=scalarManaBonus && std::isfinite(intelligence);
+ const std::string key(reinterpret_cast<const char*>(&intelligence),sizeof(intelligence));
+ if(cacheable){auto it=spellAddonManaBonusCache.find(key);if(it!=spellAddonManaBonusCache.end())return it->second;}
  const char*callback=scalarManaBonus?"GetManaBonusFromIntelligence":"GetManaBonusOnServer";
  BeginCallback(callback);
  if(scalarManaBonus)lua_pushnumber(state,stats.psIntelligence.fpEffectiveValue);
@@ -739,9 +771,11 @@ float CModPackage::SpellAddonManaBonus(const SRPGUnitStats&stats){
  Call(1,1);
  if(lua_type(state,-1)!=LUA_TNUMBER)
   throw std::runtime_error(std::string(callback)+": expected numeric result");
- // ASI's FCOMP treats an unordered product as not greater. Keep IEEE values
- // on this path alone, without reading or writing the strict R01 cache.
- return static_cast<float>(lua_tonumber(state,-1));
+ // Keep IEEE results separate from the strict R01 cache. Only successful
+ // scalar calls with finite intelligence are cached, as in the addon reader.
+ const float value=static_cast<float>(lua_tonumber(state,-1));
+ if(cacheable){if(spellAddonManaBonusCache.size()>=4096)spellAddonManaBonusCache.clear();spellAddonManaBonusCache[key]=value;}
+ return value;
 }
 float CModPackage::VampSpellValue(const char*prototype,int column){
  CallbackFrame frame(state);
@@ -1391,9 +1425,10 @@ Json CheckCampStatsG3(const std::string& directory){
 #include "ModCampDescriptionsCheck.inl"
 #include "ModIdleTooltipsCheck.inl"
 #include "ModAssortmentCheck.inl"
-std::string CModPackage::ProgressionRequirementCode(const char* code,int field){
+std::optional<std::string> CModPackage::ProgressionRequirementCode(const char* code,int field){
  CallbackFrame frame(state);BeginCallback("GetPerkRequiredJmv");lua_pushstring(state,code);lua_pushinteger(state,field);Call(2,1);
- const char* text=lua_tostring(state,-1);std::string result=text?text:"";lua_pop(state,1);return result;
+ const char* text=lua_tostring(state,-1);
+ return text?std::optional<std::string>(text):std::nullopt;
 }
 namespace {
 Json CheckDownstreamOwnerG3(){
@@ -1483,6 +1518,7 @@ Json CheckConditionalCombatG3(){
 #include "ModSecondaryAtlasCheck.inl"
 #include "ModPrimaryAtlasCheck.inl"
 #include "ModTextureMemoryCheck.inl"
+#include "ModHDEquipmentLayerCheck.inl"
 #include "ModSpellTargetingCheck.inl"
 #include "ModSpellMappingCheck.inl"
 #include "ModSpellOwnerCheck.inl"
@@ -1605,7 +1641,8 @@ bool InspectModPackageCommandLine(int &result){
  bool uiDescriptions=argc>=2&&wcscmp(argv[1],L"--inspect-ui-descriptions-g3")==0;
  bool spellTooltips=argc>=2&&wcscmp(argv[1],L"--inspect-spell-tooltips")==0;
  bool startup=argc>=2&&wcscmp(argv[1],L"--inspect-mod-startup")==0;
- if(argc<2||(!mob&&!defaults&&!economy&&!startup&&!uiRange&&!spellTooltips&&!campSpellInfo&&!campStats&&!fullDescriptions&&!idleTooltips&&!assortment&&!hudAssignment&&!progression&&!safetyLookup&&!equipmentSwitch&&!campEquipment&&!campRepair&&!campItemPrice&&!campSale&&!secondaryAtlas&&!primaryAtlas&&!textureMemory&&!memoryOutputAllocation&&!conditionalCombat&&!attackCreation&&!downstreamOwner&&!modalFade&&!meleeTiming&&!preparedAttack&&!lruAccounting&&!consoleDrawAll&&!spellTargeting&&!spellMapping&&!spellOwner&&!spellLoad&&!spellPhase&&!campReferences&&!uiDescriptions&&!itemInfo&&!itemDetails&&!constructorLifetime&&!constructorContext&&!playerNumbers&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
+ bool hdEquipmentLayer=argc>=2&&wcscmp(argv[1],L"--inspect-hd-equipment-layer")==0;
+ if(argc<2||(!mob&&!defaults&&!economy&&!startup&&!hdEquipmentLayer&&!uiRange&&!spellTooltips&&!campSpellInfo&&!campStats&&!fullDescriptions&&!idleTooltips&&!assortment&&!hudAssignment&&!progression&&!safetyLookup&&!equipmentSwitch&&!campEquipment&&!campRepair&&!campItemPrice&&!campSale&&!secondaryAtlas&&!primaryAtlas&&!textureMemory&&!memoryOutputAllocation&&!conditionalCombat&&!attackCreation&&!downstreamOwner&&!modalFade&&!meleeTiming&&!preparedAttack&&!lruAccounting&&!consoleDrawAll&&!spellTargeting&&!spellMapping&&!spellOwner&&!spellLoad&&!spellPhase&&!campReferences&&!uiDescriptions&&!itemInfo&&!itemDetails&&!constructorLifetime&&!constructorContext&&!playerNumbers&&wcscmp(argv[1],L"--inspect-addon")!=0)){LocalFree(argv);return false;}
  result=2;Json report;std::wstring output;
  if(mob&&argc==5){output=argv[4];try{
   ModRuntime::Host host(Ansi(argv[2]));std::ifstream file(fs::path(argv[3]),std::ios::binary);
@@ -1614,6 +1651,7 @@ bool InspectModPackageCommandLine(int &result){
   bool ok=script.LoadText(source,FALSE)!=FALSE;auto error=script.GetLastError();
   report={{"success",ok},{"line",error.nLine},{"error",std::string((LPCSTR)error.text)}};result=ok?0:1;
  }catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
+ else if(hdEquipmentLayer&&argc==4){output=argv[3];try{report=CheckHDEquipmentLayer(Ansi(argv[2]));result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
  else if(argc==4){output=argv[3];try{if(playerNumbers)report=CheckPlayerNumbers();else if(constructorContext)report=CheckConstructorLifetimeContext(Ansi(argv[2]));else if(constructorLifetime)report=CheckConstructorLifetime(Ansi(argv[2]));else if(itemDetails)report=CheckItemDetails(Ansi(argv[2]));else if(itemInfo)report=CheckItemInfo(Ansi(argv[2]));else if(equipmentSwitch)report=CheckEquipmentSwitchG3(Ansi(argv[2]));else if(campEquipment)report=CheckCampEquipmentG3(Ansi(argv[2]));else if(campRepair)report=CheckCampRepairG3(Ansi(argv[2]));else if(campItemPrice)report=CheckCampItemPriceG3(Ansi(argv[2]));else if(campSale)report=CheckCampSaleG3(Ansi(argv[2]));else if(secondaryAtlas)report=CheckSecondaryAtlasG3(Ansi(argv[2]));else if(primaryAtlas)report=CheckPrimaryAtlasG3(Ansi(argv[2]));else if(textureMemory)report=CheckTextureMemoryG3(Ansi(argv[2]));else if(memoryOutputAllocation)report=CheckMemoryOutputAllocationG3(Ansi(argv[2]));else if(conditionalCombat)report=CheckConditionalCombatG3();else if(attackCreation)report=CheckAttackCreationG3();else if(modalFade)report=CheckModalFadeG3();else if(meleeTiming)report=CheckMeleeTimingG3();else if(preparedAttack)report=CheckPreparedAttackG3();else if(lruAccounting)report=Json::parse(CTextureManager::CheckLRUAccountingG3());else if(downstreamOwner)report=CheckDownstreamOwnerG3();else if(consoleDrawAll)report=Json::parse(NConsole::CheckDrawAllCommand());else if(campReferences)report=CheckCampReferencesG3(Ansi(argv[2]));else if(spellPhase)report=CheckSpellPhaseG3(Ansi(argv[2]));else if(spellLoad)report=CheckSpellLoadG3(Ansi(argv[2]));else if(spellOwner)report=CheckSpellOwnerG3(Ansi(argv[2]));else if(spellMapping)report=CheckSpellMappingG3(Ansi(argv[2]));else if(spellTargeting)report=CheckSpellTargetingG3(Ansi(argv[2]));else if(safetyLookup)report=CheckSafetyLookupG3(Ansi(argv[2]));else if(progression)report=CheckProgressionG3(Ansi(argv[2]));else if(hudAssignment)report=CheckHudAssignmentG3(Ansi(argv[2]));else if(assortment)report=CheckAssortmentG3(Ansi(argv[2]));else if(idleTooltips)report=CheckIdleTooltipsG3(Ansi(argv[2]));else if(fullDescriptions)report=CheckFullDescriptionsG3(Ansi(argv[2]));else if(campStats)report=CheckCampStatsG3(Ansi(argv[2]));else if(uiDescriptions)report=CheckUiDescriptions(Ansi(argv[2]));else if(campSpellInfo)report=CheckCampSpellInfo(Ansi(argv[2]));else if(spellTooltips)report=CheckSpellTooltips(Ansi(argv[2]));else if(uiRange)report=CheckUIRange(Ansi(argv[2]));else if(defaults)report=CheckDefaultStats();else if(economy){CModPackage package;package.Load(Ansi(argv[2]));report=package.CheckEconomy();}else if(startup)report=CheckStartup(Ansi(argv[2]));else{CModPackage package;package.Load(Ansi(argv[2]));report=package.Describe();}result=0;}catch(const std::exception&e){report={{"success",false},{"error",e.what()}};}}
  else report={{"success",false},{"error","Expected --inspect-addon MOD_DIRECTORY OUTPUT_JSON"}};
  LocalFree(argv);if(!output.empty()){std::ofstream file{fs::path(output)};file<<report.dump(2,' ',false,Json::error_handler_t::replace);if(!file)result=3;}return true;
@@ -1808,7 +1846,7 @@ void CModPackage::CampInfo(CPersonage&pers,CUnit*unit,int&capacity,float&seconds
  }
  capacity=ModCampStats::Capacity(strength,stats.GetPerkModifier(CombatSetting("JMVPerks")?1:RPGPRK_LIFT),jewelry,complex,sets);
  float actions=(10+stats.psDexterity.fpEffectiveValue*.2f)*(1+stats.GetPerkModifier(14)*.01f);
- int slot=int(pers.dwCurrentWeapon),left=unit?ModStats::LeftHand(*unit):-1;
+ int slot=int(pers.dwCurrentWeapon),left=unit?ModStats::LeftHand(*unit,[&](int index)->CItemWeapon*{return index>=0&&index<pers.weapons.GetSize()?pers.weapons[index]:nullptr;}):-1;
  auto*right=slot>=0&&slot<pers.weapons.GetSize()?pers.weapons[slot]:nullptr;
  auto*off=left>=0&&left<pers.weapons.GetSize()?pers.weapons[left]:nullptr;
  if(right&&left<0&&stats.cPerks[28]){
@@ -2106,6 +2144,23 @@ std::vector<std::pair<int,int>> CModPackage::InfoSetBonuses(const char*name,int 
   if(type&&type==stat)sum+=complex?int(InfoComplexProperty(set,7+i,c)):InfoSetPosition(name,c,5+i);
  }if(sum)result.emplace_back(stat,sum);}return result;
 }
+float CModPackage::InfoDisplayScalar(const char* callback, std::initializer_list<float> args) {
+ CallbackFrame frame(state); BeginCallback(callback);
+ for (float value : args) lua_pushnumber(state, value);
+ Call(int(args.size()), 1); return float(Number(state, callback));
+}
+float CModPackage::InfoDisplayActor(const char* callback, CUnit& unit, int slot) {
+ CallbackFrame frame(state); BeginCallback(callback);
+ ModLua::Push(state, unit.GetUserUnitStats(), frame.scope); ModLua::Push(state, &unit, frame.scope);
+ if (slot >= 0) lua_pushinteger(state, slot);
+ Call(slot >= 0 ? 3 : 2, 1); return float(Number(state, callback));
+}
+float CModPackage::InfoDisplayWound(const SRPGUnitStats& stats) {
+ CallbackFrame frame(state); BeginCallback("GetHitLocDecr");
+ SRPGUnitStats displayStats = stats;
+ ModLua::Push(state, &displayStats, frame.scope); lua_pushnil(state); lua_pushinteger(state, 1);
+ Call(3, 1); return float(Number(state, "GetHitLocDecr"));
+}
 float CModPackage::InfoMagicBlood(int level){
  CallbackFrame frame(state);BeginCallback("GetRegenBonusFromPerkMagicBlood");lua_pushinteger(state,level);Call(1,1);return float(Number(state,"MagicBlood"));
 }
@@ -2288,9 +2343,7 @@ bool InspectModConfigurationCommandLine(int& result){
    out["JMVSetItemsComplex"]=int(complex);out["AddonExp/Limit"]=package.experienceLimit;out["MagicRandom"]=package.magicRandomLimit;
    const auto& a=ModAudioSettings();
    out["JMVSpeechMusicDucking"]=int(a.JMVSpeechMusicDucking);out["JMVFixStepSoundVariantGenerator"]=int(a.JMVFixStepSoundVariantGenerator);
-   out["JMVSuppressEmptyStartSfx"]=int(a.JMVSuppressEmptyStartSfx);out["JMVMiniaudioModalSpeechPausePrototype"]=int(a.JMVMiniaudioModalSpeechPausePrototype);
-   out["JMVMiniaudioGamePauseSpeechPrototype"]=int(a.JMVMiniaudioGamePauseSpeechPrototype);out["JMVMiniaudioBinkOutputPrototype"]=int(a.JMVMiniaudioBinkOutputPrototype);
-   out["JMVMiniaudioBinkPreciseWaitPrototype"]=int(a.JMVMiniaudioBinkPreciseWaitPrototype);out["JMVMiniaudioBinkReadyBackpressurePrototype"]=int(a.JMVMiniaudioBinkReadyBackpressurePrototype);
+   out["JMVSuppressEmptyStartSfx"]=int(a.JMVSuppressEmptyStartSfx);
    out["JMVMiniaudioMissingAudioCatalogDiagnostic"]=int(a.JMVMiniaudioMissingAudioCatalogDiagnostic);
    out["JMVSfxReverbOutdoorLevel"]=a.JMVSfxReverbOutdoorLevel;out["JMVSfxReverbOutdoorReflection"]=a.JMVSfxReverbOutdoorReflection;out["JMVSfxReverbOutdoorDecay"]=a.JMVSfxReverbOutdoorDecay;
    out["JMVSfxReverbCaveLevel"]=a.JMVSfxReverbCaveLevel;out["JMVSfxReverbCaveReflection"]=a.JMVSfxReverbCaveReflection;out["JMVSfxReverbCaveDecay"]=a.JMVSfxReverbCaveDecay;

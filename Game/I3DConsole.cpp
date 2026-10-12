@@ -21,6 +21,54 @@ const COLORREF CONSOLE_COLOR_TEXT = RGB(180, 180, 180);
 const COLORREF CONSOLE_COLOR_CMD = RGB(255, 255, 255);
 const COLORREF CONSOLE_COLOR_CURSOR = RGB(255, 255, 255);
 const COLORREF CONSOLE_COLOR_SEL = RGB(80, 80, 80);
+// GDI writes RGB with an undefined/zero alpha byte. Retail blits ignored it;
+// the source renderer blends premultiplied BGRA. Own this conversion here so
+// console colors remain opaque without changing other UI surfaces.
+class CConsolePaint
+{
+    CI3DSurface *surface;
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous = nullptr;
+    DWORD *pixels = nullptr;
+    int width, top, height;
+public:
+    CConsolePaint(CI3DSurface *target, int w, int y, int h)
+        : surface(target), width(w), top(y), height(h)
+    {
+        BITMAPINFO info = {};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        dc = CreateCompatibleDC(nullptr);
+        if (!dc) return;
+        bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS,
+                                  reinterpret_cast<void **>(&pixels), nullptr, 0);
+        if (!bitmap) return;
+        previous = SelectObject(dc, bitmap);
+        SetViewportOrgEx(dc, 0, -top, nullptr);
+    }
+    CDC *GetDC() { return pixels ? CDC::FromHandle(dc) : nullptr; }
+    ~CConsolePaint()
+    {
+        if (pixels) {
+            GdiFlush();
+            for (size_t i = 0; i < size_t(width) * height; ++i)
+                pixels[i] |= 0xff000000u;
+            D3D11_BOX box = {0, UINT(top), 0, UINT(width), UINT(top + height), 1};
+            D3D11_SUBRESOURCE_DATA data = {pixels, UINT(width * sizeof(DWORD)), 0};
+            surface->GetSurface()->UpdateTexture(0, &box, &data);
+        }
+        if (previous) SelectObject(dc, previous);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+    }
+    CConsolePaint(const CConsolePaint &) = delete;
+    CConsolePaint &operator=(const CConsolePaint &) = delete;
+};
 /////////////////////////////////////////////////////////////////////////////////////
 CI3DConsole::CI3DConsole(CInterface3D *pI)
 {
@@ -379,7 +427,9 @@ void CI3DConsole::RedrawLines()
         return;
 
 #ifndef NOGETDC
-    CDC *pDC = pSurface->GetDC();
+    CConsolePaint paint(pSurface, nWidth, 0,
+                        nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT);
+    CDC *pDC = paint.GetDC();
     if (!pDC)
         return;
 
@@ -418,7 +468,7 @@ void CI3DConsole::RedrawLines()
 
     pDC->SelectObject(pOldFont);
 
-    pSurface->ReleaseDC();
+    // paint uploads the opaque console rectangle after GDI drawing.
 #endif // NOGETDC
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -439,7 +489,10 @@ void CI3DConsole::RedrawCommand()
     CSize sizeCursor, sizeSel;
 
 #ifndef NOGETDC
-    CDC *pDC = pSurface->GetDC();
+    CConsolePaint paint(pSurface, nWidth,
+                        nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT,
+                        2 * CONSOLE_BORDER + CONSOLE_LINE_HEIGHT);
+    CDC *pDC = paint.GetDC();
     if (!pDC)
         return;
     CFont *pOldFont = pDC->SelectObject(pConsoleFont);
@@ -484,7 +537,7 @@ void CI3DConsole::RedrawCommand()
 
     pDC->SelectObject(pOldFont);
 
-    pSurface->ReleaseDC();
+    // paint uploads the opaque console rectangle after GDI drawing.
 #endif // NOGETDC
 }
 /////////////////////////////////////////////////////////////////////////////////////

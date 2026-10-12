@@ -6,7 +6,6 @@
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
 #include "ModInfoHitChance.h"
-#include "NotificationJournal.h"
 #include "EngineDiagnostics.h"
 #include "GlobalMap.h"
 #include "MusicSystem.h"
@@ -1643,9 +1642,6 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
-    if (nChar == VK_ESCAPE && !(nFlags & 0x4000) && pOutput && pOutput->CloseHistory()) {
-        SetProcessed(); return;
-    }
     if (pI3D && pI3D->IsAltDown())
     {
         int extendedSpellSlot = -1;
@@ -1692,6 +1688,13 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     CI3DScreen::OnKeyDown(nChar, nRepCnt, nFlags);
     if (GetProcessed())
         return;
+
+    if (nChar == 'N' && ModRuntime::Current() && pI3D->IsShiftDown() &&
+        !pI3D->IsAltDown() && !pI3D->IsCtrlDown()) {
+        if ((nFlags & 0x4000) == 0) theCamera.ToggleFalloutMode();
+        SetProcessed();
+        return;
+    }
 
     if (nFlags & 0x4000)
         return;
@@ -2058,9 +2061,8 @@ BOOL CI3DScreenMission::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
     pInfo->OnMouseWheel(nFlags, zDelta, pt);
     if (pInfo->GetProcessed())
         return TRUE;
-    if (pOutput->ScrollHistory(nFlags, zDelta, pt)) return TRUE;
     pScrollText->SetProcessed(false);
-    if (!ModRuntime::Current()) pScrollText->OnMouseWheel(nFlags, zDelta, pt);
+    pScrollText->OnMouseWheel(nFlags, zDelta, pt);
     if (pScrollText->GetProcessed())
         return TRUE;
     pOutput->SetProcessed(false);
@@ -3476,27 +3478,41 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
             }
             if (pTxtMng->GetText(CString("perk ") + szSkill))
                 pTxtMng->GetLine(szName);
-            szSkill.Format("%s %d\n", szStrings[0], pStats->cManualSkills[i]);
+            if (ModRuntime::Current())
+                szSkill.Format("%s %.0f\n", szStrings[0], ModHudAssignment::ManualSkill(*pStats, i));
+            else
+                szSkill.Format("%s %d\n", szStrings[0], pStats->cManualSkills[i]);
             if (pTxtMng->GetText("tip 10511"))
                 pTxtMng->GetUntilNextCommand(szDesc);
             szName = szName + "\n" + szSkill + szDesc;
             GetArea(nSkills - 1)->SetToolTip(szName, 1, KA_SKILL_SCIENCE);
         }
-        if (bIsSomeone && pUnit->GetOwner() && theWorld.GetPlayer() &&
-            pUnit->GetOwner() == theWorld.GetPlayer()->GetPlayer() &&
-            ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCamp"))
+    }
+    CUnit* goCampContext = pUnit;
+    if (!goCampContext && bIsSomeone && pScreen)
+    {
+        int count = 0, index = -1;
+        goCampContext = pScreen->GetSelection(count, index);
+        if (count < 2) goCampContext = nullptr;
+    }
+    if (goCampContext && goCampContext->GetOwner() && theWorld.GetPlayer() &&
+        goCampContext->GetOwner() == theWorld.GetPlayer()->GetPlayer() &&
+        ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCamp"))
+    {
+        const bool available = theWorldServer.CanBeginFieldCamp();
+        AddSkill("initqi1item", available ? "jmv_gocamp" : "jmv_gocamp_disabled", -2);
+        fieldCampButtonAvailability = available ? 1 : 0;
+        fieldCampButtonLastUpdate = GetTickCount();
+        CTextManager* text = theWorld.GetTextManager();
+        CString goCampToolTip;
+        if (text->GetText("SPELL jmv_gocamp"))
         {
-            AddSkill("initqi1item", "jmv_gocamp", -2);
-            CString goCampToolTip;
-            if (pTxtMng->GetText("SPELL jmv_gocamp"))
-            {
-                pTxtMng->GetUntilNextCommand(goCampToolTip);
-                goCampToolTip.TrimRight("\r\n");
-                pTxtMng->CloseText();
-            }
-            if (!goCampToolTip.IsEmpty())
-                GetArea(nSkills - 1)->SetToolTip(goCampToolTip, 1);
+            text->GetUntilNextCommand(goCampToolTip);
+            goCampToolTip.TrimRight("\r\n");
         }
+        else goCampToolTip = "Camp";
+        text->CloseText();
+        GetArea(nSkills - 1)->SetToolTip(goCampToolTip, 1);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -5141,10 +5157,11 @@ void CI3DObjectMap::InvertClosedState()
     slide_dir = -slide_dir;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectMap::NormalizeCamera()
+void CI3DObjectMap::NormalizeCamera(bool cycleFallout)
 {
     pI3D->BeginFX("buttons\\battle\\click.wav");
-    theCamera.ToggleFalloutMode();
+    if (cycleFallout) theCamera.ToggleFalloutMode();
+    else theCamera.NormalizeNorth();
     fNormTime = 0.5f;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -5186,7 +5203,7 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
         switch (ht)
         {
         case 5:
-            NormalizeCamera();
+            NormalizeCamera(true);
             break;
         case 0:
             InvertClosedState();
@@ -5668,14 +5685,10 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
             if (serverUnit)
             {
                 const auto &serverEffects = serverUnit->GetSpellEffects();
-                for (int effectIndex = 0; effectIndex < serverEffects.GetSize(); ++effectIndex)
-                    if (serverEffects[effectIndex].nSpellID == effects[i].nSpellID)
-                    {
-                        serverEffect = &serverEffects[effectIndex];
-                        break;
-                    }
+                if (i < serverEffects.GetSize())
+                    serverEffect = &serverEffects[i];
             }
-            float power = serverEffect ? serverEffect->fpPower : effects[i].fpPower;
+            float power = serverEffect ? serverEffect->fpPower : 0.0f;
             const bool attacking = effects[i].nSpellID <= SPELL_ID_POISONFOG || effects[i].nSpellID == SPELL_ID_VAMP;
             if (attacking)
             {
@@ -5695,7 +5708,7 @@ void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
             }
             CString prefix, seconds;
             if (pTxtMng->GetText("string infoitem_82")) pTxtMng->GetLine(prefix);
-            if (pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(seconds);
+            if (serverUnit && pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(seconds);
             const bool wholePower = serverUnit && serverUnit->GetEffectValue(effects[i].nSpellID) > 10;
             if (wholePower)
                 szOut.Format("%s%.0f (%d%s)", (LPCSTR)prefix, power, effects[i].nDuration / 15, (LPCSTR)seconds);
@@ -5872,8 +5885,23 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
             int weight=int(data.GetItemsWeight());
             if(pUnit->GetTypeID()==MOTID_HUMAN){value.Format("%s: %d/%d(%d%%)",raw("perk Encumbrance"),weight,capacity,capacity>0?int((weight+1)*100.f/capacity):0);draw(value);}
             value.Format("%s: %d",raw("perk Experience"),alien?int(pUnit->GetPrototype()->fExp):int(stats->dwExperience));draw(value);
-            value.Format("%s %.0f%%",raw("string infoitem_51"),(server?server->GetFSSoundDetect():1.f)*100);draw(value);
-            value.Format("%s %.0f%%",raw("string infoitem_53"),(server?server->GetVisionDetect():1.f)*100);draw(value);
+            float hearing=1.f,sight=1.f;
+            if(server){
+                hearing=server->GetFSSoundDetect();sight=server->GetVisionDetect();
+                const auto&percepts=server->GetRPGStats()->percepts;
+                if(hearing==0.f)hearing=percepts[RPGS_HEARING].fpEffectiveValue;
+                if(sight==0.f)sight=percepts[RPGS_SIGHT].fpEffectiveValue;
+                const bool recoverHearing=!pUnit->GetOwner()&&percepts[RPGS_HEARING].fpEffectiveValue==1.f;
+                const bool recoverSight=!pUnit->GetOwner()&&percepts[RPGS_SIGHT].fpEffectiveValue==1.f;
+                if(recoverHearing||recoverSight){float armorSight=0,armorHearing=0;
+                    if(mod->NpcArmorPercepts(*serverUnit,pUnit,armorSight,armorHearing)){
+                        if(recoverHearing)hearing=(1.f+armorHearing)*server->GetFSSoundDetect();
+                        if(recoverSight)sight=(1.f+armorSight)*server->GetVisionDetect();
+                    }
+                }
+            }
+            value.Format("%s %.0f%%",raw("string infoitem_51"),hearing*100);draw(value);
+            value.Format("%s %.0f%%",raw("string infoitem_53"),sight*100);draw(value);
             int count=0;if(auto*player=theWorldServer.GetPlayer(0))count=player->party.allWagonItems.GetSize()+player->items.GetCount();
             value.Format("%s: %d",raw("camphelp 22"),count);draw(value);
             float block=0,parry=0;mod->PanelDefense(data,weight,capacity,block,parry);
@@ -6859,10 +6887,6 @@ void CI3DObjectCommands::SetAggr(int iAggr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::Init(int iMode, bool bClosed)
 {
-    if(ModRuntime::Current()) {
-        ModMessages::queue.Bind(this); iMode=0; bClosed=true;
-        notificationMode=Hidden; lastNotification=0;
-    }
     SetRect(180, 0, 620, 100);
 
     slide_bIsSlide = TRUE;
@@ -6917,14 +6941,10 @@ void CI3DObjectOutput::Init(int iMode, bool bClosed)
     pFig->MakeBarFrame(18, 80, 180, -5, 620, 100, 5, 4, 55, 90, 60);
 
     nMode = iMode;
-    if (ModRuntime::Current()) {
-        GetArea(0)->MakeRect(180, 0, 620, 20);
-        GetArea(1)->MakeRect(-10000,-10000,-10000,-10000);
-        GetArea(2)->MakeRect(-10000,-10000,-10000,-10000);
-        ((CI3DScrollText*)pScreen->GetObject(9))->SetText(szOutputText);
-    } else ShowCurrentMode();
+    ShowCurrentMode();
     ScrollFigures();
-    if (ModRuntime::Current()) SyncNotificationVisibility();
+    // Like StockOutputMessages, bind only after native panel initialization.
+    if (ModRuntime::Current()) ModMessages::queue.Bind(this);
     /*
             for ( int j=0; j<6; j++ )
                     figures[j]->Show( FALSE );
@@ -6952,10 +6972,6 @@ void CI3DObjectOutput::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ActivateMode(int nNewMode)
 {
-    if (ModRuntime::Current()) {
-        if (notificationMode != History) ((CI3DScrollText*)pScreen->GetObject(9))->SetPosToEnd();
-        SetNotificationMode(notificationMode == History ? Hidden : History); return;
-    }
     if (slide_dir == 1)
     {
         nMode = nNewMode;
@@ -6981,8 +6997,6 @@ void CI3DObjectOutput::OnIdle()
 {
     auto messages=ModMessages::queue.Take(this);
     for(const auto&message:messages)AddOutput(message.c_str());
-    if (ModRuntime::Current() && notificationMode == Transient && DWORD(GetTickCount()-lastNotification)>=4000)
-        SetNotificationMode(Hidden);
     float fPart;
 
     if (slide_bIsSlide)
@@ -7019,7 +7033,6 @@ void CI3DObjectOutput::OnIdle()
     }
     pI3D->bTextClosed = slide_dir > 0;
     pI3D->nTextMode = nMode;
-    if (ModRuntime::Current()) SyncNotificationVisibility();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::OnLButtonDown(UINT nFlags, CPoint point)
@@ -7040,9 +7053,6 @@ void CI3DObjectOutput::OnLButtonUp(UINT nFlags, CPoint point)
     pI3D->ReleaseCapture();
     int ht = HitTest(point);
     JournalHit(ht);
-    if (ModRuntime::Current()) {
-        SetProcessed(); if (ht == 0) ActivateMode(0); return;
-    }
     switch (ht)
     {
     case 0:
@@ -7080,7 +7090,6 @@ BOOL CI3DObjectOutput::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ShowCurrentMode()
 {
-    if (ModRuntime::Current()) { ActivateMode(0); return; }
     for (int i = 0; i < 2; i++)
     {
         if (nMode == i)
@@ -7112,66 +7121,15 @@ void CI3DObjectOutput::ClearOutput()
         ((CI3DScrollText *)pScreen->GetObject(9))->SetText("");
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectOutput::SyncNotificationVisibility()
-{
-    auto* scroll = (CI3DScrollText*)pScreen->GetObject(9);
-    scroll->Show(notificationMode != Hidden, TRUE);
-    bool shell = notificationMode != Hidden || (slide_bIsSlide && slide_fCurTime < 1);
-    for (int i=0;i<6;++i) figures[i]->Show(shell && i!=3 && i!=4);
-}
-void CI3DObjectOutput::SetNotificationMode(NotificationMode mode)
-{
-    if (notificationMode != mode) {
-        notificationMode=mode; nMode=0;
-        slide_dir=mode==Hidden?1.f:-1.f; slide_bIsSlide=TRUE;
-    }
-    SyncNotificationVisibility();
-}
-bool CI3DObjectOutput::CloseHistory()
-{
-    if (!ModRuntime::Current() || notificationMode != History) return false;
-    SetNotificationMode(Hidden); return true;
-}
-bool CI3DObjectOutput::ScrollHistory(UINT flags, short delta, CPoint point)
-{
-    if (!ModRuntime::Current() || notificationMode == Hidden) return false;
-    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
-    if (scroll->HitTest(point)!=2) return false;
-    SetNotificationMode(History); scroll->OnMouseWheel(flags,delta,point); return true;
-}
 void CI3DObjectOutput::RestoreOutput(LPCTSTR text)
 {
-    if (!ModRuntime::Current()) { AddOutput(text); return; }
-    szOutputText=text;
-    auto tail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
-    if(tail.removed)szOutputText=tail.text.c_str();
-    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
-    scroll->SetText(szOutputText);scroll->SetPosToEnd();SyncNotificationVisibility();
+    AddOutput(text);
 }
 void CI3DObjectOutput::AddOutput(LPCTSTR pszText)
 {
-    if (!ModRuntime::Current()) {
-        szOutputText+=pszText;
-        if(nMode==0)((CI3DScrollText*)pScreen->GetObject(9))->AddText(pszText);
-        return;
-    }
-    auto* scroll=(CI3DScrollText*)pScreen->GetObject(9);
-    int oldPos=scroll->CurrentPosition();
-    bool hold=notificationMode==History && oldPos<scroll->GetRange();
-    auto oldTail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
-    szOutputText+=pszText;
-    auto tail=NotificationJournal::LastLines(szOutputText,szOutputText.GetLength());
-    if(tail.removed && (!hold || tail.removed>=oldTail.lines)) {
-        szOutputText=tail.text.c_str();scroll->SetText(szOutputText);
-        if(hold)scroll->SetPos(0);else scroll->SetPosToEnd();
-    } else {
-        scroll->AddText(pszText);int appended=scroll->GetRange();
-        if(tail.removed){szOutputText=tail.text.c_str();scroll->SetText(szOutputText);}
-        int removed=(std::max)(0,appended-scroll->GetRange());
-        if(hold)scroll->SetPos((std::max)(0,oldPos-removed));else scroll->SetPosToEnd();
-    }
-    if(pszText && *pszText){lastNotification=GetTickCount();if(notificationMode!=History)SetNotificationMode(Transient);}
-    SyncNotificationVisibility();
+    szOutputText += pszText;
+    if (nMode == 0)
+        ((CI3DScrollText*)pScreen->GetObject(9))->AddText(pszText);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::AddHoover(CItem *pNewItem, bool bCrippled)

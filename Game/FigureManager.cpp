@@ -738,11 +738,14 @@ BOOL CFigureManager::LoadAnimationTrack(CAnimationNode *lpNode, CAnimationTrack 
         strcat(szBuffer, pszAnimationName);
         strcat(szBuffer, ".ast");
 
-        LPBYTE lpData = GetFile(szBuffer);
+        DWORD dwSize = 0;
+        LPBYTE lpData = GetFile(szBuffer, &dwSize);
         if (lpData != NULL)
         {
-            lpTrack->Load(lpData);
-            return TRUE;
+            if (lpTrack->Load(lpData, dwSize))
+                return TRUE;
+            lpTrack->ClearAnimation();
+            return FALSE;
         }
         else
             return FALSE;

@@ -11,6 +11,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Object.h"
 #include "tools.h"
 #include "ParticleManager.h"
+#include "GameJournal.h"
+#include "Notification.h"
 #include "WorldClient.h"
 #include "RandomGen.h"
 #include "Renderer.h"
@@ -1368,7 +1370,16 @@ BOOL CParticle::Create()
         strcpy(pszTexName, "ZoneExit");
         break;
     default:
-        return ReportError("CParticle::Create().\nUnknown ETypeID.\n");
+    {
+        const int typeID = static_cast<int>(GetTypeID());
+        GameJournal::Event("ERROR", "unknown_particle_type", "type_id=%d", typeID);
+        // CreateData keeps the object even when Create reports failure. Leave it
+        // inert so callers that attach/segment it can safely continue.
+        ResetFlag(PS_GENERATE_PARTICLES);
+        nMinTrys = 0;
+        locSources.SetSize(0);
+        return ReportRecoverableError("CParticle::Create().\nUnknown ETypeID %d.\n", typeID);
+    }
     }
     // Load texture
     pTexture.SetDesc(TTID_SPELL_MAIN, pszTexName);

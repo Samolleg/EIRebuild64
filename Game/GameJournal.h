@@ -35,7 +35,14 @@ const char* ItemPart(int value) noexcept;
 #ifndef GAME_JOURNAL_STANDALONE
 void ObserveDamage(CUnit* attacker, CUnit* target, float amount, int outcome, int critical) noexcept;
 void ObserveHeal(CUnit* target, float amount) noexcept;
-void ObserveSpell(CUnit* actor, CMapObject* target, const char* code, int phase, int result, float x, float y, float z, bool combat = true) noexcept;
+struct SpellObservation {
+    int actor = -1, target = -1;
+    char prototype[128] = "unknown";
+    bool squad = false;
+};
+// Capture only at a live-object call site, before callbacks may remove the objects.
+SpellObservation CaptureSpell(CMapObject* actor, CMapObject* target) noexcept;
+void ObserveSpell(const SpellObservation& captured, const char* code, int phase, int result, float x, float y, float z, bool combat = true) noexcept;
 void ObserveObject(CMapObject* object, const char* action) noexcept;
 void ObserveSelection(const std::list<int>& ids) noexcept;
 void TradeReset(const void* screen) noexcept;
@@ -51,6 +58,8 @@ void Start() noexcept;
 void Stop() noexcept;
 void Tick(unsigned long tick) noexcept;
 void Event(const char* category, const char* event, const char* format = "", ...) noexcept;
+// Ordinary warnings are queued and repeated texts are counted on the writer cadence.
+void Notification(const char* type, const char* text, const char* extra) noexcept;
 std::string Quote(const char* cp1251) noexcept;
 void Flush() noexcept; // Wake the writer; no disk I/O on the caller thread.
 void FlushCritical() noexcept; // Bounded lock wait for fatal errors/save boundaries.

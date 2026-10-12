@@ -74,15 +74,21 @@ static void TraceString(const char *str)
 }
 
 static void ReportMessage(const char *reportType, const char *buffer, const char *additionalInfo,
-                          bool plainError)
+                          bool plainError, bool recoverableError = false)
 {
     if (plainError && !strcmp(reportType, "Error")) GameJournal::MemoryErrorText(buffer);
-    GameJournal::Event("ERROR", "notification", "type=%s text=%s extra=%s", GameJournal::Quote(reportType).c_str(), GameJournal::Quote(buffer).c_str(), GameJournal::Quote(additionalInfo).c_str());
-    GameJournal::FlushCritical();
+    GameJournal::Notification(reportType, buffer, additionalInfo);
+    // Retail 0x44C470 is a no-op. Addon only redirects it to the optional debug file.
+    // Preserve the separate CLI stdout contract, without adding gameplay console/UI work.
+    if (!strcmp(reportType, "Warning") && !ModCliTool::Active())
+    {
+        if (!*additionalInfo) ReportGameDebug("%s", buffer);
+        return;
+    }
     if (ModCliTool::Active())
     {
         printf("[%s]: %s%s\n", reportType, buffer, additionalInfo);
-        if (!strcmp(reportType, "Error") &&
+        if (!recoverableError && !strcmp(reportType, "Error") &&
             ModCliTool::StopAfterError(plainError, EngineDiagnostics::AntiCrashEnabled()))
             std::exit(-1); // Proven original CRT exit; no exception/fault policy substitute.
         return;
@@ -95,10 +101,10 @@ static void ReportMessage(const char *reportType, const char *buffer, const char
         else
         {
             const std::string message = std::string(buffer) + additionalInfo;
-            NGame::MessageBox(message.c_str(), MB_OK | MB_ICONERROR, false);
+            NGame::MessageBox(message.c_str(), MB_OK | MB_ICONERROR, recoverableError);
         }
         const std::uint32_t count = ++ModCliTool::ErrorCount();
-        if (!suppressed && count < 0x80000000u && count >= 1u)
+        if (!recoverableError && !suppressed && count < 0x80000000u && count >= 1u)
             std::exit(-1);
         return;
     }
@@ -108,11 +114,11 @@ static void ReportMessage(const char *reportType, const char *buffer, const char
 }
 
 static void Report(const char *reportType, const char *additionalInfo, const char *format,
-                   va_list argList, bool plainError = false)
+                   va_list argList, bool plainError = false, bool recoverableError = false)
 {
     char buffer[1024] = { 0 };
     wvsprintf(buffer, format, argList);
-    ReportMessage(reportType, buffer, additionalInfo, plainError);
+    ReportMessage(reportType, buffer, additionalInfo, plainError, recoverableError);
 }
 
 bool ReportError(const char *format, ...)
@@ -120,6 +126,16 @@ bool ReportError(const char *format, ...)
     va_list argList;
     va_start(argList, format);
     Report("Error", "", format, argList, true);
+    va_end(argList);
+
+    return false;
+}
+
+bool ReportRecoverableError(const char *format, ...)
+{
+    va_list argList;
+    va_start(argList, format);
+    Report("Error", "", format, argList, false, true);
     va_end(argList);
 
     return false;

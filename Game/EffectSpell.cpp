@@ -52,7 +52,8 @@ CEffectSpell::~CEffectSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CEffectSpell::Segment()
 {
-    GameJournal::Actor journalActor(pWho.IsEmpty()?-1:pWho->GetID());
+    const auto journalSpell = GameJournal::CaptureSpell(static_cast<CMapObject*>(pWho), static_cast<CMapObject*>(pTarget));
+    GameJournal::Actor journalActor(journalSpell.actor);
     const int journalPhase=castPhase;
     auto*prototype=spell.GetPrototype();
     SpellTextures::Scope textureScope(spell.GetSubtypeID()>>16,prototype?prototype->GetCodeName():nullptr);
@@ -78,7 +79,7 @@ BOOL CEffectSpell::Segment()
         bRv = FALSE;
         break;
     }
-    if(journalPhase!=castPhase || !bRv) GameJournal::ObserveSpell(pWho, pTarget, prototype?prototype->GetCodeName():"unknown", journalPhase, int(castPhase), ptTarget.x, ptTarget.y, ptTarget.z, spell.IsOffensive());
+    if(journalPhase!=castPhase || !bRv) GameJournal::ObserveSpell(journalSpell, prototype?prototype->GetCodeName():"unknown", journalPhase, int(castPhase), ptTarget.x, ptTarget.y, ptTarget.z, spell.IsOffensive());
     return bRv;
 }
 /////////////////////////////////////////////////////////////////////////////////////

@@ -1,5 +1,7 @@
 #pragma once
 #include "RPGSystemConsts.h"
+#include <optional>
+#include <string>
 
 // Native LS progression rules. Values are borrowed; no actor/UI ownership here.
 namespace ModProgression {
@@ -27,7 +29,9 @@ template<class Stats,class Reader,class Lookup>
 bool Additional(const Stats& stats,Reader read,Lookup lookup){
     bool valid=true;
     for(int field=3;field<=7;++field){
-        const auto code=read(field);const int index=lookup(code.c_str());
+        const std::optional<std::string> code=read(field);
+        if(!code)continue;
+        const int index=lookup(code->c_str());
         // Failed/sentinel lookup terminates the native sequence, retaining earlier failures.
         if(index<0)break;
         if(!Minimum(stats,index))valid=false;

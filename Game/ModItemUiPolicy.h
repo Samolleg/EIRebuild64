@@ -2,6 +2,18 @@
 #include <string>
 #include <cstring>
 namespace ModItemUiPolicy {
+// Names imposed by LS_GetItemNameAndDescMeleeActive after the ordinary lookup.
+inline const char* WeaponSkillName(const char* code)
+{
+    if(!code)return nullptr;
+    if(!_stricmp(code,"doubleshot"))return "\xC4\xE2\xEE\xE9\xED\xEE\xE9 \xE2\xFB\xF1\xF2\xF0\xE5\xEB";
+    if(!_stricmp(code,"preciseshot"))return "\xD2\xEE\xF7\xED\xFB\xE9 \xE2\xFB\xF1\xF2\xF0\xE5\xEB";
+    if(!_stricmp(code,"precisehit"))return "\xD2\xEE\xF7\xED\xFB\xE9 \xF3\xE4\xE0\xF0";
+    if(!_stricmp(code,"cripplinghit"))return "\xCA\xE0\xEB\xE5\xF7\xE0\xF9\xE8\xE9 \xF3\xE4\xE0\xF0";
+    if(!_stricmp(code,"explosiveshot"))return "\xC2\xE7\xF0\xFB\xE2\xED\xEE\xE9 \xE2\xFB\xF1\xF2\xF0\xE5\xEB";
+    if(!_stricmp(code,"powerhit")||!_stricmp(code,"test"))return "\xCC\xEE\xF9\xED\xFB\xE9 \xF3\xE4\xE0\xF0";
+    return nullptr;
+}
 template<class Get> inline bool Advanced(const char* key,Get get)
 {
     if(!get("useAdvancedDescriptions"))return false;

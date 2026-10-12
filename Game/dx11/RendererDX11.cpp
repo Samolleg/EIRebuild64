@@ -39,6 +39,15 @@ const int G_BUFFER_QUALITY = 0; // default 0
 const int G_BUFFER_SAMPLES = 1; // default 1
 const int G_VSYNC = 0;
 
+bool CDX11::SetItemColorSum(bool active)
+{
+    const bool previous = itemColorSum;
+    itemColorSum = active;
+    GetConstantBuffers()->cb_ps_pixelshader.data.useSpecular =
+        active && fake_dx7.render_state[D3DRENDERSTATE_SPECULARENABLE];
+    return previous;
+}
+
 bool CDX11::RenderStateCheck()
 {
     bool res = fake_dx7.render_state == fake_dx7_prev.render_state;
@@ -76,7 +85,7 @@ bool CDX11::SetRenderStates()
     bool alpha_test_enable = rs[D3DRENDERSTATE_ALPHATESTENABLE];
     float alpharef = rs[D3DRENDERSTATE_ALPHAREF] / 256.;
 
-    bool useSpecular = rs[D3DRENDERSTATE_SPECULARENABLE];
+    bool useSpecular = itemColorSum && rs[D3DRENDERSTATE_SPECULARENABLE];
     this->GetConstantBuffers()->cb_ps_pixelshader.data.useSpecular = useSpecular;
 
     D3DCULL cullState = (D3DCULL)rs[D3DRENDERSTATE_CULLMODE];
