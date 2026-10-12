@@ -17,6 +17,7 @@
 #include "UIColorKeyBlit.h"
 #include "../OwnedRender/E1TerrainState.h"
 #include "../OwnedRender/E1Terrain.h"
+#include "../GameJournal.h"
 
 #include "batchers.h"
 #include "Utils.h"
@@ -270,6 +271,7 @@ int CDX11::DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVerte
 void CDX11::BeginFrame()
 {
     IfFailedThrowHR(rendererFacade->BeginFrame());
+    frameTiming.Begin();
     RefreshOwnedTargets();
     IfFailedThrowHR(rendererFacade->VisitDevice(&background_color,
         [](void *user, const owned::EmbeddedDeviceView& view) -> HRESULT {
@@ -314,7 +316,18 @@ void CDX11::EndFrame()
         m_bMakeScreenShot = false;
     }
     const HRESULT presented = rendererFacade->EndFrame();
+    frameTiming.End(SUCCEEDED(presented));
     FrameDiagnostics::Presented(presented);
+    if (SUCCEEDED(presented) && (++frameSerial % 120u) == 0) {
+        const auto sample = frameTiming.Read();
+        GameJournal::Event("RENDER", "frame_timing",
+            "owner=c56 frame=%llu cpu_ms_median=%.3f cpu_ms_p95=%.3f cpu_n=%u gpu_ms_median=%.3f gpu_ms_p95=%.3f gpu_n=%u gpu_status=0x%08lX dropped=%llu invalid=%llu",
+            static_cast<unsigned long long>(frameSerial), sample.cpu.median, sample.cpu.p95,
+            sample.cpu.count, sample.gpu.median, sample.gpu.p95, sample.gpu.count,
+            static_cast<unsigned long>(sample.gpuStatus),
+            static_cast<unsigned long long>(sample.dropped),
+            static_cast<unsigned long long>(sample.invalid));
+    }
     IfFailedThrowHR(presented);
 }
 
@@ -433,6 +446,10 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
             self.m_width = view.width; self.m_height = view.height;
             return OwnedRender::E1BindTargets(nullptr, view);
         }));
+    const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
+    GameJournal::Event("RENDER", "frame_owner",
+        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",
+        hWnd, static_cast<unsigned long>(timingAttached));
     IfFailedThrowHR(rendererFacade->VisitOutput(this,
         [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {
             D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);

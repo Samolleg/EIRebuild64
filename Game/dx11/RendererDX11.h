@@ -9,6 +9,7 @@
 #include "FakeDX7.h"
 #include "Caches.h"
 #include "DirectXHelpers.h"
+#include "../OwnedRender/E2FrameTiming.h"
 #include <WICTextureLoader.h>
 #include <wrl/client.h>
 #include <d3d11.h>
@@ -72,6 +73,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture2;
 
     std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
+    OwnedRender::E2FrameTiming frameTiming;
+    std::uint64_t frameSerial = 0;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
