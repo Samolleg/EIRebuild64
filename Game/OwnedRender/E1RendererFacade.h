@@ -126,6 +126,15 @@ public:
             return value.queue_native(view, state, texture, result);
         });
     }
+    HRESULT QueueNativeDirect(const owned::NativeGeometryView& view,
+                              const owned::FixedState& state,
+                              ID3D11ShaderResourceView* texture,
+                              owned::NativeGeometryResult* result = nullptr) {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        return Visit([&](Backend& value) {
+            return value.queue_native_direct(view, state, texture, result);
+        });
+    }
 };
 
 using E1RendererFacade = RendererFacadeCore<owned::Renderer>;

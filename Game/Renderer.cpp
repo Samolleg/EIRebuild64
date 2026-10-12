@@ -21,6 +21,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "WorldServer.h"
 #include "dx11/RendererDX11.h"
+#include "OwnedRender/E1RendererFacade.h"
 #include "dx11/vertex.h"
 #include "dx11/Surface.h"
 #include "dx11/ConstantBuffer.h"
@@ -1151,29 +1152,29 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     const SVertexComponents* components,int nNumComponents,const WORD* pwIndices,int nNumIndices,
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
-    if(pDX11->IsOwnedWorldActive() && pDX11->GetOwnedRenderer().FigureActive()) {
-        if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
-           !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
-            pDX11->GetOwnedRenderer().FigureFallback("figure_transform_stack_empty");return false;
-        }
-        EIRenderMeshV4 mesh={};mesh.size=sizeof(mesh);mesh.version=4;
-        mesh.positions=reinterpret_cast<const EIRenderPackedV4*>(plots);mesh.position_groups=nNumPlots;
-        mesh.normals=reinterpret_cast<const EIRenderPackedV4*>(norms);mesh.normal_groups=nNumNorms;
-        mesh.uv=reinterpret_cast<const float*>(maps);mesh.uv_count=nNumMaps;
-        mesh.components=reinterpret_cast<const EIRenderComponentV4*>(components);mesh.component_count=nNumComponents;
-        mesh.indices=pwIndices;mesh.index_count=nNumIndices;
-        EIRenderFigureV4 packet=pDX11->GetOwnedRenderer().FigureValues();
-        packet.flags=dwRenderFlags;packet.diffuse=reinterpret_cast<const uint32_t*>(colors);
-        packet.specular=reinterpret_cast<const uint32_t*>(speculars);
-        packet.default_diffuse=dwDefaultAmbientColor;packet.default_specular=RGBA_MAKE(0,0,0,cFog);
-        packet.u_shift=fpUShift;packet.v_shift=fpVShift;
-        const SHMatrix& world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
-        const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
-        memcpy(packet.object_to_world,&world,sizeof(world));memcpy(packet.object_to_clip,&clip,sizeof(clip));
-        packet.morph_xyz=reinterpret_cast<const float*>(morphs);packet.morph_count=morphCount;
-        if(pDX11->SubmitOwnedFigure(mesh,packet))return true;
-    }
-    return false;
+    if(!pDX11->IsOwnedWorldActive() || !pDX11->GetOwnedRenderer().FigureActive())return false;
+    if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
+       !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) return false;
+
+    owned::NativeGeometryView view{};
+    view.positions=reinterpret_cast<const owned::NativePackedGroup*>(plots);view.position_groups=nNumPlots;
+    view.normals=reinterpret_cast<const owned::NativePackedGroup*>(norms);view.normal_groups=nNumNorms;
+    view.diffuse=reinterpret_cast<const std::uint32_t*>(colors);
+    view.specular=reinterpret_cast<const std::uint32_t*>(speculars);
+    view.texture_coordinates=reinterpret_cast<const owned::NativeTextureCoordinate*>(maps);
+    view.texture_coordinate_count=nNumMaps;
+    view.components=reinterpret_cast<const owned::NativeVertexComponent*>(components);
+    view.component_count=nNumComponents;view.indices=pwIndices;view.index_count=nNumIndices;
+    view.semantic_kind=owned::SemanticKind::figure;view.ordering=owned::NativeOrdering::preserve;
+    view.default_diffuse=dwDefaultAmbientColor;view.default_specular=RGBA_MAKE(0,0,0,cFog);
+    view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
+    const SHMatrix& world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
+    const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
+    memcpy(view.object_to_clip.data(),&clip,sizeof(clip));
+    memcpy(view.lighting.object_to_world.data(),&world,sizeof(world));
+    view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(morphs);
+    view.morph_count=morphCount;
+    return pDX11->SubmitC56Figure(view);
 }
 
 int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const int nNumNorms,

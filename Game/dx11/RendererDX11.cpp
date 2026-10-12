@@ -198,38 +198,26 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     return OwnedTerrainPassResult::failed;
 }
 
-bool CDX11::SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet)
+bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
 {
-    if(!ownedWorldActive||!ownedRenderer.FigureActive())return false;
-    if(modShadows&&modShadows->active) {
-        ownedRenderer.FigureFallback("legacy_shadow_pass");return false;
-    }
-    uint32_t states[256]={};
-    states[D3DRENDERSTATE_ZENABLE]=D3DZB_TRUE;states[D3DRENDERSTATE_ZWRITEENABLE]=TRUE;
-    states[D3DRENDERSTATE_ZFUNC]=D3DCMP_LESSEQUAL;states[D3DRENDERSTATE_CULLMODE]=D3DCULL_CCW;
-    states[D3DRENDERSTATE_FILLMODE]=D3DFILL_SOLID;states[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_ONE;
-    states[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_ZERO;states[D3DRENDERSTATE_TEXTUREFACTOR]=0xffffffff;
-    states[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATEREQUAL;
-    for(const auto& pair:fake_dx7.render_state)if(pair.first>=0&&pair.first<256)states[pair.first]=pair.second;
-    // Both compatibility and native PS use the same source alphaRef/256.
-    // Retain the actual alpha mode and threshold byte.
-    states[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATEREQUAL;
-    uint32_t stages[32]={};
-    stages[D3DTSS_COLOROP]=D3DTOP_MODULATE;
-    stages[D3DTSS_COLORARG1]=D3DTA_TEXTURE;stages[D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
-    stages[D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;stages[D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
-    const auto alphaMode=GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
-    stages[D3DTSS_ALPHAOP]=alphaMode==0?D3DTOP_SELECTARG1:alphaMode==2?D3DTOP_SELECTARG2:D3DTOP_MODULATE;
-    stages[D3DTSS_ADDRESSU]=stages[D3DTSS_ADDRESSV]=D3DTADDRESS_WRAP;
-    stages[D3DTSS_MINFILTER]=stages[D3DTSS_MAGFILTER]=D3DTFG_LINEAR;
-    stages[D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
-    packet.render_states=states;packet.render_state_count=256;
-    packet.texture_states=stages;packet.texture_state_count=32;
-    ID3D11ShaderResourceView* images[2]={};deviceContext->PSGetShaderResources(0,2,images);
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> primary,secondary;
-    primary.Attach(images[0]);secondary.Attach(images[1]);
-    packet.primary=primary.Get();packet.secondary=secondary.Get();
-    return ownedRenderer.SubmitFigure(mesh,packet);
+    const auto fallback = [this]() { ++c56WorldFigureFallbacks; return false; };
+    if (!ownedWorldActive || !rendererFacade || !rendererFacade->Ready() || !view.positions ||
+        !view.normals || !view.components || !view.indices) return fallback();
+    ID3D11ShaderResourceView* images[2] = {};
+    deviceContext->PSGetShaderResources(0, 2, images);
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> primary, secondary;
+    primary.Attach(images[0]); secondary.Attach(images[1]);
+    if (secondary) return fallback();
+    owned::FixedState state{};
+    for (const auto& item : fake_dx7.render_state)
+        if (item.first >= 0 && static_cast<std::size_t>(item.first) < state.render.size())
+            state.render[item.first] = item.second;
+    const auto alphaMode = GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
+    state.stage[0][D3DTSS_ALPHAOP] = alphaMode == 0 ? D3DTOP_SELECTARG1 :
+        alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
+    const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary.Get());
+    if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
+    return fallback();
 }
 
 int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIndices, DWORD dwIndexCount,
@@ -313,6 +301,7 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 {
     uint32_t skyConsumed = 0;
     c56WorldFigurePrimitives = 0;
+    c56WorldFigureFallbacks = 0;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
     RefreshOwnedTargets();
@@ -322,11 +311,17 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 
 void CDX11::EndWorld()
 {
-    IfFailedThrowHR(ownedRenderer.EndWorld());
+    const HRESULT flush = rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.flush_native();
+    });
+    IfFailedThrowHR(flush);
     GameJournal::Event("RENDER", "world_model_owner",
-        "owner=c56_device path=host_figure_draw primitives=%llu",
-        static_cast<unsigned long long>(c56WorldFigurePrimitives));
+        "owner=c56_device path=c56_native_queue submitted=%llu legacy_fallback=%llu missing=%s",
+        static_cast<unsigned long long>(c56WorldFigurePrimitives),
+        static_cast<unsigned long long>(c56WorldFigureFallbacks),
+        c56WorldFigureFallbacks ? "figure" : "none");
     c56WorldFigurePrimitives = 0;
+    c56WorldFigureFallbacks = 0;
     ownedWorldActive = false;
     RefreshOwnedTargets();
     SetRenderStates();

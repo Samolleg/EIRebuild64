@@ -228,7 +228,7 @@ public:
         found->second.lastUsed=figureFrame;
         figureIdentity=found->second.identity;figureScope.part=uint32_t(figureIdentity);
         geometryIdentity=geometryRevision=0;
-        figureScopeActive=figureScene!=0;
+        figureScopeActive=true;
     }
     void SelectFigureGeometry(uint64_t identity,uint64_t revision) noexcept {
         const auto access = renderGate.Lock();

@@ -9,6 +9,8 @@
 #include "FakeDX7.h"
 #include "Caches.h"
 #include "DirectXHelpers.h"
+
+namespace owned { struct NativeGeometryView; }
 #include "../OwnedRender/E2FrameTiming.h"
 #include <WICTextureLoader.h>
 #include <wrl/client.h>
@@ -76,6 +78,7 @@ private:
     OwnedRender::E2FrameTiming frameTiming;
     std::uint64_t frameSerial = 0;
     std::uint64_t c56WorldFigurePrimitives = 0;
+    std::uint64_t c56WorldFigureFallbacks = 0;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
@@ -109,7 +112,7 @@ public:
     void EndFrame();
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
-    bool SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet);
+    bool SubmitC56Figure(const owned::NativeGeometryView& view);
     bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
     OwnedTerrainPassResult SubmitC56TerrainPass(bool transparent);
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
