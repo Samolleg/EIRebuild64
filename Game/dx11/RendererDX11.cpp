@@ -323,7 +323,7 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 void CDX11::EndWorld()
 {
     IfFailedThrowHR(ownedRenderer.EndWorld());
-    GameJournal::Event("RENDER", "zone7_model_owner",
+    GameJournal::Event("RENDER", "world_model_owner",
         "owner=c56_device path=host_figure_draw primitives=%llu",
         static_cast<unsigned long long>(c56WorldFigurePrimitives));
     c56WorldFigurePrimitives = 0;
