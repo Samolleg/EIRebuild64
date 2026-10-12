@@ -832,8 +832,6 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
         // select resource for streaming sound
         theWorld.GetSoundManager()->SelectStreamingResource(szWorkPath + "stream\\",
                                                             szResourcesPath + "streamsn.reg");
-        //		theWorld.GetSoundManager()->SelectMIDIResource( szResourcesPath +
-        //"midisn.res", szResourcesPath + "midisn.reg" );
         // select resource for SFXes
         theWorld.GetSoundManager()->SelectFXResource(szResourcesPath + "sfx.res");
         {
@@ -911,6 +909,13 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
         NConsole::InitializeNetworkSettings(); if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
     catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("GameMain");EngineDiagnostics::Caught(e.what());return BAD_RESULT;}
+    if (!ModRuntime::Current())
+    {
+        GameJournal::Event("SESSION", "mod_required", "EIRebuild requires a loaded mod");
+        MessageBoxW(nullptr, L"EIRebuild: \u043d\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d \u043c\u043e\u0434. \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u043e\u0434 \u0432 ReStarter \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0443\u0441\u043a.",
+                    L"EIRebuild", MB_OK | MB_ICONERROR);
+        return BAD_RESULT;
+    }
     OutputDebugStringA("Hello!\n");
     try
     {

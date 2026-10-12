@@ -11,28 +11,14 @@
  **********************************************************************/
 #include "ClassIDs.h"
 #include "GameBase.h"
-#include "CMMIOResource.h"
 #include "CMappedResource.h"
 #include "FileRegistry.h"
 #include "Plot.h"
-#include "MSS.h"
 #include <string>
-#include <unordered_map>
 
 #include "SoundTypes.h"
 class CSoundManager;
 #include "MiniaudioOneShotSfx.h"
-
-// Comment it to disable streaming sounds support
-// FIXME: Streaming crashes for some reason. TBD
-// #define SM_SUPPORT_STREAMING
-// Comment it to disable MIDI sounds support
-#ifndef _A4
-// #define SM_SUPPORT_MIDI
-#endif //_A4
-
-// Comment it to get streaming files from ordinary files rather then resource
-// #define STREAMING_FROM_RESOURCE
 
 // Use SNDLIST_CYCLE_BIT in return value to make sound cycling
 const int SNDLIST_CYCLE_BIT = 0x40000000;
@@ -45,163 +31,6 @@ const DWORD DW_MIXER_FREQ = 44100;
 const WORD W_MIXER_BITS = 16;
 
 // -------------------------- Control structures ---------------------------------------------
-
-struct SFadeControl
-{
-    int nExternalVolume;
-    int nMixerVolume;
-    float fpFadeValue, fpFadeSpeed;
-    enum
-    {
-        EFC_NONE,
-        EFC_FIN,
-        EFC_FOUT
-    } fadeMode;
-    BOOL bFadedOut;
-    DWORD dwTimeToReset;
-
-public:
-    SFadeControl() { Clear(); }
-
-    void SetVolume(int nPercentVolume);
-    int GetVolume() { return nExternalVolume; }
-    int GetMixerVolume() { return nMixerVolume; }
-
-    void Segment();
-
-    void BeginFadeOut(float fpFadeSpeed = 0);
-    void BeginFadeIn(float fpFadeSpeed = 0);
-    void ResetFade(DWORD dwTimeToReset = 0);
-    BOOL IsFadedOut() { return bFadedOut; }
-    BOOL IsFading() { return fadeMode != EFC_NONE; }
-
-    void Clear();
-
-private:
-    void RecalcMixerVolume();
-};
-
-struct SStreamControl
-{
-    ESNDSTREAMSTATE state; // control block state
-
-    HSAMPLE ailHSample;   // MSS sample handler
-    HASISTREAM asiStream; // MSS ASI stream handler
-    ASISTAGE *pASI;       // Pointer to MSS ASI provider
-
-    LPBYTE buffers[3];     // sound buffers
-    int nBufSize;          // size of the buffers
-    int nSamplesPerBuffer; // number of samples per buffer
-
-    int nBuf0I, nBuf1I, nBufMixI; // indexes of primary and back buffer
-    int nMixingSample;            // the number of first sample currently int mixing buffer
-    int nSampleToSwitch;          // the decided number of sample that is supposed to switch
-    int nSampleToLoop;
-
-    int nSampleSize;    // size of the sample in bytes
-    BYTE cPaddingValue; // value to fill the remainings of buffer
-
-    SFadeControl vlmCtrl; // volume control
-
-    CString szMainSoundName;      // name of currently playing sound file
-    CString szSwitchSoundName;    // name of sound file to switch
-    CIntArray nMarkersFast;       // fast markers
-    CIntArray nMarkersSafe;       // safe markers
-    CCritSection nameCritSection; // safe get name critical section
-
-    ESNDMARKERTYPE switchingType;
-
-    DWORD dwFileSize; // MP3 file size and position
-    DWORD dwReadPosition;
-
-    HSAMPLE ailHDummySample; // dummy sample to obtain pointer to ASI provider
-
-    void Clear();
-    void SetVolume();
-    BOOL Create(HDIGDRIVER ailDigDriver);
-    BOOL Destroy();
-    int GetBufferIndex(int);
-};
-
-struct SMIDIControl
-{
-    ESNDSTREAMSTATE state; // control block state
-
-    LPVOID pData0, pData1; // Alloced data
-    HSEQUENCE hSeq;        // MIDI sequence handler
-
-    CString szMainSoundName;   // name of currently playing sound file
-    CString szSwitchSoundName; // name of sound file to switch
-    CIntArray nMarkersFast;    // fast markers
-    CIntArray nMarkersSafe;    // safe markers
-
-    int nSwitchingMsPosition; // time position to switch sequence
-    int nMSTotal;             // total playing time of sequence
-
-    SFadeControl vlmCtrl; // volume control
-
-    ESNDMARKERTYPE switchingType;
-
-    CCritSection midiCritSection; // critical section
-};
-
-struct SFxControl
-{
-    std::string szSoundName; // Name of sound file
-    HSAMPLE ailHSample;      // AIL sound handler
-
-    int nPercentVolume;     // volume in percent
-    int nManualVolume;      // manually setted volume
-    int nPercentPan;        // pan [-100..100]
-    int nPriority;          // priority
-    BOOL bIsUsed;           // that slot already used
-    BOOL bIsLooped;         // that slot is playing looped sound
-    BOOL bIsSpeech;         // is it speech sound ( for separate volume control only )
-    float fpPlaybackLength; // full playbacklength in second
-
-    BOOL bReqCleanup; // this slot ended playing and required cleanup
-
-    BOOL bManualVolumes;                // turn off automatic volume calculations
-    BOOL bAffectedWithHeight;           // set height affection for manual controlled
-    CPlot3D sourceCP;                   // sound source
-    float fpMinDistance, fpMaxDistance; // max hearing distance
-
-    DWORD dwUniqueID;
-
-    void Clear();                          // clear all data
-    void Release(CSoundManager *);         // remove DS buffer
-    void SetControls(BOOL bReverseStereo); // set DS volume and pan
-};
-
-struct SDisplacedCycledControl
-{
-    std::string szSoundName; // Name of sound file
-
-    int nPercentVolume;     // volume in percent
-    int nManualVolume;      // manually setted volume
-    int nPercentPan;        // pan [-100..100]
-    int nPriority;          // priority
-    BOOL bIsSpeech;         // is it speech sound ( for separate volume control only )
-    float fpPlaybackLength; // full playbacklength in second
-
-    BOOL bManualVolumes;                // turn off automatic volume calculations
-    BOOL bAffectedWithHeight;           // set height affection for manual controlled
-    CPlot3D sourceCP;                   // sound source
-    float fpMinDistance, fpMaxDistance; // max hearing distance
-
-    DWORD dwUniqueID; // old unique ID
-
-    U32 uPosAtDisplace; // playback position when displace occur
-};
-
-struct SSoundLRU
-{
-    void *ailMemBlock;       // ail sound buffer
-    std::string szSoundName; // hash table index
-    DWORD dwLastAccessTime;  // last access time
-    DWORD dwSize;            // size of the sound data
-    int nReferences;         // number of currently used references at this block
-};
 
 struct SAmbientControl
 {
@@ -242,41 +71,13 @@ const int N_SND_NUM_FXLISTS = 8;
 
 HSOUND BeginFX(LPCSTR pszSoundName, int nPriority, const CPlot3D &sourceCP, float fpMinDistance,
                float fpMaxDistance, BOOL bLooping = FALSE);
-struct STransactionControl
-{
-    char pszSoundName[64];
-    int nPriority;
-    CPlot3D sourceCP;
-    float fpMinDist, fpMaxDist;
-
-    bool bCounted;
-};
-
 // ----------------------- Sound manager class -----------------------------------------------
 
 class CSoundManager : public CGameBase
 {
 private:
     friend struct ModAudioLayout;
-    HDIGDRIVER ailDigDriver;                                    // MSS digital sound driver
-    HMDIDRIVER ailMidiDriver;                                   // MSS MIDI sound driver
-    CMMIOResource cStreamingResource;                           // streaming resource
-    CString szStreamingResource;                                // streaming directory
-    CFileRegistry cStreamingMarkers;                            // streaming markers
-    CMappedResource cMidiResource;                              // MIDI resource file
-    CFileRegistry cMidiMarkers;                                 // MIDI markers
-    CList<CMappedResource *, CMappedResource *> fxResourceList; // SFX resources
-
-    SStreamControl streamMain;         // main streaming control block
-    CCritSection streamingCritSection; // streaming critical section
-    CWinThread *pStreamThread;         // streaming thread object pointer
-    CWinEvent streamShutDownEvent;     // streaming shut down event
-
-    SMIDIControl midiCtrl; // midi control block
-    CWinThread *pMidiThread;
-
-    volatile BOOL bShutDownReq;  // request for shutdown stream thread
-    SFxControl *pFx;             // fx sounds
+    CList<CMappedResource *, CMappedResource *> fxResourceList;
     CPlot3D listenerCP;          // fx listener position
     CPlot3D listenerOrientation; // sound source orientation
     DWORD dwUniqueCnt;           // unique IDs counter
@@ -286,24 +87,15 @@ private:
 
     SFXListControl fxLists[N_SND_NUM_FXLISTS]; // FX list structures array
 
-    DWORD dwCurBytesInLRU;                 // current number of wave data bytes stored in lru
-    CList<SSoundLRU, SSoundLRU &> lruList; // lru list
-    std::unordered_map<std::string, POSITION>
-        addrToPos; // hash map to find list position by addresses
-    std::unordered_map<DWORD, SDisplacedCycledControl *>
-        displacedCycled; // hash map and storage for displaced cycled sounds
-
     BOOL bReady;         // is manager initialized successfully
-    BOOL bMidiReady;     // is midi part of manager initialized successfully
     BOOL bAllowReverb;   // is reverb is allowed
     BOOL bReverseStereo; // is stereo reversed
     float fpReverbLevel, fpReverbReflectionTime, fpReverbDecayTime;
-    int nFXMasterVolume, nSpeechMasterVolume;
+    int nFXMasterVolume, nSpeechMasterVolume, nMusicMasterVolume;
 
-    U32 uRandomStartPosition;
+    DWORD uRandomStartPosition;
 
     int nTransactionCounter;
-    CList<STransactionControl, STransactionControl &> transactions;
 
 public:
     // Constr/desctr
@@ -325,9 +117,6 @@ public:
     void BeginTransaction(); // used to stack similar sounds in one stream, works only for BeginFX
                              // in 3D positioning mode, makes all starting sounds HSOUNDS invalid
     void EndTransaction();
-    // get direct sound object
-    LPDIRECTSOUND GetDS();
-    HDIGDRIVER GetDIGDriver() { return ailDigDriver; }
     bool IsActive() { return bReady != 0; }
     // volumes
     void SetFXMasterVolume(int nPercentVolume);
@@ -349,18 +138,11 @@ public:
     BOOL BeginStreaming(LPCSTR pszSoundName, ESNDMARKERTYPE markerType = EM_INSTANT);
     void EndStreaming(ESNDMARKERTYPE markerType = EM_INSTANT);
     CString GetStreamingName();
-    BOOL IsStreamingSwitching() { return streamMain.state == ESMST_SWITCHING; }
+    BOOL IsStreamingSwitching() { return MiniaudioOneShotSfx::IsNativeStreamingSwitching(); }
     void PauseStreaming();
     void UnpauseStreaming();
     void FadeOutStreaming();
     void FadeInStreaming();
-    // midi sounds
-    BOOL
-    SelectMIDIResource(LPCSTR pszResourceName,
-                       LPCSTR pszMarkersRegFileName); // markers should be given in milliseconds
-    BOOL BeginMIDI(LPCSTR pszSoundName, ESNDMARKERTYPE markerType = EM_INSTANT);
-    void EndMIDI(ESNDMARKERTYPE markerType = EM_INSTANT);
-    CString GetMIDIName();
     // FX sounds
     BOOL SelectFXResource(LPCSTR pszResourceName)
     {
@@ -399,10 +181,10 @@ public:
     bool IsFXValid(HSOUND hSnd)
     {
         return (hSnd != SND_EMPTY) &&
-               (MiniaudioOneShotSfx::IsVirtualSound(this,hSnd) || (GetFxControl(hSnd) != NULL) || (GetDisplaced(hSnd) != NULL));
+               MiniaudioOneShotSfx::IsVirtualSound(this,hSnd);
     }
     float GetFXPlaybackTime(HSOUND hSnd);
-    void SetRandomSampleStartPosition(U32 uMaxPosition) { uRandomStartPosition = uMaxPosition; }
+    void SetRandomSampleStartPosition(DWORD uMaxPosition) { uRandomStartPosition = uMaxPosition; }
     // Sound lists
     HSNDLIST BeginFXList(CStringArray &szSoundNames, int nPriority, const CPlot3D &sourceCP,
                          float fpMinDistance, float fpMaxDistance, BOOL bIsRandom,
@@ -434,50 +216,20 @@ public:
     HSNDAMBIENT CancelAmbient(HSNDAMBIENT);
     void SegmentAmbient();
 
-    // Service functions
-    int MssAsiFetchCallBack(void *pDest, int nDestBytes, int nOffset);
-    void ReleaseRefTo(std::string &szSoundName);
-
 private:
     // Initialization
     void Clear();
-    // Streaming sounds
-    void StreamingThread();
-    friend UINT __cdecl StreamThreadStarter(LPVOID pParam);
-    void FillMixBuffer(SStreamControl &);
-    void LoadStreamingMarkers(SStreamControl &);
-    void SetStreamingVolume(int nPercentVolume);
-    int GetStreamingVolume() { return streamMain.vlmCtrl.GetVolume(); }
-    // Midi sounds
-    void MidiThread();
-    friend UINT __cdecl MidiThreadStarter(LPVOID pParam);
-    void LoadMidiMarkers(SMIDIControl &);
-    void MidiCB();
-    void PerformMidiSwitch();
-    void SetMIDIVolume(int nPercentVolume);
-    int GetMIDIDVolume() { return midiCtrl.vlmCtrl.GetVolume(); }
-    // FX sounds
-    SFxControl *GetFxControl(HSOUND hSnd) const;
-    SDisplacedCycledControl *GetDisplaced(HSOUND hSnd);
-    int GetFxSlot(int nPriority);
-    void RecalcVolumes(SFxControl *pControl);
-    BOOL BeginFXLL(SFxControl *pSnd, int nFxIndex, LPCSTR pszSoundName, BOOL bDialogPlayMode);
-    void RecalcFXVolumes();
-    int FinalCalcVolumes(BOOL bAffectWithHeights, BOOL bIsSpeech, int nOldVolume, float fpHeight);
     HSOUND BeginFXInt(LPCSTR pszSoundName, int nPriority, int nPercentVolume, int nPercentPan,
                       BOOL bLooping, BOOL bAffectedWithHeight, BOOL bIsSpeech,
                       BOOL bIsDialogPlayMode);
     HSOUND BeginFXInt(LPCSTR pszSoundName, int nPriority, const CPlot3D &sourceCP,
                       float fpMinDistance, float fpMaxDistance, BOOL bLooping, BOOL bIsSpeech);
-    float GetPlaybackLength(void *pData, DWORD dwSize);
     // Sound lists
     SFXListControl *GetFXListControl(HSNDLIST);
     HSNDLIST BeginFXList(CStringArray &szSoundNames, int nPriority, const CPlot3D &sourceCP,
                          float fpMinDistance, float fpMaxDistance, BOOL bIsRandom, int nPlayCount,
                          SMGetNextPlayIndexFunc playingFunc);
 
-    friend void AILCALLBACK EosCB(HSAMPLE);
-    friend void AILEXPORT EndSeqCB(HSEQUENCE hSeq);
 };
 
 // ---------------------------------------------------------------------------------------------------------

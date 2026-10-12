@@ -104,24 +104,24 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(ProjectDir)SDKs\JSON;$(IncludePath)</IncludePath>
-    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\BinkW32;$(ProjectDir)SDKs\JSON;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
     <OutDir>$(SolutionDir)out\$(Platform)\$(Configuration)\</OutDir>
     <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='OptimizedDebug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
-    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
     <OutDir>$(SolutionDir)out\$(Platform)\$(Configuration)\</OutDir>
     <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
-    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\MilesWin;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)SDKs\dx7sdk\lib;$(ProjectDir)SDKs\BinkW32;$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86)</LibraryPath>
     <OutDir>$(SolutionDir)out\$(Platform)\$(Configuration)\</OutDir>
     <TargetName>$(ProjectName)_dx11_$(Configuration)_$(Platform)</TargetName>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
@@ -156,7 +156,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <Bscmake />
@@ -181,7 +181,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <Bscmake />
@@ -211,7 +211,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(OutDir)luajit-x86.lib;mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(OutDir)luajit-x86.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <FxCompile>

@@ -31,8 +31,6 @@ struct ModAudioLayout {
  static constexpr size_t ORIENTATION_Y = offsetof(CSoundManager, listenerOrientation)+offsetof(CPlot3D,y);
  static constexpr size_t ORIENTATION_Z = offsetof(CSoundManager, listenerOrientation)+offsetof(CPlot3D,z);
  static constexpr size_t UNIQUE_COUNTER = offsetof(CSoundManager,dwUniqueCnt);
- static constexpr size_t STREAM_SAMPLE = offsetof(CSoundManager,streamMain)+offsetof(SStreamControl,ailHSample);
- static constexpr size_t STREAM_SAMPLES_PER_BUFFER = offsetof(CSoundManager,streamMain)+offsetof(SStreamControl,nSamplesPerBuffer);
  static constexpr size_t READY = offsetof(CSoundManager,bReady);
  static constexpr size_t REVERSE_STEREO = offsetof(CSoundManager,bReverseStereo);
  static constexpr size_t FX_MASTER_VOLUME = offsetof(CSoundManager,nFXMasterVolume);
@@ -136,18 +134,10 @@ const size_t SOUND_MANAGER_ORIENTATION_X_OFFSET = ModAudioLayout::ORIENTATION_X;
 const size_t SOUND_MANAGER_ORIENTATION_Y_OFFSET = ModAudioLayout::ORIENTATION_Y;
 const size_t SOUND_MANAGER_ORIENTATION_Z_OFFSET = ModAudioLayout::ORIENTATION_Z;
 const size_t SOUND_MANAGER_UNIQUE_COUNTER_OFFSET = ModAudioLayout::UNIQUE_COUNTER;
-const size_t SOUND_MANAGER_STREAM_SAMPLE_OFFSET = ModAudioLayout::STREAM_SAMPLE;
-const size_t SOUND_MANAGER_STREAM_SAMPLES_PER_BUFFER_OFFSET = ModAudioLayout::STREAM_SAMPLES_PER_BUFFER;
 const size_t SOUND_MANAGER_READY_OFFSET = ModAudioLayout::READY;
 const size_t SOUND_MANAGER_REVERSE_STEREO_OFFSET = ModAudioLayout::REVERSE_STEREO;
 const size_t SOUND_MANAGER_FX_MASTER_VOLUME_OFFSET = ModAudioLayout::FX_MASTER_VOLUME;
 const size_t SOUND_MANAGER_SPEECH_MASTER_VOLUME_OFFSET = ModAudioLayout::SPEECH_MASTER_VOLUME;
-const size_t FX_VOLUME_OFFSET = offsetof(SFxControl,nPercentVolume);
-const size_t FX_PAN_OFFSET = offsetof(SFxControl,nPercentPan);
-const size_t FX_IS_USED_OFFSET = offsetof(SFxControl,bIsUsed);
-const size_t FX_IS_LOOPED_OFFSET = offsetof(SFxControl,bIsLooped);
-const size_t FX_REQ_CLEANUP_OFFSET = offsetof(SFxControl,bReqCleanup);
-const size_t FX_UNIQUE_ID_OFFSET = offsetof(SFxControl,dwUniqueID);
 const unsigned int MAX_ACTIVE_VOICES = 64;
 #if JMV_DETEST_BUILD
 const unsigned int DUPLICATE_DIAGNOSTIC_THRESHOLD = 3;
@@ -290,17 +280,13 @@ struct SVoice
     bool pausedByModalSpeech;
     bool pausedByWorld;
     bool worldSfx;
-    bool managed;
     bool looping;
     bool speech;
     bool dialog;
     bool virtualManaged;
     bool virtualManualVolumes;
     bool virtualAffectedWithHeight;
-    void *fxControl;
-    void *milesSample;
     void *virtualSoundManager;
-    uint32_t managedUniqueId;
     uint32_t virtualId;
     int virtualManualVolume;
     int virtualPercentPan;
@@ -478,7 +464,6 @@ unsigned int BinkReadyDiagnosticCount = 0;
 unsigned int BinkLockDiagnosticCount = 0;
 unsigned int BinkStartDeferredDiagnosticCount = 0;
 unsigned int BinkBufferDiagnosticCount = 0;
-unsigned int BinkFallbackDiagnosticCount = 0;
 LONG ReverbLastDiagnosticBlocks = 0;
 int ReverbLastRequestedProfile = -1;
 int ReverbLastSettledProfile = -1;
@@ -549,12 +534,12 @@ bool IsStrictTakeover()
 
 const char *FailureRoute()
 {
-    return IsStrictTakeover() ? "drop" : "miles";
+    return "drop";
 }
 
 const char *CacheFailureRoute()
 {
-    return IsStrictTakeover() ? "drop" : "miles_capture";
+    return "drop";
 }
 
 void SetLastStartReason(const char *reason)
@@ -3256,23 +3241,9 @@ void ResetVoice(SVoice &voice)
     voice.occlusionTargetVolumeFactor = 1.0f;
 }
 
-bool ManagedSlotMatches(const SVoice &voice)
-{
-    if (!voice.managed || voice.fxControl == nullptr)
-        return false;
-    const uint8_t *fx = static_cast<const uint8_t *>(voice.fxControl);
-    return *reinterpret_cast<const BOOL *>(fx + FX_IS_USED_OFFSET) != FALSE &&
-        *reinterpret_cast<const uint32_t *>(fx + FX_UNIQUE_ID_OFFSET) ==
-            voice.managedUniqueId;
-}
 
-void RequestManagedCleanup(SVoice &voice)
-{
-    if (!ManagedSlotMatches(voice) || voice.looping)
-        return;
-    uint8_t *fx = static_cast<uint8_t *>(voice.fxControl);
-    *reinterpret_cast<BOOL *>(fx + FX_REQ_CLEANUP_OFFSET) = TRUE;
-}
+
+
 
 void ReleaseVoice(SVoice &voice, const char *reason)
 {
@@ -3285,7 +3256,6 @@ void ReleaseVoice(SVoice &voice, const char *reason)
     char name[sizeof(voice.name)] = {};
     CopyName(name, sizeof(name), voice.name);
 
-    RequestManagedCleanup(voice);
 
     if (voice.soundInitialized)
     {
@@ -3841,10 +3811,6 @@ EStartResult StartDecoded(
     int percentPan,
     float gainFactor,
     float pitchFactor,
-    bool managed = false,
-    void *fxControl = nullptr,
-    void *milesSample = nullptr,
-    uint32_t managedUniqueId = 0,
     bool looping = false,
     bool speech = false,
     const SVirtualStartInfo *virtualStart = nullptr)
@@ -3862,7 +3828,7 @@ EStartResult StartDecoded(
         {
             LOGINFO("MINIAUDIO_ONESHOT_START_SUPPRESSED name=%s reason=app_inactive route=%s total=%u",
                     soundName != nullptr ? soundName : "<null>",
-                    IsStrictTakeover() ? "strict_suppress" : "miles",
+                    "suppress",
                     SuppressDiagnosticCount);
         }
 #endif
@@ -3933,18 +3899,7 @@ EStartResult StartDecoded(
     }
 #endif
 
-    if (managed)
-    {
-        for (unsigned int i = 0; i < MAX_ACTIVE_VOICES; ++i)
-        {
-            if (Voices[i].managed &&
-                (Voices[i].fxControl == fxControl ||
-                 Voices[i].milesSample == milesSample))
-            {
-                ReleaseVoice(Voices[i], "managed_slot_reuse");
-            }
-        }
-    }
+
 
     SVoice *voice = FindVoice(priority, soundName);
     if (voice == nullptr)
@@ -3993,7 +3948,7 @@ EStartResult StartDecoded(
         pitchFactor = 2.0f;
     if (percentVolume < 0)
         percentVolume = 0;
-    const int maximumVolume = managed ? 127 : 100;
+    const int maximumVolume = 100;
     if (percentVolume > maximumVolume)
         percentVolume = maximumVolume;
     if (percentPan < -100)
@@ -4033,9 +3988,7 @@ EStartResult StartDecoded(
     {
         ma_sound_set_spatialization_enabled(&voice->sound, MA_FALSE);
         ma_sound_set_pan(&voice->sound, static_cast<float>(percentPan) * 0.01f);
-        voice->gainWithoutMaster = managed
-            ? static_cast<float>(percentVolume) / 127.0f
-            : static_cast<float>(percentVolume) * 0.01f * gainFactor;
+        voice->gainWithoutMaster = static_cast<float>(percentVolume) * 0.01f * gainFactor;
     }
     ma_sound_set_pitch(&voice->sound, pitchFactor);
     if (virtualStart != nullptr)
@@ -4086,10 +4039,7 @@ EStartResult StartDecoded(
             : GetMasterVolume(soundManager);
         ma_sound_set_volume(
             &voice->sound,
-            managed
-                ? voice->gainWithoutMaster
-                : static_cast<float>(masterVolume) * 0.01f *
-                      voice->gainWithoutMaster);
+            static_cast<float>(masterVolume) * 0.01f * voice->gainWithoutMaster);
     }
 
     const bool holdForModalSpeech =
@@ -4124,12 +4074,8 @@ EStartResult StartDecoded(
     voice->pausedByModalSpeech = holdForModalSpeech;
     voice->pausedByWorld = holdForWorld;
     voice->worldSfx = worldSfx;
-    voice->managed = managed;
     voice->looping = looping;
     voice->speech = speech;
-    voice->fxControl = fxControl;
-    voice->milesSample = milesSample;
-    voice->managedUniqueId = managedUniqueId;
     voice->priority = priority;
     voice->startTick = GetTickCount();
     voice->sequence = ++StartSequence;
@@ -4185,16 +4131,14 @@ EStartResult StartDecoded(
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
     if (StartSequence <= 32 || (StartSequence % 64) == 0)
     {
-        LOGINFO("MINIAUDIO_ONESHOT_START seq=%u name=%s path=%s virtual_id=%u priority=%d gain_percent=%d pitch_percent=%d active=%u miles=0",
+        LOGINFO("MINIAUDIO_ONESHOT_START seq=%u name=%s path=%s virtual_id=%u priority=%d gain_percent=%d pitch_percent=%d active=%u",
                 voice->sequence,
                 soundName,
                 virtualStart != nullptr
                     ? (looping ? "virtual_loop" :
                        (speech ? "virtual_speech" :
                         (spatial ? "virtual_3d" : "virtual_flat")))
-                    : (managed ? (looping ? "managed_loop" :
-                                 (speech ? "managed_speech" : "managed_fx"))
-                               : (spatial ? "3d" : "flat")),
+                    : (spatial ? "3d" : "flat"),
                 virtualStart != nullptr ? virtualStart->id : 0xFFFFFFFFu,
                 priority,
                 static_cast<int>(voice->gainWithoutMaster * 100.0f + 0.5f),
@@ -4214,7 +4158,6 @@ typedef int(__stdcall *BinkTrackOpenProc)(
     int channels,
     uint32_t flags,
     void *bink);
-typedef BinkTrackOpenProc(__stdcall *BinkSystemOpenProc)(uintptr_t param);
 typedef int(__stdcall *BinkReadyProc)(SBinkSoundInterface *soundInterface);
 typedef int(__stdcall *BinkLockProc)(
     SBinkSoundInterface *soundInterface,
@@ -4258,7 +4201,6 @@ static_assert(offsetof(SBinkSoundInterface, preferredBytes) == 0x20,
               "Bink 1.0t reads the preferred PCM block size at +0x20");
 
 const size_t BINK_RETAIL_SOUND_WORKSPACE_BYTES = 0xC0;
-const DWORD BINK_READY_BACKPRESSURE_MS = 1;
 const uint64_t BINK_READY_PRECISE_WAIT_US = 1000;
 const LONGLONG BINK_READY_PRECISE_WAIT_100NS = -10000LL;
 const DWORD BINK_READY_PRECISE_WAIT_TIMEOUT_MS = 50;
@@ -4266,8 +4208,7 @@ const DWORD BINK_READY_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
 
 enum EBinkReadyWaitBackend
 {
-    BINK_READY_WAIT_LEGACY_SLEEP = 0,
-    BINK_READY_WAIT_HIGH_RES_TIMER,
+    BINK_READY_WAIT_HIGH_RES_TIMER = 0,
     BINK_READY_WAIT_YIELD_FALLBACK,
 };
 
@@ -4359,16 +4300,12 @@ const char *GetBinkReadyWaitBackendName(EBinkReadyWaitBackend backend)
     case BINK_READY_WAIT_YIELD_FALLBACK:
         return "yield_fallback";
     default:
-        return "legacy_sleep";
+        return "yield_fallback";
     }
 }
 
 const char *GetConfiguredBinkReadyWaitBackend(const SBinkVoice *voice)
 {
-    if (!ModAudioSettings().JMVMiniaudioBinkReadyBackpressurePrototype)
-        return "disabled";
-    if (!ModAudioSettings().JMVMiniaudioBinkPreciseWaitPrototype)
-        return "legacy_sleep";
     return voice != nullptr && voice->readyWaitTimer != nullptr
         ? "high_res_timer"
         : "yield_fallback";
@@ -4393,11 +4330,7 @@ void InitializeBinkReadyPreciseWait(SBinkVoice *voice)
     if (QueryPerformanceFrequency(&qpcFrequency))
         voice->readyWaitQpcFrequency = qpcFrequency.QuadPart;
 
-    if (!ModAudioSettings().JMVMiniaudioBinkReadyBackpressurePrototype ||
-        !ModAudioSettings().JMVMiniaudioBinkPreciseWaitPrototype)
-    {
-        return;
-    }
+
 
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     CreateWaitableTimerExWProc createTimer = kernel32 != nullptr
@@ -4476,12 +4409,7 @@ EBinkReadyWaitBackend YieldBinkReadyWait(SBinkVoice *voice)
 
 EBinkReadyWaitBackend WaitBinkReadyBackpressure(SBinkVoice *voice)
 {
-    if (voice == nullptr ||
-        !ModAudioSettings().JMVMiniaudioBinkPreciseWaitPrototype)
-    {
-        Sleep(BINK_READY_BACKPRESSURE_MS);
-        return BINK_READY_WAIT_LEGACY_SLEEP;
-    }
+
 
     if (voice->readyWaitTimer == nullptr)
         return YieldBinkReadyWait(voice);
@@ -4540,8 +4468,7 @@ uint64_t MeasureBinkReadyWaitMicroseconds(
 
 void ApplyBinkReadyBackpressure(SBinkVoice *voice)
 {
-    if (voice == nullptr ||
-        !ModAudioSettings().JMVMiniaudioBinkReadyBackpressurePrototype)
+    if (voice == nullptr)
     {
         return;
     }
@@ -4598,9 +4525,17 @@ void ApplyBinkReadyBackpressure(SBinkVoice *voice)
 SRWLOCK BinkVoiceRegistryLock = SRWLOCK_INIT;
 std::vector<SBinkVoice *> BinkVoiceRegistry;
 
-BinkSystemOpenProc BinkMilesSystemOpen = nullptr;
-BinkTrackOpenProc BinkMilesTrackOpen = nullptr;
-uintptr_t BinkMilesSystemParam = 0;
+bool BinkMovieAudioFailed = false;
+bool BinkMovieAudioErrorLogged = false;
+std::string BinkMovieName;
+void BinkAudioError(const char *phase, const char *reason)
+{
+    BinkMovieAudioFailed = true;
+    if (BinkMovieAudioErrorLogged) return;
+    BinkMovieAudioErrorLogged = true;
+    GameJournal::Event("AUDIO", "bink_muted", "movie=%s phase=%s reason=%s",
+        GameJournal::Quote(BinkMovieName.c_str()).c_str(), phase, reason);
+}
 
 int __stdcall BinkMiniaudioReady(SBinkSoundInterface *soundInterface);
 int __stdcall BinkMiniaudioLock(
@@ -4762,8 +4697,8 @@ void DestroyBinkVoice(SBinkVoice *voice, const char *reason)
             voice->readyAccepts,
             voice->lockCalls,
             voice->unlockCalls,
-            ModAudioSettings().JMVMiniaudioBinkReadyBackpressurePrototype ? 1 : 0,
-            ModAudioSettings().JMVMiniaudioBinkPreciseWaitPrototype ? 1 : 0,
+            1,
+            1,
             readyWaitBackend,
             voice->readyBackpressureWaits,
             voice->readyBackpressureRequestedUs,
@@ -4783,73 +4718,9 @@ void DestroyBinkVoice(SBinkVoice *voice, const char *reason)
     FinalizeDeferredBinkEngineShutdown();
 }
 
-int OpenBinkMilesFallback(
-    SBinkSoundInterface *soundInterface,
-    uint32_t frequency,
-    int bits,
-    int channels,
-    uint32_t flags,
-    void *bink,
-    const char *phase,
-    const char *reason)
-{
-    if (soundInterface == nullptr)
-        return 0;
 
-    const BinkTrackOpenProc fallback = BinkMilesTrackOpen;
-    const int result = fallback != nullptr
-        ? fallback(soundInterface, frequency, bits, channels, flags, bink)
-        : 0;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkFallbackDiagnosticCount))
-    {
-        LOGWARN("MINIAUDIO_BINK_FALLBACK phase=%s reason=%s result=%d route=%s total=%u",
-                phase != nullptr ? phase : "unknown",
-                reason != nullptr ? reason : "unknown",
-                result,
-                result != 0 ? "miles" : "none",
-                BinkFallbackDiagnosticCount);
-    }
-#endif
-    return result;
-}
 
-bool SwitchBinkVoiceToMiles(
-    SBinkSoundInterface *soundInterface,
-    SBinkVoice *voice,
-    const char *phase,
-    const char *reason,
-    int desiredOnOff)
-{
-    if (soundInterface == nullptr || voice == nullptr)
-        return false;
 
-    const uint32_t frequency = voice->frequency;
-    const int bits = voice->bits;
-    const int channels = voice->channels;
-    const uint32_t flags = voice->flags;
-    void *const bink = voice->bink;
-    DestroyBinkVoice(voice, "promote_to_miles");
-
-    const int opened = OpenBinkMilesFallback(
-        soundInterface,
-        frequency,
-        bits,
-        channels,
-        flags,
-        bink,
-        phase,
-        reason);
-    if (opened == 0)
-        return false;
-
-    if ((desiredOnOff == 0 || desiredOnOff == 1) &&
-        soundInterface->SetOnOff != nullptr)
-    {
-        soundInterface->SetOnOff(soundInterface, desiredOnOff);
-    }
-    return true;
-}
 
 void LogBinkTrackPhase(
     int sequence,
@@ -4881,7 +4752,7 @@ EBinkStartOutcome TryStartBinkVoice(
     SBinkVoice *voice,
     const char *phase)
 {
-    if (voice == nullptr || !voice->onOff || voice->paused ||
+    if (BinkMovieAudioFailed || voice == nullptr || !voice->onOff || voice->paused ||
         voice->started)
     {
         return BINK_START_NOT_NEEDED;
@@ -4929,7 +4800,7 @@ EBinkStartOutcome TryStartBinkVoice(
 
     voice->started = true;
 #if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_START seq=%d phase=%s queued_frames=%u active=%ld miles=0",
+    LOGINFO("MINIAUDIO_BINK_START seq=%d phase=%s queued_frames=%u active=%ld",
             voice->sequence,
             phase != nullptr ? phase : "start",
             queuedFrames,
@@ -4963,6 +4834,7 @@ int __stdcall BinkMiniaudioTrackOpen(
     }
 #endif
 
+    if (BinkMovieAudioFailed) return 0;
     ma_format format = ma_format_unknown;
     if (bits == 16)
         format = ma_format_s16;
@@ -4974,15 +4846,8 @@ int __stdcall BinkMiniaudioTrackOpen(
         format == ma_format_unknown)
     {
         LogBinkTrackPhase(sequence, "format_validate", "rejected");
-        return OpenBinkMilesFallback(
-            soundInterface,
-            frequency,
-            bits,
-            channels,
-            flags,
-            bink,
-            "track_open",
-            "unsupported_format");
+        BinkAudioError("track_open", "unsupported_format");
+        return 0;
     }
     LogBinkTrackPhase(sequence, "format_validate", "accepted");
 
@@ -4996,15 +4861,8 @@ int __stdcall BinkMiniaudioTrackOpen(
         deviceReady ? "ready" : (engineReady ? "device_failed" : "engine_failed"));
     if (!deviceReady)
     {
-        return OpenBinkMilesFallback(
-            soundInterface,
-            frequency,
-            bits,
-            channels,
-            flags,
-            bink,
-            "track_open",
-            "device");
+        BinkAudioError("track_open", "device");
+        return 0;
     }
 
     LogBinkTrackPhase(sequence, "voice_allocation", "begin");
@@ -5012,15 +4870,8 @@ int __stdcall BinkMiniaudioTrackOpen(
     if (voice == nullptr)
     {
         LogBinkTrackPhase(sequence, "voice_allocation", "failed");
-        return OpenBinkMilesFallback(
-            soundInterface,
-            frequency,
-            bits,
-            channels,
-            flags,
-            bink,
-            "track_open",
-            "allocation");
+        BinkAudioError("track_open", "allocation");
+        return 0;
     }
     LogBinkTrackPhase(sequence, "voice_allocation", "ready");
 
@@ -5034,7 +4885,7 @@ int __stdcall BinkMiniaudioTrackOpen(
     voice->sequence = sequence;
     voice->volume = 32768;
     voice->pan = 32768;
-    // The retail Miles track opener initializes its output voice before it
+    // The supported retail track ABI initializes its output voice before it
     // publishes SetOnOff. Bink only calls SetOnOff for later explicit state
     // changes, so a freshly opened track is active by default.
     voice->onOff = true;
@@ -5052,8 +4903,8 @@ int __stdcall BinkMiniaudioTrackOpen(
             static_cast<size_t>(capacityFrames) * voice->bytesPerFrame))
     {
         delete voice;
-        return OpenBinkMilesFallback(soundInterface, frequency, bits, channels,
-            flags, bink, "track_open", "resource_budget");
+        BinkAudioError("track_open", "resource_budget");
+        return 0;
     }
     LogBinkTrackPhase(sequence, "ring_init", "begin");
     ma_result result = ma_pcm_rb_init(
@@ -5073,15 +4924,8 @@ int __stdcall BinkMiniaudioTrackOpen(
                ma_result_description(result));
 #endif
         delete voice;
-        return OpenBinkMilesFallback(
-            soundInterface,
-            frequency,
-            bits,
-            channels,
-            flags,
-            bink,
-            "track_open",
-            "ring_init");
+        BinkAudioError("track_open", "ring_init");
+        return 0;
     }
     voice->ringInitialized = true;
     ma_pcm_rb_set_sample_rate(&voice->ring, frequency);
@@ -5105,15 +4949,8 @@ int __stdcall BinkMiniaudioTrackOpen(
 #endif
         ma_pcm_rb_uninit(&voice->ring);
         delete voice;
-        return OpenBinkMilesFallback(
-            soundInterface,
-            frequency,
-            bits,
-            channels,
-            flags,
-            bink,
-            "track_open",
-            "sound_init");
+        BinkAudioError("track_open", "sound_init");
+        return 0;
     }
     voice->soundInitialized = true;
     ma_sound_set_spatialization_enabled(&voice->sound, MA_FALSE);
@@ -5133,15 +4970,8 @@ int __stdcall BinkMiniaudioTrackOpen(
     {
         LogBinkTrackPhase(sequence, "callback_publish", "registry_failed");
         DestroyBinkVoice(voice, "registry_failed");
-        return OpenBinkMilesFallback(
-            soundInterface,
-            frequency,
-            bits,
-            channels,
-            flags,
-            bink,
-            "track_open",
-            "registry");
+        BinkAudioError("track_open", "registry");
+        return 0;
     }
     soundInterface->Ready = BinkMiniaudioReady;
     soundInterface->Lock = BinkMiniaudioLock;
@@ -5156,7 +4986,7 @@ int __stdcall BinkMiniaudioTrackOpen(
     LogBinkTrackPhase(sequence, "callback_publish", "ready");
 
 #if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_OPEN seq=%d frequency=%u bits=%d channels=%d flags=0x%08X chunk_bytes=%u ring_bytes=%u bink=0x%p route=miniaudio initial_on=%d ready_backpressure=%d precise_wait=%d wait_backend=%s requested_us=%I64u timer_create_error=%lu active=%ld miles=0",
+    LOGINFO("MINIAUDIO_BINK_OPEN seq=%d frequency=%u bits=%d channels=%d flags=0x%08X chunk_bytes=%u ring_bytes=%u bink=0x%p route=miniaudio initial_on=%d ready_backpressure=%d precise_wait=%d wait_backend=%s requested_us=%I64u timer_create_error=%lu active=%ld",
              voice->sequence,
             frequency,
             bits,
@@ -5166,8 +4996,8 @@ int __stdcall BinkMiniaudioTrackOpen(
              capacityFrames * voice->bytesPerFrame,
              bink,
              voice->onOff ? 1 : 0,
-             ModAudioSettings().JMVMiniaudioBinkReadyBackpressurePrototype ? 1 : 0,
-             ModAudioSettings().JMVMiniaudioBinkPreciseWaitPrototype ? 1 : 0,
+             1,
+             1,
              GetConfiguredBinkReadyWaitBackend(voice),
              BINK_READY_PRECISE_WAIT_US,
              static_cast<unsigned long>(voice->readyWaitTimerCreateError),
@@ -5178,33 +5008,7 @@ int __stdcall BinkMiniaudioTrackOpen(
 
 BinkTrackOpenProc __stdcall BinkMiniaudioSystemOpen(uintptr_t param)
 {
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkSystemEntryDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_BINK_SYSTEM_ENTRY param=0x%08X miles_system_open=0x%p configured_param=0x%08X total=%u",
-                static_cast<unsigned int>(param),
-                BinkMilesSystemOpen,
-                static_cast<unsigned int>(BinkMilesSystemParam),
-                BinkSystemEntryDiagnosticCount);
-    }
-#endif
-    BinkMilesTrackOpen = BinkMilesSystemOpen != nullptr
-        ? BinkMilesSystemOpen(BinkMilesSystemParam)
-        : nullptr;
-    const bool engineReady = EnsureEngine();
-    const bool deviceReady = engineReady && EnsureDeviceStarted("bink_system_open");
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkSystemDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_BINK_SYSTEM engine=%d device=%d miles_fallback=%d route=%s total=%u",
-                engineReady ? 1 : 0,
-                deviceReady ? 1 : 0,
-                BinkMilesTrackOpen != nullptr ? 1 : 0,
-                deviceReady ? "miniaudio" : "miles",
-                BinkSystemDiagnosticCount);
-    }
-#endif
-    return deviceReady ? BinkMiniaudioTrackOpen : BinkMilesTrackOpen;
+    return BinkMiniaudioTrackOpen;
 }
 
 int __stdcall BinkMiniaudioReady(SBinkSoundInterface *soundInterface)
@@ -5212,6 +5016,7 @@ int __stdcall BinkMiniaudioReady(SBinkSoundInterface *soundInterface)
     SBinkVoice *voice = GetBinkVoice(soundInterface);
     if (voice == nullptr)
         return 0;
+    if (BinkMovieAudioFailed) { ma_sound_stop(&voice->sound); return 1; }
     ++voice->readyCalls;
     if (voice->locked)
     {
@@ -5230,17 +5035,9 @@ int __stdcall BinkMiniaudioReady(SBinkSoundInterface *soundInterface)
     ApplyBinkReadyBackpressure(voice);
     if (!EnsureDeviceStarted("bink_ready"))
     {
-        if (SwitchBinkVoiceToMiles(
-                soundInterface,
-                voice,
-                "ready",
-                "device",
-                voice->onOff ? 1 : 0) &&
-            soundInterface->Ready != nullptr)
-        {
-            return soundInterface->Ready(soundInterface);
-        }
-        return 0;
+        BinkAudioError("ready", "device");
+        ma_sound_stop(&voice->sound);
+        return 1;
     }
     const ma_uint32 writableFrames = ma_pcm_rb_available_write(&voice->ring);
     const ma_uint32 queuedFrames = ma_pcm_rb_available_read(&voice->ring);
@@ -5299,6 +5096,14 @@ int __stdcall BinkMiniaudioLock(
     {
         return 0;
     }
+    if (BinkMovieAudioFailed)
+    {
+        ma_sound_stop(&voice->sound);
+        *address = static_cast<uint8_t *>(ma_pcm_rb_get_subbuffer_ptr(&voice->ring, 0, voice->ring.rb.pBuffer));
+        *length = voice->preferredFrames * voice->bytesPerFrame;
+        voice->locked = true;
+        return *address != nullptr;
+    }
     ++voice->lockCalls;
 
     ma_uint32 frames = voice->preferredFrames;
@@ -5306,7 +5111,14 @@ int __stdcall BinkMiniaudioLock(
     const ma_result result = ma_pcm_rb_acquire_write(
         &voice->ring, &frames, &buffer);
     if (result != MA_SUCCESS || frames == 0 || buffer == nullptr)
-        return 0;
+    {
+        BinkAudioError("lock", "ring_acquire");
+        ma_sound_stop(&voice->sound);
+        *address = static_cast<uint8_t *>(ma_pcm_rb_get_subbuffer_ptr(&voice->ring, 0, voice->ring.rb.pBuffer));
+        *length = voice->preferredFrames * voice->bytesPerFrame;
+        voice->locked = true;
+        return *address != nullptr;
+    }
 
     voice->locked = true;
     voice->lockedFrames = frames;
@@ -5333,6 +5145,12 @@ int __stdcall BinkMiniaudioUnlock(
     SBinkVoice *voice = GetBinkVoice(soundInterface);
     if (voice == nullptr || !voice->locked)
         return 0;
+    if (BinkMovieAudioFailed)
+    {
+        voice->locked = false;
+        voice->lockedFrames = 0;
+        return 1;
+    }
     ++voice->unlockCalls;
 
     const uint32_t lockedBytes = voice->lockedFrames * voice->bytesPerFrame;
@@ -5352,14 +5170,9 @@ int __stdcall BinkMiniaudioUnlock(
                result,
                ma_result_description(result));
 #endif
-        return SwitchBinkVoiceToMiles(
-                   soundInterface,
-                   voice,
-                   "buffer_commit",
-                   "ring_commit",
-                   voice->onOff ? 1 : 0)
-            ? 1
-            : 0;
+        BinkAudioError("pcm", "device_or_buffer");
+        ma_sound_stop(&voice->sound);
+        return 1;
     }
 
     voice->committedBytes += filledBytes;
@@ -5381,16 +5194,9 @@ int __stdcall BinkMiniaudioUnlock(
     if (startOutcome == BINK_START_DEVICE_FAILED ||
         startOutcome == BINK_START_SOUND_FAILED)
     {
-        return SwitchBinkVoiceToMiles(
-                   soundInterface,
-                   voice,
-                   "first_pcm",
-                   startOutcome == BINK_START_DEVICE_FAILED
-                       ? "device"
-                       : "sound_start",
-                   1)
-            ? 1
-            : 0;
+        BinkAudioError("pcm", "device_or_buffer");
+        ma_sound_stop(&voice->sound);
+        return 1;
     }
     return 1;
 }
@@ -5455,18 +5261,8 @@ int __stdcall BinkMiniaudioPause(
     if (startOutcome == BINK_START_DEVICE_FAILED ||
         startOutcome == BINK_START_SOUND_FAILED)
     {
-        if (SwitchBinkVoiceToMiles(
-                soundInterface,
-                voice,
-                "resume",
-                startOutcome == BINK_START_DEVICE_FAILED
-                    ? "device"
-                    : "sound_start",
-                1) &&
-            soundInterface->Pause != nullptr)
-        {
-            return soundInterface->Pause(soundInterface, status);
-        }
+        BinkAudioError("resume", "sound_start");
+        ma_sound_stop(&voice->sound);
         return status;
     }
 #if JMV_MINIAUDIO_BINK_DIAGNOSTICS
@@ -5496,16 +5292,9 @@ int __stdcall BinkMiniaudioSetOnOff(
         if (startOutcome == BINK_START_DEVICE_FAILED ||
             startOutcome == BINK_START_SOUND_FAILED)
         {
-            return SwitchBinkVoiceToMiles(
-                       soundInterface,
-                       voice,
-                       "set_on_off",
-                       startOutcome == BINK_START_DEVICE_FAILED
-                           ? "device"
-                           : "sound_start",
-                       1)
-                ? 1
-                : 0;
+            BinkAudioError("set_on_off", "sound_start");
+            ma_sound_stop(&voice->sound);
+            return 1;
         }
         return 1;
     }
@@ -5531,32 +5320,50 @@ void __stdcall BinkMiniaudioClose(SBinkSoundInterface *soundInterface)
 } // namespace
 
 bool IsSupportedBinkAudioAbi(
-    const void *setSoundSystem,
-    const void *milesSystemOpen)
+    const void *setSoundSystem)
 {
     static const uint8_t setSoundSystemPrefix[] = {
         0x8B, 0x4C, 0x24, 0x04, 0x85, 0xC9, 0x75,
         0x05, 0x33, 0xC0, 0xC2, 0x08, 0x00,
     };
-    static const uint8_t milesSystemOpenPrefix[] = {
-        0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0,
-        0x75, 0x03, 0xC2, 0x04, 0x00,
-    };
-    return setSoundSystem != nullptr && milesSystemOpen != nullptr &&
-        memcmp(setSoundSystem,
-               setSoundSystemPrefix,
-               sizeof(setSoundSystemPrefix)) == 0 &&
-        memcmp(milesSystemOpen,
-               milesSystemOpenPrefix,
-               sizeof(milesSystemOpenPrefix)) == 0;
+    if (!setSoundSystem || memcmp(setSoundSystem, setSoundSystemPrefix, sizeof(setSoundSystemPrefix)) != 0)
+        return false;
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<const char *>(setSoundSystem), &module)) return false;
+    char path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameA(module, path, MAX_PATH);
+    if (!length || length >= MAX_PATH) return false;
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeA(path, &ignored);
+    if (!size) return false;
+    std::vector<uint8_t> version(size);
+    if (!GetFileVersionInfoA(path, 0, size, version.data())) return false;
+    struct Translation { WORD language, codepage; } *translations = nullptr;
+    UINT bytes = 0;
+    if (!VerQueryValueA(version.data(), "\\VarFileInfo\\Translation",
+            reinterpret_cast<void **>(&translations), &bytes)) return false;
+    for (UINT i = 0; i < bytes / sizeof(Translation); ++i)
+    {
+        char key[80] = {};
+        sprintf_s(key, "\\StringFileInfo\\%04x%04x\\ProductVersion", translations[i].language, translations[i].codepage);
+        char *value = nullptr;
+        UINT valueBytes = 0;
+        if (VerQueryValueA(version.data(), key, reinterpret_cast<void **>(&value), &valueBytes) &&
+            value && valueBytes && strcmp(value, "1.0t") == 0) return true;
+    }
+    return false;
 }
 
-void ConfigureBinkMilesFallback(void *milesSystemOpen, uintptr_t param)
+
+
+void BeginBinkAudioMovie(const char *name)
 {
-    BinkMilesSystemOpen = reinterpret_cast<BinkSystemOpenProc>(
-        milesSystemOpen);
-    BinkMilesSystemParam = param;
+    BinkMovieName = name ? name : "";
+    BinkMovieAudioFailed = BinkMovieAudioErrorLogged = false;
 }
+void MuteBinkAudioMovie(const char *reason) { BinkAudioError("configure", reason); }
+bool HasBinkAudioMovieFailed() { return BinkMovieAudioFailed; }
 
 void *GetBinkMiniaudioSystemOpen()
 {
@@ -6083,58 +5890,7 @@ EStartResult TryStart3D(
         pitchFactor);
 }
 
-EStartResult TryStartManaged(
-    void *soundManager,
-    void *fxControl,
-    void *milesSample,
-    const char *soundName,
-    int priority,
-    int finalVolume,
-    int percentPan,
-    int playbackRate,
-    bool looping,
-    bool speech)
-{
-    if (!IsManagerReady(soundManager) || fxControl == nullptr ||
-        milesSample == nullptr || soundName == nullptr)
-    {
-        SetLastStartReason(!IsManagerReady(soundManager)
-                               ? "manager_not_ready"
-                               : (fxControl == nullptr
-                                      ? "fx_control_invalid"
-                                      : (milesSample == nullptr
-                                             ? "sample_invalid"
-                                             : "name_invalid")));
-        return START_NOT_HANDLED;
-    }
 
-    AudioResources::Handle resource = AudioResources::Pin(soundName);
-    const uint32_t sampleRate = AudioResources::SampleRate(resource);
-    const float pitchFactor = playbackRate > 0 && sampleRate > 0
-        ? static_cast<float>(playbackRate) / sampleRate : 1.0f;
-    AudioResources::Unpin(resource);
-    const uint8_t *fx = static_cast<const uint8_t *>(fxControl);
-    const uint32_t uniqueId = *reinterpret_cast<const uint32_t *>(
-        fx + FX_UNIQUE_ID_OFFSET);
-    return StartDecoded(
-        soundManager,
-        soundName,
-        priority,
-        false,
-        nullptr,
-        0.0f,
-        0.0f,
-        finalVolume,
-        percentPan,
-        1.0f,
-        pitchFactor,
-        true,
-        fxControl,
-        milesSample,
-        uniqueId,
-        looping,
-        speech);
-}
 
 EStartResult TryStartVirtualFlat(
     void *soundManager,
@@ -6191,10 +5947,6 @@ EStartResult TryStartVirtualFlat(
         percentPan,
         1.0f,
         pitchFactor,
-        false,
-        nullptr,
-        nullptr,
-        0,
         looping,
         speech,
         &virtualStart);
@@ -6273,10 +6025,6 @@ EStartResult TryStartVirtual3D(
         0,
         1.0f,
         pitchFactor,
-        false,
-        nullptr,
-        nullptr,
-        0,
         looping,
         speech,
         &virtualStart);
@@ -6410,31 +6158,9 @@ unsigned int CountAudibleVirtualSpeech(void *soundManager)
     return count;
 }
 
-bool IsManagedSample(void *milesSample)
-{
-    if (milesSample == nullptr)
-        return false;
-    for (unsigned int i = 0; i < MAX_ACTIVE_VOICES; ++i)
-    {
-        if (Voices[i].managed && Voices[i].milesSample == milesSample)
-            return true;
-    }
-    return false;
-}
 
-void StopManagedSample(void *milesSample, const char *reason)
-{
-    if (milesSample == nullptr)
-        return;
-    for (unsigned int i = 0; i < MAX_ACTIVE_VOICES; ++i)
-    {
-        if (Voices[i].managed && Voices[i].milesSample == milesSample)
-        {
-            ReleaseVoice(
-                Voices[i], reason != nullptr ? reason : "managed_stop");
-        }
-    }
-}
+
+
 
 bool FileExists(const char *path)
 {
@@ -7029,7 +6755,7 @@ void FinalizeFastStreamingSwitchIfDue()
         StopAndUninitStreamingSlot(oldSlot);
     ApplyStreamingGain();
 #if JMV_MINIAUDIO_STREAMING_MARKERS_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_STREAM_MARKERS_FAST_COMPLETE previous=%s current=%s marker_frame=%I64u marker_output_frame=%I64u scheduled_engine_frame=%I64u observed_engine_frame=%I64u overshoot_frames=%I64u miles=muted",
+    LOGINFO("MINIAUDIO_STREAM_MARKERS_FAST_COMPLETE previous=%s current=%s marker_frame=%I64u marker_output_frame=%I64u scheduled_engine_frame=%I64u observed_engine_frame=%I64u overshoot_frames=%I64u",
             oldName[0] != '\0' ? oldName : "<none>",
             Streaming.currentName,
             static_cast<unsigned __int64>(sourceFrame),
@@ -7088,17 +6814,6 @@ void CancelFastStreamingSwitch(const char *reason, bool clearPending)
 
 unsigned int GetStreamingMarkerLeadFrames()
 {
-    const int stockLead = CurrentSoundManager != nullptr
-        ? *reinterpret_cast<const int *>(
-              static_cast<const uint8_t *>(CurrentSoundManager) +
-              SOUND_MANAGER_STREAM_SAMPLES_PER_BUFFER_OFFSET)
-        : 0;
-    if (stockLead > 0 && stockLead <= 1024 * 1024)
-        return static_cast<unsigned int>(stockLead);
-#if JMV_MINIAUDIO_STREAMING_MARKERS_DIAGNOSTICS
-    LOGWARN("MINIAUDIO_STREAM_MARKERS_FALLBACK phase=lead_frames stock_value=%d fallback=4096",
-            stockLead);
-#endif
     return 4096;
 }
 
@@ -7314,7 +7029,7 @@ bool ScheduleFastStreamingSwitch(const char *soundName)
     Streaming.fastSwitchOutputFrame = markerOutputFrame;
     Streaming.fastSwitchScheduled = true;
 #if JMV_MINIAUDIO_STREAMING_MARKERS_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_STREAM_MARKERS_FAST_SCHEDULE current=%s pending=%s marker_frame=%I64u marker_output_frame=%I64u marker_rate=%u cursor=%I64u marker_lead=%u output_lead=%I64u wrapped=%d cycle_end=%I64u output_rate=%u engine_rate=%u engine_now=%I64u switch_engine_frame=%I64u output_delta=%I64u no_overlap=1 miles=muted",
+    LOGINFO("MINIAUDIO_STREAM_MARKERS_FAST_SCHEDULE current=%s pending=%s marker_frame=%I64u marker_output_frame=%I64u marker_rate=%u cursor=%I64u marker_lead=%u output_lead=%I64u wrapped=%d cycle_end=%I64u output_rate=%u engine_rate=%u engine_now=%I64u switch_engine_frame=%I64u output_delta=%I64u no_overlap=1",
             Streaming.currentName,
             soundName,
             static_cast<unsigned __int64>(markerFrame),
@@ -7453,7 +7168,7 @@ bool StartStreamingNow(
         LOGINFO("MINIAUDIO_FULL_STREAM_END name=%s reason=replace",
                 replacedName[0] != '\0' ? replacedName : "<none>");
     }
-    LOGINFO("MINIAUDIO_FULL_STREAM_START name=%s path=%s reason=%s volume=%d fade_percent=%d paused=%d miles=muted",
+    LOGINFO("MINIAUDIO_FULL_STREAM_START name=%s path=%s reason=%s volume=%d fade_percent=%d paused=%d",
             soundName,
             resolvedPath,
             reason != nullptr ? reason : "unknown",
@@ -7894,15 +7609,7 @@ void ResumeStreaming(const char *reason)
 #endif
 }
 
-bool IsStreamingSample(void *sample)
-{
-    if (sample == nullptr || CurrentSoundManager == nullptr)
-        return false;
-    const uint8_t *manager = static_cast<const uint8_t *>(
-        CurrentSoundManager);
-    return *reinterpret_cast<void *const *>(
-               manager + SOUND_MANAGER_STREAM_SAMPLE_OFFSET) == sample;
-}
+
 
 void PrepareNativeManager(void *soundManager)
 {
@@ -7910,6 +7617,7 @@ void PrepareNativeManager(void *soundManager)
     SynchronizeUniqueCounter(soundManager);
 }
 const char* GetNativeStreamingName(){return Streaming.playing ? Streaming.currentName : "";}
+bool IsNativeStreamingSwitching(){return Streaming.pendingStop || Streaming.pendingName[0] != '\0';}
 void Tick(void *soundManager)
 {
     SyncWorldSfxPause();
@@ -7940,11 +7648,7 @@ void Tick(void *soundManager)
     {
         if (!Voices[i].active)
             continue;
-        if (Voices[i].managed && !ManagedSlotMatches(Voices[i]))
-        {
-            ReleaseVoice(Voices[i], "managed_slot_released");
-            continue;
-        }
+
         if (ma_sound_at_end(&Voices[i].sound))
         {
             ReleaseVoice(Voices[i], "eos");
@@ -7957,31 +7661,7 @@ void Tick(void *soundManager)
             ApplyVirtualVoiceMix(Voices[i]);
             continue;
         }
-        if (Voices[i].managed)
-        {
-            const uint8_t *fx = static_cast<const uint8_t *>(
-                Voices[i].fxControl);
-            int finalVolume = *reinterpret_cast<const int *>(
-                fx + FX_VOLUME_OFFSET);
-            int percentPan = *reinterpret_cast<const int *>(
-                fx + FX_PAN_OFFSET);
-            if (finalVolume < 0)
-                finalVolume = 0;
-            if (finalVolume > 127)
-                finalVolume = 127;
-            if (percentPan < -100)
-                percentPan = -100;
-            if (percentPan > 100)
-                percentPan = 100;
-            Voices[i].gainWithoutMaster =
-                static_cast<float>(finalVolume) / 127.0f;
-            ma_sound_set_volume(
-                &Voices[i].sound, Voices[i].gainWithoutMaster);
-            ma_sound_set_pan(
-                &Voices[i].sound,
-                static_cast<float>(percentPan) * 0.01f);
-            continue;
-        }
+
         ma_sound_set_volume(
             &Voices[i].sound,
             static_cast<float>(masterVolume) * 0.01f *
