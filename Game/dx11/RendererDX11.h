@@ -80,6 +80,10 @@ private:
     std::uint64_t c56WorldFigurePrimitives = 0;
     std::uint64_t c56WorldFigureFallbacks = 0;
     std::uint64_t c56WorldFigureLegacyDraws = 0;
+    std::uint64_t c56WorldFigureUnavailable = 0;
+    std::uint64_t c56WorldFigureInvalidView = 0;
+    std::uint64_t c56WorldFigureMultipleTextures = 0;
+    std::uint64_t c56WorldFigureQueueFailed = 0;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;

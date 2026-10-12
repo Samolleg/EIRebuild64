@@ -200,14 +200,20 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
 
 bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
 {
-    const auto fallback = [this]() { ++c56WorldFigureFallbacks; return false; };
-    if (!ownedWorldActive || !rendererFacade || !rendererFacade->Ready() || !view.positions ||
-        !view.normals || !view.components || !view.indices) return fallback();
+    const auto fallback = [this](std::uint64_t& reason) {
+        ++c56WorldFigureFallbacks;
+        ++reason;
+        return false;
+    };
+    if (!ownedWorldActive || !rendererFacade || !rendererFacade->Ready())
+        return fallback(c56WorldFigureUnavailable);
+    if (!view.positions || !view.normals || !view.components || !view.indices)
+        return fallback(c56WorldFigureInvalidView);
     ID3D11ShaderResourceView* images[2] = {};
     deviceContext->PSGetShaderResources(0, 2, images);
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> primary, secondary;
     primary.Attach(images[0]); secondary.Attach(images[1]);
-    if (secondary) return fallback();
+    if (secondary) return fallback(c56WorldFigureMultipleTextures);
     owned::FixedState state{};
     for (const auto& item : fake_dx7.render_state)
         if (item.first >= 0 && static_cast<std::size_t>(item.first) < state.render.size())
@@ -217,7 +223,7 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
         alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
     const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary.Get());
     if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
-    return fallback();
+    return fallback(c56WorldFigureQueueFailed);
 }
 
 int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIndices, DWORD dwIndexCount,
@@ -303,6 +309,10 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
     c56WorldFigurePrimitives = 0;
     c56WorldFigureFallbacks = 0;
     c56WorldFigureLegacyDraws = 0;
+    c56WorldFigureUnavailable = 0;
+    c56WorldFigureInvalidView = 0;
+    c56WorldFigureMultipleTextures = 0;
+    c56WorldFigureQueueFailed = 0;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
     RefreshOwnedTargets();
@@ -317,14 +327,22 @@ void CDX11::EndWorld()
     });
     IfFailedThrowHR(flush);
     GameJournal::Event("RENDER", "world_model_owner",
-        "owner=c56_device path=c56_native_queue submitted=%llu legacy_draws=%llu submission_fallbacks=%llu missing=%s",
+        "owner=c56_device path=c56_native_queue submitted=%llu legacy_draws=%llu submission_fallbacks=%llu fallback_unavailable=%llu fallback_invalid_view=%llu fallback_multiple_textures=%llu fallback_queue_failed=%llu missing=%s",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
         static_cast<unsigned long long>(c56WorldFigureLegacyDraws),
         static_cast<unsigned long long>(c56WorldFigureFallbacks),
+        static_cast<unsigned long long>(c56WorldFigureUnavailable),
+        static_cast<unsigned long long>(c56WorldFigureInvalidView),
+        static_cast<unsigned long long>(c56WorldFigureMultipleTextures),
+        static_cast<unsigned long long>(c56WorldFigureQueueFailed),
         c56WorldFigureFallbacks ? "figure" : "none");
     c56WorldFigurePrimitives = 0;
     c56WorldFigureFallbacks = 0;
     c56WorldFigureLegacyDraws = 0;
+    c56WorldFigureUnavailable = 0;
+    c56WorldFigureInvalidView = 0;
+    c56WorldFigureMultipleTextures = 0;
+    c56WorldFigureQueueFailed = 0;
     ownedWorldActive = false;
     RefreshOwnedTargets();
     SetRenderStates();
