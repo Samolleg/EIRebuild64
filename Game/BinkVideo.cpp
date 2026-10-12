@@ -8,8 +8,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Renderer.h"
 #include "dx11/RendererDX11.h"
 #include "MiniaudioOneShotSfx.h"
-#include "ModAudioConfig.h"
-#include "ModAudioConfig.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 
@@ -86,23 +84,29 @@ struct CBinkVideo::Player
         pause = reinterpret_cast<decltype(pause)>(Symbol("_BinkPause@8", "BinkPause"));
         return open && close && decode && next && wait && copy && seek && pause;
     }
-    void ConfigureAudio()
+    unsigned ConfigureAudio(const char *name)
     {
+        MiniaudioOneShotSfx::BeginBinkAudioMovie(name);
         auto set = reinterpret_cast<int (__stdcall *)(void *, uintptr_t)>(
             Symbol("_BinkSetSoundSystem@8", "BinkSetSoundSystem"));
-        void *miles = reinterpret_cast<void *>(Symbol("_BinkOpenMiles@4", "BinkOpenMiles"));
+        auto tracks = reinterpret_cast<void (__stdcall *)(unsigned, unsigned *)>(
+            Symbol("_BinkSetSoundTrack@8", "BinkSetSoundTrack"));
         auto sound = theWorld.GetSoundManager();
-        if (!set || !miles || !sound) return;
-        uintptr_t driver = reinterpret_cast<uintptr_t>(sound->GetDIGDriver());
-        if (ModAudioSettings().JMVMiniaudioBinkOutputPrototype &&
-            MiniaudioOneShotSfx::IsSupportedBinkAudioAbi(reinterpret_cast<void *>(set), miles))
+        if (set && sound && MiniaudioOneShotSfx::IsSupportedBinkAudioAbi(reinterpret_cast<void *>(set)))
         {
             MiniaudioOneShotSfx::PrepareNativeManager(sound);
-            MiniaudioOneShotSfx::ConfigureBinkMilesFallback(miles, driver);
             void *adapter = MiniaudioOneShotSfx::GetBinkMiniaudioSystemOpen();
-            if (adapter && set(adapter, driver)) return;
+            if (adapter && set(adapter, 0))
+            {
+                unsigned track = 0;
+                if (tracks) tracks(1, &track);
+                return 0;
+            }
         }
-        set(miles, driver);
+        MiniaudioOneShotSfx::MuteBinkAudioMovie("adapter_unavailable");
+        if (tracks) tracks(0, nullptr);
+        // BINKSNDTRACK: the explicit empty track selection keeps video silent.
+        return 0x00004000u;
     }
     void Decode()
     {
@@ -146,9 +150,22 @@ bool CBinkVideo::BeginPlay(LPCSTR name, bool stopSounds, bool hideCursor)
     std::unique_ptr<Player> p(new Player);
     if (!p->Load()) return false;
     if (stopSounds && theWorld.GetSoundManager()) theWorld.GetSoundManager()->StopAllSounds(true);
-    p->ConfigureAudio();
+    const unsigned audioFlags = p->ConfigureAudio(name);
     std::string moviePath = ModRuntime::MoviePath(name);
-    p->movie = p->open(moviePath.c_str(), 0);
+    p->movie = p->open(moviePath.c_str(), audioFlags);
+    if (!p->movie && MiniaudioOneShotSfx::HasBinkAudioMovieFailed() && audioFlags == 0)
+    {
+        auto tracks = reinterpret_cast<void (__stdcall *)(unsigned, unsigned *)>(
+            p->Symbol("_BinkSetSoundTrack@8", "BinkSetSoundTrack"));
+        if (tracks) tracks(0, nullptr);
+        p->movie = p->open(moviePath.c_str(), 0x00004000u);
+    }
+    if (p->movie && MiniaudioOneShotSfx::HasBinkAudioMovieFailed())
+    {
+        auto mute = reinterpret_cast<int (__stdcall *)(Player::Header *, int)>(
+            p->Symbol("_BinkSetSoundOnOff@8", "BinkSetSoundOnOff"));
+        if (mute) mute(p->movie, 0);
+    }
     if (!p->movie) return false;
     unsigned w = p->movie->width, h = p->movie->height;
     if (!w || !h || w > 8192 || h > 8192 || !p->movie->frames) return false;

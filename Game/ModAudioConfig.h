@@ -4,11 +4,7 @@ class CFileRegistry;
 struct ModAudioConfig {
  static constexpr bool JMVSfxVariation=true,JMVSfxDistanceCurve=true,JMVSfxSpeechDucking=true,JMVSfxSpeechPriorityProtection=true,JMVSfxCategoryPriorities=true,JMVSfxCombatPriorityHierarchy=true,JMVSfxOffensiveSpellDucking=true;
  bool JMVSpeechMusicDucking=false,JMVFixStepSoundVariantGenerator=false,JMVSuppressEmptyStartSfx=false;
- bool JMVMiniaudioModalSpeechPausePrototype=false,JMVMiniaudioGamePauseSpeechPrototype=false;
  bool JMVMiniaudioBinauralPrototype=true;
- bool JMVMiniaudioBinkOutputPrototype=false;
- bool JMVMiniaudioBinkPreciseWaitPrototype=false;
- bool JMVMiniaudioBinkReadyBackpressurePrototype=false;
  bool JMVMiniaudioFullBackendPrototype=true;
  bool JMVMiniaudioMissingAudioCatalogDiagnostic=false;
  bool JMVMiniaudioOcclusionPrototype=true;

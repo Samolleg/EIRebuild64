@@ -106,7 +106,6 @@ CString CMusicSystem::ResolveZoneMusicName(const CString& zone, const CString& a
 
 void CMusicSystem::SetZoneMode(LPCSTR pszAllodName, BOOL bIsDungeon)
 {
-    theWorld.GetSoundManager()->EndMIDI(EM_INSTANT);
     theWorld.GetSoundManager()->EndStreaming(EM_INSTANT);
     bZoneModeStartPause = TRUE;
     for (int i = 0; i < themes.GetSize(); i++)

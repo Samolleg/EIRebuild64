@@ -68,17 +68,6 @@ EStartResult TryStart3D(
     float gainFactor,
     float pitchFactor);
 
-EStartResult TryStartManaged(
-    void *soundManager,
-    void *fxControl,
-    void *milesSample,
-    const char *soundName,
-    int priority,
-    int finalVolume,
-    int percentPan,
-    int playbackRate,
-    bool looping,
-    bool speech);
 
 EStartResult TryStartVirtualFlat(
     void *soundManager,
@@ -126,8 +115,6 @@ bool UpdateVirtual3D(
 bool CancelVirtual(void *soundManager, uint32_t virtualId);
 float GetVirtualPlaybackTime(void *soundManager, uint32_t virtualId);
 unsigned int CountAudibleVirtualSpeech(void *soundManager);
-bool IsManagedSample(void *milesSample);
-void StopManagedSample(void *milesSample, const char *reason);
 
 bool SetStreamingResource(
     void *soundManager,
@@ -140,17 +127,18 @@ void FadeOutStreaming();
 void FadeInStreaming();
 void PauseStreaming(const char *reason);
 void ResumeStreaming(const char *reason);
-bool IsStreamingSample(void *sample);
 
 bool IsSupportedBinkAudioAbi(
-    const void *setSoundSystem,
-    const void *milesSystemOpen);
-void ConfigureBinkMilesFallback(void *milesSystemOpen, uintptr_t param);
+    const void *setSoundSystem);
+void BeginBinkAudioMovie(const char *name);
+void MuteBinkAudioMovie(const char *reason);
+bool HasBinkAudioMovieFailed();
 void *GetBinkMiniaudioSystemOpen();
 unsigned int CountActiveBinkVoices();
 
 void PrepareNativeManager(void *soundManager);
 const char* GetNativeStreamingName();
+bool IsNativeStreamingSwitching();
 void Tick(void *soundManager);
 void StopAll(const char *reason);
 void Pause(const char *reason);

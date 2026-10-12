@@ -655,10 +655,7 @@ Json CheckStartup(const std::string&directory){
  if(!activeAudioConfig.Open(expected.ResolveConfig("ai.reg","config\\ai.reg").c_str()))
   throw std::runtime_error("Installed audio registry could not be opened");
  ConfigureModAudio(activeAudioConfig,directory);
- bool binkOutputConfigured=activeAudioConfig.GetInt("Addon","JMVMiniaudioBinkOutputPrototype",0)!=0;
  bool showAllQuestsConfigured=activeAudioConfig.GetInt("Addon","ShowAllQuests",0)!=0;
- if(ModAudioSettings().JMVMiniaudioBinkOutputPrototype!=binkOutputConfigured)
-  throw std::runtime_error("Bink output setting differs from active registry");
  if(!CBinkVideo::DecoderAvailable())throw std::runtime_error("Game Bink decoder was not found");
  CMappedResource native;CWin32MappedResource mapped;int entries=0;std::string base=(fs::current_path()/"res/database.res").string();
  DWORD zoneXSectors=0,zoneYSectors=0;
@@ -732,7 +729,7 @@ Json CheckStartup(const std::string&directory){
  }
  if(ModRuntime::Current()||ModRuntime::Resources())throw std::runtime_error("Host leaked its binding");
  DWORD size=0;auto*p=mapped.GetFile("units.udb",&size);if(!p||!mapped.CloseFile(p))throw std::runtime_error("Resource handle lifetime depended on destroyed Host");
- return {{"success",true},{"hostLifecycle",true},{"nativeReaderEntries",entries},{"mappedReaderEntries",entries},{"resourceOwnership",true},{"enumeration",true},{"femaleAnimationCount",femaleAnimationCount},{"maleAnimationCount",maleAnimationCount},{"twoHandedLootAxeIndex",twoHandedLootAxe},{"twoHandedLootSwordIndex",twoHandedLootSword},{"configConsumer",true},{"binkMiniaudioSetting",binkOutputConfigured},{"showAllQuestsSetting",showAllQuestsConfigured},{"binkMiniaudioConfigMatched",true},{"binkDecoderAvailable",true},{"cameraConsumer",true},{"cameraPath",expected.ResolveCamera("mainmenu.cam","")},{"mapReadConsumer",true},{"gameplayMapReader",true},{"zone1XSectors",zoneXSectors},{"zone1YSectors",zoneYSectors},{"gameplayActivated",false}};
+ return {{"success",true},{"hostLifecycle",true},{"nativeReaderEntries",entries},{"mappedReaderEntries",entries},{"resourceOwnership",true},{"enumeration",true},{"femaleAnimationCount",femaleAnimationCount},{"maleAnimationCount",maleAnimationCount},{"twoHandedLootAxeIndex",twoHandedLootAxe},{"twoHandedLootSwordIndex",twoHandedLootSword},{"configConsumer",true},{"binkMiniaudioEnabled",true},{"showAllQuestsSetting",showAllQuestsConfigured},{"binkDecoderAvailable",true},{"cameraConsumer",true},{"cameraPath",expected.ResolveCamera("mainmenu.cam","")},{"mapReadConsumer",true},{"gameplayMapReader",true},{"zone1XSectors",zoneXSectors},{"zone1YSectors",zoneYSectors},{"gameplayActivated",false}};
 }
 }
 float CModPackage::ExperienceMultiplier(const SRPGUnitStats&stats){return StatsNumber("GetExpMultiplierOnServer",stats);}
@@ -2346,9 +2343,7 @@ bool InspectModConfigurationCommandLine(int& result){
    out["JMVSetItemsComplex"]=int(complex);out["AddonExp/Limit"]=package.experienceLimit;out["MagicRandom"]=package.magicRandomLimit;
    const auto& a=ModAudioSettings();
    out["JMVSpeechMusicDucking"]=int(a.JMVSpeechMusicDucking);out["JMVFixStepSoundVariantGenerator"]=int(a.JMVFixStepSoundVariantGenerator);
-   out["JMVSuppressEmptyStartSfx"]=int(a.JMVSuppressEmptyStartSfx);out["JMVMiniaudioModalSpeechPausePrototype"]=int(a.JMVMiniaudioModalSpeechPausePrototype);
-   out["JMVMiniaudioGamePauseSpeechPrototype"]=int(a.JMVMiniaudioGamePauseSpeechPrototype);out["JMVMiniaudioBinkOutputPrototype"]=int(a.JMVMiniaudioBinkOutputPrototype);
-   out["JMVMiniaudioBinkPreciseWaitPrototype"]=int(a.JMVMiniaudioBinkPreciseWaitPrototype);out["JMVMiniaudioBinkReadyBackpressurePrototype"]=int(a.JMVMiniaudioBinkReadyBackpressurePrototype);
+   out["JMVSuppressEmptyStartSfx"]=int(a.JMVSuppressEmptyStartSfx);
    out["JMVMiniaudioMissingAudioCatalogDiagnostic"]=int(a.JMVMiniaudioMissingAudioCatalogDiagnostic);
    out["JMVSfxReverbOutdoorLevel"]=a.JMVSfxReverbOutdoorLevel;out["JMVSfxReverbOutdoorReflection"]=a.JMVSfxReverbOutdoorReflection;out["JMVSfxReverbOutdoorDecay"]=a.JMVSfxReverbOutdoorDecay;
    out["JMVSfxReverbCaveLevel"]=a.JMVSfxReverbCaveLevel;out["JMVSfxReverbCaveReflection"]=a.JMVSfxReverbCaveReflection;out["JMVSfxReverbCaveDecay"]=a.JMVSfxReverbCaveDecay;
