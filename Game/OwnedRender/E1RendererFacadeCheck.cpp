@@ -9,7 +9,7 @@
 #include <embedded_host.h>
 #include "E1RendererFacade.h"
 #include "E1Surface.h"
-#include "E1SurfaceBridge.h"
+#include "E1SurfaceFacade.h"
 #include <algorithm>
 #include <cstdio>
 #include <shellapi.h>
@@ -226,11 +226,9 @@ int RunE1RendererFacadeWarpCheck() {
                 return backend.renderer.visit_embedded_device(&source, &create_panel_source);
             });
             RECT destination{10, 10, 14, 14};
-            if (SUCCEEDED(hr)) hr = facade.Visit([&](WarpRendererBackend& backend) {
-                return OwnedRender::E1BlitPublishedSurface(backend.renderer,
-                    source.device.Get(), source.context.Get(), source.surface.Id(),
-                    destination, nullptr, nullptr, true);
-            });
+            if (SUCCEEDED(hr)) hr = OwnedRender::E1BlitPublishedSurface(facade,
+                source.device.Get(), source.context.Get(), source.surface.Id(),
+                destination, nullptr, nullptr, true);
             if (SUCCEEDED(hr)) hr = facade.Visit([&](WarpRendererBackend& backend) {
                 hr = backend.renderer.flush_ui();
                 if (FAILED(hr)) return hr;
