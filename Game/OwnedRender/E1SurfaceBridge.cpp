@@ -1,12 +1,28 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "../../stdafx.h"
 #include "E1SurfaceBridge.h"
 #include "E1Surface.h"
+#include "../../external/owned-renderer/Source/renderer.h"
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
 
 namespace OwnedRender {
+namespace {
+struct CachedSurfaceImage {
+    std::uint64_t generation = 0;
+    owned::SurfaceImage image;
+};
+std::mutex& surfaceImageCacheLock() { static auto* value = new std::mutex; return *value; }
+std::map<std::uint64_t, CachedSurfaceImage>& surfaceImageCache() {
+    static auto* value = new std::map<std::uint64_t, CachedSurfaceImage>;
+    return *value;
+}
+}
+
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept try {
     image = {};
@@ -57,4 +73,61 @@ HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     image.pixels = std::move(pixels); image.generation = value->generation;
     return S_OK;
 } catch (...) { image = {}; return E_OUTOFMEMORY; }
+
+HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
+    std::uint64_t id, owned::SurfaceImage& image) noexcept try {
+    image = {};
+    if (!device || !context || !id) return E_INVALIDARG;
+    const auto value = E1SurfaceValue(id);
+    if (!value) return E_HANDLE;
+    Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
+    context->GetDevice(&contextDevice);
+    if (contextDevice.Get() != device) return E_INVALIDARG;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> published;
+    const HRESULT resolved = E1ResolveSurface(nullptr, device, id, value->generation, published);
+    if (FAILED(resolved)) return resolved;
+    {
+        const std::lock_guard<std::mutex> lock(surfaceImageCacheLock());
+        const auto found = surfaceImageCache().find(id);
+        if (found != surfaceImageCache().end() &&
+            found->second.generation == value->generation) {
+            image = found->second.image;
+            return S_OK;
+        }
+    }
+    if (!(value->format.dwFlags & DDPF_RGB)) return DXGI_ERROR_UNSUPPORTED;
+    E1SurfaceCpuImage pixels;
+    const HRESULT read = E1ReadbackSurface(device, context, id, pixels);
+    if (FAILED(read)) return read;
+    if (pixels.generation != value->generation || pixels.width != value->width ||
+        pixels.height != value->height || pixels.format == DXGI_FORMAT_UNKNOWN ||
+        pixels.pitch != value->pitch) return E_HANDLE;
+    owned::SurfaceImage converted;
+    converted.id = value->id;
+    converted.generation = value->generation;
+    converted.width = value->width;
+    converted.height = value->height;
+    converted.pitch = value->pitch;
+    converted.format = value->format;
+    converted.pixels = pixels.pixels;
+    {
+        const std::lock_guard<std::mutex> lock(surfaceImageCacheLock());
+        auto& cache = surfaceImageCache();
+        cache[id] = {value->generation, converted};
+        // Keep the cache bounded when transient UI surfaces are retired.
+        while (cache.size() > 64) cache.erase(cache.begin());
+    }
+    image = std::move(converted);
+    return S_OK;
+} catch (...) { image = {}; return E_OUTOFMEMORY; }
+
+HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
+    ID3D11DeviceContext* context, std::uint64_t id, const RECT& destination,
+    const RECT* source, const DDCOLORKEY* color_key, bool interface_space,
+    bool native_canvas) noexcept try {
+    owned::SurfaceImage image;
+    const HRESULT converted = E1SurfaceImage(device, context, id, image);
+    if (FAILED(converted)) return converted;
+    return renderer.blit(image, destination, source, color_key, interface_space, native_canvas);
+} catch (...) { return E_FAIL; }
 }

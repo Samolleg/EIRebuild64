@@ -8,6 +8,9 @@
 #include "../../external/owned-renderer/Source/retained_static_scene.h"
 #include <embedded_host.h>
 #include "E1RendererFacade.h"
+#include "E1Surface.h"
+#include "E1SurfaceBridge.h"
+#include <algorithm>
 #include <cstdio>
 #include <shellapi.h>
 
@@ -52,6 +55,101 @@ struct WarpRendererBackend {
     void end_scene() { renderer.end_scene(); }
     HRESULT present() { return renderer.present(); }
 };
+
+struct PanelBlitSource {
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    OwnedRender::E1Surface surface;
+    std::vector<std::uint8_t> expected;
+};
+
+HRESULT create_panel_source(void* user, const owned::EmbeddedDeviceView& view) {
+    auto& source = *static_cast<PanelBlitSource*>(user);
+    source.device = view.device;
+    source.context = view.context;
+    constexpr UINT width = 4, height = 4;
+    source.expected.resize(width * height * 4);
+    for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
+        const auto i = (y * width + x) * 4;
+        source.expected[i + 0] = static_cast<std::uint8_t>(32 + x * 40);
+        source.expected[i + 1] = static_cast<std::uint8_t>(48 + y * 36);
+        source.expected[i + 2] = static_cast<std::uint8_t>(200 - x * 24 - y * 12);
+        source.expected[i + 3] = 255;
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width; desc.Height = height; desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+    D3D11_SUBRESOURCE_DATA initial{};
+    initial.pSysMem = source.expected.data(); initial.SysMemPitch = width * 4;
+    HRESULT hr = view.device->CreateTexture2D(&desc, &initial, &source.texture);
+    if (FAILED(hr)) return hr;
+    if (!source.surface.Complete(source.texture.Get())) return E_FAIL;
+    owned::SurfaceImage first, cached;
+    hr = OwnedRender::E1SurfaceImage(source.device.Get(), source.context.Get(),
+        source.surface.Id(), first);
+    if (FAILED(hr)) return hr;
+    hr = OwnedRender::E1SurfaceImage(source.device.Get(), source.context.Get(),
+        source.surface.Id(), cached);
+    if (FAILED(hr)) return hr;
+    const auto firstPixels = first.pixels.share();
+    const auto cachedPixels = cached.pixels.share();
+    if (!firstPixels || firstPixels != cachedPixels || first.id != source.surface.Id() ||
+        first.generation == 0 || first.width != width || first.height != height ||
+        firstPixels->size() != source.expected.size() ||
+        !std::equal(firstPixels->begin(), firstPixels->end(), source.expected.begin()))
+        return E_FAIL;
+    const auto firstGeneration = first.generation;
+    for (std::size_t i = 0; i < source.expected.size(); i += 4)
+        source.expected[i + 1] ^= 0x7f;
+    source.context->UpdateSubresource(source.texture.Get(), 0, nullptr,
+        source.expected.data(), width * 4, 0);
+    if (!source.surface.Complete(source.texture.Get())) return E_FAIL;
+    owned::SurfaceImage refreshed;
+    hr = OwnedRender::E1SurfaceImage(source.device.Get(), source.context.Get(),
+        source.surface.Id(), refreshed);
+    if (FAILED(hr)) return hr;
+    const auto refreshedPixels = refreshed.pixels.share();
+    if (!refreshedPixels || refreshed.generation <= firstGeneration ||
+        refreshedPixels == firstPixels || refreshedPixels->size() != source.expected.size() ||
+        !std::equal(refreshedPixels->begin(), refreshedPixels->end(), source.expected.begin()))
+        return E_FAIL;
+    return S_OK;
+}
+
+struct PanelBlitReadback {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    const std::vector<std::uint8_t>* expected = nullptr;
+    unsigned checked_pixels = 0;
+};
+
+HRESULT check_panel_output(void* user, ID3D11DeviceContext* context,
+    ID3D11Texture2D* output) {
+    auto& check = *static_cast<PanelBlitReadback*>(user);
+    if (!output || context != check.context) return E_INVALIDARG;
+    D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
+    desc.BindFlags = 0; desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    HRESULT hr = check.device->CreateTexture2D(&desc, nullptr, &staging);
+    if (FAILED(hr)) return hr;
+    context->CopyResource(staging.Get(), output);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return hr;
+    bool match = true;
+    for (UINT y = 0; y < 4; ++y) for (UINT x = 0; x < 4; ++x) {
+        const auto* pixel = static_cast<const std::uint8_t*>(mapped.pData) +
+            std::size_t(10 + y) * mapped.RowPitch + (10 + x) * 4;
+        const auto offset = (y * 4 + x) * 4;
+        for (unsigned channel = 0; channel < 4; ++channel)
+            match = match && pixel[channel] == (*check.expected)[offset + channel];
+        ++check.checked_pixels;
+    }
+    context->Unmap(staging.Get(), 0);
+    return match ? S_OK : E_FAIL;
+}
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     return DefWindowProcW(window, message, wparam, lparam);
@@ -122,15 +220,43 @@ int RunE1RendererFacadeWarpCheck() {
         } else if (FAILED(hr = facade.BeginFrame())) {
             std::printf("BeginFrame failed: 0x%08lx\n", static_cast<unsigned long>(hr));
             result = 4;
-        } else if (FAILED(hr = facade.EndFrame())) {
+        } else {
+            PanelBlitSource source;
+            hr = facade.Visit([&](WarpRendererBackend& backend) {
+                return backend.renderer.visit_embedded_device(&source, &create_panel_source);
+            });
+            RECT destination{10, 10, 14, 14};
+            if (SUCCEEDED(hr)) hr = facade.Visit([&](WarpRendererBackend& backend) {
+                return OwnedRender::E1BlitPublishedSurface(backend.renderer,
+                    source.device.Get(), source.context.Get(), source.surface.Id(),
+                    destination, nullptr, nullptr, true);
+            });
+            if (SUCCEEDED(hr)) hr = facade.Visit([&](WarpRendererBackend& backend) {
+                hr = backend.renderer.flush_ui();
+                if (FAILED(hr)) return hr;
+                PanelBlitReadback readback{source.device.Get(), source.context.Get(),
+                    &source.expected};
+                hr = backend.renderer.visit_embedded_output(&readback, &check_panel_output);
+                if (SUCCEEDED(hr) && readback.checked_pixels != 16) return E_FAIL;
+                return hr;
+            });
+            if (FAILED(hr)) {
+                std::printf("WARP published panel blit/readback failed: 0x%08lx\n",
+                    static_cast<unsigned long>(hr));
+                result = 8;
+            } else {
+                std::puts("WARP published 2D surface -> c56 blit -> output pixels PASS (16 pixels)");
+            }
+        }
+        if (!result && FAILED(hr = facade.EndFrame())) {
             std::printf("EndFrame/Present failed: 0x%08lx\n", static_cast<unsigned long>(hr));
             result = 5;
-        } else if (FAILED(hr = facade.Resize(640, 360)) ||
-                   facade.Width() != 640 || facade.Height() != 360) {
+        } else if (!result && (FAILED(hr = facade.Resize(640, 360)) ||
+                   facade.Width() != 640 || facade.Height() != 360)) {
             std::printf("Resize failed: 0x%08lx (%u x %u)\n",
                 static_cast<unsigned long>(hr), facade.Width(), facade.Height());
             result = 6;
-        } else if (FAILED(hr = facade.BeginFrame()) || FAILED(hr = facade.EndFrame())) {
+        } else if (!result && (FAILED(hr = facade.BeginFrame()) || FAILED(hr = facade.EndFrame()))) {
             std::printf("Resized frame failed: 0x%08lx\n", static_cast<unsigned long>(hr));
             result = 7;
         }

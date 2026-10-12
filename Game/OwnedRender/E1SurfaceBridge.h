@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-namespace owned { struct OwnedVisualSurface; struct SurfaceImage; }
+namespace owned { struct OwnedVisualSurface; struct SurfaceImage; class Renderer; }
 namespace OwnedRender {
 struct E1SurfaceCpuImage {
     std::uint64_t id = 0, generation = 0;
@@ -20,4 +20,12 @@ HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
 // Read one completed published surface into the CPU image consumed by c56 blit.
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept;
+// Convert a completed panel surface into the immutable CPU snapshot consumed
+// by c56 blit. Repeated reads of the same generation reuse the cached snapshot.
+HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
+    std::uint64_t id, owned::SurfaceImage& image) noexcept;
+HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
+    ID3D11DeviceContext* context, std::uint64_t id, const RECT& destination,
+    const RECT* source, const DDCOLORKEY* color_key, bool interface_space,
+    bool native_canvas = true) noexcept;
 }
