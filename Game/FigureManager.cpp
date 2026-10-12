@@ -27,6 +27,7 @@ CModelResourceEntry::CModelResourceEntry(class CResourceManager *_pManager)
     , pModelFile(0)
     , pBonesFile(0)
     , pAnimsFile(0)
+    , pAnimsFileSize(0)
 {
     pResModel = dbgnew CWin32MappedResource();
     pResBones = dbgnew CWin32MappedResource();
@@ -39,6 +40,7 @@ CModelResourceEntry::CModelResourceEntry(class CGeometryManager *_pManager)
     , pModelFile(0)
     , pBonesFile(0)
     , pAnimsFile(0)
+    , pAnimsFileSize(0)
 {
     pResModel = dbgnew CWin32MappedResource();
     pResBones = dbgnew CWin32MappedResource();
@@ -85,7 +87,8 @@ CModelResourceEntry::~CModelResourceEntry()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CModelResourceEntry::OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations)
+void CModelResourceEntry::OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations,
+    DWORD animationSize)
 {
     if (pModel)
         pResModel->OpenResourceMem(pModel);
@@ -96,6 +99,7 @@ void CModelResourceEntry::OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *p
     pModelFile = pModel;
     pBonesFile = pBones;
     pAnimsFile = pAnimations;
+    pAnimsFileSize = animationSize;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CMappedResource *CModelResourceEntry::GetAnimation(const std::string &szName)
@@ -124,13 +128,35 @@ bool CModelResourceEntry::GetAnimationSourceBytes(const std::string& szName,
 {
     bytes = nullptr;
     size = 0;
-    if (!GetAnimation(szName)) return false;
-    const auto found = animationSources.find(szName);
-    if (found == animationSources.end() || !found->second.first || !found->second.second)
+    std::string resolvedName;
+    if (!pAnimsFile || !pAnimsFileSize ||
+        !ResolveAnimationName(szName, resolvedName) || !GetAnimation(resolvedName))
         return false;
-    bytes = found->second.first;
-    size = found->second.second;
+    bytes = pAnimsFile;
+    size = pAnimsFileSize;
     return true;
+}
+bool CModelResourceEntry::ResolveAnimationName(const std::string& szName,
+    std::string& resolvedName) const
+{
+    resolvedName.clear();
+    if (szName.empty()) return false;
+    if (pResAllAnimations->IsFileExistExact(szName.c_str()))
+    {
+        resolvedName = szName;
+        return true;
+    }
+    for (unsigned int variant = 1; variant <= 99; ++variant)
+    {
+        const std::string candidate = szName +
+            (variant < 10 ? "0" : "") + std::to_string(variant);
+        if (pResAllAnimations->IsFileExistExact(candidate.c_str()))
+        {
+            resolvedName = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CFigureManager::CFigureManager()
@@ -200,17 +226,18 @@ CModelResourceEntry *CFigureManager::GetModel(const std::string &szName)
         BYTE *pBones = GetFile(buff);
         strcpy(buff, szName.c_str());
         strcat(buff, ".anm");
-        BYTE *pAnims = GetFile(buff);
+        DWORD animationSize = 0;
+        BYTE *pAnims = GetFile(buff, &animationSize);
         // DejaVu shares these species clips under their canonical animation mask.
         if (!pAnims && (!_stricmp(szName.c_str(), "unmoog1") ||
                         !_stricmp(szName.c_str(), "unmoog2")))
-            pAnims = GetFile("unmogo.anm");
+            pAnims = GetFile("unmogo.anm", &animationSize);
         else if (!pAnims && !_stricmp(szName.c_str(), "unanwiti"))
-            pAnims = GetFile("unanwipa.anm");
+            pAnims = GetFile("unanwipa.anm", &animationSize);
         if (pModel) // we need at rest a model to open resource (bones and animations are optional)
         {
             models[szName] = dbgnew CModelResourceEntry(this);
-            models[szName]->OpenModelResources(pModel, pBones, pAnims);
+            models[szName]->OpenModelResources(pModel, pBones, pAnims, animationSize);
             pos = models.find(szName);
         }
     }

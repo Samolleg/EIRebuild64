@@ -809,13 +809,16 @@ bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
     if (!model->GetAnimationSourceBytes(selected->pszAnimationName,
         animationBytes, animationSize))
         return reject("selection.anm_resource");
+    std::string resolvedClipName;
+    if (!model->ResolveAnimationName(selected->pszAnimationName, resolvedClipName))
+        return reject("selection.anm_clip_name");
 
     const std::string animationName(selected->pszAnimationName);
     const std::string databaseName = std::string(mask) + ".adb";
     const std::string animationResourceName = std::string(mask) + "/" + animationName;
     if (!OwnedRender::E1BuildAnimationSelection(databaseName, databaseBytes, databaseSize,
         animationName, animationResourceName, animationBytes, animationSize,
-        selected->dwEntryIndex, output))
+        selected->dwEntryIndex, output, resolvedClipName))
         return reject("selection.c56_decode");
     return true;
 }

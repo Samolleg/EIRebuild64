@@ -16,7 +16,8 @@ bool E1BuildAnimationSelection(const std::string& database_name,
     const void* selected_database, std::uint32_t database_size,
     const std::string& animation_name, const std::string& animation_resource_name,
     const void* selected_animation, std::uint32_t animation_size,
-    std::uint32_t ordinal, E1AnimationSelection& output) noexcept;
+    std::uint32_t ordinal, E1AnimationSelection& output,
+    const std::string& resolved_clip_name = std::string()) noexcept;
 
 // Host membership is published at successful list mutations, not visibility
 // traversal. No engine object pointer enters the renderer's retained scene.

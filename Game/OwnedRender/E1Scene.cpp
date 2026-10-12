@@ -12,7 +12,8 @@ bool E1BuildAnimationSelection(const std::string& databaseName,
     const void* selectedDatabase, std::uint32_t databaseSize,
     const std::string& animationName, const std::string& animationResourceName,
     const void* selectedAnimation, std::uint32_t animationSize,
-    std::uint32_t ordinal, E1AnimationSelection& output) noexcept try {
+    std::uint32_t ordinal, E1AnimationSelection& output,
+    const std::string& resolvedClipName) noexcept try {
     output = {};
     if (databaseName.empty() || animationName.empty() || animationResourceName.empty() ||
         !selectedDatabase || !databaseSize || !selectedAnimation || !animationSize) return false;
@@ -29,7 +30,8 @@ bool E1BuildAnimationSelection(const std::string& databaseName,
     if (!owned::retained_visual_copy_selected_memory(animationResourceName,
         selectedAnimation, animationSize, animation, animationGeneration, failure) ||
         !animationGeneration) return false;
-    auto clip = owned::retained_visual_clip_asset(animation, animationName,
+    auto clip = owned::retained_visual_clip_asset(animation,
+        resolvedClipName.empty() ? animationName : resolvedClipName,
         failure, database, generation);
     if (!clip) return false;
 
