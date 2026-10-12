@@ -320,10 +320,13 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 
 void CDX11::EndWorld()
 {
-    const HRESULT flush = rendererFacade->Visit([](owned::Renderer& renderer) {
-        return renderer.flush_native();
+    // Finish the same c56 world pass before the caller starts drawing the
+    // interface. composite_world drains queued native geometry and performs
+    // the renderer-owned world composition; Present remains the frame owner.
+    const HRESULT composite = rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.composite_world();
     });
-    IfFailedThrowHR(flush);
+    IfFailedThrowHR(composite);
     GameJournal::Event("RENDER", "world_model_owner",
         "owner=c56_device path=c56_native_queue submitted=%llu legacy_draws=%llu submission_fallbacks=%llu fallback_unavailable=%llu fallback_invalid_view=%llu fallback_multiple_textures=%llu fallback_queue_failed=%llu missing=%s",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
