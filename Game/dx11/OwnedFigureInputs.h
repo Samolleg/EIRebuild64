@@ -3,6 +3,7 @@
 #include "../Figure.h"
 #include "../MapObject.h"
 #include "../Material.h"
+#include "../Texture.h"
 
 namespace OwnedFigureInputs {
 // This scope contains copied material/identity values in the EXE. Figure and
@@ -10,7 +11,8 @@ namespace OwnedFigureInputs {
 class Scope {
     OwnedRendererClient& renderer;
 public:
-    Scope(OwnedRendererClient& r,CFigure* figure,CMaterial* material,bool world):renderer(r) {
+    Scope(OwnedRendererClient& r,CFigure* figure,CMaterial* material,bool world,
+          CTexture* texture0,CTexture* texture1):renderer(r) {
         renderer.EndFigure();
         auto* object=dynamic_cast<CMapObject*>(figure->GetObject3D());
         if(!world||!object||!material)return;
@@ -28,7 +30,11 @@ public:
         p.material_alpha=m.diffuse.a;
         memcpy(p.emissive,&m.emissive,sizeof(p.emissive));
         memcpy(p.material_specular,&m.specular,sizeof(p.material_specular));
-        renderer.BeginFigure(p,figure->GetName(),object->GetMaskName());
+        auto primary=texture0&&texture0->GetSurface()?texture0->GetSurface()->GetShaderResource():
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+        auto secondary=texture1&&texture1->GetSurface()?texture1->GetSurface()->GetShaderResource():
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+        renderer.BeginFigure(p,figure->GetName(),object->GetMaskName(),primary.Get(),secondary.Get());
     }
     ~Scope(){renderer.EndFigure();}
 };

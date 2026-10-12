@@ -209,10 +209,8 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
         return fallback(c56WorldFigureUnavailable);
     if (!view.positions || !view.normals || !view.components || !view.indices)
         return fallback(c56WorldFigureInvalidView);
-    ID3D11ShaderResourceView* images[2] = {};
-    deviceContext->PSGetShaderResources(0, 2, images);
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> primary, secondary;
-    primary.Attach(images[0]); secondary.Attach(images[1]);
+    ID3D11ShaderResourceView* primary = ownedRenderer.FigurePrimaryTexture();
+    ID3D11ShaderResourceView* secondary = ownedRenderer.FigureSecondaryTexture();
     if (secondary) return fallback(c56WorldFigureMultipleTextures);
     owned::FixedState state{};
     for (const auto& item : fake_dx7.render_state)
@@ -221,7 +219,7 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
     const auto alphaMode = GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
     state.stage[0][D3DTSS_ALPHAOP] = alphaMode == 0 ? D3DTOP_SELECTARG1 :
         alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
-    const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary.Get());
+    const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary);
     if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
     return fallback(c56WorldFigureQueueFailed);
 }

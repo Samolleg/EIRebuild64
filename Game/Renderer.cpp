@@ -250,7 +250,8 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, CSimplyArray<CLight *, CLight *> &l
         return TRUE;
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
-    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,pDX11->IsOwnedWorldActive());
+    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,
+        pDX11->IsOwnedWorldActive(),pTexture0,pTexture1);
     return pFigureSpec->Draw(this, lights, pMaterial, cFog, pRect, pTexture0, pTexture1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1167,7 +1168,14 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     view.component_count=nNumComponents;view.indices=pwIndices;view.index_count=nNumIndices;
     view.semantic_kind=owned::SemanticKind::figure;view.ordering=owned::NativeOrdering::preserve;
     view.default_diffuse=dwDefaultAmbientColor;view.default_specular=RGBA_MAKE(0,0,0,cFog);
+    if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
     view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
+    const EIRenderFigureV4 material=pDX11->GetOwnedRenderer().FigureValues();
+    view.lighting.enabled=1;
+    view.lighting.material_alpha=material.material_alpha;
+    memcpy(view.lighting.material_diffuse.data(),material.material_diffuse,sizeof(material.material_diffuse));
+    memcpy(view.lighting.emissive.data(),material.emissive,sizeof(material.emissive));
+    memcpy(view.lighting.specular.data(),material.material_specular,sizeof(material.material_specular));
     const SHMatrix& world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
     const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
     memcpy(view.object_to_clip.data(),&clip,sizeof(clip));
