@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+namespace owned { struct OwnedVisualSurface; }
 namespace OwnedRender {
 // Render-thread owner of one completed GPU surface. IDs never encode addresses.
 class E1Surface {

@@ -11,6 +11,7 @@
   <ItemGroup>
     <ClCompile Include="..\Game\OwnedRender\E1DeviceCheck.cpp" />
     <ClCompile Include="..\Game\OwnedRender\E1Surface.cpp" />
+    <ClCompile Include="..\Game\OwnedRender\E1SurfaceBridge.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

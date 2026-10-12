@@ -1,5 +1,6 @@
 #include "embedded_device.h"
 #include "E1Surface.h"
+#include "E1SurfaceBridge.h"
 #include "E1DeviceAccess.h"
 #include "E1RenderGate.h"
 #include "E1RendererFacade.h"
@@ -64,6 +65,16 @@ struct Consumer {
         check(OwnedRender::E1ClearDepth(nullptr,v)==E_INVALIDARG);
         check(self.publication.Complete(self.expected->color.Get()));
         const auto value=OwnedRender::E1SurfaceValue(self.publication.Id());
+        OwnedRender::E1SurfaceCpuImage image;
+        check(value && OwnedRender::E1ReadbackSurface(v.device,v.context,value->id,image)==S_OK);
+        check(image.id==value->id && image.generation==value->generation &&
+            image.width==v.width && image.height==v.height && image.pitch==LONG(v.width*4) &&
+            image.pixels.size()==std::size_t(v.width)*v.height*4);
+        bool greenPixels=true;
+        for(std::size_t i=0;i<image.pixels.size();i+=4)
+            greenPixels=greenPixels && image.pixels[i]==0 && image.pixels[i+1]==255 &&
+                image.pixels[i+2]==0 && image.pixels[i+3]==255;
+        check(greenPixels);
         ComPtr<ID3D11Texture2D> resolved;
         check(value && SUCCEEDED(OwnedRender::E1ResolveSurface(nullptr,v.device,value->id,value->generation,resolved)));
         check(resolved.Get()==self.expected->color.Get());
@@ -219,6 +230,9 @@ int main() try {
     };
     check(call(context.Get(),scene.rtv.Get(),scene.dsv.Get())==S_OK);
     verifyPixels(device.Get(),context.Get(),scene);
+    OwnedRender::E1SurfaceCpuImage copiedSurface;
+    check(OwnedRender::E1ReadbackSurface(foreign.Get(),foreignContext.Get(),consumer.publication.Id(),copiedSurface)==E_INVALIDARG);
+    check(OwnedRender::E1ReadbackSurface(device.Get(),foreignContext.Get(),consumer.publication.Id(),copiedSurface)==E_INVALIDARG);
     const auto old=OwnedRender::E1SurfaceValue(consumer.publication.Id());
     // The interface-sized targets are selected at the next call, not cached
     // from the preceding world-sized draw. This is an offscreen seam test.
