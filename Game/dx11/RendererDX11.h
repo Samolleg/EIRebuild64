@@ -88,6 +88,7 @@ private:
     std::uint64_t c56WorldFigureMultipleTextures = 0;
     std::uint64_t c56WorldFigureQueueFailed = 0;
     OwnedRendererClient ownedRenderer;
+    std::uint64_t boundParticleSurface = 0;
     bool ownedWorldActive = false;
     std::array<float, 16> ownedWorldToClip{};
     bool c56WorldPassRan = false;
@@ -127,6 +128,7 @@ public:
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
+    bool SubmitC56GameParticles(const owned::GameParticleView& view);
     // A loading picture (wait screen, movie frame): the renderer keeps it on
     // screen while the next world prepares, as retail shows the load screen.
     void MarkLoadPicture();
@@ -152,7 +154,8 @@ public:
     template <typename TVertexType>
     int DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVertexType> *vbVertices);
 
-    BOOL BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture);
+    BOOL BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
+                     std::uint64_t surfaceId = 0);
     ID3D11ShaderResourceView *GetBoundFigureTexture(DWORD dwIndex) const
     {
         return dwIndex < static_cast<DWORD>(boundFigureTextures.size()) ? boundFigureTextures[dwIndex].Get() : nullptr;

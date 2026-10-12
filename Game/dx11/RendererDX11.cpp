@@ -236,6 +236,70 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
     return fallback(c56WorldFigureQueueFailed);
 }
 
+bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
+{
+    HRESULT hr = E_UNEXPECTED;
+    if (ownedWorldActive && rendererFacade && rendererFacade->FrameActive()) {
+        owned::FixedState state;
+        for (const auto& value : fake_dx7.render_state)
+            if (value.first >= 0 && static_cast<std::size_t>(value.first) < state.render.size())
+                state.render[value.first] = value.second;
+        state.viewport.dwX = state.viewport.dwY = 0;
+        state.viewport.dwWidth = m_width;
+        state.viewport.dwHeight = m_height;
+        // The host represents stage 0 with alphaMode, as for c56 figures.
+        const auto alphaMode = GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
+        state.stage[0][D3DTSS_COLOROP] = D3DTOP_MODULATE;
+        state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
+        state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
+        state.stage[0][D3DTSS_ALPHAOP] = alphaMode == 0 ? D3DTOP_SELECTARG1 :
+            alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
+        state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
+        state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
+        if (!boundFigureTextures[0]) {
+            state.stage[0][D3DTSS_COLOROP] = D3DTOP_SELECTARG2;
+            state.stage[0][D3DTSS_ALPHAOP] = D3DTOP_SELECTARG2;
+        }
+        const auto& fog = GetConstantBuffers()->cb_ps_pixelshader.data.fogColor;
+        const auto byte = [](float v) { return DWORD((std::max)(0.f, (std::min)(1.f, v)) * 255.f + .5f); };
+        state.render[D3DRENDERSTATE_FOGCOLOR] = (byte(fog.x) << 16) | (byte(fog.y) << 8) | byte(fog.z);
+        if (view.additive) {
+            state.render[D3DRENDERSTATE_SRCBLEND] = D3DBLEND_SRCALPHA;
+            state.render[D3DRENDERSTATE_DESTBLEND] = D3DBLEND_ONE;
+        }
+        owned::SurfaceImage texture;
+        hr = boundFigureTextures[0] ? OwnedRender::E1SurfaceImage(device.Get(),
+            deviceContext.Get(), boundParticleSurface, texture) : S_OK;
+        if (SUCCEEDED(hr)) {
+            hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+                // Drain the host's queued UI/native geometry before this
+                // immediate pass, preserving the proxy's submission order.
+                HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
+                if (SUCCEEDED(flushed)) flushed = renderer.flush_native();
+                if (FAILED(flushed)) return flushed;
+                return renderer.draw_game_particles(view, state,
+                    boundFigureTextures[0] ? &texture : nullptr);
+            });
+            // c56 uses the same device, but its shaders/targets/state differ.
+            // Restore the host bindings for later legacy draws and fallback.
+            RefreshOwnedTargets();
+            SetRenderStates();
+            for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
+                ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
+                deviceContext->PSSetShaderResources(stage, 1, &resource);
+            }
+        }
+    }
+    if (SUCCEEDED(hr)) return true;
+    static bool reportedFallback = false;
+    if (!reportedFallback) {
+        reportedFallback = true;
+        GameJournal::Event("RENDER", "game_particles_fallback",
+            "owner=CDX11 reason=c56_rejected hr=%08lx", static_cast<unsigned long>(hr));
+    }
+    return false;
+}
+
 void CDX11::FlushInterfaceBeforeLegacyDraw()
 {
     // Interface images (panels, text, the modal world backdrop) queue in the
@@ -507,8 +571,10 @@ void CDX11::ClearZBuffer(DWORD dwValue)
     IfFailedThrowHR(rendererFacade->VisitDevice(&depth, &OwnedRender::E1ClearDepth));
 }
 
-BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture)
+BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
+                          std::uint64_t surfaceId)
 {
+    if (dwIndex == 0) boundParticleSurface = pTexture ? surfaceId : 0;
     GetConstantBuffers()->cb_ps_pixelshader.data.isTexture[dwIndex].x = pTexture ? 1 : 0;
     if (dwIndex < boundFigureTextures.size())
         boundFigureTextures[dwIndex] = pTexture;
@@ -621,7 +687,7 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     };
     const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
-        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",
+        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback game_particles=c56-or-CDX11-fallback effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));
     IfFailedThrowHR(rendererFacade->VisitOutput(this,
         [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {

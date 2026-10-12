@@ -95,7 +95,7 @@ HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
             return S_OK;
         }
     }
-    if (!(value->format.dwFlags & DDPF_RGB)) return DXGI_ERROR_UNSUPPORTED;
+    if (!(value->format.dwFlags & (DDPF_RGB | DDPF_FOURCC))) return DXGI_ERROR_UNSUPPORTED;
     E1SurfaceCpuImage pixels;
     const HRESULT read = E1ReadbackSurface(device, context, id, pixels);
     if (FAILED(read)) return read;

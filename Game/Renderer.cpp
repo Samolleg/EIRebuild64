@@ -651,6 +651,35 @@ BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawA
 {
     CDXGeometryProcessor *pGPU = GetGPU();
     CTLPipeline *pGeometryProcessor = pGPU->GetGeometryProcessor();
+    SetProjectionMatrix();
+    if (pDX11->IsOwnedWorldActive())
+    {
+        if (!points.GetSize())
+            return TRUE;
+        std::vector<owned::GameParticle> values(points.GetSize());
+        for (int i = 0; i < points.GetSize(); ++i)
+        {
+            const auto& point = points[i];
+            const auto& particle = particles[i];
+            const auto& uv = *particle.pUV;
+            values[i] = {point.x, point.y, point.z, point.w, particle.dwColor,
+                         uv.fpU0, uv.fpV0, uv.fpU1, uv.fpV1};
+        }
+        owned::GameParticleView view;
+        view.particles = values.data();
+        view.count = static_cast<std::uint32_t>(values.size());
+        // Same projection-space stack as SetProjectionMatrix(), in c56's
+        // row-major M * p layout (the legacy shader uses its transpose).
+        const SHMatrix& projection = pGPU->GetMatrix(MAT_STACK_PROJSPACE);
+        std::memcpy(view.object_to_clip.data(), &projection, sizeof(view.object_to_clip));
+        const RECT& clipRect = GetWindowRect();
+        // Same dimensions passed to CTLPipelineFPU::SetClipRect at setup.
+        view.clip_half_width = float(clipRect.right - clipRect.left) * 0.5f;
+        view.clip_half_height = float(clipRect.bottom - clipRect.top) * 0.5f;
+        view.additive = bUseAdd;
+        if (pDX11->SubmitC56GameParticles(view))
+            return TRUE;
+    }
     // Define temporary arrays
     static CXYZWArray inCoords;
     static CPVertexArray tlVertexes;
@@ -662,10 +691,6 @@ BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawA
     tlVertexes.SetSize(N_HARDWARE_V_MAX_PARTICLES * 4 /* *4 for clipping */); // ARRAY BOUNDS CHECK
     clips.SetSize(N_HARDWARE_V_MAX_PARTICLES);
     tFaces.SetSize((N_HARDWARE_V_MAX_PARTICLES / 4) * 6 * 4 /* *4 for clipping */);
-    // prepare matrix
-    {
-        this->SetProjectionMatrix();
-    }
     const SXYZW *pSrcPoint = points.GetData();
     SParticleToDraw *pParticle = particles.GetData();
     int nSrcPointsLeft = points.GetSize();
@@ -1398,7 +1423,7 @@ BOOL CRenderer::BindTexture(DWORD dwStage, CDXGISurface *pTexture)
     if (pTexture)
     {
         ID3D11ShaderResourceView *resView = pTexture->GetShaderResource().Get();
-        return pDX11->BindTexture(dwStage, resView);
+        return pDX11->BindTexture(dwStage, resView, pTexture->OwnedSurfaceId());
     }
     return pDX11->BindTexture(dwStage, nullptr);
 }
