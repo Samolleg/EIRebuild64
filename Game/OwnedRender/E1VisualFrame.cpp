@@ -114,8 +114,14 @@ bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeG
                 secondary->second.primary,secondary->second.surface.get(),&result));
         return SUCCEEDED(r.queue_native_records(submission,sink.state,nullptr,&result));
     }
-    // No DirectDraw wound surfaces exist in the embedded host.
-    if (view.wound_only) return false;
+    if (view.wound_only) {
+        const auto secondary=secondaryVisuals.find(view.prepared_identity.signed_id);
+        if (secondary==secondaryVisuals.end() || !secondary->second.surface ||
+            secondary->second.surface->id==0)
+            return false;
+        return SUCCEEDED(r.queue_embedded_wound(view,sink.state,
+            *secondary->second.surface,&result));
+    }
     const FixedState state = view.owned_fixed_state.enabled
         ? native_owned_submission_state(sink.state, view.owned_fixed_state) : sink.state;
     if (view.owned_texture.identity) return SUCCEEDED(r.queue_native_owned(view, state, &result));
