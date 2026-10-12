@@ -3120,6 +3120,7 @@ BOOL CWorldClient::Draw()
         for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
         for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
         scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
+        pRend->GetD3D()->SubmitC56PointLights(scene.c56Lights, ownedWorld.world_time);
         if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
     }
     // Publish this draw's visibility and interpolated scene facts before c56

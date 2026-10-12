@@ -343,6 +343,17 @@ void CDX11::RunC56WorldPass()
         "owner=c56 path=flush_native_static position=after_scene_publication before=transparent_terrain,world_effects missing=shadow_casters,game_particles");
 }
 
+void CDX11::SubmitC56PointLights(
+    const std::vector<owned::RetainedWorldPointLight>& lights, double worldTime)
+{
+    if (!ownedWorldActive || !rendererFacade)
+        return;
+    const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.set_native_point_lights(lights, worldTime) ? S_OK : E_FAIL;
+    });
+    IfFailedThrowHR(hr);
+}
+
 void CDX11::EndWorld()
 {
     // Finish the same c56 world pass before the caller starts drawing the

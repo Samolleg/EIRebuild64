@@ -5,6 +5,7 @@
 #include "vertexbuffer.h"
 #include "SpriteBatch.h"
 #include "OwnedRendererClient.h"
+#include "../OwnedRender/E1RendererFacade.h"
 #include "SpriteFont.h"
 #include "FakeDX7.h"
 #include "Caches.h"
@@ -117,6 +118,8 @@ public:
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
     void RunC56WorldPass();
+    void SubmitC56PointLights(const std::vector<owned::RetainedWorldPointLight>& lights,
+                              double worldTime);
     bool IsOwnedWorldActive() const { return ownedWorldActive; }
     void EndFrame(bool present = true);
     void ClearColorBuffer(DWORD value);

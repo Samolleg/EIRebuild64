@@ -1,5 +1,6 @@
 #pragma once
-#include "OwnedRendererClient.h"
++
+
 #include "../OwnedRender/E1Terrain.h"
 #include "../Unit.h"
 #include "../UnitClientSpecific.h"
@@ -93,6 +94,7 @@ struct Scene {
     std::vector<EIRenderObjectV3> objects;
     std::vector<EIRenderUnitV3> units;
     std::vector<EIRenderPointLightV3> lights;
+    std::vector<owned::RetainedWorldPointLight> c56Lights;
     std::set<int> ids;
     void Add(CMapObject* object,bool drawUndetected,CPlayerClient* player,float night){
         if(!object||object->CheckFlag(OBJ_HIDDEN)||!ids.insert(object->GetID()).second)return;
@@ -124,6 +126,12 @@ struct Scene {
             const auto& v=light->GetLight();if(v.dltType!=D3DLIGHT_POINT||!(v.dvRange>0))continue;
             EIRenderPointLightV3 row={{v.dvPosition.x,v.dvPosition.y,v.dvPosition.z},
                                      {v.dcvDiffuse.r,v.dcvDiffuse.g,v.dcvDiffuse.b},v.dvRange};lights.push_back(row);
+            owned::RetainedWorldPointLight c56{};
+            c56.source_id = light->GetID();
+            c56.center = {v.dvPosition.x, v.dvPosition.y, v.dvPosition.z};
+            c56.color = {v.dcvDiffuse.r, v.dcvDiffuse.g, v.dcvDiffuse.b};
+            c56.radius = v.dvRange;
+            c56Lights.push_back(c56);
         }
     }
     void Submit(OwnedRendererClient& renderer,uint64_t generation){
