@@ -126,6 +126,8 @@ private:
     SCameraMovement<float> pitch;    // camera pitch value/desired values
     SCameraMovement<float> zoom;     // camera zoom value/desired values
     CPlot2D ptLastDRPoint;
+    long long mouseCarryX = 0, mouseCarryY = 0;
+    int mouseCarryWidth = 0, mouseCarryHeight = 0;
     // camera anchor point params
     CPlot3D ptAnchorPoint; // point on the terrain, this camera attached to
     float fAnchorHeight;   // anchor point height over 'averaged' terrain
@@ -216,6 +218,7 @@ public:
     void UnlockScrollPoint();
     void DirectRotate(const CPlot2D &ptRotate);
     void SetLastDRPoint(const CPlot2D &point) { ptLastDRPoint = point; }
+    void NormalizeMouseDelta(CPoint& delta, int width, int height);
     //
     void SetFPSMode(CObject3D *lpNewCarrier);
     void SetFPSMode(DWORD dwNewCarrierID);

@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <cstdint>
 
 // Direct publications from CInterface3D; no engine layout or image offsets.
 namespace OwnedRender {
@@ -10,6 +11,7 @@ void E3RetireInterface() noexcept;
 void E3RefreshInterface() noexcept;
 void E3MissionEnter(const void* owner) noexcept;
 void E3MissionLeave(const void* owner) noexcept;
+void E3PublishHover(std::int32_t id, std::uint64_t incarnation) noexcept;
 void E3HudBoundary() noexcept;
 // Input uses c56 layout only while its real renderer owns the HUD boundary.
 bool E3HudRendererAttached() noexcept;

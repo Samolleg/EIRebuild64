@@ -3,6 +3,7 @@
 #include "widescreen.h"
 #include "hud_layout_context.h"
 #include "../ErrorDialog.h"
+#include "combat_ui.h"
 
 namespace {
 HWND window = nullptr;
@@ -31,6 +32,7 @@ void E3PublishInterface(HWND next, unsigned w, unsigned h, bool active,
     window = next; width = w; height = h;
     running = nextRunning;
     mission = running && soleMission;
+    if (!mission) owned::combat_ui_publish_hover(0, 0);
     resetInput = reset;
     // Match both c56 consumers: canvas_width/height query the function, while
     // native geometry and 2D surface composition use this shared state.
@@ -42,6 +44,7 @@ void E3RetireInterface() noexcept {
     endEditing();
     window = nullptr; width = height = 0;
     running = mission = false; resetInput = nullptr;
+    owned::combat_ui_publish_hover(0, 0);
     owned::widescreen::interface_owned = false;
     owned::widescreen::hud_blit = {};
     // Sink belongs to the renderer, not a particular mission. It is cleared
@@ -62,6 +65,9 @@ bool E3BlockInput(UINT message, WPARAM parameter) noexcept {
     return input && (editing || (running && GetForegroundWindow() != window));
 }
 bool E3HudRendererAttached() noexcept { return running && mission && sinkOwner && frameSink; }
+void E3PublishHover(std::int32_t id, std::uint64_t incarnation) noexcept {
+    owned::combat_ui_publish_hover(running && mission ? id : 0, running && mission ? incarnation : 0);
+}
 void E3HudBoundary() noexcept {
     if (running && frameSink) frameSink(sinkOwner);
 }

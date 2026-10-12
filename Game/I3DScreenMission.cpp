@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "OwnedRender/E1TextLifetime.h"
 #include "OwnedRender/E3Input.h"
+#include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E3Hud.h"
 #include "GameJournal.h"
 #include "ModStatsFont.h"
@@ -1471,6 +1472,11 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
     if (pU && !pU->CheckFlag(UNIT_VISIBLE))
         pU = 0;
 #endif // NODEBUGINFO
+
+    const auto hoverIdentity = pU && pU->CheckFlag(UNIT_VISIBLE) && !pU->IsDead()
+        ? OwnedRender::E1Scene().Identity(static_cast<std::int32_t>(pU->GetID()))
+        : owned::LifecycleIdentity{};
+    OwnedRender::E3PublishHover(hoverIdentity.id, hoverIdentity.generation);
 
     // if there is no selection
     pHero = GetSelection(nSelected, nIndex);

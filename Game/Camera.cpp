@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Camera.h"
+#include "camera_rotation.h"
 #include "FrameDiagnostics.h"
 #include "ServerConsts.h"
 #include "ModRuntime.h"
@@ -598,6 +599,23 @@ void CCamera::SetPitchValue(const float fpValue)
     pitch.desired = fpValue;
     if (fabs(fpValue) > fabs(pitch.value))
         pitch.value = pitch.desired;
+}
+void CCamera::NormalizeMouseDelta(CPoint& delta, int width, int height)
+{
+    if (width != mouseCarryWidth || height != mouseCarryHeight)
+    {
+        mouseCarryX = mouseCarryY = 0;
+        mouseCarryWidth = width;
+        mouseCarryHeight = height;
+    }
+    int deltaX = static_cast<int>(delta.x);
+    int deltaY = static_cast<int>(delta.y);
+    owned::CameraMouseCarry carry{mouseCarryX, mouseCarryY};
+    owned::normalize_camera_mouse_delta(deltaX, deltaY, width, height, carry);
+    delta.x = deltaX;
+    delta.y = deltaY;
+    mouseCarryX = carry.x;
+    mouseCarryY = carry.y;
 }
 void CCamera::SetZoomValue(const float fpValue)
 {

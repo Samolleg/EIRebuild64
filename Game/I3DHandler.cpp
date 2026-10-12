@@ -303,7 +303,10 @@ void CI3DHandlerNewCamera::OnMouseMove(UINT nFlags, CPoint point)
     {
         CPoint ptIncrement = theCursor.GetIncrement();
         pI3D->ScreenToVirtual(point);
-        pI3D->ScreenToVirtualLocal(ptIncrement);
+        if (theSettings.dwWidth > 0 && theSettings.dwHeight > 0)
+            theCamera.NormalizeMouseDelta(ptIncrement, theSettings.dwWidth, theSettings.dwHeight);
+        else
+            pI3D->ScreenToVirtualLocal(ptIncrement);
 
         float x = point.x / 400.f - 1;
         float y = point.y / 300.f - 1;
