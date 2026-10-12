@@ -340,7 +340,7 @@ void CDX11::RunC56WorldPass()
     IfFailedThrowHR(pass);
     c56WorldPassRan = true;
     GameJournal::Event("RENDER", "world_pass",
-        "owner=c56 path=flush_native_static position=after_base_terrain before=scene_figures");
+        "owner=c56 path=flush_native_static position=after_scene_publication before=transparent_terrain,world_effects missing=shadow_casters,game_particles");
 }
 
 void CDX11::EndWorld()
