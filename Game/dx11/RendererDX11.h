@@ -87,6 +87,9 @@ private:
     std::uint64_t c56WorldFigureQueueFailed = 0;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
+    std::array<float, 16> ownedWorldToClip{};
+    bool c56BaseTerrainSubmitted = false;
+    bool c56WorldPassRan = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
     std::unique_ptr<DirectX::SpriteFont> spriteFont;
     std::unique_ptr<DirectX::CommonStates> m_states;
@@ -114,6 +117,7 @@ public:
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
+    void RunC56WorldPass();
     bool IsOwnedWorldActive() const { return ownedWorldActive; }
     void EndFrame(bool present = true);
     void ClearColorBuffer(DWORD value);

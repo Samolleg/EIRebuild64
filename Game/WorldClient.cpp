@@ -3106,6 +3106,9 @@ BOOL CWorldClient::Draw()
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
         pTerrain->DrawBase(&theRenderer);
         pRend->FlushBuffers();
+        // c56's owned world work (HIZ, ground cover, critters and retained
+        // static geometry) belongs after opaque terrain and before figures.
+        pRend->GetD3D()->RunC56WorldPass();
     }
     ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
     // render main 3D scene: objects and their shadows

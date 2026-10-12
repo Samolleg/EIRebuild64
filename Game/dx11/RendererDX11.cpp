@@ -188,8 +188,10 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
         return OwnedRender::E1SubmitTerrainPass(renderer, transparent, submission);
     });
-    if (SUCCEEDED(hr) && submission.completed)
+    if (SUCCEEDED(hr) && submission.completed) {
+        if (!transparent) c56BaseTerrainSubmitted = true;
         return OwnedTerrainPassResult::submitted;
+    }
 
     GameJournal::Event("RENDER", "terrain_c56_failed",
         "transparent=%u hr=%08lx queued=%llu reason=%s", transparent ? 1u : 0u,
@@ -311,11 +313,31 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
     c56WorldFigureInvalidView = 0;
     c56WorldFigureMultipleTextures = 0;
     c56WorldFigureQueueFailed = 0;
+    std::copy_n(frame.world_to_clip, ownedWorldToClip.size(), ownedWorldToClip.begin());
+    c56BaseTerrainSubmitted = false;
+    c56WorldPassRan = false;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
     RefreshOwnedTargets();
     SetRenderStates();
     return skyConsumed != 0;
+}
+
+void CDX11::RunC56WorldPass()
+{
+    if (!ownedWorldActive || !c56BaseTerrainSubmitted || c56WorldPassRan || !rendererFacade)
+        return;
+    owned::FixedState frame;
+    for (const auto& value : fake_dx7.render_state)
+        if (value.first >= 0 && static_cast<std::size_t>(value.first) < frame.render.size())
+            frame.render[value.first] = value.second;
+    const HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.flush_native_static(frame, ownedWorldToClip);
+    });
+    IfFailedThrowHR(pass);
+    c56WorldPassRan = true;
+    GameJournal::Event("RENDER", "world_pass",
+        "owner=c56 path=flush_native_static position=after_base_terrain before=scene_figures");
 }
 
 void CDX11::EndWorld()
