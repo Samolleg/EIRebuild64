@@ -226,34 +226,6 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
     state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
     state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
     const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary);
-    {
-        // RS02c: one-time sample per category (white characters). Remove when settled.
-        static unsigned sampled[3] = {};
-        const EIRenderFigureV4 figure = ownedRenderer.FigureValues();
-        const unsigned category = figure.category < 3 ? figure.category : 2;
-        if (sampled[category] < 4) {
-            ++sampled[category];
-            D3D11_TEXTURE2D_DESC desc{};
-            D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
-            if (primary) {
-                primary->GetDesc(&srv);
-                Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-                primary->GetResource(&resource);
-                Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-                if (resource && SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
-            }
-            GameJournal::Event("RENDER", "figure_sample",
-                "category=%u hr=%08lx srv=%d fmt=%u dim=%u size=%ux%u mips=%u array=%u flags=%u morphs=%u light=%u diffuse=%.3f,%.3f,%.3f emissive=%.3f,%.3f,%.3f specular=%.3f,%.3f,%.3f,%.3f alpha=%.3f alphaMode=%u",
-                category, static_cast<unsigned long>(hr), primary ? 1 : 0,
-                static_cast<unsigned>(desc.Format), static_cast<unsigned>(srv.ViewDimension),
-                desc.Width, desc.Height, desc.MipLevels, desc.ArraySize, view.flags,
-                view.morph_count, view.lighting.enabled,
-                view.lighting.material_diffuse[0], view.lighting.material_diffuse[1], view.lighting.material_diffuse[2],
-                view.lighting.emissive[0], view.lighting.emissive[1], view.lighting.emissive[2],
-                view.lighting.specular[0], view.lighting.specular[1], view.lighting.specular[2], view.lighting.specular[3],
-                view.lighting.material_alpha, static_cast<unsigned>(alphaMode));
-        }
-    }
     if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
     return fallback(c56WorldFigureQueueFailed);
 }

@@ -871,8 +871,9 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
         NGame::PlayMoviesSequence("Start");
         // play static logo
         C2DScreenWait::pszProgressName = "Progres.bik";
+        // The wait screen stays up through the database and main-menu zone
+        // loads; CWorldClient::NewZone clears it when the menu zone is ready.
         C2DScreenWait::Step(0);
-        C2DScreenWait::Clear();
     }
 #if !defined(NODEBUGINFO) && !defined(_DEBUG)
     // EngineDiagnostics owns the outer exception boundary.

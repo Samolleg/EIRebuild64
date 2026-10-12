@@ -180,12 +180,14 @@ bool CBinkVideo::PlayNextFrame(bool present, bool freeze)
     Player &p = *player;
     if (!p.finished && !p.paused && !p.wait(p.movie))
     {
-        if (p.decoded && p.displayedFrame >= p.movie->frames) p.finished = true;
+        if (p.decoded && p.displayedFrame >= p.movie->frames && !freeze) p.finished = true;
         else
         {
             p.Decode();
             p.displayedFrame = p.movie->frame;
-            if (p.displayedFrame < p.movie->frames) p.next(p.movie);
+            // Loading screens loop (BinkNextFrame wraps after the last frame),
+            // as the retail wait screen does for the whole load.
+            if (freeze || p.displayedFrame < p.movie->frames) p.next(p.movie);
         }
     }
     p.Draw(rectOnScreen, present);
