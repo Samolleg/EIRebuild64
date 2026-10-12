@@ -974,6 +974,9 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #endif // !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
        //
     theWorld.SetCamera(0);
+    // The renderer and its TL pipeline hold references to the sunlight owned
+    // by the world's light manager: drop them while that light still exists.
+    GetRenderer()->SetSunlight(nullptr);
     theWorldServer.Destroy();
     theWorld.Destroy();
     GetRenderer()->Destroy();
