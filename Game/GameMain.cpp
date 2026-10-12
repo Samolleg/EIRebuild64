@@ -1218,7 +1218,9 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
 {
     CStringArray szNames;
     CIniFile reg;
-    reg.Open(theWorld.GetWorkPath() + "config\\movie.ini");
+    const CString fallback = theWorld.GetWorkPath() + "config\\movie.ini";
+    const std::string movieConfig = ModRuntime::ConfigPath((LPCSTR)fallback);
+    reg.Open(movieConfig.c_str());
     reg.GetStringArray(pszSection, "movies", szNames);
 
     for (int i = 0; i < szNames.GetSize(); ++i)
