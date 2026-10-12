@@ -212,8 +212,6 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
         return fallback(c56WorldFigureInvalidView);
     ID3D11ShaderResourceView* primary = ownedRenderer.FigurePrimaryTexture();
     ID3D11ShaderResourceView* secondary = ownedRenderer.FigureSecondaryTexture();
-    if (primary) ++c56WorldFigureTextured;
-    else ++c56WorldFigureUntextured;
     if (secondary) return fallback(c56WorldFigureMultipleTextures);
     owned::FixedState state{};
     for (const auto& item : fake_dx7.render_state)
@@ -308,8 +306,6 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 {
     uint32_t skyConsumed = 0;
     c56WorldFigurePrimitives = 0;
-    c56WorldFigureTextured = 0;
-    c56WorldFigureUntextured = 0;
     c56WorldFigureFallbacks = 0;
     c56WorldFigureLegacyDraws = 0;
     c56WorldFigureUnavailable = 0;
@@ -352,10 +348,8 @@ void CDX11::EndWorld()
     });
     IfFailedThrowHR(composite);
     GameJournal::Event("RENDER", "world_model_owner",
-        "owner=c56_device path=c56_native_queue submitted=%llu primary_srv_present=%llu primary_srv_missing=%llu legacy_draws=%llu submission_fallbacks=%llu fallback_unavailable=%llu fallback_invalid_view=%llu fallback_multiple_textures=%llu fallback_queue_failed=%llu missing=%s",
+        "owner=c56_device path=c56_native_queue submitted=%llu legacy_draws=%llu submission_fallbacks=%llu fallback_unavailable=%llu fallback_invalid_view=%llu fallback_multiple_textures=%llu fallback_queue_failed=%llu missing=%s",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
-        static_cast<unsigned long long>(c56WorldFigureTextured),
-        static_cast<unsigned long long>(c56WorldFigureUntextured),
         static_cast<unsigned long long>(c56WorldFigureLegacyDraws),
         static_cast<unsigned long long>(c56WorldFigureFallbacks),
         static_cast<unsigned long long>(c56WorldFigureUnavailable),
@@ -364,8 +358,6 @@ void CDX11::EndWorld()
         static_cast<unsigned long long>(c56WorldFigureQueueFailed),
         c56WorldFigureFallbacks ? "figure" : "none");
     c56WorldFigurePrimitives = 0;
-    c56WorldFigureTextured = 0;
-    c56WorldFigureUntextured = 0;
     c56WorldFigureFallbacks = 0;
     c56WorldFigureLegacyDraws = 0;
     c56WorldFigureUnavailable = 0;

@@ -79,8 +79,6 @@ private:
     OwnedRender::E2FrameTiming frameTiming;
     std::uint64_t frameSerial = 0;
     std::uint64_t c56WorldFigurePrimitives = 0;
-    std::uint64_t c56WorldFigureTextured = 0;
-    std::uint64_t c56WorldFigureUntextured = 0;
     std::uint64_t c56WorldFigureFallbacks = 0;
     std::uint64_t c56WorldFigureLegacyDraws = 0;
     std::uint64_t c56WorldFigureUnavailable = 0;
