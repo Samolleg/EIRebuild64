@@ -130,6 +130,8 @@ struct Scene {
             c56.center = {v.dvPosition.x, v.dvPosition.y, v.dvPosition.z};
             c56.color = {v.dcvDiffuse.r, v.dcvDiffuse.g, v.dcvDiffuse.b};
             c56.radius = v.dvRange;
+            c56.casts_shadow = !light->CheckFlag(LIT_UNSHADOW);
+            c56.attached = light->CheckFlag(LIT_QUEST) != FALSE;
             c56Lights.push_back(c56);
         }
     }
