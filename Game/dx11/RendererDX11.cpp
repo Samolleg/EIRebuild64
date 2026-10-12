@@ -218,8 +218,13 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
         if (item.first >= 0 && static_cast<std::size_t>(item.first) < state.render.size())
             state.render[item.first] = item.second;
     const auto alphaMode = GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
+    state.stage[0][D3DTSS_COLOROP] = D3DTOP_MODULATE;
+    state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
+    state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
     state.stage[0][D3DTSS_ALPHAOP] = alphaMode == 0 ? D3DTOP_SELECTARG1 :
         alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
+    state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
+    state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
     const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary);
     if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
     return fallback(c56WorldFigureQueueFailed);
