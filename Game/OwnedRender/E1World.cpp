@@ -1,5 +1,6 @@
 #include "E1World.h"
 #include "embedded_sky.h"
+#include "E1Scene.h"
 #include <cmath>
 
 namespace {
@@ -115,7 +116,9 @@ bool bridge_current_world_time(double& output) noexcept {
     output = values.environment.world_time;
     return true;
 }
-std::uint64_t bridge_current_world_epoch() noexcept { return epoch; }
+// One world epoch for scene and draw, as the game.exe bridge reads it from the
+// lifecycle: a separate draw counter made published statics an "earlier world".
+std::uint64_t bridge_current_world_epoch() noexcept { return OwnedRender::E1Scene().Epoch(); }
 SceneWorldToClipSnapshot bridge_scene_world_to_clip_snapshot() noexcept { return values.camera; }
 WorldFogSnapshot bridge_world_fog_snapshot() noexcept { return values.fog; }
 WorldDrawCompletionSnapshot bridge_world_draw_completion_snapshot() noexcept {
