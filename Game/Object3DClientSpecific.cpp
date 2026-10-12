@@ -313,6 +313,8 @@ void CObject3DClientSpecific::Destroy()
     }
     materials.RemoveAll();
     //
+    if (lpObject && lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->ClearOwnedCurrentAnimationSelection();
     RegisterObject3D(NULL);
     SetLastLightTime(0);
 

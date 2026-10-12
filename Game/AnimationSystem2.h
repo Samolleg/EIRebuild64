@@ -222,6 +222,7 @@ public:
         ownedSkeleton.PublishLinks(name, data, size);
     }
     std::shared_ptr<const owned::ModelCpuAsset> GetOwnedSkeleton() noexcept;
+    void ClearOwnedCurrentAnimationSelection() noexcept;
     bool GetOwnedCurrentAnimationSelection(OwnedRender::E1AnimationSelection& output,
                                            const char** failedStage = nullptr) noexcept;
     void GetNodeNames(CStringArray &szNames) const;

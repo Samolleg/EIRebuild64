@@ -769,6 +769,11 @@ std::shared_ptr<const owned::ModelCpuAsset> CAnimationSystem2::GetOwnedSkeleton(
 }
 catch (...) { return nullptr; }
 
+void CAnimationSystem2::ClearOwnedCurrentAnimationSelection() noexcept
+{
+    ownedAnimationSelection.reset();
+}
+
 bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
     OwnedRender::E1AnimationSelection& output, const char** failedStage) noexcept try
 {
