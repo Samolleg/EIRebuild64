@@ -1,71 +1,12 @@
 #pragma once
 #include <d3d11.h>
-#include <wrl/client.h>
 
 template <class T>
 class ConstantBuffer
 {
-private:
-    ConstantBuffer(const ConstantBuffer<T> &rhs);
-
-private:
-    Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
-    ID3D11DeviceContext *deviceContext = nullptr;
-
 public:
-    ConstantBuffer() {}
-
-    T data;
-
-    ID3D11Buffer *Get() const { return buffer.Get(); }
-
-    ID3D11Buffer *const *GetAddressOf() const { return buffer.GetAddressOf(); }
-
-    HRESULT Initialize(ID3D11Device *device, ID3D11DeviceContext *deviceContext);
-    bool ApplyChanges();
-    bool TestConstantBuffer(LPCVOID *pShader, int slotNo);
+    T data{};
 };
-
-template <class T>
-HRESULT ConstantBuffer<T>::Initialize(ID3D11Device *device, ID3D11DeviceContext *deviceContext)
-{
-    this->deviceContext = deviceContext;
-
-    D3D11_BUFFER_DESC desc;
-    desc.Usage = D3D11_USAGE_DYNAMIC;
-    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    desc.MiscFlags = 0;
-    desc.ByteWidth = static_cast<UINT>(sizeof(T) + (16 - (sizeof(T) % 16)));
-    desc.StructureByteStride = 0;
-
-    HRESULT hr = device->CreateBuffer(&desc, 0, buffer.ReleaseAndGetAddressOf());
-    return hr;
-}
-
-template <class T>
-bool ConstantBuffer<T>::ApplyChanges()
-{
-    D3D11_MAPPED_SUBRESOURCE mappedResource;
-    HRESULT hr = this->deviceContext->Map(buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                          &mappedResource);
-    if (FAILED(hr))
-    {
-        ReportError(hr, "Failed to map constant buffer.");
-        return false;
-    }
-    CopyMemory(mappedResource.pData, &data, sizeof(T));
-    this->deviceContext->Unmap(buffer.Get(), 0);
-    return true;
-}
-
-template <class T>
-bool ConstantBuffer<T>::TestConstantBuffer(LPCVOID *pShader, int slotNo)
-{
-    /*D3DReflect(pPixelShaderBuffer->GetBufferPointer(), pPixelShaderBuffer->GetBufferSize(),
-               IID_ID3D11ShaderReflection, (void **)&pReflector);*/
-    return false;
-}
 
 // D3DVALUE = float = 4
 // D3DCOLORVALUE = vec4 = 16
@@ -135,7 +76,6 @@ enum class EPS_AlphaMode
 
 struct CB_PS_pixelshader
 {
-    DirectX::XMINT4 isTexture[4];
     DirectX::XMFLOAT4 fogColor;
     float alphaRef;
     uint32_t alphaMode;
@@ -152,6 +92,4 @@ public:
     ConstantBuffer<CB_VS_vertexlights> cb_vs_vertexlights;
     ConstantBuffer<CB_PS_pixelshader> cb_ps_pixelshader;
 
-    bool Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device,
-                    Microsoft::WRL::ComPtr<ID3D11DeviceContext> &deviceContext);
 };

@@ -10,7 +10,6 @@
  **********************************************************************/
 #include "StdAfx.h"
 
-#include "dx11/Batchers.h"
 #include "OwnedRender/E2TerrainAnimation.h"
 static const char LOCAL_FILE[] = __FILE__;
 static uint64_t NextTerrainPhaseRevision(){static uint64_t value=1;return ++value;}

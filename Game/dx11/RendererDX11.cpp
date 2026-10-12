@@ -6,7 +6,6 @@
 #include <ScreenGrab.h>
 
 #include "ConstantBuffer.h"
-#include "DXShader.h"
 #include "RendererDX11.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
@@ -20,7 +19,6 @@
 #include "../OwnedRender/E1TerrainSubmission.h"
 #include "../GameJournal.h"
 
-#include "batchers.h"
 #include "Utils.h"
 #include "Vertex.h"
 #include "../Renderer.h"
@@ -368,49 +366,6 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
     return false;
 }
 
-template <typename TVertexType>
-int CDX11::DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
-                                VertexBuffer<TVertexType> *vbVertices, LPWORD pIndices,
-                                DWORD dwIndexCount)
-{
-    std::shared_ptr<VertexBuffer<WORD>> idxBuf = m_caches->CreateOrUpdate(pIndices, dwIndexCount);
-
-    this->deviceContext->IASetPrimitiveTopology(primitive);
-    this->deviceContext->PSSetSamplers(0, 1, this->samplerState.GetAddressOf());
-    this->deviceContext->PSSetSamplers(1, 1, this->samplerState.GetAddressOf());
-    this->deviceContext->PSSetShader(m_shaders->ps_main.GetShader(), NULL, 0);
-
-    // update const buffer
-    m_cbs->cb_vs_vertexshader.ApplyChanges();
-    m_cbs->cb_vs_vertexlights.ApplyChanges();
-    m_cbs->cb_ps_pixelshader.ApplyChanges();
-
-    this->deviceContext->VSSetConstantBuffers(
-        0, 1, GetConstantBuffers()->cb_vs_vertexshader.GetAddressOf());
-    this->deviceContext->VSSetConstantBuffers(
-        1, 1, GetConstantBuffers()->cb_vs_vertexlights.GetAddressOf());
-    this->deviceContext->PSSetConstantBuffers(
-        0, 1, GetConstantBuffers()->cb_ps_pixelshader.GetAddressOf());
-    UINT offset = 0;
-    this->deviceContext->IASetVertexBuffers(0, 1, vbVertices->GetAddressOf(),
-                                            vbVertices->StridePtr(), &offset);
-    this->deviceContext->IASetIndexBuffer(idxBuf->Get(), DXGI_FORMAT_R16_UINT, 0);
-
-    if(ownedWorldActive)
-        IfFailedThrowHR(ownedRenderer.BindWorldPixels(theRenderer.IsAddFog()!=0));
-    this->deviceContext->DrawIndexed(dwIndexCount, 0, 0);
-    const uint32_t triangles = primitive == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST ? dwIndexCount / 3 :
-        primitive == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && dwIndexCount > 2 ? dwIndexCount - 2 : 0;
-    IfFailedThrowHR(ownedRenderer.RecordDraw(triangles));
-    return TRV_VISIBLE_NOCLIP;
-}
-
-template <typename TVertexType>
-int CDX11::DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVertexType> *vbVertices)
-{
-    return 0;
-}
-
 void CDX11::BeginFrame()
 {
     IfFailedThrowHR(rendererFacade->BeginFrame());
@@ -432,11 +387,6 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 {
     uint32_t skyConsumed = 0;
     c56WorldFigurePrimitives = 0;
-    c56WorldFigureFallbacks = 0;
-    c56WorldFigureLegacyDraws = 0;
-    c56WorldFigureUnavailable = 0;
-    c56WorldFigureInvalidView = 0;
-    c56WorldFigureMultipleTextures = 0;
     c56WorldFigureQueueFailed = 0;
     std::copy_n(frame.world_to_clip, ownedWorldToClip.size(), ownedWorldToClip.begin());
     c56WorldPassRan = false;
@@ -550,11 +500,6 @@ void CDX11::EndWorld()
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
         static_cast<unsigned long long>(c56WorldFigureQueueFailed));
     c56WorldFigurePrimitives = 0;
-    c56WorldFigureFallbacks = 0;
-    c56WorldFigureLegacyDraws = 0;
-    c56WorldFigureUnavailable = 0;
-    c56WorldFigureInvalidView = 0;
-    c56WorldFigureMultipleTextures = 0;
     c56WorldFigureQueueFailed = 0;
     ownedWorldActive = false;
     RefreshOwnedTargets();
@@ -613,7 +558,6 @@ BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
                           std::uint64_t surfaceId)
 {
     if (dwIndex == 0) boundParticleSurface = pTexture ? surfaceId : 0;
-    GetConstantBuffers()->cb_ps_pixelshader.data.isTexture[dwIndex].x = pTexture ? 1 : 0;
     if (dwIndex < boundFigureTextures.size())
         boundFigureTextures[dwIndex] = pTexture;
     if (pTexture)
@@ -655,14 +599,11 @@ CDX11::~CDX11()
 {
     owned::camp_inventory_shutdown_icons();
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);
-    m_caches.reset();m_batchers.reset();
     uiColorKey.reset();
     this->spriteBatch.reset();
-    this->spriteFont.reset();
     this->m_states.reset();
 
     m_cbs = 0;
-    m_shaders = 0;
 
     if (this->deviceContext)
     {
@@ -674,7 +615,7 @@ CDX11::~CDX11()
     depthStencilBuffer.Reset();
     depthStencilState.Reset();depthStencilStateDisableWrite.Reset();depthStencilStateDisable.Reset();
     blendState.Reset();blendStateDisable.Reset();rasterizerState.Reset();rasterizerStateNoCull.Reset();
-    samplerState.Reset();blackTextureView.Reset();blackTexture.Reset();myTexture.Reset();myTexture2.Reset();
+    blackTextureView.Reset();blackTexture.Reset();myTexture.Reset();myTexture2.Reset();
     this->device.Reset();
     ownedRenderer.Shutdown();
 }
@@ -682,12 +623,6 @@ CDX11::~CDX11()
 bool CDX11::Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
 {
     if (!InitializeDX(hWnd, dwWidth, dwHeight))
-        return false;
-
-    if (!m_shaders->Initialize(this->device))
-        return false;
-
-    if (!m_cbs->Initialize(this->device, this->deviceContext))
         return false;
 
     return true;
@@ -830,23 +765,6 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     // spriteFont = std::make_unique<DirectX::SpriteFont>(this->device.Get(),
     // L"Data\\comic_sans_ms_16.spritefont"); spriteFont->SetDefaultCharacter(L'Z');
 
-    // Create sampler description for sampler state
-    D3D11_SAMPLER_DESC sampDesc;
-    ZeroMemory(&sampDesc, sizeof(sampDesc));
-
-    // D3D11_FILTER_MIN_MAG_MIP_LINEAR
-    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    // sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-    // sampDesc.Filter = D3D11_FILTER_ANISOTROPIC;
-    // sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_MIRROR_ONCE;
-    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sampDesc.MinLOD = 0;
-    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
-    IfFailedThrowHR(this->device->CreateSamplerState(&sampDesc, this->samplerState.GetAddressOf()));
-
     D3D11_TEXTURE2D_DESC blackTextureDesc;
     DefaultSurfaceDesc(&blackTextureDesc);
     blackTextureDesc.Width = 32;
@@ -861,8 +779,6 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
                                                            this->blackTextureView.GetAddressOf()));
 
     m_states = std::make_unique<DirectX::CommonStates>(this->device.Get());
-    m_caches = std::make_unique<CVertexCaches>(this->device.Get(), this->deviceContext.Get());
-    m_batchers = std::make_unique<CBatchers>();
     return true;
 }
 

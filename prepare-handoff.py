@@ -51,16 +51,7 @@ for name in imports:
         shutil.copy2(found, handoff/name)
     dlls.append({'name': name, 'path': str(found), 'sha256': sha(found)})
 shutil.copy2(exe, handoff/exe.name)
-shader_dir = handoff/'shaders'
-shader_dir.mkdir()
-for path in (output/'shaders/Win32_Release').glob('*.cso'):
-    assert path.read_bytes().startswith(b'DXBC'), path
-    shutil.copy2(path, shader_dir/path.name)
-required = ('vertexshader', 'vertexshader_simple', 'pixelshader')
-assert all((shader_dir/(name+'.cso')).is_file() for name in required)
-(shader_dir/'Win32_Release').mkdir()
-for path in shader_dir.glob('*.cso'):
-    shutil.copy2(path, shader_dir/'Win32_Release'/path.name)
+# EIRebuild no longer builds or loads OpenEI shader artifacts; the embedded renderer owns its shader package.
 # Keep exact matching debug information out of the user handoff.
 symbols = root/'symbols'/'20260916-r1'
 symbols.mkdir(parents=True, exist_ok=False)

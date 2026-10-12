@@ -10,10 +10,7 @@ void CDX11::RestoreHostBindings()
     for (UINT stage=0;stage<boundFigureTextures.size();++stage) {
         ID3D11ShaderResourceView* texture=boundFigureTextures[stage].Get();
         deviceContext->PSSetShaderResources(stage,1,&texture);
-        GetConstantBuffers()->cb_ps_pixelshader.data.isTexture[stage].x=texture?1:0;
     }
-    GetConstantBuffers()->cb_ps_pixelshader.ApplyChanges();
-    deviceContext->PSSetConstantBuffers(0,1,GetConstantBuffers()->cb_ps_pixelshader.GetAddressOf());
 }
 
 bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)

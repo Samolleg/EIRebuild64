@@ -2,14 +2,11 @@
 #include <CommonStates.h>
 #include <dxgidebug.h>
 
-#include "vertexbuffer.h"
 #include "SpriteBatch.h"
 #include "OwnedRendererClient.h"
 #include "../OwnedRender/E1RendererFacade.h"
 namespace OwnedRender { struct E1VisualInputs; }
-#include "SpriteFont.h"
 #include "FakeDX7.h"
-#include "Caches.h"
 #include "DirectXHelpers.h"
 
 namespace owned { struct NativeGeometryView; struct ScreenRectangleRequest; }
@@ -27,9 +24,7 @@ namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
 class UIColorKeyBlit;
 class CDXGISurface;
 class CConstantBuffers;
-class CShadersMain;
 class FakeD3D7State;
-class CBatchers;
 
 class CRenderState
 {
@@ -46,8 +41,6 @@ private:
     BOOL m_bMakeScreenShot = 0;
 
     std::unique_ptr<CConstantBuffers> m_cbs = std::make_unique<CConstantBuffers>();
-    std::unique_ptr<CShadersMain> m_shaders = std::make_unique<CShadersMain>();   
-
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> deviceContext;
 
@@ -63,8 +56,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerStateNoCull;
 
-    Microsoft::WRL::ComPtr<ID3D11SamplerState> samplerState;
-
     Microsoft::WRL::ComPtr<ID3D11Texture2D> blackTexture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> blackTextureView;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture;
@@ -75,11 +66,6 @@ private:
     OwnedRender::E2FrameTiming frameTiming;
     std::uint64_t frameSerial = 0;
     std::uint64_t c56WorldFigurePrimitives = 0;
-    std::uint64_t c56WorldFigureFallbacks = 0;
-    std::uint64_t c56WorldFigureLegacyDraws = 0;
-    std::uint64_t c56WorldFigureUnavailable = 0;
-    std::uint64_t c56WorldFigureInvalidView = 0;
-    std::uint64_t c56WorldFigureMultipleTextures = 0;
     std::uint64_t c56WorldFigureQueueFailed = 0;
     OwnedRendererClient ownedRenderer;
     std::uint64_t boundParticleSurface = 0;
@@ -89,10 +75,7 @@ private:
     bool c56WorldPassRan = false;
     int c56WorldPassState = -1;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
-    std::unique_ptr<DirectX::SpriteFont> spriteFont;
     std::unique_ptr<DirectX::CommonStates> m_states;
-    std::unique_ptr<CVertexCaches> m_caches;
-    std::unique_ptr<CBatchers> m_batchers;
     FakeD3D7State fake_dx7, fake_dx7_prev;
 
     void MakeScreenShot();
@@ -139,14 +122,6 @@ public:
     OwnedTerrainPassResult SubmitC56TerrainPass(bool transparent);
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
 
-    int TriggerRedraw();
-    template <typename TVertexType>
-    int DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
- VertexBuffer<TVertexType> *vbVertices,
-                             LPWORD pwIndices, DWORD dwIndexCount);
-    template <typename TVertexType>
-    int DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVertexType> *vbVertices);
-
     BOOL BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
                      std::uint64_t surfaceId = 0);
     ID3D11ShaderResourceView *GetBoundFigureTexture(DWORD dwIndex) const
@@ -180,8 +155,6 @@ public:
                                  const RECT* source, const DDCOLORKEY* colorKey);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };
     CConstantBuffers *GetConstantBuffers() { return m_cbs.get(); };
-    CShadersMain *GetShaders() { return m_shaders.get(); };
-    CBatchers *GetBatchers() { return m_batchers.get(); };
 
     void SetFakeRenderState(int key, DWORD value) { fake_dx7.SetRenderState(key, value); };
     void GetFakeRenderState(int key, DWORD *value) { fake_dx7.GetRenderState(key, value); };

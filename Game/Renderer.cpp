@@ -25,8 +25,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/vertex.h"
 #include "dx11/Surface.h"
 #include "dx11/ConstantBuffer.h"
-#include "dx11/DXShader.h"
-#include "dx11/Batchers.h"
 #include "Particle.h"
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"

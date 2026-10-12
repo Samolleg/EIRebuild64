@@ -428,16 +428,6 @@ public:
         if (!host || !sourceApi.terrain_drawn) return S_FALSE;
         const HRESULT hr = sourceApi.terrain_drawn(host); JournalRendererState(); return hr;
     }
-    HRESULT BindWorldPixels(bool fog){
-        const auto access = renderGate.Lock();
-        if (!host || !sourceApi.bind_world_pixels) return S_FALSE;
-        return sourceApi.bind_world_pixels(host,fog?1u:0u);
-    }
-    HRESULT RecordDraw(uint32_t triangles) {
-        const auto access = renderGate.Lock();
-        if (!host || !worldApi.record_draw) return S_FALSE;
-        return worldApi.record_draw(host, triangles);
-    }
     // Embedded c56: the host draws SpriteBatch images through the renderer
     // facade (there is no RDDraw UI host). Set by CDX11 after device creation.
     std::function<HRESULT(ID3D11ShaderResourceView*, const RECT&, const RECT*, unsigned)> embeddedUi;
