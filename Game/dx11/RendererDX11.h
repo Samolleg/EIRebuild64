@@ -79,6 +79,7 @@ private:
     std::uint64_t frameSerial = 0;
     std::uint64_t c56WorldFigurePrimitives = 0;
     std::uint64_t c56WorldFigureFallbacks = 0;
+    std::uint64_t c56WorldFigureLegacyDraws = 0;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;

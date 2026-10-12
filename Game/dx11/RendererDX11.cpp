@@ -226,7 +226,7 @@ int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIn
     if (!dwIndexCount)
         return 0;
     if (ownedWorldActive)
-        ++c56WorldFigurePrimitives;
+        ++c56WorldFigureLegacyDraws;
     RenderStateCheck();
 
     std::shared_ptr<VertexBuffer<PNTVertex>> vertexBuf = m_caches->CreateOrUpdate(static_cast<PNTVertex *>(pVertices), dwVertexCount);
@@ -302,6 +302,7 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
     uint32_t skyConsumed = 0;
     c56WorldFigurePrimitives = 0;
     c56WorldFigureFallbacks = 0;
+    c56WorldFigureLegacyDraws = 0;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
     RefreshOwnedTargets();
@@ -316,12 +317,14 @@ void CDX11::EndWorld()
     });
     IfFailedThrowHR(flush);
     GameJournal::Event("RENDER", "world_model_owner",
-        "owner=c56_device path=c56_native_queue submitted=%llu legacy_fallback=%llu missing=%s",
+        "owner=c56_device path=c56_native_queue submitted=%llu legacy_draws=%llu submission_fallbacks=%llu missing=%s",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
+        static_cast<unsigned long long>(c56WorldFigureLegacyDraws),
         static_cast<unsigned long long>(c56WorldFigureFallbacks),
         c56WorldFigureFallbacks ? "figure" : "none");
     c56WorldFigurePrimitives = 0;
     c56WorldFigureFallbacks = 0;
+    c56WorldFigureLegacyDraws = 0;
     ownedWorldActive = false;
     RefreshOwnedTargets();
     SetRenderStates();
