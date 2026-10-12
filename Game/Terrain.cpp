@@ -2454,7 +2454,11 @@ void CTerrain::BuildShadowMesh(CShadowBuilder &builder, CXYZW4Array &src)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
-void CTerrain::DrawModTerrainShadow(CRenderer *pRend) {
+void CTerrain::DrawModTerrainShadow(CRenderer *pRend) {
+    // The embedded renderer draws the terrain itself: this legacy pass redrew
+    // the whole terrain and built its shadow on the CPU, waiting on worker
+    // tasks inside the frame (0.3 s hitches in Suslanger caves).
+    if(pRend->GetD3D()->IsOwnedWorldActive())return;
     if(!modTerrainShadow)return;
     if(modTerrainShadow->Tick(GetTickCount()))
         pRend->GetD3D()->UpdateTerrainShadow(modTerrainShadow->width,modTerrainShadow->height,modTerrainShadow->pixels.data());
