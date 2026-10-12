@@ -1591,6 +1591,15 @@ void CWorldServer::DeployHooverItems(CPlayer *pPlayer, CList<CItem *, CItem *> &
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeployPlayerInfo *pInfo)
 {
+    // RemovePlayerParty has already moved server items to the wagon. Clear the
+    // retained client's old item IDs through the ordinary ordered packet stream.
+    CModPackage *campMod = ModRuntime::Current();
+    if (fieldCampArmed && this == &theWorldServer && campMod && campMod->CombatSetting("JMVGoCamp")) {
+        CPlayer *player = GetPlayer(0);
+        CPlayerServer *server = player ? dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
+        if (server && &player->party == pParty && player->curInterface == IFACE_CAMP && player->items.IsEmpty())
+            server->RemoveAllHoover();
+    }
     if (fieldCampArmed) {
         fieldCampSnapshots.clear();
         for (int index = 0; index < people.GetSize(); ++index) {
