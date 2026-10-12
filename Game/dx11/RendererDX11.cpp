@@ -192,42 +192,66 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     return OwnedTerrainPassResult::failed;
 }
 
-bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
+bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
 {
-    const auto fallback = [this](std::uint64_t& reason) {
-        ++c56WorldFigureFallbacks;
-        ++reason;
-        return false;
-    };
-    if (!ownedWorldActive || !rendererFacade || !rendererFacade->Ready())
-        return fallback(c56WorldFigureUnavailable);
-    if (!view.positions || !view.normals || !view.components || !view.indices)
-        return fallback(c56WorldFigureInvalidView);
-    ID3D11ShaderResourceView* primary = ownedRenderer.FigurePrimaryTexture();
-    ID3D11ShaderResourceView* secondary = ownedRenderer.FigureSecondaryTexture();
-    if (secondary) return fallback(c56WorldFigureMultipleTextures);
-    owned::FixedState state{};
-    for (const auto& item : fake_dx7.render_state)
-        if (item.first >= 0 && static_cast<std::size_t>(item.first) < state.render.size())
-            state.render[item.first] = item.second;
-    // Specular addition follows this figure's own material (flag 8 =
-    // MAT_USE_SPECULAR), not whatever an earlier draw left in the device
-    // state: GPU lighting passes the raw material specular (0.988 on
-    // characters), so a stale TRUE washed every character white.
-    state.render[D3DRENDERSTATE_SPECULARENABLE] = (view.flags & 8u) ? TRUE : FALSE;
-    const auto alphaMode = GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
-    state.stage[0][D3DTSS_COLOROP] = D3DTOP_MODULATE;
-    state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
-    state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
-    state.stage[0][D3DTSS_ALPHAOP] = alphaMode == 0 ? D3DTOP_SELECTARG1 :
-        alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
-    state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
-    state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-    const HRESULT hr = rendererFacade->QueueNativeDirect(view, state, primary);
-    if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
-    return fallback(c56WorldFigureQueueFailed);
+    HRESULT hr=E_UNEXPECTED;
+    if(rendererFacade && rendererFacade->FrameActive() && source.positions &&
+       source.normals && source.components && source.indices) {
+        auto view=source;
+        owned::FixedState state;
+        for(const auto& item:fake_dx7.render_state)
+            if(item.first>=0 && std::size_t(item.first)<state.render.size())state.render[item.first]=item.second;
+        D3D11_VIEWPORT viewport{};UINT count=1;
+        deviceContext->RSGetViewports(&count,&viewport);
+        state.viewport={DWORD(viewport.TopLeftX),DWORD(viewport.TopLeftY),DWORD(viewport.Width),DWORD(viewport.Height),viewport.MinDepth,viewport.MaxDepth};
+        state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
+        const auto& buffers=*GetConstantBuffers();
+        const auto& pixel=buffers.cb_ps_pixelshader.data;
+        ID3D11ShaderResourceView* primary=ownedRenderer.FigureActive()?ownedRenderer.FigurePrimaryTexture():boundFigureTextures[0].Get();
+        ID3D11ShaderResourceView* secondary=ownedRenderer.FigureActive()?ownedRenderer.FigureSecondaryTexture():boundFigureTextures[1].Get();
+        state.stage[0][D3DTSS_COLOROP]=primary?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
+        state.stage[0][D3DTSS_COLORARG1]=D3DTA_TEXTURE;state.stage[0][D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
+        state.stage[0][D3DTSS_ALPHAOP]=!primary?D3DTOP_SELECTARG2:pixel.alphaMode==0?D3DTOP_SELECTARG1:pixel.alphaMode==2?D3DTOP_SELECTARG2:D3DTOP_MODULATE;
+        state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
+        state.stage[0][D3DTSS_ADDRESSU]=state.stage[0][D3DTSS_ADDRESSV]=D3DTADDRESS_WRAP;
+        state.stage[0][D3DTSS_MINFILTER]=state.stage[0][D3DTSS_MAGFILTER]=D3DTFG_LINEAR;
+        state.stage[0][D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
+        const auto byte=[](float v){return DWORD((std::max)(0.f,(std::min)(1.f,v))*255.f+.5f);};
+        state.render[D3DRENDERSTATE_FOGCOLOR]=(byte(pixel.fogColor.x)<<16)|(byte(pixel.fogColor.y)<<8)|byte(pixel.fogColor.z);
+        owned::NativeWorldLighting lighting;
+        std::vector<owned::RetainedWorldPointLight> lights;
+        if(view.lighting.enabled) {
+            const auto& vertex=buffers.cb_vs_vertexshader.data;
+            const auto& sun=buffers.cb_vs_vertexlights.data.sunlight;
+            lighting.ambient={vertex.dcvAmbient.r,vertex.dcvAmbient.g,vertex.dcvAmbient.b,1};
+            lighting.sunlight_diffuse={sun.dcMaterialDiffuse.r,sun.dcMaterialDiffuse.g,sun.dcMaterialDiffuse.b,1};
+            SHMatrix world;memcpy(&world,view.lighting.object_to_world.data(),sizeof(world));
+            const auto direction=world.RotateVector(CPlot3D(-sun.rd.x,-sun.rd.y,-sun.rd.z));
+            lighting.sunlight_direction={direction.x,direction.y,direction.z,0};
+            // The host light entries already include the material response.
+            view.lighting.material_diffuse={1,1,1};
+            view.lighting.emissive={vertex.dvEmissive.x,vertex.dvEmissive.y,vertex.dvEmissive.z,0};
+            for(unsigned i=0;i<(std::min)(vertex.nlights,DWORD(16));++i) {
+                const auto& value=buffers.cb_vs_vertexlights.data.lights[i];
+                if(!(value.rcpr_range2>0))continue;
+                owned::RetainedWorldPointLight light;
+                light.source_id=int(i)+1;light.center={value.position.x,value.position.y,value.position.z};
+                light.color={value.dcMaterialDiffuse.r,value.dcMaterialDiffuse.g,value.dcMaterialDiffuse.b};
+                light.radius=std::sqrt(1.f/value.rcpr_range2);lights.push_back(light);
+            }
+        }
+        hr=rendererFacade->Visit([&](owned::Renderer& renderer){
+            return renderer.queue_embedded_figure(view,state,primary,secondary,
+                view.lighting.enabled?&lighting:nullptr,lights);
+        });
+        RestoreHostBindings();
+    }
+    if(SUCCEEDED(hr)){++c56WorldFigurePrimitives;return true;}
+    ++c56WorldFigureQueueFailed;
+    static bool reported=false;
+    if(!reported){reported=true;GameJournal::Event("RENDER","figure_skipped","owner=c56 hr=%08lx",static_cast<unsigned long>(hr));}
+    return false;
 }
-
 bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 {
     HRESULT hr = E_UNEXPECTED;
@@ -319,24 +343,6 @@ void CDX11::FlushInterfaceBeforeLegacyDraw()
     GetConstantBuffers()->cb_ps_pixelshader.ApplyChanges();
     deviceContext->PSSetConstantBuffers(0, 1,
         GetConstantBuffers()->cb_ps_pixelshader.GetAddressOf());
-}
-
-int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIndices, DWORD dwIndexCount,
-                  DWORD dwFlags)
-{
-    if (!dwIndexCount)
-        return 0;
-    FlushInterfaceBeforeLegacyDraw();
-    if (ownedWorldActive)
-        ++c56WorldFigureLegacyDraws;
-    RenderStateCheck();
-
-    std::shared_ptr<VertexBuffer<PNTVertex>> vertexBuf = m_caches->CreateOrUpdate(static_cast<PNTVertex *>(pVertices), dwVertexCount);
-
-    this->deviceContext->IASetInputLayout(m_shaders->vs_main.GetInputLayout());
-    this->deviceContext->VSSetShader(m_shaders->vs_main.GetShader(), NULL, 0);
-    return DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, vertexBuf.get(), pIndices,
-                                dwIndexCount);
 }
 
 template <typename TVertexType>
@@ -514,15 +520,9 @@ void CDX11::EndWorld()
     });
     IfFailedThrowHR(composite);
     GameJournal::Event("RENDER", "world_model_owner",
-        "owner=c56_device path=c56_native_queue submitted=%llu legacy_draws=%llu submission_fallbacks=%llu fallback_unavailable=%llu fallback_invalid_view=%llu fallback_multiple_textures=%llu fallback_queue_failed=%llu missing=%s",
+        "owner=c56 path=c56_native_queue submitted=%llu skipped=%llu",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
-        static_cast<unsigned long long>(c56WorldFigureLegacyDraws),
-        static_cast<unsigned long long>(c56WorldFigureFallbacks),
-        static_cast<unsigned long long>(c56WorldFigureUnavailable),
-        static_cast<unsigned long long>(c56WorldFigureInvalidView),
-        static_cast<unsigned long long>(c56WorldFigureMultipleTextures),
-        static_cast<unsigned long long>(c56WorldFigureQueueFailed),
-        c56WorldFigureFallbacks ? "figure" : "none");
+        static_cast<unsigned long long>(c56WorldFigureQueueFailed));
     c56WorldFigurePrimitives = 0;
     c56WorldFigureFallbacks = 0;
     c56WorldFigureLegacyDraws = 0;

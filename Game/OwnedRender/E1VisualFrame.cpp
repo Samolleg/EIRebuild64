@@ -25,6 +25,8 @@ std::vector<std::int32_t> currentDrawn;   // sorted, this world draw only
 bool ranThisDraw = false;
 std::uint64_t reportEpoch = 0;
 std::map<std::int32_t, bool> reportedVisuals;
+struct SecondaryVisual { std::uint64_t primary=0; std::shared_ptr<const owned::OwnedVisualSurface> surface; };
+std::map<std::int32_t,SecondaryVisual> secondaryVisuals;
 
 bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeGeometryResult& result) noexcept try {
     using namespace owned;
@@ -70,8 +72,14 @@ bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeG
     }
     if (view.depth_submission)
         return SUCCEEDED(r.queue_native_depth(*view.depth_submission, sink.state, &result));
-    if (view.prepared_submission)
-        return SUCCEEDED(r.queue_native_records(*view.prepared_submission, sink.state, nullptr, &result));
+    if (view.prepared_submission) {
+        const auto& submission=*view.prepared_submission;
+        const auto secondary=secondaryVisuals.find(submission.identity.signed_id);
+        if(secondary!=secondaryVisuals.end())
+            return SUCCEEDED(r.queue_embedded_records(submission,sink.state,
+                secondary->second.primary,secondary->second.surface.get(),&result));
+        return SUCCEEDED(r.queue_native_records(submission,sink.state,nullptr,&result));
+    }
     // No DirectDraw wound surfaces exist in the embedded host.
     if (view.wound_only) return false;
     const FixedState state = view.owned_fixed_state.enabled
@@ -181,7 +189,12 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     return ok;
 }
 bool E1OwnedVisualFrameFlushedStatics() noexcept { return lastFlushed; }
+void E1PublishSecondaryVisual(std::int32_t id, std::uint64_t primary,
+    std::shared_ptr<const owned::OwnedVisualSurface> secondary) noexcept try {
+    if(id>0 && primary)secondaryVisuals[id]={primary,std::move(secondary)};
+} catch(...) {}
 void E1OwnedVisualFrameNewDraw() noexcept {
+    secondaryVisuals.clear();
     currentDrawn.clear();
     lastFlushed = false;
     ranThisDraw = false;

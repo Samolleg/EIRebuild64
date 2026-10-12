@@ -889,7 +889,15 @@ bool CObject3DClientSpecific::PrepareOwnedResources()
 bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen)
 {
     if (lpObject->CheckFlag(OBJ_HIDDEN)) return true;
-    const bool resourcesReady = PrepareOwnedResources();
+    bool resourcesReady = PrepareOwnedResources();
+    if(resourcesReady && lpObject->WhoAmI()==HPC_UNIT && sets[0] &&
+       sets[0]->lpTexture && sets[0]->lpTexture->GetSurface()) {
+        const auto secondary=pWoundsTexture && pWoundsTexture->GetSurface()
+            ? OwnedRender::E1SurfaceValue(pWoundsTexture->GetSurface()->OwnedSurfaceId()) : nullptr;
+        if(pWoundsTexture && pWoundsTexture->GetSurface() && !secondary)resourcesReady=false;
+        OwnedRender::E1PublishSecondaryVisual(lpObject->GetID(),
+            sets[0]->lpTexture->GetSurface()->OwnedSurfaceId(),secondary);
+    }
     if (lpObject->GetAnimationSystem2())
         lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
     const bool published = resourcesReady && PublishOwnedPose();

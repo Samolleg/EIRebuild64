@@ -1,8 +1,9 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <memory>
 
-namespace owned { class Renderer; struct FixedState; }
+namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; }
 
 namespace OwnedRender {
 // Host values of one world draw, without renderer headers (WorldClient).
@@ -32,4 +33,6 @@ bool E1OwnedVisualDrawn(std::int32_t id) noexcept;
 void E1ReportOwnedVisual(std::int32_t id) noexcept;
 // Each world draw unconditionally retires the previous result.
 void E1OwnedVisualFrameNewDraw() noexcept;
+void E1PublishSecondaryVisual(std::int32_t id, std::uint64_t primary,
+    std::shared_ptr<const owned::OwnedVisualSurface> secondary) noexcept;
 }

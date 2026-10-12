@@ -279,64 +279,15 @@ int CGeometryContainer::Render(const std::string &szRangeName, DWORD dwRenderFla
     SXYZW4 *plots = plots4.GetData() + range.dwPlotsStart;
     SXYZW4 *renderPlots = plots;
     CRenderer* sourceRenderer=pGeometryManager->GetD3D();
-    if(sourceRenderer->GetD3D()->IsOwnedWorldActive() && sourceRenderer->GetD3D()->GetOwnedRenderer().FigureActive()) {
-        if(dwRenderFlags & DXD3D_USE_SPECULAR)sourceRenderer->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,TRUE);
-        sourceRenderer->GetD3D()->GetOwnedRenderer().SelectFigureGeometry(range.ownedIdentity,ownedRevision);
-        const bool accepted=sourceRenderer->TryOwnedFigure(plots,range.dwNumPlots,
-            norms4.GetData()+range.dwNormsStart,range.dwNumNorms,colors.GetData(),speculars.GetData(),
-            maps.GetData()+range.dwMapsStart,range.dwNumMaps,components.GetData()+range.dwComponentsStart,
-            range.dwNumComponents,indices.GetData()+range.dwIndicesStart,range.dwNumIndices,
-            fUShift,fVShift,255,dwRenderFlags,morphs.GetData(),morphs.GetSize());
-        if(accepted) {
-            if(dwRenderFlags & DXD3D_USE_SPECULAR)sourceRenderer->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,FALSE);
-            return TRV_VISIBLE_NOCLIP;
-        }
-        // The rejection is already counted; continue the unmodified legacy
-        // morph/render path once, without resubmitting at its lower boundary.
-        sourceRenderer->GetD3D()->GetOwnedRenderer().EndFigure();
-    }
-
-    if ((morphs.GetSize() != 0) || (morphs.GetSize() > range.dwNumPlots * 4))
-    {
-        int hindex, lindex;
-
-        plots41.SetSize(range.dwNumPlots); // ARRAY BOUNDS CHECK
-        for (int i = 0; i < plots41.GetSize() * 4; ++i)
-        {
-            hindex = i >> 2;
-            lindex = i & 0x3;
-            // CRAP - wrong work with morphs - 'morphs.GetSize()' are not multiple to 4
-            if (i >= morphs.GetSize())
-            {
-                plots41[hindex].x[lindex] = plots[hindex].x[lindex];
-                plots41[hindex].y[lindex] = plots[hindex].y[lindex];
-                plots41[hindex].z[lindex] = plots[hindex].z[lindex];
-            }
-            else
-            {
-                plots41[hindex].x[lindex] = plots[hindex].x[lindex] + morphs[i].x;
-                plots41[hindex].y[lindex] = plots[hindex].y[lindex] + morphs[i].y;
-                plots41[hindex].z[lindex] = plots[hindex].z[lindex] + morphs[i].z;
-            }
-        }
-        renderPlots = plots41.GetData();
-    }
-    //
-    CRenderer *pRend = pGeometryManager->GetD3D();
-    if (dwRenderFlags & DXD3D_USE_SPECULAR)
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
-    // rendering
-    int nClipFlag = pGeometryManager->GetD3D()->Render(
-        renderPlots, range.dwNumPlots, norms4.GetData() + range.dwNormsStart, range.dwNumNorms,
-        colors.GetData(), speculars.GetData(), maps.GetData() + range.dwMapsStart, range.dwNumMaps,
-        components.GetData() + range.dwComponentsStart, range.dwNumComponents,
-        lightcomponents.GetData() + range.dwLightComponentsStart, range.dwNumLightComponents,
-        indices.GetData() + range.dwIndicesStart, range.dwNumIndices, fUShift, fVShift,
-        255 /*cFog*/, dwRenderFlags);
-
-    if (dwRenderFlags & DXD3D_USE_SPECULAR)
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
-    return nClipFlag;
+    if(dwRenderFlags & DXD3D_USE_SPECULAR)sourceRenderer->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,TRUE);
+    sourceRenderer->GetD3D()->GetOwnedRenderer().SelectFigureGeometry(range.ownedIdentity,ownedRevision);
+    sourceRenderer->TryOwnedFigure(plots,range.dwNumPlots,
+        norms4.GetData()+range.dwNormsStart,range.dwNumNorms,colors.GetData(),speculars.GetData(),
+        maps.GetData()+range.dwMapsStart,range.dwNumMaps,components.GetData()+range.dwComponentsStart,
+        range.dwNumComponents,indices.GetData()+range.dwIndicesStart,range.dwNumIndices,
+        fUShift,fVShift,255,dwRenderFlags,morphs.GetData(),morphs.GetSize());
+    if(dwRenderFlags & DXD3D_USE_SPECULAR)sourceRenderer->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,FALSE);
+    return TRV_VISIBLE_NOCLIP;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CGeometryContainer::RecalcScreenExtents()

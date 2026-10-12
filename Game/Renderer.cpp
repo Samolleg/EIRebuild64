@@ -236,6 +236,8 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, const CQuaternion &quat, const CPlo
         return TRUE;
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
+    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,false,
+        nullptr,nullptr,pDX11->GetBoundFigureTexture(0),pDX11->GetBoundFigureTexture(1));
     return pFigureSpec->Draw(this, quat, cp, pMaterial, cFog, pRect);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -888,18 +890,19 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
     const bool campDraw=OwnedRender::E4::OwnsDraw();
-    if(!campDraw&&(!pDX11->IsOwnedWorldActive() || !pDX11->GetOwnedRenderer().FigureActive()))return false;
+    const bool hasFigure=pDX11->GetOwnedRenderer().FigureActive();
     // World objects belong to the committed frame, including rejected visuals.
     // Never submit a second figure draw or return to OpenEI for these IDs.
     const auto objectId = std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id);
-    if (!campDraw && objectId > 0) {
+    if (!campDraw && hasFigure && pDX11->IsOwnedWorldActive() && objectId > 0) {
         OwnedRender::E1ReportOwnedVisual(objectId);
         return true;
     }
     if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
        !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
-        if(campDraw){pDX11->SubmitC56CampFigure({});return true;}
-        return false;
+        if(campDraw)pDX11->SubmitC56CampFigure({});
+        else pDX11->SubmitC56Figure({});
+        return true;
     }
 
     owned::NativeGeometryView view{};
@@ -927,7 +930,7 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
     view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
     const EIRenderFigureV4 material=pDX11->GetOwnedRenderer().FigureValues();
-    view.lighting.enabled=1;
+    view.lighting.enabled=(dwRenderFlags&(DXD3D_USE_VERTEX_COLOR|DXD3D_LIT))?0u:1u;
     view.lighting.material_alpha=material.material_alpha;
     memcpy(view.lighting.material_diffuse.data(),material.material_diffuse,sizeof(material.material_diffuse));
     memcpy(view.lighting.emissive.data(),material.emissive,sizeof(material.emissive));
@@ -938,7 +941,9 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     memcpy(view.lighting.object_to_world.data(),&world,sizeof(world));
     view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(morphs);
     view.morph_count=morphCount;
-    return pDX11->SubmitC56Figure(view);
+    if(dwRenderFlags&DXD3D_LIT){view.diffuse=nullptr;view.specular=nullptr;view.flags|=4u;}
+    pDX11->SubmitC56Figure(view);
+    return true; // Rejection is logged and skipped, never drawn by OpenEI.
 }
 
 int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const int nNumNorms,
@@ -951,25 +956,7 @@ int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const i
     if(TryOwnedFigure(plots,nNumPlots,norms,nNumNorms,colors,speculars,maps,nNumMaps,
         components,nNumComponents,pwIndices,nNumIndices,fpUShift,fpVShift,cFog,dwRenderFlags,nullptr,0))
         return TRV_VISIBLE_NOCLIP;
-    VertexBuffer<PNTVertex> vertexBuf;
-    PNTVertex *pVertices = GetTempVertices(nNumComponents, (PNTVertex *)0);
-
-    if (dwRenderFlags & DXD3D_LIT)
-    {
-        DWORD dwDefaultColor = dwDefaultAmbientColor;       // RGBA_MAKE( 200, 200, 200, 255 );
-        DWORD dwDefaultSpecular = RGBA_MAKE(0, 0, 0, cFog); // dwDefaultSpecularColor
-        MemSetDWord(colors, dwDefaultColor, nNumNorms * 4);
-        MemSetDWord(speculars, dwDefaultSpecular, nNumNorms * 4);
-    }
-
-    LPTLPIPELINE pGPU = pGeometryProcessor->GetGeometryProcessor();
-    if (IsAddFog())
-        pGPU->AddFog(reinterpret_cast<D3DTLVERTEX *>(pVertices), nNumComponents);
-
-    ComposeVerticesMain(pVertices, plots, norms, colors, speculars, maps, components,
-                        nNumComponents, fpUShift, fpVShift, dwRenderFlags);
-
-    return pDX11->DrawFigurePrimitive(pVertices, nNumComponents, pwIndices, nNumIndices, dwRenderFlags);
+    return TRV_INVISIBLE;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////

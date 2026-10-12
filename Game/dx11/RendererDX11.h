@@ -146,8 +146,6 @@ public:
     bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
     OwnedTerrainPassResult SubmitC56TerrainPass(bool transparent);
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
-    int DrawFigurePrimitive(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
-               DWORD dwFlags);
     int DrawSimplePrimitive(LPVOID pvVertices, DWORD dwVertexCount,
                             LPWORD pwIndices, DWORD dwIndexCount, DWORD dwFlags);
     int TriggerRedraw();

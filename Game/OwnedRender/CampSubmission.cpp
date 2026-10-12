@@ -39,7 +39,7 @@ bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)
         if(itemColorSum&&state.render[D3DRENDERSTATE_SPECULARENABLE])materialView.flags|=8u;
         hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
             HRESULT result=renderer.has_pending_ui()?renderer.flush_ui():S_OK;
-            if(SUCCEEDED(result))result=renderer.queue_native_direct(materialView,state,boundFigureTextures[0].Get());
+            if(SUCCEEDED(result))result=renderer.queue_embedded_figure(materialView,state,boundFigureTextures[0].Get(),boundFigureTextures[1].Get(),nullptr,{});
             if(SUCCEEDED(result))result=renderer.flush_native();
             if(FAILED(result))renderer.discard_native();
             return result;
