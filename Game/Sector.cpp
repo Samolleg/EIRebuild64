@@ -726,12 +726,6 @@ BOOL CSector::Draw(CRenderer *pRend, CTerrain *pTerrain, int nMat, D3DMATRIX *pM
             nVInd = RemoveClippedVertexes(tlVertexes.GetData(), tClippedFaces.GetData(), nVInd,
                                           nFInd);
         }
-        if (nFInd > 0)
-        {
-            pRend->GetD3D()->GetBatchers()->GetBatcher()->AddVertices(
-                reinterpret_cast<STLVertex1 *>(tlVertexes.GetData()), nVInd,
-                bNeedClip ? tClippedFaces.GetData() : tFaces.GetData(), nFInd);
-        }
         //        if (nFInd > 0)
         //        {
         //            // Not all faces clipped out, render prepared arrays

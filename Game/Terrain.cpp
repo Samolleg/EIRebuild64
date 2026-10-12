@@ -342,77 +342,27 @@ BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo, bool prepareOnly
             pSector->SetClipFlag(pRend);
         }
     }
-    if(nMatFrom==0 && nMapTo==nTextures+N_NUMBER_OF_LONG_TEXTURES-1 && TryOwnedTerrain(pRend))
+    const int baseMaterialEnd = nTextures + N_NUMBER_OF_LONG_TEXTURES - 1;
+    const int transparentMaterialBegin = nTextures + N_NUMBER_OF_LONG_TEXTURES;
+    const int transparentMaterialEnd = (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1;
+    const bool basePass = nMatFrom == 0 && nMapTo == baseMaterialEnd;
+    const bool transparentPass = nMatFrom == transparentMaterialBegin && nMapTo == transparentMaterialEnd;
+    if (!basePass && !transparentPass) {
+        GameJournal::Count("RENDER", "terrain_c56_skipped", "unsupported_material_range");
         return TRUE;
-    // Transform sectors
-    for (ys = 0; ys < viewableSectorsMinX.GetSize(); ys++)
-    {
-        for (xs = viewableSectorsMinX[ys]; xs <= viewableSectorsMaxX[ys]; xs++)
-        {
-            CSector *pSector = GetSector(xs, ys + nClipMinSectorY, CSector::ESS_LIGHTED);
-            if (pSector == NULL || pSector->IsVisible() == FALSE)
-                continue;
-            pSector->SetBorderLODsFlags();
-            pSector->Transform(pRend->GetGPU());
-        }
     }
-    CBatchers *batchers = pRend->GetD3D()->GetBatchers();
+    // Publish the opaque source before the owned shadow/color pass. Transparent
+    // terrain reuses that frame and is submitted after the owned color pass.
+    if (basePass) TryOwnedTerrain(pRend);
     theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
-    // Capture after the source pass enables terrain specular/fog, before a
-    // later object/UI pass changes the device. Base and transparent are distinct.
-    const bool ownedTerrainPass =
-        (nMatFrom == 0 && nMapTo == nTextures + N_NUMBER_OF_LONG_TEXTURES - 1) ||
-        (nMatFrom == nTextures + N_NUMBER_OF_LONG_TEXTURES &&
-         nMapTo == (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1);
-    if (ownedTerrainPass)
-        OwnedRender::E1PublishTerrainMaterial(this, nMatFrom != 0,
-            pRend->GetD3D()->CaptureOwnedTerrainMaterial());
-    // Base preparation publishes current receivers/casters without colour.
-    // RunC56WorldPass draws ground after this draw's native depth maps.
+    // Keep the two material snapshots distinct: water consumes the c56 depth
+    // and reflection inputs only after the opaque terrain and owned color pass.
+    OwnedRender::E1PublishTerrainMaterial(this, transparentPass,
+        pRend->GetD3D()->CaptureOwnedTerrainMaterial());
     if (prepareOnly) return TRUE;
-    if (ownedTerrainPass) {
-        if (pRend->GetD3D()->SubmitC56TerrainPass(nMatFrom != 0) ==
-            CDX11::OwnedTerrainPassResult::unavailable)
-            GameJournal::Count("RENDER", "terrain_c56_skipped", "source_unavailable");
-        return TRUE;
-    }
-    // Draw sectors by materials
-    for (int i = nMatFrom; i <= nMapTo; i++)
-    {
-        BOOL bMatSetted = FALSE;
-        batchers->GetBatcher()->Begin();
-        for (ys = 0; ys < viewableSectorsMinX.GetSize(); ys++)
-        {
-            for (xs = viewableSectorsMinX[ys]; xs <= viewableSectorsMaxX[ys]; xs++)
-            {
-                CSector *pSector = GetSector(xs, ys + nClipMinSectorY, CSector::ESS_LIGHTED);
-                if (!pSector)
-                    continue;
-                if (pSector->IsVisible() && pSector->IsHaveMaterial(i))
-                {
-                    if (!bMatSetted)
-                    {
-                        pRend->BindTexture(0,
-                                           textures[i % (nTextures + N_NUMBER_OF_LONG_TEXTURES)]);
-                        bMatSetted = TRUE;
-                    }
-                    if (!pSector->Draw(pRend, this, i, NULL /*&d3dmatrix*/))
-                        return FALSE;
-                }
-            }
-        }
-        batchers->GetBatcher()->End();
-        {
-            STLVertex1 *pVertices;
-            DWORD dwVertexCount;
-            LPWORD pIndices;
-            DWORD dwIndexCount;
-            batchers->GetBatcher()->GetVertices(pVertices, dwVertexCount, pIndices, dwIndexCount);
-            pRend->RenderTriangleSet(pVertices, dwVertexCount, pIndices, dwIndexCount);
-        }
-    }
-    theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
-
+    if (pRend->GetD3D()->SubmitC56TerrainPass(transparentPass) ==
+        CDX11::OwnedTerrainPassResult::unavailable)
+        GameJournal::Count("RENDER", "terrain_c56_skipped", "source_unavailable");
     return TRUE;
 }
 
