@@ -2889,51 +2889,6 @@ BOOL CWorldClient::DrawPolyLines()
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-class CObjectTextureLessThenFunctional
-{
-public:
-    bool operator()(CObject3D *pObject1, CObject3D *pObject2) const
-    {
-        // SpellAddon mode 8 makes every object equivalent, without accessing resources.
-        if (const auto *mod = ModRuntime::Current())
-            if (mod->SpellAddon().Feature21() == 8)
-                return false;
-#if defined(__GAME__) && !defined(_A4)
-        if (pObject1 && pObject2)
-        {
-            CObject3DClientSpecific *pOCS1 = static_cast<CObject3DClientSpecific *>(
-                pObject1->GetObjectSpecific());
-            CObject3DClientSpecific *pOCS2 = static_cast<CObject3DClientSpecific *>(
-                pObject2->GetObjectSpecific());
-            if (pOCS1 && pOCS2)
-            {
-                CTexture *pTexture1 = pOCS1->GetPrimaryTexture();
-                CTexture *pTexture2 = pOCS2->GetPrimaryTexture();
-                if (pTexture1 < pTexture2)
-                    return true;
-                else if (pTexture1 == pTexture2)
-                {
-                    if (pObject1->GetGeometry() < pObject2->GetGeometry())
-                        return true;
-                    else if (pObject1->GetGeometry() == pObject2->GetGeometry())
-                        return (pObject1->GetRespectCP().z < pObject2->GetRespectCP().z);
-                    else
-                        return false;
-                }
-                else
-                    return false;
-            }
-        }
-        return false;
-#else
-        return (static_cast<CObject3DClientSpecific *>(pObject1->GetObjectSpecific())
-                    ->GetPrimaryTexture() <
-                static_cast<CObject3DClientSpecific *>(pObject2->GetObjectSpecific())
-                    ->GetPrimaryTexture());
-#endif // defined(__GAME__) && !defined(_A4)
-    }
-};
-/////////////////////////////////////////////////////////////////////////////////////
 class CObjectLightTimeLessThenFunctional
 {
 public:
@@ -3109,14 +3064,14 @@ BOOL CWorldClient::Draw()
         pRend->FlushBuffers();
     }
     ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
-    // render main 3D scene: objects and their shadows
-    Draw3DScene();
+    // Prepare visibility, poses and picking before publication and commit.
+    Prepare3DScene();
     LMPTimePassed();
     std::vector<owned::RetainedWorldPointLight> ownedPointLights;
     const bool ownedDrawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
     if(pTerrain && pTerrain->IsLoaded()){
         // Visibility and interpolated positions have just been prepared by
-        // Draw3DScene. Source rows are copied before the liquid/effect passes.
+        // Prepare3DScene. Source rows are copied before the liquid/effect passes.
         OwnedWorldInputs::Scene scene;
         const bool drawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
         const float night=GetNightPowerSlow();
@@ -3130,11 +3085,11 @@ BOOL CWorldClient::Draw()
     // Publish this draw's visibility and interpolated scene facts before c56
     // consumes them for critters, ground cover, lights, and retained geometry.
     // Run after opaque terrain and scene preparation, before transparent water.
-    if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
+    if (pTerrain && pTerrain->IsLoaded())
     {
         // The renderer's owned-visual frame (as the game.exe bridge's scene
         // seam): the retained scene takes this draw's point lights and commits
-        // the tick after Draw3DScene published every object's pose; the frame
+        // the tick after Prepare3DScene published every object's pose; the frame
         // then draws sun/point shadows and every claimed visual.
         static_assert(WC_RENDER_OBJECTS == 0x40 && WC_RENDER_UNITS == 0x80 && WC_RENDER_TERRAIN == 0x100,
                       "owned-visual class flags follow the game.exe world flags");
@@ -3156,6 +3111,8 @@ BOOL CWorldClient::Draw()
         visuals.fogContext = pTerrain;
         pRend->GetD3D()->RunC56WorldPass(&visuals);
     }
+    // Remaining overlays run after this draw's owned shadows and colour.
+    Draw3DScene();
     // render terrain's transparent part (water)
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
@@ -3458,8 +3415,6 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
             if (static_cast<CObject3DClientSpecific *>(pObject->GetObjectSpecific())
                     ->IsShadowVisible())
             {
-                if (pObject->GetAnimationSystem2())
-                    pObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
                 switch (pObject->WhoAmI()) // add to list by type: unit/building/tree/object
                 {
                 case HPC_UNIT:
@@ -3485,7 +3440,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // perform all operation steps to draw current d3d scene
-BOOL CWorldClient::Draw3DScene()
+BOOL CWorldClient::Prepare3DScene()
 {
     if (!pTerrain || !pTerrain->IsLoaded())
         return FALSE;
@@ -3539,61 +3494,18 @@ BOOL CWorldClient::Draw3DScene()
             (*iter)->ResetFlag(OBJ_LIGHTED);
         }
     }
-    // sort this lists by primary textures
-    CObjectTextureLessThenFunctional cmpfunct;
-    if (CheckFlag(WC_RENDER_OBJECTS | WC_RENDER_UNITS))
-    {
-        pRend->SetTexturingAlphaMode(AM_MULTIPLY);
-        // remove all object screen rect structs (from the last render)
-        lstScreenObjects.clear();
-        // flush previous renders
-        pRend->FlushBuffers();
-        // set alpha blend mode and alpha ref value
-        pRend->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
-        pRend->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, TRUE);
-        pRend->FlushBuffers();
-    }
-    auto lbObjDrawWithoutBBox = [pRend](CObject3D *obj) { obj->DrawWithoutBBox(pRend); };
-    auto lbObjDraw = [pRend](CObject3D *obj) { obj->Draw(pRend); };
-    auto lbAddObjScreenRects = [this](const CMapObject *obj) {
-        AddScreenRects(obj, &lstScreenObjects);
+    // Publish current poses for off-screen casters as well as visible objects.
+    std::set<int> prepared;
+    auto prepare = [&](CMapObject* object) {
+        if (!object || !object->GetObjectSpecific() || !prepared.insert(object->GetID()).second)
+            return;
+        static_cast<CObject3DClientSpecific*>(object->GetObjectSpecific())->PrepareOwnedVisual(
+            pRend, object->CheckFlag(OBJ_VISIBLE) != 0);
     };
-    // check for objects rendering
-    if (CheckFlag(WC_RENDER_OBJECTS))
-    {
-        std::sort(visibleBuildings.begin(), visibleBuildings.end(), cmpfunct);
-        std::sort(visibleObjects.begin(), visibleObjects.end(), cmpfunct);
-        std::sort(visibleLevers.begin(), visibleLevers.end(), cmpfunct);
-        std::sort(visibleTrees.begin(), visibleTrees.end(), cmpfunct);
-        // enable alpha blending and alpha ref testing
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHAREF, 200);
-        // draw objects
-        for_each(visibleObjects.begin(), visibleObjects.end(), lbObjDrawWithoutBBox);
-        // draw levers (and add screen rects)
-        for_each(visibleLevers.begin(), visibleLevers.end(), lbObjDraw);
-        for_each(visibleLevers.begin(), visibleLevers.end(), lbAddObjScreenRects);
-
-        pRend->FlushBuffers();
-        // draw buildings
-        for_each(visibleBuildings.begin(), visibleBuildings.end(), lbObjDrawWithoutBBox);
-        // draw trees
-        for_each(visibleTrees.begin(), visibleTrees.end(), lbObjDrawWithoutBBox);
-        pRend->FlushBuffers();
-    }
-    // check for Units rendering
-    if (CheckFlag(WC_RENDER_UNITS) && !visibleUnits.empty())
-    {
-        std::sort(visibleUnits.begin(), visibleUnits.end(), cmpfunct);
-        // enable alpha blending and alpha ref testing
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHAREF, 10);
-        // draw units
-        // pRend->SetTexturingAlphaMode(AM_MULTIPLY);
-        for_each(visibleUnits.begin(), visibleUnits.end(), lbObjDraw);
-        for_each(visibleUnits.begin(), visibleUnits.end(), lbAddObjScreenRects);
-        pRend->FlushBuffers();
-    }
+    for (const auto* list : {&visibleObjects, &visibleBuildings, &visibleTrees, &visibleLevers,
+                            &visibleUnits, &shadowObjects, &shadowBuildings, &shadowTrees,
+                            &shadowLevers, &shadowUnits})
+        for (auto* object : *list) prepare(object);
     // Publish only footprints with a known creator and current native lifetime.
     try
     {
@@ -3608,6 +3520,29 @@ BOOL CWorldClient::Draw3DScene()
     {
         OwnedRender::E1PublishGroundCoverFootprints({}, false);
     }
+    return TRUE;
+}
+// Only remaining overlays: world object colour and shadows have no OpenEI draw.
+BOOL CWorldClient::Draw3DScene()
+{
+    if (!pTerrain || !pTerrain->IsLoaded()) return FALSE;
+    CRenderer *pRend = &theRenderer;
+    CDXGeometryProcessor *pGPU = pRend->GetGPU();
+    lstScreenObjects.clear();
+    auto record = [this](CMapObject* object, bool selectable) {
+        if (object->CheckFlag(OBJ_HIDDEN) || !object->CheckFlag(OBJ_VISIBLE)) return;
+        OwnedRender::E1ReportOwnedVisual(object->GetID());
+        if (selectable) AddScreenRects(object, &lstScreenObjects);
+    };
+    if (CheckFlag(WC_RENDER_OBJECTS)) {
+        for (auto* object : visibleObjects) record(object, false);
+        for (auto* object : visibleBuildings) record(object, false);
+        for (auto* object : visibleTrees) record(object, false);
+        for (auto* object : visibleLevers) record(object, true);
+    }
+    if (CheckFlag(WC_RENDER_UNITS))
+        for (auto* object : visibleUnits) record(object, true);
+
     // draw terrain prints (footprints, blood and fireprints)
     if (!bloodprints.empty() || !footprints.empty() || !fireprints.empty())
     {
@@ -3628,10 +3563,6 @@ BOOL CWorldClient::Draw3DScene()
         pRend->FlushBuffers();
         ModShadowSchedule::BeginFrame();
         pRend->GetD3D()->BeginModShadows();
-        std::sort(shadowBuildings.begin(), shadowBuildings.end(), cmpfunct);
-        std::sort(shadowObjects.begin(), shadowObjects.end(), cmpfunct);
-        std::sort(shadowLevers.begin(), shadowLevers.end(), cmpfunct);
-        std::sort(shadowTrees.begin(), shadowTrees.end(), cmpfunct);
         // shift shadow in camera direction
         SHMatrix matrix;
         Identity(matrix);
@@ -3645,15 +3576,6 @@ BOOL CWorldClient::Draw3DScene()
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
         pTerrain->DrawModTerrainShadow(pRend);
-        // Objects the owned-visual frame drew cast owned shadows instead.
-        auto lbObjDrawShadow = [pRend](CObject3D *obj) {
-            if (!OwnedRender::E1OwnedVisualDrawn(obj->GetID())) obj->DrawRealisticShadow2(pRend);
-        };
-        for_each(shadowLevers.begin(), shadowLevers.end(), lbObjDrawShadow);
-        for_each(shadowObjects.begin(), shadowObjects.end(), lbObjDrawShadow);
-        for_each(shadowBuildings.begin(), shadowBuildings.end(), lbObjDrawShadow);
-        for_each(shadowTrees.begin(), shadowTrees.end(), lbObjDrawShadow);
-        for_each(shadowUnits.begin(), shadowUnits.end(), lbObjDrawShadow);
         pRend->FlushBuffers();
         pRend->GetD3D()->EndModShadows();
         ModShadowSchedule::EndFrame();

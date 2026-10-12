@@ -25,11 +25,11 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
                            const E1VisualInputs& inputs) noexcept;
 // Whether the static set was flushed by the last E1RunOwnedVisualFrame.
 bool E1OwnedVisualFrameFlushedStatics() noexcept;
-// Whether the last owned-visual frame drew this object. Its legacy figures
-// and stock shadow are then skipped (game.exe bridge: claimed visuals); an
-// object the frame did not draw keeps its legacy path, so nothing vanishes.
+// Whether this draw's owned frame accepted an object's colour.
+// Unclaimed objects are skipped, with no legacy colour/shadow fallback.
 bool E1OwnedVisualDrawn(std::int32_t id) noexcept;
-// Called at each world draw start: forgets the drawn set when the previous
-// world draw ran no owned-visual frame.
+// Reports acceptance/rejection only when an object's state changes.
+void E1ReportOwnedVisual(std::int32_t id) noexcept;
+// Each world draw unconditionally retires the previous result.
 void E1OwnedVisualFrameNewDraw() noexcept;
 }

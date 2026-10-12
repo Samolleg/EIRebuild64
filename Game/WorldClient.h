@@ -387,6 +387,7 @@ public:
     CCamera *GetCamera() { return pCamera; }
     void SetCameraScroll(CPoint point, int nFlags);
     //
+    BOOL Prepare3DScene();
     BOOL Draw3DScene();
     BOOL Draw();
     // idle function (call from CWinApp::OnIdle)

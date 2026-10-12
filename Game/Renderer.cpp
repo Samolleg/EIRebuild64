@@ -887,8 +887,13 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
     if(!pDX11->IsOwnedWorldActive() || !pDX11->GetOwnedRenderer().FigureActive())return false;
-    // A visual the retained scene claims is drawn by the owned-visual frame.
-    if(OwnedRender::E1OwnedVisualDrawn(std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id)))return true;
+    // World objects belong to the committed frame, including rejected visuals.
+    // Never submit a second figure draw or return to OpenEI for these IDs.
+    const auto objectId = std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id);
+    if (objectId > 0) {
+        OwnedRender::E1ReportOwnedVisual(objectId);
+        return true;
+    }
     if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
        !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) return false;
 

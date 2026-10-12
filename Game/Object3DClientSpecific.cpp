@@ -20,6 +20,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FigureClientSpecific.h"
 #include "AnimationSystem2.h"
 #include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E1Surface.h"
 #include "owned_asset_loader.h"
 
@@ -854,16 +855,8 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
 catch (...) { return false; }
 // BOOL CObject3DClientSpecific::Draw()
 // draw
-BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
+bool CObject3DClientSpecific::PrepareOwnedResources()
 {
-    if (lpObject->CheckFlag(OBJ_HIDDEN))
-        return TRUE;
-    CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    CPlot3D objectCP = (lpObject)->GetCP();
-    SHMatrix matrix;
-    int nFigureClipFlag = 0;
-    bool bHaveScale = false;
-    //
     lpObject->FinalDataLoading();
     // Only immutable shared providers are replayable here; never use a base
     // canonical alias to overwrite current private mouth/wound state.
@@ -891,6 +884,86 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
         ownedAppearanceAttempted = true;
         PublishOwnedAppearance();
     }
+    return true;
+}
+bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen)
+{
+    if (lpObject->CheckFlag(OBJ_HIDDEN)) return true;
+    const bool resourcesReady = PrepareOwnedResources();
+    if (lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    const bool published = resourcesReady && PublishOwnedPose();
+    if (!published) {
+        const auto resource = OwnedRender::E1Scene().Resource(this);
+        if (resource.serial)
+            OwnedRender::E1Scene().Scene().visual_reject(resource,
+                owned::RetainedVisualStatus::unsupported_selector,
+                "object_pose.current_draw_preparation", "host.object_pose");
+    }
+    if (!visibleOnScreen) return published;
+
+    // Picking uses current host geometry, independently of GPU acceptance.
+    const bool selectable = lpObject->WhoAmI() == HPC_UNIT || lpObject->WhoAmI() == HPC_LEVER;
+    rcRect.SetRectEmpty();
+    if (selectable) lpObject->rcScreenRect.SetRectEmpty();
+    CDXGeometryProcessor *gpu = pRend->GetGPU();
+    lpObject->CreateCurrentPlacement();
+    SHMatrix matrix;
+    lpObject->GetPlacement(matrix);
+    gpu->PushMainMatrix(matrix);
+    gpu->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+    Identity(matrix);
+    const bool scaled = GetScaleMatrix(matrix);
+    if (scaled) {
+        gpu->PushMainMatrix(matrix);
+        gpu->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+    }
+    bool anyVisible = false;
+    auto* object = static_cast<CObject3D*>(lpObject);
+    for (int index = 0; index < object->GetNumFigures(); ++index) {
+        CFigure* figure = object->GetFigure(index);
+        if (!figure || fabs2(figure->GetCP()) > 1e9f) continue;
+        figure->CreateCurrentPlacement();
+        figure->GetPlacement(matrix);
+        gpu->PushMainMatrix(matrix);
+        gpu->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+        CRect rect;
+        static_cast<CFigureClientSpecific*>(figure->GetFigureSpecific())->PrepareOwnedPicking(
+            pRend, selectable ? &rect : nullptr);
+        anyVisible |= figure->CheckFlag(FIG_VISIBLE) != 0;
+        if (selectable && !rect.IsRectEmpty()) rcRect |= rect;
+        gpu->PopMatrix(MAT_STACK_WORLDSPACE);
+        gpu->PopMainMatrix();
+    }
+    if (scaled) {
+        gpu->PopMatrix(MAT_STACK_WORLDSPACE);
+        gpu->PopMainMatrix();
+    }
+    gpu->PopMatrix(MAT_STACK_WORLDSPACE);
+    gpu->PopMainMatrix();
+    if (selectable) lpObject->rcScreenRect = rcRect;
+    if (anyVisible) lpObject->SetFlag(OBJ_VISIBLE);
+    else lpObject->ResetFlag(OBJ_VISIBLE);
+    return published;
+}
+
+BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
+{
+    // Publication and picking precede this draw's owned scene commit.
+    if (pRend->GetD3D()->IsOwnedWorldActive() && lpObject->GetID() > 0) {
+        OwnedRender::E1ReportOwnedVisual(lpObject->GetID());
+        if (pRect) *pRect = lpObject->rcScreenRect;
+        return TRUE;
+    }
+    if (lpObject->CheckFlag(OBJ_HIDDEN))
+        return TRUE;
+    CDXGeometryProcessor *pGPU = pRend->GetGPU();
+    CPlot3D objectCP = (lpObject)->GetCP();
+    SHMatrix matrix;
+    int nFigureClipFlag = 0;
+    bool bHaveScale = false;
+    //
+    if (!PrepareOwnedResources()) return FALSE;
     //
     if (!lpObject->CheckFlag(OBJ_STATIC))
         lpObject->ResetFlag(OBJ_LIGHTED);

@@ -86,10 +86,12 @@ private:
 
 private:
     void CreateShadowShiftScaleMatrix(SHMatrix &matrix);
+    bool PrepareOwnedResources();
     bool PublishOwnedAppearance() noexcept;
     bool PublishOwnedPose() noexcept;
 
 public:
+    bool PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen);
     CObject3DClientSpecific();
     virtual ~CObject3DClientSpecific();
     // create/destroy

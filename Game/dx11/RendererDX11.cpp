@@ -437,17 +437,27 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
         // was rejected before the flush) the static set is flushed here.
         if (visuals)
             owned = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, *visuals);
-        if (visuals && OwnedRender::E1OwnedVisualFrameFlushedStatics())
-            return S_OK;
-        return renderer.flush_native_static(frame, ownedWorldToClip);
+        HRESULT hr = S_OK;
+        if (!visuals || !OwnedRender::E1OwnedVisualFrameFlushedStatics())
+            hr = renderer.flush_native_static(frame, ownedWorldToClip);
+        // Complete queued colour before the host draws remaining overlays.
+        if (SUCCEEDED(hr)) hr = renderer.flush_native();
+        if (FAILED(hr)) renderer.discard_native();
+        return hr;
     });
-    IfFailedThrowHR(pass);
+    if (FAILED(pass)) OwnedRender::E1OwnedVisualFrameNewDraw();
     c56WorldPassRan = true;
-    const int state = visuals ? (owned ? 2 : 1) : 0;
+    RefreshOwnedTargets();
+    SetRenderStates();
+    for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
+        ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
+        deviceContext->PSSetShaderResources(stage, 1, &resource);
+    }
+    const int state = FAILED(pass) ? 3 : visuals ? (owned ? 2 : 1) : 0;
     if (state != c56WorldPassState) {
         c56WorldPassState = state;
         GameJournal::Event("RENDER", "world_pass",
-            "owner=c56 owned_visual_frame=%s", state == 2 ? "drawn" : state == 1 ? "rejected" : "not_requested");
+            "owner=c56 owned_visual_frame=%s hr=%08lx", state == 2 ? "drawn" : state == 0 ? "not_requested" : "rejected", static_cast<unsigned long>(pass));
     }
 }
 

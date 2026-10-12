@@ -1,10 +1,12 @@
 #include "E1VisualFrame.h"
+#include "../GameJournal.h"
 #include "renderer.h"
 #include "engine_bridge.h"
 #include "retained_static_scene.h"
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <map>
 
 namespace {
 // Native sinks of the embedded host. They mirror the DirectDraw proxy's
@@ -19,8 +21,10 @@ struct Sink {
 };
 Sink* self(void* context) noexcept { return static_cast<Sink*>(context); }
 bool lastFlushed = false;
-std::vector<std::int32_t> lastDrawn;   // sorted
+std::vector<std::int32_t> currentDrawn;   // sorted, this world draw only
 bool ranThisDraw = false;
+std::uint64_t reportEpoch = 0;
+std::map<std::int32_t, bool> reportedVisuals;
 
 bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeGeometryResult& result) noexcept try {
     using namespace owned;
@@ -168,7 +172,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     std::vector<std::int32_t> drawn;
     const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn);
     std::sort(drawn.begin(), drawn.end());
-    lastDrawn.swap(drawn);
+    currentDrawn.swap(drawn);
     ranThisDraw = true;
     if (sink.object) renderer.rollback_native(sink.checkpoint);
     // The sinks point at this stack frame: never leave them installed.
@@ -178,10 +182,25 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
 }
 bool E1OwnedVisualFrameFlushedStatics() noexcept { return lastFlushed; }
 void E1OwnedVisualFrameNewDraw() noexcept {
-    if (!ranThisDraw) lastDrawn.clear();
+    currentDrawn.clear();
+    lastFlushed = false;
     ranThisDraw = false;
 }
+void E1ReportOwnedVisual(std::int32_t id) noexcept try {
+    const auto epoch = owned::bridge_current_world_epoch();
+    if (reportEpoch != epoch) {
+        reportedVisuals.clear();
+        reportEpoch = epoch;
+    }
+    const bool drawn = E1OwnedVisualDrawn(id);
+    const auto previous = reportedVisuals.find(id);
+    if (previous == reportedVisuals.end() || previous->second != drawn) {
+        reportedVisuals[id] = drawn;
+        GameJournal::Event("RENDER", "world_visual",
+            "id=%d owner=c56 status=%s", id, drawn ? "drawn" : "skipped_unclaimed");
+    }
+} catch (...) {}
 bool E1OwnedVisualDrawn(std::int32_t id) noexcept {
-    return id > 0 && std::binary_search(lastDrawn.begin(), lastDrawn.end(), id);
+    return ranThisDraw && id > 0 && std::binary_search(currentDrawn.begin(), currentDrawn.end(), id);
 }
 }

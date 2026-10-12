@@ -21,6 +21,7 @@ private:
 private:
     void RecalcXYAdd(float fpTimeStep);
     void DrawBBox(CRenderer *pRend);
+    void CalculateScreenBounds(CRenderer *pRend, CRect *pRect);
 
     IGeometry *GetGeometry()
     {
@@ -49,6 +50,7 @@ public:
     void Calc2DClipRect(CXYZWArray &homoscreen);
     void Calc2DClipRect(CTLVertexArray &tlscreen);
     const CRect &Get2DClipRect() const { return rcClip; }
+    void PrepareOwnedPicking(CRenderer *pRend, CRect *pRect);
     // drawing
     BOOL Draw(CRenderer *pRend, const CQuaternion &qObject, const CPlot3D &cpObject,
               LPGAMEBASE lpMaterial, BYTE cFog, CRect *pRect);
