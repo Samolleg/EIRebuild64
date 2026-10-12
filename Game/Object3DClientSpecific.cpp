@@ -667,7 +667,7 @@ void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
     ownedAppearanceAttempted = false;
     if (!hadAttempt)
         return;
-    const auto resource = OwnedRender::E1Scene().Resource(this);
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     if (resource.serial)
         OwnedRender::E1Scene().Scene().visual_reject(resource,
             owned::RetainedVisualStatus::unsupported_appearance,
@@ -678,7 +678,7 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
     CObject3D* object = static_cast<CObject3D*>(lpObject);
     auto* animation = object ? object->GetAnimationSystem2() : nullptr;
     IGeometry* geometry = object ? object->GetGeometry() : nullptr;
-    const auto resource = OwnedRender::E1Scene().Resource(this);
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     auto& scene = OwnedRender::E1Scene().Scene();
     auto reject = [&](const char* predicate) {
         if (resource.serial)
@@ -799,7 +799,7 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
 }
 catch (...)
 {
-    const auto resource = OwnedRender::E1Scene().Resource(this);
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     if (resource.serial)
         OwnedRender::E1Scene().Scene().visual_reject(resource,
             owned::RetainedVisualStatus::unsupported_appearance,
@@ -810,7 +810,7 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
 {
     CObject3D* object = static_cast<CObject3D*>(lpObject);
     CAnimationSystem2* animation = object ? object->GetAnimationSystem2() : nullptr;
-    const auto resource = OwnedRender::E1Scene().Resource(this);
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     auto& hostScene = OwnedRender::E1Scene();
     auto& scene = hostScene.Scene();
     if (!resource.serial || !object || !animation) return false;
@@ -893,7 +893,7 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
 {
     if (lpObject->CheckFlag(OBJ_HIDDEN)) {
         // Keep an already published caster from surviving a hide transition.
-        const auto resource = OwnedRender::E1Scene().Resource(this);
+        const auto resource = OwnedRender::E1Scene().Resource(lpObject);
         if (resource.serial) PublishOwnedPose();
         return true;
     }
@@ -910,7 +910,7 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
     const bool published = resourcesReady && PublishOwnedPose();
     if (!published) {
-        const auto resource = OwnedRender::E1Scene().Resource(this);
+        const auto resource = OwnedRender::E1Scene().Resource(lpObject);
         if (resource.serial)
             OwnedRender::E1Scene().Scene().visual_reject(resource,
                 owned::RetainedVisualStatus::unsupported_selector,
