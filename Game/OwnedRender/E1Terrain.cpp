@@ -36,6 +36,18 @@ bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexce
     output = source;
     return bool(output.terrain);
 }
+bool E1ShadowTerrain(owned::EmbeddedVisualFrameInputs& inputs,
+    owned::RetainedTerrainSourceSnapshot& pinned) noexcept {
+    if (!E1TerrainView() || !source.geometry ||
+        materialGeometry[0] != source.geometry->revision || !materials[0].enabled) return false;
+    pinned = source;
+    inputs.terrain_source = &pinned;
+    inputs.terrain_frame = &view;
+    inputs.terrain_dynamic = &sectors;
+    inputs.terrain_to_world = transform;
+    inputs.terrain_material = materials[0];
+    return true;
+}
 bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_t revision,
     const char* project, const char* header, E1TerrainRead read, void* context,
     std::string& failure) noexcept try {

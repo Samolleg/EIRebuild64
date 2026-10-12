@@ -12,7 +12,7 @@
 #include "../OwnedRender/E1RendererFacade.h"
 #include "../OwnedRender/E1SurfaceFacade.h"
 #include "../FrameDiagnostics.h"
-#include "ModShadowDX11.h"
+
 #include "ModWorldBackgroundDX11.h"
 #include "UIColorKeyBlit.h"
 #include "../OwnedRender/E1TerrainState.h"
@@ -106,7 +106,7 @@ bool CDX11::SetRenderStates()
                                                     0);
     }
     this->SetAlphaRef(alpha_test_enable ? alpharef : 0);
-    if(modShadows && modShadows->active)modShadows->Bind();
+
     return true;
 }
 
@@ -151,8 +151,8 @@ owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
 
 bool CDX11::SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet)
 {
-    unsigned width=0,height=0;
-    if(!ownedWorldActive || (modShadows&&modShadows->active) || GetTerrainShadowSize(width,height))return false;
+
+    if(!ownedWorldActive)return false;
     uint32_t states[256]={};
     states[D3DRENDERSTATE_ZENABLE]=D3DZB_TRUE;states[D3DRENDERSTATE_ZWRITEENABLE]=TRUE;
     states[D3DRENDERSTATE_ZFUNC]=D3DCMP_LESSEQUAL;states[D3DRENDERSTATE_CULLMODE]=D3DCULL_CCW;
@@ -355,8 +355,7 @@ int CDX11::DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
     this->deviceContext->IASetPrimitiveTopology(primitive);
     this->deviceContext->PSSetSamplers(0, 1, this->samplerState.GetAddressOf());
     this->deviceContext->PSSetSamplers(1, 1, this->samplerState.GetAddressOf());
-    if(!modShadows || !modShadows->active)
-        this->deviceContext->PSSetShader(m_shaders->ps_main.GetShader(), NULL, 0);
+    this->deviceContext->PSSetShader(m_shaders->ps_main.GetShader(), NULL, 0);
 
     // update const buffer
     m_cbs->cb_vs_vertexshader.ApplyChanges();
@@ -373,8 +372,8 @@ int CDX11::DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
     this->deviceContext->IASetVertexBuffers(0, 1, vbVertices->GetAddressOf(),
                                             vbVertices->StridePtr(), &offset);
     this->deviceContext->IASetIndexBuffer(idxBuf->Get(), DXGI_FORMAT_R16_UINT, 0);
-    if(modShadows && modShadows->terrainPass)modShadows->BindTerrainResource();
-    if(ownedWorldActive && (!modShadows||!modShadows->active))
+
+    if(ownedWorldActive)
         IfFailedThrowHR(ownedRenderer.BindWorldPixels(theRenderer.IsAddFog()!=0));
     this->deviceContext->DrawIndexed(dwIndexCount, 0, 0);
     const uint32_t triangles = primitive == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST ? dwIndexCount / 3 :
@@ -628,7 +627,7 @@ CDX11::~CDX11()
 {
     owned::camp_inventory_shutdown_icons();
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);
-    modBackground.reset();modShadows.reset();
+    modBackground.reset();
     m_effproc.reset();m_caches.reset();m_batchers.reset();
     uiColorKey.reset();
     this->spriteBatch.reset();
@@ -902,30 +901,6 @@ void CDX11::SetAlphaRef(float value)
 {
     m_cbs->cb_ps_pixelshader.data.alphaRef = value;
 };
-void CDX11::BeginModShadows() {
-    if(!modShadows) modShadows=std::make_shared<ModShadowDX11>(device.Get(),deviceContext.Get());
-    modShadows->Begin(m_width,m_height);
-}
-void CDX11::EndModShadows() { if(modShadows)modShadows->End(); }
-std::vector<WORD> CDX11::ReadModShadowAlpha(ID3D11ShaderResourceView *source) {
-    if(!modShadows)modShadows=std::make_shared<ModShadowDX11>(device.Get(),deviceContext.Get());
-    return modShadows->ReadAlpha(source);
-}
-
-void CDX11::UpdateTerrainShadow(unsigned w,unsigned h,const unsigned char *pixels){
-    if(!modShadows)modShadows=std::make_shared<ModShadowDX11>(device.Get(),deviceContext.Get());
-    modShadows->UpdateTerrain(w,h,pixels);
-}
-void CDX11::SetTerrainShadowPass(bool enabled){
-    modShadows->SetTerrainPass(enabled);
-}
-
-bool CDX11::GetTerrainShadowSize(unsigned &width,unsigned &height) const {
-    if(!modShadows || !modShadows->terrainPass)return false;
-    width=modShadows->TerrainWidth();height=modShadows->TerrainHeight();
-    return width && height;
-}
-
 void CDX11::ResetWorldBackground(){modBackground.reset();}
 void CDX11::DrawWorldBackground(const std::shared_ptr<ModWorldBackground::FrameSnapshot>& snapshot,const WorldBackground::VisualEnvironment& environment,const std::array<float,4>& depthRow,unsigned long fogColor,bool transparentPass){
     if(!snapshot)return;

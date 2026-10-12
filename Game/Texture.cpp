@@ -11,7 +11,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ResourceManager.h"
 #include "mmpFormat.h"
 #include "Texture.h"
-#include "ModShadowRaster.h"
+
 #include "Renderer.h"
 #include "GeneralSettings.h"
 #include "dx11/RendererDX11.h"
@@ -193,7 +193,7 @@ std::set<int> formats;
 // 4. perform transfer from render surface to video
 BOOL CTexture::Load(CRenderer *pRend, SMMPFileHeader *pHdr, DWORD dwFromLevel)
 {
-    modShadowAlpha.clear();
+
     if (CheckFlag(TEX_LOADED))
         return TRUE;
     // ASSERT(ddpfFormat.dwRGBBitCount == 16);
@@ -305,7 +305,7 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
 /////////////////////////////////////////////////////////////////////////////////////
 void CTexture::Unload()
 {
-    modShadowAlpha.clear();
+
     nTotalSize = 0;
     //
     userdata.RemoveAll();
@@ -343,7 +343,7 @@ BOOL CTexture::Create()
 }
 void CTexture::Destroy()
 {
-    modShadowAlpha.clear();
+
     pSurface = 0;
     SetLRUSegment(0);
     ResetAllFlags();
@@ -355,11 +355,4 @@ bool CTexture::IsUserDataEqual(const CBYTEArray &userdata1) const
         return false;
     return memcmp(userdata.GetData(), userdata1.GetData(), userdata.GetSize()) == 0;
 }
-WORD *CTexture::GetModShadowAlpha() {
-    if(!pSurface)return nullptr;
-    if(modShadowAlpha.empty()) {
-        modShadowAlpha=theRenderer.GetD3D()->ReadModShadowAlpha(pSurface->GetShaderResource().Get());
-        modShadowOpaque=ModShadow::PrepareMask(modShadowAlpha.data(),256);
-    }
-    return modShadowOpaque ? nullptr : modShadowAlpha.data();
-}
+

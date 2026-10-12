@@ -24,7 +24,7 @@ static uint64_t NextTerrainPhaseRevision(){static uint64_t value=1;return ++valu
 #include "Renderer.h"
 #include "DXGeometryProcessor.h"
 #include "dx11/RendererDX11.h"
-#include "ModTerrainUV.h"
+
 
 const int N_VERT_PTILE = 9;
 const int N_FACES_PTILE = 8;
@@ -367,17 +367,6 @@ BOOL CSector::Draw(CRenderer *pRend, CTerrain *pTerrain, int nMat, D3DMATRIX *pM
     if (nClipFlag == TRV_INVISIBLE)
         return TRUE;
 
-    unsigned shadowWidth=0,shadowHeight=0;
-    const bool terrainShadow=pRend->GetD3D()->GetTerrainShadowSize(shadowWidth,shadowHeight);
-    auto makeVertex=[&](D3DTLVERTEX *dst,LPBYTE clip,STXVertex *src) {
-        MakeTL(dst,clip,src);
-        if(terrainShadow) {
-            // sx/sy are already projected. Carry map UV through the existing clipper.
-            const CPlot3D &world=mesh[src->pLVert-lVertexes.GetData()];
-            ModTerrainUV::Assign(*dst,world.x,world.y,shadowWidth,shadowHeight);
-        }
-    };
-
     // Static data
     static CTLVertexArray tlVertexes;
     static CWordArray tFaces, tClippedFaces;
@@ -425,45 +414,45 @@ BOOL CSector::Draw(CRenderer *pRend, CTerrain *pTerrain, int nMat, D3DMATRIX *pM
             case 0:
                 for (i = 0; i < nVToDraw / 8; i++)
                 {
-                    makeVertex(pDst + 0, pClip + 0, pSrc + 0);
-                    makeVertex(pDst + 1, pClip + 1, pSrc + 1);
-                    makeVertex(pDst + 2, pClip + 2, pSrc + 2);
-                    makeVertex(pDst + 3, pClip + 3, pSrc + 3);
-                    makeVertex(pDst + 4, pClip + 4, pSrc + 4);
-                    makeVertex(pDst + 5, pClip + 5, pSrc + 5);
-                    makeVertex(pDst + 6, pClip + 6, pSrc + 6);
-                    makeVertex(pDst + 7, pClip + 7, pSrc + 7);
+                    MakeTL(pDst + 0, pClip + 0, pSrc + 0);
+                    MakeTL(pDst + 1, pClip + 1, pSrc + 1);
+                    MakeTL(pDst + 2, pClip + 2, pSrc + 2);
+                    MakeTL(pDst + 3, pClip + 3, pSrc + 3);
+                    MakeTL(pDst + 4, pClip + 4, pSrc + 4);
+                    MakeTL(pDst + 5, pClip + 5, pSrc + 5);
+                    MakeTL(pDst + 6, pClip + 6, pSrc + 6);
+                    MakeTL(pDst + 7, pClip + 7, pSrc + 7);
                     pDst += 8;
                     pClip += 8;
                     pSrc += 8;
                 }
                 for (i = 0; i < nVToDraw % 8; i++)
-                    makeVertex(pDst++, pClip++, pSrc++);
+                    MakeTL(pDst++, pClip++, pSrc++);
                 break;
             case 1:
                 for (i = 0; i < nTilesToDraw; i++)
                 {
-                    makeVertex(pDst++, pClip++, pSrc);
+                    MakeTL(pDst++, pClip++, pSrc);
                     pSrc += 2;
-                    makeVertex(pDst++, pClip++, pSrc++);
-                    makeVertex(pDst++, pClip++, pSrc);
+                    MakeTL(pDst++, pClip++, pSrc++);
+                    MakeTL(pDst++, pClip++, pSrc);
                     pSrc += 2;
-                    makeVertex(pDst++, pClip++, pSrc++);
-                    makeVertex(pDst++, pClip++, pSrc);
+                    MakeTL(pDst++, pClip++, pSrc++);
+                    MakeTL(pDst++, pClip++, pSrc);
                     pSrc += 2;
-                    makeVertex(pDst++, pClip++, pSrc++);
+                    MakeTL(pDst++, pClip++, pSrc++);
                 }
                 break;
             case 2:
                 for (i = 0; i < nTilesToDraw; i++)
                 {
-                    makeVertex(pDst++, pClip++, pSrc);
+                    MakeTL(pDst++, pClip++, pSrc);
                     pSrc += 2;
-                    makeVertex(pDst++, pClip++, pSrc);
+                    MakeTL(pDst++, pClip++, pSrc);
                     pSrc += 4;
-                    makeVertex(pDst++, pClip++, pSrc);
+                    MakeTL(pDst++, pClip++, pSrc);
                     pSrc += 2;
-                    makeVertex(pDst++, pClip++, pSrc++);
+                    MakeTL(pDst++, pClip++, pSrc++);
                 }
                 break;
             }

@@ -1,4 +1,6 @@
 #include "E1VisualFrame.h"
+#include "E1TerrainSubmission.h"
+#include "E1Surface.h"
 #include "../GameJournal.h"
 #include "renderer.h"
 #include "engine_bridge.h"
@@ -18,6 +20,7 @@ struct Sink {
     owned::Renderer::NativeQueueCheckpoint checkpoint{};
     bool object = false;
     bool staticsFlushed = false;
+    bool shadowsEnabled = true;
 };
 Sink* self(void* context) noexcept { return static_cast<Sink*>(context); }
 bool lastFlushed = false;
@@ -113,7 +116,7 @@ bool frameState(void* context, owned::NativeFrameState& output) noexcept {
     std::memcpy(output.view.data(), &sink.state.transform[D3DTRANSFORMSTATE_VIEW], sizeof(output.view));
     std::memcpy(output.projection.data(), &sink.state.transform[D3DTRANSFORMSTATE_PROJECTION], sizeof(output.projection));
     output.material = owned::native_owned_fixed_state(sink.state);
-    output.shadows_enabled = sink.renderer->native_shadows_enabled();
+    output.shadows_enabled = sink.shadowsEnabled && sink.renderer->native_shadows_enabled();
     return true;
 }
 bool worldLighting(void* context, const owned::NativeWorldLighting& lighting) noexcept {
@@ -173,6 +176,18 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     Sink sink;
     sink.renderer = &renderer;
     sink.state = state;
+    sink.shadowsEnabled = (host.sceneFlags & 0x200u) != 0;
+    owned::RetainedTerrainSourceSnapshot terrain;
+    if (host.sceneFlags & 0x100u) {
+        E1ShadowTerrain(inputs, terrain);
+        inputs.draw_terrain = [](void* context) -> bool {
+            E1TerrainSubmission result;
+            return SUCCEEDED(E1SubmitTerrainPass(*static_cast<owned::Renderer*>(context), false, result)) &&
+                result.completed;
+        };
+        inputs.terrain_context = &renderer;
+    }
+    renderer.set_surface_texture_resolver(&E1ResolveSurface, nullptr);
     owned::bridge_set_native_geometry_sink(&sink, &submit, &beginBatch, &endBatch, &beginObject, &endObject,
         &frameState, &worldLighting, &shadowBegin, &shadowEnd, &shadowDiagnostics, &pointLights,
         &pointShadowBegin, &pointShadowEnd, &staticDepth, &pointShadowBatch, &pointShadowPublish,

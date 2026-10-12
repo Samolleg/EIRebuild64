@@ -51,8 +51,8 @@ private:
     DWORD dwSizeX, dwSizeY; // texture sizes x and y
     int nTotalSize;         // texture's estimated size (in bytes)
     CBYTEArray userdata;
-    std::vector<WORD> modShadowAlpha;
-    bool modShadowOpaque = false;
+
+
     DXGI_FORMAT m_texFormat;
     std::unique_ptr<CDXGISurface> pSurface; // surface
 private:
@@ -86,7 +86,7 @@ public:
         dwSizeY = dwNewSizeY;
     }
     // 'get-private-data' functions
-    WORD *GetModShadowAlpha();
+
     CDXGISurface *GetSurface() const { return pSurface.get(); }
     BOOL Load(CRenderer *pRend, LPCSTR pszBitmapName);
     BOOL Load(CRenderer *pRend, SMMPFileHeader *pHdr, DWORD dwFromLevel);

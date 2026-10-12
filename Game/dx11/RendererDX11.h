@@ -27,7 +27,7 @@ namespace owned { struct NativeOwnedFixedState; }
 namespace owned { class Renderer; }
 namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
 class ModWorldBackgroundDX11;
-class ModShadowDX11;
+
 class UIColorKeyBlit;
 class CDXGISurface;
 class CConstantBuffers;
@@ -46,7 +46,7 @@ class CDX11
 private:
     bool itemColorSum = false; // Per-draw item state, never a configuration option.
     std::shared_ptr<ModWorldBackgroundDX11> modBackground;
-    std::shared_ptr<ModShadowDX11> modShadows;
+
     std::shared_ptr<UIColorKeyBlit> uiColorKey;
     DWORD m_width, m_height;
     DirectX::XMFLOAT4 background_color;
@@ -112,12 +112,12 @@ public:
     enum class OwnedTerrainPassResult { unavailable, submitted, failed };
     bool Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
     ~CDX11();
-    void UpdateTerrainShadow(unsigned width,unsigned height,const unsigned char *pixels);
-    void SetTerrainShadowPass(bool enabled);
-    bool GetTerrainShadowSize(unsigned &width,unsigned &height) const;
-    void BeginModShadows();
-    void EndModShadows();
-    std::vector<WORD> ReadModShadowAlpha(ID3D11ShaderResourceView *source);
+
+
+
+
+
+
     void DrawWorldBackground(const std::shared_ptr<ModWorldBackground::FrameSnapshot>&,const WorldBackground::VisualEnvironment&,const std::array<float,4>& depthRow,unsigned long fogColor,bool transparentPass=false);
     void ResetWorldBackground();
     void BeginFrame();

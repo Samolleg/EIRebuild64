@@ -66,7 +66,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "StringProcessing.h"
 #include "IDebugInfoSystem.h"
 #include "Renderer.h"
-#include "ModShadowSchedule.h"
+
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
@@ -3060,7 +3060,7 @@ BOOL CWorldClient::Draw()
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
                           OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
-        pTerrain->DrawBase(&theRenderer);
+        pTerrain->DrawBase(&theRenderer, true);
         pRend->FlushBuffers();
     }
     ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
@@ -3084,7 +3084,7 @@ BOOL CWorldClient::Draw()
     }
     // Publish this draw's visibility and interpolated scene facts before c56
     // consumes them for critters, ground cover, lights, and retained geometry.
-    // Run after opaque terrain and scene preparation, before transparent water.
+    // Run after terrain and scene preparation, before ground colour and water.
     if (pTerrain && pTerrain->IsLoaded())
     {
         // The renderer's owned-visual frame (as the game.exe bridge's scene
@@ -3506,6 +3506,13 @@ BOOL CWorldClient::Prepare3DScene()
                             &visibleUnits, &shadowObjects, &shadowBuildings, &shadowTrees,
                             &shadowLevers, &shadowUnits})
         for (auto* object : *list) prepare(object);
+    // Caster admission is by native light-space bounds, not the camera list.
+    // Publish even outside the host draw radius: long sun/point shadows can
+    // enter visible receiver coverage while their source stays off screen.
+    for (auto* object : objects)
+        if (object && object->GetObjectSpecific() &&
+            object->GetID() > 0)
+            prepare(object);
     // Publish only footprints with a known creator and current native lifetime.
     try
     {
@@ -3556,34 +3563,6 @@ BOOL CWorldClient::Draw3DScene()
         if (theSettings.nTerrainEnableFireprints)
             for_each(fireprints.begin(), fireprints.end(), [](CFirePrints &obj) { obj.Draw(); });
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
-    }
-    // draw shadows
-    if (CheckFlag(WC_RENDER_SHADOWS))
-    {
-        pRend->FlushBuffers();
-        ModShadowSchedule::BeginFrame();
-        pRend->GetD3D()->BeginModShadows();
-        // shift shadow in camera direction
-        SHMatrix matrix;
-        Identity(matrix);
-        CPlot3D ptZAxis = theCamera.GetZAxis();
-        matrix._14 = -ptZAxis.x * 0.02f;
-        matrix._24 = -ptZAxis.y * 0.02f;
-        matrix._34 = -ptZAxis.z * 0.02f;
-        pGPU->PushMainMatrix(matrix);
-        //
-        pRend->SetTexturingAlphaMode(AM_MULTIPLY);
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-        pTerrain->DrawModTerrainShadow(pRend);
-        pRend->FlushBuffers();
-        pRend->GetD3D()->EndModShadows();
-        ModShadowSchedule::EndFrame();
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
-        //
-        pGPU->PopMainMatrix();
-
-        //
     }
     // draw selection for objects
     if (!selectedObjects.empty() && (theSettings.nSelectionType == 1) && CheckFlag(WC_RENDER_UNITS))

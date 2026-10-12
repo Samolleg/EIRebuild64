@@ -115,47 +115,5 @@ bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
         if (!OwnedRender::E1PublishTerrainView(this, view))
             GameJournal::Count("RENDER", "terrain_view_publication_failed", "source_or_view_invalid");
     }
-    // owned terrain via API5 retired; the renderer is embedded in stage 3
-    if(renderer && renderer->GetD3D())
-        renderer->GetD3D()->GetOwnedRenderer().TerrainFallback("owned_terrain_api5_retired_stage3");
-    return false;
-    auto* dx=renderer->GetD3D();unsigned width=0,height=0;
-    if(!dx||!dx->IsOwnedWorldActive()||dx->GetTerrainShadowSize(width,height))return false;
-    if(!renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)){
-        dx->GetOwnedRenderer().TerrainFallback("terrain_projection_stack_empty");return false;
-    }
-    const size_t count=size_t(GetSectorsNumber());
-    if(rendererSectorRows.size()!=count){rendererSectorRows.resize(count);rendererSectorPhases.resize(count);}
-    std::vector<EIRenderTerrainSectorV5> rows;rows.reserve(count);
-    // These sectors were just loaded, clipped and assigned LOD by Draw.
-    // Retain every resident row for release decisions; invisible rows simply
-    // contribute no color command. Unloaded geometry stays in one shared map.
-    POSITION pos=sectorLRU.GetHeadPosition();
-    while(pos){CSector* sector=sectorLRU.GetNext(pos);
-        if(!sector->IsHaveState(CSector::ESS_LIGHTED))continue;
-        const uint32_t index=uint32_t(sector->GetMapY()*nXSectors+sector->GetMapX());
-        auto& row=rendererSectorRows[index];row.sector=index;
-        // Draw's source domain is authoritative even when a cached sector's
-        // clip bits are from an older frame.
-        const int y=sector->GetMapY()-nClipMinSectorY,x=sector->GetMapX();
-        const bool visible=y>=0&&y<viewableSectorsMinX.GetSize()&&x>=viewableSectorsMinX[y]&&x<=viewableSectorsMaxX[y];
-        if(visible)sector->SetBorderLODsFlags();
-        sector->CopyRendererState(row,rendererSectorPhases[index]);
-        if(!visible)row.subparts=0;
-        rows.push_back(row);
-    }
-    EIRenderTerrainFrameV5 packet{};packet.source_revision=rendererRevision;
-    // DrawBase/DrawTransparent publish this terrain's own placement and push
-    // it onto PROJSPACE only. WORLDSPACE belongs to object traversal.
-    const SHMatrix& world=GetPlacement();
-    const SHMatrix& clip=renderer->GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
-    memcpy(packet.object_to_world,&world,sizeof(world));memcpy(packet.object_to_clip,&clip,sizeof(clip));
-    packet.camera[0]=theCamera.GetCP().x;packet.camera[1]=theCamera.GetCP().y;packet.camera[2]=theCamera.GetCP().z;
-    packet.lod_distances[0]=theSettings.fpTerrainLODs[0];packet.lod_distances[1]=theSettings.fpTerrainLODs[1];
-    packet.maximum_lod=nMaxLOD;packet.render_state=renderState;
-    packet.wind[0]=windDirection.x;packet.wind[1]=windDirection.y;
-    packet.wind_force=fpWindForce;packet.wind_normalized=fpWindForce01;packet.wind_phase=fpWindPhase;
-    packet.precise_time=float(theWorld.GetSegmentTimeCounter())/16.f;
-    packet.sectors=rows.data();packet.sector_count=uint32_t(rows.size());
-    return dx->SubmitOwnedTerrain(packet);
+    return false; // Preparation only; colour is submitted after native shadows.
 }
