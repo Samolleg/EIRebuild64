@@ -5,6 +5,7 @@
 #include "E1SurfaceBridge.h"
 #include "E1Surface.h"
 #include "../../external/owned-renderer/Source/renderer.h"
+#include <DirectXTex.h>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -22,6 +23,45 @@ std::map<std::uint64_t, CachedSurfaceImage>& surfaceImageCache() {
     return *value;
 }
 }
+
+HRESULT E1CaptureTarget(ID3D11DeviceContext* context, ID3D11Texture2D* source,
+    UINT width, UINT height, DXGI_FORMAT format, E1SurfaceCpuImage& image) noexcept try {
+    image = {};
+    if (!context || !source || !width || !height ||
+        format != DXGI_FORMAT_B8G8R8A8_UNORM) return E_INVALIDARG;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    context->GetDevice(&device);
+    DirectX::ScratchImage captured, converted, resized;
+    HRESULT hr = DirectX::CaptureTexture(device.Get(), context, source, captured);
+    if (FAILED(hr)) return hr;
+    const DirectX::Image* pixels = captured.GetImage(0, 0, 0);
+    if (!pixels) return E_FAIL;
+    if (pixels->format != format) {
+        // Raw linear values preserve the zone codes; scene postprocessing would
+        // change them. Force the non-WIC conversion to avoid color management.
+        hr = DirectX::Convert(*pixels, format, DirectX::TEX_FILTER_FORCE_NON_WIC,
+            DirectX::TEX_THRESHOLD_DEFAULT, converted);
+        if (FAILED(hr)) return hr;
+        pixels = converted.GetImage(0, 0, 0);
+    }
+    if (pixels->width != width || pixels->height != height) {
+        hr = DirectX::Resize(*pixels, width, height,
+            DirectX::TEX_FILTER_POINT | DirectX::TEX_FILTER_FORCE_NON_WIC, resized);
+        if (FAILED(hr)) return hr;
+        pixels = resized.GetImage(0, 0, 0);
+    }
+    const std::size_t rowBytes = std::size_t(width) * sizeof(DWORD);
+    if (rowBytes > (std::numeric_limits<LONG>::max)() ||
+        rowBytes > (std::numeric_limits<std::size_t>::max)() / height)
+        return E_INVALIDARG;
+    image.pixels.resize(rowBytes * height);
+    for (UINT y = 0; y < height; ++y)
+        std::memcpy(image.pixels.data() + std::size_t(y) * rowBytes,
+            pixels->pixels + std::size_t(y) * pixels->rowPitch, rowBytes);
+    image.width = width; image.height = height;
+    image.pitch = static_cast<LONG>(rowBytes); image.format = format;
+    return S_OK;
+} catch (...) { image = {}; return E_OUTOFMEMORY; }
 
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept try {

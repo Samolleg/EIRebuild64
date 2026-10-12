@@ -17,6 +17,10 @@ struct E1SurfaceCpuImage {
 std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id) noexcept;
 HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
     std::uint64_t generation, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texture) noexcept;
+// Capture the raw c56 target, resolving MSAA and converting/scaling to the host
+// surface without tone mapping or interpolation of color-coded hit-test masks.
+HRESULT E1CaptureTarget(ID3D11DeviceContext* context, ID3D11Texture2D* source,
+    UINT width, UINT height, DXGI_FORMAT format, E1SurfaceCpuImage& image) noexcept;
 // Read one completed published surface into the CPU image consumed by c56 blit.
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept;

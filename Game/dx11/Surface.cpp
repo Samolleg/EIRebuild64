@@ -558,13 +558,24 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
             D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
             source->GetDesc(&sourceDesc);
             self.texture->GetDesc(&destinationDesc);
-            if (sourceDesc.Width != destinationDesc.Width ||
-                sourceDesc.Height != destinationDesc.Height ||
-                sourceDesc.Format != destinationDesc.Format ||
-                sourceDesc.SampleDesc.Count != destinationDesc.SampleDesc.Count)
-                return E_INVALIDARG;
-            self.ownedSurface.BeginWrite();
-            context->CopyResource(self.texture.Get(), source.Get());
+            if (sourceDesc.Width == destinationDesc.Width &&
+                sourceDesc.Height == destinationDesc.Height &&
+                sourceDesc.Format == destinationDesc.Format &&
+                sourceDesc.SampleDesc.Count == destinationDesc.SampleDesc.Count &&
+                sourceDesc.SampleDesc.Quality == destinationDesc.SampleDesc.Quality &&
+                sourceDesc.MipLevels == destinationDesc.MipLevels &&
+                sourceDesc.ArraySize == destinationDesc.ArraySize) {
+                self.ownedSurface.BeginWrite();
+                context->CopyResource(self.texture.Get(), source.Get());
+            } else {
+                OwnedRender::E1SurfaceCpuImage image;
+                const HRESULT captured = OwnedRender::E1CaptureTarget(context, source.Get(),
+                    destinationDesc.Width, destinationDesc.Height, destinationDesc.Format, image);
+                if (FAILED(captured)) return captured;
+                self.ownedSurface.BeginWrite();
+                context->UpdateSubresource(self.texture.Get(), 0, nullptr,
+                    image.pixels.data(), static_cast<UINT>(image.pitch), 0);
+            }
             self.ownedSurface.Complete(self.texture.Get());
             return S_OK;
         });
