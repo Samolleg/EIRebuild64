@@ -189,7 +189,6 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
         return OwnedRender::E1SubmitTerrainPass(renderer, transparent, submission);
     });
     if (SUCCEEDED(hr) && submission.completed) {
-        if (!transparent) c56BaseTerrainSubmitted = true;
         return OwnedTerrainPassResult::submitted;
     }
 
@@ -314,7 +313,6 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
     c56WorldFigureMultipleTextures = 0;
     c56WorldFigureQueueFailed = 0;
     std::copy_n(frame.world_to_clip, ownedWorldToClip.size(), ownedWorldToClip.begin());
-    c56BaseTerrainSubmitted = false;
     c56WorldPassRan = false;
     IfFailedThrowHR(ownedRenderer.BeginWorld(frame, skyConsumed));
     ownedWorldActive = true;
@@ -325,7 +323,7 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 
 void CDX11::RunC56WorldPass()
 {
-    if (!ownedWorldActive || !c56BaseTerrainSubmitted || c56WorldPassRan || !rendererFacade)
+    if (!ownedWorldActive || c56WorldPassRan || !rendererFacade)
         return;
     owned::FixedState frame;
     for (const auto& value : fake_dx7.render_state)
