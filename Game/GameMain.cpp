@@ -1196,11 +1196,10 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
             theInterface.Draw2D();
         }
 
-        if (bFlip && bEnableRender && bNeedRender)
-        {
+        const bool present = bFlip && bEnableRender && bNeedRender;
+        if (present)
             theCursor.Draw();
-            pDX11->EndFrame();
-        }
+        pDX11->EndFrame(present);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////

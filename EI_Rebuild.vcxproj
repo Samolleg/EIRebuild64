@@ -212,7 +212,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(OutDir)luajit-x86.lib;mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(OutDir)OwnedRenderer\eid3d11_shaders.res;$(OutDir)luajit-x86.lib;mss32.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
     </Link>
     <FxCompile>
@@ -897,6 +897,11 @@
     <Natvis Include="images.natvis" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="OwnedRenderer\RendererShaders.vcxproj">
+      <Project>{F9F236B9-5E99-4BD6-B032-D727834B2329}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
     <ProjectReference Include="OwnedRenderer\OwnedRenderer.vcxproj" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'"><Project>{8F045552-BA21-4F45-9902-631E6359DABD}</Project></ProjectReference>
     <ProjectReference Include="luajit-x86\luajit.vcxproj"><Project>{2714e7b7-71e0-484a-81df-495cfdb463ad}</Project></ProjectReference>
   </ItemGroup>

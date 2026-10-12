@@ -86,6 +86,19 @@ public:
         }
     }
 
+    // Close an off-screen/capture frame without presenting it. DrawFrame(false)
+    // uses this path while it reads the rendered backbuffer into a surface.
+    HRESULT DiscardFrame() noexcept {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        frameActive = false;
+        try {
+            renderer.end_scene();
+            return S_OK;
+        } catch (...) {
+            return E_FAIL;
+        }
+    }
+
     bool Ready() const noexcept { return initialized; }
     bool FrameActive() const noexcept { return frameActive; }
     HWND Window() const noexcept { return window; }

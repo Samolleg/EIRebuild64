@@ -353,8 +353,14 @@ void CDX11::RefreshOwnedTargets()
     IfFailedThrowHR(rendererFacade->VisitDevice(nullptr, &OwnedRender::E1BindTargets));
 }
 
-void CDX11::EndFrame()
+void CDX11::EndFrame(bool present)
 {
+    if (!present) {
+        const HRESULT discarded = rendererFacade->DiscardFrame();
+        frameTiming.End(false);
+        IfFailedThrowHR(discarded);
+        return;
+    }
     FrameDiagnostics::Scope timing(FrameDiagnostics::Present);
     if (m_bMakeScreenShot)
     {

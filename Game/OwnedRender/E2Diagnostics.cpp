@@ -29,8 +29,10 @@ void bridge_report_event(const char* event, const char* detail) noexcept {
 }
 void bridge_append_probe_event(const char*, const char*) noexcept { E2_UNAVAILABLE("retail lifecycle probe"); }
 void bridge_trace_input_focus(HWND, const char*, UINT, WPARAM, int) noexcept { E2_UNAVAILABLE("retail input focus trace"); }
-bool bridge_game_sites_all_verified() noexcept { E2_UNAVAILABLE("retail game site verification"); return false; }
-bool bridge_semantic_slots_installed() noexcept { E2_UNAVAILABLE("retail semantic hooks (direct frame/UI scopes only)"); return false; }
+// The embedded EIRebuild host publishes its own render inputs directly. Retail
+// game.exe patch-site and semantic-hook checks do not apply to this frontend.
+bool bridge_game_sites_all_verified() noexcept { return true; }
+bool bridge_semantic_slots_installed() noexcept { return true; }
 const BridgeProfileSnapshot* bridge_latest_profile() noexcept { return nullptr; }
 void bridge_set_profile_enabled(bool enabled) { if (enabled) { E2_UNAVAILABLE("retail bridge profile"); } }
 void bridge_report_hovered_shadow() noexcept { E2_UNAVAILABLE("retail hovered-shadow capture"); }

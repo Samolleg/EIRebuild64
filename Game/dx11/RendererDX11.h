@@ -114,7 +114,7 @@ public:
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
     bool IsOwnedWorldActive() const { return ownedWorldActive; }
-    void EndFrame();
+    void EndFrame(bool present = true);
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
