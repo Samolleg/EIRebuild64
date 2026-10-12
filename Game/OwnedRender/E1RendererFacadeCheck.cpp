@@ -36,7 +36,11 @@ void mark(const char* value) {
 
 struct WarpRendererBackend {
     owned::Renderer renderer;
+    static void observe_initialization(void*, const char* stage) noexcept {
+        mark(stage);
+    }
     HRESULT ensure(HWND window, UINT width, UINT height) {
+        renderer.set_test_initialization_observer(&observe_initialization, nullptr);
         try {
             const HRESULT result = renderer.ensure_for_test_warp(window, width, height);
             if (FAILED(result)) warpFailureStage = renderer.test_initialization_failure_stage();
