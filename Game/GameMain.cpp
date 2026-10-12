@@ -653,6 +653,9 @@ static bool NGame::ProcessMessages()
 
 const int BAD_RESULT = 0xDEAD;
 
+// The renderer reads game archives (MOB sources, models) for the whole session,
+// not only during WinMainInit: its resource lease lives until shutdown.
+static std::unique_ptr<OwnedRender::ResourceRuntimeLease> ownedResourceRuntime;
 int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     //_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -760,7 +763,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
        // set new memory depleted handler
        // create worlds and establish connection to local server
     OwnedRender::ConfigureStartup();
-    OwnedRender::ResourceRuntimeLease ownedResourceRuntime;
+    ownedResourceRuntime = std::make_unique<OwnedRender::ResourceRuntimeLease>();
     theWorld.Create();
     theWorldServer.Create();
     theCamera.Create(&theSettings, theSettings.fpNearClipDistance, theSettings.fpFarClipDistance,
@@ -980,6 +983,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     theWorldServer.Destroy();
     theWorld.Destroy();
     GetRenderer()->Destroy();
+    ownedResourceRuntime.reset();
 
     DumpUnfreedMemory(AMTS_BYFILENAME);
     //_CrtDumpMemoryLeaks();
