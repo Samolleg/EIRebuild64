@@ -32,6 +32,7 @@ struct CBinkVideo::Player
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     bool decoded = false, finished = false, paused = false, loadingPicture = false;
+    std::uint64_t imageGeneration = 0;
     unsigned displayedFrame = 0;
     std::unique_ptr<OwnedSpriteBatch> batch;
     ~Player() { if (movie) close(movie); if (module) FreeLibrary(module); }
