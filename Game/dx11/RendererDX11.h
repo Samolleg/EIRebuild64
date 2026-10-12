@@ -142,8 +142,6 @@ public:
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
     int DrawFigurePrimitive(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
                DWORD dwFlags);
-    int DrawParticles(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
-                      DWORD dwFlags);
     int DrawSimplePrimitive(LPVOID pvVertices, DWORD dwVertexCount,
                             LPWORD pwIndices, DWORD dwIndexCount, DWORD dwFlags);
     int TriggerRedraw();

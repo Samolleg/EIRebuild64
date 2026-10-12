@@ -1430,9 +1430,6 @@
     <FxCompile Include="shaders\vertexshader_simple.hlsl">
       <Filter>Resource Files\shaders</Filter>
     </FxCompile>
-    <FxCompile Include="shaders\vertexshader_particles.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </FxCompile>
     <FxCompile Include="shaders\gs_point_to_quad.hlsl">
       <Filter>Resource Files\shaders</Filter>
     </FxCompile>

@@ -56,7 +56,7 @@ shader_dir.mkdir()
 for path in (output/'shaders/Win32_Release').glob('*.cso'):
     assert path.read_bytes().startswith(b'DXBC'), path
     shutil.copy2(path, shader_dir/path.name)
-required = ('vertexshader', 'vertexshader_simple', 'vertexshader_particles', 'pixelshader')
+required = ('vertexshader', 'vertexshader_simple', 'pixelshader')
 assert all((shader_dir/(name+'.cso')).is_file() for name in required)
 (shader_dir/'Win32_Release').mkdir()
 for path in shader_dir.glob('*.cso'):

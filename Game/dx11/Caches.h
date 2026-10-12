@@ -58,13 +58,10 @@ public:
 
         vertexTypes[typeid(STLVertex1)] = EVertexType::STL;
         vertexTypes[typeid(PNTVertex)] = EVertexType::PNT;
-        vertexTypes[typeid(ParticleVertex)] = EVertexType::Particle;
         vertexTypes[typeid(WORD)] = EVertexType::Word;
 
         cacheMap[EVertexType::STL] = std::make_unique<CSharedCache<VertexBuffer<STLVertex1>>>();
         cacheMap[EVertexType::PNT] = std::make_unique<CSharedCache<VertexBuffer<PNTVertex>>>();
-        cacheMap[EVertexType::Particle] =
-            std::make_unique<CSharedCache<VertexBuffer<ParticleVertex>>>();
         cacheMap[EVertexType::Word] = std::make_unique<CSharedCache<VertexBuffer<WORD>>>();
     }
     template <typename TVertex>

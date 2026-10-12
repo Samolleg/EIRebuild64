@@ -3,7 +3,6 @@
 #include "Vertex.h"
 
 template class VertexBuffer<PNTVertex>;
-template class VertexBuffer<ParticleVertex>;
 template class VertexBuffer<STLVertex1>;
 template class VertexBuffer<WORD>;
 

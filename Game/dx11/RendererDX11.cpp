@@ -102,23 +102,6 @@ bool CDX11::SetRenderStates()
 }
 
 
-int CDX11::DrawParticles(LPVOID pVertices, DWORD dwVertexCount, LPWORD pwIndices,
-                         DWORD dwIndexCount, DWORD dwFlags)
-{
-    // Need additional scale in projection space (screen_dx)
-    if (!dwIndexCount)
-        return 0;
-    RenderStateCheck();
-
-    std::shared_ptr<VertexBuffer<ParticleVertex>> vertexBuf = m_caches->CreateOrUpdate(
-        static_cast<ParticleVertex *>(pVertices), dwVertexCount);
-
-    this->deviceContext->IASetInputLayout(m_shaders->vs_particles.GetInputLayout());
-    this->deviceContext->VSSetShader(m_shaders->vs_particles.GetShader(), NULL, 0);
-    return DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, vertexBuf.get(), pwIndices,
-                                dwIndexCount);
-}
-
 int CDX11::DrawSimplePrimitive(LPVOID pVertices, DWORD dwVertexCount,
                                LPWORD pIndices, DWORD dwIndexCount, DWORD dwFlags)
 {
@@ -281,7 +264,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
                     boundFigureTextures[0] ? &texture : nullptr);
             });
             // c56 uses the same device, but its shaders/targets/state differ.
-            // Restore the host bindings for later legacy draws and fallback.
+            // Restore the host bindings for subsequent figure draws.
             RefreshOwnedTargets();
             SetRenderStates();
             for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
@@ -291,11 +274,11 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
         }
     }
     if (SUCCEEDED(hr)) return true;
-    static bool reportedFallback = false;
-    if (!reportedFallback) {
-        reportedFallback = true;
-        GameJournal::Event("RENDER", "game_particles_fallback",
-            "owner=CDX11 reason=c56_rejected hr=%08lx", static_cast<unsigned long>(hr));
+    static bool reportedSkipped = false;
+    if (!reportedSkipped) {
+        reportedSkipped = true;
+        GameJournal::Event("RENDER", "game_particles_skipped",
+            "owner=c56 reason=c56_rejected hr=%08lx", static_cast<unsigned long>(hr));
     }
     return false;
 }
@@ -318,6 +301,15 @@ void CDX11::FlushInterfaceBeforeLegacyDraw()
         return;
     RefreshOwnedTargets();
     SetRenderStates();
+    // flush_ui replaces the PS resources after the caller's BindTexture.
+    for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
+        ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
+        deviceContext->PSSetShaderResources(stage, 1, &resource);
+        GetConstantBuffers()->cb_ps_pixelshader.data.isTexture[stage].x = resource ? 1 : 0;
+    }
+    GetConstantBuffers()->cb_ps_pixelshader.ApplyChanges();
+    deviceContext->PSSetConstantBuffers(0, 1,
+        GetConstantBuffers()->cb_ps_pixelshader.GetAddressOf());
 }
 
 int CDX11::DrawFigurePrimitive(LPVOID pVertices, DWORD dwVertexCount, LPWORD pIndices, DWORD dwIndexCount,
@@ -687,7 +679,7 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     };
     const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
-        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback game_particles=c56-or-CDX11-fallback effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",
+        "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=E1-submit-or-CDX11-fallback world_figures=E1-submit-or-CDX11-fallback game_particles=c56 effects=CDX11-on-c56 shadows=CDX11-on-c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));
     IfFailedThrowHR(rendererFacade->VisitOutput(this,
         [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {

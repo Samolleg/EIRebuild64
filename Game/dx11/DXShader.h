@@ -58,7 +58,6 @@ public:
     PixelShader ps_main;
     VertexShader vs_main;
     VertexShader vs_simple;
-    VertexShader vs_particles;
     GeometryShader gs_point_to_quad;
 
     bool Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device);

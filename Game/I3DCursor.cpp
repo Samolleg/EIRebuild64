@@ -180,17 +180,15 @@ void CI3DCursor::Draw()
     if (m_rectDstCur.IsRectEmpty())
         return;
 
-    CDX11 *pDX11 = GetRenderer()->GetD3D();
     if (m_isShow)
     {
-        auto m_states = pDX11->GetCommonStates();
-        pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred,
-                                       m_states->NonPremultiplied());
-        m_pCursorInfo->pSurface->BltToRenderSurface(m_rectDstCur, m_rectSrcCur, 0, 0);
-        pDX11->GetSpriteBatch()->End();
-        // pDX11->GetSpriteBatch()->Draw(m_pCursorInfo->pSurface->texture, *m_rectDstCur,
-        // m_rectSrcCur);
-    };
+        DDBLTFX blit{};
+        blit.dwSize = sizeof(blit);
+        blit.ddckSrcColorkey.dwColorSpaceLowValue = 0;
+        blit.ddckSrcColorkey.dwColorSpaceHighValue = 0;
+        m_pCursorInfo->pSurface->BltToRenderSurface(m_rectDstCur, m_rectSrcCur,
+            DDBLT_KEYSRCOVERRIDE, &blit);
+    }
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::Init()

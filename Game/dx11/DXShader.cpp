@@ -123,25 +123,6 @@ bool CShadersMain::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> &device)
                               numElements))
         return false;
 
-    D3D11_INPUT_ELEMENT_DESC layout3[] = {
-        { "POSITION", 0, DXGI_FORMAT::DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,
-          D3D11_INPUT_CLASSIFICATION::D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT::DXGI_FORMAT_B8G8R8A8_UNORM, 0, D3D11_APPEND_ALIGNED_ELEMENT,
-          D3D11_INPUT_CLASSIFICATION::D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "SPECULAR", 0, DXGI_FORMAT::DXGI_FORMAT_B8G8R8A8_UNORM, 0, D3D11_APPEND_ALIGNED_ELEMENT,
-          D3D11_INPUT_CLASSIFICATION::D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT::DXGI_FORMAT_R32G32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT,
-          D3D11_INPUT_CLASSIFICATION::D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "SCREEN_DX", 0, DXGI_FORMAT::DXGI_FORMAT_R32G32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT,
-          D3D11_INPUT_CLASSIFICATION::D3D11_INPUT_PER_VERTEX_DATA, 0 },
-    };
-
-    numElements = ARRAYSIZE(layout3);
-
-    if (!vs_particles.Initialize(device, ShaderPath("vertexshader_particles.cso"), layout3,
-                                 numElements))
-        return false;
-
     if (!ps_main.Initialize(device, ShaderPath("pixelshader.cso")))
         return false;
 

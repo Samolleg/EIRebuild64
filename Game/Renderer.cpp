@@ -46,13 +46,8 @@ inline VERTEX_TYPE *GetTempVertices(int nAmount, VERTEX_TYPE *pType)
     return reinterpret_cast<VERTEX_TYPE *>(NDXDirect3D::tempVertices.GetData());
 }
 
-// Maximum number of vertexes for particles
-const int N_HARDWARE_V_MAX_PARTICLES = 2048; // 4096;
 /////////////////////////////////////////////////////////////////////////////////////
 CRenderer theRenderer;
-typedef CSimplyArray<ParticleVertex, ParticleVertex> CPVertexArray;
-typedef ParticleVertex *SortVertixPtr;
-typedef CPVertexArray ParticleVertexArray;
 
 SRayPicker::SRayPicker(const CPoint &screenPoint, const CPlot3D &cameraPos)
 {
@@ -456,201 +451,9 @@ BOOL CRenderer::Draw3DLine(CXYZWArray &points, const float fpLineWidth, const in
     return bRetVal;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// particle rendering
-// ------------------------------- Sort TLVertexes and clips by z
-// ------------------------------------------
-struct SSortZElem
-{
-    union
-    {
-        int nZ;
-        float fZ;
-    };
-    SSortZElem *pNext;
-    SortVertixPtr lpVertex;
-    union
-    {
-        BYTE bClip[4];
-        DWORD dwClip;
-    };
-};
-
-/////////////////////////////////////////////////////////////////////////////////////
-static void RadixSortStage(int shift, SSortZElem **pSrc, SSortZElem **pDst, int nCount,
-                           int nNormalDir)
-{
-    int i;
-    SSortZElem *lists[256] = {};
-    MemSetDWord((DWORD *)lists, 0, 256);
-    for (i = 0; i < nCount; i++)
-    {
-        int n = (pSrc[i]->nZ >> shift) &
-                0xff; // determine pile to which this element is to be stored
-        pSrc[i]->pNext = lists[n];
-        lists[n] = pSrc[i];
-    }
-    if (nNormalDir)
-    {
-        for (i = 0; i < 256; i++)
-        {
-            SSortZElem *pElem = lists[i];
-            while (pElem)
-            {
-                *pDst++ = pElem;
-                pElem = pElem->pNext;
-            }
-        }
-    }
-    else
-    {
-        for (i = 255; i >= 0; i--)
-        {
-            SSortZElem *pElem = lists[i];
-            while (pElem)
-            {
-                *pDst++ = pElem;
-                pElem = pElem->pNext;
-            }
-        }
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-// сортировка слияниями, эта функция - один проход слияни
-static void JoinSortStage(int step, SSortZElem **pSrc, SSortZElem **pDst, int nCount)
-{
-    int i, n1, n2, step2, dest, numSteps;
-    step2 = step * 2;
-    if (step * 2 > nCount)
-    {
-        numSteps = nCount - step;
-        memcpy(pDst + nCount - step, pSrc + nCount - step, step * sizeof(pSrc[0]));
-    }
-    else
-    {
-        numSteps = step;
-    }
-    numSteps = Min(step, nCount - step);
-    for (i = 0; i < numSteps; i++)
-    {
-        n1 = i;
-        n2 = i + step;
-        dest = i;
-        while (1)
-        {
-            if (pSrc[n1]->nZ < pSrc[n2]->nZ)
-            {
-                pDst[dest] = pSrc[n2];
-                n2 += step2;
-                dest += step;
-                if (n2 >= nCount)
-                {
-                    while (n1 < nCount)
-                    {
-                        pDst[dest] = pSrc[n1];
-                        n1 += step2;
-                        dest += step;
-                    }
-                    break;
-                }
-            }
-            else
-            {
-                pDst[dest] = pSrc[n1];
-                n1 += step2;
-                dest += step;
-                if (n1 >= nCount)
-                {
-                    while (n2 < nCount)
-                    {
-                        pDst[dest] = pSrc[n2];
-                        n2 += step2;
-                        dest += step;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
-static void SortByZ(ParticleVertexArray &tlVertexes, CByteArray &clips)
-{
-    int i, iAdd, nStep;
-    static ParticleVertexArray tmpVertexes;
-    static CSimplyArray<SSortZElem, SSortZElem &> sortElements;
-    static CSimplyArray<SSortZElem *, SSortZElem *> sort, sort1;
-    SSortZElem **pSort, **pSort1, **pSortTemp;
-
-    tmpVertexes.SetSize(tlVertexes.GetSize());
-    memcpy(tmpVertexes.GetData(), tlVertexes.GetData(),
-           sizeof(tlVertexes[0]) * tlVertexes.GetSize());
-
-    SortVertixPtr tlBase = tmpVertexes.GetData();
-
-    BYTE *pClips = clips.GetData();
-    int nElem = tmpVertexes.GetSize() / 4;
-
-    sortElements.SetSize(nElem);
-    sort.SetSize(nElem);
-    iAdd = 0;
-    for (i = 0; i < nElem; i++)
-    {
-        SSortZElem &elem = sortElements[iAdd];
-        elem.fZ = tlBase[i * 4].pos.z;
-        if (elem.nZ & 0x80000000) // points with negative Z values are discarded
-            continue;
-        elem.dwClip = ((DWORD *)pClips)[i]; // copy 4 clip bytes
-        elem.lpVertex = tlBase + i * 4;     // pointer to 4 d3dvertexes
-        sort[iAdd] = &elem;
-        iAdd++;
-    }
-    //	sortElements.SetSize( iAdd );
-    nElem = iAdd; // количество элементов, которое будет сортироваться (элементы с отрицательным z
-                  // отброшены)
-    sort1.SetSize(nElem);
-
-    pSort = sort.GetData();
-    pSort1 = sort1.GetData();
-    if (nElem > 128)
-    { // radix sort is efficient on this number of particles
-        RadixSortStage(0, pSort, pSort1, nElem, 1);
-        RadixSortStage(8, pSort1, pSort, nElem, 0);
-        RadixSortStage(16, pSort, pSort1, nElem, 1);
-        RadixSortStage(24, pSort1, pSort, nElem, 0);
-    }
-    else if (nElem > 1)
-    { // use join sort with less number of particles
-        nStep = 0x40000000;
-        while (nStep >= nElem)
-            nStep >>= 1; // determine initial step for join sort
-
-        while (nStep > 0)
-        {
-            JoinSortStage(nStep, pSort, pSort1, nElem);
-            nStep >>= 1;
-            pSortTemp = pSort;
-            pSort = pSort1;
-            pSort1 = pSortTemp; // swap pSort & pSort1
-        }
-    }
-    // move from pSort[] to tlVertexes & clips
-    tlVertexes.SetSize(nElem * 4); // ARRAY BOUNDS CHECK
-    // clips.SetSize( nElem*4 );
-    tlBase = tlVertexes.GetData();
-    pClips = clips.GetData();
-    for (i = 0; i < nElem; i++)
-    {
-        memcpy(tlBase + i * 4, pSort[i]->lpVertex, sizeof(tlVertexes[i]) * 4);
-        ((DWORD *)pClips)[i] = pSort[i]->dwClip; // copy 4 clip bytes
-    }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles)
 {
     CDXGeometryProcessor *pGPU = GetGPU();
-    CTLPipeline *pGeometryProcessor = pGPU->GetGeometryProcessor();
     SetProjectionMatrix();
     if (pDX11->IsOwnedWorldActive())
     {
@@ -677,108 +480,11 @@ BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawA
         view.clip_half_width = float(clipRect.right - clipRect.left) * 0.5f;
         view.clip_half_height = float(clipRect.bottom - clipRect.top) * 0.5f;
         view.additive = bUseAdd;
-        if (pDX11->SubmitC56GameParticles(view))
-            return TRUE;
+        pDX11->SubmitC56GameParticles(view);
+        return TRUE;
     }
-    // Define temporary arrays
-    static CXYZWArray inCoords;
-    static CPVertexArray tlVertexes;
-    static CByteArray clips;
-    static CWordArray tFaces;
-
-    // Set draft sizes of arrays
-    inCoords.SetSize(N_HARDWARE_V_MAX_PARTICLES / 4);                         // ARRAY BOUNDS CHECK
-    tlVertexes.SetSize(N_HARDWARE_V_MAX_PARTICLES * 4 /* *4 for clipping */); // ARRAY BOUNDS CHECK
-    clips.SetSize(N_HARDWARE_V_MAX_PARTICLES);
-    tFaces.SetSize((N_HARDWARE_V_MAX_PARTICLES / 4) * 6 * 4 /* *4 for clipping */);
-    const SXYZW *pSrcPoint = points.GetData();
-    SParticleToDraw *pParticle = particles.GetData();
-    int nSrcPointsLeft = points.GetSize();
-    // additive blending
-    DWORD dwOldSrcBlend, dwOldDstBlend;
-    if (bUseAdd)
-    {
-        GetRenderState(D3DRENDERSTATE_SRCBLEND, &dwOldSrcBlend);
-        GetRenderState(D3DRENDERSTATE_DESTBLEND, &dwOldDstBlend);
-
-        SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
-        SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ONE);
-    }
-    // Sequently fill and render arrays
-    while (nSrcPointsLeft > 0)
-    {
-        // form current tlvertex array
-        ParticleVertex *pTL = tlVertexes.GetData();
-        int nNumPart = 0;
-        for (; nNumPart < (N_HARDWARE_V_MAX_PARTICLES / 4 - 1) && nSrcPointsLeft > 0;
-             nNumPart++, nSrcPointsLeft--, pParticle++)
-        {
-            const DWORD dwParticleColor = pParticle->dwColor;
-            const SParticleUV *pUV = pParticle->pUV;
-            const float radius = pSrcPoint->w;
-
-            const float xx[4] = { -radius, +radius, +radius, -radius };
-            const float yy[4] = { -radius, -radius, +radius, +radius };
-            const float uu[4] = { pUV->fpU0, pUV->fpU1, pUV->fpU1, pUV->fpU0 };
-            const float vv[4] = { pUV->fpV0, pUV->fpV0, pUV->fpV1, pUV->fpV1 };
-
-            for (int i = 0; i < 4; ++i)
-            {
-                auto &vertex = *pTL;
-                vertex.pos.x = pSrcPoint->x;
-                vertex.pos.y = pSrcPoint->y;
-                vertex.pos.z = pSrcPoint->z;
-                vertex.pos.w = 1.0;
-
-                vertex.tuv.x = uu[i];
-                vertex.tuv.y = vv[i];
-                vertex.screen_dx.x = xx[i];
-                vertex.screen_dx.y = yy[i];
-                vertex.color = dwParticleColor;
-                vertex.specular = RGBA_MAKE(0, 0, 0, 0xFF);
-                pTL++;
-            }
-            pSrcPoint++;
-        }
-        assert(nNumPart > 0);
-
-        tlVertexes.SetSize(nNumPart * 4); // ARRAY BOUNDS CHECK
-        int nClipFlag = TRV_VISIBLE_NOCLIP;
-        // pSrcPoint += nNumPart;
-        // Sort particles by z
-
-        // qsort(tlVertexes.GetData(), tlVertexes.GetSize(), sizeof(ParticleVertex), CmpGridPoints);
-        // TODOALEX: doesn't seem to have any effect?
-        // if (!bUseAdd)
-        // SortByZ(tlVertexes, clips);
-        nNumPart = tlVertexes.GetSize() / 4;
-        // Draw particles
-        WORD *pFace = tFaces.GetData();
-        // compose quads
-        for (int i = 0; i < nNumPart * 4; i += 4, pFace += 6)
-        {
-            pFace[0] = i + 0;
-            pFace[1] = i + 1;
-            pFace[2] = i + 2;
-            pFace[3] = i + 0;
-            pFace[4] = i + 2;
-            pFace[5] = i + 3;
-        }
-        int nVertices = nNumPart * 4;
-        int nIndexes = nNumPart * 2 * 3; // 6 per quad
-        if (nNumPart)
-        {
-            pDX11->DrawParticles(reinterpret_cast<ParticleVertex *>(tlVertexes.GetData()),
-                                 nVertices, tFaces.GetData(), nIndexes, 0);
-        }
-    }
-    // restore blending after ADD
-    if (bUseAdd)
-    {
-        SetRenderState(D3DRENDERSTATE_SRCBLEND, dwOldSrcBlend);
-        SetRenderState(D3DRENDERSTATE_DESTBLEND, dwOldDstBlend);
-    }
-
+    // No OpenEI path: submission reports an unavailable renderer once.
+    pDX11->SubmitC56GameParticles(owned::GameParticleView{});
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
