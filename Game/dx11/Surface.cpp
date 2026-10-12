@@ -513,11 +513,14 @@ BOOL CDXGISurface::GetTextureFormat(DXGI_FORMAT &texFormat)
 HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                          LPDDBLTFX pDDBltFx)
 {
-    if (dwFlags & DDBLT_KEYSRCOVERRIDE)
-        return pDX11->DrawColorKeySurface(textureView.Get(), *pDestRect, pSrcRect,
-            pDDBltFx ? pDDBltFx->ddckSrcColorkey.dwColorSpaceLowValue : 0);
-    pDX11->GetSpriteBatch()->Draw(textureView.Get(), *pDestRect, pSrcRect);
-    return S_OK;
+    if (!pDestRect) return E_INVALIDARG;
+    DDCOLORKEY colorKey{};
+    const DDCOLORKEY* key = nullptr;
+    if (dwFlags & DDBLT_KEYSRCOVERRIDE) {
+        if (pDDBltFx) colorKey = pDDBltFx->ddckSrcColorkey;
+        key = &colorKey;
+    }
+    return pDX11->BlitPublishedSurface(OwnedSurfaceId(), *pDestRect, pSrcRect, key);
 }
 HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facade,
     const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey,
@@ -533,7 +536,7 @@ HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facad
 HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                            LPDDBLTFX pDDBltFx)
 {
-    return pDX11->GetOwnedRenderer().VisitOutput(this,
+    return pDX11->GetRendererFacade().VisitOutput(this,
         [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {
             auto& self = *static_cast<CDXGISurface*>(user);
             Microsoft::WRL::ComPtr<ID3D11Texture2D> source;

@@ -18,6 +18,8 @@
 namespace ModWorldBackground { struct FrameSnapshot; }
 namespace WorldBackground { struct VisualEnvironment; }
 namespace owned { struct NativeOwnedFixedState; }
+namespace owned { class Renderer; }
+namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
 class ModWorldBackgroundDX11;
 class ModShadowDX11;
 class UIColorKeyBlit;
@@ -69,6 +71,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture2;
 
+    std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
     OwnedRendererClient ownedRenderer;
     bool ownedWorldActive = false;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
@@ -140,8 +143,9 @@ public:
     Microsoft::WRL::ComPtr<ID3D11Device> GetDevice() { return device; };
     OwnedSpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
     OwnedRendererClient &GetOwnedRenderer() { return ownedRenderer; };
-    HRESULT DrawColorKeySurface(ID3D11ShaderResourceView* image, const RECT& destination,
-                                const RECT* source, COLORREF key);
+    auto &GetRendererFacade() { return *rendererFacade; };
+    HRESULT BlitPublishedSurface(std::uint64_t surfaceId, const RECT& destination,
+                                 const RECT* source, const DDCOLORKEY* colorKey);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };
     CConstantBuffers *GetConstantBuffers() { return m_cbs.get(); };
     CEffectProcessor *GetEffectProcessor() { return m_effproc.get(); }

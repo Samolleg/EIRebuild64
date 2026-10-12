@@ -1,6 +1,13 @@
 #pragma once
 
+#pragma push_macro("min")
+#pragma push_macro("max")
+#undef min
+#undef max
+#include "../../external/owned-renderer/Source/retained_static_scene.h"
 #include "../../external/owned-renderer/Source/renderer.h"
+#pragma pop_macro("max")
+#pragma pop_macro("min")
 #include <type_traits>
 #include <utility>
 
@@ -93,6 +100,18 @@ public:
         } catch (...) {
             return E_FAIL;
         }
+    }
+
+    HRESULT VisitDevice(void* user, owned::EmbeddedDeviceVisitor visitor) {
+        return Visit([&](Backend& value) {
+            return value.visit_embedded_device(user, visitor);
+        });
+    }
+
+    HRESULT VisitOutput(void* user, owned::EmbeddedOutputVisitor visitor) {
+        return Visit([&](Backend& value) {
+            return value.visit_embedded_output(user, visitor);
+        });
     }
 };
 

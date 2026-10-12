@@ -8,6 +8,9 @@
 #include "ConstantBuffer.h"
 #include "DXShader.h"
 #include "RendererDX11.h"
+#include "../OwnedRender/E1SurfaceBridge.h"
+#include "../OwnedRender/E1RendererFacade.h"
+#include "../OwnedRender/E1SurfaceFacade.h"
 #include "../FrameDiagnostics.h"
 #include "ModShadowDX11.h"
 #include "ModWorldBackgroundDX11.h"
@@ -266,8 +269,16 @@ int CDX11::DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVerte
 
 void CDX11::BeginFrame()
 {
-    IfFailedThrowHR(ownedRenderer.BeginFrame((FLOAT *)&background_color, G_CLEAR_DEPTH_VALUE));
+    IfFailedThrowHR(rendererFacade->BeginFrame());
     RefreshOwnedTargets();
+    IfFailedThrowHR(rendererFacade->VisitDevice(&background_color,
+        [](void *user, const owned::EmbeddedDeviceView& view) -> HRESULT {
+            const auto *color = static_cast<const DirectX::XMFLOAT4 *>(user);
+            view.context->ClearRenderTargetView(view.color, reinterpret_cast<const float *>(color));
+            view.context->ClearDepthStencilView(view.depth,
+                D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, G_CLEAR_DEPTH_VALUE, 0);
+            return S_OK;
+        }));
     SetRenderStates();
 }
 
@@ -291,7 +302,7 @@ void CDX11::EndWorld()
 
 void CDX11::RefreshOwnedTargets()
 {
-    IfFailedThrowHR(ownedRenderer.VisitDevice(nullptr, &OwnedRender::E1BindTargets));
+    IfFailedThrowHR(rendererFacade->VisitDevice(nullptr, &OwnedRender::E1BindTargets));
 }
 
 void CDX11::EndFrame()
@@ -302,7 +313,7 @@ void CDX11::EndFrame()
         MakeScreenShot();
         m_bMakeScreenShot = false;
     }
-    const HRESULT presented = ownedRenderer.Present();
+    const HRESULT presented = rendererFacade->EndFrame();
     FrameDiagnostics::Presented(presented);
     IfFailedThrowHR(presented);
 }
@@ -310,13 +321,13 @@ void CDX11::EndFrame()
 void CDX11::ClearColorBuffer(DWORD value)
 {
     DirectX::XMFLOAT4 color = BGRAtoFloat4(value);
-    IfFailedThrowHR(ownedRenderer.VisitDevice(&color, &OwnedRender::E1ClearColor));
+    IfFailedThrowHR(rendererFacade->VisitDevice(&color, &OwnedRender::E1ClearColor));
 }
 
 void CDX11::ClearZBuffer(DWORD dwValue)
 {
     float depth = float(dwValue);
-    IfFailedThrowHR(ownedRenderer.VisitDevice(&depth, &OwnedRender::E1ClearDepth));
+    IfFailedThrowHR(rendererFacade->VisitDevice(&depth, &OwnedRender::E1ClearDepth));
 }
 
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture)
@@ -350,14 +361,11 @@ void CDX11::ScreenShot()
     m_bMakeScreenShot = true;
 }
 
-HRESULT CDX11::DrawColorKeySurface(ID3D11ShaderResourceView* image,
-    const RECT& destination, const RECT* source, COLORREF key)
+HRESULT CDX11::BlitPublishedSurface(std::uint64_t surfaceId,
+    const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey)
 {
-    spriteBatch->End();
-    const HRESULT result = ownedRenderer.DrawUi(image, destination, source,
-        EI_RENDERER_UI_COLOR_KEY | EI_RENDERER_UI_OPAQUE | EI_RENDERER_UI_POINT, key);
-    spriteBatch->Begin();
-    return result;
+    return OwnedRender::E1BlitPublishedSurface(*rendererFacade, device.Get(),
+        deviceContext.Get(), surfaceId, destination, source, colorKey, true, true);
 }
 
 CDX11::~CDX11()
@@ -410,22 +418,22 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
         ReportError("No IDXGI Adapters found.");
         return false;
     }*/
-    HRESULT hr = ownedRenderer.Initialize(hWnd, dwWidth, dwHeight);
+    rendererFacade = std::make_shared<OwnedRender::E1RendererFacade>();
+    HRESULT hr = rendererFacade->Initialize(hWnd, dwWidth, dwHeight);
     if (FAILED(hr))
     {
-        ReportError(hr, "Cannot initialize the shared renderer. Place the source-API RDDraw.dll next to EIRebuild.exe.");
+        ReportError(hr, "Cannot initialize the embedded c56 renderer.");
         throw hr;
     }
-    IfFailedThrowHR(ownedRenderer.VisitDevice(this,
+    IfFailedThrowHR(rendererFacade->VisitDevice(this,
         [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
             auto& self = *static_cast<CDX11*>(user);
-            // Device/context live for the renderer session. Target references
-            // stay in the callback and are acquired again at each boundary.
             self.device = view.device;
             self.deviceContext = view.context;
+            self.m_width = view.width; self.m_height = view.height;
             return OwnedRender::E1BindTargets(nullptr, view);
         }));
-    IfFailedThrowHR(ownedRenderer.VisitOutput(this,
+    IfFailedThrowHR(rendererFacade->VisitOutput(this,
         [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {
             D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
             if (!desc.Width || !desc.Height) return E_INVALIDARG;
@@ -578,7 +586,7 @@ bool CDX11::ReportLiveObjects()
 void CDX11::MakeScreenShot()
 {
     // Capture the composed output while its renderer-owned lease is valid.
-    ownedRenderer.VisitOutput(nullptr,
+    rendererFacade->VisitOutput(nullptr,
         [](void*, ID3D11DeviceContext* context, ID3D11Texture2D* output) -> HRESULT {
             return DirectX::SaveWICTextureToFile(context, output,
                 GUID_ContainerFormatJpeg, L"SCREENSHOT.JPG");
