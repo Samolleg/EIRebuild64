@@ -34,6 +34,8 @@ bool E1OwnedVisualDrawn(std::int32_t id) noexcept;
 const char* E1OwnedVisualOmission(std::int32_t id) noexcept;
 // Reports acceptance/rejection only when an object's state changes.
 void E1ReportOwnedVisual(std::int32_t id) noexcept;
+// Records a rejected owned pose for the once-per-epoch step summary.
+void E1ReportOwnedPoseFailure(std::int32_t id, const char* step) noexcept;
 // Each world draw unconditionally retires the previous result.
 void E1OwnedVisualFrameNewDraw() noexcept;
 void E1PublishSecondaryVisual(std::int32_t id, std::uint64_t primary,

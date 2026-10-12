@@ -769,9 +769,14 @@ std::shared_ptr<const owned::ModelCpuAsset> CAnimationSystem2::GetOwnedSkeleton(
 catch (...) { return nullptr; }
 
 bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
-    OwnedRender::E1AnimationSelection& output) noexcept try
+    OwnedRender::E1AnimationSelection& output, const char** failedStage) noexcept try
 {
     output = {};
+    if (failedStage) *failedStage = nullptr;
+    auto reject = [&](const char* stage) noexcept {
+        if (failedStage) *failedStage = stage;
+        return false;
+    };
     const SADEntry* selected = lpADEntry;
     if (!selected)
     {
@@ -779,35 +784,46 @@ bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
         output.valid = true;
         return true;
     }
-    if (!lpObject3D || !selected->pszAnimationName[0]) return false;
+    if (!lpObject3D || !selected->pszAnimationName[0])
+        return reject("selection.object_or_entry");
     const char* mask = lpObject3D->GetMaskName();
     CWorld* world = GetWorld();
-    if (!mask || !*mask || !world) return false;
+    if (!mask || !*mask || !world)
+        return reject("selection.mask_or_world");
 
     CString maskName(mask);
     const void* databaseBytes = nullptr;
     DWORD databaseSize = 0;
     auto* mapObjects = static_cast<CMapObjectManager*>(world->GetMapObjectManager());
-    if (!mapObjects || !mapObjects->GetSelectedAnimationDatabase(maskName, selected,
-        databaseBytes, databaseSize)) return false;
+    if (!mapObjects) return reject("selection.map_object_manager");
+    if (!mapObjects->GetSelectedAnimationDatabase(maskName, selected,
+        databaseBytes, databaseSize))
+        return reject("selection.adb_selection");
 
     auto* figures = static_cast<CFigureManager*>(world->GetFigureManager());
-    if (!figures) return false;
+    if (!figures) return reject("selection.figure_manager");
     CModelResourceEntry* model = figures->GetModel(std::string(mask));
-    if (!model) return false;
+    if (!model) return reject("selection.model_resource");
     const void* animationBytes = nullptr;
     DWORD animationSize = 0;
     if (!model->GetAnimationSourceBytes(selected->pszAnimationName,
-        animationBytes, animationSize)) return false;
+        animationBytes, animationSize))
+        return reject("selection.anm_resource");
 
     const std::string animationName(selected->pszAnimationName);
     const std::string databaseName = std::string(mask) + ".adb";
     const std::string animationResourceName = std::string(mask) + "/" + animationName;
-    return OwnedRender::E1BuildAnimationSelection(databaseName, databaseBytes, databaseSize,
+    if (!OwnedRender::E1BuildAnimationSelection(databaseName, databaseBytes, databaseSize,
         animationName, animationResourceName, animationBytes, animationSize,
-        selected->dwEntryIndex, output);
+        selected->dwEntryIndex, output))
+        return reject("selection.c56_decode");
+    return true;
 }
-catch (...) { output = {}; return false; }
+catch (...) {
+    output = {};
+    if (failedStage) *failedStage = "selection.exception";
+    return false;
+}
 
 void CAnimationSystem2::LoadSkeleton(LPCSTR pszMaskName)
 {

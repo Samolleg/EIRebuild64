@@ -9,6 +9,8 @@
 #include <cstring>
 #include <vector>
 #include <map>
+#include <set>
+#include <string>
 
 namespace {
 // Native sinks of the embedded host. They mirror the DirectDraw proxy's
@@ -26,7 +28,34 @@ Sink* self(void* context) noexcept { return static_cast<Sink*>(context); }
 bool lastFlushed = false;
 std::vector<std::int32_t> currentDrawn;   // sorted, this world draw only
 std::map<std::int32_t, const char*> currentOmissions;
+struct PoseFailureSummary {
+    std::set<std::int32_t> ids;
+    bool reported = false;
+};
+std::map<std::string, PoseFailureSummary> poseFailures;
+std::uint64_t poseFailureEpoch = 0;
 bool ranThisDraw = false;
+
+void reportPoseFailures(std::uint64_t epoch) noexcept try {
+    if (!epoch || epoch != poseFailureEpoch) return;
+    for (auto& entry : poseFailures) {
+        auto& summary = entry.second;
+        if (summary.reported || summary.ids.empty()) continue;
+        std::string ids;
+        unsigned shown = 0;
+        for (const auto id : summary.ids) {
+            if (shown == 5) break;
+            if (!ids.empty()) ids += ",";
+            ids += std::to_string(id);
+            ++shown;
+        }
+        GameJournal::Event("RENDER", "world_visual_pose_reject",
+            "epoch=%llu step=%s objects=%u ids=%s",
+            static_cast<unsigned long long>(epoch), entry.first.c_str(),
+            static_cast<unsigned>(summary.ids.size()), ids.c_str());
+        summary.reported = true;
+    }
+} catch (...) {}
 std::uint64_t reportEpoch = 0;
 std::uint64_t omissionReportEpoch = 0;
 std::map<std::int32_t, bool> reportedVisuals;
@@ -208,6 +237,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
         GameJournal::Event("RENDER", "world_visual_omission",
             "id=%d owner=c56 reason=%s", omitted.front().id, omitted.front().reason);
     }
+    reportPoseFailures(epoch);
     ranThisDraw = true;
     if (sink.object) renderer.rollback_native(sink.checkpoint);
     // The sinks point at this stack frame: never leave them installed.
@@ -227,6 +257,16 @@ void E1OwnedVisualFrameNewDraw() noexcept {
     lastFlushed = false;
     ranThisDraw = false;
 }
+void E1ReportOwnedPoseFailure(std::int32_t id, const char* step) noexcept try {
+    const auto epoch = owned::bridge_current_world_epoch();
+    if (!epoch || id <= 0 || !step || !*step) return;
+    if (poseFailureEpoch != epoch) {
+        poseFailures.clear();
+        poseFailureEpoch = epoch;
+    }
+    auto& summary = poseFailures[step];
+    if (summary.ids.insert(id).second) summary.reported = false;
+} catch (...) {}
 void E1ReportOwnedVisual(std::int32_t id) noexcept try {
     const auto epoch = owned::bridge_current_world_epoch();
     if (reportEpoch != epoch) {

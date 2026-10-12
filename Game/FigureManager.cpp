@@ -201,6 +201,12 @@ CModelResourceEntry *CFigureManager::GetModel(const std::string &szName)
         strcpy(buff, szName.c_str());
         strcat(buff, ".anm");
         BYTE *pAnims = GetFile(buff);
+        // DejaVu shares these species clips under their canonical animation mask.
+        if (!pAnims && (!_stricmp(szName.c_str(), "unmoog1") ||
+                        !_stricmp(szName.c_str(), "unmoog2")))
+            pAnims = GetFile("unmogo.anm");
+        else if (!pAnims && !_stricmp(szName.c_str(), "unanwiti"))
+            pAnims = GetFile("unanwipa.anm");
         if (pModel) // we need at rest a model to open resource (bones and animations are optional)
         {
             models[szName] = dbgnew CModelResourceEntry(this);

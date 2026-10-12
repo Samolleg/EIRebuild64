@@ -809,27 +809,30 @@ catch (...)
 bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
 {
     CObject3D* object = static_cast<CObject3D*>(lpObject);
-    CAnimationSystem2* animation = object ? object->GetAnimationSystem2() : nullptr;
     const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     auto& hostScene = OwnedRender::E1Scene();
     auto& scene = hostScene.Scene();
-    if (!resource.serial || !object || !animation) return false;
+    auto reject = [&](const char* step) noexcept {
+        OwnedRender::E1ReportOwnedPoseFailure(object ? object->GetID() : -1, step);
+        if (resource.serial)
+            scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
+                step, "host.object_pose");
+        return false;
+    };
+    if (!resource.serial) return reject("object_pose.resource");
+    if (!object) return reject("object_pose.object");
+    CAnimationSystem2* animation = object->GetAnimationSystem2();
+    if (!animation) return reject("object_pose.animation_system");
 
     const auto assembly = scene.visual_assembly(resource);
-    if (!assembly) return false;
+    if (!assembly) return reject("object_pose.assembly");
     OwnedRender::E1AnimationSelection selected;
-    if (!animation->GetOwnedCurrentAnimationSelection(selected) || !selected.valid)
-    {
-        scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
-            "object_pose.selected_animation", "host.object_pose");
-        return false;
-    }
+    const char* selectionFailure = nullptr;
+    if (!animation->GetOwnedCurrentAnimationSelection(selected, &selectionFailure) ||
+        !selected.valid)
+        return reject(selectionFailure ? selectionFailure : "selection.result_invalid");
     if (!selected.visual.neutral && !hostScene.BindDatabase(resource, selected))
-    {
-        scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
-            "object_pose.animation_database", "host.object_pose");
-        return false;
-    }
+        return reject("object_pose.animation_database");
 
     const CPlot3D position = object->GetCP();
     const CQuaternion& orientation = object->GetOrientation();
@@ -848,14 +851,14 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
     pose.source_generation = selected.source_generation;
     pose.appearance_revision = assembly->revision;
     if (!hostScene.PublishObjectPose(resource, pose))
-    {
-        scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
-            "object_pose.publish", "host.object_pose");
-        return false;
-    }
+        return reject("object_pose.publish");
     return true;
 }
-catch (...) { return false; }
+catch (...) {
+    OwnedRender::E1ReportOwnedPoseFailure(lpObject ? lpObject->GetID() : -1,
+        "object_pose.exception");
+    return false;
+}
 // BOOL CObject3DClientSpecific::Draw()
 // draw
 bool CObject3DClientSpecific::PrepareOwnedResources()
