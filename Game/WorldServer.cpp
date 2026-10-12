@@ -17,6 +17,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Player.h"
 #include "PlayerManager.h"
+#include "OwnedRender/E1MobSource.h"
 #include "PlayerServer.h"
 
 #include "ServerConsts.h"
@@ -3580,6 +3581,7 @@ BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName)
         }
     }
     //
+    OwnedRender::E1MobSource ownedSource(pszMobName);
     C2DScreenWait::Ignore(true);
     if (pszMobName && !LoadMapObjects(pszMobName, false))
     {
@@ -3589,6 +3591,7 @@ BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName)
     }
     C2DScreenWait::Ignore(false);
     szLoadedMobs.Add(pszMobName);
+    ownedSource.Succeeded(true);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3615,6 +3618,7 @@ CString CWorldServer::GetFullMobName(const char *pszFileName)
 BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
                                CMemorySave &graphChunk, bool bStaticOnly)
 {
+    OwnedRender::E1MobSource ownedSource(pszMprName, pszMobName);
     // load ai map if changed
     if (szZoneFileName.CompareNoCase(pszMprName) != 0)
     {
@@ -3679,6 +3683,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     bLoadDynamic = true;
     bLoadStatic = true;
     if(auto*mod=ModRuntime::Current())mod->ResetRuntimeState();
+    ownedSource.Succeeded(true);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3692,6 +3697,7 @@ BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
                            pszMobName);
     else
     {
+        OwnedRender::E1MobSource::Parsed(pszMobName);
         bRv = reader.Load(this, bSkipScript);
         reader.Close();
         if (!bRv)

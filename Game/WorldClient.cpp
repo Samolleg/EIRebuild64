@@ -104,7 +104,7 @@ using std::for_each;
 using std::list;
 using std::sort;
 /////////////////////////////////////////////////////////////////////////////////////
-// пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅ
+// половина стороны квадрата точки выхода из зоны
 const int N_EXIT_PLACE_SIZE = 20;
 const int N_EXIT_EDGE_SIZE = 10;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1187,7 +1187,7 @@ BOOL CWorldClient::HasObject(int nID)
     return FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+// удаляет все объекты с положительными идентификаторами
 void CWorldClient::RemoveAllObjects()
 {
     areaLights.RemoveAll();  // remove all lights from area map
@@ -1211,7 +1211,7 @@ void CWorldClient::RemoveAllObjects()
     pSpecificManager->ClearTrash();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+// удаляет все эффекты с клиента
 void CWorldClient::RemoveAllEffects()
 {
     exitParticles.RemoveAll();
@@ -1252,7 +1252,7 @@ void CWorldClient::RecheckAllQuestStates()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// пїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ (q.gz1g.xuz)
+// на вход принимается полное имя квестовой переменной (q.gz1g.xuz)
 void CWorldClient::UpdateQuestState(const char *pszQuestName, float fpVal)
 {
     bool bOn = fpVal == 1;
@@ -3094,13 +3094,6 @@ BOOL CWorldClient::Draw()
         pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
     }
-    else if (CheckFlag(WC_RENDER_SKY) && pSky)
-    {
-        // The owned sky skips the legacy sky draw, but the world after it
-        // relies on the state that draw leaves: specular off. Left on, the
-        // full material specular (0.988 on characters) washes figures white.
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
-    }
     LMPTimePassed();
 #endif // _A4
        // render terrain's main part
@@ -3376,7 +3369,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
             if ((pObject->GetTypeID() == MOTID_HUMAN) && IsIDofPersonage(pObject->GetID()) &&
                 !bPickHeroes)
                 continue;
-            // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ, ...
+            // обработать юнитов надо, ...
             if (bPickDynamic)
                 pObject->SetExactPosition(fpTime);
             else
@@ -3384,7 +3377,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
                 dynamicObjects.push_back(pObject);
                 continue;
             }
-            // ... пїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ, пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
+            // ... а вот показывать только тех, кого наши персы видят
             if (!(bDrawInvisibleUnits || pObject->CheckFlag(UNIT_VISIBLE)))
                 continue;
         }
@@ -3396,7 +3389,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
         if (nRetCode != TRV_INVISIBLE)
         {
             pObject->SetFlag(OBJ_VISIBLE);
-            // respectCP пїЅпїЅпїЅ z-sorting пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ
+            // respectCP для z-sorting в пространстве камеры
             pObject->SetRespectCP(matCamera.RotateVector(pObject->GetCP()));
             switch (pObject->WhoAmI()) // add to list by type: unit/building/tree/object
             {
@@ -3433,7 +3426,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
         else
         {
             pObject->ResetFlag(OBJ_VISIBLE);
-            // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
+            // добавить в списки теней по детальной проверке тени
             if (static_cast<CObject3DClientSpecific *>(pObject->GetObjectSpecific())
                     ->IsShadowVisible())
             {
@@ -3723,7 +3716,7 @@ CPlot3D CWorldClient::GetTerrainXYZFromScreenXY(int sx, int sy)
             z1 = pTerrain->GetZValue(x, y);
             nIterationCount++;
         } while ((fabs(z1 - z) > 0.01) && (nIterationCount < 100));
-        // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+        // теперь проведём итерации с усреднением
         if (nIterationCount >= 100)
         {
             nIterationCount = 0;
@@ -3798,7 +3791,7 @@ CPlot3D CWorldClient::GetTerrainXYZFromScreenXYWithBridge(int sx, int sy)
             z1 = GetBridgeZValue(x, y);
             nIterationCount++;
         } while ((fabs(z1 - z) > 0.01) && (nIterationCount < 100));
-        // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+        // теперь проведём итерации с усреднением
         if (nIterationCount >= 100)
         {
             nIterationCount = 0;
@@ -3928,7 +3921,7 @@ void CWorldClient::AddBloodPrints(float fX, float fY, float fSize, float fFinalS
         }
     }
 }
-// пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ, пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+// вернуть тип крови, в которую вступили
 int CWorldClient::AddFootPrints(CMapObject *owner, float fX, float fY, float fSizeX, float fSizeY,
                                 float fRotate, int nType, float fDetection, bool bVisible, int nBloodType)
 {
@@ -3942,7 +3935,7 @@ int CWorldClient::AddFootPrints(CMapObject *owner, float fX, float fY, float fSi
             if (fabs2(pos->GetCenterX() - fX, pos->GetCenterY() - fY) <=
                 fabs2(fEffectiveRadius + pos->GetSizeX()))
             {
-                if (!pos->IsSmall()) // пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
+                if (!pos->IsSmall()) // не оставлять следы после вступления в маленькие капли
                 {
                     bInBlood = true;
                     nBloodType = pos->GetBloodType();
@@ -4083,7 +4076,7 @@ DWORD CWorldClient::FormBoredAckFlagsForUnit(CUnit *pUnit)
         dwAckFlags = ACK_RUNING;
         break;
     }
-    // пїЅпїЅпїЅпїЅпїЅ
+    // аллод
     if (szCurrentAllodName == "gipat")
         dwAckFlags |= ACK_GIPATH;
     else if (szCurrentAllodName == "ingos")
@@ -4121,17 +4114,17 @@ DWORD CWorldClient::FormBoredAckFlagsForUnit(CUnit *pUnit)
         if (szCurrentAllodName == "suslanger")
             dwAckFlags |= ACK_SUSLANGER;
     }
-    // пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
+    // время суток
     if (IsNightTime())
         dwAckFlags |= ACK_NIGHT;
     else
         dwAckFlags |= ACK_DAY;
-    // пїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ ?
+    // в пещере или на свежем воздухе ?
     if (IsCaveZone())
         dwAckFlags |= ACK_CAVE;
     else
         dwAckFlags |= ACK_OUTDOORS;
-    // пїЅпїЅпїЅпїЅпїЅпїЅ
+    // погода
     switch (weather.GetCurrentWeather())
     {
     case EW_RAIN:
