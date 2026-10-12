@@ -18,6 +18,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_embedded.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\combat_ui.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_draw.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_tables.cpp" />
@@ -59,6 +60,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\lifecycle_probe.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\frame_statistics.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_static_lod.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_impostors.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\simplifier.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
   </ItemGroup>

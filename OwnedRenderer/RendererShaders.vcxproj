@@ -60,6 +60,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\frame_statistics.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\system_telemetry.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\combat_ui.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay_config.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\graphics_settings.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
@@ -69,6 +70,7 @@
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_static_lod.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_impostors.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\simplifier.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
   </ItemGroup>
