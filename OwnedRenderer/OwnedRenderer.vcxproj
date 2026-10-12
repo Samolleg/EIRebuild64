@@ -52,6 +52,11 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_critters.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_point_shadows.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\engine_bridge.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_bridge_stubs.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\camera_rotation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\addon_hook_chain.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\addon_discovery.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_occlusion.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fog.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
