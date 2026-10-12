@@ -520,7 +520,19 @@ HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWOR
         if (pDDBltFx) colorKey = pDDBltFx->ddckSrcColorkey;
         key = &colorKey;
     }
-    return pDX11->BlitPublishedSurface(OwnedSurfaceId(), *pDestRect, pSrcRect, key);
+    const HRESULT result = pDX11->BlitPublishedSurface(OwnedSurfaceId(), *pDestRect, pSrcRect, key);
+    if (result == E_HANDLE) {
+        // A missing/stale publication is transient; do not abort the UI frame.
+        static bool reportedUnavailable = false;
+        if (!reportedUnavailable) {
+            reportedUnavailable = true;
+            GameJournal::Event("RENDER", "surface_blit_skipped",
+                "surface=%llu reason=publication_unavailable",
+                static_cast<unsigned long long>(OwnedSurfaceId()));
+        }
+        return S_OK;
+    }
+    return result;
 }
 HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facade,
     const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey,

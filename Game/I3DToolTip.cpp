@@ -152,6 +152,8 @@ void CI3DToolTip::Process(CPoint point)
 
             CI3DSurface *pSurf;
             AddSurface(pSurf = dbgnew CI3DSurface(pI3D, rect));
+            // TT_INC is drawable this frame; finish GDI writes and publish now.
+            Update();
             /*
                                             CI3DFigure *pFig;
                                             pFig = AddFigure();
@@ -216,8 +218,8 @@ void CI3DToolTip::Update()
     {
 #ifndef NOGETDC
         CDC *pDC = pSurface->GetDC();
-        // if (!pDC)
-        // return;
+        if (!pDC)
+            return;
         pSurface->Fill(RGB(N_TEXT_R_FROM, N_TEXT_G_FROM, N_TEXT_B_FROM));
 
         pSurface->DrawRect(CRect(0, 0, 0, 0), RGB(N_TEXT_HDR_R, N_TEXT_HDR_G, N_TEXT_HDR_B));
