@@ -646,96 +646,10 @@ BOOL CRenderer::EndDrawFrame()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawFrameSelection(int x1, int y1, int x2, int y2, char cAlpha, bool bFrame)
 {
-    // green rect when selecting characters /w mice
-    // check rect for singularity :)
-    if ((x2 < x1) || (y2 < y1))
+    owned::ScreenRectangleRequest request{};
+    if (!owned::make_screen_rectangle_request(x1, y1, x2, y2, cAlpha, bFrame, request))
         return FALSE;
-    //
-    DWORD dwColor = RGBA_MAKE(0, 0, 0, cAlpha);
-    DWORD dwSpecular = RGBA_MAKE(0, 0, 0, 255);
-    WORD indices[6] = { 0, 1, 2, 0, 2, 3 };
-    // SLineVertex vertices[5] = { };
-    STLVertex1 vertices[5] = {};
-    float fPlus = 1, fMinus = -1;
-    //
-    if (!bFrame)
-        fPlus = fMinus = 0;
-    //
-    vertices[0].sx = x1 + fPlus;
-    vertices[0].sy = y1 + fPlus;
-    vertices[0].sz = 0;
-    vertices[0].rhw = 1;
-    vertices[0].color = dwColor;
-    vertices[0].specular = dwSpecular;
-
-    vertices[1].sx = x1 + fPlus;
-    vertices[1].sy = y2 + fMinus;
-    vertices[1].sz = 0;
-    vertices[1].rhw = 1;
-    vertices[1].color = dwColor;
-    vertices[1].specular = dwSpecular;
-
-    vertices[2].sx = x2 + fMinus;
-    vertices[2].sy = y2 + fMinus;
-    vertices[2].sz = 0;
-    vertices[2].rhw = 1;
-    vertices[2].color = dwColor;
-    vertices[2].specular = dwSpecular;
-
-    vertices[3].sx = x2 + fMinus;
-    vertices[3].sy = y1 + fPlus;
-    vertices[3].sz = 0;
-    vertices[3].rhw = 1;
-    vertices[3].color = dwColor;
-    vertices[3].specular = dwSpecular;
-
-    vertices[4].sx = x1 + fPlus;
-    vertices[4].sy = y1 + fPlus;
-    vertices[4].sz = 0;
-    vertices[4].rhw = 1;
-    vertices[4].color = dwColor;
-    vertices[4].specular = dwSpecular;
-
-    BindTexture(0, (CDXGISurface *)0);
-
-    SetRenderState(D3DRENDERSTATE_ZBIAS, 0);
-    DrawIndexedPrimitive(D3DPT_TRIANGLELIST, vertices, 4, indices, 6);
-
-    if (bFrame)
-    {
-        dwColor = RGBA_MAKE(255, 255, 255, 255);
-        for (int i = 0; i < 5; ++i)
-            vertices[i].color = dwColor;
-
-        vertices[0].sx = x1;
-        vertices[0].sy = y1;
-
-        vertices[1].sx = x1;
-        vertices[1].sy = y2;
-
-        vertices[2].sx = x2;
-        vertices[2].sy = y2;
-
-        vertices[3].sx = x2;
-        vertices[3].sy = y1;
-
-        vertices[4].sx = x1;
-        vertices[4].sy = y1;
-
-        // SetRenderState(D3DRENDERSTATE_SHADEMODE, D3DSHADE_FLAT);
-        // SetRenderState(D3DRENDERSTATE_ZBIAS, 1);
-        // SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
-        // SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
-
-        // pDX11->DrawIndexedPrimitive(, vertices, 5, 0);
-
-        // SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-        // SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-        // SetRenderState(D3DRENDERSTATE_SHADEMODE, D3DSHADE_GOURAUD);
-        // SetRenderState(D3DRENDERSTATE_ZBIAS, 0);
-    }
-
-    return TRUE;
+    return pDX11->SubmitC56ScreenRectangle(request) ? TRUE : FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawPolyline(CPolyLine *pPolyline)

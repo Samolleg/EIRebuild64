@@ -12,7 +12,7 @@ namespace OwnedRender { struct E1VisualInputs; }
 #include "Caches.h"
 #include "DirectXHelpers.h"
 
-namespace owned { struct NativeGeometryView; }
+namespace owned { struct NativeGeometryView; struct ScreenRectangleRequest; }
 #include "../OwnedRender/E2FrameTiming.h"
 #include <camp_inventory.h>
 #include <WICTextureLoader.h>
@@ -124,6 +124,7 @@ public:
     void ClearZBuffer(DWORD value);
     owned::FixedState CaptureC56MaterialState();
     bool SubmitC56Triangles(const owned::NativeGeometryView& view);
+    bool SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
     bool SubmitC56CampFigure(const owned::NativeGeometryView& view);

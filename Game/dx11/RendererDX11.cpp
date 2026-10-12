@@ -16,6 +16,7 @@
 #include "UIColorKeyBlit.h"
 #include "../OwnedRender/E1TerrainState.h"
 #include "../OwnedRender/E1Terrain.h"
+#include "../OwnedRender/E1FogSubmission.h"
 #include "../OwnedRender/E1TerrainSubmission.h"
 #include "../GameJournal.h"
 
@@ -223,6 +224,34 @@ bool CDX11::SubmitC56Triangles(const owned::NativeGeometryView& view)
     return false;
 }
 
+bool CDX11::SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request)
+{
+    HRESULT hr = E_UNEXPECTED;
+    if (rendererFacade && rendererFacade->FrameActive()) {
+        const D3DVIEWPORT7 viewport{0, 0, m_width, m_height, 0.0f, 1.0f};
+        hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+            return renderer.queue_screen_rectangle(request, viewport);
+        });
+        RestoreHostBindings();
+    }
+    if (SUCCEEDED(hr)) return true;
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        GameJournal::Event("RENDER", "screen_rectangle_skipped",
+            "owner=c56 hr=%08lx", static_cast<unsigned long>(hr));
+    }
+    return false;
+}
+
+namespace {
+bool SubmitScreenRectangleToC56(void* context,
+                                const owned::ScreenRectangleRequest& request) noexcept
+{
+    return context && static_cast<CDX11*>(context)->SubmitC56ScreenRectangle(request);
+}
+}
+
 bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
 {
     HRESULT hr=E_UNEXPECTED;
@@ -415,6 +444,7 @@ int CDX11::DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVerte
 void CDX11::BeginFrame()
 {
     IfFailedThrowHR(rendererFacade->BeginFrame());
+    owned::bridge_set_screen_rectangle_sink(this, &SubmitScreenRectangleToC56);
     frameTiming.Begin();
     RefreshOwnedTargets();
     IfFailedThrowHR(rendererFacade->VisitDevice(&background_color,
@@ -568,6 +598,7 @@ void CDX11::RefreshOwnedTargets()
 
 void CDX11::EndFrame(bool present)
 {
+    owned::bridge_set_screen_rectangle_sink(nullptr, nullptr);
     if (!present) {
         const HRESULT discarded = rendererFacade->DiscardFrame();
         frameTiming.End(false);
