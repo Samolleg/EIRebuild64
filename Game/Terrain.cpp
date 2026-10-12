@@ -360,11 +360,16 @@ BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo)
     theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
     // Capture after the source pass enables terrain specular/fog, before a
     // later object/UI pass changes the device. Base and transparent are distinct.
-    if ((nMatFrom == 0 && nMapTo == nTextures + N_NUMBER_OF_LONG_TEXTURES - 1) ||
+    const bool ownedTerrainPass =
+        (nMatFrom == 0 && nMapTo == nTextures + N_NUMBER_OF_LONG_TEXTURES - 1) ||
         (nMatFrom == nTextures + N_NUMBER_OF_LONG_TEXTURES &&
-         nMapTo == (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1))
+         nMapTo == (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1);
+    if (ownedTerrainPass)
         OwnedRender::E1PublishTerrainMaterial(this, nMatFrom != 0,
             pRend->GetD3D()->CaptureOwnedTerrainMaterial());
+    if (ownedTerrainPass && pRend->GetD3D()->SubmitC56TerrainPass(nMatFrom != 0) !=
+        CDX11::OwnedTerrainPassResult::unavailable)
+        return TRUE;
     // Draw sectors by materials
     for (int i = nMatFrom; i <= nMapTo; i++)
     {

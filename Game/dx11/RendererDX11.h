@@ -90,6 +90,7 @@ private:
     bool ReportLiveObjects();
 
 public:
+    enum class OwnedTerrainPassResult { unavailable, submitted, failed };
     bool Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
     ~CDX11();
     void UpdateTerrainShadow(unsigned width,unsigned height,const unsigned char *pixels);
@@ -109,6 +110,7 @@ public:
     void ClearZBuffer(DWORD value);
     bool SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet);
     bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
+    OwnedTerrainPassResult SubmitC56TerrainPass(bool transparent);
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();
     int DrawFigurePrimitive(LPVOID pvVertices, DWORD dwVertexCount, LPWORD pwIndices, DWORD dwIndexCount,
                DWORD dwFlags);

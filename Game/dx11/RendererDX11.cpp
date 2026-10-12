@@ -17,6 +17,7 @@
 #include "UIColorKeyBlit.h"
 #include "../OwnedRender/E1TerrainState.h"
 #include "../OwnedRender/E1Terrain.h"
+#include "../OwnedRender/E1TerrainSubmission.h"
 #include "../GameJournal.h"
 
 #include "batchers.h"
@@ -173,6 +174,28 @@ bool CDX11::SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet)
     stages[D3DTSS_MINFILTER]=stages[D3DTSS_MAGFILTER]=D3DTFG_LINEAR;stages[D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
     packet.render_states=states;packet.render_state_count=256;packet.texture_states=stages;packet.texture_state_count=32;
     return ownedRenderer.SubmitTerrain(packet);
+}
+
+CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
+{
+    if (!ownedWorldActive || !rendererFacade || !rendererFacade->Ready())
+        return OwnedTerrainPassResult::unavailable;
+    OwnedRender::E1TerrainPassSource pass;
+    if (!OwnedRender::E1PrepareTerrainPass(transparent, pass))
+        return OwnedTerrainPassResult::unavailable;
+
+    OwnedRender::E1TerrainSubmission submission;
+    const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return OwnedRender::E1SubmitTerrainPass(renderer, transparent, submission);
+    });
+    if (SUCCEEDED(hr) && submission.completed)
+        return OwnedTerrainPassResult::submitted;
+
+    GameJournal::Event("RENDER", "terrain_c56_failed",
+        "transparent=%u hr=%08lx queued=%llu reason=%s", transparent ? 1u : 0u,
+        static_cast<unsigned long>(hr), static_cast<unsigned long long>(submission.queued),
+        submission.failure ? submission.failure : "renderer_unavailable");
+    return OwnedTerrainPassResult::failed;
 }
 
 bool CDX11::SubmitOwnedFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet)
