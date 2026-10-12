@@ -8,7 +8,11 @@
 
 #include "adFormat.h"
 #include "OwnedRender/E1SkeletonSources.h"
-namespace OwnedRender { struct E1AnimationSelection; }
+#include <memory>
+namespace OwnedRender {
+struct E1AnimationSelection;
+class E1AnimationSelectionCache;
+}
 
 /////////////////////////////////////////////////////////////////////////////////////
 class CFigure;
@@ -163,6 +167,7 @@ class CAnimationSystem2 : public CGameBase
 {
     friend class CObject3D;
     OwnedRender::E1SkeletonSources ownedSkeleton;
+    std::unique_ptr<OwnedRender::E1AnimationSelectionCache> ownedAnimationSelection;
 
 private:
     CObject3D *lpObject3D;                             // object3d, this animation system belong to

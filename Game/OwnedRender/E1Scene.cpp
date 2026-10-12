@@ -1,5 +1,6 @@
 #include "E1Scene.h"
 #include "owned_resource_runtime.h"
+#include "owned_resource_store.h"
 
 namespace {
 std::uint64_t advance(std::uint64_t& value) noexcept {
@@ -8,6 +9,112 @@ std::uint64_t advance(std::uint64_t& value) noexcept {
 }
 }
 namespace OwnedRender {
+struct E1AnimationSelectionCache::Impl {
+    std::uint64_t worldEpoch = 0;
+    std::uint64_t resourceSerial = 0;
+    const void* modelIdentity = nullptr;
+    std::string maskName;
+    std::string databaseName;
+    const void* selectedDatabase = nullptr;
+    std::uint32_t databaseSize = 0;
+    std::shared_ptr<const owned::AnimationDatabaseAsset> database;
+    std::uint64_t databaseGeneration = 0;
+    std::string animationResourceName;
+    const void* selectedAnimation = nullptr;
+    std::uint32_t animationSize = 0;
+    owned::ResourceBlob animationBlob;
+    std::uint64_t animationGeneration = 0;
+    std::string animationName;
+    std::string resolvedClipName;
+    E1AnimationSelection selection;
+};
+
+E1AnimationSelectionCache::E1AnimationSelectionCache() = default;
+E1AnimationSelectionCache::~E1AnimationSelectionCache() = default;
+void E1AnimationSelectionCache::Clear() noexcept { impl.reset(); }
+
+bool E1AnimationSelectionCache::Select(std::uint64_t worldEpoch,
+    std::uint64_t resourceSerial, const std::string& maskName,
+    const void* modelIdentity, const std::string& databaseName,
+    const void* selectedDatabase, std::uint32_t databaseSize,
+    const std::string& animationName, const std::string& animationResourceName,
+    const void* selectedAnimation, std::uint32_t animationSize,
+    std::uint32_t ordinal, const std::string& resolvedClipName,
+    E1AnimationSelection& output) noexcept try {
+    output = {};
+    if (maskName.empty() || !modelIdentity || databaseName.empty() ||
+        !selectedDatabase || !databaseSize || animationName.empty() ||
+        animationResourceName.empty() || !selectedAnimation || !animationSize)
+        return false;
+
+    if (!impl) impl.reset(new Impl());
+    Impl& cache = *impl;
+    if (cache.worldEpoch != worldEpoch || cache.resourceSerial != resourceSerial ||
+        cache.modelIdentity != modelIdentity || cache.maskName != maskName) {
+        cache = Impl{};
+        cache.worldEpoch = worldEpoch;
+        cache.resourceSerial = resourceSerial;
+        cache.modelIdentity = modelIdentity;
+        cache.maskName = maskName;
+    }
+
+    if (cache.databaseName != databaseName ||
+        cache.selectedDatabase != selectedDatabase || cache.databaseSize != databaseSize) {
+        cache.database.reset();
+        cache.databaseGeneration = 0;
+        cache.databaseName = databaseName;
+        cache.selectedDatabase = selectedDatabase;
+        cache.databaseSize = databaseSize;
+        cache.selection = {};
+    }
+    if (!cache.database) {
+        owned::ResourceFailure failure;
+        cache.database = owned::retained_visual_selected_database_asset(databaseName,
+            selectedDatabase, databaseSize, cache.databaseGeneration, failure);
+        if (!cache.database || !cache.databaseGeneration) return false;
+    }
+
+    if (cache.animationResourceName != animationResourceName ||
+        cache.selectedAnimation != selectedAnimation || cache.animationSize != animationSize) {
+        cache.animationBlob = {};
+        cache.animationGeneration = 0;
+        cache.animationResourceName = animationResourceName;
+        cache.selectedAnimation = selectedAnimation;
+        cache.animationSize = animationSize;
+        cache.animationName.clear();
+        cache.resolvedClipName.clear();
+        cache.selection = {};
+    }
+    if (!cache.animationBlob.bytes) {
+        owned::ResourceFailure failure;
+        if (!owned::retained_visual_copy_selected_memory(animationResourceName,
+            selectedAnimation, animationSize, cache.animationBlob,
+            cache.animationGeneration, failure) || !cache.animationGeneration ||
+            cache.animationGeneration != cache.databaseGeneration)
+            return false;
+    }
+
+    if (!cache.selection.valid || cache.animationName != animationName ||
+        cache.resolvedClipName != resolvedClipName) {
+        owned::ResourceFailure failure;
+        auto clip = owned::retained_visual_clip_asset(cache.animationBlob,
+            resolvedClipName.empty() ? animationName : resolvedClipName,
+            failure, cache.database, cache.databaseGeneration);
+        if (!clip) return false;
+        cache.selection = {};
+        cache.selection.visual.database = cache.database;
+        cache.selection.visual.clip = std::move(clip);
+        cache.selection.visual.neutral = false;
+        cache.selection.source_generation = cache.databaseGeneration;
+        cache.selection.valid = true;
+        cache.animationName = animationName;
+        cache.resolvedClipName = resolvedClipName;
+    }
+    cache.selection.visual.ordinal = ordinal;
+    output = cache.selection;
+    return true;
+} catch (...) { output = {}; return false; }
+
 bool E1BuildAnimationSelection(const std::string& databaseName,
     const void* selectedDatabase, std::uint32_t databaseSize,
     const std::string& animationName, const std::string& animationResourceName,

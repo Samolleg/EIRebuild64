@@ -548,6 +548,7 @@ void CAnimationSystem2::DeleteNodes()
 void CAnimationSystem2::Clear()
 {
     ownedSkeleton.Clear();
+    ownedAnimationSelection.reset();
     SwitchCallback = 0;
     lpObject3D = NULL;
     lpHeadNode = NULL;
@@ -815,10 +816,14 @@ bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
 
     const std::string animationName(selected->pszAnimationName);
     const std::string databaseName = std::string(mask) + ".adb";
-    const std::string animationResourceName = std::string(mask) + "/" + animationName;
-    if (!OwnedRender::E1BuildAnimationSelection(databaseName, databaseBytes, databaseSize,
-        animationName, animationResourceName, animationBytes, animationSize,
-        selected->dwEntryIndex, output, resolvedClipName))
+    const std::string animationResourceName = std::string(mask) + ".anm";
+    if (!ownedAnimationSelection)
+        ownedAnimationSelection.reset(new OwnedRender::E1AnimationSelectionCache());
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject3D);
+    if (!ownedAnimationSelection->Select(OwnedRender::E1Scene().Epoch(), resource.serial,
+        mask, model, databaseName, databaseBytes, databaseSize, animationName,
+        animationResourceName, animationBytes, animationSize, selected->dwEntryIndex,
+        resolvedClipName, output))
         return reject("selection.c56_decode");
     return true;
 }

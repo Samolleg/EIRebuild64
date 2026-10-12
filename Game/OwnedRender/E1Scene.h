@@ -2,12 +2,32 @@
 #include "retained_static_scene.h"
 #include "owned_resource_runtime.h"
 #include <map>
+#include <memory>
 
 namespace OwnedRender {
 struct E1AnimationSelection {
     owned::VisualClipSelection visual{};
     std::uint64_t source_generation = 0;
     bool valid = false;
+};
+// Keeps the host-selected ADB and ANM byte selections stable for one
+// animation-system resource. The implementation is private to E1Scene.cpp.
+class E1AnimationSelectionCache {
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+public:
+    E1AnimationSelectionCache();
+    ~E1AnimationSelectionCache();
+    E1AnimationSelectionCache(const E1AnimationSelectionCache&) = delete;
+    E1AnimationSelectionCache& operator=(const E1AnimationSelectionCache&) = delete;
+    void Clear() noexcept;
+    bool Select(std::uint64_t world_epoch, std::uint64_t resource_serial,
+        const std::string& mask_name, const void* model_identity,
+        const std::string& database_name, const void* selected_database,
+        std::uint32_t database_size, const std::string& animation_name,
+        const std::string& animation_resource_name, const void* selected_animation,
+        std::uint32_t animation_size, std::uint32_t ordinal,
+        const std::string& resolved_clip_name, E1AnimationSelection& output) noexcept;
 };
 // These spans are the exact ADB and ANM selections already made by the host
 // resource managers. The renderer copies and decodes them; it never searches
