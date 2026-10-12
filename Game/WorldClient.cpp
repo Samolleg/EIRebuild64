@@ -3106,9 +3106,6 @@ BOOL CWorldClient::Draw()
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
         pTerrain->DrawBase(&theRenderer);
         pRend->FlushBuffers();
-        // c56's owned world work (HIZ, ground cover, critters and retained
-        // static geometry) belongs after opaque terrain and before figures.
-        pRend->GetD3D()->RunC56WorldPass();
     }
     ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
     // render main 3D scene: objects and their shadows
@@ -3125,6 +3122,11 @@ BOOL CWorldClient::Draw()
         scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
         if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
     }
+    // Publish this draw's visibility and interpolated scene facts before c56
+    // consumes them for critters, ground cover, lights, and retained geometry.
+    // Run after opaque terrain and scene preparation, before transparent water.
+    if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
+        pRend->GetD3D()->RunC56WorldPass();
     // render terrain's transparent part (water)
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
