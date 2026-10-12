@@ -623,12 +623,6 @@
     <ClCompile Include="Game\dx11\Surface.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
-    <ClCompile Include="Game\dx11\EffectProcessor.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\dx11\EffectProcessor.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
     <ClCompile Include="Game\dx11\VertexBuffer.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
@@ -1383,12 +1377,6 @@
       <Filter>Sources\dx11</Filter>
     </ClInclude>
     <ClInclude Include="Game\dx11\Surface.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\dx11\EffectProcessor.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\dx11\EffectProcessor.h">
       <Filter>Sources\dx11</Filter>
     </ClInclude>
     <ClInclude Include="shared\Common.h">

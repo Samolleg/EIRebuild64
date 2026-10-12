@@ -4,7 +4,8 @@
 #include <io.h>
 #include "RendererDX11.h"
 #include "../FrameDiagnostics.h"
-#include "EffectProcessor.h"
+#include "PostProcess.h"
+#include "RetailModalFade.h"
 #ifdef min
 #undef min
 #endif
@@ -447,18 +448,105 @@ std::unique_ptr<DWORD[]> CDXGISurface::GetPixelBuffer()
     return pixelBuffer;
 }
 
+namespace {
+struct OwnedSurfaceEffect {
+    ID3D11ShaderResourceView* source = nullptr;
+    ID3D11Texture2D* destination = nullptr;
+    const RECT* viewport = nullptr;
+    bool fade = false;
+};
+
+HRESULT RunOwnedSurfaceEffect(void* opaque, const owned::EmbeddedDeviceView& view)
+{
+#ifdef EID3D11_EMBEDDED
+    auto& effect = *static_cast<OwnedSurfaceEffect*>(opaque);
+    if (!view.device || !view.context || !effect.source || !effect.destination)
+        return E_INVALIDARG;
+    D3D11_TEXTURE2D_DESC description{};
+    effect.destination->GetDesc(&description);
+    description.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> target;
+    HRESULT hr = view.device->CreateTexture2D(&description, nullptr, target.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> targetView;
+    hr = view.device->CreateRenderTargetView(target.Get(), nullptr, targetView.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> oldTarget;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> oldDepth;
+    view.context->OMGetRenderTargets(1, oldTarget.GetAddressOf(), oldDepth.GetAddressOf());
+    D3D11_VIEWPORT oldViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    view.context->RSGetViewports(&viewportCount, oldViewports);
+    view.context->OMSetRenderTargets(1, targetView.GetAddressOf(), nullptr);
+    if (effect.viewport) {
+        D3D11_VIEWPORT viewport{};
+        viewport.TopLeftX = static_cast<float>(effect.viewport->left);
+        viewport.TopLeftY = static_cast<float>(effect.viewport->top);
+        viewport.Width = static_cast<float>(effect.viewport->right);
+        viewport.Height = static_cast<float>(effect.viewport->bottom);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        view.context->RSSetViewports(1, &viewport);
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> fadeShader;
+    if (effect.fade) {
+        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+        hr = RetailModalFade::Compile(bytecode.GetAddressOf());
+        if (SUCCEEDED(hr))
+            hr = view.device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+                nullptr, fadeShader.GetAddressOf());
+    }
+    if (SUCCEEDED(hr)) {
+        try {
+            DirectX::BasicPostProcess postProcess(view.device);
+            postProcess.SetSourceTexture(effect.source);
+            postProcess.SetEffect(DirectX::BasicPostProcess::Effect::Copy);
+            postProcess.Process(view.context, [context = view.context, shader = fadeShader.Get()] {
+                if (shader) context->PSSetShader(shader, nullptr, 0);
+            });
+        } catch (...) {
+            hr = E_FAIL;
+        }
+    }
+    view.context->OMSetRenderTargets(1, oldTarget.GetAddressOf(), oldDepth.Get());
+    if (viewportCount) view.context->RSSetViewports(viewportCount, oldViewports);
+    if (FAILED(hr)) return hr;
+    view.context->CopyResource(effect.destination, target.Get());
+    return S_OK;
+#else
+    (void)opaque; (void)view;
+    return E_NOTIMPL;
+#endif
+}
+
+HRESULT ApplyOwnedSurfaceEffect(OwnedRender::RendererFacadeCore<owned::Renderer>& facade,
+    ID3D11ShaderResourceView* source, ID3D11Texture2D* destination,
+    const RECT* viewport, bool fade)
+{
+    OwnedSurfaceEffect effect{source, destination, viewport, fade};
+    return facade.Visit([&](owned::Renderer& renderer) {
+        return renderer.visit_embedded_device(&effect, &RunOwnedSurfaceEffect);
+    });
+}
+}
+
 void CDXGISurface::Fade()
 {
     ownedSurface.BeginWrite();
-    pDX11->GetEffectProcessor()->Fade(this->GetShaderResource().Get());
+    const HRESULT hr = ApplyOwnedSurfaceEffect(pDX11->GetRendererFacade(),
+        textureView.Get(), texture.Get(), nullptr, true);
+    if (FAILED(hr)) throw hr;
     ownedSurface.Complete(texture.Get());
 }
 void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 {
-    // The historical argument named src is the actual destination (resultView).
+    // The historical argument named src is the actual destination.
     src->ownedSurface.BeginWrite();
-    auto effproc = pDX11->GetEffectProcessor();
-    effproc->StretchTo(this->GetShaderResource().Get(), src->GetShaderResource().Get(), rect);
+    const HRESULT hr = ApplyOwnedSurfaceEffect(pDX11->GetRendererFacade(),
+        textureView.Get(), src->texture.Get(), &rect, false);
+    if (FAILED(hr)) throw hr;
     src->ownedSurface.Complete(src->texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////

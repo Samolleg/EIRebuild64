@@ -29,7 +29,6 @@ class CDXGISurface;
 class CConstantBuffers;
 class CShadersMain;
 class FakeD3D7State;
-class CEffectProcessor;
 class CBatchers;
 
 class CRenderState
@@ -48,7 +47,6 @@ private:
 
     std::unique_ptr<CConstantBuffers> m_cbs = std::make_unique<CConstantBuffers>();
     std::unique_ptr<CShadersMain> m_shaders = std::make_unique<CShadersMain>();   
-    std::unique_ptr<CEffectProcessor> m_effproc = std::make_unique<CEffectProcessor>(this);    
 
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> deviceContext;
@@ -183,7 +181,6 @@ public:
                                  const RECT* source, const DDCOLORKEY* colorKey);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };
     CConstantBuffers *GetConstantBuffers() { return m_cbs.get(); };
-    CEffectProcessor *GetEffectProcessor() { return m_effproc.get(); }
     CShadersMain *GetShaders() { return m_shaders.get(); };
     CBatchers *GetBatchers() { return m_batchers.get(); };
 

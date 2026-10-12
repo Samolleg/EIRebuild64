@@ -23,7 +23,6 @@
 #include "batchers.h"
 #include "Utils.h"
 #include "Vertex.h"
-#include "EffectProcessor.h"
 #include "../Renderer.h"
 #include "../OwnedRender/E1VisualFrame.h"
 
@@ -685,7 +684,7 @@ CDX11::~CDX11()
 {
     owned::camp_inventory_shutdown_icons();
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);
-    m_effproc.reset();m_caches.reset();m_batchers.reset();
+    m_caches.reset();m_batchers.reset();
     uiColorKey.reset();
     this->spriteBatch.reset();
     this->spriteFont.reset();
