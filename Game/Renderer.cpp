@@ -251,7 +251,8 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, CSimplyArray<CLight *, CLight *> &l
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
     OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,
-        pDX11->IsOwnedWorldActive(),pTexture0,pTexture1);
+        pDX11->IsOwnedWorldActive(),pTexture0,pTexture1,
+        pDX11->GetBoundFigureTexture(0),pDX11->GetBoundFigureTexture(1));
     return pFigureSpec->Draw(this, lights, pMaterial, cFog, pRect, pTexture0, pTexture1);
 }
 /////////////////////////////////////////////////////////////////////////////////////

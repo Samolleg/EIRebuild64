@@ -12,7 +12,9 @@ class Scope {
     OwnedRendererClient& renderer;
 public:
     Scope(OwnedRendererClient& r,CFigure* figure,CMaterial* material,bool world,
-          CTexture* texture0,CTexture* texture1):renderer(r) {
+          CTexture* texture0,CTexture* texture1,
+          ID3D11ShaderResourceView* boundPrimary,
+          ID3D11ShaderResourceView* boundSecondary):renderer(r) {
         renderer.EndFigure();
         auto* object=dynamic_cast<CMapObject*>(figure->GetObject3D());
         if(!world||!object||!material)return;
@@ -34,6 +36,8 @@ public:
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
         auto secondary=texture1&&texture1->GetSurface()?texture1->GetSurface()->GetShaderResource():
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+        if(!primary&&boundPrimary)primary=boundPrimary;
+        if(!secondary&&boundSecondary)secondary=boundSecondary;
         renderer.BeginFigure(p,figure->GetName(),object->GetMaskName(),primary.Get(),secondary.Get());
     }
     ~Scope(){renderer.EndFigure();}

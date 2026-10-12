@@ -73,6 +73,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> blackTextureView;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture2;
+    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> boundFigureTextures;
 
     std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
     OwnedRender::E2FrameTiming frameTiming;
@@ -136,6 +137,10 @@ public:
     int DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVertexType> *vbVertices);
 
     BOOL BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture);
+    ID3D11ShaderResourceView *GetBoundFigureTexture(DWORD dwIndex) const
+    {
+        return dwIndex < static_cast<DWORD>(boundFigureTextures.size()) ? boundFigureTextures[dwIndex].Get() : nullptr;
+    }
     void SetAlphaRef(float value);
     void SetBackgroundColor(DWORD value);
     void SetFogColor(DWORD value);

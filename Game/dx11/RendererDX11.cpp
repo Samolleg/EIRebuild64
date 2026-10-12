@@ -396,6 +396,8 @@ void CDX11::ClearZBuffer(DWORD dwValue)
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture)
 {
     GetConstantBuffers()->cb_ps_pixelshader.data.isTexture[dwIndex].x = pTexture ? 1 : 0;
+    if (dwIndex < boundFigureTextures.size())
+        boundFigureTextures[dwIndex] = pTexture;
     if (pTexture)
     {
         this->deviceContext->PSSetShaderResources(dwIndex, 1, &pTexture);
