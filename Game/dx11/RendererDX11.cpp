@@ -368,35 +368,6 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
     return false;
 }
 
-void CDX11::FlushInterfaceBeforeLegacyDraw()
-{
-    // Interface images (panels, text, the modal world backdrop) queue in the
-    // renderer until present; a legacy figure drawn now (window 3D frames,
-    // escMenu model, interface bars) would end up beneath them. Draw the queue
-    // first, as the DirectDraw proxy does before its pending legacy draws.
-    if (ownedWorldActive || !rendererFacade)
-        return;
-    bool flushed = false;
-    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
-        if (!renderer.has_pending_ui()) return S_OK;
-        flushed = true;
-        return renderer.flush_ui();
-    }));
-    if (!flushed)
-        return;
-    RefreshOwnedTargets();
-    SetRenderStates();
-    // flush_ui replaces the PS resources after the caller's BindTexture.
-    for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
-        ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
-        deviceContext->PSSetShaderResources(stage, 1, &resource);
-        GetConstantBuffers()->cb_ps_pixelshader.data.isTexture[stage].x = resource ? 1 : 0;
-    }
-    GetConstantBuffers()->cb_ps_pixelshader.ApplyChanges();
-    deviceContext->PSSetConstantBuffers(0, 1,
-        GetConstantBuffers()->cb_ps_pixelshader.GetAddressOf());
-}
-
 template <typename TVertexType>
 int CDX11::DrawIndexedPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive,
                                 VertexBuffer<TVertexType> *vbVertices, LPWORD pIndices,

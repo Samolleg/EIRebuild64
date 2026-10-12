@@ -131,7 +131,6 @@ public:
     // A loading picture (wait screen, movie frame): the renderer keeps it on
     // screen while the next world prepares, as retail shows the load screen.
     void MarkLoadPicture();
-    void FlushInterfaceBeforeLegacyDraw();
     // Presents a full-screen BGRX image (movie or wait-screen frame) through
     // the renderer, fitted to the output and kept as the loading picture.
     HRESULT PresentLoadingImage(const std::vector<unsigned char>& bgrx, UINT width, UINT height,
