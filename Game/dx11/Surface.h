@@ -37,6 +37,11 @@ public:
     BOOL GetTextureFormat(DXGI_FORMAT &pDDPixelFormat);
     // access to surface's width/height/bpp, previously extracted during creating
     std::uint64_t OwnedSurfaceId() const noexcept { return ownedSurface.Id(); }
+    bool EnsureOwnedSurfacePublished() const noexcept
+    {
+        return OwnedRender::E1SurfaceValue(ownedSurface.Id()) != nullptr ||
+               ownedSurface.Complete(texture.Get());
+    }
     DWORD GetWidth() const { return dwSurfaceWidth; };
     DWORD GetHeight() const { return dwSurfaceHeight; };
     DWORD GetBPP() const { return dwSurfaceBPP; };

@@ -876,12 +876,14 @@ bool CObject3DClientSpecific::PrepareOwnedResources()
     }
     // A retained wound overlay must be restored by its unit owner before bind.
     if(pWoundsTexture && !pWoundsTexture->GetSurface()) {
-        if(!lpObject || lpObject->WhoAmI()!=HPC_UNIT)return FALSE;
-        auto* unit=static_cast<CUnit*>(lpObject);
-        auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
-        if(!specific || !specific->EnsureWoundsTextureReady() ||
-           !pWoundsTexture || !pWoundsTexture->GetSurface())return FALSE;
+        if(lpObject && lpObject->WhoAmI()==HPC_UNIT) {
+            auto* unit=static_cast<CUnit*>(lpObject);
+            auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
+            if(specific)specific->EnsureWoundsTextureReady();
+        }
     }
+    if(pWoundsTexture && pWoundsTexture->GetSurface())
+        pWoundsTexture->GetSurface()->EnsureOwnedSurfacePublished();
     if (!ownedAppearanceAttempted)
     {
         ownedAppearanceAttempted = true;
@@ -902,7 +904,6 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
        sets[0]->lpTexture && sets[0]->lpTexture->GetSurface()) {
         const auto secondary=pWoundsTexture && pWoundsTexture->GetSurface()
             ? OwnedRender::E1SurfaceValue(pWoundsTexture->GetSurface()->OwnedSurfaceId()) : nullptr;
-        if(pWoundsTexture && pWoundsTexture->GetSurface() && !secondary)resourcesReady=false;
         OwnedRender::E1PublishSecondaryVisual(lpObject->GetID(),
             sets[0]->lpTexture->GetSurface()->OwnedSurfaceId(),secondary);
     }
