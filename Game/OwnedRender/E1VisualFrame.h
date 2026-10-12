@@ -29,6 +29,9 @@ bool E1OwnedVisualFrameFlushedStatics() noexcept;
 // Whether this draw's owned frame accepted an object's colour.
 // Unclaimed objects are skipped, with no legacy colour/shadow fallback.
 bool E1OwnedVisualDrawn(std::int32_t id) noexcept;
+// First omission reason from the last owned frame, or null if that frame
+// contains the visual and accepted its colour.
+const char* E1OwnedVisualOmission(std::int32_t id) noexcept;
 // Reports acceptance/rejection only when an object's state changes.
 void E1ReportOwnedVisual(std::int32_t id) noexcept;
 // Each world draw unconditionally retires the previous result.

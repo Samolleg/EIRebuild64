@@ -25,8 +25,10 @@ struct Sink {
 Sink* self(void* context) noexcept { return static_cast<Sink*>(context); }
 bool lastFlushed = false;
 std::vector<std::int32_t> currentDrawn;   // sorted, this world draw only
+std::map<std::int32_t, const char*> currentOmissions;
 bool ranThisDraw = false;
 std::uint64_t reportEpoch = 0;
+std::uint64_t omissionReportEpoch = 0;
 std::map<std::int32_t, bool> reportedVisuals;
 struct SecondaryVisual { std::uint64_t primary=0; std::shared_ptr<const owned::OwnedVisualSurface> surface; };
 std::map<std::int32_t,SecondaryVisual> secondaryVisuals;
@@ -193,9 +195,19 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
         &pointShadowBegin, &pointShadowEnd, &staticDepth, &pointShadowBatch, &pointShadowPublish,
         &pointShadowAllocate, &pointShadowRelease, &shadowCull);
     std::vector<std::int32_t> drawn;
-    const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn);
+    std::vector<owned::EmbeddedVisualOmission> omitted;
+    const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn, &omitted);
     std::sort(drawn.begin(), drawn.end());
     currentDrawn.swap(drawn);
+    currentOmissions.clear();
+    for (const auto& item : omitted)
+        if (item.id > 0 && item.reason) currentOmissions.emplace(item.id, item.reason);
+    const auto epoch = owned::bridge_current_world_epoch();
+    if (!omitted.empty() && epoch && omissionReportEpoch != epoch) {
+        omissionReportEpoch = epoch;
+        GameJournal::Event("RENDER", "world_visual_omission",
+            "id=%d owner=c56 reason=%s", omitted.front().id, omitted.front().reason);
+    }
     ranThisDraw = true;
     if (sink.object) renderer.rollback_native(sink.checkpoint);
     // The sinks point at this stack frame: never leave them installed.
@@ -211,6 +223,7 @@ void E1PublishSecondaryVisual(std::int32_t id, std::uint64_t primary,
 void E1OwnedVisualFrameNewDraw() noexcept {
     secondaryVisuals.clear();
     currentDrawn.clear();
+    currentOmissions.clear();
     lastFlushed = false;
     ranThisDraw = false;
 }
@@ -221,6 +234,12 @@ void E1ReportOwnedVisual(std::int32_t id) noexcept try {
         reportEpoch = epoch;
     }
     const bool drawn = E1OwnedVisualDrawn(id);
+    if (!drawn && epoch && omissionReportEpoch != epoch) {
+        omissionReportEpoch = epoch;
+        const char* reason = E1OwnedVisualOmission(id);
+        GameJournal::Event("RENDER", "world_visual_omission",
+            "id=%d owner=c56 reason=%s", id, reason ? reason : "entity_missing_from_frame");
+    }
     const auto previous = reportedVisuals.find(id);
     if (previous == reportedVisuals.end() || previous->second != drawn) {
         reportedVisuals[id] = drawn;
@@ -230,5 +249,10 @@ void E1ReportOwnedVisual(std::int32_t id) noexcept try {
 } catch (...) {}
 bool E1OwnedVisualDrawn(std::int32_t id) noexcept {
     return ranThisDraw && id > 0 && std::binary_search(currentDrawn.begin(), currentDrawn.end(), id);
+}
+const char* E1OwnedVisualOmission(std::int32_t id) noexcept {
+    if (!ranThisDraw || id <= 0) return nullptr;
+    const auto found = currentOmissions.find(id);
+    return found == currentOmissions.end() ? nullptr : found->second;
 }
 }
