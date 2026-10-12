@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DFigure.h"
 #include "Renderer.h"
+#include "OwnedRender/E4Camp.h"
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DFigure::Create()
 {
@@ -44,7 +45,7 @@ BOOL CI3DFigure::Draw(CRenderer *pRend)
     BOOL bCheck = FALSE;
     SHMatrix matrix;
 
-    bCheck = pRend->BindTexture(0, pTexture);
+    bCheck = OwnedRender::E4::BindIcon(this,pRend) || pRend->BindTexture(0, pTexture);
     if (bCheck == FALSE)
         return ReportError("CI3DFigure::Draw.\n SetTexture failed.\n");
 

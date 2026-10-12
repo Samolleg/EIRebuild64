@@ -6,6 +6,9 @@
 #include "../GameJournal.h"
 #include "../dx11/Surface.h"
 #include <map>
+#include "../dx11/RendererDX11.h"
+#include "../ModRuntime.h"
+#include "../ModPackage.h"
 
 using namespace OwnedRender::E4;
 using owned::camp::Rect;
@@ -47,10 +50,18 @@ void E4CampAccess::Activate(CI3DScreenCamp* owner){
     OwnedRender::E4::Activate({owner,[](void* p){auto* s=static_cast<CI3DScreenCamp*>(p);return s->GetI3D()->GetCurrentScreen()==s&&!s->GetI3D()->GetCapture();},&Scroll,&ScrollTo,
         [](void*){grid_text.clear();art_owners.clear();shown_cards={};},
         [](void* p){static_cast<CI3DScreenCamp*>(p)->GetI3D()->BeginFX("buttons\\camp\\scroll.wav");}});
-    GameJournal::Event("RENDER","camp_activate","source=CI3DScreenCamp");
+    const auto* mod=ModRuntime::Current();
+    RegisterTextures(mod&&mod->CombatSetting("JMVGraphics2"));
+    auto* backend=owner->GetI3D()->GetRenderer()->GetD3D();
+    owned::camp_inventory_set_popup_sink(backend,[](void* p,owned::CampRenderRequest request,owned::CampPopupDraw draw,void* data){
+        return static_cast<CDX11*>(p)->SubmitC56CampPopup(request,draw,data);
+    },backend->GetDevice().Get());
+    GameJournal::Event("RENDER","camp_activate","source=CI3DScreenCamp owner=c56");
 }
 void E4CampAccess::Deactivate(CI3DScreenCamp* owner){
     if(screen!=owner)return;
+    Popup(owned::CampRenderRequest::invalidate_popup,nullptr,nullptr);
+    owned::camp_inventory_set_popup_sink(nullptr,nullptr);
     comparison.reset();blueprint.reset();shown_cards={};ordinary_hover=false;
     OwnedRender::E4::Deactivate(owner);screen=nullptr;belt_first=0;
     GameJournal::Event("RENDER","camp_deactivate","borrowed_state=retired");
@@ -265,6 +276,14 @@ bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
     p->FormSortedList();const auto& l=Layout();const bool v=vendor(p);const int first=First(p),count=p->pSortedItems.GetSize();
     const int cols=l.grid_columns(v),rows=l.grid_rows(v);ObserveGrid(v,first,count,p->nSortMode,cols,rows);
     Scope scope(v?Role::vendor:Role::wagon);
+    std::vector<std::string> visible,selected;
+    for(int i=0;i<count;++i)if(p->pSortedItems[i]){
+        const std::string name=p->pSortedItems[i]->GetI3DTextureName();
+        selected.push_back(name);if(i>=first&&i<first+cols*rows)visible.push_back(name);
+    }
+    // Initialize the shared resource/device owner before the worker priority queue.
+    if(!visible.empty())owned::camp_inventory_request_icon(visible.front().c_str(),renderer->GetD3D()->GetDevice().Get());
+    owned::camp_inventory_prioritize_icons(!v?0:screen->bIsSpellConstr&&p==screen->pAssortSpells?1:2,visible,selected);
     const Rect native{50,float(p->nTopHeight),150,float(p->nTopHeight+100)};
     auto* cell=art(p);
     if(!cell->figures.GetSize()){
@@ -449,4 +468,13 @@ PreviewMaterial::PreviewMaterial(CI3DFigure* value,bool active,std::uint32_t rgb
     if(figure){previous=figure->GetDefaultSpecular();figure->SetDefaultSpecular((previous&0xff000000u)|rgb);}
 }
 PreviewMaterial::~PreviewMaterial(){if(figure)figure->SetDefaultSpecular(previous);}
+}
+
+namespace OwnedRender::E4 {
+bool BindIcon(CI3DFigure* figure,CRenderer* renderer){
+    const auto value=BoundIcon(figure);
+    if(!value)return false;
+    renderer->GetD3D()->BindTexture(0,value->srv.Get());
+    return true;
+}
 }

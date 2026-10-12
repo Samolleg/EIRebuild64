@@ -653,6 +653,7 @@
     <ClCompile Include="Game\LuaState.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
+    <ClCompile Include="Game\OwnedRender\CampSubmission.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">

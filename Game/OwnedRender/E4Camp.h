@@ -11,6 +11,7 @@ class CItem;
 class CI3DFigure;
 struct SDrawItem;
 
+namespace owned {struct PreparedCampIcon;}
 namespace OwnedRender::E4 {
 enum class Role { none, root, background, info, help, stats, wagon, vendor,
                   quick, spells, perks, trade, repair, construction, comparison, blueprint };
@@ -105,3 +106,17 @@ struct E4CampAccess {
     static owned::camp::Placement Area(CI3DObject*,OwnedRender::E4::Role,int);
     static int First(CI3DObjectInventoryItems*);
 };
+
+namespace OwnedRender::E4 {
+bool OwnsDraw() noexcept;
+void RegisterTextures(bool high_resolution) noexcept;
+struct Icon {
+    Icon* previous;
+    CI3DFigure* figure;
+    std::shared_ptr<const owned::PreparedCampIcon> value;
+    Icon(CI3DFigure*, std::shared_ptr<const owned::PreparedCampIcon>);
+    ~Icon();
+};
+bool BindIcon(CI3DFigure*, CRenderer*);
+std::shared_ptr<const owned::PreparedCampIcon> BoundIcon(CI3DFigure*);
+}

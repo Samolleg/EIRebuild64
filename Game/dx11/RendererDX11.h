@@ -14,6 +14,7 @@ namespace OwnedRender { struct E1VisualInputs; }
 
 namespace owned { struct NativeGeometryView; }
 #include "../OwnedRender/E2FrameTiming.h"
+#include <camp_inventory.h>
 #include <WICTextureLoader.h>
 #include <wrl/client.h>
 #include <d3d11.h>
@@ -91,6 +92,7 @@ private:
     OwnedRendererClient ownedRenderer;
     std::uint64_t boundParticleSurface = 0;
     bool ownedWorldActive = false;
+    bool campPopupActive = false, campPopupFailed = false;
     std::array<float, 16> ownedWorldToClip{};
     bool c56WorldPassRan = false;
     int c56WorldPassState = -1;
@@ -130,6 +132,9 @@ public:
     void ClearZBuffer(DWORD value);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
+    bool SubmitC56CampFigure(const owned::NativeGeometryView& view);
+    bool SubmitC56CampPopup(owned::CampRenderRequest,owned::CampPopupDraw,void*);
+    void RestoreHostBindings();
     // A loading picture (wait screen, movie frame): the renderer keeps it on
     // screen while the next world prepares, as retail shows the load screen.
     void MarkLoadPicture();

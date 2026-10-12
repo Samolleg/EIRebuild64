@@ -626,6 +626,8 @@ HRESULT CDX11::BlitPublishedSurface(std::uint64_t surfaceId,
 
 CDX11::~CDX11()
 {
+    owned::camp_inventory_shutdown_icons();
+    owned::camp_inventory_set_popup_sink(nullptr,nullptr);
     modBackground.reset();modShadows.reset();
     m_effproc.reset();m_caches.reset();m_batchers.reset();
     uiColorKey.reset();

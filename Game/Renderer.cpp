@@ -32,6 +32,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"
 #include "OwnedRender/E1VisualFrame.h"
+#include "OwnedRender/E4Camp.h"
 /////////////////////////////////////////////////////////////////////////////////////
 namespace NDXDirect3D {
 // buffers
@@ -886,16 +887,20 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     const SVertexComponents* components,int nNumComponents,const WORD* pwIndices,int nNumIndices,
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
-    if(!pDX11->IsOwnedWorldActive() || !pDX11->GetOwnedRenderer().FigureActive())return false;
+    const bool campDraw=OwnedRender::E4::OwnsDraw();
+    if(!campDraw&&(!pDX11->IsOwnedWorldActive() || !pDX11->GetOwnedRenderer().FigureActive()))return false;
     // World objects belong to the committed frame, including rejected visuals.
     // Never submit a second figure draw or return to OpenEI for these IDs.
     const auto objectId = std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id);
-    if (objectId > 0) {
+    if (!campDraw && objectId > 0) {
         OwnedRender::E1ReportOwnedVisual(objectId);
         return true;
     }
     if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
-       !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) return false;
+       !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
+        if(campDraw){pDX11->SubmitC56CampFigure({});return true;}
+        return false;
+    }
 
     owned::NativeGeometryView view{};
     view.positions=reinterpret_cast<const owned::NativePackedGroup*>(plots);view.position_groups=nNumPlots;
@@ -908,6 +913,17 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     view.component_count=nNumComponents;view.indices=pwIndices;view.index_count=nNumIndices;
     view.semantic_kind=owned::SemanticKind::figure;view.ordering=owned::NativeOrdering::preserve;
     view.default_diffuse=dwDefaultAmbientColor;view.default_specular=RGBA_MAKE(0,0,0,cFog);
+    if(campDraw){
+        // The host has produced its exact interface colors; c56 owns placement and drawing.
+        if(dwRenderFlags&DXD3D_LIT){view.diffuse=nullptr;view.specular=nullptr;view.flags|=4u;}
+        if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
+        const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
+        memcpy(view.object_to_clip.data(),&clip,sizeof(clip));
+        view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
+        view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(morphs);view.morph_count=morphCount;
+        pDX11->SubmitC56CampFigure(view);
+        return true; // This category never falls through to the OpenEI buffers/shaders.
+    }
     if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
     view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
     const EIRenderFigureV4 material=pDX11->GetOwnedRenderer().FigureValues();

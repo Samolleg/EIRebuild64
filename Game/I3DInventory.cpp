@@ -331,7 +331,11 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
     CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName());
     CTexture *pTex = nullptr;
-    {
+    std::shared_ptr<const owned::PreparedCampIcon> campIcon;
+    if (OwnedRender::E4::OwnsDraw()) {
+        campIcon = owned::camp_inventory_request_icon(item.pItem->GetI3DTextureName(),pRend->GetD3D()->GetDevice().Get());
+        if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
+    } else {
         OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
         pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
         if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
@@ -470,7 +474,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     pRend->GetRenderState(D3DRENDERSTATE_SPECULARENABLE,&oldSpecular);
     pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,item.pItem->GetSpellsCount()!=0);
     const bool oldColorSum=pRend->GetD3D()->SetItemColorSum(true);
-    pFig->Draw(pRend);
+    { OwnedRender::E4::Icon icon(pFig,campIcon); pFig->Draw(pRend); }
     pRend->GetD3D()->SetItemColorSum(oldColorSum);
     pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,oldSpecular);
 

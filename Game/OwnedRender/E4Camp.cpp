@@ -1,5 +1,6 @@
 #include "E4Camp.h"
 #include <utility>
+#include <engine_bridge.h>
 
 namespace OwnedRender::E4 {
 namespace {
@@ -15,6 +16,8 @@ owned::CampDecoration decoration;
 owned::CampScrollCostSnapshot cost;
 std::uint64_t generation=0;
 thread_local Preview* preview=nullptr;
+thread_local Icon* icon=nullptr;
+bool high_resolution_icons=false;
 unsigned measured_items=0;
 unsigned frame_depth=0;
 void* popup_context=nullptr;
@@ -56,6 +59,10 @@ void move_drag(POINT physical) noexcept {
 std::uint64_t now() noexcept {LARGE_INTEGER q{};if(!QueryPerformanceCounter(&q)){cost.valid=false;return 0;}return q.QuadPart;}
 bool observe() noexcept {static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_ATTRIBUTION",value,sizeof(value))&&value[0]=='1';}();return enabled;}
 }
+bool OwnsDraw() noexcept {return host.context&&(frame_depth||drawing!=Role::none);}
+void RegisterTextures(bool high_resolution) noexcept {high_resolution_icons=high_resolution;owned::camp_inventory_embedded_owner(host.context,generation,high_resolution_icons);}
+Icon::Icon(CI3DFigure* f,std::shared_ptr<const owned::PreparedCampIcon> v):previous(icon),figure(f),value(std::move(v)){icon=this;}
+Icon::~Icon(){icon=previous;}
 bool Active() noexcept {return host.context&&valid&&layout.wide;}
 bool Current() noexcept {return Active()&&host.current&&host.current(host.context);}
 const owned::camp::Layout& Layout() noexcept {return layout;}
@@ -99,7 +106,7 @@ void Activate(Host value) noexcept {
 void Deactivate(void* owner) noexcept {
     if(owner!=host.context)return;
     owned::camp_inventory_cancel_drag();owned::camp_inventory_retire_textures();
-    host={};valid=false;cards={};decoration={};decoration_pending=false;cost={};preview=nullptr;drawing=Role::none;
+    host={};owned::camp_inventory_embedded_owner(nullptr,0,high_resolution_icons);valid=false;cards={};decoration={};decoration_pending=false;cost={};preview=nullptr;drawing=Role::none;
 }
 void BeginDraw(int value) noexcept {
     if(!host.context)return;
@@ -154,7 +161,7 @@ bool Message(HWND window,UINT message,WPARAM wparam,LPARAM lparam) noexcept {
 namespace owned {
 using namespace OwnedRender::E4;
 CampScrollCostSnapshot camp_inventory_take_scroll_cost() noexcept {return std::exchange(cost,CampScrollCostSnapshot{});}
-void camp_inventory_retire_textures() noexcept {if(host.context&&host.retire)host.retire(host.context);decoration_pending=false;cards={};++generation;}
+void camp_inventory_retire_textures() noexcept {if(host.context&&host.retire)host.retire(host.context);decoration_pending=false;cards={};++generation;camp_inventory_embedded_owner(host.context,generation,high_resolution_icons);}
 bool camp_inventory_take_decoration(CampDecoration& value) noexcept {
     if(!Active()||!camp::primary_output||!decoration_pending||frame_depth)return false;
     value=decoration;decoration_pending=false;return true;
@@ -184,7 +191,7 @@ bool camp_inventory_preview_specular_rgb(std::uint32_t& rgb) noexcept {
     rgb=preview->rgb;return true;
 }
 void camp_inventory_cancel_drag() noexcept {const HWND window=drag.window;drag={};if(window&&GetCapture()==window)ReleaseCapture();}
-void camp_inventory_set_popup_sink(void* context,CampPopupSink sink) noexcept {popup_context=context;popup_sink=sink;}
+void camp_inventory_set_popup_sink(void* context,CampPopupSink sink,ID3D11Device*) noexcept {popup_context=context;popup_sink=sink;}
 bool camp_inventory_wheel(POINT physical,short delta,UINT) noexcept {
     if(!Current()||!focus||controls)return false;
     const auto p=virtual_point(physical);
@@ -344,4 +351,8 @@ bool camp_inventory_clear(const RECT& source, RECT& destination) noexcept {
 }
 
 
+}
+
+namespace OwnedRender::E4 {
+std::shared_ptr<const owned::PreparedCampIcon> BoundIcon(CI3DFigure* figure) {return icon&&icon->figure==figure?icon->value:nullptr;}
 }
