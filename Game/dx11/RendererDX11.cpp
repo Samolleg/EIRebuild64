@@ -10,6 +10,7 @@
 #include "RendererDX11.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
+#include "../OwnedRender/E1World.h"
 #include "../OwnedRender/E1SurfaceFacade.h"
 #include "../FrameDiagnostics.h"
 #include "ModShadowDX11.h"
@@ -288,6 +289,7 @@ int CDX11::DrawPrimitive(D3D11_PRIMITIVE_TOPOLOGY primitive, VertexBuffer<TVerte
 void CDX11::BeginFrame()
 {
     IfFailedThrowHR(rendererFacade->BeginFrame());
+    OwnedRender::E1BeginFrame();
     frameTiming.Begin();
     RefreshOwnedTargets();
     IfFailedThrowHR(rendererFacade->VisitDevice(&background_color,
