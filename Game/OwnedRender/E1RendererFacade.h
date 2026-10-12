@@ -113,6 +113,19 @@ public:
             return value.visit_embedded_output(user, visitor);
         });
     }
+
+    // Native figure adapters submit their completed, pointer-bounded snapshot
+    // during the active c56 frame. The renderer copies the geometry into its
+    // own queue before this call returns; callers must not retain engine data.
+    HRESULT QueueNative(const owned::NativeGeometryView& view,
+                        const owned::FixedState& state,
+                        owned::SurfaceImage* texture,
+                        owned::NativeGeometryResult* result = nullptr) {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        return Visit([&](Backend& value) {
+            return value.queue_native(view, state, texture, result);
+        });
+    }
 };
 
 using E1RendererFacade = RendererFacadeCore<owned::Renderer>;
