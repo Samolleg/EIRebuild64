@@ -986,7 +986,9 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
                 }
                 CRect rcFigureRect(0, 0, 0, 0);
                 bCheck = pRend->DrawFigure(pFigure, lights, sets[i]->matgroups[j]->lpMaterial, cFog,
-                                           pRect ? &rcFigureRect : nullptr);
+                                           pRect ? &rcFigureRect : nullptr,
+                                           lpObject->WhoAmI() == HPC_UNIT ? sets[i]->lpTexture : nullptr,
+                                           nullptr);
                 if (bCheck == FALSE)
                     return ReportError("CObject3DClientSpecific::Draw.\n CFigure::Draw failed.\n");
                 nFigureClipFlag |= pFigure->CheckFlag(FIG_VISIBLE);
