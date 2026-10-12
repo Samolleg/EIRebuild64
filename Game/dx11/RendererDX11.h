@@ -125,6 +125,9 @@ public:
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
+    // A loading picture (wait screen, movie frame): the renderer keeps it on
+    // screen while the next world prepares, as retail shows the load screen.
+    void MarkLoadPicture();
     bool SubmitOwnedTerrain(EIRenderTerrainFrameV5 packet);
     OwnedTerrainPassResult SubmitC56TerrainPass(bool transparent);
     owned::NativeOwnedFixedState CaptureOwnedTerrainMaterial();

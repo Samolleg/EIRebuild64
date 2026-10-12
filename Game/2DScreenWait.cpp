@@ -121,6 +121,7 @@ bool StartProgressVideo()
         return false;
     }
 
+    candidate->MarkLoadingPicture();
     progressVideo = std::move(candidate);
     auto context = theRenderer.GetD3D()->GetDeviceContext();
     if (SUCCEEDED(context.As(&videoContextLock)) && videoContextLock)
@@ -213,6 +214,7 @@ void C2DScreenWait::Step(int nNumb)
     pDX11->GetSpriteBatch()->Begin();
     if (pSurface) pSurface->BltToRenderSurface(rectOnScreen, 0, 0);
     pDX11->GetSpriteBatch()->End();
+    pDX11->MarkLoadPicture();
     theCursor.Draw();
     pDX11->EndFrame();
 #endif

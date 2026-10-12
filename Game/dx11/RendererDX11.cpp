@@ -217,6 +217,11 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& view)
     for (const auto& item : fake_dx7.render_state)
         if (item.first >= 0 && static_cast<std::size_t>(item.first) < state.render.size())
             state.render[item.first] = item.second;
+    // Specular addition follows this figure's own material (flag 8 =
+    // MAT_USE_SPECULAR), not whatever an earlier draw left in the device
+    // state: GPU lighting passes the raw material specular (0.988 on
+    // characters), so a stale TRUE washed every character white.
+    state.render[D3DRENDERSTATE_SPECULARENABLE] = (view.flags & 8u) ? TRUE : FALSE;
     const auto alphaMode = GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
     state.stage[0][D3DTSS_COLOROP] = D3DTOP_MODULATE;
     state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
@@ -341,6 +346,15 @@ void CDX11::RunC56WorldPass()
     c56WorldPassRan = true;
     GameJournal::Event("RENDER", "world_pass",
         "owner=c56 path=flush_native_static position=after_scene_publication before=transparent_terrain,world_effects missing=shadow_casters,game_particles");
+}
+
+void CDX11::MarkLoadPicture()
+{
+    if (!rendererFacade) return;
+    rendererFacade->Visit([](owned::Renderer& renderer) {
+        renderer.mark_load_picture();
+        return S_OK;
+    });
 }
 
 void CDX11::SubmitC56PointLights(

@@ -31,7 +31,7 @@ struct CBinkVideo::Player
     std::vector<unsigned char> pixels;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
-    bool decoded = false, finished = false, paused = false;
+    bool decoded = false, finished = false, paused = false, loadingPicture = false;
     unsigned displayedFrame = 0;
     std::unique_ptr<OwnedSpriteBatch> batch;
     ~Player() { if (movie) close(movie); if (module) FreeLibrary(module); }
@@ -130,6 +130,7 @@ struct CBinkVideo::Player
             batch->Begin(DirectX::SpriteSortMode_Immediate);
             batch->Draw(view.Get(), dest);
             batch->End();
+            if (loadingPicture) dx->MarkLoadPicture();
             dx->EndFrame();
         }
         else dx->GetSpriteBatch()->Draw(view.Get(), dest);
@@ -258,4 +259,8 @@ void CBinkVideo::DrawFrame(int frame, bool blit, bool present)
     player->displayedFrame = player->movie->frame;
     if (player->displayedFrame < player->movie->frames) player->next(player->movie);
     if (blit) player->Draw(rectOnScreen, present);
+}
+void CBinkVideo::MarkLoadingPicture()
+{
+    if (player) player->loadingPicture = true;
 }
