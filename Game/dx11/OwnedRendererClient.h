@@ -248,6 +248,7 @@ public:
     }
     bool SubmitFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet) {
         const auto access = renderGate.Lock();
+        if (!host) return false;
         if(!figureScopeActive)return false;
         // A raw/CPU-deformed caller without source identity/revision stays on
         // the legacy path. Never assume its scratch buffers are immutable.
@@ -350,6 +351,7 @@ public:
     }
     HRESULT BeginFrame(const float* color, float depth) {
         const auto access = renderGate.Lock();
+        if (!host || !api.begin_frame) return S_FALSE;
         const bool measured = GetCurrentThreadId() == ownerThread;
         if (measured) frameTiming.Begin();
         const HRESULT hr = api.begin_frame(host, color, depth);
@@ -358,6 +360,7 @@ public:
     }
     HRESULT Present() {
         const auto access = renderGate.Lock();
+        if (!host || !api.present) return S_FALSE;
         const HRESULT hr = api.present(host);
         if (GetCurrentThreadId() == ownerThread) {
             frameTiming.End(hr == S_OK); JournalFrameTiming();
@@ -366,6 +369,8 @@ public:
     }
     HRESULT BeginWorld(const EIRenderWorldFrameV2& frame, uint32_t& skyConsumed) {
         const auto access = renderGate.Lock();
+        skyConsumed = 0;
+        if (!host || !worldApi.begin_world) return S_FALSE;
         const HRESULT hr=worldApi.begin_world(host, &frame, &skyConsumed);
         if(SUCCEEDED(hr)) {
             if(figureScene!=frame.world_generation){FinishPackets();figureIdentities.clear();figureMeshes.clear();figureTextures.clear();meshFailures.clear();figureFrame=0;packetHistory=false;}
@@ -375,9 +380,17 @@ public:
         return hr;
     }
     HRESULT EndWorld() {
-        const auto access = renderGate.Lock(); const HRESULT hr = worldApi.end_world(host); if(SUCCEEDED(hr))CollectFigureResources(); PublishPackets(); JournalRendererState(); return hr; }
+        const auto access = renderGate.Lock();
+        if (!host || !worldApi.end_world) return S_FALSE;
+        const HRESULT hr = worldApi.end_world(host);
+        if (SUCCEEDED(hr)) CollectFigureResources();
+        PublishPackets(); JournalRendererState(); return hr;
+    }
     HRESULT SetTerrain(const EIRenderTerrainSourceV5& input){
-        const auto access = renderGate.Lock();return terrainApi.set_terrain_source(host,&input);}
+        const auto access = renderGate.Lock();
+        if (!host || !terrainApi.set_terrain_source) return S_FALSE;
+        return terrainApi.set_terrain_source(host,&input);
+    }
     void ReleaseTerrain() {
         const auto access = renderGate.Lock();if(host){const HRESULT hr=terrainApi.release_terrain(host);if(FAILED(hr))throw hr;}}
     void TerrainFallback(const char* reason) {
@@ -386,6 +399,7 @@ public:
     }
     bool SubmitTerrain(EIRenderTerrainFrameV5 input) {
         const auto access = renderGate.Lock();
+        if (!host || !terrainApi.submit_terrain) return false;
         input.size=sizeof(input);input.version=5;input.scene_generation=figureScene;
         EIRenderTerrainResultV5 result{sizeof(result),5,0,0,{}};
         const HRESULT hr=terrainApi.submit_terrain(host,&input,&result);
@@ -395,16 +409,29 @@ public:
         ++counts.rejected;++counts.legacy;++counts.reasons[result.reason];return false;
     }
     HRESULT SetScene(const EIRenderSceneV3& input){
-        const auto access = renderGate.Lock();return sourceApi.set_scene(host,&input);}
+        const auto access = renderGate.Lock();
+        if (!host || !sourceApi.set_scene) return S_FALSE;
+        return sourceApi.set_scene(host,&input);
+    }
     HRESULT TerrainDrawn(){
-        const auto access = renderGate.Lock();const HRESULT hr = sourceApi.terrain_drawn(host); JournalRendererState(); return hr;}
+        const auto access = renderGate.Lock();
+        if (!host || !sourceApi.terrain_drawn) return S_FALSE;
+        const HRESULT hr = sourceApi.terrain_drawn(host); JournalRendererState(); return hr;
+    }
     HRESULT BindWorldPixels(bool fog){
-        const auto access = renderGate.Lock();return sourceApi.bind_world_pixels(host,fog?1u:0u);}
+        const auto access = renderGate.Lock();
+        if (!host || !sourceApi.bind_world_pixels) return S_FALSE;
+        return sourceApi.bind_world_pixels(host,fog?1u:0u);
+    }
     HRESULT RecordDraw(uint32_t triangles) {
-        const auto access = renderGate.Lock(); return worldApi.record_draw(host, triangles); }
+        const auto access = renderGate.Lock();
+        if (!host || !worldApi.record_draw) return S_FALSE;
+        return worldApi.record_draw(host, triangles);
+    }
     HRESULT DrawUi(ID3D11ShaderResourceView* image, const RECT& destination,
                    const RECT* source, unsigned flags, COLORREF key = 0) {
         const auto access = renderGate.Lock();
+        if (!host || !api.draw_ui) return S_FALSE;
         EIRenderUiBlitV1 request = {};
         request.size = sizeof(request);
         request.image = image;
