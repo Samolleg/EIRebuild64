@@ -3026,30 +3026,9 @@ BOOL CWorldClient::Draw()
             if (!world->pPlayer || !world->pPlayer->GetPlayerSpecific()) return false;
             world->CombatPause(pause); return true;
         }, this);
-    const bool sourceSky = pRend->GetD3D()->BeginWorld(ownedWorld);
-    const bool embeddedSky = OwnedRender::E1ClaimSky(CheckFlag(WC_RENDER_SKY) && pSky);
-    const bool ownedSky = sourceSky || embeddedSky;
-    // render sky object
+    pRend->GetD3D()->BeginWorld(ownedWorld);
+    OwnedRender::E1ClaimSky(CheckFlag(WC_RENDER_SKY) && pSky);
 #ifndef _A4
-    if (CheckFlag(WC_RENDER_SKY) && pSky && !ownedSky)
-    {
-        //			pRend->SetRenderState( D3DRENDERSTATE_ALPHAREF, 10 );
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
-        pRend->SetTexturingAlphaMode(AM_VERTEX);
-        //			pRend->SetRenderState( D3DRENDERSTATE_ZENABLE, D3DZB_TRUE );
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-        pRend->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
-
-        pRend->SetAddFogOff();
-        pSky->Draw(&theRenderer, pCamera->GetCP());
-        pRend->FlushBuffers(); // flush terrain render data
-        pRend->SetAddFogOn();
-
-        pRend->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_CW);
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
-    }
     LMPTimePassed();
 #endif // _A4
        // render terrain's main part
@@ -3063,7 +3042,6 @@ BOOL CWorldClient::Draw()
         pTerrain->DrawBase(&theRenderer, true);
         pRend->FlushBuffers();
     }
-    ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
     // Prepare visibility, poses and picking before publication and commit.
     Prepare3DScene();
     LMPTimePassed();
@@ -3128,7 +3106,6 @@ BOOL CWorldClient::Draw()
         pRend->FlushBuffers();
     }
     LMPTimePassed();
-    ModWorldBackground::DrawTransparent();
     // render effects
     if (CheckFlag(WC_RENDER_EFFECTS))
     {

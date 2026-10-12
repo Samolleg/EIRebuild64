@@ -21,13 +21,9 @@ namespace owned { struct NativeGeometryView; }
 #include <array>
 
 // #define DRAWABLE_BACKBUFFER
-namespace ModWorldBackground { struct FrameSnapshot; }
-namespace WorldBackground { struct VisualEnvironment; }
 namespace owned { struct NativeOwnedFixedState; }
 namespace owned { class Renderer; }
 namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
-class ModWorldBackgroundDX11;
-
 class UIColorKeyBlit;
 class CDXGISurface;
 class CConstantBuffers;
@@ -45,8 +41,6 @@ class CDX11
 {
 private:
     bool itemColorSum = false; // Per-draw item state, never a configuration option.
-    std::shared_ptr<ModWorldBackgroundDX11> modBackground;
-
     std::shared_ptr<UIColorKeyBlit> uiColorKey;
     DWORD m_width, m_height;
     DirectX::XMFLOAT4 background_color;
@@ -118,8 +112,6 @@ public:
 
 
 
-    void DrawWorldBackground(const std::shared_ptr<ModWorldBackground::FrameSnapshot>&,const WorldBackground::VisualEnvironment&,const std::array<float,4>& depthRow,unsigned long fogColor,bool transparentPass=false);
-    void ResetWorldBackground();
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();

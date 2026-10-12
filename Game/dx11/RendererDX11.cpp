@@ -13,7 +13,6 @@
 #include "../OwnedRender/E1SurfaceFacade.h"
 #include "../FrameDiagnostics.h"
 
-#include "ModWorldBackgroundDX11.h"
 #include "UIColorKeyBlit.h"
 #include "../OwnedRender/E1TerrainState.h"
 #include "../OwnedRender/E1Terrain.h"
@@ -655,7 +654,6 @@ CDX11::~CDX11()
 {
     owned::camp_inventory_shutdown_icons();
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);
-    modBackground.reset();
     m_effproc.reset();m_caches.reset();m_batchers.reset();
     uiColorKey.reset();
     this->spriteBatch.reset();
@@ -929,9 +927,3 @@ void CDX11::SetAlphaRef(float value)
 {
     m_cbs->cb_ps_pixelshader.data.alphaRef = value;
 };
-void CDX11::ResetWorldBackground(){modBackground.reset();}
-void CDX11::DrawWorldBackground(const std::shared_ptr<ModWorldBackground::FrameSnapshot>& snapshot,const WorldBackground::VisualEnvironment& environment,const std::array<float,4>& depthRow,unsigned long fogColor,bool transparentPass){
-    if(!snapshot)return;
-    try{if(!modBackground)modBackground=std::make_shared<ModWorldBackgroundDX11>(device.Get(),deviceContext.Get());modBackground->Frame(snapshot,environment,depthRow,fogColor,transparentPass);}
-    catch(const std::exception& e){GameJournal::AllocationFailureInCatch("world_background");OutputDebugStringA(e.what());modBackground.reset();if(snapshot->publication)snapshot->publication->Reset(environment.epoch);}
-}

@@ -1,5 +1,6 @@
 #include "E1Terrain.h"
 #include "E1World.h"
+#include "E1Scene.h"
 #include "E1Surface.h"
 #include "world_mist_grid.h"
 #include <cmath>
@@ -279,8 +280,15 @@ bool bridge_ambient_world_source(AmbientWorldSource& output) noexcept {
     output = {};
     if (!current() || !source.terrain || !source.geometry) return false;
     output.terrain = source.terrain; output.geometry = source.geometry;
-    // No fabricated MOB snapshot: map-dependent effects remain unavailable
-    // until the main retained scene publisher supplies its real map source.
+    // The scene owner retains the exact main MOB/MPR snapshot published by the
+    // server loader. Pair it with this terrain only when both name the same MPR.
+    auto& scene = OwnedRender::E1Scene();
+    if (scene.CurrentWorld(worldIdentity)) {
+        const auto mapSource = scene.Scene().terrain_source_snapshot();
+        if (mapSource.map && mapSource.map->terrain &&
+            mapSource.map->terrain_resource == source.terrain->project_resource)
+            output.map = mapSource.map;
+    }
     const auto& a = source.geometry->animation;
     output.wind_direction[0] = a.wind_direction[0]; output.wind_direction[1] = a.wind_direction[1];
     output.wind_force_normalized = a.wind_force_normalized;
