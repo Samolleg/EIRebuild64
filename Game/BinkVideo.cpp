@@ -29,7 +29,8 @@ struct CBinkVideo::Player
     std::vector<unsigned char> pixels;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
-    bool decoded = false, finished = false, paused = false;
+    bool decoded = false, finished = false, paused = false, loadingPicture = false;
+    std::uint64_t imageGeneration = 0;
     unsigned displayedFrame = 0;
     std::unique_ptr<OwnedSpriteBatch> batch;
     ~Player() { if (movie) close(movie); if (module) FreeLibrary(module); }
@@ -119,6 +120,7 @@ struct CBinkVideo::Player
     }
     void Decode()
     {
+        const auto renderAccess = theRenderer.GetD3D()->GetOwnedRenderer().LockFrame();
         decode(movie);
         copy(movie, pixels.data(), movie->width * 4, movie->height, 0, 0, 0x80000003u);
         // BINKSURFACE32 is BGRX; SpriteBatch requires opaque alpha.
@@ -131,16 +133,18 @@ struct CBinkVideo::Player
     {
         if (!decoded) return;
         auto dx = theRenderer.GetD3D();
+        const auto renderAccess = dx->GetOwnedRenderer().LockFrame();
         RECT dest = {rect.left, rect.top, rect.right, rect.bottom};
         if (present)
         {
-            // A separate batch also allows movie sequences invoked from an UI draw callback.
-            if (!batch) batch.reset(new OwnedSpriteBatch(dx->GetOwnedRenderer()));
+            // The embedded renderer has no RDDraw UI host: present the frame
+            // as a renderer image (fitted to the output; also the loading
+            // picture the renderer holds while the next world prepares).
             dx->BeginFrame();
             dx->ClearColorBuffer(0);
-            batch->Begin(DirectX::SpriteSortMode_Immediate);
-            batch->Draw(view.Get(), dest);
-            batch->End();
+            dx->PresentLoadingImage(pixels, movie->width, movie->height,
+                (std::uint64_t(1) << 62) | std::uint64_t(reinterpret_cast<std::uintptr_t>(this)),
+                ++imageGeneration);
             dx->EndFrame();
         }
         else dx->GetSpriteBatch()->Draw(view.Get(), dest);
@@ -202,12 +206,14 @@ bool CBinkVideo::PlayNextFrame(bool present, bool freeze)
     Player &p = *player;
     if (!p.finished && !p.paused && !p.wait(p.movie))
     {
-        if (p.decoded && p.displayedFrame >= p.movie->frames) p.finished = true;
+        if (p.decoded && p.displayedFrame >= p.movie->frames && !freeze) p.finished = true;
         else
         {
             p.Decode();
             p.displayedFrame = p.movie->frame;
-            if (p.displayedFrame < p.movie->frames) p.next(p.movie);
+            // Loading screens loop (BinkNextFrame wraps after the last frame),
+            // as the retail wait screen does for the whole load.
+            if (freeze || p.displayedFrame < p.movie->frames) p.next(p.movie);
         }
     }
     p.Draw(rectOnScreen, present);
@@ -278,4 +284,8 @@ void CBinkVideo::DrawFrame(int frame, bool blit, bool present)
     player->displayedFrame = player->movie->frame;
     if (player->displayedFrame < player->movie->frames) player->next(player->movie);
     if (blit) player->Draw(rectOnScreen, present);
+}
+void CBinkVideo::MarkLoadingPicture()
+{
+    if (player) player->loadingPicture = true;
 }

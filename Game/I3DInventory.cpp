@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -222,7 +223,7 @@ bool CTextureLRUAllocator::EnsureReady(CTexture *pTex)
         D3D11_SUBRESOURCE_DATA data = {0};
         data.pSysMem = recipe.uploadedPixels.get();
         data.SysMemPitch = 2 * recipe.sourceWidth;
-        pTex->GetSurface()->UpdateTexture(0, &region, &data);
+        pTex->GetSurface()->UpdateTexture(0, &region, &data, MMP_FORMAT_5551);
     }
     restoring.ready = true;
     return true;
@@ -323,10 +324,22 @@ static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, 
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
 void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
 {
+    if (!item.pItem) return;
+    owned::camp::Composition campPlacement;
+    const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
+    owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
+    if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
     CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName());
-    CTexture *pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
-    if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
-        return;
+    CTexture *pTex = nullptr;
+    std::shared_ptr<const owned::PreparedCampIcon> campIcon;
+    if (OwnedRender::E4::OwnsDraw()) {
+        campIcon = owned::camp_inventory_request_icon(item.pItem->GetI3DTextureName(),pRend->GetD3D()->GetDevice().Get());
+        if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
+    } else {
+        OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
+        pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
+        if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
+    }
     pFig->SetTexture(pTex);
     pFig->SetDefaultSpecular(0xff000000);
     pFig->SetRelativeToScreen(item.fX, item.fY, item.fZ);
@@ -450,6 +463,10 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     }
     // draw
     //		pFig->SetDefaultSpecular( 0xff000000 );
+    const bool campPreview = item.eFrom == ISP_UNKNOWN && campPlaced;
+    const auto campRGB = campPreview ? E4CampAccess::PreviewRGB(this, item.pItem) : 0u;
+    OwnedRender::E4::Preview preview(campRGB, campPreview);
+    OwnedRender::E4::PreviewMaterial campMaterial(pFig, campPreview, campRGB);
     pFig->SetDefaultColor(
         D3DRGBA(pFig->GetAmbient().x, pFig->GetAmbient().y, pFig->GetAmbient().z, 1));
     pFig->UseDefaultColors(TRUE);
@@ -457,7 +474,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     pRend->GetRenderState(D3DRENDERSTATE_SPECULARENABLE,&oldSpecular);
     pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,item.pItem->GetSpellsCount()!=0);
     const bool oldColorSum=pRend->GetD3D()->SetItemColorSum(true);
-    pFig->Draw(pRend);
+    { OwnedRender::E4::Icon icon(pFig,campIcon); pFig->Draw(pRend); }
     pRend->GetD3D()->SetItemColorSum(oldColorSum);
     pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,oldSpecular);
 
@@ -729,6 +746,7 @@ void CI3DObjectItemInfo::Init(int x, int y)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectItemInfo::Draw(CRenderer *pRend)
 {
+    if (E4CampAccess::CardDraw(this, pRend)) return TRUE;
     CItem *pItem = GetItem();
     if (pItem)
     {
@@ -779,6 +797,7 @@ void CI3DObjectItemInfo::ResetInputState()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::SetItem(CItem *pNewItem)
 {
+    E4CampAccess::Hover(this, pNewItem != nullptr);
     CItem *pItem = GetItem();
     if (pItem && pNewItem && pItem->Compare(pNewItem))
         return;
@@ -4773,6 +4792,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
     }
 
     SetItem(0);
+    E4CampAccess::Hover(this, pSkillInfo && pSkillInfo->nType >= 0);
     if (pSkillInfo->nType < 0)
         return;
 
@@ -5458,6 +5478,7 @@ switch (pSkillInfo->nType)
 void CI3DObjectItemInfo::SetHelp(int nHelpID)
 {
     SetItem(0);
+    E4CampAccess::Hover(this, nHelpID != 0);
 
 #ifndef NOGETDC
     CI3DSurface *pSurf = surfaces[0];

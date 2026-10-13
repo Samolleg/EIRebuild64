@@ -299,9 +299,15 @@ CGeometryContainer *CGeometryManager::CreateNewGeometryContainer(const std::stri
 BOOL CGeometryManager::ReadFigure(CGeometryContainer *pGC, const std::string &szFigureName,
                                   float fStrength, float fGrace, float fTall)
 {
-    BYTE *pData = GetFile((pGC->GetName() + szFigureName + ".fig").c_str());
+    const bool hadRange = pGC->IsHaveRange(szFigureName);
+    DWORD selectedSize = 0;
+    BYTE *pData = GetFile((pGC->GetName() + szFigureName + ".fig").c_str(), &selectedSize);
     if (!pData)
+    {
+        pGC->OwnedFigureSources().Remove(szFigureName);
         return FALSE;
+    }
+    const BYTE* selectedData = pData;
     //
     if ((ptr_cast<SFigureFormatHeader>(pData)->dwSignature & FIG_SIGNATURE_MASK) ==
         FIG_SIGNATURE_FIGN)
@@ -309,15 +315,26 @@ BOOL CGeometryManager::ReadFigure(CGeometryContainer *pGC, const std::string &sz
     else
         LoadOldFigureData(pGC, szFigureName, pData, fStrength, fGrace, fTall);
 
+    if (pGC->IsHaveRange(szFigureName))
+    {
+        if (hadRange) pGC->OwnedFigureSources().ConfirmPositionSource(szFigureName, selectedData, selectedSize);
+        else pGC->OwnedFigureSources().Publish(szFigureName, selectedData, selectedSize);
+    }
     return TRUE;
 }
 BOOL CGeometryManager::ReadFigure(CGeometryContainer *pGC, CModelResourceEntry *pModel,
                                   const std::string &szFigureName, float fStrength, float fGrace,
                                   float fTall)
 {
-    BYTE *pData = pModel->GetModel()->GetFile(szFigureName.c_str());
+    const bool hadRange = pGC->IsHaveRange(szFigureName);
+    DWORD selectedSize = 0;
+    BYTE *pData = pModel->GetModel()->GetFile(szFigureName.c_str(), &selectedSize);
     if (!pData)
+    {
+        pGC->OwnedFigureSources().Remove(szFigureName);
         return FALSE;
+    }
+    const BYTE* selectedData = pData;
     //
     if ((ptr_cast<SFigureFormatHeader>(pData)->dwSignature & FIG_SIGNATURE_MASK) ==
         FIG_SIGNATURE_FIGN)
@@ -325,6 +342,11 @@ BOOL CGeometryManager::ReadFigure(CGeometryContainer *pGC, CModelResourceEntry *
     else
         LoadOldFigureData(pGC, szFigureName, pData, fStrength, fGrace, fTall);
 
+    if (pGC->IsHaveRange(szFigureName))
+    {
+        if (hadRange) pGC->OwnedFigureSources().ConfirmPositionSource(szFigureName, selectedData, selectedSize);
+        else pGC->OwnedFigureSources().Publish(szFigureName, selectedData, selectedSize);
+    }
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -844,13 +866,18 @@ bool CGeometryManager::ChangeRangeGeometry(CGeometryContainer *pGC, CModelResour
                                            const std::string &szRangeName, float fStrength,
                                            float fGrace, float fTall)
 {
+    DWORD selectedSize = 0;
     BYTE *pData = 0;
     if (pModel)
-        pData = pModel->GetModel()->GetFile(szRangeName.c_str());
+        pData = pModel->GetModel()->GetFile(szRangeName.c_str(), &selectedSize);
     else
-        pData = GetFile((pGC->GetName() + szRangeName + ".fig").c_str());
+        pData = GetFile((pGC->GetName() + szRangeName + ".fig").c_str(), &selectedSize);
     if (!pData)
+    {
+        pGC->OwnedFigureSources().Remove(szRangeName);
         return FALSE;
+    }
+    const BYTE* selectedData = pData;
     //
     if ((ptr_cast<SFigureFormatHeader>(pData)->dwSignature & FIG_SIGNATURE_MASK) ==
         FIG_SIGNATURE_FIGN)
@@ -858,6 +885,8 @@ bool CGeometryManager::ChangeRangeGeometry(CGeometryContainer *pGC, CModelResour
     else
         LoadOldGeometryData(pGC, szRangeName, pData, fStrength, fGrace, fTall);
 
+    if (pGC->IsHaveRange(szRangeName))
+        pGC->OwnedFigureSources().ConfirmPositionSource(szRangeName, selectedData, selectedSize);
     return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////

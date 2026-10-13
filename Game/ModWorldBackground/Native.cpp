@@ -3,80 +3,16 @@
 #include "Pipeline.h"
 #include "../ModPackage.h"
 #include "../ModRuntime.h"
-#include "../WorldClient.h"
-#include "../WorldInterface.h"
-#include "../Terrain.h"
-#include "../Renderer.h"
-#include "../Camera.h"
-#include "../Light.h"
-#include "../GeneralSettings.h"
-#include "../TLPipelineFPU.h"
-#include "../dx11/RendererDX11.h"
-#include "../dx11/ModWorldBackgroundDX11.h"
 #include <filesystem>
 #include <fstream>
 #include <shellapi.h>
 
 namespace ModWorldBackground {
 namespace {
-struct State {
-    GroupWorker worker;CDX11* renderer=nullptr;const CWorldClient* world=nullptr;
-    std::string identity;uint32_t epoch=0;
-    std::shared_ptr<FrameSnapshot> borrowed;
-    VisualEnvironment environment;std::array<float,4> depthRow={};DWORD fogColor=0;
-};
+struct State { GroupWorker worker; };
 State& Runtime(){static State* state=new State;return *state;}
-VisualEnvironment CaptureEnvironment(CTerrain& terrain,CRenderer& renderer,uint32_t epoch){
-    VisualEnvironment env;env.epoch=epoch;
-    if(auto* sun=terrain.GetSunLight()){
-        const auto& rgb=sun->GetDiffuse();const auto& direction=sun->GetDirection();const auto& ambient=terrain.GetAmbient();const auto& position=sun->GetCP();
-        env.light={{rgb.r,rgb.g,rgb.b,direction.x,direction.y,direction.z,ambient.r,ambient.g,ambient.b}};
-        env.sunPosition={{position.x,position.y,position.z}};
-        bool trace=false;terrain.GetBackgroundSun(env.terrainSun[0],env.terrainSun[1],env.terrainSun[2],env.terrainSteps[0],env.terrainSteps[1],trace);env.terrainSteps[2]=trace?1:0;
-        bool valid=true;for(float v:env.light)valid=valid&&std::isfinite(v);for(float v:env.sunPosition)valid=valid&&std::isfinite(v);for(float v:env.terrainSun)valid=valid&&std::isfinite(v);
-        valid=valid&&env.terrainSun[2]>=0&&std::abs(env.terrainSteps[0])<=96&&std::abs(env.terrainSteps[1])<=96;
-        if(valid)env.valid|=VisualLight|VisualSunPosition|VisualTerrainSun;
-    }
-    const auto& clip=renderer.GetGPU()->GetMatrix(MAT_STACK_VIEW2CLIP);std::memcpy(env.view.data(),&clip,64);
-    bool finite=true;for(size_t i=0;i<16;++i)finite=finite&&std::isfinite(env.view[i]);if(finite)env.valid|=VisualView;
-    if(auto* pipeline=dynamic_cast<CTLPipelineFPU*>(renderer.GetTransformPipeline())){
-        pipeline->GetBackgroundFog(env.atmosphereRange.data(),env.atmosphereProjection.data());
-        if(renderer.IsAddFog()&&env.atmosphereRange[0]>=0&&env.atmosphereRange[1]>env.atmosphereRange[0])env.valid|=VisualAtmosphere;
-    }
-    return env;
 }
-}
-void Unload(){
-    auto& state=Runtime();
-    // Release the render/CPU borrow and COM upload owners before joining. The
-    // worker and its decor worker hold all remaining map/model data until exit.
-    if(state.renderer)state.renderer->ResetWorldBackground();state.borrowed.reset();state.worker.Stop();
-    if(!state.identity.empty())OutputDebugStringA("WorldBackground unloaded; workers joined, renderer released\n");
-    state.renderer=nullptr;state.world=nullptr;state.identity.clear();state.environment={};
-}
-void BeforeDraw(CWorldClient& world,const CPlot3D& logicalCamera){
-    auto& state=Runtime();auto* package=ModRuntime::Resources();auto* terrain=world.GetTerrain();
-    if(!package||!package->WorldBackgroundEnabled()||!terrain||!terrain->IsLoaded()||!world.CheckFlag(WC_RENDER_TERRAIN)||!theRenderer.GetD3D()){if(state.world)Unload();return;}
-    WorldBackground::Identity active;active.profile="deja-vu";active.allod=Key((LPCSTR)world.GetBackgroundAllod());active.zone=Key((LPCSTR)IWorldClient.GetCurrentZoneName());active.mpr=MapName((LPCSTR)terrain->GetBaseName());
-    const auto identity=package->Directory()+"/"+active.allod+"/"+active.zone+"/"+active.mpr;
-    try{
-        if(state.world!=&world||state.renderer!=theRenderer.GetD3D()||state.identity!=identity){
-            Unload();state.world=&world;state.renderer=theRenderer.GetD3D();state.identity=identity;
-            if(state.epoch==UINT32_MAX)throw std::runtime_error("WorldBackground map epoch exhausted");++state.epoch;
-            state.worker.Start(CaptureInput(*package,std::filesystem::path((LPCSTR)CWorld::GetResourcePath()).wstring(),std::filesystem::path((LPCSTR)CWorld::GetWorkPath()).wstring(),active));
-            OutputDebugStringA(("WorldBackground CPU session started: "+identity+"\n").c_str());
-        }
-        Request request;request.epoch=state.epoch;request.environment=CaptureEnvironment(*terrain,theRenderer,state.epoch);
-        request.view.camera={logicalCamera.x,logicalCamera.y};request.view.useFrustum=(request.environment.valid&VisualView)!=0;
-        std::copy(request.environment.view.begin(),request.environment.view.begin()+16,request.view.worldToClip.begin());
-        request.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();state.worker.RequestFrame(request);
-        if(auto ready=state.worker.Borrow(state.epoch))state.borrowed=std::move(ready);
-        state.environment=request.environment;
-        const auto& camera=theRenderer.GetGPU()->GetMatrix(MAT_STACK_CAMERA);state.depthRow={{camera._31,camera._32,camera._33,camera._34}};state.fogColor=theRenderer.GetBGColor();
-        if(state.borrowed)state.renderer->DrawWorldBackground(state.borrowed,state.environment,state.depthRow,state.fogColor);
-    }catch(const std::exception& e){OutputDebugStringA(e.what());state.worker.Stop();state.borrowed.reset();if(state.renderer)state.renderer->ResetWorldBackground();}
-}
-void DrawTransparent(){auto& state=Runtime();if(state.renderer&&state.borrowed)state.renderer->DrawWorldBackground(state.borrowed,state.environment,state.depthRow,state.fogColor,true);}
+void Unload(){Runtime().worker.Stop();}
 }
 
 // Four bounded value/CPU-ownership traces on the same production contract.
@@ -283,7 +219,6 @@ bool InspectWorldBackgroundCommandLine(int& result){
         check(Capacity::CanPrepare(0)&&Capacity::CanPrepare(2)&&!Capacity::CanPrepare(3)&&!Capacity::CanPrepare(4),"Retained CPU snapshot backpressure boundary mismatch");
         check(Capacity::RetainedPayloadBytes==3*MaxPayloadBudget,"Retained logical payload bound mismatch");
         report["capacity"]={{"payload",Capacity::PayloadBytes},{"retainedSnapshots",Capacity::Snapshots},{"retainedLogicalPayload",Capacity::RetainedPayloadBytes},{"visiblePendingGpuLogicalPayload",2*Capacity::PayloadBytes}};add("shared upload capability and retained snapshot backpressure boundaries");
-        ModWorldBackgroundDX11::CheckShaders();add("actual native DX11 vertex and pixel shaders compile without device");
         report["assertions"]=assertions;report["success"]=true;result=0;
     }catch(const std::exception& e){report["error"]=e.what();}
     std::ofstream stream(output,std::ios::binary);stream<<report.dump(2);return true;

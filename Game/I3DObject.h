@@ -13,6 +13,8 @@ class CDXGISurface;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DPolyArea
 {
+    friend struct E4CampAccess;
+    friend struct E3HudAccess;
 private:
     CInterface3D *pI3D;
     CSimplyArray<CPoint, CPoint> points;
@@ -42,6 +44,8 @@ public:
     void SetToolTip(LPCTSTR pszText, int nHeaderLines = 1, int nKbdAction = 0);
     void SetToolTip(int nTipID, int nHeaderLines = 1, int nKbdAction = 0);
     void ProcessIdle(CPoint point);
+    // Membership can be remapped while tooltip placement keeps the real cursor.
+    void ProcessIdle(CPoint point,bool inside);
 
     void Draw(CRenderer *pRend);
     void Draw2D();
@@ -56,9 +60,11 @@ enum EBlitStyleFlag
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DSurface
 {
+    friend struct E4CampAccess;
+    friend struct E3HudAccess;
 private:
     CInterface3D *pI3D;
-    HDC hDC; // used when locked
+    HDC hDC = nullptr; // used when locked
     DWORD dwBlitFlags;
     std::unique_ptr<CDXGISurface> pSurface;
     std::unique_ptr<CDXGISurface> pCopy;
@@ -81,6 +87,8 @@ public:
     CI3DSurface(CInterface3D *pI3D, CString szName);
 
     void SetRect(CRect rect);
+    // Discards pixels on resize; the text owner must redraw after reflow.
+    bool SetRectForRedraw(CRect rect, float textScale = 1.f);
     void Move(CPoint ptLeftTop);
 
     void Show(BOOL bShow, BOOL bNeedStore = FALSE);
@@ -128,6 +136,8 @@ public:
 class CI3DMapObjTranslation;
 class CI3DObject : public CBase3D, public CI3DHandler
 {
+    friend struct E4CampAccess;
+    friend struct E3HudAccess;
 private:
     SBoundingVolume bv;
     CRect rect;
@@ -200,6 +210,7 @@ public:
     int HitTest(CPoint pt);
     void JournalHit(int hit) noexcept;
 
+    const CRect& GetRect() const { return rect; }
     void SetRect(CRect rc) { rect = rc; }
     void SetRect(int x1, int y1, int x2, int y2)
     {

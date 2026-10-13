@@ -1,10 +1,15 @@
 #pragma once
 #include "../../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
 #include "RenderJournalState.h"
+#include "../OwnedRender/E2FrameTiming.h"
+#include "../OwnedRender/E1DeviceAccess.h"
+#include "../OwnedRender/E1RenderGate.h"
+#include "../../external/owned-renderer/Source/widescreen.h"
 #include <SpriteBatch.h>
 #include <wrl/client.h>
 #include <string>
 #include <vector>
+#include <functional>
 #include <map>
 #include <array>
 #include <unordered_map>
@@ -12,6 +17,7 @@
 // Source client: the renderer module remains loaded until process exit. This
 // also keeps outstanding COM vtables and the proxy's CRT handlers valid.
 class OwnedRendererClient {
+    OwnedRender::E1RenderGate renderGate;
     HMODULE module = nullptr;
     EIRenderApiV5 terrainApi = {};
     EIRenderMeshReportApiV1 meshReportApi = {};
@@ -23,6 +29,7 @@ class OwnedRendererClient {
     uint64_t figureFrame = 0, geometryIdentity = 0, geometryRevision = 0;
     bool figureScopeActive = false;
     EIRenderFigureV4 figureScope = {};
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> figurePrimaryTexture, figureSecondaryTexture;
     uint64_t figureIdentity = 0;
     struct PartEntry {uint64_t identity, lastUsed;};
     std::map<std::pair<uint64_t,std::string>,PartEntry> figureIdentities;
@@ -111,6 +118,21 @@ class OwnedRendererClient {
     EIRenderStatusApiV2 statusApi = {};
     RenderJournalState journalState;
     DWORD ownerThread = 0;
+    OwnedRender::E2FrameTiming frameTiming;
+    ULONGLONG lastTimingReport = 0;
+    void JournalFrameTiming(bool final = false) noexcept {
+        if (GetCurrentThreadId() != ownerThread) return;
+        const ULONGLONG now = GetTickCount64();
+        if (!final && now - lastTimingReport < 5000) return;
+        const auto sample = frameTiming.Read();
+        if (!sample.completed && !sample.aborted) return;
+        lastTimingReport = now;
+        GameJournal::Event("RENDER", "frame_time",
+            "backend=rddraw_api5 scope=device_session_tail240 cpu_scope=begin_to_present_return gpu_scope=timestamp_span_including_present final=%u frames=%llu cpu_n=%u cpu_median_ms=%.3f cpu_p95_ms=%.3f gpu_n=%u gpu_median_ms=%.3f gpu_p95_ms=%.3f gpu_status=%08lx gpu_state=%s gpu_dropped=%llu gpu_invalid=%llu aborted=%llu",
+            final ? 1u : 0u, sample.completed, sample.cpu.count, sample.cpu.median, sample.cpu.p95,
+            sample.gpu.count, sample.gpu.median, sample.gpu.p95,
+            static_cast<unsigned long>(sample.gpuStatus), FAILED(sample.gpuStatus) ? "unavailable" : sample.gpu.count ? "measured" : "pending", sample.dropped, sample.invalid, sample.aborted);
+    }
     HRESULT previousStatusError = S_OK;
     void JournalRendererState() noexcept {
         // Loading-video workers use API1 only; they do not read F10/world state.
@@ -131,11 +153,17 @@ class OwnedRendererClient {
         journalState.Publish(status);
     }
 public:
+    OwnedRender::E1RenderGate::Lease LockFrame() const { return renderGate.Lock(); }
+    OwnedRender::E1RenderGate::Lease TryFrame() const { return renderGate.Try(); }
     OwnedRendererClient() = default;
     OwnedRendererClient(const OwnedRendererClient&) = delete;
     OwnedRendererClient& operator=(const OwnedRendererClient&) = delete;
     ~OwnedRendererClient() { Shutdown(); }
     void Shutdown() noexcept {
+        const auto access = renderGate.Lock();
+        if (GetCurrentThreadId() == ownerThread) frameTiming.End(false);
+        JournalFrameTiming(true);
+        frameTiming.Reset();
         FinishPackets();
         // Release the client's SRV leases before destroying the host/device.
         figureTextures.clear();figureMeshes.clear();figureIdentities.clear();meshFailures.clear();
@@ -144,6 +172,7 @@ public:
     }
 
     HRESULT Initialize(HWND window, unsigned width, unsigned height) {
+        const auto access = renderGate.Lock();
         wchar_t executable[32768] = {};
         const DWORD count = GetModuleFileNameW(nullptr, executable, _countof(executable));
         if (!count || count >= _countof(executable)) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
@@ -178,33 +207,58 @@ public:
         if(FAILED(result)||!meshReportApi.register_mesh_report)return E_NOINTERFACE;
         const EIRenderHostDescV1 desc = {sizeof(desc), window, width, height};
         result = api.create_host(&desc, &host);
-        if (SUCCEEDED(result)) { ownerThread = GetCurrentThreadId(); JournalRendererState(); }
+        if (SUCCEEDED(result)) {
+            ownerThread = GetCurrentThreadId(); lastTimingReport = GetTickCount64();
+            const HRESULT timingResult = VisitDevice(&frameTiming,
+                [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
+                    return static_cast<OwnedRender::E2FrameTiming*>(user)->Attach(view.device, view.context);
+                });
+            GameJournal::Event("RENDER", "frame_timing_attached", "gpu_status=%08lx",
+                static_cast<unsigned long>(timingResult));
+            JournalRendererState();
+        }
         return result;
     }
 
-    void BeginFigure(const EIRenderFigureV4& input,const char* name,const char* model=nullptr) {
+    void BeginFigure(const EIRenderFigureV4& input,const char* name,const char* model=nullptr,
+                     ID3D11ShaderResourceView* primary=nullptr,
+                     ID3D11ShaderResourceView* secondary=nullptr) {
+        const auto access = renderGate.Lock();
         figurePart=name?name:"";figureModel=model?model:"unknown";
         figureScope=input;figureScope.scene_generation=figureScene;
+        figurePrimaryTexture=primary;figureSecondaryTexture=secondary;
         const auto key=std::make_pair(input.object_id,std::string(name?name:""));
         auto found=figureIdentities.find(key);
         if(found==figureIdentities.end())found=figureIdentities.emplace(key,PartEntry{nextFigureIdentity++,figureFrame}).first;
         found->second.lastUsed=figureFrame;
         figureIdentity=found->second.identity;figureScope.part=uint32_t(figureIdentity);
         geometryIdentity=geometryRevision=0;
-        figureScopeActive=figureScene!=0;
+        figureScopeActive=true;
     }
     void SelectFigureGeometry(uint64_t identity,uint64_t revision) noexcept {
+        const auto access = renderGate.Lock();
         geometryIdentity=identity;geometryRevision=revision;
     }
-    void EndFigure() noexcept {figureScopeActive=false;}
-    bool FigureActive() const noexcept {return figureScopeActive;}
-    EIRenderFigureV4 FigureValues() const {return figureScope;}
+    void EndFigure() noexcept {
+        const auto access = renderGate.Lock();figureScopeActive=false;
+        figurePrimaryTexture.Reset();figureSecondaryTexture.Reset();}
+    bool FigureActive() const noexcept {
+        const auto access = renderGate.Lock();return figureScopeActive;}
+    EIRenderFigureV4 FigureValues() const {
+        const auto access = renderGate.Lock();return figureScope;}
+    ID3D11ShaderResourceView* FigurePrimaryTexture() const {
+        const auto access = renderGate.Lock();return figurePrimaryTexture.Get();}
+    ID3D11ShaderResourceView* FigureSecondaryTexture() const {
+        const auto access = renderGate.Lock();return figureSecondaryTexture.Get();}
     void FigureFallback(const char* reason) {
+        const auto access = renderGate.Lock();
         if(!figureScopeActive)return;
         auto& count=packets[figureScope.category];++count.rejected;++count.legacy;
         ++count.reasons[reason];
     }
     bool SubmitFigure(EIRenderMeshV4 mesh,EIRenderFigureV4 packet) {
+        const auto access = renderGate.Lock();
+        if (!host) return false;
         if(!figureScopeActive)return false;
         // A raw/CPU-deformed caller without source identity/revision stays on
         // the legacy path. Never assume its scratch buffers are immutable.
@@ -264,14 +318,69 @@ public:
         FigureFallback(result.reason[0]?result.reason:"figure_packet_invalid");return false;
     }
 
+private:
+    // The compatibility provider owns its leases too. Consumers use the same
+    // synchronous view as embedded c56; no swap chain leaves this client.
+    struct DeviceLease {
+        EIRenderD3D11BridgeV1 value{};
+        ~DeviceLease() {
+            if(value.device)value.device->Release();
+            if(value.context)value.context->Release();
+            if(value.swap_chain)value.swap_chain->Release();
+            if(value.color_target)value.color_target->Release();
+            if(value.depth_target)value.depth_target->Release();
+        }
+    };
     HRESULT AcquireBridge(EIRenderD3D11BridgeV1& bridge) {
         bridge = {};
         bridge.size = sizeof(bridge);
+        if(!host||!api.acquire_d3d11_bridge)return CO_E_NOTINITIALIZED;
         return api.acquire_d3d11_bridge(host, &bridge);
     }
-    HRESULT BeginFrame(const float* color, float depth) { return api.begin_frame(host, color, depth); }
-    HRESULT Present() { const HRESULT hr = api.present(host); JournalRendererState(); return hr; }
+public:
+    HRESULT VisitDevice(void* user, owned::EmbeddedDeviceVisitor visitor) {
+        const auto access = renderGate.Lock();
+        if(!visitor)return E_INVALIDARG;
+        DeviceLease lease;
+        const HRESULT hr=AcquireBridge(lease.value);
+        if(FAILED(hr))return hr;
+        const auto& v=lease.value;
+        return owned::visit_embedded_device(v.device,v.context,v.color_target,v.depth_target,user,visitor);
+    }
+    using OutputVisitor=HRESULT (*)(void*,ID3D11DeviceContext*,ID3D11Texture2D*);
+    HRESULT VisitOutput(void* user,OutputVisitor visitor) {
+        const auto access = renderGate.Lock();
+        if(!visitor)return E_INVALIDARG;
+        DeviceLease lease;
+        HRESULT hr=AcquireBridge(lease.value);
+        if(FAILED(hr))return hr;
+        if(!lease.value.context||!lease.value.swap_chain)return E_UNEXPECTED;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> output;
+        hr=lease.value.swap_chain->GetBuffer(0,IID_PPV_ARGS(&output));
+        return FAILED(hr)?hr:visitor(user,lease.value.context,output.Get());
+    }
+    HRESULT BeginFrame(const float* color, float depth) {
+        const auto access = renderGate.Lock();
+        if (!host || !api.begin_frame) return S_FALSE;
+        const bool measured = GetCurrentThreadId() == ownerThread;
+        if (measured) frameTiming.Begin();
+        const HRESULT hr = api.begin_frame(host, color, depth);
+        if (measured && FAILED(hr)) frameTiming.End(false);
+        return hr;
+    }
+    HRESULT Present() {
+        const auto access = renderGate.Lock();
+        if (!host || !api.present) return S_FALSE;
+        const HRESULT hr = api.present(host);
+        if (GetCurrentThreadId() == ownerThread) {
+            frameTiming.End(hr == S_OK); JournalFrameTiming();
+        }
+        JournalRendererState(); return hr;
+    }
     HRESULT BeginWorld(const EIRenderWorldFrameV2& frame, uint32_t& skyConsumed) {
+        const auto access = renderGate.Lock();
+        skyConsumed = 0;
+        if (!host || !worldApi.begin_world) return S_FALSE;
         const HRESULT hr=worldApi.begin_world(host, &frame, &skyConsumed);
         if(SUCCEEDED(hr)) {
             if(figureScene!=frame.world_generation){FinishPackets();figureIdentities.clear();figureMeshes.clear();figureTextures.clear();meshFailures.clear();figureFrame=0;packetHistory=false;}
@@ -280,13 +389,27 @@ public:
         }
         return hr;
     }
-    HRESULT EndWorld() { const HRESULT hr = worldApi.end_world(host); if(SUCCEEDED(hr))CollectFigureResources(); PublishPackets(); JournalRendererState(); return hr; }
-    HRESULT SetTerrain(const EIRenderTerrainSourceV5& input){return terrainApi.set_terrain_source(host,&input);}
-    void ReleaseTerrain() {if(host){const HRESULT hr=terrainApi.release_terrain(host);if(FAILED(hr))throw hr;}}
+    HRESULT EndWorld() {
+        const auto access = renderGate.Lock();
+        if (!host || !worldApi.end_world) return S_FALSE;
+        const HRESULT hr = worldApi.end_world(host);
+        if (SUCCEEDED(hr)) CollectFigureResources();
+        PublishPackets(); JournalRendererState(); return hr;
+    }
+    HRESULT SetTerrain(const EIRenderTerrainSourceV5& input){
+        const auto access = renderGate.Lock();
+        if (!host || !terrainApi.set_terrain_source) return S_FALSE;
+        return terrainApi.set_terrain_source(host,&input);
+    }
+    void ReleaseTerrain() {
+        const auto access = renderGate.Lock();if(host){const HRESULT hr=terrainApi.release_terrain(host);if(FAILED(hr))throw hr;}}
     void TerrainFallback(const char* reason) {
+        const auto access = renderGate.Lock();
         auto& counts=packets[3];++counts.rejected;++counts.legacy;++counts.reasons[reason];
     }
     bool SubmitTerrain(EIRenderTerrainFrameV5 input) {
+        const auto access = renderGate.Lock();
+        if (!host || !terrainApi.submit_terrain) return false;
         input.size=sizeof(input);input.version=5;input.scene_generation=figureScene;
         EIRenderTerrainResultV5 result{sizeof(result),5,0,0,{}};
         const HRESULT hr=terrainApi.submit_terrain(host,&input,&result);
@@ -295,12 +418,24 @@ public:
         if(result.accepted){++counts.accepted;return true;}
         ++counts.rejected;++counts.legacy;++counts.reasons[result.reason];return false;
     }
-    HRESULT SetScene(const EIRenderSceneV3& input){return sourceApi.set_scene(host,&input);}
-    HRESULT TerrainDrawn(){const HRESULT hr = sourceApi.terrain_drawn(host); JournalRendererState(); return hr;}
-    HRESULT BindWorldPixels(bool fog){return sourceApi.bind_world_pixels(host,fog?1u:0u);}
-    HRESULT RecordDraw(uint32_t triangles) { return worldApi.record_draw(host, triangles); }
+    HRESULT SetScene(const EIRenderSceneV3& input){
+        const auto access = renderGate.Lock();
+        if (!host || !sourceApi.set_scene) return S_FALSE;
+        return sourceApi.set_scene(host,&input);
+    }
+    HRESULT TerrainDrawn(){
+        const auto access = renderGate.Lock();
+        if (!host || !sourceApi.terrain_drawn) return S_FALSE;
+        const HRESULT hr = sourceApi.terrain_drawn(host); JournalRendererState(); return hr;
+    }
+    // Embedded c56: the host draws SpriteBatch images through the renderer
+    // facade (there is no RDDraw UI host). Set by CDX11 after device creation.
+    std::function<HRESULT(ID3D11ShaderResourceView*, const RECT&, const RECT*, unsigned)> embeddedUi;
     HRESULT DrawUi(ID3D11ShaderResourceView* image, const RECT& destination,
                    const RECT* source, unsigned flags, COLORREF key = 0) {
+        if (embeddedUi) return embeddedUi(image, destination, source, flags);
+        const auto access = renderGate.Lock();
+        if (!host || !api.draw_ui) return S_FALSE;
         EIRenderUiBlitV1 request = {};
         request.size = sizeof(request);
         request.image = image;
@@ -321,6 +456,7 @@ class OwnedSpriteBatch {
         RECT destination, source;
         bool has_source;
         unsigned flags;
+        owned::widescreen::HudComposition composition;
     };
     OwnedRendererClient& renderer;
     std::vector<DrawCommand> pending;
@@ -353,6 +489,7 @@ public:
             command.destination = destination;
             if (source) { command.source = *source; command.has_source = true; }
             command.flags = flags;
+            command.composition = owned::widescreen::hud_blit;
             pending.push_back(std::move(command));
         }
     }
@@ -362,7 +499,12 @@ public:
         // Clear retained images even if a draw fails. No stale frame replay.
         std::vector<DrawCommand> commands;
         commands.swap(pending);
+        struct RestoreComposition {
+            owned::widescreen::HudComposition previous=owned::widescreen::hud_blit;
+            ~RestoreComposition(){owned::widescreen::hud_blit=previous;}
+        } restore;
         for (const auto& command : commands) {
+            owned::widescreen::hud_blit=command.composition;
             const HRESULT result = renderer.DrawUi(command.image.Get(), command.destination,
                 command.has_source ? &command.source : nullptr, command.flags);
             if (FAILED(result)) throw result;

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 
 #include "Object.h"
 #include "Material.h"
@@ -59,10 +60,6 @@ private:
     CSimplyArray<CMaterial *, CMaterial *&> materials; // materials of this objects
     int pos;                                           // for textures/materials iteration only
     // shadow rendering information
-    static CSimplyArray<CPlot2D, CPlot2D &> shadowbuffer; // projected shadow temporary buffer
-    static CSimplyArray<CPoint, CPoint &>
-        shadowresult; // projected and resized shadow vertices temporary buffer
-
     CXYZW4Array shadowvertices;         // geometry vertices for shadow rendering
     CPlot2DArray shadowmaps;            // shadow maps
     CWORDArray shadowindices;           // indices for shadow rendering
@@ -78,13 +75,19 @@ private:
     //
     float fpTime;
     DWORD dwLastLightTime; // time, then this object was relighted (in milliseconds)
+    bool ownedAppearanceAttempted = false;
+    std::uint64_t ownedAppearanceRevision = 0;
     //
     float fScaleX, fScaleY, fScaleZ;
 
 private:
-    void CreateShadowShiftScaleMatrix(SHMatrix &matrix);
+
+    bool PrepareOwnedResources();
+    bool PublishOwnedAppearance() noexcept;
+    bool PublishOwnedPose() noexcept;
 
 public:
+    bool PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen);
     CObject3DClientSpecific();
     virtual ~CObject3DClientSpecific();
     // create/destroy
@@ -102,6 +105,7 @@ public:
         fScaleY = fSY;
         fScaleZ = fSZ;
     }
+    void InvalidateOwnedAppearance() noexcept;
     virtual void GetScaleCoeffs(float &fSX, float &fSY, float &fSZ) const
     {
         fSX = fScaleX;
@@ -158,7 +162,7 @@ public:
     void Highlight(BOOL bHighlight);
     // drawing
     virtual BOOL Draw(CRenderer *pRend, CRect *pRect);
-    virtual BOOL DrawRealisticShadow2(CRenderer *pRend);
+
     // shadow functions
     bool IsNeedShadow() const;       // is this object cast shadow in current settings ?
     bool IsNeedRecalcShadow() const; // is this object require shadow recalculation in this frame ?
@@ -184,20 +188,6 @@ inline bool CObject3DClientSpecific::GetScaleMatrix(SHMatrix &matrix) const
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // creates shadow shift=scale matrix from current min/max values
-inline void CObject3DClientSpecific::CreateShadowShiftScaleMatrix(SHMatrix &matrix)
-{
-    float fpScaleX = 63.0f / (shadowrect.Width());
-    float fpScaleY = 63.0f / (shadowrect.Height());
-    float fpShiftX = -shadowrect.minx * fpScaleX;
-    float fpShiftY = -shadowrect.miny * fpScaleY;
-
-    Identity(matrix);
-    matrix._11 = fpScaleX;
-    matrix._22 = fpScaleY;
-    matrix._41 = fpShiftX;
-    matrix._42 = fpShiftY;
-}
-/////////////////////////////////////////////////////////////////////////////////////
 inline CTexture *CObject3DClientSpecific::GetPrimaryTexture()
 {
     if (sets[0])

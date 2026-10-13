@@ -4,7 +4,16 @@
 #include <io.h>
 #include "RendererDX11.h"
 #include "../FrameDiagnostics.h"
-#include "EffectProcessor.h"
+#include "PostProcess.h"
+#include "RetailModalFade.h"
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#include "../OwnedRender/E1SurfaceFacade.h"
+#include "MmpRgbToBgra.h"
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
 {
@@ -162,6 +171,19 @@ size_t BitsPerPixel(DXGI_FORMAT fmt)
     }
 }
 
+DXGI_FORMAT OwnedRgbSurfaceFormat(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_B5G6R5_UNORM:
+    case DXGI_FORMAT_B5G5R5A1_UNORM:
+    case DXGI_FORMAT_B4G4R4A4_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    default:
+        return format;
+    }
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, DWORD dwWidth, DWORD dwHeight)
     : pDX11(pDXDirectDraw)
@@ -199,7 +221,11 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, D3D11_TEXTURE2D_DESC *ptex2d)
     , texture(0)
     , textureView(0)
 {
-    pDX11->CreateTexture(ptex2d, texture);
+    ownedSurface.BeginWrite();
+    D3D11_TEXTURE2D_DESC normalized = *ptex2d;
+    opaquePadding = normalized.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
+    normalized.Format = OwnedRgbSurfaceFormat(normalized.Format);
+    pDX11->CreateTexture(&normalized, texture);
     pDX11->CreateShaderResource(texture, textureView);
 
     ExtractSurfaceParams();
@@ -219,6 +245,7 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, const SMMPFileHeader *pHdr, boo
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
 {
+    ownedSurface.BeginWrite();
     pDX11->CreateTexture(ptex2d, texture);
     pDX11->CreateShaderResource(texture, textureView);
     return ExtractSurfaceParams();
@@ -292,8 +319,19 @@ int CopyToSurface(CDXGISurface *pDXDDS, const SMMPFileHeader *pHdr, DWORD dwFrom
         int sub_index = D3D11CalcSubresource(i, 0, pHdr->dwMipMapLevel);
 
         D3D11_SUBRESOURCE_DATA srd = { 0 };
-        srd.pSysMem = lpData;
-        srd.SysMemPitch = pHdr->dwBitDepth * dwNewSizeX / 8;
+        std::vector<DWORD> converted;
+        const bool packedRgb = (pHdr->dwFormat != MMP_FORMAT_8888 || pHdr->dwABits == 0) &&
+            (pHdr->dwBitDepth == 16 || (pHdr->dwBitDepth == 32 && pHdr->dwABits == 0)) &&
+            (pHdr->dwFormat & 0x00FFFFFF) != MMP_FORMAT_DXTN;
+        if (packedRgb) {
+            if (!MmpRgbToBgra::Convert(*pHdr, lpData, size_t(dwNewSizeX) * dwNewSizeY, converted))
+                return nTotalSize;
+            srd.pSysMem = converted.data();
+            srd.SysMemPitch = dwNewSizeX * sizeof(DWORD);
+        } else {
+            srd.pSysMem = lpData;
+            srd.SysMemPitch = pHdr->dwBitDepth * dwNewSizeX / 8;
+        }
         // alex_k: no idea why this check is needed. How does EI/DX7 handle it? Is pDX11 data
         // sparse whereas dx7 is packed? this loads MIPs correctly too (if you place break, all mips
         // > 1 become black)
@@ -319,8 +357,9 @@ BOOL CDXGISurface::Load(const SMMPFileHeader *pHdr, bool bInVideo)
     // check for header valids
     if (!pHdr)
         return ReportError("Can't load picture from NULL pointer.\n");
-    else if (pHdr->dwFormat != MMP_FORMAT_8888)
-        return ReportError("Can't load picture from non-8888 format.\n");
+    else if (pHdr->dwFormat != MMP_FORMAT_8888 && pHdr->dwBitDepth != 16 &&
+             !(pHdr->dwBitDepth == 32 && pHdr->dwABits == 0))
+        return ReportError("Can't load picture from unsupported RGB format.\n");
 
     D3D11_TEXTURE2D_DESC tex2d;
     pDX11->DefaultSurfaceDesc(&tex2d);
@@ -344,15 +383,19 @@ void CDXGISurface::DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *ptex2d)
 
 void CDXGISurface::CopyResource(CDXGISurface *src)
 {
+    ownedSurface.BeginWrite();
     pDX11->GetDeviceContext()->CopyResource(this->GetTexture().Get(), src->GetTexture().Get());
+    ownedSurface.Complete(texture.Get());
 }
 
 void CDXGISurface::CopySubresourceRegion(UINT dstSubresource, UINT dstX, UINT dstY, UINT dstZ,
                                          CDXGISurface *src, UINT srcSubresource, D3D11_BOX *pBox)
 {
+    ownedSurface.BeginWrite();
     pDX11->GetDeviceContext()->CopySubresourceRegion(this->GetTexture().Get(), dstSubresource, dstX,
                                                      dstY, dstZ, src->GetTexture().Get(),
                                                      srcSubresource, pBox);
+    ownedSurface.Complete(texture.Get());
 }
 
 void CDXGISurface::GetPixel(int nX, int nY)
@@ -434,14 +477,106 @@ std::unique_ptr<DWORD[]> CDXGISurface::GetPixelBuffer()
     return pixelBuffer;
 }
 
+namespace {
+struct OwnedSurfaceEffect {
+    ID3D11ShaderResourceView* source = nullptr;
+    ID3D11Texture2D* destination = nullptr;
+    const RECT* viewport = nullptr;
+    bool fade = false;
+};
+
+HRESULT RunOwnedSurfaceEffect(void* opaque, const owned::EmbeddedDeviceView& view)
+{
+#ifdef EID3D11_EMBEDDED
+    auto& effect = *static_cast<OwnedSurfaceEffect*>(opaque);
+    if (!view.device || !view.context || !effect.source || !effect.destination)
+        return E_INVALIDARG;
+    D3D11_TEXTURE2D_DESC description{};
+    effect.destination->GetDesc(&description);
+    description.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> target;
+    HRESULT hr = view.device->CreateTexture2D(&description, nullptr, target.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> targetView;
+    hr = view.device->CreateRenderTargetView(target.Get(), nullptr, targetView.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> oldTarget;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> oldDepth;
+    view.context->OMGetRenderTargets(1, oldTarget.GetAddressOf(), oldDepth.GetAddressOf());
+    D3D11_VIEWPORT oldViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    view.context->RSGetViewports(&viewportCount, oldViewports);
+    view.context->OMSetRenderTargets(1, targetView.GetAddressOf(), nullptr);
+    if (effect.viewport) {
+        D3D11_VIEWPORT viewport{};
+        viewport.TopLeftX = static_cast<float>(effect.viewport->left);
+        viewport.TopLeftY = static_cast<float>(effect.viewport->top);
+        viewport.Width = static_cast<float>(effect.viewport->right);
+        viewport.Height = static_cast<float>(effect.viewport->bottom);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        view.context->RSSetViewports(1, &viewport);
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> fadeShader;
+    if (effect.fade) {
+        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+        hr = RetailModalFade::Compile(bytecode.GetAddressOf());
+        if (SUCCEEDED(hr))
+            hr = view.device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+                nullptr, fadeShader.GetAddressOf());
+    }
+    if (SUCCEEDED(hr)) {
+        try {
+            DirectX::BasicPostProcess postProcess(view.device);
+            postProcess.SetSourceTexture(effect.source);
+            postProcess.SetEffect(DirectX::BasicPostProcess::Effect::Copy);
+            postProcess.Process(view.context, [context = view.context, shader = fadeShader.Get()] {
+                if (shader) context->PSSetShader(shader, nullptr, 0);
+            });
+        } catch (...) {
+            hr = E_FAIL;
+        }
+    }
+    view.context->OMSetRenderTargets(1, oldTarget.GetAddressOf(), oldDepth.Get());
+    if (viewportCount) view.context->RSSetViewports(viewportCount, oldViewports);
+    if (FAILED(hr)) return hr;
+    view.context->CopyResource(effect.destination, target.Get());
+    return S_OK;
+#else
+    (void)opaque; (void)view;
+    return E_NOTIMPL;
+#endif
+}
+
+HRESULT ApplyOwnedSurfaceEffect(OwnedRender::RendererFacadeCore<owned::Renderer>& facade,
+    ID3D11ShaderResourceView* source, ID3D11Texture2D* destination,
+    const RECT* viewport, bool fade)
+{
+    OwnedSurfaceEffect effect{source, destination, viewport, fade};
+    return facade.Visit([&](owned::Renderer& renderer) {
+        return renderer.visit_embedded_device(&effect, &RunOwnedSurfaceEffect);
+    });
+}
+}
+
 void CDXGISurface::Fade()
 {
-    pDX11->GetEffectProcessor()->Fade(this->GetShaderResource().Get());
+    ownedSurface.BeginWrite();
+    const HRESULT hr = ApplyOwnedSurfaceEffect(pDX11->GetRendererFacade(),
+        textureView.Get(), texture.Get(), nullptr, true);
+    if (FAILED(hr)) throw hr;
+    ownedSurface.Complete(texture.Get());
 }
 void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 {
-    auto effproc = pDX11->GetEffectProcessor();
-    effproc->StretchTo(this->GetShaderResource().Get(), src->GetShaderResource().Get(), rect);
+    // The historical argument named src is the actual destination.
+    src->ownedSurface.BeginWrite();
+    const HRESULT hr = ApplyOwnedSurfaceEffect(pDX11->GetRendererFacade(),
+        textureView.Get(), src->texture.Get(), &rect, false);
+    if (FAILED(hr)) throw hr;
+    src->ownedSurface.Complete(src->texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CDXGISurface::AcquireDC(HDC *pDC)
@@ -450,7 +585,8 @@ BOOL CDXGISurface::AcquireDC(HDC *pDC)
 #ifdef DXGI_ENABLED
     Microsoft::WRL::ComPtr<IDXGISurface1> surf;
     IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
-    surf->GetDC(FALSE, pDC);
+    ownedSurface.BeginWrite();
+    IfFailedThrowHR(surf->GetDC(FALSE, pDC));
     hDc = *pDC;
     return TRUE;
 #else
@@ -464,8 +600,9 @@ BOOL CDXGISurface::ReleaseDC(HDC hDC)
     FrameDiagnostics::Scope timing(FrameDiagnostics::ReleaseDC);
 #ifdef DXGI_ENABLED
     Microsoft::WRL::ComPtr<IDXGISurface1> surf;
-    texture->QueryInterface(IID_PPV_ARGS(&surf));
-    surf->ReleaseDC(nullptr);
+    IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
+    IfFailedThrowHR(surf->ReleaseDC(nullptr));
+    ownedSurface.Complete(texture.Get());
     hDc = 0;
     return TRUE;
 #else
@@ -493,50 +630,113 @@ BOOL CDXGISurface::GetTextureFormat(DXGI_FORMAT &texFormat)
 HRESULT CDXGISurface::BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                          LPDDBLTFX pDDBltFx)
 {
-    if (dwFlags & DDBLT_KEYSRCOVERRIDE)
-        return pDX11->DrawColorKeySurface(textureView.Get(), *pDestRect, pSrcRect,
-            pDDBltFx ? pDDBltFx->ddckSrcColorkey.dwColorSpaceLowValue : 0);
-    pDX11->GetSpriteBatch()->Draw(textureView.Get(), *pDestRect, pSrcRect);
-    return S_OK;
+    if (!pDestRect) return E_INVALIDARG;
+    DDCOLORKEY colorKey{};
+    const DDCOLORKEY* key = nullptr;
+    if (dwFlags & DDBLT_KEYSRCOVERRIDE) {
+        if (pDDBltFx) colorKey = pDDBltFx->ddckSrcColorkey;
+        key = &colorKey;
+    }
+    const HRESULT result = pDX11->BlitPublishedSurface(OwnedSurfaceId(), *pDestRect, pSrcRect, key);
+    if (result == E_HANDLE) {
+        // A missing/stale publication is transient; do not abort the UI frame.
+        static bool reportedUnavailable = false;
+        if (!reportedUnavailable) {
+            reportedUnavailable = true;
+            GameJournal::Event("RENDER", "surface_blit_skipped",
+                "surface=%llu reason=publication_unavailable",
+                static_cast<unsigned long long>(OwnedSurfaceId()));
+        }
+        return S_OK;
+    }
+    return result;
+}
+HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facade,
+    const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey,
+    bool interfaceSpace, bool nativeCanvas)
+{
+    if (!pDX11 || !texture || !facade.FrameActive()) return E_UNEXPECTED;
+    auto device = pDX11->GetDevice();
+    auto context = pDX11->GetDeviceContext();
+    if (!device || !context) return E_UNEXPECTED;
+    return OwnedRender::E1BlitPublishedSurface(facade, device.Get(), context.Get(),
+        OwnedSurfaceId(), destination, source, colorKey, interfaceSpace, nativeCanvas);
 }
 HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                            LPDDBLTFX pDDBltFx)
 {
-    auto context = pDX11->GetDeviceContext();
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> boundTarget;
-    context->OMGetRenderTargets(1, boundTarget.GetAddressOf(), nullptr);
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-    captureUsedBoundTarget = false;
-    captureDifferentFromBufferZero = false;
-    if (boundTarget)
-    {
-        Microsoft::WRL::ComPtr<ID3D11Resource> resource;
-        boundTarget->GetResource(resource.GetAddressOf());
-        if (resource && SUCCEEDED(resource.As(&source)))
-            captureUsedBoundTarget = true;
-    }
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuffer;
-    HRESULT hr = pDX11->GetSwapChain()->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
-    if (FAILED(hr))
-        return hr;
-    if (!source)
-        source = backbuffer;
-    captureDifferentFromBufferZero = source.Get() != backbuffer.Get();
-    D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
-    source->GetDesc(&sourceDesc);
-    texture->GetDesc(&destinationDesc);
-    if (sourceDesc.Width != destinationDesc.Width ||
-        sourceDesc.Height != destinationDesc.Height ||
-        sourceDesc.Format != destinationDesc.Format ||
-        sourceDesc.SampleDesc.Count != destinationDesc.SampleDesc.Count)
-        return E_INVALIDARG;
-    context->CopyResource(texture.Get(), source.Get());
-    return S_OK;
+    return pDX11->GetRendererFacade().VisitOutput(this,
+        [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {
+            auto& self = *static_cast<CDXGISurface*>(user);
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+            const HRESULT selected = OwnedRender::E1CaptureSource(context, backbuffer, source,
+                self.captureUsedBoundTarget, self.captureDifferentFromBufferZero);
+            if (FAILED(selected)) return selected;
+            D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
+            source->GetDesc(&sourceDesc);
+            self.texture->GetDesc(&destinationDesc);
+            if (sourceDesc.Width == destinationDesc.Width &&
+                sourceDesc.Height == destinationDesc.Height &&
+                sourceDesc.Format == destinationDesc.Format &&
+                sourceDesc.SampleDesc.Count == destinationDesc.SampleDesc.Count &&
+                sourceDesc.SampleDesc.Quality == destinationDesc.SampleDesc.Quality &&
+                sourceDesc.MipLevels == destinationDesc.MipLevels &&
+                sourceDesc.ArraySize == destinationDesc.ArraySize) {
+                self.ownedSurface.BeginWrite();
+                context->CopyResource(self.texture.Get(), source.Get());
+            } else {
+                OwnedRender::E1SurfaceCpuImage image;
+                const HRESULT captured = OwnedRender::E1CaptureTarget(context, source.Get(),
+                    destinationDesc.Width, destinationDesc.Height, destinationDesc.Format, image);
+                if (FAILED(captured)) return captured;
+                self.ownedSurface.BeginWrite();
+                context->UpdateSubresource(self.texture.Get(), 0, nullptr,
+                    image.pixels.data(), static_cast<UINT>(image.pitch), 0);
+            }
+            self.ownedSurface.Complete(self.texture.Get());
+            return S_OK;
+        });
 }
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
-                                 D3D11_SUBRESOURCE_DATA *srd)
+                                 D3D11_SUBRESOURCE_DATA *srd, DWORD sourceMmpFormat)
 {
-    pDX11->UpdateTexture(this->texture.Get(), subresource_index, region, srd);
+    ownedSurface.BeginWrite();
+    D3D11_TEXTURE2D_DESC destination = {};
+    texture->GetDesc(&destination);
+    if (destination.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        (sourceMmpFormat != MMP_FORMAT_8888 || opaquePadding)) {
+        SMMPFileHeader format;
+        format.InitializeDefaultFormat(sourceMmpFormat);
+        const UINT left = region ? region->left : 0;
+        const UINT top = region ? region->top : 0;
+        const UINT width = region ? region->right - region->left : destination.Width;
+        const UINT height = region ? region->bottom - region->top : destination.Height;
+        if (srd && srd->pSysMem && width && height) {
+            const size_t sourceBytesPerPixel = format.dwBitDepth / 8;
+            const size_t sourcePitch = srd->SysMemPitch ? srd->SysMemPitch : width * sourceBytesPerPixel;
+            std::vector<DWORD> converted(size_t(width) * height);
+            std::vector<DWORD> convertedRow;
+            for (UINT row = 0; row < height; ++row) {
+                if (!MmpRgbToBgra::Convert(format,
+                    static_cast<const BYTE*>(srd->pSysMem) + size_t(row) * sourcePitch,
+                    width, convertedRow)) {
+                    ownedSurface.Complete(texture.Get());
+                    return;
+                }
+                if (opaquePadding)
+                    for (DWORD& pixel : convertedRow) pixel |= 0xff000000u;
+                memcpy(converted.data() + size_t(row) * width, convertedRow.data(), width * sizeof(DWORD));
+            }
+            D3D11_SUBRESOURCE_DATA normalized = *srd;
+            normalized.pSysMem = converted.data();
+            normalized.SysMemPitch = width * sizeof(DWORD);
+            D3D11_BOX normalizedRegion = {left, top, 0, left + width, top + height, 1};
+            pDX11->UpdateTexture(texture.Get(), subresource_index, &normalizedRegion, &normalized);
+        }
+    } else {
+        pDX11->UpdateTexture(this->texture.Get(), subresource_index, region, srd);
+    }
+    ownedSurface.Complete(texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 HRESULT CDXGISurface::Clear(DWORD dwColorFill)

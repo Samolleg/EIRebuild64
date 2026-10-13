@@ -261,6 +261,37 @@ SADEntry *CMapObjectManager::GetAnimationEntry(const CString &szMaskName, LPCSTR
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CMapObjectManager::GetSelectedAnimationDatabase(const CString& maskName,
+    const SADEntry* selected, const void*& bytes, DWORD& size)
+{
+    bytes = nullptr;
+    size = 0;
+    if (!selected || maskName.IsEmpty()) return false;
+    const CString resourceName = maskName + ".adb";
+    LPBYTE data = GetFile(resourceName, &size);
+    if (!data || size < sizeof(SADBFileHeader)) return false;
+
+    const auto* header = reinterpret_cast<const SADBFileHeader*>(data);
+    if (header->dwSignature != ADB_SIGNATURE) return false;
+    const unsigned long long count = header->dwCount;
+    const unsigned long long required = sizeof(SADBFileHeader) + count * sizeof(SADEntry);
+    if (required > size) return false;
+
+    const auto begin = reinterpret_cast<std::uintptr_t>(data + sizeof(SADBFileHeader));
+    const auto selectedAddress = reinterpret_cast<std::uintptr_t>(selected);
+    const auto entriesBytes = count * sizeof(SADEntry);
+    if (selectedAddress < begin || selectedAddress - begin >= entriesBytes ||
+        (selectedAddress - begin) % sizeof(SADEntry) != 0) return false;
+    const auto index = static_cast<DWORD>((selectedAddress - begin) / sizeof(SADEntry));
+    if (selected->dwEntryIndex != index) return false;
+
+    const auto* entry = reinterpret_cast<const SADEntry*>(data + sizeof(SADBFileHeader) +
+        static_cast<unsigned long long>(index) * sizeof(SADEntry));
+    if (entry != selected) return false;
+    bytes = data;
+    return true;
+}
+/////////////////////////////////////////////////////////////////////////////////////
 // SADEntry* CMapObjectManager::GetRandomAnimationEntry( CString& szMaskName, DWORD dwCaps )
 // get one of animation entry, which exactly match specified caps
 SADEntry *CMapObjectManager::GetRandomAnimationEntry(CString &szMaskName, DWORD dwCaps)

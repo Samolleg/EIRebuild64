@@ -9,6 +9,7 @@
 #include "Base3D.h"
 #include "SoundTypes.h"
 #include "ServerConsts.h"
+#include "OwnedRender/E2EffectDistance.h"
 #include "SaveLoader.h"
 #include "NetUpdate.h"
 #include "Lightning.h"
@@ -47,7 +48,7 @@ public:
     virtual void Destroy();
     void SetUpdateMask();
     // Additional range
-    virtual float GetRange() const { return FP_VISUAL_RANGE; }
+    virtual float GetRange() const { return OwnedRender::E2EffectDistance(); }
     virtual const CPlot3D &GetEffectPlace(CScriptObjectGroup &currentVisible) { return cp; }
     // Segment
     virtual int Segment() { return TRUE; }
@@ -178,7 +179,7 @@ public:
     CEffectPointLight();
     virtual ~CEffectPointLight() { Destroy(); }
     virtual void Clear();
-    virtual float GetRange() { return FP_VISUAL_RANGE + fpRange; }
+    virtual float GetRange() { return OwnedRender::E2EffectDistance() + fpRange; }
     //
     virtual int Segment();
     // Update

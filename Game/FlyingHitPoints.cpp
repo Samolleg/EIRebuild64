@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Scale.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -372,6 +373,7 @@ BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
             STLVertex1 *vertices;
             PWORD indices;
             quads.GetData(nVertices, nIndices, vertices, indices);
+            OwnedRender::E3CombatVertices(vertices, nVertices, sizeof(*vertices));
             for (int j = 0; j < nVertices; j++)
             {
                 vertices[j].tu += 1 / 512.f;

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Scale.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -65,9 +66,15 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "StringProcessing.h"
 #include "IDebugInfoSystem.h"
 #include "Renderer.h"
-#include "ModShadowSchedule.h"
+
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
+#include "OwnedRender/E1World.h"
+#include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E1VisualFrame.h"
+#include "OwnedRender/E1AmbientEffects.h"
+#include "OwnedRender/E2LoadReveal.h"
+#include "WorldServer.h"
 #include "GeometryManager.h"
 
 #include "I3DMain.h"
@@ -414,6 +421,8 @@ CWorldClient::~CWorldClient()
 BOOL CWorldClient::Create()
 {
     CWorldBase::Create();
+    OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
     //
     szTexturesPath = GetWorkPath() + "textures\\";
     //
@@ -621,6 +630,9 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
+    OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     ModWorldBackground::Unload();
     theCamera.ResetFalloutMode();
@@ -1104,6 +1116,8 @@ BOOL CWorldClient::AddObject(CMapObject *lpObject)
     // add object
     lpObject->AddRef();
     objects.push_back(lpObject);
+    if (!OwnedRender::E1Scene().Added(this, ownedRenderGeneration, lpObject->GetID()))
+        GameJournal::Event("RENDER", "scene_membership_failed", "id=%d", lpObject->GetID());
     // add object to the area map, but first remove any copy...
     areaObjects.Remove(lpObject);
     areaObjects.Add(lpObject);
@@ -1156,6 +1170,7 @@ void CWorldClient::RemoveObject(int nID)
             }
             areaObjects.Remove(pObject);
             objects.erase(pos);
+            OwnedRender::E1Scene().Removed(this, ownedRenderGeneration, nID);
             pObject->Release();
             return;
         }
@@ -1186,6 +1201,7 @@ void CWorldClient::RemoveAllObjects()
     heroes.clear();
     //
     objects.remove_if(CReleasePositiveFunctional<CMapObject>());
+    OwnedRender::E1Scene().ResetPositive(this, ownedRenderGeneration);
 
     pPlayer->RemoveAllObjects();
 
@@ -2334,7 +2350,12 @@ BOOL CWorldClient::NewItems(CMemorySave &packet)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
+    OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
+    OwnedRender::E1RetireWorld(this);
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
+    OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
+    OwnedRender::E1ResetGroundCoverFootprints();
     IWorldConnector.LMPClientRecvZone();
     CString szZone, szMob;
     EGMZoneSky sky;
@@ -2868,51 +2889,6 @@ BOOL CWorldClient::DrawPolyLines()
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-class CObjectTextureLessThenFunctional
-{
-public:
-    bool operator()(CObject3D *pObject1, CObject3D *pObject2) const
-    {
-        // SpellAddon mode 8 makes every object equivalent, without accessing resources.
-        if (const auto *mod = ModRuntime::Current())
-            if (mod->SpellAddon().Feature21() == 8)
-                return false;
-#if defined(__GAME__) && !defined(_A4)
-        if (pObject1 && pObject2)
-        {
-            CObject3DClientSpecific *pOCS1 = static_cast<CObject3DClientSpecific *>(
-                pObject1->GetObjectSpecific());
-            CObject3DClientSpecific *pOCS2 = static_cast<CObject3DClientSpecific *>(
-                pObject2->GetObjectSpecific());
-            if (pOCS1 && pOCS2)
-            {
-                CTexture *pTexture1 = pOCS1->GetPrimaryTexture();
-                CTexture *pTexture2 = pOCS2->GetPrimaryTexture();
-                if (pTexture1 < pTexture2)
-                    return true;
-                else if (pTexture1 == pTexture2)
-                {
-                    if (pObject1->GetGeometry() < pObject2->GetGeometry())
-                        return true;
-                    else if (pObject1->GetGeometry() == pObject2->GetGeometry())
-                        return (pObject1->GetRespectCP().z < pObject2->GetRespectCP().z);
-                    else
-                        return false;
-                }
-                else
-                    return false;
-            }
-        }
-        return false;
-#else
-        return (static_cast<CObject3DClientSpecific *>(pObject1->GetObjectSpecific())
-                    ->GetPrimaryTexture() <
-                static_cast<CObject3DClientSpecific *>(pObject2->GetObjectSpecific())
-                    ->GetPrimaryTexture());
-#endif // defined(__GAME__) && !defined(_A4)
-    }
-};
-/////////////////////////////////////////////////////////////////////////////////////
 class CObjectLightTimeLessThenFunctional
 {
 public:
@@ -3011,28 +2987,48 @@ BOOL CWorldClient::Draw()
         OwnedWorldInputs::Terrain(pRend->GetD3D()->GetOwnedRenderer(),*pTerrain,
             static_cast<CTextureManager*>(GetTextureManager()),ownedRenderGeneration,
             ModRuntime::Resources(),GetWorkPath(),GetResourcePath());
-    const bool ownedSky = pRend->GetD3D()->BeginWorld(ownedWorld);
-    // render sky object
+    OwnedRender::E1WorldFrame frameValues;
+    // The values above were read from this draw's renderer and sunlight.
+    // ownedWorld already reverses D3DLIGHT's ray direction exactly once.
+    frameValues.lightingValid = true;
+    frameValues.lighting.ambient = {ownedWorld.ambient[0], ownedWorld.ambient[1], ownedWorld.ambient[2], 1.f};
+    frameValues.lighting.sunlight_diffuse = {sunlight.r, sunlight.g, sunlight.b, 1.f};
+    frameValues.lighting.sunlight_direction = {ownedWorld.sunlight_direction[0],
+        ownedWorld.sunlight_direction[1], ownedWorld.sunlight_direction[2], 0.f};
+    auto& environment = frameValues.environment;
+    environment.valid = true;
+    environment.game_hours = ownedWorld.game_hours;
+    environment.hour = float(std::fmod(ownedWorld.game_hours, 24.0));
+    if (environment.hour < 0.f) environment.hour += 24.f;
+    environment.world_time = ownedWorld.world_time;
+    environment.cave = (ownedWorld.flags & EI_RENDERER_WORLD_CAVE) != 0;
+    environment.region = ownedWorld.region;
+    environment.weather_current = ownedWorld.weather_current;
+    environment.weather_next = ownedWorld.weather_next;
+    environment.weather_progress = ownedWorld.weather_progress;
+    environment.rain_particles = owned::weather_particle_rain(ownedWorld.weather_current,
+        ownedWorld.weather_next, ownedWorld.rain_progress);
+    frameValues.camera.valid = true;
+    std::copy_n(ownedWorld.world_to_clip, 16, frameValues.camera.world_to_clip.begin());
+    auto& fog = frameValues.fog;
+    fog.enabled = (ownedWorld.flags & EI_RENDERER_WORLD_FOG) != 0;
+    fog.valid = dynamic_cast<CTLPipelineFPU*>(pRend->GetTransformPipeline()) != nullptr;
+    fog.failure = fog.valid ? nullptr : "host_fog_pipeline_unavailable";
+    fog.fog = {ownedWorld.fog_range[0], ownedWorld.fog_range[1], ownedWorld.fog_range[2],
+        ownedWorld.fog_projection[2], ownedWorld.fog_projection[1], ownedWorld.fog_projection[0]};
+    OwnedRender::E1WorldDraw worldDraw(this, ownedRenderGeneration, frameValues);
+    OwnedRender::E2LoadRevealFrame(owned::bridge_current_world_epoch(),
+        theWorldServer.GetServerMode() == SERV_MODE_LOCAL && theWorldServer.IsMapLoaded() &&
+        theWorldServer.curInterface == IFACE_MISSION,
+        IWorld.IsMissionCombatPause() || IWorld.IsCombatPause(),
+        [](void* context, bool pause) -> bool {
+            auto* world = static_cast<CWorldClient*>(context);
+            if (!world->pPlayer || !world->pPlayer->GetPlayerSpecific()) return false;
+            world->CombatPause(pause); return true;
+        }, this);
+    pRend->GetD3D()->BeginWorld(ownedWorld);
+    OwnedRender::E1ClaimSky(CheckFlag(WC_RENDER_SKY) && pSky);
 #ifndef _A4
-    if (CheckFlag(WC_RENDER_SKY) && pSky && !ownedSky)
-    {
-        //			pRend->SetRenderState( D3DRENDERSTATE_ALPHAREF, 10 );
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
-        pRend->SetTexturingAlphaMode(AM_VERTEX);
-        //			pRend->SetRenderState( D3DRENDERSTATE_ZENABLE, D3DZB_TRUE );
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-        pRend->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
-
-        pRend->SetAddFogOff();
-        pSky->Draw(&theRenderer, pCamera->GetCP());
-        pRend->FlushBuffers(); // flush terrain render data
-        pRend->SetAddFogOn();
-
-        pRend->SetRenderState(D3DRENDERSTATE_CULLMODE, D3DCULL_CW);
-        pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
-    }
     LMPTimePassed();
 #endif // _A4
        // render terrain's main part
@@ -3041,33 +3037,67 @@ BOOL CWorldClient::Draw()
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
-                          NConsole::LandscapeDrawRadius());
+                          OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
-        pTerrain->DrawBase(&theRenderer);
+        pTerrain->DrawBase(&theRenderer, true);
         pRend->FlushBuffers();
     }
-    ModWorldBackground::BeforeDraw(*this,falloutFrame.IsActive() ? falloutFrame.LogicalCP() : pCamera->GetCP());
-    // render main 3D scene: objects and their shadows
-    Draw3DScene();
+    // Prepare visibility, poses and picking before publication and commit.
+    Prepare3DScene();
     LMPTimePassed();
+    std::vector<owned::RetainedWorldPointLight> ownedPointLights;
+    const bool ownedDrawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
     if(pTerrain && pTerrain->IsLoaded()){
         // Visibility and interpolated positions have just been prepared by
-        // Draw3DScene. Source rows are copied before the liquid/effect passes.
+        // Prepare3DScene. Source rows are copied before the liquid/effect passes.
         OwnedWorldInputs::Scene scene;
         const bool drawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
         const float night=GetNightPowerSlow();
         for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
         for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
         scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
+        pRend->GetD3D()->SubmitC56PointLights(scene.c56Lights, ownedWorld.world_time);
+        ownedPointLights=scene.c56Lights;
         if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
     }
+    // Publish this draw's visibility and interpolated scene facts before c56
+    // consumes them for critters, ground cover, lights, and retained geometry.
+    // Run after terrain and scene preparation, before ground colour and water.
+    if (pTerrain && pTerrain->IsLoaded())
+    {
+        // The renderer's owned-visual frame (as the game.exe bridge's scene
+        // seam): the retained scene takes this draw's point lights and commits
+        // the tick after Prepare3DScene published every object's pose; the frame
+        // then draws sun/point shadows and every claimed visual.
+        static_assert(WC_RENDER_OBJECTS == 0x40 && WC_RENDER_UNITS == 0x80 && WC_RENDER_TERRAIN == 0x100,
+                      "owned-visual class flags follow the game.exe world flags");
+        auto& retained = OwnedRender::E1Scene().Scene();
+        retained.visual_publish_world_point_lights(ownedPointLights);
+        retained.visual_commit_tick(double(GetSegmentTimeCounter()));
+        OwnedRender::E1VisualInputs visuals;
+        visuals.time = GetPreciseTime();
+        visuals.sceneFlags = GetFlags();
+        visuals.drawUndetected = ownedDrawUndetected;
+        visuals.worldToClip = frameValues.camera.world_to_clip;
+        visuals.ambient = frameValues.lighting.ambient;
+        visuals.sunDiffuse = frameValues.lighting.sunlight_diffuse;
+        visuals.sunDirection = frameValues.lighting.sunlight_direction;
+        visuals.lightingValid = frameValues.lightingValid;
+        visuals.fog = [](void* terrain, const float* p) -> unsigned char {
+            return static_cast<CTerrain*>(terrain)->GetFogAlpha(CPlot3D(p[0], p[1], p[2]));
+        };
+        visuals.fogContext = pTerrain;
+        pRend->GetD3D()->RunC56WorldPass(&visuals);
+    }
+    // Remaining overlays run after this draw's owned shadows and colour.
+    Draw3DScene();
     // render terrain's transparent part (water)
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
         CPlot3D centerPoint = pCamera->GetIntersectionWithZero();
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
-                          NConsole::LandscapeDrawRadius());
+                          OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
         // flush previous renders
         pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
@@ -3076,7 +3106,6 @@ BOOL CWorldClient::Draw()
         pRend->FlushBuffers();
     }
     LMPTimePassed();
-    ModWorldBackground::DrawTransparent();
     // render effects
     if (CheckFlag(WC_RENDER_EFFECTS))
     {
@@ -3186,6 +3215,7 @@ BOOL CWorldClient::Draw()
         // batch->End();
     }
 
+    worldDraw.Complete();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3362,8 +3392,6 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
             if (static_cast<CObject3DClientSpecific *>(pObject->GetObjectSpecific())
                     ->IsShadowVisible())
             {
-                if (pObject->GetAnimationSystem2())
-                    pObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
                 switch (pObject->WhoAmI()) // add to list by type: unit/building/tree/object
                 {
                 case HPC_UNIT:
@@ -3389,7 +3417,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // perform all operation steps to draw current d3d scene
-BOOL CWorldClient::Draw3DScene()
+BOOL CWorldClient::Prepare3DScene()
 {
     if (!pTerrain || !pTerrain->IsLoaded())
         return FALSE;
@@ -3410,7 +3438,7 @@ BOOL CWorldClient::Draw3DScene()
     if (pMoshka)
         pMoshka->SetTime(fpTime);
     // puck objects from the area map
-    const float fPickRadius = NConsole::ObjectsDrawRadius();
+    const float fPickRadius = OwnedRender::E3DrawRadius(NConsole::ObjectsDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight());
     std::list<CSmartPtr<CMapObject>> *pObjects = areaObjects.GetFirstList(
         Max(0.0f, Min(pTerrain->GetMaxX() - 1, ptObservationPosition.x - fPickRadius)),
         Max(0.0f, Min(pTerrain->GetMaxY() - 1, ptObservationPosition.y - fPickRadius)),
@@ -3443,61 +3471,102 @@ BOOL CWorldClient::Draw3DScene()
             (*iter)->ResetFlag(OBJ_LIGHTED);
         }
     }
-    // sort this lists by primary textures
-    CObjectTextureLessThenFunctional cmpfunct;
-    if (CheckFlag(WC_RENDER_OBJECTS | WC_RENDER_UNITS))
-    {
-        pRend->SetTexturingAlphaMode(AM_MULTIPLY);
-        // remove all object screen rect structs (from the last render)
-        lstScreenObjects.clear();
-        // flush previous renders
-        pRend->FlushBuffers();
-        // set alpha blend mode and alpha ref value
-        pRend->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
-        pRend->SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, TRUE);
-        pRend->FlushBuffers();
-    }
-    auto lbObjDrawWithoutBBox = [pRend](CObject3D *obj) { obj->DrawWithoutBBox(pRend); };
-    auto lbObjDraw = [pRend](CObject3D *obj) { obj->Draw(pRend); };
-    auto lbAddObjScreenRects = [this](const CMapObject *obj) {
-        AddScreenRects(obj, &lstScreenObjects);
+    // Publish current poses for off-screen casters as well as visible objects.
+    std::set<int> prepared;
+    static std::uint64_t lastPublicationEpoch = 0;
+    const auto publicationEpoch = OwnedRender::E1Scene().Epoch();
+    const bool capturePublication = publicationEpoch && publicationEpoch != lastPublicationEpoch;
+    std::vector<std::pair<int, unsigned>> unclaimedPublicationStages;
+    auto prepare = [&](CMapObject* object) {
+        if (!object || !object->GetObjectSpecific() || !prepared.insert(object->GetID()).second)
+            return;
+        auto* specific = static_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
+        if (!capturePublication)
+        {
+            specific->PrepareOwnedVisual(pRend, object->CheckFlag(OBJ_VISIBLE) != 0);
+            return;
+        }
+        const auto identity = OwnedRender::E1Scene().Identity(object->GetID());
+        const auto resource = OwnedRender::E1Scene().Resource(specific);
+        auto& retained = OwnedRender::E1Scene().Scene();
+        unsigned stages = 0;
+        if (identity.generation) stages |= 1u;
+        if (resource.serial) stages |= 2u;
+        if (resource.serial && retained.visual_assembly(resource)) stages |= 4u;
+        const bool preparedVisual = specific->PrepareOwnedVisual(
+            pRend, object->CheckFlag(OBJ_VISIBLE) != 0);
+        if (preparedVisual) stages |= 32u;
+        if (resource.serial && retained.visual_assembly(resource)) stages |= 64u;
+        owned::VisualObjectPose pose{};
+        if (resource.serial && retained.visual_object_pose(resource, pose)) stages |= 8u;
+        if (identity.generation && retained.visual_claims_mesh(identity)) stages |= 16u;
+        if (!(stages & 16u)) unclaimedPublicationStages.emplace_back(object->GetID(), stages);
     };
-    // check for objects rendering
-    if (CheckFlag(WC_RENDER_OBJECTS))
+    for (const auto* list : {&visibleObjects, &visibleBuildings, &visibleTrees, &visibleLevers,
+                            &visibleUnits, &shadowObjects, &shadowBuildings, &shadowTrees,
+                            &shadowLevers, &shadowUnits})
+        for (auto* object : *list) prepare(object);
+    // Caster admission is by native light-space bounds, not the camera list.
+    // Publish even outside the host draw radius: long sun/point shadows can
+    // enter visible receiver coverage while their source stays off screen.
+    for (auto* object : objects)
+        if (object && object->GetObjectSpecific() &&
+            object->GetID() > 0)
+            prepare(object);
+    if (capturePublication)
     {
-        std::sort(visibleBuildings.begin(), visibleBuildings.end(), cmpfunct);
-        std::sort(visibleObjects.begin(), visibleObjects.end(), cmpfunct);
-        std::sort(visibleLevers.begin(), visibleLevers.end(), cmpfunct);
-        std::sort(visibleTrees.begin(), visibleTrees.end(), cmpfunct);
-        // enable alpha blending and alpha ref testing
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHAREF, 200);
-        // draw objects
-        for_each(visibleObjects.begin(), visibleObjects.end(), lbObjDrawWithoutBBox);
-        // draw levers (and add screen rects)
-        for_each(visibleLevers.begin(), visibleLevers.end(), lbObjDraw);
-        for_each(visibleLevers.begin(), visibleLevers.end(), lbAddObjScreenRects);
+        lastPublicationEpoch = publicationEpoch;
+        if (!unclaimedPublicationStages.empty())
+        {
+            char details[768]{};
+            std::size_t used = 0;
+            for (const auto& item : unclaimedPublicationStages)
+            {
+                const int written = _snprintf_s(details + used, sizeof(details) - used,
+                    _TRUNCATE, "%s%d:%02x", used ? "," : "", item.first, item.second);
+                if (written < 0) break;
+                used += static_cast<std::size_t>(written);
+            }
+            GameJournal::Event("RENDER", "world_visual_unclaimed_stages", "%s", details);
+        }
+    }
+    // Publish only footprints with a known creator and current native lifetime.
+    try
+    {
+        std::vector<OwnedRender::E1GroundCoverFootprintFact> facts;
+        facts.reserve(footprints.size());
+        for (const auto &print : footprints)
+            facts.push_back({&print, print.GetRemainingSegments(), print.GetFadeoutSegments(),
+                             !print.IsInvisible()});
+        OwnedRender::E1PublishGroundCoverFootprints(facts, theSettings.nTerrainEnableFootprints != 0);
+    }
+    catch (...)
+    {
+        OwnedRender::E1PublishGroundCoverFootprints({}, false);
+    }
+    return TRUE;
+}
+// Only remaining overlays: world object colour and shadows have no OpenEI draw.
+BOOL CWorldClient::Draw3DScene()
+{
+    if (!pTerrain || !pTerrain->IsLoaded()) return FALSE;
+    CRenderer *pRend = &theRenderer;
+    CDXGeometryProcessor *pGPU = pRend->GetGPU();
+    lstScreenObjects.clear();
+    auto record = [this](CMapObject* object, bool selectable) {
+        if (object->CheckFlag(OBJ_HIDDEN) || !object->CheckFlag(OBJ_VISIBLE)) return;
+        OwnedRender::E1ReportOwnedVisual(object->GetID());
+        if (selectable) AddScreenRects(object, &lstScreenObjects);
+    };
+    if (CheckFlag(WC_RENDER_OBJECTS)) {
+        for (auto* object : visibleObjects) record(object, false);
+        for (auto* object : visibleBuildings) record(object, false);
+        for (auto* object : visibleTrees) record(object, false);
+        for (auto* object : visibleLevers) record(object, true);
+    }
+    if (CheckFlag(WC_RENDER_UNITS))
+        for (auto* object : visibleUnits) record(object, true);
 
-        pRend->FlushBuffers();
-        // draw buildings
-        for_each(visibleBuildings.begin(), visibleBuildings.end(), lbObjDrawWithoutBBox);
-        // draw trees
-        for_each(visibleTrees.begin(), visibleTrees.end(), lbObjDrawWithoutBBox);
-        pRend->FlushBuffers();
-    }
-    // check for Units rendering
-    if (CheckFlag(WC_RENDER_UNITS) && !visibleUnits.empty())
-    {
-        std::sort(visibleUnits.begin(), visibleUnits.end(), cmpfunct);
-        // enable alpha blending and alpha ref testing
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHAREF, 10);
-        // draw units
-        // pRend->SetTexturingAlphaMode(AM_MULTIPLY);
-        for_each(visibleUnits.begin(), visibleUnits.end(), lbObjDraw);
-        for_each(visibleUnits.begin(), visibleUnits.end(), lbAddObjScreenRects);
-        pRend->FlushBuffers();
-    }
     // draw terrain prints (footprints, blood and fireprints)
     if (!bloodprints.empty() || !footprints.empty() || !fireprints.empty())
     {
@@ -3511,44 +3580,6 @@ BOOL CWorldClient::Draw3DScene()
         if (theSettings.nTerrainEnableFireprints)
             for_each(fireprints.begin(), fireprints.end(), [](CFirePrints &obj) { obj.Draw(); });
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
-    }
-    // draw shadows
-    if (CheckFlag(WC_RENDER_SHADOWS))
-    {
-        pRend->FlushBuffers();
-        ModShadowSchedule::BeginFrame();
-        pRend->GetD3D()->BeginModShadows();
-        std::sort(shadowBuildings.begin(), shadowBuildings.end(), cmpfunct);
-        std::sort(shadowObjects.begin(), shadowObjects.end(), cmpfunct);
-        std::sort(shadowLevers.begin(), shadowLevers.end(), cmpfunct);
-        std::sort(shadowTrees.begin(), shadowTrees.end(), cmpfunct);
-        // shift shadow in camera direction
-        SHMatrix matrix;
-        Identity(matrix);
-        CPlot3D ptZAxis = theCamera.GetZAxis();
-        matrix._14 = -ptZAxis.x * 0.02f;
-        matrix._24 = -ptZAxis.y * 0.02f;
-        matrix._34 = -ptZAxis.z * 0.02f;
-        pGPU->PushMainMatrix(matrix);
-        //
-        pRend->SetTexturingAlphaMode(AM_MULTIPLY);
-        pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-        pTerrain->DrawModTerrainShadow(pRend);
-        auto lbObjDrawShadow = [pRend](CObject3D *obj) { obj->DrawRealisticShadow2(pRend); };
-        for_each(shadowLevers.begin(), shadowLevers.end(), lbObjDrawShadow);
-        for_each(shadowObjects.begin(), shadowObjects.end(), lbObjDrawShadow);
-        for_each(shadowBuildings.begin(), shadowBuildings.end(), lbObjDrawShadow);
-        for_each(shadowTrees.begin(), shadowTrees.end(), lbObjDrawShadow);
-        for_each(shadowUnits.begin(), shadowUnits.end(), lbObjDrawShadow);
-        pRend->FlushBuffers();
-        pRend->GetD3D()->EndModShadows();
-        ModShadowSchedule::EndFrame();
-        pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
-        //
-        pGPU->PopMainMatrix();
-
-        //
     }
     // draw selection for objects
     if (!selectedObjects.empty() && (theSettings.nSelectionType == 1) && CheckFlag(WC_RENDER_UNITS))
@@ -3840,8 +3871,8 @@ void CWorldClient::AddBloodPrints(float fX, float fY, float fSize, float fFinalS
     }
 }
 // вернуть тип крови, в которую вступили
-int CWorldClient::AddFootPrints(float fX, float fY, float fSizeX, float fSizeY, float fRotate,
-                                int nType, float fDetection, bool bVisible, int nBloodType)
+int CWorldClient::AddFootPrints(CMapObject *owner, float fX, float fY, float fSizeX, float fSizeY,
+                                float fRotate, int nType, float fDetection, bool bVisible, int nBloodType)
 {
     bool bInBlood = false;
     if (theSettings.nTerrainEnableFootprints)
@@ -3878,9 +3909,14 @@ int CWorldClient::AddFootPrints(float fX, float fY, float fSizeX, float fSizeY, 
                 nFadeoutTime = pDesc->weather.nFadeoutTime;
             }
             if ((fPower > 0) && (nLifetime > 0) && (nFadeoutTime > 0))
+            {
                 footprints.push_back(CFootPrints(fX, fY, fSizeX, fSizeY, fRotate, fPower, nLifetime,
                                                  nFadeoutTime, nType, fDetection, bVisible,
                                                  nBloodType));
+                const auto &print = footprints.back();
+                OwnedRender::E1RegisterGroundCoverFootprint(&print, owner, ownedRenderGeneration,
+                    theWorld.GetSegmentTimeCounter(), print.GetCenterX(), print.GetCenterY());
+            }
         }
     }
     return bInBlood ? nBloodType : -1;

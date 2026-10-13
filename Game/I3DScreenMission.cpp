@@ -1,4 +1,8 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1TextLifetime.h"
+#include "OwnedRender/E3Input.h"
+#include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E3Hud.h"
 #include "GameJournal.h"
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
@@ -92,7 +96,7 @@ static bool PasteModInterfaceIcon(CTexture *texture, LPCTSTR name, int size, int
     D3D11_SUBRESOURCE_DATA data = {};
     data.pSysMem = blank.data();
     data.SysMemPitch = size * sizeof(WORD);
-    texture->GetSurface()->UpdateTexture(0, &region, &data);
+    texture->GetSurface()->UpdateTexture(0, &region, &data, MMP_FORMAT_5551);
     static std::set<std::string> reported;
     if (reported.size() < 32 && reported.insert((LPCSTR)resource).second)
         ReportWarning("Missing HD interface icon %s", (LPCSTR)resource);
@@ -254,10 +258,13 @@ void CI3DScreenMission::OnActivate()
     if (IWorldConnector.IsLMP())
         LMPPersonsUpdate(true);
     lmpState.nMainHeroID = -1;
+    OwnedRender::E3MissionEnter(this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnDeactivate()
 {
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E3MissionLeave(this);
     DW_SEGMENT_TIME = DW_DEFAULT_SEGMENT_TIME;
 
     theCamera.SetFlag(CAM_CANT_SCROLL);
@@ -1407,6 +1414,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnMouseMove(UINT nFlags, CPoint point)
 {
+    if (OwnedRender::E3EditorPaused()) return;
     // CRAP{ - for advanced kick/ban
     if (eKickMode != KM_NONE)
     {
@@ -1464,6 +1472,11 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
     if (pU && !pU->CheckFlag(UNIT_VISIBLE))
         pU = 0;
 #endif // NODEBUGINFO
+
+    const auto hoverIdentity = pU && pU->CheckFlag(UNIT_VISIBLE) && !pU->IsDead()
+        ? OwnedRender::E1Scene().Identity(static_cast<std::int32_t>(pU->GetID()))
+        : owned::LifecycleIdentity{};
+    OwnedRender::E3PublishHover(hoverIdentity.id, hoverIdentity.generation);
 
     // if there is no selection
     pHero = GetSelection(nSelected, nIndex);
@@ -5202,7 +5215,8 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
             InvertClosedState();
             break;
         case 1:
-            pI3D->ScreenToVirtual(point);
+            if(!OwnedRender::E3HudNativePoint(this,unsigned(ht),point,point))
+                pI3D->ScreenToVirtual(point);
             pt.x = (point.x - 700 - WideScreen::VirtualShift()) / fPixInMeter;
             pt.y = (point.y - 80) / fPixInMeter;
             pt = FromFigureToTerrain(pt, TRUE);
@@ -5216,7 +5230,8 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
             }
             break;
         case 2:
-            pI3D->ScreenToVirtual(point);
+            if(!OwnedRender::E3HudNativePoint(this,unsigned(ht),point,point))
+                pI3D->ScreenToVirtual(point);
             pt.x = (point.x - 700 - WideScreen::VirtualShift()) / fPixInMeter;
             pt.y = (point.y - 80) / fPixInMeter;
             pt = FromFigureToTerrain(pt);
@@ -5463,6 +5478,7 @@ void CI3DObjectInfo::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 {
+    OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::pane,this);
     WideScreen::Scope wideScope(-1);
     CPlot3D pos;
     CQuaternion rot;
@@ -5616,6 +5632,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 
     CI3DObject::Draw(pRend);
 
+    textDraw.Complete();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////

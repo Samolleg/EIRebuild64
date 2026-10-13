@@ -1,5 +1,6 @@
 #pragma once
-#include "OwnedRendererClient.h"
+
+#include "../OwnedRender/E1Terrain.h"
 #include "../Unit.h"
 #include "../UnitClientSpecific.h"
 #include "../Terrain.h"
@@ -61,6 +62,12 @@ inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureMana
     input.loose_roots=rootPointers.data();input.loose_count=uint32_t(rootPointers.size());
     input.archives=archivePointers.data();input.archive_count=uint32_t(archivePointers.size());
     input.layer_shifts=shifts.data();input.layer_count=uint32_t(shifts.size());Check(renderer.SetTerrain(source));
+    std::string failure;
+    if (!OwnedRender::E1PublishTerrainSource(&terrain, generation, source.source_revision,
+        project.c_str(), header.c_str(), ReadMap, &terrain, failure)) {
+        GameJournal::Event("RENDER", "terrain_publication_failed", "%s", failure.c_str());
+        throw E_FAIL;
+    }
 }
 inline bool Bounds(const CMapObject& object,float* out){
     const auto& volume=object.GetBoundingVolume();if(!volume.IsBox())return false;
@@ -86,6 +93,7 @@ struct Scene {
     std::vector<EIRenderObjectV3> objects;
     std::vector<EIRenderUnitV3> units;
     std::vector<EIRenderPointLightV3> lights;
+    std::vector<owned::RetainedWorldPointLight> c56Lights;
     std::set<int> ids;
     void Add(CMapObject* object,bool drawUndetected,CPlayerClient* player,float night){
         if(!object||object->CheckFlag(OBJ_HIDDEN)||!ids.insert(object->GetID()).second)return;
@@ -117,6 +125,14 @@ struct Scene {
             const auto& v=light->GetLight();if(v.dltType!=D3DLIGHT_POINT||!(v.dvRange>0))continue;
             EIRenderPointLightV3 row={{v.dvPosition.x,v.dvPosition.y,v.dvPosition.z},
                                      {v.dcvDiffuse.r,v.dcvDiffuse.g,v.dcvDiffuse.b},v.dvRange};lights.push_back(row);
+            owned::RetainedWorldPointLight c56{};
+            c56.source_id = light->GetID();
+            c56.center = {v.dvPosition.x, v.dvPosition.y, v.dvPosition.z};
+            c56.color = {v.dcvDiffuse.r, v.dcvDiffuse.g, v.dcvDiffuse.b};
+            c56.radius = v.dvRange;
+            c56.casts_shadow = !light->CheckFlag(LIT_UNSHADOW);
+            c56.attached = light->CheckFlag(LIT_QUEST) != FALSE;
+            c56Lights.push_back(c56);
         }
     }
     void Submit(OwnedRendererClient& renderer,uint64_t generation){

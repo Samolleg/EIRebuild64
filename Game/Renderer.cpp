@@ -21,15 +21,16 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "WorldServer.h"
 #include "dx11/RendererDX11.h"
+#include "OwnedRender/E1RendererFacade.h"
 #include "dx11/vertex.h"
 #include "dx11/Surface.h"
 #include "dx11/ConstantBuffer.h"
-#include "dx11/EffectProcessor.h" //for delete CDX11
-#include "dx11/DXShader.h"
-#include "dx11/Batchers.h"
 #include "Particle.h"
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"
+#include "OwnedRender/E1VisualFrame.h"
+#include "OwnedRender/E1FogSubmission.h"
+#include "OwnedRender/E4Camp.h"
 /////////////////////////////////////////////////////////////////////////////////////
 namespace NDXDirect3D {
 // buffers
@@ -44,13 +45,8 @@ inline VERTEX_TYPE *GetTempVertices(int nAmount, VERTEX_TYPE *pType)
     return reinterpret_cast<VERTEX_TYPE *>(NDXDirect3D::tempVertices.GetData());
 }
 
-// Maximum number of vertexes for particles
-const int N_HARDWARE_V_MAX_PARTICLES = 2048; // 4096;
 /////////////////////////////////////////////////////////////////////////////////////
 CRenderer theRenderer;
-typedef CSimplyArray<ParticleVertex, ParticleVertex> CPVertexArray;
-typedef ParticleVertex *SortVertixPtr;
-typedef CPVertexArray ParticleVertexArray;
 
 SRayPicker::SRayPicker(const CPoint &screenPoint, const CPlot3D &cameraPos)
 {
@@ -238,6 +234,8 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, const CQuaternion &quat, const CPlo
         return TRUE;
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
+    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,false,
+        nullptr,nullptr,pDX11->GetBoundFigureTexture(0),pDX11->GetBoundFigureTexture(1));
     return pFigureSpec->Draw(this, quat, cp, pMaterial, cFog, pRect);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -249,7 +247,9 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, CSimplyArray<CLight *, CLight *> &l
         return TRUE;
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
-    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,pDX11->IsOwnedWorldActive());
+    OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,
+        pDX11->IsOwnedWorldActive(),pTexture0,pTexture1,
+        pDX11->GetBoundFigureTexture(0),pDX11->GetBoundFigureTexture(1));
     return pFigureSpec->Draw(this, lights, pMaterial, cFog, pRect, pTexture0, pTexture1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -452,304 +452,40 @@ BOOL CRenderer::Draw3DLine(CXYZWArray &points, const float fpLineWidth, const in
     return bRetVal;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// particle rendering
-// ------------------------------- Sort TLVertexes and clips by z
-// ------------------------------------------
-struct SSortZElem
-{
-    union
-    {
-        int nZ;
-        float fZ;
-    };
-    SSortZElem *pNext;
-    SortVertixPtr lpVertex;
-    union
-    {
-        BYTE bClip[4];
-        DWORD dwClip;
-    };
-};
-
-/////////////////////////////////////////////////////////////////////////////////////
-static void RadixSortStage(int shift, SSortZElem **pSrc, SSortZElem **pDst, int nCount,
-                           int nNormalDir)
-{
-    int i;
-    SSortZElem *lists[256] = {};
-    MemSetDWord((DWORD *)lists, 0, 256);
-    for (i = 0; i < nCount; i++)
-    {
-        int n = (pSrc[i]->nZ >> shift) &
-                0xff; // determine pile to which this element is to be stored
-        pSrc[i]->pNext = lists[n];
-        lists[n] = pSrc[i];
-    }
-    if (nNormalDir)
-    {
-        for (i = 0; i < 256; i++)
-        {
-            SSortZElem *pElem = lists[i];
-            while (pElem)
-            {
-                *pDst++ = pElem;
-                pElem = pElem->pNext;
-            }
-        }
-    }
-    else
-    {
-        for (i = 255; i >= 0; i--)
-        {
-            SSortZElem *pElem = lists[i];
-            while (pElem)
-            {
-                *pDst++ = pElem;
-                pElem = pElem->pNext;
-            }
-        }
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-// сортировка слияниями, эта функция - один проход слияни
-static void JoinSortStage(int step, SSortZElem **pSrc, SSortZElem **pDst, int nCount)
-{
-    int i, n1, n2, step2, dest, numSteps;
-    step2 = step * 2;
-    if (step * 2 > nCount)
-    {
-        numSteps = nCount - step;
-        memcpy(pDst + nCount - step, pSrc + nCount - step, step * sizeof(pSrc[0]));
-    }
-    else
-    {
-        numSteps = step;
-    }
-    numSteps = Min(step, nCount - step);
-    for (i = 0; i < numSteps; i++)
-    {
-        n1 = i;
-        n2 = i + step;
-        dest = i;
-        while (1)
-        {
-            if (pSrc[n1]->nZ < pSrc[n2]->nZ)
-            {
-                pDst[dest] = pSrc[n2];
-                n2 += step2;
-                dest += step;
-                if (n2 >= nCount)
-                {
-                    while (n1 < nCount)
-                    {
-                        pDst[dest] = pSrc[n1];
-                        n1 += step2;
-                        dest += step;
-                    }
-                    break;
-                }
-            }
-            else
-            {
-                pDst[dest] = pSrc[n1];
-                n1 += step2;
-                dest += step;
-                if (n1 >= nCount)
-                {
-                    while (n2 < nCount)
-                    {
-                        pDst[dest] = pSrc[n2];
-                        n2 += step2;
-                        dest += step;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
-static void SortByZ(ParticleVertexArray &tlVertexes, CByteArray &clips)
-{
-    int i, iAdd, nStep;
-    static ParticleVertexArray tmpVertexes;
-    static CSimplyArray<SSortZElem, SSortZElem &> sortElements;
-    static CSimplyArray<SSortZElem *, SSortZElem *> sort, sort1;
-    SSortZElem **pSort, **pSort1, **pSortTemp;
-
-    tmpVertexes.SetSize(tlVertexes.GetSize());
-    memcpy(tmpVertexes.GetData(), tlVertexes.GetData(),
-           sizeof(tlVertexes[0]) * tlVertexes.GetSize());
-
-    SortVertixPtr tlBase = tmpVertexes.GetData();
-
-    BYTE *pClips = clips.GetData();
-    int nElem = tmpVertexes.GetSize() / 4;
-
-    sortElements.SetSize(nElem);
-    sort.SetSize(nElem);
-    iAdd = 0;
-    for (i = 0; i < nElem; i++)
-    {
-        SSortZElem &elem = sortElements[iAdd];
-        elem.fZ = tlBase[i * 4].pos.z;
-        if (elem.nZ & 0x80000000) // points with negative Z values are discarded
-            continue;
-        elem.dwClip = ((DWORD *)pClips)[i]; // copy 4 clip bytes
-        elem.lpVertex = tlBase + i * 4;     // pointer to 4 d3dvertexes
-        sort[iAdd] = &elem;
-        iAdd++;
-    }
-    //	sortElements.SetSize( iAdd );
-    nElem = iAdd; // количество элементов, которое будет сортироваться (элементы с отрицательным z
-                  // отброшены)
-    sort1.SetSize(nElem);
-
-    pSort = sort.GetData();
-    pSort1 = sort1.GetData();
-    if (nElem > 128)
-    { // radix sort is efficient on this number of particles
-        RadixSortStage(0, pSort, pSort1, nElem, 1);
-        RadixSortStage(8, pSort1, pSort, nElem, 0);
-        RadixSortStage(16, pSort, pSort1, nElem, 1);
-        RadixSortStage(24, pSort1, pSort, nElem, 0);
-    }
-    else if (nElem > 1)
-    { // use join sort with less number of particles
-        nStep = 0x40000000;
-        while (nStep >= nElem)
-            nStep >>= 1; // determine initial step for join sort
-
-        while (nStep > 0)
-        {
-            JoinSortStage(nStep, pSort, pSort1, nElem);
-            nStep >>= 1;
-            pSortTemp = pSort;
-            pSort = pSort1;
-            pSort1 = pSortTemp; // swap pSort & pSort1
-        }
-    }
-    // move from pSort[] to tlVertexes & clips
-    tlVertexes.SetSize(nElem * 4); // ARRAY BOUNDS CHECK
-    // clips.SetSize( nElem*4 );
-    tlBase = tlVertexes.GetData();
-    pClips = clips.GetData();
-    for (i = 0; i < nElem; i++)
-    {
-        memcpy(tlBase + i * 4, pSort[i]->lpVertex, sizeof(tlVertexes[i]) * 4);
-        ((DWORD *)pClips)[i] = pSort[i]->dwClip; // copy 4 clip bytes
-    }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles)
 {
     CDXGeometryProcessor *pGPU = GetGPU();
-    CTLPipeline *pGeometryProcessor = pGPU->GetGeometryProcessor();
-    // Define temporary arrays
-    static CXYZWArray inCoords;
-    static CPVertexArray tlVertexes;
-    static CByteArray clips;
-    static CWordArray tFaces;
-
-    // Set draft sizes of arrays
-    inCoords.SetSize(N_HARDWARE_V_MAX_PARTICLES / 4);                         // ARRAY BOUNDS CHECK
-    tlVertexes.SetSize(N_HARDWARE_V_MAX_PARTICLES * 4 /* *4 for clipping */); // ARRAY BOUNDS CHECK
-    clips.SetSize(N_HARDWARE_V_MAX_PARTICLES);
-    tFaces.SetSize((N_HARDWARE_V_MAX_PARTICLES / 4) * 6 * 4 /* *4 for clipping */);
-    // prepare matrix
+    SetProjectionMatrix();
+    if (pDX11->IsOwnedWorldActive())
     {
-        this->SetProjectionMatrix();
-    }
-    const SXYZW *pSrcPoint = points.GetData();
-    SParticleToDraw *pParticle = particles.GetData();
-    int nSrcPointsLeft = points.GetSize();
-    // additive blending
-    DWORD dwOldSrcBlend, dwOldDstBlend;
-    if (bUseAdd)
-    {
-        GetRenderState(D3DRENDERSTATE_SRCBLEND, &dwOldSrcBlend);
-        GetRenderState(D3DRENDERSTATE_DESTBLEND, &dwOldDstBlend);
-
-        SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
-        SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ONE);
-    }
-    // Sequently fill and render arrays
-    while (nSrcPointsLeft > 0)
-    {
-        // form current tlvertex array
-        ParticleVertex *pTL = tlVertexes.GetData();
-        int nNumPart = 0;
-        for (; nNumPart < (N_HARDWARE_V_MAX_PARTICLES / 4 - 1) && nSrcPointsLeft > 0;
-             nNumPart++, nSrcPointsLeft--, pParticle++)
+        if (!points.GetSize())
+            return TRUE;
+        std::vector<owned::GameParticle> values(points.GetSize());
+        for (int i = 0; i < points.GetSize(); ++i)
         {
-            const DWORD dwParticleColor = pParticle->dwColor;
-            const SParticleUV *pUV = pParticle->pUV;
-            const float radius = pSrcPoint->w;
-
-            const float xx[4] = { -radius, +radius, +radius, -radius };
-            const float yy[4] = { -radius, -radius, +radius, +radius };
-            const float uu[4] = { pUV->fpU0, pUV->fpU1, pUV->fpU1, pUV->fpU0 };
-            const float vv[4] = { pUV->fpV0, pUV->fpV0, pUV->fpV1, pUV->fpV1 };
-
-            for (int i = 0; i < 4; ++i)
-            {
-                auto &vertex = *pTL;
-                vertex.pos.x = pSrcPoint->x;
-                vertex.pos.y = pSrcPoint->y;
-                vertex.pos.z = pSrcPoint->z;
-                vertex.pos.w = 1.0;
-
-                vertex.tuv.x = uu[i];
-                vertex.tuv.y = vv[i];
-                vertex.screen_dx.x = xx[i];
-                vertex.screen_dx.y = yy[i];
-                vertex.color = dwParticleColor;
-                vertex.specular = RGBA_MAKE(0, 0, 0, 0xFF);
-                pTL++;
-            }
-            pSrcPoint++;
+            const auto& point = points[i];
+            const auto& particle = particles[i];
+            const auto& uv = *particle.pUV;
+            values[i] = {point.x, point.y, point.z, point.w, particle.dwColor,
+                         uv.fpU0, uv.fpV0, uv.fpU1, uv.fpV1};
         }
-        assert(nNumPart > 0);
-
-        tlVertexes.SetSize(nNumPart * 4); // ARRAY BOUNDS CHECK
-        int nClipFlag = TRV_VISIBLE_NOCLIP;
-        // pSrcPoint += nNumPart;
-        // Sort particles by z
-
-        // qsort(tlVertexes.GetData(), tlVertexes.GetSize(), sizeof(ParticleVertex), CmpGridPoints);
-        // TODOALEX: doesn't seem to have any effect?
-        // if (!bUseAdd)
-        // SortByZ(tlVertexes, clips);
-        nNumPart = tlVertexes.GetSize() / 4;
-        // Draw particles
-        WORD *pFace = tFaces.GetData();
-        // compose quads
-        for (int i = 0; i < nNumPart * 4; i += 4, pFace += 6)
-        {
-            pFace[0] = i + 0;
-            pFace[1] = i + 1;
-            pFace[2] = i + 2;
-            pFace[3] = i + 0;
-            pFace[4] = i + 2;
-            pFace[5] = i + 3;
-        }
-        int nVertices = nNumPart * 4;
-        int nIndexes = nNumPart * 2 * 3; // 6 per quad
-        if (nNumPart)
-        {
-            pDX11->DrawParticles(reinterpret_cast<ParticleVertex *>(tlVertexes.GetData()),
-                                 nVertices, tFaces.GetData(), nIndexes, 0);
-        }
+        owned::GameParticleView view;
+        view.particles = values.data();
+        view.count = static_cast<std::uint32_t>(values.size());
+        // Same projection-space stack as SetProjectionMatrix(), in c56's
+        // row-major M * p layout (the legacy shader uses its transpose).
+        const SHMatrix& projection = pGPU->GetMatrix(MAT_STACK_PROJSPACE);
+        std::memcpy(view.object_to_clip.data(), &projection, sizeof(view.object_to_clip));
+        const RECT& clipRect = GetWindowRect();
+        // Same dimensions passed to CTLPipelineFPU::SetClipRect at setup.
+        view.clip_half_width = float(clipRect.right - clipRect.left) * 0.5f;
+        view.clip_half_height = float(clipRect.bottom - clipRect.top) * 0.5f;
+        view.additive = bUseAdd;
+        pDX11->SubmitC56GameParticles(view);
+        return TRUE;
     }
-    // restore blending after ADD
-    if (bUseAdd)
-    {
-        SetRenderState(D3DRENDERSTATE_SRCBLEND, dwOldSrcBlend);
-        SetRenderState(D3DRENDERSTATE_DESTBLEND, dwOldDstBlend);
-    }
-
+    // No OpenEI path: submission reports an unavailable renderer once.
+    pDX11->SubmitC56GameParticles(owned::GameParticleView{});
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -907,96 +643,10 @@ BOOL CRenderer::EndDrawFrame()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawFrameSelection(int x1, int y1, int x2, int y2, char cAlpha, bool bFrame)
 {
-    // green rect when selecting characters /w mice
-    // check rect for singularity :)
-    if ((x2 < x1) || (y2 < y1))
+    owned::ScreenRectangleRequest request{};
+    if (!owned::make_screen_rectangle_request(x1, y1, x2, y2, cAlpha, bFrame, request))
         return FALSE;
-    //
-    DWORD dwColor = RGBA_MAKE(0, 0, 0, cAlpha);
-    DWORD dwSpecular = RGBA_MAKE(0, 0, 0, 255);
-    WORD indices[6] = { 0, 1, 2, 0, 2, 3 };
-    // SLineVertex vertices[5] = { };
-    STLVertex1 vertices[5] = {};
-    float fPlus = 1, fMinus = -1;
-    //
-    if (!bFrame)
-        fPlus = fMinus = 0;
-    //
-    vertices[0].sx = x1 + fPlus;
-    vertices[0].sy = y1 + fPlus;
-    vertices[0].sz = 0;
-    vertices[0].rhw = 1;
-    vertices[0].color = dwColor;
-    vertices[0].specular = dwSpecular;
-
-    vertices[1].sx = x1 + fPlus;
-    vertices[1].sy = y2 + fMinus;
-    vertices[1].sz = 0;
-    vertices[1].rhw = 1;
-    vertices[1].color = dwColor;
-    vertices[1].specular = dwSpecular;
-
-    vertices[2].sx = x2 + fMinus;
-    vertices[2].sy = y2 + fMinus;
-    vertices[2].sz = 0;
-    vertices[2].rhw = 1;
-    vertices[2].color = dwColor;
-    vertices[2].specular = dwSpecular;
-
-    vertices[3].sx = x2 + fMinus;
-    vertices[3].sy = y1 + fPlus;
-    vertices[3].sz = 0;
-    vertices[3].rhw = 1;
-    vertices[3].color = dwColor;
-    vertices[3].specular = dwSpecular;
-
-    vertices[4].sx = x1 + fPlus;
-    vertices[4].sy = y1 + fPlus;
-    vertices[4].sz = 0;
-    vertices[4].rhw = 1;
-    vertices[4].color = dwColor;
-    vertices[4].specular = dwSpecular;
-
-    BindTexture(0, (CDXGISurface *)0);
-
-    SetRenderState(D3DRENDERSTATE_ZBIAS, 0);
-    DrawIndexedPrimitive(D3DPT_TRIANGLELIST, vertices, 4, indices, 6);
-
-    if (bFrame)
-    {
-        dwColor = RGBA_MAKE(255, 255, 255, 255);
-        for (int i = 0; i < 5; ++i)
-            vertices[i].color = dwColor;
-
-        vertices[0].sx = x1;
-        vertices[0].sy = y1;
-
-        vertices[1].sx = x1;
-        vertices[1].sy = y2;
-
-        vertices[2].sx = x2;
-        vertices[2].sy = y2;
-
-        vertices[3].sx = x2;
-        vertices[3].sy = y1;
-
-        vertices[4].sx = x1;
-        vertices[4].sy = y1;
-
-        // SetRenderState(D3DRENDERSTATE_SHADEMODE, D3DSHADE_FLAT);
-        // SetRenderState(D3DRENDERSTATE_ZBIAS, 1);
-        // SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
-        // SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
-
-        // pDX11->DrawIndexedPrimitive(, vertices, 5, 0);
-
-        // SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-        // SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-        // SetRenderState(D3DRENDERSTATE_SHADEMODE, D3DSHADE_GOURAUD);
-        // SetRenderState(D3DRENDERSTATE_ZBIAS, 0);
-    }
-
-    return TRUE;
+    return pDX11->SubmitC56ScreenRectangle(request) ? TRUE : FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawPolyline(CPolyLine *pPolyline)
@@ -1085,11 +735,12 @@ DXGI_FORMAT TextureFormatFromMMPFormat(DWORD mmpFormat)
     case MMP_FORMAT_DXT3:
         return DXGI_FORMAT_BC2_UNORM;
     case MMP_FORMAT_5650:
-        return DXGI_FORMAT_B5G6R5_UNORM;
+    case MMP_FORMAT_5550:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case MMP_FORMAT_5551:
-        return DXGI_FORMAT_B5G5R5A1_UNORM;
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case MMP_FORMAT_4444:
-        return DXGI_FORMAT_B4G4R4A4_UNORM;
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case MMP_FORMAT_8888:
         return DXGI_FORMAT_B8G8R8A8_UNORM;
     default:
@@ -1151,29 +802,64 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     const SVertexComponents* components,int nNumComponents,const WORD* pwIndices,int nNumIndices,
     float fpUShift,float fpVShift,BYTE cFog,DWORD dwRenderFlags,const CPlot3D* morphs,int morphCount)
 {
-    if(pDX11->IsOwnedWorldActive() && pDX11->GetOwnedRenderer().FigureActive()) {
-        if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
-           !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
-            pDX11->GetOwnedRenderer().FigureFallback("figure_transform_stack_empty");return false;
-        }
-        EIRenderMeshV4 mesh={};mesh.size=sizeof(mesh);mesh.version=4;
-        mesh.positions=reinterpret_cast<const EIRenderPackedV4*>(plots);mesh.position_groups=nNumPlots;
-        mesh.normals=reinterpret_cast<const EIRenderPackedV4*>(norms);mesh.normal_groups=nNumNorms;
-        mesh.uv=reinterpret_cast<const float*>(maps);mesh.uv_count=nNumMaps;
-        mesh.components=reinterpret_cast<const EIRenderComponentV4*>(components);mesh.component_count=nNumComponents;
-        mesh.indices=pwIndices;mesh.index_count=nNumIndices;
-        EIRenderFigureV4 packet=pDX11->GetOwnedRenderer().FigureValues();
-        packet.flags=dwRenderFlags;packet.diffuse=reinterpret_cast<const uint32_t*>(colors);
-        packet.specular=reinterpret_cast<const uint32_t*>(speculars);
-        packet.default_diffuse=dwDefaultAmbientColor;packet.default_specular=RGBA_MAKE(0,0,0,cFog);
-        packet.u_shift=fpUShift;packet.v_shift=fpVShift;
-        const SHMatrix& world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
-        const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
-        memcpy(packet.object_to_world,&world,sizeof(world));memcpy(packet.object_to_clip,&clip,sizeof(clip));
-        packet.morph_xyz=reinterpret_cast<const float*>(morphs);packet.morph_count=morphCount;
-        if(pDX11->SubmitOwnedFigure(mesh,packet))return true;
+    const bool campDraw=OwnedRender::E4::OwnsDraw();
+    const bool hasFigure=pDX11->GetOwnedRenderer().FigureActive();
+    // World objects belong to the committed frame, including rejected visuals.
+    // Never submit a second figure draw or return to OpenEI for these IDs.
+    const auto objectId = std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id);
+    if (!campDraw && hasFigure && pDX11->IsOwnedWorldActive() && objectId > 0) {
+        OwnedRender::E1ReportOwnedVisual(objectId);
+        return true;
     }
-    return false;
+    const bool haveWorldMatrix=pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE);
+    const bool haveProjectionMatrix=pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE);
+    if(!haveProjectionMatrix || (!haveWorldMatrix && objectId!=0)) {
+        if(campDraw)pDX11->SubmitC56CampFigure({});
+        else pDX11->ReportC56FigureNoMatrix();
+        return true;
+    }
+
+    owned::NativeGeometryView view{};
+    view.positions=reinterpret_cast<const owned::NativePackedGroup*>(plots);view.position_groups=nNumPlots;
+    view.normals=reinterpret_cast<const owned::NativePackedGroup*>(norms);view.normal_groups=nNumNorms;
+    view.diffuse=reinterpret_cast<const std::uint32_t*>(colors);
+    view.specular=reinterpret_cast<const std::uint32_t*>(speculars);
+    view.texture_coordinates=reinterpret_cast<const owned::NativeTextureCoordinate*>(maps);
+    view.texture_coordinate_count=nNumMaps;
+    view.components=reinterpret_cast<const owned::NativeVertexComponent*>(components);
+    view.component_count=nNumComponents;view.indices=pwIndices;view.index_count=nNumIndices;
+    view.semantic_kind=owned::SemanticKind::figure;view.ordering=owned::NativeOrdering::preserve;
+    view.default_diffuse=dwDefaultAmbientColor;view.default_specular=RGBA_MAKE(0,0,0,cFog);
+    if(campDraw){
+        // The host has produced its exact interface colors; c56 owns placement and drawing.
+        if(dwRenderFlags&DXD3D_LIT){view.diffuse=nullptr;view.specular=nullptr;view.flags|=4u;}
+        if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
+        const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
+        memcpy(view.object_to_clip.data(),&clip,sizeof(clip));
+        view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
+        view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(morphs);view.morph_count=morphCount;
+        pDX11->SubmitC56CampFigure(view);
+        return true; // This category never falls through to the OpenEI buffers/shaders.
+    }
+    if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
+    view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
+    const EIRenderFigureV4 material=pDX11->GetOwnedRenderer().FigureValues();
+    view.lighting.enabled=(dwRenderFlags&(DXD3D_USE_VERTEX_COLOR|DXD3D_LIT))?0u:1u;
+    view.lighting.material_alpha=material.material_alpha;
+    memcpy(view.lighting.material_diffuse.data(),material.material_diffuse,sizeof(material.material_diffuse));
+    memcpy(view.lighting.emissive.data(),material.emissive,sizeof(material.emissive));
+    memcpy(view.lighting.specular.data(),material.material_specular,sizeof(material.material_specular));
+    const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
+    memcpy(view.object_to_clip.data(),&clip,sizeof(clip));
+    SHMatrix world;
+    if(haveWorldMatrix)world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
+    else Identity(world); // Interface figures use the legacy model-space lighting path.
+    memcpy(view.lighting.object_to_world.data(),&world,sizeof(world));
+    view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(morphs);
+    view.morph_count=morphCount;
+    if(dwRenderFlags&DXD3D_LIT){view.diffuse=nullptr;view.specular=nullptr;view.flags|=4u;}
+    pDX11->SubmitC56Figure(view);
+    return true; // Rejection is logged and skipped, never drawn by OpenEI.
 }
 
 int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const int nNumNorms,
@@ -1186,25 +872,7 @@ int CRenderer::Render(SXYZW4 *plots, const int nNumPlots, SXYZW4 *norms, const i
     if(TryOwnedFigure(plots,nNumPlots,norms,nNumNorms,colors,speculars,maps,nNumMaps,
         components,nNumComponents,pwIndices,nNumIndices,fpUShift,fpVShift,cFog,dwRenderFlags,nullptr,0))
         return TRV_VISIBLE_NOCLIP;
-    VertexBuffer<PNTVertex> vertexBuf;
-    PNTVertex *pVertices = GetTempVertices(nNumComponents, (PNTVertex *)0);
-
-    if (dwRenderFlags & DXD3D_LIT)
-    {
-        DWORD dwDefaultColor = dwDefaultAmbientColor;       // RGBA_MAKE( 200, 200, 200, 255 );
-        DWORD dwDefaultSpecular = RGBA_MAKE(0, 0, 0, cFog); // dwDefaultSpecularColor
-        MemSetDWord(colors, dwDefaultColor, nNumNorms * 4);
-        MemSetDWord(speculars, dwDefaultSpecular, nNumNorms * 4);
-    }
-
-    LPTLPIPELINE pGPU = pGeometryProcessor->GetGeometryProcessor();
-    if (IsAddFog())
-        pGPU->AddFog(reinterpret_cast<D3DTLVERTEX *>(pVertices), nNumComponents);
-
-    ComposeVerticesMain(pVertices, plots, norms, colors, speculars, maps, components,
-                        nNumComponents, fpUShift, fpVShift, dwRenderFlags);
-
-    return pDX11->DrawFigurePrimitive(pVertices, nNumComponents, pwIndices, nNumIndices, dwRenderFlags);
+    return TRV_INVISIBLE;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1247,10 +915,6 @@ int CRenderer::Render(SXYZW4 *plots, CPlot2D *maps, const int nNumPlots, WORD *i
 BOOL CRenderer::RenderTriangleSet(STLVertex1 *pVertices, DWORD dwVertexCount, LPWORD pIndices,
                                   DWORD dwIndexCount)
 {
-    if (bAddFog)
-        pGeometryProcessor->GetGeometryProcessor()->AddFog(reinterpret_cast<D3DTLVERTEX *>(
-                                                               pVertices),
-                                                           dwVertexCount);
 
     return DrawIndexedPrimitive(D3DPT_TRIANGLELIST, pVertices, dwVertexCount, pIndices,
                                 dwIndexCount, 0);
@@ -1279,7 +943,18 @@ BOOL CRenderer::DrawIndexedPrimitive(D3DPRIMITIVETYPE primitiveType, LPVOID lpvV
 {
     if ((dwVertexCount == 0) || (dwIndexCount == 0))
         return TRUE;
-    pDX11->DrawSimplePrimitive(lpvVertices, dwVertexCount, pIndices, dwIndexCount, dwFlags);
+    // Completed host geometry and material are consumed only by c56.
+    // Distance/projection fog is applied by its pixel stage, never CPU AddFog.
+    OwnedRender::E1TrianglePacket packet;
+    if (primitiveType != D3DPT_TRIANGLELIST || !packet.Build(
+        static_cast<const STLVertex1*>(lpvVertices), dwVertexCount, pIndices, dwIndexCount)) {
+        pDX11->SubmitC56Triangles({});
+        return TRUE;
+    }
+    auto view = packet.View(pIndices, dwIndexCount);
+    const auto& projection = GetConstantBuffers()->cb_vs_vertexshader.data.ei_projspace;
+    std::memcpy(view.object_to_clip.data(), &projection, sizeof(view.object_to_clip));
+    pDX11->SubmitC56Triangles(view);
     return TRUE;
 }
 
@@ -1385,7 +1060,7 @@ BOOL CRenderer::BindTexture(DWORD dwStage, CDXGISurface *pTexture)
     if (pTexture)
     {
         ID3D11ShaderResourceView *resView = pTexture->GetShaderResource().Get();
-        return pDX11->BindTexture(dwStage, resView);
+        return pDX11->BindTexture(dwStage, resView, pTexture->OwnedSurfaceId());
     }
     return pDX11->BindTexture(dwStage, nullptr);
 }

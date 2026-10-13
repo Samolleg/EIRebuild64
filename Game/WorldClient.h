@@ -270,8 +270,8 @@ public:
     CSkyObject *GetSky() { return pSky; }
     //
     void AddBloodPrints(float fX, float fY, float fSize, float fFinalSize, int nType, bool bSmall);
-    int AddFootPrints(float fX, float fY, float fSizeX, float fSizeY, float fRotate, int nType,
-                      float fDetection, bool bVisible, int nBloodType);
+    int AddFootPrints(CMapObject *owner, float fX, float fY, float fSizeX, float fSizeY,
+                      float fRotate, int nType, float fDetection, bool bVisible, int nBloodType);
     void AddFirePrints(float fX, float fY, float fSizeX, float fSizeY, float fRotate, float fPower);
     void VisualizePrints(const CPlot3D &ptCenter, float fVision);
     // for debug data access
@@ -387,6 +387,7 @@ public:
     CCamera *GetCamera() { return pCamera; }
     void SetCameraScroll(CPoint point, int nFlags);
     //
+    BOOL Prepare3DScene();
     BOOL Draw3DScene();
     BOOL Draw();
     // idle function (call from CWinApp::OnIdle)

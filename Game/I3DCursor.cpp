@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Input.h"
 static const char LOCAL_FILE[] = __FILE__;
 ///////////////////////////////////////////////////////////////////////////////////
 #include "I3DCursor.h"
@@ -116,7 +117,7 @@ bool CI3DCursor::UpdateCursorState()
         {
             // update increment
             CPoint cursorPos;
-            GetCursorPos(&cursorPos);
+            OwnedRender::E3ReadCursor(&cursorPos);
             m_ptLastInc = cursorPos - m_ptLastCursor;
 
             if (m_isLock)
@@ -132,7 +133,7 @@ bool CI3DCursor::UpdateCursorState()
                     cursorPos.y = 1;
                 else if (cursorPos.y == 0)
                     cursorPos.y = s_height - 2;
-                SetCursorPos(cursorPos.x, cursorPos.y);
+                OwnedRender::E3WriteCursor(cursorPos.x, cursorPos.y);
             }
             m_ptLastCursor = cursorPos;
         }
@@ -142,7 +143,7 @@ bool CI3DCursor::UpdateCursorState()
             point = m_ptLockedCursor;
         else
         {
-            GetCursorPos(&point);
+            OwnedRender::E3ReadCursor(&point);
             m_ptLockedCursor = point;
         }
         if (point.x < 0)
@@ -179,17 +180,15 @@ void CI3DCursor::Draw()
     if (m_rectDstCur.IsRectEmpty())
         return;
 
-    CDX11 *pDX11 = GetRenderer()->GetD3D();
     if (m_isShow)
     {
-        auto m_states = pDX11->GetCommonStates();
-        pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred,
-                                       m_states->NonPremultiplied());
-        m_pCursorInfo->pSurface->BltToRenderSurface(m_rectDstCur, m_rectSrcCur, 0, 0);
-        pDX11->GetSpriteBatch()->End();
-        // pDX11->GetSpriteBatch()->Draw(m_pCursorInfo->pSurface->texture, *m_rectDstCur,
-        // m_rectSrcCur);
-    };
+        DDBLTFX blit{};
+        blit.dwSize = sizeof(blit);
+        blit.ddckSrcColorkey.dwColorSpaceLowValue = 0;
+        blit.ddckSrcColorkey.dwColorSpaceHighValue = 0;
+        m_pCursorInfo->pSurface->BltToRenderSurface(m_rectDstCur, m_rectSrcCur,
+            DDBLT_KEYSRCOVERRIDE, &blit);
+    }
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::Init()
@@ -262,7 +261,7 @@ void CI3DCursor::SetPos(CPoint ptPos)
         m_ptLockedCursor = ptPos;
     }
     else
-        SetCursorPos(ptPos.x, ptPos.y);
+        OwnedRender::E3WriteCursor(ptPos.x, ptPos.y);
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::LockPos(bool bLock)

@@ -26,6 +26,9 @@ public:
     CQuaternion Inverse() const;
     CQuaternion UnitInverse() const;
     float Dot(const CQuaternion &quat) const;
+    void GetComponents(float& outW, float& outX, float& outY, float& outZ) const {
+        outW = w; outX = x; outY = y; outZ = z;
+    }
     void ReverseAxis();  // reverse quaternion's axis : x = -x, y = -y, z = -z
     void ReverseAxisX(); // reverse quaternion's Y axis : y = -y
     void ReverseAxisY(); // reverse quaternion's Y axis : y = -y

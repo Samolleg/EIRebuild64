@@ -1,9 +1,13 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
+#include "OwnedRender/E3Hud.h"
+#include "I3DScreenCamp.h"
 #include "GameJournal.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DObject.h"
+#include <cmath>
 #include <new>
 #include "I3DMapObjTranslation.h"
 #include "I3DMain.h"
@@ -74,9 +78,13 @@ void CI3DPolyArea::SetToolTip(int nTipID, int nHeaderLines, int nKbdAction)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DPolyArea::ProcessIdle(CPoint point)
 {
+    ProcessIdle(point,PtInArea(point)!=FALSE);
+}
+void CI3DPolyArea::ProcessIdle(CPoint point,bool inside)
+{
     if (pTip)
     {
-        if (PtInArea(point))
+        if (inside)
         {
             if (!pTip->IsActive())
                 pTip->Activate();
@@ -313,6 +321,37 @@ void CI3DSurface::SetRect(CRect rectr)
     pI3D->VirtualToScreen(rect);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CI3DSurface::SetRectForRedraw(CRect desired, float textScale)
+{
+    if (!std::isfinite(textScale) || textScale <= 0.f)
+        throw std::invalid_argument("Invalid text scale");
+    pI3D->VirtualToScreen(desired);
+    desired.right = desired.left + LONG(std::ceil(desired.Width() / textScale));
+    desired.bottom = desired.top + LONG(std::ceil(desired.Height() / textScale));
+    if (desired.Width() <= 0 || desired.Height() <= 0)
+        throw std::invalid_argument("Text surface requires a positive rectangle");
+    if (hDC)
+        throw std::logic_error("Cannot resize a locked text surface");
+
+    const bool resized = !pSurface || nRealWidth != desired.Width() || nRealHeight != desired.Height();
+    if (resized)
+    {
+        // Prepare before replacing live storage. A failed allocation leaves the
+        // previous surface, rectangle and readback/backup state intact.
+        auto replacement = std::make_unique<CDXGISurface>(pI3D->GetD3D(), desired.Width(), desired.Height());
+        pSurface.swap(replacement);
+        nRealWidth = desired.Width();
+        nRealHeight = desired.Height();
+        pCopy.reset();
+        nCopyBytes = 0;
+        pixelBuffer.reset();
+        pixelBufferValid = false;
+        pixelReadbackStatus = E_PENDING;
+    }
+    const bool changed = resized || rect != desired;
+    rect = desired;
+    return changed;
+}
 void CI3DSurface::GetFromScreen()
 {
     if (!pSurface)
@@ -374,6 +413,8 @@ void CI3DSurface::MemoryBackup(BOOL bShow)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DSurface::Draw()
 {
+    if (OwnedRender::E3HudBlit(this)) return;
+    if (E4CampAccess::Blit(this)) return;
 #ifndef NOBLIT
     if (!pSurface || !HasFlag(BS_VISIBLE))
         return;
@@ -649,9 +690,9 @@ CI3DObject::~CI3DObject()
 BOOL CI3DObject::Draw(CRenderer *pRend)
 {
     int k;
-
-    for (k = 0; k < figures.GetSize(); k++)
-        figures[k]->Draw(pRend);
+    if (!OwnedRender::E3HudDraw(this, pRend) && !E4CampAccess::Draw(this, pRend))
+        for (k = 0; k < figures.GetSize(); k++)
+            figures[k]->Draw(pRend);
 
     for (k = 0; k < m_aMapObjTaranslation.GetSize(); k++)
         m_aMapObjTaranslation[k]->Draw(pRend);
@@ -665,17 +706,24 @@ void CI3DObject::DrawTips(CRenderer *pRend)
     pI3D->ScreenToVirtual(pt);
     for (int k = 0; k < areas.GetSize(); k++)
     {
-        areas[k]->ProcessIdle(pt);
+        bool hudInside=false;
+        if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
+            areas[k]->ProcessIdle(pt,hudInside);
+        else areas[k]->ProcessIdle(pt);
         // areas[k]->Draw( pRend );
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObject::Draw2D()
 {
+    if (OwnedRender::E3HudDraw2D(this)) return;
+    if (E4CampAccess::Draw2D(this)) return;
+    OwnedRender::E4::Scope campScope(E4CampAccess::RoleOf(this));
     for (int k = 0; k < surfaces.GetSize(); k++)
         if (surfaces[k]->IsVisible())
             surfaces[k]->Draw();
 
+    if (auto* camp = dynamic_cast<CI3DScreenCamp*>(this)) E4CampAccess::CardText(camp);
     // for (int k = 0; k < areas.GetSize(); k++ )
     // areas[k]->Draw2D();
 }
@@ -686,7 +734,10 @@ void CI3DObject::Draw2DTips()
     pI3D->ScreenToVirtual(pt);
     for (int k = 0; k < areas.GetSize(); k++)
     {
-        areas[k]->ProcessIdle(pt);
+        bool hudInside=false;
+        if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
+            areas[k]->ProcessIdle(pt,hudInside);
+        else areas[k]->ProcessIdle(pt);
         areas[k]->Draw2D();
     }
 }
@@ -894,6 +945,10 @@ void CI3DObject::RemoveAllSurfaces()
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DObject::HitTest(CPoint pt)
 {
+    const int hudHit=OwnedRender::E3HudHit(this,pt);
+    if(hudHit!=-2)return hudHit;
+    const int campHit = E4CampAccess::Hit(this, pt);
+    if (campHit != -2) return campHit;
     CPoint point(pt);
     pI3D->ScreenToVirtual(point);
     for (int i = 0; i < areas.GetSize(); i++)
@@ -904,6 +959,10 @@ int CI3DObject::HitTest(CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObject::IsInside(CPoint pt)
 {
+    bool hudInside=false;
+    if(OwnedRender::E3HudInside(this,pt,hudInside))return hudInside;
+    bool campInside = false;
+    if (E4CampAccess::Inside(this, pt, campInside)) return campInside;
     CPoint point(pt);
     pI3D->ScreenToVirtual(point);
     return rect.PtInRect(point);
@@ -989,7 +1048,7 @@ bool PasteTexture(LPTEXTURE pDstTex, LPCTSTR pszTexName, int nSrcSizeX, int nSrc
     int bpp = 16;
     srd.SysMemPitch = bpp * nSrcSizeX / 8;
 
-    pSurface->UpdateTexture(0, &region, &srd);
+    pSurface->UpdateTexture(0, &region, &srd, MMP_FORMAT_5551);
     ((CTextureManager *)(theWorld.GetTextureManager()))->CloseAllFiles();
     // Optional inventory owner retains the exact pixels used by this upload.
     if (uploadedPixels) *uploadedPixels = std::move(pSixteenBit);

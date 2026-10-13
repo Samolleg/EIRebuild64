@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{8F045552-BA21-4F45-9902-631E6359DABD}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>StaticLibrary</ConfigurationType><PlatformToolset>v143</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="Renderer.props" />
+  <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="..\Game\OwnedRender\E1SkeletonSources.cpp" />
+    <ClCompile Include="..\Game\OwnedRender\E1FigureSources.cpp" />
+    <ClCompile Include="..\Game\OwnedRender\E1TerrainSubmission.cpp" />
+    <ClCompile Include="..\Game\OwnedRender\E1VisualFrame.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\world_unit_effects.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\world_object_contacts.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\world_perches.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_context.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_embedded.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\combat_ui.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_draw.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_tables.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\render_profiler.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\attribution_ledger.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\system_telemetry.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay_config.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\graphics_settings.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_atlas_mutation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_store.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_loader.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_visual_evaluation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\hud_visual_publication.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\character_pane_owned_text.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_front_end.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_decode.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_runtime.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_layout.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_maps.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_scene.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_submission.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_neighbour_maps.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_liquid.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_particles.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_wind_trails.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ground_cover.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_critters.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_point_shadows.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\engine_bridge.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_bridge_stubs.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\camp_inventory.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\camera_rotation.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\addon_hook_chain.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\addon_discovery.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_occlusion.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fog.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain_bake.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\surface_upload.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\lifecycle_probe.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\frame_statistics.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_static_lod.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_impostors.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\simplifier.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
+  </ItemGroup>
+
+  <ItemDefinitionGroup><ClCompile><PreprocessorDefinitions>EID3D11_EMBEDDED;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

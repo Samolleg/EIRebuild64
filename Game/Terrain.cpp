@@ -10,12 +10,13 @@
  **********************************************************************/
 #include "StdAfx.h"
 
-#include "dx11/Batchers.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Sector.h"
 #include "Terrain.h"
-#include "ModTerrainShadow.h"
+#include "OwnedRender/NeighbourTerrain.h"
+#include "OwnedRender/E1Terrain.h"
+
 #include "mapFormat.h"
 
 #include "WorldClient.h"
@@ -284,11 +285,17 @@ void CTerrain::PrepareForDraw(const CQuaternion &q)
     PrepareD3DRotateMatrix(rotation1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CTerrain::DrawBase(CRenderer *pRend)
+BOOL CTerrain::DrawBase(CRenderer *pRend, bool prepareOnly)
 {
     CreateCurrentPlacement();
+    const auto& matrix = GetPlacement();
+    OwnedRender::PublishTerrainPlacement(this, {
+        matrix._11, matrix._12, matrix._13, matrix._14,
+        matrix._21, matrix._22, matrix._23, matrix._24,
+        matrix._31, matrix._32, matrix._33, matrix._34,
+        matrix._41, matrix._42, matrix._43, matrix._44});
     pRend->GetGPU()->PushMainMatrix(GetPlacement());
-    BOOL bRet = Draw(pRend, 0, nTextures + N_NUMBER_OF_LONG_TEXTURES - 1);
+    BOOL bRet = Draw(pRend, 0, nTextures + N_NUMBER_OF_LONG_TEXTURES - 1, prepareOnly);
     pRend->GetGPU()->PopMainMatrix();
 
     return bRet;
@@ -296,6 +303,12 @@ BOOL CTerrain::DrawBase(CRenderer *pRend)
 BOOL CTerrain::DrawTransparent(CRenderer *pRend)
 {
     CreateCurrentPlacement();
+    const auto& matrix = GetPlacement();
+    OwnedRender::PublishTerrainPlacement(this, {
+        matrix._11, matrix._12, matrix._13, matrix._14,
+        matrix._21, matrix._22, matrix._23, matrix._24,
+        matrix._31, matrix._32, matrix._33, matrix._34,
+        matrix._41, matrix._42, matrix._43, matrix._44});
     pRend->GetGPU()->PushMainMatrix(GetPlacement());
     BOOL bRet = Draw(pRend, nTextures + N_NUMBER_OF_LONG_TEXTURES,
                      (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1);
@@ -309,7 +322,7 @@ BOOL CTerrain::Draw(CRenderer *pRend)
     return Draw(pRend, 0, (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1);
 }
 
-BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo)
+BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo, bool prepareOnly)
 {
     if (!bIsLoaded)
         return FALSE;
@@ -328,59 +341,27 @@ BOOL CTerrain::Draw(CRenderer *pRend, int nMatFrom, int nMapTo)
             pSector->SetClipFlag(pRend);
         }
     }
-    if(nMatFrom==0 && nMapTo==nTextures+N_NUMBER_OF_LONG_TEXTURES-1 && TryOwnedTerrain(pRend))
+    const int baseMaterialEnd = nTextures + N_NUMBER_OF_LONG_TEXTURES - 1;
+    const int transparentMaterialBegin = nTextures + N_NUMBER_OF_LONG_TEXTURES;
+    const int transparentMaterialEnd = (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2 - 1;
+    const bool basePass = nMatFrom == 0 && nMapTo == baseMaterialEnd;
+    const bool transparentPass = nMatFrom == transparentMaterialBegin && nMapTo == transparentMaterialEnd;
+    if (!basePass && !transparentPass) {
+        GameJournal::Count("RENDER", "terrain_c56_skipped", "unsupported_material_range");
         return TRUE;
-    // Transform sectors
-    for (ys = 0; ys < viewableSectorsMinX.GetSize(); ys++)
-    {
-        for (xs = viewableSectorsMinX[ys]; xs <= viewableSectorsMaxX[ys]; xs++)
-        {
-            CSector *pSector = GetSector(xs, ys + nClipMinSectorY, CSector::ESS_LIGHTED);
-            if (pSector == NULL || pSector->IsVisible() == FALSE)
-                continue;
-            pSector->SetBorderLODsFlags();
-            pSector->Transform(pRend->GetGPU());
-        }
     }
-    CBatchers *batchers = pRend->GetD3D()->GetBatchers();
+    // Publish the opaque source before the owned shadow/color pass. Transparent
+    // terrain reuses that frame and is submitted after the owned color pass.
+    if (basePass) TryOwnedTerrain(pRend);
     theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
-    // Draw sectors by materials
-    for (int i = nMatFrom; i <= nMapTo; i++)
-    {
-        BOOL bMatSetted = FALSE;
-        batchers->GetBatcher()->Begin();
-        for (ys = 0; ys < viewableSectorsMinX.GetSize(); ys++)
-        {
-            for (xs = viewableSectorsMinX[ys]; xs <= viewableSectorsMaxX[ys]; xs++)
-            {
-                CSector *pSector = GetSector(xs, ys + nClipMinSectorY, CSector::ESS_LIGHTED);
-                if (!pSector)
-                    continue;
-                if (pSector->IsVisible() && pSector->IsHaveMaterial(i))
-                {
-                    if (!bMatSetted)
-                    {
-                        pRend->BindTexture(0,
-                                           textures[i % (nTextures + N_NUMBER_OF_LONG_TEXTURES)]);
-                        bMatSetted = TRUE;
-                    }
-                    if (!pSector->Draw(pRend, this, i, NULL /*&d3dmatrix*/))
-                        return FALSE;
-                }
-            }
-        }
-        batchers->GetBatcher()->End();
-        {
-            STLVertex1 *pVertices;
-            DWORD dwVertexCount;
-            LPWORD pIndices;
-            DWORD dwIndexCount;
-            batchers->GetBatcher()->GetVertices(pVertices, dwVertexCount, pIndices, dwIndexCount);
-            pRend->RenderTriangleSet(pVertices, dwVertexCount, pIndices, dwIndexCount);
-        }
-    }
-    theRenderer.SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
-
+    // Keep the two material snapshots distinct: water consumes the c56 depth
+    // and reflection inputs only after the opaque terrain and owned color pass.
+    OwnedRender::E1PublishTerrainMaterial(this, transparentPass,
+        pRend->GetD3D()->CaptureOwnedTerrainMaterial());
+    if (prepareOnly) return TRUE;
+    if (pRend->GetD3D()->SubmitC56TerrainPass(transparentPass) ==
+        CDX11::OwnedTerrainPassResult::unavailable)
+        GameJournal::Count("RENDER", "terrain_c56_skipped", "source_unavailable");
     return TRUE;
 }
 
@@ -580,21 +561,6 @@ BOOL CTerrain::Load(LPCSTR pszFileName, LPCSTR pszAllodName, bool bCave)
     assert(nTexSize % nTileSize == 0);
 
     bIsLoaded = TRUE;
-    if(!bCave) {
-        const int width=nXSectors*N_CL_PSECTOR_S+1,height=nYSectors*N_CL_PSECTOR_S+1;
-        if(static_cast<size_t>(width)*height<=2000000) {
-            std::vector<float> heights(static_cast<size_t>(width)*height);
-            for(int sy=0;sy<nYSectors;sy++)for(int sx=0;sx<nXSectors;sx++) {
-                SSectVert2 *vertices=GetSectorGeometryData(sx,sy);
-                for(int y=0;y<N_V_PSECTOR_S;y++)for(int x=0;x<N_V_PSECTOR_S;x++)
-                    heights[(sy*N_CL_PSECTOR_S+y)*width+sx*N_CL_PSECTOR_S+x]=GetFloatValueByRange(vertices[y*N_V_PSECTOR_S+x].usZ,GetMaxZ());
-            }
-            modTerrainShadow=std::make_shared<ModTerrainShadow>();
-            modTerrainShadow->Initialize(width,height,std::move(heights));
-        }
-    }
-
-
     // prepare ambient sounds table
     if (bCave)
         szAllodDependentSndDir = "Dungeon";
@@ -623,10 +589,11 @@ BOOL CTerrain::Load(LPCSTR pszFileName, LPCSTR pszAllodName, bool bCave)
 /////////////////////////////////////////////////////////////////////////////////////
 void CTerrain::Free()
 {
+    OwnedRender::RetireTerrainPlacement(this);
     ChangeRendererRevision();
     ReleaseOwnedTerrain(&theRenderer);
     rendererSectorRows.clear();rendererSectorPhases.clear();
-    modTerrainShadow.reset();
+
     for (int i = 0; i < N_LASRC_NUM; i++)
     {
         hSndAmbient[i] = theWorld.GetSoundManager()->CancelFX(hSndAmbient[i]);
@@ -1151,7 +1118,7 @@ void CTerrain::SetSun(CLight *pLight, D3DCOLORVALUE &_dcvAmbient)
     nAddCellsX = Float2Int(fpX * FP_SUNTRACE_LEN / FP_CL_MP_SIZE);
     nAddCellsY = Float2Int(fpY * FP_SUNTRACE_LEN / FP_CL_MP_SIZE);
     pSunLight = pLight;
-    if(modTerrainShadow)modTerrainShadow->Request(nAddCellsX,nAddCellsY,fpCA,fpCB,dvDir.z<0);
+
 
 
     if (nSegmentsToRelight <= 0)
@@ -2427,14 +2394,4 @@ void CTerrain::BuildShadowMesh(CShadowBuilder &builder, CXYZW4Array &src)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
-void CTerrain::DrawModTerrainShadow(CRenderer *pRend) {
-    if(!modTerrainShadow)return;
-    if(modTerrainShadow->Tick(GetTickCount()))
-        pRend->GetD3D()->UpdateTerrainShadow(modTerrainShadow->width,modTerrainShadow->height,modTerrainShadow->pixels.data());
-    if(!modTerrainShadow->ready)return;
-    pRend->FlushBuffers();
-    pRend->GetD3D()->SetTerrainShadowPass(true);
-    DrawBase(pRend);
-    pRend->FlushBuffers();
-    pRend->GetD3D()->SetTerrainShadowPass(false);
-}
+

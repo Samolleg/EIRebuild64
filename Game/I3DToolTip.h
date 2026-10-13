@@ -13,6 +13,9 @@ enum ETipType
 
 class CI3DToolTip : public CI3DObject
 {
+    friend struct E3HudAccess;
+    unsigned long long ownedTextRevision = 0, ownedClockRevision = 0;
+    int ownedClockMinute = -1;
 protected:
     void Update();
     // CString m_szText;

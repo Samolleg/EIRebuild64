@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1TextLifetime.h"
+#include "OwnedRender/E3Input.h"
 #include "GameJournal.h"
 #include "InterfaceFont.h"
 #include <typeinfo>
@@ -216,10 +218,13 @@ void CInterface3D::Init(CRenderer *pNewRend)
     ShowFPS(true);
 
     bCheckDisconnect = false;
+    OwnedRender::E1TextInterfaceBegin();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Fini()
 {
+    OwnedRender::E1TextInterfaceEnd();
+    OwnedRender::E3RetireInterface();
     DestroyScreens();
 
     CStdioFile file;
@@ -285,6 +290,7 @@ void CInterface3D::ClearStates()
 BOOL CInterface3D::Draw()
 {
     CheckScreensMustDie();
+    OwnedRender::E3RefreshInterface();
     if (eBGFlag == BG_FLAG_DRAW || eBGFlag == BG_FLAG_DRAW_S || eBGFlag == BG_FLAG_CREATE_S)
     { // if we have background screen
         GetD3D()->ClearColorBuffer(0);
@@ -304,6 +310,7 @@ BOOL CInterface3D::Draw()
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Draw2D()
 {
+    OwnedRender::E3RefreshInterface();
     CDX11 *pDX11 = GetD3D();
     pDX11->GetSpriteBatch()->Begin();
 
@@ -312,6 +319,7 @@ void CInterface3D::Draw2D()
     if (!pScreens.empty())
     {
         pScreens.back()->Draw2D();
+        OwnedRender::E3HudBoundary();
         pScreens.back()->Draw2DTips();
     }
     m_pEffects->Draw2D();
@@ -536,6 +544,8 @@ void CInterface3D::ActivateScreen(CI3DScreen *pScreen)
         ReportError("Cannot activate NULL interface screen\n");
         return;
     }
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);
     pScreens.push_back(pScreen);
 
     GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
@@ -581,6 +591,8 @@ void CInterface3D::DoModal(CI3DScreen *pScreen, bool bSaveBack, bool bGrayBack)
         // error
         ReportError("Cannot activate NULL interface screen\n");
     }
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);
     pScreens.push_back(pScreen);
 
     GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
@@ -605,6 +617,8 @@ void CInterface3D::ExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::DestroyScreens()
 {
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);
+    OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);
     theCursor.SetMode(CT_WAIT);
     while (!pScreens.empty())
     {

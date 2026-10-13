@@ -23,6 +23,8 @@ public:
     ~CBinkVideo();
 
     static bool DecoderAvailable();
+    // Frames of this movie are the wait screen the renderer holds during loads.
+    void MarkLoadingPicture();
 
     static bool Play(LPCSTR lpszName, DWORD dwFramePause = 0, bool bAllowSkipMovie = true,
                      bool bAllowSkipFrame = true, bool bClearPrimarySurface = true,

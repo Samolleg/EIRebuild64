@@ -1,4 +1,8 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
+#include "OwnedRender/E3Input.h"
+#include <game_focus.h>
+#include <cursor_confinement.h>
 #include "GameJournal.h"
 #include "ErrorDialog.h"
 #include "SettingsProfile.h"
@@ -23,6 +27,10 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "dx11/RendererDX11.h"
 #include "GameMain.h"
+#include "OwnedRender/Startup.h"
+#include "OwnedRender/E2Host.h"
+#include "OwnedRender/E1WorldLifecycle.h"
+#include "OwnedRender/E1TextLifetime.h"
 #include "StringProcessing.h"
 #include "WorldClient.h"
 #include "WorldServer.h"
@@ -460,15 +468,17 @@ int nShowClientTimeBalance = 0;
 // time sync problem is to be refined
 static bool CountTime()
 {
-    static DWORD dwLastTime = timeGetTime();
+    static DWORD dwLastTime = OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(NGame::hWnd));
     static DWORD dwPassedTime = 0;
     static DWORD dwClientPassedTime = 0;
     static float fpClientTimeSpeed = 1;
 
-    DWORD dwTimeStep = timeGetTime() - dwLastTime;
+    DWORD dwTimeStep = OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(NGame::hWnd)) - dwLastTime;
     FrameDiagnostics::RawDelta(dwTimeStep);
     DWORD dwFracTime; // for client
     dwLastTime += dwTimeStep;
+    OwnedRender::E3RefreshInterface();
+    if (OwnedRender::E3EditorPaused()) return true;
     // check if focus is in application
     /*if (!GetRenderer()->IsActive())
     {
@@ -643,6 +653,9 @@ static bool NGame::ProcessMessages()
 
 const int BAD_RESULT = 0xDEAD;
 
+// The renderer reads game archives (MOB sources, models) for the whole session,
+// not only during WinMainInit: its resource lease lives until shutdown.
+static std::unique_ptr<OwnedRender::ResourceRuntimeLease> ownedResourceRuntime;
 int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     //_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -749,6 +762,8 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
        //
        // set new memory depleted handler
        // create worlds and establish connection to local server
+    OwnedRender::ConfigureStartup();
+    ownedResourceRuntime = std::make_unique<OwnedRender::ResourceRuntimeLease>();
     theWorld.Create();
     theWorldServer.Create();
     theCamera.Create(&theSettings, theSettings.fpNearClipDistance, theSettings.fpFarClipDistance,
@@ -857,8 +872,9 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
         NGame::PlayMoviesSequence("Start");
         // play static logo
         C2DScreenWait::pszProgressName = "Progres.bik";
+        // The wait screen stays up through the database and main-menu zone
+        // loads; CWorldClient::NewZone clears it when the menu zone is ready.
         C2DScreenWait::Step(0);
-        C2DScreenWait::Clear();
     }
 #if !defined(NODEBUGINFO) && !defined(_DEBUG)
     // EngineDiagnostics owns the outer exception boundary.
@@ -966,9 +982,13 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #endif // !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
        //
     theWorld.SetCamera(0);
+    // The renderer and its TL pipeline hold references to the sunlight owned
+    // by the world's light manager: drop them while that light still exists.
+    GetRenderer()->SetSunlight(nullptr);
     theWorldServer.Destroy();
     theWorld.Destroy();
     GetRenderer()->Destroy();
+    ownedResourceRuntime.reset();
 
     DumpUnfreedMemory(AMTS_BYFILENAME);
     //_CrtDumpMemoryLeaks();
@@ -985,7 +1005,16 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
+    if (OwnedRender::E2BlockBackgroundInput(hWnd, message, wParam, lParam)) return 1;
     theInterface.CheckScreensMustDie();
+    // c56 focus/editor gate wraps overlay dispatch; both camp consumers see
+    // original mouse coordinates, before the single native remap.
+    OwnedRender::E3RefreshInterface();
+    if (OwnedRender::E3BlockInput(message, wParam))
+        return SendMessage(hWnd, message, wParam, lParam);
+    if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
+    if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;
+    lParam = owned::game_native_mouse_message(message, lParam, false);
     switch (message)
     {
     case WM_SYSKEYDOWN:
@@ -1012,38 +1041,38 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_MOUSEMOVE:
-        theInterface.OnMouseMove(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnMouseMove(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_MOUSEWHEEL:
         theInterface.OnMouseWheel(LOWORD(wParam), (short)HIWORD(wParam),
-                                  CPoint(LOWORD(lParam), HIWORD(lParam)));
+                                  CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
 
     // CRAP{ noone knows why Genius mouse driver sends this message instead of WM_MOUSEWHEEL =
     // 0x020A
     case 0xCC54:
         theInterface.OnMouseWheel(0, (short)(signed)(wParam),
-                                  CPoint(LOWORD(lParam), HIWORD(lParam)));
+                                  CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
         // CRAP} parameters are also different from default
 
     case WM_LBUTTONDOWN:
-        theInterface.OnLButtonDown(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnLButtonDown(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_LBUTTONUP:
-        theInterface.OnLButtonUp(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnLButtonUp(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_LBUTTONDBLCLK:
-        theInterface.OnLButtonDblClk(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnLButtonDblClk(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_RBUTTONDOWN:
-        theInterface.OnRButtonDown(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnRButtonDown(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_RBUTTONUP:
-        theInterface.OnRButtonUp(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnRButtonUp(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     case WM_RBUTTONDBLCLK:
-        theInterface.OnRButtonDblClk(wParam, CPoint(LOWORD(lParam), HIWORD(lParam)));
+        theInterface.OnRButtonDblClk(wParam, CPoint(short(LOWORD(lParam)), short(HIWORD(lParam))));
         break;
     default:
         // return DefWindowProc( hWnd, message, wParam, lParam );
@@ -1057,7 +1086,12 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 /////////////////////////////////////////////////////////////////////////////////////
 LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == WM_KILLFOCUS || message == WM_SETFOCUS || message == WM_ACTIVATE || message == WM_ACTIVATEAPP ||
+        message == WM_CANCELMODE || message == WM_CAPTURECHANGED || message == WM_SIZE || message == WM_DESTROY || message == WM_NCDESTROY)
+        owned::camp_inventory_input(hWnd, message, wParam, lParam, false);
     if (ErrorDialog::HandleOwnerMessage(message, wParam)) return 1;
+    OwnedRender::E3RefreshInterface();
+    if (owned::game_focus_swallow_activation(hWnd, message, wParam)) return 1;
     WORD wID;
 
     switch (message)
@@ -1073,6 +1107,12 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         }
         break;
     case WM_ACTIVATE:
+        if (OwnedRender::E2BackgroundConfigured())
+        {
+            OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(hWnd));
+            theInterface.ResetInputState();
+            break;
+        }
         if (!(HIWORD(wParam))) // if window is not minimized
         {
             CSoundManager *pSoundManager = theWorld.GetSoundManager();
@@ -1134,6 +1174,10 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 /////////////////////////////////////////////////////////////////////////////////////
 void NGame::DrawFrame(bool bFlip, bool bDraw2D)
 {
+    if (OwnedRender::E2BackgroundPaused(hWnd)) { Sleep(50); return; }
+    OwnedRender::E2PassScope pass(OwnedRender::Pass::frame);
+    OwnedRender::E1BeginFrame();
+    OwnedRender::E1TextBeginFrame();
     if (!bEnableRender)
         return;
     if (!bNeedRender)
@@ -1145,6 +1189,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
     }
 
     auto pDX11 = theRenderer.GetD3D();
+    const auto renderAccess = pDX11->GetOwnedRenderer().LockFrame();
 
     if (theRenderer.BeginDrawFrame())
     {
@@ -1161,14 +1206,14 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
         if (bDraw2D)
         {
             FrameDiagnostics::Scope timing(FrameDiagnostics::Draw2D);
+            OwnedRender::E2PassScope uiPass(OwnedRender::Pass::ui);
             theInterface.Draw2D();
         }
 
-        if (bFlip && bEnableRender && bNeedRender)
-        {
+        const bool present = bFlip && bEnableRender && bNeedRender;
+        if (present)
             theCursor.Draw();
-            pDX11->EndFrame();
-        }
+        pDX11->EndFrame(present);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1186,7 +1231,9 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
 {
     CStringArray szNames;
     CIniFile reg;
-    reg.Open(theWorld.GetWorkPath() + "config\\movie.ini");
+    const CString fallback = theWorld.GetWorkPath() + "config\\movie.ini";
+    const std::string movieConfig = ModRuntime::ConfigPath((LPCSTR)fallback);
+    reg.Open(movieConfig.c_str());
     reg.GetStringArray(pszSection, "movies", szNames);
 
     for (int i = 0; i < szNames.GetSize(); ++i)
@@ -1196,7 +1243,7 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-
+
 // Keep C++ ownership in a callee, outside the SEH frame's local variables.
 static int RunLegacyEntry(HINSTANCE instance, HINSTANCE previous, int show)
 {
@@ -1232,9 +1279,12 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
     return RunGame(instance, previous, command, show);
 }
 
+bool InspectRendererFacadeCheckCommandLine(int& result);
+
 int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
 {
     int profileResult=0;
+    if (InspectRendererFacadeCheckCommandLine(profileResult)) return profileResult;
     if(InspectSettingsProfileCommandLine(profileResult))return profileResult;
     const int cliResult = GuardLegacyEntry(instance, previous, show);
     if (cliResult != ModCli::NotCli) return cliResult;

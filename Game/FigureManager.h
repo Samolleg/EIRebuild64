@@ -27,6 +27,7 @@ class CModelResourceEntry : public CRefCount
     BYTE *pModelFile;
     BYTE *pBonesFile;
     BYTE *pAnimsFile;
+    DWORD pAnimsFileSize;
     class CResourceManager *pManager1;
     class CGeometryManager *pManager2;
     // resources
@@ -34,15 +35,19 @@ class CModelResourceEntry : public CRefCount
     CMappedResource *pResBones;
     CMappedResource *pResAllAnimations;
     CAnimationResource resAnimations;
+    std::unordered_map<std::string, std::pair<const BYTE *, DWORD>> animationSources;
 
 public:
     CModelResourceEntry(class CResourceManager *pManager);
     CModelResourceEntry(class CGeometryManager *pManager);
     ~CModelResourceEntry();
     //
-    void OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations);
+    void OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations,
+                            DWORD animationSize = 0);
     //
     CMappedResource *GetAnimation(const std::string &szName);
+    bool GetAnimationSourceBytes(const std::string& szName, const void*& bytes, DWORD& size);
+    bool ResolveAnimationName(const std::string& szName, std::string& resolvedName) const;
     CMappedResource *GetModel() { return pResModel; }
     CMappedResource *GetBones() { return pResBones; }
 };

@@ -37,52 +37,83 @@ HRESULT CTerrain::CopyRendererBaseVertices(uint32_t index,float* rows,uint32_t c
 
 void CTerrain::ReleaseOwnedTerrain(CRenderer* renderer)
 {
+    OwnedRender::E1RetireTerrain(this);
     if(renderer && renderer->GetD3D())renderer->GetD3D()->GetOwnedRenderer().ReleaseTerrain();
 }
 
 bool CTerrain::TryOwnedTerrain(CRenderer* renderer)
 {
-    // owned terrain via API5 retired; the renderer is embedded in stage 3
-    if(renderer && renderer->GetD3D())
-        renderer->GetD3D()->GetOwnedRenderer().TerrainFallback("owned_terrain_api5_retired_stage3");
-    return false;
-    auto* dx=renderer->GetD3D();unsigned width=0,height=0;
-    if(!dx||!dx->IsOwnedWorldActive()||dx->GetTerrainShadowSize(width,height))return false;
-    if(!renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)){
-        dx->GetOwnedRenderer().TerrainFallback("terrain_projection_stack_empty");return false;
+    owned::OwnedTerrainGeometryValues values;
+    values.revision = rendererRevision; values.structural_revision = rendererRevision;
+    values.noise_revision = rendererRevision;
+    for (int i = 0; i < GetObjectsNumber(); ++i) {
+        values.layer_shifts.push_back(GetObject(i)->fGlobalShift);
+        values.animation.maximum_wind_multiplier = (std::max)(values.animation.maximum_wind_multiplier,
+            std::abs(GetObject(i)->fpWindMultiplier));
     }
-    const size_t count=size_t(GetSectorsNumber());
-    if(rendererSectorRows.size()!=count){rendererSectorRows.resize(count);rendererSectorPhases.resize(count);}
-    std::vector<EIRenderTerrainSectorV5> rows;rows.reserve(count);
-    // These sectors were just loaded, clipped and assigned LOD by Draw.
-    // Retain every resident row for release decisions; invisible rows simply
-    // contribute no color command. Unloaded geometry stays in one shared map.
-    POSITION pos=sectorLRU.GetHeadPosition();
-    while(pos){CSector* sector=sectorLRU.GetNext(pos);
-        if(!sector->IsHaveState(CSector::ESS_LIGHTED))continue;
-        const uint32_t index=uint32_t(sector->GetMapY()*nXSectors+sector->GetMapX());
-        auto& row=rendererSectorRows[index];row.sector=index;
-        // Draw's source domain is authoritative even when a cached sector's
-        // clip bits are from an older frame.
-        const int y=sector->GetMapY()-nClipMinSectorY,x=sector->GetMapX();
-        const bool visible=y>=0&&y<viewableSectorsMinX.GetSize()&&x>=viewableSectorsMinX[y]&&x<=viewableSectorsMaxX[y];
-        if(visible)sector->SetBorderLODsFlags();
-        sector->CopyRendererState(row,rendererSectorPhases[index]);
-        if(!visible)row.subparts=0;
-        rows.push_back(row);
+    if (fpNoises.GetSize() != values.wind_noise.size()) {
+        OwnedRender::E1RetireTerrain(this);
+        GameJournal::Count("RENDER", "terrain_frame_publication_failed", "wind_noise_size");
+        return false;
     }
-    EIRenderTerrainFrameV5 packet{};packet.source_revision=rendererRevision;
-    // DrawBase/DrawTransparent publish this terrain's own placement and push
-    // it onto PROJSPACE only. WORLDSPACE belongs to object traversal.
-    const SHMatrix& world=GetPlacement();
-    const SHMatrix& clip=renderer->GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
-    memcpy(packet.object_to_world,&world,sizeof(world));memcpy(packet.object_to_clip,&clip,sizeof(clip));
-    packet.camera[0]=theCamera.GetCP().x;packet.camera[1]=theCamera.GetCP().y;packet.camera[2]=theCamera.GetCP().z;
-    packet.lod_distances[0]=theSettings.fpTerrainLODs[0];packet.lod_distances[1]=theSettings.fpTerrainLODs[1];
-    packet.maximum_lod=nMaxLOD;packet.render_state=renderState;
-    packet.wind[0]=windDirection.x;packet.wind[1]=windDirection.y;
-    packet.wind_force=fpWindForce;packet.wind_normalized=fpWindForce01;packet.wind_phase=fpWindPhase;
-    packet.precise_time=float(theWorld.GetSegmentTimeCounter())/16.f;
-    packet.sectors=rows.data();packet.sector_count=uint32_t(rows.size());
-    return dx->SubmitOwnedTerrain(packet);
+    std::copy_n(fpNoises.GetData(), values.wind_noise.size(), values.wind_noise.begin());
+    auto& animation = values.animation;
+    animation.wind_direction[0] = windDirection.x; animation.wind_direction[1] = windDirection.y;
+    animation.wind_force = fpWindForce; animation.wind_force_normalized = fpWindForce01;
+    animation.wind_phase = fpWindPhase; animation.precise_time = theWorld.GetPreciseTime();
+    animation.waves_enabled = (renderState & ETRS_WAVES) != 0;
+    animation.animated_tiles_enabled = (renderState & ETRS_ANIMATED_TILES) != 0;
+    animation.tiles_per_texture_side = nTilesPerTexSide;
+    animation.liquid_detail_time = animation.precise_time;
+    if (renderState & ETRS_BORDER_FOG) {
+        animation.fog_enabled = 1;
+        animation.fog_distance = theSettings.fpTerrainBorderFogDistance;
+        animation.fog_min[0] = animation.fog_min[1] = animation.fog_distance + FP_CL_MP_SIZE;
+        animation.fog_max[0] = GetMaxX() - animation.fog_distance - FP_CL_MP_SIZE;
+        animation.fog_max[1] = GetMaxY() - animation.fog_distance - FP_CL_MP_SIZE;
+    }
+    const auto& placement = GetPlacement();
+    std::array<float,16> matrix;
+    memcpy(matrix.data(), &placement, sizeof(placement));
+    if (!OwnedRender::E1PublishTerrainFrame(this, values, matrix)) {
+        GameJournal::Count("RENDER", "terrain_frame_publication_failed", "source_or_frame_unavailable");
+    }
+    std::vector<std::uint64_t> atlases;
+    atlases.reserve(textures.GetSize());
+    for (int i = 0; i < textures.GetSize(); ++i) {
+        const auto* surface = textures[i] ? textures[i]->GetSurface() : nullptr;
+        atlases.push_back(surface ? surface->OwnedSurfaceId() : 0);
+    }
+    OwnedRender::E1PublishTerrainAtlases(this, atlases);
+    std::vector<OwnedRender::E1TerrainSectorValues> sectorValues;
+    POSITION resident = sectorLRU.GetHeadPosition();
+    while (resident) {
+        CSector* sector = sectorLRU.GetNext(resident);
+        if (!sector->IsHaveState(CSector::ESS_LIGHTED)) continue;
+        OwnedRender::E1TerrainSectorValues value;
+        value.sector = uint32_t(sector->GetMapY()*nXSectors+sector->GetMapX());
+        EIRenderTerrainSectorV5 row{};
+        sector->CopyRendererState(row, value.phases);
+        sectorValues.push_back(std::move(value));
+    }
+    if (!OwnedRender::E1PublishTerrainSectors(this, sectorValues))
+        GameJournal::Count("RENDER", "terrain_sector_publication_failed", "source_or_phases_invalid");
+    if (renderer && renderer->GetGPU()->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
+        owned::OwnedTerrainFrameInputs view;
+        view.terrain_origin = {placement._14, placement._24, placement._34};
+        view.camera_position = {theCamera.GetCP().x, theCamera.GetCP().y, theCamera.GetCP().z};
+        view.lod_distances = {theSettings.fpTerrainLODs[0], theSettings.fpTerrainLODs[1]};
+        view.maximum_lod = nMaxLOD;
+        view.runtime_texture_count = nTextures;
+        view.terrain_render_state = renderState;
+        const auto& clip = renderer->GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
+        memcpy(view.object_to_clip.data(), &clip, sizeof(clip));
+        view.game_visibility_domain_present = true;
+        view.game_visibility_min_y = nClipMinSectorY;
+        for (int i = 0; i < viewableSectorsMinX.GetSize(); ++i)
+            view.game_visibility_rows.push_back({viewableSectorsMinX[i], viewableSectorsMaxX[i]});
+        if (!OwnedRender::E1PublishTerrainView(this, view))
+            GameJournal::Count("RENDER", "terrain_view_publication_failed", "source_or_view_invalid");
+    }
+    return false; // Preparation only; colour is submitted after native shadows.
 }

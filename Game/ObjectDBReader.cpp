@@ -27,6 +27,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <map>
 #include <string>
 #include <list>
+#include "OwnedRender/E1MobSource.h"
 
 //--------------------------------------------------------------------------
 /////////////////////////////////////////////////////////////////////////////////////
@@ -117,7 +118,12 @@ bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript)
             for (int j = 0; j < N_MAX_PLAYERS; j++)
                 pTrap->p_Specific.dwDiplomacy |= (dipl.aDipl[pTrap->p_nPlayer][j] == War) << j;
         }
-        theWorldServer.AddMapObject(pObject);
+        {
+            const int admitted = theWorldServer.AddMapObject(pObject);
+            const auto *source = dynamic_cast<CMEObject *>(pObject);
+            OwnedRender::E1MobSource::Admitted(std::uint32_t(pObject->p_nID),
+                source ? std::uint32_t(source->p_tidTypeID) : 0u, admitted);
+        }
         // чтобы колонна не ходила
         /*if (pObject->p_nID != 2 || ((CMEObject *)pObject)->p_szTemplate != "unmoco2")
         {*/

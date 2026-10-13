@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include <algorithm>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
@@ -10,13 +11,18 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModSecondaryAtlas.h"
 #include "ModPrimaryAtlas.h"
 #include "ModTextureMemory.h"
-#include "ModShadowSchedule.h"
+
 #include "dx11/RendererDX11.h"
 #include "MaterialManager.h"
 #include "GraphicsProcessor.h"
 
 #include "Object3DClientSpecific.h"
 #include "FigureClientSpecific.h"
+#include "AnimationSystem2.h"
+#include "OwnedRender/E1Scene.h"
+#include "OwnedRender/E1VisualFrame.h"
+#include "OwnedRender/E1Surface.h"
+#include "owned_asset_loader.h"
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
@@ -250,6 +256,8 @@ CObject3DClientSpecific::~CObject3DClientSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3DClientSpecific::Create()
 {
+    ownedAppearanceAttempted = false;
+    ownedAppearanceRevision = 0;
     pos = -1;
     ResetAllFlags();
     // initialize extended textures (shadow and wounds)
@@ -272,6 +280,7 @@ BOOL CObject3DClientSpecific::Create()
 // destroy all internal data structures
 void CObject3DClientSpecific::Destroy()
 {
+    ownedAppearanceAttempted = false;
     int i;
     // remove extended textures (shadow and wounds)
     pShadowTexture = 0;
@@ -304,6 +313,8 @@ void CObject3DClientSpecific::Destroy()
     }
     materials.RemoveAll();
     //
+    if (lpObject && lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->ClearOwnedCurrentAnimationSelection();
     RegisterObject3D(NULL);
     SetLastLightTime(0);
 
@@ -336,6 +347,7 @@ BOOL CObject3DClientSpecific::AddFigure(CFigure *lpFigure)
         if (sets[i]->lpTexture->GetTypeID() == tidTextureTypeID)
         {
             sets[i]->AddFigure(lpFigure, tidMaterialTypeID);
+            InvalidateOwnedAppearance();
             return TRUE;
         }
     }
@@ -353,7 +365,10 @@ BOOL CObject3DClientSpecific::RemoveFigure(CFigure *lpFigure)
         if (!sets[i])
             continue;
         if (sets[i]->RemoveFigure(lpFigure))
+        {
+            InvalidateOwnedAppearance();
             return TRUE;
+        }
     }
 
     return FALSE;
@@ -374,7 +389,10 @@ CFigure *CObject3DClientSpecific::RemoveFigure(LPCSTR pszFigureName)
         if (!sets[i])
             continue;
         if (sets[i]->RemoveFigure(lpFigure))
+        {
+            InvalidateOwnedAppearance();
             return lpFigure;
+        }
     }
 
     return NULL;
@@ -568,6 +586,8 @@ CTexture *CObject3DClientSpecific::ChangeTexture(CTexture *lpNewTexture)
     }
 #endif // _DEBUG
 
+    if (lpReturnTexture1)
+        InvalidateOwnedAppearance();
     return lpReturnTexture1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -642,18 +662,209 @@ void CObject3DClientSpecific::RecalcScreenRect()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// c56 consumes owned copies only. Drop a previously published value as soon as a host owner changes.
+void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
+{
+    const bool hadAttempt = ownedAppearanceAttempted;
+    ownedAppearanceAttempted = false;
+    if (!hadAttempt)
+        return;
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+    if (resource.serial)
+        OwnedRender::E1Scene().Scene().visual_reject(resource,
+            owned::RetainedVisualStatus::unsupported_appearance,
+            "appearance.source_changed", "host.object_appearance");
+}
+bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
+{
+    CObject3D* object = static_cast<CObject3D*>(lpObject);
+    auto* animation = object ? object->GetAnimationSystem2() : nullptr;
+    IGeometry* geometry = object ? object->GetGeometry() : nullptr;
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+    auto& scene = OwnedRender::E1Scene().Scene();
+    auto reject = [&](const char* predicate) {
+        if (resource.serial)
+            scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_appearance,
+                                predicate, "host.object_appearance");
+        return false;
+    };
+    if (!resource.serial || !animation || !geometry || object->GetNumFigures() <= 0)
+        return reject("appearance.sources_ready");
+
+    auto skeleton = animation->GetOwnedSkeleton();
+    if (!skeleton || skeleton->links.empty())
+        return reject("appearance.selected_skeleton");
+    auto assembly = std::make_shared<owned::VisualAssemblyAsset>();
+    assembly->skeleton = skeleton;
+    assembly->revision = ++ownedAppearanceRevision;
+    if (!assembly->revision)
+        assembly->revision = ++ownedAppearanceRevision;
+    const CPlot3D center = object->GetCenterShift();
+    assembly->center_shift = {{center.x, center.y, center.z}};
+    const SComplection& complection = object->GetComplection();
+    assembly->shape = {{complection.strength, complection.grace, complection.tall}};
+    GetScaleCoeffs(assembly->scale[0], assembly->scale[1], assembly->scale[2]);
+
+    for (int index = 0; index < object->GetNumFigures(); ++index)
+    {
+        CFigure* figure = object->GetFigure(index);
+        if (!figure || !figure->GetName() || !*figure->GetName())
+            return reject("appearance.figure_owner");
+        const std::string partName(figure->GetName());
+        auto figureAsset = geometry->GetOwnedFigure(partName);
+        if (!figureAsset)
+            return reject("appearance.selected_fig");
+        auto node = std::find_if(skeleton->links.begin(), skeleton->links.end(),
+            [&](const owned::ModelLink& link) { return link.child == partName; });
+        if (node == skeleton->links.end())
+            return reject("appearance.figure_node");
+
+        CTexture* texture = nullptr;
+        CMaterial* material = nullptr;
+        for (int setIndex = 0; setIndex < 2 && !material; ++setIndex)
+        {
+            STextureMaterialSet* set = sets[setIndex];
+            if (!set || !set->lpTexture ||
+                set->lpTexture->GetTypeID() != figure->GetTextureTypeID())
+                continue;
+            for (int groupIndex = 0; groupIndex < set->matgroups.GetSize() && !material;
+                 ++groupIndex)
+            {
+                SMaterialFigureSet* group = set->matgroups[groupIndex];
+                if (!group || !group->lpMaterial ||
+                    group->lpMaterial->GetTypeID() != figure->GetMaterialTypeID())
+                    continue;
+                for (int figureIndex = 0; figureIndex < group->figures.GetSize(); ++figureIndex)
+                    if (group->figures[figureIndex] == figure)
+                    {
+                        texture = set->lpTexture;
+                        material = group->lpMaterial;
+                        break;
+                    }
+            }
+        }
+        if (!texture || !material || !texture->GetSurface())
+            return reject("appearance.selected_material_texture");
+        auto surface = OwnedRender::E1SurfaceValue(texture->GetSurface()->OwnedSurfaceId());
+        if (!surface)
+            return reject("appearance.completed_surface");
+
+        const D3DMATERIAL7& sourceMaterial = material->GetMaterial();
+        auto materialAsset = std::make_shared<owned::MaterialCpuAsset>();
+        materialAsset->source = owned::MaterialValueSource::completed_native;
+        materialAsset->diffuse = {{sourceMaterial.diffuse.r, sourceMaterial.diffuse.g,
+            sourceMaterial.diffuse.b, sourceMaterial.diffuse.a}};
+        materialAsset->ambient = {{sourceMaterial.ambient.r, sourceMaterial.ambient.g,
+            sourceMaterial.ambient.b, sourceMaterial.ambient.a}};
+        materialAsset->specular = {{sourceMaterial.specular.r, sourceMaterial.specular.g,
+            sourceMaterial.specular.b, sourceMaterial.specular.a}};
+        materialAsset->emissive = {{sourceMaterial.emissive.r, sourceMaterial.emissive.g,
+            sourceMaterial.emissive.b, sourceMaterial.emissive.a}};
+        materialAsset->power = sourceMaterial.power;
+        D3DCOLORVALUE recentEmissive{}, oldestEmissive{};
+        if (material->GetStoredEmissive(recentEmissive, oldestEmissive))
+        {
+            materialAsset->has_previous_highlight_emissive = true;
+            materialAsset->previous_highlight_emissive = {{recentEmissive.r,
+                recentEmissive.g, recentEmissive.b, recentEmissive.a}};
+            materialAsset->has_oldest_highlight_emissive = true;
+            materialAsset->oldest_highlight_emissive = {{oldestEmissive.r,
+                oldestEmissive.g, oldestEmissive.b, oldestEmissive.a}};
+        }
+
+        owned::VisualPartAsset part;
+        part.name = partName;
+        part.geometry = std::move(figureAsset);
+        part.skeleton_node = static_cast<std::uint32_t>(node - skeleton->links.begin());
+        part.surface = std::move(surface);
+        part.texture_source_name = texture->GetName() ? texture->GetName() : "";
+        part.material = std::move(materialAsset);
+        part.texture_type = static_cast<std::uint32_t>(texture->GetTypeID());
+        part.material_type = static_cast<std::uint32_t>(material->GetTypeID());
+        part.material_flags = material->CheckFlag(MAT_USE_SPECULAR) ? MAT_USE_SPECULAR : 0;
+        part.figure_flags = figure->CheckFlag(FIG_USE_DEFAULT_COLORS) ? FIG_USE_DEFAULT_COLORS : 0;
+        const DWORD textureFlags[] = {TEX_ALPHA0, TEX_ALPHA1, TEX_ALPHA4, TEX_ALPHA8};
+        for (DWORD textureFlag : textureFlags)
+            if (texture->CheckFlag(textureFlag)) part.texture_flags |= textureFlag;
+        part.diffuse = figure->GetDefaultColor();
+        part.specular = figure->GetDefaultSpecular();
+        part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN);
+        assembly->parts.push_back(std::move(part));
+    }
+    // The retained scene claims this object's mesh (game.exe bridge:
+    // visual_publish_appearance); the owned-visual frame then draws it.
+    if (!scene.visual_declare_mesh(resource, object->GetNumFigures() > 0))
+        return reject("appearance.declaration_publish");
+    if (!scene.visual_publish_assembly(resource, std::move(assembly)))
+        return reject("appearance.publish_current_resource");
+    return true;
+}
+catch (...)
+{
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+    if (resource.serial)
+        OwnedRender::E1Scene().Scene().visual_reject(resource,
+            owned::RetainedVisualStatus::unsupported_appearance,
+            "appearance.host_snapshot_exception", "host.object_appearance");
+    return false;
+}
+bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
+{
+    CObject3D* object = static_cast<CObject3D*>(lpObject);
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+    auto& hostScene = OwnedRender::E1Scene();
+    auto& scene = hostScene.Scene();
+    auto reject = [&](const char* step) noexcept {
+        OwnedRender::E1ReportOwnedPoseFailure(object ? object->GetID() : -1, step);
+        if (resource.serial)
+            scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_selector,
+                step, "host.object_pose");
+        return false;
+    };
+    if (!resource.serial) return reject("object_pose.resource");
+    if (!object) return reject("object_pose.object");
+    CAnimationSystem2* animation = object->GetAnimationSystem2();
+    if (!animation) return reject("object_pose.animation_system");
+
+    const auto assembly = scene.visual_assembly(resource);
+    if (!assembly) return reject("object_pose.assembly");
+    OwnedRender::E1AnimationSelection selected;
+    const char* selectionFailure = nullptr;
+    if (!animation->GetOwnedCurrentAnimationSelection(selected, &selectionFailure) ||
+        !selected.valid)
+        return reject(selectionFailure ? selectionFailure : "selection.result_invalid");
+    if (!selected.visual.neutral && !hostScene.BindDatabase(resource, selected))
+        return reject("object_pose.animation_database");
+
+    const CPlot3D position = object->GetCP();
+    const CQuaternion& orientation = object->GetOrientation();
+    const SComplection& shape = object->GetComplection();
+    owned::VisualObjectPose pose;
+    pose.position = {{position.x, position.y, position.z}};
+    pose.object_flags = object->GetFlags();
+    // Respect host source policy without a second shadow renderer.
+    if (!IsNeedShadow()) pose.object_flags |= OBJ_NOSHADOW;
+    float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+    orientation.GetComponents(qw, qx, qy, qz);
+    pose.quaternion = {{qw, qx, qy, qz}};
+    pose.shape = {{shape.strength, shape.grace, shape.tall}};
+    pose.selection = selected.visual;
+    pose.phase = selected.visual.neutral ? 0.0 : animation->GetTime();
+    pose.source_generation = selected.source_generation;
+    pose.appearance_revision = assembly->revision;
+    if (!hostScene.PublishObjectPose(resource, pose))
+        return reject("object_pose.publish");
+    return true;
+}
+catch (...) {
+    OwnedRender::E1ReportOwnedPoseFailure(lpObject ? lpObject->GetID() : -1,
+        "object_pose.exception");
+    return false;
+}
 // BOOL CObject3DClientSpecific::Draw()
 // draw
-BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
+bool CObject3DClientSpecific::PrepareOwnedResources()
 {
-    if (lpObject->CheckFlag(OBJ_HIDDEN))
-        return TRUE;
-    CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    CPlot3D objectCP = (lpObject)->GetCP();
-    SHMatrix matrix;
-    int nFigureClipFlag = 0;
-    bool bHaveScale = false;
-    //
     lpObject->FinalDataLoading();
     // Only immutable shared providers are replayable here; never use a base
     // canonical alias to overwrite current private mouth/wound state.
@@ -670,12 +881,111 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     }
     // A retained wound overlay must be restored by its unit owner before bind.
     if(pWoundsTexture && !pWoundsTexture->GetSurface()) {
-        if(!lpObject || lpObject->WhoAmI()!=HPC_UNIT)return FALSE;
-        auto* unit=static_cast<CUnit*>(lpObject);
-        auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
-        if(!specific || !specific->EnsureWoundsTextureReady() ||
-           !pWoundsTexture || !pWoundsTexture->GetSurface())return FALSE;
+        if(lpObject && lpObject->WhoAmI()==HPC_UNIT) {
+            auto* unit=static_cast<CUnit*>(lpObject);
+            auto* specific=static_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
+            if(specific)specific->EnsureWoundsTextureReady();
+        }
     }
+    if(pWoundsTexture && pWoundsTexture->GetSurface())
+        pWoundsTexture->GetSurface()->EnsureOwnedSurfacePublished();
+    if (!ownedAppearanceAttempted)
+    {
+        ownedAppearanceAttempted = true;
+        PublishOwnedAppearance();
+    }
+    return true;
+}
+bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen)
+{
+    if (lpObject->CheckFlag(OBJ_HIDDEN)) {
+        // Keep an already published caster from surviving a hide transition.
+        const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+        if (resource.serial) PublishOwnedPose();
+        return true;
+    }
+    bool resourcesReady = PrepareOwnedResources();
+    if(resourcesReady && lpObject->WhoAmI()==HPC_UNIT && sets[0] &&
+       sets[0]->lpTexture && sets[0]->lpTexture->GetSurface()) {
+        const auto secondary=pWoundsTexture && pWoundsTexture->GetSurface()
+            ? OwnedRender::E1SurfaceValue(pWoundsTexture->GetSurface()->OwnedSurfaceId()) : nullptr;
+        OwnedRender::E1PublishSecondaryVisual(lpObject->GetID(),
+            sets[0]->lpTexture->GetSurface()->OwnedSurfaceId(),secondary);
+    }
+    if (lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    const bool published = resourcesReady && PublishOwnedPose();
+    if (!published) {
+        const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+        if (resource.serial)
+            OwnedRender::E1Scene().Scene().visual_reject(resource,
+                owned::RetainedVisualStatus::unsupported_selector,
+                "object_pose.current_draw_preparation", "host.object_pose");
+    }
+    if (!visibleOnScreen) return published;
+
+    // Picking uses current host geometry, independently of GPU acceptance.
+    const bool selectable = lpObject->WhoAmI() == HPC_UNIT || lpObject->WhoAmI() == HPC_LEVER;
+    rcRect.SetRectEmpty();
+    if (selectable) lpObject->rcScreenRect.SetRectEmpty();
+    CDXGeometryProcessor *gpu = pRend->GetGPU();
+    lpObject->CreateCurrentPlacement();
+    SHMatrix matrix;
+    lpObject->GetPlacement(matrix);
+    gpu->PushMainMatrix(matrix);
+    gpu->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+    Identity(matrix);
+    const bool scaled = GetScaleMatrix(matrix);
+    if (scaled) {
+        gpu->PushMainMatrix(matrix);
+        gpu->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+    }
+    bool anyVisible = false;
+    auto* object = static_cast<CObject3D*>(lpObject);
+    for (int index = 0; index < object->GetNumFigures(); ++index) {
+        CFigure* figure = object->GetFigure(index);
+        if (!figure || fabs2(figure->GetCP()) > 1e9f) continue;
+        figure->CreateCurrentPlacement();
+        figure->GetPlacement(matrix);
+        gpu->PushMainMatrix(matrix);
+        gpu->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+        CRect rect;
+        static_cast<CFigureClientSpecific*>(figure->GetFigureSpecific())->PrepareOwnedPicking(
+            pRend, selectable ? &rect : nullptr);
+        anyVisible |= figure->CheckFlag(FIG_VISIBLE) != 0;
+        if (selectable && !rect.IsRectEmpty()) rcRect |= rect;
+        gpu->PopMatrix(MAT_STACK_WORLDSPACE);
+        gpu->PopMainMatrix();
+    }
+    if (scaled) {
+        gpu->PopMatrix(MAT_STACK_WORLDSPACE);
+        gpu->PopMainMatrix();
+    }
+    gpu->PopMatrix(MAT_STACK_WORLDSPACE);
+    gpu->PopMainMatrix();
+    if (selectable) lpObject->rcScreenRect = rcRect;
+    if (anyVisible) lpObject->SetFlag(OBJ_VISIBLE);
+    else lpObject->ResetFlag(OBJ_VISIBLE);
+    return published;
+}
+
+BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
+{
+    // Publication and picking precede this draw's owned scene commit.
+    if (pRend->GetD3D()->IsOwnedWorldActive() && lpObject->GetID() > 0) {
+        OwnedRender::E1ReportOwnedVisual(lpObject->GetID());
+        if (pRect) *pRect = lpObject->rcScreenRect;
+        return TRUE;
+    }
+    if (lpObject->CheckFlag(OBJ_HIDDEN))
+        return TRUE;
+    CDXGeometryProcessor *pGPU = pRend->GetGPU();
+    CPlot3D objectCP = (lpObject)->GetCP();
+    SHMatrix matrix;
+    int nFigureClipFlag = 0;
+    bool bHaveScale = false;
+    //
+    if (!PrepareOwnedResources()) return FALSE;
     //
     if (!lpObject->CheckFlag(OBJ_STATIC))
         lpObject->ResetFlag(OBJ_LIGHTED);
@@ -688,6 +998,7 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     //
     if (lpObject->GetAnimationSystem2())
         lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    PublishOwnedPose();
     // collect all light sources to lit this object
     static CSimplyArray<CLight *, CLight *> lights;
     CManagerIterator mi;
@@ -774,7 +1085,9 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
                 }
                 CRect rcFigureRect(0, 0, 0, 0);
                 bCheck = pRend->DrawFigure(pFigure, lights, sets[i]->matgroups[j]->lpMaterial, cFog,
-                                           pRect ? &rcFigureRect : nullptr);
+                                           pRect ? &rcFigureRect : nullptr,
+                                           lpObject->WhoAmI() == HPC_UNIT ? sets[i]->lpTexture : nullptr,
+                                           nullptr);
                 if (bCheck == FALSE)
                     return ReportError("CObject3DClientSpecific::Draw.\n CFigure::Draw failed.\n");
                 nFigureClipFlag |= pFigure->CheckFlag(FIG_VISIBLE);
@@ -1044,6 +1357,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
         }
     }
 
+    InvalidateOwnedAppearance();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1102,6 +1416,7 @@ void CObject3DClientSpecific::SetMaterials()
         lpMaterialManager->SetMaterial(lpMaterial, lpMaterial->GetTypeID());
         lpMaterial = GetNextMaterial();
     }
+    InvalidateOwnedAppearance();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3DClientSpecific::Select(BOOL bSelect)
@@ -1136,6 +1451,7 @@ void CObject3DClientSpecific::Highlight(BOOL bHighlight)
         for (i = 0; i < materials.GetSize(); i++)
             materials[i]->RestoreEmissive();
     }
+    InvalidateOwnedAppearance();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // void CObject3DClientSpecific::FinalDataLoading()
@@ -1150,8 +1466,6 @@ void CObject3DClientSpecific::FinalDataLoading()
     else
         LoadTextures(szPrimaryTextureName, NULL);
 }
-/////////////////////////////////////////////////////////////////////////////////////
-static CXYZW4Array shadow4;
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3DClientSpecific::StepInvisibility(float fpTimeStep)
 {
@@ -1200,339 +1514,6 @@ void CObject3DClientSpecific::SetUnstun()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-CSimplyArray<CPlot2D, CPlot2D &> CObject3DClientSpecific::shadowbuffer;
-CSimplyArray<CPoint, CPoint &> CObject3DClientSpecific::shadowresult;
-CSize G_SHADOWSIZE = { 64, 64 };
-std::unique_ptr<WORD[]> pTexShadowBuffer = std::make_unique<WORD[]>(G_SHADOWSIZE.cx * G_SHADOWSIZE.cy);
-    /////////////////////////////////////////////////////////////////////////////////////
-// BOOL CObject3DClientSpecific::DrawRealisticShadow2()
-// draw realistic shadow with blur!
-// first, project object's bbox on zero-plane and calc all necessary information
-// to project object on the 64x64 texture.
-// Then, project and draw object's figures on the texture above
-// apply blur
-// create mesh with texture above and put it on terrain
-BOOL CObject3DClientSpecific::DrawRealisticShadow2(CRenderer *pRend)
-{
-    if (!IsNeedShadow() || lpObject->CheckFlag(OBJ_HIDDEN | OBJ_NOSHADOW) ||
-        lpObject->IsInvisible())
-        return TRUE;
-    CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    // render new shadow
-    // create shadow rendering texture (if need)
-    if (!pShadowTexture)
-    {
-        pShadowTexture = theWorld.GetTextureManager()->CreateShadowTexture();
-        if (!pShadowTexture)
-            return ReportError("Can't create texture for shadow rendering!\n");
-        char buffer[64];
-        sprintf(buffer, "SR%d",
-                lpObject->GetID()); // all shadow rendering textures have a name 'SR' + object's ID
-        pShadowTexture->SetName(buffer);
-
-        SetFlag(OCS_RESHADOW);
-    }
-    if (!pShadowTexture->GetSurface())
-    {
-        // Unload keeps this referenced provider; restore its procedural surface.
-        // Force generation before upload/bind, including a retry after failure.
-        SetFlag(OCS_RESHADOW);
-        SMMPFileHeader hdr;
-        hdr.InitializeDefaultFormat4444();
-        hdr.dwSignature = MMP_SIGNATURE;
-        hdr.dwDimentionX = 64;
-        hdr.dwDimentionY = 64;
-        hdr.dwMipMapLevel = 1;
-        if (pShadowTexture->Create(pRend, &hdr) == FALSE)
-            return ReportError("Can't restore texture for shadow rendering!\n");
-    }
-    //////////////////////////////////////////////////////////////////////
-    const DWORD shadowNow = GetTickCount();
-    bool rebuildShadow = IsNeedRecalcShadow();
-    if (!rebuildShadow && shadowvertices.GetSize()) {
-        DWORD width,height; pRend->GetD3D()->GetCurrentMode(width,height);
-        const CRect &screen = lpObject->rcScreenRect;
-        const unsigned long long area = static_cast<unsigned long long>(Max(0,screen.Width())) * Max(0,screen.Height());
-        rebuildShadow = ModShadowSchedule::ForceRefresh(shadowNow,modShadowLastBuild,
-            lpObject->CheckFlag(OBJ_VISIBLE)!=0,area*1000 >= static_cast<unsigned long long>(width)*height*10);
-    }
-    LARGE_INTEGER shadowStarted;
-    if (rebuildShadow)
-    {
-        QueryPerformanceCounter(&shadowStarted);
-        ++ModShadowSchedule::rebuilt;
-        LPGRAPHICSPROCESSOR pGrPU = pRend->GetGrPU();
-        LPTLPIPELINE lpGeometryProcessor = pGPU->GetGeometryProcessor();
-        SHMatrix matrix, matShift;
-        int i, j;
-        // enumerate light sources and build a median light direction, which takes in accout light's
-        // luminance and direction
-        CPlot3D ptLightDir = VNULL;
-        CManagerIterator mi;
-        CLight *pLight = static_cast<CLight *>(mi.GetFirst(theWorld.GetLightManager()));
-        while (pLight)
-        {
-            if (!pLight->CheckFlag(LIT_UNSHADOW) && !pLight->CheckFlag(LIT_INACTIVE))
-            {
-                if (pLight->GetTypeID() != LTID_POINTLIGHT)
-                {
-                    const D3DCOLORVALUE &color1 = pLight->GetDiffuse();
-                    float fLuminance = 0.6f * color1.g + 0.3f * color1.r + 0.1f * color1.b;
-                    ptLightDir += *reinterpret_cast<const CPlot3D *>(&(pLight->GetDirection())) *
-                                  fLuminance;
-                }
-                else
-                {
-                    float ldr2 = fabs2(lpObject->GetCP(), pLight->GetCP());
-                    if (ldr2 < pLight->GetRange2())
-                    {
-                        const D3DCOLORVALUE &color1 = pLight->GetDiffuse();
-                        float fLuminance = 0.6f * color1.g + 0.3f * color1.r + 0.1f * color1.b;
-                        fLuminance *= 1.0f - ldr2 * pLight->GetRcprRange2();
-                        CPlot3D ptDir = lpObject->GetCP() - pLight->GetCP();
-                        if (ldr2 != 0)
-                            ptDir *= 1.0f / sqrt(ldr2);
-                        else
-                            ptDir = VNULL;
-                        if (pLight->CheckFlag(LIT_MAGICSHADOW))
-                            fLuminance *= 10;
-                        ptLightDir += ptDir * fLuminance;
-                    }
-                }
-            }
-            pLight = static_cast<CLight *>(mi.GetNext());
-        }
-        // now normalize and correct result direction
-        CPlot3D direction(ptLightDir);
-        {
-            float fLen2 = fabs2(direction);
-            if (fLen2 != 0)
-                direction *= 1.0f / sqrt(fLen2);
-            // correct direction to be 20 degrees or more
-            float fXY = sqrt(direction.x * direction.x + direction.y * direction.y);
-            float fAngle = atan2(fabs(direction.z), fXY);
-            if (fAngle < ToRadian(20.0f))
-            {
-                direction.z = -fXY * 0.36397f; // * tan( 20 )
-                direction *= 1.0f / fabs(direction);
-            }
-        }
-        //
-        pGPU->CreateShadowProjectionMatrixWithCorrection(matrix, direction);
-        pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN); // push shadow projection matrix
-        // Geometry counts are groups of four, as returned by ProjectShadow.
-        DWORD shadowCapacity = 0;
-        for(int k=0;k<lpObject->figures.GetSize();++k) {
-            const SXYZW4 *plots; const SVertexComponents *components; const WORD *indices;
-            DWORD count=0,indexCount=0;
-            if(lpObject->pGeometry && lpObject->pGeometry->GetRangeGeometryData(lpObject->figures[k]->GetName(),plots,components,indices,count,indexCount)) shadowCapacity += count*4;
-        }
-        if(!shadowCapacity)return TRUE;
-        shadowbuffer.SetSize(shadowCapacity);
-        shadowresult.SetSize(shadowCapacity);
-        DWORD dwShadowBufferShift = 0;
-        // calc rotation angle and temporary rotate object
-        CQuaternion quat;
-        pGPU->CreateDirectionCorrection(direction, quat);
-        lpObject->Rotate(quat); // temporary rotate object for shadow matrix calculation
-        lpObject->CreateCurrentPlacement();
-        quat.ReverseAxis();
-        lpObject->Rotate(quat); // return object's native rotation
-        lpObject->GetPlacement(matrix);
-        matrix._14 = matrix._24 = matrix._34 = 0; // set object position to '0'
-        // project shadow vertices and store it in shadow buffer
-        shadowrect.x1 = FLT_MAX;
-        shadowrect.x2 = -FLT_MAX;
-        shadowrect.y1 = FLT_MAX;
-        shadowrect.y2 = -FLT_MAX;
-        pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN); // push object's matrix
-        // object's scale
-        bool bHaveScale = GetScaleMatrix(matrix);
-        if (bHaveScale)
-            pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN);
-        for (i = 0; i < lpObject->figures.GetSize(); i++)
-        {
-            // CRAP - old model with wrong bodyparts
-            if (fabs2(lpObject->figures[i]->GetCP()) > 1e+10f)
-                continue;
-            // end of CRAP
-            if (lpObject->figures[i]->CheckFlag(FIG_HIDDEN))
-                continue; // we don't need a shadow from the hidden figures
-            lpObject->figures[i]->CreateCurrentPlacement();
-            lpObject->figures[i]->GetPlacement(matrix);
-            pGPU->PushMatrix(matrix, MAT_STACK_SHADOWMAIN); // push figure matrix
-            assert(lpObject->pGeometry);
-            if (lpObject->pGeometry)
-            {
-                dwShadowBufferShift += lpObject->pGeometry->ProjectShadow(
-                    lpObject->figures[i]->GetName(), lpObject->figures[i]->morphs,
-                    pGPU->GetMatrix(MAT_STACK_SHADOWMAIN),
-                    shadowbuffer.GetData() + dwShadowBufferShift, &shadowrect);
-            }
-            pGPU->PopMatrix(MAT_STACK_SHADOWMAIN); // pop figure matrix
-        }
-        //
-        if (bHaveScale)
-            pGPU->PopMatrix(MAT_STACK_SHADOWMAIN);
-        // pop object matrix
-        pGPU->PopMatrix(MAT_STACK_SHADOWMAIN);
-        // pop shadow projection matrix
-        pGPU->PopMatrix(MAT_STACK_SHADOWMAIN);
-        shadowbuffer.SetSize(dwShadowBufferShift); // ARRAY BOUNDS CHECK
-        // create shadow rescale/shift matrix (to fit shadow in 64x64 rect)
-        CreateShadowShiftScaleMatrix(matShift);
-        // rescale and shift shadow
-        for (i = 0; i < shadowbuffer.GetSize(); i++)
-        {
-            shadowresult[i].x = MINT(shadowbuffer[i].x * matShift._11 + matShift._41);
-            shadowresult[i].y = MINT(shadowbuffer[i].y * matShift._22 + matShift._42);
-        }
-        shadowresult.SetSize(dwShadowBufferShift); // ARRAY BOUNDS CHECK
-        //////////////////////////////////////////////////////////////////////
-        /*CTexture *pShadowBuffer = ((CTextureManager *)((CWorldClient *)GetWorld())
-                                       ->GetTextureManager())
-                                      ->GetShadowBuffer();*/
-        DDSURFACEDESC2 ddsd;
-        // prepare render params
-        SShadowTextureRenderParam renderparam;
-        renderparam.lpSrcTexture = 0;
-        renderparam.dwSrcPitch = 256 * 2;
-        renderparam.dwDstPitch = G_SHADOWSIZE.cx * 2;
-        renderparam.lpDstTexture = pTexShadowBuffer.get();
-        // clear render surface for the new rendering
-        MemSetDWord(reinterpret_cast<DWORD *>(renderparam.lpDstTexture), 0,
-                    renderparam.dwDstPitch * G_SHADOWSIZE.cy /
-                        sizeof(DWORD)); // fill by DWORDs
-        // render figures to texture
-        dwShadowBufferShift = 0;
-        BOOL bBridge = FALSE;
-        for (j = 0; j < lpObject->figures.GetSize(); j++)
-        {
-            // CRAP - old figures with wrong position
-            if (fabs2(lpObject->figures[j]->GetCP()) > 1e+10f)
-                continue;
-            bBridge |= lpObject->figures[j]->GetBV().IsBridge();
-            // end of CRAP
-            if (lpObject->figures[j]->CheckFlag(FIG_HIDDEN))
-                continue; // we don't need a shadow from the hidden figures
-            assert(lpObject->pGeometry);
-            CTexture *casterTexture = FindTexture(lpObject->figures[j]->GetTextureTypeID());
-            renderparam.lpSrcTexture = lpObject->WhoAmI()==HPC_TREE && casterTexture
-                ? casterTexture->GetModShadowAlpha() : nullptr;
-            if (lpObject->pGeometry)
-                dwShadowBufferShift += lpObject->pGeometry->RenderShadow(
-                    lpObject->figures[j]->GetName(), shadowresult.GetData() + dwShadowBufferShift,
-                    renderparam);
-        }
-        //////////////////////////////////////////////////////////////////////
-        // performing BLUR by two linear filter (in perpendicular direction)
-        if (theSettings.nShadowQuality == 2)
-        {
-            pGrPU->BlurVertical(renderparam.lpDstTexture, 64, 64);
-            pGrPU->BlurHorizontal(renderparam.lpDstTexture, 64, 64);
-        }
-        pShadowTexture->GetSurface()->LoadFromByteDump(pTexShadowBuffer.get(), G_SHADOWSIZE.cx * 2, G_SHADOWSIZE.cy);
-        // Bounded diagnostic handoff: record the first generated silhouette per caster class.
-        static unsigned reportedShadowClasses = 0;
-        unsigned shadowClass = lpObject->WhoAmI()==HPC_TREE ? 1u : lpObject->WhoAmI()==HPC_UNIT ? 2u : 4u;
-        if(!(reportedShadowClasses & shadowClass)) {
-            reportedShadowClasses |= shadowClass;
-            unsigned covered=0; for(int pixel=0;pixel<4096;++pixel) if(pTexShadowBuffer[pixel]&0xf000)++covered;
-            FILE *log=fopen("eirebuild-shadow-port.log","a");
-            if(log){fprintf(log,"R5 class=%u projected_vertices=%u covered_pixels=%u alpha_foliage=%u max_union=1\n",shadowClass,dwShadowBufferShift,covered,shadowClass==1);fclose(log);}
-        }
-
-        // project new shadow mesh
-        CPlot3D objectCP = lpObject->GetCP();
-        quat.DecompEulerMatrix(
-            matrix); // this is an quaternion, which was used for direction correction
-        CPlot3D plot;
-
-        shadow4.SetSize(1);
-
-        plot.SetPlot(shadowrect.x1, shadowrect.y2, 0);
-        plot = matrix.RotateVector(plot);
-        shadow4[0].x[0] = objectCP.x + plot.x;
-        shadow4[0].y[0] = objectCP.y + plot.y;
-        shadow4[0].z[0] = objectCP.z;
-        shadow4[0].w[0] = 1;
-
-        plot.SetPlot(shadowrect.x2, shadowrect.y2, 0);
-        plot = matrix.RotateVector(plot);
-        shadow4[0].x[1] = objectCP.x + plot.x;
-        shadow4[0].y[1] = objectCP.y + plot.y;
-        shadow4[0].z[1] = objectCP.z;
-        shadow4[0].w[1] = 1;
-
-        plot.SetPlot(shadowrect.x2, shadowrect.y1, 0);
-        plot = matrix.RotateVector(plot);
-        shadow4[0].x[2] = objectCP.x + plot.x;
-        shadow4[0].y[2] = objectCP.y + plot.y;
-        shadow4[0].z[2] = objectCP.z;
-        shadow4[0].w[2] = 1;
-
-        plot.SetPlot(shadowrect.x1, shadowrect.y1, 0);
-        plot = matrix.RotateVector(plot);
-        shadow4[0].x[3] = objectCP.x + plot.x;
-        shadow4[0].y[3] = objectCP.y + plot.y;
-        shadow4[0].z[3] = objectCP.z;
-        shadow4[0].w[3] = 1;
-
-        plot = lpObject->GetPlacement().RotateVector(lpObject->bv.ptCenter);
-        theWorld.CastShadowToTerrain(direction, objectCP + plot, lpObject->bv.fpRadius, shadow4,
-                                     shadowvertices, shadowmaps, shadowindices, false,
-                                     bBridge == 0);
-
-        // Bound the projected mesh, not the caster: long shadows may remain visible offscreen.
-        bvShadowBV.dwFlags = 0;
-        if (shadowvertices.GetSize()) {
-            CPlot3D lo(FLT_MAX,FLT_MAX,FLT_MAX),hi(-FLT_MAX,-FLT_MAX,-FLT_MAX);
-            for(int v=0;v<shadowvertices.GetSize();v++)for(int lane=0;lane<4;lane++) {
-                const SXYZW4 &p=shadowvertices[v];
-                lo.x=Min(lo.x,p.x[lane]);lo.y=Min(lo.y,p.y[lane]);lo.z=Min(lo.z,p.z[lane]);
-                hi.x=Max(hi.x,p.x[lane]);hi.y=Max(hi.y,p.y[lane]);hi.z=Max(hi.z,p.z[lane]);
-            }
-            CPlot3D center=(lo+hi)*.5f;
-            bvShadowBV.ptCenter=center-lpObject->GetCP();
-            bvShadowBV.SetRadius(fabs(hi-center)+1.0f);
-        }
-        modShadowLastBuild=shadowNow;
-        LARGE_INTEGER finished;QueryPerformanceCounter(&finished);
-        ModShadowSchedule::generationTicks += finished.QuadPart-shadowStarted.QuadPart;
-        ResetFlag(OCS_RESHADOW);
-    }
-    //////////////////////////////////////////////////////////////////////
-    //
-    if(!rebuildShadow)++ModShadowSchedule::reused;
-    if (shadowvertices.GetSize() == 0)
-        return TRUE; // can't build shadow - shadow invisible
-                     //
-                     //
-    SBoundingVolume projected = bvShadowBV;
-    projected.ptCenter += lpObject->GetCP();
-    if(projected.dwFlags && pGPU->CheckVisibility(projected)==TRV_INVISIBLE) {
-        ++ModShadowSchedule::culled;return TRUE;
-    }
-    DWORD dwColor = RGBA_MAKE(255, 255, 255, 128);
-    if (lpObject->WhoAmI() == HPC_UNIT)
-    {
-        float fAlphaModulate = static_cast<CUnitClientSpecific *>(
-                                   static_cast<CUnit *>(lpObject)->GetUnitSpecific())
-                                   ->GetFadeOutAlpha();
-        dwColor = RGBA_MAKE(255, 255, 255, MINT(fAlphaModulate * 128.0f));
-    }
-    theRenderer.SetProjectionMatrix();
-
-    theRenderer.BindTexture(0, pShadowTexture);
-    BYTE cFogValue = theWorld.GetTerrain()->GetFogAlpha(lpObject->GetCP());
-    theRenderer.Render(shadowvertices.GetData(), shadowmaps.GetData(), shadowvertices.GetSize(),
-                       shadowindices.GetData(), shadowindices.GetSize(), dwColor,
-                       RGBA_MAKE(0, 0, 0, cFogValue), 0, 0.9999f);
-
-    return TRUE;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-// check for shadow necessarility
 bool CObject3DClientSpecific::IsNeedShadow() const
 {
 #ifndef _A4
@@ -1572,20 +1553,9 @@ void CObject3DClientSpecific::RemoveShadowInformation()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CObject3DClientSpecific::IsShadowVisible() const
 {
-    // а нужна ли нам эта тень вообще?
-    if (IsNeedShadow() == false)
-        return false;
-    // если объект видимый, то его тень с ќ„≈Ќ№ большой веро€тностью тоже видима
-    if (CheckFlag(OBJ_VISIBLE))
-        return true;
-    else // ну а дл€ самого общего слеча€ проверим по BV тени
-    {
-        bvShadowBV.ptCenter += lpObject->GetCP();
-        int nVisibility = theRenderer.GetGPU()->CheckVisibility(bvShadowBV);
-        bvShadowBV.ptCenter -= lpObject->GetCP();
-
-        return nVisibility != TRV_INVISIBLE;
-    }
-    return false;
+    // Only source eligibility belongs to the host. Native light-space culling
+    // decides whether an off-screen caster reaches this draw's receivers.
+    return IsNeedShadow() && !lpObject->CheckFlag(OBJ_HIDDEN | OBJ_NOSHADOW) &&
+        !lpObject->IsInvisible();
 }
 /////////////////////////////////////////////////////////////////////////////////////

@@ -4,8 +4,7 @@ enum class EVertexType
 {
     Word = 0,
     STL = 1,
-    PNT = 2,
-    Particle = 3
+    PNT = 2
 };
 
 struct STLVertex2
@@ -37,15 +36,6 @@ struct PNTVertex
     DWORD specular;
     DirectX::XMFLOAT2 tuv;
     DWORD useVertexColor;
-};
-
-struct ParticleVertex
-{
-    DirectX::XMFLOAT4 pos;
-    DWORD color;
-    DWORD specular;
-    DirectX::XMFLOAT2 tuv;
-    DirectX::XMFLOAT2 screen_dx;
 };
 
 typedef CSimplyArray<STLVertex1, STLVertex1> CTLVertex1Array;

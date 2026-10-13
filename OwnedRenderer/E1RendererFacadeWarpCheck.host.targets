@@ -1,0 +1,21 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Build the normal EIRebuild host providers, but enter the WARP facade check directly. -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <OutDir>$(MSBuildThisFileDirectory)..\out\Win32\Release\</OutDir>
+    <TargetName>E1RendererFacadeWarpCheck</TargetName>
+    <TargetPath>$(OutDir)$(TargetName)$(TargetExt)</TargetPath>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\Game\OwnedRender\E1RendererFacadeWarpMain.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ObjectFileName>$(IntDir)E1RendererFacadeWarpMain-host.obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+      <AdditionalDependencies>$(MSBuildThisFileDirectory)..\out\Win32\Release\OwnedRenderer\eid3d11_shaders.res;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

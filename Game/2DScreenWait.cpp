@@ -60,8 +60,15 @@ void ProgressVideoLoop()
         while (!stopProgress.load())
         {
             {
-                VideoContextGuard guard(videoContextLock.Get());
-                progressVideo->PlayNextFrame(true, true);
+                // Gate before the D3D context lock, consistently with the
+                // main render path. Never wait here: StopProgressVideo can
+                // join us while the main thread owns a nested frame lease.
+                const auto renderAccess = theRenderer.GetD3D()->GetOwnedRenderer().TryFrame();
+                if (renderAccess.owns_lock() && !stopProgress.load())
+                {
+                    VideoContextGuard guard(videoContextLock.Get());
+                    progressVideo->PlayNextFrame(true, true);
+                }
             }
             Sleep(16);
         }
@@ -114,6 +121,7 @@ bool StartProgressVideo()
         return false;
     }
 
+    candidate->MarkLoadingPicture();
     progressVideo = std::move(candidate);
     auto context = theRenderer.GetD3D()->GetDeviceContext();
     if (SUCCEEDED(context.As(&videoContextLock)) && videoContextLock)
@@ -190,6 +198,7 @@ void C2DScreenWait::Step(int nNumb)
     }
 
     CDX11 *pDX11 = GetRenderer()->GetD3D();
+    const auto renderAccess = pDX11->GetOwnedRenderer().LockFrame();
     if (!pSurface)
     {
         LoadLogo();
@@ -205,6 +214,7 @@ void C2DScreenWait::Step(int nNumb)
     pDX11->GetSpriteBatch()->Begin();
     if (pSurface) pSurface->BltToRenderSurface(rectOnScreen, 0, 0);
     pDX11->GetSpriteBatch()->End();
+    pDX11->MarkLoadPicture();
     theCursor.Draw();
     pDX11->EndFrame();
 #endif

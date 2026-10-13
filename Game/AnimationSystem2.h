@@ -7,6 +7,13 @@
 #include "Quaternion.h"
 
 #include "adFormat.h"
+#include "OwnedRender/E1SkeletonSources.h"
+#include <memory>
+namespace OwnedRender {
+struct E1AnimationSelection;
+class E1AnimationSelectionCache;
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 class CFigure;
 class CAnimationNode;
@@ -86,6 +93,7 @@ private:
     CAnimationTrack *lpNext;      // next animation track (to switch to)
     CAnimationTrack *lpAlternate; // alternate animation (for info-window, etc.)
     //
+    OwnedRender::E1SelectedSkeletonBytes ownedBone;
     CPlot3D bone; // bone of this animation node
     // complection
     float strength; // strenght
@@ -141,6 +149,10 @@ public:
     const CPlot3D &GetPosition() const { return position; }
     const CQuaternion &GetOrientation() const { return rotation; }
     //
+    void PublishOwnedBone(const void* data, DWORD size) noexcept {
+        ownedBone.Publish(GetName(), data, size);
+    }
+    const OwnedRender::E1SelectedSkeletonBytes& GetOwnedBone() const noexcept { return ownedBone; }
     void LoadBone(LPBYTE &lpData);
     void LoadOldBone(LPBYTE &lpData);
     // class identification functions
@@ -154,6 +166,8 @@ class CObject3D;
 class CAnimationSystem2 : public CGameBase
 {
     friend class CObject3D;
+    OwnedRender::E1SkeletonSources ownedSkeleton;
+    std::unique_ptr<OwnedRender::E1AnimationSelectionCache> ownedAnimationSelection;
 
 private:
     CObject3D *lpObject3D;                             // object3d, this animation system belong to
@@ -204,6 +218,13 @@ public:
     BOOL RemoveNode(LPCSTR pszNodeName);
     BOOL SetupHeadNode();
     void LoadSkeleton(LPCSTR pszMaskName);
+    void PublishOwnedLinks(const char* name, const void* data, DWORD size) noexcept {
+        ownedSkeleton.PublishLinks(name, data, size);
+    }
+    std::shared_ptr<const owned::ModelCpuAsset> GetOwnedSkeleton() noexcept;
+    void ClearOwnedCurrentAnimationSelection() noexcept;
+    bool GetOwnedCurrentAnimationSelection(OwnedRender::E1AnimationSelection& output,
+                                           const char** failedStage = nullptr) noexcept;
     void GetNodeNames(CStringArray &szNames) const;
     // linking
     BOOL LinkWithFigures(CSimplyArray<CFigure *, CFigure *> &figures);

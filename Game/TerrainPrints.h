@@ -78,6 +78,8 @@ public:
     float GetSizeX() const { return fSizeX; }
     float GetSizeY() const { return fSizeY; }
     float GetAverageSize() const { return (fSizeX + fSizeY) * 0.5f; }
+    int GetRemainingSegments() const { return nLifeTimeCounter; }
+    int GetFadeoutSegments() const { return nFadeoutTime; }
     //
     virtual int Segment();
     //

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
@@ -465,11 +466,13 @@ void CI3DScreenCamp::OnActivate()
     wideRight->SetAmbient(sideAmbient, sideAmbient, sideAmbient);
     wideLeft->SetTexture(wideTexture);
     wideRight->SetTexture(wideTexture);
+    E4CampAccess::Activate(this);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::OnDeactivate()
 {
+    E4CampAccess::Deactivate(this);
     IWorld.CombatPause(false);
     // remove antializasing
     theRenderer.SetRenderState(D3DRENDERSTATE_ANTIALIAS, D3DANTIALIAS_NONE);
@@ -711,6 +714,8 @@ void CI3DScreenCamp::SetScreenMode(EItemScreenModes eNewMode)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
 {
+    E4CampAccess::BeginDraw(this);
+    OwnedRender::E4::Frame campFrame;
     CPoint point = theCursor.GetPos();
 
     pMouseItem = 0;
@@ -808,12 +813,13 @@ BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
     }
 
     CheckValidTransaction();
-
+    E4CampAccess::Cards(this, pRend);
     CI3DScreen::Draw(pRend);
 
     if (eScreenMode == ISM_WEAPONS)
     {
         CUnit *pDrawUnit = pUnits[nCurPers];
+        owned::camp::VisualScope campUnit(owned::camp::composition(OwnedRender::E4::Layout(), OwnedRender::E4::Uniform(OwnedRender::E4::Role::quick)), OwnedRender::E4::Active());
         DrawUnit(pRend, pDrawUnit, fPersAngle, 400, true);
     }
 

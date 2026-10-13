@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Input.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DHandler.h"
@@ -176,7 +177,7 @@ void CI3DHandlerNewCamera::OnRButtonUp(UINT nFlags, CPoint point)
     theCursor.ResetIncrement();
     CPoint pt = theCursor.GetPos();
     theCursor.LockPos(false);
-    SetCursorPos(pt.x, pt.y);
+    OwnedRender::E3WriteCursor(pt.x, pt.y);
     SetProcessed();
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -302,7 +303,10 @@ void CI3DHandlerNewCamera::OnMouseMove(UINT nFlags, CPoint point)
     {
         CPoint ptIncrement = theCursor.GetIncrement();
         pI3D->ScreenToVirtual(point);
-        pI3D->ScreenToVirtualLocal(ptIncrement);
+        if (theSettings.dwWidth > 0 && theSettings.dwHeight > 0)
+            theCamera.NormalizeMouseDelta(ptIncrement, theSettings.dwWidth, theSettings.dwHeight);
+        else
+            pI3D->ScreenToVirtualLocal(ptIncrement);
 
         float x = point.x / 400.f - 1;
         float y = point.y / 300.f - 1;

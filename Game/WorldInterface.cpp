@@ -1332,10 +1332,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
             SYSTEMTIME time;
             GetLocalTime(&time);
 
-            // theWorldServer.SetWorldTime(time.wHour + time.wMinute / 60.0f);
-            //  TODOALEX DEBUG!!
-            theWorldServer.SetWorldTime(0);
-            theWorldServer.SetWorldTimeScale(0);
+            theWorldServer.SetWorldTime(time.wHour + time.wMinute / 60.0f);
 
             servMode = SERV_MODE_INTERFACE;
             // ATM: AllowScriptsInMainMenu patch

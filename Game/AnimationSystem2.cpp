@@ -8,6 +8,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FigureManager.h"
 
 #include "World.h"
+#include "MapObjectManager.h"
+#include "OwnedRender/E1Scene.h"
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // **                   class CAnimationTrack functions                          ** //
@@ -235,6 +237,7 @@ void CAnimationNode::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAnimationNode::Clear()
 {
+    ownedBone.Clear();
     // names
     szName = "none";
     szParentName = "none";
@@ -531,6 +534,7 @@ void CAnimationSystem2::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAnimationSystem2::DeleteNodes()
 {
+    ownedSkeleton.Clear();
     POSITION pos = nodes.GetHeadPosition();
     CAnimationNode *lpNode = NULL;
     while (pos)
@@ -543,6 +547,8 @@ void CAnimationSystem2::DeleteNodes()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAnimationSystem2::Clear()
 {
+    ownedSkeleton.Clear();
+    ownedAnimationSelection.reset();
     SwitchCallback = 0;
     lpObject3D = NULL;
     lpHeadNode = NULL;
@@ -749,6 +755,89 @@ BOOL CAnimationSystem2::SetupHeadNode()
     return FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+std::shared_ptr<const owned::ModelCpuAsset> CAnimationSystem2::GetOwnedSkeleton() noexcept try
+{
+    std::vector<OwnedRender::E1SkeletonNode> facts;
+    POSITION pos = nodes.GetHeadPosition();
+    while (pos)
+    {
+        CAnimationNode* node = nodes.GetNext(pos);
+        facts.push_back({node, node->GetParentNode(), (LPCSTR)node->GetNodeName(),
+            (LPCSTR)node->GetParentName(), node->GetOwnedBone()});
+    }
+    return ownedSkeleton.Complete(facts, lpHeadNode);
+}
+catch (...) { return nullptr; }
+
+void CAnimationSystem2::ClearOwnedCurrentAnimationSelection() noexcept
+{
+    ownedAnimationSelection.reset();
+}
+
+bool CAnimationSystem2::GetOwnedCurrentAnimationSelection(
+    OwnedRender::E1AnimationSelection& output, const char** failedStage) noexcept try
+{
+    output = {};
+    if (failedStage) *failedStage = nullptr;
+    auto reject = [&](const char* stage) noexcept {
+        if (failedStage) *failedStage = stage;
+        return false;
+    };
+    const SADEntry* selected = lpADEntry;
+    if (!selected)
+    {
+        output.visual.neutral = true;
+        output.valid = true;
+        return true;
+    }
+    if (!lpObject3D || !selected->pszAnimationName[0])
+        return reject("selection.object_or_entry");
+    const char* mask = lpObject3D->GetMaskName();
+    CWorld* world = GetWorld();
+    if (!mask || !*mask || !world)
+        return reject("selection.mask_or_world");
+
+    CString maskName(mask);
+    const void* databaseBytes = nullptr;
+    DWORD databaseSize = 0;
+    auto* mapObjects = static_cast<CMapObjectManager*>(world->GetMapObjectManager());
+    if (!mapObjects) return reject("selection.map_object_manager");
+    if (!mapObjects->GetSelectedAnimationDatabase(maskName, selected,
+        databaseBytes, databaseSize))
+        return reject("selection.adb_selection");
+
+    auto* figures = static_cast<CFigureManager*>(world->GetFigureManager());
+    if (!figures) return reject("selection.figure_manager");
+    CModelResourceEntry* model = figures->GetModel(std::string(mask));
+    if (!model) return reject("selection.model_resource");
+    const void* animationBytes = nullptr;
+    DWORD animationSize = 0;
+    if (!model->GetAnimationSourceBytes(selected->pszAnimationName,
+        animationBytes, animationSize))
+        return reject("selection.anm_resource");
+    std::string resolvedClipName;
+    if (!model->ResolveAnimationName(selected->pszAnimationName, resolvedClipName))
+        return reject("selection.anm_clip_name");
+
+    const std::string animationName(selected->pszAnimationName);
+    const std::string databaseName = std::string(mask) + ".adb";
+    const std::string animationResourceName = std::string(mask) + ".anm";
+    if (!ownedAnimationSelection)
+        ownedAnimationSelection.reset(new OwnedRender::E1AnimationSelectionCache());
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject3D);
+    if (!ownedAnimationSelection->Select(OwnedRender::E1Scene().Epoch(), resource.serial,
+        mask, model, databaseName, databaseBytes, databaseSize, animationName,
+        animationResourceName, animationBytes, animationSize, selected->dwEntryIndex,
+        resolvedClipName, output))
+        return reject("selection.c56_decode");
+    return true;
+}
+catch (...) {
+    output = {};
+    if (failedStage) *failedStage = "selection.exception";
+    return false;
+}
+
 void CAnimationSystem2::LoadSkeleton(LPCSTR pszMaskName)
 {
     bNeedRecalc = true;

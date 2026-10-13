@@ -6,6 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <ctype.h>
 #include "Notification.h"
 #include "Win32Classes.h"
+#include "OwnedRender/ResourceMapping.h"
 
 //----------------------- Mapped file class -------------------------------------------------
 
@@ -26,7 +27,7 @@ void CMappedFile::Close()
 {
     if (NULL != pView)
     {
-        UnmapViewOfFile(pView);
+        OwnedRender::UnmapResourceView(pView);
         pView = NULL;
     }
     if (NULL != hMapping)
@@ -106,9 +107,9 @@ BOOL CMappedFile::Open(LPCSTR szFileName, BOOL bWriteAccess)
     }
     // Create view of file
     if (bWriteAccess)
-        pView = MapViewOfFile(hMapping, FILE_MAP_WRITE, 0, 0, 0);
+        pView = OwnedRender::MapResourceView(hMapping, FILE_MAP_WRITE, dwFileSize);
     else
-        pView = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+        pView = OwnedRender::MapResourceView(hMapping, FILE_MAP_READ, dwFileSize);
     if (NULL == pView)
     {
         DWORD dwErrorCode = GetLastError();

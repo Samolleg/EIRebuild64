@@ -1,5 +1,5 @@
 #pragma once
-class ModTerrainShadow;
+
 float SectorBackgroundInverseDepth();
 /**********************************************************************
  *<
@@ -209,7 +209,7 @@ private:
     int nSegmentCount;
 
     // Light calculation information
-    std::shared_ptr<ModTerrainShadow> modTerrainShadow;
+
     int nSegmentsToRelight;
     int nCurSegmentsToRelight;
     D3DCOLORVALUE dcvAmbient; // Ambient color
@@ -260,8 +260,8 @@ public:
     EClassIDs WhoAmI() const { return HPC_TERRAIN; }
     // CBase3D methods
     BOOL Draw(CRenderer *lpScene);
-    BOOL DrawBase(CRenderer *lpScene);
-    void DrawModTerrainShadow(CRenderer *pRend);
+    BOOL DrawBase(CRenderer *lpScene, bool prepareOnly = false);
+
     BOOL DrawTransparent(CRenderer *lpScene);
 
     // 3D engine mehods
@@ -424,7 +424,7 @@ private:
     void CreateSineTable();
 
     // It's clear enough :)
-    BOOL Draw(CRenderer *lpScene, int nMatFrom, int nMapTo);
+    BOOL Draw(CRenderer *lpScene, int nMatFrom, int nMapTo, bool prepareOnly = false);
 
     // Texures
     BOOL CreateTextures(int nTexCount);

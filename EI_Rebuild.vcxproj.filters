@@ -605,9 +605,6 @@
     <ClCompile Include="Game\dx11\RendererDX11.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
-    <ClCompile Include="Game\dx11\DXShader.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
     <ClCompile Include="game\dx11\Vertex.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
@@ -623,15 +620,6 @@
     <ClCompile Include="Game\dx11\Surface.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
-    <ClCompile Include="Game\dx11\EffectProcessor.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\dx11\EffectProcessor.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\dx11\VertexBuffer.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
     <ClCompile Include="shared\Common.cpp">
       <Filter>Sources\shared</Filter>
     </ClCompile>
@@ -644,15 +632,10 @@
     <ClCompile Include="Game\TextureDescriptor.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
-    <ClCompile Include="Game\dx11\Caches.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\dx11\Batchers.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
     <ClCompile Include="Game\LuaState.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
+    <ClCompile Include="Game\OwnedRender\CampSubmission.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -1363,13 +1346,7 @@
     <ClInclude Include="Game\dx11\RendererDX11.h">
       <Filter>Sources\dx11</Filter>
     </ClInclude>
-    <ClInclude Include="Game\dx11\DXShader.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
     <ClInclude Include="Game\dx11\Vertex.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\dx11\VertexBuffer.h">
       <Filter>Sources\dx11</Filter>
     </ClInclude>
     <ClInclude Include="Game\dx11\ConstantBuffer.h">
@@ -1384,12 +1361,6 @@
     <ClInclude Include="Game\dx11\Surface.h">
       <Filter>Sources\dx11</Filter>
     </ClInclude>
-    <ClInclude Include="Game\dx11\EffectProcessor.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\dx11\EffectProcessor.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
     <ClInclude Include="shared\Common.h">
       <Filter>Sources\shared</Filter>
     </ClInclude>
@@ -1401,12 +1372,6 @@
     </ClInclude>
     <ClInclude Include="Game\TextureDescriptor.h">
       <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\dx11\Caches.h">
-      <Filter>Sources\dx11</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\dx11\Batchers.h">
-      <Filter>Sources\dx11</Filter>
     </ClInclude>
     <ClInclude Include="Game\LuaState.h">
       <Filter>Header Files</Filter>
@@ -1421,29 +1386,11 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="shaders\pixelshader.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </FxCompile>
-    <FxCompile Include="shaders\vertexshader.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </FxCompile>
-    <FxCompile Include="shaders\vertexshader_simple.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </FxCompile>
-    <FxCompile Include="shaders\vertexshader_particles.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </FxCompile>
-    <FxCompile Include="shaders\gs_point_to_quad.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </FxCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
     <None Include="render.md">
       <Filter>Sources\dx11</Filter>
-    </None>
-    <None Include="shaders\vs_input.hlsl">
-      <Filter>Resource Files\shaders</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -1455,8 +1402,5 @@
     </Natvis>
   </ItemGroup>
   <ItemGroup>
-    <Text Include="shaders\constant_buffers.hlsl">
-      <Filter>Resource Files\shaders</Filter>
-    </Text>
   </ItemGroup>
 </Project>

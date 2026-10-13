@@ -1,19 +1,24 @@
 #pragma once
+#include "../OwnedRender/E1Surface.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "../mmpFormat.h"
 #define DXGI_ENABLED
 
 class CDX11;
+namespace owned { class Renderer; }
+namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
 
 class CDXGISurface
 {
 private:
+    mutable OwnedRender::E1Surface ownedSurface;
     CDX11 *pDX11;
     DWORD dwSurfaceWidth;  // surface width
     DWORD dwSurfaceHeight; // surface height
     DWORD dwSurfaceBPP;    // surface bit depth
     DXGI_FORMAT tfFormat = DXGI_FORMAT::DXGI_FORMAT_UNKNOWN;
+    bool opaquePadding = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture = 0;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> textureView = 0;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelReadbackStaging;
@@ -32,6 +37,12 @@ public:
     BOOL GetSurfaceDesc(D3D11_TEXTURE2D_DESC *pDDSD);
     BOOL GetTextureFormat(DXGI_FORMAT &pDDPixelFormat);
     // access to surface's width/height/bpp, previously extracted during creating
+    std::uint64_t OwnedSurfaceId() const noexcept { return ownedSurface.Id(); }
+    bool EnsureOwnedSurfacePublished() const noexcept
+    {
+        return OwnedRender::E1SurfaceValue(ownedSurface.Id()) != nullptr ||
+               ownedSurface.Complete(texture.Get());
+    }
     DWORD GetWidth() const { return dwSurfaceWidth; };
     DWORD GetHeight() const { return dwSurfaceHeight; };
     DWORD GetBPP() const { return dwSurfaceBPP; };
@@ -43,9 +54,13 @@ public:
     // special blit to and from primary/render surfaces
     HRESULT BltToRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                LPDDBLTFX pDDBltFx = 0);
+    HRESULT BlitPublishedToFacade(OwnedRender::RendererFacadeCore<owned::Renderer>& facade,
+        const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey = nullptr,
+        bool interfaceSpace = true, bool nativeCanvas = true);
     HRESULT BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                  LPDDBLTFX pDDBltFx = 0);
-    void UpdateTexture(UINT subresource_index, D3D11_BOX *region, D3D11_SUBRESOURCE_DATA *srd);
+    void UpdateTexture(UINT subresource_index, D3D11_BOX *region, D3D11_SUBRESOURCE_DATA *srd,
+                       DWORD sourceMmpFormat = MMP_FORMAT_8888);
     // surface clearing
     HRESULT Clear(DWORD dwColorFill);
     // load picture
@@ -73,4 +88,4 @@ public:
         return textureView;
     };
     Microsoft::WRL::ComPtr<ID3D11Texture2D> GetTexture() const { return texture; };
-};
+};

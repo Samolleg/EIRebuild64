@@ -165,6 +165,7 @@ class CParty;
 // all inventory screens ( camp, constructors ) are derived from this screen
 class CI3DItemScreen : public CI3DScreen
 {
+    friend struct E4CampAccess;
 protected:
     CI3DObjectItemInfo *pItemInfo;
     CItem *pMouseItem;
@@ -229,6 +230,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DItemObject : public CI3DObject
 {
+    friend struct E4CampAccess;
 protected:
     EItemScreenParts ePartType;
     CI3DItemScreen *pScreen;
@@ -253,6 +255,7 @@ public:
 // standard window for displaying info about item ( used in camp, constructors )
 class CI3DObjectItemInfo : public CI3DItemObject
 {
+    friend struct E4CampAccess;
 private:
     CParty itemParty;
     int nX, nY;

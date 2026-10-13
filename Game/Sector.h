@@ -125,6 +125,7 @@ private:
 
     CTileAnimArray tilesAnimation; // Tiles animation information
     uint64_t rendererPhaseRevision = 1;
+    bool rendererUvsDeferred = false;
     CIntArray tilesCounts;         // Number of tiles each type
 
     // For sector manager
