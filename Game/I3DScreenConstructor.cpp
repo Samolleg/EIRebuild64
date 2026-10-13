@@ -921,7 +921,6 @@ BOOL CI3DObjectQuickSlots::Draw(CRenderer *pRend)
             rects[i].y2 = rcTmp.bottom;
         }
 
-        pI3D->GetRenderer()->FlushBuffers();
         pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 0, 0);
         pI3D->GetRenderer()->Clear(RPG_NUM_ARMOR_TYPES, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
 
@@ -937,9 +936,7 @@ BOOL CI3DObjectQuickSlots::Draw(CRenderer *pRend)
             pScreen->DrawItem(pRend, item);
         }
 
-        pI3D->GetRenderer()->FlushBuffers();
         pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 1, 0);
-        pI3D->GetRenderer()->FlushBuffers();
     }
 
     return TRUE;
@@ -3307,7 +3304,6 @@ void CI3DTradeTable::Init(CItemsArray *pItBuy, CItemsArray *pItSell, bool bSpell
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DTradeTable::Draw(CRenderer *pRend)
 {
-    pI3D->GetRenderer()->FlushBuffers();
 
     D3DRECT rect;
     CRect rcTmp(200, 100, 600, 500);
@@ -3324,7 +3320,6 @@ BOOL CI3DTradeTable::Draw(CRenderer *pRend)
     rect.y2 = rcTmp.bottom;
     pI3D->GetRenderer()->Clear(1, &rect, D3DCLEAR_ZBUFFER, 0, 1, 0);
 
-    pI3D->GetRenderer()->FlushBuffers();
     CI3DObject::Draw(pRend);
 
 #ifndef NOGETDC
@@ -3386,7 +3381,6 @@ BOOL CI3DTradeTable::Draw(CRenderer *pRend)
     pSurf->ReleaseDC();
 #endif // NOGETDC
 
-    pI3D->GetRenderer()->FlushBuffers();
     rect.x1 = 0;
     rect.y1 = 0;
     rect.x2 = pI3D->GetWidth();
@@ -3470,7 +3464,6 @@ void CI3DRepairTable::Init(CItemsArray *pItRepair)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DRepairTable::Draw(CRenderer *pRend)
 {
-    pI3D->GetRenderer()->FlushBuffers();
 
     D3DRECT rect;
     CRect rcTmp(200, 100, 600, 500);
@@ -3520,7 +3513,6 @@ BOOL CI3DRepairTable::Draw(CRenderer *pRend)
 
     CI3DObject::Draw(pRend);
 
-    pI3D->GetRenderer()->FlushBuffers();
     rect.x1 = 0;
     rect.y1 = 0;
     rect.x2 = pI3D->GetWidth();
@@ -3873,7 +3865,6 @@ BOOL CI3DConstrItem::Draw(CRenderer *pRend)
         item.pItem = pTableParty->allWagonItems[i];
         if (pScreen->IsItemConstructed(item.pItem))
         {
-            pI3D->GetRenderer()->FlushBuffers();
             rcTmp.left = 215;
             rcTmp.top = 265;
             rcTmp.right = 285;
@@ -3893,15 +3884,12 @@ BOOL CI3DConstrItem::Draw(CRenderer *pRend)
             item.eFrom = ePartType;
             pScreen->DrawItem(pRend, item);
 
-            pI3D->GetRenderer()->FlushBuffers();
             pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 1, 0);
-            pI3D->GetRenderer()->FlushBuffers();
 
             bDrawNoFrames = true;
         }
         else if (pScreen->IsItemInstruction(item.pItem))
         {
-            pI3D->GetRenderer()->FlushBuffers();
             rcTmp.left = 315;
             rcTmp.top = 215;
             rcTmp.right = 385;
@@ -3921,9 +3909,7 @@ BOOL CI3DConstrItem::Draw(CRenderer *pRend)
             item.eFrom = ePartType;
             pScreen->DrawItem(pRend, item);
 
-            pI3D->GetRenderer()->FlushBuffers();
             pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 1, 0);
-            pI3D->GetRenderer()->FlushBuffers();
 
             bIsInstr = true;
 

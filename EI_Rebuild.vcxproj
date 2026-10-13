@@ -298,7 +298,6 @@
     <ClCompile Include="Game\dx11\FakeDX7.cpp" />
     <ClCompile Include="Game\dx11\Surface.cpp" />
     <ClCompile Include="Game\dx11\Utils.cpp" />
-    <ClCompile Include="game\dx11\Vertex.cpp" />
     <ClCompile Include="Game\DXGeometryProcessor.cpp" />
     <ClCompile Include="Game\Effect.cpp" />
     <ClCompile Include="Game\EffectManager.cpp" />

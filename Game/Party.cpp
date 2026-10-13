@@ -523,10 +523,6 @@ int CParty::GetWagonItemIdx(CItem *pItem)
     {
         if (pItem == allWagonItems[i])
             return i;
-#if 0
-		if ( pItem->Compare( allWagonItems[i] ) )
-		  return i;
-#endif
     }
     return -1;
 }

@@ -65,7 +65,6 @@ void CI3DScreen::DrawTips(CRenderer *pRend)
     if (!pI3D->IsRendered())
         return;
 
-    pI3D->GetRenderer()->FlushBuffers();
     DWORD dwAlpha;
     pI3D->GetRenderer()->GetRenderState(D3DRENDERSTATE_ALPHAREF, &dwAlpha);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, 1);
@@ -75,7 +74,6 @@ void CI3DScreen::DrawTips(CRenderer *pRend)
         if (pObjects[i]->IsVisible())
             pObjects[i]->DrawTips(pRend);
 
-    pI3D->GetRenderer()->FlushBuffers();
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, dwAlpha);
 }
 /////////////////////////////////////////////////////////////////////////////////////

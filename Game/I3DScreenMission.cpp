@@ -2313,7 +2313,6 @@ void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectWeapons::Draw(CRenderer *pRend)
 {
-    pI3D->GetRenderer()->FlushBuffers();
     DWORD dwAlpha;
     DWORD dwAlphaEnable;
     pI3D->GetRenderer()->GetRenderState(D3DRENDERSTATE_ALPHAREF, &dwAlpha);
@@ -2324,7 +2323,6 @@ BOOL CI3DObjectWeapons::Draw(CRenderer *pRend)
 
     CI3DObject::Draw(pRend);
 
-    pI3D->GetRenderer()->FlushBuffers();
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, dwAlpha);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, dwAlphaEnable);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
@@ -5537,7 +5535,6 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
             rects[2].y1 = rcTmp1.top;
             rects[2].x2 = rcTmp1.right;
             rects[2].y2 = rcTmp1.bottom;
-            pI3D->GetRenderer()->FlushBuffers();
 
             pI3D->GetRenderer()->Clear(3, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
 
@@ -5578,7 +5575,6 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
             }
             pDrawUnit->ResetFlag(OBJ_USE_DEFAULT_FOG);
             pDrawUnit->ResetFlagsFromAllFigures(FIG_USE_DEFAULT_COLORS);
-            pI3D->GetRenderer()->FlushBuffers();
             pI3D->GetRenderer()->Clear(3, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
         }
 

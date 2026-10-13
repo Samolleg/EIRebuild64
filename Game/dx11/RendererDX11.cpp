@@ -40,8 +40,6 @@ bool CDX11::SetItemColorSum(bool active)
 {
     const bool previous = itemColorSum;
     itemColorSum = active;
-    GetConstantBuffers()->cb_ps_pixelshader.data.useSpecular =
-        active && fake_dx7.render_state[D3DRENDERSTATE_SPECULARENABLE];
     return previous;
 }
 
@@ -79,11 +77,7 @@ bool CDX11::SetRenderStates()
     IfFailedThrowHR(
         this->device->CreateBlendState(&blendDesc, blendState.ReleaseAndGetAddressOf()));
     this->deviceContext->OMSetBlendState(blendState.Get(), NULL, 0xFFFFFFFF);
-    bool alpha_test_enable = rs[D3DRENDERSTATE_ALPHATESTENABLE];
-    float alpharef = rs[D3DRENDERSTATE_ALPHAREF] / 256.;
 
-    bool useSpecular = itemColorSum && rs[D3DRENDERSTATE_SPECULARENABLE];
-    this->GetConstantBuffers()->cb_ps_pixelshader.data.useSpecular = useSpecular;
 
     D3DCULL cullState = (D3DCULL)rs[D3DRENDERSTATE_CULLMODE];
     if (cullState == D3DCULL::D3DCULL_NONE)
@@ -102,7 +96,6 @@ bool CDX11::SetRenderStates()
                                                         : this->depthStencilStateDisableWrite.Get(),
                                                     0);
     }
-    this->SetAlphaRef(alpha_test_enable ? alpharef : 0);
 
     return true;
 }
@@ -874,7 +867,3 @@ void CDX11::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d,
     IfFailedThrowHR(this->device->CreateTexture2D(ptex2d, 0, texture.ReleaseAndGetAddressOf()));
 }
 
-void CDX11::SetAlphaRef(float value)
-{
-    m_cbs->cb_ps_pixelshader.data.alphaRef = value;
-};

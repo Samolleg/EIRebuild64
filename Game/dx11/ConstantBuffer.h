@@ -12,18 +12,6 @@ public:
 // D3DCOLORVALUE = vec4 = 16
 // CPlot3D = D3DVECTOR = vec3 ...
 
-struct CLight11
-{
-    D3DLIGHT7 light;                  // structure defining the light
-    float fpAddHeight;                // additional height
-    float range2;                     // range*range
-    float rcpr_range2;                // 1.0f/range2
-    CPlot3D rd;                       // respect direction
-    D3DCOLORVALUE dcMaterialDiffuse;  // light color * material diffuse reflection
-    D3DCOLORVALUE dcMaterialSpecular; // light color * material specular reflection
-};
-// sizeof(D3DLIGHT7);
-
 class CLight;
 struct CLight11Packed
 {
@@ -41,24 +29,13 @@ struct CLight11Packed
     CLight11Packed(CLight &src);
 };
 
-constexpr int lightSize = sizeof(CLight11Packed);
 
 struct CB_VS_vertexshader
 {
-    DirectX::XMMATRIX camera;
-    DirectX::XMMATRIX projection;
-    DirectX::XMMATRIX clip;
-    DirectX::XMMATRIX translation;
-    DirectX::XMMATRIX scale;
-    DirectX::XMMATRIX translation2;
-    DirectX::XMMATRIX camera_proj_clip;
     DirectX::XMMATRIX ei_projspace;
-    DirectX::XMMATRIX ei_scrnspace;
-    DirectX::XMMATRIX model_to_world;
     D3DCOLORVALUE dcvAmbient;
     DWORD nlights;
     D3DVECTOR dvEmissive;
-    DirectX::XMFLOAT3 cameraPosition;
 };
 
 struct CB_VS_vertexlights
@@ -77,9 +54,7 @@ enum class EPS_AlphaMode
 struct CB_PS_pixelshader
 {
     DirectX::XMFLOAT4 fogColor;
-    float alphaRef;
     uint32_t alphaMode;
-    uint32_t useSpecular;
 };
 
 DirectX::XMMATRIX sh_to_xm(SHMatrix mat);

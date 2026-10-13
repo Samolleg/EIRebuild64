@@ -439,14 +439,12 @@ void CI3DScreenTutorial::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenTutorial::Draw(CRenderer *pRend)
 {
-    pI3D->GetRenderer()->FlushBuffers();
     DWORD dwAlpha;
     pI3D->GetRenderer()->GetRenderState(D3DRENDERSTATE_ALPHAREF, &dwAlpha);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, 1);
 
     CI3DScreen::Draw(pRend);
 
-    pI3D->GetRenderer()->FlushBuffers();
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, dwAlpha);
 
     return TRUE;

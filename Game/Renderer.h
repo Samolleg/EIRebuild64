@@ -205,7 +205,6 @@ public:
     // render triangle set functions
     BOOL RenderTriangleSet(STLVertex1 *pVertices, DWORD dwVertexCount, LPWORD pIndices,
                            DWORD dwIndexCount);
-    void FlushBuffers(){};
     // bind texture for rendering
     BOOL BindTexture(DWORD dwStage, CGameBase *pTexture);
     // bind texture for rendering
@@ -242,8 +241,6 @@ public:
     void SetProjectionMatrix(const SHMatrix &matrix);
     void SetProjectionMatrixOne();
     void SetProjectionMatrix();
-    void SetWorldMatrix(const SHMatrix &matrix);
-    void SetCameraPosition(const CPlot3D &pos);
 };
 /////////////////////////////////////////////////////////////////////////////////////
 extern CRenderer theRenderer;

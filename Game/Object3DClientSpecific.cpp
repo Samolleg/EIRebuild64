@@ -1080,8 +1080,6 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
                 // draw figure
                 {
                     pRend->SetProjectionMatrix();
-                    SHMatrix world = pGPU->GetMatrix(MAT_STACK_WORLDSPACE);
-                    pRend->SetWorldMatrix(world);
                 }
                 CRect rcFigureRect(0, 0, 0, 0);
                 bCheck = pRend->DrawFigure(pFigure, lights, sets[i]->matgroups[j]->lpMaterial, cFog,

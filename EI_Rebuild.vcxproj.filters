@@ -605,9 +605,6 @@
     <ClCompile Include="Game\dx11\RendererDX11.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
-    <ClCompile Include="game\dx11\Vertex.cpp">
-      <Filter>Sources\dx11</Filter>
-    </ClCompile>
     <ClCompile Include="Game\BinkVideo.cpp">
       <Filter>Sources</Filter>
     </ClCompile>

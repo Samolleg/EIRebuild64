@@ -246,7 +246,6 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
     CQuaternion rot;
     CRect rcTmp;
 
-    pI3D->GetRenderer()->FlushBuffers();
     pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 0, 0);
     if (bArmors)
     {
@@ -315,7 +314,6 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
     pDrawUnit->SetOrientation(rot);
 
     pDrawUnit->ResetFlag(OBJ_USE_DEFAULT_FOG);
-    pI3D->GetRenderer()->FlushBuffers();
     pRend->SetAmbientColor(oldamb);
 }
 /////////////////////////////////////////////////////////////////////////////////////

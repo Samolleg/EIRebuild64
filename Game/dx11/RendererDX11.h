@@ -134,7 +134,6 @@ public:
     {
         return dwIndex < static_cast<DWORD>(boundFigureTextures.size()) ? boundFigureTextures[dwIndex].Get() : nullptr;
     }
-    void SetAlphaRef(float value);
     void SetBackgroundColor(DWORD value);
     void SetFogColor(DWORD value);
     void ScreenShot();

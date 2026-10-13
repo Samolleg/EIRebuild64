@@ -976,16 +976,6 @@ void CRenderer::SetProjectionMatrix()
     this->GetConstantBuffers()->cb_vs_vertexshader.data.ei_projspace = sh_to_xm(matrix);
 }
 
-void CRenderer::SetWorldMatrix(const SHMatrix &matrix)
-{
-    this->GetConstantBuffers()->cb_vs_vertexshader.data.model_to_world = sh_to_xm(matrix);
-}
-
-void CRenderer::SetCameraPosition(const CPlot3D &pos)
-{
-    this->GetConstantBuffers()->cb_vs_vertexshader.data.cameraPosition = pos;
-}
-
 BOOL CRenderer::Clear(DWORD dwCount, LPD3DRECT lpRects, DWORD dwFlags, DWORD dwColor, D3DVALUE dvZ,
                       DWORD dwStencil)
 {

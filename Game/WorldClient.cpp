@@ -2918,8 +2918,6 @@ BOOL CWorldClient::Draw()
     if (!falloutProjection.IsActive()) falloutFrame.Reset();
     //
     AdjustLightingWithTime();
-    // flush all previos renders
-    pRend->FlushBuffers();
     // create camera matrix
     SHMatrix matrix;
     pGPU->CreateCameraMatrix(matrix, &theCamera);
@@ -3040,7 +3038,6 @@ BOOL CWorldClient::Draw()
                           OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
         pRend->SetTexturingAlphaMode(AM_DEFAULT);
         pTerrain->DrawBase(&theRenderer, true);
-        pRend->FlushBuffers();
     }
     // Prepare visibility, poses and picking before publication and commit.
     Prepare3DScene();
@@ -3098,19 +3095,14 @@ BOOL CWorldClient::Draw()
         pTerrain->SetClip(falloutFrame.IsActive() ? falloutFrame.LogicalCP().x : pCamera->GetCPX(),
                           falloutFrame.IsActive() ? falloutFrame.LogicalCP().y : pCamera->GetCPY(),
                           OwnedRender::E3DrawRadius(NConsole::LandscapeDrawRadius(), theInterface.GetWidth(), theInterface.GetHeight()));
-        // flush previous renders
-        pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
         pRend->SetTexturingAlphaMode(AM_VERTEX);
         pTerrain->DrawTransparent(&theRenderer);
-        pRend->FlushBuffers();
     }
     LMPTimePassed();
     // render effects
     if (CheckFlag(WC_RENDER_EFFECTS))
     {
-        // flush previous renders
-        pRend->FlushBuffers();
         pRend->SetTexturingAlphaMode(AM_MULTIPLY);
         // particles
         theRenderer.SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
@@ -3119,30 +3111,25 @@ BOOL CWorldClient::Draw()
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
         GetVisFogManager()->Draw(&theRenderer);
-        pRend->FlushBuffers();
         //        ;
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
         static_cast<CParticleManager *>(GetParticleManager())->Draw(&theRenderer);
-        pRend->FlushBuffers();
         // lightning
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         GetLightningManager()->Draw(&theRenderer);
-        pRend->FlushBuffers();
         // weather
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         weather.Draw(&theRenderer);
-        pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
     }
     pRend->SetTexturingAlphaMode(AM_VERTEX);
     LMPTimePassed();
     //
     DrawPolyLines();
-    pRend->FlushBuffers();
     pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
     // pop main and camera matrix
     pGPU->PopMatrix(MAT_STACK_VIEW2CLIP);
@@ -3157,62 +3144,7 @@ BOOL CWorldClient::Draw()
         // for (int i=0; i<10; ++i)
         pFlyingHP->Draw(&theRenderer);
         pRend->SetAddFogOn();
-        pRend->FlushBuffers();
         pRend->SetRenderState(D3DRENDERSTATE_ZENABLE, TRUE);
-    }
-
-    if (false)
-    {
-        using namespace DirectX;
-        using namespace SimpleMath;
-
-        /*CDX11* pDX11 = theInterface.GetD3D();
-
-        auto device = pDX11->GetDevice().Get();
-        auto dc = pDX11->GetDeviceContext().Get();
-
-        std::unique_ptr<PrimitiveBatch<VertexPositionColor>> batch;
-        batch = std::make_unique<PrimitiveBatch<VertexPositionColor>>(dc);
-
-        auto cam = GetCamera();
-        auto cp = cam->GetCP();
-
-        std::unique_ptr<BasicEffect> basicEffect;
-
-        basicEffect = std::make_unique<BasicEffect>(device);
-
-        DWORD screenWidth, screenHeight;
-        pDX11->GetCurrentMode(screenWidth, screenHeight);
-        basicEffect->SetProjection(
-            XMMatrixOrthographicOffCenterRH(0, screenWidth, screenHeight, 0, -1, 1));
-        basicEffect->SetVertexColorEnabled(true);
-
-        Microsoft::WRL::ComPtr<ID3D11InputLayout> inputLayout;
-        IfFailedThrowHR(
-            CreateInputLayoutFromEffect<VertexPositionColor>(device, basicEffect.get(),
-                                                    inputLayout.ReleaseAndGetAddressOf()));
-
-        auto states = pDX11->GetCommonStates();
-        dc->OMSetBlendState(states->Opaque(), Colors::White, 0xFFFFFFFF);
-        dc->OMSetDepthStencilState(states->DepthNone(), 0);
-        dc->RSSetState(states->CullNone());
-
-        basicEffect->Apply(dc);
-        dc->IASetInputLayout(inputLayout.Get());
-
-        batch->Begin();
-
-        VertexPositionColor v1(Vector3(0., screenHeight, 0.0f ), Colors::Yellow);
-        VertexPositionColor v2(Vector3(screenWidth, screenHeight, 0.0f), Colors::Yellow);
-        VertexPositionColor v3(Vector3(screenWidth/2, 0.0f, 0.0f), Colors::Yellow);
-
-        batch->DrawTriangle(v1, v2, v3);
-        batch->End();*/
-
-        // batch->Begin();
-        // VertexPositionColor v1(cp, { 0.5, 0, 0.0, 1.0 });
-        // VertexPositionColor v2(cp + CPlot3D(0.7, 0.7, -1.0), { 0., 0.5, 0.0, 1.0 });
-        // batch->End();
     }
 
     worldDraw.Complete();
@@ -3426,7 +3358,6 @@ BOOL CWorldClient::Prepare3DScene()
     DWORD dwCurrentLightTime = timeGetTime();
     CMapObject *pObject = 0;
     const SHMatrix &matCamera = pGPU->GetMatrix(MAT_STACK_CAMERA);
-    pRend->SetCameraPosition(theCamera.GetCP());
     // now we can test only this objects for visibility in the camera (against the current matrix
     // stack)
     NWorldClient::ClearLists();

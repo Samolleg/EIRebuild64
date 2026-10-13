@@ -156,17 +156,4 @@ void CDebugInfoSystem::Show(bool bShow)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-#if 0
-void CDebugInfoSystem::Draw( int x, int y, int xstep, int ystep, HDC hDC )
-{
-	std::map <std::string, std::string>::iterator it;
-	int i;
-
-	for ( i=0, it = datamap.begin(); it != datamap.end(); it++, i++ )
-	{
-		TextOut( hDC, x        , y + ystep*i, it->first.c_str() , it->first.length() );
-		TextOut( hDC, x + xstep, y + ystep*i, it->second.c_str(), it->second.length() );
-	}
-}
-#endif
 /////////////////////////////////////////////////////////////////////////////////////
