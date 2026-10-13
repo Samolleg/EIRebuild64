@@ -6,6 +6,7 @@
 #include "engine_bridge.h"
 #include "retained_static_scene.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 #include <map>
@@ -20,7 +21,9 @@ struct Sink {
     owned::Renderer* renderer = nullptr;
     owned::FixedState state{};
     owned::Renderer::NativeQueueCheckpoint checkpoint{};
+    owned::NativeGeometryResult batchFailure{};
     bool object = false;
+    bool batch = false;
     bool staticsFlushed = false;
     bool shadowsEnabled = true;
 };
@@ -28,6 +31,15 @@ Sink* self(void* context) noexcept { return static_cast<Sink*>(context); }
 bool lastFlushed = false;
 std::vector<std::int32_t> currentDrawn;   // sorted, this world draw only
 std::map<std::int32_t, const char*> currentOmissions;
+std::uint64_t batchRollbackReportEpoch = 0;
+void reportBatchFailure(const owned::NativeGeometryResult& result, const char* fallback) noexcept {
+    const auto epoch = owned::bridge_current_world_epoch();
+    if (!epoch || batchRollbackReportEpoch == epoch) return;
+    batchRollbackReportEpoch = epoch;
+    GameJournal::Event("RENDER", "world_visual_batch_rollback",
+        "operation=%s hr=%08lx", result.failure_operation ? result.failure_operation : fallback,
+        static_cast<unsigned long>(result.failure_hresult));
+}
 struct PoseFailureSummary {
     std::set<std::int32_t> ids;
     bool reported = false;
@@ -62,7 +74,7 @@ std::map<std::int32_t, bool> reportedVisuals;
 struct SecondaryVisual { std::uint64_t primary=0; std::shared_ptr<const owned::OwnedVisualSurface> surface; };
 std::map<std::int32_t,SecondaryVisual> secondaryVisuals;
 
-bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeGeometryResult& result) noexcept try {
+bool submitImpl(void* context, const owned::NativeGeometryView& view, owned::NativeGeometryResult& result) noexcept try {
     using namespace owned;
     Sink& sink = *self(context);
     Renderer& r = *sink.renderer;
@@ -109,7 +121,11 @@ bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeG
     if (view.prepared_submission) {
         const auto& submission=*view.prepared_submission;
         const auto secondary=secondaryVisuals.find(submission.identity.signed_id);
-        if(secondary!=secondaryVisuals.end())
+        // Match the proxy's bulk prepared-record route unless a wound layer
+        // is actually published. Unit entries are also published with an
+        // empty secondary surface, which is not a reason to split the pose
+        // GPU submission into per-part queue_native_owned calls.
+        if(secondary!=secondaryVisuals.end() && secondary->second.surface)
             return SUCCEEDED(r.queue_embedded_records(submission,sink.state,
                 secondary->second.primary,secondary->second.surface.get(),&result));
         return SUCCEEDED(r.queue_native_records(submission,sink.state,nullptr,&result));
@@ -117,8 +133,11 @@ bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeG
     if (view.wound_only) {
         const auto secondary=secondaryVisuals.find(view.prepared_identity.signed_id);
         if (secondary==secondaryVisuals.end() || !secondary->second.surface ||
-            secondary->second.surface->id==0)
+            secondary->second.surface->id==0) {
+            result.failure_hresult = E_INVALIDARG;
+            result.failure_operation = "embedded.wound_surface_unpublished";
             return false;
+        }
         return SUCCEEDED(r.queue_embedded_wound(view,sink.state,
             *secondary->second.surface,&result));
     }
@@ -132,8 +151,35 @@ bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeG
     if (!result.failure_operation) result.failure_operation = "embedded.exception";
     return false;
 }
-bool beginBatch(void*, owned::SemanticKind) noexcept { return true; }
-void endBatch(void* context, bool commit) noexcept { if (!commit) self(context)->renderer->discard_native(); }
+bool submit(void* context, const owned::NativeGeometryView& view, owned::NativeGeometryResult& result) noexcept {
+    const bool accepted = submitImpl(context, view, result);
+    if (!accepted) self(context)->batchFailure = result;
+    return accepted;
+}
+bool beginBatch(void* context, owned::SemanticKind) noexcept {
+    Sink& sink = *self(context);
+    if (sink.batch) return false;
+    sink.batchFailure = {};
+    const HRESULT hr = sink.renderer->flush_native();
+    if (FAILED(hr)) {
+        sink.batchFailure.failure_hresult = hr;
+        sink.batchFailure.failure_operation = "embedded.batch_begin_flush";
+        reportBatchFailure(sink.batchFailure, "embedded.batch_begin_rejected");
+        return false;
+    }
+    sink.batch = true;
+    return true;
+}
+void endBatch(void* context, bool commit) noexcept {
+    Sink& sink = *self(context);
+    if (!sink.batch) return;
+    if (!commit) {
+        sink.renderer->discard_native();
+        reportBatchFailure(sink.batchFailure, "embedded.batch_rejected");
+    }
+    sink.batch = false;
+    sink.batchFailure = {};
+}
 bool beginObject(void* context) noexcept {
     Sink& sink = *self(context);
     if (sink.object || !sink.renderer->checkpoint_native(sink.checkpoint)) return false;
@@ -240,8 +286,32 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     const auto epoch = owned::bridge_current_world_epoch();
     if (!omitted.empty() && epoch && omissionReportEpoch != epoch) {
         omissionReportEpoch = epoch;
+        std::map<std::string, std::pair<std::size_t, std::vector<std::int32_t>>> summary;
+        for (const auto& item : omitted) {
+            if (item.id <= 0 || !item.reason) continue;
+            auto& reason = summary[item.reason];
+            ++reason.first;
+            if (reason.second.size() < 5) reason.second.push_back(item.id);
+        }
+        char details[384]{};
+        std::size_t detailsUsed = 0;
+        for (const auto& entry : summary) {
+            char ids[64]{};
+            std::size_t used = 0;
+            for (const auto id : entry.second.second) {
+                const int written = std::snprintf(ids + used, sizeof(ids) - used,
+                    "%s%d", used ? "," : "", id);
+                if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(ids) - used) break;
+                used += static_cast<std::size_t>(written);
+            }
+            const int written = std::snprintf(details + detailsUsed, sizeof(details) - detailsUsed,
+                "%s%s=%llu ids=%s", detailsUsed ? ";" : "", entry.first.c_str(),
+                static_cast<unsigned long long>(entry.second.first), ids);
+            if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(details) - detailsUsed) break;
+            detailsUsed += static_cast<std::size_t>(written);
+        }
         GameJournal::Event("RENDER", "world_visual_omission",
-            "id=%d owner=c56 reason=%s", omitted.front().id, omitted.front().reason);
+            "owner=c56 %s", detailsUsed ? details : "count=0");
     }
     reportPoseFailures(epoch);
     ranThisDraw = true;
