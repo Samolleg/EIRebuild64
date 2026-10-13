@@ -811,10 +811,11 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
         OwnedRender::E1ReportOwnedVisual(objectId);
         return true;
     }
-    if(!pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE) ||
-       !pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
+    const bool haveWorldMatrix=pGeometryProcessor->IsHaveMatrix(MAT_STACK_WORLDSPACE);
+    const bool haveProjectionMatrix=pGeometryProcessor->IsHaveMatrix(MAT_STACK_PROJSPACE);
+    if(!haveProjectionMatrix || (!haveWorldMatrix && objectId!=0)) {
         if(campDraw)pDX11->SubmitC56CampFigure({});
-        else pDX11->SubmitC56Figure({});
+        else pDX11->ReportC56FigureNoMatrix();
         return true;
     }
 
@@ -848,9 +849,11 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     memcpy(view.lighting.material_diffuse.data(),material.material_diffuse,sizeof(material.material_diffuse));
     memcpy(view.lighting.emissive.data(),material.emissive,sizeof(material.emissive));
     memcpy(view.lighting.specular.data(),material.material_specular,sizeof(material.material_specular));
-    const SHMatrix& world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
     const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
     memcpy(view.object_to_clip.data(),&clip,sizeof(clip));
+    SHMatrix world;
+    if(haveWorldMatrix)world=pGeometryProcessor->GetMatrix(MAT_STACK_WORLDSPACE);
+    else Identity(world); // Interface figures use the legacy model-space lighting path.
     memcpy(view.lighting.object_to_world.data(),&world,sizeof(world));
     view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(morphs);
     view.morph_count=morphCount;

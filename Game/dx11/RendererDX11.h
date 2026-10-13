@@ -67,6 +67,10 @@ private:
     std::uint64_t frameSerial = 0;
     std::uint64_t c56WorldFigurePrimitives = 0;
     std::uint64_t c56WorldFigureQueueFailed = 0;
+    std::uint64_t c56FigureSkippedNoMatrix = 0;
+    std::uint64_t c56FigureSkippedNoFrame = 0;
+    std::uint64_t c56FigureSkippedRenderError = 0;
+    HRESULT c56FigureLastRenderError = S_OK;
     OwnedRendererClient ownedRenderer;
     std::uint64_t boundParticleSurface = 0;
     bool ownedWorldActive = false;
@@ -107,6 +111,8 @@ public:
     bool SubmitC56Triangles(const owned::NativeGeometryView& view);
     bool SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
+    void ReportC56FigureNoMatrix();
+    void ReportC56FigureSkipSummary();
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
     bool SubmitC56CampFigure(const owned::NativeGeometryView& view);
     bool SubmitC56CampPopup(owned::CampRenderRequest,owned::CampPopupDraw,void*);

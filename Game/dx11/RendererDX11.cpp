@@ -252,8 +252,11 @@ bool SubmitScreenRectangleToC56(void* context,
 bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
 {
     HRESULT hr=E_UNEXPECTED;
-    if(rendererFacade && rendererFacade->FrameActive() && source.positions &&
-       source.normals && source.components && source.indices) {
+    if(!rendererFacade || !rendererFacade->FrameActive()) {
+        ++c56FigureSkippedNoFrame;
+        return false;
+    }
+    if(source.positions && source.normals && source.components && source.indices) {
         auto view=source;
         owned::FixedState state = CaptureC56MaterialState();
         state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
@@ -300,9 +303,28 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
     }
     if(SUCCEEDED(hr)){++c56WorldFigurePrimitives;return true;}
     ++c56WorldFigureQueueFailed;
-    static bool reported=false;
-    if(!reported){reported=true;GameJournal::Event("RENDER","figure_skipped","owner=c56 hr=%08lx",static_cast<unsigned long>(hr));}
+    ++c56FigureSkippedRenderError;
+    c56FigureLastRenderError=hr;
     return false;
+}
+void CDX11::ReportC56FigureNoMatrix()
+{
+    ++c56FigureSkippedNoMatrix;
+}
+void CDX11::ReportC56FigureSkipSummary()
+{
+    if(!c56FigureSkippedNoMatrix && !c56FigureSkippedNoFrame && !c56FigureSkippedRenderError)
+        return;
+    GameJournal::Event("RENDER","figure_skipped",
+        "owner=c56 no_matrix=%llu no_frame=%llu render_error=%llu hr=%08lx",
+        static_cast<unsigned long long>(c56FigureSkippedNoMatrix),
+        static_cast<unsigned long long>(c56FigureSkippedNoFrame),
+        static_cast<unsigned long long>(c56FigureSkippedRenderError),
+        static_cast<unsigned long>(c56FigureLastRenderError));
+    c56FigureSkippedNoMatrix=0;
+    c56FigureSkippedNoFrame=0;
+    c56FigureSkippedRenderError=0;
+    c56FigureLastRenderError=S_OK;
 }
 bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 {
@@ -368,6 +390,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 
 void CDX11::BeginFrame()
 {
+    ReportC56FigureSkipSummary();
     IfFailedThrowHR(rendererFacade->BeginFrame());
     owned::bridge_set_screen_rectangle_sink(this, &SubmitScreenRectangleToC56);
     frameTiming.Begin();
@@ -495,6 +518,7 @@ void CDX11::EndWorld()
         return renderer.composite_world();
     });
     IfFailedThrowHR(composite);
+    ReportC56FigureSkipSummary();
     GameJournal::Event("RENDER", "world_model_owner",
         "owner=c56 path=c56_native_queue submitted=%llu skipped=%llu",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
@@ -513,6 +537,7 @@ void CDX11::RefreshOwnedTargets()
 
 void CDX11::EndFrame(bool present)
 {
+    ReportC56FigureSkipSummary();
     owned::bridge_set_screen_rectangle_sink(nullptr, nullptr);
     if (!present) {
         const HRESULT discarded = rendererFacade->DiscardFrame();
