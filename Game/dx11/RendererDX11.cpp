@@ -259,6 +259,10 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
     if(source.positions && source.normals && source.components && source.indices) {
         auto view=source;
         owned::FixedState state = CaptureC56MaterialState();
+        // Interface figures (object_id 0), including the global map, must not
+        // inherit the active world's fog state from the shared device frame.
+        if (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0)
+            state.render[D3DRENDERSTATE_FOGENABLE] = FALSE;
         state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
         const auto& buffers=*GetConstantBuffers();
         const auto& pixel=buffers.cb_ps_pixelshader.data;
@@ -315,6 +319,11 @@ void CDX11::ReportC56FigureSkipSummary()
 {
     if(!c56FigureSkippedNoMatrix && !c56FigureSkippedNoFrame && !c56FigureSkippedRenderError)
         return;
+    static ULONGLONG lastSummaryTick = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (lastSummaryTick && now - lastSummaryTick < 5000)
+        return;
+    lastSummaryTick = now;
     GameJournal::Event("RENDER","figure_skipped",
         "owner=c56 no_matrix=%llu no_frame=%llu render_error=%llu hr=%08lx",
         static_cast<unsigned long long>(c56FigureSkippedNoMatrix),
