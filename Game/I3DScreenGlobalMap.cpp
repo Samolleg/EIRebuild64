@@ -554,7 +554,7 @@ void CI3DScreenGlobalMap::OnIdle()
         srd.pSysMem = buffer.get();
         srd.SysMemPitch = pitch;
 
-        pSurface->UpdateTexture(0, nullptr, &srd);
+        pSurface->UpdateTexture(0, nullptr, &srd, MMP_FORMAT_5650);
     }
     if (bRButDown)
         theCursor.SetMode(CT_CAMERA);

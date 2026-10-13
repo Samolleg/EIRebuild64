@@ -18,6 +18,7 @@ private:
     DWORD dwSurfaceHeight; // surface height
     DWORD dwSurfaceBPP;    // surface bit depth
     DXGI_FORMAT tfFormat = DXGI_FORMAT::DXGI_FORMAT_UNKNOWN;
+    bool opaquePadding = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture = 0;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> textureView = 0;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelReadbackStaging;
@@ -58,7 +59,8 @@ public:
         bool interfaceSpace = true, bool nativeCanvas = true);
     HRESULT BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
                                  LPDDBLTFX pDDBltFx = 0);
-    void UpdateTexture(UINT subresource_index, D3D11_BOX *region, D3D11_SUBRESOURCE_DATA *srd);
+    void UpdateTexture(UINT subresource_index, D3D11_BOX *region, D3D11_SUBRESOURCE_DATA *srd,
+                       DWORD sourceMmpFormat = MMP_FORMAT_8888);
     // surface clearing
     HRESULT Clear(DWORD dwColorFill);
     // load picture
@@ -86,4 +88,4 @@ public:
         return textureView;
     };
     Microsoft::WRL::ComPtr<ID3D11Texture2D> GetTexture() const { return texture; };
-};
+};

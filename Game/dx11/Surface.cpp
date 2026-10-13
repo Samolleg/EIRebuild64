@@ -13,6 +13,7 @@
 #undef max
 #endif
 #include "../OwnedRender/E1SurfaceFacade.h"
+#include "MmpRgbToBgra.h"
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
 {
@@ -170,6 +171,19 @@ size_t BitsPerPixel(DXGI_FORMAT fmt)
     }
 }
 
+DXGI_FORMAT OwnedRgbSurfaceFormat(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_B5G6R5_UNORM:
+    case DXGI_FORMAT_B5G5R5A1_UNORM:
+    case DXGI_FORMAT_B4G4R4A4_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    default:
+        return format;
+    }
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, DWORD dwWidth, DWORD dwHeight)
     : pDX11(pDXDirectDraw)
@@ -208,7 +222,10 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, D3D11_TEXTURE2D_DESC *ptex2d)
     , textureView(0)
 {
     ownedSurface.BeginWrite();
-    pDX11->CreateTexture(ptex2d, texture);
+    D3D11_TEXTURE2D_DESC normalized = *ptex2d;
+    opaquePadding = normalized.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
+    normalized.Format = OwnedRgbSurfaceFormat(normalized.Format);
+    pDX11->CreateTexture(&normalized, texture);
     pDX11->CreateShaderResource(texture, textureView);
 
     ExtractSurfaceParams();
@@ -302,8 +319,19 @@ int CopyToSurface(CDXGISurface *pDXDDS, const SMMPFileHeader *pHdr, DWORD dwFrom
         int sub_index = D3D11CalcSubresource(i, 0, pHdr->dwMipMapLevel);
 
         D3D11_SUBRESOURCE_DATA srd = { 0 };
-        srd.pSysMem = lpData;
-        srd.SysMemPitch = pHdr->dwBitDepth * dwNewSizeX / 8;
+        std::vector<DWORD> converted;
+        const bool packedRgb = (pHdr->dwFormat != MMP_FORMAT_8888 || pHdr->dwABits == 0) &&
+            (pHdr->dwBitDepth == 16 || (pHdr->dwBitDepth == 32 && pHdr->dwABits == 0)) &&
+            (pHdr->dwFormat & 0x00FFFFFF) != MMP_FORMAT_DXTN;
+        if (packedRgb) {
+            if (!MmpRgbToBgra::Convert(*pHdr, lpData, size_t(dwNewSizeX) * dwNewSizeY, converted))
+                return nTotalSize;
+            srd.pSysMem = converted.data();
+            srd.SysMemPitch = dwNewSizeX * sizeof(DWORD);
+        } else {
+            srd.pSysMem = lpData;
+            srd.SysMemPitch = pHdr->dwBitDepth * dwNewSizeX / 8;
+        }
         // alex_k: no idea why this check is needed. How does EI/DX7 handle it? Is pDX11 data
         // sparse whereas dx7 is packed? this loads MIPs correctly too (if you place break, all mips
         // > 1 become black)
@@ -329,8 +357,9 @@ BOOL CDXGISurface::Load(const SMMPFileHeader *pHdr, bool bInVideo)
     // check for header valids
     if (!pHdr)
         return ReportError("Can't load picture from NULL pointer.\n");
-    else if (pHdr->dwFormat != MMP_FORMAT_8888)
-        return ReportError("Can't load picture from non-8888 format.\n");
+    else if (pHdr->dwFormat != MMP_FORMAT_8888 && pHdr->dwBitDepth != 16 &&
+             !(pHdr->dwBitDepth == 32 && pHdr->dwABits == 0))
+        return ReportError("Can't load picture from unsupported RGB format.\n");
 
     D3D11_TEXTURE2D_DESC tex2d;
     pDX11->DefaultSurfaceDesc(&tex2d);
@@ -669,10 +698,44 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
         });
 }
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
-                                 D3D11_SUBRESOURCE_DATA *srd)
+                                 D3D11_SUBRESOURCE_DATA *srd, DWORD sourceMmpFormat)
 {
     ownedSurface.BeginWrite();
-    pDX11->UpdateTexture(this->texture.Get(), subresource_index, region, srd);
+    D3D11_TEXTURE2D_DESC destination = {};
+    texture->GetDesc(&destination);
+    if (destination.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        (sourceMmpFormat != MMP_FORMAT_8888 || opaquePadding)) {
+        SMMPFileHeader format;
+        format.InitializeDefaultFormat(sourceMmpFormat);
+        const UINT left = region ? region->left : 0;
+        const UINT top = region ? region->top : 0;
+        const UINT width = region ? region->right - region->left : destination.Width;
+        const UINT height = region ? region->bottom - region->top : destination.Height;
+        if (srd && srd->pSysMem && width && height) {
+            const size_t sourceBytesPerPixel = format.dwBitDepth / 8;
+            const size_t sourcePitch = srd->SysMemPitch ? srd->SysMemPitch : width * sourceBytesPerPixel;
+            std::vector<DWORD> converted(size_t(width) * height);
+            std::vector<DWORD> convertedRow;
+            for (UINT row = 0; row < height; ++row) {
+                if (!MmpRgbToBgra::Convert(format,
+                    static_cast<const BYTE*>(srd->pSysMem) + size_t(row) * sourcePitch,
+                    width, convertedRow)) {
+                    ownedSurface.Complete(texture.Get());
+                    return;
+                }
+                if (opaquePadding)
+                    for (DWORD& pixel : convertedRow) pixel |= 0xff000000u;
+                memcpy(converted.data() + size_t(row) * width, convertedRow.data(), width * sizeof(DWORD));
+            }
+            D3D11_SUBRESOURCE_DATA normalized = *srd;
+            normalized.pSysMem = converted.data();
+            normalized.SysMemPitch = width * sizeof(DWORD);
+            D3D11_BOX normalizedRegion = {left, top, 0, left + width, top + height, 1};
+            pDX11->UpdateTexture(texture.Get(), subresource_index, &normalizedRegion, &normalized);
+        }
+    } else {
+        pDX11->UpdateTexture(this->texture.Get(), subresource_index, region, srd);
+    }
     ownedSurface.Complete(texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////

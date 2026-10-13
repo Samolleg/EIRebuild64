@@ -17,6 +17,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "dx11/Utils.h"
 #include "dx11/Surface.h"
+#include "dx11/MmpRgbToBgra.h"
 
 void CTexture::SetupTextureFlags(D3D11_TEXTURE2D_DESC *tex2d)
 {
@@ -277,9 +278,20 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
         int sub_index = i - int(dwFromLevel);
 
         D3D11_SUBRESOURCE_DATA srd = { 0 };
-        srd.pSysMem = lpData;
+        std::vector<DWORD> converted;
+        const bool packedRgb = (pHdr->dwFormat != MMP_FORMAT_8888 || pHdr->dwABits == 0) &&
+            (pHdr->dwBitDepth == 16 || (pHdr->dwBitDepth == 32 && pHdr->dwABits == 0)) &&
+            (pHdr->dwFormat & 0x00FFFFFF) != MMP_FORMAT_DXTN;
+        if (packedRgb) {
+            if (!MmpRgbToBgra::Convert(*pHdr, lpData, size_t(dwNewSizeX) * dwNewSizeY, converted))
+                return nTotalSize;
+            srd.pSysMem = converted.data();
+            srd.SysMemPitch = dwNewSizeX * sizeof(DWORD);
+        } else {
+            srd.pSysMem = lpData;
+            srd.SysMemPitch = pHdr->dwBitDepth * dwNewSizeX / 8;
+        }
         int linePitch = pHdr->dwBitDepth * dwNewSizeX / 8;
-        srd.SysMemPitch = linePitch;
         // alex_k: the original just uses ^ pitch for loading into surface.
         // no idea why additional checks for DXT[n] are needed. How does EI/DX7 handle it?
         // Is pDX11 data sparse whereas dx7 is packed?

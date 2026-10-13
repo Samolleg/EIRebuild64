@@ -96,7 +96,7 @@ static bool PasteModInterfaceIcon(CTexture *texture, LPCTSTR name, int size, int
     D3D11_SUBRESOURCE_DATA data = {};
     data.pSysMem = blank.data();
     data.SysMemPitch = size * sizeof(WORD);
-    texture->GetSurface()->UpdateTexture(0, &region, &data);
+    texture->GetSurface()->UpdateTexture(0, &region, &data, MMP_FORMAT_5551);
     static std::set<std::string> reported;
     if (reported.size() < 32 && reported.insert((LPCSTR)resource).second)
         ReportWarning("Missing HD interface icon %s", (LPCSTR)resource);

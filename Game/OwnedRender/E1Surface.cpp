@@ -28,17 +28,10 @@ bool describe(ID3D11Texture2D* texture, owned::OwnedVisualSurface& value) noexce
     switch (d.Format) {
     case DXGI_FORMAT_BC1_UNORM: f.dwFlags = DDPF_FOURCC; f.dwFourCC = MAKEFOURCC('D','X','T','1'); value.pitch = ((d.Width+3)/4)*8; break;
     case DXGI_FORMAT_BC2_UNORM: f.dwFlags = DDPF_FOURCC; f.dwFourCC = MAKEFOURCC('D','X','T','3'); value.pitch = ((d.Width+3)/4)*16; break;
-    case DXGI_FORMAT_B5G6R5_UNORM:
-        f.dwRGBBitCount = 16; f.dwRBitMask = 0xf800; f.dwGBitMask = 0x07e0; f.dwBBitMask = 0x001f; value.pitch = d.Width*2; value.alpha_fully_opaque = true; break;
-    case DXGI_FORMAT_B5G5R5A1_UNORM:
-        f.dwRGBBitCount = 16; f.dwRBitMask = 0x7c00; f.dwGBitMask = 0x03e0; f.dwBBitMask = 0x001f; f.dwRGBAlphaBitMask = 0x8000; value.pitch = d.Width*2; break;
-    case DXGI_FORMAT_B4G4R4A4_UNORM:
-        f.dwRGBBitCount = 16; f.dwRBitMask = 0x0f00; f.dwGBitMask = 0x00f0; f.dwBBitMask = 0x000f; f.dwRGBAlphaBitMask = 0xf000; value.pitch = d.Width*2; break;
+    case DXGI_FORMAT_BC3_UNORM: f.dwFlags = DDPF_FOURCC; f.dwFourCC = MAKEFOURCC('D','X','T','5'); value.pitch = ((d.Width+3)/4)*16; break;
     case DXGI_FORMAT_B8G8R8A8_UNORM:
-    case DXGI_FORMAT_B8G8R8X8_UNORM:
         f.dwRGBBitCount = 32; f.dwRBitMask = 0xff0000; f.dwGBitMask = 0x00ff00; f.dwBBitMask = 0x0000ff;
-        f.dwRGBAlphaBitMask = d.Format == DXGI_FORMAT_B8G8R8A8_UNORM ? 0xff000000 : 0;
-        value.pitch = d.Width*4; value.alpha_fully_opaque = f.dwRGBAlphaBitMask == 0; break;
+        f.dwRGBAlphaBitMask = 0xff000000; value.pitch = d.Width*4; break;
     default: return false;
     }
     if (f.dwRGBAlphaBitMask) f.dwFlags |= DDPF_ALPHAPIXELS;

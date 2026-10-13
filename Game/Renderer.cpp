@@ -735,11 +735,12 @@ DXGI_FORMAT TextureFormatFromMMPFormat(DWORD mmpFormat)
     case MMP_FORMAT_DXT3:
         return DXGI_FORMAT_BC2_UNORM;
     case MMP_FORMAT_5650:
-        return DXGI_FORMAT_B5G6R5_UNORM;
+    case MMP_FORMAT_5550:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case MMP_FORMAT_5551:
-        return DXGI_FORMAT_B5G5R5A1_UNORM;
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case MMP_FORMAT_4444:
-        return DXGI_FORMAT_B4G4R4A4_UNORM;
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     case MMP_FORMAT_8888:
         return DXGI_FORMAT_B8G8R8A8_UNORM;
     default:

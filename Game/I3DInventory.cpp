@@ -223,7 +223,7 @@ bool CTextureLRUAllocator::EnsureReady(CTexture *pTex)
         D3D11_SUBRESOURCE_DATA data = {0};
         data.pSysMem = recipe.uploadedPixels.get();
         data.SysMemPitch = 2 * recipe.sourceWidth;
-        pTex->GetSurface()->UpdateTexture(0, &region, &data);
+        pTex->GetSurface()->UpdateTexture(0, &region, &data, MMP_FORMAT_5551);
     }
     restoring.ready = true;
     return true;

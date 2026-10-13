@@ -1048,7 +1048,7 @@ bool PasteTexture(LPTEXTURE pDstTex, LPCTSTR pszTexName, int nSrcSizeX, int nSrc
     int bpp = 16;
     srd.SysMemPitch = bpp * nSrcSizeX / 8;
 
-    pSurface->UpdateTexture(0, &region, &srd);
+    pSurface->UpdateTexture(0, &region, &srd, MMP_FORMAT_5551);
     ((CTextureManager *)(theWorld.GetTextureManager()))->CloseAllFiles();
     // Optional inventory owner retains the exact pixels used by this upload.
     if (uploadedPixels) *uploadedPixels = std::move(pSixteenBit);
