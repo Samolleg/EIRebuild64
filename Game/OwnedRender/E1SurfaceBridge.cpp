@@ -213,9 +213,27 @@ HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
     bool native_canvas) noexcept try {
     static E1PerfCounter counter{"ui_blit_total"};
     E1PerfScope timing(counter);
+    if (!device || !context || !id) return E_INVALIDARG;
+    Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
+    context->GetDevice(&contextDevice);
+    if (contextDevice.Get() != device) return E_INVALIDARG;
+    const auto value = E1SurfaceValue(id);
+    if (!value) return E_HANDLE;
     owned::SurfaceImage image;
-    const HRESULT converted = E1SurfaceImage(device, context, id, image);
-    if (FAILED(converted)) return converted;
-    return renderer.blit(image, destination, source, color_key, interface_space, native_canvas);
+    HRESULT hr = E1ResolveSurface(nullptr, device, id, value->generation, image.texture);
+    if (FAILED(hr)) return hr;
+    image.id = value->id; image.generation = value->generation;
+    image.width = value->width; image.height = value->height;
+    image.pitch = value->pitch; image.format = value->format;
+    hr = device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv);
+    if (FAILED(hr)) return hr;
+    // Borrow the published GPU image; the source owner retains its accounting.
+    // The existing GPU blit handles clipping, scaling, opaque copies and keys.
+    image.gpu_captured = true;
+    hr = renderer.blit(image, destination, source, color_key, interface_space, native_canvas);
+    if (FAILED(hr)) return hr;
+    // Submit before the host can mutate this texture again. Unlike the old CPU
+    // snapshot, a borrowed texture cannot safely wait for a later UI flush.
+    return renderer.flush_ui();
 } catch (...) { return E_FAIL; }
 }
