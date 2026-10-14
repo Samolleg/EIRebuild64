@@ -9026,7 +9026,20 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   std::shared_ptr<const OwnedVisualSurface> surface;
   if(!bridge_terrain_atlas(material,surface)||!surface)continue;
   ID3D11Texture2D* source=nullptr;UINT source_slice=0;
-  for(const auto& entry:native_texture_arrays_){
+  // Embedded terrain publishes immutable surfaces. Their array slots are
+  // keyed by GPU backing, not by surface id, and carry generation 1. Resolve
+  // the original uploaded texture by the same key as get_native_owned_texture.
+  const std::string surface_key="surface:"+std::to_string(surface->id);
+  for(const char* mips:{"|mips=full","|mips=authored"}){
+   const auto found=native_owned_textures_.find(surface_key+mips);
+   if(found!=native_owned_textures_.end()&&found->second.generation==surface->generation&&found->second.texture){
+    source=found->second.texture.Get();break;
+   }
+  }
+  // Retail surfaces use the mutable array cache. Its id namespace must not
+  // be confused with immutable GPU backing ids, even when numbers coincide.
+  if(!source)for(const auto& entry:native_texture_arrays_){
+   if(entry.first.immutable_values)continue;
    for(const auto& page:entry.second){
     const auto found=page.slots.find(surface->id);
     if(found!=page.slots.end()&&found->second.generation==surface->generation){
@@ -9038,6 +9051,14 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   if(!source)continue; // not drawn yet: the band keeps the painted colour meanwhile
   hr=copy_contact_atlas(source,source_slice,material,contact_maps_);
   if(FAILED(hr))return hr;
+  if(hr==S_OK){
+   char detail[224];std::snprintf(detail,sizeof(detail),
+    "epoch=%llu material=%u surface=%llu generation=%llu ready=%016llx pending=%016llx",
+    static_cast<unsigned long long>(bridge_current_world_epoch()),material,
+    static_cast<unsigned long long>(surface->id),static_cast<unsigned long long>(surface->generation),
+    static_cast<unsigned long long>(contact_maps_.ready),static_cast<unsigned long long>(contact_maps_.pending));
+   bridge_report_event("contact_terrain_atlas",detail);
+  }
   if(hr==S_FALSE&&!contact_incompatible_logged_){
    contact_incompatible_logged_=true;
    bridge_append_probe_event("contact_blend_atlas_incompatible","terrain atlas format or dimensions differ; affected contact art omitted");
