@@ -246,7 +246,9 @@ void E4CampAccess::PrepareGrid(CI3DObjectInventoryItems* p){
 }
 bool E4CampAccess::TipInside(CI3DObject* p,int index,POINT physical,bool& inside){
     if(!Active()||RoleOf(p)==Role::none)return false;
-    inside=Hit(p,physical)==index;return true;
+    // Mode buttons already publish their description in the ordinary card.
+    // A second delayed native tooltip would cover the header and repeat it.
+    inside=!(RoleOf(p)==Role::root&&index>=4&&index<12)&&Hit(p,physical)==index;return true;
 }
 int E4CampAccess::First(CI3DObjectInventoryItems* p){
     const int cols=Layout().grid_columns(vendor(p)),rows=Layout().grid_rows(vendor(p));
