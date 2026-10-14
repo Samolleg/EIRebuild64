@@ -2,7 +2,6 @@
 #include "E1World.h"
 #include "E1Scene.h"
 #include "E1Surface.h"
-#include "owned_resource_runtime.h"
 #include "world_mist_grid.h"
 #include <cmath>
 
@@ -285,8 +284,7 @@ bool bridge_ambient_world_source(AmbientWorldSource& output) noexcept {
     // server loader. Pair it with this terrain only when both name the same MPR.
     auto& scene = OwnedRender::E1Scene();
     if (scene.CurrentWorld(worldIdentity)) {
-        // MOB assets belong to the loader runtime, not the client visual-membership scene.
-        const auto mapSource = retained_static_terrain_source_snapshot();
+        const auto mapSource = scene.Scene().terrain_source_snapshot();
         if (mapSource.map && mapSource.map->terrain &&
             mapSource.map->terrain_resource == source.terrain->project_resource)
             output.map = mapSource.map;
