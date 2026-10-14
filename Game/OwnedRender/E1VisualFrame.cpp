@@ -267,15 +267,25 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     sink.state = state;
     sink.shadowsEnabled = renderer.native_shadows_enabled() || renderer.native_point_shadows_enabled();
     inputs.scene_flags = (inputs.scene_flags & ~0x200u) | (sink.shadowsEnabled ? 0x200u : 0u);
+    struct TerrainContext {
+        owned::Renderer& renderer;
+        const owned::FixedState& state;
+        const std::array<float, 16>& worldToClip;
+    } terrainContext{renderer, state, host.worldToClip};
     owned::RetainedTerrainSourceSnapshot terrain;
     if (host.sceneFlags & 0x100u) {
         E1ShadowTerrain(inputs, terrain);
         inputs.draw_terrain = [](void* context) -> bool {
+            auto& terrain = *static_cast<TerrainContext*>(context);
             E1TerrainSubmission result;
-            return SUCCEEDED(E1SubmitTerrainPass(*static_cast<owned::Renderer*>(context), false, result)) &&
-                result.completed;
+            return SUCCEEDED(E1SubmitTerrainPass(terrain.renderer, false, result)) &&
+                result.completed &&
+                // Adopt streamed neighbours and draw their opaque terrain/objects
+                // before world figures. Their water stays in composite_world.
+                SUCCEEDED(terrain.renderer.flush_native_static_terrain(
+                    terrain.state, terrain.worldToClip));
         };
-        inputs.terrain_context = &renderer;
+        inputs.terrain_context = &terrainContext;
     }
     renderer.set_surface_texture_resolver(&E1ResolveSurface, nullptr);
     owned::bridge_set_native_geometry_sink(&sink, &submit, &beginBatch, &endBatch, &beginObject, &endObject,
