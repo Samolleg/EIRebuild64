@@ -44,13 +44,6 @@ struct CB_VS_vertexlights
     CLight11Packed lights[16];
 };
 
-enum class EPS_AlphaMode
-{
-    am_texture = 0,
-    am_multiply = 1,
-    am_vertex = 2
-};
-
 struct CB_PS_pixelshader
 {
     DirectX::XMFLOAT4 fogColor;

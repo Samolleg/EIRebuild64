@@ -32,26 +32,12 @@ using Microsoft::WRL::ComPtr;
 float G_CLEAR_DEPTH_VALUE = 1.0;
 D3D11_CULL_MODE G_CULL_MODE = D3D11_CULL_MODE::D3D11_CULL_BACK;
 D3D11_COMPARISON_FUNC G_DEPTH_FUNC = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_LESS_EQUAL;
-const int G_BUFFER_QUALITY = 0; // default 0
-const int G_BUFFER_SAMPLES = 1; // default 1
-const int G_VSYNC = 0;
 
 bool CDX11::SetItemColorSum(bool active)
 {
     const bool previous = itemColorSum;
     itemColorSum = active;
     return previous;
-}
-
-bool CDX11::RenderStateCheck()
-{
-    bool res = fake_dx7.render_state == fake_dx7_prev.render_state;
-    if (!res)
-    {
-        SetRenderStates();
-    }
-    fake_dx7_prev.render_state = fake_dx7.render_state;
-    return res;
 }
 
 bool CDX11::SetRenderStates()
@@ -638,11 +624,9 @@ CDX11::~CDX11()
         this->deviceContext->Flush();
     }
     this->deviceContext.Reset();
-    // ReportLiveObjects();
     depthStencilBuffer.Reset();
     depthStencilState.Reset();depthStencilStateDisableWrite.Reset();depthStencilStateDisable.Reset();
-    blendState.Reset();blendStateDisable.Reset();rasterizerState.Reset();rasterizerStateNoCull.Reset();
-    blackTextureView.Reset();blackTexture.Reset();myTexture.Reset();myTexture2.Reset();
+    blendState.Reset();rasterizerState.Reset();rasterizerStateNoCull.Reset();
     this->device.Reset();
     ownedRenderer.Shutdown();
 }
@@ -719,14 +703,6 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     blendDesc.RenderTarget[0] = rtbd;
     IfFailedThrowHR(this->device->CreateBlendState(&blendDesc, this->blendState.GetAddressOf()));
 
-    rtbd = { 0 };
-    rtbd.BlendEnable = false;
-
-    blendDesc = { 0 };
-    blendDesc.RenderTarget[0] = rtbd;
-    IfFailedThrowHR(
-        this->device->CreateBlendState(&blendDesc, this->blendStateDisable.GetAddressOf()));
-
     // Create depth stencil state
     D3D11_DEPTH_STENCIL_DESC depthstencildesc;
     ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
@@ -792,33 +768,8 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     // spriteFont = std::make_unique<DirectX::SpriteFont>(this->device.Get(),
     // L"Data\\comic_sans_ms_16.spritefont"); spriteFont->SetDefaultCharacter(L'Z');
 
-    D3D11_TEXTURE2D_DESC blackTextureDesc;
-    DefaultSurfaceDesc(&blackTextureDesc);
-    blackTextureDesc.Width = 32;
-    blackTextureDesc.Height = 32;
-    // blackTextureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    blackTextureDesc.Format = DXGI_FORMAT_BC1_UNORM;
-
-    IfFailedThrowHR(
-        this->device->CreateTexture2D(&blackTextureDesc, NULL, this->blackTexture.GetAddressOf()));
-
-    IfFailedThrowHR(this->device->CreateShaderResourceView(blackTexture.Get(), NULL,
-                                                           this->blackTextureView.GetAddressOf()));
-
     m_states = std::make_unique<DirectX::CommonStates>(this->device.Get());
     return true;
-}
-
-bool CDX11::ReportLiveObjects()
-{
-    ComPtr<ID3D11Debug> d3dDebug;
-    if (SUCCEEDED(this->device.As(&d3dDebug)))
-    {
-        d3dDebug->ReportLiveDeviceObjects(D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL |
-                                          D3D11_RLDO_IGNORE_INTERNAL);
-        return true;
-    }
-    return false;
 }
 
 void CDX11::MakeScreenShot()

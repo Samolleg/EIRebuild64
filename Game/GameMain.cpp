@@ -1194,8 +1194,6 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
     if (theRenderer.BeginDrawFrame())
     {
         pDX11->BeginFrame();
-        auto m_states = pDX11->GetCommonStates();
-        // dx11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, m_states->AlphaBlend());
         pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Immediate);
         {
             FrameDiagnostics::Scope timing(FrameDiagnostics::Draw3D);

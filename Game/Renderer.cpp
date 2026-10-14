@@ -654,35 +654,6 @@ BOOL CRenderer::DrawPolyline(CPolyLine *pPolyline)
     return pPolyline->Draw(GetGPU(), this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CRenderer::DrawPolyLine(const CSimplyArray<POINT, POINT &> &plots, DWORD dwColor)
-{
-    if (plots.GetSize() < 2)
-        return FALSE;
-    //
-    CSimplyArray<SLineVertex, SLineVertex &> verts;
-    verts.SetSize(plots.GetSize()); // ARRAY BOUNDS CHECK
-                                    //
-    for (int i = 0; i < plots.GetSize(); ++i)
-    {
-        verts[i].x = plots[i].x;
-        verts[i].y = plots[i].y;
-        verts[i].z = 0;
-        verts[i].rhw = 1;
-        verts[i].color = dwColor | 0xff000000;
-        verts[i].specular = 0xff000000;
-    }
-    //
-    // SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
-    // SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
-
-    // DrawPrimitive(D3DPT_LINESTRIP, SLineVertex::fvfFlags, verts.GetData(), verts.GetSize(),
-    //                    0);
-
-    // SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-    // SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-
-    return TRUE;
-}
 void CRenderer::Destroy()
 {
     ModWorldBackground::Unload();
@@ -701,23 +672,6 @@ bool CRenderer::Restore()
         return false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CRenderer::DrawTextureDebug(CGameBase *pTex, float x, float y, float fScale)
-{
-    CTexture *pTexture = static_cast<CTexture *>(pTex);
-    if (pTexture)
-    {
-        float fSizeX = float(pTexture->GetSizeX()) * fScale;
-        float fSizeY = float(pTexture->GetSizeY()) * fScale;
-        STLVertex1 vertices[4] = { { x + 0, y + 0, 0.9f, 1, 0xffffffff, 0xff000000, 0, 0 },
-                                   { x + 0, y + fSizeY, 0.9f, 1, 0xffffffff, 0xff000000, 0, 1 },
-                                   { x + fSizeX, y + 0, 0.9f, 1, 0xffffffff, 0xff000000, 1, 0 },
-                                   { x + fSizeX, y + fSizeY, 0.9f, 1, 0xffffffff, 0xff000000, 1,
-                                     1 } };
-        BindTexture(0, pTexture);
-        // return GetD3D()->DrawPrimitive(D3DPT_TRIANGLESTRIP, D3DFVF_TLVERTEX, vertices, 4, 0);
-    }
-    return FALSE;
-}
 /////////////////////////////////////////////////////////////////////////////////////
 inline float Clamp(float fVal, float fMin, float fMax)
 {

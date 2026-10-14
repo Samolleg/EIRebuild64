@@ -174,8 +174,6 @@ public:
     BOOL DrawSelection(const CPlot3D &cp, const float fSize, const CPlot3D &ptXAxis,
                        const CPlot3D &ptYAxis);
     BOOL DrawFrameSelection(int x1, int y1, int x2, int y2, char cAlpha = 64, bool bFrame = true);
-    BOOL DrawPolyLine(const CSimplyArray<POINT, POINT &> &plots, DWORD dwColor);
-    BOOL DrawTextureDebug(CGameBase *pTexture, float x, float y, float fScale = 1.0f);
     bool Restore();
     void SetViewport(const RECT &rect);
     // D3D

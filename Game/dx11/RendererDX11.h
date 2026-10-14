@@ -26,11 +26,6 @@ class CDXGISurface;
 class CConstantBuffers;
 class FakeD3D7State;
 
-class CRenderState
-{
-    uint32_t alphaRef;   
-};
-
 class CDX11
 {
 private:
@@ -51,15 +46,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilStateDisable;
 
     Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
-    Microsoft::WRL::ComPtr<ID3D11BlendState> blendStateDisable;
 
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerStateNoCull;
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> blackTexture;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> blackTextureView;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> myTexture2;
     std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 2> boundFigureTextures;
 
     std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
@@ -80,12 +70,11 @@ private:
     int c56WorldPassState = -1;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
     std::unique_ptr<DirectX::CommonStates> m_states;
-    FakeD3D7State fake_dx7, fake_dx7_prev;
+    FakeD3D7State fake_dx7;
 
     void MakeScreenShot();
     void RefreshOwnedTargets();
     bool InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
-    bool ReportLiveObjects();
 
 public:
     enum class OwnedTerrainPassResult { unavailable, submitted, failed };
@@ -137,7 +126,6 @@ public:
     void SetBackgroundColor(DWORD value);
     void SetFogColor(DWORD value);
     void ScreenShot();
-    bool RenderStateCheck();
     bool SetRenderStates();
     bool SetItemColorSum(bool active);
     void CreateShaderResource(Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
@@ -166,4 +154,3 @@ public:
     void DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *tex2d);    
 };
 
-const int N_QUAD_VERTICES = 4;
