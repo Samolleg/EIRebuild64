@@ -18,8 +18,6 @@
   </ItemDefinitionGroup>
   <Target Name="VerifyRendererIdentity" BeforeTargets="PrepareForBuild">
     <Error Condition="'$(Configuration)|$(Platform)'!='Release|Win32'" Text="Owned renderer is supported only in Release Win32." />
-    <Exec Command="git -c safe.directory=* -C &quot;$(OwnedRendererRoot).&quot; rev-parse HEAD" ConsoleToMSBuild="true" StandardOutputImportance="Low"><Output TaskParameter="ConsoleOutput" PropertyName="RendererActualCommit" /></Exec>
-    <Error Condition="'$(RendererActualCommit)'!='4e06826962c84368ad2726abb0d936621cb82112'" Text="Renderer source must be the pinned local c56-embed revision 4e06826962c84368ad2726abb0d936621cb82112." />
-    <Exec Command="git -c safe.directory=* -C &quot;$(OwnedRendererRoot).&quot; diff --exit-code HEAD --" />
+    <Error Condition="!Exists('$(OwnedRendererRoot)Source\renderer.cpp')" Text="Renderer sources are missing. Download the complete EIRebuild source tree including external/owned-renderer." />
   </Target>
 </Project>

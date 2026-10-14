@@ -1,44 +1,57 @@
-# EIRebuild — local source baseline after R29
+# EIRebuild
 
-First local Git snapshot authorized on 2026-09-16. This repository records the current engine sources, project files, shaders, SDK inputs and development tools. It is a private local development repository; no remote or publication is configured by this operation. The source migration remains incomplete.
+Движок «Проклятых Земель» со встроенным рендером. Исходники рендера,
+шейдеров и используемые при сборке ресурсы включены в `external/owned-renderer`.
+Обычный clone или GitHub **Download ZIP** содержит их целиком; submodule не нужен.
 
-The canonical roadmap remains `../investigations/project-roadmap.md`, task `GAME-EXE-EIREBUILD-ADDON-INTEGRATION-001`. Current audit: `evidence/addon-integration/audit-20260916-r29/REPORT.md` (local evidence, intentionally outside Git). See `LOCAL_BASELINE.md` for snapshot scope and remaining limitations.
+## Сборка на другом компьютере
 
-## Historical initial-build notes (R1)
+Поддерживается **Windows, Release x86**. Наличие конфигураций x64/Debug в
+историческом solution не означает их поддержку. Linux, macOS и ARM-native
+сборки этим проектом не предусмотрены.
 
-The notes below describe the original build stage, not the current R29 implementation or current Git status.
+Установите:
 
-# EIRebuild: isolated full-engine x86 build
+- Visual Studio 2022 (Community/Professional/Enterprise) либо Build Tools 2022.
+- Набор «Разработка классических приложений на C++» / Desktop development with C++.
+- MSVC v143 x86/x64, **C++ MFC for latest v143 build tools (x86 & x64)** и Windows 10/11 SDK.
+- Python 3.8 или новее. Git нужен только при получении исходников через clone.
 
-Owner-authorized working copy of `work/src_eirebuild/EIRebuild Good dx11`, created 2026-09-16. This is the next full-engine reconstruction baseline; `work/engine` remains a supporting prototype. Neither is the installed addon baseline. Canonical roadmap: `work/investigations/project-roadmap.md`, GAME-EXE-EIREBUILD-BUILD-001 under GAME-EXE-RECONSTRUCTION-001.
+Скачайте репозиторий или выполните:
 
-## Build
+```powershell
+git clone https://github.com/Samolleg/EIRebuild.git
+cd EIRebuild
+py -3 build-local.py
+```
 
-Run `build-local.py` with the bundled Python and an optional new log label. Requires VS2022 BuildTools, v143 with x86 MFC, and Windows SDK. Build target is Release / x86 (project Win32). Output stays in `out/Win32/Release`; intermediate files stay in `obj/<project>/Win32/Release`. The original projects are preserved in the reference directory. No fetch, install, or game launch occurs.
+Для ZIP распакуйте исходники и выполните последнюю команду в папке проекта.
+Если Python установлен без команды `py`, используйте `python build-local.py`.
+Скрипт найдёт Visual Studio через vswhere, загрузит NuGet 6.12.1 с
+`dist.nuget.org` и восстановит закреплённые в `packages.config` зависимости
+с `api.nuget.org`. Первый запуск требует подключения к интернету.
+Локальная установка игры, приватные каталоги разработчика и отдельный
+репозиторий рендера для сборки не нужны.
 
-Working project fixes:
+Результат: **`out/Win32/Release/EIRebuild.exe`**.
+Журнал: `evidence/build-console.log`. Первый проход также компилирует и
+встраивает шейдеры; это может занять несколько минут. Отдельные RDDraw.dll
+и файлы шейдеров для полученного EXE не требуются. Скрипт не запускает
+игру, не устанавливает EXE и не запускает тесты.
 
-- Use installed v143 including MFC. v142 compiler exists but its MFC does not.
-- Match `UseOfMfc=Dynamic` to existing `_AFXDLL` and `/MD`; compile LuaJIT with the same release CRT.
-- Redirect historical absolute game output paths into this working tree.
-- Add a project dependency on LuaJIT so the library is built before the engine links.
-- Remove unused sibling ImGui/DirectXTK include paths. Existing pinned NuGet packages supply DirectXTK, DirectXTex and XAudio2; Paint.cpp using ImGui is not part of the application project.
-- Normalize child-process PATH casing and disable MSBuild node reuse to avoid the host environment's duplicate Path/PATH failure.
+После подготовки зависимостей можно открыть `EI_Rebuild.sln` в Visual Studio
+и собирать Release/x86. Готовый EXE используется с существующей установкой
+игры и подключённым модом; игровые данные и ReStarter в этот репозиторий
+не входят. Установка и запуск не являются частью сборки.
 
-No C/C++/HLSL game implementation was rewritten. `prepare-handoff.py` verified 615 declared source/header/resource/object inputs against the reference snapshot. The supplied LuaJIT `lj_vm.obj` remains a binary input; this is not a proof of a fully source-reproducible LuaJIT VM.
+## Рендер и зависимости
 
-## Result and limits
+Происхождение включённого рендера и порядок его обновления:
+[`external/owned-renderer/PROVENANCE.md`](external/owned-renderer/PROVENANCE.md).
+Сборочная интеграция: [`OwnedRenderer/README.md`](OwnedRenderer/README.md).
+Лицензии сторонних частей сохранены рядом с их исходниками.
 
-Full engine application, LuaJIT static library and five shader binaries built successfully. `evidence/build-03-console.log` records the successful build; build-01/02 retain the environment failures before compilation. Six warnings remain: two LuaJIT enum-type arithmetic warnings and four existing geometry-shader vector truncation warnings. Engine warnings were already disabled by its historical project settings; success does not establish warning cleanliness.
-
-Private build-only handoff: `work/handoffs/eirebuild-x86-20260916-r1`. EXE SHA-256: `1c7fa651cd366d4929cc6fb591169c19446d942ef942bb74fd57e70a5f25d617`. Exact PDB retained separately in `symbols/20260916-r1`. Manifest, dependency locations and source hashes: `evidence/handoff.json`; PE imports: `evidence/pe-imports.txt`.
-
-Static artifact check: x86 PE32 GUI; 25 direct DLL import entries accounted for (Windows API-set entries delegated to OS); compiled DXBC shaders present in both normal and debugger paths expected by DXShader.cpp. Miles DLL copied from the installed Engine into the private handoff. No proxy/addon DLL copied. DLL export compatibility, recursive/dynamic loads and execution remain untested.
-
-No executable was launched, no installed file or registry value changed. Branch/worktree/commit: N/A, separate copied source tree; no merge/push/publication authorized or performed. No new runtime toggle introduced.
-
-## Exact next step
-
-Prepare an isolated runtime resource/config layout and isolate the registry key before launching: GameMain.cpp uses `Software\\Nival Interactive\\EvilIslands`, reads global path/settings values and writes them back on shutdown. Merely choosing a different working directory does not isolate settings. Then test startup, a rendered map and clean exit; record the first actual failure. Follow with movement/combat/save-load and mod-compatibility testing. Do not load the installed addon/dinput hooks into this differently linked EXE: original address compatibility is not established.
-
-This build establishes that the existing EIRebuild source is viable as a complete compilation unit. It does not prove correct game behavior, compatibility with JamaisVu data/saves, parity with the installed game.exe, or x64 readiness. Parent full-engine task remains OPEN.
+В дереве сохранены исторические SDK/import libraries и готовый `luajit-x86/lj_vm.obj`:
+они являются входами проекта. Поэтому сборка из этого репозитория не означает
+пересборку каждого стороннего бинарного входа с нуля. Все входы текущей сборки
+включены; формат игры и поведение движка этим изменением не меняются.

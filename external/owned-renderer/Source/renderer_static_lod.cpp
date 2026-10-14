@@ -1,0 +1,150 @@
+#include "static_lod.h"
+
+#include "owned_asset_loader.h"
+
+#include "../ThirdParty/meshoptimizer/src/meshoptimizer.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace owned {
+
+namespace {
+
+// Attribute weights against positions normalised to the mesh extent: shading
+// normals and texture coordinates both hold the collapse back where they bend
+// (GD3D11 uses the same 0.5 / 0.5 for its static LOD).
+constexpr float kNormalWeight = 0.5f;
+constexpr float kUvWeight = 0.5f;
+// Target triangle share of each level against the full mesh.
+constexpr float kLevelRatio[kStaticLodMaxLevels] = {0.5f, 0.25f, 0.125f};
+// A level must drop at least this share of the previous level's triangles.
+constexpr float kMinimumStep = 0.85f;
+
+} // namespace
+
+bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noexcept try {
+    output = {};
+    const std::size_t index_count = figure.indices.size();
+    const std::size_t vertex_count = figure.components.size();
+    if (figure.shape_count != 8 || index_count % 3 || index_count / 3 < kStaticLodMinTriangles ||
+        !vertex_count || figure.position_groups == 0 ||
+        figure.positions.size() != std::size_t(figure.position_groups) * 8u)
+        return false;
+    const std::size_t position_count = std::size_t(figure.position_groups) * 4u;
+    const std::size_t normal_count = figure.normals.size() * 4u;
+    // Per component: the mean shape's position, then normal and UV.
+    std::vector<float> positions(vertex_count * 3), shape_positions(vertex_count * 3), attributes(vertex_count * 5);
+    float largest_scale = 0;
+    for (std::uint32_t shape = 0; shape < 8; ++shape) {
+        for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+            const auto& component = figure.components[vertex];
+            if (component.position >= position_count || component.normal >= normal_count ||
+                component.texture >= figure.texture_coordinates.size())
+                return false;
+            const auto& group = figure.positions[shape * figure.position_groups + (component.position >> 2)];
+            const unsigned lane = component.position & 3u;
+            const float value[3] = {group.x[lane], group.y[lane], group.z[lane]};
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                if (!std::isfinite(value[axis])) return false;
+                shape_positions[vertex * 3 + axis] = value[axis];
+                positions[vertex * 3 + axis] += value[axis] * 0.125f;
+            }
+        }
+        largest_scale = (std::max)(largest_scale, meshopt_simplifyScale(shape_positions.data(), vertex_count, 12));
+    }
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const auto& component = figure.components[vertex];
+        const auto& group = figure.normals[component.normal >> 2];
+        const unsigned lane = component.normal & 3u;
+        float* attribute = &attributes[vertex * 5];
+        attribute[0] = group.x[lane]; attribute[1] = group.y[lane]; attribute[2] = group.z[lane];
+        attribute[3] = figure.texture_coordinates[component.texture].u;
+        attribute[4] = figure.texture_coordinates[component.texture].v;
+        for (unsigned k = 0; k < 5; ++k) if (!std::isfinite(attribute[k])) return false;
+    }
+    if (!(largest_scale > 0) || !std::isfinite(largest_scale)) return false;
+    std::vector<std::uint32_t> indices(figure.indices.begin(), figure.indices.end());
+    for (const std::uint32_t index : indices) if (index >= vertex_count) return false;
+    const float weights[5] = {kNormalWeight, kNormalWeight, kNormalWeight, kUvWeight, kUvWeight};
+    std::vector<std::uint32_t> reduced(index_count);
+    std::size_t previous = index_count;
+    float previous_error = 0;
+    for (std::uint32_t level = 0; level < kStaticLodMaxLevels; ++level) {
+        const std::size_t target = (std::max)(std::size_t(3),
+            std::size_t(double(index_count / 3) * kLevelRatio[level]) * 3u);
+        float error = 0;
+        // Open borders stay (walls, planks, cards): a moved border edge
+        // changes the silhouette. The error bound is open; the renderer picks
+        // a level only where its error projects below its pixel limit.
+        const std::size_t count = meshopt_simplifyWithAttributes(reduced.data(), indices.data(), index_count,
+            positions.data(), vertex_count, 12, attributes.data(), 20, weights, 5, nullptr,
+            target, 1.0f, meshopt_SimplifyLockBorder, &error);
+        if (count < 3 || count % 3 || float(count) > float(previous) * kMinimumStep || !std::isfinite(error)) break;
+        auto& stored = output.indices[level];
+        stored.assign(reduced.begin(), reduced.begin() + std::ptrdiff_t(count));
+        previous_error = (std::max)(previous_error, error * largest_scale);
+        output.error[level] = previous_error;
+        output.levels = level + 1;
+        previous = count;
+    }
+    return output.levels != 0;
+} catch (...) {
+    output = {};
+    return false;
+}
+
+} // namespace owned
+
+namespace owned {
+
+bool build_impostor_source(const FigureCpuAsset& figure, NativeImpostorSource& output) noexcept try {
+    output = {};
+    const std::size_t index_count = figure.indices.size();
+    const std::size_t vertex_count = figure.components.size();
+    if (figure.shape_count != 8 || index_count % 3 || index_count / 3 < kImpostorMinTriangles || !vertex_count ||
+        figure.position_groups == 0 || figure.positions.size() != std::size_t(figure.position_groups) * 8u)
+        return false;
+    const std::size_t position_count = std::size_t(figure.position_groups) * 4u;
+    const std::size_t normal_count = figure.normals.size() * 4u;
+    output.vertices.assign(vertex_count * 8, 0.f);
+    float low[3] = {1e30f, 1e30f, 1e30f}, high[3] = {-1e30f, -1e30f, -1e30f};
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const auto& component = figure.components[vertex];
+        if (component.position >= position_count || component.normal >= normal_count ||
+            component.texture >= figure.texture_coordinates.size())
+            return false;
+        float* out = &output.vertices[vertex * 8];
+        const unsigned lane = component.position & 3u;
+        for (std::uint32_t shape = 0; shape < 8; ++shape) {
+            const auto& group = figure.positions[shape * figure.position_groups + (component.position >> 2)];
+            out[0] += group.x[lane] * 0.125f; out[1] += group.y[lane] * 0.125f; out[2] += group.z[lane] * 0.125f;
+        }
+        const auto& normal = figure.normals[component.normal >> 2];
+        const unsigned normal_lane = component.normal & 3u;
+        out[3] = normal.x[normal_lane]; out[4] = normal.y[normal_lane]; out[5] = normal.z[normal_lane];
+        out[6] = figure.texture_coordinates[component.texture].u;
+        out[7] = figure.texture_coordinates[component.texture].v;
+        for (unsigned k = 0; k < 8; ++k) if (!std::isfinite(out[k])) return false;
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            low[axis] = (std::min)(low[axis], out[axis]); high[axis] = (std::max)(high[axis], out[axis]);
+        }
+    }
+    float radius = 0;
+    for (unsigned axis = 0; axis < 3; ++axis) output.sphere[axis] = (low[axis] + high[axis]) * 0.5f;
+    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const float* p = &output.vertices[vertex * 8];
+        const float dx = p[0] - output.sphere[0], dy = p[1] - output.sphere[1], dz = p[2] - output.sphere[2];
+        radius = (std::max)(radius, std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    if (!(radius > 0) || !std::isfinite(radius)) return false;
+    output.sphere[3] = radius;
+    output.indices.assign(figure.indices.begin(), figure.indices.end());
+    for (const std::uint32_t index : output.indices) if (index >= vertex_count) return false;
+    return true;
+} catch (...) {
+    output = {};
+    return false;
+}
+
+} // namespace owned
