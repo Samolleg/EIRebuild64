@@ -343,8 +343,8 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             state.render[D3DRENDERSTATE_SRCBLEND] = D3DBLEND_SRCALPHA;
             state.render[D3DRENDERSTATE_DESTBLEND] = D3DBLEND_ONE;
         }
-        owned::SurfaceImage texture;
-        hr = boundFigureTextures[0] ? OwnedRender::E1SurfaceImage(device.Get(),
+        std::shared_ptr<owned::SurfaceImage> texture;
+        hr = boundFigureTextures[0] ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
             deviceContext.Get(), boundParticleSurface, texture) : S_OK;
         if (SUCCEEDED(hr)) {
             hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
@@ -354,7 +354,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
                 if (SUCCEEDED(flushed)) flushed = renderer.flush_native();
                 if (FAILED(flushed)) return flushed;
                 return renderer.draw_game_particles(view, state,
-                    boundFigureTextures[0] ? &texture : nullptr);
+                    texture.get());
             });
             // c56 uses the same device, but its shaders/targets/state differ.
             // Restore the host bindings for subsequent figure draws.

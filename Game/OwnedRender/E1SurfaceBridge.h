@@ -28,6 +28,9 @@ HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
 // by c56 blit. Repeated reads of the same generation reuse the cached snapshot.
 HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, owned::SurfaceImage& image) noexcept;
+// Retain particle upload state across draws; generation/device changes retire it.
+HRESULT E1ParticleSurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
+    std::uint64_t id, std::shared_ptr<owned::SurfaceImage>& image) noexcept;
 HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
     ID3D11DeviceContext* context, std::uint64_t id, const RECT& destination,
     const RECT* source, const DDCOLORKEY* color_key, bool interface_space,

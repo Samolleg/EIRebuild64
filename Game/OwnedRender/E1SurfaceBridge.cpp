@@ -161,6 +161,47 @@ HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
     return S_OK;
 } catch (...) { image = {}; return E_OUTOFMEMORY; }
 
+HRESULT E1ParticleSurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
+    std::uint64_t id, std::shared_ptr<owned::SurfaceImage>& image) noexcept try {
+    image.reset();
+    const auto value = E1SurfaceValue(id);
+    if (!value || !device || !context) return E_INVALIDARG;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> published;
+    const HRESULT resolved = E1ResolveSurface(nullptr, device, id, value->generation, published);
+    if (FAILED(resolved)) return resolved;
+    struct Entry {
+        ID3D11Device* device = nullptr;
+        std::uint64_t used = 0;
+        std::shared_ptr<owned::SurfaceImage> image;
+    };
+    // Called on the render thread, just like the immediate particle submission.
+    static auto* cache = new std::map<std::uint64_t, Entry>;
+    static std::uint64_t serial = 0;
+    const auto found = cache->find(id);
+    if (found != cache->end() && found->second.device == device &&
+        found->second.image->generation == value->generation) {
+        found->second.used = ++serial;
+        image = found->second.image;
+        return S_OK;
+    }
+    auto next = std::shared_ptr<owned::SurfaceImage>(new owned::SurfaceImage,
+        [](owned::SurfaceImage* value) {
+            owned::release_surface_memory_accounting(*value);
+            delete value;
+        });
+    const HRESULT converted = E1SurfaceImage(device, context, id, *next);
+    if (FAILED(converted)) return converted;
+    (*cache)[id] = {device, ++serial, next};
+    while (cache->size() > 64) {
+        auto oldest = cache->begin();
+        for (auto it = cache->begin(); it != cache->end(); ++it)
+            if (it->second.used < oldest->second.used) oldest = it;
+        cache->erase(oldest);
+    }
+    image = std::move(next);
+    return S_OK;
+} catch (...) { image.reset(); return E_OUTOFMEMORY; }
+
 HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
     ID3D11DeviceContext* context, std::uint64_t id, const RECT& destination,
     const RECT* source, const DDCOLORKEY* color_key, bool interface_space,
