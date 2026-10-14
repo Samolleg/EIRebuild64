@@ -229,13 +229,15 @@ HSOUND CSoundManager::BeginFXInt(LPCSTR pszSoundName, int nPriority, int nPercen
     char corrected[256]={};const char* effective=pszSoundName;
     if(!ModAudioPolicy::Name(this,pszSoundName,corrected,sizeof(corrected),effective))return SND_EMPTY;
     pszSoundName=effective;
-    if(!CaptureModSound(pszSoundName))return SND_EMPTY;
+    if(!CaptureModSound(pszSoundName)){if(bIsDialogPlayMode)EngineDiagnostics::Event("BriefingVoice capture failed file=%s",pszSoundName);return SND_EMPTY;}
     nPriority=ModAudioPolicy::Priority(nPriority,pszSoundName,bLooping!=0,bIsSpeech!=0,bIsDialogPlayMode!=0);
     float gain=1.f,pitch=1.f;ModAudioPolicy::Variation(pszSoundName,bLooping!=0,bIsSpeech!=0,bIsDialogPlayMode!=0,gain,pitch);
     const DWORD id=dwUniqueCnt;if(id==DWORD(SND_EMPTY))return SND_EMPTY;
     MiniaudioOneShotSfx::PartyVoiceBinding party={};
     const bool bound=ModAudioPolicy::TakeAck(bIsSpeech!=0,bIsDialogPlayMode!=0,bLooping!=0,party);
-    if(MiniaudioOneShotSfx::TryStartVirtualFlat(this,id,pszSoundName,nPriority,nPercentVolume,nPercentPan,bLooping!=0,bAffectedWithHeight!=0,(bIsSpeech||bIsDialogPlayMode)!=0,bIsDialogPlayMode!=0,gain,pitch,bound?&party:nullptr,false)==MiniaudioOneShotSfx::STARTED){dwUniqueCnt=id+1;return id;}return SND_EMPTY;
+    const auto started=MiniaudioOneShotSfx::TryStartVirtualFlat(this,id,pszSoundName,nPriority,nPercentVolume,nPercentPan,bLooping!=0,bAffectedWithHeight!=0,(bIsSpeech||bIsDialogPlayMode)!=0,bIsDialogPlayMode!=0,gain,pitch,bound?&party:nullptr,false);
+    if(bIsDialogPlayMode)EngineDiagnostics::Event("BriefingVoice file=%s id=%lu started=%d speechMaster=%d reason=%s",pszSoundName,id,started==MiniaudioOneShotSfx::STARTED,nSpeechMasterVolume,started==MiniaudioOneShotSfx::STARTED?"started":MiniaudioOneShotSfx::LastStartReason());
+    if(started==MiniaudioOneShotSfx::STARTED){dwUniqueCnt=id+1;return id;}return SND_EMPTY;
 
 }
 

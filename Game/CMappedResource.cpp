@@ -46,6 +46,11 @@ std::vector<std::string> BriefingCandidates(LPCSTR path)
 {
     if (!path)
         return {};
+    // The native briefing screen uses an unprefixed name. Installed speech
+    // archives contain s\Briefing and t\Briefing variants; resolve these in
+    // the same deterministic order as the prefixed retail requests.
+    if (_strnicmp(path, "briefing\\", 9) == 0)
+        return {std::string("s\\") + path, path, std::string("t\\") + path};
     std::vector<std::string> names;
     if ((_strnicmp(path, "s\\briefing\\", 11) != 0) &&
         (_strnicmp(path, "t\\briefing\\", 11) != 0))
