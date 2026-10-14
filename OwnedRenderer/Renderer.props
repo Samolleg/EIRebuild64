@@ -11,7 +11,7 @@
       <ExceptionHandling>Sync</ExceptionHandling><PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel><ConformanceMode>true</ConformanceMode>
       <Optimization>MaxSpeed</Optimization><MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;DIRECTDRAW_VERSION=0x0700;DIRECT3D_VERSION=0x0700;EID3D11_BUILD_COMMIT=&quot;2cd405491549b896ec66d4cc3d3b185ed9abed20&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;DIRECTDRAW_VERSION=0x0700;DIRECT3D_VERSION=0x0700;EID3D11_BUILD_COMMIT=&quot;7d74adf9e3c262e0bcbac755ac6bd5b34f94dba2&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;$(OwnedRendererRoot)ThirdParty\imgui;$(OwnedRendererRoot)ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/Brepro %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -19,7 +19,7 @@
   <Target Name="VerifyRendererIdentity" BeforeTargets="PrepareForBuild">
     <Error Condition="'$(Configuration)|$(Platform)'!='Release|Win32'" Text="Owned renderer is supported only in Release Win32." />
     <Exec Command="git -c safe.directory=* -C &quot;$(OwnedRendererRoot).&quot; rev-parse HEAD" ConsoleToMSBuild="true" StandardOutputImportance="Low"><Output TaskParameter="ConsoleOutput" PropertyName="RendererActualCommit" /></Exec>
-    <Error Condition="'$(RendererActualCommit)'!='2cd405491549b896ec66d4cc3d3b185ed9abed20'" Text="Renderer source must be the pinned local c56-embed revision 2cd405491549b896ec66d4cc3d3b185ed9abed20." />
+    <Error Condition="'$(RendererActualCommit)'!='7d74adf9e3c262e0bcbac755ac6bd5b34f94dba2'" Text="Renderer source must be the pinned local c56-embed revision 7d74adf9e3c262e0bcbac755ac6bd5b34f94dba2." />
     <Exec Command="git -c safe.directory=* -C &quot;$(OwnedRendererRoot).&quot; diff --exit-code HEAD --" />
   </Target>
 </Project>
