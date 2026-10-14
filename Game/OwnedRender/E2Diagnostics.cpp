@@ -12,6 +12,10 @@ void unavailable(const char* feature, std::atomic_flag& once) noexcept {
 #define E2_UNAVAILABLE(feature) do { static std::atomic_flag once = ATOMIC_FLAG_INIT; unavailable(feature, once); } while (false)
 }
 namespace owned {
+void embedded_perf06_report(const char* detail) noexcept {
+    GameJournal::Event("RENDER", "pipeline_perf", "%s", detail);
+}
+
 const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {
     static constexpr const char* names[] = {"none", "unavailable", "hidden", "renderer state",
         "transform", "material", "light array", "morph data", "geometry", "metadata",

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1PerfDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Object.h"
@@ -897,6 +898,8 @@ void CAnimationSystem2::RecalcSkeleton()
 // recal nodes in LCS with current time and recalc skeleton with node's LCS placements
 void CAnimationSystem2::RecalcSkeletonWithCurrentTime()
 {
+    static OwnedRender::E1PerfCounter counter{"host_animation_skeleton"};
+    OwnedRender::E1PerfScope timing(counter);
     if (!bNeedRecalc)
         return;
     // set time to all animation nodes

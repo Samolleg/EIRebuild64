@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E1PerfDiagnostics.h"
 #include <algorithm>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -814,6 +815,8 @@ catch (...)
 }
 bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
 {
+    static OwnedRender::E1PerfCounter counter{"host_pose_publish"};
+    OwnedRender::E1PerfScope timing(counter);
     CObject3D* object = static_cast<CObject3D*>(lpObject);
     const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     auto& hostScene = OwnedRender::E1Scene();
