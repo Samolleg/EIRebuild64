@@ -28,7 +28,6 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_runtime.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_layout.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_maps.cpp" />
-    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_scene.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_submission.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
