@@ -23,6 +23,16 @@ bool in_grid=false;
 bool in_popup=false,ordinary_hover=false;
 bool previous_wide=false;
 int previous_mode=-1;
+std::uint64_t grid_epoch=1;
+struct GridCache {
+    std::uint64_t epoch=0;
+    int mode=-1,type=-1;
+    std::vector<CItem*> items;
+    std::vector<std::string> visible;
+    std::vector<std::pair<int,int>> text;
+};
+std::map<CI3DObjectInventoryItems*,GridCache> grids;
+int comparison_modifiers=-1,blueprint_modifiers=-1;
 std::unique_ptr<CI3DObjectItemInfo> comparison,blueprint;
 std::array<bool,3> shown_cards{};
 bool show_blueprint=false,empty_construction=false;
@@ -48,7 +58,7 @@ void rail_draw(List list,CRenderer* renderer){
 void E4CampAccess::Activate(CI3DScreenCamp* owner){
     screen=owner;belt_first=0;previous_wide=false;previous_mode=-1;
     OwnedRender::E4::Activate({owner,[](void* p){auto* s=static_cast<CI3DScreenCamp*>(p);return s->GetI3D()->GetCurrentScreen()==s&&!s->GetI3D()->GetCapture();},&Scroll,&ScrollTo,
-        [](void*){grid_text.clear();art_owners.clear();shown_cards={};},
+        [](void*){grid_text.clear();art_owners.clear();grids.clear();shown_cards={};comparison_modifiers=blueprint_modifiers=-1;},
         [](void* p){static_cast<CI3DScreenCamp*>(p)->GetI3D()->BeginFX("buttons\\camp\\scroll.wav");}});
     const auto* mod=ModRuntime::Current();
     RegisterTextures(mod&&mod->CombatSetting("JMVGraphics2"));
@@ -95,6 +105,7 @@ Role E4CampAccess::RoleOf(CI3DObject* p){
 }
 void E4CampAccess::BeginDraw(CI3DScreenCamp* owner){
     if(owner!=screen)return;
+    BeginInput();
     OwnedRender::E4::BeginDraw(int(owner->eScreenMode));
     ordinary_hover=false;
     if(previous_wide!=Active()||previous_mode!=int(owner->eScreenMode)){
@@ -118,7 +129,8 @@ void E4CampAccess::Cards(CI3DScreenCamp* owner,CRenderer* renderer){
             if(party)for(int i=0;i<party->allWagonItems.GetSize();++i){auto* item=party->allWagonItems[i];
                 if(item&&(owner->eScreenMode==ISM_SPELLCONSTR?owner->IsItemPrototype(item):owner->IsItemInstruction(item)))selected=item;
             }
-            blueprint->SetItem(selected);show_blueprint=selected!=nullptr;empty_construction=!selected;
+            if(selected||blueprint->GetItem())blueprint->SetItem(selected);
+            show_blueprint=selected!=nullptr;empty_construction=!selected;
         }
     }
     CItem* item=shown_cards[0]?owner->pMouseItem:construction?info->GetItem():nullptr;
@@ -127,11 +139,32 @@ void E4CampAccess::Cards(CI3DScreenCamp* owner,CRenderer* renderer){
         if(item->GetTypeID()==ITID_ITEM_WEAPON&&person->dwCurrentWeapon<DWORD(person->weapons.GetSize()))counterpart=person->weapons[person->dwCurrentWeapon];
         else if(item->GetTypeID()==ITID_ITEM_ARMOR)for(int i=0;i<person->armors.GetSize();++i){auto* armor=person->armors[i];if(armor&&armor->GetArmorType()==static_cast<CItemArmor*>(item)->GetArmorType()){counterpart=armor;break;}}
     }
-    comparison->SetItem(counterpart);shown_cards[2]=counterpart!=nullptr;
-    if(counterpart)comparison->FormTextInfo();
-    if(show_blueprint)blueprint->FormTextInfo();
+    if(counterpart||comparison->GetItem())comparison->SetItem(counterpart);
+    shown_cards[2]=counterpart!=nullptr;
+    const int modifiers=((GetKeyState(VK_CONTROL)&0x8000)?1:0)|((GetKeyState(VK_MENU)&0x8000)?2:0);
+    if(counterpart&&modifiers!=comparison_modifiers){
+        comparison->FormTextInfo();comparison_modifiers=modifiers;
+    }
+    if(show_blueprint&&modifiers!=blueprint_modifiers){
+        blueprint->FormTextInfo();blueprint_modifiers=modifiers;
+    }
     if(!Popup(owned::CampRenderRequest::begin_interface,nullptr,nullptr)){shown_cards={};owned::camp_inventory_popup_failed();}
     SetCards(shown_cards);
+    // Keep the hover decision observable without logging each rendered frame.
+    static CI3DScreenCamp* reportedOwner=nullptr;
+    static int reportedItem=-2;
+    static unsigned reportedState=~0u;
+    const int itemId=owner->pMouseItem?owner->pMouseItem->GetID():-1;
+    const unsigned state=(ordinary_hover?1u:0u)|(Current()?2u:0u)|
+        (shown_cards[0]?4u:0u)|(shown_cards[1]?8u:0u)|(shown_cards[2]?16u:0u);
+    if(reportedOwner!=owner||reportedItem!=itemId||reportedState!=state){
+        reportedOwner=owner;reportedItem=itemId;reportedState=state;
+        const CPoint mouse=owner->GetI3D()->GetMousePos();
+        GameJournal::Event("RENDER","camp_hover_card",
+            "item=%d hover=%d current=%d cards=%u mouse=%d,%d capture=%d",
+            itemId,int(ordinary_hover),int(Current()),state>>2,mouse.x,mouse.y,
+            int(owner->GetI3D()->GetCapture()!=nullptr));
+    }
     // These independent visual owners are never inserted into the handler tree.
     (void)renderer;
 }
@@ -177,7 +210,7 @@ OwnedRender::E4::Scroll E4CampAccess::Scroll(void* owner,List list){
                 learned?LearnedRows(p):23,0};
     }}
     if(!grid||!grid->IsVisible())return {};
-    grid->FormSortedList();
+    PrepareGrid(grid);
     const int cols=Layout().grid_columns(list!=List::stash);
     return {true,First(grid)/cols,(grid->pSortedItems.GetSize()+cols-1)/cols,Layout().grid_rows(list!=List::stash),grid->nSortMode};
 }
@@ -191,6 +224,29 @@ void E4CampAccess::ScrollTo(void* owner,List list,int pos){
     }
     auto* p=list==List::stash?s->pWagon:list==List::spell_vendor?s->pAssortSpells:s->pAssortItems;
     p->fCurPos[p->nSortMode]=float(pos*Layout().grid_columns(list!=List::stash));p->fToScroll=p->fSpeed=0;
+}
+void E4CampAccess::BeginInput(){if(++grid_epoch==0){grids.clear();grid_epoch=1;}}
+void E4CampAccess::PrepareGrid(CI3DObjectInventoryItems* p){
+    auto& cache=grids[p];if(cache.epoch==grid_epoch&&cache.mode==p->nSortMode&&cache.type==p->nSortType)return;
+    std::vector<CItem*> current;
+    current.reserve(p->pAllItems->GetSize());
+    for(int i=0;i<p->pAllItems->GetSize();++i){
+        auto* item=(*p->pAllItems)[i];
+        if((p->nSortType==0&&p->nSortMode==5)||p->GetItemSortMode(item)==p->nSortMode)
+            current.push_back(item);
+    }
+    bool changed=current!=cache.items||p->pSortedItems.GetSize()!=int(current.size());
+    if(!changed)for(int i=0;i<p->pSortedItems.GetSize();++i)
+        if(p->pSortedItems[i]!=current[i]){changed=true;break;}
+    if(changed){
+        p->pSortedItems.RemoveAll();for(const auto& value:current)p->pSortedItems.Add(value);
+        p->nSortedItems=p->pSortedItems.GetSize();cache.items=std::move(current);
+    }
+    cache.epoch=grid_epoch;cache.mode=p->nSortMode;cache.type=p->nSortType;
+}
+bool E4CampAccess::TipInside(CI3DObject* p,int index,POINT physical,bool& inside){
+    if(!Active()||RoleOf(p)==Role::none)return false;
+    inside=Hit(p,physical)==index;return true;
 }
 int E4CampAccess::First(CI3DObjectInventoryItems* p){
     const int cols=Layout().grid_columns(vendor(p)),rows=Layout().grid_rows(vendor(p));
@@ -255,12 +311,12 @@ bool E4CampAccess::MouseItem(CI3DObjectInventoryItems* p,POINT physical,int& slo
     CPoint point(physical);p->GetI3D()->ScreenToVirtual(point);const auto& l=Layout();const bool v=vendor(p);const auto r=l.grid(v);
     if(!r.contains(float(point.x),float(point.y)))return true;
     slot=p->ePartType==ISP_WAGON?IST_WAGON:p->ePartType==ISP_SPELLASSORT?IST_SPELL_ASSORT:IST_ITEM_ASSORT;
-    p->FormSortedList();const int index=First(p)+int((point.y-r.top)/l.cell)*l.grid_columns(v)+int((point.x-r.left)/l.cell);
+    PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));const int index=First(p)+int((point.y-r.top)/l.cell)*l.grid_columns(v)+int((point.x-r.left)/l.cell);
     if(index>=0&&index<p->pSortedItems.GetSize())item=p->pSortedItems[index];return true;
 }
 bool E4CampAccess::Idle(CI3DObjectInventory* p){
     if(!Active()||!inventory(p))return false;
-    p->FormSortedList();
+    PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));
     // Whole rows replace the native horizontal interpolation, retaining its category/sort producer.
     const int rows=int(p->fToScroll);p->fToScroll-=rows;p->fSpeed=0;
     p->fCurPos[p->nSortMode]+=rows*Layout().grid_columns(vendor(p));First(static_cast<CI3DObjectInventoryItems*>(p));return true;
@@ -273,17 +329,15 @@ bool E4CampAccess::SetToItem(CI3DObjectInventoryItems* p,int target){
 }
 bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
     if(!Active()||!inventory(p))return false;
-    p->FormSortedList();const auto& l=Layout();const bool v=vendor(p);const int first=First(p),count=p->pSortedItems.GetSize();
+    PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));const auto& l=Layout();const bool v=vendor(p);const int first=First(p),count=p->pSortedItems.GetSize();
     const int cols=l.grid_columns(v),rows=l.grid_rows(v);ObserveGrid(v,first,count,p->nSortMode,cols,rows);
     Scope scope(v?Role::vendor:Role::wagon);
-    std::vector<std::string> visible,selected;
-    for(int i=0;i<count;++i)if(p->pSortedItems[i]){
-        const std::string name=p->pSortedItems[i]->GetI3DTextureName();
-        selected.push_back(name);if(i>=first&&i<first+cols*rows)visible.push_back(name);
-    }
-    // Initialize the shared resource/device owner before the worker priority queue.
-    if(!visible.empty())owned::camp_inventory_request_icon(visible.front().c_str(),renderer->GetD3D()->GetDevice().Get());
-    owned::camp_inventory_prioritize_icons(!v?0:screen->bIsSpellConstr&&p==screen->pAssortSpells?1:2,visible,selected);
+    auto& cache=grids[p];cache.visible.clear();
+    for(int i=first;i<count&&i<first+cols*rows;++i)
+        if(cache.items[i])cache.visible.emplace_back(cache.items[i]->GetI3DTextureName());
+    // Queue only the current page; hidden categories must not compete with it.
+    if(!cache.visible.empty())owned::camp_inventory_request_icon(cache.visible.front().c_str(),renderer->GetD3D()->GetDevice().Get());
+    owned::camp_inventory_prioritize_icons(!v?0:screen->bIsSpellConstr&&p==screen->pAssortSpells?1:2,cache.visible,{});
     const Rect native{50,float(p->nTopHeight),150,float(p->nTopHeight+100)};
     auto* cell=art(p);
     if(!cell->figures.GetSize()){
@@ -303,15 +357,23 @@ bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
     rail_draw(!v?List::stash:screen->bIsSpellConstr&&p==screen->pAssortSpells?List::spell_vendor:List::item_vendor,renderer);
     auto& text=grid_text[p];const auto r=l.grid(v);
     if(!text)text=std::make_unique<CI3DSurface>(p->GetI3D(),int(r.left),int(r.top),int(r.right),int(r.bottom));
-    text->GetDC();text->Clear();
+    std::vector<std::pair<int,int>> labels(cols*rows,{1,-1});
     for(int i=0;i<cols*rows&&first+i<count;++i){
         auto* item=p->pSortedItems[first+i];if(!item)continue;
-        CString number;const int x=int((i%cols)*l.cell),y=int((i/cols)*l.cell);
-        if(item->GetCount()!=1){number.Format("%d",item->GetCount());text->DrawText(number,CRect(x+6,y+3,x+int(l.cell)-6,y+23),1,RGB(228,215,167),DT_RIGHT);}
-        if(p->ePriceType!=ISK_TOTAL&&p->pScreen->CanClickOnItem(item,p->ePartType)){
-            number.Format("%d",p->pScreen->GetItemPrice(item,p->ePriceType));text->DrawText(number,CRect(x+6,y+int(l.cell)-23,x+int(l.cell)-6,y+int(l.cell)-3),1,RGB(228,215,167),DT_CENTER);
+        labels[i].first=item->GetCount();
+        if(p->ePriceType!=ISK_TOTAL&&p->pScreen->CanClickOnItem(item,p->ePartType))
+            labels[i].second=p->pScreen->GetItemPrice(item,p->ePriceType);
+    }
+    if(labels!=cache.text){
+        text->GetDC();text->Clear();
+        for(int i=0;i<int(labels.size());++i){
+            CString number;const int x=int((i%cols)*l.cell),y=int((i/cols)*l.cell);
+            if(labels[i].first!=1){number.Format("%d",labels[i].first);text->DrawText(number,CRect(x+6,y+3,x+int(l.cell)-6,y+23),1,RGB(228,215,167),DT_RIGHT);}
+            if(labels[i].second>=0){number.Format("%d",labels[i].second);text->DrawText(number,CRect(x+6,y+int(l.cell)-23,x+int(l.cell)-6,y+int(l.cell)-3),1,RGB(228,215,167),DT_CENTER);}
         }
-    }text->ReleaseDC();return true;
+        text->ReleaseDC();cache.text=std::move(labels);
+    }
+    return true;
 }
 bool E4CampAccess::DrawSpells(CI3DObjectSpellSlots* p,CRenderer* renderer){
     if(!Active()||RoleOf(p)!=Role::spells)return false;

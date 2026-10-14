@@ -46,7 +46,7 @@ struct Scope {
     explicit Scope(Role role) noexcept;
     ~Scope();
 };
-struct Frame {Frame() noexcept;~Frame();};
+struct Frame {CRenderer* renderer;explicit Frame(CRenderer*) noexcept;~Frame();};
 struct Preview {
     Preview* previous;
     std::uint32_t rgb;
@@ -95,6 +95,9 @@ struct E4CampAccess {
     static void Hover(class CI3DObjectItemInfo*,bool);
     static bool Draw2D(CI3DObject*);
     static int Hit(CI3DObject*,POINT);
+    static bool TipInside(CI3DObject*,int,POINT,bool&);
+    static void BeginInput();
+    static void PrepareGrid(CI3DObjectInventoryItems*);
     static bool Inside(CI3DObject*,POINT,bool&);
     static bool MouseItem(CI3DObjectInventoryItems*,POINT,int&,CItem*&);
     static bool Idle(CI3DObjectInventory*);

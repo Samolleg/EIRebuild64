@@ -36,12 +36,18 @@ bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)
         if(itemColorSum&&state.render[D3DRENDERSTATE_SPECULARENABLE])materialView.flags|=8u;
         hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
             HRESULT result=renderer.has_pending_ui()?renderer.flush_ui():S_OK;
-            if(SUCCEEDED(result))result=renderer.queue_embedded_figure(materialView,state,boundFigureTextures[0].Get(),boundFigureTextures[1].Get(),nullptr,{});
-            if(SUCCEEDED(result))result=renderer.flush_native();
-            if(FAILED(result))renderer.discard_native();
+            if(SUCCEEDED(result)) {
+                if(boundFigureTextures[1])
+                    result=renderer.queue_embedded_figure(materialView,state,boundFigureTextures[0].Get(),boundFigureTextures[1].Get(),nullptr,{});
+                else {
+                    owned::Renderer::NativeQueueCheckpoint checkpoint;
+                    if(!renderer.checkpoint_native(checkpoint))return E_FAIL;
+                    result=renderer.queue_native_direct(materialView,state,boundFigureTextures[0].Get());
+                    if(FAILED(result))renderer.rollback_native(checkpoint);
+                }
+            }
             return result;
         });
-        RestoreHostBindings();
     }
     if(FAILED(hr)) {
         campPopupFailed=true;
@@ -49,6 +55,18 @@ bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)
         if(!reported){reported=true;GameJournal::Event("RENDER","camp_draw_skipped","owner=c56 hr=%08lx",static_cast<unsigned long>(hr));}
     }
     return SUCCEEDED(hr);
+}
+
+bool CDX11::FlushC56CampFigures()
+{
+    if(!rendererFacade||!rendererFacade->FrameActive())return false;
+    const HRESULT hr=rendererFacade->Visit([](owned::Renderer& renderer){
+        const HRESULT result=renderer.flush_native();
+        if(FAILED(result))renderer.discard_native();
+        return result;
+    });
+    if(FAILED(hr)){campPopupFailed=true;GameJournal::Event("RENDER","camp_batch_failed","hr=%08lx",static_cast<unsigned long>(hr));}
+    RestoreHostBindings();return SUCCEEDED(hr);
 }
 
 bool CDX11::SubmitC56CampPopup(owned::CampRenderRequest request,owned::CampPopupDraw draw,void* data)

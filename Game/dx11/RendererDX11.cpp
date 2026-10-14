@@ -23,6 +23,7 @@
 #include "Vertex.h"
 #include "../Renderer.h"
 #include "../OwnedRender/E1VisualFrame.h"
+#include "../OwnedRender/E4Camp.h"
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -240,7 +241,7 @@ bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
         owned::FixedState state = CaptureC56MaterialState();
         // Interface figures (object_id 0), including the global map, must not
         // inherit the active world's fog state from the shared device frame.
-        if (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0)
+        if (OwnedRender::E4::OwnsDraw() || (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0))
             state.render[D3DRENDERSTATE_FOGENABLE] = FALSE;
         state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
         const auto& buffers=*GetConstantBuffers();

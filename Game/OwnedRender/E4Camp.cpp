@@ -1,5 +1,9 @@
+#include "StdAfx.h"
 #include "E4Camp.h"
 #include <utility>
+#include "../dx11/RendererDX11.h"
+#include "../Renderer.h"
+#include "../GameJournal.h"
 #include <engine_bridge.h>
 
 namespace OwnedRender::E4 {
@@ -114,6 +118,7 @@ void BeginDraw(int value) noexcept {
     mode=value;
     const bool want=owned::camp::make_layout(float(width),float(height),float(frame)).wide&&requested;
     if(want!=layout.wide){owned::camp_inventory_retire_textures();layout=owned::camp::make_layout(float(width),float(height),float(frame));layout.wide=want;valid=true;}
+    owned::camp_inventory_begin_icon_frame();
     decoration_pending=false;
 }
 void PublishDecoration(const owned::CampDecoration& value) noexcept {
@@ -126,14 +131,28 @@ void SetCards(std::array<bool,3> value) noexcept {cards=value;}
 Role Drawing() noexcept {return drawing;}
 bool RailTrack(List list,owned::camp::Rect& track) noexcept {const auto b=rail(list);track=b.track;return b.maximum>0;}
 bool Popup(owned::CampRenderRequest request,owned::CampPopupDraw draw,void* data){
-    if(popup_sink&&popup_sink(popup_context,request,draw,data))return true;
-    if(draw)owned::camp_inventory_popup_failed();
-    return false;
+    const bool complete=popup_sink&&popup_sink(popup_context,request,draw,data);
+    static std::array<int,4> reported{{-1,-1,-1,-1}};
+    static unsigned reportCount=0;
+    const unsigned index=unsigned(request);
+    if(index<reported.size()&&reported[index]!=int(complete)&&reportCount<64){
+        ++reportCount;
+        reported[index]=int(complete);
+        GameJournal::Event("RENDER","camp_popup_stage","request=%u complete=%d role=%u",index,int(complete),unsigned(drawing));
+    }
+    if(!complete&&draw)owned::camp_inventory_popup_failed();
+    return complete;
 }
 Scope::Scope(Role r) noexcept:previous(drawing){drawing=Active()?r:Role::none;}
 Scope::~Scope(){drawing=previous;}
-Frame::Frame() noexcept {++frame_depth;}
-Frame::~Frame(){--frame_depth;}
+Frame::Frame(CRenderer* value) noexcept:renderer(value) {++frame_depth;}
+Frame::~Frame(){
+    if(frame_depth==1 && renderer) {
+        try { renderer->GetD3D()->FlushC56CampFigures(); }
+        catch(...) { owned::camp_inventory_popup_failed(); }
+    }
+    --frame_depth;
+}
 Preview::Preview(std::uint32_t color,bool active) noexcept:previous(preview),rgb(color),enabled(active){preview=this;}
 Preview::~Preview(){preview=previous;}
 ItemCost::ItemCost(bool measure) noexcept {if(measure&&Active()&&observe()){begin=now();if(begin)++measured_items;if(!cost.first_qpc)cost.first_qpc=begin;}}
@@ -168,13 +187,22 @@ bool camp_inventory_take_decoration(CampDecoration& value) noexcept {
 }
 void camp_inventory_art_failed() noexcept {art_failed=true;}
 void camp_inventory_popup_failed() noexcept {cards={};popup_failed=true;decoration.card_count=0;}
-void camp_inventory_popup_published(bool visible) noexcept {if(!visible){cards={};decoration.card_count=0;}}
+void camp_inventory_popup_published(bool visible) noexcept {
+    static int reported=-1;
+    const int state=int(decoration.card_count)*2+int(visible);
+    if(reported!=state){
+        reported=state;
+        GameJournal::Event("RENDER","camp_popup_published","cards=%u visible=%d",unsigned(decoration.card_count),int(visible));
+    }
+    if(!visible){cards={};decoration.card_count=0;}
+}
 void camp_inventory_output(unsigned w,unsigned h,unsigned size) noexcept {
     if(w==width&&h==height&&size==frame)return;
     camp_inventory_cancel_drag();camp_inventory_retire_textures();
-    // As in c56, live resize requires a fresh authoritative activation.
-    if(Active())valid=false;
     width=w;height=h;frame=size;
+    layout=owned::camp::make_layout(float(width),float(height),float(frame));
+    layout.wide=layout.wide&&requested;
+    valid=host.context&&w&&h;
 }
 void camp_inventory_set_wide(bool wide) noexcept {if(wide!=requested){camp_inventory_cancel_drag();cards={};requested=wide;}}
 const char* camp_inventory_notice() noexcept {
@@ -337,7 +365,7 @@ int camp_inventory_blit(const RECT& destination, const RECT& source, CampBlitPie
     return int(emitted);
 }
 bool camp_inventory_clear(const RECT& source, RECT& destination) noexcept {
-    if (!camp::primary_output || !Active() || drawing == Role::none) return false;
+    if (!camp::primary_output || !Active() || (drawing == Role::none && !camp::composing)) return false;
     if (source.left == 0 && source.top == 0 && source.right == LONG(width) && source.bottom == LONG(height)) return false;
     const auto p = Uniform(drawing);
     const auto& h = camp::composing ? camp::visual : camp::composition(layout, p);

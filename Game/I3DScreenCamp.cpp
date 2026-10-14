@@ -715,7 +715,7 @@ void CI3DScreenCamp::SetScreenMode(EItemScreenModes eNewMode)
 BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
 {
     E4CampAccess::BeginDraw(this);
-    OwnedRender::E4::Frame campFrame;
+    OwnedRender::E4::Frame campFrame(pRend);
     CPoint point = theCursor.GetPos();
 
     pMouseItem = 0;

@@ -784,8 +784,9 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     view.component_count=nNumComponents;view.indices=pwIndices;view.index_count=nNumIndices;
     view.semantic_kind=owned::SemanticKind::figure;view.ordering=owned::NativeOrdering::preserve;
     view.default_diffuse=dwDefaultAmbientColor;view.default_specular=RGBA_MAKE(0,0,0,cFog);
-    if(campDraw){
-        // The host has produced its exact interface colors; c56 owns placement and drawing.
+    if(campDraw&&(dwRenderFlags&(DXD3D_USE_VERTEX_COLOR|DXD3D_LIT))){
+        // Only prelit UI figures have completed CPU colors. Lit unit previews
+        // use the material/lighting path below, just like other native models.
         if(dwRenderFlags&DXD3D_LIT){view.diffuse=nullptr;view.specular=nullptr;view.flags|=4u;}
         if(dwRenderFlags&DXD3D_USE_SPECULAR)view.flags|=8u;
         const SHMatrix& clip=pGeometryProcessor->GetMatrix(MAT_STACK_PROJSPACE);
@@ -799,6 +800,7 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     view.u_shift=fpUShift;view.v_shift=fpVShift;view.fog=cFog;
     const EIRenderFigureV4 material=pDX11->GetOwnedRenderer().FigureValues();
     view.lighting.enabled=(dwRenderFlags&(DXD3D_USE_VERTEX_COLOR|DXD3D_LIT))?0u:1u;
+    if(campDraw && view.lighting.enabled)view.diffuse=nullptr; // GPU supplies lit model colors.
     view.lighting.material_alpha=material.material_alpha;
     memcpy(view.lighting.material_diffuse.data(),material.material_diffuse,sizeof(material.material_diffuse));
     memcpy(view.lighting.emissive.data(),material.emissive,sizeof(material.emissive));
@@ -933,6 +935,15 @@ void CRenderer::SetProjectionMatrix()
 BOOL CRenderer::Clear(DWORD dwCount, LPD3DRECT lpRects, DWORD dwFlags, DWORD dwColor, D3DVALUE dvZ,
                       DWORD dwStencil)
 {
+    if (OwnedRender::E4::OwnsDraw()) {
+        const HRESULT hr = pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+            const HRESULT flushed = renderer.flush_native();
+            if (FAILED(flushed)) return flushed;
+            return renderer.clear(dwCount, lpRects, dwFlags, dwColor, dvZ, dwStencil);
+        });
+        pDX11->RestoreHostBindings();
+        return SUCCEEDED(hr);
+    }
     if ((dwFlags & D3DCLEAR_ZBUFFER))
         pDX11->ClearZBuffer(dvZ);
     /*..

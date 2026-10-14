@@ -712,6 +712,8 @@ void CI3DObject::DrawTips(CRenderer *pRend)
         bool hudInside=false;
         if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
             areas[k]->ProcessIdle(pt,hudInside);
+        else if(E4CampAccess::TipInside(this,k,pI3D->GetMousePos(),hudInside))
+            areas[k]->ProcessIdle(pt,hudInside);
         else areas[k]->ProcessIdle(pt);
         // areas[k]->Draw( pRend );
     }
@@ -739,6 +741,8 @@ void CI3DObject::Draw2DTips()
     {
         bool hudInside=false;
         if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
+            areas[k]->ProcessIdle(pt,hudInside);
+        else if(E4CampAccess::TipInside(this,k,pI3D->GetMousePos(),hudInside))
             areas[k]->ProcessIdle(pt,hudInside);
         else areas[k]->ProcessIdle(pt);
         areas[k]->Draw2D();

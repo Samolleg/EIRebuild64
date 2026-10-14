@@ -104,6 +104,7 @@ public:
     void ReportC56FigureSkipSummary();
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
     bool SubmitC56CampFigure(const owned::NativeGeometryView& view);
+    bool FlushC56CampFigures();
     bool SubmitC56CampPopup(owned::CampRenderRequest,owned::CampPopupDraw,void*);
     void RestoreHostBindings();
     // A loading picture (wait screen, movie frame): the renderer keeps it on

@@ -1012,6 +1012,7 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
     OwnedRender::E3RefreshInterface();
     if (OwnedRender::E3BlockInput(message, wParam))
         return SendMessage(hWnd, message, wParam, lParam);
+    E4CampAccess::BeginInput();
     if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;
     lParam = owned::game_native_mouse_message(message, lParam, false);

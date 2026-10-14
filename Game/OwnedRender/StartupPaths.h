@@ -32,8 +32,8 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
     paths.world_map_layouts = (modRoot / L"world-map-layouts.json").wstring();
     if (package) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
     paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
-    const char* categories[] = {"figures.res", "menus.res", "textures.res"};
-    std::array<bool, 3> ignore{};
+    const char* categories[] = {"figures.res", "menus.res", "textures.res", "redress.res"};
+    std::array<bool, 4> ignore{};
     for (size_t i = 0; i != ignore.size(); ++i) {
         std::vector<std::string> replacements;
         if (package) package->ResourcePlan(categories[i], replacements, ignore[i]);

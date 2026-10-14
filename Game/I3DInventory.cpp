@@ -246,6 +246,8 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
     CQuaternion rot;
     CRect rcTmp;
 
+    // Complete earlier camp figures before changing the preview depth buffer.
+    if(OwnedRender::E4::OwnsDraw())pRend->GetD3D()->FlushC56CampFigures();
     pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 0, 0);
     if (bArmors)
     {
@@ -306,7 +308,21 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
         CRenderer *pRend = pI3D->GetRenderer();
         DWORD dwMipFilter0 = 0;
         // TODO ALEX mip - high quality texture
-        pDrawUnit->DrawWithoutBBox(pRend);
+        const bool camp=OwnedRender::E4::OwnsDraw();
+        std::uint64_t before=0,after=0;
+        if(camp)pRend->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& renderer){before=renderer.native_logical_draws();return S_OK;});
+        const BOOL drawn=pDrawUnit->DrawWithoutBBox(pRend);
+        if(camp){
+            const bool flushed=pRend->GetD3D()->FlushC56CampFigures();
+            pRend->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& renderer){after=renderer.native_logical_draws();return S_OK;});
+            static std::map<int,unsigned> reported;
+            const unsigned status=(drawn?1u:0u)|(flushed?2u:0u)|(after>before?4u:0u)|(pDrawUnit->CheckFlag(OBJ_HIDDEN)?8u:0u);
+            auto found=reported.find(pDrawUnit->GetID());
+            if(found==reported.end()||found->second!=status){
+                reported[pDrawUnit->GetID()]=status;
+                GameJournal::Event("RENDER","camp_unit_preview","id=%d draw=%d flush=%d hidden=%d submissions=%llu",pDrawUnit->GetID(),int(drawn),int(flushed),int(pDrawUnit->CheckFlag(OBJ_HIDDEN)!=0),static_cast<unsigned long long>(after-before));
+            }
+        }
     }
     ((CObject3DClientSpecific *)pDrawUnit->GetObjectSpecific())->SetScale(1.f, 1.f, 1.f);
 
@@ -4786,6 +4802,7 @@ void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
 {
     if (auto* mod = ModRuntime::Current(); mod && mod->AdvancedUI("useLS_SetSkill")) {
         SetModSkill(pSkillInfo);
+        E4CampAccess::Hover(this, pSkillInfo && pSkillInfo->nType >= 0);
         return;
     }
 
