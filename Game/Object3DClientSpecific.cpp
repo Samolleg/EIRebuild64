@@ -27,6 +27,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
+#include "PlayerClient.h"
 #include "Terrain.h"
 #else
 #include "ViewObject.h"
@@ -844,6 +845,17 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
     owned::VisualObjectPose pose;
     pose.position = {{position.x, position.y, position.z}};
     pose.object_flags = object->GetFlags();
+#ifndef _A4
+    // Completed host poses use the object animation path. Encode the game's
+    // unit detection policy in the render copy, not in the live object's flags.
+    if (object->WhoAmI() == HPC_UNIT) {
+        const auto* player = IWorldClient.GetPlayer();
+        const bool drawUndetected = !theSettings.nDrawVisibleOnly ||
+            (player && player->curInterface != IFACE_MISSION);
+        if (!drawUndetected && !object->CheckFlag(UNIT_VISIBLE))
+            pose.object_flags |= OBJ_HIDDEN;
+    }
+#endif
     // Respect host source policy without a second shadow renderer.
     if (!IsNeedShadow()) pose.object_flags |= OBJ_NOSHADOW;
     float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
