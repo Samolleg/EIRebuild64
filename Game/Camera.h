@@ -197,6 +197,7 @@ public:
     //
     void SetAnchorPoint(const CPlot3D &pt);
     const CPlot3D &GetAnchorPoint() const { return ptAnchorPoint; }
+    float GetOrbitAnchorHeight() const { return fAnchorHeight; }
     void MoveAnchor(const CPlot3D &pt);
     void MoveAnchorXY(const CPlot3D &pt);
     void ReconstructCameraPlacement();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Camera.h"
+#include "CameraTerrainCollision.h"
 #include "DXGeometryProcessor.h"
 
 // The physical camera exists only while the world is rendered. Simulation, UI,
@@ -9,16 +10,18 @@ class CModFalloutTelephotoFrame
 {
     CCamera &camera;
     CPlot3D logicalCP;
+    CQuaternion logicalRotation;
     bool active = false;
 
 public:
     CModFalloutTelephotoFrame(CCamera &camera, bool enabled, float multiplier)
-        : camera(camera), logicalCP(camera.GetCP())
+        : camera(camera), logicalCP(camera.GetCP()), logicalRotation(camera.GetOrientation())
     {
         if (!enabled || multiplier <= 1.0001f || camera.GetDistance() <= 0.0f)
             return;
         camera.SetCP(logicalCP - camera.GetZAxis() *
                                   (camera.GetDistance() * (multiplier - 1.0f)));
+        CameraTerrainCollision::ConstrainExtendedArm(&camera);
         active = true;
     }
 
@@ -31,6 +34,7 @@ public:
         if (active)
         {
             camera.SetCP(logicalCP);
+            camera.SetOrientation(logicalRotation);
             active = false;
         }
     }

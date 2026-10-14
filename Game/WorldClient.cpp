@@ -2906,6 +2906,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::Draw()
 {
+    CameraTerrainCollision::GuardEye(this, &theCamera);
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
     CRenderer *pRend = &theRenderer;
     const DWORD falloutWorldStacks[] = {

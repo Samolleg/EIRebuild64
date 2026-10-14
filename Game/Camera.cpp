@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Camera.h"
+#include "CameraTerrainCollision.h"
 #include "camera_rotation.h"
 #include "FrameDiagnostics.h"
 #include "ServerConsts.h"
@@ -313,41 +314,7 @@ float CCamera::GetSplineHeight(const CPlot3D &ptPos, float fpSemiaxisX, float fp
 // void CCamera::CorrectHeight()
 void CCamera::CorrectHeight()
 {
-    float fAverageZ, fMinZ, fMaxZ;
-    EstimateAverageHeight(cp, VNULL, VNULL, 1.0f, 2.0f, 2.0f, fAverageZ, fMinZ, fMaxZ);
-    // теперь мы соберём объекты в окрестности камеры и возьмём их bboxes
-    std::list<CMapObject *> result;
-    theWorld.CollectObjectsInArea(cp, 16, result);
-    float fNewMaxHeight = 0;
-    for (auto pos = result.begin(); pos != result.end(); ++pos)
-    {
-        const SBoundingVolume &bv = (*pos)->GetBoundingVolume();
-        if ((bv.ptMax.x > 1e2f) || (bv.ptMax.y > 1e2f) || (bv.ptMax.z > 1e2f) ||
-            (bv.ptCenter.z > 1e2f))
-            continue;
-        CPlot3D ptPos1 = (*pos)->GetCP() + bv.ptCenter;
-        ptPos1.z = cp.z;
-        float fXYRadius = hypot(bv.ptMax.x, bv.ptMax.y);
-        float fAbs = fabs(ptPos1, cp) - fXYRadius;
-        float fCoeff = 0;
-        if (fAbs > 0)
-        {
-            if (fAbs <= 10)
-                fCoeff = 1.0f - fAbs / 10.0f;
-        }
-        else
-            fCoeff = 1;
-        float fVal = fCoeff * (bv.ptMax.z + bv.ptCenter.z + (*pos)->GetCPZ());
-        fNewMaxHeight = Max(fNewMaxHeight, fVal);
-    }
-    // это некая попытка исправить улёт камеры в бесконечность...
-    if (fNewMaxHeight > fMaxZ)
-    {
-        float fCameraNewZ = fMaxZ + Min(pSettings->fpCameraMaxHeight, fNewMaxHeight - fMaxZ);
-        cp.z = Max(cp.z, fCameraNewZ + pSettings->fpCameraMinHeight);
-    }
-    else
-        cp.z = Max(cp.z, Max(fNewMaxHeight, fMaxZ) + pSettings->fpCameraMinHeight);
+    CameraTerrainCollision::GuardEye(&theWorld, this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // zoom/unzoom camera
@@ -663,17 +630,7 @@ void CCamera::ReconstructCameraPlacement()
     SetOrientation(qRotate);
     Rotate(GetXAxis(), -(ToRadian(90.0f) + fPitch));
     cp = ptAnchorPoint - GetZAxis() * fDistance;
-    float fOldCPZ = cp.z;
-    // correct height
-    CorrectHeight();
-    // correct pitch, if camera height was corrected
-    if (fOldCPZ < cp.z)
-    {
-        float fAngle = atan2(cp.z - ptAnchorPoint.z,
-                             hypot(cp.x - ptAnchorPoint.x, cp.y - ptAnchorPoint.y));
-        SetOrientation(qRotate);
-        Rotate(GetXAxis(), -(ToRadian(90.0f) + fAngle));
-    }
+    CameraTerrainCollision::ConstrainOrbit(this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 const CPlot3D &CCamera::GetObservationPosition() const
@@ -942,6 +899,7 @@ void CCamera::InitRotate(float fRotateAngle)
 }
 void CCamera::ResetFalloutMode()
 {
+    CameraTerrainCollision::Reset();
     falloutMode = FALLOUT_STOCK;
     falloutBriefingMode = FALLOUT_STOCK;
     falloutBriefing = false;
@@ -1059,6 +1017,7 @@ float CCamera::GetRotateAngle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CCamera::Load(CSave &file)
 {
+    CameraTerrainCollision::Reset();
     DWORD dwCameraFlags, dwNewCarrierID;
 
     file.Read(&ptAnchorPoint, sizeof(ptAnchorPoint));
