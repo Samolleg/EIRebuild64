@@ -1,4 +1,5 @@
 #include "E1Terrain.h"
+#include "E1PerfDiagnostics.h"
 #include "E1World.h"
 #include "E1Scene.h"
 #include "E1Surface.h"
@@ -102,6 +103,8 @@ void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>
 void E1RetireTerrain(const void* owner) noexcept { if (owner == sourceOwner) clear(); }
 bool E1PublishTerrainSectors(const void* owner,
     const std::vector<E1TerrainSectorValues>& input) noexcept try {
+    static OwnedRender::E1PerfCounter counter{"terrain_sectors"};
+    OwnedRender::E1PerfScope timing(counter);
     sectorFrame = 0;
     if (!owner || owner != sourceOwner || !current() || !source.geometry) return false;
     std::vector<std::shared_ptr<const owned::OwnedTerrainDynamicSector>> next(source.terrain->sectors.size());
@@ -140,6 +143,8 @@ std::shared_ptr<const owned::OwnedTerrainDynamicSector> E1TerrainSector(std::uin
     return current() && sectorFrame == terrainFrame && sector < sectors.size() ? sectors[sector] : nullptr;
 }
 bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInputs& input) noexcept try {
+    static OwnedRender::E1PerfCounter counter{"terrain_view"};
+    OwnedRender::E1PerfScope timing(counter);
     viewReady = false;
     if (!owner || owner != sourceOwner || !current() || !source.geometry) return false;
     auto values = input;
@@ -232,6 +237,8 @@ bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainComma
 }
 bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryValues& input,
     const std::array<float,16>& placement) noexcept try {
+    static OwnedRender::E1PerfCounter counter{"terrain_frame"};
+    OwnedRender::E1PerfScope timing(counter);
     terrainFrame = 0; sectorFrame = 0; viewReady = false; materials = {}; materialGeometry = {};
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
     if (!owner || owner != sourceOwner || !source.terrain || !frame.valid || !frame.scene_frame_serial ||

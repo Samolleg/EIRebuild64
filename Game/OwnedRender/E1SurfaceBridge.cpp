@@ -3,6 +3,7 @@
 #endif
 #include "../../stdafx.h"
 #include "E1SurfaceBridge.h"
+#include "E1PerfDiagnostics.h"
 #include "E1Surface.h"
 #include "../../external/owned-renderer/Source/renderer.h"
 #include <DirectXTex.h>
@@ -65,6 +66,8 @@ HRESULT E1CaptureTarget(ID3D11DeviceContext* context, ID3D11Texture2D* source,
 
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept try {
+    static E1PerfCounter counter{"ui_readback"};
+    E1PerfScope timing(counter);
     image = {};
     if (!device || !context || !id) return E_INVALIDARG;
     Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
@@ -131,6 +134,8 @@ HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
         const auto found = surfaceImageCache().find(id);
         if (found != surfaceImageCache().end() &&
             found->second.generation == value->generation) {
+            static E1PerfCounter counter{"surface_cache_copy"};
+            E1PerfScope timing(counter, found->second.image.pixels.size());
             image = found->second.image;
             return S_OK;
         }
@@ -206,6 +211,8 @@ HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
     ID3D11DeviceContext* context, std::uint64_t id, const RECT& destination,
     const RECT* source, const DDCOLORKEY* color_key, bool interface_space,
     bool native_canvas) noexcept try {
+    static E1PerfCounter counter{"ui_blit_total"};
+    E1PerfScope timing(counter);
     owned::SurfaceImage image;
     const HRESULT converted = E1SurfaceImage(device, context, id, image);
     if (FAILED(converted)) return converted;

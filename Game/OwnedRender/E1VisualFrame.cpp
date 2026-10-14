@@ -1,4 +1,5 @@
 #include "E1VisualFrame.h"
+#include "E1PerfDiagnostics.h"
 #include "E1TerrainSubmission.h"
 #include "E1Surface.h"
 #include "../GameJournal.h"
@@ -245,6 +246,8 @@ void shadowCull(void* context, owned::NativeShadowCullProjection& projection) no
 namespace OwnedRender {
 bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& state,
                            const E1VisualInputs& host) noexcept {
+    static E1PerfCounter counter{"scene_total"};
+    E1PerfScope timing(counter);
     owned::EmbeddedVisualFrameInputs inputs;
     inputs.time = host.time;
     inputs.scene_flags = host.sceneFlags;
