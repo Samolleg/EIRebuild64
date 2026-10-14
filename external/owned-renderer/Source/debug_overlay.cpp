@@ -8,6 +8,7 @@
 #include "engine_bridge.h"
 #include "game_sites.h"
 #include "graphics_settings.h"
+#include "renderer_ui_ru.h"
 #include "widescreen.h"
 #include "world_fog.h"
 #include "camp_inventory.h"
@@ -250,7 +251,7 @@ struct DebugOverlay::Implementation {
     // Frames of timing still to run before a capture asked for while the
     // overlay is hidden: the capture then carries a resolved normal frame.
     unsigned capture_warmup = 0;
-    ULONGLONG capture_notice_until = 0;  // "Frame captured" notice, tick ms
+    ULONGLONG capture_notice_until = 0;  // u8"\u041a\u0430\u0434\u0440 \u0437\u0430\u0445\u0432\u0430\u0447\u0435\u043d" notice, tick ms
     bool cull_freeze_toggle = false;
     bool pending_save = false;
     bool f10_was_down = false;
@@ -359,13 +360,13 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
 
 void draw_live_statistics(const RendererResourceSnapshot& resources) {
     if (resources.rolling_frame_samples) {
-        ImGui::Text("5s avg %.1f FPS  5s low %.1f FPS", resources.rolling_average_fps,
+        ImGui::Text(u8"\u0417\u0430 5 \u0441: \u0441\u0440\u0435\u0434\u043d\u0435\u0435 %.1f FPS  \u043c\u0438\u043d\u0438\u043c\u0443\u043c %.1f FPS", resources.rolling_average_fps,
                     resources.rolling_lowest_fps);
     } else {
-        ImGui::TextUnformatted("5s avg n/a  5s low n/a");
+        ImGui::TextUnformatted(u8"\u0417\u0430 5 \u0441: \u0441\u0440\u0435\u0434\u043d\u0435\u0435 \u043d/\u0434  \u043c\u0438\u043d\u0438\u043c\u0443\u043c \u043d/\u0434");
     }
     if (resources.culling_frozen)
-        ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), "CULLING FROZEN (Shift+F11): objects culled for the frozen camera");
+        ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), u8"\u041a\u0410\u041c\u0415\u0420\u0410 \u041e\u0422\u0421\u0415\u0427\u0415\u041d\u0418\u042f \u0417\u0410\u041a\u0420\u0415\u041f\u041b\u0415\u041d\u0410 (Shift+F11)");
     if (resources.fog_status[0])
         ImGui::TextColored(resources.fog_problem ? ImVec4(1.f, .35f, .2f, 1.f) : ImVec4(.75f, .9f, 1.f, 1.f), "%s",
                            resources.fog_status);
@@ -377,55 +378,55 @@ void draw_live_statistics(const RendererResourceSnapshot& resources) {
                            resources.particle_status);
     if (resources.critter_status[0]) ImGui::TextUnformatted(resources.critter_status);
     if (resources.emissive_status[0]) ImGui::TextColored(ImVec4(1.f, .62f, .3f, 1.f), "%s", resources.emissive_status);
-    ImGui::Text("Shadows %s  depth draws %llu  triangles %llu",
+    ImGui::Text(u8"\u0422\u0435\u043d\u0438 %s  \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a \u0433\u043b\u0443\u0431\u0438\u043d\u044b %llu  \u0442\u0440\u0435\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u043e\u0432 %llu",
                 resources.native_shadows_enabled ? "ON" : "OFF",
                 static_cast<unsigned long long>(resources.native_shadow_draws),
                 static_cast<unsigned long long>(resources.native_shadow_triangles));
     const auto& point=resources.point_shadows;
-    ImGui::Text("Point lamps: baked %llu  rebaked %llu  overlays %llu  budget skipped %llu",
+    ImGui::Text(u8"\u041b\u0430\u043c\u043f\u044b: \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043b\u0435\u043d\u043e %llu  \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u043e %llu  \u043d\u0430\u043b\u043e\u0436\u0435\u043d\u0438\u0439 %llu  \u0432\u043d\u0435 \u0431\u044e\u0434\u0436\u0435\u0442\u0430 %llu",
         point.baked,point.rebaked,point.overlays,point.budget);
-    ImGui::Text("Point invalidation: radius %llu  terrain %llu  light %llu  list %llu  reset %llu",
+    ImGui::Text(u8"\u0421\u0431\u0440\u043e\u0441 \u0442\u0435\u043d\u0435\u0439 \u043b\u0430\u043c\u043f: \u0440\u0430\u0434\u0438\u0443\u0441 %llu  \u0437\u0435\u043c\u043b\u044f %llu  \u0441\u0432\u0435\u0442 %llu  \u0441\u043f\u0438\u0441\u043e\u043a %llu  \u0441\u0431\u0440\u043e\u0441 %llu",
         point.radius_dirty,point.terrain,point.light,point.list,point.reset);
-    ImGui::Text("Point capacity: allocation failures %llu  pressure retirements %llu",
+    ImGui::Text(u8"\u041f\u0430\u043c\u044f\u0442\u044c \u0442\u0435\u043d\u0435\u0439 \u043b\u0430\u043c\u043f: \u043e\u0448\u0438\u0431\u043e\u043a \u0432\u044b\u0434\u0435\u043b\u0435\u043d\u0438\u044f %llu  \u043e\u0441\u0432\u043e\u0431\u043e\u0436\u0434\u0435\u043d\u0438\u0439 %llu",
         point.allocation_failures,point.pressure_drops);
     if (resources.rolling_frame_capacity_truncated) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.64f, 0.18f, 1.0f));
-        ImGui::TextUnformatted("5s window truncated: frame-rate exceeds sample capacity");
+        ImGui::TextUnformatted(u8"\u041e\u043a\u043d\u043e 5 \u0441 \u0441\u043e\u043a\u0440\u0430\u0449\u0435\u043d\u043e: \u0447\u0430\u0441\u0442\u043e\u0442\u0430 \u043a\u0430\u0434\u0440\u043e\u0432 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0435\u0442 \u0432\u043c\u0435\u0441\u0442\u0438\u043c\u043e\u0441\u0442\u044c \u0432\u044b\u0431\u043e\u0440\u043a\u0438");
         ImGui::PopStyleColor();
     } else if (resources.rolling_frame_warming_up) {
-        ImGui::Text("5s window warming: %.1f / 5.0 s", resources.rolling_frame_seconds);
+        ImGui::Text(u8"\u041d\u0430\u043a\u043e\u043f\u043b\u0435\u043d\u0438\u0435 \u043e\u043a\u043d\u0430 5 \u0441: %.1f / 5,0 \u0441", resources.rolling_frame_seconds);
     }
 
     if (resources.system_telemetry_stale) {
         if (resources.system_telemetry_age_ms)
-            ImGui::Text("Game CPU n/a  GPU 3D n/a  (telemetry stale: %llu ms)",
+            ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D \u043d/\u0434  (\u0434\u0430\u043d\u043d\u044b\u0435 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0438: %llu \u043c\u0441)",
                         static_cast<unsigned long long>(resources.system_telemetry_age_ms));
         else
-            ImGui::TextUnformatted("Game CPU n/a  GPU 3D n/a  (telemetry warming up)");
+            ImGui::TextUnformatted(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D \u043d/\u0434  (\u0441\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445)");
     } else if (resources.process_cpu_valid && resources.gpu_3d_percent_valid) {
-        ImGui::Text("Game CPU %.1f%%  GPU 3D %.1f%%", resources.process_cpu_percent,
+        ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b %.1f%%  GPU 3D %.1f%%", resources.process_cpu_percent,
                     resources.gpu_3d_percent);
     } else if (resources.process_cpu_valid) {
-        ImGui::Text("Game CPU %.1f%%  GPU 3D n/a", resources.process_cpu_percent);
+        ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b %.1f%%  GPU 3D \u043d/\u0434", resources.process_cpu_percent);
     } else if (resources.gpu_3d_percent_valid) {
-        ImGui::Text("Game CPU n/a  GPU 3D %.1f%%", resources.gpu_3d_percent);
+        ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D %.1f%%", resources.gpu_3d_percent);
     } else {
-        ImGui::TextUnformatted("Game CPU n/a  GPU 3D n/a");
+        ImGui::TextUnformatted(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D \u043d/\u0434");
     }
 
     if (!resources.system_telemetry_stale && resources.process_private_bytes_valid &&
         resources.gpu_memory_valid) {
-        ImGui::Text("RAM private %.1f MiB  VRAM local %.1f / %.1f MiB",
+        ImGui::Text(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 %.1f \u041c\u0438\u0411  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c %.1f / %.1f \u041c\u0438\u0411",
                     mib(resources.process_private_bytes), mib(resources.gpu_usage_bytes),
                     mib(resources.gpu_budget_bytes));
     } else if (!resources.system_telemetry_stale && resources.process_private_bytes_valid) {
-        ImGui::Text("RAM private %.1f MiB  VRAM local n/a",
+        ImGui::Text(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 %.1f \u041c\u0438\u0411  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c \u043d/\u0434",
                     mib(resources.process_private_bytes));
     } else if (!resources.system_telemetry_stale && resources.gpu_memory_valid) {
-        ImGui::Text("RAM private n/a  VRAM local %.1f / %.1f MiB",
+        ImGui::Text(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 \u043d/\u0434  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c %.1f / %.1f \u041c\u0438\u0411",
                     mib(resources.gpu_usage_bytes), mib(resources.gpu_budget_bytes));
     } else {
-        ImGui::TextUnformatted("RAM private n/a  VRAM local n/a");
+        ImGui::TextUnformatted(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 \u043d/\u0434  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c \u043d/\u0434");
     }
 }
 
@@ -442,7 +443,7 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
     }
     draw_live_statistics(resources);
     if (!profile) {
-        ImGui::TextUnformatted("EID3D11  |  profiler warming up...");
+        ImGui::TextUnformatted(u8"EID3D11  /  \u0441\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u0440\u043e\u0444\u0438\u043b\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430...");
     } else {
         const double interval_ms = resources.present_smoothed_ms > 0.0
             ? resources.present_smoothed_ms
@@ -450,10 +451,10 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
                 ? bridge->begin_interval_ms : 0.0);
         const double fps = interval_ms > 0.0 ? 1000.0 / interval_ms : 0.0;
         if (profile->gpu_valid)
-            ImGui::Text("EID3D11  %.0f FPS / %.2f ms  Render CPU %.2f ms  GPU %.2f ms",
+            ImGui::Text(u8"EID3D11  %.0f FPS / %.2f \u043c\u0441  CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 %.2f \u043c\u0441  GPU %.2f \u043c\u0441",
                         fps, interval_ms, profile->frame_cpu_ms, profile->frame_gpu_ms);
         else
-            ImGui::Text("EID3D11  %.0f FPS / %.2f ms  Render CPU %.2f ms  GPU n/a",
+            ImGui::Text(u8"EID3D11  %.0f FPS / %.2f \u043c\u0441  CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 %.2f \u043c\u0441  GPU \u043d/\u0434",
                         fps, interval_ms, profile->frame_cpu_ms);
         std::uint64_t draws = 0, triangles = 0, batches = 0;
         for (UINT index = 0; index < profile->pass_count && index < profile->passes.size(); ++index) {
@@ -461,19 +462,19 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
             triangles += profile->passes[index].counters.triangles;
             batches += profile->passes[index].counters.batches;
         }
-        ImGui::Text("Draws %llu  Triangles %llu  Batches %llu",
+        ImGui::Text(u8"\u041e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a %llu  \u0442\u0440\u0435\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u043e\u0432 %llu  \u043f\u0430\u043a\u0435\u0442\u043e\u0432 %llu",
                     static_cast<unsigned long long>(draws),
                     static_cast<unsigned long long>(triangles),
                     static_cast<unsigned long long>(batches));
-        ImGui::Text("Renderer tracked %.0f MiB", mib(resources.renderer_resident_bytes));
+        ImGui::Text(u8"\u0423\u0447\u0442\u0435\u043d\u043e \u0440\u0435\u043d\u0434\u0435\u0440\u043e\u043c %.0f \u041c\u0438\u0411", mib(resources.renderer_resident_bytes));
         if (bridge) {
-            ImGui::Text("API %.2f ms  Outside %.2f ms", bridge->frame_cpu_ms,
+            ImGui::Text(u8"API %.2f \u043c\u0441  \u0432\u043d\u0435 API %.2f \u043c\u0441", bridge->frame_cpu_ms,
                         bridge->outside_entry_cpu_ms);
-            ImGui::Text("3D scene %.2f ms  unexplained %.2f ms  other %.2f ms",
+            ImGui::Text(u8"3D-\u0441\u0446\u0435\u043d\u0430 %.2f \u043c\u0441  \u043d\u0435 \u0443\u0447\u0442\u0435\u043d\u043e %.2f \u043c\u0441  \u043f\u0440\u043e\u0447\u0435\u0435 %.2f \u043c\u0441",
                         bridge->scene_3d_cpu_ms,
                         bridge->scene_3d_unattributed_cpu_ms,
                         bridge->outside_scene_3d_cpu_ms);
-            ImGui::Text("Simple %.2f ms / %llu  Figures %.2f ms / %llu",
+            ImGui::Text(u8"\u041f\u0440\u043e\u0441\u0442\u0430\u044f \u0433\u0435\u043e\u043c\u0435\u0442\u0440\u0438\u044f %.2f \u043c\u0441 / %llu  \u043c\u043e\u0434\u0435\u043b\u0438 %.2f \u043c\u0441 / %llu",
                         bridge->simple_cpu_ms,
                         static_cast<unsigned long long>(bridge->simple_calls),
                         bridge->figure_placed_cpu_ms + bridge->figure_lit_cpu_ms,
@@ -482,21 +483,21 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
             ImGui::Text("GPU figures %llu  CPU fallback %llu",
                         static_cast<unsigned long long>(bridge->figure_gpu_owned_calls),
                         static_cast<unsigned long long>(bridge->figure_cpu_fallback_calls));
-            ImGui::Text("Terrain %.2f ms / %llu  GPU %llu  fallback %llu",
+            ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442 %.2f \u043c\u0441 / %llu  GPU %llu  \u0430\u043b\u044c\u0442\u0435\u0440\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u0443\u0442\u044c %llu",
                         bridge->terrain_cpu_ms,
                         static_cast<unsigned long long>(bridge->terrain_calls),
                         static_cast<unsigned long long>(bridge->terrain_gpu_owned_calls),
                         static_cast<unsigned long long>(bridge->terrain_cpu_fallback_calls));
-            ImGui::Text("Terrain outer %.2f ms  capture %.2f ms  submit %.2f ms",
+            ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442: \u043e\u0431\u0449\u0438\u0439 %.2f \u043c\u0441  \u0437\u0430\u0445\u0432\u0430\u0442 %.2f \u043c\u0441  \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 %.2f \u043c\u0441",
                         bridge->terrain_outer_cpu_ms, bridge->terrain_capture_cpu_ms,
                         bridge->terrain_submit_cpu_ms);
-            ImGui::Text("Owned prep/reuse/omit/original: %llu / %llu / %llu / %llu",
+            ImGui::Text(u8"\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430/\u043f\u043e\u0432\u0442\u043e\u0440/\u043f\u0440\u043e\u043f\u0443\u0441\u043a/\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b: %llu / %llu / %llu / %llu",
                         static_cast<unsigned long long>(bridge->terrain_owned_frame_preparations),
                         static_cast<unsigned long long>(bridge->terrain_owned_transparent_reuses),
                         static_cast<unsigned long long>(bridge->terrain_owned_omitted_ranges),
                         static_cast<unsigned long long>(
                             bridge->terrain_original_render_front_end_calls));
-            ImGui::Text("Sectors candidate/visible/frustum: %llu / %llu / %llu",
+            ImGui::Text(u8"\u0421\u0435\u043a\u0442\u043e\u0440\u044b: \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u044b/\u0432\u0438\u0434\u0438\u043c\u044b\u0435/\u043e\u0442\u0441\u0435\u0447\u0451\u043d\u043d\u044b\u0435: %llu / %llu / %llu",
                         static_cast<unsigned long long>(bridge->terrain_candidate_sectors),
                         static_cast<unsigned long long>(bridge->terrain_visible_sectors),
                         static_cast<unsigned long long>(bridge->terrain_frustum_rejected_sectors));
@@ -509,7 +510,7 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
             const auto dominant = dominant_figure_fallback(*bridge, dominant_count);
             if (dominant_count || bridge->figure_gpu_submit_failures ||
                 bridge->figure_gpu_culled_calls)
-                ImGui::Text("Fallback: %s %llu  Submit fail %llu  Culled %llu",
+                ImGui::Text(u8"\u0410\u043b\u044c\u0442\u0435\u0440\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u0443\u0442\u044c: %s %llu  \u043e\u0448\u0438\u0431\u043e\u043a \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438 %llu  \u043e\u0442\u0441\u0435\u0447\u0435\u043d\u043e %llu",
                             figure_fallback_reason_name(dominant),
                             static_cast<unsigned long long>(dominant_count),
                             static_cast<unsigned long long>(bridge->figure_gpu_submit_failures),
@@ -525,16 +526,16 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
     draw_live_statistics(resources);
     ImGui::Separator();
     if (!profile) {
-        ImGui::TextUnformatted("Profiler is warming up. GPU timestamp results are delayed and non-blocking.");
+        ImGui::TextUnformatted(u8"\u041f\u0440\u043e\u0444\u0438\u043b\u0438\u0440\u043e\u0432\u0449\u0438\u043a \u0441\u043e\u0431\u0438\u0440\u0430\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0435. \u0417\u0430\u043c\u0435\u0440\u044b GPU \u043f\u0440\u0438\u0445\u043e\u0434\u044f\u0442 \u0441 \u0437\u0430\u0434\u0435\u0440\u0436\u043a\u043e\u0439, \u043d\u0435 \u0431\u043b\u043e\u043a\u0438\u0440\u0443\u044f \u043a\u0430\u0434\u0440.");
         return;
     }
     const double frame_ms = resources.present_smoothed_ms;
     const double fps = frame_ms > 0.0 ? 1000.0 / frame_ms : 0.0;
-    ImGui::Text("Frame %llu  |  Present %.1f FPS / %.3f ms  |  Renderer CPU %.3f ms",
+    ImGui::Text(u8"\u041a\u0430\u0434\u0440 %llu  /  \u043f\u043e\u043a\u0430\u0437 %.1f FPS / %.3f \u043c\u0441  /  CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 %.3f \u043c\u0441",
                 static_cast<unsigned long long>(profile->frame), fps, frame_ms,
                 profile->frame_cpu_ms);
     ImGui::SameLine();
-    if (profile->gpu_valid) ImGui::Text("|  GPU %.3f ms", profile->frame_gpu_ms);
+    if (profile->gpu_valid) ImGui::Text(u8"/  GPU %.3f \u043c\u0441", profile->frame_gpu_ms);
     else ImGui::TextUnformatted("|  GPU unavailable");
 
     std::array<float, kFrameHistorySize> cpu{};
@@ -544,25 +545,25 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
     state.linear_history(state.gpu_history, gpu);
     state.linear_history(state.present_history, present);
     const int count = static_cast<int>(state.history_count);
-    ImGui::PlotLines("Present cadence (ms)", present.data(), count, 0, nullptr, 0.0f, 33.4f,
+    ImGui::PlotLines(u8"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043a\u0430\u0434\u0440\u043e\u0432 (\u043c\u0441)", present.data(), count, 0, nullptr, 0.0f, 33.4f,
                      ImVec2(-1.0f, 72.0f * state.ui_scale));
-    ImGui::PlotLines("Renderer CPU work (ms)", cpu.data(), count, 0, nullptr, 0.0f, 33.4f,
+    ImGui::PlotLines(u8"\u0412\u0440\u0435\u043c\u044f CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 (\u043c\u0441)", cpu.data(), count, 0, nullptr, 0.0f, 33.4f,
                      ImVec2(-1.0f, 72.0f * state.ui_scale));
     if (profile->gpu_valid)
         ImGui::PlotLines("GPU frame (ms)", gpu.data(), count, 0, nullptr, 0.0f, 33.4f,
                          ImVec2(-1.0f, 72.0f * state.ui_scale));
 
-    if (ImGui::BeginTable("Passes", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+    if (ImGui::BeginTable(u8"\u041f\u0440\u043e\u0445\u043e\u0434\u044b", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                            ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
                            ImVec2(0.0f, 270.0f * state.ui_scale))) {
-        ImGui::TableSetupColumn("Pass");
+        ImGui::TableSetupColumn(u8"\u041f\u0440\u043e\u0445\u043e\u0434");
         ImGui::TableSetupColumn("CPU ms");
         ImGui::TableSetupColumn("GPU ms");
-        ImGui::TableSetupColumn("Draws");
-        ImGui::TableSetupColumn("Triangles");
-        ImGui::TableSetupColumn("Batches");
-        ImGui::TableSetupColumn("Uploads");
-        ImGui::TableSetupColumn("Upload MiB");
+        ImGui::TableSetupColumn(u8"\u041e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0438");
+        ImGui::TableSetupColumn(u8"\u0422\u0440\u0435\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u0438");
+        ImGui::TableSetupColumn(u8"\u041f\u0430\u043a\u0435\u0442\u044b");
+        ImGui::TableSetupColumn(u8"\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0438");
+        ImGui::TableSetupColumn(u8"\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430, \u041c\u0438\u0411");
         ImGui::TableHeadersRow();
         for (UINT index = 0; index < profile->pass_count && index < profile->passes.size(); ++index) {
             const auto& pass = profile->passes[index];
@@ -581,146 +582,146 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
         ImGui::EndTable();
     }
 
-    ImGui::SeparatorText("Memory");
+    ImGui::SeparatorText(u8"\u041f\u0430\u043c\u044f\u0442\u044c");
     if (resources.gpu_memory_valid) {
-        ImGui::Text("WDDM local budget: %.1f MiB", mib(resources.gpu_budget_bytes));
-        ImGui::Text("Process local usage: %.1f MiB", mib(resources.gpu_usage_bytes));
+        ImGui::Text(u8"\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 \u0431\u044e\u0434\u0436\u0435\u0442 WDDM: %.1f \u041c\u0438\u0411", mib(resources.gpu_budget_bytes));
+        ImGui::Text(u8"\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u0430\u044f \u043f\u0430\u043c\u044f\u0442\u044c \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430: %.1f \u041c\u0438\u0411", mib(resources.gpu_usage_bytes));
     } else {
-        ImGui::TextUnformatted("WDDM budget telemetry unavailable");
+        ImGui::TextUnformatted(u8"\u0414\u0430\u043d\u043d\u044b\u0435 \u0431\u044e\u0434\u0436\u0435\u0442\u0430 WDDM \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b");
     }
-    ImGui::Text("Renderer tracked residency: %.1f MiB", mib(resources.renderer_resident_bytes));
-    ImGui::Text("Transient upload storage: %.1f MiB", mib(resources.transient_upload_bytes));
-    ImGui::Text("CPU surface storage: %.1f MiB", mib(resources.cpu_surface_bytes));
-    ImGui::Text("GPU texture storage: %.1f MiB", mib(resources.gpu_texture_bytes));
+    ImGui::Text(u8"\u0423\u0447\u0442\u0451\u043d\u043d\u044b\u0435 \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0440\u0435\u043d\u0434\u0435\u0440\u0430: %.1f \u041c\u0438\u0411", mib(resources.renderer_resident_bytes));
+    ImGui::Text(u8"\u0412\u0440\u0435\u043c\u0435\u043d\u043d\u0430\u044f \u043f\u0430\u043c\u044f\u0442\u044c \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438: %.1f \u041c\u0438\u0411", mib(resources.transient_upload_bytes));
+    ImGui::Text(u8"\u041f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0438 \u0432 \u043f\u0430\u043c\u044f\u0442\u0438 CPU: %.1f \u041c\u0438\u0411", mib(resources.cpu_surface_bytes));
+    ImGui::Text(u8"\u0422\u0435\u043a\u0441\u0442\u0443\u0440\u044b \u0432 \u043f\u0430\u043c\u044f\u0442\u0438 GPU: %.1f \u041c\u0438\u0411", mib(resources.gpu_texture_bytes));
     if (resources.double_resident_bytes) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.64f, 0.18f, 1.0f));
-        ImGui::Text("Persistent CPU + GPU duplicates: %.1f MiB", mib(resources.double_resident_bytes));
+        ImGui::Text(u8"\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u0435 \u043a\u043e\u043f\u0438\u0438 CPU + GPU: %.1f \u041c\u0438\u0411", mib(resources.double_resident_bytes));
         ImGui::PopStyleColor();
     }
-    ImGui::Text("GPU-only surfaces: %llu (%.1f MiB CPU freed), pinned %llu",
+    ImGui::Text(u8"\u041f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0435\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 GPU: %llu (\u043e\u0441\u0432\u043e\u0431\u043e\u0436\u0434\u0435\u043d\u043e %.1f \u041c\u0438\u0411 CPU), \u0437\u0430\u043a\u0440\u0435\u043f\u043b\u0435\u043d\u043e %llu",
                 static_cast<unsigned long long>(resources.released_surfaces),
                 mib(resources.released_surface_bytes),
                 static_cast<unsigned long long>(resources.pinned_surfaces));
-    ImGui::Text("Surface restore readbacks: %llu (%.2f ms total)",
+    ImGui::Text(u8"\u0412\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0439 \u043f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0435\u0439: %llu (\u0432\u0441\u0435\u0433\u043e %.2f \u043c\u0441)",
                 static_cast<unsigned long long>(resources.surface_restore_readbacks),
                 resources.surface_restore_readback_ms);
 
-    ImGui::SeparatorText("Native batching");
-    ImGui::Text("Logical draws: %llu  Physical batches: %llu",
+    ImGui::SeparatorText(u8"\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a");
+    ImGui::Text(u8"\u041b\u043e\u0433\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a: %llu  \u0444\u0438\u0437\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u043f\u0430\u043a\u0435\u0442\u043e\u0432: %llu",
                 static_cast<unsigned long long>(resources.native_logical_draws),
                 static_cast<unsigned long long>(resources.native_physical_batches));
-    ImGui::Text("Reorderable: %llu  Ordered: %llu",
+    ImGui::Text(u8"\u0421 \u043f\u0435\u0440\u0435\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u043e\u0439: %llu  \u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435\u043c \u043f\u043e\u0440\u044f\u0434\u043a\u0430: %llu",
                 static_cast<unsigned long long>(resources.native_reorderable_draws),
                 static_cast<unsigned long long>(resources.native_ordered_draws));
-    ImGui::Text("Opaque: %llu  Cutout: %llu  Material buckets: %llu",
+    ImGui::Text(u8"\u041d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u044b\u0445: %llu  \u0441 \u0432\u044b\u0440\u0435\u0437\u0430\u043c\u0438: %llu  \u0433\u0440\u0443\u043f\u043f \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u043e\u0432: %llu",
                 static_cast<unsigned long long>(resources.native_opaque_draws),
                 static_cast<unsigned long long>(resources.native_cutout_draws),
                 static_cast<unsigned long long>(resources.native_material_buckets));
-    ImGui::Text("Visibility dispatches: %llu  One-draw batches: %llu",
+    ImGui::Text(u8"\u0420\u0430\u0441\u0447\u0451\u0442\u043e\u0432 \u0432\u0438\u0434\u0438\u043c\u043e\u0441\u0442\u0438: %llu  \u043e\u0434\u0438\u043d\u043e\u0447\u043d\u044b\u0445 \u043f\u0430\u043a\u0435\u0442\u043e\u0432: %llu",
                 static_cast<unsigned long long>(resources.native_compute_dispatches),
                 static_cast<unsigned long long>(resources.native_one_draw_batches));
-    ImGui::Text("Largest batch: %llu draws",
+    ImGui::Text(u8"\u0421\u0430\u043c\u044b\u0439 \u0431\u043e\u043b\u044c\u0448\u043e\u0439 \u043f\u0430\u043a\u0435\u0442: %llu \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a",
                 static_cast<unsigned long long>(resources.native_max_batch_draws));
-    ImGui::Text("Terrain texture arrays: %llu / %llu successes",
+    ImGui::Text(u8"\u041c\u0430\u0441\u0441\u0438\u0432\u044b \u0442\u0435\u043a\u0441\u0442\u0443\u0440 \u0437\u0435\u043c\u043b\u0438: %llu / %llu \u0443\u0441\u043f\u0435\u0448\u043d\u043e",
                 static_cast<unsigned long long>(resources.native_texture_array_successes),
                 static_cast<unsigned long long>(resources.native_texture_array_attempts));
-    ImGui::Text("Array fallback unavailable/format/layout/alloc: %llu / %llu / %llu / %llu",
+    ImGui::Text(u8"\u041e\u0442\u043a\u0430\u0437\u044b \u043c\u0430\u0441\u0441\u0438\u0432\u043e\u0432: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445/\u0444\u043e\u0440\u043c\u0430\u0442/\u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0430/\u043f\u0430\u043c\u044f\u0442\u044c: %llu / %llu / %llu / %llu",
                 static_cast<unsigned long long>(resources.native_texture_array_fallback_unavailable),
                 static_cast<unsigned long long>(resources.native_texture_array_fallback_format),
                 static_cast<unsigned long long>(resources.native_texture_array_invalid_layout),
                 static_cast<unsigned long long>(resources.native_texture_array_allocation_failures));
-    ImGui::Text("Array residency classes/pages/slices: %llu / %llu / %llu",
+    ImGui::Text(u8"\u041c\u0430\u0441\u0441\u0438\u0432\u044b: \u043a\u043b\u0430\u0441\u0441\u044b/\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b/\u0441\u043b\u043e\u0438: %llu / %llu / %llu",
                 static_cast<unsigned long long>(resources.native_texture_array_classes),
                 static_cast<unsigned long long>(resources.native_texture_array_pages),
                 static_cast<unsigned long long>(resources.native_texture_array_slices));
-    ImGui::Text("Terrain contract reorder/preserve: %llu / %llu",
+    ImGui::Text(u8"\u041f\u043e\u0440\u044f\u0434\u043e\u043a \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: \u0438\u0437\u043c\u0435\u043d\u0451\u043d/\u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d: %llu / %llu",
                 static_cast<unsigned long long>(resources.native_terrain_reorderable_contracts),
                 static_cast<unsigned long long>(resources.native_terrain_preserve_contracts));
-    ImGui::Text("Terrain stage-0 textured/untextured: %llu / %llu",
+    ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442, \u0441\u0442\u0430\u0434\u0438\u044f 0: \u0441 \u0442\u0435\u043a\u0441\u0442\u0443\u0440\u043e\u0439/\u0431\u0435\u0437: %llu / %llu",
                 static_cast<unsigned long long>(resources.native_terrain_textured_draws),
                 static_cast<unsigned long long>(resources.native_terrain_untextured_draws));
-    ImGui::Text("Terrain topology uploads: %llu / %llu vertices  Color-only: %llu / %llu vertices",
+    ImGui::Text(u8"\u041f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 \u0442\u043e\u043f\u043e\u043b\u043e\u0433\u0438\u0438: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d  \u0442\u043e\u043b\u044c\u043a\u043e \u0446\u0432\u0435\u0442\u0430: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d",
                 static_cast<unsigned long long>(resources.native_terrain_topology_uploads),
                 static_cast<unsigned long long>(resources.native_terrain_topology_upload_vertices),
                 static_cast<unsigned long long>(resources.native_terrain_color_only_uploads),
                 static_cast<unsigned long long>(resources.native_terrain_color_only_upload_vertices));
 
     if (bridge) {
-        ImGui::SeparatorText("Engine / API CPU");
-        ImGui::Text("Engine scene-begin cadence: %.3f ms", bridge->begin_interval_ms);
-        ImGui::Text("Measured frame CPU: %.3f ms  Outside entry points: %.3f ms",
+        ImGui::SeparatorText(u8"CPU \u0434\u0432\u0438\u0436\u043a\u0430 \u0438 API");
+        ImGui::Text(u8"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u0446\u0435\u043d \u0434\u0432\u0438\u0436\u043a\u0430: %.3f \u043c\u0441", bridge->begin_interval_ms);
+        ImGui::Text(u8"\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u043e CPU \u043a\u0430\u0434\u0440\u0430: %.3f \u043c\u0441  \u0432\u043d\u0435 \u0442\u043e\u0447\u0435\u043a \u0432\u0445\u043e\u0434\u0430: %.3f \u043c\u0441",
                     bridge->frame_cpu_ms, bridge->outside_entry_cpu_ms);
-        ImGui::Text("World draw: %.3f ms / %llu  unattributed: %.3f ms",
+        ImGui::Text(u8"\u041e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0430 \u043c\u0438\u0440\u0430: %.3f \u043c\u0441 / %llu  \u043d\u0435 \u0443\u0447\u0442\u0435\u043d\u043e: %.3f \u043c\u0441",
                     bridge->world_draw_cpu_ms,
                     static_cast<unsigned long long>(bridge->world_draw_calls),
                     bridge->world_unattributed_cpu_ms);
-        ImGui::Text("3D scene: %.3f ms / %llu  unattributed: %.3f ms  outside 3D: %.3f ms",
+        ImGui::Text(u8"3D-\u0441\u0446\u0435\u043d\u0430: %.3f \u043c\u0441 / %llu  \u043d\u0435 \u0443\u0447\u0442\u0435\u043d\u043e: %.3f \u043c\u0441  \u0432\u043d\u0435 3D: %.3f \u043c\u0441",
                     bridge->scene_3d_cpu_ms,
                     static_cast<unsigned long long>(bridge->scene_3d_calls),
                     bridge->scene_3d_unattributed_cpu_ms,
                     bridge->outside_scene_3d_cpu_ms);
-        ImGui::Text("3D objects: %.3f ms / %llu  object-local residual: %.3f ms",
+        ImGui::Text(u8"3D-\u043e\u0431\u044a\u0435\u043a\u0442\u044b: %.3f \u043c\u0441 / %llu  \u043e\u0441\u0442\u0430\u0442\u043e\u043a \u043f\u043e \u043e\u0431\u044a\u0435\u043a\u0442\u0430\u043c: %.3f \u043c\u0441",
                     bridge->object_draw_cpu_ms,
                     static_cast<unsigned long long>(bridge->object_draw_calls),
                     bridge->object_draw_unattributed_cpu_ms);
-        ImGui::Text("Simple geometry: %.3f ms / %llu calls", bridge->simple_cpu_ms,
+        ImGui::Text(u8"\u041f\u0440\u043e\u0441\u0442\u0430\u044f \u0433\u0435\u043e\u043c\u0435\u0442\u0440\u0438\u044f: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->simple_cpu_ms,
                     static_cast<unsigned long long>(bridge->simple_calls));
-        ImGui::Text("Terrain ingress: %.3f ms / %llu calls", bridge->terrain_cpu_ms,
+        ImGui::Text(u8"\u041f\u0440\u0438\u0451\u043c \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->terrain_cpu_ms,
                     static_cast<unsigned long long>(bridge->terrain_calls));
-        ImGui::Text("Terrain range: %.3f ms / %llu calls  Capture: %.3f ms  Submit: %.3f ms",
+        ImGui::Text(u8"\u0414\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u044b \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432  \u0437\u0430\u0445\u0432\u0430\u0442: %.3f \u043c\u0441  \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0430: %.3f \u043c\u0441",
                     bridge->terrain_outer_cpu_ms,
                     static_cast<unsigned long long>(bridge->terrain_outer_calls),
                     bridge->terrain_capture_cpu_ms, bridge->terrain_submit_cpu_ms);
-        ImGui::Text("Owned terrain prep/reuse/omitted/original front-end: %llu / %llu / %llu / %llu",
+        ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442: \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430/\u043f\u043e\u0432\u0442\u043e\u0440/\u043f\u0440\u043e\u043f\u0443\u0441\u043a/\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b: %llu / %llu / %llu / %llu",
                     static_cast<unsigned long long>(bridge->terrain_owned_frame_preparations),
                     static_cast<unsigned long long>(bridge->terrain_owned_transparent_reuses),
                     static_cast<unsigned long long>(bridge->terrain_owned_omitted_ranges),
                     static_cast<unsigned long long>(
                         bridge->terrain_original_render_front_end_calls));
-        ImGui::Text("Terrain game publication: %llu sectors  Dynamic colors: %llu vertices",
+        ImGui::Text(u8"\u041f\u0443\u0431\u043b\u0438\u043a\u0430\u0446\u0438\u044f \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: %llu \u0441\u0435\u043a\u0442\u043e\u0440\u043e\u0432  \u0434\u0438\u043d\u0430\u043c\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0446\u0432\u0435\u0442\u0430: %llu \u0432\u0435\u0440\u0448\u0438\u043d",
                     static_cast<unsigned long long>(bridge->terrain_game_publication_sectors),
                     static_cast<unsigned long long>(
                         bridge->terrain_dynamic_color_vertices_copied));
-        ImGui::Text("Terrain structural copies: %llu vertices  Source topology: %llu / %llu vertices",
+        ImGui::Text(u8"\u041a\u043e\u043f\u0438\u0438 \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u044b \u0437\u0435\u043c\u043b\u0438: %llu \u0432\u0435\u0440\u0448\u0438\u043d  \u0438\u0441\u0445\u043e\u0434\u043d\u0430\u044f \u0442\u043e\u043f\u043e\u043b\u043e\u0433\u0438\u044f: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d",
                     static_cast<unsigned long long>(
                         bridge->terrain_structural_vertices_copied),
                     static_cast<unsigned long long>(bridge->terrain_source_topology_decodes),
                     static_cast<unsigned long long>(bridge->terrain_source_topology_vertices));
-        ImGui::Text("Terrain color-only decodes: %llu / %llu vertices",
+        ImGui::Text(u8"\u0414\u0435\u043a\u043e\u0434\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435 \u0446\u0432\u0435\u0442\u043e\u0432 \u0437\u0435\u043c\u043b\u0438: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d",
                     static_cast<unsigned long long>(bridge->terrain_source_color_decodes),
                     static_cast<unsigned long long>(bridge->terrain_source_color_vertices));
-        ImGui::Text("GPU-owned terrain: %llu  CPU fallbacks: %llu  Submit failures: %llu",
+        ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442 \u043d\u0430 GPU: %llu  \u043f\u0443\u0442\u0438 CPU: %llu  \u043e\u0448\u0438\u0431\u043a\u0438 \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438: %llu",
                     static_cast<unsigned long long>(bridge->terrain_gpu_owned_calls),
                     static_cast<unsigned long long>(bridge->terrain_cpu_fallback_calls),
                     static_cast<unsigned long long>(bridge->terrain_gpu_submit_failures));
-        ImGui::Text("Terrain sectors candidate/visible/frustum rejected: %llu / %llu / %llu",
+        ImGui::Text(u8"\u0421\u0435\u043a\u0442\u043e\u0440\u044b: \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u044b/\u0432\u0438\u0434\u0438\u043c\u044b\u0435/\u043e\u0442\u0441\u0435\u0447\u0451\u043d\u043d\u044b\u0435: %llu / %llu / %llu",
                     static_cast<unsigned long long>(bridge->terrain_candidate_sectors),
                     static_cast<unsigned long long>(bridge->terrain_visible_sectors),
                     static_cast<unsigned long long>(bridge->terrain_frustum_rejected_sectors));
-        ImGui::Text("Terrain animation GPU/CPU fallback: %llu / %llu  wave sectors: %llu  tile phases: %llu",
+        ImGui::Text(u8"\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u044f \u0437\u0435\u043c\u043b\u0438 GPU/CPU: %llu / %llu  \u0432\u043e\u043b\u043d\u043e\u0432\u044b\u0445 \u0441\u0435\u043a\u0442\u043e\u0440\u043e\u0432: %llu  \u0444\u0430\u0437 \u0442\u0430\u0439\u043b\u043e\u0432: %llu",
                     static_cast<unsigned long long>(bridge->terrain_animation_owned_updates),
                     static_cast<unsigned long long>(bridge->terrain_animation_fallback_updates),
                     static_cast<unsigned long long>(bridge->terrain_wave_sectors),
                     static_cast<unsigned long long>(bridge->terrain_animated_tile_updates));
-        ImGui::Text("Placed figures: %.3f ms / %llu calls", bridge->figure_placed_cpu_ms,
+        ImGui::Text(u8"\u0420\u0430\u0437\u043c\u0435\u0449\u0451\u043d\u043d\u044b\u0435 \u043c\u043e\u0434\u0435\u043b\u0438: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->figure_placed_cpu_ms,
                     static_cast<unsigned long long>(bridge->figure_placed_calls));
-        ImGui::Text("Lit figures: %.3f ms / %llu calls", bridge->figure_lit_cpu_ms,
+        ImGui::Text(u8"\u041e\u0441\u0432\u0435\u0449\u0451\u043d\u043d\u044b\u0435 \u043c\u043e\u0434\u0435\u043b\u0438: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->figure_lit_cpu_ms,
                     static_cast<unsigned long long>(bridge->figure_lit_calls));
-        ImGui::Text("Lit ingress morphed/rigid-or-unknown: %.3f/%0.3f ms  %llu/%llu calls",
+        ImGui::Text(u8"\u041f\u0440\u0438\u0451\u043c \u043e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u044f: \u043c\u043e\u0440\u0444\u0438\u043d\u0433/\u0436\u0451\u0441\u0442\u043a\u0438\u0435 \u0438\u043b\u0438 \u043f\u0440\u043e\u0447\u0438\u0435: %.3f/%0.3f \u043c\u0441  %llu/%llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432",
                     bridge->figure_lit_morphed_cpu_ms,
                     bridge->figure_lit_rigid_cpu_ms,
                     static_cast<unsigned long long>(bridge->figure_lit_morphed_calls),
                     static_cast<unsigned long long>(bridge->figure_lit_rigid_calls));
-        ImGui::Text("GPU-owned figures: %llu  CPU fallbacks: %llu",
+        ImGui::Text(u8"\u041c\u043e\u0434\u0435\u043b\u0438 \u043d\u0430 GPU: %llu  \u043f\u0443\u0442\u0438 CPU: %llu",
                     static_cast<unsigned long long>(bridge->figure_gpu_owned_calls),
                     static_cast<unsigned long long>(bridge->figure_cpu_fallback_calls));
-        ImGui::Text("GPU submit failures: %llu  High-level culled: %llu",
+        ImGui::Text(u8"\u041e\u0448\u0438\u0431\u043a\u0438 \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438 GPU: %llu  \u043e\u0442\u0441\u0435\u0447\u0435\u043d\u043e \u0437\u0430\u0440\u0430\u043d\u0435\u0435: %llu",
                     static_cast<unsigned long long>(bridge->figure_gpu_submit_failures),
                     static_cast<unsigned long long>(bridge->figure_gpu_culled_calls));
         for (std::size_t index = 1; index < bridge->figure_fallback_reasons.size(); ++index) {
             const auto fallback_count = bridge->figure_fallback_reasons[index];
             if (!fallback_count) continue;
-            ImGui::Text("Fallback %-14s %llu",
+            ImGui::Text(u8"\u0410\u043b\u044c\u0442\u0435\u0440\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u0443\u0442\u044c %-14s %llu",
                         figure_fallback_reason_name(static_cast<FigureFallbackReason>(index)),
                         static_cast<unsigned long long>(fallback_count));
         }
@@ -728,7 +729,7 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
 }
 
 bool interface_option(const RendererOption& option) {
-    if(option.group==u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441" || option.group=="HUD layout" || option.group=="Combat UI")return true;
+    if(option.group=="Interface" || option.group=="HUD layout" || option.group=="Combat UI")return true;
     std::size_t count=0;const auto* settings=player_graphics_settings(count);
     for(std::size_t i=0;i<count;++i)
         if(option.key==settings[i].key && std::strcmp(settings[i].category,u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")==0)return true;
@@ -751,8 +752,8 @@ constexpr const char* kDiagnosticsGroup = "Diagnostics";
 void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool diagnostics = false,bool ui_only = false) {
     filter.Draw(u8"\u041f\u043e\u0438\u0441\u043a \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a", -1.f);
     if (config.options().empty()) {
-        ImGui::TextWrapped("No runtime graphics options are registered by this renderer build. "
-                           "Controls appear here only after the backing renderer feature exists.");
+        ImGui::TextWrapped(u8"\u0412 \u044d\u0442\u043e\u0439 \u0441\u0431\u043e\u0440\u043a\u0435 \u0440\u0435\u043d\u0434\u0435\u0440\u0430 \u043d\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u0433\u0440\u0430\u0444\u0438\u043a\u0438. "
+                           u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043f\u043e\u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 \u0444\u0443\u043d\u043a\u0446\u0438\u0439.");
         return;
     }
     std::string current_group;
@@ -764,44 +765,51 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
         if (!filter.PassFilter(searchable.c_str())) continue;
         if (option.group != current_group) {
             current_group = option.group;
-            ImGui::SeparatorText(current_group.c_str());
+            ImGui::SeparatorText(renderer_ui_text_ru(current_group.c_str()));
         }
+        ImGui::PushID(option.key.c_str());
+        if (ImGui::BeginTable("##setting", 2, ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::TableNextColumn();
+        ImGui::TextWrapped("%s", option.label.c_str());
+        help_marker(option.description.c_str());
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
         const char* note = blocked_option_note(config, option.key.c_str());
         ImGui::BeginDisabled(note != nullptr);
         switch (option.type) {
         case RendererOptionType::text: break;
         case RendererOptionType::boolean: {
             bool value = option.boolean_value;
-            if (ImGui::Checkbox(option.label.c_str(), &value)) config.set_boolean(option.key.c_str(), value);
+            if (ImGui::Checkbox("##value", &value)) config.set_boolean(option.key.c_str(), value);
             break;
         }
         case RendererOptionType::integer: {
             int value = option.integer_value;
             if (option.key == "camp_ui_layout") {
                 const char* choices[] = {u8"\u0418\u0441\u0445\u043e\u0434\u043d\u044b\u0439 (\u0434\u043b\u044f \u0441\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u044f)", u8"\u0428\u0438\u0440\u043e\u043a\u0430\u044f \u0441\u0435\u0442\u043a\u0430"};
-                if (ImGui::Combo(option.label.c_str(), &value, choices, 2))
+                if (ImGui::Combo("##value", &value, choices, 2))
                     config.set_integer(option.key.c_str(), value);
             } else if(option.key=="portrait_direction") {
                 const char* choices[]={u8"\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 (\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b)",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
-                if(ImGui::Combo(option.label.c_str(),&value,choices,5))config.set_integer(option.key.c_str(),value);
+                if(ImGui::Combo("##value",&value,choices,5))config.set_integer(option.key.c_str(),value);
             } else if(option.key=="spell_bar_direction" || option.key=="ability_bar_direction" || option.key=="weapon_switcher_direction" || option.key=="quick_items_direction") {
                 const char* choices[]={u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
-                if(ImGui::Combo(option.label.c_str(),&value,choices,4))config.set_integer(option.key.c_str(),value);
+                if(ImGui::Combo("##value",&value,choices,4))config.set_integer(option.key.c_str(),value);
             } else if (option.key == "anisotropy") {
                 const char* choices[] = {"1", "2", "4", "8", "16"};
-                if (ImGui::Combo(option.label.c_str(), &value, choices, 5))
+                if (ImGui::Combo("##value", &value, choices, 5))
                     config.set_integer(option.key.c_str(), value);
             } else if (option.key == "shadow_cascade_quality") {
-                const char* choices[] = {"Low (1024 x 1024)", "Medium (2048 x 2048)",
-                                         "High (4096 x 4096)"};
-                if (ImGui::Combo(option.label.c_str(), &value, choices, 3))
+                const char* choices[] = {u8"\u041d\u0438\u0437\u043a\u043e\u0435 (1024 x 1024)", u8"\u0421\u0440\u0435\u0434\u043d\u0435\u0435 (2048 x 2048)",
+                                         u8"\u0412\u044b\u0441\u043e\u043a\u043e\u0435 (4096 x 4096)"};
+                if (ImGui::Combo("##value", &value, choices, 3))
                     config.set_integer(option.key.c_str(), value);
             } else if (option.key == "point_shadow_quality") {
-                const char* choices[] = {"Low (128 x 128)", "Medium (256 x 256)",
-                                         "High (512 x 512)"};
-                if (ImGui::Combo(option.label.c_str(), &value, choices, 3))
+                const char* choices[] = {u8"\u041d\u0438\u0437\u043a\u043e\u0435 (128 x 128)", u8"\u0421\u0440\u0435\u0434\u043d\u0435\u0435 (256 x 256)",
+                                         u8"\u0412\u044b\u0441\u043e\u043a\u043e\u0435 (512 x 512)"};
+                if (ImGui::Combo("##value", &value, choices, 3))
                     config.set_integer(option.key.c_str(), value);
-            } else if (ImGui::SliderInt(option.label.c_str(), &value,
+            } else if (ImGui::SliderInt("##value", &value,
                                        option.integer_minimum, option.integer_maximum)) {
                 config.set_integer(option.key.c_str(), value);
             }
@@ -810,19 +818,21 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
         case RendererOptionType::floating_point: {
             float value = option.floating_value;
             const char* format = option.floating_step < 0.1f ? "%.3f" : "%.2f";
-            if (ImGui::SliderFloat(option.label.c_str(), &value, option.floating_minimum,
+            if (ImGui::SliderFloat("##value", &value, option.floating_minimum,
                                    option.floating_maximum, format))
                 config.set_floating_point(option.key.c_str(), value);
             break;
         }
         }
         ImGui::EndDisabled();
-        if (note) { ImGui::SameLine(); ImGui::TextDisabled("(%s)", note); }
+        if (note) ImGui::TextWrapped("%s", note);
         if (option.restart_required) {
             ImGui::SameLine();
-            ImGui::TextDisabled("restart required");
+            ImGui::TextDisabled(u8"\u043d\u0443\u0436\u0435\u043d \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a");
         }
-        help_marker(option.description.c_str());
+        ImGui::EndTable();
+        }
+        ImGui::PopID();
     }
 }
 
@@ -892,24 +902,24 @@ void hud_scale_control(RendererConfig& config,const char* key,const char* label)
     }
 }
 void hud_panel_options(RendererConfig& config,unsigned panel,const HudPanelBounds& bounds) {
-    ImGui::TextUnformatted(kHudPanels[panel].label);
+    ImGui::TextUnformatted(renderer_ui_text_ru(kHudPanels[panel].label));
     ImGui::Separator();
-    ImGui::Text("Position: X %.0f, Y %.0f px",bounds.left,bounds.top);
-    ImGui::Text("Size: %.0f x %.0f px",bounds.width,bounds.height);
+    ImGui::Text(u8"\u041f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435: X %.0f, Y %.0f \u043f\u0438\u043a\u0441.",bounds.left,bounds.top);
+    ImGui::Text(u8"\u0420\u0430\u0437\u043c\u0435\u0440: %.0f x %.0f \u043f\u0438\u043a\u0441.",bounds.width,bounds.height);
     if(HudPanel(panel)==HudPanel::messages) {
-        hud_scale_control(config,"message_panel_text_scale","Text scale");
+        hud_scale_control(config,"message_panel_text_scale",u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u0442\u0435\u043a\u0441\u0442\u0430");
     } else {
         const auto key=std::string(kHudPanels[panel].key)+"_scale";
-        hud_scale_control(config,key.c_str(),"Widget scale");
+        hud_scale_control(config,key.c_str(),u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u043f\u0430\u043d\u0435\u043b\u0438");
     }
     const std::string fade_prefix=kHudPanels[panel].key;
     if(const auto* fade=config.find((fade_prefix+"_auto_fade").c_str())){
         bool enabled=fade->boolean_value;
-        if(ImGui::Checkbox("Auto fade",&enabled))config.set_boolean(fade->key.c_str(),enabled);
-        hud_scale_control(config,(fade_prefix+"_fade_transparency").c_str(),"Faded transparency");
+        if(ImGui::Checkbox(u8"\u0410\u0432\u0442\u043e\u0441\u043a\u0440\u044b\u0442\u0438\u0435",&enabled))config.set_boolean(fade->key.c_str(),enabled);
+        hud_scale_control(config,(fade_prefix+"_fade_transparency").c_str(),u8"\u041f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u0441\u043a\u0440\u044b\u0442\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438");
         ImGui::TextDisabled("0%% = solid; 100%% = hidden");
     }
-    if(panel>=unsigned(HudPanel::stance))ImGui::TextDisabled("Fixed screen corner");
+    if(panel>=unsigned(HudPanel::stance))ImGui::TextDisabled(u8"\u0417\u0430\u043a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u0435 \u0432 \u0443\u0433\u043b\u0443 \u044d\u043a\u0440\u0430\u043d\u0430");
     const char* direction=nullptr;
     if(HudPanel(panel)==HudPanel::spells)direction="spell_bar_direction";
     else if(HudPanel(panel)==HudPanel::abilities)direction="ability_bar_direction";
@@ -923,35 +933,35 @@ void hud_panel_options(RendererConfig& config,unsigned panel,const HudPanelBound
             const char* bars[]={u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
             const char* portraits[]={u8"\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 (\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b)",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
             const bool faces=HudPanel(panel)==HudPanel::portraits;
-            if(ImGui::Combo("Icon alignment",&value,faces?portraits:bars,faces?5:4))
+            if(ImGui::Combo(u8"\u0420\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0437\u043d\u0430\u0447\u043a\u043e\u0432",&value,faces?portraits:bars,faces?5:4))
                 config.set_integer(direction,value);
         }
     }
     if(direction) {
         const std::string prefix=kHudPanels[panel].key;
         const auto* padding=config.find((prefix+"_padding").c_str());
-        if(padding) {int value=padding->integer_value;if(ImGui::SliderInt("Padding (px)",&value,padding->integer_minimum,padding->integer_maximum))config.set_integer(padding->key.c_str(),value);}
+        if(padding) {int value=padding->integer_value;if(ImGui::SliderInt(u8"\u041e\u0442\u0441\u0442\u0443\u043f (\u043f\u0438\u043a\u0441.)",&value,padding->integer_minimum,padding->integer_maximum))config.set_integer(padding->key.c_str(),value);}
         const auto* preview=config.find((prefix+"_preview").c_str());
-        if(preview) {bool value=preview->boolean_value;if(ImGui::Checkbox("Preview slots",&value))config.set_boolean(preview->key.c_str(),value);}
+        if(preview) {bool value=preview->boolean_value;if(ImGui::Checkbox(u8"\u041f\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u044f\u0447\u0435\u0435\u043a",&value))config.set_boolean(preview->key.c_str(),value);}
         const auto* count=config.find((prefix+"_preview_count").c_str());
-        if(count) {int value=count->integer_value;if(ImGui::SliderInt("Preview count",&value,count->integer_minimum,count->integer_maximum))config.set_integer(count->key.c_str(),value);}
+        if(count) {int value=count->integer_value;if(ImGui::SliderInt(u8"\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u044f\u0447\u0435\u0435\u043a \u043f\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430",&value,count->integer_minimum,count->integer_maximum))config.set_integer(count->key.c_str(),value);}
         const auto* wrap=config.find((prefix+"_slots_per_column").c_str());
         if(wrap) {int value=wrap->integer_value;
             const bool rows=(direction && config.find(direction) && config.find(direction)->integer_value>=2);
-            if(ImGui::SliderInt(rows?"Slots per row":"Slots per column",&value,wrap->integer_minimum,wrap->integer_maximum,value?"%d":"0 (one line)"))config.set_integer(wrap->key.c_str(),value);}
+            if(ImGui::SliderInt(rows?u8"\u042f\u0447\u0435\u0435\u043a \u0432 \u0441\u0442\u0440\u043e\u043a\u0435":u8"\u042f\u0447\u0435\u0435\u043a \u0432 \u0441\u0442\u043e\u043b\u0431\u0446\u0435",&value,wrap->integer_minimum,wrap->integer_maximum,value?"%d":u8"0 (\u043e\u0434\u0438\u043d \u0440\u044f\u0434)"))config.set_integer(wrap->key.c_str(),value);}
     }
     if(HudPanel(panel)==HudPanel::minimap || HudPanel(panel)==HudPanel::character_info || HudPanel(panel)==HudPanel::messages) {
         const std::string prefix=kHudPanels[panel].key;
-        hud_scale_control(config,(prefix+"_buttons_scale").c_str(),"Buttons scale");
+        hud_scale_control(config,(prefix+"_buttons_scale").c_str(),u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u043a\u043d\u043e\u043f\u043e\u043a");
         const auto* gap=config.find((prefix+"_border_padding").c_str());
-        if(gap){int value=gap->integer_value;if(ImGui::SliderInt("Border padding (px)",&value,gap->integer_minimum,gap->integer_maximum))config.set_integer(gap->key.c_str(),value);}
+        if(gap){int value=gap->integer_value;if(ImGui::SliderInt(u8"\u041e\u0442\u0441\u0442\u0443\u043f \u0440\u0430\u043c\u043a\u0438 (\u043f\u0438\u043a\u0441.)",&value,gap->integer_minimum,gap->integer_maximum))config.set_integer(gap->key.c_str(),value);}
         const auto* option=config.find((prefix+"_buttons_side").c_str());
         if(option) {int value=option->integer_value;
-            const char* sides[]={"Automatic","Game default side","Left","Right","Top","Bottom"};
-            if(ImGui::Combo("Button alignment",&value,sides,6))config.set_integer(option->key.c_str(),value);
+            const char* sides[]={u8"\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438",u8"\u0428\u0442\u0430\u0442\u043d\u0430\u044f \u0441\u0442\u043e\u0440\u043e\u043d\u0430",u8"\u0421\u043b\u0435\u0432\u0430",u8"\u0421\u043f\u0440\u0430\u0432\u0430",u8"\u0421\u0432\u0435\u0440\u0445\u0443",u8"\u0421\u043d\u0438\u0437\u0443"};
+            if(ImGui::Combo(u8"\u0420\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u043a\u043d\u043e\u043f\u043e\u043a",&value,sides,6))config.set_integer(option->key.c_str(),value);
         }
     }
-    if(ImGui::Button("Reset this panel"))reset_hud_panel(config,panel);
+    if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u044d\u0442\u0443 \u043f\u0430\u043d\u0435\u043b\u044c"))reset_hud_panel(config,panel);
 }
 void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config) {
     if(!game_hud_editing() || state.settings_open || config.overlay_mode()==DebugOverlayMode::full)return;
@@ -984,10 +994,10 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
         const ImGuiWindowFlags flags=ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|
             ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoFocusOnAppearing|
             ImGuiWindowFlags_NoNav|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse;
-        if(ImGui::Begin(kHudPanels[i].label,nullptr,flags)) {
+        if(ImGui::Begin(renderer_ui_text_ru(kHudPanels[i].label),nullptr,flags)) {
             ImGui::SetCursorScreenPos(at);ImGui::InvisibleButton("move_or_resize",hit_size);
             const bool active=ImGui::IsItemActive();
-            const bool highlighted=ImGui::IsItemHovered() || active || ImGui::IsPopupOpen("Panel options");
+            const bool highlighted=ImGui::IsItemHovered() || active || ImGui::IsPopupOpen(u8"\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u043f\u0430\u043d\u0435\u043b\u0438");
             auto* draw=ImGui::GetWindowDrawList();
             const auto color=highlighted?IM_COL32(100,230,255,255):IM_COL32(255,215,80,255);
             if(highlighted)draw->AddRectFilled(at,ImVec2(at.x+hit_size.x,at.y+hit_size.y),IM_COL32(70,190,230,35));
@@ -996,12 +1006,12 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
                 auto p=preview.bounds;hud_bounds_to_output(p);const ImVec2 first(p.left,p.top),last(p.left+p.width,p.top+p.height);
                 draw->AddRectFilled(first,last,IM_COL32(150,185,210,22));
                 draw->AddRect(first,last,IM_COL32(160,200,225,90),0.f,0,1.f);
-                const std::string label=std::string(i==4?"Party ":i==0?"Spell ":i==1?"Skill ":i==5?"Weapon ":"Item ")+std::to_string(preview.index+1);
+                const std::string label=std::string(i==4?u8"\u041e\u0442\u0440\u044f\u0434 ":i==0?u8"\u0417\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u0435 ":i==1?u8"\u0423\u043c\u0435\u043d\u0438\u0435 ":i==5?u8"\u041e\u0440\u0443\u0436\u0438\u0435 ":u8"\u041f\u0440\u0435\u0434\u043c\u0435\u0442 ")+std::to_string(preview.index+1);
                 draw->AddText(ImVec2(first.x+3.f,first.y+3.f),IM_COL32(180,210,230,135),label.c_str());
             }
             // Editor guides are always one physical pixel, independent of widget scale.
             draw->AddRect(content,ImVec2(content.x+size.x,content.y+size.y),color,0.f,0,1.f);
-            draw->AddText(ImVec2(at.x+5.f,at.y+5.f),color,kHudPanels[i].label);
+            draw->AddText(ImVec2(at.x+5.f,at.y+5.f),color,renderer_ui_text_ru(kHudPanels[i].label));
             if(i<unsigned(HudPanel::stance))draw->AddLine(ImVec2(content.x+size.x-grip,content.y+size.y-2.f),ImVec2(content.x+size.x-2.f,content.y+size.y-grip),color,1.f);
             if(ImGui::IsItemActivated()) {
                 state.panel_drag_start=content;state.panel_size_start=size;
@@ -1052,7 +1062,7 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
                     config.set_floating_point((key+"_y").c_str(),y);
                 }
             }
-            if(ImGui::BeginPopupContextItem("Panel options")) {
+            if(ImGui::BeginPopupContextItem(u8"\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u043f\u0430\u043d\u0435\u043b\u0438")) {
                 hud_panel_options(config,i,b);
                 ImGui::EndPopup();
             }
@@ -1062,20 +1072,20 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
     ImGui::SetNextWindowPos(ImVec2(20.f*state.ui_scale,layout.height*.4f),ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(290.f*state.ui_scale,0),ImGuiCond_FirstUseEver);
     if(ImGui::Begin("HUD layout",nullptr,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_AlwaysAutoResize)) {
-        hud_scale_control(config,"ui_scale","Global UI scale");
+        hud_scale_control(config,"ui_scale",u8"\u041e\u0431\u0449\u0438\u0439 \u043c\u0430\u0441\u0448\u0442\u0430\u0431 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430");
         const char* timing_keys[]={"hud_fade_in_duration","hud_fade_duration","hud_fade_delay"};
-        const char* timing_labels[]={"Fade-in duration","Fade-out duration","Idle time before fade-out"};
+        const char* timing_labels[]={u8"\u0412\u0440\u0435\u043c\u044f \u043f\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u044f",u8"\u0412\u0440\u0435\u043c\u044f \u0438\u0441\u0447\u0435\u0437\u043d\u043e\u0432\u0435\u043d\u0438\u044f",u8"\u0417\u0430\u0434\u0435\u0440\u0436\u043a\u0430 \u043f\u0435\u0440\u0435\u0434 \u0441\u043a\u0440\u044b\u0442\u0438\u0435\u043c"};
         for(unsigned i=0;i<3;++i)if(const auto* timing=config.find(timing_keys[i])) {
             int value=timing->integer_value;
             if(ImGui::SliderInt(timing_labels[i],&value,timing->integer_minimum,timing->integer_maximum,u8"%d \u043c\u0441"))
                 config.set_integer(timing->key.c_str(),value);
         }
-        ImGui::Checkbox("Show grid",&state.hud_grid);
+        ImGui::Checkbox(u8"\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0435\u0442\u043a\u0443",&state.hud_grid);
         if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(config);
         ImGui::SameLine();
-        if(ImGui::Button("Lock")){set_game_hud_editing(false);state.pending_save=true;}
-        ImGui::TextWrapped("Drag anywhere in a panel; resize its lower-right corner. Right-click for this panel's options, coordinates and reset.");
-        ImGui::TextWrapped("Ctrl snaps horizontally, Alt vertically; hold both for both axes. Snaps use the visible grid, otherwise screen and widget edges. Lock saves; Esc also locks.");
+        if(ImGui::Button(u8"\u0417\u0430\u043a\u0440\u0435\u043f\u0438\u0442\u044c")){set_game_hud_editing(false);state.pending_save=true;}
+        ImGui::TextWrapped(u8"\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u0439\u0442\u0435 \u043f\u0430\u043d\u0435\u043b\u044c \u0437\u0430 \u043b\u044e\u0431\u0443\u044e \u0442\u043e\u0447\u043a\u0443; \u043c\u0435\u043d\u044f\u0439\u0442\u0435 \u0440\u0430\u0437\u043c\u0435\u0440 \u0437\u0430 \u043d\u0438\u0436\u043d\u0438\u0439 \u043f\u0440\u0430\u0432\u044b\u0439 \u0443\u0433\u043e\u043b. \u041f\u0440\u0430\u0432\u0430\u044f \u043a\u043d\u043e\u043f\u043a\u0430 \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u043a\u043e\u043e\u0440\u0434\u0438\u043d\u0430\u0442\u044b \u0438 \u0441\u0431\u0440\u043e\u0441.");
+        ImGui::TextWrapped(u8"Ctrl \u0432\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u043f\u0440\u0438\u0432\u044f\u0437\u043a\u0443 \u043f\u043e \u0433\u043e\u0440\u0438\u0437\u043e\u043d\u0442\u0430\u043b\u0438, Alt \u2014 \u043f\u043e \u0432\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u0438, \u0432\u043c\u0435\u0441\u0442\u0435 \u2014 \u043f\u043e \u043e\u0431\u0435\u0438\u043c \u043e\u0441\u044f\u043c. \u041f\u0440\u0438\u0432\u044f\u0437\u043a\u0430 \u043a \u0441\u0435\u0442\u043a\u0435 \u043b\u0438\u0431\u043e \u043a\u0440\u0430\u044f\u043c \u044d\u043a\u0440\u0430\u043d\u0430 \u0438 \u043f\u0430\u043d\u0435\u043b\u0435\u0439. \u0417\u0430\u043a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u0435 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f; Esc \u0442\u043e\u0436\u0435 \u0437\u0430\u043a\u0440\u0435\u043f\u043b\u044f\u0435\u0442.");
     }
     ImGui::End();
     if(!available || ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {set_game_hud_editing(false);state.pending_save=true;}
@@ -1092,27 +1102,27 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
     ImGui::SetNextWindowSize(ImVec2(850.0f * state.ui_scale, 620.0f * state.ui_scale),
                              ImGuiCond_FirstUseEver);
     bool open = true;
-    if (ImGui::Begin("EID3D11 renderer", &open, ImGuiWindowFlags_NoCollapse)) {
+    if (ImGui::Begin(u8"\u0420\u0435\u043d\u0434\u0435\u0440 EID3D11", &open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::TextDisabled(state.developer
-            ? "F10: hidden / monitor / configuration   Shift+F10: player settings   F11: capture next frame"
-            : "Shift+F10: hidden / monitor / configuration   F10: player settings   F11: capture next frame");
+            ? u8"F10: \u0441\u043a\u0440\u044b\u0442\u044c / \u043c\u043e\u043d\u0438\u0442\u043e\u0440 / \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b   Shift+F10: \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0438\u0433\u0440\u043e\u043a\u0430   F11: \u0437\u0430\u0445\u0432\u0430\u0442 \u043a\u0430\u0434\u0440\u0430"
+            : u8"Shift+F10: \u0441\u043a\u0440\u044b\u0442\u044c / \u043c\u043e\u043d\u0438\u0442\u043e\u0440 / \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b   F10: \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0438\u0433\u0440\u043e\u043a\u0430   F11: \u0437\u0430\u0445\u0432\u0430\u0442 \u043a\u0430\u0434\u0440\u0430");
         if (ImGui::BeginTabBar("RendererTabs")) {
-            if (ImGui::BeginTabItem("Performance")) {
+            if (ImGui::BeginTabItem(u8"\u041f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c")) {
                 draw_performance_tab(state, profile, bridge, resources);
                 ImGui::Separator();
-                if (ImGui::Button("Capture next frame, pass by pass")) state.capture_requested = true;
-                if (ImGui::Button("Freeze / unfreeze culling camera (Shift+F11)")) state.cull_freeze_toggle = true;
-                help_marker("Explicit diagnostic capture. It may stall that captured frame; normal monitoring never writes to disk.");
+                if (ImGui::Button(u8"\u0417\u0430\u0445\u0432\u0430\u0442\u0438\u0442\u044c \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u043a\u0430\u0434\u0440 \u043f\u043e \u043f\u0440\u043e\u0445\u043e\u0434\u0430\u043c")) state.capture_requested = true;
+                if (ImGui::Button(u8"\u0417\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u0442\u044c / \u043e\u0441\u0432\u043e\u0431\u043e\u0434\u0438\u0442\u044c \u043a\u0430\u043c\u0435\u0440\u0443 \u043e\u0442\u0441\u0435\u0447\u0435\u043d\u0438\u044f (Shift+F11)")) state.cull_freeze_toggle = true;
+                help_marker(u8"\u0414\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0437\u0430\u0445\u0432\u0430\u0442 \u043c\u043e\u0436\u0435\u0442 \u0437\u0430\u0434\u0435\u0440\u0436\u0430\u0442\u044c \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u043a\u0430\u0434\u0440. \u041e\u0431\u044b\u0447\u043d\u044b\u0439 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u043d\u0435 \u043f\u0438\u0448\u0435\u0442 \u043d\u0430 \u0434\u0438\u0441\u043a.");
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem(u8"\u0413\u0440\u0430\u0444\u0438\u043a\u0430")) {
-                if (!state.settings_open && ImGui::Button("Open player Graphics Settings"))
+                if (!state.settings_open && ImGui::Button(u8"\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0433\u0440\u0430\u0444\u0438\u043a\u0438"))
                     open_settings(state, overlay.config(), false);
                 draw_graphics_tab(overlay.config(), state.graphics_filter);
                 ImGui::Separator();
-                if (ImGui::Button("Apply and save")) state.pending_save = true;
+                if (ImGui::Button(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c")) state.pending_save = true;
                 ImGui::SameLine();
-                ImGui::TextDisabled("Local eid3d11.ini; no registry settings");
+                ImGui::TextDisabled(u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442\u0441\u044f \u0432 \u0444\u0430\u0439\u043b\u0435 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u0440\u0435\u043d\u0434\u0435\u0440\u0430");
                 ImGui::EndTabItem();
             }
             if(ImGui::BeginTabItem(u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")) {
@@ -1122,16 +1132,16 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                 if(ImGui::CollapsingHeader(u8"\u0417\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0438 \u0431\u043e\u0435\u0432\u044b\u0435 \u044d\u0444\u0444\u0435\u043a\u0442\u044b"))state.combat_ui.draw_settings(overlay.config());
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(kDiagnosticsGroup)) {
+            if (ImGui::BeginTabItem(renderer_ui_text_ru(kDiagnosticsGroup))) {
                 draw_graphics_tab(overlay.config(), state.diagnostics_filter, true);
                 ImGui::Separator();
-                if (ImGui::Button("Spawn lightning at camera focus")) owned::request_debug_lightning();
-                if (ImGui::Button("Apply and save##diagnostics")) state.pending_save = true;
+                if (ImGui::Button(u8"\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043c\u043e\u043b\u043d\u0438\u044e \u0432 \u0444\u043e\u043a\u0443\u0441\u0435 \u043a\u0430\u043c\u0435\u0440\u044b")) owned::request_debug_lightning();
+                if (ImGui::Button(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c##diagnostics")) state.pending_save = true;
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Resources")) {
+            if (ImGui::BeginTabItem(u8"\u0420\u0435\u0441\u0443\u0440\u0441\u044b")) {
                 const DebugResourceView selected = overlay.config().debug_resource_view();
-                if (ImGui::BeginCombo("Resource view",
+                if (ImGui::BeginCombo(u8"\u041f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u0440\u0435\u0441\u0443\u0440\u0441\u0430",
                                       debug_resource_view_label(selected))) {
                     for (std::uint8_t raw = 0;
                          raw < static_cast<std::uint8_t>(DebugResourceView::count); ++raw) {
@@ -1146,51 +1156,51 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                     ImGui::EndCombo();
                 }
                 if (!debug_views.available(selected))
-                    ImGui::TextDisabled("Selected view is unavailable in the current frame.");
-                ImGui::TextWrapped("Views use only resources already owned by the renderer. "
-                                   "Unavailable production buffers are listed explicitly and are not fabricated.");
-                ImGui::TextDisabled("The selected view runs only while this full F10 window is active.");
+                    ImGui::TextDisabled(u8"\u0412\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u0440\u0435\u0441\u0443\u0440\u0441 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0432 \u0442\u0435\u043a\u0443\u0449\u0435\u043c \u043a\u0430\u0434\u0440\u0435.");
+                ImGui::TextWrapped(u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u043c\u0435\u044e\u0449\u0438\u0435\u0441\u044f \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0440\u0435\u043d\u0434\u0435\u0440\u0430. "
+                                   u8"\u041e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0431\u0443\u0444\u0435\u0440\u044b \u043e\u0442\u043c\u0435\u0447\u0430\u044e\u0442\u0441\u044f \u044f\u0432\u043d\u043e \u0438 \u043d\u0435 \u043f\u043e\u0434\u043c\u0435\u043d\u044f\u044e\u0442\u0441\u044f.");
+                ImGui::TextDisabled(u8"\u041f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u043e\u043a\u0430 \u043e\u0442\u043a\u0440\u044b\u0442\u0430 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f \u043f\u0430\u043d\u0435\u043b\u044c F10.");
                 if (selected == DebugResourceView::shadows ||
                     selected == DebugResourceView::shadow_cascade_coverage) {
                     ImGui::Separator();
-                    ImGui::Text("Runtime shadows: %s", shadows.feature_enabled ? "ON" : "OFF");
-                    ImGui::Text("Shadow masks (bits C1..C4): enabled 0x%X, valid 0x%X",
+                    ImGui::Text(u8"\u0422\u0435\u043d\u0438: %s", shadows.feature_enabled ? "ON" : "OFF");
+                    ImGui::Text(u8"\u041c\u0430\u0441\u043a\u0438 \u0442\u0435\u043d\u0435\u0439 (\u0431\u0438\u0442\u044b C1..C4): \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b 0x%X, \u0433\u043e\u0442\u043e\u0432\u044b 0x%X",
                                 shadows.enabled_mask, shadows.valid_mask);
                     if (shadows.pass_in_progress)
-                        ImGui::TextDisabled("Shadow pass in progress; maps are not displayed.");
+                        ImGui::TextDisabled(u8"\u041f\u0440\u043e\u0445\u043e\u0434 \u0442\u0435\u043d\u0435\u0439 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f; \u043a\u0430\u0440\u0442\u044b \u043f\u043e\u043a\u0430 \u043d\u0435 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u044e\u0442\u0441\u044f.");
                     else
-                        ImGui::Text("Rewritten in last completed shadow pass: 0x%X",
+                        ImGui::Text(u8"\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b \u0432 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u043c \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u043e\u043c \u043f\u0440\u043e\u0445\u043e\u0434\u0435: 0x%X",
                                     shadows.rewritten_mask);
                     constexpr ImVec4 colors[] = {{1,.25f,.2f,1}, {.2f,1,.25f,1},
                                                  {.2f,.5f,1,1}, {1,.85f,.2f,1}, {.8f,.35f,1,1}};
-                    ImGui::TextWrapped("Maps: C1-C3 top row; C4 middle distance and C5 far distance below. "
-                        "Gray is each map's normalized light depth [0,1]; navy is clear depth. "
-                        "Colored rectangles show stored receiver XY bounds. Hatched maps are empty or invalid.");
-                    ImGui::TextWrapped("Coverage colors receiving world pixels: C1 red, C2 green, C3 blue, C4 yellow, C5 violet. "
-                        "Gray: no selector; magenta: first selector invalid; cyan: outside selected light volume. "
-                        "Unlit visuals and UI keep their colors. Changes apply to the next world render.");
+                    ImGui::TextWrapped(u8"\u041a\u0430\u0440\u0442\u044b: C1\u2013C3 \u0432\u0432\u0435\u0440\u0445\u0443; C4 \u0441\u0440\u0435\u0434\u043d\u0435\u0439 \u0438 C5 \u0434\u0430\u043b\u044c\u043d\u0435\u0439 \u0434\u0438\u0441\u0442\u0430\u043d\u0446\u0438\u0438 \u0432\u043d\u0438\u0437\u0443. "
+                        u8"\u0421\u0435\u0440\u044b\u0439 \u2014 \u043d\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u0430\u044f \u0433\u043b\u0443\u0431\u0438\u043d\u0430 [0,1], \u0442\u0451\u043c\u043d\u043e-\u0441\u0438\u043d\u0438\u0439 \u2014 \u043f\u0443\u0441\u0442\u0430\u044f \u043e\u0431\u043b\u0430\u0441\u0442\u044c. "
+                        u8"\u0426\u0432\u0435\u0442\u043d\u044b\u0435 \u043f\u0440\u044f\u043c\u043e\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u0438 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442 \u0433\u0440\u0430\u043d\u0438\u0446\u044b \u043f\u0440\u0438\u0451\u043c\u043d\u0438\u043a\u043e\u0432 \u043f\u043e XY. \u0428\u0442\u0440\u0438\u0445\u043e\u0432\u043a\u0430 \u043e\u0431\u043e\u0437\u043d\u0430\u0447\u0430\u0435\u0442 \u043f\u0443\u0441\u0442\u044b\u0435 \u0438\u043b\u0438 \u043d\u0435\u0433\u043e\u0442\u043e\u0432\u044b\u0435 \u043a\u0430\u0440\u0442\u044b.");
+                    ImGui::TextWrapped(u8"\u0426\u0432\u0435\u0442 \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u044f: C1 \u043a\u0440\u0430\u0441\u043d\u044b\u0439, C2 \u0437\u0435\u043b\u0451\u043d\u044b\u0439, C3 \u0441\u0438\u043d\u0438\u0439, C4 \u0436\u0451\u043b\u0442\u044b\u0439, C5 \u0444\u0438\u043e\u043b\u0435\u0442\u043e\u0432\u044b\u0439. "
+                        u8"\u0421\u0435\u0440\u044b\u0439 \u2014 \u043d\u0435\u0442 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0433\u043e \u043a\u0430\u0441\u043a\u0430\u0434\u0430, \u043f\u0443\u0440\u043f\u0443\u0440\u043d\u044b\u0439 \u2014 \u043f\u0435\u0440\u0432\u044b\u0439 \u043a\u0430\u0441\u043a\u0430\u0434 \u043d\u0435\u0433\u043e\u0442\u043e\u0432, \u0433\u043e\u043b\u0443\u0431\u043e\u0439 \u2014 \u0432\u043d\u0435 \u043e\u0431\u044a\u0451\u043c\u0430 \u0441\u0432\u0435\u0442\u0430. "
+                        u8"\u041e\u0431\u044a\u0435\u043a\u0442\u044b \u0431\u0435\u0437 \u043e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u044f \u0438 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442 \u0446\u0432\u0435\u0442\u0430. \u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044e\u0442 \u0441\u043e \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u0439 \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0438 \u043c\u0438\u0440\u0430.");
                     for (unsigned i = 0; i < 5; ++i) {
                         const auto& slice = shadows.slices[i];
                         const bool enabled = (shadows.enabled_mask & (1u << i)) != 0;
                         const bool valid = (shadows.valid_mask & (1u << i)) != 0;
                         ImGui::TextColored(colors[i], "C%u  %s", i + 1,
-                                           !enabled ? "empty / disabled" : (valid ? "valid" : "invalid"));
+                                           !enabled ? u8"\u043f\u0443\u0441\u0442\u043e / \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u043e" : (valid ? u8"\u0433\u043e\u0442\u043e\u0432\u043e" : u8"\u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u043e"));
                         if (!enabled) continue;
-                        ImGui::Text("Radius %.4g  |  world units / texel %.6g  |  caster revision entries %llu",
+                        ImGui::Text(u8"\u0420\u0430\u0434\u0438\u0443\u0441 %.4g  /  \u0435\u0434\u0438\u043d\u0438\u0446 \u043c\u0438\u0440\u0430 \u043d\u0430 \u0442\u0435\u043a\u0441\u0435\u043b\u044c %.6g  /  \u0432\u0435\u0440\u0441\u0438\u0439 \u043e\u0431\u044a\u0435\u043a\u0442\u043e\u0432 %llu",
                             slice.radius, slice.world_units_per_texel,
                             static_cast<unsigned long long>(slice.caster_revision_entries));
-                        ImGui::Text("Receiver light XY: [%.4g, %.4g] to [%.4g, %.4g]",
+                        ImGui::Text(u8"\u0413\u0440\u0430\u043d\u0438\u0446\u044b \u043f\u0440\u0438\u0451\u043c\u043d\u0438\u043a\u043e\u0432 XY: [%.4g, %.4g] \u2014 [%.4g, %.4g]",
                             slice.receiver_minimum[0], slice.receiver_minimum[1],
                             slice.receiver_maximum[0], slice.receiver_maximum[1]);
-                        ImGui::Text("Receiver light Z: [%.4g, %.4g]  |  map light Z: [%.4g, %.4g]",
+                        ImGui::Text(u8"\u0413\u043b\u0443\u0431\u0438\u043d\u0430 \u043f\u0440\u0438\u0451\u043c\u043d\u0438\u043a\u043e\u0432: [%.4g, %.4g]  /  \u043a\u0430\u0440\u0442\u044b: [%.4g, %.4g]",
                             slice.receiver_minimum[2], slice.receiver_maximum[2],
                             slice.light_depth[0], slice.light_depth[1]);
                     }
                 }
-                if (ImGui::Button("Save resource view selection")) state.pending_save = true;
+                if (ImGui::Button(u8"\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440")) state.pending_save = true;
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Attribution markers")) {
+            if (ImGui::BeginTabItem(u8"\u041c\u0430\u0440\u043a\u0435\u0440\u044b \u0437\u0430\u043c\u0435\u0440\u043e\u0432")) {
                 constexpr const char* labels[] = {
                     "main_menu_high_fps_ui", "store_inventory", "city_heavy_forced_visibility",
                     "outdoor_daytime", "outdoor_nighttime", "cave_interior",
@@ -1202,20 +1212,20 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                 AttributionMarkerStatus status = profiler ? profiler->attribution_marker_status() :
                     AttributionMarkerStatus{};
                 constexpr const char* states[] = {
-                    "inactive", "begin armed", "active", "end armed", "complete", "overflow", "invalid" };
+                    u8"\u043d\u0435\u0430\u043a\u0442\u0438\u0432\u0435\u043d", u8"\u043e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u043d\u0430\u0447\u0430\u043b\u0430", u8"\u0430\u043a\u0442\u0438\u0432\u0435\u043d", u8"\u043e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u043a\u043e\u043d\u0446\u0430", u8"\u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d", u8"\u043f\u0435\u0440\u0435\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", u8"\u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u043e" };
                 const auto state_index = static_cast<std::size_t>(status.state);
-                ImGui::Text("Recorder: %s%s  segments: %u / %u",
-                            state_index < std::size(states) ? states[state_index] : "invalid",
-                            status.window_flush_pending ? " (draining/flushing window)" : "",
+                ImGui::Text(u8"\u0417\u0430\u043f\u0438\u0441\u044c: %s%s  \u0441\u0435\u0433\u043c\u0435\u043d\u0442\u043e\u0432: %u / %u",
+                            state_index < std::size(states) ? states[state_index] : u8"\u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u043e",
+                            status.window_flush_pending ? u8" (\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435 \u043e\u043a\u043d\u0430)" : "",
                             status.completed, status.capacity);
-                ImGui::Text("Current marked window: %u / %u frames",
+                ImGui::Text(u8"\u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u043e\u043a\u043d\u043e \u0437\u0430\u043c\u0435\u0440\u0430: %u / %u \u043a\u0430\u0434\u0440\u043e\u0432",
                             status.window_frame_count, status.window_frame_capacity);
-                ImGui::TextDisabled("At the measured ~600 FPS, 8192 frames are ~13.65 s per marked window.");
+                ImGui::TextDisabled(u8"\u041f\u0440\u0438 \u0447\u0430\u0441\u0442\u043e\u0442\u0435 \u043e\u043a\u043e\u043b\u043e 600 FPS \u043e\u043a\u043d\u043e \u0438\u0437 8192 \u043a\u0430\u0434\u0440\u043e\u0432 \u0437\u0430\u043d\u0438\u043c\u0430\u0435\u0442 \u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e 13,65 \u0441.");
                 if (!available)
-                    ImGui::TextDisabled("Enable EI_RENDERER_ATTRIBUTION=1 before launch to arm markers.");
-                ImGui::Combo("Stable route label", &state.marker_label, labels,
+                    ImGui::TextDisabled(u8"\u0414\u043b\u044f \u043c\u0430\u0440\u043a\u0435\u0440\u043e\u0432 \u043f\u0435\u0440\u0435\u0434 \u0437\u0430\u043f\u0443\u0441\u043a\u043e\u043c \u0437\u0430\u0434\u0430\u0439\u0442\u0435 EI_RENDERER_ATTRIBUTION=1.");
+                ImGui::Combo(u8"\u041c\u0435\u0442\u043a\u0430 \u0441\u0446\u0435\u043d\u0430\u0440\u0438\u044f", &state.marker_label, labels,
                              static_cast<int>(std::size(labels)));
-                ImGui::Checkbox("Issue #13 menu opening transition",
+                ImGui::Checkbox(u8"\u041f\u0435\u0440\u0435\u0445\u043e\u0434 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f \u043c\u0435\u043d\u044e (\u0437\u0430\u0434\u0430\u0447\u0430 \u211613)",
                                 &state.marker_issue13_transition);
                 AttributionMarkerSelection selection{};
                 selection.label = static_cast<AttributionMarkerLabel>(state.marker_label);
@@ -1225,10 +1235,10 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                         return attribution_issue13_menu_label_name(
                             static_cast<AttributionIssue13MenuLabel>(index));
                     };
-                    ImGui::Combo("Stable non-semantic menu label", &state.marker_menu_label,
+                    ImGui::Combo(u8"\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u0430\u044f \u043c\u0435\u0442\u043a\u0430 \u043c\u0435\u043d\u044e", &state.marker_menu_label,
                                  menu_label_getter, nullptr,
                                  static_cast<int>(AttributionIssue13MenuLabel::count));
-                    ImGui::Text("Opening ordinal: %d", state.marker_opening_ordinal);
+                    ImGui::Text(u8"\u041d\u043e\u043c\u0435\u0440 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f: %d", state.marker_opening_ordinal);
                     ImGui::SameLine();
                     ImGui::BeginDisabled(state.marker_opening_ordinal <= 1);
                     if (ImGui::Button("-##opening_ordinal")) --state.marker_opening_ordinal;
@@ -1238,9 +1248,9 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                         state.marker_opening_ordinal == (std::numeric_limits<int>::max)());
                     if (ImGui::Button("+##opening_ordinal")) ++state.marker_opening_ordinal;
                     ImGui::EndDisabled();
-                    ImGui::Combo("Opening observation", &state.marker_repetition,
+                    ImGui::Combo(u8"\u041d\u0430\u0431\u043b\u044e\u0434\u0435\u043d\u0438\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f", &state.marker_repetition,
                                  "first_observed\0repeated_opening\0");
-                    ImGui::TextDisabled("Ordinal is not interpreted as cold or warm resource state.");
+                    ImGui::TextDisabled(u8"\u041d\u043e\u043c\u0435\u0440 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f \u043d\u0435 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u044f\u0435\u0442, \u0431\u044b\u043b\u0438 \u043b\u0438 \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0443\u0436\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d\u044b.");
                     const char* menu_label = attribution_issue13_menu_label_name(
                         static_cast<AttributionIssue13MenuLabel>(state.marker_menu_label));
                     strncpy_s(selection.menu_label.data(), selection.menu_label.size(),
@@ -1258,24 +1268,24 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                     !status.window_flush_pending && selection_ready;
                 if (available && !can_begin) {
                     if (!selection_ready)
-                        ImGui::TextDisabled("Begin unavailable: select complete valid marker metadata.");
+                        ImGui::TextDisabled(u8"\u041d\u0430\u0447\u0430\u043b\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0437\u0430\u043f\u043e\u043b\u043d\u0438\u0442\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043c\u0430\u0440\u043a\u0435\u0440\u0430.");
                     else if (status.window_flush_pending)
-                        ImGui::TextDisabled("Begin unavailable: wait for the completed window to flush.");
+                        ImGui::TextDisabled(u8"\u041d\u0430\u0447\u0430\u043b\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0434\u043e\u0436\u0434\u0438\u0442\u0435\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u043e\u0433\u043e \u043e\u043a\u043d\u0430.");
                     else
-                        ImGui::TextDisabled("Begin unavailable: finish or restart the current recorder state.");
+                        ImGui::TextDisabled(u8"\u041d\u0430\u0447\u0430\u043b\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0438\u043b\u0438 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u0442\u0435\u043a\u0443\u0449\u0443\u044e \u0437\u0430\u043f\u0438\u0441\u044c.");
                 }
                 ImGui::BeginDisabled(!can_begin);
-                if (ImGui::Button("Begin at next successful Present")) {
+                if (ImGui::Button(u8"\u041d\u0430\u0447\u0430\u0442\u044c \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0443\u0441\u043f\u0435\u0448\u043d\u043e\u043c \u043f\u043e\u043a\u0430\u0437\u0435 \u043a\u0430\u0434\u0440\u0430")) {
                     profiler->arm_attribution_marker_begin(selection);
                 }
                 ImGui::EndDisabled();
                 ImGui::SameLine();
                 const bool can_end = available && status.state == AttributionMarkerState::active;
                 ImGui::BeginDisabled(!can_end);
-                if (ImGui::Button("End at next successful Present"))
+                if (ImGui::Button(u8"\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0443\u0441\u043f\u0435\u0448\u043d\u043e\u043c \u043f\u043e\u043a\u0430\u0437\u0435 \u043a\u0430\u0434\u0440\u0430"))
                     profiler->arm_attribution_marker_end();
                 ImGui::EndDisabled();
-                ImGui::TextWrapped("Markers are explicit half-open Present intervals. Completed windows flush as bounded batches only after delayed GPU queries drain in the unmarked gap. No scene detection, gameplay hook, or global marker hotkey is active.");
+                ImGui::TextWrapped(u8"\u041c\u0430\u0440\u043a\u0435\u0440\u044b \u0437\u0430\u0434\u0430\u044e\u0442 \u0438\u043d\u0442\u0435\u0440\u0432\u0430\u043b\u044b \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u043a\u0430\u0434\u0440\u043e\u0432 \u0441 \u0438\u0441\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u043e\u0439 \u043f\u0440\u0430\u0432\u043e\u0439 \u0433\u0440\u0430\u043d\u0438\u0446\u0435\u0439. \u041e\u043a\u043d\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u044f \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 GPU \u0432 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043a\u0435 \u043c\u0435\u0436\u0434\u0443 \u0437\u0430\u043c\u0435\u0440\u0430\u043c\u0438. \u0410\u0432\u0442\u043e\u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u0441\u0446\u0435\u043d, \u0438\u0433\u0440\u043e\u0432\u044b\u0435 \u043f\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u044b \u0438 \u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u044b\u0435 \u0433\u043e\u0440\u044f\u0447\u0438\u0435 \u043a\u043b\u0430\u0432\u0438\u0448\u0438 \u043c\u0430\u0440\u043a\u0435\u0440\u043e\u0432 \u043d\u0435 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f.");
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -1811,12 +1821,12 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing)) {
             if (implementation_->capture_warmup || implementation_->capture_requested) {
-                ImGui::TextUnformatted("Capturing a diagnostic frame...");
+                ImGui::TextUnformatted(u8"\u0417\u0430\u0445\u0432\u0430\u0442 \u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0433\u043e \u043a\u0430\u0434\u0440\u0430...");
                 const float done = implementation_->capture_warmup ? 1.f - implementation_->capture_warmup / 90.f : 1.f;
                 ImGui::ProgressBar(done, ImVec2(-FLT_MIN, 0.f), "");
             } else {
-                ImGui::TextUnformatted("Frame captured.");
-                ImGui::TextDisabled("Saved in the EID3D11 captures folder.");
+                ImGui::TextUnformatted(u8"\u041a\u0430\u0434\u0440 \u0437\u0430\u0445\u0432\u0430\u0447\u0435\u043d.");
+                ImGui::TextDisabled(u8"\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u0432 \u043f\u0430\u043f\u043a\u0435 \u0437\u0430\u0445\u0432\u0430\u0442\u043e\u0432 EID3D11.");
             }
         }
         ImGui::End();
@@ -1849,10 +1859,10 @@ void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total
     const float scale = implementation_->ui_scale;
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f), ImGuiCond_Always, ImVec2(.5f, .5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(440.f * scale, io.DisplaySize.x * .9f), 0.f), ImGuiCond_Always);
-    if (ImGui::Begin("Preparing shaders", nullptr,
+    if (ImGui::Begin(u8"\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u0448\u0435\u0439\u0434\u0435\u0440\u043e\u0432", nullptr,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav)) {
-        ImGui::TextWrapped("Preparing the graphics for your settings.");
+        ImGui::TextWrapped(u8"\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u0433\u0440\u0430\u0444\u0438\u043a\u0438 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a.");
         char label[48];
         std::snprintf(label, sizeof(label), "%zu / %zu", done, total);
         ImGui::ProgressBar(total ? static_cast<float>(done) / static_cast<float>(total) : 1.f,

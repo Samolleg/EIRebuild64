@@ -1,4 +1,5 @@
 #include "debug_overlay_config.h"
+#include "graphics_settings_ru.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
 #endif
@@ -156,18 +157,18 @@ const char* debug_resource_view_name(DebugResourceView view) noexcept {
 
 const char* debug_resource_view_label(DebugResourceView view) noexcept {
     switch (view) {
-    case DebugResourceView::raw_depth: return "Raw depth";
-    case DebugResourceView::linearized_depth: return "Linearized depth";
-    case DebugResourceView::stencil: return "Stencil";
-    case DebugResourceView::ambient_occlusion: return "Ambient occlusion";
-    case DebugResourceView::normals: return "Normals (unavailable)";
-    case DebugResourceView::materials: return "Material IDs (unavailable)";
-    case DebugResourceView::object_ids: return "Object IDs (unavailable)";
-    case DebugResourceView::motion: return "Motion vectors (unavailable)";
-    case DebugResourceView::shadows: return "Shadow maps";
-    case DebugResourceView::shadow_cascade_coverage: return "Shadow cascade coverage";
-    case DebugResourceView::hierarchical_depth: return "Hi-Z (unavailable)";
-    default: return "Disabled";
+    case DebugResourceView::raw_depth: return u8"\u0418\u0441\u0445\u043e\u0434\u043d\u0430\u044f \u0433\u043b\u0443\u0431\u0438\u043d\u0430";
+    case DebugResourceView::linearized_depth: return u8"\u041b\u0438\u043d\u0435\u0439\u043d\u0430\u044f \u0433\u043b\u0443\u0431\u0438\u043d\u0430";
+    case DebugResourceView::stencil: return u8"\u0422\u0440\u0430\u0444\u0430\u0440\u0435\u0442";
+    case DebugResourceView::ambient_occlusion: return u8"\u0417\u0430\u0442\u0435\u043d\u0435\u043d\u0438\u0435 \u0432 \u0443\u0433\u043b\u0443\u0431\u043b\u0435\u043d\u0438\u044f\u0445";
+    case DebugResourceView::normals: return u8"\u041d\u043e\u0440\u043c\u0430\u043b\u0438 (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
+    case DebugResourceView::materials: return u8"ID \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u043e\u0432 (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
+    case DebugResourceView::object_ids: return u8"ID \u043e\u0431\u044a\u0435\u043a\u0442\u043e\u0432 (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
+    case DebugResourceView::motion: return u8"\u0412\u0435\u043a\u0442\u043e\u0440\u044b \u0434\u0432\u0438\u0436\u0435\u043d\u0438\u044f (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
+    case DebugResourceView::shadows: return u8"\u041a\u0430\u0440\u0442\u044b \u0442\u0435\u043d\u0435\u0439";
+    case DebugResourceView::shadow_cascade_coverage: return u8"\u041f\u043e\u043a\u0440\u044b\u0442\u0438\u0435 \u043a\u0430\u0441\u043a\u0430\u0434\u043e\u0432 \u0442\u0435\u043d\u0435\u0439";
+    case DebugResourceView::hierarchical_depth: return u8"\u041f\u0438\u0440\u0430\u043c\u0438\u0434\u0430 \u0433\u043b\u0443\u0431\u0438\u043d\u044b (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
+    default: return u8"\u041e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u043e";
     }
 }
 
@@ -207,6 +208,7 @@ std::uint64_t option_key_hash(const char* key) noexcept {
 bool RendererConfig::register_option(RendererOption option) {
     if (!valid_key(option.key.c_str()) || option.label.empty() || find(option.key.c_str())) return false;
     const std::uint64_t hash = option_key_hash(option.key.c_str());
+    localize_renderer_option(option);
     options_.push_back(std::move(option));
     if (!index_.emplace(hash, options_.size() - 1).second) index_collision_ = true;
     return true;
