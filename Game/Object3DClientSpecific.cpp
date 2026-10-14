@@ -789,7 +789,8 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
             if (texture->CheckFlag(textureFlag)) part.texture_flags |= textureFlag;
         part.diffuse = figure->GetDefaultColor();
         part.specular = figure->GetDefaultSpecular();
-        part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN);
+        // Empty FIG parts keep their names and skeleton nodes, but draw nothing.
+        part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
         assembly->parts.push_back(std::move(part));
     }
     // The retained scene claims this object's mesh (game.exe bridge:
