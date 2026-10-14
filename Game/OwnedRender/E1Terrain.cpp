@@ -281,13 +281,28 @@ bool bridge_ambient_world_source(AmbientWorldSource& output) noexcept {
     if (!current() || !source.terrain || !source.geometry) return false;
     output.terrain = source.terrain; output.geometry = source.geometry;
     // The scene owner retains the exact main MOB/MPR snapshot published by the
-    // server loader. Pair it with this terrain only when both name the same MPR.
+    // server loader. Pair it with the current terrain by its internal header.
     auto& scene = OwnedRender::E1Scene();
     if (scene.CurrentWorld(worldIdentity)) {
         const auto mapSource = scene.Scene().terrain_source_snapshot();
-        if (mapSource.map && mapSource.map->terrain &&
-            mapSource.map->terrain_resource == source.terrain->project_resource)
-            output.map = mapSource.map;
+        // The host project name is synthesized from the internal .mp member;
+        // it is not the external MPR filename published by the MOB loader.
+        if (mapSource.map && mapSource.map->terrain) {
+            const auto& loaded = *mapSource.map->terrain;
+            const auto& live = *source.terrain;
+            const auto sameMember = [](const std::string& a, const std::string& b) {
+                if (a.size() != b.size()) return false;
+                for (std::size_t i = 0; i < a.size(); ++i) {
+                    const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : c; };
+                    if (fold(a[i]) != fold(b[i])) return false;
+                }
+                return !a.empty();
+            };
+            if (sameMember(loaded.map_header_resource, live.map_header_resource) &&
+                loaded.sector_count_x == live.sector_count_x &&
+                loaded.sector_count_y == live.sector_count_y)
+                output.map = mapSource.map;
+        }
     }
     const auto& a = source.geometry->animation;
     output.wind_direction[0] = a.wind_direction[0]; output.wind_direction[1] = a.wind_direction[1];
