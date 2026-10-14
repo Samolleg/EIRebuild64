@@ -131,47 +131,47 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
     };
     const auto integer = [&](const char* value) { return configured_value(config, value); };
     if (boolean("water_simple") && (is("water_reflections") || is("water_reflection_quality") || is("water_physical")))
-        return "turn off Stock-look water to use this option";
+        return u8"\u043e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0432\u043e\u0434\u0443 \u0432 \u0441\u0442\u0438\u043b\u0435 \u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b\u0430";
     if (!boolean("water_reflections", true) && (is("water_reflection_quality") || is("water_physical")))
-        return "needs water reflections";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0442\u0440\u0430\u0436\u0435\u043d\u0438\u0439 \u0432 \u0432\u043e\u0434\u0435";
     if (!boolean("shadows", true) && (is("shadow_cascade_quality") || is("shadow_close_cascades") || is("shadow_far") || is("shadow_far_foliage_opaque") || is("shadow_sun_angle")))
-        return "needs sun shadows";
-    if (is("shadow_far_foliage_opaque") && !boolean("shadow_far", true)) return "needs distant shadows";
-    if (!boolean("point_shadows", true) && starts("point_shadow_")) return "needs lamp and torch shadows";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u043b\u043d\u0435\u0447\u043d\u044b\u0445 \u0442\u0435\u043d\u0435\u0439";
+    if (is("shadow_far_foliage_opaque") && !boolean("shadow_far", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0434\u0430\u043b\u044c\u043d\u0438\u0445 \u0442\u0435\u043d\u0435\u0439";
+    if (!boolean("point_shadows", true) && starts("point_shadow_")) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0435\u043d\u0435\u0439 \u043e\u0442 \u043b\u0430\u043c\u043f \u0438 \u0444\u0430\u043a\u0435\u043b\u043e\u0432";
     if (is("shadow_softness") && !boolean("shadows", true) && !boolean("point_shadows", true))
-        return "needs sun or lamp shadows";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0435\u043d\u0435\u0439 \u043e\u0442 \u0441\u043e\u043b\u043d\u0446\u0430 \u0438\u043b\u0438 \u043b\u0430\u043c\u043f";
     if (integer("shadow_softness") == 0 && (is("shadow_sun_angle") || is("point_shadow_light_size")))
-        return "needs soft shadows";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043c\u044f\u0433\u043a\u0438\u0445 \u0442\u0435\u043d\u0435\u0439";
     if ((is("terrain_antitile") || is("terrain_height_blend")) && integer("terrain_quality") == 0)
-        return "needs High terrain detail";
-    if (is("terrain_cliffs") && integer("terrain_blend") == 0) return "needs terrain blending";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u044b\u0441\u043e\u043a\u043e\u0439 \u0434\u0435\u0442\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u0438 \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430";
+    if (is("terrain_cliffs") && integer("terrain_blend") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439 \u0437\u0435\u043c\u043b\u0438";
     if (starts("cliff_") && (!boolean("terrain_cliffs", true) || integer("terrain_blend") == 0))
-        return "needs cliff texturing and terrain blending";
-    if (is("terrain_far_detile") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (starts("terrain_bake_") && integer("terrain_bake") == 0) return "needs terrain baking";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0435\u043a\u0441\u0442\u0443\u0440 \u043e\u0431\u0440\u044b\u0432\u043e\u0432 \u0438 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439";
+    if (is("terrain_far_detile") && integer("terrain_blend") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439 \u0437\u0435\u043c\u043b\u0438";
+    if (starts("terrain_bake_") && integer("terrain_bake") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0438 \u0442\u0435\u043a\u0441\u0442\u0443\u0440 \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430";
     if ((starts("neighbour_fog_") || is("terrain_blend_neighbours") || is("terrain_bake_neighbours")) && !boolean("neighbour_maps", true))
-        return "needs neighbouring maps";
-    if (is("terrain_blend_neighbours") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (is("ground_cover_distance") && integer("ground_cover") == 0) return "needs grass and ground cover";
-    if (starts("ambient_particle_") && integer("ambient_particles") == 0) return "needs ambient particles";
-    if (is("tree_sway_strength") && !boolean("tree_sway", true)) return "needs swaying trees";
-    if (starts("ao_") && !is("ao_quality") && integer("ao_quality") == 0) return "needs ambient occlusion";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u0441\u0435\u0434\u043d\u0438\u0445 \u043a\u0430\u0440\u0442";
+    if (is("terrain_blend_neighbours") && integer("terrain_blend") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439 \u0437\u0435\u043c\u043b\u0438";
+    if (is("ground_cover_distance") && integer("ground_cover") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0440\u0430\u0432\u044b \u0438 \u043c\u0435\u043b\u043a\u043e\u0439 \u0440\u0430\u0441\u0442\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u0438";
+    if (starts("ambient_particle_") && integer("ambient_particles") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0447\u0430\u0441\u0442\u0438\u0446 \u043e\u043a\u0440\u0443\u0436\u0435\u043d\u0438\u044f";
+    if (is("tree_sway_strength") && !boolean("tree_sway", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043a\u0430\u0447\u0430\u043d\u0438\u044f \u0434\u0435\u0440\u0435\u0432\u044c\u0435\u0432";
+    if (starts("ao_") && !is("ao_quality") && integer("ao_quality") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0437\u0430\u0442\u0435\u043d\u0435\u043d\u0438\u044f \u0432 \u0443\u0433\u043b\u0443\u0431\u043b\u0435\u043d\u0438\u044f\u0445";
     if (starts("sky_") && !is("sky_clouds") && !is("sky_weather_test") && integer("sky_clouds") == 0)
-        return "needs the animated sky";
-    if (is("sky_weather_test") && integer("sky_clouds") == 0) return "needs the animated sky; main menu only";
-    if (is("fog_volume_quality") && integer("fog_preset") < 2) return "needs Volumetric fog";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u043d\u0438\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0433\u043e \u043d\u0435\u0431\u0430";
+    if (is("sky_weather_test") && integer("sky_clouds") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u043d\u0438\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0433\u043e \u043d\u0435\u0431\u0430; \u0442\u043e\u043b\u044c\u043a\u043e \u0432 \u0433\u043b\u0430\u0432\u043d\u043e\u043c \u043c\u0435\u043d\u044e";
+    if (is("fog_volume_quality") && integer("fog_preset") < 2) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0431\u044a\u0451\u043c\u043d\u043e\u0433\u043e \u0442\u0443\u043c\u0430\u043d\u0430";
     if (starts("fog_") && !is("fog_preset") && !is("fog_volume_quality") && integer("fog_preset") == 0)
-        return "needs Atmospheric or Volumetric fog";
-    if (is("sun_shaft_strength") && integer("sun_shafts") == 0) return "needs sun shafts";
+        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u0442\u043c\u043e\u0441\u0444\u0435\u0440\u043d\u043e\u0433\u043e \u0438\u043b\u0438 \u043e\u0431\u044a\u0451\u043c\u043d\u043e\u0433\u043e \u0442\u0443\u043c\u0430\u043d\u0430";
+    if (is("sun_shaft_strength") && integer("sun_shafts") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u043b\u043d\u0435\u0447\u043d\u044b\u0445 \u043b\u0443\u0447\u0435\u0439";
     if (is("bloom_strength") || is("bloom_threshold") || is("bloom_debug_view"))
-        if (integer("bloom") == 0) return "needs bloom";
-    if (is("emissive_light_strength") && integer("emissive_lights") == 0) return "needs emissive lighting";
-    if (is("depth_of_field_strength") && integer("depth_of_field") == 0) return "needs depth of field";
-    if (is("lod_pixel_error") && !boolean("lod", true)) return "needs object LOD";
-    if (starts("impostor_") && !boolean("impostors", true)) return "needs crown impostors";
+        if (integer("bloom") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u0432\u0435\u0447\u0435\u043d\u0438\u044f \u044f\u0440\u043a\u0438\u0445 \u043e\u0431\u043b\u0430\u0441\u0442\u0435\u0439";
+    if (is("emissive_light_strength") && integer("emissive_lights") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u044f \u043e\u0442 \u0441\u0432\u0435\u0442\u044f\u0449\u0438\u0445\u0441\u044f \u043f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0435\u0439";
+    if (is("depth_of_field_strength") && integer("depth_of_field") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0433\u043b\u0443\u0431\u0438\u043d\u044b \u0440\u0435\u0437\u043a\u043e\u0441\u0442\u0438";
+    if (is("lod_pixel_error") && !boolean("lod", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0443\u043f\u0440\u043e\u0449\u0435\u043d\u0438\u044f \u0434\u0430\u043b\u044c\u043d\u0438\u0445 \u043e\u0431\u044a\u0435\u043a\u0442\u043e\u0432";
+    if (starts("impostor_") && !boolean("impostors", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0443\u043f\u0440\u043e\u0449\u0451\u043d\u043d\u044b\u0445 \u043a\u0440\u043e\u043d \u0434\u0435\u0440\u0435\u0432\u044c\u0435\u0432";
     if (const char* suffix = std::strstr(key, "_fade_transparency")) {
         const std::string parent = std::string(key, suffix) + "_auto_fade";
-        if (!boolean(parent.c_str())) return "needs this widget's auto fade";
+        if (!boolean(parent.c_str())) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u0432\u0442\u043e\u0441\u043a\u0440\u044b\u0442\u0438\u044f \u044d\u0442\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438";
     }
     return nullptr;
 }
@@ -728,10 +728,10 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
 }
 
 bool interface_option(const RendererOption& option) {
-    if(option.group=="Interface" || option.group=="HUD layout" || option.group=="Combat UI")return true;
+    if(option.group==u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441" || option.group=="HUD layout" || option.group=="Combat UI")return true;
     std::size_t count=0;const auto* settings=player_graphics_settings(count);
     for(std::size_t i=0;i<count;++i)
-        if(option.key==settings[i].key && std::strcmp(settings[i].category,"Interface")==0)return true;
+        if(option.key==settings[i].key && std::strcmp(settings[i].category,u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")==0)return true;
     return false;
 }
 void reset_interface(RendererConfig& config) {
@@ -749,7 +749,7 @@ void reset_interface(RendererConfig& config) {
 // get their own tab; the Graphics tab lists every other group.
 constexpr const char* kDiagnosticsGroup = "Diagnostics";
 void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool diagnostics = false,bool ui_only = false) {
-    filter.Draw("Search options", -1.f);
+    filter.Draw(u8"\u041f\u043e\u0438\u0441\u043a \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a", -1.f);
     if (config.options().empty()) {
         ImGui::TextWrapped("No runtime graphics options are registered by this renderer build. "
                            "Controls appear here only after the backing renderer feature exists.");
@@ -778,14 +778,14 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
         case RendererOptionType::integer: {
             int value = option.integer_value;
             if (option.key == "camp_ui_layout") {
-                const char* choices[] = {"Original UI (comparison)", "Wide grid"};
+                const char* choices[] = {u8"\u0418\u0441\u0445\u043e\u0434\u043d\u044b\u0439 (\u0434\u043b\u044f \u0441\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u044f)", u8"\u0428\u0438\u0440\u043e\u043a\u0430\u044f \u0441\u0435\u0442\u043a\u0430"};
                 if (ImGui::Combo(option.label.c_str(), &value, choices, 2))
                     config.set_integer(option.key.c_str(), value);
             } else if(option.key=="portrait_direction") {
-                const char* choices[]={"Centered (original)","Top to bottom","Bottom to top","Left to right","Right to left"};
+                const char* choices[]={u8"\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 (\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b)",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
                 if(ImGui::Combo(option.label.c_str(),&value,choices,5))config.set_integer(option.key.c_str(),value);
             } else if(option.key=="spell_bar_direction" || option.key=="ability_bar_direction" || option.key=="weapon_switcher_direction" || option.key=="quick_items_direction") {
-                const char* choices[]={"Bottom to top","Top to bottom","Left to right","Right to left"};
+                const char* choices[]={u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
                 if(ImGui::Combo(option.label.c_str(),&value,choices,4))config.set_integer(option.key.c_str(),value);
             } else if (option.key == "anisotropy") {
                 const char* choices[] = {"1", "2", "4", "8", "16"};
@@ -832,7 +832,7 @@ void draw_hud_layout_control(DebugOverlay::Implementation& state,RendererConfig&
     HudPanelBounds b;
     const bool available=game_hud_editor_available() && widescreen_hud_panel_bounds(HudPanel::messages,b);
     ImGui::BeginDisabled(!available && !game_hud_editing());
-    if(ImGui::Button(game_hud_editing() ? "Lock HUD layout" : "Unlock HUD layout")) {
+    if(ImGui::Button(game_hud_editing() ? u8"\u0417\u0430\u043a\u0440\u0435\u043f\u0438\u0442\u044c \u043f\u0430\u043d\u0435\u043b\u0438" : u8"\u041f\u0435\u0440\u0435\u043c\u0435\u0441\u0442\u0438\u0442\u044c \u043f\u0430\u043d\u0435\u043b\u0438")) {
         if(game_hud_editing()) {set_game_hud_editing(false);state.pending_save=true;}
         else {
             if(state.settings_open)close_settings(state,config,true);
@@ -841,7 +841,7 @@ void draw_hud_layout_control(DebugOverlay::Implementation& state,RendererConfig&
         }
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Drag anywhere inside each unlocked panel. Drag its corner to resize. F10 opens this menu again to lock and save.");
+    ImGui::SetItemTooltip(u8"\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u0439\u0442\u0435 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0435 \u043f\u0430\u043d\u0435\u043b\u0438 \u043c\u044b\u0448\u044c\u044e. \u0422\u044f\u043d\u0438\u0442\u0435 \u0437\u0430 \u0443\u0433\u043e\u043b \u0434\u043b\u044f \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0440\u0430\u0437\u043c\u0435\u0440\u0430. F10 \u0441\u043d\u043e\u0432\u0430 \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442 \u043c\u0435\u043d\u044e, \u0447\u0442\u043e\u0431\u044b \u0437\u0430\u043a\u0440\u0435\u043f\u0438\u0442\u044c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0440\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435.");
 }
 
 void hud_bounds_to_output(HudPanelBounds& b) {
@@ -920,8 +920,8 @@ void hud_panel_options(RendererConfig& config,unsigned panel,const HudPanelBound
         const auto* option=config.find(direction);
         if(option) {
             int value=option->integer_value;
-            const char* bars[]={"Bottom to top","Top to bottom","Left to right","Right to left"};
-            const char* portraits[]={"Centered (original)","Top to bottom","Bottom to top","Left to right","Right to left"};
+            const char* bars[]={u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
+            const char* portraits[]={u8"\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 (\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b)",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
             const bool faces=HudPanel(panel)==HudPanel::portraits;
             if(ImGui::Combo("Icon alignment",&value,faces?portraits:bars,faces?5:4))
                 config.set_integer(direction,value);
@@ -1067,11 +1067,11 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
         const char* timing_labels[]={"Fade-in duration","Fade-out duration","Idle time before fade-out"};
         for(unsigned i=0;i<3;++i)if(const auto* timing=config.find(timing_keys[i])) {
             int value=timing->integer_value;
-            if(ImGui::SliderInt(timing_labels[i],&value,timing->integer_minimum,timing->integer_maximum,"%d ms"))
+            if(ImGui::SliderInt(timing_labels[i],&value,timing->integer_minimum,timing->integer_maximum,u8"%d \u043c\u0441"))
                 config.set_integer(timing->key.c_str(),value);
         }
         ImGui::Checkbox("Show grid",&state.hud_grid);
-        if(ImGui::Button("Reset UI"))reset_interface(config);
+        if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(config);
         ImGui::SameLine();
         if(ImGui::Button("Lock")){set_game_hud_editing(false);state.pending_save=true;}
         ImGui::TextWrapped("Drag anywhere in a panel; resize its lower-right corner. Right-click for this panel's options, coordinates and reset.");
@@ -1105,7 +1105,7 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                 help_marker("Explicit diagnostic capture. It may stall that captured frame; normal monitoring never writes to disk.");
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Graphics")) {
+            if (ImGui::BeginTabItem(u8"\u0413\u0440\u0430\u0444\u0438\u043a\u0430")) {
                 if (!state.settings_open && ImGui::Button("Open player Graphics Settings"))
                     open_settings(state, overlay.config(), false);
                 draw_graphics_tab(overlay.config(), state.graphics_filter);
@@ -1115,11 +1115,11 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                 ImGui::TextDisabled("Local eid3d11.ini; no registry settings");
                 ImGui::EndTabItem();
             }
-            if(ImGui::BeginTabItem("Interface")) {
+            if(ImGui::BeginTabItem(u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")) {
                 draw_hud_layout_control(state,overlay.config());
-                ImGui::SameLine();if(ImGui::Button("Reset UI"))reset_interface(overlay.config());
+                ImGui::SameLine();if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(overlay.config());
                 draw_graphics_tab(overlay.config(),state.graphics_filter,false,true);
-                if(ImGui::CollapsingHeader("Combat healthplates and effects"))state.combat_ui.draw_settings(overlay.config());
+                if(ImGui::CollapsingHeader(u8"\u0417\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0438 \u0431\u043e\u0435\u0432\u044b\u0435 \u044d\u0444\u0444\u0435\u043a\u0442\u044b"))state.combat_ui.draw_settings(overlay.config());
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem(kDiagnosticsGroup)) {
@@ -1339,14 +1339,14 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         if (developer) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), "Missing option: %s", setting.key);
+            ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430: %s", setting.key);
         }
         return;
     }
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(setting.label);
+    ImGui::TextWrapped("%s", setting.label);
     ImGui::SetItemTooltip("%s", setting.tooltip);
     ImGui::TableNextColumn();
     ImGui::PushID(setting.key);
@@ -1375,10 +1375,10 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         } else if (std::strcmp(setting.key, "window_width") == 0) {
             // One row for both client dimensions; 0 x 0 is the monitor's size.
             int width = option->integer_value, height = configured_value(config, "window_height");
-            char preview[64] = "Native";
+            char preview[64] = u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430";
             if (width > 0 && height > 0) format_window_size(preview, sizeof(preview), width, height);
             if (ImGui::BeginCombo("##value", preview)) {
-                if (ImGui::Selectable("Native", width <= 0 || height <= 0)) {
+                if (ImGui::Selectable(u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430", width <= 0 || height <= 0)) {
                     config.set_integer("window_width", 0);
                     config.set_integer("window_height", 0);
                 }
@@ -1398,26 +1398,26 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
                 ImGui::CalcTextSize("x").x - 2.f * ImGui::GetStyle().ItemSpacing.x) * .5f);
             ImGui::SetNextItemWidth(field_width);
             if (ImGui::InputInt("##width", &width, 0, 0)) config.set_integer("window_width", width);
-            ImGui::SetItemTooltip("Client width in pixels. Set both dimensions to 0 for the monitor's native size.");
+            ImGui::SetItemTooltip(u8"\u0428\u0438\u0440\u0438\u043d\u0430 \u043e\u0431\u043b\u0430\u0441\u0442\u0438 \u0438\u0433\u0440\u044b \u0432 \u043f\u0438\u043a\u0441\u0435\u043b\u044f\u0445. \u0423\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u043e\u0431\u0430 \u0440\u0430\u0437\u043c\u0435\u0440\u0430 \u0432 0 \u0434\u043b\u044f \u0440\u0430\u0437\u043c\u0435\u0440\u0430 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430.");
             ImGui::SameLine();
             ImGui::TextUnformatted("x");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(field_width);
             if (ImGui::InputInt("##height", &height, 0, 0)) config.set_integer("window_height", height);
-            ImGui::SetItemTooltip("Client height in pixels. A window larger than the work area is fitted to the screen.");
+            ImGui::SetItemTooltip(u8"\u0412\u044b\u0441\u043e\u0442\u0430 \u043e\u0431\u043b\u0430\u0441\u0442\u0438 \u0438\u0433\u0440\u044b \u0432 \u043f\u0438\u043a\u0441\u0435\u043b\u044f\u0445. \u0421\u043b\u0438\u0448\u043a\u043e\u043c \u0431\u043e\u043b\u044c\u0448\u043e\u0435 \u043e\u043a\u043d\u043e \u0443\u043c\u0435\u043d\u044c\u0448\u0430\u0435\u0442\u0441\u044f \u0434\u043e \u0440\u0430\u0431\u043e\u0447\u0435\u0439 \u043e\u0431\u043b\u0430\u0441\u0442\u0438 \u044d\u043a\u0440\u0430\u043d\u0430.");
             ImGui::BeginDisabled(state.display_apply_pending);
-            if (ImGui::Button("Apply display")) {
+            if (ImGui::Button(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u044d\u043a\u0440\u0430\u043d")) {
                 state.display_apply = {configured_value(config, "display_mode") == 1 ? DisplayMode::windowed : DisplayMode::borderless,
                     configured_value(config, "window_width"), configured_value(config, "window_height")};
                 state.display_apply_pending = true;
                 state.display_apply_result[0] = 0;
             }
             ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Apply without restarting. Borderless uses the monitor size; windowed fits the requested client size to the work area.");
+            ImGui::SetItemTooltip(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a\u0430. \u0411\u0435\u0437\u0440\u0430\u043c\u043e\u0447\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442 \u0440\u0430\u0437\u043c\u0435\u0440 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430, \u043e\u043a\u043e\u043d\u043d\u044b\u0439 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044f \u0440\u0430\u0431\u043e\u0447\u0435\u0439 \u043e\u0431\u043b\u0430\u0441\u0442\u044c\u044e \u044d\u043a\u0440\u0430\u043d\u0430.");
             if (state.display_apply_result[0]) ImGui::TextWrapped("%s", state.display_apply_result);
         } else if (std::strcmp(setting.key, "frame_limit") == 0) {
             // Off / fixed rates / Custom; Custom shows a rate slider below.
-            const char* labels = "Off\0" "30\0" "60\0" "90\0" "120\0" "144\0" "165\0" "240\0" "Custom\0";
+            const char* labels = u8"\u0412\u044b\u043a\u043b.\0" "30\0" "60\0" "90\0" "120\0" "144\0" "165\0" "240\0" u8"\u0421\u0432\u043e\u0451\0";
             int index = frame_limit_choice(option->integer_value);
             if (ImGui::Combo("##value", &index, labels)) {
                 // Custom keeps an existing custom rate, else starts at 75.
@@ -1438,8 +1438,8 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         } else {
             int value = option->integer_value;
             const bool fade_transparency=std::strstr(setting.key,"_fade_transparency")!=nullptr;
-            const char* format=(std::strcmp(setting.key,"hud_fade_duration")==0 || std::strcmp(setting.key,"hud_fade_in_duration")==0 || std::strcmp(setting.key,"hud_fade_delay")==0)?"%d ms":
-                fade_transparency?(value==0?"%d%% (solid)":value==100?"%d%% (hidden)":"%d%%"):"%d";
+            const char* format=(std::strcmp(setting.key,"hud_fade_duration")==0 || std::strcmp(setting.key,"hud_fade_in_duration")==0 || std::strcmp(setting.key,"hud_fade_delay")==0)?u8"%d \u043c\u0441":
+                fade_transparency?(value==0?u8"%d%% (\u0432\u0438\u0434\u043d\u0430)":value==100?u8"%d%% (\u0441\u043a\u0440\u044b\u0442\u0430)":"%d%%"):"%d";
             if (ImGui::SliderInt("##value", &value, option->integer_minimum, option->integer_maximum,format)) {
                 const int step = std::max(1, option->integer_step);
                 value = option->integer_minimum + (value - option->integer_minimum + step / 2) / step * step;
@@ -1466,38 +1466,38 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f), ImGuiCond_Appearing,
                             ImVec2(.5f, .5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(680.f * scale, io.DisplaySize.x * .95f),
+    ImGui::SetNextWindowSize(ImVec2(std::min(860.f * scale, io.DisplaySize.x * .95f),
                                     std::min(660.f * scale, io.DisplaySize.y * .9f)), ImGuiCond_Appearing);
     bool keep_open = true;
     bool accept = false, cancel = false;
-    if (ImGui::Begin("Options", state.settings_first_run ? nullptr : &keep_open,
+    if (ImGui::Begin(u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", state.settings_first_run ? nullptr : &keep_open,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
         if (state.settings_first_frame) {
             ImGui::SetWindowFocus();
             state.settings_first_frame = false;
         }
         if (state.settings_first_run) {
-            ImGui::TextWrapped("Welcome. Choose the graphics quality for this PC. "
-                               "You can change it at any time with F10.");
+            ImGui::TextWrapped(u8"\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e \u0433\u0440\u0430\u0444\u0438\u043a\u0438 \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u043a\u043e\u043c\u043f\u044c\u044e\u0442\u0435\u0440\u0430. "
+                               u8"\u0415\u0433\u043e \u043c\u043e\u0436\u043d\u043e \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0432 \u043b\u044e\u0431\u043e\u0435 \u0432\u0440\u0435\u043c\u044f \u043a\u043b\u0430\u0432\u0438\u0448\u0435\u0439 F10.");
             if (state.suggested_preset != GraphicsPreset::custom)
-                ImGui::Text("Suggested for %s: %s", state.adapter_name[0] ? state.adapter_name : "this graphics card",
+                ImGui::Text(u8"\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0443\u0435\u0442\u0441\u044f \u0434\u043b\u044f %s: %s", state.adapter_name[0] ? state.adapter_name : u8"\u044d\u0442\u043e\u0439 \u0432\u0438\u0434\u0435\u043e\u043a\u0430\u0440\u0442\u044b",
                             graphics_preset_name(state.suggested_preset));
         }
 
         if (!state.large_address_aware) {
-            ImGui::TextColored(ImVec4(1.f, .8f, .3f, 1.f), "4 GB memory mode is off");
-            ImGui::SetItemTooltip("game.exe can use only 2 GB of memory; large maps with high settings may run out.");
+            ImGui::TextColored(ImVec4(1.f, .8f, .3f, 1.f), u8"\u0420\u0435\u0436\u0438\u043c 4 \u0413\u0411 \u043f\u0430\u043c\u044f\u0442\u0438 \u043e\u0442\u043a\u043b\u044e\u0447\u0451\u043d");
+            ImGui::SetItemTooltip(u8"\u0418\u0433\u0440\u0430 \u043c\u043e\u0436\u0435\u0442 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e 2 \u0413\u0411 \u043f\u0430\u043c\u044f\u0442\u0438. \u041d\u0430 \u0431\u043e\u043b\u044c\u0448\u0438\u0445 \u043a\u0430\u0440\u0442\u0430\u0445 \u0441 \u0432\u044b\u0441\u043e\u043a\u0438\u043c \u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e\u043c \u043f\u0430\u043c\u044f\u0442\u0438 \u043c\u043e\u0436\u0435\u0442 \u043d\u0435 \u0445\u0432\u0430\u0442\u0438\u0442\u044c.");
             if (state.large_address_result) {
                 ImGui::TextWrapped("%s", state.large_address_result);
-            } else if (ImGui::Button("Enable 4 GB mode (restart required)")) {
+            } else if (ImGui::Button(u8"\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c 4 \u0413\u0411 (\u043d\u0443\u0436\u0435\u043d \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a)")) {
                 state.large_address_result = enable_large_address_mode();
             }
         }
         if (state.developer)
-            ImGui::TextDisabled("Developer mode: VSync and the frame rate limit are forced off.");
+            ImGui::TextDisabled(u8"\u0420\u0435\u0436\u0438\u043c \u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0430: \u0432\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u0438 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435 FPS \u043f\u0440\u0438\u043d\u0443\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b.");
         const GraphicsPreset detected = detect_graphics_preset(config);
         if (detected != GraphicsPreset::custom) state.preset_slider = static_cast<int>(detected);
-        ImGui::SeparatorText("Preset");
+        ImGui::SeparatorText(u8"\u041a\u0430\u0447\u0435\u0441\u0442\u0432\u043e \u0433\u0440\u0430\u0444\u0438\u043a\u0438");
         ImGui::SetNextItemWidth(-FLT_MIN);
         int slider = state.preset_slider;
         if (ImGui::SliderInt("##preset", &slider, 0, kGraphicsPresetCount - 1, graphics_preset_name(detected),
@@ -1505,7 +1505,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             state.preset_slider = slider;
             apply_graphics_preset(config, static_cast<GraphicsPreset>(slider));
         }
-        ImGui::SetItemTooltip("Drag to choose Low, Medium, High or Ultra. Changing an advanced option below makes it Custom.");
+        ImGui::SetItemTooltip(u8"\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u0438\u0437\u043a\u043e\u0435, \u0441\u0440\u0435\u0434\u043d\u0435\u0435, \u0432\u044b\u0441\u043e\u043a\u043e\u0435 \u0438\u043b\u0438 \u0443\u043b\u044c\u0442\u0440\u0430\u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e. \u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0445 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u043f\u0440\u043e\u0444\u0438\u043b\u044c \u043d\u0430 \u00ab\u0421\u0432\u043e\u0451\u00bb.");
         // Stop labels under the slider.
         const float width = ImGui::GetContentRegionAvail().x;
         const float left = ImGui::GetCursorPosX();
@@ -1520,21 +1520,21 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
         ImGui::TextWrapped("%s: %s", graphics_preset_name(detected), graphics_preset_summary(detected));
         if (const auto* strength = config.find("depth_of_field_strength"))
             if (configured_value(config, "depth_of_field") > 0 && strength->floating_value <= 0.f)
-                ImGui::TextWrapped("Depth of field is inactive because its strength is 0. Increase Depth of field strength to use it; a steep gameplay camera remains sharp.");
+                ImGui::TextWrapped(u8"\u0420\u0430\u0437\u043c\u044b\u0442\u0438\u0435 \u0444\u043e\u043d\u0430 \u043d\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u043f\u0440\u0438 \u043d\u0443\u043b\u0435\u0432\u043e\u0439 \u0441\u0438\u043b\u0435. \u0423\u0432\u0435\u043b\u0438\u0447\u044c\u0442\u0435 \u0441\u0438\u043b\u0443 \u0440\u0430\u0437\u043c\u044b\u0442\u0438\u044f. \u041f\u0440\u0438 \u0432\u0438\u0434\u0435 \u0441\u0432\u0435\u0440\u0445\u0443 \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435 \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u0447\u0451\u0442\u043a\u0438\u043c.");
 
         if (configured_value(config, "display_mode") != state.running_display[0] ||
             configured_value(config, "window_width") != state.running_display[1] ||
             configured_value(config, "window_height") != state.running_display[2])
-            ImGui::TextDisabled("Display changes are pending. Use Apply display beside Window size.");
-        state.settings_filter.Draw("Search options",-1.f);
-        const float footer=ImGui::GetFrameHeightWithSpacing()+ImGui::GetStyle().ItemSpacing.y;
+            ImGui::TextDisabled(u8"\u0420\u0435\u0436\u0438\u043c \u044d\u043a\u0440\u0430\u043d\u0430 \u0435\u0449\u0451 \u043d\u0435 \u0438\u0437\u043c\u0435\u043d\u0451\u043d. \u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u00ab\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u044d\u043a\u0440\u0430\u043d\u00bb \u0440\u044f\u0434\u043e\u043c \u0441 \u0440\u0430\u0437\u043c\u0435\u0440\u043e\u043c \u043e\u043a\u043d\u0430.");
+        state.settings_filter.Draw(u8"\u041f\u043e\u0438\u0441\u043a \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a",-1.f);
+        const float footer=ImGui::GetFrameHeightWithSpacing()+ImGui::GetTextLineHeightWithSpacing()*2.f;
         if(ImGui::BeginTabBar("option_tabs")) {
           for(unsigned tab=0;tab<2;++tab) {
             const bool ui_tab=tab==1;
-            if(!ImGui::BeginTabItem(ui_tab?"Interface":"Graphics"))continue;
+            if(!ImGui::BeginTabItem(ui_tab?u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441":u8"\u0413\u0440\u0430\u0444\u0438\u043a\u0430"))continue;
             if(ui_tab) {
                 draw_hud_layout_control(state,config);ImGui::SameLine();
-                if(ImGui::Button("Reset UI"))reset_interface(config);
+                if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(config);
             }
             if(ImGui::BeginChild(ui_tab?"interface_options":"graphics_options",ImVec2(0,-footer),ImGuiChildFlags_Borders)) {
             std::size_t category_count = 0, setting_count = 0;
@@ -1547,7 +1547,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             };
             bool any_match = false;
             for (std::size_t category = 0; category < category_count; ++category) {
-                if((std::strcmp(categories[category],"Interface")==0)!=ui_tab)continue;
+                if((std::strcmp(categories[category],u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")==0)!=ui_tab)continue;
                 bool category_match = false;
                 for (std::size_t index = 0; index < setting_count; ++index)
                     if (std::strcmp(settings[index].category, categories[category]) == 0 && matches(settings[index]))
@@ -1564,22 +1564,21 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
                     ImGui::EndTable();
                 }
             }
-            if(ui_tab && ImGui::CollapsingHeader("Combat healthplates and effects"))state.combat_ui.draw_settings(config);
-            if (!any_match) ImGui::TextDisabled("No matching options.");
+            if(ui_tab && ImGui::CollapsingHeader(u8"\u0417\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0438 \u0431\u043e\u0435\u0432\u044b\u0435 \u044d\u0444\u0444\u0435\u043a\u0442\u044b"))state.combat_ui.draw_settings(config);
+            if (!any_match) ImGui::TextDisabled(u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.");
             }
             ImGui::EndChild();ImGui::EndTabItem();
           }
           ImGui::EndTabBar();
         }
 
-        if (ImGui::Button("OK", ImVec2(110.f * scale, 0.f))) accept = true;
+        if (ImGui::Button(u8"\u041e\u041a", ImVec2(110.f * scale, 0.f))) accept = true;
         if (!state.settings_first_run) {
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(110.f * scale, 0.f))) cancel = true;
+            if (ImGui::Button(u8"\u041e\u0442\u043c\u0435\u043d\u0430", ImVec2(110.f * scale, 0.f))) cancel = true;
         }
-        ImGui::SameLine();
-        ImGui::TextDisabled(state.settings_first_run ? "OK saves your choice."
-                                                     : "Changes show immediately. OK saves, Cancel or Esc reverts.");
+        ImGui::TextWrapped(state.settings_first_run ? u8"\u041e\u041a \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 \u0432\u044b\u0431\u043e\u0440."
+                                                     : u8"\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0432\u0438\u0434\u043d\u044b \u0441\u0440\u0430\u0437\u0443. \u041e\u041a \u2014 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c, \u041e\u0442\u043c\u0435\u043d\u0430 \u0438\u043b\u0438 Esc \u2014 \u0432\u0435\u0440\u043d\u0443\u0442\u044c.");
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
             !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
             (state.settings_first_run ? accept : cancel) = true;
@@ -1674,7 +1673,29 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.Fonts->AddFontDefault();
+    // The built-in Latin-only font cannot display localized settings.
+    ImFont* settings_font = nullptr;
+    wchar_t windows_directory[MAX_PATH]{};
+    const UINT windows_length = GetWindowsDirectoryW(windows_directory, MAX_PATH);
+    if (windows_length > 0 && windows_length < MAX_PATH) {
+        for (const wchar_t* filename : {L"\\Fonts\\segoeui.ttf", L"\\Fonts\\tahoma.ttf"}) {
+            const std::wstring path = std::wstring(windows_directory) + filename;
+            HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) continue;
+            const DWORD size = GetFileSize(file, nullptr);
+            void* bytes = size > 0 && size < 16u * 1024u * 1024u ? ImGui::MemAlloc(size) : nullptr;
+            DWORD read = 0;
+            const bool complete = bytes && ReadFile(file, bytes, size, &read, nullptr) && read == size;
+            CloseHandle(file);
+            if (!complete) { if (bytes) ImGui::MemFree(bytes); continue; }
+            settings_font = io.Fonts->AddFontFromMemoryTTF(bytes, static_cast<int>(size), 16.f,
+                                                         nullptr, io.Fonts->GetGlyphRangesCyrillic());
+            if (settings_font) break;
+        }
+    }
+    if (settings_font) io.FontDefault = settings_font;
+    else io.Fonts->AddFontDefault();
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.FontScaleMain = state->ui_scale;

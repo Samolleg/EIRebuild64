@@ -49,7 +49,7 @@ struct State {
     bool portraits_enabled = true;
     bool show_combat = true, show_all = false, show_alt = true, show_paused = true, show_hover = true;
     float idle_opacity = .5f;
-    std::string status = "Waiting for an active mission.";
+    std::string status = u8"\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438 \u043a\u0430\u0440\u0442\u044b.";
 };
 State& state() { static State value; return value; }
 float plate_opacity(const State& s,const CombatUnitValue& unit) {
@@ -222,7 +222,7 @@ void combat_ui_publish_unit(const CombatUnitValue& value) noexcept {
         previous.attacking = value.attacking; previous.attack_targets = value.attack_targets;
         previous.effect_count = value.effect_count;
         std::copy_n(value.effects.begin(), value.effect_count, previous.effects.begin());
-    } catch (...) { combat_ui_set_status("Combat UI publication failed."); }
+    } catch (...) { combat_ui_set_status(u8"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0435\u0440\u0435\u0434\u0430\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435 \u0431\u043e\u0435\u0432\u043e\u0433\u043e \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430."); }
 }
 void combat_ui_retire_unit(std::int32_t id) noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
@@ -276,7 +276,7 @@ void combat_ui_publish_font(const void* bytes,std::size_t size,std::uint64_t gen
             const auto* begin=static_cast<const std::uint8_t*>(bytes);
             s.font_bytes.assign(begin,begin+size); s.font_generation=generation;
         }
-    } catch (...) { combat_ui_set_status("Combat text omitted: font snapshot allocation failed."); }
+    } catch (...) { combat_ui_set_status(u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0442\u0435\u043a\u0441\u0442 \u043d\u0435 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044f: \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0448\u0440\u0438\u0444\u0442."); }
 }
 void combat_ui_set_mission(bool active) noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
@@ -333,56 +333,56 @@ bool combat_ui_needs_plate(std::int32_t id) noexcept {
     return found != s.units.end() && plate_opacity(s,found->second)>0;
 }
 void register_combat_ui_options(RendererConfig& config) {
-    config.register_boolean("combat_portrait_effects", "Portrait buffs / debuffs", "Combat UI", true, false,
-        "Show active effect icons above character portraits.");
-    config.register_boolean("combat_healthplates", "Combat healthplates", "Combat UI", true, false,
-        "Enable character healthplates. The display rules below choose when they appear.");
-    config.register_boolean("combat_plate_combat", "Show in combat", "Combat UI", false, false,
-        "Always show combat participants at full opacity, including while unpaused and without Alt. Overrides and disables the Alt and pause rules.");
-    config.register_boolean("combat_plate_alt", "Show all plates while Alt is held", "Combat UI", true, false,
-        "Reveal all visible characters while Alt is held. Available when Show in combat is off.");
-    config.register_boolean("combat_plate_paused", "Show all plates when paused", "Combat UI", true, false,
-        "Reveal all visible characters while the game is paused. Available when Show in combat is off.");
-    config.register_boolean("combat_plate_hover", "Show plate on hover", "Combat UI", true, false,
-        "The hovered character's plate has full opacity.");
-    config.register_boolean("combat_plate_all", "Show all visible characters", "Combat UI", false, false,
-        "Always show every visible living character, regardless of combat, Alt or pause.");
-    config.register_integer("combat_plate_idle_opacity", "Non-combat plate opacity (%)", "Combat UI", 50, 0, 100, 1, false,
-        "Opacity of characters revealed outside combat. Hovered plates remain fully opaque.");
-    config.register_integer("combat_plate_width", "HP bar width", "Combat UI", 120, 30, 320, 1, false,
-        "Health bar width at 1080p. Scales with the screen height.");
-    config.register_integer("combat_plate_height", "HP bar height", "Combat UI", 8, 3, 40, 1, false,
-        "Health bar height at 1080p. Scales with the screen height.");
-    config.register_integer("combat_plate_spacing", "Space above character", "Combat UI", 28, 0, 40, 1, false,
-        "Gap between the top of the character and the health bar, scaled from 1080p.");
-    config.register_boolean("combat_plate_stacking", "Keep healthplates apart", "Combat UI", true, false,
-        "Move overlapping healthplates apart in screen space, including their effect rows. Crowded screen edges may still overlap.");
-    config.register_integer("combat_plate_stack_gap", "Stacking gap (screen pixels)", "Combat UI", 4, 0, 80, 1, false,
-        "Minimum space between neighbouring plate groups when Keep healthplates apart is enabled.");
-    config.register_floating_point("combat_icon_scale", "Effect icon scale", "Combat UI", 1.15f, 0.5f, 2.5f, 0.05f, false,
-        "Size of buff and debuff icons on healthplates and portraits.");
-    config.register_boolean("combat_split_effects", "Separate buffs and debuffs", "Combat UI", true, false,
-        "Healthplates: buffs above HP and debuffs below. Portraits: separate rows above the portrait to keep them on screen.");
-    config.register_boolean("combat_effect_outlines", "Buff / debuff outlines", "Combat UI", true, false,
-        "Inset gold outlines for buffs and crimson outlines for debuffs.");
-    config.register_boolean("combat_hp_values", "Show current / maximum HP", "Combat UI", true, false,
-        "Print current and maximum health on the health bar.");
-    config.register_boolean("combat_hp_percent", "Show HP percentage", "Combat UI", false, false,
-        "Print remaining health as a percentage on the health bar.");
-    config.register_integer("combat_hp_text_size", "HP text size", "Combat UI", 18, 8, 32, 1, false,
-        "Health text size at 1080p, using the selected game font.");
-    config.register_integer("combat_max_effects", "Maximum effects", "Combat UI", 3, 0, 32, 1, false,
-        "Limit per group when buffs and debuffs are separate, including each group's +X. Always-show spells may exceed the limit.");
-    config.register_boolean("combat_durations", "Show remaining duration", "Combat UI", true, false,
-        "Print the time left on each effect icon. Hold Alt over an icon for its spell description.");
-    config.register_integer("combat_duration_size", "Duration text size", "Combat UI", 10, 8, 32, 1, false,
-        "Effect timer and +X text size at 1080p, using the selected game font.");
-    config.register_text("combat_priority", "Always show (effect IDs)", "Combat UI", "Ordered comma-separated IDs. Priorities count toward the maximum and always show.", "29,34,25,32,30,15,38");
-    config.register_text("combat_effect_priorities", "Effect priorities (ID:priority)", "Combat UI", "Lower numbers stay visible first. Default is 100; range 0 to 1000. Edit each effect below or enter ID:priority pairs.",
+    config.register_boolean("combat_portrait_effects", u8"\u042d\u0444\u0444\u0435\u043a\u0442\u044b \u043d\u0430\u0434 \u043f\u043e\u0440\u0442\u0440\u0435\u0442\u0430\u043c\u0438", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0437\u043d\u0430\u0447\u043a\u0438 \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0445 \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432 \u043d\u0430\u0434 \u043f\u043e\u0440\u0442\u0440\u0435\u0442\u0430\u043c\u0438 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439.");
+    config.register_boolean("combat_healthplates", u8"\u041f\u043e\u043b\u043e\u0441\u044b \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043f\u043e\u043b\u043e\u0441\u044b \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439. \u0423\u0441\u043b\u043e\u0432\u0438\u044f \u0438\u0445 \u043f\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u044f \u0437\u0430\u0434\u0430\u044e\u0442\u0441\u044f \u043d\u0438\u0436\u0435.");
+    config.register_boolean("combat_plate_combat", u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0432 \u0431\u043e\u044e", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", false, false,
+        u8"\u0412\u0441\u0435\u0433\u0434\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 \u0431\u043e\u044f \u0431\u0435\u0437 \u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u0438, \u0432 \u0442\u043e\u043c \u0447\u0438\u0441\u043b\u0435 \u0431\u0435\u0437 \u043f\u0430\u0443\u0437\u044b \u0438 Alt. \u0417\u0430\u043c\u0435\u043d\u044f\u0435\u0442 \u0438 \u043e\u0442\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u043f\u0440\u0430\u0432\u0438\u043b\u0430 Alt \u0438 \u043f\u0430\u0443\u0437\u044b.");
+    config.register_boolean("combat_plate_alt", u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0432\u0441\u0435 \u043f\u043e\u043b\u043e\u0441\u044b \u043f\u0440\u0438 Alt", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u043f\u043e\u043b\u043e\u0441\u044b \u0432\u0441\u0435\u0445 \u0432\u0438\u0434\u0438\u043c\u044b\u0445 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439 \u043f\u0440\u0438 \u0443\u0434\u0435\u0440\u0436\u0430\u043d\u0438\u0438 Alt. \u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e, \u0435\u0441\u043b\u0438 \u043f\u043e\u043a\u0430\u0437 \u0432 \u0431\u043e\u044e \u043e\u0442\u043a\u043b\u044e\u0447\u0451\u043d.");
+    config.register_boolean("combat_plate_paused", u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0432\u0441\u0435 \u043f\u043e\u043b\u043e\u0441\u044b \u043d\u0430 \u043f\u0430\u0443\u0437\u0435", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u043f\u043e\u043b\u043e\u0441\u044b \u0432\u0441\u0435\u0445 \u0432\u0438\u0434\u0438\u043c\u044b\u0445 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439 \u043d\u0430 \u043f\u0430\u0443\u0437\u0435. \u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e, \u0435\u0441\u043b\u0438 \u043f\u043e\u043a\u0430\u0437 \u0432 \u0431\u043e\u044e \u043e\u0442\u043a\u043b\u044e\u0447\u0451\u043d.");
+    config.register_boolean("combat_plate_hover", u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u043f\u0440\u0438 \u043d\u0430\u0432\u0435\u0434\u0435\u043d\u0438\u0438", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u041f\u043e\u043b\u043e\u0441\u0430 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430 \u043f\u043e\u0434 \u043a\u0443\u0440\u0441\u043e\u0440\u043e\u043c \u043f\u043e\u043b\u043d\u043e\u0441\u0442\u044c\u044e \u043d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u0430.");
+    config.register_boolean("combat_plate_all", u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0432\u0441\u0435\u0445 \u0432\u0438\u0434\u0438\u043c\u044b\u0445 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", false, false,
+        u8"\u0412\u0441\u0435\u0433\u0434\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0432\u0441\u0435\u0445 \u0432\u0438\u0434\u0438\u043c\u044b\u0445 \u0436\u0438\u0432\u044b\u0445 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u0439 \u043d\u0435\u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e \u043e\u0442 \u0431\u043e\u044f, Alt \u0438 \u043f\u0430\u0443\u0437\u044b.");
+    config.register_integer("combat_plate_idle_opacity", u8"\u041d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u0432\u043d\u0435 \u0431\u043e\u044f (%)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 50, 0, 100, 1, false,
+        u8"\u041d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u043f\u043e\u043b\u043e\u0441 \u0432\u043d\u0435 \u0431\u043e\u044f. \u041f\u0440\u0438 \u043d\u0430\u0432\u0435\u0434\u0435\u043d\u0438\u0438 \u043f\u043e\u043b\u043e\u0441\u0430 \u043f\u043e\u043b\u043d\u043e\u0441\u0442\u044c\u044e \u043d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u0430.");
+    config.register_integer("combat_plate_width", u8"\u0428\u0438\u0440\u0438\u043d\u0430 \u043f\u043e\u043b\u043e\u0441\u044b \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 120, 30, 320, 1, false,
+        u8"\u0428\u0438\u0440\u0438\u043d\u0430 \u043f\u0440\u0438 \u0432\u044b\u0441\u043e\u0442\u0435 \u044d\u043a\u0440\u0430\u043d\u0430 1080 \u043f\u0438\u043a\u0441\u0435\u043b\u0435\u0439. \u041c\u0430\u0441\u0448\u0442\u0430\u0431\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0441 \u0432\u044b\u0441\u043e\u0442\u043e\u0439 \u044d\u043a\u0440\u0430\u043d\u0430.");
+    config.register_integer("combat_plate_height", u8"\u0412\u044b\u0441\u043e\u0442\u0430 \u043f\u043e\u043b\u043e\u0441\u044b \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 8, 3, 40, 1, false,
+        u8"\u0412\u044b\u0441\u043e\u0442\u0430 \u043f\u0440\u0438 \u0432\u044b\u0441\u043e\u0442\u0435 \u044d\u043a\u0440\u0430\u043d\u0430 1080 \u043f\u0438\u043a\u0441\u0435\u043b\u0435\u0439. \u041c\u0430\u0441\u0448\u0442\u0430\u0431\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0441 \u0432\u044b\u0441\u043e\u0442\u043e\u0439 \u044d\u043a\u0440\u0430\u043d\u0430.");
+    config.register_integer("combat_plate_spacing", u8"\u041e\u0442\u0441\u0442\u0443\u043f \u043d\u0430\u0434 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0435\u043c", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 28, 0, 40, 1, false,
+        u8"\u041f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u043a \u043c\u0435\u0436\u0434\u0443 \u0432\u0435\u0440\u0445\u043e\u043c \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0430 \u0438 \u043f\u043e\u043b\u043e\u0441\u043e\u0439 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f, \u043c\u0430\u0441\u0448\u0442\u0430\u0431\u0438\u0440\u0443\u0435\u043c\u044b\u0439 \u043e\u0442 1080p.");
+    config.register_boolean("combat_plate_stacking", u8"\u0420\u0430\u0437\u0434\u0432\u0438\u0433\u0430\u0442\u044c \u043f\u043e\u043b\u043e\u0441\u044b \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u0420\u0430\u0437\u0434\u0432\u0438\u0433\u0430\u0442\u044c \u043f\u0435\u0440\u0435\u043a\u0440\u044b\u0432\u0430\u044e\u0449\u0438\u0435\u0441\u044f \u043f\u043e\u043b\u043e\u0441\u044b \u0432\u043c\u0435\u0441\u0442\u0435 \u0441 \u0440\u044f\u0434\u0430\u043c\u0438 \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432. \u0423 \u043a\u0440\u0430\u0451\u0432 \u044d\u043a\u0440\u0430\u043d\u0430 \u043f\u0440\u0438 \u0442\u0435\u0441\u043d\u043e\u043c \u0440\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0438 \u043f\u0435\u0440\u0435\u043a\u0440\u044b\u0442\u0438\u044f \u0432\u0441\u0451 \u0435\u0449\u0451 \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b.");
+    config.register_integer("combat_plate_stack_gap", u8"\u041f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u043a \u043c\u0435\u0436\u0434\u0443 \u043f\u043e\u043b\u043e\u0441\u0430\u043c\u0438 (\u043f\u0438\u043a\u0441.)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 4, 0, 80, 1, false,
+        u8"\u041c\u0438\u043d\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u043a \u043c\u0435\u0436\u0434\u0443 \u0433\u0440\u0443\u043f\u043f\u0430\u043c\u0438 \u043f\u043e\u043b\u043e\u0441 \u043f\u0440\u0438 \u0432\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u043e\u043c \u0440\u0430\u0437\u0434\u0432\u0438\u0433\u0430\u043d\u0438\u0438.");
+    config.register_floating_point("combat_icon_scale", u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u0437\u043d\u0430\u0447\u043a\u043e\u0432 \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 1.15f, 0.5f, 2.5f, 0.05f, false,
+        u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u0437\u043d\u0430\u0447\u043a\u043e\u0432 \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u0439 \u0438 \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0439 \u0443 \u043f\u043e\u043b\u043e\u0441 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f \u0438 \u043f\u043e\u0440\u0442\u0440\u0435\u0442\u043e\u0432.");
+    config.register_boolean("combat_split_effects", u8"\u0420\u0430\u0437\u0434\u0435\u043b\u044f\u0442\u044c \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u044f \u0438 \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u044f", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u0423 \u043f\u043e\u043b\u043e\u0441 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u044f \u0441\u0432\u0435\u0440\u0445\u0443, \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u044f \u0441\u043d\u0438\u0437\u0443. \u0423 \u043f\u043e\u0440\u0442\u0440\u0435\u0442\u043e\u0432 \u2014 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0435 \u0440\u044f\u0434\u044b \u043d\u0430\u0434 \u043f\u043e\u0440\u0442\u0440\u0435\u0442\u043e\u043c, \u0447\u0442\u043e\u0431\u044b \u043e\u043d\u0438 \u043e\u0441\u0442\u0430\u0432\u0430\u043b\u0438\u0441\u044c \u043d\u0430 \u044d\u043a\u0440\u0430\u043d\u0435.");
+    config.register_boolean("combat_effect_outlines", u8"\u0420\u0430\u043c\u043a\u0438 \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u0439 \u0438 \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0439", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u0417\u043e\u043b\u043e\u0442\u044b\u0435 \u0432\u043d\u0443\u0442\u0440\u0435\u043d\u043d\u0438\u0435 \u0440\u0430\u043c\u043a\u0438 \u0434\u043b\u044f \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u0439, \u0431\u0430\u0433\u0440\u043e\u0432\u044b\u0435 \u0434\u043b\u044f \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0439.");
+    config.register_boolean("combat_hp_values", u8"\u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u0438 \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u0435", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0442\u0435\u043a\u0443\u0449\u0435\u0435 \u0438 \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u043d\u0430 \u043f\u043e\u043b\u043e\u0441\u0435.");
+    config.register_boolean("combat_hp_percent", u8"\u0417\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0432 \u043f\u0440\u043e\u0446\u0435\u043d\u0442\u0430\u0445", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", false, false,
+        u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u043e\u0441\u0442\u0430\u0432\u0448\u0435\u0435\u0441\u044f \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0432 \u043f\u0440\u043e\u0446\u0435\u043d\u0442\u0430\u0445.");
+    config.register_integer("combat_hp_text_size", u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u0442\u0435\u043a\u0441\u0442\u0430 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 18, 8, 32, 1, false,
+        u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u0442\u0435\u043a\u0441\u0442\u0430 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f \u043f\u0440\u0438 1080p. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442\u0441\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u0438\u0433\u0440\u043e\u0432\u043e\u0439 \u0448\u0440\u0438\u0444\u0442.");
+    config.register_integer("combat_max_effects", u8"\u041c\u0430\u043a\u0441\u0438\u043c\u0443\u043c \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 3, 0, 32, 1, false,
+        u8"\u041b\u0438\u043c\u0438\u0442 \u043a\u0430\u0436\u0434\u043e\u0439 \u0433\u0440\u0443\u043f\u043f\u044b \u043f\u0440\u0438 \u0440\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u0438 \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u0439 \u0438 \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0439, \u0432\u043a\u043b\u044e\u0447\u0430\u044f \u0435\u0451 \u0441\u0447\u0451\u0442\u0447\u0438\u043a +X. \u042d\u0444\u0444\u0435\u043a\u0442\u044b \u0441 \u043f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u043c \u043f\u043e\u043a\u0430\u0437\u043e\u043c \u043c\u043e\u0433\u0443\u0442 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0442\u044c \u043b\u0438\u043c\u0438\u0442.");
+    config.register_boolean("combat_durations", u8"\u041e\u0441\u0442\u0430\u0432\u0448\u0435\u0435\u0441\u044f \u0432\u0440\u0435\u043c\u044f \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", true, false,
+        u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0432\u0440\u0435\u043c\u044f \u043d\u0430 \u0437\u043d\u0430\u0447\u043a\u0430\u0445 \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432. \u0414\u043b\u044f \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u0437\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u044f \u043d\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043a\u0443\u0440\u0441\u043e\u0440 \u0441 \u0437\u0430\u0436\u0430\u0442\u044b\u043c Alt.");
+    config.register_integer("combat_duration_size", u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u0442\u0435\u043a\u0441\u0442\u0430 \u0432\u0440\u0435\u043c\u0435\u043d\u0438", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", 10, 8, 32, 1, false,
+        u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u0442\u0430\u0439\u043c\u0435\u0440\u0430 \u0438 \u0441\u0447\u0451\u0442\u0447\u0438\u043a\u0430 +X \u043f\u0440\u0438 1080p. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442\u0441\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u0438\u0433\u0440\u043e\u0432\u043e\u0439 \u0448\u0440\u0438\u0444\u0442.");
+    config.register_text("combat_priority", u8"\u0412\u0441\u0435\u0433\u0434\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c (ID \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", u8"\u0423\u043f\u043e\u0440\u044f\u0434\u043e\u0447\u0435\u043d\u043d\u044b\u0435 ID \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e. \u042d\u0442\u0438 \u044d\u0444\u0444\u0435\u043a\u0442\u044b \u0443\u0447\u0438\u0442\u044b\u0432\u0430\u044e\u0442\u0441\u044f \u0432 \u043b\u0438\u043c\u0438\u0442\u0435 \u0438 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442\u0441\u044f \u0432\u0441\u0435\u0433\u0434\u0430.", "29,34,25,32,30,15,38");
+    config.register_text("combat_effect_priorities", u8"\u041f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442\u044b \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432 (ID:\u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", u8"\u041c\u0435\u043d\u044c\u0448\u0438\u0435 \u0447\u0438\u0441\u043b\u0430 \u0438\u043c\u0435\u044e\u0442 \u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442. \u041f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e 100, \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d 0\u20131000. \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u0442\u0435 \u044d\u0444\u0444\u0435\u043a\u0442\u044b \u043d\u0438\u0436\u0435 \u0438\u043b\u0438 \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u043f\u0430\u0440\u044b ID:\u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442.",
         "9:99,10:99,11:99,15:102,25:102,26:101,29:102,30:102,31:101,33:101,34:101,38:102");
-    config.register_text("combat_blacklist", "Never show (effect IDs)", "Combat UI", "Comma-separated IDs. Blacklist takes precedence over priority.", "13,14,12");
-    config.register_text("combat_buff_overrides", "Treat as buffs (effect IDs)", "Combat UI", "Optional display classification overrides.");
-    config.register_text("combat_debuff_overrides", "Treat as debuffs (effect IDs)", "Combat UI", "Optional display classification overrides. Debuff overrides win.", "16,50");
+    config.register_text("combat_blacklist", u8"\u041d\u0435 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c (ID \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", u8"ID \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e. \u0417\u0430\u043f\u0440\u0435\u0442 \u043f\u043e\u043a\u0430\u0437\u0430 \u0432\u0430\u0436\u043d\u0435\u0435 \u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442\u0430.", "13,14,12");
+    config.register_text("combat_buff_overrides", u8"\u0421\u0447\u0438\u0442\u0430\u0442\u044c \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u044f\u043c\u0438 (ID \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", u8"\u041d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f.");
+    config.register_text("combat_debuff_overrides", u8"\u0421\u0447\u0438\u0442\u0430\u0442\u044c \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u044f\u043c\u0438 (ID \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432)", u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441", u8"\u041d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438. \u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0435\u043c \u0438\u043c\u0435\u0435\u0442 \u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442.", "16,50");
 }
 
 struct CombatUiRenderer::Implementation {
@@ -471,11 +471,11 @@ struct CombatUiRenderer::Implementation {
         // cannot identify its selected face here and is explicitly omitted.
         const auto* b=font_bytes.data();
         if (!((b[0]==0 && b[1]==1 && b[2]==0 && b[3]==0) || std::memcmp(b,"OTTO",4)==0)) {
-            combat_ui_set_status("Combat text omitted: selected font format is unsupported."); return;
+            combat_ui_set_status(u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0442\u0435\u043a\u0441\u0442 \u043d\u0435 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044f: \u0444\u043e\u0440\u043c\u0430\u0442 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0433\u043e \u0448\u0440\u0438\u0444\u0442\u0430 \u043d\u0435 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044f."); return;
         }
         ImFontConfig config; config.FontDataOwnedByAtlas=false;
         font=ImGui::GetIO().Fonts->AddFontFromMemoryTTF(font_bytes.data(),static_cast<int>(font_bytes.size()),16,&config);
-        if (!font) combat_ui_set_status("Combat text omitted: native font could not be loaded.");
+        if (!font) combat_ui_set_status(u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0442\u0435\u043a\u0441\u0442 \u043d\u0435 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044f: \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0438\u0433\u0440\u043e\u0432\u043e\u0439 \u0448\u0440\u0438\u0444\u0442.");
     }
 
     void run() noexcept {
@@ -484,7 +484,7 @@ struct CombatUiRenderer::Implementation {
             ResourceStore store,text_store; ResourceFailure failure;
             const bool opened = store.open(mounts, failure);
             const bool texts_opened=text_store.open(text_mounts,failure);
-            if (!texts_opened) combat_ui_set_status("Combat spell text unavailable: active text archives could not be opened.");
+            if (!texts_opened) combat_ui_set_status(u8"\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0437\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u0439 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0430\u0440\u0445\u0438\u0432\u044b \u0442\u0435\u043a\u0441\u0442\u0430.");
             for (;;) {
                 Request request{};
                 {
@@ -514,7 +514,7 @@ struct CombatUiRenderer::Implementation {
                 if (result.id == 256 || urgent[result.id]) completed.push_front(std::move(result));
                 else completed.push_back(std::move(result));
             }
-        } catch (...) { combat_ui_set_status("Combat icon worker failed."); }
+        } catch (...) { combat_ui_set_status(u8"\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438 \u0431\u043e\u0435\u0432\u044b\u0445 \u0437\u043d\u0430\u0447\u043a\u043e\u0432."); }
     }
     void request(unsigned id, bool visible) {
         if (!catalog[id].valid || ready[id] || failed[id] || (requested[id] && (!visible || urgent[id]))) return;
@@ -549,7 +549,7 @@ struct CombatUiRenderer::Implementation {
             if (!value.detail_seconds.empty()) detail_seconds=std::move(value.detail_seconds);
         }
         if (!value.valid) {
-            if (value.id == 256) combat_ui_set_status("Combat healthplate artwork is unavailable.");
+            if (value.id == 256) combat_ui_set_status(u8"\u0413\u0440\u0430\u0444\u0438\u043a\u0430 \u043f\u043e\u043b\u043e\u0441 \u0437\u0434\u043e\u0440\u043e\u0432\u044c\u044f \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430.");
             else failed[value.id] = true;
             return;
         }
@@ -560,7 +560,7 @@ struct CombatUiRenderer::Implementation {
             if (FAILED(device->CreateTexture2D(&desc, nullptr, &atlas)) ||
                 FAILED(device->CreateShaderResourceView(atlas.Get(), nullptr, &atlas_view))) {
                 if (value.id < 256) failed[value.id] = true;
-                combat_ui_set_status("Combat icon atlas allocation failed."); return;
+                combat_ui_set_status(u8"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u0430\u0442\u043b\u0430\u0441 \u0431\u043e\u0435\u0432\u044b\u0445 \u0437\u043d\u0430\u0447\u043a\u043e\u0432."); return;
             }
         }
         D3D11_BOX box{(value.id % 16) * 64, (value.id / 16) * 64, 0,
@@ -621,7 +621,7 @@ void CombatUiRenderer::initialize(ID3D11Device* device, ID3D11DeviceContext* con
         s.requests.push_back({256, 0});
         s.worker = std::thread([&s] { s.run(); });
     }
-    else combat_ui_set_status("Combat icons unavailable: active resource mounts are missing.");
+    else combat_ui_set_status(u8"\u0411\u043e\u0435\u0432\u044b\u0435 \u0437\u043d\u0430\u0447\u043a\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b: \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u044b.");
 }
 void CombatUiRenderer::shutdown() noexcept {
     if (!implementation_) return;
@@ -1039,9 +1039,9 @@ bool CombatUiRenderer::process_input(UINT message,WPARAM wparam,LPARAM lparam) n
     return false;
 }
 void CombatUiRenderer::draw_settings(RendererConfig& config) {
-    ImGui::TextWrapped("Lower effect priorities stay visible first. Always show overrides the limit; blacklist wins. Separate buffs and debuffs each have their own limit.");
+    ImGui::TextWrapped(u8"\u042d\u0444\u0444\u0435\u043a\u0442\u044b \u0441 \u043c\u0435\u043d\u044c\u0448\u0438\u043c \u0447\u0438\u0441\u043b\u043e\u043c \u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442\u0441\u044f \u043f\u0435\u0440\u0432\u044b\u043c\u0438. \u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u0439 \u043f\u043e\u043a\u0430\u0437 \u043c\u043e\u0436\u0435\u0442 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0442\u044c \u043b\u0438\u043c\u0438\u0442; \u0437\u0430\u043f\u0440\u0435\u0442 \u043f\u043e\u043a\u0430\u0437\u0430 \u0432\u0430\u0436\u043d\u0435\u0435. \u041f\u0440\u0438 \u0440\u0430\u0437\u0434\u0435\u043b\u0435\u043d\u0438\u0438 \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u044f \u0438 \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u044f \u0438\u043c\u0435\u044e\u0442 \u0441\u043e\u0431\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0435 \u043b\u0438\u043c\u0438\u0442\u044b.");
     for (const auto& option : config.options()) {
-        if (option.group != "Combat UI") continue;
+        if (option.group != u8"\u0411\u043e\u0435\u0432\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441") continue;
         const bool blocked=config.find("combat_plate_combat")->boolean_value &&
             (option.key=="combat_plate_alt" || option.key=="combat_plate_paused");
         ImGui::BeginDisabled(blocked);
@@ -1053,15 +1053,15 @@ void CombatUiRenderer::draw_settings(RendererConfig& config) {
         if (!option.description.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::BeginTooltip(); ImGui::PushTextWrapPos(ImGui::GetFontSize()*30.f);
             ImGui::TextUnformatted(option.description.c_str());
-            if (blocked) ImGui::TextUnformatted("Disabled while Show in combat is enabled. Your saved choice is preserved.");
+            if (blocked) ImGui::TextUnformatted(u8"\u041d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u043f\u0440\u0438 \u0432\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u043e\u043c \u043f\u043e\u043a\u0430\u0437\u0435 \u0432 \u0431\u043e\u044e. \u0412\u0430\u0448 \u0432\u044b\u0431\u043e\u0440 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d.");
             ImGui::PopTextWrapPos(); ImGui::EndTooltip();
         }
     }
     auto& shared = state(); std::array<CombatEffectDefinition, 256> catalog;
     { std::lock_guard<std::mutex> guard(shared.lock); ImGui::TextDisabled("%s", shared.status.c_str()); catalog = shared.catalog; }
-    if (!ImGui::CollapsingHeader("Effect list")) return;
+    if (!ImGui::CollapsingHeader(u8"\u0421\u043f\u0438\u0441\u043e\u043a \u044d\u0444\u0444\u0435\u043a\u0442\u043e\u0432")) return;
     if (ImGui::BeginTable("CombatEffectList", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 230))) {
-        ImGui::TableSetupColumn("Effect"); ImGui::TableSetupColumn("Priority"); ImGui::TableSetupColumn("Visibility"); ImGui::TableSetupColumn("Type"); ImGui::TableSetupColumn("Icon"); ImGui::TableHeadersRow();
+        ImGui::TableSetupColumn(u8"\u042d\u0444\u0444\u0435\u043a\u0442"); ImGui::TableSetupColumn(u8"\u041f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442"); ImGui::TableSetupColumn(u8"\u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435"); ImGui::TableSetupColumn(u8"\u0422\u0438\u043f"); ImGui::TableSetupColumn(u8"\u0417\u043d\u0430\u0447\u043e\u043a"); ImGui::TableHeadersRow();
         std::array<int, 256> priority, blacklist,buffs,debuffs,effect_priorities;
         parse_effect_priorities(config.find("combat_effect_priorities")->text_value,effect_priorities);
         parse_ids(config.find("combat_priority")->text_value, priority); parse_ids(config.find("combat_blacklist")->text_value, blacklist);
@@ -1088,19 +1088,19 @@ void CombatUiRenderer::draw_settings(RendererConfig& config) {
                     for (unsigned n = 0; n < count; ++n) { if (!text.empty()) text += ','; text += std::to_string(order[n]); }
                     config.set_text(key, text.c_str());
             };
-            if (ImGui::Combo("##Visibility", &value, "Normal\0Always show\0Never show\0")) {
+            if (ImGui::Combo("##Visibility", &value, u8"\u041e\u0431\u044b\u0447\u043d\u043e\0\u0412\u0441\u0435\u0433\u0434\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c\0\u041d\u0435 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c\0")) {
                 edit("combat_priority", priority, value == 1); edit("combat_blacklist", blacklist, value == 2);
             }
             ImGui::TableNextColumn();
             int type=debuffs[id]>=0 ? 2 : buffs[id]>=0 ? 1 : 0;
-            const char* choices=catalog[id].debuff ? "Default: Debuff\0Buff\0Debuff\0" : "Default: Buff\0Buff\0Debuff\0";
+            const char* choices=catalog[id].debuff ? u8"\u041f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e: \u043e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0435\0\u0423\u0441\u0438\u043b\u0435\u043d\u0438\u0435\0\u041e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0435\0" : u8"\u041f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e: \u0443\u0441\u0438\u043b\u0435\u043d\u0438\u0435\0\u0423\u0441\u0438\u043b\u0435\u043d\u0438\u0435\0\u041e\u0441\u043b\u0430\u0431\u043b\u0435\u043d\u0438\u0435\0";
             if (ImGui::Combo("##Type",&type,choices)) {
                 edit("combat_buff_overrides",buffs,type==1); edit("combat_debuff_overrides",debuffs,type==2);
             }
             ImGui::TableNextColumn();
-            if (implementation_ && implementation_->ready[id]) ImGui::TextUnformatted("Ready");
-            else if (implementation_ && implementation_->failed[id]) ImGui::TextUnformatted("Missing");
-            else ImGui::TextUnformatted("Streaming");
+            if (implementation_ && implementation_->ready[id]) ImGui::TextUnformatted(u8"\u0413\u043e\u0442\u043e\u0432");
+            else if (implementation_ && implementation_->failed[id]) ImGui::TextUnformatted(u8"\u041e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442");
+            else ImGui::TextUnformatted(u8"\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430");
             ImGui::PopID();
         }
         ImGui::EndTable();
