@@ -554,7 +554,8 @@ void CI3DScreenGlobalMap::OnIdle()
         srd.pSysMem = buffer.get();
         srd.SysMemPitch = pitch;
 
-        pSurface->UpdateTexture(0, nullptr, &srd, MMP_FORMAT_5650);
+        // CCloudsGenerator packs white RGB and cloud opacity as ARGB4444.
+        pSurface->UpdateTexture(0, nullptr, &srd, MMP_FORMAT_4444);
     }
     if (bRButDown)
         theCursor.SetMode(CT_CAMERA);
