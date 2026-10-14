@@ -28,6 +28,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #ifndef _A4
 #include "UnitClientSpecific.h"
 #include "PlayerClient.h"
+#include "WorldInterface.h"
 #include "Terrain.h"
 #else
 #include "ViewObject.h"
