@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Gdi.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -645,7 +646,9 @@ void CI3DScreenSaveLoad::Save()
     {
         // pI3D->ExitFromModal(0x00100002);
         CDXGISurface *pSurfaceSrc = pCurrentShot->GetSurface();
-        pSurfaceSrc->DumpToFile(szFullPath + "shot.sav", BG_SMALL_PICTURE.cy);
+        const HRESULT picture = pSurfaceSrc->SaveThumbnailFile(szFullPath + "shot.sav", BG_SMALL_PICTURE.cy);
+        if (FAILED(picture)) GameJournal::Event("RENDER", "save_thumbnail_failed",
+            "stage=manual_write hr=%08lx", static_cast<unsigned long>(picture));
     }
 
     theCursor.SetMode(CT_DEFAULT);
@@ -840,7 +843,7 @@ void CI3DScreenSaveLoad::RedrawSlots()
                     pI3D->VirtualToScreenLocal(p1);
                     pI3D->VirtualToScreenLocal(p2);
                     pDC->MoveTo(p1.x, p1.y);
-                    pDC->LineTo(p2.x, p2.y);
+                    OwnedRender::E2LineTo(pDC,p2.x, p2.y);
                     pDC->SelectObject(pOldPen);
                 }
             }
@@ -936,10 +939,12 @@ void CI3DScreenSaveLoad::ReloadPicture()
     {
         CDXGISurface *pSurface = textures[1]->GetSurface();
 
-        pSurface->LoadFromFileDump(szTexPath + "shot.sav", BG_SMALL_PICTURE.cx * 2,
-                                   BG_SMALL_PICTURE.cy);
-        figures[3]->Show(TRUE);
-        figures[3]->SetTexture(textures[1]);
+        const HRESULT picture = pSurface->LoadThumbnailFile(szTexPath + "shot.sav", BG_SMALL_PICTURE.cy);
+        if (SUCCEEDED(picture)) {
+            figures[3]->Show(TRUE);
+            figures[3]->SetTexture(textures[1]);
+        } else GameJournal::Event("RENDER", "save_thumbnail_failed",
+            "stage=read slot=%s hr=%08lx", (LPCSTR)pSlot->szPath, static_cast<unsigned long>(picture));
     }
 }
 ////////////////////////////////////////////////////////////////////////////////
@@ -955,7 +960,7 @@ void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
     if (bIsAuto)
         NGame::DrawFrame(false);
     pBGScreen = std::make_unique<CI3DSurface>(&theInterface, 0, 0, 800, 600, BS_VISIBLE);
-    pBGScreen->GetFromScreen();
+    pBGScreen->GetFromScreen(true);
 
     theCursor.SetMode(CT_WAIT);
 
@@ -984,8 +989,13 @@ void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
     slot.Store(file);
     file.CloseFile();
 
-    auto pBGSmallScreen = SmallScreenFromScreen(pBGScreen.get());
-    pBGSmallScreen->DumpToFile(szFullPath + "shot.sav", BG_SMALL_PICTURE.cy);
+    if (SUCCEEDED(pBGScreen->GetPixelReadbackStatus())) {
+        auto pBGSmallScreen = SmallScreenFromScreen(pBGScreen.get());
+        const HRESULT picture = pBGSmallScreen->SaveThumbnailFile(szFullPath + "shot.sav", BG_SMALL_PICTURE.cy);
+        if (FAILED(picture)) GameJournal::Event("RENDER", "save_thumbnail_failed",
+            "stage=quick_write hr=%08lx", static_cast<unsigned long>(picture));
+    } else GameJournal::Event("RENDER", "save_thumbnail_failed",
+        "stage=quick_capture hr=%08lx", static_cast<unsigned long>(pBGScreen->GetPixelReadbackStatus()));
 
     theCursor.SetMode(CT_DEFAULT);
 }

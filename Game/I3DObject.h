@@ -114,7 +114,7 @@ public:
 
     void StretchTo(CDXGISurface *result, const RECT &rect);
 
-    void GetFromScreen();
+    void GetFromScreen(bool composedOutput = false);
     virtual void Draw();
     CDC *GetDC();
     void ReleaseDC();

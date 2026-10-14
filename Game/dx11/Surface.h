@@ -1,5 +1,6 @@
 #pragma once
 #include "../OwnedRender/E1Surface.h"
+#include "owned_ui_layers.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include "../mmpFormat.h"
@@ -24,7 +25,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelReadbackStaging;
     bool captureUsedBoundTarget = false;
     bool captureDifferentFromBufferZero = false;
-    HDC hDc;
+    HDC hDc = nullptr;
+    HDC uiRecordingDc = nullptr;
+    bool uiRecordingReset = false;
+    owned::UiLayerState uiLayer;
+    std::vector<std::uint8_t> uiRecipe;
+    HDC AcquirePixelsDC();
+    void ReleasePixelsDC();
+    static HDC PromoteUiLayer(void* context,const std::uint8_t* recipe,std::size_t size) noexcept;
     BOOL CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d);
     BOOL ExtractSurfaceParams();
 
@@ -32,12 +40,14 @@ public:
     CDXGISurface(CDX11 *pDXDirectDraw, DWORD dwWidth, DWORD dwHeight);
     CDXGISurface(CDX11 *pDXDirectDraw, D3D11_TEXTURE2D_DESC *ptex2d);
     CDXGISurface(CDX11 *pDXDirectDraw, const SMMPFileHeader *pHdr, bool bInVideo = false);
+    ~CDXGISurface();
     // texture surface functions: priority and LOD. NOTE: use it ONLY with automatic managed
     // TEXTURES wraps for surface description functions
     BOOL GetSurfaceDesc(D3D11_TEXTURE2D_DESC *pDDSD);
     BOOL GetTextureFormat(DXGI_FORMAT &pDDPixelFormat);
     // access to surface's width/height/bpp, previously extracted during creating
     std::uint64_t OwnedSurfaceId() const noexcept { return ownedSurface.Id(); }
+    std::uint64_t OwnedSurfaceGeneration() const noexcept;
     bool EnsureOwnedSurfacePublished() const noexcept
     {
         return OwnedRender::E1SurfaceValue(ownedSurface.Id()) != nullptr ||
@@ -49,6 +59,7 @@ public:
     // lock/unlock wraps
     BOOL AcquireDC(HDC* pDC);
     BOOL ReleaseDC(HDC hDC);
+    void RecordedSurfaceReset(const RECT& rect) noexcept;
     // blit functions
     // general blit functions
     // special blit to and from primary/render surfaces
@@ -58,7 +69,7 @@ public:
         const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey = nullptr,
         bool interfaceSpace = true, bool nativeCanvas = true);
     HRESULT BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
-                                 LPDDBLTFX pDDBltFx = 0);
+                                 LPDDBLTFX pDDBltFx = 0, bool composedOutput = false);
     void UpdateTexture(UINT subresource_index, D3D11_BOX *region, D3D11_SUBRESOURCE_DATA *srd,
                        DWORD sourceMmpFormat = MMP_FORMAT_8888);
     // surface clearing
@@ -68,9 +79,8 @@ public:
     BOOL Load(FILE *file, bool bInVideo = false);
     BOOL Load(const SMMPFileHeader *pHdr, bool bInVideo = false);
     void DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *ptex2d);
-    void DumpToFile(LPCSTR path, UINT rows);
-    void LoadFromFileDump(LPCSTR path, UINT linePitch, UINT rows);
-    void LoadFromByteDump(void *src, UINT linePitch, UINT rows);
+    HRESULT SaveThumbnailFile(LPCSTR path, UINT rows) noexcept;
+    HRESULT LoadThumbnailFile(LPCSTR path, UINT rows) noexcept;
     // Assuming src is copy compatible without checks!
     void CopyResource(CDXGISurface *src);
     // void CopyResource(ID3D11Texture2D *src);

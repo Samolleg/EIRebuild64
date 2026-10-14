@@ -290,8 +290,8 @@ struct E3HudAccess {
         messageTextOwner=nullptr;
         itemFigures.fill(-1);cameraSlot=-1;
         owned::HudLayoutFrame frame;
-        // Current host ingress is full-width, unscaled placed space. Do not
-        // announce a different safe area until its drawing/input consumer exists.
+        // Publish native, unscaled placed space. HudLayoutContext applies the
+        // configured safe area to both composition and pointer membership.
         frame.layout=owned::widescreen::make_layout(float(width),float(height));
         frame.active=mission && width && height;
         if(frame.active) {

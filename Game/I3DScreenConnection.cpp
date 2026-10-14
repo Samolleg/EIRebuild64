@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Gdi.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenConnection.h"
@@ -1412,7 +1413,7 @@ void CI3DScreenConnection::RedrawSlots()
     pI3D->VirtualToScreenLocal(p1);
     pI3D->VirtualToScreenLocal(p2);
     pDC->MoveTo(p1.x, p1.y);
-    pDC->LineTo(p2.x, p2.y);
+    OwnedRender::E2LineTo(pDC,p2.x, p2.y);
 
     rc += CPoint(0, 27);
 

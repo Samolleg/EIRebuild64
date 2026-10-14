@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Host.h"
+#include "A3Cursor.h"
 #include "OwnedRender/E3Scale.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -3075,6 +3077,17 @@ BOOL CWorldClient::Draw()
         visuals.time = GetPreciseTime();
         visuals.sceneFlags = GetFlags();
         visuals.drawUndetected = ownedDrawUndetected;
+        visuals.briefingScreen = pPlayer && pPlayer->curInterface == IFACE_BASE;
+        const auto hover = OwnedRender::E2HoveredObject(theCursor.GetMode());
+        const auto identity = OwnedRender::E1Scene().Identity(hover.id);
+        owned::VisualObjectPublicationSnapshot hoverSnapshot;
+        if (hover.generation && identity.generation == hover.generation &&
+            theCursor.GetMode() != CT_CANCEL && theCursor.GetMode() != CT_SPELL_CANCEL &&
+            theCursor.GetMode() != CT_WAIT && theCursor.GetMode() != CT_CAMERA &&
+            retained.visual_object_publication_snapshot(hover.id, hoverSnapshot)) {
+            visuals.hoverId = hoverSnapshot.resource.signed_id;
+            visuals.hoverSerial = hoverSnapshot.resource.serial;
+        }
         visuals.worldToClip = frameValues.camera.world_to_clip;
         visuals.ambient = frameValues.lighting.ambient;
         visuals.sunDiffuse = frameValues.lighting.sunlight_diffuse;

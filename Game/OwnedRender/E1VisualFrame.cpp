@@ -249,6 +249,9 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     inputs.time = host.time;
     inputs.scene_flags = host.sceneFlags;
     inputs.draw_undetected = host.drawUndetected;
+    inputs.briefing_screen = host.briefingScreen;
+    inputs.hover_id = host.hoverId;
+    inputs.hover_serial = host.hoverSerial;
     inputs.world_to_clip = host.worldToClip;
     inputs.lighting.ambient = host.ambient;
     inputs.lighting.sunlight_diffuse = host.sunDiffuse;
@@ -259,7 +262,8 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     Sink sink;
     sink.renderer = &renderer;
     sink.state = state;
-    sink.shadowsEnabled = (host.sceneFlags & 0x200u) != 0;
+    sink.shadowsEnabled = renderer.native_shadows_enabled() || renderer.native_point_shadows_enabled();
+    inputs.scene_flags = (inputs.scene_flags & ~0x200u) | (sink.shadowsEnabled ? 0x200u : 0u);
     owned::RetainedTerrainSourceSnapshot terrain;
     if (host.sceneFlags & 0x100u) {
         E1ShadowTerrain(inputs, terrain);

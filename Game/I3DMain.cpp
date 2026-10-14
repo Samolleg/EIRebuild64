@@ -331,7 +331,7 @@ void CInterface3D::Draw2D()
     if (eBGFlag == BG_FLAG_CREATE)
     { // if we have to create background screen
         pBGScreen = std::make_unique<CI3DSurface>(this, 0, 0, nScreenWidth, nScreenHeight, BS_VISIBLE, false);
-        pBGScreen->GetFromScreen();
+        pBGScreen->GetFromScreen(true);
         DirectX::SetDebugObjectName(pBGScreen->GetSurface()->GetTexture().Get(), "pBGScreen");
 
         pBGSmallScreen = SmallScreenFromScreen(pBGScreen.get());
@@ -344,7 +344,7 @@ void CInterface3D::Draw2D()
             pBGScreen->MemoryBackup(FALSE);
         pBGScreen2 = std::move(pBGScreen);
         pBGScreen = std::make_unique<CI3DSurface>(this, 0, 0, nScreenWidth, nScreenHeight, BS_VISIBLE, false);
-        pBGScreen->GetFromScreen();
+        pBGScreen->GetFromScreen(true);
         DirectX::SetDebugObjectName(pBGScreen->GetSurface()->GetTexture().Get(), "pBGScreenSmall");
 
         eBGFlag = BG_FLAG_DRAW_S;

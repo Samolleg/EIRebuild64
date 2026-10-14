@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Host.h"
+#include "OwnedRender/E2Gdi.h"
 #include "OwnedRender/E1TextLifetime.h"
 #include "OwnedRender/E3Input.h"
 #include "OwnedRender/E1Scene.h"
@@ -1459,6 +1461,14 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
     CMapObject *pObj = 0;
     CUnit *pHero = 0;
     CPlot3D plot;
+    struct HoverPublication {
+        CUnit*& unit; CMapObject*& object;
+        ~HoverPublication() {
+            CMapObject* target = object ? object : unit;
+            const auto identity = target ? OwnedRender::E1Scene().Identity(target->GetID()) : owned::LifecycleIdentity{};
+            OwnedRender::E2SetHoveredObject(identity.id, identity.generation, theCursor.GetMode());
+        }
+    } hoverPublication{pU, pObj};
 
 #ifdef NODEBUGINFO
     if (pU && !pU->CheckFlag(UNIT_VISIBLE))
@@ -4422,7 +4432,7 @@ void CI3DObjectMap::Init(float fInitZoom, bool bClosed)
     AddSurface(pSurf);
 #ifdef DXGI_ENABLED
     CDC *pDC = pSurf->GetDC();
-    pDC->SetPixel(0, 0, RGB(255, 255, 255));
+    OwnedRender::E2SetPixel(pDC,0, 0, RGB(255, 255, 255));
     pSurf->ReleaseDC();
 #endif // NOGETDC
 

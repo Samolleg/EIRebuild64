@@ -3,6 +3,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenBase.h"
+#include "OwnedRender/E2Host.h"
+#include "OwnedRender/E1Scene.h"
 #include "I3DScreenGlobalMap.h"
 #include "I3DScreenEcsapeMenu.h"
 #include "I3DScreenMessageBox.h"
@@ -653,8 +655,11 @@ void CI3DScreenBase::OnMouseMove(UINT nFlags, CPoint point)
 
         FillBriefingsList(nUnitID);
 
-        if (szBriefings.GetSize() > 0)
+        if (szBriefings.GetSize() > 0) {
             theCursor.SetMode(CT_TALK);
+            const auto identity = OwnedRender::E1Scene().Identity(nUnitID);
+            OwnedRender::E2SetHoveredObject(identity.id, identity.generation, CT_TALK);
+        }
 
         auto it2 = localNames.find(nUnitID);
         if (it2 != localNames.end())

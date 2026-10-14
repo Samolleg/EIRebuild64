@@ -579,35 +579,110 @@ void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
     src->ownedSurface.Complete(src->texture.Get());
 }
 /////////////////////////////////////////////////////////////////////////////////////
+std::uint64_t CDXGISurface::OwnedSurfaceGeneration() const noexcept
+{
+    const auto value=OwnedRender::E1SurfaceValue(ownedSurface.Id());
+    return value?value->generation:0;
+}
+
+CDXGISurface::~CDXGISurface()
+{
+    if(uiRecordingDc)owned::ui_layer_abort(uiRecordingDc);
+    if(hDc && texture){
+        Microsoft::WRL::ComPtr<IDXGISurface1> surface;
+        if(SUCCEEDED(texture.As(&surface)))surface->ReleaseDC(nullptr);
+    }
+}
+
+HDC CDXGISurface::AcquirePixelsDC()
+{
+    Microsoft::WRL::ComPtr<IDXGISurface1> surface;
+    IfFailedThrowHR(texture.As(&surface));
+    ownedSurface.BeginWrite();
+    IfFailedThrowHR(surface->GetDC(FALSE,&hDc));
+    return hDc;
+}
+
+void CDXGISurface::ReleasePixelsDC()
+{
+    Microsoft::WRL::ComPtr<IDXGISurface1> surface;
+    IfFailedThrowHR(texture.As(&surface));
+    IfFailedThrowHR(surface->ReleaseDC(nullptr));
+    hDc=nullptr;
+    IfFailedThrowHR(ownedSurface.Complete(texture.Get())?S_OK:E_FAIL);
+}
+
+HDC CDXGISurface::PromoteUiLayer(void* context,const std::uint8_t* recipe,std::size_t size) noexcept
+{
+    auto& surface=*static_cast<CDXGISurface*>(context);
+    try{
+        const HDC target=surface.AcquirePixelsDC();
+        if(owned::ui_layer_replay(recipe,size,target))return target;
+        surface.ReleasePixelsDC();
+    }catch(...){
+        GameJournal::Event("render","ui_text_promotion_failed","surface=%llu",surface.OwnedSurfaceId());
+    }
+    return nullptr;
+}
+
+void CDXGISurface::RecordedSurfaceReset(const RECT& rect) noexcept
+{
+    if(uiRecordingDc && rect.left<=0 && rect.top<=0 &&
+       rect.right>=LONG(dwSurfaceWidth) && rect.bottom>=LONG(dwSurfaceHeight))uiRecordingReset=true;
+}
+
 BOOL CDXGISurface::AcquireDC(HDC *pDC)
 {
     FrameDiagnostics::Scope timing(FrameDiagnostics::GetDC);
-#ifdef DXGI_ENABLED
-    Microsoft::WRL::ComPtr<IDXGISurface1> surf;
-    IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
-    ownedSurface.BeginWrite();
-    IfFailedThrowHR(surf->GetDC(FALSE, pDC));
-    hDc = *pDC;
+    if(!pDC || hDc || uiRecordingDc)return FALSE;
+    bool recordText=false;
+    IfFailedThrowHR(pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+        recordText=renderer.owned_ui_text_enabled();return S_OK;
+    }));
+    if(recordText){
+        uiRecordingReset=false;
+        uiRecordingDc=owned::ui_layer_begin(this,&PromoteUiLayer);
+        if(!uiRecordingDc){
+            GameJournal::Event("render","ui_text_recording_unavailable","surface=%llu",OwnedSurfaceId());
+            IfFailedThrowHR(E_FAIL);
+        }
+        *pDC=uiRecordingDc;
+    }else *pDC=AcquirePixelsDC();
     return TRUE;
-#else
-    return 0;
-#endif
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // BOOL CDXGISurface::ReleaseDC( HDC hDC )
 BOOL CDXGISurface::ReleaseDC(HDC hDC)
 {
     FrameDiagnostics::Scope timing(FrameDiagnostics::ReleaseDC);
-#ifdef DXGI_ENABLED
-    Microsoft::WRL::ComPtr<IDXGISurface1> surf;
-    IfFailedThrowHR(texture->QueryInterface(IID_PPV_ARGS(&surf)));
-    IfFailedThrowHR(surf->ReleaseDC(nullptr));
-    ownedSurface.Complete(texture.Get());
-    hDc = 0;
+    if(!uiRecordingDc){
+        if(!hDc || hDC!=hDc)return FALSE;
+        ReleasePixelsDC();return TRUE;
+    }
+    if(hDC!=uiRecordingDc)return FALSE;
+    const auto completed=owned::ui_layer_end(uiRecordingDc,uiRecipe);
+    uiRecordingDc=nullptr;
+    if(completed.promoted){
+        ReleasePixelsDC();uiLayer={};
+    }else if(completed.failure==owned::UiLayerFailure::none){
+        if(owned::ui_layer_unchanged(uiLayer,uiRecipe,OwnedSurfaceGeneration()))return TRUE;
+        const HDC target=AcquirePixelsDC();
+        const bool replayed=owned::ui_layer_replay(uiRecipe.data(),uiRecipe.size(),target);
+        ReleasePixelsDC();
+        IfFailedThrowHR(replayed?S_OK:E_FAIL);
+        uiLayer.recipe.swap(uiRecipe);
+        uiLayer.generation=OwnedSurfaceGeneration();
+        // A full clear makes this recipe independent of previous surface pixels.
+        // Incremental and promoted drawing is never treated as a fixed point.
+        uiLayer.stable=uiRecordingReset;
+    }
+    if(completed.failure!=owned::UiLayerFailure::none){
+        uiLayer={};
+        GameJournal::Event("render","ui_text_recording_failed","surface=%llu reason=%s",
+            OwnedSurfaceId(),owned::ui_layer_failure_name(completed.failure));
+        IfFailedThrowHR(E_FAIL);
+    }
     return TRUE;
-#else
-    return 0;
-#endif
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // BOOL CDXGISurface::GetSurfaceDesc( LPDDSURFACEDESC2 pDDSD )
@@ -663,15 +738,31 @@ HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facad
         OwnedSurfaceId(), destination, source, colorKey, interfaceSpace, nativeCanvas);
 }
 HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DWORD dwFlags,
-                                           LPDDBLTFX pDDBltFx)
+                                           LPDDBLTFX pDDBltFx, bool composedOutput)
 {
-    return pDX11->GetRendererFacade().VisitOutput(this,
+    auto& facade = pDX11->GetRendererFacade();
+    if (composedOutput) {
+        const HRESULT ready = facade.Visit([](owned::Renderer& renderer) -> HRESULT {
+            HRESULT hr = renderer.composite_world();
+            if (SUCCEEDED(hr)) hr = renderer.flush_native();
+            if (SUCCEEDED(hr)) hr = renderer.flush_ui();
+            return hr;
+        });
+        if (FAILED(ready)) return ready;
+    }
+    struct Capture { CDXGISurface* surface; bool composed; } capture{this, composedOutput};
+    return facade.VisitOutput(&capture,
         [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {
-            auto& self = *static_cast<CDXGISurface*>(user);
+            auto& request = *static_cast<Capture*>(user);
+            auto& self = *request.surface;
+            self.captureUsedBoundTarget = self.captureDifferentFromBufferZero = false;
             Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-            const HRESULT selected = OwnedRender::E1CaptureSource(context, backbuffer, source,
-                self.captureUsedBoundTarget, self.captureDifferentFromBufferZero);
-            if (FAILED(selected)) return selected;
+            if (request.composed) source = backbuffer;
+            else {
+                const HRESULT selected = OwnedRender::E1CaptureSource(context, backbuffer, source,
+                    self.captureUsedBoundTarget, self.captureDifferentFromBufferZero);
+                if (FAILED(selected)) return selected;
+            }
             D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
             source->GetDesc(&sourceDesc);
             self.texture->GetDesc(&destinationDesc);
@@ -763,50 +854,86 @@ HRESULT CDXGISurface::Clear(DWORD dwColorFill)
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CDXGISurface::DumpToFile(LPCSTR path, UINT rows)
+HRESULT CDXGISurface::SaveThumbnailFile(LPCSTR path, UINT rows) noexcept
 {
-    // create to-cpu copyable texture
-    D3D11_TEXTURE2D_DESC tex2d;
-    GetSurfaceDesc(&tex2d);
-    tex2d.Usage = D3D11_USAGE::D3D11_USAGE_STAGING;
-    tex2d.BindFlags = 0;
-    tex2d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-    pDX11->CreateTexture(&tex2d, staging);
-
-    // copy texture to staging
-    pDX11->GetDeviceContext()->CopyResource(staging.Get(), this->GetTexture().Get());
-
-    // read staging, write to file
-    D3D11_MAPPED_SUBRESOURCE ResourceDesc = {};
-    pDX11->GetDeviceContext()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &ResourceDesc);
-
-    CFile file;
-    file.Open(path, CFile::modeCreate | CFile::modeWrite);
-    file.Write(ResourceDesc.pData, ResourceDesc.RowPitch * rows);
-    file.Close();
-
-    pDX11->GetDeviceContext()->Unmap(staging.Get(), 0);
-};
-
-void CDXGISurface::LoadFromFileDump(LPCSTR path, UINT linePitch, UINT rows)
-{
-    CFile file;
-    file.Open(path, CFile::modeRead);
-    // read file into buffer
-    const int depthPitch = linePitch * rows;
-    std::unique_ptr<BYTE[]> buf = std::make_unique<BYTE[]>(depthPitch);
-    auto read = file.Read(buf.get(), depthPitch);
-    file.Close();
-
-    this->LoadFromByteDump(buf.get(), linePitch, rows);
+    if (!path || !rows || rows > dwSurfaceHeight || !dwSurfaceWidth) return E_INVALIDARG;
+    std::string temporary;
+    try {
+        const size_t count = size_t(dwSurfaceWidth) * dwSurfaceHeight;
+        std::vector<DWORD> pixels(count);
+        const HRESULT captured = CopyPixelBuffer(pixels.data(), pixels.size());
+        if (FAILED(captured)) return captured;
+        std::vector<WORD> packed(size_t(dwSurfaceWidth) * rows);
+        for (size_t i = 0; i < packed.size(); ++i) {
+            const DWORD pixel = pixels[i];
+            packed[i] = WORD(((pixel >> 19) & 31u) << 11 |
+                             ((pixel >> 10) & 63u) << 5 | ((pixel >> 3) & 31u));
+        }
+        // Prepare the complete image before replacing the previous thumbnail.
+        temporary = std::string(path) + ".thumbnail-" + std::to_string(GetCurrentProcessId()) + ".tmp";
+        {
+            CFile file; CFileException error;
+            if (!file.Open(temporary.c_str(), CFile::modeCreate | CFile::modeWrite, &error))
+                return HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+            file.Write(packed.data(), UINT(packed.size() * sizeof(WORD)));
+            file.Close();
+        }
+        if (!MoveFileExA(temporary.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            const DWORD error = GetLastError();
+            DeleteFileA(temporary.c_str());
+            return HRESULT_FROM_WIN32(error);
+        }
+        return S_OK;
+    } catch (CException* error) {
+        error->Delete();
+        if (!temporary.empty()) DeleteFileA(temporary.c_str());
+        return HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+    } catch (...) {
+        if (!temporary.empty()) DeleteFileA(temporary.c_str());
+        return E_OUTOFMEMORY;
+    }
 }
 
-void CDXGISurface::LoadFromByteDump(void *src, UINT linePitch, UINT rows)
+HRESULT CDXGISurface::LoadThumbnailFile(LPCSTR path, UINT rows) noexcept
 {
-    D3D11_SUBRESOURCE_DATA srd = {};
-    srd.pSysMem = src;
-    srd.SysMemPitch = linePitch;
-    D3D11_BOX region = { 0, 0, 0, dwSurfaceWidth, rows, 1 };
-    this->UpdateTexture(0, &region, &srd);
-};
+    if (!path || !rows || rows > dwSurfaceHeight || !dwSurfaceWidth) return E_INVALIDARG;
+    try {
+        CFile file; CFileException error;
+        if (!file.Open(path, CFile::modeRead, &error))
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        const ULONGLONG bytes = file.GetLength();
+        const size_t row16 = size_t(dwSurfaceWidth) * sizeof(WORD);
+        const size_t row32 = size_t(dwSurfaceWidth) * sizeof(DWORD);
+        const bool rgb565 = bytes == row16 * rows;
+        // Read raw BGRA dumps produced by the broken writer too. Their row
+        // padding is inferred from the complete file, never treated as pixels.
+        if (!rgb565 && (bytes < row32 * rows || bytes % rows || bytes > row32 * rows * 4u))
+            return HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
+        const size_t pitch = rgb565 ? row16 : size_t(bytes / rows);
+        std::vector<BYTE> source(size_t(bytes), BYTE{});
+        if (file.Read(source.data(), UINT(source.size())) != source.size())
+            return HRESULT_FROM_WIN32(ERROR_HANDLE_EOF);
+        file.Close();
+        std::vector<DWORD> pixels(size_t(dwSurfaceWidth) * rows);
+        if (rgb565) {
+            SMMPFileHeader format; format.InitializeDefaultFormat(MMP_FORMAT_5650);
+            std::vector<DWORD> row;
+            for (UINT y = 0; y < rows; ++y) {
+                if (!MmpRgbToBgra::Convert(format, source.data() + size_t(y) * pitch, dwSurfaceWidth, row))
+                    return HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
+                memcpy(pixels.data() + size_t(y) * dwSurfaceWidth, row.data(), row32);
+            }
+        } else {
+            for (UINT y = 0; y < rows; ++y)
+                memcpy(pixels.data() + size_t(y) * dwSurfaceWidth, source.data() + size_t(y) * pitch, row32);
+            // Save pictures are opaque, including old BGRX dumps.
+            for (DWORD& pixel : pixels) pixel |= 0xff000000u;
+        }
+        D3D11_SUBRESOURCE_DATA data{};
+        data.pSysMem = pixels.data(); data.SysMemPitch = UINT(row32);
+        D3D11_BOX region{0, 0, 0, dwSurfaceWidth, rows, 1};
+        UpdateTexture(0, &region, &data, MMP_FORMAT_8888);
+        return S_OK;
+    } catch (CException* error) { error->Delete(); return HRESULT_FROM_WIN32(ERROR_READ_FAULT); }
+      catch (...) { return E_OUTOFMEMORY; }
+}

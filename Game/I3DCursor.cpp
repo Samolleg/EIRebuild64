@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Host.h"
 #include "OwnedRender/E3Input.h"
 static const char LOCAL_FILE[] = __FILE__;
 ///////////////////////////////////////////////////////////////////////////////////
@@ -79,6 +80,7 @@ CI3DCursor::CI3DCursor()
 /////////////////////////////////////////////////////////////////////////////////////
 int CI3DCursor::SetMode(int nType)
 {
+    OwnedRender::E2ClearHoveredObject();
     if (m_eCursorType == -1 || !m_isInitialized)
         return -1;
     else

@@ -16,7 +16,7 @@ void widescreen_set_combat_text_scale(int percent) noexcept {
 }
 void widescreen_set_landscape_radius(float distance) noexcept {
     if (std::isfinite(distance))
-        landscapeRadius = (std::max)(500.f, std::clamp(distance, 100.f, 1000.f));
+        landscapeRadius = std::clamp(distance, 100.f, 1000.f);
 }
 }
 namespace OwnedRender {

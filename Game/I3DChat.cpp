@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Gdi.h"
 #include "OwnedRender/E1TextLifetime.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -348,7 +349,7 @@ void CI3DChat::RedrawChatPhrase()
         pI3D->VirtualToScreenLocal(p1);
         pI3D->VirtualToScreenLocal(p2);
         pDC->MoveTo(p1.x, p1.y);
-        pDC->LineTo(p2.x, p2.y);
+        OwnedRender::E2LineTo(pDC,p2.x, p2.y);
         pDC->SelectObject(pOldPen);
     }
     pSurf->ReleaseDC();

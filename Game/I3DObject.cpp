@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Gdi.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Hud.h"
 #include "I3DScreenCamp.h"
@@ -352,12 +353,12 @@ bool CI3DSurface::SetRectForRedraw(CRect desired, float textScale)
     rect = desired;
     return changed;
 }
-void CI3DSurface::GetFromScreen()
+void CI3DSurface::GetFromScreen(bool composedOutput)
 {
     if (!pSurface)
         return;
     // must match screen's sampling
-    pixelReadbackStatus = pSurface->BltFromRenderSurface(0, rect, 0);
+    pixelReadbackStatus = pSurface->BltFromRenderSurface(0, rect, 0, nullptr, composedOutput);
     pixelBufferValid = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -493,7 +494,7 @@ void CI3DSurface::DrawRect(const CRect &rc, COLORREF crColor)
     }
 
     brush.CreateSolidBrush(crColor);
-    pDC->FrameRect(rcDraw, &brush);
+    OwnedRender::E2FrameRect(pDC,rcDraw, &brush);
 #endif // NOGETDC
 }
 
@@ -523,11 +524,11 @@ int CI3DSurface::DrawText(LPCTSTR pszStr, const CRect &rc, int nFont, COLORREF c
     if (bShadow)
     {
         pDC->SetTextColor(RGB(8, 8, 8));
-        pDC->DrawText(pszStr, -1, rcDraw + shift, nFormat);
+        OwnedRender::E2DrawText(pDC,pszStr, -1, rcDraw + shift, nFormat);
     }
     pDC->SetTextColor(crColor);
     CSize size;
-    size.cy = pDC->DrawText(pszStr, -1, rcDraw, nFormat);
+    size.cy = OwnedRender::E2DrawText(pDC,pszStr, -1, rcDraw, nFormat);
     pDC->SelectObject(pOldFont);
     pI3D->ScreenToVirtual(size);
     return size.cy;
@@ -623,7 +624,8 @@ void CI3DSurface::Clear()
         return;
     // pSurface->Clear(0);
     CDC *pDC = CDC::FromHandle(hDC);
-    pDC->FillSolidRect(rect - rect.TopLeft(), colorKey);
+    OwnedRender::E2FillSolidRect(pDC,rect - rect.TopLeft(), colorKey);
+    pSurface->RecordedSurfaceReset(rect - rect.TopLeft());
 #endif // NOGETDC
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -635,7 +637,8 @@ void CI3DSurface::Fill(COLORREF crColor)
     CDC *pDC = CDC::FromHandle(hDC);
     if (!pDC)
         return;
-    pDC->FillSolidRect(rect - rect.TopLeft(), crColor);
+    OwnedRender::E2FillSolidRect(pDC,rect - rect.TopLeft(), crColor);
+    pSurface->RecordedSurfaceReset(rect - rect.TopLeft());
 #endif // NOGETDC
 }
 /////////////////////////////////////////////////////////////////////////////////////

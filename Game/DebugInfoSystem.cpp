@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E2Gdi.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "DebugInfoSystem.h"
@@ -107,7 +108,7 @@ void CDebugInfoSystem::RedrawSurface()
     CDC *pDC = pSurface->GetDC();
     if (!pDC)
         return;
-    pDC->FillSolidRect(0, 0, rcReal.Width(), rcReal.Height(), RGB(0, 0, 0));
+    OwnedRender::E2FillSolidRect(pDC,0, 0, rcReal.Width(), rcReal.Height(), RGB(0, 0, 0));
     pDC->SetBkMode(TRANSPARENT);
     CFont *pOldFont = pDC->SelectObject(pDebugFont);
 
@@ -118,14 +119,14 @@ void CDebugInfoSystem::RedrawSurface()
     for (it = datamap.begin(); it != datamap.end(); ++it)
     {
         pDC->SetTextColor(RGB(8, 8, 8));
-        pDC->DrawText(it->first.c_str(), it->first.length(), rc1 + CPoint(1, 1),
+        OwnedRender::E2DrawText(pDC,it->first.c_str(), it->first.length(), rc1 + CPoint(1, 1),
                       DT_LEFT | DT_NOPREFIX);
-        pDC->DrawText(it->second.c_str(), it->second.length(), rc2 + CPoint(1, 1),
+        OwnedRender::E2DrawText(pDC,it->second.c_str(), it->second.length(), rc2 + CPoint(1, 1),
                       DT_LEFT | DT_NOPREFIX);
 
         pDC->SetTextColor(DEBUGINFO_COLOR_TEXT);
-        pDC->DrawText(it->first.c_str(), it->first.length(), rc1, DT_LEFT | DT_NOPREFIX);
-        pDC->DrawText(it->second.c_str(), it->second.length(), rc2, DT_LEFT | DT_NOPREFIX);
+        OwnedRender::E2DrawText(pDC,it->first.c_str(), it->first.length(), rc1, DT_LEFT | DT_NOPREFIX);
+        OwnedRender::E2DrawText(pDC,it->second.c_str(), it->second.length(), rc2, DT_LEFT | DT_NOPREFIX);
 
         rc1 += CPoint(0, DEBUGINFO_LINE_HEIGHT);
         rc2 += CPoint(0, DEBUGINFO_LINE_HEIGHT);

@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <cstdint>
 
 namespace OwnedRender {
 // Direct host scopes; no retail return addresses or persisted world pointers.
@@ -12,6 +13,13 @@ public:
     E2PassScope(const E2PassScope&) = delete;
     E2PassScope& operator=(const E2PassScope&) = delete;
 };
+struct E2HoverSelection {
+    std::int32_t id = 0;
+    std::uint64_t generation = 0;
+};
+void E2SetHoveredObject(std::int32_t id, std::uint64_t generation, int cursorMode) noexcept;
+void E2ClearHoveredObject() noexcept;
+E2HoverSelection E2HoveredObject(int cursorMode) noexcept;
 bool E2CampInput(UINT message, WPARAM wparam, LPARAM lparam) noexcept;
 bool E2BackgroundConfigured() noexcept;
 bool E2BackgroundPaused(HWND window) noexcept;

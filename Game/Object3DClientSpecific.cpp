@@ -23,6 +23,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E1Surface.h"
 #include "owned_asset_loader.h"
+#include "engine_bridge.h"
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
@@ -852,6 +853,8 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
     pose.phase = selected.visual.neutral ? 0.0 : animation->GetTime();
     pose.source_generation = selected.source_generation;
     pose.appearance_revision = assembly->revision;
+    if (owned::bridge_change_driven_poses_enabled() && scene.visual_object_pose_current(resource, pose))
+        return true;
     if (!hostScene.PublishObjectPose(resource, pose))
         return reject("object_pose.publish");
     return true;
@@ -923,6 +926,13 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
                 "object_pose.current_draw_preparation", "host.object_pose");
     }
     if (!visibleOnScreen) return published;
+    const auto type = lpObject->WhoAmI();
+    auto* mapObject = dynamic_cast<CMapObject*>(lpObject);
+    if (published && owned::bridge_skip_scenery_draw_walk_enabled() &&
+        (type == HPC_BUILDING || type == HPC_TREE ||
+         (type != HPC_UNIT && type != HPC_LEVER && type != HPC_TORCH && type != HPC_TRAP && lpObject->CheckFlag(OBJ_STATIC) && mapObject && !mapObject->IsScientific())) &&
+        (!lpObject->GetAnimationSystem2() || !lpObject->GetAnimationSystem2()->GetCurrentAnimation()))
+        return published;
 
     // Picking uses current host geometry, independently of GPU acceptance.
     const bool selectable = lpObject->WhoAmI() == HPC_UNIT || lpObject->WhoAmI() == HPC_LEVER;

@@ -1,4 +1,6 @@
 #include "E2Host.h"
+#include "E3Input.h"
+#include <mutex>
 #include "engine_bridge.h"
 #include "game_focus.h"
 #include <atomic>
@@ -6,8 +8,24 @@
 namespace {
 thread_local OwnedRender::Pass pass = OwnedRender::Pass::unknown;
 std::atomic<int> backgroundMode{-1}; // no renderer configuration yet
+std::mutex hoverLock;
+OwnedRender::E2HoverSelection hovered;
+int hoverCursorMode = -1;
 }
 namespace OwnedRender {
+void E2SetHoveredObject(std::int32_t id, std::uint64_t generation, int cursorMode) noexcept {
+    std::lock_guard<std::mutex> guard(hoverLock);
+    hovered = {id, generation}; hoverCursorMode = cursorMode;
+}
+void E2ClearHoveredObject() noexcept {
+    std::lock_guard<std::mutex> guard(hoverLock);
+    hovered = {}; hoverCursorMode = -1;
+}
+E2HoverSelection E2HoveredObject(int cursorMode) noexcept {
+    if (E3EditorPaused() || GetForegroundWindow() != E3Window()) return {};
+    std::lock_guard<std::mutex> guard(hoverLock);
+    return cursorMode == hoverCursorMode ? hovered : E2HoverSelection{};
+}
 E2PassScope::E2PassScope(Pass value) noexcept : previous(pass) { pass = value; }
 E2PassScope::~E2PassScope() noexcept { pass = previous; }
 bool E2BackgroundConfigured() noexcept { return backgroundMode.load() >= 0; }

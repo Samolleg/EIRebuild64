@@ -11,6 +11,9 @@ struct E1VisualInputs {
     double time = 0;                        // segment ticks + fraction
     std::uint32_t sceneFlags = 0;           // CWorldClient flags (WC_RENDER_*)
     bool drawUndetected = true;
+    bool briefingScreen = false;
+    std::int32_t hoverId = 0;
+    std::uint64_t hoverSerial = 0;
     std::array<float, 16> worldToClip{};
     std::array<float, 4> ambient{}, sunDiffuse{}, sunDirection{};
     bool lightingValid = false;
