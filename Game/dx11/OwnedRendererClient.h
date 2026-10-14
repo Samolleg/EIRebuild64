@@ -1,5 +1,5 @@
 #pragma once
-#include "../../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
+#include "../OwnedRender/ei_renderer_api.h"
 #include "RenderJournalState.h"
 #include "../OwnedRender/E2FrameTiming.h"
 #include "../OwnedRender/E1DeviceAccess.h"

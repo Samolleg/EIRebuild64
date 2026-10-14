@@ -12,7 +12,7 @@ float SectorBackgroundInverseDepth();
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 #include "Base3D.h"
-#include "../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
+#include "OwnedRender/ei_renderer_api.h"
 #include "Sector.h"
 #include "mapFormat.h"
 #include "SoundTypes.h"

@@ -1,6 +1,6 @@
 #pragma once
 #include "../GameJournal.h"
-#include "../../../owned-renderer-c40-rebuild/Include/ei_renderer_api.h"
+#include "../OwnedRender/ei_renderer_api.h"
 #include <cstring>
 
 // Journal only final source-host states, on the game/renderer owner thread.
