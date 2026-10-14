@@ -906,6 +906,11 @@ BOOL CI3DObjectQuickSlots::Draw(CRenderer *pRend)
 
     if (bDrawArmors)
     {
+        // The depth cutouts must follow the same placement as armor frames/icons.
+        OwnedRender::E4::Scope armorScope(E4CampAccess::RoleOf(this));
+        owned::camp::VisualScope armorPlacement(
+            owned::camp::composition(OwnedRender::E4::Layout(), OwnedRender::E4::Uniform(OwnedRender::E4::Role::quick)),
+            OwnedRender::E4::Active() && E4CampAccess::RoleOf(this)==OwnedRender::E4::Role::quick);
         CRect rcTmp;
         D3DRECT rects[RPG_NUM_ARMOR_TYPES];
         for (int i = 0; i < RPG_NUM_ARMOR_TYPES; i++)

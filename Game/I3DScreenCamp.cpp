@@ -2085,7 +2085,8 @@ void CI3DScreenCamp::CheckValidTransaction()
         nPrice = pPerks->GetExpPrice();
         if(auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVPerks") &&
            !ModProgression::CampAffordable(nPrice,pPerks->GetExpTotal()))bValidOK=false;
-        if (bValidOK)
+        // Keep the pending cost visible even when the selection is unaffordable.
+        if (bValidCancel)
             szActionToDo = "camp_level_up";
         szAmount = "camp_current_exp";
     }
