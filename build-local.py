@@ -51,5 +51,7 @@ with (evidence / f"{label}-console.log").open("wb") as log:
         cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
 print(f"Build exit={result.returncode}; log={evidence / (label + '-console.log')}")
 if result.returncode == 0:
+    shutil.copy2(root / 'out/Win32/Release/EI_Rebuild_dx11_Release_Win32.exe',
+                 root / 'out/Win32/Release/EIRebuild.exe')
     print(f'Output: {root / "out/Win32/Release/EIRebuild.exe"}')
 sys.exit(result.returncode)
