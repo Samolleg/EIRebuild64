@@ -29,6 +29,8 @@ void Activate(Host host) noexcept;
 void Deactivate(void* owner) noexcept;
 void BeginDraw(int mode) noexcept;
 void PublishDecoration(const owned::CampDecoration& decoration) noexcept;
+void DrawDecorationBackground(CRenderer* renderer);
+void FinishDraw2D(CRenderer* renderer);
 bool Active() noexcept;
 bool Current() noexcept;
 const owned::camp::Layout& Layout() noexcept;

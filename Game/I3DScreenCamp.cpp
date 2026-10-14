@@ -712,6 +712,11 @@ void CI3DScreenCamp::SetScreenMode(EItemScreenModes eNewMode)
     pI3D->CheckTutorial();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenCamp::Draw2D()
+{
+    CI3DScreen::Draw2D();
+    OwnedRender::E4::FinishDraw2D(pI3D->GetRenderer());
+}
 BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
 {
     E4CampAccess::BeginDraw(this);

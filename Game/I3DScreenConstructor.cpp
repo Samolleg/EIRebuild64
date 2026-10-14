@@ -2506,6 +2506,13 @@ void CI3DObjectNameStats::GetMouseSkill(CPoint point, SCampSkillMouseInfo *pSkil
     pSkillInfo->pUnit = pScreen->GetUnit(nCurPers);
     if(eCurMode==ISM_WEAPONS && ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_UpdateStats") && pSkillInfo->pUnit){
         pI3D->ScreenToVirtual(point);
+        if(OwnedRender::E4::Active()){
+            const auto placement=OwnedRender::E4::Uniform(OwnedRender::E4::Role::stats);
+            const auto& dst=placement.destination;const auto& src=placement.source;
+            if(!dst.contains(float(point.x),float(point.y)))return;
+            point.x=int(std::floor(src.left+(point.x-dst.left)*src.width()/dst.width()));
+            point.y=int(std::floor(src.top+(point.y-dst.top)*src.height()/dst.height()));
+        }
         if(point.x<20||point.x>=180||point.y<165||point.y>=400)return;
         const int row=(point.y-165)/15,slot=int(pPers->dwCurrentWeapon);
         const bool weapon=slot>=0&&slot<pPers->weapons.GetSize()&&pPers->weapons[slot];

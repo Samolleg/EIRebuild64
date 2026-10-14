@@ -124,6 +124,7 @@ public:
     virtual void ClickOnSlot(int nSlotType, EItemScreenParts eFrom);
 
     virtual BOOL Draw(CRenderer *pRend);
+    void Draw2D() override;
 
     virtual void OnIdle();
     virtual void OnLButtonDown(UINT nFlags, CPoint point);

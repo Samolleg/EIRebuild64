@@ -742,8 +742,10 @@ void CI3DObject::Draw2DTips()
         bool hudInside=false;
         if(OwnedRender::E3HudAreaInside(this,unsigned(k),pI3D->GetMousePos(),hudInside))
             areas[k]->ProcessIdle(pt,hudInside);
-        else if(E4CampAccess::TipInside(this,k,pI3D->GetMousePos(),hudInside))
+        else if(E4CampAccess::TipInside(this,k,pI3D->GetMousePos(),hudInside)) {
             areas[k]->ProcessIdle(pt,hudInside);
+            if(!hudInside)continue; // Do not draw the previous camp button's fading tooltip.
+        }
         else areas[k]->ProcessIdle(pt);
         areas[k]->Draw2D();
     }

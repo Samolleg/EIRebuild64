@@ -264,7 +264,20 @@ Placement E4CampAccess::Area(CI3DObject* p,Role role,int i){
     switch(role){
     case Role::root:
         if(i<2){const auto r=Actions();const float s=r.width()/200;target={r.left+source.left*s,r.top+(source.top-400)*s,r.left+source.right*s,r.top+(source.bottom-400)*s};}
-        else if(i<4)target=l.rotation[i-2];else if(i<12)target=l.mode_button(i-4);break;
+        else if(i<4)target=l.rotation[i-2];
+        else if(i<12){
+            const int mode=i-4;
+            if(mode+2>=screen->figures.GetSize()||!screen->figures[mode+2]->IsVisible())return {source,{}};
+            int count=0,index=0;
+            for(int m=0;m<8;++m)if(m+2<screen->figures.GetSize()&&screen->figures[m+2]->IsVisible()){
+                if(m<mode)++index;++count;
+            }
+            target=l.mode_button(mode);
+            const float width=target.width();
+            target.left=(l.dock.left+l.dock.right-count*width)*.5f+index*width;
+            target.right=target.left+width;
+        }
+        break;
     case Role::wagon:case Role::vendor:
         target=i<2?Rect{}:i<8?l.category(role==Role::vendor,i-2):l.grid(role==Role::vendor);break;
     case Role::quick:
@@ -497,6 +510,7 @@ bool E4CampAccess::Blit(CI3DSurface* surface){
 }
 bool E4CampAccess::Draw2D(CI3DObject* p){
     if(!Active()||RoleOf(p)==Role::none)return false;
+    if(RoleOf(p)==Role::root)DrawDecorationBackground(p->GetI3D()->GetRenderer());
     if(auto* card=dynamic_cast<CI3DObjectItemInfo*>(p))if(CardTextDraw(card))return true;
     const auto found=grid_text.find(p);
     if(found==grid_text.end())return false;

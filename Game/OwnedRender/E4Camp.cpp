@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "E4Camp.h"
+#include "E1RendererFacade.h"
 #include <utility>
 #include "../dx11/RendererDX11.h"
 #include "../Renderer.h"
@@ -126,6 +127,20 @@ void PublishDecoration(const owned::CampDecoration& value) noexcept {
     decoration=value;
     for(int i=0;i<6;++i){const auto b=rail(List(i));if(b.maximum&&decoration.thumb_count<decoration.thumbs.size())decoration.thumbs[decoration.thumb_count++]=Pixels(b.thumb);}
     decoration_pending=true;
+}
+void DrawDecorationBackground(CRenderer* renderer) {
+    if(!Active()||!decoration_pending||!renderer)return;
+    auto background=decoration;background.card_count=0;background.construction_icon_visible=false;
+    renderer->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& backend){
+        backend.queue_camp_decoration(background,false);return S_OK;
+    });
+    decoration.title_plate={};decoration.count=0;decoration.thumb_count=0;decoration.divider_count=0;
+}
+void FinishDraw2D(CRenderer* renderer) {
+    if(!renderer)return;
+    owned::CampDecoration frame;
+    if(owned::camp_inventory_take_decoration(frame))
+        renderer->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& backend){backend.queue_camp_decoration(frame);return S_OK;});
 }
 void SetCards(std::array<bool,3> value) noexcept {cards=value;}
 Role Drawing() noexcept {return drawing;}
