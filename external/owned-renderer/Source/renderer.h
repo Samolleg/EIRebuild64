@@ -75,6 +75,7 @@ struct AnimationClipAsset;
 struct HarnessCommand;
 struct NeighbourMapUpload;
 struct FigureCpuAsset;
+struct LiquidSurfField;
 
 struct PlacedHitchArmInputs {
     std::uint64_t previous_bridge_frame = 0;
@@ -2524,6 +2525,26 @@ private:
     };
     std::vector<LiquidUnitEase> liquid_unit_ease_;double liquid_ease_clock_=-1;
     void ease_liquid_units(NativeLiquidRipples& values,double seconds);
+    // Sea surf field (liquid_surf.h): the active map's on a worker started at
+    // its first liquid frame, each neighbour's from its stream worker, all
+    // composited into one world-space texture (t62) whose window rides the
+    // ripple constants (NativeLiquidRipples::surf_window). Released with the
+    // map and the neighbours; maps without surf leave the texture.
+    struct LiquidSurfMap { std::array<float,2> origin{}; std::string name; std::shared_ptr<const LiquidSurfField> field; };
+    std::future<std::shared_ptr<const LiquidSurfField>> liquid_surf_job_;
+    std::uint64_t liquid_surf_generation_=UINT64_MAX; // map generation of the active field (or its job)
+    std::shared_ptr<const LiquidSurfField> liquid_surf_active_;
+    std::vector<LiquidSurfMap> liquid_surf_neighbours_;
+    std::uint64_t liquid_surf_serial_=1,liquid_surf_built_serial_=0; // composite inputs changed / composited
+    ComPtr<ID3D11ShaderResourceView> liquid_surf_srv_,liquid_surf_level_srv_; // t62 field, t63 sea level
+    std::array<float,4> liquid_surf_window_{}; // origin xy (world m), 1/extent xy
+    float liquid_surf_fade_=-1; // water_surf_edge_fade the composite was built with (m)
+    // The composite's one regional swell direction (unit xy, from open sea
+    // toward the shores; z its agreement 0..1): the swell runs as long-crested
+    // plane waves along it instead of rings around the coastline.
+    std::array<float,4> liquid_surf_swell_{};
+    void update_liquid_surf() noexcept;
+    void add_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::array<float,16>& active_to_world) noexcept;
     // Ambient particles (renderer_ambient_particles.cpp): camera-local,
     // area-driven motes/leaves/embers drawn into the world colour after the
     // world pass and before SMAA and the interface. Off creates nothing.
@@ -2573,6 +2594,12 @@ private:
     std::size_t emissive_published_=0;
     void refresh_emissive_lights() noexcept;
     std::uint32_t ambient_tiles_x_=0,ambient_tiles_y_=0,ambient_zone_=0;bool ambient_menu_=false;
+    std::string ambient_map_name_; // map file basename, lower case (rebuild_ambient_particle_map)
+    // water_surf_no_sea_maps: maps whose water never counts as sea (liquid_surf.h).
+    std::string liquid_surf_no_sea_maps() const {
+        const auto* option=debug_overlay_.config().find("water_surf_no_sea_maps");
+        return option?option->text_value:std::string("zone7");
+    }
     std::array<std::array<double,3>,15> ambient_displacement_{};
     double ambient_time_=-1;int ambient_level_=-1;bool ambient_failed_=false;
     float ambient_rain_=0.f,ambient_snow_=0.f;double ambient_weather_hours_=-1;
@@ -2655,7 +2682,7 @@ private:
     // habitat, build; renderer_ground_cover.cpp kPlaceClasses), each class
     // compiled with only its rules' features; neighbours run all rules in one
     // set of three stages.
-    static constexpr unsigned kGcPlaceClasses = 6, kGcPixelKinds = 4;
+    static constexpr unsigned kGcPlaceClasses = 6, kGcPixelKinds = 5;
     // [stage][class]: cells, habitat, build (with trails), build without trails;
     // gc_place_cs_ (the plain cell stage) is set last and marks the pipeline complete.
     std::array<std::array<ComPtr<ID3D11ComputeShader>,kGcPlaceClasses>,4> gc_stage_cs_;ComPtr<ID3D11ComputeShader> gc_place_cs_;
@@ -2697,10 +2724,10 @@ private:
     // pixel (procedural, bark, stone, snow pile Low, snow pile); each mesh's
     // kind from the materials of its rules. gcPrepCS (active, neighbour)
     // writes the per-frame draw inputs per pool slot (fog, cloud, wind).
-    std::array<ComPtr<ID3D11VertexShader>,4> gc_vs_;std::array<ComPtr<ID3D11PixelShader>,48> gc_ps_;
+    std::array<ComPtr<ID3D11VertexShader>,4> gc_vs_;std::array<ComPtr<ID3D11PixelShader>,60> gc_ps_;
     std::array<ComPtr<ID3D11ComputeShader>,8> gc_prep_cs_;
     // Depth prepass permutations (cover, snow pile): the material programs' placement, alpha test only.
-    std::array<ComPtr<ID3D11VertexShader>,3> gc_depth_vs_;std::array<ComPtr<ID3D11PixelShader>,2> gc_depth_ps_;
+    std::array<ComPtr<ID3D11VertexShader>,4> gc_depth_vs_;std::array<ComPtr<ID3D11PixelShader>,3> gc_depth_ps_;
     ComPtr<ID3D11Buffer> gc_draw_inputs_;ComPtr<ID3D11ShaderResourceView> gc_draw_input_srv_;ComPtr<ID3D11UnorderedAccessView> gc_draw_input_uav_;
     std::array<std::uint8_t,kGroundCoverMeshes> gc_mesh_kind_{};
     ComPtr<ID3D11VertexShader> gc_trail_vs_,gc_trail_full_vs_,gc_object_vs_;ComPtr<ID3D11PixelShader> gc_trail_ps_,gc_trail_decay_ps_,gc_object_ps_;

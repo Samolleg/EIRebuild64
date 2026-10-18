@@ -59,6 +59,7 @@ void Renderer::release_neighbour_maps() noexcept {
     dedicated_geometry_stale_=true; // their prebuilt pages go once unreferenced
     neighbour_border_fog_publish({});
     gc_neighbours_.clear(); // their ground cover goes with them
+    liquid_surf_neighbours_.clear();++liquid_surf_serial_; // and their surf
     // Their impostors: the atlas keeps its size and is baked over again.
     impostors_.slices.clear();impostors_.count=0;
 }
@@ -284,6 +285,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 }
                 // Ground cover inputs while the decoded map is still alive.
                 if(accepted)add_ground_cover_neighbour(*upload,map_placement,first_part+1);
+                if(accepted)add_liquid_surf_neighbour(*upload,map_placement);
                 neighbours_.geometry_bytes+=native_mesh_resident_bytes_-old_mesh;
                 neighbours_.texture_bytes+=native_owned_texture_bytes(false)+native_owned_texture_bytes(true)-old_texture;
                 native_texture_share_floor_=0;

@@ -1900,6 +1900,7 @@ bool validate_terrain_asset_descriptor_once(
             if (!animation_seen[ordinal]) return false;
     }
     flatten_liquid_rim(source);
+    owned_terrain_reset_liquid_outflow(source); // level river reaches, built on first use
     if (!build_terrain_render_envelopes(source)) return false;
     // Procedural falls: derived here, under the loading screen, before the
     // asset is shared (their sheets widen their host ranges' envelopes).

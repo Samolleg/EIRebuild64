@@ -28,6 +28,7 @@
 #include "ground_cover_cave.h"
 #include "ambient_occlusion.h"
 #include "ambient_terrain_grids.h"
+#include "liquid_surf.h"
 #include "neighbour_maps.h"
 #include "owned_asset_loader.h"
 #include "owned_terrain_decode.h"
@@ -1568,11 +1569,18 @@ GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  return o;
 }
 // Depth prepass: the same placement, only what the alpha test reads.
-struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;float2 uv:TEXCOORD3;nointerpolation uint mat:TEXCOORD7;
- nointerpolation float snowHeightScale:TEXCOORD10;};
+struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;nointerpolation float snowHeightScale:TEXCOORD10;
+#if GC_PS_KIND==4
+ float2 uv:TEXCOORD3; // strands: their alpha-cut edge (gcStrandClip)
+#endif
+};
 GcDepthOut gcDepthVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
- GcDepthOut o;o.p=f.p;o.wp=f.wp;o.uv=f.v.uv;o.mat=f.inst.extra.z&15u;o.snowHeightScale=f.scale*f.stretch.y;return o;
+ GcDepthOut o;o.p=f.p;o.wp=f.wp;o.snowHeightScale=f.scale*f.stretch.y;
+#if GC_PS_KIND==4
+ o.uv=f.v.uv;
+#endif
+ return o;
 }
 float3 gcRectSample(Texture2D t,float4 rect,float2 uv){
  return t.SampleGrad(gcWrap,rect.xy+frac(uv)*rect.zw,ddx(uv)*rect.zw,ddy(uv)*rect.zw).rgb;
@@ -1582,7 +1590,8 @@ struct GcPixel{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:S
 // Pixel permutations, chosen per draw from the mesh's rule materials:
 // GC_PS_KIND 0 procedural colour (plain, ground, wet, glow), 1 bark,
 // 2 stone, 3 snow pile (terrain lighting per pixel; NATIVE_LOW when no lamp
-// has a shadow slot this frame). Cover lamps come from the vertex stage.
+// has a shadow slot this frame), 4 painted strands (seagrass, beach wrack).
+// Cover lamps come from the vertex stage.
 #ifndef GC_PS_KIND
 #define GC_PS_KIND 0
 #endif
@@ -1639,24 +1648,8 @@ float gcPixelSunVisibility(GcOut i,float3 sun,float3 positionDx,float3 positionD
 }
 // The cover's alpha test, shared by the depth prepass and the material pass:
 // fragments over a prop's current footprint (dithered over its margin) and,
-// for the snow pile, buried fragments; for strands (mat 7, seagrass), their
-// wavy alpha-cut edge.
-// Strand blades (make_seagrass): uv.x across the blade, uv.y its height t
-// plus 2 per blade. The edge cuts in by a slow wave per blade, and only where
-// the blade is wide enough on screen to show it, so narrow and distant
-// blades never shimmer (pixels: blade width in pixels, from fwidth(uv.x)).
-float gcStrandT(float2 uv){return uv.y-2*floor(uv.y*.5);}
-float gcStrandPixels(float2 uv){return 1/max(fwidth(uv.x),1e-4);}
-void gcStrandClip(float2 uv,float pixels){
- const float t=gcStrandT(uv),blade=floor(uv.y*.5),across=abs(uv.x*2-1);
- const float wave=.5+.5*sin(t*23+blade*2.4)*sin(t*9.1+blade*5.3);
- clip(1-(.12+.22*wave)*saturate((pixels-3)*.2)-across);
-}
-void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale,float2 uv,uint mat){
-#if GC_PS_KIND==0
- const float strandPixels=gcStrandPixels(uv);
- [branch]if(mat==7u||mat==8u)gcStrandClip(uv,strandPixels);
-#endif
+// for the snow pile, buried fragments.
+void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale){
  // A surviving centre can still have blades or debris crossing a prop. Clip
  // their fragments against the same current footprint, including its margin.
  float blocked=gcObjectMask.SampleLevel(gcClamp,(wp.xy-gcObjectWindow.xy)*gcObjectWindow.zw,0);
@@ -1670,6 +1663,20 @@ void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale,float2 uv,uint mat
  clip(gcSnowCoverage(rise,snowHeightScale)-gcSnowDither(uint2(pixel)));
 #endif
 }
+#if GC_PS_KIND==4
+// Strands (kind 4: make_seagrass, make_kelp): uv.x across the blade, uv.y
+// its height t plus 2 per blade. Besides the cover's test, their wavy
+// alpha-cut edge: it cuts in by a slow wave per blade, and only where the
+// blade is wide enough on screen to show it, so narrow and distant blades
+// never shimmer (pixels: blade width in pixels, from fwidth(uv.x)).
+float gcStrandT(float2 uv){return uv.y-2*floor(uv.y*.5);}
+float gcStrandPixels(float2 uv){return 1/max(fwidth(uv.x),1e-4);}
+void gcStrandClip(float2 uv,float pixels){
+ const float t=gcStrandT(uv),blade=floor(uv.y*.5),across=abs(uv.x*2-1);
+ const float wave=.5+.5*sin(t*23+blade*2.4)*sin(t*9.1+blade*5.3);
+ clip(1-(.12+.22*wave)*saturate((pixels-3)*.2)-across);
+}
+#endif
 // The depth prepass writes the world's sun-shadow receiver record (renderer
 // resolve_world_shadow_mask, native_shader.h nativeShadowMaskPS): target 0
 // the rest (shadow-lookup) position minus the point reconstructed from the
@@ -1680,7 +1687,10 @@ void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale,float2 uv,uint mat
 float gcDepth24(float z){return round(saturate(z)*16777215.0)/16777215.0;}
 struct GcDepthResult{float4 rest:SV_Target0;float2 normal:SV_Target1;};
 GcDepthResult gcDepthPS(GcDepthOut i){
- gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.uv,i.mat);
+ gcCoverClip(i.wp,i.p.xy,i.snowHeightScale);
+#if GC_PS_KIND==4
+ gcStrandClip(i.uv,gcStrandPixels(i.uv));
+#endif
  float3 rest=i.wp;
 #if GC_PS_KIND!=3
  if(dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz)>1e-12)rest+=normalize(nativeWorldSunDirection.xyz)*.05;
@@ -1692,7 +1702,10 @@ GcDepthResult gcDepthPS(GcDepthOut i){
 }
 GcPixel gcPS(GcOut i){
  float3 positionDx=ddx(i.wp),positionDy=ddy(i.wp);
- gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.uv,i.mat&15u);
+ gcCoverClip(i.wp,i.p.xy,i.snowHeightScale);
+#if GC_PS_KIND==4
+ const float strandPixels=gcStrandPixels(i.uv);gcStrandClip(i.uv,strandPixels);
+#endif
  // Thin tufts keep no AO share: the horizon AO of their own blades is noise,
  // while the ground between them still darkens from the blades' depth.
  const bool thin=(i.mat&0x10000u)!=0;i.mat&=15u;
@@ -1729,7 +1742,12 @@ GcPixel gcPS(GcOut i){
   alb=tex*i.own.rgb*i.own.a;
  }
 #elif GC_PS_KIND==0
- const float strandPixels=gcStrandPixels(i.uv);
+ if(i.mat==4u||i.mat==5u){
+  // Slab fragments and stains use the painted cave tile art and its colour.
+  alb=lerp(alb,gcTerrainColor(i.wp.xy-gcOrigin.xy,0),.35);
+  if(i.mat==5u)alb*=.5;
+ }
+#elif GC_PS_KIND==4
  [branch]if(i.mat==7u){
   // Painted strand (EI's soft hand-painted foliage, not photographic): a pale
   // midrib, darker rims, faint long veins and soft banding along the blade,
@@ -1755,11 +1773,6 @@ GcPixel gcPS(GcOut i){
   alb=lerp(alb,alb*float3(1.6,1.5,1.25)+float3(.05,.04,.02),edge*(.25+.45*blotch)*(.5+.5*detail));
   alb*=1-.16*rib*detail;
   wrackSheen=rib*detail;
- }
- if(i.mat==4u||i.mat==5u){
-  // Slab fragments and stains use the painted cave tile art and its colour.
-  alb=lerp(alb,gcTerrainColor(i.wp.xy-gcOrigin.xy,0),.35);
-  if(i.mat==5u)alb*=.5;
  }
 #elif GC_PS_KIND==2
  if((uint(gcSwitches.w)&2u)!=0){ // the rock art of the placed stone props, triplanar
@@ -1819,6 +1832,7 @@ GcPixel gcPS(GcOut i){
  float3 c=alb*(saturate(max(nativeWorldAmbient.rgb,directional)+local)+glow);
  #if GC_PS_KIND==0
  if(i.mat==6u)c+=i.alb*float3(.08,.24,.17);
+ #elif GC_PS_KIND==4
  [branch]if(wrackSheen>0){ // the wet wrack midrib: a small, soft sun glint
   const float3 halfway=normalize(sun+normalize(gcEye.xyz-i.wp));
   c+=nativeWorldSunDiffuse.rgb*(visibility*.1*wrackSheen*pow(saturate(dot(n,halfway)),24));
@@ -2198,29 +2212,7 @@ HRESULT make_texture(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT 
 }
 UINT dispatch_groups(UINT count, UINT size) { return (count + size - 1) / size; }
 
-// Open-water tiles connected (4-neighbour) to the map edge, in components of at
-// least 2048 tiles (8192 m2): the sea. Lakes and rivers inside the map, and
-// small water bodies cut by the edge, are not.
-std::vector<std::uint8_t> ground_cover_sea_mask(const std::vector<std::uint8_t>& area, UINT width, UINT height) {
-    std::vector<std::uint8_t> mask(std::size_t(width) * height, 0);
-    if (area.size() != mask.size()) return mask;
-    std::vector<std::int32_t> label(mask.size(), -1), queue;
-    const auto water = [&](std::size_t i) { return (area[i] & 15u) == ambient::area_water; };
-    for (std::size_t start = 0; start < mask.size(); ++start) {
-        if (!water(start) || label[start] >= 0) continue;
-        queue.clear(); queue.push_back(std::int32_t(start)); label[start] = std::int32_t(start);
-        bool edge = false;
-        for (std::size_t head = 0; head < queue.size(); ++head) {
-            const UINT i = UINT(queue[head]), x = i % width, y = i / width;
-            edge |= x == 0 || y == 0 || x + 1 == width || y + 1 == height;
-            const UINT next[4]{x ? i - 1 : i, x + 1 < width ? i + 1 : i, y ? i - width : i, y + 1 < height ? i + width : i};
-            for (const UINT n : next)
-                if (water(n) && label[n] < 0) { label[n] = std::int32_t(start); queue.push_back(std::int32_t(n)); }
-        }
-        if (edge && queue.size() >= 2048) for (const auto i : queue) mask[std::size_t(i)] = 255;
-    }
-    return mask;
-}
+// The sea mask (ground_cover_sea_mask) lives in liquid_surf.h, shared with the sea surf field.
 
 HRESULT make_sea_srv(ID3D11Device* device, const std::vector<std::uint8_t>& area, UINT tiles_x, UINT tiles_y,
                      ComPtr<ID3D11ShaderResourceView>& srv) {
@@ -2386,6 +2378,17 @@ std::shared_ptr<GroundCoverNeighbourInputs> prepare_ground_cover_neighbour_input
     return inputs;
 } catch (...) { return nullptr; }
 
+std::shared_ptr<const LiquidSurfField> prepare_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::string& no_sea_maps) noexcept try {
+    const auto& inputs = upload.ground_cover_inputs;
+    if (!inputs || !inputs->grids_valid) return nullptr;
+    auto field = std::make_shared<LiquidSurfField>(
+        build_liquid_surf_field(inputs->grids.area, inputs->grids.level.liquid_area, inputs->grids.height,
+                                inputs->grids.ground, inputs->grids.tiles_x, inputs->grids.tiles_y,
+                                liquid_surf_map_takes_sea(upload.selection.placement.mpr,no_sea_maps)));
+    if (field->texels.empty()) return nullptr;
+    return field;
+} catch (...) { return nullptr; }
+
 // One production source for asynchronous pipeline compilation and shader checks.
 const std::string& owned_ground_cover_shader_source(){
     static const std::string source=
@@ -2407,9 +2410,10 @@ enum GcProgram : unsigned {
     gp_ps = gp_vs + 4,            // 30: [(kind * 5 + sun state) * 2 + ambient occlusion]
     gp_ps_snow = gp_ps + 30,      // 8: [(sun * 2 + point shadows) * 2 + snow trails]
     gp_ps_masked = gp_ps_snow + 8, // 10: cover [kind * 2 + ambient occlusion], snow pile [point shadows * 2 + snow trails]
-    gp_depth_vs = gp_ps_masked + 10, // 3: cover, snow pile without / with trails
-    gp_depth_ps = gp_depth_vs + 3, // 2: cover, snow pile
-    gp_trail_vs = gp_depth_ps + 2, gp_trail_ps, gp_trail_full_vs, gp_trail_decay_ps, gp_object_vs, gp_object_ps,
+    gp_ps_strand = gp_ps_masked + 10, // 12: strands [sun state * 2 + ambient occlusion], then masked [ambient occlusion]
+    gp_depth_vs = gp_ps_strand + 12, // 4: cover, snow pile without / with trails, strands
+    gp_depth_ps = gp_depth_vs + 4, // 3: cover, snow pile, strands
+    gp_trail_vs = gp_depth_ps + 3, gp_trail_ps, gp_trail_full_vs, gp_trail_decay_ps, gp_object_vs, gp_object_ps,
     gp_snow_stamp_vs, gp_snow_stamp_ps, gp_snow_recover_ps, gp_snow_tile_vs, gp_count};
 // The placement shader's per-rule features (its GC_F_* guards).
 enum PlaceFeature : unsigned { pf_edge = 1, pf_cluster = 2, pf_far = 4, pf_trail = 8, pf_pal1 = 16, pf_pal23 = 32,
@@ -2445,9 +2449,9 @@ unsigned place_features(const GroundCoverRule& r) {
     return f;
 }
 // Pixel material kinds (GC_PS_KIND): procedural colour (plain, ground, wet,
-// glow), bark, stone, snow pile.
-constexpr unsigned kPixelKindMaterials[4] = {(1u << mat_plain) | (1u << mat_ground) | (1u << mat_wet) | (1u << mat_glow) | (1u << mat_strand) | (1u << mat_wrack),
-                                             1u << mat_bark, 1u << mat_stone, 1u << mat_snow};
+// glow), bark, stone, snow pile, painted strands.
+constexpr unsigned kPixelKindMaterials[5] = {(1u << mat_plain) | (1u << mat_ground) | (1u << mat_wet) | (1u << mat_glow),
+                                             1u << mat_bark, 1u << mat_stone, 1u << mat_snow, (1u << mat_strand) | (1u << mat_wrack)};
 } // namespace
 
 // Order is the pipeline's blob order in ensure_ground_cover_pipeline (GcProgram).
@@ -2507,12 +2511,23 @@ void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
         else add("gcPS", "ps_5_0", list({{"GC_POINT_SHADOW_RECEIVER", "1"}, {"GC_PS_KIND", "3"}, {"GC_SUN_MASK", "1"}, {"GC_SUN", "0"},
                                         {"GC_SNOW_TRAILS", digit[trails]}, {"NATIVE_LOW", "1"}}));
     }
+    // Painted strands: their own kind, so no other cover pays for their edge and paint.
+    for (unsigned sun = 0; sun < 5; ++sun) for (unsigned ao = 0; ao < 2; ++ao) {
+        const unsigned soft = sun >= 3 ? 1 : 0, far_maps = sun ? (sun - 1) & 1 : 0;
+        add("gcPS", "ps_5_0", list({{"GC_POINT_SHADOW_RECEIVER", "1"}, {"GC_PS_KIND", "4"}, {"GC_SUN", digit[sun ? 1 : 0]},
+                                    {"GC_SUN_SOFT", digit[soft]}, {"GC_SUN_FAR", digit[far_maps]}, {"GC_AO", digit[ao]}}));
+    }
+    for (unsigned ao = 0; ao < 2; ++ao)
+        add("gcPS", "ps_5_0", list({{"GC_POINT_SHADOW_RECEIVER", "1"}, {"GC_PS_KIND", "4"}, {"GC_SUN_MASK", "1"},
+                                    {"GC_SUN", "0"}, {"GC_AO", digit[ao]}}));
     // Depth prepass (alpha test only): the material programs' placement and clip.
     add("gcDepthVS", "vs_5_0", list({{"GC_VS", "1"}}));
     for (unsigned trails = 0; trails < 2; ++trails)
         add("gcDepthVS", "vs_5_0", list({{"GC_VS", "1"}, {"GC_VS_SNOW", "1"}, {"GC_SNOW_TRAILS", digit[trails]}}));
+    add("gcDepthVS", "vs_5_0", list({{"GC_VS", "1"}, {"GC_PS_KIND", "4"}}));
     add("gcDepthPS", "ps_5_0", list({{"GC_POINT_SHADOW_RECEIVER", "1"}, {"GC_PS_KIND", "0"}}));
     add("gcDepthPS", "ps_5_0", list({{"GC_POINT_SHADOW_RECEIVER", "1"}, {"GC_PS_KIND", "3"}}));
+    add("gcDepthPS", "ps_5_0", list({{"GC_POINT_SHADOW_RECEIVER", "1"}, {"GC_PS_KIND", "4"}}));
     add("gcTrailVS", "vs_5_0", nullptr); add("gcTrailPS", "ps_5_0", nullptr); add("gcTrailFullVS", "vs_5_0", nullptr);
     add("gcTrailDecayPS", "ps_5_0", nullptr); add("gcObjectVS", "vs_5_0", nullptr); add("gcObjectPS", "ps_5_0", nullptr);
     add("gcSnowStampVS", "vs_5_0", nullptr); add("gcSnowStampPS", "ps_5_0", nullptr); add("gcSnowRecoverPS", "ps_5_0", nullptr);
@@ -4462,10 +4477,10 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         context_->VSSetShader(gc_vs_[kind == 3 ? 2 + trails : point_shadows ? 1 : 0].Get(), nullptr, 0);
         if (masked && !neighbour)
             context_->PSSetShader(kind == 3 ? gc_ps_[44 + (point_shadows ? 2u : 0u) + trails].Get()
-                                            : gc_ps_[38 + kind * 2 + (write_ambient ? 1u : 0u)].Get(), nullptr, 0);
+                                            : gc_ps_[(kind == 4 ? 58 : 38 + kind * 2) + (write_ambient ? 1u : 0u)].Get(), nullptr, 0);
         else
             context_->PSSetShader(kind == 3 ? gc_ps_[30 + ((sun_on ? 2u : 0u) + (point_shadows ? 1u : 0u)) * 2 + trails].Get()
-                                            : gc_ps_[(kind * 5 + sun_state) * 2 + (write_ambient ? 1u : 0u)].Get(), nullptr, 0);
+                                            : gc_ps_[((kind == 4 ? 24 : kind * 5) + sun_state) * 2 + (write_ambient ? 1u : 0u)].Get(), nullptr, 0);
     };
     bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
     context_->VSSetConstantBuffers(11, 1, gc_frame_constants_.GetAddressOf());
@@ -4566,9 +4581,9 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         context_->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
         for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
             if (!gc_capacity_[mesh]) continue;
-            const bool snow = gc_mesh_kind_[mesh] == 3;
-            context_->VSSetShader(gc_depth_vs_[snow ? 1u + (snow_trails ? 1u : 0u) : 0u].Get(), nullptr, 0);
-            context_->PSSetShader(gc_depth_ps_[snow ? 1 : 0].Get(), nullptr, 0);
+            const bool snow = gc_mesh_kind_[mesh] == 3, strand = gc_mesh_kind_[mesh] == 4;
+            context_->VSSetShader(gc_depth_vs_[snow ? 1u + (snow_trails ? 1u : 0u) : strand ? 3u : 0u].Get(), nullptr, 0);
+            context_->PSSetShader(gc_depth_ps_[snow ? 1 : strand ? 2 : 0].Get(), nullptr, 0);
             context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
             context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
             context_->DrawIndexedInstancedIndirect(gc_args_.Get(), mesh * 20u);

@@ -24,27 +24,48 @@ struct LiquidMapLevels {
 
 inline LiquidMapLevels generate_liquid_map_levels() {
  LiquidMapLevels out;
- constexpr unsigned size=LiquidMapLevels::normal_size;constexpr int wave_count=40;
- struct Wave{float kx,ky,amplitude,phase;};
- std::array<Wave,wave_count> waves{};
+ constexpr unsigned size=LiquidMapLevels::normal_size;
+ // Ripple spectrum: every integer wave vector with 2..24 cycles per tile
+ // (seamless), a random phase and a Rayleigh amplitude each (a Gaussian
+ // field, so no single wave stands out), slope falling with frequency and a
+ // mild bias toward the tile's X axis. 40 waves at 1..12 cycles, rounded to
+ // integer vectors, snapped most of them onto a few directions, several
+ // onto (1,0) itself: every tile carried straight tile-wide bands that read
+ // as banding on open water (save1146, Gipat south-west sea).
+ constexpr int k_min=2,k_max=24;
  std::uint32_t state=0x9E3779B9u;
- const auto next=[&](){state=state*1664525u+1013904223u;return float(state>>8)*(1.0f/16777216.0f);};
- // Swell-like spectrum: low integer frequencies (seamless), directions spread
- // around the tile's +X axis, and slope falling with frequency so broad waves
- // dominate instead of a fine carpet of noise.
- for(auto& wave:waves){
-  const float frequency=1.0f+11.0f*next()*next(),angle=2.2f*(next()-.5f)+(next()<.2f?3.14159265f:0.f);
-  wave.kx=std::round(std::cos(angle)*frequency);wave.ky=std::round(std::sin(angle)*frequency);
-  if(wave.kx==0&&wave.ky==0)wave.kx=1;
-  const float length=std::sqrt(wave.kx*wave.kx+wave.ky*wave.ky);
-  wave.amplitude=1.0f/std::pow(length,2.2f);wave.phase=6.2831853f*next();
+ const auto next=[&](){state=state*1664525u+1013904223u;return (float(state>>8)+.5f)*(1.0f/16777216.0f);};
+ // Separable sum: per kx, the ky waves' cos/sin over v, then over u.
+ std::vector<float> cos_u(size),sin_u(size);
+ std::vector<std::array<float,2>> slopes(size*size,{0.f,0.f});double energy=0;
+ std::vector<float> c1(size),s1(size),c2(size),s2(size);
+ for(int kx=0;kx<=k_max;++kx){
+  std::fill(c1.begin(),c1.end(),0.f);std::fill(s1.begin(),s1.end(),0.f);
+  std::fill(c2.begin(),c2.end(),0.f);std::fill(s2.begin(),s2.end(),0.f);
+  bool any=false;
+  for(int ky=-k_max;ky<=k_max;++ky){
+   if(kx==0&&ky<=0)continue; // one of each +-k pair
+   const float k=std::sqrt(float(kx*kx+ky*ky));
+   if(k<k_min||k>k_max)continue;
+   const float along=float(kx)/k;
+   const float amplitude=std::pow(k,-2.7f)*(.55f+.45f*along*along)*std::sqrt(-2.f*std::log(next()))*
+                         (std::min)(1.f,(k_max-k)/6.f+.05f);
+   const float phase=6.2831853f*next();
+   for(unsigned v=0;v<size;++v){
+    const float a=6.2831853f*float(ky)*float(v)/float(size)+phase;
+    const float c=std::cos(a)*amplitude,s=std::sin(a)*amplitude;
+    c1[v]+=c*float(kx);s1[v]+=s*float(kx);c2[v]+=c*float(ky);s2[v]+=s*float(ky);
+   }
+   any=true;
+  }
+  if(!any)continue;
+  for(unsigned u=0;u<size;++u){const float a=6.2831853f*float(kx)*float(u)/float(size);cos_u[u]=std::cos(a);sin_u[u]=std::sin(a);}
+  for(unsigned v=0;v<size;++v)for(unsigned u=0;u<size;++u){
+   auto& slope=slopes[v*size+u];
+   slope[0]+=c1[v]*cos_u[u]-s1[v]*sin_u[u];slope[1]+=c2[v]*cos_u[u]-s2[v]*sin_u[u];
+  }
  }
- std::vector<std::array<float,2>> slopes(size*size);double energy=0;
- for(unsigned y=0;y<size;++y)for(unsigned x=0;x<size;++x){
-  float dx=0,dy=0;const float u=6.2831853f*x/size,v=6.2831853f*y/size;
-  for(const auto& wave:waves){const float c=std::cos(wave.kx*u+wave.ky*v+wave.phase)*wave.amplitude;dx+=c*wave.kx;dy+=c*wave.ky;}
-  slopes[y*size+x]={dx,dy};energy+=double(dx)*dx+double(dy)*dy;
- }
+ for(const auto& slope:slopes)energy+=double(slope[0])*slope[0]+double(slope[1])*slope[1];
  constexpr float target_rms_slope=.3f;
  const float scale=target_rms_slope/float(std::sqrt((std::max)(energy/(size*size),1e-12)));
  out.normals.resize(size*size);

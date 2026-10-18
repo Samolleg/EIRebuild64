@@ -69,7 +69,7 @@ enum Palette : std::uint32_t { pal_none = 0, pal_flower, pal_leaf, pal_stone };
 // Material art in the pixel shader: procedural colour, the game's tree bark /
 // end grain, the placed stone props' rock art, snow pile.
 enum Material : std::uint32_t { mat_plain = 0, mat_bark, mat_stone, mat_snow, mat_ground, mat_wet, mat_glow,
-    mat_strand, mat_wrack }; // painted, alpha-cut strands (procedural, kind 0): seagrass; beach wrack
+    mat_strand, mat_wrack }; // painted, alpha-cut strands (procedural, own pixel kind 4): seagrass; beach wrack
 
 // The decoded loader keys are ASCII-folded. Both base and HD packs preserve
 // these square atlas layouts; normalized crops do not depend on pixel size.

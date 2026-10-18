@@ -2,8 +2,8 @@
 
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
-This is the EIRebuild embedded integration, based on candidate-73 (`e9d58be5983c48c94a6adc4c5f5b821bd1fa7f1c`) with local
-integration changes in branch `eirebuild/c73-embed`, commit `5f30d3563e361380735a5448f36840f4338308b1`.
+This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
+integration changes in branch `eirebuild/c74-embed`, commit `203547bf0e2268721abf20975fb005121b7c99cb`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -23,3 +23,9 @@ by the EIRebuild repository. To update from upstream, compare against the source
 baseline, integrate deliberately with the host adapter, and update this record.
 Do not replace this directory with an upstream checkout without carrying forward
 the embedded interface and accepted integration changes.
+
+RUPD74 merges candidate-74 into embedded RUPD73B revision 5f30d3563e361380735a5448f36840f4338308b1.
+Sea surf, level river outflow, water shading, snow trail shadows and painted-strand
+pixel kinds follow candidate-74. The typed host interface, normalized wave glint,
+world retirement, precipitation and progress movie ownership remain embedded.
+Russian F10 labels include the upstream maps-without-sea setting.

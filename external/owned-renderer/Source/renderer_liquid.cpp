@@ -5,11 +5,17 @@
 #include "liquid_surface_shader.h"
 #include "liquid_maps.h"
 #include "liquid_waves.h"
+#include "liquid_surf.h"
 #include "renderer.h"
 #include "engine_bridge.h"
+#include "neighbour_maps.h"
 #include "owned_asset_loader.h"
+#include "worker_priority.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <chrono>
+#include <climits>
+#include <future>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -324,6 +330,36 @@ void Renderer::prepare_liquid_ripples() {
   // rain x strength), outdoors only.
   const float rain=environment.valid&&!environment.cave?precipitation_rain_visible_:0.f;
   values.meta[3]=configured_boolean(debug_overlay_.config(),"water_physical",true)?rain:0.f;
+  update_liquid_surf();
+  values.surf_window=liquid_surf_window_;
+  values.surf_mode={liquid_surf_srv_?1.f:0.f,
+                    float(std::clamp(configured_integer(debug_overlay_.config(),"water_surf_debug",0),0,3)+
+                          4*std::clamp(configured_integer(debug_overlay_.config(),"water_surf_quality",2),0,2)), // debug + 4 * quality
+                    // half a texel in uv (.5/side): with 2 m texels the window's 1/extent
+                    liquid_surf_window_[2],liquid_surf_window_[3]};
+  {
+   const auto& config=debug_overlay_.config();
+   const auto value=[&](const char* key,float fallback,float low,float high){return std::clamp(configured_floating_point(config,key,fallback),low,high);};
+   values.surf_wave={value("water_surf_wave_height",.6f,0.f,2.f),value("water_surf_wavelength",9.f,2.f,30.f),
+                     value("water_surf_speed",1.2f,.1f,4.f),value("water_surf_choppiness",2.5f,1.f,6.f)};
+   values.surf_shape={float(std::clamp(configured_integer(config,"water_surf_octaves",4),1,6)),value("water_surf_segment",18.f,4.f,60.f),
+                      value("water_surf_randomness",.75f,0.f,1.f),value("water_surf_chop_height",.25f,0.f,1.f)};
+   values.surf_foam={value("water_surf_shore_foam",1.f,0.f,2.f),value("water_surf_shore_width",.6f,.05f,1.5f),
+                     value("water_surf_crest_foam",.95f,.6f,1.f),value("water_surf_foam_cell",1.6f,.3f,4.f)};
+   values.surf_look={value("water_surf_shallow_tint",.7f,0.f,1.f),value("water_surf_absorption",1.f,0.f,3.f),
+                     value("water_surf_cliff_burst",1.f,0.f,3.f),liquid_surf_fade_};
+   values.surf_swell=liquid_surf_swell_;
+   // Wind: the renderer wind (weather_wind.h: the map's force times calm,
+   // windy and storm spells, smooth in game time) raises and lowers the
+   // swell and chop gradually and brings whitecaps on (swell w, 0..1). A
+   // typical map wind (~.3) keeps the configured height; calm ~.7x, storms
+   // up to 1.8x.
+   const float drive=weather_wind_.gpu.force*weather_wind_.gpu.speed;
+   const float scale=std::clamp(.5f+1.6f*drive,.5f,1.8f);
+   values.surf_wave[0]*=scale;values.surf_shape[3]*=scale;
+   values.surf_foam[2]=std::clamp(1.f-(1.f-values.surf_foam[2])*scale,.6f,1.f);
+   values.surf_swell[3]=std::clamp((drive-.2f)/.8f,0.f,1.f);
+  }
   if(available){step_liquid_waves(values,seconds);ease_liquid_units(values,seconds);}
   liquid_ripple_values_=values;++liquid_ripple_values_serial_;
   for(unsigned u=0;u<16u;++u)liquid_unit_reach_[u]=liquid_unit_reach(values,u);
@@ -347,7 +383,168 @@ void Renderer::prepare_liquid_ripples() {
  ID3D11Buffer* buffer=liquid_ripple_ready_?liquid_ripple_constants_.Get():nullptr;
  context_->PSSetConstantBuffers(8,1,&buffer);
  context_->PSSetShaderResources(24,1,liquid_wave_srv_[liquid_wave_current_].GetAddressOf());
+ context_->PSSetShaderResources(62,1,liquid_surf_srv_.GetAddressOf());
+ context_->PSSetShaderResources(63,1,liquid_surf_level_srv_.GetAddressOf()); // its sea level and shore impact (cliff bursts, beach run-up)
+ // The terrain tess stages read the surf field and its window too (sea surf
+ // wave height on tessellated water; nativeTessVS, nativeTerrainDomain).
+ context_->VSSetConstantBuffers(8,1,&buffer);context_->DSSetConstantBuffers(8,1,&buffer);
+ context_->VSSetShaderResources(62,1,liquid_surf_srv_.GetAddressOf());context_->DSSetShaderResources(62,1,liquid_surf_srv_.GetAddressOf());
+ context_->DSSetShaderResources(63,1,liquid_surf_level_srv_.GetAddressOf()); // the wave height fades at steep shores
 }
+
+// Sea surf (liquid_surf.h): adopt the active map's field when its worker is
+// done (starting it once the map's area grid exists), and composite the
+// active and neighbour fields that have surf into one world-space texture
+// whenever that set changes. Pieces are placed at whole tiles; the active
+// map is written last, so it wins where pieces overlap.
+void Renderer::update_liquid_surf() noexcept try {
+ neighbour_maps_set_no_sea_maps(liquid_surf_no_sea_maps());
+ if(liquid_surf_job_.valid()&&liquid_surf_job_.wait_for(std::chrono::seconds(0))==std::future_status::ready){
+  auto field=liquid_surf_job_.get();
+  if(field&&liquid_surf_generation_==ambient_map_generation_){
+   liquid_surf_active_=std::move(field);++liquid_surf_serial_;
+   const auto& s=liquid_surf_active_->impact_spots;
+   char line[400];std::snprintf(line,sizeof(line),"active map: %u tiles with surf, max effective fetch %.0f m (%ux%u tiles); "
+    "steep-shore spots x,y,score,incoming_deg: %.0f,%.0f,%.2f,%.0f | %.0f,%.0f,%.2f,%.0f | %.0f,%.0f,%.2f,%.0f",
+    liquid_surf_active_->surf_cells,liquid_surf_active_->max_exposure,liquid_surf_active_->tiles_x,liquid_surf_active_->tiles_y,
+    s[0][0],s[0][1],s[0][2],s[0][3],s[1][0],s[1][1],s[1][2],s[1][3],s[2][0],s[2][1],s[2][2],s[2][3]);
+   bridge_report_event("water_surf",line);
+  }
+ }
+ if(!liquid_surf_job_.valid()&&liquid_surf_generation_!=ambient_map_generation_&&!ambient_terrain_.expired()&&
+    ambient_tiles_x_&&ambient_tiles_y_&&ambient_area_.size()==std::size_t(ambient_tiles_x_)*ambient_tiles_y_){
+  liquid_surf_generation_=ambient_map_generation_;
+  if(liquid_surf_active_){liquid_surf_active_.reset();++liquid_surf_serial_;}
+  liquid_surf_job_=std::async(std::launch::async,[area=ambient_area_,liquid=ambient_liquid_level_.liquid_area,height=ambient_height_,ground=ambient_liquid_level_.ground,
+                                                     x=ambient_tiles_x_,y=ambient_tiles_y_,sea=liquid_surf_map_takes_sea(ambient_map_name_,liquid_surf_no_sea_maps())]()->std::shared_ptr<const LiquidSurfField>{
+   const BackgroundWorkerPriority priority;
+   try{return std::make_shared<LiquidSurfField>(build_liquid_surf_field(area,liquid,height,ground,x,y,sea));}catch(...){return nullptr;}
+  });
+ }
+ const float fade=std::clamp(configured_floating_point(debug_overlay_.config(),"water_surf_edge_fade",40.f),0.f,120.f);
+ if(fade!=liquid_surf_fade_){liquid_surf_fade_=fade;++liquid_surf_serial_;} // the composite carries the edge fade
+ if(liquid_surf_built_serial_==liquid_surf_serial_||!device_)return;
+ liquid_surf_built_serial_=liquid_surf_serial_;
+ liquid_surf_srv_.Reset();liquid_surf_level_srv_.Reset();liquid_surf_window_={};liquid_surf_swell_={};
+ struct Piece{long x,y;const LiquidSurfField* field;};
+ std::vector<Piece> pieces;
+ for(const auto& n:liquid_surf_neighbours_)
+  pieces.push_back({std::lround(n.origin[0]*.5f),std::lround(n.origin[1]*.5f),n.field.get()});
+ if(liquid_surf_active_&&liquid_surf_active_->surf_cells)pieces.push_back({0,0,liquid_surf_active_.get()});
+ if(pieces.empty())return;
+ long x0=LONG_MAX,y0=LONG_MAX,x1=LONG_MIN,y1=LONG_MIN;
+ for(const auto& p:pieces){
+  x0=std::min(x0,p.x);y0=std::min(y0,p.y);
+  x1=std::max(x1,p.x+long(p.field->tiles_x));y1=std::max(y1,p.y+long(p.field->tiles_y));
+ }
+ const long width=x1-x0,height=y1-y0;
+ if(width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION){
+  bridge_report_event("water_surf","omitted: the maps with surf span more than the largest texture side");
+  return;
+ }
+ std::vector<std::array<std::uint8_t,4>> texels(std::size_t(width)*height,std::array<std::uint8_t,4>{0,128,128,255});
+ // t63: sea level, shore impact, smooth swell distance (m), smooth depth (m) (liquid_surf.h).
+ std::vector<std::array<float,4>> levels(std::size_t(width)*height,std::array<float,4>{liquidSurfNoLevel,0.f,liquidSurfSwellReach,0.f});
+ std::vector<std::uint8_t> covered(std::size_t(width)*height,0);
+ for(const auto& p:pieces)
+  for(std::uint32_t y=0;y<p.field->tiles_y;++y)for(std::uint32_t x=0;x<p.field->tiles_x;++x){
+   const std::size_t source=std::size_t(y)*p.field->tiles_x+x,target=std::size_t(p.y-y0+long(y))*width+std::size_t(p.x-x0+long(x));
+   covered[target]=1;
+   if(p.field->level[source]!=liquidSurfNoLevel){levels[target][0]=p.field->level[source];levels[target][1]=p.field->impact[source];}
+   if(p.field->swell_distance.size()==p.field->texels.size()){levels[target][2]=p.field->swell_distance[source];levels[target][3]=p.field->swell_depth[source];}
+   const auto& t=p.field->texels[source];
+   if(t[0]==0)continue; // no surf: the default texel reads the same
+   texels[target]=t;
+  }
+ // One regional swell direction: the exposure-weighted mean of the coastal
+ // band's incoming directions (open water toward the shores). Its length is
+ // how well they agree; where they agree (not an island map, directions all
+ // round) all water of the map drifts its ripples this way.
+ {
+  double sx=0,sy=0,sw=0;
+  for(const auto& t:texels){
+   if(!t[0])continue;
+   const double dx=t[1]/127.5-1,dy=t[2]/127.5-1,l=std::sqrt(dx*dx+dy*dy);
+   if(l<.3)continue; // out at sea: no direction
+   const double w=t[0]/255.0;sx+=w*dx/l;sy+=w*dy/l;sw+=w;
+  }
+  const double l=std::sqrt(sx*sx+sy*sy);
+  liquid_surf_swell_=sw>0&&l>1e-6?std::array<float,4>{float(sx/l),float(sy/l),float(std::clamp(l/sw,0.0,1.0)),0.f}:std::array<float,4>{};
+ }
+ // Where the sea runs off the covered maps (a map edge with no surf field
+ // beyond it, or the texture's edge), the surf fades to none over
+ // water_surf_edge_fade metres instead of stopping at a line: chamfer
+ // distance (2 m texels) from the covered texels touching the uncovered.
+ if(liquid_surf_fade_>0){
+  const std::size_t count=texels.size();
+  std::vector<float> distance(count,1e9f);
+  for(long y=0;y<height;++y)for(long x=0;x<width;++x){
+   const std::size_t i=std::size_t(y)*width+x;
+   if(!covered[i])continue;
+   if(x==0||y==0||x+1==width||y+1==height||!covered[i-1]||!covered[i+1]||!covered[i-width]||!covered[i+width])distance[i]=0;
+  }
+  const float diagonal=1.41421356f;
+  for(long y=0;y<height;++y)for(long x=0;x<width;++x){
+   float& d=distance[std::size_t(y)*width+x];
+   if(x)d=std::min(d,distance[std::size_t(y)*width+x-1]+1);
+   if(y){
+    d=std::min(d,distance[std::size_t(y-1)*width+x]+1);
+    if(x)d=std::min(d,distance[std::size_t(y-1)*width+x-1]+diagonal);
+    if(x+1<width)d=std::min(d,distance[std::size_t(y-1)*width+x+1]+diagonal);
+   }
+  }
+  for(long y=height-1;y>=0;--y)for(long x=width-1;x>=0;--x){
+   float& d=distance[std::size_t(y)*width+x];
+   if(x+1<width)d=std::min(d,distance[std::size_t(y)*width+x+1]+1);
+   if(y+1<height){
+    d=std::min(d,distance[std::size_t(y+1)*width+x]+1);
+    if(x+1<width)d=std::min(d,distance[std::size_t(y+1)*width+x+1]+diagonal);
+    if(x)d=std::min(d,distance[std::size_t(y+1)*width+x-1]+diagonal);
+   }
+  }
+  for(std::size_t i=0;i<count;++i){
+   if(!texels[i][0])continue;
+   const float t=std::clamp(distance[i]*2.f/liquid_surf_fade_,0.f,1.f);
+   texels[i][0]=static_cast<std::uint8_t>(std::lround(texels[i][0]*t*t*(3-2*t)));
+  }
+ }
+ D3D11_TEXTURE2D_DESC desc{};desc.Width=UINT(width);desc.Height=UINT(height);desc.MipLevels=desc.ArraySize=1;
+ desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+ const D3D11_SUBRESOURCE_DATA data{texels.data(),UINT(width)*4u,0};
+ D3D11_TEXTURE2D_DESC levelDesc=desc;levelDesc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+ const D3D11_SUBRESOURCE_DATA levelData{levels.data(),UINT(width)*16u,0};
+ ComPtr<ID3D11Texture2D> texture,levelTexture;
+ if(FAILED(device_->CreateTexture2D(&desc,&data,&texture))||FAILED(device_->CreateShaderResourceView(texture.Get(),nullptr,&liquid_surf_srv_))||
+    FAILED(device_->CreateTexture2D(&levelDesc,&levelData,&levelTexture))||FAILED(device_->CreateShaderResourceView(levelTexture.Get(),nullptr,&liquid_surf_level_srv_))){
+  liquid_surf_srv_.Reset();liquid_surf_level_srv_.Reset();
+  bridge_report_event("water_surf","omitted: texture unavailable; water shows no surf");
+  return;
+ }
+ liquid_surf_window_={float(x0)*2.f,float(y0)*2.f,.5f/float(width),.5f/float(height)};
+} catch(const std::bad_alloc&) {
+ liquid_surf_srv_.Reset();liquid_surf_level_srv_.Reset();liquid_surf_window_={};liquid_surf_swell_={};
+ bridge_report_event("water_surf","omitted: CPU allocation failed; water shows no surf");
+}
+
+void Renderer::add_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::array<float,16>& active_to_world) noexcept try {
+ const auto& field=upload.liquid_surf;
+ if(!field)return; // no water (or no grids): nothing to say
+ std::array<float,3> origin{};
+ char line[400];
+ if(!ground_cover::neighbour_cover_origin(active_to_world,upload.selection.x,upload.selection.y,origin)){
+  std::snprintf(line,sizeof(line),"map=%s water_surf=omitted reason=placement_not_translation",upload.selection.placement.mpr.c_str());
+  bridge_neighbour_diagnostic(line);return;
+ }
+ const auto& s=field->impact_spots;
+ std::snprintf(line,sizeof(line),"map=%s water_surf tiles=%u max_effective_fetch=%.0fm steep_spots_world=%.0f,%.0f,%.2f,%.0f|%.0f,%.0f,%.2f,%.0f|%.0f,%.0f,%.2f,%.0f",
+  upload.selection.placement.mpr.c_str(),field->surf_cells,field->max_exposure,
+  s[0][0]+origin[0],s[0][1]+origin[1],s[0][2],s[0][3],s[1][0]+origin[0],s[1][1]+origin[1],s[1][2],s[1][3],s[2][0]+origin[0],s[2][1]+origin[1],s[2][2],s[2][3]);
+ bridge_neighbour_diagnostic(line);
+ if(!field->surf_cells)return;
+ liquid_surf_neighbours_.push_back({{origin[0],origin[1]},upload.selection.placement.mpr,field});
+ ++liquid_surf_serial_;
+} catch(...) {}
+
 void Renderer::reset_water_reflections() noexcept {
  clear_water_reflection_bindings();
  water_scene_srv_.Reset();water_history_srv_.Reset();water_scene_color_.Reset();water_scene_depth_srv_.Reset();water_scene_depth_.Reset();

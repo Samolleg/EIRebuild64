@@ -447,6 +447,7 @@ struct TerrainTexturePage {
 // an above-terrain offset; this source-owned surface supplies its authoritative
 // ground height without consulting live object pointers or legacy Draw.
 struct ProceduralFallMap; // procedural_falls.h
+struct TerrainLiquidOutflow; // owned_terrain_front_end.h
 
 // Visible liquid surface heights of an adjoining map just beyond a terrain's
 // edges (rest heights; NaN where it has none), in this terrain's vertex grid:
@@ -507,6 +508,11 @@ struct TerrainCpuAsset {
     // derived once from this immutable asset on first use.
     mutable std::shared_ptr<const ProceduralFallMap> procedural_falls;
     TerrainOutsideLiquid outside_liquid;
+    // River flow of level liquid reaches, built on first use from the liquid
+    // surface then shown (owned_terrain_liquid_outflow); created with the
+    // descriptor, reset when a neighbour's seam is set. Added to
+    // OwnedLiquidFlow::current.
+    std::shared_ptr<TerrainLiquidOutflow> liquid_outflow;
     std::uint32_t immutable_descriptor_validation_count = 0;
 #ifdef EID3D11_TESTING
     // Decode-boundary proof only; absent from production builds.

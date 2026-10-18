@@ -128,6 +128,9 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"water_physical", kCategories[3], "Realistic water",
      "Refraction, depth colour and sun glints on water. Needs water reflections.",
      nullptr, true, {0, 0, 1, 1}},
+    {"water_surf_quality", kCategories[3], "Sea surf detail",
+     "Breaking waves and foam on exposed sea coasts. Low draws fewer wave layers; faster.",
+     "Low\0" "Medium\0" "High\0", true, {0, 1, 2, 2}},
     // Vegetation & Ground Cover
     {"ground_cover", kCategories[4], "Grass and ground cover",
      "Grass, flowers, leaves, stones and reeds on the ground.",

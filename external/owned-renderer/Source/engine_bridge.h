@@ -51,6 +51,12 @@ struct NativeLiquidRipples {
     // (OwnedLiquidFlow::current); the renderer turns it into the current that
     // carries the wading trail downstream (liquid_waves.h).
     std::array<std::array<float,4>,16> flow{};
+    // Renderer-owned sea surf texture (t62, liquid_surf.h): origin xy (world
+    // m), 1/extent xy; mode x valid, y water_surf_debug + 4 * quality, zw
+    // half a texel. Then the live surf look (F10; liquid_surface.hlsl
+    // liquidSurfWaveParams..liquidSurfLookParams, then liquidSurfSwellDir).
+    std::array<float,4> surf_window{},surf_mode{};
+    std::array<float,4> surf_wave{},surf_shape{},surf_foam{},surf_look{},surf_swell{};
     // Per unit: its identity (lifecycle id and generation), so the renderer
     // can ease each unit's wake in and out (renderer_liquid.cpp). Past the
     // ripple shader's cbuffer, never read by it.

@@ -555,7 +555,7 @@ float4 calculateWorldLighting(NativeInstance instance,float3 normal,float3 emiss
 // Neighbour terrain and decorations take their own piece's band (raw edges in the
 // instance), giving way wherever another rendered piece adjoins.
 float terrainFogFactor(NativeInstance instance,float2 worldPosition){if(instance.terrainFogEnabled==0||instance.terrainFogDistance<=0)return 1;float4 piece=float4(instance.terrainFogMin,instance.terrainFogMax);float density=(instance.nativeFlags&@NEIGHBOUR_FLAG@)!=0?nativeNeighbourPieceFogDensity(worldPosition,piece,instance.terrainFogDistance,nativeNeighbourSeam,nativeNeighbourCurve,uint(nativeNeighbourPieceInfo.x)):borderFogDensity(worldPosition,piece,instance.terrainFogDistance,nativeNeighbourSeam,nativeNeighbourCurve,nativeNeighbourSpanLo,nativeNeighbourSpanHi);float fog=floor(density*255)/255;return 1-fog;}
-NativePreparedVertex prepareNativeVertex(NativeInstance instance,uint componentAddress){NativePreparedVertex o;uint4 component=nativeGeometry.Load4(componentAddress);float4 position=loadPacked(instance.geometryOffsets.x,component.x);float4 normal=loadPacked(instance.geometryOffsets.y,component.y);if(component.x<instance.morphCount)position.xyz+=loadMorph(instance,component.x);float2 originalWorldPosition=0;NativeTerrainVertex terrain=(NativeTerrainVertex)0;bool terrainVertex=instance.terrainVertexOffset!=0xffffffff;if(terrainVertex){originalWorldPosition=mul(instance.objectToWorld,float4(position.xyz,1)).xy;terrain=loadTerrainVertex(instance,component.x);{float layerShift=terrainLayerShift(instance,terrain.shiftObjects&0xffffu);position.z+=layerShift;terrain.depth+=layerShift;}if((instance.terrainFlags&1)!=0&&(terrain.flags&1)!=0){float phase=(position.x*instance.terrainWindDirection.x+position.y*instance.terrainWindDirection.y+instance.terrainWindPhase*terrain.windMultiplier+terrain.noise);float wave=sin(phase)*instance.terrainWindForce*terrain.windMultiplier;if((terrain.flags&2)!=0&&terrain.depth<0){position.xy+=wave.xx;}else{uint gridX=(terrain.gridIndex&65535u)%33;uint gridY=(terrain.gridIndex&65535u)/33;position.z+=wave*0.25;position.x+=sin(gridX*0.7853981634+instance.terrainPreciseTime*0.05)*instance.terrainWindForce*terrain.windMultiplier*3;position.y+=sin(gridY*0.7853981634+instance.terrainPreciseTime*0.05)*instance.terrainWindForce*terrain.windMultiplier*3;}}}o.p=mul(instance.objectToClip,float4(position.xyz,1));if(instance.lightingEnabled!=0){float3 emissive=terrainVertex?terrain.emissive:instance.nativeEmissive.rgb;float opacity=terrainVertex?terrain.opacity:instance.nativeMaterialAlpha;o.d=calculateWorldLighting(instance,normalize(normal.xyz),emissive,opacity);o.s=terrainVertex?float4(0,0,0,terrainFogFactor(instance,originalWorldPosition)):instance.nativeSpecular;if(!terrainVertex)o.s.a=(instance.nativeDefaultSpecular>>24)/255.0;}else{uint diffuse=(instance.nativeFlags&4)!=0||instance.colorOffsets.x==0xffffffff?instance.nativeDefaultDiffuse:nativeGeometry.Load(instance.colorOffsets.x+component.y*4);uint specular=(instance.nativeFlags&4)!=0||instance.colorOffsets.y==0xffffffff?instance.nativeDefaultSpecular:nativeGeometry.Load(instance.colorOffsets.y+component.y*4);o.d=unpackColor(diffuse);o.s=unpackColor(specular);}if((instance.nativeFlags&@PREVIEW_SPECULAR_RGB_FLAG@)!=0)o.s.rgb=unpackColor(instance.nativeDefaultSpecular).rgb;if(terrainVertex&&(instance.terrainFlags&1)!=0&&(terrain.flags&1)!=0){float phase=(position.x*instance.terrainWindDirection.x+position.y*instance.terrainWindDirection.y+instance.terrainWindPhase*terrain.windMultiplier+terrain.noise);float wave=max(sin(phase),0);o.s.rgb=saturate(terrain.objectColor*terrain.windMultiplier*instance.terrainWindForceNormalized*(50.0/255.0)*wave);}o.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8))+instance.nativeUvShift;if(terrainVertex&&(instance.terrainFlags&2)!=0&&(terrain.flags&4)!=0&&terrain.animationIndex<instance.terrainPhaseCount&&instance.terrainTilesPerSide!=0){uint phase=((instance.terrainFlags&4)!=0?nativeAnimation.Load(instance.terrainPhaseOffset+terrain.animationIndex*4):nativeDynamic.Load(instance.terrainPhaseOffset+terrain.animationIndex*4));uint baseTile=terrain.animationBaseTile;uint currentTile=baseTile+phase;float side=(float)instance.terrainTilesPerSide;o.uv+=float2(((int)(currentTile%instance.terrainTilesPerSide)-(int)(baseTile%instance.terrainTilesPerSide))/side,-((int)(currentTile/instance.terrainTilesPerSide)-(int)(baseTile/instance.terrainTilesPerSide))/side);}o.textureReference=uint2(instance.nativePadding.x,instance.nativePadding.y);return o;}
+NativePreparedVertex prepareNativeVertex(NativeInstance instance,uint componentAddress){NativePreparedVertex o;uint4 component=nativeGeometry.Load4(componentAddress);float4 position=loadPacked(instance.geometryOffsets.x,component.x);float4 normal=loadPacked(instance.geometryOffsets.y,component.y);if(component.x<instance.morphCount)position.xyz+=loadMorph(instance,component.x);float2 originalWorldPosition=0;NativeTerrainVertex terrain=(NativeTerrainVertex)0;bool terrainVertex=instance.terrainVertexOffset!=0xffffffff;if(terrainVertex){originalWorldPosition=mul(instance.objectToWorld,float4(position.xyz,1)).xy;terrain=loadTerrainVertex(instance,component.x);{float layerShift=terrainLayerShift(instance,terrain.shiftObjects&0xffffu);position.z+=layerShift;terrain.depth+=layerShift;}if((instance.terrainFlags&1)!=0&&(terrain.flags&1)!=0){float phase=(position.x*instance.terrainWindDirection.x+position.y*instance.terrainWindDirection.y+instance.terrainWindPhase*terrain.windMultiplier+terrain.noise);float settle=1-smoothstep(.015,.08,length(terrain.liquidCurrent));float wave=sin(phase)*instance.terrainWindForce*terrain.windMultiplier*settle;if((terrain.flags&2)!=0&&terrain.depth<0){position.xy+=wave.xx;}else{uint gridX=(terrain.gridIndex&65535u)%33;uint gridY=(terrain.gridIndex&65535u)/33;position.z+=wave*0.25;position.x+=sin(gridX*0.7853981634+instance.terrainPreciseTime*0.05)*instance.terrainWindForce*terrain.windMultiplier*settle*3;position.y+=sin(gridY*0.7853981634+instance.terrainPreciseTime*0.05)*instance.terrainWindForce*terrain.windMultiplier*settle*3;}}}o.p=mul(instance.objectToClip,float4(position.xyz,1));if(instance.lightingEnabled!=0){float3 emissive=terrainVertex?terrain.emissive:instance.nativeEmissive.rgb;float opacity=terrainVertex?terrain.opacity:instance.nativeMaterialAlpha;o.d=calculateWorldLighting(instance,normalize(normal.xyz),emissive,opacity);o.s=terrainVertex?float4(0,0,0,terrainFogFactor(instance,originalWorldPosition)):instance.nativeSpecular;if(!terrainVertex)o.s.a=(instance.nativeDefaultSpecular>>24)/255.0;}else{uint diffuse=(instance.nativeFlags&4)!=0||instance.colorOffsets.x==0xffffffff?instance.nativeDefaultDiffuse:nativeGeometry.Load(instance.colorOffsets.x+component.y*4);uint specular=(instance.nativeFlags&4)!=0||instance.colorOffsets.y==0xffffffff?instance.nativeDefaultSpecular:nativeGeometry.Load(instance.colorOffsets.y+component.y*4);o.d=unpackColor(diffuse);o.s=unpackColor(specular);}if((instance.nativeFlags&@PREVIEW_SPECULAR_RGB_FLAG@)!=0)o.s.rgb=unpackColor(instance.nativeDefaultSpecular).rgb;if(terrainVertex&&(instance.terrainFlags&1)!=0&&(terrain.flags&1)!=0){float phase=(position.x*instance.terrainWindDirection.x+position.y*instance.terrainWindDirection.y+instance.terrainWindPhase*terrain.windMultiplier+terrain.noise);float wave=max(sin(phase),0);o.s.rgb=saturate(terrain.objectColor*terrain.windMultiplier*instance.terrainWindForceNormalized*(50.0/255.0)*wave);}o.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8))+instance.nativeUvShift;if(terrainVertex&&(instance.terrainFlags&2)!=0&&(terrain.flags&4)!=0&&terrain.animationIndex<instance.terrainPhaseCount&&instance.terrainTilesPerSide!=0){uint phase=((instance.terrainFlags&4)!=0?nativeAnimation.Load(instance.terrainPhaseOffset+terrain.animationIndex*4):nativeDynamic.Load(instance.terrainPhaseOffset+terrain.animationIndex*4));uint baseTile=terrain.animationBaseTile;uint currentTile=baseTile+phase;float side=(float)instance.terrainTilesPerSide;o.uv+=float2(((int)(currentTile%instance.terrainTilesPerSide)-(int)(baseTile%instance.terrainTilesPerSide))/side,-((int)(currentTile/instance.terrainTilesPerSide)-(int)(baseTile/instance.terrainTilesPerSide))/side);}o.textureReference=uint2(instance.nativePadding.x,instance.nativePadding.y);return o;}
 bool drawVisible(NativeDraw draw,NativeInstance instance){float4x4 cull=(draw.instanceIndex&0x80000000u)!=0?nativeCullWorldClip:instance.objectToClip;uint outside=63u;bool front=true;float2 lo=1e30,hi=-1e30;float nearest=1,nearestW=1e30;[unroll]for(uint corner=0;corner<8;corner++){float3 p=float3((corner&1)?draw.boundsMax.x:draw.boundsMin.x,(corner&2)?draw.boundsMax.y:draw.boundsMin.y,(corner&4)?draw.boundsMax.z:draw.boundsMin.z);float4 clip=mul(cull,float4(p,1));uint mask=0;if(clip.x < -clip.w)mask|=1;if(clip.x > clip.w)mask|=2;if(clip.y < -clip.w)mask|=4;if(clip.y > clip.w)mask|=8;if(clip.z < 0)mask|=16;if(clip.z > clip.w)mask|=32;outside&=mask;nearestW=min(nearestW,clip.w);if(clip.w<=1e-5)front=false;else{float2 ndc=clip.xy/clip.w;lo=min(lo,ndc);hi=max(hi,ndc);nearest=min(nearest,clip.z/clip.w);}}if(outside!=0)return false;
  // Draw distance (draw_distance, or nearer where fog fully covers): the nearest
  // corner's clip w is the box's least planar view depth, never more than its
@@ -630,6 +630,9 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
    // the active map's waves fade out over the last metres, so both maps'
    // liquids meet at the shared authored edge heights without a step or gap.
    instance.terrainWindForce*=neighbourSeamWaveWeight(output.undeformedXY);
+   // Running water does not heave with the game's waves (liquidRiverOnset):
+   // a river sheet bobbing up and down read as jelly; its motion is the flow.
+   instance.terrainWindForce*=1-smoothstep(.015,.08,length(terrain.liquidCurrent));
    float phase=dot(position.xy,instance.terrainWindDirection)+instance.terrainWindPhase*terrain.windMultiplier+terrain.noise;
    float wave=sin(phase)*instance.terrainWindForce*terrain.windMultiplier;
    if((terrain.flags&2)!=0&&terrain.depth<0)position.xy+=wave.xx;
@@ -1211,7 +1214,8 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
   // the shared authored edge heights (frame switch nativeTerrainFogControl.w).
   [branch]if((instance.nativeFlags&@NEIGHBOUR_FLAG@)!=0&&nativeTerrainFogControl.w>0&&(terrain.flags&1)!=0&&liquidSurfaceEnabled(terrain.flags)){
    float4 b=nativeTerrainActiveBounds;float2 q=world.p.xy;
-   float force=instance.terrainWindForce*terrain.windMultiplier*saturate(max(max(b.x-q.x,q.x-b.z),max(b.y-q.y,q.y-b.w))/4);
+   float force=instance.terrainWindForce*terrain.windMultiplier*saturate(max(max(b.x-q.x,q.x-b.z),max(b.y-q.y,q.y-b.w))/4)*
+               (1-smoothstep(.015,.08,length(terrain.liquidCurrent))); // running water does not heave
    // World phase only (no per-map noise or grid index), so two neighbours
    // also agree on the vertices they share.
    float wave=sin(dot(q,instance.terrainWindDirection)+instance.terrainWindPhase*terrain.windMultiplier)*force;
@@ -2302,8 +2306,20 @@ NativePrepassResult nativePrepassPS(NativeDepthOutput i){
  bool receiver=i.shadowMode==1||(i.shadowMode==2&&nativeRasterTail.y!=0);
  bool lifted=(i.terrainVertexFlags&16)!=0&&dot(i.terrainSlope,i.terrainSlope)>1e-8;
  uint flags=(receiver?1u:0u)|(nativeRasterTail.x==0&&(i.swaying&255u)==0?2u:0u)|(lifted?4u:0u);
+ // Snow trail troughs and berms (nativeTessGroundPosition) are drawn off the
+ // untessellated terrain the sun maps hold. The receiver follows the drawn
+ // point along its ray to the sun up to that terrain, so a shadow lands on
+ // the trough floor where the drawn surface meets it, and the terrain in the
+ // map never shadows its own trough. Only where the drawn point left the
+ // rest point (the snow stages ran; untessellated trails stay at rest).
+ float3 rest=i.shadowPosition;
+ [branch]if((i.terrainVertexFlags&16)!=0&&i.neighbour==0&&nativeSnowTrailWindow.w>0&&abs(i.worldPosition.z-rest.z)>1e-5&&nativeWorldSunDirection.z>0){
+  float h=snowTrailHeight(snowTrailRaw(nativeSnowTrail,nativeSnowTrailWindow,nativeSnowTrailTiles,i.worldPosition.xy));
+  float3 sun=normalize(nativeWorldSunDirection.xyz);
+  rest.xy-=h*sun.xy/max(sun.z,.25);
+ }
  NativePrepassResult r;
- r.rest=float4(i.shadowPosition-fogUnproject(i.p.xy*fogScreen.xy,nativeDepth24(i.p.z)),flags);
+ r.rest=float4(rest-fogUnproject(i.p.xy*fogScreen.xy,nativeDepth24(i.p.z)),flags);
  r.normal=lifted?nativeOctEncode(normalize(i.terrainSlope)):float2(.5,.5);
  return r;
 }
@@ -2567,10 +2583,14 @@ NativePixelResult nativePS(NativeOutput i){
    }
    snowPacked=snowTrailCompaction(snowRaw);
    float skyScale=(1-.04*snowPacked)*(.9+.1*snowRelief.z/max(snowBase.z,.2));
-   float3 luma=float3(.2126,.7152,.0722);
-   float direct=dot(i.directional*saturate(filteredShadow),luma),sky=dot(nativeWorldAmbient.rgb,luma);
-   float scale=lerp(skyScale,sunScale,smoothstep(.7,1.3,direct/max(sky,1e-4)));
-   i.d.rgb*=scale;unlit*=sunScale;
+   // Each light term takes its own relief factor inside the game's
+   // max(ambient, sun) model: the relief rescales the shadowed sun, never the
+   // ambient floor. Scaling the whole lit colour by sunScale dropped sunlit
+   // trail walls below the shadowed ambient level, so a shadow crossing a
+   // trail read as a half-transparent patch (frame_012091, frame_012440).
+   float3 sunLight=i.directional*(filteredShadow>=0?min(saturate(filteredShadow),cloud):1);
+   float3 before=max(nativeWorldAmbient.rgb,sunLight),after=max(nativeWorldAmbient.rgb*skyScale,sunLight*sunScale);
+   i.d.rgb=saturate(i.d.rgb+after-before);unlit=saturate(unlit+sunLight*(sunScale-1));
   }
  }
 #endif
@@ -2605,6 +2625,38 @@ NativePixelResult nativePS(NativeOutput i){
   wet*=1-saturate(nativeSnowCover.x*3);
   t.rgb=lerp(t.rgb,pow(saturate(t.rgb),1.35)*.82,wet);
  }
+#ifdef NATIVE_TERRAIN_PS // ground only: the object and Low programs never carry it
+ // Sea surf on the shore ground (liquidSurfShoreAt): the water mesh ends at
+ // the waterline, so the swash sheet each arriving crest pushes up the sand,
+ // its scalloped foam edge and lace, the darker wet sand, and on steep shores
+ // the white water and spray bursting up the face, are drawn on the dry
+ // ground here, on the water's own clock, measured as the ground's height
+ // above the sea surface (t63). Only ground near the sea's waterline with
+ // sea-mask surf; everywhere else the test leaves the ground unchanged. Maps
+ // without sea surf (no field bound: liquidSurfMode.x 0) skip it on one
+ // uniform test. Ground: material base tiles (flag 16) and long tiles (4096,
+ // the stretched cliff and bank faces).
+ float surfFootprint=max(length(ddx(i.worldPosition.xy)),length(ddy(i.worldPosition.xy))); // m per pixel, outside the branch (derivatives)
+ [branch]if(liquidSurfMode.x>.5&&(i.terrainVertexFlags&(16u|4096u))!=0&&i.bedLiquid.x<=0&&shadowReceiver) {
+  float4 surfField=liquidSurfAt(i.worldPosition.xy);
+  [branch]if(surfField.r>1e-3&&surfField.a<2.5&&surfField.a>-liquidSurfRunupInland) {
+   float3 up=dot(i.terrainSlope,i.terrainSlope)>1e-8?normalize(i.terrainSlope):normalize(i.worldNormal);
+   float4 sea=liquidSurfLevelAt(i.worldPosition.xy); // sea level, shore impact, smooth swell distance and depth
+   float4 shore=liquidSurfShoreAt(i.worldPosition.xy,surfField,sea,nativeTerrainClock.y*liquidSecondsPerTime,i.worldPosition.z-sea.x,up,surfFootprint);
+   [branch]if(any(shore>0)) {
+    t.rgb=lerp(t.rgb,pow(saturate(t.rgb),1.3)*(1-liquidSurfWetDarken),shore.z); // wet sand and rock
+    t.rgb=lerp(t.rgb,t.rgb*.7+float3(.06,.13,.14),shore.x*.6);                  // the thin sheet over the sand
+    t.rgb=lerp(t.rgb,liquidSurfFoamWhite,max(shore.y,shore.w)*.92);             // foam edge, lace, white water, spray
+    wet=max(wet,max(shore.z*.75,shore.x));wetNormal=up;
+   }
+   // water_surf_debug 2: the shore impact over the shore ground too; 3: the
+   // surf foam on the ground, as brightness.
+   float surfDebug=fmod(liquidSurfMode.y,4);
+   [branch]if(abs(surfDebug-2)<.5){t.rgb=liquidSurfImpactDebug(sea.y);wet=0;}
+   else if(abs(surfDebug-3)<.5){t.rgb=saturate(max(shore.y,shore.w)).xxx;wet=0;}
+  }
+ }
+#endif
 #endif
 )" R"(
 #ifndef NATIVE_UNLIT
@@ -2954,12 +3006,25 @@ NativeTessPoint nativeTessVS(uint vertexId:SV_VertexID){
   float3 h=run>1e-5?float3(current/run,0):float3(0,0,0);
   t.tessNormal=h;t.tessClipNormal=mul(instance.objectToClip,float4(h,0));
   t.tessLimit=liquidTessWeight(terrain.liquidCascade,terrain.liquidCurrent,terrain.liquidSelfIllumination);
+  // Sea surf: corners on sea water with surf (the coastal band and the
+  // exposed sea beyond it) split for the wave height, which the domain lifts
+  // along world up (liquidSurfHeight).
+  float4 surfField=liquidSurfLoad(t.o.worldPosition.xy);
+  if(surfField.r>1e-3&&surfField.a>-1.5&&terrain.liquidSelfIllumination<=0)t.tessLimit+=liquidSurfTessFlag;
+  t.tessClipUp=mul(instance.objectToClip,float4(0,0,1,0));
   return t;
  }
  // Layer vertices carry no slope (straight up) and so never bend an edge.
  float3 n=normalize(mul((float3x3)instance.objectToWorld,terrainSlopeNormal(terrain.slopeNormal)));
  t.tessNormal=n;t.tessClipNormal=mul(instance.objectToClip,float4(n,0));
  t.tessLimit=terrainTessLimit(t.o.worldPosition,n.z,nativeTerrainTess.x,nativeTerrainActiveBounds);
+ // Submerged ground takes no smoothing: on a shallow bed beside a drop the
+ // Phong bulge lifted the bed up to and through the water surface (save1144:
+ // sandbar edges standing out of 0.2 m of water like rocks). Live layer
+ // shift as in nativeVertex.
+ float bedDepth=terrain.liquidDepth;
+ if((terrain.shiftObjects>>16)!=0xffffu)bedDepth+=terrainLayerShift(instance,terrain.shiftObjects>>16);
+ t.tessLimit*=1-smoothstep(.02,.15,bedDepth);
  // Same object-to-clip use of a world vector as the slope normal above.
  if((terrain.flags&16)!=0&&nativeSnowTrailWindow.w>0)t.tessClipUp=mul(instance.objectToClip,float4(0,0,1,0));
  return t;
@@ -2989,7 +3054,9 @@ NativeTessFactors nativeTessFactorsOf(NativeTessCorner c[3],float pixelsAtUnitW,
  [branch]if(liquidSurfaceEnabled(c[0].flags)){
   [unroll]for(uint e=0;e<3;++e){
    uint a=(e+1)%3,b=(e+2)%3;
-   f.edges[e]=liquidTessEdgeFactor(c[a].rest,c[b].rest,c[a].limit,c[b].limit,nativeTerrainCliff.y);
+   f.edges[e]=liquidTessEdgeFactor(c[a].rest,c[b].rest,liquidTessFall(c[a].limit),liquidTessFall(c[b].limit),nativeTerrainCliff.y);
+   if(liquidTessSurf(c[a].limit)||liquidTessSurf(c[b].limit))
+    f.edges[e]=max(f.edges[e],liquidSurfTessEdgeFactor(c[a].rest,c[b].rest,nativeTerrainCliff.y));
   }
   f.inside=max(f.edges[0],max(f.edges[1],f.edges[2]));
   return f;
@@ -3066,12 +3133,12 @@ NativeOutput nativeTerrainDomain(float3 b,const OutputPatch<NativeTessPoint,3> p
  NATIVE_TESS_LERP(liquidTintDepth);NATIVE_TESS_LERP(liquidMaterial);NATIVE_TESS_LERP(liquidView);NATIVE_TESS_LERP(bedLiquid);
  NATIVE_TESS_LERP(liquidDirections);NATIVE_TESS_LERP(liquidFall);NATIVE_TESS_LERP(liquidTileLocal);NATIVE_TESS_LERP(terrainSlope);NATIVE_TESS_LERP(terrainFlat);NATIVE_TESS_LERP(shadowPosition);
 #undef NATIVE_TESS_LERP
- float limit=b.x*p[0].tessLimit+b.y*p[1].tessLimit+b.z*p[2].tessLimit;
  [branch]if(liquidSurfaceEnabled(o.terrainVertexFlags)){
   // Falling and running water: the scalar displacement along the corners'
   // flow directions, from interpolated values only. Both liquid passes (water
   // body and foam layer) use the rest position, so they move together.
-  [branch]if(limit>0){
+  float fallLimit=b.x*liquidTessFall(p[0].tessLimit)+b.y*liquidTessFall(p[1].tessLimit)+b.z*liquidTessFall(p[2].tessLimit);
+  [branch]if(fallLimit>0){
    float k=liquidTessDisplacement(o.shadowPosition,o.liquidDirections.zw,o.liquidFall.x,o.liquidTintDepth.a,
                                   o.liquidFlow.w*liquidSecondsPerTime);
    // None at a touched seam (the neighbour's water is not tessellated):
@@ -3079,6 +3146,23 @@ NativeOutput nativeTerrainDomain(float3 b,const OutputPatch<NativeTessPoint,3> p
    k*=neighbourSeamWaveWeight(o.shadowPosition.xy);
    o.worldPosition+=k*(b.x*p[0].tessNormal+b.y*p[1].tessNormal+b.z*p[2].tessNormal);
    o.p+=k*(b.x*p[0].tessClipNormal+b.y*p[1].tessClipNormal+b.z*p[2].tessClipNormal);
+  }
+  // Sea surf: the wave height along world up, where any corner is on sea
+  // water with surf (0 wherever the field has none). None at a touched
+  // neighbour seam, whose water is not tessellated.
+  [branch]if(liquidTessSurf(p[0].tessLimit)||liquidTessSurf(p[1].tessLimit)||liquidTessSurf(p[2].tessLimit)){
+   float4 surfField=liquidSurfLoad(o.worldPosition.xy);
+   [branch]if(surfField.r>1e-3){
+    // Never on swamp, lava or running water (the pixel stage's surf gate),
+    // also where the filtered field reaches half a tile past the sea.
+    float waterlike=(1-saturate(o.liquidMaterial.w))*(o.liquidMaterial.z>0?0:1)*
+                    (1-smoothstep(liquidRiverOnset.x,liquidRiverOnset.y,length(o.liquidDirections.zw)));
+    float h=liquidSurfHeight(o.worldPosition.xy,surfField,liquidSurfLevelLoad(o.worldPosition.xy),o.liquidFlow.w*liquidSecondsPerTime,
+                             o.liquidTintDepth.a)*
+            neighbourSeamWaveWeight(o.shadowPosition.xy)*waterlike;
+    o.worldPosition.z+=h;
+    o.p+=h*(b.x*p[0].tessClipUp+b.y*p[1].tessClipUp+b.z*p[2].tessClipUp);
+   }
   }
   return o;
  }

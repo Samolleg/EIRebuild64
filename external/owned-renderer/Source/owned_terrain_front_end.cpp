@@ -13,6 +13,11 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <chrono>
+#include <functional>
+#include <queue>
+#include <vector>
+#include <cstdint>
 
 namespace owned {
 
@@ -354,6 +359,43 @@ bool liquid_flow_from_gradients(const Gradient& gradient,const Steepness& steepn
         finite_value(flow.cascade)&&finite_value(flow.impact)&&finite_value(flow.drop)&&finite_value(flow.fill);
 }
 
+// The level-reach river current (liquid_outflow) at global vertex (x,y), as
+// a surface slope; zero off the field.
+// z: the lip approach 0..1.
+std::array<float,3> liquid_outflow_at(const TerrainLiquidOutflowField* outflow,int xmax,int ymax,int x,int y) noexcept {
+    if(!outflow||outflow->empty()||x<0||y<0||x>xmax||y>ymax)return {};
+    const auto& v=(*outflow)[std::size_t(y)*std::size_t(xmax+1)+std::size_t(x)];
+    constexpr float scale=kLiquidOutflowSlope/127.f;
+    return {v[0]*scale,v[1]*scale,v[2]/127.f};
+}
+
+// Adds the level-reach current to a decoded flow: up to kLiquidOutflowSlope
+// where the surface itself is level, less where it already slopes that way,
+// nothing against a real slope (a counter-slope of a hundredth stops it:
+// water never runs uphill). Its turning joins the bend, so the shader widens
+// its footprint along a river's curves as it does for sloped water.
+void apply_liquid_outflow(const TerrainLiquidOutflowField* outflow,int xmax,int ymax,int gx,int gy,OwnedLiquidFlow& flow) noexcept {
+    const auto o=liquid_outflow_at(outflow,xmax,ymax,gx,gy);
+    // The last metres above a fall lip raise the cascade source there (the
+    // vertex's own source faded out within ~4 m of the lip): the shader's lip
+    // approach (liquidLipApproach) reads it where the drop below the lip is 0.
+    flow.cascade=(std::max)(flow.cascade,o[2]);
+    const float strength=std::hypot(o[0],o[1]);
+    if(strength<=0)return;
+    const float along=(flow.current[0]*o[0]+flow.current[1]*o[1])/strength;
+    const float slope=std::hypot(flow.current[0],flow.current[1]);
+    const float keep=std::clamp(1+along/.01f,0.f,1.f)*(std::max)(0.f,1-slope/kLiquidOutflowSlope);
+    if(keep<=0)return;
+    flow.current[0]+=o[0]*keep;flow.current[1]+=o[1]*keep;
+    float bend=0;
+    for(int axis=0;axis<2;++axis) {
+        const auto a=axis?liquid_outflow_at(outflow,xmax,ymax,gx,gy-2):liquid_outflow_at(outflow,xmax,ymax,gx-2,gy);
+        const auto b=axis?liquid_outflow_at(outflow,xmax,ymax,gx,gy+2):liquid_outflow_at(outflow,xmax,ymax,gx+2,gy);
+        bend+=((b[0]-a[0])*(b[0]-a[0])+(b[1]-a[1])*(b[1]-a[1]))/16.f;
+    }
+    flow.bend=std::sqrt(flow.bend*flow.bend+bend*keep*keep);
+}
+
 } // namespace
 
 // Global grid addressing gives both copies of a sector-edge vertex the same
@@ -378,12 +420,17 @@ bool owned_terrain_liquid_flow(const TerrainCpuAsset& source,
     const auto height=[&](int x,int y,float& z) {
         return liquid_surface_height(source,x,y,values,z);
     };
-    return liquid_flow_from_gradients(gradient,steepness,height,gx,gy,flow);
+    if(!liquid_flow_from_gradients(gradient,steepness,height,gx,gy,flow))return false;
+    const auto outflow=owned_terrain_liquid_outflow(source,values);
+    apply_liquid_outflow(outflow.get(),int(source.sector_count_x*32),int(source.sector_count_y*32),gx,gy,flow);
+    return true;
 }
 
 bool OwnedLiquidFlowSector::prepare(const TerrainCpuAsset& source,std::uint32_t sector_index,
     const OwnedTerrainGeometryValues* values) noexcept {
     ready_=false;done_.fill(0);
+    outflow_=owned_terrain_liquid_outflow(source,values);
+    xmax_=int(source.sector_count_x*32);ymax_=int(source.sector_count_y*32);
     if(sector_index>=source.sectors.size()||!source.sector_count_x||!source.sector_count_y)return false;
     const auto& origin=source.sectors[sector_index];
     origin_x_=int(origin.map_x*32)-kLiquidFlowGradientReach;
@@ -428,6 +475,7 @@ bool OwnedLiquidFlowSector::flow(std::uint32_t base,OwnedLiquidFlow& flow) noexc
             z=heights_[cell];return true;
         };
         if(!liquid_flow_from_gradients(gradient,steepness,height,gx,gy,flows_[base])||!inside)return false;
+        apply_liquid_outflow(outflow_.get(),xmax_,ymax_,gx,gy,flows_[base]);
         done_[base]=1;
     }
     flow=flows_[base];
@@ -467,6 +515,8 @@ void owned_terrain_set_outside_liquid(TerrainCpuAsset& terrain,int offset_x,int 
         }
     }
     terrain.outside_liquid=any?std::move(outside):TerrainOutsideLiquid{};
+    // Rebuild the level-reach current with the seam's outlets and sources.
+    if(any)owned_terrain_reset_liquid_outflow(terrain);
 }
 
 void owned_terrain_weld_edge_flow(const TerrainCpuAsset& terrain,int x,int y,OwnedLiquidFlow& flow) noexcept {
@@ -485,6 +535,428 @@ void owned_terrain_weld_edge_flow(const TerrainCpuAsset& terrain,int x,int y,Own
     flow.current[0]=mix(edge->current[0],flow.current[0]);flow.current[1]=mix(edge->current[1],flow.current[1]);
     flow.bend=mix(edge->bend,flow.bend);flow.cascade=mix(edge->cascade,flow.cascade);flow.impact=mix(edge->impact,flow.impact);
     flow.drop=mix(edge->drop,flow.drop);flow.fill=mix(edge->fill,flow.fill);
+}
+
+namespace {
+
+// owned_terrain_liquid_outflow on the global vertex grid of one map.
+TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,const OwnedTerrainGeometryValues* values) {
+    const int xmax=int(terrain.sector_count_x*32),ymax=int(terrain.sector_count_y*32);
+    if(xmax<8||ymax<8)return {};
+    const int w=xmax+1,h=ymax+1;
+    const std::size_t n=std::size_t(w)*std::size_t(h);
+    const auto at=[w](int x,int y){return std::size_t(y)*std::size_t(w)+std::size_t(x);};
+    std::vector<float> z(n,0.f);std::vector<std::uint8_t> valid(n,0);
+    bool any=false;
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        float v=0;
+        if(liquid_surface_height(terrain,x,y,values,v)){z[at(x,y)]=v;valid[at(x,y)]=1;any=true;}
+    }
+    if(!any)return {};
+    // Levels read the pit-filled surface (the rule of OwnedLiquidFlow::fill):
+    // a closed dip such as a fall's impact funnel counts at its spill level.
+    // Its raw minimum made the zone3obr loop's east branch drain backwards
+    // into the funnel at the foot of its fall instead of toward the swamp.
+    {
+        std::vector<float> filled(z);
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+            if(!valid[at(x,y)])continue;
+            float spill=std::numeric_limits<float>::max();
+            for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx) {
+                if(!dx&&!dy)continue;
+                float highest=z[at(x,y)];
+                for(int step=1;step<=kLiquidPitReach;++step) {
+                    const int px=x+dx*step,py=y+dy*step;
+                    if(px<0||py<0||px>xmax||py>ymax||!valid[at(px,py)])break;
+                    highest=(std::max)(highest,z[at(px,py)]);
+                }
+                spill=(std::min)(spill,highest);
+            }
+            filled[at(x,y)]=(std::max)(z[at(x,y)],spill);
+        }
+        z.swap(filled);
+    }
+    // Swamp and lava never run.
+    std::vector<std::uint8_t> still(n,0);
+    for(const auto& sector:terrain.sectors)for(const auto& tile:sector.tiles) {
+        if(!tile.transparent||tile.object_id>=terrain.objects.size())continue;
+        const auto& object=terrain.objects[tile.object_id];
+        if(!terrain_liquid_object(object.type)||!(terrain_swamp_tile(terrain,tile)||object.self_illumination>0))continue;
+        for(const auto index:tile.vertex_indices) {
+            const unsigned grid=index>=1089u?index-1089u:index;
+            const int x=int(sector.map_x*32+grid%33),y=int(sector.map_y*32+grid/33);
+            if(x<=xmax&&y<=ymax)still[at(x,y)]=1;
+        }
+    }
+    // The surface's own slope (5x5 tent, as OwnedLiquidFlow::current).
+    std::vector<std::array<float,2>> gradient(n);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x)
+        if(valid[at(x,y)])(void)liquid_surface_gradient(terrain,x,y,values,gradient[at(x,y)]);
+    std::vector<float> slope(n,0.f);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        if(!valid[at(x,y)])continue;
+        float gx=0,gy=0,weight=0;
+        for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx) {
+            const int px=x+dx,py=y+dy;
+            if(px<0||py<0||px>xmax||py>ymax||!valid[at(px,py)])continue;
+            const float k=float((3-std::abs(dx))*(3-std::abs(dy)));
+            gx+=gradient[at(px,py)][0]*k;gy+=gradient[at(px,py)][1]*k;weight+=k;
+        }
+        slope[at(x,y)]=std::hypot(gx,gy)/weight;
+    }
+    std::vector<std::array<float,2>>().swap(gradient);
+    // Distance to land (chamfer 1, sqrt 2; beyond the map is not land).
+    constexpr float diagonal=1.41421356f,unreached=1e9f;
+    std::vector<float> land(n);
+    for(std::size_t i=0;i<n;++i)land[i]=valid[i]?unreached:0.f;
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        float& v=land[at(x,y)];if(v==0)continue;
+        if(x>0)v=(std::min)(v,land[at(x-1,y)]+1);
+        if(y>0) {
+            v=(std::min)(v,land[at(x,y-1)]+1);
+            if(x>0)v=(std::min)(v,land[at(x-1,y-1)]+diagonal);
+            if(x<xmax)v=(std::min)(v,land[at(x+1,y-1)]+diagonal);
+        }
+    }
+    for(int y=ymax;y>=0;--y)for(int x=xmax;x>=0;--x) {
+        float& v=land[at(x,y)];if(v==0)continue;
+        if(x<xmax)v=(std::min)(v,land[at(x+1,y)]+1);
+        if(y<ymax) {
+            v=(std::min)(v,land[at(x,y+1)]+1);
+            if(x<xmax)v=(std::min)(v,land[at(x+1,y+1)]+diagonal);
+            if(x>0)v=(std::min)(v,land[at(x-1,y+1)]+diagonal);
+        }
+    }
+    // Moving water: a fall or rapid away from the bank (authored bank vertices
+    // raised up the shore are no rapids).
+    std::vector<std::uint8_t> running(n,0);
+    for(std::size_t i=0;i<n;++i)running[i]=valid[i]&&!still[i]&&slope[i]>kLiquidOutflowSource&&land[i]>=2;
+    // Seam roles (a neighbour map): 1 the adjoining map's flow leaves this map
+    // there (an outlet), 2 it enters (a source).
+    std::vector<std::uint8_t> role(n,0);
+    const auto& outside=terrain.outside_liquid;
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        if(!valid[at(x,y)])continue;
+        const int distance[4]={y,ymax-y,x,xmax-x},along[4]={x,x,y,y};
+        constexpr float normal[4][2]={{0,-1},{0,1},{-1,0},{1,0}};
+        int best=3;
+        for(unsigned side=0;side<4;++side) {
+            const auto& e=outside.edge_flow[side];
+            if(distance[side]>best||std::size_t(along[side])>=e.size()||!e[std::size_t(along[side])].valid)continue;
+            const float d=e[std::size_t(along[side])].current[0]*normal[side][0]+e[std::size_t(along[side])].current[1]*normal[side][1];
+            best=distance[side];
+            role[at(x,y)]=d>.005f?1u:d<-.005f?2u:0u;
+        }
+        if(role[at(x,y)]==2)running[at(x,y)]=1;
+    }
+    // The outer two vertex rows are the shipped maps' height-0 rim
+    // (flatten_liquid_rim keeps only rims beside inner liquid): never a level
+    // and no link between waters (it joined zone1's rivers to the sea).
+    const auto rim=[&](int x,int y){return x<2||y<2||x>xmax-2||y>ymax-2;};
+    const auto inner=[&](std::size_t i){return valid[i]&&!rim(int(i%unsigned(w)),int(i/unsigned(w)));};
+    // Water bodies (4-neighbour components, rim excluded).
+    std::vector<std::int32_t> body(n,-1);
+    std::vector<std::vector<std::uint32_t>> bodies;
+    {
+        std::vector<std::uint32_t> stack;
+        for(std::size_t start=0;start<n;++start) {
+            if(!inner(start)||body[start]>=0)continue;
+            const auto id=std::int32_t(bodies.size());bodies.emplace_back();
+            body[start]=id;stack.assign(1,std::uint32_t(start));
+            while(!stack.empty()) {
+                const std::uint32_t i=stack.back();stack.pop_back();bodies.back().push_back(i);
+                const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+                const int next[4][2]={{x+1,y},{x-1,y},{x,y+1},{x,y-1}};
+                for(const auto& p:next) {
+                    if(p[0]<0||p[1]<0||p[0]>xmax||p[1]>ymax)continue;
+                    const std::size_t j=at(p[0],p[1]);
+                    if(inner(j)&&body[j]<0){body[j]=id;stack.push_back(std::uint32_t(j));}
+                }
+            }
+        }
+    }
+    // Outlets.
+    const auto on_edge=[&](int x,int y){return !rim(x,y)&&(x==2||y==2||x==xmax-2||y==ymax-2);};
+    std::vector<std::uint8_t> sink(n,0),low(n,0),lake_seen(n,0);
+    std::vector<std::vector<std::uint32_t>> basins; // lake water that may pass its inflow on
+    bool moving_water=false;
+    for(const auto& cells:bodies) {
+        bool motion=false;float zmin=unreached;
+        for(const auto i:cells) {
+            motion=motion||running[i];
+            const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+            if(!rim(x,y))zmin=(std::min)(zmin,z[i]);
+        }
+        if(!motion||zmin==unreached)continue;
+        moving_water=true;
+        bool any_sink=false,any_terminal=false;float widest=0;
+        for(const auto i:cells) {
+            const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+            low[i]=!rim(x,y)&&z[i]<zmin+kLiquidOutflowLevelBand;
+            if(role[i]==1||(low[i]&&on_edge(x,y)&&role[i]!=2)){sink[i]=1;any_sink=any_terminal=true;}
+            if(low[i]&&land[i]>=kLiquidOutflowWide){sink[i]=1;any_sink=true;}
+            if(low[i])widest=(std::max)(widest,land[i]);
+        }
+        if(!any_sink) {
+            // A closed body draining down to its widest low water (a plunge pool).
+            for(const auto i:cells)if(low[i]&&land[i]>=.8f*widest)sink[i]=1;
+            continue;
+        }
+        // Lakes and sea: 8-connected low open water of this body. One at a
+        // map edge is an outlet; with no edge outlet the largest is the
+        // body's terminal and the others may pass their inflow on.
+        std::size_t largest=SIZE_MAX;
+        for(const auto start:cells) {
+            if(!low[start]||land[start]<kLiquidOutflowWide||lake_seen[start])continue;
+            bool edge=false;std::vector<std::uint32_t> lake,stack(1,start);lake_seen[start]=1;
+            while(!stack.empty()) {
+                const std::uint32_t i=stack.back();stack.pop_back();lake.push_back(i);
+                const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+                edge=edge||on_edge(x,y);
+                for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx) {
+                    const int px=x+dx,py=y+dy;
+                    if(px<0||py<0||px>xmax||py>ymax)continue;
+                    const std::size_t j=at(px,py);
+                    if(body[j]==body[start]&&low[j]&&land[j]>=kLiquidOutflowWide&&!lake_seen[j]){lake_seen[j]=1;stack.push_back(std::uint32_t(j));}
+                }
+            }
+            if(edge)any_terminal=true; // lake or sea water at a map edge: an outlet
+            else {
+                basins.push_back(std::move(lake));
+                if(largest==SIZE_MAX||basins.back().size()>basins[largest].size())largest=basins.size()-1;
+            }
+        }
+        if(!any_terminal&&largest!=SIZE_MAX)basins.erase(basins.begin()+std::ptrdiff_t(largest));
+    }
+    if(!moving_water)return {};
+    // Downstream potential, a priority flood from the outlets: lower water
+    // levels are settled first, and within a level the distance to that
+    // level's exit. Working upstream, a rise of more than kLiquidOutflowStep
+    // starts a new level at distance 0 (the reach above a fall lip measures
+    // from its own lip), and a lower reach is never entered from a higher one
+    // (it was settled first). So every level reach runs to its nearest exit
+    // and over its falls, never back up one: the geodesic distance to the
+    // outlet ran zone3obr's source reach away from its fall toward the longer
+    // way round, and an earlier rule drained the loop into a fall's funnel.
+    // A fed lake stops being an outlet and passes its water on (repeat while
+    // that changes).
+    std::vector<float> level(n),exit_distance(n),outlet_level(n);
+    std::vector<std::uint32_t> exit_cell(n); // the cell where each level starts (its lip)
+    std::vector<double> potential(n);std::vector<std::uint32_t> order;
+    std::vector<std::uint8_t> drains(n),supplied(n),settled(n);
+    std::vector<std::uint8_t> passing(basins.size(),0);
+    constexpr double kLevelWeight=1e5; // any level step outweighs every distance
+    for(int pass=0;pass<4;++pass) {
+        std::fill(level.begin(),level.end(),unreached);std::fill(exit_distance.begin(),exit_distance.end(),unreached);
+        std::fill(settled.begin(),settled.end(),std::uint8_t(0));order.clear();
+        struct Entry { float level,distance; std::uint32_t index;
+            bool operator>(const Entry& o) const { return level!=o.level?level>o.level:distance>o.distance; } };
+        std::priority_queue<Entry,std::vector<Entry>,std::greater<Entry>> queue;
+        for(std::size_t i=0;i<n;++i)if(sink[i]) {
+            level[i]=outlet_level[i]=z[i];exit_distance[i]=0;exit_cell[i]=std::uint32_t(i);queue.push({z[i],0.f,std::uint32_t(i)});
+        }
+        while(!queue.empty()) {
+            const Entry e=queue.top();queue.pop();
+            const std::uint32_t i=e.index;
+            if(settled[i]||e.level!=level[i]||e.distance!=exit_distance[i])continue;
+            settled[i]=1;order.push_back(i);
+            const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+            for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx) {
+                const int px=x+dx,py=y+dy;
+                if((!dx&&!dy)||px<0||py<0||px>xmax||py>ymax)continue;
+                const std::size_t j=at(px,py);
+                if(!inner(j)||settled[j])continue;
+                const bool rise=z[j]>e.level+kLiquidOutflowStep;
+                const float l=rise?z[j]:e.level,d=rise?0.f:e.distance+(dx&&dy?diagonal:1.f);
+                if(l<level[j]||(l==level[j]&&d<exit_distance[j])) {
+                    level[j]=l;exit_distance[j]=d;outlet_level[j]=outlet_level[i];exit_cell[j]=rise?std::uint32_t(j):exit_cell[i];
+                    queue.push({l,d,std::uint32_t(j)});
+                }
+            }
+        }
+        for(std::size_t i=0;i<n;++i)potential[i]=level[i]<unreached?double(level[i])*kLevelWeight+exit_distance[i]:1e300;
+        // Drains: its way down (always to the lowest neighbour) crosses moving
+        // water. Supplied: below moving water.
+        std::fill(drains.begin(),drains.end(),std::uint8_t(0));
+        for(const auto i:order) {
+            const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+            std::size_t down=n;double lowest=potential[i];
+            for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx) {
+                const int px=x+dx,py=y+dy;
+                if((!dx&&!dy)||px<0||py<0||px>xmax||py>ymax)continue;
+                const std::size_t j=at(px,py);
+                if(potential[j]<lowest){lowest=potential[j];down=j;}
+            }
+            drains[i]=running[i]||(down<n&&drains[down]);
+        }
+        for(std::size_t i=0;i<n;++i)supplied[i]=running[i];
+        for(auto it=order.rbegin();it!=order.rend();++it) {
+            const std::uint32_t i=*it;
+            if(!supplied[i])continue;
+            const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
+            for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx) {
+                const int px=x+dx,py=y+dy;
+                if((!dx&&!dy)||px<0||py<0||px>xmax||py>ymax)continue;
+                const std::size_t j=at(px,py);
+                if(potential[j]<potential[i])supplied[j]=1;
+            }
+        }
+        bool changed=false;
+        for(std::size_t b=0;b<basins.size();++b) {
+            if(passing[b])continue;
+            bool fed=false;
+            for(const auto i:basins[b])if(supplied[i]){fed=true;break;}
+            if(!fed)continue;
+            passing[b]=1;changed=true;
+            for(const auto i:basins[b])sink[i]=0;
+        }
+        if(!changed)break;
+    }
+    // Water at its outlet's own level drains over no drop: it runs only when fed.
+    std::vector<std::uint8_t> moving(n,0);bool any_moving=false;
+    for(std::size_t i=0;i<n;++i) {
+        const bool above=level[i]>outlet_level[i]+kLiquidOutflowLevelBand;
+        moving[i]=((drains[i]&&above)||supplied[i])&&level[i]<unreached&&!still[i];
+        any_moving=any_moving||moving[i];
+    }
+    if(!any_moving)return {};
+    // Downstream: minus the potential gradient (central, one-sided at the
+    // edge), as a unit vector, so the steps at lips do not outweigh the rest.
+    std::vector<std::array<float,2>> down(n);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        const std::size_t i=at(x,y);
+        if(!moving[i])continue;
+        double g[2]{};
+        for(int axis=0;axis<2;++axis) {
+            const int ax=axis?x:x-1,ay=axis?y-1:y,bx=axis?x:x+1,by=axis?y+1:y;
+            const bool a=ax>=0&&ay>=0&&level[at(ax,ay)]<unreached,b=bx<=xmax&&by<=ymax&&level[at(bx,by)]<unreached;
+            const double pa=a?potential[at(ax,ay)]:0,pb=b?potential[at(bx,by)]:0;
+            g[axis]=-(a&&b?(pb-pa)*.5:a?potential[i]-pa:b?pb-potential[i]:0.);
+        }
+        const double length=std::hypot(g[0],g[1]);
+        if(length>0)down[i]={float(g[0]/length),float(g[1]/length)};
+    }
+    // Openness around moving water: the mean free run over 16 radials as a
+    // share of run_cap metres (the map edge ends a run), then its largest
+    // value within 6 m, so a lake's shore takes the lake's openness and stays
+    // still with it.
+    constexpr int radials=16,run_cap=24,reach=6;
+    std::vector<std::uint8_t> candidate(n,0);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        if(!moving[at(x,y)])continue;
+        for(int dy=-reach-2;dy<=reach+2;++dy)for(int dx=-reach-2;dx<=reach+2;++dx) {
+            const int px=x+dx,py=y+dy;
+            if(px>=0&&py>=0&&px<=xmax&&py<=ymax&&valid[at(px,py)])candidate[at(px,py)]=1;
+        }
+    }
+    std::vector<std::array<std::int8_t,2>> steps(std::size_t(radials)*run_cap);
+    for(int k=0;k<radials;++k)for(int s=1;s<=run_cap;++s) {
+        const float angle=6.2831853f*float(k)/float(radials);
+        steps[std::size_t(k)*run_cap+std::size_t(s-1)]={std::int8_t(std::lround(std::cos(angle)*float(s))),
+                                                         std::int8_t(std::lround(std::sin(angle)*float(s)))};
+    }
+    std::vector<float> open(n,0.f);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        if(!candidate[at(x,y)])continue;
+        int total=0;
+        for(int k=0;k<radials;++k)for(int s=0;s<run_cap;++s) {
+            const auto& o=steps[std::size_t(k)*run_cap+std::size_t(s)];
+            const int px=x+o[0],py=y+o[1];
+            if(px<0||py<0||px>xmax||py>ymax||!valid[at(px,py)])break;
+            ++total;
+        }
+        open[at(x,y)]=float(total)/float(radials*run_cap);
+    }
+    // A level's lip drop: how far the surface falls within 3 m of its lip.
+    std::vector<float> lip_drop(n,-1.f);
+    const auto lip_drop_at=[&](std::uint32_t lip) {
+        if(lip_drop[lip]>=0)return lip_drop[lip];
+        float drop=0;
+        if(!sink[lip]) {
+            const int lx=int(lip%unsigned(w)),ly=int(lip/unsigned(w));
+            for(int dy=-3;dy<=3;++dy)for(int dx=-3;dx<=3;++dx) {
+                const int px=lx+dx,py=ly+dy;
+                if(px<0||py<0||px>xmax||py>ymax||!valid[at(px,py)])continue;
+                drop=(std::max)(drop,level[lip]-z[at(px,py)]);
+            }
+        }
+        return lip_drop[lip]=drop;
+    };
+    std::vector<std::array<std::int8_t,3>> result(n,std::array<std::int8_t,3>{});
+    bool stored=false;
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        const std::size_t i=at(x,y);
+        if(!valid[i]||still[i]||level[i]>=unreached)continue;
+        float sx=0,sy=0;
+        for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx) {
+            const int px=x+dx,py=y+dy;
+            if(px<0||py<0||px>xmax||py>ymax)continue;
+            const std::size_t j=at(px,py);
+            if(!moving[j]||body[j]!=body[i])continue;
+            const float k=float((3-std::abs(dx))*(3-std::abs(dy)));
+            sx+=down[j][0]*k;sy+=down[j][1]*k;
+        }
+        const float length=std::hypot(sx,sy);
+        if(length<=0)continue;
+        float openness=0;
+        for(int dy=-reach;dy<=reach;++dy)for(int dx=-reach;dx<=reach;++dx) {
+            const int px=x+dx,py=y+dy;
+            if(dx*dx+dy*dy<=reach*reach&&px>=0&&py>=0&&px<=xmax&&py<=ymax)openness=(std::max)(openness,open[at(px,py)]);
+        }
+        const auto smooth=[](float t){t=std::clamp(t,0.f,1.f);return t*t*(3-2*t);};
+        const float channel=1-smooth((openness-kLiquidOutflowOpenness[0])/(kLiquidOutflowOpenness[1]-kLiquidOutflowOpenness[0]));
+        // Full strength once the gradient is whole across the tent; calm at the outlet itself.
+        // Calm at the outlet itself (a plunge pool at its body's own level).
+        const float calm=level[i]<outlet_level[i]+kLiquidOutflowLevelBand?smooth(exit_distance[i]/6.f):1.f;
+        const float strength=(std::min)(length/81.f,1.f)*channel*calm;
+        const auto q=[&](float v){return std::int8_t(std::clamp(std::lround(v/length*strength*127.f),-127L,127L));};
+        // Approaching a fall lip: within kLiquidLipReach of the lip of its
+        // level, scaled by the drop beside that lip (rapid steps stay calm).
+        float approach=0;
+        if(moving[i]&&level[i]>outlet_level[i]+kLiquidOutflowLevelBand) {
+            const float drop=lip_drop_at(exit_cell[i]);
+            approach=smooth((drop-kLiquidLipDrop[0])/(kLiquidLipDrop[1]-kLiquidLipDrop[0]))*(1-smooth(exit_distance[i]/kLiquidLipReach));
+        }
+        result[i]={q(sx),q(sy),std::int8_t(std::lround(approach*127.f))};
+        stored=stored||result[i][0]||result[i][1]||result[i][2];
+    }
+    // The rim takes the field of the first inner vertex.
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        if(!valid[at(x,y)]||!rim(x,y))continue;
+        result[at(x,y)]=result[at((std::clamp)(x,2,xmax-2),(std::clamp)(y,2,ymax-2))];
+        stored=stored||result[at(x,y)][0]||result[at(x,y)][1]||result[at(x,y)][2];
+    }
+    if(!stored)return {};
+    return result;
+}
+
+} // namespace
+
+void owned_terrain_reset_liquid_outflow(TerrainCpuAsset& terrain) noexcept {
+    try {terrain.liquid_outflow=std::make_shared<TerrainLiquidOutflow>();} catch(...) {terrain.liquid_outflow.reset();}
+}
+
+std::shared_ptr<const TerrainLiquidOutflowField> owned_terrain_liquid_outflow(
+    const TerrainCpuAsset& terrain,const OwnedTerrainGeometryValues* values) noexcept {
+    const auto cache=terrain.liquid_outflow;
+    if(!cache)return {};
+    std::lock_guard<std::mutex> guard(cache->lock);
+    if(!cache->built) {
+        cache->built=true;
+        const auto start=std::chrono::steady_clock::now();
+        try {
+            auto field=build_liquid_outflow(terrain,values);
+            if(!field.empty())cache->field=std::make_shared<const TerrainLiquidOutflowField>(std::move(field));
+        } catch(...) {cache->field.reset();}
+        std::size_t running=0;
+        if(cache->field)for(const auto& v:*cache->field)running+=v[0]||v[1];
+        // One line per build with its cost (it runs inside the first decode).
+        char detail[192];
+        std::snprintf(detail,sizeof(detail),"%s: %u level river vertices run, %.1f ms",terrain.identity.canonical_name.c_str(),
+            unsigned(running),std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+        bridge_append_probe_event("liquid_outflow",detail);
+    }
+    return cache->field;
 }
 
 // Swamp frames with open water painted in. The shipped swamp atlas holds,

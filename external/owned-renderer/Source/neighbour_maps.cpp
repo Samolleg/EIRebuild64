@@ -262,7 +262,7 @@ std::string read_layout(const std::wstring& file) {
     if(!input.read(json.data(),std::streamsize(json.size())))throw std::runtime_error("Cannot read neighbour layout");
     return json;
 }
-void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mounts,std::uint64_t id) {
+void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mounts,std::uint64_t id,std::string no_sea_maps) {
     const BackgroundWorkerPriority priority;
     // Under s.lock: this stream was stopped or replaced.
     const auto stopped=[&s,id] {return s.stop || s.run!=id;};
@@ -345,6 +345,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                 if(upload) {
                     prebuild_neighbour(*upload);
                     upload->ground_cover_inputs=prepare_ground_cover_neighbour_inputs(*upload);
+                    upload->liquid_surf=prepare_liquid_surf_neighbour(*upload,no_sea_maps);
                 }
                 {
                     std::lock_guard<std::mutex> guard(s.lock);
@@ -560,15 +561,22 @@ void neighbour_maps_stop_epoch(std::uint64_t epoch) noexcept {
     {std::lock_guard<std::mutex> guard(s.lock);if(!epoch || s.epoch!=epoch)return;}
     neighbour_maps_stop();
 }
+// water_surf_no_sea_maps as the renderer last published it (neighbour_maps_set_no_sea_maps).
+std::mutex g_no_sea_lock;std::string g_no_sea_maps="zone7";
+void neighbour_maps_set_no_sea_maps(const std::string& maps) noexcept {
+    try {std::lock_guard<std::mutex> guard(g_no_sea_lock);if(g_no_sea_maps!=maps)g_no_sea_maps=maps;} catch(...) {}
+}
 void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts) noexcept {
     auto& s=stream();
+    std::string no_sea_maps;
+    try {std::lock_guard<std::mutex> guard(g_no_sea_lock);no_sea_maps=g_no_sea_maps;} catch(...) {}
     {std::lock_guard<std::mutex> guard(s.lock);if(s.epoch==epoch)return;}
     neighbour_maps_stop();if(!enabled.load(std::memory_order_acquire))return;
     std::uint64_t id=0;
     try {
         {std::lock_guard<std::mutex> guard(s.lock);s.epoch=epoch;s.stop=false;s.finished=false;
             s.ready.clear();s.next_take=0;s.total=0;s.resident=0;s.in_upload=false;id=++s.run;}
-        s.worker=std::thread(run,std::ref(s),mpr,epoch,mounts,id);
+        s.worker=std::thread(run,std::ref(s),mpr,epoch,mounts,id,no_sea_maps);
     } catch(...) {
         std::lock_guard<std::mutex> guard(s.lock);
         s.error="Neighbour map worker creation failed";s.finished=true;s.exited=(std::max)(s.exited,id);

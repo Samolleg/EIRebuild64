@@ -1328,6 +1328,45 @@ config.register_boolean("water_simple","Stock-look water (prototype)","Graphics"
  "Prototype for weak GPUs, in no preset: liquid surfaces draw like the game's own water through the world's ground shader: the liquid tile's own texture with its tile animation, the game's vertex lighting and authored opacity, and the wave glint. No reflections, refraction, foam, shore or ripples.");
 config.register_boolean("water_physical","Physical water","Graphics",true,false,
  "With water reflections: Snell refraction and per-channel absorption along the view path through the water depth, a GGX sun highlight widened by distant ripple detail, and rounded liquid-tile outlines. Off keeps the previous water shading.");
+config.register_integer("water_surf_quality","Sea surf quality","Graphics",2,0,2,1,false,
+ "Detail of the sea surf. 0: two chop octaves fewer than set, one displaced, no foam bubbles or foam edge (for weak GPUs); 1: one octave fewer, two displaced; 2: all octaves, three displaced.");
+config.register_integer("water_surf_debug","Sea surf debug view","Diagnostics",0,0,3,1,false,
+ "Temporary. 1: sea water drawn unlit by its sea surf exposure (blue sheltered, through yellow, to red fully exposed), with darker stripes along the incoming wave direction. 2: the shore impact (how steep the shore is: dark green beach, through yellow, to magenta cliff or quay) over the coastal water and the shore ground. 3: only the surf foam (on the water) and the foam thrown onto the shore ground, as brightness.");
+// The sea surf look (liquid_surface.hlsl liquidSurfWaveParams..LookParams), live.
+config.register_floating_point("water_surf_wave_height","Sea swell height (m)","Graphics",.6f,0.f,2.f,.05f,false,
+ "Crest-to-trough height of a large swell crest rolling in toward the shore; crests grow a little more as the water shoals and break where it is about as deep as they are high.");
+config.register_floating_point("water_surf_wavelength","Sea swell wavelength (m)","Graphics",9.f,2.f,30.f,.5f,false,
+ "Average distance between swell crests; the chop's longest octave scales with it.");
+config.register_floating_point("water_surf_speed","Sea swell speed (m/s)","Graphics",1.2f,.1f,4.f,.05f,false,
+ "How fast swell crests roll toward the shore, in game seconds (freezes on pause, follows game speed). The chop drifts at about half this.");
+config.register_floating_point("water_surf_choppiness","Sea chop sharpness","Graphics",2.5f,1.f,6.f,.1f,false,
+ "Peaking of the chop's crests: 1 round, higher sharper crests over broader troughs. Each finer octave is a little rounder.");
+config.register_integer("water_surf_octaves","Sea chop octaves","Graphics",4,1,6,1,false,
+ "Layers of chop at rising frequency on High surf quality (Medium one fewer, Low two fewer). More layers: finer detail, more GPU time on sea water.");
+config.register_floating_point("water_surf_chop_height","Sea chop height (m)","Graphics",.25f,0.f,1.f,.01f,false,
+ "Height of the noise-warped chop over the whole sea, beside the swell. Calmer in the breaking shallows.");
+config.register_floating_point("water_surf_segment","Sea crest segment length (m)","Graphics",18.f,4.f,60.f,1.f,false,
+ "Typical length of a swell crest segment along the coast: crests arrive, break and land segment by segment, at scattered places and times.");
+config.register_floating_point("water_surf_randomness","Sea crest randomness","Graphics",.75f,0.f,1.f,.05f,false,
+ "0: long, even crests landing along the coast together; 1: short segments with low gaps, arrivals well out of step.");
+config.register_floating_point("water_surf_shore_foam","Sea shore foam amount","Graphics",1.f,0.f,2.f,.05f,false,
+ "Strength of the foam clumps, lace and scalloped edge along beaches.");
+config.register_floating_point("water_surf_shore_width","Sea shore foam width (m of water)","Graphics",.6f,.05f,1.5f,.05f,false,
+ "Water depth up to which the shore foam reaches (it swells with each arriving crest).");
+config.register_floating_point("water_surf_crest_foam","Sea crest foam threshold","Graphics",.95f,.6f,1.f,.005f,false,
+ "Foam on steep wave faces: where the surface normal's upward share falls below this. Higher: more crest foam.");
+config.register_floating_point("water_surf_foam_cell","Sea foam cell size (m)","Graphics",1.6f,.3f,4.f,.05f,false,
+ "Size of the foam clumps, lace cells and scallops.");
+config.register_floating_point("water_surf_shallow_tint","Sea shallow tint","Graphics",.7f,0.f,1.f,.05f,false,
+ "How strongly clear sea shallows turn turquoise over the bed, and deeper blue with depth.");
+config.register_floating_point("water_surf_absorption","Sea absorption","Graphics",1.f,0.f,3.f,.05f,false,
+ "Beer-Lambert absorption of the sea tint per metre of water (red first, then green): higher turns blue sooner.");
+config.register_floating_point("water_surf_cliff_burst","Sea cliff burst strength","Graphics",1.f,0.f,3.f,.05f,false,
+ "How high the white water and spray burst up cliffs and quays, and how far the foam is thrown back off the rock, per arriving crest.");
+config.register_text("water_surf_no_sea_maps","Maps without sea","Graphics",
+ "Comma-separated map names (for example zone7) whose water never counts as sea: no surf, sea colour or foam there, whatever its open water. Takes effect on the next map load.","zone7");
+config.register_floating_point("water_surf_edge_fade","Sea surf edge fade (m)","Graphics",40.f,0.f,120.f,5.f,false,
+ "Where the sea runs off the maps around the hero, the surf, swell and foam fade into plain water over this distance.");
 config.register_integer("bloom","Bloom","Graphics",2,0,2,1,false,"Soft glow around the brightest world light: sun highlights, sky near the sun, lava, fire, lamps and magic. 0: off, 1: low (4 half-resolution blur levels), 2: high (6 levels, wider glow). The interface never glows.");
 config.register_integer("emissive_lights","Emissive lighting","Graphics",1,0,2,1,false,"Lava and other self-lit surfaces light the ground, objects and characters around them with a soft glow: point lights just above the surface, no shadows, pulsing slowly with game time. 0: off, 1: on (one light per 8 m cell of lava), 2: finer (one per 4 m cell; about 3x the lights and a little more GPU time near lava).");
 config.register_floating_point("emissive_light_strength","Emissive light strength","Graphics",1.f,0.f,3.f,.05f,false,"Brightness of the glow that emissive surfaces cast on their surroundings.");
@@ -15682,6 +15721,8 @@ void Renderer::release() {
  if(liquid_maps_job_.valid())liquid_maps_job_.wait();liquid_maps_job_={};
  liquid_normal_srv_.Reset();liquid_detail_srv_.Reset();liquid_normal_sampler_.Reset();
  liquid_swamp_frame_srv_.Reset();liquid_swamp_frame_generation_=UINT64_MAX;
+ if(liquid_surf_job_.valid())liquid_surf_job_.wait();liquid_surf_job_={};
+ liquid_surf_srv_.Reset();liquid_surf_level_srv_.Reset();liquid_surf_built_serial_=0; // the CPU fields stay; the next device composites them again
  for(unsigned k=0;k<2;++k){liquid_wave_uav_[k].Reset();liquid_wave_srv_[k].Reset();liquid_wave_texture_[k].Reset();}
  liquid_wave_cs_.Reset();liquid_wave_constants_.Reset();liquid_wave_origin_valid_=liquid_wave_failed_=false;
  liquid_wave_clock_=-1;liquid_wave_accumulator_=0;

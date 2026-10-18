@@ -19,12 +19,8 @@ static const float liquidShallowOpacity = .45; // Fraction of authored opacity. 
 static const float liquidShallowLighten = .20; // @param 0 1
 static const float liquidDeepBrightness = .45; // @param 0 1
 static const float3 liquidDetailScale = float3(.65,1.7,4.3);
-static const float2 liquidFlowSpeed = float2(.018,.029);
 static const float liquidCalmMotion = .06;
 static const float liquidEmissiveFlow = .15;
-static const float liquidCalmNormal = .10;
-static const float liquidWindNormalMinimum = .35;
-static const float liquidNormalStrength = .36; // @param 0 1
 static const float liquidF0 = .045;
 static const float liquidSpecularPower = 128; // @param 8 512
 static const float liquidSpecularStrength = .6; // @param 0 2
@@ -45,7 +41,6 @@ static const float liquidMuddyShoreMinimum = .2;
 static const float2 liquidFilterRange = float2(.25,.5);
 static const float liquidMudOpacity = .85;
 static const float liquidMudBrightness = .62;
-static const float liquidMoltenExposure = 2.2;
 static const float2 liquidLavaTile = float2(10,4.5); // world units per detail-map repeat
 static const float liquidAlgaeTile = 14; // world units per swamp algae repeat
 static const float liquidSwampTile = 2; // world units per layer-art repeat
@@ -65,7 +60,6 @@ static const float liquidLavaDrift = .12; // world units per second
 // relative to each other; derivatives below are analytic world-space slopes.
 static const float2 liquidDetailRotation = float2(.8,.6);
 static const float3 liquidHeightWeights = float3(.57,.29,.14);
-static const float3 liquidSlopeWeights = float3(1,.45,.18);
 static const float2 liquidColorDetail = float2(.92,1.08);
 // Procedural replacement for tile-gated bubbles. Sparse highlights favour dark
 // or green/brown colours through blue-channel separation, never a type check.
@@ -74,28 +68,56 @@ static const float liquidBubbleFineScale = 9;
 static const float2 liquidBubblePatch = float2(.82,.94);
 static const float2 liquidBubbleSpeckle = float2(.7,.9);
 static const float liquidBubbleSpeed = .07;
-static const float liquidBubbleBlueSeparation = .3;
 static const float liquidBubbleBrightness = .16; // @param 0 1
 static const float liquidBubbleWhiten = .4;
 
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
 // Directional wave field (normal-only; the game keeps geometric displacement).
 // Wavelengths in world units; speeds follow deep-water dispersion. Time is the
 // game's segment clock; one segment is ~55 ms (tunable visual scale).
 static const float liquidSecondsPerTime = .055; // @param 0.01 0.2
 static const float liquidGravity = 9.81;
-static const float4 liquidWaveLength = float4(6.0,3.7,2.5,1.6);
-static const float4 liquidWaveAngle = float4(0,.45,-.55,1.0); // radians from wind
-static const float4 liquidWaveSteepness = float4(.10,.08,.06,.045);
 static const float liquidWaveMinimum = .35; // calm water still moves @param 0 1
 static const float liquidDetailDrift = .25; // world units per second @param 0 2
 static const float liquidShoreSurge = .30; // fraction of shore depth, in and out
 static const float liquidShoreSurgeRate = .7; // radians per second
-// Shore bands move down the signed-depth gradient.
-static const float liquidShoreWaveFrequency = 9;
-static const float liquidShoreWaveSpeed = .55;
-static const float liquidShoreWaveDepth = 1.2;
-static const float liquidShoreWaveNormal = .08;
-static const float liquidShoreWaveFoam = .18;
+// Sea surf (liquidSurfSwellAt, liquidSurfChop, the surf foam; sea-mask water
+// only, scaled by the field's exposure). The look is set live from F10 (the
+// b8 surf parameters below the cbuffer: wave height, wavelength, speed,
+// choppiness, octaves, crest segments, foam, tint); these are the fixed rest.
+// Approach after the stylized water write-up (gameidea.org 2026, "creating a
+// stylized 3D water shader": noise-warped choppy octaves stacked at rising
+// frequency, finite-difference normals with a distance LOD, foam from depth
+// and steep crests through animated fBm-Voronoi clumps, bubbles and a darker
+// offset edge, Beer-Lambert depth tint) and a procedural shoreline study
+// (lacy scalloped swash edge, thin lace, turquoise shallows, wet sand band).
+// Independently written.
+static const float liquidSurfBand = 25;        // m; the field's distance scale (liquid_surf.h liquidSurfBand)
+static const float liquidSurfLandReach = 8;    // m; the field's land distance scale (liquid_surf.h liquidSurfLandReach)
+static const float liquidSurfTessSpacing = .7; // m between new vertices on surf water (terrain tess stages) @param 0.3 2
+static const float liquidSurfTessFlag = 2;     // added to a tess corner's limit on surf water
+static const float liquidSurfRunupInland = 4;  // m from the field's waterline beyond which the shore ground takes nothing
+static const float liquidSurfChopLength = 1.3; // chop base wavelength, share of the swell wavelength @param 0.3 3
+static const float liquidSurfChopSpeed = .45;  // chop drift, share of the swell speed @param 0 2
+static const float liquidSurfSurge = 4.5;      // m the swell drifts ahead and back (speed variation)
+static const float liquidSurfSpacing = .3;     // spacing variation between swell crests, in wavelengths
+static const float liquidSurfSetLength = 7;    // crests per set cycle (3-5 large, the rest a lull)
+static const float liquidSurfLull = .5;        // height of the crests between sets
+static const float liquidSurfRunupRise = .22;  // share of a crest period its swash runs up the beach (the rest it drains)
+static const float liquidSurfRunup = .45;      // m the swash climbs above the sea surface per m of crest height @param 0 1.5
+static const float liquidSurfWetDarken = .3;   // darkening of wet sand and rock @param 0 0.6
+static const float liquidSurfWallTrim = .45;   // m from a steep shore's waterline where the wave height is trimmed (no glass rim)
+static const float3 liquidSurfShallowColor = float3(.20,.62,.58); // painterly turquoise of clear shallows
+static const float3 liquidSurfDeepColor = float3(.04,.20,.30);    // the deeper blue the absorbed light turns to
+static const float3 liquidSurfAbsorb = float3(.9,.22,.14);        // per-channel absorption per m (x the absorption setting)
+static const float liquidSurfGlow = .35;                            // light through thin wave tops @param 0 1
+static const float3 liquidSurfFoamShadow = float3(.72,.8,.84);   // the darker foam edge, share of the water colour
+static const float liquidSurfFoamCut = 1.05;         // pattern + density where foam starts @param 0.8 1.6
+static const float2 liquidSurfFoamEdgeOffset = float2(.05,.05); // the darker edge's offset (foam cells) @param 0 .2
+static const float liquidSurfFoamBubbles = .5;       // how dark the gaps between bubbles inside foam get @param 0 1
+static const float3 liquidSurfFoamWhite = float3(.92,.95,.94);    // foam thrown onto sand and rock
 // SSR quality/range, in world units. Fixed work budget is a quality setting.
 // March steps come from water_reflection_quality (liquidReflectionQuality.x:
 // Low 12, Medium 20, High 40) within this range.
@@ -232,13 +254,24 @@ static const float2 liquidFarPatchRange = float2(.45,1.35); // @param 0 2
 static const float liquidFarSwellWeight = .45; // @param 0 1
 // Running water follows the liquid surface's own downhill slope (level lakes
 // have none). Speeds are metres per game second. River phases restart every
-// liquidRiverPeriod everywhere, so the two-phase flow never shears.
+// liquidRiverPeriod everywhere, so the two-phase flow never shears. At 0.9 s
+// a slow river moved its ripples ~0.3 m between crossfades of two unrelated
+// patterns, so the surface morphed in place ("pulsating jelly"): frames 0.1 s
+// apart correlated at 0.1-0.4 with no coherent shift. A phase now lasts long
+// enough for the pattern to visibly travel; liquidRiverTravel caps the
+// travel per phase on fast water, where a longer advection would stretch
+// the texture across speed changes and per-area phase offsets.
 static const float2 liquidRiverOnset = float2(.015,.08); // surface slope where water starts to run @param 0 0.5
 static const float3 liquidRiverSpeed = float3(.5,2.5,4); // at slope 0, added per unit slope, maximum @param 0 8
-static const float liquidRiverPeriod = .9; // game seconds per river flow phase @param 0.2 4
-static const float liquidRiverStreak = .06; // world units of streak per m/s @param 0 0.3
-static const float liquidRiverNormal = 1.3; // ripple amplitude of fully running water @param 0 3
+static const float liquidRiverPeriod = 2.4; // game seconds per river flow phase @param 0.2 6
+static const float liquidRiverTravel = 3.5; // longest ripple travel in one phase (world units) @param 0.5 10
+static const float liquidRiverStreak = .15; // world units of streak per m/s @param 0 0.5
+static const float liquidRiverNormal = 1.3; // ripple amplitude of fast running water (rapids; slow rivers keep 1) @param 0 3
 static const float2 liquidRiverFoam = float2(.1,.8); // foam amount of gentle and steep running water (rapids) @param 0 1.5
+// Running water breaks white where it runs shallow: along its banks and over
+// rocks and bars near the surface (water depth over the bed, world units).
+static const float2 liquidRiverShallows = float2(.06,.4); // depth of full foam and of none @param 0 1.5
+static const float liquidRiverShallowFoam = .45; // foam amount of fully running shallows @param 0 1.5
 // The decoded slope is smoothed over 5x5 vertices: zone11 cascades peak ~0.8-1.
 static const float2 liquidWaterfallSlope = float2(.55,1.1); // surface slope ramping to a full waterfall @param 0 2
 static const float liquidCascadeFoam = .95; // foam amount where a cascade source is 1 (impact pools) @param 0 1.5
@@ -308,6 +341,12 @@ float3 liquidWaveSlope(float2 base,float2 along,float seconds,float4 gradient) {
 float3 liquidRiverSlope(float2 base,float4 gradient) {
  return liquidWaveSlope(base,float2(1,0),0,gradient);
 }
+// Ripple travel in one river phase at a speed (world units).
+float liquidRiverShiftLength(float speed) { return min(speed*liquidRiverPeriod,liquidRiverTravel); }
+// Two crossfaded phases keep their contrast: a plain lerp of two unrelated
+// patterns loses up to a third of it mid-fade, which reads as breathing.
+// Scale a blend's deviation by this (w: weight of the second phase).
+float liquidPhaseContrast(float w) { return rsqrt((1-w)*(1-w)+w*w); }
 // River flow phases (a, b, blend of b) at game seconds; restart every period.
 float3 liquidRiverPhases(float seconds,float phaseOffset) {
  float cycle=seconds/liquidRiverPeriod+phaseOffset,a=frac(cycle);
@@ -317,8 +356,9 @@ float3 liquidRiverPhases(float seconds,float phaseOffset) {
 // with period liquidRiverPeriod (no unbounded term).
 float3 liquidRiverWaves(float2 position,float2 shift,float riverA,float riverB,float riverBlend,
                         float4 gradientA,float4 gradientB) {
- return lerp(liquidRiverSlope(position-shift*(riverA-.5),gradientA),
-             liquidRiverSlope(position-shift*(riverB-.5)+float2(3.7,1.9),gradientB),riverBlend);
+ float3 waves=lerp(liquidRiverSlope(position-shift*(riverA-.5),gradientA),
+                   liquidRiverSlope(position-shift*(riverB-.5)+float2(3.7,1.9),gradientB),riverBlend);
+ return float3(waves.xy*liquidPhaseContrast(riverBlend),waves.z);
 }
 // Liquid type programs (renderer.cpp, per batch from its meshes' liquid
 // vertices): NATIVE_LIQUID_WATER (no swamp or lava vertex: self-illumination
@@ -585,12 +625,25 @@ float4 liquidSceneReflection(float3 position,float3 direction,float selfIllumina
   float3 end=position+direction*liquidSsrDistance;
   float2 endUv;
   if(liquidProject(end,endUv)) {
-   int2 endPixel=int2(endUv*liquidReflectionTarget.xy);
-   if(liquidSceneDepth.Load(int3(endPixel,0))>=1) {
+   // Sky coverage around the end point, filtered at the colour's footprint
+   // (bilinear over four depth texels that far apart). Neighbouring rays end
+   // within a fraction of a pixel of each other, so one nearest depth texel
+   // magnified the sky edge's pixel steps into large bright blocks on the
+   // water (save1144 shallows).
+   float level=min(log2(max(liquidSsrDistance*spread/max(footprint,1e-4),1)),liquidReflectionQuality.y);
+   float stride=exp2(level);
+   float2 h=endUv*liquidReflectionTarget.xy/stride-.5,f=frac(h);
+   int2 maxPixel=int2(liquidReflectionTarget.xy)-1;
+   float skyShare=0;
+   [unroll]for(uint k=0;k<4;++k) {
+    float2 offset=float2(k&1,k>>1);
+    int2 endPixel=clamp(int2((floor(h)+offset+.5)*stride),int2(0,0),maxPixel);
+    skyShare+=(liquidSceneDepth.Load(int3(endPixel,0))>=1?1:0)*(offset.x?f.x:1-f.x)*(offset.y?f.y:1-f.y);
+   }
+   [branch]if(skyShare>0) {
     float edge=min(min(endUv.x,endUv.y),min(1-endUv.x,1-endUv.y));
-    float confidence=saturate(edge/liquidSsrEdgeFade)*liquidSsrScreenMiss*
+    float confidence=saturate(edge/liquidSsrEdgeFade)*liquidSsrScreenMiss*skyShare*
         (1-smoothstep(liquidSsrTowardCamera.x,liquidSsrTowardCamera.y,towardCamera));
-    float level=min(log2(max(liquidSsrDistance*spread/max(footprint,1e-4),1)),liquidReflectionQuality.y);
     return float4(liquidPointColor(end,endUv,level),confidence);
    }
   }
@@ -653,9 +706,6 @@ float3 liquidNoiseGradient(float2 p) {
 float3 liquidFilteredGradient(float2 p,float footprint) {
  return lerp(float3(.5,0,0),liquidNoiseGradient(p),liquidBandWeight(footprint));
 }
-float liquidShorePhase(float depth,float time) {
- return -depth*liquidShoreWaveFrequency-time*liquidShoreWaveSpeed;
-}
 float3 liquidMoltenColor(float3 lit,float3 emissive,float heat) {
  // Temperature ramp: dark crust -> deep red (authored hue family) -> orange ->
  // yellow-hot. The authored emissive picks the hue; brightness comes from heat.
@@ -672,7 +722,426 @@ cbuffer LiquidRippleFrame:register(b8) {
  float4 liquidRipplePhase[16];
  float4 liquidWaveWindow; // origin xy, 1/extent, valid
  float4 liquidRippleFlow[16]; // per unit: river surface gradient at its feet (the wave field's trail current)
+ float4 liquidSurfWindow; // sea surf texture: origin xy (world m), 1/extent xy
+ float4 liquidSurfMode; // valid, debug view + 2 * water_surf_quality, half texel uv xy
+ // Sea surf look, live from F10 (Renderer::prepare_liquid_ripples).
+ float4 liquidSurfWaveParams;  // swell crest-to-trough height (m), wavelength (m), speed (m per game second), choppiness
+ float4 liquidSurfShapeParams; // chop octaves (High), crest segment length (m), segment randomness 0..1, chop height (m)
+ float4 liquidSurfFoamParams;  // shore foam amount, shore foam width (m of water), crest foam threshold (normal z), foam cell size (m)
+ float4 liquidSurfLookParams;  // shallow tint, absorption, cliff burst, sea-edge fade (m; applied in the composite on the CPU)
+ float4 liquidSurfSwellDir;    // regional swell direction xy (unit, open sea toward the shores), z agreement 0..1, w wind whitecaps 0..1 (renderer_liquid.cpp)
 };
+// Sea surf field (liquid_surf.h, renderer-owned, one world-space texture over
+// the maps with surf; 2 m texels): r exposure to open water (0 on rivers,
+// ponds and sheltered lakes; faded out where the sea runs off the covered
+// maps), gb the incoming wave direction (from open water toward the shore;
+// none out at sea, beyond the coastal band), a the signed distance to the
+// waterline (water +, land -).
+Texture2D<float4> liquidSurf:register(t62);
+// Decoded: r, gb the incoming direction with its length the share of the
+// coastal swell (1 in the band, 0 out at sea), a metres.
+float4 liquidSurfDecode(float4 s) {
+ float2 incoming=s.gb*2-1;float l=length(incoming);
+ float d=s.a<.25?(s.a-.25)*4*liquidSurfLandReach:(s.a-.25)/.75*liquidSurfBand;
+ return float4(s.r,l>.05?incoming/l*saturate((l-.05)/.25):float2(0,0),d);
+}
+// Pixel stage: one filtered read.
+float4 liquidSurfAt(float2 p) {
+ float2 uv=(p-liquidSurfWindow.xy)*liquidSurfWindow.zw;
+ if(liquidSurfMode.x<.5||any(uv<0)||any(uv>1))return float4(0,0,0,liquidSurfBand);
+ return liquidSurfDecode(liquidSurf.SampleLevel(liquidNormalSampler,clamp(uv,liquidSurfMode.zw,1-liquidSurfMode.zw),0));
+}
+// Vertex and domain stages (no sampler bound there): the same bilinear
+// filter from four texels.
+float4 liquidSurfLoad(float2 p) {
+ float2 uv=(p-liquidSurfWindow.xy)*liquidSurfWindow.zw;
+ if(liquidSurfMode.x<.5||any(uv<0)||any(uv>1))return float4(0,0,0,liquidSurfBand);
+ uint width,height;liquidSurf.GetDimensions(width,height);
+ float2 t=uv*float2(width,height)-.5;int2 c=int2(floor(t));float2 f=t-float2(c);
+ int2 last=int2(width,height)-1;
+ float4 a=liquidSurf.Load(int3(clamp(c,0,last),0)),b=liquidSurf.Load(int3(clamp(c+int2(1,0),0,last),0));
+ float4 d=liquidSurf.Load(int3(clamp(c+int2(0,1),0,last),0)),e=liquidSurf.Load(int3(clamp(c+1,0,last),0));
+ return liquidSurfDecode(lerp(lerp(a,b,f.x),lerp(d,e,f.x),f.y));
+}
+// The sea surface height (x), shore steepness (y, impact 0 beach .. 1 cliff
+// or quay), smooth swell distance (z, m: water a heavily blurred distance to
+// land, land minus its distance to water) and smooth water depth (w, m) at p
+// (liquid_surf.h level, impact, swell_distance, swell_depth): t63, beside
+// t62. Crest geometry follows z, shoaling and breaking w, so crests never
+// bend over bumps of the bed. Outside the maps with surf: x far below, y 0,
+// z 60, w 0. Pixel stage: one filtered read; vertex and domain stages (no
+// sampler there): the same filter from four texels.
+Texture2D<float4> liquidSurfLevel:register(t63);
+float4 liquidSurfLevelAt(float2 p) {
+ float2 uv=(p-liquidSurfWindow.xy)*liquidSurfWindow.zw;
+ if(liquidSurfMode.x<.5||any(uv<0)||any(uv>1))return float4(-1e4,0,60,0);
+ return liquidSurfLevel.SampleLevel(liquidNormalSampler,clamp(uv,liquidSurfMode.zw,1-liquidSurfMode.zw),0);
+}
+float4 liquidSurfLevelLoad(float2 p) {
+ float2 uv=(p-liquidSurfWindow.xy)*liquidSurfWindow.zw;
+ if(liquidSurfMode.x<.5||any(uv<0)||any(uv>1))return float4(-1e4,0,60,0);
+ uint width,height;liquidSurfLevel.GetDimensions(width,height);
+ float2 t=uv*float2(width,height)-.5;int2 c=int2(floor(t));float2 f=t-float2(c);
+ int2 last=int2(width,height)-1;
+ float4 a=liquidSurfLevel.Load(int3(clamp(c,0,last),0)),b=liquidSurfLevel.Load(int3(clamp(c+int2(1,0),0,last),0));
+ float4 d=liquidSurfLevel.Load(int3(clamp(c+int2(0,1),0,last),0)),e=liquidSurfLevel.Load(int3(clamp(c+1,0,last),0));
+ return lerp(lerp(a,b,f.x),lerp(d,e,f.x),f.y);
+}
+// Integer lattice hash (exact at any world coordinate, unlike a sine hash).
+uint liquidSurfHashU(int2 c) {
+ uint h=uint(c.x)*0x8da6b343u^uint(c.y)*0xd8163841u;
+ h^=h>>15;h*=0x2c1b3c6du;h^=h>>12;h*=0x297a2d39u;h^=h>>15;
+ return h;
+}
+float liquidSurfHash(int2 c) { return float(liquidSurfHashU(c)>>8)*(1.0/16777216.0); }
+float2 liquidSurfHash2(int2 c) { uint h=liquidSurfHashU(c); return float2(h&0xffffu,h>>16)*(1.0/65536.0); }
+// Smooth value noise -1..1 (x) and its gradient (yz).
+float3 liquidSurfNoiseGrad(float2 p) {
+ float2 i=floor(p),f=p-i,u=f*f*(3-2*f),du=6*f*(1-f);int2 c=int2(i);
+ float a=liquidSurfHash(c),b=liquidSurfHash(c+int2(1,0)),d=liquidSurfHash(c+int2(0,1)),e=liquidSurfHash(c+int2(1,1));
+ return float3(lerp(lerp(a,b,u.x),lerp(d,e,u.x),u.y)*2-1,
+               2*du.x*lerp(b-a,e-d,u.y),2*du.y*lerp(d-a,e-b,u.x));
+}
+float liquidSurfNoise(float2 p) {
+ float2 i=floor(p),f=p-i;f=f*f*(3-2*f);int2 c=int2(i);
+ return lerp(lerp(liquidSurfHash(c),liquidSurfHash(c+int2(1,0)),f.x),
+             lerp(liquidSurfHash(c+int2(0,1)),liquidSurfHash(c+1),f.x),f.y)*2-1;
+}
+// 0..1 value noise over the plane and time (foam patches pulsing).
+float liquidSurfNoise3(float3 p) {
+ float3 i=floor(p),f=p-i;f=f*f*(3-2*f);int3 c=int3(i);
+ int2 a=c.xy+int2(c.z*7919,-c.z*104729),b=a+int2(7919,-104729);
+ float lower=lerp(lerp(liquidSurfHash(a),liquidSurfHash(a+int2(1,0)),f.x),lerp(liquidSurfHash(a+int2(0,1)),liquidSurfHash(a+1),f.x),f.y);
+ float upper=lerp(lerp(liquidSurfHash(b),liquidSurfHash(b+int2(1,0)),f.x),lerp(liquidSurfHash(b+int2(0,1)),liquidSurfHash(b+1),f.x),f.y);
+ return lerp(lower,upper,f.z);
+}
+// Nearest (x) and second nearest (y) distance to a cell grid's feature
+// points, each circling slowly on t, so foam pulses and reshapes instead of
+// sliding as a sheet. Isotropic: never stretched along an axis.
+float2 liquidSurfVoronoi(float2 uv,float t) {
+ float2 i=floor(uv),f=uv-i;int2 c=int2(i);float first=8,second=8;
+ [unroll]for(int y=-1;y<=1;++y)[unroll]for(int x=-1;x<=1;++x) {
+  float2 h=liquidSurfHash2(c+int2(x,y));
+  float2 r=float2(x,y)+.5+.4*sin(t+6.2831853*h)-f;
+  float d=dot(r,r);
+  if(d<first){second=first;first=d;}else second=min(second,d);
+ }
+ return sqrt(float2(first,second));
+}
+// Foam of a given density 0..1 at foam-cell coordinates fp, after the
+// stylized-water write-up's structure (foam level added to a drifting
+// pattern, cut sharply; emergence noise; an offset darker edge) with the
+// shoreline study's texture: the pattern is four octaves of domain-warped,
+// drifting value noise (irregular holes and wisps at every scale, never a
+// grid of round dots), with a weak share of circling Voronoi centres for
+// some clumping. Thin density leaves scattered lacy patches, full density a
+// sheet with irregular holes. Thick foam gets a few small, irregular bubble
+// holes. Far away (detail 0) its mean.
+// x foam 0..1, y the darker edge just outside it, z thickness 0..1.
+float liquidSurfFoamClumps(float2 uv,float t,float fine) {
+ float v=0,a=.5;float2 p=uv;
+ [unroll]for(int k=0;k<4;++k) {
+  v+=a*(liquidSurfNoise(p+t*float2(.031,-.023)*(k+1))*.5+.5);
+  p=float2(p.x*.8-p.y*.6,p.x*.6+p.y*.8)*2.07+float2(17.3,-9.1);
+  a*=.5;
+ }
+ // Close up: two finer octaves (a few cm) so the edge and holes stay crisp
+ // instead of a blurry enlarged pattern; their mean stands in far away.
+ [branch]if(fine>0) {
+  float f=liquidSurfNoise(p)*.5+.5;p=float2(p.x*.8-p.y*.6,p.x*.6+p.y*.8)*2.07+float2(4.7,13.9);
+  f+=.5*(liquidSurfNoise(p)*.5+.5);
+  v+=a*lerp(.75,f,fine);
+ } else v+=a*.75;
+ float c=saturate(1-liquidSurfVoronoi(uv*.9,t).x*1.1);
+ return v*.8+.25*c*c; // about 0 .. 1, mean ~.4
+}
+float3 liquidSurfFoamPattern(float2 fp,float density,float t,float detail,uint quality,float cells) {
+ [branch]if(density<=.01)return 0;
+ float level=saturate(density);
+ float3 mean=float3(smoothstep(.25,1,level)*.8,0,level);
+ [branch]if(detail<=.01)return mean;
+ float2 warp=float2(liquidSurfNoise(fp*.21+t*.04),liquidSurfNoise(fp*.21+float2(5.2,1.3)-t*.035))*.9;
+ // cells: foam cells per pixel (footprint / cell size). Crisp edges and
+ // fine octaves close up, soft far away.
+ float fine=1-smoothstep(.02,.08,cells);
+ float soft=clamp(cells*2.5,.025,.12);
+ float emerge=smoothstep(0,1,liquidSurfNoise3(float3(fp*.25,t*.2))*.5+.5);
+ float present=lerp(emerge,1,level);
+ float main=liquidSurfFoamClumps(fp+warp,t,fine)*present+level;
+ float foam=smoothstep(liquidSurfFoamCut,liquidSurfFoamCut+soft,main);
+ float offset=liquidSurfFoamClumps(fp+warp+liquidSurfFoamEdgeOffset,t,0)*present+level;
+ float edge=saturate(smoothstep(liquidSurfFoamCut,liquidSurfFoamCut+soft,offset)-foam);
+ float thick=saturate((main-liquidSurfFoamCut)*2);
+ float bubbles=1;
+ [branch]if(quality>0) {
+  float b=liquidSurfNoise((fp+warp)*5.3+float2(t*.1,0))*.5+.5;
+  bubbles=1-liquidSurfFoamBubbles*smoothstep(.64,.8,b)*smoothstep(.3,1,thick);
+ }
+ return lerp(mean,float3(foam*bubbles,edge,foam*thick),detail);
+}
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
+// Octave counts from the chop octave setting and water_surf_quality (High:
+// the setting, Medium one fewer, Low two fewer, at least one); the domain
+// stage displaces at most 1/2/3 of them, the pixel stage takes all for its
+// normals.
+uint liquidSurfOctaves(bool geometry) {
+ int quality=int(min(floor(liquidSurfMode.y*.25),2)); // mode.y = debug + 4 * quality
+ int count=max(int(clamp(round(liquidSurfShapeParams.x),1,6))-(2-quality),1);
+ return uint(geometry?min(count,quality+1):count);
+}
+// One chop octave: two rounded cusp-crested waves 60 degrees apart, each
+// running at its own phase (phase.xy), over noise-warped coordinates whose
+// warp evolves in place; raised to the choppiness: peaked crests over broad
+// troughs. 0..1.
+float liquidSurfOctave(float2 uv,float choppy,float2 phase) {
+ uv+=liquidSurfNoise(uv*.6+phase*.05)*1.1;
+ float sa=sin(uv.x+phase.x),sb=sin(dot(uv,float2(.5,.8660254))+phase.y);
+ // A rounded |sin|: no crease along the crest (creases drew hair lines).
+ float a=(1-sqrt(sa*sa+.02))/.8586,b=(1-sqrt(sb*sb+.02))/.8586;
+ return pow(max((a+b)*.5,1e-4),choppy);
+}
+// The sea chop height (m, mean zero) at p: octaves of liquidSurfOctave, each
+// rotated, about twice the frequency and a quarter of the height of the
+// last, a little rounder. Each octave is two copies running opposite ways
+// at its own (deep-water) phase speed, so the chop churns in place instead
+// of one pattern sliding toward the shore. Each octave fades out as its
+// waves near the pixel footprint (the distance LOD: no shimmer far away) and
+// the loop stops once one is gone. The domain stage passes footprint 0.
+float liquidSurfChop(float2 p,float seconds,uint count,float footprint) {
+ float freq0=3.14159265/max(liquidSurfWaveParams.y*liquidSurfChopLength,.5),freq=freq0;
+ float amp=liquidSurfShapeParams.w*.5,choppy=max(liquidSurfWaveParams.w,1);
+ float omega=seconds*liquidSurfWaveParams.z*liquidSurfChopSpeed*freq0;
+ float2 uv=p*float2(.8,1);float h=0;
+ [loop]for(uint k=0;k<count;++k) {
+  float fade=liquidBandWeight(footprint*freq*.31830989);
+  [branch]if(fade<=0)break;
+  float mean=1/(1.26+.825*choppy+.665*choppy*choppy); // the octave's mean over the plane
+  float w=omega*sqrt(freq/freq0)*(1+.13*k);
+  float o=liquidSurfOctave(uv*freq,choppy,float2(w,-.8*w))+liquidSurfOctave(uv*freq+float2(1.7,4.1),choppy,float2(-.9*w,w));
+  h+=(o-2*mean)*amp*fade;
+  uv=float2(uv.x*.8-uv.y*.6,uv.x*.6+uv.y*.8);
+  freq*=2.1;amp*=.27;choppy=lerp(choppy,1,.25);
+ }
+ return h;
+}
+// Pixel stage: the chop's slope by forward differences, the step following
+// the footprint (finer near, coarser far).
+float2 liquidSurfChopSlope(float2 p,float seconds,uint count,float footprint) {
+ float eps=clamp(footprint*.75,.03,.6);
+ float h0=liquidSurfChop(p,seconds,count,footprint);
+ float hx=liquidSurfChop(p+float2(eps,0),seconds,count,footprint);
+ float hy=liquidSurfChop(p+float2(0,eps),seconds,count,footprint);
+ return float2(hx-h0,hy-h0)/eps;
+}
+// Share of the chop: full on open water, calmer in the breaking shallows
+// (the swell carries the shore there) and none at the waterline; at a steep
+// shore it keeps its height up to the wall's foot.
+float liquidSurfChopWeight(float4 field,float4 level,float depth) {
+ float wall=smoothstep(.1,.4,level.y),deep=level.w;
+ return field.r*lerp(smoothstep(.04,.6,depth)*lerp(.45,1,smoothstep(.6,2.5,deep)),
+                     smoothstep(liquidSurfWallTrim*.6,liquidSurfWallTrim*1.6,max(field.a,0)),wall);
+}
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
+// The swell: crests rolling in toward the shore along the smooth swell
+// distance (t63 z). Each crest's arrival is shifted along the coast by
+// smooth noise over the shore point it heads for (liquidSurfOffset), drifting
+// slowly in time, and within its own cycle by a per-crest seeded warp
+// (liquidSurfCrestWarp), so every crest lands, breaks and spaces itself
+// differently, at full height, never one front running along the coast nor
+// the same shape every time. Each crest has its own size (sets, lulls, a
+// segment envelope reseeded per crest), grows and steepens as the smooth
+// depth shoals, breaks where the water is about as deep as it is high and
+// runs out as a low bore; against a steep shore it rises on the rock and is
+// trimmed only at the wall's foot.
+struct LiquidSurfSwell {
+ float height;float2 slope; // m along world up, and its gradient
+ float crest;    // 0..1 the crest shape here (1 on a top)
+ float front;    // 0..1 on the shoreward face of a crest
+ float behind;   // 0 at a top .. 1 at the next trough, behind it
+ float breaking; // 0..1 how far the crests here have broken
+ float wave;     // 0..1 this crest's size
+ float seed;     // 0..1 this crest's own seed (its foam layout)
+};
+float liquidSurfTravel(float seconds) {
+ // Irregular arrivals: the swell surges ahead and slackens (two slow noises),
+ // so crests never land on one steady beat.
+ return seconds*liquidSurfWaveParams.z+liquidSurfSurge*(liquidSurfNoise(float2(seconds*.045,7.3))+.6*liquidSurfNoise(float2(seconds*.11,2.9)));
+}
+// x the along-coast arrival offset (wavelengths), yz its gradient (per m).
+float3 liquidSurfOffset(float2 shore,float seconds) {
+ float segment=max(liquidSurfShapeParams.y,2);
+ float3 a=liquidSurfNoiseGrad(shore/segment+float2(seconds*.012,-seconds*.009));
+ float3 b=liquidSurfNoiseGrad(shore/(segment*.43)+float2(5.2,1.3)+float2(-seconds*.017,seconds*.013));
+ // Up to ~1.6 wavelengths, held to about half a wavelength per segment so the
+ // crests stay mostly parallel to the coast (oblique, never side-on).
+ float k=liquidSurfShapeParams.z*min(1.6,.55*segment/max(liquidSurfWaveParams.y,1));
+ return float3(a.x+.3*b.x,a.yz/segment+.3*b.yz/(segment*.43))*k;
+}
+// Per-crest warp of its own cycle (wave n at a shore point): how far its top
+// is moved ahead or back within the cycle (|x| < 1/pi keeps the cycle
+// monotone), from noise reseeded for every crest; yz its gradient (per m).
+float3 liquidSurfCrestWarp(float n,float2 shore,float seconds) {
+ float segment=max(liquidSurfShapeParams.y,2)*.8;
+ float3 g=liquidSurfNoiseGrad(shore/segment+liquidSurfHash2(int2(int(n),433))*97+seconds*.01);
+ float k=.28*liquidSurfShapeParams.z;
+ return float3(g.x,g.yz/segment)*k;
+}
+// Size of crest n at a shore point: 3-5 large crests per set and a lull,
+// per-crest randomness, and its own segment envelope (crests about a
+// segment long with low gaps, a fresh layout for every crest, drifting).
+float liquidSurfCrestSize(float n,float2 shore,float seconds) {
+ float set=floor(n/liquidSurfSetLength);
+ float big=(n-set*liquidSurfSetLength)<lerp(3,5.99,liquidSurfHash(int2(int(set),57)))?1:liquidSurfLull;
+ float segment=max(liquidSurfShapeParams.y,2)*lerp(.6,1.4,liquidSurfHash(int2(int(n),2903)));
+ float2 jitter=liquidSurfHash2(int2(int(n),911))*61;
+ float envelope=smoothstep(-.35,.35,liquidSurfNoise(shore/segment+jitter+seconds*float2(.008,-.006)));
+ // A quarter of the crests barely form, so arrivals come in uneven groups.
+ float h=liquidSurfHash(int2(int(n),1713));
+ float form=h<.25?.12:lerp(.55,1.25,(h-.25)/.75);
+ return big*form*lerp(1,lerp(.1,1,envelope),liquidSurfShapeParams.z);
+}
+// The regular phase along the smooth swell distance d plus travel, its
+// spacing warp and the along-coast offset (x), and its gradient (yz, per m).
+// Crests follow the heavily smoothed shore distance (liquid_surf.h
+// swell_distance), so they always come in toward each shore and only gently
+// curve in bays (a plane swell along one regional direction ran along coasts
+// not facing it).
+// gradient: that of d (per m); shore: where the along-coast noise is read.
+float3 liquidSurfShorePhase(float d,float2 gradient,float2 shore,float seconds) {
+ float lambda=max(liquidSurfWaveParams.y,1);
+ float z=(d+liquidSurfTravel(seconds))/lambda;
+ float3 warp=liquidSurfNoiseGrad(float2(z*.37,3.1)); // spacing variation; monotone: .37*2*1.5*spacing < 1
+ float3 offset=liquidSurfOffset(shore,seconds);
+ return float3(z+liquidSurfSpacing*warp.x+offset.x,
+               gradient*(1+liquidSurfSpacing*.37*warp.y)/lambda+offset.yz);
+}
+// gradient: that of the smooth swell distance level.z at p (per m).
+LiquidSurfSwell liquidSurfSwellAt(float2 p,float4 field,float4 level,float2 gradient,float seconds,float depth) {
+ LiquidSurfSwell s=(LiquidSurfSwell)0;
+ float band=length(field.gb),d=max(level.z,0);
+ // Shore-distance crests stay in the band.
+ float reach=band*(1-smoothstep(liquidSurfBand*.6,liquidSurfBand,max(field.a,0)));
+ [branch]if(reach<=0)return s;
+ // The along-coast noise (offset, crest warp and size) is read at p, not at
+ // the shore point p+incoming*d: out at sea d is tens of metres, so where
+ // the stored direction is weak or noisy (where shore directions disagree)
+ // a small error in it swung that point far and squeezed the crests into
+ // tight bunched stripes (save1146, Gipat south-west). For the same reason
+ // the slope takes the distance field's own gradient, not -incoming.
+ float2 shore=p;
+ float3 phase=liquidSurfShorePhase(d,gradient,shore,seconds);
+ float n=floor(phase.x),y0=phase.x-n;
+ // This crest's own warp of its cycle (ends fixed, so neighbours join).
+ float3 cw=liquidSurfCrestWarp(n,shore,seconds);
+ float y=y0+cw.x*sin(3.14159265*y0);
+ float2 gradY=(1+cw.x*3.14159265*cos(3.14159265*y0))*phase.yz+sin(3.14159265*y0)*cw.yz;
+ float size=liquidSurfCrestSize(n,shore,seconds);
+ float height=liquidSurfWaveParams.x*field.r*size;
+ float wall=smoothstep(.1,.4,level.y),deep=max(level.w,0);
+ // Shoaling, then breaking at a smooth depth about the crest's height
+ // (each crest at its own depth: its height differs).
+ float shoal=lerp(1,1.45,1-smoothstep(.5,3,deep));
+ float breakDepth=height*shoal*1.25;
+ s.breaking=(1-smoothstep(breakDepth*.55,breakDepth*1.1+.05,deep))*(1-wall);
+ float amplitude=height*shoal*lerp(1,.4,s.breaking*s.breaking)*reach;
+ // A steep shore: higher against the rock in the last metres, trimmed only
+ // at the wall's foot. A beach: flat only at the drawn waterline (the swash).
+ float fromWall=max(field.a,0);
+ // Steep shore: the coarse water mesh cannot climb a wall, so its lifted
+ // vertices stood as spiky triangles against the rock; the wave fades out
+ // over the last ~2.5 m and the impact is carried by foam on the water.
+ amplitude*=lerp(smoothstep(.02,.3,depth),smoothstep(.6,2.5,fromWall),wall);
+ // Shape: a rising front (shoreward, steeper as it breaks), a rounded top
+ // and a long smooth back; peaked a little (broad troughs).
+ float front=lerp(.36,.1,s.breaking)*lerp(1,.7,wall);
+ float h,dh;
+ if(y<front){float t=y/front;h=t*t*(3-2*t);dh=6*t*(1-t)/front;}
+ else{float t=(y-front)/(1-front);h=.5+.5*cos(3.14159265*t);dh=-1.5707963*sin(3.14159265*t)/(1-front);}
+ float hp=pow(max(h,1e-4),1.4),dhp=1.4*hp/max(h,1e-4)*dh;
+ s.height=amplitude*(hp-.33);
+ s.slope=amplitude*dhp*gradY;
+ s.crest=hp;
+ s.front=y<front?smoothstep(0,1,y/front):1-smoothstep(0,.08,(y-front)/(1-front));
+ s.behind=y<front?0:(y-front)/(1-front);
+ s.wave=saturate(size)*reach;
+ s.breaking*=reach;
+ s.seed=liquidSurfHash(int2(int(n),5521));
+ return s;
+}
+// The crests arriving at the waterline at a shore point (the swell's own
+// phase at distance 0 with each crest's warp, so the swash and the bursts
+// land where and when its crests do): x time since the last arrival (crest
+// periods 0..1), y that crest's size 0..1 (x exposure), z its seed.
+float3 liquidSurfArrival(float2 shore,float2 incoming,float exposure,float seconds) {
+ float phase=liquidSurfShorePhase(0,-incoming,shore,seconds).x;
+ float n=floor(phase),y0=phase-n;
+ float y=y0+liquidSurfCrestWarp(n,shore,seconds).x*sin(3.14159265*y0);
+ float arrived=y>=.1?n:n-1; // broken crests: the top passes about .1 into the cycle
+ return float3(frac(y-.1),saturate(liquidSurfCrestSize(arrived,shore,seconds))*exposure,liquidSurfHash(int2(int(arrived),5521)));
+}
+// The sea surf surface height (m along world up) at p for the domain stage:
+// the swell and the geometry octaves of the chop.
+float liquidSurfHeight(float2 p,float4 field,float4 level,float seconds,float depth) {
+ return liquidSurfSwellAt(p,field,level,float2(0,0),seconds,depth).height+
+        liquidSurfChop(p,seconds,liquidSurfOctaves(true),0)*liquidSurfChopWeight(field,level,depth);
+}
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
+// The shore ground above the waterline (terrain pixel stage), elevation the
+// ground's height above the sea surface (m), normal the ground's, footprint
+// its metres per pixel: x the thin swash sheet, y its lacy foam edge and the
+// lace it leaves on the sand, z wet sand or rock, w white water and spray
+// thrown up a steep face. Each arriving crest (liquidSurfArrival) pushes the
+// swash up the beach, where it slows, stops and drains, each stretch of shore
+// on its own; on a steep shore it bursts up the face and falls back.
+float4 liquidSurfShoreAt(float2 p,float4 field,float4 level,float seconds,float elevation,float3 normal,float footprint) {
+ float band=length(field.gb);
+ float2 incoming=band>1e-3?field.gb/band:float2(0,0);
+ float2 shore=p+incoming*min(level.z,0); // < 0 on land: back to the waterline
+ float3 arrival=liquidSurfArrival(shore,incoming,field.r,seconds);
+ float since=arrival.x,height=liquidSurfWaveParams.x*arrival.y;
+ float wall=smoothstep(.1,.4,level.y),cell=max(liquidSurfFoamParams.w,.2);
+ float detail=liquidBandWeight(footprint/cell);
+ uint quality=uint(min(floor(liquidSurfMode.y*.25),2));
+ float2 fp=p/cell+arrival.z*41; // a fresh foam layout per crest
+ float scallop=lerp(.5,liquidSurfVoronoi(p/cell*.5,seconds*.2).x,detail); // scallops along the swash edge
+ float4 o=0;
+ // Beach: the sheet runs up fast, slows, stops and drains; its foam edge
+ // rides its top, lace and wet sand stay behind it.
+ float flat=smoothstep(.55,.85,normal.z)*(1-wall);
+ float rise=since<liquidSurfRunupRise?sin(1.5707963*since/liquidSurfRunupRise):1-smoothstep(liquidSurfRunupRise,liquidSurfRunupRise+.6,since);
+ float top=liquidSurfRunup*height*(.7+.6*scallop);
+ float under=top*rise-elevation; // > 0 under the sheet
+ float fresh=1-smoothstep(.1,.9,since);
+ o.x=smoothstep(0,.015,under)*(.35+.65*fresh)*flat;
+ [branch]if(flat>0&&top>1e-3) {
+  float edge=(1-smoothstep(0,.03,abs(under-.01)))*smoothstep(.02,.15,rise*arrival.y);
+  float left=smoothstep(-.01,.01,top-elevation)*step(0,-under)*fresh*(1-smoothstep(liquidSurfRunupRise,1,since))*.55;
+  o.y=liquidSurfFoamPattern(fp,max(edge,left),seconds*.5,detail,quality,footprint/cell).x*flat*saturate(liquidSurfFoamParams.x);
+ }
+ float wetTop=liquidSurfRunup*liquidSurfWaveParams.x*field.r*(.75+.5*scallop);
+ o.z=max(smoothstep(-.02,.02,wetTop-elevation)*lerp(.6,1,fresh),1-smoothstep(0,.05,elevation))*flat;
+ float keep=(field.r>1e-3?1:0)*(1-smoothstep(liquidSurfRunupInland-1,liquidSurfRunupInland,-field.a));
+ return o*keep;
+}
+// water_surf_debug 1: band water unlit by exposure (blue sheltered, yellow,
+// red fully exposed), darker stripes across the incoming direction.
+// water_surf_debug 2: shore impact, dark green beach through yellow to magenta cliff or quay.
+float3 liquidSurfImpactDebug(float impact) {
+ return impact<.5?lerp(float3(.05,.35,.1),float3(1,.9,.1),impact*2):lerp(float3(1,.9,.1),float3(.95,.1,.85),impact*2-1);
+}
+float3 liquidSurfDebug(float4 field,float2 p) {
+ float3 ramp=field.r<.5?lerp(float3(.1,.25,.9),float3(1,.9,.1),field.r*2):lerp(float3(1,.9,.1),float3(1,.1,.05),field.r*2-1);
+ return ramp*(frac(dot(p,field.gb)*.25)<.2?.55:1);
+}
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
 // Character ripples: local rings and churn from the renderer's wave
 // simulation (liquid_waves.h), plus a short Kelvin-angle V trailing each
 // moving unit, evaluated here from the unit's position, heading, speed and
@@ -786,10 +1255,10 @@ float3 liquidUnitContact(float2 p,float2 current,float seconds,float footprint) 
    float along=dot(q,flow),lat=dot(q,float2(-flow.y,flow.x));
    if(along>0){
     float3 phase=liquidRiverPhases(seconds,ph.x);
-    float shift=liquidRiverPeriod*min(liquidRiverSpeed.x+liquidRiverSpeed.y*runSlope,liquidRiverSpeed.z);
+    float shift=liquidRiverShiftLength(min(liquidRiverSpeed.x+liquidRiverSpeed.y*runSlope,liquidRiverSpeed.z));
     float sA=liquidFilteredNoise(float2((along-phase.x*shift)*2.5,lat*9)+ph.x,footprint*9);
     float sB=liquidFilteredNoise(float2((along-phase.y*shift)*2.5,lat*9)+ph.x+7.3,footprint*9);
-    float streaks=smoothstep(.45,.8,lerp(sA,sB,phase.z));
+    float streaks=smoothstep(.45,.8,.5+(lerp(sA,sB,phase.z)-.5)*liquidPhaseContrast(phase.z));
     float spread=r*(.7+.5*along/max(tailLength,1e-3));
     foam=max(foam,streaks*exp(-lat*lat/(spread*spread))*smoothstep(r*.5,r*1.1,along)*
                   saturate(1-along/(r+tailLength))*run*.8);
@@ -955,16 +1424,33 @@ float liquidTileField(uint flags,float2 local) {
  [unroll]for(uint k=0;k<9;++k)field+=((flags>>(16+k))&1)*ix[k%3]*iy[k/3];
  return field;
 }
-// Sheets end at tile borders: keep them whole up to the rounded outline and
-// fade the square outer corners.
-float liquidTileCoverage(uint flags,float2 local) {
- return smoothstep(.25,.5,liquidTileField(flags,local));
-}
 float3 liquidScenePoint(int2 pixel,float z) {
  float2 ndc=(float2(pixel)+.5)/liquidReflectionTarget.xy*float2(2,-2)+float2(-1,1);
  float4 p=mul(liquidInverseWorldClip,float4(ndc,z,1));
  return p.xyz/(abs(p.w)>1e-6?p.w:1e-6);
 }
+// Water depth over the bed averaged over about 1.5 m (this pixel and eight
+// snapshot reads on a ring, rotated per pixel), dry ground counting as 0;
+// without the snapshot (Low path, the half-resolution pass) the vertex
+// depth. Shipped beds step from flat shallows straight down a tile edge,
+// and the shallow look taken from the exact depth drew those square steps
+// as hard white-edged blocks (save1144 sandbar).
+static const float liquidBedSmoothReach = 1.5; // m @param 0.3 4
+float liquidSmoothBedDepth(float2 pixel,float3 position,float vertexDepth,float footprint) {
+ [branch]if(liquidLowPath||liquidReflectionTarget.z<.5)return max(vertexDepth,0);
+ int2 last=int2(liquidReflectionTarget.xy)-1;
+ float reach=clamp(liquidBedSmoothReach/max(footprint,1e-4),1,64);
+ float turn=6.2831853*frac(52.9829189*frac(dot(pixel,float2(.06711056,.00583715))));
+ float sum=0,count=0;
+ [unroll]for(uint k=0;k<9;++k) {
+  float a=turn+k*.7853982,r=k==0?0:reach*(k&1?1:.55);
+  int2 q=clamp(int2(pixel+float2(cos(a),sin(a))*r),int2(0,0),last);
+  float z=liquidSceneDepth.Load(int3(q,0));
+  if(z<1){sum+=max(position.z-liquidScenePoint(q,z).z,0);++count;}
+ }
+ return count>0?sum/count:max(vertexDepth,0);
+}
+static float liquidBedSmooth=0; // shadeLiquidSurface: liquidSmoothBedDepth of this pixel
 #ifdef __cplusplus
 //")hlsl" R"hlsl( //"
 #endif
@@ -989,7 +1475,7 @@ static const float liquidTessLipCurve = .8; // drop (m) over which the lip curls
 static const float liquidTessColumns = .22; // thicker and thinner columns of falling water (m) @param 0 0.6
 static const float liquidTessSides = .45; // the sides pull back into the rock by up to this (m) @param 0 1.5
 static const float liquidTessSideDepth = .6; // water depth over the rock below which the sides thin out (m) @param 0.1 2
-static const float2 liquidTessRipple = float2(.04,.02); // ripple amplitude on falls and on running water (m) @param 0 0.2
+static const float2 liquidTessRipple = float2(.04,0); // ripple amplitude on falls (x, m); y unused: running water no longer ripples its mesh @param 0 0.2
 static const float liquidTessRippleSpeed = 5; // radians per game second @param 0 20
 // Corner weight: falling or running water (and the water a fall lands in, so
 // edges shared with the pool subdivide alike); lakes and lava stay whole.
@@ -999,6 +1485,15 @@ float liquidTessWeight(float cascade,float2 current,float selfIllumination) {
 float liquidTessEdgeFactor(float3 a,float3 b,float weightA,float weightB,float maxFactor) {
  if(maxFactor<=1||max(weightA,weightB)<=0)return 1;
  return clamp(ceil(length(a-b)/liquidTessSpacing),1,maxFactor);
+}
+// Sea surf on tessellated water: a corner in the coastal band with surf
+// carries liquidSurfTessFlag on top of its fall weight (nativeTessVS); its
+// edges split to liquidSurfTessSpacing for the wave height (nativeTerrainDomain).
+// Water without surf keeps exactly its former factors and displacement.
+bool liquidTessSurf(float limit) { return limit>=liquidSurfTessFlag; }
+float liquidTessFall(float limit) { return liquidTessSurf(limit)?limit-liquidSurfTessFlag:limit; }
+float liquidSurfTessEdgeFactor(float3 a,float3 b,float maxFactor) {
+ return maxFactor<=1?1:clamp(ceil(length(a-b)/liquidSurfTessSpacing),1,maxFactor);
 }
 // Displacement (m, along the horizontal flow direction) at a point of the
 // liquid surface: rest position q, interpolated current, drop below the lip,
@@ -1017,8 +1512,10 @@ float liquidTessDisplacement(float3 q,float2 current,float drop,float depth,floa
  // at an irregular line set by the columns.
  float side=1-smoothstep(0,liquidTessSideDepth,depth+(columns-.5)*.5);
  float outward=(lip+liquidTessColumns*(columns-.5)*smoothstep(0,1,drop))*(1-side)-liquidTessSides*side;
- float ripple=sin(drop*3.1+across*1.7-seconds*liquidTessRippleSpeed)*lerp(liquidTessRipple.y,liquidTessRipple.x,fall);
- return fall*outward+run*ripple;
+ // Falls only: on running water this sideways wobble (and its phase across
+ // world coordinates, noisy where the flow turns) made the sheet heave.
+ float ripple=sin(drop*3.1+across*1.7-seconds*liquidTessRippleSpeed)*liquidTessRipple.x;
+ return fall*(outward+ripple);
 }
 struct LiquidSurfaceInput {
  float3 position, viewDirection, tint, emissive;
@@ -1045,7 +1542,10 @@ float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
  float vertical=max(i.depth,0),path=vertical/max(v.z,.2); // sky behind: authored depth
  if(z<1) {
   float3 bed=liquidScenePoint(pixel,z);
-  path=length(i.position-bed);vertical=max(i.position.z-bed.z,0);
+  vertical=max(i.position.z-bed.z,0);
+  // Absorption and opacity take the smoothed bed depth (liquidBedSmooth);
+  // the refraction reach keeps this pixel's own depth.
+  path=liquidBedSmooth/max(v.z,.2);
  }
  float2 uv=(float2(pixel)+.5)/liquidReflectionTarget.xy,refracted;
  float3 t=refract(-v,n,1/liquidRefractionIndex);
@@ -1063,7 +1563,7 @@ float liquidShoreAmount(LiquidSurfaceInput i) {
  float breakup=liquidFilteredNoise(i.position.xy*liquidShoreNoiseScale-wind*i.time*liquidShoreFlowSpeed*motion,
                                   i.footprint*liquidShoreNoiseScale);
  float surge=1+liquidShoreSurge*sin(i.time*liquidSecondsPerTime*liquidShoreSurgeRate+breakup*6.2831853);
- float edge=1-smoothstep(0,liquidShoreDepth*surge,max(i.depth,0));
+ float edge=1-smoothstep(0,liquidShoreDepth*surge,liquidBedSmooth);
  float luminance=dot(saturate(i.tint),float3(.2126,.7152,.0722));
  float clarity=lerp(liquidMuddyShoreMinimum,1,
                     smoothstep(liquidShoreColorRange.x,liquidShoreColorRange.y,luminance));
@@ -1139,6 +1639,29 @@ float liquidCurtainWeight(LiquidSurfaceInput i,float running) {
 #ifdef __cplusplus
 //")hlsl" R"hlsl( //"
 #endif
+// The last metres of running water above a fall lip: near a fall (cascade
+// source, which fades over kLiquidCascadeReach) but not below its lip (drop
+// ~0) and not the falling face. There the water speeds up, chops and
+// streaks white and its surface leans toward the lip.
+static const float2 liquidLipDrop = float2(.15,.6); // drop below the lip (m) over which the approach ends @param 0 2
+static const float liquidLipSpeed = .8; // share by which the flow speeds up at the lip @param 0 3
+static const float liquidLipChop = .9; // extra ripple amplitude at the lip @param 0 3
+static const float liquidLipFoam = .5; // foam amount of light streaks at the lip @param 0 1
+static const float liquidLipTilt = .12; // extra surface slope toward the lip @param 0 0.5
+float liquidLipApproach(LiquidSurfaceInput i,float running,float waterfall) {
+ return saturate(i.cascade)*(1-smoothstep(liquidLipDrop.x,liquidLipDrop.y,i.drop))*running*(1-waterfall);
+}
+// Shallow water foam follows the depth over the bed, which is linear over
+// each 1 m triangle of the bed grid: thresholded directly it drew the grid's
+// straight edges as white squares. A fine noise moves the threshold.
+static const float liquidShallowBreakup = .22; // depth (m) the noise moves the threshold by @param 0 1
+static const float liquidShallowTile = 1.7; // world units per breakup noise repeat @param 0.3 6
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
 // The foam layer: rapids and pool whitewater as colour and coverage over the
 // water body drawn before it.
 float4 liquidFoamLayer(LiquidSurfaceInput i,float3 ambient,float3 sunColor,float3 l,float3 tint,float mud,
@@ -1149,8 +1672,14 @@ float4 liquidFoamLayer(LiquidSurfaceInput i,float3 ambient,float3 sunColor,float
  float cascade=saturate(i.cascade);
  // Impact: water near a fall (cascade source) that lies well below its lip.
  float impact=pow(cascade,liquidCascadeFalloff)*smoothstep(.1*liquidWaterfallAeration,1.5*liquidWaterfallAeration,i.drop);
- float amount=max(running*lerp(liquidRiverFoam.x,liquidRiverFoam.y,smoothstep(.1,.8,steep)),
-                  impact*liquidCascadeFoam)*(1-.6*mud);
+ float shallows=0;
+ [branch]if(running>0&&i.depth<liquidRiverShallows.y+liquidShallowBreakup) {
+  float breakup=liquidDetailAt(i.position.xy/liquidShallowTile+.23,liquidShallowTile,i.gradient).b;
+  shallows=1-smoothstep(liquidRiverShallows.x,liquidRiverShallows.y,i.depth+(breakup-.5)*2*liquidShallowBreakup);
+ }
+ float lip=liquidLipApproach(i,running,waterfall);
+ float amount=max(running*max(lerp(liquidRiverFoam.x,liquidRiverFoam.y,smoothstep(.1,.8,steep)),shallows*liquidRiverShallowFoam),
+                  max(impact*liquidCascadeFoam,lip*liquidLipFoam))*(1-.6*mud);
  float cover=0;float3 color=foamBase;
  [branch]if(amount>0&&waterfall<1) {
   // Churning pool foam: two layers, each jumping to a fresh random place and
@@ -1176,9 +1705,12 @@ float4 liquidFoamLayer(LiquidSurfaceInput i,float3 ambient,float3 sunColor,float
    float4 fb=liquidDetailAt((i.position.xy-shiftB)/liquidFoamTile+.77,liquidFoamTile,riverGradientB);
    float4 ga=liquidDetailAt((i.position.xy-shiftA)/liquidFoamFineTile+.19,liquidFoamFineTile,riverGradientA);
    float4 gb=liquidDetailAt((i.position.xy-shiftB)/liquidFoamFineTile+.61,liquidFoamFineTile,riverGradientB);
-   coarse=lerp(coarse,lerp(fa.b*.5+fa.g*.5,fb.b*.5+fb.g*.5,riverBlend),running);
-   fine=lerp(fine,lerp(ga.b,gb.b,riverBlend),running);
-   foamSlope=lerp(foamSlope,(lerp(ga.gb,gb.gb,riverBlend)-.5)*2.2,running);
+   // Constant-contrast blends: the thresholded foam masses would otherwise
+   // shrink at every crossfade and the foam would pulse.
+   float contrast=liquidPhaseContrast(riverBlend);
+   coarse=lerp(coarse,.5+(lerp(fa.b*.5+fa.g*.5,fb.b*.5+fb.g*.5,riverBlend)-.5)*contrast,running);
+   fine=lerp(fine,.5+(lerp(ga.b,gb.b,riverBlend)-.5)*contrast,running);
+   foamSlope=lerp(foamSlope,(lerp(ga.gb,gb.gb,riverBlend)-.5)*2.2*contrast,running);
   }
   // Soft rounded masses where the foam is thick, a lace network of thin
   // foam lines (ridges of the fine churn) on the coarse patches around them,
@@ -1212,11 +1744,24 @@ static float4 liquidTransmitted=0;
 float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  float3 sunDirection,float3 sunColor,float3 skyColor) {
  liquidTransmitted=0;
+ liquidBedSmooth=liquidSmoothBedDepth(i.pixel,i.position,i.depth,i.footprint);
  // A lifted pit (impact funnel) lies flat: its authored slope no longer runs.
  float pit=smoothstep(0,.6,i.fill);
  i.current*=1-pit;
  float windLength=length(i.windDirection);
  float2 along=windLength>1e-6?i.windDirection/windLength:float2(0,1);
+ // On the sea the small waves drift with the swell toward the shore, not
+ // along the game's wind (offshore wind made the sea seem to stream away
+ // from the beach).
+ float4 surfField=liquidSurfAt(i.position.xy);
+ // One direction for all water of the map (the regional swell direction
+ // where it has one), never per pixel: the drift is direction times game
+ // time, so any spatial change of direction shears the ripples without
+ // bound. Blending it by the per-pixel sea weight smeared them into streaks
+ // and arcs that grew with time wherever that weight changes: along the sea
+ // field's end at the map edge (a V at the corners), toward rivers and near
+ // shores (save1146, user F11s).
+ if(liquidSurfSwellDir.z>=.3)along=liquidSurfSwellDir.xy;
  float seconds=i.time*liquidSecondsPerTime;
  float calm=saturate(i.selfIllumination);
  float windiness=lerp(liquidWaveMinimum,1,saturate(abs(i.multiplier)*saturate(i.windForce)*1.5));
@@ -1234,12 +1779,13 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  float steep=runSlope;
  float running=smoothstep(liquidRiverOnset.x,liquidRiverOnset.y,runSlope)*liquidShoreEnabled(i.selfIllumination);
  float waterfall=smoothstep(liquidWaterfallSlope.x,liquidWaterfallSlope.y,steep)*running;
- float riverSpeed=min(liquidRiverSpeed.x+liquidRiverSpeed.y*runSlope,liquidRiverSpeed.z);
+ float lip=liquidLipApproach(i,running,waterfall);
+ float riverSpeed=min(liquidRiverSpeed.x+liquidRiverSpeed.y*runSlope,liquidRiverSpeed.z)*(1+lip*liquidLipSpeed);
  float3 riverPhase=liquidRiverPhases(seconds,phaseOffset);
  float riverA=riverPhase.x,riverB=riverPhase.y,riverBlend=riverPhase.z;
  // Velocity is the current scaled (to zero below the onset), so it fades out
  // smoothly instead of normalising tiny, direction-unstable currents.
- float flowGain=riverSpeed*saturate(runSlope/liquidRiverOnset.y)/max(runSlope,1e-4);
+ float flowGain=liquidRiverShiftLength(riverSpeed)/liquidRiverPeriod*saturate(runSlope/liquidRiverOnset.y)/max(runSlope,1e-4);
  float2 riverShift=i.current*flowGain*liquidRiverPeriod;
  float4 riverGradient=liquidStreakGradient(i.gradient,flowDir,running*riverSpeed*liquidRiverStreak);
  // The advected coordinate also changes with the flow across the surface:
@@ -1260,6 +1806,16 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
   return liquidFoamLayer(i,ambient,sunColor,liquidSafeNormal(sunDirection),layerTint,layerMud,seconds,phaseOffset,
                          running,steep,waterfall,flowDir,riverShift,riverA,riverB,riverBlend,riverGradientA,riverGradientB);
  }
+ // Sea surf exposure here (0 off exposed coasts: there the terms below add
+ // nothing and the water is unchanged). Never on swamp, lava or running water.
+ float surfGate=liquidShoreEnabled(i.selfIllumination)*(1-saturate(i.mud))*(1-running);
+ float surf=surfField.r*surfGate;
+ float surfDebug=fmod(liquidSurfMode.y,4); // water_surf_debug: 1 exposure, 2 shore impact
+ [branch]if(surfDebug>.5&&surfDebug<2.5&&LIQUID_WATERLIKE(i.selfIllumination)&&surfField.a<liquidSurfBand-.01)
+  return float4(surfDebug<1.5?liquidSurfDebug(surfField,i.position.xy):liquidSurfImpactDebug(liquidSurfLevelAt(i.position.xy).y),1);
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
  // Two detail layers drifting in different directions (no single sliding sheet).
  float2 across=float2(-along.y,along.x);
  float speed=liquidDetailDrift*lerp(1,liquidEmissiveFlow,calm)*seconds;
@@ -1305,13 +1861,29 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
   waveField.xy+=swell.xy*liquidFarSwellWeight*far;
  }
  float2 wave=waveField.xy;
- float amplitude=liquidNormalAmplitude*lerp(.8,1,windiness)*lerp(1,.25,calm)*lerp(1,liquidRiverNormal,running);
+ float amplitude=liquidNormalAmplitude*lerp(.8,1,windiness)*lerp(1,.25,calm)*lerp(1,liquidRiverNormal,running*saturate((riverSpeed-1)/2))*(1+lip*liquidLipChop);
  float slopeVariance=waveField.z*amplitude*amplitude;
  float2 slope=-wave*amplitude;
  float2 shoreSlope=0;
  float3 ripples=0;
  [branch]if(LIQUID_WATERLIKE(i.selfIllumination))ripples=liquidWaveRipples(i.position.xy,i.current,seconds,i.footprint);
  shoreSlope+=ripples.xy;
+ // Sea surf waves: the slope of the same height field the domain stage
+ // displaces (the swell analytically, the chop by finite differences with
+ // all its octaves, the finest fading with the footprint), so normals match
+ // the geometry; untessellated water (neighbour maps, tessellation off)
+ // takes the slope alone.
+ LiquidSurfSwell surfSwell=(LiquidSurfSwell)0;float surfImpact=0;float4 surfLevel=0;float2 surfChop=0;
+ [branch]if(surf>1e-3) {
+  surfLevel=liquidSurfLevelAt(i.position.xy);surfImpact=surfLevel.y;
+  // Forward differences of the smooth swell distance over one metre.
+  float2 swellGradient=float2(liquidSurfLevelAt(i.position.xy+float2(1,0)).z,liquidSurfLevelAt(i.position.xy+float2(0,1)).z)-surfLevel.z;
+  surfSwell=liquidSurfSwellAt(i.position.xy,surfField,surfLevel,swellGradient,seconds,i.depth);
+  surfChop=liquidSurfChopSlope(i.position.xy,seconds,liquidSurfOctaves(false),i.footprint)*
+           liquidSurfChopWeight(surfField,surfLevel,i.depth);
+  // Far away (swell crests under a pixel or two) its slope eases off instead of sparkling.
+  shoreSlope+=(surfSwell.slope*lerp(.5,1,liquidBandWeight(i.footprint/(max(liquidSurfWaveParams.y,1)*.5)))+surfChop)*surfGate;
+ }
  // Rain rings on water and swamp (not lava). The swamp reflects little,
  // so its rings also lighten the murky body along their crests (run 7: no
  // rain ripples were visible in the swamp).
@@ -1323,7 +1895,7 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
   rainCrest=saturate(length(drops.xy)*.8);
  }
  // The sloped liquid surface tilts the geometric normal (i.current = -grad h).
- float3 n=liquidSafeNormal(float3(i.current-slope-shoreSlope,1));
+ float3 n=liquidSafeNormal(float3(i.current+flowDir*lip*liquidLipTilt-slope-shoreSlope,1));
  float3 v=liquidSafeNormal(i.viewDirection),l=liquidSafeNormal(sunDirection);
  float depth=max(i.depth,0);
  float absorption=saturate((1-exp(-liquidAbsorption*depth))/
@@ -1428,8 +2000,9 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  color+=lerp(tint,float3(1,1,1),liquidBubbleWhiten)*bubbles*muddy*
         liquidBubbleBrightness*liquidShoreEnabled(i.selfIllumination);
  float crest=0;
+ float4 foamDetail=.5;
  [branch]if(LIQUID_WATERLIKE(i.selfIllumination)) {
-  float4 foamDetail=liquidDetailAt(i.position.xy/3+float2(seconds*.05,0),3,i.gradient);
+  foamDetail=liquidDetailAt(i.position.xy/3+float2(seconds*.05,0),3,i.gradient);
   crest=smoothstep(.45,.85,length(wave))*smoothstep(.35,.75,foamDetail.b)*liquidCrestFoam*(1-algae);
  }
  // Swamp water has no surf: the shore band (water shallower than about
@@ -1442,6 +2015,102 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
 #ifdef __cplusplus
 //")hlsl" R"hlsl( //"
 #endif
+
+ // Sea surf body, tint and foam. Body: light through the thin top of a
+ // swell crest, darker troughs (volume). Tint: clear turquoise shallows
+ // turning deeper blue with depth, per-channel Beer-Lambert (physical water
+ // tints the refracted bed in its composite below; otherwise the body colour
+ // leans that way). Foam: one density from the shore (a scalloped edge band
+ // riding each arriving crest's swash, lace behind it), breaking swell crests
+ // (each crest with its own foam layout), steep crests and bursts off steep
+ // shores, drawn by liquidSurfFoamPattern (lace thickening into foam with
+ // holes, bubbles, a darker rim) and lit by the smooth swell surface, not the
+ // fine chop (its ridges combed the foam).
+ float surfFoam=0,surfShade=0,surfTint=0,seaScatter=0;float3 seaFoamLit=0;
+ [branch]if(surf>1e-3) {
+  float depthHere=max(i.depth,0);
+  float wall=smoothstep(.1,.4,surfImpact);
+  float cell=max(liquidSurfFoamParams.w,.2);
+  uint quality=uint(min(floor(liquidSurfMode.y*.25),2));
+  float3 smoothN=liquidSafeNormal(float3(i.current-surfSwell.slope*.6,1));
+  float3 lightN=ambient*1.1+sunColor*.7*saturate(dot(smoothN,l));
+  // Body.
+  float backlit=.55+.45*saturate(dot(-v.xy,l.xy)*2);
+  float thin=surfSwell.front*smoothstep(.55,.95,surfSwell.crest)*surfSwell.wave;
+  color=lerp(color,lerp(liquidSurfShallowColor,saturate(tint),.4)*(ambient*1.1+sunColor*.6*backlit),thin*.22*surfGate);
+  color*=1-.16*surfSwell.wave*(1-smoothstep(.1,.5,surfSwell.crest))*surfGate;
+  // Tint.
+  surfTint=surf*liquidSurfLookParams.x*(1-.6*wall);
+  if(!physical&&surfTint>0) {
+   float3 through=exp(-liquidSurfAbsorb*liquidSurfLookParams.y*depthHere);
+   color=lerp(color,lerp(liquidSurfDeepColor,liquidSurfShallowColor,through.g)*lightN,saturate(surfTint)*.45*(1-smoothstep(0,3,depthHere)));
+  }
+  // Foam density, the write-up's foam level: shallow water (the shore band,
+  // breathing with each crest's swash) plus steep crests, plus breaking
+  // swell crests and bursts off steep shores; summed and clamped.
+  float band=length(surfField.gb);
+  float2 incoming=band>1e-3?surfField.gb/band:liquidSurfSwellDir.xy;
+  float3 arrival=liquidSurfArrival(i.position.xy+incoming*max(surfLevel.z,0),incoming,surfField.r,seconds);
+  float swash=arrival.x<liquidSurfRunupRise?sin(1.5707963*arrival.x/liquidSurfRunupRise):1-smoothstep(liquidSurfRunupRise,liquidSurfRunupRise+.55,arrival.x);
+  float width=max(liquidSurfFoamParams.y,.01);
+  float surfDetail=liquidBandWeight(i.footprint/cell);
+  float t=seconds*.6;
+  float lift=width*.45*swash*arrival.y; // the band reaches farther out as a crest washes in
+  // Beach: by water depth. A steep shore (depth jumps at the rock, so a depth
+  // band collapsed into a hard white outline): by distance from the rock,
+  // swelling with each arriving crest and draining back between them, so it
+  // reads as water slapping the wall, never a painted line.
+  // m from the drawn waterline: the nearer of the depth estimate and the
+  // field distance (a blend switched to the coarse field where the water is
+  // deep right at the rock and broke the foam line there).
+  float fromWall=min(depthHere/.35,max(surfField.a,0));
+  float slap=1-smoothstep(.15,.85,arrival.x);
+  float wallFoam=(1-smoothstep(0,.5+2*slap*arrival.y,fromWall))*lerp(.15,.75,slap);
+  float shoreFoam=lerp(smoothstep(width,0,depthHere-lift),wallFoam,wall)*saturate(liquidSurfFoamParams.x);
+  // Crests: steep faces of the swell and chop surface (without the fine
+  // ripple normals), and breaking swell crests trailing foam behind them.
+  // Whitecaps from the chop (and a share of the swell): the swell's narrow
+  // breaking front alone drew one long thin white line along each crest.
+  float3 crestN=liquidSafeNormal(float3(-(surfSwell.slope*.6+surfChop*1.25),1));
+  // Whitecaps: steep wave tops, broken into patches (never a ruled line).
+  float crestFoam=smoothstep(liquidSurfFoamParams.z+.01,liquidSurfFoamParams.z-.05,crestN.z)*2*surf;
+  // Breaking crests: white water on the top and spilling behind it, a few
+  // metres wide, broken along the crest by slow noise (never a ruled line).
+  float breaking=surfSwell.breaking*surfSwell.wave*(surfSwell.front*smoothstep(.6,.95,surfSwell.crest)*.6+
+                 (surfSwell.behind>0?(1-smoothstep(0,.6,surfSwell.behind)):0));
+  breaking*=smoothstep(.15,.65,liquidSurfNoise3(float3(i.position.xy/max(liquidSurfShapeParams.y*.35,2),t*.05+surfSwell.seed*7))+.15);
+  // Steep shores: each arriving crest bursts white off the rock and falls
+  // back into churned foam drifting off it.
+  float burst=0;
+  [branch]if(wall>0) {
+   float spread=liquidSurfLookParams.z*(1+5*arrival.y)*smoothstep(0,.3,arrival.x);
+   burst=max((1-smoothstep(spread*.6,spread+.6,fromWall))*(1-smoothstep(.25,.9,arrival.x)),
+             (1-smoothstep(.3,1.4,fromWall))*.25)*wall*min(liquidSurfLookParams.z,1.5)*.8;
+  }
+  // Forming crests out at sea: white on the tops of the larger swell crests
+  // before they break, in broken patches, more with wind. From the swell
+  // shape (not the chop, whose fine slope filters away with distance), so
+  // they read from the game camera's distance.
+  float forming=surfSwell.wave*smoothstep(.7,.96,surfSwell.crest)*(1-surfSwell.breaking)*(.35+.65*liquidSurfSwellDir.w);
+  forming*=smoothstep(.45,.75,liquidSurfNoise3(float3(i.position.xy/max(liquidSurfShapeParams.y*.5,3),t*.04+surfSwell.seed*5)));
+  float density=saturate(shoreFoam+crestFoam+forming*.8+breaking*1.3+burst)*surf;
+  float2 fp=i.position.xy/cell; // no per-crest reseed here: it would pop the shore foam as each crest arrives
+  float3 pattern=liquidSurfFoamPattern(fp,density,t,surfDetail,quality,i.footprint/cell);
+  [branch]if(abs(fmod(liquidSurfMode.y,4)-3)<.5)return float4(pattern.xxx,1); // water_surf_debug 3: the surf foam alone
+  // Body: thin foam lets the water through (translucent lace), thick foam is
+  // opaque; soft brightness variation inside it so a sheet never reads as
+  // flat paper close up.
+  float body=lerp(.5,1,smoothstep(0,.6,pattern.z));
+  float grain=liquidSurfNoise(fp*3.1+float2(t*.07,-t*.05))*.5+liquidSurfNoise(fp*7.7-float2(t*.04,0))*.25;
+  surfFoam=pattern.x*body*(1-algae)*surfGate;
+  surfShade=pattern.y*(1-algae)*surfGate;
+  color=lerp(color,color*liquidSurfFoamShadow,surfShade);
+  seaFoamLit=lerp(tint,float3(1,1,1),.93)*lightN*lerp(.86,1.04,pattern.z)*(1+.07*grain); // near-white: a tinted mix read grey and dirty
+  color=lerp(color,seaFoamLit,surfFoam);
+  // Light through the thin top of a wave (the ocean's subsurface glow),
+  // strongest looking toward the sun; used by the physical sea model below.
+  seaScatter=saturate(surfSwell.crest)*surfSwell.wave*(.25+.75*saturate(dot(-v.xy,l.xy)*2))*surfGate;
+ }
 
  // Whitewater is the foam layer (liquidFoamLayer, its own pass over this
  // one). The water body keeps what lies under the foam: milky, bubbly water
@@ -1471,20 +2140,24 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  float alpha=authored*lerp(lerp(liquidShallowOpacity,liquidMudOpacity,mud),1,absorption);
  alpha=min(authored,alpha+shore*liquidShoreOpacity);
  alpha=max(alpha,ripples.z*liquidWaveFoamOpacity); // wake foam stays visible on clear water
+ alpha=max(alpha,max(surfFoam*.92,surfShade*.35)); // surf foam and its darker edge too
  alpha=lerp(alpha,authored,smoothstep(liquidOpaqueMaterialStart,1,authored));
  alpha=lerp(alpha,max(authored,.95),algae);
  alpha=lerp(alpha,max(alpha,liquidFoamOpacity),froth);
  alpha=lerp(alpha,fallOpacity*authored,waterfall);
  [branch]if(physical) {
-  specular*=(1-algae)*(1-foamCover);
+  specular*=(1-algae)*(1-foamCover)*(1-surfFoam);
   [branch]if(LIQUID_WATERLIKE(i.selfIllumination)) {
    // Beer-Lambert per channel along the refracted view path; the authored
    // opacity range is kept, only depth, path and colour become physical.
    float4 behind=liquidRefraction(i,n,v);
+   // Sea surf: the bed seen through clear sea water turns turquoise, then
+   // deeper blue, per channel along the view path (red goes first).
    float3 absorbed=liquidChannelAbsorbed(bodyTint,behind.a);
    float3 opacity=authored*lerp(lerp(liquidShallowOpacity,liquidMudOpacity,mud),1,absorbed);
    opacity=min(authored,opacity+shore*liquidShoreOpacity);
    opacity=max(opacity,ripples.z*liquidWaveFoamOpacity);
+   opacity=max(opacity,max(surfFoam*.92,surfShade*.35));
    opacity=lerp(opacity,authored,smoothstep(liquidOpaqueMaterialStart,1,authored));
    opacity=lerp(opacity,max(authored,.95),algae);
    opacity=lerp(opacity,max(opacity,liquidFoamOpacity),froth);
@@ -1493,6 +2166,32 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
    // reflected is transmitted from the refracted scene.
    float3 composite=opacity*color+(1-opacity)*lerp(behind.rgb,sky,fresnel*(1-algae));
    float3 through=(1-opacity)*(1-fresnel*(1-algae));
+   // Sea (by the surf weight, fading over the spill into other water): an
+   // ocean water model instead of the authored body colour and opacity.
+   // The bed along the refracted view path is absorbed per channel (red
+   // first: sand turns turquoise, then deep teal) and replaced by light
+   // scattered in the water; the thin tops of waves glow; the sky reflects
+   // by Fresnel; foam lies on top. No [branch]: the compiler may fold this
+   // branch (lava, non-physical variants).
+   float seaW=saturate(surf/.35)*saturate(liquidSurfLookParams.x*1.43); // sea weight: full on any sea water (liquid_surf.h liquidSurfSeaFloor), fading over the spill; tint setting 0.7 = full
+   if(seaW>0) {
+    // Path through the water: the scene depth near the shore, the smoothed
+    // depth (liquid_surf.h swell_depth) in deeper water. The terrain heights
+    // under the sea are coarsely quantized, so the raw path stepped and the
+    // absorbed colour banded in rings following the bed.
+    float smoothPath=max(surfLevel.w,0)/max(v.z,.25);
+    float seaPath=lerp(behind.a,smoothPath,smoothstep(1.2,3.5,surfLevel.w));
+    float3 T=exp(-liquidSurfAbsorb*liquidSurfLookParams.y*seaPath);
+    float3 inscatter=liquidSurfDeepColor*(ambient*.9+sunColor*.55*saturate(l.z));
+    float3 water=behind.rgb*T+inscatter*(1-T)+liquidSurfShallowColor*sunColor*seaScatter*liquidSurfGlow;
+    float3 sea=lerp(water,sky,fresnel);
+    sea=lerp(sea,seaFoamLit,surfFoam);
+    composite=lerp(composite,sea,seaW);
+    // Dither: the smooth deep teal gradient banded in 8 bits.
+    float ign=frac(52.9829189*frac(dot(i.pixel,float2(.06711056,.00583715))));
+    composite+=(ign-.5)*(1.5/255)*seaW;
+    through=lerp(through,(1-surfFoam)*(1-fresnel)*T,seaW);
+   }
    liquidTransmitted=float4(through*behind.rgb,dot(through,1.0/3));
    return float4(saturate(composite+specular),i.coverage*lerp(1,liquidFallEdge(i),waterfall));
   }

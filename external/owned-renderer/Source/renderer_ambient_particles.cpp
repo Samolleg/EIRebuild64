@@ -110,6 +110,7 @@ void Renderer::release_ambient_world() noexcept {
     release_terrain_bake();
     release_contact_blend_maps(); decltype(contact_tile_rows_)().swap(contact_tile_rows_);
     liquid_swamp_frame_srv_.Reset(); liquid_swamp_frame_generation_ = UINT64_MAX;
+    liquid_surf_active_.reset(); liquid_surf_generation_ = UINT64_MAX; ++liquid_surf_serial_;
     fog_mist_srv_.Reset(); fog_mist_grid_ = {}; fog_mist_generation_ = 0;
 }
 
@@ -124,6 +125,7 @@ bool Renderer::rebuild_ambient_particle_map(const AmbientWorldSource& inputs, co
     const std::string name = ambient_basename(inputs.map && !inputs.map->terrain_resource.empty()
         ? inputs.map->terrain_resource : terrain.project_resource);
     ambient_menu_ = name.find("mainmenu") != std::string::npos;
+    ambient_map_name_ = name;
     ambient_zone_ = classify_zone(name.c_str(), environment.cave, environment.region);
     // The same map never rebuilds: animation/noise change nothing here and a
     // layer shift step is a bounded in-place update.

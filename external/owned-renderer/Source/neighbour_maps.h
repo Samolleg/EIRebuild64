@@ -91,9 +91,14 @@ struct GroundCoverNeighbourInputs;
 struct NeighbourMapUpload;
 std::shared_ptr<GroundCoverNeighbourInputs> prepare_ground_cover_neighbour_inputs(
     const NeighbourMapUpload& upload) noexcept;
+// Its sea surf field (liquid_surf.h) from those inputs' area grid; null
+// without water or inputs.
+struct LiquidSurfField;
+std::shared_ptr<const LiquidSurfField> prepare_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::string& no_sea_maps) noexcept;
 struct NeighbourMapUpload {
     std::uint64_t epoch = 0;
     std::shared_ptr<GroundCoverNeighbourInputs> ground_cover_inputs;
+    std::shared_ptr<const LiquidSurfField> liquid_surf;
     NeighbourSelection selection;
     std::shared_ptr<const OwnedMapSnapshot> map;
     std::vector<std::shared_ptr<RetainedStaticSourceCandidate>> decorations;
@@ -218,6 +223,9 @@ void neighbour_receivers_append_visible(const std::array<float,16>& world_to_cli
     std::vector<NativeWorldBounds>& receivers) noexcept;
 void neighbour_maps_begin(const std::string& mpr, std::uint64_t epoch,
     const ResourceStoreConfig& mounts) noexcept;
+// The water_surf_no_sea_maps list neighbour sea fields are built with (the
+// renderer publishes it; a stream takes it when it starts).
+void neighbour_maps_set_no_sea_maps(const std::string& maps) noexcept;
 void neighbour_maps_stop() noexcept;
 // Stops the stream only while it serves this map generation. A world change
 // releases the uploaded neighbours; a reload of the same map keeps its

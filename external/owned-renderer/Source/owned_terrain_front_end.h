@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -105,6 +106,34 @@ template<class Height> bool liquid_fall_vertex_at(const Height& height,int x,int
 // and drop then read the adjoining liquid across the shared edge.
 void owned_terrain_set_outside_liquid(TerrainCpuAsset& terrain,int offset_x,int offset_y,
     const TerrainCpuAsset& adjoining);
+// The current of level river reaches: per global liquid vertex (row stride
+// sector_count_x*32+1) the downstream direction times its strength, in units
+// of kLiquidOutflowSlope/127, and how close it runs to a fall lip (0..127,
+// raised into the cascade source); empty when no level water of the map runs.
+using TerrainLiquidOutflowField = std::vector<std::array<std::int8_t,3>>;
+struct TerrainLiquidOutflow {
+    std::mutex lock;
+    bool built = false;
+    std::shared_ptr<const TerrainLiquidOutflowField> field;
+};
+// Gives terrain.liquid_outflow an empty cache (descriptor validation), or
+// empties it (a neighbour's seam was set), so the field is (re)built on first
+// use. The field reads the liquid surface first asked for (its layer shifts:
+// a shift moves a buried overlay edge into view) and, like the rest of the
+// flow, is not rebuilt by a later shift.
+void owned_terrain_reset_liquid_outflow(TerrainCpuAsset& terrain) noexcept;
+// The level-reach field, built on first use: the current of level river
+// reaches. Each liquid body drains to its lowest level (lake or
+// sea water, else a map edge at that level, else its widest low water); a
+// level vertex runs toward that outlet, along the geodesic distance to it,
+// when its way down crosses moving water (it drains over a fall or rapid) or
+// it lies downstream of moving water. Open water (lakes, sea) and ponds stay
+// still, as do swamp and lava, and a lake fed by moving water passes it on.
+// With terrain.outside_liquid set (a neighbour map), an edge where the
+// adjoining map's flow leaves this map is an outlet and one where it enters
+// is a source, so the flow continues across the seam. CPU only, at decode.
+std::shared_ptr<const TerrainLiquidOutflowField> owned_terrain_liquid_outflow(
+    const TerrainCpuAsset& terrain,const OwnedTerrainGeometryValues* values) noexcept;
 // Blends a flow decoded at global vertex (x,y) of terrain toward the
 // adjoining map's flow on their shared edge (outside_liquid.edge_flow): equal
 // on the edge, the terrain's own kTerrainEdgeFlowBand vertices in.
@@ -127,6 +156,8 @@ public:
                  const OwnedTerrainGeometryValues* values) noexcept;
     bool flow(std::uint32_t base, OwnedLiquidFlow& flow) noexcept;
 private:
+    std::shared_ptr<const TerrainLiquidOutflowField> outflow_;
+    int xmax_ = 0, ymax_ = 0;
     int origin_x_ = 0, origin_y_ = 0;
     bool ready_ = false;
     std::array<std::array<float,2>, kSide * kSide> gradients_{};
