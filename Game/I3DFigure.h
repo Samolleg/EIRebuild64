@@ -12,6 +12,7 @@ const float VIEWING_ANGLE_TAN = 0.4815746188f;
 class CI3DFigure : public CFigureLoaded
 {
 private:
+    friend struct E3HudVisualAccess;
     BOOL bVisible;
 
     D3DVECTOR ambientLight;

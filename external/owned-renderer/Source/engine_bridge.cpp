@@ -8,6 +8,7 @@
 #include "point_shadow_policy.h"
 #include "world_lamp_memory.h"
 #include "engine_bridge.h"
+#include "embedded_hud_visual.h"
 #include "world_scene_algorithms.h"
 #include "combat_text.h"
 #include "frame_accounting.h"
@@ -2528,7 +2529,12 @@ bool g_hud_atlas_hooks_installed = false;
 const char* g_hud_atlas_install_detail = "not_attempted";
 thread_local HudAtlasProducerContext g_hud_atlas_producer{};
 thread_local bool g_addon_hud_atlas_lock_pending = false;
+#ifdef EID3D11_EMBEDDED
+// Host global managers can retire after other translation units at shutdown.
+HudVisualPublication& g_hud_visuals = *new HudVisualPublication;
+#else
 HudVisualPublication g_hud_visuals;
+#endif
 struct HudDrawContext {
     HudVisualLane lane = HudVisualLane::none;
     void* receiver = nullptr;
@@ -43233,6 +43239,28 @@ namespace owned {
 // The embedded counterpart of the scene seam (submit_owned_visual_scene): the
 // host calls it once per world draw after its objects published appearance,
 // pose and lights and the retained scene committed the tick.
+// Same atlas-to-icon builder as submit_hud_visual; the embedded host supplies
+// completed carrier values and a synchronous renderer sink, never retail memory.
+HudVisualPublication& hud_embedded_publication() noexcept {return g_hud_visuals;}
+bool hud_embedded_submit_visual(const HudPublishedVisual& visual,
+    const EmbeddedHudVisualInput& input, void* context, EmbeddedHudVisualSink sink) noexcept {
+    if (!visual.visible) return visual.complete;
+    if (!sink) return false;
+    try {
+        std::vector<NativeTextureCoordinate> coordinates;
+        std::vector<NativeOwnedTextureMip> mips;
+        NativeGeometryView view{};
+        if (!build_hud_visual_view(visual, input.u_shift, input.v_shift,
+                input.default_colors ? kFigureUseDefaultColors : 0u,
+                input.color_sum ? 0x10u : 0u, 255, input.object_to_clip,
+                input.diffuse, false, coordinates, mips, view)) return false;
+        if (input.default_colors) {
+            view.default_diffuse = input.diffuse;
+            view.default_specular = input.specular;
+        }
+        return sink(context, view);
+    } catch (...) { return false; }
+}
 bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
                                         std::vector<std::int32_t>* drawn,
                                         std::vector<EmbeddedVisualOmission>* omitted) noexcept {

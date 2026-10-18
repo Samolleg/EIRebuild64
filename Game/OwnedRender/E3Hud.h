@@ -7,6 +7,7 @@ class CI3DScrollText;
 class CI3DToolTip;
 class CRenderer;
 namespace OwnedRender {
+void E3HudCommitVisuals(const CI3DScreenMission* mission);
 bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,bool& valid) noexcept;
 void E3MessageLayout(CI3DScrollText* text);
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer);

@@ -9,6 +9,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DObject.h"
+#include "OwnedRender/E3HudVisual.h"
 #include <cmath>
 #include <new>
 #include "I3DMapObjTranslation.h"
@@ -681,6 +682,7 @@ CI3DObject::CI3DObject(CInterface3D *pI)
 /////////////////////////////////////////////////////////////////////////////////////
 CI3DObject::~CI3DObject()
 {
+    OwnedRender::E3HudRetireScreen(this);
     if (pMat1)
         pMat1->Release();
     pMat1 = NULL;
@@ -845,7 +847,7 @@ CI3DFigure *CI3DObject::AddFigure(LPCTSTR pszFigName)
 {
     CI3DFigure *pFig;
     CFigureManager *pFigMng = (CFigureManager *)theWorld.GetFigureManager();
-    pFig = (CI3DFigure *)pFigMng->CreateI3DFigure(pszFigName);
+    pFig = (CI3DFigure *)pFigMng->CreateI3DFigure(OwnedRender::E3HudAttachFigure(this,pszFigName)?nullptr:pszFigName);
     if (!pFig)
         return NULL;
     AddFigure(pFig);

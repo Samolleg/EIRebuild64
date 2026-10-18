@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p3a`, commit `e625b1b969582587248f8a2b47dd33af96a66f30`.
+integration changes in branch `eirebuild/c74-p3a2`, commit `3e5ff9338443fd32ec8464acdae5a3ef9bc4960f`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -59,3 +59,10 @@ Embedded-only entries reset per-draw anchors and retire world-owned display
 values. Token-aware unit retirement preserves a reused resource incarnation.
 The retail portrait memory reader is excluded from embedded calls. HUD atlas
 and icon lane producers remain for OWN74-P3a-2; WS layout remains P3b.
+
+OWN74-P3a2 exposes the same HudVisualPublication and build_hud_visual_view
+to typed embedded carrier values. The four icon lanes no longer load or draw
+host meshes or mutate host atlas pixels. Manager role generations and source
+retirement feed the shared publication/debug counters. Portrait models and
+remaining non-lane atlas/WS work are still open; see the task REPORT.
+

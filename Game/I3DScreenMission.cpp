@@ -8,6 +8,7 @@
 #include "OwnedRender/E3Combat.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E3Hud.h"
+#include "OwnedRender/E3HudVisual.h"
 #include "GameJournal.h"
 #include "ModStatsFont.h"
 #include "ModStatRules.h"
@@ -80,6 +81,7 @@ static bool UseModInterfaceHD()
     return ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2");
 }
 
+// Remaining portrait atlas producer; icon lanes publish through E3HudVisual.
 static bool PasteModInterfaceIcon(CTexture *texture, LPCTSTR name, int size, int x, int y)
 {
     CString resource(name);
@@ -175,6 +177,7 @@ void CI3DScreenMission::OnActivate()
     AddTexture(256, 256);   // spells and skills	// 1
     AddTexture("battle00"); // 2
     const bool hdInterface = UseModInterfaceHD();
+    OwnedRender::E3HudBeginScreen(this,hdInterface);
     if (hdInterface)
     {
         // Source useAWATG2: independent canvases for HD equipment, quick items,
@@ -263,6 +266,7 @@ void CI3DScreenMission::OnActivate()
     if (IWorldConnector.IsLMP())
         LMPPersonsUpdate(true);
     lmpState.nMainHeroID = -1;
+    OwnedRender::E3HudCommitVisuals(this);
     OwnedRender::E3MissionEnter(this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2186,10 +2190,8 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
         break;
     }
 
-    if (hdInterface)
-        PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
-    else
-        PasteTexture(textures[0], pszTextureName, 128, 128, 42, 128, x, y);
+    OwnedRender::E3HudIcon(OwnedRender::E3HudLane::weapon,pszTextureName,canvasSize,
+        iconSize,iconSize,hdInterface?iconSize:42,iconSize,x,y,hdInterface);
 
     CI3DFigure *pFig;
     pFig = AddFigure(pszFigureName);
@@ -2199,11 +2201,6 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
         pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), -FP_PI / 20) *
                              CQuaternion(CPlot3D(0, 1, 0), -FP_PI / 3) *
                              CQuaternion(CPlot3D(0, 0, 1), FP_PI * 3 / 4));
-    }
-    else
-    {
-        pFig = AddFigure();
-        pFig->MakeBar(12, 40, 80.f + nWeapons * 40, 520, 120.f + nWeapons * 40, 600, 0, 0, 42, 128);
     }
 
     pFig->SetUShift(x / float(canvasSize));
@@ -2253,6 +2250,7 @@ void CI3DObjectWeapons::ShowSelectWeapon(int num, BOOL bSelect)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
 {
+    OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::weapon);
     CString szName, szDesc, szOut;
     auto* mod=ModRuntime::Current();
     const bool nativeAssignment=mod && mod->AdvancedUI("useLS_SetUnitW");
@@ -2517,21 +2515,15 @@ void CI3DObjectItems::AddItem(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
     {
         x = (nItems % 4) * iconSize;
         y = (2 + nItems / 4) * iconSize;
-        PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
     }
-    else
-        PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
+    OwnedRender::E3HudIcon(OwnedRender::E3HudLane::item,pszTextureName,canvasSize,
+        iconSize,iconSize,iconSize,iconSize,x,y,hdInterface);
 
     CI3DFigure *pFig;
     pFig = AddFigure(pszFigureName);
     if (hdInterface && pFig) pFig->SetTexture(textures[0]);
     if (pFig)
         pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI));
-    else
-    {
-        pFig = AddFigure();
-        pFig->MakeBar(20, 20, 680, 560, 720, 600, 0, 0, 64, 64);
-    }
 
     pFig->SetUShift(x / float(canvasSize));
     pFig->SetVShift((iconSize + y) / float(canvasSize));
@@ -2688,6 +2680,7 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::SetUnit(CUnit *pNewUnit)
 {
+    OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::item);
     CString szName, szDesc;
     pUnit = pNewUnit;
     RemoveAllItems();
@@ -2991,10 +2984,8 @@ void CI3DObjectSpells::AddSpell(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
     AddArea()->MakeRect(p.left,p.top,p.left+40,p.top+40);
     const int iconSize=p.size,canvasSize=p.canvas;
     const int x=mod ? p.x : 128+((nSpells%8)/4)*64,y=p.y;
-    if (hdInterface)
-        PasteModInterfaceIcon(textures[0], pszTextureName, iconSize, x, y);
-    else
-        PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
+    OwnedRender::E3HudIcon(OwnedRender::E3HudLane::spell,pszTextureName,canvasSize,
+        iconSize,iconSize,iconSize,iconSize,x,y,hdInterface);
 
     CI3DFigure *pFig = AddFigure(pszFigureName);
     if (hdInterface || (mod && extended)) pFig->SetTexture(textures[0]);
@@ -3038,6 +3029,7 @@ void CI3DObjectSpells::DeselectSpells()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 {
+    OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::spell);
     auto *mod = ModRuntime::Current();
     const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
     const int maxSpellSlots=mod ? ModHudAssignment::SpellSlots(mod->CombatSetting("JMVExtendedSpellSlots")) : QI_MAX_SPELLS;
@@ -3378,7 +3370,7 @@ void CI3DObjectSkills::AddSkill(LPCTSTR pszFigureName, LPCTSTR pszTextureName, i
         break;
     }
 
-    PasteTexture(textures[0], pszTextureName, 64, 64, 64, 64, x, y);
+    OwnedRender::E3HudIcon(OwnedRender::E3HudLane::skill,pszTextureName,256,64,64,64,64,x,y);
 
     CI3DFigure *pFig;
     pFig = AddFigure(pszFigureName);
@@ -3462,6 +3454,7 @@ static const char LS_COMPANION_TOOLTIP_TACTICS[] =
 
 void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
 {
+    OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::skill);
     int i;
     pUnit = pNewUnit;
     RemoveAllSkills();
@@ -3656,8 +3649,8 @@ BOOL CI3DObjectSkills::Draw(CRenderer *pRend)
             {
                 const int x = (i / 4) * 64;
                 const int y = (i % 4) * 64;
-                PasteTexture(textures[0], availability ? "jmv_gocamp" : "jmv_gocamp_disabled",
-                             64, 64, 64, 64, x, y);
+                OwnedRender::E3HudIcon(OwnedRender::E3HudLane::skill,
+                    availability ? "jmv_gocamp" : "jmv_gocamp_disabled",256,64,64,64,64,x,y);
                 fieldCampButtonAvailability = availability;
             }
         }

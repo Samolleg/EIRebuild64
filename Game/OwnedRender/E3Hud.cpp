@@ -2,6 +2,7 @@
 #include "E3Hud.h"
 #include "E3Input.h"
 #include "E3Combat.h"
+#include "E3HudVisual.h"
 #include "combat_ui.h"
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
@@ -134,7 +135,11 @@ struct E3HudAccess {
                 context.figure_composition(owned::HudPanel(index),unsigned(i),slot,composition);
             if(!visible)continue;
             owned::widescreen::hud_blit=composition;
-            figure->Draw(renderer);
+            if(index==0 || index==1 || index==5 || index==6) {
+                const auto lane=index==0?OwnedRender::E3HudLane::spell:index==1?OwnedRender::E3HudLane::skill:
+                    index==5?OwnedRender::E3HudLane::weapon:OwnedRender::E3HudLane::item;
+                OwnedRender::E3HudDrawVisual(figure,renderer,lane,unsigned(i));
+            } else figure->Draw(renderer);
         }
         return true;
     }
@@ -287,6 +292,11 @@ struct E3HudAccess {
         TextActivity(p[7].activity_values,mission->pScrollText);
         for(unsigned i:{0u,1u,2u,4u,5u,6u,7u,8u,9u})p[i].activity_available=true;
     }
+    static void CommitVisuals(const CI3DScreenMission* mission) {
+        const std::uint32_t counts[]={unsigned(mission->pWeapons->figures.GetSize()),unsigned(mission->pItems->figures.GetSize()),
+            unsigned(mission->pSpells->figures.GetSize()),unsigned(mission->pSkills->figures.GetSize())};
+        OwnedRender::E3HudCommitScreen(mission,counts);
+    }
     static void CombatPortraits(const CI3DScreenMission* mission) {
         std::vector<owned::CombatPortraitAnchor> anchors;
         if(mission && mission->pFaces && mission->pFaces->bVisible) {
@@ -353,6 +363,7 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+void E3HudCommitVisuals(const CI3DScreenMission* mission) {E3HudAccess::CommitVisuals(mission);}
 bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,bool& valid) noexcept {
     if(!object || object!=messageTextOwner || !E3HudRendererAttached())return false;
     valid=E3HudAccess::MessagePoint(object,pixel,native,captured);return true;

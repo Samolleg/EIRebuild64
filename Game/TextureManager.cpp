@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "TextureManager.h"
+#include "OwnedRender/E3HudVisual.h"
 #include "ModHDEquipmentLayer.h"
 #include "GameJournal.h"
 #include "ModSecondaryAtlas.h"
@@ -68,6 +69,7 @@ void CTextureManager::SetInterface(CRenderer *pNewRend)
 // create internal data and open resource
 BOOL CTextureManager::Create()
 {
+    OwnedRender::E3HudRoleCreation hudResources(this,true);
     if (CResourceManager::Create() == FALSE)
         return FALSE;
     // delete unit layer textures
@@ -79,7 +81,7 @@ BOOL CTextureManager::Create()
     bCheck = AddNewResource(szResourcesPath + "textures.res") && bCheck;
     bCheck = AddNewResource(szResourcesPath + "redress.res") && bCheck;
     bCheck = AddNewResource(szResourcesPath + "menus.res") && bCheck;
-    return bCheck;
+    return hudResources.Complete(bCheck);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTextureManager::Destroy()

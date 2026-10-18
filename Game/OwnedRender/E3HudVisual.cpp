@@ -1,0 +1,166 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include "../../stdafx.h"
+#include "E3HudVisual.h"
+#include "../ResourceManager.h"
+#include "../I3DFigure.h"
+#include "../Renderer.h"
+#include "../dx11/RendererDX11.h"
+#include "../GameJournal.h"
+#include "../WorldClient.h"
+#include "embedded_hud_visual.h"
+#include <exception>
+
+namespace {
+struct State {
+    owned::HudVisualPublication& publication=owned::hud_embedded_publication();
+    CResourceManager* textures=nullptr;
+    CResourceManager* figures=nullptr;
+    const void* screen=nullptr;
+    std::uint64_t epoch=0;
+    CI3DObject* receiver=nullptr;
+    bool capture=false;
+};
+State& state() { static auto* value=new State; return *value; }
+owned::HudVisualLane lane(OwnedRender::E3HudLane value) {return owned::HudVisualLane(value);}
+bool resolve(void*, owned::HudResourceRole role, const char* name,
+    owned::ResourceBlob& blob, owned::HudPublicationFailureStage& stage,
+    owned::ResourceFailureCode& code) {
+    auto* manager=role==owned::HudResourceRole::texture?state().textures:state().figures;
+    stage=owned::HudPublicationFailureStage::resolver; code=owned::ResourceFailureCode::not_found;
+    if(!manager)return false;
+    DWORD size=0;
+    BYTE* bytes=manager->GetFile(name,&size);
+    if(!bytes)return false;
+    struct Close { CResourceManager* manager; BYTE* bytes; ~Close(){manager->CloseFile(bytes);} } close{manager,bytes};
+    static const owned::ResourceStore store;
+    owned::ResourceFailure failure;
+    if(!store.copy_selected_memory(name,bytes,size,blob,failure)) {
+        stage=owned::HudPublicationFailureStage::copy;code=failure.code;return false;
+    }
+    stage=owned::HudPublicationFailureStage::none;code=owned::ResourceFailureCode::none;return true;
+}
+void omitted(owned::HudVisualLane value, unsigned ordinal, const char* stage) noexcept {
+    // One actionable journal entry per lane/screen; no high-frequency log.
+    static std::uint64_t reportedEpoch=0;
+    static unsigned mask=0;
+    if(reportedEpoch!=state().epoch){reportedEpoch=state().epoch;mask=0;}
+    const unsigned bit=1u<<unsigned(value);
+    if(mask&bit)return;
+    mask|=bit;
+    GameJournal::Event("RENDER","hud_visual_omitted","lane=%u ordinal=%u stage=%s",unsigned(value),ordinal,stage);
+}
+}
+namespace OwnedRender {
+E3HudRoleCreation::E3HudRoleCreation(CResourceManager* owner, bool isTexture):texture(isTexture) {
+    active=owner->GetWorld()==&theWorld;
+    if(!active)return;
+    auto& s=state();
+    (texture?s.textures:s.figures)=owner;
+    s.publication.set_resolver(nullptr,resolve);
+    s.publication.begin_role_recreation(texture?owned::HudResourceRole::texture:owned::HudResourceRole::figure);
+}
+E3HudRoleCreation::~E3HudRoleCreation() {
+    if(!active)return;
+    state().publication.finish_role_recreation(texture?owned::HudResourceRole::texture:owned::HudResourceRole::figure,success);
+}
+bool E3HudRoleCreation::Complete(bool value) noexcept {success=value;return value;}
+void E3HudResourceChanged(CResourceManager* owner, bool destroying) noexcept {
+    auto& s=state();
+    for(auto role:{owned::HudResourceRole::texture,owned::HudResourceRole::figure}) {
+        auto*& manager=role==owned::HudResourceRole::texture?s.textures:s.figures;
+        if(manager!=owner)continue;
+        if(destroying){s.publication.begin_role_recreation(role);manager=nullptr;}
+        else s.publication.invalidate_role(role);
+    }
+}
+void E3HudBeginScreen(const CI3DScreenMission* owner, bool hd) noexcept {
+    auto& s=state();s.screen=owner;s.receiver=nullptr;
+    ++s.epoch;
+    s.publication.initialize_overlay(hd?1u:0u);
+    if(!s.publication.begin_activation())omitted(owned::HudVisualLane::none,0,"activation");
+}
+void E3HudCommitScreen(const CI3DScreenMission* owner, const std::uint32_t* counts) noexcept {
+    auto& s=state();
+    if(s.screen!=owner)return;
+    if(!counts || !s.publication.commit_activation({counts[0],counts[1],counts[2],counts[3]})) {
+        s.publication.abort_activation();omitted(owned::HudVisualLane::none,0,"activation_commit");
+    }
+}
+void E3HudRetireScreen(const void* owner) noexcept {
+    auto& s=state();if(s.screen!=owner)return;
+    s.publication.retire_screen();s.screen=nullptr;s.receiver=nullptr;
+}
+E3HudLanePublication::E3HudLanePublication(CI3DObject* owner, E3HudLane value) noexcept {
+    auto& s=state();previous=s.receiver;exceptions=std::uncaught_exceptions();
+    previousCapture=s.capture;
+    armed=s.publication.begin_lane(lane(value));
+    s.receiver=owner;s.capture=armed;
+}
+E3HudLanePublication::~E3HudLanePublication() {
+    auto& s=state();
+    if(armed)s.publication.finish_lane(std::uncaught_exceptions()==exceptions);
+    s.receiver=previous;s.capture=previousCapture;
+}
+void E3HudIcon(E3HudLane value, const char* name, unsigned atlas, unsigned sw,
+    unsigned sh, unsigned w, unsigned h, unsigned x, unsigned y, bool hd,
+    unsigned sx, unsigned sy) noexcept {
+    auto& p=state().publication;
+    if(state().receiver && !state().capture){omitted(lane(value),0,"lane_begin");return;}
+    const owned::HudIconPlacement placement{atlas,sw,sh,w,h,x,y,sx,sy,hd?1u:0u};
+    try {
+        const std::string canonical=std::string(name?name:"")+(hd?".x2.mmp":".mmp");
+        if(p.capturing_lane_id()==lane(value))p.observe_icon(canonical.c_str(),placement);
+        else if(!p.repaint_icon(lane(value),canonical.c_str(),placement))omitted(lane(value),0,"repaint");
+    } catch(...) {p.reject_icon_attempt();omitted(lane(value),0,"icon");}
+}
+bool E3HudAttachFigure(CI3DObject* owner, const char* name) noexcept {
+    auto& s=state();
+    if(owner!=s.receiver)return false;
+    try {if(s.capture)s.publication.attach_figure(name);}
+    catch(...) {s.publication.invalidate_open_lane();}
+    return true; // A claimed carrier is empty even when publication failed.
+}
+}
+
+// Access only placement/scale and completed color values. No host mesh or
+// atlas texture is consumed for the four renderer-owned icon lanes.
+struct E3HudVisualAccess {
+    static bool Draw(CI3DFigure* figure, CRenderer* renderer,
+        const owned::HudPublishedVisual& visual) {
+        auto* gpu=renderer->GetGPU();
+        figure->CreateCurrentPlacement();
+        SHMatrix placement;figure->GetPlacement(placement);
+        gpu->PushMainMatrix(placement);gpu->PushMainMatrix(figure->scale);
+        struct Pop { CDXGeometryProcessor* gpu; ~Pop(){gpu->PopMainMatrix();gpu->PopMainMatrix();} } pop{gpu};
+        renderer->SetProjectionMatrix();
+        if(!gpu->IsHaveMatrix(MAT_STACK_PROJSPACE))return false;
+        owned::EmbeddedHudVisualInput input;
+        const auto& clip=gpu->GetMatrix(MAT_STACK_PROJSPACE);
+        static_assert(sizeof(clip)==sizeof(input.object_to_clip));
+        memcpy(input.object_to_clip.data(),&clip,sizeof(clip));
+        input.u_shift=figure->GetUShift();input.v_shift=figure->GetVShift();
+        input.default_colors=figure->CheckFlag(FIG_USE_DEFAULT_COLORS)!=FALSE;
+        input.diffuse=input.default_colors?figure->GetDefaultColor():renderer->GetAmbientColor();
+        input.specular=figure->GetDefaultSpecular();
+        auto* material=figure->GetMaterial();
+        input.color_sum=material && material->CheckFlag(MAT_USE_SPECULAR);
+        return renderer->GetD3D()->SubmitHudVisual(visual,input);
+    }
+};
+namespace OwnedRender {
+void E3HudDrawVisual(CI3DFigure* figure, CRenderer* renderer, E3HudLane value, unsigned ordinal) noexcept {
+    if(figure && figure->CheckFlag(FIG_HIDDEN))return;
+    const auto* visual=state().publication.find(lane(value),ordinal);
+    if(!visual){
+        const auto failure=state().publication.classify_missing(lane(value),ordinal,
+            state().publication.active_screen_generation(),true);
+        omitted(lane(value),ordinal,owned::hud_publication_failure_stage_name(failure.stage));return;
+    }
+    try {
+        if(!figure || !renderer || !E3HudVisualAccess::Draw(figure,renderer,*visual))
+            omitted(lane(value),ordinal,"submission");
+    } catch(...) {omitted(lane(value),ordinal,"submission_exception");}
+}
+}

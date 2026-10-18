@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "StringProcessing.h"
 
 #include "FigureManager.h"
+#include "OwnedRender/E3HudVisual.h"
 #include "AnimationSystem.h"
 #include "AnimationSystem2.h"
 #include "FileRegistry.h"
@@ -177,6 +178,7 @@ delete pos->second;
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CFigureManager::AddNewResource(LPCSTR pszResourceFileName)
 {
+    OwnedRender::E3HudResourceChanged(this);
     if (_access(pszResourceFileName, 4) == -1)
         return FALSE;
     // first, check for such resource
@@ -200,6 +202,7 @@ BOOL CFigureManager::AddNewResource(LPCSTR pszResourceFileName)
 // create manager's internal data structures
 BOOL CFigureManager::Create()
 {
+    OwnedRender::E3HudRoleCreation hudResources(this,false);
     if (CResourceManager::Create() == FALSE)
         return FALSE;
 
@@ -209,7 +212,7 @@ BOOL CFigureManager::Create()
     AddNewResource(szResourcesPath + "figures.res");
     AddNewResource(szResourcesPath + "menus.res");
     LoadMenuRects(theMenuRects);
-    return TRUE;
+    return hudResources.Complete(true);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CModelResourceEntry *CFigureManager::GetModel(const std::string &szName)

@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "E3Input.h"
 #include "E3Hud.h"
+#include "E3HudVisual.h"
 #include "../I3DScreenMission.h"
 #include "../GameMain.h"
 #include "../I3DMain.h"
@@ -25,6 +26,7 @@ void E3MissionEnter(const void* owner) noexcept {
     missionOwner = owner;
 }
 void E3MissionLeave(const void* owner) noexcept {
+    E3HudRetireScreen(owner);
     if (missionOwner == owner) {
         missionOwner = nullptr;
         E3PublishHud(nullptr,theInterface.GetWidth(),theInterface.GetHeight());

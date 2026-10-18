@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ResourceManager.h"
+#include "OwnedRender/E3HudVisual.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 
@@ -23,6 +24,7 @@ CResourceManager::~CResourceManager()
 // close all managed resources
 void CResourceManager::Destroy()
 {
+    OwnedRender::E3HudResourceChanged(this,true);
     // close all opened resources
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
@@ -38,6 +40,7 @@ void CResourceManager::Destroy()
 // add new resource file and open it
 BOOL CResourceManager::AddNewResource(LPCSTR pszResourceFileName)
 {
+    OwnedRender::E3HudResourceChanged(this);
     if (_access(pszResourceFileName, 4) == -1) {
         std::vector<std::string> paths;bool ignore=false;
         if(!ModRuntime::Resources()||!ModRuntime::Resources()->ResourcePlan(pszResourceFileName,paths,ignore)||!ignore)return FALSE;
@@ -63,6 +66,7 @@ BOOL CResourceManager::AddNewResource(LPCSTR pszResourceFileName)
 // searching for resource and close it
 BOOL CResourceManager::CloseResource(LPCSTR pszResourceFileName)
 {
+    OwnedRender::E3HudResourceChanged(this);
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
         if (pos->first == pszResourceFileName)
@@ -80,6 +84,7 @@ BOOL CResourceManager::CloseResource(LPCSTR pszResourceFileName)
 // close all opened resources
 BOOL CResourceManager::CloseResources()
 {
+    OwnedRender::E3HudResourceChanged(this);
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
         pos->second->CloseResource();
@@ -163,6 +168,7 @@ BOOL CResourceManager::AddGraphicsResources(LPCSTR category)
                     delete archive;
                     return ReportError("Cannot open mod graphics archive %s", path.c_str());
                 }
+                OwnedRender::E3HudResourceChanged(this);
                 resources.push_back(CResourcePair(path, archive));
             }
         }

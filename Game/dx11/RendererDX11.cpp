@@ -7,6 +7,7 @@
 
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
+#include "embedded_hud_visual.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
 #include "../OwnedRender/E3Cursor.h"
@@ -228,6 +229,34 @@ bool SubmitScreenRectangleToC56(void* context,
 {
     return context && static_cast<CDX11*>(context)->SubmitC56ScreenRectangle(request);
 }
+}
+
+bool CDX11::SubmitHudVisual(const owned::HudPublishedVisual& visual,
+    const owned::EmbeddedHudVisualInput& input)
+{
+    if(!rendererFacade || !rendererFacade->FrameActive())return false;
+    return owned::hud_embedded_submit_visual(visual,input,this,
+        [](void* context,const owned::NativeGeometryView& view) {
+            auto* self=static_cast<CDX11*>(context);
+            auto state=self->CaptureC56MaterialState();
+            state.render[D3DRENDERSTATE_FOGENABLE]=FALSE;
+            state.stage[0][D3DTSS_COLOROP]=D3DTOP_MODULATE;
+            state.stage[0][D3DTSS_COLORARG1]=D3DTA_TEXTURE;
+            state.stage[0][D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
+            state.stage[0][D3DTSS_ALPHAOP]=D3DTOP_MODULATE;
+            state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;
+            state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
+            const auto hr=self->rendererFacade->Visit([&](owned::Renderer& renderer) {
+                const auto flushed=renderer.has_pending_ui()?renderer.flush_ui():S_OK;
+                if(FAILED(flushed))return flushed;
+                owned::Renderer::NativeQueueCheckpoint checkpoint;
+                if(!renderer.checkpoint_native(checkpoint))return E_FAIL;
+                const auto result=renderer.queue_native_owned(view,state);
+                if(FAILED(result))renderer.rollback_native(checkpoint);
+                return result;
+            });
+            self->RestoreHostBindings();return SUCCEEDED(hr);
+        });
 }
 
 bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
