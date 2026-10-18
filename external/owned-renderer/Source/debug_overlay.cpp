@@ -135,9 +135,9 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
     const auto integer = [&](const char* value) { return configured_value(config, value); };
 #ifdef EID3D11_EMBEDDED
     if (is("render_thread") || is("render_thread_frame_latency"))
-        return "needs host scene-thread lifecycle";
+        return "Scene thread is not yet available in EIRebuild";
     if (is("precipitation") || starts("precip_"))
-        return "needs host weather draw ownership";
+        return "Renderer precipitation is not yet available in EIRebuild";
 #endif
     if (boolean("water_simple") && (is("water_reflections") || is("water_reflection_quality") || is("water_physical")))
         return "turn off Stock-look water to use this option";
