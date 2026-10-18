@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "E1World.h"
 #include "embedded_sky.h"
 #include "E1Scene.h"
