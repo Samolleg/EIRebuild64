@@ -21,5 +21,5 @@ void E3CursorStart();
 void E3CursorStop() noexcept;
 void E3CursorPublish(E3CursorState state);
 void E3CursorCanvas(HWND window, unsigned width, unsigned height, bool active) noexcept;
-HRESULT E3QueueCursor(owned::Renderer& renderer);
+HRESULT E3QueueCursor(owned::Renderer& renderer, int scale_percent, bool loading);
 }

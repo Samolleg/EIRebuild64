@@ -637,7 +637,7 @@ void CDX11::EndFrame(bool present)
         m_bMakeScreenShot = false;
     }
     IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
-        return OwnedRender::E3QueueCursor(renderer);
+        return OwnedRender::E3QueueCursor(renderer, renderer.cursor_scale_percent(), renderer.load_cursor_wanted());
     }));
     const HRESULT presented = rendererFacade->EndFrame();
     frameTiming.End(SUCCEEDED(presented));

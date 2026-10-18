@@ -2,13 +2,6 @@
 #include "cursor_confinement.h"
 #include "../ErrorDialog.h"
 #include <engine_bridge.h>
-#pragma push_macro("min")
-#pragma push_macro("max")
-#undef min
-#undef max
-#include <renderer.h>
-#pragma pop_macro("max")
-#pragma pop_macro("min")
 #include <mmsystem.h>
 #include <algorithm>
 #include <condition_variable>
@@ -150,20 +143,16 @@ void E3CursorCanvas(HWND window, unsigned width, unsigned height, bool active) n
     cursor.window = window; cursor.width = width; cursor.height = height; cursor.active = active;
     cursor.wake.notify_all();
 }
-HRESULT E3QueueCursor(owned::Renderer& renderer) {
+HRESULT E3QueueCursor(owned::Renderer& renderer, int percent, bool loading) {
     owned::CursorPresentation frame;
     {
         std::lock_guard<std::mutex> lock(cursor.mutex);
-        const int percent = renderer.cursor_scale_percent();
         if (cursor.scale != percent) { cursor.scale = percent; cursor.frame = {}; ++cursor.revision; cursor.wake.notify_all(); }
-        cursor.loadCursor = renderer.load_cursor_wanted();
+        cursor.loadCursor = loading;
         if (cursor.active && cursor.window && GetForegroundWindow() == cursor.window && !ErrorDialog::Active())
             frame = cursor.frame;
         const std::lock_guard<std::recursive_mutex> modalLock(ErrorDialog::cursorMutex);
-        if (ErrorDialog::cursorPauses) {
-            static const std::vector<std::uint32_t> empty;
-            return renderer.queue_cursor(0, empty, 0, 0, RECT{});
-        }
+        if (ErrorDialog::cursorPauses) return S_OK;
         return owned::queue_owned_cursor(renderer, frame, cursor.loadCursor);
     }
 }
