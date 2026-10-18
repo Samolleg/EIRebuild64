@@ -78,7 +78,7 @@ bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept try {
         }
         sample.completed_pose=true;
         sample.values.unit=true;
-        sample.values.dead=static_cast<CUnit*>(object)->bDead!=FALSE;
+        sample.values.dead=static_cast<CUnit*>(object)->IsDead()!=FALSE;
         sample.visibility.casts_shadow=object->CheckFlag(OBJ_NOSHADOW)==0;
         sample.values.object_flags=(sample.values.object_flags&~0x00400000u)|
             (object->CheckFlag(UNIT_VISIBLE)?0x00400000u:0u);
