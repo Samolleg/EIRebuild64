@@ -29,6 +29,7 @@ struct CursorOwner {
         if (thread.joinable()) thread.join();
         std::lock_guard<std::mutex> lock(mutex);
         state = {}; frame = {};
+        active = loadCursor = false; window = nullptr; width = height = 0; ++revision;
     }
     void run() noexcept {
         owned::CursorProducer producer;
