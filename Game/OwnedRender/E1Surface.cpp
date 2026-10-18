@@ -72,4 +72,11 @@ HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
     if (actual.Get() != device) return E_INVALIDARG;
     texture = found->second.texture; return S_OK;
 }
+// Keep direct host readback callers on their existing surface API.
+HRESULT E1ResolveSurface(void* context, ID3D11Device* device, std::uint64_t id,
+    std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture) noexcept {
+    owned::SurfaceImage* image = nullptr;
+    return E1ResolveSurface(context, device, id, generation, texture, image);
+}
+
 }

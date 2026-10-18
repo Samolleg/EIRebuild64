@@ -3996,12 +3996,16 @@ void __fastcall hook_hud_on_activate(void* self, void*) {
     const bool staging = g_hud_visuals.begin_activation();
     g_hud_provisional_screen = staging ? self : nullptr;
     bool completed = false;
+#ifndef EID3D11_EMBEDDED
     widescreen_mission_activation(true);
+#endif
     __try {
         g_hud_on_activate(self);
         completed = true;
     } __finally {
+#ifndef EID3D11_EMBEDDED
         widescreen_mission_activation(false);
+#endif
         if (staging) {
             std::array<std::uint32_t, 4> lane_counts{};
             if (!completed || !hud_activation_lane_state(self, lane_counts) ||
@@ -28103,6 +28107,7 @@ bool bind_combat_text_texture(void* text, void* visualizator, bool& missing) noe
     }
 }
 
+#ifndef EID3D11_EMBEDDED
 BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
     SemanticScope scope(SemanticKind::particles, _ReturnAddress());
     if (!text || !visualizator) { report_combat_text_omission("null_list_or_visualizator"); return FALSE; }
@@ -28169,6 +28174,7 @@ BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
         }
     return TRUE;
 }
+#endif
 
 bool write_combat_text_clock_call(std::uint8_t* site, const void* target) noexcept {
     DWORD protection = 0;
@@ -28193,6 +28199,7 @@ bool restore_combat_text_clock_call(std::uint8_t* site, const std::array<std::ui
 
 // The Draw call, Draw's entry, ReceiveDamage's entry and both receive clock
 // calls must be stock; then all are patched, or none stay patched.
+#ifndef EID3D11_EMBEDDED
 bool install_combat_text_hooks(std::uint8_t* image) noexcept {
     if (g_combat_text_installed) return true;
     const auto draw_owner = resolve_hook_entry(image + kCombatTextDrawRva, kCombatTextDrawPrologue.data(),
@@ -28223,7 +28230,9 @@ bool install_combat_text_hooks(std::uint8_t* image) noexcept {
     g_combat_text_installed = true;
     return true;
 }
+#endif
 
+#ifndef EID3D11_EMBEDDED
 bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
     if (!g_combat_text_installed) return true;
     if (!image) return false;
@@ -28240,6 +28249,7 @@ bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
     if (restored) g_combat_text_installed = false;
     return restored;
 }
+#endif
 
 std::string debug_root() {
     char explicit_path[MAX_PATH]{};
@@ -41335,12 +41345,14 @@ bool EngineBridge::install() {
         report(game_prints_installed ? "game_prints_installed" : "game_prints_rejected",
                game_prints_installed ? "verified_print_list_pushes_and_render_call_gpu_prints" :
                                        "print_push_render_call_or_entry_mismatch_game_draws_prints");
+#ifndef EID3D11_EMBEDDED
         const bool combat_text_installed = install_combat_text_hooks(
             reinterpret_cast<std::uint8_t*>(image_));
         report(combat_text_installed ? "combat_text_installed" : "combat_text_rejected",
                combat_text_installed ? (g_combat_text_addon_layout ? "verified_call_addon_draw_chain_bypassed_addon_layout_game_time" :
                                         "verified_flying_hp_call_and_receive_clock_gpu_glyphs_game_time") :
                                        "flying_hp_call_entry_or_receive_clock_mismatch_game_draws_combat_text");
+#endif
         const bool owned_sky_installed = install_owned_sky_hook(
             reinterpret_cast<std::uint8_t*>(image_));
         report(owned_sky_installed ? "owned_sky_installed" : "owned_sky_rejected",
@@ -41631,7 +41643,9 @@ bool EngineBridge::uninstall() {
     restored &= uninstall_game_ribbon_hook(image);
     restored &= uninstall_game_selection_hook(image);
     restored &= uninstall_game_print_hooks(image);
+#ifndef EID3D11_EMBEDDED
     restored &= uninstall_combat_text_hooks(image);
+#endif
     uninstall_camera_mouse_pitch_hook(image);
     uninstall_camera_mouse_yaw_hook(image);
     if (!uninstall_highlight_hooks(image)) {

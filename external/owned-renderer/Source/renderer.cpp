@@ -1263,7 +1263,17 @@ void migrate_settings(RendererConfig& config) noexcept try{
 }catch(...){}
 } // namespace
 
-HRESULT Renderer::ensure(HWND hwnd,UINT w,UINT h){SCENE_ENTRY("ensure");
+HRESULT Renderer::ensure(HWND hwnd,UINT w,UINT h){
+ return ensure_with_driver(hwnd,w,h,D3D_DRIVER_TYPE_HARDWARE);
+}
+// Existing embedded device entry retained from the integration baseline.
+HRESULT Renderer::ensure_for_test_warp(HWND hwnd,UINT w,UINT h){
+ return ensure_with_driver(hwnd,w,h,D3D_DRIVER_TYPE_WARP);
+}
+HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE driver){SCENE_ENTRY("ensure");
+#ifdef EID3D11_EMBEDDED
+ if(!embedded_sky().available_to(this))return E_UNEXPECTED;
+#endif
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);camp_inventory_output(canvas_width(),canvas_height());width_=render_scale_extent(output_width_,render_scale_percent_);height_=render_scale_extent(output_height_,render_scale_percent_);hwnd_=hwnd;if(device_)return rtv_&&scene_composite_.target()?S_OK:E_FAIL;
  // NVIDIA's threaded optimisation retires shader variants on its worker while
  // their background compiles finish on its pool: an ABBA deadlock inside
@@ -1271,7 +1281,7 @@ HRESULT Renderer::ensure(HWND hwnd,UINT w,UINT h){SCENE_ENTRY("ensure");
  // threads off this device.
  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};HRESULT hr;
  delete_recorded_nvidia_cache();
- hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
+ hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
  if(FAILED(hr))return hr;
  shader_objects_=ShaderObjects::attach(device_.Get());
  frame_acct::install_device_counters(device_.Get(),context_.Get());
@@ -13343,8 +13353,12 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
  }
  if(!command)return HarnessRequest::none;
  const auto finish=[this,inputs](bool ok,const std::string& detail){
+#ifndef EID3D11_EMBEDDED
   if(inputs){harness_complete_entry(inputs->harness_entry_id,ok,detail);harness_completed_entry_=inputs->harness_entry_id;}
-  else harness_complete(ok,detail);
+
+  else
+#endif
+   harness_complete(ok,detail);
   harness_stage_=0;harness_wait_=0;};
  std::string detail;
  switch(command->verb){
@@ -14783,8 +14797,10 @@ HRESULT Renderer::queue_present(){
  }
  owned_resource_runtime_poll();
  camp_inventory_set_wide(configured_integer(debug_overlay_.config(),"camp_ui_layout",1)!=0);
+#ifndef EID3D11_EMBEDDED
  inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
   inputs.harness_camera_steps,inputs.harness_on_travel_map);
+#endif
  inputs.bridge=bridge_capture_frame_values();
  bridge_capture_profile_values(inputs.profile);
  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);scene_thread_->wait_present_slot();}
@@ -14930,8 +14946,12 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  if(!inputs)camp_inventory_set_wide(configured_integer(debug_overlay_.config(),"camp_ui_layout",1)!=0);
  if(!harness_overlay_shot_.empty()){
   std::string detail;const bool ok=write_harness_screenshot(harness_overlay_shot_,detail);
+#ifndef EID3D11_EMBEDDED
   if(inputs){harness_complete_entry(inputs->harness_entry_id,ok,detail+" (after the overlay: critter labels on)");harness_completed_entry_=inputs->harness_entry_id;}
-  else harness_complete(ok,detail+" (after the overlay: critter labels on)");
+
+  else
+#endif
+   harness_complete(ok,detail+" (after the overlay: critter labels on)");
   harness_stage_=0;harness_wait_=0;harness_overlay_shot_.clear();
  }
   ComPtr<ID3D11Texture2D> profiledBack;if(profiler_.capture_active())swap_->GetBuffer(0,IID_PPV_ARGS(&profiledBack));profiler_.end_pass(profiledBack.Get());
