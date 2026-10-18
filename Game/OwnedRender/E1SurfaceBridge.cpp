@@ -3,6 +3,7 @@
 #endif
 #include "../../stdafx.h"
 #include "E1SurfaceBridge.h"
+#include "E1TextLifetime.h"
 #include "E1PerfDiagnostics.h"
 #include "E1Surface.h"
 #include "../../external/owned-renderer/Source/renderer.h"
