@@ -208,6 +208,12 @@ struct Binding {
 std::map<std::string,std::vector<Binding>> models;
 std::string loadedProfile;
 bool loaded=false;
+bool catalogAlive=true;
+// theWorld's global destructor also calls Destroy(). Its order relative to
+// this translation unit is unspecified; never clear already destroyed STL.
+struct CatalogLifetime {
+    ~CatalogLifetime() { catalogAlive=false; }
+} catalogLifetime;
 
 template<class T> const T* Find(CDatabase<T>& db,const std::string& name) {
     const int count=db.GetNumEntries();
@@ -316,9 +322,9 @@ std::string Stamp(const std::string& path) {
 }
 }
 
-void Reset() { models.clear();loadedProfile.clear();loaded=false; }
+void Reset() { if(!catalogAlive)return;models.clear();loadedProfile.clear();loaded=false; }
 bool UsesWorldXY(const char* model) {
-    if(!model || !*model || theItemDatabase.sourceArchive.empty())return false;
+    if(!catalogAlive || !model || !*model || theItemDatabase.sourceArchive.empty())return false;
     try {
         const auto databases=Databases();std::string profile=ModRuntime::Resources() ? ModRuntime::Resources()->Directory() : "";
         for(const auto& path:databases) {
