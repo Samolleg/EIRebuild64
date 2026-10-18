@@ -163,7 +163,7 @@ std::vector<unsigned char> Read(std::ifstream& f, size_t size) {
     std::vector<unsigned char> b(size);if(size)f.read(reinterpret_cast<char*>(b.data()),std::streamsize(size));
     Require(bool(f),"Truncated catalog/RES");return b;
 }
-uint32_t U32(const std::vector<unsigned char>& b,size_t p) {
+uint32_t ReadCatalogU32(const std::vector<unsigned char>& b,size_t p) {
     Require(p<=b.size() && 4<=b.size()-p,"Truncated RES integer");
     return uint32_t(b[p])|(uint32_t(b[p+1])<<8)|(uint32_t(b[p+2])<<16)|(uint32_t(b[p+3])<<24);
 }
@@ -179,13 +179,13 @@ public:
                 std::ifstream f(Wide(path),std::ios::binary);Require(bool(f),"Missing RES");
                 f.seekg(0,std::ios::end);const auto length=f.tellg();Require(length>=16,"Invalid RES size");
                 f.seekg(0);const auto h=Read(f,16);
-                const uint32_t count=U32(h,4),offset=U32(h,8),bytes=U32(h,12);
+                const uint32_t count=ReadCatalogU32(h,4),offset=ReadCatalogU32(h,8),bytes=ReadCatalogU32(h,12);
                 const uint64_t table=uint64_t(count)*22;
-                Require(U32(h,0)==0x019ce23c && count>0 && count<=1000000 && offset>=16
+                Require(ReadCatalogU32(h,0)==0x019ce23c && count>0 && count<=1000000 && offset>=16
                     && bytes<=32u*1024u*1024u && uint64_t(offset)+table+bytes<=uint64_t(length),"Invalid RES index");
                 f.seekg(offset);const auto index=Read(f,size_t(table)+bytes);
                 for(uint32_t i=0;i<count;++i) {
-                    const size_t p=size_t(i)*22;const uint32_t next=U32(index,p),size=U32(index,p+4),data=U32(index,p+8),name=U32(index,p+18);
+                    const size_t p=size_t(i)*22;const uint32_t next=ReadCatalogU32(index,p),size=ReadCatalogU32(index,p+4),data=ReadCatalogU32(index,p+8),name=ReadCatalogU32(index,p+18);
                     const uint32_t n=index[p+16]|(uint32_t(index[p+17])<<8);
                     Require((next==0xffffffff || next<count) && uint64_t(data)+size<=uint64_t(length)
                         && name<=bytes && n<=bytes-name,"Invalid RES entry");
