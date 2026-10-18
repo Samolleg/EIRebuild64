@@ -471,7 +471,9 @@ struct RetainedShadowSourceChanges {
     std::vector<std::uint32_t> wave_active_terrain_sectors;
 };
 
-enum class RetainedShadowConsumer : std::uint8_t { directional, point, persistent_scene, count };
+// ground_contacts: the ground-cover object contact store (#164); it reads
+// value and lifecycle changes, not shadow state.
+enum class RetainedShadowConsumer : std::uint8_t { directional, point, persistent_scene, ground_contacts, count };
 
 // The scene lock protects this journal. Consumers acknowledge only completed
 // publications. Inactive consumers retain no history and begin with a full read.
@@ -479,6 +481,11 @@ class RetainedShadowChangeJournal {
 public:
     static constexpr std::size_t capacity = 8192;
     std::uint64_t revision() const noexcept { return revision_; }
+    // A publication prepared from revision `through` may still be acknowledged:
+    // no reset happened after it.
+    bool acknowledgeable(std::uint64_t through) const noexcept {
+        return through && through <= revision_ && through >= full_revision_;
+    }
     void visual_changed(std::int32_t id) noexcept;
     void terrain_changed(bool time_only) noexcept;
     RetainedShadowSourceChanges changes_since(std::uint64_t since) const;
@@ -876,8 +883,11 @@ public:
         std::uint64_t* committed_entities = nullptr) noexcept;
     RetainedVisualFrame visual_frame(double time, bool diagnose = false) const;
     std::shared_ptr<const RetainedVisualFrame> visual_frame_value(double time, bool diagnose = false) const;
+    void release_visual_frame_scratch() noexcept;
     RetainedShadowSourceChanges shadow_source_changes(std::uint64_t since) const;
     RetainedShadowSourceChanges shadow_source_changes(RetainedShadowConsumer consumer);
+    // The same read without the time/wave activity lists (value consumers).
+    RetainedShadowSourceChanges visual_source_changes(RetainedShadowConsumer consumer);
     void acknowledge_shadow_source_changes(RetainedShadowConsumer consumer,
         std::uint64_t through) noexcept;
     std::uint64_t shadow_source_revision() const noexcept;
@@ -1092,6 +1102,9 @@ private:
     // Resource creation precedes world admission and can survive world removal.
     // Membership remains solely in live_; this map owns resource incarnations.
     std::map<std::int32_t, VisualEntity> visuals_;
+    // Whether visual_publish_forced_weapon_ids may have left any entity
+    // forced_hidden (its only writer); false lets an empty list skip the walk.
+    bool forced_weapon_hidden_any_ = false;
     // Window-exited non-unit visuals, outside membership (see visual_detach).
     std::map<std::int32_t, DetachedVisual> detached_;
     std::atomic<std::size_t> detached_count_{0};
@@ -1109,6 +1122,7 @@ private:
     std::shared_ptr<const RetainedShadowInputDomain> shadow_input_domain_;
     bool shadow_tracking_failed_ = false;
     mutable std::shared_ptr<RetainedVisualFrame> visual_frame_cache_;
+    mutable std::shared_ptr<RetainedVisualFrame> visual_frame_spare_;
     mutable std::array<std::uint64_t,5> visual_frame_key_{};
     mutable std::uint64_t visual_frame_serial_ = 0;
     mutable std::uint64_t visual_frame_join_revision_ = 0;

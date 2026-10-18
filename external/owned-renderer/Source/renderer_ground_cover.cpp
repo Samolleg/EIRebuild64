@@ -108,6 +108,10 @@ cbuffer GcFrame:register(b11){
  uint4 gcStage;
  // x: round split (the candidate capacity less the largest cell).
  uint4 gcRound;
+ // The soft shelter map (gcShelter, t70; filter_native_rain_shelter): map x/y
+ // are rows 0 and 1 (.x*x+.y*y+.z), depth to height row 2 (.y-d*.x); row
+ // 0 .w 1 while it is bound.
+ float4 gcShelterRow[3];
 };
 cbuffer GcDraw:register(b12){uint gcDrawBase;uint3 gcDrawPadding;};
 // Placement kernels (compute only; b12 is free there): the global rule
@@ -240,6 +244,7 @@ float gcNoise(float2 p,uint seed){
  }
  return lerp(row0,row1,f.y);
 }
+)" R"(
 float gcFbm(float2 p,uint seed){
  float o0=0,o1=0;
  [loop]for(uint o=0;o<2;++o){
@@ -481,10 +486,30 @@ float gcSoftSandShare(float2 p){
  uint m=v>>12;float2 f=frac(p*.5);
  return lerp(lerp(float(m&1u),float((m>>1)&1u),f.x),lerp(float((m>>2)&1u),float((m>>3)&1u),f.x),f.y);
 }
+// Snow kept on grass under the shelter map's cover (1 open, 0 under a roof
+// or crown): the same soft map and rule as the world surfaces, so blades
+// under a crown stay green (ce0fedee user note).
+Texture2D<float4> gcShelter:register(t70);
+float gcShelterKeep(float3 p){
+ [branch]if(gcShelterRow[0].w<.5)return 1;
+ float2 n=float2(dot(gcShelterRow[0].xy,p.xy)+gcShelterRow[0].z,dot(gcShelterRow[1].xy,p.xy)+gcShelterRow[1].z);
+ if(any(abs(n)>=1))return 1;
+ uint w,h;gcShelter.GetDimensions(w,h);
+ float2 c=float2(n.x*.5+.5,.5-.5*n.y)*float2(w,h)-.5;
+ int2 base=int2(floor(c));float2 f=c-base;
+ float v[4];
+ [unroll]for(uint k=0;k<4;++k){
+  float4 m=gcShelter.Load(int3(clamp(base+int2(k&1u,k>>1),int2(0,0),int2(w-1,h-1)),0));
+  v[k]=m.r>=1?0:saturate((gcShelterRow[2].y-m.r*gcShelterRow[2].x-p.z-.3)/.6)*(gcShelterRow[2].w>.5?1:shelterTexelKeep(m,gcShelterRow[1].w));
+ }
+ return 1-saturate(lerp(lerp(v[0],v[1],f.x),lerp(v[2],v[3],f.x),f.y));
+}
 float gcSnowGround(float2 p){
  float2 t=gcCoverageTile(p,gcGrid.xy);int2 i=int2(floor(t));float2 f=t-i;
  float snow=lerp(lerp(gcSnowTile(i),gcSnowTile(i+int2(1,0)),f.x),lerp(gcSnowTile(i+int2(0,1)),gcSnowTile(i+int2(1,1)),f.x),f.y);
- return max(snow,.6*gcSoftSandShare(p));
+ // Snow built up by a snowfall (gcSnowStep.w, the cover) takes trails on any
+ // ground, as deep as the cover is thick (c71 user note).
+ return max(max(snow,.6*gcSoftSandShare(p)),saturate(gcSnowStep.w*1.2));
 }
 // One capsule per unit step, MAX-composed into the field (snow_trails.h).
 struct GcSnowOut{float4 p:SV_Position;float2 world:TEXCOORD0;nointerpolation float4 ends:TEXCOORD1;nointerpolation float3 shape:TEXCOORD2;nointerpolation float2 path:TEXCOORD3;};
@@ -1543,10 +1568,11 @@ GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  return o;
 }
 // Depth prepass: the same placement, only what the alpha test reads.
-struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;nointerpolation float snowHeightScale:TEXCOORD10;};
+struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;float2 uv:TEXCOORD3;nointerpolation uint mat:TEXCOORD7;
+ nointerpolation float snowHeightScale:TEXCOORD10;};
 GcDepthOut gcDepthVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
- GcDepthOut o;o.p=f.p;o.wp=f.wp;o.snowHeightScale=f.scale*f.stretch.y;return o;
+ GcDepthOut o;o.p=f.p;o.wp=f.wp;o.uv=f.v.uv;o.mat=f.inst.extra.z&15u;o.snowHeightScale=f.scale*f.stretch.y;return o;
 }
 float3 gcRectSample(Texture2D t,float4 rect,float2 uv){
  return t.SampleGrad(gcWrap,rect.xy+frac(uv)*rect.zw,ddx(uv)*rect.zw,ddy(uv)*rect.zw).rgb;
@@ -1606,15 +1632,31 @@ float gcPixelSunVisibility(GcOut i,float3 sun,float3 positionDx,float3 positionD
   float2 historyUv;int2 historyPixel;
   [branch]if(visibility>=0&&all(isfinite(positionDx))&&all(isfinite(positionDy))&&
      nativeShadowHistoryAt(i.wp,positionDx,positionDy,historyUv,historyPixel))
-   visibility=lerp(visibility,previousShadowVisibility.Load(int3(historyPixel,0)),shadowHistorySettings.z);
+   visibility=lerp(visibility,nativeShadowHistoryClamp(visibility,previousShadowVisibility.Load(int3(historyPixel,0))),shadowHistorySettings.z);
  }
 #endif
  return visibility;
 }
 // The cover's alpha test, shared by the depth prepass and the material pass:
 // fragments over a prop's current footprint (dithered over its margin) and,
-// for the snow pile, buried fragments.
-void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale){
+// for the snow pile, buried fragments; for strands (mat 7, seagrass), their
+// wavy alpha-cut edge.
+// Strand blades (make_seagrass): uv.x across the blade, uv.y its height t
+// plus 2 per blade. The edge cuts in by a slow wave per blade, and only where
+// the blade is wide enough on screen to show it, so narrow and distant
+// blades never shimmer (pixels: blade width in pixels, from fwidth(uv.x)).
+float gcStrandT(float2 uv){return uv.y-2*floor(uv.y*.5);}
+float gcStrandPixels(float2 uv){return 1/max(fwidth(uv.x),1e-4);}
+void gcStrandClip(float2 uv,float pixels){
+ const float t=gcStrandT(uv),blade=floor(uv.y*.5),across=abs(uv.x*2-1);
+ const float wave=.5+.5*sin(t*23+blade*2.4)*sin(t*9.1+blade*5.3);
+ clip(1-(.12+.22*wave)*saturate((pixels-3)*.2)-across);
+}
+void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale,float2 uv,uint mat){
+#if GC_PS_KIND==0
+ const float strandPixels=gcStrandPixels(uv);
+ [branch]if(mat==7u||mat==8u)gcStrandClip(uv,strandPixels);
+#endif
  // A surviving centre can still have blades or debris crossing a prop. Clip
  // their fragments against the same current footprint, including its margin.
  float blocked=gcObjectMask.SampleLevel(gcClamp,(wp.xy-gcObjectWindow.xy)*gcObjectWindow.zw,0);
@@ -1638,7 +1680,7 @@ void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale){
 float gcDepth24(float z){return round(saturate(z)*16777215.0)/16777215.0;}
 struct GcDepthResult{float4 rest:SV_Target0;float2 normal:SV_Target1;};
 GcDepthResult gcDepthPS(GcDepthOut i){
- gcCoverClip(i.wp,i.p.xy,i.snowHeightScale);
+ gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.uv,i.mat);
  float3 rest=i.wp;
 #if GC_PS_KIND!=3
  if(dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz)>1e-12)rest+=normalize(nativeWorldSunDirection.xyz)*.05;
@@ -1650,7 +1692,7 @@ GcDepthResult gcDepthPS(GcDepthOut i){
 }
 GcPixel gcPS(GcOut i){
  float3 positionDx=ddx(i.wp),positionDy=ddy(i.wp);
- gcCoverClip(i.wp,i.p.xy,i.snowHeightScale);
+ gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.uv,i.mat&15u);
  // Thin tufts keep no AO share: the horizon AO of their own blades is noise,
  // while the ground between them still darkens from the blades' depth.
  const bool thin=(i.mat&0x10000u)!=0;i.mat&=15u;
@@ -1687,6 +1729,33 @@ GcPixel gcPS(GcOut i){
   alb=tex*i.own.rgb*i.own.a;
  }
 #elif GC_PS_KIND==0
+ const float strandPixels=gcStrandPixels(i.uv);
+ [branch]if(i.mat==7u){
+  // Painted strand (EI's soft hand-painted foliage, not photographic): a pale
+  // midrib, darker rims, faint long veins and soft banding along the blade,
+  // the tip lighter and warmer where light passes through it. Fine detail
+  // fades out where the blade is too narrow on screen to carry it.
+  const float t=gcStrandT(i.uv),blade=floor(i.uv.y*.5),across=abs(i.uv.x*2-1);
+  const float detail=saturate((strandPixels-4)*.15);
+  const float rib=1-smoothstep(.04,.24,across),rim=smoothstep(.5,.95,across);
+  const float veins=(.5+.5*cos(across*18.85))*(1-rib)*detail;
+  const float band=sin(t*29+blade*1.7+across*1.5)*detail;
+  alb*=1+(.24*rib-.3*rim)*(.4+.6*detail)-.08*veins+.05*band;
+  alb=lerp(alb,alb*float3(1.18,1.14,.82),.45*smoothstep(.55,1,t));
+ }
+ // Beach wrack drying on the sand: dark olive-brown strands whose edges dry
+ // paler in soft blotches, a darker damp midrib, and a faint wet sheen along
+ // it (every wrack strand lies within 1.4 m of the waterline: fd_beach).
+ float wrackSheen=0;
+ [branch]if(i.mat==8u){
+  const float t=gcStrandT(i.uv),blade=floor(i.uv.y*.5),across=abs(i.uv.x*2-1);
+  const float detail=saturate((strandPixels-4)*.15);
+  const float edge=smoothstep(.4,.95,across),rib=1-smoothstep(.05,.3,across);
+  const float blotch=.5+.5*sin(t*17+blade*3.1)*sin(t*6.3+blade*1.3);
+  alb=lerp(alb,alb*float3(1.6,1.5,1.25)+float3(.05,.04,.02),edge*(.25+.45*blotch)*(.5+.5*detail));
+  alb*=1-.16*rib*detail;
+  wrackSheen=rib*detail;
+ }
  if(i.mat==4u||i.mat==5u){
   // Slab fragments and stains use the painted cave tile art and its colour.
   alb=lerp(alb,gcTerrainColor(i.wp.xy-gcOrigin.xy,0),.35);
@@ -1702,6 +1771,20 @@ GcPixel gcPS(GcOut i){
 #endif
  alb=lerp(alb,i.gnd.rgb,i.gnd.w);
  alb=lerp(alb,float3(.92,.95,1),i.frost*saturate(n.z*1.8-.6));
+ // Snow build-up on grass and ground cover while it snows (the cover in
+ // gcSnowStep.w): most of it lies on the ground under the blades (the blade
+ // bases, which carry the ground colour, take the ground's snow), and the
+ // blades themselves only a dusting on up-facing tips, capped at 55%, so
+ // grass never turns fully white (d9bc4d22 user note).
+ [branch]if(gcSnowStep.w>0){
+  float2 g=i.wp.xy/1.1,gi=floor(g),gf=g-gi;gf=gf*gf*(3-2*gf);
+  float4 hc=frac(sin(float4(dot(gi,float2(12.9898,78.233)),dot(gi+float2(1,0),float2(12.9898,78.233)),
+                            dot(gi+float2(0,1),float2(12.9898,78.233)),dot(gi+1,float2(12.9898,78.233))))*43758.5453);
+  float h=lerp(lerp(hc.x,hc.y,gf.x),lerp(hc.z,hc.w,gf.x),gf.y);
+  float patchy=saturate(gcSnowStep.w*1.4-h*.6);
+  float tip=1-i.gnd.w;
+  alb=lerp(alb,float3(.93,.95,1),(.55*patchy*saturate(n.z*1.6-.2)*tip+.85*saturate(gcSnowStep.w*1.2)*i.gnd.w)*gcShelterKeep(i.wp));
+ }
  float3 sun=dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz)>1e-12?normalize(nativeWorldSunDirection.xyz):float3(0,0,1);
  // The terrain's own facing (or its full-sun comparison) blended to wrapped
  // light for thin cover above the base.
@@ -1736,6 +1819,10 @@ GcPixel gcPS(GcOut i){
  float3 c=alb*(saturate(max(nativeWorldAmbient.rgb,directional)+local)+glow);
  #if GC_PS_KIND==0
  if(i.mat==6u)c+=i.alb*float3(.08,.24,.17);
+ [branch]if(wrackSheen>0){ // the wet wrack midrib: a small, soft sun glint
+  const float3 halfway=normalize(sun+normalize(gcEye.xyz-i.wp));
+  c+=nativeWorldSunDiffuse.rgb*(visibility*.1*wrackSheen*pow(saturate(dot(n,halfway)),24));
+ }
 #endif
  // Reduced AO on debris: full horizon AO darkened its rims and made it stand out.
  #if GC_AO
@@ -1950,38 +2037,74 @@ GcMesh make_conch() {
     add_prism(m, pts, 0.16f, 0.015f, 8, {0.9f, 0.76f, 0.6f}, 0.9f, true, {0.95f, 0.62f, 0.58f});
     return m;
 }
+// Beach wrack (mat_wrack): a loose tangle of thin, flat strands lying on the
+// sand, mostly along the shoreline (x; the rule yaws it along the shore).
+// Each strand meanders on its own curve, tapers to a point and hugs the
+// ground, a little higher where it drapes over the others (per-strand layer
+// heights keep crossings apart). Colours run from dark olive-brown to paler,
+// dried strands. uv as make_seagrass: x across, y t plus 2 per strand.
+// 2*segs+1 vertices per strand.
 GcMesh make_kelp(std::uint32_t seed) {
     GcMesh m; Rng r(seed);
-    for (int s = 0; s < 6; ++s) {
-        const float y0 = r.r(-0.18f, 0.18f), ph = r.r(0, 6.28f), w = r.r(0.05f, 0.09f), len = r.r(0.6f, 1.0f), tone = r.r(0.85f, 1.15f);
-        const float col[4]{0.3f * tone, 0.27f * tone, 0.11f * tone, 0.9f};
+    const int strands = 8, segs = 6;
+    const V3 wet{0.2f, 0.19f, 0.08f}, dried{0.4f, 0.35f, 0.19f};
+    for (int s = 0; s < strands; ++s) {
+        const float len = r.r(0.45f, 0.95f), w0 = r.r(0.022f, 0.045f), turn = r.r(-2.2f, 2.2f), wobble = r.r(0.15f, 0.4f);
+        const float heading = r.r(-0.5f, 0.5f) + (r.f() < 0.5f ? 0.0f : 3.14159f), ph = r.r(0, 6.28f);
+        const float tone = r.r(0.8f, 1.15f), dry = r.r(0.0f, 0.6f);
+        const float col[4]{(wet.x + (dried.x - wet.x) * dry) * tone, (wet.y + (dried.y - wet.y) * dry) * tone,
+                           (wet.z + (dried.z - wet.z) * dry) * tone, 0.9f};
+        float x = r.r(-0.3f, 0.3f) - std::cos(heading) * len * 0.5f, y = r.r(-0.15f, 0.15f) - std::sin(heading) * len * 0.5f;
+        const float step = len / segs;
         const auto base = std::uint32_t(m.v.size());
-        const int segs = 10;
         for (int k = 0; k <= segs; ++k) {
-            const float t = float(k) / segs, x = (t - 0.5f) * len, y = y0 + 0.05f * std::sin(t * 9 + ph);
-            const float z = 0.008f + 0.01f * std::fabs(std::sin(t * 5 + ph));
-            add(m, {x, y - w, z}, {0, 0, 1}, col, 0, 0, 0.95f, 0);
-            add(m, {x, y + w, z}, {0, 0, 1}, col, 0, 0, 0.95f, 0);
+            const float t = float(k) / segs, h = heading + turn * (t - 0.5f) + wobble * std::sin(t * 7 + ph);
+            const float w = w0 * 0.5f * (1 - 0.8f * std::pow(t, 1.5f)), px = -std::sin(h) * w, py = std::cos(h) * w;
+            const float z = 0.004f + 0.003f * s + 0.004f * std::max(0.0f, std::sin(t * 6 + ph));
+            const float v = t + 2.0f * s;
+            if (k == segs) add(m, {x, y, z}, {0, 0, 1}, col, .5f, v, 0.9f, 0);
+            else { add(m, {x - px, y - py, z}, {0, 0, 1}, col, 0, v, 0.9f, 0); add(m, {x + px, y + py, z}, {0, 0, 1}, col, 1, v, 0.9f, 0); }
+            x += std::cos(h) * step; y += std::sin(h) * step;
         }
-        for (int k = 0; k < segs; ++k) { const std::uint32_t q = base + k * 2; tri(m, q, q + 1, q + 2); tri(m, q + 1, q + 3, q + 2); }
+        for (int k = 0; k < segs - 1; ++k) { const std::uint32_t q = base + k * 2; tri(m, q, q + 1, q + 2); tri(m, q + 1, q + 3, q + 2); }
+        const std::uint32_t q = base + (segs - 1) * 2; tri(m, q, q + 1, q + 2);
     }
     return m;
 }
-GcMesh make_seagrass(std::uint32_t seed, int blades = 9, int segs = 5, float width_scale = 1) {
+// Seagrass and kelp strands (mat_strand): fewer, finer ribbons than a grass
+// tuft. Each blade tapers to a point, twists about its own axis and curls
+// gently sideways as it rises, on a slow arc rather than a straight lean.
+// uv.x runs across the blade (the pixel shader's painted midrib, rims and
+// wavy alpha-cut edge: gcStrandClip); uv.y is the height t plus 2 per blade
+// (that blade's own phase in the pattern). Tip colour varies per blade
+// between sea green and olive. 2*segs+1 vertices per blade.
+GcMesh make_seagrass(std::uint32_t seed, int blades = 6, int segs = 5, float width_scale = 1) {
     GcMesh m; Rng r(seed);
-    const V3 dark{0.12f, 0.26f, 0.1f}, light{0.34f, 0.5f, 0.2f};
+    const V3 dark{0.1f, 0.22f, 0.09f}, light{0.3f, 0.46f, 0.18f}, olive{0.36f, 0.4f, 0.14f};
     for (int b = 0; b < blades; ++b) {
-        const float a = r.r(0, 6.283f), rad = r.r(0.0f, 0.12f), hgt = r.r(0.6f, 1.0f), lean = r.r(0.05f, 0.3f), face = a + 1.57f, w0 = r.r(0.05f, 0.08f);
-        const float bx = std::cos(a) * rad, by = std::sin(a) * rad, dx = std::cos(a), dy = std::sin(a), fx = std::cos(face), fy = std::sin(face);
+        const float a = r.r(0, 6.283f), rad = r.r(0.0f, 0.1f), hgt = r.r(0.6f, 1.0f), lean = r.r(0.05f, 0.28f);
+        const float w0 = r.r(0.035f, 0.055f), twist = r.r(-1.4f, 1.4f), curl = r.r(0.02f, 0.06f), waves = r.r(1.0f, 2.0f);
+        const float phase = r.r(0, 6.283f), hue = r.r(0.0f, 0.6f), tone = r.r(0.85f, 1.12f);
+        const float bx = std::cos(a) * rad, by = std::sin(a) * rad, dx = std::cos(a), dy = std::sin(a);
+        const V3 tip{(light.x + (olive.x - light.x) * hue) * tone, (light.y + (olive.y - light.y) * hue) * tone,
+                     (light.z + (olive.z - light.z) * hue) * tone};
         const auto base = std::uint32_t(m.v.size());
         for (int s = 0; s <= segs; ++s) {
-            const float t = float(s) / segs, w = w0 * width_scale * (1 - t * 0.6f) * 0.5f;
-            const float cx = bx + dx * lean * t * hgt, cy = by + dy * lean * t * hgt, cz = hgt * t;
-            const float col[4]{dark.x + (light.x - dark.x) * t, dark.y + (light.y - dark.y) * t, dark.z + (light.z - dark.z) * t, 0.85f};
-            add(m, {cx - fx * w, cy - fy * w, cz}, {-dx * 0.3f, -dy * 0.3f, 0.95f}, col, 0, t, 0.75f + 0.35f * t, t * t * hgt * 2.5f);
-            add(m, {cx + fx * w, cy + fy * w, cz}, {-dx * 0.3f, -dy * 0.3f, 0.95f}, col, 1, t, 0.75f + 0.35f * t, t * t * hgt * 2.5f);
+            const float t = float(s) / segs;
+            const float w = w0 * width_scale * (1 - 0.8f * std::pow(t, 1.4f)) * 0.5f;
+            const float side = curl * hgt * t * std::sin(t * 3.14159f * waves + phase); // sideways curl
+            const float arc = lean * hgt * (0.4f * t + 0.6f * t * t);
+            const float cx = bx + dx * arc - dy * side, cy = by + dy * arc + dx * side, cz = hgt * t * (1 - 0.15f * lean * t);
+            const float face = a + 1.57f + twist * t, fx = std::cos(face), fy = std::sin(face);
+            const float col[4]{dark.x + (tip.x - dark.x) * t, dark.y + (tip.y - dark.y) * t, dark.z + (tip.z - dark.z) * t, 0.85f};
+            const V3 n = unit3({-dx * 0.3f + fy * 0.25f, -dy * 0.3f - fx * 0.25f, 0.92f});
+            const float v = t + 2.0f * b, ao = 0.75f + 0.35f * t, bend = t * t * hgt * 2.5f;
+            if (s == segs) { add(m, {cx, cy, cz}, n, col, .5f, v, ao, bend); break; }
+            add(m, {cx - fx * w, cy - fy * w, cz}, n, col, 0, v, ao, bend);
+            add(m, {cx + fx * w, cy + fy * w, cz}, n, col, 1, v, ao, bend);
         }
-        for (int s = 0; s < segs; ++s) { const std::uint32_t q = base + s * 2; tri(m, q, q + 1, q + 2); tri(m, q + 1, q + 3, q + 2); }
+        for (int s = 0; s < segs - 1; ++s) { const std::uint32_t q = base + s * 2; tri(m, q, q + 1, q + 2); tri(m, q + 1, q + 3, q + 2); }
+        const std::uint32_t q = base + (segs - 1) * 2; tri(m, q, q + 1, q + 2);
     }
     return m;
 }
@@ -2024,7 +2147,7 @@ std::array<GcMesh, gm_count> build_meshes() {
             make_blades(4, 0.2f, 13, 0.3f, {0.92f, 0.9f, 0.5f}, .34f, 2), make_cone(),
             make_cave_patch(),make_cave_fern(),make_cave_roots(),make_cave_mushrooms(),make_cave_slab(),
             make_cave_bones(),make_cave_web(),make_cave_crystals(),make_cave_slab(true),make_cave_skull(),
-            make_flower(17, true), make_reeds(31, 5, 2, 2.2f), make_cattail(41, true), make_seagrass(71, 5, 2, 1.8f)};
+            make_flower(17, true), make_reeds(31, 5, 2, 2.2f), make_cattail(41, true), make_seagrass(71, 4, 2, 1.8f)};
 }
 
 struct GroundCoverConstants {
@@ -2042,6 +2165,7 @@ struct GroundCoverConstants {
     std::uint32_t pass[4];
     std::uint32_t stage[4]; // placement: candidate and survivor capacity, jobs per class, window rows
     std::uint32_t round[4]; // placement: round split (candidate capacity less the largest cell)
+    float shelter[3][4];    // soft shelter map rows (gcShelterRow); row 0 w 1 while bound
 };
 static_assert(sizeof(GroundCoverConstants) % 16 == 0);
 struct GcTileGpu { float uv[8]; std::uint32_t material, padding[3]; };
@@ -2236,7 +2360,7 @@ struct GroundCoverNeighbourInputs {
     std::vector<GcTileGpu> tiles;
     std::vector<std::uint8_t> used, base_lanes;
     std::vector<std::array<std::uint8_t,4>> trees;
-    std::future<TerrainTileFamilies> families;
+    TileFamiliesJob families;
     std::vector<std::uint16_t> base_slots;
     std::vector<std::uint32_t> slot_types;
     std::shared_ptr<TerrainTileBlendInput> blend_input; // only for 8-tile atlas sides
@@ -2322,7 +2446,7 @@ unsigned place_features(const GroundCoverRule& r) {
 }
 // Pixel material kinds (GC_PS_KIND): procedural colour (plain, ground, wet,
 // glow), bark, stone, snow pile.
-constexpr unsigned kPixelKindMaterials[4] = {(1u << mat_plain) | (1u << mat_ground) | (1u << mat_wet) | (1u << mat_glow),
+constexpr unsigned kPixelKindMaterials[4] = {(1u << mat_plain) | (1u << mat_ground) | (1u << mat_wet) | (1u << mat_glow) | (1u << mat_strand) | (1u << mat_wrack),
                                              1u << mat_bark, 1u << mat_stone, 1u << mat_snow};
 } // namespace
 
@@ -2445,12 +2569,60 @@ void Renderer::release_ground_cover() noexcept {
     gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
     gc_fields_srv_.Reset(); gc_color_.Reset(); gc_color_srv_.Reset(); gc_color_uav_.Reset();
     gc_tiles_srv_.Reset(); gc_bark_srv_.Reset(); gc_stone_srv_.Reset(); gc_trees_srv_.Reset();
-    gc_zone_pieces_.Reset(); gc_zone_srv_.Reset(); gc_zone_uploaded_values_.clear();
+    gc_zone_pieces_.Reset(); gc_zone_srv_.Reset(); gc_zone_uploaded_.clear();
     gc_raster_.Reset(); gc_depth_.Reset(); gc_blend_.Reset(); gc_clamp_.Reset(); gc_wrap_.Reset();
     gc_map_.reset(); gc_material_state_.clear(); gc_neighbours_.clear();
     gc_capacity_.fill(0); gc_instance_capacity_ = 0; gc_readback_head_ = gc_readback_pending_ = 0;
     gc_map_generation_ = 0; gc_failed_ = false; gc_grow_ = false;
     if (gc_compile_.valid()) gc_compile_ = {}; // waits for a running compile
+}
+
+// World change (release_world_state): every map-scoped field, map and
+// demand-grown pool goes; shaders, states and the fixed rule/mesh buffers of
+// ensure_ground_cover_pipeline stay. Each released resource is recreated by
+// its own null/capacity check at the new map's demand (gc_map_generation_ 0
+// rebuilds the map fields; an empty pool starts from the rule estimate).
+void Renderer::release_ground_cover_world() noexcept {
+    bridge_release_ground_contacts();
+    gc_cell_jobs_.Reset(); gc_cell_job_uav_.Reset(); gc_cell_job_srv_.Reset(); gc_cell_job_capacity_ = 0;
+    std::vector<std::uint64_t>().swap(gc_cell_masks_); gc_cell_masks_key_ = UINT64_MAX; gc_cell_mask_srv_.Reset();
+    gc_candidates_.Reset(); gc_survivors_.Reset(); gc_candidate_uav_.Reset(); gc_survivor_uav_.Reset();
+    gc_candidate_capacity_ = gc_survivor_capacity_ = 0;
+    gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
+    gc_shade_input_.Reset(); gc_shade_input_uav_.Reset();
+    gc_draw_inputs_.Reset(); gc_draw_input_srv_.Reset(); gc_draw_input_uav_.Reset();
+    for (auto& value : gc_draw_constants_) value.Reset();
+    // Counts still in flight describe the previous map's pools.
+    gc_capacity_.fill(0); gc_instance_capacity_ = 0; gc_grow_ = false; gc_readback_pending_ = 0;
+    std::vector<std::uint32_t>().swap(gc_tile_classes_); gc_tile_classes_key_ = UINT64_MAX;
+    std::vector<std::uint8_t>().swap(gc_tree_mask_);
+    gc_object_mask_.Reset(); gc_object_rtv_.Reset(); gc_object_srv_.Reset();
+    gc_objects_.Reset(); gc_object_input_srv_.Reset();
+    std::vector<FootprintSplat>().swap(gc_object_input_); std::vector<FootprintSplat>().swap(gc_object_drawn_);
+    gc_object_mask_current_ = false; gc_object_capacity_ = gc_object_width_ = gc_object_height_ = 0;
+    for (unsigned k = 0; k < 2; ++k) { gc_trail_[k].Reset(); gc_trail_rtv_[k].Reset(); gc_trail_srv_[k].Reset(); }
+    gc_trail_sources_.Reset(); gc_trail_sources_rtv_.Reset(); gc_trail_sources_srv_.Reset();
+    gc_trail_index_ = 0; gc_trail_recovery_ = 0; gc_trail_seconds_ = -1;
+    gc_footprints_.Reset(); gc_footprint_srv_.Reset();
+    std::vector<FootprintSplat>().swap(gc_footprint_input_);
+    gc_footprint_capacity_ = gc_trail_width_ = gc_trail_height_ = 0;
+    gc_snow_tiles_ = {}; gc_snow_active_ = {}; gc_snow_full_writes_ = 0;
+    for (unsigned k = 0; k < 2; ++k) { gc_snow_[k].Reset(); gc_snow_rtv_[k].Reset(); gc_snow_srv_[k].Reset(); }
+    gc_snow_segments_.Reset(); gc_snow_segment_srv_.Reset(); gc_snow_segment_capacity_ = 0; gc_snow_index_ = 0;
+    gc_snow_valid_ = false; gc_snow_seconds_ = -1; gc_snow_map_generation_ = 0; snow_terrain_srv_.Reset();
+    decltype(gc_snow_tracks_)().swap(gc_snow_tracks_);
+    decltype(gc_snow_prints_)().swap(gc_snow_prints_);
+    decltype(gc_snow_segment_input_)().swap(gc_snow_segment_input_);
+    decltype(gc_unit_input_)().swap(gc_unit_input_);
+    decltype(gc_unit_trails_)().swap(gc_unit_trails_);
+    gc_overflow_.Reset(); gc_overflow_uav_.Reset(); gc_overflow_passes_ = 0;
+    gc_fields_srv_.Reset(); gc_color_.Reset(); gc_color_srv_.Reset(); gc_color_uav_.Reset(); gc_tiles_srv_.Reset();
+    gc_bark_srv_.Reset(); gc_stone_srv_.Reset(); gc_trees_srv_.Reset();
+    gc_zone_pieces_.Reset(); gc_zone_srv_.Reset(); gc_zone_uploaded_.clear();
+    gc_map_.reset(); std::vector<std::uint8_t>().swap(gc_material_state_);
+    gc_map_generation_ = 0;
+    // Emptied by release_neighbour_maps; give back the vector itself.
+    if (gc_neighbours_.empty()) decltype(gc_neighbours_)().swap(gc_neighbours_);
 }
 
 // Shaders load on a worker as soon as the option is on, so no frame waits;
@@ -2463,7 +2635,10 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
         try {
             std::vector<ShaderProgram> programs;
             append_ground_cover_shader_programs(programs);
-            gc_compile_ = std::async(std::launch::async, [programs = std::move(programs)]() {
+            gc_compile_total_ = programs.size();
+            gc_compile_done_ = std::make_shared<std::atomic<std::size_t>>(0);
+            gc_compile_ = std::async(std::launch::async, [programs = std::move(programs), done = gc_compile_done_]() {
+                const BackgroundWorkerPriority priority;
                 std::vector<ComPtr<ID3DBlob>> blobs(programs.size());
                 for (std::size_t k = 0; k < programs.size(); ++k) {
                     ComPtr<ID3DBlob> errors;
@@ -2472,6 +2647,7 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
                         blobs.clear();
                         break;
                     }
+                    ++*done;
                 }
                 return blobs;
             });
@@ -2486,13 +2662,13 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
     static_assert(kPlaceClassCount == kGcPlaceClasses, "placement class table");
     HRESULT hr = S_OK;
     const auto blob_cs = [&](unsigned program, ComPtr<ID3D11ComputeShader>& shader) {
-        return device_->CreateComputeShader(blobs[program]->GetBufferPointer(), blobs[program]->GetBufferSize(), nullptr, &shader);
+        return create_shader(device_.Get(),blobs[program]->GetBufferPointer(), blobs[program]->GetBufferSize(), nullptr, &shader);
     };
     const auto blob_vs = [&](unsigned program, ComPtr<ID3D11VertexShader>& shader) {
-        return device_->CreateVertexShader(blobs[program]->GetBufferPointer(), blobs[program]->GetBufferSize(), nullptr, &shader);
+        return create_shader(device_.Get(),blobs[program]->GetBufferPointer(), blobs[program]->GetBufferSize(), nullptr, &shader);
     };
     const auto blob_ps = [&](unsigned program, ComPtr<ID3D11PixelShader>& shader) {
-        return device_->CreatePixelShader(blobs[program]->GetBufferPointer(), blobs[program]->GetBufferSize(), nullptr, &shader);
+        return create_shader(device_.Get(),blobs[program]->GetBufferPointer(), blobs[program]->GetBufferSize(), nullptr, &shader);
     };
     if (FAILED(hr = blob_cs(gp_finalize, gc_finalize_cs_)) || FAILED(hr = blob_cs(gp_paint, gc_paint_cs_)) ||
         FAILED(hr = blob_cs(gp_shade, gc_shade_cs_[0])) || FAILED(hr = blob_cs(gp_shade + 1, gc_shade_cs_[1])) ||
@@ -2805,6 +2981,7 @@ HRESULT Renderer::update_ground_cover_maps(const AmbientWorldSource& inputs) noe
                 switch (texture->format) {
                 case MmpFormat::dxt1: view.format = NativeOwnedTextureFormat::dxt1; break;
                 case MmpFormat::dxt3: view.format = NativeOwnedTextureFormat::dxt3; break;
+                case MmpFormat::dxt5: view.format = NativeOwnedTextureFormat::dxt5; break;
                 case MmpFormat::rgb565: view.format = NativeOwnedTextureFormat::rgb565; break;
                 case MmpFormat::argb1555: view.format = NativeOwnedTextureFormat::argb1555; break;
                 case MmpFormat::argb4444: view.format = NativeOwnedTextureFormat::argb4444; break;
@@ -2992,7 +3169,7 @@ void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
 }
 
 void Renderer::apply_neighbour_tile_families(GcNeighbour& n) noexcept try {
-    if (!n.families.valid() || n.families.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    if (!n.families.ready()) return;
     const auto families = n.families.get();
     const auto sand = terrain_tile_sand_slots(families);
     const auto bare = terrain_tile_bare_corners(families);
@@ -3179,20 +3356,27 @@ std::array<UINT, 6> gc_window_bounds(const std::vector<std::uint64_t>& masks, UI
     const auto& rules = rule_table();
     std::array<UINT, 6> bounds{};
     if (masks.empty()) return bounds;
-    // Rules are immutable. Counts depend on quality and distance bands only,
-    // not on the camera, map, frustum or selected classes.
-    struct CountCache {
-        std::vector<UINT> table;
-        UINT bands = 0;
-        float density = -1, distance = -1;
-    };
-    static thread_local CountCache counts;
-    if(counts.density!=density || counts.distance!=distance) {
-        counts.table.clear();counts.bands=0;
-        counts.density=density;counts.distance=distance;
+    // Each class's rules as mask bits (a rule is listed once, in one class):
+    // a cell then visits only its own rules instead of testing every rule of
+    // every class (this walk was ~2% of the main thread in a pan sample).
+    std::array<std::uint64_t, 6> class_bits{};
+    for (unsigned c = 0; c < 6; ++c)
+        for (const std::uint32_t r : class_rules[c]) if (r < 64) class_bits[c] |= std::uint64_t{1} << r;
+    // [band][rule] slot counts depend only on density and distance (the rule
+    // table is constant): kept per pair across calls, grown by band on demand.
+    // The active map and its neighbours use different densities.
+    struct BandTable { float density = -1, distance = -1; std::vector<UINT> table; UINT bands = 0; };
+    static thread_local std::array<BandTable, 4> band_tables;
+    static thread_local unsigned band_table_next = 0;
+    BandTable* cached = nullptr;
+    for (auto& entry : band_tables)
+        if (std::memcmp(&entry.density, &density, sizeof(float)) == 0 && std::memcmp(&entry.distance, &distance, sizeof(float)) == 0) { cached = &entry; break; }
+    if (!cached) {
+        cached = &band_tables[band_table_next++ % band_tables.size()];
+        cached->density = density; cached->distance = distance; cached->table.clear(); cached->bands = 0;
     }
-    auto& table=counts.table;
-    auto& bands=counts.bands;
+    std::vector<UINT>& table = cached->table;
+    UINT& bands = cached->bands;
     const auto count = [&](UINT band, std::uint32_t r) {
         while (band >= bands) {
             // Reserve the whole row before mutation, so allocation failure
@@ -3218,19 +3402,36 @@ std::array<UINT, 6> gc_window_bounds(const std::vector<std::uint64_t>& masks, UI
         if (!visible) continue;
         const float dx = std::max({lo[0] - eye[0], 0.f, eye[0] - hi[0]}), dy = std::max({lo[1] - eye[1], 0.f, eye[1] - hi[1]});
         const UINT band = UINT(std::sqrt(dx * dx + dy * dy) / 4.f);
-        for (unsigned c = 0; c < 6; ++c)
-            for (const std::uint32_t r : class_rules[c]) if ((mask >> r) & 1u) bounds[c] += count(band, r);
+        for (unsigned c = 0; c < 6; ++c) {
+            std::uint64_t bits = mask & class_bits[c];
+            while (bits) {
+                unsigned long r = 0;
+                const auto low_bits = static_cast<std::uint32_t>(bits);
+                if (low_bits) _BitScanForward(&r, low_bits);
+                else { _BitScanForward(&r, static_cast<std::uint32_t>(bits >> 32)); r += 32; }
+                bits &= bits - 1;
+                bounds[c] += count(band, r);
+            }
+        }
     }
     return bounds;
 }
 } // namespace
 
-// Candidate and survivor buffers for one round (exact: every slot of a round
-// can survive), sized before the frame constants carry them.
-HRESULT Renderer::gc_ensure_stage_buffers(UINT capacity) {
-    if (capacity <= gc_candidate_capacity_) return S_OK;
+// Candidate and survivor buffers for one round (every slot of a round can
+// survive), sized before the frame constants carry them. They grow by half
+// again over the demand (issue #162): grown to the exact demand, a pan that
+// widens the visible window recreated both (17-46 MB together) nearly every
+// frame, and the driver then stalled the frame's next WRITE_DISCARD Map for
+// 8-25 ms (zone 3 route: 64 of 66 such stalls within two frames of it).
+// The capacity the shaders see was already allowed above a round's demand
+// (it never shrinks).
+HRESULT Renderer::gc_ensure_stage_buffers(UINT required) {
+    if (required <= gc_candidate_capacity_) return S_OK;
+    const UINT previous = gc_candidate_capacity_;
     gc_candidates_.Reset(); gc_candidate_uav_.Reset(); gc_survivors_.Reset(); gc_survivor_uav_.Reset();
     gc_candidate_capacity_ = gc_survivor_capacity_ = 0;
+    UINT capacity = previous ? std::max(required, previous + previous / 2) : required;
     const auto stage_buffer = [&](UINT stride, ComPtr<ID3D11Buffer>& buffer, ComPtr<ID3D11UnorderedAccessView>& uav) {
         HRESULT result = make_buffer(device_.Get(), capacity * stride, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
             stride, nullptr, buffer);
@@ -3238,9 +3439,15 @@ HRESULT Renderer::gc_ensure_stage_buffers(UINT capacity) {
         if (SUCCEEDED(result)) result = device_->CreateUnorderedAccessView(buffer.Get(), &v, &uav);
         return result;
     };
-    HRESULT hr;
-    if (FAILED(hr = stage_buffer(kGcCandidateBytes, gc_candidates_, gc_candidate_uav_)) ||
-        FAILED(hr = stage_buffer(kGcSurvivorBytes, gc_survivors_, gc_survivor_uav_))) return hr;
+    const auto create = [&]() {
+        HRESULT result = stage_buffer(kGcCandidateBytes, gc_candidates_, gc_candidate_uav_);
+        if (SUCCEEDED(result)) result = stage_buffer(kGcSurvivorBytes, gc_survivors_, gc_survivor_uav_);
+        if (FAILED(result)) { gc_candidates_.Reset(); gc_candidate_uav_.Reset(); gc_survivors_.Reset(); gc_survivor_uav_.Reset(); }
+        return result;
+    };
+    HRESULT hr = create();
+    if (FAILED(hr) && capacity != required) { capacity = required; hr = create(); } // the headroom did not fit
+    if (FAILED(hr)) return hr;
     gc_candidate_capacity_ = gc_survivor_capacity_ = capacity;
     return S_OK;
 }
@@ -3341,7 +3548,8 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // another map's cover. Only compact rectangles survive on the CPU.
     struct ZonePiece { float bounds[4]; std::uint32_t zone, padding[3]{}; };
     static_assert(sizeof(ZonePiece)==32);
-    std::vector<ZonePiece> zone_pieces;
+    static thread_local std::vector<ZonePiece> zone_pieces; // scratch, reused every frame
+    zone_pieces.clear();
     zone_pieces.push_back({{0,0,float(ambient_tiles_x_)*2,float(ambient_tiles_y_)*2},std::uint32_t(ambient_zone_)});
     for(std::size_t i=0;i<gc_neighbours_.size();) {
         auto& n=gc_neighbours_[i];
@@ -3355,27 +3563,26 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         zone_pieces.push_back({{n.origin[0],n.origin[1],n.origin[0]+float(n.tiles_x)*2,n.origin[1]+float(n.tiles_y)*2},std::uint32_t(zone)});
         ++i;
     }
-    // Compare current authoritative placements each frame. Only changed bytes
-    // need uploading; the SRV dimensions remain the exact live piece count.
+    // Reallocate only when the piece count changes; upload the current
+    // authoritative placement when it differs from the uploaded one. The
+    // SRV's dimensions are the exact live count.
     const UINT zone_bytes=UINT(zone_pieces.size()*sizeof(ZonePiece));
-    D3D11_BUFFER_DESC zone_desc{};
-    if(gc_zone_pieces_)gc_zone_pieces_->GetDesc(&zone_desc);
-    if(zone_desc.ByteWidth!=zone_bytes) {
-        gc_zone_srv_.Reset();gc_zone_pieces_.Reset();gc_zone_uploaded_values_.clear();
+    const bool zone_resized=!gc_zone_pieces_||gc_zone_uploaded_.size()!=zone_bytes;
+    if(zone_resized) {
+        gc_zone_uploaded_.clear();
+        gc_zone_srv_.Reset();gc_zone_pieces_.Reset();
         if(FAILED(make_buffer(device_.Get(),zone_bytes,D3D11_BIND_SHADER_RESOURCE,D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
             sizeof(ZonePiece),nullptr,gc_zone_pieces_,D3D11_USAGE_DYNAMIC,D3D11_CPU_ACCESS_WRITE)) ||
            FAILED(make_structured_srv(device_.Get(),gc_zone_pieces_.Get(),UINT(zone_pieces.size()),gc_zone_srv_)))
             return fail("EID3D11 ground cover: zone blend buffer unavailable; cover omitted.");
     }
-    if(gc_zone_uploaded_values_.size()!=zone_bytes ||
-       std::memcmp(gc_zone_uploaded_values_.data(),zone_pieces.data(),zone_bytes)!=0) {
-        const auto* bytes=reinterpret_cast<const std::uint8_t*>(zone_pieces.data());
-        std::vector<std::uint8_t> next(bytes,bytes+zone_bytes);
+    const auto* zone_data=reinterpret_cast<const std::uint8_t*>(zone_pieces.data());
+    if(zone_resized||std::memcmp(gc_zone_uploaded_.data(),zone_data,zone_bytes)!=0) {
         D3D11_MAPPED_SUBRESOURCE zone_mapped{};
         if(FAILED(context_->Map(gc_zone_pieces_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&zone_mapped)))
             return fail("EID3D11 ground cover: zone blend upload failed; cover omitted.");
-        std::memcpy(zone_mapped.pData,zone_pieces.data(),zone_bytes);context_->Unmap(gc_zone_pieces_.Get(),0);
-        gc_zone_uploaded_values_.swap(next);
+        std::memcpy(zone_mapped.pData,zone_data,zone_bytes);context_->Unmap(gc_zone_pieces_.Get(),0);
+        gc_zone_uploaded_.assign(zone_data,zone_data+zone_bytes);
     }
     if(FAILED(update_contact_blend_maps()))
         return fail("EID3D11 snow terrain art unavailable; cover omitted.");
@@ -3390,12 +3597,17 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // Cover reaches every ground height the camera can show. Sector bounds
     // come from the decoded terrain, including lower ground beyond the eye.
     if (inputs.terrain->sectors.empty()) return skip("terrain has no sectors");
-    float lowest = inputs.terrain->sectors.front().bounds.minimum[2];
-    float highest = inputs.terrain->sectors.front().bounds.maximum[2];
-    for (const auto& sector : inputs.terrain->sectors) {
-        lowest = std::min(lowest, sector.bounds.minimum[2]);
-        highest = std::max(highest, sector.bounds.maximum[2]);
+    // The terrain asset is immutable: its height range is scanned once per asset.
+    if (gc_height_terrain_.expired() || gc_height_terrain_.owner_before(inputs.terrain) || inputs.terrain.owner_before(gc_height_terrain_)) {
+        gc_height_range_[0] = inputs.terrain->sectors.front().bounds.minimum[2];
+        gc_height_range_[1] = inputs.terrain->sectors.front().bounds.maximum[2];
+        for (const auto& sector : inputs.terrain->sectors) {
+            gc_height_range_[0] = std::min(gc_height_range_[0], sector.bounds.minimum[2]);
+            gc_height_range_[1] = std::max(gc_height_range_[1], sector.bounds.maximum[2]);
+        }
+        gc_height_terrain_ = inputs.terrain;
     }
+    const float lowest = gc_height_range_[0], highest = gc_height_range_[1];
     const float map_x = float(ambient_tiles_x_) * 2, map_y = float(ambient_tiles_y_) * 2;
     // F10 ground_cover_distance: its own limit, not the draw distance.
     const float cover_limit = float(configured_integer(debug_overlay_.config(), "ground_cover_distance", 200));
@@ -3434,36 +3646,49 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         UINT total = 0;
         for (unsigned m = 0; m < gm_count; ++m) { gc_base_[m] = total; total += gc_capacity_[m]; }
         if (total > kGcStageLimit) return fail("EID3D11 ground cover: instance pools exceed one shadow dispatch; ground cover omitted.");
-        gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
-        gc_shade_input_.Reset(); gc_shade_input_uav_.Reset();
-        HRESULT hr = make_buffer(device_.Get(), total * UINT(sizeof(GcInstanceGpu)), D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-            D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(GcInstanceGpu), nullptr, gc_instances_);
-        D3D11_UNORDERED_ACCESS_VIEW_DESC u{}; u.Format = DXGI_FORMAT_UNKNOWN; u.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; u.Buffer.NumElements = total;
-        if (SUCCEEDED(hr)) hr = make_structured_srv(device_.Get(), gc_instances_.Get(), total, gc_instance_srv_);
-        if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_instances_.Get(), &u, &gc_instance_uav_);
-        // Sun shadow inputs per pool slot (gcShadeCS), 16 bytes.
-        if (SUCCEEDED(hr)) hr = make_buffer(device_.Get(), total * 16, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 16,
-            nullptr, gc_shade_input_);
-        if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_shade_input_.Get(), &u, &gc_shade_input_uav_);
-        // Per-frame draw inputs per pool slot (gcPrepCS), 32 bytes.
-        gc_draw_inputs_.Reset(); gc_draw_input_srv_.Reset(); gc_draw_input_uav_.Reset();
-        if (SUCCEEDED(hr)) hr = make_buffer(device_.Get(), total * 32, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
-            D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 32, nullptr, gc_draw_inputs_);
-        if (SUCCEEDED(hr)) hr = make_structured_srv(device_.Get(), gc_draw_inputs_.Get(), total, gc_draw_input_srv_);
-        if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_draw_inputs_.Get(), &u, &gc_draw_input_uav_);
-        // Each mesh's pool base is constant until the pool grows again.
+        // The pool buffers keep a quarter more than the assigned slots. A mesh that
+        // outgrows its share re-partitions inside them (only the bases move;
+        // every slot is rewritten each frame), so the ~135 MB of pool buffers
+        // are not recreated for a few KB of growth: each recreation stalled
+        // one Map or Present 10-20 ms (zone 3 route, frames 2158/2275/2301).
+        HRESULT hr = S_OK;
+        if (!gc_instances_ || total > gc_instance_capacity_) {
+            const UINT slots = UINT(std::min<std::uint64_t>(kGcStageLimit, std::uint64_t(total) + total / 4));
+            gc_instance_capacity_ = 0;
+            gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
+            gc_shade_input_.Reset(); gc_shade_input_uav_.Reset();
+            hr = make_buffer(device_.Get(), slots * UINT(sizeof(GcInstanceGpu)), D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(GcInstanceGpu), nullptr, gc_instances_);
+            D3D11_UNORDERED_ACCESS_VIEW_DESC u{}; u.Format = DXGI_FORMAT_UNKNOWN; u.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; u.Buffer.NumElements = slots;
+            if (SUCCEEDED(hr)) hr = make_structured_srv(device_.Get(), gc_instances_.Get(), slots, gc_instance_srv_);
+            if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_instances_.Get(), &u, &gc_instance_uav_);
+            // Sun shadow inputs per pool slot (gcShadeCS), 16 bytes.
+            if (SUCCEEDED(hr)) hr = make_buffer(device_.Get(), slots * 16, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 16,
+                nullptr, gc_shade_input_);
+            if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_shade_input_.Get(), &u, &gc_shade_input_uav_);
+            // Per-frame draw inputs per pool slot (gcPrepCS), 32 bytes.
+            gc_draw_inputs_.Reset(); gc_draw_input_srv_.Reset(); gc_draw_input_uav_.Reset();
+            if (SUCCEEDED(hr)) hr = make_buffer(device_.Get(), slots * 32, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 32, nullptr, gc_draw_inputs_);
+            if (SUCCEEDED(hr)) hr = make_structured_srv(device_.Get(), gc_draw_inputs_.Get(), slots, gc_draw_input_srv_);
+            if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_draw_inputs_.Get(), &u, &gc_draw_input_uav_);
+            if (SUCCEEDED(hr)) gc_instance_capacity_ = slots;
+        }
+        // Each mesh's pool base is constant until the pool is partitioned again.
         for (unsigned mesh = 0; mesh < gm_count && SUCCEEDED(hr); ++mesh) {
             const std::uint32_t values[4]{gc_base_[mesh], 0, 0, 0};
             gc_draw_constants_[mesh].Reset();
             hr = make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, values, gc_draw_constants_[mesh], D3D11_USAGE_IMMUTABLE);
         }
         if (FAILED(hr)) return fail("EID3D11 ground cover: instance pool allocation failed; ground cover omitted.");
-        gc_instance_capacity_ = total; gc_grow_ = false;
+        gc_grow_ = false;
     }
 
 
     // Units near the eye bend the grass: position, reach and strength by body size.
     const float grass_reach = reach + kCellSize;
+    {
+    const frame_acct::Scope accounted(frame_acct::ours_gc_units);
     bridge_ground_cover_units(eye[0], eye[1], grass_reach, gc_unit_input_, nullptr, &gc_unit_trails_);
     // Game-owned lasting tracks. Read the entire validated list, regardless
     // of unit visibility; the GPU clips stamps to the camera's cover window.
@@ -3474,6 +3699,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     }
     // Corpses the game still shows press the same mask while the body lasts.
     bridge_ground_cover_corpses(eye[0], eye[1], reach + kCellSize, gc_footprint_input_);
+    }
     // Reuse the authoritative shown, grounded, live-unit snapshot. Hidden,
     // undetected and invisible units were rejected by that bridge (the unit
     // drawing rule) and never stamp here, so cover cannot reveal them.
@@ -3555,20 +3781,20 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     if (gc_snow_map_generation_ != ambient_map_generation_) {
         gc_snow_map_generation_ = ambient_map_generation_;
         gc_snow_map_ = std::any_of(ambient_area_.begin(), ambient_area_.end(), [](std::uint8_t v) { return (v & 15u) == ambient::area_snow; });
-        gc_snow_valid_ = false; gc_snow_tracks_.clear(); gc_snow_seconds_ = -1; gc_snow_tiles_ = {};
+        gc_snow_valid_ = false; gc_snow_tracks_.clear(); gc_snow_seconds_ = -1; gc_snow_tiles_ = {}; gc_snow_history_.clear();
     }
     const float snow_dt = gc_snow_seconds_ >= 0 ? float(std::max(seconds - gc_snow_seconds_, 0.0)) : 0.f;
     gc_snow_seconds_ = seconds;
     gc_snow_segment_input_.clear();
     // Trail ground: snow, or soft sand families once the map's families load.
-    const bool trail_map = gc_snow_map_ || (gc_soft_sand_ && gc_sand_generation_ == ambient_map_generation_);
+    const bool trail_map = gc_snow_map_ || snow_cover_ > .02f || (gc_soft_sand_ && gc_sand_generation_ == ambient_map_generation_);
     if (trail_map && gc_unit_trails_.size() == gc_unit_input_.size()) {
         for (std::size_t k = 0; k < gc_unit_input_.size(); ++k) {
             const auto& unit = gc_unit_input_[k];
             const std::uint64_t id = gc_unit_trails_[k].id;
             float from[2]{unit[0], unit[1]}, along = 0;
             auto track = std::find_if(gc_snow_tracks_.begin(), gc_snow_tracks_.end(), [&](const SnowTrack& t) { return t.id == id; });
-            if (track == gc_snow_tracks_.end()) { gc_snow_tracks_.push_back({id, unit[0], unit[1], native_frame_index_, 0}); }
+            if (track == gc_snow_tracks_.end()) { gc_snow_tracks_.push_back({id, unit[0], unit[1], native_frame_index_, 0, unit[0], unit[1], 0}); }
             else {
                 const float dx = unit[0] - track->x, dy = unit[1] - track->y, step = std::sqrt(dx * dx + dy * dy);
                 if (step <= snow_trails::kLongestStep) { from[0] = track->x; from[1] = track->y; along = track->along; }
@@ -3576,6 +3802,14 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
                 track->along = std::fmod(along + (step <= snow_trails::kLongestStep ? step : 0.f), 4096.f);
                 if (track->along < along) along -= 4096.f;
                 track->x = unit[0]; track->y = unit[1]; track->frame = native_frame_index_;
+                // History: the path in 0.4 m steps (a placed unit starts afresh).
+                if (step > snow_trails::kLongestStep) { track->hx = unit[0]; track->hy = unit[1]; track->hal = track->along; }
+                else if (std::hypot(unit[0] - track->hx, unit[1] - track->hy) >= .4f) {
+                    const auto stored = snow_trails::body_shape(gc_unit_trails_[k].half_extent, unit[3]);
+                    gc_snow_history_.push_back({{{track->hx, track->hy}, {unit[0], unit[1]}, stored.half_width, stored.depth, stored.berm,
+                        track->hal, snow_trails::unit_seed(id), {}}, seconds});
+                    track->hx = unit[0]; track->hy = unit[1]; track->hal = track->along;
+                }
             }
             const auto shape = snow_trails::body_shape(gc_unit_trails_[k].half_extent, unit[3]);
             gc_snow_segment_input_.push_back({{from[0], from[1]}, {unit[0], unit[1]}, shape.half_width, shape.depth, shape.berm, along,
@@ -3633,6 +3867,38 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         gc_snow_full_writes_ = 2;
     }
     if (!gc_snow_valid_) { gc_snow_tiles_ = {}; gc_snow_full_writes_ = 2; }
+    // Trail history: steps fully filled in are dropped. When the window moves
+    // or the field is rebuilt (no tile was active), every remembered step
+    // inside the new window is stamped again at its recovered depth (the
+    // recovery's closed form, (v + 0.018) e^(-age/90) - 0.018, snowTrailRecover),
+    // so a trail the window dropped comes back on re-entry instead of as
+    // untouched snow (2bea38da user note). Steps still in the field take the
+    // MAX with it.
+    {
+        const auto recovered = [](float v, double age) {
+            return std::max(float((double(v) + .018) * std::exp(-age / 90.0) - .018), 0.f);
+        };
+        gc_snow_history_.erase(std::remove_if(gc_snow_history_.begin(), gc_snow_history_.end(), [&](const SnowTrailHistory& h) {
+            const double age = seconds - h.seconds;
+            return age < 0 || (recovered(h.segment.depth * 1.35f, age) <= 0.f && recovered(h.segment.berm, age) <= 0.f);
+        }), gc_snow_history_.end());
+        if (trail_map && (!gc_snow_valid_ || snow_origin != gc_snow_origin_)) {
+            const float x0 = float(snow_origin[0]) * snow_trails::kTexel, y0 = float(snow_origin[1]) * snow_trails::kTexel;
+            const float extent = float(snow_trails::kSide) * snow_trails::kTexel;
+            for (const auto& h : gc_snow_history_) {
+                const double age = seconds - h.seconds;
+                if (age <= 0) continue;  // this frame's steps are stamped live
+                const float reach = 2.3f * h.segment.half_width;
+                if (std::max(h.segment.a[0], h.segment.b[0]) + reach < x0 || std::min(h.segment.a[0], h.segment.b[0]) - reach > x0 + extent ||
+                    std::max(h.segment.a[1], h.segment.b[1]) + reach < y0 || std::min(h.segment.a[1], h.segment.b[1]) - reach > y0 + extent)
+                    continue;
+                auto segment = h.segment;
+                segment.depth = recovered(h.segment.depth, age); segment.berm = recovered(h.segment.berm, age);
+                if (segment.depth > 0.f || segment.berm > 0.f) gc_snow_segment_input_.push_back(segment);
+            }
+        }
+    }
+
     for (const auto& segment : gc_snow_segment_input_) gc_snow_tiles_.touch(segment, snow_origin, seconds);
     const auto snow_tiles = gc_snow_tiles_.mask(seconds, false);
     const bool snow_update = trail_map && (snow_tiles[0] | snow_tiles[1] | snow_tiles[2] | snow_tiles[3]) != 0;
@@ -3670,7 +3936,24 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     c.snow_window[0] = float(snow_origin[0]) * snow_trails::kTexel; c.snow_window[1] = float(snow_origin[1]) * snow_trails::kTexel;
     c.snow_window[2] = 1.f / snow_trails::kTexel; c.snow_window[3] = snow_update ? float(snow_trails::kSide) : 0.f;
     c.snow_step[0] = float(snow_origin[0] - gc_snow_origin_[0]); c.snow_step[1] = float(snow_origin[1] - gc_snow_origin_[1]);
-    c.snow_step[2] = snow_dt;
+    // Trails fill in faster while it snows (up to 4x in a heavy fall).
+    c.snow_step[2] = snow_dt * (1.f + 3.f * precipitation_snow_visible_);
+    // Snow build-up cover: grass whitens and trails cut it on any ground.
+    c.snow_step[3] = snow_cover_;
+    // The soft shelter map keeps grass under roofs and crowns green (t70).
+    {
+        const bool shelter = native_rain_valid_ && native_rain_srv_ && snow_cover_ > 0.f;
+        if (shelter) {
+            const auto& m = native_rain_slice_.world_to_light;
+            c.shelter[0][0] = m[0]; c.shelter[0][1] = m[1]; c.shelter[0][2] = m[3]; c.shelter[0][3] = 1.f;
+            c.shelter[1][0] = m[4]; c.shelter[1][1] = m[5]; c.shelter[1][2] = m[7];
+            c.shelter[2][0] = std::abs(m[10]) > 1e-9f ? -1.f / m[10] : 0.f; c.shelter[2][1] = m[11] * c.shelter[2][0];
+            c.shelter[2][3] = native_shelter_soft_valid_ ? 0.f : 1.f;  // the raw map serves (filter unavailable, logged)
+            c.shelter[1][3] = shelter_fill_;  // the crown fill-in
+        }
+        ID3D11ShaderResourceView* map = !shelter ? nullptr : native_shelter_soft_valid_ ? native_shelter_soft_srv_[1].Get() : native_rain_srv_.Get();
+        context_->PSSetShaderResources(70, 1, &map);
+    }
     const auto snow_write = gc_snow_full_writes_ ? std::array<std::uint32_t, 4>{~0u, ~0u, ~0u, ~0u} : gc_snow_tiles_.mask(seconds, true);
     std::memcpy(c.snow_tiles, snow_tiles.data(), sizeof(c.snow_tiles)); std::memcpy(c.snow_write, snow_write.data(), sizeof(c.snow_write));
     c.snow_materials[0]=std::uint32_t(contact_maps_.ready);
@@ -3704,7 +3987,8 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // Zone pieces and the per-cell rule masks of the active map (from its
     // tiles: generation counters only, never addresses) bound the stage
     // buffers exactly.
-    std::vector<std::array<float, 5>> zones;
+    static thread_local std::vector<std::array<float, 5>> zones; // scratch, reused every frame
+    zones.clear();
     std::uint64_t zones_key = 0;
     for (const auto& piece : zone_pieces) {
         zones.push_back({piece.bounds[0], piece.bounds[1], piece.bounds[2], piece.bounds[3], float(piece.zone)});
@@ -3760,7 +4044,10 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     c.trail_step[2] = trail_dt / kTrailPressSeconds; c.trail_step[3] = trail_dt / kTrailReleaseSeconds;
     // Rebuild from current posed scene boxes: moved/removed objects leave no
     // stale footprint, and no legacy draw stream is consumed or cached.
-    if(!bridge_ground_cover_objects(eye[0],eye[1],reach+kCellSize,gc_object_input_))
+    bool objects_read;
+    {const frame_acct::Scope accounted(frame_acct::ours_gc_objects);
+     objects_read=bridge_ground_cover_objects(eye[0],eye[1],reach+kCellSize,gc_object_input_);}
+    if(!objects_read)
         return fail("EID3D11 ground cover: static scene bounds unavailable; cover omitted.");
     const std::uint64_t ow=std::uint64_t(x1-x0)*kTrailTexelsPerCell,oh=std::uint64_t(y1-y0)*kTrailTexelsPerCell;
     if(ow>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||oh>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||
@@ -3782,11 +4069,15 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     const bool object_mask_update=!object_mask_current(gc_object_mask_current_,gc_object_origin_x_,gc_object_origin_y_,
         gc_object_drawn_,x0,y0,gc_object_input_);
     if(object_mask_update&&object_count>gc_object_capacity_) {
-        if(FAILED(make_buffer(device_.Get(),object_count*UINT(sizeof(FootprintSplat)),D3D11_BIND_SHADER_RESOURCE,
+        // Half again over the demand, as the stage buffers (a pan grew it
+        // a little nearly every frame); the draw uses object_count.
+        const UINT capacity=std::max(object_count,gc_object_capacity_+gc_object_capacity_/2);
+        gc_objects_.Reset();gc_object_input_srv_.Reset();gc_object_capacity_=0;
+        if(FAILED(make_buffer(device_.Get(),capacity*UINT(sizeof(FootprintSplat)),D3D11_BIND_SHADER_RESOURCE,
             D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,sizeof(FootprintSplat),nullptr,gc_objects_,D3D11_USAGE_DYNAMIC,D3D11_CPU_ACCESS_WRITE))||
-           FAILED(make_structured_srv(device_.Get(),gc_objects_.Get(),object_count,gc_object_input_srv_)))
+           FAILED(make_structured_srv(device_.Get(),gc_objects_.Get(),capacity,gc_object_input_srv_)))
             return fail("EID3D11 ground cover: object buffer unavailable; cover omitted.");
-        gc_object_capacity_=object_count;
+        gc_object_capacity_=capacity;
     }
     if(object_mask_update&&object_count) {
         D3D11_MAPPED_SUBRESOURCE objects{};
@@ -3911,7 +4202,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             ++snow_draws;
         }
         context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), dsv_.Get());
-        gc_snow_index_ = target; gc_snow_origin_ = snow_origin; gc_snow_active_ = snow_tiles;
+        gc_snow_index_ = target; gc_snow_origin_ = snow_origin; gc_snow_active_ = snow_tiles; gc_snow_centre_ = {snow_centre[0], snow_centre[1]};
         gc_snow_valid_ = true;
         if (gc_snow_full_writes_) --gc_snow_full_writes_;
         profiler_.add_draw(snow_draws, snow_draws); profiler_.add_batch(snow_draws);
@@ -4367,8 +4658,12 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             }
             UINT neighbour_bound = 0;
             {
-                std::array<std::vector<std::uint32_t>, kPlaceClassCount> all_rules;
-                for (std::uint32_t r = 0; r < rule_table().size(); ++r) all_rules[0].push_back(r);
+                // Every rule in one class (the rule table is constant).
+                static const auto all_rules = [] {
+                    std::array<std::vector<std::uint32_t>, kPlaceClassCount> rules;
+                    for (std::uint32_t r = 0; r < rule_table().size(); ++r) rules[0].push_back(r);
+                    return rules;
+                }();
                 neighbour_bound = gc_window_bounds(n.masks, (n.tiles_x + 1) / 2, eye, w.x0, w.y0, w.x1, w.y1, n.lowest, n.highest, c.planes,
                     n.origin.data(), quality.density * kNeighbourCoverDensity, quality.distance, all_rules)[0];
             }

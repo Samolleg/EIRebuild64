@@ -234,6 +234,7 @@ enum class MmpFormat : std::uint8_t {
     argb1555,
     argb4444,
     argb8888,
+    dxt5,
 };
 
 // The two immutable texture producers share this alpha-only inspection. Packed

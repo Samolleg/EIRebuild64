@@ -178,6 +178,7 @@ cbuffer LiquidReflectionFrame:register(b7) {
  float4 liquidReflectionQuality; // march steps (water_reflection_quality), highest history mip, history valid, particle depth valid
  row_major float4x4 liquidHistoryClip; // world-to-clip of the previous frame's colour
  row_major float4x4 liquidHistoryInverse; // its inverse
+ float4 liquidSsrMarch; // x: largest coarse march step in target pixels (water_reflection_step_pixels; 0: fixed steps)
 };
 // Slice 0: this frame's world colour at the first liquid batch (refraction).
 // Slice 1: the previous frame's finished world colour with mips (reflections;
@@ -437,6 +438,29 @@ float4 liquidSceneReflection(float3 position,float3 direction,float selfIllumina
  // shorten each step, so the crossing refinement works alike at every
  // quality.
  uint steps=clamp((uint)liquidReflectionQuality.x,liquidSsrSteps.x,liquidSsrSteps.y);
+ // Screen-bounded step count (liquidSsrMarch.x > 0): a ray whose whole march
+ // projects short on screen (distant water) takes only as many steps as keep
+ // every coarse step within liquidSsrMarch.x target pixels; a ray that
+ // already needs the quality's count (near water) keeps it unchanged. The
+ // ray is measured in four quarters of the fraction schedule (each holds a
+ // quarter of the steps); a quarter's largest step is its length times
+ // f_end / f_mid of that quarter (2, 4/3, 6/5, 8/7). Any point behind or at
+ // the camera plane keeps the full count.
+ [branch]if(liquidSsrMarch.x>0) {
+  float2 screen[5];bool projected=true;
+  [unroll]for(uint q=0;q<5;++q) {
+   float f=q*.25;
+   float4 c=mul(liquidWorldClip,float4(position+direction*(liquidSsrStart+liquidSsrDistance*f*f),1));
+   projected=projected&&c.w>1e-3;
+   screen[q]=c.xy/max(c.w,1e-3)*.5*liquidReflectionTarget.xy;
+  }
+  [branch]if(projected) {
+   float largest=max(max(2*length(screen[1]-screen[0]),4./3*length(screen[2]-screen[1])),
+                     max(1.2*length(screen[3]-screen[2]),8./7*length(screen[4]-screen[3])));
+   float needed=ceil(4*largest/liquidSsrMarch.x);
+   steps=(uint)clamp(needed,(float)min(liquidSsrSteps.x,steps),(float)steps);
+  }
+ }
  [loop]for(uint step=1;step<=steps;++step) {
   float fraction=(step-jitter)/steps;
   float distance=liquidSsrStart+liquidSsrDistance*fraction*fraction;
@@ -1288,12 +1312,15 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  float3 ripples=0;
  [branch]if(LIQUID_WATERLIKE(i.selfIllumination))ripples=liquidWaveRipples(i.position.xy,i.current,seconds,i.footprint);
  shoreSlope+=ripples.xy;
- // Rain rings on water (not lava; faint on swamp and mud).
+ // Rain rings on water and swamp (not lava). The swamp reflects little,
+ // so its rings also lighten the murky body along their crests (run 7: no
+ // rain ripples were visible in the swamp).
  float rain=liquidPhysical()&&LIQUID_WATERLIKE(i.selfIllumination)?saturate(liquidRippleMeta.w):0;
+ float rainCrest=0;
  [branch]if(rain>0) {
-  float3 drops=liquidRainRipples(i.position.xy,seconds,rain,i.footprint)*
-   lerp(1,.35,i.mud);
+  float3 drops=liquidRainRipples(i.position.xy,seconds,rain,i.footprint);
   shoreSlope+=drops.xy;slopeVariance+=drops.z;
+  rainCrest=saturate(length(drops.xy)*.8);
  }
  // The sloped liquid surface tilts the geometric normal (i.current = -grad h).
  float3 n=liquidSafeNormal(float3(i.current-slope-shoreSlope,1));
@@ -1318,6 +1345,7 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  float3 albedo=lerp(lerp(bodyTint,lerp(float3(1,1,1),swampTint,swampTintWeight),liquidShallowLighten),
                     bodyTint*liquidDeepBrightness,1-exp(-liquidColorAbsorption*depth));
  albedo*=lerp(1,liquidMudBrightness,swampArt?0:mud);
+ albedo*=1+mud*rainCrest*.45;
  float facing=saturate(dot(n,v));
  float fresnel=max(liquidFresnel(facing,i.selfIllumination),liquidReflectMinimum*liquidReflectionWeight(i.selfIllumination));
  fresnel*=lerp(1,.55,mud); // murky swamp pools reflect less

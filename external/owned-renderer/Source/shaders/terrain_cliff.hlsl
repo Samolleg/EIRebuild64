@@ -46,7 +46,9 @@ float3 terrainCliffPlaneWeights(float3 n){
 // shadows cast from farther away stay.
 float3 terrainShadowLookup(float3 p,float3 slope,float3 sun){
  float3 n=normalize(slope);float c=saturate(dot(n,sun));
- return p+n*terrainShadowNormalOffset*sqrt(1-c*c);
+ // This compensates coarse cliff rims; lifting gentle ground loses low casters.
+ float cliff=1-terrainCliffPlaneWeights(n).z;
+ return p+n*(cliff*terrainShadowNormalOffset*sqrt(1-c*c));
 }
 // Projection weights of a terrain pixel: the smooth slope normal n, with the
 // top-down share raised where the drawn facets around the vertices are flat

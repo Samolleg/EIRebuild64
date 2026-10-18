@@ -9,6 +9,7 @@
 #include "terrain_tile_blend.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -118,8 +119,10 @@ struct TerrainTileMapInput {
 TerrainTileMapInput terrain_tile_map_input(const TerrainCpuAsset& terrain);
 // A map's tile families: the editor profile shipped with its resources, else
 // the editor's built-in preset for its atlas when the atlas's maps fit it, else
-// families from the placements of every map of that atlas.
-TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,TerrainTileMapInput input) noexcept;
+// families from the placements of every map of that atlas. A set `cancel`
+// ends the load early with an empty result (source "tile family load cancelled").
+TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,TerrainTileMapInput input,
+    const std::atomic<bool>* cancel=nullptr) noexcept;
 std::string terrain_tile_family_space(const TerrainCpuAsset& terrain);
 
 } // namespace owned

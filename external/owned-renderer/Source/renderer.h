@@ -13,10 +13,13 @@
 #include <windows.h>
 #include <d3d.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_5.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <atomic>
 #include <set>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +37,7 @@
 #include "shadow_far_retention.h"
 #include "debug_overlay.h"
 #include "frame_limiter.h"
+#include "frame_accounting.h"
 #include "frame_statistics.h"
 #include "placed_hitch_profile.h"
 #include "render_profiler.h"
@@ -50,6 +54,9 @@
 #include "terrain_bake.h"
 #include "neighbour_fog.h"
 #include "shader_cache.h"
+#include "scene_thread.h"
+#include "test_harness_command.h"
+#include "constant_ring.h"
 
 namespace owned {
 struct CampDecoration;
@@ -61,6 +68,7 @@ struct CharacterPaneGlyphAsset;
 struct RetainedSceneIdentitySnapshot;
 struct RetainedWorldPointLight;
 struct RetainedShadowCasterValue;
+struct NativeTerrainShadowEntry;
 struct ModelCpuAsset;
 struct TerrainTexturePage;
 struct AnimationClipAsset;
@@ -183,6 +191,18 @@ struct SurfaceImage {
     std::uint32_t restore_readbacks = 0;
     std::uint64_t last_restore_frame = 0;
     std::uint64_t texture_serial = 0; // advances when the texture object changes
+    // The owned texture cache holds this texture as its copy of a generation
+    // (one texture per image). An in-place GPU write must first move the
+    // surface to a fresh texture (Renderer::detach_shared_surface_texture),
+    // so the cached generation keeps its pixels. In scene mode it is set when
+    // the game thread publishes the texture to the scene thread (the cache may
+    // share it from then on; scene_detach_surface_texture moves the surface).
+    bool texture_shared = false;
+    // Scene thread (render_thread option): a copy made on the game thread for
+    // one queued command (Renderer::scene_surface). It carries the current
+    // GPU home and description but no CPU bytes, is never accounted and is
+    // never written back; the game thread's image stays the only owner.
+    bool scene_snapshot = false;
 };
 
 void update_surface_memory_accounting(SurfaceImage& image) noexcept;
@@ -599,7 +619,13 @@ inline NativeMeshCacheSelector native_mesh_cache_selector(
     selector.object_token = view.object_token;
     selector.figure_token = view.figure_token;
     selector.geometry_token = view.geometry_token;
-    if (!selector.cache_identity) {
+    if (!selector.cache_identity && view.cache_pointers_valid) {
+        selector.positions = view.cache_pointers[0];
+        selector.normals = view.cache_pointers[1];
+        selector.components = view.cache_pointers[2];
+        selector.texture_coordinates = view.cache_pointers[3];
+        selector.indices = view.cache_pointers[4];
+    } else if (!selector.cache_identity) {
         selector.positions = reinterpret_cast<std::uintptr_t>(view.positions);
         selector.normals = reinterpret_cast<std::uintptr_t>(view.normals);
         selector.components = reinterpret_cast<std::uintptr_t>(view.components);
@@ -641,8 +667,13 @@ struct NativeShadowConstants {
     std::array<std::array<float,16>,6> light{}, camera{};
     std::array<std::array<float,4>,6> bias{};
     std::array<UINT,4> control{};
+    // Static sun caster bake on a scrolled map (shadowScrollCopied/Control):
+    // the copied old square in light NDC (x min, x max, y min, y max) and
+    // x = 1 when the build culls records wholly inside it, y = map side.
+    std::array<float,4> scroll_copied{};
+    std::array<UINT,4> scroll_control{};
 };
-static_assert(sizeof(NativeShadowConstants)==880, "owned shadow constant layout");
+static_assert(sizeof(NativeShadowConstants)==912, "owned shadow constant layout");
 
 inline bool configured_boolean(const RendererConfig& config,const char* key,bool fallback){const auto* option=config.find(key);return option&&option->type==RendererOptionType::boolean?option->boolean_value:fallback;}
 inline int configured_integer(const RendererConfig& config,const char* key,int fallback){const auto* option=config.find(key);return option&&option->type==RendererOptionType::integer?option->integer_value:fallback;}
@@ -660,6 +691,18 @@ const std::string& owned_ground_cover_shader_source();
 // settings use, so the features find them in the shader cache.
 void append_interface_shader_programs(std::vector<ShaderProgram>& out);
 void append_world_support_shader_programs(std::vector<ShaderProgram>& out);
+// Named programs of the interface and world-support lists. Consumers ask for
+// a program by name; the enum order is only the list (preparation) order, so
+// inserting a program never shifts what another consumer compiles.
+enum class InterfaceShader : std::size_t {
+ game_vs,game_ps,rectangle_vs,rectangle_ps,backdrop_ps,count
+};
+enum class WorldSupportShader : std::size_t {
+ clear_vs,clear_ps,game_particle_vs,game_particle_ps,shadow_scroll_vs,shadow_scroll_ps,
+ interface_scaled_ps,game_particle_depth_ps,game_ribbon_vs,game_selection_vs,game_mesh_vs,game_glyph_vs,interface_text_ps,count
+};
+ShaderProgram interface_shader_program(InterfaceShader shader);
+ShaderProgram world_support_shader_program(WorldSupportShader shader);
 void append_native_shader_programs(std::vector<ShaderProgram>& out);
 void append_terrain_tessellation_shader_programs(std::vector<ShaderProgram>& out);
 void append_terrain_bake_shader_programs(std::vector<ShaderProgram>& out);
@@ -671,6 +714,7 @@ void append_sky_shader_programs(std::vector<ShaderProgram>& out);
 void append_fog_volume_shader_programs(std::vector<ShaderProgram>& out);
 void append_ambient_particle_shader_programs(std::vector<ShaderProgram>& out);
 void append_wind_trail_shader_programs(std::vector<ShaderProgram>& out);
+void append_precipitation_shader_programs(std::vector<ShaderProgram>& out);
 void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out);
 void append_critter_shader_programs(std::vector<ShaderProgram>& out);
 // The program groups the settings use, one bit per group (feature level 11
@@ -689,7 +733,35 @@ std::vector<std::uint32_t> native_shipped_specialisation_keys();
 std::wstring native_spec_cache_file_name(const ShaderKey& key);
 // A terrain's tile families (terrain_tile_blend.h) loaded off the render thread:
 // its map editor profile, else the editor preset. Invalid without resource mounts.
-std::future<TerrainTileFamilies> load_terrain_tile_families_async(const TerrainCpuAsset& terrain);
+// Dropping an unfinished job never waits for it: the job is cancelled and its
+// future handed to a reaper (reap_tile_family_jobs, each frame), joined at
+// teardown (join_tile_family_jobs). A world change released neighbour cover
+// whose std::async future then blocked the game thread for 27 s on a starved
+// below-normal job.
+class TileFamiliesJob {
+public:
+    TileFamiliesJob() = default;
+    TileFamiliesJob(std::future<TerrainTileFamilies> result,std::shared_ptr<std::atomic<bool>> cancel) noexcept
+        : result_(std::move(result)),cancel_(std::move(cancel)) {}
+    TileFamiliesJob(TileFamiliesJob&&) noexcept = default;
+    TileFamiliesJob& operator=(TileFamiliesJob&& other) noexcept {
+        if(this!=&other){retire();result_=std::move(other.result_);cancel_=std::move(other.cancel_);}
+        return *this;
+    }
+    TileFamiliesJob(const TileFamiliesJob&) = delete;
+    TileFamiliesJob& operator=(const TileFamiliesJob&) = delete;
+    ~TileFamiliesJob(){retire();}
+    bool valid() const noexcept {return result_.valid();}
+    bool ready() const {return result_.valid()&&result_.wait_for(std::chrono::seconds(0))==std::future_status::ready;}
+    TerrainTileFamilies get(){cancel_.reset();return result_.get();}
+private:
+    void retire() noexcept;
+    std::future<TerrainTileFamilies> result_;
+    std::shared_ptr<std::atomic<bool>> cancel_;
+};
+TileFamiliesJob load_terrain_tile_families_async(const TerrainCpuAsset& terrain);
+void reap_tile_family_jobs() noexcept;
+void join_tile_family_jobs() noexcept;
 struct TerrainTileBlendInput; // owned_terrain_decode.h
 inline float configured_floating_point(const RendererConfig& config,const char* key,float fallback){const auto* option=config.find(key);return option&&option->type==RendererOptionType::floating_point?option->floating_value:fallback;}
 // The Low pixel path (NATIVE_LOW shader variants): every stage it leaves out
@@ -713,6 +785,49 @@ inline bool native_low_pixel_path(const RendererConfig& config){
   !configured_boolean(config,"water_reflections",true)&&
   configured_integer(config,"shadow_close_cascades",3)<=2&&!configured_boolean(config,"shadow_far",true);
 }
+// Target formats that a feature's targets and the load hold's pipeline
+// warm-up (renderer_warmup.cpp) share: the bloom glow, the particle depth
+// for reflections, the half-resolution water reflection targets and depth,
+// and the point-shadow atlas depth (atlas, overlay).
+constexpr DXGI_FORMAT kGlowFormat=DXGI_FORMAT_R11G11B10_FLOAT;
+constexpr DXGI_FORMAT kParticleDepthFormat=DXGI_FORMAT_R32_FLOAT;
+constexpr DXGI_FORMAT kWaterSsrFormats[6]={DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT,
+ DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT};
+constexpr DXGI_FORMAT kWaterSsrDepthFormat=DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kPointShadowDepthFormats[2]={DXGI_FORMAT_D16_UNORM,DXGI_FORMAT_D32_FLOAT};
+
+// Storage of one buffer or texture from its description (renderer.cpp).
+std::uint64_t resource_video_bytes(ID3D11Resource* resource) noexcept;
+
+// Scene thread (render_thread option): what a queued present needs from the
+// game thread, copied when the frame is queued. Harness steps that act on the
+// game (load, quit, camera, pause) ran on the game thread already; only the
+// renderer verb it returned travels here.
+struct ScenePresentInputs {
+    bool harness_command_valid = false;
+    HarnessCommand harness_command;
+    unsigned long harness_entry_id = 0;
+    unsigned harness_camera_steps = 0;
+    bool harness_on_travel_map = false;
+    BridgeFrameValues bridge{};
+    BridgeProfileValues profile{};
+    std::int64_t recorder_present_entry = 0;
+    bool outer_timing_taken = false;
+    OuterFrameTimingSnapshot outer_timing{};
+    frame_acct::Record game_frame{}; // the game thread's frame ending at this present
+    std::vector<HudAssetFrame> hud_frames; // live HUD panel reads, copied on the game thread
+};
+
+// First statement of a public Renderer entry point that touches renderer
+// state: a game-thread call while the scene thread owns the renderer first
+// waits for it (scene_sync), and the whole call then runs inline: a nested
+// public call inside it (flush_native from flush_native_static_terrain, ...)
+// must not be queued, or the scene thread would run it on the immediate
+// context while this thread is still using it. No effect with the
+// render_thread option off or on the scene thread itself. On the game thread
+// the entry is also charged to the ours_renderer frame-accounting part
+// (frame_accounting.h; harness runs only).
+#define SCENE_ENTRY(reason) const ::frame_acct::Scope frame_acct_entry_(this->on_scene_thread() ? ::frame_acct::none : ::frame_acct::entry_part()); const ::owned::Renderer::SceneInlineScope scene_inline_scope_(const_cast<Renderer*>(this),reason)
 
 class Renderer {
     friend struct ContactBlendSmokeAccess;
@@ -728,6 +843,7 @@ public:
         std::size_t draws = 0;
         std::size_t dynamic_bytes = 0;
         std::uint64_t epoch = 0;
+        std::uint64_t scene_token = 0; // scene mode: the scene thread holds the real checkpoint
     };
     HRESULT ensure(HWND hwnd, UINT width, UINT height);
     // Explicit test entry point for headless WARP lifecycle checks. Production
@@ -753,6 +869,7 @@ public:
     HRESULT clear(DWORD flags, D3DCOLOR color, float z, DWORD stencil) {
         return clear(0, nullptr, flags, color, z, stencil);
     }
+    HRESULT begin_engine_frame();
     void begin_scene();
     void end_scene();
     HRESULT draw(D3DPRIMITIVETYPE type, DWORD fvf, const void* vertices,
@@ -766,6 +883,11 @@ public:
     HRESULT draw_frame(const std::vector<LegacyDrawPacket>& packets,
                        const std::vector<std::uint8_t>& vertex_bytes,
                        const std::vector<WORD>& indices);
+    // The device's pending legacy draws; in scene mode the vectors move into
+    // the queued command (left empty) with snapshots of their textures.
+    HRESULT draw_frame_take(std::vector<LegacyDrawPacket>& packets,
+                            std::vector<std::uint8_t>& vertex_bytes,
+                            std::vector<WORD>& indices);
     HRESULT queue_native(const NativeGeometryView& view, const FixedState& state,
                          SurfaceImage* texture,
                          NativeGeometryResult* result = nullptr);
@@ -790,8 +912,17 @@ public:
                                const FixedState& state,
                                NativeGeometryResult* result = nullptr);
     HRESULT queue_native_depth(const NativeDepthSubmission& submission,const FixedState& frame,NativeGeometryResult* result);
+    // casters: the bridge's whole static store at store_revision (nullptr:
+    // unchanged since the last call). On a static-layer redraw the bake is
+    // drawn and the absent casters a redrawn map reaches are returned in
+    // missing for registration.
     bool queue_native_static_shadow_depth(const RetainedShadowCasterValue* casters,
-        std::uint32_t count,std::vector<RetainedShadowCasterValue>& missing) noexcept;
+        std::uint32_t count,std::uint64_t store_revision,
+        std::vector<RetainedShadowCasterValue>& missing) noexcept;
+    // Terrain sun casters of a static-layer redraw with their final masks;
+    // absent: entries the bridge must submit through the depth path.
+    bool queue_native_terrain_shadow_bake(const NativeTerrainShadowEntry* entries,
+        std::uint32_t count,std::vector<std::uint32_t>& absent) noexcept;
     HRESULT queue_native_records(const NativePreparedSubmission& submission,
                                  const FixedState& frame_state,SurfaceImage* wound,
                                  NativeGeometryResult* result = nullptr);
@@ -832,8 +963,12 @@ public:
     // Diagnostic: source line of the last native flush return (reported on failure).
     int native_flush_failure_line() const noexcept { return native_flush_failure_line_; }
     int native_flush_failure_line_ = 0;
+    int flush_anisotropy_ = -1;
+    bool strict_depth_failure_reported_ = false; // the anisotropy setting while flush_native runs (apply_state), else -1
     const std::array<float,16>* native_frozen_cull_clip() const noexcept { return native_cull_frozen_?&native_cull_clip_:nullptr; }
     bool set_native_world_lighting(const NativeWorldLighting& lighting) noexcept;
+    // Scene thread: the same, with the world environment read on the game thread.
+    bool set_native_world_lighting(const NativeWorldLighting& lighting,const WorldEnvironment* environment) noexcept;
     // world_time: the game's world clock of these lights (emissive-light pulse).
     bool set_native_point_lights(const std::vector<RetainedWorldPointLight>& lights,double world_time=0) noexcept;
     bool native_shadows_enabled() const noexcept { return native_shadows_enabled_; }
@@ -842,6 +977,10 @@ public:
     void native_shadow_cull_projection(NativeShadowCullProjection& projection) const noexcept;
     bool begin_native_point_shadow_faces(UINT slot,UINT light_index,const NativePointShadowFrame& faces) noexcept;
     bool end_native_point_shadow_faces(bool commit) noexcept;
+    // Shelter map bake (renderer_precipitation.cpp).
+    bool begin_native_rain_occlusion(const NativeShadowSlice& slice,UINT side) noexcept;
+    bool end_native_rain_occlusion(bool commit) noexcept;
+    bool filter_native_rain_shelter() noexcept;
     bool begin_native_point_shadow_batch(std::uint64_t& generation,bool* pressure=nullptr) noexcept;
     bool allocate_native_point_shadow(bool overlay,int& slot) noexcept;
     void release_native_point_shadow(std::uint64_t generation,int slot) noexcept;
@@ -859,6 +998,19 @@ public:
     // fogged on the GPU in the stock draw order, at the call's stream position.
     HRESULT draw_game_particles(const GameParticleView& view, const FixedState& state,
                                 SurfaceImage* texture);
+    // Game lightning ribbons (game_particles.h): the stock screen-space strip
+    // expanded on the GPU at the call's stream position.
+    HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
+    // The game's selection marker (game_particles.h): the stock six-point
+    // mesh generated on the GPU from the game's point, size and axes.
+    HRESULT draw_game_selection(const GameSelectionView& view, const FixedState& state, SurfaceImage* texture);
+    // One texture/state run of game terrain prints (game_particles.h): the
+    // games' cached print meshes as a world-space triangle list.
+    // The game's combat text glyphs (combat_text.h) as GPU-expanded quads.
+    HRESULT draw_game_glyphs(const GameGlyphView& view, const FixedState& state, SurfaceImage* texture);
+    HRESULT draw_game_print_run(const GameParticleGpu* vertices, UINT count, const std::array<float, 16>& object_to_clip,
+                                float clip_half_width, float clip_half_height, const FixedState& state,
+                                SurfaceImage* texture);
     void record_capture(std::uint64_t cpu_ticks, std::uint64_t bytes, bool appended) {
         profiler_.add_capture(cpu_ticks, bytes, appended);
     }
@@ -870,6 +1022,9 @@ public:
     HRESULT queue_cursor(std::uint64_t cache_key, const std::vector<std::uint32_t>& pixels,
                          UINT width, UINT height, const RECT& destination);
     int cursor_scale_percent() const noexcept { return cursor_scale_percent_; }
+    // While the loading picture is held the game cursor is the system cursor
+    // (cursor_image.h show_load_cursor); not while renderer controls own input.
+    bool load_cursor_wanted() const noexcept { return load_reveal_holding_ && !debug_overlay_.captures_input(); }
     bool owned_ui_text_enabled() const noexcept;
     // interface_space: an interface surface; inside an anchored HUD widget it
     // is composed at the UI scale around the widget's pivot (widescreen::hud_blit).
@@ -882,10 +1037,14 @@ public:
     // A full-screen picture (loading screen, movie frame) shown at its own
     // aspect: pillarboxed or letterboxed over a black or blurred fill
     // (`pillarbox_fill`). A source of the output's aspect fills the screen.
-    HRESULT present_image(const SurfaceImage& source, const RECT* source_rect, const DDCOLORKEY* source_key);
+    // `placed`: the game placed the picture itself (a letterboxed movie at
+    // 3840x1632 of a 3840x2160 primary); it keeps that rectangle and the
+    // rest of the screen gets the same fill.
+    HRESULT present_image(const SurfaceImage& source, const RECT* source_rect, const DDCOLORKEY* source_key,
+                          const RECT* placed = nullptr);
     // A large picture reached the primary this frame (loading screens, movies,
     // also when not exactly full-screen): the load reveal keeps the latest one.
-    void mark_load_picture() noexcept { load_picture_this_frame_ = true; }
+    void mark_load_picture() noexcept { if(scene_queue()){scene_post([this]{load_picture_this_frame_=true;});return;} load_picture_this_frame_ = true; }
     void retire_surface(std::uint64_t surface_id) noexcept;
     void retire_camp_texture(std::uint64_t surface_id,
                              std::uint64_t generation) noexcept;
@@ -893,6 +1052,16 @@ public:
         const CharacterPaneTextFrame& frame, std::uint64_t ui_epoch,
         std::uint64_t frame_serial, const RECT& destination,
         const RECT* source_rect);
+    // Output pixels per surface pixel that owned text drawn now will be
+    // composed at (the current HUD composition times output/canvas), so its
+    // glyphs can be rasterized at that size. Game thread. 1 when the axes
+    // differ; the queue then draws the stock-size glyphs as before.
+    float owned_text_raster_scale() const noexcept {
+        const auto& h = widescreen::interface_owned ? widescreen::hud_blit : widescreen::HudComposition{};
+        const float sx = float(output_width_) / float(canvas_width()), sy = float(output_height_) / float(canvas_height());
+        const float x = h.scale * sx, y = h.scale_y * sy;
+        return std::fabs(x - y) <= 1e-4f * x ? x : 1.0f;
+    }
     HRESULT capture(SurfaceImage& destination, const RECT& destination_rect,
                     const RECT& source_rect);
     HRESULT capture(SurfaceImage& destination, LONG destination_x,
@@ -905,6 +1074,26 @@ public:
     }
     HRESULT readback(SurfaceImage& image);
     HRESULT upload(SurfaceImage& image, SurfaceUploadResult* result = nullptr);
+    // Copy-on-write for a texture the owned cache shares: before an in-place
+    // GPU write, the surface moves to an exact copy and the cache keeps the
+    // old texture for its generation. One bridge event per rewrite (rare).
+    HRESULT detach_shared_surface_texture(SurfaceImage& image, const char* writer);
+    // The surface no longer uses `texture`: its cache entries own it alone.
+    void unshare_owned_texture(SurfaceImage& image, ID3D11Texture2D* texture) noexcept;
+    // Scene thread (render_thread option), copy-on-write across threads. The
+    // owned cache (scene thread) may share a surface's GPU home only once the
+    // game thread has published it (scene_publish_surface_texture): from then
+    // on the game thread never writes that texture in place. Its writers
+    // (game_upload, capture) first move the surface to a copy recorded on the
+    // game-upload deferred context, which the scene thread executes in stream
+    // order before any later work, and queue the unshare of the old texture
+    // behind every command that may have shared it.
+    void scene_publish_surface_texture(SurfaceImage& image) noexcept;
+    HRESULT scene_detach_surface_texture(SurfaceImage& image, const char* writer);
+    void scene_unshare_surface_texture(std::uint64_t id, ID3D11Texture2D* texture) noexcept;
+    // Scene thread: whether the game thread still uses `texture` as surface
+    // id's GPU home (compared only, never dereferenced).
+    bool scene_surface_holds(std::uint64_t id, ID3D11Texture2D* texture) const noexcept;
     // Returns a released GPU-primary surface's exact pixels to the CPU by a
     // one-shot staging readback. A surface restored twice within
     // kSurfaceRepeatReadFrames stays CPU-resident (cpu_pinned) so a hot reader
@@ -916,9 +1105,12 @@ public:
     void release_surface_pixels(SurfaceImage& image) noexcept;
     void sampled_surface_pixels(SurfaceImage& image,bool resolved=false) noexcept;
     // Completed proxy sources carry no pixels. The proxy resolves a current
-    // surface generation to its texture, uploading it if needed.
+    // surface generation to its texture, uploading it if needed. `image`
+    // receives the surface's image, so the owned cache can mark a texture it
+    // shares (SurfaceImage::texture_shared).
     using SurfaceTextureResolver = HRESULT (*)(void* context, ID3D11Device* device,
-        std::uint64_t id, std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture);
+        std::uint64_t id, std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture,
+        SurfaceImage*& image);
     void set_surface_texture_resolver(SurfaceTextureResolver resolver, void* context) noexcept {
         surface_texture_resolver_ = resolver; surface_texture_resolver_context_ = context;
     }
@@ -926,10 +1118,12 @@ public:
     void queue_camp_decoration(const CampDecoration& frame, bool include_popup = true) noexcept;
     HRESULT begin_camp_popup(bool clear);
     void end_camp_popup(bool complete) noexcept;
-    void invalidate_camp_popup() noexcept { camp_popup_ready_=false; }
+    void invalidate_camp_popup() noexcept { if(scene_queue()){scene_post([this]{camp_popup_ready_=false;});return;} camp_popup_ready_=false; }
     void reset_camp_popup() noexcept;
     HRESULT flush_ui();
-    bool has_pending_ui() const noexcept { return !pending_blits_.empty() || cursor_pending_; }
+    // Scene mode, game thread: whether UI work the game thread queued may still
+    // be pending on the scene thread (it cannot read the scene's queues).
+    bool has_pending_ui() const noexcept { return scene_queue() ? scene_ui_pending_ : (!pending_blits_.empty() || cursor_pending_); }
     HRESULT present();
     void release();
     // Direct embedded-host seam; active targets are acquired at each call,
@@ -942,7 +1136,83 @@ public:
         return owned::visit_embedded_output(device_.Get(), context_.Get(),
             backbuffer_rtv_.Get(), user, visitor);
     }
+    // ---- Scene thread (render_thread option; scene_thread.h) ----------------
+    // Off (the default): scene_queue() is false everywhere and every call runs
+    // inline on its caller's thread exactly as before.
+    // On: the scene thread owns this renderer (immediate context, swap chain,
+    // every queue and cache). Game-thread code queues its work with
+    // scene_post (copied inputs only, never game pointers) or, on a path not
+    // converted, waits for the scene thread with scene_sync. Public entry
+    // points that touch renderer state begin with SCENE_ENTRY, so an
+    // unconverted caller stays correct, only synchronous (each such reason is
+    // logged once as render_thread_sync and counted in the summary).
+    bool scene_mode() const noexcept { return scene_mode_.load(std::memory_order_acquire); }
+    bool on_scene_thread() const noexcept { return scene_thread_ && scene_thread_->on_thread(); }
+    bool scene_queue() const noexcept { return scene_mode() && !on_scene_thread() && !scene_inline_; }
+    // Game thread: drains the scene thread (reason non-null and queuing) and
+    // keeps every renderer call inline until the scope ends; the scene thread
+    // stays parked meanwhile (nothing is posted).
+    struct SceneInlineScope {
+        Renderer* renderer;
+        bool active;
+        SceneInlineScope(Renderer* owner, const char* reason) noexcept
+            : renderer(owner), active(reason && owner->scene_queue()) {
+            if (active) { owner->scene_sync(reason); ++owner->scene_inline_; }
+        }
+        ~SceneInlineScope() { if (active) --renderer->scene_inline_; }
+        SceneInlineScope(const SceneInlineScope&) = delete;
+        SceneInlineScope& operator=(const SceneInlineScope&) = delete;
+    };
+    template <class F> void scene_post(F&& work) {
+        if (scene_queue()) {
+            if (game_upload_pending_) flush_game_uploads();
+            if (scene_thread_->post(std::forward<F>(work))) return;
+            // Allocation failed: run it here, in order, with the scene thread
+            // drained (scene_inline_ makes the call take its inline body).
+            const SceneInlineScope inline_scope(this, "post_allocation_failed");
+            work();
+            return;
+        }
+        work();
+    }
+    // As scene_post, with the bridge's per-frame values of this point of the
+    // frame installed on the scene thread before the work runs.
+    // The game thread's HUD composition (widescreen::hud_blit, thread_local:
+    // the anchored panel/slot's offset, scale and panel clip) travels with the
+    // command too; the scene thread's own copy is identity, so without it
+    // queued interface work lost its placement and slid-out panel clip.
+    template <class F> void scene_post_frame(F&& work) {
+        if (!scene_queue()) { work(); return; }
+        scene_post([this, values = bridge_capture_frame_values(), hud = widescreen::hud_blit,
+                    work = std::forward<F>(work)]() mutable {
+            if (!on_scene_thread()) { work(); return; }
+            bridge_install_frame_values(values);
+            const auto previous = widescreen::hud_blit;
+            widescreen::hud_blit = hud;
+            work();
+            widescreen::hud_blit = previous;
+        });
+    }
+    // Game thread, scene mode: native or UI work was queued (proxy flushes
+    // queue a flush only when something may be pending).
+    void scene_note_native() noexcept { scene_native_pending_ = true; }
+    bool scene_native_pending() const noexcept { return scene_native_pending_; }
+    void scene_note_ui() noexcept { scene_ui_pending_ = true; }
+    void release_native_checkpoint(const NativeQueueCheckpoint& checkpoint) noexcept;
+    void scene_sync(const char* reason) noexcept;
+    // Game thread, scene mode: the surface's current GPU home (uploaded on the
+    // game thread if needed) as a pixel-free snapshot a queued command may use.
+    // Null for null. Off (or on the scene thread) it returns a non-owning
+    // pointer to the image itself.
+    std::shared_ptr<SurfaceImage> scene_surface(SurfaceImage* image);
     bool ready() const { return device_ != nullptr; }
+    // S_OK while the device works; the DXGI removal reason after a driver
+    // timeout (TDR) or reset. Callers query it only after a failed HRESULT.
+    HRESULT device_removed_reason() const noexcept {
+        return device_ ? device_->GetDeviceRemovedReason() : S_OK;
+    }
+    // One bridge event naming the removal reason, adapter, driver and memory.
+    void report_device_removed(HRESULT reason) noexcept;
     ID3D11Device* resource_device() const noexcept { return device_.Get(); }
     UINT width() const { return width_; }
     UINT height() const { return height_; }
@@ -1253,8 +1523,18 @@ private:
     TestInitializationObserver test_initialization_observer_ = nullptr;
     void* test_initialization_observer_context_ = nullptr;
     GpuBlitKey gpu_blit_key_;
-    struct PendingBlit { std::uint64_t source_id{}, cache_key{}, generation{}, base_generation{}, revision{}, ui_epoch{}, frame_serial{}; bool native_canvas{true}; bool keyed{}, gpu{}, cached{}, partial{}, force_opaque_alpha{}, batchable_text{}, source_is_surface{}, source_destroyed{}, quarter_turn{}, backdrop{}, presentation_fill{}; widescreen::HudComposition composition{}; RECT source{}, destination{}, update{}; DDCOLORKEY color_key{}; UINT width{}, height{}, pitch{}; std::uint32_t diffuse{0xffffffffu}; float u0{}, v0{}, u1{1}, v1{1}; std::vector<std::uint32_t> pixels; std::shared_ptr<const CharacterPaneGlyphAsset> text_asset; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
+    struct PendingBlit { std::uint64_t source_id{}, cache_key{}, generation{}, base_generation{}, revision{}, ui_epoch{}, frame_serial{}; bool native_canvas{true}; bool output_space{}, filtered_text{}; bool keyed{}, gpu{}, cached{}, partial{}, force_opaque_alpha{}, batchable_text{}, source_is_surface{}, source_destroyed{}, quarter_turn{}, backdrop{}, presentation_fill{}; widescreen::HudComposition composition{}; RECT source{}, destination{}, update{}; DDCOLORKEY color_key{}; UINT width{}, height{}, pitch{}; std::uint32_t diffuse{0xffffffffu}; float u0{}, v0{}, u1{1}, v1{1}; std::vector<std::uint32_t> pixels; std::shared_ptr<const CharacterPaneGlyphAsset> text_asset; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
     struct OverlayTexture { UINT width{}, height{}; std::uint64_t generation{}, revision{}, surface_id{}; RECT source{}; bool keyed{}; DDCOLORKEY color_key{}; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
+    // Scene mode: the game thread's view of overlay_textures_ (what the cache
+    // will hold once its queued blits ran), used to choose cached/partial
+    // conversions exactly as blit() does. A drop on the scene side resets it.
+    struct OverlayMirror { std::uint64_t surface_id{}, generation{}; UINT width{}, height{}; RECT source{}; bool keyed{}; DDCOLORKEY color_key{}; };
+    std::unordered_map<std::uint64_t, OverlayMirror> overlay_mirror_;   // game thread
+    std::atomic<bool> overlay_mirror_reset_{false};
+    HRESULT make_scene_blit(const SurfaceImage& source, const RECT& destination, const RECT* source_rect,
+                            const DDCOLORKEY* source_key, bool interface_space, bool native_canvas,
+                            std::vector<PendingBlit>& output);
+    PendingBlit make_presentation_fill(const PendingBlit& picture, const widescreen::PresentationFit& fit) const;
     struct NativeTextureArrayKey {
         UINT width = 0;
         UINT height = 0;
@@ -1272,8 +1552,13 @@ private:
     struct NativeTextureArraySlot { UINT slice = 0; std::uint64_t generation = 0; };
     struct NativeTextureArrayPage {
         UINT capacity = 0;
-        UINT used = 0;
+        UINT used = 0; // live slots
+        // Slices handed out. A dropped slot's slice is not handed out again
+        // while the page lives (a persistent depth record may still sample
+        // it); the page goes with its last live slot.
+        UINT next = 0;
         std::uint64_t last_used = 0;
+        std::uint64_t last_used_frame = 0; // native_frame_index_ (VRAM budget idle test)
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> srv;
         std::unordered_map<std::uint64_t, NativeTextureArraySlot> slots;
@@ -1622,13 +1907,22 @@ private:
         std::uint64_t generation = 0;
         std::uint64_t surface_id = 0;
         bool camp_surface_alias = false;
+        // Re-entered from a detached static's retained copy: its client
+        // surface is gone, so the world sweep retires it like an owned value.
+        bool detached_copy = false;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         DWORD source_fourcc = 0;
         UINT width = 0;
         UINT height = 0;
         UINT mip_count = 0;
         std::uint64_t last_used = 0;
+        std::uint64_t last_used_frame = 0; // native_frame_index_ (VRAM budget idle test)
+        UINT budget_skip = 0; // top mips left out under VRAM budget pressure
         std::uint64_t shared_floor = 0; // Last neighbour load that counted this reuse.
+        // `texture` is the client surface's own texture (one texture per
+        // image): its bytes are the surface's, and dropping this entry frees
+        // nothing. Cleared when the surface moves to another texture.
+        bool surface_shared = false;
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> srv;
     };
@@ -1773,6 +2067,15 @@ private:
     // created and after every present (settings may have changed).
     void prepare_shaders() noexcept;
     void register_embedded_shaders() noexcept;
+    // Shader crash breadcrumb (eid3d11_shader_crash.txt beside the ini): a
+    // preparation names the last program group it handed to the driver until
+    // the next completed present closes it. Still there at startup, the last
+    // run died inside the driver with that group. After a parallel
+    // preparation, recover switches preparation to one worker for good;
+    // after a serial one it turns the group's feature off (or the nearest
+    // earlier optional one). Either way it logs and owes a notice.
+    void recover_shader_crash() noexcept;
+    void close_shader_marker() noexcept;
     HRESULT load_camp_art();
     HRESULT create_clear_pipeline();
     HRESULT draw_screen_rectangle(const ScreenRectangleRequest& request,
@@ -1781,19 +2084,21 @@ private:
                              DWORD flags, D3DCOLOR color, float z, DWORD stencil);
     HRESULT create_native_pipeline();
     HRESULT render_pending_blits();
-    HRESULT draw_hud_asset_frames();
+    // captured: the frames copied on the game thread (render_thread on);
+    // nullptr reads the live panels here (render_thread off, game thread).
+    HRESULT draw_hud_asset_frames(const std::vector<HudAssetFrame>* captured);
     std::shared_ptr<const TextureCpuAsset> hud_frame_texture_;
     bool hud_frame_texture_failed_=false;
     std::uint64_t hud_frames_frame_=UINT64_MAX;
     HRESULT get_native_texture_array_slice(SurfaceImage& image,
                                            ComPtr<ID3D11ShaderResourceView>& srv,
                                            UINT& slice,
-                                           const TerrainTexturePage* authored_page=nullptr);
+                                           const TerrainTexturePage* authored_page=nullptr,
+                                           UINT demand_slices=0);
     HRESULT get_native_owned_texture(
         const NativeOwnedTextureView& source,
-        ComPtr<ID3D11ShaderResourceView>& srv, std::uint64_t& backing, NativeGeometryResult* result, bool world_mips = false);
-    HRESULT get_native_owned_texture_array(ID3D11ShaderResourceView* source,
-        std::uint64_t backing, ComPtr<ID3D11ShaderResourceView>& array, UINT& slice, NativeGeometryResult* result);
+        ComPtr<ID3D11ShaderResourceView>& srv, std::uint64_t& backing, NativeGeometryResult* result, bool world_mips = false,
+        bool budget_reducible = false);
     HRESULT reserve_native_owned_texture_bytes(std::uint64_t bytes,bool arrays);
     HRESULT retire_native_owned_texture_bytes(std::uint64_t bytes,bool arrays);
     std::uint64_t native_owned_texture_bytes(bool arrays) const;
@@ -1932,6 +2237,14 @@ private:
     HRESULT trim_native_mesh_cache();
     // Retires unowned geometry last used before frame `before`.
     HRESULT retire_stale_native_geometry(std::uint64_t before);
+    // Releases the buffers of general geometry pages that hold no live span.
+    void release_empty_native_geometry_pages() noexcept;
+    // Owned textures and immutable array slots not used since the world
+    // began (queue epoch `since`); client-surface entries go with their surface.
+    void retire_world_textures(std::uint64_t since) noexcept;
+    // Drops the array slots keyed `id` (immutable: an owned texture's backing;
+    // else a surface id) and releases pages left without a live slot.
+    void drop_native_texture_array_slots(std::uint64_t id, bool immutable) noexcept;
     HRESULT apply_state(const FixedState& state, bool textured, const widescreen::HudComposition& hud = {}, const camp::Clip& clip = {});
     void restore_camp_clip() noexcept;
     struct CampClipScope {
@@ -1942,9 +2255,64 @@ private:
     void transition_profile_pass(const char* name);
     // GPU sub-scope names (profiling only). Terrain parts: live, live after a
     // cached draw, cached, liquid ground, liquid water, foam, stock water.
-    enum class TerrainProfilePart : unsigned { live, live_routed, cached, ground, water, foam, stock_water };
+    enum class TerrainProfilePart : unsigned { live, live_routed, cached, ground, water, foam, stock_water, live_flat };
     static const char* terrain_profile_scope(bool neighbour, bool tessellated, TerrainProfilePart part) noexcept;
     RendererResourceSnapshot resource_snapshot() const;
+    // Someone reads the per-pass status text this frame: the overlay, a capture
+    // warm-up, attribution, the hitch recorder, a harness route or critter labels.
+    bool status_text_wanted() const noexcept;
+    // Peak-sized CPU-mapped upload buffers and their CPU staging, dropped
+    // when a new world begins so they regrow to that world's demand.
+    void release_world_upload_peaks() noexcept;
+    // Drops free instance records and reusable prepared slots from the end
+    // of their tables and returns the storage once a world is gone.
+    void trim_native_tables() noexcept;
+    // World change (a new world epoch: map load or main menu), at the first
+    // engine frame of the new world with no draw pending: every world-scoped
+    // GPU resource and CPU store goes, then the device and heap are trimmed.
+    // The new world rebuilds on demand at its own size.
+    void release_world_state() noexcept;
+    std::uint64_t world_state_epoch_ = 0;
+    std::uint64_t scene_world_epoch_ = 0;
+    UINT scene_frame_latency_ = 0;          // game thread: latency applied while in scene mode (0: none)
+    UINT scene_frame_latency_restore_ = 0;  // the device's latency before scene mode
+    void apply_scene_frame_latency() noexcept;
+    // Scene mode: surface id -> the published texture the game thread still
+    // holds (scene_publish_surface_texture; erased when it moves off it).
+    mutable std::mutex scene_surface_holds_lock_;
+    std::unordered_map<std::uint64_t,ID3D11Texture2D*> scene_surface_holds_; // game thread, scene mode: world_state_epoch_ as of the last inline frame begin
+    HRESULT begin_engine_frame_at(std::uint64_t world_epoch);
+    // Settings-window video memory by feature; summed at most every 15
+    // presents while the window is open (cached in video_memory_).
+    VideoMemoryBreakdown video_memory_breakdown() const;
+    mutable VideoMemoryBreakdown video_memory_{};
+    mutable std::uint64_t video_memory_frame_ = UINT64_MAX;
+    std::uint64_t critter_video_bytes() const noexcept;  // renderer_critters.cpp
+    // WDDM local video memory budget (renderer_vram_budget.cpp). Polled after
+    // Present; enforced on adapters with a non-local segment (discrete) or
+    // when EID3D11_VRAM_BUDGET_MB overrides the budget.
+    struct VramBudget {
+        bool known = false, enforced = false, uma = false, overridden = false;
+        std::uint64_t budget = 0, usage = 0, override_bytes = 0;
+        unsigned level = 0;  // VramBudgetSnapshot::level
+        std::array<std::uint64_t, 4> usage_at_step{}, step_savings{};
+        std::uint64_t next_poll_frame = 0, settle_until_frame = 0, evicted_bytes = 0;
+        std::uint64_t rebuild_frame = UINT64_MAX, rebuild_bytes = 0;
+        unsigned restore_polls = 0;
+        bool cannot_fit_reported = false;
+    } vram_budget_;
+    void update_vram_budget() noexcept;
+    std::uint64_t evict_idle_textures_for_budget(std::uint64_t bytes) noexcept;
+    VramBudgetSnapshot vram_budget_snapshot() const noexcept;
+    // Top mips a reducible world texture leaves out at the current level.
+    UINT vram_texture_skip(UINT width, UINT height, UINT levels) const noexcept {
+        if (!vram_budget_.level) return 0;
+        UINT skip = vram_budget_.level >= 3 ? 2u : 1u;
+        while (skip && ((std::max)(width, height) >> skip) < 64u) --skip;  // small textures stay whole
+        return levels > skip ? skip : (levels ? levels - 1 : 0);
+    }
+    bool vram_take_rebuild(std::uint64_t bytes) noexcept;
+    UINT vram_shadow_shift() const noexcept { return vram_budget_.level >= 2 ? 1u : 0u; }
     CutoutShadowScopeSnapshot cutout_shadow_scope_snapshot() const noexcept;
 
     // Declared before device resources so implicit destruction releases them
@@ -1978,10 +2346,90 @@ private:
     FrameLimiter frame_limiter_;  // player frame_limit option, paces Present
     std::uint32_t shader_groups_prepared_ = 0;  // prepare_shaders groups already created
     std::uint32_t shader_on_demand_reported_ = 0;  // shader_cache on-demand compiles already logged
+    // The device's prepared shader objects (shader_cache.h create_shader),
+    // attached at device creation and detached before the device goes.
+    ComPtr<ShaderObjects> shader_objects_;
+    std::uint32_t shader_unprepared_reported_ = 0;  // shader_objects_ misses already logged
+    // D3D11_FEATURE_THREADING DriverConcurrentCreates (report_adapter). False:
+    // shader preparation runs on one worker, like after a parallel crash.
+    bool driver_concurrent_creates_ = true;
+    std::atomic<bool> shader_marker_open_{false};  // a preparation's breadcrumb awaits a completed present
     HRESULT create_swap_chain();
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
+    // Per-draw constants (constant_ring.h, issue #162): appended with
+    // NO_OVERWRITE and bound by range through context1_ (the immediate context as an
+    // ID3D11DeviceContext1). Written only by the renderer's owner thread. Without
+    // D3D11.1 constant buffer offsets and NO_OVERWRITE on dynamic constant
+    // buffers, each block keeps its own buffer with one DISCARD per write.
+    ComPtr<ID3D11DeviceContext1> context1_;
+    owned::ConstantRing constant_ring_;
+    bool constant_ring_supported_=false;
+    // The last b0 draw constants (Constants), so a pass that rebinds b0
+    // without writing (bind_draw_constants) still sees them after a restart.
+    std::array<std::uint8_t,owned::ConstantRing::kAlign*2> draw_constants_copy_{};
+    UINT draw_constants_bytes_=0;
+    owned::ConstantRing::Range draw_constants_range_{};
+    std::uint32_t draw_constants_generation_=0;
+    enum ConstantStage : UINT { constant_vs=1u, constant_ps=2u };
+    void refresh_constant_ring_context() noexcept;
+    void restart_upload_rings() noexcept;
+    HRESULT push_constants(UINT stages,UINT slot,const void* data,UINT bytes,ID3D11Buffer* own_buffer) noexcept;
+    HRESULT upload_draw_constants(const void* data,UINT bytes) noexcept;
+    void bind_draw_constants() noexcept;
+    // False when a ring restart, wrap or regrowth since the last
+    // upload_draw_constants left the bound b0 range stale (callers that skip
+    // an unchanged upload must write again).
+    bool draw_constants_live() const noexcept{
+     return !(constant_ring_supported_&&context1_)||draw_constants_generation_==constant_ring_.generation();
+    }
+    // Scene thread (render_thread option). Switched only on the game thread
+    // at a frame boundary, with the scene thread drained.
+    std::unique_ptr<SceneThread> scene_thread_;
+    std::atomic<bool> scene_mode_{false};
+    std::vector<std::pair<const char*,std::uint64_t>> scene_syncs_; // game thread: reasons, first logged
+    unsigned scene_inline_=0;        // game thread: depth of SceneInlineScope (calls run inline)
+    std::vector<std::pair<const char*,std::uint64_t>> scene_sync_window_; // game thread: waits this window
+    std::uint64_t scene_window_frames_=0; // game thread: presents queued in this window
+    bool scene_ui_pending_=false;    // game thread: UI queued since the last UI flush
+    bool scene_native_pending_=false;// game thread: native work queued since the last native flush
+    std::uint64_t scene_checkpoint_serial_=0;                 // game thread
+    std::unordered_map<std::uint64_t,NativeQueueCheckpoint> scene_checkpoints_; // scene thread
+    bool clear_rects_placed_=false;  // scene thread: clear() rectangles are already camp-placed
+    // Surface uploads the game thread makes in scene mode record into this
+    // deferred context; the list runs on the scene thread ahead of the next
+    // queued command, after any queued output blit from the same surfaces.
+    ComPtr<ID3D11DeviceContext> game_upload_context_;
+    bool game_upload_pending_=false;
+    std::vector<std::uint64_t> game_upload_surfaces_;
+    std::uint64_t game_upload_bytes_=0;
+    HRESULT game_upload(SurfaceImage& image,SurfaceUploadResult* output);
+    void flush_game_uploads() noexcept;
+    // Scene thread: a snapshot whose world use asks for mips its game texture
+    // lacks gets one mipped copy per (surface, generation, texture object).
+    struct SceneMipTexture{std::uint64_t generation=0,texture_serial=0;ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> srv;};
+    std::unordered_map<std::uint64_t,SceneMipTexture> scene_mip_textures_;
+    std::uint64_t scene_mode_frame_=0;   // presentation frame of the last activation
+    void set_scene_mode(bool active) noexcept;
+    void report_scene_sync_window() noexcept;
+public:
+    // Game thread, scene mode: the selection result (screen extents and
+    // visibility) queue_native/queue_native_owned compute for a non-world
+    // packet, from the packet alone: its position bounds plus morph range,
+    // the HUD composition of its clip, and the state's viewport. S_OK
+    // visible, S_FALSE outside, failure as the queue would fail.
+    HRESULT native_packet_extents(const NativeGeometryView& view,const FixedState& st,RECT& extents) const noexcept;
+    // A queued call's failure: one line per operation, at most a few each.
+    static void report_scene_failure(const char* operation,HRESULT hr) noexcept;
+private:
+    void begin_scene_game();
+    void begin_scene_renderer();
+    HRESULT queue_present();
+    HRESULT present_frame(const ScenePresentInputs* inputs);
     ComPtr<IDXGIAdapter3> adapter3_;
+    // "adapter=<name> vendor= device= driver=<a.b.c.d>", recorded at device creation.
+    std::string adapter_summary_;
+    void report_adapter() noexcept;
     D3D_FEATURE_LEVEL feature_level_ = D3D_FEATURE_LEVEL_9_3;
     // Active colour target: scene until the first interface boundary, then backbuffer.
     ComPtr<ID3D11RenderTargetView> rtv_;
@@ -2010,6 +2458,7 @@ private:
         std::array<float,4> quality{}; // SSR march steps (water_reflection_quality), history mip, history valid, reserved
         std::array<float,16> history_clip{}; // world-to-clip of the previous frame's colour (slice 1)
         std::array<float,16> history_inverse{}; // its inverse, for the previous frame's particle depth
+        std::array<float,4> march{}; // largest coarse SSR step in target pixels (water_reflection_step_pixels; 0: fixed), reserved
     };
     int water_reflection_quality_logged_ = -1; // last quality written to the event log
     // Mip levels of the reflection scene copy (1 when the format has no mip
@@ -2035,6 +2484,7 @@ private:
     ComPtr<ID3D11DepthStencilState> particle_depth_test_;
     bool particle_depth_failed_ = false;
     bool particle_depth_wanted() const;
+    bool ensure_particle_depth_pipeline();
     void draw_game_particle_depth(UINT vertex_count);
     ComPtr<ID3D11Texture2D> water_scene_color_;
     ComPtr<ID3D11ShaderResourceView> water_scene_srv_;
@@ -2139,6 +2589,10 @@ private:
     HRESULT ensure_ground_cover_pipeline() noexcept;
     HRESULT update_ground_cover_maps(const AmbientWorldSource& inputs) noexcept;
     void release_ground_cover() noexcept;
+    // World-change parts of release_world_state (shaders and states stay).
+    void release_ground_cover_world() noexcept;
+    void release_critters_world() noexcept;
+    void release_ambient_world() noexcept;
     HRESULT update_contact_blend_maps() noexcept;
     void release_contact_blend_maps() noexcept;
     // Terrain cliff tessellation stages (terrain_cliff.h), compiled on first use.
@@ -2217,6 +2671,8 @@ private:
     std::array<ComPtr<ID3D11Buffer>,64> gc_round_constants_; // GcRun per round (the round index)
     // Per-cell rule masks of the active map (every rule that can place in a
     // cell: a superset of the shader's acceptance) bound the stage buffers exactly.
+    std::vector<std::uint8_t> gc_zone_uploaded_;   // the zone pieces last written to gc_zone_pieces_
+    std::weak_ptr<const TerrainCpuAsset> gc_height_terrain_;float gc_height_range_[2]{}; // its sectors' lowest and highest ground
     std::vector<std::uint64_t> gc_cell_masks_;std::uint64_t gc_cell_masks_key_=UINT64_MAX;ComPtr<ID3D11ShaderResourceView> gc_cell_mask_srv_;
     HRESULT gc_ensure_stage_buffers(UINT capacity);
     HRESULT gc_ensure_cell_jobs(UINT cells);
@@ -2254,7 +2710,6 @@ private:
     ComPtr<ID3D11ShaderResourceView> gc_vertex_srv_,gc_rule_srv_,gc_instance_srv_,gc_fields_srv_,gc_color_srv_,gc_tiles_srv_;
     ComPtr<ID3D11ShaderResourceView> gc_bark_srv_,gc_stone_srv_,gc_trees_srv_;
     ComPtr<ID3D11Buffer> gc_zone_pieces_;
-    std::vector<std::uint8_t> gc_zone_uploaded_values_;
     ComPtr<ID3D11ShaderResourceView> gc_zone_srv_;
     ComPtr<ID3D11UnorderedAccessView> gc_args_uav_,gc_counts_uav_,gc_instance_uav_,gc_color_uav_;
     // Per placement pass (active map, then each neighbour) and mesh: demand
@@ -2315,7 +2770,13 @@ private:
     double gc_snow_seconds_=-1;std::uint64_t gc_snow_map_generation_=0;
     bool gc_snow_map_=false;                          // the current map has snow ground (area class 4)
     bool gc_soft_sand_=false;                         // its tile families include soft sand (terrain_tile_soft_sand)
-    struct SnowTrack{std::uint64_t id=0;float x=0,y=0;std::uint64_t frame=0;float along=0;}; // along: path metres walked
+    struct SnowTrack{std::uint64_t id=0;float x=0,y=0;std::uint64_t frame=0;float along=0;float hx=0,hy=0,hal=0;}; // along: path metres walked; h*: last history point
+    // Trail history (snow_trails.h): each walking unit's path in 0.4 m steps with
+    // its game second, so a trail the moving window dropped comes back (recovered
+    // by its age) when the window returns over it; pruned once fully filled in.
+    struct SnowTrailHistory{snow_trails::Segment segment;double seconds=0;};
+    std::vector<SnowTrailHistory> gc_snow_history_;
+    std::array<float,2> gc_snow_centre_{};            // the window's smooth centre (trail fade), paired with gc_snow_origin_
     std::vector<SnowTrack> gc_snow_tracks_;           // each walking unit's previous position, by lifecycle id
     std::vector<GroundUnitTrail> gc_unit_trails_;     // trail key and body size of gc_unit_input_ rows
     std::vector<FootprintTrailPoint> gc_snow_prints_; // visible prints of walking makers (snow trails of unseen units)
@@ -2348,10 +2809,10 @@ private:
     // The active map's tile families, loaded off the render thread (one job at
     // a time) for ambient_map_generation_ while the material blend or ground
     // cover is on. poll_terrain_tile_families: true once tile_families_ is in.
-    std::future<TerrainTileFamilies> tile_families_job_;
+    TileFamiliesJob tile_families_job_;
     // Started as soon as a new main terrain source is published (inside the
     // game's load), adopted by the first poll for that same terrain.
-    std::future<TerrainTileFamilies> tile_families_prestart_;
+    TileFamiliesJob tile_families_prestart_;
     std::shared_ptr<const TerrainCpuAsset> tile_families_prestart_terrain_;
     void prestart_terrain_tile_families() noexcept;
     std::uint64_t tile_families_job_generation_=UINT64_MAX,tile_families_generation_=UINT64_MAX;
@@ -2400,7 +2861,7 @@ private:
         bool prepared=false;
         // Until its tile families load: base tile slots and slot types for the
         // sand-family bit; beach rules see ETERRTYPE sand only meanwhile.
-        std::future<TerrainTileFamilies> families;
+        TileFamiliesJob families;
         std::vector<std::uint16_t> base_slots;std::vector<std::uint32_t> slot_types;std::vector<std::uint8_t> base_lanes;
         // Terrain material blend of this neighbour's own terrain (its own
         // families and atlas; terrain_tile_blend.h): until its families load,
@@ -2421,6 +2882,7 @@ private:
     HRESULT prepare_ground_cover_neighbour(GcNeighbour& neighbour) noexcept;
     bool terrain_full_sun_=false; // terrain lighting compares the full sun (set with the terrain frame)
     std::future<std::vector<ComPtr<ID3DBlob>>> gc_compile_;   // worker shader compile
+    std::shared_ptr<std::atomic<std::size_t>> gc_compile_done_; std::size_t gc_compile_total_ = 0; // its programs done (load progress)
     // F10 line: what the last particle pass did, or why it drew nothing.
     char ambient_status_[256]="Particles: pass not reached yet";bool ambient_status_problem_=false;
     std::uint64_t ambient_status_frame_=UINT64_MAX;
@@ -2433,6 +2895,49 @@ private:
     ComPtr<ID3D11RasterizerState> wind_trails_raster_;
     std::array<wind_trails::Slot,wind_trails::kMaxSlots> wind_trails_slots_{};
     double wind_trails_time_=-1;std::uint64_t wind_trails_generation_=0;int wind_trails_level_=-1;bool wind_trails_failed_=false;
+    // Owned precipitation (renderer_precipitation.cpp): rain and snow that
+    // replace the game's CWeather draws, after the wind trails and before
+    // SMAA. Quality 0 creates nothing (and the stock draws stay suppressed).
+    void render_precipitation();
+    ComPtr<ID3D11VertexShader> precipitation_vs_,precipitation_veil_vs_,precipitation_splash_vs_;
+    ComPtr<ID3D11PixelShader> precipitation_ps_,precipitation_veil_ps_,precipitation_splash_ps_;
+    ComPtr<ID3D11Buffer> precipitation_constants_;ComPtr<ID3D11BlendState> precipitation_blend_;ComPtr<ID3D11RasterizerState> precipitation_raster_;
+    bool precipitation_failed_=false;
+    char precipitation_status_[256]="Precipitation: pass not reached yet";bool precipitation_status_problem_=false;
+    std::uint64_t precipitation_status_frame_=UINT64_MAX;
+    char precipitation_status_state_[96]="";
+    unsigned long long precipitation_cover_log_=0;
+    float precipitation_focus_smooth_=0;unsigned long long precipitation_focus_tick_=0;  // eased focus distance (real time)  // last precipitation_cover bridge event (tick ms)  // the status line's state last reported to the bridge log
+    RainOcclusionRequest precipitation_request_{};  // the shelter map wanted (bridge bakes it)
+    // The game's weather atlas (snow crystals) and its sampler; reason on failure.
+    const char* load_precipitation_flakes() noexcept;
+    ComPtr<ID3D11ShaderResourceView> precipitation_flakes_srv_;ComPtr<ID3D11SamplerState> precipitation_sampler_;
+    bool precipitation_flakes_failed_=false;
+    unsigned long long native_rain_bakes_=0;
+    // Precipitation build-up/fade and the falling field's wind drift (game seconds).
+    float precipitation_level_=0;int precipitation_kind_=0;double precipitation_time_=-1;std::uint64_t precipitation_ramp_generation_=0;
+    float precipitation_rain_visible_=0;  // ramped rain x strength share: rain rings and wet ripples
+    float precipitation_snow_visible_=0;  // the same for snow: snow build-up and trail refill
+    float precipitation_strength_seen_=-1;  // the strength the picture shows (cross-fades, never from zero)
+    double precipitation_onset_=-1;
+    bool precipitation_paused_=false;int precipitation_wanted_=0;  // game clock still this frame; the kind it waits to build        // game seconds the current rain began (drizzle, then the front)
+    float precipitation_local_cover_=-1;           // the sky's scattered cover overhead, 0..1 (renderer_sky; -1: not published)
+    float precipitation_front_arrival_=-1;           // the sky's storm front over the eye, 0..1 (renderer_sky; -1: not published)
+    float snow_cover_=0;double snow_cover_hours_=-1;std::uint64_t snow_cover_generation_=UINT64_MAX;
+    float shelter_fill_=0;  // how far snow has crept under crowns (slower than snow_cover_, keeps growing after it is full)  // snow build-up on surfaces and its game seconds (precipitation clock)
+    double precipitation_drift_[2]{};float precipitation_wind_[2]{};double precipitation_drift_time_=-1;std::uint64_t precipitation_drift_generation_=0;  // shelter bakes so far (F10 line: it must stay still while nothing changes)
+    float wet_level_=0;double wet_hours_=-1;std::uint64_t wet_generation_=UINT64_MAX;  // wet surfaces: lingering rain wetness and its game hours
+    // Shelter map (renderer_precipitation.cpp): one straight-down depth map of
+    // the persistent static casters, drawn through flush_native_shadows.
+    bool native_rain_active_=false,native_rain_valid_=false;UINT native_rain_side_=0;NativeShadowSlice native_rain_slice_{};
+    ComPtr<ID3D11Texture2D> native_rain_depth_;ComPtr<ID3D11DepthStencilView> native_rain_dsv_;
+    ComPtr<ID3D11ShaderResourceView> native_rain_srv_;ComPtr<ID3D11Buffer> native_rain_constants_;
+    // Its soft version for the snow and wet surfaces (filter_native_rain_shelter):
+    // ping-pong RGBA16 maps; the last pass writes map 1, the result.
+    ComPtr<ID3D11Texture2D> native_shelter_soft_[2];ComPtr<ID3D11ShaderResourceView> native_shelter_soft_srv_[2];
+    ComPtr<ID3D11UnorderedAccessView> native_shelter_soft_uav_[2];ComPtr<ID3D11ComputeShader> native_shelter_soft_cs_;
+    ComPtr<ID3D11Buffer> native_shelter_soft_constants_;UINT native_shelter_soft_side_=0;
+    bool native_shelter_soft_valid_=false,native_shelter_soft_failed_=false;
 
     // Critters (renderer_critters.cpp): ambient creatures in the opaque world
     // pass after the ground cover. Level 0 creates and reads nothing.
@@ -2507,7 +3012,7 @@ private:
     std::array<float,4> fog_mist_grid_{};
     std::array<float,16> fog_previous_clip_{};
     std::uint64_t fog_prepared_frame_=UINT64_MAX,fog_mist_generation_=0;
-    double fog_wetness_hours_=-1.0;
+    double fog_wetness_hours_=-1.0;std::uint64_t fog_world_generation_=UINT64_MAX;
     float fog_wetness_=0.f,fog_rain_level_=0.f,fog_terrain_low_z_=0.f;
     std::array<float,4> fog_previous_eye_{};
     const char* fog_volume_reason_="";
@@ -2524,7 +3029,7 @@ private:
     HRESULT ensure_owned_sky(int quality) noexcept;
     void release_owned_sky() noexcept;
     void bind_owned_sky_pixel_inputs() noexcept;
-    ComPtr<ID3D11ComputeShader> sky_shape_cs_,sky_detail_cs_,sky_weather_cs_,sky_lut_cs_,sky_shadow_cs_,sky_clouds_cs_,sky_resolve_cs_,sky_probe_cs_;
+    ComPtr<ID3D11ComputeShader> sky_shape_cs_,sky_detail_cs_,sky_weather_cs_,sky_lut_cs_,sky_shadow_cs_,sky_shadow_blur_cs_,sky_clouds_cs_,sky_resolve_cs_,sky_probe_cs_;
     ComPtr<ID3D11VertexShader> sky_vs_;ComPtr<ID3D11PixelShader> sky_ps_;
     ComPtr<ID3D11Buffer> sky_constants_;
     ComPtr<ID3D11SamplerState> sky_wrap_sampler_,sky_clamp_sampler_;
@@ -2532,14 +3037,31 @@ private:
     ComPtr<ID3D11RasterizerState> sky_raster_state_;
     ComPtr<ID3D11ShaderResourceView> sky_shape_srv_,sky_detail_srv_,sky_weather_srv_,sky_lut_srv_,sky_shadow_srv_;
     ComPtr<ID3D11UnorderedAccessView> sky_lut_uav_,sky_shadow_uav_;
+    // The raw cloud-shadow field (skyShadowCS); sky_shadow_srv_ holds it pre-blurred (skyShadowBlurCS).
+    ComPtr<ID3D11ShaderResourceView> sky_shadow_raw_srv_;ComPtr<ID3D11UnorderedAccessView> sky_shadow_raw_uav_;
 ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView> sky_march_uav_;
     ComPtr<ID3D11ShaderResourceView> sky_cloud_srv_[2],sky_probe_srv_[2];
     ComPtr<ID3D11UnorderedAccessView> sky_cloud_uav_[2],sky_probe_uav_[2];
     std::array<float,16> sky_previous_clip_{};
     double sky_wind_offset_[3]{};
     double sky_time_=-1.0;
+    // The inputs the sky LUT and the cloud shadow field were last computed
+    // from (empty: recompute). Equal inputs give equal outputs: skipped.
+    std::vector<unsigned char> sky_lut_inputs_,sky_shadow_inputs_;
+    double sky_shadow_offset_[2]{};  // slower drift of the cloud-shadow field (sky_cloud_shadow_speed)
     float sky_fair_coverage_=-1.f;
-    float sky_closure_=-1.f;  // weather closure ramped over game time (sky_step_closure)
+    float sky_closure_=-1.f;  // the storm deck over the eye last frame (sky_front_deck at 0)
+    // Storm front edges (m upwind of the eye) and the pre-storm overhead cover
+    // (sky_clouds.h SkyFront, sky_step_front).
+    float sky_front_lead_=-80000.f,sky_front_rear_=-80000.f,sky_front_pre_=0.f;
+public:
+    // Published once per world frame for the precipitation ramp: the storm
+    // front's arrival over the eye (0..1) and the small pre-storm clouds
+    // forming overhead (0..1).
+    float sky_front_arrival() const noexcept { return sky_front_arrival_; }
+    float sky_local_cover() const noexcept { return sky_local_cover_; }
+private:
+    float sky_front_arrival_=0.f,sky_local_cover_=0.f;
     float sky_deck_kind_=1.f; // storm weight of the closing weather: rain 1, snow .8 (sky_deck_storm)
     // Latest game lightning strike (sky_strike_light): game seconds and ground xy;
     // the strike lights listed last frame (id, half-unit centre) find new ones.
@@ -2550,7 +3072,7 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     int sky_quality_=-1;std::uint32_t sky_frame_=0,sky_jitter_=0;
     bool sky_history_valid_=false,sky_failed_=false,sky_draw_pending_=false,sky_inputs_active_=false;
     const char* sky_reason_="";
-    char sky_status_[448]="Sky: no world frame yet";
+    char sky_status_[576]="Sky: no world frame yet";
     bool sky_status_problem_=false;
     std::string sky_status_state_;
     bool ao_ambient_written_=false,ao_pipeline_failed_=false; // a world batch wrote the ambient share this frame
@@ -2584,6 +3106,19 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     ComPtr<ID3D11ShaderResourceView> game_particle_srv_;
     UINT game_particle_capacity_ = 0;
     bool game_particle_pipeline_failed_ = false;
+    HRESULT ensure_game_particle_pipeline();
+    ComPtr<ID3D11VertexShader> game_ribbon_vs_, game_selection_vs_, game_mesh_vs_, game_glyph_vs_;
+    // One draw of game effect elements (particles, ribbons) with the call's state.
+    struct GameEffectDraw {
+        const float* object_to_clip = nullptr;
+        float clip_half_width = 0, clip_half_height = 0;
+        UINT element_count = 0, vertex_count = 0, ribbon_points = 0;
+        ID3D11VertexShader* vertex_shader = nullptr;
+        bool fog = true, reflection_depth = true;
+        const char* profile_pass = "";
+    };
+    std::vector<GameParticleGpu> game_effect_elements_;
+    HRESULT draw_game_effect(const GameEffectDraw& draw, const FixedState& state, SurfaceImage* texture);
     // Bloom glow target (world size): additive world particles add their light
     // here; valid for bloom only in the frame it was cleared (glow_frame_).
     ComPtr<ID3D11Texture2D> glow_;ComPtr<ID3D11RenderTargetView> glow_rtv_;ComPtr<ID3D11ShaderResourceView> glow_srv_;
@@ -2641,13 +3176,17 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     // 8 atmosphere without the fog volume, 9 the cascade coverage debug view
     // (compiled only into that set), 10 soft point shadows off, 11 the fast
     // combiner only, bound per batch). Key 0 draws the general
-    // programs (the default preset's set). Another key's set compiles on
-    // worker threads into the disk cache once the key holds; the general
+    // programs (the default preset's set). Another key's set is created from
+    // its prebuilt programs on worker threads once the key holds; the general
     // programs draw until it is ready (renderer.cpp). Every set built this
     // session stays resident, so a key seen before binds in the same frame.
+    // All sets being built share one queue of programs over one pool.
     struct NativeSpecialisationJob;
+    struct NativeSpecialisationPool;
     using NativeSpecialisedSet=std::array<ComPtr<ID3D11PixelShader>,15>;
-    std::shared_ptr<NativeSpecialisationJob> native_spec_job_;
+    std::shared_ptr<NativeSpecialisationPool> native_spec_pool_;
+    std::vector<std::shared_ptr<NativeSpecialisationJob>> native_spec_jobs_; // sets building, in start order
+    bool native_specialisation_building(std::uint32_t key) const noexcept;
     std::uint32_t native_spec_candidate_=0;std::uint64_t native_spec_candidate_frame_=0;
     std::uint64_t native_spec_updated_frame_=~std::uint64_t{0}; // the last frame whose world flush chose a set
     std::unordered_map<std::uint32_t,NativeSpecialisedSet> native_spec_sets_;
@@ -2670,7 +3209,7 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     void release_native_specialisation() noexcept;
     ID3D11PixelShader* native_pixel(ComPtr<ID3D11PixelShader> Renderer::* member) const noexcept;
     static ComPtr<ID3D11PixelShader> Renderer::* const* native_specialised_members() noexcept; // in NativeSpecialisedSet order
-    void start_native_specialisation(std::uint32_t key) noexcept;
+    void start_native_specialisation(std::uint32_t key,bool first) noexcept; // first: front of the queue
     std::uint32_t native_spec_current_key_=0; // the key of the latest world flush
     ID3D11PixelShader* native_pixel(ComPtr<ID3D11PixelShader> Renderer::* member,bool contact,bool fast_combiner=false) const noexcept;
     std::set<std::uint64_t> native_general_combiners_; // general-combiner configurations reported once
@@ -2701,6 +3240,8 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     ComPtr<ID3D11PixelShader> backdrop_ps_;ComPtr<ID3D11SamplerState> backdrop_sampler_;
     ComPtr<ID3D11PixelShader> interface_scaled_ps_;bool interface_scaled_ps_failed_=false;
     bool interface_scaled_ps();
+    ComPtr<ID3D11PixelShader> interface_text_ps_;bool interface_text_ps_failed_=false;
+    bool interface_text_ps();
     ComPtr<ID3D11VertexShader> debug_texture_vs_;
     ComPtr<ID3D11PixelShader> debug_texture_ps_;
     ComPtr<ID3D11Buffer> debug_texture_constants_;
@@ -2739,16 +3280,98 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     ComPtr<ID3D11ShaderResourceView> native_persistent_instance_srv_, native_instance_update_srv_;
     ComPtr<ID3D11UnorderedAccessView> native_persistent_instance_uav_;
     UINT native_persistent_instance_capacity_ = 0, native_instance_update_capacity_ = 0;
-    struct InstanceUploadSlot {
-        ComPtr<ID3D11Buffer> buffer;
-        ComPtr<ID3D11ShaderResourceView> srv;
-        UINT capacity = 0;
-    };
-    std::array<InstanceUploadSlot, 8> native_instance_upload_ring_{};
-    UINT native_instance_upload_cursor_ = 0;
+    // Per-flush structured inputs (instance updates, pose inputs) appended
+    // into fenced per-frame rings (FencedUploadRing, constant_ring.h): each
+    // upload is written with NO_OVERWRITE and read from its first element
+    // (b4 work range), and no buffer the GPU may still read is discarded.
+    // Each 3.7 MB DISCARD per flush (several a frame while records changed)
+    // ran the driver out of renamed copies: 2-9 ms Map stalls (zone 3 route).
+    // Needs D3D11.1 MapNoOverwriteOnDynamicBufferSRV; without it each upload
+    // keeps its own buffer with one DISCARD. Same owner thread as the
+    // constant ring; its frame boundary is restart_upload_rings.
+    owned::FencedUploadRing native_instance_update_ring_{sizeof(NativeInstanceUpdate)};
+    bool structured_ring_supported_ = false;
     std::vector<NativeInstanceRecord> native_instance_records_;
     std::unordered_map<std::uint64_t,NativeStaticShadowRecord> native_static_shadow_records_;
     std::uint64_t native_static_shadow_visit_ = 0;
+    // Bumped by every insert into or erase from native_static_shadow_records_
+    // outside the bake rebuild: the bake's record membership key.
+    std::uint64_t native_static_shadow_records_serial_ = 1;
+    // Persistent static sun casters drawn from one baked layout (issue #162).
+    // The bridge sends its static caster store once per store revision; the
+    // bake holds every store caster that has a current depth record, with
+    // record and range references (the static colour set rule, L-046), and
+    // its own work buffer (layout slot 5). A static-layer redraw draws the
+    // bake with no per-caster CPU work: the GPU culls each record per map
+    // (nativeLightBoundsVisible) and, for a scrolled map, against the
+    // exposed strip. Store casters without a current record wait in `absent`
+    // and are registered through the depth path when a redrawn map reaches
+    // them, which changes the record serial and rebuilds the bake.
+    struct NativeStaticShadowBake {
+        std::vector<RetainedShadowCasterValue> store;
+        std::uint64_t store_revision = 0;
+        std::vector<NativeSelectedRecord> records;
+        std::vector<RetainedShadowCasterValue> absent;
+        std::vector<std::weak_ptr<const void>> owners;   // distinct record owners
+        std::vector<UINT> mesh_slots, material_slots;     // distinct, ascending
+        std::vector<UINT> dispatch_chunks, geometry_chunks; // per dispatch range of the layout
+        // Store key (id << 32 | part) -> work index and records index, by key:
+        // a changed or removed caster's work entry is switched off in place.
+        // shared: its work entry prepares a world range other baked entries
+        // also draw from, so it cannot be switched off alone.
+        struct Entry { std::uint64_t key = 0; NativeShadowCasterRevision revision{}; UINT work = UINT_MAX, record = UINT_MAX; bool shared = false; };
+        // Owner of each record (index into owners) and the live records per
+        // owner: a switched-off record's owner may expire without a rebuild.
+        std::vector<UINT> owner_of, owner_live;
+        std::vector<Entry> entries;
+        UINT excluded = 0;
+        std::uint64_t built_store_revision = 0, built_content_revision = 0, built_records_serial = 0;
+        std::uint64_t prepared_vertices = 0;
+        UINT preparations = 0;
+        bool built = false, far_foliage_opaque = false;
+        unsigned layout_slot = 5;
+        // Terrain bake: per-work map masks of this redraw (t35), set by the
+        // bridge's final terrain masks instead of the GPU strip test.
+        bool masked = false;
+        std::vector<UINT> masks;
+        // Sun maps its records reach (bits 0-4; the neighbour bake follows
+        // shadow_neighbour_casters) and, for the neighbour bake, the caster
+        // key it was built at (neighbour_caster_key).
+        UINT slice_mask = 0x1fu;
+        std::uint64_t built_key = 0;
+    } native_static_shadow_bake_, native_terrain_shadow_bake_;
+    // Neighbour-map decorations as sun and shelter casters (layout slot 7):
+    // their object-space colour records cast as themselves (no depth records,
+    // no world allocations), drawn into the static layer with the store bake
+    // and pancaked onto the near plane (their depth is not in the bridge's
+    // cascade depth grid). Membership changes bump neighbour_caster_revision_.
+    NativeStaticShadowBake native_neighbour_shadow_bake_{};
+    std::uint64_t neighbour_caster_revision_ = 1;
+    // The neighbour caster key each sun map's static layer was drawn with.
+    std::array<std::uint64_t,5> native_shadow_neighbour_drawn_{};
+    // Revision and shadow_neighbour_casters level (0 off, 1 close maps, 2 all).
+    std::uint64_t neighbour_caster_key() const noexcept;
+    UINT neighbour_caster_slices() const noexcept;
+    HRESULT draw_native_neighbour_shadows() noexcept;
+    HRESULT finish_native_shadow_bake(NativeStaticShadowBake& bake) noexcept;
+    // Terrain sun caster records registered through the depth path (same
+    // currency rule as native_static_shadow_records_), for the terrain bake.
+    std::unordered_map<std::uint64_t,NativeStaticShadowRecord> native_terrain_shadow_records_;
+    std::uint64_t native_terrain_shadow_records_serial_ = 1;
+    ComPtr<ID3D11Buffer> native_shadow_work_mask_;
+    ComPtr<ID3D11ShaderResourceView> native_shadow_work_mask_srv_;
+    UINT native_shadow_work_mask_capacity_ = 0;
+    NativeStaticShadowBake* native_shadow_bake_active_ = nullptr;   // flush_native_shadows draws this bake
+    bool native_shadow_bake_current(const NativeStaticShadowBake& bake,std::uint64_t records_serial) const noexcept;
+    HRESULT rebuild_native_shadow_bake(NativeStaticShadowBake& bake,
+        std::unordered_map<std::uint64_t,NativeStaticShadowRecord>& stored,
+        const std::vector<std::pair<std::uint64_t,NativeShadowCasterRevision>>& members,
+        std::vector<std::size_t>& absent,bool sweep,std::uint64_t records_serial) noexcept;
+    void release_native_shadow_bake(NativeStaticShadowBake& bake) noexcept;
+    HRESULT draw_native_shadow_bake(NativeStaticShadowBake& bake) noexcept;
+    bool native_static_shadow_record_current(const NativeStaticShadowRecord& stored,
+        const NativeShadowCasterRevision& revision) const noexcept;
+    bool update_native_static_shadow_store(const RetainedShadowCasterValue* casters,std::uint32_t count) noexcept;
 #ifdef EID3D11_TESTING
     std::uint64_t test_native_depth_selections_ = 0, test_native_depth_registrations_ = 0;
 #endif
@@ -2815,11 +3438,35 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     UINT native_animation_capacity_ = 0, native_animation_used_ = 16;
     ComPtr<ID3D11UnorderedAccessView> native_animation_uav_;
     ComPtr<ID3D11ComputeShader> native_terrain_phase_cs_;
+    // One slot per terrain phase identity (the fields same_prepared_identity
+    // compares without the part). The lookup lives here, never in the game's
+    // phase values: the scene thread resolves a per-command copy of them
+    // (landmine: game-side cache handles under scene-thread command copies).
+    struct NativeTerrainPhaseKey {
+        std::int32_t signed_id=0;
+        std::uint32_t set_index=0;
+        std::uint64_t lifecycle_generation=0,world_epoch=0,plan_generation=0;
+        bool terrain_source=false;
+        bool operator==(const NativeTerrainPhaseKey& other) const noexcept {
+            return signed_id==other.signed_id&&set_index==other.set_index&&
+                lifecycle_generation==other.lifecycle_generation&&world_epoch==other.world_epoch&&
+                plan_generation==other.plan_generation&&terrain_source==other.terrain_source;
+        }
+    };
+    struct NativeTerrainPhaseKeyHash {
+        std::size_t operator()(const NativeTerrainPhaseKey& key) const noexcept {
+            std::uint64_t value=std::uint64_t(std::uint32_t(key.signed_id))|(std::uint64_t(key.set_index)<<32)|
+                (std::uint64_t(key.terrain_source)<<63);
+            for(const std::uint64_t part:{key.lifecycle_generation,key.world_epoch,key.plan_generation})
+                value=(value^part)*0x100000001b3ull;
+            return static_cast<std::size_t>(value^(value>>32));
+        }
+    };
     struct NativeTerrainPhaseSlot {
-        NativePreparedIdentity identity{};
+        NativeTerrainPhaseKey key{};
         std::weak_ptr<const void> owner;
-        std::uint64_t revision=0;
-        UINT generation=1,allocation=UINT_MAX,count=0;
+        std::uint64_t revision=0,last_frame=UINT64_MAX;
+        UINT allocation=UINT_MAX,count=0;
         bool active=false,valid=false,scheduled=false;
     };
     struct NativeTerrainPhaseWork {
@@ -2827,9 +3474,17 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
         std::uint64_t revision=0;
     };
     std::vector<NativeTerrainPhaseSlot> native_terrain_phases_;
+    std::unordered_map<NativeTerrainPhaseKey,UINT,NativeTerrainPhaseKeyHash> native_terrain_phase_lookup_;
+    std::vector<UINT> native_terrain_phase_free_;
+    // Slots resolved in native_terrain_phase_live_frame_: the live sector
+    // count for the once-only growth guard.
+    std::uint64_t native_terrain_phase_live_frame_=UINT64_MAX;
+    UINT native_terrain_phase_live_=0;
+    bool native_terrain_phase_growth_logged_=false;
     std::vector<NativeTerrainPhaseWork> native_terrain_phase_work_;
     std::vector<NativeDrawWorkGpu> native_terrain_phase_copies_;
     UINT native_pose_input_capacity_ = 0, native_pose_node_capacity_ = 0, native_pose_node_used_ = 0;
+    owned::FencedUploadRing native_pose_input_ring_{sizeof(NativePoseGpu)}; // see native_instance_update_ring_
     std::unordered_map<std::string,NativeSkeletonAsset> native_skeleton_assets_;
     std::vector<NativePoseSlot> native_pose_slots_;
     std::vector<NativeGpuRange> native_pose_ranges_, native_world_ranges_, native_animation_ranges_;
@@ -2932,7 +3587,9 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     std::uint8_t native_shadow_dirty_mask_ = 0;
     std::uint8_t native_shadow_cleared_mask_ = 0;
     bool native_shadow_collecting_ = false, native_shadow_failed_ = false;
-    bool native_shadows_enabled_ = true, native_shadow_constants_dirty_ = false;
+    // Atomic: the game thread's frame-state sink reads it in scene thread mode.
+    std::atomic<bool> native_shadows_enabled_{true};
+    bool native_shadow_constants_dirty_ = false;
     UINT native_shadow_side_ = 2048, native_point_shadow_side_ = 256;
     std::array<float,4> native_shadow_softness_{}; // PCSS constants (shadowBias[5]); zero keeps the tapered PCF
     std::uint8_t native_close_shadow_cascades_ = 3;
@@ -2981,8 +3638,10 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
     bool native_material_groups_dirty_ = false;
     std::vector<UINT> native_active_groups_;
     std::vector<std::size_t> native_draw_order_;
-    // 0 per-frame color, 1 shadows, 2 persistent static color set.
-    std::array<NativeSubmissionLayout,5> native_submission_layouts_;
+    // 0 per-frame color, 1 shadows, 2 persistent static color set, 3 static
+    // terrain set, 4 neighbour opaque set, 5 static sun caster bake, 6 terrain
+    // sun caster bake, 7 neighbour sun caster bake.
+    std::array<NativeSubmissionLayout,8> native_submission_layouts_;
     // Each registered key's draws hold one reference (taken over from its
     // registration enqueue) until removed or its owner expires.
     struct NativeStaticSet {
@@ -2995,7 +3654,14 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
         // rebuilt with draws: owner expiry is the one membership change no
         // set or remove call announces.
         std::vector<std::weak_ptr<const void>> owners;
+        // Object colour set only: keys registered since the last rebuild,
+        // not in the bake (adopt_native_static_draws), and their draw count.
+        std::vector<std::uint64_t> added;
+        std::size_t added_draws = 0;
     };
+    // Added draws a static set carries before a rebuild folds them in (at
+    // least; an eighth of the baked draws when larger).
+    static constexpr unsigned kNativeStaticAddedFold = 256;
     NativeStaticSet native_static_set_{}, native_terrain_set_{{},{},false,1,3};
     struct NeighbourGpuState {
         std::shared_ptr<const void> owner;
@@ -3012,6 +3678,9 @@ ComPtr<ID3D11ShaderResourceView> sky_march_srv_;ComPtr<ID3D11UnorderedAccessView
         double fog_range = 1; // range the uploaded content was fog-culled at
     };
     NeighbourGpuState neighbours_;
+    // Sun-shadow receiver cells (32 m, world space) of the accepted neighbours'
+    // terrain and decorations, published to the bridge (neighbour_receivers_publish).
+    std::map<std::pair<int,int>,NativeWorldBounds> neighbour_receiver_cells_;
     // World-space neighbour seam fog of the current world frame (all sides
     // uncovered when no neighbour is rendered); set with ambient_terrain_state_.
     NeighbourFogField neighbour_fog_{};
@@ -3029,6 +3698,9 @@ private:
     void release_unused_prebuilt(const NeighbourMapUpload& upload) noexcept;
     void retire_dedicated_geometry() noexcept;
     bool dedicated_geometry_stale_ = false; // released neighbours may leave dedicated meshes
+    bool dedicated_geometry_remaining_ = false; // the last sweep left a dedicated mesh in place
+    std::uint64_t dedicated_geometry_release_frame_ = 0,dedicated_geometry_sweep_frame_ = 0;
+    static constexpr std::uint64_t kDedicatedFollowFrames = 3,kDedicatedSweepFrames = 30;
     HRESULT render_neighbour_maps(const FixedState& frame,const std::array<float,16>& world_to_clip,bool ordered) noexcept;
     HRESULT adopt_native_static_draws(NativeStaticSet& set,std::uint64_t key,std::size_t first,bool& registered);
     HRESULT flush_native_static_set(NativeStaticSet& set,const FixedState& frame);
@@ -3094,7 +3766,12 @@ private:
     std::unordered_map<NativeTextureArrayKey, std::vector<NativeTextureArrayPage>,
                        NativeTextureArrayKeyHash> native_texture_arrays_;
     std::unordered_map<std::string, NativeOwnedTexture> native_owned_textures_;
+    // Written only by the renderer's owner thread; the game thread's detach
+    // retainer (retain_detached_surface_texture, under the retained scene's
+    // lock) reads it while the scene thread may write: both hold this lock.
+    mutable std::mutex native_owned_textures_lock_;
     std::uint64_t native_owned_texture_serial_ = 0;
+    std::uint64_t shared_texture_rewrites_ = 0; // detach_shared_surface_texture copies
     std::uint64_t native_owned_texture_uploads_ = 0, native_owned_array_uploads_ = 0;
     // While a neighbour map uploads: pool serial at its start (0 = off), and the
     // distinct older textures it reused instead of uploading again.
@@ -3108,6 +3785,11 @@ private:
     std::vector<NativePreparedMaterialSlot> native_prepared_material_slots_;
     std::size_t native_prepared_mesh_reuse_cursor_ = 0;
     std::size_t native_prepared_material_reuse_cursor_ = 0;
+    // Highest generation of a slot trimmed off the end (trim_native_tables):
+    // a slot appended at that index again starts above it, so a stale handle
+    // to the trimmed slot can never match its new occupant.
+    std::uint32_t native_prepared_mesh_generation_floor_ = 1;
+    std::uint32_t native_prepared_material_generation_floor_ = 1;
     std::uint64_t native_prepared_mesh_reuse_sweep_frame_ = 0;
     std::uint64_t native_prepared_material_reuse_sweep_frame_ = 0;
     std::uint64_t native_world_prepared_vertices_ = 0;
@@ -3122,11 +3804,18 @@ private:
     std::uint64_t native_cache_world_epoch_ = 0;
     std::uint64_t native_cache_epoch_frame_ = 0;
     bool native_cache_epoch_sweep_pending_ = false;
+    // The queue epoch the current world began at, and its pending texture sweep.
+    std::uint64_t native_texture_epoch_queue_ = 0;
+    bool native_texture_epoch_sweep_pending_ = false;
     std::uint64_t native_cache_older_owned_meshes_ = 0;
     std::uint64_t native_released_mesh_slots_ = 0;
     std::uint64_t native_geometry_growths_ = 0;      // general page growths and new pages
     std::uint64_t native_cache_seen_growths_ = 0;
+    // World/effect input and resource use belong to each engine draw invocation,
+    // including draws without a flip. Public presentation stamps count only
+    // actual swap-chain Present calls.
     std::uint64_t native_frame_index_ = 0;
+    std::uint64_t presentation_frame_index_ = 0;
     SurfaceTextureResolver surface_texture_resolver_ = nullptr;
     void* surface_texture_resolver_context_ = nullptr;
     NativeWorldLighting native_world_lighting_{};
@@ -3232,7 +3921,7 @@ private:
     DebugOverlay debug_overlay_;
     // File-driven test harness (test_harness.h): the renderer-owned commands.
     enum class HarnessRequest : std::uint8_t { none, capture, profile };
-    HarnessRequest step_test_harness() noexcept;
+    HarnessRequest step_test_harness(const ScenePresentInputs* inputs) noexcept;
     bool apply_harness_config(const HarnessCommand& command, std::string& detail) noexcept;
     bool write_harness_screenshot(const std::string& path, std::string& detail) noexcept;
     std::string harness_unready_parts(std::string& ready_detail) noexcept;
@@ -3242,24 +3931,103 @@ private:
     // the loading screen. Frames keep running (multi-frame preparation needs
     // them); only their presentation is replaced. RENDERER_ARCHITECTURE.md.
     void apply_load_reveal() noexcept;
-    const char* load_reveal_waiting_on() noexcept;
-    bool load_reveal_holding_ = false;      // also drains neighbours and paints every frame
+    // Which cap a held frame counts against: the neighbour stream's or the rest.
+    enum class LoadRevealWait { other, neighbours };
+    const char* load_reveal_waiting_on(LoadRevealWait& kind) noexcept;
+    // Also drains neighbours and paints every frame. Written by the presenting
+    // thread, read by the game thread (load_cursor_wanted): atomic.
+    std::atomic<bool> load_reveal_holding_{false};
     bool load_reveal_tracking_ = false;     // timing the current load (hold on or off)
     bool load_picture_this_frame_ = false;  // present_image ran in this frame
     std::uint64_t load_reveal_epoch_ = 0, load_reveal_draws_ = 0, load_reveal_revealed_epoch_ = 0;
-    std::int64_t load_reveal_first_world_ = 0;
+    std::int64_t load_reveal_first_world_ = 0, load_reveal_last_world_ = 0;
+    // The hold caps' clocks (each held frame adds at most 250 ms): frames held
+    // for the neighbour stream, and frames held for every other wait.
+    double load_reveal_held_ms_ = 0, load_reveal_neighbour_held_ms_ = 0;
     unsigned load_reveal_frames_ = 0;
     // Held frames per readiness reason (static strings), for the reveal line.
     std::array<std::pair<const char*, unsigned>, 12> load_reveal_waits_{};
     std::uint64_t load_reveal_va_peak_ = 0;
     ComPtr<ID3D11Texture2D> load_picture_;  // GPU copy of the last loading picture frame
+    // Load progress during the hold (renderer_load_progress.cpp): the game's
+    // progress movie steps one frame per load progress point and never shows
+    // its last frame (005DA400). While the picture is held, the frames after
+    // the one shown follow the hold's real progress (load_reveal_progress),
+    // decoded from the same movie and composed as the game's picture.
+    struct LoadProgressMovie {
+        std::string path;                    // as the game opened it
+        unsigned width = 0, height = 0, frames = 0, shown = 0; // shown: 0-based index of the held frame
+        bool attempted = false;              // decode tried for this load (once)
+        std::vector<SurfaceImage> after;     // frames shown + 1 .. frames - 1, GPU textures
+        float position = 0;                  // frames past `shown`, never decreasing
+    } load_progress_movie_;
+    bool load_progress_movie_valid_ = false; // the latest loading picture was a progress frame
+    // Per component (world, neighbours, critter perches, shader sets, ground
+    // cover, warm-up): the most work units seen outstanding during this hold.
+    std::array<std::size_t, 6> load_reveal_progress_peak_{};
+    bool load_reveal_perches_ready_ = false;
+    bool load_picture_fitted_ = false;      // present_image composed a full-screen picture this frame
+    void capture_load_progress_movie(bool fitted) noexcept;
+    bool decode_load_progress_movie() noexcept;
+    // Scene mode: the game's progress movie state as the game thread read it
+    // at the latest fitted picture (present_image); the scene thread's
+    // capture_load_progress_movie uses it instead of game memory.
+    ProgressMovie progress_movie_input_;
+    bool progress_movie_input_valid_ = false;
+    // Scene mode: the movie decode runs on the game thread (the game's own
+    // binkw32 imports, which only the game thread calls). The scene thread
+    // files a request; queue_present decodes it and leaves the frames here.
+    struct LoadProgressDecode {
+        std::uint64_t serial = 0;            // 0: no request
+        bool taken = false, done = false;
+        std::string path;
+        unsigned width = 0, height = 0, frames = 0, shown = 0;
+        std::vector<SurfaceImage> after;     // done: the frames (empty: failed, reported)
+    };
+    std::mutex load_progress_decode_lock_;   // guards the two members below
+    LoadProgressDecode load_progress_decode_;
+    std::uint64_t load_progress_decode_serials_ = 0;
+    void service_load_progress_decode() noexcept; // game thread, queue_present
+    void cancel_load_progress_decode() noexcept;
+    void draw_load_progress(float progress) noexcept;
+    float load_reveal_progress() noexcept;  // 0..1 of the work outstanding during this hold, done
+    const char* load_reveal_world_wait() noexcept;
+    const char* load_reveal_ground_cover_wait() noexcept;
+    std::size_t native_specialisation_programs_remaining() const noexcept;
+    // Pipeline warm-up (renderer_warmup.cpp): during held frames, one tiny
+    // draw per shader combination and target formats a later first draw
+    // would otherwise make the driver compile mid-play (specialised sets'
+    // siblings, liquids, water reflection, particles, point shadows), into
+    // 4x4 scratch targets; the hold waits until the GPU has run them. The
+    // list is rebuilt each held frame; warmup_signature_ restarts it when
+    // its programs change (a set arrives, the key changes, a new device).
+    void pump_pipeline_warmup() noexcept;
+    void reset_pipeline_warmup() noexcept;
+    bool warmup_done_ = false, warmup_query_pending_ = false;
+    std::uint64_t warmup_signature_ = 0;
+    std::size_t warmup_next_ = 0, warmup_items_ = 0;
+    unsigned warmup_draws_ = 0;            // draws issued for the current load (load_reveal line)
+    ComPtr<ID3D11Query> warmup_query_;
+    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D11RenderTargetView>>> warmup_targets_;
+    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D11DepthStencilView>>> warmup_depths_;
     unsigned harness_stage_ = 0;
+    unsigned long harness_completed_entry_ = 0; // scene thread: last completed queued command
     std::uint64_t harness_started_ms_ = 0;
     unsigned harness_wait_ = 0;
     // camera_path (temporary): the previous present's counter, the present
     // count and the last profiler frame written.
     std::int64_t harness_path_previous_=0;unsigned harness_path_present_=0;std::uint64_t harness_path_profile_frame_=0;
     std::array<std::uint64_t,6> harness_path_cache_counters_{};
+    // Frame accounting (frame_accounting.h): the camera_path row of this
+    // present waits for the frame's end; the game thread's last closed frame;
+    // D3D counters and shadow decision counts at the previous row; buffered rows.
+    std::string harness_path_line_;
+    frame_acct::Record fa_game_frame_{};
+    std::array<std::int64_t,frame_acct::counter_count> fa_counters_{};
+    decltype(ShadowRendererDiagnostics::counts) fa_shadow_witness_{};
+    std::string harness_path_rows_;
+    void finish_harness_path_row(const frame_acct::Record& game_frame,const frame_acct::Record* scene_frame) noexcept;
+    void write_harness_path_rows() noexcept;
     std::string harness_capture_directory_;
     std::string harness_overlay_shot_;   // screenshot path waiting for this present's overlay pass
     bool harness_profile_armed_ = false;

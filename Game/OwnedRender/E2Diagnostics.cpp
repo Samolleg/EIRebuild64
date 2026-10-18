@@ -39,7 +39,7 @@ bool bridge_game_sites_all_verified() noexcept { return true; }
 bool bridge_semantic_slots_installed() noexcept { return true; }
 const BridgeProfileSnapshot* bridge_latest_profile() noexcept { return nullptr; }
 void bridge_set_profile_enabled(bool enabled) { if (enabled) { E2_UNAVAILABLE("retail bridge profile"); } }
-void bridge_report_hovered_shadow() noexcept { E2_UNAVAILABLE("retail hovered-shadow capture"); }
+void bridge_request_hovered_shadow_capture() noexcept { E2_UNAVAILABLE("retail hovered-shadow capture"); }
 void bridge_post_engine_surface_material_group_scan() noexcept {
     E2_UNAVAILABLE("retail post-engine surface material-group timing");
 }

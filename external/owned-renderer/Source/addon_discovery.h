@@ -105,7 +105,7 @@ struct AddonCombatLayout {
 };
 
 struct AddonLayout {
-    std::uint32_t effect_value_callback=0, effect_perk_getter=0;
+    std::uint32_t effect_value_callback=0;
     const char* effect_value_failure="not_discovered";
     AddonCombatLayout combat;
     const char* combat_failure="not_discovered";

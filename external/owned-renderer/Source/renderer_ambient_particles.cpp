@@ -86,6 +86,33 @@ void append_ambient_particle_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "ambient", nullptr, "fallShellPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+// World change (release_world_state): the shared per-map grids, their
+// textures and everything keyed by them. Forgetting the terrain makes the
+// next rebuild_ambient_particle_map a new map (ambient_map_generation_ steps),
+// so every consumer keyed by that generation (ground cover, contact maps,
+// tile families, terrain bake, emissive lights) rebuilds for the new world.
+// Running worker jobs (tile families, bake cells) are left alone: their
+// results are generation-checked.
+void Renderer::release_ambient_world() noexcept {
+    ambient_terrain_.reset(); ambient_geometry_.reset(); ambient_source_map_.reset();
+    ambient_area_srv_.Reset(); ambient_height_srv_.Reset(); ambient_ground_srv_.Reset(); ambient_type_srv_.Reset();
+    ambient_sources_srv_.Reset(); ambient_fall_tiles_srv_.Reset(); ambient_falls_srv_.Reset(); ambient_fall_shell_srv_.Reset();
+    ambient_fall_tile_count_ = ambient_fall_impact_count_ = ambient_fall_count_ = 0; ambient_fall_shell_vertices_ = 0;
+    std::vector<std::uint8_t>().swap(ambient_area_); std::vector<float>().swap(ambient_height_);
+    decltype(ambient_sources_)().swap(ambient_sources_);
+    ambient_liquid_level_ = decltype(ambient_liquid_level_){};
+    decltype(emissive_tiles_)().swap(emissive_tiles_); decltype(emissive_clusters_)().swap(emissive_clusters_);
+    decltype(emissive_colors_)().swap(emissive_colors_); emissive_colors_sampled_ = false;
+    emissive_generation_ = UINT64_MAX; emissive_published_ = 0;
+    decltype(native_contact_cell_high_)().swap(native_contact_cell_high_);
+    native_contact_cells_x_ = native_contact_cells_y_ = 0; ++native_contact_generation_;
+    terrain_bake_cells_.reset(); terrain_bake_cells_generation_ = 0;
+    release_terrain_bake();
+    release_contact_blend_maps(); decltype(contact_tile_rows_)().swap(contact_tile_rows_);
+    liquid_swamp_frame_srv_.Reset(); liquid_swamp_frame_generation_ = UINT64_MAX;
+    fog_mist_srv_.Reset(); fog_mist_grid_ = {}; fog_mist_generation_ = 0;
+}
+
 // Base resources belong to the immutable terrain and are built once per map:
 // heights and wet classes at the current layer shifts, spray from the flow
 // of the authored rest surface. Later layer shifts update in place.
@@ -199,7 +226,8 @@ void Renderer::render_ambient_particles() {
     // F10 line: the outcome of this pass, or the first reason it drew nothing.
     ambient_status_frame_ = native_frame_index_;
     const auto status = [&](bool problem, const char* format, auto... values) {
-        std::snprintf(ambient_status_,sizeof(ambient_status_),format,values...);ambient_status_problem_ = problem;
+        if (status_text_wanted()) std::snprintf(ambient_status_,sizeof(ambient_status_),format,values...);
+        ambient_status_problem_ = problem;
     };
     if (level <= 0) return status(false,"Particles: off");
     if (ambient_failed_) return status(true,"Particles: disabled after a resource/shader failure (see debug output)");
@@ -237,8 +265,8 @@ void Renderer::render_ambient_particles() {
         t.SrcBlend=t.SrcBlendAlpha=D3D11_BLEND_ONE;t.DestBlend=t.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
         t.BlendOp=t.BlendOpAlpha=D3D11_BLEND_OP_ADD;t.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
         D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
-        if (FAILED(device_->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&ambient_vs_)) ||
-            FAILED(device_->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&ambient_ps_)) ||
+        if (FAILED(create_shader(device_.Get(),vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&ambient_vs_)) ||
+            FAILED(create_shader(device_.Get(),ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&ambient_ps_)) ||
             FAILED(device_->CreateBuffer(&b,nullptr,&ambient_constants_)) ||
             FAILED(device_->CreateBlendState(&blend,&ambient_blend_)) ||
             FAILED(device_->CreateRasterizerState(&raster,&ambient_raster_))) {
@@ -309,8 +337,8 @@ void Renderer::render_ambient_particles() {
             D3D11_DEPTH_STENCIL_DESC depth{};depth.DepthEnable=TRUE;depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
             depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
             if (FAILED(compile_shader(programs[2], &vs, &errors)) || FAILED(compile_shader(programs[3], &ps, &errors)) ||
-                FAILED(device_->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&fall_shell_vs_)) ||
-                FAILED(device_->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&fall_shell_ps_)) ||
+                FAILED(create_shader(device_.Get(),vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&fall_shell_vs_)) ||
+                FAILED(create_shader(device_.Get(),ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&fall_shell_ps_)) ||
                 FAILED(device_->CreateDepthStencilState(&depth,&fall_shell_depth_))) {
                 if (errors) OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
                 OutputDebugStringA("EID3D11 waterfall shells: shaders unavailable; waterfall foam omitted.\n");
@@ -382,7 +410,7 @@ void Renderer::render_ambient_particles() {
     }
     unsigned draws = 0, instances = 0;
     Quality scaled = quality;scaled.density *= std::max(density,0.f);
-    char drawn[128] = "";
+    char drawn[128] = "";const bool status_text = status_text_wanted();
     static const char* const kNames[em_count] = {"pollen","leaves","motes","cavedust","drips","spores","embers","ash","sand","fireflies","snow glitter","splashes","mist","fall foam","lip spray"};
     for (unsigned index = 0; index < em_count; ++index) {
         const auto e = static_cast<Emitter>(index);
@@ -424,14 +452,14 @@ void Renderer::render_ambient_particles() {
         ambient_emitter_constants(c,e,style,table,mushroom,pool,scale,displacement.data(),velocity);
         const float window_x = c.window[0];
         if (waterfall_emitter(e)) c.window[0] = float(fall_first);
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(context_->Map(ambient_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) break;
-        std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(ambient_constants_.Get(),0);
+        if (FAILED(push_constants(constant_vs|constant_ps,0,&c,sizeof(c),ambient_constants_.Get()))) break;
         const unsigned count = waterfall_emitter(e) ? pool*fall_count : pool*columns*rows;
         c.window[0] = window_x;
         context_->DrawInstanced(4,count,0,0);++draws;instances += count;
-        const std::size_t used = std::strlen(drawn);
-        std::snprintf(drawn+used,sizeof(drawn)-used,"%s%s %u",used?", ":"",kNames[index],count);
+        if (status_text) {
+            const std::size_t used = std::strlen(drawn);
+            std::snprintf(drawn+used,sizeof(drawn)-used,"%s%s %u",used?", ":"",kNames[index],count);
+        }
     }
     static const char* const kZones[zone_count] = {"outdoor","dead city","cave","gipat cave","snow","desert"};
     static const char* const kAreas[area_count] = {"bare","grass","dry","sand","snow","swamp","water","lava"};

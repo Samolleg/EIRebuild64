@@ -3,12 +3,13 @@
 #include "combat_ui.h"
 
 #include "cursor_confinement.h"
+#include "cursor_image.h"
 #include "game_focus.h"
 #include "render_profiler.h"
 #include "engine_bridge.h"
 #include "game_sites.h"
 #include "graphics_settings.h"
-#include "renderer_ui_ru.h"
+#include "ui_language.h"
 #include "widescreen.h"
 #include "world_fog.h"
 #include "camp_inventory.h"
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -131,48 +133,54 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
         return option && option->type == RendererOptionType::boolean ? option->boolean_value : fallback;
     };
     const auto integer = [&](const char* value) { return configured_value(config, value); };
+#ifdef EID3D11_EMBEDDED
+    if (is("render_thread") || is("render_thread_frame_latency"))
+        return "needs host scene-thread lifecycle";
+    if (is("precipitation") || starts("precip_"))
+        return "needs host weather draw ownership";
+#endif
     if (boolean("water_simple") && (is("water_reflections") || is("water_reflection_quality") || is("water_physical")))
-        return u8"\u043e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0432\u043e\u0434\u0443 \u0432 \u0441\u0442\u0438\u043b\u0435 \u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b\u0430";
+        return "turn off Stock-look water to use this option";
     if (!boolean("water_reflections", true) && (is("water_reflection_quality") || is("water_physical")))
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0442\u0440\u0430\u0436\u0435\u043d\u0438\u0439 \u0432 \u0432\u043e\u0434\u0435";
+        return "needs water reflections";
     if (!boolean("shadows", true) && (is("shadow_cascade_quality") || is("shadow_close_cascades") || is("shadow_far") || is("shadow_far_foliage_opaque") || is("shadow_sun_angle")))
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u043b\u043d\u0435\u0447\u043d\u044b\u0445 \u0442\u0435\u043d\u0435\u0439";
-    if (is("shadow_far_foliage_opaque") && !boolean("shadow_far", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0434\u0430\u043b\u044c\u043d\u0438\u0445 \u0442\u0435\u043d\u0435\u0439";
-    if (!boolean("point_shadows", true) && starts("point_shadow_")) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0435\u043d\u0435\u0439 \u043e\u0442 \u043b\u0430\u043c\u043f \u0438 \u0444\u0430\u043a\u0435\u043b\u043e\u0432";
+        return "needs sun shadows";
+    if (is("shadow_far_foliage_opaque") && !boolean("shadow_far", true)) return "needs distant shadows";
+    if (!boolean("point_shadows", true) && starts("point_shadow_")) return "needs lamp and torch shadows";
     if (is("shadow_softness") && !boolean("shadows", true) && !boolean("point_shadows", true))
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0435\u043d\u0435\u0439 \u043e\u0442 \u0441\u043e\u043b\u043d\u0446\u0430 \u0438\u043b\u0438 \u043b\u0430\u043c\u043f";
+        return "needs sun or lamp shadows";
     if (integer("shadow_softness") == 0 && (is("shadow_sun_angle") || is("point_shadow_light_size")))
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043c\u044f\u0433\u043a\u0438\u0445 \u0442\u0435\u043d\u0435\u0439";
+        return "needs soft shadows";
     if ((is("terrain_antitile") || is("terrain_height_blend")) && integer("terrain_quality") == 0)
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u044b\u0441\u043e\u043a\u043e\u0439 \u0434\u0435\u0442\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u0438 \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430";
-    if (is("terrain_cliffs") && integer("terrain_blend") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439 \u0437\u0435\u043c\u043b\u0438";
+        return "needs High terrain detail";
+    if (is("terrain_cliffs") && integer("terrain_blend") == 0) return "needs terrain blending";
     if (starts("cliff_") && (!boolean("terrain_cliffs", true) || integer("terrain_blend") == 0))
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0435\u043a\u0441\u0442\u0443\u0440 \u043e\u0431\u0440\u044b\u0432\u043e\u0432 \u0438 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439";
-    if (is("terrain_far_detile") && integer("terrain_blend") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439 \u0437\u0435\u043c\u043b\u0438";
-    if (starts("terrain_bake_") && integer("terrain_bake") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0438 \u0442\u0435\u043a\u0441\u0442\u0443\u0440 \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430";
+        return "needs cliff texturing and terrain blending";
+    if (is("terrain_far_detile") && integer("terrain_blend") == 0) return "needs terrain blending";
+    if (starts("terrain_bake_") && integer("terrain_bake") == 0) return "needs terrain baking";
     if ((starts("neighbour_fog_") || is("terrain_blend_neighbours") || is("terrain_bake_neighbours")) && !boolean("neighbour_maps", true))
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u0441\u0435\u0434\u043d\u0438\u0445 \u043a\u0430\u0440\u0442";
-    if (is("terrain_blend_neighbours") && integer("terrain_blend") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u043d\u0438\u044f \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0439 \u0437\u0435\u043c\u043b\u0438";
-    if (is("ground_cover_distance") && integer("ground_cover") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u0440\u0430\u0432\u044b \u0438 \u043c\u0435\u043b\u043a\u043e\u0439 \u0440\u0430\u0441\u0442\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u0438";
-    if (starts("ambient_particle_") && integer("ambient_particles") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0447\u0430\u0441\u0442\u0438\u0446 \u043e\u043a\u0440\u0443\u0436\u0435\u043d\u0438\u044f";
-    if (is("tree_sway_strength") && !boolean("tree_sway", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043a\u0430\u0447\u0430\u043d\u0438\u044f \u0434\u0435\u0440\u0435\u0432\u044c\u0435\u0432";
-    if (starts("ao_") && !is("ao_quality") && integer("ao_quality") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0437\u0430\u0442\u0435\u043d\u0435\u043d\u0438\u044f \u0432 \u0443\u0433\u043b\u0443\u0431\u043b\u0435\u043d\u0438\u044f\u0445";
+        return "needs neighbouring maps";
+    if (is("terrain_blend_neighbours") && integer("terrain_blend") == 0) return "needs terrain blending";
+    if (is("ground_cover_distance") && integer("ground_cover") == 0) return "needs grass and ground cover";
+    if (starts("ambient_particle_") && integer("ambient_particles") == 0) return "needs ambient particles";
+    if (is("tree_sway_strength") && !boolean("tree_sway", true)) return "needs swaying trees";
+    if (starts("ao_") && !is("ao_quality") && integer("ao_quality") == 0) return "needs ambient occlusion";
     if (starts("sky_") && !is("sky_clouds") && !is("sky_weather_test") && integer("sky_clouds") == 0)
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u043d\u0438\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0433\u043e \u043d\u0435\u0431\u0430";
-    if (is("sky_weather_test") && integer("sky_clouds") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u043d\u0438\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0433\u043e \u043d\u0435\u0431\u0430; \u0442\u043e\u043b\u044c\u043a\u043e \u0432 \u0433\u043b\u0430\u0432\u043d\u043e\u043c \u043c\u0435\u043d\u044e";
-    if (is("fog_volume_quality") && integer("fog_preset") < 2) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0431\u044a\u0451\u043c\u043d\u043e\u0433\u043e \u0442\u0443\u043c\u0430\u043d\u0430";
+        return "needs the animated sky";
+    if (is("sky_weather_test") && integer("sky_clouds") == 0) return "needs the animated sky; main menu only";
+    if (is("fog_volume_quality") && integer("fog_preset") < 2) return "needs Volumetric fog";
     if (starts("fog_") && !is("fog_preset") && !is("fog_volume_quality") && integer("fog_preset") == 0)
-        return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u0442\u043c\u043e\u0441\u0444\u0435\u0440\u043d\u043e\u0433\u043e \u0438\u043b\u0438 \u043e\u0431\u044a\u0451\u043c\u043d\u043e\u0433\u043e \u0442\u0443\u043c\u0430\u043d\u0430";
-    if (is("sun_shaft_strength") && integer("sun_shafts") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u043b\u043d\u0435\u0447\u043d\u044b\u0445 \u043b\u0443\u0447\u0435\u0439";
+        return "needs Atmospheric or Volumetric fog";
+    if (is("sun_shaft_strength") && integer("sun_shafts") == 0) return "needs sun shafts";
     if (is("bloom_strength") || is("bloom_threshold") || is("bloom_debug_view"))
-        if (integer("bloom") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u0432\u0435\u0447\u0435\u043d\u0438\u044f \u044f\u0440\u043a\u0438\u0445 \u043e\u0431\u043b\u0430\u0441\u0442\u0435\u0439";
-    if (is("emissive_light_strength") && integer("emissive_lights") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u044f \u043e\u0442 \u0441\u0432\u0435\u0442\u044f\u0449\u0438\u0445\u0441\u044f \u043f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0435\u0439";
-    if (is("depth_of_field_strength") && integer("depth_of_field") == 0) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0433\u043b\u0443\u0431\u0438\u043d\u044b \u0440\u0435\u0437\u043a\u043e\u0441\u0442\u0438";
-    if (is("lod_pixel_error") && !boolean("lod", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0443\u043f\u0440\u043e\u0449\u0435\u043d\u0438\u044f \u0434\u0430\u043b\u044c\u043d\u0438\u0445 \u043e\u0431\u044a\u0435\u043a\u0442\u043e\u0432";
-    if (starts("impostor_") && !boolean("impostors", true)) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0443\u043f\u0440\u043e\u0449\u0451\u043d\u043d\u044b\u0445 \u043a\u0440\u043e\u043d \u0434\u0435\u0440\u0435\u0432\u044c\u0435\u0432";
+        if (integer("bloom") == 0) return "needs bloom";
+    if (is("emissive_light_strength") && integer("emissive_lights") == 0) return "needs emissive lighting";
+    if (is("depth_of_field_strength") && integer("depth_of_field") == 0) return "needs depth of field";
+    if (is("lod_pixel_error") && !boolean("lod", true)) return "needs object LOD";
+    if (starts("impostor_") && !boolean("impostors", true)) return "needs crown impostors";
     if (const char* suffix = std::strstr(key, "_fade_transparency")) {
         const std::string parent = std::string(key, suffix) + "_auto_fade";
-        if (!boolean(parent.c_str())) return u8"\u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0430\u0432\u0442\u043e\u0441\u043a\u0440\u044b\u0442\u0438\u044f \u044d\u0442\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438";
+        if (!boolean(parent.c_str())) return "needs this widget's auto fade";
     }
     return nullptr;
 }
@@ -220,6 +228,29 @@ struct ExtraShaderStageState {
     }
 };
 
+// Segoe UI (Tahoma on older Windows) carries Cyrillic; empty when neither exists.
+std::string system_ui_font_path() {
+    wchar_t directory[MAX_PATH]{};
+    const UINT length = GetWindowsDirectoryW(directory, MAX_PATH);
+    if (!length || length >= MAX_PATH) return {};
+    for (const wchar_t* name : {L"\\Fonts\\segoeui.ttf", L"\\Fonts\\tahoma.ttf"}) {
+        const std::wstring path = std::wstring(directory) + name;
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        char utf8[MAX_PATH * 3]{};
+        if (WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, utf8, sizeof(utf8), nullptr, nullptr) > 0) return utf8;
+    }
+    return {};
+}
+// Segoe UI fits ascent plus descent (1.33 em) into the line height; this
+// brings its em close to the built-in 13 px font.
+constexpr float kCyrillicGlyphScale = 1.2f;
+
+// Translated visible label with a fixed ImGui ID, so a window, tab or
+// header keeps its position and open state across a language switch.
+std::string window_title(const char* english, const char* id) {
+    return std::string(ui_text(english)) + "###" + id;
+}
+
 void help_marker(const char* text) {
     if (!text || !*text) return;
     ImGui::SameLine();
@@ -230,6 +261,33 @@ void help_marker(const char* text) {
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
     }
+}
+
+// Over-budget marker: the game's orderly quit is WM_QUIT reaching its main
+// loop (NGame::QuitProgram posts it; WinMain then releases its textures,
+// interface and visualizator, and only after that the DirectDraw object).
+// A WH_GETMESSAGE hook on the window's thread, installed only while the
+// marker is set, clears it there, before any teardown Release can hang.
+HHOOK g_quit_hook = nullptr;
+std::wstring g_quit_hook_ini;
+std::atomic<bool> g_quit_seen{false};
+LRESULT CALLBACK quit_message_hook(int code, WPARAM wparam, LPARAM lparam) {
+    const MSG* message = reinterpret_cast<const MSG*>(lparam);
+    if (code == HC_ACTION && message && message->message == WM_QUIT && !g_quit_seen.exchange(true)) {
+        WritePrivateProfileStringW(L"setup", L"over_budget_pending", nullptr, g_quit_hook_ini.c_str());
+        bridge_report_event("vram_budget_marker_cleared", "WM_QUIT: orderly quit after an over-budget save");
+    }
+    return CallNextHookEx(g_quit_hook, code, wparam, lparam);
+}
+void install_quit_hook(HWND window, const std::wstring& ini) {
+    if (g_quit_hook || !window) return;
+    try { g_quit_hook_ini = ini; } catch (...) { return; }
+    g_quit_hook = SetWindowsHookExW(WH_GETMESSAGE, quit_message_hook, nullptr,
+                                    GetWindowThreadProcessId(window, nullptr));
+}
+void remove_quit_hook() {
+    if (g_quit_hook) UnhookWindowsHookEx(g_quit_hook);
+    g_quit_hook = nullptr;
 }
 
 } // namespace
@@ -251,7 +309,7 @@ struct DebugOverlay::Implementation {
     // Frames of timing still to run before a capture asked for while the
     // overlay is hidden: the capture then carries a resolved normal frame.
     unsigned capture_warmup = 0;
-    ULONGLONG capture_notice_until = 0;  // u8"\u041a\u0430\u0434\u0440 \u0437\u0430\u0445\u0432\u0430\u0447\u0435\u043d" notice, tick ms
+    ULONGLONG capture_notice_until = 0;  // "Frame captured" notice, tick ms
     bool cull_freeze_toggle = false;
     bool pending_save = false;
     bool f10_was_down = false;
@@ -270,6 +328,13 @@ struct DebugOverlay::Implementation {
     bool settings_open = false;
     bool settings_first_run = false;
     bool settings_first_frame = false;
+    // VRAM budget: the save warning (MiB of the estimate and the budget) and
+    // the one-time notice after an over-budget session ended uncleanly.
+    bool vram_warning_open = false;
+    double vram_warning_need_mib = 0.0, vram_warning_budget_mib = 0.0;
+    bool graphics_reset_pending = false;
+    ULONGLONG graphics_reset_until = 0;
+    char graphics_reset_text[1024] = "";
     bool hud_grid = false;
     bool panel_resizing = false;
     ImVec2 panel_drag_start{}, panel_size_start{};
@@ -283,6 +348,7 @@ struct DebugOverlay::Implementation {
     int preset_slider = static_cast<int>(GraphicsPreset::high);
     GraphicsPreset suggested_preset = GraphicsPreset::custom;
     char adapter_name[128] = "";
+    std::uint64_t adapter_budget_bytes = 0;  // WDDM local budget at startup
     struct SavedValue { bool boolean; int integer; float floating; std::string text; };
     std::vector<SavedValue> settings_snapshot;  // option values (registration order) restored by Cancel
     std::array<int, 3> running_display{};  // last successfully applied settings
@@ -290,6 +356,10 @@ struct DebugOverlay::Implementation {
     DisplaySettings display_apply{};
     char display_apply_result[256] = "";
     std::vector<std::pair<int, int>> window_sizes;
+    // Menu fonts: the built-in Latin font (with Cyrillic merged in for game
+    // text) and a Windows UI font drawn as the default in Russian.
+    ImFont* latin_font = nullptr;
+    ImFont* cyrillic_font = nullptr;
 
     void remember(const RenderProfileSnapshot* profile,
                   const RendererResourceSnapshot& resources) {
@@ -312,6 +382,11 @@ struct DebugOverlay::Implementation {
     }
 };
 
+std::recursive_mutex& debug_overlay_lock() noexcept {
+    static std::recursive_mutex lock;
+    return lock;
+}
+
 namespace {
 
 LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
@@ -323,12 +398,17 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
     // Hover-only combat UI observes motion while gameplay keeps owning input.
     // Keep the backend's tracked position current after F10 has closed.
     if (!overlay->captures_input() && (message==WM_MOUSEMOVE || message==WM_MOUSELEAVE ||
-        message==WM_NCMOUSEMOVE || message==WM_NCMOUSELEAVE))
+        message==WM_NCMOUSEMOVE || message==WM_NCMOUSELEAVE)) {
+        std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
         ImGui_ImplWin32_WndProcHandler(window,message,wparam,lparam);
+    }
     // Camp rail ownership must end before focus swallowing or renderer controls
     // can hide a release. No native item, rotation or keyboard route is replaced.
     if(overlay->process_camp_input(message,wparam,lparam))return 0;
-    if(overlay->process_combat_input(message,wparam,lparam))return 0;
+    {
+        std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+        if(overlay->process_combat_input(message,wparam,lparam))return 0;
+    }
 
     const bool focus_message = message == WM_ACTIVATE || message == WM_ACTIVATEAPP ||
         message == WM_KILLFOCUS || message == WM_SETFOCUS;
@@ -342,7 +422,11 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
     if (game_focus_swallow_activation(window, message, wparam)) return 0;
 
     if (overlay->captures_input()) {
-        const LRESULT handled = ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
+        LRESULT handled = 0;
+        {
+            std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+            handled = ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
+        }
         // Full mode and the settings window are explicit renderer-control
         // surfaces. Always consume their
         // keyboard and pointer messages instead of relying on the previous
@@ -351,6 +435,9 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
         if ((is_keyboard_message(message) && overlay->captures_keyboard()) || is_mouse_message(message))
             return handled ? handled : 1;
     }
+    // The held loading picture shows the game cursor as the system cursor
+    // (cursor_image.h); the game's window procedure would hide it here.
+    if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && apply_load_cursor()) return TRUE;
     const LRESULT result = DefSubclassProc(window, message, wparam, lparam);
     if (focus_message)
         bridge_trace_input_focus(window, "after_game", message, wparam,
@@ -360,13 +447,13 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
 
 void draw_live_statistics(const RendererResourceSnapshot& resources) {
     if (resources.rolling_frame_samples) {
-        ImGui::Text(u8"\u0417\u0430 5 \u0441: \u0441\u0440\u0435\u0434\u043d\u0435\u0435 %.1f FPS  \u043c\u0438\u043d\u0438\u043c\u0443\u043c %.1f FPS", resources.rolling_average_fps,
+        ImGui::Text(ui_text("5s avg %.1f FPS  5s low %.1f FPS"), resources.rolling_average_fps,
                     resources.rolling_lowest_fps);
     } else {
-        ImGui::TextUnformatted(u8"\u0417\u0430 5 \u0441: \u0441\u0440\u0435\u0434\u043d\u0435\u0435 \u043d/\u0434  \u043c\u0438\u043d\u0438\u043c\u0443\u043c \u043d/\u0434");
+        ImGui::TextUnformatted(ui_text("5s avg n/a  5s low n/a"));
     }
     if (resources.culling_frozen)
-        ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), u8"\u041a\u0410\u041c\u0415\u0420\u0410 \u041e\u0422\u0421\u0415\u0427\u0415\u041d\u0418\u042f \u0417\u0410\u041a\u0420\u0415\u041f\u041b\u0415\u041d\u0410 (Shift+F11)");
+        ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), ui_text("CULLING FROZEN (Shift+F11): objects culled for the frozen camera"));
     if (resources.fog_status[0])
         ImGui::TextColored(resources.fog_problem ? ImVec4(1.f, .35f, .2f, 1.f) : ImVec4(.75f, .9f, 1.f, 1.f), "%s",
                            resources.fog_status);
@@ -376,58 +463,69 @@ void draw_live_statistics(const RendererResourceSnapshot& resources) {
     if (resources.particle_status[0])
         ImGui::TextColored(resources.particle_problem ? ImVec4(1.f, .35f, .2f, 1.f) : ImVec4(.75f, .9f, 1.f, 1.f), "%s",
                            resources.particle_status);
+    if (resources.precipitation_status[0])
+        ImGui::TextColored(resources.precipitation_problem ? ImVec4(1.f, .35f, .2f, 1.f) : ImVec4(.75f, .9f, 1.f, 1.f), "%s",
+                           resources.precipitation_status);
     if (resources.critter_status[0]) ImGui::TextUnformatted(resources.critter_status);
     if (resources.emissive_status[0]) ImGui::TextColored(ImVec4(1.f, .62f, .3f, 1.f), "%s", resources.emissive_status);
-    ImGui::Text(u8"\u0422\u0435\u043d\u0438 %s  \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a \u0433\u043b\u0443\u0431\u0438\u043d\u044b %llu  \u0442\u0440\u0435\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u043e\u0432 %llu",
-                resources.native_shadows_enabled ? "ON" : "OFF",
+    ImGui::Text(ui_text("Shadows %s  depth draws %llu  triangles %llu"),
+                ui_text(resources.native_shadows_enabled ? "ON" : "OFF"),
                 static_cast<unsigned long long>(resources.native_shadow_draws),
                 static_cast<unsigned long long>(resources.native_shadow_triangles));
     const auto& point=resources.point_shadows;
-    ImGui::Text(u8"\u041b\u0430\u043c\u043f\u044b: \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043b\u0435\u043d\u043e %llu  \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u043e %llu  \u043d\u0430\u043b\u043e\u0436\u0435\u043d\u0438\u0439 %llu  \u0432\u043d\u0435 \u0431\u044e\u0434\u0436\u0435\u0442\u0430 %llu",
+    ImGui::Text(ui_text("Point lamps: baked %llu  rebaked %llu  overlays %llu  budget skipped %llu"),
         point.baked,point.rebaked,point.overlays,point.budget);
-    ImGui::Text(u8"\u0421\u0431\u0440\u043e\u0441 \u0442\u0435\u043d\u0435\u0439 \u043b\u0430\u043c\u043f: \u0440\u0430\u0434\u0438\u0443\u0441 %llu  \u0437\u0435\u043c\u043b\u044f %llu  \u0441\u0432\u0435\u0442 %llu  \u0441\u043f\u0438\u0441\u043e\u043a %llu  \u0441\u0431\u0440\u043e\u0441 %llu",
+    ImGui::Text(ui_text("Point invalidation: radius %llu  terrain %llu  light %llu  list %llu  reset %llu"),
         point.radius_dirty,point.terrain,point.light,point.list,point.reset);
-    ImGui::Text(u8"\u041f\u0430\u043c\u044f\u0442\u044c \u0442\u0435\u043d\u0435\u0439 \u043b\u0430\u043c\u043f: \u043e\u0448\u0438\u0431\u043e\u043a \u0432\u044b\u0434\u0435\u043b\u0435\u043d\u0438\u044f %llu  \u043e\u0441\u0432\u043e\u0431\u043e\u0436\u0434\u0435\u043d\u0438\u0439 %llu",
+    ImGui::Text(ui_text("Point capacity: allocation failures %llu  pressure retirements %llu"),
         point.allocation_failures,point.pressure_drops);
     if (resources.rolling_frame_capacity_truncated) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.64f, 0.18f, 1.0f));
-        ImGui::TextUnformatted(u8"\u041e\u043a\u043d\u043e 5 \u0441 \u0441\u043e\u043a\u0440\u0430\u0449\u0435\u043d\u043e: \u0447\u0430\u0441\u0442\u043e\u0442\u0430 \u043a\u0430\u0434\u0440\u043e\u0432 \u043f\u0440\u0435\u0432\u044b\u0448\u0430\u0435\u0442 \u0432\u043c\u0435\u0441\u0442\u0438\u043c\u043e\u0441\u0442\u044c \u0432\u044b\u0431\u043e\u0440\u043a\u0438");
+        ImGui::TextUnformatted(ui_text("5s window truncated: frame-rate exceeds sample capacity"));
         ImGui::PopStyleColor();
     } else if (resources.rolling_frame_warming_up) {
-        ImGui::Text(u8"\u041d\u0430\u043a\u043e\u043f\u043b\u0435\u043d\u0438\u0435 \u043e\u043a\u043d\u0430 5 \u0441: %.1f / 5,0 \u0441", resources.rolling_frame_seconds);
+        ImGui::Text(ui_text("5s window warming: %.1f / 5.0 s"), resources.rolling_frame_seconds);
     }
 
     if (resources.system_telemetry_stale) {
         if (resources.system_telemetry_age_ms)
-            ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D \u043d/\u0434  (\u0434\u0430\u043d\u043d\u044b\u0435 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0438: %llu \u043c\u0441)",
+            ImGui::Text(ui_text("Game CPU n/a  GPU 3D n/a  (telemetry stale: %llu ms)"),
                         static_cast<unsigned long long>(resources.system_telemetry_age_ms));
         else
-            ImGui::TextUnformatted(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D \u043d/\u0434  (\u0441\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445)");
+            ImGui::TextUnformatted(ui_text("Game CPU n/a  GPU 3D n/a  (telemetry warming up)"));
     } else if (resources.process_cpu_valid && resources.gpu_3d_percent_valid) {
-        ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b %.1f%%  GPU 3D %.1f%%", resources.process_cpu_percent,
+        ImGui::Text(ui_text("Game CPU %.1f%%  GPU 3D %.1f%%"), resources.process_cpu_percent,
                     resources.gpu_3d_percent);
     } else if (resources.process_cpu_valid) {
-        ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b %.1f%%  GPU 3D \u043d/\u0434", resources.process_cpu_percent);
+        ImGui::Text(ui_text("Game CPU %.1f%%  GPU 3D n/a"), resources.process_cpu_percent);
     } else if (resources.gpu_3d_percent_valid) {
-        ImGui::Text(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D %.1f%%", resources.gpu_3d_percent);
+        ImGui::Text(ui_text("Game CPU n/a  GPU 3D %.1f%%"), resources.gpu_3d_percent);
     } else {
-        ImGui::TextUnformatted(u8"CPU \u0438\u0433\u0440\u044b \u043d/\u0434  GPU 3D \u043d/\u0434");
+        ImGui::TextUnformatted(ui_text("Game CPU n/a  GPU 3D n/a"));
     }
 
     if (!resources.system_telemetry_stale && resources.process_private_bytes_valid &&
         resources.gpu_memory_valid) {
-        ImGui::Text(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 %.1f \u041c\u0438\u0411  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c %.1f / %.1f \u041c\u0438\u0411",
+        ImGui::Text(ui_text("RAM private %.1f MiB  VRAM local %.1f / %.1f MiB"),
                     mib(resources.process_private_bytes), mib(resources.gpu_usage_bytes),
                     mib(resources.gpu_budget_bytes));
     } else if (!resources.system_telemetry_stale && resources.process_private_bytes_valid) {
-        ImGui::Text(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 %.1f \u041c\u0438\u0411  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c \u043d/\u0434",
+        ImGui::Text(ui_text("RAM private %.1f MiB  VRAM local n/a"),
                     mib(resources.process_private_bytes));
     } else if (!resources.system_telemetry_stale && resources.gpu_memory_valid) {
-        ImGui::Text(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 \u043d/\u0434  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c %.1f / %.1f \u041c\u0438\u0411",
+        ImGui::Text(ui_text("RAM private n/a  VRAM local %.1f / %.1f MiB"),
                     mib(resources.gpu_usage_bytes), mib(resources.gpu_budget_bytes));
     } else {
-        ImGui::TextUnformatted(u8"RAM \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430 \u043d/\u0434  \u0432\u0438\u0434\u0435\u043e\u043f\u0430\u043c\u044f\u0442\u044c \u043d/\u0434");
+        ImGui::TextUnformatted(ui_text("RAM private n/a  VRAM local n/a"));
     }
+    const VramBudgetSnapshot& vram = resources.vram_budget;
+    if (vram.known && vram.enforced)
+        ImGui::Text(ui_text("VRAM budget: %.0f/%.0f MiB%s, reduced: %s, idle evicted %.0f MiB"), mib(vram.usage_bytes),
+                    mib(vram.budget_bytes), vram.overridden ? ui_text(" (override)") : "",
+                    ui_text(vram_budget_level_text(vram.level)), mib(vram.evicted_bytes));
+    else if (vram.known && vram.uma)
+        ImGui::Text(ui_text("VRAM budget: %.0f/%.0f MiB shared memory (UMA), not enforced"), mib(vram.usage_bytes),
+                    mib(vram.budget_bytes));
 }
 
 void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProfileSnapshot* bridge,
@@ -443,7 +541,7 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
     }
     draw_live_statistics(resources);
     if (!profile) {
-        ImGui::TextUnformatted(u8"EID3D11  /  \u0441\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u0440\u043e\u0444\u0438\u043b\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430...");
+        ImGui::TextUnformatted(ui_text("EID3D11  |  profiler warming up..."));
     } else {
         const double interval_ms = resources.present_smoothed_ms > 0.0
             ? resources.present_smoothed_ms
@@ -451,10 +549,10 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
                 ? bridge->begin_interval_ms : 0.0);
         const double fps = interval_ms > 0.0 ? 1000.0 / interval_ms : 0.0;
         if (profile->gpu_valid)
-            ImGui::Text(u8"EID3D11  %.0f FPS / %.2f \u043c\u0441  CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 %.2f \u043c\u0441  GPU %.2f \u043c\u0441",
+            ImGui::Text(ui_text("EID3D11  %.0f FPS / %.2f ms  Render CPU %.2f ms  GPU %.2f ms"),
                         fps, interval_ms, profile->frame_cpu_ms, profile->frame_gpu_ms);
         else
-            ImGui::Text(u8"EID3D11  %.0f FPS / %.2f \u043c\u0441  CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 %.2f \u043c\u0441  GPU \u043d/\u0434",
+            ImGui::Text(ui_text("EID3D11  %.0f FPS / %.2f ms  Render CPU %.2f ms  GPU n/a"),
                         fps, interval_ms, profile->frame_cpu_ms);
         std::uint64_t draws = 0, triangles = 0, batches = 0;
         for (UINT index = 0; index < profile->pass_count && index < profile->passes.size(); ++index) {
@@ -462,46 +560,46 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
             triangles += profile->passes[index].counters.triangles;
             batches += profile->passes[index].counters.batches;
         }
-        ImGui::Text(u8"\u041e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a %llu  \u0442\u0440\u0435\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u043e\u0432 %llu  \u043f\u0430\u043a\u0435\u0442\u043e\u0432 %llu",
+        ImGui::Text(ui_text("Draws %llu  Triangles %llu  Batches %llu"),
                     static_cast<unsigned long long>(draws),
                     static_cast<unsigned long long>(triangles),
                     static_cast<unsigned long long>(batches));
-        ImGui::Text(u8"\u0423\u0447\u0442\u0435\u043d\u043e \u0440\u0435\u043d\u0434\u0435\u0440\u043e\u043c %.0f \u041c\u0438\u0411", mib(resources.renderer_resident_bytes));
+        ImGui::Text(ui_text("Renderer tracked %.0f MiB"), mib(resources.renderer_resident_bytes));
         if (bridge) {
-            ImGui::Text(u8"API %.2f \u043c\u0441  \u0432\u043d\u0435 API %.2f \u043c\u0441", bridge->frame_cpu_ms,
+            ImGui::Text(ui_text("API %.2f ms  Outside %.2f ms"), bridge->frame_cpu_ms,
                         bridge->outside_entry_cpu_ms);
-            ImGui::Text(u8"3D-\u0441\u0446\u0435\u043d\u0430 %.2f \u043c\u0441  \u043d\u0435 \u0443\u0447\u0442\u0435\u043d\u043e %.2f \u043c\u0441  \u043f\u0440\u043e\u0447\u0435\u0435 %.2f \u043c\u0441",
+            ImGui::Text(ui_text("3D scene %.2f ms  unexplained %.2f ms  other %.2f ms"),
                         bridge->scene_3d_cpu_ms,
                         bridge->scene_3d_unattributed_cpu_ms,
                         bridge->outside_scene_3d_cpu_ms);
-            ImGui::Text(u8"\u041f\u0440\u043e\u0441\u0442\u0430\u044f \u0433\u0435\u043e\u043c\u0435\u0442\u0440\u0438\u044f %.2f \u043c\u0441 / %llu  \u043c\u043e\u0434\u0435\u043b\u0438 %.2f \u043c\u0441 / %llu",
+            ImGui::Text(ui_text("Simple %.2f ms / %llu  Figures %.2f ms / %llu"),
                         bridge->simple_cpu_ms,
                         static_cast<unsigned long long>(bridge->simple_calls),
                         bridge->figure_placed_cpu_ms + bridge->figure_lit_cpu_ms,
                         static_cast<unsigned long long>(bridge->figure_placed_calls +
                                                         bridge->figure_lit_calls));
-            ImGui::Text("GPU figures %llu  CPU fallback %llu",
+            ImGui::Text(ui_text("GPU figures %llu  CPU fallback %llu"),
                         static_cast<unsigned long long>(bridge->figure_gpu_owned_calls),
                         static_cast<unsigned long long>(bridge->figure_cpu_fallback_calls));
-            ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442 %.2f \u043c\u0441 / %llu  GPU %llu  \u0430\u043b\u044c\u0442\u0435\u0440\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u0443\u0442\u044c %llu",
+            ImGui::Text(ui_text("Terrain %.2f ms / %llu  GPU %llu  fallback %llu"),
                         bridge->terrain_cpu_ms,
                         static_cast<unsigned long long>(bridge->terrain_calls),
                         static_cast<unsigned long long>(bridge->terrain_gpu_owned_calls),
                         static_cast<unsigned long long>(bridge->terrain_cpu_fallback_calls));
-            ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442: \u043e\u0431\u0449\u0438\u0439 %.2f \u043c\u0441  \u0437\u0430\u0445\u0432\u0430\u0442 %.2f \u043c\u0441  \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 %.2f \u043c\u0441",
+            ImGui::Text(ui_text("Terrain outer %.2f ms  capture %.2f ms  submit %.2f ms"),
                         bridge->terrain_outer_cpu_ms, bridge->terrain_capture_cpu_ms,
                         bridge->terrain_submit_cpu_ms);
-            ImGui::Text(u8"\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430/\u043f\u043e\u0432\u0442\u043e\u0440/\u043f\u0440\u043e\u043f\u0443\u0441\u043a/\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b: %llu / %llu / %llu / %llu",
+            ImGui::Text(ui_text("Owned prep/reuse/omit/original: %llu / %llu / %llu / %llu"),
                         static_cast<unsigned long long>(bridge->terrain_owned_frame_preparations),
                         static_cast<unsigned long long>(bridge->terrain_owned_transparent_reuses),
                         static_cast<unsigned long long>(bridge->terrain_owned_omitted_ranges),
                         static_cast<unsigned long long>(
                             bridge->terrain_original_render_front_end_calls));
-            ImGui::Text(u8"\u0421\u0435\u043a\u0442\u043e\u0440\u044b: \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u044b/\u0432\u0438\u0434\u0438\u043c\u044b\u0435/\u043e\u0442\u0441\u0435\u0447\u0451\u043d\u043d\u044b\u0435: %llu / %llu / %llu",
+            ImGui::Text(ui_text("Sectors candidate/visible/frustum: %llu / %llu / %llu"),
                         static_cast<unsigned long long>(bridge->terrain_candidate_sectors),
                         static_cast<unsigned long long>(bridge->terrain_visible_sectors),
                         static_cast<unsigned long long>(bridge->terrain_frustum_rejected_sectors));
-            ImGui::Text("GPU anim %llu  waves %llu  tiles %llu  fallback %llu",
+            ImGui::Text(ui_text("GPU anim %llu  waves %llu  tiles %llu  fallback %llu"),
                         static_cast<unsigned long long>(bridge->terrain_animation_owned_updates),
                         static_cast<unsigned long long>(bridge->terrain_wave_sectors),
                         static_cast<unsigned long long>(bridge->terrain_animated_tile_updates),
@@ -510,7 +608,7 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
             const auto dominant = dominant_figure_fallback(*bridge, dominant_count);
             if (dominant_count || bridge->figure_gpu_submit_failures ||
                 bridge->figure_gpu_culled_calls)
-                ImGui::Text(u8"\u0410\u043b\u044c\u0442\u0435\u0440\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u0443\u0442\u044c: %s %llu  \u043e\u0448\u0438\u0431\u043e\u043a \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438 %llu  \u043e\u0442\u0441\u0435\u0447\u0435\u043d\u043e %llu",
+                ImGui::Text(ui_text("Fallback: %s %llu  Submit fail %llu  Culled %llu"),
                             figure_fallback_reason_name(dominant),
                             static_cast<unsigned long long>(dominant_count),
                             static_cast<unsigned long long>(bridge->figure_gpu_submit_failures),
@@ -526,17 +624,17 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
     draw_live_statistics(resources);
     ImGui::Separator();
     if (!profile) {
-        ImGui::TextUnformatted(u8"\u041f\u0440\u043e\u0444\u0438\u043b\u0438\u0440\u043e\u0432\u0449\u0438\u043a \u0441\u043e\u0431\u0438\u0440\u0430\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0435. \u0417\u0430\u043c\u0435\u0440\u044b GPU \u043f\u0440\u0438\u0445\u043e\u0434\u044f\u0442 \u0441 \u0437\u0430\u0434\u0435\u0440\u0436\u043a\u043e\u0439, \u043d\u0435 \u0431\u043b\u043e\u043a\u0438\u0440\u0443\u044f \u043a\u0430\u0434\u0440.");
+        ImGui::TextUnformatted(ui_text("Profiler is warming up. GPU timestamp results are delayed and non-blocking."));
         return;
     }
     const double frame_ms = resources.present_smoothed_ms;
     const double fps = frame_ms > 0.0 ? 1000.0 / frame_ms : 0.0;
-    ImGui::Text(u8"\u041a\u0430\u0434\u0440 %llu  /  \u043f\u043e\u043a\u0430\u0437 %.1f FPS / %.3f \u043c\u0441  /  CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 %.3f \u043c\u0441",
+    ImGui::Text(ui_text("Frame %llu  |  Present %.1f FPS / %.3f ms  |  Renderer CPU %.3f ms"),
                 static_cast<unsigned long long>(profile->frame), fps, frame_ms,
                 profile->frame_cpu_ms);
     ImGui::SameLine();
-    if (profile->gpu_valid) ImGui::Text(u8"/  GPU %.3f \u043c\u0441", profile->frame_gpu_ms);
-    else ImGui::TextUnformatted("|  GPU unavailable");
+    if (profile->gpu_valid) ImGui::Text(ui_text("|  GPU %.3f ms"), profile->frame_gpu_ms);
+    else ImGui::TextUnformatted(ui_text("|  GPU unavailable"));
 
     std::array<float, kFrameHistorySize> cpu{};
     std::array<float, kFrameHistorySize> gpu{};
@@ -545,25 +643,25 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
     state.linear_history(state.gpu_history, gpu);
     state.linear_history(state.present_history, present);
     const int count = static_cast<int>(state.history_count);
-    ImGui::PlotLines(u8"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043a\u0430\u0434\u0440\u043e\u0432 (\u043c\u0441)", present.data(), count, 0, nullptr, 0.0f, 33.4f,
+    ImGui::PlotLines(ui_text("Present cadence (ms)"), present.data(), count, 0, nullptr, 0.0f, 33.4f,
                      ImVec2(-1.0f, 72.0f * state.ui_scale));
-    ImGui::PlotLines(u8"\u0412\u0440\u0435\u043c\u044f CPU \u0440\u0435\u043d\u0434\u0435\u0440\u0430 (\u043c\u0441)", cpu.data(), count, 0, nullptr, 0.0f, 33.4f,
+    ImGui::PlotLines(ui_text("Renderer CPU work (ms)"), cpu.data(), count, 0, nullptr, 0.0f, 33.4f,
                      ImVec2(-1.0f, 72.0f * state.ui_scale));
     if (profile->gpu_valid)
-        ImGui::PlotLines("GPU frame (ms)", gpu.data(), count, 0, nullptr, 0.0f, 33.4f,
+        ImGui::PlotLines(ui_text("GPU frame (ms)"), gpu.data(), count, 0, nullptr, 0.0f, 33.4f,
                          ImVec2(-1.0f, 72.0f * state.ui_scale));
 
-    if (ImGui::BeginTable(u8"\u041f\u0440\u043e\u0445\u043e\u0434\u044b", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+    if (ImGui::BeginTable("Passes", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                            ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
                            ImVec2(0.0f, 270.0f * state.ui_scale))) {
-        ImGui::TableSetupColumn(u8"\u041f\u0440\u043e\u0445\u043e\u0434");
-        ImGui::TableSetupColumn("CPU ms");
-        ImGui::TableSetupColumn("GPU ms");
-        ImGui::TableSetupColumn(u8"\u041e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0438");
-        ImGui::TableSetupColumn(u8"\u0422\u0440\u0435\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u0438");
-        ImGui::TableSetupColumn(u8"\u041f\u0430\u043a\u0435\u0442\u044b");
-        ImGui::TableSetupColumn(u8"\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0438");
-        ImGui::TableSetupColumn(u8"\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430, \u041c\u0438\u0411");
+        ImGui::TableSetupColumn(ui_text("Pass"));
+        ImGui::TableSetupColumn(ui_text("CPU ms"));
+        ImGui::TableSetupColumn(ui_text("GPU ms"));
+        ImGui::TableSetupColumn(ui_text("Draws"));
+        ImGui::TableSetupColumn(ui_text("Triangles"));
+        ImGui::TableSetupColumn(ui_text("Batches"));
+        ImGui::TableSetupColumn(ui_text("Uploads"));
+        ImGui::TableSetupColumn(ui_text("Upload MiB"));
         ImGui::TableHeadersRow();
         for (UINT index = 0; index < profile->pass_count && index < profile->passes.size(); ++index) {
             const auto& pass = profile->passes[index];
@@ -582,146 +680,146 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
         ImGui::EndTable();
     }
 
-    ImGui::SeparatorText(u8"\u041f\u0430\u043c\u044f\u0442\u044c");
+    ImGui::SeparatorText(ui_text("Memory"));
     if (resources.gpu_memory_valid) {
-        ImGui::Text(u8"\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 \u0431\u044e\u0434\u0436\u0435\u0442 WDDM: %.1f \u041c\u0438\u0411", mib(resources.gpu_budget_bytes));
-        ImGui::Text(u8"\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u0430\u044f \u043f\u0430\u043c\u044f\u0442\u044c \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430: %.1f \u041c\u0438\u0411", mib(resources.gpu_usage_bytes));
+        ImGui::Text(ui_text("WDDM local budget: %.1f MiB"), mib(resources.gpu_budget_bytes));
+        ImGui::Text(ui_text("Process local usage: %.1f MiB"), mib(resources.gpu_usage_bytes));
     } else {
-        ImGui::TextUnformatted(u8"\u0414\u0430\u043d\u043d\u044b\u0435 \u0431\u044e\u0434\u0436\u0435\u0442\u0430 WDDM \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b");
+        ImGui::TextUnformatted(ui_text("WDDM budget telemetry unavailable"));
     }
-    ImGui::Text(u8"\u0423\u0447\u0442\u0451\u043d\u043d\u044b\u0435 \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0440\u0435\u043d\u0434\u0435\u0440\u0430: %.1f \u041c\u0438\u0411", mib(resources.renderer_resident_bytes));
-    ImGui::Text(u8"\u0412\u0440\u0435\u043c\u0435\u043d\u043d\u0430\u044f \u043f\u0430\u043c\u044f\u0442\u044c \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438: %.1f \u041c\u0438\u0411", mib(resources.transient_upload_bytes));
-    ImGui::Text(u8"\u041f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0438 \u0432 \u043f\u0430\u043c\u044f\u0442\u0438 CPU: %.1f \u041c\u0438\u0411", mib(resources.cpu_surface_bytes));
-    ImGui::Text(u8"\u0422\u0435\u043a\u0441\u0442\u0443\u0440\u044b \u0432 \u043f\u0430\u043c\u044f\u0442\u0438 GPU: %.1f \u041c\u0438\u0411", mib(resources.gpu_texture_bytes));
+    ImGui::Text(ui_text("Renderer tracked residency: %.1f MiB"), mib(resources.renderer_resident_bytes));
+    ImGui::Text(ui_text("Transient upload storage: %.1f MiB"), mib(resources.transient_upload_bytes));
+    ImGui::Text(ui_text("CPU surface storage: %.1f MiB"), mib(resources.cpu_surface_bytes));
+    ImGui::Text(ui_text("GPU texture storage: %.1f MiB"), mib(resources.gpu_texture_bytes));
     if (resources.double_resident_bytes) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.64f, 0.18f, 1.0f));
-        ImGui::Text(u8"\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u0435 \u043a\u043e\u043f\u0438\u0438 CPU + GPU: %.1f \u041c\u0438\u0411", mib(resources.double_resident_bytes));
+        ImGui::Text(ui_text("Persistent CPU + GPU duplicates: %.1f MiB"), mib(resources.double_resident_bytes));
         ImGui::PopStyleColor();
     }
-    ImGui::Text(u8"\u041f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0435\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430 GPU: %llu (\u043e\u0441\u0432\u043e\u0431\u043e\u0436\u0434\u0435\u043d\u043e %.1f \u041c\u0438\u0411 CPU), \u0437\u0430\u043a\u0440\u0435\u043f\u043b\u0435\u043d\u043e %llu",
+    ImGui::Text(ui_text("GPU-only surfaces: %llu (%.1f MiB CPU freed), pinned %llu"),
                 static_cast<unsigned long long>(resources.released_surfaces),
                 mib(resources.released_surface_bytes),
                 static_cast<unsigned long long>(resources.pinned_surfaces));
-    ImGui::Text(u8"\u0412\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0439 \u043f\u043e\u0432\u0435\u0440\u0445\u043d\u043e\u0441\u0442\u0435\u0439: %llu (\u0432\u0441\u0435\u0433\u043e %.2f \u043c\u0441)",
+    ImGui::Text(ui_text("Surface restore readbacks: %llu (%.2f ms total)"),
                 static_cast<unsigned long long>(resources.surface_restore_readbacks),
                 resources.surface_restore_readback_ms);
 
-    ImGui::SeparatorText(u8"\u041e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a");
-    ImGui::Text(u8"\u041b\u043e\u0433\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a: %llu  \u0444\u0438\u0437\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u043f\u0430\u043a\u0435\u0442\u043e\u0432: %llu",
+    ImGui::SeparatorText(ui_text("Native batching"));
+    ImGui::Text(ui_text("Logical draws: %llu  Physical batches: %llu"),
                 static_cast<unsigned long long>(resources.native_logical_draws),
                 static_cast<unsigned long long>(resources.native_physical_batches));
-    ImGui::Text(u8"\u0421 \u043f\u0435\u0440\u0435\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u043e\u0439: %llu  \u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435\u043c \u043f\u043e\u0440\u044f\u0434\u043a\u0430: %llu",
+    ImGui::Text(ui_text("Reorderable: %llu  Ordered: %llu"),
                 static_cast<unsigned long long>(resources.native_reorderable_draws),
                 static_cast<unsigned long long>(resources.native_ordered_draws));
-    ImGui::Text(u8"\u041d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u044b\u0445: %llu  \u0441 \u0432\u044b\u0440\u0435\u0437\u0430\u043c\u0438: %llu  \u0433\u0440\u0443\u043f\u043f \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u043e\u0432: %llu",
+    ImGui::Text(ui_text("Opaque: %llu  Cutout: %llu  Material buckets: %llu"),
                 static_cast<unsigned long long>(resources.native_opaque_draws),
                 static_cast<unsigned long long>(resources.native_cutout_draws),
                 static_cast<unsigned long long>(resources.native_material_buckets));
-    ImGui::Text(u8"\u0420\u0430\u0441\u0447\u0451\u0442\u043e\u0432 \u0432\u0438\u0434\u0438\u043c\u043e\u0441\u0442\u0438: %llu  \u043e\u0434\u0438\u043d\u043e\u0447\u043d\u044b\u0445 \u043f\u0430\u043a\u0435\u0442\u043e\u0432: %llu",
+    ImGui::Text(ui_text("Visibility dispatches: %llu  One-draw batches: %llu"),
                 static_cast<unsigned long long>(resources.native_compute_dispatches),
                 static_cast<unsigned long long>(resources.native_one_draw_batches));
-    ImGui::Text(u8"\u0421\u0430\u043c\u044b\u0439 \u0431\u043e\u043b\u044c\u0448\u043e\u0439 \u043f\u0430\u043a\u0435\u0442: %llu \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043e\u043a",
+    ImGui::Text(ui_text("Largest batch: %llu draws"),
                 static_cast<unsigned long long>(resources.native_max_batch_draws));
-    ImGui::Text(u8"\u041c\u0430\u0441\u0441\u0438\u0432\u044b \u0442\u0435\u043a\u0441\u0442\u0443\u0440 \u0437\u0435\u043c\u043b\u0438: %llu / %llu \u0443\u0441\u043f\u0435\u0448\u043d\u043e",
+    ImGui::Text(ui_text("Terrain texture arrays: %llu / %llu successes"),
                 static_cast<unsigned long long>(resources.native_texture_array_successes),
                 static_cast<unsigned long long>(resources.native_texture_array_attempts));
-    ImGui::Text(u8"\u041e\u0442\u043a\u0430\u0437\u044b \u043c\u0430\u0441\u0441\u0438\u0432\u043e\u0432: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445/\u0444\u043e\u0440\u043c\u0430\u0442/\u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0430/\u043f\u0430\u043c\u044f\u0442\u044c: %llu / %llu / %llu / %llu",
+    ImGui::Text(ui_text("Array fallback unavailable/format/layout/alloc: %llu / %llu / %llu / %llu"),
                 static_cast<unsigned long long>(resources.native_texture_array_fallback_unavailable),
                 static_cast<unsigned long long>(resources.native_texture_array_fallback_format),
                 static_cast<unsigned long long>(resources.native_texture_array_invalid_layout),
                 static_cast<unsigned long long>(resources.native_texture_array_allocation_failures));
-    ImGui::Text(u8"\u041c\u0430\u0441\u0441\u0438\u0432\u044b: \u043a\u043b\u0430\u0441\u0441\u044b/\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b/\u0441\u043b\u043e\u0438: %llu / %llu / %llu",
+    ImGui::Text(ui_text("Array residency classes/pages/slices: %llu / %llu / %llu"),
                 static_cast<unsigned long long>(resources.native_texture_array_classes),
                 static_cast<unsigned long long>(resources.native_texture_array_pages),
                 static_cast<unsigned long long>(resources.native_texture_array_slices));
-    ImGui::Text(u8"\u041f\u043e\u0440\u044f\u0434\u043e\u043a \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: \u0438\u0437\u043c\u0435\u043d\u0451\u043d/\u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d: %llu / %llu",
+    ImGui::Text(ui_text("Terrain contract reorder/preserve: %llu / %llu"),
                 static_cast<unsigned long long>(resources.native_terrain_reorderable_contracts),
                 static_cast<unsigned long long>(resources.native_terrain_preserve_contracts));
-    ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442, \u0441\u0442\u0430\u0434\u0438\u044f 0: \u0441 \u0442\u0435\u043a\u0441\u0442\u0443\u0440\u043e\u0439/\u0431\u0435\u0437: %llu / %llu",
+    ImGui::Text(ui_text("Terrain stage-0 textured/untextured: %llu / %llu"),
                 static_cast<unsigned long long>(resources.native_terrain_textured_draws),
                 static_cast<unsigned long long>(resources.native_terrain_untextured_draws));
-    ImGui::Text(u8"\u041f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 \u0442\u043e\u043f\u043e\u043b\u043e\u0433\u0438\u0438: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d  \u0442\u043e\u043b\u044c\u043a\u043e \u0446\u0432\u0435\u0442\u0430: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d",
+    ImGui::Text(ui_text("Terrain topology uploads: %llu / %llu vertices  Color-only: %llu / %llu vertices"),
                 static_cast<unsigned long long>(resources.native_terrain_topology_uploads),
                 static_cast<unsigned long long>(resources.native_terrain_topology_upload_vertices),
                 static_cast<unsigned long long>(resources.native_terrain_color_only_uploads),
                 static_cast<unsigned long long>(resources.native_terrain_color_only_upload_vertices));
 
     if (bridge) {
-        ImGui::SeparatorText(u8"CPU \u0434\u0432\u0438\u0436\u043a\u0430 \u0438 API");
-        ImGui::Text(u8"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u0446\u0435\u043d \u0434\u0432\u0438\u0436\u043a\u0430: %.3f \u043c\u0441", bridge->begin_interval_ms);
-        ImGui::Text(u8"\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u043e CPU \u043a\u0430\u0434\u0440\u0430: %.3f \u043c\u0441  \u0432\u043d\u0435 \u0442\u043e\u0447\u0435\u043a \u0432\u0445\u043e\u0434\u0430: %.3f \u043c\u0441",
+        ImGui::SeparatorText(ui_text("Engine / API CPU"));
+        ImGui::Text(ui_text("Engine scene-begin cadence: %.3f ms"), bridge->begin_interval_ms);
+        ImGui::Text(ui_text("Measured frame CPU: %.3f ms  Outside entry points: %.3f ms"),
                     bridge->frame_cpu_ms, bridge->outside_entry_cpu_ms);
-        ImGui::Text(u8"\u041e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0430 \u043c\u0438\u0440\u0430: %.3f \u043c\u0441 / %llu  \u043d\u0435 \u0443\u0447\u0442\u0435\u043d\u043e: %.3f \u043c\u0441",
+        ImGui::Text(ui_text("World draw: %.3f ms / %llu  unattributed: %.3f ms"),
                     bridge->world_draw_cpu_ms,
                     static_cast<unsigned long long>(bridge->world_draw_calls),
                     bridge->world_unattributed_cpu_ms);
-        ImGui::Text(u8"3D-\u0441\u0446\u0435\u043d\u0430: %.3f \u043c\u0441 / %llu  \u043d\u0435 \u0443\u0447\u0442\u0435\u043d\u043e: %.3f \u043c\u0441  \u0432\u043d\u0435 3D: %.3f \u043c\u0441",
+        ImGui::Text(ui_text("3D scene: %.3f ms / %llu  unattributed: %.3f ms  outside 3D: %.3f ms"),
                     bridge->scene_3d_cpu_ms,
                     static_cast<unsigned long long>(bridge->scene_3d_calls),
                     bridge->scene_3d_unattributed_cpu_ms,
                     bridge->outside_scene_3d_cpu_ms);
-        ImGui::Text(u8"3D-\u043e\u0431\u044a\u0435\u043a\u0442\u044b: %.3f \u043c\u0441 / %llu  \u043e\u0441\u0442\u0430\u0442\u043e\u043a \u043f\u043e \u043e\u0431\u044a\u0435\u043a\u0442\u0430\u043c: %.3f \u043c\u0441",
+        ImGui::Text(ui_text("3D objects: %.3f ms / %llu  object-local residual: %.3f ms"),
                     bridge->object_draw_cpu_ms,
                     static_cast<unsigned long long>(bridge->object_draw_calls),
                     bridge->object_draw_unattributed_cpu_ms);
-        ImGui::Text(u8"\u041f\u0440\u043e\u0441\u0442\u0430\u044f \u0433\u0435\u043e\u043c\u0435\u0442\u0440\u0438\u044f: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->simple_cpu_ms,
+        ImGui::Text(ui_text("Simple geometry: %.3f ms / %llu calls"), bridge->simple_cpu_ms,
                     static_cast<unsigned long long>(bridge->simple_calls));
-        ImGui::Text(u8"\u041f\u0440\u0438\u0451\u043c \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->terrain_cpu_ms,
+        ImGui::Text(ui_text("Terrain ingress: %.3f ms / %llu calls"), bridge->terrain_cpu_ms,
                     static_cast<unsigned long long>(bridge->terrain_calls));
-        ImGui::Text(u8"\u0414\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u044b \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432  \u0437\u0430\u0445\u0432\u0430\u0442: %.3f \u043c\u0441  \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0430: %.3f \u043c\u0441",
+        ImGui::Text(ui_text("Terrain range: %.3f ms / %llu calls  Capture: %.3f ms  Submit: %.3f ms"),
                     bridge->terrain_outer_cpu_ms,
                     static_cast<unsigned long long>(bridge->terrain_outer_calls),
                     bridge->terrain_capture_cpu_ms, bridge->terrain_submit_cpu_ms);
-        ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442: \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430/\u043f\u043e\u0432\u0442\u043e\u0440/\u043f\u0440\u043e\u043f\u0443\u0441\u043a/\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b: %llu / %llu / %llu / %llu",
+        ImGui::Text(ui_text("Owned terrain prep/reuse/omitted/original front-end: %llu / %llu / %llu / %llu"),
                     static_cast<unsigned long long>(bridge->terrain_owned_frame_preparations),
                     static_cast<unsigned long long>(bridge->terrain_owned_transparent_reuses),
                     static_cast<unsigned long long>(bridge->terrain_owned_omitted_ranges),
                     static_cast<unsigned long long>(
                         bridge->terrain_original_render_front_end_calls));
-        ImGui::Text(u8"\u041f\u0443\u0431\u043b\u0438\u043a\u0430\u0446\u0438\u044f \u043b\u0430\u043d\u0434\u0448\u0430\u0444\u0442\u0430: %llu \u0441\u0435\u043a\u0442\u043e\u0440\u043e\u0432  \u0434\u0438\u043d\u0430\u043c\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0446\u0432\u0435\u0442\u0430: %llu \u0432\u0435\u0440\u0448\u0438\u043d",
+        ImGui::Text(ui_text("Terrain game publication: %llu sectors  Dynamic colors: %llu vertices"),
                     static_cast<unsigned long long>(bridge->terrain_game_publication_sectors),
                     static_cast<unsigned long long>(
                         bridge->terrain_dynamic_color_vertices_copied));
-        ImGui::Text(u8"\u041a\u043e\u043f\u0438\u0438 \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u044b \u0437\u0435\u043c\u043b\u0438: %llu \u0432\u0435\u0440\u0448\u0438\u043d  \u0438\u0441\u0445\u043e\u0434\u043d\u0430\u044f \u0442\u043e\u043f\u043e\u043b\u043e\u0433\u0438\u044f: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d",
+        ImGui::Text(ui_text("Terrain structural copies: %llu vertices  Source topology: %llu / %llu vertices"),
                     static_cast<unsigned long long>(
                         bridge->terrain_structural_vertices_copied),
                     static_cast<unsigned long long>(bridge->terrain_source_topology_decodes),
                     static_cast<unsigned long long>(bridge->terrain_source_topology_vertices));
-        ImGui::Text(u8"\u0414\u0435\u043a\u043e\u0434\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435 \u0446\u0432\u0435\u0442\u043e\u0432 \u0437\u0435\u043c\u043b\u0438: %llu / %llu \u0432\u0435\u0440\u0448\u0438\u043d",
+        ImGui::Text(ui_text("Terrain color-only decodes: %llu / %llu vertices"),
                     static_cast<unsigned long long>(bridge->terrain_source_color_decodes),
                     static_cast<unsigned long long>(bridge->terrain_source_color_vertices));
-        ImGui::Text(u8"\u041b\u0430\u043d\u0434\u0448\u0430\u0444\u0442 \u043d\u0430 GPU: %llu  \u043f\u0443\u0442\u0438 CPU: %llu  \u043e\u0448\u0438\u0431\u043a\u0438 \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438: %llu",
+        ImGui::Text(ui_text("GPU-owned terrain: %llu  CPU fallbacks: %llu  Submit failures: %llu"),
                     static_cast<unsigned long long>(bridge->terrain_gpu_owned_calls),
                     static_cast<unsigned long long>(bridge->terrain_cpu_fallback_calls),
                     static_cast<unsigned long long>(bridge->terrain_gpu_submit_failures));
-        ImGui::Text(u8"\u0421\u0435\u043a\u0442\u043e\u0440\u044b: \u043a\u0430\u043d\u0434\u0438\u0434\u0430\u0442\u044b/\u0432\u0438\u0434\u0438\u043c\u044b\u0435/\u043e\u0442\u0441\u0435\u0447\u0451\u043d\u043d\u044b\u0435: %llu / %llu / %llu",
+        ImGui::Text(ui_text("Terrain sectors candidate/visible/frustum rejected: %llu / %llu / %llu"),
                     static_cast<unsigned long long>(bridge->terrain_candidate_sectors),
                     static_cast<unsigned long long>(bridge->terrain_visible_sectors),
                     static_cast<unsigned long long>(bridge->terrain_frustum_rejected_sectors));
-        ImGui::Text(u8"\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u044f \u0437\u0435\u043c\u043b\u0438 GPU/CPU: %llu / %llu  \u0432\u043e\u043b\u043d\u043e\u0432\u044b\u0445 \u0441\u0435\u043a\u0442\u043e\u0440\u043e\u0432: %llu  \u0444\u0430\u0437 \u0442\u0430\u0439\u043b\u043e\u0432: %llu",
+        ImGui::Text(ui_text("Terrain animation GPU/CPU fallback: %llu / %llu  wave sectors: %llu  tile phases: %llu"),
                     static_cast<unsigned long long>(bridge->terrain_animation_owned_updates),
                     static_cast<unsigned long long>(bridge->terrain_animation_fallback_updates),
                     static_cast<unsigned long long>(bridge->terrain_wave_sectors),
                     static_cast<unsigned long long>(bridge->terrain_animated_tile_updates));
-        ImGui::Text(u8"\u0420\u0430\u0437\u043c\u0435\u0449\u0451\u043d\u043d\u044b\u0435 \u043c\u043e\u0434\u0435\u043b\u0438: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->figure_placed_cpu_ms,
+        ImGui::Text(ui_text("Placed figures: %.3f ms / %llu calls"), bridge->figure_placed_cpu_ms,
                     static_cast<unsigned long long>(bridge->figure_placed_calls));
-        ImGui::Text(u8"\u041e\u0441\u0432\u0435\u0449\u0451\u043d\u043d\u044b\u0435 \u043c\u043e\u0434\u0435\u043b\u0438: %.3f \u043c\u0441 / %llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432", bridge->figure_lit_cpu_ms,
+        ImGui::Text(ui_text("Lit figures: %.3f ms / %llu calls"), bridge->figure_lit_cpu_ms,
                     static_cast<unsigned long long>(bridge->figure_lit_calls));
-        ImGui::Text(u8"\u041f\u0440\u0438\u0451\u043c \u043e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u044f: \u043c\u043e\u0440\u0444\u0438\u043d\u0433/\u0436\u0451\u0441\u0442\u043a\u0438\u0435 \u0438\u043b\u0438 \u043f\u0440\u043e\u0447\u0438\u0435: %.3f/%0.3f \u043c\u0441  %llu/%llu \u0432\u044b\u0437\u043e\u0432\u043e\u0432",
+        ImGui::Text(ui_text("Lit ingress morphed/rigid-or-unknown: %.3f/%0.3f ms  %llu/%llu calls"),
                     bridge->figure_lit_morphed_cpu_ms,
                     bridge->figure_lit_rigid_cpu_ms,
                     static_cast<unsigned long long>(bridge->figure_lit_morphed_calls),
                     static_cast<unsigned long long>(bridge->figure_lit_rigid_calls));
-        ImGui::Text(u8"\u041c\u043e\u0434\u0435\u043b\u0438 \u043d\u0430 GPU: %llu  \u043f\u0443\u0442\u0438 CPU: %llu",
+        ImGui::Text(ui_text("GPU-owned figures: %llu  CPU fallbacks: %llu"),
                     static_cast<unsigned long long>(bridge->figure_gpu_owned_calls),
                     static_cast<unsigned long long>(bridge->figure_cpu_fallback_calls));
-        ImGui::Text(u8"\u041e\u0448\u0438\u0431\u043a\u0438 \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0438 GPU: %llu  \u043e\u0442\u0441\u0435\u0447\u0435\u043d\u043e \u0437\u0430\u0440\u0430\u043d\u0435\u0435: %llu",
+        ImGui::Text(ui_text("GPU submit failures: %llu  High-level culled: %llu"),
                     static_cast<unsigned long long>(bridge->figure_gpu_submit_failures),
                     static_cast<unsigned long long>(bridge->figure_gpu_culled_calls));
         for (std::size_t index = 1; index < bridge->figure_fallback_reasons.size(); ++index) {
             const auto fallback_count = bridge->figure_fallback_reasons[index];
             if (!fallback_count) continue;
-            ImGui::Text(u8"\u0410\u043b\u044c\u0442\u0435\u0440\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u0443\u0442\u044c %-14s %llu",
+            ImGui::Text(ui_text("Fallback %-14s %llu"),
                         figure_fallback_reason_name(static_cast<FigureFallbackReason>(index)),
                         static_cast<unsigned long long>(fallback_count));
         }
@@ -732,7 +830,7 @@ bool interface_option(const RendererOption& option) {
     if(option.group=="Interface" || option.group=="HUD layout" || option.group=="Combat UI")return true;
     std::size_t count=0;const auto* settings=player_graphics_settings(count);
     for(std::size_t i=0;i<count;++i)
-        if(option.key==settings[i].key && std::strcmp(settings[i].category,u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")==0)return true;
+        if(option.key==settings[i].key && std::strcmp(settings[i].category,"Interface")==0)return true;
     return false;
 }
 void reset_interface(RendererConfig& config) {
@@ -750,64 +848,84 @@ void reset_interface(RendererConfig& config) {
 // get their own tab; the Graphics tab lists every other group.
 constexpr const char* kDiagnosticsGroup = "Diagnostics";
 void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool diagnostics = false,bool ui_only = false) {
-    filter.Draw(u8"\u041f\u043e\u0438\u0441\u043a \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a", -1.f);
+    filter.Draw(ui_text("Search options"), -1.f);
     if (config.options().empty()) {
-        ImGui::TextWrapped(u8"\u0412 \u044d\u0442\u043e\u0439 \u0441\u0431\u043e\u0440\u043a\u0435 \u0440\u0435\u043d\u0434\u0435\u0440\u0430 \u043d\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u0433\u0440\u0430\u0444\u0438\u043a\u0438. "
-                           u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043f\u043e\u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 \u0444\u0443\u043d\u043a\u0446\u0438\u0439.");
+        ImGui::TextWrapped(ui_text("No runtime graphics options are registered by this renderer build. "
+                           "Controls appear here only after the backing renderer feature exists."));
         return;
     }
+    // One two-column table per group: the label wraps on the left, the
+    // control fills the right, so long (translated) labels never clip.
     std::string current_group;
+    bool table_open = false;
     for (const auto& option : config.options()) {
-        if (option.group == "Combat UI") continue;
+        if (option.group == "Combat UI" || option.type == RendererOptionType::text) continue;
         if(option.group=="HUD layout" || (option.group==kDiagnosticsGroup)!=diagnostics ||
            (!diagnostics && interface_option(option)!=ui_only))continue;
-        const std::string searchable = option.label + " " + option.key + " " + option.group + " " + option.description;
+        const char* label = ui_option_label(option);
+        const char* description = ui_option_description(option);
+        const std::string searchable = std::string(label) + " " + option.label + " " + option.key + " " +
+                                       option.group + " " + description;
         if (!filter.PassFilter(searchable.c_str())) continue;
-        if (option.group != current_group) {
+        if (option.group != current_group || !table_open) {
+            if (table_open) ImGui::EndTable();
             current_group = option.group;
-            ImGui::SeparatorText(renderer_ui_text_ru(current_group.c_str()));
+            ImGui::SeparatorText(ui_text(current_group.c_str()));
+            table_open = ImGui::BeginTable(current_group.c_str(), 2, ImGuiTableFlags_SizingStretchSame);
+            if (!table_open) continue;
         }
         ImGui::PushID(option.key.c_str());
-        if (ImGui::BeginTable("##setting", 2, ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::TableNextRow();
         ImGui::TableNextColumn();
-        ImGui::TextWrapped("%s", option.label.c_str());
-        help_marker(option.description.c_str());
+        ImGui::AlignTextToFramePadding();
+        // Wrap short of the "(?)" marker so it stays inside the column.
+        const float marker = *description ? ImGui::CalcTextSize("(?)").x + ImGui::GetStyle().ItemSpacing.x : 0.f;
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + (std::max)(1.f, ImGui::GetContentRegionAvail().x - marker));
+        ImGui::TextUnformatted(label);
+        ImGui::PopTextWrapPos();
+        help_marker(description);
+        if (option.restart_required) ImGui::TextDisabled("%s", ui_text("restart required"));
         ImGui::TableNextColumn();
         ImGui::SetNextItemWidth(-FLT_MIN);
-        const char* note = blocked_option_note(config, option.key.c_str());
-        ImGui::BeginDisabled(note != nullptr);
         switch (option.type) {
         case RendererOptionType::text: break;
         case RendererOptionType::boolean: {
             bool value = option.boolean_value;
+            const char* note = blocked_option_note(config, option.key.c_str());
+            ImGui::BeginDisabled(note != nullptr);
             if (ImGui::Checkbox("##value", &value)) config.set_boolean(option.key.c_str(), value);
+            ImGui::EndDisabled();
+            if (note) { ImGui::SameLine(); ImGui::TextDisabled("(%s)", ui_text(note)); }
             break;
         }
         case RendererOptionType::integer: {
             int value = option.integer_value;
             if (option.key == "camp_ui_layout") {
-                const char* choices[] = {u8"\u0418\u0441\u0445\u043e\u0434\u043d\u044b\u0439 (\u0434\u043b\u044f \u0441\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u044f)", u8"\u0428\u0438\u0440\u043e\u043a\u0430\u044f \u0441\u0435\u0442\u043a\u0430"};
+                const char* choices[] = {ui_text("Original UI (comparison)"), ui_text("Wide grid")};
                 if (ImGui::Combo("##value", &value, choices, 2))
                     config.set_integer(option.key.c_str(), value);
             } else if(option.key=="portrait_direction") {
-                const char* choices[]={u8"\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 (\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b)",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
+                const char* choices[]={ui_text("Centered (original)"),ui_text("Top to bottom"),ui_text("Bottom to top"),ui_text("Left to right"),ui_text("Right to left")};
                 if(ImGui::Combo("##value",&value,choices,5))config.set_integer(option.key.c_str(),value);
             } else if(option.key=="spell_bar_direction" || option.key=="ability_bar_direction" || option.key=="weapon_switcher_direction" || option.key=="quick_items_direction") {
-                const char* choices[]={u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
+                const char* choices[]={ui_text("Bottom to top"),ui_text("Top to bottom"),ui_text("Left to right"),ui_text("Right to left")};
                 if(ImGui::Combo("##value",&value,choices,4))config.set_integer(option.key.c_str(),value);
             } else if (option.key == "anisotropy") {
                 const char* choices[] = {"1", "2", "4", "8", "16"};
                 if (ImGui::Combo("##value", &value, choices, 5))
                     config.set_integer(option.key.c_str(), value);
             } else if (option.key == "shadow_cascade_quality") {
-                const char* choices[] = {u8"\u041d\u0438\u0437\u043a\u043e\u0435 (1024 x 1024)", u8"\u0421\u0440\u0435\u0434\u043d\u0435\u0435 (2048 x 2048)",
-                                         u8"\u0412\u044b\u0441\u043e\u043a\u043e\u0435 (4096 x 4096)"};
+                const char* choices[] = {ui_text("Low (1024 x 1024)"), ui_text("Medium (2048 x 2048)"),
+                                         ui_text("High (4096 x 4096)")};
                 if (ImGui::Combo("##value", &value, choices, 3))
                     config.set_integer(option.key.c_str(), value);
             } else if (option.key == "point_shadow_quality") {
-                const char* choices[] = {u8"\u041d\u0438\u0437\u043a\u043e\u0435 (128 x 128)", u8"\u0421\u0440\u0435\u0434\u043d\u0435\u0435 (256 x 256)",
-                                         u8"\u0412\u044b\u0441\u043e\u043a\u043e\u0435 (512 x 512)"};
+                const char* choices[] = {ui_text("Low (128 x 128)"), ui_text("Medium (256 x 256)"),
+                                         ui_text("High (512 x 512)")};
                 if (ImGui::Combo("##value", &value, choices, 3))
+                    config.set_integer(option.key.c_str(), value);
+            } else if (option.key == "ui_language") {
+                if (ImGui::Combo("##value", &value, ui_choices(kUiLanguageChoices)))
                     config.set_integer(option.key.c_str(), value);
             } else if (ImGui::SliderInt("##value", &value,
                                        option.integer_minimum, option.integer_maximum)) {
@@ -824,16 +942,9 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
             break;
         }
         }
-        ImGui::EndDisabled();
-        if (note) ImGui::TextWrapped("%s", note);
-        if (option.restart_required) {
-            ImGui::SameLine();
-            ImGui::TextDisabled(u8"\u043d\u0443\u0436\u0435\u043d \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a");
-        }
-        ImGui::EndTable();
-        }
         ImGui::PopID();
     }
+    if (table_open) ImGui::EndTable();
 }
 
 void close_settings(DebugOverlay::Implementation& state,RendererConfig& config,bool keep);
@@ -842,7 +953,7 @@ void draw_hud_layout_control(DebugOverlay::Implementation& state,RendererConfig&
     HudPanelBounds b;
     const bool available=game_hud_editor_available() && widescreen_hud_panel_bounds(HudPanel::messages,b);
     ImGui::BeginDisabled(!available && !game_hud_editing());
-    if(ImGui::Button(game_hud_editing() ? u8"\u0417\u0430\u043a\u0440\u0435\u043f\u0438\u0442\u044c \u043f\u0430\u043d\u0435\u043b\u0438" : u8"\u041f\u0435\u0440\u0435\u043c\u0435\u0441\u0442\u0438\u0442\u044c \u043f\u0430\u043d\u0435\u043b\u0438")) {
+    if(ImGui::Button(ui_text(game_hud_editing() ? "Lock HUD layout" : "Unlock HUD layout"))) {
         if(game_hud_editing()) {set_game_hud_editing(false);state.pending_save=true;}
         else {
             if(state.settings_open)close_settings(state,config,true);
@@ -851,7 +962,7 @@ void draw_hud_layout_control(DebugOverlay::Implementation& state,RendererConfig&
         }
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip(u8"\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u0439\u0442\u0435 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0435 \u043f\u0430\u043d\u0435\u043b\u0438 \u043c\u044b\u0448\u044c\u044e. \u0422\u044f\u043d\u0438\u0442\u0435 \u0437\u0430 \u0443\u0433\u043e\u043b \u0434\u043b\u044f \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0440\u0430\u0437\u043c\u0435\u0440\u0430. F10 \u0441\u043d\u043e\u0432\u0430 \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442 \u043c\u0435\u043d\u044e, \u0447\u0442\u043e\u0431\u044b \u0437\u0430\u043a\u0440\u0435\u043f\u0438\u0442\u044c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0440\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435.");
+    ImGui::SetItemTooltip(ui_text("Drag anywhere inside each unlocked panel. Drag its corner to resize. F10 opens this menu again to lock and save."));
 }
 
 void hud_bounds_to_output(HudPanelBounds& b) {
@@ -902,24 +1013,24 @@ void hud_scale_control(RendererConfig& config,const char* key,const char* label)
     }
 }
 void hud_panel_options(RendererConfig& config,unsigned panel,const HudPanelBounds& bounds) {
-    ImGui::TextUnformatted(renderer_ui_text_ru(kHudPanels[panel].label));
+    ImGui::TextUnformatted(ui_text(kHudPanels[panel].label));
     ImGui::Separator();
-    ImGui::Text(u8"\u041f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435: X %.0f, Y %.0f \u043f\u0438\u043a\u0441.",bounds.left,bounds.top);
-    ImGui::Text(u8"\u0420\u0430\u0437\u043c\u0435\u0440: %.0f x %.0f \u043f\u0438\u043a\u0441.",bounds.width,bounds.height);
+    ImGui::Text(ui_text("Position: X %.0f, Y %.0f px"),bounds.left,bounds.top);
+    ImGui::Text(ui_text("Size: %.0f x %.0f px"),bounds.width,bounds.height);
     if(HudPanel(panel)==HudPanel::messages) {
-        hud_scale_control(config,"message_panel_text_scale",u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u0442\u0435\u043a\u0441\u0442\u0430");
+        hud_scale_control(config,"message_panel_text_scale",ui_text("Text scale"));
     } else {
         const auto key=std::string(kHudPanels[panel].key)+"_scale";
-        hud_scale_control(config,key.c_str(),u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u043f\u0430\u043d\u0435\u043b\u0438");
+        hud_scale_control(config,key.c_str(),ui_text("Widget scale"));
     }
     const std::string fade_prefix=kHudPanels[panel].key;
     if(const auto* fade=config.find((fade_prefix+"_auto_fade").c_str())){
         bool enabled=fade->boolean_value;
-        if(ImGui::Checkbox(u8"\u0410\u0432\u0442\u043e\u0441\u043a\u0440\u044b\u0442\u0438\u0435",&enabled))config.set_boolean(fade->key.c_str(),enabled);
-        hud_scale_control(config,(fade_prefix+"_fade_transparency").c_str(),u8"\u041f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u0441\u043a\u0440\u044b\u0442\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438");
-        ImGui::TextDisabled("0%% = solid; 100%% = hidden");
+        if(ImGui::Checkbox(ui_text("Auto fade"),&enabled))config.set_boolean(fade->key.c_str(),enabled);
+        hud_scale_control(config,(fade_prefix+"_fade_transparency").c_str(),ui_text("Faded transparency"));
+        ImGui::TextDisabled(ui_text("0%% = solid; 100%% = hidden"));
     }
-    if(panel>=unsigned(HudPanel::stance))ImGui::TextDisabled(u8"\u0417\u0430\u043a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u0435 \u0432 \u0443\u0433\u043b\u0443 \u044d\u043a\u0440\u0430\u043d\u0430");
+    if(panel>=unsigned(HudPanel::stance))ImGui::TextDisabled(ui_text("Fixed screen corner"));
     const char* direction=nullptr;
     if(HudPanel(panel)==HudPanel::spells)direction="spell_bar_direction";
     else if(HudPanel(panel)==HudPanel::abilities)direction="ability_bar_direction";
@@ -930,38 +1041,38 @@ void hud_panel_options(RendererConfig& config,unsigned panel,const HudPanelBound
         const auto* option=config.find(direction);
         if(option) {
             int value=option->integer_value;
-            const char* bars[]={u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
-            const char* portraits[]={u8"\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 (\u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b)",u8"\u0421\u0432\u0435\u0440\u0445\u0443 \u0432\u043d\u0438\u0437",u8"\u0421\u043d\u0438\u0437\u0443 \u0432\u0432\u0435\u0440\u0445",u8"\u0421\u043b\u0435\u0432\u0430 \u043d\u0430\u043f\u0440\u0430\u0432\u043e",u8"\u0421\u043f\u0440\u0430\u0432\u0430 \u043d\u0430\u043b\u0435\u0432\u043e"};
+            const char* bars[]={ui_text("Bottom to top"),ui_text("Top to bottom"),ui_text("Left to right"),ui_text("Right to left")};
+            const char* portraits[]={ui_text("Centered (original)"),ui_text("Top to bottom"),ui_text("Bottom to top"),ui_text("Left to right"),ui_text("Right to left")};
             const bool faces=HudPanel(panel)==HudPanel::portraits;
-            if(ImGui::Combo(u8"\u0420\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0437\u043d\u0430\u0447\u043a\u043e\u0432",&value,faces?portraits:bars,faces?5:4))
+            if(ImGui::Combo(ui_text("Icon alignment"),&value,faces?portraits:bars,faces?5:4))
                 config.set_integer(direction,value);
         }
     }
     if(direction) {
         const std::string prefix=kHudPanels[panel].key;
         const auto* padding=config.find((prefix+"_padding").c_str());
-        if(padding) {int value=padding->integer_value;if(ImGui::SliderInt(u8"\u041e\u0442\u0441\u0442\u0443\u043f (\u043f\u0438\u043a\u0441.)",&value,padding->integer_minimum,padding->integer_maximum))config.set_integer(padding->key.c_str(),value);}
+        if(padding) {int value=padding->integer_value;if(ImGui::SliderInt(ui_text("Padding (px)"),&value,padding->integer_minimum,padding->integer_maximum))config.set_integer(padding->key.c_str(),value);}
         const auto* preview=config.find((prefix+"_preview").c_str());
-        if(preview) {bool value=preview->boolean_value;if(ImGui::Checkbox(u8"\u041f\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u044f\u0447\u0435\u0435\u043a",&value))config.set_boolean(preview->key.c_str(),value);}
+        if(preview) {bool value=preview->boolean_value;if(ImGui::Checkbox(ui_text("Preview slots"),&value))config.set_boolean(preview->key.c_str(),value);}
         const auto* count=config.find((prefix+"_preview_count").c_str());
-        if(count) {int value=count->integer_value;if(ImGui::SliderInt(u8"\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u044f\u0447\u0435\u0435\u043a \u043f\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430",&value,count->integer_minimum,count->integer_maximum))config.set_integer(count->key.c_str(),value);}
+        if(count) {int value=count->integer_value;if(ImGui::SliderInt(ui_text("Preview count"),&value,count->integer_minimum,count->integer_maximum))config.set_integer(count->key.c_str(),value);}
         const auto* wrap=config.find((prefix+"_slots_per_column").c_str());
         if(wrap) {int value=wrap->integer_value;
             const bool rows=(direction && config.find(direction) && config.find(direction)->integer_value>=2);
-            if(ImGui::SliderInt(rows?u8"\u042f\u0447\u0435\u0435\u043a \u0432 \u0441\u0442\u0440\u043e\u043a\u0435":u8"\u042f\u0447\u0435\u0435\u043a \u0432 \u0441\u0442\u043e\u043b\u0431\u0446\u0435",&value,wrap->integer_minimum,wrap->integer_maximum,value?"%d":u8"0 (\u043e\u0434\u0438\u043d \u0440\u044f\u0434)"))config.set_integer(wrap->key.c_str(),value);}
+            if(ImGui::SliderInt(ui_text(rows?"Slots per row":"Slots per column"),&value,wrap->integer_minimum,wrap->integer_maximum,value?"%d":ui_text("0 (one line)")))config.set_integer(wrap->key.c_str(),value);}
     }
     if(HudPanel(panel)==HudPanel::minimap || HudPanel(panel)==HudPanel::character_info || HudPanel(panel)==HudPanel::messages) {
         const std::string prefix=kHudPanels[panel].key;
-        hud_scale_control(config,(prefix+"_buttons_scale").c_str(),u8"\u041c\u0430\u0441\u0448\u0442\u0430\u0431 \u043a\u043d\u043e\u043f\u043e\u043a");
+        hud_scale_control(config,(prefix+"_buttons_scale").c_str(),ui_text("Buttons scale"));
         const auto* gap=config.find((prefix+"_border_padding").c_str());
-        if(gap){int value=gap->integer_value;if(ImGui::SliderInt(u8"\u041e\u0442\u0441\u0442\u0443\u043f \u0440\u0430\u043c\u043a\u0438 (\u043f\u0438\u043a\u0441.)",&value,gap->integer_minimum,gap->integer_maximum))config.set_integer(gap->key.c_str(),value);}
+        if(gap){int value=gap->integer_value;if(ImGui::SliderInt(ui_text("Border padding (px)"),&value,gap->integer_minimum,gap->integer_maximum))config.set_integer(gap->key.c_str(),value);}
         const auto* option=config.find((prefix+"_buttons_side").c_str());
         if(option) {int value=option->integer_value;
-            const char* sides[]={u8"\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438",u8"\u0428\u0442\u0430\u0442\u043d\u0430\u044f \u0441\u0442\u043e\u0440\u043e\u043d\u0430",u8"\u0421\u043b\u0435\u0432\u0430",u8"\u0421\u043f\u0440\u0430\u0432\u0430",u8"\u0421\u0432\u0435\u0440\u0445\u0443",u8"\u0421\u043d\u0438\u0437\u0443"};
-            if(ImGui::Combo(u8"\u0420\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u043a\u043d\u043e\u043f\u043e\u043a",&value,sides,6))config.set_integer(option->key.c_str(),value);
+            const char* sides[]={ui_text("Automatic"),ui_text("Game default side"),ui_text("Left"),ui_text("Right"),ui_text("Top"),ui_text("Bottom")};
+            if(ImGui::Combo(ui_text("Button alignment"),&value,sides,6))config.set_integer(option->key.c_str(),value);
         }
     }
-    if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u044d\u0442\u0443 \u043f\u0430\u043d\u0435\u043b\u044c"))reset_hud_panel(config,panel);
+    if(ImGui::Button(ui_text("Reset this panel")))reset_hud_panel(config,panel);
 }
 void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config) {
     if(!game_hud_editing() || state.settings_open || config.overlay_mode()==DebugOverlayMode::full)return;
@@ -994,10 +1105,10 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
         const ImGuiWindowFlags flags=ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|
             ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoFocusOnAppearing|
             ImGuiWindowFlags_NoNav|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse;
-        if(ImGui::Begin(renderer_ui_text_ru(kHudPanels[i].label),nullptr,flags)) {
+        if(ImGui::Begin(kHudPanels[i].label,nullptr,flags)) {
             ImGui::SetCursorScreenPos(at);ImGui::InvisibleButton("move_or_resize",hit_size);
             const bool active=ImGui::IsItemActive();
-            const bool highlighted=ImGui::IsItemHovered() || active || ImGui::IsPopupOpen(u8"\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u043f\u0430\u043d\u0435\u043b\u0438");
+            const bool highlighted=ImGui::IsItemHovered() || active || ImGui::IsPopupOpen("Panel options");
             auto* draw=ImGui::GetWindowDrawList();
             const auto color=highlighted?IM_COL32(100,230,255,255):IM_COL32(255,215,80,255);
             if(highlighted)draw->AddRectFilled(at,ImVec2(at.x+hit_size.x,at.y+hit_size.y),IM_COL32(70,190,230,35));
@@ -1006,12 +1117,12 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
                 auto p=preview.bounds;hud_bounds_to_output(p);const ImVec2 first(p.left,p.top),last(p.left+p.width,p.top+p.height);
                 draw->AddRectFilled(first,last,IM_COL32(150,185,210,22));
                 draw->AddRect(first,last,IM_COL32(160,200,225,90),0.f,0,1.f);
-                const std::string label=std::string(i==4?u8"\u041e\u0442\u0440\u044f\u0434 ":i==0?u8"\u0417\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u0435 ":i==1?u8"\u0423\u043c\u0435\u043d\u0438\u0435 ":i==5?u8"\u041e\u0440\u0443\u0436\u0438\u0435 ":u8"\u041f\u0440\u0435\u0434\u043c\u0435\u0442 ")+std::to_string(preview.index+1);
+                const std::string label=std::string(ui_text(i==4?"Party ":i==0?"Spell ":i==1?"Skill ":i==5?"Weapon ":"Item "))+std::to_string(preview.index+1);
                 draw->AddText(ImVec2(first.x+3.f,first.y+3.f),IM_COL32(180,210,230,135),label.c_str());
             }
             // Editor guides are always one physical pixel, independent of widget scale.
             draw->AddRect(content,ImVec2(content.x+size.x,content.y+size.y),color,0.f,0,1.f);
-            draw->AddText(ImVec2(at.x+5.f,at.y+5.f),color,renderer_ui_text_ru(kHudPanels[i].label));
+            draw->AddText(ImVec2(at.x+5.f,at.y+5.f),color,ui_text(kHudPanels[i].label));
             if(i<unsigned(HudPanel::stance))draw->AddLine(ImVec2(content.x+size.x-grip,content.y+size.y-2.f),ImVec2(content.x+size.x-2.f,content.y+size.y-grip),color,1.f);
             if(ImGui::IsItemActivated()) {
                 state.panel_drag_start=content;state.panel_size_start=size;
@@ -1062,7 +1173,7 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
                     config.set_floating_point((key+"_y").c_str(),y);
                 }
             }
-            if(ImGui::BeginPopupContextItem(u8"\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u043f\u0430\u043d\u0435\u043b\u0438")) {
+            if(ImGui::BeginPopupContextItem("Panel options")) {
                 hud_panel_options(config,i,b);
                 ImGui::EndPopup();
             }
@@ -1071,21 +1182,21 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
     }
     ImGui::SetNextWindowPos(ImVec2(20.f*state.ui_scale,layout.height*.4f),ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(290.f*state.ui_scale,0),ImGuiCond_FirstUseEver);
-    if(ImGui::Begin("HUD layout",nullptr,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_AlwaysAutoResize)) {
-        hud_scale_control(config,"ui_scale",u8"\u041e\u0431\u0449\u0438\u0439 \u043c\u0430\u0441\u0448\u0442\u0430\u0431 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430");
+    if(ImGui::Begin(window_title("HUD layout","hud_layout").c_str(),nullptr,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_AlwaysAutoResize)) {
+        hud_scale_control(config,"ui_scale",ui_text("Global UI scale"));
         const char* timing_keys[]={"hud_fade_in_duration","hud_fade_duration","hud_fade_delay"};
-        const char* timing_labels[]={u8"\u0412\u0440\u0435\u043c\u044f \u043f\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u044f",u8"\u0412\u0440\u0435\u043c\u044f \u0438\u0441\u0447\u0435\u0437\u043d\u043e\u0432\u0435\u043d\u0438\u044f",u8"\u0417\u0430\u0434\u0435\u0440\u0436\u043a\u0430 \u043f\u0435\u0440\u0435\u0434 \u0441\u043a\u0440\u044b\u0442\u0438\u0435\u043c"};
+        const char* timing_labels[]={ui_text("Fade-in duration"),ui_text("Fade-out duration"),ui_text("Idle time before fade-out")};
         for(unsigned i=0;i<3;++i)if(const auto* timing=config.find(timing_keys[i])) {
             int value=timing->integer_value;
-            if(ImGui::SliderInt(timing_labels[i],&value,timing->integer_minimum,timing->integer_maximum,u8"%d \u043c\u0441"))
+            if(ImGui::SliderInt(timing_labels[i],&value,timing->integer_minimum,timing->integer_maximum,ui_text("%d ms")))
                 config.set_integer(timing->key.c_str(),value);
         }
-        ImGui::Checkbox(u8"\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0435\u0442\u043a\u0443",&state.hud_grid);
-        if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(config);
+        ImGui::Checkbox(ui_text("Show grid"),&state.hud_grid);
+        if(ImGui::Button(ui_text("Reset UI")))reset_interface(config);
         ImGui::SameLine();
-        if(ImGui::Button(u8"\u0417\u0430\u043a\u0440\u0435\u043f\u0438\u0442\u044c")){set_game_hud_editing(false);state.pending_save=true;}
-        ImGui::TextWrapped(u8"\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u0439\u0442\u0435 \u043f\u0430\u043d\u0435\u043b\u044c \u0437\u0430 \u043b\u044e\u0431\u0443\u044e \u0442\u043e\u0447\u043a\u0443; \u043c\u0435\u043d\u044f\u0439\u0442\u0435 \u0440\u0430\u0437\u043c\u0435\u0440 \u0437\u0430 \u043d\u0438\u0436\u043d\u0438\u0439 \u043f\u0440\u0430\u0432\u044b\u0439 \u0443\u0433\u043e\u043b. \u041f\u0440\u0430\u0432\u0430\u044f \u043a\u043d\u043e\u043f\u043a\u0430 \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u043a\u043e\u043e\u0440\u0434\u0438\u043d\u0430\u0442\u044b \u0438 \u0441\u0431\u0440\u043e\u0441.");
-        ImGui::TextWrapped(u8"Ctrl \u0432\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u043f\u0440\u0438\u0432\u044f\u0437\u043a\u0443 \u043f\u043e \u0433\u043e\u0440\u0438\u0437\u043e\u043d\u0442\u0430\u043b\u0438, Alt \u2014 \u043f\u043e \u0432\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u0438, \u0432\u043c\u0435\u0441\u0442\u0435 \u2014 \u043f\u043e \u043e\u0431\u0435\u0438\u043c \u043e\u0441\u044f\u043c. \u041f\u0440\u0438\u0432\u044f\u0437\u043a\u0430 \u043a \u0441\u0435\u0442\u043a\u0435 \u043b\u0438\u0431\u043e \u043a\u0440\u0430\u044f\u043c \u044d\u043a\u0440\u0430\u043d\u0430 \u0438 \u043f\u0430\u043d\u0435\u043b\u0435\u0439. \u0417\u0430\u043a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u0435 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f; Esc \u0442\u043e\u0436\u0435 \u0437\u0430\u043a\u0440\u0435\u043f\u043b\u044f\u0435\u0442.");
+        if(ImGui::Button(ui_text("Lock"))){set_game_hud_editing(false);state.pending_save=true;}
+        ImGui::TextWrapped(ui_text("Drag anywhere in a panel; resize its lower-right corner. Right-click for this panel's options, coordinates and reset."));
+        ImGui::TextWrapped(ui_text("Ctrl snaps horizontally, Alt vertically; hold both for both axes. Snaps use the visible grid, otherwise screen and widget edges. Lock saves; Esc also locks."));
     }
     ImGui::End();
     if(!available || ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {set_game_hud_editing(false);state.pending_save=true;}
@@ -1102,53 +1213,53 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
     ImGui::SetNextWindowSize(ImVec2(850.0f * state.ui_scale, 620.0f * state.ui_scale),
                              ImGuiCond_FirstUseEver);
     bool open = true;
-    if (ImGui::Begin(u8"\u0420\u0435\u043d\u0434\u0435\u0440 EID3D11", &open, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::TextDisabled(state.developer
-            ? u8"F10: \u0441\u043a\u0440\u044b\u0442\u044c / \u043c\u043e\u043d\u0438\u0442\u043e\u0440 / \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b   Shift+F10: \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0438\u0433\u0440\u043e\u043a\u0430   F11: \u0437\u0430\u0445\u0432\u0430\u0442 \u043a\u0430\u0434\u0440\u0430"
-            : u8"Shift+F10: \u0441\u043a\u0440\u044b\u0442\u044c / \u043c\u043e\u043d\u0438\u0442\u043e\u0440 / \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b   F10: \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0438\u0433\u0440\u043e\u043a\u0430   F11: \u0437\u0430\u0445\u0432\u0430\u0442 \u043a\u0430\u0434\u0440\u0430");
+    if (ImGui::Begin(window_title("EID3D11 renderer", "renderer").c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::TextDisabled("%s", ui_text(state.developer
+            ? "F10: hidden / monitor / configuration   Shift+F10: player settings   F11: capture next frame"
+            : "Shift+F10: hidden / monitor / configuration   F10: player settings   F11: capture next frame"));
         if (ImGui::BeginTabBar("RendererTabs")) {
-            if (ImGui::BeginTabItem(u8"\u041f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c")) {
+            if (ImGui::BeginTabItem(window_title("Performance", "performance").c_str())) {
                 draw_performance_tab(state, profile, bridge, resources);
                 ImGui::Separator();
-                if (ImGui::Button(u8"\u0417\u0430\u0445\u0432\u0430\u0442\u0438\u0442\u044c \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u043a\u0430\u0434\u0440 \u043f\u043e \u043f\u0440\u043e\u0445\u043e\u0434\u0430\u043c")) state.capture_requested = true;
-                if (ImGui::Button(u8"\u0417\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u0442\u044c / \u043e\u0441\u0432\u043e\u0431\u043e\u0434\u0438\u0442\u044c \u043a\u0430\u043c\u0435\u0440\u0443 \u043e\u0442\u0441\u0435\u0447\u0435\u043d\u0438\u044f (Shift+F11)")) state.cull_freeze_toggle = true;
-                help_marker(u8"\u0414\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0437\u0430\u0445\u0432\u0430\u0442 \u043c\u043e\u0436\u0435\u0442 \u0437\u0430\u0434\u0435\u0440\u0436\u0430\u0442\u044c \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u043a\u0430\u0434\u0440. \u041e\u0431\u044b\u0447\u043d\u044b\u0439 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u043d\u0435 \u043f\u0438\u0448\u0435\u0442 \u043d\u0430 \u0434\u0438\u0441\u043a.");
+                if (ImGui::Button(ui_text("Capture next frame, pass by pass"))) state.capture_requested = true;
+                if (ImGui::Button(ui_text("Freeze / unfreeze culling camera (Shift+F11)"))) state.cull_freeze_toggle = true;
+                help_marker(ui_text("Explicit diagnostic capture. It may stall that captured frame; normal monitoring never writes to disk."));
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(u8"\u0413\u0440\u0430\u0444\u0438\u043a\u0430")) {
-                if (!state.settings_open && ImGui::Button(u8"\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0433\u0440\u0430\u0444\u0438\u043a\u0438"))
+            if (ImGui::BeginTabItem(window_title("Graphics", "graphics").c_str())) {
+                if (!state.settings_open && ImGui::Button(ui_text("Open player Graphics Settings")))
                     open_settings(state, overlay.config(), false);
                 draw_graphics_tab(overlay.config(), state.graphics_filter);
                 ImGui::Separator();
-                if (ImGui::Button(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c")) state.pending_save = true;
+                if (ImGui::Button(ui_text("Apply and save"))) state.pending_save = true;
                 ImGui::SameLine();
-                ImGui::TextDisabled(u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442\u0441\u044f \u0432 \u0444\u0430\u0439\u043b\u0435 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u0440\u0435\u043d\u0434\u0435\u0440\u0430");
+                ImGui::TextDisabled(ui_text("Local eid3d11.ini; no registry settings"));
                 ImGui::EndTabItem();
             }
-            if(ImGui::BeginTabItem(u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")) {
+            if(ImGui::BeginTabItem(window_title("Interface", "interface").c_str())) {
                 draw_hud_layout_control(state,overlay.config());
-                ImGui::SameLine();if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(overlay.config());
+                ImGui::SameLine();if(ImGui::Button(ui_text("Reset UI")))reset_interface(overlay.config());
                 draw_graphics_tab(overlay.config(),state.graphics_filter,false,true);
-                if(ImGui::CollapsingHeader(u8"\u0417\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0438 \u0431\u043e\u0435\u0432\u044b\u0435 \u044d\u0444\u0444\u0435\u043a\u0442\u044b"))state.combat_ui.draw_settings(overlay.config());
+                if(ImGui::CollapsingHeader(ui_text("Combat healthplates and effects")))state.combat_ui.draw_settings(overlay.config());
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(renderer_ui_text_ru(kDiagnosticsGroup))) {
+            if (ImGui::BeginTabItem(window_title(kDiagnosticsGroup, "diagnostics").c_str())) {
                 draw_graphics_tab(overlay.config(), state.diagnostics_filter, true);
                 ImGui::Separator();
-                if (ImGui::Button(u8"\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043c\u043e\u043b\u043d\u0438\u044e \u0432 \u0444\u043e\u043a\u0443\u0441\u0435 \u043a\u0430\u043c\u0435\u0440\u044b")) owned::request_debug_lightning();
-                if (ImGui::Button(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c##diagnostics")) state.pending_save = true;
+                if (ImGui::Button(ui_text("Spawn lightning at camera focus"))) owned::request_debug_lightning();
+                if (ImGui::Button(ui_text("Apply and save##diagnostics"))) state.pending_save = true;
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(u8"\u0420\u0435\u0441\u0443\u0440\u0441\u044b")) {
+            if (ImGui::BeginTabItem(window_title("Resources", "resources").c_str())) {
                 const DebugResourceView selected = overlay.config().debug_resource_view();
-                if (ImGui::BeginCombo(u8"\u041f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u0440\u0435\u0441\u0443\u0440\u0441\u0430",
-                                      debug_resource_view_label(selected))) {
+                if (ImGui::BeginCombo(ui_text("Resource view"),
+                                      ui_text(debug_resource_view_label(selected)))) {
                     for (std::uint8_t raw = 0;
                          raw < static_cast<std::uint8_t>(DebugResourceView::count); ++raw) {
                         const auto candidate = static_cast<DebugResourceView>(raw);
                         const bool available = debug_views.available(candidate);
                         ImGui::BeginDisabled(!available);
-                        if (ImGui::Selectable(debug_resource_view_label(candidate),
+                        if (ImGui::Selectable(ui_text(debug_resource_view_label(candidate)),
                                               candidate == selected) && available)
                             overlay.config().set_debug_resource_view(candidate);
                         ImGui::EndDisabled();
@@ -1156,51 +1267,51 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                     ImGui::EndCombo();
                 }
                 if (!debug_views.available(selected))
-                    ImGui::TextDisabled(u8"\u0412\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u0440\u0435\u0441\u0443\u0440\u0441 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0432 \u0442\u0435\u043a\u0443\u0449\u0435\u043c \u043a\u0430\u0434\u0440\u0435.");
-                ImGui::TextWrapped(u8"\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u043c\u0435\u044e\u0449\u0438\u0435\u0441\u044f \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0440\u0435\u043d\u0434\u0435\u0440\u0430. "
-                                   u8"\u041e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0431\u0443\u0444\u0435\u0440\u044b \u043e\u0442\u043c\u0435\u0447\u0430\u044e\u0442\u0441\u044f \u044f\u0432\u043d\u043e \u0438 \u043d\u0435 \u043f\u043e\u0434\u043c\u0435\u043d\u044f\u044e\u0442\u0441\u044f.");
-                ImGui::TextDisabled(u8"\u041f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u043e\u043a\u0430 \u043e\u0442\u043a\u0440\u044b\u0442\u0430 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f \u043f\u0430\u043d\u0435\u043b\u044c F10.");
+                    ImGui::TextDisabled(ui_text("Selected view is unavailable in the current frame."));
+                ImGui::TextWrapped(ui_text("Views use only resources already owned by the renderer. "
+                                   "Unavailable production buffers are listed explicitly and are not fabricated."));
+                ImGui::TextDisabled(ui_text("The selected view runs only while this full F10 window is active."));
                 if (selected == DebugResourceView::shadows ||
                     selected == DebugResourceView::shadow_cascade_coverage) {
                     ImGui::Separator();
-                    ImGui::Text(u8"\u0422\u0435\u043d\u0438: %s", shadows.feature_enabled ? "ON" : "OFF");
-                    ImGui::Text(u8"\u041c\u0430\u0441\u043a\u0438 \u0442\u0435\u043d\u0435\u0439 (\u0431\u0438\u0442\u044b C1..C4): \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b 0x%X, \u0433\u043e\u0442\u043e\u0432\u044b 0x%X",
+                    ImGui::Text(ui_text("Runtime shadows: %s"), ui_text(shadows.feature_enabled ? "ON" : "OFF"));
+                    ImGui::Text(ui_text("Shadow masks (bits C1..C4): enabled 0x%X, valid 0x%X"),
                                 shadows.enabled_mask, shadows.valid_mask);
                     if (shadows.pass_in_progress)
-                        ImGui::TextDisabled(u8"\u041f\u0440\u043e\u0445\u043e\u0434 \u0442\u0435\u043d\u0435\u0439 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f; \u043a\u0430\u0440\u0442\u044b \u043f\u043e\u043a\u0430 \u043d\u0435 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u044e\u0442\u0441\u044f.");
+                        ImGui::TextDisabled(ui_text("Shadow pass in progress; maps are not displayed."));
                     else
-                        ImGui::Text(u8"\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b \u0432 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u043c \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u043e\u043c \u043f\u0440\u043e\u0445\u043e\u0434\u0435: 0x%X",
+                        ImGui::Text(ui_text("Rewritten in last completed shadow pass: 0x%X"),
                                     shadows.rewritten_mask);
                     constexpr ImVec4 colors[] = {{1,.25f,.2f,1}, {.2f,1,.25f,1},
                                                  {.2f,.5f,1,1}, {1,.85f,.2f,1}, {.8f,.35f,1,1}};
-                    ImGui::TextWrapped(u8"\u041a\u0430\u0440\u0442\u044b: C1\u2013C3 \u0432\u0432\u0435\u0440\u0445\u0443; C4 \u0441\u0440\u0435\u0434\u043d\u0435\u0439 \u0438 C5 \u0434\u0430\u043b\u044c\u043d\u0435\u0439 \u0434\u0438\u0441\u0442\u0430\u043d\u0446\u0438\u0438 \u0432\u043d\u0438\u0437\u0443. "
-                        u8"\u0421\u0435\u0440\u044b\u0439 \u2014 \u043d\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u0430\u044f \u0433\u043b\u0443\u0431\u0438\u043d\u0430 [0,1], \u0442\u0451\u043c\u043d\u043e-\u0441\u0438\u043d\u0438\u0439 \u2014 \u043f\u0443\u0441\u0442\u0430\u044f \u043e\u0431\u043b\u0430\u0441\u0442\u044c. "
-                        u8"\u0426\u0432\u0435\u0442\u043d\u044b\u0435 \u043f\u0440\u044f\u043c\u043e\u0443\u0433\u043e\u043b\u044c\u043d\u0438\u043a\u0438 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442 \u0433\u0440\u0430\u043d\u0438\u0446\u044b \u043f\u0440\u0438\u0451\u043c\u043d\u0438\u043a\u043e\u0432 \u043f\u043e XY. \u0428\u0442\u0440\u0438\u0445\u043e\u0432\u043a\u0430 \u043e\u0431\u043e\u0437\u043d\u0430\u0447\u0430\u0435\u0442 \u043f\u0443\u0441\u0442\u044b\u0435 \u0438\u043b\u0438 \u043d\u0435\u0433\u043e\u0442\u043e\u0432\u044b\u0435 \u043a\u0430\u0440\u0442\u044b.");
-                    ImGui::TextWrapped(u8"\u0426\u0432\u0435\u0442 \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u044f: C1 \u043a\u0440\u0430\u0441\u043d\u044b\u0439, C2 \u0437\u0435\u043b\u0451\u043d\u044b\u0439, C3 \u0441\u0438\u043d\u0438\u0439, C4 \u0436\u0451\u043b\u0442\u044b\u0439, C5 \u0444\u0438\u043e\u043b\u0435\u0442\u043e\u0432\u044b\u0439. "
-                        u8"\u0421\u0435\u0440\u044b\u0439 \u2014 \u043d\u0435\u0442 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0433\u043e \u043a\u0430\u0441\u043a\u0430\u0434\u0430, \u043f\u0443\u0440\u043f\u0443\u0440\u043d\u044b\u0439 \u2014 \u043f\u0435\u0440\u0432\u044b\u0439 \u043a\u0430\u0441\u043a\u0430\u0434 \u043d\u0435\u0433\u043e\u0442\u043e\u0432, \u0433\u043e\u043b\u0443\u0431\u043e\u0439 \u2014 \u0432\u043d\u0435 \u043e\u0431\u044a\u0451\u043c\u0430 \u0441\u0432\u0435\u0442\u0430. "
-                        u8"\u041e\u0431\u044a\u0435\u043a\u0442\u044b \u0431\u0435\u0437 \u043e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u044f \u0438 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442 \u0446\u0432\u0435\u0442\u0430. \u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044e\u0442 \u0441\u043e \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u0439 \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0438 \u043c\u0438\u0440\u0430.");
+                    ImGui::TextWrapped(ui_text("Maps: C1-C3 top row; C4 middle distance and C5 far distance below. "
+                        "Gray is each map's normalized light depth [0,1]; navy is clear depth. "
+                        "Colored rectangles show stored receiver XY bounds. Hatched maps are empty or invalid."));
+                    ImGui::TextWrapped(ui_text("Coverage colors receiving world pixels: C1 red, C2 green, C3 blue, C4 yellow, C5 violet. "
+                        "Gray: no selector; magenta: first selector invalid; cyan: outside selected light volume. "
+                        "Unlit visuals and UI keep their colors. Changes apply to the next world render."));
                     for (unsigned i = 0; i < 5; ++i) {
                         const auto& slice = shadows.slices[i];
                         const bool enabled = (shadows.enabled_mask & (1u << i)) != 0;
                         const bool valid = (shadows.valid_mask & (1u << i)) != 0;
                         ImGui::TextColored(colors[i], "C%u  %s", i + 1,
-                                           !enabled ? u8"\u043f\u0443\u0441\u0442\u043e / \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u043e" : (valid ? u8"\u0433\u043e\u0442\u043e\u0432\u043e" : u8"\u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u043e"));
+                                           ui_text(!enabled ? "empty / disabled" : (valid ? "valid" : "invalid")));
                         if (!enabled) continue;
-                        ImGui::Text(u8"\u0420\u0430\u0434\u0438\u0443\u0441 %.4g  /  \u0435\u0434\u0438\u043d\u0438\u0446 \u043c\u0438\u0440\u0430 \u043d\u0430 \u0442\u0435\u043a\u0441\u0435\u043b\u044c %.6g  /  \u0432\u0435\u0440\u0441\u0438\u0439 \u043e\u0431\u044a\u0435\u043a\u0442\u043e\u0432 %llu",
+                        ImGui::Text(ui_text("Radius %.4g  |  world units / texel %.6g  |  caster revision entries %llu"),
                             slice.radius, slice.world_units_per_texel,
                             static_cast<unsigned long long>(slice.caster_revision_entries));
-                        ImGui::Text(u8"\u0413\u0440\u0430\u043d\u0438\u0446\u044b \u043f\u0440\u0438\u0451\u043c\u043d\u0438\u043a\u043e\u0432 XY: [%.4g, %.4g] \u2014 [%.4g, %.4g]",
+                        ImGui::Text(ui_text("Receiver light XY: [%.4g, %.4g] to [%.4g, %.4g]"),
                             slice.receiver_minimum[0], slice.receiver_minimum[1],
                             slice.receiver_maximum[0], slice.receiver_maximum[1]);
-                        ImGui::Text(u8"\u0413\u043b\u0443\u0431\u0438\u043d\u0430 \u043f\u0440\u0438\u0451\u043c\u043d\u0438\u043a\u043e\u0432: [%.4g, %.4g]  /  \u043a\u0430\u0440\u0442\u044b: [%.4g, %.4g]",
+                        ImGui::Text(ui_text("Receiver light Z: [%.4g, %.4g]  |  map light Z: [%.4g, %.4g]"),
                             slice.receiver_minimum[2], slice.receiver_maximum[2],
                             slice.light_depth[0], slice.light_depth[1]);
                     }
                 }
-                if (ImGui::Button(u8"\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440")) state.pending_save = true;
+                if (ImGui::Button(ui_text("Save resource view selection"))) state.pending_save = true;
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(u8"\u041c\u0430\u0440\u043a\u0435\u0440\u044b \u0437\u0430\u043c\u0435\u0440\u043e\u0432")) {
+            if (ImGui::BeginTabItem(window_title("Attribution markers", "markers").c_str())) {
                 constexpr const char* labels[] = {
                     "main_menu_high_fps_ui", "store_inventory", "city_heavy_forced_visibility",
                     "outdoor_daytime", "outdoor_nighttime", "cave_interior",
@@ -1212,20 +1323,20 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                 AttributionMarkerStatus status = profiler ? profiler->attribution_marker_status() :
                     AttributionMarkerStatus{};
                 constexpr const char* states[] = {
-                    u8"\u043d\u0435\u0430\u043a\u0442\u0438\u0432\u0435\u043d", u8"\u043e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u043d\u0430\u0447\u0430\u043b\u0430", u8"\u0430\u043a\u0442\u0438\u0432\u0435\u043d", u8"\u043e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u043a\u043e\u043d\u0446\u0430", u8"\u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d", u8"\u043f\u0435\u0440\u0435\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", u8"\u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u043e" };
+                    "inactive", "begin armed", "active", "end armed", "complete", "overflow", "invalid" };
                 const auto state_index = static_cast<std::size_t>(status.state);
-                ImGui::Text(u8"\u0417\u0430\u043f\u0438\u0441\u044c: %s%s  \u0441\u0435\u0433\u043c\u0435\u043d\u0442\u043e\u0432: %u / %u",
-                            state_index < std::size(states) ? states[state_index] : u8"\u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u043e",
-                            status.window_flush_pending ? u8" (\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435 \u043e\u043a\u043d\u0430)" : "",
+                ImGui::Text(ui_text("Recorder: %s%s  segments: %u / %u"),
+                            ui_text(state_index < std::size(states) ? states[state_index] : "invalid"),
+                            status.window_flush_pending ? ui_text(" (draining/flushing window)") : "",
                             status.completed, status.capacity);
-                ImGui::Text(u8"\u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u043e\u043a\u043d\u043e \u0437\u0430\u043c\u0435\u0440\u0430: %u / %u \u043a\u0430\u0434\u0440\u043e\u0432",
+                ImGui::Text(ui_text("Current marked window: %u / %u frames"),
                             status.window_frame_count, status.window_frame_capacity);
-                ImGui::TextDisabled(u8"\u041f\u0440\u0438 \u0447\u0430\u0441\u0442\u043e\u0442\u0435 \u043e\u043a\u043e\u043b\u043e 600 FPS \u043e\u043a\u043d\u043e \u0438\u0437 8192 \u043a\u0430\u0434\u0440\u043e\u0432 \u0437\u0430\u043d\u0438\u043c\u0430\u0435\u0442 \u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e 13,65 \u0441.");
+                ImGui::TextDisabled(ui_text("At the measured ~600 FPS, 8192 frames are ~13.65 s per marked window."));
                 if (!available)
-                    ImGui::TextDisabled(u8"\u0414\u043b\u044f \u043c\u0430\u0440\u043a\u0435\u0440\u043e\u0432 \u043f\u0435\u0440\u0435\u0434 \u0437\u0430\u043f\u0443\u0441\u043a\u043e\u043c \u0437\u0430\u0434\u0430\u0439\u0442\u0435 EI_RENDERER_ATTRIBUTION=1.");
-                ImGui::Combo(u8"\u041c\u0435\u0442\u043a\u0430 \u0441\u0446\u0435\u043d\u0430\u0440\u0438\u044f", &state.marker_label, labels,
+                    ImGui::TextDisabled(ui_text("Enable EI_RENDERER_ATTRIBUTION=1 before launch to arm markers."));
+                ImGui::Combo(ui_text("Stable route label"), &state.marker_label, labels,
                              static_cast<int>(std::size(labels)));
-                ImGui::Checkbox(u8"\u041f\u0435\u0440\u0435\u0445\u043e\u0434 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f \u043c\u0435\u043d\u044e (\u0437\u0430\u0434\u0430\u0447\u0430 \u211613)",
+                ImGui::Checkbox(ui_text("Issue #13 menu opening transition"),
                                 &state.marker_issue13_transition);
                 AttributionMarkerSelection selection{};
                 selection.label = static_cast<AttributionMarkerLabel>(state.marker_label);
@@ -1235,10 +1346,10 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                         return attribution_issue13_menu_label_name(
                             static_cast<AttributionIssue13MenuLabel>(index));
                     };
-                    ImGui::Combo(u8"\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u0430\u044f \u043c\u0435\u0442\u043a\u0430 \u043c\u0435\u043d\u044e", &state.marker_menu_label,
+                    ImGui::Combo(ui_text("Stable non-semantic menu label"), &state.marker_menu_label,
                                  menu_label_getter, nullptr,
                                  static_cast<int>(AttributionIssue13MenuLabel::count));
-                    ImGui::Text(u8"\u041d\u043e\u043c\u0435\u0440 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f: %d", state.marker_opening_ordinal);
+                    ImGui::Text(ui_text("Opening ordinal: %d"), state.marker_opening_ordinal);
                     ImGui::SameLine();
                     ImGui::BeginDisabled(state.marker_opening_ordinal <= 1);
                     if (ImGui::Button("-##opening_ordinal")) --state.marker_opening_ordinal;
@@ -1248,9 +1359,9 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                         state.marker_opening_ordinal == (std::numeric_limits<int>::max)());
                     if (ImGui::Button("+##opening_ordinal")) ++state.marker_opening_ordinal;
                     ImGui::EndDisabled();
-                    ImGui::Combo(u8"\u041d\u0430\u0431\u043b\u044e\u0434\u0435\u043d\u0438\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f", &state.marker_repetition,
+                    ImGui::Combo(ui_text("Opening observation"), &state.marker_repetition,
                                  "first_observed\0repeated_opening\0");
-                    ImGui::TextDisabled(u8"\u041d\u043e\u043c\u0435\u0440 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u044f \u043d\u0435 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u044f\u0435\u0442, \u0431\u044b\u043b\u0438 \u043b\u0438 \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0443\u0436\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d\u044b.");
+                    ImGui::TextDisabled(ui_text("Ordinal is not interpreted as cold or warm resource state."));
                     const char* menu_label = attribution_issue13_menu_label_name(
                         static_cast<AttributionIssue13MenuLabel>(state.marker_menu_label));
                     strncpy_s(selection.menu_label.data(), selection.menu_label.size(),
@@ -1268,24 +1379,24 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                     !status.window_flush_pending && selection_ready;
                 if (available && !can_begin) {
                     if (!selection_ready)
-                        ImGui::TextDisabled(u8"\u041d\u0430\u0447\u0430\u043b\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0437\u0430\u043f\u043e\u043b\u043d\u0438\u0442\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043c\u0430\u0440\u043a\u0435\u0440\u0430.");
+                        ImGui::TextDisabled(ui_text("Begin unavailable: select complete valid marker metadata."));
                     else if (status.window_flush_pending)
-                        ImGui::TextDisabled(u8"\u041d\u0430\u0447\u0430\u043b\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0434\u043e\u0436\u0434\u0438\u0442\u0435\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u043e\u0433\u043e \u043e\u043a\u043d\u0430.");
+                        ImGui::TextDisabled(ui_text("Begin unavailable: wait for the completed window to flush."));
                     else
-                        ImGui::TextDisabled(u8"\u041d\u0430\u0447\u0430\u043b\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0438\u043b\u0438 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u0442\u0435\u043a\u0443\u0449\u0443\u044e \u0437\u0430\u043f\u0438\u0441\u044c.");
+                        ImGui::TextDisabled(ui_text("Begin unavailable: finish or restart the current recorder state."));
                 }
                 ImGui::BeginDisabled(!can_begin);
-                if (ImGui::Button(u8"\u041d\u0430\u0447\u0430\u0442\u044c \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0443\u0441\u043f\u0435\u0448\u043d\u043e\u043c \u043f\u043e\u043a\u0430\u0437\u0435 \u043a\u0430\u0434\u0440\u0430")) {
+                if (ImGui::Button(ui_text("Begin at next successful Present"))) {
                     profiler->arm_attribution_marker_begin(selection);
                 }
                 ImGui::EndDisabled();
                 ImGui::SameLine();
                 const bool can_end = available && status.state == AttributionMarkerState::active;
                 ImGui::BeginDisabled(!can_end);
-                if (ImGui::Button(u8"\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u043f\u0440\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c \u0443\u0441\u043f\u0435\u0448\u043d\u043e\u043c \u043f\u043e\u043a\u0430\u0437\u0435 \u043a\u0430\u0434\u0440\u0430"))
+                if (ImGui::Button(ui_text("End at next successful Present")))
                     profiler->arm_attribution_marker_end();
                 ImGui::EndDisabled();
-                ImGui::TextWrapped(u8"\u041c\u0430\u0440\u043a\u0435\u0440\u044b \u0437\u0430\u0434\u0430\u044e\u0442 \u0438\u043d\u0442\u0435\u0440\u0432\u0430\u043b\u044b \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u043a\u0430\u0434\u0440\u043e\u0432 \u0441 \u0438\u0441\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u043e\u0439 \u043f\u0440\u0430\u0432\u043e\u0439 \u0433\u0440\u0430\u043d\u0438\u0446\u0435\u0439. \u041e\u043a\u043d\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442\u0441\u044f \u043f\u043e\u0441\u043b\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u044f \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 GPU \u0432 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043a\u0435 \u043c\u0435\u0436\u0434\u0443 \u0437\u0430\u043c\u0435\u0440\u0430\u043c\u0438. \u0410\u0432\u0442\u043e\u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u0441\u0446\u0435\u043d, \u0438\u0433\u0440\u043e\u0432\u044b\u0435 \u043f\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u044b \u0438 \u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u044b\u0435 \u0433\u043e\u0440\u044f\u0447\u0438\u0435 \u043a\u043b\u0430\u0432\u0438\u0448\u0438 \u043c\u0430\u0440\u043a\u0435\u0440\u043e\u0432 \u043d\u0435 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f.");
+                ImGui::TextWrapped(ui_text("Markers are explicit half-open Present intervals. Completed windows flush as bounded batches only after delayed GPU queries drain in the unmarked gap. No scene detection, gameplay hook, or global marker hotkey is active."));
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -1341,23 +1452,113 @@ void close_settings(DebugOverlay::Implementation& state, RendererConfig& config,
     state.settings_snapshot.clear();
 }
 
+// Options that size one group of the video memory breakdown; the window
+// shows what that group holds now beside the option.
+bool setting_memory_group(const char* key, VideoMemoryGroup& group) noexcept {
+    static constexpr struct { const char* key; VideoMemoryGroup group; } kRows[] = {
+        {"render_scale", VideoMemoryGroup::screen},
+        {"water_reflection_quality", VideoMemoryGroup::water},
+        {"shadow_cascade_quality", VideoMemoryGroup::sun_shadows},
+        {"point_shadow_quality", VideoMemoryGroup::lamp_shadows},
+        {"fog_volume_quality", VideoMemoryGroup::fog},
+        {"ao_quality", VideoMemoryGroup::ambient_occlusion},
+        {"sky_clouds", VideoMemoryGroup::sky},
+        {"terrain_blend", VideoMemoryGroup::terrain_blend},
+        {"ground_cover", VideoMemoryGroup::ground_cover},
+        {"critters", VideoMemoryGroup::critters},
+    };
+    for (const auto& row : kRows)
+        if (std::strcmp(row.key, key) == 0) { group = row.group; return true; }
+    return false;
+}
+
+void text_megabytes(std::uint64_t bytes) {
+    const double value = mib(bytes);
+    ImGui::TextDisabled(ui_text(value < 10.0 ? "%.1f MB" : "%.0f MB"), value);
+}
+
+// "Video memory: X MB used of Y MB available" and the
+// per-feature list (VideoMemoryBreakdown) of the settings window.
+void draw_video_memory(const DebugOverlay::Implementation& state, const RendererResourceSnapshot& resources) {
+    const ImVec4 warning(1.f, .8f, .3f, 1.f);
+    const VideoMemoryBreakdown& memory = resources.video_memory;
+    const bool measured = !resources.system_telemetry_stale && resources.gpu_memory_valid;
+    const std::uint64_t budget = measured ? resources.gpu_budget_bytes : state.adapter_budget_bytes;
+    const std::uint64_t own = memory.valid ? memory.total() : 0;
+    if (measured)
+        ImGui::Text(ui_text("Video memory: %.0f MB used of %.0f MB available"), mib(resources.gpu_usage_bytes), mib(budget));
+    else if (own && budget)
+        ImGui::Text(ui_text("Video memory: about %.0f MB used of %.0f MB available"), mib(own), mib(budget));
+    else
+        ImGui::TextUnformatted(ui_text("Video memory: n/a"));
+    ImGui::SetItemTooltip(ui_text("Graphics card memory the game uses now, and the share Windows makes available to it. "
+                          "Settings changes show here within a few seconds."));
+    const std::uint64_t used = measured ? std::max(resources.gpu_usage_bytes, own) : own;
+    if (budget && used > budget) {
+        ImGui::SameLine();
+        ImGui::TextColored(warning, ui_text("More than available"));
+        ImGui::SetItemTooltip(ui_text("The game needs more video memory than this card offers, which causes stutter. "
+                              "Lower the render scale, shadow resolution, fog quality or ground cover."));
+    }
+    if (resources.vram_budget.enforced && resources.vram_budget.level) {
+        ImGui::TextColored(warning, ui_text("Reduced to fit video memory: %s (about %.0f MB needed)"),
+                           ui_text(vram_budget_level_text(resources.vram_budget.level)),
+                           mib(resources.vram_budget.estimate_bytes()));
+        ImGui::SetItemTooltip(ui_text("These settings need more video memory than the card has, so textures and shadows are "
+                              "drawn at lower resolution. Lower settings bring them back."));
+    }
+    if (!memory.valid || !ImGui::CollapsingHeader(ui_text("Video memory by feature"))) return;
+    std::array<std::size_t, kVideoMemoryGroupCount> order{};
+    for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
+    std::sort(order.begin(), order.end(),
+              [&](std::size_t a, std::size_t b) { return memory.bytes[a] > memory.bytes[b]; });
+    if (!ImGui::BeginTable("video_memory", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) return;
+    const auto row = [](const char* label) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(label);
+        ImGui::TableNextColumn();
+    };
+    for (const std::size_t index : order) {
+        if (!memory.bytes[index]) continue;
+        row(ui_text(video_memory_group_name(static_cast<VideoMemoryGroup>(index))));
+        text_megabytes(memory.bytes[index]);
+    }
+    row(ui_text("Terrain material cache"));
+    if (memory.terrain_cache_known) text_megabytes(memory.terrain_cache_bytes);
+    else ImGui::TextDisabled("%s", ui_text("n/a"));
+    if (measured && resources.gpu_usage_bytes > own) {
+        row(ui_text("Other (driver, shaders, not listed)"));
+        text_megabytes(resources.gpu_usage_bytes - own);
+    }
+    ImGui::EndTable();
+}
+
 void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& setting, bool developer,
-                         DebugOverlay::Implementation& state) {
+                         DebugOverlay::Implementation& state, const VideoMemoryBreakdown& memory) {
     const RendererOption* option = config.find(setting.key);
     if (!option) {
         // Visible to developers only: a table key the renderer never registered.
         if (developer) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430: %s", setting.key);
+            ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), ui_text("Missing option: %s"), setting.key);
         }
         return;
     }
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextWrapped("%s", setting.label);
-    ImGui::SetItemTooltip("%s", setting.tooltip);
+    const char* tooltip = ui_setting_tooltip(setting);
+    // Russian labels are longer and wrap; English keeps its single line.
+    if (ui_russian()) ImGui::TextWrapped("%s", ui_setting_label(setting));
+    else ImGui::TextUnformatted(setting.label);
+    ImGui::SetItemTooltip("%s", tooltip);
+    if (VideoMemoryGroup group{}; memory.valid && setting_memory_group(setting.key, group)) {
+        ImGui::SameLine();
+        text_megabytes(memory.bytes[static_cast<std::size_t>(group)]);
+        ImGui::SetItemTooltip(ui_text("Video memory this feature uses now."));
+    }
     ImGui::TableNextColumn();
     ImGui::PushID(setting.key);
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1367,6 +1568,25 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     case RendererOptionType::boolean: {
         bool value = option->boolean_value;
         if (ImGui::Checkbox("##value", &value)) config.set_boolean(setting.key, value);
+        // A switch with a "<key>_weight" percent option (critter types) shows
+        // that weight beside it, greyed while the switch is off.
+        const RendererOption* weight = config.find((std::string(setting.key) + "_weight").c_str());
+        if (weight && weight->type == RendererOptionType::integer) {
+            ImGui::SetItemTooltip("%s", tooltip);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            int percent = weight->integer_value;
+            ImGui::BeginDisabled(!value);
+            if (ImGui::SliderInt("##weight", &percent, weight->integer_minimum, weight->integer_maximum,
+                                 ui_text("%d%% spawn weight"), ImGuiSliderFlags_Logarithmic))
+                config.set_integer(weight->key.c_str(), percent);
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("%s", ui_text("How often this type is picked against the other types that fit the place. "
+                                                "100% is the normal mix; 0% keeps it away. The number of critters stays the same."));
+            ImGui::EndDisabled();
+            ImGui::PopID();
+            return;
+        }
         break;
     }
     case RendererOptionType::integer: {
@@ -1385,10 +1605,11 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         } else if (std::strcmp(setting.key, "window_width") == 0) {
             // One row for both client dimensions; 0 x 0 is the monitor's size.
             int width = option->integer_value, height = configured_value(config, "window_height");
-            char preview[64] = u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430";
+            char preview[64]{};
+            std::snprintf(preview, sizeof(preview), "%s", ui_text("Native"));
             if (width > 0 && height > 0) format_window_size(preview, sizeof(preview), width, height);
             if (ImGui::BeginCombo("##value", preview)) {
-                if (ImGui::Selectable(u8"\u0420\u0430\u0437\u043c\u0435\u0440 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430", width <= 0 || height <= 0)) {
+                if (ImGui::Selectable(ui_text("Native"), width <= 0 || height <= 0)) {
                     config.set_integer("window_width", 0);
                     config.set_integer("window_height", 0);
                 }
@@ -1408,26 +1629,26 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
                 ImGui::CalcTextSize("x").x - 2.f * ImGui::GetStyle().ItemSpacing.x) * .5f);
             ImGui::SetNextItemWidth(field_width);
             if (ImGui::InputInt("##width", &width, 0, 0)) config.set_integer("window_width", width);
-            ImGui::SetItemTooltip(u8"\u0428\u0438\u0440\u0438\u043d\u0430 \u043e\u0431\u043b\u0430\u0441\u0442\u0438 \u0438\u0433\u0440\u044b \u0432 \u043f\u0438\u043a\u0441\u0435\u043b\u044f\u0445. \u0423\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u043e\u0431\u0430 \u0440\u0430\u0437\u043c\u0435\u0440\u0430 \u0432 0 \u0434\u043b\u044f \u0440\u0430\u0437\u043c\u0435\u0440\u0430 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430.");
+            ImGui::SetItemTooltip(ui_text("Client width in pixels. Set both dimensions to 0 for the monitor's native size."));
             ImGui::SameLine();
             ImGui::TextUnformatted("x");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(field_width);
             if (ImGui::InputInt("##height", &height, 0, 0)) config.set_integer("window_height", height);
-            ImGui::SetItemTooltip(u8"\u0412\u044b\u0441\u043e\u0442\u0430 \u043e\u0431\u043b\u0430\u0441\u0442\u0438 \u0438\u0433\u0440\u044b \u0432 \u043f\u0438\u043a\u0441\u0435\u043b\u044f\u0445. \u0421\u043b\u0438\u0448\u043a\u043e\u043c \u0431\u043e\u043b\u044c\u0448\u043e\u0435 \u043e\u043a\u043d\u043e \u0443\u043c\u0435\u043d\u044c\u0448\u0430\u0435\u0442\u0441\u044f \u0434\u043e \u0440\u0430\u0431\u043e\u0447\u0435\u0439 \u043e\u0431\u043b\u0430\u0441\u0442\u0438 \u044d\u043a\u0440\u0430\u043d\u0430.");
+            ImGui::SetItemTooltip(ui_text("Client height in pixels. A window larger than the work area is fitted to the screen."));
             ImGui::BeginDisabled(state.display_apply_pending);
-            if (ImGui::Button(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u044d\u043a\u0440\u0430\u043d")) {
+            if (ImGui::Button(ui_text("Apply display"))) {
                 state.display_apply = {configured_value(config, "display_mode") == 1 ? DisplayMode::windowed : DisplayMode::borderless,
                     configured_value(config, "window_width"), configured_value(config, "window_height")};
                 state.display_apply_pending = true;
                 state.display_apply_result[0] = 0;
             }
             ImGui::EndDisabled();
-            ImGui::SetItemTooltip(u8"\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a\u0430. \u0411\u0435\u0437\u0440\u0430\u043c\u043e\u0447\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442 \u0440\u0430\u0437\u043c\u0435\u0440 \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0430, \u043e\u043a\u043e\u043d\u043d\u044b\u0439 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044f \u0440\u0430\u0431\u043e\u0447\u0435\u0439 \u043e\u0431\u043b\u0430\u0441\u0442\u044c\u044e \u044d\u043a\u0440\u0430\u043d\u0430.");
+            ImGui::SetItemTooltip(ui_text("Apply without restarting. Borderless uses the monitor size; windowed fits the requested client size to the work area."));
             if (state.display_apply_result[0]) ImGui::TextWrapped("%s", state.display_apply_result);
         } else if (std::strcmp(setting.key, "frame_limit") == 0) {
             // Off / fixed rates / Custom; Custom shows a rate slider below.
-            const char* labels = u8"\u0412\u044b\u043a\u043b.\0" "30\0" "60\0" "90\0" "120\0" "144\0" "165\0" "240\0" u8"\u0421\u0432\u043e\u0451\0";
+            const char* labels = ui_choices("Off\0" "30\0" "60\0" "90\0" "120\0" "144\0" "165\0" "240\0" "Custom\0");
             int index = frame_limit_choice(option->integer_value);
             if (ImGui::Combo("##value", &index, labels)) {
                 // Custom keeps an existing custom rate, else starts at 75.
@@ -1443,13 +1664,13 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
             }
         } else if (setting.choices) {
             int index = option->integer_value - option->integer_minimum;
-            if (ImGui::Combo("##value", &index, setting.choices))
+            if (ImGui::Combo("##value", &index, ui_choices(setting.choices)))
                 config.set_integer(setting.key, option->integer_minimum + index);
         } else {
             int value = option->integer_value;
             const bool fade_transparency=std::strstr(setting.key,"_fade_transparency")!=nullptr;
-            const char* format=(std::strcmp(setting.key,"hud_fade_duration")==0 || std::strcmp(setting.key,"hud_fade_in_duration")==0 || std::strcmp(setting.key,"hud_fade_delay")==0)?u8"%d \u043c\u0441":
-                fade_transparency?(value==0?u8"%d%% (\u0432\u0438\u0434\u043d\u0430)":value==100?u8"%d%% (\u0441\u043a\u0440\u044b\u0442\u0430)":"%d%%"):"%d";
+            const char* format=ui_text((std::strcmp(setting.key,"hud_fade_duration")==0 || std::strcmp(setting.key,"hud_fade_in_duration")==0 || std::strcmp(setting.key,"hud_fade_delay")==0)?"%d ms":
+                fade_transparency?(value==0?"%d%% (solid)":value==100?"%d%% (hidden)":"%d%%"):"%d");
             if (ImGui::SliderInt("##value", &value, option->integer_minimum, option->integer_maximum,format)) {
                 const int step = std::max(1, option->integer_step);
                 value = option->integer_minimum + (value - option->integer_minimum + step / 2) / step * step;
@@ -1466,98 +1687,100 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     }
     }
     ImGui::EndDisabled();
-    if (note) ImGui::TextDisabled("%s", note);
-    ImGui::SetItemTooltip("%s", setting.tooltip);
+    if (note) ImGui::TextDisabled("%s", ui_text(note));
+    ImGui::SetItemTooltip("%s", tooltip);
     ImGui::PopID();
 }
 
-void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& config) {
+void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& config,
+                          const RendererResourceSnapshot& resources) {
     const float scale = state.ui_scale;
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f), ImGuiCond_Appearing,
                             ImVec2(.5f, .5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(860.f * scale, io.DisplaySize.x * .95f),
+    ImGui::SetNextWindowSize(ImVec2(std::min(680.f * scale, io.DisplaySize.x * .95f),
                                     std::min(660.f * scale, io.DisplaySize.y * .9f)), ImGuiCond_Appearing);
     bool keep_open = true;
-    bool accept = false, cancel = false;
-    if (ImGui::Begin(u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", state.settings_first_run ? nullptr : &keep_open,
+    bool accept = false, cancel = false, save_over_budget = false;
+    if (ImGui::Begin(window_title("Options", "options").c_str(), state.settings_first_run ? nullptr : &keep_open,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
         if (state.settings_first_frame) {
             ImGui::SetWindowFocus();
             state.settings_first_frame = false;
         }
         if (state.settings_first_run) {
-            ImGui::TextWrapped(u8"\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e \u0433\u0440\u0430\u0444\u0438\u043a\u0438 \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u043a\u043e\u043c\u043f\u044c\u044e\u0442\u0435\u0440\u0430. "
-                               u8"\u0415\u0433\u043e \u043c\u043e\u0436\u043d\u043e \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0432 \u043b\u044e\u0431\u043e\u0435 \u0432\u0440\u0435\u043c\u044f \u043a\u043b\u0430\u0432\u0438\u0448\u0435\u0439 F10.");
+            ImGui::TextWrapped(ui_text("Welcome. Choose the graphics quality for this PC. "
+                               "You can change it at any time with F10."));
             if (state.suggested_preset != GraphicsPreset::custom)
-                ImGui::Text(u8"\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0443\u0435\u0442\u0441\u044f \u0434\u043b\u044f %s: %s", state.adapter_name[0] ? state.adapter_name : u8"\u044d\u0442\u043e\u0439 \u0432\u0438\u0434\u0435\u043e\u043a\u0430\u0440\u0442\u044b",
-                            graphics_preset_name(state.suggested_preset));
+                ImGui::Text(ui_text("Suggested for %s: %s"), state.adapter_name[0] ? state.adapter_name : ui_text("this graphics card"),
+                            ui_text(graphics_preset_name(state.suggested_preset)));
         }
 
         if (!state.large_address_aware) {
-            ImGui::TextColored(ImVec4(1.f, .8f, .3f, 1.f), u8"\u0420\u0435\u0436\u0438\u043c 4 \u0413\u0411 \u043f\u0430\u043c\u044f\u0442\u0438 \u043e\u0442\u043a\u043b\u044e\u0447\u0451\u043d");
-            ImGui::SetItemTooltip(u8"\u0418\u0433\u0440\u0430 \u043c\u043e\u0436\u0435\u0442 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e 2 \u0413\u0411 \u043f\u0430\u043c\u044f\u0442\u0438. \u041d\u0430 \u0431\u043e\u043b\u044c\u0448\u0438\u0445 \u043a\u0430\u0440\u0442\u0430\u0445 \u0441 \u0432\u044b\u0441\u043e\u043a\u0438\u043c \u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e\u043c \u043f\u0430\u043c\u044f\u0442\u0438 \u043c\u043e\u0436\u0435\u0442 \u043d\u0435 \u0445\u0432\u0430\u0442\u0438\u0442\u044c.");
+            ImGui::TextColored(ImVec4(1.f, .8f, .3f, 1.f), ui_text("4 GB memory mode is off"));
+            ImGui::SetItemTooltip(ui_text("game.exe can use only 2 GB of memory; large maps with high settings may run out."));
             if (state.large_address_result) {
                 ImGui::TextWrapped("%s", state.large_address_result);
-            } else if (ImGui::Button(u8"\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c 4 \u0413\u0411 (\u043d\u0443\u0436\u0435\u043d \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a)")) {
+            } else if (ImGui::Button(ui_text("Enable 4 GB mode (restart required)"))) {
                 state.large_address_result = enable_large_address_mode();
             }
         }
         if (state.developer)
-            ImGui::TextDisabled(u8"\u0420\u0435\u0436\u0438\u043c \u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0430: \u0432\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0430\u0446\u0438\u044f \u0438 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435 FPS \u043f\u0440\u0438\u043d\u0443\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b.");
+            ImGui::TextDisabled(ui_text("Developer mode: VSync and the frame rate limit are forced off."));
         const GraphicsPreset detected = detect_graphics_preset(config);
         if (detected != GraphicsPreset::custom) state.preset_slider = static_cast<int>(detected);
-        ImGui::SeparatorText(u8"\u041a\u0430\u0447\u0435\u0441\u0442\u0432\u043e \u0433\u0440\u0430\u0444\u0438\u043a\u0438");
+        ImGui::SeparatorText(ui_text("Preset"));
         ImGui::SetNextItemWidth(-FLT_MIN);
         int slider = state.preset_slider;
-        if (ImGui::SliderInt("##preset", &slider, 0, kGraphicsPresetCount - 1, graphics_preset_name(detected),
+        if (ImGui::SliderInt("##preset", &slider, 0, kGraphicsPresetCount - 1, ui_text(graphics_preset_name(detected)),
                              ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput)) {
             state.preset_slider = slider;
             apply_graphics_preset(config, static_cast<GraphicsPreset>(slider));
         }
-        ImGui::SetItemTooltip(u8"\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u0438\u0437\u043a\u043e\u0435, \u0441\u0440\u0435\u0434\u043d\u0435\u0435, \u0432\u044b\u0441\u043e\u043a\u043e\u0435 \u0438\u043b\u0438 \u0443\u043b\u044c\u0442\u0440\u0430\u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e. \u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0445 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u043f\u0440\u043e\u0444\u0438\u043b\u044c \u043d\u0430 \u00ab\u0421\u0432\u043e\u0451\u00bb.");
+        ImGui::SetItemTooltip(ui_text("Drag to choose Low, Medium, High or Ultra. Changing an advanced option below makes it Custom."));
         // Stop labels under the slider.
         const float width = ImGui::GetContentRegionAvail().x;
         const float left = ImGui::GetCursorPosX();
         for (int index = 0; index < kGraphicsPresetCount; ++index) {
-            const char* name = graphics_preset_name(static_cast<GraphicsPreset>(index));
+            const char* name = ui_text(graphics_preset_name(static_cast<GraphicsPreset>(index)));
             const float text = ImGui::CalcTextSize(name).x;
             const float at = left + (width - text) * static_cast<float>(index) / (kGraphicsPresetCount - 1);
             if (index) ImGui::SameLine();
             ImGui::SetCursorPosX(at);
             ImGui::TextDisabled("%s", name);
         }
-        ImGui::TextWrapped("%s: %s", graphics_preset_name(detected), graphics_preset_summary(detected));
-        if (const auto* strength = config.find("depth_of_field_strength"))
-            if (configured_value(config, "depth_of_field") > 0 && strength->floating_value <= 0.f)
-                ImGui::TextWrapped(u8"\u0420\u0430\u0437\u043c\u044b\u0442\u0438\u0435 \u0444\u043e\u043d\u0430 \u043d\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u043f\u0440\u0438 \u043d\u0443\u043b\u0435\u0432\u043e\u0439 \u0441\u0438\u043b\u0435. \u0423\u0432\u0435\u043b\u0438\u0447\u044c\u0442\u0435 \u0441\u0438\u043b\u0443 \u0440\u0430\u0437\u043c\u044b\u0442\u0438\u044f. \u041f\u0440\u0438 \u0432\u0438\u0434\u0435 \u0441\u0432\u0435\u0440\u0445\u0443 \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435 \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u0447\u0451\u0442\u043a\u0438\u043c.");
+        ImGui::TextWrapped("%s: %s", ui_text(graphics_preset_name(detected)), ui_text(graphics_preset_summary(detected)));
+        if (!state.settings_first_run && state.suggested_preset != GraphicsPreset::custom)
+            ImGui::TextDisabled(ui_text("Suggested for %s: %s"), state.adapter_name[0] ? state.adapter_name : ui_text("this graphics card"),
+                                ui_text(graphics_preset_name(state.suggested_preset)));
+        draw_video_memory(state, resources);
 
         if (configured_value(config, "display_mode") != state.running_display[0] ||
             configured_value(config, "window_width") != state.running_display[1] ||
             configured_value(config, "window_height") != state.running_display[2])
-            ImGui::TextDisabled(u8"\u0420\u0435\u0436\u0438\u043c \u044d\u043a\u0440\u0430\u043d\u0430 \u0435\u0449\u0451 \u043d\u0435 \u0438\u0437\u043c\u0435\u043d\u0451\u043d. \u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u00ab\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u044d\u043a\u0440\u0430\u043d\u00bb \u0440\u044f\u0434\u043e\u043c \u0441 \u0440\u0430\u0437\u043c\u0435\u0440\u043e\u043c \u043e\u043a\u043d\u0430.");
-        state.settings_filter.Draw(u8"\u041f\u043e\u0438\u0441\u043a \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a",-1.f);
-        const float footer=ImGui::GetFrameHeightWithSpacing()+ImGui::GetTextLineHeightWithSpacing()*2.f;
+            ImGui::TextDisabled(ui_text("Display changes are pending. Use Apply display beside Window size."));
+        state.settings_filter.Draw(ui_text("Search options"),-1.f);
+        const float footer=ImGui::GetFrameHeightWithSpacing()+ImGui::GetStyle().ItemSpacing.y;
         if(ImGui::BeginTabBar("option_tabs")) {
           for(unsigned tab=0;tab<2;++tab) {
             const bool ui_tab=tab==1;
-            if(!ImGui::BeginTabItem(ui_tab?u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441":u8"\u0413\u0440\u0430\u0444\u0438\u043a\u0430"))continue;
+            if(!ImGui::BeginTabItem(window_title(ui_tab?"Interface":"Graphics",ui_tab?"interface":"graphics").c_str()))continue;
             if(ui_tab) {
                 draw_hud_layout_control(state,config);ImGui::SameLine();
-                if(ImGui::Button(u8"\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441"))reset_interface(config);
+                if(ImGui::Button(ui_text("Reset UI")))reset_interface(config);
             }
             if(ImGui::BeginChild(ui_tab?"interface_options":"graphics_options",ImVec2(0,-footer),ImGuiChildFlags_Borders)) {
             std::size_t category_count = 0, setting_count = 0;
             const char* const* categories = player_graphics_categories(category_count);
             const PlayerGraphicsSetting* settings = player_graphics_settings(setting_count);
             auto matches = [&](const PlayerGraphicsSetting& setting) {
-                const std::string text = std::string(setting.label) + " " + setting.key + " " +
-                                         setting.category + " " + setting.tooltip;
+                const std::string text = std::string(ui_setting_label(setting)) + " " + setting.label + " " + setting.key + " " +
+                                         ui_text(setting.category) + " " + ui_setting_tooltip(setting);
                 return state.settings_filter.PassFilter(text.c_str());
             };
             bool any_match = false;
             for (std::size_t category = 0; category < category_count; ++category) {
-                if((std::strcmp(categories[category],u8"\u0418\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441")==0)!=ui_tab)continue;
+                if((std::strcmp(categories[category],"Interface")==0)!=ui_tab)continue;
                 bool category_match = false;
                 for (std::size_t index = 0; index < setting_count; ++index)
                     if (std::strcmp(settings[index].category, categories[category]) == 0 && matches(settings[index]))
@@ -1565,38 +1788,81 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
                 if (!category_match) continue;
                 any_match = true;
                 if(ui_tab || state.settings_filter.IsActive())ImGui::SetNextItemOpen(true,ImGuiCond_Always);
-                if (!ImGui::CollapsingHeader(categories[category])) continue;
+                if (!ImGui::CollapsingHeader(window_title(categories[category], categories[category]).c_str())) continue;
                 if (ImGui::BeginTable(categories[category], 2,
                                       ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_RowBg)) {
                     for (std::size_t index = 0; index < setting_count; ++index)
                         if (std::strcmp(settings[index].category, categories[category]) == 0 && matches(settings[index]))
-                            draw_player_setting(config, settings[index], state.developer, state);
+                            draw_player_setting(config, settings[index], state.developer, state, resources.video_memory);
                     ImGui::EndTable();
                 }
             }
-            if(ui_tab && ImGui::CollapsingHeader(u8"\u0417\u0434\u043e\u0440\u043e\u0432\u044c\u0435 \u0438 \u0431\u043e\u0435\u0432\u044b\u0435 \u044d\u0444\u0444\u0435\u043a\u0442\u044b"))state.combat_ui.draw_settings(config);
-            if (!any_match) ImGui::TextDisabled(u8"\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.");
+            if(ui_tab && ImGui::CollapsingHeader(ui_text("Combat healthplates and effects")))state.combat_ui.draw_settings(config);
+            if (!any_match) ImGui::TextDisabled(ui_text("No matching options."));
             }
             ImGui::EndChild();ImGui::EndTabItem();
           }
           ImGui::EndTabBar();
         }
 
-        if (ImGui::Button(u8"\u041e\u041a", ImVec2(110.f * scale, 0.f))) accept = true;
+        if (ImGui::Button(ui_text("OK"), ImVec2(110.f * scale, 0.f))) accept = true;
         if (!state.settings_first_run) {
             ImGui::SameLine();
-            if (ImGui::Button(u8"\u041e\u0442\u043c\u0435\u043d\u0430", ImVec2(110.f * scale, 0.f))) cancel = true;
+            if (ImGui::Button(ui_text("Cancel"), ImVec2(110.f * scale, 0.f))) cancel = true;
         }
-        ImGui::TextWrapped(state.settings_first_run ? u8"\u041e\u041a \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 \u0432\u044b\u0431\u043e\u0440."
-                                                     : u8"\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0432\u0438\u0434\u043d\u044b \u0441\u0440\u0430\u0437\u0443. \u041e\u041a \u2014 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c, \u041e\u0442\u043c\u0435\u043d\u0430 \u0438\u043b\u0438 Esc \u2014 \u0432\u0435\u0440\u043d\u0443\u0442\u044c.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", ui_text(state.settings_first_run ? "OK saves your choice."
+                                                     : "Changes show immediately. OK saves, Cancel or Esc reverts."));
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
             !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
             (state.settings_first_run ? accept : cancel) = true;
+        // Save warning: the previewed settings need more than the card's
+        // local budget (enforced adapters only). Never blocks the save.
+        const VramBudgetSnapshot& vram = resources.vram_budget;
+        if (accept && vram.known && vram.enforced && vram.budget_bytes && vram.estimate_bytes() > vram.budget_bytes) {
+            accept = false;
+            state.vram_warning_need_mib = mib(vram.estimate_bytes());
+            state.vram_warning_budget_mib = mib(vram.budget_bytes);
+            ImGui::OpenPopup(window_title("Video memory", "video_memory").c_str());
+        }
+        if (ImGui::BeginPopupModal(window_title("Video memory", "video_memory").c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushTextWrapPos(440.f * scale);
+            ImGui::TextWrapped(ui_text("These settings need about %.0f MiB of video memory; this graphics card has %.0f MiB. "
+                               "The game may stutter badly or the driver may reset. Save anyway?"),
+                               state.vram_warning_need_mib, state.vram_warning_budget_mib);
+            ImGui::PopTextWrapPos();
+            if (ImGui::Button(ui_text("Save anyway"), ImVec2(130.f * scale, 0.f))) {
+                accept = save_over_budget = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(ui_text("Go back"), ImVec2(130.f * scale, 0.f)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
     }
     ImGui::End();
     if (!keep_open) cancel = true;
+    if (accept) {
+        // Marker for the crash safety net; a save within the budget clears it.
+        config.set_over_budget_pending(save_over_budget);
+        if (save_over_budget) {
+            char detail[96];
+            std::snprintf(detail, sizeof(detail), "saved settings needing about %.0f MiB over a %.0f MiB budget",
+                          state.vram_warning_need_mib, state.vram_warning_budget_mib);
+            bridge_report_event("vram_budget_save_over", detail);
+            install_quit_hook(state.window, state.config_path);
+        }
+    }
     if (accept) close_settings(state, config, true);
     else if (cancel) close_settings(state, config, false);
+}
+
+// The menu language follows the ui_language option every frame; Russian
+// needs the Cyrillic font, so without one the menus stay English.
+void apply_ui_language(DebugOverlay::Implementation& state, const RendererConfig& config) {
+    set_ui_language(state.cyrillic_font ? configured_value(config, "ui_language") : 1);
+    ImGui::GetIO().FontDefault = ui_russian() ? state.cyrillic_font : state.latin_font;
 }
 
 // First-run hint: UMA adapters expose no non-local segment; discrete cards
@@ -1622,6 +1888,7 @@ void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* devi
             if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) &&
                 SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &non_local))) {
                 memory = local.Budget;
+                state.adapter_budget_bytes = local.Budget;
                 integrated = non_local.Budget == 0;
             }
             adapter3->Release();
@@ -1633,6 +1900,26 @@ void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* devi
 }
 
 } // namespace
+
+const char* video_memory_group_name(VideoMemoryGroup group) noexcept {
+    switch (group) {
+    case VideoMemoryGroup::screen: return "Screen buffers (resolution, render scale)";
+    case VideoMemoryGroup::water: return "Water reflections and waves";
+    case VideoMemoryGroup::ambient_occlusion: return "Ambient occlusion";
+    case VideoMemoryGroup::fog: return "Volumetric fog";
+    case VideoMemoryGroup::sky: return "Sky and clouds";
+    case VideoMemoryGroup::sun_shadows: return "Sun shadows";
+    case VideoMemoryGroup::lamp_shadows: return "Lamp and torch shadows";
+    case VideoMemoryGroup::terrain_blend: return "Terrain blending, cliff and contact art";
+    case VideoMemoryGroup::ground_cover: return "Grass, ground cover and ambient maps";
+    case VideoMemoryGroup::critters: return "Critters";
+    case VideoMemoryGroup::game_textures: return "Game textures (models, terrain, interface)";
+    case VideoMemoryGroup::texture_arrays: return "Batched texture arrays";
+    case VideoMemoryGroup::geometry: return "Geometry (models, terrain, neighbouring maps)";
+    case VideoMemoryGroup::frame_uploads: return "Per-frame upload buffers";
+    default: return "?";
+    }
+}
 
 DebugOverlay::DebugOverlay() = default;
 
@@ -1657,6 +1944,7 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     state->context = context;
     state->config_path = config_path && *config_path ? config_path : renderer_config_path();
     config_.load(state->config_path.c_str());
+    set_ui_language(configured_value(config_, "ui_language"));
     // The proxy sized the window from these values before the renderer existed.
     state->running_display = {configured_value(config_, "display_mode"), configured_value(config_, "window_width"),
                               configured_value(config_, "window_height")};
@@ -1668,6 +1956,24 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     if (!state->developer && !config_.overlay_mode_loaded()) config_.set_overlay_mode(DebugOverlayMode::hidden);
     if (first_run_settings_due(config_.first_run_done(), state->developer))
         suggest_for_adapter(*state, device);
+    // Crash safety net: settings saved past the VRAM budget and no clean exit
+    // since (crash, hang, driver reset). Back to the adapter suggestion.
+    if (config_.over_budget_pending()) {
+        if (state->suggested_preset == GraphicsPreset::custom) suggest_for_adapter(*state, device);
+        const GraphicsPreset preset =
+            state->suggested_preset != GraphicsPreset::custom ? state->suggested_preset : GraphicsPreset::low;
+        apply_graphics_preset(config_, preset);
+        config_.set_over_budget_pending(false);
+        if (config_.save(state->config_path.c_str())) config_.clear_dirty();
+        std::snprintf(state->graphics_reset_text, sizeof(state->graphics_reset_text),
+                      ui_text("The last session ended unexpectedly after choosing settings above this card's video memory. "
+                              "Graphics were reset to %s; change them in F10."), ui_text(graphics_preset_name(preset)));
+        state->graphics_reset_pending = true;
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "over_budget_pending was set at startup; graphics reset to %s",
+                      graphics_preset_name(preset));
+        bridge_report_event("vram_budget_reset", detail);
+    }
     state->f10_was_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     state->f11_was_down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     state->ui_scale = overlay_scale_for_window(window);
@@ -1683,29 +1989,21 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // The built-in Latin-only font cannot display localized settings.
-    ImFont* settings_font = nullptr;
-    wchar_t windows_directory[MAX_PATH]{};
-    const UINT windows_length = GetWindowsDirectoryW(windows_directory, MAX_PATH);
-    if (windows_length > 0 && windows_length < MAX_PATH) {
-        for (const wchar_t* filename : {L"\\Fonts\\segoeui.ttf", L"\\Fonts\\tahoma.ttf"}) {
-            const std::wstring path = std::wstring(windows_directory) + filename;
-            HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (file == INVALID_HANDLE_VALUE) continue;
-            const DWORD size = GetFileSize(file, nullptr);
-            void* bytes = size > 0 && size < 16u * 1024u * 1024u ? ImGui::MemAlloc(size) : nullptr;
-            DWORD read = 0;
-            const bool complete = bytes && ReadFile(file, bytes, size, &read, nullptr) && read == size;
-            CloseHandle(file);
-            if (!complete) { if (bytes) ImGui::MemFree(bytes); continue; }
-            settings_font = io.Fonts->AddFontFromMemoryTTF(bytes, static_cast<int>(size), 16.f,
-                                                         nullptr, io.Fonts->GetGlyphRangesCyrillic());
-            if (settings_font) break;
-        }
+    state->latin_font = io.Fonts->AddFontDefault();
+    // Cyrillic: the built-in font is Latin only. The Windows UI font fills its
+    // missing glyphs (game text such as effect names) and is the whole menu
+    // font in Russian. Its glyphs are scaled up inside the unchanged line
+    // height so they match the built-in font's visual size.
+    if (const std::string cyrillic = system_ui_font_path(); !cyrillic.empty()) {
+        ImFontConfig merge;
+        merge.MergeMode = true;
+        merge.ExtraSizeScale = kCyrillicGlyphScale;
+        io.Fonts->AddFontFromFileTTF(cyrillic.c_str(), 0.f, &merge);
+        ImFontConfig own;
+        own.ExtraSizeScale = kCyrillicGlyphScale;
+        state->cyrillic_font = io.Fonts->AddFontFromFileTTF(cyrillic.c_str(), 13.f, &own);
     }
-    if (settings_font) io.FontDefault = settings_font;
-    else io.Fonts->AddFontDefault();
+    io.FontDefault = state->latin_font;
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.FontScaleMain = state->ui_scale;
@@ -1748,6 +2046,7 @@ void DebugOverlay::shutdown() noexcept {
     camp_inventory_cancel_drag();
     if (!implementation_) return;
     if (implementation_->imgui) ImGui::SetCurrentContext(implementation_->imgui);
+    remove_quit_hook();
     implementation_->combat_ui.shutdown();
     release_cursor_confinement(implementation_->cursor_confinement);
     if (GetCapture() == implementation_->window) ReleaseCapture();
@@ -1772,6 +2071,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
                              const RendererResourceSnapshot& resources,
                              const DebugResourceViewAvailability& debug_views,
                              RenderProfiler* profiler, const DebugShadowInfo& shadows) {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
     if (!implementation_ || !implementation_->imgui) return E_UNEXPECTED;
     ImGui::SetCurrentContext(implementation_->imgui);
     maintain();
@@ -1780,6 +2080,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     const bool combat_visible = implementation_->combat_ui.prepare(config_);
     if (!combat_visible && !visible() && resources.critters.labels.empty() && !notice_ && !capture_notice) return S_FALSE;
 
+    apply_ui_language(*implementation_, config_);
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -1799,7 +2100,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
         draw_full_overlay(*this, *implementation_, profile, bridge, resources, debug_views,
                           profiler, shadows);
     draw_hud_editor(*implementation_,config_);
-    if (implementation_->settings_open) draw_settings_window(*implementation_, config_);
+    if (implementation_->settings_open) draw_settings_window(*implementation_, config_, resources);
     // Critter labels remain visible after closing F10 (viewport fractions).
     if (!resources.critters.labels.empty()) {
         ImDrawList* draw = ImGui::GetBackgroundDrawList();
@@ -1821,12 +2122,12 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing)) {
             if (implementation_->capture_warmup || implementation_->capture_requested) {
-                ImGui::TextUnformatted(u8"\u0417\u0430\u0445\u0432\u0430\u0442 \u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0433\u043e \u043a\u0430\u0434\u0440\u0430...");
+                ImGui::TextUnformatted(ui_text("Capturing a diagnostic frame..."));
                 const float done = implementation_->capture_warmup ? 1.f - implementation_->capture_warmup / 90.f : 1.f;
                 ImGui::ProgressBar(done, ImVec2(-FLT_MIN, 0.f), "");
             } else {
-                ImGui::TextUnformatted(u8"\u041a\u0430\u0434\u0440 \u0437\u0430\u0445\u0432\u0430\u0447\u0435\u043d.");
-                ImGui::TextDisabled(u8"\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u0432 \u043f\u0430\u043f\u043a\u0435 \u0437\u0430\u0445\u0432\u0430\u0442\u043e\u0432 EID3D11.");
+                ImGui::TextUnformatted(ui_text("Frame captured."));
+                ImGui::TextDisabled(ui_text("Saved in the EID3D11 captures folder."));
             }
         }
         ImGui::End();
@@ -1851,6 +2152,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
 void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total) noexcept {
     if (!implementation_ || !implementation_->imgui) return;
     ImGui::SetCurrentContext(implementation_->imgui);
+    apply_ui_language(*implementation_, config_);
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -1859,10 +2161,10 @@ void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total
     const float scale = implementation_->ui_scale;
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * .5f, io.DisplaySize.y * .5f), ImGuiCond_Always, ImVec2(.5f, .5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(440.f * scale, io.DisplaySize.x * .9f), 0.f), ImGuiCond_Always);
-    if (ImGui::Begin(u8"\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u0448\u0435\u0439\u0434\u0435\u0440\u043e\u0432", nullptr,
+    if (ImGui::Begin(window_title("Preparing shaders", "preparing_shaders").c_str(), nullptr,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav)) {
-        ImGui::TextWrapped(u8"\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u0433\u0440\u0430\u0444\u0438\u043a\u0438 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a.");
+        ImGui::TextWrapped(ui_text("Preparing the graphics for your settings."));
         char label[48];
         std::snprintf(label, sizeof(label), "%zu / %zu", done, total);
         ImGui::ProgressBar(total ? static_cast<float>(done) / static_cast<float>(total) : 1.f,
@@ -1888,6 +2190,7 @@ void request_capture(DebugOverlay::Implementation& state, const RendererConfig& 
 
 void DebugOverlay::maintain() noexcept {
     if (!implementation_) return;
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
     if(game_hud_editing()) {
         HudPanelBounds mission;
         if(!widescreen_hud_panel_bounds(HudPanel::messages,mission)) {
@@ -1981,6 +2284,7 @@ void DebugOverlay::maintain() noexcept {
                               cursor_confinement_option_enabled(config_));
     bridge_trace_input_focus(implementation_->window, "frame", 0, 0,
                               static_cast<int>(config_.overlay_mode()));
+    if (g_quit_seen.load()) config_.set_over_budget_pending(false);  // cleared at WM_QUIT
     if (!implementation_->pending_save) return;
     if (config_.save(implementation_->config_path.c_str())) {
         config_.clear_dirty();
@@ -2026,6 +2330,47 @@ void DebugOverlay::open_first_run_settings() noexcept {
     if (first_run_pending()) open_settings(*implementation_, config_, true);
 }
 
+bool DebugOverlay::graphics_reset_notice_pending() const noexcept {
+    return implementation_ && implementation_->graphics_reset_pending;
+}
+
+const char* DebugOverlay::graphics_reset_notice(bool world_on_screen) noexcept {
+    if (!implementation_ || !implementation_->graphics_reset_pending) return nullptr;
+    auto& state = *implementation_;
+    const ULONGLONG now = GetTickCount64();
+    if (!state.graphics_reset_until) {
+        if (!world_on_screen) return nullptr;
+        state.graphics_reset_until = now + 20000;
+    }
+    if (now < state.graphics_reset_until && !state.settings_open) return state.graphics_reset_text;
+    state.graphics_reset_pending = false;
+    return nullptr;
+}
+
+void DebugOverlay::add_graphics_reset_notice(const char* text) noexcept {
+    if (!implementation_ || !text || !*text) return;
+    auto& state = *implementation_;
+    const std::size_t used = state.graphics_reset_pending ? std::strlen(state.graphics_reset_text) : 0;
+    std::snprintf(state.graphics_reset_text + used, sizeof(state.graphics_reset_text) - used, "%s%s", used ? " " : "", text);
+    state.graphics_reset_pending = true;
+}
+
+void DebugOverlay::clear_over_budget_marker() noexcept {
+    if (!implementation_ || !config_.over_budget_pending()) return;
+    config_.set_over_budget_pending(false);
+    if (config_.save(implementation_->config_path.c_str())) config_.clear_dirty();
+    bridge_report_event("vram_budget_marker_cleared", "clean exit after an over-budget save");
+}
+
+const char* vram_budget_level_text(unsigned level) noexcept {
+    switch (level) {
+    case 0: return "none";
+    case 1: return "textures 1/2";
+    case 2: return "textures 1/2, shadows 1/2";
+    default: return "textures 1/4, shadows 1/2";
+    }
+}
+
 bool DebugOverlay::consume_cull_freeze_toggle() noexcept {
     if (!implementation_) return false;
     const bool requested = implementation_->cull_freeze_toggle;
@@ -2042,12 +2387,14 @@ bool DebugOverlay::consume_capture_request() noexcept {
 }
 
 bool DebugOverlay::consume_display_apply(DisplaySettings& settings) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
     if (!implementation_ || !implementation_->display_apply_pending) return false;
     settings = implementation_->display_apply;
     implementation_->display_apply_pending = false;
     return true;
 }
 void DebugOverlay::finish_display_apply(const DisplaySettings& settings, HRESULT result, const char* message) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
     if (!implementation_) return;
     auto& state = *implementation_;
     std::snprintf(state.display_apply_result, sizeof(state.display_apply_result), "%s", message ? message : "");

@@ -12,7 +12,7 @@ namespace owned {
 //
 //   bit(s)  mask        meaning
 //   0       0x00000001  UPDATE_EXTENTS request (view only; never read by shaders)
-//   1       0x00000002  free
+//   1       0x00000002  unit (a creature or character: native_unit_flag; snow takes a sheen only)
 //   2       0x00000004  use default diffuse/specular colours
 //   3       0x00000008  specular enable
 //   4       0x00000010  owned preview specular RGB (native_preview_specular_rgb_flag)
@@ -33,6 +33,7 @@ namespace owned {
 constexpr std::uint32_t native_embedded_homogeneous_flag = 0x2u;
 #endif
 constexpr std::uint32_t native_neighbour_flag = 0x20u;
+constexpr std::uint32_t native_unit_flag = 0x2u;
 constexpr std::uint32_t native_preview_specular_rgb_flag = 0x10u;
 constexpr std::uint32_t native_sway_flag = 0x200u;
 constexpr std::uint32_t native_sway_shape_mask = 0x0ffffc00u;
@@ -55,9 +56,9 @@ static_assert((native_embedded_homogeneous_flag & (0x1u | 0x4u | 0x8u |
     "embedded homogeneous flag overlaps native fields");
 #endif
 constexpr std::uint32_t native_low_instance_flags =
-    0x1u | 0x4u | 0x8u | native_preview_specular_rgb_flag | 0x40u | native_neighbour_flag | native_ground_contact_flag |
+    0x1u | native_unit_flag | 0x4u | 0x8u | native_preview_specular_rgb_flag | 0x40u | native_neighbour_flag | native_ground_contact_flag |
     native_foliage_part_flag | native_sway_flag;
-static_assert(0x1u + 0x4u + 0x8u + native_preview_specular_rgb_flag + 0x40u + native_neighbour_flag + native_ground_contact_flag +
+static_assert(0x1u + native_unit_flag + 0x4u + 0x8u + native_preview_specular_rgb_flag + 0x40u + native_neighbour_flag + native_ground_contact_flag +
     native_foliage_part_flag + native_sway_flag == native_low_instance_flags,
     "single-bit instance flags overlap");
 static_assert((native_low_instance_flags & (native_sway_shape_mask | native_sway_root_mask)) == 0,

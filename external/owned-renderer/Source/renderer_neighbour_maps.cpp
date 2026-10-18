@@ -50,7 +50,12 @@ void Renderer::release_neighbour_maps() noexcept {
         (void)key;for(const auto& draw:draws)release_native_queued_draw(draw.record,false);
     }
     for(const auto& draw:neighbours_.ordered)release_native_queued_draw(draw.record,false);
+    // Their sun and shelter casters go with them; the static sun layers
+    // redraw without them (neighbour_caster_key).
+    release_native_shadow_bake(native_neighbour_shadow_bake_);
+    ++neighbour_caster_revision_;
     neighbours_={};
+    neighbour_receiver_cells_.clear();neighbour_receivers_publish({});
     dedicated_geometry_stale_=true; // their prebuilt pages go once unreferenced
     neighbour_border_fog_publish({});
     gc_neighbours_.clear(); // their ground cover goes with them
@@ -103,10 +108,29 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 const auto first_ordered=neighbours_.ordered.size();
                 const auto first_part=neighbours_.next_part;
                 neighbours_.peak_decoded_bytes=(std::max)(neighbours_.peak_decoded_bytes,upload->decoded_bytes);
-                struct Submission {Renderer* self;const FixedState* frame;const char* failure;};
-                Submission submission{this,&frame,nullptr};
+                // Receiver cells of this piece, kept only if it is accepted.
+                std::map<std::pair<int,int>,NativeWorldBounds> piece_cells;
+                struct Submission {Renderer* self;const FixedState* frame;const char* failure;
+                    std::map<std::pair<int,int>,NativeWorldBounds>* cells;};
+                Submission submission{this,&frame,nullptr,&piece_cells};
                 const auto submit=[](void* opaque,const NativeGeometryView& input,NativeGeometryResult& result)->bool {
                     auto& context=*static_cast<Submission*>(opaque);auto& self=*context.self;
+                    {
+                        bool usable=true;
+                        for(unsigned axis=0;axis<3;++axis)
+                            usable=usable&&std::isfinite(input.bounds_minimum[axis])&&std::isfinite(input.bounds_maximum[axis])&&
+                                input.bounds_minimum[axis]<=input.bounds_maximum[axis];
+                        if(usable) {
+                            const std::pair<int,int> key{int(std::floor((input.bounds_minimum[0]+input.bounds_maximum[0])*.5f/32.f)),
+                                int(std::floor((input.bounds_minimum[1]+input.bounds_maximum[1])*.5f/32.f))};
+                            auto& cell=(*context.cells)[key];
+                            if(!cell.valid){cell.minimum=input.bounds_minimum;cell.maximum=input.bounds_maximum;cell.valid=true;}
+                            else for(unsigned axis=0;axis<3;++axis) {
+                                cell.minimum[axis]=(std::min)(cell.minimum[axis],input.bounds_minimum[axis]);
+                                cell.maximum[axis]=(std::max)(cell.maximum[axis],input.bounds_maximum[axis]);
+                            }
+                        }
+                    }
                     const FixedState state=neighbour_submission_state(*context.frame,input.semantic_kind,input.ordering);
                     const auto first=self.native_pending_draws_.size();
                     const HRESULT hr=self.queue_native_terrain(input,state,nullptr,&result);
@@ -206,6 +230,25 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.owned_texture.format=node.texture_format;view.owned_texture.mips=node.texture_mips.data();
                     view.owned_texture.mip_count=static_cast<UINT>(node.texture_mips.size());
                     view.semantic_kind=SemanticKind::figure;view.flags=native_neighbour_flag|native_ground_contact_flag|8u;
+                    // Sway and foliage by the main map's rule
+                    // (retained_visual_part_values): a tree's parts sway around
+                    // its root node, and a part of a swaying plant whose
+                    // triangles sample cut-out texels is foliage. The assembly's
+                    // parts are its drawn nodes, in order.
+                    if(const auto* assembly=candidate->assembly.get();
+                       assembly&&assembly->sways&&assembly->parts.size()==candidate->nodes.size()) {
+                        const auto& part=assembly->parts[node_index];
+                        if(retained_visual_part_sway(part).foliage)view.flags|=native_foliage_part_flag;
+                        const auto sway=candidate->root_valid?retained_object_space_sway_flags(*assembly,part):0u;
+                        if(sway) {
+                            view.flags|=sway;
+                            const std::array<float,4> root{candidate->root_world[0]+float(upload->selection.x),
+                                candidate->root_world[1]+float(upload->selection.y),candidate->root_world[2],1.f};
+                            for(unsigned axis=0;axis<3;++axis)
+                                view.world.sway_root[axis]=map_placement[axis*4]*root[0]+map_placement[axis*4+1]*root[1]+
+                                    map_placement[axis*4+2]*root[2]+map_placement[axis*4+3];
+                        }
+                    }
                     view.contact_world_height=contact_hi-contact_lo;view.contact_map=first_part+1;
                     view.ordering=NativeOrdering::reorderable;view.contribution={true,true,0};
                     NativeGeometryResult result;if(!submit(&submission,view,result)){accepted=false;step="decoration.submit";break;}
@@ -213,6 +256,18 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     if(!accepted)break;
                 }
                 if(accepted) {
+                    ++neighbour_caster_revision_; // its decorations cast from the next sun redraw
+                    for(const auto& [key,box]:piece_cells) {
+                        auto& cell=neighbour_receiver_cells_[key];
+                        if(!cell.valid){cell=box;continue;}
+                        for(unsigned axis=0;axis<3;++axis) {
+                            cell.minimum[axis]=(std::min)(cell.minimum[axis],box.minimum[axis]);
+                            cell.maximum[axis]=(std::max)(cell.maximum[axis],box.maximum[axis]);
+                        }
+                    }
+                    std::vector<NativeWorldBounds> cells;cells.reserve(neighbour_receiver_cells_.size());
+                    for(const auto& [key,box]:neighbour_receiver_cells_){(void)key;cells.push_back(box);}
+                    neighbour_receivers_publish(std::move(cells));
                     neighbours_.accepted.push_back(own);
                     const auto edges=neighbour_fog_edges(active,neighbours_.accepted);
                     neighbour_border_fog_publish({active,edges,neighbour_fog_contacts(active,neighbours_.accepted),fog_range});

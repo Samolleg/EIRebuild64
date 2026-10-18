@@ -68,7 +68,8 @@ enum Field : std::uint32_t { fd_none = 0, fd_swamp_edge, fd_beach, fd_river, fd_
 enum Palette : std::uint32_t { pal_none = 0, pal_flower, pal_leaf, pal_stone };
 // Material art in the pixel shader: procedural colour, the game's tree bark /
 // end grain, the placed stone props' rock art, snow pile.
-enum Material : std::uint32_t { mat_plain = 0, mat_bark, mat_stone, mat_snow, mat_ground, mat_wet, mat_glow };
+enum Material : std::uint32_t { mat_plain = 0, mat_bark, mat_stone, mat_snow, mat_ground, mat_wet, mat_glow,
+    mat_strand, mat_wrack }; // painted, alpha-cut strands (procedural, kind 0): seagrass; beach wrack
 
 // The decoded loader keys are ASCII-folded. Both base and HD packs preserve
 // these square atlas layouts; normalized crops do not depend on pixel size.
@@ -119,10 +120,10 @@ inline GroundCoverRule make_rule(std::uint32_t mesh, std::uint32_t areas, float 
     case gm_shell: case gm_conch:
         r.align = 1; r.normal_blend = .2f; r.lod_near = 35; r.lod_far = 100; r.contact = .3f; r.blend_height = .12f; r.sink = .1f; break;
     case gm_kelp:
-        r.align = 1; r.normal_blend = .3f; r.lod_near = 45; r.lod_far = 130; r.contact = .35f; r.blend_height = .03f;
-        r.sx_max = 1.8f; r.flags = rf_shore_tangent; break;
+        r.material = mat_wrack; r.align = 1; r.normal_blend = .3f; r.lod_near = 45; r.lod_far = 130; r.contact = .35f; r.blend_height = .03f;
+        r.sx_max = 1.2f; r.flags = rf_shore_tangent; break;
     case gm_seagrass:
-        r.align = .3f; r.normal_blend = .5f; r.sz_min = .8f; r.sz_max = 1.4f; r.lod_near = 50; r.lod_far = 140;
+        r.material = mat_strand; r.align = .3f; r.normal_blend = .5f; r.sz_min = .8f; r.sz_max = 1.4f; r.lod_near = 50; r.lod_far = 140;
         r.flags = rf_tuft | rf_depth_clamp; break;
     case gm_blades: case gm_flower:
         r.align = .25f; r.normal_blend = .75f; r.sz_min = .8f; r.sz_max = 1.25f; r.lod_near = 40; r.lod_far = 110;
@@ -339,7 +340,7 @@ inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
         // former even line; denser inside a clump. All beach wrack keeps to
         // sand (ETERRTYPE sand, or a tile whose atlas slot has a sand corner
         // family: gcSandFamilyAt) on gentle ground near the water (kelp_ground).
-        auto* kelp = add(make_rule(gm_kelp, sand, 11, .4f, .9f)); field(kelp, fd_beach, .15f, 1.4f);
+        auto* kelp = add(make_rule(gm_kelp, sand, 8, .4f, .9f)); field(kelp, fd_beach, .15f, 1.4f);
         kelp->flags |= rf_shore_clumps;
         auto* shell = add(make_rule(gm_shell, sand, .6f, .08f, .12f)); field(shell, fd_beach, 0, 5);
         auto* conch = add(make_rule(gm_conch, sand, .08f, .07f, .1f)); field(conch, fd_beach, 0, 4);

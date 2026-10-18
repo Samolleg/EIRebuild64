@@ -21,7 +21,7 @@ struct NativePointShadowStats {
     std::uint64_t radius_dirty=0,terrain=0,light=0,list=0,reset=0,allocation_failures=0,pressure_drops=0;
     std::uint64_t reorder_only=0,reset_epoch=0,reset_journal_full=0,reset_class_flags=0,reset_undetected=0,reset_pool=0;
     std::uint64_t eligibility_lost=0,strength_zeroed=0,static_to_dynamic=0,merged_lights=0;
-    std::uint64_t casting_lights=0,neighbour_within_1=0,neighbour_within_2=0,neighbour_within_4=0; // latest frame
+    std::uint64_t casting_lights=0; // latest frame
     bool pass_ran=false;
 };
 struct NativePointLightValue {

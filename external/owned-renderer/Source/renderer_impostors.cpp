@@ -74,8 +74,7 @@ public:
         context_->HSGetShader(&hs_, nullptr, nullptr);
         context_->DSGetShader(&ds_, nullptr, nullptr);
         context_->GSGetShader(&gs_, nullptr, nullptr);
-        context_->VSGetConstantBuffers(0, 1, &vs_constants_);
-        context_->PSGetConstantBuffers(0, 1, &ps_constants_);
+        constants_.save(context_, 0); // with its ring range (constant_ring.h)
         context_->VSGetShaderResources(1, 1, &vs_resource_);
         context_->PSGetShaderResources(0, 1, &ps_resource_);
         context_->PSGetShaderResources(44, 2, ps_atlas_);
@@ -98,8 +97,8 @@ public:
         context_->HSSetShader(hs_, nullptr, 0);
         context_->DSSetShader(ds_, nullptr, 0);
         context_->GSSetShader(gs_, nullptr, 0);
-        context_->VSSetConstantBuffers(0, 1, &vs_constants_);
-        context_->PSSetConstantBuffers(0, 1, &ps_constants_);
+        constants_.restore(context_, 0);
+        constants_.release();
         context_->VSSetShaderResources(1, 1, &vs_resource_);
         context_->PSSetShaderResources(0, 1, &ps_resource_);
         context_->PSSetShaderResources(44, 2, ps_atlas_);
@@ -109,7 +108,7 @@ public:
         context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets_, depth_);
         context_->OMSetBlendState(blend_, blend_factor_, sample_mask_);
         context_->OMSetDepthStencilState(depth_state_, stencil_);
-        IUnknown* held[] = {layout_, index_, vs_, ps_, hs_, ds_, gs_, vs_constants_, ps_constants_, vs_resource_,
+        IUnknown* held[] = {layout_, index_, vs_, ps_, hs_, ds_, gs_, vs_resource_,
                             ps_resource_, ps_atlas_[0], ps_atlas_[1], sampler_, raster_, depth_, blend_, depth_state_};
         for (IUnknown* item : held) if (item) item->Release();
         for (ID3D11RenderTargetView* target : targets_) if (target) target->Release();
@@ -128,8 +127,7 @@ private:
     ID3D11HullShader* hs_ = nullptr;
     ID3D11DomainShader* ds_ = nullptr;
     ID3D11GeometryShader* gs_ = nullptr;
-    ID3D11Buffer* vs_constants_ = nullptr;
-    ID3D11Buffer* ps_constants_ = nullptr;
+    owned::SavedConstantSlot constants_;
     ID3D11ShaderResourceView* vs_resource_ = nullptr;
     ID3D11ShaderResourceView* ps_resource_ = nullptr;
     ID3D11ShaderResourceView* ps_atlas_[2]{};
@@ -249,8 +247,8 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noe
         append_impostor_shader_programs(programs);
         ComPtr<ID3DBlob> vs, ps, errors;
         if (FAILED(compile_shader(programs[0], &vs, &errors)) || FAILED(compile_shader(programs[1], &ps, &errors)) ||
-            FAILED(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &impostors_.vs)) ||
-            FAILED(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &impostors_.ps))) {
+            FAILED(create_shader(device_.Get(),vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &impostors_.vs)) ||
+            FAILED(create_shader(device_.Get(),ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &impostors_.ps))) {
             impostor_failure("impostor bake shaders failed to compile or create");
             return S_OK;
         }

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <array>
 #include <memory>
+#include <mutex>
 
 #include "debug_overlay_config.h"
 #include "graphics_settings.h"
@@ -41,6 +42,44 @@ struct DebugShadowInfo {
     bool pass_in_progress = false;
 };
 
+// Video memory of the renderer's own GPU resources by feature, for the
+// player settings window. Renderer::video_memory_breakdown sums the live
+// resources each group owns from their descriptions (no driver queries).
+enum class VideoMemoryGroup : std::uint8_t {
+    screen, water, ambient_occlusion, fog, sky, sun_shadows, lamp_shadows, terrain_blend,
+    ground_cover, critters, game_textures, texture_arrays, geometry, frame_uploads, count
+};
+constexpr std::size_t kVideoMemoryGroupCount = static_cast<std::size_t>(VideoMemoryGroup::count);
+const char* video_memory_group_name(VideoMemoryGroup group) noexcept;
+struct VideoMemoryBreakdown {
+    std::array<std::uint64_t, kVideoMemoryGroupCount> bytes{};
+    bool valid = false;
+    // Hook for the terrain material cache (virtual texture) counters: its
+    // owner sets these in Renderer::video_memory_breakdown; "n/a" until then.
+    bool terrain_cache_known = false;
+    std::uint64_t terrain_cache_bytes = 0;
+    std::uint64_t total() const noexcept {
+        std::uint64_t sum = terrain_cache_known ? terrain_cache_bytes : 0;
+        for (const auto value : bytes) sum += value;
+        return sum;
+    }
+};
+
+// WDDM local-budget enforcement state (renderer_vram_budget.cpp).
+struct VramBudgetSnapshot {
+    bool known = false;       // polled at least once
+    bool enforced = false;    // discrete adapter, or EID3D11_VRAM_BUDGET_MB set
+    bool uma = false;         // no non-local segment: not enforced
+    bool overridden = false;  // budget from EID3D11_VRAM_BUDGET_MB
+    unsigned level = 0;       // 0 none, 1 textures 1/2, 2 + shadows 1/2, 3 textures 1/4 + shadows 1/2
+    std::uint64_t budget_bytes = 0, usage_bytes = 0;
+    std::uint64_t shed_bytes = 0;     // measured savings of the reductions in effect
+    std::uint64_t evicted_bytes = 0;  // idle textures evicted this session
+    // What the chosen settings need: live use plus the reductions in effect.
+    std::uint64_t estimate_bytes() const noexcept { return usage_bytes + shed_bytes; }
+};
+const char* vram_budget_level_text(unsigned level) noexcept;
+
 struct RendererResourceSnapshot {
     std::uint64_t presentation_frame = 0;
     double present_interval_ms = 0.0;
@@ -65,6 +104,13 @@ struct RendererResourceSnapshot {
     std::uint64_t gpu_usage_bytes = 0;
     std::uint64_t renderer_resident_bytes = 0;
     std::uint64_t transient_upload_bytes = 0;
+    // Owned GPU caches (map-revisit residency): owned texture entries and
+    // bytes, texture array bytes, geometry page capacity and live bytes.
+    std::uint64_t owned_texture_entries = 0;
+    std::uint64_t owned_texture_bytes = 0;
+    std::uint64_t texture_array_bytes = 0;
+    std::uint64_t geometry_page_bytes = 0;
+    std::uint64_t geometry_live_bytes = 0;
     std::uint64_t cpu_surface_bytes = 0;
     std::uint64_t gpu_texture_bytes = 0;
     std::uint64_t double_resident_bytes = 0;
@@ -121,10 +167,12 @@ struct RendererResourceSnapshot {
     bool culling_frozen = false;
     char fog_status[512] = "";  // world fog state line (renderer_fog.cpp)
     bool fog_problem = false;
-    char sky_status[384] = "";  // owned sky state line (renderer_sky.cpp)
+    char sky_status[576] = "";  // owned sky state line (renderer_sky.cpp)
     bool sky_problem = false;
     char particle_status[256] = "";  // ambient particle pass line (renderer_ambient_particles.cpp)
     bool particle_problem = false;
+    char precipitation_status[256] = "";  // owned rain/snow pass line (renderer_precipitation.cpp)
+    bool precipitation_problem = false;
     char critter_status[768] = "";
     char emissive_status[192] = "";  // emissive-surface lights (lava) of the active map
     CritterSummary critters{};   // F11 normal_frame.json "critters"; zero when off or stale
@@ -175,7 +223,16 @@ struct RendererResourceSnapshot {
     std::uint64_t res_cache_override_gets = 0;
     std::uint64_t res_cache_override_releases = 0;
     std::uint64_t res_cache_icon_releases = 0;
+    VideoMemoryBreakdown video_memory{};  // filled while the settings window is open
+    VramBudgetSnapshot vram_budget{};
 };
+
+// Scene thread (render_thread option): the overlay frame (ImGui, combat UI)
+// runs on the scene thread while window messages arrive on the game thread.
+// Both hold this lock around ImGui and combat UI state; the window procedure
+// releases it before the game's own handler runs, so it never waits for the
+// scene thread while holding it.
+std::recursive_mutex& debug_overlay_lock() noexcept;
 
 class DebugOverlay {
 public:
@@ -243,6 +300,18 @@ public:
     // for a state the player must not mistake for normal rendering.
     void set_status_notice(const char* text) noexcept { notice_ = text; }
     bool has_status_notice() const noexcept { return notice_ != nullptr; }
+    // Over-budget crash safety net ([setup] over_budget_pending). The marker
+    // is set when the player saves settings past the VRAM budget and cleared
+    // at WM_QUIT (the orderly quit, before teardown) or, as a fallback, in
+    // Renderer::release; still set at startup, graphics were reset to the
+    // adapter suggestion and this notice is owed once a world is on screen
+    // (world_on_screen starts its 20 s).
+    bool graphics_reset_notice_pending() const noexcept;
+    const char* graphics_reset_notice(bool world_on_screen) noexcept;
+    void clear_over_budget_marker() noexcept;  // clean exit (Renderer::release)
+    // Another startup recovery owes the same one-time notice (appended when
+    // the over-budget reset already owes one). Text is already translated.
+    void add_graphics_reset_notice(const char* text) noexcept;
 
     struct Implementation;
 

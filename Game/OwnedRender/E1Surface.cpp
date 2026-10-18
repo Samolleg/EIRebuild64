@@ -61,7 +61,8 @@ std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id
     return found == entries().end() ? nullptr : found->second.value;
 }
 HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
-    std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture) noexcept {
+    std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture, owned::SurfaceImage*& image) noexcept {
+    image = nullptr; // No mutable proxy image backs an immutable host surface.
     texture.Reset();
     if (!device || !id || !generation) return E_INVALIDARG;
     const std::lock_guard<std::mutex> lock(guard());

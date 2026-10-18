@@ -29,6 +29,12 @@ enum Bird : std::uint8_t {
     bird_none = 0xff,
 };
 
+// The species (spawn rule and player setting) a bird variant flies for.
+constexpr Species bird_species(Bird b) noexcept {
+    return b == bird_snowbird ? sp_snowbird : b == bird_crow || b == bird_raven ? sp_raven
+         : b == bird_vulture ? sp_vulture : b == bird_bat ? sp_bat : sp_bird;
+}
+
 constexpr std::uint32_t zbit(ambient::ZoneClass z) noexcept { return 1u << z; }
 constexpr std::uint32_t abit(ambient::AreaClass a) noexcept { return 1u << a; }
 

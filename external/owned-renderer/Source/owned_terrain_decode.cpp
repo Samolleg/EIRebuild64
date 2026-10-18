@@ -88,6 +88,7 @@ bool prepare_owned_terrain_source_view(const OwnedTerrainFramePacket& packet,
         packet.source->pages[command.material].mip_count > 1) {
         view.terrain_page = &packet.source->pages[command.material];
     }
+    view.terrain_page_count = packet.source->texture_count + 2u;
     view.decode_context = &context;
     view.decode = [](void* opaque, NativeGeometryDecodeTarget& target) { const auto* input = static_cast<const OwnedTerrainSourceDecodeContext*>(opaque); return owned_terrain_decode_valid(input, target) && decode_owned_terrain_tiles(*input, target); };
     return true;
@@ -205,9 +206,11 @@ std::uint32_t terrain_vertices_per_tile(std::uint32_t lod) {
 
 bool set_owned_terrain_material(const TerrainObjectDescriptor& object,
                                 NativeTerrainVertex& vertex) noexcept {
-    if (!std::isfinite(object.opacity) || object.opacity < 0.0f ||
-        object.opacity > 1.0f) return false;
-    vertex.opacity = static_cast<std::uint32_t>(object.opacity * 255.0f) / 255.0f;
+    // The game turns opacity into a byte without a range check; an
+    // out-of-range value is drawn clamped instead of dropping the sector.
+    if (!std::isfinite(object.opacity)) return false;
+    const float opacity = (std::min)((std::max)(object.opacity, 0.0f), 1.0f);
+    vertex.opacity = static_cast<std::uint32_t>(opacity * 255.0f) / 255.0f;
     for (std::size_t axis = 0; axis < 3; ++axis) {
         const float emissive = object.color[axis] * object.self_illumination;
         if (!std::isfinite(emissive)) return false;
@@ -509,6 +512,11 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                         // only); bits 16-31 hold the facet flatness.
                         terrain_vertex.grid_index = owned_terrain_facet_flatness(
                             *context->source, *context->sector, source_index) << 16;
+                        // Dry base vertices: liquid_fill holds the authored
+                        // pit depth the shadow casters fill (L-085).
+                        if (!water_tile)
+                            terrain_vertex.liquid_fill = owned_terrain_pit_fill(
+                                *context->source, *context->sector, source_index);
                         if (material_tile)
                             terrain_vertex.flags |= native_terrain_material_vertex | fill_flags;
                         else if (long_tile)
@@ -702,6 +710,7 @@ std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const Ter
 // write time (a changed file gets a new key). Only these small headers are
 // kept; base tiles are re-read per load (32-bit address space).
 namespace {
+bool load_cancelled(const std::atomic<bool>* cancel) noexcept {return cancel&&cancel->load(std::memory_order_relaxed);}
 struct MapFileCache {
  std::mutex lock;
  std::map<std::wstring,TerrainTileMapFile> headers;
@@ -713,7 +722,7 @@ MapFileCache& map_file_cache(){static MapFileCache cache;return cache;}
 // `slots` atlas slots, except the map itself (`own`, already in memory).
 // Returns the number of maps added.
 std::size_t pool_map_files(const ResourceStoreConfig& mounts,const std::string& space,unsigned slots,
-    const std::string& own,const std::vector<bool>& skip,TerrainTileVertexRuns& runs){
+    const std::string& own,const std::vector<bool>& skip,TerrainTileVertexRuns& runs,const std::atomic<bool>* cancel){
  std::size_t added=0;
  std::vector<TerrainTilePlacement> tiles;
  std::map<std::wstring,bool> taken;
@@ -723,6 +732,7 @@ std::size_t pool_map_files(const ResourceStoreConfig& mounts,const std::string& 
   const HANDLE find=FindFirstFileW((root+L"\\*.mpr").c_str(),&found);
   if(find==INVALID_HANDLE_VALUE)continue;
   do{
+   if(load_cancelled(cancel))break;
    if(found.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)continue;
    std::wstring name=found.cFileName;
    for(auto& c:name)if(c>=L'A'&&c<=L'Z')c=wchar_t(c+32);
@@ -748,39 +758,58 @@ std::size_t pool_map_files(const ResourceStoreConfig& mounts,const std::string& 
  return added;
 }
 
-// Content key of every atlas slot: FNV-1a over the level-0 bytes of its cell
+// Content key of every atlas slot: a hash of the level-0 bytes of its cell
 // (exact block or pixel rows, with the format and cell size), so a slot
-// keeps its key when a repacked atlas moves it. Slot pos of a page is cell
+// keeps its key when a repacked atlas moves it. Keys are compared only
+// within one load, so their values never need to persist. Two 32-bit lanes
+// over 4-byte words (FNV-1a and a MurmurHash3 body): the per-byte 64-bit
+// FNV-1a called _allmul for every byte on x86. Slot pos of a page is cell
 // column pos%side, row side-1-pos/side from the top of the image (the blend
 // shader's cell rule). Evidence: the zone19 atlases of 2026-09-28 and
 // 2026-10-08 match slot for slot under this rule (every repacked cliff slot
 // pair byte-identical), not under the top-down row order. False when a page
 // is missing or does not divide into cells.
 bool terrain_atlas_slot_keys(const ResourceStore& store,const std::string& space,unsigned pages,unsigned side,
-    std::vector<std::uint64_t>& keys){
+    std::vector<std::uint64_t>& keys,const std::atomic<bool>* cancel){
  keys.assign(std::size_t(pages)*side*side,0);
  if(!pages||!side)return false;
+ struct Key{
+  std::uint32_t a=2166136261u,b=0x9747b28cu;std::size_t length=0;
+  static std::uint32_t rotl(std::uint32_t v,int r){return (v<<r)|(v>>(32-r));}
+  void word(std::uint32_t w){
+   a=(a^w)*16777619u;
+   std::uint32_t k=rotl(w*0xcc9e2d51u,15)*0x1b873593u;
+   b=rotl(b^k,13)*5u+0xe6546b64u;length+=4;
+  }
+  void bytes(const std::uint8_t* p,std::size_t n){
+   for(;n>=4;p+=4,n-=4){std::uint32_t w;std::memcpy(&w,p,4);word(w);}
+   if(n){std::uint32_t w=0;std::memcpy(&w,p,n);word(w^(std::uint32_t(n)<<24));}
+  }
+  std::uint64_t finish() const{
+   std::uint32_t h=b^std::uint32_t(length);
+   h^=h>>16;h*=0x85ebca6bu;h^=h>>13;h*=0xc2b2ae35u;h^=h>>16;
+   return (std::uint64_t(h)<<32)|a;
+  }
+ };
  for(unsigned page=0;page<pages;++page){
+  if(load_cancelled(cancel))return false;
   char suffix[16];std::snprintf(suffix,sizeof(suffix),"%03u.mmp",page);
   ResourceBlob blob;ResourceFailure failure;TextureCpuAsset texture;
   if(!store.resolve(space+suffix,blob,failure)||!parse_texture_asset(blob,texture,failure)||texture.mips.empty()||!texture.source)return false;
   const auto& mip=texture.mips[0];
-  const bool blocks=texture.format==MmpFormat::dxt1||texture.format==MmpFormat::dxt3;
+  const bool blocks=texture.format==MmpFormat::dxt1||texture.format==MmpFormat::dxt3||texture.format==MmpFormat::dxt5;
   const unsigned unit=blocks?4u:1u;
   if(!mip.width||!mip.height||mip.width%side||mip.height%side||(mip.width/side)%unit||(mip.height/side)%unit)return false;
   const std::size_t rows=mip.height/unit,row_bytes=mip.bytes/rows,cell_rows=(mip.height/side)/unit,cell_bytes=row_bytes/side;
   if(rows*row_bytes!=mip.bytes||cell_bytes*side!=row_bytes)return false;
   const std::uint8_t* base=texture.source->data()+mip.byte_offset;
   for(unsigned pos=0;pos<side*side;++pos){
-   std::uint64_t h=1469598103934665603ull;
-   const auto mix=[&h](std::uint64_t v){for(unsigned b=0;b<8;++b){h^=(v>>(b*8))&255u;h*=1099511628211ull;}};
-   mix(texture.format_signature);mix(mip.width/side);
+   Key h;
+   const std::uint64_t head[2]={std::uint64_t(texture.format_signature),std::uint64_t(mip.width/side)};
+   h.bytes(reinterpret_cast<const std::uint8_t*>(head),sizeof(head));
    const std::size_t r=side-1-pos/side,c=pos%side;
-   for(std::size_t y=0;y<cell_rows;++y){
-    const std::uint8_t* row=base+(r*cell_rows+y)*row_bytes+c*cell_bytes;
-    for(std::size_t i=0;i<cell_bytes;++i){h^=row[i];h*=1099511628211ull;}
-   }
-   keys[std::size_t(page)*side*side+pos]=h;
+   for(std::size_t y=0;y<cell_rows;++y)h.bytes(base+(r*cell_rows+y)*row_bytes+c*cell_bytes,cell_bytes);
+   keys[std::size_t(page)*side*side+pos]=h.finish();
   }
  }
  return true;
@@ -795,7 +824,7 @@ bool terrain_atlas_slot_keys(const ResourceStore& store,const std::string& space
 // slots still open. adopted[s] marks the slots taken; text names each
 // profile used.
 std::size_t adopt_profile_families(const ResourceStore& store,const TerrainTileMapInput& input,
-    TerrainTileFamilies& out,std::vector<bool>& adopted,std::string& text){
+    TerrainTileFamilies& out,std::vector<bool>& adopted,std::string& text,const std::atomic<bool>* cancel){
  const unsigned slots=input.slots;
  out.signatures.assign(slots,{});out.names.clear();adopted.assign(slots,false);
  const auto map_name=[](const std::string& space){
@@ -806,11 +835,12 @@ std::size_t adopt_profile_families(const ResourceStore& store,const TerrainTileM
  };
  std::vector<std::uint64_t> own;
  if(!input.tiles_per_side||input.pages*input.tiles_per_side*input.tiles_per_side!=slots||
-    !terrain_atlas_slot_keys(store,input.space,input.pages,input.tiles_per_side,own))return 0;
+    !terrain_atlas_slot_keys(store,input.space,input.pages,input.tiles_per_side,own,cancel))return 0;
  struct Candidate{std::string space;unsigned slots,pages;std::string json;};
  std::vector<Candidate> candidates;
  const std::string prefix="ei_atlas_profile_",own_name=map_name(input.space);
  for(const auto& member:store.archive_entry_names()){
+  if(load_cancelled(cancel))return 0;
   if(member.compare(0,prefix.size(),prefix)!=0||member.size()<prefix.size()+5||member.compare(member.size()-5,5,".json")!=0)continue;
   ResourceBlob blob;ResourceFailure failure;
   if(!store.resolve(member,blob,failure)||!blob.bytes)continue;
@@ -834,7 +864,7 @@ std::size_t adopt_profile_families(const ResourceStore& store,const TerrainTileM
   while((side+1)*(side+1)<=per_page)++side;
   Source source{&c,{},{},{}};std::vector<std::uint64_t> keys;
   if(side*side!=per_page||!terrain_tile_signatures_from_profile(c.json,c.space,c.slots,source.signatures,&source.names)||
-     !terrain_atlas_slot_keys(store,c.space,c.pages,side,keys))continue;
+     !terrain_atlas_slot_keys(store,c.space,c.pages,side,keys,cancel))continue;
   for(unsigned s=0;s<c.slots&&s<keys.size();++s){
    const auto& g=source.signatures[s];
    if(g[0]|g[1]|g[2]|g[3])source.by_key.emplace(keys[s],s);
@@ -901,7 +931,8 @@ TerrainTileMapInput terrain_tile_map_input(const TerrainCpuAsset& terrain){
 // 3. Families from the placements of every map of the atlas
 //    (terrain_tile_map_families.h); unnamed groups stay unassigned.
 // One log line per atlas names the source and its corner counts.
-TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,TerrainTileMapInput input) noexcept try{
+TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,TerrainTileMapInput input,
+    const std::atomic<bool>* cancel) noexcept try{
  TerrainTileFamilies result;
  const std::string space=input.space;const unsigned slots=input.slots;
  const std::string atlas=space+"/"+std::to_string(slots);
@@ -936,7 +967,9 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
  // Families adopted by slot art from other shipped profiles of this map.
  TerrainTileFamilies adopted_families;std::vector<bool> adopted;std::string adopted_text;std::size_t adopted_slots=0;
  {ResourceStore store;ResourceFailure failure;
-  if(store.open(mounts,failure))adopted_slots=adopt_profile_families(store,input,adopted_families,adopted,adopted_text);}
+  if(store.open(mounts,failure))adopted_slots=adopt_profile_families(store,input,adopted_families,adopted,adopted_text,cancel);}
+ const auto cancelled=[&]{TerrainTileFamilies none;none.source="tile family load cancelled";return none;};
+ if(load_cancelled(cancel))return cancelled();
  if(adopted_slots==slots){
   const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
   char text[96];std::snprintf(text,sizeof(text),"adopted %zu of %u slots by art (%.0f ms): ",adopted_slots,slots,ms);
@@ -945,7 +978,8 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
  }
  TerrainTileVertexRuns runs;
  runs.add_map(input.own,slots,input.skip);
- const std::size_t maps=pool_map_files(mounts,space,slots,input.own_file,input.skip,runs)+1;
+ const std::size_t maps=pool_map_files(mounts,space,slots,input.own_file,input.skip,runs,cancel)+1;
+ if(load_cancelled(cancel))return cancelled();
  std::string rejected;
  for(const auto& preset:kTerrainTilePresets){
   std::string name=preset.name;

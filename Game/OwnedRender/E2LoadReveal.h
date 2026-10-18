@@ -29,6 +29,7 @@ public:
     }
 };
 using SetLoadPause = bool (*)(void*, bool);
+bool E2LoadRevealHeld(std::uint64_t epoch) noexcept;
 void E2LoadRevealFrame(std::uint64_t epoch, bool localMission, bool paused,
                       SetLoadPause set, void* context) noexcept;
 }

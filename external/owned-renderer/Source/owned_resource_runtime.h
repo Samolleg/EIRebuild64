@@ -134,6 +134,9 @@ MainLoadTiming retained_static_main_load_timing() noexcept;
 void retained_static_lifecycle_added(const LifecycleIdentity& identity) noexcept;
 void retained_static_lifecycle_removed(std::int32_t signed_id) noexcept;
 void retained_static_positive_reset(std::uint64_t new_epoch) noexcept;
+// World change (renderer release_world_state): expired identity-index entries
+// and the retained scene's per-frame scratch.
+void owned_resource_runtime_release_world_bookkeeping() noexcept;
 RetainedStaticBindingView retained_static_binding_view() noexcept;
 RetainedSceneIdentitySnapshot retained_static_scene_identity_snapshot();
 RetainedTerrainSourceSnapshot retained_static_terrain_source_snapshot() noexcept;

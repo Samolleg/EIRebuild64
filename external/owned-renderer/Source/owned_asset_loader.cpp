@@ -1,6 +1,7 @@
 #include "owned_asset_loader.h"
 #include "owned_terrain_front_end.h"
 #include "procedural_falls.h"
+#include "worker_priority.h"
 
 #include <algorithm>
 #include <chrono>
@@ -263,6 +264,7 @@ constexpr std::uint32_t kFig1 = 0x31474946u;
 constexpr std::uint32_t kMmp = 0x00504d4du;
 constexpr std::uint32_t kDxt1 = 0x31545844u;
 constexpr std::uint32_t kDxt3 = 0x33545844u;
+constexpr std::uint32_t kDxt5 = 0x35545844u;
 constexpr std::uint32_t kPnt3 = 0x33544e50u;
 constexpr std::uint32_t kRgb565 = 0x00005650u;
 constexpr std::uint32_t kArgb1555 = 0x00005551u;
@@ -517,6 +519,17 @@ bool parse_mob_chunks(const std::vector<std::uint8_t>& bytes,
     }
     std::uint32_t cursor = begin;
     while (cursor < end) {
+        // The game reads the file's root chunk and stops when it is consumed;
+        // top-level bytes after it, whole or partial, are never read.
+        if (depth == 0 && !output.empty() &&
+            (end - cursor < 8 || read_u32(bytes.data() + cursor + 4) < 8 ||
+             read_u32(bytes.data() + cursor + 4) > end - cursor)) {
+            char detail[96];
+            std::snprintf(detail, sizeof(detail), "%u trailing MOB bytes ignored, as the game does",
+                          end - cursor);
+            bridge_append_probe_event("mob_trailing_bytes", detail);
+            return true;
+        }
         if (end - cursor < 8) {
             fail(failure, ResourceFailureCode::parse,
                  "MOB has trailing bytes shorter than a chunk header");
@@ -576,8 +589,10 @@ bool legacy_string(const std::vector<std::uint8_t>& bytes,
     const char* begin = reinterpret_cast<const char*>(
         bytes.data() + record->payload_offset);
     output.assign(begin, record->payload_bytes);
-    while (!output.empty() && output.back() == '\0') output.pop_back();
-    return output.find('\0') == std::string::npos;
+    // The game's string reader keeps the text before the first NUL.
+    const auto nul = output.find('\0');
+    if (nul != std::string::npos) output.resize(nul);
+    return true;
 }
 
 const MobChunkRecord* unique_field(
@@ -603,10 +618,12 @@ void extract_static_objects(const std::vector<std::uint8_t>& bytes,
         const bool lever = include_levers && chunk.id == kMobLever;
         if (chunk.id == kMobObject || lever) {
             StaticObjectSource object{};
+            // The game reads fields in order: a repeated field keeps the last
+            // value, and an unknown field id is skipped (recorded here for
+            // diagnostics only).
             std::unordered_map<std::uint32_t, const MobChunkRecord*> fields;
-            bool duplicate_field = false;
             for (const MobChunkRecord& field : chunk.children) {
-                if (!fields.emplace(field.id, &field).second) duplicate_field = true;
+                fields.insert_or_assign(field.id, &field);
                 if (!known_object_field(field.id) &&
                     !(lever && (field.id >> 16) == (kMobLever >> 16)))
                     object.unknown_field_ids.push_back(field.id);
@@ -621,14 +638,17 @@ void extract_static_objects(const std::vector<std::uint8_t>& bytes,
             const auto* shadow = unique_field(fields, kFieldShadow);
             const auto* parent_nid = unique_field(fields, kFieldParentNid);
             const auto* parts = unique_field(fields, kFieldParts);
-            bool malformed = duplicate_field || !exact_field_size(nid, 4) ||
-                !exact_field_size(type, 4) || !exact_field_size(owner, 1) ||
-                !exact_field_size(position, 12) ||
-                !exact_field_size(quaternion, 16) ||
-                !exact_field_size(shape, 12) || !exact_field_size(quest, 1) ||
-                !exact_field_size(shadow, 1) ||
-                !exact_field_size(parent_nid, 4) || !parts ||
-                parts->payload_bytes < 4;
+            // A missing field takes the game's constructor default; a field of
+            // the wrong size puts the game's reader out of step (rejected).
+            // A missing type makes the game dereference a null object.
+            const auto sized = [](const MobChunkRecord* field, std::uint32_t expected) {
+                return !field || field->payload_bytes == expected;
+            };
+            bool malformed = !exact_field_size(type, 4) || !sized(nid, 4) ||
+                !sized(owner, 1) || !sized(position, 12) ||
+                !sized(quaternion, 16) || !sized(shape, 12) || !sized(quest, 1) ||
+                !sized(shadow, 1) || !sized(parent_nid, 4) ||
+                (parts && parts->payload_bytes < 4);
             malformed = malformed ||
                 !legacy_string(bytes, unique_field(fields, kFieldName), object.name) ||
                 !legacy_string(bytes, unique_field(fields, kFieldModel),
@@ -646,17 +666,20 @@ void extract_static_objects(const std::vector<std::uint8_t>& bytes,
                 object.visual_reference = fold_ascii(std::move(object.visual_reference));
                 object.primary_texture = fold_ascii(std::move(object.primary_texture));
                 object.secondary_texture = fold_ascii(std::move(object.secondary_texture));
-                object.nid = read_u32(bytes.data() + nid->payload_offset);
+                // Game constructor defaults: NID and parent -1, owner 0,
+                // use-in-script false, shadow true; the two flags are set
+                // only by a stored byte of exactly 1.
+                object.nid = nid ? read_u32(bytes.data() + nid->payload_offset) : UINT32_MAX;
                 object.family = read_u32(bytes.data() + type->payload_offset);
-                object.owner = bytes[owner->payload_offset];
-                object.quest = bytes[quest->payload_offset];
-                object.shadow = bytes[shadow->payload_offset];
-                object.prototype_nid = read_u32(
-                    bytes.data() + parent_nid->payload_offset);
-                part_count = read_u32(bytes.data() + parts->payload_offset);
+                object.owner = owner ? bytes[owner->payload_offset] : 0u;
+                object.quest = quest && bytes[quest->payload_offset] == 1u ? 1u : 0u;
+                object.shadow = !shadow || bytes[shadow->payload_offset] == 1u ? 1u : 0u;
+                object.prototype_nid = parent_nid ? read_u32(
+                    bytes.data() + parent_nid->payload_offset) : UINT32_MAX;
+                part_count = parts ? read_u32(bytes.data() + parts->payload_offset) : 0u;
                 // Entries are nested B00D strings: id, total size, name bytes.
-                std::uint32_t cursor = parts->payload_offset + 4u;
-                const std::uint32_t end = parts->payload_offset + parts->payload_bytes;
+                std::uint32_t cursor = parts ? parts->payload_offset + 4u : 0u;
+                const std::uint32_t end = parts ? parts->payload_offset + parts->payload_bytes : 0u;
                 for (std::uint32_t index = 0; index < part_count && !malformed; ++index) {
                     if (end - cursor < 8u || read_u32(bytes.data() + cursor) != kFieldParts) {
                         malformed = true;
@@ -668,28 +691,49 @@ void extract_static_objects(const std::vector<std::uint8_t>& bytes,
                         break;
                     }
                     std::string name(reinterpret_cast<const char*>(bytes.data() + cursor + 8u), total - 8u);
-                    while (!name.empty() && name.back() == '\0') name.pop_back();
-                    malformed = name.empty() || name.find('\0') != std::string::npos;
+                    const auto nul = name.find('\0');
+                    if (nul != std::string::npos) name.resize(nul);
+                    // An empty part name is a fatal "body part not found" in the game.
+                    malformed = name.empty();
                     object.part_names.push_back(fold_ascii(std::move(name)));
                     cursor += total;
                 }
+                // A count that does not consume the list puts the game out of step.
                 malformed = malformed || cursor != end;
-                for (std::size_t index = 0; index < object.position.size(); ++index)
-                    object.position[index] = read_float(
-                        bytes.data() + position->payload_offset + index * 4);
-                for (std::size_t index = 0; index < object.quaternion.size(); ++index)
-                    object.quaternion[index] = read_float(
-                        bytes.data() + quaternion->payload_offset + index * 4);
+                // Defaults: position (0,0,0), rotation w=1, complection 0.5.
+                object.position = {};
+                object.quaternion = {{1.0f, 0.0f, 0.0f, 0.0f}};
+                object.shape = {{0.5f, 0.5f, 0.5f}};
+                if (position)
+                    for (std::size_t index = 0; index < object.position.size(); ++index)
+                        object.position[index] = read_float(
+                            bytes.data() + position->payload_offset + index * 4);
+                if (quaternion)
+                    for (std::size_t index = 0; index < object.quaternion.size(); ++index)
+                        object.quaternion[index] = read_float(
+                            bytes.data() + quaternion->payload_offset + index * 4);
                 // MOB B00C serializes grace,strength,tall. Convert once at the
                 // resource boundary to the strength,grace,tall selector used
                 // by FIG8 positions/bounds and BON endpoints everywhere else.
-                const std::array<float, 3> raw_shape{{
-                    read_float(bytes.data() + shape->payload_offset),
-                    read_float(bytes.data() + shape->payload_offset + 4u),
-                    read_float(bytes.data() + shape->payload_offset + 8u)}};
-                object.shape = {{raw_shape[1], raw_shape[0], raw_shape[2]}};
-                malformed = !finite(object.position) || !finite(object.quaternion) ||
-                    !finite(object.shape);
+                if (shape) {
+                    const std::array<float, 3> raw_shape{{
+                        read_float(bytes.data() + shape->payload_offset),
+                        read_float(bytes.data() + shape->payload_offset + 4u),
+                        read_float(bytes.data() + shape->payload_offset + 8u)}};
+                    object.shape = {{raw_shape[1], raw_shape[0], raw_shape[2]}};
+                }
+                // The game sets these unchecked; a non-finite value takes its
+                // default so the GPU never sees it.
+                if (!finite(object.position) || !finite(object.quaternion) ||
+                    !finite(object.shape)) {
+                    if (!finite(object.position)) object.position = {};
+                    if (!finite(object.quaternion)) object.quaternion = {{1.0f, 0.0f, 0.0f, 0.0f}};
+                    if (!finite(object.shape)) object.shape = {{0.5f, 0.5f, 0.5f}};
+                    char detail[128];
+                    std::snprintf(detail, sizeof(detail), "MOB object %u: non-finite placement reset to defaults",
+                                  object.nid);
+                    bridge_append_probe_event("mob_object_repaired", detail);
+                }
             }
             std::sort(object.unknown_field_ids.begin(),
                       object.unknown_field_ids.end());
@@ -699,8 +743,6 @@ void extract_static_objects(const std::vector<std::uint8_t>& bytes,
                 object.unknown_field_ids.end());
             if (malformed)
                 object.rejection = StaticObjectRejection::malformed;
-            else if (!object.unknown_field_ids.empty())
-                object.rejection = StaticObjectRejection::unknown_field;
             else if (object.quest)
                 object.rejection = StaticObjectRejection::script_mutable;
             else if (part_count)
@@ -723,17 +765,21 @@ bool parse_lnk(const ResourceBlob& blob, std::vector<ModelLink>& links,
     }
     const auto& bytes = *blob.bytes;
     const std::uint32_t count = read_u32(bytes.data());
-    if (!count || count > 65536u) {
-        fail(failure, ResourceFailureCode::parse, "LNK link count is invalid");
+    // Every link needs two length words. The game accepts any count that its
+    // data can hold, zero included (nothing is drawn).
+    if (count > (bytes.size() - 4) / 8u) {
+        fail(failure, ResourceFailureCode::parse, "LNK link count exceeds its data");
         return false;
     }
     std::size_t cursor = 4;
     std::unordered_map<std::string, std::uint32_t> prior;
-    bool declared_root = false;
+    std::uint32_t dropped = 0;
     try { links.reserve(count); } catch (...) {
         fail(failure, ResourceFailureCode::parse, "LNK allocation failed");
         return false;
     }
+    // The game copies the length-prefixed bytes and appends a NUL, so a name
+    // ends at its first NUL.
     auto read_name = [&](std::string& output) {
         if (cursor + 4 > bytes.size()) return false;
         const std::uint32_t length = read_u32(bytes.data() + cursor);
@@ -741,42 +787,42 @@ bool parse_lnk(const ResourceBlob& blob, std::vector<ModelLink>& links,
         if (length > bytes.size() - cursor) return false;
         output.assign(reinterpret_cast<const char*>(bytes.data() + cursor), length);
         cursor += length;
-        while (!output.empty() && output.back() == '\0') output.pop_back();
-        return !output.empty() ? output.find('\0') == std::string::npos : true;
+        const auto nul = output.find('\0');
+        if (nul != std::string::npos) output.resize(nul);
+        return true;
     };
     for (std::uint32_t index = 0; index < count; ++index) {
         ModelLink link{};
-        if (!read_name(link.child) || !read_name(link.parent) || link.child.empty()) {
+        if (!read_name(link.child) || !read_name(link.parent)) {
             fail(failure, ResourceFailureCode::parse,
-                 "LNK contains a truncated or invalid name");
+                 "LNK contains a truncated name");
             return false;
         }
+        // The game refuses a repeated (or unnamed) node as a child and as a
+        // geometry range, so it is never positioned or drawn: drop it.
         const std::string child_key = fold_ascii(link.child);
-        if (!prior.emplace(child_key, index).second) {
-            fail(failure, ResourceFailureCode::parse,
-                 "LNK contains duplicate child identities");
-            return false;
+        if (link.child.empty() ||
+            !prior.emplace(child_key, static_cast<std::uint32_t>(links.size())).second) {
+            ++dropped;
+            continue;
         }
-        if (link.parent.empty()) {
-            declared_root = true;
-        } else {
+        if (!link.parent.empty()) {
             const auto found = prior.find(fold_ascii(link.parent));
             // The shipped loader links a node only when its named parent has
             // already been added. A missing or later parent leaves this node
             // unattached; the declared name remains available for diagnostics.
+            // With no root at all the game leaves every node unplaced; the
+            // nodes are kept the same way.
             if (found != prior.end()) link.parent_index = found->second;
         }
         links.push_back(std::move(link));
     }
-    if (!declared_root) {
-        fail(failure, ResourceFailureCode::parse,
-             "LNK has no declared root node");
-        return false;
-    }
-    if (cursor != bytes.size()) {
-        fail(failure, ResourceFailureCode::parse,
-             "LNK has trailing bytes outside its declared links");
-        return false;
+    // Bytes after the declared links are never read by the game.
+    if (dropped) {
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "%s: %u repeated or unnamed LNK nodes dropped, as the game does",
+                      blob.identity.canonical_name.c_str(), dropped);
+        bridge_append_probe_event("lnk_nodes_dropped", detail);
     }
     failure = {};
     return true;
@@ -991,18 +1037,17 @@ bool parse_mob_document(const ResourceBlob& blob, MobDocument& document,
                           document.roots, failure))
         return false;
     extract_static_objects(*blob.bytes, document.roots, objects, include_levers);
-    std::sort(objects.begin(), objects.end(), [](const auto& left, const auto& right) {
-        if (left.nid != right.nid) return left.nid < right.nid;
-        if (left.visual_reference != right.visual_reference)
-            return left.visual_reference < right.visual_reference;
-        return left.name < right.name;
+    // The game stores objects in a map keyed by NID: the last object in file
+    // order with a given NID is created and earlier ones never are. Order by
+    // NID keeping file order (stable), then retire all but the last of each.
+    std::stable_sort(objects.begin(), objects.end(), [](const auto& left, const auto& right) {
+        return left.nid < right.nid;
     });
     for (std::size_t begin = 0; begin < objects.size();) {
         std::size_t end = begin + 1;
         while (end < objects.size() && objects[end].nid == objects[begin].nid) ++end;
-        if (end - begin > 1)
-            for (std::size_t index = begin; index < end; ++index)
-                objects[index].rejection = StaticObjectRejection::duplicate_nid;
+        for (std::size_t index = begin; index + 1 < end; ++index)
+            objects[index].rejection = StaticObjectRejection::duplicate_nid;
         begin = end;
     }
     failure = {};
@@ -1017,12 +1062,15 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
         return false;
     }
     const auto& bytes = *blob.bytes;
+    // The game tests only the "FIG" prefix: exactly "FIG8" has eight shapes
+    // and every other fourth byte is read as one shape. A file without the
+    // prefix is the game's older headerless format, which we do not decode.
     const std::uint32_t signature = read_u32(bytes.data());
-    const std::uint32_t shape_count = signature == kFig1 ? 1u :
-        signature == kFigureSignature8 ? 8u : 0u;
+    const std::uint32_t shape_count = (signature & 0x00ffffffu) != (kFig1 & 0x00ffffffu) ? 0u :
+        signature == kFigureSignature8 ? 8u : 1u;
     if (!shape_count) {
         fail(failure, ResourceFailureCode::parse,
-             "FIG signature is not established for the active corpus");
+             "FIG uses the older headerless figure format, which is not decoded");
         return false;
     }
     const std::uint32_t position_groups = read_u32(bytes.data() + 4);
@@ -1059,13 +1107,14 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
     if (!checked_add(required, float_bytes, required) ||
         !checked_add(required, index_bytes, required) ||
         !checked_add(required, component_bytes, required) ||
-        !checked_add(required, morph_bytes, required) || required > bytes.size() ||
-        (user_offset == 0 && required != bytes.size()) ||
-        (user_offset != 0 && (user_offset < required || user_offset > bytes.size()))) {
+        !checked_add(required, morph_bytes, required) || required > bytes.size()) {
         fail(failure, ResourceFailureCode::parse,
              "FIG channels do not fit the declared resource bytes");
         return false;
     }
+    // The game never reads the user-data offset and ignores trailing bytes.
+    // Keep user data only where the offset actually points behind the channels.
+    const bool user_data_valid = user_offset >= required && user_offset <= bytes.size();
     std::vector<std::uint8_t> position_used;
     try {
         position_used.resize(static_cast<std::size_t>(position_groups) * 4u);
@@ -1082,7 +1131,11 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
         return false;
     }
     figure.identity = blob.identity;
-    figure.signature = signature;
+    // Publish the layout the game reads ("FIG2".."FIG7" etc. are one shape).
+    figure.signature = shape_count == 8u ? kFigureSignature8 : kFig1;
+    if (figure.signature != signature)
+        bridge_append_probe_event("figure_signature_variant",
+            (blob.identity.canonical_name + ": FIG variant read as one shape, as the game does").c_str());
     figure.shape_count = shape_count;
     figure.position_groups = position_groups;
     figure.normal_groups = normal_groups;
@@ -1090,6 +1143,8 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
     figure.texture_number = texture_number;
 
     std::size_t cursor = 40;
+    std::array<bool, 8> bounds_rebuilt{};
+    std::uint32_t repaired_texture_coordinates = 0, repaired_positions = 0;
     const std::size_t center = cursor;
     const std::size_t minimum = center + shape_count * 3u * 4u;
     const std::size_t maximum = minimum + shape_count * 3u * 4u;
@@ -1105,15 +1160,15 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
                 bytes.data() + maximum + (shape_index * 3u + component) * 4u);
         }
         bounds.radius = read_float(bytes.data() + radius + shape_index * 4u);
-        if (!finite(bounds.center) || !finite(bounds.minimum) ||
-            !finite(bounds.maximum) || !std::isfinite(bounds.radius)) {
-            fail(failure, ResourceFailureCode::parse,
-                 "FIG bounds contain a non-finite value");
-            return false;
-        }
+        // The game's draw path skips the stored bounds and recomputes them
+        // from the vertices; a non-finite stored value is rebuilt from the
+        // positions below.
+        bounds_rebuilt[shape_index] = !finite(bounds.center) || !finite(bounds.minimum) ||
+            !finite(bounds.maximum) || !std::isfinite(bounds.radius);
     }
     cursor += static_cast<std::size_t>(bound_floats * 4u);
     cursor += static_cast<std::size_t>(position_floats * 4u);
+    std::uint32_t repaired_normals = 0;
     for (std::uint32_t group = 0; group < normal_groups; ++group) {
         const std::size_t group_base = cursor +
             static_cast<std::size_t>(group) * 16u * 4u;
@@ -1124,29 +1179,37 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
                                         (4u + lane) * 4u);
             target.z[lane] = read_float(bytes.data() + group_base +
                                         (8u + lane) * 4u);
-            target.w[lane] = read_float(bytes.data() + group_base +
-                                        (12u + lane) * 4u);
+            // The game lights with XYZ only and never validates the packed
+            // normal, so neither may we: W (1 in shipped figures, 0 in some
+            // tool exports) is ignored and stored as 1, and a non-finite
+            // direction becomes straight up instead of rejecting the model.
+            target.w[lane] = 1.0f;
             if (!std::isfinite(target.x[lane]) ||
                 !std::isfinite(target.y[lane]) ||
-                !std::isfinite(target.z[lane]) ||
-                !std::isfinite(target.w[lane]) || target.w[lane] == 0.0f) {
-                fail(failure, ResourceFailureCode::parse,
-                     "FIG packed normal contains an invalid value");
-                return false;
+                !std::isfinite(target.z[lane])) {
+                target.x[lane] = 0.0f; target.y[lane] = 0.0f; target.z[lane] = 1.0f;
+                ++repaired_normals;
             }
         }
     }
     cursor += static_cast<std::size_t>(normal_floats * 4u);
+    if (repaired_normals) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%s: %u non-finite packed normals drawn as up",
+                      blob.identity.canonical_name.c_str(), repaired_normals);
+        bridge_append_probe_event("figure_normals_repaired", detail);
+    }
     for (std::uint32_t index = 0; index < texture_count; ++index) {
         figure.texture_coordinates[index].u = read_float(
             bytes.data() + cursor + static_cast<std::size_t>(index) * 8u);
         figure.texture_coordinates[index].v = read_float(
             bytes.data() + cursor + static_cast<std::size_t>(index) * 8u + 4u);
+        // Unchecked by the game; a non-finite coordinate samples the corner.
         if (!std::isfinite(figure.texture_coordinates[index].u) ||
             !std::isfinite(figure.texture_coordinates[index].v)) {
-            fail(failure, ResourceFailureCode::parse,
-                 "FIG texture coordinate contains a non-finite value");
-            return false;
+            figure.texture_coordinates[index].u = 0.0f;
+            figure.texture_coordinates[index].v = 0.0f;
+            ++repaired_texture_coordinates;
         }
     }
     cursor += static_cast<std::size_t>(texture_floats * 4u);
@@ -1194,6 +1257,11 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
     // streams establish which positions belong to the geometry. Keep padding
     // finite for downstream group operations and out of the render envelope.
     cursor = 40u + static_cast<std::size_t>(bound_floats * 4u);
+    for (std::uint32_t shape_index = 0; shape_index < shape_count; ++shape_index)
+        if (bounds_rebuilt[shape_index]) {
+            figure.bounds[shape_index].minimum.fill((std::numeric_limits<float>::max)());
+            figure.bounds[shape_index].maximum.fill(std::numeric_limits<float>::lowest());
+        }
     for (std::uint32_t group = 0; group < position_groups; ++group) {
         const std::size_t group_base = cursor +
             static_cast<std::size_t>(group) * shape_count * 12u * 4u;
@@ -1214,26 +1282,61 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
                 target.z[lane] = read_float(bytes.data() + group_base +
                     (shape_count * 8u + shape_index * 4u + lane) * 4u);
                 target.w[lane] = 1.0f;
+                // Unchecked by the game; a non-finite used position is drawn
+                // at the node origin.
                 if (!std::isfinite(target.x[lane]) ||
                     !std::isfinite(target.y[lane]) ||
                     !std::isfinite(target.z[lane])) {
-                    fail(failure, ResourceFailureCode::parse,
-                         "FIG position contains a non-finite value");
-                    return false;
+                    target.x[lane] = target.y[lane] = target.z[lane] = 0.0f;
+                    ++repaired_positions;
                 }
                 const double x = target.x[lane], y = target.y[lane], z = target.z[lane];
-                const float extent = std::nextafter(
+                float extent = std::nextafter(
                     static_cast<float>(std::sqrt(x*x+y*y+z*z)), INFINITY);
-                if (!std::isfinite(extent)) {
-                    fail(failure, ResourceFailureCode::parse, "unbounded FIG position");
-                    return false;
-                }
+                if (!std::isfinite(extent)) extent = (std::numeric_limits<float>::max)();
                 figure.shape_position_radii[shape_index] = (std::max)(
                     figure.shape_position_radii[shape_index], extent);
+                if (bounds_rebuilt[shape_index]) {
+                    FigureBounds& bounds = figure.bounds[shape_index];
+                    const std::array<float, 3> point{{target.x[lane], target.y[lane], target.z[lane]}};
+                    for (unsigned axis = 0; axis < 3; ++axis) {
+                        bounds.minimum[axis] = (std::min)(bounds.minimum[axis], point[axis]);
+                        bounds.maximum[axis] = (std::max)(bounds.maximum[axis], point[axis]);
+                    }
+                }
             }
         }
     }
-    if (user_offset) {
+    std::uint32_t rebuilt_bounds = 0;
+    for (std::uint32_t shape_index = 0; shape_index < shape_count; ++shape_index) {
+        if (!bounds_rebuilt[shape_index]) continue;
+        ++rebuilt_bounds;
+        FigureBounds& bounds = figure.bounds[shape_index];
+        if (bounds.minimum[0] > bounds.maximum[0]) {  // no used position
+            bounds.minimum.fill(0.0f);
+            bounds.maximum.fill(0.0f);
+        }
+        double squared = 0.0;
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            bounds.center[axis] = 0.5f * (bounds.minimum[axis] + bounds.maximum[axis]);
+            const double half = 0.5 * (double(bounds.maximum[axis]) - bounds.minimum[axis]);
+            squared += half * half;
+        }
+        bounds.radius = std::nextafter(static_cast<float>(std::sqrt(squared)), INFINITY);
+        if (!finite(bounds.center) || !std::isfinite(bounds.radius)) {
+            bounds.center.fill(0.0f);
+            bounds.radius = figure.shape_position_radii[shape_index];
+        }
+    }
+    if (repaired_texture_coordinates || repaired_positions || rebuilt_bounds) {
+        char detail[224];
+        std::snprintf(detail, sizeof(detail),
+                      "%s: %u non-finite UVs, %u non-finite positions zeroed, %u shape bounds rebuilt",
+                      blob.identity.canonical_name.c_str(), repaired_texture_coordinates,
+                      repaired_positions, rebuilt_bounds);
+        bridge_append_probe_event("figure_values_repaired", detail);
+    }
+    if (user_offset && user_data_valid) {
         try {
             figure.user_data.assign(bytes.begin() + user_offset, bytes.end());
         } catch (...) {
@@ -1253,6 +1356,7 @@ bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t index,
     switch (texture.format) {
     case MmpFormat::dxt1: input.format = TextureAlphaFormat::bc1; break;
     case MmpFormat::dxt3: input.format = TextureAlphaFormat::bc2; break;
+    case MmpFormat::dxt5: input.format = TextureAlphaFormat::bc3; break;
     case MmpFormat::rgb565: input.pixel_bytes = 2; break;
     case MmpFormat::argb1555: input.pixel_bytes = 2; input.alpha_mask = 0x8000; break;
     case MmpFormat::argb4444: input.pixel_bytes = 2; input.alpha_mask = 0xf000; break;
@@ -1286,10 +1390,11 @@ static bool parse_texture_asset_impl(const ResourceBlob& blob,
         return false;
     }
     const auto& bytes = *blob.bytes;
-    if (read_u32(bytes.data()) != kMmp) {
-        fail(failure, ResourceFailureCode::parse, "MMP signature is invalid");
-        return false;
-    }
+    // The game's texture loader never compares the MMP signature; it only
+    // writes it. Note a foreign one and read the header as the game does.
+    if (read_u32(bytes.data()) != kMmp)
+        bridge_append_probe_event("mmp_signature_ignored",
+            (blob.identity.canonical_name + ": MMP signature differs; read as the game does").c_str());
     texture.identity = blob.identity;
     texture.width = read_u32(bytes.data() + 4);
     texture.height = read_u32(bytes.data() + 8);
@@ -1333,6 +1438,16 @@ static bool parse_texture_asset_impl(const ResourceBlob& blob,
         if (texture.bit_count != 8) {
             fail(failure, ResourceFailureCode::parse,
                  "MMP DXT3 bit count is inconsistent");
+            return false;
+        }
+        break;
+    case kDxt5:
+        // The game uploads any DXTn the device exposes; D3D11 always has BC3.
+        texture.format = MmpFormat::dxt5;
+        block_bytes = 16;
+        if (texture.bit_count != 8) {
+            fail(failure, ResourceFailureCode::parse,
+                 "MMP DXT5 bit count is inconsistent");
             return false;
         }
         break;
@@ -1392,12 +1507,12 @@ static bool parse_texture_asset_impl(const ResourceBlob& blob,
              "MMP uncompressed bit count is inconsistent");
         return false;
     }
-    // The supported generated producers write a user-data byte count here,
-    // followed by user data and then pixels. Archive MMPs use an absolute
-    // trailing user-data offset. Keep both layouts explicit and immutable.
+    // Header +72 is the byte length of a user-data block right after the
+    // header; level 0 starts at 76 + that length. This is the game's own
+    // rule (SMMPFileHeader::ShiftToMipLevel) for archive and generated MMPs.
     std::uint64_t cursor = kMmpHeaderBytes;
-    if (generated && (!checked_add(cursor, user_offset, cursor) || cursor > bytes.size())) {
-        fail(failure, ResourceFailureCode::parse, "generated MMP user data is truncated");
+    if (!checked_add(cursor, user_offset, cursor) || cursor > bytes.size()) {
+        fail(failure, ResourceFailureCode::parse, "MMP user data is truncated");
         return false;
     }
     texture.texel_offset = static_cast<std::uint32_t>(cursor);
@@ -1443,19 +1558,19 @@ static bool parse_texture_asset_impl(const ResourceBlob& blob,
     }
     const bool invalid_generated_size = source == TextureValueSource::generated_memory ?
         ((cursor + 3u) & ~std::uint64_t{3}) != bytes.size() : cursor != bytes.size();
-    if (generated ? invalid_generated_size :
-        ((user_offset == 0 && cursor != bytes.size()) ||
-         (user_offset != 0 && (user_offset < cursor || user_offset > bytes.size())))) {
+    // The game never learns an archive member's size and ignores bytes after
+    // the declared mips (shipped textures.res carries whole unused chains
+    // behind a one-level header). Only the completed generated producer is
+    // held to its exact size.
+    if (generated && invalid_generated_size) {
         fail(failure, ResourceFailureCode::parse,
-             "MMP user-data offset does not follow its exact mip payload");
+             "generated MMP size does not match its exact mip payload");
         return false;
     }
     if (user_offset) {
         try {
-            if (generated)
-                texture.user_data.assign(bytes.begin() + kMmpHeaderBytes,
-                    bytes.begin() + kMmpHeaderBytes + user_offset);
-            else texture.user_data.assign(bytes.begin() + user_offset, bytes.end());
+            texture.user_data.assign(bytes.begin() + kMmpHeaderBytes,
+                bytes.begin() + kMmpHeaderBytes + user_offset);
         }
         catch (...) {
             fail(failure, ResourceFailureCode::parse,
@@ -1805,16 +1920,22 @@ bool parse_terrain_asset(const ResourceBlob& blob,
     }
     MemoryResourceArchive archive;
     if (!archive.open(blob, failure)) return false;
+    // The game lists "*.mp" in archive table order and uses the first match;
+    // its single-header assertion is not in the shipped build. Do the same.
     std::string header_name;
+    std::uint32_t header_candidates = 0;
     for (const std::string& name : archive.entry_names()) {
         if (name.size() < 3 || name.compare(name.size() - 3, 3, ".mp") != 0)
             continue;
-        if (!header_name.empty()) {
-            fail(failure, ResourceFailureCode::parse,
-                 "MPR contains more than one map header");
-            return false;
-        }
-        header_name = name;
+        if (header_name.empty()) header_name = name;
+        ++header_candidates;
+    }
+    if (header_candidates > 1) {
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "%s: %u map headers, using %s (game order)",
+                      blob.identity.canonical_name.c_str(), header_candidates,
+                      header_name.c_str());
+        bridge_append_probe_event("terrain_extra_map_headers", detail);
     }
     if (header_name.empty()) {
         fail(failure, ResourceFailureCode::parse,
@@ -1845,7 +1966,15 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
         return false;
     }
     const auto& bytes = *header.bytes;
-    const float maximum_z = read_float(bytes.data() + 4u);
+    // The game scales heights by max_z without checking it. Zero or negative
+    // values are drawn as the game draws them; only a non-finite value is
+    // made GPU-safe (flat at zero) and logged.
+    float maximum_z = read_float(bytes.data() + 4u);
+    if (!std::isfinite(maximum_z)) {
+        bridge_append_probe_event("terrain_max_z_repaired",
+            (header.identity.canonical_name + ": non-finite max_z drawn flat").c_str());
+        maximum_z = 0.0f;
+    }
     const std::uint32_t sectors_x = read_u32(bytes.data() + 8u);
     const std::uint32_t sectors_y = read_u32(bytes.data() + 12u);
     const std::uint32_t textures = read_u32(bytes.data() + 16u);
@@ -1856,13 +1985,14 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
     const std::uint32_t animated_tiles = read_u32(bytes.data() + 34u);
     std::uint64_t expected_header = kMapHeaderBytes;
     std::uint64_t part = 0;
+    // texture_size % tile_size is only a debug assertion in the game, which
+    // truncates the tiles-per-side division; a zero quotient divides by zero.
     if (read_u32(bytes.data()) != kMapSignature ||
-        !std::isfinite(maximum_z) || maximum_z <= 0.0f ||
         !sectors_x || !sectors_y ||
         !textures || textures >
             (static_cast<std::uint32_t>(UINT16_MAX) + 1u) / 2u -
                 kTerrainLongTextureCount ||
-        !texture_size || !tile_size || texture_size % tile_size != 0 ||
+        !texture_size || !tile_size ||
         texture_size / tile_size == 0 || texture_size / tile_size > 4096u ||
         !tiles ||
         sectors_x > static_cast<std::uint32_t>(
@@ -1941,14 +2071,19 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
             output.self_illumination = read_float(input + 20u);
             output.wave_multiplier = read_float(input + 24u);
             output.warp_speed = read_float(input + 28u);
-            if (output.type > 4u || !finite(output.color) ||
-                !std::isfinite(output.opacity) ||
-                !std::isfinite(output.self_illumination) ||
-                !std::isfinite(output.wave_multiplier) ||
-                !std::isfinite(output.warp_speed)) {
-                fail(failure, ResourceFailureCode::parse,
-                     "MPR terrain object is unsupported or non-finite");
-                return false;
+            // The game copies the record unchecked: a type beyond 4 is only
+            // "not grass, not water", and its floats are used as stored.
+            // Keep both; only a non-finite float is made GPU-safe (zero).
+            bool repaired = false;
+            for (float* value : {&output.color[0], &output.color[1], &output.color[2],
+                                 &output.opacity, &output.self_illumination,
+                                 &output.wave_multiplier, &output.warp_speed})
+                if (!std::isfinite(*value)) { *value = 0.0f; repaired = true; }
+            if (repaired) {
+                char detail[256];
+                std::snprintf(detail, sizeof(detail), "%s: object %u non-finite fields set to 0",
+                              header.identity.canonical_name.c_str(), index);
+                bridge_append_probe_event("terrain_object_repaired", detail);
             }
         }
         const std::uint8_t* tile_types = object_bytes +
@@ -1967,8 +2102,10 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
         for (std::uint32_t index = 0; index < animated_tiles; ++index) {
             const std::uint16_t tile_index = read_u16(animations + index * 4u);
             const std::uint16_t phases = read_u16(animations + index * 4u + 2u);
-            if (tile_index >= tiles || !phases ||
-                terrain.tile_animation_phases[tile_index] != 0u ||
+            // The game stores phases[index] = count: a repeated index keeps the
+            // last count and zero means "not animated". An index or phase run
+            // past the tile table is an out-of-bounds access in the game.
+            if (tile_index >= tiles ||
                 static_cast<std::uint32_t>(tile_index) + phases > tiles) {
                 fail(failure, ResourceFailureCode::parse,
                      "MPR animated tile descriptor is invalid");
@@ -1997,9 +2134,13 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
                 !sector_blob.bytes || sector_blob.bytes->size() < 5u)
                 return false;
             const auto& sector_bytes = *sector_blob.bytes;
-            const std::uint8_t flags = sector_bytes[4];
+            // The game reads layers = flags & 1 and layer tiles = flags & 3,
+            // so bit 0 alone also carries layer tiles, and bits 2-7 are
+            // ignored. Layer tiles without layers (flags & 3 == 2) leave the
+            // game's object-id array empty and crash it on first draw.
+            const std::uint8_t flags = sector_bytes[4] & 0x03u;
             if (read_u32(sector_bytes.data()) != kSectorSignatureNormals ||
-                (flags & ~0x03u) != 0 || flags == 0x02u) {
+                flags == 0x02u) {
                 fail(failure, ResourceFailureCode::parse,
                      "MPR sector signature or flags are unsupported");
                 return false;
@@ -2011,7 +2152,7 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
                 expected_sector +=
                     static_cast<std::uint64_t>(kTerrainVerticesPerSector) *
                         kTerrainVertexBytes + kTerrainTileBytes;
-            if ((flags & 0x03u) == 0x03u) expected_sector += kTerrainTileBytes;
+            if (flags != 0u) expected_sector += kTerrainTileBytes;
             if (expected_sector != sector_bytes.size()) {
                 fail(failure, ResourceFailureCode::parse,
                      "MPR sector byte count does not match its flags");
@@ -2023,7 +2164,7 @@ bool parse_terrain_members(const ResourceIdentity& identity, const std::string& 
             output.map_x = sx;
             output.map_y = sy;
             output.has_layers = (flags & 0x01u) != 0;
-            output.has_layer_tiles = (flags & 0x03u) == 0x03u;
+            output.has_layer_tiles = flags != 0u;
             const std::size_t vertex_count = kTerrainVerticesPerSector *
                 (output.has_layers ? 2u : 1u);
             try { output.vertices.resize(vertex_count); }
@@ -2608,10 +2749,11 @@ bool decode_model_resources(const ResourceBlob& mod_blob,
         for (std::size_t index = 0; index < node.bone_positions.size(); ++index) {
             node.bone_positions[index] = read_float(
                 node_bones.bytes->data() + index * sizeof(float));
+            // The game uses BON endpoints unchecked; zero a non-finite one.
             if (!std::isfinite(node.bone_positions[index])) {
-                fail(failure, ResourceFailureCode::parse,
-                     "BON node contains a non-finite position");
-                return false;
+                node.bone_positions[index] = 0.0f;
+                bridge_append_probe_event("bon_endpoint_repaired",
+                    (visual_reference + "/" + link.child + ": non-finite BON endpoint zeroed").c_str());
             }
         }
         model.static_shape_parameterized = model.static_shape_parameterized ||
@@ -2645,16 +2787,10 @@ bool parse_material_asset(const ResourceBlob& blob, MaterialCpuAsset& material,
         for (auto& value : *channels) {
             value = read_float(blob.bytes->data()+cursor);
             cursor += 4;
-            if (!std::isfinite(value)) {
-                fail(failure, ResourceFailureCode::parse, "non-finite MAT channel");
-                return false;
-            }
+            if (!std::isfinite(value)) value = 0.0f;  // unchecked by the game
         }
     result.power = read_float(blob.bytes->data()+cursor);
-    if (!std::isfinite(result.power)) {
-        fail(failure, ResourceFailureCode::parse, "non-finite MAT power");
-        return false;
-    }
+    if (!std::isfinite(result.power)) result.power = 0.0f;
     material = std::move(result);
     failure = {};
     return true;
@@ -2695,8 +2831,9 @@ bool decode_selected_skeleton(const ResourceBlob& links,
                 const auto source = legacy ? old_endpoint[i/3]*3+i%3 : i;
                 node.bone_positions[i] = read_float(selected.bytes->data()+4*source);
                 if (!std::isfinite(node.bone_positions[i])) {
-                    fail(failure, ResourceFailureCode::parse, "non-finite visual BON endpoint");
-                    return false;
+                    node.bone_positions[i] = 0.0f;
+                    bridge_append_probe_event("bon_endpoint_repaired",
+                        (visual_reference + "/" + link.child + ": non-finite BON endpoint zeroed").c_str());
                 }
             }
         }
@@ -2743,26 +2880,42 @@ bool parse_animation_database(const ResourceBlob& blob,
                               ResourceFailure& failure) {
     database = {};
     constexpr std::size_t header_bytes = 44u, entry_bytes = 88u;
-    if (!blob.bytes || blob.bytes->size() < header_bytes ||
-        read_u32(blob.bytes->data()) != 0x00424441u) {
-        fail(failure, ResourceFailureCode::parse, "invalid ADB header");
+    if (!blob.bytes || blob.bytes->size() < header_bytes) {
+        fail(failure, ResourceFailureCode::parse, "ADB header is truncated");
         return false;
     }
-    const auto* data = blob.bytes->data();
-    const std::uint32_t count = read_u32(data + 4);
-    if (count > 65536u || static_cast<std::uint64_t>(count) * entry_bytes +
-            header_bytes != blob.bytes->size()) {
+    // The game never compares the ADB signature.
+    if (read_u32(blob.bytes->data()) != 0x00424441u)
+        bridge_append_probe_event("adb_signature_ignored",
+            (blob.identity.canonical_name + ": ADB signature differs; read as the game does").c_str());
+    const std::uint32_t count = read_u32(blob.bytes->data() + 4);
+    if (count > 65536u) {
         fail(failure, ResourceFailureCode::archive_bounds, "invalid ADB entry range");
         return false;
+    }
+    // The game walks the database in place with its stored count and never
+    // checks the member size; shipped database.res has ADBs whose last
+    // entries end early (inmm1, unmoco3/4, unmozozo). Read every declared
+    // entry; bytes past the member read as zero and are logged once.
+    const std::uint64_t declared = static_cast<std::uint64_t>(count) * entry_bytes + header_bytes;
+    std::vector<std::uint8_t> padded;
+    const std::uint8_t* data = blob.bytes->data();
+    if (declared != blob.bytes->size()) {
+        if (declared > blob.bytes->size()) {
+            padded.assign(static_cast<std::size_t>(declared), 0u);
+            std::memcpy(padded.data(), data, blob.bytes->size());
+            data = padded.data();
+        }
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "%s: %u entries declared in %zu bytes; read as the game does",
+                      blob.identity.canonical_name.c_str(), count, blob.bytes->size());
+        bridge_append_probe_event("adb_size_mismatch", detail);
     }
     AnimationDatabaseAsset result{};
     result.identity = blob.identity;
     for (std::size_t i = 0; i < 3; ++i) {
         result.heights[i] = read_float(data + 32u + i * 4u);
-        if (!std::isfinite(result.heights[i])) {
-            fail(failure, ResourceFailureCode::parse, "non-finite ADB height");
-            return false;
-        }
+        if (!std::isfinite(result.heights[i])) result.heights[i] = 0.0f;  // unchecked by the game
     }
     result.entries.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -2773,10 +2926,7 @@ bool parse_animation_database(const ResourceBlob& blob,
         // Shipped selectors index entries by their physical 88-byte position
         // and return database+44+88*n. The stored word at +16 is metadata, not
         // an array-index invariant; valid shipped databases need not equal n.
-        if (!length) {
-            fail(failure, ResourceFailureCode::parse, "invalid ADB name");
-            return false;
-        }
+        // An empty name is kept (the game does not check it); it matches no lookup.
         value.name.assign(reinterpret_cast<const char*>(entry), length);
         value.ordinal = i;
         value.flags = read_u32(entry + 20);
@@ -2784,7 +2934,8 @@ bool parse_animation_database(const ResourceBlob& blob,
         value.length = read_u32(entry + 32);
         value.speed = read_float(entry + 36);
         value.hide_frames = {read_u32(entry + 40), read_u32(entry + 44)};
-        if (!std::isfinite(value.speed) || value.length > 0x1000000u) {
+        if (!std::isfinite(value.speed)) value.speed = 0.0f;  // unchecked by the game
+        if (value.length > 0x1000000u) {
             fail(failure, ResourceFailureCode::parse, "invalid ADB duration or rate");
             return false;
         }
@@ -2807,6 +2958,7 @@ bool parse_animation_track(const ResourceBlob& blob,
     AnimationTrackAsset result{};
     result.identity = blob.identity;
     std::size_t offset = 0;
+    std::uint32_t repaired_frames = 0;
     const auto word = [&](std::uint32_t& value) {
         if (blob.bytes->size() - offset < 4u) return false;
         value = read_u32(blob.bytes->data() + offset);
@@ -2826,10 +2978,20 @@ bool parse_animation_track(const ResourceBlob& blob,
             fail(failure, ResourceFailureCode::parse, "ANM frame allocation failed");
             return false;
         }
-        for (auto& frame : output) for (float& value : frame) {
-            value = read_float(blob.bytes->data() + offset);
-            offset += 4u;
-            if (!std::isfinite(value)) return false;
+        // The game uses frames unchecked. A frame with a non-finite value
+        // becomes the identity rotation {w=1,x,y,z=0} or a zero offset.
+        for (auto& frame : output) {
+            bool finite_frame = true;
+            for (float& value : frame) {
+                value = read_float(blob.bytes->data() + offset);
+                offset += 4u;
+                finite_frame = finite_frame && std::isfinite(value);
+            }
+            if (!finite_frame) {
+                frame.fill(0.0f);
+                if constexpr (width == 4u) frame[0] = 1.0f;
+                ++repaired_frames;
+            }
         }
         return true;
     };
@@ -2842,11 +3004,17 @@ bool parse_animation_track(const ResourceBlob& blob,
         (!(result.morph_frames == 0 && offset == blob.bytes->size()) &&
          (!word(result.morph_points) ||
           !frames(result.morphs, static_cast<std::uint64_t>(result.morph_frames) *
-                                    result.morph_points))) ||
-        offset != blob.bytes->size()) {
+                                    result.morph_points)))) {
         if (!failure)
             fail(failure, ResourceFailureCode::archive_bounds, "invalid ANM frame range");
         return false;
+    }
+    // Bytes after the declared frames are never read by the game.
+    if (repaired_frames) {
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "%s: %u non-finite ANM frames reset",
+                      blob.identity.canonical_name.c_str(), repaired_frames);
+        bridge_append_probe_event("anm_frames_repaired", detail);
     }
     // Keep the stored quaternion, including its non-unit scale. The owned
     // q*p*conjugate(q) evaluator needs the norm-squared envelope below.
@@ -2909,11 +3077,8 @@ bool decode_animation_clip(const ResourceBlob& selected_clip,
                            ResourceFailure& failure, const ResourceStore* budget) {
     clip = {};
     MemoryResourceArchive archive;
+    // The game has no track-count limit; the archive's own size bounds it.
     if (!archive.open(selected_clip, failure,budget)) return false;
-    if (archive.entry_count() > 4096u) {
-        fail(failure, ResourceFailureCode::archive_bounds, "too many ANM node tracks");
-        return false;
-    }
     AnimationClipAsset result{};
     result.identity = selected_clip.identity;
     const auto names = archive.entry_names();
@@ -3134,6 +3299,7 @@ struct OwnedResourceLoader::Impl {
     }
 
     void worker_main() {
+        const BackgroundWorkerPriority priority;
         for (;;) {
             LoaderJob job;
             {

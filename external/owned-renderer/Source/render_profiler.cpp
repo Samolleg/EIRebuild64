@@ -5,6 +5,7 @@
 #include "owned_resource_runtime.h"
 #include "retained_static_scene.h"
 #include "retained_static_submission.h"
+#include "stall_watchdog.h"
 
 #include <algorithm>
 #include <cmath>
@@ -668,7 +669,7 @@ void RenderProfiler::request_capture_next(const BridgeProfileSnapshot* bridge,
         if (resources) {   // temporary: memory attribution
             const auto store = owned_visual_resource_stats();
             std::snprintf(line, sizeof(line),
-                ",\n  \"memory\":{\"process_private_bytes\":%llu,\"proxy_surface_cpu_bytes\":%llu,\"surface_gpu_bytes\":%llu,\"surface_double_resident_bytes\":%llu,\"surface_released_bytes\":%llu,\"surface_released_count\":%llu,\"surface_pinned_count\":%llu,\"surface_restore_readbacks\":%llu,\"surface_restore_readback_ms\":%.3f,\"owned_immutable_bytes\":%llu,\"owned_archive_owners\":%llu,\"owned_mapped_views\":%llu,\"owned_texture_source_bytes\":%llu,\"transient_upload_bytes\":%llu}",
+                ",\n  \"memory\":{\"process_private_bytes\":%llu,\"proxy_surface_cpu_bytes\":%llu,\"surface_gpu_bytes\":%llu,\"surface_double_resident_bytes\":%llu,\"surface_released_bytes\":%llu,\"surface_released_count\":%llu,\"surface_pinned_count\":%llu,\"surface_restore_readbacks\":%llu,\"surface_restore_readback_ms\":%.3f,\"owned_immutable_bytes\":%llu,\"owned_archive_owners\":%llu,\"owned_mapped_views\":%llu,\"owned_texture_source_bytes\":%llu,\"transient_upload_bytes\":%llu,\"owned_texture_entries\":%llu,\"owned_texture_bytes\":%llu,\"texture_array_bytes\":%llu,\"geometry_page_bytes\":%llu,\"geometry_live_bytes\":%llu}",
                 static_cast<unsigned long long>(resources->process_private_bytes),
                 static_cast<unsigned long long>(resources->cpu_surface_bytes),
                 static_cast<unsigned long long>(resources->gpu_texture_bytes),
@@ -682,7 +683,12 @@ void RenderProfiler::request_capture_next(const BridgeProfileSnapshot* bridge,
                 static_cast<unsigned long long>(store.archive_owner_count),
                 static_cast<unsigned long long>(store.mapped_view_count),
                 static_cast<unsigned long long>(owned_visual_texture_source_bytes()),
-                static_cast<unsigned long long>(resources->transient_upload_bytes));
+                static_cast<unsigned long long>(resources->transient_upload_bytes),
+                static_cast<unsigned long long>(resources->owned_texture_entries),
+                static_cast<unsigned long long>(resources->owned_texture_bytes),
+                static_cast<unsigned long long>(resources->texture_array_bytes),
+                static_cast<unsigned long long>(resources->geometry_page_bytes),
+                static_cast<unsigned long long>(resources->geometry_live_bytes));
             metadata += line;
         }
         char lifecycle_json[3072]{};
@@ -1328,7 +1334,8 @@ bool RenderProfiler::request_shadow_temporal_pair(ID3D11Texture2D* color,
         c.SampleDesc.Count != 1 ||
         d.Format != DXGI_FORMAT_R24G8_TYPELESS || d.SampleDesc.Count != 1 ||
         s.Format != DXGI_FORMAT_R32_TYPELESS || s.ArraySize != 5 ||
-        s.Width != 2048 || s.Height != 2048 || s.SampleDesc.Count != 1 ||
+        s.Width != s.Height || (s.Width != 1024 && s.Width != 2048 && s.Width != 4096) ||
+        s.SampleDesc.Count != 1 ||
         c.MipLevels != 1 || d.MipLevels != 1 || s.MipLevels != 1) return false;
     clear_shadow_temporal_pair();
     for (auto& slot : shadow_temporal_slots_) {
@@ -1403,6 +1410,7 @@ ShadowTemporalPresentOutcome RenderProfiler::shadow_temporal_present(
 }
 
 bool RenderProfiler::export_shadow_temporal_pair() {
+    const stall_watch::Exempt disk_export;  // diagnostic readback and disk output
     try {
         const auto& first = shadow_temporal_slots_[0].snapshot;
         const auto& second = shadow_temporal_slots_[1].snapshot;
@@ -1440,8 +1448,9 @@ bool RenderProfiler::export_shadow_temporal_pair() {
                 slot.depth.Get());
             const bool shadow_written = write_shadow_temporal_maps(directory + "\\" + shadow_name,
                 slot.shadows.Get());
-            D3D11_TEXTURE2D_DESC color_desc{};
+            D3D11_TEXTURE2D_DESC color_desc{}, shadow_desc{};
             slot.color->GetDesc(&color_desc);
+            slot.shadows->GetDesc(&shadow_desc);
             std::ostringstream output;
             output.imbue(std::locale::classic());
             output << std::setprecision(12);
@@ -1461,7 +1470,7 @@ bool RenderProfiler::export_shadow_temporal_pair() {
                 << ",\"copy_enqueue_ms\":"
                 << (1000.0 * static_cast<double>(snapshot.copy_enqueue_qpc_ticks) /
                     static_cast<double>(qpc_frequency_))
-                << ",\"capture_perturbation\":\"three GPU copies per sample, including one 80 MiB shadow array; no CPU readback or file I/O between samples\""
+                << ",\"capture_perturbation\":\"three GPU copies per sample, including one complete sun-shadow array; no CPU readback or file I/O between samples\""
                 << ",\"pair_sample_interval_ms\":" << interval_ms
                 << ",\"world_time_valid\":" << (snapshot.world_time_valid ? "true" : "false")
                 << ",\"world_time\":" << snapshot.world_time
@@ -1478,7 +1487,11 @@ bool RenderProfiler::export_shadow_temporal_pair() {
                 << ",\"depth_written\":" << (depth_written ? "true" : "false")
                 << ",\"shadow_written\":" << (shadow_written ? "true" : "false")
                 << ",\"world_depth_encoding\":\"top-down little-endian D24_UNORM_S8_UINT, tightly packed four bytes per pixel\""
-                << ",\"shadow_depth_encoding\":\"five top-down 2048x2048 R32_FLOAT slices, tightly packed in slice order\""
+                << ",\"shadow_width\":" << shadow_desc.Width
+                << ",\"shadow_height\":" << shadow_desc.Height
+                << ",\"shadow_slices\":" << shadow_desc.ArraySize
+                << ",\"shadow_depth_encoding\":\"five top-down " << shadow_desc.Width
+                << 'x' << shadow_desc.Height << " R32_FLOAT slices, tightly packed in slice order\""
                 << ",\"selector_rule\":\"first camera-containing slice; slices[4].bias[2]>=0.5 also requires guarded light containment\""
                 << ",\"shadow_projection_change_scope\":\"first numeric difference only; world_to_light includes XY and Z\""
                 << ",\"authored_sun_valid\":" << (snapshot.authored_sun_valid ? "true" : "false")
@@ -1508,7 +1521,7 @@ bool RenderProfiler::export_shadow_temporal_pair() {
                 << ",\"slices\":[";
             for (std::size_t index = 0; index < snapshot.slices.size(); ++index) {
                 const auto& slice = snapshot.slices[index];
-                const float radius = slice.bias[0] * 1024.f;
+                const float radius = slice.bias[0] * (float(shadow_desc.Width) * .5f);
                 const float depth_span = slice.bias[1] > 0 ? 1.f / slice.bias[1] : 0.f;
                 output << (index ? "," : "") << "{\"index\":" << index
                     << ",\"enabled\":" << (slice.enabled ? "true" : "false")
@@ -1547,6 +1560,7 @@ bool RenderProfiler::export_shadow_temporal_pair() {
 }
 
 void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal) {
+    const stall_watch::Exempt disk_export;  // F11 capture readback and disk output
     char image_name[128]{};
     std::snprintf(image_name, sizeof(image_name), "%02u_%s.bmp", ordinal, sanitize(pass.name.data()).c_str());
     const std::string image_path = capture_directory_ + "\\" + image_name;
@@ -1676,8 +1690,8 @@ bool RenderProfiler::write_shadow_temporal_maps(const std::string& path,
     if (!staging || !context_) return false;
     D3D11_TEXTURE2D_DESC desc{};
     staging->GetDesc(&desc);
-    if (desc.Format != DXGI_FORMAT_R32_TYPELESS || desc.Width != 2048 ||
-        desc.Height != 2048 || desc.ArraySize != 5 || desc.MipLevels != 1 ||
+    if (desc.Format != DXGI_FORMAT_R32_TYPELESS || !desc.Width ||
+        desc.Width != desc.Height || desc.ArraySize != 5 || desc.MipLevels != 1 ||
         desc.Usage != D3D11_USAGE_STAGING ||
         !(desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) return false;
     FILE* file = nullptr;

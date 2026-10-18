@@ -16,6 +16,8 @@ inline float snow_trail_extent(const std::array<float,2>& half) noexcept {
 }
 struct PerchRef { std::string part; std::uint32_t triangle=0; int sample=-1; critters::PerchKind kind=critters::perch_fill; };
 VisualPreparedResources::PoseKey owned_visual_pose_key(const RetainedVisualSample& sample) noexcept;
+bool owned_visual_pose_key_matches(const VisualPreparedResources::PoseKey& left,
+    const RetainedVisualSample& sample,const double* phase=nullptr) noexcept;
 bool same_visual_pose_key(const VisualPreparedResources::PoseKey& left,
     const VisualPreparedResources::PoseKey& right) noexcept;
 bool prepare_world_visual_pose(const RetainedVisualSample& sample,
@@ -29,7 +31,9 @@ bool place_perches(const RetainedVisualSample& sample, const std::vector<PerchRe
 // Queries consume one immutable, completed visual frame. Cache lifetime is
 // explicit so independent worlds do not share a hidden model census.
 struct WorldPerchCache { std::unordered_map<std::string,std::vector<PerchRef>> models; };
+struct WorldContactStore;
 struct WorldContactCache {
+    std::shared_ptr<WorldContactStore> store;
     std::vector<float> sector_top;
     std::shared_ptr<const TerrainCpuAsset> terrain;
     std::uint64_t generation = 0, revision = 0;
@@ -42,5 +46,6 @@ bool build_critter_perches(const RetainedVisualFrame& frame,const TextureCpuAsse
     std::uint64_t* preparation_count = nullptr) noexcept;
 bool build_ground_cover_objects(const RetainedVisualFrame& frame,const RetainedTerrainSourceSnapshot& source,
     WorldContactCache& cache,float x,float y,float radius,std::vector<ground_cover::FootprintSplat>& output,
-    std::uint64_t* preparation_count = nullptr) noexcept;
+    std::uint64_t* preparation_count = nullptr,RetainedStaticScene* owner = nullptr,
+    bool load_reveal_held = false) noexcept;
 } // namespace owned

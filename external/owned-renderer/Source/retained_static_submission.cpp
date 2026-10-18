@@ -1,4 +1,5 @@
 #include "retained_static_submission.h"
+#include "fast_float.h"
 #include "shadow_foliage.h"
 #include "visual_highlight.h"
 #include "contact_blend.h"
@@ -133,10 +134,10 @@ bool selected_groups(const std::vector<NativePackedGroup>& endpoints,
             selected.y[lane] = select_endpoint(y, selector);
             selected.z[lane] = select_endpoint(z, selector);
             selected.w[lane] = select_endpoint(w, selector);
-            if (!std::isfinite(selected.x[lane]) ||
-                !std::isfinite(selected.y[lane]) ||
-                !std::isfinite(selected.z[lane]) ||
-                !std::isfinite(selected.w[lane]))
+            if (!finite_value(selected.x[lane]) ||
+                !finite_value(selected.y[lane]) ||
+                !finite_value(selected.z[lane]) ||
+                !finite_value(selected.w[lane]))
                 return false;
         }
     }
@@ -147,6 +148,7 @@ NativeOwnedTextureFormat texture_format(MmpFormat format) noexcept {
     switch (format) {
     case MmpFormat::dxt1: return NativeOwnedTextureFormat::dxt1;
     case MmpFormat::dxt3: return NativeOwnedTextureFormat::dxt3;
+    case MmpFormat::dxt5: return NativeOwnedTextureFormat::dxt5;
     case MmpFormat::rgb565: return NativeOwnedTextureFormat::rgb565;
     case MmpFormat::argb1555: return NativeOwnedTextureFormat::argb1555;
     case MmpFormat::argb4444: return NativeOwnedTextureFormat::argb4444;
@@ -193,7 +195,7 @@ NativeWorldLighting shadow_projection_lighting(const NativeWorldLighting& lighti
     // per-axis 1/512 snap changed every ~12 frames with the game clock running
     // (L-077), while 0.5-degree steps were visibly stepped. The hold follows
     // the game sun, so it advances with game time and freezes on pause.
-    if (!(length_squared>1e-12) || !std::isfinite(length_squared)) return result;
+    if (!(length_squared>1e-12) || !finite_value(length_squared)) return result;
     const double length=std::sqrt(length_squared);
     std::array<double,3> current{};
     for(unsigned axis=0;axis<3;++axis)current[axis]=lighting.sunlight_direction[axis]/length;
@@ -227,7 +229,7 @@ bool retained_object_matrix(
         0.0f, 0.0f, 0.0f, 1.0f,
     }};
     return std::all_of(matrix.begin(), matrix.end(),
-                       [](float value) { return std::isfinite(value); });
+                       [](float value) { return finite_value(value); });
 }
 
 const char* retained_static_prepare_result_name(
@@ -282,7 +284,7 @@ const char* retained_static_structure_omission(
         !model->second->static_shape_parameterized)
         return "model_structure";
     for (const float selector : source.shape)
-        if (!std::isfinite(selector)) return "source_values";
+        if (!finite_value(selector)) return "source_values";
     const auto texture_supported = [&](std::uint32_t type_id) {
         const std::string* name = figure_texture_for_type(source, type_id);
         if (!name) return false;
@@ -379,8 +381,8 @@ bool retained_bounds_visible(
     for (std::size_t axis = 0; axis < 3; ++axis) {
         minimum[axis] = bounds.center[axis] + bounds.minimum[axis];
         maximum[axis] = bounds.center[axis] + bounds.maximum[axis];
-        if (!std::isfinite(minimum[axis]) ||
-            !std::isfinite(maximum[axis]) || minimum[axis] > maximum[axis])
+        if (!finite_value(minimum[axis]) ||
+            !finite_value(maximum[axis]) || minimum[axis] > maximum[axis])
             return false;
     }
     std::uint32_t outside = 0x3fu;
@@ -396,8 +398,8 @@ bool retained_bounds_visible(
             object_to_clip[9] * y + object_to_clip[10] * z + object_to_clip[11];
         const float clip_w = object_to_clip[12] * x +
             object_to_clip[13] * y + object_to_clip[14] * z + object_to_clip[15];
-        if (!std::isfinite(clip_x) || !std::isfinite(clip_y) ||
-            !std::isfinite(clip_z) || !std::isfinite(clip_w))
+        if (!finite_value(clip_x) || !finite_value(clip_y) ||
+            !finite_value(clip_z) || !finite_value(clip_w))
             return false;
         std::uint32_t mask = 0;
         if (clip_x < -clip_w) mask |= 1u;
@@ -455,7 +457,7 @@ bool prepare_retained_static_candidate(
                                   source_index, kRetainedStaticPrepareNoIndex,
                                   signed_id);
 
-        const auto finite = [](float value) { return std::isfinite(value); };
+        const auto finite = [](float value) { return finite_value(value); };
         if (!std::all_of(object.position.begin(), object.position.end(), finite) ||
             !std::all_of(object.quaternion.begin(), object.quaternion.end(), finite) ||
             !std::all_of(object.shape.begin(), object.shape.end(), finite))
@@ -489,13 +491,13 @@ bool prepare_retained_static_candidate(
         float ground_height = 0.0f;
         if (!sample_terrain_height(*terrain, object.position[0],
                                    object.position[1], ground_height) ||
-            !std::isfinite(ground_height))
+            !finite_value(ground_height))
             return prepare_failed(
                 diagnostic, RetainedStaticPrepareResult::terrain_sample,
                 source_index, kRetainedStaticPrepareNoIndex, signed_id);
         candidate->world_position = object.position;
         candidate->world_position[2] += ground_height;
-        if (!std::isfinite(candidate->world_position[2]))
+        if (!finite_value(candidate->world_position[2]))
             return prepare_failed(
                 diagnostic, RetainedStaticPrepareResult::grounded_position,
                 source_index, kRetainedStaticPrepareNoIndex, signed_id);
@@ -581,7 +583,7 @@ bool prepare_retained_static_candidate(
                              node.bounds.minimum.end(), finite) ||
                 !std::all_of(node.bounds.maximum.begin(),
                              node.bounds.maximum.end(), finite) ||
-                !std::isfinite(node.bounds.radius) || node.bounds.radius < 0.0f)
+                !finite_value(node.bounds.radius) || node.bounds.radius < 0.0f)
                 return prepare_failed(
                     diagnostic, RetainedStaticPrepareResult::node_bounds,
                     source_index, index, signed_id);
@@ -661,6 +663,21 @@ bool prepare_retained_static_candidate(
             return prepare_failed(
                 diagnostic, RetainedStaticPrepareResult::figure_structure,
                 source_index, kRetainedStaticPrepareNoIndex, signed_id);
+        // The root node (sway_tree_assembly's rule: exactly one) placed like
+        // every node, drawn or not.
+        std::size_t roots = 0, root = 0;
+        for (std::size_t index = 0; index < model.links.size(); ++index)
+            if (model.links[index].parent_index == UINT_MAX && model.links[index].parent.empty()) {
+                ++roots; root = index;
+            }
+        if (roots == 1) {
+            const auto& t = accumulated[root];
+            for (unsigned axis = 0; axis < 3; ++axis)
+                candidate->root_world[axis] = placement[axis * 4] * t[0] + placement[axis * 4 + 1] * t[1] +
+                    placement[axis * 4 + 2] * t[2] + placement[axis * 4 + 3];
+            candidate->root_valid = std::all_of(candidate->root_world.begin(),
+                candidate->root_world.end(), finite);
+        }
         candidate->assembly = std::move(assembly);
         candidate->prepared = true;
         return true;
@@ -722,7 +739,7 @@ namespace {
 bool finite_world_bounds(const NativeWorldBounds& box) noexcept {
     if (!box.valid) return false;
     for (std::size_t axis = 0; axis < 3; ++axis)
-        if (!std::isfinite(box.minimum[axis]) || !std::isfinite(box.maximum[axis]) ||
+        if (!finite_value(box.minimum[axis]) || !finite_value(box.maximum[axis]) ||
             box.minimum[axis] > box.maximum[axis]) return false;
     return true;
 }
@@ -747,7 +764,7 @@ bool inverse_world_clip(const std::array<Scalar, 16>& matrix,
     double rows[4][8]{};
     for (unsigned r = 0; r < 4; ++r) {
         for (unsigned c = 0; c < 4; ++c) {
-            if (!std::isfinite(matrix[r*4+c])) return false;
+            if (!finite_value(matrix[r*4+c])) return false;
             rows[r][c] = matrix[r*4+c];
         }
         rows[r][r+4] = 1;
@@ -798,10 +815,10 @@ bool shadow_unproject(const std::array<double, 16>& inverse,
     for (unsigned row = 0; row < 4; ++row)
         for (unsigned column = 0; column < 4; ++column)
             world[row] += inverse[row*4+column]*clip[column];
-    if (!(world[3] > 0) || !std::isfinite(world[3])) return false;
+    if (!(world[3] > 0) || !finite_value(world[3])) return false;
     for (unsigned axis = 0; axis < 3; ++axis) {
         point[axis] = world[axis]/world[3];
-        if (!std::isfinite(point[axis])) return false;
+        if (!finite_value(point[axis])) return false;
     }
     return true;
 }
@@ -929,12 +946,12 @@ bool finish_shadow_receiver_xy(RetainedDirectionalSlice& slice,
     const double quantum = (std::max)(0.5,std::ldexp(1.0, exponent-5));
     radius = std::ceil(radius/quantum)*quantum;
     slice.light_radius = static_cast<float>(radius);
-    if (!std::isfinite(slice.light_radius) || slice.light_radius <= 0) return false;
+    if (!finite_value(slice.light_radius) || slice.light_radius <= 0) return false;
     const double texel = 2*radius/map_side;
     for (unsigned axis = 0; axis < 2; ++axis) {
         slice.light_center[axis] = static_cast<float>(std::floor(center[axis]/texel+.5)*texel);
-        bounds.minimum[axis] = std::nextafter(static_cast<float>(bounds.minimum[axis]-3*texel), -INFINITY);
-        bounds.maximum[axis] = std::nextafter(static_cast<float>(bounds.maximum[axis]+3*texel), INFINITY);
+        bounds.minimum[axis] = next_float(static_cast<float>(bounds.minimum[axis]-3*texel), -INFINITY);
+        bounds.maximum[axis] = next_float(static_cast<float>(bounds.maximum[axis]+3*texel), INFINITY);
         if (double(slice.light_center[axis])-radius > bounds.minimum[axis] ||
             double(slice.light_center[axis])+radius < bounds.maximum[axis]) return false;
     }
@@ -1001,6 +1018,7 @@ bool fit_shadow_camera_slice_xy(RetainedDirectionalSlice& slice,
 
 bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
     const TerrainCpuAsset& terrain, const std::array<float,16>& terrain_to_world,
+    std::uint64_t terrain_generation,
     ShadowPoint& world_hit, double& ground_near, double& ground_far) noexcept {
     std::array<float,16> normalized_camera{};
     for(unsigned index=0;index<16;++index)
@@ -1031,16 +1049,34 @@ bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
     ShadowPoint direction{};
     for (unsigned axis=0;axis<3;++axis) direction[axis]=far_point[axis]-near_point[axis];
     ShadowPoint local_hit{};
-    if (!intersect_base_terrain_ray(terrain,near_point,direction,local_hit)) return false;
+    // Looking across the map edge at rendered neighbour ground, the view axis
+    // leaves the active terrain. Dropping the anchor there switched the whole
+    // cascade policy (spatial off: C2 50 vs 120 units, C3 240 vs 480, C4 off
+    // vs on in the ba005a6d dumps), so neighbour pixels jumped between maps
+    // of very different resolution and softness while panning. The axis then
+    // meets the horizontal plane at the last terrain hit's height: the same
+    // reference ground the bands use below, held across the edge.
+    // Held per terrain source generation: another world never uses this
+    // map's height.
+    static double held_height=0;static bool held=false;static std::uint64_t held_generation=0;
+    if (held_generation!=terrain_generation) {held=false;held_generation=terrain_generation;}
+    if (intersect_base_terrain_ray(terrain,near_point,direction,local_hit)) {
+        held_height=local_hit[2];held=true;
+    } else {
+        if (!held || !(direction[2]<0)) return false;
+        const double fraction=(held_height-near_point[2])/direction[2];
+        if (!(fraction>0) || !finite_value(fraction)) return false;
+        for (unsigned axis=0;axis<3;++axis) local_hit[axis]=near_point[axis]+fraction*direction[axis];
+    }
     double w=terrain_to_world[15];
     for (unsigned axis=0;axis<3;++axis) w+=terrain_to_world[12+axis]*local_hit[axis];
-    if (!(w>0) || !std::isfinite(w)) return false;
+    if (!(w>0) || !finite_value(w)) return false;
     for (unsigned axis=0;axis<3;++axis) {
         double value=terrain_to_world[axis*4+3];
         for (unsigned component=0;component<3;++component)
             value+=terrain_to_world[axis*4+component]*local_hit[component];
         world_hit[axis]=value/w;
-        if (!std::isfinite(world_hit[axis])) return false;
+        if (!finite_value(world_hit[axis])) return false;
     }
 
     // The camera's lower view rays, rather than its clip near plane, define
@@ -1071,11 +1107,11 @@ bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
         for(unsigned axis=0;axis<3;++axis)
             ground[axis]=ray_near[axis]+fraction*(ray_far[axis]-ray_near[axis]);
         const double distance=local_w(ground);
-        if (!(distance>0) || !std::isfinite(distance)) continue;
+        if (!(distance>0) || !finite_value(distance)) continue;
         ground_near=(std::min)(ground_near,distance);
         ground_far=(std::max)(ground_far,distance);
     }
-    if (!std::isfinite(ground_near) || !(ground_far>=ground_near)) return false;
+    if (!finite_value(ground_near) || !(ground_far>=ground_near)) return false;
     return true;
 }
 }
@@ -1091,7 +1127,7 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
     float envelope_radius = sample.envelope_radius;
     if (sample.values.unit &&
         !retained_visual_selection_envelope_radius(sample,envelope_radius)) return false;
-    if (!std::isfinite(envelope_radius) || envelope_radius < 0) return false;
+    if (!finite_value(envelope_radius) || envelope_radius < 0) return false;
     std::array<float,3> extent{envelope_radius,envelope_radius,envelope_radius};
     auto root = sample.pose.root;
     if (!sample.values.unit) {
@@ -1111,18 +1147,18 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
         if (!sample.pose.root_rotation_valid) return false;
         double magnitude_squared = 0;
         for (float value : sample.pose.root_rotation) {
-            if (!std::isfinite(value)) return false;
+            if (!finite_value(value)) return false;
             magnitude_squared += double(value)*value;
         }
         if (magnitude_squared == 0) return false;
         const double radius = double(envelope_radius)*magnitude_squared;
         float rounded = static_cast<float>(radius);
-        if (double(rounded) < radius) rounded = std::nextafter(rounded,INFINITY);
+        if (double(rounded) < radius) rounded = next_float(rounded,INFINITY);
         extent.fill(rounded);
     }
     for (unsigned axis = 0; axis < 3; ++axis) {
-        bounds.minimum[axis] = std::nextafter(root[axis]-extent[axis],-INFINITY);
-        bounds.maximum[axis] = std::nextafter(root[axis]+extent[axis],INFINITY);
+        bounds.minimum[axis] = next_float(root[axis]-extent[axis],-INFINITY);
+        bounds.maximum[axis] = next_float(root[axis]+extent[axis],INFINITY);
     }
     bounds.valid = true;
     return finite_world_bounds(bounds);
@@ -1192,27 +1228,89 @@ bool far_receiver_cells_intersect(const NativeWorldBounds& caster,
 }
 }
 
+std::uint64_t receiver_cell_key(float cell,const NativeWorldBounds& b) noexcept {
+    const auto index=[&](unsigned axis){return static_cast<std::uint32_t>(static_cast<std::int32_t>(
+        std::floor((double(b.minimum[axis])+b.maximum[axis])*.5/cell)));};
+    return (std::uint64_t(index(0))<<32)|index(1);
+}
+
 bool append_cell_merged_receivers(float cell,const std::vector<NativeWorldBounds>& statics,
+    std::vector<NativeWorldBounds>& receivers) {
+    return append_cell_merged_receivers(cell,statics,{},receivers);
+}
+
+bool append_cell_merged_receivers(float cell,const std::vector<NativeWorldBounds>& statics,
+    const std::vector<std::pair<std::uint64_t,NativeWorldBounds>>& cells,
     std::vector<NativeWorldBounds>& receivers) {
     if(!(cell>0)){receivers.insert(receivers.end(),statics.begin(),statics.end());return true;}
     std::vector<std::pair<std::uint64_t,NativeWorldBounds>> keyed;keyed.reserve(statics.size());
     for(const auto& b:statics) {
         if(!b.valid)continue;
-        const auto index=[&](unsigned axis){return static_cast<std::uint32_t>(static_cast<std::int32_t>(
-            std::floor((double(b.minimum[axis])+b.maximum[axis])*.5/cell)));};
-        keyed.emplace_back((std::uint64_t(index(0))<<32)|index(1),b);
+        keyed.emplace_back(receiver_cell_key(cell,b),b);
     }
     std::stable_sort(keyed.begin(),keyed.end(),[](const auto& x,const auto& y){return x.first<y.first;});
-    for(std::size_t i=0;i<keyed.size();) {
-        auto merged=keyed[i].second;std::size_t j=i+1;
-        for(;j<keyed.size() && keyed[j].first==keyed[i].first;++j)
-            for(unsigned axis=0;axis<3;++axis){
-                merged.minimum[axis]=(std::min)(merged.minimum[axis],keyed[j].second.minimum[axis]);
-                merged.maximum[axis]=(std::max)(merged.maximum[axis],keyed[j].second.maximum[axis]);
-            }
-        receivers.push_back(merged);i=j;
+    // Per key, the union of the formed cell (if any) and every keyed box,
+    // in ascending key order: min and max are exact, so the union does not
+    // depend on how the boxes were grouped.
+    const auto include=[](NativeWorldBounds& merged,const NativeWorldBounds& b) {
+        if(!merged.valid){merged=b;return;}
+        for(unsigned axis=0;axis<3;++axis){
+            merged.minimum[axis]=(std::min)(merged.minimum[axis],b.minimum[axis]);
+            merged.maximum[axis]=(std::max)(merged.maximum[axis],b.maximum[axis]);
+        }
+    };
+    std::size_t i=0,c=0;
+    while(i<keyed.size() || c<cells.size()) {
+        const auto key=c<cells.size() && (i>=keyed.size() || cells[c].first<=keyed[i].first) ?
+            cells[c].first : keyed[i].first;
+        NativeWorldBounds merged{};
+        if(c<cells.size() && cells[c].first==key)include(merged,cells[c++].second);
+        for(;i<keyed.size() && keyed[i].first==key;++i)include(merged,keyed[i].second);
+        receivers.push_back(merged);
     }
     return true;
+}
+
+ReceiverCellClass classify_receiver_cell(const NativeWorldBounds& b,
+    const std::array<float,16>& m) noexcept {
+    if(!finite_world_bounds(b))return ReceiverCellClass::partial;
+    // Each clip row of any point in the box, evaluated in float as
+    // retained_bounds_visible does, is within ~4e-7 of the row's magnitude
+    // bound (sum of |coefficient| * max |coordinate|). A margin of 1e-5 of
+    // the compared rows' magnitudes leaves every member box's float test
+    // the same as the exact sign at the cell corners.
+    std::array<double,4> scale{};
+    for(unsigned row=0;row<4;++row) {
+        double sum=std::abs(double(m[row*4+3]));
+        for(unsigned axis=0;axis<3;++axis)
+            sum+=std::abs(double(m[row*4+axis]))*
+                (std::max)(std::abs(double(b.minimum[axis])),std::abs(double(b.maximum[axis])));
+        if(!std::isfinite(sum))return ReceiverCellClass::partial;
+        scale[row]=sum;
+    }
+    constexpr double k=1e-5;
+    const double margin[6]{k*(scale[0]+scale[3]),k*(scale[0]+scale[3]),k*(scale[1]+scale[3]),
+        k*(scale[1]+scale[3]),k*scale[2],k*(scale[2]+scale[3])};
+    bool inside=true;std::uint32_t outside=0x3fu;
+    for(unsigned corner=0;corner<8u;++corner) {
+        const double x=(corner&1u)?b.maximum[0]:b.minimum[0];
+        const double y=(corner&2u)?b.maximum[1]:b.minimum[1];
+        const double z=(corner&4u)?b.maximum[2]:b.minimum[2];
+        std::array<double,4> clip{};
+        for(unsigned row=0;row<4;++row)
+            clip[row]=double(m[row*4])*x+double(m[row*4+1])*y+double(m[row*4+2])*z+double(m[row*4+3]);
+        // retained_bounds_visible's planes: x>=-w, x<=w, y>=-w, y<=w, z>=0, z<=w.
+        const double distance[6]{clip[0]+clip[3],clip[3]-clip[0],clip[1]+clip[3],
+            clip[3]-clip[1],clip[2],clip[3]-clip[2]};
+        std::uint32_t mask=0;
+        for(unsigned plane=0;plane<6;++plane) {
+            if(!(distance[plane]>margin[plane]))inside=false;
+            if(distance[plane]< -margin[plane])mask|=1u<<plane;
+        }
+        outside&=mask;
+    }
+    if(outside)return ReceiverCellClass::outside;
+    return inside?ReceiverCellClass::inside:ReceiverCellClass::partial;
 }
 
 bool build_retained_directional_coverage(
@@ -1220,7 +1318,7 @@ bool build_retained_directional_coverage(
     const std::vector<NativeWorldBounds>& receiving_bounds,
     RetainedDirectionalCoverage& result, const TerrainCpuAsset* base_terrain,
     const std::array<float,16>* terrain_to_world,
-    std::uint32_t map_side,std::uint8_t close_cascades) noexcept {
+    std::uint32_t map_side,std::uint8_t close_cascades,std::uint64_t base_terrain_generation) noexcept {
     result = {};
     if(map_side<1024 || map_side>4096 || (map_side&(map_side-1)) ||
        close_cascades<1 || close_cascades>3)return false;
@@ -1233,15 +1331,15 @@ bool build_retained_directional_coverage(
         w_length_squared += double(world_to_clip[12+axis])*world_to_clip[12+axis];
     const bool perspective = w_length_squared > 0;
     const double camera_scale = perspective ? std::sqrt(w_length_squared) : world_to_clip[15];
-    if (!(camera_scale > 0) || !std::isfinite(camera_scale)) return false;
+    if (!(camera_scale > 0) || !finite_value(camera_scale)) return false;
     std::array<double, 16> camera_matrix{};
     for (unsigned index = 0; index < 16; ++index) camera_matrix[index] = world_to_clip[index]/camera_scale;
     std::array<double, 16> inverse{};
     if (!inverse_world_clip(camera_matrix, inverse)) return false;
     double ray_length = 0;
     for (unsigned axis = 0; axis < 3; ++axis) {
-        if (!std::isfinite(lighting.sunlight_direction[axis]) ||
-            !std::isfinite(lighting.sunlight_diffuse[axis])) return false;
+        if (!finite_value(lighting.sunlight_direction[axis]) ||
+            !finite_value(lighting.sunlight_diffuse[axis])) return false;
         ray_length += static_cast<double>(lighting.sunlight_direction[axis]) *
             lighting.sunlight_direction[axis];
         result.directional |= lighting.sunlight_diffuse[axis] > 0;
@@ -1291,7 +1389,7 @@ bool build_retained_directional_coverage(
     if (!receivers) { result.valid = true; return true; }
     minimum_depth = (std::max)(0.0, minimum_depth);
     maximum_depth = (std::min)(1.0, maximum_depth);
-    if (!std::isfinite(minimum_depth) || !std::isfinite(maximum_depth) || minimum_depth > maximum_depth) return false;
+    if (!finite_value(minimum_depth) || !finite_value(maximum_depth) || minimum_depth > maximum_depth) return false;
 
     ShadowPoint near_point{}, far_point{};
     if (!shadow_unproject(inverse, 0, 0, perspective ? 0 : minimum_depth, near_point) ||
@@ -1339,7 +1437,7 @@ bool build_retained_directional_coverage(
     ShadowPoint terrain_hit{};
     double ground_near=0,ground_far=0;
     const bool anchored=perspective && base_terrain && terrain_to_world &&
-        base_terrain_quality_anchor(camera_matrix,*base_terrain,*terrain_to_world,
+        base_terrain_quality_anchor(camera_matrix,*base_terrain,*terrain_to_world,base_terrain_generation,
             terrain_hit,ground_near,ground_far);
     if (anchored) {
         std::vector<NativeWorldBounds> clipped_receivers;
@@ -1413,8 +1511,8 @@ bool build_retained_directional_coverage(
                     double value=0;
                     for (unsigned component=0;component<3;++component)
                         value+=double(result.light_axes[axis][component])*point[component];
-                    lower[axis]=std::nextafter(static_cast<float>(value),-INFINITY);
-                    upper[axis]=std::nextafter(static_cast<float>(value),INFINITY);
+                    lower[axis]=next_float(static_cast<float>(value),-INFINITY);
+                    upper[axis]=next_float(static_cast<float>(value),INFINITY);
                 }
                 include_world_point(clipped,lower);
                 include_world_point(clipped,upper);
@@ -1439,9 +1537,9 @@ bool build_retained_directional_coverage(
                     (quality_far_distance-near_distance);
                 for(unsigned axis=0;axis<3;++axis)
                     start[axis]=near_point[axis]+start_fraction*(quality_far[axis]-near_point[axis]);
-                const double first=(std::max)(0.0,double(std::nextafter(
+                const double first=(std::max)(0.0,double(next_float(
                     static_cast<float>(shadow_clip_depth(camera_matrix,start)),-INFINITY)));
-                const double last=(std::min)(1.0,double(std::nextafter(
+                const double last=(std::min)(1.0,double(next_float(
                     static_cast<float>(quality_depths[index+1]),INFINITY)));
                 for(unsigned column=0;column<4;++column)
                     quality.world_to_clip[8+column]=static_cast<float>((
@@ -1471,7 +1569,7 @@ bool build_retained_directional_coverage(
                 // distance its own stable grid. Remote receiver bounds must
                 // not dilute the shadows visible around the camera.
                 const double radius=4.0*result.slices[2].light_radius;
-                if (!(radius>0) || !std::isfinite(radius)) return false;
+                if (!(radius>0) || !finite_value(radius)) return false;
                 const double texel=2*radius/map_side;
                 slice.light_radius=static_cast<float>(radius);
                 for(unsigned axis=0;axis<2;++axis)
@@ -1568,10 +1666,10 @@ bool build_retained_directional_coverage(
             if(low_x<=high_x) {
                 const double left=minimum_x+low_x*cell_side,bottom=minimum_y+low_y*cell_side;
                 const double right=minimum_x+high_x*cell_side+cell_side,top=minimum_y+high_y*cell_side+cell_side;
-                include_world_point(slice.far_receivers_in_light,{std::nextafter(static_cast<float>(left),-INFINITY),
-                    std::nextafter(static_cast<float>(bottom),-INFINITY),low_z});
-                include_world_point(slice.far_receivers_in_light,{std::nextafter(static_cast<float>(right),INFINITY),
-                    std::nextafter(static_cast<float>(top),INFINITY),high_z});
+                include_world_point(slice.far_receivers_in_light,{next_float(static_cast<float>(left),-INFINITY),
+                    next_float(static_cast<float>(bottom),-INFINITY),low_z});
+                include_world_point(slice.far_receivers_in_light,{next_float(static_cast<float>(right),INFINITY),
+                    next_float(static_cast<float>(top),INFINITY),high_z});
             }
         }
         return quality_valid;
@@ -1589,7 +1687,7 @@ bool build_retained_directional_coverage(
     // A planar/point receiver cannot supply four distinct float depth cuts.
     // One fitted map still covers it; its selector uses the original camera.
     const bool single = !perspective &&
-        std::nextafter(static_cast<float>(depths.front()), INFINITY) >= depths.back();
+        next_float(static_cast<float>(depths.front()), INFINITY) >= depths.back();
     for (unsigned index = 0; index < (single ? 1u : 4u); ++index) {
         if (!single && depths[index+1] <= depths[index]) continue;
         const double active_start=index==3u-close_cascades?depths.front():depths[index];
@@ -1598,8 +1696,8 @@ bool build_retained_directional_coverage(
         for (unsigned component = 0; component < 16; ++component)
             slice.world_to_clip[component] = static_cast<float>(camera_matrix[component]);
         if (!single) {
-            const double first = (std::max)(0.f, std::nextafter(static_cast<float>(active_start), -INFINITY));
-            const double last = (std::min)(1.f, std::nextafter(static_cast<float>(depths[index+1]), INFINITY));
+            const double first = (std::max)(0.f, next_float(static_cast<float>(active_start), -INFINITY));
+            const double last = (std::min)(1.f, next_float(static_cast<float>(depths[index+1]), INFINITY));
             for (unsigned column = 0; column < 4; ++column)
                 slice.world_to_clip[8+column] = static_cast<float>((camera_matrix[8+column]-
                     first*camera_matrix[12+column])/(last-first));
@@ -1613,8 +1711,8 @@ bool build_retained_directional_coverage(
                     double value = 0;
                     for (unsigned component = 0; component < 3; ++component)
                         value += double(result.light_axes[axis][component])*point[component];
-                    lower[axis] = std::nextafter(static_cast<float>(value), -INFINITY);
-                    upper[axis] = std::nextafter(static_cast<float>(value), INFINITY);
+                    lower[axis] = next_float(static_cast<float>(value), -INFINITY);
+                    upper[axis] = next_float(static_cast<float>(value), INFINITY);
                 }
                 include_world_point(slice.receivers_in_light, lower);
                 include_world_point(slice.receivers_in_light, upper);
@@ -1749,11 +1847,19 @@ bool build_retained_shadow_frame(const RetainedDirectionalCoverage& coverage,
     if(!coverage.valid)return false;
     if(!coverage.directional){frame.publication_serial=next_retained_shadow_revision();return true;}
     try {
+        // Each slice's validity lists, counted first so each is reserved once
+        // (filled below in the same order).
+        std::size_t list_sizes[5][2]{};   // [slice][terrain]
+        for(const auto& caster:casters)
+            for(unsigned index=0;index<5;++index)
+                if(caster.mask&(1u<<index))++list_sizes[index][caster.revision.terrain?1:0];
         for(unsigned index=0;index<5;++index){
             const auto& source=coverage.slices[index];
             if(!source.receivers_in_light.valid)continue;
-            if(!std::isfinite(source.light_radius)||source.light_radius<=0)return false;
+            if(!finite_value(source.light_radius)||source.light_radius<=0)return false;
             auto& slice=frame.slices[index];slice.enabled=true;slice.camera_slice=source.world_to_clip;
+            slice.validity.reserve(list_sizes[index][0]);
+            slice.static_validity.reserve(list_sizes[index][1]+(statics&&statics->valid?1u:0u));
             const auto& active_receivers=coverage.spatial_selection && index>=3 &&
                 source.far_receivers_in_light.valid ? source.far_receivers_in_light :
                 source.receivers_in_light;
@@ -1800,7 +1906,7 @@ bool build_retained_shadow_frame(const RetainedDirectionalCoverage& coverage,
             constexpr double depth_step=16;
             minimum=static_cast<float>(std::floor((minimum-depth_guard)/depth_step)*depth_step);
             maximum=static_cast<float>(std::ceil((maximum+depth_guard)/depth_step)*depth_step);
-            const float depth=maximum-minimum;if(!std::isfinite(depth)||depth<=0)return false;
+            const float depth=maximum-minimum;if(!finite_value(depth)||depth<=0)return false;
             // The final slice's z lane selects guarded spatial coverage.
             // Close slices use their otherwise free z/w lanes for the linear
             // camera-distance overlap with the next slice.
@@ -1816,7 +1922,7 @@ bool build_retained_shadow_frame(const RetainedDirectionalCoverage& coverage,
                 slice.world_to_light[axis*4+3]=axis<2?-source.light_center[axis]/radius:-minimum/depth;
             }
             slice.world_to_light[15]=1;
-            for(float value:slice.world_to_light)if(!std::isfinite(value))return false;
+            for(float value:slice.world_to_light)if(!finite_value(value))return false;
         }
         frame.slices[4].bias[2]=coverage.spatial_selection?1.f:0.f;
         frame.publication_serial=next_retained_shadow_revision();
@@ -1892,7 +1998,7 @@ bool retained_figure_position_bounds(const FigureCpuAsset& figure,
                         axis == 1 ? packed.y[lane] : packed.z[lane];
                 }
                 const float value = figure.shape_count == 1 ? endpoints[0] : select_endpoint(endpoints, shape);
-                if (!std::isfinite(value)) { bounds = {}; return false; }
+                if (!finite_value(value)) { bounds = {}; return false; }
                 if (!bounds.valid) bounds.minimum[axis] = bounds.maximum[axis] = value;
                 else {
                     bounds.minimum[axis] = (std::min)(bounds.minimum[axis], value);
@@ -1929,7 +2035,7 @@ float retained_visual_effective_alpha(const RetainedVisualSample& sample,
 bool retained_visual_texture_shift(std::uint32_t type, double time,
     float& u, float& v) noexcept {
     u = v = 0;
-    if (!std::isfinite(time) || time < 0 || time > INT_MAX) return false;
+    if (!finite_value(time) || time < 0 || time > INT_MAX) return false;
     if (type != 13 && type != 14 && type != 16) return true;
     const auto columns = type == 16 ? 8u : 4u;
     const auto rows = type == 13 ? 2u : 4u;
@@ -2029,12 +2135,12 @@ bool prepare_visual_part_envelope(const RetainedVisualSample& sample,
     if (const auto* track=prepared.skeleton_binding->tracks[part.skeleton_node])
         radius+=track->morph_radius;
     const auto& envelope=prepared.node_envelopes[part.skeleton_node];
-    target.geometry_radius=std::nextafter(static_cast<float>(radius),INFINITY);
-    target.envelope_radius=std::nextafter(static_cast<float>(
+    target.geometry_radius=next_float(static_cast<float>(radius),INFINITY);
+    target.envelope_radius=next_float(static_cast<float>(
         envelope.origin_radius+envelope.rotation_scale*radius),INFINITY);
     target.envelope_center=envelope.center;
-    if (!std::isfinite(target.envelope_radius) ||
-        !std::isfinite(target.geometry_radius)) return false;
+    if (!finite_value(target.envelope_radius) ||
+        !finite_value(target.geometry_radius)) return false;
     target.envelope_assembly=sample.assembly;
     target.bound_skeleton=prepared.skeleton_binding;
     target.envelope_shape=retained_visual_shape(sample);
@@ -2069,7 +2175,7 @@ bool retained_visual_selection_envelope_radius(
         for (const auto& cached:prepared.selection_envelopes)
             if (same_prepared_selection(cached,sample.selection)) {
                 radius=cached.radius;
-                return std::isfinite(radius) && radius>=0;
+                return finite_value(radius) && radius>=0;
             }
 #ifdef EID3D11_TESTING
         if (++prepared.selection_envelope_builds==0)
@@ -2107,19 +2213,19 @@ bool retained_visual_selection_envelope_radius(
             const double part_radius=envelope.origin_radius+
                 double(envelope.rotation_scale)*geometry_radius;
             const double complete=std::sqrt(squared)+part_radius;
-            if (!std::isfinite(complete)) return false;
+            if (!finite_value(complete)) return false;
             local_radius=(std::max)(local_radius,complete);
         }
         double scale=0;
         for (float axis:assembly.scale) {
-            if (!std::isfinite(axis)) return false;
+            if (!finite_value(axis)) return false;
             scale=(std::max)(scale,std::abs(double(axis)));
         }
         const double complete=local_radius*scale;
-        if (!std::isfinite(complete) ||
+        if (!finite_value(complete) ||
             complete>(std::numeric_limits<float>::max)()) return false;
-        radius=std::nextafter(static_cast<float>(complete),INFINITY);
-        if (!std::isfinite(radius) || radius<0) return false;
+        radius=next_float(static_cast<float>(complete),INFINITY);
+        if (!finite_value(radius) || radius<0) return false;
         VisualPreparedResources::SelectionEnvelope value;
         value.database=sample.selection.database;
         value.clip=sample.selection.clip;
@@ -2165,7 +2271,7 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
         const auto& h=sample.selection.database->heights;
         if (h[1]!=0) height=(double(h[0])+retained_visual_shape(sample)[2]*(double(h[2])-h[0]))/h[1];
     }
-    if (!std::isfinite(height) || std::abs(height)>(std::numeric_limits<float>::max)()) return false;
+    if (!finite_value(height) || std::abs(height)>(std::numeric_limits<float>::max)()) return false;
     current.binding=prepared.skeleton_binding;
     current.owner=sample.prepared;
     current.root_to_world=root;current.shape=retained_visual_shape(sample);current.center_shift=assembly.center_shift;
@@ -2241,7 +2347,7 @@ bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
             for (unsigned axis=0;axis<3;++axis) {
                 const float base=nodes[part.skeleton_node].translation[axis]+box.center[axis];
                 const float lo=base+box.minimum[axis],hi=base+box.maximum[axis];
-                if (!std::isfinite(lo) || !std::isfinite(hi) || lo>hi) return false;
+                if (!finite_value(lo) || !finite_value(hi) || lo>hi) return false;
                 found->minimum[axis]=(std::min)(found->minimum[axis],lo);
                 found->maximum[axis]=(std::max)(found->maximum[axis],hi);
             }
@@ -2281,7 +2387,7 @@ bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
         }
     }
     anchor={(minimum[0]+maximum[0])*.5f,(minimum[1]+maximum[1])*.5f,maximum[2]};
-    return std::isfinite(anchor[0]) && std::isfinite(anchor[1]) && std::isfinite(anchor[2]);
+    return finite_value(anchor[0]) && finite_value(anchor[1]) && finite_value(anchor[2]);
 }
 
 bool retained_visual_part_bounds(const RetainedVisualSample& sample,std::size_t index,NativeWorldBounds& bounds) {
@@ -2297,8 +2403,8 @@ bool retained_visual_part_bounds(const RetainedVisualSample& sample,std::size_t 
             const double value=root[axis*4+column];center+=value*target.envelope_center[column];squared+=value*value;
         }
         const double extent=target.envelope_radius*std::sqrt(squared);
-        bounds.minimum[axis]=std::nextafter(static_cast<float>(center-extent),-INFINITY);
-        bounds.maximum[axis]=std::nextafter(static_cast<float>(center+extent),INFINITY);
+        bounds.minimum[axis]=next_float(static_cast<float>(center-extent),-INFINITY);
+        bounds.maximum[axis]=next_float(static_cast<float>(center+extent),INFINITY);
     }
     bounds.valid=true;return finite_world_bounds(bounds);
 }
@@ -2333,6 +2439,8 @@ bool retained_visual_part_values(const RetainedVisualSample& sample,const Visual
     values.flags|=retained_visual_sway_flags(sample,part);
     // Rigid world objects meet the terrain with its colour; units never do.
     if (!sample.values.unit) values.flags |= native_ground_contact_flag;
+    // Units carry the unit flag: snow build-up gives them a sheen only.
+    else values.flags |= native_unit_flag;
     if (sample.assembly && sample.assembly->sways && !sample.values.unit &&
         retained_visual_part_sway(part).foliage)
         values.flags |= native_foliage_part_flag;
@@ -2443,7 +2551,7 @@ std::uint32_t retained_visual_sway_shape(const TrunkShape& trunk,
     const float up = std::fabs(scale[2]);
     const auto code = [](float value, float steps) {
         const float rounded = std::ceil(value * steps);
-        return std::isfinite(rounded) ? static_cast<std::uint32_t>((std::min)((std::max)(rounded, 0.f), 63.f)) : 63u;
+        return finite_value(rounded) ? static_cast<std::uint32_t>((std::min)((std::max)(rounded, 0.f), 63.f)) : 63u;
     };
     return (code(trunk.top * up, 4) << 10) | (code(trunk.radius * across, 16) << 16) |
         ((std::max)(code(trunk.height * up, 4), 1u) << 22);
@@ -2456,6 +2564,37 @@ std::uint32_t retained_visual_sway_flags(const RetainedVisualSample& sample,
         part.skeleton_node - sample.assembly->sway_root > native_sway_root_max) return 0;
     return native_sway_flag | sample.assembly->sway_shape |
         native_sway_root_bits(part.skeleton_node - sample.assembly->sway_root);
+}
+
+std::uint32_t retained_object_space_sway_flags(const VisualAssemblyAsset& assembly,
+    const VisualPartAsset& part) noexcept {
+    if (!assembly.sways || part.skeleton_node < assembly.sway_root ||
+        part.skeleton_node - assembly.sway_root > native_sway_root_max) return 0;
+    return native_sway_flag | assembly.sway_shape;
+}
+
+void sway_tree_assembly(VisualAssemblyAsset& assembly) noexcept {
+    if (!assembly.skeleton) return;
+    const auto& links = assembly.skeleton->links;
+    std::uint32_t roots = 0, root = 0;
+    for (std::uint32_t i = 0; i < links.size(); ++i)
+        if (links[i].parent_index == UINT_MAX && links[i].parent.empty()) { ++roots; root = i; }
+    if (roots != 1) return;
+    bool foliage = false;
+    TrunkShape trunk;
+    for (const auto& part : assembly.parts) {
+        const auto evidence = retained_visual_part_sway(part);
+        foliage = foliage || evidence.foliage;
+        if (part.skeleton_node == root && part.geometry) {
+            const auto value = retained_visual_trunk_shape(*part.geometry, evidence.clear_positions, assembly.shape);
+            trunk.radius = (std::max)(trunk.radius, value.radius);
+            trunk.top = (std::max)(trunk.top, value.top);
+            trunk.height = (std::max)(trunk.height, value.height);
+        }
+    }
+    assembly.sways = foliage;
+    assembly.sway_shape = retained_visual_sway_shape(trunk, assembly.scale);
+    assembly.sway_root = root;
 }
 
 bool retained_visual_part_submission(const RetainedVisualSample& sample,std::size_t index,
@@ -2631,8 +2770,9 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     auto& prepared=*sample.prepared;auto& group=prepared.merged_groups[group_index];
     const auto& part=sample.assembly->parts[group.parts[0]];
     auto& view=group.record;
-    // Every node of the unit lies within its selection envelope, so the first
-    // pose node plus twice that radius bounds every merged part in any pose.
+    // Every node lies within the already-scaled world selection envelope.
+    // Twice that world radius around node zero bounds every merged part;
+    // nativeCurrentBounds must not apply the node's scale to it again.
     const float radius=2*(std::max)({bounds.maximum[0]-bounds.minimum[0],bounds.maximum[1]-bounds.minimum[1],
         bounds.maximum[2]-bounds.minimum[2]})*.5f;
     if (!view.world.enabled) {
@@ -2744,6 +2884,7 @@ bool retained_visual_preserve_color_order(const RetainedVisualSample& sample,
         if ((part.texture->opaque_mips&selected)==selected) return false;
     }
     return part.texture->format==MmpFormat::dxt3 ||
+        part.texture->format==MmpFormat::dxt5 ||
         part.texture->format==MmpFormat::argb4444 ||
         part.texture->format==MmpFormat::argb8888;
 }

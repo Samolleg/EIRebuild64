@@ -984,7 +984,7 @@ bool decode_skin_texture(const TextureCpuAsset& t, Image& out) {
     if (mip.byte_offset > t.source->size() || mip.bytes > t.source->size() - mip.byte_offset) return false;
     const std::uint8_t* data = t.source->data() + mip.byte_offset;
     if (t.format == MmpFormat::dxt1) return decode_dxt(data, mip.bytes, mip.width, mip.height, 8, out);
-    if (t.format == MmpFormat::dxt3) return decode_dxt(data, mip.bytes, mip.width, mip.height, 16, out);
+    if (t.format == MmpFormat::dxt3 || t.format == MmpFormat::dxt5) return decode_dxt(data, mip.bytes, mip.width, mip.height, 16, out);
     const unsigned bpp = t.bit_count / 8;
     if ((bpp != 2 && bpp != 4) || mip.bytes < std::size_t(mip.width) * mip.height * bpp) return false;
     out.w = mip.width; out.h = mip.height; out.rgb.assign(std::size_t(out.w) * out.h * 3, 0);
@@ -2318,6 +2318,8 @@ struct Obstacles {
 struct WorldView {
     const Obstacles* obstacles = nullptr;
     std::uint32_t unavailable = 0;   // species whose game assets failed to load
+    // Player per-type spawn weight (kCritterTypeSettings): 1 is the normal mix, 0 the type is off.
+    float type_weight[sp_count] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
     bool party_moving = false;       // a living unit near the view is walking (bats fly past then)
     const SpotMap* spot_map = nullptr;
     ambient::ZoneClass zone = ambient::zone_outdoor;
@@ -3433,9 +3435,10 @@ float species_weight(const WorldView& w, Species s) {
     const auto& rule = species_rule(s);
     const bool grim = w.zone == ambient::zone_dead_city;
     if ((w.unavailable >> s) & 1u) return 0;   // its game assets failed to load (logged once)
+    if (!(w.type_weight[s] > 0)) return 0;     // the player turned this type off
     if (s == sp_bat && !w.party_moving) return 0;   // bats fly past moving heroes, never idle ones
     if (!((rule.zones >> w.zone) & 1u) || (grim && rule.cute)) return 0;
-    return rule.weight * (w.day ? rule.day : rule.night) * (s == sp_raven && !grim ? .6f : 1.f);
+    return rule.weight * w.type_weight[s] * (w.day ? rule.day : rule.night) * (s == sp_raven && !grim ? .6f : 1.f);
 }
 // Dead City dampening (its own ravens excepted) and the recent-species halving.
 float weight_now(const Director& d, const WorldView& w, Species s) {
@@ -3762,7 +3765,21 @@ void go_to_corpse(Flock& f, const Corpse& c, const WorldView& w, const Director&
     }
 }
 
+// A type the player turned off leaves at once: its event critters, flock,
+// spot residents (the spot is free again) and carrion flocks.
+void drop_disabled_types(Director& d, const WorldView& w) {
+    const auto off = [&](Species s) { return !(w.type_weight[s] > 0); };
+    unsigned kept = 0;
+    for (unsigned i = 0; i < d.critter_count; ++i) if (!off(d.critters[i].species)) d.critters[kept++] = d.critters[i];
+    d.critter_count = kept;
+    if (d.flock.active && off(bird_species(d.flock.variant))) d.flock.active = false;
+    for (auto& r : d.residents)
+        if (r.active && off(r.is_flock ? bird_species(r.birds.variant) : r.critter.species)) end_resident(d, r);
+    for (auto& f : d.carrion) if (f.active && off(bird_species(f.variant))) f.active = false;
+}
+
 void director_tick(Director& d, float dt, const WorldView& w, const std::vector<V3>& spots, float tail_y, double elapsed) {
+    drop_disabled_types(d, w);   // also while paused: the switch is the player's
     if (elapsed <= 0) return; // pause holds state and transitions
     d.clock += elapsed;
     // Combat anywhere near: no spawns for a while; fighting within 12 m
@@ -3888,7 +3905,8 @@ void director_tick(Director& d, float dt, const WorldView& w, const std::vector<
         // Nearby living units prevent landing in flock_update, not arrival.
         // Carrion can circle above a visible corpse while the party stays near it.
         const Bird variant = carrion_bird(w.zone, near_undead, !w.outside_walls(c.x, c.y));
-        if (variant == bird_none || ((w.unavailable >> (variant == bird_vulture ? sp_vulture : sp_raven)) & 1u)) continue;
+        if (variant == bird_none || ((w.unavailable >> (variant == bird_vulture ? sp_vulture : sp_raven)) & 1u) ||
+            !(w.type_weight[bird_species(variant)] > 0)) continue;   // assets missing or the player turned it off
         const std::uint64_t k = splitmix(c.id ^ (std::uint64_t(d.events) << 16));
         const unsigned lo = variant == bird_vulture ? 2 : 3, hi = variant == bird_vulture ? 5 : 7;
         const unsigned n = lo + unsigned(rnd(d, k, key("n")) * (hi - lo + 1));
@@ -4020,6 +4038,43 @@ struct Renderer::CritterState {
     ComPtr<ID3D11DepthStencilState> depth_xray;   // showcase 3: drawn through everything
 };
 
+// World change (release_world_state): the map's director, spots, wall ring,
+// terrain offsets, demand-grown instance/bone buffers and frame scratch go;
+// shaders, the species assets and states stay (a running asset/compile job
+// is left alone). The next map frame finds no terrain and rebuilds.
+void Renderer::release_critters_world() noexcept {
+    if (!critters_) return;
+    auto& cr = *critters_;
+    cr.terrain.reset(); cr.director = Director{}; cr.spot_map = SpotMap{}; cr.world_time = -1;
+    std::vector<Point>().swap(cr.ring);
+    std::vector<float>().swap(cr.offset_x); std::vector<float>().swap(cr.offset_y);
+    decltype(cr.units)().swap(cr.units); decltype(cr.details)().swap(cr.details); decltype(cr.spots)().swap(cr.spots);
+    cr.obstacles = Obstacles{}; cr.obstacle_age = 0;
+    decltype(cr.bone_scratch)().swap(cr.bone_scratch);
+    decltype(cr.instances_scratch)().swap(cr.instances_scratch);
+    decltype(cr.instance_upload)().swap(cr.instance_upload);
+    cr.instances.Reset(); cr.instance_srv.Reset(); cr.instance_capacity = 0;
+    cr.bones.Reset(); cr.bone_srv.Reset(); cr.bone_capacity = 0;
+    decltype(cr.showcase_critters)().swap(cr.showcase_critters);
+    decltype(cr.showcase_flocks)().swap(cr.showcase_flocks);
+    cr.showcase_director = Director{}; cr.showcase_mode = 0;
+}
+
+std::uint64_t Renderer::critter_video_bytes() const noexcept {
+    if (!critters_) return 0;
+    const auto& c = *critters_;
+    std::uint64_t bytes = 0;
+    for (ID3D11Buffer* buffer : {c.frame_constants.Get(), c.draw_constants.Get(), c.vertices.Get(), c.baked.Get(),
+                                 c.instances.Get(), c.bones.Get()})
+        bytes += resource_video_bytes(buffer);
+    if (c.skins_srv) {
+        ComPtr<ID3D11Resource> skins;
+        c.skins_srv->GetResource(&skins);
+        bytes += resource_video_bytes(skins.Get());
+    }
+    return bytes;
+}
+
 void append_critter_shader_programs(std::vector<ShaderProgram>& out) {
     static const std::string source = owned_native_shader_source() + kCritterShader;
     out.push_back({source, "critters", nullptr, "crVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
@@ -4053,6 +4108,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             std::vector<ShaderProgram> programs;
             append_critter_shader_programs(programs);
             state->compile = std::async(std::launch::async, [programs = std::move(programs)]() {
+                const BackgroundWorkerPriority priority;
                 std::array<ComPtr<ID3DBlob>, 2> blobs;
                 for (unsigned k = 0; k < 2; ++k) {
                     ComPtr<ID3DBlob> errors;
@@ -4064,7 +4120,10 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 }
                 return blobs;
             });
-            state->assets = std::async(std::launch::async, build_assets, std::move(mounts));
+            state->assets = std::async(std::launch::async, [mounts = std::move(mounts)]() mutable {
+                const BackgroundWorkerPriority priority;
+                return build_assets(std::move(mounts));
+            });
             critters_ = std::move(state);
             return status("loading assets/shaders");
         }
@@ -4077,8 +4136,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             if (!blobs[0] || !blobs[1]) return fail("shaders unavailable");
             if (!assets || !assets->error.empty()) return fail(assets ? assets->error : std::string("asset build failed"));
             HRESULT hr = S_OK;
-            if (FAILED(hr = device_->CreateVertexShader(blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &cr.vs)) ||
-                FAILED(hr = device_->CreatePixelShader(blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &cr.ps)))
+            if (FAILED(hr = create_shader(device_.Get(),blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &cr.vs)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &cr.ps)))
                 return fail("shader objects unavailable");
             const auto& a = *assets;
             if (FAILED(make_buffer(device_.Get(), UINT(a.vertices.size() * sizeof(CrVertex)), D3D11_BIND_SHADER_RESOURCE,
@@ -4202,6 +4261,12 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         w.clip = world_to_clip.data(); w.width = float(width_); w.height_px = float(height_);
         w.eye = {inverse[2] / inverse[14], inverse[6] / inverse[14], inverse[10] / inverse[14]};
         w.level = level;
+        static_assert(std::size(kCritterTypeSettings) == sp_count, "one player setting per species");
+        for (unsigned s = 0; s < sp_count; ++s) {
+            const auto& type = kCritterTypeSettings[s];
+            w.type_weight[s] = configured_boolean(debug_overlay_.config(), type.key, true)
+                ? float(std::max(0, configured_integer(debug_overlay_.config(), type.weight_key, kCritterWeightDefault))) / kCritterWeightDefault : 0.f;
+        }
         const auto ground_hit = [&](float nx, float ny, V3& hit) {
             V3 p[2];
             for (int k = 0; k < 2; ++k) {
@@ -4618,7 +4683,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         if (!timers) next = 0;
         float vision_min = std::numeric_limits<float>::infinity(), vision_max = 0;
         for (const auto i : members) { vision_min = std::min(vision_min, cr.details[i].vision); vision_max = std::max(vision_max, cr.details[i].vision); }
-        std::snprintf(critters_status_, sizeof(critters_status_),
+        const bool status_text = status_text_wanted();
+        if (status_text) std::snprintf(critters_status_, sizeof(critters_status_),
             "Party: %zu members, vision %.1f-%.1fm; spawn band %.1fx sight\n"
             "Critters active: rat %u spider %u larva %u frog %u lizard %u snake %u centipede %u beetle %u "
             "bird %u raven/crow %u vulture %u crab %u snowbird %u mouse %u bat %u; instances %zu, on screen %u (body %.0f-%.0f px)\n"
@@ -4653,8 +4719,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             o.party = nearest;
         } }
         critters_summary_ = summary;
-        if (showcase) std::snprintf(critters_status_, sizeof(critters_status_), "%s", showcase_line.c_str());
-        if (!cr.omitted_text.empty()) {   // assets that failed to load stay named on screen
+        if (status_text && showcase) std::snprintf(critters_status_, sizeof(critters_status_), "%s", showcase_line.c_str());
+        if (status_text && !cr.omitted_text.empty()) {   // assets that failed to load stay named on screen
             const std::size_t used = std::strlen(critters_status_);
             std::snprintf(critters_status_ + used, sizeof(critters_status_) - used, "\nOmitted: %s", cr.omitted_text.c_str());
         }
@@ -4749,11 +4815,10 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             std::size_t end = begin;
             while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
             const auto& range = cr.meshes[mesh];
-            if (FAILED(context_->Map(cr.draw_constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) break;
             // SV_VertexID ignores StartVertexLocation (no vertex buffers bound;
             // checked on hardware and WARP): the mesh offset goes in crFirst.
             const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
-            std::memcpy(mapped.pData, values, sizeof(values)); context_->Unmap(cr.draw_constants.Get(), 0);
+            if (FAILED(push_constants(constant_vs | constant_ps, 12, values, sizeof(values), cr.draw_constants.Get()))) break;
             context_->DrawInstanced(range.count, UINT(end - begin), 0, 0);
             ++draws; triangles += std::uint64_t(range.count / 3) * (end - begin);
             begin = end;

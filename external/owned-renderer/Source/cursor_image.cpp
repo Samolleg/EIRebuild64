@@ -1,5 +1,10 @@
 #include "cursor_image.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -97,6 +102,97 @@ void upscale_cursor_frame(const std::vector<std::uint32_t>& input, std::uint32_t
                 (static_cast<std::uint32_t>(std::clamp(std::lround(alpha * 255.0), 0L, 255L)) << 24) |
                 (channel(sum[0]) << 16) | (channel(sum[1]) << 8) | channel(sum[2]);
         }
+}
+
+
+namespace {
+HCURSOR g_load_cursor = nullptr;   // the load cursor while one is built
+std::uint64_t g_load_cursor_key = 0;
+bool g_load_cursor_active = false; // shown: WM_SETCURSOR keeps it
+std::uint32_t g_load_cursor_presents = 0;
+
+// A 32-bit alpha cursor from straight-alpha BGRA (Windows blends it with the
+// alpha channel; the monochrome mask is required but unused for alpha images).
+HCURSOR create_alpha_cursor(const std::vector<std::uint32_t>& pixels, std::uint32_t width,
+    std::uint32_t height, std::uint32_t hot_x, std::uint32_t hot_y) noexcept {
+    if (!width || !height || pixels.size() < static_cast<std::size_t>(width) * height) return nullptr;
+    BITMAPV5HEADER header{};
+    header.bV5Size = sizeof(header);
+    header.bV5Width = static_cast<LONG>(width);
+    header.bV5Height = -static_cast<LONG>(height);  // top-down, as the frame
+    header.bV5Planes = 1;
+    header.bV5BitCount = 32;
+    header.bV5Compression = BI_BITFIELDS;
+    header.bV5RedMask = 0x00ff0000u;
+    header.bV5GreenMask = 0x0000ff00u;
+    header.bV5BlueMask = 0x000000ffu;
+    header.bV5AlphaMask = 0xff000000u;
+    void* bits = nullptr;
+    const HDC screen = GetDC(nullptr);
+    const HBITMAP color = CreateDIBSection(screen, reinterpret_cast<const BITMAPINFO*>(&header), DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (screen) ReleaseDC(nullptr, screen);
+    if (!color || !bits) { if (color) DeleteObject(color); return nullptr; }
+    std::memcpy(bits, pixels.data(), static_cast<std::size_t>(width) * height * 4);
+    const std::vector<std::uint8_t> zero_mask(static_cast<std::size_t>((width + 15) / 16 * 2) * height, 0);
+    const HBITMAP mask = CreateBitmap(static_cast<int>(width), static_cast<int>(height), 1, 1, zero_mask.data());
+    HCURSOR cursor = nullptr;
+    if (mask) {
+        ICONINFO info{};
+        info.fIcon = FALSE;
+        info.xHotspot = (std::min)(hot_x, width - 1);
+        info.yHotspot = (std::min)(hot_y, height - 1);
+        info.hbmMask = mask;
+        info.hbmColor = color;
+        cursor = reinterpret_cast<HCURSOR>(CreateIconIndirect(&info));
+        DeleteObject(mask);
+    }
+    DeleteObject(color);
+    return cursor;
+}
+} // namespace
+
+bool show_load_cursor(std::uint64_t key, const std::vector<std::uint32_t>& pixels, std::uint32_t width,
+    std::uint32_t height, std::uint32_t hot_x, std::uint32_t hot_y) noexcept {
+    try {
+        if (!g_load_cursor || key != g_load_cursor_key) {
+            const HCURSOR created = create_alpha_cursor(pixels, width, height, hot_x, hot_y);
+            if (!created) { hide_load_cursor(); return false; }
+            const HCURSOR previous = g_load_cursor;
+            g_load_cursor = created;
+            g_load_cursor_key = key;
+            SetCursor(created);  // the previous one is no longer current before it goes
+            if (previous) DestroyCursor(previous);
+        } else {
+            SetCursor(g_load_cursor);
+        }
+        g_load_cursor_active = true;
+        ++g_load_cursor_presents;
+        return true;
+    } catch (...) {
+        hide_load_cursor();
+        return false;
+    }
+}
+
+void hide_load_cursor() noexcept {
+    if (!g_load_cursor_active && !g_load_cursor) return;
+    g_load_cursor_active = false;
+    SetCursor(nullptr);  // the game's own rule: no system cursor over its window
+    if (g_load_cursor) DestroyCursor(g_load_cursor);
+    g_load_cursor = nullptr;
+    g_load_cursor_key = 0;
+}
+
+bool apply_load_cursor() noexcept {
+    if (!g_load_cursor_active || !g_load_cursor) return false;
+    SetCursor(g_load_cursor);
+    return true;
+}
+
+std::uint32_t take_load_cursor_presents() noexcept {
+    const std::uint32_t presents = g_load_cursor_presents;
+    g_load_cursor_presents = 0;
+    return presents;
 }
 
 } // namespace owned

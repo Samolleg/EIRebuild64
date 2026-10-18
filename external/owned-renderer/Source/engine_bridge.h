@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -78,6 +79,8 @@ bool bridge_ambient_world_source(AmbientWorldSource& output) noexcept;
 // Tree crown parts are excluded; trunk/root boxes retain cover around trees.
 bool bridge_ground_cover_objects(float x, float y, float radius,
     std::vector<ground_cover::FootprintSplat>& output) noexcept;
+// Drops the contact store with the cover's world (it is refilled on use).
+void bridge_release_ground_contacts() noexcept;
 // Critters: world envelopes (min xyz, max xyz) of the visible non-unit
 // objects (buildings, walls, fences, trees, props) within radius of a point.
 // Cached per-object envelopes only; no part or mesh work.
@@ -159,8 +162,8 @@ bool bridge_terrain_atlas(std::uint32_t material,std::shared_ptr<const OwnedVisu
 struct WorldEnvironment;
 bool bridge_read_world_environment(WorldEnvironment& output) noexcept;
 void bridge_append_probe_event(const char* event,const char* detail) noexcept;
-// Temporary, opt-in one-hovered-creature shadow observation on normal F11.
-void bridge_report_hovered_shadow() noexcept; // temporary probes
+// Temporary, opt-in normal F11 request; observed before the next world releases its frame.
+void bridge_request_hovered_shadow_capture() noexcept; // temporary probes
 struct RetainedShadowCasterValue;
 
 // A completed proxy source has its own identity domain. It is never an
@@ -447,7 +450,7 @@ struct NativeTerrainVertex {
     // signed rest depth; the shader adds the shift and clamps at zero).
     std::uint32_t shift_objects = 0xffffffffu;
     float liquid_drop = 0.0f; // OwnedLiquidFlow: distance below the fall lip (world units)
-    float liquid_fill = 0.0f; // OwnedLiquidFlow: pit depth; the shader lifts the surface by it
+    float liquid_fill = 0.0f; // Liquid vertices: OwnedLiquidFlow pit depth (the shader lifts the surface by it); dry base vertices: owned_terrain_pit_fill (shadow casters only)
 };
 
 enum NativeTerrainVertexFlag : std::uint32_t {
@@ -539,6 +542,7 @@ enum class NativeOwnedTextureFormat : std::uint32_t {
     argb1555,
     argb4444,
     argb8888,
+    dxt5,
 };
 
 struct NativeOwnedTextureMip {
@@ -730,10 +734,14 @@ struct NativeWorldGeometry {
     const ResourceIdentity* identity = nullptr;
     // Immutable subdivision within that exact resource, never a raster batch key.
     std::uint32_t part = 0;
-    // A rigid colour-only source drawn in object space: the vertex stage
-    // evaluates the shared mesh with this record's transform, and the
-    // record owns no world vertices (static_lod.h native_world_object_space).
+    // A rigid source drawn in object space: the vertex stage evaluates the
+    // shared mesh with this record's transform, and the record owns no world
+    // vertices (static_lod.h native_world_object_space).
     bool object_space = false;
+    // Object space: the plant's root point in world space, the sway anchor a
+    // posed record reads from its root pose node (instance flags 0x200 and
+    // the trunk shape carry the rest). Unused without sway flags.
+    std::array<float, 3> sway_root{};
     // Its crown impostor's atlas slice + 1 (0: none): a cut-out object-space
     // record draws the impostor far away (static_lod.h native_world_impostor).
     std::uint32_t impostor = 0;
@@ -759,11 +767,13 @@ struct NativeWorldGeometry {
     float geometry_radius = 0;
 };
 
-// The completed sector phase owner supplies a revision and a renderer handle.
-// Values are borrowed synchronously; GPU lifetime uses the map source owner.
+// The completed sector phase owner supplies a revision only. The renderer
+// finds its GPU slot by the view's prepared identity: this value is copied
+// into every scene-thread command, so a handle written back into it would be
+// lost with the copy. Values are borrowed synchronously; GPU lifetime uses
+// the map source owner.
 struct NativeTerrainPhaseValues {
     std::uint64_t revision = 0;
-    mutable std::uint32_t slot = UINT_MAX, generation = 0;
 };
 
 // Persistent static draw set: a static object's color records stay registered
@@ -843,11 +853,19 @@ struct NativeGeometryView {
     // is the renderer-owned IDirectDrawSurface7 backing the live wound layer.
     std::uintptr_t wound_surface_interface = 0;
     bool wound_only = false;
+    // Create (or find) the world mesh only: nothing is queued or drawn
+    // (terrain far-shadow mesh prewarm, engine_bridge.cpp).
+    bool prepare_only = false;
     // A non-zero cache identity names decoded geometry independently of any
     // temporary CPU packet.  It lets the renderer retain the GPU copy and ask
     // the bridge to decode object-space source data only on a cache miss or an
     // explicit revision change.
     std::uintptr_t cache_identity = 0;
+    // Scene thread mode: a packet copied off the game's memory keeps the
+    // borrowed pointers' addresses here as its mesh cache selector (opaque
+    // values, never dereferenced), so the copy hits the same cached mesh.
+    std::array<std::uintptr_t, 5> cache_pointers{};
+    bool cache_pointers_valid = false;
     NativePreparedIdentity prepared_identity{};
     NativePreparedMeshHandle* prepared_mesh = nullptr;
     NativePreparedMaterialHandle* prepared_material = nullptr;
@@ -897,6 +915,9 @@ struct NativeGeometryView {
     // Terrain base page: the shipped mip chain of the bound game surface
     // (level 0 must equal the surface bytes), or null.
     const TerrainTexturePage* terrain_page = nullptr;
+    // Reorderable terrain materials of this map (texture_count + 2): the
+    // demand that sizes its terrain texture-array page (0 when unknown).
+    std::uint32_t terrain_page_count = 0;
     NativeTerrainState terrain{};
     const NativeTerrainVertex* terrain_vertices = nullptr;
     std::uint32_t terrain_vertex_count = 0;
@@ -1055,8 +1076,20 @@ struct NativeShadowCullProjection {
 };
 using NativeShadowCullProjectionFn = void (*)(void*, NativeShadowCullProjection&);
 using NativeShadowEndFn = bool (*)(void*, bool);
+// The persistent static caster store (casters: whole store at the revision,
+// nullptr: unchanged). On a static-layer redraw the renderer draws its baked
+// store layout and returns store casters it holds no current record for.
 using NativeShadowStaticDepthFn = bool (*)(void*,const RetainedShadowCasterValue*,
-    std::uint32_t,std::vector<RetainedShadowCasterValue>&);
+    std::uint32_t,std::uint64_t,std::vector<RetainedShadowCasterValue>&);
+// A terrain sun caster of a static-layer redraw and its final map mask.
+struct NativeTerrainShadowEntry {
+    NativeShadowCasterRevision revision{};
+    std::uint8_t mask = 0;
+};
+// The renderer draws the terrain casters it holds baked records for and
+// returns the entry indices the bridge must submit through the depth path.
+using NativeShadowTerrainBakeFn = bool (*)(void*,const NativeTerrainShadowEntry*,
+    std::uint32_t,std::vector<std::uint32_t>&);
 ShadowInputDiagnostics bridge_shadow_reuse_diagnostics() noexcept;
 struct NativeShadowSourceDiagnostics {
     std::uint64_t active_visuals = 0, active_terrain = 0;
@@ -1073,6 +1106,23 @@ struct NativePointShadowPublication { int static_slot=-1,overlay_slot=-1;float s
     bool merged=false;std::array<float,3> shadow_center{}; };
 using NativePointShadowBeginFn = bool (*)(void*,std::uint32_t,std::uint32_t,const NativePointShadowFrame&);
 using NativePointShadowEndFn = bool (*)(void*,bool);
+// Shelter map bake for owned precipitation (renderer_precipitation.cpp): one
+// straight-down slice of the persistent static casters into a side x side map.
+using NativeRainOcclusionBeginFn = bool (*)(void*,const NativeShadowSlice&,std::uint32_t side);
+using NativeRainOcclusionEndFn = bool (*)(void*,bool);
+void bridge_set_rain_occlusion_sink(NativeRainOcclusionBeginFn begin,NativeRainOcclusionEndFn end) noexcept;
+// What the renderer wants baked (published by the precipitation pass; the
+// bridge bakes when the serial or the static caster store changed).
+struct RainOcclusionRequest {
+    bool active = false;
+    float center[2]{}, half = 0, top = 0, span = 0;
+    std::uint32_t side = 0;
+    std::uint64_t serial = 0;
+    // The renderer's neighbour-map caster key (its own casters join the
+    // bake): a change re-bakes like a moved square.
+    std::uint64_t casters = 0;
+};
+void bridge_set_rain_occlusion_request(const RainOcclusionRequest& request) noexcept;
 using NativePointShadowBatchFn = bool (*)(void*,std::uint64_t&,bool&);
 using NativePointShadowAllocateFn = bool (*)(void*,bool,int&);
 using NativePointShadowReleaseFn = void (*)(void*,std::uint64_t,int);
@@ -1093,6 +1143,58 @@ using GameParticleSubmitFn = bool (*)(void* context, const GameParticleView& vie
 // Registered by the device for the duration of a D3D7 scene. Without it the
 // hook omits the particles and logs the reason; it never draws them itself.
 void bridge_set_game_particle_sink(void* context, GameParticleSubmitFn submit) noexcept;
+// One game lightning ribbon from the verified Draw3DLine entry (slot 16): the
+// game's points (projection space like particles), the stock half width
+// 15 * width (pixels times W) and the texture strip the caller chose. The
+// renderer expands the screen-space ribbon on the GPU (game_particles.h).
+struct GameRibbonView {
+    const GameRibbonPoint* points = nullptr;
+    std::uint32_t count = 0;
+    std::array<float, 16> object_to_clip{};
+    float clip_half_width = 0.0f, clip_half_height = 0.0f;
+    float half_width_pixels_w = 0.0f;
+    GameRibbonStrip strip{};
+    bool interface_pass = false;
+};
+using GameRibbonSubmitFn = bool (*)(void* context, const GameRibbonView& view);
+// Registered with the particle sink for the duration of a D3D7 scene.
+void bridge_set_game_ribbon_sink(void* context, GameRibbonSubmitFn submit) noexcept;
+// The game's selection marker from the verified DrawSelection call
+// (0x0056BF12): the game's point, size and unit axes (game_particles.h).
+struct GameSelectionView {
+    GameSelectionMarker marker{};
+    std::array<float, 16> object_to_clip{};
+    float clip_half_width = 0.0f, clip_half_height = 0.0f;
+};
+using GameSelectionSubmitFn = bool (*)(void* context, const GameSelectionView& view);
+void bridge_set_game_selection_sink(void* context, GameSelectionSubmitFn submit) noexcept;
+// One game terrain print's cached mesh from the verified Render call inside
+// CTerrainPrints::Draw, expanded to a world-space triangle list
+// (game_particles.h). The device batches prints with their texture and state;
+// flush draws the batch when the list's last print has drawn.
+struct GamePrintView {
+    const GameParticleGpu* vertices = nullptr;
+    std::uint32_t count = 0;
+    std::array<float, 16> object_to_clip{};
+    float clip_half_width = 0.0f, clip_half_height = 0.0f;
+};
+using GamePrintSubmitFn = bool (*)(void* context, const GamePrintView& view);
+using GamePrintFlushFn = bool (*)(void* context);
+void bridge_set_game_print_sink(void* context, GamePrintSubmitFn submit, GamePrintFlushFn flush) noexcept;
+// The game's floating combat text as screen-space glyph quads laid out by
+// the renderer from the damage list (combat_text.h), drawn in one call.
+struct GameGlyphView {
+    const GameParticleGpu* glyphs = nullptr;
+    std::uint32_t count = 0;
+};
+using GameGlyphSubmitFn = bool (*)(void* context, const GameGlyphView& view);
+void bridge_set_game_glyph_sink(void* context, GameGlyphSubmitFn submit) noexcept;
+
+// The active device owns this sink across scenes. The verified engine frame
+// entry calls it before the native clear and before advancing any UI epoch.
+using EngineFrameBeginFn = bool (*)(void* context) noexcept;
+void bridge_set_engine_frame_begin_sink(void* context, EngineFrameBeginFn begin) noexcept;
+void bridge_clear_engine_frame_begin_sink(void* context) noexcept;
 
 // The sink is render-thread-local. A device registers it only while a D3D7
 // scene is active so an unsupported or out-of-lifecycle call falls back to the
@@ -1115,7 +1217,8 @@ void bridge_set_native_geometry_sink(void* context, NativeGeometrySubmitFn submi
                                      NativePointShadowPublishFn point_shadow_publish = nullptr,
                                      NativePointShadowAllocateFn point_shadow_allocate = nullptr,
                                      NativePointShadowReleaseFn point_shadow_release = nullptr,
-                                     NativeShadowCullProjectionFn shadow_cull_projection = nullptr);
+                                     NativeShadowCullProjectionFn shadow_cull_projection = nullptr,
+                                     NativeShadowTerrainBakeFn terrain_bake = nullptr);
 
 #ifdef EID3D11_TESTING
 bool bridge_test_build_owned_point_shadow_faces(const RetainedWorldPointLight& light,
@@ -1216,7 +1319,7 @@ bool bridge_consume_hud_atlas_window(
 bool bridge_begin_character_pane_getdc(
     IDirectDrawSurface7* surface, const void* caller,
     std::uint64_t surface_id, std::uint32_t width,
-    std::uint32_t height) noexcept;
+    std::uint32_t height, float raster_scale = 1.0f) noexcept;
 bool bridge_finish_character_pane_releasedc(
     IDirectDrawSurface7* surface, const void* caller,
     std::uint64_t surface_id, std::uint64_t surface_generation = 0) noexcept;
@@ -1263,10 +1366,17 @@ bool bridge_change_driven_poses_enabled() noexcept;
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
                                   bool hover_objects) noexcept;
 void bridge_set_change_driven_poses(bool enabled) noexcept;
+void bridge_set_terrain_far_shadow_prewarm(bool enabled) noexcept;
 void bridge_set_terrain_lod_enabled(bool enabled) noexcept;
 // Owned sky (sky_clouds.h): false keeps the game's own sky pass.
 void bridge_set_owned_sky(bool enabled) noexcept;
 bool bridge_owned_sky_installed() noexcept;
+// Owned precipitation: why the stock DrawRain/DrawSnow calls still draw
+// (both kept, doubled weather), or nullptr while both are suppressed.
+const char* bridge_owned_weather_problem() noexcept;
+// Render-only weather test (0 game, 1 rain, 2 snow) and the visual strength
+// setting (0 varies, 1-3 light/medium/heavy) the environment reader applies.
+void bridge_set_weather_visual(int test, int strength_setting) noexcept;
 // The verified game image's semantic renderer slots are patched; false means
 // the DLL runs only as a D3D wrapper of the game's own draw stream.
 bool bridge_semantic_slots_installed() noexcept;
@@ -1275,6 +1385,40 @@ bool bridge_game_sites_all_verified() noexcept;
 // For a while after a loaded save replaced a map object under the same ID
 // (save_id_clash in bridge.jsonl): the on-screen warning, else null.
 const char* bridge_save_id_clash_notice() noexcept;
+// Player-visible features a failed install left off, noted where each
+// install decides. The owned visual publication carries the world point
+// lights, ground cover, critters and the character figures drawn in panels.
+enum BridgeFeatureOff : std::uint32_t {
+    bridge_feature_off_owned_world = 1u << 0,
+    bridge_feature_off_camp_grid = 1u << 1,
+    bridge_feature_off_hud_layout = 1u << 2,
+    bridge_feature_off_hud_icons = 1u << 3,
+};
+void bridge_note_feature_off(std::uint32_t features) noexcept;
+// One line naming an unrecognised or partly recognised addon.dll and the
+// features that are off; null when the addon is fine or nothing is off.
+const char* bridge_addon_notice() noexcept;
+// ---- Renderer ownership verification (issue #70) ----
+// Every code/slot patch the bridge, widescreen and camp hooks write into
+// game.exe is recorded right after the write (`original` = the bytes it
+// replaced; the first 5 bytes are kept). Verification classifies each live
+// record: ours (any bytes we wrote there), released (the original bytes
+// again), or taken over (anything else).
+void bridge_note_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept;
+// Verifies game.exe's ddraw.dll import slots and every recorded patch; logs
+// one renderer_ownership summary and one hook_taken_over per foreign entry.
+// `when` names the check point (startup, first_world_frame).
+void bridge_verify_renderer_ownership(const char* when) noexcept;
+// Called every present: verifies once after the first completed world draw
+// (or after 600 presents without one, in case the world draw was taken).
+void bridge_verify_renderer_ownership_after_world() noexcept;
+// Logs where game.exe's ddraw.dll imports point (ddraw_import_owner).
+void bridge_log_ddraw_imports(const char* when) noexcept;
+// Process exit without any DirectDrawCreate(Ex) call into this DLL: one
+// ddraw_never_called line naming the import owners. No heap use.
+void bridge_log_never_called_at_exit() noexcept;
+// One line naming what another module took over, null when nothing was.
+const char* bridge_takeover_notice() noexcept;
 // The game asked for its sky (WC_RENDER_SKY) in the current bridge frame.
 bool bridge_owned_sky_requested() noexcept;
 #ifdef EID3D11_TESTING
@@ -1298,9 +1442,25 @@ WorldFogSnapshot bridge_world_fog_snapshot() noexcept;
 // its world transform changes; null outside a world frame.
 std::shared_ptr<const WorldMistGrid> bridge_world_mist_grid() noexcept;
 std::uint64_t bridge_current_world_epoch() noexcept;
+// Game thread, at the renderer's world change: the bridge's world caches
+// (server seed assemblies, frame spare, terrain caster caches).
+void bridge_release_world_caches() noexcept;
 // Load reveal state for the load pause at the world Draw entry: the hold is
 // wanted while enabled and the current world epoch is not yet revealed.
 void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept;
+// The game's open progress movie (005DA400): its size, frame count and BINK
+// current frame (1-based, one past the frame last decoded and shown, so the
+// shown frame's 0-based index is current - 2), and the file the game opens
+// (work path + "Movies\" + name). False when none is open or the bridge sites
+// did not verify.
+struct ProgressMovie {
+    std::uint32_t width = 0, height = 0, frames = 0, current = 0;
+    std::string path;
+};
+bool bridge_progress_movie(ProgressMovie& movie) noexcept;
+// The local single-player server runs a loaded mission (not the menu, the
+// travel map or a remote server); game thread.
+bool bridge_local_single_player_mission() noexcept;
 // Reuse the bridge's content-verified mod addon discovery for harness path patches.
 void* bridge_supported_addon_image() noexcept;
 // Check a selected loaded module with the bridge's existing PE/file contract.
@@ -1316,6 +1476,85 @@ bool bridge_current_world_time(double& time) noexcept;
 #ifdef EID3D11_TESTING
 void bridge_test_world_draw_completion(bool success) noexcept;
 #endif
+
+// Scene thread (render_thread option). Registered by the device for its D3D7
+// scene (game thread) while the renderer runs a scene thread. With it the
+// bridge splits its world work at the retained scene seam and at the
+// transparent terrain range: the game thread reads game memory and copies the
+// frame's inputs, the scene thread prepares and submits from that copy.
+struct SurfaceImage;
+struct BridgeSceneHandoff {
+    void* context = nullptr;
+    // Game thread: true while the renderer's scene thread owns it.
+    bool (*active)(void* context) = nullptr;
+    // Game thread: queue work on the scene thread, after everything queued
+    // so far, with this point's bridge frame values installed there.
+    bool (*post)(void* context, std::function<void()> work) = nullptr;
+    // Game thread: the device state the native sinks read (D3D7 fixed state,
+    // frame state, world environment), copied; flushes the device's pending
+    // legacy draws and UI first, as a native sequence begins.
+    std::shared_ptr<void> (*capture_sinks)(void* context) = nullptr;
+    // Scene thread: native sinks over that copy (null clears them).
+    void (*install_sinks)(void* sinks) = nullptr;
+    // Game thread: snapshot of the texture bound to stage 0 now.
+    std::shared_ptr<SurfaceImage> (*bound_texture)(void* context) = nullptr;
+    // Scene thread: the stage-0 texture the next sink submission samples.
+    void (*bind_texture)(void* sinks, const std::shared_ptr<SurfaceImage>& texture) = nullptr;
+    // Game thread: snapshot of a proxy surface interface (wound layers).
+    std::shared_ptr<SurfaceImage> (*surface_snapshot)(void* context, std::uintptr_t surface_interface) = nullptr;
+    // Scene thread: the wound surface a submission names resolves to this snapshot.
+    void (*set_wound)(void* sinks, std::uintptr_t surface_interface, const std::shared_ptr<SurfaceImage>& texture) = nullptr;
+    // Game thread: wait until the scene thread drained (a path that touches
+    // state the scene thread also uses).
+    void (*sync)(void* context, const char* reason) = nullptr;
+    // Scene thread: the next submissions through `sinks` use the device state,
+    // frame state and stage-0 texture captured in `from` (one transaction
+    // across several captured render-state sets).
+    void (*adopt_sinks)(void* sinks, const void* from) = nullptr;
+};
+void bridge_set_scene_handoff(const BridgeSceneHandoff& handoff) noexcept;
+void bridge_clear_scene_handoff(void* context) noexcept;
+
+// Scene thread (render_thread option; renderer scene_post). The bridge keeps
+// its per-frame values thread_local to the game thread's hooks. A queued
+// renderer command carries a copy taken when it was queued, and the scene
+// thread installs it into its own thread_local slots before the command
+// runs, so renderer pulls (world_to_clip, fog, completion, text epochs,
+// frame serial) read the values of the command's place in the frame.
+// The terrain atlases (bridge_terrain_atlas), resolved by the game thread as
+// it queues a world command; one entry per material wrapper.
+struct TerrainAtlasSnapshot {
+    std::vector<std::shared_ptr<const OwnedVisualSurface>> surfaces;
+    std::vector<const char*> failures; // static strings; null with a surface
+};
+struct BridgeFrameValues {
+    std::uint64_t frame_serial = 0;
+    WorldDrawCompletionSnapshot completion{};
+    std::uint64_t completion_counter = 0;
+    SceneWorldToClipSnapshot world_to_clip{};
+    WorldFogSnapshot fog{};
+    std::uint64_t character_pane_ui_epoch = 0;
+    std::uint64_t chat_text_ui_epoch = 0;
+    // Game reads the renderer makes: on the scene thread the bridge answers
+    // these from the installed copy, never from game memory.
+    WorldEnvironment environment{};
+    double world_time = 0;
+    bool world_time_valid = false;
+    bool local_single_player = false;
+    bool owned_sky_requested = false;
+    bool world_draw_active = false;  // queued inside the outer World::Draw
+    std::uint64_t world_epoch = 0;   // lifecycle positive world epoch when queued
+    std::shared_ptr<const TerrainAtlasSnapshot> terrain_atlases;
+};
+BridgeFrameValues bridge_capture_frame_values() noexcept;
+void bridge_install_frame_values(const BridgeFrameValues& values) noexcept;
+// The bridge frame profile (large; once per presented frame).
+struct BridgeProfileValues {
+    bool has_profile = false;
+    BridgeProfileSnapshot profile{};
+};
+void bridge_capture_profile_values(BridgeProfileValues& output) noexcept;
+void bridge_install_profile_values(const BridgeProfileValues& values) noexcept;
 
 enum class SceneRendererTimingKind : std::uint8_t {
     native_flush,

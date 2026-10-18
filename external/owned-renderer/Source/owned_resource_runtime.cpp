@@ -1071,7 +1071,9 @@ std::shared_ptr<const AnimationDatabaseAsset> retained_visual_selected_database_
     const std::string& name, const void* selected, std::uint32_t size,
     std::uint64_t& source_generation, ResourceFailure& failure) {
     source_generation = 0;
-    if (size < 44u || size > 44u+88u*65536u || (size-44u)%88u) {
+    // Shipped ADBs need not be a whole number of entries (the game never
+    // checks); parse_animation_database reads them as the game does.
+    if (size < 44u || size > 44u+88u*65536u) {
         failure = {ResourceFailureCode::archive_bounds, "native-selected ADB size"};
         return nullptr;
     }
@@ -1247,6 +1249,33 @@ void retained_visual_retire_surface(std::uint64_t id) noexcept {
 
 void retained_static_positive_reset(std::uint64_t new_epoch) noexcept {
     runtime().scene.positive_lifecycle_reset(new_epoch);
+}
+
+// World change: the identity indexes keep a node per value any world ever
+// published, reclaimed only 8 per miss. Expired entries go now (live values
+// of the new world and fail-closed negative texture entries stay), with the
+// retained scene's frame scratch sized by the previous world.
+void owned_resource_runtime_release_world_bookkeeping() noexcept {
+    auto& state = runtime();
+    {
+        std::lock_guard<std::mutex> guard(state.lock);
+        const auto sweep = [](auto& pool, auto expired) {
+            for (auto entry = pool.values.begin(); entry != pool.values.end();) {
+                if (expired(entry->second)) entry = pool.values.erase(entry); else ++entry;
+            }
+            pool.cleanup = pool.values.end();
+        };
+        const auto weak = [](const auto& value) { return value.expired(); };
+        sweep(state.visual_models, weak);
+        sweep(state.visual_figures, weak);
+        sweep(state.visual_databases, weak);
+        sweep(state.visual_clips, weak);
+        sweep(state.visual_surfaces, weak);
+        sweep(state.visual_textures, [](const RuntimeState::TextureValue& value) {
+            return value.source_available && value.asset.expired();
+        });
+    }
+    state.scene.release_visual_frame_scratch();
 }
 
 RetainedStaticBindingView retained_static_binding_view() noexcept {

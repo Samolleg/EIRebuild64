@@ -32,6 +32,16 @@ struct CharacterPaneGlyphQuad {
     RECT source{};
     RECT destination{};
     std::uint32_t color = 0;
+    // Nonzero: the glyph was rasterized at the composed output size, in
+    // output pixels per surface pixel. source is then in output pixels and is
+    // placed 1:1 at the snapped output position of anchor, plus shift scaled
+    // (both surface pixels), plus offset (output pixels), clipped to clip
+    // (surface pixels). destination is its surface-space bound.
+    float raster_scale = 0.0f;
+    POINT anchor{};
+    POINT shift{};
+    POINT offset{};
+    RECT clip{};
 };
 
 struct CharacterPaneTextFrame {
@@ -82,7 +92,11 @@ public:
 
     void initialize_fonts(std::uint64_t generation) noexcept;
     void retire_fonts() noexcept;
-    bool begin_frame(std::uint32_t width, std::uint32_t height) noexcept;
+    // raster_scale: output pixels per surface pixel this surface is expected
+    // to be composed at. Layout, wrapping and the returned heights keep the
+    // stock surface metrics; only glyph rasterization uses this size.
+    bool begin_frame(std::uint32_t width, std::uint32_t height,
+                     float raster_scale = 1.0f) noexcept;
     int draw(HFONT font, std::uint32_t font_slot, const char* text,
              const RECT& rectangle, UINT format, COLORREF color,
              bool shadow, bool& height_valid) noexcept;
@@ -114,6 +128,7 @@ private:
     struct GlyphKey {
         std::uint64_t font_generation = 0;
         std::uint32_t font_slot = 0;
+        std::uint32_t raster_key = 0;
         std::uint16_t glyph = 0;
         bool operator<(const GlyphKey& other) const noexcept;
     };
@@ -175,13 +190,16 @@ private:
                 bool word_break, bool single_line,
                 std::vector<Line>& lines) noexcept;
     bool draw_line(HDC dc, const DisplayText& text, const Line& line,
-                   int x, int baseline, COLORREF color, const RECT& clip,
+                   int x, int baseline, int shift, COLORREF color,
+                   const RECT& clip,
                    std::uint32_t font_slot, int underline_offset,
                    int& underlines) noexcept;
     bool realize_glyph(HDC dc, std::uint32_t font_slot,
                        std::uint16_t glyph, const GlyphMask*& output) noexcept;
     bool append_glyph(const GlyphMask& glyph, int pen_x, int baseline_y,
-                      COLORREF color, const RECT& clip) noexcept;
+                      int shift, COLORREF color, const RECT& clip) noexcept;
+    HFONT raster_font(HFONT font, std::uint32_t font_slot) noexcept;
+    void release_raster_fonts() noexcept;
     bool append_line(int left, int right, int y, COLORREF color,
                      const RECT& clip) noexcept;
     bool place_glyph(std::uint32_t font_slot, std::uint32_t width,
@@ -212,6 +230,10 @@ private:
     std::uint64_t layout_sweep_ms_ = 0;
     std::shared_ptr<const CharacterPaneGlyphAsset> solid_asset_;
     std::size_t glyph_bytes_ = 0;
+    float raster_scale_ = 1.0f;
+    std::uint32_t raster_key_ = 0;
+    // Owned copies of the engine fonts at raster_scale_, by slot and key.
+    std::map<std::pair<std::uint32_t, std::uint32_t>, HFONT> raster_fonts_;
     HDC measure_dc_ = nullptr;
     HBITMAP measure_bitmap_ = nullptr;
     HGDIOBJ measure_old_bitmap_ = nullptr;

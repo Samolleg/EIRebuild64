@@ -210,6 +210,9 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
   veil=r7<.08;                     // a few faint long veils give the gust a body
   if(veil)fade*=saturate(gust*2);
  }
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
  fade*=saturate((((spray||fixedPos)?1:mist?pow(saturate(ambSourcesAt(p).r*1.6),2):mushroom?ambMushroomAt(p):ambAffinity(p))*ambMisc.z*density-r3)*8);
  // Mist rises only from open water (not from liquid tiles buried under rock).
  if(fade<=.002)return o;
@@ -246,7 +249,14 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  }
  fade*=terrainFade;
  if(fade<=.002)return o;
+ // Pollen: half its (halved) pool is green grass chaff, so the chaff keeps
+ // its old count while the yellow fluff drops to a third. The yellow fluff
+ // and the fireflies are sparse and vary in size and strength, never a
+ // uniform field.
+ bool chaff=ambMisc.w==0&&r7<.5;
+ bool sparse=(ambMisc.w==0&&!chaff)||ambMisc.w==9;
  float size=lerp(ambBand.z,ambBand.w,r4)*ambReach.w*terrainFade;
+ if(sparse){size*=lerp(.7,1.35,ambRand(seed,10));fade*=lerp(.4,1,ambRand(seed,11));}
  if(veil){size*=9;fade*=.1;}
  size*=sizeScale;
  if(fleck)size*=2.4;
@@ -255,7 +265,6 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  size*=grow;fade/=grow*grow;
  float2 uv=float2((vertex&1u)?1:-1,(vertex&2u)?1:-1);
  float2 corner=uv;
- bool chaff=ambMisc.w==0&&r7<.25;          // pollen: some green grass bits
  if(chaff)corner*=float2(.45,1.6);
  float spin=ambMotion.w+(chaff?2.5:0);
  float3 axisX=ambRight.xyz,axisY=ambUp.xyz;

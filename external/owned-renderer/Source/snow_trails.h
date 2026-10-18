@@ -113,8 +113,12 @@ Texture2D<float2> nativeSnowTrail:register(t8);
 // window: xy world origin of texel (0,0), z texels per metre, w side in texels (0: no field).
 // tiles: the active 8 m tiles (bit y*10+x, snow_trails.h ActiveTiles); any
 // other point returns 0 before a texture read. Manual bilinear (no sampler
-// in any stage that reads it). The outer 80 texels (10 m) fade out
-// gradually, so a trail leaving the window thins away instead of ending at a line.
+// in any stage that reads it). The trail fades from 24 to 31 m (the larger
+// axis distance) from the window's smooth centre (nativeSnowValue.yz of the
+// native terrain frame this text is compiled into): the window itself moves
+// in whole 8 m tiles, and a fade by its edge jumped with every move, so
+// trails and their displacement popped with distance (2bea38da user note).
+// The centre sits 32 m or more inside every edge.
 float2 snowTrailRaw(Texture2D<float2> field,float4 window,uint4 tiles,float2 p){
  if(window.w<=0)return 0;
  float2 q=(p-window.xy)*window.z-.5;
@@ -124,8 +128,8 @@ float2 snowTrailRaw(Texture2D<float2> field,float4 window,uint4 tiles,float2 p){
  int2 i=int2(floor(q));float2 f=q-i;
  float2 v=lerp(lerp(field.Load(int3(i,0)),field.Load(int3(i+int2(1,0),0)),f.x),
                lerp(field.Load(int3(i+int2(0,1),0)),field.Load(int3(i+int2(1,1),0)),f.x),f.y);
- float2 edge=min(q,window.w-1-q);
- return v*smoothstep(0,80,min(edge.x,edge.y));
+ float2 off=abs(p-nativeTerrainFrame[0].nativeSnowValue.yz);
+ return v*(1-smoothstep(24,31,max(off.x,off.y)));
 }
 // Height relative to untouched snow: berms up, troughs down.
 float snowTrailHeight(float2 raw){return raw.y-raw.x;}

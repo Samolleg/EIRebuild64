@@ -350,11 +350,10 @@ LPVOID map_view_of_file_impl(HANDLE mapping, DWORD access, DWORD offset_high,
                     std::wstring physical(32768, L'\0');
                     const DWORD count = GetMappedFileNameW(GetCurrentProcess(), base,
                         physical.data(), static_cast<DWORD>(physical.size()));
-                    if (count && count < physical.size()) {
-                        physical.resize(count);
-                        physical.insert(0, L"\\\\?\\GLOBALROOT");
-                        slot->physical = std::move(physical);
-                    }
+                    // An exact-size copy: the 64 KB query buffer stayed with
+                    // every live view when it was resized and moved in.
+                    if (count && count < physical.size())
+                        slot->physical = L"\\\\?\\GLOBALROOT" + physical.substr(0, count);
                 } catch (...) { slot->physical.clear(); }
                 ++g_state.counters.logical_views;
                 ++g_state.counters.physical_views;
@@ -385,8 +384,7 @@ LPVOID map_view_of_file_impl(HANDLE mapping, DWORD access, DWORD offset_high,
             const DWORD count = GetMappedFileNameW(GetCurrentProcess(), base,
                 physical.data(), static_cast<DWORD>(physical.size()));
             if (count && count < physical.size()) {
-                physical.resize(count);
-                physical.insert(0, L"\\\\?\\GLOBALROOT");
+                physical = L"\\\\?\\GLOBALROOT" + physical.substr(0, count); // exact size, not 64 KB
                 AcquireSRWLockExclusive(&g_state.lock);
                 auto& views = g_state.other_views;
                 const auto found = std::find_if(views.begin(), views.end(),

@@ -6,22 +6,32 @@
 
 namespace {
 std::mutex requestLock;
-bool enabled = false;
+bool enabled = false, localMissionActive = false;
+std::uint64_t localMissionEpoch = 0;
 std::uint64_t revealed = 0;
 OwnedRender::LoadRevealPause pause;
 }
 namespace owned {
+bool bridge_local_single_player_mission() noexcept {
+    std::lock_guard<std::mutex> lock(requestLock);
+    return localMissionActive && localMissionEpoch && localMissionEpoch == bridge_current_world_epoch();
+}
 void bridge_set_load_reveal(bool value, std::uint64_t epoch) noexcept {
     std::lock_guard<std::mutex> lock(requestLock);
     enabled = value; revealed = epoch;
 }
 }
 namespace OwnedRender {
+bool E2LoadRevealHeld(std::uint64_t epoch) noexcept {
+    std::lock_guard<std::mutex> lock(requestLock);
+    return enabled && epoch && epoch != revealed && owned::embedded_sky().installed();
+}
 void E2LoadRevealFrame(std::uint64_t epoch, bool localMission, bool paused,
                       SetLoadPause set, void* context) noexcept {
     bool hold = false;
     {
         std::lock_guard<std::mutex> lock(requestLock);
+        localMissionActive = localMission; localMissionEpoch = epoch;
         hold = enabled && epoch && epoch != revealed && owned::embedded_sky().installed();
     }
     const auto event = pause.Update(GetTickCount64(), epoch, hold, localMission, paused,

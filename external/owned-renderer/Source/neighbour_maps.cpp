@@ -5,6 +5,7 @@
 #include "owned_resource_runtime.h"
 #include "owned_terrain_front_end.h"
 #include "retained_static_scene.h"
+#include "worker_priority.h"
 #include <windows.h>
 #include <chrono>
 #include <unordered_set>
@@ -46,6 +47,7 @@ struct Stream {
     // Layout-order slots: a decoded upload, or empty after a failed decode.
     std::map<std::size_t, std::unique_ptr<NeighbourMapUpload>> ready;
     std::size_t next_take = 0;
+    std::size_t total = 0; // neighbours in the selected layout, once read (0 before)
     unsigned resident = 0; // decoded maps alive (in decode, waiting or in upload)
     std::string error;
 };
@@ -143,6 +145,10 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
         if(!why && !prepare_retained_static_candidate(map,map->terrain,object,candidate,&prepared))
             why=retained_static_prepare_result_name(prepared.result);
         if(why){++upload->omitted_decorations;++omitted[why];continue;}
+        // Trees (family 53, the class the main map's sway is given to) take
+        // the main map's sway evidence; the assembly is still this worker's.
+        if(object.family==53&&candidate->assembly)
+            sway_tree_assembly(*std::const_pointer_cast<VisualAssemblyAsset>(candidate->assembly));
         ++drawn[object.family];
         for(const auto& node:candidate->nodes)upload->decoded_bytes+=
             node.positions.capacity()*sizeof(NativePackedGroup)+node.normals.capacity()*sizeof(NativePackedGroup);
@@ -257,6 +263,7 @@ std::string read_layout(const std::wstring& file) {
     return json;
 }
 void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mounts,std::uint64_t id) {
+    const BackgroundWorkerPriority priority;
     // Under s.lock: this stream was stopped or replaced.
     const auto stopped=[&s,id] {return s.stop || s.run!=id;};
     const auto set_error=[&s,id](Stream&,const std::string& error) {
@@ -266,6 +273,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
         if(!profile_matches(mounts))throw std::runtime_error("No verified neighbour resource profile");
         const auto file=layout_file(); const auto root=file.substr(0,file.find_last_of(L"/\\")+1);
         const auto neighbours=select_neighbour_layout(parse_neighbour_layout(read_layout(file)),"deja-vu",map_name(active));
+        {std::lock_guard<std::mutex> guard(s.lock);if(s.run==id)s.total=neighbours.size();}
         std::size_t next_claim=0; // guarded by s.lock
         // Ordered weld: the decoder holding neighbour `next_weld` welds it
         // against the active map's edge strips and every earlier welded
@@ -303,6 +311,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
             return true;
         };
         const auto decoder=[&]() {
+            const BackgroundWorkerPriority priority;
             OwnedResourceLoader loader;ResourceFailure failure;
             if(!loader.start(1,failure)){set_error(s,failure.message);return;}
             for(;;) {
@@ -505,6 +514,21 @@ void neighbour_border_fog_publish(const NeighbourBorderFog& fog) noexcept {
 std::uint64_t neighbour_border_fog_revision() noexcept {
     return fog_revision.load(std::memory_order_acquire);
 }
+namespace {
+std::mutex receiver_lock;
+std::vector<NativeWorldBounds> receiver_cells;
+}
+void neighbour_receivers_publish(std::vector<NativeWorldBounds> cells) noexcept {
+    std::lock_guard<std::mutex> guard(receiver_lock);receiver_cells.swap(cells);
+}
+void neighbour_receivers_append_visible(const std::array<float,16>& world_to_clip,
+    std::vector<NativeWorldBounds>& receivers) noexcept {
+    try {
+        std::lock_guard<std::mutex> guard(receiver_lock);
+        for(const auto& cell:receiver_cells)
+            if(cell.valid && retained_world_bounds_visible(cell,world_to_clip))receivers.push_back(cell);
+    } catch(...) {}
+}
 NeighbourBorderFog neighbour_border_fog() noexcept {
     double v[17];for(int i=0;i<17;++i)v[i]=fog_state[i].load(std::memory_order_relaxed);
     NeighbourContacts contacts;
@@ -529,7 +553,12 @@ void neighbour_maps_stop() noexcept {
         if(exited)s.worker.join();
         else {s.worker.detach();OutputDebugStringA("EID3D11 neighbour maps: stream did not stop within 5 s; detached\n");}
     }
-    {std::lock_guard<std::mutex> guard(s.lock);++s.run;s.epoch=0;s.error.clear();s.next_take=0;s.resident=0;}
+    {std::lock_guard<std::mutex> guard(s.lock);++s.run;s.epoch=0;s.error.clear();s.next_take=0;s.total=0;s.resident=0;}
+}
+void neighbour_maps_stop_epoch(std::uint64_t epoch) noexcept {
+    auto& s=stream();
+    {std::lock_guard<std::mutex> guard(s.lock);if(!epoch || s.epoch!=epoch)return;}
+    neighbour_maps_stop();
 }
 void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts) noexcept {
     auto& s=stream();
@@ -538,7 +567,7 @@ void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const Resou
     std::uint64_t id=0;
     try {
         {std::lock_guard<std::mutex> guard(s.lock);s.epoch=epoch;s.stop=false;s.finished=false;
-            s.ready.clear();s.next_take=0;s.resident=0;s.in_upload=false;id=++s.run;}
+            s.ready.clear();s.next_take=0;s.total=0;s.resident=0;s.in_upload=false;id=++s.run;}
         s.worker=std::thread(run,std::ref(s),mpr,epoch,mounts,id);
     } catch(...) {
         std::lock_guard<std::mutex> guard(s.lock);
@@ -563,6 +592,15 @@ void neighbour_maps_uploaded(std::uint64_t epoch) noexcept {
 bool neighbour_maps_settled(std::uint64_t epoch) noexcept {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);
     return s.epoch!=epoch || (s.finished && s.ready.empty() && !s.in_upload);
+}
+bool neighbour_maps_remaining(std::uint64_t epoch,std::size_t& remaining) noexcept {
+    auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);
+    remaining=0;
+    if(s.epoch!=epoch || (s.finished && s.ready.empty() && !s.in_upload))return true;
+    if(!s.total)return false; // layout not read yet
+    remaining=(s.total>s.next_take?s.total-s.next_take:0)+(s.in_upload?1:0);
+    if(!remaining)remaining=1; // taken, the stream not finished yet
+    return true;
 }
 std::string neighbour_maps_error(std::uint64_t epoch) {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);return s.epoch==epoch?s.error:std::string{};

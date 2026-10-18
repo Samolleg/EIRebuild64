@@ -769,12 +769,68 @@ const char* discover_combat(const Image& image,AddonCombatLayout& output) noexce
     output=value;return nullptr;
 }
 
+// The modifier constants 30, 120, 100 and 0.8 of the skill multiplier.
+bool effect_modifier_constants(const Image& image,std::uint32_t at) noexcept {
+    const std::uint8_t constants[4][8]={{0,0,0,0,0,0,0x3e,0x40},{0,0,0,0,0,0,0x5e,0x40},
+        {0,0,0,0,0,0,0x59,0x40},{0,0,0,0xa0,0x99,0x99,0xe9,0x3f}};
+    for (unsigned i=0;i<4;++i) {
+        const auto instruction=at+i*6,operand=absolute_rva(image,instruction+2);
+        if (!matches(image,instruction,sig(i==0 ? "dc 0d ?? ?? ?? ??" : i==3 ? "dc 05 ?? ?? ?? ??" : "dc 35 ?? ?? ?? ??")) ||
+            !operand || operand>image.size-8 || std::memcmp(image.base+operand,constants[i],8)) return false;
+    }
+    return true;
+}
+
+// The Dejavu (LS) build of the same DrawSpellEffects body: another frame and
+// register allocation, and the perk lookup inlined. It reads the native perk
+// database through the addon's reference to the game object 0x7AF268
+// (entries +0xC/+0x10, 0x44 bytes, modifier +0x34) with the unit's perk level
+// at +0x41A+subtype, exactly what the JMV build's perk getter reads.
+const char* discover_inline_effect_values(const Image& image,std::uint32_t body,std::uint32_t game) noexcept {
+    const std::uint32_t end=body+0x600;
+    std::uint32_t lookup_anchor=0,attacking=0,skill=0,perk=0,constants=0,power=0,maximum_anchor=0;
+    if (!find_unique(image,body,end,sig("80 3c ?? 08 76 0a 80 3c ?? 35 c6 45 bf 00 75 04 c6 45 bf 01"),attacking) ||
+        !find_unique(image,body,end,sig("0f b6 83 3e 03 00 00 8b 4f 14 83 e8 19 d9 ee 89 45 ?? d9 55 ?? 83 f9 02 77 0f "
+            "0f b6 83 0e 04 00 00 89 45 ?? db 45 ?? eb 2c 8d 41 fd 83 f8 01 77 0f 0f b6 83 0f 04 00 00 89 45 ?? db 45 ?? eb 15 "
+            "8d 41 fb 83 f8 02 77 10 0f b6 83 10 04 00 00 89 45 ?? db 45 ?? d9 5d ??"),skill) ||
+        !find_unique(image,body,end,sig("8a 84 0b 1a 04 00 00 84 c0 74 ?? 0f b6 f8 8d 0c 49 a1 ?? ?? ?? ?? 83 c1 14 03 f9 "
+            "8b 50 0c 8b 48 10 b8 79 78 78 78 2b ca 89 55 ?? f7 e9 c1 fa 05 8b c2 c1 e8 1f 03 c2 3b f8 7d ?? "
+            "8b 4d ?? 8b c7 c1 e0 04 03 c7 8d 04 81 85 c0 74 ?? 8b 40 34"),perk) ||
+        !find_unique(image,body,end,sig("dc 0d ?? ?? ?? ?? dc 35 ?? ?? ?? ?? dc 35 ?? ?? ?? ?? dc 05 ?? ?? ?? ??"),constants) ||
+        !find_unique(image,body,end,sig("8b 45 ?? 3b 87 9c 01 00 00 7d ?? 80 7d bf 00 74 05 d9 45 ?? eb 02 d9 e8 "
+            "8b 8f 98 01 00 00 03 ce d9 5d ?? 8b 41 08"),power) ||
+        !(attacking<skill && skill<perk && perk<constants && constants<power)) return "effects.value_fields";
+    const auto database=absolute_rva(image,perk+18);
+    if (!database || database>image.size-4 || word(image,database)!=game+0x3af268) return "effects.perk_database";
+    if (!effect_modifier_constants(image,constants)) return "effects.modifier_constants";
+    if (!find_unique(image,body,end,sig("b9 ?? ?? ?? ?? ff 73 0c e8 ?? ?? ?? ?? 8b 93 98 01 00 00"),lookup_anchor) ||
+        !find_unique(image,body,end,sig("0f b6 c1 8b cf 50 e8 ?? ?? ?? ?? 8b 93 98 01 00 00 ff 75 e8 d9 5d ?? d9 05"),maximum_anchor))
+        return "effects.helper_calls";
+    const auto ten=absolute_rva(image,maximum_anchor+25);
+    if (!ten || ten>image.size-4 || word(image,ten)!=0x41200000) return "effects.precision";
+    const auto lookup=branch_target(image,lookup_anchor+8),maximum=branch_target(image,maximum_anchor+6);
+    Sig lookup_pattern=sig("55 8b ec ff 75 08 68"); add_word(lookup_pattern,game+0x15fb00); add(lookup_pattern,"51 e8 ?? ?? ?? ?? 5d c2 04 00");
+    Sig maximum_pattern=sig("55 8b ec ff 75 08 68"); add_word(maximum_pattern,game+0x10f690); add(maximum_pattern,"51 e8 ?? ?? ?? ?? 5d c2 04 00");
+    const auto forwarder=branch_target(image,lookup+12);
+    if (word(image,lookup_anchor+1)!=game+0x3aff60 || !matches(image,lookup,lookup_pattern) ||
+        !matches(image,maximum,maximum_pattern) || branch_target(image,maximum+12)!=forwarder ||
+        !matches(image,forwarder,sig("58 59 87 04 24 ff e0"))) return "effects.native_owners";
+    return nullptr;
+}
+
 const char* discover_effect_values(const Image& image,AddonLayout& out) noexcept {
     const auto game=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)));
     const auto callback=registered_thiscall_callback(image,game+0x246b90);
     if (!callback || !matches(image,callback,sig("55 8b ec ff 75 0c 8b 4d 08 e8 ?? ?? ?? ?? 5d c2 08 00"))) return "effects.callback";
     const auto body=branch_target(image,callback+9);
-    if (!in_text(image,body) || !matches(image,body,sig("55 8b ec 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec b8 00 00 00")) ||
+    if (!in_text(image,body) || !matches(image,body,sig("55 8b ec 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec ?? 00 00 00")))
+        return "effects.value_fields";
+    if (!matches(image,body+0x236,sig("80 3c 32 08 8b 44 32 08 89 45 98 76 0d 80 3c 32 35 89 45 98 c6 45 bf 00 75 04 c6 45 bf 01"))) {
+        const char* failure=discover_inline_effect_values(image,body,game);
+        if (!failure) out.effect_value_callback=callback;
+        return failure;
+    }
+    if (!matches(image,body,sig("55 8b ec 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec b8 00 00 00")) ||
         !matches(image,body+0x236,sig("80 3c 32 08 8b 44 32 08 89 45 98 76 0d 80 3c 32 35 89 45 98 c6 45 bf 00 75 04 c6 45 bf 01")) ||
         !matches(image,body+0x254,sig("8b 4f 14 0f b6 83 3e 03 00 00 83 e8 19 d9 ee 89 45 a8 8d 51 07 d9 55 b4 83 f9 02 77 0f "
             "0f b6 83 0e 04 00 00 89 45 ac db 45 ac eb 2c 8d 41 fd 83 f8 01 77 0f 0f b6 83 0f 04 00 00 89 45 ac db 45 ac eb 15 "
@@ -802,15 +858,10 @@ const char* discover_effect_values(const Image& image,AddonLayout& out) noexcept
         "b8 79 78 78 78 56 0f b6 f2 03 f1 8b 0d");
     add_word(perk_pattern,game+0x3af278); add(perk_pattern,"57 8b 3d"); add_word(perk_pattern,game+0x3af274);
     add(perk_pattern,"2b cf f7 e9 c1 fa 05 8b c2 c1 e8 1f 03 c2 3b f0 7d 10 8b c6 c1 e0 04 03 c6 8d 04 87 5f 5e 5d c2 04 00 5f 33 c0 5e 5d c2 04 00");
+    // The getter reads the native perk database that combat_perk_modifier reads.
     if (!matches(image,perk,perk_pattern)) return "effects.perk_getter";
-    const std::uint8_t constants[4][8]={{0,0,0,0,0,0,0x3e,0x40},{0,0,0,0,0,0,0x5e,0x40},
-        {0,0,0,0,0,0,0x59,0x40},{0,0,0,0xa0,0x99,0x99,0xe9,0x3f}};
-    for (unsigned i=0;i<4;++i) {
-        const auto instruction=body+0x303+i*6,operand=absolute_rva(image,instruction+2);
-        if (!matches(image,instruction,sig(i==0 ? "dc 0d ?? ?? ?? ??" : i==3 ? "dc 05 ?? ?? ?? ??" : "dc 35 ?? ?? ?? ??")) ||
-            !operand || operand>image.size-8 || std::memcmp(image.base+operand,constants[i],8)) return "effects.modifier_constants";
-    }
-    out.effect_value_callback=callback; out.effect_perk_getter=perk; return nullptr;
+    if (!effect_modifier_constants(image,body+0x303)) return "effects.modifier_constants";
+    out.effect_value_callback=callback; return nullptr;
 }
 
 #undef DISCOVER_REQUIRE

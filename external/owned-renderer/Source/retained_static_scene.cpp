@@ -1010,7 +1010,12 @@ bool RetainedStaticScene::replace_sources(
             return source.role == MobSourceRole::main;
         }))
         shadow_input_domain_.reset();
-    shadow_source_changed_unlocked(0);
+    // Sources reach shadow casters only through the main terrain (visual
+    // entities never read sources_ or bindings_), so a source replacement is
+    // a terrain change, not a reset of every visual caster. A full journal
+    // reset here rebuilt the whole static caster store and sent every static
+    // through slow admission on each supplement publication (#162).
+    shadow_terrain_changed_unlocked(false);
     shadow_refresh_terrain_activity_unlocked();
     source_index_.swap(next_index);
     bindings_.swap(next_bindings);
@@ -2176,7 +2181,11 @@ bool RetainedStaticScene::visual_publish_bridges(
         }
         // Nothing mutates the current owner until validation and allocation of
         // its complete replacement succeed. Vector swaps cannot allocate.
-        visual_values_changed_unlocked();
+        // Bridge planes reach only route-sampled unit heights, and units are
+        // time-active shadow casters re-evaluated every frame: the frame value
+        // changes, the shadow journal does not (a reset rebuilt the whole
+        // static caster store and every static's admission, #162).
+        visual_frame_changed_unlocked();
         for (auto& entity:visuals_) {
             const auto next=replacement.find(entity.first);
             if (next==replacement.end()) entity.second.bridge_planes.clear();
@@ -2279,17 +2288,23 @@ bool RetainedStaticScene::visual_publish_forced_weapon_ids(
         std::sort(desired.begin(),desired.end());
         desired.erase(std::unique(desired.begin(),desired.end()),desired.end());
         ExclusiveLock guard(lock_);
+        // The usual tick: no forced ids and none left hidden. Walking every
+        // entity (one cold node each) for nothing cost ~2% of the main
+        // thread in a pan sample.
+        if(desired.empty() && !forced_weapon_hidden_any_)return true;
         auto next=desired.begin();
-        bool changed=false;
+        bool changed=false,any=false;
         for(auto& item:visuals_){
             while(next!=desired.end() && *next<item.first)++next;
             const bool hidden=next!=desired.end() && *next==item.first;
+            any|=hidden;
             if(item.second.tick.equipment.forced_hidden!=hidden){
                 item.second.tick.equipment.forced_hidden=hidden;
                 changed=true;
                 shadow_source_changed_unlocked(item.first);
             }
         }
+        forced_weapon_hidden_any_=any;
         if(changed)visual_frame_changed_unlocked();
         return true;
     } catch (...) { return false; }
@@ -2738,7 +2753,13 @@ std::shared_ptr<const RetainedVisualFrame> RetainedStaticScene::visual_frame_val
     if(visual_frame_cache_&&visual_frame_key_==key&&visual_frame_cache_->time==time)return visual_frame_cache_;
     // A renderer invocation may still pin the prior value. Refill in place
     // only after that invocation releases it; no pending reader sees edits.
-    if(!visual_frame_cache_||visual_frame_cache_.use_count()!=1)visual_frame_cache_=std::make_shared<RetainedVisualFrame>();
+    // With the scene thread (render_thread) one frame's value stays pinned
+    // while the next is built: alternate between two values instead of
+    // allocating a new one each frame.
+    if(!visual_frame_cache_||visual_frame_cache_.use_count()!=1) {
+        if(visual_frame_spare_&&visual_frame_spare_.use_count()==1)std::swap(visual_frame_cache_,visual_frame_spare_);
+        else { visual_frame_spare_=std::move(visual_frame_cache_);visual_frame_cache_=std::make_shared<RetainedVisualFrame>(); }
+    }
     visual_frame_key_={};
     visual_frame_unlocked(time,diagnose,*visual_frame_cache_);
     visual_frame_key_=key;
@@ -2746,6 +2767,23 @@ std::shared_ptr<const RetainedVisualFrame> RetainedStaticScene::visual_frame_val
     ++visual_frame_evaluations_;
 #endif
     return visual_frame_cache_;
+}
+
+// World change: the frame value and the evaluation scratch are sized by the
+// previous world's entity count and only ever refilled in place. A value a
+// renderer invocation still pins stays with that reader.
+void RetainedStaticScene::release_visual_frame_scratch() noexcept {
+    ExclusiveLock guard(lock_);
+    visual_frame_cache_.reset(); visual_frame_spare_.reset(); visual_frame_key_ = {};
+    visual_frame_join_revision_ = 0; visual_frame_graph_valid_ = false;
+    std::vector<VisualFrameJoin>().swap(visual_frame_joins_);
+    std::vector<VisualRouteSample>().swap(visual_frame_roots_);
+    std::vector<const VisualEntity*>().swap(visual_frame_records_);
+    std::vector<std::size_t>().swap(visual_frame_unit_ordinals_);
+    std::vector<std::size_t>().swap(visual_frame_dependencies_);
+    std::vector<std::size_t>().swap(visual_frame_order_);
+    std::vector<std::size_t>().swap(visual_frame_chain_);
+    std::vector<std::uint8_t>().swap(visual_frame_visited_);
 }
 
 std::shared_ptr<const RetainedVisualFrame> RetainedStaticScene::visual_frame_value(double time,bool diagnose) const {
@@ -2926,6 +2964,16 @@ RetainedShadowSourceChanges RetainedStaticScene::shadow_source_changes(
     return changes;
 }
 
+RetainedShadowSourceChanges RetainedStaticScene::visual_source_changes(
+    RetainedShadowConsumer consumer) {
+    ExclusiveLock guard(lock_);
+    auto changes=shadow_changes_.read(consumer);
+    changes.full|=shadow_tracking_failed_;
+    changes.terrain_dirty|=changes.full;
+    if (changes.full) changes.terrain_time_only=false;
+    return changes;
+}
+
 void RetainedStaticScene::acknowledge_shadow_source_changes(
     RetainedShadowConsumer consumer,std::uint64_t through) noexcept {
     ExclusiveLock guard(lock_);
@@ -2947,9 +2995,15 @@ bool RetainedStaticScene::publish_shadow_input_domain(
     std::shared_ptr<const RetainedShadowInputDomain> value) noexcept {
     if(!value || !value->source_revision || !value->coverage.valid)return false;
     ExclusiveLock guard(lock_);
-    if(value->source_revision!=shadow_changes_.revision())return false;
+    // The scene thread (render_thread) prepares from a revision the game
+    // thread may since have advanced: the publication covers the changes
+    // through its own revision, and later ones stay unacknowledged for the
+    // next read. Without a scene thread both are always equal.
+    const auto through=value->source_revision;
+    if(!shadow_changes_.acknowledgeable(through) ||
+       (shadow_input_domain_ && shadow_input_domain_->source_revision>through))return false;
     shadow_input_domain_=std::move(value);
-    shadow_changes_.acknowledge(RetainedShadowConsumer::directional,shadow_changes_.revision());
+    shadow_changes_.acknowledge(RetainedShadowConsumer::directional,through);
     return true;
 }
 

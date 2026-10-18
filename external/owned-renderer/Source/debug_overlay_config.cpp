@@ -1,5 +1,4 @@
 #include "debug_overlay_config.h"
-#include "graphics_settings_ru.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
 #endif
@@ -157,18 +156,18 @@ const char* debug_resource_view_name(DebugResourceView view) noexcept {
 
 const char* debug_resource_view_label(DebugResourceView view) noexcept {
     switch (view) {
-    case DebugResourceView::raw_depth: return u8"\u0418\u0441\u0445\u043e\u0434\u043d\u0430\u044f \u0433\u043b\u0443\u0431\u0438\u043d\u0430";
-    case DebugResourceView::linearized_depth: return u8"\u041b\u0438\u043d\u0435\u0439\u043d\u0430\u044f \u0433\u043b\u0443\u0431\u0438\u043d\u0430";
-    case DebugResourceView::stencil: return u8"\u0422\u0440\u0430\u0444\u0430\u0440\u0435\u0442";
-    case DebugResourceView::ambient_occlusion: return u8"\u0417\u0430\u0442\u0435\u043d\u0435\u043d\u0438\u0435 \u0432 \u0443\u0433\u043b\u0443\u0431\u043b\u0435\u043d\u0438\u044f\u0445";
-    case DebugResourceView::normals: return u8"\u041d\u043e\u0440\u043c\u0430\u043b\u0438 (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
-    case DebugResourceView::materials: return u8"ID \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u043e\u0432 (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
-    case DebugResourceView::object_ids: return u8"ID \u043e\u0431\u044a\u0435\u043a\u0442\u043e\u0432 (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
-    case DebugResourceView::motion: return u8"\u0412\u0435\u043a\u0442\u043e\u0440\u044b \u0434\u0432\u0438\u0436\u0435\u043d\u0438\u044f (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
-    case DebugResourceView::shadows: return u8"\u041a\u0430\u0440\u0442\u044b \u0442\u0435\u043d\u0435\u0439";
-    case DebugResourceView::shadow_cascade_coverage: return u8"\u041f\u043e\u043a\u0440\u044b\u0442\u0438\u0435 \u043a\u0430\u0441\u043a\u0430\u0434\u043e\u0432 \u0442\u0435\u043d\u0435\u0439";
-    case DebugResourceView::hierarchical_depth: return u8"\u041f\u0438\u0440\u0430\u043c\u0438\u0434\u0430 \u0433\u043b\u0443\u0431\u0438\u043d\u044b (\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e)";
-    default: return u8"\u041e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u043e";
+    case DebugResourceView::raw_depth: return "Raw depth";
+    case DebugResourceView::linearized_depth: return "Linearized depth";
+    case DebugResourceView::stencil: return "Stencil";
+    case DebugResourceView::ambient_occlusion: return "Ambient occlusion";
+    case DebugResourceView::normals: return "Normals (unavailable)";
+    case DebugResourceView::materials: return "Material IDs (unavailable)";
+    case DebugResourceView::object_ids: return "Object IDs (unavailable)";
+    case DebugResourceView::motion: return "Motion vectors (unavailable)";
+    case DebugResourceView::shadows: return "Shadow maps";
+    case DebugResourceView::shadow_cascade_coverage: return "Shadow cascade coverage";
+    case DebugResourceView::hierarchical_depth: return "Hi-Z (unavailable)";
+    default: return "Disabled";
     }
 }
 
@@ -208,7 +207,6 @@ std::uint64_t option_key_hash(const char* key) noexcept {
 bool RendererConfig::register_option(RendererOption option) {
     if (!valid_key(option.key.c_str()) || option.label.empty() || find(option.key.c_str())) return false;
     const std::uint64_t hash = option_key_hash(option.key.c_str());
-    localize_renderer_option(option);
     options_.push_back(std::move(option));
     if (!index_.emplace(hash, options_.size() - 1).second) index_collision_ = true;
     return true;
@@ -327,6 +325,13 @@ void RendererConfig::set_first_run_done(bool done) noexcept {
     }
 }
 
+void RendererConfig::set_nvidia_cache_id(const std::string& id) {
+    if (nvidia_cache_id_ != id) {
+        nvidia_cache_id_ = id;
+        dirty_ = true;
+    }
+}
+
 void RendererConfig::set_debug_resource_view(DebugResourceView view) noexcept {
     if (view >= DebugResourceView::count) view = DebugResourceView::disabled;
     if (debug_resource_view_ != view) {
@@ -354,6 +359,18 @@ bool RendererConfig::set_text(const char* key, const char* value) {
     option->text_value = value;
     dirty_ = true;
     return true;
+}
+
+bool RendererConfig::reset_to_default(const char* key) noexcept {
+    const auto* option = find(key);
+    if (!option) return false;
+    switch (option->type) {
+    case RendererOptionType::boolean: return set_boolean(key, option->boolean_default);
+    case RendererOptionType::integer: return set_integer(key, option->integer_default);
+    case RendererOptionType::floating_point: return set_floating_point(key, option->floating_default);
+    case RendererOptionType::text: return false;
+    }
+    return false;
 }
 
 bool RendererConfig::load(const wchar_t* path) {
@@ -402,6 +419,25 @@ bool RendererConfig::load(const wchar_t* path) {
             if (parse_boolean(value.c_str(), done)) first_run_done_ = done;
             continue;
         }
+        if (_stricmp(section.c_str(), "setup") == 0 && _stricmp(key.c_str(), "over_budget_pending") == 0) {
+            bool pending = false;
+            if (parse_boolean(value.c_str(), pending)) over_budget_pending_ = pending;
+            continue;
+        }
+        if (_stricmp(section.c_str(), "setup") == 0 && _stricmp(key.c_str(), "serial_shader_preparation") == 0) {
+            bool serial = false;
+            if (parse_boolean(value.c_str(), serial)) serial_shader_preparation_ = serial;
+            continue;
+        }
+        if (_stricmp(section.c_str(), "setup") == 0 && _stricmp(key.c_str(), "settings_version") == 0) {
+            int version = 0;
+            if (parse_integer(value.c_str(), version) && version > 0) settings_version_ = version;
+            continue;
+        }
+        if (_stricmp(section.c_str(), "setup") == 0 && _stricmp(key.c_str(), "nvidia_cache_id") == 0) {
+            if (value.size() <= 16) nvidia_cache_id_ = value;
+            continue;
+        }
         if (_stricmp(section.c_str(), "overlay") == 0 &&
             _stricmp(key.c_str(), "debug_resource_view") == 0) {
             DebugResourceView view{};
@@ -445,7 +481,11 @@ bool RendererConfig::save(const wchar_t* path) const {
     text += debug_overlay_mode_name(overlay_mode_);
     text += "\r\ndebug_resource_view=";
     text += debug_resource_view_name(debug_resource_view_);
-    if (first_run_done_) text += "\r\n\r\n[setup]\r\nfirst_run_done=true";
+    text += "\r\n\r\n[setup]\r\nsettings_version=" + std::to_string(settings_version_);
+    if (first_run_done_) text += "\r\nfirst_run_done=true";
+    if (over_budget_pending_) text += "\r\nover_budget_pending=1";
+    if (serial_shader_preparation_) text += "\r\nserial_shader_preparation=1";
+    if (!nvidia_cache_id_.empty()) text += "\r\nnvidia_cache_id=" + nvidia_cache_id_;
     text += "\r\n\r\n[graphics]\r\n";
     for (const auto& option : options_) {
         text += option.key;

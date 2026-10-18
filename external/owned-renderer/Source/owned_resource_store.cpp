@@ -16,8 +16,10 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <cstdio>
 
 namespace owned {
+void bridge_append_probe_event(const char* event, const char* detail) noexcept;
 namespace {
 
 constexpr std::uint32_t kResSignature = 0x019ce23cu;
@@ -345,10 +347,11 @@ bool parse_archive_records(const std::uint8_t* table, std::uint32_t count,
                            ResourceFailure& failure,
                            const ResourceStore* budget = nullptr,
                            std::shared_ptr<const std::vector<std::uint8_t>>* reservation = nullptr) {
+    // The game opens an empty archive and every lookup in it misses.
     if (!count) {
-        fail(failure, ResourceFailureCode::archive_header,
-             "RES contains zero hash buckets");
-        return false;
+        entries.clear();
+        failure = {};
+        return true;
     }
     if (budget) {
         std::uint64_t bytes = static_cast<std::uint64_t>(count)*sizeof(ArchiveEntry);
@@ -366,6 +369,7 @@ bool parse_archive_records(const std::uint8_t* table, std::uint32_t count,
              "RES index allocation failed");
         return false;
     }
+    std::uint32_t unreachable = 0;
     for (std::uint32_t index = 0; index < count; ++index) {
         const auto* source = table + index * kResEntryBytes;
         ArchiveEntry& entry = entries[index];
@@ -376,25 +380,37 @@ bool parse_archive_records(const std::uint8_t* table, std::uint32_t count,
         const std::uint32_t name_offset = read_u32(source + 18);
         std::uint64_t data_end = 0;
         std::uint64_t name_end = 0;
-        if (entry.next < -1 || entry.next >= static_cast<std::int32_t>(count) ||
-            !checked_add(entry.offset, entry.size, data_end) ||
+        // The game validates no record: a bad one only matters when a lookup
+        // walks onto it, where the game reads outside the archive. Keep the
+        // archive and make that record unreachable (a chain index out of
+        // range ends the chain; a data or name range outside the archive, or
+        // a name with an embedded NUL, never matches - as in the game).
+        if (entry.next < -1 || entry.next >= static_cast<std::int32_t>(count)) {
+            entry.next = -1;
+            ++unreachable;
+        }
+        if (!checked_add(entry.offset, entry.size, data_end) ||
             data_end > container_bytes ||
             !checked_add(name_offset, name_length, name_end) ||
             name_end > names_bytes) {
-            fail(failure, ResourceFailureCode::archive_bounds,
-                 "RES entry range or chain index is invalid");
-            return false;
+            ++unreachable;
+            continue;
         }
         entry.raw_name.assign(
             reinterpret_cast<const char*>(names + name_offset),
             name_length);
         if (entry.raw_name.find('\0') != std::string::npos) {
-            fail(failure, ResourceFailureCode::archive_name,
-                 "RES entry name contains an embedded NUL");
-            return false;
+            ++unreachable;
+            continue;
         }
         entry.ascii = ascii_name(entry.raw_name);
         if (entry.ascii) entry.folded_name = fold_ascii(entry.raw_name);
+    }
+    if (unreachable) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%u of %u RES records unreachable (bad range, chain or name)",
+                      unreachable, count);
+        bridge_append_probe_event("res_records_unreachable", detail);
     }
     // The shipped lookup accepts the table as mounted and follows only the
     // requested name's bucket chain. Some active archives contain dead records
@@ -421,18 +437,20 @@ bool parse_archive_bytes(const std::uint8_t* data, std::uint64_t bytes,
     }
     const std::uint32_t count = read_u32(data + 4);
     const std::uint32_t table_offset = read_u32(data + 8);
-    const std::uint32_t names_bytes = read_u32(data + 12);
     std::uint64_t table_bytes = 0;
     std::uint64_t names_offset = 0;
-    std::uint64_t archive_end = 0;
     if (!checked_multiply(count, kResEntryBytes, table_bytes) ||
         !checked_add(table_offset, table_bytes, names_offset) ||
-        !checked_add(names_offset, names_bytes, archive_end) ||
-        archive_end > bytes) {
+        names_offset > bytes) {
         fail(failure, ResourceFailureCode::archive_bounds,
-             "RES table or name pool is outside the container");
+             "RES table is outside the container");
         return false;
     }
+    // The game's mapped reader (used for every nested archive) places the
+    // name pool right after the table and ignores the stored pool size;
+    // names are bounded by the container instead.
+    const std::uint32_t names_bytes = static_cast<std::uint32_t>(
+        (std::min)(bytes - names_offset, std::uint64_t{UINT32_MAX}));
     return parse_archive_records(data + table_offset, count,
                                  data + names_offset, names_bytes, bytes,
                                  entries, failure, budget, reservation);
@@ -652,7 +670,7 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
         const std::uint32_t names_bytes = read_u32(header.data() + 12);
         std::uint64_t table_bytes = 0;
         std::uint64_t metadata_bytes = 0;
-        if (!count || !checked_multiply(count, kResEntryBytes, table_bytes) ||
+        if (!checked_multiply(count, kResEntryBytes, table_bytes) ||
             !checked_add(table_bytes, names_bytes, metadata_bytes)) {
             fail(failure, ResourceFailureCode::archive_header,
                  "mounted RES index size is invalid");

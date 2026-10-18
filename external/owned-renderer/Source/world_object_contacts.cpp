@@ -5,6 +5,7 @@
 #include "retained_static_scene.h"
 #include "retained_static_submission.h"
 #include "ground_cover.h"
+#include "frame_accounting.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -57,11 +58,26 @@ static bool same_visual_world_bounds_key(const VisualPreparedResources::WorldBou
             left.root_rotation==right.root_rotation));
 }
 
+static bool owned_visual_world_bounds_key_matches(const VisualPreparedResources::WorldBoundsKey& left,
+    const RetainedVisualSample& sample) noexcept {
+    const bool unit=sample.values.unit;
+    if(!same_lifecycle_identity(left.lifecycle,sample.lifecycle) ||
+        !same_visual_resource(left.resource,sample.resource) || left.unit!=unit)return false;
+    if(!unit)return left.envelope_radius==static_cast<decltype(left.envelope_radius)>(sample.envelope_radius) &&
+        left.position==sample.object_pose.position && left.quaternion==sample.object_pose.quaternion;
+    return left.assembly==sample.assembly &&
+        left.assembly_revision==(sample.assembly?sample.assembly->revision:0) &&
+        same_visual_selection_key(left.selection,sample.selection) && left.root==sample.pose.root &&
+        left.tilted_facing==sample.pose.tilted_facing &&
+        (!left.tilted_facing || (left.root_rotation_valid==sample.pose.root_rotation_valid &&
+            left.root_rotation==sample.pose.root_rotation));
+}
+
 bool prepare_world_visual_bounds(const RetainedVisualSample& sample,
     NativeWorldBounds& bounds) {
-    auto& prepared=*sample.prepared;const auto key=owned_visual_world_bounds_key(sample);
+    auto& prepared=*sample.prepared;
     if(prepared.derived_world_bounds_valid &&
-        same_visual_world_bounds_key(prepared.derived_world_bounds_key,key)) {
+        owned_visual_world_bounds_key_matches(prepared.derived_world_bounds_key,sample)) {
         bounds=prepared.derived_world_bounds;
 #ifdef EID3D11_TESTING
         ++prepared.derived_world_bounds_reuses;
@@ -70,7 +86,7 @@ bool prepare_world_visual_bounds(const RetainedVisualSample& sample,
     }
     NativeWorldBounds value{};
     if(!retained_visual_world_bounds(sample,value))return false;
-    prepared.derived_world_bounds_key=key;prepared.derived_world_bounds=value;
+    prepared.derived_world_bounds_key=owned_visual_world_bounds_key(sample);prepared.derived_world_bounds=value;
     prepared.derived_world_bounds_valid=true;bounds=value;
 #ifdef EID3D11_TESTING
     ++prepared.derived_world_bounds_builds;
@@ -109,9 +125,25 @@ bool same_visual_pose_key(const VisualPreparedResources::PoseKey& left,
 }
 
 
+bool owned_visual_pose_key_matches(const VisualPreparedResources::PoseKey& left,
+    const RetainedVisualSample& sample,const double* phase) noexcept {
+    const bool unit=sample.values.unit;
+    const decltype(left.phase) current=phase?*phase:sample.pose.phase;
+    if(!same_lifecycle_identity(left.lifecycle,sample.lifecycle) ||
+        !same_visual_resource(left.resource,sample.resource) || left.assembly!=sample.assembly ||
+        left.assembly_revision!=(sample.assembly?sample.assembly->revision:0) || left.unit!=unit ||
+        left.phase!=current || !same_visual_selection_key(left.selection,sample.selection))return false;
+    if(!unit)return left.position==sample.object_pose.position &&
+        left.quaternion==sample.object_pose.quaternion && left.shape==sample.object_pose.shape;
+    if(left.root!=sample.pose.root || left.tilted_facing!=sample.pose.tilted_facing)return false;
+    if(left.tilted_facing)return left.root_rotation_valid==sample.pose.root_rotation_valid &&
+        left.root_rotation==sample.pose.root_rotation;
+    return left.facing==static_cast<decltype(left.facing)>(sample.pose.facing);
+}
+
 bool prepare_world_visual_pose(const RetainedVisualSample& sample, std::uint64_t* preparation_count) {
-    auto& prepared=*sample.prepared;const auto key=owned_visual_pose_key(sample);
-    if(prepared.derived_pose_valid && same_visual_pose_key(prepared.derived_pose_key,key)) {
+    auto& prepared=*sample.prepared;
+    if(prepared.derived_pose_valid && owned_visual_pose_key_matches(prepared.derived_pose_key,sample)) {
 #ifdef EID3D11_TESTING
         ++prepared.derived_pose_reuses;
 #endif
@@ -122,7 +154,7 @@ bool prepare_world_visual_pose(const RetainedVisualSample& sample, std::uint64_t
     if(preparation_count) ++*preparation_count;
 #endif
     if(!retained_visual_gpu_pose(sample,pose)||!pose)return false;
-    prepared.derived_pose_key=key;prepared.derived_pose_valid=true;
+    prepared.derived_pose_key=owned_visual_pose_key(sample);prepared.derived_pose_valid=true;
     if(++prepared.derived_pose_generation==0)++prepared.derived_pose_generation;
 #ifdef EID3D11_TESTING
     ++prepared.derived_pose_builds;
@@ -271,63 +303,233 @@ bool build_critter_perches(const RetainedVisualFrame& frame,const TextureCpuAsse
     return true;
 } catch(...) {output.clear();return false;}
 
-bool build_ground_cover_objects(const RetainedVisualFrame& frame,const RetainedTerrainSourceSnapshot& source,WorldContactCache& cache,float x,float y,float radius,
-    std::vector<ground_cover::FootprintSplat>& output,std::uint64_t* preparation_count) noexcept try {
-    output.clear();
-    if(!source.terrain)return false;
-    const auto& ground=*source.terrain;
-    auto& sector_top=cache.sector_top;
-    if(cache.terrain!=source.terrain || cache.generation!=source.source_generation ||
-       cache.revision!=source.source_revision) {
-    // Immutable terrain bounds need rebuilding only for a different source.
-    cache.terrain.reset();
-    sector_top.assign(std::size_t(ground.sector_count_x)*ground.sector_count_y,-INFINITY);
-    for(const auto& sector:ground.sectors)
-        if(sector.map_x<ground.sector_count_x&&sector.map_y<ground.sector_count_y) {
-            auto& value=sector_top[std::size_t(sector.map_y)*ground.sector_count_x+sector.map_x];
-            value=std::max(value,sector.bounds.maximum[2]);
-        }
-    cache.terrain=source.terrain;cache.generation=source.source_generation;cache.revision=source.source_revision;
+constexpr float kGroundContactCell = 16.f;
+constexpr double kGroundContactBudgetMs = .3;
+struct WorldContactStore {
+    struct Entry {
+        LifecycleIdentity lifecycle{};
+        VisualResourceIncarnation resource{};
+        std::shared_ptr<VisualPreparedResources> prepared; // holds the built contacts
+        std::array<float,4> box{}; // XY min/max filed in the grid
+        bool built = false, bounded = true;
+        std::uint64_t seen = 0;
+    };
+    std::unordered_map<std::int32_t,Entry> entries;
+    std::unordered_map<std::int64_t,std::vector<std::int32_t>> cells;
+    std::vector<std::int32_t> unbounded; // no envelope: offered to every window
+    std::vector<float> sector_top;
+    std::uint64_t terrain_generation = 0, terrain_revision = 0, stamp = 0;
+    std::uint64_t revision = 1; // any filing change
+    std::vector<ground_cover::FootprintSplat> answer;
+    std::array<std::int32_t,4> answer_cells{};
+    std::uint64_t answer_revision = 0; // 0: no complete answer kept
+    bool valid = false;
+    void clear() {
+        entries.clear();cells.clear();unbounded.clear();answer.clear();
+        answer_revision=0;valid=false;++revision;
     }
-    // Contacts are built once per object placement. A burst (map entry, a far
-    // zoom-out) spreads over frames; an object not yet built has no footprint.
-    const auto start=std::chrono::steady_clock::now();
-    bool building=true;
-    for(const auto& sample:frame.entities) {
-        if(sample.values.unit||sample.values.hidden||(sample.values.object_flags&0x40u)||
-           sample.status!=RetainedVisualStatus::ready||!sample.height_valid||!sample.assembly||
-           !sample.assembly->skeleton||!sample.prepared)continue;
-        // The published entity envelope contains every part envelope (the
-        // contract the owned scene selects consumers by); reject the whole
-        // object before per-part work. Without one, fall through to the parts.
+};
+namespace {
+std::int64_t ground_contact_cell_key(std::int32_t x,std::int32_t y) noexcept {
+    return (std::int64_t(x)<<32)|std::uint32_t(y);
+}
+std::array<std::int32_t,4> ground_contact_cell_range(const std::array<float,4>& box) noexcept {
+    return {std::int32_t(std::floor(box[0]/kGroundContactCell)),std::int32_t(std::floor(box[1]/kGroundContactCell)),
+            std::int32_t(std::floor(box[2]/kGroundContactCell)),std::int32_t(std::floor(box[3]/kGroundContactCell))};
+}
+template<class F> void ground_contact_cells(const std::array<std::int32_t,4>& range,F&& visit) {
+    for(auto cy=range[1];cy<=range[3];++cy)for(auto cx=range[0];cx<=range[2];++cx)visit(ground_contact_cell_key(cx,cy));
+}
+std::array<float,4> ground_contact_box(const std::vector<std::array<float,4>>& rectangles) noexcept {
+    std::array<float,4> box{INFINITY,INFINITY,-INFINITY,-INFINITY};
+    for(const auto& r:rectangles) {
+        box[0]=std::min(box[0],r[0]-r[2]);box[1]=std::min(box[1],r[1]-r[3]);
+        box[2]=std::max(box[2],r[0]+r[2]);box[3]=std::max(box[3],r[1]+r[3]);
+    }
+    return box;
+}
+void ground_contact_unfile(WorldContactStore& store,std::int32_t id,const WorldContactStore::Entry& entry) {
+    ++store.revision;
+    if(!entry.bounded) {
+        store.unbounded.erase(std::remove(store.unbounded.begin(),store.unbounded.end(),id),store.unbounded.end());
+        return;
+    }
+    if(!(entry.box[0]<=entry.box[2]))return; // built with no contacts: never filed
+    ground_contact_cells(ground_contact_cell_range(entry.box),[&](std::int64_t key){
+        const auto cell=store.cells.find(key);
+        if(cell==store.cells.end())return;
+        auto& ids=cell->second;
+        ids.erase(std::remove(ids.begin(),ids.end(),id),ids.end());
+        if(ids.empty())store.cells.erase(cell);
+    });
+}
+void ground_contact_file(WorldContactStore& store,std::int32_t id,const WorldContactStore::Entry& entry) {
+    ++store.revision;
+    if(!entry.bounded){store.unbounded.push_back(id);return;}
+    if(!(entry.box[0]<=entry.box[2]))return;
+    ground_contact_cells(ground_contact_cell_range(entry.box),[&](std::int64_t key){store.cells[key].push_back(id);});
+}
+bool ground_contacts_current(const RetainedVisualSample& sample,const RetainedTerrainSourceSnapshot& source) {
+    const auto& prepared=*sample.prepared;
+    const double still=0;
+    return prepared.ground_contacts_valid&&owned_visual_pose_key_matches(prepared.ground_contacts_key,sample,&still)&&
+        prepared.ground_contacts_terrain_generation==source.source_generation&&
+        prepared.ground_contacts_terrain_revision==source.source_revision;
+}
+// The frame's samples stay in signed-ID order with one sample per ID
+// (RetainedStaticScene::visual_frame_unlocked).
+const RetainedVisualSample* ground_contact_sample(const std::vector<RetainedVisualSample>& entities,std::int32_t id) noexcept {
+    const auto found=std::lower_bound(entities.begin(),entities.end(),id,
+        [](const RetainedVisualSample& sample,std::int32_t value){return sample.resource.signed_id<value;});
+    return found!=entities.end()&&found->resource.signed_id==id ? &*found : nullptr;
+}
+// One sample's entry under the exact rule of the former per-frame walk;
+// false: not a contact source.
+bool ground_contact_entry(const RetainedVisualSample& sample,const RetainedTerrainSourceSnapshot& source,
+    WorldContactStore::Entry& entry) {
+    if(sample.values.unit||sample.values.hidden||(sample.values.object_flags&0x40u)||
+       sample.status!=RetainedVisualStatus::ready||!sample.height_valid||!sample.assembly||
+       !sample.assembly->skeleton||!sample.prepared)return false;
+    entry={};
+    entry.lifecycle=sample.lifecycle;entry.resource=sample.resource;entry.prepared=sample.prepared;
+    if(ground_contacts_current(sample,source)) {
+        entry.built=true;entry.box=ground_contact_box(sample.prepared->ground_contacts);
+    } else {
+        // The published entity envelope contains every part envelope.
         NativeWorldBounds envelope{};
         if(prepare_world_visual_bounds(sample,envelope)&&
-           (envelope.maximum[0]<x-radius||envelope.minimum[0]>x+radius||
-            envelope.maximum[1]<y-radius||envelope.minimum[1]>y+radius))continue;
-        // Contacts follow the object's placement, appearance and clip, not the
-        // animation phase: an idling prop keeps the contact it was built with.
-        auto& prepared=*sample.prepared;
-        auto key=owned_visual_pose_key(sample);key.phase=0;
-        if(!prepared.ground_contacts_valid||!same_visual_pose_key(prepared.ground_contacts_key,key)||
-           prepared.ground_contacts_terrain_generation!=source.source_generation||
-           prepared.ground_contacts_terrain_revision!=source.source_revision) {
-            if(!building)continue;
-            prepared.ground_contacts_valid=false;
-            const bool built=build_ground_contacts(sample,ground,sector_top,prepared.ground_contacts,preparation_count);
-            building=std::chrono::steady_clock::now()-start<std::chrono::microseconds(1500);
-            if(!built)continue;
+           std::isfinite(envelope.minimum[0])&&std::isfinite(envelope.minimum[1])&&
+           std::isfinite(envelope.maximum[0])&&std::isfinite(envelope.maximum[1]))
+            entry.box={envelope.minimum[0],envelope.minimum[1],envelope.maximum[0],envelope.maximum[1]};
+        else entry.bounded=false;
+    }
+    return true;
+}
+bool same_ground_contact_entry(const WorldContactStore::Entry& left,const WorldContactStore::Entry& right) noexcept {
+    return same_lifecycle_identity(left.lifecycle,right.lifecycle)&&same_visual_resource(left.resource,right.resource)&&
+        left.prepared==right.prepared&&left.built==right.built&&left.bounded==right.bounded&&left.box==right.box;
+}
+} // namespace
+
+bool build_ground_cover_objects(const RetainedVisualFrame& frame,const RetainedTerrainSourceSnapshot& source,
+    WorldContactCache& cache,float x,float y,float radius,std::vector<ground_cover::FootprintSplat>& output,
+    std::uint64_t* preparation_count,RetainedStaticScene* owner,bool held) noexcept try {
+    output.clear();
+    if(!source.terrain)return false;
+    if(!cache.store)cache.store=std::make_shared<WorldContactStore>();
+    const auto& ground=*source.terrain;
+    const auto& entities=frame.entities;
+    auto& store=*cache.store;
+    auto& scene=owner?*owner:retained_visual_scene();
+    const auto changes=scene.visual_source_changes(RetainedShadowConsumer::ground_contacts);
+    const bool full=!store.valid||changes.full||(changes.terrain_dirty&&!changes.terrain_time_only)||
+        store.terrain_generation!=source.source_generation||
+        store.terrain_revision!=source.source_revision;
+    if(full) {
+        store.clear();
+        store.sector_top.assign(std::size_t(ground.sector_count_x)*ground.sector_count_y,-INFINITY);
+        for(const auto& sector:ground.sectors)
+            if(sector.map_x<ground.sector_count_x&&sector.map_y<ground.sector_count_y) {
+                auto& value=store.sector_top[std::size_t(sector.map_y)*ground.sector_count_x+sector.map_x];
+                value=std::max(value,sector.bounds.maximum[2]);
+            }
+        store.terrain_generation=source.source_generation;store.terrain_revision=source.source_revision;
+        WorldContactStore::Entry entry;
+        for(const auto& sample:entities)
+            if(ground_contact_entry(sample,source,entry)) {
+                ground_contact_file(store,sample.resource.signed_id,entry);
+                store.entries[sample.resource.signed_id]=std::move(entry);
+            }
+        store.valid=true;
+    } else {
+        WorldContactStore::Entry entry;
+        for(const auto id:changes.dirty_visuals) {
+            const auto* sample=ground_contact_sample(entities,id);
+            const bool source_now=sample&&ground_contact_entry(*sample,source,entry);
+            const auto found=store.entries.find(id);
+            // An unchanged entry (an animated prop's phase, a flag that does
+            // not concern cover) keeps its filing and the kept answer.
+            if(found!=store.entries.end()&&source_now&&same_ground_contact_entry(found->second,entry))continue;
+            if(found!=store.entries.end()){ground_contact_unfile(store,id,found->second);store.entries.erase(found);}
+            if(source_now){ground_contact_file(store,id,entry);store.entries[id]=std::move(entry);}
+        }
+    }
+    // The scene thread's frame may predate the newest changes: they stay
+    // unacknowledged and are read again next frame.
+    scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::ground_contacts,
+        changes.revision);
+
+    // The cells the cover window touches; the answer covers them whole.
+    const auto range=ground_contact_cell_range({x-radius,y-radius,x+radius,y+radius});
+    if(store.answer_revision==store.revision&&store.answer_cells==range) {
+        output=store.answer;
+        return true;
+    }
+    const std::array<float,4> area{range[0]*kGroundContactCell,range[1]*kGroundContactCell,
+        (range[2]+1)*kGroundContactCell,(range[3]+1)*kGroundContactCell};
+    const auto overlaps=[&](const std::array<float,4>& box){
+        return !(box[2]<area[0]||box[0]>area[2]||box[3]<area[1]||box[1]>area[3]);
+    };
+    const auto emit=[&](const WorldContactStore::Entry& entry){
+        for(const auto& rectangle:entry.prepared->ground_contacts) {
+            if(rectangle[0]+rectangle[2]<area[0]||rectangle[0]-rectangle[2]>area[2]||
+               rectangle[1]+rectangle[3]<area[1]||rectangle[1]-rectangle[3]>area[3])continue;
+            output.push_back(ground_cover::object_splat(rectangle));
+        }
+    };
+    static std::vector<std::pair<float,std::int32_t>> pending;
+    pending.clear();
+    ++store.stamp;
+    const auto offer=[&](std::int32_t id){
+        auto& entry=store.entries.at(id);
+        if(entry.seen==store.stamp)return;
+        entry.seen=store.stamp;
+        if(entry.built){emit(entry);return;}
+        if(entry.bounded&&!overlaps(entry.box))return;
+        const float dx=.5f*(entry.box[0]+entry.box[2])-x,dy=.5f*(entry.box[1]+entry.box[3])-y;
+        pending.push_back({entry.bounded?dx*dx+dy*dy:0.f,id});
+    };
+    ground_contact_cells(range,[&](std::int64_t key){
+        const auto cell=store.cells.find(key);
+        if(cell!=store.cells.end())for(const auto id:cell->second)offer(id);
+    });
+    for(const auto id:store.unbounded)offer(id);
+    // Builds re-file their entry, so they run after the grid walk.
+    std::sort(pending.begin(),pending.end());
+    const auto start=frame_acct::now();
+    const auto budget=static_cast<std::int64_t>(kGroundContactBudgetMs/frame_acct::ms_per_tick());
+    std::size_t done=0;
+    for(;done<pending.size();++done) {
+        if(!held&&frame_acct::now()-start>=budget)break;
+        const auto id=pending[done].second;
+        auto& entry=store.entries.at(id);
+        const auto* sample=ground_contact_sample(entities,id);
+        // A sample of another incarnation is the journal's next change.
+        if(!sample||!same_lifecycle_identity(sample->lifecycle,entry.lifecycle)||
+           !same_visual_resource(sample->resource,entry.resource)||sample->prepared!=entry.prepared)continue;
+        auto& prepared=*entry.prepared;
+        auto key=owned_visual_pose_key(*sample);key.phase=0;
+        prepared.ground_contacts_valid=false;
+        // A failed build (deterministic for this placement) leaves no contacts
+        // and is retried when the journal reports the object changed.
+        const bool built=build_ground_contacts(*sample,ground,store.sector_top,prepared.ground_contacts,preparation_count);
+        if(built) {
             prepared.ground_contacts_key=key;prepared.ground_contacts_valid=true;
             prepared.ground_contacts_terrain_generation=source.source_generation;
             prepared.ground_contacts_terrain_revision=source.source_revision;
-        }
-        for(const auto& rectangle:prepared.ground_contacts) {
-            if(rectangle[0]+rectangle[2]<x-radius||rectangle[0]-rectangle[2]>x+radius||
-               rectangle[1]+rectangle[3]<y-radius||rectangle[1]-rectangle[3]>y+radius)continue;
-            output.push_back(ground_cover::object_splat(rectangle));
-        }
+        } else prepared.ground_contacts.clear();
+        ground_contact_unfile(store,id,entry);
+        entry.built=true;entry.bounded=true;entry.box=ground_contact_box(prepared.ground_contacts);
+        ground_contact_file(store,id,entry);
+        emit(entry);
     }
+    // Keep the answer only when nothing in the window still waits for a build.
+    store.answer=output;store.answer_cells=range;
+    store.answer_revision=done==pending.size()?store.revision:0;
     return true;
-} catch(...) {output.clear();return false;}
+} catch(...) {output.clear();cache.store.reset();return false;}
+
+
 
 
 } // namespace owned

@@ -1,6 +1,7 @@
 #include "character_pane_owned_text.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -23,6 +24,8 @@ constexpr std::uint64_t kAtlasIdentityBase = 0x5458544100000000ull;
 constexpr std::uint64_t kSolidIdentity = 0x5458544c494e4501ull;
 // A layout survives while it is drawn at least once per sweep interval.
 constexpr std::uint64_t kLayoutSweepMs = 1000u;
+// Raster scales are keyed in 1/65536 steps; this key is the stock size.
+constexpr std::uint32_t kUnitRasterKey = 65536u;
 
 std::uint8_t expand5(std::uint32_t value) noexcept {
     return static_cast<std::uint8_t>((value << 3u) | (value >> 2u));
@@ -104,8 +107,9 @@ const char* character_pane_text_failure_name(
 
 bool CharacterPaneOwnedText::GlyphKey::operator<(
     const GlyphKey& other) const noexcept {
-    return std::tie(font_generation, font_slot, glyph) <
-        std::tie(other.font_generation, other.font_slot, other.glyph);
+    return std::tie(font_generation, font_slot, raster_key, glyph) <
+        std::tie(other.font_generation, other.font_slot, other.raster_key,
+                 other.glyph);
 }
 
 bool CharacterPaneOwnedText::LayoutKey::operator<(
@@ -116,6 +120,7 @@ bool CharacterPaneOwnedText::LayoutKey::operator<(
 }
 
 CharacterPaneOwnedText::~CharacterPaneOwnedText() {
+    release_raster_fonts();
     if (measure_dc_ && measure_old_bitmap_)
         SelectObject(measure_dc_, measure_old_bitmap_);
     if (measure_bitmap_) DeleteObject(measure_bitmap_);
@@ -126,6 +131,7 @@ void CharacterPaneOwnedText::initialize_fonts(
     std::uint64_t generation) noexcept {
     if (!generation || generation == font_generation_) return;
     font_generation_ = generation;
+    release_raster_fonts();
     glyphs_.clear();
     pages_.clear();
     layouts_.clear();
@@ -136,6 +142,7 @@ void CharacterPaneOwnedText::initialize_fonts(
 
 void CharacterPaneOwnedText::retire_fonts() noexcept {
     font_generation_ = 0;
+    release_raster_fonts();
     glyphs_.clear();
     pages_.clear();
     layouts_.clear();
@@ -187,10 +194,59 @@ void CharacterPaneOwnedText::sweep_layouts() noexcept {
     layout_sweep_ms_ = now;
 }
 
+void CharacterPaneOwnedText::release_raster_fonts() noexcept {
+    for (const auto& entry : raster_fonts_) DeleteObject(entry.second);
+    raster_fonts_.clear();
+}
+
+// A copy of the engine font at raster_scale_. Glyph indices come from the
+// stock font shaping and are the same in the copy (same face).
+HFONT CharacterPaneOwnedText::raster_font(
+    HFONT font, std::uint32_t font_slot) noexcept {
+    if (raster_key_ == kUnitRasterKey) return font;
+    const auto key = std::make_pair(font_slot, raster_key_);
+    const auto found = raster_fonts_.find(key);
+    if (found != raster_fonts_.end()) return found->second;
+    LOGFONTW description{};
+    if (GetObjectW(font, sizeof(description), &description) !=
+        sizeof(description))
+        return nullptr;
+    if (!description.lfHeight) {
+        // Default size: scale the stock cell height (selected in the DC).
+        TEXTMETRICW metrics{};
+        if (!GetTextMetricsW(measure_dc_, &metrics)) return nullptr;
+        description.lfHeight = metrics.tmHeight;
+    }
+    const auto scaled = [this](LONG value) {
+        const LONG result = static_cast<LONG>(
+            std::lround(static_cast<double>(value) * raster_scale_));
+        return result ? result : (value < 0 ? -1 : 1);
+    };
+    description.lfHeight = scaled(description.lfHeight);
+    if (description.lfWidth) description.lfWidth = scaled(description.lfWidth);
+    HFONT created = CreateFontIndirectW(&description);
+    if (!created) return nullptr;
+    try {
+        raster_fonts_.emplace(key, created);
+    } catch (const std::bad_alloc&) {
+        DeleteObject(created);
+        return nullptr;
+    }
+    return created;
+}
+
 bool CharacterPaneOwnedText::begin_frame(
-    std::uint32_t width, std::uint32_t height) noexcept {
+    std::uint32_t width, std::uint32_t height, float raster_scale) noexcept {
     abort_frame();
     sweep_layouts();
+    // Bounded by the UI scale range and supported output/canvas ratios.
+    if (!std::isfinite(raster_scale) || raster_scale < 0.25f ||
+        raster_scale > 8.0f || std::fabs(raster_scale - 1.0f) < 1e-4f)
+        raster_scale = 1.0f;
+    raster_scale_ = raster_scale;
+    raster_key_ = static_cast<std::uint32_t>(
+        std::lround(static_cast<double>(raster_scale) * kUnitRasterKey));
+    if (raster_key_ == kUnitRasterKey) raster_scale_ = 1.0f;
     if (!font_generation_ || !width || !height ||
         width > (std::numeric_limits<std::size_t>::max)() / height ||
         static_cast<std::size_t>(width) * height > kMaximumPanePixels) {
@@ -602,7 +658,7 @@ bool CharacterPaneOwnedText::realize_glyph(
     HDC dc, std::uint32_t font_slot, std::uint16_t glyph,
     const GlyphMask*& output) noexcept {
     output = nullptr;
-    const GlyphKey key{font_generation_, font_slot, glyph};
+    const GlyphKey key{font_generation_, font_slot, raster_key_, glyph};
     auto found = glyphs_.find(key);
     if (found != glyphs_.end()) {
         output = &found->second;
@@ -663,11 +719,50 @@ bool CharacterPaneOwnedText::realize_glyph(
 }
 
 bool CharacterPaneOwnedText::append_glyph(
-    const GlyphMask& glyph, int pen_x, int baseline_y,
+    const GlyphMask& glyph, int pen_x, int baseline_y, int shift,
     COLORREF color, const RECT& clip) noexcept {
     if (glyph.width <= 0 || glyph.height <= 0) return true;
     if (glyph.page_index >= pages_.size() || !pages_[glyph.page_index].asset)
         return false;
+    if (raster_key_ != kUnitRasterKey) {
+        // Output-size glyph: the renderer places it 1:1 at the snapped output
+        // position of the stock pen, so its shape is the same everywhere.
+        const double scale = raster_scale_;
+        const double left = pen_x + shift + glyph.left / scale;
+        const double top = baseline_y + shift - glyph.top / scale;
+        const RECT bound{
+            std::max<LONG>(clip.left, 0), std::max<LONG>(clip.top, 0),
+            std::min<LONG>(clip.right, static_cast<LONG>(width_)),
+            std::min<LONG>(clip.bottom, static_cast<LONG>(height_))};
+        const RECT bounded{
+            std::max<LONG>(static_cast<LONG>(std::floor(left)), bound.left),
+            std::max<LONG>(static_cast<LONG>(std::floor(top)), bound.top),
+            std::min<LONG>(static_cast<LONG>(
+                std::ceil(left + glyph.width / scale)), bound.right),
+            std::min<LONG>(static_cast<LONG>(
+                std::ceil(top + glyph.height / scale)), bound.bottom)};
+        if (bounded.right <= bounded.left || bounded.bottom <= bounded.top)
+            return true;
+        if (quads_.size() >= kMaximumFrameQuads) return false;
+        CharacterPaneGlyphQuad quad{};
+        quad.atlas_page_index = glyph.page_index;
+        quad.source = glyph.source;
+        quad.destination = bounded;
+        quad.color = quantized_color(color);
+        quad.raster_scale = raster_scale_;
+        quad.anchor = {pen_x, baseline_y};
+        quad.shift = {shift, shift};
+        quad.offset = {glyph.left, -glyph.top};
+        quad.clip = bound;
+        try {
+            quads_.push_back(std::move(quad));
+        } catch (const std::bad_alloc&) {
+            return false;
+        }
+        return true;
+    }
+    pen_x += shift;
+    baseline_y += shift;
     const int glyph_left = pen_x + glyph.left;
     const int glyph_top = baseline_y - glyph.top;
     RECT destination{
@@ -744,7 +839,7 @@ bool CharacterPaneOwnedText::append_line(
 
 bool CharacterPaneOwnedText::draw_line(
     HDC dc, const DisplayText& display, const Line& line,
-    int x, int baseline, COLORREF color, const RECT& clip,
+    int x, int baseline, int shift, COLORREF color, const RECT& clip,
     std::uint32_t font_slot, int underline_offset,
     int& underlines) noexcept {
     if (!line.length) return true;
@@ -761,7 +856,7 @@ bool CharacterPaneOwnedText::draw_line(
                                shaped.glyphs[index],
                                glyph) || !glyph)
                 return false;
-            if (!append_glyph(*glyph, pen, baseline, color, clip))
+            if (!append_glyph(*glyph, pen, baseline, shift, color, clip))
                 return false;
             if ((shaped.advances[index] > 0 &&
                  pen > INT_MAX - shaped.advances[index]) ||
@@ -783,10 +878,10 @@ bool CharacterPaneOwnedText::draw_line(
             const std::int64_t glyph_end =
                 glyph_origin + shaped.advances[glyph_index];
             const std::int64_t left =
-                static_cast<std::int64_t>(x) +
+                static_cast<std::int64_t>(x) + shift +
                 std::min(glyph_origin, glyph_end);
             const std::int64_t right =
-                static_cast<std::int64_t>(x) +
+                static_cast<std::int64_t>(x) + shift +
                 std::max(glyph_origin, glyph_end);
             if (left < INT_MIN || left > INT_MAX ||
                 right < INT_MIN || right > INT_MAX)
@@ -796,7 +891,7 @@ bool CharacterPaneOwnedText::draw_line(
             if (underline_right > INT_MAX || !append_line(
                     static_cast<int>(left),
                     static_cast<int>(underline_right),
-                    baseline + underline_offset, color, clip))
+                    baseline + shift + underline_offset, color, clip))
                 return false;
             ++underlines;
         }
@@ -879,6 +974,16 @@ int CharacterPaneOwnedText::draw(
         shaped = &fresh;
     }
     const int exact_height = shaped->height;
+    if (complete && raster_key_ != kUnitRasterKey) {
+        // Layout above used the stock font; glyphs rasterize from its copy.
+        const HFONT raster = raster_font(font, font_slot);
+        const HGDIOBJ previous = raster ? SelectObject(measure_dc_, raster)
+                                        : nullptr;
+        if (!previous || previous == HGDI_ERROR) {
+            fail(CharacterPaneTextFailure::font);
+            complete = false;
+        }
+    }
     if (complete) {
         const RECT clip = (format & DT_NOCLIP)
             ? RECT{0, 0, static_cast<LONG>(width_),
@@ -896,7 +1001,7 @@ int CharacterPaneOwnedText::draw(
             const int baseline = y + shaped->ascent;
             int ignored_underlines = 0;
             if (shadow && !draw_line(
-                    measure_dc_, shaped->display, line, x + 1, baseline + 1,
+                    measure_dc_, shaped->display, line, x, baseline, 1,
                     RGB(8, 8, 8), clip, font_slot,
                     1, ignored_underlines)) {
                 complete = false;
@@ -904,8 +1009,8 @@ int CharacterPaneOwnedText::draw(
             }
             int underlines = 0;
             if (!draw_line(
-                    measure_dc_, shaped->display, line, x, baseline, color,
-                    clip, font_slot, 1, underlines)) {
+                    measure_dc_, shaped->display, line, x, baseline, 0,
+                    color, clip, font_slot, 1, underlines)) {
                 complete = false;
                 break;
             }

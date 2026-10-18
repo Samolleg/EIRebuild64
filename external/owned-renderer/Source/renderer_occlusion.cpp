@@ -50,7 +50,7 @@ HRESULT Renderer::build_native_hiz() noexcept {
             code.Reset(); errors.Reset();
             HRESULT result = compile_shader(program, &code, &errors);
             if (SUCCEEDED(result))
-                result = device_->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader);
+                result = create_shader(device_.Get(),code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader);
             return result;
         };
         if (FAILED(hr = compile(programs[0], native_hiz_copy_cs_)) ||

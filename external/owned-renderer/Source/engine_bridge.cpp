@@ -6,6 +6,8 @@
 #include "world_lamp_memory.h"
 #include "engine_bridge.h"
 #include "world_scene_algorithms.h"
+#include "combat_text.h"
+#include "frame_accounting.h"
 #include "widescreen.h"
 #include "shadow_far_retention.h"
 #include "stock_shadow_suppression.h"
@@ -43,6 +45,7 @@
 #include "game_sites.h"
 #include "hud_native_sites.h"
 #include "visual_native_sites.h"
+#include "precipitation.h"
 
 #include <bcrypt.h>
 #include <intrin.h>
@@ -53,6 +56,7 @@
 #include <array>
 #include <atomic>
 #include <cfloat>
+#include <cstdarg>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -397,6 +401,18 @@ constexpr std::uint32_t kCameraMouseNormalizeRva = 0x001f7e00;
 // symbols name both). The owned sky replaces that call (sky_clouds.h).
 constexpr std::uint32_t kSkyDrawCallRva = 0x00169fb7;
 constexpr std::uint32_t kSkyObjectDrawRva = 0x000d96e0;
+// CWeather::Draw (004E5680; reached from CWorldClient::Draw at 0056A294)
+// runs SetupPower (power ramp, rain-loop volume) and then, by its current
+// kind, PUSH EBX(visualizator); MOV ECX,ESI; CALL DrawRain (004E4240) at
+// 004E56EB or CALL DrawSnow (004E4C80) at 004E56FD. Both are thiscall
+// BOOL(CVisualizator*) ending MOV EAX,1 ... RET 4 (level 1 disassembly);
+// they only fill CWeather's own vertex scratch arrays and submit one TL
+// triangle set. Owned precipitation (renderer_precipitation.cpp) draws the
+// weather, so both calls return TRUE without drawing.
+constexpr std::uint32_t kWeatherDrawRainCallRva = 0x000e56eb;
+constexpr std::uint32_t kWeatherDrawRainRva = 0x000e4240;
+constexpr std::uint32_t kWeatherDrawSnowCallRva = 0x000e56fd;
+constexpr std::uint32_t kWeatherDrawSnowRva = 0x000e4c80;
 // BE0FC330... supported image: 569F34 reads world+8, 569F37 tests
 // AH bit 10h, and 569F3A skips the complete sky block to 569FFB.
 constexpr std::uint32_t kWorldSkyGateRva=0x00169f34;
@@ -1086,12 +1102,14 @@ std::int64_t city_retained_excluded_ticks() noexcept {
 struct CityRetainedOwnerGuard {
     explicit CityRetainedOwnerGuard(CityRetainedOwner owner,std::int64_t now=0) noexcept
         : index(static_cast<std::size_t>(owner)) {
+        accounted=frame_acct::push(static_cast<frame_acct::Part>(frame_acct::ret_receiver_fitting+index));
         if(!g_scene_partition.active||!g_bridge_sample.active||!g_scene_partition.retained_depth||
             g_scene_partition.renderer_depth||g_scene_partition.queue_depth)return;
         begin=now?now:bridge_now();excluded=city_retained_excluded_ticks();
         ++g_scene_partition.retained_owner_depth;active=true;
     }
     void finish(std::int64_t now=0) noexcept {
+        if(accounted){accounted=false;frame_acct::pop();}
         if(!active)return;
         active=false;
         if(!g_scene_partition.active)return;
@@ -1113,6 +1131,7 @@ struct CityRetainedOwnerGuard {
     std::size_t index;
     std::int64_t begin=0,excluded=0;
     bool active=false;
+    bool accounted=false;
 };
 
 std::int64_t scene_partition_renderer_total(
@@ -1768,6 +1787,8 @@ struct HudAtlasProducerContext {
 
 BeginEndFn g_begin_frame = nullptr;
 BeginEndFn g_end_frame = nullptr;
+// The direct DrawFrame call owns rendering entry independently of profiling.
+std::uint8_t* g_engine_frame_begin_image = nullptr;
 OuterTimeGetTimeFn g_outer_time_get_time = nullptr;
 OuterPreTickFn g_outer_pre_tick = nullptr;
 OuterFixedStepFn g_outer_fixed_step = nullptr;
@@ -2473,6 +2494,13 @@ const std::int32_t* g_camera_mouse_effective_height = nullptr;
 std::array<std::uint8_t, 5> g_owned_sky_call_original{};
 bool g_owned_sky_installed = false;
 bool g_owned_sky_gate_valid = false;
+std::array<std::array<std::uint8_t, 5>, 2> g_owned_weather_call_original{};
+std::array<bool, 2> g_owned_weather_installed{};
+// Written at hook install/uninstall (game thread), read by the renderer's
+// precipitation status on whichever thread presents.
+std::atomic<const char*> g_owned_weather_status{"not installed"};
+std::atomic<int> g_weather_visual_test{0};       // F10 precip_test (render only)
+std::atomic<int> g_weather_strength_setting{0};  // precip_strength or its F10 override
 #ifdef EID3D11_TESTING
 std::uint8_t* g_test_restore_fail_entry=nullptr;
 #endif
@@ -2699,6 +2727,8 @@ BOOL __fastcall test_outer_end_frame(void*, void*) {
     return g_test_outer_end_result;
 }
 #endif
+thread_local void* g_engine_frame_begin_context = nullptr;
+thread_local EngineFrameBeginFn g_engine_frame_begin_sink = nullptr;
 thread_local void* g_native_sink_context = nullptr;
 thread_local NativeGeometrySubmitFn g_native_sink_submit = nullptr;
 thread_local NativeGeometryBatchBeginFn g_native_sink_begin_batch = nullptr;
@@ -2709,11 +2739,18 @@ thread_local NativeGeometryFrameStateFn g_native_sink_frame_state = nullptr;
 thread_local NativeWorldLightingSetFn g_native_sink_world_lighting = nullptr;
 thread_local NativeShadowBeginFn g_native_sink_shadow_begin = nullptr;
 thread_local NativeShadowCullProjectionFn g_native_sink_shadow_cull_projection = nullptr;
+thread_local NativeShadowTerrainBakeFn g_native_sink_shadow_terrain_bake = nullptr;
 thread_local NativeShadowStaticDepthFn g_native_sink_shadow_static_depth = nullptr;
 thread_local NativeShadowEndFn g_native_sink_shadow_end = nullptr;
 thread_local NativeShadowSourceDiagnosticsFn g_native_sink_shadow_diagnostics = nullptr;
 thread_local NativePointLightsSetFn g_native_sink_point_lights = nullptr;
 thread_local NativePointShadowBeginFn g_native_sink_point_shadow_begin = nullptr;
+thread_local NativeRainOcclusionBeginFn g_native_sink_rain_begin = nullptr;
+thread_local NativeRainOcclusionEndFn g_native_sink_rain_end = nullptr;
+// Owned precipitation shelter map: the renderer's request and what the
+// bridge last baked (or attempted) for it.
+RainOcclusionRequest g_rain_request{};
+struct RainOcclusionBaked { std::uint64_t serial = 0, store_revision = 0, epoch = 0, frame = 0; bool attempted = false; } g_rain_baked;
 thread_local NativePointShadowEndFn g_native_sink_point_shadow_end = nullptr;
 thread_local NativePointShadowBatchFn g_native_sink_point_shadow_batch = nullptr;
 thread_local NativePointShadowPublishFn g_native_sink_point_shadow_publish = nullptr;
@@ -2728,6 +2765,37 @@ thread_local bool g_current_object_plan_handled = false;
 bool restore_inline_entry(std::uint8_t* entry, const std::uint8_t* original,
                           std::size_t bytes) noexcept;
 const void* relative_jump_target(const std::uint8_t* entry) noexcept;
+// A game.exe entry our hook cannot own because another module holds it:
+// one hook_taken_over line naming the owner, plus the on-screen notice.
+void note_foreign_entry(const std::uint8_t* entry, const char* when, const char* reason) noexcept;
+// Our patch record without the executable-page requirement (renderer slots).
+void record_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept;
+
+const std::uint8_t* game_image_base() noexcept {
+    return reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+}
+
+std::size_t game_image_size() noexcept {
+    static const std::size_t size = [] {
+        const auto* base = game_image_base();
+        if (!base) return std::size_t{0};
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return std::size_t{0};
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+        return nt->Signature == IMAGE_NT_SIGNATURE ?
+            static_cast<std::size_t>(nt->OptionalHeader.SizeOfImage) : std::size_t{0};
+    }();
+    return size;
+}
+
+bool game_image_contains(const void* address) noexcept {
+    const auto* base = game_image_base();
+    const auto* at = static_cast<const std::uint8_t*>(address);
+    return base && at >= base && at < base + game_image_size();
+}
+
+// A world draw completed through our hook (the ownership check point).
+std::atomic<bool> g_ownership_world_seen{false};
 
 // Ownership of a game entry the bridge detours: stock bytes, or the addon's
 // hook-framework chain (forward through its dispatcher, which stays owned by
@@ -2751,9 +2819,22 @@ EntryResolution resolve_hook_entry(const std::uint8_t* entry,
             std::snprintf(detail, sizeof(detail), "entry_rva=%08x reason=%s",
                           static_cast<unsigned>(entry - image), result.reason);
             append_bridge_event("entry_owner_rejected", detail, true);
+            note_foreign_entry(entry, "install", result.reason);
         }
     }
     return result;
+}
+
+// A fully replaced entry never calls its previous owner, so only stock bytes
+// are accepted. An addon hook-framework chain there would be silently
+// dropped by our jump; it stays installed and the feature is rejected
+// visibly instead (any other foreign owner is named by resolve_hook_entry).
+bool replaced_entry_is_stock(std::uint8_t* entry, const std::uint8_t* stock,
+                             std::size_t stock_bytes) noexcept {
+    const auto owner = resolve_hook_entry(entry, stock, stock_bytes, 5);
+    if (owner.owner == EntryOwner::framework_chain)
+        note_foreign_entry(entry, "install", "addon_hook_on_fully_replaced_entry");
+    return owner.owner == EntryOwner::stock;
 }
 
 bool hook_entry_usable(const std::uint8_t* entry, const std::uint8_t* stock,
@@ -2997,6 +3078,55 @@ thread_local WorldDrawCompletionSnapshot g_world_draw_completion{};
 thread_local std::uint64_t g_world_draw_completion_counter = 0;
 thread_local SceneWorldToClipSnapshot g_scene_world_to_clip{};
 thread_local WorldFogSnapshot g_world_fog{};
+// Scene thread: the last installed frame values. While installed, the
+// bridge's game-reading pulls answer from them (game memory is read only on
+// the game thread, when the values are captured).
+thread_local bool g_scene_frame_values_installed = false;
+thread_local BridgeFrameValues g_scene_frame_values{};
+// Scene thread: inputs of the queued world command being run (null outside).
+thread_local const std::vector<std::int16_t>* g_scene_fog_table = nullptr;
+// The neighbour border fog revision the scene command's fog table was computed
+// at (scene thread); see current_border_fog_revision.
+thread_local std::uint64_t g_scene_fog_revision = 0;
+// The border fog revision the fog bytes of this preparation belong to. On the
+// scene thread the bytes come from the command's table, computed on the game
+// thread before the scene thread runs; stamping a packet with the live
+// revision instead let a neighbour publication between the two mark stale
+// bytes current, and those objects kept the old fog until their own state
+// changed (zone3obr: trees inside the zone7 seam stayed at 255 while a rock
+// beside them, re-registered for a flag change, took the seam fog).
+std::uint64_t current_border_fog_revision() noexcept {
+    return g_scene_fog_table ? g_scene_fog_revision : neighbour_border_fog_revision();
+}
+
+thread_local const std::vector<std::shared_ptr<SurfaceImage>>* g_scene_terrain_textures = nullptr;
+thread_local const std::vector<std::shared_ptr<const OwnedVisualSurface>>* g_scene_terrain_shadow_textures = nullptr;
+thread_local void (*g_scene_bind_texture)(void*, const std::shared_ptr<SurfaceImage>&) = nullptr;
+thread_local void* g_scene_sinks = nullptr;
+// The game's footprint list as the game thread read it for a queued world
+// command (bridge_ground_cover_footprints' result there). The marker records
+// (g_cover_markers) are game-thread state; the scene thread only copies this.
+struct GroundCoverFootprintSnapshot {
+    bool ok = false;
+    std::vector<ground_cover::FootprintSplat> splats;
+    std::vector<FootprintTrailPoint> trail_points;
+};
+thread_local const GroundCoverFootprintSnapshot* g_scene_footprints = nullptr;
+// Game thread: the latest terrain atlas snapshot (capture_terrain_atlases);
+// every post carries it in its frame values.
+std::shared_ptr<const TerrainAtlasSnapshot> g_terrain_atlases;
+// The retained scene's shadow revision when the command's values were
+// copied: journal consumers acknowledge only through it.
+thread_local std::uint64_t g_scene_capture_revision = 0;
+// Game thread: the device's hand-off while its scene thread runs.
+BridgeSceneHandoff g_scene_handoff{};
+bool scene_handoff_active() noexcept {
+    return g_scene_handoff.context && g_scene_handoff.active && g_scene_handoff.active(g_scene_handoff.context);
+}
+std::uint64_t owned_scene_ack_revision(std::uint64_t revision) noexcept {
+    return g_scene_capture_revision ? (std::min)(revision, g_scene_capture_revision) : revision;
+}
+
 struct NativeWorldLightingFrame {
     bool sampled = false;
     FigureFallbackReason result = FigureFallbackReason::unavailable;
@@ -3013,7 +3143,10 @@ struct OwnedVisualPartPreparation {
     NativeWorldBounds light_bounds{};
     NativeContribution contribution{};
     NativeShadowCasterRevision depth_revision;
-    bool ready = false; // A computed zero contribution is still a valid result.
+    // Per-frame values carry the serial of the frame that computed them: a
+    // kept entity (OwnedAdmissionCache) never sees another frame's value.
+    std::uint64_t ready_serial = 0; // bounds/contribution; a zero contribution is still a result
+    std::uint64_t depth_serial = 0; // depth_revision
     bool visible = false;
     bool receives = false;
     bool casts = false;
@@ -3043,6 +3176,8 @@ bool hovered_shadow_observation_enabled() noexcept {
     return enabled;
 }
 VisualResourceIncarnation hovered_shadow_observation_target() noexcept;
+thread_local bool g_hovered_shadow_capture_requested=false;
+void complete_hovered_shadow_capture() noexcept;
 struct OwnedVisualWorldFrame {
     OwnedVisualDiagnostic diagnostic{};
     NativeShadowSourceDiagnostics shadow_source_diagnostic{};
@@ -3074,6 +3209,7 @@ struct OwnedVisualWorldFrame {
     bool shadow_ready = false;
     bool color_submitted = false;
     bool persistent_static_shadows = false;
+    bool admission_incremental = false; // prepared by the persistent admission (OwnedAdmissionCache)
 #ifdef EID3D11_TESTING
     std::uint64_t pose_preparations = 0, color_sort_entries = 0;
     std::uint64_t part_bounds_computations = 0, part_bounds_reuses = 0;
@@ -3083,6 +3219,37 @@ struct OwnedVisualWorldFrame {
 #endif
 };
 thread_local OwnedVisualWorldFrame g_owned_visual_world_frame{};
+// The per-entity states of the last frame, kept out of sight between frames:
+// each holds its own parts vector, and destroying the frame freed and
+// prepare_owned_visual_values reallocated one per entity on every frame
+// (~3% of the main thread in a pan sample). Only prepare_owned_visual_values
+// takes it back, and it resets every element it keeps.
+thread_local std::vector<OwnedVisualFramePartState> g_owned_visual_prepared_spare;
+// The frame's per-frame scratch vectors: a frame reset clears them (their
+// elements are destroyed) but keeps their capacity, so each frame does not
+// reallocate them. bridge_release_world_caches frees the empty ones.
+template<class Visit> void visit_owned_visual_frame_scratch(OwnedVisualWorldFrame& frame,Visit&& visit) {
+    visit(frame.shadow_casters);visit(frame.shadow_receivers);visit(frame.static_receivers);visit(frame.static_drawn);
+    visit(frame.candidates);visit(frame.color_order);visit(frame.light_only_order);visit(frame.submission_order);
+    visit(frame.selected);visit(frame.depth_selected);visit(frame.shadow_time_active_visuals);
+}
+// frame={} for everything else (values and prepared included).
+void clear_owned_visual_world_frame(OwnedVisualWorldFrame& frame) noexcept {
+    OwnedVisualWorldFrame kept{};   // value-initialised, as frame={}
+    visit_owned_visual_frame_scratch(frame,[](auto& vector) noexcept {vector.clear();});
+    kept.shadow_casters.swap(frame.shadow_casters);kept.shadow_receivers.swap(frame.shadow_receivers);
+    kept.static_receivers.swap(frame.static_receivers);kept.static_drawn.swap(frame.static_drawn);
+    kept.candidates.swap(frame.candidates);kept.color_order.swap(frame.color_order);
+    kept.light_only_order.swap(frame.light_only_order);kept.submission_order.swap(frame.submission_order);
+    kept.selected.swap(frame.selected);kept.depth_selected.swap(frame.depth_selected);
+    kept.shadow_time_active_visuals.swap(frame.shadow_time_active_visuals);
+    frame=std::move(kept);
+}
+void reset_owned_visual_world_frame() noexcept {
+    auto& frame=g_owned_visual_world_frame;
+    if(!frame.prepared.empty())g_owned_visual_prepared_spare=std::move(frame.prepared);
+    clear_owned_visual_world_frame(frame);
+}
 volatile LONG g_owned_visual_failure_reported = 0;
 volatile LONG g_owned_shadow_failure_reported = 0;
 
@@ -3176,7 +3343,7 @@ void complete_owned_visual_diagnostic(bool completed) noexcept {
 // identity and does not enter the retained scene or any renderer queue.
 thread_local void* g_owned_visual_drawing_world = nullptr;
 void reset_owned_visual_draw(void* world) noexcept {
-    g_owned_visual_world_frame={};g_owned_visual_drawing_world=world;
+    reset_owned_visual_world_frame();g_owned_visual_drawing_world=world;
     if (world && g_bridge_sample.active && bridge_profile_enabled())
         g_owned_visual_world_frame.diagnostic.profile_frame=g_bridge_sample.frame;
 }
@@ -3829,10 +3996,12 @@ void __fastcall hook_hud_on_activate(void* self, void*) {
     const bool staging = g_hud_visuals.begin_activation();
     g_hud_provisional_screen = staging ? self : nullptr;
     bool completed = false;
+    widescreen_mission_activation(true);
     __try {
         g_hud_on_activate(self);
         completed = true;
     } __finally {
+        widescreen_mission_activation(false);
         if (staging) {
             std::array<std::uint32_t, 4> lane_counts{};
             if (!completed || !hud_activation_lane_state(self, lane_counts) ||
@@ -4938,6 +5107,11 @@ FigureFallbackReason publish_retained_world_lighting(
 }
 
 FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
+    // Scene thread: the game thread sampled and published the world light
+    // when it queued this command; never read the game's renderer here.
+    if (g_scene_frame_values_installed)
+        return g_native_world_lighting_frame.sampled ? g_native_world_lighting_frame.result
+                                                     : FigureFallbackReason::unavailable;
     if (!g_native_sink_context || !g_native_sink_world_lighting)
         return FigureFallbackReason::unavailable;
     // The outer world call owns this memo, including two world calls in one
@@ -5142,6 +5316,7 @@ bool hud_texture_format(MmpFormat format,
     switch (format) {
     case MmpFormat::dxt1: output = NativeOwnedTextureFormat::dxt1; return true;
     case MmpFormat::dxt3: output = NativeOwnedTextureFormat::dxt3; return true;
+    case MmpFormat::dxt5: output = NativeOwnedTextureFormat::dxt5; return true;
     case MmpFormat::rgb565: output = NativeOwnedTextureFormat::rgb565; return true;
     case MmpFormat::argb1555: output = NativeOwnedTextureFormat::argb1555; return true;
     case MmpFormat::argb4444: output = NativeOwnedTextureFormat::argb4444; return true;
@@ -5373,6 +5548,61 @@ bool read_hud_live_draw_inputs(void* renderer, void* figure, void* material,
     }
 }
 
+void install_owned_scene_inputs(void* sinks,const BridgeSceneHandoff& handoff,
+    const std::vector<std::shared_ptr<SurfaceImage>>* textures,
+    const std::vector<std::shared_ptr<const OwnedVisualSurface>>* shadow_textures,
+    const std::vector<std::int16_t>* fog,std::uint64_t revision) noexcept;
+void clear_owned_scene_inputs(const BridgeSceneHandoff& handoff) noexcept;
+
+// Scene thread mode, a HUD figure the game needs no extents for: the view is
+// built from the published immutable assets on the scene thread and
+// submitted through the scene sinks; the game thread copies only the live
+// draw inputs it read. The call is reported processed as on the direct path;
+// a scene-side failure omits the icon and is diagnosed once.
+bool queue_hud_visual(const HudPublishedVisual& slot, const HudLiveDrawInputs& inputs,
+                      BYTE fog, const std::array<float,16>& transform,
+                      std::uint32_t renderer_diffuse) noexcept {
+    struct Command {
+        HudPublishedVisual slot;
+        HudLiveDrawInputs inputs;
+        BYTE fog = 255;
+        std::array<float,16> transform{};
+        std::uint32_t renderer_diffuse = 0;
+        std::shared_ptr<void> sinks;
+        BridgeSceneHandoff handoff;
+    };
+    try {
+        auto command = std::make_shared<Command>();
+        command->slot = slot; command->inputs = inputs; command->fog = fog;
+        command->transform = transform; command->renderer_diffuse = renderer_diffuse;
+        command->handoff = g_scene_handoff;
+        command->sinks = g_scene_handoff.capture_sinks(g_scene_handoff.context);
+        if (!command->sinks) return false;
+        return g_scene_handoff.post(g_scene_handoff.context, [command] {
+            install_owned_scene_inputs(command->sinks.get(), command->handoff, nullptr, nullptr, nullptr, 0);
+            bool ok = false;
+            try {
+                std::vector<NativeTextureCoordinate> coordinates;
+                std::vector<NativeOwnedTextureMip> mips;
+                NativeGeometryView view{};
+                const auto& inputs = command->inputs;
+                if (build_hud_visual_view(command->slot, inputs.u_shift, inputs.v_shift, inputs.figure_flags,
+                        inputs.material_flags, command->fog, command->transform, command->renderer_diffuse,
+                        false, coordinates, mips, view)) {
+                    if ((inputs.figure_flags & kFigureUseDefaultColors) != 0u) {
+                        view.default_diffuse = inputs.default_diffuse;
+                        view.default_specular = inputs.default_specular;
+                    }
+                    NativeGeometryResult result{};
+                    ok = g_native_sink_submit && g_native_sink_submit(g_native_sink_context, view, result);
+                }
+            } catch (...) { ok = false; }
+            if (!ok) diagnose_hud_visual_once(2u, "owned_hud_submission_failed");
+            clear_owned_scene_inputs(command->handoff);
+        });
+    } catch (...) { return false; }
+}
+
 BOOL submit_hud_visual(void* renderer, void* figure, void* material,
                        BYTE fog, void* rect,
                        const HudPublishedVisual& slot) noexcept {
@@ -5388,6 +5618,10 @@ BOOL submit_hud_visual(void* renderer, void* figure, void* material,
         if (!extract_native_transform(inputs.direct3d, transform,
                                       renderer_diffuse))
             return FALSE;
+        // Extents go back to the game synchronously: only the no-rect call
+        // is queued (the rect call keeps the synchronous device path).
+        if (!rect && scene_handoff_active())
+            return queue_hud_visual(slot, inputs, fog, transform, renderer_diffuse) ? TRUE : FALSE;
         std::vector<NativeTextureCoordinate> coordinates;
         std::vector<NativeOwnedTextureMip> mips;
         NativeGeometryView view{};
@@ -6995,12 +7229,60 @@ bool submit_object_plan_geometry(
     }
 }
 
+// Scene thread option: the game thread's own cache of interaction boxes.
+// The box is a pure function of the immutable figure asset (held here, so its
+// address cannot be reused while cached) and the shape values; the prepared
+// resources' per-part cache belongs to the scene thread. Without this cache
+// every visible part walked all its vertex positions every frame (frame
+// accounting 2026-10-13: 4.5 ms of game-thread time in the Gipat village,
+// against 0.64 ms with the cached render_thread-off path).
+struct InteractionBoundsKey {
+    const FigureCpuAsset* figure = nullptr;
+    std::array<std::uint32_t,3> shape{};
+    bool operator==(const InteractionBoundsKey& other) const noexcept {
+        return figure == other.figure && shape == other.shape;
+    }
+};
+struct InteractionBoundsKeyHash {
+    std::size_t operator()(const InteractionBoundsKey& key) const noexcept {
+        std::size_t hash = std::hash<const void*>{}(key.figure);
+        for (const auto value : key.shape) hash ^= value + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+        return hash;
+    }
+};
+struct InteractionBoundsEntry {
+    std::shared_ptr<const FigureCpuAsset> figure;
+    NativeWorldBounds bounds{};
+};
+struct GameThreadInteractionBounds {
+    std::unordered_map<InteractionBoundsKey,InteractionBoundsEntry,InteractionBoundsKeyHash> boxes;
+};
+GameThreadInteractionBounds g_game_thread_interaction_bounds;
+
+bool game_thread_interaction_bounds(const std::shared_ptr<const FigureCpuAsset>& geometry,
+    const std::array<float,3>& shape, NativeWorldBounds& bounds) {
+    auto& cache = g_game_thread_interaction_bounds;
+    // Emptied at each world change (bridge_release_world_caches); a shape
+    // stream that never repeats starts over instead of growing.
+    if (cache.boxes.size() > 65536) cache.boxes.clear();
+    InteractionBoundsKey key{geometry.get()};
+    std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
+    const auto found = cache.boxes.find(key);
+    if (found != cache.boxes.end()) { bounds = found->second.bounds; return true; }
+    if (!retained_figure_position_bounds(*geometry, shape, bounds)) return false;
+    try { cache.boxes.emplace(key, InteractionBoundsEntry{geometry, bounds}); } catch (...) {}
+    return true;
+}
+
 bool owned_interaction_shape_bounds(const RetainedVisualSample& sample,std::size_t part_index,
     NativeWorldBounds& bounds) {
     if (!sample.prepared || !sample.assembly || part_index >= sample.assembly->parts.size()) return false;
     const auto& assembly = *sample.assembly;
     const auto& geometry = assembly.parts[part_index].geometry;
     const auto& shape = retained_visual_shape(sample);
+    // Scene thread option: the scene thread owns the prepared resources'
+    // caches; the game thread keeps its own boxes from the immutable asset.
+    if (scene_handoff_active()) return geometry && game_thread_interaction_bounds(geometry, shape, bounds);
     if (sample.prepared->parts.size() != assembly.parts.size())
         sample.prepared->parts.resize(assembly.parts.size());
     auto& part = sample.prepared->parts[part_index];
@@ -7073,6 +7355,18 @@ bool ensure_object_interaction_mapping(ObjectRenderPlan& plan,
 // Sentinel sample index: no owned render sample takes part in this call.
 constexpr std::size_t kNoOwnedVisualSample = static_cast<std::size_t>(-1);
 
+// Scene thread mode: one object's wound-layer parts, queued after the world
+// command that prepares them (queue_owned_wound_layer). The game thread
+// resolved the wound surface and the game's fog; the scene thread checks the
+// prepared/admitted results it owns and submits.
+struct OwnedWoundRequest {
+    std::size_t sample = 0, part = 0;
+    BYTE fog = 255;
+    std::uintptr_t wound = 0;
+};
+bool scene_handoff_active() noexcept;
+bool queue_owned_wound_layer(std::vector<OwnedWoundRequest>&& requests) noexcept;
+
 bool read_figure_bounding_volume(const void* figure, FigureBoundingVolume& volume) noexcept {
     volume = {};
     __try {
@@ -7098,6 +7392,7 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
     ObjectRenderPlan& plan,std::size_t sample_index,
     const ObjectPlanExplicitInputs* explicit_inputs,bool defer_transaction_end,
     ObjectPlanExecutionOutput& output) noexcept {
+    const frame_acct::Scope accounted(frame_acct::ours_objects);
     output = {};
     bool transaction = false;
     try {
@@ -7140,6 +7435,8 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
         std::uint8_t active_set = 0xff;
         std::uintptr_t wound = 0;
         bool wound_failed = false;
+        const bool scene_queue = sample && scene_handoff_active();
+        std::vector<OwnedWoundRequest> scene_wounds;
         for (std::size_t source_index=0;source_index<plan.parts.size();++source_index) {
             const auto& source=plan.parts[source_index];
             if (source.set != active_set) {
@@ -7217,9 +7514,19 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
                 (caller_rect && !merge_object_plan_extents(object_extents,part_extents,visible,have_extents)) ||
                 !read_object_plan_flags(source.figure,flags)) { stage="extent_publication"; success=false; break; }
             any_visible |= flags & kFigureVisible;
+            // Scene thread mode: the render results are the scene thread's;
+            // queue the part with the game-side inputs it needs.
+            if (scene_queue && !wound_failed && wound && prepared->claimed &&
+                index < sample->assembly->parts.size() &&
+                retained_visual_part_visible(*sample,sample->assembly->parts[index],world.draw_undetected_units)) {
+                if (!fog_ready) fog_ready = resolve_object_plan_fog(frame,specific,owner,explicit_inputs,fog);
+                if (fog_ready) scene_wounds.push_back({sample_index,index,fog,wound});
+                else { report_object_plan_failure("owned_wound_layer"); wound_failed = true; scene_wounds.clear(); }
+                continue;
+            }
             // Wound layer: a render-only submission. Its failure omits the
             // layer for this object and frame; interaction is already published.
-            if (can_submit && !wound_failed && wound && prepared->submitted && index < prepared->parts.size() &&
+            if (!scene_queue && can_submit && !wound_failed && wound && prepared->submitted && index < prepared->parts.size() &&
                 prepared->parts[index].color_admitted &&
                 retained_visual_part_visible(*sample,sample->assembly->parts[index],world.draw_undetected_units)) {
                 if (!fog_ready) fog_ready = resolve_object_plan_fog(frame,specific,owner,explicit_inputs,fog);
@@ -7259,6 +7566,13 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
             if(transaction)g_native_sink_end_object(g_native_sink_context,false);
             write_object_plan_loop_outputs(frame,0,0); output={};
             return ObjectPlanExecutionStatus::failure;
+        }
+        if (!scene_wounds.empty()) {
+            output.submitted_figures = static_cast<std::uint32_t>(scene_wounds.size());
+            if (!queue_owned_wound_layer(std::move(scene_wounds))) {
+                report_object_plan_failure("owned_wound_layer");
+                wound_failed = true; output.submitted_figures = 0;
+            }
         }
         output.extents=object_extents; output.visible=any_visible; output.have_extents=have_extents;
         output.visual_omitted = !sample || wound_failed;
@@ -7306,6 +7620,95 @@ bool preview_world_to_clip(const std::array<float,16>& world,
     return true;
 }
 
+void install_owned_scene_inputs(void* sinks,const BridgeSceneHandoff& handoff,
+    const std::vector<std::shared_ptr<SurfaceImage>>* textures,
+    const std::vector<std::shared_ptr<const OwnedVisualSurface>>* shadow_textures,
+    const std::vector<std::int16_t>* fog,std::uint64_t revision) noexcept;
+void clear_owned_scene_inputs(const BridgeSceneHandoff& handoff) noexcept;
+
+// Scene thread mode: one preview (inventory, character pane) as a queued
+// command. The game thread runs every game read and game call of the
+// preview (pose source, clip, part flags and names, the per-set texture and
+// render-state calls) and copies their results; the scene thread evaluates
+// the preview pose and part records (the preview's own prepared resources)
+// and submits, all inside one object transaction. Game outputs (FIG_VISIBLE
+// of the loop) come from the game-side selection, never from the renderer.
+struct OwnedPreviewPart {
+    std::size_t ordinal = 0;
+    std::size_t set = 0;              // index into the captured state sets
+    NativeOwnedFixedState material{};
+    bool uses_default_colors = false;
+    std::uint32_t default_diffuse = 0, default_specular = 0;
+    NativeLighting lighting{};
+    std::uint32_t material_flags = 0;
+    std::uintptr_t wound = 0;
+    std::shared_ptr<SurfaceImage> wound_texture;
+};
+struct OwnedPreviewCommand {
+    RetainedVisualSample sample;
+    double texture_time = 0;
+    BYTE fog = 255;
+    std::array<float,16> base_world{}, world_to_clip{};
+    std::uint64_t presentation_serial = 0;
+    std::vector<std::shared_ptr<void>> sets;
+    std::vector<OwnedPreviewPart> parts;
+    BridgeSceneHandoff handoff;
+};
+void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
+    if (command.sets.empty()) return;
+    const auto& handoff = command.handoff;
+    void* sinks = command.sets.front().get();
+    install_owned_scene_inputs(sinks, handoff, nullptr, nullptr, nullptr, 0);
+    bool transaction = false, ok = false;
+    try {
+        auto& sample = command.sample;
+        NativeWorldGeometry::Pose* pose = nullptr;
+        ok = retained_visual_gpu_pose(sample, pose) && pose;
+        if (ok) {
+            pose->root_to_world = command.base_world;
+            transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
+            ok = transaction;
+        }
+        for (std::size_t i = 0; ok && i < command.parts.size(); ++i) {
+            const auto& part = command.parts[i];
+            if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
+            NativeWorldBounds bounds{};
+            NativePreparedPartSubmission* record = nullptr;
+            if (!retained_visual_part_bounds(sample, part.ordinal, bounds) ||
+                !retained_visual_part_submission(sample, part.ordinal, bounds, {true,true,0},
+                    command.texture_time, command.fog, record)) { ok = false; break; }
+            NativeGeometryView view = *record->source;
+            view.owned_fixed_state = part.material;
+            view.world.pose = pose; view.world.owner = &pose->owner;
+            view.world.shape = pose->shape; view.world.object_to_world = command.base_world;
+            view.world.world_to_clip = command.world_to_clip; view.object_to_clip = command.world_to_clip;
+            view.contribution = {true,true,0};
+            view.bounds_minimum = bounds.minimum; view.bounds_maximum = bounds.maximum;
+            view.prepared_identity.presentation_serial = command.presentation_serial;
+            view.flags = (part.uses_default_colors?4u:0u) | ((part.material_flags&0x10u)?8u:0u);
+            view.default_diffuse = part.default_diffuse; view.default_specular = part.default_specular;
+            view.lighting = part.lighting;
+            view.owned_fixed_state.specular_enable = (part.material_flags&0x10u) ? TRUE : FALSE;
+            view.u_shift = record->values.u_shift; view.v_shift = record->values.v_shift;
+            view.ordering = part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state;
+            NativeGeometryResult result{};
+            if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
+            if (part.wound) {
+                if (handoff.set_wound) handoff.set_wound(sinks, part.wound, part.wound_texture);
+                view.wound_surface_interface = part.wound; view.wound_only = true;
+                if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
+            }
+        }
+    } catch (...) { ok = false; }
+    if (!ok) {
+        static volatile LONG reported = 0;
+        if (InterlockedCompareExchange(&reported,1,0) == 0)
+            append_bridge_event("owned_preview_omitted","scene thread: preview submission failed; the preview is omitted",true);
+    }
+    if (transaction && g_native_sink_end_object) g_native_sink_end_object(g_native_sink_context, ok);
+    clear_owned_scene_inputs(handoff);
+}
+
 ObjectPlanExecutionStatus execute_owned_preview_render_plan(
     void* frame, void* owner, void* specific, void* renderer, ObjectRenderPlan& plan,
     ObjectSuffixWorldRoute route, const std::array<float,16>& base_clip,
@@ -7322,6 +7725,13 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
         return ObjectPlanExecutionStatus::failure;
     };
     try {
+        const bool scene_queue = scene_handoff_active() && g_scene_handoff.capture_sinks &&
+            g_scene_handoff.bound_texture && g_scene_handoff.surface_snapshot;
+        std::shared_ptr<OwnedPreviewCommand> command;
+        if (scene_queue) {
+            command = std::make_shared<OwnedPreviewCommand>();
+            command->handoff = g_scene_handoff;
+        }
         RetainedVisualSample sample;
         double texture_time=0;
         if (!prepare_owned_preview_pose(plan,owner,route,sample,texture_time,&failure))
@@ -7338,11 +7748,15 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                                         layout.width, layout.height);
         }
         NativeWorldGeometry::Pose* pose=nullptr;
-        if (!retained_visual_gpu_pose(sample,pose) || !pose) return fail("preview.gpu_binding");
-        pose->root_to_world=base_world;
+        if (!command) {
+            if (!retained_visual_gpu_pose(sample,pose) || !pose) return fail("preview.gpu_binding");
+            pose->root_to_world=base_world;
+        }
         if (!ensure_object_interaction_mapping(plan,sample)) return fail("preview.parts");
-        transaction=g_native_sink_begin_object(g_native_sink_context);
-        if (!transaction) return fail("preview.transaction");
+        if (!command) {
+            transaction=g_native_sink_begin_object(g_native_sink_context);
+            if (!transaction) return fail("preview.transaction");
+        }
         std::uint8_t active_set=0xff;
         std::uint32_t visible=0;
         for (std::size_t i=0;i<plan.parts.size();++i) {
@@ -7361,6 +7775,14 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                     !set_object_plan_texture(renderer,texture) ||
                     !apply_object_plan_render_state(active_set==0?descriptor:nullptr))
                     return fail("preview.presentation");
+                if (command) {
+                    // The device state and stage-0 texture this set's parts use.
+                    auto sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
+                    if (!sinks) return fail("preview.scene_sinks");
+                    if (g_scene_handoff.bind_texture)
+                        g_scene_handoff.bind_texture(sinks.get(),g_scene_handoff.bound_texture(g_scene_handoff.context));
+                    command->sets.push_back(std::move(sinks));
+                }
             }
             const char* name=nullptr;
             std::size_t name_size=0;
@@ -7376,6 +7798,33 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 ordinal=static_cast<std::size_t>(found-sample.assembly->parts.begin());
             }
             if (!preview_submits_part(sample.assembly->parts[ordinal])) continue;
+            if (command) {
+                NativeFrameState state;
+                if (!g_native_sink_frame_state ||
+                    !g_native_sink_frame_state(g_native_sink_context,state)) return fail("preview.ui_state");
+                std::uint32_t material_flags=0;
+                if (!read_object_plan_flags(current.material,material_flags)) return fail("preview.material");
+                OwnedPreviewPart part;
+                part.ordinal=ordinal; part.set=command->sets.size()-1;
+                part.material=state.material;
+                part.uses_default_colors=current.context.uses_default_colors;
+                part.default_diffuse=current.context.default_diffuse;
+                part.default_specular=current.context.default_specular;
+                part.lighting=current.context.lighting;
+                part.material_flags=material_flags;
+                const auto* image=g_object_suffix_image;
+                const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
+                part.wound=object_render_wound_surface_for_set(active_set,
+                    active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
+                if (part.wound) {
+                    part.wound_texture=g_scene_handoff.surface_snapshot(g_scene_handoff.context,part.wound);
+                    if (!part.wound_texture) return fail("preview.wound_snapshot");
+                }
+                command->parts.push_back(std::move(part));
+                visible|=kFigureVisible;
+                ++output.submitted_figures;
+                continue;
+            }
             NativeWorldBounds bounds{};
             NativePreparedPartSubmission* record=nullptr;
             if (!retained_visual_part_bounds(sample,ordinal,bounds) ||
@@ -7416,6 +7865,18 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             }
             visible|=kFigureVisible;
             ++output.submitted_figures;
+        }
+        if (command) {
+            command->sample=std::move(sample);
+            command->texture_time=texture_time; command->fog=fog;
+            command->base_world=base_world; command->world_to_clip=world_to_clip;
+            command->presentation_serial=g_bridge_frame_serial;
+            if (!write_object_plan_loop_outputs(frame,visible,0)) return fail("preview.outputs");
+            if (!command->sets.empty() && !command->parts.empty() &&
+                !g_scene_handoff.post(g_scene_handoff.context,[command]{ run_owned_preview_command(*command); }))
+                return fail("preview.queue");
+            output.visible=visible; output.transaction_required=false; output.transaction_open=false;
+            return ObjectPlanExecutionStatus::success;
         }
         if (!write_object_plan_loop_outputs(frame,visible,0)) return fail("preview.outputs");
         output.visible=visible; output.transaction_required=true;
@@ -8267,12 +8728,29 @@ VisualPacketReadFn g_visual_posrot_read = nullptr;
 // change only through the network apply's POSROT read + MoveObject, the
 // complection setter (publishes itself), SetAnimation/append (publish
 // themselves) and creation/load. The render-time walk captures only objects
-// marked here, plus a round-robin slice and a periodic full sweep.
+// marked here plus a round-robin slice (every object once per 32 frames).
+// A positive reset (a load) clears every published pose and re-adds every
+// object. While the load reveal hold covers the world, that catch-up and the
+// pending burst are spread at kPoseCapturesPerFrame captures a frame instead
+// of one 2-8 ms frame (#163). An object without a published pose is not ready
+// (awaiting_values) and is not drawn; outside the hold nothing is deferred,
+// so no visible object keeps a stale pose.
+std::atomic<bool> g_load_reveal_enabled{false};
+std::atomic<std::uint64_t> g_load_reveal_revealed_epoch{0};
+bool load_reveal_held() noexcept {
+    const std::uint64_t epoch = bridge_current_world_epoch();
+    return g_load_reveal_enabled.load(std::memory_order_relaxed) && epoch &&
+        epoch != g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
+}
 bool g_change_driven_poses = true;
 std::vector<std::int32_t> g_pose_pending_ids;
 bool g_pose_full_sweep = true;
-std::size_t g_pose_sweep_cursor = 0;
-std::uint32_t g_pose_frames_since_sweep = 0;
+constexpr std::uint32_t kPoseSweepBuckets = 32;
+std::uint32_t g_pose_sweep_bucket = 0;
+std::uint32_t g_pose_catch_up_buckets = 0;
+// ~0.5-0.8 us per capture on the Suslanger and Dejavu routes (4,030 objects
+// in 1.6-3.1 ms): 1024 keeps a burst frame under ~1 ms.
+constexpr std::size_t kPoseCapturesPerFrame = 1024;
 void mark_object_pose_pending(void* object) noexcept {
     std::int32_t id = 0;
     if (!g_visual_publication_active || !visual_object_id(object,id)) return;
@@ -8455,32 +8933,6 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
     const char** predicate = nullptr,
     OuterFrameAppearanceCallback callback = OuterFrameAppearanceCallback::unknown) noexcept;
 bool retained_current_object_type(void* object, std::uint32_t& type) noexcept;
-// Tree sway inputs from immutable part evidence: the object sways when any
-// part samples foliage texels; its one root node anchors the field and the
-// root parts' cut-out-free geometry gives the still trunk radius.
-void sway_tree_assembly(VisualAssemblyAsset& assembly) noexcept {
-    if (!assembly.skeleton) return;
-    const auto& links = assembly.skeleton->links;
-    std::uint32_t roots = 0, root = 0;
-    for (std::uint32_t i = 0; i < links.size(); ++i)
-        if (links[i].parent_index == UINT_MAX && links[i].parent.empty()) { ++roots; root = i; }
-    if (roots != 1) return;
-    bool foliage = false;
-    TrunkShape trunk;
-    for (const auto& part : assembly.parts) {
-        const auto evidence = retained_visual_part_sway(part);
-        foliage = foliage || evidence.foliage;
-        if (part.skeleton_node == root && part.geometry) {
-            const auto value = retained_visual_trunk_shape(*part.geometry, evidence.clear_positions, assembly.shape);
-            trunk.radius = (std::max)(trunk.radius, value.radius);
-            trunk.top = (std::max)(trunk.top, value.top);
-            trunk.height = (std::max)(trunk.height, value.height);
-        }
-    }
-    assembly.sways = foliage;
-    assembly.sway_shape = retained_visual_sway_shape(trunk, assembly.scale);
-    assembly.sway_root = root;
-}
 bool visual_publish_unit_values(void* object, const float* packet_rate,
                                 const float* tick_fade, bool* completed_stun_end = nullptr,
                                 const char** failure = nullptr) noexcept;
@@ -8508,6 +8960,18 @@ bool visual_read_bytes(const void* base, std::size_t offset, void* value, std::s
         reinterpret_cast<const std::uint8_t*>(address+offset), bytes);
 }
 
+// One guarded fixed-size copy: sizeof(T) is a constant, so the copy is a
+// plain load instead of a CRT memcpy call with a runtime size (its byte loop
+// was ~1.7% of the main thread in a pan sample; thousands of reads a frame).
+template<class T> bool visual_read_fixed(std::uintptr_t source, T& value) noexcept {
+    __try {
+        std::memcpy(&value, reinterpret_cast<const void*>(source), sizeof(T));
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 template<class T> bool visual_read(const void* base, std::size_t offset, T& value) noexcept {
     static_assert(std::is_trivially_copyable_v<T>);
 #ifdef EID3D11_TESTING
@@ -8520,7 +8984,10 @@ template<class T> bool visual_read(const void* base, std::size_t offset, T& valu
         }
     }
 #endif
-    return visual_read_bytes(base, offset, &value, sizeof(T));
+    const auto address = reinterpret_cast<std::uintptr_t>(base);
+    if (!address || offset > UINTPTR_MAX-address || sizeof(T) > UINTPTR_MAX-address-offset)
+        return false;
+    return visual_read_fixed(address+offset, value);
 }
 
 std::uint64_t next_visual_event() noexcept {
@@ -11791,8 +12258,12 @@ bool visual_capture_world_point_lights(void* world,
             report_world_point_light_omission("world_point_light.point_contract");
             continue;
         }
-        value.casts_shadow=(flags&0x400u)==0;
         value.attached=(flags&0x200u)!=0; // LIT_QUEST: follows its unit
+        // A rain strike's light (owned::sky_strike_light: the 80 m white light
+        // of InvokeLightning's script) lives two script sleeps; a cube bake of
+        // its ~92 m range on every strike was a rain-onset spike (#165). It
+        // lights unshadowed; the sky flash still keys on it.
+        value.casts_shadow=(flags&0x400u)==0&&!owned::sky_strike_light(value);
         try { lights.push_back(value); }
         catch (...) { return visual_failure(failure,"world_point_light.allocation"); }
     }
@@ -11983,18 +12454,9 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     // Units are deliberately excluded: their camera-written CP is not
     // authoritative visual phase. Their owned route supplies the root.
     auto& scene=retained_visual_scene();
-    bool full=!publish_poses || !g_change_driven_poses || g_pose_full_sweep || ++g_pose_frames_since_sweep>=256;
-    if(full){g_pose_full_sweep=false;g_pose_frames_since_sweep=0;}
-    std::sort(g_pose_pending_ids.begin(),g_pose_pending_ids.end());
-    const std::size_t slice=objects.size()/32+1;
-    const std::size_t slice_begin=g_pose_sweep_cursor%objects.size();
-    g_pose_sweep_cursor=slice_begin+slice;
-    for(std::size_t index=0;index<objects.size();++index) {
-        const auto& item=objects[index];
-        if(!full && !visual_pose_sweep_contains(index,objects.size(),slice_begin,slice) &&
-           !std::binary_search(g_pose_pending_ids.begin(),g_pose_pending_ids.end(),item.id))continue;
+    const auto capture=[&](const NativeObjectValue& item) {
         VisualObjectPublicationSnapshot snapshot;
-        if(!scene.visual_object_publication_snapshot(item.id,snapshot))continue;
+        if(!scene.visual_object_publication_snapshot(item.id,snapshot))return;
         VisualObjectPose values;
         const char* object_failure=nullptr;
         if(!visual_capture_object_values(item.object,item.id,snapshot,values,&object_failure)) {
@@ -12003,13 +12465,58 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
                 object_failure && std::strncmp(object_failure,"selector.",9)==0
                 ? RetainedVisualStatus::unsupported_selector : RetainedVisualStatus::invalid_intent;
             scene.visual_reject_object_pose_if_current(snapshot,status,object_failure);
-            continue;
+            return;
         }
         if(!scene.visual_publish_object_pose(snapshot,values))
             scene.visual_reject_object_pose_if_current(snapshot,
                 RetainedVisualStatus::invalid_intent,"object_pose.publish");
+    };
+    if(!g_change_driven_poses) { // F10 comparison option: the whole list every frame
+        for(const auto& item:objects)capture(item);
+        g_pose_pending_ids.clear();
+        return true;
     }
-    if(publish_poses)g_pose_pending_ids.clear();
+    if(g_pose_full_sweep){g_pose_full_sweep=false;g_pose_catch_up_buckets=kPoseSweepBuckets;}
+    auto& pending=g_pose_pending_ids;
+    std::sort(pending.begin(),pending.end());
+    pending.erase(std::unique(pending.begin(),pending.end()),pending.end());
+    // Marked objects first; while the load hold hides the world, a mark past
+    // the budget stays pending (in list order) for the next frame.
+    static std::vector<std::int32_t> deferred;
+    deferred.clear();
+    std::size_t budget=load_reveal_held()?kPoseCapturesPerFrame:(std::numeric_limits<std::size_t>::max)();
+    if(!pending.empty()) {
+        for(const auto& item:objects) {
+            if(!std::binary_search(pending.begin(),pending.end(),item.id))continue;
+            if(!budget) {
+                try { deferred.push_back(item.id); } catch (...) { g_pose_full_sweep=true; }
+                continue;
+            }
+            --budget;
+            capture(item);
+        }
+    }
+    // Then the rotating slice: the objects whose ID falls in this frame's
+    // bucket (ID mod 32), so every listed object is revisited every 32 frames
+    // whatever the list order, additions or removals. A reset catch-up takes
+    // all 32 buckets at once, or as many as the budget covers while held.
+    // Marked objects were handled above.
+    constexpr std::uint32_t buckets=kPoseSweepBuckets;
+    const std::size_t bucket_size=objects.size()/buckets+1;
+    std::uint32_t taken=budget>=bucket_size?1u:0u;
+    if(taken && g_pose_catch_up_buckets) {
+        taken=static_cast<std::uint32_t>((std::min<std::size_t>)(g_pose_catch_up_buckets,budget/bucket_size));
+        g_pose_catch_up_buckets-=taken;
+    }
+    const std::uint32_t first=g_pose_sweep_bucket;
+    g_pose_sweep_bucket=(first+taken)%buckets;
+    if(taken) {
+        for(const auto& item:objects) {
+            if((static_cast<std::uint32_t>(item.id)%buckets+buckets-first)%buckets>=taken)continue;
+            if(!std::binary_search(pending.begin(),pending.end(),item.id))capture(item);
+        }
+    }
+    pending.swap(deferred);
     return true;
 }
 
@@ -13495,10 +14002,25 @@ void read_world_environment(WorldEnvironment& environment) noexcept {
     environment.weather_current = current;
     environment.weather_next = next;
     environment.weather_progress = length > 0.0f ? std::clamp((ticks - start) / length, 0.0f, 1.0f) : 1.0f;
-    environment.rain_particles = weather_particle_rain(current, next,
-        length != 0.0f ? (static_cast<float>(ticks) - start) / length : 2.0f);
+    const float particle_progress = length != 0.0f ? (static_cast<float>(ticks) - start) / length : 2.0f;
+    environment.rain_particles = weather_particle_power(current, next, particle_progress, 1);
+    environment.snow_particles = weather_particle_power(current, next, particle_progress, 2);
+    environment.weather_start = start;
     double world_time = 0.0;
     if (read_owned_world_time(image, world_time)) environment.world_time = world_time;
+    // Render-only weather test (F10 precip_test): every visual weather
+    // consumer (fog, sky, wind, particles, precipitation, water rings) sees a
+    // settled rain or snow; the game's weather and gameplay are untouched.
+    if (const int test = g_weather_visual_test.load(std::memory_order_relaxed); test == 1 || test == 2) {
+        environment.weather_current = environment.weather_next = test;
+        environment.weather_progress = 1.0f;
+        environment.rain_particles = test == 1 ? 1.0f : 0.0f;
+        environment.snow_particles = test == 2 ? 1.0f : 0.0f;
+    }
+    // The visual strength of this shower (precipitation.h; visual only).
+    environment.precipitation_strength = precipitation::shower_strength(
+        g_weather_strength_setting.load(std::memory_order_relaxed), environment.game_hours,
+        environment.world_time * kWeatherSecondsPerSegment);
     // +0x184 is an MFC CString (character pointer; length at pointer-8), as
     // concatenated by 00700B9F when the light table name is built.
     const char* region = nullptr;
@@ -13956,7 +14478,7 @@ bool prepare_owned_visual_part(std::size_t entity,std::size_t part,
     if(sample.prepared->parts.size()!=sample.assembly->parts.size())
         sample.prepared->parts.resize(sample.assembly->parts.size());
     auto& value=parts[part];output=nullptr;
-    bool ready=value.ready;
+    bool ready=value.ready_serial==frame.serial;
 #ifdef EID3D11_TESTING
     ready=ready && !frame.recompute_part_preparation;
 #endif
@@ -13978,7 +14500,7 @@ bool prepare_owned_visual_part(std::size_t entity,std::size_t part,
 #endif
             ++frame.shadow_source_diagnostic.part_bounds_rebuilt;
             if(g_bridge_sample.active)++g_bridge_sample.shadow_bounds_rebuilt;
-            value.ready=false;
+            value.ready_serial=0;
             if(!retained_visual_part_bounds(sample,part,value.bounds))return false;
             retained.derived_bounds=value.bounds;
             retained.derived_bounds_pose_generation=sample.prepared->derived_pose_generation;
@@ -13993,7 +14515,7 @@ bool prepare_owned_visual_part(std::size_t entity,std::size_t part,
         else
             value.contribution={true,retained_world_bounds_visible(
                 value.bounds,frame.coverage.world_to_clip),0};
-        value.ready=true;
+        value.ready_serial=frame.serial;
     }
 #ifdef EID3D11_TESTING
     else ++frame.part_bounds_reuses;
@@ -14002,7 +14524,7 @@ bool prepare_owned_visual_part(std::size_t entity,std::size_t part,
 }
 
 bool current_base_terrain_quality_reference(const TerrainCpuAsset*& source,
-    const std::array<float,16>*& transform) noexcept;
+    const std::array<float,16>*& transform,std::uint64_t& generation) noexcept;
 
 bool owned_point_shadow_influence(const NativeWorldBounds& bounds,
     const RetainedWorldPointLight& light) noexcept {
@@ -14038,39 +14560,109 @@ std::uint64_t owned_static_key(const RetainedVisualSample& sample) noexcept;
 // admission saw the entity. Entries unseen in a frame are removed, so an
 // entity that silently leaves the frame's list never lingers as a ghost.
 std::unordered_map<std::uint64_t,std::uint64_t> g_owned_static_registry;
+
+// Persistent entity admission (issue #162). Index-parallel to the frame's
+// entity list and to frame.prepared, owned by the thread that prepares the
+// world (both are thread-local). An entity whose admission is unchanged keeps
+// its frame.prepared state across frames and is not visited:
+//  - reused: in the persistent static colour set (the static_skip path);
+//  - admitted: a static object with admission and bounds whose contribution
+//    was rejected and which is not registered; only its contribution is
+//    tested again each frame.
+// Validity is decided once per frame, never per pointer: the same admission
+// settings, renderer static generation and neighbour fog revision, a
+// journal read that covers every change since the cache's last frame
+// (dirty_since <= through), an ID-ordered list, and the same lifecycle
+// identity (id, generation, epoch, resource serial, mesh claim, readiness)
+// at every index. Any journalled entity is admitted again. Anything else
+// takes the full walk, which rebuilds the cache; a new receiver cell size
+// only re-keys the kept receivers. Per-part values that are per frame (part bounds,
+// contributions, depth revisions) are stamped with the frame serial, so a
+// kept entity can never reuse an older frame's value.
+// Receivers of kept entities are unioned per receiver cell (the same cells
+// as append_cell_merged_receivers); a cell wholly inside or outside the
+// camera (classify_receiver_cell, with a rounding margin) decides all its
+// members at once, a straddling cell tests each member exactly.
+struct OwnedAdmissionCache {
+    enum class State : std::uint8_t { process, reused, admitted };
+    struct Entry {
+        LifecycleIdentity lifecycle{};
+        std::uint64_t resource_serial=0;
+        std::uint64_t cell=0;
+        State state=State::process;
+        bool claimed=false,in_cell=false,dirty=false;
+    };
+    struct Member { std::uint32_t index=0; NativeWorldBounds bounds{}; };
+    struct Cell { std::vector<Member> members; NativeWorldBounds all{}; bool all_current=false; };
+    bool valid=false;
+    bool draw_undetected=false,shadows=false;
+    std::uint32_t class_flags=0;
+    std::uint64_t static_generation=0,border_fog_revision=0,through=0;
+    float receiver_cell=0;
+    std::vector<Entry> entries;
+    std::map<std::uint64_t,Cell> cells;
+    std::vector<std::uint32_t> admit,contribute;   // this frame, ascending
+    std::vector<std::uint8_t> rejected;            // contribution rejected this frame, per index
+    std::vector<std::pair<std::uint64_t,NativeWorldBounds>> cell_unions;
+    void clear() noexcept {
+        valid=false;entries.clear();cells.clear();admit.clear();contribute.clear();rejected.clear();cell_unions.clear();
+    }
+    void leave_cell(std::uint32_t index) {
+        auto& entry=entries[index];
+        if(!entry.in_cell)return;
+        entry.in_cell=false;
+        const auto found=cells.find(entry.cell);
+        if(found==cells.end())return;
+        auto& members=found->second.members;
+        for(std::size_t m=0;m<members.size();++m)if(members[m].index==index) {
+            members[m]=members.back();members.pop_back();break;
+        }
+        found->second.all_current=false;
+        if(members.empty())cells.erase(found);
+    }
+    void join_cell(std::uint32_t index,const NativeWorldBounds& bounds) {
+        auto& entry=entries[index];
+        entry.cell=receiver_cell_key(receiver_cell,bounds);
+        auto& cell=cells[entry.cell];
+        cell.members.push_back({index,bounds});
+        if(cell.all_current) {
+            for(unsigned axis=0;axis<3;++axis) {
+                cell.all.minimum[axis]=(std::min)(cell.all.minimum[axis],bounds.minimum[axis]);
+                cell.all.maximum[axis]=(std::max)(cell.all.maximum[axis],bounds.maximum[axis]);
+            }
+        }
+        entry.in_cell=true;
+    }
+};
+thread_local OwnedAdmissionCache g_owned_admission_cache;
+bool owned_admission_finite(const NativeWorldBounds& b) noexcept {
+    if(!b.valid)return false;
+    for(unsigned axis=0;axis<3;++axis)
+        if(!std::isfinite(b.minimum[axis]) || !std::isfinite(b.maximum[axis]) || b.minimum[axis]>b.maximum[axis])return false;
+    return true;
+}
 bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> values,
     const std::array<float,16>& world_to_clip, const NativeWorldLighting& lighting,
     bool draw_undetected, std::uint32_t class_flags,
     const std::vector<NativeWorldBounds>& terrain_receivers,bool shadows_enabled=true,
     const RetainedDirectionalCoverage* reused_coverage=nullptr,
-    const std::vector<std::int32_t>* static_dirty=nullptr) {
+    const std::vector<std::int32_t>* static_dirty=nullptr,
+    std::uint64_t dirty_since=0,std::uint64_t dirty_through=0) {
  PERF06_SCOPE("scene_prepare_values");
     CityRetainedOwnerGuard receiver_timing(CityRetainedOwner::receiver_fitting);
+    auto& cache=g_owned_admission_cache;
+    const bool cache_was_valid=cache.valid;
+    cache.valid=false;   // valid again only when this preparation completes
     auto& frame = g_owned_visual_world_frame;
     auto prepared_storage=std::move(frame.prepared);
+    if(prepared_storage.empty())prepared_storage.swap(g_owned_visual_prepared_spare);
     const auto shadow_source_diagnostic=frame.shadow_source_diagnostic;
-    auto caster_storage=std::move(frame.shadow_casters);
-    auto receiver_storage=std::move(frame.shadow_receivers);
-    auto static_receiver_storage=std::move(frame.static_receivers);
-    auto candidate_storage=std::move(frame.candidates);
-    auto color_storage=std::move(frame.color_order);
-    auto light_storage=std::move(frame.light_only_order);
-    auto submission_storage=std::move(frame.submission_order);
     auto shadow_storage=std::move(frame.shadows);
-    auto depth_storage=std::move(frame.depth_selected);
-    frame = {};
+    clear_owned_visual_world_frame(frame);   // the scratch vectors keep their capacity
     if(!values)return false;
     frame.prepared=std::move(prepared_storage);
     frame.shadow_source_diagnostic=shadow_source_diagnostic;
-    frame.shadow_casters=std::move(caster_storage);frame.shadow_casters.clear();
-    frame.shadow_receivers=std::move(receiver_storage);frame.shadow_receivers.clear();
-    frame.static_receivers=std::move(static_receiver_storage);
-    frame.candidates=std::move(candidate_storage);frame.candidates.clear();
-    frame.color_order=std::move(color_storage);frame.color_order.clear();
-    frame.light_only_order=std::move(light_storage);frame.light_only_order.clear();
-    frame.submission_order=std::move(submission_storage);frame.submission_order.clear();
     frame.shadows=std::move(shadow_storage);
-    frame.depth_selected=std::move(depth_storage);frame.depth_selected.clear();
     frame.active = true;
     frame.shadows_enabled = shadows_enabled;
     frame.values = std::move(values);
@@ -14084,11 +14676,8 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
     frame.draw_undetected_units = draw_undetected;
     frame.serial = ++g_object_render_presentation_serial;
     if (!frame.serial) frame.serial = ++g_object_render_presentation_serial;
-    if(hovered_shadow_observation_enabled())frame.observed_hover=hovered_shadow_observation_target();
-    frame.prepared.resize(frame.values->entities.size());
-    for(auto& part:frame.prepared){
-        auto storage=std::move(part.parts);part={};part.parts=std::move(storage);part.parts.clear();
-    }
+    if(hovered_shadow_observation_enabled() && !g_scene_frame_values_installed)frame.observed_hover=hovered_shadow_observation_target();
+    const auto entity_count=frame.values->entities.size();
     auto receivers = shadows_enabled ? terrain_receivers : std::vector<NativeWorldBounds>{};
     // Static receivers are unioned per terrain-sector-sized cell, as terrain
     // receivers are per sector: coverage clips every receiver box against the
@@ -14132,14 +14721,71 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         static_skip=g_native_sink_submit && g_native_sink_submit(g_native_sink_context,view,ignored);
         static_generation=query.generation;
     }
-    const auto border_fog_revision=neighbour_border_fog_revision();
-    for (std::size_t i = 0; i < frame.values->entities.size(); ++i) {
+    const auto border_fog_revision=current_border_fog_revision();
+    // Persistent admission (OwnedAdmissionCache): the frame-level conditions,
+    // then the identity at every index.
+    bool incremental=cache_was_valid && static_skip && !frame.diagnostic.profile_frame && !membership_probe &&
+        cache.draw_undetected==draw_undetected && cache.shadows==shadows_enabled && cache.class_flags==class_flags &&
+        cache.static_generation==static_generation && cache.border_fog_revision==border_fog_revision &&
+        dirty_since<=cache.through && receiver_cell>0 &&
+        cache.entries.size()==entity_count && frame.prepared.size()==entity_count;
+    for(std::size_t i=0;incremental && i<entity_count;++i) {
+        const auto& sample=frame.values->entities[i];const auto& entry=cache.entries[i];
+        incremental=same_lifecycle_identity(entry.lifecycle,sample.lifecycle) &&
+            entry.resource_serial==sample.resource.serial && entry.claimed==sample.mesh_declared &&
+            (entry.state==OwnedAdmissionCache::State::process ||
+             (sample.status==RetainedVisualStatus::ready && sample.assembly && sample.prepared));
+    }
+    auto& admit=cache.admit;admit.clear();
+    auto& contribute=cache.contribute;contribute.clear();
+    std::size_t kept_claimed=0;
+    if(incremental && cache.receiver_cell!=receiver_cell) {
+        // The receiver cell follows the largest visible terrain sector; a
+        // new size only re-keys the kept receivers (append_cell_merged_receivers
+        // unions by this cell).
+        std::vector<OwnedAdmissionCache::Member> kept;
+        for(const auto& [key,cell]:cache.cells)kept.insert(kept.end(),cell.members.begin(),cell.members.end());
+        cache.cells.clear();cache.receiver_cell=receiver_cell;
+        for(const auto& member:kept){cache.entries[member.index].in_cell=false;cache.join_cell(member.index,member.bounds);}
+    }
+    if(incremental) {
+        for(const auto id:*static_dirty) {
+            auto it=std::lower_bound(cache.entries.begin(),cache.entries.end(),id,
+                [](const OwnedAdmissionCache::Entry& entry,std::int32_t key){return entry.lifecycle.id<key;});
+            for(;it!=cache.entries.end() && it->lifecycle.id==id;++it)it->dirty=true;
+        }
+        for(std::size_t i=0;i<entity_count;++i) {
+            auto& entry=cache.entries[i];
+            if(entry.state==OwnedAdmissionCache::State::process || entry.dirty) {
+                entry.dirty=false;entry.state=OwnedAdmissionCache::State::process;
+                cache.leave_cell(static_cast<std::uint32_t>(i));
+                admit.push_back(static_cast<std::uint32_t>(i));
+                contribute.push_back(static_cast<std::uint32_t>(i));
+            } else {
+                if(entry.state==OwnedAdmissionCache::State::admitted)contribute.push_back(static_cast<std::uint32_t>(i));
+                kept_claimed+=entry.claimed;
+            }
+        }
+        for(const auto i:admit) {
+            auto& part=frame.prepared[i];
+            auto storage=std::move(part.parts);part={};part.parts=std::move(storage);part.parts.clear();
+        }
+    } else {
+        cache.clear();
+        frame.prepared.resize(entity_count);
+        for(auto& part:frame.prepared){
+            auto storage=std::move(part.parts);part={};part.parts=std::move(storage);part.parts.clear();
+        }
+    }
+    frame.admission_incremental=incremental;
+    frame.considered+=kept_claimed;
+    const auto admit_entity=[&](std::size_t i) {
         const auto& sample = frame.values->entities[i];
         auto& prepared = frame.prepared[i];
         prepared.claimed = sample.mesh_declared;
         if (!prepared.claimed) {
             reject_owned_visual("classification","unclaimed",&sample,false,class_flags);
-            continue;
+            return;
         }
         ++frame.considered;
         if (sample.status != RetainedVisualStatus::ready || !sample.assembly || !sample.prepared) {
@@ -14149,7 +14795,7 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
                 (sample.readiness_reason ? sample.readiness_reason : retained_visual_status_name(static_cast<std::uint32_t>(sample.status))) :
                 !sample.assembly ? "assembly" : "prepared_resources",&sample);
             report_object_plan_failure("owned_scene_value_unavailable");
-            continue;
+            return;
         }
         // Temporary (bind-pose report, 2026-10-02): a unit whose game controller
         // has no current entry is drawn in the bind pose, exactly as the game's
@@ -14171,7 +14817,7 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             retire_owned_static_color(sample);
             if (frame.diagnostic.profile_frame) ++frame.diagnostic.class_rejected;
             reject_owned_visual("classification","class_flags",&sample,false,class_flags);
-            continue;
+            return;
         }
         if (static_skip && !sample.values.unit && sample.prepared->derived_admission_valid &&
             sample.prepared->derived_world_bounds_valid) {
@@ -14195,14 +14841,14 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
                     if (frame.diagnostic.profile_frame) ++frame.diagnostic.bounds_ready;
                     if (receives && retained_world_bounds_visible(prepared.bounds,world_to_clip))
                         static_receivers.push_back(prepared.bounds);
-                    continue;
+                    return;
                 }
             }
         }
         if (!prepare_owned_visual_admission(sample,draw_undetected,shadows_enabled)) {
             retire_owned_static_color(sample);
             reject_owned_visual("classification","admission",&sample,false,class_flags);
-            continue;
+            return;
         }
         const auto& admitted=sample.prepared->derived_admission_parts;
         prepared.parts.resize(admitted.size());
@@ -14219,14 +14865,14 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             retire_owned_static_color(sample);
             if (frame.diagnostic.profile_frame) ++frame.diagnostic.no_visible_part;
             reject_owned_visual("visibility","no_visible_part",&sample,false,class_flags);
-            continue;
+            return;
         }
         if (!prepare_owned_visual_world_bounds(sample,prepared.bounds)) {
             retire_owned_static_color(sample);
             if (frame.diagnostic.profile_frame) ++frame.diagnostic.invalid_envelope;
             reject_owned_visual("envelope","world_bounds",&sample);
             report_object_plan_failure("owned_scene_envelope");
-            continue;
+            return;
         }
         // Preserve the camera-independent admission envelope before pose/coverage work.
         prepared.point_membership_bounds=prepared.bounds;
@@ -14239,17 +14885,48 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             if (sample.values.unit) receivers.push_back(prepared.bounds);
             else static_receivers.push_back(prepared.bounds);
         }
-    }
-    append_cell_merged_receivers(receiver_cell,static_receivers,receivers);
+    };
+    if(incremental)for(const auto i:admit)admit_entity(i);
+    else for(std::size_t i=0;i<entity_count;++i)admit_entity(i);
+    if(incremental) {
+        // Kept entities' receivers: one decision per cell where the camera
+        // allows it, else the exact per-box test of each member.
+        auto& unions=cache.cell_unions;unions.clear();
+        for(auto& [key,cell]:cache.cells) {
+            if(!cell.all_current) {
+                cell.all=cell.members.front().bounds;
+                for(const auto& member:cell.members)
+                    for(unsigned axis=0;axis<3;++axis) {
+                        cell.all.minimum[axis]=(std::min)(cell.all.minimum[axis],member.bounds.minimum[axis]);
+                        cell.all.maximum[axis]=(std::max)(cell.all.maximum[axis],member.bounds.maximum[axis]);
+                    }
+                cell.all_current=true;
+            }
+            const auto kind=classify_receiver_cell(cell.all,world_to_clip);
+            if(kind==ReceiverCellClass::outside)continue;
+            if(kind==ReceiverCellClass::inside){unions.emplace_back(key,cell.all);continue;}
+            NativeWorldBounds merged{};
+            for(const auto& member:cell.members) {
+                if(!retained_world_bounds_visible(member.bounds,world_to_clip))continue;
+                if(!merged.valid){merged=member.bounds;continue;}
+                for(unsigned axis=0;axis<3;++axis) {
+                    merged.minimum[axis]=(std::min)(merged.minimum[axis],member.bounds.minimum[axis]);
+                    merged.maximum[axis]=(std::max)(merged.maximum[axis],member.bounds.maximum[axis]);
+                }
+            }
+            if(merged.valid)unions.emplace_back(key,merged);
+        }
+        append_cell_merged_receivers(receiver_cell,static_receivers,unions,receivers);
+    } else append_cell_merged_receivers(receiver_cell,static_receivers,receivers);
 
     if (shadows_enabled && g_owned_shadow_settings.sun_shadows) {
         const TerrainCpuAsset* base_source=nullptr;
-        const std::array<float,16>* base_transform=nullptr;
-        current_base_terrain_quality_reference(base_source,base_transform);
+        const std::array<float,16>* base_transform=nullptr;std::uint64_t base_generation=0;
+        current_base_terrain_quality_reference(base_source,base_transform,base_generation);
         if(reused_coverage)frame.coverage=*reused_coverage;
         else if (!build_retained_directional_coverage(world_to_clip,lighting,receivers,
             frame.coverage,base_source,base_transform,g_owned_shadow_settings.map_side,
-            g_owned_shadow_settings.close_cascades)) {
+            g_owned_shadow_settings.close_cascades,base_generation)) {
             reject_owned_visual("coverage","receiver_coverage");
             report_object_plan_failure("owned_scene_receiver_coverage");
             return false;
@@ -14268,13 +14945,14 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
     // Published entity envelopes depend only on authoritative scalar values and
     // immutable asset metadata. They can select both consumers before binding
     // animation tracks or constructing backend part envelopes.
-    for (std::size_t i=0;i<frame.prepared.size();++i) {
+    cache.rejected.assign(entity_count,0);
+    const auto contribute_entity=[&](std::size_t i) {
         auto& prepared=frame.prepared[i];
         prepared.candidate_begin=frame.candidates.size();
         prepared.candidate_end=prepared.candidate_begin;
-        if (!prepared.bounds.valid) continue;
+        if (!prepared.bounds.valid) return;
         // Admission already proved it unchanged and registered this frame.
-        if (prepared.static_reused) { prepared.submitted=true; continue; }
+        if (prepared.static_reused) { prepared.submitted=true; return; }
         const auto& sample=frame.values->entities[i];
         const bool casts=shadows_enabled && prepared.casting_parts!=0;
         prepared.contribution=shadows_enabled ?
@@ -14288,7 +14966,8 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             frame.shadow_considered+=prepared.casting_parts;
             if(frame.diagnostic.profile_frame)++frame.diagnostic.contribution_rejected;
             reject_owned_visual("contribution","outside_receiver_coverage",&sample,false);
-            continue;
+            cache.rejected[i]=1;
+            return;
         }
         // One preparation for this value serves color, shadow revision checks,
         // dirty depth slices and the later admitted wound overlay.
@@ -14298,7 +14977,7 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             prepared.bounds={};prepared.contribution={};
             reject_owned_visual("values","pose_binding",&sample);
             report_object_plan_failure("owned_scene_pose_binding");
-            continue;
+            return;
         }
         frame.shadow_considered+=prepared.casting_parts;
         if(prepared.contribution.color) {
@@ -14326,6 +15005,52 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
                 frame.candidates.push_back({i,kMergedPartBase+group});
         }
         prepared.candidate_end=frame.candidates.size();
+    };
+    if(incremental)for(const auto i:contribute)contribute_entity(i);
+    else for(std::size_t i=0;i<entity_count;++i)contribute_entity(i);
+    // Keep what the next frame may skip: the static colour set's members, and
+    // static objects outside every consumer whose admission stands.
+    const auto settle=[&](std::size_t i) {
+        auto& entry=cache.entries[i];
+        const auto& prepared=frame.prepared[i];
+        const auto& sample=frame.values->entities[i];
+        auto state=OwnedAdmissionCache::State::process;
+        if(prepared.claimed && prepared.bounds.valid) {
+            if(prepared.static_reused)state=OwnedAdmissionCache::State::reused;
+            else if(cache.rejected[i] && !sample.values.unit && sample.prepared &&
+                    !sample.prepared->color_packet.static_registered)
+                state=OwnedAdmissionCache::State::admitted;
+        }
+        entry.state=state;
+        bool receives=false;
+        if(state!=OwnedAdmissionCache::State::process)
+            for(const auto& part:prepared.parts)receives|=part.receives;
+        receives=receives && owned_admission_finite(prepared.bounds);
+        if(!receives)cache.leave_cell(static_cast<std::uint32_t>(i));
+        else if(!entry.in_cell)cache.join_cell(static_cast<std::uint32_t>(i),prepared.bounds);
+    };
+    // Dirty marks find entities by binary search: the list must be in
+    // ascending ID order (it is built so); a kept list keeps its order.
+    bool ordered=true;
+    if(incremental)for(const auto i:contribute)settle(i);
+    else {
+        for(std::size_t i=1;i<entity_count && ordered;++i)
+            ordered=frame.values->entities[i-1].lifecycle.id<=frame.values->entities[i].lifecycle.id;
+        cache.receiver_cell=receiver_cell;
+        cache.entries.resize(entity_count);
+        for(std::size_t i=0;i<entity_count;++i) {
+            const auto& sample=frame.values->entities[i];auto& entry=cache.entries[i];
+            entry=OwnedAdmissionCache::Entry{};
+            entry.lifecycle=sample.lifecycle;entry.resource_serial=sample.resource.serial;
+            entry.claimed=sample.mesh_declared;
+            if(receiver_cell>0)settle(i);
+        }
+    }
+    // Persistent admission needs the receiver cells (receiver_cell > 0).
+    if(receiver_cell>0 && static_dirty && ordered) {
+        cache.draw_undetected=draw_undetected;cache.shadows=shadows_enabled;cache.class_flags=class_flags;
+        cache.static_generation=static_generation;cache.border_fog_revision=border_fog_revision;
+        cache.through=dirty_through;cache.valid=static_skip;
     }
     return true;
 }
@@ -14369,6 +15094,18 @@ bool owned_static_color_eligible(const RetainedVisualSample& sample,
         any=true;
     }
     return any;
+}
+
+// The game's distance fog for one entity of the frame: its fog function is a
+// game call, so on the scene thread the value comes from the table the game
+// thread filled when it queued the command.
+bool owned_visual_fog(void* fog_controller,std::size_t index,const RetainedVisualSample& sample,BYTE& fog) noexcept {
+    if (g_scene_fog_table) {
+        if (index >= g_scene_fog_table->size() || (*g_scene_fog_table)[index] < 0) return false;
+        fog = static_cast<BYTE>((*g_scene_fog_table)[index]);
+        return true;
+    }
+    return retained_world_fog(fog_controller,sample.pose.root,fog);
 }
 
 bool owned_static_color_current(const VisualPreparedResources::ColorPacket& packet,
@@ -14437,7 +15174,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only = f
         NativeGeometryView query_view;query_view.static_submission=&query;NativeGeometryResult ignored{};
         if(!g_native_sink_submit(g_native_sink_context,query_view,ignored))throw "owned_static_generation";
         const auto generation=query.generation;
-        const auto border_fog_revision=neighbour_border_fog_revision();
+        const auto border_fog_revision=current_border_fog_revision();
         for (const auto i:submission_order) {
             const auto& sample = frame.values->entities[i];
             auto& prepared = frame.prepared[i];
@@ -14445,7 +15182,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only = f
             if (!owned_static_color_eligible(sample,prepared)) { retire_owned_static_color(sample); continue; }
             BYTE fog = 255;
             if (!(sample.values.object_flags & 0x800u) &&
-                !retained_world_fog(fog_controller,sample.pose.root,fog)) continue;   // per-frame path reports
+                !owned_visual_fog(fog_controller,i,sample,fog)) continue;   // per-frame path reports
             auto& packet=sample.prepared->color_packet;
             std::size_t parts_drawn=0;
             if (owned_static_color_current(packet,sample,prepared,fog,generation,border_fog_revision) &&
@@ -14490,12 +15227,22 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only = f
             static_drawn[i]=1;prepared.submitted=true;
             ++frame.eligible;frame.submitted_parts+=parts_drawn;
         }
-        for(auto it=g_owned_static_registry.begin();it!=g_owned_static_registry.end();) {
-            if(it->second==frame.serial){++it;continue;}
+        const auto remove_unseen=[&](std::unordered_map<std::uint64_t,std::uint64_t>::iterator it) {
             NativeStaticSubmission request;request.operation=NativeStaticSubmission::Operation::remove;
             request.key=it->first;NativeGeometryView view;view.static_submission=&request;
             NativeGeometryResult removed{};g_native_sink_submit(g_native_sink_context,view,removed);
-            it=g_owned_static_registry.erase(it);
+            return g_owned_static_registry.erase(it);
+        };
+        if(frame.admission_incremental) {
+            // Only visited entities can be unseen: every kept one is a current
+            // member of the set (OwnedAdmissionCache), and no entity left.
+            for(const auto i:g_owned_admission_cache.contribute) {
+                const auto it=g_owned_static_registry.find(owned_static_key(frame.values->entities[i]));
+                if(it!=g_owned_static_registry.end() && it->second!=frame.serial)remove_unseen(it);
+            }
+        } else for(auto it=g_owned_static_registry.begin();it!=g_owned_static_registry.end();) {
+            if(it->second==frame.serial){++it;continue;}
+            it=remove_unseen(it);
         }
         NativeStaticSubmission flush;flush.operation=NativeStaticSubmission::Operation::flush;
         flush.world_to_clip=&world_to_clip;
@@ -14519,7 +15266,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only = f
             ++frame.eligible;
             BYTE fog = 255;
             if (!(sample.values.object_flags & 0x800u) &&
-                !retained_world_fog(fog_controller,sample.pose.root,fog)) {
+                !owned_visual_fog(fog_controller,i,sample,fog)) {
                 reject_owned_visual("submission","fog",&sample);
                 report_object_plan_failure("owned_scene_fog"); success = false; continue;
             }
@@ -14738,7 +15485,7 @@ bool append_owned_visual_shadow_values(std::vector<RetainedShadowCasterValue>& c
             value.mask=part_value->contribution.light_mask;
             if(!value.mask)return true;
             if(!retained_visual_depth_revision(sample,part,frame.values->time,value.revision))return false;
-            prepared.parts[part].depth_revision=value.revision;
+            prepared.parts[part].depth_revision=value.revision;prepared.parts[part].depth_serial=frame.serial;
             casters.push_back(std::move(value));
             return true;
     };
@@ -14761,14 +15508,11 @@ bool append_owned_static_shadow_values(std::vector<RetainedShadowCasterValue>& c
     const std::vector<std::int32_t>& time_active_ids,
     const std::vector<std::int32_t>* selected_ids=nullptr) {
     auto& frame=g_owned_visual_world_frame;
-    for(std::size_t index=0;index<frame.prepared.size();++index) {
+    const auto append_entity=[&](std::size_t index) {
         auto& prepared=frame.prepared[index];
-        if(!prepared.bounds.valid || !prepared.casting_parts)continue;
+        if(!prepared.bounds.valid || !prepared.casting_parts)return true;
         const auto& sample=frame.values->entities[index];
-        const auto id=sample.lifecycle.id;
-        if(std::binary_search(time_active_ids.begin(),time_active_ids.end(),id) ||
-           (selected_ids && !std::binary_search(selected_ids->begin(),selected_ids->end(),id)))
-            continue;
+        if(std::binary_search(time_active_ids.begin(),time_active_ids.end(),sample.lifecycle.id))return true;
         if(!prepare_owned_visual_pose(sample))return false;
         for(std::size_t part=0;part<prepared.parts.size();++part) {
             if(!prepared.parts[part].casts)continue;
@@ -14781,10 +15525,29 @@ bool append_owned_static_shadow_values(std::vector<RetainedShadowCasterValue>& c
             caster.persistent_static=true;
             if(!retained_visual_depth_revision(sample,part,frame.values->time,
                 caster.revision))return false;
-            prepared.parts[part].depth_revision=caster.revision;
+            prepared.parts[part].depth_revision=caster.revision;prepared.parts[part].depth_serial=frame.serial;
             casters.push_back(std::move(caster));
         }
+        return true;
+    };
+    // Entities are ordered by lifecycle id, so a journal-dirty update looks
+    // up only its ids (same order as a walk of the whole list) instead of
+    // visiting every entity of the world.
+    if(selected_ids) {
+        const auto& entities=frame.values->entities;
+        auto from=entities.begin();
+        for(const auto id:*selected_ids) {
+            from=std::lower_bound(from,entities.end(),id,
+                [](const RetainedVisualSample& sample,std::int32_t value){return sample.lifecycle.id<value;});
+            if(from==entities.end())break;
+            if(from->lifecycle.id!=id)continue;
+            if(!append_entity(static_cast<std::size_t>(from-entities.begin())))return false;
+            ++from;
+        }
+        return true;
     }
+    for(std::size_t index=0;index<frame.prepared.size();++index)
+        if(!append_entity(index))return false;
     return true;
 }
 
@@ -14839,13 +15602,14 @@ bool collect_owned_visual_depth(std::uint8_t dirty,const ShadowFrame& shadows,
 #endif
             const auto index=candidate.entity;const auto part_index=candidate.part;
             auto& prepared=frame.prepared[index];const auto& sample=frame.values->entities[index];
-            if(frame.persistent_static_shadows && !point_light &&
-               !std::binary_search(frame.shadow_time_active_visuals.begin(),
-                   frame.shadow_time_active_visuals.end(),sample.lifecycle.id))continue;
+            // The cheap rejects first; the binary search after them (all pure tests).
             const std::uint8_t retained=point_light ? 0 : owned_depth_retained_slices(shadows);
             if(!prepared.bounds.valid || (point_light ?
                 !owned_point_shadow_influence(prepared.bounds,*point_light) :
                 !((prepared.contribution.light_mask|retained)&dirty)))continue;
+            if(frame.persistent_static_shadows && !point_light &&
+               !std::binary_search(frame.shadow_time_active_visuals.begin(),
+                   frame.shadow_time_active_visuals.end(),sample.lifecycle.id))continue;
             if(part_index>=kMergedPartBase) {
                 const auto group_index=part_index-kMergedPartBase;
                 auto& group=sample.prepared->merged_groups[group_index];
@@ -14880,9 +15644,11 @@ bool collect_owned_visual_depth(std::uint8_t dirty,const ShadowFrame& shadows,
                 retained,dirty,static_cast<unsigned>(shadows.slices.size()),[&](unsigned slice){
                     return retained_world_bounds_visible(value->bounds,shadows.slices[slice].world_to_light);});
             if(!mask)continue;
-            if(!prepared.parts[part_index].depth_revision.revision &&
+            auto& depth_part=prepared.parts[part_index];
+            if(depth_part.depth_serial!=frame.serial){depth_part.depth_revision={};depth_part.depth_serial=frame.serial;}
+            if(!depth_part.depth_revision.revision &&
                !retained_visual_depth_revision(sample,part_index,frame.values->time,
-                   prepared.parts[part_index].depth_revision))return false;
+                   depth_part.depth_revision))return false;
             auto& source=sample.prepared->parts[part_index];
             NativeDepthSelection selected;
             selected.mesh=&source.mesh;selected.material=&source.material;
@@ -14985,38 +15751,48 @@ void dump_owned_units_on_request(const std::array<float,16>& world_to_clip) noex
     std::fclose(file);
 }
 
+// The seam's submissions once its shadow frame is prepared (both modes).
+bool finish_owned_visual_scene(void* fog_controller,const std::array<float,16>& world_to_clip) {
+    auto& frame=g_owned_visual_world_frame;
+    if(!frame.shadow_ready || frame.coverage.world_to_clip!=world_to_clip) {
+        reject_owned_visual("submission","shadow_frame_unavailable");
+        report_object_plan_failure("owned_shadow_frame_unavailable");return false;
+    }
+    CityRetainedOwnerGuard terrain_timing(CityRetainedOwner::terrain_base);
+    const bool terrain_submitted = submit_pending_owned_terrain_base();
+    terrain_timing.finish();
+    if (!terrain_submitted) {
+        reject_owned_visual("submission","terrain_base_unavailable");
+    }
+    if(frame.color_submitted)return terrain_submitted;
+    frame.color_submitted=true;
+    CityRetainedOwnerGuard color_timing(CityRetainedOwner::color_submission);
+    const bool color_submitted = submit_owned_visual_color(fog_controller,false,true);
+    color_timing.finish();
+    dump_owned_units_on_request(world_to_clip);
+    return terrain_submitted && color_submitted;
+}
+
 bool submit_owned_visual_scene(void* scene,void* renderer,
     const std::array<float,16>& world_to_clip) noexcept {
     if (!g_visual_publication_active) return false;
     try {
         auto& frame=g_owned_visual_world_frame;
         if(!frame.shadow_attempted && !prepare_owned_world_shadows(scene,renderer,world_to_clip))return false;
-        if(!frame.shadow_ready || frame.coverage.world_to_clip!=world_to_clip) {
-            reject_owned_visual("submission","shadow_frame_unavailable");
-            report_object_plan_failure("owned_shadow_frame_unavailable");return false;
-        }
-        CityRetainedOwnerGuard terrain_timing(CityRetainedOwner::terrain_base);
-        const bool terrain_submitted = submit_pending_owned_terrain_base();
-        terrain_timing.finish();
-        if (!terrain_submitted) {
-            reject_owned_visual("submission","terrain_base_unavailable");
-        }
-        if(frame.color_submitted)return terrain_submitted;
-        frame.color_submitted=true;
-        CityRetainedOwnerGuard color_timing(CityRetainedOwner::color_submission);
-        const bool color_submitted = submit_owned_visual_color(retained_scene_fog_controller(scene),false,true);
-        color_timing.finish();
-        dump_owned_units_on_request(world_to_clip);
-        return terrain_submitted && color_submitted;
+        return finish_owned_visual_scene(retained_scene_fog_controller(scene),world_to_clip);
     } catch (...) {
         report_object_plan_failure("owned_scene_frame_allocation");
         return false;
     }
 }
 
+bool queue_owned_visual_scene(void* scene,void* renderer,
+    const std::array<float,16>& world_to_clip) noexcept;
+
 extern "C" void __stdcall dispatch_retained_static_scene(
     void* scene, void* renderer) noexcept {
     if (!g_retained_scene_seam_installed) return;
+    const frame_acct::Scope accounted(frame_acct::ours_world_scene);
     const bool traced=startup_begin(StartupStage::retained_seam);
     ScenePartitionChildGuard partition_guard(
         ScenePartitionContext::retained);
@@ -15027,7 +15803,8 @@ extern "C" void __stdcall dispatch_retained_static_scene(
                 renderer, scene_world_to_clip);
         if (g_visual_publication_active) {
             const bool submitted = scene_world_to_clip_valid &&
-                submit_owned_visual_scene(scene,renderer,scene_world_to_clip);
+                (scene_handoff_active() ? queue_owned_visual_scene(scene,renderer,scene_world_to_clip) :
+                 submit_owned_visual_scene(scene,renderer,scene_world_to_clip));
             startup_end(StartupStage::retained_seam,traced,submitted ? "owned_scene" : "owned_scene_rejected");
             return;
         }
@@ -15187,7 +15964,7 @@ bool retained_static_claims_object(void* specific) noexcept {
 }
 
 void begin_retained_static_binding_frame() noexcept {
-    if (!g_world_draw_depth) g_owned_visual_world_frame = {};
+    if (!g_world_draw_depth) reset_owned_visual_world_frame();
     // A prior abnormal boundary must release every same-frame borrow before
     // replacing its pinned binding view.
     clear_retained_active_visibility();
@@ -15202,7 +15979,7 @@ void begin_retained_static_binding_frame() noexcept {
 }
 
 void end_retained_static_binding_frame() noexcept {
-    if (!g_world_draw_depth) g_owned_visual_world_frame = {};
+    if (!g_world_draw_depth) reset_owned_visual_world_frame();
     clear_retained_active_visibility();
     g_retained_owned_visibility_ready = false;
     g_retained_owned_visibility_failed = false;
@@ -15350,9 +16127,6 @@ void end_rejected_sky_omission(void* world,std::uint32_t restore) noexcept {
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-std::atomic<bool> g_load_reveal_enabled{false};
-std::atomic<std::uint64_t> g_load_reveal_revealed_epoch{0};
-
 // The local single-player server runs a loaded mission (the server-seed
 // contract above: server vtable, mode +138 = 1, map loaded +15C, interface
 // +12D64 = 1). The load pause acts only there: never in the menu, on the
@@ -15368,7 +16142,32 @@ bool local_single_player_mission() noexcept {
         visual_read(world, kServerInterfaceOffset, interface_mode) && interface_mode == 1;
 }
 
+// Scene thread (render_thread option): its frames begin and end at the
+// outer world draw's place in the stream (outside hook_world_draw, whose
+// SEH frame admits no unwinding objects).
+void post_scene_world_begin() noexcept {
+    const std::uint64_t profile_frame =
+        g_bridge_sample.active && bridge_profile_enabled() ? g_bridge_sample.frame : 0;
+    try {
+        g_scene_handoff.post(g_scene_handoff.context, [profile_frame] {
+            begin_owned_terrain_world_frame();
+            reset_owned_visual_world_frame();
+            g_owned_visual_world_frame.diagnostic.profile_frame = profile_frame;
+        });
+    } catch (...) {}
+}
+void post_scene_world_end() noexcept {
+    try {
+        g_scene_handoff.post(g_scene_handoff.context, [] {
+            end_owned_terrain_world_frame();
+            reset_owned_visual_world_frame();
+        });
+    } catch (...) {}
+}
+
 BOOL __fastcall hook_world_draw(void* self, void*) {
+    const bool accounted = frame_acct::push(frame_acct::ours_world_setup);
+    bool accounted_game = false;
     const bool outermost = g_world_draw_depth++ == 0;
     if (outermost) g_world_draw_completion = {};
     const bool traced = outermost && startup_begin(StartupStage::world);
@@ -15384,6 +16183,7 @@ BOOL __fastcall hook_world_draw(void* self, void*) {
         game_back_clip_world_frame(self);
         begin_owned_terrain_world_frame();
         reset_owned_visual_draw(self);
+        if (scene_handoff_active()) post_scene_world_begin();
     }
     if (outermost && g_bridge_sample.active) {
         g_world_profile_begin = bridge_now();
@@ -15398,17 +16198,29 @@ BOOL __fastcall hook_world_draw(void* self, void*) {
             // Omit this world draw; the interface and F10 diagnostic remain.
             world_omitted=true;result=TRUE;__leave;
         }
+        accounted_game = frame_acct::push(frame_acct::game_world);
         result = g_world_draw ? g_world_draw(self) : FALSE;
+        if (accounted_game) { frame_acct::pop(); accounted_game = false; }
     } __finally {
+        if (accounted_game) frame_acct::pop();
         end_rejected_sky_omission(self,sky_restore);
         if (--g_world_draw_depth == 0) {
-            if (!world_omitted && !AbnormalTermination() && result != FALSE)
+            if (!world_omitted && !AbnormalTermination() && result != FALSE) {
                 g_world_draw_completion = {g_bridge_frame_serial,
                     ++g_world_draw_completion_counter, true};
+                g_ownership_world_seen.store(true, std::memory_order_relaxed);
+            }
             else g_world_draw_completion = {};
             complete_owned_visual_diagnostic(!world_omitted && !AbnormalTermination() && result!=FALSE);
+            if(g_hovered_shadow_capture_requested) {
+                g_hovered_shadow_capture_requested=false;
+                if(!world_omitted && !AbnormalTermination() && result!=FALSE)
+                    complete_hovered_shadow_capture();
+                else append_bridge_event("hovered_shadow_capture","Requested world frame did not complete; no corpse state recorded.",false);
+            }
             end_owned_terrain_world_frame();
             reset_owned_visual_draw(nullptr);
+            if (scene_handoff_active()) post_scene_world_end();
             if (g_bridge_sample.active && g_world_profile_begin) {
                 g_bridge_sample.world_draw_ticks += bridge_now() - g_world_profile_begin;
             }
@@ -15416,6 +16228,7 @@ BOOL __fastcall hook_world_draw(void* self, void*) {
             startup_end(StartupStage::world, traced,
                 AbnormalTermination() ? "unwind" : result ? "true" : "false");
         }
+        if (accounted) frame_acct::pop();
     }
     return result;
 }
@@ -15461,6 +16274,9 @@ BOOL __fastcall hook_scene_3d_draw(void* self, void*) {
 BOOL hook_object_3d_draw_for_returns(
     void* self, void* renderer, void* rect,
     const void* immediate_return, const void* return_slot) {
+    const frame_acct::Part accounted_outer = frame_acct::current();
+    const bool accounted = frame_acct::push(frame_acct::ours_object_draw);
+    bool accounted_game = false;
     ScenePartitionChildToken partition_child =
         begin_scene_partition_child(ScenePartitionContext::object);
     const ObjectSuffixCutToken suffix_token = object_suffix_begin_invocation(
@@ -15551,8 +16367,10 @@ BOOL hook_object_3d_draw_for_returns(
             }
         } else {
             const bool traced = g_scene_3d_depth && startup_begin(StartupStage::object_native);
+            accounted_game = frame_acct::push(accounted_outer);
             result = g_object_3d_draw
                 ? g_object_3d_draw(self, renderer, rect) : FALSE;
+            if (accounted_game) { frame_acct::pop(); accounted_game = false; }
             startup_end(StartupStage::object_native, traced, result ? "true" : "false");
             if (!g_current_object_plan_handled &&
                 g_bridge_sample.active &&
@@ -15561,6 +16379,7 @@ BOOL hook_object_3d_draw_for_returns(
                 ++g_bridge_sample.object_plan_original_calls;
         }
     } __finally {
+        if (accounted_game) frame_acct::pop();
         object_suffix_end_invocation(suffix_token);
         g_current_object_plan_identity = previous_identity;
         g_current_object_plan_identity_valid = previous_identity_valid;
@@ -15573,6 +16392,7 @@ BOOL hook_object_3d_draw_for_returns(
                 g_bridge_sample.scene_3d_named_ticks += elapsed;
         }
         end_scene_partition_child(partition_child);
+        if (accounted) frame_acct::pop();
     }
     return result;
 }
@@ -15589,6 +16409,7 @@ DWORD WINAPI hook_outer_count_time_clock() {
     if (camp_inventory_observation_enabled()) camp_inventory_observe_count_time_clock(bridge_now());
     const DWORD result = g_outer_time_get_time ? g_outer_time_get_time() : 0;
     if (begin) outer_frame_count_time_begin(begin);
+    frame_acct::set_root(frame_acct::game_sim);
     return result;
 }
 
@@ -15696,9 +16517,12 @@ void __fastcall hook_outer_interface_on_idle(void* self, void*) {
     const auto begin = outer_frame_timing_active() ? bridge_now() : 0;
     const auto camp_begin = camp_inventory_observation_enabled() ? bridge_now() : 0;
     if (begin) outer_frame_count_time_profile_end(begin);
+    frame_acct::set_root(frame_acct::game_loop);
+    const bool accounted = frame_acct::push(frame_acct::game_ui_idle);
     __try {
         if (g_outer_interface_on_idle) g_outer_interface_on_idle(self);
     } __finally {
+        if (accounted) frame_acct::pop();
         if (begin) outer_frame_interface_on_idle(begin, bridge_now());
         if (camp_begin) camp_inventory_observe_modal_idle(camp_begin, bridge_now());
     }
@@ -15709,6 +16533,7 @@ LRESULT __fastcall hook_outer_wnd_proc(
     const auto begin = outer_frame_timing_active() ? bridge_now() : 0;
     const auto camp_begin = camp_inventory_observation_enabled() ? bridge_now() : 0;
     LRESULT result = 0;
+    const bool accounted = frame_acct::push(frame_acct::game_msg);
     __try {
         if (g_camp_input_image && g_camp_input_overlay &&
             (g_camp_input_overlay->process_camp_input(message,wparam,lparam) ||
@@ -15717,6 +16542,7 @@ LRESULT __fastcall hook_outer_wnd_proc(
         } else if (g_outer_wnd_proc)
             result = g_outer_wnd_proc(message, wparam, game_native_mouse_message(message,lparam));
     } __finally {
+        if (accounted) frame_acct::pop();
         if (begin) outer_frame_message_handled(begin, bridge_now());
         if (camp_begin) camp_inventory_observe_close_call("wnd_proc",camp_begin,bridge_now());
     }
@@ -15728,10 +16554,12 @@ LRESULT WINAPI hook_outer_short_wnd_proc(
     const auto begin = outer_frame_timing_active() ? bridge_now() : 0;
     const auto camp_begin = camp_inventory_observation_enabled() ? bridge_now() : 0;
     LRESULT result = 0;
+    const bool accounted = frame_acct::push(frame_acct::game_msg);
     __try {
         if (g_outer_short_wnd_proc)
             result = g_outer_short_wnd_proc(hwnd, message, wparam, lparam);
     } __finally {
+        if (accounted) frame_acct::pop();
         if (begin) outer_frame_message_handled(begin, bridge_now());
         if (camp_begin) camp_inventory_observe_close_call("short_wnd_proc",camp_begin,bridge_now());
     }
@@ -15741,10 +16569,30 @@ LRESULT WINAPI hook_outer_short_wnd_proc(
 BOOL __fastcall hook_begin_frame(void* self, void*) {
     const auto caller = _ReturnAddress();
     SemanticScope scope(SemanticKind::frame, caller);
-    // Supported outer loop: 45807D E8 BE BE 0A 00 -> 503F40. Count that
-    // completed frame boundary, not any nested D3D scene or profiling epoch.
-    if (g_visual_game_image && caller == g_visual_game_image + kOuterBeginFrameCallRva + 5)
+    // Supported DrawFrame entry: 45807D E8 BE BE 0A 00 -> 503F40.
+    // Finish queued output under its original UI epoch, then restore owned
+    // world targets before the engine clears them. Saves can draw again
+    // without an intervening Present; a nested D3D scene is not this boundary.
+    frame_acct::set_root(frame_acct::game_draw);
+    if (g_engine_frame_begin_image &&
+        caller == g_engine_frame_begin_image + kOuterBeginFrameCallRva + 5) {
+        bool sink_ok = false;
+        {
+            const frame_acct::Scope sink_scope(frame_acct::ours_frame_begin);
+            sink_ok = g_engine_frame_begin_sink &&
+                g_engine_frame_begin_sink(g_engine_frame_begin_context);
+        }
+        if (!sink_ok) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                bridge_report_event("owned_frame_begin_failed",
+                    "Active device could not finish queued output and restore world targets; frame omitted before native clear.");
+            }
+            return FALSE;
+        }
         ++g_preview_frame_serial;
+    }
     const bool profile_was_active = g_bridge_sample.active;
     bridge_profile_begin_frame();
     outer_frame_begin(!profile_was_active && g_bridge_sample.active
@@ -15756,7 +16604,12 @@ BOOL __fastcall hook_end_frame(void* self, void*) {
     SemanticScope scope(SemanticKind::frame, _ReturnAddress());
     const std::uint64_t expected_profile_frame =
         g_bridge_sample.active ? g_bridge_sample.frame : 0;
-    const BOOL result = g_end_frame ? g_end_frame(self) : FALSE;
+    BOOL result = FALSE;
+    {
+        const frame_acct::Scope end_scope(frame_acct::game_end_frame);
+        result = g_end_frame ? g_end_frame(self) : FALSE;
+    }
+    frame_acct::set_root(frame_acct::game_loop);
     bridge_profile_end_frame();
     const auto* published_profile = bridge_latest_profile();
     const std::uint64_t completed_profile_frame =
@@ -15811,6 +16664,8 @@ BOOL __fastcall hook_figure_placed(void* self, void*, void* figure, const void* 
         outer_caller = reinterpret_cast<const void*>(return_slot[0x88 / sizeof(std::uintptr_t)]);
     }
     SemanticScope scope(SemanticKind::figure, _ReturnAddress(), outer_caller);
+    const frame_acct::Part accounted_outer = frame_acct::current();
+    const frame_acct::Scope accounted(frame_acct::ours_figure_hooks);
     const auto begin = bridge_profile_enabled() ? bridge_now() : 0;
     if (g_hud_draw.claimed && g_hud_draw.carrier_active &&
         !g_hud_draw.placed_consumed &&
@@ -15863,7 +16718,11 @@ BOOL __fastcall hook_figure_placed(void* self, void*, void* figure, const void* 
     if (owns_figure) {
         g_native_figure = owned_context;
     }
-    const BOOL result = g_figure_placed ? g_figure_placed(self, figure, rotation, position, material, fog, rect) : FALSE;
+    BOOL result = FALSE;
+    {
+        const frame_acct::Scope original(accounted_outer);
+        result = g_figure_placed ? g_figure_placed(self, figure, rotation, position, material, fog, rect) : FALSE;
+    }
     const std::uint32_t lower_calls = g_native_lower_calls;
     if (owns_figure) {
         const bool submitted = g_native_figure.submitted;
@@ -15895,6 +16754,8 @@ BOOL __fastcall hook_figure_lights(void* self, void*, void* figure, void* lights
                                    void* material, BYTE fog, void* rect, void* texture0,
                                    void* texture1) {
     SemanticScope scope(SemanticKind::figure, _ReturnAddress());
+    const frame_acct::Part accounted_outer = frame_acct::current();
+    const frame_acct::Scope accounted(frame_acct::ours_figure_hooks);
     const auto begin = bridge_profile_enabled() ? bridge_now() : 0;
     const NativeFigureContext previous_context = g_native_figure;
     const std::uint32_t previous_lower_calls = g_native_lower_calls;
@@ -15961,10 +16822,13 @@ BOOL __fastcall hook_figure_lights(void* self, void*, void* figure, void* lights
             fallback_reason = FigureFallbackReason::direct_submit;
             if (g_bridge_sample.active) ++g_bridge_sample.figure_gpu_submit_failures;
             g_native_figure = previous_context;
-            result = g_figure_lights
-                ? g_figure_lights(self, figure, lights, material, fog, rect,
-                                  texture0, texture1)
-                : FALSE;
+            {
+                const frame_acct::Scope original(accounted_outer);
+                result = g_figure_lights
+                    ? g_figure_lights(self, figure, lights, material, fog, rect,
+                                      texture0, texture1)
+                    : FALSE;
+            }
             original_called = true;
         }
     } else if (owns_figure) {
@@ -15979,6 +16843,7 @@ BOOL __fastcall hook_figure_lights(void* self, void*, void* figure, void* lights
         }
     }
     if (!direct_owned && !original_called) {
+        const frame_acct::Scope original(accounted_outer);
         result = g_figure_lights
             ? g_figure_lights(self, figure, lights, material, fog, rect, texture0, texture1)
             : FALSE;
@@ -16094,11 +16959,10 @@ struct OwnedTerrainRuntimeFrame {
     std::vector<std::uint8_t> publication_seen;
     // These are map-owned engine texture wrappers, copied only for the
     // uninterrupted outer World::Draw call. They are never dereferenced by
-    // source state and are cleared before that call returns.
+    // source state and are cleared before that call returns. Only the slots
+    // of materials this world's source contains are captured; every other
+    // slot stays null and is never read from the game's array.
     std::vector<void*> texture_handles;
-    // Borrowed only during the same outer world call; unlike color handles,
-    // the full source array can name a contributing never-color-admitted atlas.
-    void** texture_sources = nullptr;
     std::vector<std::uint8_t> shadow_texture_observed;
     NativeOwnedFixedState shadow_material;
     std::array<float,16> world_to_clip{};
@@ -16115,8 +16979,8 @@ thread_local OwnedTerrainRuntimeFrame g_owned_terrain_frame{};
 thread_local std::uint64_t g_owned_terrain_world_serial = 0;
 
 bool current_base_terrain_quality_reference(const TerrainCpuAsset*& source,
-    const std::array<float,16>*& transform) noexcept {
-    source=nullptr;transform=nullptr;
+    const std::array<float,16>*& transform,std::uint64_t& generation) noexcept {
+    source=nullptr;transform=nullptr;generation=0;
     const auto& terrain=g_owned_terrain_frame;
     if(!terrain.world_serial || !terrain.world_transform_valid ||
        terrain.front_end.status!=OwnedTerrainPacketStatus::ready ||
@@ -16128,6 +16992,7 @@ bool current_base_terrain_quality_reference(const TerrainCpuAsset*& source,
        terrain.front_end.spatial_object_to_world!=terrain.object_to_world)return false;
     source=terrain.source_values.terrain.get();
     transform=&terrain.object_to_world;
+    generation=terrain.source_values.source_generation;
     return true;
 }
 
@@ -16154,7 +17019,6 @@ void begin_owned_terrain_world_frame() noexcept {
         dynamic.captured = false;
     g_owned_terrain_frame.publication_seen.clear();
     g_owned_terrain_frame.texture_handles.clear();
-    g_owned_terrain_frame.texture_sources=nullptr;
     g_owned_terrain_frame.shadow_texture_observed.clear();
     g_owned_terrain_frame.shadow_material={};
     g_owned_terrain_frame.base_attempted = false;
@@ -16188,7 +17052,6 @@ void end_owned_terrain_world_frame() noexcept {
         dynamic.captured = false;
     g_owned_terrain_frame.publication_seen.clear();
     g_owned_terrain_frame.texture_handles.clear();
-    g_owned_terrain_frame.texture_sources=nullptr;
     g_owned_terrain_frame.shadow_texture_observed.clear();
     g_owned_terrain_frame.shadow_material={};
     g_owned_terrain_frame.base_attempted = false;
@@ -16646,6 +17509,8 @@ bool source_terrain_view(const OwnedTerrainFramePacket& packet,
                          NativeGeometryView& view) noexcept {
     if (!prepare_owned_terrain_source_view(packet, command, dynamic, context, view)) return false;
     view.decode = &decode_owned_terrain_source; // Preserve retail profiling.
+    view.terrain_page_count = packet.source->texture_count + 2u;
+    view.terrain_page_count = packet.source->texture_count + 2u;
     return true;
 }
 
@@ -16734,6 +17599,7 @@ bool terrain_shadow_alpha_inputs(const NativeOwnedFixedState& state,bool& textur
     }
 }
 
+void* owned_terrain_texture_wrapper(std::size_t material) noexcept;
 std::shared_ptr<const OwnedVisualSurface> owned_terrain_shadow_texture(
     std::uint32_t material,RetainedStaticScene& scene) {
     auto& frame=g_owned_terrain_frame;
@@ -16745,7 +17611,11 @@ std::shared_ptr<const OwnedVisualSurface> owned_terrain_shadow_texture(
         // One bounded source read per required material in this completed world
         // packet, independent of color admission. The Surface owner avoids any
         // new byte copy for an unchanged generation and publishes later writes.
-        if(!frame.texture_sources || !visual_read(frame.texture_sources,material*sizeof(void*),texture) ||
+        if(g_scene_terrain_shadow_textures) {
+            // Scene thread: the game thread read the map's atlas surfaces
+            // when it queued this command.
+            if(material<g_scene_terrain_shadow_textures->size())value=(*g_scene_terrain_shadow_textures)[material];
+        } else if(!(texture=owned_terrain_texture_wrapper(material)) ||
            !visual_texture_surface(texture,surface,flags) || !surface || !g_visual_surface_reader ||
            !g_visual_surface_reader(surface,value))value.reset();
         if(!scene.publish_terrain_texture(frame.source_values.source_generation,
@@ -16794,10 +17664,28 @@ bool append_owned_terrain_shadow_values_uncached(std::vector<RetainedShadowCaste
 // 1 ms per pan frame in zone18). A part's light bounds depend only on its
 // geometry and the sun axes, its commands only on its sector's LOD and
 // stitching; only its slice mask follows the moving maps, so that is all a
-// pan recomputes. Prepared depth parts are looked up per frame for the parts
-// actually emitted (never kept as pointers).
+// pan recomputes. A detail's prepared depth part is found once per command:
+// the prepared table's nodes never move or go away (unordered_map, never
+// erased), and the cache names the table it was found in by its control
+// block (prepared_owner: a weak reference, so it neither keeps an old map's
+// resources alive nor can match a later table); another table clears every
+// part. The hash lookup per emitted caster on every pan frame was ~2% of the
+// main thread.
+// Every write of a terrain prepared part's depth values or revision bumps
+// this serial. Within one TerrainShadowPartCache the depth values are fixed
+// (its keys hold the placement and depth state), so a detail that confirmed
+// its part's revision needs to read the part again only after a write. The
+// read was a random hash-node access per emitted caster: 0.42-0.52 ms on
+// zone3 frames emitting ~3,100 casters.
+std::uint64_t g_terrain_depth_writes=0;
 struct TerrainShadowPartCache {
-    struct Detail { bool present=false; OwnedTerrainCommand command{}; };
+    // depth_revision: the prepared part's depth revision this detail last
+    // confirmed against the cache's depth values, valid while no terrain
+    // depth record has been written since (g_terrain_depth_writes).
+    struct Detail {
+        bool present=false; OwnedTerrainCommand command{}; OwnedTerrainPreparedPart* prepared=nullptr;
+        std::uint64_t depth_revision=0,depth_writes=0;
+    };
     struct Part {
         bool valid=false;
         std::uint32_t sector=UINT32_MAX,material=0;std::uint8_t subparts=0;
@@ -16809,7 +17697,15 @@ struct TerrainShadowPartCache {
     std::uint64_t source_generation=0,source_revision=0,structural_revision=0;
     std::array<float,16> object_to_world{};std::array<std::uint32_t,2> depth_state{};
     std::array<std::array<float,3>,3> light_axes{};
+    std::weak_ptr<OwnedTerrainPreparedResources> prepared_owner;
     std::vector<Part> parts;
+    // Spatial indices in caster order (sector, material, subpart): the spatial
+    // list is material-major, so emitting in list order left a full sort of
+    // every terrain caster on each pan frame (~2% of the main thread). Stale
+    // after a reset or a changed part; a stale order only costs the sort.
+    std::vector<std::uint32_t> order;
+    bool order_stale=true;
+    std::size_t emitted=0; // casters of the last build (reserve size)
 };
 TerrainShadowPartCache g_terrain_shadow_part_cache;
 
@@ -16825,17 +17721,48 @@ bool append_owned_terrain_shadow_values_incremental(std::vector<RetainedShadowCa
     if(!cache.valid || cache.source_generation!=frame.source_values.source_generation ||
        cache.source_revision!=frame.source_values.source_revision ||
        cache.structural_revision!=geometry.structural_revision || cache.object_to_world!=frame.object_to_world ||
-       cache.depth_state!=depth_state || cache.light_axes!=coverage.light_axes) {
+       cache.depth_state!=depth_state ||
+       cache.prepared_owner.owner_before(frame.source_values.prepared) ||
+       frame.source_values.prepared.owner_before(cache.prepared_owner)) {
         cache.parts.clear();
         cache.source_generation=frame.source_values.source_generation;cache.source_revision=frame.source_values.source_revision;
         cache.structural_revision=geometry.structural_revision;cache.object_to_world=frame.object_to_world;
-        cache.depth_state=depth_state;cache.light_axes=coverage.light_axes;cache.valid=true;
+        cache.depth_state=depth_state;cache.light_axes=coverage.light_axes;
+        cache.prepared_owner=frame.source_values.prepared;cache.valid=true;cache.order_stale=true;
+    } else if(cache.light_axes!=coverage.light_axes) {
+        // A sun move changes only the light-space bounds; bounds, commands,
+        // far commands and prepared parts follow geometry, LOD and the
+        // prepared table, which the keys above hold (zone3 rebuilt all
+        // ~3,300 parts every ~42 presents for this: ~2.4 ms).
+        for(auto& part:cache.parts)
+            if(part.valid)retained_world_light_contribution(part.bounds,true,coverage,part.light_bounds);
+        cache.light_axes=coverage.light_axes;
     }
+    // The same depth values for every terrain caster of this call.
+    OwnedTerrainPreparedPart::DepthValues depth{};
+    depth.object_to_world=frame.object_to_world;
+    depth.state[0]=frame.shadow_material.cull_mode;depth.state[1]=frame.shadow_material.fill_mode;
+    depth.state[2]=static_cast<UINT>(NativeOpacityClass::opaque);depth.alpha=1;
     const auto& spatial_parts=frame.front_end.spatial_parts;
     cache.parts.resize(spatial_parts.size());
-    casters.reserve(casters.size()+spatial_parts.size()/4);commands.reserve(commands.size()+spatial_parts.size()/4);
+    if(cache.order_stale || cache.order.size()!=spatial_parts.size()) {
+        cache.order.resize(spatial_parts.size());
+        for(std::size_t index=0;index<spatial_parts.size();++index)cache.order[index]=static_cast<std::uint32_t>(index);
+        std::stable_sort(cache.order.begin(),cache.order.end(),[&](std::uint32_t a,std::uint32_t b) {
+            const auto& x=spatial_parts[a];const auto& y=spatial_parts[b];
+            if(x.source_sector!=y.source_sector)return x.source_sector<y.source_sector;
+            if(x.material!=y.material)return x.material<y.material;
+            return x.subpart_mask<y.subpart_mask;
+        });
+        cache.order_stale=false;
+    }
+    // Sized by the previous emission (its demand), so the outputs do not
+    // regrow while ~3,000 casters are appended.
+    const std::size_t first_emitted=casters.size();
+    const std::size_t expected=(std::max)(cache.emitted,spatial_parts.size()/4);
+    casters.reserve(casters.size()+expected);commands.reserve(commands.size()+expected);
     auto& prepared_parts=frame.source_values.prepared->parts;
-    for(std::size_t spatial_index=0;spatial_index<spatial_parts.size();++spatial_index) {
+    for(const auto spatial_index:cache.order) {
         const auto& spatial=spatial_parts[spatial_index];
         const auto sector=spatial.source_sector;
         const auto material=static_cast<std::uint32_t>(spatial.material);
@@ -16845,6 +17772,7 @@ bool append_owned_terrain_shadow_values_incremental(std::vector<RetainedShadowCa
         if(first==4)return false;
         auto& part=cache.parts[spatial_index];
         if(!part.valid || part.sector!=sector || part.material!=material || part.subparts!=spatial.subpart_mask) {
+            if(part.valid)cache.order_stale=true;
             part=TerrainShadowPartCache::Part{};
             OwnedTerrainCommand probe{};
             probe.source_sector=sector;probe.material=static_cast<std::uint16_t>(material);
@@ -16866,40 +17794,54 @@ bool append_owned_terrain_shadow_values_incremental(std::vector<RetainedShadowCa
         const std::uint32_t signature=near_command.lod|(near_command.lu_higher?4u:0u)|(near_command.rd_higher?8u:0u);
         if(part.signature!=signature) {
             near_command.spatial_index=static_cast<std::uint32_t>(spatial_index);
-            part.details[0]={true,near_command};part.signature=signature;
+            part.details[0]={true,near_command,nullptr};part.signature=signature;
         }
         if((mask&0x18u) && !part.details[1].present) {
             OwnedTerrainCommand far_command{};
             if(!owned_terrain_far_shadow_command(frame.front_end,sector,material,spatial.subpart_mask,far_command))return false;
             far_command.spatial_index=static_cast<std::uint32_t>(spatial_index);
-            part.details[1]={true,far_command};
+            part.details[1]={true,far_command,nullptr};
         }
-        for(unsigned detail=0;detail<2;++detail) {
+        // Near before far unless the far variant sorts first (same part key
+        // order as the caster sort below).
+        const auto variant_of=[](const OwnedTerrainCommand& command) {
+            return UINT(command.lod)|(command.lu_higher?4u:0u)|(command.rd_higher?8u:0u);};
+        const bool far_first=(mask&0x07u) && (mask&0x18u) && part.details[0].present && part.details[1].present &&
+            (part.details[1].command.subpart_mask<part.details[0].command.subpart_mask ||
+             (part.details[1].command.subpart_mask==part.details[0].command.subpart_mask &&
+              variant_of(part.details[1].command)<variant_of(part.details[0].command)));
+        for(unsigned step=0;step<2;++step) {
+            const unsigned detail=far_first?1u-step:step;
             const auto detail_mask=static_cast<std::uint8_t>(mask&(detail==0?0x07u:0x18u));
-            if(!detail_mask || !part.details[detail].present)continue;
+            auto& cached=part.details[detail];
+            if(!detail_mask || !cached.present)continue;
             OwnedTerrainShadowCommand item{};
-            item.command=part.details[detail].command;item.bounds=part.bounds;item.light_bounds=part.light_bounds;
+            item.command=cached.command;item.bounds=part.bounds;item.light_bounds=part.light_bounds;
             item.mask=detail_mask;
-            OwnedTerrainPreparedPart::DepthValues depth{};
-            depth.object_to_world=frame.object_to_world;
-            depth.state[0]=frame.shadow_material.cull_mode;depth.state[1]=frame.shadow_material.fill_mode;
-            depth.state[2]=static_cast<UINT>(NativeOpacityClass::opaque);depth.alpha=1;
             const UINT variant=item.command.lod|(item.command.lu_higher?4u:0u)|(item.command.rd_higher?8u:0u);
-            const std::array<UINT,4> key{sector,material,item.command.subpart_mask,variant};
-            if(prepared_parts.size()>=65536 && prepared_parts.find(key)==prepared_parts.end())return false;
-            auto& prepared=prepared_parts[key];
-            if(!prepared.depth_revision || !(prepared.depth_values==depth)){
-                prepared.depth_values=depth;prepared.depth_revision=next_retained_shadow_revision();
+            if(!cached.prepared || !cached.depth_revision || cached.depth_writes!=g_terrain_depth_writes) {
+                if(!cached.prepared) {
+                    const std::array<UINT,4> key{sector,material,item.command.subpart_mask,variant};
+                    if(prepared_parts.size()>=65536 && prepared_parts.find(key)==prepared_parts.end())return false;
+                    cached.prepared=&prepared_parts[key];
+                }
+                auto& prepared=*cached.prepared;
+                if(!prepared.depth_revision || !(prepared.depth_values==depth)){
+                    prepared.depth_values=depth;prepared.depth_revision=next_retained_shadow_revision();
+                    ++g_terrain_depth_writes;
+                }
+                cached.depth_revision=prepared.depth_revision;cached.depth_writes=g_terrain_depth_writes;
             }
             RetainedShadowCasterValue value{};value.bounds=item.bounds;value.mask=detail_mask;
             value.light_bounds=item.light_bounds;
             value.revision={static_cast<std::int32_t>(sector),(material<<8u)|(UINT(item.command.subpart_mask)<<4u)|variant,
                 frame.source_values.source_generation,frame.source_values.source_generation,
-                frame.source_values.source_revision,prepared.depth_revision,true};
-            item.prepared=&prepared;item.revision=value.revision;
+                frame.source_values.source_revision,cached.depth_revision,true};
+            item.prepared=cached.prepared;item.revision=value.revision;
             casters.push_back(std::move(value));commands.push_back(std::move(item));
         }
     }
+    cache.emitted=casters.size()-first_emitted;
     return true;
 }
 
@@ -16943,11 +17885,14 @@ bool append_owned_terrain_shadow_values(std::vector<RetainedShadowCasterValue>& 
     if(!append_owned_terrain_shadow_values_incremental(casters,commands))return false;
     if(!coverage.valid)return true;
     // Stored in caster order (all terrain: sector, then part), so a frame
-    // that reuses it sorts only its dynamic casters.
-    std::sort(casters.begin()+first_caster,casters.end(),[](const auto& a,const auto& b) {
+    // that reuses it sorts only its dynamic casters. The incremental builder
+    // emits in this order; any sorted sequence is a valid result of the sort.
+    const auto caster_order=[](const auto& a,const auto& b) {
         if(a.revision.signed_id!=b.revision.signed_id)return a.revision.signed_id<b.revision.signed_id;
         return a.revision.part<b.revision.part;
-    });
+    };
+    if(!std::is_sorted(casters.begin()+first_caster,casters.end(),caster_order))
+        std::sort(casters.begin()+first_caster,casters.end(),caster_order);
     try {
         cache.casters.assign(casters.begin()+first_caster,casters.end());
         cache.commands.assign(commands.begin()+first_command,commands.end());
@@ -17036,6 +17981,7 @@ bool append_owned_terrain_shadow_values_uncached(std::vector<RetainedShadowCaste
                 auto& prepared=parts[key];
                 if(!prepared.depth_revision || !(prepared.depth_values==depth)){
                     prepared.depth_values=depth;prepared.depth_revision=next_retained_shadow_revision();
+                    ++g_terrain_depth_writes;
                 }
                 value.revision={static_cast<std::int32_t>(sector),(material<<8u)|(UINT(item.command.subpart_mask)<<4u)|variant,
                     frame.source_values.source_generation,frame.source_values.source_generation,
@@ -17049,14 +17995,18 @@ bool append_owned_terrain_shadow_values_uncached(std::vector<RetainedShadowCaste
 
 template<class ShadowFrame>
 bool submit_owned_terrain_shadow_parts(const OwnedTerrainShadowCommand* commands,std::size_t count,
-    std::uint8_t dirty,const ShadowFrame& shadows,bool collect,NativeGeometryResult* failure=nullptr) {
+    std::uint8_t dirty,const ShadowFrame& shadows,bool collect,NativeGeometryResult* failure=nullptr,
+    const std::vector<std::uint8_t>* only=nullptr) {
     auto& frame=g_owned_terrain_frame;
     for(std::size_t index=0;index<count;++index) {
+        if(only && (index>=only->size() || !(*only)[index]))continue;
         const auto& item=commands[index];
         std::uint8_t mask=item.mask&dirty;
         if(collect)mask=owned_static_scroll_mask(shadows,item.light_bounds,mask,item.revision.terrain?
             (std::uint64_t(std::uint32_t(item.revision.signed_id))<<32)|item.revision.part:0);
-        for(unsigned slice=0;slice<shadows.slices.size();++slice)
+        // Registration (!collect) receives the mask this collection already
+        // culled against the same frame's slices: no second visibility walk.
+        if(collect)for(unsigned slice=0;slice<shadows.slices.size();++slice)
             if((mask&(1u<<slice)) && !retained_world_bounds_visible(item.bounds,shadows.slices[slice].world_to_light))
                 mask&=static_cast<std::uint8_t>(~(1u<<slice));
         if(!mask)continue;
@@ -17239,9 +18189,20 @@ bool append_owned_shadow_source_values(std::vector<RetainedShadowCasterValue>& c
                 const auto dirty=[&](const RetainedShadowCasterValue& value){
                     return std::binary_search(changes->dirty_visuals.begin(),changes->dirty_visuals.end(),
                         value.revision.signed_id);};
-                // Removed values keep store (caster) order.
+                // Removed values keep store (caster) order. The store holds
+                // only visual casters sorted by (id, part), so each dirty id
+                // is one range found by search, not a walk of every caster.
                 std::vector<RetainedShadowCasterValue> removed;
-                for(const auto& value:store.casters)if(dirty(value))removed.push_back(value);
+                {
+                    auto from=store.casters.begin();
+                    for(const auto id:changes->dirty_visuals) {
+                        from=std::lower_bound(from,store.casters.end(),id,
+                            [](const RetainedShadowCasterValue& value,std::int32_t key){return value.revision.signed_id<key;});
+                        auto to=from;
+                        while(to!=store.casters.end() && to->revision.signed_id==id)++to;
+                        removed.insert(removed.end(),from,to);from=to;
+                    }
+                }
                 std::vector<RetainedShadowCasterValue> fresh;
                 if(!append_owned_static_shadow_values(fresh,changes->time_active_visuals,&changes->dirty_visuals))return false;
                 for(auto& value:fresh)value.mask=0x1f;
@@ -17322,6 +18283,333 @@ bool append_owned_shadow_source_values(std::vector<RetainedShadowCasterValue>& c
     return true;
 }
 
+// Far-cascade terrain shadow meshes ahead of time. The far cascades draw
+// every caster sector at the fixed far command (LOD 2, no stitching), so
+// that set is camera-independent and bounded by the map's spatial parts.
+// Created on first use instead, a pan that moves the far cascades over new
+// ground created up to 325 of them in one frame (frame accounting
+// 2026-10-13: 163/163 and 325/325 first creations were terrain, depth-only,
+// LOD 2; about 40 us each on the renderer thread). This walks the same parts
+// and far commands as append_owned_terrain_shadow_values and asks the
+// renderer for each mesh only (prepare_only), in time slices: long ones while
+// the load is held, short ones after. A new terrain source restarts it.
+struct TerrainFarShadowPrewarm {
+    std::uint64_t source_generation = 0, source_revision = 0, structural_revision = 0;
+    const void* prepared = nullptr;
+    std::size_t cursor = 0, created = 0, failed = 0;
+    std::int64_t ticks = 0;
+    bool done = false;
+    const char* first_failure = nullptr;   // the first failing stage, reported once
+    HRESULT first_failure_hr = S_OK;
+};
+thread_local TerrainFarShadowPrewarm g_terrain_far_shadow_prewarm;
+// Config terrain_far_shadow_prewarm (renderer begin_scene, every frame). Off
+// stops the walk at once; meshes are then created on first use as before.
+std::atomic<bool> g_terrain_far_shadow_prewarm_enabled{true};
+
+void prewarm_owned_terrain_far_shadow_meshes() noexcept {
+    if(!g_terrain_far_shadow_prewarm_enabled.load(std::memory_order_relaxed))return;
+    try {
+        auto& frame=g_owned_terrain_frame;
+        if(!frame.source_values.terrain || !frame.source_values.geometry || !frame.source_values.prepared ||
+           !frame.shadow_material.enabled || !g_native_sink_submit || !g_native_sink_context)return;
+        auto& state=g_terrain_far_shadow_prewarm;
+        const auto& geometry=*frame.source_values.geometry;
+        if(state.source_generation!=frame.source_values.source_generation ||
+           state.source_revision!=frame.source_values.source_revision ||
+           state.structural_revision!=geometry.structural_revision ||
+           state.prepared!=frame.source_values.prepared.get()) {
+            state={};
+            state.source_generation=frame.source_values.source_generation;
+            state.source_revision=frame.source_values.source_revision;
+            state.structural_revision=geometry.structural_revision;
+            state.prepared=frame.source_values.prepared.get();
+        }
+        if(state.done)return;
+        const std::uint64_t epoch=bridge_current_world_epoch();
+        const bool held=g_load_reveal_enabled.load(std::memory_order_relaxed) && epoch &&
+            epoch!=g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
+        const std::int64_t frequency=static_cast<std::int64_t>(bridge_frequency());
+        const std::int64_t budget=frequency*(held?25:2)/1000;
+        const std::int64_t begin=bridge_now();
+        const auto& source=*frame.source_values.terrain;
+        const auto& spatial_parts=frame.front_end.spatial_parts;
+        while(state.cursor<spatial_parts.size()) {
+            const auto spatial_index=state.cursor++;
+            const auto& spatial=spatial_parts[spatial_index];
+            const auto material=static_cast<std::uint32_t>(spatial.material);
+            if(!owned_terrain_base_shadow_material(source,material))continue;
+            OwnedTerrainCommand far_command{};
+            const auto failure=[&](const char* stage,HRESULT hr=S_OK) {
+                ++state.failed;
+                if(!state.first_failure){state.first_failure=stage;state.first_failure_hr=hr;}
+            };
+            if(!owned_terrain_far_shadow_command(frame.front_end,spatial.source_sector,material,spatial.subpart_mask,far_command)) {
+                failure("far_command");continue;
+            }
+            far_command.spatial_index=static_cast<std::uint32_t>(spatial_index);
+            OwnedTerrainSourceDecodeContext context{};NativeGeometryView* source_view=nullptr;
+            if(!source_terrain_world_record(frame.source_values,frame.front_end,far_command,nullptr,
+                   {true,false,0x18},context,source_view,false) || !source_view) { failure("world_record");continue; }
+            if(!apply_owned_terrain_world_transform(*source_view)) { failure("world_transform");continue; }
+            NativeGeometryView view=*source_view;
+            view.prepare_only=true;
+            NativeGeometryResult result{};
+            if(g_native_sink_submit(g_native_sink_context,view,result))++state.created;
+            else failure(result.failure_operation?result.failure_operation:"sink",result.failure_hresult);
+            if(bridge_now()-begin>=budget)break;
+        }
+        state.ticks+=bridge_now()-begin;
+        if(state.cursor>=spatial_parts.size()) {
+            state.done=true;
+            char detail[256];
+            std::snprintf(detail,sizeof(detail),"parts=%zu prepared=%zu failed=%zu ms=%.1f first_failure=%s hr=%08lx",
+                spatial_parts.size(),state.created,state.failed,1000.0*double(state.ticks)/double(frequency),
+                state.first_failure?state.first_failure:"none",static_cast<unsigned long>(state.first_failure_hr));
+            append_bridge_event("terrain_far_shadow_prewarm",detail,true);
+        }
+    } catch(...) {
+        g_terrain_far_shadow_prewarm.done=true;
+        append_bridge_event("terrain_far_shadow_prewarm","stopped: allocation failure",false);
+    }
+}
+
+// Near terrain meshes ahead of the camera. The near sun maps (C0-C2) draw
+// each base spatial part at its render command (LOD 0 with terrain LOD off),
+// and transparent terrain draws each visible (sector, material) piece; both
+// were created on first use, in bursts as a pan brought new ground into the
+// near maps or the view (frame accounting 2026-10-14, Suslanger cascade
+// route: every pan-frame terrain creation was LOD 0, up to 77 in one frame).
+// Unlike the far set this depends on the camera, so it is a region around
+// it: parts whose light bounds reach a near map's receiver square widened by
+// kNearPrewarmLightMargin of its half extent per side, and transparent pieces
+// (base pieces too with terrain LOD on) inside a camera frustum widened by
+// kNearPrewarmViewMargin. Missing meshes are queued nearest first and created
+// prepare-only after the sun pass in a slice sized by the queue (cleared in
+// about eight frames, 0.3-2 ms; 25 ms while the load is held). A mesh the
+// queue has not reached yet is still created on first use, as before.
+struct TerrainNearPrewarm {
+    std::uint64_t source_generation = 0, source_revision = 0, structural_revision = 0;
+    const void* prepared = nullptr;
+    // Per spatial part: the command variant + 1 last prepared (0 none).
+    std::vector<std::uint32_t> depth_warmed, color_warmed;
+    std::vector<std::pair<float,std::uint32_t>> queue;   // distance squared, spatial index | colour bit
+    std::size_t head = 0;
+    std::array<float,16> scanned_clip{};
+    std::uint32_t frames_since_scan = 0;
+    bool failure_reported = false;
+};
+thread_local TerrainNearPrewarm g_terrain_near_prewarm;
+constexpr std::uint32_t kNearPrewarmColor = 0x80000000u;
+constexpr float kNearPrewarmLightMargin = 0.5f;
+constexpr float kNearPrewarmViewMargin = 0.5f;
+
+void prewarm_owned_terrain_near_meshes() noexcept {
+    if(!g_terrain_far_shadow_prewarm_enabled.load(std::memory_order_relaxed))return;
+    try {
+        auto& frame=g_owned_terrain_frame;
+        if(!frame.source_values.terrain || !frame.source_values.geometry || !frame.source_values.prepared ||
+           !frame.front_end.spatial_ready || !g_native_sink_submit || !g_native_sink_context)return;
+        auto& state=g_terrain_near_prewarm;
+        const auto& geometry=*frame.source_values.geometry;
+        const auto& spatial_parts=frame.front_end.spatial_parts;
+        if(state.source_generation!=frame.source_values.source_generation ||
+           state.source_revision!=frame.source_values.source_revision ||
+           state.structural_revision!=geometry.structural_revision ||
+           state.prepared!=frame.source_values.prepared.get() ||
+           state.depth_warmed.size()!=spatial_parts.size()) {
+            state={};
+            state.source_generation=frame.source_values.source_generation;
+            state.source_revision=frame.source_values.source_revision;
+            state.structural_revision=geometry.structural_revision;
+            state.prepared=frame.source_values.prepared.get();
+            state.depth_warmed.assign(spatial_parts.size(),0);
+            state.color_warmed.assign(spatial_parts.size(),0);
+            state.frames_since_scan=UINT32_MAX-1;
+        }
+        const auto& source=*frame.source_values.terrain;
+        const auto& inputs=frame.front_end.inputs;
+        const auto threshold=source.texture_count+2u;
+        const auto variant_of=[](const OwnedTerrainCommand& command) {
+            return std::uint32_t(command.lod)|(command.lu_higher?4u:0u)|(command.rd_higher?8u:0u);};
+        // The (sector, material) piece starting at a spatial index: all its
+        // parts, as the front end and the terrain set draw it.
+        const auto piece_command=[&](std::uint32_t first,OwnedTerrainCommand& command) {
+            const auto sector=spatial_parts[first].source_sector;const auto material=spatial_parts[first].material;
+            std::uint8_t mask=0;
+            for(std::size_t index=first;index<spatial_parts.size() && spatial_parts[index].source_sector==sector &&
+                spatial_parts[index].material==material;++index)mask=static_cast<std::uint8_t>(mask|spatial_parts[index].subpart_mask);
+            if(!owned_terrain_render_command(frame.front_end,sector,material,mask,command))return false;
+            command.spatial_index=first;return true;
+        };
+        const auto part_command=[&](std::uint32_t index,OwnedTerrainCommand& command) {
+            const auto& spatial=spatial_parts[index];
+            if(!owned_terrain_render_command(frame.front_end,spatial.source_sector,spatial.material,spatial.subpart_mask,command))
+                return false;
+            command.spatial_index=index;return true;
+        };
+        if(state.frames_since_scan<UINT32_MAX)++state.frames_since_scan;
+        // Rescan after the camera moved; at most every fourth frame, since the
+        // margins hold several frames of pan.
+        if(inputs.object_to_clip!=state.scanned_clip && state.frames_since_scan>=4) {
+            state.queue.clear();state.head=0;state.frames_since_scan=0;state.scanned_clip=inputs.object_to_clip;
+            const auto& coverage=g_owned_visual_world_frame.coverage;
+            std::array<NativeWorldBounds,3> near_squares{};
+            if(coverage.valid && coverage.directional)
+                for(unsigned slice=0;slice<3;++slice) {
+                    auto value=coverage.slices[slice].receivers_in_light;
+                    if(!value.valid)continue;
+                    for(unsigned axis=0;axis<2;++axis) {
+                        const float margin=(value.maximum[axis]-value.minimum[axis])*.5f*kNearPrewarmLightMargin;
+                        value.minimum[axis]-=margin;value.maximum[axis]+=margin;
+                    }
+                    near_squares[slice]=value;
+                }
+            const auto& part_cache=g_terrain_shadow_part_cache;
+            const bool light_ready=coverage.valid && part_cache.valid &&
+                part_cache.source_generation==frame.source_values.source_generation &&
+                part_cache.source_revision==frame.source_values.source_revision &&
+                part_cache.structural_revision==geometry.structural_revision &&
+                part_cache.light_axes==coverage.light_axes && part_cache.parts.size()==spatial_parts.size();
+            // Terrain LOD off: every command is LOD 0 unstitched, so a part prepared
+            // once needs no command to be checked again.
+            const bool fixed_variant=inputs.force_full_detail;
+            auto clip=inputs.object_to_clip;
+            for(unsigned index=0;index<8;++index)clip[index]/=1.f+kNearPrewarmViewMargin;
+            const auto distance=[&](const NativeWorldBounds& bounds) {
+                float sum=0;
+                for(unsigned axis=0;axis<3;++axis) {
+                    const float value=inputs.terrain_origin[axis]+(bounds.minimum[axis]+bounds.maximum[axis])*.5f-
+                        inputs.camera_position[axis];
+                    sum+=value*value;
+                }
+                return sum;
+            };
+            for(std::size_t begin=0;begin<spatial_parts.size();) {
+                const auto sector=spatial_parts[begin].source_sector;const auto material=spatial_parts[begin].material;
+                std::size_t end=begin;
+                while(end<spatial_parts.size() && spatial_parts[end].source_sector==sector &&
+                      spatial_parts[end].material==material)++end;
+                const auto first=static_cast<std::uint32_t>(begin);
+                // With terrain LOD off the base pieces are the persistent
+                // terrain set, created when it is registered.
+                if((material>=threshold || !inputs.force_full_detail) && !(fixed_variant && state.color_warmed[first])) {
+                    float nearest=INFINITY;
+                    for(std::size_t index=begin;index<end;++index)
+                        if(retained_world_bounds_visible(spatial_parts[index].local_bounds,clip))
+                            nearest=(std::min)(nearest,distance(spatial_parts[index].local_bounds));
+                    OwnedTerrainCommand command{};
+                    if(nearest<INFINITY && piece_command(first,command) && state.color_warmed[first]!=variant_of(command)+1u)
+                        state.queue.push_back({nearest,first|kNearPrewarmColor});
+                }
+                if(light_ready && material<threshold && owned_terrain_base_shadow_material(source,material))
+                    for(std::size_t index=begin;index<end;++index) {
+                        const auto& light=part_cache.parts[index];
+                        if(!light.valid || !light.light_bounds.valid || (fixed_variant && state.depth_warmed[index]))continue;
+                        const auto& caster=light.light_bounds;
+                        bool reaches=false;
+                        for(const auto& receiver:near_squares)
+                            if(receiver.valid && caster.minimum[2]<=receiver.maximum[2] &&
+                               caster.maximum[0]>=receiver.minimum[0] && caster.minimum[0]<=receiver.maximum[0] &&
+                               caster.maximum[1]>=receiver.minimum[1] && caster.minimum[1]<=receiver.maximum[1]){reaches=true;break;}
+                        OwnedTerrainCommand command{};
+                        if(reaches && part_command(static_cast<std::uint32_t>(index),command) &&
+                           state.depth_warmed[index]!=variant_of(command)+1u)
+                            state.queue.push_back({distance(spatial_parts[index].local_bounds),static_cast<std::uint32_t>(index)});
+                    }
+                begin=end;
+            }
+            std::sort(state.queue.begin(),state.queue.end());
+        }
+        if(state.head>=state.queue.size())return;
+        const std::uint64_t epoch=bridge_current_world_epoch();
+        const bool held=g_load_reveal_enabled.load(std::memory_order_relaxed) && epoch &&
+            epoch!=g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
+        const std::int64_t frequency=static_cast<std::int64_t>(bridge_frequency());
+        const std::int64_t remaining=static_cast<std::int64_t>(state.queue.size()-state.head);
+        const std::int64_t budget_us=held?25000:std::clamp<std::int64_t>(remaining*40/8,300,2000);
+        const std::int64_t budget=frequency*budget_us/1000000;
+        const std::int64_t begin=bridge_now();
+        while(state.head<state.queue.size()) {
+            const auto entry=state.queue[state.head++].second;
+            const bool color=(entry&kNearPrewarmColor)!=0;
+            const auto index=entry&~kNearPrewarmColor;
+            if(index>=spatial_parts.size())continue;
+            OwnedTerrainCommand command{};
+            if(!(color?piece_command(index,command):part_command(index,command)))continue;
+            auto& warmed=(color?state.color_warmed:state.depth_warmed)[index];
+            const auto signature=variant_of(command)+1u;
+            if(warmed==signature)continue;
+            warmed=signature;   // failures too: never retried every frame
+            const char* stage=nullptr;HRESULT hr=S_OK;
+            OwnedTerrainSourceDecodeContext context{};NativeGeometryView* source_view=nullptr;
+            // Mesh content does not depend on the contribution; a light bit
+            // lets the record build without the colour pass's atlas phases.
+            if(!source_terrain_world_record(frame.source_values,frame.front_end,command,nullptr,
+                   {true,false,color?std::uint8_t(0x01):std::uint8_t(0x07)},context,source_view,false) || !source_view)
+                stage="world_record";
+            else if(!apply_owned_terrain_world_transform(*source_view))stage="world_transform";
+            else {
+                NativeGeometryView view=*source_view;
+                view.prepare_only=true;
+                NativeGeometryResult result{};
+                if(!g_native_sink_submit(g_native_sink_context,view,result)) {
+                    stage=result.failure_operation?result.failure_operation:"sink";hr=result.failure_hresult;
+                }
+            }
+            if(stage && !state.failure_reported) {
+                state.failure_reported=true;
+                char detail[160];
+                std::snprintf(detail,sizeof(detail),"first_failure=%s hr=%08lx sector=%u material=%u color=%d",
+                    stage,static_cast<unsigned long>(hr),command.source_sector,unsigned(command.material),color?1:0);
+                append_bridge_event("terrain_near_prewarm_failed",detail,false);
+            }
+            if(bridge_now()-begin>=budget)break;
+        }
+    } catch(...) {
+        g_terrain_near_prewarm.queue.clear();g_terrain_near_prewarm.head=0;
+    }
+}
+
+// Hands the renderer the static caster store: the whole store when its
+// revision changed since the renderer last took it (or the renderer lost
+// it), otherwise only the revision. During a static-layer redraw the
+// renderer draws its baked store and returns casters it must register.
+bool send_owned_static_store(bool force_store,std::vector<RetainedShadowCasterValue>& missing) {
+    auto& store=g_owned_static_casters;
+    if(!g_native_sink_shadow_static_depth)return false;
+    const auto send=[&](bool whole){
+        return g_native_sink_shadow_static_depth(g_native_sink_context,
+            whole?store.casters.data():nullptr,whole?static_cast<std::uint32_t>(store.casters.size()):0u,
+            store.revision,missing);
+    };
+    const bool whole=force_store || store.renderer_revision!=store.revision;
+    if(send(whole)){store.renderer_revision=store.revision;return true;}
+    // The renderer released its copy (world or device reset): send it whole.
+    if(!whole && send(true)){store.renderer_revision=store.revision;return true;}
+    store.renderer_revision=0;
+    return false;
+}
+
+// A rejected sun shadow pass omits the frame's owned world; every such
+// frame is counted and the reason logged (the first 16, then every 600th),
+// so a repeating failure is never silent after the first report.
+void report_owned_shadow_pass_failure(const char* reason) noexcept {
+    static std::uint64_t failures=0;
+    ++failures;
+    if(failures>16 && failures%600)return;
+    char detail[160];
+    std::snprintf(detail,sizeof(detail),"reason=%s failures=%llu",reason?reason:"unknown",
+        static_cast<unsigned long long>(failures));
+    append_bridge_event("owned_shadow_pass_rejected",detail,false);
+}
+
+thread_local std::vector<OwnedTerrainShadowCommand> g_terrain_command_storage;
+// execute_owned_shadow_pass scratch (plain values), cleared at each use.
+thread_local std::vector<RetainedShadowCasterValue> g_shadow_missing_static_storage;
+thread_local std::vector<std::uint8_t> g_shadow_terrain_only_storage;
+thread_local std::vector<NativeTerrainShadowEntry> g_shadow_terrain_entry_storage;
+thread_local std::vector<std::uint32_t> g_shadow_terrain_absent_storage;
 bool execute_owned_shadow_pass(bool terrain_enabled,
     RetainedStaticScene& terrain_scene=retained_visual_scene(),
     const OwnedShadowSourceDelta* delta=nullptr,
@@ -17335,7 +18623,10 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
     bool collecting=false,batch=false;
     try {
         auto& casters=frame.shadow_casters;casters.clear();
-        std::vector<OwnedTerrainShadowCommand> terrain_commands;
+        // Kept capacity: ~3,000 commands (~0.5 MB) were allocated and regrown
+        // on every frame. Emptied when the pass ends (texture references).
+        auto& terrain_commands=g_terrain_command_storage;terrain_commands.clear();
+        struct EmptyAtExit { std::vector<OwnedTerrainShadowCommand>& v; ~EmptyAtExit(){v.clear();} } empty_at_exit{terrain_commands};
         {
             CityRetainedOwnerGuard caster_timing(CityRetainedOwner::caster_values);
             if(!append_owned_shadow_source_values(casters,terrain_commands,terrain_enabled,
@@ -17377,6 +18668,12 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
             }
         }
         frame.observed_retained_mask=cull.retained_mask;frame.observed_scroll_mask=cull.scroll_mask;
+        if(frame_acct::enabled()) {
+            for(unsigned slice=0;slice<5;++slice)if(dirty&(1u<<slice))frame_acct::add(frame_acct::sun_dirty_slices,1);
+            if(dirty&1u)frame_acct::add(frame_acct::sun_slice0_dirty,1);
+            if(dirty&8u)frame_acct::add(frame_acct::sun_slice3_dirty,1);
+            if(dirty&16u)frame_acct::add(frame_acct::sun_slice4_dirty,1);
+        }
         frame.shadow_source_diagnostic.dirty_mask|=dirty;
         if(g_bridge_sample.active)g_bridge_sample.shadow_dirty_mask|=dirty;
         collecting=true;
@@ -17395,6 +18692,7 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
             const auto submit_selected=[&]() {
                 if(frame.depth_selected.size()>UINT_MAX)throw "owned_shadow_selection_count";
                 if(!frame.depth_selected.empty()) {
+                    frame_acct::add(frame_acct::sun_depth_parts,static_cast<std::int64_t>(frame.depth_selected.size()));
                     OwnedDepthRegistration<OwnedSunDepthCull> registration{terrain_commands,cull};
                     NativeDepthSubmission submission{frame.depth_selected.data(),static_cast<UINT>(frame.depth_selected.size()),
                         &frame.coverage.world_to_clip,&registration,&register_owned_depth_part<OwnedSunDepthCull>};
@@ -17421,32 +18719,39 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
             if(static_dirty) {
                 if(!g_native_sink_begin_batch(g_native_sink_context,SemanticKind::figure))throw "owned_shadow_batch";
                 batch=true;
-                std::vector<RetainedShadowCasterValue> missing_static;
+                auto& missing_static=g_shadow_missing_static_storage;missing_static.clear();
                 if(frame.persistent_static_shadows) {
-                    // When every static-dirty map scrolls, only the casters
-                    // reaching an exposed strip are sent (the store walk was
-                    // about 1 ms per pan frame over all 8060 casters).
-                    const auto& store=g_owned_static_casters;
-                    const RetainedShadowCasterValue* sent=store.casters.data();
-                    std::size_t sent_count=store.casters.size();
-                    std::vector<RetainedShadowCasterValue> strip;
-                    if(!(static_dirty&~cull.scroll_mask) && store.summary.valid &&
-                       store.summary.light.size()==store.casters.size()) {
-                        for(std::size_t index=0;index<store.casters.size();++index)
-                            if(owned_static_scroll_mask(cull,store.summary.light[index],
-                                   static_cast<std::uint8_t>(store.casters[index].mask&static_dirty),0))
-                                strip.push_back(store.casters[index]);
-                        sent=strip.data();sent_count=strip.size();
+                    // The renderer draws its baked copy of the store (GPU
+                    // culled per map and scroll strip); the store itself is
+                    // sent only when its revision changed. Returned casters
+                    // have no current record yet and are registered below.
+                    if(!send_owned_static_store(false,missing_static))throw "owned_shadow_static_records";
+                }
+                // Terrain casters: the renderer draws the ones it holds baked
+                // records for with these final masks (dirty static maps,
+                // scroll strip and entered parts, as the depth path applies
+                // them); the rest go through the depth path below.
+                auto& terrain_only=g_shadow_terrain_only_storage;terrain_only.clear();
+                const std::vector<std::uint8_t>* terrain_subset=nullptr;
+                if(layered && g_native_sink_shadow_terrain_bake && !terrain_commands.empty()) {
+                    auto& entries=g_shadow_terrain_entry_storage;entries.clear();entries.reserve(terrain_commands.size());
+                    for(const auto& item:terrain_commands) {
+                        std::uint8_t mask=item.mask&static_dirty;
+                        mask=owned_static_scroll_mask(cull,item.light_bounds,mask,
+                            (std::uint64_t(std::uint32_t(item.revision.signed_id))<<32)|item.revision.part);
+                        entries.push_back({item.revision,mask});
                     }
-                    if(!g_native_sink_shadow_static_depth ||
-                       !g_native_sink_shadow_static_depth(g_native_sink_context,
-                           sent,static_cast<UINT>(sent_count),missing_static))
-                        throw "owned_shadow_static_records";
-                    if(sent_count==store.casters.size())
-                        g_owned_static_casters.renderer_revision=g_owned_static_casters.revision;
+                    auto& absent=g_shadow_terrain_absent_storage;absent.clear();
+                    if(g_native_sink_shadow_terrain_bake(g_native_sink_context,entries.data(),
+                           static_cast<std::uint32_t>(entries.size()),absent)) {
+                        terrain_only.assign(entries.size(),0);
+                        for(const auto index:absent)if(index<terrain_only.size())terrain_only[index]=1;
+                        terrain_subset=&terrain_only;
+                    }
                 }
                 if(!collect_owned_missing_static_depth(missing_static,static_dirty) ||
-                   !submit_owned_terrain_shadow_parts(terrain_commands.data(),terrain_commands.size(),static_dirty,cull,true) ||
+                   !submit_owned_terrain_shadow_parts(terrain_commands.data(),terrain_commands.size(),static_dirty,cull,true,
+                       nullptr,terrain_subset) ||
                    (!layered && !collect_owned_visual_depth(dirty,cull)))
                     throw "owned_shadow_part";
                 submit_selected();
@@ -17462,17 +18767,13 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
             }
         } else if(frame.persistent_static_shadows &&
                   g_owned_static_casters.renderer_revision!=g_owned_static_casters.revision) {
-            // Without a redraw the call only refreshes the renderer's record
-            // membership, which is unchanged while the store is.
-            g_owned_static_casters.renderer_revision=g_owned_static_casters.revision;
-            std::vector<RetainedShadowCasterValue> missing_static;
-            if(!g_native_sink_shadow_static_depth ||
-               !g_native_sink_shadow_static_depth(g_native_sink_context,
-                   g_owned_static_casters.casters.data(),static_cast<UINT>(g_owned_static_casters.casters.size()),missing_static))
-                throw "owned_shadow_static_records";
+            // Without a redraw the renderer only keeps the new store.
+            auto& missing_static=g_shadow_missing_static_storage;missing_static.clear();
+            if(!send_owned_static_store(true,missing_static))throw "owned_shadow_static_records";
         }
         const bool success=g_native_sink_shadow_end(g_native_sink_context,true);collecting=false;
         if(!success)throw "owned_shadow_end";
+        if(terrain_enabled){prewarm_owned_terrain_far_shadow_meshes();prewarm_owned_terrain_near_meshes();}
         frame.shadow_ready=true;
         startup_end(StartupStage::shadow,traced,"completed");
         return true;
@@ -17480,10 +18781,12 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
         startup_failure(StartupStage::shadow,reason);
         reject_owned_visual("shadow",reason);
         report_object_plan_failure(reason);
+        report_owned_shadow_pass_failure(reason);
     } catch(...) {
         startup_failure(StartupStage::shadow,"owned_shadow_allocation");
         reject_owned_visual("shadow","owned_shadow_allocation");
         report_object_plan_failure("owned_shadow_allocation");
+        report_owned_shadow_pass_failure("owned_shadow_allocation");
     }
     CityRetainedOwnerGuard cleanup_timing(CityRetainedOwner::depth_registration);
     if(batch)g_native_sink_end_batch(g_native_sink_context,false);
@@ -17521,6 +18824,76 @@ struct OwnedPointScene {
     double last_time=0;
 };
 thread_local OwnedPointScene g_point_scene;
+
+// Shelter map for owned precipitation (renderer_precipitation.cpp): the
+// persistent static caster store drawn straight down through the shadow depth
+// path into the renderer's one shelter slice. Baked when the renderer's
+// request (a snapped square around the view focus), the store or the world
+// epoch changes; units and animated objects are not in the store. A failed
+// bake is named once and not retried until one of them changes.
+void execute_owned_rain_occlusion_pass() noexcept {
+    auto& frame=g_owned_visual_world_frame;
+    const RainOcclusionRequest request=g_rain_request;
+    if(!frame.values||!request.active||!request.side||!(request.half>0)||!(request.span>0))return;
+    if(!g_native_sink_context||!g_native_sink_rain_begin||!g_native_sink_rain_end||!g_native_sink_begin_batch||
+       !g_native_sink_end_batch||!g_native_sink_shadow_static_depth||!g_native_sink_submit)return;
+    const auto& store=g_owned_static_casters;
+    if(!store.valid||!frame.shadows_enabled)return;
+    // The epoch captured with this frame (scene thread: the queued command's).
+    const auto epoch=bridge_current_world_epoch();
+    // A new square or world bakes at once. Static-object changes (the store
+    // revision moves whenever any journal-dirty static changes, which some
+    // maps do nearly every frame) re-bake at most every 60 world frames: a
+    // per-frame re-bake was hidden storm cost (run 6).
+    const bool request_changed=!g_rain_baked.attempted||g_rain_baked.serial!=request.serial||g_rain_baked.epoch!=epoch;
+    const bool store_changed=g_rain_baked.store_revision!=store.revision;
+    if(!request_changed&&!(store_changed&&frame.serial-g_rain_baked.frame>=60))return;
+    g_rain_baked={request.serial,store.revision,epoch,frame.serial,true};
+    NativePointShadowFrame faces{};auto& slice=faces.slices[0];
+    const float h=request.half;
+    slice.world_to_light={1/h,0,0,-request.center[0]/h, 0,1/h,0,-request.center[1]/h,
+                          0,0,-1/request.span,request.top/request.span, 0,0,0,1};
+    slice.camera_slice=slice.world_to_light;
+    slice.bias={2*h/float(request.side),1/request.span,0,0};
+    slice.enabled=true;
+    bool collecting=false,batch=false;
+    const auto failed=[&](const char* reason) {
+        if(batch)g_native_sink_end_batch(g_native_sink_context,false);
+        if(collecting)g_native_sink_rain_end(g_native_sink_context,false);
+        static const char* last=nullptr;
+        if(last!=reason){append_bridge_event("precip_shelter_failed",reason,true);last=reason;}
+    };
+    try {
+        if(!g_native_sink_rain_begin(g_native_sink_context,slice,request.side))throw "shelter_begin";
+        collecting=true;
+        if(!g_native_sink_begin_batch(g_native_sink_context,SemanticKind::figure))throw "shelter_batch";
+        batch=true;
+        // The renderer draws its baked static store (issue #162) into the
+        // shelter slice and returns the store casters without a current
+        // record that the slice reaches; those register through the depth path.
+        std::vector<RetainedShadowCasterValue> missing;
+        if(!send_owned_static_store(false,missing))throw "shelter_static_store";
+        frame.depth_selected.clear();
+        if(!collect_owned_missing_static_depth(missing,1))throw "shelter_missing_casters";
+        if(!frame.depth_selected.empty()) {
+            if(frame.depth_selected.size()>UINT_MAX)throw "shelter_selection_count";
+            const std::vector<OwnedTerrainShadowCommand> no_terrain;
+            OwnedDepthRegistration<NativePointShadowFrame> registration{no_terrain,faces};
+            NativeDepthSubmission submission{frame.depth_selected.data(),static_cast<UINT>(frame.depth_selected.size()),
+                &frame.coverage.world_to_clip,&registration,&register_owned_depth_part<NativePointShadowFrame>};
+            NativeGeometryView dispatch;dispatch.depth_submission=&submission;NativeGeometryResult result{};
+            if(!g_native_sink_submit(g_native_sink_context,dispatch,result))throw "shelter_submission";
+        }
+        frame.depth_selected.clear();
+        g_native_sink_end_batch(g_native_sink_context,true);batch=false;
+        const bool committed=g_native_sink_rain_end(g_native_sink_context,true);collecting=false;
+        if(!committed)throw "shelter_commit";
+    } catch(const char* reason) {
+        failed(reason);
+    } catch(...) {
+        failed("shelter_allocation");
+    }
+}
 
 void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& terrain_scene,
     bool /*terrain_static_stable*/,std::uint32_t class_flags,bool draw_undetected) noexcept {
@@ -17560,10 +18933,10 @@ void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& t
         if(!enabled){
             release_all();state={};
             if(g_native_sink_point_shadow_publish)g_native_sink_point_shadow_publish(g_native_sink_context,publication,stats);
-            terrain_scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::point,changes.revision);
+            terrain_scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::point,owned_scene_ack_revision(changes.revision));
             return;
         }
-        const auto epoch=lifecycle_observer().snapshot().positive_world_epoch;
+        const auto epoch=bridge_current_world_epoch(); // scene thread: the queued command's epoch
         const auto matches=point_shadow_matches(state.lights,lights);
         bool list_changed=state.lights.size()!=lights.size();std::size_t matched=0;
         for(std::size_t i=0;i<matches.size();++i){matched+=matches[i]<state.lights.size();list_changed|=matches[i]!=i;}
@@ -17581,7 +18954,8 @@ void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& t
         const bool reset=stats.reset_epoch||stats.reset_journal_full||stats.reset_class_flags||stats.reset_undetected;
         if(reset){++stats.reset;for(unsigned i=0;i<lights.size();++i)state.scheduler.invalidate(i);}        state.epoch=epoch;state.flags=class_flags;state.undetected=draw_undetected;
         double time=0;
-        const bool time_valid=read_owned_world_time(g_visual_game_image,time);
+        // Scene thread: the game thread's copied frame time, never a game read.
+        const bool time_valid=bridge_current_world_time(time);
         const double now=time_valid?time*kWeatherSecondsPerSegment:state.last_time;
         const float dt=state.last_time?float(std::min(.25,std::max(0.,now-state.last_time))):0;
         state.last_time=now;++state.frame;
@@ -17797,14 +19171,7 @@ void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& t
                 publication[i].merged=true;publication[i].shadow_center=shadow_shape(lights[i],lamp.bake_radius).center;}
             if(lamp.eligible&&!lamp.retiring&&!lamp.suppressed&&!lamp.moving&&lamp.static_slot>=0&&lamp.stale)++stats.budget;
         }
-        // Temporary: how clustered are shadow-casting lights (merge decision).
-        for(unsigned i=0;i<lights.size();++i){if(!lights[i].casts_shadow)continue;++stats.casting_lights;
-            double nearest=1e30;
-            for(unsigned j=0;j<lights.size();++j){if(j==i||!lights[j].casts_shadow)continue;
-                double d=0;for(unsigned a=0;a<3;++a){const double v=double(lights[i].center[a])-lights[j].center[a];d+=v*v;}
-                nearest=std::min(nearest,d);}
-            stats.neighbour_within_1+=nearest<=1;stats.neighbour_within_2+=nearest<=4;stats.neighbour_within_4+=nearest<=16;
-        }
+        for(const auto& light:lights)stats.casting_lights+=light.casts_shadow?1u:0u;
         {   // Cluster heads publish their merged centre; members sample the head's cube.
             std::vector<bool> head(lights.size(),false);
             for(int l:shadow_leader)if(l>=0)head[std::size_t(l)]=true;
@@ -17823,7 +19190,7 @@ void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& t
         // Empty and entirely reused frames consume history too. Invalidation has
         // already retired stale bakes even when their rebuild waits for budget.
         if(terrain_scene.shadow_source_revision()==changes.revision)
-            terrain_scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::point,changes.revision);
+            terrain_scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::point,owned_scene_ack_revision(changes.revision));
     }catch(...){
         // Failure leaves committed cubes intact. Remap even when the pass failed
         // before it could adopt this frame's light order.
@@ -17843,7 +19210,10 @@ bool append_owned_terrain_receiver_bounds(OwnedTerrainRuntimeFrame& terrain,
     // One receiver per visible sector: coverage clips every receiver against
     // the camera and each map, so per-command boxes multiplied that work while
     // their union changes the fitted envelopes only within the sector.
-    std::vector<NativeWorldBounds> sectors(terrain.source_values.terrain->sectors.size());
+    // Scratch kept across frames (a fresh per-sector vector was a heap round
+    // trip of ~100 KB on every frame the camera moved).
+    thread_local std::vector<NativeWorldBounds> sectors;
+    sectors.assign(terrain.source_values.terrain->sectors.size(),NativeWorldBounds{});
     for(const auto* commands:{&terrain.front_end.base_commands,&terrain.front_end.transparent_commands})
         for(const auto& command:*commands) {
             const auto& material=terrain.source_values.terrain->sectors[command.source_sector].materials[command.material];
@@ -18071,7 +19441,7 @@ void observe_shadow_reuse_inputs(const RetainedShadowInputDomain* cached,
     const RetainedShadowSourceChanges& changes,const std::array<float,16>& clip,
     const NativeWorldLighting& lighting,std::uint32_t flags,bool undetected,
     bool terrain_enabled,std::uint64_t revision){
-    auto& d=g_shadow_reuse_inputs;const auto epoch=lifecycle_observer().snapshot().positive_world_epoch;
+    auto& d=g_shadow_reuse_inputs;const auto epoch=bridge_current_world_epoch();
     if(d.epoch!=epoch){d={};d.epoch=epoch;}++d.attempts;
     using Cause=ShadowInputDifference;
     std::array<bool,static_cast<unsigned>(Cause::count)> diff{};
@@ -18113,6 +19483,12 @@ void observe_shadow_reuse_inputs(const RetainedShadowInputDomain* cached,
         }
     }
     for(unsigned i=0;i<diff.size();++i)d.counts[i]+=diff[i];
+}
+// The retained scene's shadow revision the preparation reasons about: on the
+// scene thread the one its values were copied at (later game-thread changes
+// belong to the next command), else the live one.
+std::uint64_t owned_shadow_current_revision(const RetainedStaticScene& scene) noexcept {
+    return g_scene_capture_revision ? g_scene_capture_revision : scene.shadow_source_revision();
 }
 ShadowInputDecision decide_owned_shadow_input(RetainedStaticScene& scene,
     const RetainedShadowInputDomain* cached,const RetainedShadowSourceChanges& changes,
@@ -18171,83 +19547,99 @@ ShadowInputDecision decide_owned_shadow_input(RetainedStaticScene& scene,
             if(!dirty&&!finished)note(ShadowInputDifference::renderer_end_failed);
             if(dirty)note(ShadowInputDifference::renderer_dirty);
             if(!dirty && finished &&
-               scene.shadow_source_revision()==cached->source_revision)
+               owned_shadow_current_revision(scene)==cached->source_revision)
                 result.route=ShadowInputRoute::reuse;
             else if(dirty)g_native_sink_shadow_end(g_native_sink_context,false);
-            if(scene.shadow_source_revision()!=cached->source_revision)note(ShadowInputDifference::source_changed_during_reuse);
+            if(owned_shadow_current_revision(scene)!=cached->source_revision)note(ShadowInputDifference::source_changed_during_reuse);
         }else note(ShadowInputDifference::renderer_begin_failed);
     }
     return result;
 }
 
-bool prepare_owned_world_shadows(void* scene,void* renderer,
-    const std::array<float,16>& world_to_clip) noexcept {
- PERF06_SCOPE("scene_shadow_prepare");
+// The seam's world preparation in two parts. The head reads game memory and
+// copies the frame's authoritative inputs (game thread); the rest prepares
+// shadows, values and submissions from that copy alone (the scene thread with
+// the render_thread option, else straight after the head).
+struct OwnedShadowInputs {
+    NativeFrameState pass{};
+    double time = 0;
+    std::uint32_t flags = 0;
+    bool draw_undetected = false;
+    std::uint64_t shadow_source_revision = 0;
+    std::shared_ptr<const RetainedVisualFrame> values;
+};
+
+void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInputs& in) {
+    std::int32_t visible_only=0,interface_kind=0;void* player=nullptr;
+    if(!g_visual_publication_active)throw "owned_shadow_publication_inactive";
+    if(!g_native_sink_frame_state || !g_native_sink_begin_batch ||
+       !g_native_sink_end_batch || !g_native_sink_submit)
+        throw "owned_shadow_sink_unavailable";
+    if(!g_native_sink_frame_state(g_native_sink_context,in.pass))
+        throw "owned_shadow_frame_state_unavailable";
+    if(in.pass.shadows_enabled && (!g_native_sink_shadow_begin || !g_native_sink_shadow_end))
+        throw "owned_shadow_sink_unavailable";
+#ifdef EID3D11_EMBEDDED
+    if(g_embedded_visual_inputs) {
+        if(!read_owned_world_time(nullptr,in.time))throw "owned_shadow_time_unreadable_or_invalid";
+        visible_only=g_embedded_visual_inputs->draw_undetected?0:1;interface_kind=1;
+        in.flags=g_embedded_visual_inputs->scene_flags;
+    } else
+#endif
+    {
+    if(!read_owned_world_time(g_visual_game_image,in.time))throw "owned_shadow_time_unreadable_or_invalid";
+    if(!visual_read(g_visual_game_image,0x39be6c,visible_only))throw "owned_shadow_visibility_setting_unreadable";
+    if(!visual_read(scene,0x20c,player))throw "owned_shadow_player_unreadable";
+    if(!visual_read(player,0x100,interface_kind))throw "owned_shadow_interface_unreadable";
+    if(!visual_read(scene,8,in.flags))throw "owned_shadow_flags_unreadable";
+    }
+    // This seam follows the original completed nonunit render-time writer.
+    // Read common values, never its camera list or a game animation method.
+    const char* object_failure = nullptr;
+#ifdef EID3D11_EMBEDDED
+    if(!g_embedded_visual_inputs)
+#endif
+    {
+        CityRetainedOwnerGuard pose_timing(CityRetainedOwner::nonunit_pose);
+        if (!publish_visual_object_poses(scene,&object_failure))
+            throw object_failure ? object_failure : "owned_shadow_object_values";
+    }
+    CityRetainedOwnerGuard lighting_timing(CityRetainedOwner::lighting_publish);
+    if(publish_retained_world_lighting(renderer)!=FigureFallbackReason::none)throw "owned_shadow_lighting_unavailable";
+    auto& shadow_scene=retained_visual_scene();
+    in.shadow_source_revision=shadow_scene.shadow_source_revision();
+    in.draw_undetected=!visible_only || interface_kind!=1;
+    lighting_timing.finish();
+    publish_highlight_state();
+    {
+        CityRetainedOwnerGuard values_timing(CityRetainedOwner::visual_frame_values);
+        const bool traced=startup_begin(StartupStage::visual_sample);
+        g_owned_visual_world_frame.values.reset();
+        in.values=shadow_scene.visual_frame_value(in.time,g_bridge_sample.active && bridge_profile_enabled());
+        startup_end(StartupStage::visual_sample,traced,"completed");
+    }
+}
+
+bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
+    const std::array<float,16>& world_to_clip) {
     auto& frame=g_owned_visual_world_frame;
-    if(frame.shadow_attempted)return frame.shadow_ready;
-    frame.active=true;frame.shadow_attempted=true;
-    frame.shadow_source_diagnostic={};
-    try {
-        std::int32_t visible_only=0,interface_kind=0;double time=0;
-        void* player=nullptr;std::uint32_t flags=0;
-        if(!g_visual_publication_active)throw "owned_shadow_publication_inactive";
-        if(!g_native_sink_frame_state || !g_native_sink_begin_batch ||
-           !g_native_sink_end_batch || !g_native_sink_submit)
-            throw "owned_shadow_sink_unavailable";
-        NativeFrameState pass{};
-        if(!g_native_sink_frame_state(g_native_sink_context,pass))
-            throw "owned_shadow_frame_state_unavailable";
-        if(pass.shadows_enabled && (!g_native_sink_shadow_begin || !g_native_sink_shadow_end))
-            throw "owned_shadow_sink_unavailable";
-#ifdef EID3D11_EMBEDDED
-        if(g_embedded_visual_inputs){
-            if(!read_owned_world_time(nullptr,time))throw "owned_shadow_time_unreadable_or_invalid";
-            visible_only=g_embedded_visual_inputs->draw_undetected?0:1;interface_kind=1;
-            flags=g_embedded_visual_inputs->scene_flags;(void)player;
-        } else
-#endif
-        {
-        if(!read_owned_world_time(g_visual_game_image,time))throw "owned_shadow_time_unreadable_or_invalid";
-        if(!visual_read(g_visual_game_image,0x39be6c,visible_only))throw "owned_shadow_visibility_setting_unreadable";
-        if(!visual_read(scene,0x20c,player))throw "owned_shadow_player_unreadable";
-        if(!visual_read(player,0x100,interface_kind))throw "owned_shadow_interface_unreadable";
-        if(!visual_read(scene,8,flags))throw "owned_shadow_flags_unreadable";
-        }
-        // This seam follows the original completed nonunit render-time writer.
-        // Read common values, never its camera list or a game animation method.
-        const char* object_failure = nullptr;
-#ifdef EID3D11_EMBEDDED
-        if(!g_embedded_visual_inputs)
-#endif
-        {
-            CityRetainedOwnerGuard pose_timing(CityRetainedOwner::nonunit_pose);
-            if (!publish_visual_object_poses(scene,&object_failure))
-                throw object_failure ? object_failure : "owned_shadow_object_values";
-        }
-        CityRetainedOwnerGuard lighting_timing(CityRetainedOwner::lighting_publish);
-        if(publish_retained_world_lighting(renderer)!=FigureFallbackReason::none)throw "owned_shadow_lighting_unavailable";
+    {
+        const auto& pass=in.pass;
+        const auto flags=in.flags;
+        const bool draw_undetected=in.draw_undetected;
+        const auto shadow_source_revision=in.shadow_source_revision;
         const auto shadow_lighting=shadow_projection_lighting(
             g_native_world_lighting_frame.lighting);
         auto& shadow_scene=retained_visual_scene();
         const bool terrain_enabled=(flags&0x100u)!=0 && g_owned_terrain_frame.source_values.terrain;
-        const auto shadow_source_revision=shadow_scene.shadow_source_revision();
         std::vector<NativeWorldBounds> receivers;
-        const bool draw_undetected=!visible_only || interface_kind!=1;
-        lighting_timing.finish();
         CityRetainedOwnerGuard decision_timing(CityRetainedOwner::shadow_input_decision);
         publish_highlight_state();
         const auto configured_domain=pass.shadows_enabled ? shadow_scene.shadow_input_domain() : nullptr;
         const auto cached=configured_domain && configured_domain->settings_revision==g_owned_shadow_settings_revision
             ? configured_domain : nullptr;
         const auto changes=shadow_scene.shadow_source_changes(cached?cached->source_revision:0);
-        std::shared_ptr<const RetainedVisualFrame> values;
-        {
-            CityRetainedOwnerGuard values_timing(CityRetainedOwner::visual_frame_values);
-            const bool traced=startup_begin(StartupStage::visual_sample);
-            g_owned_visual_world_frame.values.reset();
-            values=shadow_scene.visual_frame_value(time,g_bridge_sample.active && bridge_profile_enabled());
-            startup_end(StartupStage::visual_sample,traced,"completed");
-        }
+        std::shared_ptr<const RetainedVisualFrame> values=std::move(in.values);
         CityRetainedOwnerGuard point_lighting_timing(CityRetainedOwner::lighting_publish);
         if (g_native_sink_point_lights) {
             if (!g_native_sink_point_lights(g_native_sink_context,*values))
@@ -18261,14 +19653,19 @@ bool prepare_owned_world_shadows(void* scene,void* renderer,
             terrain_enabled,shadow_source_revision);
         decision_timing.finish();
         if(decision.route==ShadowInputRoute::reuse) {
-            if(shadow_scene.shadow_source_revision()==cached->source_revision) {
+            if(owned_shadow_current_revision(shadow_scene)==cached->source_revision) {
                 ++frame.shadow_source_diagnostic.map_reuses;
                 if(g_bridge_sample.active)++g_bridge_sample.shadow_map_reuses;
                 if(!prepare_owned_visual_values(std::move(values),world_to_clip,
                     shadow_lighting,draw_undetected,flags,cached->receivers,pass.shadows_enabled,&cached->coverage,
-                    changes.full?nullptr:&changes.dirty_visuals))
+                    changes.full?nullptr:&changes.dirty_visuals,cached->source_revision,shadow_source_revision))
                     throw "owned_shadow_scene_values";
                 execute_owned_point_shadow_pass(terrain_enabled,shadow_scene,true,flags,draw_undetected);
+                execute_owned_rain_occlusion_pass();
+                // Reused maps skip execute_owned_shadow_pass, which pumps the
+                // far-terrain prewarm on redraw frames. Pump it here too so a
+                // stationary camera keeps finishing it under its own budget.
+                if(terrain_enabled){prewarm_owned_terrain_far_shadow_meshes();prewarm_owned_terrain_near_meshes();}
                 frame.shadow_attempted=true;frame.shadow_ready=true;
                 if(g_native_sink_shadow_diagnostics)
                     g_native_sink_shadow_diagnostics(g_native_sink_context,frame.serial,
@@ -18292,10 +19689,14 @@ bool prepare_owned_world_shadows(void* scene,void* renderer,
             // Caster membership below still traverses the complete source.
             if(!append_owned_terrain_receiver_bounds(terrain,receivers))
                 throw "owned_shadow_terrain_transform";
+            // Rendered neighbour ground and decorations receive sun shadows
+            // too: fit the maps to them as to the active map's sectors.
+            neighbour_receivers_append_visible(world_to_clip,receivers);
         }
         if(!prepare_owned_visual_values(std::move(values),
             world_to_clip,shadow_lighting,draw_undetected,
-            flags,receivers,pass.shadows_enabled,nullptr,changes.full?nullptr:&changes.dirty_visuals))
+            flags,receivers,pass.shadows_enabled,nullptr,changes.full?nullptr:&changes.dirty_visuals,
+            cached?cached->source_revision:0,shadow_source_revision))
             throw "owned_shadow_scene_values";
         frame.persistent_static_shadows=pass.shadows_enabled;
         frame.shadow_time_active_visuals=changes.time_active_visuals;
@@ -18308,6 +19709,7 @@ bool prepare_owned_world_shadows(void* scene,void* renderer,
             cached->frame.world_epoch==bridge_current_world_epoch();
         if(!execute_owned_shadow_pass(terrain_enabled,shadow_scene,
             nullptr,&changes,reuse_static?cached.get():nullptr))return false;
+        execute_owned_rain_occlusion_pass();
         if(pass.shadows_enabled) {
             CityRetainedOwnerGuard snapshot_timing(CityRetainedOwner::domain_snapshot);
             // Publication is best effort: GPU success is not contingent on an
@@ -18348,6 +19750,20 @@ bool prepare_owned_world_shadows(void* scene,void* renderer,
             g_native_sink_shadow_diagnostics(g_native_sink_context,frame.serial,
                 frame.shadow_source_diagnostic);
         return true;
+    }
+}
+
+bool prepare_owned_world_shadows(void* scene,void* renderer,
+    const std::array<float,16>& world_to_clip) noexcept {
+    auto& frame=g_owned_visual_world_frame;
+    if(frame.shadow_attempted)return frame.shadow_ready;
+    frame.active=true;frame.shadow_attempted=true;
+    frame.shadow_source_diagnostic={};
+    try {
+        OwnedShadowInputs in;
+        capture_owned_world_shadow_inputs(scene,renderer,in);
+        if(prepare_owned_world_shadows_from(std::move(in),world_to_clip))return true;
+        return false;
     } catch(const char* reason) {
         startup_failure(StartupStage::shadow_prepare,reason);
         reject_owned_visual("shadow_prepare",reason);
@@ -18362,6 +19778,283 @@ bool prepare_owned_world_shadows(void* scene,void* renderer,
 }
 
 
+void* owned_terrain_texture_wrapper(std::size_t material) noexcept;
+bool exact_bind_terrain_texture(void* renderer, void* texture);
+
+// ---- Scene thread (render_thread option): the seam's world work ------------
+// Game thread at the seam: the game reads of prepare_owned_world_shadows'
+// head (time, flags, object poses, world light, highlight, the retained
+// visual frame), the game's fog function for every entity, the terrain frame
+// with the atlases the game binds, and the device state the sinks read. The
+// scene thread then prepares shadows, values, terrain and colour submissions
+// from that copy only. Simulation visibility, picking and selection never wait
+// for or read these results (execute_owned_object_interaction keeps computing
+// them from game state and the copied values).
+struct OwnedSceneCommand {
+    std::array<float,16> world_to_clip{};
+    OwnedShadowInputs inputs;
+    OwnedTerrainRuntimeFrame terrain;
+    NativeWorldLightingFrame lighting{};
+    std::vector<std::int16_t> fog;
+    std::uint64_t fog_revision = 0;   // neighbour_border_fog_revision() read before fog was computed
+    std::vector<std::shared_ptr<SurfaceImage>> terrain_textures;
+    std::vector<std::shared_ptr<const OwnedVisualSurface>> terrain_shadow_textures;
+    GroundCoverFootprintSnapshot footprints;
+    std::shared_ptr<void> sinks;
+    BridgeSceneHandoff handoff;
+};
+bool read_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
+    std::vector<FootprintTrailPoint>* trail_points) noexcept;
+void capture_terrain_atlases(const std::vector<void*>& wrappers) noexcept;
+// Scene-thread presentation serials stay apart from the game thread's (both
+// reach the renderer: game-thread previews and HUD figures, scene-thread world).
+constexpr std::uint64_t kScenePresentationSerialBase = 1ull << 62;
+
+// Game thread: the atlas wrapper of every terrain material index (the frame's
+// handles, else the map's own wrapper list), so the scene thread never reads
+// the game's texture list.
+std::vector<void*> owned_terrain_wrappers() {
+    const auto count=g_owned_terrain_frame.texture_handles.size();
+    std::vector<void*> wrappers(count,nullptr);
+    for(std::size_t index=0;index<count;++index)wrappers[index]=owned_terrain_texture_wrapper(index);
+    return wrappers;
+}
+
+// Game thread: the game's own bind of each atlas (with its side effects) and
+// a snapshot of the texture it bound.
+std::vector<std::shared_ptr<SurfaceImage>> owned_terrain_bound_textures(void* renderer,
+    const std::vector<void*>& wrappers,const std::vector<std::uint8_t>* wanted) {
+    std::vector<std::shared_ptr<SurfaceImage>> textures(wrappers.size());
+    if(!g_scene_handoff.bound_texture)return textures;
+    for(std::size_t index=0;index<wrappers.size();++index) {
+        if(!wrappers[index] || (wanted && (index>=wanted->size() || !(*wanted)[index])))continue;
+        if(exact_bind_terrain_texture(renderer,wrappers[index]))
+            textures[index]=g_scene_handoff.bound_texture(g_scene_handoff.context);
+        else {
+            // The slot's terrain stays untextured (omitted by its submission);
+            // say so once rather than hiding a game bind that faults.
+            static bool logged=false;
+            if(!logged) {
+                logged=true;char detail[64];
+                std::snprintf(detail,sizeof(detail),"slot=%u of %u",unsigned(index),unsigned(wrappers.size()));
+                append_bridge_event("terrain_texture_bind_rejected",detail,true);
+            }
+        }
+    }
+    return textures;
+}
+
+// Game thread: the published atlas surfaces terrain shadow casters sample.
+std::vector<std::shared_ptr<const OwnedVisualSurface>> owned_terrain_shadow_sources() {
+    const auto& frame=g_owned_terrain_frame;
+    std::vector<std::shared_ptr<const OwnedVisualSurface>> sources(frame.shadow_texture_observed.size());
+    if(frame.texture_handles.empty() || !g_visual_surface_reader)return sources;
+    for(std::size_t material=0;material<sources.size();++material) {
+        void* texture=nullptr;IDirectDrawSurface7* surface=nullptr;std::uint32_t flags=0;
+        std::shared_ptr<const OwnedVisualSurface> value;
+        if((texture=owned_terrain_texture_wrapper(material))!=nullptr &&
+           visual_texture_surface(texture,surface,flags) && surface && g_visual_surface_reader(surface,value))
+            sources[material]=std::move(value);
+    }
+    return sources;
+}
+
+// Scene thread: install a queued world command's inputs; clear afterwards.
+void install_owned_scene_inputs(void* sinks,const BridgeSceneHandoff& handoff,
+    const std::vector<std::shared_ptr<SurfaceImage>>* textures,
+    const std::vector<std::shared_ptr<const OwnedVisualSurface>>* shadow_textures,
+    const std::vector<std::int16_t>* fog,std::uint64_t revision) noexcept {
+    if(handoff.install_sinks)handoff.install_sinks(sinks);
+    g_scene_sinks=sinks;g_scene_bind_texture=handoff.bind_texture;
+    g_scene_terrain_textures=textures;g_scene_terrain_shadow_textures=shadow_textures;
+    g_scene_fog_table=fog;g_scene_capture_revision=revision;
+    if(g_object_render_presentation_serial<kScenePresentationSerialBase)
+        g_object_render_presentation_serial=kScenePresentationSerialBase;
+}
+void clear_owned_scene_inputs(const BridgeSceneHandoff& handoff) noexcept {
+    g_scene_sinks=nullptr;g_scene_bind_texture=nullptr;
+    g_scene_terrain_textures=nullptr;g_scene_terrain_shadow_textures=nullptr;
+    g_scene_fog_table=nullptr;g_scene_capture_revision=0;g_scene_fog_revision=0;
+    if(handoff.install_sinks)handoff.install_sinks(nullptr);
+}
+
+void run_owned_visual_scene(OwnedSceneCommand& command) noexcept {
+    const frame_acct::Scope accounted(frame_acct::scene_world);
+    install_owned_scene_inputs(command.sinks.get(),command.handoff,&command.terrain_textures,
+        &command.terrain_shadow_textures,&command.fog,command.inputs.shadow_source_revision);
+    g_scene_fog_revision=command.fog_revision;
+    g_owned_terrain_frame=std::move(command.terrain);
+    g_native_world_lighting_frame=command.lighting;
+    auto& frame=g_owned_visual_world_frame;
+    frame.active=true;frame.shadow_attempted=true;frame.shadow_source_diagnostic={};
+    bool ready=false;
+    try {
+        ready=prepare_owned_world_shadows_from(std::move(command.inputs),command.world_to_clip);
+    } catch(const char* reason) {
+        startup_failure(StartupStage::shadow_prepare,reason);
+        reject_owned_visual("shadow_prepare",reason);
+        report_object_plan_failure(reason);
+    } catch(...) {
+        startup_failure(StartupStage::shadow_prepare,"owned_shadow_allocation");
+        report_object_plan_failure("owned_shadow_allocation");
+    }
+    if(!ready) {
+        frame.active=true;frame.shadow_attempted=true;frame.shadow_ready=false;
+        retire_owned_shadow_maps();
+    } else {
+        g_scene_footprints=&command.footprints;
+        try { (void)finish_owned_visual_scene(nullptr,command.world_to_clip); }
+        catch(...) { report_object_plan_failure("owned_scene_frame_allocation"); }
+        g_scene_footprints=nullptr;
+    }
+    clear_owned_scene_inputs(command.handoff);
+}
+
+bool queue_owned_visual_scene(void* scene,void* renderer,
+    const std::array<float,16>& world_to_clip) noexcept {
+    auto& frame=g_owned_visual_world_frame;
+    // A second seam call in one world: the first queued the whole frame.
+    if(frame.shadow_attempted)return frame.shadow_ready;
+    frame.active=true;frame.shadow_attempted=true;
+    std::shared_ptr<OwnedSceneCommand> command;
+    try {
+        command=std::make_shared<OwnedSceneCommand>();
+        command->handoff=g_scene_handoff;
+        command->world_to_clip=world_to_clip;
+        capture_owned_world_shadow_inputs(scene,renderer,command->inputs);
+        command->lighting=g_native_world_lighting_frame;
+        // The game's fog function per entity (a game call). The revision is
+        // read first: a publication during the loop leaves the stamp older
+        // than the values, so the next frame recomputes them.
+        command->fog_revision=neighbour_border_fog_revision();
+        if(void* controller=retained_scene_fog_controller(scene)) {
+            const auto& entities=command->inputs.values->entities;
+            command->fog.assign(entities.size(),std::int16_t(-1));
+            for(std::size_t index=0;index<entities.size();++index) {
+                const auto& sample=entities[index];
+                if(!sample.mesh_declared || (sample.values.object_flags & 0x800u))continue;
+                BYTE fog=255;
+                if(retained_world_fog(controller,sample.pose.root,fog))command->fog[index]=fog;
+            }
+        }
+        auto& terrain=g_owned_terrain_frame;
+        command->terrain=terrain;
+        const auto wrappers=owned_terrain_wrappers();
+        command->terrain.texture_handles=wrappers;
+        // The atlases the scene thread's ground cover and contact maps read
+        // (bridge_terrain_atlas), carried with this and later posts.
+        capture_terrain_atlases(wrappers);
+        if(terrain.base_pending)
+            command->terrain_textures=owned_terrain_bound_textures(terrain.base_renderer,wrappers,nullptr);
+        if(command->inputs.pass.shadows_enabled && (command->inputs.flags&0x100u))
+            command->terrain_shadow_textures=owned_terrain_shadow_sources();
+        command->sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
+        if(!command->sinks)throw "owned_scene_sink_capture";
+        // The scene thread submits the base: the game thread's packet
+        // proceeds to its transparent range as after a submitted base.
+        if(terrain.base_pending) {
+            terrain.base_pending=false;terrain.base_renderer=nullptr;
+            complete_owned_terrain_base(terrain.front_end,true);
+        }
+    } catch(const char* reason) {
+        startup_failure(StartupStage::shadow_prepare,reason);
+        reject_owned_visual("shadow_prepare",reason);
+        report_object_plan_failure(reason);
+        frame.shadow_ready=false;return false;
+    } catch(...) {
+        startup_failure(StartupStage::shadow_prepare,"owned_shadow_allocation");
+        report_object_plan_failure("owned_shadow_allocation");
+        frame.shadow_ready=false;return false;
+    }
+    // The game thread keeps the copied values for interaction (claimed
+    // samples and their part boxes); render results live on the scene thread.
+    try {
+        frame.values=command->inputs.values;
+        frame.draw_undetected_units=command->inputs.draw_undetected;
+        g_owned_admission_cache.clear();   // this thread's prepared states are replaced here
+        // The spare's states come back reset (their parts keep capacity).
+        if(frame.prepared.empty())frame.prepared.swap(g_owned_visual_prepared_spare);
+        const std::size_t kept=(std::min)(frame.prepared.size(),frame.values->entities.size());
+        frame.prepared.resize(frame.values->entities.size());
+        for(std::size_t index=0;index<frame.prepared.size();++index) {
+            auto& state=frame.prepared[index];
+            if(index<kept){auto parts=std::move(state.parts);parts.clear();state={};state.parts=std::move(parts);}
+            state.claimed=frame.values->entities[index].mesh_declared;
+        }
+        frame.shadow_ready=true;
+    } catch(...) { frame.values.reset();frame.prepared.clear();frame.shadow_ready=false; }
+    // The game's footprint list for this frame's ground cover, read here with
+    // the values just set (the stamp sizes come from them). The marker
+    // records stay with the game thread, which also appends them.
+    command->footprints.ok=read_ground_cover_footprints(command->footprints.splats,
+        &command->footprints.trail_points);
+    if(!g_scene_handoff.post(g_scene_handoff.context,[command]{ run_owned_visual_scene(*command); })) {
+        report_object_plan_failure("owned_scene_queue_failed");
+        return false;
+    }
+    return true;
+}
+
+// Game thread: queue one object's wound layer behind the world command. The
+// command keeps the copied values the parts were chosen from and submits only
+// when the scene thread prepared that same frame (its world frame holds the
+// same immutable values object) and admitted each part's colour, as the
+// direct path does; otherwise the layer is omitted for the frame.
+bool queue_owned_wound_layer(std::vector<OwnedWoundRequest>&& requests) noexcept {
+    struct Command {
+        std::vector<OwnedWoundRequest> requests;
+        std::vector<std::shared_ptr<SurfaceImage>> wounds;
+        std::shared_ptr<const RetainedVisualFrame> values;
+        std::shared_ptr<void> sinks;
+        BridgeSceneHandoff handoff;
+    };
+    try {
+        const auto& world=g_owned_visual_world_frame;
+        if(!world.values || !g_scene_handoff.surface_snapshot || !g_scene_handoff.set_wound)return false;
+        auto command=std::make_shared<Command>();
+        command->handoff=g_scene_handoff;command->values=world.values;
+        command->requests=std::move(requests);
+        for(const auto& request:command->requests) {
+            auto texture=g_scene_handoff.surface_snapshot(g_scene_handoff.context,request.wound);
+            if(!texture)return false;
+            command->wounds.push_back(std::move(texture));
+        }
+        command->sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
+        if(!command->sinks)return false;
+        return g_scene_handoff.post(g_scene_handoff.context,[command]{
+            const auto& handoff=command->handoff;
+            install_owned_scene_inputs(command->sinks.get(),handoff,nullptr,nullptr,nullptr,0);
+            const auto& world=g_owned_visual_world_frame;
+            bool transaction=false,ok=world.values==command->values && world.values;
+            try {
+                for(std::size_t i=0;ok && i<command->requests.size();++i) {
+                    const auto& request=command->requests[i];
+                    if(request.sample>=world.values->entities.size() || request.sample>=world.prepared.size()) { ok=false; break; }
+                    const auto& sample=world.values->entities[request.sample];
+                    const auto& prepared=world.prepared[request.sample];
+                    if(!prepared.submitted || request.part>=prepared.parts.size() ||
+                       !prepared.parts[request.part].color_admitted)continue;
+                    if(!transaction && !(transaction=g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context))) { ok=false; break; }
+                    handoff.set_wound(command->sinks.get(),request.wound,command->wounds[i]);
+                    NativePreparedPartSubmission* record=nullptr;
+                    NativeWorldBounds part_bounds{};
+                    NativeGeometryResult ignored{};
+                    ok=retained_visual_part_bounds(sample,request.part,part_bounds) &&
+                        retained_visual_part_submission(sample,request.part,part_bounds,{true,true,0},
+                            world.values->time,request.fog,record);
+                    if(ok) {
+                        const NativePreparedPartSubmission* selected=record;
+                        ok=submit_owned_visual_records(sample,&selected,1,world.coverage.world_to_clip,
+                            world.serial,request.wound,ignored);
+                    }
+                }
+            } catch(...) { ok=false; }
+            if(!ok)report_object_plan_failure("owned_wound_layer");
+            if(transaction && g_native_sink_end_object)g_native_sink_end_object(g_native_sink_context,ok);
+            clear_owned_scene_inputs(handoff);
+        });
+    } catch(...) { return false; }
+}
 bool complete_owned_terrain_light_state(
     void* self, unsigned char* terrain, DWORD dynamic_only,
     DWORD first_x, DWORD first_y, DWORD final_x, DWORD final_y) noexcept {
@@ -18465,6 +20158,39 @@ bool exact_bind_terrain_texture(void* renderer, void* texture) {
     }
 }
 
+// Binds the atlas a terrain submission samples. On the scene thread the game
+// thread made the game's own bind when it queued the command and the sinks
+// receive the texture it bound (a snapshot); there is no game call here.
+bool bind_owned_terrain_texture(void* renderer,std::size_t index,void* wrapper) {
+    if(g_scene_terrain_textures) {
+        if(!wrapper || !g_scene_bind_texture || !g_scene_sinks)return false;
+        std::shared_ptr<SurfaceImage> texture;
+        if(index<g_scene_terrain_textures->size())texture=(*g_scene_terrain_textures)[index];
+        g_scene_bind_texture(g_scene_sinks,texture);
+        return true;
+    }
+    return exact_bind_terrain_texture(renderer,wrapper);
+}
+
+// The texture slots (material % (nTextures + 2)) any sector of an immutable
+// terrain source contains tiles of, computed once per source.
+const std::vector<std::uint8_t>& owned_terrain_source_texture_slots(
+    const std::shared_ptr<const TerrainCpuAsset>& source) {
+    struct Cache { std::weak_ptr<const TerrainCpuAsset> source; std::vector<std::uint8_t> used; };
+    static thread_local Cache cache;
+    if (cache.source.lock() == source) return cache.used;
+    cache = {};
+    const std::size_t count = std::size_t(source->texture_count) + 2u;
+    std::vector<std::uint8_t> used(count, 0);
+    for (const auto& sector : source->sectors)
+        for (std::size_t material = 0; material < sector.materials.size(); ++material)
+            for (const auto& subpart : sector.materials[material].subparts)
+                if (subpart.tile_count) { used[material % count] = 1; break; }
+    cache.used = std::move(used);
+    cache.source = source;
+    return cache.used;
+}
+
 template <typename ReadTexture>
 bool capture_owned_terrain_texture_handles_with_operation(
     const TerrainRangeContract& contract, OwnedTerrainRuntimeFrame& frame,
@@ -18473,7 +20199,6 @@ bool capture_owned_terrain_texture_handles_with_operation(
     if (count <= 0 || count > 4096) return false;
     try {
         frame.texture_handles.assign(static_cast<std::size_t>(count), nullptr);
-        frame.texture_sources=contract.textures;
         frame.shadow_texture_observed.assign(static_cast<std::size_t>(count),0);
         const auto capture_commands = [&](
                 const std::vector<OwnedTerrainCommand>& commands) {
@@ -18495,6 +20220,23 @@ bool capture_owned_terrain_texture_handles_with_operation(
         if (!capture_commands(frame.front_end.base_commands) ||
             !capture_commands(frame.front_end.transparent_commands))
             throw false;
+        // Off-screen casters, ground cover and contact maps also sample the
+        // atlas of a material no visible command uses. The game reads a slot
+        // only for a material some sector contains (E-120); any other slot of
+        // nTextures + 2 can hold a non-pointer word, and binding every slot
+        // put first-chance AVs into the game's SetTexture each frame. Capture
+        // exactly the slots this world's own source contains, once, here.
+        const auto& source = frame.source_values.terrain;
+        if (source && source->texture_count ==
+                static_cast<std::uint32_t>(contract.texture_count)) {
+            const auto& used = owned_terrain_source_texture_slots(source);
+            for (std::size_t index = 0; index < used.size(); ++index) {
+                if (!used[index] || frame.texture_handles[index]) continue;
+                void* texture = nullptr;
+                if (read_texture(index, texture))
+                    frame.texture_handles[index] = texture;
+            }
+        }
         return true;
     } catch (...) {
         frame.texture_handles.clear();
@@ -18842,7 +20584,7 @@ bool submit_source_owned_terrain_commands(
                 void* texture =
                     g_owned_terrain_frame.texture_handles[texture_index];
                 g_owned_terrain_failure_stage="submit.bind_texture";
-                if (!exact_bind_terrain_texture(renderer, texture)) throw false;
+                if (!bind_owned_terrain_texture(renderer, texture_index, texture)) throw false;
                 bound_material = command.material;
             }
             NativeGeometryResult ignored{};
@@ -19080,6 +20822,41 @@ bool draw_source_owned_terrain_range(
     if (action == OwnedTerrainRangeAction::submit_transparent &&
         g_bridge_sample.active)
         ++g_bridge_sample.terrain_owned_transparent_reuses;
+    if (action == OwnedTerrainRangeAction::submit_transparent && scene_handoff_active()) {
+        // Scene thread: the transparent commands from a copy of this frame,
+        // with the atlases bound here by the game's own bind.
+        struct TransparentCommand {
+            OwnedTerrainRuntimeFrame terrain;NativeWorldLightingFrame lighting{};
+            std::vector<std::shared_ptr<SurfaceImage>> textures;std::shared_ptr<void> sinks;BridgeSceneHandoff handoff;
+            void* renderer=nullptr;
+        };
+        auto queued=std::make_shared<TransparentCommand>();
+        queued->handoff=g_scene_handoff;queued->renderer=renderer;
+        queued->terrain=g_owned_terrain_frame;
+        const auto wrappers=owned_terrain_wrappers();
+        queued->terrain.texture_handles=wrappers;
+        std::vector<std::uint8_t> wanted(wrappers.size(),0);
+        for(const auto& command:commands)if(!wrappers.empty())wanted[command.material%wrappers.size()]=1;
+        // The submission samples the world light the game thread published.
+        (void)publish_native_world_lighting(renderer);
+        queued->lighting=g_native_world_lighting_frame;
+        queued->textures=owned_terrain_bound_textures(renderer,wrappers,&wanted);
+        queued->sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
+        if(!queued->sinks || !g_scene_handoff.post(g_scene_handoff.context,[queued]{
+            install_owned_scene_inputs(queued->sinks.get(),queued->handoff,&queued->textures,nullptr,nullptr,0);
+            g_owned_terrain_frame=std::move(queued->terrain);
+            g_native_world_lighting_frame=queued->lighting;
+            if(!submit_source_owned_terrain_commands(queued->renderer,g_owned_terrain_frame.front_end.transparent_commands,nullptr)) {
+                g_owned_terrain_frame.front_end.failed_after_claim=true;
+                report_owned_terrain_omission(OwnedTerrainRangeAction::omit_invalid);
+            }
+            clear_owned_scene_inputs(queued->handoff);
+        })) {
+            g_owned_terrain_frame.front_end.failed_after_claim = true;
+            report_owned_terrain_omission(OwnedTerrainRangeAction::omit_invalid);
+        }
+        return true;
+    }
     // The base pass (publication off) draws with the owned opaque base
     // material, as the deferred publication-on base does, never with the
     // device's current blending.
@@ -19189,7 +20966,6 @@ void* owned_terrain_texture_wrapper(std::size_t material) noexcept {
     if(frame.texture_handles.empty())return nullptr;
     const auto index=material%frame.texture_handles.size();
     void* texture=frame.texture_handles[index];
-    if(!texture && frame.texture_sources)visual_read(frame.texture_sources,index*sizeof(void*),texture);
     return texture;
 }
 
@@ -19207,7 +20983,7 @@ bool register_owned_terrain_piece(void* renderer,const OwnedTerrainCommand& comm
     if(!apply_owned_terrain_world_transform(*view)) {
         report_owned_terrain_set_failure("transform",sector,material,nullptr);return false;
     }
-    if(!exact_bind_terrain_texture(renderer,texture)) {
+    if(!bind_owned_terrain_texture(renderer,frame.texture_handles.empty()?0:material%frame.texture_handles.size(),texture)) {
         report_owned_terrain_set_failure("texture",sector,material,nullptr);return false;
     }
     NativeStaticSubmission request;request.terrain=true;
@@ -19338,53 +21114,9 @@ bool submit_pending_owned_terrain_base() noexcept {
             success=owned_terrain_static_op(globals,&failure);
             if(!success)report_owned_terrain_set_failure("globals",0,0,failure);
         }
-        const auto rebuilds_before=g_owned_terrain_set_rebuilds;
         if(success)success=frame.front_end.inputs.force_full_detail ? submit_owned_terrain_set(renderer) :
             submit_source_owned_terrain_commands(renderer,frame.front_end.base_commands,&frame.shadow_material) &&
             flush_owned_terrain_lod_set();
-        // Temporary (post-load stall investigation): what moves the game's
-        // per-object layer shift (object+0x34), and proof that a step costs
-        // no terrain/liquid rebuild. One line per changed object, 48 at most.
-        static std::vector<float> shift_event_last;static unsigned shift_events=0;
-        if(success && frame.source_values.geometry && frame.source_values.terrain) {
-            const auto& geometry=*frame.source_values.geometry;
-            const auto& objects=frame.source_values.terrain->objects;
-            // Once per terrain source: every object's shift as first published
-            // (a constant nonzero shift changes what the rest surface means).
-            static const void* shift_source_logged=nullptr;
-            if(shift_source_logged!=frame.source_values.terrain.get()) {
-                shift_source_logged=frame.source_values.terrain.get();
-                std::string text="objects="+std::to_string(geometry.layer_shifts.size());
-                for(std::size_t object=0;object<geometry.layer_shifts.size() && object<16;++object) {
-                    char item[64];
-                    std::snprintf(item,sizeof(item)," %zu:type%u=%.9g",object,
-                        object<objects.size()?objects[object].type:0xffffffffu,geometry.layer_shifts[object]);
-                    text+=item;
-                }
-                append_bridge_event("terrain_layer_shifts_initial",text.c_str(),false);
-            }
-            if(shift_event_last.size()==geometry.layer_shifts.size())
-                for(std::size_t object=0;object<geometry.layer_shifts.size() && shift_events<48;++object) {
-                    const float before=shift_event_last[object],after=geometry.layer_shifts[object];
-                    std::uint32_t before_bits=0,after_bits=0;
-                    std::memcpy(&before_bits,&before,4);std::memcpy(&after_bits,&after,4);
-                    if(before_bits==after_bits)continue;
-                    ++shift_events;char text[320];
-                    std::snprintf(text,sizeof(text),
-                        "object=%zu type=%u old=%.9g new=%.9g old_bits=%08x new_bits=%08x game_time=%.4f "
-                        "source=%llu/%llu set_rebuilds=%llu spatial_parts_recomputed=%llu range=%.6g..%.6g",
-                        object,object<objects.size()?objects[object].type:0xffffffffu,before,after,before_bits,after_bits,
-                        geometry.animation.precise_time,
-                        static_cast<unsigned long long>(frame.source_values.source_generation),
-                        static_cast<unsigned long long>(frame.source_values.source_revision),
-                        static_cast<unsigned long long>(g_owned_terrain_set_rebuilds-rebuilds_before),
-                        static_cast<unsigned long long>(frame.front_end.spatial_bounds_computations),
-                        object<geometry.layer_shift_range.size()?geometry.layer_shift_range[object][0]:0.f,
-                        object<geometry.layer_shift_range.size()?geometry.layer_shift_range[object][1]:0.f);
-                    append_bridge_event("terrain_layer_shift_change",text,false);
-                }
-            shift_event_last=geometry.layer_shifts;
-        }
     } catch (...) { g_owned_terrain_failure_stage="base.exception_or_allocation_failure";success=false; }
     if (!complete_owned_terrain_base(frame.front_end,success)) {
         frame.front_end.failed_after_claim=true;
@@ -19397,6 +21129,7 @@ bool submit_pending_owned_terrain_base() noexcept {
 BOOL __fastcall hook_terrain_range_draw(void* self, void*, void* renderer,
                                         int material_from, int material_to) {
     SemanticScope scope(SemanticKind::terrain, _ReturnAddress());
+    const frame_acct::Scope accounted(frame_acct::ours_terrain);
     const auto begin = g_bridge_sample.active ? bridge_now() : 0;
     if (g_bridge_sample.active) ++g_bridge_sample.terrain_outer_calls;
     BOOL result = FALSE;
@@ -19426,8 +21159,36 @@ BOOL __fastcall hook_terrain_range_draw(void* self, void*, void* renderer,
     return result;
 }
 
+int native_geometry_sink(
+    void* self, const NativePackedGroup* positions, int position_groups,
+    const NativePackedGroup* normals, int normal_groups,
+    const std::uint32_t* diffuse, const std::uint32_t* specular,
+    const NativeTextureCoordinate* texture_coordinates, int texture_coordinate_count,
+    const NativeVertexComponent* components, int component_count,
+    const void* light_components, int light_component_count,
+    const std::uint16_t* indices, int index_count,
+    float u_shift, float v_shift, BYTE fog, DWORD flags);
+
+// The native geometry sink, charged to ours_native_geom (frame accounting);
+// the body keeps its SEH block, which cannot share a function with a scope.
 int __fastcall hook_native_geometry(
     void* self, void*, const NativePackedGroup* positions, int position_groups,
+    const NativePackedGroup* normals, int normal_groups,
+    const std::uint32_t* diffuse, const std::uint32_t* specular,
+    const NativeTextureCoordinate* texture_coordinates, int texture_coordinate_count,
+    const NativeVertexComponent* components, int component_count,
+    const void* light_components, int light_component_count,
+    const std::uint16_t* indices, int index_count,
+    float u_shift, float v_shift, BYTE fog, DWORD flags) {
+    const frame_acct::Scope accounted(frame_acct::ours_native_geom);
+    return native_geometry_sink(self, positions, position_groups, normals, normal_groups,
+        diffuse, specular, texture_coordinates, texture_coordinate_count, components,
+        component_count, light_components, light_component_count, indices, index_count,
+        u_shift, v_shift, fog, flags);
+}
+
+int native_geometry_sink(
+    void* self, const NativePackedGroup* positions, int position_groups,
     const NativePackedGroup* normals, int normal_groups,
     const std::uint32_t* diffuse, const std::uint32_t* specular,
     const NativeTextureCoordinate* texture_coordinates, int texture_coordinate_count,
@@ -19677,9 +21438,13 @@ bool write_relative_jump(std::uint8_t* from, const void* target) {
     const auto delta = destination - source_after;
     if (delta < std::numeric_limits<std::int32_t>::min() ||
         delta > std::numeric_limits<std::int32_t>::max()) return false;
+    std::uint8_t before[5];
+    std::memcpy(before, from, sizeof(before));
     from[0] = 0xe9;
     const auto relative = static_cast<std::int32_t>(delta);
     std::memcpy(from + 1, &relative, sizeof(relative));
+    // A jump back into game.exe is a restore (or a forwarder), not our hook.
+    if (!game_image_contains(target)) bridge_note_owned_patch(from, before, sizeof(before));
     return true;
 }
 
@@ -19714,9 +21479,13 @@ bool write_relative_call(std::uint8_t* from, const void* target) {
     const auto delta = destination - source_after;
     if (delta < std::numeric_limits<std::int32_t>::min() ||
         delta > std::numeric_limits<std::int32_t>::max()) return false;
+    std::uint8_t before[5];
+    std::memcpy(before, from, sizeof(before));
     from[0] = 0xe8;
     const auto relative = static_cast<std::int32_t>(delta);
     std::memcpy(from + 1, &relative, sizeof(relative));
+    // A call back to a game.exe function is a restore, not our hook.
+    if (!game_image_contains(target)) bridge_note_owned_patch(from, before, sizeof(before));
     return true;
 }
 
@@ -19809,6 +21578,51 @@ bool outer_wnd_proc_restored_call_matches(const std::uint8_t* image) noexcept {
                        kOuterWndProcCallBytes.size())==0;
 }
 
+bool install_engine_frame_begin_hook(std::uint8_t* image) noexcept {
+    const auto* const hook = reinterpret_cast<const void*>(&hook_begin_frame);
+    if (g_engine_frame_begin_image)
+        return image == g_engine_frame_begin_image &&
+            relative_call_targets(image + kOuterBeginFrameCallRva, hook);
+    if (!image ||
+        !relative_call_targets(image + kOuterBeginFrameCallRva,
+                               image + kOuterBeginFrameRva) ||
+        !signature(image + kOuterBeginFrameRva, {0x56,0x8b,0xf1}) ||
+        !relative_call_fits(image + kOuterBeginFrameCallRva, hook))
+        return false;
+
+    auto* const call = image + kOuterBeginFrameCallRva;
+    DWORD previous = 0;
+    if (!VirtualProtect(call, 5, PAGE_EXECUTE_READWRITE, &previous))
+        return false;
+    // This direct call bypasses the renderer table. Its verified target is
+    // also the native forwarder used when the semantic table is installed.
+    g_begin_frame = reinterpret_cast<BeginEndFn>(image + kOuterBeginFrameRva);
+    const bool wrote = write_relative_call(call, hook);
+    DWORD ignored = 0;
+    VirtualProtect(call, 5, previous, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), call, 5);
+    if (wrote) g_engine_frame_begin_image = image;
+    return wrote;
+}
+
+bool uninstall_engine_frame_begin_hook() noexcept {
+    auto* const image = g_engine_frame_begin_image;
+    if (!image) return true;
+    auto* const call = image + kOuterBeginFrameCallRva;
+    if (!relative_call_targets(call,
+                               reinterpret_cast<const void*>(&hook_begin_frame)))
+        return false; // Preserve a foreign owner's call and our retry state.
+    DWORD previous = 0;
+    if (!VirtualProtect(call, 5, PAGE_EXECUTE_READWRITE, &previous))
+        return false;
+    const bool restored = write_relative_call(call, image + kOuterBeginFrameRva);
+    DWORD ignored = 0;
+    VirtualProtect(call, 5, previous, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), call, 5);
+    if (restored) g_engine_frame_begin_image = nullptr;
+    return restored;
+}
+
 bool outer_frame_gap_profile_requested() noexcept {
     static const bool requested = [] {
         char value[8]{};
@@ -19845,9 +21659,6 @@ bool outer_hook_relative_calls_fit(std::uint8_t* image) noexcept {
                image + kOuterShortWndProcCallRva,
                reinterpret_cast<const void*>(&hook_outer_short_wnd_proc)) &&
            relative_call_fits(
-               image + kOuterBeginFrameCallRva,
-               reinterpret_cast<const void*>(&hook_begin_frame)) &&
-           relative_call_fits(
                image + kOuterEndFrameCallRva,
                reinterpret_cast<const void*>(&hook_end_frame));
 }
@@ -19883,8 +21694,6 @@ bool outer_frame_timing_original_calls_match(
         outer_wnd_proc_restored_call_matches(image) &&
         relative_call_targets(image + kOuterShortWndProcCallRva,
                               image + kOuterShortWndProcRva) &&
-        relative_call_targets(image + kOuterBeginFrameCallRva,
-                              image + kOuterBeginFrameRva) &&
         relative_call_targets(image + kOuterEndFrameCallRva,
                               image + kOuterEndFrameRva);
 }
@@ -19916,9 +21725,6 @@ bool outer_frame_timing_hook_calls_match(
             image + kOuterShortWndProcCallRva,
             reinterpret_cast<const void*>(&hook_outer_short_wnd_proc)) &&
         relative_call_targets(
-            image + kOuterBeginFrameCallRva,
-            reinterpret_cast<const void*>(&hook_begin_frame)) &&
-        relative_call_targets(
             image + kOuterEndFrameCallRva,
             reinterpret_cast<const void*>(&hook_end_frame));
 }
@@ -19949,9 +21755,6 @@ bool write_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
                image + kOuterShortWndProcCallRva,
                reinterpret_cast<const void*>(&hook_outer_short_wnd_proc)) &&
            write_outer_hook_call(
-               image + kOuterBeginFrameCallRva,
-               reinterpret_cast<const void*>(&hook_begin_frame)) &&
-           write_outer_hook_call(
                image + kOuterEndFrameCallRva,
                reinterpret_cast<const void*>(&hook_end_frame));
 }
@@ -19979,8 +21782,6 @@ bool restore_outer_frame_timing_calls(std::uint8_t* image) noexcept {
                                        image + kOuterWndProcRva) && restored;
     restored = write_relative_call(image + kOuterShortWndProcCallRva,
                                    image + kOuterShortWndProcRva) && restored;
-    restored = write_relative_call(image + kOuterBeginFrameCallRva,
-                                   image + kOuterBeginFrameRva) && restored;
     restored = write_relative_call(image + kOuterEndFrameCallRva,
                                    image + kOuterEndFrameRva) && restored;
     return restored && outer_frame_timing_original_calls_match(image);
@@ -19988,7 +21789,12 @@ bool restore_outer_frame_timing_calls(std::uint8_t* image) noexcept {
 
 bool install_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
     if (g_outer_frame_timing_hooks_installed) return image == g_outer_frame_timing_image;
-    if (!outer_frame_timing_original_calls_match(image) ||
+    // The recorder depends on rendering entry but never owns it. Its rollback
+    // and teardown validate only its own sites, so both owners can retry alone.
+    if (image != g_engine_frame_begin_image || !image ||
+        !relative_call_targets(image + kOuterBeginFrameCallRva,
+                               reinterpret_cast<const void*>(&hook_begin_frame)) ||
+        !outer_frame_timing_original_calls_match(image) ||
         !outer_hook_relative_calls_fit(image))
         return false;
 
@@ -20068,9 +21874,6 @@ bool uninstall_outer_frame_timing_hooks() noexcept {
         !relative_call_targets(image + kOuterShortWndProcCallRva,
                                reinterpret_cast<const void*>(
                                    &hook_outer_short_wnd_proc)) ||
-        !relative_call_targets(image + kOuterBeginFrameCallRva,
-                               reinterpret_cast<const void*>(
-                                   &hook_begin_frame)) ||
         !relative_call_targets(image + kOuterEndFrameCallRva,
                                reinterpret_cast<const void*>(
                                    &hook_end_frame)))
@@ -20314,6 +22117,22 @@ bool exact_loaded_module(HMODULE module, std::uint32_t expected_image_size,
     return sha256_file(path, digest) && digest == expected_hash;
 }
 
+// How find_addon_module recognised the loaded addon.dll, for the player
+// notice (bridge_addon_notice). none also covers "no addon.dll loaded".
+enum class AddonRecognition : std::uint8_t { none, full, partial, rejected };
+AddonRecognition g_addon_recognition = AddonRecognition::none;
+char g_addon_hash[65] = "unavailable";
+
+void addon_module_hash(const std::uint8_t* image, char (&hash)[65]) noexcept {
+    char path[MAX_PATH]{};
+    std::array<std::uint8_t, 32> digest{};
+    if (!GetModuleFileNameA(reinterpret_cast<HMODULE>(const_cast<std::uint8_t*>(image)), path, MAX_PATH) ||
+        !sha256_file(path, digest))
+        return;
+    for (std::size_t index = 0; index < digest.size(); ++index)
+        std::snprintf(hash + index * 2, 3, "%02x", digest[index]);
+}
+
 // Selects the loaded addon.dll by its discovered content. Base and mod
 // addons may share the basename; the candidate whose image yields addon
 // contracts is selected, and an ambiguous choice selects nothing. The
@@ -20358,6 +22177,12 @@ std::uint8_t* find_addon_module() noexcept {
         static bool rejection_logged = false;
         if (!rejection_logged) {
             rejection_logged = true;
+            // A loaded addon.dll without a usable contract is shown to the
+            // player; no addon.dll at all is the supported native setup.
+            if (discovered_count) {
+                g_addon_recognition = AddonRecognition::rejected;
+                addon_module_hash(discovered[0].image, g_addon_hash);
+            }
             append_bridge_event("addon_module_rejected",
                 ambiguous ? "several addon.dll images yield addon contracts" :
                             "no loaded addon.dll yields an addon contract", true);
@@ -20368,24 +22193,56 @@ std::uint8_t* find_addon_module() noexcept {
     g_addon.layout = selected->layout;
     if (logged != selected->image) {
         logged = selected->image;
-        char path[MAX_PATH]{};
-        std::array<std::uint8_t, 32> digest{};
-        const bool hashed = GetModuleFileNameA(reinterpret_cast<HMODULE>(selected->image),
-                                               path, MAX_PATH) && sha256_file(path, digest);
-        char hash[65]{};
-        for (std::size_t index = 0; hashed && index < digest.size(); ++index)
-            std::snprintf(hash + index * 2, 3, "%02x", digest[index]);
+        addon_module_hash(selected->image, g_addon_hash);
+        const AddonLayout& layout = selected->layout;
+        g_addon_recognition = layout.hud_atlas_failure || layout.pane_failure ||
+            layout.res_cache_failure || layout.hud_visual_failure || layout.visual_failure ?
+            AddonRecognition::partial : AddonRecognition::full;
         const auto status = [](const char* failure) { return failure ? failure : "ok"; };
         char detail[512];
         std::snprintf(detail, sizeof(detail),
             "sha256=%s hud_atlas=%s pane=%s res_cache=%s hud_visual=%s visual=%s resolver=%s",
-            hashed ? hash : "unavailable", status(selected->layout.hud_atlas_failure),
+            g_addon_hash, status(selected->layout.hud_atlas_failure),
             status(selected->layout.pane_failure), status(selected->layout.res_cache_failure),
             status(selected->layout.hud_visual_failure), status(selected->layout.visual_failure),
             status(selected->layout.resolver_failure));
         append_bridge_event("addon_module", detail, true);
     }
     return selected->image;
+}
+
+// BridgeFeatureOff bits noted by the installs (engine_bridge.h).
+std::uint32_t g_features_off = 0;
+char g_addon_notice[256]{};
+
+// After every install decided: one notice and one bridge event naming the
+// addon problem and the features that are off. An addon that is fine (or no
+// addon.dll) leaves the other notices; so does an addon problem that left
+// every feature on through the native contracts.
+void publish_addon_notice() noexcept {
+    if (g_addon_recognition != AddonRecognition::rejected &&
+        g_addon_recognition != AddonRecognition::partial) return;
+    static constexpr struct { std::uint32_t bit; const char* text; } kFeatures[] = {
+        {bridge_feature_off_hud_icons, "weapon/spell icons"},
+        {bridge_feature_off_owned_world, "panel figures, point lights, grass, critters"},
+        {bridge_feature_off_camp_grid, "wide camp inventory"},
+        {bridge_feature_off_hud_layout, "HUD layout"},
+    };
+    char off[160]{};
+    for (const auto& feature : kFeatures) {
+        if (!(g_features_off & feature.bit)) continue;
+        const std::size_t used = std::strlen(off);
+        std::snprintf(off + used, sizeof(off) - used, "%s%s", used ? ", " : "", feature.text);
+    }
+    if (!off[0]) return;
+    const bool rejected = g_addon_recognition == AddonRecognition::rejected;
+    std::snprintf(g_addon_notice, sizeof(g_addon_notice),
+                  "Addon %s (addon.dll %.8s) - off: %s (see bridge.jsonl)",
+                  rejected ? "not recognised" : "partly recognised", g_addon_hash, off);
+    char detail[320];
+    std::snprintf(detail, sizeof(detail), "addon=%s sha256=%s off=%s",
+                  rejected ? "rejected" : "partial", g_addon_hash, off);
+    append_bridge_event("addon_features_off", detail, true);
 }
 
 bool install_hud_atlas_hooks(std::uint8_t* game_image) noexcept {
@@ -20993,6 +22850,9 @@ bool install_hud_visual_hooks(std::uint8_t* game) noexcept {
                                               "no_addon_and_native_sites_differ";
         return false;
     }
+    // The native contract claims the lanes the addon's panels draw but has
+    // nothing published for them, so those icons are omitted (hook_figure_placed).
+    if (addon) bridge_note_feature_off(bridge_feature_off_hud_icons);
     return install_hud_visual_hooks_images(game, nullptr);
 }
 
@@ -21705,14 +23565,20 @@ bool combat_amounts_contract(std::uint8_t* game) noexcept {
     return owner.owner==EntryOwner::framework_chain && owner.callback==g_addon.image+g_addon.layout.effect_value_callback;
 }
 
+// The addon's perk modifier, as both discovered addon forms read it: the
+// unit's level of perk subtype+7 (+0x413+perk), then entry perk*3+level-1 of
+// the native perk database (0x7AF268: entries +0xC..+0x10, 0x44 bytes) and
+// its modifier at +0x34. No level, or no such entry, is modifier 0.
 bool combat_perk_modifier(void* unit,unsigned subtype,std::uint32_t& modifier) noexcept {
-    __try {
-        using GetPerk=const void*(__thiscall*)(void*,int);
-        const auto* perk=reinterpret_cast<GetPerk>(g_addon.image+g_addon.layout.effect_perk_getter)(
-            static_cast<std::uint8_t*>(unit)+0x330,int(subtype)+7);
-        modifier=0;
-        return !perk || visual_read(perk,0x34,modifier);
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    const int perk=int(subtype)+7;
+    std::uint8_t level=0; std::uintptr_t begin=0,end=0;
+    modifier=0;
+    if (!visual_read(unit,0x413+perk,level)) return false;
+    if (!level) return true;
+    if (!visual_read(g_visual_game_image,0x3af274,begin) || !visual_read(g_visual_game_image,0x3af278,end) ||
+        end<begin) return false;
+    const std::uintptr_t entry=std::uintptr_t(perk*3+level-1);
+    return entry>=(end-begin)/0x44 || visual_read(reinterpret_cast<const void*>(begin+entry*0x44),0x34,modifier);
 }
 
 void publish_combat_amounts(void* unit,void* server,CombatUnitValue& value) noexcept {
@@ -24381,9 +26247,11 @@ bool install_terrain_hooks(std::uint8_t* image) {
     static const std::uint8_t kFreeStock[] = {0x83,0xec,0x08,0x53,0x55};
     static_assert(sizeof(kSegmentStock) == kTerrainSegmentPatchBytes &&
                   sizeof(kFreeStock) == kTerrainFreePatchBytes);
-    // The range draw is fully replaced and stays exact; the forwarding
-    // entries accept stock bytes or an addon hook-framework chain.
-    if (!signature(range_draw_entry, {0x83,0xec,0x0c,0x53,0x55}) ||
+    // The range draw is fully replaced and stays exact (a foreign owner is
+    // named and rejected visibly); the forwarding entries accept stock bytes
+    // or an addon hook-framework chain.
+    static const std::uint8_t kRangeDrawStock[] = {0x83,0xec,0x0c,0x53,0x55,0x56};
+    if (!replaced_entry_is_stock(range_draw_entry, kRangeDrawStock, sizeof(kRangeDrawStock)) ||
         !hook_entry_usable(segment_entry, kSegmentStock, sizeof(kSegmentStock),
                            kTerrainSegmentPatchBytes) ||
         !hook_entry_usable(free_entry, kFreeStock, sizeof(kFreeStock),
@@ -24648,12 +26516,14 @@ void __fastcall hook_cursor_restore(void*, void*, int) {}
 bool install_owned_cursor_hooks(std::uint8_t* image) {
     if (!image) return false;
     const std::array<std::uint32_t,3> rvas{kCursorDrawEntryRva,kCursorThreadEntryRva,kCursorRestoreEntryRva};
-    const std::array<std::array<std::uint8_t,5>,3> expected{{{0x83,0xec,0x10,0x53,0x55},
-        {0x81,0xec,0xe0,0x00,0x00},{0x83,0xec,0x20,0x53,0x56}}};
+    // Whole stock instructions (the thread's first one is 6 bytes) so an
+    // addon hook-framework chain is recognised and named, never overwritten.
+    const std::array<std::array<std::uint8_t,7>,3> expected{{{0x83,0xec,0x10,0x53,0x55,0x56,0x57},
+        {0x81,0xec,0xe0,0x00,0x00,0x00,0x53},{0x83,0xec,0x20,0x53,0x56,0x8b,0xf1}}};
     const std::array<const void*,3> targets{reinterpret_cast<const void*>(&hook_cursor_draw),
         reinterpret_cast<const void*>(&hook_cursor_thread),reinterpret_cast<const void*>(&hook_cursor_restore)};
     for (std::size_t i = 0; i < rvas.size(); ++i)
-        if (std::memcmp(image + rvas[i], expected[i].data(), 5) != 0) return false;
+        if (!replaced_entry_is_stock(image + rvas[i], expected[i].data(), expected[i].size())) return false;
     g_cursor_update = reinterpret_cast<CursorUpdateFn>(image + kCursorUpdateEntryRva);
     g_cursor_screen_state = image + kCursorScreenStateRva;
     for (std::size_t i = 0; i < rvas.size(); ++i) {
@@ -25380,6 +27250,67 @@ bool uninstall_owned_sky_hook(std::uint8_t* image) {
     return true;
 }
 
+// Stock __thiscall CWeather::DrawRain/DrawSnow(CVisualizator*), ret 4.
+BOOL __fastcall hook_owned_weather_draw(void*, void*, void*) { return TRUE; }
+
+struct OwnedWeatherSite {
+    std::uint32_t call_rva, entry_rva;
+    std::array<std::uint8_t, 24> prologue;
+    const char* name;
+};
+constexpr std::array<OwnedWeatherSite, 2> kOwnedWeatherSites{{
+    {kWeatherDrawRainCallRva, kWeatherDrawRainRva,
+     {{0x55,0x8b,0xec,0x83,0xec,0x60,0x53,0x8b,0xd9,0x56,0x57,0x8d,0x83,0xa8,0,0,0,0x8b,0x8b,0xa8,0,0,0,0x89}}, "rain"},
+    {kWeatherDrawSnowCallRva, kWeatherDrawSnowRva,
+     {{0x55,0x8b,0xec,0x83,0xec,0x64,0x53,0x8b,0xd9,0x56,0x57,0x8d,0x83,0xa8,0,0,0,0x8b,0x8b,0xa8,0,0,0,0x89}}, "snow"},
+}};
+
+// Both stock weather draws stop. A call site that no longer calls the stock
+// entry, or an entry another hook framework chains (an addon observing or
+// drawing weather), keeps that call: owned precipitation still draws, so the
+// doubled weather and the F10 line make the rejection visible.
+bool install_owned_weather_hooks(std::uint8_t* image) noexcept {
+    if (!game_sites_ok(GameSiteGroup::bridge)) { g_owned_weather_status = "game sites differ: stock rain/snow kept (doubled)"; return false; }
+    bool all = true;
+    for (std::size_t i = 0; i < kOwnedWeatherSites.size(); ++i) {
+        const auto& site = kOwnedWeatherSites[i];
+        if (g_owned_weather_installed[i]) continue;
+        auto* call = image + site.call_rva;
+        const auto owner = resolve_hook_entry(image + site.entry_rva, site.prologue.data(), site.prologue.size(), 5);
+        if (!window_call_targets(call, image + site.entry_rva) || owner.owner != EntryOwner::stock) {
+            g_owned_weather_status = owner.owner == EntryOwner::framework_chain ?
+                "an addon hooks the stock weather draw: stock rain/snow kept (doubled)" :
+                "weather draw call site differs: stock rain/snow kept (doubled)";
+            all = false;
+            continue;
+        }
+        std::memcpy(g_owned_weather_call_original[i].data(), call, 5);
+        if (!patch_window_code(call, reinterpret_cast<const void*>(&hook_owned_weather_draw), true)) {
+            g_owned_weather_status = "weather call patch failed: stock rain/snow kept (doubled)";
+            all = false;
+            continue;
+        }
+        g_owned_weather_installed[i] = true;
+    }
+    if (all) g_owned_weather_status = nullptr;
+    return all;
+}
+
+bool uninstall_owned_weather_hooks(std::uint8_t* image) noexcept {
+    bool restored = true;
+    for (std::size_t i = 0; i < kOwnedWeatherSites.size(); ++i) {
+        if (!g_owned_weather_installed[i]) continue;
+        if (!image || !restore_forwarding_hook(image + kOwnedWeatherSites[i].call_rva, g_owned_weather_call_original[i].data(), 5,
+                reinterpret_cast<const void*>(&hook_owned_weather_draw), true, "owned_weather.call")) {
+            restored = false;
+            continue;
+        }
+        g_owned_weather_installed[i] = false;
+    }
+    if (restored) g_owned_weather_status = "not installed";
+    return restored;
+}
+
 // ---- Owned DrawFrameSelection rectangles ----
 // CVisualizatorD3D::DrawFrameSelection(x1, y1, x2, y2, char alpha, bool frame)
 // is a __thiscall with six stack slots (both epilogues ret 18h). Its callers
@@ -25591,6 +27522,7 @@ bool install_game_particle_hook(std::uint8_t* image) {
     if (!VirtualProtect(&table[kGameParticleSlot], sizeof(void*), PAGE_READWRITE, &protection)) return false;
     g_game_particles_original = table[kGameParticleSlot];
     InterlockedExchangePointer(&table[kGameParticleSlot], reinterpret_cast<void*>(&hook_game_particles));
+    record_owned_patch(&table[kGameParticleSlot], &g_game_particles_original, sizeof(void*));
     DWORD ignored = 0;
     VirtualProtect(&table[kGameParticleSlot], sizeof(void*), protection, &ignored);
     g_game_particles_installed = true;
@@ -25616,6 +27548,699 @@ bool uninstall_game_particle_hook(std::uint8_t* image) {
     g_game_particles_installed=false;g_game_particles_original=nullptr;return true;
 }
 
+// CVisualizatorD3D::Draw3DLine, renderer vtable slot 16 (0x00501D90):
+// __thiscall (CSimplyArray<SXYZW>& points, float width, int clip_flags,
+// float texture_length, float v_start, float v_width), returns BOOL, pops 24
+// bytes (ret 18h). Points are {data +0, count +4} of 16-byte SXYZW, the same
+// array type DrawParticles reads. Only CLightning calls it (Draw and DrawLeaf,
+// through the slot), after setting the bolt texture on stage 0. The stock body
+// returns TRUE without drawing for clip flag 2 (TRV_INVISIBLE) or fewer than
+// 2 points (0x5023C2, 0x5023E1), multiplies 15.0 (0x73C518) by width times
+// rhw, sets SRCBLEND SRCALPHA / DESTBLEND ONE around one RenderTriangleSet and
+// restores both (0x502981-0x502A0D).
+constexpr std::uint32_t kGameRibbonSlot = 16;
+constexpr std::uint32_t kGameRibbonRva = 0x00101d90;
+constexpr std::int32_t kTrvInvisible = 2;
+
+void* g_game_ribbon_original = nullptr;  // restored on uninstall, never called
+bool g_game_ribbon_installed = false;
+thread_local void* g_game_ribbon_sink_context = nullptr;
+thread_local GameRibbonSubmitFn g_game_ribbon_sink = nullptr;
+
+void report_game_ribbon_omission(const char* reason) noexcept {
+    static const char* reported = nullptr;
+    if (reported == reason) return;
+    reported = reason;
+    append_bridge_event("game_lightning_omitted", reason, true);
+}
+
+bool read_game_ribbon_points(const void* points, std::int32_t& count, const float*& data) noexcept {
+    __try {
+        data = *reinterpret_cast<const float* const*>(points);
+        count = *reinterpret_cast<const std::int32_t*>(static_cast<const std::uint8_t*>(points) + 4);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool copy_game_ribbon_points(const float* data, GameRibbonPoint* output, std::uint32_t count) noexcept {
+    __try {
+        for (std::uint32_t i = 0; i < count; ++i, data += 4) output[i] = {data[0], data[1], data[2]};
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+BOOL __fastcall hook_game_ribbon(void* self, void*, const void* points, float width, std::int32_t clip_flags,
+                                 float texture_length, float v_start, float v_width) {
+    const bool interface_pass = g_semantic.kind == SemanticKind::ui;
+    SemanticScope scope(SemanticKind::particles, _ReturnAddress());
+    // Every failure omits the ribbon and returns success, as the stock body
+    // does for its own rejects; the bolt stays visibly missing.
+    if (clip_flags == kTrvInvisible) return TRUE;
+    std::int32_t count = 0;
+    const float* data = nullptr;
+    if (!points || !read_game_ribbon_points(points, count, data) || count < 0 || (count > 0 && !data)) {
+        report_game_ribbon_omission("invalid_points");
+        return TRUE;
+    }
+    if (count <= 1) return TRUE;
+    GameRibbonView view{};
+    if (const char* failure = read_game_particle_clip_rect(self, view.clip_half_width, view.clip_half_height)) {
+        report_game_ribbon_omission(failure);
+        return TRUE;
+    }
+    if (!extract_terrain_transform(self, view.object_to_clip)) {
+        report_game_ribbon_omission("projection_matrix_unreadable");
+        return TRUE;
+    }
+    if (!g_game_ribbon_sink) {
+        report_game_ribbon_omission("no_active_scene");
+        return TRUE;
+    }
+    if (!std::isfinite(width) || !std::isfinite(texture_length) || !std::isfinite(v_start) || !std::isfinite(v_width)) {
+        report_game_ribbon_omission("invalid_strip");
+        return TRUE;
+    }
+    thread_local std::vector<GameRibbonPoint> scratch;
+    try { if (scratch.size() < static_cast<std::size_t>(count)) scratch.resize(static_cast<std::size_t>(count)); }
+    catch (...) { report_game_ribbon_omission("scratch_allocation_failed"); return TRUE; }
+    if (!copy_game_ribbon_points(data, scratch.data(), static_cast<std::uint32_t>(count))) {
+        report_game_ribbon_omission("input_unreadable");
+        return TRUE;
+    }
+    view.points = scratch.data();
+    view.count = static_cast<std::uint32_t>(count);
+    view.half_width_pixels_w = 15.0f * width;
+    game_ribbon_strip(texture_length, v_start, v_width, view.count, view.strip);
+    view.interface_pass = interface_pass;
+    if (!g_game_ribbon_sink(g_game_ribbon_sink_context, view)) report_game_ribbon_omission("renderer_draw_failed");
+    return TRUE;
+}
+
+// Claims slot 16 only when it still points at the stock entry and the entry
+// bytes are unpatched; otherwise the game keeps drawing (reported rejected).
+bool install_game_ribbon_hook(std::uint8_t* image) {
+    auto** table = reinterpret_cast<void**>(image + kRendererTableRva);
+    if (table[kGameRibbonSlot] != image + kGameRibbonRva ||
+        !signature(image + kGameRibbonRva, {0x55,0x8b,0xec,0x83,0xec,0x30,0x89,0x4d,0xd0,0x8b,0x49,0x08}))
+        return false;
+    DWORD protection = 0;
+    if (!VirtualProtect(&table[kGameRibbonSlot], sizeof(void*), PAGE_READWRITE, &protection)) return false;
+    g_game_ribbon_original = table[kGameRibbonSlot];
+    InterlockedExchangePointer(&table[kGameRibbonSlot], reinterpret_cast<void*>(&hook_game_ribbon));
+    record_owned_patch(&table[kGameRibbonSlot], &g_game_ribbon_original, sizeof(void*));
+    DWORD ignored = 0;
+    VirtualProtect(&table[kGameRibbonSlot], sizeof(void*), protection, &ignored);
+    g_game_ribbon_installed = true;
+    return true;
+}
+
+bool uninstall_game_ribbon_hook(std::uint8_t* image) {
+    if (!g_game_ribbon_installed) return true;
+    if (!image) return false;
+    auto** table=reinterpret_cast<void**>(image+kRendererTableRva);
+    if(table[kGameRibbonSlot]!=g_game_ribbon_original) {
+        DWORD protection=0;
+        if(table[kGameRibbonSlot]!=reinterpret_cast<void*>(&hook_game_ribbon) ||
+           !VirtualProtect(&table[kGameRibbonSlot],sizeof(void*),PAGE_READWRITE,&protection)) {
+            append_bridge_event("hook_teardown_pending","lightning.slot_foreign_or_restore_failed",true);return false;
+        }
+        InterlockedExchangePointer(&table[kGameRibbonSlot],g_game_ribbon_original);
+        DWORD ignored=0;
+        if(!VirtualProtect(&table[kGameRibbonSlot],sizeof(void*),protection,&ignored)) {
+            append_bridge_event("hook_teardown_pending","lightning.protection_restore_failed",true);return false;
+        }
+    }
+    g_game_ribbon_installed=false;g_game_ribbon_original=nullptr;return true;
+}
+
+// CVisualizatorD3D::DrawSelection(const CPlot3D& cp, float size, const
+// CPlot3D& x_axis, const CPlot3D& y_axis), __thiscall, ret 10h (0x00503F13),
+// reached only by the direct call at 0x0056BF12 in Draw3DScene's selection
+// loop (ecx = theVisualizatorD3D 0x7AF060, size pushed as 0.5f). The stock
+// body builds six points from r = size * (float)1/3 (0x73D9A4) and the
+// constants 3, 2, 5, 1.4, 1.4, 4 with z = cp.z + 0.3 (0x73C54C), then calls
+// CDXDirect3D::Render 0x004EA4A0 with 18 indices, diffuse 0x8000FF00,
+// specular 0xFF000000, no bounding volume and z coefficient 1 (0x503EC0-
+// 0x503EFF). The call now reaches the hook instead; the renderer draws the
+// marker from the same inputs (game_particles.h).
+constexpr std::uint32_t kDrawSelectionCallRva = 0x0016bf12;
+constexpr std::uint32_t kDrawSelectionEntryRva = 0x00103a40;
+constexpr std::array<std::uint8_t, 24> kDrawSelectionPrologue{{0x81,0xec,0x2c,0x01,0x00,0x00,0xd9,0x84,0x24,0x34,
+    0x01,0x00,0x00,0xd8,0x0d,0xa4,0xd9,0x73,0x00,0x53,0x55,0x8b,0xe9,0x56}};
+std::array<std::uint8_t, 5> g_game_selection_call_original{};
+bool g_game_selection_installed = false;
+thread_local void* g_game_selection_sink_context = nullptr;
+thread_local GameSelectionSubmitFn g_game_selection_sink = nullptr;
+
+void report_game_selection_omission(const char* reason) noexcept {
+    static const char* reported = nullptr;
+    if (reported == reason) return;
+    reported = reason;
+    append_bridge_event("game_selection_marker_omitted", reason, true);
+}
+
+bool read_game_selection(const float* cp, float size, const float* x_axis, const float* y_axis,
+                         GameSelectionMarker& out) noexcept {
+    __try {
+        out.x = cp[0]; out.y = cp[1]; out.z = cp[2]; out.size = size;
+        out.x_axis[0] = x_axis[0]; out.x_axis[1] = x_axis[1];
+        out.y_axis[0] = y_axis[0]; out.y_axis[1] = y_axis[1];
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+BOOL __fastcall hook_game_selection(void* self, void*, const float* cp, float size, const float* x_axis,
+                                    const float* y_axis) {
+    SemanticScope scope(SemanticKind::particles, _ReturnAddress());
+    GameSelectionView view{};
+    if (!cp || !x_axis || !y_axis || !read_game_selection(cp, size, x_axis, y_axis, view.marker)) {
+        report_game_selection_omission("input_unreadable");
+        return TRUE;
+    }
+    for (float value : {view.marker.x, view.marker.y, view.marker.z, view.marker.size, view.marker.x_axis[0],
+                        view.marker.x_axis[1], view.marker.y_axis[0], view.marker.y_axis[1]})
+        if (!std::isfinite(value)) { report_game_selection_omission("input_not_finite"); return TRUE; }
+    if (const char* failure = read_game_particle_clip_rect(self, view.clip_half_width, view.clip_half_height)) {
+        report_game_selection_omission(failure);
+        return TRUE;
+    }
+    if (!extract_terrain_transform(self, view.object_to_clip)) {
+        report_game_selection_omission("projection_matrix_unreadable");
+        return TRUE;
+    }
+    if (!g_game_selection_sink) {
+        report_game_selection_omission("no_active_scene");
+        return TRUE;
+    }
+    if (!g_game_selection_sink(g_game_selection_sink_context, view))
+        report_game_selection_omission("renderer_draw_failed");
+    return TRUE;
+}
+
+// The call must still target the stock entry and the entry must be stock;
+// an addon chain on it keeps the stock marker (reported rejected).
+bool install_game_selection_hook(std::uint8_t* image) noexcept {
+    if (g_game_selection_installed) return true;
+    auto* call = image + kDrawSelectionCallRva;
+    const auto owner = resolve_hook_entry(image + kDrawSelectionEntryRva, kDrawSelectionPrologue.data(),
+                                          kDrawSelectionPrologue.size(), 5);
+    if (!window_call_targets(call, image + kDrawSelectionEntryRva) || owner.owner != EntryOwner::stock) return false;
+    std::memcpy(g_game_selection_call_original.data(), call, 5);
+    if (!patch_window_code(call, reinterpret_cast<const void*>(&hook_game_selection), true)) return false;
+    g_game_selection_installed = true;
+    return true;
+}
+
+bool uninstall_game_selection_hook(std::uint8_t* image) noexcept {
+    if (!g_game_selection_installed) return true;
+    if (!image || !restore_forwarding_hook(image + kDrawSelectionCallRva, g_game_selection_call_original.data(), 5,
+            reinterpret_cast<const void*>(&hook_game_selection), true, "selection_marker.call"))
+        return false;
+    g_game_selection_installed = false;
+    return true;
+}
+
+// Game terrain prints (game_particles.h). Draw3DScene draws the blood, foot
+// and fire print lists (CWorldClient +0x1B8/+0x1BC/+0x1C0, STLport lists:
+// the member is the sentinel pointer, nodes {next, prev, print inline at +8})
+// with for_each over CTerrainPrints::Draw, whose address it pushes at
+// 0x0056B8FB/0x0056B929/0x0056B957 (push imm32). Each push now names a
+// wrapper for its list; the wrapper runs the stock Draw (visibility, one-time
+// projection, fade alpha written to the print as stock) and, after the
+// list's last print, flushes the batch. The stock Render call inside Draw
+// (0x006CF2F6 -> 0x004EA4A0, thiscall, ret 24h, ecx = theVisualizatorD3D's
+// D3D 0x7AF080) reaches hook_game_print instead and hands over the mesh.
+constexpr std::uint32_t kPrintsDrawRva = 0x002cede0;
+constexpr std::uint32_t kPrintsRenderCallRva = 0x002cf2f6;
+constexpr std::uint32_t kD3DRenderMeshRva = 0x000ea4a0;
+constexpr std::uint32_t kVisualizatorObjectRva = 0x003af060;  // theVisualizatorD3D (DrawSelection call's ecx)
+constexpr std::array<std::uint32_t, 3> kPrintsPushSiteRvas{{0x0016b8fb, 0x0016b929, 0x0016b957}};
+constexpr std::array<std::uint32_t, 3> kPrintsListOffsets{{0x1b8, 0x1bc, 0x1c0}};
+constexpr std::array<std::uint8_t, 10> kPrintsDrawPrologue{{0x55,0x8b,0xec,0x6a,0xff,0x68,0xf8,0x71,0x73,0x00}};
+constexpr std::int32_t kTrvVisibleNoClip = 0;
+using PrintsDrawFn = int (__thiscall*)(void*);
+
+std::uint8_t* g_game_print_image = nullptr;
+bool g_game_prints_installed = false;
+std::array<std::uint8_t, 5> g_game_print_call_original{};
+thread_local void* g_game_print_sink_context = nullptr;
+thread_local GamePrintSubmitFn g_game_print_sink = nullptr;
+thread_local GamePrintFlushFn g_game_print_flush = nullptr;
+thread_local bool g_game_print_list_active = false;
+
+void report_game_print_omission(const char* reason) noexcept {
+    static const char* reported = nullptr;
+    if (reported == reason) return;
+    reported = reason;
+    append_bridge_event("game_prints_omitted", reason, true);
+}
+
+// The mesh expanded to one element per index. False on unreadable input or
+// an index outside the mesh.
+bool copy_game_print_mesh(const float* plots, const float* maps, std::uint32_t vertices, const WORD* indices,
+                          std::uint32_t index_count, std::uint32_t color, GameParticleGpu* output) noexcept {
+    __try {
+        for (std::uint32_t k = 0; k < index_count; ++k) {
+            const std::uint32_t i = indices[k];
+            if (i >= vertices) return false;
+            game_print_vertex_gpu(plots + (i / 4u) * 16u, i % 4u, maps[i * 2u], maps[i * 2u + 1u], color, output[k]);
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int __fastcall hook_game_print(void*, void*, const float* plots, const float* maps, std::int32_t groups,
+                               const WORD* indices, std::int32_t index_count, std::uint32_t color, std::uint32_t,
+                               const void*, float) {
+    SemanticScope scope(SemanticKind::particles, _ReturnAddress());
+    if (!g_game_print_list_active) { report_game_print_omission("render_outside_print_list"); return kTrvVisibleNoClip; }
+    if (groups < 0 || index_count < 0 || groups > 0x3fffffff || (index_count && (!plots || !maps || !indices))) {
+        report_game_print_omission("invalid_mesh");
+        return kTrvVisibleNoClip;
+    }
+    if (!index_count) return kTrvVisibleNoClip;
+    GamePrintView view{};
+    void* const visualizator = g_game_print_image + kVisualizatorObjectRva;
+    if (const char* failure = read_game_particle_clip_rect(visualizator, view.clip_half_width, view.clip_half_height)) {
+        report_game_print_omission(failure);
+        return kTrvVisibleNoClip;
+    }
+    if (!extract_terrain_transform(visualizator, view.object_to_clip)) {
+        report_game_print_omission("projection_matrix_unreadable");
+        return kTrvVisibleNoClip;
+    }
+    if (!g_game_print_sink) { report_game_print_omission("no_active_scene"); return kTrvVisibleNoClip; }
+    thread_local std::vector<GameParticleGpu> scratch;
+    try { if (scratch.size() < static_cast<std::size_t>(index_count)) scratch.resize(static_cast<std::size_t>(index_count)); }
+    catch (...) { report_game_print_omission("scratch_allocation_failed"); return kTrvVisibleNoClip; }
+    if (!copy_game_print_mesh(plots, maps, static_cast<std::uint32_t>(groups) * 4u, indices,
+                              static_cast<std::uint32_t>(index_count), color, scratch.data())) {
+        report_game_print_omission("mesh_unreadable");
+        return kTrvVisibleNoClip;
+    }
+    view.vertices = scratch.data();
+    view.count = static_cast<std::uint32_t>(index_count);
+    if (!g_game_print_sink(g_game_print_sink_context, view)) report_game_print_omission("renderer_draw_failed");
+    return kTrvVisibleNoClip;
+}
+
+// True when the print's node is the last one of its list.
+bool game_print_is_last(const void* print, std::uint32_t list_offset) noexcept {
+    __try {
+        const auto* world = g_game_print_image + kVisualClientWorldRva;
+        const void* sentinel = *reinterpret_cast<const void* const*>(world + list_offset);
+        const void* next = *reinterpret_cast<const void* const*>(static_cast<const std::uint8_t*>(print) - 8);
+        return next == sentinel;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return true;  // flush rather than hold a batch past an unreadable list
+    }
+}
+
+int game_print_list_draw(void* print, std::uint32_t list_offset) {
+    g_game_print_list_active = true;
+    const int result = reinterpret_cast<PrintsDrawFn>(g_game_print_image + kPrintsDrawRva)(print);
+    g_game_print_list_active = false;
+    if (game_print_is_last(print, list_offset) && g_game_print_flush &&
+        !g_game_print_flush(g_game_print_sink_context))
+        report_game_print_omission("renderer_flush_failed");
+    return result;
+}
+int __fastcall hook_game_blood_prints(void* print, void*) { return game_print_list_draw(print, kPrintsListOffsets[0]); }
+int __fastcall hook_game_foot_prints(void* print, void*) { return game_print_list_draw(print, kPrintsListOffsets[1]); }
+int __fastcall hook_game_fire_prints(void* print, void*) { return game_print_list_draw(print, kPrintsListOffsets[2]); }
+const std::array<const void*, 3> kGamePrintWrappers{{reinterpret_cast<const void*>(&hook_game_blood_prints),
+    reinterpret_cast<const void*>(&hook_game_foot_prints), reinterpret_cast<const void*>(&hook_game_fire_prints)}};
+
+bool write_game_print_push(std::uint8_t* site, const void* target) noexcept {
+    DWORD protection = 0;
+    if (!VirtualProtect(site + 1, 4, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    const auto value = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(target));
+    std::memcpy(site + 1, &value, 4);
+    DWORD ignored = 0;
+    VirtualProtect(site + 1, 4, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site + 1, 4);
+    return true;
+}
+
+// All four sites must be stock (the three pushes name the stock Draw, the
+// Render call targets the stock entry and Draw's entry is unpatched); then
+// all are patched together, or none stay patched.
+bool install_game_print_hooks(std::uint8_t* image) noexcept {
+    if (g_game_prints_installed) return true;
+    const auto draw = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(image + kPrintsDrawRva));
+    for (std::uint32_t rva : kPrintsPushSiteRvas) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, image + rva + 1, 4);
+        if (image[rva] != 0x68 || value != draw) return false;
+    }
+    if (std::memcmp(image + kPrintsDrawRva, kPrintsDrawPrologue.data(), kPrintsDrawPrologue.size()) != 0 ||
+        !window_call_targets(image + kPrintsRenderCallRva, image + kD3DRenderMeshRva))
+        return false;
+    g_game_print_image = image;
+    std::memcpy(g_game_print_call_original.data(), image + kPrintsRenderCallRva, 5);
+    if (!patch_window_code(image + kPrintsRenderCallRva, reinterpret_cast<const void*>(&hook_game_print), true))
+        return false;
+    for (std::size_t i = 0; i < kPrintsPushSiteRvas.size(); ++i) {
+        if (write_game_print_push(image + kPrintsPushSiteRvas[i], kGamePrintWrappers[i])) continue;
+        for (std::size_t k = 0; k < i; ++k)
+            write_game_print_push(image + kPrintsPushSiteRvas[k], image + kPrintsDrawRva);
+        restore_forwarding_hook(image + kPrintsRenderCallRva, g_game_print_call_original.data(), 5,
+                                reinterpret_cast<const void*>(&hook_game_print), true, "prints.call");
+        return false;
+    }
+    g_game_prints_installed = true;
+    return true;
+}
+
+bool uninstall_game_print_hooks(std::uint8_t* image) noexcept {
+    if (!g_game_prints_installed) return true;
+    if (!image) return false;
+    bool restored = true;
+    for (std::size_t i = 0; i < kPrintsPushSiteRvas.size(); ++i) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, image + kPrintsPushSiteRvas[i] + 1, 4);
+        if (value == static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(kGamePrintWrappers[i])))
+            restored &= write_game_print_push(image + kPrintsPushSiteRvas[i], image + kPrintsDrawRva);
+        else { append_bridge_event("hook_teardown_pending", "prints.push_foreign", true); restored = false; }
+    }
+    if (!restore_forwarding_hook(image + kPrintsRenderCallRva, g_game_print_call_original.data(), 5,
+            reinterpret_cast<const void*>(&hook_game_print), true, "prints.call"))
+        restored = false;
+    if (restored) g_game_prints_installed = false;
+    return restored;
+}
+
+// Owned floating combat text (combat_text.h). CWorldClient::Draw calls
+// CFlyingHitPoints::Draw(CVisualizator*) at 0x0056A337 (ecx = world +0x1B4,
+// thiscall, ret 4); that call now reaches hook_combat_text, which keeps the
+// stock list maintenance and draws the text itself. Shipped-byte evidence
+// (0x005E18E0): texture +0 bound through visualizator slot 11 first (FALSE
+// without one); entries older than 3000 ms are erased before the
+// "draw flying HP" setting (0x79BE74) is tested; per entry: unit = GetUnit
+// (0x00578980, ecx 0x7AFEA5, id), drawn only with unit flags (+8) 0x20 set,
+// 0x40 clear and 0x400000 set; anchor = centre of the first of the figures
+// "hd" (0x78AD74), "bd" (0x78AD38), "hp" (0x7900E4) found by MatchFigure
+// (0x00516A80): its 2D clip rect (figure +0x94 -> +0x20..+0x2C) when the
+// figure flag (+8) 0x40 is set, else the unit's screen rect (+0x100..+0x10C),
+// each centre (a + b) / 2 in integer division; owner (+0x24C) colours the
+// text; screen size from the D3D mode ([vis+0x20] +0x14 present -> +0x18 ->
+// +0x14/+0x18); after drawing, every briefing entry (flags bit 31) is
+// erased. Erase is the list's own 0x005E25B0 (thiscall, (iterator* result,
+// node), ret 8: unlinks the node into the node free list). The receive clock
+// (two timeGetTime calls in ReceiveDamage 0x005E1870 at 0x005E1892 and
+// 0x005E189F, the second stamp +500 ms for experience) reads game time
+// instead, as the draw does: the text freezes on pause and follows game
+// speed (game segments at the renderer's 0.055 s visual scale).
+constexpr std::uint32_t kCombatTextCallRva = 0x0016a337;
+constexpr std::uint32_t kCombatTextDrawRva = 0x001e18e0;
+constexpr std::uint32_t kCombatTextReceiveRva = 0x001e1870;
+constexpr std::array<std::uint32_t, 2> kCombatTextClockCallRvas{{0x001e1892, 0x001e189f}};
+constexpr std::uint32_t kCombatTextGetUnitRva = 0x00178980;
+constexpr std::uint32_t kCombatTextUnitOwnerRva = 0x003afea5;  // IWorldClient (GetUnit's ecx)
+constexpr std::uint32_t kCombatTextMatchFigureRva = 0x00116a80;
+constexpr std::array<std::uint32_t, 3> kCombatTextFigureNameRvas{{0x0038ad74, 0x0038ad38, 0x003900e4}};
+constexpr std::uint32_t kCombatTextEraseRva = 0x001e25b0;
+constexpr std::uint32_t kCombatTextSettingRva = 0x0039be74;
+constexpr std::array<std::uint8_t, 14> kCombatTextDrawPrologue{{0x6a,0xff,0x68,0xcb,0x8d,0x72,0x00,0x64,0xa1,0x00,0x00,0x00,0x00,0x50}};
+constexpr std::array<std::uint8_t, 6> kCombatTextClockCall{{0xff,0x15,0xa0,0xb6,0x73,0x00}};  // call [timeGetTime]
+constexpr std::array<std::uint8_t, 8> kCombatTextReceivePrologue{{0x83,0xec,0x10,0x55,0x8b,0x6c,0x24,0x18}};
+constexpr std::int32_t kCombatTextLifetimeMs = 3000;
+constexpr double kCombatTextSecondsPerSegment = .055;  // the renderer's game-clock scale (ground_cover.h)
+using CombatTextGetUnitFn = void* (__thiscall*)(void*, std::int32_t);
+using CombatTextMatchFigureFn = void* (__thiscall*)(void*, const char*);
+using CombatTextEraseFn = void (__thiscall*)(void*, void**, void*);
+using CombatTextSetTextureFn = BOOL (__thiscall*)(void*, DWORD, void*);
+
+std::uint8_t* g_combat_text_image = nullptr;
+bool g_combat_text_installed = false;
+// The addon's hook framework chains the stock Draw entry: its replacement
+// Draw design is drawn (combat_text_layout_addon) and briefing entries keep
+// the 3 s rule, as that design does. Discovered at install, generically.
+bool g_combat_text_addon_layout = false;
+std::array<std::uint8_t, 5> g_combat_text_call_original{};
+std::array<std::array<std::uint8_t, 6>, 2> g_combat_text_clock_original{};
+thread_local void* g_combat_text_sink_context = nullptr;
+thread_local GameGlyphSubmitFn g_combat_text_sink = nullptr;
+
+void report_combat_text_omission(const char* reason) noexcept {
+    static const char* reported = nullptr;
+    if (reported == reason) return;
+    reported = reason;
+    append_bridge_event("combat_text_omitted", reason, true);
+}
+
+// Game time in milliseconds for the damage list (receive stamps and draw).
+DWORD __stdcall combat_text_clock_ms() noexcept {
+    static DWORD last = 0;
+    double segments = 0;
+    if (g_combat_text_image && read_owned_world_time(g_combat_text_image, segments))
+        last = static_cast<DWORD>(static_cast<std::uint64_t>(segments * kCombatTextSecondsPerSegment * 1000.0));
+    return last;
+}
+
+struct CombatTextNode { void* node; std::int32_t unit, amount; std::uint32_t flags, time; };
+
+bool read_combat_text_list(void* text, void*& sentinel, std::vector<CombatTextNode>& nodes) noexcept {
+    __try {
+        sentinel = *reinterpret_cast<void**>(static_cast<std::uint8_t*>(text) + 4);
+        if (!sentinel) return false;
+        void* previous = sentinel;
+        for (void* node = *reinterpret_cast<void**>(sentinel); node != sentinel;) {
+            auto* bytes = static_cast<std::uint8_t*>(node);
+            if (!node || *reinterpret_cast<void**>(bytes + 4) != previous) return false;
+            if (nodes.size() == nodes.capacity()) return false;  // reserved by the caller; never grows here
+            nodes.push_back({node, *reinterpret_cast<std::int32_t*>(bytes + 8), *reinterpret_cast<std::int32_t*>(bytes + 12),
+                             *reinterpret_cast<std::uint32_t*>(bytes + 16), *reinterpret_cast<std::uint32_t*>(bytes + 20)});
+            previous = node;
+            node = *reinterpret_cast<void**>(bytes);
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::size_t count_combat_text_list(void* text) noexcept {
+    __try {
+        void* sentinel = *reinterpret_cast<void**>(static_cast<std::uint8_t*>(text) + 4);
+        std::size_t count = 0;
+        for (void* node = *reinterpret_cast<void**>(sentinel); node != sentinel && count < 0x100000; ++count)
+            node = *reinterpret_cast<void**>(node);
+        return count;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+bool erase_combat_text_node(void* text, void* node) noexcept {
+    __try {
+        void* result = nullptr;
+        reinterpret_cast<CombatTextEraseFn>(g_combat_text_image + kCombatTextEraseRva)(
+            static_cast<std::uint8_t*>(text) + 4, &result, node);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The entry's anchor and owner colour, or false when stock draws nothing.
+bool read_combat_text_unit(std::int32_t id, int& x, int& y, bool& owned) noexcept {
+    __try {
+        auto* unit = static_cast<std::uint8_t*>(reinterpret_cast<CombatTextGetUnitFn>(
+            g_combat_text_image + kCombatTextGetUnitRva)(g_combat_text_image + kCombatTextUnitOwnerRva, id));
+        if (!unit) return false;
+        const std::uint32_t flags = *reinterpret_cast<std::uint32_t*>(unit + 8);
+        if (!(flags & 0x20u) || (flags & 0x40u) || !(flags & 0x400000u)) return false;
+        std::uint8_t* figure = nullptr;
+        for (std::uint32_t name : kCombatTextFigureNameRvas) {
+            figure = static_cast<std::uint8_t*>(reinterpret_cast<CombatTextMatchFigureFn>(
+                g_combat_text_image + kCombatTextMatchFigureRva)(unit, reinterpret_cast<const char*>(g_combat_text_image + name)));
+            if (figure) break;
+        }
+        if (!figure) return false;
+        const std::int32_t* rect = (*reinterpret_cast<std::uint32_t*>(figure + 8) & 0x40u)
+            ? reinterpret_cast<const std::int32_t*>(*reinterpret_cast<std::uint8_t**>(figure + 0x94) + 0x20)
+            : reinterpret_cast<const std::int32_t*>(unit + 0x100);
+        x = (rect[0] + rect[2]) / 2;
+        y = (rect[1] + rect[3]) / 2;
+        owned = *reinterpret_cast<std::int32_t*>(unit + 0x24c) != 0;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool read_combat_text_screen(void* visualizator, float& w, float& h) noexcept {
+    __try {
+        auto* d3d = *reinterpret_cast<std::uint8_t**>(static_cast<std::uint8_t*>(visualizator) + 0x20);
+        if (!d3d || !*reinterpret_cast<std::uint32_t*>(d3d + 0x14)) return false;
+        auto* mode = *reinterpret_cast<std::uint8_t**>(d3d + 0x18);
+        w = static_cast<float>(*reinterpret_cast<std::uint32_t*>(mode + 0x14));
+        h = static_cast<float>(*reinterpret_cast<std::uint32_t*>(mode + 0x18));
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool bind_combat_text_texture(void* text, void* visualizator, bool& missing) noexcept {
+    __try {
+        void* texture = *static_cast<void**>(text);
+        missing = texture == nullptr;
+        if (missing) return false;
+        auto* table = *static_cast<void***>(visualizator);
+        return reinterpret_cast<CombatTextSetTextureFn>(table[11])(visualizator, 0, texture) != FALSE;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
+    SemanticScope scope(SemanticKind::particles, _ReturnAddress());
+    if (!text || !visualizator) { report_combat_text_omission("null_list_or_visualizator"); return FALSE; }
+    bool missing = false;
+    if (!bind_combat_text_texture(text, visualizator, missing)) {
+        if (!missing) report_combat_text_omission("set_texture_failed");
+        return FALSE;
+    }
+    const DWORD now = combat_text_clock_ms();
+    thread_local std::vector<CombatTextNode> nodes;
+    thread_local std::vector<GameParticleGpu> glyphs;
+    void* sentinel = nullptr;
+    nodes.clear();
+    try { const std::size_t count = count_combat_text_list(text); if (nodes.capacity() < count) nodes.reserve(count); }
+    catch (...) { report_combat_text_omission("list_allocation_failed"); return TRUE; }
+    if (!read_combat_text_list(text, sentinel, nodes)) { report_combat_text_omission("list_unreadable"); return TRUE; }
+    // Stock expiry; a stamp ahead of the clock by more than one lifetime (a
+    // game clock that restarted) is stale and goes the same way.
+    std::size_t kept = 0;
+    for (const CombatTextNode& n : nodes) {
+        const std::int32_t age = static_cast<std::int32_t>(now - n.time);
+        if (age > kCombatTextLifetimeMs || age < -2 * kCombatTextLifetimeMs) {
+            if (!erase_combat_text_node(text, n.node)) { report_combat_text_omission("erase_failed"); return TRUE; }
+        } else nodes[kept++] = n;
+    }
+    nodes.resize(kept);
+    std::int32_t enabled = 0;
+    if (!visual_read(g_combat_text_image, kCombatTextSettingRva, enabled)) { report_combat_text_omission("setting_unreadable"); return TRUE; }
+    if (!enabled) return TRUE;
+    float screen_w = 0, screen_h = 0;
+    const bool screen = read_combat_text_screen(visualizator, screen_w, screen_h);
+    if (!screen) report_combat_text_omission("screen_mode_unreadable");
+    glyphs.clear();
+    const float scale = widescreen_combat_text_scale();
+    for (const CombatTextNode& n : nodes) {
+        if (!screen) break;
+        CombatTextEntry entry{};
+        const std::int32_t age = static_cast<std::int32_t>(now - n.time);
+        entry.progress = g_combat_text_addon_layout ? static_cast<float>(age) / static_cast<float>(kCombatTextLifetimeMs)
+                                                    : static_cast<float>(age) * kCombatTextProgressPerMs;
+        if (entry.progress > 1.0f || entry.progress < 0.0f) continue;
+        if (!read_combat_text_unit(n.unit, entry.anchor_x, entry.anchor_y, entry.owned_unit)) continue;
+        entry.amount = n.amount;
+        entry.flags = n.flags;
+        try {
+            if (g_combat_text_addon_layout) combat_text_layout_addon(entry, screen_w, screen_h, scale, glyphs);
+            else combat_text_layout(entry, screen_w, screen_h, scale, glyphs);
+        }
+        catch (...) { report_combat_text_omission("glyph_allocation_failed"); glyphs.clear(); break; }
+    }
+    if (!glyphs.empty()) {
+        if (!g_combat_text_sink) report_combat_text_omission("no_active_scene");
+        else {
+            GameGlyphView view{};
+            view.glyphs = glyphs.data();
+            view.count = static_cast<std::uint32_t>(glyphs.size());
+            if (!g_combat_text_sink(g_combat_text_sink_context, view)) report_combat_text_omission("renderer_draw_failed");
+        }
+    }
+    for (const CombatTextNode& n : nodes)
+        if (!g_combat_text_addon_layout && (n.flags & kCombatTextBriefing) && !erase_combat_text_node(text, n.node)) {
+            report_combat_text_omission("erase_failed");
+            break;
+        }
+    return TRUE;
+}
+
+bool write_combat_text_clock_call(std::uint8_t* site, const void* target) noexcept {
+    DWORD protection = 0;
+    if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    const bool wrote = write_relative_call(site, target);
+    if (wrote) site[5] = 0x90;
+    DWORD ignored = 0;
+    VirtualProtect(site, 6, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site, 6);
+    return wrote;
+}
+
+bool restore_combat_text_clock_call(std::uint8_t* site, const std::array<std::uint8_t, 6>& original) noexcept {
+    DWORD protection = 0;
+    if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::memcpy(site, original.data(), 6);
+    DWORD ignored = 0;
+    VirtualProtect(site, 6, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site, 6);
+    return true;
+}
+
+// The Draw call, Draw's entry, ReceiveDamage's entry and both receive clock
+// calls must be stock; then all are patched, or none stay patched.
+bool install_combat_text_hooks(std::uint8_t* image) noexcept {
+    if (g_combat_text_installed) return true;
+    const auto draw_owner = resolve_hook_entry(image + kCombatTextDrawRva, kCombatTextDrawPrologue.data(),
+                                               kCombatTextDrawPrologue.size(), 5);
+    // A framework chain on Draw is the addon's replacement Draw; the call is
+    // taken before it, so that chain stays installed and is simply not reached.
+    if (!window_call_targets(image + kCombatTextCallRva, image + kCombatTextDrawRva) ||
+        draw_owner.owner == EntryOwner::rejected ||
+        std::memcmp(image + kCombatTextReceiveRva, kCombatTextReceivePrologue.data(), kCombatTextReceivePrologue.size()) != 0)
+        return false;
+    for (std::uint32_t rva : kCombatTextClockCallRvas)
+        if (std::memcmp(image + rva, kCombatTextClockCall.data(), kCombatTextClockCall.size()) != 0) return false;
+    g_combat_text_image = image;
+    g_combat_text_addon_layout = draw_owner.owner == EntryOwner::framework_chain;
+    std::memcpy(g_combat_text_call_original.data(), image + kCombatTextCallRva, 5);
+    for (std::size_t i = 0; i < kCombatTextClockCallRvas.size(); ++i)
+        std::memcpy(g_combat_text_clock_original[i].data(), image + kCombatTextClockCallRvas[i], 6);
+    if (!patch_window_code(image + kCombatTextCallRva, reinterpret_cast<const void*>(&hook_combat_text), true)) return false;
+    for (std::size_t i = 0; i < kCombatTextClockCallRvas.size(); ++i) {
+        if (write_combat_text_clock_call(image + kCombatTextClockCallRvas[i], reinterpret_cast<const void*>(&combat_text_clock_ms)))
+            continue;
+        for (std::size_t k = 0; k < i; ++k)
+            restore_combat_text_clock_call(image + kCombatTextClockCallRvas[k], g_combat_text_clock_original[k]);
+        restore_forwarding_hook(image + kCombatTextCallRva, g_combat_text_call_original.data(), 5,
+                                reinterpret_cast<const void*>(&hook_combat_text), true, "combat_text.call");
+        return false;
+    }
+    g_combat_text_installed = true;
+    return true;
+}
+
+bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
+    if (!g_combat_text_installed) return true;
+    if (!image) return false;
+    bool restored = true;
+    for (std::size_t i = 0; i < kCombatTextClockCallRvas.size(); ++i) {
+        std::uint8_t* site = image + kCombatTextClockCallRvas[i];
+        if (relative_call_targets(site, reinterpret_cast<const void*>(&combat_text_clock_ms)))
+            restored &= restore_combat_text_clock_call(site, g_combat_text_clock_original[i]);
+        else { append_bridge_event("hook_teardown_pending", "combat_text.clock_foreign", true); restored = false; }
+    }
+    if (!restore_forwarding_hook(image + kCombatTextCallRva, g_combat_text_call_original.data(), 5,
+            reinterpret_cast<const void*>(&hook_combat_text), true, "combat_text.call"))
+        restored = false;
+    if (restored) g_combat_text_installed = false;
+    return restored;
+}
+
 std::string debug_root() {
     char explicit_path[MAX_PATH]{};
     if (GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR", explicit_path,
@@ -25628,7 +28253,12 @@ std::string debug_root() {
 
 } // namespace
 
-void bridge_update_combat_portraits() noexcept { publish_combat_portraits(); }
+// Reads the game's units: game thread only (the scene thread's overlay frame
+// skips it; queue_present runs it on the game thread instead).
+void bridge_update_combat_portraits() noexcept {
+    if (g_scene_frame_values_installed) return;
+    publish_combat_portraits();
+}
 
 std::uint64_t bridge_camp_texture_generation() noexcept {
     return g_hud_visual_game_image && g_hud_visuals.role_ready(HudResourceRole::texture)
@@ -25817,9 +28447,8 @@ void publish_ground_cover_footprint_append(void* object, VisualResourceIncarnati
     }
 } catch(...) { append_bridge_event("ground_cover_marker_omitted","creation snapshot allocation failed",true); }
 
-} // namespace
-
-bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
+// Game thread: the footprint list read (and the marker records it keeps).
+bool read_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
     std::vector<FootprintTrailPoint>* trail_points) noexcept {
     output.clear();
     if(trail_points)trail_points->clear();
@@ -25949,18 +28578,79 @@ bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& o
     return true;
 }
 
-bool bridge_terrain_atlas(std::uint32_t material,std::shared_ptr<const OwnedVisualSurface>& output,
-    const char** failure) noexcept {
-    output.reset();
-    const char* reason="terrain atlas read failed";
+} // namespace
+
+bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
+    std::vector<FootprintTrailPoint>* trail_points) noexcept {
+    if(!g_scene_frame_values_installed)return read_ground_cover_footprints(output,trail_points);
+    // Scene thread: the game thread's read for this world command.
+    output.clear();
+    if(trail_points)trail_points->clear();
+    const auto* snapshot=g_scene_footprints;
+    if(!snapshot) {
+        static bool reported=false;
+        if(!reported){reported=true;append_bridge_event("ground_cover_footprints_rejected",
+            "scene thread: no game-thread footprint snapshot with this command; ground cover omitted",true);}
+        return false;
+    }
     try {
-        void* texture=owned_terrain_texture_wrapper(material);
+        output=snapshot->splats;
+        if(trail_points)*trail_points=snapshot->trail_points;
+    } catch(...) {
+        output.clear();
+        if(trail_points)trail_points->clear();
+        return false;
+    }
+    return snapshot->ok;
+}
+
+namespace {
+// Game thread: the atlas behind one terrain texture wrapper.
+std::shared_ptr<const OwnedVisualSurface> read_terrain_atlas(void* texture,const char*& reason) noexcept {
+    std::shared_ptr<const OwnedVisualSurface> output;
+    reason="terrain atlas read failed";
+    try {
         IDirectDrawSurface7* surface=nullptr;std::uint32_t flags=0;
         if(!texture)reason="terrain texture wrapper not captured";
         else if(!visual_texture_surface(texture,surface,flags)||!surface)reason="terrain texture has no surface";
         else if(!g_visual_surface_reader)reason="surface reader not installed";
         else if(!g_visual_surface_reader(surface,output)){output.reset();reason="terrain atlas surface not publishable";}
     } catch(...) { output.reset(); }
+    return output;
+}
+
+// Game thread, as it queues a world command: every terrain material's atlas.
+// The scene thread's bridge_terrain_atlas answers from this snapshot, carried
+// with the frame values of every later post.
+void capture_terrain_atlases(const std::vector<void*>& wrappers) noexcept {
+    try {
+        auto snapshot=std::make_shared<TerrainAtlasSnapshot>();
+        snapshot->surfaces.resize(wrappers.size());
+        snapshot->failures.resize(wrappers.size(),nullptr);
+        for(std::size_t index=0;index<wrappers.size();++index)
+            snapshot->surfaces[index]=read_terrain_atlas(wrappers[index],snapshot->failures[index]);
+        g_terrain_atlases=std::move(snapshot);
+    } catch(...) { g_terrain_atlases.reset(); }
+}
+} // namespace
+
+bool bridge_terrain_atlas(std::uint32_t material,std::shared_ptr<const OwnedVisualSurface>& output,
+    const char** failure) noexcept {
+    output.reset();
+    const char* reason="terrain atlas read failed";
+    if(g_scene_frame_values_installed) {
+        // Scene thread: the game thread's snapshot (capture_terrain_atlases).
+        const auto& snapshot=g_scene_frame_values.terrain_atlases;
+        if(!snapshot)reason="terrain atlases not captured by the game thread yet";
+        else if(snapshot->surfaces.empty())reason="terrain texture wrapper not captured";
+        else {
+            const auto index=material%snapshot->surfaces.size();
+            output=snapshot->surfaces[index];
+            if(!output&&snapshot->failures[index])reason=snapshot->failures[index];
+        }
+    } else {
+        output=read_terrain_atlas(owned_terrain_texture_wrapper(material),reason);
+    }
     if(!output&&failure)*failure=reason;
     return output!=nullptr;
 }
@@ -25969,10 +28659,15 @@ void bridge_append_probe_event(const char* event,const char* detail) noexcept {
     append_bridge_event(event,detail,false);
 }
 
-void bridge_report_hovered_shadow() noexcept {
-    if(!hovered_shadow_observation_enabled())return;
+void bridge_request_hovered_shadow_capture() noexcept {
+    if(hovered_shadow_observation_enabled())g_hovered_shadow_capture_requested=true;
+}
+
+namespace {
+void complete_hovered_shadow_capture() noexcept {
+    // Present only requests this; read while the completed world still owns its borrows.
     const auto& frame=g_owned_visual_world_frame;
-    const auto target=hovered_shadow_observation_target();
+    const auto target=frame.observed_hover;
     char detail[768]{};
     if(!frame.active || !frame.values || !target.signed_id) {
         append_bridge_event("hovered_shadow_capture","No completed world frame or current hover target; hover the affected corpse with object highlighting enabled.",false);return;
@@ -26005,7 +28700,7 @@ void bridge_report_hovered_shadow() noexcept {
         const auto& value=prepared.parts[part];
         const float alpha=sample.assembly && part<sample.assembly->parts.size()?retained_visual_effective_alpha(sample,sample.assembly->parts[part]):-1.f;
         std::snprintf(detail,sizeof(detail),"frame=%llu id=%d part=%zu alpha=%.4f ready=%u visible=%u casts=%u color_admitted=%u bounds_valid=%u light_mask=0x%02x depth_revision=%llu",
-            frame.serial,target.signed_id,part,alpha,unsigned(value.ready),unsigned(value.visible),unsigned(value.casts),unsigned(value.color_admitted),
+            frame.serial,target.signed_id,part,alpha,unsigned(value.ready_serial==frame.serial),unsigned(value.visible),unsigned(value.casts),unsigned(value.color_admitted),
             unsigned(value.bounds.valid),unsigned(value.contribution.light_mask),value.depth_revision.revision);
         append_bridge_event("hovered_shadow_part",detail,false);
     }
@@ -26015,6 +28710,7 @@ void bridge_report_hovered_shadow() noexcept {
         append_bridge_event("hovered_shadow_candidate",detail,false);
     }
 }
+} // namespace
 
 bool bridge_liquid_ripples(NativeLiquidRipples& output) noexcept {
     output={};
@@ -26029,6 +28725,10 @@ bool bridge_liquid_ripples(NativeLiquidRipples& output) noexcept {
 }
 
 bool bridge_read_world_environment(WorldEnvironment& output) noexcept {
+    if (g_scene_frame_values_installed) {
+        output = g_scene_frame_values.environment;
+        return output.valid;
+    }
     read_world_environment(output);
     return output.valid;
 }
@@ -26084,7 +28784,7 @@ bool perch_figure_valid(const FigureCpuAsset& figure) {
 // A DXT texel's colour is a branch's (brown: red over green and blue), not a
 // leaf's (green) or snow's (white). Packed formats carry no such evidence here.
 bool perch_branch_texel(const TextureCpuAsset& texture,std::uint32_t x,std::uint32_t y) {
-    if((texture.format!=MmpFormat::dxt1&&texture.format!=MmpFormat::dxt3)||texture.mips.empty()||!texture.source)return false;
+    if((texture.format!=MmpFormat::dxt1&&texture.format!=MmpFormat::dxt3&&texture.format!=MmpFormat::dxt5)||texture.mips.empty()||!texture.source)return false;
     const auto& mip=texture.mips[0];
     const std::uint32_t block=texture.format==MmpFormat::dxt1?8u:16u;
     const std::size_t offset=mip.byte_offset+(std::size_t(y/4)*((mip.width+3)/4)+x/4)*block+(block-8);
@@ -26228,7 +28928,8 @@ bool place_perches_c56(const RetainedVisualSample& sample,const std::vector<Perc
     return true;
 }
 
-// Perches chosen per model (perch_model_key), kept for the session.
+// Perches chosen per model (perch_model_key), kept for the world
+// (bridge_release_world_caches empties it).
 std::unordered_map<std::string,std::vector<PerchRef>> g_perch_models;
 
 const TextureCpuAsset* perch_tree_atlas() noexcept {
@@ -26290,9 +28991,10 @@ bool bridge_critter_perches(float x,float y,float radius,std::vector<CritterPerc
         if(!prepare_owned_visual_world_bounds(sample,b))continue;
         if(b.maximum[0]<x-radius||b.minimum[0]>x+radius||b.maximum[1]<y-radius||b.minimum[1]>y+radius)continue;
         auto& prepared=*sample.prepared;
-        auto key=owned_visual_pose_key(sample);key.phase=0;
-        if(!prepared.perches_valid||!same_visual_pose_key(prepared.perches_key,key)) {
+        const double still=0;
+        if(!prepared.perches_valid||!owned_visual_pose_key_matches(prepared.perches_key,sample,&still)) {
             if(!building)continue;
+            auto key=owned_visual_pose_key(sample);key.phase=0;
             prepared.perches_valid=false;
             const std::string model_key=perch_model_key(sample,atlas!=nullptr);
             auto found=models.find(model_key);
@@ -26316,19 +29018,258 @@ bool bridge_critter_perches(float x,float y,float radius,std::vector<CritterPerc
     return true;
 } catch(...) {output.clear();return false;}
 
+namespace {
+// Ground-cover object contacts (#164). The store holds every eligible non-unit
+// scene object, filed in a 16 m XY grid by its contact rectangles (or, until
+// those are built, its envelope). It changes only through the scene's own
+// per-ID change journal (consumer ground_contacts: values, status, lifecycle
+// add/remove) and is refilled whole on a journal reset, a static terrain
+// change or a new terrain source. Contacts are built once per placement,
+// nearest the eye first, under kGroundContactBudgetMs a frame; while the load
+// reveal hold covers the world every one in the window is built, so the
+// revealed frame has them all. An object not yet built has no footprint
+// (grass shows through it).
+// The answer for a window is the rectangles of the grid cells it covers. It
+// is kept and handed out again while those cells and the store are unchanged
+// (825f42fe measured the per-frame read of every in-window object's contacts
+// at the cost of the former walk: 0.23 ms median on Suslanger).
+constexpr float kGroundContactCell = 16.f;
+constexpr double kGroundContactBudgetMs = .3;
+struct GroundContactStore {
+    struct Entry {
+        LifecycleIdentity lifecycle{};
+        VisualResourceIncarnation resource{};
+        std::shared_ptr<VisualPreparedResources> prepared; // holds the built contacts
+        std::array<float,4> box{}; // XY min/max filed in the grid
+        bool built = false, bounded = true;
+        std::uint64_t seen = 0;
+    };
+    std::unordered_map<std::int32_t,Entry> entries;
+    std::unordered_map<std::int64_t,std::vector<std::int32_t>> cells;
+    std::vector<std::int32_t> unbounded; // no envelope: offered to every window
+    std::vector<float> sector_top;
+    std::uint64_t terrain_generation = 0, terrain_revision = 0, stamp = 0;
+    std::uint64_t revision = 1; // any filing change
+    std::vector<ground_cover::FootprintSplat> answer;
+    std::array<std::int32_t,4> answer_cells{};
+    std::uint64_t answer_revision = 0; // 0: no complete answer kept
+    bool valid = false;
+    void clear() {
+        entries.clear();cells.clear();unbounded.clear();answer.clear();
+        answer_revision=0;valid=false;++revision;
+    }
+};
+// Never destroyed: it holds scene resources whose owners are gone at static
+// destruction. Released with the cover's world (bridge_release_ground_contacts).
+GroundContactStore& g_ground_contacts=*new GroundContactStore;
+
+std::int64_t ground_contact_cell_key(std::int32_t x,std::int32_t y) noexcept {
+    return (std::int64_t(x)<<32)|std::uint32_t(y);
+}
+std::array<std::int32_t,4> ground_contact_cell_range(const std::array<float,4>& box) noexcept {
+    return {std::int32_t(std::floor(box[0]/kGroundContactCell)),std::int32_t(std::floor(box[1]/kGroundContactCell)),
+            std::int32_t(std::floor(box[2]/kGroundContactCell)),std::int32_t(std::floor(box[3]/kGroundContactCell))};
+}
+template<class F> void ground_contact_cells(const std::array<std::int32_t,4>& range,F&& visit) {
+    for(auto cy=range[1];cy<=range[3];++cy)for(auto cx=range[0];cx<=range[2];++cx)visit(ground_contact_cell_key(cx,cy));
+}
+std::array<float,4> ground_contact_box(const std::vector<std::array<float,4>>& rectangles) noexcept {
+    std::array<float,4> box{INFINITY,INFINITY,-INFINITY,-INFINITY};
+    for(const auto& r:rectangles) {
+        box[0]=std::min(box[0],r[0]-r[2]);box[1]=std::min(box[1],r[1]-r[3]);
+        box[2]=std::max(box[2],r[0]+r[2]);box[3]=std::max(box[3],r[1]+r[3]);
+    }
+    return box;
+}
+void ground_contact_unfile(GroundContactStore& store,std::int32_t id,const GroundContactStore::Entry& entry) {
+    ++store.revision;
+    if(!entry.bounded) {
+        store.unbounded.erase(std::remove(store.unbounded.begin(),store.unbounded.end(),id),store.unbounded.end());
+        return;
+    }
+    if(!(entry.box[0]<=entry.box[2]))return; // built with no contacts: never filed
+    ground_contact_cells(ground_contact_cell_range(entry.box),[&](std::int64_t key){
+        const auto cell=store.cells.find(key);
+        if(cell==store.cells.end())return;
+        auto& ids=cell->second;
+        ids.erase(std::remove(ids.begin(),ids.end(),id),ids.end());
+        if(ids.empty())store.cells.erase(cell);
+    });
+}
+void ground_contact_file(GroundContactStore& store,std::int32_t id,const GroundContactStore::Entry& entry) {
+    ++store.revision;
+    if(!entry.bounded){store.unbounded.push_back(id);return;}
+    if(!(entry.box[0]<=entry.box[2]))return;
+    ground_contact_cells(ground_contact_cell_range(entry.box),[&](std::int64_t key){store.cells[key].push_back(id);});
+}
+bool ground_contacts_current(const RetainedVisualSample& sample,const RetainedTerrainSourceSnapshot& source) {
+    const auto& prepared=*sample.prepared;
+    const double still=0;
+    return prepared.ground_contacts_valid&&owned_visual_pose_key_matches(prepared.ground_contacts_key,sample,&still)&&
+        prepared.ground_contacts_terrain_generation==source.source_generation&&
+        prepared.ground_contacts_terrain_revision==source.source_revision;
+}
+// The frame's samples stay in signed-ID order with one sample per ID
+// (RetainedStaticScene::visual_frame_unlocked).
+const RetainedVisualSample* ground_contact_sample(const std::vector<RetainedVisualSample>& entities,std::int32_t id) noexcept {
+    const auto found=std::lower_bound(entities.begin(),entities.end(),id,
+        [](const RetainedVisualSample& sample,std::int32_t value){return sample.resource.signed_id<value;});
+    return found!=entities.end()&&found->resource.signed_id==id ? &*found : nullptr;
+}
+// One sample's entry under the exact rule of the former per-frame walk;
+// false: not a contact source.
+bool ground_contact_entry(const RetainedVisualSample& sample,const RetainedTerrainSourceSnapshot& source,
+    GroundContactStore::Entry& entry) {
+    if(sample.values.unit||sample.values.hidden||(sample.values.object_flags&0x40u)||
+       sample.status!=RetainedVisualStatus::ready||!sample.height_valid||!sample.assembly||
+       !sample.assembly->skeleton||!sample.prepared)return false;
+    entry={};
+    entry.lifecycle=sample.lifecycle;entry.resource=sample.resource;entry.prepared=sample.prepared;
+    if(ground_contacts_current(sample,source)) {
+        entry.built=true;entry.box=ground_contact_box(sample.prepared->ground_contacts);
+    } else {
+        // The published entity envelope contains every part envelope.
+        NativeWorldBounds envelope{};
+        if(prepare_owned_visual_world_bounds(sample,envelope)&&
+           std::isfinite(envelope.minimum[0])&&std::isfinite(envelope.minimum[1])&&
+           std::isfinite(envelope.maximum[0])&&std::isfinite(envelope.maximum[1]))
+            entry.box={envelope.minimum[0],envelope.minimum[1],envelope.maximum[0],envelope.maximum[1]};
+        else entry.bounded=false;
+    }
+    return true;
+}
+bool same_ground_contact_entry(const GroundContactStore::Entry& left,const GroundContactStore::Entry& right) noexcept {
+    return same_lifecycle_identity(left.lifecycle,right.lifecycle)&&same_visual_resource(left.resource,right.resource)&&
+        left.prepared==right.prepared&&left.built==right.built&&left.bounded==right.bounded&&left.box==right.box;
+}
+} // namespace
+
+void bridge_release_ground_contacts() noexcept {
+    g_ground_contacts.clear();
+    std::vector<float>().swap(g_ground_contacts.sector_top);
+}
+
 bool bridge_ground_cover_objects(float x,float y,float radius,
-    std::vector<ground_cover::FootprintSplat>& output) noexcept {
+    std::vector<ground_cover::FootprintSplat>& output) noexcept try {
     output.clear();
     const auto& visual=g_owned_visual_world_frame;
     const auto& terrain=g_owned_terrain_frame;
     if(!visual.active||!visual.values||!terrain.world_serial||!terrain.source_values.terrain)return false;
-    static WorldContactCache cache;
-    return build_ground_cover_objects(*visual.values,terrain.source_values,cache,x,y,radius,output
-#ifdef EID3D11_TESTING
-        , &g_owned_visual_world_frame.pose_preparations
-#endif
-    );
-}
+    const auto& source=terrain.source_values;
+    const auto& ground=*source.terrain;
+    const auto& entities=visual.values->entities;
+    auto& store=g_ground_contacts;
+    auto& scene=retained_visual_scene();
+    const auto changes=scene.visual_source_changes(RetainedShadowConsumer::ground_contacts);
+    const bool full=!store.valid||changes.full||(changes.terrain_dirty&&!changes.terrain_time_only)||
+        store.terrain_generation!=source.source_generation||
+        store.terrain_revision!=source.source_revision;
+    if(full) {
+        store.clear();
+        store.sector_top.assign(std::size_t(ground.sector_count_x)*ground.sector_count_y,-INFINITY);
+        for(const auto& sector:ground.sectors)
+            if(sector.map_x<ground.sector_count_x&&sector.map_y<ground.sector_count_y) {
+                auto& value=store.sector_top[std::size_t(sector.map_y)*ground.sector_count_x+sector.map_x];
+                value=std::max(value,sector.bounds.maximum[2]);
+            }
+        store.terrain_generation=source.source_generation;store.terrain_revision=source.source_revision;
+        GroundContactStore::Entry entry;
+        for(const auto& sample:entities)
+            if(ground_contact_entry(sample,source,entry)) {
+                ground_contact_file(store,sample.resource.signed_id,entry);
+                store.entries[sample.resource.signed_id]=std::move(entry);
+            }
+        store.valid=true;
+    } else {
+        GroundContactStore::Entry entry;
+        for(const auto id:changes.dirty_visuals) {
+            const auto* sample=ground_contact_sample(entities,id);
+            const bool source_now=sample&&ground_contact_entry(*sample,source,entry);
+            const auto found=store.entries.find(id);
+            // An unchanged entry (an animated prop's phase, a flag that does
+            // not concern cover) keeps its filing and the kept answer.
+            if(found!=store.entries.end()&&source_now&&same_ground_contact_entry(found->second,entry))continue;
+            if(found!=store.entries.end()){ground_contact_unfile(store,id,found->second);store.entries.erase(found);}
+            if(source_now){ground_contact_file(store,id,entry);store.entries[id]=std::move(entry);}
+        }
+    }
+    // The scene thread's frame may predate the newest changes: they stay
+    // unacknowledged and are read again next frame.
+    scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::ground_contacts,
+        owned_scene_ack_revision(changes.revision));
+
+    // The cells the cover window touches; the answer covers them whole.
+    const auto range=ground_contact_cell_range({x-radius,y-radius,x+radius,y+radius});
+    if(store.answer_revision==store.revision&&store.answer_cells==range) {
+        output=store.answer;
+        return true;
+    }
+    const std::array<float,4> area{range[0]*kGroundContactCell,range[1]*kGroundContactCell,
+        (range[2]+1)*kGroundContactCell,(range[3]+1)*kGroundContactCell};
+    const auto overlaps=[&](const std::array<float,4>& box){
+        return !(box[2]<area[0]||box[0]>area[2]||box[3]<area[1]||box[1]>area[3]);
+    };
+    const auto emit=[&](const GroundContactStore::Entry& entry){
+        for(const auto& rectangle:entry.prepared->ground_contacts) {
+            if(rectangle[0]+rectangle[2]<area[0]||rectangle[0]-rectangle[2]>area[2]||
+               rectangle[1]+rectangle[3]<area[1]||rectangle[1]-rectangle[3]>area[3])continue;
+            output.push_back(ground_cover::object_splat(rectangle));
+        }
+    };
+    static std::vector<std::pair<float,std::int32_t>> pending;
+    pending.clear();
+    ++store.stamp;
+    const auto offer=[&](std::int32_t id){
+        auto& entry=store.entries.at(id);
+        if(entry.seen==store.stamp)return;
+        entry.seen=store.stamp;
+        if(entry.built){emit(entry);return;}
+        if(entry.bounded&&!overlaps(entry.box))return;
+        const float dx=.5f*(entry.box[0]+entry.box[2])-x,dy=.5f*(entry.box[1]+entry.box[3])-y;
+        pending.push_back({entry.bounded?dx*dx+dy*dy:0.f,id});
+    };
+    ground_contact_cells(range,[&](std::int64_t key){
+        const auto cell=store.cells.find(key);
+        if(cell!=store.cells.end())for(const auto id:cell->second)offer(id);
+    });
+    for(const auto id:store.unbounded)offer(id);
+    // Builds re-file their entry, so they run after the grid walk.
+    std::sort(pending.begin(),pending.end());
+    const bool held=load_reveal_held();
+    const auto start=frame_acct::now();
+    const auto budget=static_cast<std::int64_t>(kGroundContactBudgetMs/frame_acct::ms_per_tick());
+    std::size_t done=0;
+    for(;done<pending.size();++done) {
+        if(!held&&frame_acct::now()-start>=budget)break;
+        const auto id=pending[done].second;
+        auto& entry=store.entries.at(id);
+        const auto* sample=ground_contact_sample(entities,id);
+        // A sample of another incarnation is the journal's next change.
+        if(!sample||!same_lifecycle_identity(sample->lifecycle,entry.lifecycle)||
+           !same_visual_resource(sample->resource,entry.resource)||sample->prepared!=entry.prepared)continue;
+        auto& prepared=*entry.prepared;
+        auto key=owned_visual_pose_key(*sample);key.phase=0;
+        prepared.ground_contacts_valid=false;
+        // A failed build (deterministic for this placement) leaves no contacts
+        // and is retried when the journal reports the object changed.
+        const bool built=build_ground_contacts(*sample,ground,store.sector_top,prepared.ground_contacts);
+        if(built) {
+            prepared.ground_contacts_key=key;prepared.ground_contacts_valid=true;
+            prepared.ground_contacts_terrain_generation=source.source_generation;
+            prepared.ground_contacts_terrain_revision=source.source_revision;
+        } else prepared.ground_contacts.clear();
+        ground_contact_unfile(store,id,entry);
+        entry.built=true;entry.bounded=true;entry.box=ground_contact_box(prepared.ground_contacts);
+        ground_contact_file(store,id,entry);
+        emit(entry);
+    }
+    // Keep the answer only when nothing in the window still waits for a build.
+    store.answer=output;store.answer_cells=range;
+    store.answer_revision=done==pending.size()?store.revision:0;
+    return true;
+} catch(...) {output.clear();g_ground_contacts.clear();return false;}
+
+
 #ifdef EID3D11_TESTING
 bool bridge_test_build_owned_point_shadow_faces(const RetainedWorldPointLight& light,
     unsigned first_face,NativeShadowFrame& faces) noexcept {
@@ -26366,7 +29307,7 @@ bool bridge_consume_hud_atlas_window(
 bool bridge_begin_character_pane_getdc(
     IDirectDrawSurface7* surface, const void* caller,
     std::uint64_t surface_id, std::uint32_t width,
-    std::uint32_t height) noexcept {
+    std::uint32_t height, float raster_scale) noexcept {
     auto* invocation = current_character_pane_text_invocation();
     const bool caller_matches = g_character_pane_game_image &&
         reinterpret_cast<std::uintptr_t>(caller) ==
@@ -26390,7 +29331,7 @@ bool bridge_begin_character_pane_getdc(
     if (invocation->chat) invocation->surface = surface;
     invocation->surface_id = surface_id;
     invocation->claimed = true;
-    g_character_pane_text.begin_frame(width, height);
+    g_character_pane_text.begin_frame(width, height, raster_scale);
     return true;
 }
 
@@ -34949,7 +37890,7 @@ static bool object_suffix_cut_test_production_path() noexcept {
             for (std::uint8_t light_mask : {std::uint8_t{0},std::uint8_t{1}}) {
                 wound_admission.parts.resize(1);
                 wound_admission.parts[0].contribution={true,false,light_mask};
-                wound_admission.parts[0].ready=true;
+                wound_admission.parts[0].ready_serial=g_owned_visual_world_frame.serial;
                 wound_admission.parts[0].color_admitted=false;
                 reset_case(true);
                 if (!run_case(nullptr) || state.submit_calls || state.commit_calls || state.abort_calls ||
@@ -36440,10 +39381,11 @@ bool bridge_test_submit_owned_terrain_shadows(const RetainedTerrainSourceSnapsho
     bool result=false;snapshot={};
     try {
         g_owned_terrain_frame={};g_owned_terrain_frame.source_values=source;
+        void** test_textures=nullptr;
         if(material_inputs && material_inputs->game_image)
             g_visual_game_image=const_cast<std::uint8_t*>(material_inputs->game_image);
         if(source.terrain && source.terrain->texture_count<=4094) {
-            visual_read(terrain,kTerrainTexturesOffset,g_owned_terrain_frame.texture_sources);
+            visual_read(terrain,kTerrainTexturesOffset,test_textures);
             g_owned_terrain_frame.shadow_texture_observed.assign(source.terrain->texture_count+2u,0);
         }
         const bool captured=capture_owned_terrain_shadow_material();
@@ -36473,7 +39415,7 @@ bool bridge_test_submit_owned_terrain_shadows(const RetainedTerrainSourceSnapsho
                 g_owned_terrain_frame.object_to_world) &&
             prepare_owned_terrain_render_commands(g_owned_terrain_frame.front_end);
         if(result && base) {
-            TerrainRangeContract contract{};contract.textures=g_owned_terrain_frame.texture_sources;
+            TerrainRangeContract contract{};contract.textures=test_textures;
             contract.texture_count=static_cast<int>(source.terrain->texture_count);
             result=capture_owned_terrain_texture_handles(contract,g_owned_terrain_frame) &&
                 decide_owned_terrain_range(g_owned_terrain_frame.front_end,inputs,0,
@@ -38284,10 +41226,24 @@ bool EngineBridge::install() {
         startup_end(StartupStage::hooks, traced, "bridge_site_bytes_mismatch");
         return false;
     }
+    auto* const image = reinterpret_cast<std::uint8_t*>(image_);
+    if (!install_engine_frame_begin_hook(image)) {
+        report("bridge_rejected", "required_frame_call_mismatch_or_write_failure");
+        startup_end(StartupStage::hooks, traced, "required_frame_call_rejected");
+        return false;
+    }
     installed_ = patch_slots();
+    // patch_slots validates every slot before changing any of them. If it
+    // rejects, undo just the required call; retain its owner only for a failed
+    // restore so uninstall can retry even without installed semantic slots.
+    if (!installed_ && !uninstall_engine_frame_begin_hook())
+        report("engine_frame_begin_uninstall_pending", "slot_activation_failed_call_restore_failed");
     report(installed_ ? "bridge_installed" : "bridge_rejected",
-           installed_ ? "verified_semantic_slots" : "slot_signature_mismatch");
+           installed_ ? "verified_semantic_slots_and_required_frame_call" : "slot_signature_mismatch");
     if (installed_) {
+        // Frame accounting does not request these game-loop hooks (issue
+        // #161); it marks game_sim/game_loop/game_ui_idle/game_end_frame
+        // only when the F11 gap profile or camp observation installs them.
         const bool outer_frame_timing_requested =
             outer_frame_gap_profile_requested() || camp_inventory_observation_enabled();
         const bool outer_frame_timing_installed =
@@ -38364,12 +41320,37 @@ bool EngineBridge::install() {
         report(game_particles_installed ? "game_particles_installed" : "game_particles_rejected",
                game_particles_installed ? "verified_draw_particles_slot_gpu_billboards" :
                                           "draw_particles_slot_or_entry_mismatch_game_draws_particles");
+        const bool game_lightning_installed = install_game_ribbon_hook(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(game_lightning_installed ? "game_lightning_installed" : "game_lightning_rejected",
+               game_lightning_installed ? "verified_draw_3d_line_slot_gpu_ribbons" :
+                                          "draw_3d_line_slot_or_entry_mismatch_game_draws_lightning");
+        const bool game_selection_installed = install_game_selection_hook(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(game_selection_installed ? "game_selection_marker_installed" : "game_selection_marker_rejected",
+               game_selection_installed ? "verified_draw_selection_call_gpu_marker" :
+                                          "draw_selection_call_or_entry_mismatch_game_draws_marker");
+        const bool game_prints_installed = install_game_print_hooks(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(game_prints_installed ? "game_prints_installed" : "game_prints_rejected",
+               game_prints_installed ? "verified_print_list_pushes_and_render_call_gpu_prints" :
+                                       "print_push_render_call_or_entry_mismatch_game_draws_prints");
+        const bool combat_text_installed = install_combat_text_hooks(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(combat_text_installed ? "combat_text_installed" : "combat_text_rejected",
+               combat_text_installed ? (g_combat_text_addon_layout ? "verified_call_addon_draw_chain_bypassed_addon_layout_game_time" :
+                                        "verified_flying_hp_call_and_receive_clock_gpu_glyphs_game_time") :
+                                       "flying_hp_call_entry_or_receive_clock_mismatch_game_draws_combat_text");
         const bool owned_sky_installed = install_owned_sky_hook(
             reinterpret_cast<std::uint8_t*>(image_));
         report(owned_sky_installed ? "owned_sky_installed" : "owned_sky_rejected",
                owned_sky_installed ? "verified_sky_draw_call" :
                                      g_owned_sky_gate_valid ? "sky_hook_rejected_stock_sky_omitted" :
                                      "sky_hook_and_gate_rejected_world_omitted");
+        const bool owned_weather_installed = install_owned_weather_hooks(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(owned_weather_installed ? "owned_weather_installed" : "owned_weather_rejected",
+               owned_weather_installed ? "verified_draw_rain_and_draw_snow_calls" : g_owned_weather_status.load());
         const bool owned_frame_selection_installed =
             install_owned_frame_selection_hook(
                 reinterpret_cast<std::uint8_t*>(image_));
@@ -38567,6 +41548,7 @@ bool EngineBridge::install() {
         report(camp_installed ? "camp_grid_installed" : "camp_grid_rejected",
                camp_installed ? "owned_layout_enumeration_pick_scroll_native_visuals_temporary" :
                                 "entry_owner_or_native_contract_mismatch");
+        if (!camp_installed) bridge_note_feature_off(bridge_feature_off_camp_grid);
         const bool visual_publication_installed = retained_scene_installed &&
             hud_visuals_installed && install_visual_publication_hooks(
                 reinterpret_cast<std::uint8_t*>(image_),terrain_installed);
@@ -38574,6 +41556,7 @@ bool EngineBridge::install() {
                                              "owned_visual_publication_rejected",
                visual_publication_installed || (retained_scene_installed && hud_visuals_installed) ?
                    g_visual_install_detail : "retained_scene_or_resource_owner_inactive");
+        if (!visual_publication_installed) bridge_note_feature_off(bridge_feature_off_owned_world);
         const bool window_membership_installed = visual_publication_installed &&
             g_lifecycle_hooks_installed && install_window_membership_hooks(
                 reinterpret_cast<std::uint8_t*>(image_));
@@ -38592,13 +41575,19 @@ bool EngineBridge::install() {
                stock_shadows_suppressed ?
                    "verified_draw_and_offscreen_branches_registry_settings_ignored" :
                    "branch_bytes_mismatch_game_shadows_follow_registry_settings");
+        publish_addon_notice();
     }
     startup_end(StartupStage::hooks, traced, installed_ ? "completed" : "rejected");
     return installed_;
 }
 
 bool EngineBridge::uninstall() {
-    if (!installed_) return true;
+    if (!installed_) {
+        const bool restored = uninstall_engine_frame_begin_hook();
+        if (!restored)
+            report("engine_frame_begin_uninstall_pending", "restore_failed_or_foreign_call_owner_preserved");
+        return restored;
+    }
     if (!image_) return false;
     auto* const image = reinterpret_cast<std::uint8_t*>(image_);
     // The DLL unloads regardless of the result. Each independent owner is
@@ -38615,6 +41604,11 @@ bool EngineBridge::uninstall() {
     restored &= uninstall_window_membership_hooks(image);
     restored &= uninstall_visual_publication_hooks();
     restored &= uninstall_outer_frame_timing_hooks();
+    // Optional timing must release its sites before the required begin call.
+    const bool frame_begin_restored = uninstall_engine_frame_begin_hook();
+    if (!frame_begin_restored)
+        report("engine_frame_begin_uninstall_pending", "restore_failed_or_foreign_call_owner_preserved");
+    restored &= frame_begin_restored;
     restored &= uninstall_chat_text_hooks();
     restored &= uninstall_character_pane_text_hooks();
     restored &= uninstall_hud_visual_hooks();
@@ -38628,8 +41622,16 @@ bool EngineBridge::uninstall() {
         report("owned_sky_uninstall_pending","restore_failed_or_foreign_hook_owner_preserved");
         restored = false;
     }
+    if(!uninstall_owned_weather_hooks(image)) {
+        report("owned_weather_uninstall_pending","restore_failed_or_foreign_hook_owner_preserved");
+        restored = false;
+    }
     restored &= uninstall_owned_frame_selection_hook(image);
     restored &= uninstall_game_particle_hook(image);
+    restored &= uninstall_game_ribbon_hook(image);
+    restored &= uninstall_game_selection_hook(image);
+    restored &= uninstall_game_print_hooks(image);
+    restored &= uninstall_combat_text_hooks(image);
     uninstall_camera_mouse_pitch_hook(image);
     uninstall_camera_mouse_yaw_hook(image);
     if (!uninstall_highlight_hooks(image)) {
@@ -38687,9 +41689,42 @@ bool EngineBridge::uninstall() {
 
 SemanticContext EngineBridge::current() const { return g_semantic; }
 
+void bridge_set_engine_frame_begin_sink(void* context, EngineFrameBeginFn begin) noexcept {
+    g_engine_frame_begin_context = context;
+    g_engine_frame_begin_sink = begin;
+}
+
+void bridge_clear_engine_frame_begin_sink(void* context) noexcept {
+    if (g_engine_frame_begin_context == context) {
+        g_engine_frame_begin_context = nullptr;
+        g_engine_frame_begin_sink = nullptr;
+    }
+}
+
 void bridge_set_game_particle_sink(void* context, GameParticleSubmitFn submit) noexcept {
     g_game_particle_sink_context = context;
     g_game_particle_sink = submit;
+}
+
+void bridge_set_game_ribbon_sink(void* context, GameRibbonSubmitFn submit) noexcept {
+    g_game_ribbon_sink_context = context;
+    g_game_ribbon_sink = submit;
+}
+
+void bridge_set_game_selection_sink(void* context, GameSelectionSubmitFn submit) noexcept {
+    g_game_selection_sink_context = context;
+    g_game_selection_sink = submit;
+}
+
+void bridge_set_game_print_sink(void* context, GamePrintSubmitFn submit, GamePrintFlushFn flush) noexcept {
+    g_game_print_sink_context = context;
+    g_game_print_sink = submit;
+    g_game_print_flush = flush;
+}
+
+void bridge_set_game_glyph_sink(void* context, GameGlyphSubmitFn submit) noexcept {
+    g_combat_text_sink_context = context;
+    g_combat_text_sink = submit;
 }
 
 void bridge_set_native_geometry_sink(void* context, NativeGeometrySubmitFn submit,
@@ -38710,7 +41745,8 @@ void bridge_set_native_geometry_sink(void* context, NativeGeometrySubmitFn submi
                                      NativePointShadowPublishFn point_shadow_publish,
                                      NativePointShadowAllocateFn point_shadow_allocate,
                                      NativePointShadowReleaseFn point_shadow_release,
-                                     NativeShadowCullProjectionFn shadow_cull_projection) {
+                                     NativeShadowCullProjectionFn shadow_cull_projection,
+                                     NativeShadowTerrainBakeFn terrain_bake) {
     if (!context && g_native_sink_context && g_native_sink_shadow_end)
         g_native_sink_shadow_end(g_native_sink_context,false);
     if (!context && g_native_sink_context && g_native_sink_point_shadow_end)
@@ -38725,6 +41761,7 @@ void bridge_set_native_geometry_sink(void* context, NativeGeometrySubmitFn submi
     g_native_sink_world_lighting = world_lighting;
     g_native_sink_shadow_begin = shadow_begin;
     g_native_sink_shadow_cull_projection = shadow_cull_projection;
+    g_native_sink_shadow_terrain_bake = terrain_bake;
     g_native_sink_shadow_static_depth = static_depth;
     g_native_sink_shadow_end = shadow_end;
     g_native_sink_shadow_diagnostics = shadow_diagnostics;
@@ -38736,6 +41773,23 @@ void bridge_set_native_geometry_sink(void* context, NativeGeometrySubmitFn submi
     g_native_sink_point_shadow_allocate = point_shadow_allocate;
     g_native_sink_point_shadow_release = point_shadow_release;
     g_native_world_lighting_frame = {};
+}
+
+void bridge_set_scene_handoff(const BridgeSceneHandoff& handoff) noexcept {
+    g_scene_handoff = handoff;
+}
+
+void bridge_clear_scene_handoff(void* context) noexcept {
+    if (g_scene_handoff.context == context) g_scene_handoff = {};
+}
+
+void bridge_set_rain_occlusion_sink(NativeRainOcclusionBeginFn begin,NativeRainOcclusionEndFn end) noexcept {
+    g_native_sink_rain_begin = begin;
+    g_native_sink_rain_end = end;
+}
+
+void bridge_set_rain_occlusion_request(const RainOcclusionRequest& request) noexcept {
+    g_rain_request = request;
 }
 
 void bridge_set_screen_rectangle_sink(void* context,
@@ -38803,6 +41857,7 @@ bool EngineBridge::patch_slots() {
     for (const auto& slot : slots) {
         *slot.original = table[slot.slot];
         InterlockedExchangePointer(&table[slot.slot], slot.hook);
+        record_owned_patch(&table[slot.slot], slot.original, sizeof(void*));
     }
     DWORD ignored = 0;
     VirtualProtect(table, 26 * sizeof(void*), protection, &ignored);
@@ -39315,6 +42370,9 @@ void bridge_set_change_driven_poses(bool enabled) noexcept {
     if (enabled && !g_change_driven_poses) g_pose_full_sweep = true;
     g_change_driven_poses = enabled;
 }
+void bridge_set_terrain_far_shadow_prewarm(bool enabled) noexcept {
+    g_terrain_far_shadow_prewarm_enabled.store(enabled, std::memory_order_relaxed);
+}
 
 void bridge_set_point_shadow_fast_overlays(int count) noexcept { g_point_shadow_fast_overlays=count<0?0:count; }
 void bridge_set_point_shadow_merge_distance(float distance) noexcept {
@@ -39326,11 +42384,408 @@ void bridge_set_terrain_lod_enabled(bool enabled) noexcept {
 }
 void bridge_set_owned_sky(bool enabled) noexcept { g_owned_sky_enabled = enabled; }
 bool bridge_owned_sky_installed() noexcept { return g_owned_sky_installed; }
+const char* bridge_owned_weather_problem() noexcept { return g_owned_weather_status.load(); }
+void bridge_set_weather_visual(int test, int strength_setting) noexcept {
+    g_weather_visual_test.store(test, std::memory_order_relaxed);
+    g_weather_strength_setting.store(strength_setting, std::memory_order_relaxed);
+}
 bool bridge_semantic_slots_installed() noexcept { return EngineBridge::instance().installed(); }
+
+// ---- Renderer ownership verification (issue #70) ----
+// Another module can rebind game.exe's ddraw.dll imports (this DLL is then
+// never called) or overwrite our hook entries after we install them. Both
+// are checked at startup and once after the first world frame; each foreign
+// owner is logged once and named in the on-screen notice. Nothing is
+// repaired or re-patched: the foreign owner stays, the visual is not ours.
+namespace {
+
+constexpr std::size_t kOwnedPatchBytes = 5;
+using PatchBytes = std::array<std::uint8_t, kOwnedPatchBytes>;
+
+struct OwnedPatchRecord {
+    std::uint8_t* address = nullptr;
+    std::size_t size = 0;           // compared bytes
+    PatchBytes original{};          // what our first write replaced
+    std::vector<PatchBytes> ours;   // every byte pattern we wrote here
+    bool superseded = false;        // a later write of ours overlaps it elsewhere
+};
+
+SRWLOCK g_owned_patch_lock = SRWLOCK_INIT;
+std::vector<OwnedPatchRecord> g_owned_patches;
+
+SRWLOCK g_takeover_lock = SRWLOCK_INIT;
+std::vector<std::string> g_takeover_names;      // distinct, in discovery order
+std::vector<const void*> g_takeover_entries;    // each reported once
+std::array<std::array<char, 256>, 2> g_takeover_text{};
+std::size_t g_takeover_text_slot = 0;
+std::atomic<const char*> g_takeover_notice{nullptr};
+std::atomic<bool> g_ownership_after_world_done{false};
+std::atomic<std::uint32_t> g_ownership_presents{0};
+constexpr std::uint32_t kOwnershipPresentsWithoutWorld = 1800;
+
+void appendf(char* out, std::size_t size, std::size_t& used, const char* format, ...) noexcept {
+    if (!size || used + 1 >= size) return;
+    va_list arguments;
+    va_start(arguments, format);
+    const int written = std::vsnprintf(out + used, size - used, format, arguments);
+    va_end(arguments);
+    if (written > 0) used = (std::min)(size - 1, used + static_cast<std::size_t>(written));
+}
+
+bool game_code_contains(const void* address) noexcept {
+    if (!game_image_contains(address)) return false;
+    const auto* base = game_image_base();
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    const auto rva = static_cast<std::uint32_t>(static_cast<const std::uint8_t*>(address) - base);
+    const auto* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section) {
+        const std::uint32_t span = (std::max)(section->Misc.VirtualSize, section->SizeOfRawData);
+        if (rva >= section->VirtualAddress && rva < section->VirtualAddress + span)
+            return (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+    }
+    return false;
+}
+
+void module_name_of(const void* address, char* out, std::size_t size) noexcept {
+    HMODULE module = nullptr;
+    char path[MAX_PATH]{};
+    if (address && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                      static_cast<LPCSTR>(address), &module)) {
+        const DWORD length = GetModuleFileNameA(module, path, MAX_PATH);
+        if (length && length < MAX_PATH) {
+            const char* name = std::strrchr(path, '\\');
+            std::snprintf(out, size, "%s", name ? name + 1 : path);
+            return;
+        }
+    }
+    // Generated code (another module's VirtualAlloc'd thunk) has no module.
+    std::snprintf(out, size, "%s", address ? "no_module" : "none");
+}
+
+HMODULE renderer_module() noexcept {
+    static const HMODULE module = [] {
+        HMODULE self = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&renderer_module), &self);
+        return self;
+    }();
+    return module;
+}
+
+// The player-facing name of a hooked site; other sites are named by RVA.
+const char* owned_site_name(std::uint32_t rva) noexcept {
+    if (rva == kTerrainRangeDrawEntryRva || rva == kTerrainSegmentEntryRva ||
+        rva == kTerrainFreeEntryRva) return "terrain";
+    if (rva == kCursorDrawEntryRva || rva == kCursorThreadEntryRva ||
+        rva == kCursorRestoreEntryRva) return "cursor";
+    if (rva == kWorldDrawEntryRva) return "world draw";
+    if (rva == kScene3dDrawEntryRva) return "Draw3DScene";
+    if (rva == kObject3dDrawEntryRva) return "object draw";
+    if (rva >= kRendererTableRva && rva < kRendererTableRva + 26 * sizeof(void*))
+        return "renderer slots";
+    return nullptr;
+}
+
+void publish_takeover(const char* name) noexcept {
+    AcquireSRWLockExclusive(&g_takeover_lock);
+    try {
+        if (std::find(g_takeover_names.begin(), g_takeover_names.end(), name) ==
+            g_takeover_names.end()) {
+            g_takeover_names.emplace_back(name);
+            // Two buffers: the renderer may still be drawing the previous text.
+            g_takeover_text_slot ^= 1u;
+            auto& text = g_takeover_text[g_takeover_text_slot];
+            std::size_t used = 0;
+            appendf(text.data(), text.size(), used, "EID3D11: another module took over ");
+            std::size_t shown = 0;
+            for (const auto& taken : g_takeover_names) {
+                if (used + taken.size() + 72 > text.size()) break;
+                appendf(text.data(), text.size(), used, "%s%s", shown ? ", " : "", taken.c_str());
+                ++shown;
+            }
+            if (shown < g_takeover_names.size())
+                appendf(text.data(), text.size(), used, "%s+%zu more", shown ? ", " : "",
+                        g_takeover_names.size() - shown);
+            appendf(text.data(), text.size(), used,
+                    " - not drawn by EID3D11 (see bridge.jsonl)");
+            g_takeover_notice.store(text.data(), std::memory_order_release);
+        }
+    } catch (...) {
+    }
+    ReleaseSRWLockExclusive(&g_takeover_lock);
+}
+
+// Where a live patch leads: a rel32 jump/call target, or a slot's pointer.
+const void* live_patch_target(const std::uint8_t* address, std::size_t size) noexcept {
+    if (size >= 5 && (address[0] == 0xe9 || address[0] == 0xe8)) {
+        std::int32_t relative = 0;
+        std::memcpy(&relative, address + 1, sizeof(relative));
+        return address + 5 + relative;
+    }
+    const void* pointer = nullptr;
+    if (size == sizeof(void*)) std::memcpy(&pointer, address, sizeof(pointer));
+    return pointer;
+}
+
+// A live jump/call/slot into this DLL is ours even when the writer that
+// re-patched it is not recorded (one of our layers chained above another).
+bool live_patch_targets_renderer(const std::uint8_t* address, std::size_t size) noexcept {
+    const void* target = live_patch_target(address, size);
+    HMODULE owner = nullptr;
+    return target && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                        static_cast<LPCWSTR>(target), &owner) &&
+           owner == renderer_module();
+}
+
+// One hook_taken_over line per address, naming the live bytes' owner.
+void report_foreign_once(const std::uint8_t* address, std::size_t size,
+                         const char* when, const char* reason) noexcept {
+    bool fresh = false;
+    AcquireSRWLockExclusive(&g_takeover_lock);
+    try {
+        if (std::find(g_takeover_entries.begin(), g_takeover_entries.end(), address) ==
+            g_takeover_entries.end()) {
+            g_takeover_entries.push_back(address);
+            fresh = true;
+        }
+    } catch (...) {
+    }
+    ReleaseSRWLockExclusive(&g_takeover_lock);
+    if (!fresh) return;
+    std::uint8_t live[kOwnedPatchBytes]{};
+    size = (std::min)(size, kOwnedPatchBytes);
+    std::memcpy(live, address, size);
+    const void* target = live_patch_target(address, size);
+    char owner[64];
+    module_name_of(target, owner, sizeof(owner));
+    const auto rva = static_cast<std::uint32_t>(address - game_image_base());
+    char fallback[24];
+    const char* name = owned_site_name(rva);
+    if (!name) {
+        std::snprintf(fallback, sizeof(fallback), "hook %06x", static_cast<unsigned>(rva));
+        name = fallback;
+    }
+    char bytes[2 * kOwnedPatchBytes + 1]{};
+    for (std::size_t index = 0; index < size; ++index)
+        std::snprintf(bytes + 2 * index, 3, "%02x", live[index]);
+    char detail[320];
+    std::snprintf(detail, sizeof(detail),
+                  "when=%s site=%s rva=%06x reason=%s live=%s target=%08x owner=%s",
+                  when, name, static_cast<unsigned>(rva), reason ? reason : "unknown", bytes,
+                  static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(target)), owner);
+    append_bridge_event("hook_taken_over", detail, true);
+    publish_takeover(name);
+}
+
+// Where each of game.exe's ddraw.dll import slots points. Stack only (it
+// also runs at process exit); true when every slot points into this DLL.
+bool ddraw_import_detail(char* out, std::size_t size) noexcept {
+    std::size_t used = 0;
+    if (size) out[0] = '\0';
+    const auto* base = game_image_base();
+    if (!base || !game_image_size()) {
+        appendf(out, size, used, "no_game_image");
+        return false;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!directory.VirtualAddress) {
+        appendf(out, size, used, "no_import_table");
+        return false;
+    }
+    const HMODULE self = renderer_module();
+    bool found = false;
+    bool all_ours = true;
+    for (const auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
+             base + directory.VirtualAddress); descriptor->Name; ++descriptor) {
+        if (_stricmp(reinterpret_cast<const char*>(base + descriptor->Name), "ddraw.dll") != 0)
+            continue;
+        found = true;
+        const auto* slots = reinterpret_cast<const IMAGE_THUNK_DATA32*>(base + descriptor->FirstThunk);
+        // Without the name table the bound slots carry no names.
+        const auto* names = descriptor->OriginalFirstThunk ?
+            reinterpret_cast<const IMAGE_THUNK_DATA32*>(base + descriptor->OriginalFirstThunk) : nullptr;
+        for (std::size_t index = 0; slots[index].u1.Function; ++index) {
+            char label[64];
+            if (!names)
+                std::snprintf(label, sizeof(label), "slot%zu", index);
+            else if (IMAGE_SNAP_BY_ORDINAL32(names[index].u1.Ordinal))
+                std::snprintf(label, sizeof(label), "#%u",
+                              static_cast<unsigned>(IMAGE_ORDINAL32(names[index].u1.Ordinal)));
+            else
+                std::snprintf(label, sizeof(label), "%s", reinterpret_cast<const char*>(
+                    reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+                        base + names[index].u1.AddressOfData)->Name));
+            const void* target = reinterpret_cast<const void*>(
+                static_cast<std::uintptr_t>(slots[index].u1.Function));
+            HMODULE owner = nullptr;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(target), &owner);
+            if (owner && owner == self) {
+                appendf(out, size, used, "%s%s=ours", used ? " " : "", label);
+            } else {
+                all_ours = false;
+                char module[64];
+                module_name_of(target, module, sizeof(module));
+                appendf(out, size, used, "%s%s=%s@%08x", used ? " " : "", label, module,
+                        static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(target)));
+            }
+        }
+    }
+    if (!found) {
+        appendf(out, size, used, "no_ddraw_import");
+        return false;
+    }
+    return all_ours;
+}
+
+void record_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept {
+    if (!address || !original || !bytes || !game_image_contains(address)) return;
+    auto* const at = static_cast<std::uint8_t*>(const_cast<void*>(address));
+    const std::size_t size = (std::min)(bytes, kOwnedPatchBytes);
+    PatchBytes written{}, before{};
+    std::memcpy(written.data(), at, size);
+    std::memcpy(before.data(), original, size);
+    if (written == before) return;  // a restore, not a hook
+    AcquireSRWLockExclusive(&g_owned_patch_lock);
+    try {
+        OwnedPatchRecord* record = nullptr;
+        for (auto& existing : g_owned_patches) {
+            if (existing.address == at) record = &existing;
+            else if (existing.address < at + bytes && at < existing.address + existing.size)
+                existing.superseded = true;  // our newer, overlapping write is checked instead
+        }
+        if (!record) {
+            OwnedPatchRecord added;
+            added.address = at;
+            added.size = size;
+            added.original = before;
+            g_owned_patches.push_back(std::move(added));
+            record = &g_owned_patches.back();
+        }
+        record->superseded = false;
+        record->size = (std::min)(record->size, size);
+        if (std::find(record->ours.begin(), record->ours.end(), written) == record->ours.end())
+            record->ours.push_back(written);
+    } catch (...) {
+    }
+    ReleaseSRWLockExclusive(&g_owned_patch_lock);
+}
+
+void note_foreign_entry(const std::uint8_t* entry, const char* when, const char* reason) noexcept {
+    // An entry already leading into this DLL is one of our own layers.
+    if (game_image_contains(entry) && !live_patch_targets_renderer(entry, kOwnedPatchBytes))
+        report_foreign_once(entry, kOwnedPatchBytes, when, reason);
+}
+
+} // namespace
+
+void bridge_note_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept {
+    // Code only: data the game itself rewrites is not a hook entry.
+    if (game_code_contains(address)) record_owned_patch(address, original, bytes);
+}
+
+void bridge_verify_renderer_ownership(const char* when) noexcept {
+    char imports[256];
+    const bool imports_ours = ddraw_import_detail(imports, sizeof(imports));
+    struct Taken { const std::uint8_t* address; std::size_t size; };
+    std::vector<Taken> taken;
+    std::size_t checked = 0, ours = 0, repatched = 0, released = 0, layered = 0;
+    AcquireSRWLockShared(&g_owned_patch_lock);
+    try {
+        for (const auto& record : g_owned_patches) {
+            if (record.superseded) { ++layered; continue; }
+            ++checked;
+            const bool is_ours = std::any_of(record.ours.begin(), record.ours.end(),
+                [&](const PatchBytes& bytes) {
+                    return std::memcmp(record.address, bytes.data(), record.size) == 0;
+                });
+            if (is_ours) ++ours;
+            else if (std::memcmp(record.address, record.original.data(), record.size) == 0) ++released;
+            else if (live_patch_targets_renderer(record.address, record.size)) ++repatched;
+            else taken.push_back({record.address, record.size});
+        }
+    } catch (...) {
+    }
+    ReleaseSRWLockShared(&g_owned_patch_lock);
+    for (const auto& entry : taken)
+        report_foreign_once(entry.address, entry.size, when, "overwritten_after_install");
+    if (!imports_ours) publish_takeover("the DirectDraw import");
+    char detail[512];
+    std::snprintf(detail, sizeof(detail),
+                  "when=%s ddraw_imports=[%s] patches=%zu ours=%zu repatched_by_us=%zu released=%zu "
+                  "taken=%zu layered=%zu",
+                  when, imports, checked, ours, repatched, released, taken.size(), layered);
+    append_bridge_event("renderer_ownership", detail, EngineBridge::instance().sites_verified());
+}
+
+void bridge_verify_renderer_ownership_after_world() noexcept {
+    if (g_ownership_after_world_done.load(std::memory_order_relaxed)) return;
+    const bool world = g_ownership_world_seen.load(std::memory_order_relaxed);
+    const std::uint32_t presents =
+        g_ownership_presents.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!world && presents < kOwnershipPresentsWithoutWorld) return;
+    if (g_ownership_after_world_done.exchange(true)) return;
+    bridge_verify_renderer_ownership(world ? "first_world_frame" : "presents_without_world_draw");
+}
+
+void bridge_log_ddraw_imports(const char* when) noexcept {
+    char imports[256];
+    ddraw_import_detail(imports, sizeof(imports));
+    char detail[320];
+    std::snprintf(detail, sizeof(detail), "when=%s %s", when, imports);
+    append_bridge_event("ddraw_import_owner", detail, false);
+}
+
+void bridge_log_never_called_at_exit() noexcept {
+    // Process exit: other threads are gone and may hold the heap lock, so
+    // this writes with stack buffers and Win32 file calls only.
+    char imports[256];
+    ddraw_import_detail(imports, sizeof(imports));
+    char root[MAX_PATH]{};
+    char directory[MAX_PATH + 16]{};
+    DWORD length = GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR", root, MAX_PATH);
+    // The same directory as debug_root().
+    if (length && length < MAX_PATH)
+        std::snprintf(directory, sizeof(directory), "%s", root);
+    else if ((length = GetEnvironmentVariableA("LOCALAPPDATA", root, MAX_PATH)) != 0 &&
+             length < MAX_PATH)
+        std::snprintf(directory, sizeof(directory), "%s\\EID3D11", root);
+    else
+        std::snprintf(directory, sizeof(directory), ".\\EID3D11-debug");
+    CreateDirectoryA(directory, nullptr);
+    char path[MAX_PATH + 32];
+    std::snprintf(path, sizeof(path), "%s\\bridge.jsonl", directory);
+    char line[512];
+    const int bytes = std::snprintf(line, sizeof(line),
+        "{\"event\":\"ddraw_never_called\",\"detail\":\"no DirectDrawCreate(Ex) reached this "
+        "ddraw.dll; game.exe imports: %s\",\"sites_verified\":false}\n", imports);
+    if (bytes <= 0) return;
+    const HANDLE file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, line, static_cast<DWORD>((std::min)(bytes, static_cast<int>(sizeof(line)) - 1)),
+              &written, nullptr);
+    CloseHandle(file);
+}
+
+const char* bridge_takeover_notice() noexcept {
+    return g_takeover_notice.load(std::memory_order_acquire);
+}
+
 const char* bridge_save_id_clash_notice() noexcept {
     return GetTickCount64() < g_save_clash_notice_until.load() ?
         "Save ID clash: this save may crash on reload or exit (see bridge.jsonl)" : nullptr;
 }
+void bridge_note_feature_off(std::uint32_t features) noexcept { g_features_off |= features; }
+const char* bridge_addon_notice() noexcept { return g_addon_notice[0] ? g_addon_notice : nullptr; }
 bool bridge_game_sites_all_verified() noexcept {
     try {
         const auto& report = running_game_sites().report;
@@ -39338,6 +42793,7 @@ bool bridge_game_sites_all_verified() noexcept {
     } catch (...) { return false; }
 }
 bool bridge_owned_sky_requested() noexcept {
+    if (g_scene_frame_values_installed) return g_scene_frame_values.owned_sky_requested;
     return g_owned_sky_installed && g_owned_sky_request_serial == g_bridge_frame_serial;
 }
 #ifdef EID3D11_TESTING
@@ -39380,13 +42836,83 @@ ShadowInputDiagnostics bridge_shadow_reuse_diagnostics() noexcept {return g_shad
 
 #ifndef EID3D11_EMBEDDED
 std::uint64_t bridge_current_world_epoch() noexcept {
+    // Scene thread: the epoch of the frame its command was queued in, so
+    // renderer state keyed by it never runs ahead of the queued work.
+    if (g_scene_frame_values_installed) return g_scene_frame_values.world_epoch;
     return lifecycle_observer().snapshot().positive_world_epoch;
 }
 #endif
 
+// Game thread, at the renderer's world change (release_world_state). The
+// bridge's world caches that nothing else empties between maps: server seed
+// assemblies (strong references to every seeded appearance, kept through the
+// menu, which reads no server list), the per-entity frame spare and the
+// terrain caster caches (both rebuilt on their next miss).
+void bridge_release_world_caches() noexcept {
+    auto& seeds = g_server_seeds;
+    decltype(seeds.appearances)().swap(seeds.appearances);
+    decltype(seeds.raw)().swap(seeds.raw);
+    decltype(seeds.eligible)().swap(seeds.eligible);
+    decltype(seeds.missing)().swap(seeds.missing);
+    seeds.source_generation = 0; seeds.zone.clear(); seeds.zone.shrink_to_fit();
+    decltype(g_owned_visual_prepared_spare)().swap(g_owned_visual_prepared_spare);
+    // Critter perches per model: rebuilt for the next world's trees (load reveal waits for them).
+    decltype(g_perch_models)().swap(g_perch_models);
+    // The world frame's cleared scratch vectors keep capacity between frames.
+    visit_owned_visual_frame_scratch(g_owned_visual_world_frame,[](auto& vector) noexcept {
+        if(vector.empty())std::remove_reference_t<decltype(vector)>().swap(vector);});
+    g_owned_admission_cache=OwnedAdmissionCache{};
+    g_terrain_shadow_caster_cache.valid = false;
+    decltype(g_terrain_shadow_caster_cache.casters)().swap(g_terrain_shadow_caster_cache.casters);
+    decltype(g_terrain_shadow_caster_cache.commands)().swap(g_terrain_shadow_caster_cache.commands);
+    g_terrain_shadow_part_cache.valid = false; g_terrain_shadow_part_cache.order_stale = true;
+    g_terrain_shadow_part_cache.prepared_owner.reset();
+    decltype(g_terrain_shadow_part_cache.parts)().swap(g_terrain_shadow_part_cache.parts);
+    decltype(g_terrain_shadow_part_cache.order)().swap(g_terrain_shadow_part_cache.order);
+    decltype(g_game_thread_interaction_bounds.boxes)().swap(g_game_thread_interaction_bounds.boxes);
+    g_terrain_atlases.reset();
+}
+
+// The progress screen (game.exe be0fc330, static disassembly). 005DA400
+// (thiscall, ECX = wanted frame, clamped to frames - 1 at 005DA6BE-005DA6C6)
+// opens the movie named by [00791EE0] through the work path CString
+// [007AF460] + "Movies\" (005DA461-005DA483), keeps the BINK handle in
+// [007C5550] (005DA4B7) and, while the handle's current frame (+0C) is below
+// wanted + 1 (005DA6D3-005DA6DE), decodes it (DoFrame 005DA6EA, CopyToBuffer
+// 005DA784) and steps to current + 1 (BinkGoto 005DA7D3); then it Blts and
+// presents. The handle's width +0, height +4 and frame count +8 are read at
+// 005DA803 and 005DA6BE. 005DA3C0 closes the movie at the end of the load.
+// Read only, while the game presents a progress frame.
+constexpr std::uint32_t kProgressMovieNameRva = 0x00391ee0;
+constexpr std::uint32_t kProgressMovieHandleRva = 0x003c5550;
+constexpr std::uint32_t kProgressWorkPathRva = 0x003af460;
+
+bool bridge_progress_movie(ProgressMovie& movie) noexcept {
+    movie = {};
+    try {
+        if (!game_sites_ok(GameSiteGroup::bridge)) return false;
+        const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+        const void* handle = nullptr;
+        if (!visual_read(image, kProgressMovieHandleRva, handle) || !handle) return false;
+        std::array<std::uint32_t, 4> values{};
+        if (!visual_read(handle, 0, values)) return false;
+        std::string name, work_path;
+        if (!visual_string(image, kProgressMovieNameRva, name) ||
+            !visual_string(image, kProgressWorkPathRva, work_path, true)) return false;
+        movie.width = values[0]; movie.height = values[1]; movie.frames = values[2]; movie.current = values[3];
+        movie.path = work_path + "Movies\\" + name;
+        return true;
+    } catch (...) { movie = {}; return false; }
+}
+
 void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept {
     g_load_reveal_enabled.store(enabled, std::memory_order_relaxed);
     g_load_reveal_revealed_epoch.store(revealed_epoch, std::memory_order_relaxed);
+}
+
+bool bridge_local_single_player_mission() noexcept {
+    if (g_scene_frame_values_installed) return g_scene_frame_values.local_single_player;
+    return local_single_player_mission();
 }
 
 void* bridge_supported_addon_image() noexcept {
@@ -39400,7 +42926,9 @@ bool bridge_exact_loaded_module(void* module, std::uint32_t image_size,
 
 WorldDrawCompletionSnapshot bridge_world_draw_completion_snapshot() noexcept {
     auto result = g_world_draw_completion;
-    if (g_world_draw_depth || result.bridge_frame != g_bridge_frame_serial)
+    const bool world_draw = g_scene_frame_values_installed ?
+        g_scene_frame_values.world_draw_active : g_world_draw_depth != 0;
+    if (world_draw || result.bridge_frame != g_bridge_frame_serial)
         result.valid = false;
     return result;
 }
@@ -39409,7 +42937,52 @@ std::uint64_t bridge_world_draw_completion_counter() noexcept {
     return g_world_draw_completion_counter;
 }
 
+BridgeFrameValues bridge_capture_frame_values() noexcept {
+    BridgeFrameValues values;
+    values.frame_serial = g_bridge_frame_serial;
+    read_world_environment(values.environment);
+    values.world_time_valid = g_visual_game_image && read_owned_world_time(g_visual_game_image, values.world_time);
+    values.local_single_player = local_single_player_mission();
+    values.owned_sky_requested = g_owned_sky_installed && g_owned_sky_request_serial == g_bridge_frame_serial;
+    values.world_draw_active = g_world_draw_depth != 0;
+    values.completion = g_world_draw_completion;
+    values.completion_counter = g_world_draw_completion_counter;
+    values.world_to_clip = g_scene_world_to_clip;
+    values.fog = g_world_fog;
+    values.character_pane_ui_epoch = g_character_pane_ui_epoch;
+    values.chat_text_ui_epoch = g_chat_text_ui_epoch;
+    values.terrain_atlases = g_terrain_atlases;
+    values.world_epoch = lifecycle_observer().snapshot().positive_world_epoch;
+    return values;
+}
+
+void bridge_install_frame_values(const BridgeFrameValues& values) noexcept {
+    g_scene_frame_values = values;
+    g_scene_frame_values_installed = true;
+    g_bridge_frame_serial = values.frame_serial;
+    g_world_draw_completion = values.completion;
+    g_world_draw_completion_counter = values.completion_counter;
+    g_scene_world_to_clip = values.world_to_clip;
+    g_world_fog = values.fog;
+    g_character_pane_ui_epoch = values.character_pane_ui_epoch;
+    g_chat_text_ui_epoch = values.chat_text_ui_epoch;
+}
+
+void bridge_capture_profile_values(BridgeProfileValues& output) noexcept {
+    output.has_profile = g_has_latest_bridge_profile;
+    if (output.has_profile) output.profile = g_latest_bridge_profile;
+}
+
+void bridge_install_profile_values(const BridgeProfileValues& values) noexcept {
+    g_has_latest_bridge_profile = values.has_profile;
+    if (values.has_profile) g_latest_bridge_profile = values.profile;
+}
+
 bool bridge_current_world_time(double& time) noexcept {
+    if (g_scene_frame_values_installed) {
+        time = g_scene_frame_values.world_time;
+        return g_scene_frame_values.world_time_valid;
+    }
     return g_visual_game_image && read_owned_world_time(g_visual_game_image, time);
 }
 

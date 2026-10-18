@@ -43,6 +43,7 @@ void Renderer::start_liquid_maps_job() noexcept {
  if(liquid_maps_job_.valid()||(liquid_normal_srv_&&liquid_detail_srv_)||!device_)return;
  try{
   liquid_maps_job_=std::async(std::launch::async,[device=device_]()->LiquidMapsPrepared{
+   const BackgroundWorkerPriority priority;
    LiquidMapsPrepared out;
    try{
     auto levels=generate_liquid_map_levels();
@@ -113,7 +114,7 @@ void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
  if(!liquid_wave_cs_) {
   ComPtr<ID3DBlob> code,errors;std::vector<ShaderProgram> programs;append_liquid_wave_shader_programs(programs);
   if(FAILED(compile_shader(programs[0],&code,&errors))||
-     FAILED(device_->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&liquid_wave_cs_)))
+     FAILED(create_shader(device_.Get(),code->GetBufferPointer(),code->GetBufferSize(),nullptr,&liquid_wave_cs_)))
    return fail("EID3D11 liquid ripples: wave shader unavailable; character ripples omitted.\n");
   D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=kLiquidWaveSize;desc.MipLevels=desc.ArraySize=1;
   desc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;desc.SampleDesc.Count=1; // height, previous height, trail
@@ -317,7 +318,11 @@ void Renderer::prepare_liquid_ripples() {
   const double seconds=environment.valid?environment.world_time*kWeatherSecondsPerSegment:
       (liquid_wave_clock_<0?0:liquid_wave_clock_);
   values.meta[2]=static_cast<float>(std::fmod(seconds,4096.0));
-  const float rain=update_weather_surface_rain(weather_wind_,environment);
+  // Rain rings follow the game's fade (and the render-only precipitation
+  // test) and thin with the shower's visual strength.
+  // Rain rings follow the precipitation's own build-up and fade (ramped
+  // rain x strength), outdoors only.
+  const float rain=environment.valid&&!environment.cave?precipitation_rain_visible_:0.f;
   values.meta[3]=configured_boolean(debug_overlay_.config(),"water_physical",true)?rain:0.f;
   if(available){step_liquid_waves(values,seconds);ease_liquid_units(values,seconds);}
   liquid_ripple_values_=values;++liquid_ripple_values_serial_;
@@ -421,18 +426,17 @@ HRESULT Renderer::create_water_ssr_targets() {
  water_ssr_depth_.Reset();water_ssr_dsv_.Reset();water_ssr_width_=water_ssr_height_=0;
  // Rays (direction, facing), water points (world xyz needs 32-bit floats;
  // w the spread per footprint), colour and key.
- static constexpr DXGI_FORMAT formats[6]={DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R32G32B32A32_FLOAT,
-  DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT};
+ // (kWaterSsrFormats, renderer.h)
  HRESULT hr=S_OK;
  for(unsigned n=0;n<6;++n) {
   D3D11_TEXTURE2D_DESC desc{};desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
-  desc.Format=formats[n];desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+  desc.Format=kWaterSsrFormats[n];desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
   if(FAILED(hr=device_->CreateTexture2D(&desc,nullptr,&water_ssr_textures_[n]))||
      FAILED(hr=device_->CreateRenderTargetView(water_ssr_textures_[n].Get(),nullptr,&water_ssr_rtv_[n]))||
      FAILED(hr=device_->CreateShaderResourceView(water_ssr_textures_[n].Get(),nullptr,&water_ssr_srv_[n])))return hr;
  }
  D3D11_TEXTURE2D_DESC depth{};depth.Width=width;depth.Height=height;depth.MipLevels=depth.ArraySize=depth.SampleDesc.Count=1;
- depth.Format=DXGI_FORMAT_D32_FLOAT;depth.Usage=D3D11_USAGE_DEFAULT;depth.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+ depth.Format=kWaterSsrDepthFormat;depth.Usage=D3D11_USAGE_DEFAULT;depth.BindFlags=D3D11_BIND_DEPTH_STENCIL;
  if(FAILED(hr=device_->CreateTexture2D(&depth,nullptr,&water_ssr_depth_))||
     FAILED(hr=device_->CreateDepthStencilView(water_ssr_depth_.Get(),nullptr,&water_ssr_dsv_)))return hr;
  if(!water_ssr_depth_state_) {
@@ -489,6 +493,8 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
   const bool particles=history&&particle_depth_history_frame_==water_history_frame_&&quality>0;
   constants.quality={kWaterReflectionSteps[quality],float(water_scene_levels_-1),history?1.f:0.f,particles?1.f:0.f};
   constants.history_clip=history?water_history_clip_:native_world_clip_;
+  // Screen-bounded march steps (liquidSceneReflection): 0 keeps the fixed count.
+  constants.march={std::max(configured_floating_point(debug_overlay_.config(),"water_reflection_step_pixels",8.f),0.f),0,0,0};
   constants.history_inverse=history?water_history_inverse_:constants.inverse;
   if(quality!=water_reflection_quality_logged_) {
    water_reflection_quality_logged_=quality;
@@ -566,37 +572,46 @@ bool Renderer::particle_depth_wanted() const {
 // the current particle depth slot, depth-tested against the scene without
 // writing it. Sets and restores its own targets, blend, depth state and
 // pixel shader. A failure turns particle reflections off (logged once).
-void Renderer::draw_game_particle_depth(UINT vertex_count) {
- const auto fail=[&](const char* reason) {
-  particle_depth_failed_=true;OutputDebugStringA(reason);bridge_report_event("particle_reflections","unavailable");
- };
- if(!game_particle_depth_ps_) {
-  UINT support=0;
-  if(FAILED(device_->CheckFormatSupport(DXGI_FORMAT_R32_FLOAT,&support))||!(support&D3D11_FORMAT_SUPPORT_BLENDABLE))
-   return fail("EID3D11 particle reflections: R32F blending unsupported; particles omitted from reflections\n");
-  std::vector<ShaderProgram> programs;append_world_support_shader_programs(programs);
-  ComPtr<ID3DBlob> pixel,error;
-  if(FAILED(compile_shader(programs[7],&pixel,&error))) {
-   if(error)OutputDebugStringA(static_cast<const char*>(error->GetBufferPointer()));
-   return fail("EID3D11 particle reflections: depth shader compile failed; particles omitted from reflections\n");
-  }
-  D3D11_BLEND_DESC blend{};auto& target=blend.RenderTarget[0];
-  target.BlendEnable=TRUE;target.SrcBlend=target.DestBlend=target.SrcBlendAlpha=target.DestBlendAlpha=D3D11_BLEND_ONE;
-  target.BlendOp=target.BlendOpAlpha=D3D11_BLEND_OP_MIN;target.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
-  D3D11_DEPTH_STENCIL_DESC test{};test.DepthEnable=TRUE;test.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
-  test.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
-  if(FAILED(device_->CreatePixelShader(pixel->GetBufferPointer(),pixel->GetBufferSize(),nullptr,&game_particle_depth_ps_))||
-     FAILED(device_->CreateBlendState(&blend,&particle_depth_blend_))||
-     FAILED(device_->CreateDepthStencilState(&test,&particle_depth_test_))) {
-   game_particle_depth_ps_.Reset();particle_depth_blend_.Reset();particle_depth_test_.Reset();
-   return fail("EID3D11 particle reflections: pipeline creation failed; particles omitted from reflections\n");
-  }
+namespace {
+void particle_depth_unavailable(bool& failed,const char* reason) {
+ failed=true;OutputDebugStringA(reason);bridge_report_event("particle_reflections","unavailable");
+}
+}
+// The depth program and its blend and depth states: made on the first
+// particle depth draw or by the load hold's pipeline warm-up.
+bool Renderer::ensure_particle_depth_pipeline() {
+ if(game_particle_depth_ps_)return true;
+ if(particle_depth_failed_)return false;
+ const auto fail=[&](const char* reason){particle_depth_unavailable(particle_depth_failed_,reason);return false;};
+ UINT support=0;
+ if(FAILED(device_->CheckFormatSupport(kParticleDepthFormat,&support))||!(support&D3D11_FORMAT_SUPPORT_BLENDABLE))
+  return fail("EID3D11 particle reflections: R32F blending unsupported; particles omitted from reflections\n");
+ ComPtr<ID3DBlob> pixel,error;
+ if(FAILED(compile_shader(world_support_shader_program(WorldSupportShader::game_particle_depth_ps),&pixel,&error))) {
+  if(error)OutputDebugStringA(static_cast<const char*>(error->GetBufferPointer()));
+  return fail("EID3D11 particle reflections: depth shader compile failed; particles omitted from reflections\n");
  }
+ D3D11_BLEND_DESC blend{};auto& target=blend.RenderTarget[0];
+ target.BlendEnable=TRUE;target.SrcBlend=target.DestBlend=target.SrcBlendAlpha=target.DestBlendAlpha=D3D11_BLEND_ONE;
+ target.BlendOp=target.BlendOpAlpha=D3D11_BLEND_OP_MIN;target.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED;
+ D3D11_DEPTH_STENCIL_DESC test{};test.DepthEnable=TRUE;test.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+ test.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
+ if(FAILED(create_shader(device_.Get(),pixel->GetBufferPointer(),pixel->GetBufferSize(),nullptr,&game_particle_depth_ps_))||
+    FAILED(device_->CreateBlendState(&blend,&particle_depth_blend_))||
+    FAILED(device_->CreateDepthStencilState(&test,&particle_depth_test_))) {
+  game_particle_depth_ps_.Reset();particle_depth_blend_.Reset();particle_depth_test_.Reset();
+  return fail("EID3D11 particle reflections: pipeline creation failed; particles omitted from reflections\n");
+ }
+ return true;
+}
+void Renderer::draw_game_particle_depth(UINT vertex_count) {
+ const auto fail=[&](const char* reason){particle_depth_unavailable(particle_depth_failed_,reason);};
+ if(!ensure_particle_depth_pipeline())return;
  if(!particle_depth_[0]||particle_depth_width_!=width_||particle_depth_height_!=height_) {
   for(UINT slot=0;slot<2;++slot){particle_depth_srv_[slot].Reset();particle_depth_rtv_[slot].Reset();particle_depth_[slot].Reset();}
   particle_depth_frame_=particle_depth_history_frame_=UINT64_MAX;
   D3D11_TEXTURE2D_DESC description{};description.Width=width_;description.Height=height_;
-  description.MipLevels=description.ArraySize=description.SampleDesc.Count=1;description.Format=DXGI_FORMAT_R32_FLOAT;
+  description.MipLevels=description.ArraySize=description.SampleDesc.Count=1;description.Format=kParticleDepthFormat;
   description.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
   for(UINT slot=0;slot<2;++slot)
    if(FAILED(device_->CreateTexture2D(&description,nullptr,&particle_depth_[slot]))||

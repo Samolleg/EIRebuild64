@@ -145,6 +145,12 @@ std::uint32_t owned_terrain_slope_normal(const TerrainCpuAsset& source,
 // zone-grid positions, so sector-edge copies agree).
 std::uint32_t owned_terrain_facet_flatness(const TerrainCpuAsset& source,
     const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
+// Depth of a base vertex below both its neighbour pairs (an authored pit that
+// is concave along both grid axes; 0 on slopes, ridges and valleys). The
+// one-ring slope normal and the stored lighting normal never see it, so sun
+// and point casters draw the vertex raised by it (L-085). Zone-grid positions.
+float owned_terrain_pit_fill(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
 // Fills every sector's base_slope_normals/base_facet_flatness (several threads),
 // so the terrain decode at the first world frame reads them instead.
 void owned_terrain_prepare_shading(TerrainCpuAsset& source) noexcept;

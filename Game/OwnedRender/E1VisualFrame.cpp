@@ -222,8 +222,12 @@ bool pointShadowBegin(void* context, std::uint32_t light, std::uint32_t firstFac
 }
 bool pointShadowEnd(void* context, bool commit) noexcept { return self(context)->renderer->end_native_point_shadow_faces(commit); }
 bool staticDepth(void* context, const owned::RetainedShadowCasterValue* casters, std::uint32_t count,
-                 std::vector<owned::RetainedShadowCasterValue>& missing) noexcept {
-    return self(context)->renderer->queue_native_static_shadow_depth(casters, count, missing);
+                 std::uint64_t revision, std::vector<owned::RetainedShadowCasterValue>& missing) noexcept {
+    return self(context)->renderer->queue_native_static_shadow_depth(casters, count, revision, missing);
+}
+bool terrainBake(void* context, const owned::NativeTerrainShadowEntry* entries,
+                 std::uint32_t count, std::vector<std::uint32_t>& absent) noexcept {
+    return self(context)->renderer->queue_native_terrain_shadow_bake(entries, count, absent);
 }
 bool pointShadowBatch(void* context, std::uint64_t& generation, bool& pressure) noexcept {
     return self(context)->renderer->begin_native_point_shadow_batch(generation, &pressure);
@@ -291,7 +295,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     owned::bridge_set_native_geometry_sink(&sink, &submit, &beginBatch, &endBatch, &beginObject, &endObject,
         &frameState, &worldLighting, &shadowBegin, &shadowEnd, &shadowDiagnostics, &pointLights,
         &pointShadowBegin, &pointShadowEnd, &staticDepth, &pointShadowBatch, &pointShadowPublish,
-        &pointShadowAllocate, &pointShadowRelease, &shadowCull);
+        &pointShadowAllocate, &pointShadowRelease, &shadowCull, &terrainBake);
     std::vector<std::int32_t> drawn;
     std::vector<owned::EmbeddedVisualOmission> omitted;
     const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn, &omitted);

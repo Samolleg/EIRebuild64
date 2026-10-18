@@ -37,16 +37,36 @@ namespace owned {
 // any distance instead of the whole field translating rigidly.
 // Issue #69 (candidate 29): 8-14 m/s rigid drift and a 2 m/s vertical slice
 // over 500 m billows read as static kilometres away, even at 3x speed.
+// Calm drift speed (m/s, F10 sky_cloud_wind_speed). Issue #115 follow-up:
+// the old 10 m/s moved a cloud 20 km away about 2 degrees a minute, which the
+// user read as a still sky; 25 m/s is the candidate value (look decision,
+// pending the user's verdict on shadow speed in the small game view).
+constexpr float kSkyCloudWindSpeed = 25.f;
+// The cloud-shadow field has its own, slower drift (F10
+// sky_cloud_shadow_speed; play-2 00229eb1 user verdict: the clouds that shade
+// the scene should move slower while the distant sky keeps its cinematic
+// pace). Same wind direction and the same evolution clock, so the dapple
+// still drifts and slowly changes; it just does not race across the ~40 m
+// game view. The game camera sees the horizon, not the clouds overhead that
+// cast these shadows, so the two drifts never meet in one view.
+constexpr float kSkyCloudShadowSpeed = 8.f;
 inline void sky_step_motion(const WorldEnvironment& env, double& previous, double wind[3],
-                            float wx, float wy, float force, float storm, float scale = 1.f) noexcept {
+                            float wx, float wy, float force, float storm, float scale = 1.f,
+                            float calm_speed = kSkyCloudWindSpeed, double* shadow = nullptr,
+                            float shadow_speed = kSkyCloudShadowSpeed) noexcept {
     if (!env.valid) { previous = -1.0; return; }
     const double seconds = env.world_time * .055;
     const double dt = previous < 0.0 ? 0.0 : std::max(0.0, seconds - previous);
     previous = seconds;
     const double s = std::clamp(storm, 0.f, 1.f), k = std::max(0.f, scale);
-    const double speed = (10.0 + 6.0 * std::clamp(force, 0.f, 1.f) + 10.0 * s) * k;
+    const double speed = (std::max(0.f, calm_speed) + 6.0 * std::clamp(force, 0.f, 1.f) + 10.0 * s) * k;
     wind[0] -= wx * speed * dt;
     wind[1] -= wy * speed * dt;
+    if (shadow) {
+        const double slow = (std::max(0.f, shadow_speed) + 2.0 * std::clamp(force, 0.f, 1.f) + 4.0 * s) * k;
+        shadow[0] -= wx * slow * dt;
+        shadow[1] -= wy * slow * dt;
+    }
     // Storms boil faster. All density consumers use these same phases.
     wind[2] += (1.0 + .8 * s) * k * dt;
 }
@@ -74,14 +94,23 @@ struct SkyNoiseLayer { double a, b, wavelength; };
 #define SKY_CPU_LAYER(a,b,s) {a,b,s},
 constexpr SkyNoiseLayer kSkyNoiseLayers[] = {SKY_NOISE_LAYERS(SKY_CPU_LAYER)};
 #undef SKY_CPU_LAYER
+// The shape volume (layers 3 and 4) holds this many horizontal tiles of
+// height, so its vertical periods (2 x 2100 m, 2 x 3467 m) exceed the 4 km
+// cloud layer. Issue #115: with a cubic 2100 m tile the shape repeated 2100 m
+// above itself under the same 2D coverage, so tall clouds showed a copy
+// directly over them. Feature sizes are unchanged.
+#define SKY_SHAPE_DEPTH_TILES 2
+constexpr unsigned kSkyShapeDepthTiles = SKY_SHAPE_DEPTH_TILES;
 inline void sky_noise_phases(const double wind[3], float phases[6][4]) noexcept {
     for (unsigned i = 0; i < 6; ++i) {
         const auto& l = kSkyNoiseLayers[i];
         const auto& e = kSkyLayerEvolution[i];
         const double x = wind[0] + e[0] * wind[2], y = wind[1] + e[1] * wind[2];
+        // z in units of the shape volume's depth (layers 3, 4), so it wraps seamlessly.
+        const double depth = i == 3 || i == 4 ? double(kSkyShapeDepthTiles) : 1.0;
         const double p[3] = {(l.a * x - l.b * y) / l.wavelength,
                              (l.b * x + l.a * y) / l.wavelength,
-                             e[2] * wind[2] / l.wavelength};
+                             e[2] * wind[2] / (l.wavelength * depth)};
         for (unsigned j = 0; j < 3; ++j) phases[i][j] = float(p[j] - std::floor(p[j]));
         phases[i][3] = 0.f;
     }
@@ -334,6 +363,21 @@ inline float sky_step_coverage(float level, float target, double elapsed_seconds
 constexpr float kSkyCloudBase = 800.f, kSkyCloudTop = 4800.f, kSkyCirrusAltitude = 8500.f;
 // The upper wind veers from the cloud wind and blows faster.
 constexpr float kSkyCirrusVeerDegrees = 25.f, kSkyCirrusSpeed = 2.5f;
+// Layered wind (issue #115 follow-up, user: "movement should be layered,
+// realistic shadow like"): each cloud population drifts as a whole at its
+// own altitude's wind, faster and veered with height (shear), rather than
+// one rigid sheet. The low volume (stratus, cumulus, nimbus; 0.8-3 km) takes
+// the cloud wind itself; a thin mid-level altocumulus sheet (3.4-3.9 km)
+// takes it 1.4x faster, veered 12 degrees; cirrus (8.5 km) 2.5x, 25 degrees.
+// Every layer's offset is the low offset scaled and rotated, so a turning
+// game wind turns all layers together and no extra clock exists.
+constexpr float kSkyMidVeerDegrees = 12.f, kSkyMidSpeed = 1.4f;
+#define SKY_MID_COVERAGE_WAVELENGTH 23000.0
+#define SKY_MID_SHAPE_WAVELENGTH 1050.0
+constexpr double kSkyMidCoverageWavelength = SKY_MID_COVERAGE_WAVELENGTH;
+constexpr double kSkyMidShapeWavelength = SKY_MID_SHAPE_WAVELENGTH;
+// Mid-sheet band over the volume's height fraction (0 = 800 m, 1 = 4800 m).
+#define SKY_MID_BAND .66, .69, .73, .77
 // Cirrus streak wavelengths (along, across the upper wind) of its two taps.
 #define SKY_CIRRUS_SCALE 36000.0, 9000.0, 14000.0, 1400.0
 constexpr double kSkyCirrusScale[4] = {SKY_CIRRUS_SCALE};
@@ -356,20 +400,82 @@ struct SkyCloudWeather {
 // than the 90 s closure) only adds where it is ahead. Driving the type by that
 // ramp alone took a closed stratus deck through scattered cumulus (type .5)
 // half way to nimbus, in rain, and back again as the rain eased.
+// Storm front (issue #115/#145, user-approved design): the deck is a band of
+// the sky between a leading edge and a trailing edge on the wind axis,
+// measured in metres upwind of the eye, so storms move in from the upwind
+// horizon and clear from the upwind side instead of the whole sky morphing.
+// The game switches its weather within a second; on that switch small
+// scattered clouds form overhead (pre, about 15 s) with the first light rain,
+// and the leading edge sets off 12 km upwind at 500 m/s (a formation front:
+// the clouds inside still drift with the storm wind), passing overhead after
+// about 24 s as the rain intensifies (the weather side gates its ramp by
+// sky_front_arrival). Clearing: the trailing edge starts 40 km upwind and
+// moves downwind at 180 m/s, clearing overhead after about 3.7 min. A
+// reversed weather reverses the edge that has not passed yet.
+constexpr float kSkyFrontStart = 12000.f, kSkyFrontSpeed = 500.f, kSkyRearStart = 40000.f, kSkyRearSpeed = 180.f;
+constexpr float kSkyFrontGone = -80000.f, kSkyFrontOpen = 1.0e6f, kSkyFrontBuild = 4000.f;
+constexpr float kSkyPreFormSeconds = 15.f, kSkyPreClearSeconds = 60.f;
+struct SkyFront { float lead = kSkyFrontGone, rear = kSkyFrontGone, pre = 0.f; };
+inline bool sky_front_present(const SkyFront& f) noexcept { return f.rear - f.lead > kSkyFrontBuild && f.rear > kSkyFrontGone; }
+inline void sky_step_front(SkyFront& f, bool storm, double elapsed) noexcept {
+    if (elapsed < 0.0) {  // load or jump: the scene starts in its own weather
+        f.lead = kSkyFrontGone; f.rear = storm ? kSkyFrontOpen : kSkyFrontGone; f.pre = storm ? 1.f : 0.f;
+        return;
+    }
+    const float dt = static_cast<float>(elapsed);
+    if (storm) {
+        if (!sky_front_present(f)) { f.lead = kSkyFrontStart; f.rear = kSkyFrontOpen; }
+        f.lead = std::max(kSkyFrontGone, f.lead - kSkyFrontSpeed * dt);
+        if (f.rear < kSkyFrontOpen) { f.rear += kSkyRearSpeed * dt; if (f.rear > 2.f * kSkyRearStart) f.rear = kSkyFrontOpen; }
+        f.pre = std::min(1.f, f.pre + dt / kSkyPreFormSeconds);
+    } else {
+        if (sky_front_present(f) && f.rear >= kSkyFrontOpen) f.rear = kSkyRearStart;
+        if (f.rear < kSkyFrontOpen) f.rear = std::max(kSkyFrontGone, f.rear - kSkyRearSpeed * dt);
+        // A leading edge that has not reached the eye retreats; one past it moves off downwind.
+        f.lead = f.lead > 0.f ? f.lead + kSkyFrontSpeed * dt : std::max(kSkyFrontGone, f.lead - kSkyFrontSpeed * dt);
+        f.pre = std::max(0.f, f.pre - dt / kSkyPreClearSeconds);
+    }
+}
+// The deck amount at `along` metres upwind of the eye (the shader's skyDeckAt).
+inline float sky_front_deck(const SkyFront& f, float along) noexcept {
+    auto smooth = [](float a, float b, float x) { const float t = std::clamp((x - a) / (b - a), 0.f, 1.f); return t * t * (3.f - 2.f * t); };
+    return smooth(f.lead, f.lead + kSkyFrontBuild, along) * (1.f - smooth(f.rear - kSkyFrontBuild, f.rear, along));
+}
 inline float sky_deck_storm(float closed, float ramped_storm, float kind) noexcept {
     return std::max(std::clamp(ramped_storm, 0.f, 1.f), std::clamp(closed, 0.f, 1.f) * std::clamp(kind, 0.f, 1.f));
 }
 inline SkyCloudWeather sky_cloud_weather(float closed, float storm, float windy, float day) noexcept {
     const float c = std::clamp(closed, 0.f, 1.f), s = std::clamp(storm, 0.f, 1.f), w = std::clamp(windy, 0.f, 1.f);
     SkyCloudWeather out;
-    float base = .5f + .1f * w;
+    // Fair skies centre on cumulus with less stratus weight (cloud-shape:
+    // type .28 put 44% stratus into a column, whose blended band pulled the
+    // cumulus top down and whose sheet fill flattened it into wide lens
+    // pancakes). Fair type now spans about .39-.73: at most 22% stratus.
+    float base = .56f + .1f * w;
     base += (.06f - base) * c;
     base += (.92f - base) * s;
     out.type_base = base;
-    out.type_spread = .22f + .06f * w - .08f * c * (1.f - s) + .12f * s;
+    out.type_spread = .17f + .06f * w - .03f * c * (1.f - s) + .17f * s;
     out.storm = s;
     out.cirrus = std::clamp(.45f + .25f * std::clamp(day, -1.f, 1.f) + .2f * w, 0.f, 1.f) * (1.f - c);
     return out;
+}
+// Mid sheet phases from the integrated low offset: coverage (xy, in its own
+// rotated frame) and shape (xyz, the shape volume is kSkyShapeDepthTiles tall;
+// z slides slowly with the evolution clock, 4 m per unit).
+inline void sky_mid_phases(const double wind[3], float coverage[2], float shape[3]) noexcept {
+    constexpr double veer = kSkyMidVeerDegrees * 3.14159265358979 / 180.0;
+    const double cv = std::cos(veer), sv = std::sin(veer);
+    const double ox = kSkyMidSpeed * (cv * wind[0] - sv * wind[1]);
+    const double oy = kSkyMidSpeed * (sv * wind[0] + cv * wind[1]);
+    // Same rotations as the HLSL (skyMidDensity).
+    const double c[2] = {(.573576 * ox - .819152 * oy) / kSkyMidCoverageWavelength,
+                         (.819152 * ox + .573576 * oy) / kSkyMidCoverageWavelength};
+    const double s[3] = {(.939693 * ox - .342020 * oy) / kSkyMidShapeWavelength,
+                         (.342020 * ox + .939693 * oy) / kSkyMidShapeWavelength,
+                         4.0 * wind[2] / (kSkyMidShapeWavelength * kSkyShapeDepthTiles)};
+    for (int i = 0; i < 2; ++i) coverage[i] = static_cast<float>(c[i] - std::floor(c[i]));
+    for (int i = 0; i < 3; ++i) shape[i] = static_cast<float>(s[i] - std::floor(s[i]));
 }
 // Upper-wind direction and its reduced streak phases from the integrated
 // cloud wind offset (world metres); double precision before the reduction.
@@ -455,8 +561,13 @@ struct SkyFrameGpu {
     float storm_light[4]{};     // low sun under the storm deck (linear irradiance), w: deck edge radius (m)
     float flash[4]{};           // lightning position (world), w: intensity
     float rain[4]{};            // rain-shaft amount, slant direction x, y, w: deck edge strength
+    float mid[4]{};             // mid sheet coverage phase u, v, amount, density
+    float mid_shape[4]{};       // mid sheet shape phase x, y, z
+    float deck_types[4]{};      // the storm deck's cloud type base, spread, storm, 1 (types holds the fair sky's)
+    float deck_cloud[4]{};      // deck coverage, density, leading and trailing edge (m upwind of the eye)
+    float deck_axis[4]{};       // upwind direction x, y, edge build width (m), pre-storm overhead cover
 };
-static_assert(sizeof(SkyFrameGpu) == 688, "sky constants must match HLSL");
+static_assert(sizeof(SkyFrameGpu) == 768, "sky constants must match HLSL");
 
 // Temporal cloud reconstruction: each frame marches one sub-pixel of every
 // 2x2 block of the reconstruction target, so four consecutive frames march
@@ -476,13 +587,17 @@ constexpr unsigned kSkyLutWidth = 192, kSkyLutHeight = 108;
 constexpr char kSkyShader[] =
 "static const float3 skyNoiseLayers[6]={" SKY_NOISE_LAYERS(SKY_HLSL_LAYER) "};\n"
 "static const float4 skyCirrusScale=float4(" SKY_STRING_LIST(SKY_CIRRUS_SCALE) ");\n"
+"static const float4 skyMidBand=float4(" SKY_STRING_LIST(SKY_MID_BAND) ");\n"
+"static const float2 skyMidWavelength=float2(" SKY_STRING(SKY_MID_COVERAGE_WAVELENGTH) "," SKY_STRING(SKY_MID_SHAPE_WAVELENGTH) ");\n"
+"static const int SKY_SHAPE_DEPTH=" SKY_STRING(SKY_SHAPE_DEPTH_TILES) ";\n"
 R"(
 cbuffer SkyFrame:register(b0){row_major float4x4 skyClipToWorld;row_major float4x4 skyPreviousWorldToClip;
  float4 skyEye;float4 skyPrevious;float4 skySun;float4 skyMoon;float4 skyLightRadiance;float4 skyCloudLight;
  float4 skyLutSun;float4 skyLutMoon;float4 skyLight;float4 skyCloud;float4 skyWeather;float4 skyNoisePhase[6];
  float4 skyShadow;float4 skyHorizon;float4 skyGame;float4 skyStars;float4 skySunDisc;float4 skyMoonDisc;uint4 skySize;uint4 skyControl;uint4 skyReconstruct;
  float4 skyTypes;float4 skyCirrus;float4 skyCirrusPhase;
- float4 skyCloudBottom;float4 skyCloudTop;float4 skyCirrusLight;float4 skyStormLight;float4 skyFlash;float4 skyRain;};
+ float4 skyCloudBottom;float4 skyCloudTop;float4 skyCirrusLight;float4 skyStormLight;float4 skyFlash;float4 skyRain;
+ float4 skyMid;float4 skyMidShape;float4 skyDeckTypes;float4 skyDeckCloud;float4 skyDeckAxis;};
 static const float SKY_PI=3.14159265;
 static const float2 SKY_LUT=float2(192,108);
 Texture3D<float> skyShapeNoise:register(t0);
@@ -497,29 +612,34 @@ RWTexture3D<float> skyNoiseOut:register(u0);
 RWTexture2D<float2> skyWeatherOut:register(u1);
 RWTexture2D<float4> skyColorOut:register(u2);
 RWTexture2D<float> skyShadowOut:register(u3);
+Texture2D<float> skyShadowRaw:register(t6);
 
 // ------------------------------------------------------------ noise (tiling)
 uint skyHash3(int3 p){uint h=(uint)p.x*73856093u^(uint)p.y*19349663u^(uint)p.z*83492791u;h^=h>>13;h*=0x5bd1e995u;h^=h>>15;return h;}
 float3 skyGrad3(int3 p){uint h=skyHash3(p);return normalize(float3(h&1023u,(h>>10)&1023u,(h>>20)&1023u)/511.5-1+1e-4);}
-float skyPerlin3(float3 p,int period){
+float skyPerlin3(float3 p,int3 period){
  int3 i=(int3)floor(p);float3 f=frac(p);float3 u=f*f*f*(f*(f*6-15)+10);float r=0;
  [loop]for(int k=0;k<8;++k){int3 o=int3(k&1,(k>>1)&1,k>>2);int3 c=(i+o)%period;c+=c<0?period:0;
   float w=(o.x?u.x:1-u.x)*(o.y?u.y:1-u.y)*(o.z?u.z:1-u.z);r+=w*dot(skyGrad3(c),f-o);}
  return r*.5+.5;
 }
-float skyWorley3(float3 p,int period){
+float skyWorley3(float3 p,int3 period){
  int3 i=(int3)floor(p);float3 f=frac(p);float d=1;
  [loop]for(int k=0;k<27;++k){int3 o=int3(k%3,(k/3)%3,k/9)-1;int3 c=(i+o)%period;c+=c<0?period:0;
   uint h=skyHash3(c+7);float3 j=float3(h&255u,(h>>8)&255u,(h>>16)&255u)/255.0;d=min(d,length(o+j-f));}
  return 1-saturate(d);
 }
 float skyRemap(float v,float a,float b,float c,float d){return c+(v-a)/(b-a)*(d-c);}
+// 128 x 128 texels per tile horizontally, SKY_SHAPE_DEPTH tiles (128 texels
+// each) of height: p spans [0,1) x [0,1) x [0,SKY_SHAPE_DEPTH).
 [numthreads(4,4,4)]void skyShapeCS(uint3 id:SV_DispatchThreadID){
  float3 p=(id+.5)/128.0;
- // Cube-axis rotations preserve seamless wrapping of the stored volume,
- // while independent offsets decorrelate its generated octaves.
- float pf=skyPerlin3(p*4+float3(.17,.43,.71),4)*.625+skyPerlin3(p.yzx*8+float3(2.31,5.17,1.73),8)*.25+skyPerlin3(p.zxy*16+float3(7.13,3.61,11.29),16)*.125;
- float wf=skyWorley3(p*4+float3(1.37,.59,2.11),4)*.625+skyWorley3(p.zxy*8+float3(3.71,1.23,5.47),8)*.25+skyWorley3(p.yzx*16+float3(9.19,7.43,2.89),16)*.125;
+ int3 e=int3(1,1,SKY_SHAPE_DEPTH);
+ // Cube-axis rotations preserve seamless wrapping of the stored volume (each
+ // lattice period follows its permuted axis extent), while independent
+ // offsets decorrelate its generated octaves.
+ float pf=skyPerlin3(p*4+float3(.17,.43,.71),e*4)*.625+skyPerlin3(p.yzx*8+float3(2.31,5.17,1.73),e.yzx*8)*.25+skyPerlin3(p.zxy*16+float3(7.13,3.61,11.29),e.zxy*16)*.125;
+ float wf=skyWorley3(p*4+float3(1.37,.59,2.11),e*4)*.625+skyWorley3(p.zxy*8+float3(3.71,1.23,5.47),e.zxy*8)*.25+skyWorley3(p.yzx*16+float3(9.19,7.43,2.89),e.yzx*16)*.125;
  skyNoiseOut[id]=saturate(skyRemap(pf,wf-1,1,0,1));
 }
 [numthreads(4,4,4)]void skyDetailCS(uint3 id:SV_DispatchThreadID){
@@ -607,6 +727,12 @@ float3 skyNoiseCoord(float3 p,int layer){
  float3 l=skyNoiseLayers[layer];
  return float3(l.x*p.x-l.y*p.y,l.y*p.x+l.x*p.y,p.z)/l.z+skyNoisePhase[layer].xyz;
 }
+// Shape volume coordinate: the volume is SKY_SHAPE_DEPTH tiles tall, so z
+// (and its phase, reduced on the CPU in the same unit) spans that depth.
+float3 skyShapeCoord(float3 p,int layer){
+ float3 l=skyNoiseLayers[layer];
+ return float3(l.x*p.x-l.y*p.y,l.y*p.x+l.x*p.y,p.z/SKY_SHAPE_DEPTH)/l.z+skyNoisePhase[layer].xyz;
+}
 float2 skyWeatherAt(float2 xy){
  // Broad warp bends the smaller coverage structures without aligning them
  // with the shape lattice. Three taps, no larger weather allocation.
@@ -619,29 +745,47 @@ float2 skyWeatherAt(float2 xy){
 }
 float skyDetailWeight(float footprint){return 1-smoothstep(317.0/16,317.0/4,footprint);}
 float skyHeightFraction(float3 p){return saturate((p.z-skyCloud.x)/(skyCloud.y-skyCloud.x));}
+// Storm front (sky_step_front): the deck amount at a world position, from
+// its distance upwind of the eye between the leading and trailing edges.
+float skyDeckAt(float2 xy){
+ float along=dot(xy-skyEye.xy,skyDeckAxis.xy),w=skyDeckAxis.z;
+ return smoothstep(skyDeckCloud.z,skyDeckCloud.z+w,along)*(1-smoothstep(skyDeckCloud.w-w,skyDeckCloud.w,along));
+}
+// Local cloud weather (types and coverage/density) for the position being
+// sampled: the fair sky (skyTypes, skyCloud.zw, plus the pre-storm small
+// clouds forming over the eye) blended into the deck (skyDeckTypes,
+// skyDeckCloud.xy). Set before each density evaluation; skyT.w is the local
+// closure.
+static float4 skyT=0;static float2 skyCW=0;
+void skyLocalWeather(float2 xy){
+ float c=skyDeckAt(xy);
+ float pre=skyDeckAxis.w*(1-smoothstep(3000,8000,length(xy-skyEye.xy)));
+ skyT=lerp(skyTypes,skyDeckTypes,c);
+ skyCW=lerp(float2(saturate(skyCloud.z+.35*pre),skyCloud.w),skyDeckCloud.xy,c);
+}
 // ---- cloud types (Nubis-style scalar type: 0 stratus, .5 cumulus, 1 cumulonimbus)
 // Large-scale type noise (features of about 15 km) drifting with the wind.
 float skyCloudTypeNoise(float2 xy){
  float n=skyWeatherMap.SampleLevel(skyWrap,skyNoiseCoord(float3(xy,0),0).xy+float2(.53,.29),0).y;
  return saturate((n-.5)*2.5+.5);
 }
-float skyCloudType(float n){return saturate(skyTypes.x+skyTypes.y*(n*2-1));}
+float skyCloudType(float n){return saturate(skyT.x+skyT.y*(n*2-1));}
 // Weights of stratus, cumulus and nimbus for a type value.
 // A closing deck takes the scattered cumulus share into its own body (stratus,
 // nimbus as it storms): every type path from stratus to nimbus crosses .5,
 // and a closed deck must never break into fair cumulus there.
 float3 skyTypeWeights(float t){
- float s=saturate(1-2*t),n=saturate(2*t-1),c=1-s-n,k=c*skyTypes.w;
- return float3(s+k*(1-skyTypes.z),c-k,n+k*skyTypes.z);
+ float s=saturate(1-2*t),n=saturate(2*t-1),c=1-s-n,k=c*skyT.w;
+ return float3(s+k*(1-skyT.z),c-k,n+k*skyT.z);
 }
 // Stratus fills a sheet, nimbus a broad mass, cumulus stays scattered.
 float skyTypeCoverage(float3 tw){return dot(tw,float3(1.3,1,1.2));}
 // Nimbus is heavier, darkest while it precipitates.
-float skyTypeExtinction(float3 tw){return dot(tw,float3(.85,1,1.15+.55*skyTypes.z));}
+float skyTypeExtinction(float3 tw){return dot(tw,float3(.85,1,1.15+.55*skyT.z));}
 // Stratus evens out the coverage noise into a sheet with few holes.
 float skyTypeWeather(float w,float3 tw){return lerp(w,.6+.4*w,tw.x);}
 float skyLocalCoverage(float w,float3 tw){
- float open=saturate((w-(1-saturate(skyCloud.z*skyTypeCoverage(tw))))*2.5);
+ float open=saturate((w-(1-saturate(skyCW.x*skyTypeCoverage(tw))))*2.5);
  // A closed storm deck is separate heavy masses over the kilometre-scale
  // coverage cores with gaps between them; the thin upper sheet
  // (skyCloudDensityLocal) closes the sky above, so the gaps show lighter
@@ -649,46 +793,58 @@ float skyLocalCoverage(float w,float3 tw){
  // that filled every column read at the game camera's 1-8 degrees as one
  // flat band; dark scalloped mass bases against lighter gaps and far deck
  // are what reads at grazing angles.
- return lerp(open,saturate((w-.35)*3),skyTypes.w);
+ return lerp(open,saturate((w-.35)*3),skyT.w);
 }
 float skyBand(float h,float b0,float b1,float t0,float t1){return saturate((h-b0)/(b1-b0))*saturate((t1-h)/max(t1-t0,1e-4));}
 // Vertical density profile over the layer fraction h (800 m .. 4800 m) for
 // local coverage wc, variation v and storm mass m; local is the height inside
 // the blended cloud (0 base, 1 top) for erosion and ambient light.
-float skyCloudProfile(float h,float wc,float v,float m,float3 tw,out float local){
+float skyCloudProfile(float h,float wc,float v,float m,float3 tw,out float local,out float base){
  // A closed deck hangs lower over the kilometre-scale coverage cores (m 1)
  // than between them (m 0). Kept shallow: a 560 m seam lift raised the base
  // so far that the eye-anchored deck edge cut a hard wavy line across the
  // view (runtime, db97b88).
- float seam=skyTypes.w*(1-m);
+ float seam=skyT.w*(1-m);
  // Stratus: a low sheet with a gently varying underside, 800-1300 m.
  float sT=.08+.05*v;
  float sB=.012*v+.02*seam;
- float pS=skyBand(h,sB,sB+.025,sT*.55,sT);
  // Cumulus/altocumulus: broad, rounded lobes. The existing weather
  // variation moves the base; thin column edges lift it into the body.
  float core=sqrt(wc);
  float cB=.075+.05*v+.05*(1-core),cT=cB+.03+.47*core*lerp(.5,1,v);
- float pC=smoothstep(cB,cB+.07,h)*(1-smoothstep(lerp(cB,cT,.55),cT,h));
  // nimbus: low ragged base, towers up to the layer top
  // A closed storm base undulates over the kilometre-scale variation field:
  // low-hanging masses and high recesses, large enough to read at the low
  // angles the game camera sees the sky (per-lobe detail averages out there).
- float nB=.02+lerp(.05,.17,skyTypes.w)*(1-v)+.04*(1-wc)+.05*seam,nT=.5+.5*core-.1*seam;
+ float nB=.02+lerp(.05,.17,skyT.w)*(1-v)+.04*(1-wc)+.05*seam,nT=.5+.5*core-.1*seam;
  // Keep the existing inexpensive nimbus envelope; its varying base and
  // body noise already round it. Cubic ramps here repeated in every shadow
  // column added cost without helping the fair-weather cumulus underside.
  // A closed storm base ramps in over twice the height, so its lobes hang
  // deeper (vertical relief of several hundred metres).
- float pN=skyBand(h,nB,nB+lerp(.08,.17,skyTypes.w),lerp(nB,nT,.7),nT);
- local=dot(tw,float3(saturate(h/sT),saturate((h-cB)/(cT-cB)),saturate((h-nB)/(nT-nB))));
- return dot(tw,float3(pS,pC,pN));
+ // Issue #115: one body per column. Summing the three weighted bands put a
+ // stratus sheet (800-1300 m) under a cumulus body starting 1100-1500 m in
+ // every mixed-type column (fair type .22-.88 spans stratus/cumulus), both
+ // cut by the same coverage and shape noise: each cloud showed a flat copy
+ // of its own outline a few hundred metres below it. The type weights now
+ // blend the band edges instead, so a mixed column is one cloud between the
+ // types' bases and tops; a pure type keeps its own band exactly (cumulus
+ // smooth edges, stratus and nimbus linear).
+ float b0=dot(tw,float3(sB,cB,nB));base=b0;
+ float b1=dot(tw,float3(sB+.025,cB+.07,nB+lerp(.08,.17,skyT.w)));
+ float t0=dot(tw,float3(sT*.55,lerp(cB,cT,.55),lerp(nB,nT,.7))),t1=dot(tw,float3(sT,cT,nT));
+ float bandL=skyBand(h,b0,b1,t0,t1);
+ float bandS=smoothstep(b0,b1,h)*(1-smoothstep(t0,t1,h));
+ float lb=dot(tw,float3(0,cB,nB));  // stratus height inside its sheet starts at the layer base
+ local=saturate((h-lb)/max(t1-lb,1e-4));
+ return lerp(bandL,bandS,tw.y);
 }
 // One density model for sky clouds, the probe and the cloud shadow map.
 // shade: the closed deck's underside tone (1 neutral), constant within a
 // billow, for the march's ambient (skyMarchClouds).
-float skyCloudDensityLocal(float3 p,bool detail,float footprint,out float local,out float shade){
+float skyCloudDensityLow(float3 p,bool detail,float footprint,out float local,out float shade){
  local=0;shade=1;
+ skyLocalWeather(p.xy);
  float h=skyHeightFraction(p);
  float2 w=skyWeatherAt(p.xy);
  float3 tw=skyTypeWeights(skyCloudType(skyCloudTypeNoise(p.xy)));
@@ -699,17 +855,18 @@ float skyCloudDensityLocal(float3 p,bool detail,float footprint,out float local,
  wc*=edge;
  // The closed deck's thin upper sheet (altostratus, 2.5-3.2 km): lighter
  // than the masses below it, gently varying, no 3D taps.
- float upper=skyTypes.w*edge*skyBand(h,.42,.47,.52,.6)*.22*(.6+.4*w.y)*skyCloud.w;
+ float upper=skyT.w*edge*skyBand(h,.42,.47,.52,.6)*.22*(.6+.4*w.y)*skyCW.y;
  [branch]if(upper>0&&wc<=.001){local=.8;return upper;}
  if(wc<=.001)return 0;
  float m=smoothstep(.2,.8,w.x);
- float profile=skyCloudProfile(h,wc,w.y,m,tw,local);
+ float base;
+ float profile=skyCloudProfile(h,wc,w.y,m,tw,local,base);
  if(profile<=0){[branch]if(upper>0)local=.8;return upper;}  // above this column's cloud: no 3D taps
  // Capped below 1 so a closed deck keeps crevices between its billows; a
  // full threshold filled the whole layer and showed one flat grey base.
  float coverage=min(wc*lerp(.75,1,max(tw.x,tw.z)),.93);
- float s0=skyShapeNoise.SampleLevel(skyWrap,skyNoiseCoord(p,3)+float3(.13,.71,.29),0);
- float s1=skyShapeNoise.SampleLevel(skyWrap,skyNoiseCoord(p,4)+float3(.67,.19,.83),0);
+ float s0=skyShapeNoise.SampleLevel(skyWrap,skyShapeCoord(p,3)+float3(.13,.71,.29),0);
+ float s1=skyShapeNoise.SampleLevel(skyWrap,skyShapeCoord(p,4)+float3(.67,.19,.83),0);
  float s=s0*.65+s1*.35;
  // Closed deck underside (seen from below it is opaque within one step and
  // takes no direct light, so only this tone shapes it): the strong billows
@@ -726,12 +883,37 @@ float skyCloudDensityLocal(float3 p,bool detail,float footprint,out float local,
  // Shape threshold selects the cloud body; the vertical envelope rounds
  // that body. Thresholding their product shaved sparse desert banks into
  // disconnected slivers with unnaturally level lower edges.
+ // Rounded bases (cloud-shape, user: "fluffy clouds splattered with a
+ // plane from the bottom"): a height-independent threshold started every
+ // cloud body at one base height out to its thin edges, so from below and at
+ // mid angles the base read as a flat cut with a flat skirt. Over the lowest
+ // ~440 m the threshold now rises (Nubis-style envelope in the threshold):
+ // the strong cores still sit on the common condensation level, weaker shape
+ // noise toward the edges only starts higher, so the underside curves up into
+ // the sides and its density ramps in softly. The closed deck keeps its own
+ // tuned underside.
+ // Storm nimbus has its own envelope threshold below (dn).
+ // Runtime (2bf28538, Gipat pitch 5): large clouds still showed wide flat
+ // bottoms, the rounding only reached their edges. The broad shape layer
+ // (s1, ~3.5 km) now also lifts the rounding start by up to ~240 m where it
+ // is weak, so a large cloud's underside is scalloped into lobes at slightly
+ // different heights while its strong cores keep the common base; the
+ // rounding is deeper (520 m) and starts from a lower floor.
+ // Runtime (559a91a2, looking up): many tiny detached puffs ("confetti")
+ // around the large clouds, where a weak coverage edge or the low rounding
+ // floor let only isolated noise maxima through. Fair cells below ~.2
+ // coverage fade out, and the floor is .42.
+ float storm=saturate(skyT.z+skyT.w);
+ coverage*=lerp(smoothstep(.1,.28,coverage),1,storm);
+ float lift=.06*saturate((.62-s1)*1.6);
+ float br=saturate((h-base-lift)/.13);
+ coverage*=lerp(lerp(.42,1,br),1,storm);
  float d=saturate(skyRemap(s,1-coverage,1,0,1))*profile;
  // Nimbus: the envelope enters the threshold (Nubis), so only the strongest
  // billows reach down to its base: a lumpy, hanging underside with dark
  // pockets instead of a level cut. The dense body above stays connected.
  float dn=saturate(skyRemap(s,1-coverage*saturate(profile*1.4),1,0,1))*sqrt(profile);
- d=lerp(d,dn,tw.z*saturate(skyTypes.z+skyTypes.w));  // fair cumulus unchanged
+ d=lerp(d,dn,tw.z*saturate(skyT.z+skyT.w));  // fair cumulus unchanged
  float dw=detail?skyDetailWeight(footprint):0;
  [branch]if(dw>0&&d>0){
   float dn=skyDetailNoise.SampleLevel(skyWrap,skyNoiseCoord(p,5)+float3(.41,.23,.59),0);
@@ -740,7 +922,28 @@ float skyCloudDensityLocal(float3 p,bool detail,float footprint,out float local,
   float e=lerp(dn,1-dn,saturate(local*4));
   d=saturate(skyRemap(d,e*(.16+.16*tw.z*(1-local))*(1-local*.3)*dw,1,0,1));
  }
- return d*skyCloud.w*skyTypeExtinction(tw)+upper;
+ return d*skyCW.y*skyTypeExtinction(tw)+upper;
+}
+// Mid-level altocumulus sheet (issue #115 follow-up): a thin layer of small
+// cells over km-scale patches, drifting faster and veered against the low
+// volume (sky_mid_phases), so the sky and the ground dapple move in layers.
+// Two taps, only inside its 3.4-3.9 km band.
+float skyMidDensity(float3 p){
+ float hb=skyBand(skyHeightFraction(p),skyMidBand.x,skyMidBand.y,skyMidBand.z,skyMidBand.w);
+ [branch]if(hb<=0||skyMid.z<=0)return 0;
+ float2 q=float2(.573576*p.x-.819152*p.y,.819152*p.x+.573576*p.y)/skyMidWavelength.x+skyMid.xy;
+ float c=skyWeatherMap.SampleLevel(skyWrap,q,0).x;
+ float cover=saturate((c-(1-skyMid.z))*3);
+ [branch]if(cover<=0)return 0;
+ float3 r=float3(.939693*p.x-.342020*p.y,.342020*p.x+.939693*p.y,p.z/SKY_SHAPE_DEPTH)/skyMidWavelength.y+skyMidShape.xyz;
+ float s=skyShapeNoise.SampleLevel(skyWrap,r,0);
+ return saturate(skyRemap(s,1-cover*.8,1,0,1))*hb*skyMid.w;
+}
+float skyCloudDensityLocal(float3 p,bool detail,float footprint,out float local,out float shade){
+ float d=skyCloudDensityLow(p,detail,footprint,local,shade);
+ float m=skyMidDensity(p);
+ [branch]if(m>0)local=d>0?lerp(local,.6,m/(m+d)):.6;
+ return d+m;
 }
 float skyCloudDensity(float3 p,bool detail,float footprint){float local,shade;return skyCloudDensityLocal(p,detail,footprint,local,shade);}
 )"
@@ -750,12 +953,12 @@ float3 skyCloudAmbient(float h){
  float3 sky=(zenith+side)*.5;
  float3 bottom=sky*.55*float3(.92,.9,1.05)+skyCloudBottom.rgb*saturate(skyCloudLight.z)*.04;
  // A precipitating base sees little sky: blue-black with a cool teal cast.
- bottom*=lerp(1,float3(.3,.37,.42),skyTypes.z);
+ bottom*=lerp(1,float3(.3,.37,.42),skyT.z);
  // A closed deck takes no twilight tint from the dome: a cool slate tone,
  // dark blue-black at its base. Warm light reaches it only from below.
  float3 top=sky*1.2;
- bottom=lerp(bottom,dot(bottom,float3(.3,.5,.2))*float3(.78,.9,1.15),skyTypes.w*.9);
- top=lerp(top,dot(top,float3(.3,.5,.2))*float3(.86,.93,1.07),skyTypes.w*.75);
+ bottom=lerp(bottom,dot(bottom,float3(.3,.5,.2))*float3(.78,.9,1.15),skyT.w*.9);
+ top=lerp(top,dot(top,float3(.3,.5,.2))*float3(.86,.93,1.07),skyT.w*.75);
  return lerp(bottom,top,h);
 }
 float skyHash2(float2 p){return frac(sin(dot(p,float2(127.1,311.7)))*43758.5453);}
@@ -787,6 +990,7 @@ float4 skyRainShafts(float3 ro,float3 rd,float tBase){
  float tEnd=min(tBase,24000);
  [branch]if(skyRain.x<=0||tEnd<=1500)return float4(0,0,0,1);
  float2 dir=skyRain.yz;
+ skyLocalWeather(ro.xy+rd.xy*tEnd);
  float3 col=skyCloudAmbient(0);  // dark curtains against the bright gap
  float ratio=pow(tEnd/1500,1.0/6),t=1500;float3 S=0;float T=1;
  [loop]for(int i=0;i<6;++i,t*=ratio){
@@ -798,7 +1002,7 @@ float4 skyRainShafts(float3 ro,float3 rd,float tBase){
   // masses and the gaps between them stay clear.
   float w=skyWeatherAt(src).x;
   float streak=.5+.5*skyValueNoisePeriodic(frac(nc)*80,80);  // ~240 m curtains
-  float sigma=skyRain.x*smoothstep(.5,.75,w)*streak/5000;
+  float sigma=skyRain.x*smoothstep(.5,.75,w)*streak*skyDeckAt(src)/5000;  // only under the deck
   float tr=exp(-sigma*dt);
   float3 c=col;[branch]if(skyFlash.w>0)c+=skyFlashLight(float3(p.xy,skyCloud.x))*.15;
   S+=T*c*(1-tr);T*=tr;
@@ -825,6 +1029,7 @@ float4 skyMarchClouds(float3 ro,float3 rd,int steps,int lightSteps,float jitter,
  float3 o=float3(0,0,SKY_RG+ro.z);
  float t0=max(10,skyRaySphere(o,rd,SKY_RG+skyCloud.x).y),t1=skyRaySphere(o,rd,SKY_RG+skyCloud.y).y;
  float4 rain=skyRainShafts(ro,rd,t0);
+ skyLocalWeather(ro.xy+rd.xy*t0);float rayDeck=skyT.w;  // ray-level tone: the deck where the ray enters the layer
  t1=min(t1,t0+SKY_MARCH_SPAN);if(t0>=maxDistance||t1<=t0)return rain;
  int n=skyMarchSteps(t0,t1,steps);
  float ratio=pow(t1/t0,1.0/n),cosT=dot(rd,skyCloudLight.xyz),sigma=.035;
@@ -864,7 +1069,7 @@ float4 skyMarchClouds(float3 ro,float3 rd,int steps,int lightSteps,float jitter,
   // fringes glow. (Runtime: a uniform ambient made the deck one flat tone.)
   // Absolute height: the low-hanging masses are lit, the recesses dark.
   float hb=saturate((skyHeightFraction(p)-.02)/.14);
-  ambient*=lerp(1,shade,skyTypes.w);
+  ambient*=lerp(1,shade,skyT.w);
   float3 irradiance=lerp(skyCloudBottom.rgb,skyCloudTop.rgb,skyHeightFraction(p));
   float3 scatter=irradiance*light*4*SKY_PI*powder+ambient;
   [branch]if(under){float b=1-hb;b*=b;scatter+=skyStormLight.rgb*skyUnderReach(p.xy,sunXY)*b*b*underPhase;}
@@ -875,7 +1080,7 @@ float4 skyMarchClouds(float3 ro,float3 rd,int steps,int lightSteps,float jitter,
  // aerial perspective: distant clouds fade toward the horizon sky
  // A closed storm deck keeps its dark, structured base far out instead of
  // dissolving into the bright overcast dome (runtime: it washed out flat).
- float fade=exp(-max(0,t0-4000)/lerp(30000,9000,saturate(skyWeather.x)*(1-.75*skyTypes.w)));
+ float fade=exp(-max(0,t0-4000)/lerp(30000,9000,saturate(skyWeather.x)*(1-.75*rayDeck)));
  // Dissolve at the existing finite sky/probe reach instead of dropping a
  // whole bank when the first layer intersection crosses that boundary.
  fade*=1-smoothstep(maxDistance-SKY_MARCH_SPAN,maxDistance,t0);
@@ -944,17 +1149,25 @@ float3 skyDisplay(float3 c){
 // shimmer near the horizon.
 float skyCirrusLod(float footprint,float scale){return max(0,log2(footprint*512/scale));}
 float4 skyCirrusLayer(float3 rd,float pixelAngle){
- if(skyCirrus.z<=0||rd.z<=.02)return 0;
+ if(skyCirrus.z<=0||rd.z<=.01)return 0;
  float3 o=float3(0,0,SKY_RG+skyEye.z);
  float t=skyRaySphere(o,rd,SKY_RG+skyCirrus.w).y;
  float2 xy=skyEye.xy+rd.xy*t,dir=skyCirrus.xy;
  float2 q=float2(dot(xy,dir),dot(xy,float2(-dir.y,dir.x)));
  // footprint on the layer: across the view, and stretched along it at low elevation
- float footprint=t*pixelAngle*rsqrt(max(rd.z,.02));
+ float footprint=t*pixelAngle*rsqrt(max(rd.z,.01));
  float a=skyWeatherMap.SampleLevel(skyWrap,q/skyCirrusScale.xy+skyCirrusPhase.xy,skyCirrusLod(footprint,skyCirrusScale.y)).x;
  float b=skyWeatherMap.SampleLevel(skyWrap,q/skyCirrusScale.zw+skyCirrusPhase.zw,skyCirrusLod(footprint,skyCirrusScale.w)).y;
- float wisp=saturate((a*.6+b*.4-(1-skyCirrus.z))*2.2);
- float alpha=wisp*wisp*.55*saturate((rd.z-.02)*10)*exp(-t/90000);
+ // Upper layer readable from the game camera (cloud-shape, user: "natural
+ // thin clouds ... the missing upper layer"): the camera sees 3-10 degrees,
+ // where this layer lies 50-160 km out, and the old fades (exp(-t/90 km),
+ // full only above 7 degrees) left at most ~.03-.15 opacity there. Softer
+ // fades, a slightly higher floor on thin amounts, and a faint milky
+ // altostratus veil from the same tap; still thin wisps, not a deck.
+ float amount=lerp(skyCirrus.z,sqrt(skyCirrus.z),.5);
+ float wisp=saturate((a*.6+b*.4-(1-amount))*2.2);
+ float veil=saturate((b-.4)*1.6)*amount*.1;
+ float alpha=(wisp*wisp*.45+veil*(1-wisp*wisp*.45))*saturate((rd.z-.01)*25)*exp(-t/250000);
  // forward-scattering ice lit by the sun or moon, plus the zenith sky
  float cosT=dot(rd,skyCirrusLight.w>0?skySun.xyz:skyMoon.xyz);
  float3 c=skyCirrusLight.rgb*(skyPhaseHG(cosT,.5)*SKY_PI+.35)+skyBaseRadiance(float3(0,0,1))*.9;
@@ -1003,9 +1216,25 @@ float3 skyRay(float2 uv){
  }
  skyColorOut[id.xy]=current;
 }
+// The vertical component's sign of skyRay(uv), without the normalisation.
+float skyRayHeight(float2 uv){
+ float4 p=mul(skyClipToWorld,float4(uv.x*2-1,1-uv.y*2,1,1));
+ return p.z/p.w-skyEye.z;
+}
 [numthreads(8,8,1)]void skyResolveCS(uint3 id:SV_DispatchThreadID){
  if(any(id.xy>=skyReconstruct.xy))return;
  int2 last=(int2)skySize.xy-1,m=min((int2)(id.xy/2),last);
+ // Well below the horizon: every march texel this pixel reads (the 3x3
+ // neighbourhood and the bilinear footprint, within one texel of m) holds
+ // the march's below-horizon value (0,0,0,1), so the result is exactly that.
+ // The rays below the horizon form a half-plane on screen: the four corners
+ // of a box two march texels wider than those texels (either jitter) decide.
+ {
+  float2 lo=(float2(max(m-3,0))*2+.5)/skyReconstruct.xy,hi=(float2(min(m+3,last))*2+1.5)/skyReconstruct.xy;
+  [branch]if(skyRayHeight(lo)<0&&skyRayHeight(hi)<0&&skyRayHeight(float2(lo.x,hi.y))<0&&skyRayHeight(float2(hi.x,lo.y))<0){
+   skyColorOut[id.xy]=float4(0,0,0,1);return;
+  }
+ }
  bool fresh=all((id.xy&1)==skyReconstruct.zw)&&all(id.xy/2<skySize.xy);
  // The exact sample traced this frame, or the march moved by this frame's jitter.
  float4 current=fresh?skyClouds.Load(int3(m,0))
@@ -1041,7 +1270,14 @@ float3 skyRay(float2 uv){
 }
 // Ground transmittance along the game's light, for the world and the fog.
 float skyCloudOpticalDepth(float2 ground,int samples){
- float3 s=skyLight.xyz;float invz=1/max(s.z,.15);float2 slope=s.xy*invz;
+ // The footprint offset (height x slope) is capped at 0.6 (about 59 degrees
+ // of light elevation): with the full slope a low or turning light swept the
+ // footprint of a 2-4 km cloud several kilometres within a game hour, which
+ // read as shadows racing (play-2: "sometimes super fast") or standing still
+ // where that sweep cancelled the drift. The game camera never sees the
+ // cloud and its shadow together, so a steeper projection costs nothing.
+ float3 s=skyLight.xyz;float2 slope=s.xy/max(s.z,.15);float sl=length(slope);slope*=sl>.6?.6/sl:1;
+ float invz=sqrt(1+dot(slope,slope));
  float range=skyCloud.y-skyCloud.x,od=0;
  // Quadratic spacing: fine samples through the low stratus sheet and the
  // cumulus bases, coarse ones through the tall nimbus tops.
@@ -1058,13 +1294,19 @@ float skyCloudShadowResponse(float od){
  // Density columns are measured in metres. The old .5..8 threshold made
  // almost any cloud edge immediately opaque. A 200 m optical-depth scale
  // spreads the arrival, and cores remove at most 35% of direct light.
- return 1-.35*(1-exp(-max(0,od)/200));
+ // A gentle drifting dimming of the direct sun only (sky and ambient light
+ // stay): thick cores take at most 40%, thin edges little (play-2 user
+ // verdict: cloud shadows must never read as deep, crisp object shadows; the
+ // 60% cap of dcf39a8c is undone).
+ return 1-.4*(1-exp(-max(0,od)/250));
 }
 float skyCloudTransmittance(float2 ground,int samples){
  // Broad spatial penumbra, anchored to the same advected density as the
  // visible cloud. Average columns before the soft optical response; no
  // temporal lag that would leave shadows behind their clouds.
- const float radius=120;
+ // Very soft, wide edges (play-2 user verdict): a 150 m penumbra, so a
+ // passing cloud dims the view gradually instead of a crisp edge sweeping.
+ const float radius=150;
  float od=skyCloudOpticalDepth(ground,samples)*.4;
  od+=skyCloudOpticalDepth(ground+float2(radius,0),samples)*.15;
  od+=skyCloudOpticalDepth(ground-float2(radius,0),samples)*.15;
@@ -1072,9 +1314,25 @@ float skyCloudTransmittance(float2 ground,int samples){
  od+=skyCloudOpticalDepth(ground-float2(0,radius),samples)*.15;
  return skyCloudShadowResponse(od);
 }
+// The cloud-shadow receivers' blur, once per texel of the field: the five
+// taps skyCloudVisibility took per pixel (6 m apart, the centre twice, the
+// same clamp bilinear reads). The receiver then samples this field once;
+// the blur and the bilinear read swap order (equal for a field linear
+// across the 6 m taps, otherwise within its curvature over one texel).
+[numthreads(8,8,1)]void skyShadowBlurCS(uint3 id:SV_DispatchThreadID){
+ uint width,height;skyShadowOut.GetDimensions(width,height);
+ if(any(id.xy>=uint2(width,height)))return;
+ float2 uv=(id.xy+.5)/float2(width,height);
+ float o=6/skyShadow.z;
+ skyShadowOut[id.xy]=(2*skyShadowRaw.SampleLevel(skyClamp,uv,0)+
+  skyShadowRaw.SampleLevel(skyClamp,uv+float2(o,o*.3),0)+skyShadowRaw.SampleLevel(skyClamp,uv-float2(o,o*.3),0)+
+  skyShadowRaw.SampleLevel(skyClamp,uv+float2(-o*.3,o),0)+skyShadowRaw.SampleLevel(skyClamp,uv-float2(-o*.3,o),0))/6;
+}
 [numthreads(8,8,1)]void skyShadowCS(uint3 id:SV_DispatchThreadID){
  uint width,height;skyShadowOut.GetDimensions(width,height);
  if(any(id.xy>=uint2(width,height)))return;
+ // Cloud shadows off (strength 0): t=lerp(1,T,0)=1 and 1+(1-1)*w=1 below.
+ [branch]if(skyLight.w==0){skyShadowOut[id.xy]=1;return;}
  float2 ground=skyShadow.xy+(id.xy+.5)/float2(width,height)*skyShadow.z;
  float t=lerp(1,skyCloudTransmittance(ground,12),skyLight.w);
  skyShadowOut[id.xy]=t+(1-t)*skyShadow.w;
@@ -1098,6 +1356,10 @@ float4 skyPS(float4 position:SV_Position):SV_Target{
 #undef SKY_STRING_INNER
 #undef SKY_NOISE_LAYERS
 #undef SKY_CIRRUS_SCALE
+#undef SKY_MID_BAND
+#undef SKY_MID_COVERAGE_WAVELENGTH
+#undef SKY_MID_SHAPE_WAVELENGTH
+#undef SKY_SHAPE_DEPTH_TILES
 
 // Native world pixel hooks (compiled into the native shader before the liquid
 // surface shader; needs the fog frame constants). The probe replaces the flat

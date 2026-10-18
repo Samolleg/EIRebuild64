@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include "shader_cache.h"
 
 namespace owned {
 
@@ -265,23 +266,25 @@ class DepthOfFieldPass {
     double last_seconds_ = 0;
 
     HRESULT create_shaders(ID3D11Device* device, int quality) {
-        const std::string source = depth_of_field_shader_source(quality);
-        auto compile = [&](const char* entry, const char* profile, Ptr<ID3DBlob>& code) {
+        // The quality's six programs from the embedded table (prepared with
+        // the other groups), never FXC on the render thread.
+        std::vector<ShaderProgram> programs;
+        shader_programs(programs);
+        const ShaderProgram* own = programs.data() + (quality >= 2 ? 6 : 0);
+        auto compile = [&](const ShaderProgram& program, Ptr<ID3DBlob>& code) {
             Ptr<ID3DBlob> error;
-            const HRESULT hr = D3DCompile(source.data(), source.size(), "DepthOfField", nullptr, nullptr, entry, profile,
-                                          D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &error);
+            const HRESULT hr = compile_shader(program, &code, &error);
             if (FAILED(hr) && error) OutputDebugStringA(static_cast<const char*>(error->GetBufferPointer()));
             return hr;
         };
         Ptr<ID3DBlob> code; HRESULT hr;
-        if (FAILED(hr = compile("dofVS", "vs_4_0", code))) return hr;
-        if (FAILED(hr = device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &vs_))) return hr;
-        const char* entries[] = {"focusPS", "prefilterPS", "gatherPS", "fillPS", "compositePS"};
+        if (FAILED(hr = compile(own[0], code))) return hr;
+        if (FAILED(hr = create_shader(device,code->GetBufferPointer(), code->GetBufferSize(), nullptr, &vs_))) return hr;
         Ptr<ID3D11PixelShader>* shaders[] = {&focus_ps_, &prefilter_ps_, &gather_ps_, &fill_ps_, &composite_ps_};
         for (unsigned n = 0; n < 5; ++n) {
             code.Reset();
-            if (FAILED(hr = compile(entries[n], "ps_4_0", code))) return hr;
-            if (FAILED(hr = device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr,
+            if (FAILED(hr = compile(own[1 + n], code))) return hr;
+            if (FAILED(hr = create_shader(device,code->GetBufferPointer(), code->GetBufferSize(), nullptr,
                                                       shaders[n]->ReleaseAndGetAddressOf()))) return hr;
         }
         quality_ = quality;
@@ -346,6 +349,16 @@ public:
     // `output` (the resolved world image, width x height). `depth` is the
     // world's hardware depth, `world_to_clip` the camera that produced it.
     // `seconds` is a monotonic real-time clock for focus smoothing. Returns
+    // Quality 1 (16 taps), then quality 2 (40 taps): dofVS, then the five
+    // pixel stages in create_shaders order. Quality 0 never draws.
+    static void shader_programs(std::vector<ShaderProgram>& out) {
+        static const std::string sources[2] = {depth_of_field_shader_source(1), depth_of_field_shader_source(2)};
+        for (const std::string& source : sources) {
+            out.push_back({source, "DepthOfField", nullptr, "dofVS", "vs_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+            for (const char* entry : {"focusPS", "prefilterPS", "gatherPS", "fillPS", "compositePS"})
+                out.push_back({source, "DepthOfField", nullptr, entry, "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+        }
+    }
     // S_FALSE without drawing when the lens is inactive (top-down camera,
     // strength 0); a failure is logged once where it occurs and leaves
     // `output` untouched.

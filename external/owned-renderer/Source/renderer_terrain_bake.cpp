@@ -133,6 +133,7 @@ void Renderer::start_terrain_bake_cells() noexcept try{
  auto height=std::make_shared<const std::vector<float>>(ambient_height_);
  const std::uint32_t tiles_x=ambient_tiles_x_,tiles_y=ambient_tiles_y_;
  terrain_bake_cells_future_=std::async(std::launch::async,[height,tiles_x,tiles_y](){
+  const BackgroundWorkerPriority priority;
   return std::make_shared<const TerrainBakeCells>(terrain_bake_cells(*height,tiles_x,tiles_y));
  });
 }catch(...){terrain_bake_cells_future_={};}
@@ -204,17 +205,17 @@ HRESULT Renderer::ensure_terrain_bake_programs() noexcept{
   ComPtr<ID3DBlob> error;hr=compile_shader(programs[k],&code[k],&error);
   if(FAILED(hr)&&error)OutputDebugStringA(static_cast<const char*>(error->GetBufferPointer()));
  }
- if(SUCCEEDED(hr))hr=device_->CreateVertexShader(code[0]->GetBufferPointer(),code[0]->GetBufferSize(),nullptr,&terrain_bake_vs_);
- if(SUCCEEDED(hr))hr=device_->CreateHullShader(code[1]->GetBufferPointer(),code[1]->GetBufferSize(),nullptr,&terrain_bake_hs_);
- if(SUCCEEDED(hr))hr=device_->CreateDomainShader(code[2]->GetBufferPointer(),code[2]->GetBufferSize(),nullptr,&terrain_bake_ds_);
- if(SUCCEEDED(hr))hr=device_->CreatePixelShader(code[3]->GetBufferPointer(),code[3]->GetBufferSize(),nullptr,&terrain_bake_ps_);
- if(SUCCEEDED(hr))hr=device_->CreateVertexShader(code[4]->GetBufferPointer(),code[4]->GetBufferSize(),nullptr,&terrain_bake_tess_vs_);
- if(SUCCEEDED(hr))hr=device_->CreateVertexShader(code[5]->GetBufferPointer(),code[5]->GetBufferSize(),nullptr,&terrain_baked_vs_);
- if(SUCCEEDED(hr))hr=device_->CreateHullShader(code[6]->GetBufferPointer(),code[6]->GetBufferSize(),nullptr,&terrain_baked_hs_);
- if(SUCCEEDED(hr))hr=device_->CreatePixelShader(code[7]->GetBufferPointer(),code[7]->GetBufferSize(),nullptr,&terrain_baked_ps_);
- if(SUCCEEDED(hr))hr=device_->CreatePixelShader(code[8]->GetBufferPointer(),code[8]->GetBufferSize(),nullptr,&terrain_baked_snow_ps_);
- if(SUCCEEDED(hr))hr=device_->CreateComputeShader(code[9]->GetBufferPointer(),code[9]->GetBufferSize(),nullptr,&terrain_bake_bc1_cs_);
- if(SUCCEEDED(hr))hr=device_->CreateComputeShader(code[10]->GetBufferPointer(),code[10]->GetBufferSize(),nullptr,&terrain_bake_bc7_cs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[0]->GetBufferPointer(),code[0]->GetBufferSize(),nullptr,&terrain_bake_vs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[1]->GetBufferPointer(),code[1]->GetBufferSize(),nullptr,&terrain_bake_hs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[2]->GetBufferPointer(),code[2]->GetBufferSize(),nullptr,&terrain_bake_ds_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[3]->GetBufferPointer(),code[3]->GetBufferSize(),nullptr,&terrain_bake_ps_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[4]->GetBufferPointer(),code[4]->GetBufferSize(),nullptr,&terrain_bake_tess_vs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[5]->GetBufferPointer(),code[5]->GetBufferSize(),nullptr,&terrain_baked_vs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[6]->GetBufferPointer(),code[6]->GetBufferSize(),nullptr,&terrain_baked_hs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[7]->GetBufferPointer(),code[7]->GetBufferSize(),nullptr,&terrain_baked_ps_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[8]->GetBufferPointer(),code[8]->GetBufferSize(),nullptr,&terrain_baked_snow_ps_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[9]->GetBufferPointer(),code[9]->GetBufferSize(),nullptr,&terrain_bake_bc1_cs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),code[10]->GetBufferPointer(),code[10]->GetBufferSize(),nullptr,&terrain_bake_bc7_cs_);
  if(FAILED(hr))terrain_bake_pipeline_failed_=true;
  return hr;
 }

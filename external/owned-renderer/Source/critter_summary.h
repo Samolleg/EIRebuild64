@@ -44,6 +44,36 @@ inline constexpr const char* kCritterSpeciesNames[] = {
     "rat", "spider", "larva", "frog", "lizard", "snake", "centipede", "beetle",
     "bird", "raven/crow", "vulture", "crab", "snowbird", "mouse", "bat"};
 
+// Player switches per critter type, in critters::Species order (issue #126):
+// key (boolean, on) and weight_key (integer percent, 100) in eid3d11.ini. The
+// weight multiplies the species' own spawn weight, so it changes how often the
+// type is picked against the others that fit the place; the on-screen budget
+// stays the same. Off or 0 % keeps the type away, carrion flocks included.
+struct CritterTypeSetting { const char* key; const char* weight_key; const char* label; const char* tooltip; };
+inline constexpr CritterTypeSetting kCritterTypeSettings[] = {
+    {"critter_rats", "critter_rats_weight", "Rats", "Rats in caves."},
+    {"critter_spiders", "critter_spiders_weight", "Spiders", "Spiders in caves and the Dead City."},
+    {"critter_larvae", "critter_larvae_weight", "Crawler larvae", "Larvae crawling around a live crawler."},
+    {"critter_frogs", "critter_frogs_weight", "Frogs", "Frogs by swamps and water."},
+    {"critter_lizards", "critter_lizards_weight", "Lizards", "Lizards on dry ground and sand, by day."},
+    {"critter_snakes", "critter_snakes_weight", "Snakes", "Snakes in grass, on stony ground and in the Dead City; rare."},
+    {"critter_scolopendras", "critter_scolopendras_weight", "Scolopendras", "Scolopendras in Suslanger."},
+    {"critter_dung_beetles", "critter_dung_beetles_weight", "Dung beetles", "Dung beetles in Suslanger, by day."},
+    {"critter_small_birds", "critter_small_birds_weight", "Small birds",
+     "Flocks of finches, sparrows and buntings on meadows, by day."},
+    {"critter_corvids", "critter_corvids_weight", "Ravens and crows",
+     "Raven flocks outside the Dead City wall, single ravens and crows in trees, and the ravens and crows that come to corpses."},
+    {"critter_vultures", "critter_vultures_weight", "Vultures",
+     "Vultures circling over Suslanger or sitting on cacti, and the vultures that come to corpses there."},
+    {"critter_crabs", "critter_crabs_weight", "Shore crabs", "Crabs on sandy shores."},
+    {"critter_snow_birds", "critter_snow_birds_weight", "Snow birds", "Small bird flocks in Ingos, by day."},
+    {"critter_snow_mice", "critter_snow_mice_weight", "Snow mice", "Mice in the snow of Ingos."},
+    {"critter_bats", "critter_bats_weight", "Cave bats", "Bat swarms flying past moving heroes in caves."},
+};
+static_assert(sizeof(kCritterTypeSettings) / sizeof(*kCritterTypeSettings) ==
+              sizeof(kCritterSpeciesNames) / sizeof(*kCritterSpeciesNames), "one setting per critter species");
+inline constexpr int kCritterWeightDefault = 100, kCritterWeightMaximum = 1000;   // percent
+
 inline void append_critter_summary_json(std::string& out, const CritterSummary& c) {
     constexpr unsigned names = sizeof(kCritterSpeciesNames) / sizeof(*kCritterSpeciesNames);
     char line[448];

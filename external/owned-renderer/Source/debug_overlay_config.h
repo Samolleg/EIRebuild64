@@ -115,6 +115,8 @@ public:
     bool register_text(const char* key, const char* label, const char* group,
                        const char* description, const char* default_value = "");
     bool set_text(const char* key, const char* value);
+    // Back to the registered default (boolean, integer, floating point).
+    bool reset_to_default(const char* key) noexcept;
 
     DebugOverlayMode overlay_mode() const noexcept { return overlay_mode_; }
     void set_overlay_mode(DebugOverlayMode mode) noexcept;
@@ -124,9 +126,32 @@ public:
     // not done. Only written once true.
     bool first_run_done() const noexcept { return first_run_done_; }
     void set_first_run_done(bool done) noexcept;
+    // 8-hex id of this game's NVIDIA disk shader cache files ([setup]
+    // nvidia_cache_id; landmine L-087), deleted at the next device creation.
+    const std::string& nvidia_cache_id() const noexcept { return nvidia_cache_id_; }
+    void set_nvidia_cache_id(const std::string& id);
+    // Settings were saved past the VRAM budget and the session has not yet
+    // exited cleanly ([setup] over_budget_pending; DebugOverlay owns it).
+    bool over_budget_pending() const noexcept { return over_budget_pending_; }
+    void set_over_budget_pending(bool pending) noexcept {
+        if (over_budget_pending_ != pending) { over_budget_pending_ = pending; dirty_ = true; }
+    }
+    // The driver crashed in a parallel shader preparation: prepare on one
+    // worker from now on ([setup] serial_shader_preparation; Renderer owns it).
+    bool serial_shader_preparation() const noexcept { return serial_shader_preparation_; }
+    void set_serial_shader_preparation(bool serial) noexcept {
+        if (serial_shader_preparation_ != serial) { serial_shader_preparation_ = serial; dirty_ = true; }
+    }
     // True when the loaded file carried [overlay] mode (players then keep the
     // developer monitor they chose; otherwise players start hidden).
     bool overlay_mode_loaded() const noexcept { return overlay_mode_loaded_; }
+    // [setup] settings_version of the loaded file (0: missing, older build
+    // or no file). Saving writes this value; the renderer's migration raises
+    // it after dropping the values whose registered default changed since.
+    int settings_version() const noexcept { return settings_version_; }
+    void set_settings_version(int version) noexcept {
+        if (settings_version_ != version) { settings_version_ = version; dirty_ = true; }
+    }
     bool dirty() const noexcept { return dirty_; }
     void clear_dirty() noexcept { dirty_ = false; }
 
@@ -150,7 +175,11 @@ private:
     DebugOverlayMode overlay_mode_ = DebugOverlayMode::compact;
     DebugResourceView debug_resource_view_ = DebugResourceView::disabled;
     bool first_run_done_ = false;
+    bool over_budget_pending_ = false;
+    bool serial_shader_preparation_ = false;
+    std::string nvidia_cache_id_;
     bool overlay_mode_loaded_ = false;
+    int settings_version_ = 0;
     bool dirty_ = false;
 };
 

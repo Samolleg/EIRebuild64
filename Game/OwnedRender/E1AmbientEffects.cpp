@@ -5,6 +5,7 @@
 #include "E1AmbientEffects.h"
 #include "E1Terrain.h"
 #include "E1World.h"
+#include "E2LoadReveal.h"
 #include "ground_cover.h"
 #include "retained_static_submission.h"
 #include "world_scene_algorithms.h"
@@ -51,8 +52,10 @@ struct AmbientCacheState {
 };
 
 AmbientCacheState& ambient_cache() {
-    static AmbientCacheState value;
-    return value;
+    // The renderer releases contacts while their source owners still live.
+    // Do not release retained prepared resources from a late CRT destructor.
+    static AmbientCacheState* value = new AmbientCacheState;
+    return *value;
 }
 
 struct CreatedGroundFootprint {
@@ -226,6 +229,8 @@ bool bridge_critter_perches(float x, float y, float radius,
         cache.perches, x, y, radius, output);
 }
 
+void bridge_release_ground_contacts() noexcept { ambient_cache().contacts = {}; }
+
 bool bridge_ground_cover_objects(float x, float y, float radius,
     std::vector<ground_cover::FootprintSplat>& output) noexcept {
     output.clear();
@@ -234,6 +239,7 @@ bool bridge_ground_cover_objects(float x, float y, float radius,
     auto& cache = ambient_cache();
     cache.synchronize(frame);
     return build_ground_cover_objects(*frame.visuals, frame.terrain,
-        cache.contacts, x, y, radius, output);
+        cache.contacts, x, y, radius, output, nullptr, &OwnedRender::E1Scene().Scene(),
+        OwnedRender::E2LoadRevealHeld(bridge_current_world_epoch()));
 }
 }

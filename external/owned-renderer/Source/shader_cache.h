@@ -19,6 +19,9 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
+#include "stall_watchdog.h"
+#include "worker_priority.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -238,6 +241,7 @@ inline HRESULT compile_shader(const ShaderProgram& program, ID3DBlob** code, ID3
         }
     }
     Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
+    const stall_watch::Exempt fxc_compile;  // an on-demand FXC compile can take seconds
     const HRESULT hr = D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
                                   program.entry, program.profile, program.flags, 0, &blob, &messages);
     ++detail::on_demand_compiles;
@@ -250,15 +254,162 @@ inline HRESULT compile_shader(const ShaderProgram& program, ID3DBlob** code, ID3
     return E_OUTOFMEMORY;
 }
 
-// Creates and releases the D3D shader object of every program on worker
-// threads, so the driver has translated the bytecode before the features ask
-// for it. A program without a table entry is compiled first and kept for its
-// feature. Without a device only that compile step runs. The destructor
-// waits for the workers.
+// The shader objects of one device, created by its preparations and handed to
+// every feature that creates the same bytecode for the same stage
+// (create_shader). The driver translates bytecode in Create*Shader and its
+// disk cache is off (32-bit address space), so a discarded object would be
+// translated again at first use: ~18 ms a program on the thread that draws.
+// The renderer creates one per device (attach), and clears and detaches it
+// before the device goes (detach): the objects hold their device.
+class ShaderObjects final : public IUnknown {
+public:
+    // Stage: the profile prefix (v, p, c, h, d, g).
+    struct Key {
+        ShaderKey bytecode;
+        char stage = 0;
+        bool operator<(const Key& other) const noexcept {
+            return bytecode == other.bytecode ? stage < other.stage : bytecode < other.bytecode;
+        }
+    };
+    // The bytecode's identity: the DXBC container checksum (bytes 4..19) and
+    // the size; any other blob is hashed whole.
+    static Key key(char stage, const void* code, std::size_t size) noexcept {
+        Key key;
+        key.stage = stage;
+        if (size >= 20 && std::memcmp(code, "DXBC", 4) == 0) {
+            std::memcpy(&key.bytecode.a, static_cast<const unsigned char*>(code) + 4, 8);
+            std::memcpy(&key.bytecode.b, static_cast<const unsigned char*>(code) + 12, 8);
+            key.bytecode.a ^= static_cast<std::uint64_t>(size);
+        } else {
+            shader_cache_detail::Hasher h;
+            h.bytes(code, size);
+            key.bytecode = {h.a, h.b};
+        }
+        return key;
+    }
+
+    // Creates the store and attaches it to device (null on failure: the
+    // features then create their own objects).
+    static Microsoft::WRL::ComPtr<ShaderObjects> attach(ID3D11Device* device) noexcept {
+        Microsoft::WRL::ComPtr<ShaderObjects> store;
+        store.Attach(new (std::nothrow) ShaderObjects);
+        if (store && FAILED(device->SetPrivateDataInterface(kGuid, store.Get()))) store.Reset();
+        return store;
+    }
+    // Drops the objects and the device's reference to the store.
+    void detach(ID3D11Device* device) noexcept {
+        clear();
+        if (device) device->SetPrivateDataInterface(kGuid, nullptr);
+    }
+    // device's store, or null.
+    static Microsoft::WRL::ComPtr<ShaderObjects> of(ID3D11Device* device) noexcept {
+        IUnknown* unknown = nullptr;
+        UINT size = sizeof(unknown);
+        Microsoft::WRL::ComPtr<ShaderObjects> store;
+        if (device && SUCCEEDED(device->GetPrivateData(kGuid, &size, &unknown)) && unknown)
+            store.Attach(static_cast<ShaderObjects*>(unknown));  // GetPrivateData added a reference
+        return store;
+    }
+
+    bool find(const Key& key, REFIID iid, void** out) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = objects_.find(key);
+        return found != objects_.end() && SUCCEEDED(found->second->QueryInterface(iid, out));
+    }
+    bool contains(const Key& key) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return objects_.count(key) != 0;
+    }
+    void add(const Key& key, ID3D11DeviceChild* object) noexcept try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        objects_.emplace(key, object);
+    } catch (...) {}
+    void clear() noexcept {
+        std::map<Key, Microsoft::WRL::ComPtr<ID3D11DeviceChild>> objects;
+        std::lock_guard<std::mutex> lock(mutex_);
+        objects.swap(objects_);
+    }
+    std::size_t size() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return objects_.size();
+    }
+    // Creations that found no object (a program no preparation covered).
+    std::atomic<std::uint32_t> unprepared{0};
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (iid == __uuidof(IUnknown)) { *out = static_cast<IUnknown*>(this); AddRef(); return S_OK; }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG left = --references_;
+        if (!left) delete this;
+        return left;
+    }
+
+private:
+    ShaderObjects() = default;
+    ~ShaderObjects() = default;
+    // {6B0E2C51-7A43-4D8E-9F1B-3C5D2A7E8F14}
+    static constexpr GUID kGuid{0x6b0e2c51, 0x7a43, 0x4d8e, {0x9f, 0x1b, 0x3c, 0x5d, 0x2a, 0x7e, 0x8f, 0x14}};
+    std::atomic<ULONG> references_{1};
+    std::mutex mutex_;
+    std::map<Key, Microsoft::WRL::ComPtr<ID3D11DeviceChild>> objects_;
+};
+
+namespace shader_cache_detail {
+inline HRESULT device_create(ID3D11Device* d, const void* c, SIZE_T s, ID3D11ClassLinkage* l, ID3D11VertexShader** o) { return d->CreateVertexShader(c, s, l, o); }
+inline HRESULT device_create(ID3D11Device* d, const void* c, SIZE_T s, ID3D11ClassLinkage* l, ID3D11PixelShader** o) { return d->CreatePixelShader(c, s, l, o); }
+inline HRESULT device_create(ID3D11Device* d, const void* c, SIZE_T s, ID3D11ClassLinkage* l, ID3D11ComputeShader** o) { return d->CreateComputeShader(c, s, l, o); }
+inline HRESULT device_create(ID3D11Device* d, const void* c, SIZE_T s, ID3D11ClassLinkage* l, ID3D11HullShader** o) { return d->CreateHullShader(c, s, l, o); }
+inline HRESULT device_create(ID3D11Device* d, const void* c, SIZE_T s, ID3D11ClassLinkage* l, ID3D11DomainShader** o) { return d->CreateDomainShader(c, s, l, o); }
+inline HRESULT device_create(ID3D11Device* d, const void* c, SIZE_T s, ID3D11ClassLinkage* l, ID3D11GeometryShader** o) { return d->CreateGeometryShader(c, s, l, o); }
+inline char stage_of(ID3D11VertexShader**) { return 'v'; }
+inline char stage_of(ID3D11PixelShader**) { return 'p'; }
+inline char stage_of(ID3D11ComputeShader**) { return 'c'; }
+inline char stage_of(ID3D11HullShader**) { return 'h'; }
+inline char stage_of(ID3D11DomainShader**) { return 'd'; }
+inline char stage_of(ID3D11GeometryShader**) { return 'g'; }
+} // namespace shader_cache_detail
+
+// Device::Create*Shader through the device's prepared objects: the object of
+// this bytecode and stage (shared, no driver work), else a new one (counted
+// as unprepared).
+template <class Shader>
+HRESULT create_shader(ID3D11Device* device, const void* code, SIZE_T size, ID3D11ClassLinkage* linkage, Shader** out) noexcept {
+    namespace detail = shader_cache_detail;
+    if (!device || !code || !out) return E_INVALIDARG;
+    *out = nullptr;
+    const auto store = ShaderObjects::of(device);
+    if (store && !linkage &&
+        store->find(ShaderObjects::key(detail::stage_of(out), code, size), __uuidof(Shader), reinterpret_cast<void**>(out)))
+        return S_OK;
+    if (store) ++store->unprepared;
+    return detail::device_create(device, code, size, linkage, out);
+}
+// &com_ptr arguments (the conversion to Shader** releases the old object).
+template <class Shader>
+HRESULT create_shader(ID3D11Device* device, const void* code, SIZE_T size, ID3D11ClassLinkage* linkage,
+                      Microsoft::WRL::Details::ComPtrRef<Microsoft::WRL::ComPtr<Shader>> out) noexcept {
+    return create_shader(device, code, size, linkage, static_cast<Shader**>(out));
+}
+
+// Creates the D3D shader object of every program on worker threads and keeps
+// it in the device's ShaderObjects for its feature, so the driver translates
+// each program once, here. A program without a table entry is compiled first
+// and kept for its feature. Without a device only that compile step runs. The
+// destructor waits for the workers.
 class ShaderPreparation {
 public:
-    ShaderPreparation(std::vector<ShaderProgram> programs, unsigned threads, ID3D11Device* device = nullptr)
-        : programs_(std::move(programs)), device_(device) {
+    // handoff (optional) runs on the worker just before a program's bytecode
+    // goes to the driver, with the program's index in the list.
+    using Handoff = void (*)(void* context, std::size_t index) noexcept;
+    ShaderPreparation(std::vector<ShaderProgram> programs, unsigned threads, ID3D11Device* device = nullptr,
+                      Handoff handoff = nullptr, void* handoff_context = nullptr)
+        : programs_(std::move(programs)), device_(device), store_(ShaderObjects::of(device)),
+          handoff_(handoff), handoff_context_(handoff_context) {
         threads = (std::max)(1u, (std::min)(threads, static_cast<unsigned>(programs_.size())));
         try {
             for (unsigned i = 0; i < threads && !programs_.empty(); ++i) workers_.emplace_back([this] { run(); });
@@ -284,24 +435,31 @@ public:
     }
 
 private:
-    // The stage follows the profile prefix (vs_, ps_, cs_, hs_, ds_, gs_).
+    // The stage follows the profile prefix (vs_, ps_, cs_, hs_, ds_, gs_). An
+    // object the device's store already holds (a program in two groups) is
+    // not created again.
     bool create(const char* profile, const void* code, std::size_t size) noexcept {
         if (!device_) return true;
+        const ShaderObjects::Key key = ShaderObjects::key(profile[0], code, size);
+        if (store_ && store_->contains(key)) return true;
         HRESULT hr = E_INVALIDARG;
+        Microsoft::WRL::ComPtr<ID3D11DeviceChild> object;
         switch (profile[0]) {
-        case 'v': { Microsoft::WRL::ComPtr<ID3D11VertexShader> s; hr = device_->CreateVertexShader(code, size, nullptr, &s); break; }
-        case 'p': { Microsoft::WRL::ComPtr<ID3D11PixelShader> s; hr = device_->CreatePixelShader(code, size, nullptr, &s); break; }
-        case 'c': { Microsoft::WRL::ComPtr<ID3D11ComputeShader> s; hr = device_->CreateComputeShader(code, size, nullptr, &s); break; }
-        case 'h': { Microsoft::WRL::ComPtr<ID3D11HullShader> s; hr = device_->CreateHullShader(code, size, nullptr, &s); break; }
-        case 'd': { Microsoft::WRL::ComPtr<ID3D11DomainShader> s; hr = device_->CreateDomainShader(code, size, nullptr, &s); break; }
-        case 'g': { Microsoft::WRL::ComPtr<ID3D11GeometryShader> s; hr = device_->CreateGeometryShader(code, size, nullptr, &s); break; }
+        case 'v': { Microsoft::WRL::ComPtr<ID3D11VertexShader> s; hr = device_->CreateVertexShader(code, size, nullptr, &s); object = s; break; }
+        case 'p': { Microsoft::WRL::ComPtr<ID3D11PixelShader> s; hr = device_->CreatePixelShader(code, size, nullptr, &s); object = s; break; }
+        case 'c': { Microsoft::WRL::ComPtr<ID3D11ComputeShader> s; hr = device_->CreateComputeShader(code, size, nullptr, &s); object = s; break; }
+        case 'h': { Microsoft::WRL::ComPtr<ID3D11HullShader> s; hr = device_->CreateHullShader(code, size, nullptr, &s); object = s; break; }
+        case 'd': { Microsoft::WRL::ComPtr<ID3D11DomainShader> s; hr = device_->CreateDomainShader(code, size, nullptr, &s); object = s; break; }
+        case 'g': { Microsoft::WRL::ComPtr<ID3D11GeometryShader> s; hr = device_->CreateGeometryShader(code, size, nullptr, &s); object = s; break; }
         default: break;
         }
+        if (SUCCEEDED(hr) && store_) store_->add(key, object.Get());
         return SUCCEEDED(hr);
     }
 
     void run() noexcept {
         namespace detail = shader_cache_detail;
+        const BackgroundWorkerPriority priority;
         for (std::size_t index = next_++; index < programs_.size(); index = next_++) {
             const ShaderProgram& program = programs_[index];
             const ShaderKey key = shader_key(program);
@@ -326,6 +484,7 @@ private:
                     OutputDebugStringA(static_cast<const char*>(messages->GetBufferPointer()));
                 }
             }
+            if (ok && handoff_) handoff_(handoff_context_, index);
             if (ok && create(program.profile, code, size)) ++created_;
             else ++failed_;
             {
@@ -338,6 +497,9 @@ private:
 
     std::vector<ShaderProgram> programs_;
     ID3D11Device* device_ = nullptr;
+    Microsoft::WRL::ComPtr<ShaderObjects> store_;
+    Handoff handoff_ = nullptr;
+    void* handoff_context_ = nullptr;
     std::vector<std::thread> workers_;
     std::atomic<std::size_t> next_{0}, done_{0}, compiled_{0}, created_{0}, failed_{0};
     std::mutex mutex_;

@@ -449,11 +449,10 @@ VisualClipVisibility sample_visual_visibility(const AnimationEntryAsset* entry,
         }
         result.hide_arrow = result.hide_arrow || result.hide_weapons;
     }
-    // A visible corpse remains a caster for its authoritative body lifetime.
-    // Part visibility, material alpha and shadow eligibility still gate submission.
-    result.casts_shadow = dead || (entry &&
-        !((entry->flags & 0x38000u) == 0x30000u &&
-          (entry->flags & 0x3c0000u) != 0x240000u));
+    // Current posed units cast without the legacy lying-animation veto.
+    // Visible corpses keep casting for their authoritative body lifetime;
+    // part visibility, material alpha and shadow eligibility still gate submission.
+    result.casts_shadow = dead || entry != nullptr;
     return result;
 }
 

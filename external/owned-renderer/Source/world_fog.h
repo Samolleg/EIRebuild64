@@ -58,6 +58,9 @@ struct WorldEnvironment {
     int weather_current = 0, weather_next = 0;  // 1 rain; 2 snow per the addon enum
     float weather_progress = 1.0f;  // (ticks - start) / length of the pending change
     float rain_particles = 0.0f; // immediate rain particle density, before renderer smoothing
+    float snow_particles = 0.0f; // the same for snow (DrawSnow, 004E4C80)
+    float weather_start = 0.0f;  // CWeather +0xC0: start tick of the latest change (seeds a shower)
+    float precipitation_strength = 1.0f; // visual strength of the rain/snow (precipitation.h), 0.2..1
     double world_time = 0.0;  // tick + fraction: world animation time, pauses with the game
     int region = 0;           // fog_region(): from the region name that selects Lights<region>.ini
 };
@@ -66,13 +69,17 @@ struct WorldEnvironment {
 // selects the current kind, and 004E449A tests that power for rain emission.
 // Evaluate from transition state because the particle draw updates its stored
 // power later than the world snapshot. Progress > 1 also represents no transition.
-inline float weather_particle_rain(int current, int next, float progress) noexcept {
+// kind: 1 rain (DrawRain), 2 snow (DrawSnow); both gate on the same power.
+inline float weather_particle_power(int current, int next, float progress, int kind) noexcept {
     if (current == 0) return 0.0f;
-    if (progress > 1.0f) return next == 1 ? 1.0f : 0.0f;
-    if (current != 1) return 0.0f;
+    if (progress > 1.0f) return next == kind ? 1.0f : 0.0f;
+    if (current != kind) return 0.0f;
     const double wave = std::cos(static_cast<double>(progress) * 3.14159);
     const float density = static_cast<float>(0.5 * (1.0 + (next == 0 ? wave : -wave)));
     return std::nearbyint(density * 64.0f) / 64.0f;
+}
+inline float weather_particle_rain(int current, int next, float progress) noexcept {
+    return weather_particle_power(current, next, progress, 1);
 }
 
 // CWorldClient+0x184 holds the region name the game uses to build
@@ -134,7 +141,9 @@ inline float fog_smoothstep(float a, float b, float x) noexcept {
 inline float fog_precipitation(const WorldEnvironment& e) noexcept {
     auto amount = [](int type) { return type == 1 ? 1.0f : type == 2 ? 0.5f : 0.0f; };
     const float p = std::clamp(e.weather_progress, 0.0f, 1.0f);
-    return amount(e.weather_current) + (amount(e.weather_next) - amount(e.weather_current)) * p;
+    // Light showers haze less than heavy ones (visual strength only).
+    return (amount(e.weather_current) + (amount(e.weather_next) - amount(e.weather_current)) * p) *
+           (0.4f + 0.6f * e.precipitation_strength);
 }
 
 // Night weight with the stock fog-start hours: day 6-18, night 22-2.
@@ -298,7 +307,8 @@ Texture2D<float4> skyProbe:register(t12);
 Texture2D<float> skyCloudShadow:register(t10);
 // Cloud shadow (sky_clouds.h): the world-space map holds the ground
 // transmittance along the game's light; a receiver is projected onto it along
-// the same light. Five taps 6 m apart keep the edges soft. fogCloud.x (> 0
+// the same light. The map is pre-blurred (sky_clouds.h skyShadowBlurCS: five
+// taps 6 m apart keep the edges soft), so one read serves. fogCloud.x (> 0
 // when enabled) is the visibility beyond the map: the deck's mean, so a closed
 // deck does not leave the terrain past the map lit (runtime: a lit region that
 // darkened as the camera approached it in rain).
@@ -307,10 +317,7 @@ float skyCloudVisibility(float3 p){
  float2 uv=(p.xy-fogSun.xy/max(fogSun.z,.15)*p.z-fogCloud.yz)*fogCloud.w;
  float edge=max(abs(uv.x-.5),abs(uv.y-.5));
  [branch]if(edge>=.5)return fogCloud.x;
- float o=6*fogCloud.w;
- float v=(2*skyCloudShadow.SampleLevel(fogLinearClamp,uv,0)+
-  skyCloudShadow.SampleLevel(fogLinearClamp,uv+float2(o,o*.3),0)+skyCloudShadow.SampleLevel(fogLinearClamp,uv-float2(o,o*.3),0)+
-  skyCloudShadow.SampleLevel(fogLinearClamp,uv+float2(-o*.3,o),0)+skyCloudShadow.SampleLevel(fogLinearClamp,uv-float2(-o*.3,o),0))/6;
+ float v=skyCloudShadow.SampleLevel(fogLinearClamp,uv,0);
  return lerp(v,fogCloud.x,smoothstep(.4,.5,edge));
 }
 float fogViewDepth(float screenZ){return fogProjection.z/(fogProjection.y*screenZ-fogProjection.x);}

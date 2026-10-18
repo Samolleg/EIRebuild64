@@ -11,7 +11,8 @@ namespace owned {
 // Once a present the harness stats <dir>\cmd.txt; when present it is read,
 // deleted and its lines run in order, one result line each appended to
 // <dir>\results.txt as "<id>\t<done|failed>\t<command>\t<detail>".
-// All entry points run on the game thread (present and CWorldClient::Draw).
+// Entry points run on the game thread (present and CWorldClient::Draw); with
+// the render_thread option harness_complete also runs on the scene thread.
 bool harness_enabled() noexcept;
 const std::string& harness_directory() noexcept;
 // camera_path (temporary): the steps the front command has applied (0 when
@@ -26,6 +27,16 @@ unsigned harness_camera_path_steps() noexcept;
 // returned on every present until harness_complete() retires it.
 const HarnessCommand* harness_present_step() noexcept;
 void harness_complete(bool ok, const std::string& detail) noexcept;
+// Scene thread (render_thread option): the game thread runs the present step
+// and copies the renderer verb it returned (false: none), with the
+// camera_path progress and the travel-map state at that moment; the scene
+// thread then runs the verb and completes it. Entry points that touch the
+// queue are locked against each other.
+bool harness_present_step_copy(HarnessCommand& command, unsigned long& entry_id,
+                               unsigned& camera_steps, bool& on_travel_map_now) noexcept;
+// Retires the front command only while it is still entry_id (the game thread
+// may already have stepped the same command again for the next frame).
+void harness_complete_entry(unsigned long entry_id, bool ok, const std::string& detail) noexcept;
 
 // CWorldClient::Draw entry, before the original body: applies a pending
 // camera pose, pause or god mode request or console text and keeps a pinned clock

@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "engine_bridge.h"
+#include "addon_hook_chain.h"
 
 #include <windows.h>
 #include "game_sites.h"
@@ -13,6 +14,7 @@
 #include <deque>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace owned {
@@ -89,10 +91,17 @@ constexpr std::size_t kPlayerGod = 0x108;
 // (CMP [007C2CC4],4: the world/travel map). That screen draws no world.
 // 00581660 ReqGoMainMenu (ECX=007AFE20, the connector) drops the network
 // chat objects and queues action 1, consumed between frames like a load;
-// the game's own menus and the end screen call it.
+// the game's own menus and the end screen call it (the Esc menu's "main
+// menu" confirmation calls it directly). The supported addon may own the
+// entry through its hook builder (jmp dispatcher + NOP fill; the Dejavu
+// addon does): the harness then calls the entry exactly like those game
+// callers, through the addon's chain, never around it. Its tail
+// (+54: MOV [ESI],1; POP ESI; RET) stays stock either way.
 constexpr std::uintptr_t kServerInterfaceRva = 0x003c2cc4;
 constexpr std::uintptr_t kSaveInterfaceTestRva = 0x0017b4d1;
 constexpr std::uintptr_t kRequestMainMenuRva = 0x00181660;
+constexpr std::uint8_t kRequestMainMenuStock[] = {
+    0x56,0x8b,0xf1,0x8b,0x0d,0xdc,0xb5,0x79,0x00,0xc6,0x05,0xd8,0x7d,0x7c,0x00,0x00};
 constexpr std::uint32_t kInterfaceMainMenu = 2, kInterfaceTravelMap = 4;
 constexpr const char* kTravelMapDetail = "game is on the world map (no mission); no world frames there";
 // What the server sends the client (CWorldServer::UpdatePlayer 0058B750): the
@@ -181,6 +190,10 @@ struct State {
     float clock_hour = 0.0f;
     float path_start[5]{}; // camera_path (temporary): the pose it starts from (camera order)
     unsigned long command_file_error = 0; // the last cmd.txt delete failure named (0: none)
+    // Result lines not yet in results.txt (another process held it without
+    // write sharing): the driver waits on each line, so none may be dropped.
+    std::deque<std::string> unwritten_results;
+    unsigned long result_file_error = 0; // the last results.txt open failure named (0: none)
     bool clock_saved = false;
     float saved_scale = 0.0f, saved_modifier = 0.0f;
 };
@@ -218,9 +231,9 @@ void initialize_game_commands(State& s) {
         {0x6a,0xff,0x68,0x28,0x62,0x72,0x00,0x64});
     s.interface_error = entry_error(s, kSaveInterfaceTestRva,
         {0x83,0x3d,0xc4,0x2c,0x7c,0x00,0x04,0x75});
+    // The entry itself is resolved when main_menu runs (main_menu_entry):
+    // the addon may install its hook after this first harness step.
     s.menu_error = s.interface_error;
-    if (s.menu_error.empty()) s.menu_error = entry_error(s, kRequestMainMenuRva,
-        {0x56,0x8b,0xf1,0x8b,0x0d,0xdc,0xb5,0x79,0x00});
     if (s.menu_error.empty()) s.menu_error = entry_error(s, kRequestMainMenuRva + 0x54,
         {0xc7,0x06,0x01,0x00,0x00,0x00,0x5e,0xc3});
     // Native strings are one pointer: construction writes [ECX], and
@@ -272,6 +285,31 @@ void initialize_game_commands(State& s) {
     if (s.load_error.empty()) s.load_error = entry_error(s, kCurrentZoneRva,
         {0x51,0x56,0xb9,0xb8,0xf5,0x7a,0x00});
 }
+
+// The scene thread (render_thread option) completes renderer verbs while the
+// game thread steps the queue: every public entry that touches the queue
+// holds this lock. Recursive: a public entry may reach another.
+std::recursive_mutex& harness_lock() {
+    static std::recursive_mutex value;
+    return value;
+}
+
+// Scene thread completions (harness_complete_entry). The scene thread never
+// takes harness_lock: the game thread may hold it across a game call that
+// waits for the scene thread (a load, a world change). The game thread
+// applies these the next time it steps the queue.
+struct PendingCompletion { unsigned long id; bool ok; std::string detail; };
+std::mutex& pending_completion_lock() {
+    static std::mutex value;
+    return value;
+}
+std::vector<PendingCompletion>& pending_completions() {
+    static std::vector<PendingCompletion> value;
+    return value;
+}
+void retire_front(bool ok, const std::string& detail);
+// Game thread, harness_lock held.
+void apply_pending_completions();
 
 State& state() {
     static State value = [] {
@@ -549,19 +587,49 @@ bool select_save(const std::string& selector, SaveSlot& selected, std::string& d
     return true;
 }
 
-void append_result(const Entry& entry, bool ok, const std::string& detail) {
+// Appends the unwritten result lines in order. One that cannot be written
+// yet stays for the next present instead of being lost.
+void write_results() {
+    State& s = state();
+    if (s.unwritten_results.empty()) return;
     FILE* file = nullptr;
-    if (fopen_s(&file, (state().directory + "results.txt").c_str(), "ab") || !file) return;
-    std::fprintf(file, "%lu\t%s\t%s\t%s\n", entry.id, ok ? "done" : "failed",
-                 entry.line.c_str(), detail.c_str());
+    const errno_t opened = fopen_s(&file, (s.directory + "results.txt").c_str(), "ab");
+    if (opened || !file) {
+        const unsigned long error = opened ? static_cast<unsigned long>(opened) : 1ul;
+        if (error != s.result_file_error) {
+            s.result_file_error = error;
+            bridge_report_event("harness_result_file",
+                text_of("results.txt not writable (errno %lu): results held until it is", error).c_str());
+        }
+        return;
+    }
+    s.result_file_error = 0;
+    while (!s.unwritten_results.empty()) {
+        const std::string& line = s.unwritten_results.front();
+        if (std::fwrite(line.data(), 1, line.size(), file) != line.size()) break;
+        s.unwritten_results.pop_front();
+    }
     std::fclose(file);
 }
 
 void retire_front(bool ok, const std::string& detail) {
     State& s = state();
     if (s.queue.empty()) return;
-    append_result(s.queue.front(), ok, detail);
+    const Entry& entry = s.queue.front();
+    s.unwritten_results.push_back(text_of("%lu\t%s\t", entry.id, ok ? "done" : "failed") +
+                                  entry.line + "\t" + detail + "\n");
     s.queue.pop_front();
+    write_results();
+}
+void apply_pending_completions() {
+    std::vector<PendingCompletion> completions;
+    {
+        std::lock_guard<std::mutex> guard(pending_completion_lock());
+        completions.swap(pending_completions());
+    }
+    State& s = state();
+    for (const auto& completion : completions)
+        if (!s.queue.empty() && s.queue.front().id == completion.id) retire_front(completion.ok, completion.detail);
 }
 
 void load_commands() {
@@ -688,6 +756,21 @@ bool request_load(const HarnessCommand& command, std::string& detail) {
     return true;
 }
 
+// ReqGoMainMenu as a game caller reaches it: the stock entry, or the
+// addon's verified hook chain at it (addon_hook_chain.h). Null with the
+// reason for any other patch.
+RequestMainMenuFn main_menu_entry(std::string& error) {
+    const State& s = state();
+    const EntryResolution owner = resolve_entry_owner(s.image + kRequestMainMenuRva,
+        kRequestMainMenuStock, sizeof(kRequestMainMenuStock), 5, &addon_module_contains);
+    if (owner.owner == EntryOwner::rejected) {
+        error = text_of("ReqGoMainMenu entry (game.exe+0x181660) is neither stock nor a verified "
+                        "addon hook chain: %s", owner.reason ? owner.reason : "unknown");
+        return nullptr;
+    }
+    return reinterpret_cast<RequestMainMenuFn>(s.image + kRequestMainMenuRva);
+}
+
 std::uint32_t server_interface() {
     return field<std::uint32_t>(state().image, kServerInterfaceRva);
 }
@@ -761,15 +844,51 @@ bool harness_on_travel_map() noexcept { return on_travel_map(); }
 const std::string& harness_directory() noexcept { return state().directory; }
 
 unsigned harness_camera_path_steps() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
     State& s = state();
     return !s.queue.empty() && s.queue.front().command.verb == HarnessVerb::camera_path ? s.queue.front().progress : 0u;
 }
 
-void harness_complete(bool ok, const std::string& detail) noexcept { retire_front(ok, detail); }
+void harness_complete(bool ok, const std::string& detail) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    retire_front(ok, detail);
+}
+
+bool harness_present_step_copy(HarnessCommand& command, unsigned long& entry_id,
+                               unsigned& camera_steps, bool& on_travel_map_now) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    try { apply_pending_completions(); } catch (...) {}
+    entry_id = 0;
+    camera_steps = 0;
+    on_travel_map_now = false;
+    const HarnessCommand* step = harness_present_step();
+    if (!step) return false;
+    State& s = state();
+    if (s.queue.empty()) return false;
+    try {
+        command = *step;
+    } catch (...) {
+        return false;
+    }
+    entry_id = s.queue.front().id;
+    camera_steps = harness_camera_path_steps();
+    on_travel_map_now = on_travel_map();
+    return true;
+}
+
+void harness_complete_entry(unsigned long entry_id, bool ok, const std::string& detail) noexcept {
+    try {
+        std::lock_guard<std::mutex> guard(pending_completion_lock());
+        pending_completions().push_back({entry_id, ok, detail});
+    } catch (...) {}
+}
+
 
 const HarnessCommand* harness_present_step() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
     State& s = state();
     if (!s.enabled) return nullptr;
+    write_results();
     if (s.queue.empty()) load_commands();
     while (!s.queue.empty()) {
         Entry& entry = s.queue.front();
@@ -861,9 +980,12 @@ const HarnessCommand* harness_present_step() noexcept {
                     retire_front(false, "game already has a pending world transition");
                     continue;
                 }
+                std::string error;
+                const RequestMainMenuFn request = main_menu_entry(error);
+                if (!request) { retire_front(false, error); continue; }
                 entry.posted = true;
                 release_clock(s.image + kWorldClientRva);
-                reinterpret_cast<RequestMainMenuFn>(s.image + kRequestMainMenuRva)(connector);
+                request(connector);
                 s.menu_started_ms = GetTickCount64();
                 return nullptr; // consumed between frames
             }
@@ -1181,6 +1303,8 @@ void debug_lightning_world_frame(void* world_client) noexcept {
 }
 
 void harness_world_frame(void* world_client) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    try { apply_pending_completions(); } catch (...) {}
     State& s = state();
     if (!s.enabled || !s.image) return;
     std::uint8_t* world = s.image + kWorldClientRva;

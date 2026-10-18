@@ -200,10 +200,10 @@ private:
         };
         Ptr<ID3DBlob> code;
         if(FAILED(hr=compile(programs[0],code)))return hr;
-        if(FAILED(hr=device->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs_)))return hr;
+        if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs_)))return hr;
         Ptr<ID3D11PixelShader>* shaders[]={&edge_ps_,&weight_ps_,&blend_ps_,&copy_ps_,&upscale_ps_,&upscale_depth_ps_};
         for(unsigned i=0;i<6;++i){code.Reset();if(FAILED(hr=compile(programs[1+i],code)))return hr;
-            if(FAILED(hr=device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,shaders[i]->GetAddressOf())))return hr;}
+            if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,shaders[i]->GetAddressOf())))return hr;}
         D3D11_SAMPLER_DESC s{};s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
         s.MaxLOD=0;s.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         if(FAILED(hr=device->CreateSamplerState(&s,&linear_)))return hr;

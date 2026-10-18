@@ -9,6 +9,7 @@
 namespace owned {
 
 void bridge_report_event(const char* event, const char* detail) noexcept;
+void bridge_note_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept;
 
 namespace {
 
@@ -195,6 +196,7 @@ bool write_call(std::uint8_t* at, const void* target, std::size_t length,std::ui
     DWORD ignored = 0;
     const bool restored = VirtualProtect(at, length, patch.protection, &ignored) != FALSE;
     const bool flushed = FlushInstructionCache(GetCurrentProcess(), at, length) != FALSE;
+    bridge_note_owned_patch(at, patch.original, length);  // ownership verification
     return restored && flushed;
 }
 

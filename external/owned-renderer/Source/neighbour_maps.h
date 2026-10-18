@@ -207,15 +207,31 @@ NeighbourBorderFog neighbour_border_fog() noexcept;
 // Publication follows accepted-piece membership, range restreams and teardown.
 // Retained object fog must be recomputed after any of these render-only changes.
 std::uint64_t neighbour_border_fog_revision() noexcept;
+// Sun-shadow receivers of the rendered neighbours: world-space boxes, one per
+// 32 m cell of each accepted neighbour's terrain and decorations. The renderer
+// publishes them on accepted-piece changes and teardown; the bridge adds the
+// visible ones to the active map's terrain receivers, so the sun maps' bands,
+// squares and depth ranges are fitted to neighbour ground as well (without
+// them, neighbour ground beyond the active map's receivers selected no map).
+void neighbour_receivers_publish(std::vector<NativeWorldBounds> cells) noexcept;
+void neighbour_receivers_append_visible(const std::array<float,16>& world_to_clip,
+    std::vector<NativeWorldBounds>& receivers) noexcept;
 void neighbour_maps_begin(const std::string& mpr, std::uint64_t epoch,
     const ResourceStoreConfig& mounts) noexcept;
 void neighbour_maps_stop() noexcept;
+// Stops the stream only while it serves this map generation. A world change
+// releases the uploaded neighbours; a reload of the same map keeps its
+// generation, so its drained stream must go or begin() would reuse it.
+void neighbour_maps_stop_epoch(std::uint64_t epoch) noexcept;
 std::unique_ptr<NeighbourMapUpload> neighbour_maps_take(std::uint64_t epoch) noexcept;
 void neighbour_maps_uploaded(std::uint64_t epoch) noexcept;
 std::string neighbour_maps_error(std::uint64_t epoch);
 // True once no stream runs for this epoch (disabled, no profile, never begun)
 // or its worker has finished and its last piece was uploaded.
 bool neighbour_maps_settled(std::uint64_t epoch) noexcept;
+// Neighbours of this epoch's stream not yet uploaded (0 once settled); false
+// while the stream has not read its layout yet (count unknown).
+bool neighbour_maps_remaining(std::uint64_t epoch,std::size_t& remaining) noexcept;
 bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept;
 void bridge_neighbour_diagnostic(const char* reason) noexcept;
 // Synchronous preparation into the shipped owned terrain decoder; callback

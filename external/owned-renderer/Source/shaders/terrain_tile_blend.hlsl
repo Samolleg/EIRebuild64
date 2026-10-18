@@ -105,8 +105,11 @@ float3 terrainTileBlendMean(TerrainCliffCell k){
 // Share of a material shown as the tile's own art: where the field is nearly
 // all that material, inside a plain tile of it and in the band of a tile
 // toward such a plain neighbour (one image on the shared edge).
-float terrainTileBlendOwnArt(uint4 own,uint ownCell[4],float dist[4],uint material,float weight,bool plain){
+// (own: the tile's grid row; f: the position inside the tile, 0..1.)
+float terrainTileBlendOwnArt(uint4 own,float2 f,uint material,float weight,bool plain){
  uint2 ends[4]={uint2(0,2),uint2(1,3),uint2(0,1),uint2(2,3)};
+ uint ownCell[4]={own.x&65535u,own.x>>16,own.y&65535u,own.y>>16};
+ float dist[4]={f.x,1-f.x,f.y,1-f.y};
  float g=plain&&ownCell[0]==material?1:0;
  [unroll]for(int e=0;e<4;++e)
   if(((own.z>>(8+e))&1u)!=0&&ownCell[ends[e].x]==material&&ownCell[ends[e].y]==material)g=max(g,1-smoothstep(0,tileBlendEdgeBand,dist[e]));
@@ -294,15 +297,15 @@ float4 terrainTileBlendFarTop(TerrainCliffCell k,float2 s,float2 sDx,float2 sDy)
 // bake only; live pixels fade the blend out there instead): the top-down
 // read is held inside the padding and turns into the material's mean over
 // tileBlendMeanRange (a footprint as wide as the tile averages to it).
+// The texel brightness read the decisions use (contested or a face).
+float3 terrainTileBlendDecision(TerrainCliffCell k,float2 s,float3 p,float3 planes,bool full,float3 mean){
+ const float lod=terrainTileBlendDecisionLod(k);
+ [branch]if(planes.z<.998)return terrainTileBlendFacesDecision(k,p,planes,full,mean,lod)/max(1-planes.z,1e-4);
+ return terrainCliffTapLevel(k,uint2(0,0),frac(s),lod);
+}
 float3 terrainTileBlendMaterial(TerrainCliffCell k,float2 s,float2 sDx,float2 sDy,float3 p,float3 pDx,float3 pDy,
-  float3 planes,bool full,float ownArt,float3 mean,float beyond,bool decide,out float share,out float3 decision){
- float3 c=0,top=0;share=planes.z*ownArt;decision=0;
- // The texel brightness the decisions use (decide: contested or a face).
- [branch]if(decide){
-  const float lod=terrainTileBlendDecisionLod(k);
-  [branch]if(planes.z<.998)decision=terrainTileBlendFacesDecision(k,p,planes,full,mean,lod)/max(1-planes.z,1e-4);
-  else decision=terrainCliffTapLevel(k,uint2(0,0),frac(s),lod);
- }
+  float3 planes,bool full,float ownArt,float3 mean,float beyond,out float share){
+ float3 c=0,top=0;share=planes.z*ownArt;
  [branch]if(planes.z>.002&&ownArt<.999){
   // Far de-tiling: the larger-scale read crossfades in by the footprint
   // as near; past the padding the plain read is held, and only past what
@@ -384,12 +387,14 @@ float terrainTileBlendRock(uint rock,float snowShare,float presence,float coverH
  if(!terrainTileBlendCell(rock,k))return 0;
  float3 luma=float3(.2126,.7152,.0722);
  float3 mean=terrainTileBlendMean(k);
- rc=terrainTileBlendFaces(k,p,pDx,pDy,planes,full,mean)/side;
  // The edge's brightness term at the decision level (the same at every distance).
  float rockHeight=clamp(dot(terrainTileBlendFacesDecision(k,p,planes,full,mean,terrainTileBlendDecisionLod(k))/side-mean,luma),-.25,.25);
  m+=tileBlendRockHeight*detailWeight*(rockHeight-coverHeight);
  float a=saturate(m/width+.5);
- return amount*a*a*(3-2*a);
+ float exposure=amount*a*a*(3-2*a);
+ // The rock colour only where it shows (the caller weights it by the exposure).
+ [branch]if(exposure>0)rc=terrainTileBlendFaces(k,p,pDx,pDy,planes,full,mean)/side;
+ return exposure;
 }
 // The cliff materials of tile c of the blend grid (rows h..2h of the contact
 // tiles): its four corners and, on steep tiles, the materials at the top and
@@ -557,11 +562,12 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  // in plan, so without this every face pixel above one plan point shares
  // its material and the edges are vertical lines.
  [branch]if(fw.x+fw.y>.002){
-  float2 a=fw.x*(2*terrainNoise2(pw.yz*.18,13)-1)+fw.y*(2*terrainNoise2(pw.xz*.18,15)-1);
-  float2 b=fw.x*(2*terrainNoise2(pw.yz*.7,17)-1)+fw.y*(2*terrainNoise2(pw.xz*.7,19)-1);
   // A third, ~0.6 m octave: with only the broad ones a boundary still ran
-  // straight down several metres of face.
-  float2 c3=fw.x*(2*terrainNoise2(pw.yz*1.7,21)-1)+fw.y*(2*terrainNoise2(pw.xz*1.7,23)-1);
+  // straight down several metres of face. Each plane's noise only where
+  // its weight is above 0 (the weaker plane's is exactly 0 on most faces).
+  float2 a=0,b=0,c3=0;
+  [branch]if(fw.x>0){a=fw.x*(2*terrainNoise2(pw.yz*.18,13)-1);b=fw.x*(2*terrainNoise2(pw.yz*.7,17)-1);c3=fw.x*(2*terrainNoise2(pw.yz*1.7,21)-1);}
+  [branch]if(fw.y>0){a+=fw.y*(2*terrainNoise2(pw.xz*.18,15)-1);b+=fw.y*(2*terrainNoise2(pw.xz*.7,19)-1);c3+=fw.y*(2*terrainNoise2(pw.xz*1.7,23)-1);}
   q+=edgeKeep*nativeCliffBlend[1].w*(a+.6*b+.3*c3);
  }
  // Kernel over the 3x3 vertices around the nearest one: quadratic B-spline
@@ -642,7 +648,6 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  // the warped lookup, blended bilinearly (a per-tile choice drew every tile
  // edge where two tiles' cliffs differ as a straight cut).
  float faceShare=1-planes.z;
- uint4 cliffRock=0xffffu;float4 cliffW=0;
  [branch]if(faceShare>.002){
   // One row a tile (its cells, top and bottom, and the rock the map load
   // chose), then membership by comparison.
@@ -652,7 +657,6 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
    int2 o=int2(t4&1,t4>>1);
    float wt=(o.x!=0?bf.x:1-bf.x)*(o.y!=0?bf.y:1-bf.y);
    uint4 r=terrainTileBlendCliffRow(b0+o,gw,gh);
-   cliffW[t4]=wt;cliffRock[t4]=terrainTileBlendCliffRock(r);
    uint3 set=uint3(r.x,r.y,(r.z>>16)|(r.w&0xffff0000u));
    bool4 member=sc==(set.x&65535u)||sc==(set.x>>16)||sc==(set.y&65535u)||sc==(set.y>>16)||sc==(set.z&65535u)||sc==(set.z>>16);
    foreign+=member?0:wt;
@@ -688,7 +692,7 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  // One material: no scores or noise (contested is 0 and only it is read);
  // a plain tile of it on walkable ground is its own art.
  [branch]if(wmax>=.999){
-  if(planes.z>=.998&&nativeTerrainTess.y<.5&&terrainTileBlendOwnArt(own,ownCell,dist,topCell,wmax,plain)>=.999)return float4(0,0,0,1);
+  if(planes.z>=.998&&nativeTerrainTess.y<.5&&terrainTileBlendOwnArt(own,f,topCell,wmax,plain)>=.999)return float4(0,0,0,1);
   wq=topMask?wq:0;
   wsum=dot(wq,1);
  }
@@ -696,27 +700,24 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  float contested=wmax>=.999?0:saturate(3*(1-wmax));
  float3 luma=float3(.2126,.7152,.0722);
  wq/=wsum;
- // Per slot: colour (cr, cg, cb), tile-art share, texel brightness. One
- // copy of the material reads in a loop that rotates the slot vectors
- // (slot x is the current one; four turns restore the order).
- float4 cr=0,cg=0,cb=0,shareQ=0,texQ=0;
+ // Per slot texel brightness (texQ), from the decision read: it feeds the
+ // scores and the exposed-rock edge only (its world resolution is fixed; the
+ // pixel's footprint and the tile art's own mip never decide). One copy of
+ // the read in a loop that rotates the slot vectors (slot x is the current
+ // one; four turns restore the order). The colours are read after the
+ // scores, only for the slots the soft range keeps.
+ const bool decide=contested>0||planes.z<.998;
+ float4 texQ=0;
  [loop]for(int i=0;i<4;++i){
   [branch]if(wq.x>0){
    TerrainCliffCell k;
    if(!terrainTileBlendCell(sc.x,k))return float4(0,0,0,1);
-   float share;float3 decision,mean=0;
-   // The mean feeds the face reads, the texel brightness and held far reads.
-   const bool decide=contested>0||planes.z<.998;
-   [branch]if(decide||beyond>0)mean=terrainTileBlendMean(k);
-   float3 color=terrainTileBlendMaterial(k,sw,sDx,sDy,pw,pDx,pDy,planes,full,
-    terrainTileBlendOwnArt(own,ownCell,dist,sc.x,wq.x,plain),mean,beyond,decide,share,decision);
-   // Texel brightness feeds the scores and the exposed-rock edge only, from
-   // the decision read (its world resolution is fixed; the pixel's footprint
-   // and the tile art's own mip never decide).
-   [branch]if(decide)texQ.x=clamp(dot(decision-mean,luma),-.25,.25);
-   cr.x=color.r;cg.x=color.g;cb.x=color.b;shareQ.x=share;
+   [branch]if(decide){
+    float3 mean=terrainTileBlendMean(k);
+    texQ.x=clamp(dot(terrainTileBlendDecision(k,sw,pw,planes,full,mean)-mean,luma),-.25,.25);
+   }
   }
-  sc=sc.yzwx;wq=wq.yzwx;cr=cr.yzwx;cg=cg.yzwx;cb=cb.yzwx;shareQ=shareQ.yzwx;texQ=texQ.yzwx;
+  sc=sc.yzwx;wq=wq.yzwx;texQ=texQ.yzwx;
  }
 #ifdef __cplusplus
 //")hlsl" R"hlsl( //"
@@ -755,17 +756,51 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  float4 a=max(score-best0+depth,0);a*=a;
  float total=dot(a,1);
  if(total<=0)return float4(0,0,0,1);
- float3 cover=float3(dot(a,cr),dot(a,cg),dot(a,cb))/total;float share=dot(a,shareQ)/total;float rockShown=0;
+ // Colour and tile-art share summed over the slots by their blend share a,
+ // read only where a is above 0 (a slot at 0 adds nothing; the cell read
+ // succeeded in the decision loop). Summed as they are read: four
+ // per-slot colour vectors held across the reads cost registers.
+ float3 cover=0;float share=0,rockShown=0;
+ // Cover heights for the exposed rock (the blend shares a); texel
+ // brightness is not needed past this point.
+ float coverHeight=dot(a,texQ)/total;
+ // The slots' own-art shares before the colour reads, so the tile row, the
+ // position in the tile and the field weights are not held across them.
+ float4 ownQ=0;
+ [unroll]for(int i3=0;i3<4;++i3)if(a[i3]>0)ownQ[i3]=terrainTileBlendOwnArt(own,f,sc[i3],wq[i3],plain);
+ [loop]for(int i2=0;i2<4;++i2){
+  [branch]if(a.x>0){
+   TerrainCliffCell k;terrainTileBlendCell(sc.x,k);
+   float slotShare;float3 mean=0;
+   // The mean feeds the face reads and held far reads.
+   [branch]if(planes.z<.998||beyond>0)mean=terrainTileBlendMean(k);
+   float3 color=terrainTileBlendMaterial(k,sw,pDx.xy*.5,pDy.xy*.5,pw,pDx,pDy,planes,full,ownQ.x,mean,beyond,slotShare);
+   cover+=a.x*color;share+=a.x*slotShare;
+  }
+  sc=sc.yzwx;ownQ=ownQ.yzwx;a=a.yzwx;
+ }
+ cover/=total;share/=total;
  [branch]if(planes.z<.998){
   // Exposed rock: each of the four surrounding tiles' rock (a stone
   // material of its cliff, else a ground one), weighted like the cliff
   // materials above, so the rock and its amount change smoothly between
   // tiles; a tile without one adds no rock. Equal rocks are read once.
   float e=0,rcWeight=0;float3 rcSum=0;
+  // The four tiles' rocks and weights (rows read again here, not held in
+  // registers across the material reads; none where the face share is 0).
+  uint4 cliffRock=0xffffu;float4 cliffW=0;
+  [branch]if(faceShare>.002){
+   int2 b0=int2(floor(q-.5));float2 bf=q-.5-b0;
+   [unroll]for(int t4=0;t4<4;++t4){
+    int2 o=int2(t4&1,t4>>1);
+    cliffW[t4]=(o.x!=0?bf.x:1-bf.x)*(o.y!=0?bf.y:1-bf.y);
+    cliffRock[t4]=terrainTileBlendCliffRock(terrainTileBlendCliffRow(b0+o,gw,gh));
+   }
+  }
   [unroll]for(int r4=0;r4<4;++r4)[unroll]for(int r5=r4+1;r5<4;++r5)
    if(cliffRock[r5]==cliffRock[r4]){cliffW[r4]+=cliffW[r5];cliffW[r5]=0;}
-  // Cover heights and classes for the rock (the blend shares a).
-  float coverHeight=dot(a,texQ)/total;
+  // The cover's classes (from the slot cells, not held across the reads).
+  bool4 valid=sc!=0xffffu;uint4 kind=(sc>>12)&7u;
   // One copy of the rock read: tile x is the current one (rotated).
   [loop]for(int r6=0;r6<4;++r6){
    [branch]if(cliffW.x>.001&&cliffRock.x!=0xffffu){

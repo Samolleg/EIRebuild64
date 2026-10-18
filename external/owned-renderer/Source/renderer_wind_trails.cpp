@@ -93,8 +93,8 @@ void Renderer::render_wind_trails() {
         t.SrcBlend=t.SrcBlendAlpha=D3D11_BLEND_ONE;t.DestBlend=t.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
         t.BlendOp=t.BlendOpAlpha=D3D11_BLEND_OP_ADD;t.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
         D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
-        if (FAILED(device_->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&wind_trails_vs_)) ||
-            FAILED(device_->CreatePixelShader(ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&wind_trails_ps_)) ||
+        if (FAILED(create_shader(device_.Get(),vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&wind_trails_vs_)) ||
+            FAILED(create_shader(device_.Get(),ps->GetBufferPointer(),ps->GetBufferSize(),nullptr,&wind_trails_ps_)) ||
             FAILED(device_->CreateBuffer(&b,nullptr,&wind_trails_constants_)) ||
             FAILED(device_->CreateBlendState(&blend,&wind_trails_blend_)) ||
             FAILED(device_->CreateRasterizerState(&raster,&wind_trails_raster_))) {

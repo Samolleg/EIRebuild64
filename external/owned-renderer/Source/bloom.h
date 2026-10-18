@@ -151,12 +151,12 @@ class BloomPass {
         };
         Ptr<ID3DBlob> code; HRESULT hr;
         if (FAILED(hr = compile(programs[0], code))) return hr;
-        if (FAILED(hr = device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &vs_))) return hr;
+        if (FAILED(hr = create_shader(device,code->GetBufferPointer(), code->GetBufferSize(), nullptr, &vs_))) return hr;
         Ptr<ID3D11PixelShader>* shaders[] = {&prefilter13_ps_, &prefilter4_ps_, &down_ps_, &up_ps_, &composite_ps_};
         for (unsigned n = 0; n < 5; ++n) {
             code.Reset();
             if (FAILED(hr = compile(programs[1 + n], code))) return hr;
-            if (FAILED(hr = device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr,
+            if (FAILED(hr = create_shader(device,code->GetBufferPointer(), code->GetBufferSize(), nullptr,
                                                       shaders[n]->GetAddressOf()))) return hr;
         }
         D3D11_BUFFER_DESC b{}; b.ByteWidth = 32; b.Usage = D3D11_USAGE_DYNAMIC;

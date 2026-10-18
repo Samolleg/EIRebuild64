@@ -1,7 +1,9 @@
 #include "owned_terrain_front_end.h"
+#include "fast_float.h"
 #include "procedural_falls.h"
 #include "liquid_surface_shader.h"
 #include "terrain_material.h"
+#include "worker_priority.h"
 
 #include <algorithm>
 #include <atomic>
@@ -20,7 +22,7 @@ bool transform_terrain_bounds(const NativeWorldBounds& source,
     const std::array<float,16>& matrix,NativeWorldBounds& bounds) noexcept {
     bounds={};
     if(!source.valid)return false;
-    for(float value:matrix)if(!std::isfinite(value))return false;
+    for(float value:matrix)if(!finite_value(value))return false;
     for(unsigned corner=0;corner<8;++corner) {
         std::array<float,3> point{};
         for(unsigned row=0;row<3;++row) {
@@ -29,7 +31,7 @@ bool transform_terrain_bounds(const NativeWorldBounds& source,
                 value+=double(matrix[row*4+column])*
                     ((corner&(1u<<column))?source.maximum[column]:source.minimum[column]);
             point[row]=static_cast<float>(value);
-            if(!std::isfinite(point[row]))return false;
+            if(!finite_value(point[row]))return false;
             if(!bounds.valid)bounds.minimum[row]=bounds.maximum[row]=point[row];
             else {
                 bounds.minimum[row]=(std::min)(bounds.minimum[row],point[row]);
@@ -39,8 +41,8 @@ bool transform_terrain_bounds(const NativeWorldBounds& source,
         bounds.valid=true;
     }
     for(unsigned axis=0;axis<3;++axis) {
-        bounds.minimum[axis]=std::nextafter(bounds.minimum[axis],-INFINITY);
-        bounds.maximum[axis]=std::nextafter(bounds.maximum[axis],INFINITY);
+        bounds.minimum[axis]=next_float(bounds.minimum[axis],-INFINITY);
+        bounds.maximum[axis]=next_float(bounds.maximum[axis],INFINITY);
     }
     return true;
 }
@@ -64,7 +66,7 @@ bool owned_terrain_vertex_height(const TerrainVertex& vertex,
         if (vertex.lighting_object >= values.layer_shifts.size()) return false;
         height += values.layer_shifts[vertex.lighting_object];
     }
-    return std::isfinite(height);
+    return finite_value(height);
 }
 
 bool owned_terrain_base_liquid_depth(const TerrainCpuAsset& source,
@@ -75,7 +77,7 @@ bool owned_terrain_base_liquid_depth(const TerrainCpuAsset& source,
     float height=0;
     if (!owned_terrain_vertex_height(sector.vertices[base+33u*33u],values,height)) return false;
     depth=(std::max)(0.0f,height-sector.vertices[base].z);
-    return std::isfinite(depth);
+    return finite_value(depth);
 }
 
 namespace {
@@ -100,6 +102,17 @@ std::uint32_t owned_terrain_facet_flatness(const TerrainCpuAsset& source,
     if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 255u|(255u<<8);
     return terrain_facet_flatness([&](int x,int y){return owned_zone_node(source,x,y);},
         int(sector.map_x*32+base%33),int(sector.map_y*32+base/33));
+}
+
+float owned_terrain_pit_fill(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept {
+    if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
+    const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
+    const float z=owned_zone_node(source,x,y)[2];
+    const float across=.5f*(owned_zone_node(source,x-1,y)[2]+owned_zone_node(source,x+1,y)[2])-z;
+    const float along=.5f*(owned_zone_node(source,x,y-1)[2]+owned_zone_node(source,x,y+1)[2])-z;
+    const float fill=(std::min)(across,along);
+    return finite_value(fill)&&fill>0?fill:0.f;
 }
 
 std::uint32_t owned_terrain_slope_normal(const TerrainCpuAsset& source,
@@ -142,7 +155,7 @@ void owned_terrain_prepare_shading(TerrainCpuAsset& source) noexcept {
         };
         const unsigned threads=(std::min)(4u,(std::max)(1u,std::thread::hardware_concurrency()/2));
         std::vector<std::thread> helpers;
-        try {for(unsigned t=1;t<threads;++t)helpers.emplace_back(work);} catch(...) {}
+        try {for(unsigned t=1;t<threads;++t)helpers.emplace_back([&work] {const BackgroundWorkerPriority priority;work();});} catch(...) {}
         work();
         for(auto& helper:helpers)helper.join();
         for(std::size_t i=0;i<count;++i) {
@@ -196,7 +209,7 @@ bool liquid_surface_height(const TerrainCpuAsset& source,int x,int y,
         if(!r||x<-r||y<-r||x>xmax+r||y>ymax+r||
            outside.heights.size()!=std::size_t(w)*std::size_t(ymax+1+2*r))return false;
         z=outside.heights[std::size_t(y+r)*std::size_t(w)+std::size_t(x+r)];
-        return std::isfinite(z);
+        return finite_value(z);
     }
     const auto sx=(std::min)(unsigned(x/32),source.sector_count_x-1);
     const auto sy=(std::min)(unsigned(y/32),source.sector_count_y-1);
@@ -206,7 +219,7 @@ bool liquid_surface_height(const TerrainCpuAsset& source,int x,int y,
     const auto& vertex=sector.vertices[index+1089];
     if(values){if(!owned_terrain_vertex_height(vertex,*values,z))return false;}
     else z=vertex.z;
-    return std::isfinite(z)&&z>=sector.vertices[index].z-kLiquidBuriedTolerance;
+    return finite_value(z)&&z>=sector.vertices[index].z-kLiquidBuriedTolerance;
 }
 
 // Central difference, one-sided beside a missing neighbour.
@@ -337,8 +350,8 @@ bool liquid_flow_from_gradients(const Gradient& gradient,const Steepness& steepn
         spill=(std::min)(spill,highest);
     }
     flow.fill=spill-centreHeight;
-    return std::isfinite(flow.current[0])&&std::isfinite(flow.current[1])&&std::isfinite(flow.bend)&&
-        std::isfinite(flow.cascade)&&std::isfinite(flow.impact)&&std::isfinite(flow.drop)&&std::isfinite(flow.fill);
+    return finite_value(flow.current[0])&&finite_value(flow.current[1])&&finite_value(flow.bend)&&
+        finite_value(flow.cascade)&&finite_value(flow.impact)&&finite_value(flow.drop)&&finite_value(flow.fill);
 }
 
 } // namespace
@@ -746,9 +759,9 @@ bool owned_terrain_command_bounds(const TerrainCpuAsset& source,
             const std::array<float,3> padding{wave*3,wave*3,wave*.25f};
             for (unsigned axis=0;axis<3;++axis) {
                 box.minimum[axis]-=padding[axis]; box.maximum[axis]+=padding[axis];
-                box.minimum[axis]=std::nextafter(box.minimum[axis],-INFINITY);
-                box.maximum[axis]=std::nextafter(box.maximum[axis],INFINITY);
-                if (!std::isfinite(box.minimum[axis]) || !std::isfinite(box.maximum[axis]) ||
+                box.minimum[axis]=next_float(box.minimum[axis],-INFINITY);
+                box.maximum[axis]=next_float(box.maximum[axis],INFINITY);
+                if (!finite_value(box.minimum[axis]) || !finite_value(box.maximum[axis]) ||
                     box.minimum[axis]>box.maximum[axis]) return false;
             }
             if (!bounds.valid) { bounds.minimum=box.minimum;bounds.maximum=box.maximum;bounds.valid=true; }
@@ -783,13 +796,13 @@ namespace {
 
 bool finite_inputs(const OwnedTerrainFrameInputs& inputs) noexcept {
     for (float value : inputs.terrain_origin)
-        if (!std::isfinite(value)) return false;
+        if (!finite_value(value)) return false;
     for (float value : inputs.camera_position)
-        if (!std::isfinite(value)) return false;
+        if (!finite_value(value)) return false;
     for (float value : inputs.lod_distances)
-        if (!std::isfinite(value) || value < 0.0f) return false;
+        if (!finite_value(value) || value < 0.0f) return false;
     for (float value : inputs.object_to_clip)
-        if (!std::isfinite(value)) return false;
+        if (!finite_value(value)) return false;
     if (inputs.game_visibility_rows.size() > 65536u) return false;
     return inputs.source_generation != 0 && inputs.source_revision != 0 &&
         inputs.world_frame_serial != 0 && inputs.maximum_lod >= 0 &&
@@ -814,8 +827,8 @@ bool game_visibility_admits(const OwnedTerrainFrameInputs& inputs,
 bool bounds_visible(const TerrainBounds& bounds,
                     const std::array<float, 16>& transform) noexcept {
     for (std::size_t axis = 0; axis < 3; ++axis)
-        if (!std::isfinite(bounds.minimum[axis]) ||
-            !std::isfinite(bounds.maximum[axis]) ||
+        if (!finite_value(bounds.minimum[axis]) ||
+            !finite_value(bounds.maximum[axis]) ||
             bounds.minimum[axis] > bounds.maximum[axis])
             return false;
     std::uint32_t outside = 0x3fu;
@@ -831,8 +844,8 @@ bool bounds_visible(const TerrainBounds& bounds,
             transform[10] * z + transform[11];
         const float clip_w = transform[12] * x + transform[13] * y +
             transform[14] * z + transform[15];
-        if (!std::isfinite(clip_x) || !std::isfinite(clip_y) ||
-            !std::isfinite(clip_z) || !std::isfinite(clip_w))
+        if (!finite_value(clip_x) || !finite_value(clip_y) ||
+            !finite_value(clip_z) || !finite_value(clip_w))
             return false;
         std::uint32_t mask = 0;
         if (clip_x < -clip_w) mask |= 1u;
@@ -1170,8 +1183,8 @@ bool owned_terrain_world_to_clip(const std::array<float,16>& object_to_clip,
     const std::array<float,16>& object_to_world,
     std::array<float,16>& world_to_clip) noexcept {
     world_to_clip={};
-    for(float value:object_to_clip)if(!std::isfinite(value))return false;
-    for(float value:object_to_world)if(!std::isfinite(value))return false;
+    for(float value:object_to_clip)if(!finite_value(value))return false;
+    for(float value:object_to_world)if(!finite_value(value))return false;
     // General 4x4 inverse of the placement by cofactors (double precision).
     const auto& m=object_to_world;
     double inverse[16];
@@ -1192,14 +1205,14 @@ bool owned_terrain_world_to_clip(const std::array<float,16>& object_to_clip,
     inverse[11]=-m[0]*double(m[5])*m[11]+m[0]*double(m[7])*m[9]+m[4]*double(m[1])*m[11]-m[4]*double(m[3])*m[9]-m[8]*double(m[1])*m[7]+m[8]*double(m[3])*m[5];
     inverse[15]=m[0]*double(m[5])*m[10]-m[0]*double(m[6])*m[9]-m[4]*double(m[1])*m[10]+m[4]*double(m[2])*m[9]+m[8]*double(m[1])*m[6]-m[8]*double(m[2])*m[5];
     const double determinant=m[0]*inverse[0]+m[1]*inverse[4]+m[2]*inverse[8]+m[3]*inverse[12];
-    if(!std::isfinite(determinant) || std::fabs(determinant)<1e-12)return false;
+    if(!finite_value(determinant) || std::fabs(determinant)<1e-12)return false;
     for(unsigned row=0;row<4;++row)
         for(unsigned column=0;column<4;++column) {
             double value=0;
             for(unsigned k=0;k<4;++k)
                 value+=double(object_to_clip[row*4+k])*inverse[k*4+column]/determinant;
             world_to_clip[row*4+column]=static_cast<float>(value);
-            if(!std::isfinite(world_to_clip[row*4+column]))return false;
+            if(!finite_value(world_to_clip[row*4+column]))return false;
         }
     return true;
 }
@@ -1214,11 +1227,11 @@ bool prepare_owned_terrain_spatial_parts(OwnedTerrainFramePacket& packet,
     packet.spatial_front_end_reuses=0;packet.spatial_receiver_reuses=0;
     packet.spatial_caster_reuses=0;packet.spatial_record_reuses=0;
     if(packet.status!=OwnedTerrainPacketStatus::ready || !packet.source || !values.revision ||
-       values.animation.waves_enabled>1 || !std::isfinite(values.animation.wind_force) ||
+       values.animation.waves_enabled>1 || !finite_value(values.animation.wind_force) ||
        !std::all_of(values.layer_shift_range.begin(),values.layer_shift_range.end(),
-           [](const std::array<float,2>& value){return std::isfinite(value[0])&&std::isfinite(value[1]);}) ||
+           [](const std::array<float,2>& value){return finite_value(value[0])&&finite_value(value[1]);}) ||
        !std::all_of(object_to_world.begin(),object_to_world.end(),
-           [](float value){return std::isfinite(value);}))return false;
+           [](float value){return finite_value(value);}))return false;
     // A degenerate placement (an uncaptured zero matrix) would collapse every
     // world bound to one point and let GPU culling drop the whole terrain.
     const auto& m=object_to_world;
@@ -1226,7 +1239,7 @@ bool prepare_owned_terrain_spatial_parts(OwnedTerrainFramePacket& packet,
         double(m[0])*(double(m[5])*m[10]-double(m[6])*m[9])-
         double(m[1])*(double(m[4])*m[10]-double(m[6])*m[8])+
         double(m[2])*(double(m[4])*m[9]-double(m[5])*m[8]);
-    if(!std::isfinite(determinant) || std::fabs(determinant)<1e-12)return false;
+    if(!finite_value(determinant) || std::fabs(determinant)<1e-12)return false;
     try {
         const auto& source=*packet.source;
         const bool waves=values.animation.waves_enabled!=0;
@@ -1312,25 +1325,30 @@ bool prepare_owned_terrain_render_commands(OwnedTerrainFramePacket& packet) noex
         for(std::size_t begin=0;begin<packet.spatial_parts.size();) {
             const auto source_sector=packet.spatial_parts[begin].source_sector;
             const auto material=packet.spatial_parts[begin].material;
+            // A piece with any visible part draws all of its parts, so its
+            // mesh key (sector, material, parts, LOD) stays fixed while the
+            // screen edge moves across the sector instead of naming a new
+            // mesh for every visible-part combination (frame accounting
+            // 2026-10-14: pan frames created colour meshes for new
+            // combinations). The extra parts are off screen and clipped; the
+            // base terrain set registers its pieces with all parts the same way.
             std::uint8_t subpart_mask=0;
-            std::uint32_t first_visible=UINT32_MAX;
+            bool visible=false;
             std::size_t end=begin;
             while(end<packet.spatial_parts.size()) {
                 const auto& spatial=packet.spatial_parts[end];
                 if(spatial.source_sector!=source_sector || spatial.material!=material)break;
                 ++packet.spatial_front_end_reuses;++packet.spatial_bounds_reuses;
-                if(bounds_visible({spatial.local_bounds.minimum,spatial.local_bounds.maximum},
-                    packet.inputs.object_to_clip)) {
-                    if(first_visible==UINT32_MAX)first_visible=static_cast<std::uint32_t>(end);
-                    subpart_mask=static_cast<std::uint8_t>(subpart_mask|spatial.subpart_mask);
-                }
+                subpart_mask=static_cast<std::uint8_t>(subpart_mask|spatial.subpart_mask);
+                if(!visible && bounds_visible({spatial.local_bounds.minimum,spatial.local_bounds.maximum},
+                    packet.inputs.object_to_clip))visible=true;
                 ++end;
             }
-            if(!subpart_mask) { begin=end;continue; }
+            if(!visible || !subpart_mask) { begin=end;continue; }
             OwnedTerrainCommand command{};
             if(!owned_terrain_render_command(packet,source_sector,material,
                 subpart_mask,command))return false;
-            command.spatial_index=first_visible;
+            command.spatial_index=static_cast<std::uint32_t>(begin);
             (material<threshold?packet.base_commands:packet.transparent_commands).push_back(command);
             begin=end;
         }

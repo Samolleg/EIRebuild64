@@ -54,11 +54,11 @@ HRESULT Renderer::update_ambient_occlusion_targets() noexcept {
         }
         ComPtr<ID3D11VertexShader> vertex;ComPtr<ID3D11PixelShader> p,h,d,r;ComPtr<ID3D11Buffer> constants;
         ComPtr<ID3D11BlendState> blend;
-        if(FAILED(hr=device_->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&vertex))||
-           FAILED(hr=device_->CreatePixelShader(prepare->GetBufferPointer(),prepare->GetBufferSize(),nullptr,&p))||
-           FAILED(hr=device_->CreatePixelShader(horizon->GetBufferPointer(),horizon->GetBufferSize(),nullptr,&h))||
-           FAILED(hr=device_->CreatePixelShader(denoise->GetBufferPointer(),denoise->GetBufferSize(),nullptr,&d))||
-           FAILED(hr=device_->CreatePixelShader(resolve->GetBufferPointer(),resolve->GetBufferSize(),nullptr,&r)))return hr;
+        if(FAILED(hr=create_shader(device_.Get(),vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,&vertex))||
+           FAILED(hr=create_shader(device_.Get(),prepare->GetBufferPointer(),prepare->GetBufferSize(),nullptr,&p))||
+           FAILED(hr=create_shader(device_.Get(),horizon->GetBufferPointer(),horizon->GetBufferSize(),nullptr,&h))||
+           FAILED(hr=create_shader(device_.Get(),denoise->GetBufferPointer(),denoise->GetBufferSize(),nullptr,&d))||
+           FAILED(hr=create_shader(device_.Get(),resolve->GetBufferPointer(),resolve->GetBufferSize(),nullptr,&r)))return hr;
         D3D11_BUFFER_DESC cb{};cb.ByteWidth=sizeof(AmbientOcclusionConstants);cb.Usage=D3D11_USAGE_DYNAMIC;
         cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;cb.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
         if(FAILED(hr=device_->CreateBuffer(&cb,nullptr,&constants)))return hr;

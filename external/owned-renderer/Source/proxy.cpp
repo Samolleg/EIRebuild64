@@ -6,6 +6,7 @@
 #include "test_harness.h"
 #include <windows.h>
 #include <psapi.h>
+#include <dbghelp.h>
 #include <mmsystem.h>
 #pragma comment(lib,"winmm.lib")
 #include <ddraw.h>
@@ -39,6 +40,7 @@
 #include "cursor_confinement.h"
 #include "retained_static_scene.h"
 #include "camp_inventory.h"
+#include "stall_watchdog.h"
 
 namespace owned {
 #ifdef EID3D11_TESTING
@@ -53,6 +55,23 @@ std::atomic<std::uint64_t> g_next_surface_id{0};
 // Presented frames; a GDI DIB unused for more than kDcReuseFrames is freed.
 std::uint64_t g_present_serial=0;
 constexpr std::uint64_t kDcReuseFrames=2;
+// A movie on screen: large primary pictures from one surface whose content
+// changed since the previous one, less than 250 ms earlier, while no load
+// progress movie is open (static loading pictures and progress frames keep
+// the cursor). The owned cursor is not drawn until 250 ms after the last
+// such frame; game input is untouched. Game thread (Blt and presentVisual).
+struct VideoPictureState{std::uint64_t source_id=0,generation=0,last_ms=0,until_ms=0;};
+VideoPictureState g_video_picture;
+constexpr std::uint64_t kVideoPictureGapMs=250;
+void note_large_primary_picture(const SurfaceImage& image) noexcept{
+ const std::uint64_t now=GetTickCount64();auto& state=g_video_picture;
+ const bool next_frame=state.source_id==image.id&&state.generation!=image.generation&&now-state.last_ms<kVideoPictureGapMs;
+ state.source_id=image.id;state.generation=image.generation;state.last_ms=now;
+ if(!next_frame)return;
+ owned::ProgressMovie movie;if(owned::bridge_progress_movie(movie))return;
+ state.until_ms=now+kVideoPictureGapMs;
+}
+bool video_picture_on_screen() noexcept{return GetTickCount64()<g_video_picture.until_ms;}
 
 class SceneQueueTimingScope {
 public:
@@ -200,6 +219,359 @@ void start(){
  if(g_main)CloseHandle(CreateThread(nullptr,0,run,nullptr,0,nullptr));
 }
 }
+
+// GPU stall watchdog (stall_watchdog.h): once per session, a main-thread
+// bracket open for more than 5 s writes a gpu_stall line to bridge.jsonl and
+// gpu-stall-<timestamp>.dmp beside it (%LOCALAPPDATA%\EID3D11, or
+// EI_RENDERER_DEBUG_DIR). It only records: no recovery, no termination. The
+// stalled thread is inside the driver, so the record avoids the CRT and heap
+// where it can (Win32 file calls, stack buffers, dbghelp loaded at start).
+namespace stall_watchdog {
+using WriteDumpFn=BOOL(WINAPI*)(HANDLE,DWORD,HANDLE,MINIDUMP_TYPE,PMINIDUMP_EXCEPTION_INFORMATION,
+ PMINIDUMP_USER_STREAM_INFORMATION,PMINIDUMP_CALLBACK_INFORMATION);
+constexpr std::int64_t kStallSeconds=5;
+WriteDumpFn g_write_dump=nullptr;
+HANDLE g_thread=nullptr,g_stop=nullptr,g_done=nullptr;
+char g_root[MAX_PATH]{};
+void append(const char* event,const char* detail){
+ char path[MAX_PATH+16];wsprintfA(path,"%s\\bridge.jsonl",g_root);
+ HANDLE file=CreateFileA(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+ if(file==INVALID_HANDLE_VALUE)return;
+ char line[640];const int length=wsprintfA(line,"{\"event\":\"%s\",\"detail\":\"%s\",\"sites_verified\":false}\n",event,detail);
+ DWORD written=0;WriteFile(file,line,static_cast<DWORD>(length),&written,nullptr);CloseHandle(file);
+}
+void record(const char* bracket,DWORD thread,std::int64_t tenths){
+ SYSTEMTIME t{};GetLocalTime(&t);char name[64];
+ wsprintfA(name,"gpu-stall-%04u%02u%02u-%02u%02u%02u.dmp",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);
+ char detail[320];
+ wsprintfA(detail,"bracket=%s seconds=%lu.%lu thread=%lu dump=%s",bracket?bracket:"?",
+  static_cast<unsigned long>(tenths/10),static_cast<unsigned long>(tenths%10),thread,name);
+ append("gpu_stall",detail);
+ if(!g_write_dump){append("gpu_stall_dump","result=dbghelp_unavailable");return;}
+ char path[MAX_PATH+80];wsprintfA(path,"%s\\%s",g_root,name);
+ HANDLE file=CreateFileA(path,GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+ if(file==INVALID_HANDLE_VALUE){wsprintfA(detail,"result=create_failed error=%lu",GetLastError());append("gpu_stall_dump",detail);return;}
+ // Every thread with its stack and TEB, private read/write memory (the
+ // driver's heaps and lock objects), module data sections (driver globals),
+ // the handle table and the region map. Image and mapped-file contents
+ // are left out: the analysis loads them from the binaries.
+ const auto type=static_cast<MINIDUMP_TYPE>(MiniDumpWithPrivateReadWriteMemory|MiniDumpWithDataSegs|
+  MiniDumpWithHandleData|MiniDumpWithThreadInfo|MiniDumpWithFullMemoryInfo|MiniDumpWithUnloadedModules);
+ MINIDUMP_USER_STREAM comment{CommentStreamA,static_cast<ULONG>(std::strlen(detail)+1),detail};
+ MINIDUMP_USER_STREAM_INFORMATION streams{1,&comment};
+ const BOOL ok=g_write_dump(GetCurrentProcess(),GetCurrentProcessId(),file,type,nullptr,&streams,nullptr);
+ const DWORD error=ok?0:GetLastError();
+ LARGE_INTEGER size{};GetFileSizeEx(file,&size);CloseHandle(file);
+ wsprintfA(detail,"result=%s error=%08lx mb=%lu dump=%s",ok?"ok":"failed",error,
+  static_cast<unsigned long>(size.QuadPart>>20),name);
+ append("gpu_stall_dump",detail);
+}
+DWORD WINAPI run(void*){
+ LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
+ namespace sw=owned::stall_watch;
+ std::int64_t watched[sw::kSlots]{};std::int64_t wakes[sw::kSlots]{};
+ // A stall needs the same bracket entry on more than kStallSeconds
+ // consecutive 1 s wakes as well as on the clock, so a system sleep or a
+ // suspended process, which skip the wakes, never counts as one. Slot 0 is
+ // the game thread, slot 1 the render thread (render_thread option).
+ bool recorded=false;
+ while(!recorded&&WaitForSingleObject(g_stop,1000)==WAIT_TIMEOUT){
+  for(int s=0;s<sw::kSlots&&!recorded;++s){
+   const std::int64_t since=sw::slots[s].busy_since.load(std::memory_order_acquire);
+   if(!since||since!=watched[s]){watched[s]=since;wakes[s]=0;continue;}
+   const std::int64_t ticks=sw::now()-since;
+   if(++wakes[s]<kStallSeconds||ticks<=kStallSeconds*frequency.QuadPart||IsDebuggerPresent())continue;
+   record(sw::slots[s].busy_name.load(std::memory_order_relaxed),
+    sw::slots[s].busy_thread.load(std::memory_order_relaxed),ticks*10/frequency.QuadPart);
+   recorded=true;
+  }
+ }
+ SetEvent(g_done);
+ return 0;
+}
+void start(){
+ if(g_thread)return;
+ // The bridge.jsonl folder (engine_bridge.cpp debug_root).
+ char value[MAX_PATH]{};DWORD length=0;
+ if((length=GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR",value,MAX_PATH))!=0&&length<MAX_PATH)strcpy_s(g_root,value);
+ else if((length=GetEnvironmentVariableA("LOCALAPPDATA",value,MAX_PATH))!=0&&length<MAX_PATH-8)wsprintfA(g_root,"%s\\EID3D11",value);
+ else strcpy_s(g_root,".\\EID3D11-debug");
+ CreateDirectoryA(g_root,nullptr);
+ if(HMODULE dbghelp=LoadLibraryExW(L"dbghelp.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32))
+  g_write_dump=reinterpret_cast<WriteDumpFn>(GetProcAddress(dbghelp,"MiniDumpWriteDump"));
+ g_stop=CreateEventW(nullptr,TRUE,FALSE,nullptr);g_done=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+ if(g_stop&&g_done)g_thread=CreateThread(nullptr,0,run,nullptr,0,nullptr);
+ if(g_thread)SetThreadPriority(g_thread,THREAD_PRIORITY_ABOVE_NORMAL);
+}
+// DLL unload (FreeLibrary): the loader lock is held, so the thread cannot
+// finish exiting here; wait only until it has left this module's code. At
+// process exit Windows has already ended the thread.
+void stop(){
+ if(!g_thread)return;
+ SetEvent(g_stop);WaitForSingleObject(g_done,2000);
+ CloseHandle(g_thread);g_thread=nullptr;
+}
+}
+// Temporary crash diagnostic for the world-teardown crash at 005D58EA (issue
+// #161), opt-in: EID3D11_FEAR_WATCH=1. The CUMFear vtable (0073FF8C, .rdata)
+// slots for the deleting destructor (0), GetType (8) and Load (11) point at
+// thunks that record the object and the call-validated game return addresses
+// on its stack, then jump to the stock function; no code bytes change.
+// Deletions go to a fixed ring, first sightings to a table that a 20 ms
+// watcher uses to time a vtable change of a still-live object. A first-chance
+// access violation at 005D58EA looks up ecx, writes one fear_watch_crash line
+// to bridge.jsonl and a full-memory dump, and continues the search. In that
+// line deleted=yes means a virtual deletion of this address was recorded
+// after its latest sighting (freed while still listed); deleted=no with a
+// vtable_change time means the live object was overwritten. Verified
+// on game.exe SHA-256 be0fc330...; any differing slot or byte refuses the
+// install. Remove once the crash is understood.
+namespace fear_watch {
+constexpr std::uint32_t kVtable=0x0073FF8C,kDelete=0x005D2930,kDuplicate=0x005D2880,kGetType=0x005D2920,
+ kRemoveReferences=0x004BA230,kLoad=0x005D3690,kCrashSite=0x005D58EA;
+constexpr std::uint32_t kRing=1u<<16,kSeen=1u<<14;constexpr int kFrames=10,kSeenFrames=6;
+struct Deletion{volatile LONG seq;std::uint32_t object,thread,flag;std::int64_t ticks;std::uint32_t frames[kFrames];};
+struct Seen{volatile LONG object,deleted;std::uint32_t thread,source;std::int64_t ticks;std::uint32_t frames[kSeenFrames];
+ volatile LONG changed_value;std::int64_t changed_ticks;};
+Deletion* g_ring=nullptr;Seen* g_seen=nullptr;volatile LONG g_next=0,g_seen_drops=0,g_crash_taken=0;
+std::uintptr_t g_image=0,g_text=0,g_text_end=0;std::uint32_t* g_slots=nullptr;
+std::uint32_t g_original_delete=0,g_original_get_type=0,g_original_load=0;
+PVOID g_handler=nullptr;HANDLE g_watch_stop=nullptr;
+std::int64_t now(){LARGE_INTEGER t{};QueryPerformanceCounter(&t);return t.QuadPart;}
+// Game-relative addresses (0x400000 base) of game .text return addresses on
+// the stack: the game does not keep frame pointers, so a frame walk stops
+// early. A value counts when a call instruction ends exactly before it.
+int scan_stack(const std::uint32_t* esp,std::uint32_t* out,int capacity){
+ const auto stack_base=static_cast<std::uintptr_t>(__readfsdword(4));int found=0;
+ for(int i=0;i<384&&found<capacity;++i){
+  if(reinterpret_cast<std::uintptr_t>(esp+i+1)>stack_base)break;
+  const std::uintptr_t v=esp[i];if(v<g_text+6||v>=g_text_end)continue;
+  const auto* c=reinterpret_cast<const std::uint8_t*>(v);
+  if(c[-5]==0xE8||(c[-2]==0xFF&&((c[-1]>>3)&7)==2)||(c[-3]==0xFF&&((c[-2]>>3)&7)==2)||(c[-6]==0xFF&&((c[-5]>>3)&7)==2))
+   out[found++]=static_cast<std::uint32_t>(v-g_image+0x400000u);
+ }
+ return found;
+}
+Seen* find_seen(std::uint32_t object,bool claim){
+ const std::uint32_t start=(object>>3)*2654435761u>>(32-14);
+ for(std::uint32_t i=0;i<64;++i){Seen& s=g_seen[(start+i)&(kSeen-1)];
+  const LONG held=s.object;if(held==static_cast<LONG>(object))return &s;
+  if(!held){if(!claim)return nullptr;
+   const LONG prior=InterlockedCompareExchange(&s.object,static_cast<LONG>(object),0);
+   if(!prior||prior==static_cast<LONG>(object))return &s;}
+ }
+ if(claim)InterlockedIncrement(&g_seen_drops);
+ return nullptr;
+}
+void __stdcall on_delete(std::uint32_t object,const std::uint32_t* esp){
+ const LONG seq=InterlockedIncrement(&g_next);
+ Deletion& d=g_ring[static_cast<std::uint32_t>(seq-1)&(kRing-1)];
+ d.seq=0;d.object=object;d.thread=GetCurrentThreadId();d.flag=esp[1];d.ticks=now();
+ std::memset(d.frames,0,sizeof(d.frames));scan_stack(esp,d.frames,kFrames);
+ InterlockedExchange(&d.seq,seq);
+ if(Seen* s=find_seen(object,false))InterlockedExchange(&s->deleted,1);
+}
+// source 1 = GetType (called as a fear is added), 2 = Load. A sighting is
+// refreshed after its object was deleted (address reuse) or on every Load.
+void __stdcall on_seen(std::uint32_t object,const std::uint32_t* esp,std::uint32_t source){
+ Seen* s=find_seen(object,true);if(!s)return;
+ if(s->ticks&&!s->deleted&&source==1)return;
+ s->deleted=1;s->thread=GetCurrentThreadId();s->source=source;s->changed_ticks=0;s->changed_value=0;
+ std::memset(s->frames,0,sizeof(s->frames));scan_stack(esp,s->frames,kSeenFrames);s->ticks=now();
+ InterlockedExchange(&s->deleted,0);
+}
+__declspec(naked) void delete_thunk(){__asm{
+ pushad
+ lea eax,[esp+32]
+ push eax
+ push ecx
+ call on_delete
+ popad
+ jmp dword ptr [g_original_delete]
+}}
+__declspec(naked) void get_type_thunk(){__asm{
+ pushad
+ lea eax,[esp+32]
+ push 1
+ push eax
+ push ecx
+ call on_seen
+ popad
+ jmp dword ptr [g_original_get_type]
+}}
+__declspec(naked) void load_thunk(){__asm{
+ pushad
+ lea eax,[esp+32]
+ push 2
+ push eax
+ push ecx
+ call on_seen
+ popad
+ jmp dword ptr [g_original_load]
+}}
+// A live (not deleted) object whose vtable dword stops being CUMFear's gets
+// the time and the new value, once per sighting. The destructor thunk marks
+// the object deleted before the stock destructor rewrites the vtable, so
+// the second deleted check rejects a legitimate deletion.
+DWORD WINAPI watch(void*){
+ while(WaitForSingleObject(g_watch_stop,20)==WAIT_TIMEOUT){
+  for(std::uint32_t i=0;i<kSeen;++i){Seen& s=g_seen[i];
+   const LONG object=s.object;if(!object||s.deleted||s.changed_ticks||!s.ticks)continue;
+   std::uint32_t value=0;
+   __try{value=*reinterpret_cast<const volatile std::uint32_t*>(static_cast<std::uintptr_t>(object));}
+   __except(EXCEPTION_EXECUTE_HANDLER){value=0xFFFFFFFFu;}
+   if(value==g_image+kVtable-0x400000u||s.deleted)continue;
+   s.changed_value=static_cast<LONG>(value);s.changed_ticks=now();
+  }
+ }
+ return 0;
+}
+void format_frames(char* out,const std::uint32_t* frames,int count){
+ int used=0;out[0]='-';out[1]=0;
+ for(int i=0;i<count&&frames[i];++i)used+=wsprintfA(out+used,i?",%08lX":"%08lX",static_cast<unsigned long>(frames[i]));
+}
+unsigned long ms_before(std::int64_t then,std::int64_t at){
+ LARGE_INTEGER f{};QueryPerformanceFrequency(&f);return then?static_cast<unsigned long>((at-then)*1000/f.QuadPart):0ul;
+}
+LONG CALLBACK on_exception(EXCEPTION_POINTERS* info){
+ if(info->ExceptionRecord->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION||
+  reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress)!=g_image+kCrashSite-0x400000u||
+  InterlockedExchange(&g_crash_taken,1))return EXCEPTION_CONTINUE_SEARCH;
+ const std::int64_t at=now();const CONTEXT* c=info->ContextRecord;const std::uint32_t object=c->Ecx;
+ const Deletion* last=nullptr;unsigned long deletions=0;
+ for(std::uint32_t i=0;i<kRing;++i){const Deletion& d=g_ring[i];
+  if(!d.seq||d.object!=object)continue;++deletions;if(!last||d.seq>last->seq)last=&d;}
+ std::uint32_t head[2]{};
+ __try{head[0]=reinterpret_cast<const std::uint32_t*>(static_cast<std::uintptr_t>(object))[0];
+  head[1]=reinterpret_cast<const std::uint32_t*>(static_cast<std::uintptr_t>(object))[1];}
+ __except(EXCEPTION_EXECUTE_HANDLER){head[0]=head[1]=0xFFFFFFFFu;}
+ const Seen* seen=find_seen(object,false);if(seen&&!seen->ticks)seen=nullptr;
+ char delete_stack[128],seen_stack[80];
+ format_frames(delete_stack,last?last->frames:nullptr,last?kFrames:0);
+ format_frames(seen_stack,seen?seen->frames:nullptr,seen?kSeenFrames:0);
+ char detail[600];
+ wsprintfA(detail,"object=%08lX head=%08lX,%08lX deleted=%s deletions_of_object=%lu delete_ms_before_crash=%lu delete_thread=%lu delete_flag=%lu "
+  "delete_stack=%s crash_thread=%lu seen=%s seen_ms_before_crash=%lu seen_thread=%lu seen_stack=%s vtable_change_ms_before_crash=%lu "
+  "vtable_change_value=%08lX edi=%08lX esi=%08lX ring_total=%lu seen_drops=%ld",
+  static_cast<unsigned long>(object),static_cast<unsigned long>(head[0]),static_cast<unsigned long>(head[1]),!last?"no":!seen||last->ticks>=seen->ticks?"yes":"before_last_sighting",deletions,
+  last?ms_before(last->ticks,at):0ul,last?static_cast<unsigned long>(last->thread):0ul,last?static_cast<unsigned long>(last->flag):0ul,
+  delete_stack,GetCurrentThreadId(),!seen?"no":seen->source==2?"load":"get_type",seen?ms_before(seen->ticks,at):0ul,
+  seen?static_cast<unsigned long>(seen->thread):0ul,seen_stack,seen&&seen->changed_ticks?ms_before(seen->changed_ticks,at):0ul,
+  seen?static_cast<unsigned long>(seen->changed_value):0ul,static_cast<unsigned long>(c->Edi),static_cast<unsigned long>(c->Esi),
+  static_cast<unsigned long>(g_next),g_seen_drops);
+ stall_watchdog::append("fear_watch_crash",detail);
+ if(!stall_watchdog::g_write_dump){stall_watchdog::append("fear_watch_dump","result=dbghelp_unavailable");return EXCEPTION_CONTINUE_SEARCH;}
+ SYSTEMTIME t{};GetLocalTime(&t);char name[64],path[MAX_PATH+80];
+ wsprintfA(name,"crash-005D58EA-%04u%02u%02u-%02u%02u%02u.dmp",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);
+ wsprintfA(path,"%s\\%s",stall_watchdog::g_root,name);
+ HANDLE file=CreateFileA(path,GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+ if(file==INVALID_HANDLE_VALUE){wsprintfA(detail,"result=create_failed error=%lu",GetLastError());stall_watchdog::append("fear_watch_dump",detail);return EXCEPTION_CONTINUE_SEARCH;}
+ MINIDUMP_EXCEPTION_INFORMATION exception{GetCurrentThreadId(),info,FALSE};
+ const auto type=static_cast<MINIDUMP_TYPE>(MiniDumpWithFullMemory|MiniDumpWithHandleData|MiniDumpWithThreadInfo|
+  MiniDumpWithFullMemoryInfo|MiniDumpWithUnloadedModules);
+ const BOOL ok=stall_watchdog::g_write_dump(GetCurrentProcess(),GetCurrentProcessId(),file,type,&exception,nullptr,nullptr);
+ const DWORD error=ok?0:GetLastError();LARGE_INTEGER size{};GetFileSizeEx(file,&size);CloseHandle(file);
+ wsprintfA(detail,"result=%s error=%08lx mb=%lu dump=%s",ok?"ok":"failed",error,static_cast<unsigned long>(size.QuadPart>>20),name);
+ stall_watchdog::append("fear_watch_dump",detail);
+ return EXCEPTION_CONTINUE_SEARCH;
+}
+bool write_slot(int slot,std::uint32_t value){
+ DWORD protection=0,ignored=0;if(!VirtualProtect(g_slots+slot,4,PAGE_READWRITE,&protection))return false;
+ InterlockedExchange(reinterpret_cast<volatile LONG*>(g_slots+slot),static_cast<LONG>(value));
+ VirtualProtect(g_slots+slot,4,protection,&ignored);return true;
+}
+void install(){
+ static bool attempted=false;if(attempted)return;attempted=true;
+ char value[4]{};if(GetEnvironmentVariableA("EID3D11_FEAR_WATCH",value,sizeof(value))!=1||value[0]!='1')return;
+ g_image=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+ const auto rebase=[](std::uint32_t va){return g_image+va-0x400000u;};
+ const auto* headers=reinterpret_cast<const IMAGE_NT_HEADERS*>(g_image+reinterpret_cast<const IMAGE_DOS_HEADER*>(g_image)->e_lfanew);
+ const auto* text=IMAGE_FIRST_SECTION(headers);
+ g_text=g_image+text->VirtualAddress;g_text_end=g_text+text->Misc.VirtualSize;
+ g_slots=reinterpret_cast<std::uint32_t*>(rebase(kVtable));
+ // The stock slot values, then the stock bytes of the hooked functions and
+ // of the crash site (mov ecx,[eax+8]; mov eax,[ecx]; call [eax+28h]).
+ static const std::uint8_t delete_bytes[]={0x56,0x8B,0xF1,0xE8,0x18,0x00,0x00,0x00,0xF6,0x44,0x24,0x08,0x01,0x74,0x09,0x56,
+  0xE8,0x93,0xDC,0x12,0x00,0x83,0xC4,0x04,0x8B,0xC6,0x5E,0xC2,0x04,0x00};
+ static const std::uint8_t get_type_bytes[]={0xB8,0x07,0x00,0x00,0x00,0xC3};
+ static const std::uint8_t load_bytes[]={0x56,0x8B,0x74,0x24,0x08,0x57,0x8B,0xF9};
+ static const std::uint8_t crash_bytes[]={0x8B,0x48,0x08,0x8B,0x01,0xFF,0x50,0x28};
+ const std::uint32_t expected[][2]={{0,kDelete},{3,kDuplicate},{8,kGetType},{10,kRemoveReferences},{11,kLoad}};
+ const char* reason=nullptr;
+ if(text->VirtualAddress!=0x1000||std::memcmp(text->Name,".text",6))reason="text_section_differs";
+ for(const auto& e:expected)if(!reason&&g_slots[e[0]]!=rebase(e[1]))reason="vtable_slot_differs";
+ if(!reason&&(std::memcmp(reinterpret_cast<void*>(rebase(kDelete)),delete_bytes,sizeof(delete_bytes))||
+  std::memcmp(reinterpret_cast<void*>(rebase(kGetType)),get_type_bytes,sizeof(get_type_bytes))||
+  std::memcmp(reinterpret_cast<void*>(rebase(kLoad)),load_bytes,sizeof(load_bytes))||
+  std::memcmp(reinterpret_cast<void*>(rebase(kCrashSite-5)),crash_bytes,sizeof(crash_bytes))))reason="function_bytes_differ";
+ if(!reason){
+  g_ring=static_cast<Deletion*>(VirtualAlloc(nullptr,sizeof(Deletion)*kRing,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+  g_seen=static_cast<Seen*>(VirtualAlloc(nullptr,sizeof(Seen)*kSeen,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+  g_watch_stop=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+  if(!g_ring||!g_seen||!g_watch_stop)reason="allocation_failed";
+ }
+ if(reason){stall_watchdog::append("fear_watch_rejected",reason);return;}
+ g_handler=AddVectoredExceptionHandler(1,on_exception);
+ g_original_delete=g_slots[0];g_original_get_type=g_slots[8];g_original_load=g_slots[11];
+ const bool ok=write_slot(0,reinterpret_cast<std::uint32_t>(&delete_thunk))&&write_slot(8,reinterpret_cast<std::uint32_t>(&get_type_thunk))&&
+  write_slot(11,reinterpret_cast<std::uint32_t>(&load_thunk));
+ if(HANDLE thread=CreateThread(nullptr,0,watch,nullptr,0,nullptr))CloseHandle(thread);
+ char detail[160];wsprintfA(detail,"result=%s vtable=%08lX ring=%lu seen=%lu",ok?"ok":"protect_failed",
+  static_cast<unsigned long>(kVtable),static_cast<unsigned long>(kRing),static_cast<unsigned long>(kSeen));
+ stall_watchdog::append("fear_watch_installed",detail);
+}
+// DLL unload only: put the stock slots back and stop observing.
+void uninstall(){
+ if(!g_original_delete)return;
+ write_slot(0,g_original_delete);write_slot(8,g_original_get_type);write_slot(11,g_original_load);g_original_delete=0;
+ if(g_watch_stop)SetEvent(g_watch_stop);
+ if(g_handler){RemoveVectoredExceptionHandler(g_handler);g_handler=nullptr;}
+}
+}
+// Startup crash #160: Windows dinput.dll (32-bit, PE timestamp 871200FE)
+// walks its HID device table (count, capacity, then 0x48-byte entries) in
+// the function at +1A304 and reads entry[i]+44 before it checks i < count
+// (+1A353: cmp [esi+44h],0 / je +1A3AD; cmp edi,[ecx] / jge +1A3AD). With a
+// full table that read lands one entry past the block; at a heap commit edge
+// it faults inside DirectInputCreate (game CInputManager::Create). Once
+// edi >= count both branches go to +1A3AD, so resuming there is exactly the
+// stock result. Installed at DLL attach, before the game's WinMain.
+namespace dinput_guard {
+constexpr std::uint32_t kSite=0x1A353,kResume=0x1A3AD,kTimestamp=0x871200FE,kImageSize=0x27000;
+volatile LONG g_fired=0,g_logged=0;char g_detail[160]{};
+void log_pending(){
+ if(g_fired&&stall_watchdog::g_root[0]&&!InterlockedExchange(&g_logged,1))stall_watchdog::append("dinput_overread_guard",g_detail);
+}
+LONG CALLBACK on_exception(EXCEPTION_POINTERS* info){
+ const EXCEPTION_RECORD* record=info->ExceptionRecord;CONTEXT* c=info->ContextRecord;
+ if(record->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION||record->NumberParameters<2||record->ExceptionInformation[0]!=0||!c)
+  return EXCEPTION_CONTINUE_SEARCH;
+ HMODULE owner=nullptr;
+ if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+  static_cast<LPCSTR>(record->ExceptionAddress),&owner)||!owner)return EXCEPTION_CONTINUE_SEARCH;
+ const auto base=reinterpret_cast<std::uintptr_t>(owner);
+ if(reinterpret_cast<std::uintptr_t>(record->ExceptionAddress)!=base+kSite)return EXCEPTION_CONTINUE_SEARCH;
+ static const std::uint8_t site[]={0x85,0xF6,0x74,0x5A,0x83,0x7E,0x44,0x00,0x74,0x54,0x3B,0x39,0x7D,0x50};
+ static const std::uint8_t resume[]={0x85,0xC0,0x0F,0x84,0xE4,0x00,0x00,0x00};
+ const auto* headers=reinterpret_cast<const IMAGE_NT_HEADERS*>(base+reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+ if(headers->FileHeader.TimeDateStamp!=kTimestamp||headers->OptionalHeader.SizeOfImage!=kImageSize||
+  std::memcmp(reinterpret_cast<const void*>(base+kSite-4),site,sizeof(site))||
+  std::memcmp(reinterpret_cast<const void*>(base+kResume),resume,sizeof(resume))||
+  record->ExceptionInformation[1]!=c->Esi+0x44||!c->Ecx)return EXCEPTION_CONTINUE_SEARCH;
+ LONG count=0;
+ __try{count=*reinterpret_cast<const volatile LONG*>(static_cast<std::uintptr_t>(c->Ecx));}
+ __except(EXCEPTION_EXECUTE_HANDLER){return EXCEPTION_CONTINUE_SEARCH;}
+ if(static_cast<LONG>(c->Edi)<count)return EXCEPTION_CONTINUE_SEARCH;
+ if(!InterlockedExchange(&g_fired,1))
+  wsprintfA(g_detail,"resumed=dinput+%05lX table=%08lX count=%ld index=%lu fault=%08lX thread=%lu",
+   static_cast<unsigned long>(kResume),static_cast<unsigned long>(c->Ecx),count,static_cast<unsigned long>(c->Edi),
+   static_cast<unsigned long>(record->ExceptionInformation[1]),GetCurrentThreadId());
+ c->Eip=static_cast<DWORD>(base+kResume);
+ log_pending();
+ return EXCEPTION_CONTINUE_EXECUTION;
+}
+PVOID g_handler=nullptr;
+}
 // The game's cursor GetCursorPos/SetCursorPos call sites (`call [import]`,
 // FF 15 imm32) read the redirected entries instead. All sites must carry the
 // stock bytes or none is changed (sites also in game_sites.h). Verified on game.exe SHA-256 be0fc330...:
@@ -238,6 +610,9 @@ void install_game_cursor_coordinates(bool sites_ok){
 
 void install_runtime_bridges(){
  window_sampler::start();
+ stall_watchdog::start();
+ dinput_guard::log_pending();
+ fear_watch::install();
  bridge_set_completed_visual_surface_reader(&proxy_completed_visual_surface);
  // Stock widescreen first; foreign layouts reject visibly. The bridge then
  // chains its native HUD, character-pane and camera hooks above ours.
@@ -345,17 +720,59 @@ HANDLE open_exceptions_log(){
 [[noreturn]] void terminate_trace(){fatal_trace("terminate");}
 void __cdecl purecall_trace(){fatal_trace("purecall");}
 
+// Repeats are capped: each distinct exception (code, module, offset and,
+// for a C++ throw, the thrown type) is logged its first 8 times, then at
+// each power of two of its count; the whole session writes at most 4096
+// lines. A repeat that is not logged returns before any file or stack work.
+// Lock-free (a vectored handler can run on any thread, nested in itself).
+struct ExceptionTraceKey{volatile LONG64 key;volatile LONG count;};
+ExceptionTraceKey g_exception_keys[512]{};
+volatile LONG g_exception_lines=0;
+constexpr LONG kExceptionLineCap=4096;
+// The occurrence count of this key (0: not tracked, the table is full).
+LONG exception_trace_count(std::uint64_t key){
+ if(!key)key=1; // 0 marks a free slot
+ for(unsigned probe=0;probe<std::size(g_exception_keys);++probe){
+  auto& slot=g_exception_keys[(static_cast<unsigned>(key)+static_cast<unsigned>(key>>32)+probe)%std::size(g_exception_keys)];
+  const LONG64 seen=InterlockedCompareExchange64(&slot.key,static_cast<LONG64>(key),0);
+  if(seen==0||seen==static_cast<LONG64>(key))return InterlockedIncrement(&slot.count);
+ }
+ return 0;
+}
+// Each line names the faulting module and the offset from its load base
+// (ddraw.dll RVAs match the map at 0x10000000+RVA); the first line of a
+// session records the game and ddraw.dll load bases.
 LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
  if(!pointers||!pointers->ExceptionRecord)return EXCEPTION_CONTINUE_SEARCH;auto* record=pointers->ExceptionRecord;
  if(record->ExceptionCode!=0xE06D7363u&&record->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION)return EXCEPTION_CONTINUE_SEARCH;
- char modulePath[MAX_PATH]{};HMODULE owner{};GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCSTR>(record->ExceptionAddress),&owner);if(owner)GetModuleFileNameA(owner,modulePath,MAX_PATH);
+ if(g_exception_lines>=kExceptionLineCap)return EXCEPTION_CONTINUE_SEARCH;
+ HMODULE owner{};GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCSTR>(record->ExceptionAddress),&owner);
+ LONG occurrence=0;
+ {
+  const auto offset=owner?static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(record->ExceptionAddress)-reinterpret_cast<std::uintptr_t>(owner)):0u;
+  const std::uint64_t thrown=record->ExceptionCode==0xE06D7363u&&record->NumberParameters>2?record->ExceptionInformation[2]:0u;
+  std::uint64_t key=(std::uint64_t(record->ExceptionCode)<<32)^offset;
+  key^=(std::uint64_t(reinterpret_cast<std::uintptr_t>(owner))*0x9E3779B97F4A7C15ull)^(thrown*0xC2B2AE3D27D4EB4Full);
+  occurrence=exception_trace_count(key);
+  if(occurrence>8&&(occurrence&(occurrence-1))!=0)return EXCEPTION_CONTINUE_SEARCH;
+ }
+ if(InterlockedIncrement(&g_exception_lines)>kExceptionLineCap)return EXCEPTION_CONTINUE_SEARCH;
+ char modulePath[MAX_PATH]{};if(owner)GetModuleFileNameA(owner,modulePath,MAX_PATH);
  HANDLE file=open_exceptions_log();if(file==INVALID_HANDLE_VALUE)return EXCEPTION_CONTINUE_SEARCH;
- // For a C++ throw p2 is the thrown type's ThrowInfo, inside the throwing module.
- char line[512]{};ULONG_PTR p0=record->NumberParameters>0?record->ExceptionInformation[0]:0,p1=record->NumberParameters>1?record->ExceptionInformation[1]:0,p2=record->NumberParameters>2?record->ExceptionInformation[2]:0;SYSTEMTIME now{};GetLocalTime(&now);int length=wsprintfA(line,"%02u:%02u:%02u.%03u code=%08lX address=%p p0=%p p1=%p p2=%p module=%s\r\n",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,record->ExceptionCode,record->ExceptionAddress,(void*)p0,(void*)p1,(void*)p2,modulePath);DWORD written{};WriteFile(file,line,(DWORD)length,&written,nullptr);
- // Temporary (alt-tab exit): for an access violation in game.exe, the game
- // return addresses found on the faulting stack name the caller chain.
  const auto image=reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
- if(record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION&&owner==reinterpret_cast<HMODULE>(image)&&pointers->ContextRecord){
+ MODULEINFO self{};GetModuleInformation(GetCurrentProcess(),g_module,&self,sizeof(self));
+ const std::uintptr_t ddrawBase=reinterpret_cast<std::uintptr_t>(self.lpBaseOfDll),ddrawEnd=ddrawBase+self.SizeOfImage;
+ DWORD written{};char line[512]{};SYSTEMTIME now{};GetLocalTime(&now);
+ static LONG sessionLogged=0;
+ if(InterlockedExchange(&sessionLogged,1)==0){int length=wsprintfA(line,"%02u:%02u:%02u.%03u session pid=%lu game_base=%08lX ddraw_base=%08lX ddraw_size=%08lX\r\n",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,GetCurrentProcessId(),static_cast<unsigned long>(image),static_cast<unsigned long>(ddrawBase),static_cast<unsigned long>(self.SizeOfImage));WriteFile(file,line,(DWORD)length,&written,nullptr);}
+ // For a C++ throw p2 is the thrown type's ThrowInfo, inside the throwing module.
+ ULONG_PTR p0=record->NumberParameters>0?record->ExceptionInformation[0]:0,p1=record->NumberParameters>1?record->ExceptionInformation[1]:0,p2=record->NumberParameters>2?record->ExceptionInformation[2]:0;
+ const auto faultOffset=owner?static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(record->ExceptionAddress)-reinterpret_cast<std::uintptr_t>(owner)):0ul;
+ int length=wsprintfA(line,"%02u:%02u:%02u.%03u code=%08lX address=%p offset=+%06lX thread=%lu p0=%p p1=%p p2=%p module=%s count=%ld%s\r\n",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,record->ExceptionCode,record->ExceptionAddress,faultOffset,GetCurrentThreadId(),(void*)p0,(void*)p1,(void*)p2,modulePath,occurrence,g_exception_lines>=kExceptionLineCap?" (session line cap reached)":"");WriteFile(file,line,(DWORD)length,&written,nullptr);
+ // For an access violation in game.exe or ddraw.dll, the return addresses
+ // found on the faulting stack name the caller chain: game addresses at the
+ // 0x400000 image base, ddraw.dll ones as d+RVA.
+ if(record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION&&(owner==reinterpret_cast<HMODULE>(image)||owner==g_module)&&pointers->ContextRecord){
   const auto* headers=reinterpret_cast<const IMAGE_NT_HEADERS*>(image+reinterpret_cast<const IMAGE_DOS_HEADER*>(image)->e_lfanew);
   const std::uintptr_t text_end=image+headers->OptionalHeader.SizeOfImage;
   char trace[1024]{};int used=wsprintfA(trace,"  stack:");int found=0;
@@ -364,6 +781,7 @@ LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
    std::uintptr_t value=0;
    __try{value=slot[i];}__except(EXCEPTION_EXECUTE_HANDLER){break;}
    if(value>image+0x1000&&value<text_end){used+=wsprintfA(trace+used," %08lX",static_cast<unsigned long>(value-image+0x400000));++found;}
+   else if(value>ddrawBase+0x1000&&value<ddrawEnd){used+=wsprintfA(trace+used," d+%06lX",static_cast<unsigned long>(value-ddrawBase));++found;}
   }
   used+=wsprintfA(trace+used,"\r\n");WriteFile(file,trace,(DWORD)used,&written,nullptr);
  }
@@ -528,17 +946,40 @@ private:
  std::atomic<ULONG> refs_{1};DD* owner_{};DDSURFACEDESC2 desc_{};SurfaceImage image_{};Surface* attached_{};HDC dc_{};HBITMAP dc_bitmap_{};HGDIOBJ dc_old_bitmap_{};void* dc_bits_{};HDC owned_text_dc_{};HBITMAP owned_text_bitmap_{};HGDIOBJ owned_text_old_bitmap_{};void* owned_text_bits_{};RECT locked_rect_{};DWORD locked_flags_{};HudAtlasMutationSnapshot hud_atlas_snapshot_{};bool dc_active_{};bool dc_owned_text_{};bool lost_{};bool locked_{};bool has_key_{};DDCOLORKEY key_{};DWORD unique_{1},priority_{},lod_{};
 };
 
-HRESULT resolve_proxy_surface_texture(void* context,ID3D11Device*,std::uint64_t id,std::uint64_t generation,ComPtr<ID3D11Texture2D>& texture);
+HRESULT resolve_proxy_surface_texture(void* context,ID3D11Device*,std::uint64_t id,std::uint64_t generation,ComPtr<ID3D11Texture2D>& texture,SurfaceImage*& image_out);
+// Scene thread (render_thread option): the renderer resolves completed visual
+// sources on the scene thread, which never touches a proxy Surface. The game
+// thread registers each published generation's GPU home here (uploaded on the
+// game thread); a miss is requested back and serviced at the next present.
+struct SceneSurfaceTexture{std::uint64_t generation=0;ComPtr<ID3D11Texture2D> texture;};
+std::mutex g_scene_surface_lock;
+std::unordered_map<std::uint64_t,SceneSurfaceTexture> g_scene_surface_textures;
+std::vector<std::pair<std::uint64_t,std::uint64_t>> g_scene_surface_requests;
+void scene_surface_texture_erase(std::uint64_t id) noexcept{
+ std::lock_guard<std::mutex> guard(g_scene_surface_lock);g_scene_surface_textures.erase(id);
+}
 class Device;
 class DD final:public IDirectDraw7,public IDirect3D7 {
 public:
  DD(){trace("DD.Create");owned_resource_runtime_acquire(EngineBridge::instance().resource_registry_key());renderer.set_surface_texture_resolver(&resolve_proxy_surface_texture,this);}
  ~DD(){trace("DD.Destroy");renderer.release();owned_resource_runtime_release();}
  Renderer renderer; HWND hwnd{};DWORD width{800},height{600},bpp{32},coop{};Surface* primary{};Surface* active_target{};Device* active_device{};
+ // Device removal (driver timeout/TDR). The game treats a failed present,
+ // blit or lock as fatal: game.exe 480080 shows "Can't flip render surface"
+ // and calls exit(-1), whose CRT destructors then call a UI screen it has
+ // already freed (5F7F80 via 667BA0). So a failed call that finds the device
+ // removed never returns to the game: it logs once, tells the player and
+ // ends the process. A working device only adds one FAILED() test per call.
+ HRESULT checkDevice(HRESULT hr){
+  if(FAILED(hr)){const HRESULT reason=renderer.device_removed_reason();if(FAILED(reason))deviceRemovedExit(reason);}
+  return hr;
+ }
+ [[noreturn]] void deviceRemovedExit(HRESULT reason) noexcept;
  bool startup_display_pending=true;
  void applyDisplay(const owned::DisplaySettings& settings);
  void invalidateVisualOutput() noexcept{if(active_target)active_target->invalidateVisualCpu();if(primary&&primary!=active_target)primary->invalidateVisualCpu();}
- HRESULT flushVisualUi(){if(renderer.has_pending_ui())invalidateVisualOutput();return renderer.flush_ui();}
+ HRESULT flushVisualUi(){if(renderer.has_pending_ui())invalidateVisualOutput();else if(renderer.scene_queue())return DD_OK;return renderer.flush_ui();}
+ void serviceSceneSurfaceRequests() noexcept;
  // Renderer-owned cursor: the game's current frame, extracted from its strip
  // and scaled once per (strip content, frame, scale), drawn after all UI.
  std::uint64_t owned_cursor_key=0;std::vector<std::uint32_t> owned_cursor_pixels;UINT owned_cursor_width=0,owned_cursor_height=0;
@@ -552,6 +993,12 @@ public:
  void queueOwnedCursor(){
   // Publication is per presentation, including an absent native cursor.
   renderer.queue_cursor(0,owned_cursor_pixels,0,0,RECT{});
+  // While the loading picture is held the same frame is the system cursor
+  // (cursor_image.h); every other present, and any frame that cannot be
+  // shown, returns to the owned cursor and the game's hidden system cursor.
+  const bool load_cursor=renderer.load_cursor_wanted();bool load_cursor_shown=false;
+  struct LoadCursorScope{bool& shown;~LoadCursorScope(){if(!shown)owned::hide_load_cursor();}} load_cursor_scope{load_cursor_shown};
+  if(video_picture_on_screen())return; // no cursor over a playing movie
   OwnedCursorFrame frame{};if(!bridge_owned_cursor_frame(frame)||!frame.visible)return;
   Surface* strip=ownedCursorSurface(frame.surface);if(!strip)return reportOwnedCursor("strip_not_a_proxy_surface");
   const SurfaceImage& image=*strip->image();
@@ -580,14 +1027,20 @@ public:
   const POINT hotspot=owned::game_native_to_output(hwnd,{frame.x+frame.hot_x,frame.y+frame.hot_y});
   const LONG hot_x=hotspot.x,hot_y=hotspot.y;
   const LONG left=hot_x-(LONG)std::lround(frame.hot_x*scale),top=hot_y-(LONG)std::lround(frame.hot_y*scale);
+  if(load_cursor){
+   if(owned::show_load_cursor(owned_cursor_key,owned_cursor_pixels,owned_cursor_width,owned_cursor_height,
+       (std::uint32_t)(std::max)(0L,hot_x-left),(std::uint32_t)(std::max)(0L,hot_y-top))){load_cursor_shown=true;return;}
+   reportOwnedCursor("load_cursor_create_failed"); // the owned cursor draws on the held frames instead
+  }
   renderer.queue_cursor(owned_cursor_key,owned_cursor_pixels,owned_cursor_width,owned_cursor_height,
    RECT{left,top,left+(LONG)owned_cursor_width,top+(LONG)owned_cursor_height});
  }
  HRESULT presentVisual(){
   ++g_present_serial;
+  if(renderer.scene_queue()){serviceSceneSurfaceRequests();bridge_update_combat_portraits();}
   for(std::size_t i=g_dc_holders.size();i-->0;)g_dc_holders[i]->sweepDcStorage();
   queueOwnedCursor();
-  PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::proxy);invalidateVisualOutput();timing.finish();const HRESULT hr=renderer.present();
+  PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::proxy);invalidateVisualOutput();timing.finish();const HRESULT hr=checkDevice(renderer.present());
   if(FAILED(hr)){static unsigned reported=0;if(reported<8){++reported;char detail[96];std::snprintf(detail,sizeof(detail),"hr=%08lx static_draws=%zu",
    static_cast<unsigned long>(hr),renderer.native_static_draw_count());owned::bridge_append_probe_event("present_failed",detail);}}
   if(SUCCEEDED(hr)){
@@ -816,6 +1269,173 @@ private:
  std::atomic<ULONG> refs_{1};DD* core_{};
 };
 
+// ---- Scene thread (render_thread option): native sinks over a device copy ---
+// The bridge's queued world commands (the retained scene seam, transparent
+// terrain, wound layers) submit through these on the scene thread. They do
+// what the Device sinks do, with the D3D7 fixed state and frame state copied
+// when the command was queued (Device::captureSceneSinks), the stage-0 texture
+// the bridge binds as a snapshot, and a wound surface resolved to its
+// snapshot. The device's own bookkeeping (its pending legacy draws, UI flush,
+// native sequence) ran on the game thread before the command was queued.
+struct SceneSinks {
+ Renderer* renderer=nullptr;
+ FixedState state{};
+ NativeFrameState frame{};bool frame_valid=false;
+ std::shared_ptr<SurfaceImage> bound;
+ std::uintptr_t wound_interface=0;std::shared_ptr<SurfaceImage> wound;
+ bool sequence=false,batch_active=false,object_active=false;
+ Renderer::NativeQueueCheckpoint checkpoint{};
+ void flushUi(){if(renderer->has_pending_ui())(void)renderer->flush_ui();}
+ SurfaceImage* woundImage(std::uintptr_t surface_interface) const{return surface_interface&&surface_interface==wound_interface?wound.get():nullptr;}
+ static SceneSinks& of(void* context){return *static_cast<SceneSinks*>(context);}
+ static bool submit(void* context,const NativeGeometryView& view,NativeGeometryResult& result) noexcept{
+  try{
+   auto& self=of(context);auto& renderer=*self.renderer;result={};
+   if(!self.sequence){self.flushUi();self.sequence=true;}
+   if(view.static_submission){
+    const auto& request=*view.static_submission;
+    using Operation=NativeStaticSubmission::Operation;
+    request.generation=renderer.native_static_generation();
+    if(request.operation==Operation::generation)return true;
+    if(request.operation==Operation::shadow_static||request.operation==Operation::shadow_dynamic){
+     request.generation=renderer.set_native_shadow_phase(request.operation==Operation::shadow_static?1u:2u);return true;}
+    if(request.operation==Operation::terrain_frame){
+     if(!request.terrain_state){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.terrain_frame";return false;}
+     return SUCCEEDED(renderer.set_native_terrain_frame(*request.terrain_state,request.full_sun,request.layer_shifts));
+    }
+    if(request.operation==Operation::remove){renderer.remove_native_static_object(request.key,request.terrain);return true;}
+    if(request.operation==Operation::flush){
+     if(!request.world_to_clip){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_clip";return false;}
+     const HRESULT hr=request.terrain?renderer.flush_native_static_terrain(self.state,*request.world_to_clip):
+      renderer.flush_native_static(self.state,*request.world_to_clip);
+     if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="scene.static_flush";
+      char detail[96];std::snprintf(detail,sizeof(detail),"hr=%08lx draws=%zu",static_cast<unsigned long>(hr),renderer.native_static_draw_count());
+      owned::bridge_append_probe_event("static_flush_failed",detail);return false;}
+     return true;
+    }
+    bool registered=false;HRESULT hr=S_OK;
+    if(request.terrain){
+     if(!request.terrain_view){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_terrain_view";return false;}
+     const auto& terrain=*request.terrain_view;
+     const FixedState terrain_state=terrain.owned_fixed_state.enabled?native_owned_submission_state(self.state,terrain.owned_fixed_state):self.state;
+     hr=renderer.set_native_static_terrain(request.key,terrain,terrain_state,
+      terrain.owned_texture.identity?nullptr:self.bound.get(),registered,&result);
+     request.registered=registered;return SUCCEEDED(hr);
+    }
+    if(!request.records){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_records";return false;}
+    hr=renderer.set_native_static_object(request.key,*request.records,self.state,registered,&result);
+    request.registered=registered;
+    if(FAILED(hr)){char detail[160];std::snprintf(detail,sizeof(detail),"hr=%08lx op=%s",static_cast<unsigned long>(hr),
+     result.failure_operation?result.failure_operation:"-");owned::bridge_append_probe_event("static_set_failed",detail);}
+    return SUCCEEDED(hr);
+   }
+   if(view.depth_submission)return SUCCEEDED(renderer.queue_native_depth(*view.depth_submission,self.state,&result));
+   if(view.prepared_submission){
+    const auto& submission=*view.prepared_submission;SurfaceImage* wound=nullptr;
+    if(submission.wound_surface_interface){
+     wound=self.woundImage(submission.wound_surface_interface);
+     if(!wound){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.prepared_wound";return false;}
+    }
+    return SUCCEEDED(renderer.queue_native_records(submission,self.state,wound,&result));
+   }
+   const bool prepared=view.prepared_mesh&&view.prepared_material&&view.prepared_identity.valid;
+   const FixedState submission_state=view.owned_fixed_state.enabled?native_owned_submission_state(self.state,view.owned_fixed_state):self.state;
+   const auto queue=[&](const NativeGeometryView& packet,const FixedState& state,SurfaceImage* texture,NativeGeometryResult* output){
+    if(packet.owned_texture.identity)return renderer.queue_native_owned(packet,state,output);
+    return prepared?renderer.queue_native_prepared(packet,state,texture,output):renderer.queue_native(packet,state,texture,output);
+   };
+   SurfaceImage* wound=view.wound_surface_interface?self.woundImage(view.wound_surface_interface):nullptr;
+   if(view.wound_only&&!wound)return false;
+   const bool owned_depth=view.owned_fixed_state.enabled&&view.contribution.known&&!view.contribution.color&&view.contribution.light_mask;
+   if(!wound)return SUCCEEDED(queue(view,submission_state,view.owned_texture.identity||owned_depth?nullptr:self.bound.get(),&result));
+   if(!view.wound_only&&FAILED(queue(view,submission_state,self.bound.get(),&result)))return false;
+   FixedState wound_state=submission_state;
+   wound_state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;wound_state.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_INVSRCALPHA;
+   wound_state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=TRUE;wound_state.stage[0][D3DTSS_TEXCOORDINDEX]=0;
+   NativeGeometryView wound_view=view;wound_view.wound_surface_interface=0;wound_view.wound_only=false;wound_view.owned_texture={};
+   if(prepared)wound_view.prepared_material=view.prepared_wound_material;
+   if(prepared&&!wound_view.prepared_material)return false;
+   if(FAILED(prepared?renderer.queue_native_prepared(wound_view,wound_state,wound,view.wound_only?&result:nullptr):
+                      renderer.queue_native(wound_view,wound_state,wound,view.wound_only?&result:nullptr)))return !view.wound_only;
+   return true;
+  }catch(...){if(!result.failure_operation)result.failure_operation="scene.exception";return false;}
+ }
+ static bool beginBatch(void* context,SemanticKind) noexcept{
+  try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();
+   if(FAILED(self.renderer->flush_native()))return false;self.sequence=true;self.batch_active=true;return true;}catch(...){return false;}
+ }
+ static void endBatch(void* context,bool commit) noexcept{
+  try{auto& self=of(context);if(!self.batch_active)return;if(!commit)self.renderer->discard_native();self.batch_active=false;}catch(...){}
+ }
+ static bool beginObject(void* context) noexcept{
+  try{auto& self=of(context);if(self.object_active||!self.renderer->checkpoint_native(self.checkpoint))return false;self.object_active=true;return true;}catch(...){return false;}
+ }
+ static void endObject(void* context,bool commit) noexcept{
+  try{auto& self=of(context);if(!self.object_active)return;if(!commit)self.renderer->rollback_native(self.checkpoint);else self.renderer->release_native_checkpoint(self.checkpoint);self.object_active=false;}catch(...){}
+ }
+ static bool frameState(void* context,NativeFrameState& output) noexcept{
+  const auto& self=of(context);if(!self.frame_valid)return false;output=self.frame;return true;
+ }
+ static bool worldLighting(void* context,const NativeWorldLighting& lighting) noexcept{
+  try{return of(context).renderer->set_native_world_lighting(lighting);}catch(...){return false;}
+ }
+ static bool pointLights(void* context,const RetainedVisualFrame& frame) noexcept{
+  try{return of(context).renderer->set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}
+ }
+ static bool pointShadowBatch(void* context,std::uint64_t& generation,bool& pressure) noexcept{
+  try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();self.sequence=true;
+   return self.renderer->begin_native_point_shadow_batch(generation,&pressure);}catch(...){return false;}
+ }
+ static bool pointShadowAllocate(void* context,bool overlay,int& slot) noexcept{return of(context).renderer->allocate_native_point_shadow(overlay,slot);}
+ static void pointShadowRelease(void* context,std::uint64_t generation,int slot) noexcept{of(context).renderer->release_native_point_shadow(generation,slot);}
+ static void pointShadowPublish(void* context,const std::vector<NativePointShadowPublication>& lights,const NativePointShadowStats& stats) noexcept{
+  try{of(context).renderer->publish_native_point_shadows(lights,stats);}catch(...){}
+ }
+ static bool pointShadowFaces(void* context,std::uint32_t light,std::uint32_t first_face,const NativePointShadowFrame& faces) noexcept{
+  try{auto& self=of(context);if(self.batch_active)return false;self.sequence=true;
+   return self.renderer->begin_native_point_shadow_faces(light,first_face,faces);}catch(...){return false;}
+ }
+ static bool pointShadowFacesEnd(void* context,bool commit) noexcept{try{return of(context).renderer->end_native_point_shadow_faces(commit);}catch(...){return false;}}
+ static void cullProjection(void* context,NativeShadowCullProjection& projection) noexcept{of(context).renderer->native_shadow_cull_projection(projection);}
+ static bool shadowsBegin(void* context,const NativeShadowFrame& frame,std::uint8_t& dirty) noexcept{
+  try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();self.sequence=true;
+   return self.renderer->begin_native_shadows(frame,dirty);}catch(...){return false;}
+ }
+ static bool shadowsEnd(void* context,bool commit) noexcept{try{return of(context).renderer->end_native_shadows(commit);}catch(...){return false;}}
+ static bool staticDepth(void* context,const RetainedShadowCasterValue* casters,std::uint32_t count,std::uint64_t store_revision,
+  std::vector<RetainedShadowCasterValue>& missing) noexcept{
+  try{return of(context).renderer->queue_native_static_shadow_depth(casters,count,store_revision,missing);}catch(...){return false;}
+ }
+ static bool terrainBake(void* context,const NativeTerrainShadowEntry* entries,std::uint32_t count,std::vector<std::uint32_t>& absent) noexcept{
+  try{return of(context).renderer->queue_native_terrain_shadow_bake(entries,count,absent);}catch(...){return false;}
+ }
+ static void shadowDiagnostics(void* context,std::uint64_t world_serial,const NativeShadowSourceDiagnostics& values) noexcept{
+  try{of(context).renderer->record_native_shadow_source_diagnostics(world_serial,values);}catch(...){}
+ }
+ static bool rainBegin(void* context,const NativeShadowSlice& slice,std::uint32_t side) noexcept{
+  try{auto& self=of(context);if(self.batch_active)return false;self.sequence=true;
+   return self.renderer->begin_native_rain_occlusion(slice,side);}catch(...){return false;}
+ }
+ static bool rainEnd(void* context,bool commit) noexcept{try{return of(context).renderer->end_native_rain_occlusion(commit);}catch(...){return false;}}
+ static void install(void* context) noexcept{
+  // The shelter (rain occlusion) sinks are thread-local like the others: the
+  // scene thread's world preparation bakes through these.
+  if(!context){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_rain_occlusion_sink(nullptr,nullptr);return;}
+  bridge_set_rain_occlusion_sink(&rainBegin,&rainEnd);
+  bridge_set_native_geometry_sink(context,&submit,&beginBatch,&endBatch,&beginObject,&endObject,&frameState,&worldLighting,
+   &shadowsBegin,&shadowsEnd,&shadowDiagnostics,&pointLights,&pointShadowFaces,&pointShadowFacesEnd,&staticDepth,
+   &pointShadowBatch,&pointShadowPublish,&pointShadowAllocate,&pointShadowRelease,&cullProjection,&terrainBake);
+ }
+ static void bind(void* context,const std::shared_ptr<SurfaceImage>& texture) noexcept{of(context).bound=texture;}
+ static void adopt(void* context,const void* from) noexcept{
+  auto& self=of(context);const auto& source=*static_cast<const SceneSinks*>(from);
+  self.state=source.state;self.frame=source.frame;self.frame_valid=source.frame_valid;self.bound=source.bound;
+ }
+ static void setWound(void* context,std::uintptr_t surface_interface,const std::shared_ptr<SurfaceImage>& texture) noexcept{
+  auto& self=of(context);self.wound_interface=surface_interface;self.wound=texture;
+ }
+};
+
 class Device final:public IDirect3DDevice7 {
 public:
 #ifdef EID3D11_TESTING
@@ -836,9 +1456,10 @@ public:
   state_.viewport.dwWidth=dd_->width;state_.viewport.dwHeight=dd_->height;state_.viewport.dvMaxZ=1;
   RECT client{};const bool sized=GetClientRect(dd_->hwnd,&client)&&client.right>0&&client.bottom>0;
   dd_->renderer.ensure(dd_->hwnd,sized?UINT(client.right):dd_->width,sized?UINT(client.bottom):dd_->height);
+  bridge_set_engine_frame_begin_sink(this,&Device::beginEngineFrame);
   trace("Device.Create");
  }
- ~Device(){if(scene_){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);}if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}flushNativeVisual();clearPendingDraws();releaseRecordingTextures();for(auto& pair:blocks_)releaseBlock(pair.second);for(auto* t:textures_)if(t)t->Release();if(dd_->active_device==this)dd_->active_device=nullptr;if(dd_->active_target==target_)dd_->active_target=nullptr;if(target_)target_->Release();if(composition_target_)composition_target_->Release();dd_->Release();trace("Device.Destroy");}
+ ~Device(){bridge_clear_engine_frame_begin_sink(this);bridge_clear_scene_handoff(this);if(scene_){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);}if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}flushNativeVisual();clearPendingDraws();releaseRecordingTextures();for(auto& pair:blocks_)releaseBlock(pair.second);for(auto* t:textures_)if(t)t->Release();if(dd_->active_device==this)dd_->active_device=nullptr;if(dd_->active_target==target_)dd_->active_target=nullptr;if(target_)target_->Release();if(composition_target_)composition_target_->Release();dd_->Release();trace("Device.Destroy");}
  bool compositionTarget(const Surface* surface)const noexcept{return surface==composition_target_;}
  bool displayResizeIdle() const noexcept {return !scene_ && !recording_ && !native_batch_active_ && !native_object_active_ && pending_draws_.empty();}
  void resizeDisplayViewport(UINT old_width,UINT old_height,UINT width,UINT height) noexcept {
@@ -849,8 +1470,8 @@ public:
  ULONG STDMETHODCALLTYPE AddRef() override{return ++refs_;}ULONG STDMETHODCALLTYPE Release() override{ULONG n=--refs_;if(!n)delete this;return n;}
  HRESULT STDMETHODCALLTYPE GetCaps(LPD3DDEVICEDESC7) override;
  HRESULT STDMETHODCALLTYPE EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK,LPVOID) override;
- HRESULT STDMETHODCALLTYPE BeginScene() override{bridge_profile_api_entry("BeginScene",_ReturnAddress());trace("Device.BeginScene");if(scene_)return D3DERR_SCENE_IN_SCENE;clearPendingDraws();HRESULT pending=flushNativeVisual();if(FAILED(pending))return pending;scene_=true;native_sequence_=false;native_batch_active_=false;native_object_active_=false;bridge_profile_begin_frame();dd_->renderer.begin_scene();bridge_set_native_geometry_sink(this,&Device::submitNativeGeometry,&Device::beginNativeGeometryBatch,&Device::endNativeGeometryBatch,&Device::beginNativeObject,&Device::endNativeObject,&Device::nativeFrameState,&Device::nativeWorldLighting,&Device::beginNativeShadows,&Device::endNativeShadows,&Device::shadowSourceDiagnostics,&Device::nativePointLights,&Device::beginNativePointShadowFaces,&Device::endNativePointShadowFaces,&Device::queueNativeStaticDepth,&Device::beginNativePointShadowBatch,&Device::publishNativePointShadows,&Device::allocateNativePointShadow,&Device::releaseNativePointShadow,&Device::nativeShadowCullProjection);bridge_set_screen_rectangle_sink(this,&Device::submitScreenRectangle);bridge_set_game_particle_sink(this,&Device::submitGameParticles);camp_inventory_set_popup_sink(this,&Device::submitCampPopup,dd_->renderer.resource_device());return D3D_OK;}
- HRESULT STDMETHODCALLTYPE EndScene() override{bridge_profile_api_entry("EndScene",_ReturnAddress());trace("Device.EndScene");if(!scene_)return D3DERR_SCENE_NOT_IN_SCENE;bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);native_batch_active_=false;if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}HRESULT hr=flushNativeVisual();native_sequence_=false;if(SUCCEEDED(hr)){if(!pending_draws_.empty())invalidateVisualTarget();hr=dd_->renderer.draw_frame(pending_draws_,pending_vertex_bytes_,pending_indices_);}clearPendingDraws();dd_->renderer.end_scene();scene_=false;bridge_profile_end_frame();return hr;}
+ HRESULT STDMETHODCALLTYPE BeginScene() override{bridge_profile_api_entry("BeginScene",_ReturnAddress());trace("Device.BeginScene");if(scene_)return D3DERR_SCENE_IN_SCENE;clearPendingDraws();HRESULT pending=flushNativeVisual();if(FAILED(pending))return dd_->checkDevice(pending);scene_=true;native_sequence_=false;native_batch_active_=false;native_object_active_=false;bridge_profile_begin_frame();dd_->renderer.begin_scene();bridge_set_native_geometry_sink(this,&Device::submitNativeGeometry,&Device::beginNativeGeometryBatch,&Device::endNativeGeometryBatch,&Device::beginNativeObject,&Device::endNativeObject,&Device::nativeFrameState,&Device::nativeWorldLighting,&Device::beginNativeShadows,&Device::endNativeShadows,&Device::shadowSourceDiagnostics,&Device::nativePointLights,&Device::beginNativePointShadowFaces,&Device::endNativePointShadowFaces,&Device::queueNativeStaticDepth,&Device::beginNativePointShadowBatch,&Device::publishNativePointShadows,&Device::allocateNativePointShadow,&Device::releaseNativePointShadow,&Device::nativeShadowCullProjection,&Device::queueNativeTerrainBake);bridge_set_rain_occlusion_sink(&Device::beginRainOcclusion,&Device::endRainOcclusion);bridge_set_screen_rectangle_sink(this,&Device::submitScreenRectangle);bridge_set_game_particle_sink(this,&Device::submitGameParticles);bridge_set_game_ribbon_sink(this,&Device::submitGameRibbon);bridge_set_game_selection_sink(this,&Device::submitGameSelection);bridge_set_game_print_sink(this,&Device::submitGamePrint,&Device::flushGamePrintsSink);bridge_set_game_glyph_sink(this,&Device::submitGameGlyphs);camp_inventory_set_popup_sink(this,&Device::submitCampPopup,dd_->renderer.resource_device());registerSceneHandoff();return D3D_OK;}
+ HRESULT STDMETHODCALLTYPE EndScene() override{bridge_profile_api_entry("EndScene",_ReturnAddress());trace("Device.EndScene");if(!scene_)return D3DERR_SCENE_NOT_IN_SCENE;flushGamePrints();bridge_clear_scene_handoff(this);bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);native_batch_active_=false;if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}HRESULT hr=flushNativeVisual();native_sequence_=false;if(SUCCEEDED(hr)){if(!pending_draws_.empty())invalidateVisualTarget();hr=dd_->renderer.draw_frame_take(pending_draws_,pending_vertex_bytes_,pending_indices_);}clearPendingDraws();dd_->renderer.end_scene();scene_=false;bridge_profile_end_frame();return dd_->checkDevice(hr);}
  HRESULT STDMETHODCALLTYPE GetDirect3D(LPDIRECT3D7* out) override{if(!out)return E_POINTER;*out=static_cast<IDirect3D7*>(dd_);dd_->AddRef();return D3D_OK;}
  HRESULT STDMETHODCALLTYPE SetRenderTarget(LPDIRECTDRAWSURFACE7,DWORD) override;
  HRESULT STDMETHODCALLTYPE GetRenderTarget(LPDIRECTDRAWSURFACE7*) override;
@@ -901,8 +1522,20 @@ public:
    dd_->renderer.native_flush_failure_line(),dd_->renderer.native_static_draw_count());owned::bridge_append_probe_event("surface_flush_failed",detail);}
  bool visualWritesPending() const noexcept{return native_sequence_||!pending_draws_.empty();}
 private:
+ static bool beginEngineFrame(void* context) noexcept {
+  auto& self=*static_cast<Device*>(context);
+  if(self.dd_->active_device!=&self||self.scene_)return false;
+  try {
+   HRESULT hr=self.flushForSurface();
+   if(SUCCEEDED(hr)){
+    self.dd_->invalidateVisualOutput();
+    hr=self.dd_->renderer.begin_engine_frame();
+   }
+   return SUCCEEDED(hr);
+  }catch(...){return false;}
+ }
  void invalidateVisualTarget() noexcept{if(target_)target_->invalidateVisualTarget();}
- HRESULT flushNativeVisual(){if(native_sequence_)invalidateVisualTarget();return dd_->renderer.flush_native();}
+ HRESULT flushNativeVisual(){if(native_sequence_)invalidateVisualTarget();else if(dd_->renderer.scene_queue()&&!dd_->renderer.scene_native_pending())return D3D_OK;return dd_->renderer.flush_native();}
  struct StateBlock {FixedState state{};std::array<Surface*,8> textures{};std::array<bool,256> render_mask{};std::array<std::array<bool,32>,8> stage_mask{};std::array<bool,8> texture_mask{};std::array<bool,4> transform_mask{};bool viewport_mask{},material_mask{};D3DSTATEBLOCKTYPE type{D3DSBT_ALL};};
  void releaseBlock(StateBlock& b){for(auto*& t:b.textures){if(t)t->Release();t=nullptr;}}
  void captureBlock(StateBlock& b){for(size_t i=0;i<b.render_mask.size();++i)if(b.render_mask[i])b.state.render[i]=state_.render[i];for(size_t s=0;s<b.stage_mask.size();++s)for(size_t i=0;i<b.stage_mask[s].size();++i)if(b.stage_mask[s][i])b.state.stage[s][i]=state_.stage[s][i];for(size_t i=0;i<b.transform_mask.size();++i)if(b.transform_mask[i])b.state.transform[i]=state_.transform[i];if(b.viewport_mask)b.state.viewport=state_.viewport;if(b.material_mask)b.state.material=state_.material;for(size_t i=0;i<b.texture_mask.size();++i)if(b.texture_mask[i]){if(b.textures[i])b.textures[i]->Release();b.textures[i]=textures_[i];if(b.textures[i])b.textures[i]->AddRef();}}
@@ -910,6 +1543,44 @@ private:
   void releaseRecordingTextures(){for(auto*& texture:recording_textures_){if(texture)texture->Release();texture=nullptr;}}
  // Owned DrawFrameSelection: keep submission order with the queued legacy and
  // interface work, then hand the request to the renderer.
+ // Scene thread hand-off (bridge_set_scene_handoff): queued world commands
+ // and the device-state copy their scene sinks read.
+ void registerSceneHandoff() noexcept{
+  BridgeSceneHandoff handoff{};handoff.context=this;
+  // Camp inventory composition keeps the device path (its icon textures are
+  // resolved against the live bound surface). The world draws into the
+  // composition output too, so only the composing state can tell them apart.
+  handoff.active=[](void* context){
+   return !camp::composing&&static_cast<Device*>(context)->dd_->renderer.scene_queue();};
+  handoff.post=[](void* context,std::function<void()> work){
+   auto& renderer=static_cast<Device*>(context)->dd_->renderer;
+   renderer.scene_note_native();renderer.scene_post_frame(std::move(work));return true;};
+  handoff.capture_sinks=&Device::captureSceneSinks;
+  handoff.install_sinks=&SceneSinks::install;
+  handoff.bound_texture=[](void* context){auto* self=static_cast<Device*>(context);
+   return self->dd_->renderer.scene_surface(self->textures_[0]?self->textures_[0]->image():nullptr);};
+  handoff.bind_texture=&SceneSinks::bind;
+  handoff.surface_snapshot=[](void* context,std::uintptr_t surface_interface){auto* self=static_cast<Device*>(context);
+   auto* surface=surface_interface?dynamic_cast<Surface*>(reinterpret_cast<IDirectDrawSurface7*>(surface_interface)):nullptr;
+   return self->dd_->renderer.scene_surface(surface?surface->image():nullptr);};
+  handoff.set_wound=&SceneSinks::setWound;
+  handoff.sync=[](void* context,const char* reason){static_cast<Device*>(context)->dd_->renderer.scene_sync(reason);};
+  handoff.adopt_sinks=&SceneSinks::adopt;
+  bridge_set_scene_handoff(handoff);
+ }
+ // Game thread: a native sequence begins (queued legacy draws and UI go
+ // first), then the state the scene sinks read is copied.
+ static std::shared_ptr<void> captureSceneSinks(void* context){
+  auto* self=static_cast<Device*>(context);
+  try{
+   if(FAILED(self->flushPendingDraws())||FAILED(self->dd_->flushVisualUi()))return nullptr;
+   self->native_sequence_=true;self->invalidateVisualTarget();self->dd_->renderer.scene_note_native();
+   auto sinks=std::make_shared<SceneSinks>();
+   sinks->renderer=&self->dd_->renderer;sinks->state=self->state_;
+   sinks->frame_valid=nativeFrameState(self,sinks->frame);
+   return sinks;
+  }catch(...){return nullptr;}
+ }
  static bool submitScreenRectangle(void* context,const ScreenRectangleRequest& request) noexcept{auto* self=static_cast<Device*>(context);if(!self->scene_)return false;HRESULT hr=self->flushNativeVisual();self->native_sequence_=false;if(SUCCEEDED(hr))hr=self->dd_->flushVisualUi();if(SUCCEEDED(hr))hr=self->flushPendingDraws();if(SUCCEEDED(hr)){self->invalidateVisualTarget();hr=self->dd_->renderer.queue_screen_rectangle(request,self->state_.viewport);}return SUCCEEDED(hr);}
  static bool submitNativeGeometry(void* context,const NativeGeometryView& view,NativeGeometryResult& result) noexcept{try{return static_cast<Device*>(context)->queueNativeGeometry(view,result);}catch(...){if(!result.failure_operation)result.failure_operation="proxy.exception";return false;}}
  static bool submitGameParticles(void* context,const GameParticleView& view) noexcept{try{return static_cast<Device*>(context)->drawGameParticles(view);}catch(...){return false;}}
@@ -920,6 +1591,63 @@ private:
   FixedState state=state_;
   if(view.additive){state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;state.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_ONE;}
   return SUCCEEDED(dd_->renderer.draw_game_particles(view,state,textures_[0]?textures_[0]->image():nullptr));
+ }
+ static bool submitGameRibbon(void* context,const GameRibbonView& view) noexcept{try{return static_cast<Device*>(context)->drawGameRibbon(view);}catch(...){return false;}}
+ // Stock Draw3DLine sets SRCALPHA/ONE around its one draw and restores both.
+ bool drawGameRibbon(const GameRibbonView& view){
+  if(!scene_||native_batch_active_)return false;
+  if(FAILED(flushPendingDraws())||FAILED(dd_->flushVisualUi())||FAILED(flushNativeVisual()))return false;
+  native_sequence_=false;invalidateVisualTarget();
+  FixedState state=state_;
+  state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;state.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_ONE;
+  return SUCCEEDED(dd_->renderer.draw_game_ribbon(view,state,textures_[0]?textures_[0]->image():nullptr));
+ }
+ static bool submitGameSelection(void* context,const GameSelectionView& view) noexcept{try{return static_cast<Device*>(context)->drawGameSelection(view);}catch(...){return false;}}
+ // The marker draws with the state Draw3DScene set (stock Render keeps it).
+ bool drawGameSelection(const GameSelectionView& view){
+  if(!scene_||native_batch_active_)return false;
+  if(FAILED(flushPendingDraws())||FAILED(dd_->flushVisualUi())||FAILED(flushNativeVisual()))return false;
+  native_sequence_=false;invalidateVisualTarget();
+  return SUCCEEDED(dd_->renderer.draw_game_selection(view,state_,textures_[0]?textures_[0]->image():nullptr));
+ }
+ // Terrain prints: one list's prints are batched per texture/state run and
+ // drawn when the bridge reports the list's last print (or at EndScene).
+ struct GamePrintRun{SurfaceImage* texture=nullptr;FixedState state{};std::array<float,16> object_to_clip{};float half_width=0,half_height=0;UINT first=0,count=0;};
+ std::vector<GameParticleGpu> print_vertices_;std::vector<GamePrintRun> print_runs_;
+ static bool submitGamePrint(void* context,const GamePrintView& view) noexcept{try{return static_cast<Device*>(context)->appendGamePrint(view);}catch(...){return false;}}
+ static bool flushGamePrintsSink(void* context) noexcept{try{return static_cast<Device*>(context)->flushGamePrints();}catch(...){return false;}}
+ bool appendGamePrint(const GamePrintView& view){
+  if(!scene_||native_batch_active_||!view.vertices||!view.count)return false;
+  if(print_runs_.empty()){
+   if(FAILED(flushPendingDraws())||FAILED(dd_->flushVisualUi())||FAILED(flushNativeVisual()))return false;
+   native_sequence_=false;invalidateVisualTarget();
+  }
+  SurfaceImage* texture=textures_[0]?textures_[0]->image():nullptr;
+  const UINT first=static_cast<UINT>(print_vertices_.size());
+  print_vertices_.insert(print_vertices_.end(),view.vertices,view.vertices+view.count);
+  if(!print_runs_.empty()){
+   GamePrintRun& last=print_runs_.back();
+   if(last.texture==texture&&last.object_to_clip==view.object_to_clip&&last.half_width==view.clip_half_width&&
+      last.half_height==view.clip_half_height&&std::memcmp(&last.state,&state_,sizeof(FixedState))==0){last.count+=view.count;return true;}
+  }
+  GamePrintRun run;run.texture=texture;run.state=state_;run.object_to_clip=view.object_to_clip;
+  run.half_width=view.clip_half_width;run.half_height=view.clip_half_height;run.first=first;run.count=view.count;
+  print_runs_.push_back(run);return true;
+ }
+ bool flushGamePrints(){
+  bool ok=true;
+  if(scene_)for(const GamePrintRun& run:print_runs_)
+   ok&=SUCCEEDED(dd_->renderer.draw_game_print_run(print_vertices_.data()+run.first,run.count,run.object_to_clip,
+    run.half_width,run.half_height,run.state,run.texture));
+  print_vertices_.clear();print_runs_.clear();return ok;
+ }
+ static bool submitGameGlyphs(void* context,const GameGlyphView& view) noexcept{try{return static_cast<Device*>(context)->drawGameGlyphs(view);}catch(...){return false;}}
+ // Combat text draws with the state CWorldClient::Draw set before its call.
+ bool drawGameGlyphs(const GameGlyphView& view){
+  if(!scene_||native_batch_active_)return false;
+  if(FAILED(flushPendingDraws())||FAILED(dd_->flushVisualUi())||FAILED(flushNativeVisual()))return false;
+  native_sequence_=false;invalidateVisualTarget();
+  return SUCCEEDED(dd_->renderer.draw_game_glyphs(view,state_,textures_[0]?textures_[0]->image():nullptr));
  }
  static bool beginNativeGeometryBatch(void* context,SemanticKind kind) noexcept{try{return static_cast<Device*>(context)->beginNativeBatch(kind);}catch(...){return false;}}
  static void endNativeGeometryBatch(void* context,bool commit) noexcept{try{static_cast<Device*>(context)->endNativeBatch(commit);}catch(...){}}
@@ -967,6 +1695,15 @@ private:
  static bool endNativePointShadowFaces(void* context,bool commit) noexcept{
   try{return static_cast<Device*>(context)->dd_->renderer.end_native_point_shadow_faces(commit);}catch(...){return false;}
  }
+ static bool beginRainOcclusion(void* context,const NativeShadowSlice& slice,std::uint32_t side) noexcept{
+  try{Device* self=static_cast<Device*>(context);if(!self||!self->scene_||self->native_batch_active_)return false;
+   self->native_sequence_=true;
+   return self->dd_->renderer.begin_native_rain_occlusion(slice,side);
+  }catch(...){return false;}
+ }
+ static bool endRainOcclusion(void* context,bool commit) noexcept{
+  try{return static_cast<Device*>(context)->dd_->renderer.end_native_rain_occlusion(commit);}catch(...){return false;}
+ }
  static void nativeShadowCullProjection(void* context,NativeShadowCullProjection& projection) noexcept{
   Device* self=static_cast<Device*>(context);if(self)self->dd_->renderer.native_shadow_cull_projection(projection);
  }
@@ -980,10 +1717,16 @@ private:
   try{return static_cast<Device*>(context)->dd_->renderer.end_native_shadows(commit);}catch(...){return false;}
  }
  static bool queueNativeStaticDepth(void* context,const RetainedShadowCasterValue* casters,
-  std::uint32_t count,std::vector<RetainedShadowCasterValue>& missing) noexcept {
+  std::uint32_t count,std::uint64_t store_revision,std::vector<RetainedShadowCasterValue>& missing) noexcept {
   try{Device* self=static_cast<Device*>(context);
    return self&&self->scene_&&self->dd_->renderer.queue_native_static_shadow_depth(
-       casters,count,missing);
+       casters,count,store_revision,missing);
+  }catch(...){return false;}
+ }
+ static bool queueNativeTerrainBake(void* context,const NativeTerrainShadowEntry* entries,
+  std::uint32_t count,std::vector<std::uint32_t>& absent) noexcept {
+  try{Device* self=static_cast<Device*>(context);
+   return self&&self->scene_&&self->dd_->renderer.queue_native_terrain_shadow_bake(entries,count,absent);
   }catch(...){return false;}
  }
  static void shadowSourceDiagnostics(void* context,std::uint64_t world_serial,
@@ -1036,7 +1779,98 @@ private:
  bool beginNativeBatch(SemanticKind){if(!scene_||native_batch_active_)return false;HRESULT hr=flushPendingDraws();if(FAILED(hr))return false;if(FAILED(hr=dd_->flushVisualUi()))return false;if(FAILED(hr=flushNativeVisual()))return false;native_sequence_=true;native_batch_active_=true;return true;}
  void endNativeBatch(bool commit){if(!native_batch_active_)return;if(!commit)dd_->renderer.discard_native();native_batch_active_=false;}
  bool beginNativeObjectTransaction(){if(!scene_||native_object_active_)return false;if(!dd_->renderer.checkpoint_native(native_object_checkpoint_))return false;native_object_active_=true;return true;}
- void endNativeObjectTransaction(bool commit){if(!native_object_active_)return;if(!commit)dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}
+ void endNativeObjectTransaction(bool commit){if(!native_object_active_)return;if(!commit)dd_->renderer.rollback_native(native_object_checkpoint_);else dd_->renderer.release_native_checkpoint(native_object_checkpoint_);native_object_active_=false;}
+ // Scene thread mode: a generic packet (legacy figure geometry, HUD figures)
+ // the game needs only the selection result back from. That result is
+ // computed here from the packet (Renderer::native_packet_extents), the
+ // packet's arrays are copied off the game's memory and the submission is
+ // queued with the device state and texture snapshots. Prepared, decoded,
+ // world, terrain-page and surface-texture packets keep the synchronous path.
+ struct ScenePacket {
+  NativeGeometryView view;
+  std::vector<NativePackedGroup> positions,normals;
+  std::vector<std::uint32_t> diffuse,specular;
+  std::vector<NativeTextureCoordinate> coordinates;
+  std::vector<NativeVertexComponent> components;
+  std::vector<std::uint16_t> indices;
+  std::vector<NativeMorphOffset> morphs;
+  std::vector<NativeOwnedTextureMip> mips;
+  std::vector<std::vector<std::uint8_t>> mip_bytes;
+ };
+ static bool scenePacketEligible(const NativeGeometryView& view) noexcept{
+  const bool prepared=view.prepared_mesh&&view.prepared_material&&view.prepared_identity.valid;
+  return !prepared&&!view.decode&&!view.decode_colors&&!view.world.enabled&&!view.prebuilt_mesh&&!view.lods&&
+   !view.component_parts&&!view.terrain_page&&!view.terrain_vertices&&!view.terrain_vertex_count&&
+   !view.terrain_animation_phases&&!view.terrain_phase_values&&!view.owned_texture.surface&&
+   !view.owned_texture.resource&&(!view.owned_texture.identity||view.owned_texture.mips)&&
+   view.positions&&view.normals&&view.components&&view.texture_coordinates&&view.indices&&
+   view.position_groups&&view.normal_groups&&view.component_count&&view.texture_coordinate_count&&view.index_count;
+ }
+ static std::shared_ptr<ScenePacket> copyScenePacket(const NativeGeometryView& source){
+  auto packet=std::make_shared<ScenePacket>();
+  auto& view=packet->view;view=source;
+  if(!view.cache_identity&&!view.cache_pointers_valid){
+   view.cache_pointers={reinterpret_cast<std::uintptr_t>(source.positions),reinterpret_cast<std::uintptr_t>(source.normals),
+    reinterpret_cast<std::uintptr_t>(source.components),reinterpret_cast<std::uintptr_t>(source.texture_coordinates),
+    reinterpret_cast<std::uintptr_t>(source.indices)};
+   view.cache_pointers_valid=true;
+  }
+  const std::size_t colors=static_cast<std::size_t>(source.normal_groups)*4u;
+  packet->positions.assign(source.positions,source.positions+source.position_groups);view.positions=packet->positions.data();
+  packet->normals.assign(source.normals,source.normals+source.normal_groups);view.normals=packet->normals.data();
+  if(source.diffuse){packet->diffuse.assign(source.diffuse,source.diffuse+colors);view.diffuse=packet->diffuse.data();}
+  if(source.specular){packet->specular.assign(source.specular,source.specular+colors);view.specular=packet->specular.data();}
+  packet->coordinates.assign(source.texture_coordinates,source.texture_coordinates+source.texture_coordinate_count);
+  view.texture_coordinates=packet->coordinates.data();
+  packet->components.assign(source.components,source.components+source.component_count);view.components=packet->components.data();
+  packet->indices.assign(source.indices,source.indices+source.index_count);view.indices=packet->indices.data();
+  if(source.morphs&&source.morph_count){packet->morphs.assign(source.morphs,source.morphs+source.morph_count);view.morphs=packet->morphs.data();}
+  else{view.morphs=nullptr;view.morph_count=0;}
+  if(source.owned_texture.identity&&source.owned_texture.mips){
+   packet->mips.assign(source.owned_texture.mips,source.owned_texture.mips+source.owned_texture.mip_count);
+   packet->mip_bytes.resize(packet->mips.size());
+   for(std::size_t index=0;index<packet->mips.size();++index){
+    auto& mip=packet->mips[index];
+    if(mip.data&&mip.bytes){packet->mip_bytes[index].assign(mip.data,mip.data+mip.bytes);mip.data=packet->mip_bytes[index].data();}
+   }
+   view.owned_texture.mips=packet->mips.data();
+  }
+  return packet;
+ }
+ bool queueScenePacket(const NativeGeometryView& view,NativeGeometryResult& result){
+  result={};
+  invalidateVisualTarget();
+  const FixedState submission_state=view.owned_fixed_state.enabled?native_owned_submission_state(state_,view.owned_fixed_state):state_;
+  auto* bound=textures_[0]?textures_[0]->image():nullptr;
+  camp_inventory_observe_texture(view,submission_state,bound);
+  Surface* wound=nullptr;
+  if(view.wound_surface_interface){
+   wound=dynamic_cast<Surface*>(reinterpret_cast<IDirectDrawSurface7*>(view.wound_surface_interface));
+   if(!wound)trace("Device.NativeWoundSurfaceRejected");
+  }
+  if(view.wound_only&&!wound)return false;
+  // The synchronous result the renderer would return (the wound layer's
+  // own result only for a wound-only packet; same packet, same viewport).
+  if(view.flags&1u){
+   RECT extents{};const HRESULT hr=dd_->renderer.native_packet_extents(view,submission_state,extents);
+   if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="scene.screen_extents";return false;}
+   result.visible=hr==S_OK;result.screen_extents_valid=true;result.screen_extents=extents;
+  }
+  auto sinks=std::make_shared<SceneSinks>();
+  sinks->renderer=&dd_->renderer;sinks->state=state_;sinks->sequence=true;
+  sinks->frame_valid=nativeFrameState(this,sinks->frame);
+  sinks->bound=dd_->renderer.scene_surface(bound);
+  if(wound){sinks->wound_interface=view.wound_surface_interface;sinks->wound=dd_->renderer.scene_surface(wound->image());}
+  auto packet=copyScenePacket(view);
+  dd_->renderer.scene_note_native();
+  dd_->renderer.scene_post_frame([sinks,packet]{
+   NativeGeometryResult ignored{};
+   if(!SceneSinks::submit(sinks.get(),packet->view,ignored))
+    Renderer::report_scene_failure(ignored.failure_operation?ignored.failure_operation:"scene.packet",
+     ignored.failure_hresult?ignored.failure_hresult:E_FAIL);
+  });
+  return true;
+ }
  bool queueNativeGeometry(const NativeGeometryView& view,NativeGeometryResult& result){
   camp::OutputScope output(target_&&target_->compositionOutput());
   result={};if(!scene_){result.failure_operation="proxy.scene";return false;}
@@ -1092,6 +1926,10 @@ private:
    invalidateVisualTarget();
    return SUCCEEDED(dd_->renderer.queue_native_records(submission,state_,wound?wound->image():nullptr,&result));
   }
+  if(!camp::composing&&dd_->renderer.scene_queue()&&scenePacketEligible(view)){
+   try{return queueScenePacket(view,result);}
+   catch(...){result.failure_operation="scene.packet_copy";return false;}
+  }
  const bool prepared=view.prepared_mesh&&view.prepared_material&&
    view.prepared_identity.valid;
   FixedState submission_state=view.owned_fixed_state.enabled?
@@ -1145,7 +1983,7 @@ private:
   return true;
  }
   HRESULT queueDraw(D3DPRIMITIVETYPE,DWORD,const void*,DWORD,const WORD*,DWORD);
- HRESULT flushPendingDraws(){if(pending_draws_.empty())return D3D_OK;invalidateVisualTarget();HRESULT hr=dd_->renderer.draw_frame(pending_draws_,pending_vertex_bytes_,pending_indices_);clearPendingDraws();return hr;}
+ HRESULT flushPendingDraws(){if(pending_draws_.empty())return D3D_OK;invalidateVisualTarget();HRESULT hr=dd_->renderer.draw_frame_take(pending_draws_,pending_vertex_bytes_,pending_indices_);clearPendingDraws();return hr;}
  void clearPendingDraws(){for(auto* texture:pending_texture_refs_)if(texture)texture->Release();pending_texture_refs_.clear();pending_draws_.clear();pending_vertex_bytes_.clear();pending_indices_.clear();}
  HRESULT unsupported(const char* n){trace(n);return E_NOTIMPL;}
  std::atomic<ULONG> refs_{1};DD* dd_{};Surface* target_{};Surface* composition_target_{};std::array<Surface*,8> textures_{};FixedState state_{},recording_state_{};bool scene_{},recording_{},native_sequence_{},native_batch_active_{},native_object_active_{};Renderer::NativeQueueCheckpoint native_object_checkpoint_{};std::array<bool,256> recording_render_mask_{};std::array<std::array<bool,32>,8> recording_stage_mask_{};std::array<Surface*,8> recording_textures_{};std::array<bool,8> recording_texture_mask_{};std::array<bool,4> recording_transform_mask_{};bool recording_viewport_mask_{},recording_material_mask_{};DWORD next_block_{1};std::unordered_map<DWORD,StateBlock> blocks_{};std::vector<LegacyDrawPacket> pending_draws_{};std::vector<std::uint8_t> pending_vertex_bytes_{};std::vector<WORD> pending_indices_{};std::vector<Surface*> pending_texture_refs_{};
@@ -1256,6 +2094,11 @@ bool Surface::publishCampIcon(const PreparedCampIcon& icon,
     ++image_.texture_serial; clear_surface_dirty(image_);
     visual_cpu_current_ = true; visual_source_observed_ = true;
     update_surface_memory_accounting(image_);
+    if (owner_->renderer.scene_queue()) {
+        owner_->renderer.scene_publish_surface_texture(image_);
+        std::lock_guard<std::mutex> guard(g_scene_surface_lock);
+        try { g_scene_surface_textures[image_.id] = {image_.generation, image_.texture}; } catch (...) {}
+    }
     return true;
 }
 
@@ -1268,9 +2111,21 @@ void proxy_retire_camp_texture(std::uint64_t id,std::uint64_t generation) noexce
 // Completed visual sources carry no pixels. The surface's own texture is their
 // GPU home: make it current for the published generation and hand it out.
 HRESULT resolve_proxy_surface_texture(void* context,ID3D11Device*,std::uint64_t id,
-    std::uint64_t generation,ComPtr<ID3D11Texture2D>& texture){
-    texture.Reset();
+    std::uint64_t generation,ComPtr<ID3D11Texture2D>& texture,SurfaceImage*& image_out){
+    texture.Reset();image_out=nullptr;
     auto* owner=static_cast<DD*>(context);
+    if(owner&&owner->renderer.on_scene_thread()){
+        std::lock_guard<std::mutex> guard(g_scene_surface_lock);
+        const auto found=g_scene_surface_textures.find(id);
+        if(found!=g_scene_surface_textures.end()&&found->second.generation==generation&&found->second.texture){
+            texture=found->second.texture;return S_OK;
+        }
+        try{
+            if(std::find(g_scene_surface_requests.begin(),g_scene_surface_requests.end(),std::make_pair(id,generation))==g_scene_surface_requests.end())
+                g_scene_surface_requests.emplace_back(id,generation);
+        }catch(...){}
+        return E_PENDING;
+    }
     const auto found=g_surfaces_by_id.find(id);
     if(!owner||found==g_surfaces_by_id.end()||found->second->owner()!=owner)return E_FAIL;
     auto& image=*found->second->image();
@@ -1282,7 +2137,34 @@ HRESULT resolve_proxy_surface_texture(void* context,ID3D11Device*,std::uint64_t 
     texture=image.texture;
     if (!texture) return E_FAIL;
     owner->renderer.sampled_surface_pixels(image,true);
+    image_out=&image;
     return S_OK;
+}
+
+// Game thread, scene mode: the published generation's GPU home, current now,
+// for the scene thread's resolver.
+void register_scene_surface_texture(DD& owner,SurfaceImage& image) noexcept{
+    if(!owner.renderer.scene_queue()||image.gpu_captured)return;
+    if(image.uploaded_generation!=image.generation||!image.texture)(void)owner.renderer.upload(image);
+    if(image.uploaded_generation!=image.generation||!image.texture)return;
+    // From here the game thread never writes this texture in place (the owned
+    // cache may share it): its next write detaches first.
+    owner.renderer.scene_publish_surface_texture(image);
+    try{std::lock_guard<std::mutex> guard(g_scene_surface_lock);g_scene_surface_textures[image.id]={image.generation,image.texture};}catch(...){}
+}
+
+void DD::serviceSceneSurfaceRequests() noexcept{
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> requests;
+    {std::lock_guard<std::mutex> guard(g_scene_surface_lock);requests.swap(g_scene_surface_requests);}
+    for(const auto& request:requests){
+        const auto found=g_surfaces_by_id.find(request.first);
+        if(found==g_surfaces_by_id.end()||found->second->owner()!=this)continue;
+        auto& image=*found->second->image();
+        if(image.generation!=request.second||image.gpu_captured)continue;
+        // An open Lock/DC session has not finished this generation's bytes yet.
+        if(image.cpu_access_active&&image.uploaded_generation!=image.generation)continue;
+        register_scene_surface_texture(*this,image);
+    }
 }
 
 bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& value) noexcept {
@@ -1300,6 +2182,7 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     if (value) {
         held_publication_ = value;
         image_.published_generation = image_.generation;
+        register_scene_surface_texture(*owner_, image_);
         releaseCpuPixels();
         return true;
     }
@@ -1342,6 +2225,7 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     visual_source_observed_ = true;
     held_publication_ = value;
     image_.published_generation = image_.generation;
+    register_scene_surface_texture(*owner_, image_);
     releaseCpuPixels();
     return true;
 }
@@ -1398,13 +2282,13 @@ HRESULT Surface::legacyCpuAccess() {
         surface_rows(image_.height, image_.format);
     if (visual_cpu_current_ && !image_.cpu_released &&
         image_.pixels.size() >= required) return DD_OK;
-    const HRESULT result = owner_->renderer.readback(image_);
+    const HRESULT result = owner_->checkDevice(owner_->renderer.readback(image_));
     if (SUCCEEDED(result)) visual_cpu_current_ = true;
     return result;
 }
 
 Surface::Surface(DD* o,const DDSURFACEDESC2& d):owner_(o),desc_(d){g_surface_vtable=*reinterpret_cast<void* const*>(static_cast<IDirectDrawSurface7*>(this));image_.static_mip_hint=(d.ddsCaps.dwCaps&DDSCAPS_TEXTURE)&&!(d.ddsCaps.dwCaps&(DDSCAPS_3DDEVICE|DDSCAPS_PRIMARYSURFACE|DDSCAPS_BACKBUFFER))&&(d.ddsCaps.dwCaps2&DDSCAPS2_HINTSTATIC)&&!(d.ddsCaps.dwCaps2&DDSCAPS2_HINTDYNAMIC);image_.gpu_primary=(d.ddsCaps.dwCaps&DDSCAPS_TEXTURE)&&!(d.ddsCaps.dwCaps&(DDSCAPS_SYSTEMMEMORY|DDSCAPS_3DDEVICE|DDSCAPS_PRIMARYSURFACE|DDSCAPS_BACKBUFFER|DDSCAPS_ZBUFFER));owner_->AddRef();image_.id=++g_next_surface_id;try{g_surfaces_by_id[image_.id]=this;}catch(...){image_.gpu_primary=false;}if(!desc_.dwSize)desc_.dwSize=sizeof(desc_);image_.width=std::max<DWORD>(1,desc_.dwWidth?desc_.dwWidth:owner_->width);image_.height=std::max<DWORD>(1,desc_.dwHeight?desc_.dwHeight:owner_->height);image_.format=(desc_.dwFlags&DDSD_PIXELFORMAT)?desc_.ddpfPixelFormat:bgra32();image_.pitch=surface_pitch(image_.width,image_.format);desc_.dwWidth=image_.width;desc_.dwHeight=image_.height;desc_.lPitch=image_.pitch;desc_.ddpfPixelFormat=image_.format;desc_.dwFlags|=DDSD_WIDTH|DDSD_HEIGHT|DDSD_PITCH|DDSD_PIXELFORMAT;if(primary())owner_->primary=this;trace("Surface.Create","id=%llu caps=%08lx %ux%u flags=%08lx fourcc=%08lx bpp=%lu pitch=%ld backing=lazy",(unsigned long long)image_.id,desc_.ddsCaps.dwCaps,image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount,image_.pitch);}
-Surface::~Surface(){if(visual_source_observed_){retained_visual_retire_surface(image_.id);visual_source_observed_=false;}if(dc_layer_){ui_layer_abort(layer_dc_);dc_layer_=false;dc_active_=false;image_.cpu_access_active=false;}if(dc_active_)ReleaseDC(dc_owned_text_?owned_text_dc_:dc_);if(owned_text_dc_){bridge_retire_owned_text_surface(image_.id);SelectObject(owned_text_dc_,owned_text_old_bitmap_);DeleteObject(owned_text_bitmap_);DeleteDC(owned_text_dc_);}freeDcStorage();g_surfaces_by_id.erase(image_.id);if(attached_)attached_->Release();if(owner_->primary==this)owner_->primary=nullptr;owner_->renderer.retire_surface(image_.id);release_surface_memory_accounting(image_);owner_->Release();trace("Surface.Destroy");}
+Surface::~Surface(){if(visual_source_observed_){retained_visual_retire_surface(image_.id);visual_source_observed_=false;}if(dc_layer_){ui_layer_abort(layer_dc_);dc_layer_=false;dc_active_=false;image_.cpu_access_active=false;}if(dc_active_)ReleaseDC(dc_owned_text_?owned_text_dc_:dc_);if(owned_text_dc_){bridge_retire_owned_text_surface(image_.id);SelectObject(owned_text_dc_,owned_text_old_bitmap_);DeleteObject(owned_text_bitmap_);DeleteDC(owned_text_dc_);}freeDcStorage();g_surfaces_by_id.erase(image_.id);scene_surface_texture_erase(image_.id);if(attached_)attached_->Release();if(owner_->primary==this)owner_->primary=nullptr;owner_->renderer.retire_surface(image_.id);release_surface_memory_accounting(image_);owner_->Release();trace("Surface.Destroy");}
 HRESULT Surface::ensurePixels(){if(image_.cpu_released)return restoreReleased();if(!image_.pixels.empty())return DD_OK;const auto bytes=(size_t)image_.pitch*surface_rows(image_.height,image_.format);try{image_.pixels.resize(bytes);}catch(const std::bad_alloc&){trace("Surface.AllocationFailed","%ux%u bytes=%llu",image_.width,image_.height,(unsigned long long)bytes);return DDERR_OUTOFMEMORY;}update_surface_memory_accounting(image_);return DD_OK;}
 HRESULT Surface::ensureDcStorage(){if(dc_&&dc_bitmap_&&dc_bits_)return DD_OK;BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=(LONG)image_.width;info.bmiHeader.biHeight=-(LONG)image_.height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;dc_=CreateCompatibleDC(nullptr);if(!dc_)return DDERR_GENERIC;dc_bitmap_=CreateDIBSection(dc_,&info,DIB_RGB_COLORS,&dc_bits_,nullptr,0);if(!dc_bitmap_||!dc_bits_){if(dc_bitmap_)DeleteObject(dc_bitmap_);DeleteDC(dc_);dc_=nullptr;dc_bitmap_=nullptr;dc_bits_=nullptr;return DDERR_GENERIC;}dc_old_bitmap_=SelectObject(dc_,dc_bitmap_);try{g_dc_holders.push_back(this);}catch(...){freeDcStorage();return DDERR_OUTOFMEMORY;}return DD_OK;}
 HRESULT Surface::ensurePixelsForWrite(bool full_overwrite){
@@ -1443,16 +2327,14 @@ HRESULT Surface::GetCaps(LPDDSCAPS2 c){if(!c)return DDERR_INVALIDPARAMS;*c=desc_
 HRESULT Surface::GetPixelFormat(LPDDPIXELFORMAT f){if(!f)return DDERR_INVALIDPARAMS;*f=image_.format;return DD_OK;}
 HRESULT Surface::GetSurfaceDesc(LPDDSURFACEDESC2 d){if(!d)return DDERR_INVALIDPARAMS;DWORD size=d->dwSize;*d=desc_;d->dwSize=size?size:sizeof(*d);d->lpSurface=locked_?image_.pixels.data():nullptr;return DD_OK;}
 HRESULT Surface::beginDibSession(){HRESULT hr=restoreReleased(false);if(FAILED(hr))return hr;hr=legacyCpuAccess();if(FAILED(hr))return hr;hr=ensureDcStorage();if(FAILED(hr))return hr;dc_last_present_=g_present_serial;image_.cpu_access_active=true;const auto& format=image_.format;const DWORD bytes=pixel_bytes(format);auto* output=static_cast<DWORD*>(dc_bits_);const bool native_bgra=format.dwRGBBitCount==32&&format.dwRBitMask==0x00ff0000&&format.dwGBitMask==0x0000ff00&&format.dwBBitMask==0x000000ff&&format.dwRGBAlphaBitMask==0xff000000;if(native_bgra){const size_t row_bytes=(size_t)image_.width*4;for(UINT y=0;y<image_.height;++y)std::memcpy(output+(size_t)y*image_.width,image_.pixels.data()+(size_t)y*image_.pitch,row_bytes);}else for(UINT y=0;y<image_.height;++y)for(UINT x=0;x<image_.width;++x){DWORD raw{};std::memcpy(&raw,image_.pixels.data()+(size_t)y*image_.pitch+(size_t)x*bytes,std::min<DWORD>(bytes,4));const BYTE r=expand_mask(raw,format.dwRBitMask,0),g=expand_mask(raw,format.dwGBitMask,0),b=expand_mask(raw,format.dwBBitMask,0),a=expand_mask(raw,format.dwRGBAlphaBitMask,255);output[(size_t)y*image_.width+x]=(DWORD(a)<<24)|(DWORD(r)<<16)|(DWORD(g)<<8)|b;}return DD_OK;}
-HRESULT Surface::GetDC(HDC* out){trace("Surface.GetDC","%ux%u flags=%08lx fourcc=%08lx bpp=%lu",image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount);if(!out)return DDERR_INVALIDPARAMS;*out=nullptr;if(dc_active_)return DDERR_DCALREADYCREATED;if(locked_||block_compressed(image_.format)||!(image_.format.dwFlags&DDPF_RGB))return DDERR_UNSUPPORTED;const bool owned_text=bridge_begin_character_pane_getdc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.width,image_.height);if(owned_text){const HRESULT hr=ensureOwnedTextDc();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=true;*out=owned_text_dc_;return DD_OK;}if(ownedLayerClaim(_ReturnAddress())){const HDC dc=ui_layer_begin(this,&Surface::promoteLayer);if(dc){dc_active_=true;dc_layer_=true;layer_dc_=dc;*out=dc;return DD_OK;}bridge_append_probe_event("owned_ui_text_omitted","recording_dc_unavailable");}const HRESULT hr=beginDibSession();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=false;*out=dc_;return DD_OK;}
-HRESULT Surface::ReleaseDC(HDC value){trace("Surface.ReleaseDC");if(!dc_active_)return DDERR_NODC;if(dc_layer_)return releaseLayerDc(value);if(dc_owned_text_){if(!owned_text_dc_||value!=owned_text_dc_)return DDERR_NODC;bridge_finish_character_pane_releasedc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.generation);dc_active_=false;dc_owned_text_=false;return DD_OK;}if(!dc_||value!=dc_)return DDERR_NODC;packDibSession(nullptr);dc_active_=false;image_.cpu_access_active=false;image_.gpu_captured=false;mark_surface_dirty_full(image_);advance_surface_generation(image_,nullptr);++unique_;completedVisualMutation();finishCpuWrite();return DD_OK;}
-// TEMPORARY (owned_ui_text acceptance): per-10 s layer session totals.
-void owned_layer_stats(bool skipped,bool dib_current,bool changed,const RECT& touched){
- static std::uint64_t sessions=0,skips=0,replays=0,current=0,changes=0,pixels=0;static ULONGLONG since=0;
- ++sessions;if(skipped)++skips;else{++replays;current+=dib_current;changes+=changed;pixels+=(std::uint64_t)std::max<LONG>(0,touched.right-touched.left)*(std::uint64_t)std::max<LONG>(0,touched.bottom-touched.top);}
- const ULONGLONG now=GetTickCount64();if(!since)since=now;if(now-since<10000)return;
- char detail[192];sprintf_s(detail,"sessions=%llu skipped=%llu replays=%llu dib_current=%llu changed=%llu touched_pixels=%llu window_ms=%llu",(unsigned long long)sessions,(unsigned long long)skips,(unsigned long long)replays,(unsigned long long)current,(unsigned long long)changes,(unsigned long long)pixels,(unsigned long long)(now-since));
- bridge_append_probe_event("owned_ui_text_stats",detail);sessions=skips=replays=current=changes=pixels=0;since=now;
-}
+HRESULT Surface::GetDC(HDC* out){trace("Surface.GetDC","%ux%u flags=%08lx fourcc=%08lx bpp=%lu",image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount);if(!out)return DDERR_INVALIDPARAMS;*out=nullptr;if(dc_active_)return DDERR_DCALREADYCREATED;if(locked_||block_compressed(image_.format)||!(image_.format.dwFlags&DDPF_RGB))return DDERR_UNSUPPORTED;const bool owned_text=bridge_begin_character_pane_getdc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.width,image_.height,owner_->renderer.owned_text_raster_scale());if(owned_text){const HRESULT hr=ensureOwnedTextDc();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=true;*out=owned_text_dc_;return DD_OK;}if(ownedLayerClaim(_ReturnAddress())){const HDC dc=ui_layer_begin(this,&Surface::promoteLayer);if(dc){dc_active_=true;dc_layer_=true;layer_dc_=dc;*out=dc;return DD_OK;}bridge_append_probe_event("owned_ui_text_omitted","recording_dc_unavailable");}const HRESULT hr=beginDibSession();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=false;*out=dc_;return DD_OK;}
+HRESULT Surface::ReleaseDC(HDC value){trace("Surface.ReleaseDC");if(!dc_active_)return DDERR_NODC;if(dc_layer_)return releaseLayerDc(value);if(dc_owned_text_){if(!owned_text_dc_||value!=owned_text_dc_)return DDERR_NODC;bridge_finish_character_pane_releasedc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.generation);dc_active_=false;dc_owned_text_=false;return DD_OK;}if(!dc_||value!=dc_)return DDERR_NODC;dc_active_=false;
+ // A GDI session publishes only the pixels it changed. Interface text redrawn
+ // identically every frame (camp/store grids, cards, strips) then keeps its
+ // generation, so converted and uploaded copies stay current. A GPU-captured
+ // surface keeps the full publication that retires its GPU provenance.
+ if(!image_.gpu_captured){RECT changed{};const bool any=packDibSession(&changed);dib_generation_=0;finishLayerWrite(any,changed);return DD_OK;}
+ packDibSession(nullptr);image_.cpu_access_active=false;image_.gpu_captured=false;mark_surface_dirty_full(image_);advance_surface_generation(image_,nullptr);++unique_;completedVisualMutation();finishCpuWrite();return DD_OK;}
 // Legacy DC sessions publish the whole DIB; owned layers write back only the
 // pixels their replay changed and report those bounds.
 bool Surface::packDibSession(RECT* changed){
@@ -1550,7 +2432,7 @@ HRESULT Surface::releaseLayerDc(HDC value){
   RECT rect{};const bool changed=packDibSession(&rect);finishLayerWrite(changed,rect);dib_generation_=image_.generation;layer_state_={};return DD_OK;
  }
  // Same recipe on the pixels its last no-op replay left: nothing to do.
- if(!image_.gpu_captured&&!lost_&&ui_layer_unchanged(layer_state_,layer_recipe_,image_.generation)){owned_layer_stats(true,false,false,RECT{});return DD_OK;}
+ if(!image_.gpu_captured&&!lost_&&ui_layer_unchanged(layer_state_,layer_recipe_,image_.generation))return DD_OK;
  // The DIB still holds this generation: replay on it and write back only
  // what the replay drew. Otherwise unpack the surface first, as legacy does.
  const bool current=dc_&&dib_generation_==image_.generation&&!image_.gpu_captured&&!image_.cpu_released&&!image_.pixels.empty();
@@ -1560,7 +2442,6 @@ HRESULT Surface::releaseLayerDc(HDC value){
  if(FAILED(hr)||!ui_layer_replay(layer_recipe_.data(),layer_recipe_.size(),dc_,&touched)){image_.cpu_access_active=false;omitLayer(UiLayerFailure::allocation);return DD_OK;}
  RECT rect{};const bool changed=packDibRect(touched,rect);finishLayerWrite(changed,rect);dib_generation_=image_.generation;
  ui_layer_commit(layer_state_,layer_recipe_,image_.generation,changed);
- owned_layer_stats(false,current,changed,touched);
  return DD_OK;
 }
 HRESULT Surface::Lock(LPRECT r,LPDDSURFACEDESC2 d,DWORD flags,HANDLE){
@@ -1636,18 +2517,34 @@ static HRESULT copy_rect(Surface& dst,LONG dx,LONG dy,Surface& src,const RECT* s
  const bool full_overwrite=&dst!=&src&&dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height;
  HRESULT hr=src.restoreReleased(false);if(FAILED(hr))return hr;hr=src.legacyCpuAccess();if(FAILED(hr))return hr;
  if(w<=0||h<=0){return DD_OK;}
+ // A whole-surface copy from an equal-layout source (the DX7 staging ->
+ // texture load) takes the source bytes copy-on-write instead of allocating,
+ // zero-filling and copying a destination buffer: the destination's bytes are
+ // exactly the memmove result. A later write to either surface (Lock, DC,
+ // copy) detaches its own copy, so DX7 Lock semantics stay exact. Neither
+ // surface may hold an open Lock/DC pointer into its bytes.
+ const auto share_whole_source=[&]{
+  auto& d=*dst.image();const auto& s=*src.image();
+  const size_t bytes=(size_t)d.pitch*surface_rows(d.height,d.format);
+  if(!full_overwrite||r.left!=0||r.top!=0||s.width!=d.width||s.height!=d.height||s.pitch!=d.pitch||
+     d.cpu_access_active||s.cpu_access_active||s.pixels.size()!=bytes)return false;
+  d.pixels=s.pixels;d.cpu_released=false;update_surface_memory_accounting(d);
+  return true;
+ };
  if(block_compressed(dst.image()->format)||block_compressed(src.image()->format)){
   const auto& df=dst.image()->format;const auto& sf=src.image()->format;
   if(!block_compressed(df)||!block_compressed(sf)||df.dwFourCC!=sf.dwFourCC||((dx|dy|r.left|r.top)&3))return DDERR_INVALIDPIXELFORMAT;
-  hr=dst.ensurePixelsForWrite(full_overwrite);if(FAILED(hr))return hr;
+  const bool shared=share_whole_source();
+  if(!shared){hr=dst.ensurePixelsForWrite(full_overwrite);if(FAILED(hr))return hr;}
   const LONG bw=(w+3)/4,bh=(h+3)/4;const DWORD bytes=block_bytes(df);
   PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::cpu_rect);
-  for(LONG y=0;y<bh;y++)std::memmove(dst.image()->pixels.data()+(size_t)(dy/4+y)*dst.image()->pitch+(size_t)(dx/4)*bytes,std::as_const(src.image()->pixels).data()+(size_t)(r.top/4+y)*src.image()->pitch+(size_t)(r.left/4)*bytes,(size_t)bw*bytes);
+  if(!shared)for(LONG y=0;y<bh;y++)std::memmove(dst.image()->pixels.data()+(size_t)(dy/4+y)*dst.image()->pitch+(size_t)(dx/4)*bytes,std::as_const(src.image()->pixels).data()+(size_t)(r.top/4+y)*src.image()->pitch+(size_t)(r.left/4)*bytes,(size_t)bw*bytes);
   dst.image()->gpu_captured=false;{const RECT changed{dx,dy,dx+w,dy+h};mark_surface_dirty(*dst.image(),changed);advance_surface_generation(*dst.image(),&changed);}timing.finish((std::uint64_t)w*h);if(publish_visual)dst.completedVisualCpuWrite(dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height,src.visualCpuCurrent());else dst.invalidateVisualCpu();return DD_OK;
  }
  DWORD db=pixel_bytes(dst.image()->format),sb=pixel_bytes(src.image()->format);if(db!=sb)return DDERR_INVALIDPIXELFORMAT;
- hr=dst.ensurePixelsForWrite(full_overwrite);if(FAILED(hr))return hr;
- PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::cpu_rect);for(LONG y=0;y<h;y++)std::memmove(dst.image()->pixels.data()+(size_t)(dy+y)*dst.image()->pitch+(size_t)dx*db,std::as_const(src.image()->pixels).data()+(size_t)(r.top+y)*src.image()->pitch+(size_t)r.left*sb,(size_t)w*db);dst.image()->gpu_captured=false;{const RECT changed{dx,dy,dx+w,dy+h};mark_surface_dirty(*dst.image(),changed);advance_surface_generation(*dst.image(),&changed);}timing.finish((std::uint64_t)w*h);if(publish_visual)dst.completedVisualCpuWrite(dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height,src.visualCpuCurrent());else dst.invalidateVisualCpu();return DD_OK;
+ const bool shared=share_whole_source();
+ if(!shared){hr=dst.ensurePixelsForWrite(full_overwrite);if(FAILED(hr))return hr;}
+ PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::cpu_rect);if(!shared)for(LONG y=0;y<h;y++)std::memmove(dst.image()->pixels.data()+(size_t)(dy+y)*dst.image()->pitch+(size_t)dx*db,std::as_const(src.image()->pixels).data()+(size_t)(r.top+y)*src.image()->pitch+(size_t)r.left*sb,(size_t)w*db);dst.image()->gpu_captured=false;{const RECT changed{dx,dy,dx+w,dy+h};mark_surface_dirty(*dst.image(),changed);advance_surface_generation(*dst.image(),&changed);}timing.finish((std::uint64_t)w*h);if(publish_visual)dst.completedVisualCpuWrite(dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height,src.visualCpuCurrent());else dst.invalidateVisualCpu();return DD_OK;
 }
 static HRESULT stretch_rect(Surface& dst,const RECT& dr,Surface& src,const RECT& sr,bool publish_visual=true){
  const LONG dw=dr.right-dr.left,dh=dr.bottom-dr.top,sw=sr.right-sr.left,sh=sr.bottom-sr.top;if(dw<=0||dh<=0||sw<=0||sh<=0)return DDERR_INVALIDRECT;
@@ -1661,14 +2558,14 @@ static HRESULT stretch_rect(Surface& dst,const RECT& dr,Surface& src,const RECT&
 HRESULT Surface::BltFast(DWORD x,DWORD y,LPDIRECTDRAWSURFACE7 src,LPRECT r,DWORD flags){
  PostEngineSurfaceTimingScope proxy_timing(PostEngineSurfaceTimingKind::proxy);
  auto* s=dynamic_cast<Surface*>(src);trace("Surface.BltFast","target_primary=%d target=%ux%u source=%ux%u active_target=%d",primary()?1:0,image_.width,image_.height,s?s->image()->width:0,s?s->image()->height:0,s==owner_->active_target?1:0);if(!s)return DDERR_INVALIDOBJECT;
- if(owner_->active_device&&(this==owner_->active_target||primary()||s==owner_->active_target)){HRESULT flush=owner_->active_device->flushForSurface();if(FAILED(flush))return flush;}
+ if(owner_->active_device&&(this==owner_->active_target||primary()||s==owner_->active_target)){HRESULT flush=owner_->active_device->flushForSurface();if(FAILED(flush))return owner_->checkDevice(flush);}
  if(primary()&&s==owner_->active_target){invalidateVisualCpu();proxy_timing.finish();return owner_->presentVisual();}
  RECT sourceRect=r?*r:RECT{0,0,(LONG)s->image()->width,(LONG)s->image()->height};RECT destination{(LONG)x,(LONG)y,(LONG)x+(sourceRect.right-sourceRect.left),(LONG)y+(sourceRect.bottom-sourceRect.top)};const DDCOLORKEY* key=(flags&DDBLTFAST_SRCCOLORKEY)&&s->image()->has_color_key?&s->image()->color_key:nullptr;
  if(!((this==owner_->active_target||primary())&&released_surface_gpu_blit(*s->image(),key))){const HRESULT restored=s->restoreReleased(false);if(FAILED(restored))return restored;}
  if(this==owner_->active_target||primary()){
   invalidateVisualTarget();HRESULT hr=owner_->renderer.blit(*s->image(),destination,&sourceRect,key,this==owner_->active_target);
   if(SUCCEEDED(hr)&&primary()){proxy_timing.finish();return owner_->presentVisual();}
-  return hr;
+  return owner_->checkDevice(hr);
  }
  return copy_rect(*this,(LONG)x,(LONG)y,*s,r);
 }
@@ -1678,14 +2575,14 @@ HRESULT Surface::Blt(LPRECT dr,LPDIRECTDRAWSURFACE7 src,LPRECT sr,DWORD flags,LP
  RECT requested=dr?*dr:RECT{0,0,(LONG)image_.width,(LONG)image_.height};trace("Surface.Blt","flags=%08lx rect=%ld,%ld,%ld,%ld target=%ux%u",flags,requested.left,requested.top,requested.right,requested.bottom,image_.width,image_.height);
  if(flags&(DDBLT_COLORFILL|DDBLT_DEPTHFILL)){if(!fx)return DDERR_INVALIDPARAMS;DWORD c=(flags&DDBLT_DEPTHFILL)?fx->dwFillDepth:fx->dwFillColor;RECT r{std::max<LONG>(0,requested.left),std::max<LONG>(0,requested.top),std::min<LONG>((LONG)image_.width,requested.right),std::min<LONG>((LONG)image_.height,requested.bottom)};if(r.right<=r.left||r.bottom<=r.top)return DDERR_INVALIDRECT;HRESULT hr=ensurePixelsForWrite(r.left==0&&r.top==0&&r.right==(LONG)image_.width&&r.bottom==(LONG)image_.height);if(FAILED(hr))return hr;DWORD bytes=pixel_bytes(image_.format);PostEngineSurfaceTimingScope rect_timing(PostEngineSurfaceTimingKind::cpu_rect);for(LONG y=r.top;y<r.bottom;y++){auto* row=image_.pixels.data()+(size_t)y*image_.pitch+(size_t)r.left*bytes;for(LONG x=r.left;x<r.right;x++,row+=bytes)std::memcpy(row,&c,bytes);}mark_surface_dirty(image_,r);advance_surface_generation(image_,&r);rect_timing.finish((std::uint64_t)(r.right-r.left)*(r.bottom-r.top));completedVisualCpuWrite(r.left==0&&r.top==0&&r.right==(LONG)image_.width&&r.bottom==(LONG)image_.height,true);if(primary()){proxy_timing.finish();hr=owner_->presentVisual();}return hr;}
  auto* s=dynamic_cast<Surface*>(src);if(!s)return DDERR_INVALIDOBJECT;trace("Surface.Blt.Source","id=%llu %ux%u flags=%08lx fourcc=%08lx bpp=%lu active_target=%d",(unsigned long long)s->image()->id,s->image()->width,s->image()->height,s->image()->format.dwFlags,s->image()->format.dwFourCC,s->image()->format.dwRGBBitCount,s==owner_->active_target?1:0);if(state_trace_enabled()){RECT sourceRect=sr?*sr:RECT{0,0,(LONG)s->image()->width,(LONG)s->image()->height};char event[320]{};sprintf_s(event,"Diagnostic.Blt.t%llu.tp%d.s%llu.sa%d.f%08lx.d%ld.%ld.%ld.%ld.r%ld.%ld.%ld.%ld",(unsigned long long)image_.id,primary()?1:0,(unsigned long long)s->image()->id,s==owner_->active_target?1:0,flags,requested.left,requested.top,requested.right,requested.bottom,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);trace(event);}
- if(owner_->active_device&&(this==owner_->active_target||primary()||s==owner_->active_target)){HRESULT flush=owner_->active_device->flushForSurface();if(FAILED(flush))return flush;}
+ if(owner_->active_device&&(this==owner_->active_target||primary()||s==owner_->active_target)){HRESULT flush=owner_->active_device->flushForSurface();if(FAILED(flush))return owner_->checkDevice(flush);}
  if(primary()&&s==owner_->active_target){invalidateVisualCpu();proxy_timing.finish();return owner_->presentVisual();}
  HRESULT owned_text_result=DD_OK;if(bridge_consume_character_pane_blt(s->image()->id,_ReturnAddress(),requested,sr,owner_->renderer,owned_text_result,s->image()->generation)){invalidateVisualTarget();return owned_text_result;}
  DDCOLORKEY overrideKey{};const DDCOLORKEY* key=nullptr;if(flags&DDBLT_KEYSRCOVERRIDE){if(fx)overrideKey=fx->ddckSrcColorkey;key=&overrideKey;}else if((flags&DDBLT_KEYSRC)&&s->image()->has_color_key)key=&s->image()->color_key;
  if(!((this==owner_->active_target||primary())&&released_surface_gpu_blit(*s->image(),key))){const HRESULT restored=s->restoreReleased(false);if(FAILED(restored))return restored;}
- const auto destinationArea=(std::uint64_t)std::max<LONG>(0,requested.right-requested.left)*std::max<LONG>(0,requested.bottom-requested.top),primaryArea=(std::uint64_t)image_.width*image_.height;// A picture blitted over the whole screen (loading screens, movies) is shown at its own aspect.
+ const auto destinationArea=(std::uint64_t)std::max<LONG>(0,requested.right-requested.left)*std::max<LONG>(0,requested.bottom-requested.top),primaryArea=(std::uint64_t)image_.width*image_.height;// A picture blitted over the whole screen (loading screens, movies) is shown at its own aspect; one the game placed itself (the 1920x816 movies at 3840x1632) keeps its rectangle. Either way the rest of the screen gets the pillarbox fill, never the world composite behind it (issue 172).
  const bool covers_screen=image_.width==owner_->width&&image_.height==owner_->height&&requested.left<=0&&requested.top<=0&&requested.right>=(LONG)image_.width&&requested.bottom>=(LONG)image_.height;
- if(primary()&&destinationArea>primaryArea/4){owner_->renderer.mark_load_picture();trace("Surface.Blt.LargeCpuPresented","source=%ux%u destination=%ldx%ld",s->image()->width,s->image()->height,requested.right-requested.left,requested.bottom-requested.top);invalidateVisualTarget();HRESULT hr=covers_screen?owner_->renderer.present_image(*s->image(),sr,key):owner_->renderer.blit(*s->image(),requested,sr,key);if(SUCCEEDED(hr)){proxy_timing.finish();return owner_->presentVisual();}return hr;}
+ if(primary()&&destinationArea>primaryArea/4){owner_->renderer.mark_load_picture();note_large_primary_picture(*s->image());trace("Surface.Blt.LargeCpuPresented","source=%ux%u destination=%ldx%ld",s->image()->width,s->image()->height,requested.right-requested.left,requested.bottom-requested.top);invalidateVisualTarget();HRESULT hr=owner_->renderer.present_image(*s->image(),sr,key,covers_screen?nullptr:&requested);if(SUCCEEDED(hr)){proxy_timing.finish();return owner_->presentVisual();}return owner_->checkDevice(hr);}
  RECT sourceRect=sr?*sr:RECT{0,0,(LONG)s->image()->width,(LONG)s->image()->height};const bool stretched=requested.right-requested.left!=sourceRect.right-sourceRect.left||requested.bottom-requested.top!=sourceRect.bottom-sourceRect.top;const bool publish_cpu=this!=owner_->active_target&&!primary();if(s==owner_->active_target&&this!=owner_->active_target){invalidateVisualCpu();if(owner_->renderer.has_pending_ui())owner_->invalidateVisualOutput();}const bool target_capture=s==owner_->active_target&&this!=owner_->active_target;
  if(target_capture){const HRESULT restored=restoreReleased();if(FAILED(restored))return restored;}
  // The active target and primary are GPU-owned: the renderer blit below is
@@ -1693,7 +2590,7 @@ HRESULT Surface::Blt(LPRECT dr,LPDIRECTDRAWSURFACE7 src,LPRECT sr,DWORD flags,LP
  // so copying UI pixels into it only cost CPU (~1-3 GB/s in the store screen).
  HRESULT hr=target_capture?owner_->renderer.capture(image_,requested,sourceRect):
   !publish_cpu?DD_OK:(stretched?stretch_rect(*this,requested,*s,sourceRect,publish_cpu):copy_rect(*this,requested.left,requested.top,*s,sr,publish_cpu));
- if(SUCCEEDED(hr)&&this==owner_->active_target){if(key){trace("Surface.Blt.ActiveTargetKeyed","key=%08lx-%08lx source=%ld,%ld,%ld,%ld",key->dwColorSpaceLowValue,key->dwColorSpaceHighValue,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);}invalidateVisualTarget();hr=covers_screen&&!key?owner_->renderer.present_image(*s->image(),sr,key):owner_->renderer.blit(*s->image(),requested,sr,key,true);}if(SUCCEEDED(hr)&&primary()){if(key){trace("Surface.Blt.Keyed","key=%08lx-%08lx source=%ld,%ld,%ld,%ld",key->dwColorSpaceLowValue,key->dwColorSpaceHighValue,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);}invalidateVisualTarget();hr=owner_->renderer.blit(*s->image(),requested,sr,key);}if(SUCCEEDED(hr))completedVisualMutation();return hr;
+ if(SUCCEEDED(hr)&&this==owner_->active_target){if(key){trace("Surface.Blt.ActiveTargetKeyed","key=%08lx-%08lx source=%ld,%ld,%ld,%ld",key->dwColorSpaceLowValue,key->dwColorSpaceHighValue,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);}invalidateVisualTarget();hr=covers_screen&&!key?owner_->renderer.present_image(*s->image(),sr,key):owner_->renderer.blit(*s->image(),requested,sr,key,true);}if(SUCCEEDED(hr)&&primary()){if(key){trace("Surface.Blt.Keyed","key=%08lx-%08lx source=%ld,%ld,%ld,%ld",key->dwColorSpaceLowValue,key->dwColorSpaceHighValue,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);}invalidateVisualTarget();hr=owner_->renderer.blit(*s->image(),requested,sr,key);}if(SUCCEEDED(hr))completedVisualMutation();return owner_->checkDevice(hr);
 }
 HRESULT Surface::Flip(LPDIRECTDRAWSURFACE7,DWORD){trace("Surface.Flip");return owner_->presentVisual();}
 HRESULT Device::Load(LPDIRECTDRAWSURFACE7 destination,LPPOINT point,LPDIRECTDRAWSURFACE7 source,LPRECT sourceRect,DWORD flags){trace("Device.Load","flags=%08lx",flags);auto* dst=dynamic_cast<Surface*>(destination);auto* src=dynamic_cast<Surface*>(source);if(!dst||!src){trace("Device.Load.Result","hr=%08lx invalid-object",DDERR_INVALIDOBJECT);return DDERR_INVALIDOBJECT;}if(scene_){HRESULT flush=flushForSurface();if(FAILED(flush))return flush;}const LONG x=point?point->x:0,y=point?point->y:0;HRESULT hr=copy_rect(*dst,x,y,*src,sourceRect);
@@ -1708,7 +2605,31 @@ HRESULT Device::Load(LPDIRECTDRAWSURFACE7 destination,LPPOINT point,LPDIRECTDRAW
    hr=dd_->renderer.upload(*dst->image());
   }
  }
- trace("Device.Load.Result","hr=%08lx dst=%ux%u/%lu src=%ux%u/%lu point=%ld,%ld",hr,dst->image()->width,dst->image()->height,dst->image()->format.dwRGBBitCount,src->image()->width,src->image()->height,src->image()->format.dwRGBBitCount,x,y);if(state_trace_enabled()){RECT r=sourceRect?*sourceRect:RECT{0,0,(LONG)src->image()->width,(LONG)src->image()->height};char event[320]{};sprintf_s(event,"Diagnostic.Load.d%llu.s%llu.hr%08lx.p%ld.%ld.r%ld.%ld.%ld.%ld.dg%llu.sg%llu",(unsigned long long)dst->image()->id,(unsigned long long)src->image()->id,hr,x,y,r.left,r.top,r.right,r.bottom,(unsigned long long)dst->image()->generation,(unsigned long long)src->image()->generation);trace(event);}return hr;}
+ trace("Device.Load.Result","hr=%08lx dst=%ux%u/%lu src=%ux%u/%lu point=%ld,%ld",hr,dst->image()->width,dst->image()->height,dst->image()->format.dwRGBBitCount,src->image()->width,src->image()->height,src->image()->format.dwRGBBitCount,x,y);if(state_trace_enabled()){RECT r=sourceRect?*sourceRect:RECT{0,0,(LONG)src->image()->width,(LONG)src->image()->height};char event[320]{};sprintf_s(event,"Diagnostic.Load.d%llu.s%llu.hr%08lx.p%ld.%ld.r%ld.%ld.%ld.%ld.dg%llu.sg%llu",(unsigned long long)dst->image()->id,(unsigned long long)src->image()->id,hr,x,y,r.left,r.top,r.right,r.bottom,(unsigned long long)dst->image()->generation,(unsigned long long)src->image()->generation);trace(event);}return dd_->checkDevice(hr);}
+
+namespace {
+DWORD WINAPI device_removed_message(LPVOID) {
+ MessageBoxW(nullptr,
+  L"The graphics driver stopped responding (GPU timeout). Lower graphics settings (F10) or update the driver.",
+  L"Evil Islands",MB_OK|MB_ICONERROR|MB_TOPMOST|MB_SETFOREGROUND);
+ return 0;
+}
+}  // namespace
+
+void DD::deviceRemovedExit(HRESULT reason) noexcept {
+ renderer.report_device_removed(reason);
+ ClipCursor(nullptr);
+ // The message runs on its own thread: the game thread waits without pumping
+ // window messages, so no game or renderer code runs again before the end.
+ // That thread also has its own cursor state, visible over the message.
+ if(const HANDLE thread=CreateThread(nullptr,0,&device_removed_message,nullptr,0,nullptr)){
+  WaitForSingleObject(thread,INFINITE);
+  CloseHandle(thread);
+ } else device_removed_message(nullptr);
+ // No exit(): the game's CRT destructors are the crash this avoids.
+ TerminateProcess(GetCurrentProcess(),static_cast<UINT>(reason));
+ ExitProcess(static_cast<UINT>(reason));
+}
 
 HRESULT DD::CreateSurface(LPDDSURFACEDESC2 d,LPDIRECTDRAWSURFACE7* out,IUnknown* outer){trace("DD.CreateSurface");if(!d||!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* s=new(std::nothrow)Surface(this,*d);if(!s)return DDERR_OUTOFMEMORY;*out=s;if((d->ddsCaps.dwCaps&DDSCAPS_COMPLEX)&&(d->ddsCaps.dwCaps&DDSCAPS_FLIP)&&d->dwBackBufferCount){DDSURFACEDESC2 bd=*d;bd.ddsCaps.dwCaps&=~DDSCAPS_PRIMARYSURFACE;bd.ddsCaps.dwCaps|=DDSCAPS_BACKBUFFER;bd.dwBackBufferCount=0;auto* back=new(std::nothrow)Surface(this,bd);if(back){s->AddAttachedSurface(back);back->Release();}}return DD_OK;}
 HRESULT DD::DuplicateSurface(LPDIRECTDRAWSURFACE7 src,LPDIRECTDRAWSURFACE7* out){trace("DD.DuplicateSurface");auto* s=dynamic_cast<Surface*>(src);if(!s||!out)return DDERR_INVALIDPARAMS;DDSURFACEDESC2 d{};d.dwSize=sizeof(d);s->GetSurfaceDesc(&d);return CreateSurface(&d,out,nullptr);}
@@ -1748,7 +2669,7 @@ HRESULT Device::GetCaps(LPD3DDEVICEDESC7 d){if(!d)return DDERR_INVALIDPARAMS;fil
 HRESULT Device::EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK cb,LPVOID c){trace("Device.EnumTextureFormats");if(!cb)return DDERR_INVALIDPARAMS;DDPIXELFORMAT formats[]={raw_format(DDPF_RGB|DDPF_PALETTEINDEXED8,8,0,0,0),rgb_format(16,0x7c00,0x03e0,0x001f),rgb_format(16,0x7c00,0x03e0,0x001f,0x8000),rgb_format(16,0x0f00,0x00f0,0x000f,0xf000),rgb_format(16,0xf800,0x07e0,0x001f),rgb_format(32,0x00ff0000,0x0000ff00,0x000000ff),bgra32(),raw_format(DDPF_BUMPDUDV,16,0x000000ff,0x0000ff00,0),raw_format(DDPF_BUMPDUDV|DDPF_BUMPLUMINANCE,16,0x0000001f,0x000003e0,0x0000fc00),raw_format(DDPF_BUMPDUDV|DDPF_BUMPLUMINANCE,32,0x000000ff,0x0000ff00,0x00ff0000),fourcc_format(MAKEFOURCC('D','X','T','1')),fourcc_format(MAKEFOURCC('D','X','T','2')),fourcc_format(MAKEFOURCC('D','X','T','3')),fourcc_format(MAKEFOURCC('D','X','T','4')),fourcc_format(MAKEFOURCC('D','X','T','5'))};for(auto& f:formats)if(cb(&f,c)==D3DENUMRET_CANCEL)break;return D3D_OK;}
 HRESULT Device::SetRenderTarget(LPDIRECTDRAWSURFACE7 s,DWORD){trace("Device.SetRenderTarget");auto* p=dynamic_cast<Surface*>(s);if(!p)return DDERR_INVALIDPARAMS;if(scene_){HRESULT hr=flushForSurface();if(FAILED(hr))return hr;}if(target_==p){dd_->active_target=target_;return D3D_OK;}p->AddRef();auto* previous=target_;target_=p;dd_->active_target=target_;if(previous)previous->Release();return D3D_OK;}
 HRESULT Device::GetRenderTarget(LPDIRECTDRAWSURFACE7* out){if(!out)return DDERR_INVALIDPARAMS;*out=target_;if(target_)target_->AddRef();return target_?D3D_OK:DDERR_INVALIDPARAMS;}
-HRESULT Device::Clear(DWORD count,LPD3DRECT rects,DWORD flags,D3DCOLOR c,D3DVALUE z,DWORD s){camp::OutputScope output(target_&&target_->compositionOutput());bridge_profile_api_entry("Clear",_ReturnAddress());trace("Device.Clear","flags=%08lx rects=%lu",flags,count);if(scene_){HRESULT flush=flushForSurface();if(FAILED(flush))return flush;}if(flags&D3DCLEAR_TARGET)invalidateVisualTarget();return dd_->renderer.clear(count,rects,flags,c,z,s);}
+HRESULT Device::Clear(DWORD count,LPD3DRECT rects,DWORD flags,D3DCOLOR c,D3DVALUE z,DWORD s){camp::OutputScope output(target_&&target_->compositionOutput());bridge_profile_api_entry("Clear",_ReturnAddress());trace("Device.Clear","flags=%08lx rects=%lu",flags,count);if(scene_){HRESULT flush=flushForSurface();if(FAILED(flush))return dd_->checkDevice(flush);}if(flags&D3DCLEAR_TARGET)invalidateVisualTarget();return dd_->checkDevice(dd_->renderer.clear(count,rects,flags,c,z,s));}
 HRESULT Device::SetTransform(D3DTRANSFORMSTATETYPE t,LPD3DMATRIX m){bridge_profile_api_entry("Transform",_ReturnAddress());trace("Device.SetTransform","state=%lu",(DWORD)t);if(!m||t>D3DTRANSFORMSTATE_PROJECTION)return DDERR_INVALIDPARAMS;if(recording_){recording_state_.transform[t]=*m;recording_transform_mask_[t]=true;}else state_.transform[t]=*m;return D3D_OK;}
 HRESULT Device::GetTransform(D3DTRANSFORMSTATETYPE t,LPD3DMATRIX m){if(!m||t>D3DTRANSFORMSTATE_PROJECTION)return DDERR_INVALIDPARAMS;*m=state_.transform[t];return D3D_OK;}
 HRESULT Device::SetViewport(LPD3DVIEWPORT7 v){bridge_profile_api_entry("Viewport",_ReturnAddress());trace("Device.SetViewport");if(!v)return DDERR_INVALIDPARAMS;if(recording_){recording_state_.viewport=*v;recording_viewport_mask_=true;}else state_.viewport=*v;return D3D_OK;}
@@ -1765,22 +2686,10 @@ HRESULT Device::queueDraw(D3DPRIMITIVETYPE type,DWORD fvf,const void* vertices,D
  bridge_profile_api_entry(indexCount ? "DrawIndexed" : "Draw", nullptr);
  if(!vertices||!vertexCount||(indexCount&&!indices))return DDERR_INVALIDPARAMS;const UINT stride=legacy_fvf_stride(fvf);if(!stride)return E_NOTIMPL;
  HRESULT nativeFlush=flushNativeVisual();native_sequence_=false;if(FAILED(nativeFlush))return nativeFlush;
- const bool profileCapture=dd_->renderer.capture_profiling_enabled();LARGE_INTEGER captureStart{};if(profileCapture)QueryPerformanceCounter(&captureStart);const std::uint64_t captureBytes=(std::uint64_t)stride*vertexCount+(std::uint64_t)sizeof(WORD)*indexCount;
+ // The capture counters are profiler state (scene thread in scene mode).
+ const bool profileCapture=!dd_->renderer.scene_mode()&&dd_->renderer.capture_profiling_enabled();LARGE_INTEGER captureStart{};if(profileCapture)QueryPerformanceCounter(&captureStart);const std::uint64_t captureBytes=(std::uint64_t)stride*vertexCount+(std::uint64_t)sizeof(WORD)*indexCount;
  HRESULT uiFlush=dd_->flushVisualUi();if(FAILED(uiFlush))return uiFlush;
- // The verified combat-text owner emits one unclipped TL group per entry.
- // Compose that original group while copying it, before adjacent draws batch.
- const auto copy_vertices=[&](std::uint8_t* destination,size_t bytes){
-  std::memcpy(destination,vertices,bytes);
-  const float scale=widescreen::combat_text_scale;
-  if(scale==1.f||(fvf&D3DFVF_POSITION_MASK)!=D3DFVF_XYZRHW)return;
-  float minimum_x=FLT_MAX,minimum_y=FLT_MAX,maximum_x=-FLT_MAX,maximum_y=-FLT_MAX;
-  for(DWORD n=0;n<vertexCount;++n){float point[2];std::memcpy(point,destination+size_t(n)*stride,sizeof(point));
-   minimum_x=std::min(minimum_x,point[0]);maximum_x=std::max(maximum_x,point[0]);
-   minimum_y=std::min(minimum_y,point[1]);maximum_y=std::max(maximum_y,point[1]);}
-  const float x=(minimum_x+maximum_x)*.5f,y=(minimum_y+maximum_y)*.5f;
-  for(DWORD n=0;n<vertexCount;++n){float point[2];auto* vertex=destination+size_t(n)*stride;std::memcpy(point,vertex,sizeof(point));
-   point[0]=x+scale*(point[0]-x);point[1]=y+scale*(point[1]-y);std::memcpy(vertex,point,sizeof(point));}
- };
+ const auto copy_vertices=[&](std::uint8_t* destination,size_t bytes){std::memcpy(destination,vertices,bytes);};
  const auto semantic=current_semantic_context();const auto hud=widescreen::interface_owned?widescreen::hud_blit:widescreen::HudComposition{};Surface* held=textures_[0];SurfaceImage* image=held?held->image():nullptr;
  try{
   if(!pending_draws_.empty()){
@@ -1808,12 +2717,24 @@ HRESULT Device::DeleteStateBlock(DWORD handle){trace("Device.DeleteStateBlock","
 
 } // namespace owned
 
+namespace owned {
+// Issue #70: another module can rebind game.exe's ddraw.dll imports so this
+// DLL is loaded but never called. The imports are logged at load and at the
+// first enumeration; the first create verifies every installed hook; a
+// process that never created through us says so once at exit.
+std::atomic<bool> g_ddraw_create_called{false};
+std::atomic<bool> g_ddraw_enumerate_called{false};
+void note_ddraw_create() noexcept {
+ if(!g_ddraw_create_called.exchange(true))bridge_verify_renderer_ownership("startup");
+}
+} // namespace owned
+
 using owned::DD;
 
-extern "C" HRESULT WINAPI DirectDrawCreateEx(GUID*,void** out,REFIID iid,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreateEx");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* dd=new(std::nothrow)DD();if(!dd)return DDERR_OUTOFMEMORY;HRESULT hr=dd->QueryInterface(iid,out);dd->Release();return hr;}
-extern "C" HRESULT WINAPI DirectDrawCreate(GUID*,LPDIRECTDRAW* out,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreate");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* core=new(std::nothrow)DD();if(!core)return DDERR_OUTOFMEMORY;auto* legacy=new(std::nothrow)owned::LegacyDD(core);if(!legacy){core->Release();return DDERR_OUTOFMEMORY;}*out=static_cast<IDirectDraw*>(legacy);return DD_OK;}
+extern "C" HRESULT WINAPI DirectDrawCreateEx(GUID*,void** out,REFIID iid,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreateEx");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* dd=new(std::nothrow)DD();if(!dd)return DDERR_OUTOFMEMORY;HRESULT hr=dd->QueryInterface(iid,out);dd->Release();return hr;}
+extern "C" HRESULT WINAPI DirectDrawCreate(GUID*,LPDIRECTDRAW* out,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreate");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* core=new(std::nothrow)DD();if(!core)return DDERR_OUTOFMEMORY;auto* legacy=new(std::nothrow)owned::LegacyDD(core);if(!legacy){core->Release();return DDERR_OUTOFMEMORY;}*out=static_cast<IDirectDraw*>(legacy);return DD_OK;}
 extern "C" HRESULT WINAPI DirectDrawCreateClipper(DWORD,LPDIRECTDRAWCLIPPER*,IUnknown*){owned::trace("Export.DirectDrawCreateClipper");return DDERR_UNSUPPORTED;}
-extern "C" HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb,LPVOID c,DWORD){owned::trace("Export.DirectDrawEnumerateExA");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";cb(nullptr,desc,name,c,nullptr);return DD_OK;}
+extern "C" HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb,LPVOID c,DWORD){owned::trace("Export.DirectDrawEnumerateExA");if(!owned::g_ddraw_enumerate_called.exchange(true))owned::bridge_log_ddraw_imports("first_enumerate");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";cb(nullptr,desc,name,c,nullptr);return DD_OK;}
 extern "C" HRESULT WINAPI DirectDrawEnumerateA(LPDDENUMCALLBACKA cb,LPVOID c){owned::trace("Export.DirectDrawEnumerateA");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";cb(nullptr,desc,name,c);return DD_OK;}
 extern "C" HRESULT WINAPI DirectDrawEnumerateW(LPDDENUMCALLBACKW,LPVOID){return DDERR_UNSUPPORTED;}
 extern "C" HRESULT WINAPI DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW,LPVOID,DWORD){return DDERR_UNSUPPORTED;}
@@ -1825,5 +2746,5 @@ extern "C" HRESULT WINAPI DDInternalLock(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI DDInternalUnlock(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI DllCanUnloadNow(){return S_FALSE;}
 extern "C" HRESULT WINAPI DllGetClassObject(REFCLSID,REFIID,LPVOID*){return CLASS_E_CLASSNOTAVAILABLE;}
-BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){owned::g_module=h;DisableThreadLibraryCalls(h);owned::g_exception_handler=AddVectoredExceptionHandler(1,owned::exception_trace);std::set_terminate(owned::terminate_trace);_set_purecall_handler(owned::purecall_trace);}else if(reason==DLL_PROCESS_DETACH){if(!reserved){owned::ui_layers_uninstall();owned::uninstall_res_mapping_hooks();if(owned::uninstall_game_focus()&&owned::EngineBridge::instance().uninstall())owned::widescreen_uninstall();}if(owned::g_exception_handler){RemoveVectoredExceptionHandler(owned::g_exception_handler);owned::g_exception_handler=nullptr;}}return TRUE;}
+BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){owned::g_module=h;DisableThreadLibraryCalls(h);owned::g_exception_handler=AddVectoredExceptionHandler(1,owned::exception_trace);owned::dinput_guard::g_handler=AddVectoredExceptionHandler(1,owned::dinput_guard::on_exception);std::set_terminate(owned::terminate_trace);_set_purecall_handler(owned::purecall_trace);owned::bridge_log_ddraw_imports("dll_attach");}else if(reason==DLL_PROCESS_DETACH){if(!owned::g_ddraw_create_called.load())owned::bridge_log_never_called_at_exit();if(!reserved){owned::stall_watchdog::stop();owned::fear_watch::uninstall();owned::ui_layers_uninstall();owned::uninstall_res_mapping_hooks();if(owned::uninstall_game_focus()&&owned::EngineBridge::instance().uninstall())owned::widescreen_uninstall();}if(owned::dinput_guard::g_handler){RemoveVectoredExceptionHandler(owned::dinput_guard::g_handler);owned::dinput_guard::g_handler=nullptr;}if(owned::g_exception_handler){RemoveVectoredExceptionHandler(owned::g_exception_handler);owned::g_exception_handler=nullptr;}}return TRUE;}
 namespace owned { void window_sampler_present(){ window_sampler::present(); } } // TEMPORARY

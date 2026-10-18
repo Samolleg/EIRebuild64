@@ -34,6 +34,11 @@ struct RetainedStaticSourceCandidate {
     std::shared_ptr<const OwnedMapSnapshot> snapshot;
     const StaticObjectSource* source = nullptr;
     std::array<float, 3> world_position{};
+    // The model's root node in the same space as world_position (valid when
+    // the model has exactly one root): the sway anchor of an object-space
+    // record, which has no pose node to read it from.
+    std::array<float, 3> root_world{};
+    bool root_valid = false;
     std::vector<RetainedPreparedNode> nodes;
     // References the same immutable model/FIG/BON/MMP values for both passes.
     std::shared_ptr<const VisualAssemblyAsset> assembly;
@@ -120,6 +125,19 @@ NativeWorldLighting shadow_projection_lighting(const NativeWorldLighting& lighti
 // receiver against the camera and each map, so the count is what it pays for.
 bool append_cell_merged_receivers(float cell,const std::vector<NativeWorldBounds>& statics,
     std::vector<NativeWorldBounds>& receivers);
+// The cell key of a receiver box (by its centre) in that order.
+std::uint64_t receiver_cell_key(float cell,const NativeWorldBounds& bounds) noexcept;
+// The same, with some cells' unions already formed: `cells` is (key, union)
+// in ascending key order, unique keys; each is joined with the keyed statics.
+bool append_cell_merged_receivers(float cell,const std::vector<NativeWorldBounds>& statics,
+    const std::vector<std::pair<std::uint64_t,NativeWorldBounds>>& cells,
+    std::vector<NativeWorldBounds>& receivers);
+// Camera class of a box with a float rounding margin: every box inside an
+// `inside` box passes retained_world_bounds_visible, none inside an
+// `outside` box does; `partial` decides nothing.
+enum class ReceiverCellClass : std::uint8_t { outside, inside, partial };
+ReceiverCellClass classify_receiver_cell(const NativeWorldBounds& bounds,
+    const std::array<float,16>& world_to_clip) noexcept;
 
 bool build_retained_directional_coverage(
     const std::array<float, 16>& world_to_clip,
@@ -129,7 +147,8 @@ bool build_retained_directional_coverage(
     const TerrainCpuAsset* base_terrain = nullptr,
     const std::array<float, 16>* terrain_to_world = nullptr,
     std::uint32_t map_side = 2048,
-    std::uint8_t close_cascades = 3) noexcept;
+    std::uint8_t close_cascades = 3,
+    std::uint64_t base_terrain_generation = 0) noexcept; // base_terrain's source generation
 NativeContribution retained_world_contribution(const NativeWorldBounds& bounds,
     bool casts_shadow, const RetainedDirectionalCoverage& coverage,
     NativeWorldBounds* caster_in_light = nullptr,
@@ -233,6 +252,17 @@ TrunkShape retained_visual_trunk_shape(const FigureCpuAsset& figure,
 // as the object-to-world transform: maximum XY for radius, Z for top/height.
 std::uint32_t retained_visual_sway_shape(const TrunkShape& trunk,
     const std::array<float,3>& scale) noexcept;
+// Tree sway inputs from immutable part evidence (assembly.sways, sway_shape,
+// sway_root): the object sways when any part samples foliage texels; its one
+// root node anchors the field and the root parts' cut-out-free geometry gives
+// the still trunk. Main-map and neighbour-map trees (MOB family 53, the tree
+// class) take the same rule.
+void sway_tree_assembly(VisualAssemblyAsset& assembly) noexcept;
+// The same rule for an object-space record of one part: 0x200 and the trunk
+// shape, without the root-node distance (its sway anchor is carried in the
+// record, NativeWorldGeometry::sway_root). Zero when the part does not sway.
+std::uint32_t retained_object_space_sway_flags(const VisualAssemblyAsset& assembly,
+    const VisualPartAsset& part) noexcept;
 // Instance flags of a part of a swaying object: 0x200, trunk top (bits 10-15,
 // 1/4 unit), trunk radius (bits 16-21, 1/16 unit), plant height (bits 22-27,
 // 1/4 unit) and the part node's distance from the root node (bits 28-31).

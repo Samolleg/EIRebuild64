@@ -54,6 +54,9 @@ bool widescreen_hud_hovered(HudPanel panel) noexcept;
 bool widescreen_hud_fade_enabled(HudPanel panel) noexcept;
 float widescreen_hud_opacity(HudPanel panel) noexcept;
 void widescreen_hud_activity(HudPanel panel) noexcept;
+// The mission screen's own OnActivate is running: it is already the current
+// screen but has not assigned its message panel members yet.
+void widescreen_mission_activation(bool active) noexcept;
 // Compare renderer-native content values, never draw/rebuild/animation serials.
 void widescreen_hud_content_values(HudPanel panel,const std::vector<std::uint64_t>& values) noexcept;
 struct HudPanelSettings {
@@ -109,6 +112,8 @@ struct MessagePanelBounds { float left = 0, top = 0, width = 0, height = 0; };
 // Owned dimensions/reflow and uniform composition; native text/mode/slide time remain authoritative.
 void widescreen_set_message_panel(const MessagePanelSettings& settings) noexcept;
 void widescreen_set_combat_text_scale(int percent) noexcept;
+// The independent combat text size (owned combat text, combat_text.h).
+float widescreen_combat_text_scale() noexcept;
 bool widescreen_message_panel_bounds(MessagePanelBounds& bounds) noexcept;
 
 // The active layout (valid after widescreen_set_surface).

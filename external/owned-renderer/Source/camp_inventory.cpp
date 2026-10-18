@@ -259,6 +259,25 @@ class CampIconLoader {
     unsigned visible_lane_ = 0, selected_lane_ = 0;
     std::array<std::thread,2> workers_;
     bool stopping_ = false;
+    std::uint64_t world_epoch_ = 0;
+
+    // Icon GPU homes (256..2048 square BGRA, up to 16 MB each) serve the
+    // screens of one world; kept for the session they grew with every
+    // inventory ever streamed. A new world epoch drops every finished or
+    // queued entry; an icon a worker is decoding finishes into its kept
+    // entry. Bound native textures hold their own GPU reference.
+    void retire_previous_world_locked() {
+        const auto epoch = bridge_current_world_epoch();
+        if (epoch == world_epoch_) return;
+        world_epoch_ = epoch;
+        pending_.clear();
+        for (auto& lane : visible_) lane.clear();
+        for (auto& tab : selected_) tab.clear();
+        for (auto entry = entries_.begin(); entry != entries_.end();) {
+            const bool decoding = !entry->second.pending && !entry->second.data && entry->second.failure.empty();
+            if (decoding) ++entry; else entry = entries_.erase(entry);
+        }
+    }
 
     void run(ResourceStoreConfig mounts, bool high_resolution, ComPtr<ID3D11Device> device) noexcept {
         SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
@@ -383,6 +402,7 @@ public:
                 });
         }
         std::lock_guard lock(mutex_);
+        retire_previous_world_locked();
         auto [where, inserted] = entries_.try_emplace(name);
         if (inserted) { pending_.push_back(name); wake_.notify_all(); }
         auto& entry = where->second;
@@ -2471,10 +2491,14 @@ void __fastcall unit_draw(void* self, void*, void* v, void* unit, float angle, f
 bool write_bytes(std::uint8_t* address, const void* bytes, std::size_t count) noexcept {
     DWORD protection = 0;
     if (!VirtualProtect(address, count, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::uint8_t before[5]{};
+    const std::size_t noted = count < sizeof(before) ? count : sizeof(before);
+    std::memcpy(before, address, noted);
     std::memcpy(address, bytes, count);
     DWORD ignored = 0;
     const bool restored = VirtualProtect(address, count, protection, &ignored) != FALSE;
     FlushInstructionCache(GetCurrentProcess(), address, count);
+    owned::bridge_note_owned_patch(address, before, count);  // first 5 bytes compared
     return restored;
 }
 void jump(std::uint8_t* bytes, const void* address, const void* target) noexcept {

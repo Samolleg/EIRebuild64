@@ -203,7 +203,8 @@ inline Weather weather_amount(const WorldEnvironment& e) noexcept {
     auto kind = [p](int current, int next, int type) {
         return (current == type ? 1.0f - p : 0.0f) + (next == type ? p : 0.0f);
     };
-    return {kind(e.weather_current, e.weather_next, 1), kind(e.weather_current, e.weather_next, 2)};
+    const float scale = 0.4f + 0.6f * e.precipitation_strength;  // light showers react less
+    return {kind(e.weather_current, e.weather_next, 1) * scale, kind(e.weather_current, e.weather_next, 2) * scale};
 }
 
 // Rain and snow as the particles see them: the weather blend ramped like the
@@ -272,8 +273,9 @@ inline const EmitterStyle& emitter_style(Emitter e, ZoneClass zone = zone_outdoo
         {.3f, .2f, 2.4f, .05f, .08f, {.45f, .8f, .65f}, {.5f, .65f, .8f}, .18f, .08f, .1f, .15f, .4f, .5f, 1.f, .0f, .15f};
     if (e == em_spores && (zone == zone_cave || zone == zone_gipat_cave)) return mushroom_spores;
     static const EmitterStyle styles[em_count] = {
-        // pollen: warm white/pale yellow fluff with a few green chaff flecks
-        {.25f, .2f, 3.0f, .12f, .18f, {1.f, .96f, .78f}, {.86f, .92f, .55f}, .8f, .05f, 1.0f, .35f, .9f, 0.f, 1.f, .0f, .0f},
+        // pollen: warm white/pale yellow fluff and green chaff flecks, half each
+        // (sparse fluff: a third of its former count; the chaff keeps its count)
+        {.125f, .2f, 3.0f, .12f, .18f, {1.f, .96f, .78f}, {.86f, .92f, .55f}, .8f, .05f, 1.0f, .35f, .9f, 0.f, 1.f, .0f, .0f},
         // leaves: olive, ochre and rust, tumbling as they fall
         {.12f, .0f, 9.0f, .21f, .3f, {.62f, .55f, .18f}, {.78f, .38f, .12f}, .95f, -.55f, .8f, .45f, 1.6f, 0.f, 1.f, 3.2f, .0f},
         // dead motes: ash grey to bone, slowly sinking
@@ -291,8 +293,8 @@ inline const EmitterStyle& emitter_style(Emitter e, ZoneClass zone = zone_outdoo
         // sand: fine ochre grains hugging the ground (lifted by the gust rule
         // below, which also adds a few faint veils), streaked along the wind
         {.9f, .0f, 1.0f, .03f, .06f, {.88f, .74f, .52f}, {.76f, .62f, .44f}, .5f, .0f, 1.2f, .12f, 1.2f, 0.f, 1.6f, .0f, .0f},
-        // fireflies: yellow-green blinking glow
-        {.05f, .4f, 2.5f, .12f, .18f, {.8f, 1.f, .35f}, {1.f, .95f, .45f}, 1.f, .0f, .05f, .8f, .35f, 1.f, 1.f, .0f, 1.f},
+        // fireflies: sparse yellow-green blinking glow (a third of the former count)
+        {.017f, .4f, 2.5f, .12f, .18f, {.8f, 1.f, .35f}, {1.f, .95f, .45f}, 1.f, .0f, .05f, .8f, .35f, 1.f, 1.f, .0f, 1.f},
         // snow glitter: sparse white/ice-blue flakes drifting slowly, a faint twinkling sparkle
         {.1f, .1f, 4.0f, .05f, .09f, {.95f, .97f, 1.f}, {.82f, .9f, 1.f}, .8f, -.18f, .7f, .35f, .7f, .2f, 1.f, .0f, .7f},
         // spray: small white droplets in short ballistic arcs on the impact

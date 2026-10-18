@@ -35,6 +35,11 @@ const char* const* player_graphics_categories(std::size_t& count) noexcept;
 std::size_t apply_graphics_preset(RendererConfig& config, GraphicsPreset preset) noexcept;
 // The preset whose every registered key matches the config, else custom.
 GraphicsPreset detect_graphics_preset(const RendererConfig& config) noexcept;
+// Settings migration only: when the config matches a preset of the table as
+// it read in saved_version (rows added since are ignored), applies that preset's current values
+// (rows that left the preset go back to their defaults) and returns it;
+// otherwise changes nothing and returns custom.
+GraphicsPreset reapply_graphics_preset_before(RendererConfig& config, int saved_version) noexcept;
 // First-run suggestion from the adapter: integrated (UMA) GPUs get Low,
 // discrete cards are graded by their WDDM local-memory budget (64-bit even
 // in this 32-bit process). A rough hint only; the player chooses.

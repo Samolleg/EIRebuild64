@@ -16,6 +16,7 @@
 #include "widescreen.h"
 
 #include "addon_hook_chain.h"
+#include "engine_bridge.h"
 #include "game_sites.h"
 #include "world_fog.h"
 
@@ -184,7 +185,7 @@ constexpr Anchors kBottomRight{Anchor::end, Anchor::end};
 constexpr Anchors kChat{Anchor::content_start, Anchor::start};
 constexpr Anchors kBottomCentre{Anchor::centre, Anchor::end};
 enum class InputScope { none, area, rect };
-struct WidgetMethod { std::uintptr_t va; std::uint8_t prologue; Anchors anchor; bool post_rect; bool by_vtable = false; InputScope input = InputScope::none; bool handler_this = false; bool combat_text = false; };
+struct WidgetMethod { std::uintptr_t va; std::uint8_t prologue; Anchors anchor; bool post_rect; bool by_vtable = false; InputScope input = InputScope::none; bool handler_this = false; };
 constexpr WidgetMethod kWidgetMethods[] = {
     // CI3DObjectMap (minimap, top right)
     {0x00641F20, 5, kTopRight, true},   // Init
@@ -252,8 +253,6 @@ constexpr WidgetMethod kWidgetMethods[] = {
     // CI3DObject::Draw2D (the objects' 2D surfaces): anchored by the object's class
     {0x005FECC0, 6, {}, false, true},
     {0x005FED00, 5, {}, false, true, InputScope::area}, // Draw2DTips: cursor placement remains physical
-    // One original TL group per damage/indicator entry, before proxy batching.
-    {0x005E18E0, 7, {}, false, false, InputScope::none, false, true},
     // Mission notifications: child text has a custom Draw and direct scrollbar conversions.
     {0x0065D120, 5, {}, false, true},
     {0x00649E20, 6, {}, false}, // Output layout producer
@@ -408,6 +407,7 @@ bool write_code(std::uint8_t* where, const void* bytes, std::size_t size) noexce
         if (added) g_patches.pop_back();
         else std::memcpy(patch->current, previous_bytes, size);
     }
+    else owned::bridge_note_owned_patch(where, previous_bytes, size);  // ownership verification
     return result;
 }
 
@@ -853,9 +853,24 @@ bool apply_draw_square() noexcept {
 
 // Shipped current-screen membership, not retained pointer identity. Modal screens
 // replace the mission's drawing/input role even while that mission stays alive.
+bool mission_message_panel(const std::uint8_t* screen,const void*& output,const void*& text) noexcept {
+    output=text=nullptr;
+    if(!screen || *reinterpret_cast<void* const*>(screen)!=at(0x00740764))return false;
+    const auto* panel=*reinterpret_cast<const std::uint8_t* const*>(screen+0x1BC);
+    const auto* child=*reinterpret_cast<const std::uint8_t* const*>(screen+0x1B8);
+    if(!panel || !child || *reinterpret_cast<void* const*>(panel)!=at(0x00742498) ||
+        *reinterpret_cast<void* const*>(child)!=at(0x00742E9C) ||
+        *reinterpret_cast<const void* const*>(panel+0x148)!=screen ||
+        !*reinterpret_cast<const int*>(panel+0xE8))return false;
+    output=panel;text=child;return true;
+}
+// Runtime evidence (c72 exception log): every fault reading +0x1BC/+0x1B8 of
+// the current mission screen came from widgets entered inside its OnActivate,
+// before those members hold pointers. No message panel exists until it returns.
+bool g_mission_activating = false;
 bool current_message_panel(const void*& output, const void*& text) noexcept {
     output = text = nullptr;
-    if (!g_interface_owned || !g_image) return false;
+    if (!g_interface_owned || !g_image || g_mission_activating) return false;
     __try {
         const auto* ui_interface = at(0x007C7D50);
         if (!ui_interface[0x30]) return false;
@@ -863,14 +878,7 @@ bool current_message_panel(const void*& output, const void*& text) noexcept {
         auto* end = *reinterpret_cast<void* const* const*>(ui_interface + 0x38);
         if (begin == end) return false;
         const auto* screen = static_cast<const std::uint8_t*>(end[-1]);
-        if (*reinterpret_cast<void* const*>(screen) != at(0x00740764)) return false;
-        const auto* panel = *reinterpret_cast<const std::uint8_t* const*>(screen + 0x1BC);
-        const auto* child = *reinterpret_cast<const std::uint8_t* const*>(screen + 0x1B8);
-        if (!panel || !child || *reinterpret_cast<void* const*>(panel) != at(0x00742498) ||
-            *reinterpret_cast<void* const*>(child) != at(0x00742E9C) ||
-            *reinterpret_cast<const void* const*>(panel + 0x148) != screen ||
-            !*reinterpret_cast<const int*>(panel + 0xE8)) return false;
-        output = panel; text = child; return true;
+        return mission_message_panel(screen,output,text);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -882,8 +890,19 @@ constexpr std::array<PanelRole,10> kPanelRoles{{
     {0x198,0x0074283C,kBottomRight}, {0,0,{}},
     {0x1B4,0x00742530,kBottomLeft}, {0x1B0,0x007425C8,kBottomRight}
 }};
+const std::uint8_t* mission_panel(unsigned index,const std::uint8_t* screen) noexcept {
+    if(index>=kPanelRoles.size() || !kPanelRoles[index].member || !screen ||
+        *reinterpret_cast<void* const*>(screen)!=at(0x00740764))return nullptr;
+    const auto& role=kPanelRoles[index];
+    const auto* object=*reinterpret_cast<const std::uint8_t* const*>(screen+role.member);
+    if(!object || *reinterpret_cast<void* const*>(object)!=at(role.vtable) ||
+        *reinterpret_cast<const void* const*>(object+0x148)!=screen ||
+        !*reinterpret_cast<const int*>(object+0xE8))return nullptr;
+    return object;
+}
 const std::uint8_t* current_panel(unsigned index) noexcept {
-    if(!g_interface_owned || !g_image || index>=kPanelRoles.size() || !kPanelRoles[index].member)return nullptr;
+    // Not during the mission screen's OnActivate (as current_message_panel).
+    if(!g_interface_owned || !g_image || g_mission_activating || index>=kPanelRoles.size() || !kPanelRoles[index].member)return nullptr;
     __try {
         const auto* ui_interface=at(0x007C7D50);
         if(!ui_interface[0x30])return nullptr;
@@ -891,23 +910,20 @@ const std::uint8_t* current_panel(unsigned index) noexcept {
         auto* end=*reinterpret_cast<void* const* const*>(ui_interface+0x38);
         if(begin==end)return nullptr;
         const auto* screen=static_cast<const std::uint8_t*>(end[-1]);
-        if(*reinterpret_cast<void* const*>(screen)!=at(0x00740764))return nullptr;
-        const auto& role=kPanelRoles[index];
-        const auto* object=*reinterpret_cast<const std::uint8_t* const*>(screen+role.member);
-        if(!object || *reinterpret_cast<void* const*>(object)!=at(role.vtable) ||
-            *reinterpret_cast<const void* const*>(object+0x148)!=screen ||
-            !*reinterpret_cast<const int*>(object+0xE8))return nullptr;
-        return object;
+        return mission_panel(index,screen);
     } __except(EXCEPTION_EXECUTE_HANDLER){return nullptr;}
 }
 const std::uint8_t* current_clock_tip() noexcept {
     const auto* clock=current_panel(unsigned(HudPanel::game_speed));
-    if(!clock || g_clock_hover_area<0 || unsigned(g_clock_hover_area)>=*reinterpret_cast<const unsigned*>(clock+0x12C))return nullptr;
-    const auto* area=(*reinterpret_cast<const std::uint8_t* const* const*>(clock+0x128))[g_clock_hover_area];
-    const auto* tip=*reinterpret_cast<const std::uint8_t* const*>(area+0x30);
-    if(!tip || *reinterpret_cast<const void* const*>(tip+0x170)!=area)return nullptr;
-    const int mode=*reinterpret_cast<const int*>(tip+0x180);
-    return mode>=2 && mode<=4?tip:nullptr;
+    if(!clock || g_clock_hover_area<0)return nullptr;
+    __try {   // game memory, as the neighbouring readers
+        if(unsigned(g_clock_hover_area)>=*reinterpret_cast<const unsigned*>(clock+0x12C))return nullptr;
+        const auto* area=(*reinterpret_cast<const std::uint8_t* const* const*>(clock+0x128))[g_clock_hover_area];
+        const auto* tip=*reinterpret_cast<const std::uint8_t* const*>(area+0x30);
+        if(!tip || *reinterpret_cast<const void* const*>(tip+0x170)!=area)return nullptr;
+        const int mode=*reinterpret_cast<const int*>(tip+0x180);
+        return mode>=2 && mode<=4?tip:nullptr;
+    } __except(EXCEPTION_EXECUTE_HANDLER){return nullptr;}
 }
 int panel_index(const void* object) noexcept {
     if(!object)return -1;
@@ -1090,9 +1106,18 @@ widescreen::HudComposition panel_composition(unsigned index,const void* object) 
     auto composed=widescreen::HudComposition{scale,left,top,scale,placed_left-left,placed_top-top};
     composed.opacity=widescreen_hud_opacity(HudPanel(index));return composed;
 }
+bool panel_bounds(unsigned index,const void* object,HudPanelBounds& bounds) noexcept {
+    if(!object)return false;
+    const RECT native=panel_native_rect(index,object);const auto* r=&native.left;
+    const auto h=panel_composition(index,object);
+    float width,height;panel_native_size(index,r,width,height);
+    bounds={widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r[0])),h),
+        widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r[1])),h),
+        width*h.scale,height*h.scale,width,height};
+    return bounds.width>0.f && bounds.height>0.f;
+}
 struct HeaderLayout { HudPanelBounds panel,body,background; float left,top,width,height,scale; DockSide side; };
-HeaderLayout header_layout(HudPanel panel) noexcept {
-    HudPanelBounds b{};widescreen_hud_panel_bounds(panel,b);
+HeaderLayout header_layout(HudPanel panel,HudPanelBounds b) noexcept {
     const float content_scale=panel==HudPanel::messages?g_layout.scale:g_layout.scale*g_hud_panels[unsigned(panel)].scale_percent/100.f;
     const float scale=content_scale*button_multiplier(panel);
     const float gap=border_inset(panel);
@@ -1120,6 +1145,9 @@ HeaderLayout header_layout(HudPanel panel) noexcept {
     const auto background=body;
     body.left+=gap;body.top+=gap;body.width=(std::max)(1.f,body.width-2.f*gap);body.height=(std::max)(1.f,body.height-2.f*gap);
     return {b,body,background,left,top,width,height,scale,side};
+}
+HeaderLayout header_layout(HudPanel panel) noexcept {
+    HudPanelBounds b{};widescreen_hud_panel_bounds(panel,b);return header_layout(panel,b);
 }
 void header_control_target(HudPanel panel,unsigned area,const HeaderLayout& header,float& x,float& y) noexcept {
     const bool vertical=header.side==DockSide::left || header.side==DockSide::right;
@@ -1168,6 +1196,14 @@ float slide_fraction(HudPanel panel,const void* object) noexcept {
 bool slide_closing(HudPanel panel,const void* object) noexcept {
     const unsigned offset=panel==HudPanel::minimap?0x1A8:panel==HudPanel::character_info?0x17C:0x15C;
     return *reinterpret_cast<const float*>(static_cast<const std::uint8_t*>(object)+offset)>0.f;
+}
+void visible_panel_bounds(HudPanel panel,const void* object,const HeaderLayout& header,HudPanelBounds& b) noexcept {
+    const float f=slide_fraction(panel,object);
+    if(header.side==DockSide::left)b.width=header.width+(b.width-header.width)*(1.f-f);
+    else if(header.side==DockSide::right){const float w=header.width+(b.width-header.width)*(1.f-f);b.left+=b.width-w;b.width=w;}
+    else if(header.side==DockSide::bottom){const float h=panel==HudPanel::messages?header.height+(b.height-header.height)*(1.f-f):b.height*(1.f-f)+header.height;b.top=header.top+header.height-h;b.height=h;}
+    else if(panel==HudPanel::messages && header.side==DockSide::top)b.height=header.height+(b.height-header.height)*(1.f-f);
+    else {const float bottom=b.top+b.height*(1.f-f);b.top=header.top;b.height=(std::max)(header.height,bottom-b.top);}
 }
 void slide_delta(const HeaderLayout& header,float fraction,float& x,float& y,bool inset_header=false) noexcept {
     x=y=0.f;
@@ -1291,7 +1327,7 @@ POINT input_point(POINT p) noexcept {return inverse_point(p,t_input_composition)
 
 bool slot_screen_bounds(unsigned panel,unsigned slot,const void* object,HudPanelBounds& out) noexcept {
     if(!slot_panel(panel) || slot>=layout_slot_count(panel,object))return false;
-    HudPanelBounds b;if(!widescreen_hud_panel_bounds(HudPanel(panel),b))return false;
+    HudPanelBounds b;if(!panel_bounds(panel,object,b))return false;
     const int direction=slot_direction(panel);const bool horizontal=direction>=2;
     const float unit=g_layout.unit*g_layout.scale*g_hud_panels[panel].scale_percent/100.f;
     float width,height;slot_dimensions(panel,slot,object,width,height);width*=unit;height*=unit;
@@ -1739,7 +1775,7 @@ void refresh_docked_headers() noexcept {
 // moves a rect the method stored) and returns to the real caller. This works
 // for any argument count and keeps eax/edx/st0.
 
-struct AnchorFrame { void* caller; Anchors previous; widescreen::HudComposition composition, input_composition; InputScope input_scope; float combat_scale; const void* visual_object; const void* input_object; void* object; std::uint32_t method; RECT rect; };
+struct AnchorFrame { void* caller; Anchors previous; widescreen::HudComposition composition, input_composition; InputScope input_scope; const void* visual_object; const void* input_object; void* object; std::uint32_t method; RECT rect; };
 // Spell bar methods after construction. Stock ones never write the object
 // rect; the addon's extended spell bar rewrites it (720,0,800,600, raw) as a
 // hit rect for its own columns while building its slots, which still end at
@@ -1996,7 +2032,7 @@ BOOL __fastcall map_wheel(void* handler,void*,UINT flags,short delta,POINT point
 }
 void* __stdcall widget_enter(std::uint32_t method, void* caller, void* object, const POINT* point) noexcept {
     if (t_depth >= kAnchorDepth) std::abort();  // a recursion the HUD never does
-    t_frames[t_depth++] = {caller, t_anchor, widescreen::hud_blit, t_input_composition, t_input_scope, widescreen::combat_text_scale, t_visual_object, t_input_object, object, method, {}};
+    t_frames[t_depth++] = {caller, t_anchor, widescreen::hud_blit, t_input_composition, t_input_scope, t_visual_object, t_input_object, object, method, {}};
     if (object && spell_rect_method(kWidgetMethods[method].va))
         std::memcpy(&t_frames[t_depth - 1].rect, static_cast<const std::uint8_t*>(object) + kObjectRectOffset, sizeof(RECT));
     const auto& entry = kWidgetMethods[method];
@@ -2042,7 +2078,6 @@ void* __stdcall widget_enter(std::uint32_t method, void* caller, void* object, c
         }
     }
     if(entry.va==0x005FEBF0 || entry.va==0x005FED00)widescreen::hud_blit.opacity=1.f;
-    if (entry.combat_text) widescreen::combat_text_scale=g_combat_text_scale;
     // IsInside receives a physical POINT by value. A clipped child rectangle
     // must not leave an invisible hit region above a relocated closed panel.
     if(entry.va==0x005FFD30) {
@@ -2080,7 +2115,6 @@ void* __stdcall widget_leave() noexcept {
     t_input_composition=frame.input_composition;
     t_input_scope = frame.input_scope;
     t_visual_object=frame.visual_object;t_input_object=frame.input_object;
-    widescreen::combat_text_scale=frame.combat_scale;
     return frame.caller;
 }
 void* g_widget_enter = reinterpret_cast<void*>(&widget_enter);
@@ -2134,37 +2168,141 @@ const void* owned_widget_entry(const void* entry, const void* jump_target) noexc
 
 // --- Tutorial page rectangles ------------------------------------------------------
 //
-// Stock tutorials point at HUD widgets with rectangles in 4:3 layout; pages
-// pointing at the left or right HUD follow that edge (page list from the
-// addon's widescreen patch; the stock tutorial pages themselves).
-struct TutorialPage { const char* name; int page; };
-constexpr TutorialPage kTutorialLeft[] = {{"zt9", 0}, {"zt12", 0}, {"zt12", 1}, {"zt13", 0}, {"zt14", 0},
-                                          {"zt14", 2}, {"zt17", 0}, {"zt20", 0}, {"zt22", 0}};
-constexpr TutorialPage kTutorialRight[] = {{"zt3", 2}, {"zt4", 0}, {"zt4", 1}, {"zt7", 0},
-                                           {"zt10", 0}, {"zt10", 1}, {"zt18", 0}};
-bool tutorial_listed(const TutorialPage* pages, std::size_t count, const char* name, int page) noexcept {
-    for (std::size_t index = 0; index < count; ++index)
-        if (pages[index].page == page && _stricmp(pages[index].name, name) == 0) return true;
-    return false;
+// Shipped page rectangles identify HUD roles, not current positions or skill
+// ordinals. Resolve against the mission captured immediately before this modal.
+// The resulting geometry belongs to this page until its native rebuild/teardown.
+enum class TutorialTargetKind { panel,native,control,controls,skill,spell };
+struct TutorialTarget { const char* name; int page; RECT authored; HudPanel panel; TutorialTargetKind kind; int selector=0; };
+// This shipped build publishes general manual-action type 0: its native
+// target-object mode dispatches stealing on units and science on objects.
+constexpr TutorialTarget kTutorialTargets[] = {
+    {"zt3",1,{183,0,618,96},HudPanel::messages,TutorialTargetKind::panel},
+    {"zt3",1,{385,1,412,19},HudPanel::messages,TutorialTargetKind::control},
+    {"zt3",2,{770,568,799,599},HudPanel::game_speed,TutorialTargetKind::native},
+    {"zt4",0,{720,519,799,599},HudPanel::game_speed,TutorialTargetKind::panel},
+    {"zt4",1,{720,519,799,599},HudPanel::game_speed,TutorialTargetKind::panel},
+    {"zt7",0,{762,432,798,468},HudPanel::spells,TutorialTargetKind::spell},
+    {"zt9",0,{1,567,36,599},HudPanel::stance,TutorialTargetKind::native},
+    {"zt10",0,{619,1,799,162},HudPanel::minimap,TutorialTargetKind::panel},
+    {"zt10",1,{780,70,799,162},HudPanel::minimap,TutorialTargetKind::controls,0x38},
+    {"zt10",1,{778,1,799,26},HudPanel::minimap,TutorialTargetKind::control},
+    {"zt11",0,{183,0,618,96},HudPanel::messages,TutorialTargetKind::panel},
+    {"zt11",0,{385,1,412,19},HudPanel::messages,TutorialTargetKind::control},
+    {"zt11",1,{183,0,618,96},HudPanel::messages,TutorialTargetKind::panel},
+    {"zt11",1,{385,1,412,19},HudPanel::messages,TutorialTargetKind::control},
+    {"zt12",0,{1,1,185,222},HudPanel::character_info,TutorialTargetKind::panel},
+    {"zt12",0,{1,1,23,29},HudPanel::character_info,TutorialTargetKind::control},
+    {"zt12",1,{1,99,23,222},HudPanel::character_info,TutorialTargetKind::controls,0x1e},
+    {"zt13",0,{1,516,83,599},HudPanel::stance,TutorialTargetKind::panel},
+    {"zt14",0,{1,430,37,466},HudPanel::abilities,TutorialTargetKind::skill,0},
+    {"zt14",2,{1,430,37,466},HudPanel::abilities,TutorialTargetKind::skill,0},
+    {"zt17",0,{74,491,321,599},HudPanel::weapons,TutorialTargetKind::panel},
+    {"zt18",0,{452,484,709,599},HudPanel::items,TutorialTargetKind::panel},
+    {"zt20",0,{1,470,38,507},HudPanel::abilities,TutorialTargetKind::skill,-1},
+    {"zt22",0,{1,432,39,469},HudPanel::abilities,TutorialTargetKind::skill,0},
+};
+const std::uint8_t* tutorial_mission(const std::uint8_t* tutorial) noexcept {
+    if(!g_interface_owned || !g_image || *reinterpret_cast<void* const*>(tutorial)!=at(0x00740E28))return nullptr;
+    const auto* ui=at(0x007C7D50);
+    if(!ui[0x30] || *reinterpret_cast<const void* const*>(tutorial+0x98)!=ui)return nullptr;
+    auto* begin=*reinterpret_cast<const std::uint8_t* const* const*>(ui+0x34);
+    auto* end=*reinterpret_cast<const std::uint8_t* const* const*>(ui+0x38);
+    if(end-begin<2 || end[-1]!=tutorial || *reinterpret_cast<void* const*>(end[-2])!=at(0x00740764))return nullptr;
+    return end[-2];
+}
+bool tutorial_target_bounds(const TutorialTarget& target,const std::uint8_t* mission,HudPanelBounds& b) noexcept {
+    const unsigned panel=unsigned(target.panel);
+    const std::uint8_t* object=nullptr;
+    if(target.panel==HudPanel::messages) {
+        const void* output=nullptr;const void* text=nullptr;
+        if(!mission_message_panel(mission,output,text))return false;
+        object=static_cast<const std::uint8_t*>(output);
+        const auto bounds=message_panel_bounds();b={bounds.left,bounds.top,bounds.width,bounds.height};
+    } else {
+        object=mission_panel(panel,mission);
+        if(!panel_bounds(panel,object,b))return false;
+    }
+    if(target.kind==TutorialTargetKind::skill) {
+        const unsigned count=native_slot_count(panel,object);
+        const auto* types=*reinterpret_cast<const int* const*>(object+0x15C);
+        if(!types || *reinterpret_cast<const unsigned*>(object+0x160)!=count)return false;
+        for(unsigned slot=0;slot<count;++slot)
+            if(types[slot]==target.selector)return slot_screen_bounds(panel,slot,object,b);
+        return false;
+    }
+    if(target.kind==TutorialTargetKind::spell) {
+        // This authored region establishes a native spell slot, not a semantic
+        // healing ID. Preserve that contract without guessing spell identity.
+        const auto anchor=kPanelRoles[panel].anchor;
+        const float x=widescreen::layout_to_placed_x(g_layout,anchor,.5f*float(target.authored.left+target.authored.right),false);
+        const float y=widescreen::layout_to_placed_y(g_layout,anchor,.5f*float(target.authored.top+target.authored.bottom),false);
+        const auto* areas=*reinterpret_cast<const std::uint8_t* const* const*>(object+0x128);
+        for(unsigned slot=0;slot<native_slot_count(panel,object);++slot) {
+            const auto r=*reinterpret_cast<const RECT*>(areas[slot]+0x14);
+            const auto* shift=reinterpret_cast<const LONG*>(areas[slot]+0x28);
+            if(x>=r.left+shift[0] && x<r.right+shift[0] && y>=r.top+shift[1] && y<r.bottom+shift[1])
+                return slot_screen_bounds(panel,slot,object,b);
+        }
+        return false;
+    }
+    if(target.kind==TutorialTargetKind::native) {
+        const auto h=panel_composition(panel,object);const auto anchor=kPanelRoles[panel].anchor;
+        const auto x=[&](LONG v){return widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,widescreen::layout_to_placed_x(g_layout,anchor,float(v),false)),h);};
+        const auto y=[&](LONG v){return widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,widescreen::layout_to_placed_y(g_layout,anchor,float(v),false)),h);};
+        const float left=x(target.authored.left),top=y(target.authored.top);
+        b={left,top,x(target.authored.right)-left,y(target.authored.bottom)-top};return true;
+    }
+    if(target.panel!=HudPanel::messages && target.panel!=HudPanel::minimap && target.panel!=HudPanel::character_info)
+        return target.kind==TutorialTargetKind::panel;
+    const auto header=header_layout(target.panel,b);
+    if(target.kind==TutorialTargetKind::panel) {visible_panel_bounds(target.panel,object,header,b);return true;}
+    const unsigned mask=target.kind==TutorialTargetKind::control?1u:unsigned(target.selector);
+    if(mask!=1u && slide_fraction(target.panel,object)>=1.f)return false;
+    bool first=true;
+    const float unit=g_layout.unit*header.scale;
+    const float width=(target.panel==HudPanel::messages?30.f:20.f)*unit;
+    const float height=(target.panel==HudPanel::messages?20.f:30.f)*unit;
+    for(unsigned area=0;area<6;++area)if(mask&(1u<<area)) {
+        float x,y;header_control_target(target.panel,area,header,x,y);
+        const float left=x-width*.5f,top=y-height*.5f;
+        if(first){b={left,top,width,height};first=false;}
+        else {const float right=(std::max)(b.left+b.width,left+width),bottom=(std::max)(b.top+b.height,top+height);
+            b.left=(std::min)(b.left,left);b.top=(std::min)(b.top,top);b.width=right-b.left;b.height=bottom-b.top;}
+    }
+    return !first;
 }
 void __stdcall tutorial_rect(const std::uint8_t* tutorial, std::uint8_t* site_stack) noexcept {
+    const TutorialTarget* target=nullptr;
     __try {
         if (!*(tutorial + kTutorialScriptOffset)) return;
         const char* name = *reinterpret_cast<const char* const*>(tutorial + kTutorialNameOffset);
         const int page = *reinterpret_cast<const int*>(tutorial + kTutorialPageOffset);
         if (!name) return;
-        // RedrawPage locals at the call site: rect left esp+64h, right esp+58h.
+        // Fingerprinted RedrawPage locals before AddFigure/MakeBarFrame.
         auto* left = reinterpret_cast<int*>(site_stack + 0x64);
+        auto* top = reinterpret_cast<int*>(site_stack + 0x68);
         auto* right = reinterpret_cast<int*>(site_stack + 0x58);
-        Anchor anchor = Anchor::centre;
-        if (tutorial_listed(kTutorialLeft, std::size(kTutorialLeft), name, page)) anchor = Anchor::start;
-        else if (tutorial_listed(kTutorialRight, std::size(kTutorialRight), name, page)) anchor = Anchor::end;
-        if (anchor == Anchor::centre) return;
-        const widescreen::Anchors page_anchor{anchor, Anchor::centre};
-        const int shift = static_cast<int>(std::lround(widescreen::layout_to_placed_x(g_layout, page_anchor, 0.0f, false)));
-        *left += shift;
-        *right += shift;
+        auto* bottom = reinterpret_cast<int*>(site_stack + 0x1c);
+        for(const auto& candidate:kTutorialTargets)
+            if(candidate.page==page && _stricmp(candidate.name,name)==0 &&
+                candidate.authored.left==*left && candidate.authored.top==*top &&
+                candidate.authored.right==*right && candidate.authored.bottom==*bottom){target=&candidate;break;}
+        if(!target)return; // Non-HUD help retains its authored layout.
+        HudPanelBounds bounds;const auto* mission=tutorial_mission(tutorial);
+        if(!mission || !tutorial_target_bounds(*target,mission,bounds)) {
+            *left=*top=*right=*bottom=-10000;
+            event("tutorial_target_missing",target->name);return;
+        }
+        *left=std::lround(widescreen::screen_to_placed_x(g_layout,bounds.left));
+        *top=std::lround(widescreen::screen_to_placed_y(g_layout,bounds.top));
+        *right=std::lround(widescreen::screen_to_placed_x(g_layout,bounds.left+bounds.width));
+        *bottom=std::lround(widescreen::screen_to_placed_y(g_layout,bounds.top+bounds.height));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if(target) {
+            *reinterpret_cast<int*>(site_stack+0x64)=*reinterpret_cast<int*>(site_stack+0x68)=
+                *reinterpret_cast<int*>(site_stack+0x58)=*reinterpret_cast<int*>(site_stack+0x1c)=-10000;
+            event("tutorial_target_missing",target->name);
+        }
     }
 }
 void* g_tutorial_rect = reinterpret_cast<void*>(&tutorial_rect);
@@ -2421,7 +2559,9 @@ void widescreen_install_image(std::uint8_t* image, std::vector<std::uint8_t> fil
     g_addon_owned = addon_owned;
     // A failed takeover restores every owned patch, which puts the addon's
     // own layout back; only a failed restore is shown as a banner.
+    // Either way the addon keeps its own layout and ours is off.
     const auto roll_back_takeover = [](const char* reason) noexcept {
+        bridge_note_feature_off(bridge_feature_off_hud_layout);
         if (widescreen_uninstall()) event("widescreen_addon_owned", reason);
         else { g_addon_takeover = false; fail("addon_takeover_rollback_failed"); }
         g_addon_takeover = false;
@@ -2433,6 +2573,7 @@ void widescreen_install_image(std::uint8_t* image, std::vector<std::uint8_t> fil
         const std::size_t restore = plan_addon_takeover(shift, reason, detail, sizeof(detail));
         if (reason) {
             // The addon keeps its own layout; nothing was written.
+            bridge_note_feature_off(bridge_feature_off_hud_layout);
             event("widescreen_addon_owned", reason);
             g_image = nullptr;
             std::vector<std::uint8_t>().swap(g_file);
@@ -2821,6 +2962,7 @@ void widescreen_set_hud_fades(const std::array<HudFadeSettings,10>& settings,con
 }
 bool widescreen_hud_fade_enabled(HudPanel panel) noexcept {return g_hud_fades[unsigned(panel)].enabled;}
 bool widescreen_hud_hovered(HudPanel panel) noexcept {return g_hud_fade_state[unsigned(panel)].hovered;}
+void widescreen_mission_activation(bool active) noexcept {g_mission_activating=active;}
 void widescreen_hud_activity(HudPanel panel) noexcept {
     reset_hud_fade_lifetime();auto& state=g_hud_fade_state[unsigned(panel)];state.active_at=GetTickCount64();
     set_hud_fade_target(state,1.f,state.active_at);
@@ -2948,13 +3090,7 @@ bool widescreen_hud_panel_bounds(HudPanel panel,HudPanelBounds& bounds) noexcept
     const unsigned i=unsigned(panel);
     const auto* object=current_panel(i);
     if(!object)return false;
-    const RECT native=panel_native_rect(i,object);const auto* r=&native.left;
-    const auto h=panel_composition(i,object);
-    float width,height;panel_native_size(i,r,width,height);
-    bounds={widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r[0])),h),
-        widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r[1])),h),
-        width*h.scale,height*h.scale,width,height};
-    return bounds.width>0.f && bounds.height>0.f;
+    return panel_bounds(i,object,bounds);
 }
 
 void widescreen_hud_position_percent(HudPanel panel,float left,float top,float width,float height,float& x,float& y) noexcept {
@@ -3017,12 +3153,7 @@ bool widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& frame) noexcept {
         if(count>frame_index && count>arrow_index && figures && figures[frame_index] && figures[arrow_index] &&
            !*reinterpret_cast<const BOOL*>(figures[frame_index]+0x220) &&
            !*reinterpret_cast<const BOOL*>(figures[arrow_index]+0x220))return false;
-        const float f=slide_fraction(panel,object);fraction=f;
-        if(header.side==DockSide::left)b.width=header.width+(b.width-header.width)*(1.f-f);
-        else if(header.side==DockSide::right){const float w=header.width+(b.width-header.width)*(1.f-f);b.left+=b.width-w;b.width=w;}
-        else if(header.side==DockSide::bottom){const float h=panel==HudPanel::messages?header.height+(b.height-header.height)*(1.f-f):b.height*(1.f-f)+header.height;b.top=header.top+header.height-h;b.height=h;}
-        else if(panel==HudPanel::messages && header.side==DockSide::top)b.height=header.height+(b.height-header.height)*(1.f-f);
-        else {const float bottom=b.top+b.height*(1.f-f);b.top=header.top;b.height=(std::max)(header.height,bottom-b.top);}
+        fraction=slide_fraction(panel,object);visible_panel_bounds(panel,object,header,b);
     }
     unsigned edges=15;
     const float slack=edge_slack();
@@ -3095,6 +3226,7 @@ void widescreen_clear_hud_frame_sink(void* owner) noexcept {
 void widescreen_set_combat_text_scale(int percent) noexcept {
     g_combat_text_scale=std::clamp(percent,50,300)/100.f;
 }
+float widescreen_combat_text_scale() noexcept { return g_combat_text_scale; }
 void widescreen_set_message_panel(const MessagePanelSettings& settings) noexcept {
     g_message_panel.width_percent=std::clamp(settings.width_percent,50.f,800.f);
     g_message_panel.height_percent=std::clamp(settings.height_percent,50.f,600.f);

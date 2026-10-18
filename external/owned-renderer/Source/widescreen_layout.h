@@ -259,7 +259,5 @@ inline bool interface_owned = false;
 // (identity outside anchored widgets or at 100%): the renderer reads it when
 // an interface blit, text or geometry submission is queued.
 inline thread_local HudComposition hud_blit{};
-// Active only inside the verified floating combat-text producer.
-inline thread_local float combat_text_scale = 1.f;
 
 } // namespace owned::widescreen

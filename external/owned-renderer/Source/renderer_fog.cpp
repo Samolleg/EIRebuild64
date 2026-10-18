@@ -40,8 +40,8 @@ HRESULT Renderer::ensure_world_fog_volume(int quality) noexcept {
             return hr;
         }
         ComPtr<ID3D11ComputeShader> a, b;
-        if (FAILED(hr = device_->CreateComputeShader(inject->GetBufferPointer(), inject->GetBufferSize(), nullptr, &a)) ||
-            FAILED(hr = device_->CreateComputeShader(integrate->GetBufferPointer(), integrate->GetBufferSize(), nullptr, &b))) {
+        if (FAILED(hr = create_shader(device_.Get(),inject->GetBufferPointer(), inject->GetBufferSize(), nullptr, &a)) ||
+            FAILED(hr = create_shader(device_.Get(),integrate->GetBufferPointer(), integrate->GetBufferSize(), nullptr, &b))) {
             fog_volume_reason_ = "volume shader creation failed";
             return hr;
         }
@@ -126,6 +126,12 @@ HRESULT Renderer::bind_world_fog() noexcept {
             float morning = outdoor ? fog_morning(env.game_hours, configured_floating_point(config, "fog_morning_chance", .35f)) * (desert ? .25f : 1.f) : 0.f;
             // Rain fog ramps in and out over game time; wetness eases after it.
             if (env.valid) {
+                // A world change (map, menu, load) drops the old world's rain
+                // haze and wetness; the new world's own weather sets them.
+                if (fog_world_generation_ != ambient_map_generation_ || ambient_menu_) {
+                    fog_world_generation_ = ambient_map_generation_;
+                    fog_wetness_ = 0.f;fog_wetness_hours_ = -1.0;
+                }
                 const double elapsed = fog_wetness_hours_ < 0 ? -1.0 : env.game_hours - fog_wetness_hours_;
                 fog_rain_level_ = fog_ramp_precipitation(fog_rain_level_, outdoor ? fog_precipitation(env) : 0.f, elapsed);
                 fog_wetness_ = fog_update_wetness(fog_wetness_, fog_rain_level_, elapsed,
@@ -257,33 +263,41 @@ HRESULT Renderer::bind_world_fog() noexcept {
             fog_cull_frame_ = native_frame_index_;
             std::memcpy(fog_previous_clip_.data(), clip.world_to_clip.data(), sizeof(float) * 16);
             fog_previous_eye_ = {eye[0], eye[1], eye[2], 0.f};
-            std::snprintf(values, sizeof(values),
-                "air %.4f/m (visibility %.0f m) height %.4f/m @ z %.1f mist %.3f/m | hour %.1f %s %s weather %d->%d rain %.2f wet %.2f morning %.2f%s",
-                air, 3.f / (std::max)(air, 1e-6f), height, fog_terrain_low_z_, mist, hour,
-                env.valid ? (env.cave ? "cave" : "outdoor") : "clock?",
-                env.region == fog_region_gipat ? "Gipat" : env.region == fog_region_ingos ? "Ingos" :
-                env.region == fog_region_suslanger ? "Suslanger" : "region?",
-                env.weather_current, env.weather_next, precipitation, wetness, morning, test_state ? " TEST" : "");
-            const size_t used = std::strlen(values);
-            std::snprintf(values + used, sizeof(values) - used, " | shafts %s sun %.2f | fog hides past %.0f m",
-                volume_shafts ? "volume" : sun_rays_frame_ == native_frame_index_ ? "screen" : "off", sun_share,
-                fog_cull_distance_);
+            // The values feed the F10 line and the world_fog event (on a state change).
+            char event_key[256];
+            std::snprintf(event_key, sizeof(event_key), "%d|%d|%d|%s|%s|%s", preset, test_state ? 1 : 0, volume ? 1 : 0,
+                          fog.valid ? "" : fog.failure, problem ? problem : "", fog_volume_reason_);
+            if (status_text_wanted() || fog_status_state_ != event_key) {
+                std::snprintf(values, sizeof(values),
+                    "air %.4f/m (visibility %.0f m) height %.4f/m @ z %.1f mist %.3f/m | hour %.1f %s %s weather %d->%d rain %.2f wet %.2f morning %.2f%s",
+                    air, 3.f / (std::max)(air, 1e-6f), height, fog_terrain_low_z_, mist, hour,
+                    env.valid ? (env.cave ? "cave" : "outdoor") : "clock?",
+                    env.region == fog_region_gipat ? "Gipat" : env.region == fog_region_ingos ? "Ingos" :
+                    env.region == fog_region_suslanger ? "Suslanger" : "region?",
+                    env.weather_current, env.weather_next, precipitation, wetness, morning, test_state ? " TEST" : "");
+                const size_t used = std::strlen(values);
+                std::snprintf(values + used, sizeof(values) - used, " | shafts %s sun %.2f | fog hides past %.0f m",
+                    volume_shafts ? "volume" : sun_rays_frame_ == native_frame_index_ ? "screen" : "off", sun_share,
+                    fog_cull_distance_);
+            }
             // Sky, clouds and cloud shadows share this frame's camera, environment and haze colour.
             prepare_owned_sky(frame, env, eye);
         }
         if (!scene_composited_) {
             static const char* const names[3] = {"faithful", "atmospheric", "full"};
             const char* look = names[std::clamp(preset, 0, 2)];
-            std::snprintf(fog_status_, sizeof(fog_status_), "Fog %s%s | volume %s | stock %s | %s%s%s", look,
-                test_state ? " (TEST dense)" : "",
-                preset < 2 ? "off" : volume ? "ON" : "FAILED",
-                fog.valid ? "read" : fog.failure, values, problem ? " | PROBLEM: " : "", problem ? problem : "");
-            fog_status_problem_ = problem != nullptr;
             // One event per state change: the look, volume, stock read and problem.
             char state[256];
             std::snprintf(state, sizeof(state), "%d|%d|%d|%s|%s|%s", preset, test_state ? 1 : 0, volume ? 1 : 0,
                           fog.valid ? "" : fog.failure, problem ? problem : "", fog_volume_reason_);
-            if (fog_status_state_ != state) {
+            const bool event_changed = fog_status_state_ != state;
+            if (event_changed || status_text_wanted())
+                std::snprintf(fog_status_, sizeof(fog_status_), "Fog %s%s | volume %s | stock %s | %s%s%s", look,
+                    test_state ? " (TEST dense)" : "",
+                    preset < 2 ? "off" : volume ? "ON" : "FAILED",
+                    fog.valid ? "read" : fog.failure, values, problem ? " | PROBLEM: " : "", problem ? problem : "");
+            fog_status_problem_ = problem != nullptr;
+            if (event_changed) {
                 fog_status_state_ = state;
                 bridge_report_event("world_fog", fog_status_);
             }

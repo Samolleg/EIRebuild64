@@ -56,10 +56,11 @@ HRESULT Renderer::grow_native_point_shadow_page(std::size_t index,UINT cubes,boo
  desc.MipLevels=1;desc.Format=overlay?DXGI_FORMAT_R32_TYPELESS:DXGI_FORMAT_R16_TYPELESS;desc.SampleDesc.Count=1;
  desc.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
  transition_profile_pass("point_shadow_pool_growth"); // temporary: growth stall witness
+ const frame_acct::Scope growth_scope(frame_acct::point_pool_growth);
  HRESULT hr=device_->CreateTexture2D(&desc,nullptr,&next.depth);if(FAILED(hr))return hr;
  next.dsv.resize(desc.ArraySize);
  for(UINT slice=0;slice<desc.ArraySize;++slice){
-  D3D11_DEPTH_STENCIL_VIEW_DESC dsv{};dsv.Format=overlay?DXGI_FORMAT_D32_FLOAT:DXGI_FORMAT_D16_UNORM;
+  D3D11_DEPTH_STENCIL_VIEW_DESC dsv{};dsv.Format=kPointShadowDepthFormats[overlay?1:0];
   dsv.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
   dsv.Texture2DArray.ArraySize=1;dsv.Texture2DArray.FirstArraySlice=slice;
   if(FAILED(hr=device_->CreateDepthStencilView(next.depth.Get(),&dsv,&next.dsv[slice])))return hr;
@@ -74,7 +75,7 @@ HRESULT Renderer::grow_native_point_shadow_page(std::size_t index,UINT cubes,boo
   context_->CopySubresourceRegion(next.depth.Get(),slice,0,0,0,old.depth.Get(),slice,nullptr);
  old=std::move(next);return S_OK;
 }
-bool Renderer::allocate_native_point_shadow(bool overlay,int& slot) noexcept {
+bool Renderer::allocate_native_point_shadow(bool overlay,int& slot) noexcept {SCENE_ENTRY("allocate_native_point_shadow");
  slot=-1;
  try{
   if(native_point_shadow_pages_.size()<2)native_point_shadow_pages_.resize(2);
@@ -96,7 +97,7 @@ bool Renderer::allocate_native_point_shadow(bool overlay,int& slot) noexcept {
  }catch(...){point_shadow_capacity_failure("slot metadata allocation failed",E_OUTOFMEMORY);}
  return false;
 }
-void Renderer::release_native_point_shadow(std::uint64_t generation,int slot) noexcept {
+void Renderer::release_native_point_shadow(std::uint64_t generation,int slot) noexcept {SCENE_ENTRY("release_native_point_shadow");
  if(generation!=native_point_shadow_generation_||slot<0)return;
  const auto p=static_cast<unsigned>(slot)/PointShadowTextureLayout::cubes_per_atlas;
  const auto s=static_cast<unsigned>(slot)%PointShadowTextureLayout::cubes_per_atlas;
@@ -107,7 +108,7 @@ void Renderer::release_native_point_shadow(std::uint64_t generation,int slot) no
   context_->PSSetShaderResources(PointShadowTextureLayout::first_srv+p,1,&empty);page={};page.overlay=p!=0;
  }
 }
-bool Renderer::begin_native_point_shadow_batch(std::uint64_t& generation,bool* pressure) noexcept {
+bool Renderer::begin_native_point_shadow_batch(std::uint64_t& generation,bool* pressure) noexcept {SCENE_ENTRY("begin_native_point_shadow_batch");
  if(pressure)*pressure=false;
  if(native_shadow_collecting_||native_point_shadow_active_||!native_point_shadows_enabled_)return false;
  if(FAILED(flush_native()))return false;
@@ -135,7 +136,7 @@ bool Renderer::begin_native_point_shadow_batch(std::uint64_t& generation,bool* p
  return true;
 }
 void Renderer::publish_native_point_shadows(const std::vector<NativePointShadowPublication>& lights,
- const NativePointShadowStats& stats) noexcept {
+ const NativePointShadowStats& stats) noexcept {SCENE_ENTRY("publish_native_point_shadows");
  for(std::size_t i=0;i<native_point_lights_.size();++i){
   std::array<float,4> next{};
   if(i<lights.size()&&lights[i].static_slot>=0)
@@ -192,13 +193,12 @@ void Renderer::publish_native_point_shadows(const std::vector<NativePointShadowP
  point_shadows_cumulative_.strength_zeroed+=stats.strength_zeroed;
  point_shadows_cumulative_.static_to_dynamic+=stats.static_to_dynamic;
  point_shadows_cumulative_.merged_lights=stats.merged_lights;
- point_shadows_cumulative_.casting_lights=stats.casting_lights;point_shadows_cumulative_.neighbour_within_1=stats.neighbour_within_1;
- point_shadows_cumulative_.neighbour_within_2=stats.neighbour_within_2;point_shadows_cumulative_.neighbour_within_4=stats.neighbour_within_4;
+ point_shadows_cumulative_.casting_lights=stats.casting_lights;
  native_frame_stats_.point_shadows.strength_zeroed+=stats.strength_zeroed;
 }
 
 bool Renderer::begin_native_point_shadow_faces(UINT slot,UINT light_index,
- const NativePointShadowFrame& faces) noexcept {
+ const NativePointShadowFrame& faces) noexcept {SCENE_ENTRY("begin_native_point_shadow_faces");
  const UINT page=slot/PointShadowTextureLayout::cubes_per_atlas,cube=slot%PointShadowTextureLayout::cubes_per_atlas;
  if(native_shadow_collecting_||native_point_shadow_active_||page>=native_point_shadow_pages_.size()||
     cube>=native_point_shadow_pages_[page].used.size()||!native_point_shadow_pages_[page].used[cube]||
@@ -215,6 +215,9 @@ bool Renderer::begin_native_point_shadow_faces(UINT slot,UINT light_index,
 }
 
 bool Renderer::end_native_point_shadow_faces(bool commit) noexcept {
+ // As end_native_shadows: the per-EndScene abort is queued in scene mode.
+ if(!commit&&scene_queue()){scene_post([this]{(void)end_native_point_shadow_faces(false);});return false;}
+ SCENE_ENTRY("end_native_point_shadow_faces");
  if(!native_point_shadow_active_)return false;
  HRESULT hr=E_FAIL;
  try{if(commit&&!native_shadow_failed_)hr=flush_native_shadows();else discard_native();}
