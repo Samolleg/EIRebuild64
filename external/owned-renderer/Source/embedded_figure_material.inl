@@ -97,6 +97,8 @@ HRESULT Renderer::queue_embedded_records(const NativePreparedSubmission& submiss
  const FixedState& frame, std::uint64_t primaryId,
  const OwnedVisualSurface* secondary, NativeGeometryResult* result) {
  if(native_shadow_collecting_)return queue_native_records(submission,frame,nullptr,result);
+ if(submission.wound_surface_interface && !secondary)
+  return native_geometry_failure(result,E_INVALIDARG,"embedded.records_wound_surface");
  if(!submission.parts||!submission.pose||!submission.world_to_clip)
   return native_geometry_failure(result,E_INVALIDARG,"embedded.records_identity");
  for(UINT i=0;i<submission.count;++i) {
@@ -121,7 +123,11 @@ HRESULT Renderer::queue_embedded_records(const NativePreparedSubmission& submiss
   view.owned_fixed_state.specular_enable=values.specular_enable;
   const auto state=native_owned_submission_state(frame,view.owned_fixed_state);
   HRESULT hr=S_OK;
-  if(!secondary || source.owned_texture.identity!=primaryId)hr=queue_native_owned(view,state,result);
+  if(submission.wound_surface_interface) {
+   view.wound_only=true;
+   hr=queue_embedded_wound(view,state,*secondary,result);
+  }
+  else if(!secondary || source.owned_texture.identity!=primaryId)hr=queue_native_owned(view,state,result);
   else {
    ComPtr<ID3D11ShaderResourceView> primary, overlay;
    std::uint64_t backing=0;

@@ -387,6 +387,9 @@ struct VisualPreparedResources {
 };
 
 struct RetainedVisualSample {
+    // Embedded units use the host's completed pose/materials, not the retail
+    // route/intent evaluator. Their rendering still follows unit policy.
+    bool completed_pose = false;
     VisualResourceIncarnation resource{};
     LifecycleIdentity lifecycle{};
     RetainedVisualStatus status = RetainedVisualStatus::awaiting_values;

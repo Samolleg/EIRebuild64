@@ -19636,6 +19636,16 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
         const bool traced=startup_begin(StartupStage::visual_sample);
         g_owned_visual_world_frame.values.reset();
         in.values=shadow_scene.visual_frame_value(in.time,g_bridge_sample.active && bridge_profile_enabled());
+#ifdef EID3D11_EMBEDDED
+        if(g_embedded_visual_inputs) {
+            if(!in.values || !g_embedded_visual_inputs->complete_visuals)
+                throw "embedded_visual_values_unavailable";
+            auto completed=std::make_shared<RetainedVisualFrame>(*in.values);
+            if(!g_embedded_visual_inputs->complete_visuals(*completed))
+                throw "embedded_visual_values_rejected";
+            in.values=std::move(completed);
+        }
+#endif
         startup_end(StartupStage::visual_sample,traced,"completed");
     }
 }

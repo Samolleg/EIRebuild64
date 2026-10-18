@@ -33,7 +33,7 @@ static VisualPreparedResources::WorldBoundsKey owned_visual_world_bounds_key(
     VisualPreparedResources::WorldBoundsKey key{};
     key.lifecycle=sample.lifecycle;key.resource=sample.resource;
     key.envelope_radius=sample.envelope_radius;
-    key.unit=sample.values.unit;
+    key.unit=sample.values.unit && !sample.completed_pose;
     if(key.unit) {
         key.assembly=sample.assembly;
         key.assembly_revision=sample.assembly?sample.assembly->revision:0;
@@ -61,7 +61,7 @@ static bool same_visual_world_bounds_key(const VisualPreparedResources::WorldBou
 
 static bool owned_visual_world_bounds_key_matches(const VisualPreparedResources::WorldBoundsKey& left,
     const RetainedVisualSample& sample) noexcept {
-    const bool unit=sample.values.unit;
+    const bool unit=sample.values.unit && !sample.completed_pose;
     if(!same_lifecycle_identity(left.lifecycle,sample.lifecycle) ||
         !same_visual_resource(left.resource,sample.resource) || left.unit!=unit)return false;
     if(!unit)return left.envelope_radius==static_cast<decltype(left.envelope_radius)>(sample.envelope_radius) &&
@@ -99,7 +99,7 @@ VisualPreparedResources::PoseKey owned_visual_pose_key(const RetainedVisualSampl
     VisualPreparedResources::PoseKey key{};
     key.lifecycle=sample.lifecycle;key.resource=sample.resource;key.assembly=sample.assembly;
     key.assembly_revision=sample.assembly?sample.assembly->revision:0;
-    key.unit=sample.values.unit;key.selection=sample.selection;key.phase=sample.pose.phase;
+    key.unit=sample.values.unit && !sample.completed_pose;key.selection=sample.selection;key.phase=sample.pose.phase;
     if(key.unit) {
         key.root=sample.pose.root;key.root_rotation=sample.pose.root_rotation;
         key.facing=sample.pose.facing;key.tilted_facing=sample.pose.tilted_facing;
@@ -128,7 +128,7 @@ bool same_visual_pose_key(const VisualPreparedResources::PoseKey& left,
 
 bool owned_visual_pose_key_matches(const VisualPreparedResources::PoseKey& left,
     const RetainedVisualSample& sample,const double* phase) noexcept {
-    const bool unit=sample.values.unit;
+    const bool unit=sample.values.unit && !sample.completed_pose;
     const decltype(left.phase) current=phase?*phase:sample.pose.phase;
     if(!same_lifecycle_identity(left.lifecycle,sample.lifecycle) ||
         !same_visual_resource(left.resource,sample.resource) || left.assembly!=sample.assembly ||

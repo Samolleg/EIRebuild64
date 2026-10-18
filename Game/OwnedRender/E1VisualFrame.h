@@ -3,9 +3,10 @@
 #include <cstdint>
 #include <memory>
 
-namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; }
+namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; struct RetainedVisualFrame; }
 
 namespace OwnedRender {
+bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept;
 // Host values of one world draw, without renderer headers (WorldClient).
 struct E1VisualInputs {
     double time = 0;                        // segment ticks + fraction

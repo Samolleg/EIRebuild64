@@ -1117,7 +1117,7 @@ bool base_terrain_quality_anchor(const std::array<double,16>& camera_matrix,
 }
 
 const std::array<float,3>& retained_visual_shape(const RetainedVisualSample& sample) noexcept {
-    return sample.values.unit && sample.assembly ? sample.assembly->shape : sample.object_pose.shape;
+    return sample.values.unit && !sample.completed_pose && sample.assembly ? sample.assembly->shape : sample.object_pose.shape;
 }
 
 bool retained_visual_world_bounds(const RetainedVisualSample& sample,
@@ -1125,12 +1125,12 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
     bounds = {};
     if (sample.status != RetainedVisualStatus::ready) return false;
     float envelope_radius = sample.envelope_radius;
-    if (sample.values.unit &&
+    if (sample.values.unit && !sample.completed_pose &&
         !retained_visual_selection_envelope_radius(sample,envelope_radius)) return false;
     if (!finite_value(envelope_radius) || envelope_radius < 0) return false;
     std::array<float,3> extent{envelope_radius,envelope_radius,envelope_radius};
     auto root = sample.pose.root;
-    if (!sample.values.unit) {
+    if (!sample.values.unit || sample.completed_pose) {
         std::array<float,16> placement{};
         root = sample.object_pose.position;
         if (!retained_object_matrix(root,sample.object_pose.quaternion,placement)) return false;
@@ -1143,7 +1143,7 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
             extent[row] = static_cast<float>(envelope_radius*std::sqrt(squared));
         }
     }
-    if (sample.values.unit && sample.pose.tilted_facing) {
+    if (sample.values.unit && !sample.completed_pose && sample.pose.tilted_facing) {
         if (!sample.pose.root_rotation_valid) return false;
         double magnitude_squared = 0;
         for (float value : sample.pose.root_rotation) {
@@ -2024,6 +2024,9 @@ float retained_visual_effective_alpha(const RetainedVisualSample& sample,
     // alpha is not read by the packed GPU color path.
     if (part.figure_flags & 0x100u) return float(part.diffuse>>24)/255.f;
     if (!part.material) return 0;
+    // A completed host material already includes fade/invisibility. Do not
+    // replace that current value with the independent retail effect state.
+    if (sample.completed_pose) return std::clamp(part.material->diffuse[3],0.f,1.f);
     // A unit's native material alpha is the game's fade/invisibility channel
     // (it writes fade steps into it and stops at 14/15), not appearance data:
     // units are opaque unless invisible (pulse) or fading (fade value).
@@ -2255,7 +2258,7 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     if (!sample.assembly || !sample.assembly->skeleton || !sample.prepared) return false;
     const auto& assembly=*sample.assembly;
     auto& prepared=*sample.prepared;
-    const bool object_pose = !sample.values.unit;
+    const bool object_pose = !sample.values.unit || sample.completed_pose;
     if (!prepare_visual_selection_envelopes(sample)) return false;
     auto& current=prepared.gpu_pose;
     VisualFramePhase phase{};
@@ -2672,7 +2675,9 @@ bool merge_part_eligible(const VisualPartAsset& part) noexcept {
 bool merge_materials_equal(const MaterialCpuAsset& a,const MaterialCpuAsset& b) noexcept {
     return &a==&b || (a.diffuse==b.diffuse && a.ambient==b.ambient && a.specular==b.specular && a.emissive==b.emissive &&
         a.previous_highlight_emissive==b.previous_highlight_emissive &&
-        a.has_previous_highlight_emissive==b.has_previous_highlight_emissive);
+        a.has_previous_highlight_emissive==b.has_previous_highlight_emissive &&
+        a.oldest_highlight_emissive==b.oldest_highlight_emissive &&
+        a.has_oldest_highlight_emissive==b.has_oldest_highlight_emissive && a.power==b.power);
 }
 bool merge_parts_compatible(const VisualPartAsset& a,const VisualPartAsset& b) noexcept {
     return a.surface->id==b.surface->id && a.surface->generation==b.surface->generation &&
@@ -2687,9 +2692,9 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
     if (prepared.merged_assembly==sample.assembly) return true;
+    if (!prepared.gpu_pose.binding) return false;
     prepared.merged_groups.clear();prepared.merged_part_group.assign(assembly.parts.size(),-1);
     prepared.merged_assembly=sample.assembly;
-    if (!prepared.gpu_pose.binding) return true;
     std::vector<std::vector<std::uint32_t>> members;
     for (std::uint32_t index=0;index<assembly.parts.size();++index) {
         const auto& part=assembly.parts[index];

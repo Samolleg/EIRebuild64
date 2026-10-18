@@ -253,6 +253,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     static E1PerfCounter counter{"scene_total"};
     E1PerfScope timing(counter);
     owned::EmbeddedVisualFrameInputs inputs;
+    inputs.complete_visuals = &E1CompleteVisualFrame;
     inputs.time = host.time;
     inputs.scene_flags = host.sceneFlags;
     inputs.draw_undetected = host.drawUndetected;

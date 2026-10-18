@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-73 (`e9d58be5983c48c94a6adc4c5f5b821bd1fa7f1c`) with local
-integration changes in branch `eirebuild/c73-embed`, commit `5e4306858f3ade77ccf867e3f0e1a3594537674e`.
+integration changes in branch `eirebuild/c73-embed`, commit `c945960e36d85a23b9dd9326faa762b517aa0ed9`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
