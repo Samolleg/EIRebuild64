@@ -13,6 +13,8 @@
 #undef max
 #endif
 #include "../OwnedRender/E1SurfaceFacade.h"
+#include "../OwnedRender/E1TextLifetime.h"
+#include "hud_layout_context.h"
 #include "MmpRgbToBgra.h"
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
@@ -587,6 +589,7 @@ std::uint64_t CDXGISurface::OwnedSurfaceGeneration() const noexcept
 
 CDXGISurface::~CDXGISurface()
 {
+    owned::owned_text_retire_surface(OwnedSurfaceId());
     if(uiRecordingDc)owned::ui_layer_abort(uiRecordingDc);
     if(hDc && texture){
         Microsoft::WRL::ComPtr<IDXGISurface1> surface;
@@ -637,9 +640,16 @@ BOOL CDXGISurface::AcquireDC(HDC *pDC)
     if(!pDC || hDc || uiRecordingDc)return FALSE;
     bool recordText=false;
     IfFailedThrowHR(pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+        // Pane Draw precedes Draw2D: rasterize at its final composition scale.
+        const auto previous = owned::widescreen::hud_blit;
+        owned::widescreen::HudComposition pane;
+        if (owned::owned_text_pane_surface(OwnedSurfaceId()) && owned::embedded_hud_layout().surface_composition(owned::HudPanel::character_info,0,pane))
+            owned::widescreen::hud_blit = pane;
+        ownedTextDc=owned::owned_text_claim_dc(OwnedSurfaceId(),GetWidth(),GetHeight(),renderer.owned_text_raster_scale());
+        owned::widescreen::hud_blit = previous;
         recordText=renderer.owned_ui_text_enabled();return S_OK;
     }));
-    if(recordText){
+    if(recordText || ownedTextDc){
         uiRecordingReset=false;
         uiRecordingDc=owned::ui_layer_begin(this,&PromoteUiLayer);
         if(!uiRecordingDc){
@@ -662,6 +672,13 @@ BOOL CDXGISurface::ReleaseDC(HDC hDC)
     if(hDC!=uiRecordingDc)return FALSE;
     const auto completed=owned::ui_layer_end(uiRecordingDc,uiRecipe);
     uiRecordingDc=nullptr;
+    if(ownedTextDc){
+        const bool success=!completed.promoted && completed.failure==owned::UiLayerFailure::none;
+        owned::owned_text_finish_dc(OwnedSurfaceId(),OwnedSurfaceGeneration(),success);
+        if(completed.promoted)ReleasePixelsDC();
+        ownedTextDc=false;uiRecipe.clear();uiLayer={};
+        return TRUE;
+    }
     if(completed.promoted){
         ReleasePixelsDC();uiLayer={};
     }else if(completed.failure==owned::UiLayerFailure::none){

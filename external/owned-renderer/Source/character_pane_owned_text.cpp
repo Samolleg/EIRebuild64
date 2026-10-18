@@ -1,4 +1,11 @@
 #include "character_pane_owned_text.h"
+#include "combat_ui.h"
+#include "widescreen.h"
+#ifdef EID3D11_EMBEDDED
+#include "renderer.h"
+#include <atomic>
+#include <set>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -7,8 +14,61 @@
 #include <limits>
 #include <new>
 #include <tuple>
+#include <climits>
 
 namespace owned {
+
+void character_pane_text_content(const CharacterPaneTextFrame& frame) noexcept {
+    if (!widescreen_hud_fade_enabled(HudPanel::character_info)) return;
+    try {
+        std::vector<std::uint64_t> values{frame.width,frame.height};
+        for (const auto& quad : frame.quads) {
+            if (!quad.asset) continue;
+            values.insert(values.end(),{quad.asset->identity,quad.asset->generation,quad.color,
+                std::uint64_t(quad.source.left),std::uint64_t(quad.source.top),std::uint64_t(quad.source.right),std::uint64_t(quad.source.bottom),
+                std::uint64_t(quad.destination.left),std::uint64_t(quad.destination.top),std::uint64_t(quad.destination.right),std::uint64_t(quad.destination.bottom)});
+        }
+        widescreen_hud_content_values(HudPanel::character_info,values);
+    } catch (const std::bad_alloc&) { widescreen_hud_activity(HudPanel::character_info); }
+}
+
+bool character_pane_measure_text(HFONT font, const char* text, int length, SIZE& size) noexcept {
+    size = {};
+    if (!font || !text || length < 0) return false;
+    HDC dc = GetDC(nullptr);
+    if (!dc) return false;
+    const auto old = SelectObject(dc, font);
+    const bool valid = old && old != HGDI_ERROR && GetTextExtentPoint32A(dc, text, length, &size);
+    if (old && old != HGDI_ERROR) SelectObject(dc, old);
+    ReleaseDC(nullptr, dc);
+    return valid;
+}
+
+bool character_pane_stats_refresh(bool valid, bool identity_changed,
+    std::int64_t now, std::int64_t frequency, std::int64_t refreshed,
+    std::int64_t previous) noexcept {
+    if (!valid || identity_changed || frequency <= 0 || !previous) return true;
+    const bool continuous = double(now - previous) * 1000.0 / double(frequency) < 250.0;
+    return !continuous || double(now - refreshed) * 1000.0 / double(frequency) >= 100.0;
+}
+
+void character_pane_publish_combat_font(HFONT font, std::uint64_t generation) noexcept {
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return;
+    const auto old = SelectObject(dc, font);
+    if (!old || old == HGDI_ERROR) {
+        DeleteDC(dc); combat_ui_set_status("Combat text omitted: native font selection failed."); return;
+    }
+    const DWORD size = GetFontData(dc, 0, 0, nullptr, 0);
+    try {
+        if (size != GDI_ERROR && size > 100 && size <= 16u * 1024u * 1024u) {
+            std::vector<std::uint8_t> bytes(size);
+            if (GetFontData(dc, 0, 0, bytes.data(), size) == size)
+                combat_ui_publish_font(bytes.data(), size, generation);
+        } else combat_ui_set_status("Combat text omitted: native outline font is unavailable.");
+    } catch (...) { combat_ui_set_status("Combat text omitted: font snapshot allocation failed."); }
+    SelectObject(dc, old); DeleteDC(dc);
+}
 namespace {
 
 constexpr std::size_t kMaximumPanePixels = 4u * 1024u * 1024u;
@@ -1110,5 +1170,265 @@ RetainedOwnedTextFrames::Lookup RetainedOwnedTextFrames::find(
 void RetainedOwnedTextFrames::retire(std::uint64_t surface_id) noexcept {
     entries_.erase(surface_id);
 }
+
+#ifdef EID3D11_EMBEDDED
+namespace {
+struct TextCall {
+    std::string text;
+    RECT rectangle{};
+    std::uint32_t font = 0;
+    UINT format = 0;
+    COLORREF color = 0;
+    bool shadow = false;
+};
+struct FontCopy { LOGFONTW description{}; HFONT handle = nullptr; };
+struct TextSession {
+    CharacterPaneOwnedText recorder;
+    RetainedOwnedTextFrames chat;
+    // Claims survive failed/stale publications: an owned line must never
+    // quietly become a pixel blit after a failed transaction.
+    std::set<std::uint64_t> chat_surfaces;
+    std::vector<FontCopy> fonts;
+    std::uint64_t next_epoch = 0, font_generation = 0, frame = 0;
+    std::atomic<std::uint64_t> pane_epoch{0}, pane_frame{0}, chat_epoch{0}, chat_frame{0};
+    bool active = false, scope = false, released = false, pane_complete = false;
+    OwnedTextErrorSink error_sink = nullptr;
+    bool failure_reported = false;
+    OwnedTextKind kind = OwnedTextKind::pane;
+    const void* pane_owner = nullptr;
+    const void* chat_owner = nullptr;
+    std::uint64_t pane_surface = 0, dc_surface = 0, pane_generation = 0;
+    OwnedTextStamp stamp{};
+    CharacterPaneTextFrame pane;
+    std::vector<TextCall> stats;
+    const void* stats_pane = nullptr;
+    std::uint64_t stats_unit = 0, stats_fonts = 0;
+    std::string stats_name;
+    std::int64_t refreshed = 0, previous = 0;
+    bool stats_valid = false, stats_recording = false, stats_alternate = false;
+    std::uint32_t stats_width = 0, stats_height = 0, width = 0, height = 0;
+    std::uint64_t advance() noexcept { if (!++next_epoch) ++next_epoch; return next_epoch; }
+    ~TextSession() { for (auto& font : fonts) DeleteObject(font.handle); }
+    void clear_fonts() noexcept {
+        recorder.retire_fonts(); chat.clear(); chat_surfaces.clear(); pane = {};
+        for (auto& font : fonts) DeleteObject(font.handle);
+        fonts.clear(); stats.clear(); stats_valid = stats_recording = false;
+    }
+    std::uint32_t font_slot(HFONT font) {
+        LOGFONTW description{};
+        if (!font || GetObjectW(font, sizeof(description), &description) != sizeof(description))
+            return UINT_MAX;
+        for (std::size_t i = 0; i < fonts.size(); ++i)
+            if (!std::memcmp(&description, &fonts[i].description, sizeof(description)))
+                return static_cast<std::uint32_t>(i);
+        if (fonts.size() >= 64) return UINT_MAX;
+        HFONT copy = CreateFontIndirectW(&description);
+        if (!copy) return UINT_MAX;
+        try { fonts.push_back({description, copy}); }
+        catch (...) { DeleteObject(copy); throw; }
+        return static_cast<std::uint32_t>(fonts.size() - 1);
+    }
+};
+TextSession& text_session() noexcept {
+    // Explicit interface retirement owns GDI cleanup. Surface destructors may
+    // still arrive during global host teardown, after the interface has gone.
+    static auto* value = new TextSession;
+    return *value;
+}
+void text_failure(CharacterPaneTextFailure failure) noexcept {
+    auto& s = text_session();
+    if (s.failure_reported) return;
+    s.failure_reported = true;
+    const char* reason = character_pane_text_failure_name(failure);
+    combat_ui_set_status(reason);
+    if (s.error_sink) s.error_sink(reason);
+}
+}
+
+void owned_text_interface_end() noexcept {
+    auto& s = text_session();
+    s.active = s.scope = s.released = s.pane_complete = false;
+    s.pane_epoch = s.pane_frame = s.chat_epoch = s.chat_frame = 0;
+    s.pane_owner = s.chat_owner = nullptr;
+    s.pane_surface = s.dc_surface = s.pane_generation = 0;
+    s.clear_fonts();
+    combat_ui_publish_font(nullptr, 0, 0);
+}
+void owned_text_interface_begin(HFONT combat_font, OwnedTextErrorSink error_sink) noexcept {
+    owned_text_interface_end();
+    auto& s = text_session();
+    s.error_sink = error_sink; s.failure_reported = false;
+    s.active = true; s.font_generation = s.advance();
+    s.recorder.initialize_fonts(s.font_generation);
+    character_pane_publish_combat_font(combat_font, s.font_generation);
+}
+void owned_text_begin_frame() noexcept {
+    auto& s = text_session();
+    if (!++s.frame) ++s.frame;
+    s.pane_frame = 0; s.chat_frame = 0;
+}
+OwnedTextStamp owned_text_begin(OwnedTextKind kind, const void* owner,
+    std::uint64_t pane_surface) noexcept {
+    auto& s = text_session();
+    if (!s.active || !owner || s.scope) return {};
+    s.scope = true; s.kind = kind; s.dc_surface = 0; s.released = false;
+    if (kind == OwnedTextKind::pane) {
+        s.pane_owner = owner; s.pane_surface = pane_surface;
+        s.pane_complete = false; s.pane = {};
+        s.pane_epoch = s.advance(); s.pane_frame = s.frame;
+        s.stamp = {s.pane_epoch.load(), s.frame};
+    } else {
+        if (s.chat_owner != owner || !s.chat_epoch) {
+            s.chat.clear(); s.chat_surfaces.clear();
+            s.chat_owner = owner; s.chat_epoch = s.advance();
+        }
+        s.chat_frame = s.frame; s.stamp = {s.chat_epoch.load(), s.frame};
+    }
+    return s.stamp;
+}
+void owned_text_complete(OwnedTextStamp stamp, bool success) noexcept {
+    auto& s = text_session();
+    if (!s.scope || !stamp.epoch || stamp.epoch != s.stamp.epoch) return;
+    if (s.dc_surface) {
+        s.chat.retire(s.dc_surface); s.recorder.abort_frame();
+        success = false; s.dc_surface = 0;
+    }
+    if (s.kind == OwnedTextKind::pane) {
+        s.pane_complete = success && s.released && s.pane_complete;
+        if (!s.pane_complete) text_failure(CharacterPaneTextFailure::dc_transaction);
+    }
+    s.stats_recording = false; s.scope = false;
+}
+void owned_text_retire(OwnedTextKind kind, const void* owner) noexcept {
+    auto& s = text_session();
+    if (kind == OwnedTextKind::pane && (!owner || owner == s.pane_owner)) {
+        s.pane_epoch = s.pane_frame = 0; s.pane_owner = nullptr;
+        s.pane_surface = 0; s.pane = {}; s.stats_valid = false;
+    }
+    if (kind == OwnedTextKind::chat && (!owner || owner == s.chat_owner)) {
+        s.chat_epoch = s.chat_frame = 0; s.chat_owner = nullptr;
+        s.chat.clear(); s.chat_surfaces.clear();
+    }
+}
+bool owned_text_claim_dc(std::uint64_t surface, std::uint32_t width,
+    std::uint32_t height, float raster_scale) noexcept {
+    auto& s = text_session();
+    if (!s.scope || !surface || s.dc_surface ||
+        (s.kind == OwnedTextKind::pane && surface != s.pane_surface)) return false;
+    s.dc_surface = surface; s.width = width; s.height = height; s.released = false;
+    if (s.kind == OwnedTextKind::chat) {
+        try { s.chat_surfaces.insert(surface); }
+        catch (...) { text_failure(CharacterPaneTextFailure::allocation); }
+        s.chat.retire(surface);
+    }
+    s.recorder.begin_frame(width, height, raster_scale);
+    return true;
+}
+bool owned_text_dc_current(std::uint64_t surface) noexcept {
+    const auto& s = text_session();
+    return s.scope && surface && s.dc_surface == surface;
+}
+bool owned_text_pane_surface(std::uint64_t surface) noexcept {
+    const auto& s = text_session();
+    return s.scope && s.kind == OwnedTextKind::pane && surface && surface == s.pane_surface;
+}
+int owned_text_draw(std::uint64_t surface, HFONT font, const char* text,
+    const RECT& rectangle, UINT format, COLORREF color, bool shadow) noexcept {
+    auto& s = text_session();
+    if (!owned_text_dc_current(surface)) return 0;
+    try {
+        const auto slot = s.font_slot(font);
+        if (slot == UINT_MAX || !text) { s.recorder.fail(CharacterPaneTextFailure::font); return 0; }
+        if (s.stats_recording) s.stats.push_back({text, rectangle, slot, format, color, shadow});
+        bool measured = false;
+        return s.recorder.draw(s.fonts[slot].handle, slot, text, rectangle, format, color, shadow, measured);
+    } catch (...) { s.recorder.fail(CharacterPaneTextFailure::allocation); s.stats_valid = false; return 0; }
+}
+void owned_text_finish_dc(std::uint64_t surface, std::uint64_t generation,
+    bool success) noexcept {
+    auto& s = text_session();
+    if (!owned_text_dc_current(surface)) return;
+    s.recorder.finish_dc(success);
+    CharacterPaneTextFrame frame;
+    const auto failure = s.recorder.failure();
+    const bool ready = s.recorder.take(frame);
+    if (s.kind == OwnedTextKind::chat) {
+        if (!ready || !s.chat.publish(surface, generation, std::move(frame))) {
+            s.chat.retire(surface); text_failure(failure);
+        }
+    } else {
+        s.pane = std::move(frame); s.pane_complete = ready; s.pane_generation = generation;
+        if (ready) character_pane_text_content(s.pane);
+    }
+    s.recorder.abort_frame(); s.dc_surface = 0; s.released = true;
+}
+void owned_text_retire_surface(std::uint64_t surface) noexcept {
+    auto& s = text_session();
+    s.chat.retire(surface); s.chat_surfaces.erase(surface);
+    if (s.pane_surface == surface) owned_text_retire(OwnedTextKind::pane, nullptr);
+    if (s.dc_surface == surface) { s.recorder.abort_frame(); s.dc_surface = 0; }
+}
+bool owned_text_consume(Renderer& renderer, std::uint64_t surface,
+    std::uint64_t generation, const RECT& destination, const RECT* source,
+    HRESULT& result) noexcept {
+    auto& s = text_session(); result = S_OK;
+    if (surface && surface == s.pane_surface) {
+        if (s.scope || !s.pane_complete || s.pane_generation != generation || s.pane_frame != s.frame) {
+            text_failure(CharacterPaneTextFailure::dc_transaction); return true;
+        }
+        result = renderer.queue_character_pane_text(s.pane, s.pane_epoch, s.frame, destination, source);
+        s.pane_complete = false;
+    } else {
+        if (!s.scope || s.kind != OwnedTextKind::chat || !s.chat_surfaces.count(surface)) return false;
+        const CharacterPaneTextFrame* frame = nullptr;
+        if (s.chat.find(surface, generation, frame) != RetainedOwnedTextFrames::Lookup::ready) {
+            text_failure(CharacterPaneTextFailure::dc_transaction); return true;
+        }
+        result = renderer.queue_character_pane_text(*frame, s.chat_epoch, s.frame, destination, source);
+    }
+    if (FAILED(result)) text_failure(CharacterPaneTextFailure::submission);
+    return true;
+}
+bool owned_text_epoch_current(std::uint64_t epoch, std::uint64_t frame) noexcept {
+    const auto& s = text_session();
+    return epoch && frame && ((s.pane_epoch.load() == epoch && s.pane_frame.load() == frame) ||
+        (s.chat_epoch.load() == epoch && s.chat_frame.load() == frame));
+}
+bool owned_text_begin_stats(std::uint64_t unit, const char* displayed_name,
+    bool alternate) noexcept {
+    auto& s = text_session();
+    if (!s.scope || s.kind != OwnedTextKind::pane || !s.dc_surface) return true;
+    LARGE_INTEGER now{}, frequency{};
+    QueryPerformanceCounter(&now); QueryPerformanceFrequency(&frequency);
+    const char* name = displayed_name ? displayed_name : "";
+    const bool changed = s.stats_pane != s.pane_owner || s.stats_unit != unit ||
+        s.stats_fonts != s.font_generation || s.stats_name != name || s.stats_alternate != alternate ||
+        s.stats_width != s.width || s.stats_height != s.height;
+    const bool refresh = character_pane_stats_refresh(s.stats_valid, changed,
+        now.QuadPart, frequency.QuadPart, s.refreshed, s.previous);
+    s.previous = now.QuadPart;
+    if (refresh) {
+        s.stats.clear(); s.stats_valid = false; s.stats_recording = true;
+        s.stats_pane = s.pane_owner; s.stats_unit = unit; s.stats_fonts = s.font_generation;
+        s.stats_alternate = alternate; s.stats_width = s.width; s.stats_height = s.height;
+        s.refreshed = now.QuadPart;
+        try { s.stats_name = name; }
+        catch (...) { s.stats_recording = false; }
+        return true;
+    }
+    for (const auto& call : s.stats) {
+        bool measured = false;
+        s.recorder.draw(s.fonts[call.font].handle, call.font, call.text.c_str(),
+            call.rectangle, call.format, call.color, call.shadow, measured);
+    }
+    return false;
+}
+void owned_text_complete_stats() noexcept {
+    auto& s = text_session();
+    s.stats_valid = s.stats_recording && !s.stats.empty() &&
+        s.recorder.failure() == CharacterPaneTextFailure::none;
+    s.stats_recording = false;
+}
+#endif
 
 } // namespace owned

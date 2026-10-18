@@ -22992,20 +22992,7 @@ void publish_character_pane_text(
             publication.failure == CharacterPaneTextFailure::none)
             publication.failure = CharacterPaneTextFailure::dc_transaction;
     }
-    if(publication.complete && !invocation.chat && widescreen_hud_fade_enabled(HudPanel::character_info)) {
-        try {
-            // Owned glyph layout is the displayed text, with no model pose or
-            // per-draw ui_epoch/atlas-revision noise in the wake signal.
-            std::vector<std::uint64_t> values{publication.frame.width,publication.frame.height};
-            for(const auto& quad:publication.frame.quads) {
-                if(!quad.asset)continue;
-                values.insert(values.end(),{quad.asset->identity,quad.asset->generation,quad.color,
-                    std::uint64_t(quad.source.left),std::uint64_t(quad.source.top),std::uint64_t(quad.source.right),std::uint64_t(quad.source.bottom),
-                    std::uint64_t(quad.destination.left),std::uint64_t(quad.destination.top),std::uint64_t(quad.destination.right),std::uint64_t(quad.destination.bottom)});
-            }
-            widescreen_hud_content_values(HudPanel::character_info,values);
-        } catch(const std::bad_alloc&) {widescreen_hud_activity(HudPanel::character_info);}
-    }
+    if(publication.complete && !invocation.chat) character_pane_text_content(publication.frame);
     g_character_pane_text.abort_frame();
     g_character_pane_text_publication = std::move(publication);
 }
@@ -23072,7 +23059,7 @@ bool character_pane_receivers(
 // name, preview, epoch/publication) still runs every frame.
 constexpr std::uint32_t kCharacterPaneStatsCallRva = 0x00246a98;
 constexpr std::uint32_t kCharacterPaneStatsEntryRva = 0x00247040;
-constexpr double kStatsRefreshMs = 100.0;
+
 struct CharacterPaneStatsText {
     void* surface = nullptr; std::string text; RECT rectangle{}; bool has_rectangle = false;
     int font_slot = 0; COLORREF color = 0; int format = 0; BOOL shadow = FALSE;
@@ -23273,18 +23260,7 @@ void publish_combat_font(void* interface_owner, std::uint64_t generation) {
     const auto* owner=static_cast<const std::uint8_t*>(interface_owner);
     const auto* object=*reinterpret_cast<const std::uint8_t* const*>(owner+kInterfaceFontArrayOffset);
     const HFONT font=*reinterpret_cast<HFONT const*>(object+kMfcFontHandleOffset);
-    HDC dc=CreateCompatibleDC(nullptr);
-    if (!dc) return;
-    const auto old=SelectObject(dc,font);
-    if (!old || old==HGDI_ERROR) { DeleteDC(dc); combat_ui_set_status("Combat text omitted: native font selection failed."); return; }
-    const DWORD size=GetFontData(dc,0,0,nullptr,0);
-    try { if (size!=GDI_ERROR && size>100 && size<=16u*1024u*1024u) {
-        std::vector<std::uint8_t> bytes(size);
-        if (GetFontData(dc,0,0,bytes.data(),size)==size)
-            combat_ui_publish_font(bytes.data(),size,generation);
-    } else combat_ui_set_status("Combat text omitted: native outline font is unavailable.");
-    } catch (...) { combat_ui_set_status("Combat text omitted: font snapshot allocation failed."); }
-    SelectObject(dc,old); DeleteDC(dc);
+    character_pane_publish_combat_font(font,generation);
 }
 
 void __fastcall hook_character_pane_interface_init(
@@ -23343,13 +23319,11 @@ void __fastcall hook_character_pane_stats(void* pane, void*, void* renderer) {
     QueryPerformanceCounter(&now); QueryPerformanceFrequency(&frequency);
     const std::string unit = character_pane_displayed_unit(pane);
     const std::uint64_t fonts = g_character_pane_font_generation.load(std::memory_order_acquire);
-    // A pane not drawn for 250 ms was closed or hidden: refresh on its return.
-    const bool continuous = g_stats_last_call_qpc &&
-        double(now.QuadPart - g_stats_last_call_qpc) * 1000.0 / double(frequency.QuadPart) < 250.0;
-    const bool due = double(now.QuadPart - g_stats_refreshed_qpc) * 1000.0 / double(frequency.QuadPart) >= kStatsRefreshMs;
+    const bool changed = unit != g_stats_unit || fonts != g_stats_font_generation || pane != g_stats_pane;
+    const bool refresh = character_pane_stats_refresh(g_stats_valid, changed,
+        now.QuadPart, frequency.QuadPart, g_stats_refreshed_qpc, g_stats_last_call_qpc);
     g_stats_last_call_qpc = now.QuadPart;
-    if (!g_stats_valid || due || !continuous || unit != g_stats_unit ||
-        fonts != g_stats_font_generation || pane != g_stats_pane) {
+    if (refresh) {
         g_stats_text.clear(); g_stats_valid = false; g_stats_recording = true;
         const bool completed = run_character_pane_stats(pane, renderer);
         g_stats_valid = completed && !g_stats_text.empty();

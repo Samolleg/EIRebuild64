@@ -27,6 +27,7 @@ private:
     bool captureDifferentFromBufferZero = false;
     HDC hDc = nullptr;
     HDC uiRecordingDc = nullptr;
+    bool ownedTextDc = false;
     bool uiRecordingReset = false;
     owned::UiLayerState uiLayer;
     std::vector<std::uint8_t> uiRecipe;

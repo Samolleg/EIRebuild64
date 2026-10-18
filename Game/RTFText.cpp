@@ -2,6 +2,7 @@
 //
 /////////////////////////////////////////////////////////////////////////////////////////////////
 #include "StdAfx.h"
+#include "OwnedRender/E2Gdi.h"
 #include "owned_ui_layers.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -129,7 +130,7 @@ void CI3DTetxRTF::RenderToDC()
     fr.chrg.cpMin = 0;
     fr.chrg.cpMax = -1;
 
-    int nLastChar = owned::ui_layer_send_message_a(m_hRichEditCtrl, // handle to destination window
+    int nLastChar = OwnedRender::E2SendMessage(m_hRichEditCtrl, // handle to destination window
                                   EM_FORMATRANGE,  // message to send
                                   (WPARAM)TRUE,    // render option
                                   (LPARAM)&fr      // device data (FORMATRANGE *)

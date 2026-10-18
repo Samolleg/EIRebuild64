@@ -35,7 +35,9 @@ void E3PublishInterface(HWND next, unsigned w, unsigned h, bool active,
     running = nextRunning;
     owned::set_embedded_cursor_canvas(next, nextRunning ? w : 0, nextRunning ? h : 0, &ErrorDialog::Active);
     E3CursorCanvas(next, w, h, nextRunning);
-    mission = running && soleMission;
+    const bool nextMission = running && soleMission;
+    if (mission != nextMission) owned::combat_ui_set_mission(nextMission);
+    mission = nextMission;
     if (!mission) owned::combat_ui_publish_hover(0, 0);
     resetInput = reset;
     // Match both c56 consumers: canvas_width/height query the function, while
@@ -50,6 +52,7 @@ void E3RetireInterface() noexcept {
     endEditing();
     window = nullptr; width = height = 0;
     running = mission = false; resetInput = nullptr;
+    owned::combat_ui_set_mission(false);
     owned::combat_ui_publish_hover(0, 0);
     owned::widescreen::interface_owned = false;
     owned::widescreen::hud_blit = {};

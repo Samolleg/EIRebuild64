@@ -219,6 +219,9 @@ HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
     if (contextDevice.Get() != device) return E_INVALIDARG;
     const auto value = E1SurfaceValue(id);
     if (!value) return E_HANDLE;
+    HRESULT textResult = S_OK;
+    if (owned::owned_text_consume(renderer, id, value->generation, destination, source, textResult))
+        return textResult;
     owned::SurfaceImage image;
     HRESULT hr = E1ResolveSurface(nullptr, device, id, value->generation, image.texture);
     if (FAILED(hr)) return hr;

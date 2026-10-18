@@ -17,6 +17,13 @@
 
 namespace owned {
 
+// Shared retail/embedded policy. The caller owns the clock and game values.
+bool character_pane_stats_refresh(bool valid, bool identity_changed,
+    std::int64_t now, std::int64_t frequency, std::int64_t refreshed,
+    std::int64_t previous) noexcept;
+void character_pane_publish_combat_font(HFONT font, std::uint64_t generation) noexcept;
+bool character_pane_measure_text(HFONT font, const char* text, int length, SIZE& size) noexcept;
+
 struct CharacterPaneGlyphAsset {
     std::uint64_t identity = 0;
     std::uint64_t generation = 0;
@@ -49,6 +56,7 @@ struct CharacterPaneTextFrame {
     std::uint32_t height = 0;
     std::vector<CharacterPaneGlyphQuad> quads;
 };
+void character_pane_text_content(const CharacterPaneTextFrame& frame) noexcept;
 
 enum class CharacterPaneTextFailure : std::uint8_t {
     none,
@@ -271,5 +279,40 @@ private:
     };
     std::map<std::uint64_t, Entry> entries_;
 };
+
+#ifdef EID3D11_EMBEDDED
+class Renderer;
+enum class OwnedTextKind : std::uint8_t { pane, chat };
+struct OwnedTextStamp { std::uint64_t epoch = 0, frame = 0; };
+
+// Synchronous source-owner boundaries. No engine addresses, caller detection,
+// borrowed strings or borrowed font handles survive a call into this API.
+using OwnedTextErrorSink = void (*)(const char*) noexcept;
+void owned_text_interface_begin(HFONT combat_font, OwnedTextErrorSink error_sink = nullptr) noexcept;
+void owned_text_interface_end() noexcept;
+void owned_text_begin_frame() noexcept;
+OwnedTextStamp owned_text_begin(OwnedTextKind kind, const void* owner,
+    std::uint64_t pane_surface = 0) noexcept;
+void owned_text_complete(OwnedTextStamp stamp, bool success) noexcept;
+void owned_text_retire(OwnedTextKind kind, const void* owner) noexcept;
+bool owned_text_claim_dc(std::uint64_t surface, std::uint32_t width,
+    std::uint32_t height, float raster_scale) noexcept;
+bool owned_text_dc_current(std::uint64_t surface) noexcept;
+bool owned_text_pane_surface(std::uint64_t surface) noexcept;
+int owned_text_draw(std::uint64_t surface, HFONT font, const char* text,
+    const RECT& rectangle, UINT format, COLORREF color, bool shadow) noexcept;
+void owned_text_finish_dc(std::uint64_t surface, std::uint64_t generation,
+    bool success) noexcept;
+void owned_text_retire_surface(std::uint64_t surface) noexcept;
+bool owned_text_consume(Renderer& renderer, std::uint64_t surface,
+    std::uint64_t generation, const RECT& destination, const RECT* source,
+    HRESULT& result) noexcept;
+bool owned_text_epoch_current(std::uint64_t epoch, std::uint64_t frame) noexcept;
+// False means the cached calls have already been replayed into the current
+// pane recorder. Stock stats need not use this Lua display refresh policy.
+bool owned_text_begin_stats(std::uint64_t unit, const char* displayed_name,
+    bool alternate) noexcept;
+void owned_text_complete_stats() noexcept;
+#endif
 
 } // namespace owned

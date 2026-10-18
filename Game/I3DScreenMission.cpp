@@ -2,6 +2,8 @@
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E2Gdi.h"
 #include "OwnedRender/E1TextLifetime.h"
+#include "combat_ui.h"
+#include <cmath>
 #include "OwnedRender/E3Input.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E3Hud.h"
@@ -5487,7 +5489,7 @@ void CI3DObjectInfo::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 {
-    OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::pane,this);
+    OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::pane,this,surfaces[0]->GetSurface() ? surfaces[0]->GetSurface()->OwnedSurfaceId() : 0);
     WideScreen::Scope wideScope(-1);
     CPlot3D pos;
     CQuaternion rot;
@@ -5617,11 +5619,22 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
         }
         else if (nMode == 2)
         {
-            DrawStats(pDrawUnit);
+            const bool luaStats = ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_DrawStats");
+            const auto resource = OwnedRender::E1Scene().Resource(pDrawUnit->GetObjectSpecific());
+            if (!luaStats || owned::owned_text_begin_stats(resource.serial, pszName, pI3D->IsAltDown() != FALSE)) {
+                DrawStats(pDrawUnit);
+                if (luaStats) owned::owned_text_complete_stats();
+            }
         }
         else if (nMode == 3)
         {
-            DrawSpellEffects(pDrawUnit);
+            PublishSpellEffects(pDrawUnit);
+            CRect viewport(0, 35, 160, 215);
+            pI3D->VirtualToScreenLocal(viewport);
+            const auto resource = OwnedRender::E1Scene().Resource(pDrawUnit->GetObjectSpecific());
+            const auto stamp = textDraw.Stamp();
+            owned::combat_ui_publish_spell_list(pDrawUnit->GetID(), resource.serial,
+                stamp.epoch, stamp.frame, viewport);
         }
 #endif // NOGETDC
 
@@ -5654,158 +5667,72 @@ void CI3DObjectInfo::DrawName(LPCTSTR pszName)
     surfaces[0]->DrawMultiText(pszName, rc, 2, 0, color, DT_CENTER | DT_WORDBREAK);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectInfo::DrawSpellEffects(CUnit *pUnit)
+void CI3DObjectInfo::PublishSpellEffects(CUnit *pUnit)
 {
-    CTextManager *pTxtMng = theWorld.GetTextManager();
-    CI3DSurface *pSurf = surfaces[0];
-
-    CString szCode, szName, szOut;
-    CRect rc(40, 35, 155, 50);
-    CPoint shift(0, 15);
-    COLORREF color = INFO_COLOR;
-
-    int i, j;
-    int nNewEffects[6];
-    bool bOld[6];
-    int nSubst[6];
-    for (i = 0; i < 6; i++)
-    {
-        nNewEffects[i] = -1;
-        bOld[i] = false;
-        nSubst[i] = -1;
+    // Game values only. c74 owns all rows, icons, scroll, text and clipping.
+    const auto resource = OwnedRender::E1Scene().Resource(pUnit->GetObjectSpecific());
+    if (!resource.serial) {
+        GameJournal::Event("render", "pane_effects_omitted", "reason=unit_resource_unavailable");
+        return;
     }
-    const CSpellEffectArray &effects = pUnit->GetSpellEffects();
-    if (effects.GetSize() > 6)
-        figures[9]->Show(TRUE);
-    for (i = 0; i < effects.GetSize() && i < 6; i++)
-    {
-        szCode.Empty();
-        szName.Empty();
-        const SSDBSpellPrototype *pSpellProt = theSpellDatabase.spells[effects[i].nSpellID];
-        if (pSpellProt)
-        {
-            nNewEffects[i] = pSpellProt->dwTextureTypeIndex;
-            szCode = pSpellProt->GetCodeName();
-            if (pTxtMng->GetText(CString("spell ") + szCode))
-                pTxtMng->GetLine(szName);
-        }
-        pSurf->DrawText(szName, rc, 0, color, DT_LEFT);
-        rc += shift;
-        if (auto *mod = ModRuntime::Current(); mod && mod->AdvancedUI("useLS_DrawSpellEffects") && pSpellProt)
-        {
-            const CUnit *serverUnit = theWorldServer.GetUnit(pUnit->GetID());
-            const CSpellEffect *serverEffect = nullptr;
-            if (serverUnit)
-            {
-                const auto &serverEffects = serverUnit->GetSpellEffects();
-                if (i < serverEffects.GetSize())
-                    serverEffect = &serverEffects[i];
-            }
-            float power = serverEffect ? serverEffect->fpPower : 0.0f;
-            const bool attacking = effects[i].nSpellID <= SPELL_ID_POISONFOG || effects[i].nSpellID == SPELL_ID_VAMP;
-            if (attacking)
-            {
-                const auto *stats = pUnit->GetUserUnitStats();
-                const auto subtype = pSpellProt->mstSubtype;
-                float baseSkill = 0;
-                if (subtype >= RPGMST_FIRE && subtype <= RPGMST_ACID)
-                    baseSkill = stats->cAutoSkills[RPGASKL_ELEMENTAL];
-                else if (subtype >= RPGMST_ILLUSION && subtype <= RPGMST_DIVINATION)
-                    baseSkill = stats->cAutoSkills[RPGASKL_SENSE];
-                else if (subtype >= RPGMST_ENCHANTMENTS && subtype <= RPGMST_DOMINATION)
-                    baseSkill = stats->cAutoSkills[RPGASKL_ASTRAL];
-                const float skill = baseSkill +
-                    stats->GetPerkModifier(RPGPRK_FIRE + subtype) +
-                    int(pUnit->GetUserUnitStats()->cIntelligence) - 25;
-                power *= 0.8f + skill * 30.0f / 120.0f / 100.0f;
-            }
-            CString prefix, seconds;
-            if (pTxtMng->GetText("string infoitem_82")) pTxtMng->GetLine(prefix);
-            if (serverUnit && pTxtMng->GetText("string infoskill_49")) pTxtMng->GetLine(seconds);
-            const bool wholePower = serverUnit && serverUnit->GetEffectValue(effects[i].nSpellID) > 10;
-            if (wholePower)
-                szOut.Format("%s%.0f (%d%s)", (LPCSTR)prefix, power, effects[i].nDuration / 15, (LPCSTR)seconds);
-            else
-                szOut.Format("%s%.1f (%d%s)", (LPCSTR)prefix, power, effects[i].nDuration / 15, (LPCSTR)seconds);
-        }
-        else
-            szOut.Format("%d", effects[i].nDuration / 15);
-        pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
-        rc += shift;
+    std::array<owned::CombatEffectDefinition, 256> catalog{};
+    const bool hd = UseModInterfaceHD();
+    const int count = (std::min)(256, int(theSpellDatabase.spells.GetNumEntries()));
+    for (int i = 0; i < count; ++i) {
+        const auto* spell = theSpellDatabase.spells[i];
+        if (!spell) continue;
+        auto& definition = catalog[i];
+        const char* code = spell->GetCodeName();
+        if (!code) continue;
+        strncpy_s(definition.name.data(), definition.name.size(), code, _TRUNCATE);
+        definition.valid = definition.name[0] != 0;
+        definition.hd_icon = hd; definition.icon = spell->dwTextureTypeIndex;
+        for (const char* harmful : {"stench","stun","weak","feeblemind","slow","firewall","litnwall","acid_fog"})
+            if (_stricmp(code,harmful) == 0) definition.debuff = true;
     }
-    for (i = 0; i < 6; i++)
-        for (j = 0; j < 6; j++)
-            if (nNewEffects[i] >= 0 && nNewEffects[i] == nEffectsLoaded[j])
-            {
-                bOld[j] = true;
-                nSubst[i] = j;
-            }
-
-    CString szTextureName;
-    j = 0;
-    for (i = 0; i < 6; i++)
-    {
-        if (nNewEffects[i] < 0)
-            continue;
-        int x, y;
-        bool bNeedPaste = false;
-        if (nSubst[i] < 0)
-        {
-            while (j < 6 && bOld[j])
-                j++;
-            if (j == 6)
-                break;
-            bOld[j] = true;
-            nSubst[i] = j;
-            bNeedPaste = true;
-        }
-
-        const bool hdInterface = UseModInterfaceHD();
-        const int iconSize = hdInterface ? 512 : 64;
-        switch (nSubst[i])
-        {
-        case 0:
-            x = 0;
-            y = iconSize * 2;
-            break;
-        case 1:
-            x = 0;
-            y = iconSize * 3;
-            break;
-        case 2:
-            x = iconSize;
-            y = 0;
-            break;
-        case 3:
-            x = iconSize;
-            y = iconSize;
-            break;
-        case 4:
-            x = iconSize;
-            y = iconSize * 2;
-            break;
-        case 5:
-            x = iconSize;
-            y = iconSize * 3;
-            break;
-        }
-
-        if (bNeedPaste)
-        {
-            szTextureName.Format("spell%04d", nNewEffects[i]);
-            if (hdInterface)
-                PasteModInterfaceIcon(textures[2], szTextureName, iconSize, x, y);
-            else
-                PasteTexture(textures[1], szTextureName, 64, 64, 64, 64, x, y);
-            nEffectsLoaded[j] = nNewEffects[i];
-        }
-
-        CI3DFigure *pFig = figures[N_HL_FIGURE + 12 + i];
-        const float canvasSize = hdInterface ? 2048.f : 256.f;
-        pFig->SetUShift(x / canvasSize);
-        pFig->SetVShift((iconSize + y) / canvasSize);
-        pFig->Show(TRUE);
+    owned::combat_ui_publish_catalog(catalog);
+    owned::CombatUnitValue value;
+    value.id = pUnit->GetID(); value.incarnation = resource.serial;
+    value.health = pUnit->GetHP(); value.maximum_health = pUnit->GetMaxHP();
+    value.dead = pUnit->GetHP() <= 0;
+    const auto& effects = pUnit->GetSpellEffects();
+    const CUnit* server = theWorldServer.GetUnit(pUnit->GetID());
+    bool paired = server && server->GetSpellEffects().GetSize() == effects.GetSize() && effects.GetSize() <= 256;
+    if (paired) for (int i = 0; i < effects.GetSize(); ++i)
+        if (effects[i].nSpellID != server->GetSpellEffects()[i].nSpellID || !std::isfinite(server->GetSpellEffects()[i].fpPower)) { paired = false; break; }
+    std::array<float,256> maximum{};
+    if (paired) for (int i = 0; i < effects.GetSize(); ++i) {
+        const int id = effects[i].nSpellID;
+        if (id >= 0 && id < 256)
+            maximum[id] = (std::max)(maximum[id], server->GetSpellEffects()[i].fpPower);
     }
+    for (int i = 0; i < effects.GetSize() && value.effect_count < value.effects.size(); ++i) {
+        const auto& input = effects[i]; const int id = input.nSpellID;
+        if (id < 0 || id >= 256) continue;
+        auto& output = value.effects[value.effect_count++];
+        output.id = static_cast<std::uint8_t>(id); output.ticks = input.nDuration;
+        if (!paired) continue;
+        output.amount = server->GetSpellEffects()[i].fpPower;
+        output.whole_amount = maximum[id] > 10.f;
+        if (id <= SPELL_ID_POISONFOG || id == SPELL_ID_VAMP) {
+            const auto* spell = theSpellDatabase.spells[id];
+            if (!spell) continue;
+            const auto subtype = spell->mstSubtype;
+            const auto* stats = pUnit->GetUserUnitStats();
+            float base = 0;
+            if (subtype >= RPGMST_FIRE && subtype <= RPGMST_ACID) base = stats->cAutoSkills[RPGASKL_ELEMENTAL];
+            else if (subtype >= RPGMST_ILLUSION && subtype <= RPGMST_DIVINATION) base = stats->cAutoSkills[RPGASKL_SENSE];
+            else if (subtype >= RPGMST_ENCHANTMENTS && subtype <= RPGMST_DOMINATION) base = stats->cAutoSkills[RPGASKL_ASTRAL];
+            else continue;
+            const float component = base + float(stats->GetPerkModifier(RPGPRK_FIRE + subtype));
+            const double sum = double(component) + double(int(stats->cIntelligence) - 25);
+            if (sum < INT_MIN || sum > INT_MAX) continue;
+            const int skill = int(sum);
+            output.amount *= float(double(.8f) + (double(float(skill)) * 30.0 / 120.0) / 100.0);
+        }
+        output.amount_available = std::isfinite(output.amount);
+    }
+    owned::combat_ui_publish_unit(value);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::DrawStats(CUnit *pUnit)

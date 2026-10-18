@@ -524,7 +524,7 @@ private:
     void DrawHLState(CUnit *pUnit);
     void DrawStats(CUnit *pUnit);
     void DrawName(LPCTSTR pszName);
-    void DrawSpellEffects(CUnit *pUnit);
+    void PublishSpellEffects(CUnit *pUnit);
 
 public:
     CI3DObjectInfo(CInterface3D *pI, CI3DScreenMission *pScr)

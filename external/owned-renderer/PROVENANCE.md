@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p1`, commit `9ee59a75a95434cfa6b6f3e70fc46ef3bc9e95fb`.
+integration changes in branch `eirebuild/c74-p2`, commit `ed4262d5d5c0849b3bb68f21a1b40b6cb7463960`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -43,3 +43,12 @@ cursor selection are shared with the embedded host. Confinement and coordinate
 helpers are shared too; retail import redirection is excluded from embedded builds.
 Embedded-only load cursor synchronization permits the host snapshot owner to
 update the held-picture cursor without reading game objects on the scene thread.
+OWN74-P2 adds typed begin/text/complete/consume/retire boundaries over the existing
+CharacterPaneOwnedText and RetainedOwnedTextFrames. Embedded pane and colored
+chat lines use the c74 glyph shaping, output-size rasterization, shadow, clipping
+and Renderer::queue_character_pane_text; retail callers keep their verified
+hooks. Font snapshots, pane content wake values and the 100 ms Lua display
+refresh predicate are shared helpers, without moving Lua or gameplay into the
+renderer. Host text measurement/font scaling use the shared interface unit.
+Combat UI receives the pane's actual unit incarnation, effects, catalog, font and
+local clip. Generic GDI operations continue through owned_ui_layers.

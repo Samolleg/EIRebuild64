@@ -76,6 +76,7 @@ void CI3DChat::Draw2D()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::NewPhrase(LPCTSTR pszPhrase, int nOrder)
 {
+    OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::chat,this);
     int nFont = 1;
 
     int nLines;
@@ -218,8 +219,9 @@ void CI3DChat::NewPhrase(LPCTSTR pszPhrase, int nOrder)
                             DT_NOPREFIX);
         pSurf->ReleaseDC();
 #endif // NOGETDC
-        line.pSurface = pSurf.get();
+        line.pSurface = pSurf.release();
     }
+    textDraw.Complete();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)

@@ -56,6 +56,23 @@ struct Layout {
     float clip_y = 1.0f;         // magnitude of _22 (vert+ on narrow screens)
 };
 
+inline float interface_font_scale(const Layout& layout) noexcept {
+    return 0.01f * layout.width / (800.0f * layout.unit);
+}
+// Keep retail TextSize's integer multiply/divide and rounding divisors.
+inline std::int32_t text_width_divisor(const Layout& layout) noexcept {
+    return static_cast<std::int32_t>(800.0f * layout.unit + 0.5f);
+}
+inline std::int32_t text_height_divisor(const Layout& layout) noexcept {
+    return static_cast<std::int32_t>(600.0f * layout.unit + 0.5f);
+}
+inline std::int32_t text_width(const Layout& layout, std::int32_t pixels) noexcept {
+    return pixels * 800 / (std::max)(1, text_width_divisor(layout));
+}
+inline std::int32_t text_height(const Layout& layout, std::int32_t pixels) noexcept {
+    return pixels * 600 / (std::max)(1, text_height_divisor(layout));
+}
+
 inline float hud_width_aspect(HudWidth width) noexcept {
     switch (width) {
     case HudWidth::ultrawide_21_9: return 64.0f / 27.0f;

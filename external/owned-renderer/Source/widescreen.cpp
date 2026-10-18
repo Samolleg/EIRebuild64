@@ -2372,7 +2372,7 @@ bool apply_interface_values() noexcept {
     g_content_height = std::lround(600.0f * l.unit);
     // Fonts: stock size 104 * w / (|lfHeight| * 0.01) / 800 with w the screen
     // width; the interface unit replaces w / 800.
-    g_font_scale = 0.01f * l.width / (800.0f * l.unit);
+    g_font_scale = widescreen::interface_font_scale(l);
     // Draw2D: an absolute full interface-screen surface
     // (push 0 = pixel rect; push 4; push height; push width).
     for (const auto va : kDraw2DSurfaceArgs) {
@@ -2388,7 +2388,7 @@ bool apply_interface_values() noexcept {
         std::size_t n = 0;
         auto put = [&](std::initializer_list<std::uint8_t> bytes) { for (auto b : bytes) code[n++] = b; };
         auto put32 = [&](std::int32_t v) { std::memcpy(code + n, &v, 4); n += 4; };
-        const std::int32_t width_divisor = std::lround(800.0f * l.unit), height_divisor = std::lround(600.0f * l.unit);
+        const std::int32_t width_divisor = widescreen::text_width_divisor(l), height_divisor = widescreen::text_height_divisor(l);
         put({0x8b, 0x74, 0x24, 0x30});                     // mov esi, [esp+30h]
         put({0xc7, 0x44, 0x24, 0x28, 0xff, 0xff, 0xff, 0xff});  // mov [esp+28h], -1
         put({0x69, 0xc3}); put32(800);                     // imul eax, ebx, 800

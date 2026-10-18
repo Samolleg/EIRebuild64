@@ -518,6 +518,13 @@ int CI3DSurface::DrawText(LPCTSTR pszStr, const CRect &rc, int nFont, COLORREF c
         rcDraw.bottom += 2;
         rcDraw.right += 2;
     }
+    if (owned::owned_text_dc_current(pSurface->OwnedSurfaceId())) {
+        CSize size(0, owned::owned_text_draw(pSurface->OwnedSurfaceId(),
+            (HFONT)pI3D->GetFont(nFont)->GetSafeHandle(), pszStr, rcDraw,
+            nFormat, crColor, bShadow != FALSE));
+        pI3D->ScreenToVirtual(size);
+        return size.cy;
+    }
     CFont *pOldFont = pDC->SelectObject(pI3D->GetFont(nFont));
     pDC->SetBkMode(TRANSPARENT);
     const char *mytext = pszStr;
@@ -619,6 +626,7 @@ void CI3DSurface::Clear()
 {
     if (!pSurface)
         return;
+    if (owned::owned_text_dc_current(pSurface->OwnedSurfaceId())) return;
 #ifdef DXGI_ENABLED
     if (!hDC)
         return;

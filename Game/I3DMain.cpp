@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "OwnedRender/E1TextLifetime.h"
+#include "widescreen_layout.h"
 #include "OwnedRender/E3Input.h"
 #include "GameJournal.h"
 #include "InterfaceFont.h"
@@ -100,9 +101,9 @@ void CInterface3D::Init(CRenderer *pNewRend)
         return;
     }
     pTTFonts[0]->GetLogFont(&lf);
-    // Preserve the installed addon divisor and retail x87 evaluation order.
-    const float fontFactor = w >= 800 && h >= 600 && w * 3 > h * 4 ?
-        w * 0.0075f / h : 0.01f;
+    // Use the same interface unit and font divisor as the renderer.
+    const auto fontLayout = owned::widescreen::make_layout(float(w), float(h));
+    const float fontFactor = owned::widescreen::interface_font_scale(fontLayout);
     fScale = abs(lf.lfHeight) * fontFactor;
     if (pTTFonts[0])
         delete pTTFonts[0];
@@ -218,7 +219,7 @@ void CInterface3D::Init(CRenderer *pNewRend)
     ShowFPS(true);
 
     bCheckDisconnect = false;
-    OwnedRender::E1TextInterfaceBegin();
+    OwnedRender::E1TextInterfaceBegin((HFONT)GetFont(0)->GetSafeHandle());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Fini()
@@ -1061,21 +1062,12 @@ void CInterface3D::LMPItemXCHGComplete(CParty &itemsRemote, CParty &itemsOffer, 
 /////////////////////////////////////////////////////////////////////////////////////
 CSize CInterface3D::TextSize(CString szStr, int nFont)
 {
-    CSize sizeChar;
-    CDC *pDC;
-
-    pDC = CDC::FromHandle(GetDC(NGame::hWnd));
-    // TODO some font error? maybe from offscreen
-    if (!pDC) //
-        return 0;
-    CFont *pFont = GetFont(nFont);
-    CFont *pOldFont = pDC->SelectObject(pFont);
-    sizeChar = pDC->GetOutputTextExtent(szStr);
-    pDC->SelectObject(pOldFont);
-    ReleaseDC(NGame::hWnd, pDC->m_hDC);
-    ScreenToVirtual(sizeChar);
-
-    return sizeChar;
+    const auto layout = owned::widescreen::make_layout(float(nScreenWidth), float(nScreenHeight));
+    SIZE pixels{};
+    if (!owned::character_pane_measure_text((HFONT)GetFont(nFont)->GetSafeHandle(),
+        szStr, szStr.GetLength(), pixels)) return CSize(0, 0);
+    return CSize(owned::widescreen::text_width(layout, pixels.cx),
+        owned::widescreen::text_height(layout, pixels.cy));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Load(CSave &file)

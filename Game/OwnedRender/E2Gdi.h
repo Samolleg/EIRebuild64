@@ -31,4 +31,24 @@ inline BOOL E2LineTo(CDC* dc,int x,int y) {
 inline COLORREF E2SetPixel(CDC* dc,int x,int y,COLORREF color) {
     return owned::ui_layer_set_pixel(dc->GetSafeHdc(),x,y,color);
 }
+inline BOOL E2TextOut(CDC* dc,int x,int y,LPCSTR text,int count) {
+    return owned::ui_layer_text_out_a(dc->GetSafeHdc(),x,y,text,count);
+}
+inline BOOL E2PolylineTo(CDC* dc,const POINT* points,DWORD count) {
+    return owned::ui_layer_polyline_to(dc->GetSafeHdc(),points,count);
+}
+inline BOOL E2PatBlt(CDC* dc,int x,int y,int width,int height,DWORD rop) {
+    return owned::ui_layer_pat_blt(dc->GetSafeHdc(),x,y,width,height,rop);
+}
+inline LONG E2TabbedTextOut(CDC* dc,int x,int y,LPCSTR text,int count,
+                          int tabCount,const INT* tabs,int tabOrigin) {
+    return owned::ui_layer_tabbed_text_out_a(dc->GetSafeHdc(),x,y,text,count,tabCount,tabs,tabOrigin);
+}
+inline BOOL E2GrayString(CDC* dc,HBRUSH brush,GRAYSTRINGPROC proc,LPARAM data,
+                        int count,int x,int y,int width,int height) {
+    return owned::ui_layer_gray_string_a(dc->GetSafeHdc(),brush,proc,data,count,x,y,width,height);
+}
+inline LRESULT E2SendMessage(HWND window,UINT message,WPARAM wparam,LPARAM lparam) {
+    return owned::ui_layer_send_message_a(window,message,wparam,lparam);
+}
 }
