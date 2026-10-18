@@ -12,8 +12,8 @@ struct KeyEntry { const char* key; const char* label; const char* description; }
 
 // Exact English source -> Russian; format strings keep their conversions.
 inline constexpr TextEntry kText[] = {
-    {"Scene thread is not yet available in EIRebuild", u8"????? ????????? ???? ?????????? ? EIRebuild"},
-    {"Renderer precipitation is not yet available in EIRebuild", u8"????? ?????? ???? ?????????? ? EIRebuild"},
+    {"Scene thread is not yet available in EIRebuild", u8"\u041f\u043e\u0442\u043e\u043a \u043e\u0442\u0440\u0438\u0441\u043e\u0432\u043a\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0432 EIRebuild"},
+    {"Renderer precipitation is not yet available in EIRebuild", u8"\u041d\u043e\u0432\u044b\u0435 \u043e\u0441\u0430\u0434\u043a\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b \u0432 EIRebuild"},
 
     {"Input", u8"\u0412\u0432\u043e\u0434"},
     {"Presentation", u8"\u0412\u044b\u0432\u043e\u0434 \u043a\u0430\u0434\u0440\u043e\u0432"},
