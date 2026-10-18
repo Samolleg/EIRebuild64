@@ -1,6 +1,7 @@
 // Algorithms shared by the retail bridge and the embedded renderer.
 #include "world_scene_algorithms.h"
 #include "owned_terrain_front_end.h"
+#include "owned_resource_runtime.h"
 #include "owned_terrain_decode.h"
 #include "retained_static_scene.h"
 #include "retained_static_submission.h"
