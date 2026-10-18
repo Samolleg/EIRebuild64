@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "OwnedRender/E2Gdi.h"
+#include "OwnedRender/E1TextLifetime.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Hud.h"
 #include "I3DScreenCamp.h"
