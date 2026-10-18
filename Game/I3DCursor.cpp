@@ -1,6 +1,6 @@
 #include "StdAfx.h"
 #include "OwnedRender/E2Host.h"
-#include "OwnedRender/E3Input.h"
+#include "OwnedRender/E3Cursor.h"
 static const char LOCAL_FILE[] = __FILE__;
 ///////////////////////////////////////////////////////////////////////////////////
 #include "I3DCursor.h"
@@ -23,44 +23,18 @@ SCursor2DInfo::SCursor2DInfo(const char *szImageFileName, int x, int y)
 {
     dwCurAnim = 0;
     SMMPFileHeader *pHdr = (SMMPFileHeader *)theWorld.GetTextureManager()->GetFile(szImageFileName);
-    D3D11_TEXTURE2D_DESC tex2d;
-    theRenderer.GetD3D()->DefaultSurfaceDesc(&tex2d);
-
-    tex2d.Width = pHdr->dwDimentionX;
-    tex2d.Height = pHdr->dwDimentionY;
-    tex2d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    tex2d.MipLevels = pHdr->dwMipMapLevel;
-    DWORD line_pitch = tex2d.Width * 4; // 32 bits, 8888
-    std::unique_ptr<DWORD[]> data = std::make_unique<DWORD[]>(tex2d.Width * tex2d.Height);
-    memcpy(data.get(), pHdr->GetMipLevelData(0), line_pitch * tex2d.Height);
-    theWorld.GetTextureManager()->CloseFile((BYTE *)pHdr);
-
-    DWORD *pSrc = data.get();
-    DWORD black = 0xFF000000;
-    for (int i = 0; i < tex2d.Width; ++i)
-    {
-        for (int j = 0; j < tex2d.Height; ++j)
-        {
-            if (*pSrc == black)
-            {
-                *pSrc = 0;
-            }
-            pSrc++;
-        }
-    }
-    // load as colorkey
-    pSurface = std::make_unique<CDXGISurface>(theRenderer.GetD3D(), &tex2d);
-
-    D3D11_SUBRESOURCE_DATA srd = {};
-    srd.pSysMem = data.get();
-    srd.SysMemPitch = line_pitch;
-
-    pSurface->UpdateTexture(0, nullptr, &srd);
-
-    dwAnimNumb = tex2d.Width / tex2d.Height;
-    sizeCursor.cx = tex2d.Width / dwAnimNumb;
-    sizeCursor.cy = tex2d.Height;
-
+    static std::uint64_t nextImage = 0;
+    auto strip = std::make_shared<OwnedRender::E3CursorStrip>();
+    strip->id = ++nextImage; strip->epoch = 1;
+    strip->width = pHdr->dwDimentionX; strip->height = pHdr->dwDimentionY;
+    strip->frames = strip->height ? strip->width / strip->height : 0;
+    strip->frame_width = strip->frames ? strip->width / strip->frames : 0;
+    strip->pixels.resize(size_t(strip->width) * strip->height);
+    memcpy(strip->pixels.data(), pHdr->GetMipLevelData(0), strip->pixels.size() * 4);
+    theWorld.GetTextureManager()->CloseFile((BYTE*)pHdr);
+    dwAnimNumb = strip->frames;
+    sizeCursor = CSize(strip->frame_width, strip->height);
+    image = std::move(strip);
     ptHotSpot.x = x * sizeBackBuffer.cx / 48;
     ptHotSpot.y = y * sizeBackBuffer.cy / 48;
 }
@@ -91,6 +65,7 @@ int CI3DCursor::SetMode(int nType)
 
         m_pCursorInfo = m_aCursorInfo[nType];
         m_pCursorInfo->GetCursorRect(m_rectSrcCur);
+        Publish();
 
         return eOldType;
     }
@@ -102,6 +77,7 @@ void CI3DCursor::Show(BOOL bShow)
         return;
 
     m_isShow = bShow;
+    Publish();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CI3DCursor::UpdateCursorState()
@@ -120,7 +96,8 @@ bool CI3DCursor::UpdateCursorState()
             // update increment
             CPoint cursorPos;
             OwnedRender::E3ReadCursor(&cursorPos);
-            m_ptLastInc = cursorPos - m_ptLastCursor;
+            if (m_isLock) m_ptLastInc += cursorPos - m_ptLastCursor;
+            else m_ptLastInc = cursorPos - m_ptLastCursor;
 
             if (m_isLock)
             {
@@ -173,26 +150,25 @@ bool CI3DCursor::UpdateCursorState()
     return isUpdated;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DCursor::Publish()
+{
+    OwnedRender::E3CursorState state;
+    if (m_isInitialized && m_pCursorInfo && m_pCursorInfo->dwAnimNumb) {
+        state.strip = m_pCursorInfo->image;
+        state.position = m_ptCursor; state.hotspot = m_pCursorInfo->ptHotSpot;
+        state.frame = m_pCursorInfo->dwCurAnim; state.phase_time = m_dwAnimLastTime;
+        state.visible = m_isShow != FALSE; state.locked = m_isLock;
+    }
+    OwnedRender::E3CursorPublish(std::move(state));
+}
 void CI3DCursor::Draw()
 {
-    if (!GetRenderer()->IsActive() || !m_isInitialized)
+    if (!GetRenderer()->IsActive() || !m_isInitialized || !m_pCursorInfo)
         return;
-
     UpdateCursorState();
-    if (m_rectDstCur.IsRectEmpty())
-        return;
-
-    if (m_isShow)
-    {
-        DDBLTFX blit{};
-        blit.dwSize = sizeof(blit);
-        blit.ddckSrcColorkey.dwColorSpaceLowValue = 0;
-        blit.ddckSrcColorkey.dwColorSpaceHighValue = 0;
-        m_pCursorInfo->pSurface->BltToRenderSurface(m_rectDstCur, m_rectSrcCur,
-            DDBLT_KEYSRCOVERRIDE, &blit);
-    }
+    Publish();
 }
-///////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::Init()
 {
     sizeBackBuffer = CSize(48, 48);
@@ -204,27 +180,27 @@ void CI3DCursor::Init()
     m_isShow = TRUE;
     m_isInitialized = true;
 
-    m_hExitEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    m_dwAnimLastTime = timeGetTime();
+    m_isLock = false;
+    m_ptLastInc = m_ptLastCursor = m_ptLockedCursor = CPoint(0, 0);
     m_rectScreen.SetRectEmpty();
     GetRenderer()->GetCurrentMode((DWORD &)m_rectScreen.right, (DWORD &)m_rectScreen.bottom);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::StartProcessing()
 {
+    if (!m_isInitialized) return;
     m_eCursorType = 0;
     SetMode(0);
-    if (!m_isInitialized)
-        return;
+    OwnedRender::E3CursorStart();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DCursor::Fini()
 {
-    DWORD dwRes;
-    CloseHandle(m_hExitEvent);
-    m_hExitEvent = 0;
+    OwnedRender::E3CursorStop();
     for (int i = 0; i < m_aCursorInfo.GetSize(); i++)
     {
-        m_aCursorInfo[i]->pSurface = 0;
+        m_aCursorInfo[i]->image.reset();
         delete m_aCursorInfo[i];
     }
     m_aCursorInfo.RemoveAll();
@@ -264,13 +240,23 @@ void CI3DCursor::SetPos(CPoint ptPos)
     }
     else
         OwnedRender::E3WriteCursor(ptPos.x, ptPos.y);
+    m_ptCursor = ptPos;
+    Publish();
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////
+CPoint CI3DCursor::GetIncrement()
+{
+    if (m_isInitialized && m_pCursorInfo) UpdateCursorState();
+    return m_ptLastInc;
+}
 void CI3DCursor::LockPos(bool bLock)
 {
     if (!m_isInitialized)
         return;
 
+    if (m_pCursorInfo) UpdateCursorState();
+    m_ptLastInc = CPoint(0, 0);
     m_isLock = bLock;
+    Publish();
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////

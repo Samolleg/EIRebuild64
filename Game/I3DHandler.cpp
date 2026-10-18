@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DHandler.h"
 
 #include "Camera.h"
+#include <camera_rotation.h>
 #include "WorldClient.h"
 #include "WorldServer.h"
 #include "WorldInterface.h"
@@ -158,6 +159,7 @@ CI3DHandlerNewCamera::CI3DHandlerNewCamera(CInterface3D *pI)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DHandlerNewCamera::OnRButtonDown(UINT nFlags, CPoint point)
 {
+    mousePitching = false;
     ptRButDown = point;
     bRButDown = true;
     ptLastPos = point;
@@ -170,6 +172,7 @@ void CI3DHandlerNewCamera::OnRButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DHandlerNewCamera::OnRButtonUp(UINT nFlags, CPoint point)
 {
+    mousePitching = false;
     bRButDown = false;
     theCamera.SetRotateValue(0);
     theCamera.SetPitchValue(0);
@@ -321,16 +324,16 @@ void CI3DHandlerNewCamera::OnMouseMove(UINT nFlags, CPoint point)
         {
             CPlot2D pt(static_cast<float>(ptIncrement.x) / 400.0f,
                        static_cast<float>(ptIncrement.y) / 300.0f);
-            theCamera.SetRotateValue(theSettings.fCameraXAxisDir * pt.x * 10.0f *
+            theCamera.ApplyMouseYaw(theSettings.fCameraXAxisDir * pt.x * 10.0f *
                                      theSettings.cctCameraRotate.GetMouseValue());
             // we can start pitch only in the case of vertical increment greater then horizontal!
             float fValueX = abs(ptIncrement.x); // * theSettings.cctCameraRotate.GetMouseValue();
             float fValueY = abs(ptIncrement.y); // * theSettings.cctCameraPitch.GetMouseValue();
-            if (theCamera.IsPitching() || (fValueY > fValueX))
-                theCamera.SetPitchValue(theSettings.fCameraYAxisDir * pt.y * 500.0f *
-                                        theSettings.cctCameraPitch.GetMouseValue());
-            else
-                theCamera.SetPitchValue(0);
+            if (mousePitching || theCamera.IsPitching() || (fValueY > fValueX)) {
+                mousePitching = ptIncrement.y != 0;
+                theCamera.ApplyMousePitch(theSettings.fCameraYAxisDir * pt.y * 500.0f *
+                                         owned::kCameraMousePitchInputGain);
+            }
         }
         theCursor.ResetIncrement();
 
@@ -415,6 +418,7 @@ BOOL CI3DHandlerNewCamera::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DHandlerNewCamera::ResetInputState()
 {
+    mousePitching = false;
     bRButDown = false;
     fUpDown = 0;
     fLeftRight = 0;

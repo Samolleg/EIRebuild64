@@ -1,4 +1,6 @@
 #include "E3Input.h"
+#include "E3Cursor.h"
+#include <cursor_confinement.h>
 #include "game_focus.h"
 #include "widescreen.h"
 #include "hud_layout_context.h"
@@ -31,6 +33,8 @@ void E3PublishInterface(HWND next, unsigned w, unsigned h, bool active,
     }
     window = next; width = w; height = h;
     running = nextRunning;
+    owned::set_embedded_cursor_canvas(next, nextRunning ? w : 0, nextRunning ? h : 0, &ErrorDialog::Active);
+    E3CursorCanvas(next, w, h, nextRunning);
     mission = running && soleMission;
     if (!mission) owned::combat_ui_publish_hover(0, 0);
     resetInput = reset;
@@ -40,6 +44,8 @@ void E3PublishInterface(HWND next, unsigned w, unsigned h, bool active,
     if (running) owned::embedded_hud_layout().publish_canvas(w, h);
 }
 void E3RetireInterface() noexcept {
+    E3CursorStop();
+    owned::set_embedded_cursor_canvas(nullptr, 0, 0, nullptr);
     owned::embedded_hud_layout().retire();
     endEditing();
     window = nullptr; width = height = 0;

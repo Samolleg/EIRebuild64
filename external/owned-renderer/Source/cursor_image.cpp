@@ -1,4 +1,6 @@
 #include "cursor_image.h"
+#include "cursor_confinement.h"
+#include "renderer.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -8,6 +10,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#ifdef EID3D11_EMBEDDED
+#include <mutex>
+#endif
 
 namespace owned {
 namespace {
@@ -106,6 +111,9 @@ void upscale_cursor_frame(const std::vector<std::uint32_t>& input, std::uint32_t
 
 
 namespace {
+#ifdef EID3D11_EMBEDDED
+std::recursive_mutex g_load_cursor_lock;
+#endif
 HCURSOR g_load_cursor = nullptr;   // the load cursor while one is built
 std::uint64_t g_load_cursor_key = 0;
 bool g_load_cursor_active = false; // shown: WM_SETCURSOR keeps it
@@ -153,6 +161,9 @@ HCURSOR create_alpha_cursor(const std::vector<std::uint32_t>& pixels, std::uint3
 
 bool show_load_cursor(std::uint64_t key, const std::vector<std::uint32_t>& pixels, std::uint32_t width,
     std::uint32_t height, std::uint32_t hot_x, std::uint32_t hot_y) noexcept {
+#ifdef EID3D11_EMBEDDED
+    const std::lock_guard<std::recursive_mutex> lock(g_load_cursor_lock);
+#endif
     try {
         if (!g_load_cursor || key != g_load_cursor_key) {
             const HCURSOR created = create_alpha_cursor(pixels, width, height, hot_x, hot_y);
@@ -175,24 +186,92 @@ bool show_load_cursor(std::uint64_t key, const std::vector<std::uint32_t>& pixel
 }
 
 void hide_load_cursor() noexcept {
+#ifdef EID3D11_EMBEDDED
+    const std::lock_guard<std::recursive_mutex> lock(g_load_cursor_lock);
+#endif
     if (!g_load_cursor_active && !g_load_cursor) return;
     g_load_cursor_active = false;
-    SetCursor(nullptr);  // the game's own rule: no system cursor over its window
+#ifdef EID3D11_EMBEDDED
+    if (GetCursor() == g_load_cursor) SetCursor(nullptr);
+#else
+    SetCursor(nullptr);
+#endif
+    // the game's own rule: no system cursor over its window
     if (g_load_cursor) DestroyCursor(g_load_cursor);
     g_load_cursor = nullptr;
     g_load_cursor_key = 0;
 }
 
 bool apply_load_cursor() noexcept {
+#ifdef EID3D11_EMBEDDED
+    const std::lock_guard<std::recursive_mutex> lock(g_load_cursor_lock);
+#endif
     if (!g_load_cursor_active || !g_load_cursor) return false;
     SetCursor(g_load_cursor);
     return true;
 }
 
 std::uint32_t take_load_cursor_presents() noexcept {
+#ifdef EID3D11_EMBEDDED
+    const std::lock_guard<std::recursive_mutex> lock(g_load_cursor_lock);
+#endif
     const std::uint32_t presents = g_load_cursor_presents;
     g_load_cursor_presents = 0;
     return presents;
 }
 
+
+std::uint64_t cursor_frame_key(const CursorInput& in) noexcept {
+    std::uint64_t key = in.image_id * 0x9e3779b97f4a7c15ull ^ in.epoch;
+    for (const std::uint64_t value : {std::uint64_t(in.source.left), std::uint64_t(in.source.top),
+         std::uint64_t(in.source.left + in.source.width), std::uint64_t(in.source.top + in.source.height),
+         std::uint64_t(std::clamp(in.scale_percent, 100, 400))})
+        key = (key ^ value) * 0x100000001b3ull;
+    return key ^ (0x43555253ull << 32);
+}
+
+bool CursorProducer::prepare(const CursorInput& in, CursorPresentation& result) {
+    result = {};
+    if (!in.visible) return true;
+    const auto key = cursor_frame_key(in);
+    const float scale = std::clamp(in.scale_percent, 100, 400) / 100.f;
+    if (!cached_ || cached_->key != key) {
+        std::vector<std::uint32_t> base;
+        if (!extract_cursor_frame(in.source, base)) return false;
+        auto image = std::make_shared<CursorImage>();
+        upscale_cursor_frame(base, in.source.width, in.source.height, scale,
+            image->pixels, image->width, image->height);
+        image->key = key;
+        cached_ = std::move(image);
+    }
+    const HWND window = static_cast<HWND>(in.window);
+    RECT client{};
+    POINT hotspot{in.x + in.hot_x, in.y + in.hot_y};
+    if (in.canvas_width > 0 && in.canvas_height > 0 && GetClientRect(window, &client))
+        hotspot = cursor_native_to_output(hotspot, in.canvas_width, in.canvas_height,
+                                          client.right, client.bottom);
+    result.image = cached_;
+    result.hot_x = LONG(std::lround(in.hot_x * scale));
+    result.hot_y = LONG(std::lround(in.hot_y * scale));
+    result.left = hotspot.x - result.hot_x;
+    result.top = hotspot.y - result.hot_y;
+    return true;
+}
+
+long queue_owned_cursor(Renderer& renderer, const CursorPresentation& frame,
+                        bool load_cursor, bool* load_shown) {
+    static const std::vector<std::uint32_t> empty;
+    const auto cleared = renderer.queue_cursor(0, empty, 0, 0, RECT{});
+    if (load_shown) *load_shown = false;
+    if (!frame.image) { hide_load_cursor(); return cleared; }
+    const auto& image = *frame.image;
+    if (load_cursor && show_load_cursor(image.key, image.pixels, image.width, image.height,
+            std::uint32_t((std::max)(0L, frame.hot_x)), std::uint32_t((std::max)(0L, frame.hot_y)))) {
+        if (load_shown) *load_shown = true;
+        return cleared;
+    }
+    hide_load_cursor();
+    return renderer.queue_cursor(image.key, image.pixels, image.width, image.height,
+        RECT{frame.left, frame.top, frame.left + LONG(image.width), frame.top + LONG(image.height)});
+}
 } // namespace owned

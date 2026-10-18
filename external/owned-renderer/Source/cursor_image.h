@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <memory>
 
 namespace owned {
 
@@ -42,4 +43,38 @@ bool apply_load_cursor() noexcept;
 // Presents that showed the load cursor since the last reset (load_reveal line).
 std::uint32_t take_load_cursor_presents() noexcept;
 
+
+// The proxy and embedded host publish the same immutable cursor inputs. Pixel
+// storage stays with the caller until prepare returns; prepared output owns it.
+struct CursorInput {
+    std::uint64_t image_id = 0, epoch = 0;
+    CursorFrameSource source;
+    long x = 0, y = 0, hot_x = 0, hot_y = 0;
+    float canvas_width = 0, canvas_height = 0;
+    void* window = nullptr;
+    int scale_percent = 100;
+    bool visible = false;
+};
+struct CursorImage {
+    std::uint64_t key = 0;
+    std::vector<std::uint32_t> pixels;
+    std::uint32_t width = 0, height = 0;
+};
+struct CursorPresentation {
+    std::shared_ptr<const CursorImage> image;
+    long left = 0, top = 0, hot_x = 0, hot_y = 0;
+};
+std::uint64_t cursor_frame_key(const CursorInput& input) noexcept;
+class CursorProducer {
+    std::shared_ptr<const CursorImage> cached_;
+public:
+    bool prepare(const CursorInput& input, CursorPresentation& result);
+    void reset() noexcept { cached_.reset(); }
+    std::uint64_t key() const noexcept { return cached_ ? cached_->key : 0; }
+};
+class Renderer;
+// Clears the previous publication, uses the load cursor only on held pictures,
+// otherwise queues exactly the same image after the renderer's other UI.
+long queue_owned_cursor(Renderer& renderer, const CursorPresentation& frame,
+                        bool load_cursor, bool* load_shown = nullptr);
 } // namespace owned

@@ -982,7 +982,7 @@ public:
  void serviceSceneSurfaceRequests() noexcept;
  // Renderer-owned cursor: the game's current frame, extracted from its strip
  // and scaled once per (strip content, frame, scale), drawn after all UI.
- std::uint64_t owned_cursor_key=0;std::vector<std::uint32_t> owned_cursor_pixels;UINT owned_cursor_width=0,owned_cursor_height=0;
+ CursorProducer owned_cursor_producer;
  bool owned_cursor_reported=false;
  void reportOwnedCursor(const char* reason){if(owned_cursor_reported)return;owned_cursor_reported=true;owned::bridge_append_probe_event("owned_cursor_omitted",reason);}
  static Surface* ownedCursorSurface(void* pointer){
@@ -991,49 +991,39 @@ public:
   return static_cast<Surface*>(static_cast<IDirectDrawSurface7*>(pointer));
  }
  void queueOwnedCursor(){
-  // Publication is per presentation, including an absent native cursor.
-  renderer.queue_cursor(0,owned_cursor_pixels,0,0,RECT{});
-  // While the loading picture is held the same frame is the system cursor
-  // (cursor_image.h); every other present, and any frame that cannot be
-  // shown, returns to the owned cursor and the game's hidden system cursor.
-  const bool load_cursor=renderer.load_cursor_wanted();bool load_cursor_shown=false;
-  struct LoadCursorScope{bool& shown;~LoadCursorScope(){if(!shown)owned::hide_load_cursor();}} load_cursor_scope{load_cursor_shown};
-  if(video_picture_on_screen())return; // no cursor over a playing movie
-  OwnedCursorFrame frame{};if(!bridge_owned_cursor_frame(frame)||!frame.visible)return;
-  Surface* strip=ownedCursorSurface(frame.surface);if(!strip)return reportOwnedCursor("strip_not_a_proxy_surface");
-  const SurfaceImage& image=*strip->image();
-  const int percent=std::clamp(renderer.cursor_scale_percent(),100,400);
-  std::uint64_t key=image.id*0x9e3779b97f4a7c15ull^image.generation;
-  for(const std::uint64_t value:{(std::uint64_t)frame.source.left,(std::uint64_t)frame.source.top,(std::uint64_t)frame.source.right,(std::uint64_t)frame.source.bottom,(std::uint64_t)percent})
-   key=(key^value)*0x100000001b3ull;
-  key^=0x43555253ull<<32;
-  if(key!=owned_cursor_key){
-   // Read on every cursor frame change: restore once and pin CPU-resident.
-   if(FAILED(strip->restoreReleased(true)))return reportOwnedCursor("strip_restore_failed");
-   if(image.pixels.empty()||frame.source.left<0||frame.source.top<0||frame.source.right>(LONG)image.width||frame.source.bottom>(LONG)image.height)
-    return reportOwnedCursor("strip_pixels_unavailable");
-   CursorFrameSource source{};source.pixels=image.pixels.data();source.pitch=(std::uint32_t)image.pitch;source.bits=image.format.dwRGBBitCount;
-   source.red_mask=image.format.dwRBitMask;source.green_mask=image.format.dwGBitMask;source.blue_mask=image.format.dwBBitMask;
-   source.left=(std::uint32_t)frame.source.left;source.top=(std::uint32_t)frame.source.top;
-   source.width=(std::uint32_t)(frame.source.right-frame.source.left);source.height=(std::uint32_t)(frame.source.bottom-frame.source.top);
-   std::vector<std::uint32_t> base;
-   if(!extract_cursor_frame(source,base))return reportOwnedCursor("strip_format_unsupported");
-   std::uint32_t width=0,height=0;
-   upscale_cursor_frame(base,source.width,source.height,percent/100.f,owned_cursor_pixels,width,height);
-   owned_cursor_width=width;owned_cursor_height=height;owned_cursor_key=key;
+  CursorInput input{};
+  CursorPresentation prepared{};
+  if(!video_picture_on_screen()){
+   OwnedCursorFrame frame{};
+   if(bridge_owned_cursor_frame(frame)&&frame.visible){
+    Surface* strip=ownedCursorSurface(frame.surface);
+    if(!strip)reportOwnedCursor("strip_not_a_proxy_surface");
+    else{
+     const auto& image=*strip->image();
+     if(frame.source.left<0||frame.source.top<0||frame.source.right>(LONG)image.width||frame.source.bottom>(LONG)image.height)
+      reportOwnedCursor("strip_pixels_unavailable");
+     else{
+      input.image_id=image.id;input.epoch=image.generation;input.window=hwnd;
+      input.source.left=frame.source.left;input.source.top=frame.source.top;
+      input.source.width=frame.source.right-frame.source.left;input.source.height=frame.source.bottom-frame.source.top;
+      input.scale_percent=renderer.cursor_scale_percent();input.visible=true;
+      input.x=frame.x;input.y=frame.y;input.hot_x=frame.hot_x;input.hot_y=frame.hot_y;
+      if(widescreen_interface_owned()){const auto& canvas=widescreen_layout();input.canvas_width=canvas.width;input.canvas_height=canvas.height;}
+      if(cursor_frame_key(input)!=owned_cursor_producer.key()){
+       if(FAILED(strip->restoreReleased(true))){input.visible=false;reportOwnedCursor("strip_restore_failed");}
+       else if(image.pixels.empty()){input.visible=false;reportOwnedCursor("strip_pixels_unavailable");}
+      }
+      input.source.pixels=image.pixels.data();input.source.pitch=(std::uint32_t)image.pitch;
+      input.source.bits=image.format.dwRGBBitCount;input.source.red_mask=image.format.dwRBitMask;
+      input.source.green_mask=image.format.dwGBitMask;input.source.blue_mask=image.format.dwBBitMask;
+      if(!owned_cursor_producer.prepare(input,prepared))reportOwnedCursor("strip_format_unsupported");
+     }
+    }
+   }
   }
-  // Scale about the hotspot so the click point stays under the same pixel.
-  const float scale=percent/100.f;
-  const POINT hotspot=owned::game_native_to_output(hwnd,{frame.x+frame.hot_x,frame.y+frame.hot_y});
-  const LONG hot_x=hotspot.x,hot_y=hotspot.y;
-  const LONG left=hot_x-(LONG)std::lround(frame.hot_x*scale),top=hot_y-(LONG)std::lround(frame.hot_y*scale);
-  if(load_cursor){
-   if(owned::show_load_cursor(owned_cursor_key,owned_cursor_pixels,owned_cursor_width,owned_cursor_height,
-       (std::uint32_t)(std::max)(0L,hot_x-left),(std::uint32_t)(std::max)(0L,hot_y-top))){load_cursor_shown=true;return;}
-   reportOwnedCursor("load_cursor_create_failed"); // the owned cursor draws on the held frames instead
-  }
-  renderer.queue_cursor(owned_cursor_key,owned_cursor_pixels,owned_cursor_width,owned_cursor_height,
-   RECT{left,top,left+(LONG)owned_cursor_width,top+(LONG)owned_cursor_height});
+  const bool load_cursor=renderer.load_cursor_wanted();bool shown=false;
+  queue_owned_cursor(renderer,prepared,load_cursor,&shown);
+  if(load_cursor&&prepared.image&&!shown)reportOwnedCursor("load_cursor_create_failed");
  }
  HRESULT presentVisual(){
   ++g_present_serial;

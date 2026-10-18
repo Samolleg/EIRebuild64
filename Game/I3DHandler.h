@@ -59,6 +59,7 @@ private:
     CPoint ptRButDown;
     CPoint ptLastPos;
     bool bRButDown;
+    bool mousePitching = false;
     float fUpDown;
     float fLeftRight;
     float fPageUpDown;

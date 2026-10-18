@@ -5,6 +5,7 @@
 #include <cursor_confinement.h>
 #include "GameJournal.h"
 #include "ErrorDialog.h"
+#include <cursor_image.h>
 #include "SettingsProfile.h"
 #include "ModRandomOwnershipCheck.inl"
 #include "ModMobFlagArgumentsCheck.inl"
@@ -1171,7 +1172,7 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         }
         break;
     case WM_SETCURSOR:
-        SetCursor(0);
+        if (!owned::apply_load_cursor()) SetCursor(0);
         break;
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);

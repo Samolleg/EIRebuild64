@@ -222,6 +222,8 @@ public:
     void SetScrollValue(const CPlot2D &ptScroll);
     void SetRotateValue(const float fpValue);
     void SetPitchValue(const float fpValue);
+    void ApplyMouseYaw(float delta);
+    void ApplyMousePitch(float delta);
     void SetZoomValue(const float fpValue);
     void AddDistance(const float fpValue);
     void StopAllMoving();

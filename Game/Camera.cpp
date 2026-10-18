@@ -568,6 +568,22 @@ void CCamera::SetPitchValue(const float fpValue)
     if (fabs(fpValue) > fabs(pitch.value))
         pitch.value = pitch.desired;
 }
+void CCamera::ApplyMouseYaw(float delta)
+{
+    if (IsFalloutModeActive()) return;
+    owned::CameraQuaternion orientation;
+    qRotate.GetComponents(orientation.w, orientation.x, orientation.y, orientation.z);
+    owned::apply_camera_mouse_yaw(orientation, delta);
+    qRotate = CQuaternion(orientation.w, orientation.x, orientation.y, orientation.z);
+}
+void CCamera::ApplyMousePitch(float delta)
+{
+    if (IsFalloutModeActive()) return;
+    const bool alternate = CheckFlag(CAM_ALTERNATIVE_RESTRICTIONS) != 0;
+    owned::apply_camera_mouse_pitch(fPitch, delta,
+        ToRadian(alternate ? pSettings->fpCameraBriefingMinPitch : pSettings->fpCameraDefaultMinPitch),
+        ToRadian(alternate ? pSettings->fpCameraBriefingMaxPitch : pSettings->fpCameraDefaultMaxPitch));
+}
 void CCamera::NormalizeMouseDelta(CPoint& delta, int width, int height)
 {
     if (width != mouseCarryWidth || height != mouseCarryHeight)

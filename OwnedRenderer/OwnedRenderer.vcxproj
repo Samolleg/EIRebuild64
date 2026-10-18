@@ -47,6 +47,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_submission.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\cursor_image.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\cursor_confinement.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_precipitation.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_load_progress.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_vram_budget.cpp" />

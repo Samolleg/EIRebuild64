@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-embed`, commit `82e064e4143aff434b2977b3db716145bfb36d54`.
+integration changes in branch `eirebuild/c74-p1`, commit `9ee59a75a95434cfa6b6f3e70fc46ef3bc9e95fb`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -36,3 +36,10 @@ retains lightning/selection/print simulation and the visual damage list; rendere
 code expands the strips and meshes, groups print texture/state runs, chooses the
 text anchor, and lays out/scales glyphs. Embedded inputs do not read retail
 addresses. The proxy producers and shaders are unchanged.
+
+OWN74-P1 extracts the proxy cursor producer without changing its image algorithm:
+keyed extraction, EPX/area upscale, canvas/hotspot placement, cache and load
+cursor selection are shared with the embedded host. Confinement and coordinate
+helpers are shared too; retail import redirection is excluded from embedded builds.
+Embedded-only load cursor synchronization permits the host snapshot owner to
+update the held-picture cursor without reading game objects on the scene thread.

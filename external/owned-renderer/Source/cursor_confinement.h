@@ -9,6 +9,15 @@
 
 namespace owned {
 
+// Explicit canvas transforms shared by both adapters and the cursor producer.
+POINT cursor_output_to_native(POINT p, float canvas_width, float canvas_height,
+                              LONG output_width, LONG output_height) noexcept;
+POINT cursor_native_to_output(POINT p, float canvas_width, float canvas_height,
+                              LONG output_width, LONG output_height) noexcept;
+#ifdef EID3D11_EMBEDDED
+void set_embedded_cursor_canvas(HWND window, LONG width, LONG height,
+                                bool (*blocked)() noexcept) noexcept;
+#endif
 struct CursorConfinementState {
     bool active = false;
 };

@@ -5,11 +5,11 @@
 #endif // _MSC_VER > 1000
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 #include "Win32Classes.h"
-class CDXGISurface;
+namespace OwnedRender { struct E3CursorStrip; }
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 struct SCursor2DInfo
 {
-    std::unique_ptr<CDXGISurface> pSurface; // 2D blitting surfaces
+    std::shared_ptr<const OwnedRender::E3CursorStrip> image;
     CSize sizeCursor;                       // Размер одного курсора
     DWORD dwAnimNumb;                       // Количество фаз анимаций курсора
     DWORD dwCurAnim;                        // Текущая фаза анимации
@@ -26,7 +26,7 @@ private:
     SCursor2DInfo *m_pCursorInfo;
     int m_nScipCounter;
     int m_eCursorType;
-    HANDLE m_hExitEvent;
+    void Publish();
 
     CRect m_rectBack;
     CRect m_rectDstCur;
@@ -72,7 +72,7 @@ public:
     void SetPos(CPoint ptPos);
     void LockPos(bool bLock = true);
 
-    CPoint GetIncrement() const { return m_ptLastInc; }
+    CPoint GetIncrement();
     void ResetIncrement() { m_ptLastInc = CPoint(0, 0); }
 
     void GetToolTipCursorRect(CRect &rect) { rect = m_rectDstCur; }

@@ -5,6 +5,34 @@
 #include <cmath>
 
 namespace owned {
+POINT cursor_output_to_native(POINT p, float cw, float ch, LONG ow, LONG oh) noexcept {
+    if (cw > 0 && ch > 0 && ow > 0 && oh > 0) {
+        p.x = LONG(std::lround(p.x * cw / ow));
+        p.y = LONG(std::lround(p.y * ch / oh));
+    }
+    return p;
+}
+POINT cursor_native_to_output(POINT p, float cw, float ch, LONG ow, LONG oh) noexcept {
+    if (cw > 0 && ch > 0 && ow > 0 && oh > 0) {
+        p.x = LONG(std::lround(p.x * ow / cw));
+        p.y = LONG(std::lround(p.y * oh / ch));
+    }
+    return p;
+}
+#ifdef EID3D11_EMBEDDED
+namespace {
+HWND g_game_window = nullptr;
+LONG g_canvas_width = 0, g_canvas_height = 0;
+bool (*g_cursor_blocked)() noexcept = nullptr;
+}
+void set_embedded_cursor_canvas(HWND window, LONG width, LONG height,
+                                bool (*blocked)() noexcept) noexcept {
+    g_game_window = window;
+    g_canvas_width = width;
+    g_canvas_height = height;
+    g_cursor_blocked = blocked;
+}
+#endif
 
 bool cursor_confinement_option_enabled(const RendererConfig& config) noexcept {
     const RendererOption* option = config.find("confine_cursor");
@@ -46,6 +74,7 @@ bool cursor_confinement_client_rect(HWND window, RECT& screen_rect) noexcept {
     return true;
 }
 
+#ifndef EID3D11_EMBEDDED
 namespace {
 GetCursorPosFn* g_get_import = nullptr;
 SetCursorPosFn* g_set_import = nullptr;
@@ -105,22 +134,32 @@ void set_game_cursor_window(HWND window) noexcept {
     set_game_focus_window(window);
 }
 
+#endif
+
 POINT game_output_to_native(HWND window, POINT point) noexcept {
     RECT client{};
+#ifdef EID3D11_EMBEDDED
+    if (window == g_game_window && GetClientRect(window, &client))
+        return cursor_output_to_native(point, g_canvas_width, g_canvas_height, client.right, client.bottom);
+#else
     if (widescreen_interface_owned() && GetClientRect(window, &client) && client.right > 0 && client.bottom > 0) {
         const auto& canvas = widescreen_layout();
-        point.x = LONG(std::lround(point.x * canvas.width / client.right));
-        point.y = LONG(std::lround(point.y * canvas.height / client.bottom));
+        return cursor_output_to_native(point, canvas.width, canvas.height, client.right, client.bottom);
     }
+#endif
     return point;
 }
 POINT game_native_to_output(HWND window, POINT point) noexcept {
     RECT client{};
+#ifdef EID3D11_EMBEDDED
+    if (window == g_game_window && GetClientRect(window, &client))
+        return cursor_native_to_output(point, g_canvas_width, g_canvas_height, client.right, client.bottom);
+#else
     if (widescreen_interface_owned() && GetClientRect(window, &client) && client.right > 0 && client.bottom > 0) {
         const auto& canvas = widescreen_layout();
-        point.x = LONG(std::lround(point.x * client.right / canvas.width));
-        point.y = LONG(std::lround(point.y * client.bottom / canvas.height));
+        return cursor_native_to_output(point, canvas.width, canvas.height, client.right, client.bottom);
     }
+#endif
     return point;
 }
 LPARAM game_native_mouse_message(UINT message, LPARAM value, bool screen_result) noexcept {
@@ -140,7 +179,9 @@ LPARAM game_native_mouse_message(UINT message, LPARAM value, bool screen_result)
     return MAKELPARAM(WORD(point.x), WORD(point.y));
 }
 
+#ifndef EID3D11_EMBEDDED
 void set_game_cursor_harness(bool enabled) noexcept { g_harness = enabled; }
+#endif
 
 POINT harness_cursor_point(POINT p, LONG width, LONG height) noexcept {
     const LONG mx = width / 8, my = height / 8;
@@ -157,6 +198,12 @@ void release_cursor_confinement(CursorConfinementState& state) noexcept {
 
 void update_cursor_confinement(CursorConfinementState& state, HWND window,
                                bool focused, bool enabled) noexcept {
+#ifdef EID3D11_EMBEDDED
+    if (GetForegroundWindow() != window || (g_cursor_blocked && g_cursor_blocked())) {
+        release_cursor_confinement(state);
+        return;
+    }
+#endif
     if (!focused || !enabled || !window || !IsWindowVisible(window) ||
         IsIconic(window)) {
         release_cursor_confinement(state);

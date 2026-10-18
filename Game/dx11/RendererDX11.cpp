@@ -9,6 +9,7 @@
 #include "RendererDX11.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
+#include "../OwnedRender/E3Cursor.h"
 #include "../OwnedRender/E1SurfaceFacade.h"
 #include "../FrameDiagnostics.h"
 
@@ -635,6 +636,9 @@ void CDX11::EndFrame(bool present)
         MakeScreenShot();
         m_bMakeScreenShot = false;
     }
+    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+        return OwnedRender::E3QueueCursor(renderer);
+    }));
     const HRESULT presented = rendererFacade->EndFrame();
     frameTiming.End(SUCCEEDED(presented));
     FrameDiagnostics::Presented(presented);
@@ -724,6 +728,7 @@ CDX11::~CDX11()
     depthStencilState.Reset();depthStencilStateDisableWrite.Reset();depthStencilStateDisable.Reset();
     blendState.Reset();rasterizerState.Reset();rasterizerStateNoCull.Reset();
     this->device.Reset();
+    OwnedRender::E3CursorStop();
     ownedRenderer.Shutdown();
 }
 

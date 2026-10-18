@@ -1,12 +1,23 @@
 #pragma once
 #include <windows.h>
 #include <commctrl.h>
+#include <mutex>
 #pragma comment(lib, "comctl32.lib")
 
 // The game's message loop is suspended inside MessageBox, but its window still
 // receives activation and close messages. Keep that owner usable during errors.
 namespace ErrorDialog
 {
+// Cursor updates may originate from the host's immutable snapshot worker.
+// Pause native cursor changes before the modal scope captures its old handle;
+// keep that handle alive until the scope has restored it on the UI thread.
+inline std::recursive_mutex cursorMutex;
+inline unsigned cursorPauses = 0;
+struct CursorPause
+{
+    CursorPause() { std::lock_guard<std::recursive_mutex> lock(cursorMutex); ++cursorPauses; }
+    ~CursorPause() { std::lock_guard<std::recursive_mutex> lock(cursorMutex); --cursorPauses; }
+};
 struct State
 {
     HWND owner = nullptr, dialog = nullptr;
@@ -14,7 +25,7 @@ struct State
 };
 inline thread_local State *current = nullptr;
 
-inline bool Active() { return current != nullptr; }
+inline bool Active() noexcept { return current != nullptr; }
 inline bool RequestClose()
 {
     if (!current) return false;
@@ -77,6 +88,7 @@ inline LRESULT CALLBACK Activate(int code, WPARAM wparam, LPARAM lparam)
 
 class Scope
 {
+    CursorPause cursorPause;
     State state;
     State *previous;
     HHOOK hook;
