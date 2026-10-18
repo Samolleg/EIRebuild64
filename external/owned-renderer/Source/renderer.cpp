@@ -1,4 +1,7 @@
 #include "embedded_perf06.h"
+#ifdef EID3D11_EMBEDDED
+#include "embedded_host.h"
+#endif
 #include <map>
 #include <string>
 #include <intrin.h>
@@ -13617,9 +13620,12 @@ const char* Renderer::load_reveal_waiting_on(LoadRevealWait& kind) noexcept try{
  kind=LoadRevealWait::other;
  if(const char* world=load_reveal_world_wait())return world;
  const auto source=retained_static_terrain_source_snapshot();
- if(configured_boolean(debug_overlay_.config(),"neighbour_maps",true)){
-  if(neighbours_.epoch!=source.map->generation){kind=LoadRevealWait::neighbours;return "neighbours not started";}
-  if(!neighbour_maps_settled(neighbours_.epoch)){kind=LoadRevealWait::neighbours;return "neighbours streaming";}
+ // An empty/disabled stream is already settled even when no colour pass
+ // adopted a neighbour. Renderer adoption is not evidence of pending work.
+ if(configured_boolean(debug_overlay_.config(),"neighbour_maps",true)&&
+    !neighbour_maps_settled(source.map->generation)){
+  kind=LoadRevealWait::neighbours;
+  return neighbours_.epoch!=source.map->generation?"neighbours not started":"neighbours streaming";
  }
  // Critter perches are chosen once per tree model, 20-50 ms each; under a
  // held picture they are chosen now (30 ms of each held frame) instead of
@@ -13655,7 +13661,7 @@ float Renderer::load_reveal_progress() noexcept try{
  const auto source=retained_static_terrain_source_snapshot();
  if(configured_boolean(debug_overlay_.config(),"neighbour_maps",true)&&source.map){
   std::size_t left=0;
-  if(neighbours_.epoch!=source.map->generation||!neighbour_maps_remaining(neighbours_.epoch,left))left=(std::max<std::size_t>)(left,1);
+  if(!neighbour_maps_remaining(source.map->generation,left))left=(std::max<std::size_t>)(left,1);
   remaining[1]=left;
  }
  remaining[2]=load_reveal_holding_&&(configured_integer(debug_overlay_.config(),"critters",2)>0||
@@ -15517,7 +15523,17 @@ bool Renderer::update_native_static_shadow_store(const RetainedShadowCasterValue
 bool Renderer::queue_native_static_shadow_depth(
  const RetainedShadowCasterValue* casters,std::uint32_t count,std::uint64_t store_revision,
  std::vector<RetainedShadowCasterValue>& missing) noexcept {SCENE_ENTRY("queue_native_static_shadow_depth");
- if(!native_shadow_collecting_||native_shadow_failed_||(!casters&&count))return false;
+ const auto reject=[](const char* reason) noexcept {
+#ifdef EID3D11_EMBEDDED
+  embedded_report_render_failure("owned_static_depth_rejected",reason);
+#else
+  (void)reason;
+#endif
+  return false;
+ };
+ if(!native_shadow_collecting_)return reject("not_collecting");
+ if(native_shadow_failed_)return reject("prior_shadow_failure");
+ if(!casters&&count)return reject("missing_casters");
  try {
   auto& bake=native_static_shadow_bake_;
   missing.clear();
@@ -15526,7 +15542,7 @@ bool Renderer::queue_native_static_shadow_depth(
     update_native_static_shadow_store(casters,count);
    bake.store.assign(casters,casters+count);bake.store_revision=store_revision;
    bake.built_store_revision=kept?store_revision:0;
-  }else if(!casters&&(!store_revision||store_revision!=bake.store_revision))return false;
+  }else if(!casters&&(!store_revision||store_revision!=bake.store_revision))return reject("store_revision_unpublished");
   // A call outside a static-layer redraw only keeps the store; the
   // precipitation shelter bake (renderer_precipitation.cpp) draws the same
   // baked store into its one straight-down slice.
@@ -15542,16 +15558,16 @@ bool Renderer::queue_native_static_shadow_depth(
    }
    std::vector<std::size_t> absent;
    if(FAILED(rebuild_native_shadow_bake(bake,native_static_shadow_records_,members,absent,true,
-      native_static_shadow_records_serial_))){native_shadow_failed_=true;return false;}
+      native_static_shadow_records_serial_))){native_shadow_failed_=true;return reject("store_bake_build");}
    bake.absent.clear();for(const auto member:absent)bake.absent.push_back(bake.store[member_caster[member]]);
    bake.built_store_revision=bake.store_revision;
   }
-  if(FAILED(draw_native_shadow_bake(bake)))return false;
+  if(FAILED(draw_native_shadow_bake(bake)))return reject("store_bake_draw");
   // Neighbour-map decorations join the same static layer (and shelter).
   // A bake that cannot be built is omitted (named once); a failed draw has
   // already failed the pass.
   if(const HRESULT hr=draw_native_neighbour_shadows();FAILED(hr)){
-   if(native_shadow_failed_)return false;
+   if(native_shadow_failed_)return reject("neighbour_bake_draw");
    static bool reported=false;
    if(!reported)std::fprintf(stderr,"Neighbour sun casters unavailable (0x%08lx); neighbour shadows omitted.\n",static_cast<unsigned long>(hr));
    reported=true;
@@ -15564,7 +15580,7 @@ bool Renderer::queue_native_static_shadow_depth(
    if(mask)missing.push_back(caster);
   }
   return true;
- }catch(...){native_shadow_failed_=true;native_shadow_bake_active_=nullptr;return false;}
+ }catch(...){native_shadow_failed_=true;native_shadow_bake_active_=nullptr;return reject("store_exception");}
 }
 
 // Terrain sun casters of a static-layer redraw (issue #162). entries are the

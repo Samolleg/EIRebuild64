@@ -4,6 +4,8 @@
 #include <stdexcept>
 
 namespace owned {
+// Permanent, rate-limited failures in the host's game journal.
+void embedded_report_render_failure(const char* event, const char* reason) noexcept;
 // Immutable for the lifetime of an embedded session. Configure before starting
 // workers or creating the renderer; no registry or module-discovery fallback.
 struct EmbeddedHostPaths {

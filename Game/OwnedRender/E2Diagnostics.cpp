@@ -3,6 +3,11 @@
 #include "res_cache_release.h"
 #include "../GameJournal.h"
 #include <atomic>
+#include <array>
+#include <cstring>
+#include <cstdio>
+#include <mutex>
+#include "embedded_host.h"
 
 namespace {
 void unavailable(const char* feature, std::atomic_flag& once) noexcept {
@@ -12,6 +17,34 @@ void unavailable(const char* feature, std::atomic_flag& once) noexcept {
 #define E2_UNAVAILABLE(feature) do { static std::atomic_flag once = ATOMIC_FLAG_INIT; unavailable(feature, once); } while (false)
 }
 namespace owned {
+void embedded_report_render_failure(const char* event, const char* reason) noexcept try {
+    // The first occurrence of each cause in each world, then one reminder
+    // every 600 failures. Fixed storage bounds both memory and log traffic.
+    struct Failure { char event[64]{}; char reason[192]{}; std::uint64_t count = 0; };
+    static std::mutex guard;
+    static std::array<Failure, 32> failures{};
+    static std::uint64_t lastEpoch = 0;
+    const auto epoch = bridge_current_world_epoch();
+    const auto* name = event ? event : "render_failure";
+    const auto* cause = reason ? reason : "unknown";
+    std::lock_guard<std::mutex> lock(guard);
+    if (lastEpoch != epoch) { failures = {}; lastEpoch = epoch; }
+    for (auto& failure : failures) {
+        if (!failure.event[0]) {
+            std::snprintf(failure.event, sizeof(failure.event), "%s", name);
+            std::snprintf(failure.reason, sizeof(failure.reason), "%s", cause);
+        }
+        if (std::strncmp(failure.event, name, sizeof(failure.event) - 1) ||
+            std::strncmp(failure.reason, cause, sizeof(failure.reason) - 1)) continue;
+        ++failure.count;
+        if (failure.count == 1 || failure.count % 600 == 0)
+            GameJournal::Event("RENDER", name, "reason=%s epoch=%llu failures=%llu",
+                cause, static_cast<unsigned long long>(epoch),
+                static_cast<unsigned long long>(failure.count));
+        return;
+    }
+} catch (...) {}
+
 void embedded_perf06_report(const char* detail) noexcept {
     GameJournal::Event("RENDER", "pipeline_perf", "%s", detail);
 }

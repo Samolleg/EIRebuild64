@@ -1,4 +1,7 @@
 #include "embedded_perf06.h"
+#ifdef EID3D11_EMBEDDED
+#include "embedded_host.h"
+#endif
 #include "world_mist_grid.h"
 #include "contact_blend.h"
 #include "native_instance_flags.h"
@@ -6831,9 +6834,13 @@ bool publish_object_plan_extents(
 
 volatile LONG g_object_plan_failure_reported = 0;
 void report_object_plan_failure(const char* stage) noexcept {
+#ifdef EID3D11_EMBEDDED
+    embedded_report_render_failure("object_render_plan_failure", stage);
+#else
     if (InterlockedCompareExchange(&g_object_plan_failure_reported, 1, 0) == 0)
         append_bridge_event("object_render_plan_first_failure",
                             stage ? stage : "unknown", true);
+#endif
 }
 
 constexpr std::size_t kObjectPlanOmissionDiagnosticLimit = 16;
@@ -18582,9 +18589,14 @@ void prewarm_owned_terrain_near_meshes() noexcept {
 bool send_owned_static_store(bool force_store,std::vector<RetainedShadowCasterValue>& missing) {
     auto& store=g_owned_static_casters;
     if(!g_native_sink_shadow_static_depth)return false;
+    // nullptr means "reuse the renderer's store", even when count is zero.
+    // A full, empty store must still publish its revision (and clear an old
+    // nonempty store). vector::data() may be null before the first caster.
+    static const RetainedShadowCasterValue empty_store{};
     const auto send=[&](bool whole){
+        const auto* values=store.casters.empty()?&empty_store:store.casters.data();
         return g_native_sink_shadow_static_depth(g_native_sink_context,
-            whole?store.casters.data():nullptr,whole?static_cast<std::uint32_t>(store.casters.size()):0u,
+            whole?values:nullptr,whole?static_cast<std::uint32_t>(store.casters.size()):0u,
             store.revision,missing);
     };
     const bool whole=force_store || store.renderer_revision!=store.revision;
@@ -18599,6 +18611,10 @@ bool send_owned_static_store(bool force_store,std::vector<RetainedShadowCasterVa
 // frame is counted and the reason logged (the first 16, then every 600th),
 // so a repeating failure is never silent after the first report.
 void report_owned_shadow_pass_failure(const char* reason) noexcept {
+#ifdef EID3D11_EMBEDDED
+    embedded_report_render_failure("owned_shadow_pass_rejected", reason);
+    return;
+#endif
     static std::uint64_t failures=0;
     ++failures;
     if(failures>16 && failures%600)return;
@@ -19772,9 +19788,11 @@ bool prepare_owned_world_shadows(void* scene,void* renderer,
         startup_failure(StartupStage::shadow_prepare,reason);
         reject_owned_visual("shadow_prepare",reason);
         report_object_plan_failure(reason);
+        report_owned_shadow_pass_failure(reason);
     } catch(...) {
         startup_failure(StartupStage::shadow_prepare,"owned_shadow_allocation");
         report_object_plan_failure("owned_shadow_allocation");
+        report_owned_shadow_pass_failure("owned_shadow_allocation");
     }
     frame.active=true;frame.shadow_attempted=true;frame.shadow_ready=false;
     retire_owned_shadow_maps();

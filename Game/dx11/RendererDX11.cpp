@@ -380,6 +380,12 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 void CDX11::BeginFrame()
 {
     ReportC56FigureSkipSummary();
+    // c73 separates authoritative engine frames from D3D scene brackets.
+    // Reopen world composition and advance per-frame caches before BeginScene
+    // or any clear/draw; Present intentionally leaves the prior frame sealed.
+    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.begin_engine_frame();
+    }));
     IfFailedThrowHR(rendererFacade->BeginFrame());
     owned::bridge_set_screen_rectangle_sink(this, &SubmitScreenRectangleToC56);
     frameTiming.Begin();
