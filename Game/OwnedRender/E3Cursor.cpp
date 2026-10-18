@@ -138,6 +138,7 @@ void E3CursorCanvas(HWND window, unsigned width, unsigned height, bool active) n
     if (cursor.window != window || cursor.width != width || cursor.height != height || cursor.active != active) {
         cursor.frame = {}; ++cursor.revision;
     }
+    if (!active || cursor.window != window) cursor.state = {};
     cursor.window = window; cursor.width = width; cursor.height = height; cursor.active = active;
     cursor.wake.notify_all();
 }
