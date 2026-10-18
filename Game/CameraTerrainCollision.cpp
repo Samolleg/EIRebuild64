@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cfloat>
 
-// Adapted from addon 80acb93 / camera 0.12.0.6: vertical avoidance,
+// Adapted from addon d3b0896: vertical avoidance,
 // unchanged orientation and selected distance, QPC altitude damping.
 namespace CameraTerrainCollision {
 namespace {
@@ -20,9 +20,17 @@ const float ArmProbeRadius = 0.25f;
 const float ArmClearance = 0.25f;
 const float ProbeStep = 0.5f;
 const float ContactSkin = 0.05f;
-const float RetractionSmoothTime = 0.12f;
-const float RecoverySmoothTime = 0.35f;
-const int NavigationRadius = 6;
+const float ComfortSmoothTime = 0.5f;
+const float CollisionSmoothTime = 0.12f;
+const float MotionSmoothTime = 0.08f;
+const float PanReleaseTime = 0.32f; // native zero threshold settles typical pans in about 1 s
+const float UrgencySmoothTime = 0.08f;
+const float PredictionTime = 0.6f;
+const float MaxPredictionDistance = 24.0f;
+const float PredictionClearance = 0.5f;
+const int PredictionSamples = 4;
+const int MaxPredictionProbes = 64;
+const int NavigationRadius = 8;
 const int MaxProbeCount = 1024;
 const DWORD AuthoredCameraFlags = CAM_FPS_MODE | CAM_USE_PLACEMENTS | CAM_CANT_SCROLL;
 
@@ -31,14 +39,29 @@ struct ArmState
     CWorldClient *world = nullptr;
     void *terrain = nullptr;
     CCamera *camera = nullptr;
-    double time = 0.0;
+    LONGLONG time = 0;
     float focusHeight = 0.0f;
     float focusHeightVelocity = 0.0f;
+    float collisionUrgency = 0.0f;
+    CPlot3D inputFocus;
+    CPlot3D inputEye;
+    CPlot3D focusVelocity;
+    CPlot3D eyeVelocity;
     CPlot3D focus;
 };
 
 ArmState orbitArm;
 ArmState extendedArm;
+ArmState campOrbitArm;
+ArmState campExtendedArm;
+struct FrameClock
+{
+    void *terrain = nullptr;
+    LONGLONG time = 0;
+    float remaining = 0.0f, seconds = 0.0f;
+    bool eligible = false;
+};
+FrameClock frameClock;
 
 bool Finite(float value)
 {
@@ -55,17 +78,46 @@ float Clamp(float value, float low, float high)
     return value < low ? low : (value > high ? high : value);
 }
 
-double ClockSeconds()
+struct TimeSource
 {
-    static const double frequency = []() {
-        LARGE_INTEGER value;
-        return QueryPerformanceFrequency(&value) ?
-            static_cast<double>(value.QuadPart) : 0.0;
-    }();
+    bool performance;
+    LONGLONG frequency, last;
+
+    TimeSource()
+    {
+        LARGE_INTEGER rate, value;
+        performance = QueryPerformanceFrequency(&rate) && rate.QuadPart > 0 &&
+            QueryPerformanceCounter(&value);
+        frequency = performance ? rate.QuadPart : 1000;
+        last = performance ? value.QuadPart : static_cast<LONGLONG>(GetTickCount64());
+    }
+};
+
+TimeSource &Timer()
+{
+    static TimeSource source;
+    return source;
+}
+
+LONGLONG ClockTicks()
+{
+    TimeSource &source = Timer();
     LARGE_INTEGER value;
-    if (frequency > 0.0 && QueryPerformanceCounter(&value))
-        return static_cast<double>(value.QuadPart) / frequency;
-    return static_cast<double>(GetTickCount64()) * 0.001;
+    if (!source.performance)
+        source.last = static_cast<LONGLONG>(GetTickCount64());
+    else if (QueryPerformanceCounter(&value))
+        source.last = value.QuadPart;
+    // A transient counter failure freezes time; never mix millisecond ticks
+    // into an already selected performance-counter domain.
+    return source.last;
+}
+
+double ElapsedSeconds(LONGLONG now, LONGLONG previous)
+{
+    // The game's x87 precision can round even double computations to float
+    // precision. Subtract integer ticks first so uptime cannot quantize dt.
+    const LONGLONG ticks = now - previous;
+    return static_cast<double>(ticks) / static_cast<double>(Timer().frequency);
 }
 
 void Damp(float &value, float &velocity, float target, float seconds, float smoothTime)
@@ -78,11 +130,30 @@ void Damp(float &value, float &velocity, float target, float seconds, float smoo
     const float decay = expf(-omega * seconds);
     value = target + (error + change * seconds) * decay;
     velocity = (velocity - omega * change * seconds) * decay;
-    if (error * (value - target) < 0.0f)
-    {
-        value = target;
-        velocity = 0.0f;
-    }
+    // Retain momentum when a changing terrain target crosses the response.
+    // Only real contact may constrain height/velocity, not a preferred altitude.
+}
+
+float HorizontalLength(const CPlot3D &point)
+{
+    return sqrtf(point.x * point.x + point.y * point.y);
+}
+
+void UpdateMotion(CPlot3D &velocity, const CPlot3D &current,
+    const CPlot3D &previous, float seconds)
+{
+    if (seconds <= 0.00001f)
+        return;
+    CPlot3D measured = (current - previous) * (1.0f / seconds);
+    measured.z = 0.0f;
+    const float blend = 1.0f - expf(-seconds / MotionSmoothTime);
+    velocity += (measured - velocity) * blend;
+}
+
+float CollisionUrgency(float clearanceDeficit)
+{
+    const float t = Clamp(clearanceDeficit, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
 }
 
 void EnforceFloor(float &value, float &velocity, float minimum)
@@ -284,78 +355,159 @@ struct TerrainProbe
 
 };
 
-bool Resolve(const TerrainProbe &probe, CCamera *camera, ArmState &state,
-    CPlot3D focus, CPlot3D desiredEye, bool focusAlreadySafe = false)
+struct ArmHeights
+{
+    float preferred, minimum;
+};
+
+bool MeasureArm(const TerrainProbe &probe, const CPlot3D &focus,
+    const CPlot3D &eye, float anchorHeight, bool focusAlreadySafe,
+    bool prediction, ArmHeights &heights)
 {
     float focusSurface, rawFocusSurface;
-    if (!Finite(desiredEye) || !probe.Surface(focus, 0.0f, focusSurface) ||
+    if (!Finite(eye) || !probe.Surface(focus, 0.0f, focusSurface) ||
         !probe.Surface(focus, 0.0f, rawFocusSurface, false))
         return false;
-    const CPlot3D arm = desiredEye - focus;
+    const CPlot3D arm = eye - focus;
     const float length = sqrtf(arm.x * arm.x + arm.y * arm.y + arm.z * arm.z);
     if (!Finite(length) || length < 0.0001f || length > MaxProbeCount * ProbeStep)
         return false;
-    const int probes = static_cast<int>(ceilf(length / ProbeStep));
-    if (probes > MaxProbeCount)
-        return false;
-    // GetTickCount holds the same value for several high-FPS frames, then
-    // advances by an entire clock tick. Damping must advance every update,
-    // alongside the native pan, rather than moving altitude in those steps.
-    const double now = ClockSeconds();
-    const double elapsed = now - state.time;
-    const bool fresh = state.camera != camera || state.world != probe.world ||
-        state.terrain != probe.world->GetTerrain() || elapsed < 0.0 || elapsed > 1.0;
-    const float seconds = fresh ? 0.0f :
-        Clamp(static_cast<float>(elapsed), 0.0f, 0.1f);
+    int probes = static_cast<int>(ceilf(length / ProbeStep));
+    if (prediction && probes > MaxPredictionProbes)
+        probes = MaxPredictionProbes;
 
-    float anchorHeight = camera->GetOrbitAnchorHeight();
-    if (!Finite(anchorHeight) || anchorHeight < ArmClearance)
-        anchorHeight = ArmClearance;
-    float preferredLift = focusAlreadySafe ? 0.0f :
-        Clamp(focusSurface + anchorHeight - focus.z, 0.0f, FLT_MAX);
-    float requiredLift = Clamp(rawFocusSurface + ContactSkin - focus.z, 0.0f, FLT_MAX);
+    heights.preferred = focus.z;
+    if (!focusAlreadySafe && focusSurface + anchorHeight > heights.preferred)
+        heights.preferred = focusSurface + anchorHeight;
+    // This is an absolute geometric floor, not a nonnegative lift from the
+    // native anchor. A rising native anchor must not bypass safe height damping.
+    heights.minimum = rawFocusSurface + ContactSkin;
     for (int i = 1; i <= probes; ++i)
     {
         const float fraction = static_cast<float>(i) / probes;
         const CPlot3D point = focus + arm * fraction;
         float raisedFloor, rawFloor;
-        if (!probe.Surface(point, ArmProbeRadius * fraction, raisedFloor) ||
+        // The broad navigation field supplies preview width. Keep the current
+        // arm's complete clearance cone and dense raw safety trace unchanged.
+        const float radius = prediction ? 0.0f : ArmProbeRadius * fraction;
+        if (!probe.Surface(point, radius, raisedFloor) ||
             !probe.Surface(point, 0.0f, rawFloor, false))
             return false;
-        const float preferred = raisedFloor + ArmClearance * fraction - point.z;
-        const float required = rawFloor + ContactSkin * fraction - point.z;
-        if (preferred > preferredLift)
-            preferredLift = preferred;
-        if (required > requiredLift)
-            requiredLift = required;
+        const float preferred = raisedFloor + ArmClearance * fraction - arm.z * fraction;
+        const float required = rawFloor + ContactSkin * fraction - arm.z * fraction;
+        if (preferred > heights.preferred)
+            heights.preferred = preferred;
+        if (required > heights.minimum)
+            heights.minimum = required;
     }
     float eyeSurface, rawEyeSurface;
-    if (!probe.Surface(desiredEye, ProbeRadius, eyeSurface) ||
-        !probe.Surface(desiredEye, ProbeRadius, rawEyeSurface, false))
+    if (!probe.Surface(eye, ProbeRadius, eyeSurface) ||
+        !probe.Surface(eye, ProbeRadius, rawEyeSurface, false))
         return false;
-    const float preferredEyeLift = eyeSurface + probe.clearance - desiredEye.z;
-    const float requiredEyeLift = rawEyeSurface + ContactSkin - desiredEye.z;
-    if (preferredEyeLift > preferredLift)
-        preferredLift = preferredEyeLift;
-    if (requiredEyeLift > requiredLift)
-        requiredLift = requiredEyeLift;
+    const float preferredEyeHeight = eyeSurface + probe.clearance - arm.z;
+    const float requiredEyeHeight = rawEyeSurface + ContactSkin - arm.z;
+    if (preferredEyeHeight > heights.preferred)
+        heights.preferred = preferredEyeHeight;
+    if (requiredEyeHeight > heights.minimum)
+        heights.minimum = requiredEyeHeight;
+    return Finite(heights.preferred) && Finite(heights.minimum);
+}
+
+bool Resolve(const TerrainProbe &probe, CCamera *camera, ArmState &state,
+    CPlot3D focus, CPlot3D desiredEye, bool focusAlreadySafe = false)
+{
+    float anchorHeight = camera->GetOrbitAnchorHeight();
+    if (!Finite(anchorHeight) || anchorHeight < ArmClearance)
+        anchorHeight = ArmClearance;
+    ArmHeights current;
+    if (!MeasureArm(probe, focus, desiredEye, anchorHeight, focusAlreadySafe, false, current))
+        return false;
+    // GetTickCount holds the same value for several high-FPS frames, then
+    // advances by an entire clock tick. Damping must advance every update,
+    // alongside the native pan, rather than moving altitude in those steps.
+    const LONGLONG now = ClockTicks();
+    const double elapsed = ElapsedSeconds(now, state.time);
+    const bool fresh = state.camera != camera || state.world != probe.world ||
+        state.terrain != probe.world->GetTerrain() || elapsed < 0.0 || elapsed > 1.0 ||
+        HorizontalLength(focus - state.inputFocus) > MaxPredictionDistance * 2.0f;
+    const float seconds = fresh ? 0.0f :
+        Clamp(static_cast<float>(elapsed), 0.0f, 0.1f);
+    const float motionSeconds = fresh ? 0.0f : static_cast<float>(elapsed);
+
+    float desiredHeight = current.preferred;
+    float previewTimes[PredictionSamples] = {};
+    float previewMinimums[PredictionSamples] = {};
+    int previews = 0;
+    if (fresh)
+    {
+        state.focusVelocity = CPlot3D();
+        state.eyeVelocity = CPlot3D();
+        state.collisionUrgency = 0.0f;
+    }
+    else
+    {
+        // Displacement spans the actual interval, even when the spring step
+        // is capped after a stall. Dividing by that cap exaggerates pan speed.
+        UpdateMotion(state.focusVelocity, focus, state.inputFocus, motionSeconds);
+        UpdateMotion(state.eyeVelocity, desiredEye, state.inputEye, motionSeconds);
+        const float focusSpeed = HorizontalLength(state.focusVelocity);
+        const float eyeSpeed = HorizontalLength(state.eyeVelocity);
+        const float speed = focusSpeed > eyeSpeed ? focusSpeed : eyeSpeed;
+        if (Finite(speed) && speed > 0.01f)
+        {
+            // Keep time honest when limiting distance: at high pan speed the
+            // 24 m horizon is reached sooner, so the spring must react sooner.
+            const float horizon = Clamp(MaxPredictionDistance / speed, 0.0f, PredictionTime);
+            for (int i = 1; i <= PredictionSamples; ++i)
+            {
+                const float ahead = horizon * i / PredictionSamples;
+                ArmHeights preview;
+                if (!MeasureArm(probe, focus + state.focusVelocity * ahead,
+                    desiredEye + state.eyeVelocity * ahead, anchorHeight,
+                    focusAlreadySafe, true, preview))
+                    continue;
+                const float previewHeight = preview.preferred > preview.minimum + PredictionClearance ?
+                    preview.preferred : preview.minimum + PredictionClearance;
+                if (previewHeight > desiredHeight)
+                    desiredHeight = previewHeight;
+                previewTimes[previews] = ahead;
+                previewMinimums[previews++] = preview.minimum;
+            }
+        }
+    }
 
     // The raised envelope is a preferred translation height, not an invisible
     // wall that shortens the arm. Preserve native zoom and the complete camera
     // orientation; use one altitude for focus and eye so no aim compensation
     // can tilt a short arm toward vertical.
-    const float desiredHeight = focus.z + preferredLift;
     if (fresh)
     {
         state.focusHeight = desiredHeight;
         state.focusHeightVelocity = 0.0f;
     }
     else
-        Damp(state.focusHeight, state.focusHeightVelocity, desiredHeight, seconds,
-            desiredHeight > state.focusHeight ? RetractionSmoothTime : RecoverySmoothTime);
-    const float minimumHeight = focus.z + requiredLift;
-    EnforceFloor(state.focusHeight, state.focusHeightVelocity, minimumHeight);
+    {
+        float normalHeight = state.focusHeight, normalVelocity = state.focusHeightVelocity;
+        Damp(normalHeight, normalVelocity, desiredHeight, seconds, ComfortSmoothTime);
+        float urgency = CollisionUrgency(current.minimum + ContactSkin - normalHeight);
+        for (int i = 0; i < previews; ++i)
+        {
+            float predictedHeight = state.focusHeight, predictedVelocity = state.focusHeightVelocity;
+            Damp(predictedHeight, predictedVelocity, desiredHeight, previewTimes[i], ComfortSmoothTime);
+            const float risk = CollisionUrgency(previewMinimums[i] + ContactSkin - predictedHeight);
+            if (risk > urgency)
+                urgency = risk;
+        }
+        const float blend = 1.0f - expf(-seconds / UrgencySmoothTime);
+        state.collisionUrgency += (urgency - state.collisionUrgency) * blend;
+        const float smoothTime = ComfortSmoothTime +
+            (CollisionSmoothTime - ComfortSmoothTime) * state.collisionUrgency;
+        Damp(state.focusHeight, state.focusHeightVelocity, desiredHeight, seconds, smoothTime);
+    }
+    EnforceFloor(state.focusHeight, state.focusHeightVelocity, current.minimum);
     const float lift = state.focusHeight - focus.z;
+    state.inputFocus = focus;
+    state.inputEye = desiredEye;
     focus.z += lift;
     desiredEye.z += lift;
     state.world = probe.world;
@@ -372,9 +524,86 @@ bool Resolve(const TerrainProbe &probe, CCamera *camera, ArmState &state,
 
 void Reset()
 {
+    frameClock = FrameClock();
+    DiscardCampState();
     orbitArm = ArmState();
     extendedArm = ArmState();
     navigation.Reset();
+}
+
+void BeginFrame(bool active, DWORD quantum, float coefficient)
+{
+    const LONGLONG now = ClockTicks();
+    const bool eligible = active && theWorld.GetTerrain() &&
+        !theCamera.CheckFlag(AuthoredCameraFlags) && quantum > 0 &&
+        Finite(coefficient) && coefficient > 0.0f;
+    const double elapsed = ElapsedSeconds(now, frameClock.time);
+    const bool continuous = eligible && frameClock.eligible &&
+        frameClock.terrain == theWorld.GetTerrain() && elapsed >= 0.0;
+    frameClock.remaining = frameClock.seconds = 0.0f;
+    if (continuous)
+    {
+        const double limit = static_cast<double>(quantum) * 0.005;
+        const double seconds = elapsed < limit ? elapsed : limit;
+        frameClock.remaining = static_cast<float>(seconds * 1000.0 * coefficient);
+        frameClock.seconds = static_cast<float>(seconds);
+    }
+    frameClock.terrain = theWorld.GetTerrain();
+    frameClock.time = now;
+    frameClock.eligible = eligible;
+}
+
+void AdvanceCamera(CCamera *camera, float nativeStep)
+{
+    if (frameClock.eligible && camera == &theCamera &&
+        frameClock.terrain == theWorld.GetTerrain() &&
+        !camera->CheckFlag(AuthoredCameraFlags))
+    {
+        const float step = frameClock.remaining, seconds = frameClock.seconds;
+        frameClock.remaining = frameClock.seconds = 0.0f;
+        camera->DampReleasedPan(seconds, PanReleaseTime);
+        camera->Step(step);
+    }
+    else
+    {
+        frameClock = FrameClock();
+        camera->Step(nativeStep);
+    }
+}
+
+void SaveCampState(CWorldClient *world, CCamera *camera)
+{
+    campOrbitArm = world && orbitArm.world == world && orbitArm.camera == camera &&
+        orbitArm.terrain == world->GetTerrain() ? orbitArm : ArmState();
+    campExtendedArm = world && extendedArm.world == world && extendedArm.camera == camera &&
+        extendedArm.terrain == world->GetTerrain() ? extendedArm : ArmState();
+}
+
+void RestoreCampState(CWorldClient *world, CCamera *camera)
+{
+    orbitArm = world && campOrbitArm.world == world && campOrbitArm.camera == camera &&
+        campOrbitArm.terrain == world->GetTerrain() ? campOrbitArm : ArmState();
+    extendedArm = world && campExtendedArm.world == world && campExtendedArm.camera == camera &&
+        campExtendedArm.terrain == world->GetTerrain() ? campExtendedArm : ArmState();
+    const LONGLONG now = ClockTicks();
+    ArmState *arms[] = { &orbitArm, &extendedArm };
+    for (ArmState *arm : arms)
+    {
+        // Keep the exact lifted altitude, without charging camp time to the
+        // spring or predicting movement from an input that has now stopped.
+        arm->time = now;
+        arm->focusHeightVelocity = 0.0f;
+        arm->collisionUrgency = 0.0f;
+        arm->focusVelocity = CPlot3D();
+        arm->eyeVelocity = CPlot3D();
+    }
+    frameClock = FrameClock();
+}
+
+void DiscardCampState()
+{
+    campOrbitArm = ArmState();
+    campExtendedArm = ArmState();
 }
 
 void GuardEye(CWorldClient *world, CCamera *camera)

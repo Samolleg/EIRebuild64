@@ -279,6 +279,7 @@
     <ClCompile Include="Game\BinkVideo.cpp" />
     <ClCompile Include="Game\Camera.cpp" />
     <ClCompile Include="Game\CameraTerrainCollision.cpp" />
+    <ClCompile Include="Game\ItemApproachCatalog.cpp" />
     <ClCompile Include="Game\ChatServer.cpp" />
     <ClCompile Include="Game\ChunkFile.cpp" />
     <ClCompile Include="Game\ClientSpecificManager.cpp" />
@@ -543,6 +544,7 @@
     <ClInclude Include="Game\BoundCube.h" />
     <ClInclude Include="Game\Camera.h" />
     <ClInclude Include="Game\CameraTerrainCollision.h" />
+    <ClInclude Include="Game\ItemApproachCatalog.h" />
     <ClInclude Include="Game\ChatServer.h" />
     <ClInclude Include="Game\ChunkFile.h" />
     <ClInclude Include="Game\ClassIDs.h" />

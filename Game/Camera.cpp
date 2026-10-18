@@ -12,6 +12,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModConfiguration.h"
 
 #include "WorldClient.h"
+#include "WorldServer.h"
 #include "SoundManager.h"
 #include "Terrain.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -641,6 +642,13 @@ const CPlot3D &CCamera::GetObservationPosition() const
         return GetAnchorPoint();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CCamera::DampReleasedPan(float seconds, float releaseTime)
+{
+    if (seconds > 0.0f && scroll.desired.x == 0.0f &&
+        scroll.desired.y == 0.0f && scroll.desired.z == 0.0f)
+        scroll.value *= expf(-seconds / releaseTime);
+}
+
 void CCamera::Step(float fpStep)
 {
     FrameDiagnostics::Scope timing(FrameDiagnostics::Camera);
@@ -897,8 +905,91 @@ void CCamera::InitRotate(float fRotateAngle)
     qRotate.FromAxisAngle(CPlot3D(0, 0, 1), fRotateAngle);
     ReconstructCameraPlacement();
 }
+void CCamera::DiscardFieldCampCamera()
+{
+    campPlacementValid = campEntered = false;
+    campTerrain = nullptr;
+    campRequestTime = 0;
+    CameraTerrainCollision::DiscardCampState();
+}
+
+void CCamera::CaptureFieldCampCamera()
+{
+    DiscardFieldCampCamera();
+    if (this != &theCamera || !theWorld.GetTerrain()) return;
+    campPlacement.position = GetCP();
+    campPlacement.orientation = GetOrientation();
+    campPlacement.anchor = ptAnchorPoint;
+    campPlacement.anchorHeight = fAnchorHeight;
+    campPlacement.distance = fDistance;
+    campPlacement.orbit = qRotate;
+    campPlacement.pitch = fPitch;
+    campPlacement.carrier = dwCarrierID;
+    campPlacement.mode = falloutMode;
+    campPlacement.baselineValid = falloutBaselineValid;
+    campPlacement.baseline = falloutBaselineRotation;
+    campPlacement.baselinePitch = falloutBaselinePitch;
+    campPlacement.telephoto = falloutTelephotoMultiplier;
+    campTerrain = theWorld.GetTerrain();
+    campRequestTime = GetTickCount();
+    campPlacementValid = true;
+    CameraTerrainCollision::SaveCampState(&theWorld, this);
+}
+
+bool CCamera::RestoreFieldCampCamera()
+{
+    if (!campPlacementValid || theWorldServer.FieldCampReturnHeroID() < 0) return false;
+    if (this != &theCamera || !theWorld.GetTerrain() || campTerrain != theWorld.GetTerrain())
+    {
+        DiscardFieldCampCamera();
+        return false;
+    }
+    // Camp recreates units; retain only their stable ID, never a unit pointer.
+    SetCarrier(campPlacement.carrier);
+    ptAnchorPoint = campPlacement.anchor;
+    fAnchorHeight = campPlacement.anchorHeight;
+    fDistance = campPlacement.distance;
+    qRotate = campPlacement.orbit;
+    fPitch = campPlacement.pitch;
+    SetCP(campPlacement.position);
+    SetOrientation(campPlacement.orientation);
+    falloutMode = campPlacement.mode;
+    falloutBriefingMode = FALLOUT_STOCK;
+    falloutBriefing = false;
+    falloutBaselineValid = campPlacement.baselineValid;
+    falloutBaselineRotation = campPlacement.baseline;
+    falloutBaselinePitch = campPlacement.baselinePitch;
+    falloutTelephotoMultiplier = campPlacement.telephoto;
+    scroll.value = scroll.desired = VNULL;
+    rotate.value = rotate.desired = 0.0f;
+    pitch.value = pitch.desired = 0.0f;
+    zoom.value = zoom.desired = 0.0f;
+    mouseCarryX = mouseCarryY = 0;
+    mouseCarryWidth = mouseCarryHeight = 0;
+    CameraTerrainCollision::RestoreCampState(&theWorld, this);
+    return true;
+}
+
+void CCamera::UpdateFieldCampCamera()
+{
+    if (!campPlacementValid) return;
+    if (!theWorld.GetTerrain() || campTerrain != theWorld.GetTerrain() ||
+        !theWorldServer.IsFieldCampPending())
+    {
+        DiscardFieldCampCamera();
+        return;
+    }
+    if (theWorldServer.IsInFieldCamp() || theWorldServer.FieldCampReturnHeroID() >= 0)
+        campEntered = true;
+    if (!campEntered && GetTickCount() - campRequestTime > 30000)
+        DiscardFieldCampCamera();
+    else
+        RestoreFieldCampCamera();
+}
+
 void CCamera::ResetFalloutMode()
 {
+    DiscardFieldCampCamera();
     CameraTerrainCollision::Reset();
     falloutMode = FALLOUT_STOCK;
     falloutBriefingMode = FALLOUT_STOCK;
@@ -1017,6 +1108,7 @@ float CCamera::GetRotateAngle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CCamera::Load(CSave &file)
 {
+    DiscardFieldCampCamera();
     CameraTerrainCollision::Reset();
     DWORD dwCameraFlags, dwNewCarrierID;
 

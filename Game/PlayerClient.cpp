@@ -295,7 +295,8 @@ BOOL CPlayerClient::PrsMoveCamera()
     else
         theCamera.ActivateShortcut(7);
     theCamera.InitRotate(fAngle);
-    theCamera.ReapplyFalloutAfterMove();
+    if (!theCamera.RestoreFieldCampCamera())
+        theCamera.ReapplyFalloutAfterMove();
     return bRv;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////

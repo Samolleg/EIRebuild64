@@ -6,6 +6,7 @@
 struct SItemDatabase
 {
 public:
+    std::string sourceArchive; // actual items.idb provider; transient, not serialized
     CDatabase<SIDBMaterial> materials;
     CDatabase<SIDBWeaponShape> weapons;
     CDatabase<SIDBArmorShape> armors;

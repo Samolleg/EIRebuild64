@@ -25,6 +25,7 @@ private:
 
 public:
     explicit CMappedResource(bool raw=false);
+    std::string sourcePath;
     bool rawResource=false,ignoreOriginal=false;
     std::vector<std::unique_ptr<CMappedResource>> overlays;
     void OpenOverlays(LPCSTR,bool);
@@ -40,6 +41,7 @@ public:
     virtual void CloseResource();
     virtual void Flush() {}
     //
+    std::string FileProvider(LPCSTR name);
     virtual LPBYTE GetFile(LPCSTR pszFileName, LPDWORD pnDataSize = NULL);
     virtual bool IsFileExist(LPCSTR pszFileName);
     virtual bool CloseFile(LPBYTE pFileImage);

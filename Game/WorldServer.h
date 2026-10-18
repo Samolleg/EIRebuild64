@@ -210,6 +210,8 @@ public:
     bool CanBeginFieldCamp();
     bool BeginFieldCamp();
     int FieldCampReturnHeroID() const;
+    bool IsFieldCampPending() const;
+    bool IsInFieldCamp() const;
     void CompleteFieldCampReturn();
     bool BeginFieldCampCommerceSuppression();
     void EndFieldCampCommerceSuppression(bool active);

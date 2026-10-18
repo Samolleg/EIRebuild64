@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "ItemDatabase.h"
+#include "ItemApproachCatalog.h"
 
 #include "CMappedResource.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -9,6 +10,8 @@ SItemDatabase theItemDatabase;
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL SItemDatabase::Load(LPCSTR pszPath, LPCSTR pszFName)
 {
+    ItemApproachCatalog::Reset();
+    sourceArchive.clear();
     CString szPathName = CString(pszPath) + pszFName;
     CMappedResource res;
     if (res.OpenResource(szPathName) == FALSE)
@@ -19,6 +22,7 @@ BOOL SItemDatabase::Load(LPCSTR pszPath, LPCSTR pszFName)
     if (!pData)
         return ReportError("Can't open items database\n");
     //
+    sourceArchive = res.FileProvider("items.idb");
     CMemorySave file;
 
     file.StartSaving();

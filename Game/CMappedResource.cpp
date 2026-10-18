@@ -57,6 +57,12 @@ std::vector<std::string> BriefingCandidates(LPCSTR path)
     return {path};
 }
 }
+std::string CMappedResource::FileProvider(LPCSTR name)
+{
+    for (auto& child : overlays)
+        if (child->IsFileExistExact(name)) return child->sourcePath;
+    return !ignoreOriginal && IsFileExistExact(name) ? sourcePath : std::string();
+}
 LPBYTE CMappedResource::OverlayFile(LPCSTR name,LPDWORD size)
 {
     for (auto& child : overlays)
@@ -75,6 +81,7 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
     bWriteAccess = _bWriteAccess;
     const std::string resolvedName = (!rawResource && !_bWriteAccess)
         ? ModRuntime::MapPath(pszFileName) : std::string(pszFileName);
+    sourcePath = resolvedName;
     pszFileName = resolvedName.c_str();
     OpenOverlays(pszFileName,_bWriteAccess);if(ignoreOriginal)return TRUE;
 

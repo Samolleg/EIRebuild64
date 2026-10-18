@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ItemApproachCatalog.h"
 #include "OwnedRender/E2Host.h"
 #include "A3Cursor.h"
 #include "OwnedRender/E3Scale.h"
@@ -632,6 +633,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    ItemApproachCatalog::Reset();
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
     OwnedRender::E1RetireWorld(this);
@@ -2906,6 +2908,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::Draw()
 {
+    theCamera.UpdateFieldCampCamera();
     CameraTerrainCollision::GuardEye(this, &theCamera);
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
     CRenderer *pRend = &theRenderer;

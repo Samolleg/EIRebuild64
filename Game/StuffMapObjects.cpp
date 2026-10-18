@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ItemApproachCatalog.h"
 #include "EngineDiagnostics.h"
 #include "ModRegisteredLoot.h"
 #include "ModRuntime.h"
@@ -709,6 +710,36 @@ void CLeverObject::GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnit
 {
     points.SetSize(0);
     const SLDBPrototype *pLever = theLeverDatabase.levers.GetEntry(GetMaskName());
+    if (pLever && ItemApproachCatalog::UsesWorldXY(GetMaskName()))
+    {
+        // Only catalog-confirmed models use world XY; authored zero points
+        // stay empty and invalid rows never expose a partial result.
+        if (pLever->dwNumValidPlaces > 2 || !pLever->dwNumValidPlaces) return;
+        const CPlot3D origin = GetCP();
+        const float tall = complection.tall;
+        if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z) ||
+            !std::isfinite(fpUnitRadius) || !std::isfinite(pLever->fpScaleMn) || !std::isfinite(tall)) return;
+        const float scale = pLever->fpScaleMn * tall + (1 - tall);
+        if (!std::isfinite(scale)) return;
+        CPlot3D result[2];
+        for (DWORD i = 0; i < pLever->dwNumValidPlaces; ++i)
+        {
+            const float dx = pLever->ptUsePlaces[i].x, dy = pLever->ptUsePlaces[i].y;
+            if (!std::isfinite(dx) || !std::isfinite(dy)) return;
+            const double length = sqrt(double(dx) * dx + double(dy) * dy);
+            result[i] = origin;
+            if (length > 0)
+            {
+                const double distance = length * scale + fpUnitRadius;
+                result[i].x += static_cast<float>(dx / length * distance);
+                result[i].y += static_cast<float>(dy / length * distance);
+            }
+            if (!std::isfinite(result[i].x) || !std::isfinite(result[i].y)) return;
+        }
+        points.SetSize(pLever->dwNumValidPlaces);
+        for (DWORD i = 0; i < pLever->dwNumValidPlaces; ++i) points[i] = result[i];
+        return;
+    }
     if(ModRuntime::Current() && !pLever){LeverFallback(*this,points,fpUnitRadius);return;}
     if (pLever && pLever->dwNumValidPlaces > 0)
     {

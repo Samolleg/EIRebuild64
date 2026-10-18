@@ -344,24 +344,27 @@ void CI3DHandlerNewCamera::OnMouseMove(UINT nFlags, CPoint point)
         CPlot2D pt(0, 0);
         if (point.x < theSettings.nCameraBorderScrollArea)
         {
-            pt.x = -1.f;
+            pt.x = -2.f;
             dwCursorFlags |= 0x0001;
         }
         else if (point.x >= pI3D->GetWidth() - theSettings.nCameraBorderScrollArea)
         {
-            pt.x = 1.f;
+            pt.x = 2.f;
             dwCursorFlags |= 0x0010;
         }
         if (point.y < theSettings.nCameraBorderScrollArea)
         {
-            pt.y = -1.f;
+            pt.y = -2.f;
             dwCursorFlags |= 0x0100;
         }
         else if (point.y >= pI3D->GetHeight() - theSettings.nCameraBorderScrollArea)
         {
-            pt.y = 1.f;
+            pt.y = 2.f;
             dwCursorFlags |= 0x1000;
         }
+        const float edgeGain = Max(0, Min(theSettings.nCameraBorderScrollArea, 10)) * 0.2f;
+        pt.x *= edgeGain;
+        pt.y *= edgeGain;
         E2DCursorType type;
         switch (dwCursorFlags)
         {

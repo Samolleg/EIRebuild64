@@ -12,6 +12,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "io.h"
 #include "WorldServer.h"
+#include "Camera.h"
 
 #include "ServerSpecificManager.h"
 
@@ -3034,7 +3035,9 @@ bool CWorldServer::BeginFieldCamp()
     return true;
 }
 int CWorldServer::FieldCampReturnHeroID() const { return fieldCampReturnHeroId; }
-void CWorldServer::CompleteFieldCampReturn() { fieldCampReturnHeroId = -1; }
+bool CWorldServer::IsFieldCampPending() const { return fieldCampArmed || fieldCampInCamp || fieldCampReturnHeroId >= 0; }
+bool CWorldServer::IsInFieldCamp() const { return fieldCampInCamp; }
+void CWorldServer::CompleteFieldCampReturn() { fieldCampReturnHeroId = -1; theCamera.DiscardFieldCampCamera(); }
 bool CWorldServer::BeginFieldCampCommerceSuppression()
 {
     GameJournal::Source journalSource("engine.field_camp_suppression");

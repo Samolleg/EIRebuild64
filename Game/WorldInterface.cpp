@@ -266,6 +266,7 @@ void CWorldClientInterface::GoFieldCamp()
     CPlayer *player = theWorldServer.GetPlayer(0);
     CPlayerServer *server = player ? static_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
     if (!server || !theWorldServer.BeginFieldCamp()) return;
+    theCamera.CaptureFieldCampCamera();
     server->SetVar("Camp", 2.0f);
     GoCamp(IFACE_CAMP);
 }

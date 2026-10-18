@@ -143,6 +143,19 @@ private:
     CQuaternion falloutBaselineRotation;
     float falloutBaselinePitch = 0.0f;
     float falloutTelephotoMultiplier = 2.0f;
+    // Transient field-camp snapshot. Never written by Store/Load.
+    struct CampPlacement
+    {
+        CPlot3D position, anchor;
+        CQuaternion orientation, orbit, baseline;
+        float anchorHeight, distance, pitch, baselinePitch, telephoto;
+        DWORD carrier;
+        FalloutMode mode;
+        bool baselineValid;
+    } campPlacement;
+    bool campPlacementValid = false, campEntered = false;
+    void *campTerrain = nullptr;
+    DWORD campRequestTime = 0;
     // some camera effects
     std::list<SEarthquakeEffect> earthquakes;
     // scroll restrictions
@@ -192,6 +205,10 @@ public:
     void SuspendFalloutForBriefing();
     void ResumeFalloutAfterBriefing();
     void ResetFalloutMode();
+    void CaptureFieldCampCamera();
+    bool RestoreFieldCampCamera();
+    void UpdateFieldCampCamera();
+    void DiscardFieldCampCamera();
     bool IsFalloutModeActive() const { return falloutMode != FALLOUT_STOCK; }
     float GetFalloutTelephotoMultiplier() const { return falloutTelephotoMultiplier; }
     //
@@ -264,6 +281,7 @@ public:
     // segment
     virtual int Segment();
     void Step(float fpStep);
+    void DampReleasedPan(float seconds, float releaseTime);
     const CPlot3D &GetObservationPosition() const;
     // camera placements...
     BOOL BeginCameraPlacementsSave(LPCSTR pszFileName);

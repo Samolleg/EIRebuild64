@@ -37,6 +37,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldInterface.h"
 #include "ScenarioTracker.h"
 #include "Camera.h"
+#include "CameraTerrainCollision.h"
 #include "Renderer.h"
 #include "PerkDatabase.h"
 #include "QuestDatabase.h"
@@ -477,7 +478,12 @@ static bool CountTime()
     FrameDiagnostics::RawDelta(dwTimeStep);
     DWORD dwFracTime; // for client
     dwLastTime += dwTimeStep;
+    theCamera.UpdateFieldCampCamera();
     OwnedRender::E3RefreshInterface();
+    CameraTerrainCollision::BeginFrame(
+        !OwnedRender::E2BackgroundPaused(NGame::hWnd) && !OwnedRender::E3EditorPaused() &&
+        GetForegroundWindow() == NGame::hWnd && !IsIconic(NGame::hWnd),
+        DW_SEGMENT_TIME, 1.0f / static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
     if (OwnedRender::E3EditorPaused()) return true;
     // check if focus is in application
     /*if (!GetRenderer()->IsActive())
@@ -573,11 +579,11 @@ static bool CountTime()
     // consume that same interval and must not add another camera step.
     while (dwTimeStep > DW_SEGMENT_TIME)
     {
-        theCamera.Step(static_cast<float>(DW_SEGMENT_TIME) /
+        CameraTerrainCollision::AdvanceCamera(&theCamera, static_cast<float>(DW_SEGMENT_TIME) /
                        static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
         dwTimeStep -= DW_SEGMENT_TIME;
     }
-    theCamera.Step(static_cast<float>(dwTimeStep) / static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
+    CameraTerrainCollision::AdvanceCamera(&theCamera, static_cast<float>(dwTimeStep) / static_cast<float>(DW_DEFAULT_SEGMENT_TIME));
 
     // save camera position
     if (!theWorld.IsCombatPause())

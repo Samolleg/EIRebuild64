@@ -915,7 +915,8 @@ void CI3DScreenMission::OnIdle()
                     }
                 }
                 if (!fieldCampCameraReady) {
-                    theCamera.SetCarrier(fieldCampHero);
+                    if (!theCamera.RestoreFieldCampCamera())
+                        theCamera.SetCarrier(fieldCampHero);
                     fieldCampCameraReady = true;
                 }
                 if (fieldCampMusicReady && fieldCampCameraReady) {
