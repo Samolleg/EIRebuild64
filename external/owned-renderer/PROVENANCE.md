@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p2`, commit `ed4262d5d5c0849b3bb68f21a1b40b6cb7463960`.
+integration changes in branch `eirebuild/c74-p3a`, commit `e625b1b969582587248f8a2b47dd33af96a66f30`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -52,3 +52,10 @@ refresh predicate are shared helpers, without moving Lua or gameplay into the
 renderer. Host text measurement/font scaling use the shared interface unit.
 Combat UI receives the pane's actual unit incarnation, effects, catalog, font and
 local clip. Generic GDI operations continue through owned_ui_layers.
+OWN74-P3a connects completed unit health/effects, current and queued attack or
+offensive spell targets, selected AI aggression, source portrait slots and pause.
+The c74 CombatUiRenderer and reference-body plate projection are unchanged.
+Embedded-only entries reset per-draw anchors and retire world-owned display
+values. Token-aware unit retirement preserves a reused resource incarnation.
+The retail portrait memory reader is excluded from embedded calls. HUD atlas
+and icon lane producers remain for OWN74-P3a-2; WS layout remains P3b.

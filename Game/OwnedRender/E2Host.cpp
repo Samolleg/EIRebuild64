@@ -20,6 +20,7 @@ void E2SetHoveredObject(std::int32_t id, std::uint64_t generation, int cursorMod
 void E2ClearHoveredObject() noexcept {
     std::lock_guard<std::mutex> guard(hoverLock);
     hovered = {}; hoverCursorMode = -1;
+    E3PublishHover(0, 0);
 }
 E2HoverSelection E2HoveredObject(int cursorMode) noexcept {
     if (E3EditorPaused() || GetForegroundWindow() != E3Window()) return {};

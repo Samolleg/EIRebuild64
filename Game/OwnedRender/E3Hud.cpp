@@ -1,6 +1,8 @@
 #include "StdAfx.h"
 #include "E3Hud.h"
 #include "E3Input.h"
+#include "E3Combat.h"
+#include "combat_ui.h"
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
 #include "../I3DScrollText.h"
@@ -285,6 +287,23 @@ struct E3HudAccess {
         TextActivity(p[7].activity_values,mission->pScrollText);
         for(unsigned i:{0u,1u,2u,4u,5u,6u,7u,8u,9u})p[i].activity_available=true;
     }
+    static void CombatPortraits(const CI3DScreenMission* mission) {
+        std::vector<owned::CombatPortraitAnchor> anchors;
+        if(mission && mission->pFaces && mission->pFaces->bVisible) {
+            const auto* faces=mission->pFaces;
+            const int count=(std::min)(mission->pUnits.GetSize(),faces->areas.GetSize());
+            anchors.reserve(count);
+            for(int i=0;i<count;++i) {
+                auto* unit=mission->pUnits[i];const auto* area=faces->areas[i];
+                if(!unit || !area)continue;
+                OwnedRender::E3CombatPublishUnit(unit);
+                owned::CombatPortraitAnchor anchor;
+                if(owned::combat_ui_embedded_portrait(unit->GetID(),unsigned(i),area->rect,area->shift,anchor))
+                    anchors.push_back(anchor);
+            }
+        }
+        owned::combat_ui_publish_portraits(anchors.data(),anchors.size());
+    }
     static void Publish(const CI3DScreenMission* mission,unsigned width,unsigned height) {
         inputOwners={};
         messageTextOwner=nullptr;
@@ -328,7 +347,9 @@ struct E3HudAccess {
             p[7].slide_closing=mission->pOutput->slide_dir>0.f;
             Activity(frame,mission);
         }
+        const bool active=frame.active;
         owned::embedded_hud_layout().publish(std::move(frame));
+        CombatPortraits(active?mission:nullptr);
     }
 };
 namespace OwnedRender {
@@ -352,6 +373,10 @@ bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) 
 bool E3HudNativePoint(CI3DObject* object,unsigned area,POINT pixel,POINT& native) noexcept {return E3HudAccess::NativePoint(object,area,pixel,native);}
 void E3PublishHud(const CI3DScreenMission* mission,unsigned width,unsigned height) noexcept {
     try { E3HudAccess::Publish(mission,width,height); }
-    catch(const std::bad_alloc&) { inputOwners={};messageTextOwner=nullptr;owned::embedded_hud_layout().retire(); }
+    catch(const std::bad_alloc&) {
+        inputOwners={};messageTextOwner=nullptr;owned::embedded_hud_layout().retire();
+        owned::combat_ui_publish_portraits(nullptr,0);
+        owned::combat_ui_set_status("Combat portraits omitted: publication allocation failed.");
+    }
 }
 }

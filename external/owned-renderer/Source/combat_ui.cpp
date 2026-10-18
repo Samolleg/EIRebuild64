@@ -1,5 +1,8 @@
 #include "combat_ui.h"
 #include "widescreen.h"
+#ifdef EID3D11_EMBEDDED
+#include "hud_layout_context.h"
+#endif
 #include "engine_bridge.h"
 #include "debug_overlay_config.h"
 #include "ui_language.h"
@@ -236,13 +239,41 @@ void combat_ui_publish_unit(const CombatUnitValue& value) noexcept {
         std::copy_n(value.effects.begin(), value.effect_count, previous.effects.begin());
     } catch (...) { combat_ui_set_status("Combat UI publication failed."); }
 }
-void combat_ui_retire_unit(std::int32_t id) noexcept {
+void combat_ui_retire_unit(std::int32_t id, std::uint64_t incarnation) noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
     const auto it = s.units.find(id);
+    if (incarnation && (it == s.units.end() || it->second.incarnation != incarnation)) return;
     if (it != s.units.end()) { remove_attack(s, it->second); s.units.erase(it); }
     if (s.spell_list.unit.id==id) s.spell_list={};
     if (s.hover_id==id) { s.hover_id=0; s.hover_incarnation=0; }
 }
+#ifdef EID3D11_EMBEDDED
+void combat_ui_begin_embedded_frame(bool paused) noexcept {
+    auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
+    // Anchors belong to this world draw, even if its colour pass is rejected.
+    s.plates.clear();
+    s.paused = s.mission && paused;
+}
+void combat_ui_retire_embedded_world() noexcept {
+    auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
+    s.units.clear(); s.incoming.clear(); s.plates.clear(); s.portraits.clear();
+    s.spell_list = {}; s.paused = false; s.hover_id = 0; s.hover_incarnation = 0;
+}
+bool combat_ui_embedded_portrait(std::int32_t id, unsigned slot,
+    const RECT& native, const POINT& shift, CombatPortraitAnchor& output) noexcept {
+    auto& context = embedded_hud_layout();
+    widescreen::HudComposition h;
+    if (!id || !context.slot_composition(HudPanel::portraits, slot, h)) return false;
+    const auto& layout = context.layout();
+    const float x = widescreen::compose_x(widescreen::placed_to_screen_x(layout,
+        float(native.left + shift.x)), h);
+    const float y = widescreen::compose_y(widescreen::placed_to_screen_y(layout,
+        float(native.top + shift.y)), h);
+    output = {id, x, y, x + float(native.right-native.left)*layout.unit*h.scale,
+        y + float(native.bottom-native.top)*layout.unit*h.scale};
+    return true;
+}
+#endif
 void combat_ui_publish_spell_list(std::int32_t id,std::uint64_t incarnation,
     std::uint64_t epoch,std::uint64_t frame,const RECT& local_viewport) noexcept {
     auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
@@ -328,7 +359,11 @@ void combat_ui_publish_plate(std::int32_t id, float x, float y) noexcept {
     } catch (...) {}
 }
 void combat_ui_publish_portraits(const CombatPortraitAnchor* anchors, std::size_t count) noexcept {
-    try { auto& s = state(); std::lock_guard<std::mutex> guard(s.lock); s.portraits.assign(anchors, anchors + count); } catch (...) {}
+    try {
+        auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
+        if (anchors && count) s.portraits.assign(anchors, anchors + count);
+        else s.portraits.clear();
+    } catch (...) {}
 }
 bool combat_ui_has_output() noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);

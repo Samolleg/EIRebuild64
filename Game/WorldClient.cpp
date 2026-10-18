@@ -75,6 +75,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E1World.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E1VisualFrame.h"
+#include "OwnedRender/E3Combat.h"
 #include "OwnedRender/E1AmbientEffects.h"
 #include "OwnedRender/E2LoadReveal.h"
 #include "WorldServer.h"
@@ -3104,6 +3105,7 @@ BOOL CWorldClient::Draw()
             return static_cast<CTerrain*>(terrain)->GetFogAlpha(CPlot3D(p[0], p[1], p[2]));
         };
         visuals.fogContext = pTerrain;
+        OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
         pRend->GetD3D()->RunC56WorldPass(&visuals);
     }
     // Remaining overlays run after this draw's owned shadows and colour.

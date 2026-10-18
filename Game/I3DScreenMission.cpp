@@ -5,6 +5,7 @@
 #include "combat_ui.h"
 #include <cmath>
 #include "OwnedRender/E3Input.h"
+#include "OwnedRender/E3Combat.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E3Hud.h"
 #include "GameJournal.h"
@@ -1470,6 +1471,9 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
             CMapObject* target = object ? object : unit;
             const auto identity = target ? OwnedRender::E1Scene().Identity(target->GetID()) : owned::LifecycleIdentity{};
             OwnedRender::E2SetHoveredObject(identity.id, identity.generation, theCursor.GetMode());
+            const auto resource = unit && unit->CheckFlag(UNIT_VISIBLE) && !unit->IsDead()
+                ? OwnedRender::E1Scene().Resource(unit) : owned::VisualResourceIncarnation{};
+            OwnedRender::E3PublishHover(resource.signed_id, resource.serial);
         }
     } hoverPublication{pU, pObj};
 
@@ -1485,11 +1489,6 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
     if (pU && !pU->CheckFlag(UNIT_VISIBLE))
         pU = 0;
 #endif // NODEBUGINFO
-
-    const auto hoverIdentity = pU && pU->CheckFlag(UNIT_VISIBLE) && !pU->IsDead()
-        ? OwnedRender::E1Scene().Identity(static_cast<std::int32_t>(pU->GetID()))
-        : owned::LifecycleIdentity{};
-    OwnedRender::E3PublishHover(hoverIdentity.id, hoverIdentity.generation);
 
     // if there is no selection
     pHero = GetSelection(nSelected, nIndex);
@@ -5620,7 +5619,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
         else if (nMode == 2)
         {
             const bool luaStats = ModRuntime::Current() && ModRuntime::Current()->AdvancedUI("useLS_DrawStats");
-            const auto resource = OwnedRender::E1Scene().Resource(pDrawUnit->GetObjectSpecific());
+            const auto resource = OwnedRender::E1Scene().Resource(pDrawUnit);
             if (!luaStats || owned::owned_text_begin_stats(resource.serial, pszName, pI3D->IsAltDown() != FALSE)) {
                 DrawStats(pDrawUnit);
                 if (luaStats) owned::owned_text_complete_stats();
@@ -5631,7 +5630,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
             PublishSpellEffects(pDrawUnit);
             CRect viewport(0, 35, 160, 215);
             pI3D->VirtualToScreenLocal(viewport);
-            const auto resource = OwnedRender::E1Scene().Resource(pDrawUnit->GetObjectSpecific());
+            const auto resource = OwnedRender::E1Scene().Resource(pDrawUnit);
             const auto stamp = textDraw.Stamp();
             owned::combat_ui_publish_spell_list(pDrawUnit->GetID(), resource.serial,
                 stamp.epoch, stamp.frame, viewport);
@@ -5669,70 +5668,8 @@ void CI3DObjectInfo::DrawName(LPCTSTR pszName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::PublishSpellEffects(CUnit *pUnit)
 {
-    // Game values only. c74 owns all rows, icons, scroll, text and clipping.
-    const auto resource = OwnedRender::E1Scene().Resource(pUnit->GetObjectSpecific());
-    if (!resource.serial) {
-        GameJournal::Event("render", "pane_effects_omitted", "reason=unit_resource_unavailable");
-        return;
-    }
-    std::array<owned::CombatEffectDefinition, 256> catalog{};
-    const bool hd = UseModInterfaceHD();
-    const int count = (std::min)(256, int(theSpellDatabase.spells.GetNumEntries()));
-    for (int i = 0; i < count; ++i) {
-        const auto* spell = theSpellDatabase.spells[i];
-        if (!spell) continue;
-        auto& definition = catalog[i];
-        const char* code = spell->GetCodeName();
-        if (!code) continue;
-        strncpy_s(definition.name.data(), definition.name.size(), code, _TRUNCATE);
-        definition.valid = definition.name[0] != 0;
-        definition.hd_icon = hd; definition.icon = spell->dwTextureTypeIndex;
-        for (const char* harmful : {"stench","stun","weak","feeblemind","slow","firewall","litnwall","acid_fog"})
-            if (_stricmp(code,harmful) == 0) definition.debuff = true;
-    }
-    owned::combat_ui_publish_catalog(catalog);
-    owned::CombatUnitValue value;
-    value.id = pUnit->GetID(); value.incarnation = resource.serial;
-    value.health = pUnit->GetHP(); value.maximum_health = pUnit->GetMaxHP();
-    value.dead = pUnit->GetHP() <= 0;
-    const auto& effects = pUnit->GetSpellEffects();
-    const CUnit* server = theWorldServer.GetUnit(pUnit->GetID());
-    bool paired = server && server->GetSpellEffects().GetSize() == effects.GetSize() && effects.GetSize() <= 256;
-    if (paired) for (int i = 0; i < effects.GetSize(); ++i)
-        if (effects[i].nSpellID != server->GetSpellEffects()[i].nSpellID || !std::isfinite(server->GetSpellEffects()[i].fpPower)) { paired = false; break; }
-    std::array<float,256> maximum{};
-    if (paired) for (int i = 0; i < effects.GetSize(); ++i) {
-        const int id = effects[i].nSpellID;
-        if (id >= 0 && id < 256)
-            maximum[id] = (std::max)(maximum[id], server->GetSpellEffects()[i].fpPower);
-    }
-    for (int i = 0; i < effects.GetSize() && value.effect_count < value.effects.size(); ++i) {
-        const auto& input = effects[i]; const int id = input.nSpellID;
-        if (id < 0 || id >= 256) continue;
-        auto& output = value.effects[value.effect_count++];
-        output.id = static_cast<std::uint8_t>(id); output.ticks = input.nDuration;
-        if (!paired) continue;
-        output.amount = server->GetSpellEffects()[i].fpPower;
-        output.whole_amount = maximum[id] > 10.f;
-        if (id <= SPELL_ID_POISONFOG || id == SPELL_ID_VAMP) {
-            const auto* spell = theSpellDatabase.spells[id];
-            if (!spell) continue;
-            const auto subtype = spell->mstSubtype;
-            const auto* stats = pUnit->GetUserUnitStats();
-            float base = 0;
-            if (subtype >= RPGMST_FIRE && subtype <= RPGMST_ACID) base = stats->cAutoSkills[RPGASKL_ELEMENTAL];
-            else if (subtype >= RPGMST_ILLUSION && subtype <= RPGMST_DIVINATION) base = stats->cAutoSkills[RPGASKL_SENSE];
-            else if (subtype >= RPGMST_ENCHANTMENTS && subtype <= RPGMST_DOMINATION) base = stats->cAutoSkills[RPGASKL_ASTRAL];
-            else continue;
-            const float component = base + float(stats->GetPerkModifier(RPGPRK_FIRE + subtype));
-            const double sum = double(component) + double(int(stats->cIntelligence) - 25);
-            if (sum < INT_MIN || sum > INT_MAX) continue;
-            const int skill = int(sum);
-            output.amount *= float(double(.8f) + (double(float(skill)) * 30.0 / 120.0) / 100.0);
-        }
-        output.amount_available = std::isfinite(output.amount);
-    }
-    owned::combat_ui_publish_unit(value);
+    OwnedRender::E3CombatCatalog();
+    OwnedRender::E3CombatPublishUnit(pUnit);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::DrawStats(CUnit *pUnit)

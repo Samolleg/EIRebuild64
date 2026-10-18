@@ -42,7 +42,7 @@ struct CombatPortraitAnchor {
 };
 
 void combat_ui_publish_unit(const CombatUnitValue& value) noexcept;
-void combat_ui_retire_unit(std::int32_t id) noexcept;
+void combat_ui_retire_unit(std::int32_t id, std::uint64_t incarnation = 0) noexcept;
 void combat_ui_publish_catalog(const std::array<CombatEffectDefinition, 256>& catalog) noexcept;
 void combat_ui_publish_font(const void* bytes, std::size_t size, std::uint64_t generation) noexcept;
 void combat_ui_set_mission(bool active) noexcept;
@@ -60,6 +60,13 @@ void combat_ui_place_spell_list(std::uint64_t epoch, std::uint64_t frame,
 bool combat_ui_has_output() noexcept;
 bool combat_ui_needs_plate(std::int32_t id) noexcept;
 void register_combat_ui_options(RendererConfig& config);
+#ifdef EID3D11_EMBEDDED
+// Synchronous typed entries; the normal c74 renderer consumes the same state.
+void combat_ui_begin_embedded_frame(bool paused) noexcept;
+void combat_ui_retire_embedded_world() noexcept;
+bool combat_ui_embedded_portrait(std::int32_t id, unsigned slot,
+    const RECT& native, const POINT& shift, CombatPortraitAnchor& output) noexcept;
+#endif
 
 // One icon atlas and the existing owned UI backend; background I/O never calls
 // an engine resource manager or the immediate D3D context.

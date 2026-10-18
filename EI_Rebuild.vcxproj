@@ -340,6 +340,7 @@
     <ClCompile Include="Game\OwnedRender\E2Input.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\Startup.cpp"><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E3Game.cpp" />
+    <ClCompile Include="Game\OwnedRender\E3Combat.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E3Hud.cpp" />
     <ClCompile Include="Game\OwnedRender\E3Scale.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\OwnedRender\E3Input.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>

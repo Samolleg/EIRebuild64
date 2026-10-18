@@ -1,4 +1,5 @@
 #include "E1Scene.h"
+#include "combat_ui.h"
 #include "owned_resource_runtime.h"
 #include "owned_resource_store.h"
 
@@ -157,6 +158,7 @@ bool E1SceneMembership::Matches(const void* source, std::uint64_t generation) co
 void E1SceneMembership::RetireResources() noexcept {
     for (const auto& entry : resources) scene.visual_finish_resource(entry.second, false);
     resources.clear();
+    owned::combat_ui_retire_embedded_world();
 }
 void E1SceneMembership::Begin(const void* source, std::uint64_t generation) noexcept {
     if (!source || !generation || Matches(source, generation)) return;
@@ -201,11 +203,13 @@ bool E1SceneMembership::Added(const void* source, std::uint64_t generation, std:
 void E1SceneMembership::Removed(const void* source, std::uint64_t generation, std::int32_t id) noexcept {
     if (!Matches(source, generation) || id <= 0) return;
     scene.lifecycle_removed(id);
+    owned::combat_ui_retire_unit(id);
     members.erase(id);
 }
 void E1SceneMembership::ResetPositive(const void* source, std::uint64_t generation) noexcept {
     if (!Matches(source, generation)) return;
     members.clear();
+    owned::combat_ui_retire_embedded_world();
     scene.positive_lifecycle_reset(epoch = advance(nextEpoch));
 }
 owned::VisualResourceIncarnation E1SceneMembership::BeginResource(const void* source,
@@ -222,6 +226,7 @@ bool E1SceneMembership::FinishResource(owned::VisualResourceIncarnation resource
     if (!resource.serial) return false;
     const bool finished = scene.visual_finish_resource(resource, success);
     if (!success) {
+        owned::combat_ui_retire_unit(resource.signed_id,resource.serial);
         for (auto it = resources.begin(); it != resources.end(); ++it) {
             if (it->second.signed_id == resource.signed_id && it->second.serial == resource.serial) {
                 resources.erase(it);
@@ -235,6 +240,7 @@ void E1SceneMembership::DestroyResource(const void* object) noexcept {
     const auto it = resources.find(object);
     if (it == resources.end()) return;
     // Token-aware retirement cannot delete another object's reused ID.
+    owned::combat_ui_retire_unit(it->second.signed_id,it->second.serial);
     scene.visual_finish_resource(it->second, false);
     resources.erase(it);
 }

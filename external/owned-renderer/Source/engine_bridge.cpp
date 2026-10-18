@@ -28268,8 +28268,11 @@ std::string debug_root() {
 // Reads the game's units: game thread only (the scene thread's overlay frame
 // skips it; queue_present runs it on the game thread instead).
 void bridge_update_combat_portraits() noexcept {
+#ifndef EID3D11_EMBEDDED
     if (g_scene_frame_values_installed) return;
     publish_combat_portraits();
+#endif
+    // Embedded portraits are completed by the source HUD owner, before draw.
 }
 
 std::uint64_t bridge_camp_texture_generation() noexcept {

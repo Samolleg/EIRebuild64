@@ -4,6 +4,7 @@
 #include "../../stdafx.h"
 #include "E1VisualFrame.h"
 #include "E1Scene.h"
+#include "E3Combat.h"
 #include "../WorldClient.h"
 #include "../Object3DClientSpecific.h"
 #include "../Unit.h"
@@ -42,6 +43,7 @@ bool sameMaterial(const owned::MaterialCpuAsset& a,const owned::MaterialCpuAsset
 // The retained scene still owns completed object poses; changing a frame's
 // rendering class must never switch the scene to the retail route evaluator.
 bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept try {
+    E3CombatCatalog();
     for(auto& sample:frame.entities) {
         if(sample.status!=owned::RetainedVisualStatus::ready || !sample.assembly)continue;
         auto* object=theWorld.GetMapObject(sample.resource.signed_id);
@@ -76,6 +78,7 @@ bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept try {
             if(!E1Scene().Scene().visual_publish_assembly(sample.resource,changed))return false;
             sample.assembly=std::move(changed);
         }
+        E3CombatPublishUnit(static_cast<CUnit*>(object));
         sample.completed_pose=true;
         sample.values.unit=true;
         sample.values.dead=static_cast<CUnit*>(object)->IsDead()!=FALSE;
