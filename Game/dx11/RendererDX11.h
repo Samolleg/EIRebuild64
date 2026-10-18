@@ -64,6 +64,11 @@ private:
     OwnedRendererClient ownedRenderer;
     std::uint64_t boundParticleSurface = 0;
     bool ownedWorldActive = false;
+    owned::EmbeddedPrintBatch c74Prints;
+    owned::FixedState CaptureC74EffectState();
+    HRESULT PrepareC74Effect(bool requireWorld, bool useTexture, owned::FixedState&,
+        std::shared_ptr<owned::SurfaceImage>&);
+    bool FinishC74Effect(HRESULT, const char* event);
     bool campPopupActive = false, campPopupFailed = false;
     std::array<float, 16> ownedWorldToClip{};
     bool c56WorldPassRan = false;
@@ -103,6 +108,11 @@ public:
     void ReportC56FigureNoMatrix();
     void ReportC56FigureSkipSummary();
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
+    bool SubmitC74Ribbon(const owned::EmbeddedRibbonInput&);
+    bool SubmitC74Selection(const owned::GameSelectionView&);
+    bool SubmitC74Print(const owned::EmbeddedPrintInput&);
+    bool FlushC74Prints();
+    bool SubmitC74CombatText(const owned::EmbeddedCombatTextInput&);
     bool SubmitC56CampFigure(const owned::NativeGeometryView& view);
     bool FlushC56CampFigures();
     bool SubmitC56CampPopup(owned::CampRenderRequest,owned::CampPopupDraw,void*);

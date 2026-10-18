@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-embed`, commit `203547bf0e2268721abf20975fb005121b7c99cb`.
+integration changes in branch `eirebuild/c74-embed`, commit `82e064e4143aff434b2977b3db716145bfb36d54`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -29,3 +29,10 @@ Sea surf, level river outflow, water shading, snow trail shadows and painted-str
 pixel kinds follow candidate-74. The typed host interface, normalized wave glint,
 world retirement, precipitation and progress movie ownership remain embedded.
 Russian F10 labels include the upstream maps-without-sea setting.
+
+FX74 adds synchronous typed host inputs (embedded_game_effects.h) to the same
+candidate-74 ribbon, selection, print and combat-text GPU producers. The host
+retains lightning/selection/print simulation and the visual damage list; renderer
+code expands the strips and meshes, groups print texture/state runs, chooses the
+text anchor, and lays out/scales glyphs. Embedded inputs do not read retail
+addresses. The proxy producers and shaders are unchanged.

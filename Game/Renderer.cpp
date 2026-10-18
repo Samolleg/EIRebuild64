@@ -253,203 +253,27 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, CSimplyArray<CLight *, CLight *> &l
     return pFigureSpec->Draw(this, lights, pMaterial, cFog, pRect, pTexture0, pTexture1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// works in projection space, center - center of lighning route to create new segment, vector -
-// direction of new pair of points, res - array where result is stored, nCount - number of vertexes
-// made so far
-static float fp3DLineU, fp3DLineV1, fp3DLineV2;
-static void GeneratePointsPair(const D3DTLVERTEX &center, const CPlot2D &ptVector,
-                               CTLVertexArray &res, int &nCount, float fpW)
-{
-    D3DTLVERTEX &v = res[nCount++];
-    float fpStep = fpW * 15 * center.rhw;
-    fpStep /= fabs(ptVector);
-
-    v = center;
-    v.sx += fpStep * ptVector.y;
-    v.sy -= fpStep * ptVector.x;
-    v.tu = fp3DLineU;
-    v.tv = fp3DLineV1;
-
-    D3DTLVERTEX &v1 = res[nCount++];
-
-    v1 = center;
-    v1.sx -= fpStep * ptVector.y;
-    v1.sy += fpStep * ptVector.x;
-    v1.tu = fp3DLineU;
-    v1.tv = fp3DLineV2;
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
-inline CPlot2D GetDirection(int nIdx, int nNum, CTLVertexArray &src)
-{
-    switch (nNum)
-    {
-    case 1:
-        return CPlot2D(src[nIdx].sx - src[nIdx - 1].sx, src[nIdx].sy - src[nIdx - 1].sy);
-    case 2:
-        if (nIdx < src.GetSize() - 1)
-            return CPlot2D(src[nIdx + 1].sx - src[nIdx - 1].sx,
-                           src[nIdx + 1].sy - src[nIdx - 1].sy);
-        else
-            return CPlot2D(src[nIdx].sx - src[nIdx - 1].sx, src[nIdx].sy - src[nIdx - 1].sy);
-        break;
-    }
-    ASSERT(0 && "Wrong use of CLightning::GetDirection");
-    return CPlot2D(1, 0);
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
+// Typed c74 inputs only: GPU strip expansion and clipping belong to renderer.
 BOOL CRenderer::Draw3DLine(CXYZWArray &points, const float fpLineWidth, const int nBVClipFlags,
                            float fpTextureLength, float fpTexVStart, float fpTexVWidth)
 {
-    CDXGeometryProcessor *pGPU = GetGPU();
-    CTLPipeline *pGeometryProcessor = pGPU->GetGeometryProcessor();
-    int nClipFlag = nBVClipFlags;
-    int i;
-    // Define temporary arrays
-    static CBYTEArray clips;
-    static CWORDArray tFaces;
-    static CXYZWArray projVertexes;
-    static CTLVertexArray srcVertexes, transVertexes;
-    // set sizes of arrays
-    int nVertexNum = points.GetSize();
-    projVertexes.SetSize(nVertexNum);
-    transVertexes.SetSize(nVertexNum);
-    srcVertexes.SetSize(nVertexNum * 2 + 100);
-    clips.SetSize(nVertexNum);
-    tFaces.SetSize(srcVertexes.GetSize() * 3 + 150);
-    tFaces.SetSize(0);
-    // first, check BV agains current matrix stack
-    if (nClipFlag == TRV_INVISIBLE)
+    if (nBVClipFlags == TRV_INVISIBLE || points.GetSize() < 2)
         return TRUE;
-    if (points.GetSize() <= 1)
-        return TRUE;
-    float fpDU = fpTextureLength / (points.GetSize() - 1);
-    fp3DLineU = fpTextureLength != 0 ? 0 : 0.875f;
-    fp3DLineV1 = fpTexVStart;
-    fp3DLineV2 = fp3DLineV1 + fpTexVWidth;
-    // project this points
-    if (nClipFlag == TRV_VISIBLE_NOCLIP)
-        pGeometryProcessor->TransformVertices(pGPU->GetMatrix(MAT_STACK_SCRNSPACE),
-                                              points.GetData(), projVertexes.GetData(),
-                                              points.GetSize());
-    else
-        nClipFlag = pGeometryProcessor->TransformVertices(pGPU->GetMatrix(MAT_STACK_PROJSPACE),
-                                                          points.GetData(), projVertexes.GetData(),
-                                                          clips.GetData(), points.GetSize());
-    if (nClipFlag == TRV_INVISIBLE)
-        return TRUE;
-    // compose T&L vertices
-    for (i = 0; i < projVertexes.GetSize(); i++)
-    {
-        Copy128Bits(&transVertexes[i].sx, &projVertexes[i].x);
-        transVertexes[i].color = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0xFF);
-        transVertexes[i].specular = RGBA_MAKE(0, 0, 0, 0xFF);
-    }
-    transVertexes[0].color = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
-    transVertexes[projVertexes.GetSize() - 1].color = RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
-    // create points list & mesh
-    BOOL bPrevPointsReady = FALSE;
-    int nCurSrcVertex = 0;
-
-    if (nClipFlag == TRV_VISIBLE_NOCLIP)
-    {
-        for (i = 1; i < transVertexes.GetSize(); i++)
-        {
-            if (!bPrevPointsReady)
-            {
-                GeneratePointsPair(transVertexes[i - 1], GetDirection(i, 1, transVertexes),
-                                   srcVertexes, nCurSrcVertex, fpLineWidth);
-            }
-            fp3DLineU += fpDU;
-            if (i == transVertexes.GetSize() - 1)
-                GeneratePointsPair(transVertexes[i], GetDirection(i, 1, transVertexes), srcVertexes,
-                                   nCurSrcVertex, fpLineWidth);
-            else
-                GeneratePointsPair(transVertexes[i], GetDirection(i, 2, transVertexes), srcVertexes,
-                                   nCurSrcVertex, fpLineWidth);
-            bPrevPointsReady = TRUE;
-            // add 2 triangles
-            tFaces.Add(nCurSrcVertex - 4);
-            tFaces.Add(nCurSrcVertex - 3);
-            tFaces.Add(nCurSrcVertex - 2);
-            tFaces.Add(nCurSrcVertex - 2);
-            tFaces.Add(nCurSrcVertex - 3);
-            tFaces.Add(nCurSrcVertex - 1);
-        }
-    }
-    else
-    {
-        pGeometryProcessor->CastProjectionToScreenC(transVertexes.GetData(),
-                                                    transVertexes.GetSize());
-        for (i = 1; i < transVertexes.GetSize(); i++)
-        {
-            // fake compare, must develop more advanced ( possible situation when both have nonzero
-            // clips but segment is visible )
-            if (clips[i - 1] == 0 || clips[i] == 0)
-            {
-                if (!bPrevPointsReady)
-                {
-                    GeneratePointsPair(transVertexes[i - 1], GetDirection(i, 1, transVertexes),
-                                       srcVertexes, nCurSrcVertex, fpLineWidth);
-                }
-                fp3DLineU += fpDU;
-                if (i == transVertexes.GetSize() - 1)
-                    GeneratePointsPair(transVertexes[i], GetDirection(i, 1, transVertexes),
-                                       srcVertexes, nCurSrcVertex, fpLineWidth);
-                else
-                    GeneratePointsPair(transVertexes[i], GetDirection(i, 2, transVertexes),
-                                       srcVertexes, nCurSrcVertex, fpLineWidth);
-                bPrevPointsReady = TRUE;
-                // add 2 triangles
-                tFaces.Add(nCurSrcVertex - 4);
-                tFaces.Add(nCurSrcVertex - 3);
-                tFaces.Add(nCurSrcVertex - 2);
-                tFaces.Add(nCurSrcVertex - 2);
-                tFaces.Add(nCurSrcVertex - 3);
-                tFaces.Add(nCurSrcVertex - 1);
-            }
-            else
-            {
-                bPrevPointsReady = FALSE;
-                fp3DLineU += fpDU;
-            }
-        }
-    }
-    if (tFaces.GetSize() == 0)
-        return TRUE;
-    // set 'ADD' mode
-    DWORD dwOldSrcBlend, dwOldDstBlend;
-    GetRenderState(D3DRENDERSTATE_SRCBLEND, &dwOldSrcBlend);
-    GetRenderState(D3DRENDERSTATE_DESTBLEND, &dwOldDstBlend);
-    SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
-    SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_ONE);
-
-    DWORD screenWidth, screenHeight;
-    pDX11->GetCurrentMode(screenWidth, screenHeight);
-    for (i = 0; i < srcVertexes.GetSize(); i++)
-    {
-        STLVertex1 *pVertex = (STLVertex1 *)&srcVertexes[i];
-        STLVertex1 &vertex = *pVertex;
-
-        // convert to NDC space -1..1
-        CPlot3D screen = { (2 * vertex.sx / screenWidth) - 1.f,
-                           -(2 * vertex.sy / screenHeight) + 1.f, 0 };
-
-        vertex.sx = screen.x;
-        vertex.sy = screen.y;
-        vertex.sz = 0.0;
-        vertex.rhw = 1.0;
-    }
-    this->SetProjectionMatrixOne();
-    // render it
-    BOOL bRetVal = RenderTriangleSet(reinterpret_cast<STLVertex1 *>(srcVertexes.GetData()),
-                                     srcVertexes.GetSize(), tFaces.GetData(), tFaces.GetSize());
-    // restore blending mode
-    SetRenderState(D3DRENDERSTATE_SRCBLEND, dwOldSrcBlend);
-    SetRenderState(D3DRENDERSTATE_DESTBLEND, dwOldDstBlend);
-
-    return bRetVal;
+    std::vector<owned::GameRibbonPoint> values(points.GetSize());
+    for (int i = 0; i < points.GetSize(); ++i)
+        values[i] = {points[i].x, points[i].y, points[i].z};
+    owned::EmbeddedRibbonInput input;
+    input.points = values.data(); input.count = static_cast<std::uint32_t>(values.size());
+    input.width = fpLineWidth; input.clip_flags = nBVClipFlags;
+    input.texture_length = fpTextureLength; input.v_start = fpTexVStart; input.v_width = fpTexVWidth;
+    input.interface_pass = !pDX11->IsOwnedWorldActive();
+    const auto& projection = GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
+    std::memcpy(input.projection.object_to_clip.data(), &projection, sizeof(input.projection.object_to_clip));
+    const RECT& clip = GetWindowRect();
+    input.projection.clip_half_width = float(clip.right - clip.left) * .5f;
+    input.projection.clip_half_height = float(clip.bottom - clip.top) * .5f;
+    pDX11->SubmitC74Ribbon(input);
+    return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles)
@@ -492,66 +316,14 @@ BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawA
 BOOL CRenderer::DrawSelection(const CPlot3D &cp, const float fSize, const CPlot3D &ptXAxis,
                               const CPlot3D &ptYAxis)
 {
-    // triangle around character
-    float fRadius = fSize / 3.0f;
-    WORD indices[18] = { 0, 4, 3, 0, 1, 4, 1, 5, 4, 1, 2, 5, 2, 3, 5, 2, 0, 3 };
-    SXYZW4 selectionPlots[2] = {};
-    float fAddHeight = 0.3f;
-    CPlot2D maps[8];
-    //
-    memset(maps, 0, sizeof(maps));
-    // form vertices for selection
-    CPlot3D ptPlot(cp + 3.0f * fRadius * ptXAxis + 2.0f * fRadius * ptYAxis);
-    selectionPlots[0].x[0] = ptPlot.x;
-    selectionPlots[0].y[0] = ptPlot.y;
-    selectionPlots[0].z[0] = cp.z + fAddHeight;
-    selectionPlots[0].w[0] = 1.0f;
-    //
-    ptPlot.SetPlot(cp - 3.0f * fRadius * ptXAxis + 2.0f * fRadius * ptYAxis);
-    selectionPlots[0].x[1] = ptPlot.x;
-    selectionPlots[0].y[1] = ptPlot.y;
-    selectionPlots[0].z[1] = cp.z + fAddHeight;
-    selectionPlots[0].w[1] = 1.0f;
-    //
-    ptPlot.SetPlot(cp - 5.0f * fRadius * ptYAxis);
-    selectionPlots[0].x[2] = ptPlot.x;
-    selectionPlots[0].y[2] = ptPlot.y;
-    selectionPlots[0].z[2] = cp.z + fAddHeight;
-    selectionPlots[0].w[2] = 1.0f;
-    //
-    ptPlot.SetPlot(cp + 2.0f * fRadius * ptXAxis + 1.4f * fRadius * ptYAxis);
-    selectionPlots[0].x[3] = ptPlot.x;
-    selectionPlots[0].y[3] = ptPlot.y;
-    selectionPlots[0].z[3] = cp.z + fAddHeight;
-    selectionPlots[0].w[3] = 1.0f;
-    //
-    ptPlot.SetPlot(cp - 2.0f * fRadius * ptXAxis + 1.4f * fRadius * ptYAxis);
-    selectionPlots[1].x[0] = ptPlot.x;
-    selectionPlots[1].y[0] = ptPlot.y;
-    selectionPlots[1].z[0] = cp.z + fAddHeight;
-    selectionPlots[1].w[0] = 1.0f;
-    //
-    ptPlot.SetPlot(cp - 4.0f * fRadius * ptYAxis);
-    selectionPlots[1].x[1] = ptPlot.x;
-    selectionPlots[1].y[1] = ptPlot.y;
-    selectionPlots[1].z[1] = cp.z + fAddHeight;
-    selectionPlots[1].w[1] = 1.0f;
-    //
-    selectionPlots[1].x[2] = cp.x;
-    selectionPlots[1].y[2] = cp.y;
-    selectionPlots[1].z[2] = cp.z + fAddHeight;
-    selectionPlots[1].w[2] = 1.0f;
-    //
-    selectionPlots[1].x[3] = cp.x;
-    selectionPlots[1].y[3] = cp.y;
-    selectionPlots[1].z[3] = cp.z + fAddHeight;
-    selectionPlots[1].w[3] = 1.0f;
-
-    this->SetProjectionMatrix();
-
-    this->Render(selectionPlots, maps, 2, indices, 18, RGBA_MAKE(0, 255, 0, 128),
-                 RGBA_MAKE(0, 0, 0, 255), 0);
-
+    owned::GameSelectionView view;
+    view.marker = {cp.x, cp.y, cp.z, fSize, {ptXAxis.x, ptXAxis.y}, {ptYAxis.x, ptYAxis.y}};
+    const auto& projection = GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
+    std::memcpy(view.object_to_clip.data(), &projection, sizeof(view.object_to_clip));
+    const RECT& clip = GetWindowRect();
+    view.clip_half_width = float(clip.right - clip.left) * .5f;
+    view.clip_half_height = float(clip.bottom - clip.top) * .5f;
+    pDX11->SubmitC74Selection(view);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////

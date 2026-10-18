@@ -18,6 +18,7 @@
 #include "world_fog.h"
 #include "ambient_occlusion.h"
 #include "game_particles.h"
+#include "combat_text.h"
 #include "sky_clouds.h"
 #include "cave_lighting.h"
 #include "terrain_material.h"
@@ -9303,6 +9304,98 @@ HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& 
  ID3D11ShaderResourceView* none=nullptr;context_->VSSetShaderResources(7,1,&none);
  return S_OK;
 }
+
+#ifdef EID3D11_EMBEDDED
+HRESULT Renderer::draw_embedded_ribbon(const EmbeddedRibbonInput& input,
+    const FixedState& state, SurfaceImage* texture) {
+    if(input.clip_flags==2 || input.count<2)return S_OK;
+    if(!input.points || !std::isfinite(input.width) || !std::isfinite(input.texture_length) ||
+       !std::isfinite(input.v_start) || !std::isfinite(input.v_width))return E_INVALIDARG;
+    GameRibbonView view{};
+    view.points=input.points;view.count=input.count;
+    view.object_to_clip=input.projection.object_to_clip;
+    view.clip_half_width=input.projection.clip_half_width;
+    view.clip_half_height=input.projection.clip_half_height;
+    view.half_width_pixels_w=15.0f*input.width;
+    game_ribbon_strip(input.texture_length,input.v_start,input.v_width,input.count,view.strip);
+    view.interface_pass=input.interface_pass;
+    auto additive=state;
+    additive.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;
+    additive.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_ONE;
+    return draw_game_ribbon(view,additive,texture);
+}
+
+HRESULT EmbeddedPrintBatch::append(const EmbeddedPrintInput& input, const FixedState& state,
+    std::shared_ptr<SurfaceImage> texture) noexcept try {
+    if(!input.index_count)return S_OK;
+    if(!input.groups || !input.maps || !input.indices || input.index_count%3 ||
+       input.group_count>UINT_MAX/4u || vertices.size()>UINT_MAX-input.index_count)return E_INVALIDARG;
+    for(std::uint32_t k=0;k<input.index_count;++k)
+        if(input.indices[k]>=input.group_count*4u || input.indices[k]>=input.map_count)return E_INVALIDARG;
+    const auto first=vertices.size();
+    const auto needed=first+input.index_count;
+    if(vertices.capacity()<needed)vertices.reserve((std::max)(needed,vertices.capacity()*2));
+    if(runs.size()==runs.capacity())runs.reserve((std::max)(runs.size()+1,runs.capacity()*2));
+    vertices.resize(first+input.index_count);
+    for(std::uint32_t k=0;k<input.index_count;++k) {
+        const auto i=input.indices[k];
+        game_print_vertex_gpu(input.groups[i/4u].data(),i%4u,input.maps[i][0],input.maps[i][1],
+            input.color,vertices[first+k]);
+    }
+    if(!runs.empty()) {
+        auto& last=runs.back();
+        if(last.texture==texture && last.projection.object_to_clip==input.projection.object_to_clip &&
+           last.projection.clip_half_width==input.projection.clip_half_width &&
+           last.projection.clip_half_height==input.projection.clip_half_height &&
+           std::memcmp(&last.state,&state,sizeof(FixedState))==0) {
+            last.count+=input.index_count;return S_OK;
+        }
+    }
+    Run run{};run.texture=std::move(texture);run.state=state;run.projection=input.projection;
+    run.first=static_cast<UINT>(first);run.count=input.index_count;
+    runs.push_back(std::move(run));return S_OK;
+} catch(...) { return E_OUTOFMEMORY; }
+
+HRESULT Renderer::draw_embedded_prints(EmbeddedPrintBatch& batch) {
+    HRESULT result=S_OK;
+    for(const auto& run:batch.runs) {
+        const auto& p=run.projection;
+        const HRESULT hr=draw_game_print_run(batch.vertices.data()+run.first,run.count,p.object_to_clip,
+            p.clip_half_width,p.clip_half_height,run.state,run.texture.get());
+        if(FAILED(hr) && SUCCEEDED(result))result=hr;
+    }
+    batch.clear();return result;
+}
+
+HRESULT Renderer::draw_embedded_combat_text(const EmbeddedCombatTextInput& input,
+    const FixedState& state, SurfaceImage* texture) {
+    if(!input.enabled || !input.count)return S_OK;
+    if(!input.events || !(input.screen_width>0) || !(input.screen_height>0))return E_INVALIDARG;
+    const auto now=embedded_combat_text_clock_ms(input.game_time_segments);
+    std::vector<GameParticleGpu> glyphs;
+    try {
+        for(std::uint32_t i=0;i<input.count;++i) {
+            const auto& event=input.events[i];const auto& unit=event.unit;
+            const auto age=static_cast<std::int32_t>(now-event.time_ms);
+            CombatTextEntry entry{};
+            entry.progress=input.addon_layout?static_cast<float>(age)/3000.0f:
+                static_cast<float>(age)*kCombatTextProgressPerMs;
+            if(entry.progress<0 || entry.progress>1 || !unit.present || !unit.visible ||
+               unit.hidden || !unit.unit_visible || !unit.has_figure)continue;
+            const auto& rect=unit.figure_visible?unit.figure_rect:unit.unit_rect;
+            entry.anchor_x=(rect[0]+rect[2])/2;entry.anchor_y=(rect[1]+rect[3])/2;
+            entry.amount=event.amount;entry.flags=event.flags;entry.owned_unit=unit.owned_unit;
+            if(input.addon_layout)combat_text_layout_addon(entry,input.screen_width,input.screen_height,
+                widescreen_combat_text_scale(),glyphs);
+            else combat_text_layout(entry,input.screen_width,input.screen_height,
+                widescreen_combat_text_scale(),glyphs);
+        }
+    } catch(...) { return E_OUTOFMEMORY; }
+    if(glyphs.empty())return S_OK;
+    GameGlyphView view{};view.glyphs=glyphs.data();view.count=static_cast<std::uint32_t>(glyphs.size());
+    return draw_game_glyphs(view,state,texture);
+}
+#endif
 
 HRESULT Renderer::draw_game_ribbon(const GameRibbonView& view,const FixedState& st,SurfaceImage* texture){
  if(scene_queue()){

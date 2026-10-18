@@ -356,6 +356,8 @@ public:
     float GetFPSCoeff() const;
     float GetTimeStep() const;
     float GetPreciseTime() { return fpTimeFraction + nSegmentTimeCounter; }
+    // Render-only clock: preserve the same tick/fraction precision read by c74.
+    double GetRenderTimeSegments() const { return double(nSegmentTimeCounter) + double(fpTimeFraction); }
     void SetTimeFraction(float fpNewVal) { fpTimeFraction = fpNewVal; }
     int GetFrameCounter() { return nFrameCounter; }
     int GetShadowAlpha() const { return nShadowAlpha; };

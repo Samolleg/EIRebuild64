@@ -377,6 +377,94 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
     return false;
 }
 
+owned::FixedState CDX11::CaptureC74EffectState()
+{
+    auto state = CaptureC56MaterialState();
+    // c74 effect coordinates use logical host pixels, independent of render scale.
+    state.viewport.dwX = state.viewport.dwY = 0;
+    state.viewport.dwWidth = m_width; state.viewport.dwHeight = m_height;
+    return state;
+}
+HRESULT CDX11::PrepareC74Effect(bool requireWorld, bool useTexture, owned::FixedState& state,
+    std::shared_ptr<owned::SurfaceImage>& texture)
+{
+    if (!rendererFacade || !rendererFacade->FrameActive() || (requireWorld && !ownedWorldActive))
+        return E_UNEXPECTED;
+    state = CaptureC74EffectState();
+    HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
+        HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
+        return FAILED(flushed) ? flushed : renderer.flush_native();
+    });
+    if (SUCCEEDED(hr) && useTexture && boundFigureTextures[0])
+        hr = OwnedRender::E1ParticleSurfaceImage(device.Get(), deviceContext.Get(), boundParticleSurface, texture);
+    return hr;
+}
+bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
+{
+    if (rendererFacade && rendererFacade->FrameActive()) RestoreHostBindings();
+    if (SUCCEEDED(hr)) return true;
+    static std::map<std::string, HRESULT> failures;
+    const auto found = failures.find(event);
+    if (found == failures.end() || found->second != hr) {
+        failures[event] = hr;
+        GameJournal::Event("RENDER", event, "owner=c74 reason=renderer_rejected hr=%08lx", static_cast<unsigned long>(hr));
+    }
+    return false;
+}
+bool CDX11::SubmitC74Ribbon(const owned::EmbeddedRibbonInput& input)
+{
+    owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
+    HRESULT hr = PrepareC74Effect(!input.interface_pass, true, state, texture);
+    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.draw_embedded_ribbon(input, state, texture.get());
+    });
+    return FinishC74Effect(hr, "ribbon_skipped");
+}
+bool CDX11::SubmitC74Selection(const owned::GameSelectionView& view)
+{
+    owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
+    HRESULT hr = PrepareC74Effect(true, false, state, texture);
+    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.draw_game_selection(view, state, nullptr);
+    });
+    return FinishC74Effect(hr, "selection_skipped");
+}
+bool CDX11::SubmitC74Print(const owned::EmbeddedPrintInput& input)
+{
+    if (!input.index_count) return true;
+    owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
+    HRESULT hr = S_OK;
+    if (c74Prints.runs.empty()) hr = PrepareC74Effect(true, true, state, texture);
+    else {
+        if (!ownedWorldActive || !rendererFacade || !rendererFacade->FrameActive()) hr = E_UNEXPECTED;
+        else {
+            state = CaptureC74EffectState();
+            if (boundFigureTextures[0]) hr = OwnedRender::E1ParticleSurfaceImage(device.Get(),
+                deviceContext.Get(), boundParticleSurface, texture);
+        }
+    }
+    if (SUCCEEDED(hr)) hr = c74Prints.append(input, state, std::move(texture));
+    return FinishC74Effect(hr, "terrain_print_skipped");
+}
+bool CDX11::FlushC74Prints()
+{
+    if (c74Prints.runs.empty()) return true;
+    HRESULT hr = E_UNEXPECTED;
+    if (ownedWorldActive && rendererFacade && rendererFacade->FrameActive())
+        hr = rendererFacade->Visit([&](owned::Renderer& renderer) { return renderer.draw_embedded_prints(c74Prints); });
+    c74Prints.clear();
+    return FinishC74Effect(hr, "terrain_print_run_skipped");
+}
+bool CDX11::SubmitC74CombatText(const owned::EmbeddedCombatTextInput& input)
+{
+    owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
+    HRESULT hr = PrepareC74Effect(false, true, state, texture);
+    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.draw_embedded_combat_text(input, state, texture.get());
+    });
+    return FinishC74Effect(hr, "combat_text_skipped");
+}
+
 void CDX11::BeginFrame()
 {
     ReportC56FigureSkipSummary();
@@ -506,6 +594,7 @@ void CDX11::SubmitC56PointLights(
 
 void CDX11::EndWorld()
 {
+    FlushC74Prints();
     // Finish the same c56 world pass before the caller starts drawing the
     // interface. composite_world drains queued native geometry and performs
     // the renderer-owned world composition; Present remains the frame owner.

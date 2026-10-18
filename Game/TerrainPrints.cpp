@@ -7,6 +7,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldClient.h"
 #include "TextureManager.h"
 #include "Terrain.h"
+#include "dx11/RendererDX11.h"
 /////////////////////////////////////////////////////////////////////////////////////
 int CTerrainPrints::Segment()
 {
@@ -113,13 +114,25 @@ int CTerrainPrints::Draw()
     }
     //
     dwColor = (dwColor & 0x00ffffff) | (DWORD(MINT(fAlpha * 255)) << 24);
-    theRenderer.BindTexture(0, pTexture);
+    if (!theRenderer.BindTexture(0, pTexture)) return TRV_VISIBLE_NOCLIP;
 
-    theRenderer.SetProjectionMatrix();
-
-    return theRenderer.Render(vertices.GetData(), maps.GetData(), vertices.GetSize(),
-                              indices.GetData(), indices.GetSize(), dwColor,
-                              RGBA_MAKE(0, 0, 0, cFogValue));
+    owned::EmbeddedPrintInput input;
+    std::vector<std::array<float, 16>> groups(vertices.GetSize());
+    std::vector<std::array<float, 2>> uv(maps.GetSize());
+    for (int i = 0; i < vertices.GetSize(); ++i)
+        std::memcpy(groups[i].data(), &vertices[i], sizeof(SXYZW4));
+    for (int i = 0; i < maps.GetSize(); ++i) uv[i] = {maps[i].x, maps[i].y};
+    input.groups = groups.data(); input.group_count = static_cast<std::uint32_t>(groups.size());
+    input.maps = uv.data(); input.map_count = static_cast<std::uint32_t>(uv.size());
+    input.indices = indices.GetData(); input.index_count = indices.GetSize(); input.color = dwColor;
+    const auto& projection = theRenderer.GetGPU()->GetMatrix(MAT_STACK_PROJSPACE);
+    std::memcpy(input.projection.object_to_clip.data(), &projection, sizeof(input.projection.object_to_clip));
+    const RECT& clip = theRenderer.GetWindowRect();
+    input.projection.clip_half_width = float(clip.right - clip.left) * .5f;
+    input.projection.clip_half_height = float(clip.bottom - clip.top) * .5f;
+    // c74 applies terrain world fog; the cached centre fog byte is not a vertex fog input.
+    theRenderer.GetD3D()->SubmitC74Print(input);
+    return TRV_VISIBLE_NOCLIP;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTerrainPrints::SetGeometryPlacement(float _fX, float _fY, float _fSizeX, float _fSizeY)

@@ -6,6 +6,7 @@
 #include "camp_layout.h"
 #include "gpu_blit_key.h"
 #include "embedded_device.h"
+#include "embedded_game_effects.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -397,6 +398,24 @@ struct FixedState {
     D3DMATERIAL7 material{};
     FixedState();
 };
+
+#ifdef EID3D11_EMBEDDED
+// One native print list, grouped in input order by texture/state like Device's
+// proxy print runs. Texture generations stay alive until the list is flushed.
+struct EmbeddedPrintBatch {
+    struct Run {
+        std::shared_ptr<SurfaceImage> texture;
+        FixedState state{};
+        EmbeddedEffectProjection projection{};
+        UINT first = 0, count = 0;
+    };
+    std::vector<GameParticleGpu> vertices;
+    std::vector<Run> runs;
+    HRESULT append(const EmbeddedPrintInput&, const FixedState&,
+        std::shared_ptr<SurfaceImage>) noexcept;
+    void clear() noexcept { vertices.clear(); runs.clear(); }
+};
+#endif
 
 enum class NativeOpacityClass : std::uint32_t { opaque, cutout, ordered };
 struct NativeAlphaEvidence {
@@ -1002,6 +1021,11 @@ public:
     // Game lightning ribbons (game_particles.h): the stock screen-space strip
     // expanded on the GPU at the call's stream position.
     HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
+#ifdef EID3D11_EMBEDDED
+    HRESULT draw_embedded_ribbon(const EmbeddedRibbonInput&, const FixedState&, SurfaceImage*);
+    HRESULT draw_embedded_prints(EmbeddedPrintBatch&);
+    HRESULT draw_embedded_combat_text(const EmbeddedCombatTextInput&, const FixedState&, SurfaceImage*);
+#endif
     // The game's selection marker (game_particles.h): the stock six-point
     // mesh generated on the GPU from the game's point, size and axes.
     HRESULT draw_game_selection(const GameSelectionView& view, const FixedState& state, SurfaceImage* texture);

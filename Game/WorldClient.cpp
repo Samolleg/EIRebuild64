@@ -3525,11 +3525,20 @@ BOOL CWorldClient::Draw3DScene()
         pRend->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
         if (theSettings.nTerrainEnableBloodprints)
+        {
             for_each(bloodprints.begin(), bloodprints.end(), [](CBloodPrints &obj) { obj.Draw(); });
+            pRend->GetD3D()->FlushC74Prints();
+        }
         if (theSettings.nTerrainEnableFootprints)
+        {
             for_each(footprints.begin(), footprints.end(), [](CFootPrints &obj) { obj.Draw(); });
+            pRend->GetD3D()->FlushC74Prints();
+        }
         if (theSettings.nTerrainEnableFireprints)
+        {
             for_each(fireprints.begin(), fireprints.end(), [](CFirePrints &obj) { obj.Draw(); });
+            pRend->GetD3D()->FlushC74Prints();
+        }
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
     }
     // draw selection for objects
