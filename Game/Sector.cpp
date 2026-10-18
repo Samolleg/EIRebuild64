@@ -1008,10 +1008,14 @@ ReadLayerLVertexes:
     // Calculating number of tiles in each material group and fill tile indexes array
     pSector += sizeof(SSectVert2) * N_V_PSECTOR;
     int nMatCount = (nTextures + N_NUMBER_OF_LONG_TEXTURES) * 2; // Количество материалов
-    int matCounts[4][256];
+    // Both base and layer materials use the map's full texture domain.
+    // Large maps can exceed 256 entries; fixed rows alias the next subpart
+    // and finally read/write the stack as tile counts and allocation sizes.
+    std::vector<int> matCounts[4];
+    for (auto& counts : matCounts)
+        counts.resize(nMatCount);
 
     int nAnimCount = 0;
-    ZERO(matCounts);
 
     tilesCounts.SetSize(TERRTYPE_LAST);
     MemSetInt(tilesCounts.GetData(), 0, TERRTYPE_LAST);
@@ -1081,7 +1085,9 @@ ReadLayerLVertexes:
         bHaveLayerTiles = TRUE;
 
     // Creating faces by materials groups
-    ZERO(matCounts); // used as tiles counters
+    // Reuse the same material domain as the sizing pass.
+    for (auto& counts : matCounts)
+        std::fill(counts.begin(), counts.end(), 0);
 
     pTId = (TILE_ID *)pSector;
     BOOL bLayerTilesReq = bHaveLayerTiles;
