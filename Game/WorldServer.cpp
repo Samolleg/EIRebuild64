@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E1Notices.h"
 #include "OwnedRender/E2EffectDistance.h"
 #include "ErrorDialog.h"
@@ -812,6 +813,7 @@ void CWorldServer::AddActiveObject(CMapObject *pObject)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::ActiveObjectsSegment()
 {
+    CorePerf::Scope coreTiming(CorePerf::ActiveObjects);
     int i;
     POSITION pos;
     CMapObject *pMO;
@@ -819,6 +821,7 @@ void CWorldServer::ActiveObjectsSegment()
     static CIntArray notActiveObjects;
     CMapObjPtrHashIterator mapobjIter;
 
+    CorePerf::Objects(dynamicObjs.GetCount(), activeSet.GetCount());
     invalidObjects.SetSize(0);
     notActiveObjects.SetSize(0);
     if(auto*mod=ModRuntime::Current())mod->TickStatRefresh();
@@ -827,6 +830,7 @@ void CWorldServer::ActiveObjectsSegment()
         pMO = mapobjIter.GetFirst(&dynamicObjs);
         while (pMO)
         {
+            CorePerf::ObjectVisited();
             pMO->Segment();
             if (!pMO->IsValid())
                 invalidObjects.Add(pMO->GetID());
@@ -844,6 +848,7 @@ void CWorldServer::ActiveObjectsSegment()
         pMO = mapobjIter.GetFirst(&activeSet);
         while (pMO)
         {
+            CorePerf::ObjectVisited();
             pMO->Segment();
             if (!pMO->IsValid())
                 invalidObjects.Add(pMO->GetID());
@@ -932,6 +937,7 @@ void CWorldServer::StartServer(EServerMode mode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::WorldSegment(bool bForceScriptRun)
 {
+    CorePerf::Scope coreTiming(CorePerf::WorldSegment);
     POSITION pos;
     CEffect *pEff;
     CEffectPtrHashIterator effIter;
@@ -942,6 +948,7 @@ void CWorldServer::WorldSegment(bool bForceScriptRun)
     // Determine new night vision power
     if ((GetSegmentTimeCounter() & N_TIMERECALCINTERVAL) == 3)
         RecalcNightPower();
+    CorePerf::Scope coreEffects(CorePerf::Effects);
     // Call segments for effects
     pEff = effIter.GetFirst(&effects);
     std::vector<int> ids;
@@ -958,11 +965,16 @@ void CWorldServer::WorldSegment(bool bForceScriptRun)
     for (auto pos1 = ids.begin(); pos1 != ids.end(); ++pos1)
         effects.RemoveAt(*pos1);
     ids.clear();
+    coreEffects.Finish();
     // aiMap segment - footsteps management mainly
-    aiMap.Segment(GetSegmentTimeCounter());
+    { CorePerf::Scope coreTiming(CorePerf::AIMap);
+    aiMap.Segment(GetSegmentTimeCounter()); }
+    CorePerf::Scope coreWater(CorePerf::Water);
     // step of water levels
     if (waterLevels.Segment())
         SetChangedFlags(DW_PCHANGED_WATERLEVEL);
+    coreWater.Finish();
+    CorePerf::Scope coreSpells(CorePerf::Spells);
     // call segments for each spell in progress
     pos = spells.GetHeadPosition();
     while (pos)
@@ -972,21 +984,25 @@ void CWorldServer::WorldSegment(bool bForceScriptRun)
         if (!pSpell->Segment())
             spells.RemoveAt(posDel);
     }
+    coreSpells.Finish();
     // CRAP - single player only, in mission run script only if party is deployed
     if (bCanRunScript || bForceScriptRun) // curInterface != IFACE_MISSION || bCanRunScript )
-        script.Segment();
-    scriptTemp.Segment();
+    { CorePerf::Scope coreScript(CorePerf::Script); script.Segment(); }
+    { CorePerf::Scope coreTiming(CorePerf::ScriptTemp);
+    scriptTemp.Segment(); }
     // Call segment for map objects
     ActiveObjectsSegment();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldServer::Segment()
 {
+    CorePerf::ServerTick coreTick(GetJournalZoneName(), dynamicObjs.GetCount(), activeSet.GetCount());
     //
     BOOL bRv = TRUE;
     CPlayer *pPlayer;
     CPlayerIterator playerIter;
 
+    CorePerf::Scope corePackets(CorePerf::ServerPackets);
     // Parse packets from client
     pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
     for (; pPlayer; pPlayer = playerIter.GetNext())
@@ -1010,6 +1026,8 @@ BOOL CWorldServer::Segment()
         }
     }
 
+    corePackets.Finish();
+    CorePerf::Scope coreNetwork(CorePerf::ServerNetwork);
     // Call segment for network drivers
     if (pNetDriver)
     {
@@ -1023,6 +1041,7 @@ BOOL CWorldServer::Segment()
             pChatDriver->Segment(pChatServer);
         NetDriverSegment(pChatDriver);
     }
+    coreNetwork.Finish();
     // world processing
     if (!IsCombatPause())
     {
@@ -1035,6 +1054,7 @@ BOOL CWorldServer::Segment()
 
     // Form visible set for players
     {
+        CorePerf::Scope coreTiming(CorePerf::VisibleSet);
         pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
         for (; pPlayer; pPlayer = playerIter.GetNext())
             ((CPlayerServer *)pPlayer->GetPlayerSpecific())->FormNewVisibleSet();
@@ -3475,6 +3495,7 @@ void CWorldServer::CreateInitialUpdate()
 // начать функционирование нового сервера
 BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneName)
 {
+    CorePerf::Operation coreOperation("world.new_zone", pszZoneName);
     GameJournal::Event("ZONE", "resources", "mpr=%s mob=%s", GameJournal::Quote(pszMapName).c_str(), GameJournal::Quote(pszMobName).c_str());
     GameJournal::Operation journal("ZONE", "new_zone", pszZoneName);
     SetSky(GMS_NORMAL);
@@ -3494,16 +3515,19 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
         access(ModRuntime::MapPath(GetMobPath() + pszMobName).c_str(), 0) == -1)
         return FALSE;
 
+    coreOperation.Stage("ai_graph");
     CMemorySave graphChunk;
     if (!ModCliTool::GeneratingGraph() && !LoadAIGraph(pszMapName, pszMobName, graphChunk))
         return ReportError("CWorldServer::LoadMap.\n Can't load AIGraph.\n");
 
+    coreOperation.Stage("static_mob");
     szLoadedMobs.RemoveAll();
     StartZoneLoading();
     memset(alarms, 0, sizeof(alarms));
     if (!LoadMainMob(pszMapName, pszMobName, graphChunk, false))
         return ReportError("CWorldServer::NewZone()\n Can't load map.\n");
     C2DScreenWait::Step(6);
+    coreOperation.Stage("finalize");
     FinishZoneLoading();
     C2DScreenWait::Step(7);
     if (pszZoneName)
@@ -3520,7 +3544,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
 #endif
 
     JMV_NpcConsumablesLoaded(WorldLoadOrigin::ZoneEntry);
-    { journal.Result(true); return TRUE; }
+    { coreOperation.Result(true); journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::HealAllUnits()
@@ -3930,6 +3954,7 @@ void CWorldServer::RemoveDynamicObjects()
 // and should not be in local or multiplayer mode
 BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *pszTerrain)
 {
+    CorePerf::Operation coreOperation(origin == WorldLoadOrigin::SavedGame ? "world.load_save" : "world.load_zone_state", pszTerrain);
     OwnedRender::E1ClearSaveNotice();
     GameJournal::Event("LOAD", "origin", "value=%d reason=%s", int(origin), origin==WorldLoadOrigin::SavedGame?"saved_game":"zone_entry");
     GameJournal::Operation journal("LOAD", "world", pszTerrain);
@@ -3961,9 +3986,11 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
     }
     StartZoneLoading();
 
+    coreOperation.Stage("read_header");
     szNewMob = file.ReadString();
     szNewZone = file.ReadString();
     szNewCurrentZoneName = file.ReadString();
+    coreOperation.Target(szNewCurrentZoneName);
     if (pszTerrain)
         szNewZone = pszTerrain;
 
@@ -3997,19 +4024,23 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
     file.Read(&curInterface, sizeof(curInterface));
 
     // load graph
+    coreOperation.Stage("ai_graph");
     bRv = LoadAIGraph(szNewZone, szNewMob, mobGraph);
     ASSERT(bRv);
     if (!bRv)
         return FALSE;
     // load graph updates
+    coreOperation.Stage("graph_difference");
     gameGraph.LoadFromDifference(mobGraph, file);
     C2DScreenWait::Step(1);
 
     // load static data from mob
+    coreOperation.Stage("static_mob");
     if (!LoadMainMob(szNewZone, szNewMob, gameGraph, true))
         return ReportError("CWorldServer::LoadSave()\n Can't load map.\n");
 
     // load objects and other stuff
+    coreOperation.Stage("object_records");
     LoadDynamic(file, szNewCurrentZoneName);
     CBaseManager::SavedReferences savedReferences(*pMapObjectManager, omittedDynamicObjects);
     pEffectManager->Load(file);
@@ -4018,6 +4049,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
 
     C2DScreenWait::Step(5);
 
+    coreOperation.Stage("object_data");
     LoadDynamicData(file);
     pEffectManager->LoadData(file);
     pSpellManager->LoadData(file);
@@ -4137,6 +4169,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
             }
         }
     }
+    coreOperation.Stage("finalize_and_placement");
     savedReferences.End(); // map IDs are available to live logic again
     C2DScreenWait::Step(7);
 
@@ -4214,7 +4247,7 @@ BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *psz
         if (pMO && pMO->WhoAmI() == HPC_UNIT)
             SynchronizeFieldCampUnitEnergy(static_cast<CUnit *>(pMO));
     }
-    { journal.Result(true); return TRUE; }
+    { coreOperation.Result(true); journal.Result(true); return TRUE; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::StoreSave(CSave &file)

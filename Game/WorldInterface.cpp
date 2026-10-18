@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -726,6 +727,7 @@ void CWorldConnector::StoreSave(CSave &file)
 // используется в movetozone, считывается зона при неподключенных плеерах
 BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
 {
+    CorePerf::Operation coreOperation("zone.enter", party.szCurrentZone);
     GameJournal::CombatBoundary("zone_entry");
     GameJournal::Operation journal("ZONE", "enter", party.szCurrentZone);
     BOOL bRv = TRUE;
@@ -739,6 +741,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
     if (!pZone)
         return FALSE;
 
+    coreOperation.Stage("movies");
     // CRAP - movies has numbers
     switch ((int)party.vars.GetVar("movie"))
     {
@@ -753,6 +756,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
         party.vars.DelVar("movie");
     }
     //
+    coreOperation.Stage("load_world");
     if (pZone->szTerrainName != "")
     {
         // special hack for zone6 terrain
@@ -803,6 +807,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
                 }
                 else
                     nSegments = Min(nSegments, 1000);
+                coreOperation.Stage("simulate_absence");
                 const DWORD simulateStart = GetTickCount();
                 GameJournal::Event("ZONE", "simulate", "begin zone=%s segments=%d cur_time=%.9g zone_time=%.9g radius=%.9g",
                     GameJournal::Quote(szZone).c_str(), nSegments, fpCurTime, fpZoneTime, fpActivityRadius);
@@ -835,13 +840,14 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
             pZone = theMap.GetZoneByName(szZone);
             theWorldServer.SetWorldTime(4.0f);
         }
+        coreOperation.Stage("script_and_exits");
         if (pZone->eType == GM_BASE)
             theWorldServer.LoadScriptFromMOB(pZone->szMobName + ".mob");
         else
             theWorldServer.script.RestartScript();
     }
     theWorldServer.SetExits(pZone->exits);
-    { journal.Result(bRv != FALSE); return bRv; }
+    { coreOperation.Result(bRv != FALSE); journal.Result(bRv != FALSE); return bRv; }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::StoreZoneState(CParty &party)
@@ -893,6 +899,7 @@ void ClearDirectory(LPCTSTR pszPath)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::LoadGame(const char *pszSaveName)
 {
+    CorePerf::Operation coreOperation("save.load_game", pszSaveName);
     GameJournal::Operation journal("LOAD", "game", pszSaveName);
     if (theWorldServer.GetServerMode() == SERV_MODE_LMP ||
         theWorldServer.GetServerMode() == SERV_MODE_MMP) return FALSE;
@@ -902,6 +909,7 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
     bool applying = false;
     try
     {
+        coreOperation.Stage("read_and_prepare");
         PreparedSave scenario, mission;
         std::vector<std::unique_ptr<PreparedSave>> zones;
         failedPath = savePath + "scenario.sav";
@@ -949,6 +957,7 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
                 return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
         }
         // Stage B starts here. Nothing above clears current or changes the live world.
+        coreOperation.Stage("prepare_world");
         failedPath = "stage=prepare_world";
         applying = true;
         GameJournal::CombatBoundary("saved_game");
@@ -962,9 +971,11 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
         ConnectLocalServer();
         failedPath = "stage=start_server";
         theWorldServer.StartServer(SERV_MODE_LOCAL);
+        coreOperation.Stage("initial_segments");
         failedPath = "stage=initial_segments";
         theWorld.Segment(); theWorldServer.Segment();
         theWorld.Segment(); theWorldServer.Segment();
+        coreOperation.Stage("restore_state_and_files");
         failedPath = "stage=clear_current";
         ClearDirectory(currentPath);
         failedPath = scenario.path;
@@ -998,6 +1009,7 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
             if (!IsToBeStored(allod, visited)) party.ResetVisitedZone(visited->szName);
         }
         theHat.SetSinglePlayerParty(party);
+        coreOperation.Stage("apply_world");
         if (hasMission)
         {
             failedPath = mission.path;
@@ -1012,6 +1024,7 @@ BOOL CWorldConnector::LoadGame(const char *pszSaveName)
             if (!MoveToZone(party.szCurrentZone)) return FALSE;
         }
         NConsole::game << "Loaded " << pszSaveName << endl;
+        coreOperation.Result(true);
         journal.Result(true);
         return TRUE;
     }
@@ -1169,6 +1182,7 @@ void CWorldConnector::NewGame()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::StartServer(const char *pszZone)
 {
+    CorePerf::Operation coreOperation("zone.start_server", pszZone);
     SScenarioZone *pZone = 0;
     pZone = theMap.GetZoneByName(pszZone);
     if (!pZone || pZone->eType != GM_REALZONE)
@@ -1187,12 +1201,14 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
         if (result == PreparedSave::Result::Missing) MissingSave(prepared.path, "zone_missing");
         if (result == PreparedSave::Result::Failed)
             return SaveLoadFailure(prepared.path, lastSaveError.reason, lastSaveError.offset);
+        coreOperation.Stage("release");
         failedPath = "stage=start_server_resources";
         applying = true;
         theInterface.SetScreensMustDie();
         theInterface.DestroyScreens();
         LMPReloadDatabases(IsLMP());
         theWorldServer.RemoveEverythingDynamic();
+        coreOperation.Stage("create_world");
         if (existing)
         {
             failedPath = prepared.path;
@@ -1207,6 +1223,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
                 return FALSE;
             theWorldServer.SetWorldTime(4.0f);
         }
+        coreOperation.Stage("connect");
         failedPath = "stage=start_server";
         CAArray<SZoneExit, SZoneExit &> exits = pZone->exits;
         for (int i = 0; i < exits.GetSize(); i++)
@@ -1233,6 +1250,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
             }
             theWorldServer.AddSecondaryMob(CString(pszZone) + ".mob");
         }
+        coreOperation.Result(true);
         return TRUE;
     }
     catch (const CSaveReadError &e)
@@ -1246,6 +1264,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
 // server side, spawning a new server (with disconnecting everyone from server)
 BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
 {
+    CorePerf::Operation coreOperation("zone.move", pszZoneName);
     PreparedSave prepared;
     CString failedPath = "stage=move_to_zone";
     bool applying = false;
@@ -1273,6 +1292,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
                 havePrepared = true;
             }
         }
+        coreOperation.Stage("release_and_previous_save");
         failedPath = "stage=move_to_zone_resources";
         applying = true;
         if (action == CD_MOVETOZONE)
@@ -1326,6 +1346,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
 
         // theWorldServer.SetWorldTimeScale(theSettings.nDefaultTimeScale);
         theWorldServer.SetWorldTimeScale(theSettings.nDefaultTimeScale);
+        coreOperation.Stage("create_world");
         switch (iface)
         {
         case IFACE_MAINMENU: {
@@ -1368,9 +1389,11 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
         if (iface == IFACE_MISSION)
             theSettings.nDrawVisibleOnly = 1;
         // connect & start server
+        coreOperation.Stage("connect");
         failedPath = "stage=start_server";
         theWorldServer.StartServer(servMode);
         ConnectLocalServer();
+        coreOperation.Result(true);
         return TRUE;
     }
     catch (const CSaveReadError &e)

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "GameJournal.h"
 #include "ModNativeCrtRandom.h"
 #include "EngineDiagnostics.h"
@@ -514,6 +515,7 @@ void CUnitServer::LowNewWishPose(EUnitPose pose)
 bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
                               float fpMaxPathLength)
 {
+    CorePerf::Scope coreTiming(CorePerf::FindPath);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     CPlayer *pPlayer = lpUnit->GetOwner();
     if (pPlayer)
@@ -686,6 +688,7 @@ bool CUnitServer::L0IsPlayingSuffer()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L0Segment()
 {
+    CorePerf::Scope coreTiming(CorePerf::L0);
     if (bL0Frozen)
     {
         lpUnit->LowLocomotionSpeed(ULS_FROZEN);
@@ -825,6 +828,7 @@ void CUnitServer::L1NewPathSegment()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L1ExecMove()
 {
+    CorePerf::Scope coreTiming(CorePerf::MoveCollisions);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     CPlot3D pos, vec;
     float fpSpeed;
@@ -1487,6 +1491,7 @@ void CUnitServer::L1NeedPlaySuffer(int nSufferDirection)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L1Segment()
 {
+    CorePerf::Scope coreTiming(CorePerf::L1);
     L0FreezeMovement(false);
     L0Freeze(false);
     // перепроверим атаку
@@ -4937,6 +4942,7 @@ int CUnitServer::GetPlayerWhoTamed()
 // main function, processing units low level commands and actions
 int CUnitServer::Segment()
 {
+    CorePerf::Scope coreTiming(CorePerf::UnitSegment);
     // Observe loaded status without serializing cached speed.
     if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*lpUnit);if(factor!=lastCrippledFactor){lastCrippledFactor=factor;L1SpeedChanged();}}
     if (!lpUnit->bDead)
@@ -4983,7 +4989,7 @@ int CUnitServer::Segment()
         // process acknowledgements
         acknowledgements.Segment(this);
         // process logic
-        logic.Segment();
+        { CorePerf::Scope coreTiming(CorePerf::UnitAI); logic.Segment(); }
         lpUnit->ResetFlag(MAPOBJ_MOVED);
         RecalcEnemy();
         // commands execution

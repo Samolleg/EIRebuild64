@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "ItemApproachCatalog.h"
 #include "OwnedRender/E2Host.h"
 #include "A3Cursor.h"
@@ -953,6 +954,7 @@ void CWorldClient::SetClientWind(const CPlot3D &newWindVector, float fpNewWindFo
 /////////////////////////////////////////////////////////////////////////////////////
 int CWorldClient::Segment()
 {
+    CorePerf::Scope coreTiming(CorePerf::ClientSegment);
     CMapObjectIterator mapobjIter;
     CEffectIterator effIter;
     //
@@ -1005,6 +1007,7 @@ int CWorldClient::Segment()
 
     if (!IsCombatPause())
     {
+        CorePerf::Scope coreObjects(CorePerf::ClientObjects);
         // Call Segment() for all mapobjects
         POSITION objpos = objList.GetHeadPosition();
         while (objpos)
@@ -1015,6 +1018,8 @@ int CWorldClient::Segment()
         }
         //		for ( auto pos =  objects.begin(); pos != objects.end(); ++pos )
         //			(*pos)->Segment();
+        coreObjects.Finish();
+        CorePerf::Scope coreEffects(CorePerf::ClientEffects);
         // Effects segment
         CEffect *pEff = effIter.GetFirst((CEffectManager *)GetEffectManager());
         while (pEff)
@@ -1024,6 +1029,7 @@ int CWorldClient::Segment()
         }
         if (pMoshka)
             pMoshka->Segment();
+        coreEffects.Finish();
     }
     if (IWorldConnector.IsLMP() && theInterface.GetScreensNum() > 1)
     {
@@ -1033,9 +1039,12 @@ int CWorldClient::Segment()
         while (objpos)
             objList.GetNext(objpos)->SetExactPosition(fpTime);
     }
+    CorePerf::Scope coreParticles(CorePerf::ClientParticles);
     // Particles segment
     if (pParticleManager)
         ((CParticleManager *)pParticleManager)->Segment(IsCombatPause());
+    coreParticles.Finish();
+    CorePerf::Scope corePrints(CorePerf::ClientPrints);
     // call segment for all terrain prints
     if (!IsCombatPause())
     {
@@ -1079,6 +1088,7 @@ int CWorldClient::Segment()
             }
         }
     }
+    corePrints.Finish();
     // remove some LRU textures
     if ((GetSegmentTimeCounter() % 32) == 0)
         GetTextureManager()->ShrinkLRU();

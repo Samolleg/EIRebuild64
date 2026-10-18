@@ -8,6 +8,7 @@
  **********************************************************************/
 
 #include "StdAfx.h"
+#include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiScanUnits.h"
@@ -597,6 +598,7 @@ void CAIMarkManager::PrepareVision(CUnit *pUnit)
 // определить видимые юниты, представл€ющие интерес
 void CAIMarkManager::Scan(CUnit *pUnit, CAIUnitEnvironment &env)
 {
+    CorePerf::Scope coreTiming(CorePerf::Vision);
     POSITION pos = env.units.GetHeadPosition();
     CUnitServer *pServer = (CUnitServer *)pUnit->GetUnitSpecific();
     BOOL bIsHero = pUnit->IsHero() || pUnit->CheckFlag(UNIT_LOOKATALLIES);

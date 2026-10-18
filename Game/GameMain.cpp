@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Input.h"
 #include <game_focus.h>
@@ -470,6 +471,7 @@ int nShowClientTimeBalance = 0;
 // time sync problem is to be refined
 static bool CountTime()
 {
+    CorePerf::Scope coreTiming(CorePerf::CountTime);
     static DWORD dwLastTime = OwnedRender::E2Clock(timeGetTime(), OwnedRender::E2BackgroundPaused(NGame::hWnd));
     static DWORD dwPassedTime = 0;
     static DWORD dwClientPassedTime = 0;
@@ -624,6 +626,7 @@ static bool NGame::ProcessMessages()
     while (!PeekMessage(&msg, 0, 0, 0,
                         PM_NOREMOVE)) // no messages in the queue => process OnIdle
     {
+        CorePerf::Frame coreFrame;
         GameJournal::MemoryFrame(GetTickCount());
         // Update render state
         UpdateRenderEnable();
@@ -636,6 +639,7 @@ static bool NGame::ProcessMessages()
         {
             {
                 FrameDiagnostics::Scope timing(FrameDiagnostics::Idle);
+                CorePerf::Scope coreTiming(CorePerf::OnIdle);
                 theInterface.OnIdle();
             }
             NGame::DrawFrame(bEnableFlip);
@@ -646,6 +650,7 @@ static bool NGame::ProcessMessages()
             FrameDiagnostics::End(ModShadowSchedule::generationTicks, anchor.x, anchor.y);
         }
     }
+    CorePerf::Scope coreMessages(CorePerf::Messages);
     if (!GetMessage(&msg, 0, 0, 0))
         return false;
     FrameDiagnostics::Message();
@@ -655,6 +660,8 @@ static bool NGame::ProcessMessages()
         NGame::WndProc(msg.message, msg.wParam, msg.lParam);
     else
         NGame::ShortWndProc(NGame::hWnd, msg.message, msg.wParam, msg.lParam);
+    coreMessages.Finish();
+    CorePerf::Flush();
     return true;
 }
 
@@ -926,8 +933,9 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     if(InspectModConfigurationCommandLine(inspectionResult))return inspectionResult;
     if(InspectWorldBackgroundCommandLine(inspectionResult))return inspectionResult;
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
+    CorePerf::Initialize();
     GameJournal::Start();
-    struct JournalEnd { ~JournalEnd() { GameJournal::Stop(); } } journalEnd;
+    struct JournalEnd { ~JournalEnd() { CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
     try { SettingsProfile::Initialize();
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
         NConsole::InitializeNetworkSettings(); if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
@@ -1182,6 +1190,7 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 /////////////////////////////////////////////////////////////////////////////////////
 void NGame::DrawFrame(bool bFlip, bool bDraw2D)
 {
+    CorePerf::Scope coreTiming(CorePerf::DrawFrame);
     if (OwnedRender::E2BackgroundPaused(hWnd)) { Sleep(50); return; }
     OwnedRender::E2PassScope pass(OwnedRender::Pass::frame);
     OwnedRender::E1BeginFrame();
@@ -1204,6 +1213,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
         pDX11->BeginFrame();
         pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Immediate);
         {
+            CorePerf::Scope coreTiming(CorePerf::Draw3D);
             FrameDiagnostics::Scope timing(FrameDiagnostics::Draw3D);
             theInterface.Draw();
         }
@@ -1211,6 +1221,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
         theRenderer.EndDrawFrame();
         if (bDraw2D)
         {
+            CorePerf::Scope coreTiming(CorePerf::Draw2D);
             FrameDiagnostics::Scope timing(FrameDiagnostics::Draw2D);
             OwnedRender::E2PassScope uiPass(OwnedRender::Pass::ui);
             theInterface.Draw2D();

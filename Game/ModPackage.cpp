@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "GameJournal.h"
 #include "ModNativeCrtRandom.h"
 #include "ScenarioTracker.h"
@@ -125,7 +126,7 @@ bool ModStaticLookup::State::Eligible(lua_State* state,int index) const{
 }
 CModPackage::CModPackage():initialization(std::make_unique<ModInitialization::Ledger>()),refreshQueue(std::make_unique<ModNpcRefreshQueue>()),infoStats(std::make_unique<ModInfoStats::State>()){}
 CModPackage::~CModPackage(){perkHostLifetime.reset();if(state)lua_close(state);}
-void CModPackage::Call(int args,int results){GameJournal::Callback journalCallback;GameJournal::Source journalSource("Lua.mod");if(lua_pcall(state,args,results,0)){const char*p=lua_tostring(state,-1);GameJournal::Event("ERROR","lua","text=%s",GameJournal::Quote(p).c_str());throw std::runtime_error(p?p:"Lua package call failed");}}
+void CModPackage::Call(int args,int results){CorePerf::Scope coreTiming(CorePerf::Lua);GameJournal::Callback journalCallback;GameJournal::Source journalSource("Lua.mod");if(lua_pcall(state,args,results,0)){const char*p=lua_tostring(state,-1);GameJournal::Event("ERROR","lua","text=%s",GameJournal::Quote(p).c_str());throw std::runtime_error(p?p:"Lua package call failed");}}
 void CModPackage::Require(const char *name){lua_getglobal(state,"require");lua_pushstring(state,name);Call(1,1);}
 void CModPackage::Load(const std::string &directory){
  if(state)throw std::runtime_error("Package already loaded; create a fresh package for reload");
