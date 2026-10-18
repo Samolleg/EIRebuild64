@@ -1453,7 +1453,14 @@ void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept
 // shown frame's 0-based index is current - 2), and the file the game opens
 // (work path + "Movies\" + name). False when none is open or the bridge sites
 // did not verify.
+// A typed host decoder. It owns its file/codec lifetime and returns one
+// zero-based frame as opaque BGRA. No host player pointers or retail RVAs.
+struct ProgressMovieFrames {
+    virtual ~ProgressMovieFrames() = default;
+    virtual bool read(std::uint32_t frame, std::vector<std::uint8_t>& bgra) = 0;
+};
 struct ProgressMovie {
+    std::shared_ptr<ProgressMovieFrames> source;
     std::uint32_t width = 0, height = 0, frames = 0, current = 0;
     std::string path;
 };

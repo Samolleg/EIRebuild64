@@ -1629,9 +1629,7 @@ HRESULT Renderer::composite_world(){
   }
   if(scene_updated_)render_ambient_particles();
   if(scene_updated_)render_wind_trails();
-#ifndef EID3D11_EMBEDDED
   if(scene_updated_)render_precipitation();
-#endif
   capture_water_history();
   const bool smaa=configured_boolean(debug_overlay_.config(),"smaa",true);
   transition_profile_pass(smaa?"scene_smaa":"scene_copy");
@@ -13970,9 +13968,7 @@ void Renderer::apply_load_reveal() noexcept try{
    load_picture_.Reset();if(FAILED(device_->CreateTexture2D(&desc,nullptr,&load_picture_)))return;
   }
   context_->CopyResource(load_picture_.Get(),back.Get());
-#ifndef EID3D11_EMBEDDED
-  capture_load_progress_movie(fitted); // retail Bink progress owner
-#endif
+  capture_load_progress_movie(fitted); // typed host source or verified retail owner
   return;
  }
  const std::uint64_t epoch=bridge_current_world_epoch();
@@ -14048,7 +14044,7 @@ void Renderer::apply_load_reveal() noexcept try{
  char progress[96]="none";
  if(load_progress_movie_valid_)
   std::snprintf(progress,sizeof(progress),"shown=%u/%u advanced=%.2f%s",load_progress_movie_.shown,load_progress_movie_.frames,
-   static_cast<double>(load_progress_movie_.position),load_progress_movie_.after.empty()?" (not decoded)":"");
+   static_cast<double>(load_progress_movie_.position),(!load_progress_movie_.source && load_progress_movie_.after.empty())?" (not decoded)":"");
  std::snprintf(text,sizeof(text),
   "waited=%s result=%s hold=%s map=%s world_epoch=%llu game_load_ms=%.0f owned_decode_wait_ms=%.0f prepare_ms=%.0f held_ms=%.0f neighbour_held_ms=%.0f held_frames=%u waiting_on=%s neighbours=%zu va_used_mb=%llu va_peak_mb=%llu va_largest_free_mb=%llu spec_sets=%zu spec_resident=%zu spec_building=%d warm_draws=%u load_progress=%s held_present_hz=%.1f load_cursor_presents=%u",
   waits.c_str(),waiting?"capped":"ready",load_reveal_holding_?"on":"off",identity.main_outer_resource.c_str(),

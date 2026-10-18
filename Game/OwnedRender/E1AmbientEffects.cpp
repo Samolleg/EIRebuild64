@@ -229,7 +229,12 @@ bool bridge_critter_perches(float x, float y, float radius,
         cache.perches, x, y, radius, output);
 }
 
-void bridge_release_ground_contacts() noexcept { ambient_cache().contacts = {}; }
+void bridge_release_ground_contacts() noexcept {
+    ambient_cache() = {};
+    OwnedRender::E1ResetGroundCoverFootprints();
+    decltype(published_ground_footprints)().swap(published_ground_footprints);
+    decltype(published_ground_trails)().swap(published_ground_trails);
+}
 
 bool bridge_ground_cover_objects(float x, float y, float radius,
     std::vector<ground_cover::FootprintSplat>& output) noexcept {

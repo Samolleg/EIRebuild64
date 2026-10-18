@@ -136,8 +136,7 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
 #ifdef EID3D11_EMBEDDED
     if (is("render_thread") || is("render_thread_frame_latency"))
         return "Scene thread is not yet available in EIRebuild";
-    if (is("precipitation") || starts("precip_"))
-        return "Renderer precipitation is not yet available in EIRebuild";
+
 #endif
     if (boolean("water_simple") && (is("water_reflections") || is("water_reflection_quality") || is("water_physical")))
         return "turn off Stock-look water to use this option";

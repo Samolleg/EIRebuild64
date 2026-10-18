@@ -1,6 +1,10 @@
 #include "E1World.h"
 #include "embedded_sky.h"
 #include "E1Scene.h"
+#include "E1VisualFrame.h"
+#include "precipitation.h"
+#include "weather_wind.h"
+#include <mutex>
 #include <cmath>
 
 namespace {
@@ -10,6 +14,14 @@ std::uint64_t frame = 0, draw = 0, activeDraw = 0, completions = 0;
 OwnedRender::E1WorldFrame values{};
 owned::WorldDrawCompletionSnapshot completed{};
 std::uint64_t skyRevision = 0;
+int weatherTest = 0, weatherStrength = 0;
+struct MovieState { std::mutex lock; owned::ProgressMovie value; };
+MovieState& movieState() {
+    // Game-manager destruction may close a movie after ordinary globals.
+    // Its owner explicitly clears the source; the empty registry stays alive.
+    static MovieState* value = new MovieState;
+    return *value;
+}
 std::uint64_t advance(std::uint64_t& counter) noexcept {
     if (++counter == 0) ++counter;
     return counter;
@@ -23,6 +35,11 @@ void clearFrame() noexcept {
 }
 namespace OwnedRender {
 void E1BeginFrame() noexcept { advance(frame); clearFrame(); }
+void E1SetProgressMovie(const owned::ProgressMovie& movie) {
+    auto& state = movieState();
+    std::lock_guard<std::mutex> lock(state.lock);
+    state.value = movie;
+}
 bool E1ReadWorldFrame(E1WorldFrame& output) noexcept {
     output = {};
     if (!activeDraw || !values.camera.valid) return false;
@@ -52,6 +69,7 @@ void E1RetireWorld(const void* owner) noexcept {
     if (owner != worldOwner) return;
     worldOwner = nullptr; worldGeneration = epoch = 0;
     clearFrame();
+    E1OwnedVisualFrameNewDraw();
 }
 E1WorldDraw::E1WorldDraw(const void* owner, std::uint64_t generation,
                         const E1WorldFrame& input) noexcept {
@@ -74,6 +92,16 @@ E1WorldDraw::E1WorldDraw(const void* owner, std::uint64_t generation,
     environment.valid = environment.valid && std::isfinite(environment.game_hours) &&
         std::isfinite(environment.world_time) && std::isfinite(environment.hour) &&
         std::isfinite(environment.weather_progress) && std::isfinite(environment.rain_particles);
+    // Render-only settings affect the same environment consumed by sky,
+    // fog, wind and precipitation; the host weather and its sound stay real.
+    if (weatherTest == 1 || weatherTest == 2) {
+        environment.weather_current = environment.weather_next = weatherTest;
+        environment.weather_progress = 1.f;
+        environment.rain_particles = weatherTest == 1 ? 1.f : 0.f;
+        environment.snow_particles = weatherTest == 2 ? 1.f : 0.f;
+    }
+    environment.precipitation_strength = owned::precipitation::shower_strength(
+        weatherStrength, environment.game_hours, environment.world_time * owned::kWeatherSecondsPerSegment);
     values.camera.scene_frame_serial = frame;
     for (float v : values.camera.world_to_clip)
         if (!std::isfinite(v)) values.camera.valid = false;
@@ -104,6 +132,16 @@ void E1WorldDraw::Complete() noexcept {
 }
 }
 namespace owned {
+const char* bridge_owned_weather_problem() noexcept { return nullptr; }
+void bridge_set_weather_visual(int test, int strength) noexcept {
+    weatherTest = test; weatherStrength = strength;
+}
+bool bridge_progress_movie(ProgressMovie& movie) noexcept try {
+    auto& state = movieState();
+    std::lock_guard<std::mutex> lock(state.lock);
+    movie = state.value;
+    return movie.source && movie.frames && movie.width && movie.height;
+} catch (...) { movie = {}; return false; }
 void bridge_set_owned_sky(bool enabled) noexcept { embedded_sky().configure(enabled); }
 bool bridge_owned_sky_installed() noexcept { return embedded_sky().installed(); }
 bool bridge_owned_sky_requested() noexcept { return skyRevision && skyRevision == embedded_sky().revision() && embedded_sky().enabled(); }

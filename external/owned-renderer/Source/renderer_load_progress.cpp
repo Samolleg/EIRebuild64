@@ -127,11 +127,12 @@ void Renderer::capture_load_progress_movie(bool fitted) noexcept try {
         return;
     }
     const unsigned shown = (std::min)(movie.current - 2, movie.frames - 1);
-    if (!load_progress_movie_valid_ || state.path != movie.path || state.frames != movie.frames || state.shown != shown ||
+    if (!load_progress_movie_valid_ || state.source != movie.source || state.path != movie.path || state.frames != movie.frames || state.shown != shown ||
         state.width != movie.width || state.height != movie.height) {
         state = {};
         state.path = movie.path; state.width = movie.width; state.height = movie.height;
         state.frames = movie.frames; state.shown = shown;
+        state.source = movie.source;
     }
     load_progress_movie_valid_ = shown + 1 < movie.frames;
 } catch (...) { load_progress_movie_ = {}; load_progress_movie_valid_ = false; }
@@ -211,16 +212,53 @@ void Renderer::draw_load_progress(float progress) noexcept try {
     // The frame's world and interface passes are done (present): the back
     // buffer is the target and nothing else is queued.
     if (!scene_composited_ || !pending_blits_.empty() || rtv_ != backbuffer_rtv_) return;
-    if (!decode_load_progress_movie()) return;
-    const float span = float(state.after.size());
+    const bool typed = bool(state.source);
+    if (typed && state.source_failed) return;
+    if (!typed && !decode_load_progress_movie()) return;
+    const float span = typed ? float(state.frames - state.shown - 1) : float(state.after.size());
     state.position = (std::max)(state.position, std::clamp(progress, 0.f, 1.f) * span);
     if (state.position <= 0.f) return;
-    const unsigned base = (std::min)(unsigned(std::floor(state.position)), unsigned(state.after.size()));
+    const unsigned base = (std::min)(unsigned(std::floor(state.position)), unsigned(span));
     const float fraction = state.position - float(base);
-    if (base > 0 && FAILED(present_image(state.after[base - 1], nullptr, nullptr))) { pending_blits_.clear(); return; }
-    if (fraction > 0.f && base < state.after.size()) {
+    const auto image_at = [&](unsigned offset) -> SurfaceImage* {
+        if (!typed) return &state.after[offset - 1];
+        const unsigned frame = state.shown + offset;
+        const unsigned slot = frame % 2;
+        if (state.image_frames[slot] != frame) {
+            std::vector<std::uint8_t> bgra;
+            if (!state.source->read(frame, bgra) ||
+                bgra.size() != std::size_t(state.width) * state.height * 4) {
+                state.source_failed = true;
+                report_progress_failure(state.path, "host frame decode failed");
+                return nullptr;
+            }
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = state.width; desc.Height = state.height;
+            desc.MipLevels = desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            const D3D11_SUBRESOURCE_DATA initial{bgra.data(), state.width * 4, 0};
+            auto& image = state.images[slot]; image = {};
+            image.width = state.width; image.height = state.height;
+            image.pitch = LONG(state.width * 4); image.gpu_captured = true;
+            if (FAILED(device_->CreateTexture2D(&desc, &initial, &image.texture)) ||
+                FAILED(device_->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv))) {
+                state.source_failed = true;
+                report_progress_failure(state.path, "host frame upload failed");
+                return nullptr;
+            }
+            state.image_frames[slot] = frame;
+        }
+        return &state.images[slot];
+    };
+    if (base > 0) {
+        auto* image = image_at(base);
+        if (!image || FAILED(present_image(*image, nullptr, nullptr))) { pending_blits_.clear(); return; }
+    }
+    if (fraction > 0.f && base < unsigned(span)) {
         const std::size_t before = pending_blits_.size();
-        if (FAILED(present_image(state.after[base], nullptr, nullptr))) { pending_blits_.clear(); return; }
+        auto* image = image_at(base + 1);
+        if (!image || FAILED(present_image(*image, nullptr, nullptr))) { pending_blits_.clear(); return; }
         // Only the next frame's picture quad (not its fill), at the fraction's opacity.
         if (pending_blits_.size() == before + 2 && pending_blits_[before].presentation_fill)
             pending_blits_.erase(pending_blits_.begin() + std::ptrdiff_t(before));

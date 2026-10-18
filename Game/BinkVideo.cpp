@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 static const char LOCAL_FILE[] = __FILE__;
 #include "BinkVideo.h"
+#include "OwnedRender/E1World.h"
 #include "GameMain.h"
 #include "I3DCursor.h"
 #include "WorldClient.h"
@@ -30,6 +31,8 @@ struct CBinkVideo::Player
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     bool decoded = false, finished = false, paused = false, loadingPicture = false;
+    std::string moviePath;
+    std::shared_ptr<owned::ProgressMovieFrames> progressSource;
     std::uint64_t imageGeneration = 0;
     unsigned displayedFrame = 0;
     std::unique_ptr<OwnedSpriteBatch> batch;
@@ -118,6 +121,57 @@ struct CBinkVideo::Player
         // BINKSNDTRACK applies the explicit disabled track selection.
         return 0x00004000u;
     }
+    // A separate, silent decoder keeps the selected movie alive after Clear
+    // joins the loading player. The renderer requests only adjacent frames.
+    struct FrameSource : owned::ProgressMovieFrames {
+        HMODULE module = nullptr;
+        Header* movie = nullptr;
+        Header* (__stdcall* open)(const char*, unsigned);
+        void (__stdcall* close)(Header*);
+        int (__stdcall* decode)(Header*);
+        int (__stdcall* copy)(Header*, void*, int, unsigned, unsigned, unsigned, unsigned);
+        void (__stdcall* seek)(Header*, unsigned, int);
+        int (__stdcall* sound)(Header*, int) = nullptr;
+        std::string path;
+        unsigned width, height, frames;
+        std::vector<unsigned char> pixels;
+        explicit FrameSource(Player& p) : open(p.open), close(p.close), decode(p.decode),
+            copy(p.copy), seek(p.seek), path(p.moviePath), width(p.movie->width),
+            height(p.movie->height), frames(p.movie->frames) {
+            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCSTR>(p.open), &module)) return;
+            sound = reinterpret_cast<decltype(sound)>(p.Symbol("_BinkSetSoundOnOff@8", "BinkSetSoundOnOff"));
+        }
+        ~FrameSource() override { if (movie) close(movie); if (module) FreeLibrary(module); }
+        bool read(std::uint32_t frame, std::vector<std::uint8_t>& bgra) override {
+            if (!module || !sound || frame >= frames) return false;
+            if (!movie) {
+                movie = open(path.c_str(), 0);
+                if (!movie) return false;
+                sound(movie, 0);
+                if (movie->width != width || movie->height != height || movie->frames != frames) return false;
+            }
+            if (movie->width != width || movie->height != height || movie->frames != frames) return false;
+            pixels.resize(std::size_t(width) * height * 4);
+            seek(movie, frame + 1, 0);
+            decode(movie);
+            copy(movie, pixels.data(), width * 4, height, 0, 0, 0x80000003u);
+            for (std::size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
+            bgra = pixels;
+            return true;
+        }
+    };
+    void PublishProgress() {
+        if (!loadingPicture || !displayedFrame) return;
+        if (!progressSource) progressSource = std::make_shared<FrameSource>(*this);
+        owned::ProgressMovie value;
+        value.path = moviePath; value.width = movie->width; value.height = movie->height;
+        value.frames = movie->frames;
+        // Bridge convention: one past the 1-based displayed frame.
+        value.current = displayedFrame + 1;
+        value.source = progressSource;
+        OwnedRender::E1SetProgressMovie(value);
+    }
     void Decode()
     {
         const auto renderAccess = theRenderer.GetD3D()->GetOwnedRenderer().LockFrame();
@@ -141,6 +195,7 @@ struct CBinkVideo::Player
             // as a renderer image (fitted to the output; also the loading
             // picture the renderer holds while the next world prepares).
             dx->BeginFrame();
+            PublishProgress();
             dx->ClearColorBuffer(0);
             dx->PresentLoadingImage(pixels, movie->width, movie->height,
                 (std::uint64_t(1) << 62) | std::uint64_t(reinterpret_cast<std::uintptr_t>(this)),
@@ -178,6 +233,7 @@ bool CBinkVideo::BeginPlay(LPCSTR name, bool stopSounds, bool hideCursor)
         if (mute) mute(p->movie, 0);
     }
     if (!p->movie) return false;
+    p->moviePath = moviePath;
     unsigned w = p->movie->width, h = p->movie->height;
     if (!w || !h || w > 8192 || h > 8192 || !p->movie->frames) return false;
     D3D11_TEXTURE2D_DESC desc = {};
@@ -267,6 +323,7 @@ bool CBinkVideo::Play(LPCSTR name, DWORD framePause, bool skipMovie,
 
 void CBinkVideo::StopPlaying()
 {
+    if (player && player->loadingPicture) OwnedRender::E1SetProgressMovie({});
     delete player; player = nullptr;
     if (bWasCursorHided) { theCursor.Show(TRUE); bWasCursorHided = false; }
 }

@@ -3012,6 +3012,9 @@ BOOL CWorldClient::Draw()
     environment.weather_progress = ownedWorld.weather_progress;
     environment.rain_particles = owned::weather_particle_rain(ownedWorld.weather_current,
         ownedWorld.weather_next, ownedWorld.rain_progress);
+    environment.snow_particles = owned::weather_particle_power(ownedWorld.weather_current,
+        ownedWorld.weather_next, ownedWorld.rain_progress, 2);
+    environment.weather_start = weather.GetRenderWeatherStart();
     frameValues.camera.valid = true;
     std::copy_n(ownedWorld.world_to_clip, 16, frameValues.camera.world_to_clip.begin());
     auto& fog = frameValues.fog;

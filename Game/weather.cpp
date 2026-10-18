@@ -504,13 +504,8 @@ BOOL CWeather::Draw(CRenderer *pTarget)
     if (curWeather == EW_CLEAR)
         return TRUE;
 
-    // Set texture & rotation
-    pTarget->BindTexture(0, pTexture);
-    if (curWeather == EW_RAIN)
-        return DrawRain(pTarget);
-    if (curWeather == EW_SNOW)
-        return DrawSnow(pTarget);
-    ASSERT(0 && "Unknown weather type");
-    return FALSE;
+    // Weather transitions and rain audio still advance on the host. c73 is
+    // the sole rain/snow producer; a rejected renderer pass stays omitted.
+    return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////

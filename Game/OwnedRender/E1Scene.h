@@ -56,7 +56,7 @@ public:
     void Begin(const void* source, std::uint64_t generation) noexcept;
     // The positive world epoch the retained scene was reset to: the renderer's
     // world epoch (game.exe bridge: lifecycle positive_world_epoch).
-    std::uint64_t Epoch() const noexcept { return owner ? epoch : 0; }
+    std::uint64_t Epoch() const noexcept { return epoch; }
     bool CurrentWorld(std::uint64_t generation) const noexcept {
         return owner && generation && world == generation && epoch;
     }

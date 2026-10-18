@@ -297,6 +297,13 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
         &frameState, &worldLighting, &shadowBegin, &shadowEnd, &shadowDiagnostics, &pointLights,
         &pointShadowBegin, &pointShadowEnd, &staticDepth, &pointShadowBatch, &pointShadowPublish,
         &pointShadowAllocate, &pointShadowRelease, &shadowCull, &terrainBake);
+    owned::bridge_set_rain_occlusion_sink(
+        [](void* context, const owned::NativeShadowSlice& slice, std::uint32_t side) {
+            return self(context)->renderer->begin_native_rain_occlusion(slice, side);
+        },
+        [](void* context, bool commit) {
+            return self(context)->renderer->end_native_rain_occlusion(commit);
+        });
     std::vector<std::int32_t> drawn;
     std::vector<owned::EmbeddedVisualOmission> omitted;
     const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn, &omitted);
@@ -339,6 +346,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     ranThisDraw = true;
     if (sink.object) renderer.rollback_native(sink.checkpoint);
     // The sinks point at this stack frame: never leave them installed.
+    owned::bridge_set_rain_occlusion_sink(nullptr, nullptr);
     owned::bridge_set_native_geometry_sink(nullptr, nullptr);
     lastFlushed = sink.staticsFlushed;
     return ok;

@@ -13,6 +13,8 @@ struct E1WorldFrame {
     bool lightingValid = false;
 };
 void E1BeginFrame() noexcept;
+// Copied under the loading video's render lease. Source may outlive its player.
+void E1SetProgressMovie(const owned::ProgressMovie& movie);
 // Returns one copied camera/fog/environment/light tuple during the active
 // world draw. Invalid subfields remain explicit in the returned snapshot.
 bool E1ReadWorldFrame(E1WorldFrame& output) noexcept;

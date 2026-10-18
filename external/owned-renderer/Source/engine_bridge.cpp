@@ -42891,6 +42891,15 @@ std::uint64_t bridge_current_world_epoch() noexcept {
 // menu, which reads no server list), the per-entity frame spare and the
 // terrain caster caches (both rebuilt on their next miss).
 void bridge_release_world_caches() noexcept {
+    // A completed embedded frame can still own every visual in the old
+    // world. Drop the values AND prepared parts before sweeping weak indexes.
+    reset_owned_visual_draw(nullptr);
+    end_owned_terrain_world_frame();
+    g_owned_terrain_frame = {};
+    g_owned_static_casters = {};
+    g_point_scene = {};
+    g_rain_baked = {};
+    g_rain_request = {};
     auto& seeds = g_server_seeds;
     decltype(seeds.appearances)().swap(seeds.appearances);
     decltype(seeds.raw)().swap(seeds.raw);

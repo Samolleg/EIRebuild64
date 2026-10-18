@@ -174,9 +174,13 @@ void E1SceneMembership::Retire(const void* source, std::uint64_t generation) noe
     if (!Matches(source, generation)) return;
     RetireResources();
     members.clear();
-    scene.positive_lifecycle_reset(advance(nextEpoch));
+    // Retirement is a real renderer boundary, even before another world is
+    // drawn. Zero means "no change" to c73 and kept the old GPU world alive
+    // throughout the next load. Never reuse the retired epoch for the next map.
+    epoch = advance(nextEpoch);
+    scene.positive_lifecycle_reset(epoch);
     owner = nullptr;
-    world = epoch = 0;
+    world = 0;
 }
 bool E1SceneMembership::Added(const void* source, std::uint64_t generation, std::int32_t id) noexcept {
     if (!Matches(source, generation)) return false;

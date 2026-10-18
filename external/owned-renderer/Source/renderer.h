@@ -3960,6 +3960,11 @@ private:
         bool attempted = false;              // decode tried for this load (once)
         std::vector<SurfaceImage> after;     // frames shown + 1 .. frames - 1, GPU textures
         float position = 0;                  // frames past `shown`, never decreasing
+        std::shared_ptr<ProgressMovieFrames> source;
+        // Typed hosts decode at most the two adjacent progress frames.
+        std::array<SurfaceImage, 2> images;
+        std::array<unsigned, 2> image_frames{UINT_MAX, UINT_MAX};
+        bool source_failed = false;
     } load_progress_movie_;
     bool load_progress_movie_valid_ = false; // the latest loading picture was a progress frame
     // Per component (world, neighbours, critter perches, shader sets, ground

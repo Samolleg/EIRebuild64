@@ -66,7 +66,7 @@ public:
     }
     BOOL Create(CWorldClient *pWrld)
     {
-        InitArrays();
+        // Rain/snow geometry belongs to the renderer; no host particle buffers.
         pWorld = pWrld;
         return TRUE;
     }
@@ -76,6 +76,7 @@ public:
     void SetWind(const CPlot3D &newWindVector, float fpNewWindForce);
     BOOL Draw(CRenderer *pTarget);
 
+    float GetRenderWeatherStart() const { return fpWeatherStartTime; }
     EWeather GetCurrentWeather() const { return curWeather; }
     EWeather GetNextWeather() const { return nextWeather; }
     // Read transition before the particle draw updates power; inactive is >1,
