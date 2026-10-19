@@ -14,6 +14,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Light.h"
 #include "FigureScreenBounds.h"
 #include "native_placed_figure.h"
+#include "model_draw.h"
+#include "model_preview_material.h"
 #include "GameJournal.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CFigureClientSpecific::CFigureClientSpecific()
@@ -269,6 +271,9 @@ bool CFigureClientSpecific::SubmitNativeFigure(CRenderer* renderer, CMaterial* m
         defaults || (!lights && !prelit),
         defaults ? pFigure->GetDefaultColor() : renderer->GetAmbientColor(),
         defaults ? pFigure->GetDefaultSpecular() : (std::uint32_t(fog) << 24));
+    owned::apply_model_preview_material(view, {defaults || (!lights && !prelit),
+        material && material->CheckFlag(MAT_USE_SPECULAR), view.default_diffuse,
+        view.default_specular, response, owned::NativeOrdering::preserve});
     return renderer->GetD3D()->SubmitC74Figure(view, response.enabled ? &illumination : nullptr, points);
 }
 
@@ -345,10 +350,21 @@ BOOL CFigureClientSpecific::Draw(CRenderer *pRend, CSimplyArray<CLight *, CLight
 {
     // Native picking still consumes source bounds. Rendering consumes packed
     // groups, current morphs and raw material/light facts through the c74 path.
-    PrepareOwnedPicking(pRend, pRect);
-    if (!pFigure->CheckFlag(FIG_VISIBLE)) return TRUE;
-    if (SubmitNativeFigure(pRend, static_cast<CMaterial*>(lpNewMaterial), cFog, &lights))
-        pFigure->SetFlag(FIG_LIGHTED);
+    if (owned::model_draw_is_preview()) {
+        // A second UI view must not replace world FIG_VISIBLE/rcClip used by
+        // picking. Draw admission uses the current preview transform only.
+        if (pFigure->CheckFlag(FIG_HIDDEN) ||
+            pRend->GetGeometryProcessor()->CheckVisibility(pFigure->bv) == TRV_INVISIBLE)
+            return TRUE;
+        if (pFigure->GetTextureTypeID() >= TTID_ANIMATED1 &&
+            pFigure->GetTextureTypeID() <= TTID_ANIMATED4)
+            CalcAnimatedTextureFrame(theWorld.GetPreciseTime());
+    } else {
+        PrepareOwnedPicking(pRend, pRect);
+        if (!pFigure->CheckFlag(FIG_VISIBLE)) return TRUE;
+    }
+    const bool submitted = SubmitNativeFigure(pRend, static_cast<CMaterial*>(lpNewMaterial), cFog, &lights);
+    if (submitted && !owned::model_draw_is_preview()) pFigure->SetFlag(FIG_LIGHTED);
     DrawBBox(pRend);
     return TRUE;
 }

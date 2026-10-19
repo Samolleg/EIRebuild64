@@ -26,6 +26,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E1Surface.h"
 #include "owned_asset_loader.h"
 #include "engine_bridge.h"
+#include "model_draw.h"
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
@@ -1006,21 +1007,53 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
 
 BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
 {
+    if (owned::model_draw_is_preview()) {
+        if (lpObject->CheckFlag(OBJ_HIDDEN)) return TRUE;
+        if (!PrepareOwnedResources()) return FALSE;
+        if (lpObject->GetAnimationSystem2())
+            lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+        return DrawModelParts(pRend, nullptr);
+    }
     // Publication and picking precede this draw's owned scene commit.
-    if (pRend->GetD3D()->IsOwnedWorldActive() && lpObject->GetID() > 0) {
+    if (owned::model_draw_uses_retained_world(pRend->GetD3D()->IsOwnedWorldActive(),
+            lpObject->GetID() > 0, owned::model_draw_domain)) {
         OwnedRender::E1ReportOwnedVisual(lpObject->GetID());
         if (pRect) *pRect = lpObject->rcScreenRect;
         return TRUE;
     }
     if (lpObject->CheckFlag(OBJ_HIDDEN))
         return TRUE;
+    if (!PrepareOwnedResources()) return FALSE;
+    if (!lpObject->CheckFlag(OBJ_STATIC)) lpObject->ResetFlag(OBJ_LIGHTED);
+    if (pRect) { rcRect.SetRectEmpty(); lpObject->rcScreenRect.SetRectEmpty(); }
+    if (lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    PublishOwnedPose();
+    return DrawModelParts(pRend, pRect);
+}
+
+BOOL CObject3DClientSpecific::DrawModelParts(CRenderer *pRend, CRect *pRect)
+{
+    const bool preview = owned::model_draw_is_preview();
+    const DWORD previousLighting = lpObject->CheckFlag(OBJ_LIGHTED);
     CDXGeometryProcessor *pGPU = pRend->GetGPU();
     CPlot3D objectCP = (lpObject)->GetCP();
     SHMatrix matrix;
     int nFigureClipFlag = 0;
     bool bHaveScale = false;
     //
-    if (!PrepareOwnedResources()) return FALSE;
+    // Read membership only. The same c74 producer owns ordering/admission and
+    // texture-set transitions for retail plans and source object previews.
+    struct SourcePart { CFigure* figure; CMaterial* material; unsigned set; };
+    std::vector<SourcePart> parts;
+    for (unsigned set = 0; set < 2; ++set) {
+        if (!sets[set]) continue;
+        for (int group = 0; group < sets[set]->matgroups.GetSize(); ++group) {
+            const auto* source = sets[set]->matgroups[group];
+            for (int part = 0; part < source->figures.GetSize(); ++part)
+                parts.push_back({source->figures[part], source->lpMaterial, set});
+        }
+    }
     //
     if (!lpObject->CheckFlag(OBJ_STATIC))
         lpObject->ResetFlag(OBJ_LIGHTED);
@@ -1031,9 +1064,6 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
         lpObject->rcScreenRect.SetRectEmpty();
     }
     //
-    if (lpObject->GetAnimationSystem2())
-        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
-    PublishOwnedPose();
     // collect all light sources to lit this object
     static CSimplyArray<CLight *, CLight *> lights;
     CManagerIterator mi;
@@ -1080,62 +1110,41 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     // draw object
     DWORD dwAllFiguresLighted = FIG_LIGHTED;
     DWORD dwObjectWasLighted = shadowLightingWasValid;
-    for (int i = 0; i < 2; ++i)
-    {
-        if (!sets[i])
-            continue;
-        // set texture to use with this set
-        bool bCheck = pRend->BindTexture(0, sets[i]->lpTexture);
-
-        if (bCheck == FALSE)
-            return ReportError("CObject3DClientSpecific::Draw.\n SetTexture failed.\n");
-
-        theRenderer.BindTexture(1, (i == 0 && pWoundsTexture) ? pWoundsTexture : 0);
-        // process material groups for it texture
-        for (int j = 0; j < sets[i]->matgroups.GetSize(); j++)
-        {
-            // draw all figures for it material with current texture
-            for (int k = 0; k < sets[i]->matgroups[j]->figures.GetSize(); k++)
-            {
-                CFigure *pFigure = sets[i]->matgroups[j]->figures[k];
-                // CRAP - old bodypart
-                if (fabs2(pFigure->GetCP()) > 1e9f)
-                    continue;
-                // CRAP end
-                if (!lpObject->CheckFlag(OBJ_LIGHTED))
-                    pFigure->ResetFlag(FIG_LIGHTED); // reset figure lighting flag, if entire object
-                                                     // require lighting
-                // prepare placement matrix
-                pFigure->CreateCurrentPlacement();
-                pFigure->GetPlacement(matrix);
-                // TODO WORLD MATRIX TRANSLATION2
-                // push this placement to all necessary stacks
-                pGPU->PushMainMatrix(matrix);
-                pGPU->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
-                // draw figure
-                {
-                    pRend->SetProjectionMatrix();
-                }
-                CRect rcFigureRect(0, 0, 0, 0);
-                bCheck = pRend->DrawFigure(pFigure, lights, sets[i]->matgroups[j]->lpMaterial, cFog,
-                                           pRect ? &rcFigureRect : nullptr,
-                                           lpObject->WhoAmI() == HPC_UNIT ? sets[i]->lpTexture : nullptr,
-                                           nullptr);
-                if (bCheck == FALSE)
-                    return ReportError("CObject3DClientSpecific::Draw.\n CFigure::Draw failed.\n");
-                nFigureClipFlag |= pFigure->CheckFlag(FIG_VISIBLE);
-                //
-                if (pRect && !rcFigureRect.IsRectEmpty() && pFigure->CheckFlag(FIG_VISIBLE))
-                    rcRect |= rcFigureRect;
-                // pop scaling
-                // pop placement from all stacks above
-                pGPU->PopMatrix(MAT_STACK_WORLDSPACE);
-                pGPU->PopMainMatrix();
-                if (!pFigure->CheckFlag(FIG_HIDDEN))
-                    dwAllFiguresLighted &= pFigure->CheckFlag(FIG_LIGHTED);
-            }
-        }
-    }
+    owned::ModelPartResult result;
+    const bool drawn = owned::produce_model_parts(parts.size(),
+        [&](std::size_t index, owned::ModelPartFacts& facts) {
+            const auto& part = parts[index];
+            facts.texture_set = part.set;
+            facts.inactive = fabs2(part.figure->GetCP()) > 1e9f;
+            facts.hidden = part.figure->CheckFlag(FIG_HIDDEN) != 0;
+            facts.visible = part.figure->CheckFlag(FIG_VISIBLE);
+            return true;
+        },
+        [&](unsigned set) {
+            return pRend->BindTexture(0, sets[set]->lpTexture) &&
+                pRend->BindTexture(1, set == 0 ? pWoundsTexture : nullptr);
+        },
+        [&](std::size_t index, std::uint32_t& visible) {
+            const auto& part = parts[index];
+            CFigure* pFigure = part.figure;
+            if (!preview && !lpObject->CheckFlag(OBJ_LIGHTED)) pFigure->ResetFlag(FIG_LIGHTED);
+            pFigure->CreateCurrentPlacement();
+            pFigure->GetPlacement(matrix);
+            pGPU->PushMainMatrix(matrix);
+            pGPU->PushMatrix(matrix, MAT_STACK_WORLDSPACE);
+            pRend->SetProjectionMatrix();
+            CRect rect(0, 0, 0, 0);
+            const BOOL ok = pRend->DrawFigure(pFigure, lights, part.material, cFog,
+                pRect ? &rect : nullptr,
+                lpObject->WhoAmI() == HPC_UNIT ? sets[part.set]->lpTexture : nullptr, nullptr);
+            visible = pFigure->CheckFlag(FIG_VISIBLE);
+            if (pRect && !rect.IsRectEmpty() && visible) rcRect |= rect;
+            pGPU->PopMatrix(MAT_STACK_WORLDSPACE);
+            pGPU->PopMainMatrix();
+            dwAllFiguresLighted &= pFigure->CheckFlag(FIG_LIGHTED);
+            return ok != FALSE;
+        }, result);
+    nFigureClipFlag = result.visible;
     // pop scale matrix
     if (bHaveScale)
     {
@@ -1148,7 +1157,11 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
         pGPU->PopMatrix(MAT_STACK_WORLDSPACE);
     pGPU->PopMainMatrix();
     //
-    if (dwAllFiguresLighted) // treat this object as lighted only if all figures was lighted!
+    if (preview) {
+        if (previousLighting) lpObject->SetFlag(OBJ_LIGHTED);
+        else lpObject->ResetFlag(OBJ_LIGHTED);
+    }
+    else if (drawn && dwAllFiguresLighted) // treat this object as lighted only if all figures was lighted!
     {
         lpObject->SetFlag(OBJ_LIGHTED);
         if (!dwObjectWasLighted)
@@ -1163,14 +1176,14 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     if (pRect != 0)
         *pRect = lpObject->rcScreenRect = rcRect;
     //
-    if (nFigureClipFlag)
-        lpObject->SetFlag(OBJ_VISIBLE);
-    else
-        lpObject->ResetFlag(OBJ_VISIBLE);
+    if (owned::model_draw_writes_pick_state(owned::model_draw_domain)) {
+        if (nFigureClipFlag) lpObject->SetFlag(OBJ_VISIBLE);
+        else lpObject->ResetFlag(OBJ_VISIBLE);
+    }
 
-    // remove blood texture
-    theRenderer.BindTexture(1, (CDXGISurface *)0);
-    return TRUE;
+    // Always unwind object/part matrices and the wound binding on rejection.
+    pRend->BindTexture(1, (CDXGISurface *)0);
+    return drawn ? TRUE : ReportError("CObject3DClientSpecific::Draw.\n Owned model draw failed.\n");
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3DClientSpecific::CanSelectRoughly(const CPoint &point) const

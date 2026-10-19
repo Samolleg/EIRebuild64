@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a`, commit `caeaa753c3cb39a13367b4597688a7b303948231`.
+integration changes in branch `eirebuild/c74-p6a2`, commit `2a44dd6034571d58ecea8f84d1be6f0ec2074b42`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -129,3 +129,8 @@ light/material setup are removed from these wrappers. The native GPU path,
 source picking and RUPD73 r4 world publications remain intact. Object-preview
 assembly, retained scheduling/visibility, cache lifetime and live display
 projection are still tracked as open work in the task REPORT.
+
+OWN74-P6a2 shares typed model-part admission/set traversal, preview invocation
+scope and final material/default-color state with the retail preview producer.
+Create and actual-rect clip-scale builders share the same matrix algorithm.
+Whole preview pose/lifetime and embedded live display Apply remain open.

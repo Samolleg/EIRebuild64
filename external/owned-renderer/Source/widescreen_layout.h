@@ -59,6 +59,23 @@ struct Layout {
     float clip_y = 1.0f;         // magnitude of _22 (vert+ on narrow screens)
 };
 
+enum class ProjectionBasis : std::uint8_t { stock_aspect, actual_rect };
+// Both Create's fixed 4:3 projection and the live world's actual-rect
+// projection must preserve the same complete clip transform, including W.
+inline void make_clip_scale_matrix(float* matrix, const Layout& layout,
+    ProjectionBasis basis = ProjectionBasis::stock_aspect) noexcept {
+    for (unsigned i = 0; i < 16; ++i) matrix[i] = 0.f;
+    matrix[10] = matrix[15] = 1.f;
+    if (basis == ProjectionBasis::actual_rect) {
+        const float ratio = kStockAspect / (layout.width / layout.height);
+        matrix[0] = ratio;
+        matrix[5] = -ratio;
+    } else {
+        matrix[0] = layout.clip_x;
+        matrix[5] = -layout.clip_y;
+    }
+}
+
 inline float interface_font_scale(const Layout& layout) noexcept {
     return 0.01f * layout.width / (800.0f * layout.unit);
 }

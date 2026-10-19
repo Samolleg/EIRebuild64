@@ -29,6 +29,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"
 #include "native_placed_figure.h"
+#include "model_draw.h"
 #include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E4Camp.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -248,7 +249,7 @@ BOOL CRenderer::DrawFigure(CFigure *pFigure, CSimplyArray<CLight *, CLight *> &l
     CFigureClientSpecific *pFigureSpec = static_cast<CFigureClientSpecific *>(
         pFigure->GetFigureSpecific());
     OwnedFigureInputs::Scope sourceScope(pDX11->GetOwnedRenderer(),pFigure,pMaterial,
-        pDX11->IsOwnedWorldActive(),pTexture0,pTexture1,
+        pDX11->IsOwnedWorldActive() && !owned::model_draw_is_preview(),pTexture0,pTexture1,
         pDX11->GetBoundFigureTexture(0),pDX11->GetBoundFigureTexture(1));
     return pFigureSpec->Draw(this, lights, pMaterial, cFog, pRect, pTexture0, pTexture1);
 }
@@ -533,7 +534,8 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     // World objects belong to the committed frame, including rejected visuals.
     // Never submit a second figure draw or return to OpenEI for these IDs.
     const auto objectId = std::int32_t(pDX11->GetOwnedRenderer().FigureValues().object_id);
-    if (!campDraw && hasFigure && pDX11->IsOwnedWorldActive() && objectId > 0) {
+    if (!campDraw && hasFigure && owned::model_draw_uses_retained_world(
+            pDX11->IsOwnedWorldActive(), objectId > 0, owned::model_draw_domain)) {
         OwnedRender::E1ReportOwnedVisual(objectId);
         return true;
     }

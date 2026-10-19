@@ -46,6 +46,8 @@
 #include "unit_percepts.h"
 #include "figure_selection_bounds.h"
 #include "owned_preview_policy.h"
+#include "model_draw.h"
+#include "model_preview_material.h"
 #include "unit_blood.h"
 #include "game_sites.h"
 #include "hud_native_sites.h"
@@ -7697,12 +7699,11 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
             view.contribution = {true,true,0};
             view.bounds_minimum = bounds.minimum; view.bounds_maximum = bounds.maximum;
             view.prepared_identity.presentation_serial = command.presentation_serial;
-            view.flags = (part.uses_default_colors?4u:0u) | ((part.material_flags&0x10u)?8u:0u);
-            view.default_diffuse = part.default_diffuse; view.default_specular = part.default_specular;
-            view.lighting = part.lighting;
-            view.owned_fixed_state.specular_enable = (part.material_flags&0x10u) ? TRUE : FALSE;
+            apply_model_preview_material(view, {part.uses_default_colors,
+                (part.material_flags&0x10u)!=0, part.default_diffuse, part.default_specular,
+                part.lighting, part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state});
             view.u_shift = record->values.u_shift; view.v_shift = record->values.v_shift;
-            view.ordering = part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state;
+
             NativeGeometryResult result{};
             if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
             if (part.wound) {
@@ -7769,36 +7770,44 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             transaction=g_native_sink_begin_object(g_native_sink_context);
             if (!transaction) return fail("preview.transaction");
         }
-        std::uint8_t active_set=0xff;
-        std::uint32_t visible=0;
-        for (std::size_t i=0;i<plan.parts.size();++i) {
-            const auto& source=plan.parts[i];
-            const auto& current=plan.prepared[i];
-            if (current.inactive) continue;
-            std::uint32_t flags=0;
-            if (!read_object_plan_flags(source.figure,flags)) return fail("preview.flags");
-            if (current.hidden) { visible|=flags&kFigureVisible; continue; }
-            if (source.set!=active_set) {
-                active_set=source.set;
+        std::uint32_t active_set=0;
+        const auto reject=[&](const char* reason) { failure=reason; return false; };
+        ModelPartResult loop_result;
+        const bool produced=produce_model_parts(plan.parts.size(),
+            [&](std::size_t i,ModelPartFacts& facts) {
+                const auto& current=plan.prepared[i];
+                facts.texture_set=plan.parts[i].set;
+                facts.inactive=current.inactive;
+                facts.hidden=current.hidden;
+                if (!facts.inactive && !read_object_plan_flags(plan.parts[i].figure,facts.visible))
+                    return reject("preview.flags");
+                facts.visible&=kFigureVisible;
+                return true;
+            },
+            [&](std::uint32_t set) {
+                active_set=set;
                 void* texture=nullptr;
                 void* descriptor=nullptr;
-                if (!read_object_plan_pointer(plan.sets[active_set],0,texture) ||
-                    (active_set==0 && !read_object_plan_pointer(specific,kObjectWoundDescriptorOffset,descriptor)) ||
+                if (!read_object_plan_pointer(plan.sets[set],0,texture) ||
+                    (set==0 && !read_object_plan_pointer(specific,kObjectWoundDescriptorOffset,descriptor)) ||
                     !set_object_plan_texture(renderer,texture) ||
-                    !apply_object_plan_render_state(active_set==0?descriptor:nullptr))
-                    return fail("preview.presentation");
+                    !apply_object_plan_render_state(set==0?descriptor:nullptr))
+                    return reject("preview.presentation");
                 if (command) {
-                    // The device state and stage-0 texture this set's parts use.
                     auto sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
-                    if (!sinks) return fail("preview.scene_sinks");
+                    if (!sinks) return reject("preview.scene_sinks");
                     if (g_scene_handoff.bind_texture)
                         g_scene_handoff.bind_texture(sinks.get(),g_scene_handoff.bound_texture(g_scene_handoff.context));
                     command->sets.push_back(std::move(sinks));
                 }
-            }
+                return true;
+            },
+            [&](std::size_t i,std::uint32_t& part_visible) {
+                const auto& source=plan.parts[i];
+                const auto& current=plan.prepared[i];
             const char* name=nullptr;
             std::size_t name_size=0;
-            if (!read_figure_name(source.figure,name,name_size)) return fail("preview.part_name");
+            if (!read_figure_name(source.figure,name,name_size)) return reject("preview.part_name");
             auto& ordinal=plan.interaction_part_ordinals[i];
             if (ordinal>=sample.assembly->parts.size() ||
                 sample.assembly->parts[ordinal].name.size()!=name_size ||
@@ -7806,16 +7815,16 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 const auto found=std::find_if(sample.assembly->parts.begin(),sample.assembly->parts.end(),
                     [&](const VisualPartAsset& part) { return part.name.size()==name_size &&
                         std::memcmp(part.name.data(),name,name_size)==0; });
-                if (found==sample.assembly->parts.end()) return fail("preview.part_binding");
+                if (found==sample.assembly->parts.end()) return reject("preview.part_binding");
                 ordinal=static_cast<std::size_t>(found-sample.assembly->parts.begin());
             }
-            if (!preview_submits_part(sample.assembly->parts[ordinal])) continue;
+            if (!preview_submits_part(sample.assembly->parts[ordinal])) return true;
             if (command) {
                 NativeFrameState state;
                 if (!g_native_sink_frame_state ||
-                    !g_native_sink_frame_state(g_native_sink_context,state)) return fail("preview.ui_state");
+                    !g_native_sink_frame_state(g_native_sink_context,state)) return reject("preview.ui_state");
                 std::uint32_t material_flags=0;
-                if (!read_object_plan_flags(current.material,material_flags)) return fail("preview.material");
+                if (!read_object_plan_flags(current.material,material_flags)) return reject("preview.material");
                 OwnedPreviewPart part;
                 part.ordinal=ordinal; part.set=command->sets.size()-1;
                 part.material=state.material;
@@ -7830,24 +7839,23 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                     active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
                 if (part.wound) {
                     part.wound_texture=g_scene_handoff.surface_snapshot(g_scene_handoff.context,part.wound);
-                    if (!part.wound_texture) return fail("preview.wound_snapshot");
+                    if (!part.wound_texture) return reject("preview.wound_snapshot");
                 }
                 command->parts.push_back(std::move(part));
-                visible|=kFigureVisible;
-                ++output.submitted_figures;
-                continue;
+                part_visible=kFigureVisible;
+                return true;
             }
             NativeWorldBounds bounds{};
             NativePreparedPartSubmission* record=nullptr;
             if (!retained_visual_part_bounds(sample,ordinal,bounds) ||
                 !retained_visual_part_submission(sample,ordinal,bounds,{true,true,0},texture_time,fog,record))
-                return fail("preview.part_evaluation");
+                return reject("preview.part_evaluation");
             NativeGeometryView view=*record->source;
             // Read the caller's completed UI state after the set's presentation
             // transition. The prepared queue handles changes to this state.
             NativeFrameState state;
             if (!g_native_sink_frame_state ||
-                !g_native_sink_frame_state(g_native_sink_context,state)) return fail("preview.ui_state");
+                !g_native_sink_frame_state(g_native_sink_context,state)) return reject("preview.ui_state");
             view.owned_fixed_state=state.material;
             view.world.pose=pose; view.world.owner=&pose->owner;
             view.world.shape=pose->shape; view.world.object_to_world=base_world;
@@ -7858,26 +7866,28 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             const auto& context=current.context;
             const auto& lighting=context.lighting;
             std::uint32_t material_flags=0;
-            if (!read_object_plan_flags(current.material,material_flags)) return fail("preview.material");
-            view.flags=(context.uses_default_colors?4u:0u)|((material_flags&0x10u)?8u:0u);
-            view.default_diffuse=context.default_diffuse; view.default_specular=context.default_specular;
-            view.lighting=lighting;
-            view.owned_fixed_state.specular_enable=(material_flags&0x10u)?TRUE:FALSE;
+            if (!read_object_plan_flags(current.material,material_flags)) return reject("preview.material");
+
             view.u_shift=record->values.u_shift; view.v_shift=record->values.v_shift;
             const auto* image=g_object_suffix_image;
             const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
             const auto wound=object_render_wound_surface_for_set(active_set,
                 active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
-            view.ordering=wound?NativeOrdering::preserve:NativeOrdering::derive_from_state;
+            apply_model_preview_material(view, {context.uses_default_colors,
+                (material_flags&0x10u)!=0, context.default_diffuse, context.default_specular,
+                lighting, wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state});
             NativeGeometryResult result{};
-            if (!g_native_sink_submit(g_native_sink_context,view,result)) return fail("preview.submission");
+            if (!g_native_sink_submit(g_native_sink_context,view,result)) return reject("preview.submission");
             if (wound) {
                 view.wound_surface_interface=wound; view.wound_only=true;
-                if (!g_native_sink_submit(g_native_sink_context,view,result)) return fail("preview.wound_submission");
+                if (!g_native_sink_submit(g_native_sink_context,view,result)) return reject("preview.wound_submission");
             }
-            visible|=kFigureVisible;
-            ++output.submitted_figures;
-        }
+            part_visible=kFigureVisible;
+            return true;
+        },loop_result);
+        if (!produced) return fail(failure?failure:"preview.parts");
+        const auto visible=loop_result.visible;
+        output.submitted_figures=loop_result.submitted;
         if (command) {
             command->sample=std::move(sample);
             command->texture_time=texture_time; command->fog=fog;
@@ -7912,6 +7922,7 @@ ObjectPlanExecutionStatus execute_owned_object_render_plan(
     ObjectRenderPlan* plan = nullptr;
     const auto* invocation = object_suffix_current_invocation();
     const bool preview_route = invocation && owned_preview_route(invocation->route);
+    ModelDrawScope draw_scope(preview_route ? ModelDrawDomain::preview : ModelDrawDomain::normal);
     // A render-side failure omits the visual (logged) but never the game's
     // interaction outputs: once the object's figure plan exists they are
     // republished from game state alone. Only a broken identity/plan contract
@@ -7943,7 +7954,8 @@ ObjectPlanExecutionStatus execute_owned_object_render_plan(
         return fail("identity");
     plan = current_object_render_plan(identity, owner, specific);
     if (!plan) return fail("plan");
-    if (g_owned_visual_world_frame.active && g_scene_3d_depth && !preview_route) {
+    if (model_draw_uses_retained_world(g_owned_visual_world_frame.active && g_scene_3d_depth,
+            true, model_draw_domain)) {
         const auto index = owned_visual_frame_index(identity);
         if (index < g_owned_visual_world_frame.prepared.size() &&
             g_owned_visual_world_frame.prepared[index].claimed) {

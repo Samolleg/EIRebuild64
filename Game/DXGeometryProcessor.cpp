@@ -278,10 +278,7 @@ void CDXGeometryProcessor::CreateCameraMatrix2(SHMatrix &matrix, const CPlot3D &
 // create cip space scaling matrix. normal monitor's clip scale are 4 : 3. rescale DCS
 void CDXGeometryProcessor::CreateClipScaleMatrix(SHMatrix &matrix)
 {
-    Identity(matrix);
-    const auto layout=WideScreen::Layout();
-    matrix._11 = layout.clip_x;
-    matrix._22 = -layout.clip_y;
+    owned::widescreen::make_clip_scale_matrix(&matrix._11,WideScreen::Layout());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // create viewport scaling matrix. NDCS => SCS

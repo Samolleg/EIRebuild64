@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Object.h"
 #include "Object3DClientSpecific.h"
+#include "model_draw.h"
 #include "OwnedRender/E1Scene.h"
 #include "World.h"
 #include "particle.h"
@@ -181,6 +182,8 @@ void CObject3D::PrepareForDraw(const CQuaternion &q)
 // draw object = unit?
 BOOL CObject3D::Draw(CRenderer *pRend)
 {
+    if (!owned::model_draw_writes_pick_state(owned::model_draw_domain))
+        return lpObjectSpecific ? lpObjectSpecific->Draw(pRend, nullptr) : TRUE;
     rcScreenRect.SetRectEmpty();
 
     if (lpObjectSpecific)

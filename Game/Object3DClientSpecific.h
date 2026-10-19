@@ -162,6 +162,9 @@ public:
     void Highlight(BOOL bHighlight);
     // drawing
     virtual BOOL Draw(CRenderer *pRend, CRect *pRect);
+private:
+    BOOL DrawModelParts(CRenderer *pRend, CRect *pRect);
+public:
 
     // shadow functions
     bool IsNeedShadow() const;       // is this object cast shadow in current settings ?

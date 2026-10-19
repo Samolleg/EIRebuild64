@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "model_draw.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -311,6 +312,7 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
         const bool camp=OwnedRender::E4::OwnsDraw();
         std::uint64_t before=0,after=0;
         if(camp)pRend->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& renderer){before=renderer.native_logical_draws();return S_OK;});
+        owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
         const BOOL drawn=pDrawUnit->DrawWithoutBBox(pRend);
         if(camp){
             const bool flushed=pRend->GetD3D()->FlushC56CampFigures();

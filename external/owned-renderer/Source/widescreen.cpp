@@ -504,20 +504,15 @@ void* make_forwarder(std::uintptr_t va, std::size_t prologue, std::size_t& patch
 // --- World -----------------------------------------------------------------------
 
 void __fastcall clip_scale_matrix(void*, void*, float* matrix) {
-    std::memset(matrix, 0, 16 * sizeof(float));
-    matrix[0] = 1.0f;
-    matrix[5] = -1.0f;
-    matrix[10] = 1.0f;
-    matrix[15] = 1.0f;
+    widescreen::Layout layout;
+    auto basis=widescreen::ProjectionBasis::stock_aspect;
     if (g_surface_known && _ReturnAddress() == at(kClipScaleCreateReturn)) {
-        matrix[0] = g_layout.clip_x;
-        matrix[5] = -g_layout.clip_y;
+        layout=g_layout;
     } else if (g_surface_known && t_display_world_refresh && _ReturnAddress() == at(0x005016E5)) {
-        // This builder uses the rectangle's actual aspect, unlike Create's
-        // fixed 4:3. Preserve Create's complete raw projection, including W.
-        const float ratio=(4.f/3.f)/(g_layout.width/g_layout.height);
-        matrix[0]=ratio;matrix[5]=-ratio;
+        layout=g_layout;
+        basis=widescreen::ProjectionBasis::actual_rect;
     }
+    widescreen::make_clip_scale_matrix(matrix,layout,basis);
 }
 
 // --- Addon widescreen takeover -------------------------------------------------------

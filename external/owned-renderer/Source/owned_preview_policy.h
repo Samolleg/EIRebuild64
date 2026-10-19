@@ -1,6 +1,7 @@
 #pragma once
 
 #include "retained_static_scene.h"
+#include "model_draw.h"
 
 namespace owned {
 
@@ -12,7 +13,7 @@ namespace owned {
 // draw. A cleared OBJ_VISIBLE from a failed preview made a hovered boar
 // unpickable whenever its panel figure was shown.
 inline bool uncommitted_draw_clears_world_pick_state(bool preview_route) noexcept {
-    return !preview_route;
+    return model_draw_writes_pick_state(preview_route ? ModelDrawDomain::preview : ModelDrawDomain::normal);
 }
 
 // A FIG without triangles (Dejavu unanwibo.mod chelust.001/.002) is an

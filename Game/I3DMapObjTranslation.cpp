@@ -3,6 +3,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "StdAfx.h"
+#include "model_draw.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DFigure.h"
@@ -57,6 +58,7 @@ void CI3DMapObjTranslation::Draw(CRenderer *pRend)
 
     m_pMapObject->SetFlag(OBJ_USE_DEFAULT_FOG);
     m_pMapObject->SetExactPosition(timeGetTime() / 67.0f);
+    owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
     m_pMapObject->Draw(pRend);
     m_pMapObject->ResetFlag(OBJ_USE_DEFAULT_FOG);
 

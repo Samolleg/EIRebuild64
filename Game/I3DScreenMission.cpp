@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "model_draw.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E2Gdi.h"
@@ -5517,6 +5518,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
                 /*pRend->GetTextureStageState(0, D3DTSS_MIPFILTER, &dwMipFilter0);
                 pRend->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTFP_NONE);*/
                 // draw unit in the info-window
+                owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
                 pDrawUnit->DrawWithoutBBox(pRend);
                 // restore mip-mapping
                 // pRend->SetTextureStageState(0, D3DTSS_MIPFILTER, dwMipFilter0);
