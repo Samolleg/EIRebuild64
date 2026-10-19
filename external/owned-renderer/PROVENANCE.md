@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a7`, commit `1a8c09b5a2161020f41335de62372fa3bf493c1c`.
+integration changes in branch `eirebuild/c74-p6a8`, commit `eed883e248c6edbb46e3a089197c0e09467cd9d4`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -170,3 +170,12 @@ CP/orientation/scale or FIG color flags. Native admitted preview placement uses
 the same value builder; ordinary world routes are unchanged. Source animation
 callbacks remain source-owned. The full P4/P6 remainder is still open; see
 OWN74-P6a7/REMAINING.md. No upstream merge.
+
+OWN74-P6a8 moves the complete source single-item/head presentation sequence,
+source inventory/pane semantic composition and depth ordering, and the single
+source LRU storage into renderer-owned typed producers. Raw resource allocation,
+source object callbacks, item user-data/RNG and API submission stay in adapters.
+Millisecond ties cannot stall trim or evict the current unpinned texture.
+The retail stock frontend has not yet been replaced by these new producers;
+full native/source parity, allocator/session policy, normal visibility,
+generated-MMP and live display Apply remain open. No upstream merge.

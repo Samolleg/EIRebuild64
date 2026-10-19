@@ -46,6 +46,7 @@ bool ModSpellAddonAllowsSave();
 #include "I3DScreenSaveLoad.h"
 #include "I3DInventory.h"
 #include "I3DMain.h"
+#include "OwnedRender/PreviewComposition.h"
 #include "A3Cursor.h"
 #include "I3DScrollText.h"
 #include "Console.h"
@@ -5465,62 +5466,16 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
     {
         if (nMode != 2 || (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVShowCharacterModelInStats")))
         {
-            D3DRECT rects[3];
-            CRect rcTmp(180 - slide_nCurPixels, 0, 400 - slide_nCurPixels, 220);
-            CRect rcTmp1(0, 0, 20 - slide_nCurPixels, 220);
-            CRect rcTmp2(0, 220, 400 - slide_nCurPixels, 300);
-            pI3D->VirtualToScreenLocal(rcTmp);
-            pI3D->VirtualToScreenLocal(rcTmp1);
-            pI3D->VirtualToScreenLocal(rcTmp2);
-
-            rects[0].x1 = rcTmp.left;
-            rects[0].y1 = rcTmp.top;
-            rects[0].x2 = rcTmp.right;
-            rects[0].y2 = rcTmp.bottom;
-            rects[1].x1 = rcTmp2.left;
-            rects[1].y1 = rcTmp2.top;
-            rects[1].x2 = rcTmp2.right;
-            rects[1].y2 = rcTmp2.bottom;
-            rects[2].x1 = rcTmp1.left;
-            rects[2].y1 = rcTmp1.top;
-            rects[2].x2 = rcTmp1.right;
-            rects[2].y2 = rcTmp1.bottom;
-
-            pI3D->GetRenderer()->Clear(3, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
-
-
-            const float previewTime = theWorld.GetPreciseTime();
-            owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::game, previewTime);
-            pDrawUnit->SetExactPosition(previewTime);
-            auto preview=owned::widescreen::native_camera_point(
-                float(owned::widescreen::portrait_native_x(WideScreen::Layout(),slide_nCurPixels)),200.f,DISTANCE_DRAW_UNIT);
-            preview.y+=fAltDrawUnit/fDistDrawUnit;
-            owned::ModelPreviewPresentation presentation;
-            presentation.id = pDrawUnit->GetID();
-            presentation.placed = presentation.default_fog = presentation.default_colors = true;
-            presentation.placement.position = {preview.x, preview.y, preview.z};
-            const auto orientation = CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .05f) *
-                CQuaternion(CPlot3D(1, 0, 0), FP_PI2 * 1.15f) * CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .4f);
-            orientation.GetComponents(presentation.placement.quaternion[0], presentation.placement.quaternion[1],
-                presentation.placement.quaternion[2], presentation.placement.quaternion[3]);
-            presentation.placement.scale = {1 / fDistDrawUnit, 1 / fDistDrawUnit, 1 / fDistDrawUnit};
-            presentation.diffuse = nMode == 0 ? 0xffffffffu : 0xff808080u;
-            owned::ModelPreviewPresentationScope presentationScope(presentation);
-            {
-                // reset mip-mapping (and store old value)
-                CRenderer *pRend = &theRenderer;
-                DWORD dwMipFilter0 = 0;
-                // TODO ALEX drawunit mip filter?
-                /*pRend->GetTextureStageState(0, D3DTSS_MIPFILTER, &dwMipFilter0);
-                pRend->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTFP_NONE);*/
-                // draw unit in the info-window
-                owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
-                pDrawUnit->DrawWithoutBBox(pRend);
-                // restore mip-mapping
-                // pRend->SetTextureStageState(0, D3DTSS_MIPFILTER, dwMipFilter0);
-            }
-
-            pI3D->GetRenderer()->Clear(3, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
+            const float previewTime=theWorld.GetPreciseTime();
+            owned::ModelPreviewTimeScope clock(owned::ModelPreviewClock::game,previewTime);
+            const auto composition=owned::panel_model_preview(pDrawUnit->GetID(),WideScreen::Layout(),
+                slide_nCurPixels,fDistDrawUnit,fAltDrawUnit,DISTANCE_DRAW_UNIT,nMode==0);
+            owned::produce_model_preview_composition(composition,
+                [&](auto& rect,bool local){SourcePreviewRect(pI3D,rect,local);},
+                [&](const auto* rect,unsigned count,float depth){SourcePreviewDepth(pI3D->GetRenderer(),rect,count,depth);},
+                SourcePreviewQuaternion,
+                [&]{pDrawUnit->SetExactPosition(previewTime);},
+                [&]{pDrawUnit->DrawWithoutBBox(&theRenderer);},[]{});
         }
 
 #ifndef NOGETDC

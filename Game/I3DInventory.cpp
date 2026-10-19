@@ -3,6 +3,7 @@
 #include "model_preview_clock.h"
 #include "model_preview_presentation.h"
 #include "model_draw_lifetime.h"
+#include "model_preview_single.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -32,6 +33,7 @@ static float ModInfoProperty(const char*callback,const char*name,int property)
 #include "PerkDatabase.h"
 #include "UnitDatabase.h"
 #include "Object3DClientSpecific.h"
+#include "OwnedRender/PreviewComposition.h"
 #include "RandomGen.h"
 #include "Party.h"
 #include "GameMain.h"
@@ -76,15 +78,7 @@ static LPCSTR ModInfoMaterialName(const CItem *item)
 
 const COLORREF INV_COLOR_INFO = RGB(228, 215, 167);
 const COLORREF INV_COLOR_HEADER = RGB(255, 255, 255);
-const float INVROT_MAX_SPEED = 5.f; // rad/sec
-const float INVROT_MIN_SPEED = .1f; // rad/sec
-const float INVROT_ACCEL = 8.f;     // rad/sec/sec
 
-const int NUM_DRAW_RECTS = 6;
-const int DRAW_RECT_LEFT[NUM_DRAW_RECTS] = { 290, 272, 272, 510, 510, 510 };
-const int DRAW_RECT_TOP[NUM_DRAW_RECTS] = { 100, 190, 340, 190, 290, 390 };
-const int DRAW_RECT_RIGHT[NUM_DRAW_RECTS] = { 510, 290, 290, 528, 528, 528 };
-const int DRAW_RECT_BOTTOM[NUM_DRAW_RECTS] = { 500, 260, 410, 210, 310, 410 };
 /////////////////////////////////////////////////////////////////////////////////////
 CI3DFigure *CI3DFigureLRUAllocator::CreateObject(const char *pszFigName)
 {
@@ -244,62 +238,15 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
     if (!pDrawUnit)
         return;
 
-    D3DRECT rects[NUM_DRAW_RECTS];
-    float fDist = 6.f;
-    CRect rcTmp;
-
-    // Complete earlier camp figures before changing the preview depth buffer.
-    if(OwnedRender::E4::OwnsDraw())pRend->GetD3D()->FlushC56CampFigures();
-    pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 0, 0);
-    if (bArmors)
-    {
-        for (int i = 0; i < NUM_DRAW_RECTS; i++)
-        {
-            rcTmp.left = DRAW_RECT_LEFT[i];
-            rcTmp.top = DRAW_RECT_TOP[i];
-            rcTmp.right = DRAW_RECT_RIGHT[i];
-            rcTmp.bottom = DRAW_RECT_BOTTOM[i];
-            pI3D->VirtualToScreen(rcTmp);
-            rects[i].x1 = rcTmp.left;
-            rects[i].y1 = rcTmp.top;
-            rects[i].x2 = rcTmp.right;
-            rects[i].y2 = rcTmp.bottom;
-        }
-        pI3D->GetRenderer()->Clear(NUM_DRAW_RECTS, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
-    }
-    else
-    {
-        if (fX > 400)
-            rcTmp = CRect(410, 100, 700, 500);
-        else
-            rcTmp = CRect(200, 100, 600, 500);
-        pI3D->VirtualToScreen(rcTmp);
-        rects[0].x1 = rcTmp.left;
-        rects[0].y1 = rcTmp.top;
-        rects[0].x2 = rcTmp.right;
-        rects[0].y2 = rcTmp.bottom;
-        pI3D->GetRenderer()->Clear(1, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
-    }
-
-    const float previewTime = (timeGetTime() / 1024.0f) * 15;
-    owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::inventory, previewTime);
-    pDrawUnit->SetExactPosition(previewTime);
-    owned::ModelPreviewPresentation presentation;
-    presentation.id = pDrawUnit->GetID();
-    presentation.placed = presentation.full_ambient = presentation.default_fog = true;
-    presentation.placement.position = {(fX / 400.f - 1.f) * VIEWING_ANGLE_TAN * fDist,
-        (440 / 400.f - .75f) * VIEWING_ANGLE_TAN * fDist, fDist};
-    CQuaternion rotNew = CQuaternion(CPlot3D(0, 1, 0), fAngle) * CQuaternion(CPlot3D(1, 0, 0), FP_PI2);
-    if (fX > 400) rotNew = rotNew * CQuaternion(CPlot3D(0, 0, -1), FP_PI2 * 0.15f);
-    rotNew.GetComponents(presentation.placement.quaternion[0], presentation.placement.quaternion[1],
-        presentation.placement.quaternion[2], presentation.placement.quaternion[3]);
-    presentation.placement.scale = {1.2f, 1.2f, 1.2f};
-    owned::ModelPreviewPresentationScope presentationScope(presentation);
-    {
-        // reset mip-mapping (and store old value)
-        CRenderer *pRend = pI3D->GetRenderer();
-        DWORD dwMipFilter0 = 0;
-        // TODO ALEX mip - high quality texture
+    const float previewTime=(timeGetTime()/1024.0f)*15;
+    owned::ModelPreviewTimeScope clock(owned::ModelPreviewClock::inventory,previewTime);
+    const auto composition=owned::inventory_model_preview(pDrawUnit->GetID(),fX,fAngle,bArmors,VIEWING_ANGLE_TAN);
+    owned::produce_model_preview_composition(composition,
+        [&](auto& rect,bool local){SourcePreviewRect(pI3D,rect,local);},
+        [&](const auto* rect,unsigned count,float depth){SourcePreviewDepth(pI3D->GetRenderer(),rect,count,depth);},
+        SourcePreviewQuaternion,
+        [&]{pDrawUnit->SetExactPosition(previewTime);},
+        [&]{
         const bool camp=OwnedRender::E4::OwnsDraw();
         std::uint64_t before=0,after=0;
         if(camp)pRend->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& renderer){before=renderer.native_logical_draws();return S_OK;});
@@ -316,13 +263,14 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
                 GameJournal::Event("RENDER","camp_unit_preview","id=%d draw=%d flush=%d hidden=%d submissions=%llu",pDrawUnit->GetID(),int(drawn),int(flushed),int(pDrawUnit->CheckFlag(OBJ_HIDDEN)!=0),static_cast<unsigned long long>(after-before));
             }
         }
-    }
-
+        },
+        [&]{if(OwnedRender::E4::OwnsDraw())pRend->GetD3D()->FlushC56CampFigures();});
 }
 /////////////////////////////////////////////////////////////////////////////////////
 static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, { 0, 1, 0, 1 },
                                                 { 1, 1, 0, 1 }, { 1, 1, 0, 1 }, { 1, 0, 1, 1 },
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
+#include "OwnedRender/SinglePreview.inl"
 void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
 {
     if (!item.pItem) return;
@@ -347,11 +295,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
     }
     pFig->SetTexture(pTex);
-    pFig->SetDefaultSpecular(0xff000000);
-    pFig->SetRelativeToScreen(item.fX, item.fY, item.fZ);
-    pFig->SetScale(item.fZ * VIEWING_ANGLE_TAN * item.fPixSize * .75f / 800);
     pFig->SetMaterial(pMat1);
-    //
     if (item.pItem->GetUserData() == 0)
     {
         CRotateItem *pInfo = dbgnew CRotateItem;
@@ -361,186 +305,48 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         pInfo->fFlashVal = random.GetFloat(0, FP_2PI);
         item.pItem->AttachUserData(pInfo);
     }
-
     const auto* itemMod = ModRuntime::Current();
     const bool nativeItemGraphics = itemMod && itemMod->CombatSetting("JMVGraphics2");
-    // Retail comparisons at 5ECEDC/5ED25C: addon changes rune (4) to quick (2).
+    const auto type = item.pItem->GetTypeID();
     const bool flatInstruction = nativeItemGraphics
-        ? item.pItem->GetTypeID() == ITID_ITEM_LOOT &&
+        ? type == ITID_ITEM_LOOT &&
           static_cast<CItemLoot*>(item.pItem)->GetLootType() == IDBLIT_INSTRUCTION &&
           static_cast<CItemLoot*>(item.pItem)->GetInstructionType() == IDBINS_QUICK
         : IsItemModifier(item.pItem);
-    const bool flatMagicItem = IsItemSpell(item.pItem) || IsItemPrototype(item.pItem) || flatInstruction;
-    if (item.eFrom != ISP_UNKNOWN)
-    {
-        pFig->SetAmbient(1, 1, 1);
-        //
-        float fTime = GetFrameTime();
-        CRotateItem *pInfo = static_cast<CRotateItem *>(item.pItem->GetUserData());
-        ETypeIDs tid = item.pItem->GetTypeID();
-        // step magic flashing
-        if (item.pItem->GetSpellsCount() != 0 &&
-            (tid == ITID_ITEM_WEAPON || tid == ITID_ITEM_ARMOR))
-        {
-            const CSpell *pSpell = item.pItem->GetSpell(0);
-            if (pSpell)
-            {
-                ERPGMagicSubtypes magic = pSpell->GetMagicSubtype();
-                if (magic < RPGMST_UNKNOWN)
-                {
-                    const D3DCOLORVALUE &color = dcvMagicColors[magic];
-                    pInfo->fFlashVal = fmod(pInfo->fFlashVal + fTime * 5.0, 2.0 * pi);
-                    float fVal = 0.15f + sin(pInfo->fFlashVal) * 0.15f;
-                    pFig->SetDefaultSpecular(
-                        D3DRGB(color.r * fVal, color.g * fVal, color.b * fVal));
-                }
-                else
-                    pInfo->fFlashVal = 0;
+    owned::SinglePreviewFacts facts;
+    facts.x=item.fX;facts.y=item.fY;facts.z=item.fZ;facts.size=item.fPixSize;
+    facts.viewing_tangent=VIEWING_ANGLE_TAN;
+    facts.slot=item.eFrom!=ISP_UNKNOWN;
+    facts.elapsed=facts.slot?GetFrameTime():0;
+    facts.hovered=item.pItem==pMouseItem;
+    facts.flat=IsItemSpell(item.pItem)||IsItemPrototype(item.pItem)||flatInstruction;
+    facts.weapon=type==ITID_ITEM_WEAPON && !(nativeItemGraphics &&
+        static_cast<CItemWeapon*>(item.pItem)->GetWeaponType()==RPGWST_HANDS1);
+    facts.instruction=IsItemInstruction(item.pItem);
+    facts.gray_in_front=IsItemPrototype(item.pItem)||IsItemModifier(item.pItem)||IsItemSpell(item.pItem);
+    facts.pulse=item.pItem->GetSpellsCount()!=0&&(type==ITID_ITEM_WEAPON||type==ITID_ITEM_ARMOR);
+    if (facts.pulse) {
+        if (const auto* spell=item.pItem->GetSpell(0)) {
+            const auto subtype=spell->GetMagicSubtype();
+            if (subtype<RPGMST_UNKNOWN) {
+                const auto& color=dcvMagicColors[subtype];
+                facts.valid_palette=true;facts.palette={color.r,color.g,color.b};
             }
-            else
-                pInfo->fFlashVal = 0;
-        }
-        // rotate
-        if (item.pItem == pMouseItem)
-            pInfo->fSpeed += fTime * INVROT_ACCEL;
-        else
-        {
-            if (pInfo->fSpeed < INVROT_MIN_SPEED)
-            {
-                pInfo->fAngle = 0;
-                pInfo->fSpeed = 0;
-            }
-            else
-                pInfo->fSpeed = (2 * FP_PI - pInfo->fAngle) * 4.f;
-        }
-        if (pInfo->fSpeed > INVROT_MAX_SPEED)
-            pInfo->fSpeed = INVROT_MAX_SPEED;
-        pInfo->fAngle += fTime * pInfo->fSpeed;
-        while (pInfo->fAngle > FP_2PI)
-            pInfo->fAngle -= FP_2PI;
-
-        if (flatMagicItem)
-            pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
-        else if (tid == ITID_ITEM_WEAPON &&
-                 !(nativeItemGraphics &&
-                   static_cast<CItemWeapon*>(item.pItem)->GetWeaponType() == RPGWST_HANDS1))
-        {
-            pFig->SetOrientation(CQuaternion(CPlot3D(1, 1, 0), pInfo->fAngle) *
-                                 CQuaternion(CPlot3D(1, 0, 0), FP_PI));
-        }
-        else if (IsItemInstruction(item.pItem))
-        {
-            /*
-            EIDBInstructionType eType = ((CItemLoot*)item.pItem)->GetInstructionType();
-            if ( eType == IDBINS_WEAPON )
-                    pFig->SetOrientation( CQuaternion( CPlot3D(1,1,0), pInfo->fAngle ) *
-                            CQuaternion( CPlot3D(1,0,0), FP_PI ) );
-            else
-                    pFig->SetOrientation( CQuaternion( CPlot3D(0,1,0), pInfo->fAngle ) *
-                            CQuaternion( CPlot3D(1,0,0), FP_PI ) );
-            */
-            pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI));
-        }
-        else
-            pFig->SetOrientation(CQuaternion(CPlot3D(0, 1, 0), pInfo->fAngle) *
-                                 CQuaternion(CPlot3D(1, 0, 0), FP_PI));
-
-        // draw background
-        CI3DFigure *pFigure = AddFigure();
-        pFigure->MakeBar(item.fZ * 1.3f, 100, item.fX - 35, item.fY - 35, item.fX + 35,
-                         item.fY + 35, 157, 157, 227, 227);
-        pFigure->SetTexture(textures[2]);
-        pFigure->Draw(pRend);
-        RemoveFigure(pFigure);
-    }
-    else
-    {
-        pFig->SetAmbient(.5f, .5f, .5f);
-        if (flatMagicItem)
-            pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
-        else
-            pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI));
-        LPBOUNDINGVOLUME bv = pFig->GetBoundingVolume();
-        float fMaxSize = Max(bv->ptMax.x, bv->ptMax.y);
-
-        pFig->SetRelativeToScreen(item.fX - bv->ptCenter.x * item.fPixSize / 2,
-                                  item.fY + bv->ptCenter.y * item.fPixSize / 2, item.fZ);
-        pFig->SetScale(item.fZ * VIEWING_ANGLE_TAN * item.fPixSize / 800 / fMaxSize);
-    }
-    // draw
-    //		pFig->SetDefaultSpecular( 0xff000000 );
-    const bool campPreview = item.eFrom == ISP_UNKNOWN && campPlaced;
-    const auto campRGB = campPreview ? E4CampAccess::PreviewRGB(this, item.pItem) : 0u;
-    OwnedRender::E4::Preview preview(campRGB, campPreview);
-    OwnedRender::E4::PreviewMaterial campMaterial(pFig, campPreview, campRGB);
-    pFig->SetDefaultColor(
-        D3DRGBA(pFig->GetAmbient().x, pFig->GetAmbient().y, pFig->GetAmbient().z, 1));
-    pFig->UseDefaultColors(TRUE);
-    DWORD oldSpecular=FALSE;
-    pRend->GetRenderState(D3DRENDERSTATE_SPECULARENABLE,&oldSpecular);
-    pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,item.pItem->GetSpellsCount()!=0);
-    const bool oldColorSum=pRend->GetD3D()->SetItemColorSum(true);
-    { OwnedRender::E4::Icon icon(pFig,campIcon); pFig->Draw(pRend); }
-    pRend->GetD3D()->SetItemColorSum(oldColorSum);
-    pRend->SetRenderState(D3DRENDERSTATE_SPECULARENABLE,oldSpecular);
-
-    if (IsItemSpell(item.pItem))
-    {
-        CSpell *pSpell = item.pItem->GetSpell(0);
-        if (pSpell && pSpell->GetRunesCount() > 0)
-        {
-            float fX, fY, fZ, fXShift, fYShift;
-            pFig->GetRelativeToScreen(fX, fY, fZ);
-            float fScale = pFig->GetXScale();
-
-            // draw modifiers
-            CI3DFigure *pFigure = AddFigure();
-            pFigure->MakeBar(fZ * .9f, 100, 0, 0, 35, 35, 0, 0, 32, 32);
-            pFigure->SetTexture(textures[1]);
-            pFigure->SetScale(fScale);
-            if (item.eFrom != ISP_UNKNOWN)
-                pFigure->SetAmbient(1, 1, 1);
-            else
-                pFigure->SetAmbient(.5f, .5f, .5f);
-
-            for (int i = 0; i < pSpell->GetRunesCount(); i++)
-            {
-                int nMod = pSpell->GetRunes()[i] - 1;
-                pFigure->SetUShift((nMod & 0x7) / 8.f);
-                pFigure->SetVShift(-(nMod >> 3) / 8.f);
-
-                fXShift = 550 * fScale / fZ;
-                fYShift = 550 * fScale / fZ;
-                if (i == 0 || i == 4)
-                    fXShift = 0;
-                else if (i == 5 || i == 6 || i == 7)
-                    fXShift = -fXShift;
-                if (i == 2 || i == 6)
-                    fYShift = 0;
-                else if (i == 0 || i == 1 || i == 7)
-                    fYShift = -fYShift;
-
-                pFigure->SetRelativeToScreen(fX + fXShift, fY + fYShift, fZ * .9f);
-                pFigure->Draw(pRend);
-            }
-
-            RemoveFigure(pFigure);
         }
     }
-    // draw grayed
-    if (item.eFrom != ISP_UNKNOWN && !CanClickOnItem(item.pItem, item.eFrom))
-    {
-        float fDepth = item.fZ * 1.25f;
-        if (IsItemPrototype(item.pItem) || IsItemModifier(item.pItem) || IsItemSpell(item.pItem))
-            fDepth = item.fZ * .8f;
-        CI3DFigure *pFigure = AddFigure();
-        pFigure->MakeBar(fDepth, 100, item.fX - 35, item.fY - 35, item.fX + 35, item.fY + 35);
-        pFigure->SetTexture(0);
-        pFigure->UseDefaultColors(TRUE);
-        pFigure->SetDefaultColor(RGBA_MAKE(128, 64, 64, 130));
-        pFigure->Draw(pRend);
-        RemoveFigure(pFigure);
+    if (!facts.slot) {
+        const auto* bounds=pFig->GetBoundingVolume();
+        facts.bounds_max={bounds->ptMax.x,bounds->ptMax.y};
+        facts.bounds_center={bounds->ptCenter.x,bounds->ptCenter.y};
     }
+    if (IsItemSpell(item.pItem)) {
+        if (const auto* spell=item.pItem->GetSpell(0)) facts.rune_count=spell->GetRunesCount();
+    }
+    auto* info=static_cast<CRotateItem*>(item.pItem->GetUserData());
+    owned::SinglePreviewRotationState rotation{info->fAngle,info->fSpeed,info->fFlashVal};
+    SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
+    adapter.item=&item;adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
+    owned::produce_single_item_preview(facts,rotation,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
@@ -566,26 +372,10 @@ void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
     if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
         return;
     pFig->SetTexture(pTex);
-    pFig->SetDefaultSpecular(0xff000000);
-    pFig->SetRelativeToScreen(head.fX, head.fY, head.fZ);
-    pFig->SetScale(head.fZ * VIEWING_ANGLE_TAN * head.fPixSize * .75f / 800);
     pFig->SetMaterial(pMat1);
-    pFig->SetAmbient(1, 1, 1);
-    CQuaternion qRot(CPlot3D(1, 0, 0), FP_PI);
-    // qRot = CQuaternion( CPlot3D(0,1,0), (head.fX - 400) / 1000 ) * qRot;
-    qRot = CQuaternion(CPlot3D(-1, 0, 0), (head.fY - 300) / 1000) * qRot;
-    pFig->SetOrientation(qRot);
-
-    // draw background
-    CI3DFigure *pFigure = AddFigure();
-    pFigure->MakeBar(head.fZ * 1.3f, 100, head.fX - 35, head.fY - 35, head.fX + 35, head.fY + 35,
-                     157, 157, 227, 227);
-    pFigure->SetTexture(textures[2]);
-    pFigure->Draw(pRend);
-    RemoveFigure(pFigure);
-
-    // draw
-    pFig->Draw(pRend);
+    SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
+    owned::produce_single_head_preview(head.fX,head.fY,head.fZ,head.fPixSize,
+        VIEWING_ANGLE_TAN,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DItemScreen::AddBackground()
