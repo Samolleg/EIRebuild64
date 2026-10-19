@@ -1,4 +1,17 @@
 #include "contact_blend.h"
+#include "model_preview_clock.h"
+#include "../ModRuntime.h"
+#include "../ModPackage.h"
+// Read-only adapter over the same source rate used by SetExactPosition.
+struct OwnedPreviewSourceAccess {
+    static double Rate(const CUnit* unit) noexcept {
+        if (!unit) return 1;
+        if (unit->animationSpeed == UAS_FROZEN) return 0;
+        const auto* mod = ModRuntime::Current();
+        return unit->animationSpeed == UAS_MOVEMENT || (mod && mod->CombatSetting("AttackAnimSpeed"))
+            ? unit->fpAnimationCoeff : 1;
+    }
+};
 // Included by Object3DClientSpecific.cpp. Source pointers stay in this adapter;
 // the renderer evaluates its immutable FIG/BON/LNK/ANM assembly and GPU pose.
 BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
@@ -37,13 +50,16 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     if (!animation->GetOwnedCurrentAnimationSelection(selected))
         return reject("preview.selected_clip");
     sample.selection = selected.visual;
-    // The caller has already completed SetExactPosition with its native clock.
-    // Sample that selected phase without Step, queue consumption or publication
-    // into the world. Preview preparation never recalculates host skeletons.
-    if (!owned::sample_visual_preview_phase(sample.selection, animation->GetTime(), 0,
-            sample.pose.phase)) return reject("preview.phase");
-    if (!ownedPreviewPrepared) ownedPreviewPrepared = std::make_shared<owned::VisualPreparedResources>();
-    sample.prepared = ownedPreviewPrepared;
+    // The source controller has completed its callbacks. The UI owns only the
+    // selected clip's presentation anchor and a separate pose for each clock.
+    const auto clock = owned::model_preview_time;
+    if (!clock.supplied) return reject("preview.clock_source");
+    if (!ownedPreviewViews) ownedPreviewViews = std::make_shared<owned::ModelPreviewViews>();
+    auto& viewClock = ownedPreviewViews->at(clock.clock);
+    if (!owned::prepare_model_preview_phase(viewClock, sample, ownedPreviewRevision,
+            renderer->GetD3D()->ModelPreviewFrame(), clock.now, animation->GetTime(),
+            OwnedPreviewSourceAccess::Rate(dynamic_cast<const CUnit*>(lpObject))))
+        return reject("preview.phase");
 
     auto* gpu = renderer->GetGPU();
     if (!gpu->IsHaveMatrix(MAT_STACK_PROJSPACE)) return reject("preview.projection");

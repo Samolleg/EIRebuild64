@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "model_draw.h"
+#include "model_preview_clock.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E2Gdi.h"
@@ -5491,7 +5492,9 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
             pos = pDrawUnit->GetCP();
             rot = pDrawUnit->GetOrientation();
 
-            pDrawUnit->SetExactPosition(theWorld.GetPreciseTime());
+            const float previewTime = theWorld.GetPreciseTime();
+            owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::game, previewTime);
+            pDrawUnit->SetExactPosition(previewTime);
             auto preview=owned::widescreen::native_camera_point(
                 float(owned::widescreen::portrait_native_x(WideScreen::Layout(),slide_nCurPixels)),200.f,DISTANCE_DRAW_UNIT);
             preview.y+=fAltDrawUnit/fDistDrawUnit;

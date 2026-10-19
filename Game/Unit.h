@@ -193,6 +193,7 @@ class CUnit : public CMapObject
     friend class CUnitClientSpecific;
     friend class CUnitServer;
     friend struct ModNpcMigrationAccess;
+    friend struct OwnedPreviewSourceAccess;
 
 protected:
     // just a name :)

@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
-namespace owned { struct VisualPreparedResources; struct VisualAssemblyAsset; }
+namespace owned { struct ModelPreviewViews; struct VisualAssemblyAsset; }
 
 #include "Object.h"
 #include "Material.h"
@@ -84,7 +84,7 @@ private:
 
 private:
 
-    std::shared_ptr<owned::VisualPreparedResources> ownedPreviewPrepared;
+    std::shared_ptr<owned::ModelPreviewViews> ownedPreviewViews;
     std::shared_ptr<const owned::VisualAssemblyAsset> ownedPreviewAssembly;
     std::uint64_t ownedPreviewSerial = 0, ownedPreviewResource = 0, ownedPreviewRevision = 0;
     std::shared_ptr<const owned::VisualAssemblyAsset> BuildOwnedAssembly(

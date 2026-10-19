@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a4`, commit `3d31e6824fd396dfb0abe480176d763287a64caf`.
+integration changes in branch `eirebuild/c74-p6a5`, commit `6fd51e727eb552f5be414aeebc4b5708d5b8ca9d`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -146,3 +146,9 @@ embedded UI object draws. Source private previews use immutable source
 assemblies and separate prepared resources, including negative-id display
 copies. No UI pose is published into the world. P4 wrapper clocks/placement,
 light admission, item figure LRU and live display Apply remain open.
+
+OWN74-P6a5 extracts c74 preview clock/anchor and per-view prepared pose ownership
+into model_preview_clock.h. Native preview and source inventory/pane/display
+wrappers call the same owner with their actual clock values and source rates.
+Source SetExactPosition callbacks, world publication and picking are preserved.
+Full placement/light/cache/generated-MMP/live display owners remain open.

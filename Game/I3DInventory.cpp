@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "model_draw.h"
+#include "model_preview_clock.h"
 #include "model_draw_lifetime.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
@@ -291,7 +292,9 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
 
     pDrawUnit->SetFlag(OBJ_USE_DEFAULT_FOG);
 
-    pDrawUnit->SetExactPosition((timeGetTime() / 1024.0f) * 15); // theWorld.GetPreciseTime() );
+    const float previewTime = (timeGetTime() / 1024.0f) * 15;
+    owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::inventory, previewTime);
+    pDrawUnit->SetExactPosition(previewTime);
     //
     CQuaternion rotNew = CQuaternion(CPlot3D(0, 1, 0), fAngle);
     CPlot3D posNew(0, 0, 0);

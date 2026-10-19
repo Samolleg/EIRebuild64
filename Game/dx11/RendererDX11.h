@@ -84,6 +84,7 @@ private:
 
 public:
     enum class OwnedTerrainPassResult { unavailable, submitted, failed };
+    std::uint64_t ModelPreviewFrame() const noexcept { return frameSerial; }
     bool Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
     ~CDX11();
 

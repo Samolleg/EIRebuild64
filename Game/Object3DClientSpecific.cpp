@@ -294,7 +294,7 @@ BOOL CObject3DClientSpecific::Create()
 void CObject3DClientSpecific::Destroy()
 {
     ownedAppearanceAttempted = false;
-    ownedPreviewPrepared.reset();
+    ownedPreviewViews.reset();
     ownedPreviewAssembly.reset();
     ownedPreviewResource = 0;
     int i;

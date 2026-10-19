@@ -48,6 +48,7 @@
 #include "owned_preview_policy.h"
 #include "model_draw.h"
 #include "model_preview_geometry.h"
+#include "model_preview_clock.h"
 #include "model_preview_material.h"
 #include "unit_blood.h"
 #include "game_sites.h"
@@ -2974,14 +2975,7 @@ struct PreparedObjectPlanPart {
     bool inactive = false;
 };
 
-struct OwnedPreviewView {
-    VisualResourceIncarnation resource{};
-    VisualClipSelection selection;
-    std::shared_ptr<VisualPreparedResources> prepared;
-    std::uint64_t selection_revision = 0, last_frame = 0;
-    double anchor_time = 0, anchor_phase = 0, last_time = 0, rate = 1;
-    bool active = false;
-};
+using OwnedPreviewView = ModelPreviewView;
 
 struct ObjectRenderPlan {
     LifecycleIdentity identity{};
@@ -10809,22 +10803,8 @@ bool prepare_owned_preview_pose(ObjectRenderPlan& plan, void* owner,
     }
     if (!plan.preview_views) plan.preview_views=std::make_shared<std::array<OwnedPreviewView,2>>();
     auto& view=(*plan.preview_views)[inventory?1:0];
-    const bool same_clip=view.selection.database==sample.selection.database &&
-        view.selection.clip==sample.selection.clip && view.selection.ordinal==sample.selection.ordinal &&
-        view.selection.neutral==sample.selection.neutral;
-    const bool same_resource=view.resource.signed_id==resource.signed_id && view.resource.serial==resource.serial;
-    const bool shown_continuously=view.last_frame==g_preview_frame_serial ||
-        view.last_frame+1==g_preview_frame_serial;
-    if (!view.active || !same_resource || !same_clip || view.selection_revision!=revision || view.rate!=rate ||
-        !shown_continuously || now<view.last_time) {
-        view.anchor_time=now; view.anchor_phase=phase;
-    }
-    if (!same_resource || !view.prepared) view.prepared=std::make_shared<VisualPreparedResources>();
-    view.resource=resource; view.selection=sample.selection; view.selection_revision=revision;
-    view.last_frame=g_preview_frame_serial; view.last_time=now; view.rate=rate; view.active=true;
-    sample.prepared=view.prepared;
-    return sample_visual_preview_phase(sample.selection,view.anchor_phase,(now-view.anchor_time)*rate,sample.pose.phase) ||
-        visual_failure(failure,"preview.clip_time");
+    return prepare_model_preview_phase(view,sample,revision,g_preview_frame_serial,
+        now,phase,rate) || visual_failure(failure,"preview.clip_time");
 }
 
 bool visual_read_intent(void* object, double time, VisualPoseIntent& intent, const char** failure = nullptr) {
