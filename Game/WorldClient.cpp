@@ -3260,13 +3260,6 @@ std::vector<CMapObject *> visibleObjects;
 std::vector<CMapObject *> visibleLevers;
 std::vector<CMapObject *> visibleUnits;
 std::vector<CMapObject *> visibleTrees;
-// shadow lists
-std::vector<CMapObject *> shadowBuildings;
-std::vector<CMapObject *> shadowObjects;
-std::vector<CMapObject *> shadowLevers;
-std::vector<CMapObject *> shadowUnits;
-std::vector<CMapObject *> shadowTrees;
-//
 std::vector<CMapObject *> relights;
 //
 void ClearLists()
@@ -3277,11 +3270,6 @@ void ClearLists()
     visibleLevers.clear();
     visibleUnits.clear();
     visibleTrees.clear();
-    shadowBuildings.clear();
-    shadowObjects.clear();
-    shadowLevers.clear();
-    shadowUnits.clear();
-    shadowTrees.clear();
     relights.clear();
 }
 }; // namespace NWorldClient
@@ -3345,23 +3333,18 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
             {
             case HPC_UNIT:
                 visibleUnits.push_back(pObject);
-                shadowUnits.push_back(pObject);
                 break;
             case HPC_BUILDING:
                 visibleBuildings.push_back(pObject);
-                shadowBuildings.push_back(pObject);
                 break;
             case HPC_TREE:
                 visibleTrees.push_back(pObject);
-                shadowTrees.push_back(pObject);
                 break;
             case HPC_LEVER:
                 visibleLevers.push_back(pObject);
-                shadowLevers.push_back(pObject);
                 break;
             default:
                 visibleObjects.push_back(pObject);
-                shadowObjects.push_back(pObject);
             }
             if (pObject->CheckFlag(OBJ_STATIC) &&
                 (dwCurrentLightTime -
@@ -3376,28 +3359,6 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
         else
         {
             pObject->ResetFlag(OBJ_VISIBLE);
-            // добавить в списки теней по детальной проверке тени
-            if (static_cast<CObject3DClientSpecific *>(pObject->GetObjectSpecific())
-                    ->IsShadowVisible())
-            {
-                switch (pObject->WhoAmI()) // add to list by type: unit/building/tree/object
-                {
-                case HPC_UNIT:
-                    shadowUnits.push_back(pObject);
-                    break;
-                case HPC_BUILDING:
-                    shadowBuildings.push_back(pObject);
-                    break;
-                case HPC_TREE:
-                    shadowTrees.push_back(pObject);
-                    break;
-                case HPC_LEVER:
-                    shadowLevers.push_back(pObject);
-                    break;
-                default:
-                    shadowObjects.push_back(pObject);
-                }
-            }
         }
     }
 
@@ -3462,7 +3423,8 @@ BOOL CWorldClient::Prepare3DScene()
     CorePerf::VisualCount(0, visibleObjects.size() + visibleBuildings.size() + visibleTrees.size() +
         visibleLevers.size() + visibleUnits.size());
     coreParts.Stage(CorePerf::PoseWalk);
-    // Publish current poses for off-screen casters as well as visible objects.
+    // Interaction lists are camera-local. Renderer shadow coverage consumes
+    // every positive object below, independently of stock shadow lists.
     std::set<int> prepared;
     static std::uint64_t lastPublicationEpoch = 0;
     const auto publicationEpoch = OwnedRender::E1Scene().Epoch();
@@ -3494,8 +3456,7 @@ BOOL CWorldClient::Prepare3DScene()
         if (!(stages & 16u)) unclaimedPublicationStages.emplace_back(object->GetID(), stages);
     };
     for (const auto* list : {&visibleObjects, &visibleBuildings, &visibleTrees, &visibleLevers,
-                            &visibleUnits, &shadowObjects, &shadowBuildings, &shadowTrees,
-                            &shadowLevers, &shadowUnits})
+                            &visibleUnits})
         for (auto* object : *list) prepare(object);
     // Caster admission is by native light-space bounds, not the camera list.
     // Publish even outside the host draw radius: long sun/point shadows can

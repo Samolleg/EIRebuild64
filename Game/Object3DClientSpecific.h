@@ -170,7 +170,6 @@ public:
     bool IsNeedShadow() const;       // is this object cast shadow in current settings ?
     bool IsNeedRecalcShadow() const; // is this object require shadow recalculation in this frame ?
     void RemoveShadowInformation();
-    bool IsShadowVisible() const;
     //
     virtual void FinalDataLoading();
     // class identification functions

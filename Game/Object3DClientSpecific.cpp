@@ -1597,11 +1597,3 @@ void CObject3DClientSpecific::RemoveShadowInformation()
     memset(&bvShadowBV, 0, sizeof(bvShadowBV));
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CObject3DClientSpecific::IsShadowVisible() const
-{
-    // Only source eligibility belongs to the host. Native light-space culling
-    // decides whether an off-screen caster reaches this draw's receivers.
-    return IsNeedShadow() && !lpObject->CheckFlag(OBJ_HIDDEN | OBJ_NOSHADOW) &&
-        !lpObject->IsInvisible();
-}
-/////////////////////////////////////////////////////////////////////////////////////

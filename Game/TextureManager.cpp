@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "TextureManager.h"
+#include "camp_inventory.h"
 #include "OwnedRender/E3HudVisual.h"
 #include "ModHDEquipmentLayer.h"
 #include "GameJournal.h"
@@ -86,6 +87,7 @@ BOOL CTextureManager::Create()
 /////////////////////////////////////////////////////////////////////////////////////
 void CTextureManager::Destroy()
 {
+    owned::camp_inventory_texture_manager_destroying(this);
     pShadowBufferTexture = 0;
     //
     LPTEXTURE lpTexture = 0;

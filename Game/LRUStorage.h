@@ -26,22 +26,30 @@ public:
         RemoveExcess();
     }
     bool Contains(const char* name) const { return loadedObjects.find(name) != loadedObjects.end(); }
-    T *GetObject(const char *pszName);
+    T *GetObject(const char *pszName) {
+        return GetObject(pszName, [](T*) {});
+    }
+    // The draw must acquire its reference before RemoveExcess can evict a
+    // newly loaded figure (including equal native millisecond timestamps).
+    template<class Pin> T *GetObject(const char *pszName, Pin&& pin);
     void FreeObjects();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 template <class T, class M>
-T *CLRUStorage<T, M>::GetObject(const char *pszName)
+template<class Pin>
+T *CLRUStorage<T, M>::GetObject(const char *pszName, Pin&& pin)
 {
     auto it = loadedObjects.find(pszName);
     if (it != loadedObjects.end())
     {
+        pin(it->second.first);
         it->second.second = timeGetTime();
         return it->second.first;
     }
     T *pObj = M::CreateObject(pszName);
     if (!pObj)
         return 0;
+    pin(pObj);
     loadedObjects[pszName] = std::make_pair(pObj, timeGetTime());
     RemoveExcess();
     return pObj;

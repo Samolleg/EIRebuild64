@@ -10,6 +10,8 @@
 #include "../dx11/RendererDX11.h"
 #include "../ModRuntime.h"
 #include "../ModPackage.h"
+#include "../WorldClient.h"
+#include "../TextureManager.h"
 
 using namespace OwnedRender::E4;
 using owned::camp::Rect;
@@ -71,6 +73,7 @@ void E4CampAccess::Activate(CI3DScreenCamp* owner){
         [](void* p){static_cast<CI3DScreenCamp*>(p)->GetI3D()->BeginFX("buttons\\camp\\scroll.wav");}});
     const auto* mod=ModRuntime::Current();
     RegisterTextures(mod&&mod->CombatSetting("JMVGraphics2"));
+    owned::camp_inventory_embedded_texture_manager(theWorld.GetTextureManager());
     auto* backend=owner->GetI3D()->GetRenderer()->GetD3D();
     owned::camp_inventory_set_popup_sink(backend,[](void* p,owned::CampRenderRequest request,owned::CampPopupDraw draw,void* data){
         return static_cast<CDX11*>(p)->SubmitC56CampPopup(request,draw,data);

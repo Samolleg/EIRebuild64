@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "model_draw.h"
+#include "model_draw_lifetime.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -345,7 +346,12 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
     if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
-    CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName());
+    owned::ModelDrawReference figureLifetime;
+    CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName(), [&](CI3DFigure* figure) {
+        figureLifetime.hold(figure,
+            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
+            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
+    });
     CTexture *pTex = nullptr;
     std::shared_ptr<const owned::PreparedCampIcon> campIcon;
     if (OwnedRender::E4::OwnsDraw()) {
@@ -566,7 +572,12 @@ void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
     szFigureName.Format("infa%sme%dface", pRace->szMaskName, pProt->dwHair + 1);
     szTextureName.Format("face%s%02d", szSex, pProt->dwSkinIndex);
 
-    CI3DFigure *pFig = figuresLRU.GetObject(szFigureName);
+    owned::ModelDrawReference figureLifetime;
+    CI3DFigure *pFig = figuresLRU.GetObject(szFigureName, [&](CI3DFigure* figure) {
+        figureLifetime.hold(figure,
+            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
+            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
+    });
     CTexture *pTex = texturesLRU.GetObject(szTextureName);
     if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
         return;

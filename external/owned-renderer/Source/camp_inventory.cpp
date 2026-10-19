@@ -1,6 +1,7 @@
 #include "camp_inventory.h"
 #include "camp_presentation.h"
 #include "camp_session.h"
+#include "model_draw_lifetime.h"
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
 #include "owned_asset_loader.h"
@@ -506,7 +507,7 @@ struct ItemTextureScope {
     void* preview_item = nullptr; // Borrowed only by this synchronous part9 draw.
     bool preview_glow_ready = false;
     std::uint32_t preview_specular_rgb = 0;
-    void* pending_figure = nullptr; // One reference only until this native draw ends.
+    ModelDrawReference pending_figure; // Released by close(), including the native SEH exit.
     bool measure_scroll = false, scroll_miss_open = false;
     bool active = true;
     std::shared_ptr<const OwnedVisualSurface> surface;
@@ -518,10 +519,7 @@ struct ItemTextureScope {
         if (!std::exchange(active, false)) return;
         item_texture_scope = previous;
         preview_item = nullptr;
-        if (void* figure = std::exchange(pending_figure, nullptr)) {
-            // Use the same live Release dispatch as the native LRU trim.
-            reinterpret_cast<VoidFn>(field<void**>(figure, 0)[0x10 / 4])(figure);
-        }
+        pending_figure.reset();
         surface.reset(); binding = nullptr;
     }
     ~ItemTextureScope() { close(); }
@@ -626,8 +624,11 @@ const char* advance_preview_specular_rgb(void* item, std::uint32_t& rgb) noexcep
 void __stdcall retain_pending_item_figure(void* self, void* figure) noexcept {
     if (!item_texture_scope || item_texture_scope->owner != self || self != screen || !layout.wide)
         return;
-    ++field<int>(figure, 4); // Shipped allocator's inline AddRef operation.
-    item_texture_scope->pending_figure = figure;
+    item_texture_scope->pending_figure.hold(figure,
+        [](void* value) noexcept { ++field<int>(value, 4); },
+        [](void* value) noexcept {
+            reinterpret_cast<VoidFn>(field<void**>(value, 0)[0x10 / 4])(value);
+        });
     if(item_texture_scope->measure_scroll)++scroll_cost.figure_misses;
 }
 
@@ -1170,7 +1171,7 @@ void native_item_draw(void* self, void* renderer, void* item, ItemTextureScope* 
     }
 }
 void __fastcall texture_manager_destroy(void* self, void*) {
-    if (bridge_camp_texture_manager(self)) camp_inventory_retire_textures();
+    camp_inventory_texture_manager_destroying(self);
     original<VoidFn>(texture_manager_destroy_id)(self);
 }
 BOOL native_area_contains(void* area, POINT point) {
@@ -2152,6 +2153,10 @@ void camp_inventory_retire_textures() noexcept {
     camp_textures.clear();
 }
 void camp_inventory_shutdown_icons() noexcept { camp_icon_loader.shutdown(); }
+void camp_inventory_texture_manager_destroying(void* owner) noexcept {
+    retire_model_texture_manager(owner, bridge_camp_texture_manager,
+        camp_inventory_retire_textures, camp_inventory_shutdown_icons);
+}
 
 bool camp_inventory_texture(std::uint64_t id, std::uint64_t generation,
                             NativeOwnedTextureView& value) noexcept {

@@ -24,10 +24,12 @@ bool camp_inventory_input(HWND window,UINT message,WPARAM wparam,LPARAM lparam,
 void camp_inventory_cancel_drag() noexcept;
 // Resource/device owners call this before invalidation or teardown.
 void camp_inventory_retire_textures() noexcept;
+void camp_inventory_texture_manager_destroying(void* owner) noexcept;
 // Final owned resource-scope release; joins the CPU worker outside DllMain.
 void camp_inventory_shutdown_icons() noexcept;
 #ifdef EID3D11_EMBEDDED
 void camp_inventory_begin_icon_frame() noexcept;
+void camp_inventory_embedded_texture_manager(void* owner) noexcept;
 #endif
 // Only the actual bound modern icon identity/generation is admitted.
 bool camp_inventory_texture(std::uint64_t id, std::uint64_t generation,
