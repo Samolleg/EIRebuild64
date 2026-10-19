@@ -123,8 +123,8 @@ BOOL CI3DPolyArea::PtInArea(CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DPolyArea::MakeRect(int x1, int y1, int x2, int y2)
 {
-    x1 += WideScreen::currentShift;
-    x2 += WideScreen::currentShift;
+    x1=std::lround(WideScreen::PlaceX(float(x1)));y1=std::lround(WideScreen::PlaceY(float(y1)));
+    x2=std::lround(WideScreen::PlaceX(float(x2)));y2=std::lround(WideScreen::PlaceY(float(y2)));
     points.RemoveAll();
     rect.left = x1;
     rect.top = y1;
@@ -143,7 +143,8 @@ void CI3DPolyArea::Clear()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DPolyArea::AddPoint(CPoint point)
 {
-    point.x += WideScreen::currentShift;
+    point.x=std::lround(WideScreen::PlaceX(float(point.x)));
+    point.y=std::lround(WideScreen::PlaceY(float(point.y)));
     if (!points.GetSize())
     {
         rect.left = point.x;

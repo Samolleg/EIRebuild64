@@ -382,6 +382,32 @@ struct E3HudAccess {
     }
 };
 namespace OwnedRender {
+E3HudCompositionScope::E3HudCompositionScope(CI3DObject* object,int figure) noexcept
+    : previous(owned::widescreen::hud_blit) {
+    const int panel=E3HudAccess::Panel(object);
+    if(panel<0)return;
+    auto& context=owned::embedded_hud_layout();
+    owned::widescreen::HudComposition h;
+    visible=figure<0?context.body_composition(owned::HudPanel(panel),h):
+        context.figure_composition(owned::HudPanel(panel),unsigned(figure),-1,h);
+    if(visible)owned::widescreen::hud_blit=h;
+}
+E3HudCompositionScope::~E3HudCompositionScope() {owned::widescreen::hud_blit=previous;}
+bool E3HudItemEventInside(CI3DObject* object,POINT pixel) noexcept {
+    if(E3HudAccess::Panel(object)!=int(owned::HudPanel::items))return true;
+    bool inside=false;E3HudAccess::Inside(object,pixel,inside);return inside;
+}
+bool E3HudMapOffset(CI3DObject* object,POINT pixel,POINT& offset) noexcept {
+    if(E3HudAccess::Panel(object)!=int(owned::HudPanel::minimap))return false;
+    auto& context=owned::embedded_hud_layout();
+    owned::widescreen::HudComposition h;
+    if(!context.body_composition(owned::HudPanel::minimap,h))return false;
+    const auto& layout=context.layout();const auto centre=owned::widescreen::map_centre(layout,h);
+    offset.x=owned::widescreen::map_offset(owned::widescreen::cursor_x(layout,pixel.x),centre.dx,centre.inverse_scale);
+    offset.y=owned::widescreen::map_offset(owned::widescreen::cursor_y(layout,pixel.y),centre.dy,centre.inverse_scale);
+    return true;
+}
+
 void E3HudCommitVisuals(const CI3DScreenMission* mission) {E3HudAccess::CommitVisuals(mission);}
 bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,bool& valid) noexcept {
     if(!object || object!=messageTextOwner || !E3HudRendererAttached())return false;

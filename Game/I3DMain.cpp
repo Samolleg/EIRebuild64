@@ -873,17 +873,17 @@ void CInterface3D::ClearChatLines()
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::VirtualToScreen(CRect &rect)
 {
-    owned::widescreen::placed_rect_to_pixels(owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight)),rect);
+    owned::widescreen::native_surface_rect(WideScreen::Layout(nScreenWidth,nScreenHeight),WideScreen::currentAnchor,rect);
 }
 void CInterface3D::VirtualToScreen(CPoint &point)
 {
-    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
-    point.x=owned::widescreen::pixel_x(layout,float(point.x));
-    point.y=owned::widescreen::pixel_y(layout,float(point.y));
+    const auto layout=WideScreen::Layout(nScreenWidth,nScreenHeight);
+    point.x=owned::widescreen::pixel_x(layout,owned::widescreen::native_x(layout,WideScreen::currentAnchor,float(point.x)));
+    point.y=owned::widescreen::pixel_y(layout,owned::widescreen::native_y(layout,WideScreen::currentAnchor,float(point.y)));
 }
 void CInterface3D::VirtualToScreen(CSize &point)
 {
-    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    const auto layout=WideScreen::Layout(nScreenWidth,nScreenHeight);
     point.cx=owned::widescreen::local_pixels(layout,point.cx);
     point.cy=owned::widescreen::local_pixels(layout,point.cy);
 }
@@ -893,13 +893,13 @@ void CInterface3D::ScreenToVirtual(CRect &rect)
 }
 void CInterface3D::ScreenToVirtual(CPoint &pt)
 {
-    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    const auto layout=WideScreen::Layout(nScreenWidth,nScreenHeight);
     pt.x=owned::widescreen::cursor_x(layout,pt.x);
     pt.y=owned::widescreen::cursor_y(layout,pt.y);
 }
 void CInterface3D::ScreenToVirtual(CSize &pt)
 {
-    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    const auto layout=WideScreen::Layout(nScreenWidth,nScreenHeight);
     pt.cx=owned::widescreen::local_units(layout,pt.cx);
     pt.cy=owned::widescreen::local_units(layout,pt.cy);
 }

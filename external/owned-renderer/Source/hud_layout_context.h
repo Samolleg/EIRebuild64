@@ -43,6 +43,9 @@ public:
     void set_message_panel(const MessagePanelSettings& settings) noexcept;
     bool message_text_rect(RECT& placed,float& text_scale) noexcept;
     const widescreen::Layout& layout() const noexcept { return g_layout; }
+    widescreen::Layout native_layout(unsigned width,unsigned height) const noexcept {
+        return widescreen::make_layout(float(width),float(height),hud_width_,ui_scale_percent_?ui_scale_percent_/100.f:g_layout.scale);
+    }
     bool editing=false;
     std::array<HudPanelSettings,7> g_hud_panels{};
     MessagePanelSettings g_message_panel{};

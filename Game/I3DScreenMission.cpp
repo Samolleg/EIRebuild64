@@ -2105,8 +2105,8 @@ CI3DObjectWeapons::CI3DObjectWeapons(CInterface3D *pI, CI3DScreenMission *pScr)
     : CI3DObject(pI)
     , pScreen(pScr)
 {
-    WideScreen::Scope wideScope(-1);
-    SetRect(80 + WideScreen::currentShift, 520, 240 + WideScreen::currentShift, 600);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
+    SetRect(WideScreen::PlacedRect(80, 520, 240, 600));
     for (int i = 0; i < 4; i++)
     {
         CI3DPolyArea *pArea = AddArea();
@@ -2130,7 +2130,7 @@ CI3DObjectWeapons::CI3DObjectWeapons(CInterface3D *pI, CI3DScreenMission *pScr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 {
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     int x, y;
     const bool hdInterface = UseModInterfaceHD();
     const int iconSize = hdInterface ? 512 : 128;
@@ -2190,7 +2190,7 @@ void CI3DObjectWeapons::RemoveAllWeapons()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectWeapons::ShowSelectWeapon(int num, BOOL bSelect)
 {
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     CI3DFigure *pFig;
     if (num < 0 || num >= nWeapons)
         return;
@@ -2216,6 +2216,7 @@ void CI3DObjectWeapons::ShowSelectWeapon(int num, BOOL bSelect)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::weapon);
     CString szName, szDesc, szOut;
     auto* mod=ModRuntime::Current();
@@ -2223,7 +2224,7 @@ void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
     pUnit = pNewUnit;
     RemoveAllWeapons();
     if(pUnit && UseModInterfaceHD()){
-        WideScreen::Scope wideScope(-1);
+        WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
         // Stable actual slot ownership; no native RemoveAt-in-loop leak or hole indexing.
         for(int slot=0;slot<QI_MAX_WEAPONS;++slot){int x=-45+45*slot;AddSurface(new CI3DSurface(pI3D,x,560,x+100,660));}
     }
@@ -2289,6 +2290,7 @@ void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectWeapons::Draw(CRenderer *pRend)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     DWORD dwAlpha;
     DWORD dwAlphaEnable;
     pI3D->GetRenderer()->GetRenderState(D3DRENDERSTATE_ALPHAREF, &dwAlpha);
@@ -2337,6 +2339,7 @@ void CI3DObjectWeapons::FormToolTipW(int slot,CString& text)
 }
 void CI3DObjectWeapons::OnIdle()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     if (pUnit && iSelected != pUnit->GetCurrentWeaponIndex())
     {
         ShowSelectWeapon(iSelected, FALSE);
@@ -2353,6 +2356,7 @@ void CI3DObjectWeapons::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectWeapons::ChangeWeapon(int nSlot)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     if (nSlot >= 0 && nSlot < nWeapons)
         if (iSelected != nSlot)
         {
@@ -2404,8 +2408,8 @@ CI3DObjectItems::CI3DObjectItems(CInterface3D *pI, CI3DScreenMission *pScr)
     : CI3DObject(pI)
     , pScreen(pScr)
 {
-    WideScreen::Scope wideScope(1);
-    SetRect(520 + WideScreen::currentShift, 500, 720 + WideScreen::currentShift, 600);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
+    SetRect(WideScreen::PlacedRect(520, 500, 720, 600));
     for (int i = 0; i < 4; i++)
     {
         AddArea()->MakeRect(670 - i * 50, 550, 720 - i * 50, 600);
@@ -2432,7 +2436,7 @@ CI3DObjectItems::CI3DObjectItems(CInterface3D *pI, CI3DScreenMission *pScr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::AddItem(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 {
-    WideScreen::Scope wideScope(1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     int x, y;
     const bool hdInterface = UseModInterfaceHD();
     const int iconSize = hdInterface ? 512 : 64;
@@ -2515,6 +2519,7 @@ void CI3DObjectItems::RemoveAllItems()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::ShowSelectItem(int num, BOOL bSelect)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     if (nSubst[num] < 0 || nSubst[num] >= nItems)
         return;
     CI3DFigure *pFig;
@@ -2534,6 +2539,7 @@ void CI3DObjectItems::ShowSelectItem(int num, BOOL bSelect)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectItems::Draw(CRenderer *pRend)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, TRUE);
     CI3DObject::Draw(pRend);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SPECULARENABLE, FALSE);
@@ -2542,7 +2548,7 @@ BOOL CI3DObjectItems::Draw(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::PlaceItem(int num, int pos)
 {
-    WideScreen::Scope wideScope(1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     CI3DFigure *pFig;
     pFig = GetFigure(num);
     if (pos < 4)
@@ -2646,6 +2652,7 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::SetUnit(CUnit *pNewUnit)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::item);
     CString szName, szDesc;
     pUnit = pNewUnit;
@@ -2702,6 +2709,7 @@ void CI3DObjectItems::SetUnit(CUnit *pNewUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::OnIdle()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     // const float f00R = 0, f00G = 1, f00B = 0,
     //            f05R = 1, f05G = 1, f05B = 0,
     //            f10R = 1, f10G = 0, f10B = 0;
@@ -2753,9 +2761,10 @@ void CI3DObjectItems::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    if(!OwnedRender::E3HudItemEventInside(this,point))return;
     int ht = HitTest(point);
     JournalHit(ht);
-    if (nSubst[ht] >= 0)
+    if (ht >= 0 && ht < 8 && nSubst[ht] >= 0)
     {
         SetProcessed();
         pI3D->SetCapture(this);
@@ -2764,9 +2773,10 @@ void CI3DObjectItems::OnLButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
+    if(!OwnedRender::E3HudItemEventInside(this,point))return;
     int ht = HitTest(point);
     JournalHit(ht);
-    if (nSubst[ht] >= 0)
+    if (ht >= 0 && ht < 8 && nSubst[ht] >= 0)
     {
         SetProcessed();
         pI3D->SetCapture(this);
@@ -2778,9 +2788,10 @@ void CI3DObjectItems::OnLButtonUp(UINT nFlags, CPoint point)
     if (pI3D->GetCapture() != this)
         return;
     pI3D->ReleaseCapture();
+    if(!OwnedRender::E3HudItemEventInside(this,point))return;
     int i = HitTest(point);
     JournalHit(i);
-    if (nSubst[i] >= 0)
+    if (i >= 0 && i < 8 && nSubst[i] >= 0)
     {
         int j = nSubst[i];
         SetProcessed();
@@ -2901,8 +2912,9 @@ void CI3DObjectItems::SelfActivateQItem(int nItem)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItems::OnMouseMove(UINT nFlags, CPoint point)
 {
+    if(!OwnedRender::E3HudItemEventInside(this,point))return;
     int ht = HitTest(point);
-    if (nSubst[ht] >= 0)
+    if (ht >= 0 && ht < 8 && nSubst[ht] >= 0)
         SetProcessed();
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2910,8 +2922,8 @@ CI3DObjectSpells::CI3DObjectSpells(CInterface3D *pI, CI3DScreenMission *pScr)
     : CI3DObject(pI)
     , pScreen(pScr)
 {
-    WideScreen::Scope wideScope(1);
-    SetRect(720 + WideScreen::currentShift, 190, 800 + WideScreen::currentShift, 510);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
+    SetRect(WideScreen::PlacedRect(720, 190, 800, 510));
     RemoveAllSpells();
     pUnit = 0;
 
@@ -2930,10 +2942,9 @@ CI3DObjectSpells::CI3DObjectSpells(CInterface3D *pI, CI3DScreenMission *pScr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::AddSpell(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
 {
-    WideScreen::Scope wideScope(1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     auto* mod=ModRuntime::Current();
     const bool extended=!mod || mod->CombatSetting("JMVExtendedSpellSlots");
-    if(mod && extended) SetRect(720+WideScreen::currentShift,0,800+WideScreen::currentShift,600);
     const int newCount = nSpells + 1;
     const bool hdInterface = UseModInterfaceHD();
     for (int i = 0; i < areas.GetSize(); i++)
@@ -2976,6 +2987,7 @@ void CI3DObjectSpells::RemoveAllSpells()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::ShowSelectSpell(int num, BOOL bSelect)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     CI3DFigure *pFig;
     pFig = GetFigure(num);
     pFig->SetScale(bSelect ? 1.15f : 1.f);
@@ -2995,6 +3007,7 @@ void CI3DObjectSpells::DeselectSpells()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::spell);
     auto *mod = ModRuntime::Current();
     const bool improveInfoWindows = mod && mod->CombatSetting("improveInfoWindows");
@@ -3111,6 +3124,7 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpells::ChangeSpell(int nSlot)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     static unsigned selectionNotes = 0;
     if (selectionNotes++ < 64) EngineDiagnostics::Event("Spell select unit=%d slot=%d count=%d previous=%d", pUnit ? pUnit->GetID() : -1, nSlot, nSpells, iSelected);
     if (nSlot >= 0 && nSlot < nSpells)
@@ -3216,6 +3230,7 @@ void CI3DObjectSpells::SelfCast(int nSlot)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectSpells::Draw(CRenderer *pRend)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     if(auto*mod=ModRuntime::Current())if(pUnit)for(int slot=0;slot<nSpells&&slot<int(pUnit->GetSpellSlotCount())&&slot<figures.GetSize();++slot){
         auto*spell=pUnit->GetQSpell(slot);ModSkills::Config config;if(!figures[slot]||!mod->SkillConfig(spell,config))continue;
         bool ready=mod->SkillReady(*pUnit,spell,config,false)&&config.Cost(spell->GetManaCost())<=pUnit->GetMP();
@@ -3282,8 +3297,8 @@ CI3DObjectSkills::CI3DObjectSkills(CInterface3D *pI, CI3DScreenMission *pScr)
     , fieldCampButtonLastUpdate(0)
     , fieldCampButtonAvailability(-1)
 {
-    WideScreen::Scope wideScope(-1);
-    SetRect(0 + WideScreen::currentShift, 250, 40 + WideScreen::currentShift, 510);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
+    SetRect(WideScreen::PlacedRect(0, 250, 40, 510));
     for (int i = 0; i < 6; i++)
         AddArea()->MakeRect(0, (470 - i * 40), 40, (510 - i * 40));
     RemoveAllSkills();
@@ -3297,7 +3312,7 @@ CI3DObjectSkills::CI3DObjectSkills(CInterface3D *pI, CI3DScreenMission *pScr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSkills::AddSkill(LPCTSTR pszFigureName, LPCTSTR pszTextureName, int nTypeSkill)
 {
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     int x, y;
 
     switch (nSkills)
@@ -3367,6 +3382,7 @@ void CI3DObjectSkills::RemoveAllSkills()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSkills::ShowSelectSkill(int num, BOOL bSelect)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     CI3DFigure *pFig;
     pFig = GetFigure(num);
     pFig->SetScale(bSelect ? 1.15f : 1.f);
@@ -3420,6 +3436,7 @@ static const char LS_COMPANION_TOOLTIP_TACTICS[] =
 
 void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::skill);
     int i;
     pUnit = pNewUnit;
@@ -3493,6 +3510,7 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSkills::ChangeSkill(LPCTSTR pszSkillName)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     const int type = strcmp(pszSkillName, "follow") == 0 ? -1 : RPGMSKL_SCIENCE;
     // Resolve the action, not a slot shifted by camp or a tactics submenu.
     if (nSkills && nTypes[0] <= LS_COMPANION_MENU_CLOSE) RestoreSkillBar();
@@ -3539,6 +3557,7 @@ void CI3DObjectSkills::ShowTacticsMenu()
 }
 void CI3DObjectSkills::ChangeSkill(int nSlot)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     if (ModRuntime::Current() && nSlot >= 0 && nSlot < nSkills) {
         const int command = nTypes[nSlot];
         if (command == -1) { pI3D->BeginFX("buttons\\battle\\click.wav"); ShowTacticsMenu(); return; }
@@ -3600,6 +3619,7 @@ void CI3DObjectSkills::ChangeSkill(int nSlot)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DObjectSkills::Draw(CRenderer *pRend)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     bool hasFieldCampButton = false;
     for (int i = 0; i < nSkills; ++i)
     {
@@ -3669,7 +3689,8 @@ CI3DObjectFaces::CI3DObjectFaces(CInterface3D *pI, CI3DScreenMission *pScr)
     : CI3DObject(pI)
     , pScreen(pScr)
 {
-    SetRect(250, 440, 550, 600);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomCentre);
+    SetRect(WideScreen::PlacedRect(250, 440, 550, 600));
     nFaces = 0;
     AddFigure()->MakeBar(10, 80, 0, 0, 20, 20, 34, 150, 54, 170);
 }
@@ -3677,6 +3698,7 @@ CI3DObjectFaces::CI3DObjectFaces(CInterface3D *pI, CI3DScreenMission *pScr)
 void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, bool bIsMainHero,
                               bool bNotOnZone)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomCentre);
     int x, y, i = nFaces % 6, j = nFaces / 6;
     const bool hdInterface = UseModInterfaceHD();
     const int faceSize = hdInterface ? 512 : 128;
@@ -3793,6 +3815,7 @@ void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::AddFaces(bool bIsMainHero)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomCentre);
     RemoveAllFigures();
     RemoveAllAreas();
 
@@ -4200,8 +4223,8 @@ void CI3DObjectFaces::OnMouseMove(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::Init(float fInitZoom, bool bClosed)
 {
-    WideScreen::Scope wideScope(1);
-    SetRect(615 + WideScreen::currentShift, 0, 800 + WideScreen::currentShift, 165);
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
+    SetRect(WideScreen::PlacedRect(615, 0, 800, 165));
 
     fPixInMeter = 80;
 
@@ -4365,7 +4388,7 @@ void CI3DObjectMap::Init(float fInitZoom, bool bClosed)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::ScrollFigures()
 {
-    WideScreen::Scope wideScope(1);
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
     // map
     figures[0]->SetRelativeToScreen(700 + float(slide_nCurPixels), 80, 18);
     // magnify
@@ -4387,7 +4410,7 @@ void CI3DObjectMap::ScrollFigures()
 
     figures[11]->SetRelativeToScreen(790 + float(slide_nCurPixels), 85, 10);
 
-    surfaces[0]->Move(CPoint(700 + WideScreen::VirtualShift() + slide_nCurPixels, 80));
+    surfaces[0]->Move(CPoint(700 + slide_nCurPixels, 80));
 
     for (int i = 1; i < areas.GetSize(); i++)
         GetArea(i)->SetShift(slide_nCurPixels, 0);
@@ -4395,7 +4418,7 @@ void CI3DObjectMap::ScrollFigures()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::OnIdle()
 {
-    WideScreen::Scope wideScope(1);
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
     CI3DFigure *pFig;
     float fPart;
     if (nMode == 1)
@@ -4462,6 +4485,7 @@ void CI3DObjectMap::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::ModifyMapFigure()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
     int i, j, k, num;
     float d;
     CPlot2D p1, p2, p3;
@@ -4668,6 +4692,7 @@ void CI3DObjectMap::ModifyMapFigure()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::PlaceUnits()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
     int i, j, num = 0, numq = 0, nume = 0, numc = 0;
     CPlot2D pos, dir, dir2;
     CI3DFigure *pFig;
@@ -5061,6 +5086,7 @@ CPlot2D CI3DObjectMap::FromMapToTerrain(CPlot2D pt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::ShowCurrentMode()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
     for (int i = 0; i < 2; i++)
     {
         if (nMode == i + 1)
@@ -5072,6 +5098,7 @@ void CI3DObjectMap::ShowCurrentMode()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectMap::InvertClosedState()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopRight);
     pI3D->BeginFX("buttons\\battle\\sling.wav");
     slide_bIsSlide = TRUE;
     slide_dir = -slide_dir;
@@ -5129,10 +5156,9 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
             InvertClosedState();
             break;
         case 1:
-            if(!OwnedRender::E3HudNativePoint(this,unsigned(ht),point,point))
-                pI3D->ScreenToVirtual(point);
-            pt.x = (point.x - 700 - WideScreen::VirtualShift()) / fPixInMeter;
-            pt.y = (point.y - 80) / fPixInMeter;
+            if(!OwnedRender::E3HudMapOffset(this,point,point))break;
+            pt.x = point.x / fPixInMeter;
+            pt.y = point.y / fPixInMeter;
             pt = FromFigureToTerrain(pt, TRUE);
             if (pt.x > 0 && pt.x < fXMapSize && pt.y > 0 && pt.y < fYMapSize)
             {
@@ -5144,10 +5170,9 @@ void CI3DObjectMap::OnLButtonUp(UINT nFlags, CPoint point)
             }
             break;
         case 2:
-            if(!OwnedRender::E3HudNativePoint(this,unsigned(ht),point,point))
-                pI3D->ScreenToVirtual(point);
-            pt.x = (point.x - 700 - WideScreen::VirtualShift()) / fPixInMeter;
-            pt.y = (point.y - 80) / fPixInMeter;
+            if(!OwnedRender::E3HudMapOffset(this,point,point))break;
+            pt.x = point.x / fPixInMeter;
+            pt.y = point.y / fPixInMeter;
             pt = FromFigureToTerrain(pt);
             if (pt.x > 0 && pt.x < fXMapSize && pt.y > 0 && pt.y < fYMapSize)
             {
@@ -5206,7 +5231,7 @@ void CI3DObjectMap::OnMouseMove(UINT nFlags, CPoint point)
 BOOL CI3DObjectMap::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 {
     int ht = HitTest(pt);
-    if (ht == 0)
+    if ((slide_nCurPixels < slide_nTotalPixels && IsInside(pt)) || ht == 0)
     {
         float zoom = (float)pow(2.5f, .1f * zDelta / WHEEL_DELTA);
         fZoom *= zoom;
@@ -5215,15 +5240,15 @@ BOOL CI3DObjectMap::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
         if (fZoom < 1.f)
             fZoom = 1.f;
     }
-    if (ht >= 0)
+    if (ht >= 0 || (slide_nCurPixels < slide_nTotalPixels && IsInside(pt)))
         SetProcessed();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::Init(int iMode, bool bClosed)
 {
-    WideScreen::Scope wideScope(-1);
-    SetRect(0 + WideScreen::currentShift, 0, 185 + WideScreen::currentShift, 225);
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
+    SetRect(WideScreen::PlacedRect(0, 0, 185, 225));
 
     slide_bIsSlide = TRUE;
     slide_nCurPixels = bClosed ? 180 : 0;
@@ -5353,7 +5378,7 @@ void CI3DObjectInfo::Init(int iMode, bool bClosed)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::ScrollFigures()
 {
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
     // bg
     figures[0]->SetRelativeToScreen(100 - (float)slide_nCurPixels, 110, 60);
     // toolbar
@@ -5384,7 +5409,7 @@ void CI3DObjectInfo::ScrollFigures()
         figures[N_HL_FIGURE + 12 + n]->SetRelativeToScreen(40 - (float)slide_nCurPixels,
                                                            50 + n * 30, 5);
 
-    surfaces[0]->Move(CPoint(20 - WideScreen::VirtualShift() - slide_nCurPixels, 0));
+    surfaces[0]->Move(CPoint(20 - slide_nCurPixels, 0));
 
     for (int i = 1; i < areas.GetSize(); i++)
         GetArea(i)->SetShift(-slide_nCurPixels, 0);
@@ -5393,7 +5418,8 @@ void CI3DObjectInfo::ScrollFigures()
 BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 {
     OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::pane,this,surfaces[0]->GetSurface() ? surfaces[0]->GetSurface()->OwnedSurfaceId() : 0);
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
+    OwnedRender::E3HudCompositionScope hudBody(this);
     CPlot3D pos;
     CQuaternion rot;
     // D3DRECT rects[3];
@@ -5402,7 +5428,10 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
     figures[9]->Show(FALSE);
 
     figures[0]->Show(TRUE);
-    figures[0]->Draw(pRend);
+    {
+        OwnedRender::E3HudCompositionScope background(this,0);
+        if(background.visible)figures[0]->Draw(pRend);
+    }
     figures[0]->Show(FALSE);
 
     CUnit *pDrawUnit = 0;
@@ -5427,7 +5456,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
     surfaces[0]->Clear();
 #endif // NOGETDC
 
-    if (pDrawUnit && pDrawUnit->GetObjectSpecific())
+    if (pDrawUnit && pDrawUnit->GetObjectSpecific() && hudBody.visible)
     {
         if (nMode != 2 || (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVShowCharacterModelInStats")))
         {
@@ -5458,11 +5487,10 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
             rot = pDrawUnit->GetOrientation();
 
             pDrawUnit->SetExactPosition(theWorld.GetPreciseTime());
-            pDrawUnit->SetCP(CPlot3D(((100 - WideScreen::VirtualShift() - slide_nCurPixels) / 400.f - 1.f) * VIEWING_ANGLE_TAN *
-                                         DISTANCE_DRAW_UNIT,
-                                     (200 / 400.f - .75f) * VIEWING_ANGLE_TAN * DISTANCE_DRAW_UNIT +
-                                         fAltDrawUnit / fDistDrawUnit,
-                                     DISTANCE_DRAW_UNIT));
+            auto preview=owned::widescreen::native_camera_point(
+                float(owned::widescreen::portrait_native_x(WideScreen::Layout(),slide_nCurPixels)),200.f,DISTANCE_DRAW_UNIT);
+            preview.y+=fAltDrawUnit/fDistDrawUnit;
+            pDrawUnit->SetCP(CPlot3D(preview.x,preview.y,preview.z));
             pDrawUnit->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .05f) *
                                       CQuaternion(CPlot3D(1, 0, 0), FP_PI2 * 1.15f) *
                                       CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .4f));
@@ -6025,6 +6053,7 @@ void CI3DObjectInfo::DrawHLState(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::ActivateMode(int nNewMode)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
     if (slide_dir == 1)
     {
         nMode = nNewMode;
@@ -6048,7 +6077,7 @@ void CI3DObjectInfo::ActivateMode(int nNewMode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::OnIdle()
 {
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
     float fPart;
 
     if (slide_bIsSlide)
@@ -6094,6 +6123,7 @@ void CI3DObjectInfo::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::ShowCurrentMode()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
     for (int i = 0; i < 4; i++)
     {
         // figures[i+3]->SetRelativeToScreen( 10 - (float)slide_nCurPixels, 145.f + i * 30, 10 );
@@ -6121,6 +6151,7 @@ void CI3DObjectInfo::SetTempUnit(CUnit *pTmpUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::SetUnit(CUnit *pNewUnit)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
     float fMax = 0;
     if (pNewUnit != pUnit)
     {
@@ -6225,8 +6256,8 @@ static DWORD ClockSegmentTime(int mode, ClockSpeedInput input)
 
 void CI3DObjectClock::Init(int nInitSpeed)
 {
-    WideScreen::Scope wideScope(1);
-    SetRect(720 + WideScreen::currentShift, 520, 800 + WideScreen::currentShift, 600);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
+    SetRect(WideScreen::PlacedRect(720, 520, 800, 600));
 
     CI3DFigure *pFig;
     pFig = AddFigure(); // 0
@@ -6294,7 +6325,7 @@ void CI3DObjectClock::Init(int nInitSpeed)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectClock::OnIdle()
 {
-    WideScreen::Scope wideScope(1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomRight);
     pI3D->nSpeed = nMode;
     float fWorldTime = theWorld.GetWorldTime();
     CI3DFigure *pFig = GetFigure(0);
@@ -6460,8 +6491,8 @@ void CI3DObjectClock::OnMouseMove(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectCommands::Init()
 {
-    WideScreen::Scope wideScope(-1);
-    SetRect(0 + WideScreen::currentShift, 520, 80 + WideScreen::currentShift, 600);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
+    SetRect(WideScreen::PlacedRect(0, 520, 80, 600));
 
     CI3DPolyArea *pArea;
     pArea = AddArea();
@@ -6527,6 +6558,7 @@ void CI3DObjectCommands::Init()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectCommands::OnIdle()
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     if (!theWorld.GetPlayer())
         return;
 
@@ -6587,6 +6619,7 @@ void CI3DObjectCommands::OnMouseMove(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectCommands::ChangePose(int nPose)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     int i;
     if (!theWorld.GetPlayer())
         return;
@@ -6634,7 +6667,7 @@ void CI3DObjectCommands::Swarm()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectCommands::SetMode(int iMode)
 {
-    WideScreen::Scope wideScope(-1);
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     nMode = iMode;
     if (nMode < 0)
         figures[0]->Show(FALSE);
@@ -6657,6 +6690,7 @@ void CI3DObjectCommands::SetMode(int iMode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectCommands::SetAggr(int iAggr)
 {
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
     nAggr = iAggr;
     if ((EUnitAggression)nAggr == PAS_STEALTH)
         figures[5]->SetUShift(86.f / 256);

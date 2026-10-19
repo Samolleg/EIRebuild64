@@ -75,16 +75,14 @@ BOOL CI3DFigure::Draw(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DFigure::SetRelativeToScreen(float xScr, float yScr, float zDist)
 {
-    xScr += WideScreen::currentShift;
-    SetCP(CPlot3D((xScr / 400.f - 1.f) * VIEWING_ANGLE_TAN * zDist,
-                  (yScr / 400.f - .75f) * VIEWING_ANGLE_TAN * zDist, zDist));
+    const auto p=owned::widescreen::native_camera_point(WideScreen::PlaceX(xScr),WideScreen::PlaceY(yScr),zDist);
+    SetCP(CPlot3D(p.x,p.y,p.z));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DFigure::GetRelativeToScreen(float &xScr, float &yScr, float &zDist)
 {
-    xScr = GetCP().x / GetCP().z / VIEWING_ANGLE_TAN * 400 + 400;
-    yScr = GetCP().y / GetCP().z / VIEWING_ANGLE_TAN * 400 + 300;
-    zDist = GetCP().z;
+    const auto p=owned::widescreen::camera_to_native(GetCP().x,GetCP().y,GetCP().z);
+    xScr=p.x;yScr=p.y;zDist=p.z;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DFigure::SetScale(float fScale)
@@ -127,6 +125,9 @@ float CI3DFigure::GetZScale()
 void CI3DFigure::MakeBar(float fDepth, float fPixInMeter, float fL, float fT, float fR, float fB,
                          int nMapL, int nMapT, int nMapR, int nMapB)
 {
+    owned::widescreen::native_bar_corners(WideScreen::Layout(),WideScreen::currentAnchor,
+        WideScreen::rawDepth,fL,fT,fR,fB);
+    WideScreen::RawScope raw;
     CI3DFigure *pFig = this;
     int i;
     SetFlatNorms();
@@ -195,6 +196,9 @@ void CI3DFigure::MakeTilingBar(float fDepth, float fPixInMeter, float fL, float 
                                float fB, int nMapL, int nMapT, int nMapR, int nMapB, int nTilesX,
                                int nTilesY)
 {
+    owned::widescreen::native_bar_corners(WideScreen::Layout(),WideScreen::currentAnchor,
+        WideScreen::rawDepth,fL,fT,fR,fB);
+    WideScreen::RawScope raw;
     CI3DFigure *pFig = this;
     int i, j, k, l, num;
     SetFlatNorms();
@@ -279,6 +283,9 @@ void CI3DFigure::MakeTilingBar(float fDepth, float fPixInMeter, float fL, float 
 void CI3DFigure::MakeBarFrame(float fDepth, float fPixInMeter, float fL, float fT, float fR,
                               float fB, float fFrameW, int nMapL, int nMapT, int nMapR, int nMapB)
 {
+    owned::widescreen::native_bar_corners(WideScreen::Layout(),WideScreen::currentAnchor,
+        WideScreen::rawDepth,fL,fT,fR,fB);
+    WideScreen::RawScope raw;
     CI3DFigure *pFig = this;
     int i, j, k;
     SetFlatNorms();
@@ -366,6 +373,9 @@ void CI3DFigure::MakeBarFrame(float fDepth, float fPixInMeter, float fL, float f
 void CI3DFigure::MakeBarFrame2(float fDepth, float fPixInMeter, float fL, float fT, float fR,
                                float fB, float fFrameW, int nMapL, int nMapT, int nMapR, int nMapB)
 {
+    owned::widescreen::native_bar_corners(WideScreen::Layout(),WideScreen::currentAnchor,
+        WideScreen::rawDepth,fL,fT,fR,fB);
+    WideScreen::RawScope raw;
     CI3DFigure *pFig = this;
     int i, j, k;
     SetFlatNorms();
@@ -608,6 +618,10 @@ void CI3DFigure::MakeTriangle(float fDepth, float fPixInMeter, float fX1, float 
                               float fY2, float fX3, float fY3, float fMapX1, float fMapY1,
                               float fMapX2, float fMapY2, float fMapX3, float fMapY3)
 {
+    fX1=WideScreen::PlaceX(fX1);fY1=WideScreen::PlaceY(fY1);
+    fX2=WideScreen::PlaceX(fX2);fY2=WideScreen::PlaceY(fY2);
+    fX3=WideScreen::PlaceX(fX3);fY3=WideScreen::PlaceY(fY3);
+    WideScreen::RawScope raw;
     CI3DFigure *pFig = this;
     int i;
     SetFlatNorms();

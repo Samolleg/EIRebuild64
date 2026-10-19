@@ -230,6 +230,39 @@ inline std::int32_t edge_shift(const Layout& l, int side) noexcept {
     return std::lround(layout_to_placed_x(l,anchor,0.f,false));
 }
 
+// Native ingress is unscaled: composition owns live HUD scaling. Builders
+// place their entire input once, then suppress nested figure/area ingress.
+constexpr Anchors kTopLeft{Anchor::start,Anchor::start};
+constexpr Anchors kTopRight{Anchor::end,Anchor::start};
+constexpr Anchors kBottomLeft{Anchor::start,Anchor::end};
+constexpr Anchors kBottomRight{Anchor::end,Anchor::end};
+constexpr Anchors kBottomCentre{Anchor::centre,Anchor::end};
+inline float native_x(const Layout& l,const Anchors& a,float x,int raw=0) noexcept {
+    return raw?x:layout_to_placed_x(l,a,x,false);
+}
+inline float native_y(const Layout& l,const Anchors& a,float y,int raw=0) noexcept {
+    return raw?y:layout_to_placed_y(l,a,y,false);
+}
+inline void native_bar_corners(const Layout& layout,const Anchors& anchor,int raw,
+                               float& l,float& t,float& r,float& b) noexcept {
+    if(raw)return;
+    if(anchor.x==Anchor::centre && l<r) {
+        if(r<=0.f)l=(std::min)(l,screen_to_placed_x(layout,0.f));
+        if(l>=800.f)r=(std::max)(r,screen_to_placed_x(layout,layout.width));
+    }
+    l=native_x(layout,anchor,l);r=native_x(layout,anchor,r);
+    t=native_y(layout,anchor,t);b=native_y(layout,anchor,b);
+}
+template<class Rect> inline void native_rect(const Layout& l,const Anchors& a,Rect& r) noexcept {
+    r.left=layout_int_x(l,a,r.left);r.right=layout_int_x(l,a,r.right);
+    r.top=layout_int_y(l,a,r.top);r.bottom=layout_int_y(l,a,r.bottom);
+}
+// Surface endpoints stay floating point until final pixel rounding, as in
+// VirtualToScreen's retail hook (not the integer native hit-rectangle store).
+template<class Rect> inline void native_surface_rect(const Layout& l,const Anchors& a,Rect& r) noexcept {
+    r.left=pixel_x(l,native_x(l,a,float(r.left)));r.right=pixel_x(l,native_x(l,a,float(r.right)));
+    r.top=pixel_y(l,native_y(l,a,float(r.top)));r.bottom=pixel_y(l,native_y(l,a,float(r.bottom)));
+}
 template<class Rect> inline void placed_rect_to_pixels(const Layout& l, Rect& r) noexcept {
     r.left=pixel_x(l,float(r.left)); r.top=pixel_y(l,float(r.top));
     r.right=pixel_x(l,float(r.right)); r.bottom=pixel_y(l,float(r.bottom));
@@ -287,6 +320,30 @@ inline int clock_text_width(const Layout& l,int native_width,int measured_pixels
 // that projects through the clip-scaled projection to the point's pixel, at
 // depth / size_scale so a 3D figure's own size follows the UI scale.
 struct CameraPoint { float x, y, z; };
+inline CameraPoint native_camera_point(float x,float y,float depth) noexcept {
+    return {(x/400.f-1.f)*kViewingAngleTan*depth,
+            (y/400.f-.75f)*kViewingAngleTan*depth,depth};
+}
+inline CameraPoint camera_to_native(float x,float y,float z) noexcept {
+    return {x/z/kViewingAngleTan*400.f+400.f,y/z/kViewingAngleTan*400.f+300.f,z};
+}
+inline std::int32_t portrait_native_x(const Layout& l,int slide=0) noexcept {
+    return layout_int_x(l,kTopLeft,100)-slide;
+}
+struct MapCentre { std::int32_t dx,dy,inverse_scale; };
+inline MapCentre map_centre(const Layout& l,const HudComposition& h) noexcept {
+    const float x=placed_to_screen_x(l,layout_to_placed_x(l,kTopRight,700.f,false));
+    const float y=placed_to_screen_y(l,layout_to_placed_y(l,kTopRight,80.f,false));
+    return {-std::int32_t(std::lround(screen_to_placed_x(l,compose_x(x,h)))),
+            -std::int32_t(std::lround(screen_to_placed_y(l,compose_y(y,h)))),
+            std::int32_t(std::lround(65536.f/h.scale))};
+}
+// Match x86 IMUL low 32 bits and SAR 16, including negative coordinates.
+inline std::int32_t map_offset(std::int32_t point,std::int32_t delta,std::int32_t scale) noexcept {
+    const std::uint32_t bits=(std::uint32_t(point)+std::uint32_t(delta))*std::uint32_t(scale);
+    const std::uint32_t high=bits>>16;
+    return bits&0x80000000u ? std::int32_t(high)-65536 : std::int32_t(high);
+}
 inline CameraPoint placed_to_camera(const Layout& l, float x, float y, float depth, float size_scale = 1.0f) noexcept {
     const float z = depth / size_scale;
     const float clip_x = 2.0f * placed_to_screen_x(l, x) / l.width - 1.0f;

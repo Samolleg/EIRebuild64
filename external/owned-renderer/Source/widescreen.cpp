@@ -178,12 +178,12 @@ constexpr Range kStockLayoutRanges[] = {
 // stores the widget's CI3DObject rect (+D8..+E4) from layout constants; it
 // is moved to placed space when the method returns. The prologue is the
 // stock bytes our wrapper replays (whole instructions, no relative branch).
-constexpr Anchors kTopLeft{Anchor::start, Anchor::start};
-constexpr Anchors kTopRight{Anchor::end, Anchor::start};
-constexpr Anchors kBottomLeft{Anchor::start, Anchor::end};
-constexpr Anchors kBottomRight{Anchor::end, Anchor::end};
+using widescreen::kTopLeft;
+using widescreen::kTopRight;
+using widescreen::kBottomLeft;
+using widescreen::kBottomRight;
 constexpr Anchors kChat{Anchor::content_start, Anchor::start};
-constexpr Anchors kBottomCentre{Anchor::centre, Anchor::end};
+using widescreen::kBottomCentre;
 enum class InputScope { none, area, rect };
 struct WidgetMethod { std::uintptr_t va; std::uint8_t prologue; Anchors anchor; bool post_rect; bool by_vtable = false; InputScope input = InputScope::none; bool handler_this = false; };
 constexpr WidgetMethod kWidgetMethods[] = {
@@ -1306,8 +1306,8 @@ thread_local Anchors t_anchor{};  // the widget method on this thread, else cent
 thread_local int t_raw = 0;       // inside a figure builder: nested ingress passes through
 
 // Native layout stays at 100%; owned composition scales all visual output.
-float placed_x(float x) noexcept { return widescreen::layout_to_placed_x(g_layout, t_anchor, x, false); }
-float placed_y(float y) noexcept { return widescreen::layout_to_placed_y(g_layout, t_anchor, y, false); }
+float placed_x(float x) noexcept { return widescreen::native_x(g_layout,t_anchor,x); }
+float placed_y(float y) noexcept { return widescreen::native_y(g_layout,t_anchor,y); }
 thread_local widescreen::HudComposition t_input_composition{};
 thread_local InputScope t_input_scope = InputScope::none;
 bool inside_composed_screen(float x,float y,const widescreen::HudComposition& h) noexcept {
@@ -1383,8 +1383,8 @@ int portrait_camera_slot(const void* object) noexcept {
 }
 // 2D surfaces: full size around the anchor; the renderer composes them at the
 // UI scale around the same pivot (widescreen::hud_blit).
-float surface_x(float x) noexcept { return widescreen::layout_to_placed_x(g_layout, t_anchor, x, false); }
-float surface_y(float y) noexcept { return widescreen::layout_to_placed_y(g_layout, t_anchor, y, false); }
+float surface_x(float x) noexcept { return widescreen::native_x(g_layout,t_anchor,x); }
+float surface_y(float y) noexcept { return widescreen::native_y(g_layout,t_anchor,y); }
 LONG pixel_x(float placed) noexcept { return widescreen::pixel_x(g_layout,placed); }
 LONG pixel_y(float placed) noexcept { return widescreen::pixel_y(g_layout,placed); }
 LONG local_pixels(LONG v) noexcept { return widescreen::local_pixels(g_layout,v); }
@@ -1405,10 +1405,7 @@ void __fastcall virtual_to_screen_rect(const void* self, void*, RECT* r) {
         widescreen::local_rect_to_pixels(g_layout,*r);
         return;
     }
-    r->left = pixel_x(surface_x(static_cast<float>(r->left)));
-    r->top = pixel_y(surface_y(static_cast<float>(r->top)));
-    r->right = pixel_x(surface_x(static_cast<float>(r->right)));
-    r->bottom = pixel_y(surface_y(static_cast<float>(r->bottom)));
+    widescreen::native_surface_rect(g_layout,t_anchor,*r);
 }
 void __fastcall virtual_to_screen_point(const void* self, void*, POINT* p) {
     if (!self) { p->x = local_pixels(p->x); p->y = local_pixels(p->y); return; }
@@ -1537,15 +1534,7 @@ void __fastcall translation_relative(void* translation, void*, float x, float y,
 // of 800 is a pillar filler (the JMV addon's camp/character-screen side
 // panels): it reaches the screen edge.
 void bar_corners(float& l, float& t, float& r, float& b) noexcept {
-    if (t_raw) return;
-    if (t_anchor.x == Anchor::centre && l < r) {
-        if (r <= 0.0f) l = (std::min)(l, widescreen::screen_to_placed_x(g_layout, 0.0f));
-        if (l >= 800.0f) r = (std::max)(r, widescreen::screen_to_placed_x(g_layout, g_layout.width));
-    }
-    l = placed_x(l);
-    r = placed_x(r);
-    t = placed_y(t);
-    b = placed_y(b);
+    widescreen::native_bar_corners(g_layout,t_anchor,t_raw,l,t,r,b);
 }
 struct RawScope { RawScope() noexcept { ++t_raw; } ~RawScope() { --t_raw; } };
 void __fastcall make_bar(void* figure, void*, float depth, float pixels, float l, float t, float r, float b,
@@ -2351,10 +2340,8 @@ void apply_hud_scale_values() noexcept {
     float scale=g_layout.scale;
     if(const auto* object=current_panel(unsigned(HudPanel::minimap))) {
         const auto h=panel_body_composition(unsigned(HudPanel::minimap),object);
-        const float x=widescreen::placed_to_screen_x(g_layout,widescreen::layout_to_placed_x(g_layout,kTopRight,700.f,false));
-        const float y=widescreen::placed_to_screen_y(g_layout,widescreen::layout_to_placed_y(g_layout,kTopRight,80.f,false));
-        g_map_dx=-std::lround(widescreen::screen_to_placed_x(g_layout,widescreen::compose_x(x,h)));
-        g_map_dy=-std::lround(widescreen::screen_to_placed_y(g_layout,widescreen::compose_y(y,h)));
+        const auto centre=widescreen::map_centre(g_layout,h);
+        g_map_dx=centre.dx;g_map_dy=centre.dy;
         scale=h.scale;
     }
     g_map_inverse_scale = static_cast<std::int32_t>(std::lround(65536.0f / scale));
@@ -2406,7 +2393,7 @@ bool apply_interface_values() noexcept {
     // layout units (16.16 fixed point).
     apply_hud_scale_values();
     // The portrait's inline screen x (100 in the left-anchored window).
-    return write_i32(kPortraitScreenX, static_cast<std::int32_t>(std::lround(widescreen::layout_to_placed_x(l, kTopLeft, 100.0f, false))));
+    return write_i32(kPortraitScreenX, widescreen::portrait_native_x(l));
 }
 
 // --- Install ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DFigure.h"
+#include "WideScreen.h"
 #include "I3DMapObjTranslation.h"
 #include "WorldClient.h"
 #include "Object3DClientSpecific.h"
@@ -83,8 +84,8 @@ void CI3DMapObjTranslation::PlayIdleAnmation()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DMapObjTranslation::SetRelativeToScreen(float xScr, float yScr, float zDist)
 {
-    m_pMapObject->SetCP(CPlot3D((xScr / 400.f - 1.f) * VIEWING_ANGLE_TAN * zDist,
-                                (yScr / 400.f - .75f) * VIEWING_ANGLE_TAN * zDist, zDist));
+    const auto p=owned::widescreen::native_camera_point(WideScreen::PlaceX(xScr),WideScreen::PlaceY(yScr),zDist);
+    m_pMapObject->SetCP(CPlot3D(p.x,p.y,p.z));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DMapObjTranslation::ShowBodyPart(LPCTSTR pszName, bool bShow)
