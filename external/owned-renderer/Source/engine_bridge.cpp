@@ -47,6 +47,7 @@
 #include "figure_selection_bounds.h"
 #include "owned_preview_policy.h"
 #include "model_draw.h"
+#include "model_preview_geometry.h"
 #include "model_preview_material.h"
 #include "unit_blood.h"
 #include "game_sites.h"
@@ -7686,23 +7687,14 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
         for (std::size_t i = 0; ok && i < command.parts.size(); ++i) {
             const auto& part = command.parts[i];
             if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
-            NativeWorldBounds bounds{};
-            NativePreparedPartSubmission* record = nullptr;
-            if (!retained_visual_part_bounds(sample, part.ordinal, bounds) ||
-                !retained_visual_part_submission(sample, part.ordinal, bounds, {true,true,0},
-                    command.texture_time, command.fog, record)) { ok = false; break; }
-            NativeGeometryView view = *record->source;
+            NativeGeometryView view;
+            if (!prepare_model_preview_geometry(sample, part.ordinal, *pose,
+                    command.base_world, command.world_to_clip, command.texture_time,
+                    command.fog, command.presentation_serial, view)) { ok = false; break; }
             view.owned_fixed_state = part.material;
-            view.world.pose = pose; view.world.owner = &pose->owner;
-            view.world.shape = pose->shape; view.world.object_to_world = command.base_world;
-            view.world.world_to_clip = command.world_to_clip; view.object_to_clip = command.world_to_clip;
-            view.contribution = {true,true,0};
-            view.bounds_minimum = bounds.minimum; view.bounds_maximum = bounds.maximum;
-            view.prepared_identity.presentation_serial = command.presentation_serial;
             apply_model_preview_material(view, {part.uses_default_colors,
                 (part.material_flags&0x10u)!=0, part.default_diffuse, part.default_specular,
                 part.lighting, part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state});
-            view.u_shift = record->values.u_shift; view.v_shift = record->values.v_shift;
 
             NativeGeometryResult result{};
             if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
@@ -7845,30 +7837,21 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 part_visible=kFigureVisible;
                 return true;
             }
-            NativeWorldBounds bounds{};
-            NativePreparedPartSubmission* record=nullptr;
-            if (!retained_visual_part_bounds(sample,ordinal,bounds) ||
-                !retained_visual_part_submission(sample,ordinal,bounds,{true,true,0},texture_time,fog,record))
+            NativeGeometryView view;
+            if (!prepare_model_preview_geometry(sample,ordinal,*pose,base_world,world_to_clip,
+                    texture_time,fog,g_bridge_frame_serial,view))
                 return reject("preview.part_evaluation");
-            NativeGeometryView view=*record->source;
             // Read the caller's completed UI state after the set's presentation
             // transition. The prepared queue handles changes to this state.
             NativeFrameState state;
             if (!g_native_sink_frame_state ||
                 !g_native_sink_frame_state(g_native_sink_context,state)) return reject("preview.ui_state");
             view.owned_fixed_state=state.material;
-            view.world.pose=pose; view.world.owner=&pose->owner;
-            view.world.shape=pose->shape; view.world.object_to_world=base_world;
-            view.world.world_to_clip=world_to_clip; view.object_to_clip=world_to_clip;
-            view.contribution={true,true,0};
-            view.bounds_minimum=bounds.minimum; view.bounds_maximum=bounds.maximum;
-            view.prepared_identity.presentation_serial=g_bridge_frame_serial;
             const auto& context=current.context;
             const auto& lighting=context.lighting;
             std::uint32_t material_flags=0;
             if (!read_object_plan_flags(current.material,material_flags)) return reject("preview.material");
 
-            view.u_shift=record->values.u_shift; view.v_shift=record->values.v_shift;
             const auto* image=g_object_suffix_image;
             const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
             const auto wound=object_render_wound_surface_for_set(active_set,

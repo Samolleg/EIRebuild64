@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a3`, commit `8ff2e25417f8cdb0811434747c0c52016def4d1d`.
+integration changes in branch `eirebuild/c74-p6a4`, commit `3d31e6824fd396dfb0abe480176d763287a64caf`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -139,3 +139,10 @@ OWN74-P6a3 shares the draw-only native figure reference across cache trim
 and draw exits. Typed texture-manager identity drives the same retire/join
 boundary as the proxy manager hook, before native surfaces are destroyed.
 Full preview assembly/pose, LRU storage ownership and live Apply remain open.
+
+OWN74-P6a4 shares retained preview geometry/pose evaluation in
+model_preview_geometry.h for synchronous native, scene-queued native and
+embedded UI object draws. Source private previews use immutable source
+assemblies and separate prepared resources, including negative-id display
+copies. No UI pose is published into the world. P4 wrapper clocks/placement,
+light admission, item figure LRU and live display Apply remain open.

@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <memory>
+namespace owned { struct VisualPreparedResources; struct VisualAssemblyAsset; }
 
 #include "Object.h"
 #include "Material.h"
@@ -82,7 +84,13 @@ private:
 
 private:
 
-    bool PrepareOwnedResources();
+    std::shared_ptr<owned::VisualPreparedResources> ownedPreviewPrepared;
+    std::shared_ptr<const owned::VisualAssemblyAsset> ownedPreviewAssembly;
+    std::uint64_t ownedPreviewSerial = 0, ownedPreviewResource = 0, ownedPreviewRevision = 0;
+    std::shared_ptr<const owned::VisualAssemblyAsset> BuildOwnedAssembly(
+        std::uint64_t& revision, const char** failedStage) noexcept;
+    BOOL DrawModelPreview(CRenderer* renderer);
+    bool PrepareOwnedResources(bool publishAppearance = true);
     bool PublishOwnedAppearance() noexcept;
     bool PublishOwnedPose() noexcept;
 

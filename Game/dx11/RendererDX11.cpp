@@ -8,6 +8,7 @@
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
 #include "embedded_hud_visual.h"
+#include "model_draw.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
 #include "../OwnedRender/E3Cursor.h"
@@ -306,7 +307,7 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     const bool camp = OwnedRender::E4::OwnsDraw();
     auto model = view;
     if (camp && itemColorSum && state.render[D3DRENDERSTATE_SPECULARENABLE]) model.flags |= 8u;
-    if (OwnedRender::E4::OwnsDraw() ||
+    if (OwnedRender::E4::OwnsDraw() || owned::model_draw_is_preview() ||
         (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0))
         state.render[D3DRENDERSTATE_FOGENABLE] = FALSE;
     state.render[D3DRENDERSTATE_SPECULARENABLE] = (model.flags & 8u) ? TRUE : FALSE;

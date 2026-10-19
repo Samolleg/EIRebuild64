@@ -27,6 +27,13 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "owned_asset_loader.h"
 #include "engine_bridge.h"
 #include "model_draw.h"
+#include "widescreen_layout.h"
+#include "model_preview_geometry.h"
+#include "model_preview_material.h"
+#include "native_placed_figure.h"
+#include "GameJournal.h"
+#include <map>
+#include <atomic>
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
@@ -287,6 +294,9 @@ BOOL CObject3DClientSpecific::Create()
 void CObject3DClientSpecific::Destroy()
 {
     ownedAppearanceAttempted = false;
+    ownedPreviewPrepared.reset();
+    ownedPreviewAssembly.reset();
+    ownedPreviewResource = 0;
     int i;
     // remove extended textures (shadow and wounds)
     pShadowTexture = 0;
@@ -671,6 +681,7 @@ void CObject3DClientSpecific::RecalcScreenRect()
 // c56 consumes owned copies only. Drop a previously published value as soon as a host owner changes.
 void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
 {
+    ownedPreviewAssembly.reset();
     const bool hadAttempt = ownedAppearanceAttempted;
     ownedAppearanceAttempted = false;
     if (!hadAttempt)
@@ -681,30 +692,28 @@ void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
             owned::RetainedVisualStatus::unsupported_appearance,
             "appearance.source_changed", "host.object_appearance");
 }
-bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
+// Immutable source snapshot, shared by world publication and a private UI view.
+// Reading a negative-id preview never requires registering it in the world.
+std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::BuildOwnedAssembly(
+    std::uint64_t& revision, const char** failedStage) noexcept try
 {
     CObject3D* object = static_cast<CObject3D*>(lpObject);
     auto* animation = object ? object->GetAnimationSystem2() : nullptr;
     IGeometry* geometry = object ? object->GetGeometry() : nullptr;
-    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
-    auto& scene = OwnedRender::E1Scene().Scene();
-    auto reject = [&](const char* predicate) {
-        if (resource.serial)
-            scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_appearance,
-                                predicate, "host.object_appearance");
-        return false;
+    const auto reject = [&](const char* stage) -> std::shared_ptr<const owned::VisualAssemblyAsset> {
+        if (failedStage) *failedStage = stage;
+        return {};
     };
-    if (!resource.serial || !animation || !geometry || object->GetNumFigures() <= 0)
+    if (!animation || !geometry || object->GetNumFigures() <= 0)
         return reject("appearance.sources_ready");
-
     auto skeleton = animation->GetOwnedSkeleton();
     if (!skeleton || skeleton->links.empty())
         return reject("appearance.selected_skeleton");
     auto assembly = std::make_shared<owned::VisualAssemblyAsset>();
     assembly->skeleton = skeleton;
-    assembly->revision = ++ownedAppearanceRevision;
-    if (!assembly->revision)
-        assembly->revision = ++ownedAppearanceRevision;
+    if (++revision == 0) ++revision;
+    assembly->revision = revision;
+
     const CPlot3D center = object->GetCenterShift();
     assembly->center_shift = {{center.x, center.y, center.z}};
     const SComplection& complection = object->GetComplection();
@@ -798,6 +807,31 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
         part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
         assembly->parts.push_back(std::move(part));
     }
+    return assembly;
+}
+catch (...) {
+    if (failedStage) *failedStage = "appearance.host_snapshot_exception";
+    return {};
+}
+bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
+{
+    CObject3D* object = static_cast<CObject3D*>(lpObject);
+    auto* animation = object ? object->GetAnimationSystem2() : nullptr;
+    IGeometry* geometry = object ? object->GetGeometry() : nullptr;
+    const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+    auto& scene = OwnedRender::E1Scene().Scene();
+    auto reject = [&](const char* predicate) {
+        if (resource.serial)
+            scene.visual_reject(resource, owned::RetainedVisualStatus::unsupported_appearance,
+                                predicate, "host.object_appearance");
+        return false;
+    };
+    if (!resource.serial || !animation || !geometry || object->GetNumFigures() <= 0)
+        return reject("appearance.sources_ready");
+
+    const char* failure = nullptr;
+    auto assembly = BuildOwnedAssembly(ownedAppearanceRevision, &failure);
+    if (!assembly) return reject(failure ? failure : "appearance.host_snapshot_exception");
     // The retained scene claims this object's mesh (game.exe bridge:
     // visual_publish_appearance); the owned-visual frame then draws it.
     if (!scene.visual_declare_mesh(resource, object->GetNumFigures() > 0))
@@ -888,7 +922,7 @@ catch (...) {
 }
 // BOOL CObject3DClientSpecific::Draw()
 // draw
-bool CObject3DClientSpecific::PrepareOwnedResources()
+bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
 {
     lpObject->FinalDataLoading();
     // Only immutable shared providers are replayable here; never use a base
@@ -914,7 +948,7 @@ bool CObject3DClientSpecific::PrepareOwnedResources()
     }
     if(pWoundsTexture && pWoundsTexture->GetSurface())
         pWoundsTexture->GetSurface()->EnsureOwnedSurfacePublished();
-    if (!ownedAppearanceAttempted)
+    if (publishAppearance && !ownedAppearanceAttempted)
     {
         ownedAppearanceAttempted = true;
         PublishOwnedAppearance();
@@ -1009,10 +1043,8 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
 {
     if (owned::model_draw_is_preview()) {
         if (lpObject->CheckFlag(OBJ_HIDDEN)) return TRUE;
-        if (!PrepareOwnedResources()) return FALSE;
-        if (lpObject->GetAnimationSystem2())
-            lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
-        return DrawModelParts(pRend, nullptr);
+        if (!PrepareOwnedResources(false)) return FALSE;
+        return DrawModelPreview(pRend);
     }
     // Publication and picking precede this draw's owned scene commit.
     if (owned::model_draw_uses_retained_world(pRend->GetD3D()->IsOwnedWorldActive(),
@@ -1031,6 +1063,8 @@ BOOL CObject3DClientSpecific::Draw(CRenderer *pRend, CRect *pRect)
     PublishOwnedPose();
     return DrawModelParts(pRend, pRect);
 }
+
+#include "OwnedRender/ModelPreview.inl"
 
 BOOL CObject3DClientSpecific::DrawModelParts(CRenderer *pRend, CRect *pRect)
 {
