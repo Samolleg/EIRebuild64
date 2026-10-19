@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p3a3`, commit `570c90fc31cc6cf0cc151e73dff63af8187beeb3`.
+integration changes in branch `eirebuild/c74-p3b`, commit `f013571097856212952a852f5c598fe2653546bb`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -72,3 +72,9 @@ to shared placed-figure state and native GPU submission. Logical texture cells
 use the existing HUD resolver, conversion, generations and UV addressing; the
 source host no longer draws portraits or owns physical portrait atlases.
 The separate addon autocast producer still needs an authoritative source slot.
+
+OWN74-P3b shares c74 integer coordinate ingress, local rectangle mapping,
+content hit-surface offsets, campaign clock formatting and tooltip sizing.
+The source frontend uses these helpers for centred screens, global map,
+chat and tooltips. Remaining WS HUD/native-geometry/tutorial work is tracked
+per row in OWN74/MAP.md; this revision does not claim the full WS package.

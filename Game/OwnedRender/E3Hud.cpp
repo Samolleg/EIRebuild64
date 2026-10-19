@@ -4,6 +4,8 @@
 #include "E3Combat.h"
 #include "E3HudVisual.h"
 #include "combat_ui.h"
+#include "character_pane_owned_text.h"
+#include "../WorldInterface.h"
 #include "../I3DScreenMission.h"
 #include "../I3DObject.h"
 #include "../I3DScrollText.h"
@@ -36,19 +38,20 @@ struct E3HudAccess {
         if(clock && OwnedRender::E3HudRendererAttached() && clock->bVisible)
             for(int i=0;i<clock->areas.GetSize();++i)
                 if(clock->areas[i] && clock->areas[i]->pTip==tip){isClock=true;break;}
-        owned::WorldEnvironment environment{};
         int minute=-1;
-        if(isClock && owned::bridge_read_world_environment(environment) && std::isfinite(environment.hour))
-            minute=int(std::clamp(environment.hour,0.f,23.999f)*60.f);
+        if(isClock)owned::widescreen::campaign_minute(double(IWorldClient.GSGetVar("gtime")),minute);
         if(!isClock && tip->ownedClockMinute<0)return false;
         const bool extra=minute>=0;
-        char time[32]{};
+        char time[96]{};
         int width=(std::max)(int(tip->m_sizeTip.cx),tip->nFirstLineWidth),height=tip->m_sizeTip.cy;
-        const int top=4+tip->szStrings.GetSize()*tip->nStringHeight;
+        const auto textLayout=owned::widescreen::clock_text_layout(height,tip->szStrings.GetSize(),tip->nStringHeight);
+        const int top=textLayout.top;
         if(extra) {
-            std::snprintf(time,sizeof(time),"Game time: %02d:%02d",minute/60,minute%60);
-            width=(std::max)(width,int(tip->pI3D->TextSize(time,0).cx)+12);
-            height=(std::max)(height+tip->nStringHeight,top+tip->nStringHeight+4);
+            owned::widescreen::format_clock_time(time,sizeof(time),minute);
+            SIZE extent{};
+            if(!owned::character_pane_measure_text((HFONT)tip->pI3D->GetFont(0)->GetSafeHandle(),time,int(std::strlen(time)),extent))return false;
+            width=owned::widescreen::clock_text_width(owned::embedded_hud_layout().layout(),width,extent.cx);
+            height=textLayout.height;
         }
         CRect desired=surface->rect;
         tip->pI3D->ScreenToVirtual(desired);

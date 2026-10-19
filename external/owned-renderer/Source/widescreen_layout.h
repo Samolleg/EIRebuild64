@@ -23,6 +23,9 @@
 //    size inside the surface and the whole widget shrinks together.
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <cstdio>
+#include <limits>
 
 namespace owned::widescreen {
 
@@ -208,6 +211,77 @@ inline void compose_hud_clip(float* matrix,const widescreen::HudComposition& hud
 // Surface-local lengths (inside one surface, carets, text extents).
 inline float local_to_pixels(const Layout& l, float v) noexcept { return v * l.unit; }
 inline float pixels_to_local(const Layout& l, float v) noexcept { return v / l.unit; }
+
+// Integer ingress used by both the retail hooks and the source frontend.
+// Endpoints round independently; real cursor positions floor for membership.
+inline std::int32_t pixel_x(const Layout& l, float x) noexcept { return std::lround(placed_to_screen_x(l,x)); }
+inline std::int32_t pixel_y(const Layout& l, float y) noexcept { return std::lround(placed_to_screen_y(l,y)); }
+inline std::int32_t local_pixels(const Layout& l, std::int32_t v) noexcept { return std::lround(local_to_pixels(l,float(v))); }
+inline std::int32_t local_units(const Layout& l, std::int32_t v) noexcept { return std::lround(pixels_to_local(l,float(v))); }
+inline std::int32_t cursor_x(const Layout& l, std::int32_t v) noexcept { return std::int32_t(std::floor(screen_to_placed_x(l,float(v)))); }
+inline std::int32_t cursor_y(const Layout& l, std::int32_t v) noexcept { return std::int32_t(std::floor(screen_to_placed_y(l,float(v)))); }
+inline std::int32_t tooltip_right(const Layout& l) noexcept { return std::int32_t(std::floor(screen_to_placed_x(l,l.width))); }
+inline std::int32_t tooltip_bottom(const Layout& l) noexcept { return std::int32_t(std::floor(screen_to_placed_y(l,l.height))); }
+inline std::int32_t layout_int_x(const Layout& l,const Anchors& anchor,int x) noexcept { return std::lround(layout_to_placed_x(l,anchor,float(x),false)); }
+inline std::int32_t layout_int_y(const Layout& l,const Anchors& anchor,int y) noexcept { return std::lround(layout_to_placed_y(l,anchor,float(y),false)); }
+inline std::int32_t edge_shift(const Layout& l, int side) noexcept {
+    if(!side)return 0;
+    const Anchors anchor{side<0?Anchor::start:Anchor::end,Anchor::centre};
+    return std::lround(layout_to_placed_x(l,anchor,0.f,false));
+}
+
+template<class Rect> inline void placed_rect_to_pixels(const Layout& l, Rect& r) noexcept {
+    r.left=pixel_x(l,float(r.left)); r.top=pixel_y(l,float(r.top));
+    r.right=pixel_x(l,float(r.right)); r.bottom=pixel_y(l,float(r.bottom));
+}
+template<class Rect> inline void pixels_rect_to_placed(const Layout& l, Rect& r) noexcept {
+    r.left=cursor_x(l,r.left); r.top=cursor_y(l,r.top);
+    r.right=cursor_x(l,r.right); r.bottom=cursor_y(l,r.bottom);
+}
+template<class Rect> inline void local_rect_to_pixels(const Layout& l, Rect& r) noexcept {
+    r.left=local_pixels(l,r.left); r.top=local_pixels(l,r.top);
+    r.right=local_pixels(l,r.right); r.bottom=local_pixels(l,r.bottom);
+}
+template<class Rect> inline void pixels_rect_to_local(const Layout& l, Rect& r) noexcept {
+    r.left=local_units(l,r.left); r.top=local_units(l,r.top);
+    r.right=local_units(l,r.right); r.bottom=local_units(l,r.bottom);
+}
+// The stock tooltip body with the c74 right/bottom operands. Keep its native
+// zero fallback for oversized tips, and its cursor-relative vertical flip.
+template<class Rect> inline void clamp_tooltip(const Layout& l, Rect& r, std::int32_t cursor_y) noexcept {
+    if(r.right>tooltip_right(l)) {
+        auto dx=r.right-tooltip_right(l); r.left-=dx; r.right-=dx;
+        if(r.left<0){r.right-=r.left;r.left=0;}
+    }
+    if(r.bottom>tooltip_bottom(l)) {
+        auto dy=r.bottom-cursor_y; r.top-=dy; r.bottom-=dy;
+        if(r.top<0){r.bottom-=r.top;r.top=0;}
+    }
+}
+
+// A hit surface can cover either the whole output (source readback) or the
+// centred content at half size (retail). Its declared origin is authoritative.
+inline std::int32_t hit_surface_pixel(float supplied, float content_origin, float divisor) noexcept {
+    return std::lround(supplied-content_origin/divisor);
+}
+inline bool campaign_minute(double hours, int& minute) noexcept {
+    const double total=hours*60.0;
+    if(!std::isfinite(total) || total<0 || total>(std::numeric_limits<int>::max)())return false;
+    minute=int(total);return true;
+}
+inline void format_clock_time(char* text, std::size_t size, int minute) noexcept {
+    // Native GDI is CP1251 in both frontends.
+    std::snprintf(text,size,"\xC2\xF0\xE5\xEC\xFF \xF1\xF3\xF2\xEE\xEA: \xC4\xE5\xED\xFC %d, %02d:%02d",
+        minute/1440+1,(minute%1440)/60,minute%60);
+}
+struct ClockTextLayout { int top,height; };
+inline ClockTextLayout clock_text_layout(int native_height,int count,int line_height) noexcept {
+    const int top=4+count*line_height;
+    return {top,(std::max)(native_height+line_height,top+line_height+4)};
+}
+inline int clock_text_width(const Layout& l,int native_width,int measured_pixels) noexcept {
+    return (std::max)(native_width,int(std::ceil(float(measured_pixels)/l.unit))+12);
+}
 
 // CI3DFigure::SetRelativeToScreen for a placed point: the camera-space centre
 // that projects through the clip-scaled projection to the point's pixel, at

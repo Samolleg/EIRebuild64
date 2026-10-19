@@ -137,18 +137,7 @@ void CI3DToolTip::Process(CPoint point)
             pI3D->ScreenToVirtualLocal(shift);
             rect += shift;
             rect += point;
-            if (rect.right > 800 + WideScreen::VirtualShift())
-            {
-                rect -= CPoint(rect.right - 800 - WideScreen::VirtualShift(), 0);
-                if (rect.left < -WideScreen::VirtualShift())
-                    rect += CPoint(-WideScreen::VirtualShift() - rect.left, 0);
-            }
-            if (rect.bottom > 600)
-            {
-                rect -= CPoint(0, rect.bottom - point.y);
-                if (rect.top < 0)
-                    rect += CPoint(0, -rect.top);
-            }
+            owned::widescreen::clamp_tooltip(WideScreen::Layout(pI3D->GetWidth(),pI3D->GetHeight()),rect,point.y);
 
             CI3DSurface *pSurf;
             AddSurface(pSurf = dbgnew CI3DSurface(pI3D, rect));

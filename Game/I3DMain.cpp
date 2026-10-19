@@ -873,44 +873,38 @@ void CInterface3D::ClearChatLines()
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::VirtualToScreen(CRect &rect)
 {
-    rect.left = rect.left * WideScreen::Effective(nScreenWidth, nScreenHeight) / 800 + (nScreenWidth - WideScreen::Effective(nScreenWidth, nScreenHeight)) / 2;
-    rect.top = rect.top * nScreenHeight / 600;
-    rect.right = rect.right * WideScreen::Effective(nScreenWidth, nScreenHeight) / 800 + (nScreenWidth - WideScreen::Effective(nScreenWidth, nScreenHeight)) / 2;
-    rect.bottom = rect.bottom * nScreenHeight / 600;
+    owned::widescreen::placed_rect_to_pixels(owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight)),rect);
 }
-/////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::VirtualToScreen(CPoint &point)
 {
-    point.x = point.x * WideScreen::Effective(nScreenWidth, nScreenHeight) / 800 + (nScreenWidth - WideScreen::Effective(nScreenWidth, nScreenHeight)) / 2;
-    point.y = point.y * nScreenHeight / 600;
+    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    point.x=owned::widescreen::pixel_x(layout,float(point.x));
+    point.y=owned::widescreen::pixel_y(layout,float(point.y));
 }
-/////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::VirtualToScreen(CSize &point)
 {
-    point.cx = point.cx * WideScreen::Effective(nScreenWidth, nScreenHeight) / 800;
-    point.cy = point.cy * nScreenHeight / 600;
+    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    point.cx=owned::widescreen::local_pixels(layout,point.cx);
+    point.cy=owned::widescreen::local_pixels(layout,point.cy);
 }
-/////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::ScreenToVirtual(CRect &rect)
 {
-    rect.left = (rect.left - (nScreenWidth - WideScreen::Effective(nScreenWidth, nScreenHeight)) / 2) * 800 / WideScreen::Effective(nScreenWidth, nScreenHeight);
-    rect.top = rect.top * 600 / nScreenHeight;
-    rect.right = (rect.right - (nScreenWidth - WideScreen::Effective(nScreenWidth, nScreenHeight)) / 2) * 800 / WideScreen::Effective(nScreenWidth, nScreenHeight);
-    rect.bottom = rect.bottom * 600 / nScreenHeight;
+    owned::widescreen::pixels_rect_to_placed(owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight)),rect);
 }
-/////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::ScreenToVirtual(CPoint &pt)
 {
-    pt.x = (pt.x - (nScreenWidth - WideScreen::Effective(nScreenWidth, nScreenHeight)) / 2) * 800 / WideScreen::Effective(nScreenWidth, nScreenHeight);
-    pt.y = pt.y * 600 / nScreenHeight;
+    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    pt.x=owned::widescreen::cursor_x(layout,pt.x);
+    pt.y=owned::widescreen::cursor_y(layout,pt.y);
 }
-/////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::ScreenToVirtual(CSize &pt)
 {
-    pt.cx = pt.cx * 800 / WideScreen::Effective(nScreenWidth, nScreenHeight);
-    pt.cy = pt.cy * 600 / nScreenHeight;
+    const auto layout=owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight));
+    pt.cx=owned::widescreen::local_units(layout,pt.cx);
+    pt.cy=owned::widescreen::local_units(layout,pt.cy);
 }
-/////////////////////////////////////////////////////////////////////////////////////
+// Placed coordinates above are already anchored by the source widget owner.
+// Surface-local rectangles below never inherit a screen origin or HUD pivot.
 HSOUND CInterface3D::BeginFX(LPCTSTR pszSoundName, BOOL bCycle)
 {
     return theWorld.GetSoundManager()->BeginFX(pszSoundName, 1000, 100, 0, bCycle);
@@ -1246,7 +1240,7 @@ CString CInterface3D::FormChatMessageString(EChatMessages eMsg, LPCTSTR pszParam
 
 void CInterface3D::VirtualToScreenLocal(CRect &r)
 {
-    CPoint origin(0, 0); VirtualToScreen(origin); VirtualToScreen(r); r.OffsetRect(-origin.x, -origin.y);
+    owned::widescreen::local_rect_to_pixels(owned::widescreen::make_layout(float(nScreenWidth),float(nScreenHeight)),r);
 }
 void CInterface3D::VirtualToScreenLocal(CPoint &p)
 {

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "widescreen_layout.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -640,7 +641,8 @@ void CI3DScreenGlobalMap::OnLButtonDown(UINT nFlags, CPoint point)
         return;
     }
     // after all checks we try to detect, which zone is under cursor
-    color = pHitTestDDS->GetPixel(point.x, point.y);
+    color = pHitTestDDS->GetPixel(owned::widescreen::hit_surface_pixel(float(point.x),0.f,1.f),
+            owned::widescreen::hit_surface_pixel(float(point.y),0.f,1.f));
     nCurZone = int((color >> 4) & 0x0000000f) - 1;
 
     if (nCurZone >= 0 && nCurZone < nZones)
@@ -757,7 +759,8 @@ void CI3DScreenGlobalMap::OnMouseMove(UINT nFlags, CPoint point)
         {
             // hittest for zone
 
-            DWORD color = pHitTestDDS->GetPixel(point.x, point.y);
+            DWORD color = pHitTestDDS->GetPixel(owned::widescreen::hit_surface_pixel(float(point.x),0.f,1.f),
+            owned::widescreen::hit_surface_pixel(float(point.y),0.f,1.f));
             nCurZone = int((color >> 4) & 0x0000000f) - 1;
             if (nCurZone >= nZones)
                 nCurZone = -1;

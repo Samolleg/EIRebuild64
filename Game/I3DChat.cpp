@@ -6,6 +6,16 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DChat.h"
 #include "WorldInterface.h"
 #include "ChatServer.h"
+#include "hud_layout_context.h"
+
+namespace {
+constexpr owned::widescreen::Anchors chatAnchor{owned::widescreen::Anchor::content_start,owned::widescreen::Anchor::start};
+struct ChatLayoutScope {
+    owned::widescreen::HudComposition previous=owned::widescreen::hud_blit;
+    ChatLayoutScope() { owned::widescreen::hud_blit=owned::widescreen::hud_composition(owned::embedded_hud_layout().layout(),chatAnchor); }
+    ~ChatLayoutScope() { owned::widescreen::hud_blit=previous; }
+};
+}
 /////////////////////////////////////////////////////////////////////////////////////
 const int CHAT_SHIFT = 16;
 const int CHAT_LINE_X = 780;
@@ -62,12 +72,15 @@ void CI3DChat::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::Draw2D()
 {
+    ChatLayoutScope layoutScope;
     OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::chat,this);
     int n = 0;
     std::list<SChatLine>::const_iterator it;
     for (n = 0, it = mLines.begin(); it != mLines.end(); ++it, ++n)
     {
-        it->pSurface->Move(CPoint(10, 10 + n * CHAT_SHIFT));
+        const auto layout=owned::widescreen::make_layout(float(pI3D->GetWidth()),float(pI3D->GetHeight()));
+        it->pSurface->Move(CPoint(owned::widescreen::layout_int_x(layout,chatAnchor,10),
+            owned::widescreen::layout_int_y(layout,chatAnchor,10+n*CHAT_SHIFT)));
         it->pSurface->Draw();
     }
     CI3DObject::Draw2D();
@@ -76,6 +89,7 @@ void CI3DChat::Draw2D()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::NewPhrase(LPCTSTR pszPhrase, int nOrder)
 {
+    ChatLayoutScope layoutScope;
     OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::chat,this);
     int nFont = 1;
 
@@ -318,6 +332,7 @@ void CI3DChat::SetEntering(bool bSet)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DChat::RedrawChatPhrase()
 {
+    ChatLayoutScope layoutScope;
     if (!bEntering)
     {
         surfaces[0]->Show(FALSE);

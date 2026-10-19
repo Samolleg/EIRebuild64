@@ -1385,16 +1385,16 @@ int portrait_camera_slot(const void* object) noexcept {
 // UI scale around the same pivot (widescreen::hud_blit).
 float surface_x(float x) noexcept { return widescreen::layout_to_placed_x(g_layout, t_anchor, x, false); }
 float surface_y(float y) noexcept { return widescreen::layout_to_placed_y(g_layout, t_anchor, y, false); }
-LONG pixel_x(float placed) noexcept { return std::lround(widescreen::placed_to_screen_x(g_layout, placed)); }
-LONG pixel_y(float placed) noexcept { return std::lround(widescreen::placed_to_screen_y(g_layout, placed)); }
-LONG local_pixels(LONG v) noexcept { return std::lround(widescreen::local_to_pixels(g_layout, static_cast<float>(v))); }
-LONG local_units(LONG v) noexcept { return std::lround(widescreen::pixels_to_local(g_layout, static_cast<float>(v))); }
+LONG pixel_x(float placed) noexcept { return widescreen::pixel_x(g_layout,placed); }
+LONG pixel_y(float placed) noexcept { return widescreen::pixel_y(g_layout,placed); }
+LONG local_pixels(LONG v) noexcept { return widescreen::local_pixels(g_layout,v); }
+LONG local_units(LONG v) noexcept { return widescreen::local_units(g_layout,v); }
 // A real (cursor) pixel to placed units; floor keeps hit tests monotonic.
 LONG cursor_placed_x(LONG v) noexcept {
-    return static_cast<LONG>(std::floor(widescreen::screen_to_placed_x(g_layout, static_cast<float>(v))));
+    return widescreen::cursor_x(g_layout,v);
 }
 LONG cursor_placed_y(LONG v) noexcept {
-    return static_cast<LONG>(std::floor(widescreen::screen_to_placed_y(g_layout, static_cast<float>(v))));
+    return widescreen::cursor_y(g_layout,v);
 }
 
 // CInterface3D::VirtualToScreen: layout (under the current widget anchor, at
@@ -1402,8 +1402,7 @@ LONG cursor_placed_y(LONG v) noexcept {
 // surface-local rectangle.
 void __fastcall virtual_to_screen_rect(const void* self, void*, RECT* r) {
     if (!self) {
-        r->left = local_pixels(r->left); r->top = local_pixels(r->top);
-        r->right = local_pixels(r->right); r->bottom = local_pixels(r->bottom);
+        widescreen::local_rect_to_pixels(g_layout,*r);
         return;
     }
     r->left = pixel_x(surface_x(static_cast<float>(r->left)));
@@ -1423,12 +1422,10 @@ void __fastcall virtual_to_screen_size(const void*, void*, SIZE* s) {
 // a null interface converts surface-local pixels.
 void __fastcall screen_to_virtual_rect(const void* self, void*, RECT* r) {
     if (!self) {
-        r->left = local_units(r->left); r->top = local_units(r->top);
-        r->right = local_units(r->right); r->bottom = local_units(r->bottom);
+        widescreen::pixels_rect_to_local(g_layout,*r);
         return;
     }
-    r->left = cursor_placed_x(r->left); r->top = cursor_placed_y(r->top);
-    r->right = cursor_placed_x(r->right); r->bottom = cursor_placed_y(r->bottom);
+    widescreen::pixels_rect_to_placed(g_layout,*r);
 }
 void __fastcall screen_to_virtual_point(const void* self, void*, POINT* p) {
     if (!self) { p->x = local_units(p->x); p->y = local_units(p->y); return; }
@@ -1441,8 +1438,8 @@ void __fastcall screen_to_virtual_size(const void*, void*, SIZE* s) {
 // A cursor movement (real pixels) to placed units, without the UI scale so
 // rotation speed does not follow the interface size.
 void __fastcall cursor_delta(const void*, void*, POINT* p) {
-    p->x = std::lround(static_cast<float>(p->x) / g_layout.unit);
-    p->y = std::lround(static_cast<float>(p->y) / g_layout.unit);
+    p->x = widescreen::local_units(g_layout,p->x);
+    p->y = widescreen::local_units(g_layout,p->y);
 }
 // CI3DScreenGlobalMap: the zone hit surface covers the 4:3 content at half
 // size; the caller passes the cursor halved.
@@ -1450,8 +1447,8 @@ using GetPixelFn = DWORD(__thiscall*)(void*, int, int);
 DWORD __fastcall global_map_pixel(void* surface, void*, int half_x, int half_y) {
     const float content_left = 0.5f * g_layout.width - 400.0f * g_layout.unit;
     const float content_top = 0.5f * g_layout.height - 300.0f * g_layout.unit;
-    const int x = static_cast<int>(std::lround(half_x - 0.5f * content_left));
-    const int y = static_cast<int>(std::lround(half_y - 0.5f * content_top));
+    const int x = widescreen::hit_surface_pixel(float(half_x),content_left,2.f);
+    const int y = widescreen::hit_surface_pixel(float(half_y),content_top,2.f);
     return reinterpret_cast<GetPixelFn>(at(kGetPixelEntry))(surface, x, y);
 }
 
@@ -1509,8 +1506,8 @@ void* g_make_bar_frame = nullptr;
 void* g_make_bar_frame2 = nullptr;
 void* g_make_triangle = nullptr;
 
-int placed_int_x(int x) noexcept { return static_cast<int>(std::lround(placed_x(static_cast<float>(x)))); }
-int placed_int_y(int y) noexcept { return static_cast<int>(std::lround(placed_y(static_cast<float>(y)))); }
+int placed_int_x(int x) noexcept { return widescreen::layout_int_x(g_layout,t_anchor,x); }
+int placed_int_y(int y) noexcept { return widescreen::layout_int_y(g_layout,t_anchor,y); }
 
 void __fastcall make_rect(void* area, void*, int x1, int y1, int x2, int y2) {
     if (!t_raw) { x1 = placed_int_x(x1); y1 = placed_int_y(y1); x2 = placed_int_x(x2); y2 = placed_int_y(y2); }
@@ -1886,9 +1883,7 @@ bool campaign_minutes(int& minute) noexcept {
     if (contract<0) return false;
     __try {
         using GetVar=float(__thiscall*)(void*,const char*);
-        const double total=double(reinterpret_cast<GetVar>(at(0x00578B50))(at(0x007AFEA5),"gtime"))*60.0;
-        if (!std::isfinite(total) || total<0 || total>INT_MAX) return false;
-        minute=static_cast<int>(total); return true;
+        return widescreen::campaign_minute(double(reinterpret_cast<GetVar>(at(0x00578B50))(at(0x007AFEA5),"gtime")),minute);
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 void __fastcall draw_clock_tooltip(void* object,void*) {
@@ -1902,8 +1897,8 @@ void __fastcall draw_clock_tooltip(void* object,void*) {
         const int native_height=*reinterpret_cast<const int*>(tip+0x178);
         const int count=*reinterpret_cast<const int*>(tip+0x150);
         const int line_height=*reinterpret_cast<const int*>(tip+0x15C);
-        const int top=4+count*line_height;
-        const int height=(std::max)(native_height+line_height,top+line_height+4);
+        const auto text_layout=widescreen::clock_text_layout(native_height,count,line_height);
+        const int top=text_layout.top,height=text_layout.height;
         // Native creation rounds rectangle endpoints separately; compare with
         // our required extended backing, not a rounded native-height estimate.
         const bool new_surface=*reinterpret_cast<const unsigned*>(surface+0x18)!=unsigned(local_pixels(height));
@@ -1911,8 +1906,7 @@ void __fastcall draw_clock_tooltip(void* object,void*) {
             char time[96]{};
             // Native GDI text is CP1251. Requested Russian heading and the
             // same campaign day/hour/minute arithmetic used in save labels.
-            std::snprintf(time,sizeof(time),"\xC2\xF0\xE5\xEC\xFF \xF1\xF3\xF2\xEE\xEA: \xC4\xE5\xED\xFC %d, %02d:%02d",
-                minute/1440+1,(minute%1440)/60,minute%60);
+            widescreen::format_clock_time(time,sizeof(time),minute);
             using SurfaceDC=void(__thiscall*)(void*);
             const auto get_dc=reinterpret_cast<SurfaceDC>(at(0x005FDC00));
             const auto release_dc=reinterpret_cast<SurfaceDC>(at(0x005FDC60));
@@ -1927,7 +1921,7 @@ void __fastcall draw_clock_tooltip(void* object,void*) {
             if(previous && previous!=HGDI_ERROR)SelectObject(dc,previous);
             release_dc(surface);
             bool replaced=false;
-            const int width=(std::max)(native_width,int(std::ceil(float(extent.cx)/g_layout.unit))+12);
+            const int width=widescreen::clock_text_width(g_layout,native_width,extent.cx);
             if(measured && resize_text_surface(object,local_pixels(width),local_pixels(height),replaced)) {
                 reinterpret_cast<void(__thiscall*)(void*)>(at(0x0065E880))(object);
                 get_dc(surface);
@@ -2405,9 +2399,9 @@ bool apply_interface_values() noexcept {
         if (!write_code(at(kTextSizeInline), code, n)) return false;
     }
     // Tooltips may reach the right and bottom screen edges.
-    if (!write_i32(kTooltipRight, static_cast<std::int32_t>(std::floor(widescreen::screen_to_placed_x(l, l.width)))) ||
-        !write_i32(kTooltipRightNegative, -static_cast<std::int32_t>(std::floor(widescreen::screen_to_placed_x(l, l.width)))) ||
-        !write_i32(kTooltipBottom, static_cast<std::int32_t>(std::floor(widescreen::screen_to_placed_y(l, l.height))))) return false;
+    if (!write_i32(kTooltipRight, widescreen::tooltip_right(l)) ||
+        !write_i32(kTooltipRightNegative, -widescreen::tooltip_right(l)) ||
+        !write_i32(kTooltipBottom, widescreen::tooltip_bottom(l))) return false;
     // Minimap clicks: placed cursor minus the placed map centre, back to
     // layout units (16.16 fixed point).
     apply_hud_scale_values();

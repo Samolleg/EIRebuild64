@@ -279,8 +279,9 @@ void CDXGeometryProcessor::CreateCameraMatrix2(SHMatrix &matrix, const CPlot3D &
 void CDXGeometryProcessor::CreateClipScaleMatrix(SHMatrix &matrix)
 {
     Identity(matrix);
-    matrix._11 = float(WideScreen::Effective()) / theSettings.dwWidth;
-    matrix._22 = -1; // 4.0f/3.0f;
+    const auto layout=WideScreen::Layout();
+    matrix._11 = layout.clip_x;
+    matrix._22 = -layout.clip_y;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // create viewport scaling matrix. NDCS => SCS
