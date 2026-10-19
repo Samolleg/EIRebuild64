@@ -1,5 +1,6 @@
 #pragma once
 #include <camp_presentation.h>
+#include <camp_session.h>
 
 class CI3DScreenCamp;
 class CI3DObject;
@@ -32,6 +33,7 @@ void DrawDecorationBackground(CRenderer* renderer);
 void FinishDraw2D(CRenderer* renderer);
 bool Active() noexcept;
 bool Current() noexcept;
+owned::camp::frontend::CampSession& Session() noexcept;
 const owned::camp::Layout& Layout() noexcept;
 owned::camp::Rect Stage() noexcept;
 owned::camp::Rect Actions() noexcept;
@@ -93,7 +95,17 @@ struct E4CampAccess {
     static bool CardTextDraw(class CI3DObjectItemInfo*);
     static bool Blit(class CI3DSurface*);
     static int LearnedRows(CI3DObject*);
-    static void Hover(class CI3DObjectItemInfo*,bool);
+    static void Hover(class CI3DObjectItemInfo*,owned::camp::frontend::HoverKind,bool,int);
+    static void Text(class CI3DObjectItemInfo*);
+    struct Content {
+        class CI3DObjectItemInfo* info;
+        Content* previous;
+        owned::camp::frontend::HoverKind kind;
+        bool present;
+        int argument,exceptions;
+        Content(class CI3DObjectItemInfo*,owned::camp::frontend::HoverKind,bool,int=0);
+        ~Content();
+    };
     static bool Draw2D(CI3DObject*);
     static owned::camp::frontend::InputState Input(CI3DObject*);
     static int Hit(CI3DObject*,POINT);

@@ -6,6 +6,7 @@
 #include "../GameJournal.h"
 #include "../dx11/Surface.h"
 #include <map>
+#include <exception>
 #include "../dx11/RendererDX11.h"
 #include "../ModRuntime.h"
 #include "../ModPackage.h"
@@ -20,7 +21,10 @@ std::map<CI3DObject*,std::unique_ptr<CI3DSurface>> grid_text;
 std::map<CI3DObject*,std::unique_ptr<CI3DObject>> art_owners;
 int belt_first=0;
 bool in_grid=false;
-bool in_popup=false,ordinary_hover=false;
+bool in_popup=false;
+thread_local E4CampAccess::Content* content=nullptr;
+owned::camp::frontend::CardPublication publication;
+int result_help=0;
 bool previous_wide=false;
 int previous_mode=-1;
 std::uint64_t grid_epoch=1;
@@ -32,7 +36,7 @@ struct GridCache {
     std::vector<std::pair<int,int>> text;
 };
 std::map<CI3DObjectInventoryItems*,GridCache> grids;
-int comparison_modifiers=-1,blueprint_modifiers=-1;
+
 std::unique_ptr<CI3DObjectItemInfo> comparison,blueprint;
 std::array<bool,3> shown_cards{};
 bool show_blueprint=false,empty_construction=false;
@@ -63,7 +67,7 @@ void rail_draw(List list,CRenderer* renderer){
 void E4CampAccess::Activate(CI3DScreenCamp* owner){
     screen=owner;belt_first=0;previous_wide=false;previous_mode=-1;
     OwnedRender::E4::Activate({owner,[](void* p){auto* s=static_cast<CI3DScreenCamp*>(p);return s->GetI3D()->GetCurrentScreen()==s&&!s->GetI3D()->GetCapture();},&Scroll,&ScrollTo,
-        [](void*){grid_text.clear();art_owners.clear();grids.clear();shown_cards={};comparison_modifiers=blueprint_modifiers=-1;},
+        [](void*){grid_text.clear();art_owners.clear();grids.clear();shown_cards={};publication.reset();},
         [](void* p){static_cast<CI3DScreenCamp*>(p)->GetI3D()->BeginFX("buttons\\camp\\scroll.wav");}});
     const auto* mod=ModRuntime::Current();
     RegisterTextures(mod&&mod->CombatSetting("JMVGraphics2"));
@@ -77,7 +81,7 @@ void E4CampAccess::Deactivate(CI3DScreenCamp* owner){
     if(screen!=owner)return;
     Popup(owned::CampRenderRequest::invalidate_popup,nullptr,nullptr);
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);
-    comparison.reset();blueprint.reset();shown_cards={};ordinary_hover=false;
+    comparison.reset();blueprint.reset();shown_cards={};publication.reset();result_help=0;
     OwnedRender::E4::Deactivate(owner);screen=nullptr;belt_first=0;
     GameJournal::Event("RENDER","camp_deactivate","borrowed_state=retired");
 }
@@ -112,80 +116,98 @@ void E4CampAccess::BeginDraw(CI3DScreenCamp* owner){
     if(owner!=screen)return;
     BeginInput();
     OwnedRender::E4::BeginDraw(int(owner->eScreenMode));
-    ordinary_hover=false;
+    publication.begin();result_help=0;shown_cards={};show_blueprint=empty_construction=false;
+    SetCards(shown_cards);Popup(owned::CampRenderRequest::invalidate_popup,nullptr,nullptr);
     if(previous_wide!=Active()||previous_mode!=int(owner->eScreenMode)){
         owner->pPerks->CheckRanges();owner->pPerks->RedrawPerks();
         previous_wide=Active();previous_mode=int(owner->eScreenMode);
     }
 }
-void E4CampAccess::Hover(CI3DObjectItemInfo* info,bool value){if(screen&&info==screen->pItemInfo)ordinary_hover=value;}
+E4CampAccess::Content::Content(CI3DObjectItemInfo* value,owned::camp::frontend::HoverKind type,bool visible,int arg)
+    :info(value),previous(content),kind(type),present(visible),argument(arg),exceptions(std::uncaught_exceptions()){content=this;}
+E4CampAccess::Content::~Content(){
+    content=previous;
+    if((!previous||previous->info!=info)&&exceptions==std::uncaught_exceptions())Hover(info,kind,present,argument);
+}
+void E4CampAccess::Hover(CI3DObjectItemInfo* info,owned::camp::frontend::HoverKind kind,bool present,int argument){
+    if(!screen||!Active())return;
+    if(info==screen->pItemInfo)Session().hover.publish(kind,present,argument);
+    if(info==screen->pConstrInfo)result_help=kind==owned::camp::frontend::HoverKind::help&&present?argument:0;
+}
+void E4CampAccess::Text(CI3DObjectItemInfo* info){
+    const int modifiers=((GetKeyState(VK_CONTROL)&0x8000)?1:0)|((GetKeyState(VK_MENU)&0x8000)?2:0);
+    if(info==comparison.get())publication.comparison_modifiers=modifiers;
+    if(info==blueprint.get())publication.blueprint_modifiers=modifiers;
+    if(screen&&info==screen->pConstrInfo)publication.result_modifiers=modifiers;
+}
 void E4CampAccess::Cards(CI3DScreenCamp* owner,CRenderer* renderer){
     if(owner!=screen||!Active())return;
+    namespace front=owned::camp::frontend;
     if(!comparison){comparison=std::make_unique<CI3DObjectItemInfo>(owner->GetI3D(),owner);comparison->Init(600,100);}
     if(!blueprint){blueprint=std::make_unique<CI3DObjectItemInfo>(owner->GetI3D(),owner);blueprint->Init(600,100);}
-    shown_cards={ordinary_hover&&Current(),false,false};show_blueprint=false;empty_construction=false;
     auto* info=owner->pConstrInfo;
-    const bool construction=owner->eScreenMode==ISM_SPELLCONSTR||owner->eScreenMode==ISM_ITEMCONSTR;
-    if(construction&&info&&info->IsVisible()){
-        shown_cards[1]=true;
-        if(!info->GetItem()){
-            auto* party=owner->eScreenMode==ISM_SPELLCONSTR?owner->pSpellsConstr:owner->pItemsConstr;
-            CItem* selected=nullptr;
-            if(party)for(int i=0;i<party->allWagonItems.GetSize();++i){auto* item=party->allWagonItems[i];
-                if(item&&(owner->eScreenMode==ISM_SPELLCONSTR?owner->IsItemPrototype(item):owner->IsItemInstruction(item)))selected=item;
-            }
-            if(selected||blueprint->GetItem())blueprint->SetItem(selected);
-            show_blueprint=selected!=nullptr;empty_construction=!selected;
-        }
+    const int mode=int(owner->eScreenMode);
+    const int modifiers=int(Session().hover.modifiers&3);
+    CItem* selected=nullptr;
+    if((mode==3||mode==5)&&info&&info->IsVisible()&&result_help){
+        auto* party=mode==3?owner->pSpellsConstr:owner->pItemsConstr;
+        if(party)selected=front::last_blueprint<CItem*>(party->allWagonItems.GetSize(),
+            [&](int i){return party->allWagonItems[i];},
+            [&](CItem* item){return mode==3?owner->IsItemPrototype(item):owner->IsItemInstruction(item);});
     }
-    CItem* item=shown_cards[0]?owner->pMouseItem:construction?info->GetItem():nullptr;
-    CItem* counterpart=nullptr;auto* person=owner->GetCurrentPers();
-    if(item&&person&&Current()&&(GetKeyState(VK_SHIFT)&0x8000)){
-        if(item->GetTypeID()==ITID_ITEM_WEAPON&&person->dwCurrentWeapon<DWORD(person->weapons.GetSize()))counterpart=person->weapons[person->dwCurrentWeapon];
-        else if(item->GetTypeID()==ITID_ITEM_ARMOR)for(int i=0;i<person->armors.GetSize();++i){auto* armor=person->armors[i];if(armor&&armor->GetArmorType()==static_cast<CItemArmor*>(item)->GetArmorType()){counterpart=armor;break;}}
+    front::publish_constructor(publication,mode,info&&info->IsVisible(),result_help,
+        info?info->GetItem():nullptr,selected,modifiers,
+        [&](CItem* item){blueprint->SetItem(item);},[&]{return blueprint->GetItem();},
+        [&](bool result){(result?info:blueprint.get())->FormTextInfo();},
+        [](const char* reason){GameJournal::Event("RENDER","camp_card_omitted","reason=%s",reason);});
+    const bool allowed=Session().allowed(Current());
+    CItem* item=Session().hover.fresh(allowed)&&Session().hover.kind==front::HoverKind::item?owner->pMouseItem:
+        publication.constructor==front::ConstructorCard::result?info->GetItem():nullptr;
+    CItem* counterpart=nullptr;
+    auto* person=owner->GetCurrentPers();
+    if(item&&person&&allowed&&(Session().hover.modifiers&4)){
+        CItem* weapon=person->dwCurrentWeapon<DWORD(person->weapons.GetSize())?person->weapons[person->dwCurrentWeapon]:nullptr;
+        counterpart=front::comparison_item<CItem*>(item,item->GetTypeID(),weapon,person->armors.GetSize(),
+            [&](int i)->CItem*{return person->armors[i];},
+            [](CItem* armor){return static_cast<CItemArmor*>(armor)->GetArmorType();});
     }
-    if(counterpart||comparison->GetItem())comparison->SetItem(counterpart);
-    shown_cards[2]=counterpart!=nullptr;
-    const int modifiers=((GetKeyState(VK_CONTROL)&0x8000)?1:0)|((GetKeyState(VK_MENU)&0x8000)?2:0);
-    if(counterpart&&modifiers!=comparison_modifiers){
-        comparison->FormTextInfo();comparison_modifiers=modifiers;
-    }
-    if(show_blueprint&&modifiers!=blueprint_modifiers){
-        blueprint->FormTextInfo();blueprint_modifiers=modifiers;
-    }
+    front::publish_comparison(publication,counterpart,modifiers,
+        [&](CItem* value){comparison->SetItem(value);},[&]{return comparison->GetItem();},[&]{comparison->FormTextInfo();});
+    shown_cards=front::visible_cards(Session().hover,allowed,owner->pItemInfo&&owner->pItemInfo->IsVisible(),
+        info&&info->IsVisible(),publication.constructor,publication.comparison&&comparison->IsVisible());
+    show_blueprint=shown_cards[1]&&publication.constructor==front::ConstructorCard::blueprint;
+    empty_construction=shown_cards[1]&&publication.constructor==front::ConstructorCard::empty;
     if(!Popup(owned::CampRenderRequest::begin_interface,nullptr,nullptr)){shown_cards={};owned::camp_inventory_popup_failed();}
     SetCards(shown_cards);
-    // Keep the hover decision observable without logging each rendered frame.
     static CI3DScreenCamp* reportedOwner=nullptr;
     static int reportedItem=-2;
     static unsigned reportedState=~0u;
     const int itemId=owner->pMouseItem?owner->pMouseItem->GetID():-1;
-    const unsigned state=(ordinary_hover?1u:0u)|(Current()?2u:0u)|
+    const unsigned state=(Session().hover.touched?1u:0u)|(allowed?2u:0u)|
         (shown_cards[0]?4u:0u)|(shown_cards[1]?8u:0u)|(shown_cards[2]?16u:0u);
     if(reportedOwner!=owner||reportedItem!=itemId||reportedState!=state){
         reportedOwner=owner;reportedItem=itemId;reportedState=state;
         const CPoint mouse=owner->GetI3D()->GetMousePos();
         GameJournal::Event("RENDER","camp_hover_card",
             "item=%d hover=%d current=%d cards=%u mouse=%d,%d capture=%d",
-            itemId,int(ordinary_hover),int(Current()),state>>2,mouse.x,mouse.y,
+            itemId,int(Session().hover.touched),int(allowed),state>>2,mouse.x,mouse.y,
             int(owner->GetI3D()->GetCapture()!=nullptr));
     }
-    // These independent visual owners are never inserted into the handler tree.
     (void)renderer;
 }
 bool E4CampAccess::CardDraw(CI3DObjectItemInfo* info,CRenderer* renderer){
-    const auto role=RoleOf(info);if(!Active()||in_popup||role==Role::none)return false;
-    const int index=role==Role::info?0:role==Role::comparison?2:1;
-    if(!shown_cards[index]||(role==Role::help&&(show_blueprint||empty_construction)))return true;
+    const auto role=RoleOf(info);if(!Active()||in_popup||owned::camp::frontend::role_card(role)<0)return false;
+
+    if(!owned::camp::frontend::card_visible(role,publication.constructor,shown_cards,Session().allowed(Current())))return true;
     Scope scope(role);auto transform=placed(Uniform(role));
     struct Args {CI3DObjectItemInfo* info;CRenderer* renderer;} args{info,renderer};
     Popup(owned::CampRenderRequest::draw_popup,[](void* p){auto& a=*static_cast<Args*>(p);BoolScope drawing_popup(in_popup);a.info->Draw(a.renderer);},&args);
     return true;
 }
 bool E4CampAccess::CardTextDraw(CI3DObjectItemInfo* info){
-    const auto role=RoleOf(info);if(!Active()||in_popup||role==Role::none)return false;
-    const int index=role==Role::info?0:role==Role::comparison?2:1;
-    if(!shown_cards[index]||(role==Role::help&&(show_blueprint||empty_construction)))return true;
+    const auto role=RoleOf(info);if(!Active()||in_popup||owned::camp::frontend::role_card(role)<0)return false;
+
+    if(!owned::camp::frontend::card_visible(role,publication.constructor,shown_cards,Session().allowed(Current())))return true;
     Scope scope(role);auto transform=placed(Uniform(role));
     Popup(owned::CampRenderRequest::draw_popup,[](void* p){BoolScope drawing_popup(in_popup);static_cast<CI3DObjectItemInfo*>(p)->Draw2D();},info);
     return true;

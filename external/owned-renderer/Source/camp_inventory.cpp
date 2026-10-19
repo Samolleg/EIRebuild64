@@ -1,5 +1,6 @@
 #include "camp_inventory.h"
 #include "camp_presentation.h"
+#include "camp_session.h"
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
 #include "owned_asset_loader.h"
@@ -34,7 +35,9 @@ namespace {
 // module owns layout, cell enumeration, picking and scroll positions.
 constexpr std::uintptr_t kBase = 0x400000;
 std::uint8_t* game = nullptr;
-void* screen = nullptr; // Borrowed only between the authoritative activate/deactivate calls.
+camp::frontend::CampSession session;
+camp::frontend::CardPublication publication;
+void*& screen = session.owner; // Borrowed only during the authoritative camp session.
 camp::Layout layout;
 bool valid = false;
 bool install_failed = false;
@@ -49,12 +52,13 @@ bool addon_hover_selection = false;
 std::array<bool,3> cards_drawn{};
 bool any_cards() noexcept {return std::any_of(cards_drawn.begin(),cards_drawn.end(),[](bool shown){return shown;});}
 void* comparison_owner=nullptr; // One fully constructed native owner, never a child or input target.
-bool comparison_current=false;
-int comparison_modifiers=-1; // Ctrl/Alt mode of its last completed formatting.
+bool& comparison_current=publication.comparison;
+int& comparison_modifiers=publication.comparison_modifiers;
 void* blueprint_owner=nullptr; // Independent copied visual Party; never participates in a transaction.
-int blueprint_modifiers=-1,result_modifiers=-1;
-enum class ConstructorCard { none,empty,blueprint,result };
-ConstructorCard constructor_card=ConstructorCard::none;
+int& blueprint_modifiers=publication.blueprint_modifiers;
+int& result_modifiers=publication.result_modifiers;
+using ConstructorCard=camp::frontend::ConstructorCard;
+ConstructorCard& constructor_card=publication.constructor;
 void refresh_comparison(void* item);
 void destroy_comparison() noexcept;
 void* popup_sink_context = nullptr;
@@ -69,8 +73,7 @@ bool popup_submit(CampRenderRequest request, CampPopupDraw draw, void* context) 
 CampDecoration decoration;
 bool decoration_pending = false, art_failed = false;
 int belt_first = 0;
-float belt_wheel = 0;
-std::array<float,2> perk_wheel{};
+
 // Only the optional addon CampDraw (alchemy) adapter path stays pinned to its
 // reviewed JMV build. Every other addon owner the camp depends on is found
 // from the addon's own hook-framework callbacks at our game entries, in
@@ -140,26 +143,21 @@ int spell_first() noexcept {
 }
 
 using Role = camp::frontend::Role;
-int role_card(Role role) noexcept {return role==Role::info?0:(role==Role::help||role==Role::blueprint)?1:role==Role::comparison?2:-1;}
+using camp::frontend::role_card;
 bool card_content_visible(Role role) noexcept {
-    return role==Role::help?constructor_card==ConstructorCard::result:
-        role!=Role::blueprint||constructor_card==ConstructorCard::blueprint;
+    return camp::frontend::card_content_visible(role,constructor_card);
 }
 using ScrollList = camp::frontend::List;
 using ScrollRail = camp::frontend::Rail;
 ScrollRail scroll_rail(ScrollList list) noexcept;
-enum class HoverKind { none,item,help,skill };
-struct OrdinaryHover {
-    HoverKind kind=HoverKind::none;
-    int value=0,screen_mode=-1;
-    unsigned modifiers=0;
-    bool touched=false;
-} ordinary_hover;
+using HoverKind=camp::frontend::HoverKind;
+auto& ordinary_hover=session.hover;
 int result_help=0; // Actual completed help argument for this Draw; native formatting discards it.
 thread_local HoverKind hover_setter=HoverKind::none;
-bool hover_focus=true,hover_controls=false;
+bool& hover_focus=session.focus;
+bool& hover_controls=session.controls;
 void reset_hover() noexcept {
-    ordinary_hover.kind=HoverKind::none;ordinary_hover.touched=false;
+    ordinary_hover.reset();
 }
 bool ordinary_owner(void* self) noexcept {
     return screen&&layout.wide&&valid&&self==field<void*>(screen,0x164);
@@ -751,8 +749,7 @@ RECT decoration_pixels(camp::Rect r) noexcept {
 }
 
 bool fresh_hover() noexcept {
-    return ordinary_hover.kind!=HoverKind::none&&ordinary_hover.touched&&
-        hover_focus&&!hover_controls&&current_camp_input();
+    return ordinary_hover.fresh(session.allowed(current_camp_input()));
 }
 bool context_visible(unsigned card) noexcept {
     void* owner=card==2?comparison_owner:field<void*>(screen,card==0?0x164:0x1dc);
@@ -916,12 +913,7 @@ void prioritize_grid_icons(Grid& grid, int first, int count, int capacity) {
 
 bool perk_list(ScrollList list) noexcept {return list==ScrollList::learned||list==ScrollList::available;}
 bool drag_admitted=false;
-struct ScrollDrag {
-    HWND window=nullptr;
-    ScrollList list=ScrollList::stash;
-    int screen_mode=0,category=0;
-    float grab=0;
-} scroll_drag;
+auto& scroll_drag=session.drag;
 
 // The current person's equipped spells as of the previous camp frame. A spell
 // object that was not equipped then is newly equipped; the belt follows it
@@ -968,7 +960,7 @@ void* scroll_owner(ScrollList list) noexcept {
     }
     return nullptr;
 }
-ScrollRail scroll_rail(ScrollList list) noexcept {
+camp::frontend::Scroll scroll_snapshot(ScrollList list) noexcept {
     void* owner=scroll_owner(list);
     if(!owner||!field<BOOL>(owner,0xe8))return {};
     camp::frontend::Scroll scroll;scroll.visible=true;
@@ -982,10 +974,11 @@ ScrollRail scroll_rail(ScrollList list) noexcept {
     }else{
         const bool vendor=list!=ScrollList::stash;const int columns=layout.grid_columns(vendor);
         scroll.page=layout.grid_rows(vendor);scroll.total=(field<int>(owner,0x1a0)+columns-1)/columns;
-        scroll.position=first_item(owner)/columns;
+        scroll.position=first_item(owner)/columns;scroll.category=field<int>(owner,0x150);
     }
-    return camp::frontend::rail(layout,list,scroll);
+    return scroll;
 }
+ScrollRail scroll_rail(ScrollList list) noexcept {return camp::frontend::rail(layout,list,scroll_snapshot(list));}
 void scroll_to(ScrollList list,int position) noexcept {
     const auto bar=scroll_rail(list);
     position=std::clamp(position,0,bar.maximum);
@@ -1001,20 +994,8 @@ void scroll_to(ScrollList list,int position) noexcept {
     field<float>(owner,0x174)=0;field<float>(owner,0x178)=0;
 }
 void move_scroll_drag(POINT point) noexcept {
-    if(!scroll_drag.window)return;
-    if(!current_camp_input()||mode()!=scroll_drag.screen_mode||GetCapture()!=scroll_drag.window){camp_inventory_cancel_drag();return;}
-    void* owner=scroll_owner(scroll_drag.list);
-    if(!owner||!field<BOOL>(owner,0xe8)||
-        (scroll_drag.list!=ScrollList::spells&&!perk_list(scroll_drag.list)&&field<int>(owner,0x150)!=scroll_drag.category)){
-        camp_inventory_cancel_drag();return;
-    }
-    const auto bar=scroll_rail(scroll_drag.list);
-    if(!bar.maximum){camp_inventory_cancel_drag();return;}
-    const POINT p=virtual_point(screen,point);
-    scroll_to(scroll_drag.list,camp::frontend::drag_position(bar,p,scroll_drag.grab));
-
+    camp::frontend::move_drag(session,layout,mode(),current_camp_input(),point,scroll_snapshot,scroll_to);
 }
-
 using SurfaceCtor = void*(__thiscall*)(void*, void*, int, int, int, int, int, bool);
 using BarFn = void(__thiscall*)(void*, float, float, float, float, float, float, int, int, int, int);
 using FrameFn = void(__thiscall*)(void*, float, float, float, float, float, float, float, int, int, int, int);
@@ -1122,7 +1103,7 @@ void __fastcall info_item(void* self,void*,void* item) {
     if(!ordinary_owner(self)||hover_setter!=HoverKind::none){original<Fn>(info_item_id)(self,item);return;}
     call_hover_setter(info_item_id,self,item,HoverKind::item);
     if(!item){reset_hover();return;}
-    ordinary_hover.kind=HoverKind::item;ordinary_hover.touched=true;
+    ordinary_hover.publish(HoverKind::item,true);
     refresh_comparison(item);
 }
 void observe_help(HookId id,void* self,int help) {
@@ -1134,7 +1115,7 @@ void observe_help(HookId id,void* self,int help) {
     }
     call_hover_setter(id,self,help,HoverKind::help);
     if(!help){reset_hover();return;}
-    ordinary_hover.kind=HoverKind::help;ordinary_hover.value=help;ordinary_hover.touched=true;
+    ordinary_hover.publish(HoverKind::help,true,help);
 }
 void __fastcall info_help(void* self,void*,int help) {observe_help(info_help_id,self,help);}
 void __fastcall addon_info_help(void* self,void*,int help) {observe_help(addon_info_help_id,self,help);}
@@ -1145,7 +1126,7 @@ void observe_skill(HookId id,void* self,void* descriptor) {
     if(type<0)reset_hover();
     else if(type>7)reject("ordinary_hover_target_type_differs");
     else{
-        ordinary_hover.kind=HoverKind::skill;ordinary_hover.touched=true;
+        ordinary_hover.publish(HoverKind::skill,true);
     }
     // Native live stats/text refresh still occurs for every skill call.
     call_hover_setter(id,self,descriptor,HoverKind::skill);
@@ -1156,14 +1137,14 @@ void publish_addon_hover() {
     // This BG boundary follows the admitted native selection and formatting.
     // The addon inlines SetItem, so its completed fresh selection is the owner.
     if(void* item=field<void*>(screen,0x168)){
-        ordinary_hover.kind=HoverKind::item;ordinary_hover.touched=true;
+        ordinary_hover.publish(HoverKind::item,true);
         refresh_comparison(item);
     }
 }
 BOOL __fastcall info_draw(void* self,void*,void* v) {
     const auto role=role_of(self);
     if(!screen||!layout.wide||role_card(role)<0)return original<DrawFn>(info_draw_id)(self,v);
-    if(!valid||!cards_drawn[role_card(role)]||!card_content_visible(role))return TRUE;
+    if(!valid||!camp::frontend::card_visible(role,constructor_card,cards_drawn,session.allowed(current_camp_input())))return TRUE;
     Scope scope(role);
     return original<DrawFn>(info_draw_id)(self,v);
 }
@@ -1513,65 +1494,37 @@ void* make_comparison() {
     } __finally {if(!completed)destroy_comparison_stage(self,stage);}
 }
 void refresh_comparison(void* item) {
-    if(!comparison_owner||!item||!(GetKeyState(VK_SHIFT)&0x8000)||!current_camp_input()||!hover_focus||hover_controls)return;
-    void* person=current_person();
-    if(!person)return;
-    void* counterpart=nullptr;
-    const int category=field<int>(item,0x10);
-    if(category==0x3004){
-        const int index=field<int>(person,0x774),count=field<int>(person,0x734);
-        if(index>=0&&index<count)counterpart=field<void**>(person,0x730)[index];
-    }else if(category==0x3005){
-        const auto armor_type=function<int(__thiscall*)(void*)>(0x6a39e0);
-        const int type=armor_type(item),count=field<int>(person,0x754);
-        auto** armors=field<void**>(person,0x750);
-        for(int i=0;i<count;++i)if(armor_type(armors[i])==type){counterpart=armors[i];break;}
-    }
-    if(!counterpart)return; // Multi-entry quick items/spells have no invented counterpart.
-    // SetItem duplicates into this independent native Party; nothing borrowed is retained here.
-    original<void(__thiscall*)(void*,void*)>(info_item_id)(comparison_owner,counterpart);
-    if(comparison_modifiers!=int(item_modifiers()))info_text(comparison_owner,nullptr);
-    comparison_current=true;
+    if(!comparison_owner||!item||!(GetKeyState(VK_SHIFT)&0x8000)||!session.allowed(current_camp_input()))return;
+    void* person=current_person();if(!person)return;
+    const int index=field<int>(person,0x774),count=field<int>(person,0x734);
+    void* weapon=index>=0&&index<count?field<void**>(person,0x730)[index]:nullptr;
+    void* counterpart=camp::frontend::comparison_item<void*>(item,field<int>(item,0x10),weapon,field<int>(person,0x754),
+        [&](int i){return field<void**>(person,0x750)[i];},
+        [&](void* armor){return function<int(__thiscall*)(void*)>(0x6a39e0)(armor);});
+    camp::frontend::publish_comparison(publication,counterpart,int(item_modifiers()),
+        [&](void* value){original<void(__thiscall*)(void*,void*)>(info_item_id)(comparison_owner,value);},
+        [&]{return function<void*(__thiscall*)(void*)>(0x5ee720)(comparison_owner);},
+        [&]{info_text(comparison_owner,nullptr);});
 }
-
 void refresh_constructor() {
     const auto get_item=function<void*(__thiscall*)(void*)>(0x5ee720);
     void* result=field<void*>(screen,0x1dc);
     const int screen_mode=mode();
-    if((screen_mode!=3&&screen_mode!=5)||!field<BOOL>(result,0xe8)){
-        if(get_item(blueprint_owner))original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,nullptr);
-        return;
-    }
-    // Mode help IDs are the admitted native tab literals, not null-item guesses.
-    const int help=screen_mode==3?103:102;
-    if(result_help){
-        if(result_help!=help){reject("constructor_fallback_help_differs");return;}
+    void* selected=nullptr;
+    if((screen_mode==3||screen_mode==5)&&field<BOOL>(result,0xe8)&&result_help){
         void* party=field<void*>(screen,screen_mode==3?0x1d4:0x1c0);
-        const int count=field<int>(party,0x44);
-        auto** inputs=field<void**>(party,0x40);
-        const auto is_blueprint=function<bool(__thiscall*)(void*,void*)>(screen_mode==3?0x5ee050:0x5ee0d0);
-        void* selected=nullptr;
-        // Keep native list/publication order; the borrow ends at this setter.
-        for(int i=0;i<count;++i)if(is_blueprint(screen,inputs[i]))selected=inputs[i];
-        if(selected){
-            original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,selected);
-            if(blueprint_modifiers!=int(item_modifiers()))info_text(blueprint_owner,nullptr);
-            constructor_card=ConstructorCard::blueprint;
-        }else{
-            if(get_item(blueprint_owner))original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,nullptr);
-            constructor_card=ConstructorCard::empty;
-        }
-    }else{
-        void* item=get_item(result);
-        if(!item){reject("constructor_result_publication_missing");return;}
-        if(result_modifiers!=int(item_modifiers()))info_text(result,nullptr);
-        constructor_card=ConstructorCard::result;
-        // A fresh item hover owns comparison even if its slot has no counterpart.
-        // Otherwise compare the actual native result, not a blueprint prediction.
-        if(!(fresh_hover()&&ordinary_hover.kind==HoverKind::item))refresh_comparison(item);
+        selected=camp::frontend::last_blueprint<void*>(field<int>(party,0x44),
+            [&](int i){return field<void**>(party,0x40)[i];},
+            [&](void* item){return function<bool(__thiscall*)(void*,void*)>(screen_mode==3?0x5ee050:0x5ee0d0)(screen,item);});
     }
+    camp::frontend::publish_constructor(publication,screen_mode,field<BOOL>(result,0xe8)!=FALSE,result_help,
+        get_item(result),selected,int(item_modifiers()),
+        [&](void* value){original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,value);},
+        [&]{return get_item(blueprint_owner);},
+        [&](bool actual){info_text(actual?result:blueprint_owner,nullptr);},[](const char* reason){reject(reason);});
+    if(constructor_card==ConstructorCard::result&&!(fresh_hover()&&ordinary_hover.kind==HoverKind::item))
+        refresh_comparison(get_item(result));
 }
-
 bool activation_contract(void* self) noexcept {
     __try {
         // Twelve root areas are created only after the native missing-shop
@@ -1609,7 +1562,7 @@ void clear_owned_layout() noexcept {
     camp_inventory_cancel_drag();
     destroy_comparison();
     destroy_blueprint();
-    reset_hover();ordinary_hover.screen_mode=-1;result_help=0;
+    session.retire_input();ordinary_hover.screen_mode=-1;result_help=0;
     if(!restore_perk_viewport())reject("perk_viewport_restore_failed");
     grids = {}; spell_frame = nullptr; spell_background = nullptr; quick_backgrounds = {};
     camp_background=nullptr;camp_panels={};
@@ -1708,7 +1661,7 @@ void __fastcall activate(void* self, void*) {
     // Icon bindings belong to the texture-role generation, not this panel.
     original<VoidFn>(activate_id)(self);
     ++camp_visit;
-    screen = self; valid = true; failure = nullptr; icon_catalogue_cursor={}; icon_tab_cursors={}; belt_first = 0; belt_wheel=0;perk_wheel={};belt_snapshot={};
+    session.activate(self); valid = true; failure = nullptr; icon_catalogue_cursor={}; icon_tab_cursors={}; belt_first = 0; belt_snapshot={};
     clear_owned_layout();
     layout = camp::make_layout(float(output_width), float(output_height), float(frame_size));
     applied_wide = requested_wide;
@@ -1727,7 +1680,7 @@ void __fastcall deactivate(void* self, void*) {
     if(observe)QueryPerformanceCounter(&begin);
     if(screen==self&&!restore_perk_viewport())reject("perk_viewport_restore_failed");
     if(screen==self)camp_inventory_cancel_drag();
-    if (screen == self) { screen = nullptr; valid = false; clear_owned_layout(); }
+    if (screen == self) { session.deactivate(self); valid = false; clear_owned_layout(); }
     if(observe)QueryPerformanceCounter(&native_begin);
     original<VoidFn>(deactivate_id)(self);
     if(observe){
@@ -1741,16 +1694,9 @@ void __fastcall deactivate(void* self, void*) {
     }
 }
 BOOL __fastcall camp_draw(void* self, void*, void* visualizator) {
-    comparison_current=false;
-    constructor_card=ConstructorCard::none;
-    result_help=0;
-    ordinary_hover.touched=false;
-    if(screen==self&&layout.wide){
-        const unsigned modifiers=item_modifiers()|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u);
-        if(ordinary_hover.screen_mode!=mode()||ordinary_hover.modifiers!=modifiers||!current_camp_input()||!hover_focus)
-            reset_hover();
-        ordinary_hover.screen_mode=mode();ordinary_hover.modifiers=modifiers;
-    }
+    publication.begin();result_help=0;
+    if(screen==self&&layout.wide)
+        session.begin(mode(),item_modifiers()|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u),current_camp_input());
     if(scroll_drag.window&&(!current_camp_input()||mode()!=scroll_drag.screen_mode))camp_inventory_cancel_drag();
     decoration_pending=false; cards_drawn={};
     popup_submit(CampRenderRequest::invalidate_popup,nullptr,nullptr);
@@ -1855,7 +1801,7 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
     Scope scope(role);
     if(role_card(role)>=0){
         const unsigned card=unsigned(role_card(role));
-        if(!cards_drawn[card]||!card_content_visible(role))return TRUE;
+        if(!camp::frontend::card_visible(role,constructor_card,cards_drawn,session.allowed(current_camp_input())))return TRUE;
         Scope placed(uniform(role));
         void* arguments[]{self,v};
         popup_submit(CampRenderRequest::draw_popup,[](void* context){
@@ -1869,7 +1815,10 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
         if(addon_hover_selection)publish_addon_hover();
         refresh_constructor();
         if(!valid)return TRUE;
-        for(unsigned card=0;card<cards_drawn.size();++card)cards_drawn[card]=context_visible(card);
+        cards_drawn=camp::frontend::visible_cards(ordinary_hover,session.allowed(current_camp_input()),
+            field<BOOL>(field<void*>(screen,0x164),0xe8)!=FALSE,
+            field<BOOL>(field<void*>(screen,0x1dc),0xe8)!=FALSE,constructor_card,
+            context_visible(2));
         camp::frontend::draw_background(layout,mode(),
             [&](camp::Rect,int,int){function<DrawFn>(0x5e6d90)(camp_background,v);},
             [&](int i,camp::Placement p){Scope placed(p);function<DrawFn>(0x5e6d90)(camp_panels[i],v);});
@@ -1923,7 +1872,7 @@ void __fastcall draw2d(void* self, void*) {
     const Role role = role_of(self);
     if (!screen || !layout.wide || role == Role::none) { original<VoidFn>(draw2d_id)(self); return; }
     if (!valid) return;
-    if(role_card(role)>=0&&(!cards_drawn[role_card(role)]||!card_content_visible(role)))return;
+    if(role_card(role)>=0&&!camp::frontend::card_visible(role,constructor_card,cards_drawn,session.allowed(current_camp_input())))return;
     Scope scope(role);
     if (auto* grid = grid_for(self)) {
         // Both old 700x20 number/price strips are retired from wide drawing.
@@ -2307,99 +2256,24 @@ const char* camp_inventory_notice() noexcept {
     return layout.wide ? (layout.compact ? "Camp: compact 16:10 grid" : "Camp: wide grid") : nullptr;
 }
 bool camp_inventory_wheel(POINT point,short delta,UINT flags) noexcept {
-    if(!hover_focus||hover_controls||!current_camp_input())return false;
-    for(auto list:{ScrollList::stash,ScrollList::spell_vendor,ScrollList::item_vendor}){
-        void* owner=scroll_owner(list);
-        if(!owner||!field<BOOL>(owner,0xe8)||!grid_for(owner))continue;
-        const POINT p=virtual_point(owner,point);
-        if(!layout.grid(list!=ScrollList::stash).contains(float(p.x),float(p.y)))continue;
-        // The caller already converted WM_MOUSEWHEEL screen pixels to client
-        // pixels. Native dispatch would pass the original screen point to
-        // IsInside/HitTest. Keep the verified handler ABI, sound and row request
-        // through the existing hook, and consume this message only once.
-        wheel(static_cast<std::uint8_t*>(owner)+0x94,nullptr,flags,delta,point);
-        return true;
-    }
-    for(auto list:{ScrollList::learned,ScrollList::available}){
-        void* owner=scroll_owner(list);
-        const auto pane=list==ScrollList::learned?layout.learned:layout.available;
-        const POINT p=virtual_point(screen,point);
-        if(!owner||!field<BOOL>(owner,0xe8)||!pane.contains(float(p.x),float(p.y)))continue;
-        auto& remainder=perk_wheel[list==ScrollList::learned?0:1];
-        remainder-=float(delta)/WHEEL_DELTA;
-        const int steps=int(remainder);remainder-=steps;
-        const auto bar=scroll_rail(list);
-        if(steps)scroll_to(list,bar.position+steps);
-        return true;
-    }
-    void* spells=field<void*>(screen,0x1e8);
-    if(!field<BOOL>(spells,0xe8))return false;
-    const POINT p=virtual_point(spells,point);
-    if(!layout.belt.contains(float(p.x),float(p.y)))return false;
-    constexpr int visible=8;
-    const int maximum=(std::max)(0,spell_count()-visible);
-    belt_wheel-=float(delta)/WHEEL_DELTA;
-    const int steps=int(belt_wheel);belt_wheel-=steps;
-    belt_first=std::clamp(belt_first+steps,0,maximum);
-    return true;
+    if(!session.allowed(current_camp_input()))return false;
+    return camp::frontend::wheel(session,layout,virtual_point(screen,point),delta,current_camp_input(),
+        scroll_snapshot,[&](ScrollList list,camp::frontend::Scroll scroll,int steps){
+            if(unsigned(list)<3){
+                // Keep native row animation/sound, using the shared fractional-wheel accumulator.
+                const float before=field<float>(scroll_owner(list),0x174);
+                original<BOOL(__thiscall*)(void*,UINT,short,POINT)>(wheel_id)(
+                    static_cast<std::uint8_t*>(scroll_owner(list))+0x94,flags,short(-steps*WHEEL_DELTA),point);
+                field<float>(scroll_owner(list),0x174)=before+steps;
+            }else scroll_to(list,scroll.position+steps);
+        });
 }
-
-void camp_inventory_cancel_drag() noexcept {
-    const HWND window=scroll_drag.window;
-    scroll_drag={};
-    // Clear our state before ReleaseCapture's synchronous notification.
-    if(window&&GetCapture()==window)ReleaseCapture();
-}
+void camp_inventory_cancel_drag() noexcept {camp::frontend::cancel_drag(session);}
 
 bool camp_inventory_input(HWND window,UINT message,WPARAM wparam,LPARAM lparam,bool renderer_controls) noexcept {
-    hover_controls=renderer_controls;
-    if(message==WM_KILLFOCUS||(message==WM_ACTIVATEAPP&&!wparam)||
-        (message==WM_ACTIVATE&&LOWORD(wparam)==WA_INACTIVE))hover_focus=false;
-    if(message==WM_SETFOCUS||(message==WM_ACTIVATEAPP&&wparam)||
-        (message==WM_ACTIVATE&&LOWORD(wparam)!=WA_INACTIVE))hover_focus=true;
-    const POINT point{LONG(static_cast<short>(LOWORD(lparam))),LONG(static_cast<short>(HIWORD(lparam)))};
-    if(renderer_controls||!current_camp_input()||!hover_focus)reset_hover();
-    const bool cancel=renderer_controls||!hover_focus||!current_camp_input()||
-        message==WM_KILLFOCUS||message==WM_CANCELMODE||message==WM_CAPTURECHANGED||message==WM_SIZE||
-        message==WM_DESTROY||message==WM_NCDESTROY||
-        (message==WM_ACTIVATE&&LOWORD(wparam)==WA_INACTIVE)||(message==WM_ACTIVATEAPP&&!wparam)||
-        (message==WM_KEYDOWN&&wparam==VK_F10);
-    if(cancel){camp_inventory_cancel_drag();return false;}
-    if(scroll_drag.window){
-        if(message==WM_MOUSEWHEEL)return true;
-        if(message==WM_MOUSEMOVE){move_scroll_drag(point);return true;}
-        if(message==WM_LBUTTONUP){
-            move_scroll_drag(point);
-            camp_inventory_cancel_drag();return true;
-        }
-        return false;
-    }
-    if(message!=WM_LBUTTONDOWN||GetCapture())return false;
-    const POINT p=virtual_point(screen,point);
-    for(auto list:{ScrollList::stash,ScrollList::spell_vendor,ScrollList::item_vendor,ScrollList::spells,ScrollList::learned,ScrollList::available}){
-        const auto bar=scroll_rail(list);
-        if(!bar.maximum)continue;
-        camp::Rect hit=bar.horizontal?camp::Rect{bar.track.left,bar.track.top-2.5f,bar.track.right,bar.track.bottom+2.5f}:
-            camp::Rect{bar.track.left-10.f/3,bar.track.top,bar.track.right+10.f/3,bar.track.bottom};
-        if(!bar.horizontal&&!perk_list(list)){
-            hit.left=(std::max)(hit.left,layout.grid(list!=ScrollList::stash).right);
-            hit.right=(std::min)(hit.right,list==ScrollList::stash?layout.left+layout.width:layout.content.left);
-        }
-        if(!hit.contains(float(p.x),float(p.y)))continue;
-        const float coordinate=float(bar.horizontal?p.x:p.y);
-        const float start=bar.horizontal?bar.thumb.left:bar.thumb.top;
-        const float length=bar.horizontal?bar.thumb.width():bar.thumb.height();
-        void* owner=scroll_owner(list);
-        SetCapture(window);
-        if(GetCapture()!=window)return false;
-        scroll_drag={window,list,mode(),list==ScrollList::spells||perk_list(list)?0:field<int>(owner,0x150),
-            coordinate>=start&&coordinate<start+length?coordinate-start:length*.5f};
-        move_scroll_drag(point);
-        return true;
-    }
-    return false;
+    return camp::frontend::input(session,layout,screen?mode():-1,current_camp_input(),window,
+        message,wparam,lparam,renderer_controls,scroll_snapshot,scroll_to);
 }
-
 // The addon inventory allocator (CTextureLRUAllocator::CreateObject) owns
 // 0x5EC020 through a one-argument adapter followed directly by its body. The
 // body looks up "<name>.x4.mmp", then ".x2.mmp", then ".mmp" and selects the

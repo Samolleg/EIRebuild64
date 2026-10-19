@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p4b`, commit `d79649a1228dca8f884847ada294c6a2434eaf47`.
+integration changes in branch `eirebuild/c74-p4c`, commit `a9d3547dd157be330c004c6d4048502322e0426d`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -103,3 +103,9 @@ camp_presentation.h. Both proxy and embedded source callers use these bodies.
 The complete native trade/repair/constructor draw retains the same shared
 construction canvas scope. Gameplay, card content selection/lifetimes and full
 model preview remain with the source owners and are tracked as open work.
+OWN74-P4c shares camp card publication (hover item/help/skill, constructor
+blueprint/result, Shift comparison and modifier refresh) and session input
+retirement, wheel remainders and scrollbar capture in camp_session.h.
+Typed source callbacks retain native formatting, independent display Parties
+and gameplay owners. Full typed model previews, figure LRU and manager
+teardown remain open in the task REMAINING.md; they are not claimed here.

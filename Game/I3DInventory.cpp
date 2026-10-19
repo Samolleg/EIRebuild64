@@ -810,7 +810,7 @@ void CI3DObjectItemInfo::ResetInputState()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::SetItem(CItem *pNewItem)
 {
-    E4CampAccess::Hover(this, pNewItem != nullptr);
+    E4CampAccess::Content publication(this,owned::camp::frontend::HoverKind::item,pNewItem!=nullptr);
     CItem *pItem = GetItem();
     if (pItem && pNewItem && pItem->Compare(pNewItem))
         return;
@@ -841,6 +841,7 @@ CSpell *CI3DObjectItemInfo::GetSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormTextInfo()
 {
+    E4CampAccess::Text(this);
     if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
 
 	CItem* pItem = GetItem();
@@ -4799,14 +4800,15 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 // Native display body above; original-game fallback below.
 void CI3DObjectItemInfo::SetSkill(SCampSkillMouseInfo *pSkillInfo)
 {
+    E4CampAccess::Content publication(this,owned::camp::frontend::HoverKind::skill,pSkillInfo&&pSkillInfo->nType>=0);
     if (auto* mod = ModRuntime::Current(); mod && mod->AdvancedUI("useLS_SetSkill")) {
         SetModSkill(pSkillInfo);
-        E4CampAccess::Hover(this, pSkillInfo && pSkillInfo->nType >= 0);
+
         return;
     }
 
     SetItem(0);
-    E4CampAccess::Hover(this, pSkillInfo && pSkillInfo->nType >= 0);
+
     if (pSkillInfo->nType < 0)
         return;
 
@@ -5491,8 +5493,9 @@ switch (pSkillInfo->nType)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::SetHelp(int nHelpID)
 {
+    E4CampAccess::Content publication(this,owned::camp::frontend::HoverKind::help,nHelpID!=0,nHelpID);
     SetItem(0);
-    E4CampAccess::Hover(this, nHelpID != 0);
+
 
 #ifndef NOGETDC
     CI3DSurface *pSurf = surfaces[0];
