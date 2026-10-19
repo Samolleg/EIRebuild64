@@ -469,6 +469,9 @@ int nShowClientTimeBalance = 0;
 /////////////////////////////////////////////////////////////////////////////////////
 // function advances current game time and processes segments
 // time sync problem is to be refined
+// Scheduling hint only: CountTime remains the sole owner of elapsed time and
+// segment accumulators. Never advance simulation by a requested wait duration.
+static DWORD idleLogicDue = 0;
 static bool CountTime()
 {
     CorePerf::Scope coreTiming(CorePerf::CountTime);
@@ -481,6 +484,7 @@ static bool CountTime()
     FrameDiagnostics::RawDelta(dwTimeStep);
     DWORD dwFracTime; // for client
     dwLastTime += dwTimeStep;
+    idleLogicDue = dwLastTime + DW_SEGMENT_TIME;
     theCamera.UpdateFieldCampCamera();
     OwnedRender::E3RefreshInterface();
     CameraTerrainCollision::BeginFrame(
@@ -596,6 +600,15 @@ static bool CountTime()
         if (theCamera.CheckFlag(CAM_USE_PLACEMENTS))
             theCamera.PlayCamera(theWorld.GetPreciseTime());
     }
+    // Earliest existing server/client segment deadline. Waiting for an input
+    // packet is still serviced by the server deadline; no network state changes.
+    DWORD wait = dwPassedTime >= DW_SEGMENT_TIME ? 0 : DW_SEGMENT_TIME - dwPassedTime;
+    if (theWorld.HasPacket() || !theWorld.IsConnected()) {
+        const DWORD clientWait = dwClientPassedTime >= DW_SEGMENT_TIME ? 0 :
+            static_cast<DWORD>(std::ceil(double(DW_SEGMENT_TIME - dwClientPassedTime) / fpClientTimeSpeed));
+        wait = (std::min)(wait, clientWait);
+    }
+    idleLogicDue = dwLastTime + wait;
     return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -618,6 +631,41 @@ static void NGame::UpdateRenderEnable()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// DrawFrame has no frame-admission poll: an admitted frame already blocks in
+// the renderer's existing scene/present/limiter waits. Only its fast rejection
+// paths need an idle wait. Renderer logic and FPS pacing stay with the renderer.
+static void WaitForIdleWork()
+{
+    if (OwnedRender::E2BackgroundPaused(NGame::hWnd))
+        return; // DrawFrame already used the established Sleep(50) path.
+    if (NGame::bEnableRender && NGame::bNeedRender) {
+        if (!theInterface.GetCurrentScreen()) return; // Existing Sleep(50).
+        if (theRenderer.IsActive()) return; // Admissible now; no second limiter.
+    }
+    // A missing screen does not imply Sleep(50): disabled/not-needed exits
+    // precede that check in DrawFrame (notably during DestroyScreens).
+    const DWORD now = OwnedRender::E2Clock(timeGetTime(), false);
+    const LONG remaining = static_cast<LONG>(idleLogicDue - now);
+    if (remaining <= 0) return;
+
+    struct DeadlineTimer {
+        HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002, TIMER_ALL_ACCESS);
+        DeadlineTimer() noexcept {
+            if (!handle) handle = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+        }
+        ~DeadlineTimer() { if (handle) CloseHandle(handle); }
+    };
+    static DeadlineTimer timer;
+    LARGE_INTEGER due{};
+    due.QuadPart = -static_cast<LONGLONG>(remaining) * 10000;
+    const bool armed = timer.handle && SetWaitableTimer(timer.handle, &due, 0, nullptr, nullptr, FALSE);
+    CorePerf::Scope coreWait(CorePerf::IdleWait);
+    // INPUTAVAILABLE also wakes for input already inspected by PeekMessage;
+    // no message is removed or dispatched here. The normal pump retains order.
+    MsgWaitForMultipleObjectsEx(armed ? 1 : 0, armed ? &timer.handle : nullptr,
+        armed ? INFINITE : static_cast<DWORD>(remaining), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    if (armed) CancelWaitableTimer(timer.handle);
+}
 static bool NGame::ProcessMessages()
 {
     MSG msg;
@@ -649,6 +697,7 @@ static bool NGame::ProcessMessages()
             const CPlot3D &anchor = theCamera.GetAnchorPoint();
             FrameDiagnostics::End(ModShadowSchedule::generationTicks, anchor.x, anchor.y);
         }
+        WaitForIdleWork();
     }
     CorePerf::Scope coreMessages(CorePerf::Messages);
     if (!GetMessage(&msg, 0, 0, 0))
