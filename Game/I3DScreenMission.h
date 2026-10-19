@@ -379,6 +379,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectFaces : public CI3DObject
 {
+    friend struct E3HudAccess;
 private:
     CI3DScreenMission *pScreen;
 

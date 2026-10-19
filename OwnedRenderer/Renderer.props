@@ -11,7 +11,7 @@
       <ExceptionHandling>Sync</ExceptionHandling><PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel><ConformanceMode>true</ConformanceMode>
       <Optimization>MaxSpeed</Optimization><MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;DIRECTDRAW_VERSION=0x0700;DIRECT3D_VERSION=0x0700;EID3D11_BUILD_COMMIT=&quot;3e5ff9338443fd32ec8464acdae5a3ef9bc4960f&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;DIRECTDRAW_VERSION=0x0700;DIRECT3D_VERSION=0x0700;EID3D11_BUILD_COMMIT=&quot;570c90fc31cc6cf0cc151e73dff63af8187beeb3&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;$(OwnedRendererRoot)ThirdParty\imgui;$(OwnedRendererRoot)ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/Brepro %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>

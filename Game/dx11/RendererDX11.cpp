@@ -259,6 +259,33 @@ bool CDX11::SubmitHudVisual(const owned::HudPublishedVisual& visual,
         });
 }
 
+bool CDX11::SubmitHudPortrait(const owned::EmbeddedHudPortraitInput& input)
+{
+    if(!rendererFacade || !rendererFacade->FrameActive())return false;
+    return owned::hud_embedded_submit_portrait(input,this,
+        [](void* context,const owned::NativeGeometryView& view) {
+            auto* self=static_cast<CDX11*>(context);
+            auto state=self->CaptureC56MaterialState();
+            state.render[D3DRENDERSTATE_FOGENABLE]=FALSE;
+            state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
+            const bool textured=view.owned_texture.identity!=0;
+            state.stage[0][D3DTSS_COLOROP]=state.stage[0][D3DTSS_ALPHAOP]=textured?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
+            state.stage[0][D3DTSS_COLORARG1]=state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;
+            state.stage[0][D3DTSS_COLORARG2]=state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
+            const auto hr=self->rendererFacade->Visit([&](owned::Renderer& renderer) {
+                const auto flushed=renderer.has_pending_ui()?renderer.flush_ui():S_OK;
+                if(FAILED(flushed))return flushed;
+                owned::Renderer::NativeQueueCheckpoint checkpoint;
+                if(!renderer.checkpoint_native(checkpoint))return E_FAIL;
+                const auto result=textured?renderer.queue_native_owned(view,state):
+                    renderer.queue_native_direct(view,state,nullptr);
+                if(FAILED(result))renderer.rollback_native(checkpoint);
+                return result;
+            });
+            self->RestoreHostBindings();return SUCCEEDED(hr);
+        });
+}
+
 bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
 {
     HRESULT hr=E_UNEXPECTED;

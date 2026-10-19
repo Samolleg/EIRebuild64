@@ -1,5 +1,5 @@
 #pragma once
-namespace owned {struct HudPublishedVisual; struct EmbeddedHudVisualInput;}
+namespace owned {struct HudPublishedVisual; struct EmbeddedHudVisualInput; struct EmbeddedHudPortraitInput;}
 #include <CommonStates.h>
 #include <dxgidebug.h>
 
@@ -105,6 +105,7 @@ public:
     owned::FixedState CaptureC56MaterialState();
     bool SubmitC56Triangles(const owned::NativeGeometryView& view);
     bool SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request);
+    bool SubmitHudPortrait(const owned::EmbeddedHudPortraitInput& input);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
     bool SubmitHudVisual(const owned::HudPublishedVisual&, const owned::EmbeddedHudVisualInput&);
     void ReportC56FigureNoMatrix();

@@ -149,6 +149,11 @@ public:
         HudVisualLane lane, std::uint32_t ordinal,
         std::uint64_t expected_screen_generation,
         bool current_receiver) const noexcept;
+    // Read-only selected texture for non-lane placed figures (portraits).
+    // Uses the same manager generations, cache, 1555 conversion and missing
+    // source output as observe_icon. No physical atlas or lock is required.
+    bool resolve_texture(const char* name, const HudIconPlacement& placement,
+                         HudPublishedVisual& output, bool& source_found);
     bool claims_lane(HudVisualLane lane) const noexcept;
     bool capturing_lane() const noexcept;
     HudVisualLane capturing_lane_id() const noexcept;

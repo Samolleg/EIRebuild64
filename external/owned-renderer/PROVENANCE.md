@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p3a2`, commit `3e5ff9338443fd32ec8464acdae5a3ef9bc4960f`.
+integration changes in branch `eirebuild/c74-p3a3`, commit `570c90fc31cc6cf0cc151e73dff63af8187beeb3`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -66,3 +66,9 @@ host meshes or mutate host atlas pixels. Manager role generations and source
 retirement feed the shared publication/debug counters. Portrait models and
 remaining non-lane atlas/WS work are still open; see the task REPORT.
 
+
+OWN74-P3a3 adds synchronous source portrait model groups and current pose/morph
+to shared placed-figure state and native GPU submission. Logical texture cells
+use the existing HUD resolver, conversion, generations and UV addressing; the
+source host no longer draws portraits or owns physical portrait atlases.
+The separate addon autocast producer still needs an authoritative source slot.

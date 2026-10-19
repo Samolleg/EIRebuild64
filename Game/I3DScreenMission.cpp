@@ -81,35 +81,6 @@ static bool UseModInterfaceHD()
     return ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2");
 }
 
-// Remaining portrait atlas producer; icon lanes publish through E3HudVisual.
-static bool PasteModInterfaceIcon(CTexture *texture, LPCTSTR name, int size, int x, int y)
-{
-    CString resource(name);
-    resource += ".x2.mmp";
-    if (PasteTexture(texture, resource, size, size, size, size, x, y))
-        return true;
-    // The addon clears a missing HD tile to opaque white. Leaving this atlas
-    // region untouched exposes uninitialized red pixels from the render surface.
-    if (!texture || !texture->GetSurface() || size <= 0 || size > 512 || x < 0 || y < 0 ||
-        x + size > int(texture->GetSizeX()) || y + size > int(texture->GetSizeY()))
-        return false;
-    std::vector<WORD> blank(size_t(size) * size, 0xffff);
-    D3D11_BOX region = {};
-    region.left = x;
-    region.right = x + size;
-    region.top = y;
-    region.bottom = y + size;
-    region.back = 1;
-    D3D11_SUBRESOURCE_DATA data = {};
-    data.pSysMem = blank.data();
-    data.SysMemPitch = size * sizeof(WORD);
-    texture->GetSurface()->UpdateTexture(0, &region, &data, MMP_FORMAT_5551);
-    static std::set<std::string> reported;
-    if (reported.size() < 32 && reported.insert((LPCSTR)resource).second)
-        ReportWarning("Missing HD interface icon %s", (LPCSTR)resource);
-    return false;
-}
-
 const int HL_XS[6] = { 50, 50, 95, 5, 95, 5 };
 const int HL_YS[6] = { 35, 105, 70, 70, 140, 140 };
 const int N_HL_FIGURE = 14;
@@ -173,59 +144,54 @@ void CI3DScreenMission::OnActivate()
     }
     AddHandler(dbgnew CI3DHandlerSystemKeys(pI3D));
 
-    AddTexture(256, 256);   // weapons and items	// 0
-    AddTexture(256, 256);   // spells and skills	// 1
-    AddTexture("battle00"); // 2
+    AddTexture(256, 256);   // 0: info-panel effect atlas
+    AddTexture("battle00"); // 1: static HUD art
     const bool hdInterface = UseModInterfaceHD();
     OwnedRender::E3HudBeginScreen(this,hdInterface);
     if (hdInterface)
     {
-        // Source useAWATG2: independent canvases for HD equipment, quick items,
-        // spells and effect icons. Existing 256-pixel canvases remain for base UI art.
-        AddTexture(1024, 1024); // 3: equipped weapons
-        AddTexture(2048, 2048); // 4: quick items
-        AddTexture(2048, 2048); // 5: spells
-        AddTexture(2048, 2048); // 6: active effects
+        // This canvas is still consumed by CI3DObjectInfo (outside portrait ownership).
+        AddTexture(2048, 2048); // 2: HD info-panel effects
     }
 
     AddObject(pWeapons = dbgnew CI3DObjectWeapons(pI3D, this)); // 0
-    pWeapons->SetTexture(textures[hdInterface ? 3 : 0]);
+    pWeapons->SetTexture(textures[1]); // Static carrier art; no icon atlas.
 
     AddObject(pItems = dbgnew CI3DObjectItems(pI3D, this)); // 1
-    pItems->SetTexture(textures[hdInterface ? 4 : 0]);
+    pItems->SetTexture(textures[1]); // Static carrier art; no icon atlas.
 
     AddObject(pSpells = dbgnew CI3DObjectSpells(pI3D, this)); // 2
-    pSpells->SetTexture(textures[hdInterface ? 5 : 1]);
+    pSpells->SetTexture(textures[1]); // Static carrier art; no icon atlas.
 
     AddObject(pSkills = dbgnew CI3DObjectSkills(pI3D, this)); // 3
-    pSkills->SetTexture(textures[1]);
+    pSkills->SetTexture(textures[1]); // Static carrier art; no icon atlas.
 
     AddObject(pFaces = dbgnew CI3DObjectFaces(pI3D, this)); // 4
-    pFaces->SetTexture(textures[2]);
+    pFaces->SetTexture(textures[1]);
 
     AddObject(pInfo = dbgnew CI3DObjectInfo(pI3D, this)); // 5
-    pInfo->SetTexture(textures[2]);
     pInfo->SetTexture(textures[1]);
-    if (hdInterface) pInfo->SetTexture(textures[6]);
+    pInfo->SetTexture(textures[0]);
+    if (hdInterface) pInfo->SetTexture(textures[2]);
     pInfo->Init(pI3D->nInfoMode, pI3D->bInfoClosed);
 
     AddObject(pMap = dbgnew CI3DObjectMap(pI3D, this)); // 6
-    pMap->SetTexture(textures[2]);
+    pMap->SetTexture(textures[1]);
     pMap->Init(fZoom, pI3D->bMapClosed);
 
     AddObject(pClock = dbgnew CI3DObjectClock(pI3D, this)); // 7
-    pClock->SetTexture(textures[2]);
+    pClock->SetTexture(textures[1]);
     pClock->Init(pI3D->nSpeed);
 
     AddObject(pCommands = dbgnew CI3DObjectCommands(pI3D, this)); // 8
-    pCommands->SetTexture(textures[2]);
+    pCommands->SetTexture(textures[1]);
     pCommands->Init();
 
     AddObject(pScrollText = dbgnew CI3DScrollText(pI3D, "", CRect(190, 25, 610, 89), 3)); // 9
     pScrollText->p_eAlign = AT_LEFT;
 
     AddObject(pOutput = dbgnew CI3DObjectOutput(pI3D, this)); // 10
-    pOutput->SetTexture(textures[2]);
+    pOutput->SetTexture(textures[1]);
     pOutput->Init(pI3D->nTextMode, pI3D->bTextClosed);
     pOutput->RestoreOutput(szInitOutput);
     pOutput->SetMoney(nTotalMoney);
@@ -3720,7 +3686,7 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
     case 0:
         x = 0;
         y = 0;
-        AddTexture(canvasSize, canvasSize);
+        // Atlas cell is a value; texture ownership belongs to the renderer.
         break;
     case 1:
         x = faceSize;
@@ -3736,10 +3702,6 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
         break;
     }
 
-    if (hdInterface)
-        PasteModInterfaceIcon(textures[textures.GetSize() - 1], pszTextureName, faceSize, x, y);
-    else
-        PasteTexture(textures[textures.GetSize() - 1], pszTextureName, 128, 128, 128, 128, x, y);
 
     faces.emplace_back();
     faces[nFaces].bNotOnZone = bNotOnZone;
@@ -3793,7 +3755,7 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
         pFig->SetAmbient(.5f, .5f, .5f);
     pFig->SetUShift(x / float(canvasSize));
     pFig->SetVShift((faceSize + y) / float(canvasSize));
-    pFig->SetTexture(textures[textures.GetSize() - 1]);
+    pFig->SetTexture(NULL); // Selected logical face texture is submitted by E3Hud.
 
     pFig = AddFigure();
     pFig->MakeBar(7, r - l - 6, l + 3, b - 13, r - 3, b - 8, 9, 9, 73, 22);
@@ -3825,66 +3787,15 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::ChangeFaceTexture(int nFace, int nTex)
 {
-    if (nFace < 0 || static_cast<size_t>(nFace) >= faces.size())
-        return;
-    const int textureIndex = nFace / 4 + 1;
-    if (textureIndex >= textures.GetSize() || !textures[textureIndex])
-        return;
-    int x, y;
-    const bool hdInterface = UseModInterfaceHD();
-    const int faceSize = hdInterface ? 512 : 128;
-    switch (nFace % 4)
-    {
-    case 0:
-        x = 0;
-        y = 0;
-        break;
-    case 1:
-        x = faceSize;
-        y = 0;
-        break;
-    case 2:
-        x = 0;
-        y = faceSize;
-        break;
-    case 3:
-        x = faceSize;
-        y = faceSize;
-        break;
-    default:
-        return;
-    }
-
-    CString szTexName(faces[nFace].szTexName);
-    switch (nTex)
-    {
-    case 1:
-        szTexName += "a";
-        break;
-    case 2:
-        szTexName += "c";
-        break;
-    case 3:
-        szTexName += "b";
-        break;
-    }
-
-    if (hdInterface)
-    {
-        if (!PasteModInterfaceIcon(textures[textureIndex], szTexName, faceSize, x, y))
-            PasteModInterfaceIcon(textures[textureIndex], faces[nFace].szTexName,
-                                  faceSize, x, y);
-    }
-    else if (!PasteTexture(textures[textureIndex], szTexName, 128, 128, 128, 128, x, y))
-        PasteTexture(textures[textureIndex], faces[nFace].szTexName, 128, 128, 128, 128, x, y);
+    if (nFace >= 0 && static_cast<size_t>(nFace) < faces.size())
+        faces[nFace].nCurTex = nTex;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::AddFaces(bool bIsMainHero)
 {
     RemoveAllFigures();
     RemoveAllAreas();
-    while (textures.GetSize() > 1)
-        RemoveTexture(1);
+
 
     AddFigure()->MakeBar(10, 80, 0, 0, 20, 20, 34, 150, 54, 170);
 

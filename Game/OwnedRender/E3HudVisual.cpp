@@ -9,6 +9,9 @@
 #include "../dx11/RendererDX11.h"
 #include "../GameJournal.h"
 #include "../WorldClient.h"
+#include "../ModRuntime.h"
+#include "../ModPackage.h"
+#include "../FigureClientSpecific.h"
 #include "embedded_hud_visual.h"
 #include <exception>
 
@@ -127,6 +130,56 @@ bool E3HudAttachFigure(CI3DObject* owner, const char* name) noexcept {
 // Access only placement/scale and completed color values. No host mesh or
 // atlas texture is consumed for the four renderer-owned icon lanes.
 struct E3HudVisualAccess {
+    static bool Portrait(CI3DFigure* figure, CRenderer* renderer,
+        unsigned slot, int unitId, const char* texture, const char* base, bool model) {
+        auto* gpu=renderer->GetGPU();
+        figure->CreateCurrentPlacement();
+        SHMatrix placement;figure->GetPlacement(placement);
+        gpu->PushMainMatrix(placement);gpu->PushMainMatrix(figure->scale);
+        struct Pop { CDXGeometryProcessor* gpu; ~Pop(){gpu->PopMainMatrix();gpu->PopMainMatrix();} } pop{gpu};
+        renderer->SetProjectionMatrix();
+        if(!gpu->IsHaveMatrix(MAT_STACK_PROJSPACE))return false;
+        owned::EmbeddedHudPortraitInput input;
+        const auto& clip=gpu->GetMatrix(MAT_STACK_PROJSPACE);
+        memcpy(input.state.object_to_clip.data(),&clip,sizeof(clip));
+        input.state.u_shift=figure->GetUShift();input.state.v_shift=figure->GetVShift();
+        input.state.diffuse=figure->CheckFlag(FIG_USE_DEFAULT_COLORS)?figure->GetDefaultColor():
+            RGBA_MAKE(int(figure->ambientLight.x*255),int(figure->ambientLight.y*255),int(figure->ambientLight.z*255),255);
+        input.state.specular=figure->GetDefaultSpecular();
+        input.state.color_sum=figure->pMaterial && figure->pMaterial->CheckFlag(MAT_USE_SPECULAR);
+        if(figure->GetTextureTypeID()>=TTID_ANIMATED1 && figure->GetTextureTypeID()<=TTID_ANIMATED4) {
+            auto* specific=static_cast<CFigureClientSpecific*>(figure->GetFigureSpecific());
+            if(!specific)return false;
+            specific->CalcAnimatedTextureFrame(theWorld.GetPreciseTime());
+        }
+        auto& view=input.model;
+        view.positions=reinterpret_cast<const owned::NativePackedGroup*>(figure->plots4.GetData());
+        view.position_groups=figure->plots4.GetSize();
+        view.normals=reinterpret_cast<const owned::NativePackedGroup*>(figure->norms4.GetData());
+        view.normal_groups=figure->norms4.GetSize();
+        view.texture_coordinates=reinterpret_cast<const owned::NativeTextureCoordinate*>(figure->maps.GetData());
+        view.texture_coordinate_count=figure->maps.GetSize();
+        view.components=reinterpret_cast<const owned::NativeVertexComponent*>(figure->components.GetData());
+        view.component_count=figure->components.GetSize();
+        view.indices=figure->indices.GetData();view.index_count=figure->indices.GetSize();
+        view.morphs=reinterpret_cast<const owned::NativeMorphOffset*>(figure->morphs.GetData());
+        view.morph_count=figure->morphs.GetSize();
+        if(figure->CheckFlag(FIG_LIGHTED) && !figure->CheckFlag(FIG_USE_DEFAULT_COLORS)) {
+            view.diffuse=reinterpret_cast<const std::uint32_t*>(figure->colors.GetData());
+            view.specular=reinterpret_cast<const std::uint32_t*>(figure->speculars.GetData());
+        }
+        input.slot=slot;input.unit_id=unitId;
+        const bool hd=ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2");
+        std::string selected,original;
+        if(texture) {
+            selected=std::string(texture)+(model&&hd?".x2.mmp":".mmp");input.texture_name=selected.c_str();
+            if(base){original=std::string(base)+(model&&hd?".x2.mmp":".mmp");input.base_texture_name=original.c_str();}
+            const unsigned size=model?(hd?512u:128u):256u;
+            const unsigned atlas=model?size*2u:size;
+            input.placement={atlas,size,size,size,size,model?(slot%2)*size:0u,model?((slot%4)/2)*size:0u,0u,0u,model&&hd?1u:0u};
+        }
+        return renderer->GetD3D()->SubmitHudPortrait(input);
+    }
     static bool Draw(CI3DFigure* figure, CRenderer* renderer,
         const owned::HudPublishedVisual& visual) {
         auto* gpu=renderer->GetGPU();
@@ -150,6 +203,13 @@ struct E3HudVisualAccess {
     }
 };
 namespace OwnedRender {
+void E3HudDrawPortrait(CI3DFigure* figure, CRenderer* renderer,
+    unsigned slot, int unitId, const char* texture, const char* base, bool model) noexcept {
+    try {
+        if(!figure || !renderer || !E3HudVisualAccess::Portrait(figure,renderer,slot,unitId,texture,base,model))
+            omitted(owned::HudVisualLane::none,slot,"portrait_submission");
+    } catch(...) {omitted(owned::HudVisualLane::none,slot,"portrait_exception");}
+}
 void E3HudDrawVisual(CI3DFigure* figure, CRenderer* renderer, E3HudLane value, unsigned ordinal) noexcept {
     if(figure && figure->CheckFlag(FIG_HIDDEN))return;
     const auto* visual=state().publication.find(lane(value),ordinal);

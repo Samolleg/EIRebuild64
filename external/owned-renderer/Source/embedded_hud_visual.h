@@ -13,7 +13,20 @@ struct EmbeddedHudVisualInput {
     std::uint32_t diffuse = 0xffffffffu, specular = 0xff000000u;
     bool default_colors = true, color_sum = false;
 };
+// Completed current model groups, pose/morph, unit/slot and texture cell.
+// Source ownership stays with the host for this synchronous call only.
+struct EmbeddedHudPortraitInput {
+    NativeGeometryView model{};
+    EmbeddedHudVisualInput state{};
+    const char* texture_name = nullptr;
+    const char* base_texture_name = nullptr;
+    HudIconPlacement placement{};
+    std::int32_t unit_id = 0;
+    std::uint32_t slot = 0;
+};
 using EmbeddedHudVisualSink = bool (*)(void*, const NativeGeometryView&);
+bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
+    void* context, EmbeddedHudVisualSink sink) noexcept;
 bool hud_embedded_submit_visual(const HudPublishedVisual& visual,
     const EmbeddedHudVisualInput& input, void* context, EmbeddedHudVisualSink sink) noexcept;
 }

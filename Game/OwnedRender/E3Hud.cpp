@@ -135,7 +135,23 @@ struct E3HudAccess {
                 context.figure_composition(owned::HudPanel(index),unsigned(i),slot,composition);
             if(!visible)continue;
             owned::widescreen::hud_blit=composition;
-            if(index==0 || index==1 || index==5 || index==6) {
+            if(index==4) {
+                auto* owner=static_cast<CI3DObjectFaces*>(object);
+                const bool model=i>0 && (i-1)%5==0;
+                CString selected,base;
+                int unitId=0;
+                if(model && slot>=0 && unsigned(slot)<owner->faces.size()) {
+                    const auto& face=owner->faces[slot];
+                    base=face.szTexName;selected=base;
+                    if(face.nCurTex==1)selected+="a";
+                    else if(face.nCurTex==2)selected+="c";
+                    else if(face.nCurTex==3)selected+="b";
+                    if(slot<owner->pScreen->GetNumUnits())unitId=owner->pScreen->GetUnit(slot)->GetID();
+                }
+                const char* texture=model?(LPCSTR)selected:figure->GetTexture()?"battle00":nullptr;
+                OwnedRender::E3HudDrawPortrait(figure,renderer,unsigned((std::max)(slot,0)),unitId,
+                    texture,model?(LPCSTR)base:nullptr,model);
+            } else if(index==0 || index==1 || index==5 || index==6) {
                 const auto lane=index==0?OwnedRender::E3HudLane::spell:index==1?OwnedRender::E3HudLane::skill:
                     index==5?OwnedRender::E3HudLane::weapon:OwnedRender::E3HudLane::item;
                 OwnedRender::E3HudDrawVisual(figure,renderer,lane,unsigned(i));

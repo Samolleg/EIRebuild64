@@ -483,6 +483,21 @@ bool HudVisualPublication::begin_lane(HudVisualLane lane) noexcept {
     return true;
 }
 
+bool HudVisualPublication::resolve_texture(const char* name,
+    const HudIconPlacement& placement, HudPublishedVisual& output, bool& source_found) {
+    output = {}; source_found = false;
+    if (!owns_active_screen() || !name) return false;
+    CachedAsset asset; AssetLoadFailure failure;
+    if (!load(HudResourceRole::texture, name, &placement, asset, failure)) return false;
+    output.screen_generation = active_screen_generation_;
+    output.texture_generation = texture_generation_;
+    output.overlay_generation = overlay_generation_;
+    output.texture = asset.texture; output.texture_identity = asset.identity;
+    output.placement = placement; output.complete = true;
+    source_found = asset.native_source_found;
+    return true;
+}
+
 bool HudVisualPublication::load(HudResourceRole role,
                                 const std::string& canonical_name,
                                 const HudIconPlacement* placement,

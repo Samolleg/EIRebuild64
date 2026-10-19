@@ -6,6 +6,8 @@ class CI3DFigure;
 class CRenderer;
 class CI3DScreenMission;
 namespace OwnedRender {
+void E3HudDrawPortrait(CI3DFigure* figure, CRenderer* renderer,
+    unsigned slot, int unitId, const char* texture, const char* base, bool model) noexcept;
 // Numeric values match HudVisualLane; no renderer headers in legacy owners.
 enum class E3HudLane { weapon=1, item=2, spell=3, skill=4 };
 struct E3HudRoleCreation {

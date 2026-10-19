@@ -18,6 +18,7 @@
 #include "combat_ui.h"
 #include "character_pane_owned_text.h"
 #include "hud_atlas_mutation.h"
+#include "native_placed_figure.h"
 #include "hud_visual_publication.h"
 #include "camera_rotation.h"
 #include "cursor_confinement.h"
@@ -5380,6 +5381,22 @@ std::uintptr_t hud_slot_cache_identity(
     return result ? result : 1u;
 }
 
+bool remap_hud_coordinates(const NativeTextureCoordinate* source, std::uint32_t count,
+    const HudIconPlacement& p, float u, float v,
+    std::vector<NativeTextureCoordinate>& output) noexcept {
+    if (!source || !p.atlas_width || !p.source_width || !p.source_height) return false;
+    try {
+        output.resize(count);
+        for (std::uint32_t i=0;i<count;++i) {
+            output[i] = {
+                ((source[i].u+u)*p.atlas_width-p.destination_x+p.source_x)/p.source_width,
+                ((source[i].v+v)*p.atlas_width-p.destination_y+p.source_y)/p.source_height};
+            if (!std::isfinite(output[i].u) || !std::isfinite(output[i].v)) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
 bool build_hud_visual_view(
     const HudPublishedVisual& slot, float u_shift, float v_shift,
     std::uint32_t figure_flags, std::uint32_t material_flags, BYTE fog,
@@ -5436,26 +5453,9 @@ bool build_hud_visual_view(
     NativeOwnedTextureFormat format{};
     if (!hud_texture_format(slot.texture->format, format)) return false;
     try {
-        texture_coordinates.resize(slot.figure->texture_coordinates.size());
-        const float atlas = static_cast<float>(slot.placement.atlas_width);
-        const float source_width = static_cast<float>(
-            slot.placement.source_width);
-        const float source_height = static_cast<float>(
-            slot.placement.source_height);
-        for (std::size_t index = 0;
-             index < texture_coordinates.size(); ++index) {
-            const auto& source = slot.figure->texture_coordinates[index];
-            auto& destination = texture_coordinates[index];
-            destination.u = ((source.u + u_shift) * atlas -
-                static_cast<float>(slot.placement.destination_x) +
-                static_cast<float>(slot.placement.source_x)) / source_width;
-            destination.v = ((source.v + v_shift) * atlas -
-                static_cast<float>(slot.placement.destination_y) +
-                static_cast<float>(slot.placement.source_y)) / source_height;
-            if (!std::isfinite(destination.u) ||
-                !std::isfinite(destination.v))
-                return false;
-        }
+        if (!remap_hud_coordinates(slot.figure->texture_coordinates.data(),
+                static_cast<std::uint32_t>(slot.figure->texture_coordinates.size()),
+                slot.placement, u_shift, v_shift, texture_coordinates)) return false;
         texture_mips.reserve(slot.texture->mips.size());
         for (const auto& mip : slot.texture->mips) {
             const std::uint64_t end = static_cast<std::uint64_t>(
@@ -5943,11 +5943,9 @@ bool submit_resolved_figure_geometry(void* renderer, void* figure, void* materia
                        view.default_diffuse)) {
             return false;
         }
-        view.default_specular = static_cast<std::uint32_t>(view.fog) << 24;
-        if (context.uses_default_colors) {
-            view.default_diffuse = context.default_diffuse;
-            view.default_specular = context.default_specular;
-        }
+        apply_native_placed_state(view, context.morphs, context.morph_count,
+            context.lighting, context.ordering, context.uses_default_colors,
+            context.default_diffuse, context.default_specular);
         NativeGeometryResult result{};
         if (!g_native_sink_submit(g_native_sink_context, view, result)) return false;
         g_native_figure.submitted = true;
@@ -21314,11 +21312,10 @@ int native_geometry_sink(
                 self, view.object_to_clip, view.default_diffuse);
         }
         if (transform_valid) {
-            view.default_specular = static_cast<std::uint32_t>(view.fog) << 24;
-            if (g_native_figure.active && g_native_figure.uses_default_colors) {
-                view.default_diffuse = g_native_figure.default_diffuse;
-                view.default_specular = g_native_figure.default_specular;
-            }
+            apply_native_placed_state(view, view.morphs, view.morph_count,
+                view.lighting, view.ordering,
+                g_native_figure.active && g_native_figure.uses_default_colors,
+                g_native_figure.default_diffuse, g_native_figure.default_specular);
         }
         if (transform_valid && g_native_sink_submit(g_native_sink_context, view, result)) {
             if (g_native_figure.active) cache_resolved_figure_geometry(view);
@@ -43261,6 +43258,53 @@ bool hud_embedded_submit_visual(const HudPublishedVisual& visual,
         return sink(context, view);
     } catch (...) { return false; }
 }
+bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
+    void* context, EmbeddedHudVisualSink sink) noexcept {
+    if (!sink || !g_hud_visuals.owns_active_screen()) return false;
+    try {
+        NativeGeometryView view = input.model;
+        view.object_to_clip = input.state.object_to_clip;
+        view.semantic_kind = SemanticKind::ui;
+        view.u_shift = input.state.u_shift; view.v_shift = input.state.v_shift;
+        view.default_diffuse = input.state.diffuse;
+        view.fog = 255;
+        view.flags = input.state.color_sum ? 8u : 0u;
+        apply_native_placed_state(view, input.model.morphs, input.model.morph_count,
+            {}, NativeOrdering::preserve, !view.diffuse, input.state.diffuse, input.state.specular);
+        std::vector<NativeTextureCoordinate> coordinates;
+        std::vector<NativeOwnedTextureMip> mips;
+        HudPublishedVisual texture;
+        if (input.texture_name) {
+            bool found = false;
+            if (!g_hud_visuals.resolve_texture(input.texture_name, input.placement, texture, found)) return false;
+            if (!found && input.base_texture_name &&
+                !g_hud_visuals.resolve_texture(input.base_texture_name, input.placement, texture, found)) return false;
+            const auto& p = input.placement;
+            if (!texture.texture || !texture.texture->source || !p.atlas_width ||
+                !p.source_width || !p.source_height || texture.texture->width != p.source_width ||
+                texture.texture->height != p.source_height ||
+                std::uint64_t(p.destination_x)+p.copy_width>p.atlas_width ||
+                std::uint64_t(p.destination_y)+p.copy_height>p.atlas_width ||
+                std::uint64_t(p.source_x)+p.copy_width>p.source_width ||
+                std::uint64_t(p.source_y)+p.copy_height>p.source_height) return false;
+            if (!remap_hud_coordinates(view.texture_coordinates,view.texture_coordinate_count,
+                    p,view.u_shift,view.v_shift,coordinates)) return false;
+            view.texture_coordinates = coordinates.data(); view.u_shift=view.v_shift=0;
+            for (const auto& mip:texture.texture->mips) {
+                if (std::uint64_t(mip.byte_offset)+mip.bytes>texture.texture->source->size()) return false;
+                mips.push_back({texture.texture->source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes});
+            }
+            NativeOwnedTextureFormat format{};
+            if (!hud_texture_format(texture.texture->format,format)) return false;
+            view.owned_texture.identity=texture.texture_identity;
+            view.owned_texture.generation=texture.texture_generation+(texture.overlay_generation<<32u);
+            view.owned_texture.format=format; view.owned_texture.mips=mips.data();
+            view.owned_texture.mip_count=static_cast<std::uint32_t>(mips.size());
+        }
+        return sink(context,view);
+    } catch (...) { return false; }
+}
+
 bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
                                         std::vector<std::int32_t>* drawn,
                                         std::vector<EmbeddedVisualOmission>* omitted) noexcept {
