@@ -3588,12 +3588,22 @@ void CAIUnitLogic::ExecTurnNLook()
     // if we are in start waiting phase( rotation is finished )
     if (nLookFinishTime == -9999)
     {
-        ASSERT(currentRally.lookOrders.GetSize());
+        // A saved or legacy deadline may alias the rotation-finished sentinel.
+        // An exhausted rally finishes just as it does in the -10000 phase.
+        if (currentRally.lookOrders.GetSize() == 0)
+        {
+            StartIdle();
+            return;
+        }
         if (currentRally.lookOrders[0].bRest)
             pUnitServer->CmdRest();
         nLookFinishTime = Float2Int(theWorldServer.GetSegmentTimeCounter() +
                                     currentRally.lookOrders[0].fpTime);
         currentRally.lookOrders.RemoveAt(0);
+        // A negative patrol wait can make the absolute deadline equal -9999.
+        // It has elapsed; advance instead of reusing the consumed look order.
+        if (nLookFinishTime == -9999)
+            nLookFinishTime = -10000;
         return;
     }
     // if enough time elapsed
