@@ -191,3 +191,10 @@ ownership, ambient/sun conversion and basic point admission, the common lower
 object-preview geometry/material/wound producer, ModelDrawReference and manager
 retire/join. These are c74 producers or generic ingress/lifetime support.
 Only the listed source-only code is removed; no upstream merge or fallback.
+
+OWN74-P6b (partial) changes only the source host publication seam. The renderer
+working branch eirebuild/c74-p6b remains at 34015b2449ecacf9eb7eb55d89236696375cd57c;
+Source/ThirdParty/Assets/Tools and Renderer.props identity remain this snapshot.
+Live unit materials and hidden parts are published before retained frame capture,
+only when changed. This is not the unit route/intent migration: the completed
+object-pose adapter is still present and full P6b remains open.

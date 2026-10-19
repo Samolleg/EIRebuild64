@@ -39,6 +39,49 @@ bool sameMaterial(const owned::MaterialCpuAsset& a,const owned::MaterialCpuAsset
 }
 }
 
+// Synchronous completed source values. No game object or mutable material is
+// retained by c74; unchanged parts neither allocate nor publish an assembly.
+bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
+    owned::VisualResourceIncarnation resource) noexcept try {
+    auto& scene=E1Scene().Scene();
+    const auto reject=[&](const char* reason) {
+        scene.visual_reject(resource,owned::RetainedVisualStatus::unsupported_appearance,
+            reason,"host.completed_appearance");
+        return false;
+    };
+    const auto source=scene.visual_assembly(resource);
+    if(!source)return reject("appearance.completed_assembly");
+    const auto& previous=*source;
+    std::shared_ptr<owned::VisualAssemblyAsset> changed;
+    for(std::size_t i=0;i<source->parts.size();++i) {
+        const auto& part=source->parts[i];
+        auto* material=specific.FindMaterial(static_cast<ETypeIDs>(part.texture_type),
+            static_cast<ETypeIDs>(part.material_type));
+        auto* figure=specific.FindFigure(part.name.c_str());
+        if(!material || !figure)return reject("appearance.completed_part");
+        auto value=completedMaterial(*material);
+        const bool hidden=figure->CheckFlag(FIG_HIDDEN)!=0 || part.geometry->indices.empty();
+        const auto flags=material->CheckFlag(MAT_USE_SPECULAR)?MAT_USE_SPECULAR:0;
+        if(sameMaterial(value,*previous.parts[i].material) &&
+           hidden==previous.parts[i].explicitly_hidden && flags==previous.parts[i].material_flags)continue;
+        if(!changed)changed=std::make_shared<owned::VisualAssemblyAsset>(previous);
+        auto& target=changed->parts[i];
+        target.material=std::make_shared<owned::MaterialCpuAsset>(std::move(value));
+        target.explicitly_hidden=hidden;target.material_flags=flags;
+    }
+    if(changed) {
+        // Complete publication before visual_frame_value takes its immutable
+        // snapshot: admission, merged parts, depth and colour see one value.
+        if(!scene.visual_publish_assembly(resource,std::move(changed),false))
+            return reject("appearance.completed_publish");
+    }
+    return true;
+} catch(...) {
+    E1Scene().Scene().visual_reject(resource,owned::RetainedVisualStatus::unsupported_appearance,
+        "appearance.completed_exception","host.completed_appearance");
+    return false;
+}
+
 // Capture only on the synchronous host seam, before either depth or colour.
 // The retained scene still owns completed object poses; changing a frame's
 // rendering class must never switch the scene to the retail route evaluator.
@@ -50,34 +93,6 @@ bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept try {
         if(!object || object->WhoAmI()!=HPC_UNIT)continue;
         const auto current=E1Scene().Resource(object);
         if(current.serial!=sample.resource.serial)return false;
-        auto* specific=static_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
-        if(!specific)return false;
-        const auto source=sample.assembly;
-        const auto& previous=*source;
-        std::shared_ptr<owned::VisualAssemblyAsset> changed;
-        for(std::size_t i=0;i<source->parts.size();++i) {
-            const auto& part=source->parts[i];
-            auto* material=specific->FindMaterial(static_cast<ETypeIDs>(part.texture_type),
-                static_cast<ETypeIDs>(part.material_type));
-            auto* figure=specific->FindFigure(part.name.c_str());
-            if(!material || !figure)return false;
-            auto value=completedMaterial(*material);
-            const bool hidden=figure->CheckFlag(FIG_HIDDEN)!=0 || part.geometry->indices.empty();
-            const auto flags=material->CheckFlag(MAT_USE_SPECULAR)?MAT_USE_SPECULAR:0;
-            if(sameMaterial(value,*previous.parts[i].material) &&
-               hidden==previous.parts[i].explicitly_hidden && flags==previous.parts[i].material_flags)continue;
-            if(!changed)changed=std::make_shared<owned::VisualAssemblyAsset>(previous);
-            auto& target=changed->parts[i];
-            target.material=std::make_shared<owned::MaterialCpuAsset>(std::move(value));
-            target.explicitly_hidden=hidden;target.material_flags=flags;
-        }
-        if(changed) {
-            // Publish the immutable replacement as well as this frame's copy:
-            // the normal scene journal invalidates colour/depth admission and
-            // shadow reuse when alpha, highlight or part visibility changes.
-            if(!E1Scene().Scene().visual_publish_assembly(sample.resource,changed))return false;
-            sample.assembly=std::move(changed);
-        }
         E3CombatPublishUnit(static_cast<CUnit*>(object));
         sample.completed_pose=true;
         sample.values.unit=true;

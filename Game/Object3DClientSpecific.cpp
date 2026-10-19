@@ -908,7 +908,7 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
     pose.phase = selected.visual.neutral ? 0.0 : animation->GetTime();
     pose.source_generation = selected.source_generation;
     pose.appearance_revision = assembly->revision;
-    if (owned::bridge_change_driven_poses_enabled() && scene.visual_object_pose_current(resource, pose))
+    if (scene.visual_object_pose_current(resource, pose))
         return true;
     if (!hostScene.PublishObjectPose(resource, pose))
         return reject("object_pose.publish");
@@ -953,6 +953,11 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
         ownedAppearanceAttempted = true;
         PublishOwnedAppearance();
     }
+    if (publishAppearance && lpObject->WhoAmI() == HPC_UNIT) {
+        const auto resource = OwnedRender::E1Scene().Resource(lpObject);
+        if (resource.serial && !OwnedRender::E1CompleteVisualAppearance(*this, resource))
+            return false;
+    }
     return true;
 }
 bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen)
@@ -972,19 +977,26 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         OwnedRender::E1PublishSecondaryVisual(lpObject->GetID(),
             sets[0]->lpTexture->GetSurface()->OwnedSurfaceId(),secondary);
     }
-    coreParts.Stage(CorePerf::Skeleton);
-    if (lpObject->GetAnimationSystem2())
-        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    // c74 samples render nodes from the selected clip and phase; it does not
+    // consume the mutable host skeleton.
     coreParts.Stage(CorePerf::VisualPose);
     const bool published = resourcesReady && PublishOwnedPose();
-    if (!published) {
+    if (!published && resourcesReady) {
         const auto resource = OwnedRender::E1Scene().Resource(lpObject);
         if (resource.serial)
             OwnedRender::E1Scene().Scene().visual_reject(resource,
                 owned::RetainedVisualStatus::unsupported_selector,
                 "object_pose.current_draw_preparation", "host.object_pose");
     }
-    if (!visibleOnScreen) return published;
+    if (!visibleOnScreen) {
+        // Body-bound particles still consume the host unit's figure transforms.
+        // Keep that independent source consumer current even outside the camera.
+        if (lpObject->WhoAmI() == HPC_UNIT && lpObject->GetAnimationSystem2()) {
+            coreParts.Stage(CorePerf::Skeleton);
+            lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+        }
+        return published;
+    }
     const auto type = lpObject->WhoAmI();
     auto* mapObject = dynamic_cast<CMapObject*>(lpObject);
     if (published && owned::bridge_skip_scenery_draw_walk_enabled() &&
@@ -993,6 +1005,11 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         (!lpObject->GetAnimationSystem2() || !lpObject->GetAnimationSystem2()->GetCurrentAnimation()))
         return published;
 
+    // Only the source interaction path consumes these mutable figure transforms.
+    // Ordinary off-screen render publication does not need a host skeleton.
+    coreParts.Stage(CorePerf::Skeleton);
+    if (lpObject->GetAnimationSystem2())
+        lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
     coreParts.Stage(CorePerf::Picking);
     // Picking uses current host geometry, independently of GPU acceptance.
     const bool selectable = lpObject->WhoAmI() == HPC_UNIT || lpObject->WhoAmI() == HPC_LEVER;

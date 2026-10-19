@@ -3,9 +3,13 @@
 #include <cstdint>
 #include <memory>
 
-namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; struct RetainedVisualFrame; }
+class CObject3DClientSpecific;
+namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; struct RetainedVisualFrame; struct VisualResourceIncarnation; }
 
 namespace OwnedRender {
+// Publish live source appearance before retained frame sampling.
+bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
+    owned::VisualResourceIncarnation resource) noexcept;
 bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept;
 // Host values of one world draw, without renderer headers (WorldClient).
 struct E1VisualInputs {
