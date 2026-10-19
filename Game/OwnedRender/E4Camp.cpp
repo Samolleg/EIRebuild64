@@ -69,7 +69,7 @@ owned::camp::Placement Uniform(Role r) noexcept {
 owned::camp::Placement PerkBand(float x,float y) noexcept {
     return owned::camp::frontend::perk_band(layout,x,y);
 }
-RECT Pixels(owned::camp::Rect r) noexcept {return {LONG(std::lround((r.left-layout.left)*layout.unit)),LONG(std::lround(r.top*layout.unit)),LONG(std::lround((r.right-layout.left)*layout.unit)),LONG(std::lround(r.bottom*layout.unit))};}
+RECT Pixels(owned::camp::Rect r) noexcept {return owned::camp::frontend::pixels(layout,r);}
 void Activate(Host value) noexcept {
     if(host.context)Deactivate(host.context);
     host=value;valid=true;art_failed=popup_failed=false;wheel_remainder={};++generation;

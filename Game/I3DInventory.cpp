@@ -725,10 +725,9 @@ void CI3DItemObject::OnLButtonDown(UINT nFlags, CPoint point)
     int nSlotType = 0;
     CItem *pItem = GetMouseItem(point, nSlotType);
     if(pItem || nSlotType) GameJournal::Event("INPUT", "inventory", "element=%p class=%s part=%d part_name=%s slot=%d item=%d type=%u count=%d", this, GameJournal::Quote(typeid(*this).name()).c_str(), int(ePartType), GameJournal::ItemPart(int(ePartType)), nSlotType, pItem?pItem->GetID():-1, pItem?unsigned(pItem->GetSubtypeID()):0, pItem?pItem->GetCount():0);
-    if (pItem)
-        pScreen->ClickOnItem(pItem, ePartType);
-    else if (nSlotType)
-        pScreen->ClickOnSlot(nSlotType, ePartType);
+    owned::camp::frontend::slot_click(pItem,nSlotType,int(ePartType),
+        [&](CItem* item,int){pScreen->ClickOnItem(item,ePartType);},
+        [&](int slot,int){pScreen->ClickOnSlot(slot,ePartType);});
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CI3DObjectItemInfo::~CI3DObjectItemInfo()

@@ -1,5 +1,5 @@
 #pragma once
-#include <camp_frontend.h>
+#include <camp_presentation.h>
 
 class CI3DScreenCamp;
 class CI3DObject;
@@ -95,6 +95,7 @@ struct E4CampAccess {
     static int LearnedRows(CI3DObject*);
     static void Hover(class CI3DObjectItemInfo*,bool);
     static bool Draw2D(CI3DObject*);
+    static owned::camp::frontend::InputState Input(CI3DObject*);
     static int Hit(CI3DObject*,POINT);
     static bool TipInside(CI3DObject*,int,POINT,bool&);
     static void BeginInput();

@@ -1,5 +1,5 @@
 #include "camp_inventory.h"
-#include "camp_frontend.h"
+#include "camp_presentation.h"
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
 #include "owned_asset_loader.h"
@@ -135,7 +135,7 @@ int spell_count() noexcept {
     return std::clamp(count,0,spell_capacity);
 }
 int spell_first() noexcept {
-    belt_first=std::clamp(belt_first,0,(std::max)(0,spell_count()-8));
+    belt_first=camp::frontend::spell_first(belt_first,spell_count());
     return belt_first;
 }
 
@@ -747,9 +747,7 @@ camp::Rect context_plate(unsigned card) noexcept {
 }
 
 RECT decoration_pixels(camp::Rect r) noexcept {
-    return {LONG(std::lround((r.left-layout.left)*layout.unit)),
-        LONG(std::lround(r.top*layout.unit)),LONG(std::lround((r.right-layout.left)*layout.unit)),
-        LONG(std::lround(r.bottom*layout.unit))};
+    return camp::frontend::pixels(layout,r);
 }
 
 bool fresh_hover() noexcept {
@@ -765,70 +763,21 @@ bool context_visible(unsigned card) noexcept {
 }
 
 void snapshot_decoration() noexcept {
-    decoration={}; decoration.pixel_unit=layout.unit;
-    constexpr float main_board_corner=8,text_group_corner=12;
+    camp::frontend::BackgroundState state;state.mode=mode();
     const auto shown=[](std::size_t offset){
-        void* child=field<void*>(screen,offset);
-        return child&&field<BOOL>(child,0xe8);
+        void* child=field<void*>(screen,offset);return child&&field<BOOL>(child,0xe8);
     };
-    const auto panel=[](camp::Rect r,float corner){
-        decoration.panels[decoration.count++]={decoration_pixels(r),corner};
-    };
-    const auto divider=[](camp::Rect span,float height=50.f/3){
-        const float width=(std::min)(span.width(),800.f/3);
-        const float x=(span.left+span.right-width)*.5f,y=(span.top+span.bottom)*.5f;
-        decoration.dividers[decoration.divider_count++]={decoration_pixels({x,y-height*.5f,x+width,y+height*.5f}),false};
-    };
-    // These are decorative bounds, never a native content viewport or hit area.
-    decoration.title_plate=decoration_pixels(layout.title_plate);
-    if(mode()==0&&shown(0x1e4))panel(layout.character,main_board_corner);
-    if(mode()<2&&shown(0x1d8))panel({layout.stats.left-110.f/3,layout.stats.top,
-        layout.stats.right+110.f/3,layout.stats.bottom},text_group_corner);
-    if((mode()==2&&field<bool>(screen,0x195)&&shown(0x1f8))||
-        (mode()==4&&field<bool>(screen,0x196)&&shown(0x200)))panel(stage(),main_board_corner);
-    if((mode()==3&&shown(0x1fc))||(mode()==5&&shown(0x204))||
-       (mode()==6&&shown(0x208)))panel(stage(),main_board_corner);
-    if(mode()==1&&shown(0x1f4)){
-        panel({layout.skills.left,161,layout.skills.right,590},text_group_corner);
-        panel({layout.available.left,161,layout.available.right,590},text_group_corner);
-        divider({layout.skills.left+24,310,layout.skills.right-24,320},6);
-    }
-    if(mode()>=2){
-        const auto offset=mode()==2||mode()==3?0x1ec:0x1f0;
-        if(field<bool>(screen,offset==0x1ec?0x195:0x196)&&shown(offset))
-            divider({layout.merchant.left,layout.category(true,0).bottom,layout.merchant.right,layout.grid(true).top});
-    }
-    if(shown(0x1e0))divider({layout.stash.left,layout.category(false,0).bottom,layout.stash.right,layout.grid(false).top});
-    if(mode()!=1)divider({layout.content.left+25,490,layout.content.right-25,502});
-    if(mode()==2||mode()==4||mode()==6){
-        const auto gutter=[](float left,float right){
-            constexpr float width=70.f/3;
-            if(right-left<width+16)return;
-            const float x=(left+right)*.5f;
-            decoration.dividers[decoration.divider_count++]={
-                decoration_pixels({x-width*.5f,215,x+width*.5f,335}),true};
-        };
-        const bool spells=mode()==2;
-        if(field<bool>(screen,spells?0x195:0x196)&&shown(spells?0x1ec:0x1f0)){
-            const auto bar=scroll_rail(spells?ScrollList::spell_vendor:ScrollList::item_vendor);
-            const float right=bar.maximum?bar.track.right+10.f/3:layout.grid(true).right;
-            gutter(right,layout.workspace.left);
-        }
-        if(shown(0x1e0))gutter(layout.workspace.right,layout.grid(false).left);
-    }
-    // Stock BG ornaments are submitted explicitly into each isolated card.
-    // Their plate is also the crop and unrelated-text occlusion boundary.
-    for(unsigned card=0;card<cards_drawn.size();++card)
-        if(cards_drawn[card])decoration.cards[decoration.card_count++]=decoration_pixels(context_plate(card));
-    if(cards_drawn[1]&&constructor_card==ConstructorCard::empty){
-        const auto& card=layout.result_info;
-        const float x=(card.left+card.right)*.5f,y=(card.top+card.bottom)*.5f;
-        decoration.construction_icon=decoration_pixels({x-40,y-40,x+40,y+40});
-        decoration.construction_icon_visible=true;
-    }
+    const bool spells=state.mode==2||state.mode==3;
+    const bool shop=field<bool>(screen,spells?0x195:0x196);
+    state.quick=shown(0x1e4);state.stats=shown(0x1d8);state.perks=shown(0x1f4);state.wagon=shown(0x1e0);
+    state.merchant=shop&&shown(spells?0x1ec:0x1f0);
+    state.trade=shop&&shown(spells?0x1f8:0x200);
+    state.construction=shop&&shown(spells?0x1fc:0x204);
+    state.repair=field<bool>(screen,0x196)&&shown(0x208);
+    state.cards=cards_drawn;state.empty_construction=constructor_card==ConstructorCard::empty;
+    decoration=camp::frontend::background_decoration(layout,state,[](ScrollList list){return scroll_rail(list);});
     decoration_pending=true;
 }
-
 Role role_of(void* object) noexcept {
     if (!screen || !object) return Role::none;
     if (object == screen) return Role::root;
@@ -878,102 +827,34 @@ camp::Placement perk_band(float x,float y) noexcept {
     return camp::frontend::perk_band(layout,x,y);
 }
 
-camp::Placement perk_area(void* object,int index) noexcept {
-    if(index<4)return {};
-    const bool learned=index>=34;
-    const auto source=area_rect(object,learned?34:index);
-    const float native_y=learned?270+(index-34)*15.f:source.top;
-    const auto band=perk_band(source.left,native_y);
-    const float sx=band.destination.width()/band.source.width(),sy=band.destination.height()/band.source.height();
-    const auto target=[&](float x,float y){return std::pair<float,float>{
-        band.destination.left+(x-band.source.left)*sx,band.destination.top+(y-band.source.top)*sy};};
-    const auto a=target(source.left,native_y),b=target(source.right,native_y+source.height());
-    // Logical rows44..47 use the real area34 polygon as their containment template.
-    return {source,{a.first,a.second,b.first,b.second}};
+camp::frontend::InputState input_state(void* object,Role role) noexcept {
+    camp::frontend::InputState s;
+    s.role=role;s.mode=mode();s.first=belt_first;s.capacity=spell_capacity;
+    s.areas=field<int>(object,0x12c);
+    s.actions={{root_action_visible(0),root_action_visible(1)}};
+    return s;
 }
-
 camp::Placement area_placement(void* object, Role role, int index) noexcept {
-    if(role==Role::perks)return perk_area(object,index);
-    const auto source = area_rect(object, index);
-    auto target = source;
-    switch (role) {
-    case Role::root:
-        if (index < 2) {
-            const auto r = actions();
-            const float s = r.width() / 200;
-            target = {r.left + source.left * s, r.top + (source.top - 400) * s,
-                      r.left + source.right * s, r.top + (source.bottom - 400) * s};
-        } else if (index < 4) target=layout.rotation[index-2];
-        else if (index < 12) target = layout.mode_button(index - 4);
-        break;
-    case Role::wagon: case Role::vendor:
-        if (index < 2) target = {}; // Replaced by owned rail input.
-        else if (index < 8) target = layout.category(role == Role::vendor, index - 2);
-        else target = layout.grid(role == Role::vendor);
-        break;
-    case Role::quick:
-        if (index < 8) target = layout.equipped(index < 4 ? index : 11 - index, belt_first, true);
-        else {
-            const auto r = stage(); const float s = r.width() / 400;
-            target = {r.left + (source.left - 200) * s, r.top + (source.top - 100) * s,
-                      r.left + (source.right - 200) * s, r.top + (source.bottom - 100) * s};
-        }
-        break;
-    case Role::spells: target = layout.equipped(index, belt_first); break;
-    case Role::trade: target = layout.trade_cell(index); break;
-    default: {
-        const bool stats = role == Role::stats;
-        const auto r = stats ? layout.stats : stage();
-        const float sx = r.width() / (stats ? 200 : 400);
-        const float sy = r.height() / (stats ? 300 : 400);
-        target = {r.left + (source.left - (stats ? 0 : 200)) * sx,
-                  r.top + (source.top - 100) * sy,
-                  r.left + (source.right - (stats ? 0 : 200)) * sx,
-                  r.top + (source.bottom - 100) * sy};
-        break;
-    }}
-    return {source, target};
+    const auto s=input_state(object,role);
+    const int native=camp::frontend::area_template(s,index);
+    if(native<0||native>=s.areas)return {};
+    return camp::frontend::area(layout,s,index,area_rect(object,native));
 }
-
 bool belt_visible(const camp::Rect& r,bool equipment=false) noexcept {
     return camp::frontend::belt_visible(layout,r,equipment);
 }
 POINT inverse_point(camp::Placement p, POINT point) noexcept {
-    return {LONG(std::floor(p.source.left + (point.x - p.destination.left) * p.source.width() / p.destination.width())),
-            LONG(std::floor(p.source.top + (point.y - p.destination.top) * p.source.height() / p.destination.height()))};
+    return camp::frontend::inverse(p,point);
 }
 BOOL native_area_contains(void* area, POINT point);
 int hit(void* object, POINT physical) {
-    const Role role = role_of(object);
-    if (role == Role::none) return -2;
-    if (!valid) return -1;
-    const POINT p = virtual_point(object, physical);
-    if(role==Role::wagon||role==Role::vendor)return camp::frontend::grid_hit(layout,role==Role::vendor,field<int>(object,0x12c),p,
-        [&](int i){return area_rect(object,i);},[&](int i,POINT q){return native_area_contains(field<void**>(object,0x128)[i],q)!=FALSE;});
-    if(role==Role::spells){
-        const int first=spell_first();
-        const auto source=area_rect(object,0);
-        for(int i=first;i<(std::min)(spell_capacity,first+8);++i){
-            const camp::Placement placed{source,layout.equipped(i,first)};
-            if(placed.destination.contains(float(p.x),float(p.y))&&
-                native_area_contains(field<void**>(object,0x128)[0],inverse_point(placed,p)))return i;
-        }
-        return -1;
-    }
-    const int count = role==Role::perks?48:field<int>(object, 0x12c);
-    for (int i = 0; i < count; ++i) {
-        if(role==Role::root&&i<2&&!root_action_visible(i))continue;
-        if((role==Role::wagon||role==Role::vendor)&&i<2)continue;
-        const auto placed = area_placement(object, role, i);
-        if ((role == Role::spells || (role == Role::quick && i < 8)) &&
-            !belt_visible(placed.destination,role==Role::quick)) continue;
-        if (placed.source.width() > 0 && placed.source.height() > 0 &&
-            placed.destination.contains(float(p.x), float(p.y)) &&
-            native_area_contains(field<void**>(object, 0x128)[role==Role::perks&&i>=34?34:i], inverse_point(placed, p))) return i;
-    }
-    return -1;
+    const Role role=role_of(object);if(role==Role::none)return -2;if(!valid)return -1;
+    if(role==Role::spells)spell_first();
+    const auto s=input_state(object,role);
+    return camp::frontend::hit(layout,s,virtual_point(object,physical),
+        [&](int i){return area_rect(object,i);},
+        [&](int i,POINT q){return native_area_contains(field<void**>(object,0x128)[i],q)!=FALSE;});
 }
-
 struct Grid {
     void* object = nullptr;
     void* background = nullptr;
@@ -1797,14 +1678,10 @@ void prepare_owned_layout(void* self) {
     for(auto& art:scroll_art){art=add_figure(background_owner);if(!art)return;}
     function<BarFn>(0x5e70e0)(scroll_art[0],32,100,0,0,12,100,14,14,114,114);
     function<FrameFn>(0x5e8450)(scroll_art[1],24,100,0,0,12,100,1.5f,14,14,114,114);
-    const camp::Rect panel_rects[]={layout.merchant,layout.stash,
-        layout.skills,
-        {200,100,600,500},{0,100,200,400},
-        layout.learned,layout.available};
     for(unsigned i=0;i<camp_panels.size();++i){
         camp_panels[i]=add_figure(background_owner);
         if(!camp_panels[i])return;
-        const auto r=panel_rects[i];
+        const auto r=camp::frontend::background_panel(layout,int(i));
         function<BarFn>(0x5e70e0)(camp_panels[i],28,100,r.left,r.top,r.right,r.bottom,14,14,114,114);
     }
     prepare_grid(grids[0], wagon);
@@ -1930,23 +1807,9 @@ int __fastcall hit_test(void* self, void*, POINT p) {
 }
 BOOL __fastcall inside(void* self, void*, POINT p) {
     const Role role=role_of(self);
-    if(screen&&layout.wide&&role!=Role::none){
-        if(!valid)return FALSE;
-        p=virtual_point(self,p);
-        camp::Rect bounds;
-        switch(role){
-        case Role::root:case Role::background:bounds={layout.left,0,layout.left+layout.width,600};break;
-        case Role::wagon:bounds=layout.stash;break;
-        case Role::vendor:bounds=layout.merchant;break;
-        case Role::info:case Role::help:case Role::comparison:case Role::blueprint:return FALSE; // Presentation only; never capture mouse routing.
-        case Role::stats:bounds=layout.stats;break;
-        case Role::spells:bounds=layout.belt;break;
-        case Role::quick:bounds={layout.weapons.left,layout.character.top,layout.quick_items.right,layout.character.bottom};break;
-        default:bounds=stage();break;
-        }
-        return bounds.contains(float(p.x),float(p.y));
-    }
-    return original<HitFn>(inside_id)(self, p);
+    if(screen&&layout.wide&&role!=Role::none)
+        return valid&&camp::frontend::inside(layout,role,mode(),virtual_point(self,p));
+    return original<HitFn>(inside_id)(self,p);
 }
 BOOL __fastcall point_in_area(void* area, void*, POINT point) {
     void* object = widescreen_interface_owned() ? const_cast<void*>(widescreen_input_area_object()) : tip_object;
@@ -1955,15 +1818,9 @@ BOOL __fastcall point_in_area(void* area, void*, POINT point) {
         auto** areas = field<void**>(object, 0x128);
         const int count = field<int>(object, 0x12c);
         for (int i = 0; i < count; ++i) if (areas[i] == area) {
-            const auto p = area_placement(object, role, i);
-            if(role==Role::root&&i<2&&!root_action_visible(i))return FALSE;
-            if((role==Role::wagon||role==Role::vendor)&&i<2)return FALSE;
-            if(role==Role::perks&&i<4)return FALSE;
-            if(role==Role::spells&&spell_capacity==16&&i>=7)return FALSE; // Old empty/arrow areas.
-            if((role==Role::spells||(role==Role::quick&&i<8))&&!belt_visible(p.destination,role==Role::quick))return FALSE;
-            if (p.source.width() <= 0 || p.source.height() <= 0 ||
-                !p.destination.contains(float(point.x), float(point.y))) return FALSE;
-            return native_area_contains(role==Role::perks&&i>=34?areas[34]:area, inverse_point(p, point));
+            const auto s=input_state(object,role);
+            return camp::frontend::point_in_area(layout,s,i,area_placement(object,role,i),point,
+                [&](int native,POINT q){return native_area_contains(areas[native],q)!=FALSE;},true);
         }
     }
     return original<BOOL(__thiscall*)(void*, POINT)>(point_id)(area, point);
@@ -2013,24 +1870,16 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
         refresh_constructor();
         if(!valid)return TRUE;
         for(unsigned card=0;card<cards_drawn.size();++card)cards_drawn[card]=context_visible(card);
-        function<DrawFn>(0x5e6d90)(camp_background,v);
-        for(unsigned i=0;i<camp_panels.size();++i){
-            if(i==0&&mode()<2)continue;
-            if(i==4&&mode()>=2)continue;
-            if((i==2||i>=5)&&mode()!=1)continue;
-            if(i==3&&(mode()<2||mode()==3||mode()==5))continue;
-            if(i==3){Scope placed(camp::Placement{{200,100,600,500},stage()});function<DrawFn>(0x5e6d90)(camp_panels[i],v);}
-            else if(i==4){Scope placed(camp::Placement{{0,100,200,400},layout.stats});function<DrawFn>(0x5e6d90)(camp_panels[i],v);}
-            else function<DrawFn>(0x5e6d90)(camp_panels[i],v);
-        }
+        camp::frontend::draw_background(layout,mode(),
+            [&](camp::Rect,int,int){function<DrawFn>(0x5e6d90)(camp_background,v);},
+            [&](int i,camp::Placement p){Scope placed(p);function<DrawFn>(0x5e6d90)(camp_panels[i],v);});
         if(any_cards()){
             void* arguments[]{popup_background,v};
             popup_submit(CampRenderRequest::clear_popup,[](void* context){
                 auto** args=static_cast<void**>(context);
-                for(unsigned card=0;card<cards_drawn.size();++card)if(cards_drawn[card]){
-                    Scope placed(camp::Placement{{0,0,200,300},context_plate(card)});
-                    function<DrawFn>(0x5e6d90)(args[0],args[1]);
-                }
+                camp::frontend::draw_card_backgrounds(layout,cards_drawn,[&](camp::Placement p){
+                    Scope placed(p);function<DrawFn>(0x5e6d90)(args[0],args[1]);
+                });
             },arguments);
         }
         if(camp_drawing)snapshot_decoration();
@@ -2258,13 +2107,8 @@ BOOL child_draw(HookId id, void* self, void* v) {
     if (!valid) return TRUE;
     const auto role = role_of(self);
     Scope scope(role);
-    if (role == Role::construction) {
-        // Live stage markers draw after CI3DObject::Draw; keep their owner's
-        // canvas placement active through the complete construction draw.
-        Scope placement(uniform(role));
-        return original<DrawFn>(id)(self, v);
-    }
-    return original<DrawFn>(id)(self, v);
+    camp::frontend::ChildVisualScope placement(layout,mode(),role);
+    return original<DrawFn>(id)(self,v);
 }
 BOOL __fastcall quick_draw(void* self, void*, void* v) { return child_draw(quick_draw_id, self, v); }
 BOOL __fastcall spell_draw(void* self, void*, void* v) {
@@ -2298,11 +2142,7 @@ void __fastcall spell_current(void* self,void*,void* item) {
     original<void(__thiscall*)(void*,void*)>(spell_current_id)(self,item);
     if(!screen||!layout.wide||!valid||role_of(self)!=Role::spells)return;
     const int selected=field<int>(self,0x154);
-    if(selected>=0&&selected<spell_count()){
-        if(selected<belt_first)belt_first=selected;
-        else if(selected>=belt_first+8)belt_first=selected-7;
-    }
-    spell_first();
+    belt_first=camp::frontend::spell_reveal(belt_first,selected,spell_count());
 }
 void __fastcall slot_click(void* handler,void*,UINT flags,POINT point) {
     using Fn=void(__thiscall*)(void*,UINT,POINT);
@@ -2314,8 +2154,9 @@ void __fastcall slot_click(void* handler,void*,UINT flags,POINT point) {
     void* parent=field<void*>(self,0x14c);
     auto** table=field<void**>(parent,0);
     const int part=field<int>(self,0x148);
-    if(item)reinterpret_cast<void(__thiscall*)(void*,void*,int)>(table[0xa8/4])(parent,item,part);
-    else if(slot)reinterpret_cast<void(__thiscall*)(void*,int,int)>(table[0xb0/4])(parent,slot,part);
+    camp::frontend::slot_click(item,slot,part,
+        [&](void* value,int source){reinterpret_cast<void(__thiscall*)(void*,void*,int)>(table[0xa8/4])(parent,value,source);},
+        [&](int value,int source){reinterpret_cast<void(__thiscall*)(void*,int,int)>(table[0xb0/4])(parent,value,source);});
 }
 BOOL __fastcall trade_draw(void* self, void*, void* v) { return child_draw(trade_draw_id, self, v); }
 BOOL __fastcall repair_draw(void* self, void*, void* v) { return child_draw(repair_draw_id, self, v); }

@@ -1218,6 +1218,9 @@ CItem *CI3DObjectSpellSlots::GetMouseItem(CPoint point, int &nSlotType)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectSpellSlots::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    if(OwnedRender::E4::Active()&&E4CampAccess::RoleOf(this)==OwnedRender::E4::Role::spells){
+        CI3DItemObject::OnLButtonDown(nFlags,point);return;
+    }
     const int hit = HitTest(point);
     if (hit == 8 || hit == 9)
     {
@@ -3316,6 +3319,10 @@ void CI3DTradeTable::Init(CItemsArray *pItBuy, CItemsArray *pItSell, bool bSpell
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DTradeTable::Draw(CRenderer *pRend)
 {
+    OwnedRender::E4::Scope campRole(E4CampAccess::RoleOf(this));
+    owned::camp::frontend::ChildVisualScope campCanvas(OwnedRender::E4::Layout(),
+        OwnedRender::E4::Active()?E4CampAccess::Input(this).mode:0,
+        E4CampAccess::RoleOf(this),OwnedRender::E4::Active());
 
     D3DRECT rect;
     CRect rcTmp(200, 100, 600, 500);
@@ -3476,6 +3483,10 @@ void CI3DRepairTable::Init(CItemsArray *pItRepair)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DRepairTable::Draw(CRenderer *pRend)
 {
+    OwnedRender::E4::Scope campRole(E4CampAccess::RoleOf(this));
+    owned::camp::frontend::ChildVisualScope campCanvas(OwnedRender::E4::Layout(),
+        OwnedRender::E4::Active()?E4CampAccess::Input(this).mode:0,
+        E4CampAccess::RoleOf(this),OwnedRender::E4::Active());
 
     D3DRECT rect;
     CRect rcTmp(200, 100, 600, 500);
@@ -3614,6 +3625,10 @@ void CI3DConstrSpell::Init(CParty *pItems)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DConstrSpell::Draw(CRenderer *pRend)
 {
+    OwnedRender::E4::Scope campRole(E4CampAccess::RoleOf(this));
+    owned::camp::frontend::ChildVisualScope campCanvas(OwnedRender::E4::Layout(),
+        OwnedRender::E4::Active()?E4CampAccess::Input(this).mode:0,
+        E4CampAccess::RoleOf(this),OwnedRender::E4::Active());
     DWORD dwComplexity = 0;
     float fMana = 0, fPrototypeMana = 0;
     ERPGMagicSubtypes subtype;
@@ -3863,6 +3878,10 @@ void CI3DConstrItem::Init(CParty *pItems)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DConstrItem::Draw(CRenderer *pRend)
 {
+    OwnedRender::E4::Scope campRole(E4CampAccess::RoleOf(this));
+    owned::camp::frontend::ChildVisualScope campCanvas(OwnedRender::E4::Layout(),
+        OwnedRender::E4::Active()?E4CampAccess::Input(this).mode:0,
+        E4CampAccess::RoleOf(this),OwnedRender::E4::Active());
     const SIDBItemGeneralShape *pShape = 0;
     bool bDrawNoFrames = false;
     bool bIsInstr = false;

@@ -205,7 +205,7 @@ OwnedRender::E4::Scroll E4CampAccess::Scroll(void* owner,List list){
     case List::spells:{
         auto* person=s->GetCurrentPers();
         const int count=person?(std::min)(int(person->spells.GetSize()),int(QI_MAX_SPELLS)):0;
-        belt_first=std::clamp(belt_first,0,(std::max)(0,count-8));
+        belt_first=owned::camp::frontend::spell_first(belt_first,count);
         return {s->pSpells&&s->pSpells->IsVisible()!=FALSE,belt_first,count,8,0};
     }
     default:{
@@ -251,79 +251,43 @@ void E4CampAccess::PrepareGrid(CI3DObjectInventoryItems* p){
 }
 bool E4CampAccess::TipInside(CI3DObject* p,int index,POINT physical,bool& inside){
     if(!Active()||RoleOf(p)==Role::none)return false;
-    // Mode buttons already publish their description in the ordinary card.
-    // A second delayed native tooltip would cover the header and repeat it.
-    inside=!(RoleOf(p)==Role::root&&index>=4&&index<12)&&Hit(p,physical)==index;return true;
+    CPoint point(physical);p->GetI3D()->ScreenToVirtual(point);
+    const auto s=Input(p);
+    inside=owned::camp::frontend::point_in_area(Layout(),s,index,Area(p,s.role,index),point,
+        [&](int native,POINT q){return native>=0&&native<p->areas.GetSize()&&p->areas[native]->PtInArea(CPoint(q))!=FALSE;},true);
+    return true;
 }
 int E4CampAccess::First(CI3DObjectInventoryItems* p){
     const int first=owned::camp::frontend::first_item(Layout(),vendor(p),p->pSortedItems.GetSize(),p->fCurPos[p->nSortMode]);
     p->fCurPos[p->nSortMode]=float(first);return first;
 }
+owned::camp::frontend::InputState E4CampAccess::Input(CI3DObject* p){
+    owned::camp::frontend::InputState s;
+    s.role=RoleOf(p);s.mode=int(screen->eScreenMode);s.first=belt_first;s.capacity=int(QI_MAX_SPELLS);
+    s.areas=p->areas.GetSize();s.learned_start=4+RPG_NUM_ACTUAL_AUTO_SKILLS+RPG_NUM_ACTUAL_MANUAL_SKILLS+23;
+    s.actions={{screen->eScreenMode!=ISM_WEAPONS||screen->bValidOK,screen->eScreenMode!=ISM_WEAPONS||screen->bValidCancel}};
+    return s;
+}
 Placement E4CampAccess::Area(CI3DObject* p,Role role,int i){
-    constexpr int learned_start=4+RPG_NUM_ACTUAL_AUTO_SKILLS+RPG_NUM_ACTUAL_MANUAL_SKILLS+23;
-    const bool learned=role==Role::perks&&i>=learned_start;
-    const int template_index=learned?learned_start:i;
-    if(template_index<0||template_index>=p->areas.GetSize())return {};
-    const auto source=rect(p->areas[template_index]->rect);auto target=source;const auto& l=Layout();
-    if(learned){const auto band=PerkBand(source.left,270+(i-learned_start)*15.f);const float dy=band.destination.top;return {source,{band.destination.left,dy,band.destination.right,dy+15}};}
-    switch(role){
-    case Role::root:
-        if(i<2){const auto r=Actions();const float s=r.width()/200;target={r.left+source.left*s,r.top+(source.top-400)*s,r.left+source.right*s,r.top+(source.bottom-400)*s};}
-        else if(i<4)target=l.rotation[i-2];
-        else if(i<12){
-            const int mode=i-4;
-            if(mode+2>=screen->figures.GetSize()||!screen->figures[mode+2]->IsVisible())return {source,{}};
-            int count=0,index=0;
-            for(int m=0;m<8;++m)if(m+2<screen->figures.GetSize()&&screen->figures[m+2]->IsVisible()){
-                if(m<mode)++index;++count;
-            }
-            target=l.mode_button(mode);
-            const float width=target.width();
-            target.left=(l.dock.left+l.dock.right-count*width)*.5f+index*width;
-            target.right=target.left+width;
-        }
-        break;
-    case Role::wagon:case Role::vendor:
-        target=i<2?Rect{}:i<8?l.category(role==Role::vendor,i-2):l.grid(role==Role::vendor);break;
-    case Role::quick:
-        if(i<8){target=l.equipped(i<4?i:11-i,belt_first,true);break;}
-        [[fallthrough]];
-    default:{
-        auto u=role==Role::perks?PerkBand(source.left,source.top):Uniform(role);
-        const auto r=u.destination;const float sx=r.width()/u.source.width(),sy=r.height()/u.source.height();
-        target={r.left+(source.left-u.source.left)*sx,r.top+(source.top-u.source.top)*sy,
-                r.left+(source.right-u.source.left)*sx,r.top+(source.bottom-u.source.top)*sy};break;
-    }
-    case Role::spells:target=l.equipped(i,belt_first);break;
-    case Role::trade:target=l.trade_cell(i);break;
-    }
-    return {source,target};
+    auto s=Input(p);s.role=role;
+    const int native=owned::camp::frontend::area_template(s,i);
+    if(native<0||native>=p->areas.GetSize())return {};
+    return owned::camp::frontend::area(Layout(),s,i,rect(p->areas[native]->rect));
 }
 int E4CampAccess::Hit(CI3DObject* p,POINT physical){
     const auto role=RoleOf(p);if(!Active()||role==Role::none)return -2;
     CPoint point(physical);p->GetI3D()->ScreenToVirtual(point);
-    if(role==Role::wagon||role==Role::vendor)return owned::camp::frontend::grid_hit(Layout(),role==Role::vendor,p->areas.GetSize(),point,
-        [&](int i){return rect(p->areas[i]->rect);},[&](int i,POINT q){return p->areas[i]->PtInArea(CPoint(q))!=FALSE;});
-    constexpr int learned_start=4+RPG_NUM_ACTUAL_AUTO_SKILLS+RPG_NUM_ACTUAL_MANUAL_SKILLS+23;
-    const int count=role==Role::perks?learned_start+14:p->areas.GetSize();
-    if(role==Role::spells){
-        Scroll(screen,List::spells);
-        for(int i=belt_first;i<(std::min)(int(QI_MAX_SPELLS),belt_first+8);++i)if(Layout().equipped(i,belt_first).contains(float(point.x),float(point.y)))return i-belt_first;
-        return -1;
-    }
-    for(int i=0;i<count;++i){
-        if(role==Role::root&&i<2&&screen->eScreenMode==ISM_WEAPONS&&!(i==0?screen->bValidOK:screen->bValidCancel))continue;
-        const auto a=Area(p,role,i);
-        if(a.source.width()<=0||a.source.height()<=0||!a.destination.contains(float(point.x),float(point.y)))continue;
-        const CPoint inverse(int(std::floor(a.source.left+(point.x-a.destination.left)*a.source.width()/a.destination.width())),
-            int(std::floor(a.source.top+(point.y-a.destination.top)*a.source.height()/a.destination.height())));
-        if(p->areas[role==Role::perks&&i>=learned_start?learned_start:i]->PtInArea(inverse))return i;
-    }return -1;
+    if(role==Role::spells)Scroll(screen,List::spells);
+    const auto s=Input(p);
+    return owned::camp::frontend::hit(Layout(),s,point,
+        [&](int i){return rect(p->areas[i]->rect);},
+        [&](int i,POINT q){return p->areas[i]->PtInArea(CPoint(q))!=FALSE;});
 }
 int E4CampAccess::LearnedRows(CI3DObject* p){return Active()&&RoleOf(p)==Role::perks?14:10;}
 bool E4CampAccess::Inside(CI3DObject* p,POINT point,bool& inside){
     if(!Active()||RoleOf(p)==Role::none)return false;
-    inside=Hit(p,point)>=0;return true;
+    CPoint local(point);p->GetI3D()->ScreenToVirtual(local);
+    inside=owned::camp::frontend::inside(Layout(),RoleOf(p),int(screen->eScreenMode),local);return true;
 }
 bool E4CampAccess::MouseItem(CI3DObjectInventoryItems* p,POINT physical,int& slot,CItem*& item){
     if(!Active()||!inventory(p))return false;
@@ -423,56 +387,59 @@ bool E4CampAccess::DrawSpells(CI3DObjectSpellSlots* p,CRenderer* renderer){
 bool E4CampAccess::SpellMouse(CI3DObjectSpellSlots* p,POINT physical,int& slot,CItem*& item){
     if(!Active()||RoleOf(p)!=Role::spells)return false;
     item=nullptr;slot=0;if(!p->IsVisible())return true;
-    CPoint point(physical);p->GetI3D()->ScreenToVirtual(point);auto* person=screen->GetCurrentPers();if(!person)return true;
-    const auto value=Scroll(screen,List::spells);
-    for(int i=belt_first;i<(std::min)(value.total,belt_first+8);++i)if(Layout().equipped(i,belt_first).contains(float(point.x),float(point.y))){slot=IST_SPELL;item=person->spells[i];break;}
+    const int index=Hit(p,physical);
+    if(index<0||index>=int(QI_MAX_SPELLS))return true;
+    slot=IST_SPELL;
+    auto* person=screen->GetCurrentPers();
+    if(person&&index<(std::min)(int(person->spells.GetSize()),int(QI_MAX_SPELLS)))item=person->spells[index];
     return true;
 }
-void E4CampAccess::SpellCurrent(CI3DObjectSpellSlots* p,int index){if(Active()&&RoleOf(p)==Role::spells){if(index<belt_first)belt_first=index;else if(index>=belt_first+8)belt_first=index-7;Scroll(screen,List::spells);}}
+void E4CampAccess::SpellCurrent(CI3DObjectSpellSlots* p,int index){
+    if(!Active()||RoleOf(p)!=Role::spells)return;
+    const auto value=Scroll(screen,List::spells);
+    belt_first=owned::camp::frontend::spell_reveal(belt_first,index,value.total);
+}
 bool E4CampAccess::Draw(CI3DObject* p,CRenderer* renderer){
     const auto role=RoleOf(p);if(!Active()||role==Role::none)return false;
     Scope scope(role);
     if(role==Role::background){
-        auto* holder=art(p);auto* background=holder->AddFigure();
-        if(background){background->MakeTilingBar(32,100,Layout().left,0,Layout().left+Layout().width,600,14,14,114,114,int(std::ceil(Layout().width/100)),6);background->Draw(renderer);holder->RemoveFigure(background);}
-        const Rect panels[]={Layout().merchant,Layout().stash,Layout().skills,Stage(),Layout().stats,Layout().learned,Layout().available};
-        for(int i=0;i<7;++i){const int mode=int(screen->eScreenMode);if((i==0&&mode<2)||(i==4&&mode>=2)||((i==2||i>=5)&&mode!=1)||(i==3&&(mode<2||mode==3||mode==5)))continue;
-            auto* panel=holder->AddFigure();if(panel){const auto r=panels[i];panel->MakeBar(28,100,r.left,r.top,r.right,r.bottom,14,14,114,114);panel->Draw(renderer);holder->RemoveFigure(panel);}}
+        auto* holder=art(p);
+        owned::camp::frontend::draw_background(Layout(),int(screen->eScreenMode),
+            [&](Rect r,int columns,int rows){
+                auto* figure=holder->AddFigure();if(!figure){owned::camp_inventory_art_failed();return;}
+                figure->MakeTilingBar(32,100,r.left,r.top,r.right,r.bottom,14,14,114,114,columns,rows);
+                {VisualScope raw({},false);figure->Draw(renderer);}holder->RemoveFigure(figure);
+            },[&](int,Placement a){
+                auto* figure=holder->AddFigure();if(!figure){owned::camp_inventory_art_failed();return;}
+                const auto r=a.source;figure->MakeBar(28,100,r.left,r.top,r.right,r.bottom,14,14,114,114);
+                {auto transform=placed(a);figure->Draw(renderer);}holder->RemoveFigure(figure);
+            });
         if(std::any_of(shown_cards.begin(),shown_cards.end(),[](bool value){return value;})){
             struct Args {CI3DObject* holder;CRenderer* renderer;} args{holder,renderer};
             if(!Popup(owned::CampRenderRequest::clear_popup,[](void* context){
                 auto& a=*static_cast<Args*>(context);auto* plate=a.holder->AddFigure();
                 if(!plate){owned::camp_inventory_art_failed();return;}
                 plate->MakeBar(32,100,0,0,200,300,14,14,114,114);
-                for(int i=0;i<3;++i)if(shown_cards[i]){auto transform=placed({{0,0,200,300},i==0?Layout().ordinary_info:i==1?Layout().result_info:Layout().comparison_info});plate->Draw(a.renderer);}
+                owned::camp::frontend::draw_card_backgrounds(Layout(),shown_cards,[&](Placement p){
+                    auto transform=placed(p);plate->Draw(a.renderer);
+                });
                 a.holder->RemoveFigure(plate);
             },&args)){shown_cards={};SetCards(shown_cards);}
         }
-        owned::CampDecoration d;const auto& l=Layout();const int mode=int(screen->eScreenMode);
-        d.pixel_unit=l.unit;d.title_plate=Pixels(l.title_plate);
+        owned::camp::frontend::BackgroundState state;state.mode=int(screen->eScreenMode);
         const auto visible=[](CI3DObject* object){return object&&object->IsVisible();};
-        const auto panel=[&](Rect r,float corner){if(d.count<d.panels.size())d.panels[d.count++]={Pixels(r),corner};};
-        const auto divider=[&](Rect span,float height){
-            const float w=(std::min)(span.width(),800.f/3),x=(span.left+span.right-w)*.5f,y=(span.top+span.bottom)*.5f;
-            if(d.divider_count<d.dividers.size())d.dividers[d.divider_count++]={Pixels({x,y-height*.5f,x+w,y+height*.5f}),false};
-        };
-        if(mode==0&&visible(screen->pSlots))panel(l.character,8);
-        if(mode<2&&visible(screen->pNameStats))panel({l.stats.left-110.f/3,l.stats.top,l.stats.right+110.f/3,l.stats.bottom},12);
-        if((mode==2&&screen->bIsSpellConstr&&visible(screen->pTradeSpells))||(mode==4&&screen->bIsItemConstr&&visible(screen->pTradeItems)))panel(Stage(),8);
-        if((mode==3&&screen->bIsSpellConstr&&visible(screen->pConstrSpells))||(mode==5&&screen->bIsItemConstr&&visible(screen->pConstrItems))||(mode==6&&screen->bIsItemConstr&&visible(screen->pRepairItems)))panel(Stage(),8);
-        if(mode==1&&visible(screen->pPerks)){panel({l.skills.left,161,l.skills.right,590},12);panel({l.available.left,161,l.available.right,590},12);divider({l.skills.left+24,310,l.skills.right-24,320},6);}
-        const bool merchant=mode>=2&&((mode<=3&&screen->bIsSpellConstr&&visible(screen->pAssortSpells))||(mode>3&&screen->bIsItemConstr&&visible(screen->pAssortItems)));
-        if(merchant)divider({l.merchant.left,l.category(true,0).bottom,l.merchant.right,l.grid(true).top},50.f/3);
-        if(visible(screen->pWagon))divider({l.stash.left,l.category(false,0).bottom,l.stash.right,l.grid(false).top},50.f/3);
-        if(mode!=1)divider({l.content.left+25,490,l.content.right-25,502},50.f/3);
-        if(mode==2||mode==4||mode==6){
-            const auto gutter=[&](float left,float right){const float w=70.f/3;if(right-left<w+16||d.divider_count>=d.dividers.size())return;const float x=(left+right)*.5f;d.dividers[d.divider_count++]={Pixels({x-w*.5f,215,x+w*.5f,335}),true};};
-            if(merchant){Rect track;const bool rail=RailTrack(mode==2?List::spell_vendor:List::item_vendor,track);gutter(rail?track.right+10.f/3:l.grid(true).right,l.workspace.left);}
-            if(visible(screen->pWagon))gutter(l.workspace.right,l.grid(false).left);
-        }
-        for(int i=0;i<3;++i)if(shown_cards[i])d.cards[d.card_count++]=Pixels(i==0?Layout().ordinary_info:i==1?Layout().result_info:Layout().comparison_info);
-        if(empty_construction){const auto r=Layout().result_info;const float x=(r.left+r.right)*.5f,y=(r.top+r.bottom)*.5f;d.construction_icon=Pixels({x-40,y-40,x+40,y+40});d.construction_icon_visible=true;}
-        PublishDecoration(d);
+        const bool spells=state.mode==2||state.mode==3;
+        const bool shop=spells?screen->bIsSpellConstr:screen->bIsItemConstr;
+        state.quick=visible(screen->pSlots);state.stats=visible(screen->pNameStats);
+        state.perks=visible(screen->pPerks);state.wagon=visible(screen->pWagon);
+        state.merchant=shop&&visible(spells?screen->pAssortSpells:screen->pAssortItems);
+        state.trade=shop&&visible(spells?static_cast<CI3DObject*>(screen->pTradeSpells):screen->pTradeItems);
+        state.construction=shop&&visible(spells?static_cast<CI3DObject*>(screen->pConstrSpells):screen->pConstrItems);
+        state.repair=screen->bIsItemConstr&&visible(screen->pRepairItems);
+        state.cards=shown_cards;state.empty_construction=empty_construction;
+        PublishDecoration(owned::camp::frontend::background_decoration(Layout(),state,[](List list){
+            return owned::camp::frontend::rail(Layout(),list,Scroll(screen,list));
+        }));
         if(shown_cards[2])comparison->Draw(renderer);
         if(show_blueprint)blueprint->Draw(renderer);
         return true;
