@@ -1,3 +1,4 @@
+#include "contact_blend.h"
 // Included by Object3DClientSpecific.cpp. Source pointers stay in this adapter;
 // the renderer evaluates its immutable FIG/BON/LNK/ANM assembly and GPU pose.
 BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
