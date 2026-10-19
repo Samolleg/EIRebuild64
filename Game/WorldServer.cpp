@@ -3017,35 +3017,54 @@ void CWorldServer::InvokeAlarm(int nAlarm, const CPlot3D &ptOrigin, bool bForceA
 /////////////////////////////////////////////////////////////////////////////////////
 bool CWorldServer::CanBeginFieldCamp()
 {
+    const auto availability = [](bool value, const char* reason, int enemy = -1, float distance = 0.f) {
+        static const char* lastReason = nullptr;
+        static DWORD lastTick = 0;
+        static unsigned reports = 0;
+        const DWORD now = GetTickCount();
+        if (reason != lastReason && reports < 64 && (!reports || now - lastTick >= 2000)) {
+            lastReason = reason; lastTick = now; ++reports;
+            GameJournal::Event("CAMP", "availability", "available=%d reason=%s enemy=%d distance=%.3f",
+                int(value), reason, enemy, distance);
+        }
+        return value;
+    };
     CModPackage *mod = ModRuntime::Current();
-    if (!mod || !mod->CombatSetting("JMVGoCamp") || !IsMapLoaded() || curInterface != IFACE_MISSION || fieldCampArmed || fieldCampInCamp || fieldCampReturnHeroId >= 0)
-        return false;
+    if (!mod || !mod->CombatSetting("JMVGoCamp")) return availability(false, "feature-off");
+    if (!IsMapLoaded() || curInterface != IFACE_MISSION) return availability(false, "mission-unavailable");
+    if (fieldCampArmed || fieldCampInCamp || fieldCampReturnHeroId >= 0) return availability(false, "transition-active");
     CPlayer *player = const_cast<CWorldServer *>(this)->GetPlayer(0);
     CPlayerServer *playerServer = player ? dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
-    if (!player || !playerServer || playerServer->dangerState == WDS_COMBAT || player->party.people.GetSize() <= 0 || player->party.people.GetSize() > 8)
-        return false;
-    try { if (mod->GoCampZoneExcluded((LPCSTR)player->party.szCurrentZone)) return false; }
-    catch (...) { GameJournal::AllocationFailureInCatch("WorldServer"); return false; }
+    if (!player || !playerServer) return availability(false, "player-unavailable");
+    if (playerServer->dangerState == WDS_COMBAT) return availability(false, "combat");
+    if (player->party.people.GetSize() <= 0 || player->party.people.GetSize() > 8) return availability(false, "party-size");
+    try { if (mod->GoCampZoneExcluded((LPCSTR)player->party.szCurrentZone)) return availability(false, "zone-excluded"); }
+    catch (...) { GameJournal::AllocationFailureInCatch("WorldServer"); return availability(false, "zone-policy-error"); }
     std::vector<CUnit *> partyUnits;
     for (int i = 0; i < player->party.people.GetSize(); ++i) {
         CUnit *unit = GetUnit(player->party.people[i].nID);
-        if (!unit || unit->IsDead() || !unit->GetUnitSpecific() || unit->GetUnitSpecific()->WhoAmI() != HPC_UNITSERVERSPECIFIC) return false;
+        if (!unit || unit->IsDead() || !unit->GetUnitSpecific() || unit->GetUnitSpecific()->WhoAmI() != HPC_UNITSERVERSPECIFIC)
+            return availability(false, "party-unit-unavailable");
         partyUnits.push_back(unit);
     }
     float radius = 25.0f;
     try { radius = mod->GoCampEnemyRadius(); }
-    catch (...) { GameJournal::AllocationFailureInCatch("WorldServer"); return false; }
+    catch (...) { GameJournal::AllocationFailureInCatch("WorldServer"); return availability(false, "radius-policy-error"); }
     const float radiusSquared = radius * radius;
     CMapObjPtrHashIterator iterator;
     for (CMapObject *object = iterator.GetFirst(const_cast<CMapObjPtrHash *>(&dynamicObjs)); !iterator.IsReachEnd(); object = iterator.GetNext()) {
-        if (!object || object->IsInvalid() || object->WhoAmI() != HPC_UNIT) continue;
+        // Match the addon: detached objects no longer belong to the live world.
+        if (!object || object->IsInvalid() || object->IsUnreferenced() || object->WhoAmI() != HPC_UNIT) continue;
         CUnit *enemy = static_cast<CUnit *>(object);
         if (enemy->IsDead() || !enemy->IsEnemy(player->GetPlayerNumber())) continue;
-        for (CUnit *member : partyUnits) if (distanceXY2(enemy->GetCP(), member->GetCP()) <= radiusSquared) return false;
+        for (CUnit *member : partyUnits) {
+            const float distanceSquared = distanceXY2(enemy->GetCP(), member->GetCP());
+            if (distanceSquared <= radiusSquared)
+                return availability(false, "enemy-nearby", enemy->GetID(), sqrtf((std::max)(0.f, distanceSquared)));
+        }
     }
-    return true;
+    return availability(true, "ready");
 }
-
 bool CWorldServer::BeginFieldCamp()
 {
     if (!CanBeginFieldCamp()) return false;

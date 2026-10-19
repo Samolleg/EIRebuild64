@@ -851,13 +851,28 @@ void HudVisualPublication::finish_lane(bool success) noexcept {
 
 bool HudVisualPublication::repaint_icon(HudVisualLane lane,
                                        const char* canonical_name,
-                                       const HudIconPlacement& placement) {
-    const auto index = lane_index(lane);
-    if (lane_open_ || !canonical_name || !*canonical_name ||
-        !active_screen_generation_ || index >= active_lanes_.size())
+                                       const HudIconPlacement& placement,
+                                       HudPublicationFailure* output_failure) {
+    if (output_failure) *output_failure = {};
+    const auto reject = [&](HudPublicationFailureStage stage,
+                            ResourceFailureCode code, std::uint32_t ordinal = 0u) {
+        if (output_failure) *output_failure = make_publication_failure(
+            stage, lane, ordinal, canonical_name, code);
         return false;
+    };
+    const auto index = lane_index(lane);
+    if (!canonical_name || !*canonical_name)
+        return reject(HudPublicationFailureStage::resolver, ResourceFailureCode::invalid_name);
+    if (!active_screen_generation_)
+        return reject(HudPublicationFailureStage::generation, ResourceFailureCode::none);
+    if (lane_open_ || index >= active_lanes_.size())
+        return reject(HudPublicationFailureStage::lane_invalid, ResourceFailureCode::none);
     auto& publication = active_lanes_[index];
-    if (!publication.claimed || !publication.valid) return false;
+    if (!publication.claimed || !publication.valid) {
+        if (output_failure) *output_failure = classify_missing(
+            lane, 0u, active_screen_generation_, true);
+        return false;
+    }
     for (auto& slot : publication.slots) {
         const auto& cell = slot.placement;
         if (cell.atlas_width != placement.atlas_width ||
@@ -869,18 +884,18 @@ bool HudVisualPublication::repaint_icon(HudVisualLane lane,
             continue;
         CachedAsset asset{};
         AssetLoadFailure failure{};
-        if (!load(HudResourceRole::texture, canonical_name, &placement, asset,
-                  failure) || !asset.texture ||
-            asset.texture->width != placement.source_width ||
+        if (!load(HudResourceRole::texture, canonical_name, &placement, asset, failure))
+            return reject(failure.stage, failure.resource_failure, slot.ordinal);
+        if (!asset.texture || asset.texture->width != placement.source_width ||
             asset.texture->height != placement.source_height)
-            return false;
+            return reject(HudPublicationFailureStage::dimension, ResourceFailureCode::parse, slot.ordinal);
         slot.texture = asset.texture;
         slot.texture_identity = asset.identity;
         slot.placement = placement;
         slot.texture_generation = texture_generation_;
         return true;
     }
-    return false;
+    return reject(HudPublicationFailureStage::ordinal, ResourceFailureCode::none);
 }
 
 void HudVisualPublication::invalidate_open_lane() noexcept {

@@ -3541,6 +3541,8 @@ void CI3DObjectSkills::ShowTacticsMenu()
 {
     const auto units = SelectedTacticsUnits(pScreen);
     if (units.empty()) return;
+    WideScreen::Scope wideScope(owned::widescreen::kBottomLeft);
+    OwnedRender::E3HudLanePublication hudLane(this,OwnedRender::E3HudLane::skill);
     bool allAI = true;
     for (auto *unit : units) allAI = allAI && ModRuntime::Current()->CompanionSkillAI(*unit);
     pScreen->SetInputMode(MODE_SIMPLE);
@@ -3635,9 +3637,9 @@ BOOL CI3DObjectSkills::Draw(CRenderer *pRend)
             {
                 const int x = (i / 4) * 64;
                 const int y = (i % 4) * 64;
-                OwnedRender::E3HudIcon(OwnedRender::E3HudLane::skill,
-                    availability ? "jmv_gocamp" : "jmv_gocamp_disabled",256,64,64,64,64,x,y);
-                fieldCampButtonAvailability = availability;
+                if (OwnedRender::E3HudIcon(OwnedRender::E3HudLane::skill,
+                    availability ? "jmv_gocamp" : "jmv_gocamp_disabled",256,64,64,64,64,x,y))
+                    fieldCampButtonAvailability = availability;
             }
         }
         break;

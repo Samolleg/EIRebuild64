@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p4c`, commit `a9d3547dd157be330c004c6d4048502322e0426d`.
+integration changes in branch `eirebuild/c74-fix1`, commit `fadf374e4e1b28358997ed36b173f132231254ab`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -109,3 +109,8 @@ retirement, wheel remainders and scrollbar capture in camp_session.h.
 Typed source callbacks retain native formatting, independent display Parties
 and gameplay owners. Full typed model previews, figure LRU and manager
 teardown remain open in the task REMAINING.md; they are not claimed here.
+
+OWN74-FIX1 exposes the shared HUD repaint rejection (stage, member and resource
+code) to typed callers. Embedded text publications reject zero surface generations
+and report bounded, specific transaction/lifetime failures. Native rendering
+algorithms and gameplay policy are unchanged.

@@ -673,7 +673,21 @@ BOOL CDXGISurface::ReleaseDC(HDC hDC)
     const auto completed=owned::ui_layer_end(uiRecordingDc,uiRecipe);
     uiRecordingDc=nullptr;
     if(ownedTextDc){
-        const bool success=!completed.promoted && completed.failure==owned::UiLayerFailure::none;
+        bool success=!completed.promoted && completed.failure==owned::UiLayerFailure::none;
+        // Typed text does not write pixels. Publish the real backing surface's
+        // identity too, including after screen/resource recreation, so the blit
+        // can reach owned_text_consume with a nonzero current generation.
+        if(success && !OwnedRender::E1SurfaceValue(OwnedSurfaceId())) {
+            success=ownedSurface.Complete(texture.Get());
+            if(!success) {
+                static bool reported=false;
+                if(!reported) {
+                    reported=true;
+                    GameJournal::Event("RENDER","owned_text_surface_unavailable",
+                        "surface=%llu reason=surface_publication",OwnedSurfaceId());
+                }
+            }
+        }
         owned::owned_text_finish_dc(OwnedSurfaceId(),OwnedSurfaceGeneration(),success);
         if(completed.promoted)ReleasePixelsDC();
         ownedTextDc=false;uiRecipe.clear();uiLayer={};

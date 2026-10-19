@@ -141,7 +141,8 @@ public:
     // producer, same atlas cell) outside a lane rebuild: replace that slot's
     // texture. False when no published slot occupies that cell.
     bool repaint_icon(HudVisualLane lane, const char* canonical_name,
-                      const HudIconPlacement& placement);
+                      const HudIconPlacement& placement,
+                      HudPublicationFailure* failure = nullptr);
 
     const HudPublishedVisual* find(HudVisualLane lane,
                                    std::uint32_t ordinal) const noexcept;

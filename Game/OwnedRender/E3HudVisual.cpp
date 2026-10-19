@@ -27,15 +27,23 @@ struct State {
 };
 State& state() { static auto* value=new State; return *value; }
 owned::HudVisualLane lane(OwnedRender::E3HudLane value) {return owned::HudVisualLane(value);}
+void omitted(owned::HudVisualLane value, unsigned ordinal, const char* stage,
+    const char* member=nullptr, owned::ResourceFailureCode code=owned::ResourceFailureCode::none) noexcept;
 bool resolve(void*, owned::HudResourceRole role, const char* name,
     owned::ResourceBlob& blob, owned::HudPublicationFailureStage& stage,
     owned::ResourceFailureCode& code) {
     auto* manager=role==owned::HudResourceRole::texture?state().textures:state().figures;
     stage=owned::HudPublicationFailureStage::resolver; code=owned::ResourceFailureCode::not_found;
-    if(!manager)return false;
+    if(!manager){
+        stage=owned::HudPublicationFailureStage::resolver_unavailable;
+        omitted(state().publication.capturing_lane_id(),0,"resolver_unavailable",name,code);return false;
+    }
     DWORD size=0;
     BYTE* bytes=manager->GetFile(name,&size);
-    if(!bytes)return false;
+    if(!bytes){
+        omitted(state().publication.capturing_lane_id(),0,
+            role==owned::HudResourceRole::texture?"texture_resolver":"figure_resolver",name,code);return false;
+    }
     struct Close { CResourceManager* manager; BYTE* bytes; ~Close(){manager->CloseFile(bytes);} } close{manager,bytes};
     static const owned::ResourceStore store;
     owned::ResourceFailure failure;
@@ -44,15 +52,19 @@ bool resolve(void*, owned::HudResourceRole role, const char* name,
     }
     stage=owned::HudPublicationFailureStage::none;code=owned::ResourceFailureCode::none;return true;
 }
-void omitted(owned::HudVisualLane value, unsigned ordinal, const char* stage) noexcept {
-    // One actionable journal entry per lane/screen; no high-frequency log.
+void omitted(owned::HudVisualLane value, unsigned ordinal, const char* stage,
+    const char* member, owned::ResourceFailureCode code) noexcept {
+    // Bound repeated failures without hiding every later failure in this screen.
     static std::uint64_t reportedEpoch=0;
-    static unsigned mask=0;
-    if(reportedEpoch!=state().epoch){reportedEpoch=state().epoch;mask=0;}
-    const unsigned bit=1u<<unsigned(value);
-    if(mask&bit)return;
-    mask|=bit;
-    GameJournal::Event("RENDER","hud_visual_omitted","lane=%u ordinal=%u stage=%s",unsigned(value),ordinal,stage);
+    static std::array<DWORD,5> last{};
+    static std::array<unsigned,5> counts{};
+    if(reportedEpoch!=state().epoch){reportedEpoch=state().epoch;last={};counts={};}
+    const unsigned index=unsigned(value);
+    const DWORD now=GetTickCount();
+    if(index>=counts.size() || counts[index]>=16 || (counts[index] && now-last[index]<2000))return;
+    ++counts[index];last[index]=now;
+    GameJournal::Event("RENDER","hud_visual_omitted","lane=%u ordinal=%u stage=%s member=%s resource=%s",
+        index,ordinal,stage,member?member:"",owned::resource_failure_code_name(code));
 }
 }
 namespace OwnedRender {
@@ -106,22 +118,35 @@ E3HudLanePublication::~E3HudLanePublication() {
     if(armed)s.publication.finish_lane(std::uncaught_exceptions()==exceptions);
     s.receiver=previous;s.capture=previousCapture;
 }
-void E3HudIcon(E3HudLane value, const char* name, unsigned atlas, unsigned sw,
+bool E3HudIcon(E3HudLane value, const char* name, unsigned atlas, unsigned sw,
     unsigned sh, unsigned w, unsigned h, unsigned x, unsigned y, bool hd,
     unsigned sx, unsigned sy) noexcept {
     auto& p=state().publication;
-    if(state().receiver && !state().capture){omitted(lane(value),0,"lane_begin");return;}
+    if(state().receiver && !state().capture){omitted(lane(value),0,"lane_begin",name);return false;}
     const owned::HudIconPlacement placement{atlas,sw,sh,w,h,x,y,sx,sy,hd?1u:0u};
     try {
         const std::string canonical=std::string(name?name:"")+(hd?".x2.mmp":".mmp");
-        if(p.capturing_lane_id()==lane(value))p.observe_icon(canonical.c_str(),placement);
-        else if(!p.repaint_icon(lane(value),canonical.c_str(),placement))omitted(lane(value),0,"repaint");
-    } catch(...) {p.reject_icon_attempt();omitted(lane(value),0,"icon");}
+        owned::HudPublicationFailure failure;
+        if(p.capturing_lane_id()==lane(value)) {
+            if(p.observe_icon(canonical.c_str(),placement))return true;
+            failure=p.classify_missing(lane(value),0,p.active_screen_generation(),true);
+        } else {
+            if(p.repaint_icon(lane(value),canonical.c_str(),placement,&failure))return true;
+        }
+        omitted(lane(value),failure.ordinal,owned::hud_publication_failure_stage_name(failure.stage),
+            failure.logical_member.data(),failure.resource_failure);
+    } catch(...) {p.reject_icon_attempt();omitted(lane(value),0,"icon",name);}
+    return false;
 }
 bool E3HudAttachFigure(CI3DObject* owner, const char* name) noexcept {
     auto& s=state();
     if(owner!=s.receiver)return false;
-    try {if(s.capture)s.publication.attach_figure(name);}
+    try {if(s.capture && !s.publication.attach_figure(name)) {
+        const auto value=s.publication.capturing_lane_id();
+        const auto failure=s.publication.classify_missing(value,0,s.publication.active_screen_generation(),true);
+        omitted(value,failure.ordinal,owned::hud_publication_failure_stage_name(failure.stage),
+            failure.logical_member.data(),failure.resource_failure);
+    }}
     catch(...) {s.publication.invalidate_open_lane();}
     return true; // A claimed carrier is empty even when publication failed.
 }
@@ -216,7 +241,8 @@ void E3HudDrawVisual(CI3DFigure* figure, CRenderer* renderer, E3HudLane value, u
     if(!visual){
         const auto failure=state().publication.classify_missing(lane(value),ordinal,
             state().publication.active_screen_generation(),true);
-        omitted(lane(value),ordinal,owned::hud_publication_failure_stage_name(failure.stage));return;
+        omitted(lane(value),failure.ordinal,owned::hud_publication_failure_stage_name(failure.stage),
+            failure.logical_member.data(),failure.resource_failure);return;
     }
     try {
         if(!figure || !renderer || !E3HudVisualAccess::Draw(figure,renderer,*visual))

@@ -32,7 +32,7 @@ private:
     bool armed=false;
     bool previousCapture=false;
 };
-void E3HudIcon(E3HudLane, const char* name, unsigned atlas, unsigned sourceWidth,
+bool E3HudIcon(E3HudLane, const char* name, unsigned atlas, unsigned sourceWidth,
     unsigned sourceHeight, unsigned width, unsigned height, unsigned x, unsigned y,
     bool hd=false, unsigned sourceX=0, unsigned sourceY=0) noexcept;
 bool E3HudAttachFigure(CI3DObject*, const char* name) noexcept;

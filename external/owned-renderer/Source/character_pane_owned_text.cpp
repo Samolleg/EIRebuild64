@@ -1193,7 +1193,8 @@ struct TextSession {
     std::atomic<std::uint64_t> pane_epoch{0}, pane_frame{0}, chat_epoch{0}, chat_frame{0};
     bool active = false, scope = false, released = false, pane_complete = false;
     OwnedTextErrorSink error_sink = nullptr;
-    bool failure_reported = false;
+    DWORD last_failure_tick = 0;
+    unsigned failure_count = 0;
     OwnedTextKind kind = OwnedTextKind::pane;
     const void* pane_owner = nullptr;
     const void* chat_owner = nullptr;
@@ -1235,11 +1236,12 @@ TextSession& text_session() noexcept {
     static auto* value = new TextSession;
     return *value;
 }
-void text_failure(CharacterPaneTextFailure failure) noexcept {
+void text_failure(CharacterPaneTextFailure failure, const char* detail = nullptr) noexcept {
     auto& s = text_session();
-    if (s.failure_reported) return;
-    s.failure_reported = true;
-    const char* reason = character_pane_text_failure_name(failure);
+    const DWORD now = GetTickCount();
+    if (s.failure_count >= 64 || (s.failure_count && now - s.last_failure_tick < 2000)) return;
+    ++s.failure_count; s.last_failure_tick = now;
+    const char* reason = detail ? detail : character_pane_text_failure_name(failure);
     combat_ui_set_status(reason);
     if (s.error_sink) s.error_sink(reason);
 }
@@ -1257,7 +1259,7 @@ void owned_text_interface_end() noexcept {
 void owned_text_interface_begin(HFONT combat_font, OwnedTextErrorSink error_sink) noexcept {
     owned_text_interface_end();
     auto& s = text_session();
-    s.error_sink = error_sink; s.failure_reported = false;
+    s.error_sink = error_sink; s.failure_count = 0; s.last_failure_tick = 0;
     s.active = true; s.font_generation = s.advance();
     s.recorder.initialize_fonts(s.font_generation);
     character_pane_publish_combat_font(combat_font, s.font_generation);
@@ -1270,7 +1272,11 @@ void owned_text_begin_frame() noexcept {
 OwnedTextStamp owned_text_begin(OwnedTextKind kind, const void* owner,
     std::uint64_t pane_surface) noexcept {
     auto& s = text_session();
-    if (!s.active || !owner || s.scope) return {};
+    if (!s.active || !owner || s.scope) {
+        text_failure(CharacterPaneTextFailure::dc_transaction,
+            !s.active ? "interface_inactive" : !owner ? "owner_missing" : "scope_already_open");
+        return {};
+    }
     s.scope = true; s.kind = kind; s.dc_surface = 0; s.released = false;
     if (kind == OwnedTextKind::pane) {
         s.pane_owner = owner; s.pane_surface = pane_surface;
@@ -1357,8 +1363,9 @@ void owned_text_finish_dc(std::uint64_t surface, std::uint64_t generation,
             s.chat.retire(surface); text_failure(failure);
         }
     } else {
-        s.pane = std::move(frame); s.pane_complete = ready; s.pane_generation = generation;
-        if (ready) character_pane_text_content(s.pane);
+        s.pane = std::move(frame); s.pane_complete = ready && generation; s.pane_generation = generation;
+        if (s.pane_complete) character_pane_text_content(s.pane);
+        else text_failure(failure, !generation ? "surface_generation_unavailable" : "pane_recording_failed");
     }
     s.recorder.abort_frame(); s.dc_surface = 0; s.released = true;
 }
@@ -1374,7 +1381,10 @@ bool owned_text_consume(Renderer& renderer, std::uint64_t surface,
     auto& s = text_session(); result = S_OK;
     if (surface && surface == s.pane_surface) {
         if (s.scope || !s.pane_complete || s.pane_generation != generation || s.pane_frame != s.frame) {
-            text_failure(CharacterPaneTextFailure::dc_transaction); return true;
+            text_failure(CharacterPaneTextFailure::dc_transaction,
+                s.scope ? "pane_scope_not_completed" : !s.pane_complete ? "pane_not_complete" :
+                s.pane_generation != generation ? "surface_generation_changed" : "pane_frame_changed");
+            return true;
         }
         result = renderer.queue_character_pane_text(s.pane, s.pane_epoch, s.frame, destination, source);
         s.pane_complete = false;
