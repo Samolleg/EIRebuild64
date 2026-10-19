@@ -321,7 +321,10 @@ void CAISpellCaster::Initialize(CUnit *pUnit)
     {
         if (pUS->GetNativeWeaponType() != RPGWST_MAGIC)
             pUS->GetWeaponAttack(AddAttack(AT_WEAPON, -1, pUS->GetCurrentWeaponRange()));
-        for (i = 0; i < pUnit->GetSpellSlotCount(); i++)
+        // Addon companion AI owns the first eight physical quick-spell slots.
+        const int spellCount = companion ? Min(8, int(pUnit->GetSpellSlotCount()))
+                                         : int(pUnit->GetSpellSlotCount());
+        for (i = 0; i < spellCount; i++)
         {
             CSpell *pSpell = pUnit->GetQSpell(i);
             if (pSpell)
@@ -583,13 +586,20 @@ float CAISpellCaster::CalcAttackCost(const CPlot3D &ptPreferred, CUnit *pCaster,
     auto*server=dynamic_cast<CUnitServer*>(pCaster->GetUnitSpecific());auto*spell=sourceAttack.nAttackNumber>=0&&sourceAttack.nAttackNumber<int(pCaster->GetSpellSlotCount())?pCaster->GetQSpell(sourceAttack.nAttackNumber):nullptr;
     if(mod&&server){
         server->SyncNpcMagicState();
-        if(!server->HasAISpellMana(sourceAttack.nAttackNumber))return -1e30f;
+        if(!server->HasAISpellMana(sourceAttack.nAttackNumber)){
+            companionRefusals |= NoMana; return -1e30f;
+        }
         // f29's shared flag forbids ordinary magic, not weapon skills.
         if(mod->SpellAddon().Feature29()==1&&spell&&!mod->SkillConfig(spell,config)&&
-           pCaster->CheckFlag(UNIT_FEEBLED))return -1e30f;
+           pCaster->CheckFlag(UNIT_FEEBLED)){
+            companionRefusals |= CastBlocked; return -1e30f;
+        }
     }
     if(mod&&mod->SkillConfig(spell,config)){
-        if(!server||!server->CanRequestAISkill(sourceAttack.nAttackNumber,pTarget))return -1e30f;
+        if(!server||!server->CanRequestAISkill(sourceAttack.nAttackNumber,pTarget)){
+            companionRefusals |= mod->SkillCooldown(*pCaster,spell)>0 ? Cooldown : SkillUnavailable;
+            return -1e30f;
+        }
         auto*cached=GetAttack(-1);if(cached)attack=*cached;WORD toHit=attack.attack.wToHit;server->GetWeaponAttack(attack.attack);attack.attack.wToHit=toHit;
         attack.nAttackNumber=sourceAttack.nAttackNumber;attack.type=AT_WEAPON;attack.fpRange=server->GetCurrentWeaponRange();attack.nTargets=0;attack.fpDamageRadius=0;attack.nDuration=0;
         float mult=config.scaleDamageWithMelee?(std::max)(0.f,config.damageMultiplier)*(std::max)(1,config.projectileCount):1;
@@ -773,6 +783,8 @@ bool CAISpellCaster::IsValidHealToCast(EAttackType type, bool bHealOnly)
 void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList &units,
                                     const CPlot3D &ptPrefered, bool bHeal, bool bDoNotMove)
 {
+    companionRefusals=0;
+    companionHadTargets=units.GetCount()!=0;
     ModTactical::Selection tacticalSelection(logic.GetUnit(),units,bHeal);
     RefreshSkillCache(logic.GetUnit());
     POSITION pos, posBest;
@@ -902,6 +914,7 @@ void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList 
                 bOk = CanAttackEnemyFrom(logic, pThis->GetCP(), res);
             if (bOk && CanAttackEnemy(logic, res, bDoNotMove))
                 return;
+            companionRefusals |= AttackBlocked;
         }
         // проверим, если все виды атаки врага исчерпаны, то добавим его в список игнорируемых
         int nCount = 0;
@@ -919,6 +932,8 @@ void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList 
 void CAISpellCaster::Load(CSave &file)
 {
     skillCacheValid=false;
+    companionObserved=companionLogged=false;
+    companionRefusals=0;
     fpAvrgDamage = 0;
     LoadCArray(attacks, file);
     if (file.GetVersion() < 90)
@@ -1855,13 +1870,38 @@ void CUMPlayer::DoAttack(CAIUnitLogic &logic, CMapObject *_pTarget, ERPGHitLocat
     cmdState = PC_IDLE;
     pTarget = _pTarget;
     logic.StartPlayerAttack(_pTarget, hl, _bRun);
-    if(auto*mod=ModRuntime::Current();!manualWeaponSkill&&mod&&mod->CompanionSkillAI(*logic.GetUnit())&&_pTarget&&_pTarget->WhoAmI()==HPC_UNIT&&!_pTarget->IsDead()){
-        CUnitList one;one.AddTail(static_cast<CUnit*>(_pTarget));CAISpellCaster::CEnemy choice;
-        logic.caster.FindBestTarget(logic,choice,one,logic.GetUnit()->GetCP(),false,false);
-        if(static_cast<CUnit*>(choice)==_pTarget&&logic.caster.IsWeaponSkillChoice(logic,choice))logic.caster.AttackEnemy(logic,choice);
-    }
+    if (!manualWeaponSkill)
+        UpdateCompanionAttack(logic);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Reconsider the explicit enemy at command boundaries as well as on the click.
+// Keep the enemy in the player motivation while a chosen spell supports an ally.
+bool CUMPlayer::UpdateCompanionAttack(CAIUnitLogic &logic)
+{
+    auto* mod=ModRuntime::Current();
+    auto* unit=logic.GetUnit();
+    if (!mod || !mod->CompanionSkillAI(*unit) || pTarget.IsEmpty() ||
+        pTarget->WhoAmI()!=HPC_UNIT || pTarget->IsDead() || pTarget==unit)
+        return false;
+    auto* server=logic.GetUnitServer();
+    // Manual casts and tagged weapon skills must finish before automatic choice.
+    if (server->HasCast() || server->HasSkill() ||
+        ModSkills::Slot(server->GetScriptCommand().dwParam)>=0 ||
+        ModSkills::Slot(server->GetNextScriptCommand().dwParam)>=0)
+    {
+        logic.caster.ReportCompanionDecision(logic, {}, "order", "command_in_progress");
+        return true;
+    }
+    if (!logic.IsAttacking() && !logic.IsIdling())
+        return false;
+    CUnitList one;
+    one.AddTail(static_cast<CUnit*>(pTarget));
+    CAISpellCaster::CEnemy choice;
+    logic.caster.FindBestTarget(logic,choice,one,unit->GetCP(),false,false);
+    if (!logic.caster.ApplyCompanionChoice(logic,choice,"order") && !logic.IsAttacking())
+        logic.StartAttack(pTarget);
+    return true;
+}
 void CUMPlayer::DoSkill(CAIUnitLogic &logic, CMapObject *pTarget, int nSkill, int nItemID,
                         bool _bRun)
 {
@@ -1989,7 +2029,8 @@ void CUMPlayer::SeekTargets(CAIUnitLogic &logic)
             {
                 if(auto*mod=ModRuntime::Current();mod&&mod->CompanionSkillAI(*pThis)){
                     CUnitList one;one.AddTail(static_cast<CUnit*>(pTarget));logic.caster.FindBestTarget(logic,enemy,one,pThis->GetCP(),false,true);
-                    if(!enemy.IsEmpty())logic.caster.AttackEnemy(logic,enemy);
+                    if(!logic.caster.ApplyCompanionChoice(logic,enemy,"search") && !enemy.IsEmpty())
+                        logic.caster.AttackEnemy(logic,enemy);
                 }else logic.StartAttack(pTarget);
                 return;
             }
@@ -2044,13 +2085,16 @@ void CUMPlayer::SeekTargets(CAIUnitLogic &logic)
                     }
                 }
             }
-            if (!logic.caster.IsEngaging(logic, enemy)){
-                if(auto*mod=ModRuntime::Current();mod&&mod->CompanionSkillAI(*pThis))logic.caster.AttackEnemy(logic,enemy);
-                else logic.StartAttack(pEnemy);
-            }
+            const bool companionChoice=logic.caster.ApplyCompanionChoice(logic,enemy,"search");
+            if (!companionChoice && !logic.caster.IsEngaging(logic, enemy))
+                logic.StartAttack(pEnemy);
             pTarget = 0; // automatic attack mode
         }
+        else
+            logic.caster.ReportCompanionDecision(logic,enemy,"search");
     }
+    else
+        logic.caster.ReportCompanionDecision(logic,{},"search","not_aggressive");
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // everyone who follow us or follow same person as we (maybe transitive) is in one group
@@ -2159,6 +2203,8 @@ void CUMPlayer::StartMoving(CAIUnitLogic &logic, bool bGroup)
 void CUMPlayer::CommandUnit(CAIUnitLogic &logic)
 {
     bool bIsCombatMode = IsCombat(logic);
+    if (auto* mod=ModRuntime::Current(); mod && !mod->CompanionSkillAI(*logic.GetUnit()))
+        logic.caster.ReportCompanionDecision(logic,{},"command","flag_missing");
 
     // complain about attack on defensive
     if (logic.GetLastHitBy() != 0 && logic.GetUnit()->GetAggression() != PAS_AGGRESSIVE)
@@ -2167,6 +2213,8 @@ void CUMPlayer::CommandUnit(CAIUnitLogic &logic)
     switch (cmdState)
     {
     case PC_IDLE:
+        if (UpdateCompanionAttack(logic))
+            break;
         if (pFollowTo.IsEmpty() && logic.IsFollowing())
             logic.StartIdle();
         //
@@ -3910,6 +3958,75 @@ void CAIUnitLogic::Store(CSave &file)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
+void CAISpellCaster::ReportCompanionDecision(CAIUnitLogic &logic, const CEnemy &choice,
+                                            const char* path, const char* reason)
+{
+    auto* unit=logic.GetUnit();
+    auto* mod=ModRuntime::Current();
+    if (!unit || !unit->IsHero() || !mod)
+        return;
+    const bool enabled=mod->CompanionSkillAI(*unit);
+    if (!enabled && !companionObserved)
+        return;
+    if (enabled) companionObserved=true;
+    if (!enabled)
+        reason="flag_missing";
+    if (!reason)
+        reason=choice.pEnemy ? (choice.nAttackNumber>=0 ? "selected" : "weapon")
+              : (companionRefusals&NoMana) ? "no_mana"
+              : (companionRefusals&Cooldown) ? "cooldown"
+              : (companionRefusals&SkillUnavailable) ? "skill_unavailable"
+              : (companionRefusals&AttackBlocked) ? "attack_blocked"
+              : (companionRefusals&CastBlocked) ? "cast_blocked"
+              : companionHadTargets ? "no_choice" : "no_target";
+    const bool selection=strcmp(reason,"command_in_progress")!=0 &&
+        strcmp(reason,"not_aggressive")!=0 && strcmp(reason,"flag_missing")!=0;
+    const unsigned refusals=selection ? companionRefusals : 0;
+    const int target=choice.pEnemy ? choice.pEnemy->GetID() : -1;
+    const DWORD now=GetTickCount();
+    if (companionLogged &&
+        ((companionLoggedSlot==choice.nAttackNumber && companionLoggedTarget==target &&
+          strcmp(companionLoggedPath,path)==0 && strcmp(companionLoggedReason,reason)==0 &&
+          companionLoggedRefusals==refusals) ||
+         now-companionLogTime<1000))
+        return;
+    if (!enabled) companionObserved=false;
+    companionLogged=true;
+    companionLoggedSlot=choice.nAttackNumber;
+    companionLoggedTarget=target;
+    companionLoggedPath=path;
+    companionLoggedReason=reason;
+    companionLoggedRefusals=refusals;
+    companionLogTime=now;
+    GameJournal::Event("AI","companion_decision",
+        "unit=%d enabled=%d slot=%d target=%d path=%s reason=%s no_mana=%d cooldown=%d skill_unavailable=%d cast_blocked=%d attack_blocked=%d",
+        unit->GetID(),enabled,choice.nAttackNumber,target,path,reason,
+        !!(refusals&NoMana),!!(refusals&Cooldown),
+        !!(refusals&SkillUnavailable),!!(refusals&CastBlocked),
+        !!(refusals&AttackBlocked));
+}
+
+bool CAISpellCaster::ApplyCompanionChoice(CAIUnitLogic &logic, const CEnemy &choice,
+                                         const char* path)
+{
+    auto* mod=ModRuntime::Current();
+    if (!mod || !mod->CompanionSkillAI(*logic.GetUnit()))
+        return false;
+    if (!choice.pEnemy || choice.nAttackNumber<0 || choice.nAttackNumber>=8)
+    {
+        ReportCompanionDecision(logic,choice,path);
+        return false;
+    }
+    // Like the addon SeekTargets wrapper, dispatch every selected spell/skill.
+    // AttackEnemy itself preserves an already queued identical command.
+    AttackEnemy(logic,choice);
+    auto* server=logic.GetUnitServer();
+    const bool accepted=IsWeaponSkillChoice(logic,choice)
+        ? server->HasAISkillCommand(choice.nAttackNumber,choice.pEnemy)
+        : ModTactical::HasCommand(server,choice.nAttackNumber,choice.pEnemy);
+    ReportCompanionDecision(logic,choice,path,accepted ? "selected" : "command_rejected");
+    return true;
+}
 bool CAISpellCaster::HasWeaponSkills(CUnit*unit){auto*mod=ModRuntime::Current();if(!mod||!unit)return false;for(int i=0;i<int(unit->GetSpellSlotCount());++i){ModSkills::Config config;if(mod->SkillConfig(unit->GetQSpell(i),config))return true;}return false;}
 void CAISpellCaster::RefreshSkillCache(CUnit*unit){if(!ModRuntime::Current()||!unit)return;auto*weapon=unit->GetCurrentQWeapon();bool changed=!skillCacheValid||skillWeapon!=weapon||skillWeaponType!=(weapon?weapon->GetSubtypeID():0)||skillCompanion!=ModRuntime::Current()->CompanionSkillAI(*unit);
  for(int i=0;i<16;++i)changed|=skillSlots[i]!=(i<int(unit->GetSpellSlotCount())?unit->GetQSpell(i):nullptr);if(changed)Initialize(unit);

@@ -175,6 +175,14 @@ private:
     DWORD skillWeaponType=0;
     CSpell* skillSlots[16]={};
     bool skillCacheValid=false,skillCompanion=false;
+    // Passive, transient journal state; never serialized with the caster.
+    enum CompanionRefusal { NoMana=1, Cooldown=2, SkillUnavailable=4, CastBlocked=8, AttackBlocked=16 };
+    unsigned companionRefusals=0, companionLoggedRefusals=0;
+    bool companionHadTargets=false, companionObserved=false, companionLogged=false;
+    int companionLoggedSlot=-2, companionLoggedTarget=-1;
+    const char* companionLoggedPath=nullptr;
+    const char* companionLoggedReason=nullptr;
+    DWORD companionLogTime=0;
     //
     void FillAttackData(SAIPotentialAttack &a, EAttackType type, int nNumber, float fpRange,
                         int nTargets, float fpDamageRadius, int nDuration);
@@ -196,6 +204,9 @@ public:
     void Initialize(CUnit *pUnit);
     void RefreshSkillCache(CUnit*);
     bool HasWeaponSkills(CUnit*);
+    bool ApplyCompanionChoice(CAIUnitLogic&, const CEnemy&, const char* path);
+    void ReportCompanionDecision(CAIUnitLogic&, const CEnemy&, const char* path,
+                                 const char* reason=nullptr);
     bool IsWeaponSkillChoice(CAIUnitLogic&,const CEnemy&);
     void SelectRevengeSpell(CAIUnitLogic&,CEnemy&);
     // интерфейс к системе выбора лучшей цели и выполнение выбранной команды
@@ -447,6 +458,7 @@ private:
     bool bRun;
 
     void SeekTargets(CAIUnitLogic &logic);
+    bool UpdateCompanionAttack(CAIUnitLogic &logic);
     void AddAttackedTargets(CAIUnitLogic &logic, CUnitList &targets);
     bool IsVisibleTarget(CAIUnitLogic &logic, CUnit *pUnit);
     bool IsCombat(CAIUnitLogic &logic);

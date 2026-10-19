@@ -3557,7 +3557,7 @@ void CI3DObjectSkills::ChangeSkill(int nSlot)
                     else unit->GetOwner()->party.vars.SetVar(key, 1.f);
                     if (auto *server = dynamic_cast<CUnitServer *>(unit->GetUnitSpecific()))
                         server->logic.caster.RefreshSkillCache(unit);
-                    EngineDiagnostics::Event("Tactics", "ai unit=%d enabled=%d", unit->GetID(), !allAI);
+                    GameJournal::Event("TACTICS", "ai", "unit=%d enabled=%d", unit->GetID(), !allAI);
                 }
                 ShowTacticsMenu(); return;
             }
