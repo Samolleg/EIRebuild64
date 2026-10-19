@@ -48,11 +48,16 @@ CI3DObject* art(CI3DObject* owner){
 }
 void rail_draw(List list,CRenderer* renderer){
     Rect track;if(!RailTrack(list,track))return;
-    auto* owner=art(screen);auto* bar=owner->AddFigure();
-    if(!bar){owned::camp_inventory_art_failed();return;}
-    bar->MakeBar(32,100,0,0,12,100,14,14,114,114);
-    {auto transform=placed({{0,0,12,100},track});bar->Draw(renderer);}
-    owner->RemoveFigure(bar);
+    const auto scroll=E4CampAccess::Scroll(screen,list);
+    const auto bar=owned::camp::frontend::rail(Layout(),list,scroll);
+    auto* owner=art(screen);
+    owned::camp::frontend::draw_rail(bar,[&](int i,Placement p){
+        auto* figure=owner->AddFigure();if(!figure){owned::camp_inventory_art_failed();return;}
+        if(i==0)figure->MakeBar(32,100,0,0,12,100,14,14,114,114);
+        else figure->MakeBarFrame2(24,100,0,0,12,100,1.5f,14,14,114,114);
+        {auto transform=placed(p);figure->Draw(renderer);}
+        owner->RemoveFigure(figure);
+    },[](Rect){}); // Thumb is published once with the camp decoration snapshot.
 }
 }
 void E4CampAccess::Activate(CI3DScreenCamp* owner){
@@ -251,10 +256,8 @@ bool E4CampAccess::TipInside(CI3DObject* p,int index,POINT physical,bool& inside
     inside=!(RoleOf(p)==Role::root&&index>=4&&index<12)&&Hit(p,physical)==index;return true;
 }
 int E4CampAccess::First(CI3DObjectInventoryItems* p){
-    const int cols=Layout().grid_columns(vendor(p)),rows=Layout().grid_rows(vendor(p));
-    const int maximum=(std::max)(0,(p->pSortedItems.GetSize()+cols-1)/cols-rows);
-    const int row=std::clamp(int(p->fCurPos[p->nSortMode])/cols,0,maximum);
-    p->fCurPos[p->nSortMode]=float(row*cols);return row*cols;
+    const int first=owned::camp::frontend::first_item(Layout(),vendor(p),p->pSortedItems.GetSize(),p->fCurPos[p->nSortMode]);
+    p->fCurPos[p->nSortMode]=float(first);return first;
 }
 Placement E4CampAccess::Area(CI3DObject* p,Role role,int i){
     constexpr int learned_start=4+RPG_NUM_ACTUAL_AUTO_SKILLS+RPG_NUM_ACTUAL_MANUAL_SKILLS+23;
@@ -299,6 +302,8 @@ Placement E4CampAccess::Area(CI3DObject* p,Role role,int i){
 int E4CampAccess::Hit(CI3DObject* p,POINT physical){
     const auto role=RoleOf(p);if(!Active()||role==Role::none)return -2;
     CPoint point(physical);p->GetI3D()->ScreenToVirtual(point);
+    if(role==Role::wagon||role==Role::vendor)return owned::camp::frontend::grid_hit(Layout(),role==Role::vendor,p->areas.GetSize(),point,
+        [&](int i){return rect(p->areas[i]->rect);},[&](int i,POINT q){return p->areas[i]->PtInArea(CPoint(q))!=FALSE;});
     constexpr int learned_start=4+RPG_NUM_ACTUAL_AUTO_SKILLS+RPG_NUM_ACTUAL_MANUAL_SKILLS+23;
     const int count=role==Role::perks?learned_start+14:p->areas.GetSize();
     if(role==Role::spells){
@@ -326,31 +331,29 @@ bool E4CampAccess::MouseItem(CI3DObjectInventoryItems* p,POINT physical,int& slo
     CPoint point(physical);p->GetI3D()->ScreenToVirtual(point);const auto& l=Layout();const bool v=vendor(p);const auto r=l.grid(v);
     if(!r.contains(float(point.x),float(point.y)))return true;
     slot=p->ePartType==ISP_WAGON?IST_WAGON:p->ePartType==ISP_SPELLASSORT?IST_SPELL_ASSORT:IST_ITEM_ASSORT;
-    PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));const int index=First(p)+int((point.y-r.top)/l.cell)*l.grid_columns(v)+int((point.x-r.left)/l.cell);
+    PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));const int index=owned::camp::frontend::grid_pick(l,v,First(p),point);
     if(index>=0&&index<p->pSortedItems.GetSize())item=p->pSortedItems[index];return true;
 }
 bool E4CampAccess::Idle(CI3DObjectInventory* p){
     if(!Active()||!inventory(p))return false;
     PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));
-    // Whole rows replace the native horizontal interpolation, retaining its category/sort producer.
-    const int rows=int(p->fToScroll);p->fToScroll-=rows;p->fSpeed=0;
-    p->fCurPos[p->nSortMode]+=rows*Layout().grid_columns(vendor(p));First(static_cast<CI3DObjectInventoryItems*>(p));return true;
+    const int rows=owned::camp::frontend::idle_rows(p->fToScroll,p->nLock,p->fLockTime,p->GetFrameTime());
+    p->fToScroll=p->fSpeed=0;p->fCurPos[p->nSortMode]+=rows*Layout().grid_columns(vendor(p));
+    First(static_cast<CI3DObjectInventoryItems*>(p));return true;
 }
 bool E4CampAccess::SetToItem(CI3DObjectInventoryItems* p,int target){
     if(!Active()||!inventory(p))return false;
-    const int cols=Layout().grid_columns(vendor(p)),rows=Layout().grid_rows(vendor(p));int first=First(p);
-    if(target>=0){if(target<first)first=target/cols*cols;else if(target>=first+cols*rows)first=(target/cols-rows+1)*cols;}
-    p->fCurPos[p->nSortMode]=float(first);p->fToScroll=p->fSpeed=0;First(p);return true;
+    p->fCurPos[p->nSortMode]=float(owned::camp::frontend::reveal_item(Layout(),vendor(p),First(p),target));
+    p->fToScroll=p->fSpeed=0;First(p);return true;
 }
 bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
     if(!Active()||!inventory(p))return false;
-    PrepareGrid(static_cast<CI3DObjectInventoryItems*>(p));const auto& l=Layout();const bool v=vendor(p);const int first=First(p),count=p->pSortedItems.GetSize();
+    PrepareGrid(p);const auto& l=Layout();const bool v=vendor(p);const int first=First(p),count=p->pSortedItems.GetSize();
     const int cols=l.grid_columns(v),rows=l.grid_rows(v);ObserveGrid(v,first,count,p->nSortMode,cols,rows);
     Scope scope(v?Role::vendor:Role::wagon);
     auto& cache=grids[p];cache.visible.clear();
     for(int i=first;i<count&&i<first+cols*rows;++i)
         if(cache.items[i])cache.visible.emplace_back(cache.items[i]->GetI3DTextureName());
-    // Queue only the current page; hidden categories must not compete with it.
     if(!cache.visible.empty())owned::camp_inventory_request_icon(cache.visible.front().c_str(),renderer->GetD3D()->GetDevice().Get());
     owned::camp_inventory_prioritize_icons(!v?0:screen->bIsSpellConstr&&p==screen->pAssortSpells?1:2,cache.visible,{});
     const Rect native{50,float(p->nTopHeight),150,float(p->nTopHeight+100)};
@@ -359,33 +362,33 @@ bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
         auto* background=cell->AddFigure();if(!background){owned::camp_inventory_art_failed();return true;}
         background->MakeBar(p->fDepth*2,100,native.left,native.top,native.right,native.bottom,14,14,114,114);
     }
-    for(int i=0;i<cols*rows;++i){
-        const auto r=l.inventory_cell(v,i);auto transform=placed({native,r});
+    owned::camp::frontend::draw_grid(l,v,first,float(p->nTopHeight),[&](const owned::camp::frontend::GridCell& entry){
+        auto transform=placed(entry.placement);
         cell->GetFigure(0)->Draw(renderer);
         p->figures[10]->SetRelativeToScreen(100,float(p->nTopHeight+50),p->fDepth);p->figures[10]->Draw(renderer);
-        if(first+i>=count||!p->pSortedItems[first+i])continue;
-        SDrawItem item;item.pItem=p->pSortedItems[first+i];item.fX=100;item.fY=float(p->nTopHeight+50);item.fZ=p->fDepth*1.5f;item.fPixSize=100;item.eFrom=p->ePartType;
-        VisualScope clip(owned::camp::clipped_composition(l,{native,r},{65,native.top+15,135,native.top+85}),true);
+        if(entry.index>=count||!p->pSortedItems[entry.index])return;
+        SDrawItem item;item.pItem=p->pSortedItems[entry.index];item.fX=100;item.fY=float(p->nTopHeight+50);item.fZ=p->fDepth*1.5f;item.fPixSize=100;item.eFrom=p->ePartType;
+        VisualScope clip(owned::camp::clipped_composition(l,entry.placement,entry.icon_clip),true);
         ItemCost timer(true);BoolScope grid_scope(in_grid);p->pScreen->DrawItem(renderer,item);
-    }
-    for(int i=0;i<6;++i){auto transform=placed(Area(p,v?Role::vendor:Role::wagon,i+2));p->figures[i+2]->Draw(renderer);}
-    rail_draw(!v?List::stash:screen->bIsSpellConstr&&p==screen->pAssortSpells?List::spell_vendor:List::item_vendor,renderer);
+    },[&](int i,Rect target){
+        auto transform=placed({rect(p->areas[i+2]->rect),target});p->figures[i+2]->Draw(renderer);
+    },[&]{rail_draw(!v?List::stash:screen->bIsSpellConstr&&p==screen->pAssortSpells?List::spell_vendor:List::item_vendor,renderer);});
     auto& text=grid_text[p];const auto r=l.grid(v);
     if(!text)text=std::make_unique<CI3DSurface>(p->GetI3D(),int(r.left),int(r.top),int(r.right),int(r.bottom));
     std::vector<std::pair<int,int>> labels(cols*rows,{1,-1});
-    for(int i=0;i<cols*rows&&first+i<count;++i){
-        auto* item=p->pSortedItems[first+i];if(!item)continue;
+    owned::camp::frontend::grid_labels(l,v,first,count,[&](int i,int index,RECT,RECT){
+        auto* item=p->pSortedItems[index];if(!item)return;
         labels[i].first=item->GetCount();
         if(p->ePriceType!=ISK_TOTAL&&p->pScreen->CanClickOnItem(item,p->ePartType))
             labels[i].second=p->pScreen->GetItemPrice(item,p->ePriceType);
-    }
+    });
     if(labels!=cache.text){
         text->GetDC();text->Clear();
-        for(int i=0;i<int(labels.size());++i){
-            CString number;const int x=int((i%cols)*l.cell),y=int((i/cols)*l.cell);
-            if(labels[i].first!=1){number.Format("%d",labels[i].first);text->DrawText(number,CRect(x+6,y+3,x+int(l.cell)-6,y+23),1,RGB(228,215,167),DT_RIGHT);}
-            if(labels[i].second>=0){number.Format("%d",labels[i].second);text->DrawText(number,CRect(x+6,y+int(l.cell)-23,x+int(l.cell)-6,y+int(l.cell)-3),1,RGB(228,215,167),DT_CENTER);}
-        }
+        owned::camp::frontend::grid_labels(l,v,first,count,[&](int i,int,RECT quantity_rect,RECT price_rect){
+            CString number;
+            if(labels[i].first!=1){number.Format("%d",labels[i].first);text->DrawText(number,CRect(quantity_rect),1,RGB(228,215,167),DT_RIGHT);}
+            if(labels[i].second>=0){number.Format("%d",labels[i].second);text->DrawText(number,CRect(price_rect),1,RGB(228,215,167),DT_CENTER);}
+        });
         text->ReleaseDC();cache.text=std::move(labels);
     }
     return true;
@@ -394,6 +397,7 @@ bool E4CampAccess::DrawSpells(CI3DObjectSpellSlots* p,CRenderer* renderer){
     if(!Active()||RoleOf(p)!=Role::spells)return false;
     const auto scroll=Scroll(screen,List::spells);auto* person=screen->GetCurrentPers();
     if(!person)return true;
+    Scope scope(Role::spells);
     auto* cell=art(p);
     if(!cell->figures.GetSize()){
         auto* background=cell->AddFigure();if(!background){owned::camp_inventory_art_failed();return true;}
@@ -401,17 +405,20 @@ bool E4CampAccess::DrawSpells(CI3DObjectSpellSlots* p,CRenderer* renderer){
         auto* frame=cell->AddFigure();if(!frame){cell->RemoveAllFigures();owned::camp_inventory_art_failed();return true;}
         frame->MakeBarFrame2(8,100,0,0,100,100,15,14,142,114,242);
     }
-    for(int i=belt_first;i<(std::min)(int(QI_MAX_SPELLS),belt_first+8);++i){
-        {
-            auto transform=placed({{0,0,100,100},Layout().equipped(i,belt_first)});
-            cell->GetFigure(0)->Draw(renderer);cell->GetFigure(1)->Draw(renderer);
-            if(i==p->nCurrentSpell&&i<scroll.total){p->figures[0]->Show(TRUE);p->figures[0]->SetRelativeToScreen(50,50,3);p->figures[0]->Draw(renderer);}
-        }
-        if(i>=scroll.total)continue;
-        SDrawItem item;item.pItem=person->spells[i];item.fX=(i+.5f)*100;item.fY=50;item.fZ=6;item.fPixSize=100;item.eFrom=ISP_CAMPSLOTS;
-        // The source row index is the actual logical slot, not the old seven-cell viewport.
-        screen->DrawItem(renderer,item);
-    }rail_draw(List::spells,renderer);return true;
+    owned::camp::frontend::draw_spell_items(Layout(),belt_first,scroll.total,float(p->nTopHeight),
+        [&](int i,float x,float y,Placement a,Rect clip){
+            SDrawItem item;item.pItem=person->spells[i];item.fX=x;item.fY=y;item.fZ=12;item.fPixSize=100;item.eFrom=ISP_CAMPSLOTS;
+            VisualScope transform(owned::camp::clipped_composition(Layout(),a,clip),true);
+            BoolScope grid_scope(in_grid);screen->DrawItem(renderer,item);
+        });
+    owned::camp::frontend::draw_spell_frames(Layout(),belt_first,int(QI_MAX_SPELLS),scroll.total,p->nCurrentSpell,
+        [&](Placement a){auto transform=placed(a);cell->GetFigure(0)->Draw(renderer);cell->GetFigure(1)->Draw(renderer);},
+        [&](bool visible,Rect target){
+            p->figures[0]->Show(visible);if(!visible)return;
+            float x,y,z;p->figures[0]->GetRelativeToScreen(x,y,z);
+            auto transform=placed({{x-50,y-50,x+50,y+50},target});p->figures[0]->Draw(renderer);
+        },[&]{rail_draw(List::spells,renderer);});
+    return true;
 }
 bool E4CampAccess::SpellMouse(CI3DObjectSpellSlots* p,POINT physical,int& slot,CItem*& item){
     if(!Active()||RoleOf(p)!=Role::spells)return false;
@@ -475,21 +482,14 @@ bool E4CampAccess::Draw(CI3DObject* p,CRenderer* renderer){
         if(!holder->figures.GetSize())for(int i=0;i<2;++i){auto* background=holder->AddFigure();if(!background){holder->RemoveAllFigures();owned::camp_inventory_art_failed();return true;}
             background->MakeBar(16,100,0,0,100,100,14+i*128,14,114+i*128,114);
         }
-        for(int i=0;i<8;++i){auto transform=placed({{0,0,100,100},Layout().equipped(i,0,true)});holder->GetFigure(i<4?0:1)->Draw(renderer);}
+        owned::camp::frontend::draw_quick_backgrounds(Layout(),belt_first,[&](int index,Placement p){
+            auto transform=placed(p);holder->GetFigure(index)->Draw(renderer);
+        });
     }
-    for(int i=0;i<p->figures.GetSize();++i){
-        auto a=Uniform(role);
-        if(role==Role::root){
-            if(i<2){if(screen->eScreenMode==ISM_WEAPONS&&!(i==0?screen->bValidOK:screen->bValidCancel))continue;a={{0,400,200,500},Actions()};}
-            else if(i<10)a=Area(p,role,i+2);else continue;
-        }else if(role==Role::quick&&i<12){
-            if(i==6||i==11)continue;
-            float x,y,z;p->figures[i]->GetRelativeToScreen(x,y,z);const int slot=int(x/100);
-            a={{x-50,y-50,x+50,y+50},Layout().equipped(slot<4?slot:11-slot,0,true)};
-        }else if(role==Role::trade)a=Area(p,role,i/2);
-        else if(role==Role::perks){if(i<4)continue;float x,y,z;p->figures[i]->GetRelativeToScreen(x,y,z);a=PerkBand(x,y);}
-        auto transform=placed(a);p->figures[i]->Draw(renderer);
-    }
+    owned::camp::frontend::draw_object_figures(Layout(),int(screen->eScreenMode),belt_first,role,p->figures.GetSize(),
+        [&](int i,Placement a){auto transform=placed(a);p->figures[i]->Draw(renderer);},
+        [&](int i){return Area(p,role,i);},[&](int i){float x,y,z;p->figures[i]->GetRelativeToScreen(x,y,z);return std::pair<float,float>{x,y};},
+        [&](int i){return screen->eScreenMode!=ISM_WEAPONS||(i==0?screen->bValidOK:screen->bValidCancel);});
     if(role==Role::perks){rail_draw(List::learned,renderer);rail_draw(List::available,renderer);}
     // Preserve non-widget map previews owned by the original object.
     // Their implementation remains in CI3DObject after the handled figure pass.
@@ -520,15 +520,9 @@ bool E4CampAccess::Draw2D(CI3DObject* p){
 }
 bool E4CampAccess::ItemPlacement(CI3DItemScreen* owner,const SDrawItem& item,owned::camp::Composition& result){
     if(owner!=screen||!Active()||in_grid)return false;
-    const Rect source{item.fX-item.fPixSize*.5f,item.fY-item.fPixSize*.5f,item.fX+item.fPixSize*.5f,item.fY+item.fPixSize*.5f};
-    Rect target;
-    if(item.eFrom==ISP_CAMPSLOTS&&item.fY<100){int slot=int(item.fX/100);if(screen->eScreenMode==ISM_WEAPONS&&slot>=4)slot=11-slot;target=Layout().equipped(slot,belt_first,screen->eScreenMode==ISM_WEAPONS);}
-    else if(item.eFrom==ISP_ITEMTRADE||item.eFrom==ISP_SPELLTRADE)target=Layout().trade_cell(int((item.fX-200)/100)+int((item.fY-100)/100)*4);
-    else {
-        const auto a=Uniform(item.eFrom==ISP_UNKNOWN?Drawing():Role::construction);const float s=a.destination.width()/a.source.width();
-        target={a.destination.left+(source.left-a.source.left)*s,a.destination.top+(source.top-a.source.top)*s,a.destination.left+(source.right-a.source.left)*s,a.destination.top+(source.bottom-a.source.top)*s};
-    }
-    result=owned::camp::composition(Layout(),{source,target});return true;
+    const auto p=owned::camp::frontend::item_placement(Layout(),int(screen->eScreenMode),belt_first,Drawing(),
+        item.fX,item.fY,item.fPixSize,int(item.eFrom));
+    result=owned::camp::composition(Layout(),p);return true;
 }
 std::uint32_t E4CampAccess::PreviewRGB(CI3DItemScreen* owner,CItem* item){
     if(owner!=screen||!Active()||!item)return 0;

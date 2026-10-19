@@ -1,5 +1,5 @@
 #pragma once
-#include <camp_inventory.h>
+#include <camp_frontend.h>
 
 class CI3DScreenCamp;
 class CI3DObject;
@@ -13,10 +13,9 @@ struct SDrawItem;
 
 namespace owned {struct PreparedCampIcon;}
 namespace OwnedRender::E4 {
-enum class Role { none, root, background, info, help, stats, wagon, vendor,
-                  quick, spells, perks, trade, repair, construction, comparison, blueprint };
-enum class List { stash, spell_vendor, item_vendor, spells, learned, available };
-struct Scroll { bool visible=false; int position=0, total=0, page=0, category=0; };
+using Role = owned::camp::frontend::Role;
+using List = owned::camp::frontend::List;
+using Scroll = owned::camp::frontend::Scroll;
 struct Host {
     void* context=nullptr;
     bool (*current)(void*)=nullptr;

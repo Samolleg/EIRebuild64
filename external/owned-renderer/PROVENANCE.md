@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p3c`, commit `68db6ad72f466c4fb831f797b93d0668dea8cad0`.
+integration changes in branch `eirebuild/c74-p4`, commit `960cf07921429800a30f56c13394689cfdfb0e9f`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -90,3 +90,9 @@ and the c74 semantic tutorial table/resolver. Embedded message reflow runs at
 Init/Idle/SetOutputRect and before text ingress; tutorial uses a value snapshot
 of the active mission captured before modal entry, including actual skill types
 and spell slot areas. The proxy keeps its native readers and c74 values.
+
+OWN74-P4 extracts the c74 grid and label enumeration, row clamp/reveal/picking,
+scroll rail geometry/draw/drag, quick and spell figure producers, item placement
+and surface remap/card occlusion into camp_frontend.h. Both proxy and embedded
+adapters call these synchronous typed entries. Source-side camp background,
+card state, remaining role input and lifecycle integration remain open in P4.

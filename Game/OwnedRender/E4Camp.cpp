@@ -31,24 +31,10 @@ struct Drag { HWND window=nullptr; List list=List::stash; int mode=0,category=0;
 std::array<float,6> wheel_remainder{};
 struct Rail { owned::camp::Rect track,thumb; Scroll scroll; bool horizontal=false; int maximum=0; };
 Rail rail(List list) noexcept {
-    Rail b;
-    if(!host.scroll)return b;
+    Rail b;if(!host.scroll)return b;
     b.scroll=host.scroll(host.context,list);
-    if(!b.scroll.visible||b.scroll.page<=0)return b;
-    b.maximum=(std::max)(0,b.scroll.total-b.scroll.page);
-    b.scroll.position=std::clamp(b.scroll.position,0,b.maximum);
-    if(!b.maximum)return b;
-    if(list==List::spells){b.horizontal=true;b.track={layout.belt.left,146,layout.belt.right,156};}
-    else if(list==List::learned||list==List::available){
-        const bool learned=list==List::learned;const auto p=learned?layout.learned:layout.available;
-        b.track={p.right-(layout.compact?20.f:30.f),learned?346.f:200.f,
-                 p.right-(layout.compact?10.f:20.f),learned?569.f:550.f};
-    }else{const auto g=layout.grid(list!=List::stash);b.track={g.right+5.f/3,g.top,g.right+40.f/3,g.bottom};}
-    const float length=b.horizontal?b.track.width():b.track.height();
-    const float size=(std::min)(length,(std::max)(110.f/3,length*b.scroll.page/b.scroll.total));
-    const float offset=(length-size)*b.scroll.position/b.maximum;
-    b.thumb=b.horizontal?owned::camp::Rect{b.track.left+offset,b.track.top,b.track.left+offset+size,b.track.bottom}:
-        owned::camp::Rect{b.track.left,b.track.top+offset,b.track.right,b.track.top+offset+size};
+    const auto value=owned::camp::frontend::rail(layout,list,b.scroll);
+    b.track=value.track;b.thumb=value.thumb;b.horizontal=value.horizontal;b.maximum=value.maximum;
     return b;
 }
 POINT virtual_point(POINT p) noexcept {return {LONG(std::floor(p.x/layout.unit+layout.left)),LONG(std::floor(p.y/layout.unit))};}
@@ -57,9 +43,9 @@ void move_drag(POINT physical) noexcept {
     const auto b=rail(drag.list);
     if(!Current()||mode!=drag.mode||b.scroll.category!=drag.category||GetCapture()!=drag.window||!b.maximum){owned::camp_inventory_cancel_drag();return;}
     const auto p=virtual_point(physical);
-    const float length=b.horizontal?b.track.width()-b.thumb.width():b.track.height()-b.thumb.height();
-    const float offset=(b.horizontal?p.x-b.track.left:p.y-b.track.top)-drag.grab;
-    if(length>0&&host.scroll_to)host.scroll_to(host.context,drag.list,int(std::lround(std::clamp(offset/length,0.f,1.f)*b.maximum)));
+    if(host.scroll_to)host.scroll_to(host.context,drag.list,owned::camp::frontend::drag_position(
+        {b.track,b.thumb,b.scroll.position,b.maximum,b.horizontal},p,drag.grab));
+
 }
 std::uint64_t now() noexcept {LARGE_INTEGER q{};if(!QueryPerformanceCounter(&q)){cost.valid=false;return 0;}return q.QuadPart;}
 bool observe() noexcept {static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_ATTRIBUTION",value,sizeof(value))&&value[0]=='1';}();return enabled;}
@@ -72,35 +58,16 @@ bool Active() noexcept {return host.context&&valid&&layout.wide;}
 bool Current() noexcept {return Active()&&host.current&&host.current(host.context);}
 const owned::camp::Layout& Layout() noexcept {return layout;}
 owned::camp::Rect Stage() noexcept {
-    if(mode==0)return layout.character;
-    if(mode==1)return layout.content;
-    if(mode==3||mode==5){auto r=layout.workbench;r.left+=10;r.right+=10;return r;}
-    return layout.workspace;
+    return owned::camp::frontend::stage(layout,mode);
 }
 owned::camp::Rect Actions() noexcept {
-    if(mode!=1)return layout.actions;
-    const float middle=(layout.stash.left+layout.stash.right)*.5f;
-    return {middle-90,510,middle+90,600};
+    return owned::camp::frontend::actions(layout,mode);
 }
 owned::camp::Placement Uniform(Role r) noexcept {
-    switch(r){
-    case Role::stats:return {{0,100,200,400},layout.stats};
-    case Role::info:return {{600,100,800,400},layout.ordinary_info};
-    case Role::help:return {{0,100,200,400},layout.result_info};
-    case Role::comparison:return {{600,100,800,400},layout.comparison_info};
-    case Role::blueprint:return {{600,100,800,400},layout.result_info};
-    case Role::background:return {{0,100,800,500},{layout.left,0,layout.left+layout.width,600}};
-    default:return {{200,100,600,500},Stage()};
-    }
+    return owned::camp::frontend::uniform(layout,mode,r);
 }
 owned::camp::Placement PerkBand(float x,float y) noexcept {
-    const auto& p=x>=400?layout.available:y<245?layout.skills:layout.learned;
-    const float left=(p.left+15+p.right-25-200)*.5f;
-    if(x>=400)return {{400,100,600,500},{left,165,left+200,565}};
-    if(y<245)return {{200,100,400,245},{left,165,left+200,310}};
-    if(y<270)return {{200,245,400,265},{left,320,left+200,340}};
-    const int row=std::clamp(int((y-270)/15),0,13);const float top=346+row*16.f;
-    return {{200,270+row*15.f,400,285+row*15.f},{left,top,left+200,top+15}};
+    return owned::camp::frontend::perk_band(layout,x,y);
 }
 RECT Pixels(owned::camp::Rect r) noexcept {return {LONG(std::lround((r.left-layout.left)*layout.unit)),LONG(std::lround(r.top*layout.unit)),LONG(std::lround((r.right-layout.left)*layout.unit)),LONG(std::lround(r.bottom*layout.unit))};}
 void Activate(Host value) noexcept {
@@ -275,122 +242,11 @@ bool camp_inventory_input(HWND window,UINT message,WPARAM wparam,LPARAM lparam,b
 
 namespace owned {
 using namespace OwnedRender::E4;
-static int card_role(Role r) noexcept {return r==Role::info?0:(r==Role::help||r==Role::blueprint)?1:r==Role::comparison?2:-1;}
-static bool any_cards() noexcept {return std::any_of(cards.begin(),cards.end(),[](bool value){return value;});}
-static int map_camp_blit(const RECT& destination, const RECT& source, CampBlitPiece* pieces, unsigned capacity) noexcept {
-    if (!camp::primary_output || camp::remapping_blit || !Active() || drawing == Role::none) return -1;
-    if(destination.right<=destination.left||destination.bottom<=destination.top||source.right<=source.left||source.bottom<=source.top)return 0;
-    if(card_role(drawing)>=0&&(!cards[card_role(drawing)]||!true))return 0;
-    if (drawing == Role::wagon || drawing == Role::vendor) return -1; // Owned grid text is already placed.
-    const float unit = layout.unit;
-    const camp::Rect native{layout.left + destination.left / unit, destination.top / unit,
-                            layout.left + destination.right / unit, destination.bottom / unit};
-    auto emit = [&](camp::Rect crop, camp::Rect target, unsigned index) {
-        const auto x = [&](float v) { return source.left + LONG(std::lround((v - native.left) / native.width() * (source.right - source.left))); };
-        const auto y = [&](float v) { return source.top + LONG(std::lround((v - native.top) / native.height() * (source.bottom - source.top))); };
-        pieces[index].source = {x(crop.left), y(crop.top), x(crop.right), y(crop.bottom)};
-        pieces[index].destination = {LONG(std::lround((target.left - layout.left) * unit)), LONG(std::lround(target.top * unit)),
-                                     LONG(std::lround((target.right - layout.left) * unit)), LONG(std::lround(target.bottom * unit))};
-    };
-    if (drawing == Role::trade) {
-        if (capacity < 16) return 0;
-        unsigned emitted = 0;
-        for (int i = 0; i < 16; ++i) {
-            const float x = 200.f + (i % 4) * 100, y = 100.f + (i / 4) * 100;
-            const camp::Rect crop{(std::max)(native.left,x),(std::max)(native.top,y),
-                                  (std::min)(native.right,x+100),(std::min)(native.bottom,y+100)};
-            if(crop.width() <= 0 || crop.height() <= 0) continue;
-            const auto target=layout.trade_cell(i);const float scale=target.width()/100;
-            emit(crop,{target.left+(crop.left-x)*scale,target.top+(crop.top-y)*scale,
-                       target.left+(crop.right-x)*scale,target.top+(crop.bottom-y)*scale},emitted++);
-        }
-        return int(emitted);
-    }
-    if(drawing==Role::perks){
-        if(capacity<kCampMappedPieces)return 0;
-        unsigned emitted=0;
-        const auto band=[&](camp::Placement p){
-            const auto& s=p.source;
-            const camp::Rect crop{(std::max)(native.left,s.left),(std::max)(native.top,s.top),
-                (std::min)(native.right,s.right),(std::min)(native.bottom,s.bottom)};
-            if(crop.width()<=0||crop.height()<=0)return;
-            const float sx=p.destination.width()/s.width(),sy=p.destination.height()/s.height();
-            emit(crop,{p.destination.left+(crop.left-s.left)*sx,p.destination.top+(crop.top-s.top)*sy,
-                p.destination.left+(crop.right-s.left)*sx,p.destination.top+(crop.bottom-s.top)*sy},emitted++);
-        };
-        band(PerkBand(200,100));band(PerkBand(200,245));band(PerkBand(400,100));
-        for(int row=0;row<14;++row)band(PerkBand(200,270+row*15.f));
-        return int(emitted);
-    }
-    if (!capacity) return 0;
-    auto p = Uniform(drawing);
-    if (drawing == Role::root) p = native.left < 300 ? camp::Placement{{0, 400, 200, 500}, Actions()} : camp::Placement{{600, 400, 800, 430}, layout.heading};
-    const auto transform = camp::composing ? camp::visual : camp::composition(layout,p);
-    const float x1=transform.a*destination.left+transform.b*destination.top+transform.x;
-    const float y1=transform.c*destination.left+transform.d*destination.top+transform.y;
-    const float x2=transform.a*destination.right+transform.b*destination.bottom+transform.x;
-    const float y2=transform.c*destination.right+transform.d*destination.bottom+transform.y;
-    pieces[0].source=source;
-    pieces[0].destination={LONG(std::lround((std::min)(x1,x2))),LONG(std::lround((std::min)(y1,y2))),
-                           LONG(std::lround((std::max)(x1,x2))),LONG(std::lround((std::max)(y1,y2)))};
-    return 1;
-}
-
 int camp_inventory_blit(const RECT& destination, const RECT& source, CampBlitPiece (&pieces)[kCampBlitPieces]) noexcept {
-    if(camp::remapping_blit)return -1;
-    CampBlitPiece mapped[kCampMappedPieces];
-    int count=map_camp_blit(destination,source,mapped,kCampMappedPieces);
-    const bool occlude=any_cards()&&Active()&&camp::primary_output&&
-        drawing!=Role::none&&card_role(drawing)<0;
-    if(count<0){
-        if(!occlude)return -1;
-        mapped[0]={source,destination}; count=1;
-    }
-    unsigned emitted=0;
-    const auto append=[&](const CampBlitPiece& p,RECT r){
-        if(r.right<=r.left||r.bottom<=r.top)return;
-        const auto& d=p.destination; const auto& s=p.source;
-        const auto x=[&](LONG v){return s.left+LONG(std::lround(double(v-d.left)*(s.right-s.left)/(d.right-d.left)));};
-        const auto y=[&](LONG v){return s.top+LONG(std::lround(double(v-d.top)*(s.bottom-s.top)/(d.bottom-d.top)));};
-        pieces[emitted++]={{x(r.left),y(r.top),x(r.right),y(r.bottom)},r};
-    };
-    // At most seventeen native bands, split four ways by each of three cards.
-    // Crop sources from the original piece so successive cuts retain its scale.
-    for(int i=0;i<count;++i){
-        const auto& p=mapped[i]; const auto& d=p.destination;
-        RECT regions[kCampCutRegions]{d};unsigned region_count=1;
-        if(occlude)for(unsigned card=0;card<cards.size();++card)if(cards[card]){
-            const auto plate=(card==0?layout.ordinary_info:card==1?layout.result_info:layout.comparison_info);
-            const RECT bounds{LONG(std::lround((plate.left-layout.left)*layout.unit)),LONG(std::lround(plate.top*layout.unit)),
-                LONG(std::lround((plate.right-layout.left)*layout.unit)),LONG(std::lround(plate.bottom*layout.unit))};
-            RECT next[kCampCutRegions]{};unsigned next_count=0;
-            const auto keep=[&](RECT r){if(r.left<r.right&&r.top<r.bottom)next[next_count++]=r;};
-            for(unsigned j=0;j<region_count;++j){
-                const auto& r=regions[j];
-                const RECT cut{(std::max)(r.left,bounds.left),(std::max)(r.top,bounds.top),
-                               (std::min)(r.right,bounds.right),(std::min)(r.bottom,bounds.bottom)};
-                if(cut.left>=cut.right||cut.top>=cut.bottom){keep(r);continue;}
-                keep({r.left,r.top,cut.left,r.bottom});keep({cut.right,r.top,r.right,r.bottom});
-                keep({cut.left,r.top,cut.right,cut.top});keep({cut.left,cut.bottom,cut.right,r.bottom});
-            }
-            std::copy_n(next,next_count,regions);region_count=next_count;
-        }
-        for(unsigned j=0;j<region_count;++j)append(p,regions[j]);
-    }
-    return int(emitted);
+    return camp::frontend::SurfaceMapper{layout,mode,drawing,Active(),true,cards,width,height}.blit(destination,source,pieces);
 }
 bool camp_inventory_clear(const RECT& source, RECT& destination) noexcept {
-    if (!camp::primary_output || !Active() || (drawing == Role::none && !camp::composing)) return false;
-    if (source.left == 0 && source.top == 0 && source.right == LONG(width) && source.bottom == LONG(height)) return false;
-    const auto p = Uniform(drawing);
-    const auto& h = camp::composing ? camp::visual : camp::composition(layout, p);
-    const float x1 = h.a * source.left + h.b * source.top + h.x;
-    const float y1 = h.c * source.left + h.d * source.top + h.y;
-    const float x2 = h.a * source.right + h.b * source.bottom + h.x;
-    const float y2 = h.c * source.right + h.d * source.bottom + h.y;
-    destination = {LONG(std::lround((std::min)(x1,x2))), LONG(std::lround((std::min)(y1,y2))),
-                   LONG(std::lround((std::max)(x1,x2))), LONG(std::lround((std::max)(y1,y2)))};
-    return true;
+    return camp::frontend::SurfaceMapper{layout,mode,drawing,Active(),true,cards,width,height}.clear(source,destination);
 }
 
 

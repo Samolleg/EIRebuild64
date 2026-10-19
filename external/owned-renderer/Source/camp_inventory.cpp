@@ -1,4 +1,5 @@
 #include "camp_inventory.h"
+#include "camp_frontend.h"
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
 #include "owned_asset_loader.h"
@@ -138,19 +139,14 @@ int spell_first() noexcept {
     return belt_first;
 }
 
-enum class Role { none, root, background, info, help, stats, wagon, vendor,
-                  quick, spells, perks, trade, repair, construction, comparison, blueprint };
+using Role = camp::frontend::Role;
 int role_card(Role role) noexcept {return role==Role::info?0:(role==Role::help||role==Role::blueprint)?1:role==Role::comparison?2:-1;}
 bool card_content_visible(Role role) noexcept {
     return role==Role::help?constructor_card==ConstructorCard::result:
         role!=Role::blueprint||constructor_card==ConstructorCard::blueprint;
 }
-enum class ScrollList { stash, spell_vendor, item_vendor, spells, learned, available };
-struct ScrollRail {
-    camp::Rect track,thumb;
-    int position=0,maximum=0;
-    bool horizontal=false;
-};
+using ScrollList = camp::frontend::List;
+using ScrollRail = camp::frontend::Rail;
 ScrollRail scroll_rail(ScrollList list) noexcept;
 enum class HoverKind { none,item,help,skill };
 struct OrdinaryHover {
@@ -734,18 +730,10 @@ __declspec(naked) void item_texture_lookup() {
 
 int mode() noexcept { return screen ? field<int>(screen, 0x190) : 0; }
 camp::Rect stage() noexcept {
-    if(mode()==0)return layout.character;
-    if(mode()==1)return layout.content;
-    if(mode()==3||mode()==5){
-        auto board=layout.workbench;board.left+=10;board.right+=10;return board;
-    }
-    return layout.workspace;
+    return camp::frontend::stage(layout,mode());
 }
 camp::Rect actions() noexcept {
-    if(mode()!=1)return layout.actions;
-    const float middle=(layout.stash.left+layout.stash.right)*.5f;
-    // Move the complete native 200x100 footer uniformly below the stash.
-    return {middle-90,510,middle+90,600};
+    return camp::frontend::actions(layout,mode());
 }
 camp::Rect heading() noexcept { return layout.heading; }
 bool root_action_visible(int index) noexcept {
@@ -887,16 +875,7 @@ camp::Rect area_rect(void* object, int index) noexcept {
 }
 
 camp::Placement perk_band(float x,float y) noexcept {
-    const auto& pane=x>=400?layout.available:y<245?layout.skills:layout.learned;
-    // Centre the complete native 200-wide content inside the text/rail gutters.
-    const float left=(pane.left+15+pane.right-25-200)*.5f;
-    if(x>=400)return {{400,100,600,500},{left,165,left+200,565}};
-    if(y<245)return {{200,100,400,245},{left,165,left+200,310}};
-    if(y<270)return {{200,245,400,265},{left,320,left+200,340}};
-    const int row=std::clamp(int((y-270)/15),0,13);
-    const float top=346+row*16.f;
-    return {{200,270+row*15.f,400,285+row*15.f},
-        {left,top,left+200,top+15}};
+    return camp::frontend::perk_band(layout,x,y);
 }
 
 camp::Placement perk_area(void* object,int index) noexcept {
@@ -957,9 +936,7 @@ camp::Placement area_placement(void* object, Role role, int index) noexcept {
 }
 
 bool belt_visible(const camp::Rect& r,bool equipment=false) noexcept {
-    const auto contains=[&](const camp::Rect& bounds){return r.left>=bounds.left-.01f&&r.right<=bounds.right+.01f&&
-        r.top>=bounds.top-.01f&&r.bottom<=bounds.bottom+.01f;};
-    return equipment?(contains(layout.weapons)||contains(layout.quick_items)):contains(layout.belt);
+    return camp::frontend::belt_visible(layout,r,equipment);
 }
 POINT inverse_point(camp::Placement p, POINT point) noexcept {
     return {LONG(std::floor(p.source.left + (point.x - p.destination.left) * p.source.width() / p.destination.width())),
@@ -971,6 +948,8 @@ int hit(void* object, POINT physical) {
     if (role == Role::none) return -2;
     if (!valid) return -1;
     const POINT p = virtual_point(object, physical);
+    if(role==Role::wagon||role==Role::vendor)return camp::frontend::grid_hit(layout,role==Role::vendor,field<int>(object,0x12c),p,
+        [&](int i){return area_rect(object,i);},[&](int i,POINT q){return native_area_contains(field<void**>(object,0x128)[i],q)!=FALSE;});
     if(role==Role::spells){
         const int first=spell_first();
         const auto source=area_rect(object,0);
@@ -1018,17 +997,10 @@ void form_sorted(void* object) {
     reinterpret_cast<VoidFn>(table[0x68 / 4])(object);
 }
 int first_item(void* object) noexcept {
-    const int category = field<int>(object, 0x150);
-    float& position = field<float>(object, 0x15c + std::size_t(category) * 4);
-    const int count = field<int>(object, 0x1a0);
-    const bool vendor=role_of(object)==Role::vendor;
-    const int columns=layout.grid_columns(vendor),visible_rows=layout.grid_rows(vendor);
-    const int rows = (count + columns - 1) / columns;
-    const int maximum = (std::max)(0, rows - visible_rows) * columns;
-    int first = (std::max)(0, int(position) / columns * columns);
-    first = (std::min)(first, maximum);
-    position = float(first);
-    return first;
+    const int category=field<int>(object,0x150);
+    float& position=field<float>(object,0x15c+std::size_t(category)*4);
+    const int first=camp::frontend::first_item(layout,role_of(object)==Role::vendor,field<int>(object,0x1a0),position);
+    position=float(first);return first;
 }
 
 void begin_icon_priority_frame() {
@@ -1116,40 +1088,22 @@ void* scroll_owner(ScrollList list) noexcept {
     return nullptr;
 }
 ScrollRail scroll_rail(ScrollList list) noexcept {
-    ScrollRail bar;
     void* owner=scroll_owner(list);
-    if(!owner||!field<BOOL>(owner,0xe8))return bar;
-    float visible,total;
-    if(list==ScrollList::spells){
-        bar.horizontal=true;visible=8;total=float(spell_count());
-        bar.maximum=(std::max)(0,int(total)-8);bar.position=spell_first();
-        bar.track={layout.belt.left,146,layout.belt.right,156};
-    }else if(perk_list(list)){
+    if(!owner||!field<BOOL>(owner,0xe8))return {};
+    camp::frontend::Scroll scroll;scroll.visible=true;
+    if(list==ScrollList::spells){scroll.page=8;scroll.total=spell_count();scroll.position=spell_first();}
+    else if(perk_list(list)){
         const bool learned=list==ScrollList::learned;
         const auto begin=field<std::uintptr_t>(owner,learned?0x168:0x15c);
         const auto end=field<std::uintptr_t>(owner,learned?0x16c:0x160);
-        total=float((end-begin)/24);visible=learned?14.f:23.f;
-        bar.maximum=(std::max)(0,int(total-visible));
-        bar.position=field<int>(owner,learned?0x158:0x154);
-        const auto pane=learned?layout.learned:layout.available;
-        bar.track={pane.right-(layout.compact?20.f:30.f),learned?346.f:200.f,
-                   pane.right-(layout.compact?10.f:20.f),learned?569.f:550.f};
+        scroll.total=int((end-begin)/24);scroll.page=learned?14:23;
+        scroll.position=field<int>(owner,learned?0x158:0x154);
     }else{
-        const bool vendor=list!=ScrollList::stash;
-        const int columns=layout.grid_columns(vendor);
-        visible=float(layout.grid_rows(vendor));
-        total=float((field<int>(owner,0x1a0)+columns-1)/columns);
-        bar.maximum=(std::max)(0,int(total-visible));bar.position=first_item(owner)/columns;
-        const auto grid=layout.grid(vendor);
-        bar.track={grid.right+5.f/3,grid.top,grid.right+40.f/3,grid.bottom};
+        const bool vendor=list!=ScrollList::stash;const int columns=layout.grid_columns(vendor);
+        scroll.page=layout.grid_rows(vendor);scroll.total=(field<int>(owner,0x1a0)+columns-1)/columns;
+        scroll.position=first_item(owner)/columns;
     }
-    if(!bar.maximum)return bar;
-    const float length=bar.horizontal?bar.track.width():bar.track.height();
-    const float thumb=(std::min)(length,(std::max)(110.f/3,length*visible/total));
-    const float offset=(length-thumb)*bar.position/bar.maximum;
-    bar.thumb=bar.horizontal?camp::Rect{bar.track.left+offset,bar.track.top,bar.track.left+offset+thumb,bar.track.bottom}:
-        camp::Rect{bar.track.left,bar.track.top+offset,bar.track.right,bar.track.top+offset+thumb};
-    return bar;
+    return camp::frontend::rail(layout,list,scroll);
 }
 void scroll_to(ScrollList list,int position) noexcept {
     const auto bar=scroll_rail(list);
@@ -1176,12 +1130,8 @@ void move_scroll_drag(POINT point) noexcept {
     const auto bar=scroll_rail(scroll_drag.list);
     if(!bar.maximum){camp_inventory_cancel_drag();return;}
     const POINT p=virtual_point(screen,point);
-    const float track=bar.horizontal?bar.track.width():bar.track.height();
-    const float thumb=bar.horizontal?bar.thumb.width():bar.thumb.height();
-    const float start=bar.horizontal?bar.track.left:bar.track.top;
-    const float coordinate=float(bar.horizontal?p.x:p.y);
-    const float grab=(std::min)(scroll_drag.grab,thumb);
-    scroll_to(scroll_drag.list,int(std::lround(std::clamp((coordinate-start-grab)/(track-thumb),0.f,1.f)*bar.maximum)));
+    scroll_to(scroll_drag.list,camp::frontend::drag_position(bar,p,scroll_drag.grab));
+
 }
 
 using SurfaceCtor = void*(__thiscall*)(void*, void*, int, int, int, int, int, bool);
@@ -2032,28 +1982,13 @@ void __fastcall tips(void* self, void*, void* v) {
 }
 
 camp::Placement uniform(Role role) noexcept {
-    switch (role) {
-    case Role::stats: return {{0, 100, 200, 400}, layout.stats};
-    case Role::info: return {{600, 100, 800, 400}, layout.ordinary_info};
-    case Role::help: return {{0, 100, 200, 400}, layout.result_info};
-    case Role::comparison:return {{600,100,800,400},layout.comparison_info};
-    case Role::blueprint:return {{600,100,800,400},layout.result_info};
-    case Role::background: return {{0, 100, 800, 500}, {layout.left, 0, layout.left + layout.width, 600}};
-    default: return {{200, 100, 600, 500}, stage()};
-    }
+    return camp::frontend::uniform(layout,mode(),role);
 }
 
 void draw_scrollbar(ScrollList list,void* v) {
-        const auto bar=scroll_rail(list);
-        if(!bar.maximum)return;
-        {
-            Scope placed(camp::Placement{{0,0,12,100},bar.track});
-            function<DrawFn>(0x5e6d90)(scroll_art[0],v);
-            function<DrawFn>(0x5e6d90)(scroll_art[1],v);
-        }
-        // Reuse this exact authoritative rail geometry; no second native query.
-        if(camp_drawing&&decoration_pending)
-            decoration.thumbs[decoration.thumb_count++]=decoration_pixels(bar.thumb);
+    camp::frontend::draw_rail(scroll_rail(list),[&](int i,camp::Placement p){
+        Scope placed(p);function<DrawFn>(0x5e6d90)(scroll_art[i],v);
+    },[&](camp::Rect thumb){if(camp_drawing&&decoration_pending)decoration.thumbs[decoration.thumb_count++]=decoration_pixels(thumb);});
 }
 
 BOOL __fastcall object_draw(void* self, void*, void* v) {
@@ -2105,63 +2040,27 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
     const int count = field<int>(self, 0x10c);
     // Spell backgrounds were one horizontal tiled figure. The owned row
     // draws a native square frame at each authoritative empty or occupied slot.
-    if (role == Role::spells) {
-        Scope raw(Role::none);
-        const int first=spell_first();
-        for (int i = first; i < (std::min)(spell_capacity,first+8); ++i) {
-            const auto destination = layout.equipped(i, belt_first);
-            if (!belt_visible(destination)) continue;
-            Scope placement(camp::Placement{{0, 0, 100, 100}, destination});
-            function<DrawFn>(0x5e6d90)(spell_background, v);
-            function<DrawFn>(0x5e6d90)(spell_frame, v);
-        }
-        const int selected=field<int>(self,0x154);
-        const auto destination = layout.equipped(selected, first);
-        field<BOOL>(figures[0],0x220)=selected>=0&&selected<spell_count()&&belt_visible(destination);
-        if (selected>=0&&selected<spell_count()&&belt_visible(destination)) {
-            // Establish the same native selected-frame flag as the replaced Draw.
-            float x=0,y=0,z=0;
-            function<void(__thiscall*)(void*,float&,float&,float&)>(0x5e7010)(figures[0],x,y,z);
-            Scope placement(camp::Placement{{x-50,y-50,x+50,y+50},destination});
-            function<DrawFn>(0x5e6d90)(figures[0], v);
-        }
-        draw_scrollbar(ScrollList::spells,v);
+    if(role==Role::spells){
+        Scope raw(Role::none);const int first=spell_first();const int selected=field<int>(self,0x154);
+        camp::frontend::draw_spell_frames(layout,first,spell_capacity,spell_count(),selected,[&](camp::Placement p){
+            Scope placement(p);function<DrawFn>(0x5e6d90)(spell_background,v);function<DrawFn>(0x5e6d90)(spell_frame,v);
+        },[&](bool visible,camp::Rect destination){
+            field<BOOL>(figures[0],0x220)=visible;if(!visible)return;
+            float x=0,y=0,z=0;function<void(__thiscall*)(void*,float&,float&,float&)>(0x5e7010)(figures[0],x,y,z);
+            Scope placement(camp::Placement{{x-50,y-50,x+50,y+50},destination});function<DrawFn>(0x5e6d90)(figures[0],v);
+        },[&]{draw_scrollbar(ScrollList::spells,v);});
         return TRUE;
     }
-    if(role==Role::quick){
-        for(int i=0;i<8;++i){
-            const auto destination=layout.equipped(i,belt_first,true);
-            if(!belt_visible(destination,true))continue;
-            Scope placement(camp::Placement{{0,0,100,100},destination});
-            function<DrawFn>(0x5e6d90)(quick_backgrounds[i<4?0:1],v);
-        }
-    }
-    for (int i = 0; i < count; ++i) {
-        if(role==Role::quick&&(figures[i]==quick_backgrounds[0]||figures[i]==quick_backgrounds[1]))continue;
-        if (role == Role::quick && (i == 6 || i == 11)) continue; // Old horizontal tiled backgrounds.
-        camp::Placement p = uniform(role);
-        if (role == Role::root) {
-            if (i < 2) {if(!root_action_visible(i))continue;p = {{0, 400, 200, 500}, actions()};}
-            else if (i < 10) p = area_placement(self, role, i + 2);
-            else p = {{0, 0, 800, 600}, {layout.left, 0, layout.left + layout.width, 600}};
-        } else if (role == Role::quick && i < 12) {
-            float x = 0, y = 0, z = 0;
-            function<void(__thiscall*)(void*, float&, float&, float&)>(0x5e7010)(figures[i], x, y, z);
-            const int native_slot = int(x / 100);
-            const auto r = layout.equipped(native_slot < 4 ? native_slot : 11 - native_slot, belt_first,true);
-            if (!belt_visible(r,true)) continue;
-            p = {{x - 50, y - 50, x + 50, y + 50}, r};
-        } else if (role == Role::trade) {
-            p = area_placement(self, role, i / 2);
-        } else if(role==Role::perks){
-            if(i<4)continue;
-            float x=0,y=0,z=0;
-            function<void(__thiscall*)(void*,float&,float&,float&)>(0x5e7010)(figures[i],x,y,z);
-            p=perk_band(x,y);
-        }
-        Scope placement(p);
-        function<DrawFn>(0x5e6d90)(figures[i], v);
-    }
+    if(role==Role::quick)camp::frontend::draw_quick_backgrounds(layout,belt_first,[&](int index,camp::Placement p){
+        Scope placement(p);function<DrawFn>(0x5e6d90)(quick_backgrounds[index],v);
+    });
+    camp::frontend::draw_object_figures(layout,mode(),belt_first,role,count,[&](int i,camp::Placement p){
+        if(role==Role::quick&&(figures[i]==quick_backgrounds[0]||figures[i]==quick_backgrounds[1]))return;
+        Scope placement(p);function<DrawFn>(0x5e6d90)(figures[i],v);
+    },[&](int i){return area_placement(self,role,i);},[&](int i){
+        float x=0,y=0,z=0;function<void(__thiscall*)(void*,float&,float&,float&)>(0x5e7010)(figures[i],x,y,z);
+        return std::pair<float,float>{x,y};
+    },[&](int i){return root_action_visible(i);});
     if(role==Role::perks){draw_scrollbar(ScrollList::learned,v);draw_scrollbar(ScrollList::available,v);}
     // Preserve the native map-preview part of the object draw contract.
     Scope placement(uniform(role));
@@ -2196,32 +2095,8 @@ void __fastcall item_draw(void* self, void*, void* v, DrawItem* item) {
     // The actual info Draw establishes the card role before its preview call.
     const int card=role_card(drawing);
     if(item->part==9&&(card<0||!cards_drawn[card]))return;
-    camp::Placement p;
-    p.source = {item->x - item->size * .5f, item->y - item->size * .5f,
-                item->x + item->size * .5f, item->y + item->size * .5f};
-    if (item->part == 0 && item->y < 100) {
-        int slot = int(item->x / 100);
-        if (mode() == 0 && slot >= 4) slot = 11 - slot;
-        p.destination = layout.equipped(slot, belt_first, mode()==0);
-        if (!belt_visible(p.destination,mode()==0)) return;
-    } else if (item->part == 4 || item->part == 5) {
-        const int index = int((item->x - 200) / 100) + int((item->y - 100) / 100) * 4;
-        p.destination = layout.trade_cell(index);
-    } else if (item->part == 9) {
-        const auto u = uniform(drawing);
-        const float sx = u.destination.width() / u.source.width();
-        p.destination = {u.destination.left + (p.source.left - u.source.left) * sx,
-                         u.destination.top + (p.source.top - u.source.top) * sx,
-                         u.destination.left + (p.source.right - u.source.left) * sx,
-                         u.destination.top + (p.source.bottom - u.source.top) * sx};
-    } else {
-        const auto u = uniform(Role::construction);
-        const float s = u.destination.width() / 400;
-        p.destination = {u.destination.left + (p.source.left - 200) * s,
-                         u.destination.top + (p.source.top - 100) * s,
-                         u.destination.left + (p.source.right - 200) * s,
-                         u.destination.top + (p.source.bottom - 100) * s};
-    }
+    const auto p=camp::frontend::item_placement(layout,mode(),belt_first,drawing,item->x,item->y,item->size,item->part);
+    if(item->part==0&&item->y<100&&!camp::frontend::belt_visible(layout,p.destination,mode()==0))return;
     if (item->part == 9) {
         Scope placement(p);
         ItemTextureScope texture(self);
@@ -2265,28 +2140,21 @@ BOOL __fastcall inventory_draw(void* self, void*, void* v) {
             grid_cost.columns!=columns||grid_cost.rows!=rows))scroll_cost.valid=false;
         grid_cost={true,first,count,category,columns,rows};
     }
-    const float top = float(field<int>(self, 0x180));
-    const camp::Rect native_cell{50, top, 150, top + 100};
+    const float top=float(field<int>(self,0x180));
     Scope raw(Role::none);
-    for (int i = 0; i < columns * rows; ++i) {
-        const auto r = layout.inventory_cell(vendor, i);
-        Scope placement(camp::Placement{native_cell, r});
-        function<DrawFn>(0x5e6d90)(grid->background, v);
-        function<DrawFn>(0x5e6d90)(figures[10], v);
-        if (first + i >= count) continue;
-        // The cell background/frame use the full 100x100 placement. Only
-        // DrawItem's icon and effects are clipped to its native 70x70 frame.
-        DrawItem record{items[first + i], 100, top + 50,
-                        field<float>(self, 0x184) * 1.5f, 100, field<int>(self, 0x148)};
-        Scope icon(camp::Placement{native_cell, r}, {65, top + 15, 135, top + 85});
+    camp::frontend::draw_grid(layout,vendor,first,top,[&](const camp::frontend::GridCell& cell){
+        Scope placement(cell.placement);
+        function<DrawFn>(0x5e6d90)(grid->background,v);
+        function<DrawFn>(0x5e6d90)(figures[10],v);
+        if(cell.index>=count||!items[cell.index])return;
+        DrawItem record{items[cell.index],100,top+50,field<float>(self,0x184)*1.5f,100,field<int>(self,0x148)};
+        Scope icon(cell.placement,cell.icon_clip);
         ItemTextureScope texture(screen,measure_scroll);
-        native_item_draw(screen, v, &record, &texture);
-    }
-    for (int i = 0; i < 6; ++i) {
-        Scope placement(camp::Placement{area_rect(self, i + 2), layout.category(vendor, i)});
-        function<DrawFn>(0x5e6d90)(figures[i + 2], v);
-    }
-    draw_scrollbar(!vendor?ScrollList::stash:self==field<void*>(screen,0x1ec)?ScrollList::spell_vendor:ScrollList::item_vendor,v);
+        native_item_draw(screen,v,&record,&texture);
+    },[&](int i,camp::Rect target){
+        Scope placement(camp::Placement{area_rect(self,i+2),target});
+        function<DrawFn>(0x5e6d90)(figures[i+2],v);
+    },[&]{draw_scrollbar(!vendor?ScrollList::stash:self==field<void*>(screen,0x1ec)?ScrollList::spell_vendor:ScrollList::item_vendor,v);});
     // Match native lifetime order: finish every figure/icon draw before
     // acquiring the text DC, then release it before surface composition.
     function<void*(__thiscall*)(void*)>(0x5fdc00)(grid->text);
@@ -2295,26 +2163,17 @@ BOOL __fastcall inventory_draw(void* self, void*, void* v) {
     const int part = field<int>(self, 0x148);
     const int price_type = field<int>(self, 0x1b0);
     const auto table = field<void**>(screen, 0);
-    for (int i = 0; i < columns * rows && first + i < count; ++i) {
-        void* item = items[first + i];
-        char number[32];
-        const int quantity = field<int>(item, 0x48);
-        const LONG x = LONG((i % columns) * layout.cell);
-        const LONG y = LONG((i / columns) * layout.cell);
-        if (quantity != 1) {
-            std::snprintf(number, sizeof(number), "%d", quantity);
-            RECT text{x + 6, y + 3, x + LONG(layout.cell) - 6, y + 23};
-            function<TextFn>(0x5fde20)(grid->text, number, &text, 1, RGB(228,215,167), DT_RIGHT, TRUE);
+    camp::frontend::grid_labels(layout,vendor,first,count,[&](int,int index,RECT quantity_rect,RECT price_rect){
+        void* item=items[index];if(!item)return;
+        char number[32];const int quantity=field<int>(item,0x48);
+        if(quantity!=1){std::snprintf(number,sizeof(number),"%d",quantity);
+            function<TextFn>(0x5fde20)(grid->text,number,&quantity_rect,1,RGB(228,215,167),DT_RIGHT,TRUE);}
+        if(price_type!=9&&reinterpret_cast<bool(__thiscall*)(void*,void*,int)>(table[0xac/4])(screen,item,part)){
+            const int price=reinterpret_cast<int(__thiscall*)(void*,void*,int)>(table[0xd8/4])(screen,item,price_type);
+            std::snprintf(number,sizeof(number),"%d",price);
+            function<TextFn>(0x5fde20)(grid->text,number,&price_rect,1,RGB(228,215,167),DT_CENTER,TRUE);
         }
-        if (price_type != 9 && reinterpret_cast<bool(__thiscall*)(void*, void*, int)>(table[0xac / 4])(
-                screen, item, part)) {
-            const int price = reinterpret_cast<int(__thiscall*)(void*, void*, int)>(table[0xd8 / 4])(
-                screen, item, price_type);
-            std::snprintf(number, sizeof(number), "%d", price);
-            RECT text{x + 6, y + LONG(layout.cell) - 23, x + LONG(layout.cell) - 6, y + LONG(layout.cell) - 3};
-            function<TextFn>(0x5fde20)(grid->text, number, &text, 1, RGB(228,215,167), DT_CENTER, TRUE);
-        }
-    }
+    });
     function<VoidFn>(0x5fdc60)(grid->text);
     return TRUE;
 }
@@ -2330,7 +2189,7 @@ void* __fastcall inventory_mouse(void* self, void*, POINT point, int* slot) {
     const int part = field<int>(self, 0x148);
     *slot = part == 1 ? 22 : part == 2 ? 24 : part == 3 ? 23 : 0;
     form_sorted(self);
-    const int index = first_item(self) + int((p.y - r.top) / layout.cell) * layout.grid_columns(vendor) + int((p.x - r.left) / layout.cell);
+    const int index = camp::frontend::grid_pick(layout,vendor,first_item(self),p);
     return index < field<int>(self, 0x1a0) ? field<void**>(self, 0x19c)[index] : nullptr;
 }
 
@@ -2350,15 +2209,7 @@ void __fastcall idle(void* self, void*) {
     field<float>(self, 0x158) = previous_elapsed;
     field<float>(self, 0x15c + category * 4) = position;
     field<float>(self, 0x174) = 0; field<float>(self, 0x178) = 0;
-    int rows = int(request);
-    if (lock) {
-        float& elapsed = field<float>(self, 0x158);
-        if (elapsed == 0) { rows += lock == 1 ? -1 : 1; elapsed = .001f; }
-        else {
-            elapsed += function<float(__thiscall*)(void*)>(0x600270)(self);
-            if (elapsed >= .18f) { rows += lock == 1 ? -1 : 1; elapsed = 0.001f; }
-        }
-    }
+    const int rows=camp::frontend::idle_rows(request,lock,field<float>(self,0x158),function<float(__thiscall*)(void*)>(0x600270)(self));
     field<float>(self, 0x15c + category * 4) += rows * layout.grid_columns(role_of(self)==Role::vendor);
     first_item(self);
 }
@@ -2393,15 +2244,11 @@ void __fastcall set_to_item(void* self, void*, void* item) {
     auto** items = field<void**>(self, 0x19c);
     const int count = field<int>(self, 0x1a0);
     const bool vendor=role_of(self)==Role::vendor;
-    const int columns=layout.grid_columns(vendor),rows=layout.grid_rows(vendor);
+
     // BE0FC330 SetToItem uses this Compare slot and keeps the last match.
     const auto compare = reinterpret_cast<BOOL(__thiscall*)(void*, void*)>(field<void**>(item, 0)[0x38 / 4]);
     for (int i = 0; i < count; ++i) if (compare(item, items[i])) target = i;
-    if (target < first) {
-        if (target >= 0) first = target / columns * columns;
-    } else if (target >= first + columns * rows) {
-        first = (target / columns - rows + 1) * columns;
-    }
+    first=camp::frontend::reveal_item(layout,vendor,first,target);
     field<float>(self, 0x15c + category * 4) = float(first);
     first_item(self);
 }
@@ -2429,15 +2276,10 @@ BOOL __fastcall spell_draw(void* self, void*, void* v) {
     void* person=current_person();
     const int count=person?std::clamp(field<int>(person,0x764),0,spell_capacity):0;
     auto** spells=person?field<void**>(person,0x760):nullptr;
-    for(int i=first;i<(std::min)(count,first+8);++i){
-        const float x=50+i*100.f;
-        const float y=field<int>(self,0x150)+50.f;
+    camp::frontend::draw_spell_items(layout,first,count,float(field<int>(self,0x150)),[&](int i,float x,float y,camp::Placement p,camp::Rect clip){
         DrawItem record{spells[i],x,y,12,100,field<int>(self,0x148)};
-        const auto destination=layout.equipped(i,first);
-        Scope placement(camp::Placement{{x-50,y-50,x+50,y+50},destination},{x-35,y-35,x+35,y+35});
-        ItemTextureScope texture(screen);
-        native_item_draw(screen,v,&record,&texture);
-    }
+        Scope placement(p,clip);ItemTextureScope texture(screen);native_item_draw(screen,v,&record,&texture);
+    });
     return object_draw(self,nullptr,v);
 }
 void* __fastcall spell_mouse(void* self,void*,POINT point,int* slot) {
@@ -2971,119 +2813,15 @@ bool uninstall_camp_inventory() noexcept {
     return true;
 }
 
-static int map_camp_blit(const RECT& destination, const RECT& source, CampBlitPiece* pieces, unsigned capacity) noexcept {
-    if (!camp::primary_output || camp::remapping_blit || !screen || !layout.wide || !valid || drawing == Role::none) return -1;
-    if(role_card(drawing)>=0&&(!cards_drawn[role_card(drawing)]||!card_content_visible(drawing)))return 0;
-    if (drawing == Role::wagon || drawing == Role::vendor) return -1; // Owned grid text is already placed.
-    const float unit = layout.unit;
-    const camp::Rect native{layout.left + destination.left / unit, destination.top / unit,
-                            layout.left + destination.right / unit, destination.bottom / unit};
-    auto emit = [&](camp::Rect crop, camp::Rect target, unsigned index) {
-        const auto x = [&](float v) { return source.left + LONG(std::lround((v - native.left) / native.width() * (source.right - source.left))); };
-        const auto y = [&](float v) { return source.top + LONG(std::lround((v - native.top) / native.height() * (source.bottom - source.top))); };
-        pieces[index].source = {x(crop.left), y(crop.top), x(crop.right), y(crop.bottom)};
-        pieces[index].destination = {LONG(std::lround((target.left - layout.left) * unit)), LONG(std::lround(target.top * unit)),
-                                     LONG(std::lround((target.right - layout.left) * unit)), LONG(std::lround(target.bottom * unit))};
-    };
-    if (drawing == Role::trade) {
-        if (capacity < 16) return 0;
-        unsigned emitted = 0;
-        for (int i = 0; i < 16; ++i) {
-            const float x = 200.f + (i % 4) * 100, y = 100.f + (i / 4) * 100;
-            const camp::Rect crop{(std::max)(native.left,x),(std::max)(native.top,y),
-                                  (std::min)(native.right,x+100),(std::min)(native.bottom,y+100)};
-            if(crop.width() <= 0 || crop.height() <= 0) continue;
-            const auto target=layout.trade_cell(i);const float scale=target.width()/100;
-            emit(crop,{target.left+(crop.left-x)*scale,target.top+(crop.top-y)*scale,
-                       target.left+(crop.right-x)*scale,target.top+(crop.bottom-y)*scale},emitted++);
-        }
-        return int(emitted);
-    }
-    if(drawing==Role::perks){
-        if(capacity<kCampMappedPieces)return 0;
-        unsigned emitted=0;
-        const auto band=[&](camp::Placement p){
-            const auto& s=p.source;
-            const camp::Rect crop{(std::max)(native.left,s.left),(std::max)(native.top,s.top),
-                (std::min)(native.right,s.right),(std::min)(native.bottom,s.bottom)};
-            if(crop.width()<=0||crop.height()<=0)return;
-            const float sx=p.destination.width()/s.width(),sy=p.destination.height()/s.height();
-            emit(crop,{p.destination.left+(crop.left-s.left)*sx,p.destination.top+(crop.top-s.top)*sy,
-                p.destination.left+(crop.right-s.left)*sx,p.destination.top+(crop.bottom-s.top)*sy},emitted++);
-        };
-        band(perk_band(200,100));band(perk_band(200,245));band(perk_band(400,100));
-        for(int row=0;row<14;++row)band(perk_band(200,270+row*15.f));
-        return int(emitted);
-    }
-    if (!capacity) return 0;
-    auto p = uniform(drawing);
-    if (drawing == Role::root) p = native.left < 300 ? camp::Placement{{0, 400, 200, 500}, actions()} : camp::Placement{{600, 400, 800, 430}, heading()};
-    const auto transform = camp::composing ? camp::visual : camp::composition(layout,p);
-    const float x1=transform.a*destination.left+transform.b*destination.top+transform.x;
-    const float y1=transform.c*destination.left+transform.d*destination.top+transform.y;
-    const float x2=transform.a*destination.right+transform.b*destination.bottom+transform.x;
-    const float y2=transform.c*destination.right+transform.d*destination.bottom+transform.y;
-    pieces[0].source=source;
-    pieces[0].destination={LONG(std::lround((std::min)(x1,x2))),LONG(std::lround((std::min)(y1,y2))),
-                           LONG(std::lround((std::max)(x1,x2))),LONG(std::lround((std::max)(y1,y2)))};
-    return 1;
-}
+
 
 int camp_inventory_blit(const RECT& destination, const RECT& source, CampBlitPiece (&pieces)[kCampBlitPieces]) noexcept {
-    if(camp::remapping_blit)return -1;
-    CampBlitPiece mapped[kCampMappedPieces];
-    int count=map_camp_blit(destination,source,mapped,kCampMappedPieces);
-    const bool occlude=any_cards()&&screen&&layout.wide&&valid&&camp::primary_output&&
-        drawing!=Role::none&&role_card(drawing)<0;
-    if(count<0){
-        if(!occlude)return -1;
-        mapped[0]={source,destination}; count=1;
-    }
-    unsigned emitted=0;
-    const auto append=[&](const CampBlitPiece& p,RECT r){
-        if(r.right<=r.left||r.bottom<=r.top)return;
-        const auto& d=p.destination; const auto& s=p.source;
-        const auto x=[&](LONG v){return s.left+LONG(std::lround(double(v-d.left)*(s.right-s.left)/(d.right-d.left)));};
-        const auto y=[&](LONG v){return s.top+LONG(std::lround(double(v-d.top)*(s.bottom-s.top)/(d.bottom-d.top)));};
-        pieces[emitted++]={{x(r.left),y(r.top),x(r.right),y(r.bottom)},r};
-    };
-    // At most seventeen native bands, split four ways by each of three cards.
-    // Crop sources from the original piece so successive cuts retain its scale.
-    for(int i=0;i<count;++i){
-        const auto& p=mapped[i]; const auto& d=p.destination;
-        RECT regions[kCampCutRegions]{d};unsigned region_count=1;
-        if(occlude)for(unsigned card=0;card<cards_drawn.size();++card)if(cards_drawn[card]){
-            const auto plate=context_plate(card);
-            const RECT bounds{LONG(std::lround((plate.left-layout.left)*layout.unit)),LONG(std::lround(plate.top*layout.unit)),
-                LONG(std::lround((plate.right-layout.left)*layout.unit)),LONG(std::lround(plate.bottom*layout.unit))};
-            RECT next[kCampCutRegions]{};unsigned next_count=0;
-            const auto keep=[&](RECT r){if(r.left<r.right&&r.top<r.bottom)next[next_count++]=r;};
-            for(unsigned j=0;j<region_count;++j){
-                const auto& r=regions[j];
-                const RECT cut{(std::max)(r.left,bounds.left),(std::max)(r.top,bounds.top),
-                               (std::min)(r.right,bounds.right),(std::min)(r.bottom,bounds.bottom)};
-                if(cut.left>=cut.right||cut.top>=cut.bottom){keep(r);continue;}
-                keep({r.left,r.top,cut.left,r.bottom});keep({cut.right,r.top,r.right,r.bottom});
-                keep({cut.left,r.top,cut.right,cut.top});keep({cut.left,cut.bottom,cut.right,r.bottom});
-            }
-            std::copy_n(next,next_count,regions);region_count=next_count;
-        }
-        for(unsigned j=0;j<region_count;++j)append(p,regions[j]);
-    }
-    return int(emitted);
+    return camp::frontend::SurfaceMapper{layout,mode(),drawing,screen&&layout.wide&&valid,
+        card_content_visible(drawing),cards_drawn,output_width,output_height}.blit(destination,source,pieces);
 }
 bool camp_inventory_clear(const RECT& source, RECT& destination) noexcept {
-    if (!camp::primary_output || !screen || !layout.wide || !valid || drawing == Role::none) return false;
-    if (source.left == 0 && source.top == 0 && source.right == LONG(output_width) && source.bottom == LONG(output_height)) return false;
-    const auto p = uniform(drawing);
-    const auto& h = camp::composing ? camp::visual : camp::composition(layout, p);
-    const float x1 = h.a * source.left + h.b * source.top + h.x;
-    const float y1 = h.c * source.left + h.d * source.top + h.y;
-    const float x2 = h.a * source.right + h.b * source.bottom + h.x;
-    const float y2 = h.c * source.right + h.d * source.bottom + h.y;
-    destination = {LONG(std::lround((std::min)(x1,x2))), LONG(std::lround((std::min)(y1,y2))),
-                   LONG(std::lround((std::max)(x1,x2))), LONG(std::lround((std::max)(y1,y2)))};
-    return true;
+    return camp::frontend::SurfaceMapper{layout,mode(),drawing,screen&&layout.wide&&valid,
+        card_content_visible(drawing),cards_drawn,output_width,output_height}.clear(source,destination);
 }
 
 void camp_inventory_set_popup_sink(void* context, CampPopupSink sink, ID3D11Device* device) noexcept {
