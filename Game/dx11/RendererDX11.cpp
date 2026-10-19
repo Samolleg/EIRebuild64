@@ -17,7 +17,6 @@
 #include "UIColorKeyBlit.h"
 #include "../OwnedRender/E1TerrainState.h"
 #include "../OwnedRender/E1Terrain.h"
-#include "../OwnedRender/E1FogSubmission.h"
 #include "../OwnedRender/E1TerrainSubmission.h"
 #include "../GameJournal.h"
 
@@ -183,26 +182,35 @@ owned::FixedState CDX11::CaptureC56MaterialState()
     return state;
 }
 
-bool CDX11::SubmitC56Triangles(const owned::NativeGeometryView& view)
+bool CDX11::SubmitC74FixedFunction(D3DPRIMITIVETYPE type, const owned::FixedFunctionVertex* vertices, DWORD count,
+    const WORD* indices, DWORD indexCount, const SHMatrix& projection, bool untextured)
 {
     HRESULT hr = E_UNEXPECTED;
-    if (rendererFacade && rendererFacade->FrameActive() && view.positions && view.indices) {
-        const auto state = CaptureC56MaterialState();
+    if (rendererFacade && rendererFacade->FrameActive()) {
+        auto state = CaptureC56MaterialState();
+        // SHMatrix is row-major M*p; the proxy shader uses row-vector mul(p,M).
+        const auto transposed = DirectX::XMMatrixTranspose(sh_to_xm(projection));
+        std::memcpy(&state.transform[D3DTRANSFORMSTATE_PROJECTION], &transposed, sizeof(D3DMATRIX));
+        auto* texture = untextured ? nullptr : boundFigureTextures[0].Get();
+        if (untextured) {
+            state.stage[0][D3DTSS_COLOROP] = state.stage[0][D3DTSS_ALPHAOP] = D3DTOP_SELECTARG2;
+            state.stage[0][D3DTSS_COLORARG2] = state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
+            state.render[D3DRENDERSTATE_SHADEMODE] = D3DSHADE_FLAT;
+        }
         hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-            return renderer.queue_embedded_figure(view, state, boundFigureTextures[0].Get(),
-                boundFigureTextures[1].Get(), nullptr, {});
+            return renderer.draw_embedded_fixed_function(type, vertices, count,
+                indices, indexCount, state, texture);
         });
         RestoreHostBindings();
     }
     if (SUCCEEDED(hr)) return true;
-    static bool reported = false;
-    if (!reported) {
-        reported = true;
-        GameJournal::Event("RENDER", "triangles_skipped", "owner=c56 hr=%08lx", static_cast<unsigned long>(hr));
-    }
+    static unsigned reports = 0;
+    if (reports++ < 8)
+        GameJournal::Event("RENDER", "fixed_function_skipped",
+            "owner=c74 type=%lu vertices=%lu indices=%lu hr=%08lx",
+            DWORD(type), count, indexCount, static_cast<unsigned long>(hr));
     return false;
 }
-
 bool CDX11::SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request)
 {
     HRESULT hr = E_UNEXPECTED;

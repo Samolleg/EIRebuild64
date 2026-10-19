@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "DXGeometryProcessor.h"
 #include "Renderer.h"
+#include "dx11/RendererDX11.h"
 
 #include "WorldClient.h"
 
@@ -57,47 +58,27 @@ void CPolyLine::SetPlotAt(int index, CPlot3D &plot)
     plots[hindex].w[lindex] = 1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-static CSimplyArray<SLineVertex, SLineVertex &> verts;
-void DrawPolyLine(CRenderer *pRend, const CXYZWArray &plots, DWORD dwColor)
-{
-    verts.SetSize(plots.GetSize()); // ARRAY BOUNDS CHECK
-    //
-    // pRend->SetRenderState(D3DRENDERSTATE_SHADEMODE, D3DSHADE_FLAT);
-    // pRend->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
-    // pRend->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
-
-    for (int i = 0; i < plots.GetSize(); ++i)
-    {
-        Copy16Bytes(&(verts[i].x), &(plots[i].x));
-        verts[i].color = dwColor | 0xff000000;
-        verts[i].specular = 0xff000000;
-    }
-
-    // pRend->DrawPrimitive(D3DPT_LINESTRIP, SLineVertex::fvfFlags, verts.GetData(),
-    // verts.GetSize(),
-    //                    0);
-
-    // pRend->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-    // pRend->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-    // pRend->SetRenderState(D3DRENDERSTATE_SHADEMODE, D3DSHADE_GOURAUD);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-static CByteArray clips;
-static CXYZWArray dst;
-static CXYZWArray dst1;
-/////////////////////////////////////////////////////////////////////////////////////
 BOOL CPolyLine::Draw(CDXGeometryProcessor *pGPU, CRenderer *pRend)
 {
-    dst.SetSize(plots.GetSize() * 4); // ARRAY BOUNDS CHECK
-    clips.SetSize(plots.GetSize() * 4);
+    if (nNumPlots < 2)
+        return TRUE;
+    if (!pGPU || !pRend || !pGPU->IsHaveMatrix(MAT_STACK_PROJSPACE))
+        return FALSE;
 
-    // pDX11->GetConstantBuffers()
-    // pGPU->GetMatrix(MAT_STACK_PROJSPACE)
-    DrawPolyLine(pRend, dst, color);
-
-    return TRUE;
+    // Unpack only the authored points, never the padding lanes. Projection and
+    // clipping stay in the renderer's shared fixed-function translator.
+    std::vector<owned::FixedFunctionVertex> vertices(nNumPlots);
+    for (int i = 0; i < nNumPlots; ++i)
+    {
+        const auto& group = plots[i >> 2];
+        const int lane = i & 3;
+        vertices[i] = {group.x[lane], group.y[lane], group.z[lane], group.w[lane],
+            color | 0xff000000u, 0xff000000u, 0, 0};
+    }
+    return pRend->GetD3D()->SubmitC74FixedFunction(D3DPT_LINESTRIP, vertices.data(),
+        DWORD(vertices.size()), nullptr, 0, pGPU->GetMatrix(MAT_STACK_PROJSPACE), true) ? TRUE : FALSE;
 }
-/////////////////////////////////////////////////////////////////////////////////////
+//
 CPlot3D CPolyLine::GetPlot(int nIndex)
 {
     CPlot3D plot;
@@ -113,13 +94,16 @@ CPlot3D CPolyLine::GetPlot(int nIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 void CPolyLine::MakeCircle(const CPlot3D &ptCenter, float fRadius, int nSegmens)
 {
+    if (nSegmens < 3)
+        return;
     CPlot3D rVector(fRadius, 0, 0);
     CQuaternion qRot(CPlot3D(0, 0, 1), ToRadian((float)360 / nSegmens));
-
-    for (int i = 0; i <= 360 / nSegmens; i++)
+    const int first = nNumPlots;
+    for (int i = 0; i < nSegmens; i++)
     {
-        rVector = qRot.Rotate(rVector);
         AddPlot(ptCenter + rVector);
+        rVector = qRot.Rotate(rVector);
     }
+    AddPlot(GetPlot(first));
 }
 /////////////////////////////////////////////////////////////////////////////////////

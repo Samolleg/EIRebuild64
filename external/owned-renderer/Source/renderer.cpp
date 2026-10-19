@@ -222,7 +222,7 @@ std::uint64_t resource_video_bytes(ID3D11Resource* resource) noexcept {
 
 namespace {
 
-struct Vertex { float x,y,z,w; std::uint32_t diffuse,specular; float u,v; };
+using Vertex = FixedFunctionVertex;
 struct Constants {
     D3DMATRIX world,view,projection;
     float viewport[4],fog_color[4],texture_factor[4];
@@ -5212,12 +5212,54 @@ HRESULT Renderer::apply_state(const FixedState& s,bool,const widescreen::HudComp
 }
 
 HRESULT Renderer::draw(D3DPRIMITIVETYPE type,DWORD fvf,const void* data,DWORD count,const WORD* indices,DWORD index_count,const FixedState& st,SurfaceImage* texture,SemanticKind semantic_kind,std::uint32_t caller_rva,std::uint32_t legacy_draw_count,const widescreen::HudComposition& hud_composition,ID3D11ShaderResourceView* owned_texture){SCENE_ENTRY("draw");
+ if(!device_||!data||!count)return E_INVALIDARG;bool tl=(fvf&D3DFVF_POSITION_MASK)==D3DFVF_XYZRHW,xyz=(fvf&D3DFVF_POSITION_MASK)==D3DFVF_XYZ;if(!tl&&!xyz)return E_NOTIMPL;const auto* p=(const std::uint8_t*)data;UINT stride=legacy_fvf_stride(fvf);bool normal=(fvf&D3DFVF_NORMAL)!=0,diff=(fvf&D3DFVF_DIFFUSE)!=0,spec=(fvf&D3DFVF_SPECULAR)!=0;DWORD tc=(fvf&D3DFVF_TEXCOUNT_MASK)>>D3DFVF_TEXCOUNT_SHIFT;
+ std::vector<Vertex> v(count);for(DWORD n=0;n<count;n++){const auto* q=p+n*stride;std::memcpy(&v[n].x,q,12);q+=12;v[n].w=tl?*(const float*)q:1;if(tl)q+=4;if(normal)q+=12;v[n].diffuse=diff?*(const DWORD*)q:0xffffffffu;if(diff)q+=4;v[n].specular=spec?*(const DWORD*)q:0xffffffffu;if(spec)q+=4;v[n].u=tc?*(const float*)q:0;v[n].v=tc?*(const float*)(q+4):0;}
+ return draw_fixed_function(type,v,indices,index_count,st,texture,semantic_kind,caller_rva,
+  legacy_draw_count,hud_composition,owned_texture,tl,spec);
+}
+
+#ifdef EID3D11_EMBEDDED
+HRESULT Renderer::draw_embedded_fixed_function(D3DPRIMITIVETYPE type,const FixedFunctionVertex* data,
+ DWORD count,const WORD* indices,DWORD index_count,const FixedState& st,
+ ID3D11ShaderResourceView* texture){SCENE_ENTRY("draw_embedded_fixed_function");
+ if(!device_||!data||!count||count>65536u||(!indices&&index_count)||(indices&&!index_count))return E_INVALIDARG;
+ const DWORD elements=indices?index_count:count;
+ switch(type){
+ case D3DPT_POINTLIST:break;
+ case D3DPT_LINELIST:if(elements%2u)return E_INVALIDARG;break;
+ case D3DPT_LINESTRIP:if(elements<2u)return E_INVALIDARG;break;
+ case D3DPT_TRIANGLELIST:if(elements%3u)return E_INVALIDARG;break;
+ case D3DPT_TRIANGLESTRIP:if(elements<3u)return E_INVALIDARG;break;
+ default:return E_NOTIMPL;
+ }
+ for(DWORD i=0;i<index_count;++i)if(indices[i]>=count)return E_INVALIDARG;
+ if(texture){ComPtr<ID3D11Device> actual;texture->GetDevice(&actual);
+  if(actual.Get()!=device_.Get())return E_INVALIDARG;}
+ std::vector<Vertex> vertices;
+ try{vertices.resize(count);}catch(...){return E_OUTOFMEMORY;}
+ std::memcpy(vertices.data(),data,count*sizeof(Vertex));
+ for(const auto& v:vertices)
+  if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)||!std::isfinite(v.w)||
+     !std::isfinite(v.u)||!std::isfinite(v.v))return E_INVALIDARG;
+ // Flush earlier native/UI work at this exact stream position. SCENE_ENTRY
+ // drains queued work; no caller memory or texture is used asynchronously.
+ HRESULT hr=flush_native();if(FAILED(hr))return hr;
+ if(has_pending_ui()&&FAILED(hr=flush_ui()))return hr;
+ return draw_fixed_function(type,vertices,indices,index_count,st,nullptr,
+  SemanticKind::simple_geometry,0,1,{},texture,false,true);
+}
+#endif
+
+HRESULT Renderer::draw_fixed_function(D3DPRIMITIVETYPE type,std::vector<FixedFunctionVertex>& v,
+ const WORD* indices,DWORD index_count,const FixedState& st,SurfaceImage* texture,
+ SemanticKind semantic_kind,std::uint32_t caller_rva,std::uint32_t legacy_draw_count,
+ const widescreen::HudComposition& hud_composition,ID3D11ShaderResourceView* owned_texture,
+ bool tl,bool spec){
+ const DWORD count=static_cast<DWORD>(v.size());
  CampClipScope clip_scope{*this};
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
- if(!device_||!data||!count)return E_INVALIDARG;bool tl=(fvf&D3DFVF_POSITION_MASK)==D3DFVF_XYZRHW,xyz=(fvf&D3DFVF_POSITION_MASK)==D3DFVF_XYZ;if(!tl&&!xyz)return E_NOTIMPL;const auto* p=(const std::uint8_t*)data;UINT stride=legacy_fvf_stride(fvf);bool normal=(fvf&D3DFVF_NORMAL)!=0,diff=(fvf&D3DFVF_DIFFUSE)!=0,spec=(fvf&D3DFVF_SPECULAR)!=0;DWORD tc=(fvf&D3DFVF_TEXCOUNT_MASK)>>D3DFVF_TEXCOUNT_SHIFT;
  if(semantic_kind==SemanticKind::unknown)semantic_kind=current_semantic_context().kind;if(semantic_kind==SemanticKind::ui){const HRESULT hr=composite_world();if(FAILED(hr))return hr;}if(!scene_composited_)scene_updated_=true;remember_debug_projection(st,semantic_kind);char callerPass[64]{};const char* semanticPass="legacy_unclassified";if(semantic_kind==SemanticKind::figure)semanticPass="legacy_figures";else if(semantic_kind==SemanticKind::simple_geometry)semanticPass="legacy_simple_geometry";else if(semantic_kind==SemanticKind::ui)semanticPass="ui_composition";else if(profiler_.capture_active()&&caller_rva){std::snprintf(callerPass,sizeof(callerPass),"legacy_rva_%08X",caller_rva);semanticPass=callerPass;}transition_profile_pass(semanticPass);
  const std::uint64_t primitiveCount=type==D3DPT_TRIANGLELIST?(indices&&index_count?index_count:count)/3:type==D3DPT_TRIANGLESTRIP?(indices&&index_count?index_count:count)>2?(indices&&index_count?index_count:count)-2:0:0;profiler_.add_draw(primitiveCount,legacy_draw_count);profiler_.add_batch();
- std::vector<Vertex> v(count);for(DWORD n=0;n<count;n++){const auto* q=p+n*stride;std::memcpy(&v[n].x,q,12);q+=12;v[n].w=tl?*(const float*)q:1;if(tl)q+=4;if(normal)q+=12;v[n].diffuse=diff?*(const DWORD*)q:0xffffffffu;if(diff)q+=4;v[n].specular=spec?*(const DWORD*)q:0xffffffffu;if(spec)q+=4;v[n].u=tc?*(const float*)q:0;v[n].v=tc?*(const float*)(q+4):0;}
  if(tl&&widescreen::composition_changed(hud_composition)){
   const float px=st.viewport.dwX+hud_composition.pivot_x*st.viewport.dwWidth/canvas_width();
   const float py=st.viewport.dwY+hud_composition.pivot_y*st.viewport.dwHeight/canvas_height();

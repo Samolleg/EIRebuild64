@@ -390,6 +390,10 @@ bool surface_dxgi_format(const DDPIXELFORMAT& format, DXGI_FORMAT& output,
 void test_fail_next_surface_srv_creation() noexcept;
 #endif
 
+// Decoded fixed-function vertex, shared by the proxy FVF frontend and the
+// embedded homogeneous frontend. W is retained through hardware clipping.
+struct FixedFunctionVertex { float x,y,z,w; std::uint32_t diffuse,specular; float u,v; };
+
 struct FixedState {
     std::array<DWORD, 256> render{};
     std::array<std::array<DWORD, 32>, 8> stage{};
@@ -900,6 +904,12 @@ public:
                  std::uint32_t legacy_draw_count = 1,
                  const widescreen::HudComposition& hud_composition = {},
                  ID3D11ShaderResourceView* owned_texture = nullptr);
+#ifdef EID3D11_EMBEDDED
+    // Synchronous bounded source values; never retains source pointers.
+    HRESULT draw_embedded_fixed_function(D3DPRIMITIVETYPE type, const FixedFunctionVertex* vertices,
+        DWORD vertex_count, const WORD* indices, DWORD index_count,
+        const FixedState& state, ID3D11ShaderResourceView* texture);
+#endif
     HRESULT draw_frame(const std::vector<LegacyDrawPacket>& packets,
                        const std::vector<std::uint8_t>& vertex_bytes,
                        const std::vector<WORD>& indices);
@@ -2270,6 +2280,11 @@ private:
     // Drops the array slots keyed `id` (immutable: an owned texture's backing;
     // else a surface id) and releases pages left without a live slot.
     void drop_native_texture_array_slots(std::uint64_t id, bool immutable) noexcept;
+    HRESULT draw_fixed_function(D3DPRIMITIVETYPE type, std::vector<FixedFunctionVertex>& vertices,
+        const WORD* indices, DWORD index_count, const FixedState& state, SurfaceImage* texture,
+        SemanticKind semantic_kind, std::uint32_t caller_rva, std::uint32_t legacy_draw_count,
+        const widescreen::HudComposition& hud_composition, ID3D11ShaderResourceView* owned_texture,
+        bool transformed, bool specular);
     HRESULT apply_state(const FixedState& state, bool textured, const widescreen::HudComposition& hud = {}, const camp::Clip& clip = {});
     void restore_camp_clip() noexcept;
     struct CampClipScope {

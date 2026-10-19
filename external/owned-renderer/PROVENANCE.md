@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-fix1`, commit `fadf374e4e1b28358997ed36b173f132231254ab`.
+integration changes in branch `eirebuild/c74-p5`, commit `2b0c2ff6839a8536faa6dc687395d42c0cfda038`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -114,3 +114,11 @@ OWN74-FIX1 exposes the shared HUD repaint rejection (stage, member and resource
 code) to typed callers. Embedded text publications reject zero surface generations
 and report bounded, specific transaction/lifetime failures. Native rendering
 algorithms and gameplay policy are unchanged.
+
+OWN74-P5 exposes homogeneous source geometry through a synchronous typed input
+to the same fixed-function translator tail as proxy DrawPrimitive and
+DrawIndexedPrimitive. The FVF frontend and embedded frontend share state, fog,
+blend, clipping and GPU submission; the c74 shader bodies are unchanged.
+Source W, UV, diffuse and specular values survive without native FIG repacking.
+Polylines submit only authored points; the spell area ribbon keeps its source
+mesh. VisFog already uses the shared c74 particle producer.

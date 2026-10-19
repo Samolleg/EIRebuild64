@@ -103,7 +103,8 @@ public:
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
     owned::FixedState CaptureC56MaterialState();
-    bool SubmitC56Triangles(const owned::NativeGeometryView& view);
+    bool SubmitC74FixedFunction(D3DPRIMITIVETYPE type, const owned::FixedFunctionVertex* vertices, DWORD count,
+        const WORD* indices, DWORD indexCount, const SHMatrix& projection, bool untextured = false);
     bool SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request);
     bool SubmitHudPortrait(const owned::EmbeddedHudPortraitInput& input);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
