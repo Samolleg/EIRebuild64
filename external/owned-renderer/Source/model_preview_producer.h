@@ -3,7 +3,6 @@
 #include "model_draw.h"
 #include "model_preview_geometry.h"
 #include "model_preview_material.h"
-#include "owned_preview_policy.h"
 
 namespace owned {
 
@@ -11,6 +10,7 @@ namespace owned {
 // in their adapters; queued previews retain values, never these callbacks.
 struct ModelPreviewPart {
     std::size_t ordinal = 0;
+    bool hidden = false; // Current caller membership; a UI view may show a previously hidden part.
     ModelPreviewMaterial material{};
     NativeOwnedFixedState fixed_state{};
     bool fixed_state_supplied = false;
@@ -43,7 +43,7 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             ModelPreviewPart part;
             if (!prepare(index, part) || !input.sample.assembly ||
                 part.ordinal >= input.sample.assembly->parts.size()) return false;
-            if (!preview_submits_part(input.sample.assembly->parts[part.ordinal])) return true;
+            if (part.hidden) return true;
             NativeGeometryView view;
             if (!prepare_model_preview_geometry(input.sample, part.ordinal, *pose,
                     input.object_to_world, input.world_to_clip, input.texture_time,

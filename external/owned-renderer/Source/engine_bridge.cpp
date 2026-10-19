@@ -7795,7 +7795,8 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 ordinal = static_cast<std::size_t>(found - sample.assembly->parts.begin());
             }
             part.ordinal = ordinal;
-            if (!preview_submits_part(sample.assembly->parts[ordinal])) return true;
+            part.hidden = !preview_submits_part(sample.assembly->parts[ordinal]);
+            if (part.hidden) return true;
             NativeFrameState state;
             if (!g_native_sink_frame_state ||
                 !g_native_sink_frame_state(g_native_sink_context, state)) return reject("preview.ui_state");
@@ -7823,7 +7824,7 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 [&](std::size_t i, std::uint32_t& visible) {
                     ModelPreviewPart prepared;
                     if (!prepare(i, prepared)) return false;
-                    if (!preview_submits_part(sample.assembly->parts[prepared.ordinal])) return true;
+                    if (prepared.hidden) return true;
                     OwnedPreviewPart part;
                     part.ordinal = prepared.ordinal; part.set = command->sets.size() - 1;
                     part.material = prepared.fixed_state;
