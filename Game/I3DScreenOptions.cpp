@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenOptions.h"
@@ -195,6 +196,7 @@ LPCTSTR CI3DScreenOptions::GetTutorialScreenName()
 ////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenOptions::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenOptions);
     float fPart;
     CI3DMapObjTranslation *pObj = 0;
     if (bIntro)

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E3Hud.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -453,6 +454,7 @@ void CI3DScreenTutorial::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenTutorial::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenTutorial);
     DWORD dwAlpha;
     pI3D->GetRenderer()->GetRenderState(D3DRENDERSTATE_ALPHAREF, &dwAlpha);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, 1);

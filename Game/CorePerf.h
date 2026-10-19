@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include "GameJournal.h"
 
 // Permanent, passive main-thread journal counters. All times are inclusive wall
@@ -14,6 +15,14 @@ enum Id {
     Effects, AIMap, Water, Spells, Script, ScriptTemp, ActiveObjects,
     UnitSegment, UnitAI, Vision, FindPath, L1, MoveCollisions, L0, Lua,
     ClientSegment, ClientObjects, ClientEffects, ClientParticles, ClientPrints,
+    InterfaceSetup, InterfaceScreen, InterfaceEffects, ScreenMission, ScreenMenu,
+    ScreenBase, ScreenCamp, ScreenChoosePers, ScreenDebug, ScreenEndGame, ScreenExchange, ScreenGlobalMap, ScreenOptions, ScreenSaveLoad, ScreenTutorial,
+    WorldDraw, WorldSetup, WorldTerrainInputs, WorldBegin, WorldTerrainBase,
+    WorldPrepare, WorldSceneInputs, WorldVisualInputs, WorldRender, WorldOverlays,
+    WorldWater, WorldEffects, WorldFinish, Visibility, Placement, PoseWalk,
+    VisualResources, Skeleton, VisualPose, PosePublish, Picking, FootprintInputs, VisualFrameRun,
+    SceneObjectWalk, SceneSubmit, RenderTerrain, EffectsFog, EffectsParticles, EffectsLightning, EffectsWeather,
+    LockFrameWait, SceneSyncWait, PresentSlotWait, LimiterWait, IdleWait,
     Count
 };
 inline const char* Name(Id id) noexcept {
@@ -25,7 +34,17 @@ inline const char* Name(Id id) noexcept {
         "world.water", "world.spells", "world.script", "world.script_temp",
         "world.active_objects", "unit.segment", "unit.ai", "unit.vision",
         "unit.find_path", "unit.l1", "unit.move_collisions", "unit.l0", "lua.call",
-        "client.segment", "client.objects", "client.effects", "client.particles", "client.prints"
+        "client.segment", "client.objects", "client.effects", "client.particles", "client.prints",
+        "draw3d.interface_setup", "draw3d.screen", "draw3d.interface_effects", "screen.mission", "screen.menu",
+        "screen.base", "screen.camp", "screen.choosepers", "screen.debug", "screen.endgame", "screen.exchange", "screen.globalmap", "screen.options", "screen.saveload", "screen.tutorial",
+        "draw3d.world", "world_draw.setup", "world_draw.terrain_inputs", "world_draw.begin",
+        "world_draw.terrain_base", "world_draw.prepare", "world_draw.scene_inputs",
+        "world_draw.visual_inputs", "world_draw.render", "world_draw.overlays", "world_draw.water",
+        "world_draw.effects", "world_draw.finish", "prepare.visibility", "visibility.placement",
+        "prepare.pose_walk", "visual.resources", "visual.skeleton", "visual.pose", "visual.pose_publish",
+        "visual.picking", "prepare.footprints", "render.visual_frame",
+        "scene_inputs.objects", "scene_inputs.submit", "render.terrain", "effects.fog", "effects.particles", "effects.lightning", "effects.weather",
+        "wait.lock_frame", "wait.scene_sync", "wait.present_slot", "wait.limiter", "wait.idle"
     };
     return names[id];
 }
@@ -45,10 +64,30 @@ struct TickData {
     std::uint64_t dynamic = 0, active = 0, objects = 0;
     char zone[384]{};
 };
+struct VisualSample {
+    VisualSample* parent = nullptr;
+    std::uint64_t values[3]{}; // visible objects, visible figures, published poses
+};
+struct AsyncCounter {
+    std::mutex mutex;
+    Counter value;
+    void Add(LONGLONG elapsed) noexcept {
+        std::lock_guard<std::mutex> lock(mutex); value.Add(elapsed);
+    }
+    Counter Take() noexcept {
+        std::lock_guard<std::mutex> lock(mutex);
+        const Counter result = value; value = Counter{}; return result;
+    }
+};
 struct State {
     const DWORD thread = GetCurrentThreadId();
     LONGLONG frequency = 0, window = Now();
     Counter scopes[Count]{};
+    AsyncCounter async[Count]{};
+    VisualSample* visual = nullptr;
+    std::uint64_t visualFrames = 0, visualTotals[3]{}, visualMax[3]{};
+    std::uint64_t emptyFrames = 0, skips[5]{};
+    bool drew3D = false;
     TickData* tick = nullptr;
     TickData worst{};
     bool inFrame = false;
@@ -78,6 +117,55 @@ public:
     }
     ~Scope() noexcept { Finish(); }
 };
+// Sequential phases partition their parent, without moving host operations.
+class Partition {
+    State* state = Main();
+    Id id;
+    LONGLONG checkpoint;
+public:
+    explicit Partition(Id value) noexcept : id(value), checkpoint(state ? Now() : 0) {}
+    void Stage(Id value) noexcept {
+        if (state) { const auto now = Now(); Record(*state, id, now - checkpoint); checkpoint = now; }
+        id = value;
+    }
+    ~Partition() noexcept { if (state) Record(*state, id, Now() - checkpoint); }
+};
+// Renderer waits may also run on its scene thread. Keep that timeline separate
+// from the main thread's inclusive scopes; never add it to frame.draw_3d.
+class AnyThreadScope {
+    State& state = Get();
+    State* main = Main();
+    Id id;
+    LONGLONG started = Now();
+public:
+    explicit AnyThreadScope(Id value) noexcept : id(value) {}
+    ~AnyThreadScope() noexcept {
+        const auto elapsed = Now() - started;
+        if (main) Record(state, id, elapsed); else state.async[id].Add(elapsed);
+    }
+};
+class VisualFrame {
+    State* state = Main();
+    VisualSample sample{};
+public:
+    VisualFrame() noexcept {
+        if (state) { sample.parent = state->visual; state->visual = &sample; state->drew3D = true; }
+    }
+    ~VisualFrame() noexcept {
+        if (!state) return;
+        state->visual = sample.parent;
+        ++state->visualFrames;
+        for (int i = 0; i < 3; ++i) {
+            state->visualTotals[i] += sample.values[i];
+            if (sample.values[i] > state->visualMax[i]) state->visualMax[i] = sample.values[i];
+        }
+    }
+};
+inline void VisualCount(unsigned index, std::uint64_t count = 1) noexcept {
+    if (State* s = Main()) if (s->visual) s->visual->values[index] += count;
+}
+// background pause, disabled render, no render requested, no screen, inactive renderer
+inline void DrawSkipped(unsigned reason) noexcept { if (State* s = Main()) ++s->skips[reason]; }
 inline void Objects(std::uint64_t dynamic, std::uint64_t active) noexcept {
     if (State* s = Main()) {
         s->dynamicTotal += dynamic; s->activeTotal += active;
@@ -128,18 +216,35 @@ inline void Flush() noexcept {
     const double window = (now - s.window) * ms;
     for (int i = 0; i < Count; ++i) {
         const Counter& c = s.scopes[i];
-        char extra[320]{};
+        char extra[640]{};
         if (i == IdleFrame)
-            sprintf_s(extra, " frames_ticks_0=%llu frames_ticks_1=%llu frames_ticks_2=%llu frames_ticks_3plus=%llu",
-                s.histogram[0], s.histogram[1], s.histogram[2], s.histogram[3]);
+            sprintf_s(extra, " frames_ticks_0=%llu frames_ticks_1=%llu frames_ticks_2=%llu frames_ticks_3plus=%llu empty_iterations=%llu skip_background=%llu skip_disabled=%llu skip_not_needed=%llu skip_no_screen=%llu skip_inactive=%llu",
+                s.histogram[0], s.histogram[1], s.histogram[2], s.histogram[3], s.emptyFrames,
+                s.skips[0], s.skips[1], s.skips[2], s.skips[3], s.skips[4]);
+        if (i == Draw3D)
+            sprintf_s(extra, " samples=%llu visible_objects_mean=%.2f visible_objects_max=%llu visible_figures_mean=%.2f visible_figures_max=%llu published_poses_mean=%.2f published_poses_max=%llu",
+                s.visualFrames, s.visualFrames ? double(s.visualTotals[0]) / s.visualFrames : 0.0, s.visualMax[0],
+                s.visualFrames ? double(s.visualTotals[1]) / s.visualFrames : 0.0, s.visualMax[1],
+                s.visualFrames ? double(s.visualTotals[2]) / s.visualFrames : 0.0, s.visualMax[2]);
         if (i == ActiveObjects)
             sprintf_s(extra, " dynamicObjs_mean=%.2f dynamicObjs_max=%llu activeSet_mean=%.2f activeSet_max=%llu",
                 c.calls ? double(s.dynamicTotal) / c.calls : 0.0, s.dynamicMax,
                 c.calls ? double(s.activeTotal) / c.calls : 0.0, s.activeMax);
         GameJournal::Event("CORE", "core_perf",
-            "scope=%s window_ms=%.3f calls=%llu total_ms=%.3f mean_ms=%.4f max_ms=%.3f inclusive=1%s",
+            "scope=%s window_ms=%.3f calls=%llu total_ms=%.3f mean_ms=%.4f max_ms=%.3f inclusive=1 thread=main%s",
             Name(static_cast<Id>(i)), window, c.calls, c.total * ms,
             c.calls ? c.total * ms / c.calls : 0.0, c.maximum * ms, extra);
+    }
+    for (int i = 0; i < Count; ++i) {
+        const auto c = s.async[i].Take();
+        const auto calls = c.calls;
+        const auto total = c.total;
+        const auto maximum = c.maximum;
+        if (calls || total)
+            GameJournal::Event("CORE", "core_perf",
+                "scope=%s window_ms=%.3f calls=%llu total_ms=%.3f mean_ms=%.4f max_ms=%.3f inclusive=1 thread=scene",
+                Name(static_cast<Id>(i)), window, calls, total * ms,
+                calls ? total * ms / calls : 0.0, maximum * ms);
     }
     if (s.hitches) {
         char parts[4096]{}; size_t used = 0;
@@ -164,18 +269,23 @@ inline void Flush() noexcept {
     for (auto& c : s.scopes) c = Counter{};
     for (auto& n : s.histogram) n = 0;
     s.dynamicTotal = s.activeTotal = s.dynamicMax = s.activeMax = s.hitches = 0;
+    s.visualFrames = s.emptyFrames = 0;
+    for (auto& v : s.visualTotals) v = 0;
+    for (auto& v : s.visualMax) v = 0;
+    for (auto& v : s.skips) v = 0;
     s.worst = TickData{}; s.window = Now();
 }
 class Frame {
     State* state = Main();
     Scope timing{IdleFrame};
 public:
-    Frame() noexcept { if (state) { state->frameTicks = 0; state->inFrame = true; } }
+    Frame() noexcept { if (state) { state->frameTicks = 0; state->drew3D = false; state->inFrame = true; } }
     Frame(const Frame&) = delete;
     ~Frame() noexcept {
         timing.Finish();
         if (state) {
             ++state->histogram[state->frameTicks < 3 ? state->frameTicks : 3];
+            if (!state->drew3D) ++state->emptyFrames;
             state->inFrame = false;
             Flush(); // Journal formatting/queueing is outside all frame/tick timers.
         }

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 #include "ModPackage.h"
@@ -719,6 +720,7 @@ void CI3DScreenCamp::Draw2D()
 }
 BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenCamp);
     E4CampAccess::BeginDraw(this);
     OwnedRender::E4::Frame campFrame(pRend);
     CPoint point = theCursor.GetPos();

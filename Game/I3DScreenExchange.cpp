@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenExchange.h"
@@ -102,6 +103,7 @@ void CI3DScreenExchange::OnIdle()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenExchange::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenExchange);
     CPoint point = theCursor.GetPos();
 
     pMouseItem = 0;

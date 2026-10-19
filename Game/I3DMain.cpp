@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E1TextLifetime.h"
 #include "widescreen_layout.h"
 #include "OwnedRender/E3Input.h"
@@ -290,6 +291,7 @@ void CInterface3D::ClearStates()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CInterface3D::Draw()
 {
+    CorePerf::Partition coreParts(CorePerf::InterfaceSetup);
     CheckScreensMustDie();
     OwnedRender::E3RefreshInterface();
     if (eBGFlag == BG_FLAG_DRAW || eBGFlag == BG_FLAG_DRAW_S || eBGFlag == BG_FLAG_CREATE_S)
@@ -300,11 +302,13 @@ BOOL CInterface3D::Draw()
     }
     // restore state after XTK->DRAW mushes it
     GetD3D()->SetRenderStates();
+    coreParts.Stage(CorePerf::InterfaceScreen);
     if (!pScreens.empty())
     {
         pScreens.back()->Draw(GetRenderer());
         // pScreens.back()->DrawTips( GetRenderer() );
     }
+    coreParts.Stage(CorePerf::InterfaceEffects);
     m_pEffects->Draw(&theRenderer);
     return TRUE;
 }

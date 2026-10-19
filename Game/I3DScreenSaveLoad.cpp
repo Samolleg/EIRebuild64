@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E2Gdi.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -305,6 +306,7 @@ LPCTSTR CI3DScreenSaveLoad::GetTutorialScreenName()
 ////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenSaveLoad::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenSaveLoad);
     float fPart;
     CI3DMapObjTranslation *pObj = 0;
     if (bIntro)

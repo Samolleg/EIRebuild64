@@ -1191,22 +1191,23 @@ LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 void NGame::DrawFrame(bool bFlip, bool bDraw2D)
 {
     CorePerf::Scope coreTiming(CorePerf::DrawFrame);
-    if (OwnedRender::E2BackgroundPaused(hWnd)) { Sleep(50); return; }
+    if (OwnedRender::E2BackgroundPaused(hWnd)) { CorePerf::DrawSkipped(0); Sleep(50); return; }
     OwnedRender::E2PassScope pass(OwnedRender::Pass::frame);
     OwnedRender::E1BeginFrame();
     OwnedRender::E1TextBeginFrame();
-    if (!bEnableRender)
-        return;
-    if (!bNeedRender)
-        return;
+    if (!bEnableRender) { CorePerf::DrawSkipped(1); return; }
+    if (!bNeedRender) { CorePerf::DrawSkipped(2); return; }
     if (!theInterface.GetCurrentScreen())
     {
+        CorePerf::DrawSkipped(3);
         Sleep(50);
         return;
     }
 
     auto pDX11 = theRenderer.GetD3D();
+    CorePerf::Scope coreLock(CorePerf::LockFrameWait);
     const auto renderAccess = pDX11->GetOwnedRenderer().LockFrame();
+    coreLock.Finish();
 
     if (theRenderer.BeginDrawFrame())
     {
@@ -1214,6 +1215,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
         pDX11->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Immediate);
         {
             CorePerf::Scope coreTiming(CorePerf::Draw3D);
+            CorePerf::VisualFrame coreVisual;
             FrameDiagnostics::Scope timing(FrameDiagnostics::Draw3D);
             theInterface.Draw();
         }
@@ -1232,6 +1234,7 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
             theCursor.Draw();
         pDX11->EndFrame(present);
     }
+    else CorePerf::DrawSkipped(4);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void NGame::DestroyInputMessages()

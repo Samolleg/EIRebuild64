@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "widescreen_layout.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -415,6 +416,7 @@ void CI3DScreenGlobalMap::ApplyCloudsParams()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenGlobalMap::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenGlobalMap);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);

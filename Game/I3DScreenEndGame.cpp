@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenEndGame.h"
@@ -115,6 +116,7 @@ void CI3DScreenEndGame::OnDeactivate()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenEndGame::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenEndGame);
     if (IWorldClient.GetPreciseTime() > m_fWaitTime && m_pText->GetScrollSpeed() == 0)
     {
         m_fWaitTime = 0;

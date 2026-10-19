@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -313,6 +314,7 @@ void CI3DScreenChoosePers::OnExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenChoosePers::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenChoosePers);
 #ifndef NOGETDC
     if (eScreenMode == ISM_STATS)
     {

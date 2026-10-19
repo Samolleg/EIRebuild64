@@ -1,3 +1,4 @@
+#include "../CorePerf.h"
 #include "E1VisualFrame.h"
 #include "E1PerfDiagnostics.h"
 #include "E1TerrainSubmission.h"
@@ -250,6 +251,7 @@ void shadowCull(void* context, owned::NativeShadowCullProjection& projection) no
 namespace OwnedRender {
 bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& state,
                            const E1VisualInputs& host) noexcept {
+    CorePerf::Scope coreTiming(CorePerf::VisualFrameRun);
     static E1PerfCounter counter{"scene_total"};
     E1PerfScope timing(counter);
     owned::EmbeddedVisualFrameInputs inputs;
@@ -281,6 +283,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     if (host.sceneFlags & 0x100u) {
         E1ShadowTerrain(inputs, terrain);
         inputs.draw_terrain = [](void* context) -> bool {
+            CorePerf::Scope coreTerrain(CorePerf::RenderTerrain);
             auto& terrain = *static_cast<TerrainContext*>(context);
             E1TerrainSubmission result;
             return SUCCEEDED(E1SubmitTerrainPass(terrain.renderer, false, result)) &&

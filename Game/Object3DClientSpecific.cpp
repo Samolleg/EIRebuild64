@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E1PerfDiagnostics.h"
 #include <algorithm>
 static const char LOCAL_FILE[] = __FILE__;
@@ -815,6 +816,7 @@ catch (...)
 }
 bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
 {
+    CorePerf::Scope coreTiming(CorePerf::PosePublish);
     static OwnedRender::E1PerfCounter counter{"host_pose_publish"};
     OwnedRender::E1PerfScope timing(counter);
     CObject3D* object = static_cast<CObject3D*>(lpObject);
@@ -875,6 +877,7 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
         return true;
     if (!hostScene.PublishObjectPose(resource, pose))
         return reject("object_pose.publish");
+    CorePerf::VisualCount(2);
     return true;
 }
 catch (...) {
@@ -919,6 +922,7 @@ bool CObject3DClientSpecific::PrepareOwnedResources()
 }
 bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleOnScreen)
 {
+    CorePerf::Partition coreParts(CorePerf::VisualResources);
     if (lpObject->CheckFlag(OBJ_HIDDEN)) {
         // Keep an already published caster from surviving a hide transition.
         const auto resource = OwnedRender::E1Scene().Resource(lpObject);
@@ -933,8 +937,10 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         OwnedRender::E1PublishSecondaryVisual(lpObject->GetID(),
             sets[0]->lpTexture->GetSurface()->OwnedSurfaceId(),secondary);
     }
+    coreParts.Stage(CorePerf::Skeleton);
     if (lpObject->GetAnimationSystem2())
         lpObject->GetAnimationSystem2()->RecalcSkeletonWithCurrentTime();
+    coreParts.Stage(CorePerf::VisualPose);
     const bool published = resourcesReady && PublishOwnedPose();
     if (!published) {
         const auto resource = OwnedRender::E1Scene().Resource(lpObject);
@@ -952,6 +958,7 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         (!lpObject->GetAnimationSystem2() || !lpObject->GetAnimationSystem2()->GetCurrentAnimation()))
         return published;
 
+    coreParts.Stage(CorePerf::Picking);
     // Picking uses current host geometry, independently of GPU acceptance.
     const bool selectable = lpObject->WhoAmI() == HPC_UNIT || lpObject->WhoAmI() == HPC_LEVER;
     rcRect.SetRectEmpty();

@@ -3,6 +3,7 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -166,6 +167,7 @@ void CI3DScreenMainMenu::OnExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenMainMenu::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenMenu);
     IWorldClient.Draw();
     pI3D->GetRenderer()->Clear(0, 0, D3DCLEAR_ZBUFFER, 0, 1, 0);
     return CI3DScreen::Draw(pRend);

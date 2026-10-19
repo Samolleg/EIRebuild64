@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenDebug.h"
@@ -24,6 +25,7 @@ void CI3DScreenDebug::OnDeactivate()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenDebug::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenDebug);
     IWorldClient.Draw();
     return TRUE;
 }

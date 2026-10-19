@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CorePerf.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E2Gdi.h"
 #include "OwnedRender/E1TextLifetime.h"
@@ -278,6 +279,7 @@ void CI3DScreenMission::OnExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenMission::Draw(CRenderer *pRend)
 {
+    CorePerf::Scope coreTiming(CorePerf::ScreenMission);
     IWorldClient.Draw();
     if (bRubberSel)
         pRend->DrawFrameSelection(rcRubber.left, rcRubber.top, rcRubber.right, rcRubber.bottom);

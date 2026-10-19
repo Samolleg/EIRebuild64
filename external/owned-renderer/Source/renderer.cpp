@@ -1,6 +1,7 @@
 #include "embedded_perf06.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
+#include "../../../Game/CorePerf.h"
 #endif
 #include <map>
 #include <string>
@@ -4361,7 +4362,12 @@ void Renderer::flush_game_uploads() noexcept{
  };
  if(scene_thread_->post(run))return;
  // Allocation failed: run it here, in order, with the scene thread drained.
+ {
+ #ifdef EID3D11_EMBEDDED
+ const CorePerf::AnyThreadScope coreWait(CorePerf::SceneSyncWait);
+ #endif
  scene_thread_->sync();
+ }
  run();
 }
 
@@ -14846,7 +14852,12 @@ void Renderer::scene_sync(const char* reason) noexcept{
  // bracketed (slot 1), so a real stall is reported there, with its name,
  // and legitimate exempt work (shader compiles) is not a game-thread stall.
  const stall_watch::Exempt wait;
+ {
+ #ifdef EID3D11_EMBEDDED
+ const CorePerf::AnyThreadScope coreWait(CorePerf::SceneSyncWait);
+ #endif
  scene_thread_->sync();
+ }
 }
 
 // A queued call's failure (scene thread): one line per operation, at most a
@@ -14979,7 +14990,11 @@ HRESULT Renderer::queue_present(){
 #endif
  inputs.bridge=bridge_capture_frame_values();
  bridge_capture_profile_values(inputs.profile);
- {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);scene_thread_->wait_present_slot();}
+ {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);
+ #ifdef EID3D11_EMBEDDED
+ const CorePerf::AnyThreadScope coreWait(CorePerf::PresentSlotWait);
+ #endif
+ scene_thread_->wait_present_slot();}
  inputs.game_frame=fa_game_frame_;
  // Present's HUD border step draws this copy, never the live panels.
  try{widescreen_hud_asset_frames(inputs.hud_frames);}catch(...){inputs.hud_frames.clear();}
@@ -15272,7 +15287,11 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  }
  apply_load_reveal();
  frame_bracket.reset();
- {const frame_acct::Scope scope(frame_acct::pf_limiter);frame_limiter_.wait(frame_limit);}
+ {const frame_acct::Scope scope(frame_acct::pf_limiter);
+ #ifdef EID3D11_EMBEDDED
+ const CorePerf::AnyThreadScope coreWait(CorePerf::LimiterWait);
+ #endif
+ frame_limiter_.wait(frame_limit);}
  HRESULT hr;
  {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);hr=swap_->Present(interval,flags);}
  const std::int64_t recorder_present_return=

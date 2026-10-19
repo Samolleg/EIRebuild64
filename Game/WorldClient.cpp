@@ -2919,6 +2919,8 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::Draw()
 {
+    CorePerf::Scope coreWorld(CorePerf::WorldDraw);
+    CorePerf::Partition coreParts(CorePerf::WorldSetup);
     theCamera.UpdateFieldCampCamera();
     CameraTerrainCollision::GuardEye(this, &theCamera);
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
@@ -2998,10 +3000,12 @@ BOOL CWorldClient::Draw()
         ownedWorld.wind_direction[0] = wind.x; ownedWorld.wind_direction[1] = wind.y;
         ownedWorld.wind_force = pTerrain->GetWindForce();
     }
+    coreParts.Stage(CorePerf::WorldTerrainInputs);
     if(pTerrain && pTerrain->IsLoaded())
         OwnedWorldInputs::Terrain(pRend->GetD3D()->GetOwnedRenderer(),*pTerrain,
             static_cast<CTextureManager*>(GetTextureManager()),ownedRenderGeneration,
             ModRuntime::Resources(),GetWorkPath(),GetResourcePath());
+    coreParts.Stage(CorePerf::WorldBegin);
     OwnedRender::E1WorldFrame frameValues;
     // The values above were read from this draw's renderer and sunlight.
     // ownedWorld already reverses D3DLIGHT's ray direction exactly once.
@@ -3049,6 +3053,7 @@ BOOL CWorldClient::Draw()
 #ifndef _A4
     LMPTimePassed();
 #endif // _A4
+    coreParts.Stage(CorePerf::WorldTerrainBase);
        // render terrain's main part
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
@@ -3060,7 +3065,9 @@ BOOL CWorldClient::Draw()
         pTerrain->DrawBase(&theRenderer, true);
     }
     // Prepare visibility, poses and picking before publication and commit.
+    coreParts.Stage(CorePerf::WorldPrepare);
     Prepare3DScene();
+    coreParts.Stage(CorePerf::WorldSceneInputs);
     LMPTimePassed();
     std::vector<owned::RetainedWorldPointLight> ownedPointLights;
     const bool ownedDrawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
@@ -3070,13 +3077,18 @@ BOOL CWorldClient::Draw()
         OwnedWorldInputs::Scene scene;
         const bool drawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
         const float night=GetNightPowerSlow();
-        for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
-        for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
+        {
+            CorePerf::Scope coreWalk(CorePerf::SceneObjectWalk);
+            for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
+            for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
+        }
+        CorePerf::Scope coreSubmit(CorePerf::SceneSubmit);
         scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
         pRend->GetD3D()->SubmitC56PointLights(scene.c56Lights, ownedWorld.world_time);
         ownedPointLights=scene.c56Lights;
         if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
     }
+    coreParts.Stage(CorePerf::WorldVisualInputs);
     // Publish this draw's visibility and interpolated scene facts before c56
     // consumes them for critters, ground cover, lights, and retained geometry.
     // Run after terrain and scene preparation, before ground colour and water.
@@ -3116,10 +3128,13 @@ BOOL CWorldClient::Draw()
         };
         visuals.fogContext = pTerrain;
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
+        coreParts.Stage(CorePerf::WorldRender);
         pRend->GetD3D()->RunC56WorldPass(&visuals);
     }
+    coreParts.Stage(CorePerf::WorldOverlays);
     // Remaining overlays run after this draw's owned shadows and colour.
     Draw3DScene();
+    coreParts.Stage(CorePerf::WorldWater);
     // render terrain's transparent part (water)
     if (CheckFlag(WC_RENDER_TERRAIN) && pTerrain)
     {
@@ -3132,6 +3147,7 @@ BOOL CWorldClient::Draw()
         pTerrain->DrawTransparent(&theRenderer);
     }
     LMPTimePassed();
+    coreParts.Stage(CorePerf::WorldEffects);
     // render effects
     if (CheckFlag(WC_RENDER_EFFECTS))
     {
@@ -3142,25 +3158,26 @@ BOOL CWorldClient::Draw()
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-        GetVisFogManager()->Draw(&theRenderer);
+        { CorePerf::Scope coreTiming(CorePerf::EffectsFog); GetVisFogManager()->Draw(&theRenderer); }
         //        ;
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
-        static_cast<CParticleManager *>(GetParticleManager())->Draw(&theRenderer);
+        { CorePerf::Scope coreTiming(CorePerf::EffectsParticles); static_cast<CParticleManager *>(GetParticleManager())->Draw(&theRenderer); }
         // lightning
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        GetLightningManager()->Draw(&theRenderer);
+        { CorePerf::Scope coreTiming(CorePerf::EffectsLightning); GetLightningManager()->Draw(&theRenderer); }
         // weather
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        weather.Draw(&theRenderer);
+        { CorePerf::Scope coreTiming(CorePerf::EffectsWeather); weather.Draw(&theRenderer); }
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
     }
     pRend->SetTexturingAlphaMode(AM_VERTEX);
     LMPTimePassed();
     //
+    coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();
     pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
     // pop main and camera matrix
@@ -3297,7 +3314,10 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
                 continue;
             // обработать юнитов надо, ...
             if (bPickDynamic)
+            {
+                CorePerf::Scope coreTiming(CorePerf::Placement);
                 pObject->SetExactPosition(fpTime);
+            }
             else
             {
                 dynamicObjects.push_back(pObject);
@@ -3308,13 +3328,17 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
                 continue;
         }
         // first, check all the objects for visibility
-        pObject->CreateCurrentPlacement();
+        {
+            CorePerf::Scope coreTiming(CorePerf::Placement);
+            pObject->CreateCurrentPlacement();
+        }
         pGPU->PushMatrix(pObject->GetPlacement(), MAT_STACK_PROJSPACE);
         int nRetCode = theRenderer.CheckVisibility(pObject->GetBoundingVolume());
         pGPU->PopMatrix(MAT_STACK_PROJSPACE);
         if (nRetCode != TRV_INVISIBLE)
         {
             pObject->SetFlag(OBJ_VISIBLE);
+            CorePerf::VisualCount(1, static_cast<CObject3D*>(pObject)->GetNumFigures());
             // respectCP для z-sorting в пространстве камеры
             pObject->SetRespectCP(matCamera.RotateVector(pObject->GetCP()));
             switch (pObject->WhoAmI()) // add to list by type: unit/building/tree/object
@@ -3383,6 +3407,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
 // perform all operation steps to draw current d3d scene
 BOOL CWorldClient::Prepare3DScene()
 {
+    CorePerf::Partition coreParts(CorePerf::Visibility);
     if (!pTerrain || !pTerrain->IsLoaded())
         return FALSE;
     CRenderer *pRend = &theRenderer;
@@ -3434,6 +3459,9 @@ BOOL CWorldClient::Prepare3DScene()
             (*iter)->ResetFlag(OBJ_LIGHTED);
         }
     }
+    CorePerf::VisualCount(0, visibleObjects.size() + visibleBuildings.size() + visibleTrees.size() +
+        visibleLevers.size() + visibleUnits.size());
+    coreParts.Stage(CorePerf::PoseWalk);
     // Publish current poses for off-screen casters as well as visible objects.
     std::set<int> prepared;
     static std::uint64_t lastPublicationEpoch = 0;
@@ -3493,6 +3521,7 @@ BOOL CWorldClient::Prepare3DScene()
             GameJournal::Event("RENDER", "world_visual_unclaimed_stages", "%s", details);
         }
     }
+    coreParts.Stage(CorePerf::FootprintInputs);
     // Publish only footprints with a known creator and current native lifetime.
     try
     {
