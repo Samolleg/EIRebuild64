@@ -22,34 +22,6 @@ inline bool prepare_model_placement(const ModelPlacementFacts& facts,
     return true;
 }
 
-// Synchronous per-view overrides. They belong to the UI invocation, never to
-// a world pose, FIG flags, lighting cache or the immutable assembly. The id
-// prevents an unrelated object drawn by a nested callback inheriting a view.
-struct ModelPreviewPresentation {
-    std::int32_t id = 0;
-    ModelPlacementFacts placement{};
-    bool placed = false, full_ambient = false, default_fog = false;
-    bool default_colors = false;
-    std::uint32_t diffuse = 0xffffffffu, specular = 0xff000000u;
-};
-inline thread_local const ModelPreviewPresentation* model_preview_presentation = nullptr;
-class ModelPreviewPresentationScope {
-    ModelPreviewPresentation value_;
-    const ModelPreviewPresentation* previous_;
-public:
-    explicit ModelPreviewPresentationScope(const ModelPreviewPresentation& value) noexcept
-        : value_(value), previous_(model_preview_presentation) {
-        model_preview_presentation = &value_;
-    }
-    ~ModelPreviewPresentationScope() { model_preview_presentation = previous_; }
-    ModelPreviewPresentationScope(const ModelPreviewPresentationScope&) = delete;
-    ModelPreviewPresentationScope& operator=(const ModelPreviewPresentationScope&) = delete;
-};
-inline const ModelPreviewPresentation* model_preview_for(std::int32_t id) noexcept {
-    return model_preview_presentation && model_preview_presentation->id == id
-        ? model_preview_presentation : nullptr;
-}
-
 // c74's native part9 glow: store the wrapped float phase, but quantize from
 // the unrounded wrapped value. The adapter supplies its admitted palette and
 // frame duration; this does not read or retain an item or consume randomness.

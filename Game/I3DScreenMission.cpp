@@ -1,7 +1,6 @@
 #include "StdAfx.h"
 #include "model_draw.h"
-#include "model_preview_clock.h"
-#include "model_preview_presentation.h"
+#include "OwnedRender/ModelPreviewContext.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E2Gdi.h"
@@ -5467,10 +5466,10 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
         if (nMode != 2 || (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVShowCharacterModelInStats")))
         {
             const float previewTime=theWorld.GetPreciseTime();
-            owned::ModelPreviewTimeScope clock(owned::ModelPreviewClock::game,previewTime);
-            const auto composition=owned::panel_model_preview(pDrawUnit->GetID(),WideScreen::Layout(),
+            OwnedRender::ModelPreviewTimeScope clock(owned::ModelPreviewClock::game,previewTime);
+            const auto composition=OwnedRender::panel_model_preview(pDrawUnit->GetID(),WideScreen::Layout(),
                 slide_nCurPixels,fDistDrawUnit,fAltDrawUnit,DISTANCE_DRAW_UNIT,nMode==0);
-            owned::produce_model_preview_composition(composition,
+            OwnedRender::produce_model_preview_composition(composition,
                 [&](auto& rect,bool local){SourcePreviewRect(pI3D,rect,local);},
                 [&](const auto* rect,unsigned count,float depth){SourcePreviewDepth(pI3D->GetRenderer(),rect,count,depth);},
                 SourcePreviewQuaternion,

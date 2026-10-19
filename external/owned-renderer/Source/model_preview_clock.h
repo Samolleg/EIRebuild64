@@ -8,24 +8,6 @@
 namespace owned {
 
 enum class ModelPreviewClock : unsigned { game, inventory, display, count };
-struct ModelPreviewTime {
-    ModelPreviewClock clock = ModelPreviewClock::game;
-    double now = 0;
-    bool supplied = false;
-};
-inline thread_local ModelPreviewTime model_preview_time;
-// The source wrapper supplies its actual completed SetExactPosition time.
-// Nested UI calls restore their caller's clock; no borrowed game data survives.
-class ModelPreviewTimeScope {
-    ModelPreviewTime previous_;
-public:
-    ModelPreviewTimeScope(ModelPreviewClock clock, double now) noexcept
-        : previous_(model_preview_time) { model_preview_time = {clock, now, true}; }
-    ~ModelPreviewTimeScope() { model_preview_time = previous_; }
-    ModelPreviewTimeScope(const ModelPreviewTimeScope&) = delete;
-    ModelPreviewTimeScope& operator=(const ModelPreviewTimeScope&) = delete;
-};
-
 struct ModelPreviewView {
     VisualResourceIncarnation resource{};
     VisualClipSelection selection;

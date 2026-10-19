@@ -1,8 +1,8 @@
 #include "contact_blend.h"
-#include "model_preview_clock.h"
+#include "ModelPreviewContext.h"
 #include "model_preview_presentation.h"
 #include "model_preview_producer.h"
-#include "model_lighting.h"
+#include "ModelPreviewLighting.h"
 #include "../ModRuntime.h"
 #include "../ModPackage.h"
 // Read-only adapter over the same source rate used by SetExactPosition.
@@ -55,7 +55,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     sample.selection = selected.visual;
     // The source controller has completed its callbacks. The UI owns only the
     // selected clip's presentation anchor and a separate pose for each clock.
-    const auto clock = owned::model_preview_time;
+    const auto clock = OwnedRender::model_preview_time;
     if (!clock.supplied) return reject("preview.clock_source");
     if (!ownedPreviewViews) ownedPreviewViews = std::make_shared<owned::ModelPreviewViews>();
     auto& viewClock = ownedPreviewViews->at(clock.clock);
@@ -73,7 +73,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         owned::widescreen::compose_hud_clip(worldToClip.data(), owned::widescreen::hud_blit,
             float(rect.right - rect.left), float(rect.bottom - rect.top));
     }
-    const auto* presentation = owned::model_preview_for(lpObject->GetID());
+    const auto* presentation = OwnedRender::model_preview_for(lpObject->GetID());
     owned::ModelPlacementFacts placement;
     const auto& sourceCP = lpObject->GetCP();
     placement.position = {sourceCP.x, sourceCP.y, sourceCP.z};
@@ -100,7 +100,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             }
         }
     }
-    // Raw light-manager access only. c74 owns preparation and admission.
+    // Source selects preview lights; c74 prepares shared ambient/sun and admission.
     owned::ModelLightingFacts worldLight;
     worldLight.ambient = presentation && presentation->full_ambient ? 0xffffffffu : renderer->GetAmbientColor();
     const auto* sun = renderer->GetSunlight();
@@ -111,10 +111,10 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         worldLight.direction = {direction.x, direction.y, direction.z};
     }
     const auto& cp = placement.position;
-    owned::ModelPreviewLighting illumination;
+    OwnedRender::ModelPreviewLighting illumination;
     CManagerIterator iterator;
     auto* light = static_cast<CLight*>(iterator.GetFirst(theWorld.GetLightManager()));
-    if (!owned::produce_model_preview_lighting(worldLight, cp,
+    if (!OwnedRender::produce_model_preview_lighting(worldLight, cp,
         [&](owned::ModelPointLightFacts& facts) {
             if (!light) return false;
             const auto* current = light;

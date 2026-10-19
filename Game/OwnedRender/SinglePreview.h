@@ -1,8 +1,10 @@
 #pragma once
-#include "model_preview_presentation.h"
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
 
-namespace owned {
+namespace OwnedRender {
 
 struct PreviewRotation {
     std::array<float,3> axis{};
@@ -111,4 +113,4 @@ void produce_single_head_preview(float x,float y,float z,float size,float viewin
     adapter.bar(PreviewBar{z*1.3f,x-35,y-35,x+35,y+35});
     adapter.draw_head();
 }
-} // namespace owned
+} // namespace OwnedRender

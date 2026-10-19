@@ -30,41 +30,12 @@ struct ModelPointLightFacts {
     RetainedWorldPointLight value{};
     bool point = true, inactive = false, sunlight = false;
 };
-inline bool admit_model_point_light(const ModelPointLightFacts& input,
-    const std::array<float,3>* object = nullptr) noexcept {
+inline bool admit_model_point_light(const ModelPointLightFacts& input) noexcept {
     const auto& light = input.value;
     if (!input.point || input.inactive || input.sunlight ||
         !std::isfinite(light.radius) || !(light.radius > 0.f)) return false;
-    float distance_squared = 0;
     for (unsigned i = 0; i < 3; ++i) {
         if (!std::isfinite(light.center[i]) || !std::isfinite(light.color[i])) return false;
-        if (object) {
-            if (!std::isfinite((*object)[i])) return false;
-            const float delta = (*object)[i] - light.center[i];
-            distance_squared += delta * delta;
-        }
-    }
-    const float reach = light.radius + 10.f;
-    return !object || distance_squared <= reach * reach;
-}
-struct ModelPreviewLighting {
-    NativeWorldLighting world{};
-    std::vector<RetainedWorldPointLight> points;
-};
-// The iterator only supplies raw source facts. The renderer owns ambient/sun
-// preparation, point admission and the preview's object-relative selection.
-template<class Next>
-bool produce_model_preview_lighting(const ModelLightingFacts& world,
-    const std::array<float,3>& object, Next&& next, ModelPreviewLighting& output) {
-    output.points.clear();
-    if (!produce_model_lighting(world, output.world)) return false;
-    ModelPointLightFacts light;
-    while (next(light)) {
-        if (admit_model_point_light(light, &object)) {
-            if (!light.value.source_id) light.value.source_id = int(output.points.size()) + 1;
-            output.points.push_back(light.value);
-        }
-        light = {};
     }
     return true;
 }

@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a8`, commit `eed883e248c6edbb46e3a089197c0e09467cd9d4`.
+integration changes in branch `eirebuild/c74-ret1`, commit `34015b2449ecacf9eb7eb55d89236696375cd57c`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -179,3 +179,15 @@ Millisecond ties cannot stall trim or evict the current unpinned texture.
 The retail stock frontend has not yet been replaced by these new producers;
 full native/source parity, allocator/session policy, normal visibility,
 generated-MMP and live display Apply remain open. No upstream merge.
+
+OWN74-RET1 returns source-only single item/head sequences, inventory/pane
+composition and depth ordering, owning ModelPreviewCache, per-invocation
+presentation/clock TLS and object-relative preview light selection to
+Game/OwnedRender. The preceding P6a5-P6a8 ownership/open-work notes are historical
+and superseded by OWN74-SCOPE: stock DrawItem/DrawUnit/LRU and texture recipes
+remain source-owned and require no renderer frontend replacement.
+The renderer retains generic placement math and part9 glow, phase/prepared-pose
+ownership, ambient/sun conversion and basic point admission, the common lower
+object-preview geometry/material/wound producer, ModelDrawReference and manager
+retire/join. These are c74 producers or generic ingress/lifetime support.
+Only the listed source-only code is removed; no upstream merge or fallback.

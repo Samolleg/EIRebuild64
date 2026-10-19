@@ -4,8 +4,7 @@
 
 #include "StdAfx.h"
 #include "model_draw.h"
-#include "model_preview_clock.h"
-#include "model_preview_presentation.h"
+#include "OwnedRender/ModelPreviewContext.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DFigure.h"
@@ -56,12 +55,12 @@ void CI3DMapObjTranslation::Draw(CRenderer *pRend)
 {
 
     const float previewTime = timeGetTime() / 67.0f;
-    owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::display, previewTime);
+    OwnedRender::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::display, previewTime);
     m_pMapObject->SetExactPosition(previewTime);
-    owned::ModelPreviewPresentation presentation;
+    OwnedRender::ModelPreviewPresentation presentation;
     presentation.id = m_pMapObject->GetID();
     presentation.full_ambient = presentation.default_fog = true;
-    owned::ModelPreviewPresentationScope presentationScope(presentation);
+    OwnedRender::ModelPreviewPresentationScope presentationScope(presentation);
     owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
     m_pMapObject->Draw(pRend);
 

@@ -1,5 +1,4 @@
-// Source-only resource adapter. Presentation decisions and pass ordering are
-// owned by model_preview_single.h; this file only reads/writes typed source API.
+// Source resource adapter for SinglePreview.h presentation and pass ordering.
 struct SourceSinglePreview {
     CI3DItemScreen* screen;
     CRenderer* renderer;
@@ -12,22 +11,22 @@ struct SourceSinglePreview {
     std::shared_ptr<const owned::PreparedCampIcon> icon;
     CI3DFigure* runeFigure = nullptr;
     ~SourceSinglePreview() { end_runes(); }
-    void place(const owned::SinglePreviewPlacement& p) {
+    void place(const OwnedRender::SinglePreviewPlacement& p) {
         figure->SetDefaultSpecular(p.specular);
         figure->SetRelativeToScreen(p.x,p.y,p.z);
         figure->SetScale(p.scale);
         figure->SetAmbient(p.ambient,p.ambient,p.ambient);
-        const auto quaternion=[](const owned::PreviewRotation& r) {
+        const auto quaternion=[](const OwnedRender::PreviewRotation& r) {
             return CQuaternion(CPlot3D(r.axis[0],r.axis[1],r.axis[2]),r.angle);
         };
         CQuaternion q=quaternion(p.rotations[0]);
         for (unsigned i=1;i<p.rotation_count;++i) q=q*quaternion(p.rotations[i]);
         figure->SetOrientation(q);
     }
-    void rotation(const owned::SinglePreviewRotationState& s) {
+    void rotation(const OwnedRender::SinglePreviewRotationState& s) {
         state->fAngle=s.angle;state->fSpeed=s.speed;state->fFlashVal=s.phase;
     }
-    void bar(const owned::PreviewBar& b) {
+    void bar(const OwnedRender::PreviewBar& b) {
         struct Figure {
             CI3DItemScreen* screen;CI3DFigure* value;
             ~Figure() { screen->RemoveFigure(value); }
@@ -70,7 +69,7 @@ struct SourceSinglePreview {
         figure->GetRelativeToScreen(x,y,z);scale=figure->GetXScale();
     }
     int rune_index(unsigned index) { return item->pItem->GetSpell(0)->GetRunes()[index]; }
-    void rune(const owned::PreviewRune& r) {
+    void rune(const OwnedRender::PreviewRune& r) {
         if (!runeFigure) {
             runeFigure=screen->AddFigure();
             runeFigure->MakeBar(r.z,100,0,0,35,35,0,0,32,32);

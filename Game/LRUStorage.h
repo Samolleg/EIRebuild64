@@ -1,9 +1,9 @@
 #pragma once
-#include "model_preview_cache.h"
+#include "OwnedRender/ModelPreviewCache.h"
 
-// Keep the source API; the renderer owns the only storage and trim policy.
+// Keep one source storage and its existing trim policy.
 struct ModelPreviewMillisecondClock {
     static std::uint32_t now() noexcept { return timeGetTime(); }
 };
 template<class T,class M>
-using CLRUStorage = owned::ModelPreviewCache<T,M,ModelPreviewMillisecondClock>;
+using CLRUStorage = OwnedRender::ModelPreviewCache<T,M,ModelPreviewMillisecondClock>;

@@ -1,9 +1,8 @@
 #include "StdAfx.h"
 #include "model_draw.h"
-#include "model_preview_clock.h"
-#include "model_preview_presentation.h"
+#include "OwnedRender/ModelPreviewContext.h"
 #include "model_draw_lifetime.h"
-#include "model_preview_single.h"
+#include "OwnedRender/SinglePreview.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -239,9 +238,9 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
         return;
 
     const float previewTime=(timeGetTime()/1024.0f)*15;
-    owned::ModelPreviewTimeScope clock(owned::ModelPreviewClock::inventory,previewTime);
-    const auto composition=owned::inventory_model_preview(pDrawUnit->GetID(),fX,fAngle,bArmors,VIEWING_ANGLE_TAN);
-    owned::produce_model_preview_composition(composition,
+    OwnedRender::ModelPreviewTimeScope clock(owned::ModelPreviewClock::inventory,previewTime);
+    const auto composition=OwnedRender::inventory_model_preview(pDrawUnit->GetID(),fX,fAngle,bArmors,VIEWING_ANGLE_TAN);
+    OwnedRender::produce_model_preview_composition(composition,
         [&](auto& rect,bool local){SourcePreviewRect(pI3D,rect,local);},
         [&](const auto* rect,unsigned count,float depth){SourcePreviewDepth(pI3D->GetRenderer(),rect,count,depth);},
         SourcePreviewQuaternion,
@@ -313,7 +312,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
           static_cast<CItemLoot*>(item.pItem)->GetLootType() == IDBLIT_INSTRUCTION &&
           static_cast<CItemLoot*>(item.pItem)->GetInstructionType() == IDBINS_QUICK
         : IsItemModifier(item.pItem);
-    owned::SinglePreviewFacts facts;
+    OwnedRender::SinglePreviewFacts facts;
     facts.x=item.fX;facts.y=item.fY;facts.z=item.fZ;facts.size=item.fPixSize;
     facts.viewing_tangent=VIEWING_ANGLE_TAN;
     facts.slot=item.eFrom!=ISP_UNKNOWN;
@@ -343,10 +342,10 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         if (const auto* spell=item.pItem->GetSpell(0)) facts.rune_count=spell->GetRunesCount();
     }
     auto* info=static_cast<CRotateItem*>(item.pItem->GetUserData());
-    owned::SinglePreviewRotationState rotation{info->fAngle,info->fSpeed,info->fFlashVal};
+    OwnedRender::SinglePreviewRotationState rotation{info->fAngle,info->fSpeed,info->fFlashVal};
     SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
     adapter.item=&item;adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
-    owned::produce_single_item_preview(facts,rotation,adapter);
+    OwnedRender::produce_single_item_preview(facts,rotation,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
@@ -374,7 +373,7 @@ void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
     pFig->SetTexture(pTex);
     pFig->SetMaterial(pMat1);
     SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
-    owned::produce_single_head_preview(head.fX,head.fY,head.fZ,head.fPixSize,
+    OwnedRender::produce_single_head_preview(head.fX,head.fY,head.fZ,head.fPixSize,
         VIEWING_ANGLE_TAN,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////

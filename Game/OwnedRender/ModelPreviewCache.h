@@ -4,7 +4,7 @@
 #include <string>
 #include <utility>
 
-namespace owned {
+namespace OwnedRender {
 // One owning storage, not a mirror of a source cache. Pinning occurs before
 // eviction, including a zero-capacity draw. Clock/allocation stay in adapters.
 template<class T,class Allocator,class Clock>
@@ -53,4 +53,4 @@ public:
         for (const auto& entry:retired) Allocator::DestroyObject(entry.second.object);
     }
 };
-} // namespace owned
+} // namespace OwnedRender
