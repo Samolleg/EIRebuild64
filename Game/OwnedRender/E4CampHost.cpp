@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "E4Camp.h"
+#include "model_preview_presentation.h"
 #include "../I3DScreenCamp.h"
 #include "../I3DMain.h"
 #include "../SpellManager.h"
@@ -522,10 +523,11 @@ std::uint32_t E4CampAccess::PreviewRGB(CI3DItemScreen* owner,CItem* item){
     auto* spell=item->GetSpell(0);auto* phase=static_cast<CRotateItem*>(item->GetUserData());if(!spell||!phase)return 0;
     const int subtype=int(spell->GetMagicSubtype());
     static constexpr float palette[][3]={{1,0,0},{0,1,1},{0,1,0},{1,1,0},{1,1,0},{1,0,1},{1,0,1},{0,0,1}};
-    if(subtype<0||subtype>=8||!std::isfinite(phase->fFlashVal)||!std::isfinite(owner->GetFrameTime()))return 0;
-    const double next=std::fmod(double(phase->fFlashVal)+owner->GetFrameTime()*5.0,2.0*3.141592653589793);
-    phase->fFlashVal=float(next);const double strength=(std::sin(next)+1)*double(.15f);
-    return (std::uint32_t(strength*palette[subtype][0]*255)<<16)|(std::uint32_t(strength*palette[subtype][1]*255)<<8)|std::uint32_t(strength*palette[subtype][2]*255);
+    if(subtype<0||subtype>=8)return 0;
+    std::uint32_t rgb=0;
+    if(!owned::advance_model_preview_glow(phase->fFlashVal,owner->GetFrameTime(),
+        {palette[subtype][0],palette[subtype][1],palette[subtype][2]},rgb))return 0;
+    return rgb;
 }
 namespace OwnedRender::E4 {
 PreviewMaterial::PreviewMaterial(CI3DFigure* value,bool active,std::uint32_t rgb):figure(active?value:nullptr),previous(0){

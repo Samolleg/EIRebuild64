@@ -51,6 +51,7 @@
 #include "model_preview_clock.h"
 #include "model_preview_material.h"
 #include "model_preview_producer.h"
+#include "model_preview_presentation.h"
 #include "model_lighting.h"
 #include "unit_blood.h"
 #include "game_sites.h"
@@ -6444,7 +6445,7 @@ bool object_suffix_build_explicit_inputs(
     void* frame, void* specific, void* owner,
     const ObjectSuffixMatrixStackSnapshot& clip,
     const ObjectSuffixMatrixStackSnapshot& world,
-    ObjectPlanExplicitInputs& output) noexcept {
+    ObjectPlanExplicitInputs& output, bool preview) noexcept {
     output = {};
     if (!frame || !specific || !owner || !g_create_current_placement ||
         !g_matrix_multiply || !g_matrix_stack_push)
@@ -6454,7 +6455,16 @@ bool object_suffix_build_explicit_inputs(
     _fxsave(floating_state.data());
     __try {
         std::array<float, 16> placement{};
-        if (!refresh_object_plan_placement(owner, placement)) __leave;
+        if (preview) {
+            ModelPlacementFacts facts;
+            auto* bytes = static_cast<std::uint8_t*>(owner);
+            std::memcpy(facts.position.data(), bytes + kObjectPositionOffset, sizeof(facts.position));
+            std::memcpy(facts.quaternion.data(), bytes + kObjectQuaternionOffset, sizeof(facts.quaternion));
+            if (!prepare_model_placement(facts, placement)) __leave;
+            // Preserve the admitted native prefix's placement output. The
+            // source host supplies the same facts without changing its object.
+            std::memcpy(bytes + 0x54, placement.data(), sizeof(placement));
+        } else if (!refresh_object_plan_placement(owner, placement)) __leave;
         std::array<float, 16> scale{};
         std::array<std::uint32_t, 3> scale_bits{};
         std::memcpy(scale_bits.data(),
@@ -8424,7 +8434,8 @@ extern "C" BOOL __stdcall dispatch_object_suffix_cut(
         fail_claim("stack_state");
     } else if (!object_suffix_build_explicit_inputs(
                    frame, specific, owner, current_clip, current_world,
-                   explicit_inputs)) {
+                   explicit_inputs, invocation->route == ObjectSuffixWorldRoute::panel_preview ||
+                       invocation->route == ObjectSuffixWorldRoute::inventory_preview)) {
         fail_claim("explicit_inputs");
     } else {
         status = execute_owned_object_render_plan(

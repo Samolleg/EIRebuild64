@@ -5,6 +5,7 @@
 #include "StdAfx.h"
 #include "model_draw.h"
 #include "model_preview_clock.h"
+#include "model_preview_presentation.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DFigure.h"
@@ -53,19 +54,17 @@ void CI3DMapObjTranslation::Init(LPCSTR szTemplateName, LPCSTR szPrimTexture, LP
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DMapObjTranslation::Draw(CRenderer *pRend)
 {
-    DWORD oldamb;
-    oldamb = pRend->GetAmbientColor();
-    pRend->SetAmbientColor(1, 1, 1);
 
-    m_pMapObject->SetFlag(OBJ_USE_DEFAULT_FOG);
     const float previewTime = timeGetTime() / 67.0f;
     owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::display, previewTime);
     m_pMapObject->SetExactPosition(previewTime);
+    owned::ModelPreviewPresentation presentation;
+    presentation.id = m_pMapObject->GetID();
+    presentation.full_ambient = presentation.default_fog = true;
+    owned::ModelPreviewPresentationScope presentationScope(presentation);
     owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
     m_pMapObject->Draw(pRend);
-    m_pMapObject->ResetFlag(OBJ_USE_DEFAULT_FOG);
 
-    pRend->SetAmbientColor(oldamb);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DMapObjTranslation::PlaySpecialAnmation(int nAnimNumb)

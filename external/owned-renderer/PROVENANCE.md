@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a6`, commit `cea65703022ea2651d7fcfe2c56b5520678e9cec`.
+integration changes in branch `eirebuild/c74-p6a7`, commit `1a8c09b5a2161020f41335de62372fa3bf493c1c`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -162,3 +162,11 @@ ambient/sun preparation and point-light contract admission with native c74 reads
 the source preview iterator supplies raw values to the renderer's local selection.
 Full P4 composition, source callbacks, normal visibility, LRU/generated-MMP and live
 display transactions remain open in OWN74-P6a6/REMAINING.md. No upstream merge.
+
+OWN74-P6a7 shares current-object preview placement and part9 item glow in
+model_preview_presentation.h. Typed source inventory/pane/display scopes pass
+render-only placement, ambient, fog and colors without changing world object
+CP/orientation/scale or FIG color flags. Native admitted preview placement uses
+the same value builder; ordinary world routes are unchanged. Source animation
+callbacks remain source-owned. The full P4/P6 remainder is still open; see
+OWN74-P6a7/REMAINING.md. No upstream merge.

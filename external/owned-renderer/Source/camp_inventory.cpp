@@ -2,6 +2,7 @@
 #include "camp_presentation.h"
 #include "camp_session.h"
 #include "model_draw_lifetime.h"
+#include "model_preview_presentation.h"
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
 #include "owned_asset_loader.h"
@@ -602,16 +603,10 @@ const char* advance_preview_specular_rgb(void* item, std::uint32_t& rgb) noexcep
         if (!std::isfinite(elapsed)) return "native_frame_time_invalid";
         // Native part9 skips the pulse step. Advance only its Info-owned copy,
         // once per draw, using the native frame duration and phase lifecycle.
-        const double next_phase = std::fmod(double(phase) + double(elapsed) * 5.0,
-                                            2.0 * 3.141592653589793);
-        field<float>(data,0x14) = float(next_phase);
-        // Native stores a float phase, then quantizes RGB from the unrounded
-        // wrapped value still on the x87 stack.
-        const double strength = (std::sin(next_phase) + 1.0) * 0.15000000596046448;
-        const auto r = static_cast<std::uint32_t>(strength * palette[0] * 255.0);
-        const auto g = static_cast<std::uint32_t>(strength * palette[1] * 255.0);
-        const auto b = static_cast<std::uint32_t>(strength * palette[2] * 255.0);
-        rgb = (r << 16) | (g << 8) | b;
+        float next_phase = phase;
+        if (!advance_model_preview_glow(next_phase, elapsed,
+                {palette[0], palette[1], palette[2]}, rgb)) return "native_item_glow_update_failed";
+        field<float>(data,0x14) = next_phase;
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return "native_item_glow_update_failed";

@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "model_draw.h"
 #include "model_preview_clock.h"
+#include "model_preview_presentation.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E2Gdi.h"
@@ -5426,9 +5427,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
     OwnedRender::E1TextDraw textDraw(OwnedRender::E1TextKind::pane,this,surfaces[0]->GetSurface() ? surfaces[0]->GetSurface()->OwnedSurfaceId() : 0);
     WideScreen::Scope wideScope(owned::widescreen::kTopLeft);
     OwnedRender::E3HudCompositionScope hudBody(this);
-    CPlot3D pos;
-    CQuaternion rot;
-    // D3DRECT rects[3];
+
 
     figures[8]->Show(FALSE);
     figures[9]->Show(FALSE);
@@ -5489,8 +5488,6 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
 
             pI3D->GetRenderer()->Clear(3, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
 
-            pos = pDrawUnit->GetCP();
-            rot = pDrawUnit->GetOrientation();
 
             const float previewTime = theWorld.GetPreciseTime();
             owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::game, previewTime);
@@ -5498,21 +5495,17 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
             auto preview=owned::widescreen::native_camera_point(
                 float(owned::widescreen::portrait_native_x(WideScreen::Layout(),slide_nCurPixels)),200.f,DISTANCE_DRAW_UNIT);
             preview.y+=fAltDrawUnit/fDistDrawUnit;
-            pDrawUnit->SetCP(CPlot3D(preview.x,preview.y,preview.z));
-            pDrawUnit->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .05f) *
-                                      CQuaternion(CPlot3D(1, 0, 0), FP_PI2 * 1.15f) *
-                                      CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .4f));
-
-            ((CObject3DClientSpecific *)pDrawUnit->GetObjectSpecific())
-                ->SetScale(1 / fDistDrawUnit, 1 / fDistDrawUnit, 1 / fDistDrawUnit);
-
-            if (nMode == 0)
-                pDrawUnit->SetDefaultColor(0xFFFFFFFF);
-            else
-                pDrawUnit->SetDefaultColor(0xFF808080);
-            pDrawUnit->SetDefaultSpecular(0xFF000000);
-            pDrawUnit->SetFlagsToAllFigures(FIG_USE_DEFAULT_COLORS);
-            pDrawUnit->SetFlag(OBJ_USE_DEFAULT_FOG);
+            owned::ModelPreviewPresentation presentation;
+            presentation.id = pDrawUnit->GetID();
+            presentation.placed = presentation.default_fog = presentation.default_colors = true;
+            presentation.placement.position = {preview.x, preview.y, preview.z};
+            const auto orientation = CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .05f) *
+                CQuaternion(CPlot3D(1, 0, 0), FP_PI2 * 1.15f) * CQuaternion(CPlot3D(0, 0, 1), FP_PI2 * .4f);
+            orientation.GetComponents(presentation.placement.quaternion[0], presentation.placement.quaternion[1],
+                presentation.placement.quaternion[2], presentation.placement.quaternion[3]);
+            presentation.placement.scale = {1 / fDistDrawUnit, 1 / fDistDrawUnit, 1 / fDistDrawUnit};
+            presentation.diffuse = nMode == 0 ? 0xffffffffu : 0xff808080u;
+            owned::ModelPreviewPresentationScope presentationScope(presentation);
             {
                 // reset mip-mapping (and store old value)
                 CRenderer *pRend = &theRenderer;
@@ -5526,8 +5519,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
                 // restore mip-mapping
                 // pRend->SetTextureStageState(0, D3DTSS_MIPFILTER, dwMipFilter0);
             }
-            pDrawUnit->ResetFlag(OBJ_USE_DEFAULT_FOG);
-            pDrawUnit->ResetFlagsFromAllFigures(FIG_USE_DEFAULT_COLORS);
+
             pI3D->GetRenderer()->Clear(3, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
         }
 
@@ -5578,13 +5570,7 @@ BOOL CI3DObjectInfo::Draw(CRenderer *pRend)
         }
 #endif // NOGETDC
 
-        if (nMode != 2 || (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVShowCharacterModelInStats")))
-        {
-            ((CObject3DClientSpecific *)pDrawUnit->GetObjectSpecific())->SetScale(1.f, 1.f, 1.f);
 
-            pDrawUnit->SetCP(pos);
-            pDrawUnit->SetOrientation(rot);
-        }
     }
 #ifndef NOGETDC
     surfaces[0]->ReleaseDC();

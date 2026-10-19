@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "model_draw.h"
 #include "model_preview_clock.h"
+#include "model_preview_presentation.h"
 #include "model_draw_lifetime.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
@@ -245,8 +246,6 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
 
     D3DRECT rects[NUM_DRAW_RECTS];
     float fDist = 6.f;
-    CPlot3D pos;
-    CQuaternion rot;
     CRect rcTmp;
 
     // Complete earlier camp figures before changing the preview depth buffer.
@@ -281,33 +280,21 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
         rects[0].y2 = rcTmp.bottom;
         pI3D->GetRenderer()->Clear(1, rects, D3DCLEAR_ZBUFFER, 0, 1, 0);
     }
-    pos = pDrawUnit->GetCP();
-    rot = pDrawUnit->GetOrientation();
-
-    //* CQuaternion( CPlot3D(0,0,-1), FP_PI2 * .23f ) );
-
-    DWORD oldamb;
-    oldamb = pRend->GetAmbientColor();
-    pRend->SetAmbientColor(1, 1, 1);
-
-    pDrawUnit->SetFlag(OBJ_USE_DEFAULT_FOG);
 
     const float previewTime = (timeGetTime() / 1024.0f) * 15;
     owned::ModelPreviewTimeScope previewClock(owned::ModelPreviewClock::inventory, previewTime);
     pDrawUnit->SetExactPosition(previewTime);
-    //
-    CQuaternion rotNew = CQuaternion(CPlot3D(0, 1, 0), fAngle);
-    CPlot3D posNew(0, 0, 0);
-    posNew = rotNew.Rotate(posNew);
-    pDrawUnit->SetCP(CPlot3D((fX / 400.f - 1.f) * VIEWING_ANGLE_TAN * fDist,
-                             (440 / 400.f - .75f) * VIEWING_ANGLE_TAN * fDist, fDist) +
-                     posNew);
-    rotNew = rotNew * CQuaternion(CPlot3D(1, 0, 0), FP_PI2);
-    if (fX > 400)
-        rotNew = rotNew * CQuaternion(CPlot3D(0, 0, -1), FP_PI2 * 0.15f);
-    pDrawUnit->SetOrientation(rotNew);
-
-    ((CObject3DClientSpecific *)pDrawUnit->GetObjectSpecific())->SetScale(1.2f, 1.2f, 1.2f);
+    owned::ModelPreviewPresentation presentation;
+    presentation.id = pDrawUnit->GetID();
+    presentation.placed = presentation.full_ambient = presentation.default_fog = true;
+    presentation.placement.position = {(fX / 400.f - 1.f) * VIEWING_ANGLE_TAN * fDist,
+        (440 / 400.f - .75f) * VIEWING_ANGLE_TAN * fDist, fDist};
+    CQuaternion rotNew = CQuaternion(CPlot3D(0, 1, 0), fAngle) * CQuaternion(CPlot3D(1, 0, 0), FP_PI2);
+    if (fX > 400) rotNew = rotNew * CQuaternion(CPlot3D(0, 0, -1), FP_PI2 * 0.15f);
+    rotNew.GetComponents(presentation.placement.quaternion[0], presentation.placement.quaternion[1],
+        presentation.placement.quaternion[2], presentation.placement.quaternion[3]);
+    presentation.placement.scale = {1.2f, 1.2f, 1.2f};
+    owned::ModelPreviewPresentationScope presentationScope(presentation);
     {
         // reset mip-mapping (and store old value)
         CRenderer *pRend = pI3D->GetRenderer();
@@ -330,13 +317,7 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
             }
         }
     }
-    ((CObject3DClientSpecific *)pDrawUnit->GetObjectSpecific())->SetScale(1.f, 1.f, 1.f);
 
-    pDrawUnit->SetCP(pos);
-    pDrawUnit->SetOrientation(rot);
-
-    pDrawUnit->ResetFlag(OBJ_USE_DEFAULT_FOG);
-    pRend->SetAmbientColor(oldamb);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, { 0, 1, 0, 1 },

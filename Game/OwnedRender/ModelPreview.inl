@@ -1,5 +1,6 @@
 #include "contact_blend.h"
 #include "model_preview_clock.h"
+#include "model_preview_presentation.h"
 #include "model_preview_producer.h"
 #include "model_lighting.h"
 #include "../ModRuntime.h"
@@ -72,11 +73,17 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         owned::widescreen::compose_hud_clip(worldToClip.data(), owned::widescreen::hud_blit,
             float(rect.right - rect.left), float(rect.bottom - rect.top));
     }
-    SHMatrix placement, scale;
-    lpObject->CreateCurrentPlacement();
-    lpObject->GetPlacement(placement);
-    if (GetScaleMatrix(scale)) placement = placement * scale;
-    std::memcpy(objectToWorld.data(), &placement, sizeof(placement));
+    const auto* presentation = owned::model_preview_for(lpObject->GetID());
+    owned::ModelPlacementFacts placement;
+    const auto& sourceCP = lpObject->GetCP();
+    placement.position = {sourceCP.x, sourceCP.y, sourceCP.z};
+    lpObject->GetOrientation().GetComponents(placement.quaternion[0], placement.quaternion[1],
+        placement.quaternion[2], placement.quaternion[3]);
+    GetScaleCoeffs(placement.scale[0], placement.scale[1], placement.scale[2]);
+    if (presentation && presentation->placed) placement = presentation->placement;
+    if (!owned::prepare_model_placement(placement, objectToWorld)) return reject("preview.placement");
+    sample.object_pose.position = placement.position;
+    sample.object_pose.quaternion = placement.quaternion;
     struct Part { CFigure* figure; CMaterial* material; unsigned set; std::size_t ordinal; };
     std::vector<Part> parts;
     for (unsigned set = 0; set < 2; ++set) {
@@ -95,7 +102,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     }
     // Raw light-manager access only. c74 owns preparation and admission.
     owned::ModelLightingFacts worldLight;
-    worldLight.ambient = renderer->GetAmbientColor();
+    worldLight.ambient = presentation && presentation->full_ambient ? 0xffffffffu : renderer->GetAmbientColor();
     const auto* sun = renderer->GetSunlight();
     if (sun) {
         const auto& color = sun->GetDiffuse(); const auto& direction = sun->GetDirection();
@@ -103,11 +110,11 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         worldLight.diffuse = {color.r, color.g, color.b};
         worldLight.direction = {direction.x, direction.y, direction.z};
     }
-    const auto& cp = lpObject->GetCP();
+    const auto& cp = placement.position;
     owned::ModelPreviewLighting illumination;
     CManagerIterator iterator;
     auto* light = static_cast<CLight*>(iterator.GetFirst(theWorld.GetLightManager()));
-    if (!owned::produce_model_preview_lighting(worldLight, {cp.x, cp.y, cp.z},
+    if (!owned::produce_model_preview_lighting(worldLight, cp,
         [&](owned::ModelPointLightFacts& facts) {
             if (!light) return false;
             const auto* current = light;
@@ -120,7 +127,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             facts.value.radius = current->GetRange();
             return true;
         }, illumination)) return reject("preview.lighting");
-    const BYTE fog = lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG) ? 255 :
+    const BYTE fog = (presentation && presentation->default_fog) || lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG) ? 255 :
         static_cast<CWorldClient*>(GetWorld())->GetTerrain()->GetFogAlpha(lpObject->GetCP());
     const double textureTime = theWorld.GetPreciseTime();
     // Even an omitted preview must leave no wound binding for the next caller.
@@ -150,7 +157,8 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             const auto& part = parts[index];
             output.ordinal = part.ordinal;
             owned::NativeLighting lighting;
-            const bool defaults = part.figure->CheckFlag(FIG_USE_DEFAULT_COLORS) != 0;
+            const bool overrideColors = presentation && presentation->default_colors;
+            const bool defaults = overrideColors || part.figure->CheckFlag(FIG_USE_DEFAULT_COLORS) != 0;
             if (!defaults) {
                 if (!part.material) return false;
                 const auto& material = part.material->GetMaterial();
@@ -159,8 +167,8 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             }
             output.material = {defaults,
                 part.material && part.material->CheckFlag(MAT_USE_SPECULAR),
-                defaults ? part.figure->GetDefaultColor() : 0xffffffffu,
-                defaults ? part.figure->GetDefaultSpecular() : (std::uint32_t(fog) << 24),
+                overrideColors ? presentation->diffuse : defaults ? part.figure->GetDefaultColor() : 0xffffffffu,
+                overrideColors ? presentation->specular : defaults ? part.figure->GetDefaultSpecular() : (std::uint32_t(fog) << 24),
                 lighting, owned::NativeOrdering::preserve};
             return true;
         },
