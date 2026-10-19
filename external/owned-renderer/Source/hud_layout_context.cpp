@@ -180,13 +180,14 @@ bool HudLayoutContext::figure_composition(HudPanel panel,unsigned figure,int slo
         // renderer rather than rebuilding host geometry when docking changes.
         const auto header=header_layout(panel);
         float dx,dy;slide_delta(header,object->slide,dx,dy,message);
-        const float native_x=message?400.f:map?700.f+object->slide_pixels:100.f-object->slide_pixels;
-        const float native_y=message?57.5f-object->slide_pixels:map?80.f:110.f;
+        const auto geometry=message_geometry(header,g_layout.unit*g_layout.scale,g_layout.unit);
+        const float native_x=message?geometry.background_x:map?700.f+object->slide_pixels:100.f-object->slide_pixels;
+        const float native_y=message?geometry.background_y:map?80.f:110.f;
         const auto anchor=kPanelRoles[index].anchor;
         const float x=widescreen::placed_to_screen_x(g_layout,widescreen::layout_to_placed_x(g_layout,anchor,native_x,false));
         const float y=widescreen::placed_to_screen_y(g_layout,widescreen::layout_to_placed_y(g_layout,anchor,native_y,false));
-        out.scale=header.background.width/(g_layout.unit*(message?440.f:160.f));
-        out.scale_y=header.background.height/(g_layout.unit*(message?75.f:map?160.f:220.f));
+        out.scale=header.background.width/(g_layout.unit*(message?geometry.background.right-geometry.background.left:160.f));
+        out.scale_y=header.background.height/(g_layout.unit*(message?geometry.background.bottom-geometry.background.top:map?160.f:220.f));
         out.pivot_x=x;out.pivot_y=y;
         out.offset_x=header.background.left+header.background.width*.5f+dx-x;
         out.offset_y=header.background.top+header.background.height*.5f+dy-y;
@@ -204,8 +205,8 @@ bool HudLayoutContext::figure_composition(HudPanel panel,unsigned figure,int slo
     h.scale=h.scale_y=header.scale;
     float x,y;
     if(message) {
-        x=widescreen::placed_to_screen_x(g_layout,400.f);
-        y=widescreen::placed_to_screen_y(g_layout,10.f-object->slide_pixels);
+        x=widescreen::placed_to_screen_x(g_layout,message_geometry(header,g_layout.unit*g_layout.scale,g_layout.unit).centre_x);
+        y=widescreen::placed_to_screen_y(g_layout,10.f);
     } else {
         const unsigned titleArea=map?6:5;
         if(titleArea>=object->slots.size())return false;
@@ -214,8 +215,8 @@ bool HudLayoutContext::figure_composition(HudPanel panel,unsigned figure,int slo
             (map?790.f:10.f)+float(object->slots[titleArea].shift.x),false));
         y=widescreen::placed_to_screen_y(g_layout,widescreen::layout_to_placed_y(g_layout,anchor,map?80.f:110.f,false));
     }
-    h.scale=header.width/(g_layout.unit*(message?440.f:20.f));
-    h.scale_y=header.height/(g_layout.unit*(message?20.f:map?160.f:220.f));
+    h.scale=message?header.scale:header.width/(g_layout.unit*20.f);
+    h.scale_y=message?header.scale:header.height/(g_layout.unit*(map?160.f:220.f));
     h.pivot_x=x;h.pivot_y=y;
     h.offset_x=header.left+header.width*.5f-x;
     h.offset_y=header.top+header.height*.5f-y;
@@ -729,19 +730,50 @@ void HudLayoutContext::set_ui_scale(int percent) noexcept {
     ui_scale_percent_=std::clamp(percent,50,120);
     g_layout.scale=ui_scale_percent_/100.f;
 }
+void HudLayoutContext::publish_message(HudNativePanel&& panel) noexcept {
+    auto& current=frame_.panels[unsigned(HudPanel::messages)];
+    // Synchronous layout is not a new content/activity publication. Preserve
+    // the current wake facts, fade timing and opacity across reflow.
+    panel.activity_values=std::move(current.activity_values);
+    panel.activity_available=current.activity_available;panel.opacity=current.opacity;
+    frame_.active=true;current=std::move(panel);
+}
+bool HudLayoutContext::message_layout(MessageGeometry& geometry,float& text_scale) noexcept {
+    if(!current_panel(unsigned(HudPanel::messages)) || !(g_layout.unit*g_layout.scale>0.f))return false;
+    geometry=message_geometry(header_layout(HudPanel::messages),g_layout.unit*g_layout.scale,g_layout.unit);
+    text_scale=g_message_panel.text_scale_percent/100.f;
+    return geometry.text.right-geometry.text.left>14 && geometry.text.bottom>geometry.text.top;
+}
 bool HudLayoutContext::message_text_rect(RECT& placed,float& text_scale) noexcept {
-    if(!current_panel(unsigned(HudPanel::messages)))return false;
-    const auto header=header_layout(HudPanel::messages);
-    const float unit=g_layout.unit*g_layout.scale;
-    if(!(unit>0.f))return false;
-    const float left=180.f+(header.body.left-header.panel.left)/unit;
-    const float top=(header.body.top-header.panel.top)/unit;
-    RECT desired{std::lround(left)+10,std::lround(top)+5,
-        std::lround(left+header.body.width/unit)-10,
-        std::lround(top+header.body.height/unit)-11};
-    if(desired.right-desired.left<=14 || desired.bottom<=desired.top)return false;
-    placed=desired;text_scale=g_message_panel.text_scale_percent/100.f;
-    return true;
+    MessageGeometry geometry;
+    if(!message_layout(geometry,text_scale))return false;
+    placed=geometry.text;return true;
+}
+bool HudLayoutContext::tutorial_bounds(const TutorialTarget& target,HudPanelBounds& bounds) noexcept {
+    struct Reader {
+        HudLayoutContext& c;
+        const HudNativePanel* object=nullptr;
+        unsigned panel=0;
+        bool select(HudPanel role,HudPanelBounds& b) noexcept {
+            panel=unsigned(role);object=c.current_panel(panel);
+            return object && c.widescreen_hud_panel_bounds(role,b);
+        }
+        unsigned count() const noexcept {return object->native_count;}
+        int skill_type(unsigned slot) const noexcept {return slot<object->slots.size()?object->slots[slot].semantic_type:INT_MIN;}
+        RECT slot_rect(unsigned slot) const noexcept {
+            if(slot>=object->slots.size())return {};
+            auto r=object->slots[slot].rect;OffsetRect(&r,object->slots[slot].shift.x,object->slots[slot].shift.y);return r;
+        }
+        bool slot_bounds(unsigned slot,HudPanelBounds& b) noexcept {return c.slot_screen_bounds(panel,slot,object,b);}
+        const widescreen::Layout& layout() const noexcept {return c.g_layout;}
+        widescreen::Anchors anchor() const noexcept {return kPanelRoles[panel].anchor;}
+        widescreen::HudComposition composition() noexcept {return c.panel_composition(panel,object);}
+        HeaderLayout header(const HudPanelBounds&) noexcept {return c.header_layout(HudPanel(panel));}
+        float slide() const noexcept {return object->slide;}
+        void visible(const HeaderLayout& h,HudPanelBounds& b) noexcept {tutorial_visible_bounds(HudPanel(panel),object->slide,h,b);}
+        void control_target(unsigned area,const HeaderLayout& h,float& x,float& y) noexcept {c.header_control_target(HudPanel(panel),area,h,x,y);}
+    } reader{*this};
+    return resolve_tutorial_target(target,reader,bounds);
 }
 void HudLayoutContext::set_hud_panels(const std::array<HudPanelSettings,7>& settings) noexcept {
     for(unsigned i=0;i<settings.size();++i) {

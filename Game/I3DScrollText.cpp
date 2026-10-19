@@ -8,6 +8,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DMain.h"
 #include "I3DScrollText.h"
 #include "OwnedRender/E3Hud.h"
+#include "hud_message_layout.h"
 #include <cmath>
 #include "WorldClient.h"
 
@@ -38,6 +39,7 @@ CI3DScrollText::~CI3DScrollText()
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DScrollText::AddText(LPCSTR pszText)
 {
+    OwnedRender::E3MessageLayout(this);
     int nPos;
     int nOldRange, nNewRange;
     SetPosToEnd();
@@ -51,6 +53,7 @@ void CI3DScrollText::AddText(LPCSTR pszText)
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CI3DScrollText::SetText(LPCSTR pszText)
 {
+    OwnedRender::E3MessageLayout(this);
     RemoveAllText();
     AddLexems(CString(pszText));
     RecalculateRange();
@@ -73,8 +76,7 @@ void CI3DScrollText::SetTextLayout(CRect rect, float textScale)
 
     CI3DScrollBar::SetRect(rect);
     m_textScale = textScale;
-    m_rectText = CRect(0, 0, (std::max)(1, int(std::floor((rect.Width() - 14) / textScale))),
-        (std::max)(1, int(std::floor(rect.Height() / textScale))));
+    m_rectText = CRect(owned::message_text_wrap(rect,textScale));
     RecalculateRange();
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

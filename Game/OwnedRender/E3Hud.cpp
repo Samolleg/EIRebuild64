@@ -19,6 +19,8 @@
 #include "hud_layout_context.h"
 #include <algorithm>
 #include <cstring>
+#include <typeinfo>
+#include "../WideScreen.h"
 
 namespace {
 std::array<const CI3DObject*,10> inputOwners{};
@@ -30,6 +32,48 @@ thread_local CI3DSurface* drawingSurface=nullptr;
 // This adapter only copies facts owned by the active mission. Slot geometry,
 // header docking, scaling and preview layout remain in the renderer library.
 struct E3HudAccess {
+    static void RefreshMessages(CI3DObjectOutput* output) {
+        if(!output || output->figures.GetSize()<6 ||
+           theInterface.GetScreensNum()!=1 || theInterface.GetCurrentScreen()!=output->pScreen)return;
+        auto* text=output->pScreen->pScrollText;if(!text)return;
+        text->messageOutput=output;messageTextOwner=text;inputOwners[7]=output;
+        auto& context=owned::embedded_hud_layout();
+        context.publish_canvas(theInterface.GetWidth(),theInterface.GetHeight());
+        const auto publish=[&] {
+            owned::HudNativePanel panel;Copy(panel,output);Shell(panel,output,5,2);
+            panel.slide=Slide(output->slide_nCurPixels,output->slide_nTotalPixels);
+            panel.slide_pixels=output->slide_nCurPixels;panel.slide_closing=output->slide_dir>0.f;
+            context.publish_message(std::move(panel));
+        };
+        publish();owned::MessageGeometry geometry;float scale=1.f;
+        WideScreen::RawScope raw;
+        if(!context.message_layout(geometry,scale))return;
+        const auto& previous=output->ownedMessageGeometry;
+        const auto same=[](const owned::MessageGeometry::Quad& a,const owned::MessageGeometry::Quad& b) {
+            return a.left==b.left && a.top==b.top && a.right==b.right && a.bottom==b.bottom;
+        };
+        if(!output->ownedMessageLayout || !same(previous.background,geometry.background) || !same(previous.toolbar,geometry.toolbar)) {
+            const auto bg=geometry.background,title=geometry.toolbar;
+            output->figures[0]->MakeBar(20,100,bg.left,bg.top,bg.right,bg.bottom);
+            output->figures[1]->MakeBar(20,100,title.left,title.top,title.right,title.bottom);
+        }
+        output->SetRect(CRect(geometry.panel));
+        output->areas[3]->MakeRect(geometry.panel.left,geometry.panel.top,geometry.panel.right,geometry.panel.bottom);
+        output->figures[0]->SetRelativeToScreen(geometry.background_x,geometry.background_y,20);
+        output->figures[1]->SetRelativeToScreen(geometry.centre_x,10,20);
+        output->figures[3]->SetRelativeToScreen(200,10,10);
+        output->figures[4]->SetRelativeToScreen(230,10,10);
+        output->figures[5]->SetRelativeToScreen(geometry.centre_x,geometry.frame_height*.5f,18);
+        output->figures[2]->SetOrientation(output->slide_dir<0?CQuaternion(CPlot3D(0,0,1),FP_PI):QNULL);
+        output->figures[2]->SetRelativeToScreen(400,output->slide_dir<0?-52.f:83.f,8.106086f);
+        for(int i=1;i<4;++i)output->areas[i]->SetShift(0,0);
+        text->SetTextLayout(CRect(geometry.text),scale);
+        output->ownedMessageGeometry=geometry;output->ownedMessageLayout=true;
+        publish();
+    }
+    static void MessageLayout(CI3DScrollText* text) {
+        if(text && text->messageOutput)RefreshMessages(text->messageOutput);
+    }
     static bool ClockTooltip(CI3DToolTip* tip) {
         if(!tip || tip->surfaces.GetSize()!=1 || !tip->surfaces[0])return false;
         auto* surface=tip->surfaces[0];
@@ -353,6 +397,8 @@ struct E3HudAccess {
             Copy(p[6],mission->pItems);Copy(p[7],mission->pOutput);
             Copy(p[8],mission->pCommands);Copy(p[9],mission->pClock);
             Slots(p[0],mission->pSpells->nSpells);Slots(p[1],mission->pSkills->nSkills);
+            for(unsigned i=0;i<p[1].native_count && i<p[1].slots.size() && i<unsigned(mission->pSkills->nTypes.GetSize());++i)
+                p[1].slots[i].semantic_type=mission->pSkills->nTypes[i];
             PortraitFrames(p[4],mission->pFaces);Slots(p[5],mission->pWeapons->figures.GetSize());
             for(unsigned i=0;i<(std::min)(unsigned(mission->pUnits.GetSize()),p[4].native_count);++i)
                 if(mission->pUnits[i] && mission->pUnits[i]->GetID()==theCamera.GetCarrierID()){cameraSlot=int(i);break;}
@@ -413,11 +459,14 @@ bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,b
     if(!object || object!=messageTextOwner || !E3HudRendererAttached())return false;
     valid=E3HudAccess::MessagePoint(object,pixel,native,captured);return true;
 }
-void E3MessageLayout(CI3DScrollText* text) {
-    if(!text || text!=messageTextOwner || !E3HudRendererAttached())return;
-    RECT placed{};float scale=1.f;
-    if(owned::embedded_hud_layout().message_text_rect(placed,scale))
-        text->SetTextLayout(CRect(placed),scale);
+void E3MessageLayout(CI3DScrollText* text) {E3HudAccess::MessageLayout(text);}
+void E3RefreshMessages(CI3DObjectOutput* output) {E3HudAccess::RefreshMessages(output);}
+bool E3CaptureTutorial(CI3DScreen* screen,owned::HudLayoutContext& snapshot) {
+    snapshot.retire();
+    if(!screen || typeid(*screen)!=typeid(CI3DScreenMission) || theInterface.GetScreensNum()!=1 ||
+       theInterface.GetCurrentScreen()!=screen)return false;
+    E3PublishHud(static_cast<CI3DScreenMission*>(screen),theInterface.GetWidth(),theInterface.GetHeight());
+    snapshot=owned::embedded_hud_layout();return true;
 }
 bool E3ClockTooltip(CI3DToolTip* tooltip) {return E3HudAccess::ClockTooltip(tooltip);}
 bool E3HudDraw2D(CI3DObject* object) {return E3HudAccess::Draw2D(object);}

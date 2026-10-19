@@ -1,4 +1,5 @@
 #pragma once
+#include "hud_message_layout.h"
 #include "ModMessages.h"
 
 #include "I3DScreen.h"
@@ -617,6 +618,8 @@ public:
 class CI3DObjectOutput : public CI3DObject
 {
     friend struct E3HudAccess;
+    owned::MessageGeometry ownedMessageGeometry{};
+    bool ownedMessageLayout=false;
 private:
     CI3DScreenMission *pScreen;
 

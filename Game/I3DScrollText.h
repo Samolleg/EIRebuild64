@@ -5,6 +5,7 @@
 #pragma once
 
 #include "I3DScrollBar.h"
+class CI3DObjectOutput;
 
 enum ELexemType
 {
@@ -77,6 +78,7 @@ private:
     // Geometry data
     CRect m_rectText;
     float m_textScale = 1.f;
+    CI3DObjectOutput* messageOutput=nullptr;
 
     // Text data
     CBasicLexemPtrArray m_aLexems;

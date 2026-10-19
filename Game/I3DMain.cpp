@@ -1170,6 +1170,7 @@ void CInterface3D::CheckMissionTutorials(bool bForce)
         return;
     CI3DScreenTutorial *pScr = dbgnew CI3DScreenTutorial(this, szLastMissionTutorial,
                                                          nLastMissionTutorialPage, true);
+    pScr->CaptureMission(pScreens.size()==1?pScreens.back():nullptr);
     DoModal(pScr, true, false);
 }
 /////////////////////////////////////////////////////////////////////////////////////

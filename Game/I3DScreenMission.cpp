@@ -6702,7 +6702,7 @@ void CI3DObjectCommands::SetAggr(int iAggr)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::Init(int iMode, bool bClosed)
 {
-    SetRect(180, 0, 620, 100);
+    ownedMessageLayout=false;
 
     slide_bIsSlide = TRUE;
     slide_nCurPixels = bClosed ? 95 : 0;
@@ -6728,13 +6728,13 @@ void CI3DObjectOutput::Init(int iMode, bool bClosed)
     CI3DFigure *pFig;
     // bg
     pFig = AddFigure();
-    pFig->MakeBar(20, 100, 180, 20, 620, 95);
+    // Background geometry is supplied by the renderer lifecycle.
     pFig->SetTexture(NULL);
     pFig->UseDefaultColors(TRUE);
     pFig->SetDefaultColor(RGBA_MAKE(0, 0, 0, 80));
     // toolbar
     pFig = AddFigure();
-    pFig->MakeBar(20, 100, 180, 0, 620, 20);
+    // Toolbar geometry is supplied by the renderer lifecycle.
     pFig->SetTexture(NULL);
     pFig->UseDefaultColors(TRUE);
     pFig->SetDefaultColor(RGBA_MAKE(0, 0, 0, 180));
@@ -6753,11 +6753,11 @@ void CI3DObjectOutput::Init(int iMode, bool bClosed)
     pFig->MakeBar(10, 80, 215, 0, 245, 20, 2, 150, 32, 170);
 
     pFig = AddFigure();
-    pFig->MakeBarFrame(18, 80, 180, -5, 620, 100, 5, 4, 55, 90, 60);
+    // The frame is emitted by the renderer primitive pass.
 
     nMode = iMode;
-    ShowCurrentMode();
     ScrollFigures();
+    ShowCurrentMode();
     // Like StockOutputMessages, bind only after native panel initialization.
     if (ModRuntime::Current()) ModMessages::queue.Bind(this);
     /*
@@ -6768,23 +6768,9 @@ void CI3DObjectOutput::Init(int iMode, bool bClosed)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ScrollFigures()
 {
-    // bg
-    figures[0]->SetRelativeToScreen(400, 57.5f - (float)slide_nCurPixels, 20);
-    // toolbar
-    figures[1]->SetRelativeToScreen(400, 10 - (float)slide_nCurPixels, 20);
-
-    figures[3]->SetRelativeToScreen(200, 10 - (float)slide_nCurPixels, 10);
-    figures[4]->SetRelativeToScreen(230, 10 - (float)slide_nCurPixels, 10);
-
-    figures[5]->SetRelativeToScreen(400, 47.5f - (float)slide_nCurPixels, 18);
-
-    // scrolling text
-    SetOutputRect(CRect(190, 25 - slide_nCurPixels, 610, 89 - slide_nCurPixels));
-
-    for (int i = 1; i < areas.GetSize(); i++)
-        GetArea(i)->SetShift(0, -slide_nCurPixels);
+    OwnedRender::E3RefreshMessages(this);
 }
-/////////////////////////////////////////////////////////////////////////////////////
+// Output geometry and child layout are owned by the renderer.
 void CI3DObjectOutput::ActivateMode(int nNewMode)
 {
     if (slide_dir == 1)
@@ -6832,20 +6818,8 @@ void CI3DObjectOutput::OnIdle()
         if (slide_fCurTime == 1.f || slide_fCurTime == 0.f)
             slide_bIsSlide = FALSE;
 
-        ScrollFigures();
-
-        CI3DFigure *pFig = figures[2];
-        if (slide_dir == -1)
-        {
-            pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
-            pFig->SetRelativeToScreen(400, -52, 8.106086f);
-        }
-        else
-        {
-            pFig->SetOrientation(QNULL);
-            pFig->SetRelativeToScreen(400, 83, 8.106086f);
-        }
     }
+    ScrollFigures();
     pI3D->bTextClosed = slide_dir > 0;
     pI3D->nTextMode = nMode;
 }
@@ -6926,7 +6900,7 @@ void CI3DObjectOutput::ShowCurrentMode()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::SetOutputRect(CRect rc)
 {
-    ((CI3DScrollText *)pScreen->GetObject(9))->SetRect(rc);
+    OwnedRender::E3RefreshMessages(this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectOutput::ClearOutput()

@@ -5,6 +5,9 @@ class CI3DScreenMission;
 class CI3DObject;
 class CI3DSurface;
 class CI3DScrollText;
+class CI3DObjectOutput;
+class CI3DScreen;
+namespace owned { class HudLayoutContext; }
 class CI3DToolTip;
 class CRenderer;
 namespace OwnedRender {
@@ -21,6 +24,8 @@ bool E3HudMapOffset(CI3DObject* object,POINT pixel,POINT& offset) noexcept;
 void E3HudCommitVisuals(const CI3DScreenMission* mission);
 bool E3MessagePoint(CI3DObject* object,POINT pixel,POINT& native,bool captured,bool& valid) noexcept;
 void E3MessageLayout(CI3DScrollText* text);
+void E3RefreshMessages(CI3DObjectOutput* output);
+bool E3CaptureTutorial(CI3DScreen* mission,owned::HudLayoutContext& snapshot);
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer);
 bool E3HudDraw2D(CI3DObject* object);
 bool E3ClockTooltip(CI3DToolTip* tooltip);

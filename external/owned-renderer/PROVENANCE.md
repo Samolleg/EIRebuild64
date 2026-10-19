@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p3b2`, commit `4cbd79d0b9ba14bdea6c066de4a6ee73d7f06238`.
+integration changes in branch `eirebuild/c74-p3c`, commit `68db6ad72f466c4fb831f797b93d0668dea8cad0`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -84,3 +84,9 @@ final pixel rounding and integer minimap/portrait placement from c74. Source
 HUD producers call these helpers; live scaling/docking stays in HudLayoutContext.
 Retail hook values and stock geometry/UV bodies are preserved. Messages,
 tutorial and actual-rect display projection remain tracked separately.
+
+OWN74-P3c extracts shared native message geometry from refresh_message_layout
+and the c74 semantic tutorial table/resolver. Embedded message reflow runs at
+Init/Idle/SetOutputRect and before text ingress; tutorial uses a value snapshot
+of the active mission captured before modal entry, including actual skill types
+and spell slot areas. The proxy keeps its native readers and c74 values.

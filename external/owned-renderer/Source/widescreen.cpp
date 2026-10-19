@@ -14,6 +14,9 @@
 // patches) and replaced by this port. The addon's other hooks stay and are
 // chained. Anything unrecognised leaves the addon layout in place.
 #include "widescreen.h"
+#include "hud_tutorial_layout.h"
+#include "hud_message_layout.h"
+#include <climits>
 
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
@@ -1198,12 +1201,7 @@ bool slide_closing(HudPanel panel,const void* object) noexcept {
     return *reinterpret_cast<const float*>(static_cast<const std::uint8_t*>(object)+offset)>0.f;
 }
 void visible_panel_bounds(HudPanel panel,const void* object,const HeaderLayout& header,HudPanelBounds& b) noexcept {
-    const float f=slide_fraction(panel,object);
-    if(header.side==DockSide::left)b.width=header.width+(b.width-header.width)*(1.f-f);
-    else if(header.side==DockSide::right){const float w=header.width+(b.width-header.width)*(1.f-f);b.left+=b.width-w;b.width=w;}
-    else if(header.side==DockSide::bottom){const float h=panel==HudPanel::messages?header.height+(b.height-header.height)*(1.f-f):b.height*(1.f-f)+header.height;b.top=header.top+header.height-h;b.height=h;}
-    else if(panel==HudPanel::messages && header.side==DockSide::top)b.height=header.height+(b.height-header.height)*(1.f-f);
-    else {const float bottom=b.top+b.height*(1.f-f);b.top=header.top;b.height=(std::max)(header.height,bottom-b.top);}
+    tutorial_visible_bounds(panel,slide_fraction(panel,object),header,b);
 }
 void slide_delta(const HeaderLayout& header,float fraction,float& x,float& y,bool inset_header=false) noexcept {
     x=y=0.f;
@@ -1583,16 +1581,6 @@ bool g_message_surface_failed=false;
 thread_local bool t_message_layout=false;
 float g_message_mesh_width=0.f,g_message_mesh_height=0.f,g_message_mesh_buttons_scale=0.f,g_message_mesh_padding=0.f;
 DockSide g_message_mesh_side=DockSide::floating;
-struct MessageContent {float left,top,right,bottom;};
-MessageContent message_content(const void* output,bool background=false) noexcept {
-    auto header=header_layout(HudPanel::messages);const float unit=g_layout.unit*g_layout.scale;
-    if(background)header.body=header.background;
-    const float left=180.f+(header.body.left-header.panel.left)/unit;
-    const float right=left+header.body.width/unit;
-    const float top=(header.body.top-header.panel.top)/unit;
-    const float bottom=top+header.body.height/unit;
-    return {left,top,right,bottom};
-}
 void compose_message_body(const void* output,widescreen::HudComposition& h,bool background=false) noexcept {
     auto header=header_layout(HudPanel::messages);float x,y;
     if(background)header.body=header.background;
@@ -1657,8 +1645,7 @@ void message_text_rect(void* object) noexcept {
     const auto* r=reinterpret_cast<const RECT*>(static_cast<const std::uint8_t*>(object)+kObjectRectOffset);
     const float scale=g_message_panel.text_scale_percent/100.f;
     auto* wrap=reinterpret_cast<RECT*>(static_cast<std::uint8_t*>(object)+0x18C);
-    const RECT desired{0,0,(std::max)(LONG(1),LONG(std::floor(float(r->right-r->left-14)/scale))),
-                              (std::max)(LONG(1),LONG(std::floor(float(r->bottom-r->top)/scale)))};
+    const RECT desired=message_text_wrap(*r,scale);
     const int width=(std::max)(1,int(std::ceil(float(r->right-r->left)*g_layout.unit/scale)));
     const int height=(std::max)(1,int(std::ceil(float(r->bottom-r->top)*g_layout.unit/scale)));
     bool replaced=false;const bool ready=resize_text_surface(object,width,height,replaced);
@@ -1674,9 +1661,7 @@ void __fastcall scroll_text_set_rect(void* object,void*,RECT* rect) {
     if(!current_message_panel(output,text) || text!=object) {
         reinterpret_cast<void(__thiscall*)(void*,RECT*)>(g_scroll_text_set_rect)(object,rect);return;
     }
-    const auto content=message_content(output);
-    RECT desired{std::lround(content.left)+10,std::lround(content.top)+5,
-                 std::lround(content.right)-10,std::lround(content.bottom)-11};
+    RECT desired=message_geometry(header_layout(HudPanel::messages),g_layout.unit*g_layout.scale,g_layout.unit).text;
     const auto* current=reinterpret_cast<const RECT*>(static_cast<const std::uint8_t*>(object)+kObjectRectOffset);
     if(std::memcmp(current,&desired,sizeof(desired))!=0)
         reinterpret_cast<void(__thiscall*)(void*,RECT*)>(g_scroll_text_set_rect)(object,&desired);
@@ -1693,7 +1678,8 @@ void refresh_message_layout() noexcept {
     auto* bytes=const_cast<std::uint8_t*>(static_cast<const std::uint8_t*>(output));
     const auto b=message_panel_bounds();const float unit=g_layout.unit*g_layout.scale;
     const float width=b.width/unit;
-    const auto background=message_content(output,true);
+    const auto geometry=message_geometry(header_layout(HudPanel::messages),unit,g_layout.unit);
+    const auto background=geometry.background;
     const auto header=header_layout(HudPanel::messages);
     const float frame_height=b.height/unit;
     auto** figures=*reinterpret_cast<void***>(bytes+0x108);
@@ -1701,14 +1687,13 @@ void refresh_message_layout() noexcept {
     const bool rebuild=generation!=g_message_mesh_generation || width!=g_message_mesh_width || frame_height!=g_message_mesh_height || header.side!=g_message_mesh_side || header.scale!=g_message_mesh_buttons_scale || g_message_panel.border_padding!=g_message_mesh_padding;
     if(rebuild) {
         make_bar(figures[0],nullptr,20.f,100.f,background.left,background.top,background.right,background.bottom,0,0,255,255);
-        const float button_unit=g_layout.unit*header.scale;
-        const float w=header.width/button_unit,h=header.height/button_unit,x=180.f+width*.5f;
-        make_bar(figures[1],nullptr,20.f,100.f,x-w*.5f,10.f-h*.5f,x+w*.5f,10.f+h*.5f,0,0,255,255);
+        const auto toolbar=geometry.toolbar;
+        make_bar(figures[1],nullptr,20.f,100.f,toolbar.left,toolbar.top,toolbar.right,toolbar.bottom,0,0,255,255);
         // The frame is generated by the owned atlas primitive pass.
-        make_rect(areas[3],nullptr,180,0,180+std::lround(width),std::lround(frame_height));
+        make_rect(areas[3],nullptr,geometry.panel.left,geometry.panel.top,geometry.panel.right,geometry.panel.bottom);
         g_message_mesh_generation=generation;g_message_mesh_width=width;g_message_mesh_height=frame_height;g_message_mesh_side=header.side;g_message_mesh_buttons_scale=header.scale;g_message_mesh_padding=g_message_panel.border_padding;
     }
-    relative_to_screen(figures[0],nullptr,(background.left+background.right)*.5f,(background.top+background.bottom)*.5f,20.f);
+    relative_to_screen(figures[0],nullptr,geometry.background_x,geometry.background_y,20.f);
     relative_to_screen(figures[1],nullptr,180.f+width*.5f,10.f,20.f);
     relative_to_screen(figures[3],nullptr,200.f,10.f,10.f);
     relative_to_screen(figures[4],nullptr,230.f,10.f,10.f);
@@ -2154,36 +2139,6 @@ const void* owned_widget_entry(const void* entry, const void* jump_target) noexc
 // Shipped page rectangles identify HUD roles, not current positions or skill
 // ordinals. Resolve against the mission captured immediately before this modal.
 // The resulting geometry belongs to this page until its native rebuild/teardown.
-enum class TutorialTargetKind { panel,native,control,controls,skill,spell };
-struct TutorialTarget { const char* name; int page; RECT authored; HudPanel panel; TutorialTargetKind kind; int selector=0; };
-// This shipped build publishes general manual-action type 0: its native
-// target-object mode dispatches stealing on units and science on objects.
-constexpr TutorialTarget kTutorialTargets[] = {
-    {"zt3",1,{183,0,618,96},HudPanel::messages,TutorialTargetKind::panel},
-    {"zt3",1,{385,1,412,19},HudPanel::messages,TutorialTargetKind::control},
-    {"zt3",2,{770,568,799,599},HudPanel::game_speed,TutorialTargetKind::native},
-    {"zt4",0,{720,519,799,599},HudPanel::game_speed,TutorialTargetKind::panel},
-    {"zt4",1,{720,519,799,599},HudPanel::game_speed,TutorialTargetKind::panel},
-    {"zt7",0,{762,432,798,468},HudPanel::spells,TutorialTargetKind::spell},
-    {"zt9",0,{1,567,36,599},HudPanel::stance,TutorialTargetKind::native},
-    {"zt10",0,{619,1,799,162},HudPanel::minimap,TutorialTargetKind::panel},
-    {"zt10",1,{780,70,799,162},HudPanel::minimap,TutorialTargetKind::controls,0x38},
-    {"zt10",1,{778,1,799,26},HudPanel::minimap,TutorialTargetKind::control},
-    {"zt11",0,{183,0,618,96},HudPanel::messages,TutorialTargetKind::panel},
-    {"zt11",0,{385,1,412,19},HudPanel::messages,TutorialTargetKind::control},
-    {"zt11",1,{183,0,618,96},HudPanel::messages,TutorialTargetKind::panel},
-    {"zt11",1,{385,1,412,19},HudPanel::messages,TutorialTargetKind::control},
-    {"zt12",0,{1,1,185,222},HudPanel::character_info,TutorialTargetKind::panel},
-    {"zt12",0,{1,1,23,29},HudPanel::character_info,TutorialTargetKind::control},
-    {"zt12",1,{1,99,23,222},HudPanel::character_info,TutorialTargetKind::controls,0x1e},
-    {"zt13",0,{1,516,83,599},HudPanel::stance,TutorialTargetKind::panel},
-    {"zt14",0,{1,430,37,466},HudPanel::abilities,TutorialTargetKind::skill,0},
-    {"zt14",2,{1,430,37,466},HudPanel::abilities,TutorialTargetKind::skill,0},
-    {"zt17",0,{74,491,321,599},HudPanel::weapons,TutorialTargetKind::panel},
-    {"zt18",0,{452,484,709,599},HudPanel::items,TutorialTargetKind::panel},
-    {"zt20",0,{1,470,38,507},HudPanel::abilities,TutorialTargetKind::skill,-1},
-    {"zt22",0,{1,432,39,469},HudPanel::abilities,TutorialTargetKind::skill,0},
-};
 const std::uint8_t* tutorial_mission(const std::uint8_t* tutorial) noexcept {
     if(!g_interface_owned || !g_image || *reinterpret_cast<void* const*>(tutorial)!=at(0x00740E28))return nullptr;
     const auto* ui=at(0x007C7D50);
@@ -2193,66 +2148,42 @@ const std::uint8_t* tutorial_mission(const std::uint8_t* tutorial) noexcept {
     if(end-begin<2 || end[-1]!=tutorial || *reinterpret_cast<void* const*>(end[-2])!=at(0x00740764))return nullptr;
     return end[-2];
 }
-bool tutorial_target_bounds(const TutorialTarget& target,const std::uint8_t* mission,HudPanelBounds& b) noexcept {
-    const unsigned panel=unsigned(target.panel);
+struct RetailTutorialReader {
+    const std::uint8_t* mission;
     const std::uint8_t* object=nullptr;
-    if(target.panel==HudPanel::messages) {
-        const void* output=nullptr;const void* text=nullptr;
-        if(!mission_message_panel(mission,output,text))return false;
-        object=static_cast<const std::uint8_t*>(output);
-        const auto bounds=message_panel_bounds();b={bounds.left,bounds.top,bounds.width,bounds.height};
-    } else {
-        object=mission_panel(panel,mission);
-        if(!panel_bounds(panel,object,b))return false;
-    }
-    if(target.kind==TutorialTargetKind::skill) {
-        const unsigned count=native_slot_count(panel,object);
-        const auto* types=*reinterpret_cast<const int* const*>(object+0x15C);
-        if(!types || *reinterpret_cast<const unsigned*>(object+0x160)!=count)return false;
-        for(unsigned slot=0;slot<count;++slot)
-            if(types[slot]==target.selector)return slot_screen_bounds(panel,slot,object,b);
-        return false;
-    }
-    if(target.kind==TutorialTargetKind::spell) {
-        // This authored region establishes a native spell slot, not a semantic
-        // healing ID. Preserve that contract without guessing spell identity.
-        const auto anchor=kPanelRoles[panel].anchor;
-        const float x=widescreen::layout_to_placed_x(g_layout,anchor,.5f*float(target.authored.left+target.authored.right),false);
-        const float y=widescreen::layout_to_placed_y(g_layout,anchor,.5f*float(target.authored.top+target.authored.bottom),false);
-        const auto* areas=*reinterpret_cast<const std::uint8_t* const* const*>(object+0x128);
-        for(unsigned slot=0;slot<native_slot_count(panel,object);++slot) {
-            const auto r=*reinterpret_cast<const RECT*>(areas[slot]+0x14);
-            const auto* shift=reinterpret_cast<const LONG*>(areas[slot]+0x28);
-            if(x>=r.left+shift[0] && x<r.right+shift[0] && y>=r.top+shift[1] && y<r.bottom+shift[1])
-                return slot_screen_bounds(panel,slot,object,b);
+    unsigned panel=0;
+    bool select(HudPanel role,HudPanelBounds& b) noexcept {
+        panel=unsigned(role);
+        if(role==HudPanel::messages) {
+            const void* output=nullptr;const void* text=nullptr;
+            if(!mission_message_panel(mission,output,text))return false;
+            object=static_cast<const std::uint8_t*>(output);
+            const auto bounds=message_panel_bounds();b={bounds.left,bounds.top,bounds.width,bounds.height};return true;
         }
-        return false;
+        object=mission_panel(panel,mission);return panel_bounds(panel,object,b);
     }
-    if(target.kind==TutorialTargetKind::native) {
-        const auto h=panel_composition(panel,object);const auto anchor=kPanelRoles[panel].anchor;
-        const auto x=[&](LONG v){return widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,widescreen::layout_to_placed_x(g_layout,anchor,float(v),false)),h);};
-        const auto y=[&](LONG v){return widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,widescreen::layout_to_placed_y(g_layout,anchor,float(v),false)),h);};
-        const float left=x(target.authored.left),top=y(target.authored.top);
-        b={left,top,x(target.authored.right)-left,y(target.authored.bottom)-top};return true;
+    unsigned count() const noexcept {return native_slot_count(panel,object);}
+    int skill_type(unsigned slot) const noexcept {
+        const auto* types=*reinterpret_cast<const int* const*>(object+0x15C);
+        return types && *reinterpret_cast<const unsigned*>(object+0x160)==count()?types[slot]:INT_MIN;
     }
-    if(target.panel!=HudPanel::messages && target.panel!=HudPanel::minimap && target.panel!=HudPanel::character_info)
-        return target.kind==TutorialTargetKind::panel;
-    const auto header=header_layout(target.panel,b);
-    if(target.kind==TutorialTargetKind::panel) {visible_panel_bounds(target.panel,object,header,b);return true;}
-    const unsigned mask=target.kind==TutorialTargetKind::control?1u:unsigned(target.selector);
-    if(mask!=1u && slide_fraction(target.panel,object)>=1.f)return false;
-    bool first=true;
-    const float unit=g_layout.unit*header.scale;
-    const float width=(target.panel==HudPanel::messages?30.f:20.f)*unit;
-    const float height=(target.panel==HudPanel::messages?20.f:30.f)*unit;
-    for(unsigned area=0;area<6;++area)if(mask&(1u<<area)) {
-        float x,y;header_control_target(target.panel,area,header,x,y);
-        const float left=x-width*.5f,top=y-height*.5f;
-        if(first){b={left,top,width,height};first=false;}
-        else {const float right=(std::max)(b.left+b.width,left+width),bottom=(std::max)(b.top+b.height,top+height);
-            b.left=(std::min)(b.left,left);b.top=(std::min)(b.top,top);b.width=right-b.left;b.height=bottom-b.top;}
+    RECT slot_rect(unsigned slot) const noexcept {
+        const auto* areas=*reinterpret_cast<const std::uint8_t* const* const*>(object+0x128);
+        auto r=*reinterpret_cast<const RECT*>(areas[slot]+0x14);
+        const auto* shift=reinterpret_cast<const LONG*>(areas[slot]+0x28);
+        OffsetRect(&r,shift[0],shift[1]);return r;
     }
-    return !first;
+    bool slot_bounds(unsigned slot,HudPanelBounds& b) noexcept {return slot_screen_bounds(panel,slot,object,b);}
+    const widescreen::Layout& layout() const noexcept {return g_layout;}
+    widescreen::Anchors anchor() const noexcept {return kPanelRoles[panel].anchor;}
+    widescreen::HudComposition composition() noexcept {return panel_composition(panel,object);}
+    HeaderLayout header(const HudPanelBounds& b) noexcept {return header_layout(HudPanel(panel),b);}
+    float slide() const noexcept {return slide_fraction(HudPanel(panel),object);}
+    void visible(const HeaderLayout& h,HudPanelBounds& b) noexcept {visible_panel_bounds(HudPanel(panel),object,h,b);}
+    void control_target(unsigned area,const HeaderLayout& h,float& x,float& y) noexcept {header_control_target(HudPanel(panel),area,h,x,y);}
+};
+bool tutorial_target_bounds(const TutorialTarget& target,const std::uint8_t* mission,HudPanelBounds& b) noexcept {
+    RetailTutorialReader reader{mission};return resolve_tutorial_target(target,reader,b);
 }
 void __stdcall tutorial_rect(const std::uint8_t* tutorial, std::uint8_t* site_stack) noexcept {
     const TutorialTarget* target=nullptr;
@@ -2266,10 +2197,7 @@ void __stdcall tutorial_rect(const std::uint8_t* tutorial, std::uint8_t* site_st
         auto* top = reinterpret_cast<int*>(site_stack + 0x68);
         auto* right = reinterpret_cast<int*>(site_stack + 0x58);
         auto* bottom = reinterpret_cast<int*>(site_stack + 0x1c);
-        for(const auto& candidate:kTutorialTargets)
-            if(candidate.page==page && _stricmp(candidate.name,name)==0 &&
-                candidate.authored.left==*left && candidate.authored.top==*top &&
-                candidate.authored.right==*right && candidate.authored.bottom==*bottom){target=&candidate;break;}
+        target=tutorial_target(name,page,RECT{*left,*top,*right,*bottom});
         if(!target)return; // Non-HUD help retains its authored layout.
         HudPanelBounds bounds;const auto* mission=tutorial_mission(tutorial);
         if(!mission || !tutorial_target_bounds(*target,mission,bounds)) {

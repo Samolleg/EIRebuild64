@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "OwnedRender/E3Hud.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -22,6 +23,10 @@ const int FRAME_B_TO = 0;
 const int FRAME_A_TO = 255;
 using namespace std;
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenTutorial::CaptureMission(CI3DScreen* mission)
+{
+    missionLayoutAvailable=OwnedRender::E3CaptureTutorial(mission,missionLayout);
+}
 void CI3DScreenTutorial::OnActivate()
 {
     AddTexture("saveload");
@@ -254,17 +259,26 @@ void CI3DScreenTutorial::RedrawPage()
             r = atoi(szTmpArray[3]);
             b = atoi(szTmpArray[4]);
 
+            bool placedTarget=false;
             if (mbScript)
             {
-                CString pageKey; pageKey.Format("%s:%d", (LPCSTR)mszTutorial, mnCurrentPage);
-                const char *left[] = { "zt9:0", "zt12:0", "zt12:1", "zt13:0", "zt14:0", "zt14:2", "zt17:0", "zt20:0", "zt22:0" };
-                const char *right[] = { "zt3:2", "zt4:0", "zt4:1", "zt7:0", "zt10:0", "zt10:1", "zt18:0" };
-                for (const char *key : left) if (pageKey == key) { l -= WideScreen::VirtualShift(); r -= WideScreen::VirtualShift(); }
-                for (const char *key : right) if (pageKey == key) { l += WideScreen::VirtualShift(); r += WideScreen::VirtualShift(); }
+                if(const auto* target=owned::tutorial_target(mszTutorial,mnCurrentPage,RECT{l,t,r,b}))
+                {
+                    owned::HudPanelBounds bounds;
+                    if(!missionLayoutAvailable || !missionLayout.tutorial_bounds(*target,bounds))continue;
+                    placedTarget=true;
+                    const auto& layout=missionLayout.layout();
+                    l=std::lround(owned::widescreen::screen_to_placed_x(layout,bounds.left));
+                    t=std::lround(owned::widescreen::screen_to_placed_y(layout,bounds.top));
+                    r=std::lround(owned::widescreen::screen_to_placed_x(layout,bounds.left+bounds.width));
+                    b=std::lround(owned::widescreen::screen_to_placed_y(layout,bounds.top+bounds.height));
+                }
             }
-
             CI3DFigure *pFig = AddFigure();
-            pFig->MakeBarFrame(3, 100, l, t, r, b, 5);
+            if(placedTarget) {
+                WideScreen::RawScope raw;
+                pFig->MakeBarFrame(3,100,l,t,r,b,5);
+            } else pFig->MakeBarFrame(3,100,l,t,r,b,5);
             // pFig->MakeBar( 3, 100, l, t, r, b );
             pFig->SetTexture(0);
             pFig->UseDefaultColors(TRUE);

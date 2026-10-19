@@ -2,6 +2,8 @@
 
 #include "I3DScreen.h"
 #include <list>
+#include "hud_layout_context.h"
+class CI3DScreen;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DScreenTutorial : public CI3DScreen
 {
@@ -17,6 +19,8 @@ private:
     std::list<CI3DFigure *> mpIcons;
 
     float fTime;
+    owned::HudLayoutContext missionLayout;
+    bool missionLayoutAvailable=false;
 
 private:
     void RedrawPage();
@@ -30,6 +34,7 @@ public:
         , mbScript(bScript)
     {
     }
+    void CaptureMission(CI3DScreen* mission);
     virtual void OnActivate();
     virtual void OnDeactivate();
 
