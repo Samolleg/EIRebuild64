@@ -6,6 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GeometryManager.h"
 
 #include "Material.h"
+#include "native_placed_figure.h"
 #include "dx11/RendererDX11.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -209,6 +210,21 @@ bool CGeometryContainer::GetRangeGeometryData(const std::string &szRangeName, co
     return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CGeometryContainer::GetNativeFigureStreams(const std::string& name,
+    owned::NativeFigureStreams& output) const
+{
+    const auto found = ranges.find(name);
+    if (found == ranges.end()) return false;
+    const auto& r = found->second;
+    output = {reinterpret_cast<const owned::NativePackedGroup*>(plots4.GetData() + r.dwPlotsStart), r.dwNumPlots,
+        reinterpret_cast<const owned::NativePackedGroup*>(norms4.GetData() + r.dwNormsStart), r.dwNumNorms,
+        nullptr, nullptr,
+        reinterpret_cast<const owned::NativeTextureCoordinate*>(maps.GetData() + r.dwMapsStart), r.dwNumMaps,
+        reinterpret_cast<const owned::NativeVertexComponent*>(components.GetData() + r.dwComponentsStart), r.dwNumComponents,
+        indices.GetData() + r.dwIndicesStart, r.dwNumIndices};
+    return true;
+}
+
 bool CGeometryContainer::ChangeRangeGeometry(const std::string &szRangeName, SXYZW4 *rangePlots4,
                                              DWORD dwNumPlots)
 {

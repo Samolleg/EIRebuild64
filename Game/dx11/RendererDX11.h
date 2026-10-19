@@ -108,6 +108,9 @@ public:
     bool SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request);
     bool SubmitHudPortrait(const owned::EmbeddedHudPortraitInput& input);
     bool SubmitC56Figure(const owned::NativeGeometryView& view);
+    bool SubmitC74Figure(const owned::NativeGeometryView& view,
+        const owned::NativeWorldLighting* lighting,
+        const std::vector<owned::RetainedWorldPointLight>& lights);
     bool SubmitHudVisual(const owned::HudPublishedVisual&, const owned::EmbeddedHudVisualInput&);
     void ReportC56FigureNoMatrix();
     void ReportC56FigureSkipSummary();

@@ -19,6 +19,8 @@ private:
     CPlot3D scale;
 
 private:
+    bool SubmitNativeFigure(CRenderer* renderer, CMaterial* material, BYTE fog,
+        CSimplyArray<CLight*, CLight*>* lights);
     void RecalcXYAdd(float fpTimeStep);
     void DrawBBox(CRenderer *pRend);
     void CalculateScreenBounds(CRenderer *pRend, CRect *pRect);

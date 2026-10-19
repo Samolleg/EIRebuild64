@@ -294,67 +294,83 @@ bool CDX11::SubmitHudPortrait(const owned::EmbeddedHudPortraitInput& input)
         });
 }
 
-bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
+bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
+    const owned::NativeWorldLighting* lighting,
+    const std::vector<owned::RetainedWorldPointLight>& lights)
 {
-    HRESULT hr=E_UNEXPECTED;
-    if(!rendererFacade || !rendererFacade->FrameActive()) {
+    if (!rendererFacade || !rendererFacade->FrameActive()) {
         ++c56FigureSkippedNoFrame;
         return false;
     }
-    if(source.positions && source.normals && source.components && source.indices) {
-        auto view=source;
-        owned::FixedState state = CaptureC56MaterialState();
-        // Interface figures (object_id 0), including the global map, must not
-        // inherit the active world's fog state from the shared device frame.
-        if (OwnedRender::E4::OwnsDraw() || (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0))
-            state.render[D3DRENDERSTATE_FOGENABLE] = FALSE;
-        state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
-        const auto& buffers=*GetConstantBuffers();
-        const auto& pixel=buffers.cb_ps_pixelshader.data;
-        ID3D11ShaderResourceView* primary=ownedRenderer.FigureActive()?ownedRenderer.FigurePrimaryTexture():boundFigureTextures[0].Get();
-        ID3D11ShaderResourceView* secondary=ownedRenderer.FigureActive()?ownedRenderer.FigureSecondaryTexture():boundFigureTextures[1].Get();
-        state.stage[0][D3DTSS_COLOROP]=primary?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
-        state.stage[0][D3DTSS_COLORARG1]=D3DTA_TEXTURE;state.stage[0][D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
-        state.stage[0][D3DTSS_ALPHAOP]=!primary?D3DTOP_SELECTARG2:pixel.alphaMode==0?D3DTOP_SELECTARG1:pixel.alphaMode==2?D3DTOP_SELECTARG2:D3DTOP_MODULATE;
-        state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
-        state.stage[0][D3DTSS_ADDRESSU]=state.stage[0][D3DTSS_ADDRESSV]=D3DTADDRESS_WRAP;
-        state.stage[0][D3DTSS_MINFILTER]=state.stage[0][D3DTSS_MAGFILTER]=D3DTFG_LINEAR;
-        state.stage[0][D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
-        const auto byte=[](float v){return DWORD((std::max)(0.f,(std::min)(1.f,v))*255.f+.5f);};
-        state.render[D3DRENDERSTATE_FOGCOLOR]=(byte(pixel.fogColor.x)<<16)|(byte(pixel.fogColor.y)<<8)|byte(pixel.fogColor.z);
-        owned::NativeWorldLighting lighting;
-        std::vector<owned::RetainedWorldPointLight> lights;
-        if(view.lighting.enabled) {
-            const auto& vertex=buffers.cb_vs_vertexshader.data;
-            const auto& sun=buffers.cb_vs_vertexlights.data.sunlight;
-            lighting.ambient={vertex.dcvAmbient.r,vertex.dcvAmbient.g,vertex.dcvAmbient.b,1};
-            lighting.sunlight_diffuse={sun.dcMaterialDiffuse.r,sun.dcMaterialDiffuse.g,sun.dcMaterialDiffuse.b,1};
-            SHMatrix world;memcpy(&world,view.lighting.object_to_world.data(),sizeof(world));
-            const auto direction=world.RotateVector(CPlot3D(-sun.rd.x,-sun.rd.y,-sun.rd.z));
-            lighting.sunlight_direction={direction.x,direction.y,direction.z,0};
-            // The host light entries already include the material response.
-            view.lighting.material_diffuse={1,1,1};
-            view.lighting.emissive={vertex.dvEmissive.x,vertex.dvEmissive.y,vertex.dvEmissive.z,0};
-            for(unsigned i=0;i<(std::min)(vertex.nlights,DWORD(16));++i) {
-                const auto& value=buffers.cb_vs_vertexlights.data.lights[i];
-                if(!(value.rcpr_range2>0))continue;
-                owned::RetainedWorldPointLight light;
-                light.source_id=int(i)+1;light.center={value.position.x,value.position.y,value.position.z};
-                light.color={value.dcMaterialDiffuse.r,value.dcMaterialDiffuse.g,value.dcMaterialDiffuse.b};
-                light.radius=std::sqrt(1.f/value.rcpr_range2);lights.push_back(light);
-            }
+    auto state = CaptureC56MaterialState();
+    const bool camp = OwnedRender::E4::OwnsDraw();
+    auto model = view;
+    if (camp && itemColorSum && state.render[D3DRENDERSTATE_SPECULARENABLE]) model.flags |= 8u;
+    if (OwnedRender::E4::OwnsDraw() ||
+        (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0))
+        state.render[D3DRENDERSTATE_FOGENABLE] = FALSE;
+    state.render[D3DRENDERSTATE_SPECULARENABLE] = (model.flags & 8u) ? TRUE : FALSE;
+    const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
+    auto* primary = ownedRenderer.FigureActive() ? ownedRenderer.FigurePrimaryTexture() : boundFigureTextures[0].Get();
+    auto* secondary = ownedRenderer.FigureActive() ? ownedRenderer.FigureSecondaryTexture() : boundFigureTextures[1].Get();
+    state.stage[0][D3DTSS_COLOROP] = primary ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
+    state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE; state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
+    state.stage[0][D3DTSS_ALPHAOP] = !primary ? D3DTOP_SELECTARG2 : pixel.alphaMode == 0 ?
+        D3DTOP_SELECTARG1 : pixel.alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
+    state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE; state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
+    state.stage[0][D3DTSS_ADDRESSU] = state.stage[0][D3DTSS_ADDRESSV] = D3DTADDRESS_WRAP;
+    state.stage[0][D3DTSS_MINFILTER] = state.stage[0][D3DTSS_MAGFILTER] = D3DTFG_LINEAR;
+    state.stage[0][D3DTSS_MIPFILTER] = D3DTFP_LINEAR;
+    const auto byte = [](float v) {return DWORD((std::max)(0.f, (std::min)(1.f, v))*255.f+.5f);};
+    state.render[D3DRENDERSTATE_FOGCOLOR] = (byte(pixel.fogColor.x)<<16) |
+        (byte(pixel.fogColor.y)<<8) | byte(pixel.fogColor.z);
+    const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        if (camp && !lighting && !secondary) {
+            const HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
+            if (FAILED(flushed)) return flushed;
+            owned::Renderer::NativeQueueCheckpoint checkpoint;
+            if (!renderer.checkpoint_native(checkpoint)) return E_FAIL;
+            const HRESULT queued = renderer.queue_native_direct(model, state, primary);
+            if (FAILED(queued)) renderer.rollback_native(checkpoint);
+            return queued;
         }
-        hr=rendererFacade->Visit([&](owned::Renderer& renderer){
-            return renderer.queue_embedded_figure(view,state,primary,secondary,
-                view.lighting.enabled?&lighting:nullptr,lights);
-        });
-        RestoreHostBindings();
-    }
-    if(SUCCEEDED(hr)){++c56WorldFigurePrimitives;return true;}
-    ++c56WorldFigureQueueFailed;
-    ++c56FigureSkippedRenderError;
-    c56FigureLastRenderError=hr;
+        return renderer.queue_embedded_figure(model, state, primary, secondary, lighting, lights);
+    });
+    RestoreHostBindings();
+    if (SUCCEEDED(hr)) {++c56WorldFigurePrimitives; return true;}
+    if (camp) campPopupFailed = true;
+    ++c56WorldFigureQueueFailed; ++c56FigureSkippedRenderError; c56FigureLastRenderError = hr;
     return false;
+}
+
+bool CDX11::SubmitC56Figure(const owned::NativeGeometryView& source)
+{
+    // Generic native callers already supplied their current light constants.
+    // Figure wrappers above this boundary now supply raw source facts instead.
+    auto view = source;
+    owned::NativeWorldLighting lighting;
+    std::vector<owned::RetainedWorldPointLight> lights;
+    if (view.lighting.enabled) {
+        const auto& buffers = *GetConstantBuffers();
+        const auto& vertex = buffers.cb_vs_vertexshader.data;
+        const auto& sun = buffers.cb_vs_vertexlights.data.sunlight;
+        lighting.ambient = {vertex.dcvAmbient.r, vertex.dcvAmbient.g, vertex.dcvAmbient.b, 1};
+        lighting.sunlight_diffuse = {sun.dcMaterialDiffuse.r, sun.dcMaterialDiffuse.g, sun.dcMaterialDiffuse.b, 1};
+        SHMatrix world; memcpy(&world, view.lighting.object_to_world.data(), sizeof(world));
+        const auto direction = world.RotateVector(CPlot3D(-sun.rd.x,-sun.rd.y,-sun.rd.z));
+        lighting.sunlight_direction = {direction.x,direction.y,direction.z,0};
+        view.lighting.material_diffuse = {1,1,1};
+        view.lighting.emissive = {vertex.dvEmissive.x,vertex.dvEmissive.y,vertex.dvEmissive.z,0};
+        for (unsigned i=0; i<(std::min)(vertex.nlights,DWORD(16)); ++i) {
+            const auto& value = buffers.cb_vs_vertexlights.data.lights[i];
+            if (!(value.rcpr_range2>0)) continue;
+            owned::RetainedWorldPointLight light;
+            light.source_id=int(i)+1; light.center={value.position.x,value.position.y,value.position.z};
+            light.color={value.dcMaterialDiffuse.r,value.dcMaterialDiffuse.g,value.dcMaterialDiffuse.b};
+            light.radius=std::sqrt(1.f/value.rcpr_range2); lights.push_back(light);
+        }
+    }
+    return SubmitC74Figure(view, view.lighting.enabled ? &lighting : nullptr, lights);
 }
 void CDX11::ReportC56FigureNoMatrix()
 {

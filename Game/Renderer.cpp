@@ -28,6 +28,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Particle.h"
 #include <DirectXCollision.h>
 #include "dx11/OwnedFigureInputs.h"
+#include "native_placed_figure.h"
 #include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E4Camp.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -545,14 +546,13 @@ bool CRenderer::TryOwnedFigure(const SXYZW4* plots,int nNumPlots,const SXYZW4* n
     }
 
     owned::NativeGeometryView view{};
-    view.positions=reinterpret_cast<const owned::NativePackedGroup*>(plots);view.position_groups=nNumPlots;
-    view.normals=reinterpret_cast<const owned::NativePackedGroup*>(norms);view.normal_groups=nNumNorms;
-    view.diffuse=reinterpret_cast<const std::uint32_t*>(colors);
-    view.specular=reinterpret_cast<const std::uint32_t*>(speculars);
-    view.texture_coordinates=reinterpret_cast<const owned::NativeTextureCoordinate*>(maps);
-    view.texture_coordinate_count=nNumMaps;
-    view.components=reinterpret_cast<const owned::NativeVertexComponent*>(components);
-    view.component_count=nNumComponents;view.indices=pwIndices;view.index_count=nNumIndices;
+    owned::apply_native_figure_streams(view, {
+        reinterpret_cast<const owned::NativePackedGroup*>(plots), static_cast<std::uint32_t>(nNumPlots),
+        reinterpret_cast<const owned::NativePackedGroup*>(norms), static_cast<std::uint32_t>(nNumNorms),
+        reinterpret_cast<const std::uint32_t*>(colors), reinterpret_cast<const std::uint32_t*>(speculars),
+        reinterpret_cast<const owned::NativeTextureCoordinate*>(maps), static_cast<std::uint32_t>(nNumMaps),
+        reinterpret_cast<const owned::NativeVertexComponent*>(components), static_cast<std::uint32_t>(nNumComponents),
+        pwIndices, static_cast<std::uint32_t>(nNumIndices)});
     view.semantic_kind=owned::SemanticKind::figure;view.ordering=owned::NativeOrdering::preserve;
     view.default_diffuse=dwDefaultAmbientColor;view.default_specular=RGBA_MAKE(0,0,0,cFog);
     if(campDraw&&(dwRenderFlags&(DXD3D_USE_VERTEX_COLOR|DXD3D_LIT))){

@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p5`, commit `2b0c2ff6839a8536faa6dc687395d42c0cfda038`.
+integration changes in branch `eirebuild/c74-p6a`, commit `13e05da208cf22eea561d469a22c855e2f980a07`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -122,3 +122,10 @@ blend, clipping and GPU submission; the c74 shader bodies are unchanged.
 Source W, UV, diffuse and specular values survive without native FIG repacking.
 Polylines submit only authored points; the spell area ribbon keeps its source
 mesh. VisFog already uses the shared c74 particle producer.
+OWN74-P6a shares packed figure stream assembly and raw material response in
+native_placed_figure.h. Source placed/lit wrappers supply current geometry,
+morphs, material and light values directly; CPU morph expansion and legacy
+light/material setup are removed from these wrappers. The native GPU path,
+source picking and RUPD73 r4 world publications remain intact. Object-preview
+assembly, retained scheduling/visibility, cache lifetime and live display
+projection are still tracked as open work in the task REPORT.

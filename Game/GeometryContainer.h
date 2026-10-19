@@ -96,6 +96,8 @@ public:
     virtual bool GetRangeGeometryData(const std::string &szRangeName, const SXYZW4 *&plots,
                                       const SVertexComponents *&comps, const WORD *&inds,
                                       DWORD &dwNumPlots, DWORD &dwNumIndices) const;
+    bool GetNativeFigureStreams(const std::string& name,
+        owned::NativeFigureStreams& output) const override;
     // process lighting for selected range
     virtual bool ProcessLighting(const std::string &szRangeName,
                                  CSimplyArray<CLight *, CLight *> &lights, CMaterial *pMaterial,

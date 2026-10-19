@@ -13,6 +13,8 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Light.h"
 #include "FigureScreenBounds.h"
+#include "native_placed_figure.h"
+#include "GameJournal.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CFigureClientSpecific::CFigureClientSpecific()
 {
@@ -190,75 +192,98 @@ void CFigureClientSpecific::DrawBBox(CRenderer *pRend)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CFigureClientSpecific::Draw(CRenderer *pRend, const CQuaternion &qObject,
-                                 const CPlot3D &cpObject, LPGAMEBASE lpNewMaterial, BYTE cFog,
-                                 CRect *pRect)
+bool CFigureClientSpecific::SubmitNativeFigure(CRenderer* renderer, CMaterial* material,
+    BYTE fog, CSimplyArray<CLight*, CLight*>* lights)
 {
-    if (pFigure->CheckFlag(FIG_HIDDEN))
-        return TRUE;
-    // (interface / ci3dfigure / sky) draw without lighting
-    // check visibility, move texture, account for morphs and render
-    LPMATERIAL lpMaterial = static_cast<LPMATERIAL>(lpNewMaterial);
-    static CXYZW4Array plots41;
-    DWORD dwRenderFlags = 0;
-    int i;
-    //
-    pFigure->ResetFlag(FIG_VISIBLE);
-    //
-    int nClipFlag = pRend->GetGeometryProcessor()->CheckVisibility(pFigure->bv);
-    if (nClipFlag == TRV_INVISIBLE)
-        return TRUE;
-    //
-    if (pFigure->GetTextureTypeID() >= TTID_ANIMATED1 &&
-        pFigure->GetTextureTypeID() <= TTID_ANIMATED4)
-        CalcAnimatedTextureFrame(theWorld.GetPreciseTime());
-    // must we use default colors ?
-
-    // never lit in shader, that is - use vertex colors
-    dwRenderFlags |= DXD3D_USE_VERTEX_COLOR;
-    if (pFigure->CheckFlag(FIG_USE_DEFAULT_COLORS))
-    {
-        // interface figure has it's own default colors
-        MemSetDWord(pFigure->colors.GetData(), pFigure->dwDefaultColor, pFigure->colors.GetSize());
-        MemSetDWord(pFigure->speculars.GetData(), pFigure->dwDefaultSpecular,
-                    pFigure->speculars.GetSize());
+    const auto reject = [](const char* step) {
+        static unsigned reports = 0;
+        if (reports++ < 8) GameJournal::Event("RENDER", "native_figure_rejected", "step=%s", step);
+        return false;
+    };
+    auto* gpu = renderer->GetGPU();
+    if (!gpu->IsHaveMatrix(MAT_STACK_PROJSPACE)) {
+        renderer->GetD3D()->ReportC56FigureNoMatrix();
+        return false;
     }
-    else if (!pFigure->CheckFlag(FIG_LIGHTED))
-    {
-        // use default color from CD3D object down the line
-        dwRenderFlags |= DXD3D_LIT;
+    owned::NativeFigureStreams streams;
+    // Lit models use their current geometry container, including complection
+    // edits. Placed/interface figures own the exact mapped streams themselves.
+    auto* geometry = lights ? GetGeometry() : nullptr;
+    if (geometry) {
+        if (!geometry->GetNativeFigureStreams(pFigure->GetName(), streams)) return reject("streams");
+    } else {
+        streams = {reinterpret_cast<const owned::NativePackedGroup*>(pFigure->plots4),
+            static_cast<std::uint32_t>(pFigure->nNumPlots),
+            reinterpret_cast<const owned::NativePackedGroup*>(pFigure->norms4),
+            static_cast<std::uint32_t>(pFigure->nNumNorms), nullptr, nullptr,
+            reinterpret_cast<const owned::NativeTextureCoordinate*>(pFigure->maps),
+            static_cast<std::uint32_t>(pFigure->nMaps),
+            reinterpret_cast<const owned::NativeVertexComponent*>(pFigure->components),
+            static_cast<std::uint32_t>(pFigure->nComponents), pFigure->indices,
+            static_cast<std::uint32_t>(pFigure->nIndices)};
     }
-    //
-    int nNumPlots = pFigure->nNumPlots;
-    SXYZW4 *plots = pFigure->plots4;
-
-    if (pFigure->morphs.GetSize() != 0)
-    {
-        int hindex, lindex;
-
-        plots41.SetSize(pFigure->nNumPlots);
-        memcpy(plots41.GetData(), pFigure->plots4, sizeof(SXYZW4) * pFigure->nNumPlots);
-        for (i = 0; i < pFigure->morphs.GetSize(); i++)
-        {
-            hindex = i >> 2;
-            lindex = i & 0x3;
-            plots41[hindex].x[lindex] += pFigure->morphs[i].x;
-            plots41[hindex].y[lindex] += pFigure->morphs[i].y;
-            plots41[hindex].z[lindex] += pFigure->morphs[i].z;
+    const bool defaults = pFigure->CheckFlag(FIG_USE_DEFAULT_COLORS) != 0;
+    const bool prelit = !lights && !defaults && pFigure->CheckFlag(FIG_LIGHTED);
+    if (prelit) {
+        streams.diffuse = reinterpret_cast<const std::uint32_t*>(pFigure->colors.GetData());
+        streams.specular = reinterpret_cast<const std::uint32_t*>(pFigure->speculars.GetData());
+    }
+    owned::NativeGeometryView view;
+    owned::apply_native_figure_streams(view, streams);
+    view.semantic_kind = owned::SemanticKind::figure;
+    memcpy(view.object_to_clip.data(), &gpu->GetMatrix(MAT_STACK_PROJSPACE), sizeof(SHMatrix));
+    view.u_shift = pFigure->GetUShift(); view.v_shift = pFigure->GetVShift(); view.fog = fog;
+    view.flags = material && material->CheckFlag(MAT_USE_SPECULAR) ? 8u : 0u;
+    owned::NativeLighting response;
+    owned::NativeWorldLighting illumination;
+    std::vector<owned::RetainedWorldPointLight> points;
+    if (lights && !defaults) {
+        if (!material || !gpu->IsHaveMatrix(MAT_STACK_WORLDSPACE)) return reject("material_or_world_matrix");
+        std::array<float,16> world;
+        memcpy(world.data(), &gpu->GetMatrix(MAT_STACK_WORLDSPACE), sizeof(SHMatrix));
+        const auto& m = material->GetMaterial();
+        if (!owned::make_native_figure_lighting(&m.diffuse.r, &m.emissive.r,
+                &m.specular.r, world, response)) return reject("material_values");
+        const DWORD ambient = renderer->GetAmbientColor();
+        illumination.ambient = {float((ambient >> 16) & 255) / 255.f,
+            float((ambient >> 8) & 255) / 255.f, float(ambient & 255) / 255.f, 1.f};
+        illumination.sunlight_diffuse = {};
+        if (auto* sun = renderer->GetSunlight()) {
+            const auto& color = sun->GetDiffuse(); const auto& direction = sun->GetDirection();
+            illumination.sunlight_diffuse = {color.r, color.g, color.b, 1.f};
+            illumination.sunlight_direction = {-direction.x, -direction.y, -direction.z, 0.f};
         }
-
-        plots = plots41.GetData();
+        for (int i = 0; i < lights->GetSize(); ++i) {
+            const auto* light = (*lights)[i];
+            if (!light || light->CheckFlag(LIT_INACTIVE) || !(light->GetRange() > 0.f)) continue;
+            const auto& center = light->GetCP(); const auto& color = light->GetDiffuse();
+            owned::RetainedWorldPointLight point;
+            point.source_id = i + 1; point.center = {center.x, center.y, center.z};
+            point.color = {color.r, color.g, color.b}; point.radius = light->GetRange();
+            points.push_back(point);
+        }
     }
-    // rendering
-    pRend->Render(plots, nNumPlots, pFigure->norms4, pFigure->nNumNorms, pFigure->colors.GetData(),
-                  pFigure->speculars.GetData(), pFigure->maps, pFigure->nMaps, pFigure->components,
-                  pFigure->nComponents, pFigure->lightcomponents, pFigure->nLightComponents,
-                  pFigure->indices, pFigure->nIndices, pFigure->GetUShift(), pFigure->GetVShift(),
-                  cFog, dwRenderFlags);
-
-    return TRUE;
+    owned::apply_native_placed_state(view,
+        reinterpret_cast<const owned::NativeMorphOffset*>(pFigure->morphs.GetData()),
+        pFigure->morphs.GetSize(), response, owned::NativeOrdering::preserve,
+        defaults || (!lights && !prelit),
+        defaults ? pFigure->GetDefaultColor() : renderer->GetAmbientColor(),
+        defaults ? pFigure->GetDefaultSpecular() : (std::uint32_t(fog) << 24));
+    return renderer->GetD3D()->SubmitC74Figure(view, response.enabled ? &illumination : nullptr, points);
 }
-/////////////////////////////////////////////////////////////////////////////////////
+
+BOOL CFigureClientSpecific::Draw(CRenderer *pRend, const CQuaternion &qObject,
+    const CPlot3D &cpObject, LPGAMEBASE lpNewMaterial, BYTE cFog, CRect *pRect)
+{
+    if (pFigure->CheckFlag(FIG_HIDDEN)) return TRUE;
+    pFigure->ResetFlag(FIG_VISIBLE);
+    if (pRend->GetGeometryProcessor()->CheckVisibility(pFigure->bv) == TRV_INVISIBLE) return TRUE;
+    if (pFigure->GetTextureTypeID() >= TTID_ANIMATED1 && pFigure->GetTextureTypeID() <= TTID_ANIMATED4)
+        CalcAnimatedTextureFrame(theWorld.GetPreciseTime());
+    SubmitNativeFigure(pRend, static_cast<CMaterial*>(lpNewMaterial), cFog, nullptr);
+    return TRUE; // Rejected owned figures are diagnosed, with no alternate draw.
+}
+//
 void CFigureClientSpecific::CalculateScreenBounds(CRenderer *pRend, CRect *pRect)
 {
     IGeometry *pGeometry = GetGeometry();
@@ -316,153 +341,18 @@ void CFigureClientSpecific::PrepareOwnedPicking(CRenderer *pRend, CRect *pRect)
 }
 
 BOOL CFigureClientSpecific::Draw(CRenderer *pRend, CSimplyArray<CLight *, CLight *> &lights,
-                                 LPGAMEBASE lpNewMaterial, BYTE cFog, CRect *pRect,
-                                 CTexture *pTexture0, CTexture *pTexture1)
+    LPGAMEBASE lpNewMaterial, BYTE cFog, CRect *pRect, CTexture *pTexture0, CTexture *pTexture1)
 {
-    // Bounds are consumed by native object/figure picking, independently of GPU drawing.
-    rcClip.SetRectEmpty();
-    if (pRect) pRect->SetRectEmpty();
-    // draw with lighting
-    // check visibility, move texture, account for morphs
-    // setup lights positions in world space
-    pFigure->ResetFlag(FIG_VISIBLE);
-    if (pFigure->CheckFlag(FIG_HIDDEN))
-        return TRUE;
-    LPMATERIAL lpMaterial = static_cast<LPMATERIAL>(lpNewMaterial);
-    IGeometry *pGeometry = GetGeometry();
-    static CXYZW4Array plots41;
-    DWORD dwRenderFlags = 0;
-    //
-    int nClipFlag = pRend->GetGeometryProcessor()->CheckVisibility(pFigure->bv);
-    if (nClipFlag == TRV_INVISIBLE)
-        return TRUE;
-    pFigure->SetFlag(FIG_VISIBLE);
-    if (pFigure->GetTextureTypeID() >= TTID_ANIMATED1 &&
-        pFigure->GetTextureTypeID() <= TTID_ANIMATED4)
-        CalcAnimatedTextureFrame(theWorld.GetPreciseTime());
-
-    if (!pGeometry)
-        ASSERT(1);
-
-    if (pFigure->CheckFlag(FIG_USE_DEFAULT_COLORS))
-    {
-        if (pGeometry)
-        {
-            pGeometry->ProcessLighting(pFigure->GetName(), pFigure->dwDefaultColor,
-                                       pFigure->dwDefaultSpecular, pFigure->colors,
-                                       pFigure->speculars);
-        }
-        else
-        {
-            pFigure->colors.SetSize(pFigure->nNumNorms * 4);    // ARRAY BOUNDS CHECK
-            pFigure->speculars.SetSize(pFigure->nNumNorms * 4); // ARRAY BOUNDS CHECK
-            MemSetDWord(pFigure->colors.GetData(), pFigure->dwDefaultColor,
-                        pFigure->colors.GetSize());
-            MemSetDWord(pFigure->speculars.GetData(), pFigure->dwDefaultSpecular,
-                        pFigure->speculars.GetSize());
-        }
-
-        dwRenderFlags |= DXD3D_USE_VERTEX_COLOR;
-    }
-
-    {
-        CTLPipeline *pGeometryProcessor = pRend->GetGeometryProcessor()->GetGeometryProcessor();
-        // lit figure
-        // setup lights with figure placement
-        SHMatrix matrix;
-        matrix.HomogeneousInverse(pRend->GetGeometryProcessor()->GetMatrix(MAT_STACK_WORLDSPACE));
-        float fObjectsLightingCoeff;
-        fObjectsLightingCoeff = theSettings.fObjectsLightingCoeff;
-        for (int i = 0; i < lights.GetSize(); ++i)
-        {
-            lights[i]->SetRespectCP(matrix.RotateHVector(lights[i]->GetCP()));
-            lights[i]->SetupWithMaterial(lpMaterial, fObjectsLightingCoeff);
-        }
-        // sunlight
-        CLight *pSunlight = theRenderer.GetSunlight();
-        if (pSunlight)
-        {
-            D3DVECTOR d3dDirection = pSunlight->GetDirection();
-            CPlot3D nl(-d3dDirection.x, -d3dDirection.y, -d3dDirection.z);
-            nl = matrix.RotateVector(nl);
-            pSunlight->SetRespectDirection(nl);
-            pSunlight->SetupWithMaterial(lpMaterial, fObjectsLightingCoeff);
-
-            pRend->GetConstantBuffers()->cb_vs_vertexlights.data.sunlight = CLight11Packed(
-                *pSunlight);
-            pGeometryProcessor->SetSunlight(pSunlight);
-        }
-        // perform lighting
-        for (int i = 0; i < min(16, lights.GetSize()); ++i)
-        {
-            pRend->GetConstantBuffers()->cb_vs_vertexlights.data.lights[i] = CLight11Packed(
-                *lights[i]);
-        }
-        pRend->GetConstantBuffers()->cb_vs_vertexshader.data.nlights = lights.GetSize();
-        pRend->GetConstantBuffers()->cb_vs_vertexshader.data.dvEmissive = lpMaterial->GetEmissive();
-
-        if (pGeometry) // light {unhuma} unit
-            pGeometry->ProcessLighting(pFigure->GetName(), lights, lpMaterial, cFog,
-                                       pFigure->colors, pFigure->speculars);
-        //
-        if (!lpMaterial->CheckFlag(MAT_USE_SPECULAR))
-            MemSetDWord(pFigure->speculars.GetData(), RGBA_MAKE(0, 0, 0, cFog),
-                        pFigure->speculars.GetSize());
-
+    // Native picking still consumes source bounds. Rendering consumes packed
+    // groups, current morphs and raw material/light facts through the c74 path.
+    PrepareOwnedPicking(pRend, pRect);
+    if (!pFigure->CheckFlag(FIG_VISIBLE)) return TRUE;
+    if (SubmitNativeFigure(pRend, static_cast<CMaterial*>(lpNewMaterial), cFog, &lights))
         pFigure->SetFlag(FIG_LIGHTED);
-    }
-
-    if (lpMaterial->CheckFlag(MAT_USE_SPECULAR))
-        dwRenderFlags |= DXD3D_USE_SPECULAR;
-
-    if (pTexture0 && pTexture1)
-    {
-        // huh?
-        ASSERT(0);
-    }
-
-    if (pGeometry)
-    {
-        pGeometry->Render(pFigure->GetName(), dwRenderFlags, pFigure->colors, pFigure->speculars,
-                          pFigure->morphs, pFigure->GetUShift(), pFigure->GetVShift());
-    }
-    else
-    {
-        ASSERT(0);
-        // wtf s that branch?
-        int nNumPlots = pFigure->nNumPlots;
-        SXYZW4 *plots = pFigure->plots4;
-        if (pFigure->morphs.GetSize() != 0)
-        {
-            int hindex, lindex;
-
-            plots41.SetSize(pFigure->nNumPlots);
-            memcpy(plots41.GetData(), pFigure->plots4, sizeof(SXYZW4) * pFigure->nNumPlots);
-            for (int i = 0; i < pFigure->morphs.GetSize(); i++)
-            {
-                hindex = i >> 2;
-                lindex = i & 0x3;
-                plots41[hindex].x[lindex] += pFigure->morphs[i].x;
-                plots41[hindex].y[lindex] += pFigure->morphs[i].y;
-                plots41[hindex].z[lindex] += pFigure->morphs[i].z;
-            }
-
-            plots = plots41.GetData();
-        }
-        nClipFlag = pRend->Render(plots, nNumPlots, pFigure->norms4, pFigure->nNumNorms,
-                                  pFigure->colors.GetData(), pFigure->speculars.GetData(),
-                                  pFigure->maps, pFigure->nMaps, pFigure->components,
-                                  pFigure->nComponents, pFigure->lightcomponents,
-                                  pFigure->nLightComponents, pFigure->indices, pFigure->nIndices,
-                                  pFigure->GetUShift(), pFigure->GetVShift(), cFog, dwRenderFlags);
-    }
-    CalculateScreenBounds(pRend, pRect);
-    //
-    DrawBBox(&theRenderer);
-
+    DrawBBox(pRend);
     return TRUE;
 }
-/////////////////////////////////////////////////////////////////////////////////////
+//
 // void CFigureClientSpecific::Calc2DClipRect( CXYZW4Array& homoscreen )
 // calculate clip rect
 void CFigureClientSpecific::Calc2DClipRect(CXYZW4Array &homoscreen)

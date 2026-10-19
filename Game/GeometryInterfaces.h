@@ -39,7 +39,7 @@ public:
     ~SRangeExternals() { memset(this, 0, sizeof(*this)); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
-namespace owned { struct FigureCpuAsset; }
+namespace owned { struct FigureCpuAsset; struct NativeFigureStreams; }
 class IGeometry : public CRefCount
 {
 protected:
@@ -80,6 +80,9 @@ public:
     virtual bool GetRangeGeometryData(const std::string &szRangeName, const SXYZW4 *&plots,
                                       const SVertexComponents *&comps, const WORD *&inds,
                                       DWORD &dwNumPlots, DWORD &dwNumIndices) const = 0;
+    // Borrow the actual current complection streams for synchronous native draw.
+    virtual bool GetNativeFigureStreams(const std::string& name,
+        owned::NativeFigureStreams& output) const = 0;
     // process lighting for the range
     virtual bool ProcessLighting(const std::string &szRangeName,
                                  CSimplyArray<CLight *, CLight *> &lights, CMaterial *pMaterial,

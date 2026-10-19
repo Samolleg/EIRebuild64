@@ -5218,18 +5218,15 @@ FigureFallbackReason build_native_figure_context(
             if (lighting_result != FigureFallbackReason::none)
                 return lighting_result;
 
-            packet.enabled = 1;
-            packet.material_alpha = std::clamp(material_diffuse[3], 0.0f, 1.0f);
-            std::copy_n(material_diffuse, 3, packet.material_diffuse.begin());
-            std::copy_n(material_emissive, 4, packet.emissive.begin());
-            std::copy_n(material_specular, 4, packet.specular.begin());
-            packet.specular[3] = 1.0f;
+            std::array<float,16> object_to_world{};
             const FigureFallbackReason transform_result =
                 resolve_figure_object_to_world(
-                    renderer, explicit_object_to_world,
-                    packet.object_to_world);
+                    renderer, explicit_object_to_world, object_to_world);
             if (transform_result != FigureFallbackReason::none)
                 return transform_result;
+            if (!make_native_figure_lighting(material_diffuse, material_emissive,
+                    material_specular, object_to_world, packet))
+                return FigureFallbackReason::material;
         }
 
         const NativeMorphOffset* morphs = nullptr;
@@ -21265,18 +21262,11 @@ int native_geometry_sink(
         view.bounds_minimum = g_native_figure.bounds_minimum;
         view.bounds_maximum = g_native_figure.bounds_maximum;
         view.bounds_valid = g_native_figure.bounds_valid;
-        view.positions = positions;
-        view.position_groups = static_cast<std::uint32_t>(position_groups);
-        view.normals = normals;
-        view.normal_groups = static_cast<std::uint32_t>(normal_groups);
-        view.diffuse = diffuse;
-        view.specular = specular;
-        view.texture_coordinates = texture_coordinates;
-        view.texture_coordinate_count = static_cast<std::uint32_t>(texture_coordinate_count);
-        view.components = components;
-        view.component_count = static_cast<std::uint32_t>(component_count);
-        view.indices = indices;
-        view.index_count = static_cast<std::uint32_t>(index_count);
+        apply_native_figure_streams(view, {positions, static_cast<std::uint32_t>(position_groups),
+            normals, static_cast<std::uint32_t>(normal_groups), diffuse, specular,
+            texture_coordinates, static_cast<std::uint32_t>(texture_coordinate_count),
+            components, static_cast<std::uint32_t>(component_count), indices,
+            static_cast<std::uint32_t>(index_count)});
         view.semantic_kind = g_semantic.kind;
         if (g_native_figure.active) {
             view.morphs = g_native_figure.morphs;
