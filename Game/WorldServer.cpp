@@ -3065,6 +3065,7 @@ bool CWorldServer::CanBeginFieldCamp()
     }
     return availability(true, "ready");
 }
+
 bool CWorldServer::BeginFieldCamp()
 {
     if (!CanBeginFieldCamp()) return false;
