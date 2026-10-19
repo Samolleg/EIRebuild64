@@ -456,6 +456,7 @@ private:
     CPlot3D ptSwarmTarget;
     ECmdState cmdState;
     bool bRun;
+    bool resumeCompanionAttack; // Transient order continuation; not saved.
 
     void SeekTargets(CAIUnitLogic &logic);
     bool UpdateCompanionAttack(CAIUnitLogic &logic);

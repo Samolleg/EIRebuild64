@@ -1809,6 +1809,7 @@ CUMPlayer::CUMPlayer()
     ptSwarmTarget = CPlot3D(0, 0, 0);
     cmdState = PC_IDLE;
     bRun = false;
+    resumeCompanionAttack = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::RemoveReferencesOn(CMapObject *_pTarget)
@@ -1837,6 +1838,7 @@ bool CUMPlayer::DoPathExist(CAIUnitLogic &logic, const CPlot3D &ptSrc, const CPl
 void CUMPlayer::DoMoveTo(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGroup, bool _bRun,
                          const CPlot3D &ptOffset)
 {
+    resumeCompanionAttack = false;
     cmdState = PC_MOVE;
     ptSwarmTarget = ptTarget;
     if (DoPathExist(logic, ptTarget, ptTarget + ptOffset))
@@ -1852,6 +1854,7 @@ void CUMPlayer::DoMoveTo(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGro
 void CUMPlayer::DoSwarm(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGroup, bool _bRun,
                         const CPlot3D &ptOffset)
 {
+    resumeCompanionAttack = false;
     cmdState = PC_SWARM;
     ptSwarmTarget = ptTarget;
     if (DoPathExist(logic, ptTarget, ptTarget + ptOffset))
@@ -1865,6 +1868,7 @@ void CUMPlayer::DoSwarm(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGrou
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoAttack(CAIUnitLogic &logic, CMapObject *_pTarget, ERPGHitLocations hl, bool _bRun)
 {
+    resumeCompanionAttack = false;
     if (_pTarget == logic.GetUnit())
         return;
     cmdState = PC_IDLE;
@@ -1883,6 +1887,10 @@ bool CUMPlayer::UpdateCompanionAttack(CAIUnitLogic &logic)
     if (!mod || !mod->CompanionSkillAI(*unit) || pTarget.IsEmpty() ||
         pTarget->WhoAmI()!=HPC_UNIT || pTarget->IsDead() || pTarget==unit)
         return false;
+    // Only an automatic order action may resume the explicit enemy from idle.
+    // Other idle transitions retain the normal follow/SeekTargets behavior.
+    if (logic.IsIdling() && !resumeCompanionAttack)
+        return false;
     auto* server=logic.GetUnitServer();
     // Manual casts and tagged weapon skills must finish before automatic choice.
     if (server->HasCast() || server->HasSkill() ||
@@ -1898,13 +1906,15 @@ bool CUMPlayer::UpdateCompanionAttack(CAIUnitLogic &logic)
     one.AddTail(static_cast<CUnit*>(pTarget));
     CAISpellCaster::CEnemy choice;
     logic.caster.FindBestTarget(logic,choice,one,unit->GetCP(),false,false);
-    if (!logic.caster.ApplyCompanionChoice(logic,choice,"order") && !logic.IsAttacking())
+    resumeCompanionAttack = logic.caster.ApplyCompanionChoice(logic,choice,"order");
+    if (!resumeCompanionAttack && !logic.IsAttacking())
         logic.StartAttack(pTarget);
     return true;
 }
 void CUMPlayer::DoSkill(CAIUnitLogic &logic, CMapObject *pTarget, int nSkill, int nItemID,
                         bool _bRun)
 {
+    resumeCompanionAttack = false;
     cmdState = PC_IDLE;
     logic.StartUsingSkill(pTarget, nSkill, nItemID, _bRun);
 }
@@ -1920,12 +1930,14 @@ void CUMPlayer::DoCast(CAIUnitLogic &logic, int nSpell, CMapObject *pTarget, boo
         if(!server->TagWeaponSkill(nSpell,pTarget))server->InformFailure(ACK_HERO_REFUSE_CANT_CAST);
         return;
     }
+    resumeCompanionAttack = false;
     cmdState = PC_IDLE;
     logic.StartCast(nSpell, pTarget, bRun);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoCast(CAIUnitLogic &logic, int nSpell, const CPlot3D &ptTarget, bool _bRun)
 {
+    resumeCompanionAttack = false;
     auto*mod=ModRuntime::Current();auto*server=logic.GetUnitServer();
     auto*spell=server&&nSpell>=0&&nSpell<int(logic.GetUnit()->GetSpellSlotCount())?logic.GetUnit()->GetQSpell(nSpell):nullptr;ModSkills::Config config;
     bool pointSkill=mod&&mod->PointSkill(spell)&&mod->SkillConfig(spell,config);
@@ -1968,6 +1980,7 @@ void CUMPlayer::DoFollow(CAIUnitLogic &logic, CUnit *pLeader)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoStop(CAIUnitLogic &logic)
 {
+    resumeCompanionAttack = false;
     cmdState = PC_IDLE;
     logic.StartIdle();
 }
@@ -2289,6 +2302,7 @@ void CUMPlayer::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::Load(CSave &file)
 {
+    resumeCompanionAttack = false;
     pTarget.Load(file, theWorldServer);
     pFollowTo.Load(file, theWorldServer);
     file.Read(&ptSwarmTarget, sizeof(ptSwarmTarget));
