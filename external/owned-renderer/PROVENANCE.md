@@ -3,7 +3,7 @@
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-p6a5`, commit `6fd51e727eb552f5be414aeebc4b5708d5b8ca9d`.
+integration changes in branch `eirebuild/c74-p6a6`, commit `ad080c31037f5f1def17d3b538daab8e3ef9eaf4`.
 This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
@@ -152,3 +152,13 @@ into model_preview_clock.h. Native preview and source inventory/pane/display
 wrappers call the same owner with their actual clock values and source rates.
 Source SetExactPosition callbacks, world publication and picking are preserved.
 Full placement/light/cache/generated-MMP/live display owners remain open.
+
+OWN74-P6a6 shares the complete render-execution loop of source, immediate retail
+and queued retail object previews in model_preview_producer.h: ordered part
+admission/bindings, private GPU pose placement, geometry, final material and wound
+passes. Source adapters keep immutable assets and raw current facts; no world pick
+flags or completed world pose publication are changed. model_lighting.h shares
+ambient/sun preparation and point-light contract admission with native c74 reads;
+the source preview iterator supplies raw values to the renderer's local selection.
+Full P4 composition, source callbacks, normal visibility, LRU/generated-MMP and live
+display transactions remain open in OWN74-P6a6/REMAINING.md. No upstream merge.

@@ -1,5 +1,7 @@
 #include "contact_blend.h"
 #include "model_preview_clock.h"
+#include "model_preview_producer.h"
+#include "model_lighting.h"
 #include "../ModRuntime.h"
 #include "../ModPackage.h"
 // Read-only adapter over the same source rate used by SetExactPosition.
@@ -75,11 +77,6 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     lpObject->GetPlacement(placement);
     if (GetScaleMatrix(scale)) placement = placement * scale;
     std::memcpy(objectToWorld.data(), &placement, sizeof(placement));
-    owned::NativeWorldGeometry::Pose* pose = nullptr;
-    if (!owned::retained_visual_gpu_pose(sample, pose) || !pose)
-        return reject("preview.gpu_pose");
-    pose->root_to_world = objectToWorld;
-
     struct Part { CFigure* figure; CMaterial* material; unsigned set; std::size_t ordinal; };
     std::vector<Part> parts;
     for (unsigned set = 0; set < 2; ++set) {
@@ -96,30 +93,33 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             }
         }
     }
-    // Read source light facts once per object, rather than for every body part.
-    owned::NativeWorldLighting illumination;
-    const DWORD ambient = renderer->GetAmbientColor();
-    illumination.ambient = {float((ambient >> 16) & 255) / 255.f,
-        float((ambient >> 8) & 255) / 255.f, float(ambient & 255) / 255.f, 1.f};
-    illumination.sunlight_diffuse = {};
-    if (const auto* sun = renderer->GetSunlight()) {
+    // Raw light-manager access only. c74 owns preparation and admission.
+    owned::ModelLightingFacts worldLight;
+    worldLight.ambient = renderer->GetAmbientColor();
+    const auto* sun = renderer->GetSunlight();
+    if (sun) {
         const auto& color = sun->GetDiffuse(); const auto& direction = sun->GetDirection();
-        illumination.sunlight_diffuse = {color.r, color.g, color.b, 1.f};
-        illumination.sunlight_direction = {-direction.x, -direction.y, -direction.z, 0.f};
+        worldLight.sunlight = true;
+        worldLight.diffuse = {color.r, color.g, color.b};
+        worldLight.direction = {direction.x, direction.y, direction.z};
     }
-    std::vector<owned::RetainedWorldPointLight> lights;
+    const auto& cp = lpObject->GetCP();
+    owned::ModelPreviewLighting illumination;
     CManagerIterator iterator;
-    for (auto* light = static_cast<CLight*>(iterator.GetFirst(theWorld.GetLightManager())); light;
-         light = static_cast<CLight*>(iterator.GetNext())) {
-        if (light == renderer->GetSunlight() || light->CheckFlag(LIT_INACTIVE) ||
-            !(light->GetRange() > 0.f) ||
-            fabs2(lpObject->GetCP() - light->GetCP()) > square(light->GetRange() + 10.f)) continue;
-        const auto& center = light->GetCP(); const auto& color = light->GetDiffuse();
-        owned::RetainedWorldPointLight point;
-        point.source_id = int(lights.size()) + 1; point.center = {center.x, center.y, center.z};
-        point.color = {color.r, color.g, color.b}; point.radius = light->GetRange();
-        lights.push_back(point);
-    }
+    auto* light = static_cast<CLight*>(iterator.GetFirst(theWorld.GetLightManager()));
+    if (!owned::produce_model_preview_lighting(worldLight, {cp.x, cp.y, cp.z},
+        [&](owned::ModelPointLightFacts& facts) {
+            if (!light) return false;
+            const auto* current = light;
+            light = static_cast<CLight*>(iterator.GetNext());
+            const auto& center = current->GetCP(); const auto& color = current->GetDiffuse();
+            facts.sunlight = current == sun;
+            facts.inactive = current->CheckFlag(LIT_INACTIVE) != 0;
+            facts.value.center = {center.x, center.y, center.z};
+            facts.value.color = {color.r, color.g, color.b};
+            facts.value.radius = current->GetRange();
+            return true;
+        }, illumination)) return reject("preview.lighting");
     const BYTE fog = lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG) ? 255 :
         static_cast<CWorldClient*>(GetWorld())->GetTerrain()->GetFogAlpha(lpObject->GetCP());
     const double textureTime = theWorld.GetPreciseTime();
@@ -130,7 +130,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         ~FinishPreview() { if (!finished) try { renderer->FlushC56CampFigures(); } catch (...) {} }
     } finish{renderer->GetD3D()};
     owned::ModelPartResult result;
-    const bool drawn = owned::produce_model_parts(parts.size(),
+    const owned::ModelPreviewInput input{sample, objectToWorld, worldToClip,
+        textureTime, fog, ownedPreviewSerial, false};
+    const bool drawn = owned::produce_model_preview(input, parts.size(),
         [&](std::size_t index, owned::ModelPartFacts& facts) {
             const auto& part = parts[index];
             facts.texture_set = part.set;
@@ -144,15 +146,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             return renderer->BindTexture(0, sets[set]->lpTexture) &&
                 renderer->BindTexture(1, set == 0 ? pWoundsTexture : nullptr);
         },
-        [&](std::size_t index, std::uint32_t& visible) {
+        [&](std::size_t index, owned::ModelPreviewPart& output) {
             const auto& part = parts[index];
-            owned::NativeGeometryView view;
-            if (!owned::prepare_model_preview_geometry(sample, part.ordinal, *pose,
-                    objectToWorld, worldToClip, textureTime, fog, ownedPreviewSerial, view)) return false;
-            // A UI object has no world ground-contact layer. Keep unit/world
-            // publication policy unchanged while submitting this separate view.
-            view.flags &= ~owned::native_ground_contact_flag;
-            view.fog = fog;
+            output.ordinal = part.ordinal;
             owned::NativeLighting lighting;
             const bool defaults = part.figure->CheckFlag(FIG_USE_DEFAULT_COLORS) != 0;
             if (!defaults) {
@@ -161,17 +157,18 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
                 if (!owned::make_native_figure_lighting(&material.diffuse.r, &material.emissive.r,
                         &material.specular.r, objectToWorld, lighting)) return false;
             }
-            owned::apply_model_preview_material(view, {defaults,
+            output.material = {defaults,
                 part.material && part.material->CheckFlag(MAT_USE_SPECULAR),
                 defaults ? part.figure->GetDefaultColor() : 0xffffffffu,
                 defaults ? part.figure->GetDefaultSpecular() : (std::uint32_t(fog) << 24),
-                lighting, owned::NativeOrdering::preserve});
-            // SubmitC74Figure uses the current typed texture bindings; it
-            // completes lit submissions before restoring the world lights.
-            if (!renderer->GetD3D()->SubmitC74Figure(view, defaults ? nullptr : &illumination, lights)) return false;
-            visible = 1; // Producer result only; never FIG_VISIBLE/OBJ_VISIBLE.
+                lighting, owned::NativeOrdering::preserve};
             return true;
-        }, result);
+        },
+        [&](const owned::NativeGeometryView& view, const owned::ModelPreviewPart& part) {
+            return renderer->GetD3D()->SubmitC74Figure(view,
+                part.material.default_colors ? nullptr : &illumination.world, illumination.points);
+        },
+        [](std::size_t, const owned::ModelPreviewPart&) { return true; }, result);
     // Unlit camp submissions may be queued. Finish before this UI pose owner
     // can be reused by another view of the same object.
     const bool flushed = renderer->GetD3D()->FlushC56CampFigures();

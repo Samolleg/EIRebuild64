@@ -50,6 +50,8 @@
 #include "model_preview_geometry.h"
 #include "model_preview_clock.h"
 #include "model_preview_material.h"
+#include "model_preview_producer.h"
+#include "model_lighting.h"
 #include "unit_blood.h"
 #include "game_sites.h"
 #include "hud_native_sites.h"
@@ -5063,23 +5065,12 @@ bool snapshot_native_world_lighting(
         const auto* sunlight =
             *reinterpret_cast<const std::uint8_t* const*>(renderer_bytes + 0x1c);
         if (!sunlight) return false;
-        const std::uint32_t ambient =
-            *reinterpret_cast<const std::uint32_t*>(renderer_bytes + 0x18);
-        const float* diffuse = reinterpret_cast<const float*>(sunlight + 0x98);
-        if (!finite_vector(diffuse, 3)) return false;
-        lighting.ambient = {((ambient >> 16) & 255u) / 255.0f,
-                            ((ambient >> 8) & 255u) / 255.0f,
-                            (ambient & 255u) / 255.0f, 1.0f};
-        lighting.sunlight_diffuse = {diffuse[0], diffuse[1], diffuse[2], 1.0f};
-        const float* direction = reinterpret_cast<const float*>(sunlight + 0xd4);
-        if (!finite_vector(direction, 3)) return false;
-        const float length_squared = direction[0] * direction[0] +
-            direction[1] * direction[1] + direction[2] * direction[2];
-        if (!std::isfinite(length_squared) || length_squared <= 1.0e-12f)
-            return false;
-        lighting.sunlight_direction = {
-            -direction[0], -direction[1], -direction[2], 0.0f};
-        return true;
+        ModelLightingFacts facts;
+        facts.ambient = *reinterpret_cast<const std::uint32_t*>(renderer_bytes + 0x18);
+        facts.sunlight = true;
+        std::memcpy(facts.diffuse.data(), sunlight + 0x98, sizeof(facts.diffuse));
+        std::memcpy(facts.direction.data(), sunlight + 0xd4, sizeof(facts.direction));
+        return produce_model_lighting(facts, lighting);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         lighting = {};
         return false;
@@ -7670,34 +7661,40 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     install_owned_scene_inputs(sinks, handoff, nullptr, nullptr, nullptr, 0);
     bool transaction = false, ok = false;
     try {
-        auto& sample = command.sample;
-        NativeWorldGeometry::Pose* pose = nullptr;
-        ok = retained_visual_gpu_pose(sample, pose) && pose;
-        if (ok) {
-            pose->root_to_world = command.base_world;
-            transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
-            ok = transaction;
-        }
-        for (std::size_t i = 0; ok && i < command.parts.size(); ++i) {
-            const auto& part = command.parts[i];
-            if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
-            NativeGeometryView view;
-            if (!prepare_model_preview_geometry(sample, part.ordinal, *pose,
-                    command.base_world, command.world_to_clip, command.texture_time,
-                    command.fog, command.presentation_serial, view)) { ok = false; break; }
-            view.owned_fixed_state = part.material;
-            apply_model_preview_material(view, {part.uses_default_colors,
-                (part.material_flags&0x10u)!=0, part.default_diffuse, part.default_specular,
-                part.lighting, part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state});
-
-            NativeGeometryResult result{};
-            if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
-            if (part.wound) {
-                if (handoff.set_wound) handoff.set_wound(sinks, part.wound, part.wound_texture);
-                view.wound_surface_interface = part.wound; view.wound_only = true;
-                if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
-            }
-        }
+        transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
+        const ModelPreviewInput input{command.sample, command.base_world, command.world_to_clip,
+            command.texture_time, command.fog, command.presentation_serial};
+        ModelPartResult result;
+        ok = transaction && produce_model_preview(input, command.parts.size(),
+            [&](std::size_t i, ModelPartFacts& facts) {
+                facts.texture_set = static_cast<std::uint32_t>(command.parts[i].set);
+                return true;
+            },
+            [&](std::uint32_t set) {
+                if (set >= command.sets.size()) return false;
+                return true;
+            },
+            [&](std::size_t i, ModelPreviewPart& output) {
+                const auto& part = command.parts[i];
+                // Restore this captured state for every part, including after a wound draw.
+                if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
+                output.ordinal = part.ordinal;
+                output.fixed_state = part.material;
+                output.fixed_state_supplied = true;
+                output.material = {part.uses_default_colors, (part.material_flags & 0x10u) != 0,
+                    part.default_diffuse, part.default_specular, part.lighting,
+                    part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state};
+                output.wound = part.wound;
+                return true;
+            },
+            [&](const NativeGeometryView& view, const ModelPreviewPart&) {
+                NativeGeometryResult result{};
+                return g_native_sink_submit(g_native_sink_context, view, result);
+            },
+            [&](std::size_t i, const ModelPreviewPart& part) {
+                if (handoff.set_wound) handoff.set_wound(sinks, part.wound, command.parts[i].wound_texture);
+                return true;
+            }, result);
     } catch (...) { ok = false; }
     if (!ok) {
         static volatile LONG reported = 0;
@@ -7746,11 +7743,6 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             widescreen::compose_hud_clip(world_to_clip.data(), widescreen::hud_blit,
                                         layout.width, layout.height);
         }
-        NativeWorldGeometry::Pose* pose=nullptr;
-        if (!command) {
-            if (!retained_visual_gpu_pose(sample,pose) || !pose) return fail("preview.gpu_binding");
-            pose->root_to_world=base_world;
-        }
         if (!ensure_object_interaction_mapping(plan,sample)) return fail("preview.parts");
         if (!command) {
             transaction=g_native_sink_begin_object(g_native_sink_context);
@@ -7758,110 +7750,108 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
         }
         std::uint32_t active_set=0;
         const auto reject=[&](const char* reason) { failure=reason; return false; };
-        ModelPartResult loop_result;
-        const bool produced=produce_model_parts(plan.parts.size(),
-            [&](std::size_t i,ModelPartFacts& facts) {
-                const auto& current=plan.prepared[i];
-                facts.texture_set=plan.parts[i].set;
-                facts.inactive=current.inactive;
-                facts.hidden=current.hidden;
-                if (!facts.inactive && !read_object_plan_flags(plan.parts[i].figure,facts.visible))
-                    return reject("preview.flags");
-                facts.visible&=kFigureVisible;
-                return true;
-            },
-            [&](std::uint32_t set) {
-                active_set=set;
-                void* texture=nullptr;
-                void* descriptor=nullptr;
-                if (!read_object_plan_pointer(plan.sets[set],0,texture) ||
-                    (set==0 && !read_object_plan_pointer(specific,kObjectWoundDescriptorOffset,descriptor)) ||
-                    !set_object_plan_texture(renderer,texture) ||
-                    !apply_object_plan_render_state(set==0?descriptor:nullptr))
-                    return reject("preview.presentation");
-                if (command) {
-                    auto sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
-                    if (!sinks) return reject("preview.scene_sinks");
-                    if (g_scene_handoff.bind_texture)
-                        g_scene_handoff.bind_texture(sinks.get(),g_scene_handoff.bound_texture(g_scene_handoff.context));
-                    command->sets.push_back(std::move(sinks));
-                }
-                return true;
-            },
-            [&](std::size_t i,std::uint32_t& part_visible) {
-                const auto& source=plan.parts[i];
-                const auto& current=plan.prepared[i];
-            const char* name=nullptr;
-            std::size_t name_size=0;
-            if (!read_figure_name(source.figure,name,name_size)) return reject("preview.part_name");
-            auto& ordinal=plan.interaction_part_ordinals[i];
-            if (ordinal>=sample.assembly->parts.size() ||
-                sample.assembly->parts[ordinal].name.size()!=name_size ||
-                std::memcmp(sample.assembly->parts[ordinal].name.data(),name,name_size)!=0) {
-                const auto found=std::find_if(sample.assembly->parts.begin(),sample.assembly->parts.end(),
-                    [&](const VisualPartAsset& part) { return part.name.size()==name_size &&
-                        std::memcmp(part.name.data(),name,name_size)==0; });
-                if (found==sample.assembly->parts.end()) return reject("preview.part_binding");
-                ordinal=static_cast<std::size_t>(found-sample.assembly->parts.begin());
-            }
-            if (!preview_submits_part(sample.assembly->parts[ordinal])) return true;
+        const auto read = [&](std::size_t i, ModelPartFacts& facts) {
+            const auto& current = plan.prepared[i];
+            facts.texture_set = plan.parts[i].set;
+            facts.inactive = current.inactive;
+            facts.hidden = current.hidden;
+            if (!facts.inactive && !read_object_plan_flags(plan.parts[i].figure, facts.visible))
+                return reject("preview.flags");
+            facts.visible &= kFigureVisible;
+            return true;
+        };
+        const auto bind = [&](std::uint32_t set) {
+            active_set = set;
+            void* texture = nullptr;
+            void* descriptor = nullptr;
+            if (!read_object_plan_pointer(plan.sets[set], 0, texture) ||
+                (set == 0 && !read_object_plan_pointer(specific, kObjectWoundDescriptorOffset, descriptor)) ||
+                !set_object_plan_texture(renderer, texture) ||
+                !apply_object_plan_render_state(set == 0 ? descriptor : nullptr))
+                return reject("preview.presentation");
             if (command) {
-                NativeFrameState state;
-                if (!g_native_sink_frame_state ||
-                    !g_native_sink_frame_state(g_native_sink_context,state)) return reject("preview.ui_state");
-                std::uint32_t material_flags=0;
-                if (!read_object_plan_flags(current.material,material_flags)) return reject("preview.material");
-                OwnedPreviewPart part;
-                part.ordinal=ordinal; part.set=command->sets.size()-1;
-                part.material=state.material;
-                part.uses_default_colors=current.context.uses_default_colors;
-                part.default_diffuse=current.context.default_diffuse;
-                part.default_specular=current.context.default_specular;
-                part.lighting=current.context.lighting;
-                part.material_flags=material_flags;
-                const auto* image=g_object_suffix_image;
-                const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
-                part.wound=object_render_wound_surface_for_set(active_set,
-                    active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
-                if (part.wound) {
-                    part.wound_texture=g_scene_handoff.surface_snapshot(g_scene_handoff.context,part.wound);
-                    if (!part.wound_texture) return reject("preview.wound_snapshot");
-                }
-                command->parts.push_back(std::move(part));
-                part_visible=kFigureVisible;
-                return true;
+                auto sinks = g_scene_handoff.capture_sinks(g_scene_handoff.context);
+                if (!sinks) return reject("preview.scene_sinks");
+                if (g_scene_handoff.bind_texture)
+                    g_scene_handoff.bind_texture(sinks.get(), g_scene_handoff.bound_texture(g_scene_handoff.context));
+                command->sets.push_back(std::move(sinks));
             }
-            NativeGeometryView view;
-            if (!prepare_model_preview_geometry(sample,ordinal,*pose,base_world,world_to_clip,
-                    texture_time,fog,g_bridge_frame_serial,view))
-                return reject("preview.part_evaluation");
-            // Read the caller's completed UI state after the set's presentation
-            // transition. The prepared queue handles changes to this state.
+            return true;
+        };
+        const auto prepare = [&](std::size_t i, ModelPreviewPart& part) {
+            const auto& source = plan.parts[i];
+            const auto& current = plan.prepared[i];
+            const char* name = nullptr;
+            std::size_t name_size = 0;
+            if (!read_figure_name(source.figure, name, name_size)) return reject("preview.part_name");
+            auto& ordinal = plan.interaction_part_ordinals[i];
+            if (ordinal >= sample.assembly->parts.size() ||
+                sample.assembly->parts[ordinal].name.size() != name_size ||
+                std::memcmp(sample.assembly->parts[ordinal].name.data(), name, name_size) != 0) {
+                const auto found = std::find_if(sample.assembly->parts.begin(), sample.assembly->parts.end(),
+                    [&](const VisualPartAsset& asset) { return asset.name.size() == name_size &&
+                        std::memcmp(asset.name.data(), name, name_size) == 0; });
+                if (found == sample.assembly->parts.end()) return reject("preview.part_binding");
+                ordinal = static_cast<std::size_t>(found - sample.assembly->parts.begin());
+            }
+            part.ordinal = ordinal;
+            if (!preview_submits_part(sample.assembly->parts[ordinal])) return true;
             NativeFrameState state;
             if (!g_native_sink_frame_state ||
-                !g_native_sink_frame_state(g_native_sink_context,state)) return reject("preview.ui_state");
-            view.owned_fixed_state=state.material;
-            const auto& context=current.context;
-            const auto& lighting=context.lighting;
-            std::uint32_t material_flags=0;
-            if (!read_object_plan_flags(current.material,material_flags)) return reject("preview.material");
-
-            const auto* image=g_object_suffix_image;
-            const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
-            const auto wound=object_render_wound_surface_for_set(active_set,
-                active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
-            apply_model_preview_material(view, {context.uses_default_colors,
-                (material_flags&0x10u)!=0, context.default_diffuse, context.default_specular,
-                lighting, wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state});
-            NativeGeometryResult result{};
-            if (!g_native_sink_submit(g_native_sink_context,view,result)) return reject("preview.submission");
-            if (wound) {
-                view.wound_surface_interface=wound; view.wound_only=true;
-                if (!g_native_sink_submit(g_native_sink_context,view,result)) return reject("preview.wound_submission");
-            }
-            part_visible=kFigureVisible;
+                !g_native_sink_frame_state(g_native_sink_context, state)) return reject("preview.ui_state");
+            std::uint32_t material_flags = 0;
+            if (!read_object_plan_flags(current.material, material_flags)) return reject("preview.material");
+            const auto* image = g_object_suffix_image;
+            const auto* manager = image ? reinterpret_cast<const std::uint8_t* const*>(image + kRenderStateManagerGlobalRva) : nullptr;
+            part.wound = object_render_wound_surface_for_set(active_set,
+                active_wound_surface_interface(manager, static_cast<const std::uint8_t*>(owner)));
+            part.fixed_state = state.material;
+            part.fixed_state_supplied = true;
+            const auto& context = current.context;
+            part.material = {context.uses_default_colors, (material_flags & 0x10u) != 0,
+                context.default_diffuse, context.default_specular, context.lighting,
+                part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state};
+            part.visible = kFigureVisible;
             return true;
-        },loop_result);
+        };
+        ModelPartResult loop_result;
+        bool produced = false;
+        if (command) {
+            // Capture completed game reads/state changes once. The same producer
+            // executes the immutable parts on the scene thread.
+            produced = produce_model_parts(plan.parts.size(), read, bind,
+                [&](std::size_t i, std::uint32_t& visible) {
+                    ModelPreviewPart prepared;
+                    if (!prepare(i, prepared)) return false;
+                    if (!preview_submits_part(sample.assembly->parts[prepared.ordinal])) return true;
+                    OwnedPreviewPart part;
+                    part.ordinal = prepared.ordinal; part.set = command->sets.size() - 1;
+                    part.material = prepared.fixed_state;
+                    part.uses_default_colors = prepared.material.default_colors;
+                    part.default_diffuse = prepared.material.diffuse;
+                    part.default_specular = prepared.material.secondary;
+                    part.lighting = prepared.material.lighting;
+                    part.material_flags = prepared.material.specular ? 0x10u : 0u;
+                    part.wound = prepared.wound;
+                    if (part.wound) {
+                        part.wound_texture = g_scene_handoff.surface_snapshot(g_scene_handoff.context, part.wound);
+                        if (!part.wound_texture) return reject("preview.wound_snapshot");
+                    }
+                    command->parts.push_back(std::move(part));
+                    visible = prepared.visible;
+                    return true;
+                }, loop_result);
+        } else {
+            const ModelPreviewInput input{sample, base_world, world_to_clip,
+                texture_time, fog, g_bridge_frame_serial};
+            produced = produce_model_preview(input, plan.parts.size(), read, bind, prepare,
+                [&](const NativeGeometryView& view, const ModelPreviewPart&) {
+                    NativeGeometryResult result{};
+                    return g_native_sink_submit(g_native_sink_context, view, result) ||
+                        reject("preview.submission");
+                },
+                [](std::size_t, const ModelPreviewPart&) { return true; }, loop_result);
+        }
         if (!produced) return fail(failure?failure:"preview.parts");
         const auto visible=loop_result.visible;
         output.submitted_figures=loop_result.submitted;
@@ -12239,9 +12229,7 @@ bool visual_capture_world_point_lights(void* world,
             !visual_read(light,0x1c,value.center) ||
             !visual_read(light,0x98,value.color) ||
             !visual_read(light,0xe0,value.radius) ||
-            !std::isfinite(value.radius) || value.radius<=0 ||
-            !finite_vector(value.center.data(),value.center.size()) ||
-            !finite_vector(value.color.data(),value.color.size())) {
+            !admit_model_point_light({value})) {
             report_world_point_light_omission("world_point_light.point_contract");
             continue;
         }
