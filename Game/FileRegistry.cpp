@@ -74,7 +74,8 @@ void CFileRegistry::Close()
 }
 //----------------- Find general data from registry file -------------------------------------
 
-LPBYTE CFileRegistry::FindData(LPCSTR pszSection, LPCSTR pszEntry, BYTE cType, BOOL *pbIsSignle)
+LPBYTE CFileRegistry::FindData(LPCSTR pszSection, LPCSTR pszEntry, BYTE cType, BOOL *pbIsSignle,
+                               BOOL bReportTypeMismatch)
 {
     if (pBaseAddress == NULL)
         return NULL;
@@ -146,8 +147,9 @@ LPBYTE CFileRegistry::FindData(LPCSTR pszSection, LPCSTR pszEntry, BYTE cType, B
         }
         else
         {
-            ReportWarning("CFileRegistry::FindData(). Wrong type of entry. Section: %s, Entry: %s",
-                          pszSection, pszEntry);
+            if (bReportTypeMismatch)
+                ReportWarning("CFileRegistry::FindData(). Wrong type of entry. Section: %s, Entry: %s",
+                              pszSection, pszEntry);
             return NULL;
         }
     }
@@ -267,7 +269,7 @@ DWORD CFileRegistry::GetDWord(LPCSTR pszSection, LPCSTR pszEntry, DWORD dwDefaul
 }
 int CFileRegistry::GetInt(LPCSTR pszSection, LPCSTR pszEntry, int nDefault)
 {
-    LPDWORD pRet = (LPDWORD)FindData(pszSection, pszEntry, ERT_DWORD);
+    LPDWORD pRet = (LPDWORD)FindData(pszSection, pszEntry, ERT_DWORD, NULL, FALSE);
     if (pRet)
         return int(*pRet);
     else
@@ -280,7 +282,7 @@ int CFileRegistry::GetInt(LPCSTR pszSection, LPCSTR pszEntry, int nDefault)
 }
 UINT CFileRegistry::GetUInt(LPCSTR pszSection, LPCSTR pszEntry, UINT nDefault)
 {
-    LPDWORD pRet = (LPDWORD)FindData(pszSection, pszEntry, ERT_DWORD);
+    LPDWORD pRet = (LPDWORD)FindData(pszSection, pszEntry, ERT_DWORD, NULL, FALSE);
     if (pRet)
         return UINT(*pRet);
     else
@@ -295,7 +297,7 @@ UINT CFileRegistry::GetUInt(LPCSTR pszSection, LPCSTR pszEntry, UINT nDefault)
 // ---------------------- simply fp data read functions ---------------------------------------
 float CFileRegistry::GetFloat(LPCSTR pszSection, LPCSTR pszEntry, float fpDefault)
 {
-    float *pRet = (float *)FindData(pszSection, pszEntry, ERT_FLOAT);
+    float *pRet = (float *)FindData(pszSection, pszEntry, ERT_FLOAT, NULL, FALSE);
     if (pRet)
         return *pRet;
     else
@@ -309,7 +311,7 @@ float CFileRegistry::GetFloat(LPCSTR pszSection, LPCSTR pszEntry, float fpDefaul
 
 double CFileRegistry::GetDouble(LPCSTR pszSection, LPCSTR pszEntry, double fpDefault)
 {
-    float *pRet = (float *)FindData(pszSection, pszEntry, ERT_FLOAT);
+    float *pRet = (float *)FindData(pszSection, pszEntry, ERT_FLOAT, NULL, FALSE);
     if (pRet)
         return double(*pRet);
     else

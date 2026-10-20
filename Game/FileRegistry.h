@@ -51,6 +51,7 @@ public:
     BOOL bIsInRam;           // TRUE if file loaded externally
     CMappedFile cMappedFile; // Object for file mapping
     LPBYTE pBaseAddress;     // Starting address of loaded file
-    LPBYTE FindData(LPCSTR pszSection, LPCSTR pszEntry, BYTE cType, BOOL *pbIsSignle = NULL);
+    LPBYTE FindData(LPCSTR pszSection, LPCSTR pszEntry, BYTE cType, BOOL *pbIsSignle = NULL,
+                    BOOL bReportTypeMismatch = TRUE);
     BOOL IsValid();
 };
