@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
 #include "MiniaudioOneShotSfx.h"
+#include "GeneralSettings.h"
 #include "VoiceWaitState.h"
 #include "EngineDiagnostics.h"
 #include "ScenarioSpeechDucking.h"
@@ -4809,6 +4810,14 @@ EBinkStartOutcome TryStartBinkVoice(
     return BINK_START_STARTED;
 }
 
+float BinkMovieGain()
+{
+    // Movies are streamed, non-spatial audio; use the existing music/stream
+    // slider even before a world (and its sound manager) exists.
+    const int percent = (std::max)(0, (std::min)(100, theSettings.nAudioStreaming));
+    return theSettings.nAudio ? static_cast<float>(percent) * 0.01f : 0.0f;
+}
+
 int __stdcall BinkMiniaudioTrackOpen(
     SBinkSoundInterface *soundInterface,
     uint32_t frequency,
@@ -4954,7 +4963,7 @@ int __stdcall BinkMiniaudioTrackOpen(
     }
     voice->soundInitialized = true;
     ma_sound_set_spatialization_enabled(&voice->sound, MA_FALSE);
-    ma_sound_set_volume(&voice->sound, 1.0f);
+    ma_sound_set_volume(&voice->sound, BinkMovieGain());
     ma_sound_set_pan(&voice->sound, 0.0f);
     LogBinkTrackPhase(sequence, "sound_init", "ready_waiting_for_pcm");
     InitializeBinkReadyPreciseWait(voice);
@@ -5214,7 +5223,7 @@ void __stdcall BinkMiniaudioVolume(
         volume = 32768;
     voice->volume = volume;
     ma_sound_set_volume(
-        &voice->sound, static_cast<float>(volume) / 32768.0f);
+        &voice->sound, static_cast<float>(volume) / 32768.0f * BinkMovieGain());
 }
 
 void __stdcall BinkMiniaudioPan(
@@ -5341,18 +5350,26 @@ bool IsSupportedBinkAudioAbi(
     if (!GetFileVersionInfoA(path, 0, size, version.data())) return false;
     struct Translation { WORD language, codepage; } *translations = nullptr;
     UINT bytes = 0;
-    if (!VerQueryValueA(version.data(), "\\VarFileInfo\\Translation",
-            reinterpret_cast<void **>(&translations), &bytes)) return false;
-    for (UINT i = 0; i < bytes / sizeof(Translation); ++i)
+    const auto supportedVersion = [&](const char *key)
     {
-        char key[80] = {};
-        sprintf_s(key, "\\StringFileInfo\\%04x%04x\\ProductVersion", translations[i].language, translations[i].codepage);
         char *value = nullptr;
         UINT valueBytes = 0;
-        if (VerQueryValueA(version.data(), key, reinterpret_cast<void **>(&value), &valueBytes) &&
-            value && valueBytes && strcmp(value, "1.0t") == 0) return true;
+        return VerQueryValueA(version.data(), key, reinterpret_cast<void **>(&value), &valueBytes) &&
+            value && valueBytes >= sizeof("1.0t") && memcmp(value, "1.0t", sizeof("1.0t")) == 0;
+    };
+    if (VerQueryValueA(version.data(), "\\VarFileInfo\\Translation",
+            reinterpret_cast<void **>(&translations), &bytes) && translations)
+    {
+        for (UINT i = 0; i < bytes / sizeof(Translation); ++i)
+        {
+            char key[80] = {};
+            sprintf_s(key, "\\StringFileInfo\\%04x%04x\\ProductVersion", translations[i].language, translations[i].codepage);
+            if (supportedVersion(key)) return true;
+        }
     }
-    return false;
+    // Retail 1.0t has this string table but no VarFileInfo/Translation block.
+    // Keep both the exact version and callback-prefix requirements.
+    return supportedVersion("\\StringFileInfo\\040904E4\\ProductVersion");
 }
 
 

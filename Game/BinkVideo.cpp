@@ -6,6 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DCursor.h"
 #include "WorldClient.h"
 #include "SoundManager.h"
+#include "GeneralSettings.h"
 #include "Renderer.h"
 #include "dx11/RendererDX11.h"
 #include "MiniaudioOneShotSfx.h"
@@ -106,17 +107,24 @@ struct CBinkVideo::Player
         MiniaudioOneShotSfx::BeginBinkAudioMovie(name);
         auto set = reinterpret_cast<int (__stdcall *)(void *, uintptr_t)>(
             Symbol("_BinkSetSoundSystem@8", "BinkSetSoundSystem"));
-        auto sound = theWorld.GetSoundManager();
-        if (set && sound && MiniaudioOneShotSfx::IsSupportedBinkAudioAbi(reinterpret_cast<void *>(set)))
+        const char *reason = "audio_disabled";
+        if (theSettings.nAudio && set)
         {
-            MiniaudioOneShotSfx::PrepareNativeManager(sound);
-            void *adapter = MiniaudioOneShotSfx::GetBinkMiniaudioSystemOpen();
-            if (adapter && set(adapter, 0))
+            reason = "unsupported_bink_abi";
+            if (MiniaudioOneShotSfx::IsSupportedBinkAudioAbi(reinterpret_cast<void *>(set)))
             {
-                return 0;
+                // TrackOpen initializes the shared engine/device before any PCM
+                // is decoded. Video does not own or require a world manager.
+                reason = "adapter_unavailable";
+                void *adapter = MiniaudioOneShotSfx::GetBinkMiniaudioSystemOpen();
+                if (adapter && set(adapter, 0))
+                {
+                    return 0;
+                }
             }
         }
-        MiniaudioOneShotSfx::MuteBinkAudioMovie("adapter_unavailable");
+        else if (theSettings.nAudio) reason = "sound_system_export_missing";
+        MiniaudioOneShotSfx::MuteBinkAudioMovie(reason);
         SelectSilentAudioTrack();
         // BINKSNDTRACK applies the explicit disabled track selection.
         return 0x00004000u;
