@@ -506,7 +506,8 @@ BOOL CPlayerClient::PrsCreateMapobj()
         // NOTE: humans have assembled textures => compose and set their (assembled textures) names
         sprintf(pszPrimTexture, "mo%dp", pMO->GetID());
         sprintf(pszSecTexture, "mo%ds", pMO->GetID());
-        lpObject3DSpecific->LoadTextures(pszPrimTexture, pszSecTexture);
+        // These per-unit textures may not exist until NotifyItemsUpdated assembles them.
+        lpObject3DSpecific->LoadTextures(pszPrimTexture, pszSecTexture, FALSE);
     }
     else
     {

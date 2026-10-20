@@ -777,11 +777,14 @@ LPTEXTURE CI3DObject::AddTexture(LPCTSTR pszTexName, ETypeIDs eTextureTypeID, LP
     LPTEXTURE pTex = pTexMng->CreateTexture(eTextureTypeID, pszTexName);
     if (!pTex)
         return NULL;
-    BOOL bLoaded = FALSE;
-    if (!pszDir)
-        bLoaded = pTexMng->LoadTexture(pTex);
-    else
-        bLoaded = pTexMng->LoadTexture(pTex, pszDir);
+    BOOL bLoaded = pTex->CheckFlag(TEX_LOADED);
+    if (!bLoaded)
+    {
+        if (!pszDir)
+            bLoaded = pTexMng->LoadTexture(pTex);
+        else
+            bLoaded = pTexMng->LoadTexture(pTex, pszDir);
+    }
     if (bLoaded)
     {
         textures.Add(pTex);

@@ -58,7 +58,7 @@ public:
     // set interface function...
     void SetInterface(CRenderer *pNewRend);
     //
-    BOOL LoadTexture(LPTEXTURE lpTexture);
+    BOOL LoadTexture(LPTEXTURE lpTexture, BOOL bReportMissing = TRUE);
     BOOL LoadTexture(LPTEXTURE lpTexture, LPCSTR pszDirectoryName);
     BOOL LoadTextures();
     LPBYTE GetMMPData(LPCSTR pszMMPName);

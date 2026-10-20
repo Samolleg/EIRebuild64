@@ -1390,7 +1390,8 @@ BOOL CObject3DClientSpecific::RebindSecondaryTexture(LPCSTR name)
 // BOOL CObject3DClientSpecific::LoadTextures( LPCSTR pszPrimaryTextureName, pszSecondaryTextureName
 // ) load primary and secondary textures...
 BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
-                                           LPCSTR pszSecondaryTextureName)
+                                           LPCSTR pszSecondaryTextureName,
+                                           BOOL bReportMissing)
 {
     CTextureManager *lpTextureManager = (CTextureManager *)((CWorldClient *)GetWorld())
                                             ->GetTextureManager();
@@ -1427,7 +1428,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
                 if (lpTexture != NULL)
                 {
                     lpTexture->SetName(pszPrimaryTextureName);
-                    lpTextureManager->LoadTexture(lpTexture);
+                    lpTextureManager->LoadTexture(lpTexture, bReportMissing);
                 }
             }
         }
@@ -1449,7 +1450,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
             if (lpTexture != NULL)
             {
                 lpTexture->SetName(pszSecondaryTextureName);
-                lpTextureManager->LoadTexture(lpTexture);
+                lpTextureManager->LoadTexture(lpTexture, bReportMissing);
             }
         }
     }

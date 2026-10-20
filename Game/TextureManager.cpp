@@ -543,7 +543,7 @@ LPTEXTURE CTextureManager::GetShadowBuffer()
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // load texture in accordance with it's file name
-BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
+BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture, BOOL bReportMissing)
 {
     if (lpTexture == 0)
     {
@@ -648,8 +648,9 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture)
                             sourceName.c_str());
             if (file.Open(szString, CFile::modeRead) == FALSE)
             {
-                ReportWarning("CTextureManager::LoadTexture.\n Can't find texture \"%s\"\n",
-                              lpTexture->GetName());
+                if (bReportMissing)
+                    ReportWarning("CTextureManager::LoadTexture.\n Can't find texture \"%s\"\n",
+                                  lpTexture->GetName());
                 return privateAlias?FALSE:TRUE;
             }
             const DWORD pnt3DiskSize=static_cast<DWORD>(file.GetLength());

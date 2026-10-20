@@ -146,7 +146,8 @@ public:
     const CString &GetPrimaryTextureName() const { return szPrimaryTextureName; }
     const CString &GetSecondaryTextureName() const { return szSecondaryTextureName; }
     //
-    BOOL LoadTextures(LPCSTR pszPrimaryTextureName, LPCSTR pszSecondaryTextureName);
+    BOOL LoadTextures(LPCSTR pszPrimaryTextureName, LPCSTR pszSecondaryTextureName,
+                      BOOL bReportMissing = TRUE);
     void SetMaterials();
     void StepInvisibility(float fpTime);
     void SetAsVisible();
