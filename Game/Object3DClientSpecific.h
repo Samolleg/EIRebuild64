@@ -137,8 +137,8 @@ public:
     CTexture *AddNewTexture(ETypeIDs tidTextureTypeID);
     CTexture *FindTexture(ETypeIDs tidTextureTypeID);
     CTexture *ChangeTexture(CTexture *lpNewTexture);
-    BOOL RebindSecondaryTexture(LPCSTR name);
-    BOOL RebindPrimaryTexture(LPCSTR name);
+    BOOL RebindSecondaryTexture(LPCSTR name, BOOL bReportMissing = TRUE);
+    BOOL RebindPrimaryTexture(LPCSTR name, BOOL bReportMissing = TRUE);
     BOOL EnsurePrivatePrimaryAtlas(DWORD unitID);
     CMaterial *AddNewMaterial(ETypeIDs tidTextureTypeID, ETypeIDs tidMaterialTypeID);
     CMaterial *FindMaterial(ETypeIDs tidTextureTypeID, ETypeIDs tidMaterialTypeID);

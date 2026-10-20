@@ -50,7 +50,7 @@ inline bool Bool(CFileRegistry& reg,const char* section,const char* key,bool fal
     return reg.GetDWord(section,key,fallback?1u:0u)!=0;
 }
 inline float Float(CFileRegistry& reg,const char* section,const char* key,float fallback){
-    if(const auto p=reg.FindData(section,key,ERT_FLOAT)){float value;std::memcpy(&value,p,sizeof(value));return value;}
+    if(const auto p=reg.FindData(section,key,ERT_FLOAT,NULL,FALSE)){float value;std::memcpy(&value,p,sizeof(value));return value;}
     // The engine's general GetFloat casts DWORD through signed long. Native
     // addon GetFloat casts uint32_t; keep this adapter local to addon settings.
     if(const auto p=reg.FindData(section,key,ERT_DWORD)){DWORD value;std::memcpy(&value,p,sizeof(value));return float(value);}

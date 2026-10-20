@@ -1291,7 +1291,7 @@ BOOL CObject3DClientSpecific::IsCanSelect(const CRect &rect)
     return FALSE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CObject3DClientSpecific::RebindPrimaryTexture(LPCSTR name)
+BOOL CObject3DClientSpecific::RebindPrimaryTexture(LPCSTR name, BOOL bReportMissing)
 {
     CTexture* old=GetPrimaryTexture();
     if(!old || !name || !*name || old->GetTypeID()!=TTID_UNIT_MAIN)return FALSE;
@@ -1307,7 +1307,7 @@ BOOL CObject3DClientSpecific::RebindPrimaryTexture(LPCSTR name)
         },
         [&](CTexture* provider) {
             if(created)provider->SetName(name);
-            if(!provider->GetSurface() && !manager->LoadTexture(provider))return false;
+            if(!provider->GetSurface() && !manager->LoadTexture(provider, bReportMissing))return false;
             return provider->GetSurface()!=nullptr;
         },
         [&](CTexture* provider) {
@@ -1349,7 +1349,7 @@ BOOL CObject3DClientSpecific::EnsurePrivatePrimaryAtlas(DWORD unitID)
         [&](){return current->GetSurface()!=nullptr;},
         [&](const char* name){return RebindPrimaryTexture(name)!=FALSE;})?TRUE:FALSE;
 }
-BOOL CObject3DClientSpecific::RebindSecondaryTexture(LPCSTR name)
+BOOL CObject3DClientSpecific::RebindSecondaryTexture(LPCSTR name, BOOL bReportMissing)
 {
     CTexture* old=GetSecondaryTexture();
     if(!old || !name || !*name || old->GetTypeID()!=TTID_UNIT_WEAPON)return FALSE;
@@ -1368,7 +1368,7 @@ BOOL CObject3DClientSpecific::RebindSecondaryTexture(LPCSTR name)
         },
         [&](CTexture* provider) {
             if(created)provider->SetName(name);
-            if(!provider->GetSurface() && !manager->LoadTexture(provider))return false;
+            if(!provider->GetSurface() && !manager->LoadTexture(provider, bReportMissing))return false;
             return provider->GetSurface()!=nullptr; // LoadTexture can report TRUE without a surface.
         },
         [&](CTexture* provider) {
@@ -1414,7 +1414,8 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
         CString(pszPrimaryTextureName).CompareNoCase("none") != 0)
     {
         if(transactionalPrimary){
-            if(!RebindPrimaryTexture(pszPrimaryTextureName))return FALSE;
+            // Preserve the caller's quiet probe while the per-unit atlas is not assembled yet.
+            if(!RebindPrimaryTexture(pszPrimaryTextureName, bReportMissing))return FALSE;
         }else{
             lpTexture = GetPrimaryTexture();
             if (lpTexture)
@@ -1437,7 +1438,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
     if (pszSecondaryTextureName && *pszSecondaryTextureName &&
         CString(pszSecondaryTextureName).CompareNoCase("none") != 0)
     {
-        if(transactionalSecondary)return RebindSecondaryTexture(pszSecondaryTextureName);
+        if(transactionalSecondary)return RebindSecondaryTexture(pszSecondaryTextureName, bReportMissing);
         lpTexture = GetSecondaryTexture();
         if (lpTexture)
             lpTexture = lpTextureManager->FindTexture(lpTexture->GetTypeID(),
