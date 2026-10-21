@@ -675,7 +675,9 @@ bool CUnitServer::L0IsPlayingSuffer()
 {
     if (level0Animation.animations.GetSize() > 0)
     {
-        const SADEntry *pEntry = lpUnit->GetAnimationByIndex(level0Animation.GetStartId(0));
+        const DWORD startId = level0Animation.GetStartId(0);
+        if (startId == 0xffffffffu) return false;
+        const SADEntry *pEntry = lpUnit->GetAnimationByIndex(startId);
         if (pEntry && (pEntry->dwFlags & ADB_ACTIONS) == ADB_ACTION_SUFFER)
         {
             if (level0Animation.nStartSegment + pEntry->dwAnimationLength >
@@ -1212,7 +1214,9 @@ void CUnitServer::L1StartSpecialCycle(SL0AnimationSeq animation)
 static const char* AttackAnimationName(CUnit* unit, SL0AnimationSeq& animation)
 {
     if (animation.IsEmpty()) return nullptr;
-    const SADEntry* entry = unit->GetAnimationByIndex(animation.GetStartId(0));
+    const DWORD startId = animation.GetStartId(0);
+    if (startId == 0xffffffffu) return nullptr;
+    const SADEntry* entry = unit->GetAnimationByIndex(startId);
     return entry ? entry->pszAnimationName : nullptr;
 }
 
@@ -1226,7 +1230,9 @@ static bool UsesNativeOrdinaryImpact(CUnit* unit, const SUnitCommand& current, S
 {
     auto* mod = ModRuntime::Current();
     if (!mod || animation.IsEmpty()) return false;
-    const SADEntry* entry = unit->GetAnimationByIndex(animation.GetStartId(0));
+    const DWORD startId = animation.GetStartId(0);
+    if (startId == 0xffffffffu) return false;
+    const SADEntry* entry = unit->GetAnimationByIndex(startId);
     return ModAttackTiming::UsesImpactFrame(mod->CombatSetting("JMVAttacks") != 0,
         current.cmd == UC_ATTACK, ModSkills::Slot(current.dwParam) >= 0,
         entry ? entry->pszAnimationName : nullptr);
