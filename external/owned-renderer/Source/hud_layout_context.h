@@ -32,7 +32,7 @@ struct HudNativePanel {
 struct HudLayoutFrame {
     widescreen::Layout layout{};
     bool active=false;
-    std::array<HudNativePanel,10> panels{};
+    std::array<HudNativePanel,kHudPanels.size()> panels{};
 };
 class HudLayoutContext {
 public:
@@ -45,6 +45,7 @@ public:
     void set_hud_width(int value) noexcept;
     void set_hud_panels(const std::array<HudPanelSettings,7>& settings) noexcept;
     void set_message_panel(const MessagePanelSettings& settings) noexcept;
+    void set_quest_items(const QuestItemSettings& settings) noexcept;
     bool message_text_rect(RECT& placed,float& text_scale) noexcept;
     bool message_layout(MessageGeometry& geometry,float& text_scale) noexcept;
     void publish_message(HudNativePanel&& panel) noexcept;
@@ -56,6 +57,7 @@ public:
     bool editing=false;
     std::array<HudPanelSettings,7> g_hud_panels{};
     MessagePanelSettings g_message_panel{};
+    QuestItemSettings g_quest_items{};
     std::array<float,2> g_corner_scales{{100.f,100.f}};
     enum class DockSide { left,right,top,bottom,floating };
     struct HeaderLayout { HudPanelBounds panel,body,background; float left,top,width,height,scale; DockSide side; };
@@ -86,7 +88,7 @@ public:
     bool portrait_slot_composition(unsigned slot,const HudNativePanel* object,widescreen::HudComposition& h) noexcept;
     bool widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& frame) noexcept;
     void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames);
-    void set_hud_fades(const std::array<HudFadeSettings,10>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing,std::uint64_t now) noexcept;
+    void set_hud_fades(const std::array<HudFadeSettings,kHudPanels.size()>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing,std::uint64_t now) noexcept;
     void update_hud_fades(float mouse_x,float mouse_y,std::uint64_t now) noexcept;
     bool hud_hovered(HudPanel panel) const noexcept;
     float hud_opacity(HudPanel panel) const noexcept;
@@ -125,8 +127,8 @@ private:
         bool hovered=false;
         std::vector<std::uint64_t> native_values,content_values;
     };
-    std::array<FadeState,10> fades_{};
-    std::array<HudFadeSettings,10> fade_settings_{};
+    std::array<FadeState,kHudPanels.size()> fades_{};
+    std::array<HudFadeSettings,kHudPanels.size()> fade_settings_{};
     HudFadeTiming fade_timing_{};
     bool fade_lifetime_=false;
     void reset_fades(std::uint64_t now) noexcept;
@@ -139,6 +141,9 @@ private:
     void slot_dimensions(unsigned panel,unsigned slot,const HudNativePanel* object,float& width,float& height) const noexcept;
     RECT panel_source_rect(unsigned index,const HudNativePanel* object) const noexcept;
     float slide_fraction(HudPanel panel,const HudNativePanel* object) const noexcept;
+    RECT quest_area_rect(const HudNativePanel* object,unsigned slot) const noexcept;
+    bool quest_slot_bounds(unsigned slot,const HudNativePanel* object,HudPanelBounds& out) noexcept;
+    bool quest_group_bounds(const HudNativePanel* object,HudPanelBounds& out) noexcept;
 };
 // Used only by the embedded frontend. The context itself is platform-independent
 // apart from the RECT value type and is usable by either frontend or a headless test.

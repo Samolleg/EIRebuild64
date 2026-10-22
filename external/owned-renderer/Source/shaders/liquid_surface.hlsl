@@ -115,7 +115,7 @@ static const float3 liquidSurfAbsorb = float3(.9,.22,.14);        // per-channel
 static const float liquidSurfGlow = .35;                            // light through thin wave tops @param 0 1
 static const float3 liquidSurfFoamShadow = float3(.72,.8,.84);   // the darker foam edge, share of the water colour
 static const float liquidSurfFoamCut = 1.05;         // pattern + density where foam starts @param 0.8 1.6
-static const float2 liquidSurfFoamEdgeOffset = float2(.05,.05); // the darker edge's offset (foam cells) @param 0 .2
+static const float liquidSurfFoamEdgeWidth = .06; // the darker edge: how far below the foam cut it reaches @param 0 .2
 static const float liquidSurfFoamBubbles = .5;       // how dark the gaps between bubbles inside foam get @param 0 1
 static const float3 liquidSurfFoamWhite = float3(.92,.95,.94);    // foam thrown onto sand and rock
 // SSR quality/range, in world units. Fixed work budget is a quality setting.
@@ -869,8 +869,10 @@ float3 liquidSurfFoamPattern(float2 fp,float density,float t,float detail,uint q
  float present=lerp(emerge,1,level);
  float main=liquidSurfFoamClumps(fp+warp,t,fine)*present+level;
  float foam=smoothstep(liquidSurfFoamCut,liquidSurfFoamCut+soft,main);
- float offset=liquidSurfFoamClumps(fp+warp+liquidSurfFoamEdgeOffset,t,0)*present+level;
- float edge=saturate(smoothstep(liquidSurfFoamCut,liquidSurfFoamCut+soft,offset)-foam);
+ // The darker edge: a rim just outside the foam, from the same pattern at a
+ // lower cut (a second offset evaluation of the whole pattern cost about as
+ // much as the foam itself on open sea).
+ float edge=saturate(smoothstep(liquidSurfFoamCut-liquidSurfFoamEdgeWidth,liquidSurfFoamCut-liquidSurfFoamEdgeWidth+soft,main)-foam);
  float thick=saturate((main-liquidSurfFoamCut)*2);
  float bubbles=1;
  [branch]if(quality>0) {
@@ -926,14 +928,48 @@ float liquidSurfChop(float2 p,float seconds,uint count,float footprint) {
  }
  return h;
 }
-// Pixel stage: the chop's slope by forward differences, the step following
-// the footprint (finer near, coarser far).
+// liquidSurfOctave (x) with its gradient over uv (yz), through the warp, the
+// two waves, the rounding and the power.
+float3 liquidSurfOctaveGrad(float2 uv,float choppy,float2 phase) {
+ float3 n=liquidSurfNoiseGrad(uv*.6+phase*.05);
+ float2 dn=n.yz*.6*1.1; // d(warp)/d(uv), the same for both warped components
+ float2 w=uv+n.x*1.1;
+ const float2 dir=float2(.5,.8660254);
+ float sa=sin(w.x+phase.x),sb=sin(dot(w,dir)+phase.y);
+ float ra=sqrt(sa*sa+.02),rb=sqrt(sb*sb+.02);
+ float a=(1-ra)/.8586,b=(1-rb)/.8586,m=(a+b)*.5;
+ float o=pow(max(m,1e-4),choppy);
+ float dm=m>1e-4?choppy*o/m:0;
+ float2 dw=dm*.5*(-(sa/ra)*cos(w.x+phase.x)*float2(1,0)-(sb/rb)*cos(dot(w,dir)+phase.y)*dir)/.8586;
+ return float3(o,dw+dn*(dw.x+dw.y));
+}
+// Pixel stage: the chop height (x) and its slope (yz) in one pass, the
+// octaves differentiated analytically (each octave's coordinates are a
+// rotated and scaled copy of p). Forward differences evaluated the whole
+// chop three times per pixel (the largest share of the sea shading cost).
+float3 liquidSurfChopGrad(float2 p,float seconds,uint count,float footprint) {
+ float freq0=3.14159265/max(liquidSurfWaveParams.y*liquidSurfChopLength,.5),freq=freq0;
+ float amp=liquidSurfShapeParams.w*.5,choppy=max(liquidSurfWaveParams.w,1);
+ float omega=seconds*liquidSurfWaveParams.z*liquidSurfChopSpeed*freq0;
+ float2 uv=p*float2(.8,1);float2x2 m=float2x2(.8,0,0,1); // uv = m p
+ float3 h=0;
+ [loop]for(uint k=0;k<count;++k) {
+  float fade=liquidBandWeight(footprint*freq*.31830989);
+  [branch]if(fade<=0)break;
+  float mean=1/(1.26+.825*choppy+.665*choppy*choppy);
+  float w=omega*sqrt(freq/freq0)*(1+.13*k);
+  float3 o=liquidSurfOctaveGrad(uv*freq,choppy,float2(w,-.8*w))+liquidSurfOctaveGrad(uv*freq+float2(1.7,4.1),choppy,float2(-.9*w,w));
+  float s=amp*fade;
+  h.x+=(o.x-2*mean)*s;
+  h.yz+=mul(o.yz,m)*freq*s; // d/dp = (d/dq) * freq * m
+  uv=float2(uv.x*.8-uv.y*.6,uv.x*.6+uv.y*.8);
+  m=mul(float2x2(.8,-.6,.6,.8),m);
+  freq*=2.1;amp*=.27;choppy=lerp(choppy,1,.25);
+ }
+ return h;
+}
 float2 liquidSurfChopSlope(float2 p,float seconds,uint count,float footprint) {
- float eps=clamp(footprint*.75,.03,.6);
- float h0=liquidSurfChop(p,seconds,count,footprint);
- float hx=liquidSurfChop(p+float2(eps,0),seconds,count,footprint);
- float hy=liquidSurfChop(p+float2(0,eps),seconds,count,footprint);
- return float2(hx-h0,hy-h0)/eps;
+ return liquidSurfChopGrad(p,seconds,count,footprint).yz;
 }
 // Share of the chop: full on open water, calmer in the breaking shallows
 // (the swell carries the shore there) and none at the waterline; at a steep
@@ -1383,6 +1419,7 @@ static const float liquidRoughness = .12; // GGX alpha of the former Blinn-Phong
 static const float liquidPhysicalF0 = .02; // water at normal incidence
 static const float liquidRefractionIndex = 1.33;
 static const float liquidRefractionDepth = 3; // world units of bed parallax at most @param 0 10
+static const float liquidRefractionShift = .08; // largest refraction shift on screen (fraction of its height) @param 0 0.15
 // Per-channel absorption: the authored tint's strongest channel travels
 // furthest; weaker channels are absorbed up to 1.4x liquidAbsorption.
 static const float2 liquidChannelAbsorption = float2(.6,.8); // base, extra for weak channels
@@ -1430,12 +1467,18 @@ float3 liquidScenePoint(int2 pixel,float z) {
  return p.xyz/(abs(p.w)>1e-6?p.w:1e-6);
 }
 // Water depth over the bed averaged over about 1.5 m (this pixel and eight
-// snapshot reads on a ring, rotated per pixel), dry ground counting as 0;
+// snapshot reads on a ring, rotated per pixel), a dry beach counting as 0;
 // without the snapshot (Low path, the half-resolution pass) the vertex
 // depth. Shipped beds step from flat shallows straight down a tile edge,
 // and the shallow look taken from the exact depth drew those square steps
 // as hard white-edged blocks (save1144 sandbar).
 static const float liquidBedSmoothReach = 1.5; // m @param 0.3 4
+// Snapshot points standing more than this above the surface are not the bed
+// beside the water but something in front of it (a character, tree or cliff):
+// counted as dry ground they lit a pale shallow halo around every figure
+// standing in water. They are skipped; a beach just above the line still
+// counts as 0.
+static const float liquidBedSmoothDry = .5; // m @param 0.1 2
 float liquidSmoothBedDepth(float2 pixel,float3 position,float vertexDepth,float footprint) {
  [branch]if(liquidLowPath||liquidReflectionTarget.z<.5)return max(vertexDepth,0);
  int2 last=int2(liquidReflectionTarget.xy)-1;
@@ -1446,7 +1489,9 @@ float liquidSmoothBedDepth(float2 pixel,float3 position,float vertexDepth,float 
   float a=turn+k*.7853982,r=k==0?0:reach*(k&1?1:.55);
   int2 q=clamp(int2(pixel+float2(cos(a),sin(a))*r),int2(0,0),last);
   float z=liquidSceneDepth.Load(int3(q,0));
-  if(z<1){sum+=max(position.z-liquidScenePoint(q,z).z,0);++count;}
+  if(z>=1)continue;
+  float d=position.z-liquidScenePoint(q,z).z;
+  if(d>=-liquidBedSmoothDry){sum+=max(d,0);++count;}
  }
  return count>0?sum/count:max(vertexDepth,0);
 }
@@ -1534,6 +1579,29 @@ struct LiquidSurfaceInput {
  float edge; // liquid-tile field: ~1 inside, .5 on the liquid's outline (liquidTileField)
  uint layer; // 0: water body pass, 1: foam layer pass
 };
+// Depth below the water surface z of the snapshot point a refracted ray point
+// p projects onto (uv); negative on sky, above the surface or off screen.
+// clear: the share of eight neighbours (spread px and 0.43 of it away, spread
+// at least 7) not standing above the surface. A sample near a figure blends
+// toward this pixel's own bed by it: a figure's soft edge (hair, cloth)
+// blends its colour into pixels whose
+// depth is still the bed, and the hard switch to the own bed at the figure
+// drew a thin outline above its head. Underwater neighbours (weed) do not
+// count, or every blade would fail the depth test against the ray.
+float liquidRefractionHit(float3 p,float surface,float spread,out float2 uv,out float clear) {
+ clear=0;
+ if(!liquidProject(p,uv))return -1;
+ int2 q=int2(uv*liquidReflectionTarget.xy),last=int2(liquidReflectionTarget.xy)-1;
+ float z=liquidSceneDepth.Load(int3(q,0));
+ float hit=z<1?surface-liquidScenePoint(q,z).z:-1;
+ static const float2 around[8]={float2(1,0),float2(-1,0),float2(0,1),float2(0,-1),float2(.43,0),float2(-.43,0),float2(0,.43),float2(0,-.43)};
+ [unroll]for(uint k=0;k<8;++k) {
+  int2 r=clamp(q+int2(around[k]*max(spread,7)),int2(0,0),last);
+  float zr=liquidSceneDepth.Load(int3(r,0));
+  clear+=zr<1&&liquidScenePoint(r,zr).z>surface?0:.125;
+ }
+ return hit;
+}
 // Scene behind the surface along the Snell-refracted ray (rgb) and the view
 // path through the water measured against the opaque depth snapshot (a).
 float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
@@ -1541,19 +1609,50 @@ float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
  float z=liquidSceneDepth.Load(int3(pixel,0));
  float vertical=max(i.depth,0),path=vertical/max(v.z,.2); // sky behind: authored depth
  if(z<1) {
-  float3 bed=liquidScenePoint(pixel,z);
-  vertical=max(i.position.z-bed.z,0);
-  // Absorption and opacity take the smoothed bed depth (liquidBedSmooth);
-  // the refraction reach keeps this pixel's own depth.
+  // Absorption, opacity and the refraction reach take the smoothed bed depth
+  // (liquidBedSmooth): from this pixel's own depth the shift jumped wherever
+  // that depth did (a weed blade over the bed), breaking the bed into
+  // shards with see-through outlines (user, 8% shift cap).
   path=liquidBedSmooth/max(v.z,.2);
+  vertical=liquidBedSmooth;
  }
  float2 uv=(float2(pixel)+.5)/liquidReflectionTarget.xy,refracted;
  float3 t=refract(-v,n,1/liquidRefractionIndex);
  float reach=min(vertical,liquidRefractionDepth)/max(-t.z,.25);
- if(t.z<0&&liquidProject(i.position+t*reach,refracted)) {
-  // Keep only samples below the surface: above-water geometry must not leak in.
-  float refractedZ=liquidSceneDepth.Load(int3(int2(refracted*liquidReflectionTarget.xy),0));
-  if(refractedZ<1&&liquidScenePoint(int2(refracted*liquidReflectionTarget.xy),refractedZ).z<i.position.z)uv=refracted;
+ // A sample counts only where what it shows lies below the surface: above-
+ // water geometry (a figure's head and torso) must not leak in. The bed
+ // shifts by the smoothed reach; anything shallower by its own depth (below).
+ // A failed sample
+ // keeps this pixel's own bed, and one beside a figure blends toward it
+ // (liquidRefractionHit clear), so no figure-shaped seam or ghost shows
+ // (user F11s, save1150).
+ // Near the screen edge the reach shrinks so the sample lands at most halfway
+ // to the edge: rays leaving the screen fell back to this pixel's own bed (or
+ // stretched the last rows) in hard bands along the bottom of the screen.
+ [branch]if(t.z<0) {
+  float2 full;liquidProject(i.position+t*reach,full);
+  float2 shift=full-uv,need=abs(shift),room=shift>0?1-uv:uv;
+  float edge=min(need.x>1e-6?room.x/need.x:1e6,need.y>1e-6?room.y/need.y:1e6);
+  // The shift on screen stays under liquidRefractionShift of the screen
+  // height: the bed behind a figure is hidden from the camera, so the patch a
+  // full bed parallax (130-170 px at 4K in deep water) needed there showed as
+  // a smeared figure-shaped ghost whatever filled it.
+  float shiftHeight=length(shift*float2(liquidReflectionTarget.x/liquidReflectionTarget.y,1));
+  float scale=min(saturate(edge*.5),liquidRefractionShift/max(shiftHeight,1e-6));reach*=scale;
+  // The blend reaches about a third of the shift, so the seam to the own bed
+  // stays soft at any shift length.
+  float spread=shiftHeight*scale*liquidReflectionTarget.y*.35;
+  float clear;float hit=liquidRefractionHit(i.position+t*reach,i.position.z,spread,refracted,clear);
+  // Something shallower than the ray point (a figure's legs, a weed blade)
+  // shifts only as far as its own depth: the bed's full reach drew a
+  // figure's submerged legs as a larger copy behind it (user, save1150).
+  float rayDepth=reach*-t.z;
+  [branch]if(hit>0&&hit<rayDepth*.9)
+   hit=liquidRefractionHit(i.position+t*(hit/max(-t.z,.25)),i.position.z,spread,refracted,clear);
+  float3 own=liquidSceneColor.SampleLevel(liquidSceneSampler,float3(uv,0),0).rgb;
+  [branch]if(hit>0&&clear>0)
+   return float4(lerp(own,liquidSceneColor.SampleLevel(liquidSceneSampler,float3(refracted,0),0).rgb,clear),path);
+  return float4(own,path);
  }
  return float4(liquidSceneColor.SampleLevel(liquidSceneSampler,float3(uv,0),0).rgb,path);
 }
@@ -1748,6 +1847,18 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  // A lifted pit (impact funnel) lies flat: its authored slope no longer runs.
  float pit=smoothstep(0,.6,i.fill);
  i.current*=1-pit;
+#ifdef NATIVE_LIQUID_SSR_INPUT
+ // Reflection quality below high (under 40 march steps): the half-resolution
+ // rays take the flat flow normal, without the ripple, chop and surf shading
+ // that otherwise ran here only to bend them (about 0.7 ms of the 1.1 ms
+ // reflection pass on the gipat1 sea at 4K). Reflections ripple less there.
+ [branch]if(liquidReflectionQuality.x<40) {
+  float3 view=liquidSafeNormal(i.viewDirection),flat=reflect(-view,liquidSafeNormal(float3(i.current,1)));
+  liquidSsrRayOut=float4(flat,dot(view,flat));
+  liquidSsrPlaceOut=float4(i.position,liquidSsrAllowed(i.selfIllumination)?liquidSsrSpread/max(i.footprint,1e-4):0);
+  return 0;
+ }
+#endif
  float windLength=length(i.windDirection);
  float2 along=windLength>1e-6?i.windDirection/windLength:float2(0,1);
  // On the sea the small waves drift with the swell toward the shore, not
@@ -2078,7 +2189,7 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
   // metres wide, broken along the crest by slow noise (never a ruled line).
   float breaking=surfSwell.breaking*surfSwell.wave*(surfSwell.front*smoothstep(.6,.95,surfSwell.crest)*.6+
                  (surfSwell.behind>0?(1-smoothstep(0,.6,surfSwell.behind)):0));
-  breaking*=smoothstep(.15,.65,liquidSurfNoise3(float3(i.position.xy/max(liquidSurfShapeParams.y*.35,2),t*.05+surfSwell.seed*7))+.15);
+  [branch]if(breaking>0)breaking*=smoothstep(.15,.65,liquidSurfNoise3(float3(i.position.xy/max(liquidSurfShapeParams.y*.35,2),t*.05+surfSwell.seed*7))+.15);
   // Steep shores: each arriving crest bursts white off the rock and falls
   // back into churned foam drifting off it.
   float burst=0;
@@ -2092,7 +2203,7 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
   // shape (not the chop, whose fine slope filters away with distance), so
   // they read from the game camera's distance.
   float forming=surfSwell.wave*smoothstep(.7,.96,surfSwell.crest)*(1-surfSwell.breaking)*(.35+.65*liquidSurfSwellDir.w);
-  forming*=smoothstep(.45,.75,liquidSurfNoise3(float3(i.position.xy/max(liquidSurfShapeParams.y*.5,3),t*.04+surfSwell.seed*5)));
+  [branch]if(forming>0)forming*=smoothstep(.45,.75,liquidSurfNoise3(float3(i.position.xy/max(liquidSurfShapeParams.y*.5,3),t*.04+surfSwell.seed*5)));
   float density=saturate(shoreFoam+crestFoam+forming*.8+breaking*1.3+burst)*surf;
   float2 fp=i.position.xy/cell; // no per-crest reseed here: it would pop the shore foam as each crest arrives
   float3 pattern=liquidSurfFoamPattern(fp,density,t,surfDetail,quality,i.footprint/cell);

@@ -203,10 +203,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     CRITTER_TYPE_ROW(5), CRITTER_TYPE_ROW(6), CRITTER_TYPE_ROW(7), CRITTER_TYPE_ROW(8), CRITTER_TYPE_ROW(9),
     CRITTER_TYPE_ROW(10), CRITTER_TYPE_ROW(11), CRITTER_TYPE_ROW(12), CRITTER_TYPE_ROW(13), CRITTER_TYPE_ROW(14),
 #undef CRITTER_TYPE_ROW
-    // Interface & Cursor
-    {"ui_language", kCategories[8], "Menu language",
-     "Language of these settings and the renderer's other menus. Auto picks Russian on a Russian Windows.",
-     kUiLanguageChoices, false, {0, 0, 0, 0}},
+    // Interface & Cursor (the menu language has its own section at the top)
     {"hud_fade_duration", kCategories[8], "HUD fade-out duration (ms)",
      "Shared fade-out duration for every widget after the idle delay. 0 fades instantly.", nullptr, false, {}},
     {"hud_fade_in_duration", kCategories[8], "HUD fade-in duration (ms)",

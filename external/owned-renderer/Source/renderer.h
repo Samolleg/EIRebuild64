@@ -28,6 +28,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <functional>
 #include <future>
 #include <string>
 #include <type_traits>
@@ -1028,6 +1029,14 @@ public:
     // fogged on the GPU in the stock draw order, at the call's stream position.
     HRESULT draw_game_particles(const GameParticleView& view, const FixedState& state,
                                 SurfaceImage* texture);
+    // The selection marker and terrain prints are held until every liquid of
+    // the world pass has drawn (flushed in present before AO), so the water's
+    // scene copy does not hold them and they do not refract (user 2026-10-19).
+    HRESULT draw_game_selection_held(const GameSelectionView& view, const FixedState& state,
+                                     std::shared_ptr<SurfaceImage> texture);
+    HRESULT draw_game_print_run_held(std::vector<GameParticleGpu> vertices, const std::array<float, 16>& object_to_clip,
+                                     float clip_half_width, float clip_half_height, const FixedState& state,
+                                     std::shared_ptr<SurfaceImage> texture);
     // Game lightning ribbons (game_particles.h): the stock screen-space strip
     // expanded on the GPU at the call's stream position.
     HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
@@ -1089,13 +1098,16 @@ public:
         const RECT* source_rect);
     // Output pixels per surface pixel that owned text drawn now will be
     // composed at (the current HUD composition times output/canvas), so its
-    // glyphs can be rasterized at that size. Game thread. 1 when the axes
-    // differ; the queue then draws the stock-size glyphs as before.
+    // glyphs can be rasterized at that size. Game thread. Output sizes whose
+    // canvas rounds unevenly (e.g. 2000x1125) differ between the axes by a
+    // hair; they rasterize at the vertical scale, so glyphs still land near
+    // 1:1 (falling back to stock-size glyphs scaled one by one made letter
+    // heights jump, #185). 1 when the axes genuinely differ.
     float owned_text_raster_scale() const noexcept {
         const auto& h = widescreen::interface_owned ? widescreen::hud_blit : widescreen::HudComposition{};
         const float sx = float(output_width_) / float(canvas_width()), sy = float(output_height_) / float(canvas_height());
         const float x = h.scale * sx, y = h.scale_y * sy;
-        return std::fabs(x - y) <= 1e-4f * x ? x : 1.0f;
+        return std::fabs(x - y) <= .01f * y ? y : 1.0f;
     }
     HRESULT capture(SurfaceImage& destination, const RECT& destination_rect,
                     const RECT& source_rect);
@@ -2529,6 +2541,7 @@ private:
     ComPtr<ID3D11Texture2D> water_scene_color_;
     ComPtr<ID3D11ShaderResourceView> water_scene_srv_;
     ComPtr<ID3D11Texture2D> water_scene_depth_;ComPtr<ID3D11ShaderResourceView> water_scene_depth_srv_;
+    ComPtr<ID3D11DepthStencilView> water_scene_dsv_; // the pre-water depth copy, for ground marks drawn after the water
     ComPtr<ID3D11Buffer> water_reflection_constants_;
     ComPtr<ID3D11Buffer> liquid_ripple_constants_;
     std::uint64_t liquid_ripple_frame_ = UINT64_MAX;
@@ -3020,6 +3033,8 @@ private:
     std::uint64_t water_capture_frame_ = UINT64_MAX;
     bool water_capture_ready_ = false, water_failure_reported_ = false;
     bool water_late_draw_reported_ = false; // opaque world draw after the water copy (probe event, once)
+    std::vector<std::function<HRESULT()>> deferred_ground_marks_; // draw_game_selection_held, draw_game_print_run_held
+    bool drawing_ground_marks_ = false;
     HRESULT create_water_reflection_targets();
     // Half-resolution water reflection targets: 0 rays, 1 water points (the
     // liquid input pass), 2 traced colour, 3 key (the march), 4 filtered

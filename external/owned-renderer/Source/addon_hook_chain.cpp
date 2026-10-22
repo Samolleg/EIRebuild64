@@ -86,6 +86,10 @@ static OwnedEntryResolver g_owned_entry_resolver = nullptr;
 
 void set_owned_entry_resolver(OwnedEntryResolver resolver) noexcept { g_owned_entry_resolver = resolver; }
 
+static ObserverEntryCheck g_observer_entry_check = nullptr;
+
+void set_observer_entry_check(ObserverEntryCheck check) noexcept { g_observer_entry_check = check; }
+
 bool addon_module_contains(const void* address) noexcept {
     HMODULE module = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -97,6 +101,26 @@ bool addon_module_contains(const void* address) noexcept {
     if (!length || length >= MAX_PATH) return false;
     const wchar_t* name = wcsrchr(path, L'\\');
     return _wcsicmp(name ? name + 1 : path, L"addon.dll") == 0;
+}
+
+const std::uint8_t* raw_replacement_target(const std::uint8_t* entry, wchar_t* module_name,
+                                           std::size_t name_chars) noexcept {
+    std::uint8_t bytes[5]{};
+    if (!entry || !readable_copy(bytes, entry, sizeof(bytes)) || bytes[0] != 0xe9) return nullptr;
+    const std::uint8_t* target = relative_target(entry, bytes);
+    HMODULE module = nullptr, self = nullptr;
+    constexpr DWORD flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    if (!GetModuleHandleExW(flags, reinterpret_cast<LPCWSTR>(target), &module) ||
+        !GetModuleHandleExW(flags, reinterpret_cast<LPCWSTR>(&raw_replacement_target), &self) ||
+        module == GetModuleHandleW(nullptr) || module == self)
+        return nullptr;
+    if (module_name && name_chars) {
+        wchar_t path[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+        const wchar_t* name = length && length < MAX_PATH ? wcsrchr(path, L'\\') : nullptr;
+        wcsncpy_s(module_name, name_chars, name ? name + 1 : L"unknown", _TRUNCATE);
+    }
+    return target;
 }
 
 EntryResolution resolve_entry_owner(const std::uint8_t* entry,
@@ -135,6 +159,17 @@ EntryResolution resolve_entry_owner(const std::uint8_t* entry,
     Convention convention = Convention::stack;
     const std::uint8_t* callback = parse_dispatcher(dispatcher, convention);
     if (!callback) {
+        // An observe-only entry forwards to another module's replacement
+        // exactly as the game's callers would (set_observer_entry_check).
+        wchar_t module[64]{};
+        if (g_observer_entry_check && raw_replacement_target(entry, module, 64) == dispatcher &&
+            g_observer_entry_check(entry, dispatcher, module)) {
+            result.owner = EntryOwner::framework_chain;
+            result.dispatcher = dispatcher;
+            result.addon_patch_bytes = 5;
+            result.reason = nullptr;
+            return result;
+        }
         result.reason = "raw_replacement";
         return result;
     }

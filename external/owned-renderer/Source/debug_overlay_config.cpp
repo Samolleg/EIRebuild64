@@ -80,6 +80,24 @@ bool parse_float(const char* value, float& result) {
     return true;
 }
 
+bool read_text_file(const wchar_t* path, std::string& text, bool& missing) {
+    missing = false;
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) { missing = GetLastError() == ERROR_FILE_NOT_FOUND; return false; }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > kMaximumConfigBytes) {
+        CloseHandle(file);
+        return false;
+    }
+    text.assign(static_cast<std::size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    const bool read_ok = text.empty() ||
+        (ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr) && read == text.size());
+    CloseHandle(file);
+    return read_ok;
+}
+
 bool write_all(HANDLE file, const char* data, std::size_t size) {
     while (size) {
         const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(size, 1024u * 1024u));
@@ -91,7 +109,47 @@ bool write_all(HANDLE file, const char* data, std::size_t size) {
     return true;
 }
 
+// Write-flush-atomic-replace.
+bool write_text_file(const wchar_t* path, const std::string& text) {
+    const std::wstring temporary = std::wstring(path) + L".tmp";
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    const bool wrote = write_all(file, text.data(), text.size());
+    const bool flushed = wrote && FlushFileBuffers(file) != FALSE;
+    CloseHandle(file);
+    if (!flushed || !MoveFileExW(temporary.c_str(), path,
+                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+bool interface_profile_option(const RendererOption& option) noexcept {
+    return option.group == "HUD layout" || option.group == "Interface";
+}
+
+std::wstring interface_profiles_directory() {
+    std::wstring path = renderer_config_path();
+    const auto slash = path.find_last_of(L'\\');
+    path.erase(slash == std::wstring::npos ? 0 : slash + 1);
+#ifdef EID3D11_EMBEDDED
+    return path + L"rddraw_profiles";
+#else
+    return path + L"eid3d11_profiles";
+#endif
+}
+
+const char* interface_profiles_help() noexcept {
+#ifdef EID3D11_EMBEDDED
+    return "Profiles are files in rddraw_profiles next to EIRebuild.exe. Share one by sending its .ini; copy a received one there and pick it here.";
+#else
+    return "Profiles are files in eid3d11_profiles next to ddraw.dll. Share one by sending its .ini; copy a received one there and pick it here.";
+#endif
+}
 
 std::wstring renderer_config_path() {
 #ifdef EID3D11_EMBEDDED
@@ -375,20 +433,8 @@ bool RendererConfig::reset_to_default(const char* key) noexcept {
 
 bool RendererConfig::load(const wchar_t* path) {
     if (!path || !*path) return false;
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > kMaximumConfigBytes) {
-        CloseHandle(file);
-        return false;
-    }
-    std::string text(static_cast<std::size_t>(size.QuadPart), '\0');
-    DWORD read = 0;
-    const bool read_ok = text.empty() ||
-        (ReadFile(file, text.data(), static_cast<DWORD>(text.size()), &read, nullptr) && read == text.size());
-    CloseHandle(file);
-    if (!read_ok) return false;
+    std::string text;bool missing = false;
+    if (!read_text_file(path, text, missing)) return missing;
 
     std::string section;
     std::size_t offset = 0;
@@ -446,32 +492,56 @@ bool RendererConfig::load(const wchar_t* path) {
         }
         if (_stricmp(section.c_str(), "graphics") != 0) continue;
         auto* option = find_mutable(key.c_str());
-        if (!option) continue;
-        switch (option->type) {
-        case RendererOptionType::text:
-            if (value.size() <= 1023) option->text_value = value;
-            break;
-        case RendererOptionType::boolean: {
-            bool parsed = false;
-            if (parse_boolean(value.c_str(), parsed)) option->boolean_value = parsed;
-            break;
-        }
-        case RendererOptionType::integer: {
-            int parsed = 0;
-            if (parse_integer(value.c_str(), parsed))
-                option->integer_value = std::clamp(parsed, option->integer_minimum, option->integer_maximum);
-            break;
-        }
-        case RendererOptionType::floating_point: {
-            float parsed = 0.0f;
-            if (parse_float(value.c_str(), parsed))
-                option->floating_value = std::clamp(parsed, option->floating_minimum,
-                                                   option->floating_maximum);
-            break;
-        }
-        }
+        if (option) apply_value(*option, value);
     }
     dirty_ = false;
+    return true;
+}
+
+void RendererConfig::apply_value(RendererOption& option, const std::string& value) {
+    switch (option.type) {
+    case RendererOptionType::text:
+        if (value.size() <= 1023) option.text_value = value;
+        break;
+    case RendererOptionType::boolean: {
+        bool parsed = false;
+        if (parse_boolean(value.c_str(), parsed)) option.boolean_value = parsed;
+        break;
+    }
+    case RendererOptionType::integer: {
+        int parsed = 0;
+        if (parse_integer(value.c_str(), parsed))
+            option.integer_value = std::clamp(parsed, option.integer_minimum, option.integer_maximum);
+        break;
+    }
+    case RendererOptionType::floating_point: {
+        float parsed = 0.0f;
+        if (parse_float(value.c_str(), parsed))
+            option.floating_value = std::clamp(parsed, option.floating_minimum, option.floating_maximum);
+        break;
+    }
+    }
+}
+
+bool RendererConfig::load_interface_profile(const wchar_t* path) {
+    if (!path || !*path) return false;
+    std::string text;bool missing = false;
+    if (!read_text_file(path, text, missing)) return false;
+    std::size_t offset = 0;
+    while (offset <= text.size()) {
+        const std::size_t end = text.find('\n', offset);
+        const std::string line = trim(std::string_view(text).substr(
+            offset, end == std::string::npos ? text.size() - offset : end - offset));
+        offset = end == std::string::npos ? text.size() + 1 : end + 1;
+        if (line.empty() || line.front() == ';' || line.front() == '#' || line.front() == '[') continue;
+        const auto equals = line.find('=');
+        if (equals == std::string::npos) continue;
+        auto* option = find_mutable(trim(std::string_view(line).substr(0, equals)).c_str());
+        if (option && interface_profile_option(*option)) {
+            apply_value(*option, trim(std::string_view(line).substr(equals + 1)));
+            dirty_ = true;
+        }
+    }
     return true;
 }
 
@@ -510,19 +580,30 @@ bool RendererConfig::save(const wchar_t* path) const {
         text += "\r\n";
     }
 
-    const std::wstring temporary = std::wstring(path) + L".tmp";
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    const bool wrote = write_all(file, text.data(), text.size());
-    const bool flushed = wrote && FlushFileBuffers(file) != FALSE;
-    CloseHandle(file);
-    if (!flushed || !MoveFileExW(temporary.c_str(), path,
-                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(temporary.c_str());
-        return false;
+    return write_text_file(path, text);
+}
+
+bool RendererConfig::save_interface_profile(const wchar_t* path) const {
+    if (!path || !*path) return false;
+    std::string text = "; EID3D11 interface profile (HUD layout).\r\n; ";
+    text += interface_profiles_help();
+    text += "\r\n[interface]\r\n";
+    for (const auto& option : options_) {
+        if (!interface_profile_option(option)) continue;
+        text += option.key;
+        text.push_back('=');
+        char value[64]{};
+        switch (option.type) {
+        case RendererOptionType::text: text += option.text_value; break;
+        case RendererOptionType::boolean: text += option.boolean_value ? "true" : "false"; break;
+        case RendererOptionType::integer:
+            std::snprintf(value, sizeof(value), "%d", option.integer_value);text += value;break;
+        case RendererOptionType::floating_point:
+            std::snprintf(value, sizeof(value), "%.9g", static_cast<double>(option.floating_value));text += value;break;
+        }
+        text += "\r\n";
     }
-    return true;
+    return write_text_file(path, text);
 }
 
 } // namespace owned

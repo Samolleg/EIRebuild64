@@ -37,18 +37,20 @@ void widescreen_set_ui_scale(int percent) noexcept;
 // Match the established 500 m addon landscape admission, growing with owned
 // draw distance. Native decorative phase/streaming publication stays intact.
 void widescreen_set_landscape_radius(float draw_distance) noexcept;
-enum class HudPanel : unsigned { spells, abilities, minimap, character_info, portraits, weapons, items, messages, stance, game_speed, count };
+// quest_items: slots 4-7 of the game's items panel (quest items, main hero
+// only), laid out as their own widget; they have no game object of their own.
+enum class HudPanel : unsigned { spells, abilities, minimap, character_info, portraits, weapons, items, messages, quest_items, stance, game_speed, count };
 struct HudPanelDescription { const char* key; const char* label; };
-inline constexpr std::array<HudPanelDescription, 10> kHudPanels{{
+inline constexpr std::array<HudPanelDescription, 11> kHudPanels{{
     {"spell_bar", "Spell bar"}, {"ability_bar", "Ability bar"}, {"minimap", "Minimap"},
     {"character_info", "Character info"}, {"portraits", "Character portraits"},
     {"weapon_switcher", "Weapon switcher"}, {"quick_items", "Quick items"},
-    {"message_panel", "Loot and quest messages"},
+    {"message_panel", "Loot and quest messages"}, {"quest_items", "Quest items"},
     {"stance", "Current stance"}, {"game_speed", "Game speed and time"}
 }};
 struct HudFadeSettings {bool enabled=false;float transparency_percent=80.f;};
 struct HudFadeTiming {int out_ms=250,in_ms=250,idle_ms=2000;};
-void widescreen_set_hud_fades(const std::array<HudFadeSettings,10>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing) noexcept;
+void widescreen_set_hud_fades(const std::array<HudFadeSettings,kHudPanels.size()>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing) noexcept;
 void widescreen_update_hud_fades(float mouse_x,float mouse_y) noexcept;
 bool widescreen_hud_hovered(HudPanel panel) noexcept;
 bool widescreen_hud_fade_enabled(HudPanel panel) noexcept;
@@ -69,7 +71,7 @@ struct HudPanelSettings {
     int buttons_side=0;
     int direction=0;
     float padding=0.f;
-    float border_padding=7.f;
+    float border_padding=3.f;
     bool preview=false;
     unsigned preview_count=3;
     // Slot bars wrap into a further column (vertical) or row (horizontal)
@@ -90,6 +92,10 @@ void widescreen_hud_preview_slots(HudPanel panel,std::vector<HudPreviewSlot>& sl
 void widescreen_apply_hud_figure_layout(const void* figure) noexcept;
 bool widescreen_hud_header_bounds(HudPanel panel,HudPanelBounds& bounds) noexcept;
 void widescreen_set_hud_panels(const std::array<HudPanelSettings, 7>& settings) noexcept;
+// Quest items (HudPanel::quest_items): x/y -1 keeps the stock position; the
+// slots keep the stock layout of the items panel's areas 4-7.
+struct QuestItemSettings { float scale_percent=100.f, x_percent=-1.f, y_percent=-1.f; };
+void widescreen_set_quest_items(const QuestItemSettings& settings) noexcept;
 bool widescreen_hud_panel_bounds(HudPanel panel, HudPanelBounds& bounds) noexcept;
 void widescreen_hud_position_percent(HudPanel panel,float left,float top,float width,float height,float& x,float& y) noexcept;
 struct HudAssetFrame { HudPanelBounds bounds; float thickness=0.f; unsigned edges=15; bool portrait=false; float opacity=1.f; };
@@ -106,7 +112,7 @@ struct MessagePanelSettings {
     float text_scale_percent = 100.f;
     float buttons_scale_percent=100.f;
     int buttons_side=0;
-    float border_padding=7.f;
+    float border_padding=3.f;
 };
 struct MessagePanelBounds { float left = 0, top = 0, width = 0, height = 0; };
 // Owned dimensions/reflow and uniform composition; native text/mode/slide time remain authoritative.

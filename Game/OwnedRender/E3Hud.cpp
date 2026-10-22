@@ -23,7 +23,7 @@
 #include "../WideScreen.h"
 
 namespace {
-std::array<const CI3DObject*,10> inputOwners{};
+std::array<const CI3DObject*,owned::kHudPanels.size()> inputOwners{};
 std::array<int,8> itemFigures{};
 int cameraSlot=-1;
 const CI3DObject* messageTextOwner=nullptr;
@@ -78,7 +78,7 @@ struct E3HudAccess {
         if(!tip || tip->surfaces.GetSize()!=1 || !tip->surfaces[0])return false;
         auto* surface=tip->surfaces[0];
         bool isClock=false;
-        const auto* clock=inputOwners[9];
+        const auto* clock=inputOwners[unsigned(owned::HudPanel::game_speed)];
         if(clock && OwnedRender::E3HudRendererAttached() && clock->bVisible)
             for(int i=0;i<clock->areas.GetSize();++i)
                 if(clock->areas[i] && clock->areas[i]->pTip==tip){isClock=true;break;}
@@ -350,10 +350,10 @@ struct E3HudAccess {
                 p[6].activity_values.insert(p[6].activity_values.end(),{std::uint64_t(int(item->GetMP())),std::uint64_t(int(item->GetMaxMP()))});
             else p[6].activity_values.insert(p[6].activity_values.end(),{0,0});
         }
-        p[8].activity_values={std::uint64_t(mission->pCommands->nMode),std::uint64_t(mission->pCommands->nAggr)};
-        p[9].activity_values={std::uint64_t(mission->pClock->nMode),std::uint64_t(mission->pClock->bNewObj)};
+        p[unsigned(owned::HudPanel::stance)].activity_values={std::uint64_t(mission->pCommands->nMode),std::uint64_t(mission->pCommands->nAggr)};
+        p[unsigned(owned::HudPanel::game_speed)].activity_values={std::uint64_t(mission->pClock->nMode),std::uint64_t(mission->pClock->bNewObj)};
         TextActivity(p[7].activity_values,mission->pScrollText);
-        for(unsigned i:{0u,1u,2u,4u,5u,6u,7u,8u,9u})p[i].activity_available=true;
+        for(unsigned i:{0u,1u,2u,4u,5u,6u,7u,unsigned(owned::HudPanel::stance),unsigned(owned::HudPanel::game_speed)})p[i].activity_available=true;
     }
     static void CommitVisuals(const CI3DScreenMission* mission) {
         const std::uint32_t counts[]={unsigned(mission->pWeapons->figures.GetSize()),unsigned(mission->pItems->figures.GetSize()),
@@ -389,13 +389,13 @@ struct E3HudAccess {
         if(frame.active) {
             messageTextOwner=mission->pScrollText;
             inputOwners={mission->pSpells,mission->pSkills,mission->pMap,mission->pInfo,mission->pFaces,
-                mission->pWeapons,mission->pItems,mission->pOutput,mission->pCommands,mission->pClock};
+                mission->pWeapons,mission->pItems,mission->pOutput,nullptr,mission->pCommands,mission->pClock};
             auto& p=frame.panels;
             Copy(p[0],mission->pSpells);Copy(p[1],mission->pSkills);
             Copy(p[2],mission->pMap);Copy(p[3],mission->pInfo);
             Copy(p[4],mission->pFaces);Copy(p[5],mission->pWeapons);
             Copy(p[6],mission->pItems);Copy(p[7],mission->pOutput);
-            Copy(p[8],mission->pCommands);Copy(p[9],mission->pClock);
+            Copy(p[unsigned(owned::HudPanel::stance)],mission->pCommands);Copy(p[unsigned(owned::HudPanel::game_speed)],mission->pClock);
             Slots(p[0],mission->pSpells->nSpells);Slots(p[1],mission->pSkills->nSkills);
             for(unsigned i=0;i<p[1].native_count && i<p[1].slots.size() && i<unsigned(mission->pSkills->nTypes.GetSize());++i)
                 p[1].slots[i].semantic_type=mission->pSkills->nTypes[i];

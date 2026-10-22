@@ -445,17 +445,59 @@ void Renderer::update_liquid_surf() noexcept try {
  std::vector<std::array<std::uint8_t,4>> texels(std::size_t(width)*height,std::array<std::uint8_t,4>{0,128,128,255});
  // t63: sea level, shore impact, smooth swell distance (m), smooth depth (m) (liquid_surf.h).
  std::vector<std::array<float,4>> levels(std::size_t(width)*height,std::array<float,4>{liquidSurfNoLevel,0.f,liquidSurfSwellReach,0.f});
+ // covered: 1 + the index of the piece that owns the texel (0: none). A
+ // later piece owns a texel whole (surf with its own depth and distance:
+ // one map's surf over another's depth broke waves along the seam).
  std::vector<std::uint8_t> covered(std::size_t(width)*height,0);
- for(const auto& p:pieces)
+ std::vector<std::uint8_t> water(std::size_t(width)*height,0); // the owning piece's water tiles: their waterline distance
+ for(std::size_t piece=0;piece<pieces.size()&&piece<255;++piece){
+  const auto& p=pieces[piece];
   for(std::uint32_t y=0;y<p.field->tiles_y;++y)for(std::uint32_t x=0;x<p.field->tiles_x;++x){
    const std::size_t source=std::size_t(y)*p.field->tiles_x+x,target=std::size_t(p.y-y0+long(y))*width+std::size_t(p.x-x0+long(x));
-   covered[target]=1;
+   covered[target]=static_cast<std::uint8_t>(piece+1);
+   levels[target]={liquidSurfNoLevel,0.f,liquidSurfSwellReach,0.f};
    if(p.field->level[source]!=liquidSurfNoLevel){levels[target][0]=p.field->level[source];levels[target][1]=p.field->impact[source];}
    if(p.field->swell_distance.size()==p.field->texels.size()){levels[target][2]=p.field->swell_distance[source];levels[target][3]=p.field->swell_depth[source];}
    const auto& t=p.field->texels[source];
-   if(t[0]==0)continue; // no surf: the default texel reads the same
-   texels[target]=t;
+   water[target]=t[3]>=64?t[3]:0; // waterline distance (water .25 and up, land under), 0 on land
+   texels[target]=t[0]?t:std::array<std::uint8_t,4>{0,128,128,255}; // no surf: the default texel
   }
+ }
+ // Sea across map seams: each field marks its own sea (a core run along its
+ // edge, then a city-block reach) and spills it into its other water over
+ // liquidSurfSpill, but water a neighbour map's sea runs into is not sea in
+ // its own field, so the sea look stopped at the seam in a straight line or,
+ // past a weak first spill, in the field's staircase sea outline (Dejavu
+ // gipat1 sea beside zone1 coast water). Every water texel's exposure spills
+ // through water, fading over kSeaSpill metres, and raises the exposure of
+ // water outside the sea band (no sea level: other water, open sea); colour
+ // only (r), no swell (gb stays level). Sea band texels keep their own.
+ {
+  constexpr float kSeaSpill=40.f; // m
+  const std::size_t count=texels.size();
+  std::vector<float> spill(count,0.f);
+  for(std::size_t i=0;i<count;++i)if(water[i])spill[i]=texels[i][0]/255.f;
+  const float step=2.f/kSeaSpill,diagonal=step*1.41421356f;
+  const auto relax=[&](std::size_t i,std::size_t j,float d){if(water[i])spill[i]=std::max(spill[i],spill[j]-d);};
+  for(long y=0;y<height;++y)for(long x=0;x<width;++x){
+   const std::size_t i=std::size_t(y)*width+x;
+   if(x)relax(i,i-1,step);
+   if(y){relax(i,i-width,step);if(x)relax(i,i-width-1,diagonal);if(x+1<width)relax(i,i-width+1,diagonal);}
+  }
+  for(long y=height-1;y>=0;--y)for(long x=width-1;x>=0;--x){
+   const std::size_t i=std::size_t(y)*width+x;
+   if(x+1<width)relax(i,i+1,step);
+   if(y+1<height){relax(i,i+width,step);if(x+1<width)relax(i,i+width+1,diagonal);if(x)relax(i,i+width-1,diagonal);}
+  }
+  for(std::size_t i=0;i<count;++i){
+   if(!water[i]||levels[i][0]!=liquidSurfNoLevel)continue;
+   const float t=std::min(spill[i],1.f);
+   const auto r=static_cast<std::uint8_t>(std::lround(t*t*(3-2*t)*255.f));
+   if(r<=texels[i][0])continue;
+   if(!texels[i][0])texels[i][3]=water[i]; // keep the shore distance the default texel dropped
+   texels[i][0]=r;
+  }
+ }
  // One regional swell direction: the exposure-weighted mean of the coastal
  // band's incoming directions (open water toward the shores). Its length is
  // how well they agree; where they agree (not an island map, directions all
@@ -508,6 +550,47 @@ void Renderer::update_liquid_surf() noexcept try {
    texels[i][0]=static_cast<std::uint8_t>(std::lround(texels[i][0]*t*t*(3-2*t)));
   }
  }
+ // Map seams: each map's field measures its own shores, so across a seam
+ // between two maps' fields (or into uncovered water) the swell distance and
+ // depth jump and the crests cut off or broke in long straight lines (Dejavu
+ // gipat1 beside zone1). The swell share (gb, the incoming direction's
+ // length: crests, breaking and crest foam) fades to none over kSeamFade
+ // metres either side; the exposure (r, the sea colour) is left alone.
+ {
+  constexpr float kSeamFade=16.f; // m
+  const std::size_t count=texels.size();
+  std::vector<float> seam(count,1e9f);
+  for(long y=0;y<height;++y)for(long x=0;x<width;++x){
+   const std::size_t i=std::size_t(y)*width+x;
+   if(!covered[i])continue;
+   const auto differs=[&](std::size_t j){return covered[j]!=covered[i];};
+   if((x&&differs(i-1))||(x+1<width&&differs(i+1))||(y&&differs(i-width))||(y+1<height&&differs(i+width)))seam[i]=0;
+  }
+  const float diagonal=1.41421356f;
+  for(long y=0;y<height;++y)for(long x=0;x<width;++x){
+   float& d=seam[std::size_t(y)*width+x];
+   if(x)d=std::min(d,seam[std::size_t(y)*width+x-1]+1);
+   if(y){
+    d=std::min(d,seam[std::size_t(y-1)*width+x]+1);
+    if(x)d=std::min(d,seam[std::size_t(y-1)*width+x-1]+diagonal);
+    if(x+1<width)d=std::min(d,seam[std::size_t(y-1)*width+x+1]+diagonal);
+   }
+  }
+  for(long y=height-1;y>=0;--y)for(long x=width-1;x>=0;--x){
+   float& d=seam[std::size_t(y)*width+x];
+   if(x+1<width)d=std::min(d,seam[std::size_t(y)*width+x+1]+1);
+   if(y+1<height){
+    d=std::min(d,seam[std::size_t(y+1)*width+x]+1);
+    if(x+1<width)d=std::min(d,seam[std::size_t(y+1)*width+x+1]+diagonal);
+    if(x)d=std::min(d,seam[std::size_t(y+1)*width+x-1]+diagonal);
+   }
+  }
+  for(std::size_t i=0;i<count;++i){
+   if(!texels[i][0]||seam[i]*2.f>=kSeamFade)continue;
+   const float t=std::clamp(seam[i]*2.f/kSeamFade,0.f,1.f),s=t*t*(3-2*t);
+   for(int c=1;c<3;++c)texels[i][c]=static_cast<std::uint8_t>(std::lround(128.f+(texels[i][c]-128.f)*s));
+  }
+ }
  D3D11_TEXTURE2D_DESC desc{};desc.Width=UINT(width);desc.Height=UINT(height);desc.MipLevels=desc.ArraySize=1;
  desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
  const D3D11_SUBRESOURCE_DATA data{texels.data(),UINT(width)*4u,0};
@@ -547,7 +630,7 @@ void Renderer::add_liquid_surf_neighbour(const NeighbourMapUpload& upload,const 
 
 void Renderer::reset_water_reflections() noexcept {
  clear_water_reflection_bindings();
- water_scene_srv_.Reset();water_history_srv_.Reset();water_scene_color_.Reset();water_scene_depth_srv_.Reset();water_scene_depth_.Reset();
+ water_scene_srv_.Reset();water_history_srv_.Reset();water_scene_color_.Reset();water_scene_depth_srv_.Reset();water_scene_dsv_.Reset();water_scene_depth_.Reset();
  water_history_frame_=UINT64_MAX;
  for(UINT slot=0;slot<2;++slot){particle_depth_srv_[slot].Reset();particle_depth_rtv_[slot].Reset();particle_depth_[slot].Reset();}
  particle_depth_width_=particle_depth_height_=0;particle_depth_frame_=particle_depth_history_frame_=UINT64_MAX;
@@ -595,11 +678,14 @@ HRESULT Renderer::create_water_reflection_targets() {
  // A private copy of scene depth: liquids keep the game's depth writes on the
  // real depth buffer while the reflection march reads this snapshot.
  D3D11_TEXTURE2D_DESC depth_description{};depth_->GetDesc(&depth_description);
- depth_description.BindFlags=D3D11_BIND_SHADER_RESOURCE;depth_description.CPUAccessFlags=0;
+ depth_description.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_DEPTH_STENCIL;depth_description.CPUAccessFlags=0;
  depth_description.MiscFlags=0;depth_description.Usage=D3D11_USAGE_DEFAULT;
  if(FAILED(hr=device_->CreateTexture2D(&depth_description,nullptr,&depth_copy)))return hr;
  D3D11_SHADER_RESOURCE_VIEW_DESC depth_view{};depth_srv_->GetDesc(&depth_view);
  if(FAILED(hr=device_->CreateShaderResourceView(depth_copy.Get(),&depth_view,&depth_copy_srv)))return hr;
+ // Ground marks held past the water test against it (the water writes the real depth).
+ ComPtr<ID3D11DepthStencilView> depth_copy_dsv;D3D11_DEPTH_STENCIL_VIEW_DESC depth_target{};dsv_->GetDesc(&depth_target);
+ if(FAILED(hr=device_->CreateDepthStencilView(depth_copy.Get(),&depth_target,&depth_copy_dsv)))return hr;
  D3D11_BUFFER_DESC buffer{};buffer.ByteWidth=sizeof(WaterReflectionConstants);
  buffer.Usage=D3D11_USAGE_DYNAMIC;buffer.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
  buffer.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
@@ -610,7 +696,7 @@ HRESULT Renderer::create_water_reflection_targets() {
  if(FAILED(hr=device_->CreateSamplerState(&sampling,&sampler)))return hr;
  water_scene_color_=std::move(color);water_scene_srv_=std::move(srv);water_history_srv_=std::move(history_srv);
  water_scene_levels_=levels;water_history_frame_=UINT64_MAX;
- water_scene_depth_=std::move(depth_copy);water_scene_depth_srv_=std::move(depth_copy_srv);water_reflection_constants_=std::move(constants);
+ water_scene_depth_=std::move(depth_copy);water_scene_depth_srv_=std::move(depth_copy_srv);water_scene_dsv_=std::move(depth_copy_dsv);water_reflection_constants_=std::move(constants);
  water_reflection_sampler_=std::move(sampler);return S_OK;
 }
 // The half-resolution water reflection targets (flush_native trace_water),

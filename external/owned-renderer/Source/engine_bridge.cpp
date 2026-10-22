@@ -2814,6 +2814,46 @@ bool game_image_contains(const void* address) noexcept {
 // A world draw completed through our hook (the ownership check point).
 std::atomic<bool> g_ownership_world_seen{false};
 
+// Observe-only detour entries (game.exe RVAs): each handler only reads the
+// call (and renderer state) and continues it with the same arguments and
+// result, and needs nothing from hooks nested inside the stock body (audit
+// 2026-10-19). A raw replacement jump into another module at one of these is
+// forwarded to like an addon chain instead of turning the feature off
+// (Dejavu 2026-10-17 plugin.dll replaced 0050F1E0). Not listed: detours that
+// modify the call, replace it, or rely on nested hooks or return addresses.
+constexpr std::array<std::uint32_t, 46> kObserverEntryRvas{{
+    0x1641f0, 0x1647e0, 0x164be0, 0x164e70,                     // lifecycle tick, add, remove, reset
+    0x1164b0, 0x1167e0, 0x117700,                               // object plan figures, complection
+    0x196030, 0x1927c0,                                         // retained parser, admission
+    0x16afe0,                                                   // scene 3D draw bracket
+    0x2c3c80,                                                   // terrain free
+    0x235e60, 0x235e00, 0x291500, 0x1aa510,                     // HUD deactivate, destroy, managers
+    0x275050, 0x1aa360, 0x275200, 0x275340, 0x274f40,           // resource add, close, destroy
+    0x1f4990, 0x1f4f90, 0x1e29e0,                               // character pane init/fini, chat draw
+    0x116080, 0x115f70, 0x1c67d0, 0x10ca50, 0x10cba0,           // visual publication observers
+    0x1341a0, 0x11cca0, 0x268c50, 0x1352b0, 0x116650,
+    0x117500, 0x11b630, 0x11c9f0, 0x116da0, 0x117110,
+    0x291630, 0x18dcd0, 0x26e130, 0x18b750,                     // camp texture destroy, close diagnostics
+    0x10e9f0, 0x10f1e0, 0x10f2d0, 0x10f5b0}};                   // server object change writers
+
+bool observer_entry_forwarded(const void* entry, const void* target, const wchar_t* module) noexcept {
+    const auto* image = game_image_base();
+    const auto* at = static_cast<const std::uint8_t*>(entry);
+    if (!image || at < image) return false;
+    const auto rva = static_cast<std::uint32_t>(at - image);
+    const auto found = std::find(kObserverEntryRvas.begin(), kObserverEntryRvas.end(), rva);
+    if (found == kObserverEntryRvas.end()) return false;
+    static std::array<std::atomic<bool>, kObserverEntryRvas.size()> logged{};
+    if (!logged[std::size_t(found - kObserverEntryRvas.begin())].exchange(true)) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "entry_rva=%08x owner=%ls target=%p forwarded",
+                      static_cast<unsigned>(rva), module, target);
+        append_bridge_event("observer_entry_chained", detail, true);
+    }
+    return true;
+}
+const bool g_observer_entry_check_registered = (set_observer_entry_check(&observer_entry_forwarded), true);
+
 // Ownership of a game entry the bridge detours: stock bytes, or the addon's
 // hook-framework chain (forward through its dispatcher, which stays owned by
 // the addon and is never freed; uninstall restores the addon's entry bytes).

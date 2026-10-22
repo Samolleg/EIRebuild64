@@ -31,6 +31,14 @@ enum class DebugResourceView : std::uint8_t {
 
 // eid3d11.ini next to the renderer module.
 std::wstring renderer_config_path();
+// Interface profiles (#187): <name>.ini in eid3d11_profiles next to the
+// renderer module, so players can share their HUD layouts.
+std::wstring interface_profiles_directory();
+const char* interface_profiles_help() noexcept;
+struct RendererOption;
+// The options a profile holds: the HUD layout and Interface groups, except
+// the menu language (a personal choice, not part of a layout).
+bool interface_profile_option(const RendererOption& option) noexcept;
 
 const char* debug_resource_view_name(DebugResourceView view) noexcept;
 const char* debug_resource_view_label(DebugResourceView view) noexcept;
@@ -159,8 +167,13 @@ public:
     // can share a file. Saving uses write-flush-atomic-replace semantics.
     bool load(const wchar_t* path);
     bool save(const wchar_t* path) const;
+    // An interface profile: only interface_profile_option keys, written as an
+    // [interface] section; loading ignores every other key in the file.
+    bool save_interface_profile(const wchar_t* path) const;
+    bool load_interface_profile(const wchar_t* path);
 
 private:
+    static void apply_value(RendererOption& option, const std::string& value);
     RendererOption* find_mutable(const char* key) noexcept;
     bool register_option(RendererOption option);
 

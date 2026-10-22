@@ -1314,7 +1314,7 @@ config.register_boolean("smaa","Anti-aliasing: SMAA","Graphics",true,false,"SMAA
 config.register_boolean("depth_prepass","Depth prepass and shadow mask","Performance",true,false,"Opaque and alpha-tested world surfaces first draw depth only; one full-screen pass then takes the sun and cloud shadow per visible pixel, and the full material shading runs once per pixel. Off draws every surface with its own shadow lookups (more overdraw).");
 config.register_integer("render_scale","Render scale (%)","Graphics",100,kRenderScaleMinimum,100,1,false,"The 3D world (and every world effect) renders at this percentage of the screen size and is upscaled before the interface, which always stays at full resolution. Applies at the next frame.");
 config.register_integer("camp_ui_layout","Camp layout","Interface",1,0,1,1,false,"Switch the open camp without restarting: original UI comparison or inventory grid. Keeps the current mode and transaction; supports compact 16:10 and wider displays.");
-config.register_integer("ui_language","Menu language","Interface",0,0,2,1,false,"Language of the renderer's menus. 0: auto (Russian when the Windows display language is Russian or its ANSI code page is 1251), 1: English, 2: Russian. Applies at the next frame.");
+config.register_integer("ui_language","Menu language","Language",0,0,2,1,false,"Language of the renderer's menus. 0: auto (Russian when the Windows display language is Russian or its ANSI code page is 1251), 1: English, 2: Russian. Applies at the next frame.");
 config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0: borderless fullscreen on the primary monitor, 1: a movable window of the chosen window size. Use Apply display to change this during gameplay.");
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_integer("window_height","Window height","Display",0,0,16384,1,false,"Client height of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
@@ -1435,9 +1435,13 @@ for(unsigned i=0;i<7;++i) {
     config.register_floating_point((prefix+"_x").c_str(),panel.label,"HUD layout",-1.f,-1.f,100.f,.1f,false);
     config.register_floating_point((prefix+"_y").c_str(),panel.label,"HUD layout",-1.f,-1.f,100.f,.1f,false);
 }
+config.register_text("interface_profile","Interface profile","Profiles",interface_profiles_help(),"default");
+config.register_floating_point("quest_items_scale","Quest items","HUD layout",100.f,50.f,300.f,.1f,false);
+config.register_floating_point("quest_items_x","Quest items","HUD layout",-1.f,-1.f,100.f,.1f,false);
+config.register_floating_point("quest_items_y","Quest items","HUD layout",-1.f,-1.f,100.f,.1f,false);
 for(const auto panel:{HudPanel::minimap,HudPanel::character_info,HudPanel::messages}) {
     const std::string prefix=kHudPanels[unsigned(panel)].key;
-    config.register_integer((prefix+"_border_padding").c_str(),"Border padding (px)","HUD layout",7,-100,100,1,false,"Inset between the frame and toolbar icons. Global UI scale applies; widget scale does not.");
+    config.register_integer((prefix+"_border_padding").c_str(),"Border padding (px)","HUD layout",3,-100,100,1,false,"Inset between the frame and the content (map, character, text); the button strip and the background are not affected. Global UI scale applies; widget scale does not.");
     config.register_integer((prefix+"_buttons_scale").c_str(),"Buttons scale (%)","HUD layout",100,50,200,5,false);
     config.register_integer((prefix+"_buttons_side").c_str(),"Button alignment","HUD layout",0,0,5,1,false);
 }
@@ -1445,12 +1449,12 @@ config.register_integer("spell_bar_direction","Spell icon alignment","Interface"
 config.register_integer("ability_bar_direction","Ability icon alignment","Interface",0,0,3,1,false,"Bottom to top, top to bottom, left to right, or right to left. Icons stay upright and retain their bindings.");
 config.register_integer("portrait_direction","Character portrait alignment","Interface",0,0,4,1,false,"Original centered layout, top to bottom, bottom to top, left to right, or right to left. Each portrait keeps its bars, selection and click target.");
 config.register_integer("weapon_switcher_direction","Weapon icon alignment","Interface",2,0,3,1,false,"Left to right by default. Changes placement while preserving weapon slots.");
-config.register_integer("quick_items_direction","Quick item alignment","Interface",3,0,3,1,false,"Right to left by default. Changes placement while preserving quick-item and quest-item slots.");
+config.register_integer("quick_items_direction","Quick item alignment","Interface",3,0,3,1,false,"Right to left by default. Changes placement while preserving the quick-item slots; quest items are their own widget.");
 for(const unsigned i:{0u,1u,4u,5u,6u}) {
     const std::string prefix=kHudPanels[i].key;
     config.register_integer((prefix+"_padding").c_str(),"Icon padding (px)","HUD layout",0,-100,100,1,false);
     config.register_boolean((prefix+"_preview").c_str(),"Preview slots","HUD layout",false,false,"Faint labeled placeholders, visible only while the HUD is unlocked.");
-    config.register_integer((prefix+"_preview_count").c_str(),"Preview slot count","HUD layout",i==5?4:i==6?8:3,1,i==5?4:i==6?8:32,1,false);
+    config.register_integer((prefix+"_preview_count").c_str(),"Preview slot count","HUD layout",i==5||i==6?4:3,1,i==5||i==6?4:32,1,false);
     if(i!=4)config.register_integer((prefix+"_slots_per_column").c_str(),"Slots per column","HUD layout",0,0,32,1,false,"Wrap the bar into another column (or row, for left/right alignment) every this many slots. 0 keeps one line.");
 }
 config.register_integer("message_panel_text_scale","Info panel text scale (%)","Interface",100,50,300,5,false,"Size of loot and quest text, independent of the panel dimensions and multiplied by global HUD scale.");
@@ -1536,7 +1540,7 @@ config.register_integer("critter_labels","Critter labels","Diagnostics",0,0,1,1,
  config.register_integer("critter_showcase","Critter showcase","Diagnostics",0,0,3,1,false,"Debug: one of every critter species, a small flock of every bird and a vulture group (plus a vulture pair on its thermal) in labelled rows a few metres in front of the camera focus, at their normal in-game size (2: twice the size; 3: normal size drawn without the depth test, to tell buried from small). Render only: no simulation, spawn rules or budgets; the ambient critters pause while it is on.");
   set_test_initialization_stage("renderer-settings-registered");
  register_combat_ui_options(config);
- if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config);recover_shader_crash();}}
+ if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config);debug_overlay_.sync_interface_profile();recover_shader_crash();}}
  // Record which cache files the driver mapped, for deletion at the next start.
  if(debug_overlay_.initialized()){
   const std::string cache_id=mapped_nvidia_cache_id();
@@ -1656,6 +1660,19 @@ HRESULT Renderer::composite_world(){
    const HRESULT liquids=render_neighbour_maps(neighbour_liquids_state_,neighbour_liquids_clip_,true);
    if(FAILED(liquids))return liquids;
   }
+ }
+ // Ground marks held back from the world pass draw over the finished water.
+ // The water writes the real depth, so on frames it drew they test against
+ // its pre-water depth copy: marks on the bed stay visible, unrefracted.
+ if(!deferred_ground_marks_.empty()){
+  auto marks=std::move(deferred_ground_marks_);deferred_ground_marks_.clear();
+  const bool under_water=water_scene_dsv_&&water_capture_ready_&&water_capture_frame_==native_frame_index_;
+  ComPtr<ID3D11DepthStencilView> world_depth=dsv_;if(under_water)dsv_=water_scene_dsv_;
+  drawing_ground_marks_=true;HRESULT marked=S_OK;
+  for(auto& mark:marks)if(marked=mark();FAILED(marked))break;
+  drawing_ground_marks_=false;dsv_=world_depth;
+  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+  if(FAILED(marked))return marked;
  }
  // The occlusion pyramid describes the world pass only; interface 3D (HUD
  // icons, previews) draws after this point, often without depth testing.
@@ -4004,7 +4021,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  reap_tile_family_jobs(); // dropped tile family jobs, once each has stopped
  ++native_frame_index_;
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
- scene_composited_=false;scene_updated_=false;
+ scene_composited_=false;scene_updated_=false;deferred_ground_marks_.clear();
  rtv_=scene_composite_.target();dsv_=world_dsv_;
  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
  return S_OK;
@@ -4071,13 +4088,15 @@ void Renderer::begin_scene_game(){
      const char* direction=i==4?"portrait_direction":nullptr;
      panels[i].direction=configured_integer(config,direction?direction:key[hk_direction].c_str(),i==5?2:i==6?3:0);
      panels[i].padding=float(configured_integer(config,key[hk_padding].c_str(),0));
-     panels[i].border_padding=float(configured_integer(config,key[hk_border_padding].c_str(),7));
+     panels[i].border_padding=float(configured_integer(config,key[hk_border_padding].c_str(),3));
      panels[i].preview=configured_boolean(config,key[hk_preview].c_str(),false);
-     panels[i].preview_count=unsigned(configured_integer(config,key[hk_preview_count].c_str(),i==5?4:i==6?8:3));
+     panels[i].preview_count=unsigned(configured_integer(config,key[hk_preview_count].c_str(),i==5||i==6?4:3));
      if(i!=4)panels[i].slots_per_line=unsigned((std::max)(0,configured_integer(config,key[hk_slots_per_column].c_str(),0)));
  }
  widescreen_set_hud_panels(panels);
- std::array<HudFadeSettings,10> fades{};
+ widescreen_set_quest_items({configured_floating_point(config,"quest_items_scale",100.f),
+     configured_floating_point(config,"quest_items_x",-1.f),configured_floating_point(config,"quest_items_y",-1.f)});
+ std::array<HudFadeSettings,kHudPanels.size()> fades{};
  for(unsigned i=0;i<fades.size();++i){const auto& key=hud_keys[i];
      fades[i]={configured_boolean(config,key[hk_auto_fade].c_str(),false),float(configured_integer(config,key[hk_fade_transparency].c_str(),80))};}
  widescreen_set_hud_fades(fades,{configured_floating_point(config,"stance_scale",100.f),configured_floating_point(config,"game_speed_scale",100.f)},
@@ -4085,7 +4104,7 @@ void Renderer::begin_scene_game(){
  widescreen_set_combat_text_scale(configured_integer(config,"combat_text_scale",100));
  widescreen_set_message_panel({configured_floating_point(config,"message_panel_width",100.f),configured_floating_point(config,"message_panel_height",100.f),
                               configured_floating_point(config,"message_panel_x",50.f),configured_floating_point(config,"message_panel_y",0.f),float(configured_integer(config,"message_panel_text_scale",100)),
-                              float(configured_integer(config,"message_panel_buttons_scale",100)),configured_integer(config,"message_panel_buttons_side",0),float(configured_integer(config,"message_panel_border_padding",7))});
+                              float(configured_integer(config,"message_panel_buttons_scale",100)),configured_integer(config,"message_panel_buttons_side",0),float(configured_integer(config,"message_panel_border_padding",3))});
  POINT hud_mouse{-1,-1};
  if(GetForegroundWindow()!=hwnd_ || !GetCursorPos(&hud_mouse) || !ScreenToClient(hwnd_,&hud_mouse))hud_mouse={-1,-1};
  if(hud_mouse.x>=0 && hud_mouse.y>=0)hud_mouse=game_output_to_native(hwnd_,hud_mouse);
@@ -5185,7 +5204,10 @@ HRESULT Renderer::apply_state(const FixedState& s,bool,const widescreen::HudComp
    const float sx=float(target_width())/float(canvas_width()),sy=float(target_height())/float(canvas_height());
    const auto x=[&](float value){return (std::max)(0.f,(std::min)(float(target_width()),value*sx));};
    const auto y=[&](float value){return (std::max)(0.f,(std::min)(float(target_height()),value*sy));};
-   const RECT rectangle{LONG(std::floor(x(bounds.left))),LONG(std::floor(y(bounds.top))),
+   // An empty clip stays empty: rounding a zero-width clip outward left a
+   // one-pixel column of a collapsed panel's body (#186).
+   const bool empty=bounds.right<=bounds.left || bounds.bottom<=bounds.top;
+   const RECT rectangle=empty?RECT{0,0,0,0}:RECT{LONG(std::floor(x(bounds.left))),LONG(std::floor(y(bounds.top))),
     LONG(std::ceil(x(bounds.right))),LONG(std::ceil(y(bounds.bottom)))};
    camp_unclipped_raster_=unclipped.Get();
    context_->RSSetState(clipped.Get());context_->RSSetScissorRects(1,&rectangle);
@@ -9477,7 +9499,16 @@ HRESULT Renderer::draw_game_selection(const GameSelectionView& view,const FixedS
   auto snapshot=scene_surface(texture);
   scene_native_pending_=true;
   scene_post_frame([this,view,st,snapshot]{
-   report_scene_failure("draw_game_selection",draw_game_selection(view,st,snapshot.get()));});
+   report_scene_failure("draw_game_selection",draw_game_selection_held(view,st,snapshot));});
+  return S_OK;
+ }
+ return draw_game_selection_held(view,st,scene_surface(texture));
+}
+
+HRESULT Renderer::draw_game_selection_held(const GameSelectionView& view,const FixedState& st,std::shared_ptr<SurfaceImage> texture){
+ if(!scene_composited_&&!drawing_ground_marks_){
+  try{deferred_ground_marks_.push_back([this,view,st,texture]{return draw_game_selection_held(view,st,texture);});}
+  catch(...){return E_OUTOFMEMORY;}
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
@@ -9491,7 +9522,7 @@ HRESULT Renderer::draw_game_selection(const GameSelectionView& view,const FixedS
  // Stock specular alpha 255: the marker is never fogged; a ground indicator,
  // it stays out of water reflections.
  draw.fog=false;draw.reflection_depth=false;draw.profile_pass="owned_game_selection";
- return draw_game_effect(draw,st,texture);
+ return draw_game_effect(draw,st,texture.get());
 }
 
 HRESULT Renderer::draw_game_glyphs(const GameGlyphView& view,const FixedState& st,SurfaceImage* texture){
@@ -9521,26 +9552,37 @@ HRESULT Renderer::draw_game_glyphs(const GameGlyphView& view,const FixedState& s
 HRESULT Renderer::draw_game_print_run(const GameParticleGpu* vertices,UINT count,const std::array<float,16>& object_to_clip,
  float clip_half_width,float clip_half_height,const FixedState& st,SurfaceImage* texture){
  if(!vertices||!count)return E_INVALIDARG;
+ std::vector<GameParticleGpu> copy;
+ try{copy.assign(vertices,vertices+count);}catch(...){return E_OUTOFMEMORY;}
  if(scene_queue()){
-  std::vector<GameParticleGpu> copy;
-  try{copy.assign(vertices,vertices+count);}catch(...){return E_OUTOFMEMORY;}
   auto snapshot=scene_surface(texture);
   scene_native_pending_=true;
-  scene_post_frame([this,copy=std::move(copy),object_to_clip,clip_half_width,clip_half_height,st,snapshot]{
-   report_scene_failure("draw_game_print_run",draw_game_print_run(copy.data(),static_cast<UINT>(copy.size()),
-    object_to_clip,clip_half_width,clip_half_height,st,snapshot.get()));});
+  scene_post_frame([this,copy=std::move(copy),object_to_clip,clip_half_width,clip_half_height,st,snapshot]()mutable{
+   report_scene_failure("draw_game_print_run",draw_game_print_run_held(std::move(copy),object_to_clip,clip_half_width,clip_half_height,st,snapshot));});
+  return S_OK;
+ }
+ return draw_game_print_run_held(std::move(copy),object_to_clip,clip_half_width,clip_half_height,st,scene_surface(texture));
+}
+
+HRESULT Renderer::draw_game_print_run_held(std::vector<GameParticleGpu> vertices,const std::array<float,16>& object_to_clip,
+ float clip_half_width,float clip_half_height,const FixedState& st,std::shared_ptr<SurfaceImage> texture){
+ if(!scene_composited_&&!drawing_ground_marks_){
+  try{deferred_ground_marks_.push_back([this,vertices=std::move(vertices),object_to_clip,clip_half_width,clip_half_height,st,texture]{
+   return draw_game_print_run_held(vertices,object_to_clip,clip_half_width,clip_half_height,st,texture);});}
+  catch(...){return E_OUTOFMEMORY;}
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
  if(!device_||!context_)return E_INVALIDARG;
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
- try{game_effect_elements_.assign(vertices,vertices+count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+ try{game_effect_elements_=std::move(vertices);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  GameEffectDraw draw{};draw.object_to_clip=object_to_clip.data();
  draw.clip_half_width=clip_half_width;draw.clip_half_height=clip_half_height;
+ const UINT count=static_cast<UINT>(game_effect_elements_.size());
  draw.element_count=count;draw.vertex_count=count;draw.vertex_shader=game_mesh_vs_.Get();
  // Ground marks fog like the terrain under them; they stay out of reflections.
  draw.fog=true;draw.reflection_depth=false;draw.profile_pass="owned_game_prints";
- return draw_game_effect(draw,st,texture);
+ return draw_game_effect(draw,st,texture.get());
 }
 
 void Renderer::discard_native_unqueued_work() noexcept{
@@ -16027,7 +16069,7 @@ void Renderer::release() {
  depth_srv_.Reset();
  dsv_.Reset();world_dsv_.Reset();world_depth_read_only_dsv_.Reset();prepass_rest_.Reset();prepass_normal_.Reset();shadow_mask_.Reset();prepass_rest_rtv_.Reset();prepass_normal_rtv_.Reset();shadow_mask_rtv_.Reset();prepass_rest_srv_.Reset();prepass_normal_srv_.Reset();shadow_mask_srv_.Reset();for(auto& state:prepass_depth_states_)state.Reset();masked_depth_state_.Reset();shadow_mask_depth_state_.Reset();shadow_mask_raster_.Reset();interface_dsv_.Reset();interface_depth_.Reset();
  depth_.Reset();
- rtv_.Reset();backbuffer_rtv_.Reset();scene_composite_.reset();scene_composited_=false;scene_updated_=false;
+ rtv_.Reset();backbuffer_rtv_.Reset();scene_composite_.reset();scene_composited_=false;scene_updated_=false;deferred_ground_marks_.clear();
  adapter3_.Reset();
  frame_acct::uninstall_device_counters();
  context1_.Reset();context_.Reset();

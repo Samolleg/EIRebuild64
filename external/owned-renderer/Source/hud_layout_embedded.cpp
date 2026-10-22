@@ -9,6 +9,9 @@ void widescreen_set_ui_scale(int percent) noexcept {embedded_hud_layout().set_ui
 void widescreen_set_hud_panels(const std::array<HudPanelSettings,7>& settings) noexcept {
     embedded_hud_layout().set_hud_panels(settings);
 }
+void widescreen_set_quest_items(const QuestItemSettings& settings) noexcept {
+    embedded_hud_layout().set_quest_items(settings);
+}
 void widescreen_set_message_panel(const MessagePanelSettings& settings) noexcept {
     embedded_hud_layout().set_message_panel(settings);
 }
@@ -33,7 +36,7 @@ bool widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& frame) noexcept {
 void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames) {
     embedded_hud_layout().widescreen_hud_asset_frames(frames);
 }
-void widescreen_set_hud_fades(const std::array<HudFadeSettings,10>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing) noexcept {
+void widescreen_set_hud_fades(const std::array<HudFadeSettings,kHudPanels.size()>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing) noexcept {
     embedded_hud_layout().set_hud_fades(settings,corner_scales,timing,GetTickCount64());
 }
 void widescreen_update_hud_fades(float mouse_x,float mouse_y) noexcept {

@@ -2,9 +2,9 @@
 
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
-This is the EIRebuild embedded integration, based on candidate-74 (`742bda5aa064092549ace5da2b17fd9cc97423c3`) with local
-integration changes in branch `eirebuild/c74-ret1`, commit `34015b2449ecacf9eb7eb55d89236696375cd57c`.
-This merges upstream into the embedded baseline `4e06826962c84368ad2726abb0d936621cb82112`.
+This is the EIRebuild embedded integration, based on candidate-79 (`791acfb9b10ece99c0afa832862687eb4ae115b0`) with local
+integration changes in branch `eirebuild/c79-embed`, commit `c4d1466e40e3dcf074ff227597c67d4282e001a2`.
+This merges upstream into the candidate-74 embedded revision `34015b2449ecacf9eb7eb55d89236696375cd57c`.
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
 localization layer, with additional embedded translations preserved.
@@ -198,3 +198,13 @@ Source/ThirdParty/Assets/Tools and Renderer.props identity remain this snapshot.
 Live unit materials and hidden parts are published before retained frame capture,
 only when changed. This is not the unit route/intent migration: the completed
 object-pose adapter is still present and full P6b remains open.
+
+RUPD79 carries the candidate-79 liquid/refraction/ground-mark changes and the
+shared interface profiles, menu language and Reset UI confirmation. The
+extracted typed HUD context follows c79 panel padding/clipping and independent
+quest-item geometry using the host's existing area/shift/slot publications.
+Stance and clock identities follow the expanded HudPanel enumeration.
+Embedded profiles use rddraw_profiles beside the host-selected rddraw.ini;
+proxy profiles retain eid3d11_profiles. Russian menu strings remain in
+renderer_ui_ru.h. The c79 character-pane text fix is included; visual
+acceptance remains with the owner. No reverted diagnostic modes are restored.

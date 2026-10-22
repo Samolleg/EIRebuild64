@@ -309,6 +309,9 @@ public:
     bool graphics_reset_notice_pending() const noexcept;
     const char* graphics_reset_notice(bool world_on_screen) noexcept;
     void clear_over_budget_marker() noexcept;  // clean exit (Renderer::release)
+    // Interface profiles (#187): apply the current profile over the loaded
+    // settings (or create it, and "default"); after settings migration.
+    void sync_interface_profile() noexcept;
     // Another startup recovery owes the same one-time notice (appended when
     // the over-budget reset already owes one). Text is already translated.
     void add_graphics_reset_notice(const char* text) noexcept;

@@ -7,11 +7,11 @@ namespace owned {
 using widescreen::Anchor;
 namespace {
 struct PanelRole { widescreen::Anchors anchor; };
-constexpr std::array<PanelRole,10> kPanelRoles{{
+constexpr std::array<PanelRole,kHudPanels.size()> kPanelRoles{{
     {{Anchor::end,Anchor::end}}, {{Anchor::start,Anchor::end}},
     {{Anchor::end,Anchor::start}}, {{Anchor::start,Anchor::start}},
     {{Anchor::centre,Anchor::end}}, {{Anchor::start,Anchor::end}},
-    {{Anchor::end,Anchor::end}}, {{}},
+    {{Anchor::end,Anchor::end}}, {{}}, {{Anchor::end,Anchor::end}},
     {{Anchor::start,Anchor::end}}, {{Anchor::end,Anchor::end}}
 }};
 }
@@ -27,14 +27,23 @@ void HudLayoutContext::publish_canvas(unsigned width,unsigned height) noexcept {
     g_layout=widescreen::make_layout(float(width),float(height),hud_width_,g_layout.scale);
 }
 const HudNativePanel* HudLayoutContext::current_panel(unsigned index) const noexcept {
+    // The quest widget uses the items panel's published areas 4-7.
+    if(index==unsigned(HudPanel::quest_items))index=unsigned(HudPanel::items);
     return frame_.active && index<frame_.panels.size() && frame_.panels[index].visible ? &frame_.panels[index] : nullptr;
 }
 bool HudLayoutContext::current_message_panel(const HudNativePanel*& output,const HudNativePanel*& text) const noexcept {
     output=text=current_panel(unsigned(HudPanel::messages));return output!=nullptr;
 }
-unsigned HudLayoutContext::native_slot_count(unsigned,const HudNativePanel* object) const noexcept { return object->native_count; }
-bool HudLayoutContext::active_slot(unsigned,unsigned slot,const HudNativePanel* object) const noexcept {
-    return slot<object->native_count && slot<object->slots.size() && object->slots[slot].active;
+unsigned HudLayoutContext::native_slot_count(unsigned panel,const HudNativePanel* object) const noexcept {
+    if(panel!=unsigned(HudPanel::items))return object->native_count;
+    unsigned count=0;
+    for(unsigned i=0;i<(std::min)(unsigned(object->slots.size()),4u);++i)
+        if(object->slots[i].active)count=i+1;
+    return count;
+}
+bool HudLayoutContext::active_slot(unsigned panel,unsigned slot,const HudNativePanel* object) const noexcept {
+    return slot<object->slots.size() && object->slots[slot].active &&
+        (panel==unsigned(HudPanel::items)?slot<8u:slot<object->native_count);
 }
 void HudLayoutContext::slot_dimensions(unsigned panel,unsigned slot,const HudNativePanel* object,float& width,float& height) const noexcept {
     if(panel==5){width=40.f;height=80.f;return;}
@@ -68,9 +77,10 @@ void HudLayoutContext::clip_to_panel(widescreen::HudComposition& h,const HeaderL
         if(b.left+b.width>=g_layout.width-edge_slack())h.clip_right=g_layout.width-5.f*g_layout.unit*h.scale;
         if(b.top+b.height>=g_layout.height-edge_slack())h.clip_bottom=g_layout.height-5.f*g_layout.unit*h.scale;
     } else {
-        h.clip_left=(std::max)(0.f,header.body.left);h.clip_top=(std::max)(0.f,header.body.top);
-        h.clip_right=(std::min)(g_layout.width,header.body.left+header.body.width);
-        h.clip_bottom=(std::min)(g_layout.height,header.body.top+header.body.height);
+        // The background reaches the frame; only the content is inset (#186).
+        h.clip_left=(std::max)(0.f,header.background.left);h.clip_top=(std::max)(0.f,header.background.top);
+        h.clip_right=(std::min)(g_layout.width,header.background.left+header.background.width);
+        h.clip_bottom=(std::min)(g_layout.height,header.background.top+header.background.height);
     }
 }
 void HudLayoutContext::slide_delta(const HeaderLayout& header,float fraction,float& x,float& y,bool inset_header) noexcept {
@@ -91,6 +101,10 @@ bool HudLayoutContext::slot_composition(HudPanel panel,unsigned slot,widescreen:
         const float x=widescreen::placed_to_screen_x(g_layout,.5f*float(r.left+r.right)+float(area.shift.x));
         const float y=widescreen::placed_to_screen_y(g_layout,(index==5?float(r.bottom)-40.f:.5f*float(r.top+r.bottom))+float(area.shift.y));
         HudPanelBounds b;if(!slot_screen_bounds(index,slot,object,b))return false;
+        if(panel==HudPanel::items && slot>=4) {
+            h.scale=h.scale_y=g_layout.scale*g_quest_items.scale_percent/100.f;
+            h.opacity=hud_opacity(HudPanel::quest_items);
+        }
         h.offset_x+=b.left+b.width*.5f-widescreen::compose_x(x,h);
         h.offset_y+=b.top+b.height*.5f-widescreen::compose_y(y,h);
     }
@@ -325,7 +339,7 @@ HudLayoutContext::DockSide HudLayoutContext::panel_header_side(unsigned index) n
 bool HudLayoutContext::slot_panel(unsigned panel) noexcept {return panel<2 || panel==4 || panel==5 || panel==6;}
 unsigned HudLayoutContext::layout_slot_count(unsigned panel,const HudNativePanel* object) noexcept {
     const auto& s=g_hud_panels[panel];const unsigned count=native_slot_count(panel,object);
-    return s.preview && editing?(std::max)(count,s.preview_count):count;
+    return s.preview && editing?(std::max)(count,panel==6?(std::min)(s.preview_count,4u):s.preview_count):count;
 }
 int HudLayoutContext::slot_direction(unsigned panel) noexcept {
     const int d=g_hud_panels[panel].direction;
@@ -360,8 +374,8 @@ RECT HudLayoutContext::panel_native_rect(unsigned index,const HudNativePanel* ob
         const float count=index==unsigned(HudPanel::minimap)?4.f:5.f;
         const LONG content_height=index==unsigned(HudPanel::minimap)?165:225;
         const float gap=(std::max)(0.f,g_hud_panels[index].border_padding)/(g_hud_panels[index].scale_percent/100.f);
-        r.right=r.left+(std::max)(1L,std::lround(vertical?165.f+20.f*buttons+4.f*gap:(std::max)(165.f,count*20.f*buttons)+2.f*gap));
-        r.bottom=r.top+(std::max)(1L,std::lround(vertical?(std::max)(float(content_height),count*30.f*buttons)+2.f*gap:float(content_height)+2.f*gap));
+        r.right=r.left+(std::max)(1L,std::lround(vertical?165.f+2.f*gap+20.f*buttons:(std::max)(165.f+2.f*gap,count*20.f*buttons)));
+        r.bottom=r.top+(std::max)(1L,std::lround(vertical?(std::max)(float(content_height)+2.f*gap,count*30.f*buttons):float(content_height)+2.f*gap));
         return r;
     }
     if(!slot_panel(index))return r;
@@ -414,7 +428,7 @@ widescreen::HudComposition HudLayoutContext::panel_composition(unsigned index,co
     if((index==unsigned(HudPanel::minimap) || index==unsigned(HudPanel::character_info)) &&
        panel_header_side(index)!=DockSide::left && panel_header_side(index)!=DockSide::right) {
         // A horizontal strip stays outside the complete content rectangle.
-        const float header=30.f*g_layout.unit*scale*button_multiplier(HudPanel(index))+2.f*border_inset(HudPanel(index));
+        const float header=30.f*g_layout.unit*scale*button_multiplier(HudPanel(index));
         const float maximum=(std::max)(header,g_layout.height-height-header);
         placed_top=std::clamp(placed_top,header,maximum);
     }
@@ -426,7 +440,7 @@ HudLayoutContext::HeaderLayout HudLayoutContext::header_layout(HudPanel panel) n
     const float content_scale=panel==HudPanel::messages?g_layout.scale:g_layout.scale*g_hud_panels[unsigned(panel)].scale_percent/100.f;
     const float scale=content_scale*button_multiplier(panel);
     const float gap=border_inset(panel);
-    const float thickness=(std::max)(1.f,(panel==HudPanel::messages?20.f:30.f)*g_layout.unit*scale+2.f*gap);
+    const float thickness=(std::max)(1.f,(panel==HudPanel::messages?20.f:30.f)*g_layout.unit*scale);
     DockSide side;
     if(panel!=HudPanel::messages)side=panel_header_side(unsigned(panel));
     else {
@@ -437,7 +451,7 @@ HudLayoutContext::HeaderLayout HudLayoutContext::header_layout(HudPanel panel) n
     }
     float left=b.left,top=b.top,width=b.width,height=thickness;auto body=b;
     if(side==DockSide::left || side==DockSide::right) {
-        width=(std::max)(1.f,(panel==HudPanel::messages?30.f:20.f)*g_layout.unit*scale+2.f*gap);height=b.height;
+        width=(std::max)(1.f,(panel==HudPanel::messages?30.f:20.f)*g_layout.unit*scale);height=b.height;
         body.width=(std::max)(0.f,b.width-width);
         if(side==DockSide::right)left=b.left+b.width-width;else body.left+=width;
     } else if(panel==HudPanel::messages) {
@@ -456,16 +470,16 @@ void HudLayoutContext::header_control_target(HudPanel panel,unsigned area,const 
     const float unit=g_layout.unit*header.scale;
     const float cell_w=panel==HudPanel::messages?30.f:20.f,cell_h=panel==HudPanel::messages?20.f:30.f;
     const int slot=panel==HudPanel::messages?(area==0?2:int(area)-1):panel==HudPanel::minimap?(area==0?0:area==5?1:area==3?2:3):int(area);
-    const float gap=border_padding(panel);
-    x=header.left+(vertical?(header.side==DockSide::left?cell_w*.5f*unit+gap:header.width-cell_w*.5f*unit-gap):gap+(cell_w*.5f+cell_w*slot)*unit);
-    y=header.top+(vertical?gap+(cell_h*.5f+cell_h*slot)*unit:header.height*.5f);
+
+    x=header.left+(vertical?(header.side==DockSide::left?cell_w*.5f*unit:header.width-cell_w*.5f*unit):(cell_w*.5f+cell_w*slot)*unit);
+    y=header.top+(vertical?(cell_h*.5f+cell_h*slot)*unit:header.height*.5f);
     // Preserve stock spacing on its original side. All other orientations pack
     // actual cell widths/heights, so rotating a strip introduces no padding.
     if(header.side==stock_header_side(panel) && button_multiplier(panel)==1.f) {
-        if(panel==HudPanel::minimap)y=header.top+gap+(area==0?15.f:area==5?85.f:area==3?115.f:145.f)*unit;
-        else if(panel==HudPanel::character_info)y=header.top+gap+(area==0?15.f:85.f+30.f*area)*unit;
+        if(panel==HudPanel::minimap)y=header.top+(area==0?15.f:area==5?85.f:area==3?115.f:145.f)*unit;
+        else if(panel==HudPanel::character_info)y=header.top+(area==0?15.f:85.f+30.f*area)*unit;
         else if(area==0)x=header.left+header.width*.5f;
-        else x=header.left+gap+(area==1?20.f:50.f)*unit;
+        else x=header.left+(area==1?20.f:50.f)*unit;
     }
     // Signed gaps may overlap the frame. Keep complete controls on the window,
     // and use these exact centres for drawing and native hit inversion.
@@ -491,7 +505,48 @@ MessagePanelBounds HudLayoutContext::message_panel_bounds() noexcept {
     }
     return {left,std::clamp(g_layout.height*g_message_panel.top_y_percent/100.f,0.f,g_layout.height-height),width,height};
 }
+// Candidate-79 quest layout, with typed area publications instead of retail reads.
+RECT HudLayoutContext::quest_area_rect(const HudNativePanel* object,unsigned slot) const noexcept {
+    const auto& area=object->slots[slot];const auto r=area.rect;
+    return {r.left+area.shift.x,r.top+area.shift.y,r.right+area.shift.x,r.bottom+area.shift.y};
+}
+bool HudLayoutContext::quest_slot_bounds(unsigned slot,const HudNativePanel* object,HudPanelBounds& out) noexcept {
+    if(slot<4 || slot>=8 || object->slots.size()<8)return false;
+    RECT group=quest_area_rect(object,4);
+    for(unsigned i=5;i<8;++i){const RECT a=quest_area_rect(object,i);
+        group.left=(std::min)(group.left,a.left);group.top=(std::min)(group.top,a.top);
+        group.right=(std::max)(group.right,a.right);group.bottom=(std::max)(group.bottom,a.bottom);}
+    const RECT r=quest_area_rect(object,slot);
+    const float scale=g_layout.scale*g_quest_items.scale_percent/100.f,unit=g_layout.unit*scale;
+    const float width=float(r.right-r.left)*unit,height=float(r.bottom-r.top)*unit;
+    float left,top;
+    if(g_quest_items.x_percent<0.f || g_quest_items.y_percent<0.f) {
+        const auto anchor=kPanelRoles[unsigned(HudPanel::items)].anchor;
+        const widescreen::HudComposition h{scale,
+            widescreen::placed_to_screen_x(g_layout,widescreen::anchor_pivot_x(g_layout,anchor.x)),
+            widescreen::placed_to_screen_y(g_layout,widescreen::anchor_pivot_y(g_layout,anchor.y)),scale};
+        left=widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r.left)),h);
+        top=widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r.top)),h);
+    } else {
+        const float group_width=float(group.right-group.left)*unit,group_height=float(group.bottom-group.top)*unit;
+        left=(std::max)(0.f,g_layout.width-group_width)*g_quest_items.x_percent/100.f+float(r.left-group.left)*unit;
+        top=(std::max)(0.f,g_layout.height-group_height)*g_quest_items.y_percent/100.f+float(r.top-group.top)*unit;
+    }
+    out={left,top,width,height,width/unit,height/unit};
+    return true;
+}
+bool HudLayoutContext::quest_group_bounds(const HudNativePanel* object,HudPanelBounds& out) noexcept {
+    HudPanelBounds b;if(!quest_slot_bounds(4,object,b))return false;
+    float right=b.left+b.width,bottom=b.top+b.height;out=b;
+    for(unsigned i=5;i<8;++i)if(quest_slot_bounds(i,object,b)){
+        out.left=(std::min)(out.left,b.left);out.top=(std::min)(out.top,b.top);
+        right=(std::max)(right,b.left+b.width);bottom=(std::max)(bottom,b.top+b.height);}
+    const float scale=g_layout.scale*g_quest_items.scale_percent/100.f;
+    out.width=right-out.left;out.height=bottom-out.top;out.native_width=out.width/scale;out.native_height=out.height/scale;
+    return true;
+}
 bool HudLayoutContext::slot_screen_bounds(unsigned panel,unsigned slot,const HudNativePanel* object,HudPanelBounds& out) noexcept {
+    if(panel==unsigned(HudPanel::items) && slot>=4)return quest_slot_bounds(slot,object,out);
     if(!slot_panel(panel) || slot>=layout_slot_count(panel,object))return false;
     HudPanelBounds b;if(!widescreen_hud_panel_bounds(HudPanel(panel),b))return false;
     const int direction=slot_direction(panel);const bool horizontal=direction>=2;
@@ -537,6 +592,11 @@ bool HudLayoutContext::widescreen_hud_header_bounds(HudPanel panel,HudPanelBound
     bounds={left,top,right-left,bottom-top,(right-left)/h.scale,(bottom-top)/h.scale};return true;
 }
 bool HudLayoutContext::widescreen_hud_panel_bounds(HudPanel panel,HudPanelBounds& bounds) noexcept {
+    if(panel==HudPanel::quest_items) {
+        const auto* object=current_panel(unsigned(HudPanel::items));if(!object)return false;
+        bool any=editing;for(unsigned i=4;i<8 && !any;++i)any=active_slot(6,i,object);
+        return any && quest_group_bounds(object,bounds);
+    }
     if(panel==HudPanel::messages) {
         MessagePanelBounds b;
         if(!current_panel(unsigned(panel)))return false; b=message_panel_bounds();
@@ -571,6 +631,11 @@ void HudLayoutContext::widescreen_hud_position_percent(HudPanel panel,float left
 }
 void HudLayoutContext::widescreen_hud_preview_slots(HudPanel panel,std::vector<HudPreviewSlot>& slots) {
     slots.clear();const unsigned index=unsigned(panel);
+    if(panel==HudPanel::quest_items) {
+        const auto* object=current_panel(unsigned(HudPanel::items));if(!editing || !object)return;
+        for(unsigned i=4;i<8;++i)if(!active_slot(6,i,object)){HudPanelBounds b;if(quest_slot_bounds(i,object,b))slots.push_back({b,i-4});}
+        return;
+    }
     if(!editing || !slot_panel(index) || !g_hud_panels[index].preview)return;
     const auto* object=current_panel(index);if(!object)return;
     for(unsigned i=0;i<layout_slot_count(index,object);++i)if(!active_slot(index,i,object)) {
@@ -651,7 +716,7 @@ void HudLayoutContext::set_fade_target(FadeState& state,float target,std::uint64
     state.start_opacity=state.opacity;state.target_opacity=target;state.transition_at=now;
     if((target>state.start_opacity?fade_timing_.in_ms:fade_timing_.out_ms)==0)state.opacity=target;
 }
-void HudLayoutContext::set_hud_fades(const std::array<HudFadeSettings,10>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing,std::uint64_t now) noexcept {
+void HudLayoutContext::set_hud_fades(const std::array<HudFadeSettings,kHudPanels.size()>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing,std::uint64_t now) noexcept {
     reset_fades(now);
     for(unsigned i=0;i<settings.size();++i) {
         if(settings[i].enabled!=fade_settings_[i].enabled) {
@@ -712,7 +777,9 @@ void HudLayoutContext::update_hud_fades(float mouse_x,float mouse_y,std::uint64_
                 1.f:1.f-fade_settings_[i].transparency_percent/100.f;
             set_fade_target(state,target,now);
         }
-        if(!fade_settings_[i].enabled || !object || !object->activity_available)continue;
+        // Like retail c79, the quest widget wakes on its own hover, not on
+        // unrelated quick-item activity from the shared native items object.
+        if(panel==HudPanel::quest_items || !fade_settings_[i].enabled || !object || !object->activity_available)continue;
         if(state.native_values!=object->activity_values) {
             try{state.native_values=object->activity_values;}catch(const std::bad_alloc&){}
             hud_activity(panel,now);
@@ -775,6 +842,11 @@ bool HudLayoutContext::tutorial_bounds(const TutorialTarget& target,HudPanelBoun
     } reader{*this};
     return resolve_tutorial_target(target,reader,bounds);
 }
+void HudLayoutContext::set_quest_items(const QuestItemSettings& settings) noexcept {
+    g_quest_items.scale_percent=std::clamp(settings.scale_percent,50.f,300.f);
+    g_quest_items.x_percent=settings.x_percent<0.f?-1.f:std::clamp(settings.x_percent,0.f,100.f);
+    g_quest_items.y_percent=settings.y_percent<0.f?-1.f:std::clamp(settings.y_percent,0.f,100.f);
+}
 void HudLayoutContext::set_hud_panels(const std::array<HudPanelSettings,7>& settings) noexcept {
     for(unsigned i=0;i<settings.size();++i) {
         g_hud_panels[i].scale_percent=std::clamp(settings[i].scale_percent,50.f,300.f);
@@ -786,7 +858,7 @@ void HudLayoutContext::set_hud_panels(const std::array<HudPanelSettings,7>& sett
         g_hud_panels[i].padding=std::clamp(settings[i].padding,-100.f,100.f);
         g_hud_panels[i].border_padding=std::clamp(settings[i].border_padding,-100.f,100.f);
         g_hud_panels[i].preview=settings[i].preview;
-        g_hud_panels[i].preview_count=std::clamp(settings[i].preview_count,1u,i==5?4u:i==6?8u:32u);
+        g_hud_panels[i].preview_count=std::clamp(settings[i].preview_count,1u,i==5||i==6?4u:32u);
         g_hud_panels[i].slots_per_line=i==4?0u:(std::min)(settings[i].slots_per_line,32u);
     }
 

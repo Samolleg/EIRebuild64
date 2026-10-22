@@ -38,6 +38,22 @@ void set_owned_entry_resolver(OwnedEntryResolver resolver) noexcept;
 // True when `address` lies in a loaded module named addon.dll.
 bool addon_module_contains(const void* address) noexcept;
 
+// A raw replacement: `jmp target` at `entry` into a loaded module that is
+// neither the game image nor this renderer. Only an observe-only detour (it
+// reads the call and continues it unchanged) may forward there, exactly as
+// a game caller of the entry does; the module keeps its behaviour. Returns
+// the target and copies the module's file name, or nullptr.
+const std::uint8_t* raw_replacement_target(const std::uint8_t* entry, wchar_t* module_name,
+                                           std::size_t name_chars) noexcept;
+
+// Observe-only entries: the bridge's audited list of detours that only read
+// the call and continue it unchanged. resolve_entry_owner resolves a raw
+// replacement at such an entry as a chain (dispatcher = the module's jump
+// target, 5 patched bytes, no callback), so every install path forwards to
+// it; the check is told the target and module so it can log once.
+using ObserverEntryCheck = bool (*)(const void* entry, const void* target, const wchar_t* module) noexcept;
+void set_observer_entry_check(ObserverEntryCheck check) noexcept;
+
 // `stock` holds the complete expected stock bytes at `entry` (at least
 // `hook_bytes`, and at least as many as the addon replays). `callback_owned`
 // decides whether a dispatcher's callback belongs to the addon module.

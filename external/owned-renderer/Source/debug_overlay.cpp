@@ -335,6 +335,7 @@ struct DebugOverlay::Implementation {
     ULONGLONG graphics_reset_until = 0;
     char graphics_reset_text[1024] = "";
     bool hud_grid = false;
+    char profile_name[64] = "";
     bool panel_resizing = false;
     ImVec2 panel_drag_start{}, panel_size_start{};
     ImGuiTextFilter settings_filter;
@@ -843,6 +844,17 @@ void reset_interface(RendererConfig& config) {
         }
     }
 }
+// Reset UI asks first: a single click was too easy to hit by mistake.
+void reset_ui_button(RendererConfig& config) {
+    if(ImGui::Button(ui_text("Reset UI")))ImGui::OpenPopup("reset_ui_confirm");
+    if(!ImGui::BeginPopupModal("reset_ui_confirm",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoTitleBar))return;
+    ImGui::TextUnformatted(ui_text("Reset the whole interface to its defaults?"));
+    ImGui::TextDisabled("%s",ui_text("This changes the current interface profile."));
+    if(ImGui::Button(ui_text("Reset UI"))){reset_interface(config);ImGui::CloseCurrentPopup();}
+    ImGui::SameLine();
+    if(ImGui::Button(ui_text("Cancel"))||ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
 // Options grouped "Diagnostics" (debug views such as the critter showcase)
 // get their own tab; the Graphics tab lists every other group.
 constexpr const char* kDiagnosticsGroup = "Diagnostics";
@@ -998,6 +1010,73 @@ void reset_hud_panel(RendererConfig& config,unsigned panel) {
         else if(option.type==RendererOptionType::integer)config.set_integer(option.key.c_str(),option.integer_default);
         else if(option.type==RendererOptionType::floating_point)config.set_floating_point(option.key.c_str(),option.floating_default);
     }
+}
+// Interface profiles (#187): eid3d11_profiles\<name>.ini; the current one
+// (interface_profile, "default" unless chosen) receives every saved change.
+bool valid_profile_name(const std::string& name) {
+    if (name.empty() || name.size() > 48 || name.front() == '.' || name.front() == ' ' || name.back() == ' ') return false;
+    for (const unsigned char c : name) if (c < 32 || std::strchr("\\/:*?\"<>|", c)) return false;
+    return true;
+}
+std::string current_profile_name(const RendererConfig& config) {
+    const auto* option = config.find("interface_profile");
+    return option && valid_profile_name(option->text_value) ? option->text_value : std::string("default");
+}
+std::wstring profile_path(const std::string& name) {
+    std::wstring wide(name.size(), L'\0');
+    const int length = MultiByteToWideChar(CP_UTF8, 0, name.data(), int(name.size()), wide.data(), int(wide.size()));
+    wide.resize(length > 0 ? std::size_t(length) : 0);
+    return interface_profiles_directory() + L"\\" + wide + L".ini";
+}
+bool save_profile_file(const RendererConfig& config, const std::string& name) {
+    CreateDirectoryW(interface_profiles_directory().c_str(), nullptr);
+    return config.save_interface_profile(profile_path(name).c_str());
+}
+std::vector<std::string> list_profiles() {
+    std::vector<std::string> names{"default"};
+    WIN32_FIND_DATAW found{};
+    const HANDLE search = FindFirstFileW((interface_profiles_directory() + L"\\*.ini").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return names;
+    do {
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring stem = found.cFileName;
+        stem.resize(stem.size() - 4);
+        char utf8[256]{};
+        if (WideCharToMultiByte(CP_UTF8, 0, stem.c_str(), -1, utf8, sizeof(utf8), nullptr, nullptr) <= 0) continue;
+        if (valid_profile_name(utf8) && std::find(names.begin(), names.end(), utf8) == names.end()) names.emplace_back(utf8);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    std::sort(names.begin() + 1, names.end());
+    return names;
+}
+void hud_profile_controls(DebugOverlay::Implementation& state, RendererConfig& config) {
+    ImGui::SeparatorText(ui_text("Interface profile"));
+    const std::string current = current_profile_name(config);
+    if (ImGui::BeginCombo(ui_text("Profile"), current.c_str())) {
+        for (const auto& name : list_profiles()) {
+            if (!ImGui::Selectable(name.c_str(), name == current) || name == current) continue;
+            // Keep this profile's unsaved edits, then switch.
+            save_profile_file(config, current);
+            const auto path = profile_path(name);
+            if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) save_profile_file(config, name);
+            else config.load_interface_profile(path.c_str());
+            config.set_text("interface_profile", name.c_str());
+            state.pending_save = true;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::InputText(ui_text("New name"), state.profile_name, sizeof(state.profile_name));
+    ImGui::SameLine();
+    const bool valid = valid_profile_name(state.profile_name);
+    ImGui::BeginDisabled(!valid);
+    if (ImGui::Button(ui_text("Save as"))) {
+        config.set_text("interface_profile", state.profile_name);
+        save_profile_file(config, state.profile_name);
+        state.pending_save = true;
+        state.profile_name[0] = '\0';
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("%s", ui_text(interface_profiles_help()));
 }
 void hud_scale_control(RendererConfig& config,const char* key,const char* label) {
     const auto* option=config.find(key);if(!option)return;
@@ -1191,7 +1270,9 @@ void draw_hud_editor(DebugOverlay::Implementation& state,RendererConfig& config)
                 config.set_integer(timing->key.c_str(),value);
         }
         ImGui::Checkbox(ui_text("Show grid"),&state.hud_grid);
-        if(ImGui::Button(ui_text("Reset UI")))reset_interface(config);
+        hud_profile_controls(state,config);
+        ImGui::Separator();
+        reset_ui_button(config);
         ImGui::SameLine();
         if(ImGui::Button(ui_text("Lock"))){set_game_hud_editing(false);state.pending_save=true;}
         ImGui::TextWrapped(ui_text("Drag anywhere in a panel; resize its lower-right corner. Right-click for this panel's options, coordinates and reset."));
@@ -1237,7 +1318,8 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
             }
             if(ImGui::BeginTabItem(window_title("Interface", "interface").c_str())) {
                 draw_hud_layout_control(state,overlay.config());
-                ImGui::SameLine();if(ImGui::Button(ui_text("Reset UI")))reset_interface(overlay.config());
+                ImGui::SameLine();reset_ui_button(overlay.config());
+                hud_profile_controls(state,overlay.config());
                 draw_graphics_tab(overlay.config(),state.graphics_filter,false,true);
                 if(ImGui::CollapsingHeader(ui_text("Combat healthplates and effects")))state.combat_ui.draw_settings(overlay.config());
                 ImGui::EndTabItem();
@@ -1445,6 +1527,8 @@ void close_settings(DebugOverlay::Implementation& state, RendererConfig& config,
         state.pending_save = true;
     } else {
         restore_options(config, state.settings_snapshot);
+        // A profile switch inside the window already saved; save the revert.
+        state.pending_save = true;
     }
     state.settings_open = false;
     state.settings_first_run = false;
@@ -1728,6 +1812,12 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             ImGui::TextDisabled(ui_text("Developer mode: VSync and the frame rate limit are forced off."));
         const GraphicsPreset detected = detect_graphics_preset(config);
         if (detected != GraphicsPreset::custom) state.preset_slider = static_cast<int>(detected);
+        // Its own section: not part of the interface (Reset UI, profiles).
+        ImGui::SeparatorText(ui_text("Language"));
+        int language = configured_value(config, "ui_language");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::Combo("##ui_language", &language, ui_choices(kUiLanguageChoices)))
+            config.set_integer("ui_language", language);
         ImGui::SeparatorText(ui_text("Preset"));
         ImGui::SetNextItemWidth(-FLT_MIN);
         int slider = state.preset_slider;
@@ -1766,7 +1856,8 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             if(!ImGui::BeginTabItem(window_title(ui_tab?"Interface":"Graphics",ui_tab?"interface":"graphics").c_str()))continue;
             if(ui_tab) {
                 draw_hud_layout_control(state,config);ImGui::SameLine();
-                if(ImGui::Button(ui_text("Reset UI")))reset_interface(config);
+                reset_ui_button(config);
+                hud_profile_controls(state,config);
             }
             if(ImGui::BeginChild(ui_tab?"interface_options":"graphics_options",ImVec2(0,-footer),ImGuiChildFlags_Borders)) {
             std::size_t category_count = 0, setting_count = 0;
@@ -2288,6 +2379,8 @@ void DebugOverlay::maintain() noexcept {
     if (config_.save(implementation_->config_path.c_str())) {
         config_.clear_dirty();
         implementation_->pending_save = false;
+        // Every saved interface change also lands in the current profile.
+        save_profile_file(config_, current_profile_name(config_));
     }
 }
 
@@ -2352,6 +2445,19 @@ void DebugOverlay::add_graphics_reset_notice(const char* text) noexcept {
     const std::size_t used = state.graphics_reset_pending ? std::strlen(state.graphics_reset_text) : 0;
     std::snprintf(state.graphics_reset_text + used, sizeof(state.graphics_reset_text) - used, "%s%s", used ? " " : "", text);
     state.graphics_reset_pending = true;
+}
+
+void DebugOverlay::sync_interface_profile() noexcept {
+    if (!implementation_) return;
+    // The current profile (and "default") always exists: a missing one is
+    // written from the current settings, an existing one applied over them.
+    const auto name = current_profile_name(config_);
+    const auto path = profile_path(name);
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES && config_.load_interface_profile(path.c_str()))
+        implementation_->pending_save = true;
+    else save_profile_file(config_, name);
+    if (name != "default" && GetFileAttributesW(profile_path("default").c_str()) == INVALID_FILE_ATTRIBUTES)
+        save_profile_file(config_, "default");
 }
 
 void DebugOverlay::clear_over_budget_marker() noexcept {
