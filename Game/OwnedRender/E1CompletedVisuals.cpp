@@ -8,6 +8,7 @@
 #include "../WorldClient.h"
 #include "../Object3DClientSpecific.h"
 #include "../Unit.h"
+#include "../UnitClientSpecific.h"
 #include "embedded_host.h"
 
 namespace OwnedRender {
@@ -85,18 +86,28 @@ bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
 // Capture only on the synchronous host seam, before either depth or colour.
 // The retained scene still owns completed object poses; changing a frame's
 // rendering class must never switch the scene to the retail route evaluator.
-bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept try {
-    E3CombatCatalog();
+namespace {
+bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcept try {
+    if (combat) E3CombatCatalog();
     for(auto& sample:frame.entities) {
         if(sample.status!=owned::RetainedVisualStatus::ready || !sample.assembly)continue;
         auto* object=theWorld.GetMapObject(sample.resource.signed_id);
         if(!object || object->WhoAmI()!=HPC_UNIT)continue;
         const auto current=E1Scene().Resource(object);
         if(current.serial!=sample.resource.serial)return false;
-        E3CombatPublishUnit(static_cast<CUnit*>(object));
+        auto* unit=static_cast<CUnit*>(object);
+        if (combat) E3CombatPublishUnit(unit);
         sample.completed_pose=true;
         sample.values.unit=true;
-        sample.values.dead=static_cast<CUnit*>(object)->IsDead()!=FALSE;
+        sample.values.dead=unit->IsDead()!=FALSE;
+        sample.values.invisible=unit->IsInvisible()!=FALSE;
+        sample.values.pose=static_cast<std::uint8_t>(unit->GetCurrentPose());
+        sample.values.moving=unit->IsMoving()!=FALSE;
+        sample.values.locomotion=unit->GetUserUnitStats()->cLocomotion;
+        sample.values.target_half_extent={unit->GetBoundingVolume().ptMax.x,
+            unit->GetBoundingVolume().ptMax.y};
+        if (auto* specific=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific()))
+            sample.values.fade_alpha=specific->GetFadeOutAlpha();
         sample.visibility.casts_shadow=object->CheckFlag(OBJ_NOSHADOW)==0;
         sample.values.object_flags=(sample.values.object_flags&~0x00400000u)|
             (object->CheckFlag(UNIT_VISIBLE)?0x00400000u:0u);
@@ -107,5 +118,12 @@ bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept try {
 } catch(...) {
     owned::embedded_report_render_failure("object_render_plan_failure","embedded.completed_visuals");
     return false;
+}
+}
+bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept {
+    return completeVisualFrame(frame, true);
+}
+bool E1CompleteAmbientFrame(owned::RetainedVisualFrame& frame) noexcept {
+    return completeVisualFrame(frame, false);
 }
 }

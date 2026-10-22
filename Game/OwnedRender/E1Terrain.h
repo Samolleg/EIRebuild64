@@ -8,7 +8,8 @@ using E1TerrainRead = HRESULT (__cdecl *)(void*, const char*, void*, std::uint32
 // Synchronously copies completed source members. No owner/callback enters renderer assets.
 bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_t revision,
     const char* project, const char* header, E1TerrainRead read, void* context,
-    std::string& failure) noexcept;
+    std::string& failure, E1TerrainRead readTexture = nullptr,
+    void* textureContext = nullptr) noexcept;
 bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept;
 bool E1ShadowTerrain(owned::EmbeddedVisualFrameInputs& inputs,
     owned::RetainedTerrainSourceSnapshot& pinned) noexcept;

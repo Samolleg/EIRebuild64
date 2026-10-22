@@ -5,6 +5,7 @@
 #include "E1AmbientEffects.h"
 #include "E1Terrain.h"
 #include "E1World.h"
+#include "E1VisualFrame.h"
 #include "E2LoadReveal.h"
 #include "ground_cover.h"
 #include "retained_static_submission.h"
@@ -18,6 +19,16 @@ struct CurrentAmbientFrame {
     std::uint64_t world = 0;
 };
 
+struct AmbientVisualFrame {
+    std::uint64_t world = 0, serial = 0;
+    std::shared_ptr<const owned::RetainedVisualFrame> visuals;
+};
+AmbientVisualFrame& ambient_visual_frame() {
+    // Released by the existing world/footprint retirement boundary.
+    static AmbientVisualFrame* value = new AmbientVisualFrame;
+    return *value;
+}
+
 bool current_ambient_frame(CurrentAmbientFrame& output) noexcept try {
     output = {};
     owned::WorldEnvironment environment{};
@@ -25,8 +36,19 @@ bool current_ambient_frame(CurrentAmbientFrame& output) noexcept try {
     if (!output.world || !OwnedRender::E1ReadWorldEnvironment(environment) ||
         !OwnedRender::E1Scene().CurrentWorld(output.world)) return false;
     OwnedRender::E1CurrentTerrainSource(output.terrain);
-    output.visuals = OwnedRender::E1Scene().Scene().visual_frame_value(environment.world_time);
-    return bool(output.visuals);
+    auto& cached = ambient_visual_frame();
+    const auto serial = owned::bridge_scene_world_to_clip_snapshot().scene_frame_serial;
+    if (cached.world != output.world || cached.serial != serial || !cached.visuals) {
+        cached = {};
+        const auto source = OwnedRender::E1Scene().Scene().visual_frame_value(environment.world_time);
+        if (!source) return false;
+        auto completed = std::make_shared<owned::RetainedVisualFrame>(*source);
+        if (!OwnedRender::E1CompleteAmbientFrame(*completed)) return false;
+        cached.world = output.world; cached.serial = serial;
+        cached.visuals = std::move(completed);
+    }
+    output.visuals = cached.visuals;
+    return true;
 } catch (...) {
     output = {};
     return false;
@@ -83,6 +105,7 @@ const owned::TextureCpuAsset* tree_atlas(const owned::RetainedTerrainSourceSnaps
 
 namespace OwnedRender {
 void E1ResetGroundCoverFootprints() noexcept {
+    ambient_visual_frame() = {};
     created_ground_footprints.clear();
     published_ground_footprints.clear();
     published_ground_trails.clear();

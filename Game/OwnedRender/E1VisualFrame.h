@@ -11,6 +11,8 @@ namespace OwnedRender {
 bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
     owned::VisualResourceIncarnation resource) noexcept;
 bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept;
+// The same completed unit facts for cover/contacts, without HUD publication.
+bool E1CompleteAmbientFrame(owned::RetainedVisualFrame& frame) noexcept;
 // Host values of one world draw, without renderer headers (WorldClient).
 struct E1VisualInputs {
     double time = 0;                        // segment ticks + fraction

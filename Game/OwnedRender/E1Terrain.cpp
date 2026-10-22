@@ -52,7 +52,7 @@ bool E1ShadowTerrain(owned::EmbeddedVisualFrameInputs& inputs,
 }
 bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_t revision,
     const char* project, const char* header, E1TerrainRead read, void* context,
-    std::string& failure) noexcept try {
+    std::string& failure, E1TerrainRead readTexture, void* textureContext) noexcept try {
     failure.clear();
     if (!owner || !world || !revision || !project || !header || !read) {
         clear(); failure = "terrain source identity missing"; return false;
@@ -64,25 +64,44 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
     identity.canonical_name = project; identity.container_incarnation = nextGeneration;
     auto terrain = std::make_shared<owned::TerrainCpuAsset>();
     owned::ResourceFailure error;
-    const auto resolve = [&](const std::string& name, owned::ResourceBlob& blob, owned::ResourceFailure& why) {
+    const auto copy = [&](E1TerrainRead reader, void* readerContext, const std::string& name,
+        owned::ResourceBlob& blob, owned::ResourceFailure& why) {
         blob = {};
         std::uint32_t bytes = 0;
-        HRESULT hr = read(context, name.c_str(), nullptr, 0, &bytes);
+        HRESULT hr = reader(readerContext, name.c_str(), nullptr, 0, &bytes);
         if (FAILED(hr) || !bytes) {
             why = {owned::ResourceFailureCode::file_read, "terrain member size unavailable: " + name}; return false;
         }
-        auto copy = std::make_shared<std::vector<std::uint8_t>>(bytes);
+        auto bytesCopy = std::make_shared<std::vector<std::uint8_t>>(bytes);
         std::uint32_t actual = 0;
-        hr = read(context, name.c_str(), copy->data(), bytes, &actual);
+        hr = reader(readerContext, name.c_str(), bytesCopy->data(), bytes, &actual);
         if (FAILED(hr) || actual != bytes) {
             why = {owned::ResourceFailureCode::file_read, "terrain member changed during copy: " + name}; return false;
         }
         blob.identity = identity; blob.identity.canonical_name = name; blob.identity.bytes = bytes;
-        blob.bytes = std::move(copy); return true;
+        blob.bytes = std::move(bytesCopy); return true;
+    };
+    const auto resolve = [&](const std::string& name, owned::ResourceBlob& blob, owned::ResourceFailure& why) {
+        return copy(read, context, name, blob, why);
     };
     if (!owned::parse_terrain_members(identity, project, header, resolve, *terrain, error) ||
         !owned::validate_terrain_asset_descriptor_once(*terrain)) {
         failure = error.message.empty() ? "terrain descriptor invalid" : error.message; return false;
+    }
+    // The retail map loader classifies painted water/swamp transitions from
+    // selected CPU atlas bytes. Host GPU surfaces alone cannot supply them.
+    // Keep the host's existing surface/mip upload path; these pages supply
+    // only the shared classifier and its generated swamp frame.
+    if (readTexture) {
+        terrain->pages.resize(terrain->texture_resources.size());
+        for (std::size_t page = 0; page < terrain->pages.size(); ++page) {
+            owned::ResourceBlob blob;
+            auto texture = std::make_shared<owned::TextureCpuAsset>();
+            if (copy(readTexture, textureContext, terrain->texture_resources[page] + ".mmp", blob, error) &&
+                owned::parse_texture_asset(blob, *texture, error))
+                terrain->pages[page].texture = std::move(texture);
+        }
+        owned::owned_terrain_classify_swamp_frames(*terrain);
     }
     source.source_generation = nextGeneration; source.source_revision = revision;
     source.prepared = std::make_shared<owned::OwnedTerrainPreparedResources>();

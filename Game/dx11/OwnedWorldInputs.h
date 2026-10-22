@@ -64,7 +64,7 @@ inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureMana
     input.layer_shifts=shifts.data();input.layer_count=uint32_t(shifts.size());Check(renderer.SetTerrain(source));
     std::string failure;
     if (!OwnedRender::E1PublishTerrainSource(&terrain, generation, source.source_revision,
-        project.c_str(), header.c_str(), ReadMap, &terrain, failure)) {
+        project.c_str(), header.c_str(), ReadMap, &terrain, failure, ReadTexture, textures)) {
         GameJournal::Event("RENDER", "terrain_publication_failed", "%s", failure.c_str());
         throw E_FAIL;
     }
