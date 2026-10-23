@@ -9,6 +9,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Notification.h"
 #include <io.h>
 #include <fcntl.h>
+#include <atomic>
+namespace { std::atomic<std::uint64_t> resourcePayloadBytes{0}; }
+std::uint64_t CMappedResource::LivePayloadBytes() noexcept { return resourcePayloadBytes.load(std::memory_order_relaxed); }
 
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -36,10 +39,10 @@ CMappedResource::~CMappedResource()
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
-void CMappedResource::OpenOverlays(LPCSTR name,bool write){
+void CMappedResource::OpenOverlays(LPCSTR name,bool write,bool mapped){
  overlays.clear();ignoreOriginal=false;if(rawResource||write||!ModRuntime::Resources())return;
  std::vector<std::string> paths;ModRuntime::Resources()->ResourcePlan(name,paths,ignoreOriginal);
- for(const auto&path:paths){if(!std::filesystem::is_regular_file(path))throw std::runtime_error("Missing mod resource: "+path);auto child=std::make_unique<CMappedResource>(true);if(!child->OpenResource(path.c_str()))throw std::runtime_error("Cannot open mod resource: "+path);overlays.push_back(std::move(child));}
+ for(const auto&path:paths){if(!std::filesystem::is_regular_file(path))throw std::runtime_error("Missing mod resource: "+path);std::unique_ptr<CMappedResource> child = mapped ? std::unique_ptr<CMappedResource>(new CWin32MappedResource(true)) : std::make_unique<CMappedResource>(true);if(!child->OpenResource(path.c_str()))throw std::runtime_error("Cannot open mod resource: "+path);overlays.push_back(std::move(child));}
 }
 namespace {
 std::vector<std::string> BriefingCandidates(LPCSTR path)
@@ -216,6 +219,7 @@ LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
     if (_lseek(hFile, pRec->dwFilePos, SEEK_SET) == -1 ||
         _read(hFile, pRec->pAllocatedMemory, pRec->dwSize) != pRec->dwSize)
     {
+        delete[] pRec->pAllocatedMemory;
         delete pRec;
         return NULL;
     }
@@ -224,6 +228,7 @@ LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
 
     recByName[pRec->szName] = pRec;
     recByData[DWORD(pRec->pAllocatedMemory)] = pRec;
+    resourcePayloadBytes.fetch_add(pRec->dwSize, std::memory_order_relaxed);
     return pRec->pAllocatedMemory;
 }
 
@@ -251,6 +256,7 @@ bool CMappedResource::CloseFile(LPBYTE pFileImage)
                         CString(pFileImage) + "\"");
         recByData.erase(pos);
         recByName.erase(recByName.find(pRec->szName));
+        resourcePayloadBytes.fetch_sub(pRec->dwSize, std::memory_order_relaxed);
         delete[] pRec->pAllocatedMemory;
         delete pRec;
     }
@@ -265,6 +271,7 @@ void CMappedResource::CloseAllFiles()
 
     for (auto pos = recByData.begin(); pos != recByData.end(); ++pos)
     {
+        resourcePayloadBytes.fetch_sub(pos->second->dwSize, std::memory_order_relaxed);
         delete[] pos->second->pAllocatedMemory;
         delete pos->second;
     }
@@ -277,7 +284,7 @@ void CMappedResource::CloseAllFiles()
 // ******************************************************************************** //
 /////////////////////////////////////////////////////////////////////////////////////
 //--------------------------------------------------------------------------------------------
-CWin32MappedResource::CWin32MappedResource()
+CWin32MappedResource::CWin32MappedResource(bool raw) : CMappedResource(raw)
 {
     pBaseAddress = NULL;
 }
@@ -288,7 +295,7 @@ CWin32MappedResource::~CWin32MappedResource()
 //--------------------------------------------------------------------------------------------
 BOOL CWin32MappedResource::OpenResource(LPCSTR pszFileName, BOOL bWriteAccess)
 {
-    CloseResource();OpenOverlays(pszFileName,bWriteAccess);if(ignoreOriginal)return TRUE;
+    CloseResource();sourcePath=pszFileName;OpenOverlays(pszFileName,bWriteAccess,true);if(ignoreOriginal)return TRUE;
     if (!cMappedFile.Open(pszFileName, bWriteAccess))
         return FALSE;
     if (OpenResourceMem((LPBYTE)cMappedFile.GetAddress()))

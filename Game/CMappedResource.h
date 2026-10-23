@@ -9,6 +9,7 @@ Nival Entertainment, 1998
 #include "Win32Classes.h"
 #include "CResourceBase.h"
 #include <string>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -25,10 +26,11 @@ private:
 
 public:
     explicit CMappedResource(bool raw=false);
+    static std::uint64_t LivePayloadBytes() noexcept;
     std::string sourcePath;
     bool rawResource=false,ignoreOriginal=false;
     std::vector<std::unique_ptr<CMappedResource>> overlays;
-    void OpenOverlays(LPCSTR,bool);
+    void OpenOverlays(LPCSTR,bool,bool mapped=false);
     LPBYTE OverlayFile(LPCSTR,LPDWORD);
     virtual LPBYTE GetFileExact(LPCSTR, LPDWORD);
     bool IsFileExistExact(LPCSTR);
@@ -54,7 +56,7 @@ private:
     CMappedFile cMappedFile; // FileMapping object for file
     LPBYTE pBaseAddress;     // base address
 public:
-    CWin32MappedResource();
+    explicit CWin32MappedResource(bool raw=false);
     virtual ~CWin32MappedResource();
 
     // Открывает ресурсный файл, для информации по pAccelTable см. CResourceBase.h

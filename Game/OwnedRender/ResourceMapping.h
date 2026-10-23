@@ -6,6 +6,6 @@ namespace OwnedRender {
 // register only successful, offset-zero, full-file mappings and retire their
 // provenance under the same lock as the actual unmap. Queries do not extend
 // the caller's view lifetime; the caller must still own its CMappedFile.
-void* MapResourceView(HANDLE mapping, DWORD access, DWORD fileSize) noexcept;
+void* MapResourceView(HANDLE mapping, DWORD access, DWORD fileSize, HANDLE file = INVALID_HANDLE_VALUE) noexcept;
 BOOL UnmapResourceView(const void* view) noexcept;
 }

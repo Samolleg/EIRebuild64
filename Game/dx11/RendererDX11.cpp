@@ -33,6 +33,21 @@
 using Microsoft::WRL::ComPtr;
 
 float G_CLEAR_DEPTH_VALUE = 1.0;
+void CDX11::RetireOwnedWorld() noexcept {
+    if (!rendererFacade || !rendererFacade->Ready()) return;
+    const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.retire_embedded_world();
+    });
+    if (FAILED(hr)) GameJournal::Event("ERROR", "world_retire", "hr=%08lx", static_cast<unsigned long>(hr));
+    else GameJournal::MemorySnapshot("world_retired");
+}
+owned::RendererMemoryCounters CDX11::ReadOwnedMemoryCounters() noexcept {
+    owned::RendererMemoryCounters counters;
+    if (rendererFacade && rendererFacade->Ready()) rendererFacade->Visit([&](owned::Renderer& renderer) {
+        counters = renderer.read_memory_counters(); return S_OK;
+    });
+    return counters;
+}
 D3D11_CULL_MODE G_CULL_MODE = D3D11_CULL_MODE::D3D11_CULL_BACK;
 D3D11_COMPARISON_FUNC G_DEPTH_FUNC = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_LESS_EQUAL;
 

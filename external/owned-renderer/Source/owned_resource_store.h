@@ -11,6 +11,8 @@
 #include <vector>
 
 namespace owned {
+// All store instances, including neighbour workers and host-selected sources.
+std::uint64_t owned_resource_live_bytes() noexcept;
 
 enum class ResourceFailureCode : std::uint8_t {
     none,

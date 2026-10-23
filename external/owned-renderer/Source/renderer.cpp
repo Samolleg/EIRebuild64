@@ -4000,6 +4000,38 @@ const char* Renderer::terrain_profile_scope(bool neighbour,bool tessellated,Terr
  return names[neighbour?1:0][tessellated?1:0][static_cast<unsigned>(part)];
 }
 bool Renderer::owned_ui_text_enabled() const noexcept{return configured_boolean(debug_overlay_.config(),"owned_ui_text",false);}
+HRESULT Renderer::retire_embedded_world(){
+ const SceneInlineScope scene_inline(this,"world_retire");
+ if(!context_)return S_FALSE;
+ // Drain the last world's commands before dropping their owners. Do this
+ // at host retirement, before any next-world decoding or neighbour prebuild.
+ HRESULT hr=flush_native();if(FAILED(hr))return hr;
+ if(FAILED(hr=composite_world()))return hr;
+ if(FAILED(hr=render_pending_blits()))return hr;
+ world_state_epoch_=bridge_current_world_epoch();
+ release_world_state();scene_world_epoch_=world_state_epoch_;
+ return S_OK;
+}
+RendererMemoryCounters Renderer::read_memory_counters(){
+ const SceneInlineScope scene_inline(this,"memory_snapshot");
+ RendererMemoryCounters out;
+ out.available=context_!=nullptr;
+ out.geometry=native_geometry_capacity_bytes();
+ {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);
+  for(const auto& item:native_owned_textures_)if(!item.second.camp_surface_alias&&!item.second.surface_shared)
+   out.textures+=texture_storage_bytes(item.second.texture.Get());}
+ for(const auto& group:native_texture_arrays_)for(const auto& page:group.second)
+  out.textures+=texture_storage_bytes(page.texture.Get());
+ out.animation=native_animation_capacity_+std::uint64_t(native_pose_node_capacity_)*sizeof(NativePoseNodeGpu)+
+  std::uint64_t(native_pose_input_capacity_)*sizeof(NativePoseGpu);
+ out.world=std::uint64_t(native_world_vertex_capacity_)*sizeof(NativeWorldVertexGpu)+
+  std::uint64_t(native_world_state_capacity_)*sizeof(NativeWorldStateGpu)+
+  std::uint64_t(native_persistent_instance_capacity_)*(sizeof(NativeInstanceGpu)+sizeof(NativeDrawGpu));
+ out.surfaceCpu=g_cpu_surface_bytes.load(std::memory_order_relaxed);
+ out.surfaceGpu=g_gpu_surface_bytes.load(std::memory_order_relaxed);
+ out.neighbours=neighbours_.accepted.size();
+ return out;
+}
 HRESULT Renderer::begin_engine_frame(){
  // The world epoch is read here, on the game thread, once. A new epoch
  // releases world state on both sides (release_world_state with the bridge's

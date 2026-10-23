@@ -11,6 +11,9 @@
 #include "Renderer.h"
 #include "dx11/RendererDX11.h"
 #include <dxgi1_4.h>
+#include "CMappedResource.h"
+#include "../external/owned-renderer/Source/owned_resource_store.h"
+#include "../external/owned-renderer/Source/res_mapping.h"
 #endif
 #include "GameJournal.h"
 #include "CrashEvidence.h"
@@ -77,10 +80,11 @@ struct State {
     DWORD limit = 20 * 1024 * 1024;
     unsigned long long bytes = 0;
     bool capped = false;
-    DWORD gameThread=0, memoryTick=0, textureTick=0;
+    DWORD gameThread=0, memoryTick=0, textureTick=0, resourceTick=0;
     SRWLOCK memoryLock=SRWLOCK_INIT;
     TextureMemory textures;
     GpuMemory gpu;
+    ResourceMemory resources;
     char zone[384]="unknown";
     bool memoryEnded=false;
 };
@@ -434,9 +438,10 @@ bool MemoryContains(const char* text,const char* needle) noexcept {
     }return false;
 }
 
-void ReadGameMemory(State& s) noexcept {
+void ReadGameMemory(State& s, bool failure) noexcept {
     if(GetCurrentThreadId()!=s.gameThread)return;
     TextureMemory textures;GpuMemory gpu;char zone[384]="unknown";
+    ResourceMemory resources;
 #ifndef GAME_JOURNAL_STANDALONE
     try {
         if(auto* manager=theWorld.GetTextureManager())textures=manager->ReadMemoryCounters();
@@ -450,6 +455,17 @@ void ReadGameMemory(State& s) noexcept {
             }
         }
         auto* renderer=GetRenderer();auto* dx=renderer?renderer->GetD3D():nullptr;
+        resources.hostPayload=CMappedResource::LivePayloadBytes();
+        resources.ownedImmutable=owned::owned_resource_live_bytes();
+        const auto mappings=owned::res_mapping_snapshot();
+        resources.mappedArchives=mappings.physical_view_bytes;resources.mappedSaved=mappings.active_saved_view_bytes;
+        // An error handler must not synchronize/re-enter the render queue.
+        if(!failure && dx) {
+            const auto owned=dx->ReadOwnedMemoryCounters();
+            resources.rendererAvailable=owned.available;resources.geometry=owned.geometry;
+            resources.textures=owned.textures;resources.animation=owned.animation;resources.world=owned.world;
+            resources.surfaceCpu=owned.surfaceCpu;resources.surfaceGpu=owned.surfaceGpu;resources.neighbours=owned.neighbours;
+        }
         auto device=dx?dx->GetDevice():Microsoft::WRL::ComPtr<ID3D11Device>();
         if(device){
             Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
@@ -465,6 +481,7 @@ void ReadGameMemory(State& s) noexcept {
     }catch(...){} // Observation must not escape into the game's error policy.
 #endif
     AcquireSRWLockExclusive(&s.memoryLock);
+    if(!failure){s.resources=resources;s.resourceTick=GetTickCount();}
     s.textures=textures;s.gpu=gpu;strcpy_s(s.zone,zone);s.textureTick=GetTickCount();
     ReleaseSRWLockExclusive(&s.memoryLock);
 }
@@ -474,14 +491,18 @@ void MemorySnapshot(const char* reason,const char* allocationSource) noexcept {
     const bool failure=!strcmp(reason,"alloc_failure");
     // Called from existing handlers after stack unwinding; only the owner reads live providers.
     // A background allocation failure uses the last complete owner snapshot.
-    ReadGameMemory(*s);
+    ReadGameMemory(*s,failure);
     TextureMemory textures;GpuMemory gpu;char zone[384]="unknown";DWORD observed=0;
+    ResourceMemory resources;
+    DWORD resourceObserved=0;
     if(TryAcquireSRWLockShared(&s->memoryLock)){
         textures=s->textures;gpu=s->gpu;strcpy_s(zone,s->zone);observed=s->textureTick;
+        resources=s->resources;
+        resourceObserved=s->resourceTick;
         ReleaseSRWLockShared(&s->memoryLock);
     }
     const auto memory=CollectProcessMemory();constexpr double mb=1024.0*1024.0;
-    SYSTEMTIME time={};GetLocalTime(&time);char line[3072]={};
+    SYSTEMTIME time={};GetLocalTime(&time);char line[5120]={};
     int length=_snprintf_s(line,sizeof(line),_TRUNCATE,
         "%02u:%02u:%02u.%03u g=%lu %sMEMORY snapshot reason=%s zone=\"%s\" source=%s "
         "process_valid=%d private_mb=%.3f working_set_mb=%.3f peak_working_set_mb=%.3f pagefile_mb=%.3f "
@@ -498,6 +519,21 @@ void MemorySnapshot(const char* reason,const char* allocationSource) noexcept {
         textures.lruBytes,textures.lruAllowed,textures.cacheCount,textures.cacheBytes,
         GetCurrentThreadId()==s->gameThread?"current":"cached",observed?GetTickCount()-observed:0);
     if(length<0)return;
+    length+=sprintf_s(line+length,sizeof(line)-length,
+        " va_private_commit_mb=%.3f va_mapped_commit_mb=%.3f va_image_commit_mb=%.3f va_reserved_mb=%.3f"
+        " heaps_complete=%d heaps_summarized=%u heap_allocated_mb=%.3f heap_committed_mb=%.3f heap_reserved_mb=%.3f"
+        " crt_heap_valid=%d crt_heap_allocated_mb=%.3f crt_heap_committed_mb=%.3f"
+        " private_nonheap_commit_mb=%.3f host_resource_payload_mb=%.3f host_mapped_files_mb=%.3f host_mapping_saved_mb=%.3f owned_immutable_mb=%.3f"
+        " renderer_counters_valid=%d renderer_geometry_mb=%.3f renderer_texture_cache_mb=%.3f renderer_animation_mb=%.3f"
+        " renderer_world_mb=%.3f renderer_surface_cpu_mb=%.3f renderer_surface_gpu_mb=%.3f renderer_neighbours=%llu resource_snapshot=%s resource_age_ms=%lu",
+        memory.privateCommit/mb,memory.mappedCommit/mb,memory.imageCommit/mb,memory.reserved/mb,
+        memory.heapsComplete,memory.heapsSummarized,memory.heapAllocated/mb,memory.heapCommitted/mb,memory.heapReserved/mb,
+        memory.crtValid,memory.crtAllocated/mb,memory.crtCommitted/mb,
+        memory.heapsComplete && memory.privateCommit>=memory.heapCommitted?(memory.privateCommit-memory.heapCommitted)/mb:-1.0,
+        resources.hostPayload/mb,resources.mappedArchives/mb,resources.mappedSaved/mb,resources.ownedImmutable/mb,
+        resources.rendererAvailable,resources.geometry/mb,resources.textures/mb,resources.animation/mb,resources.world/mb,
+        resources.surfaceCpu/mb,resources.surfaceGpu/mb,resources.neighbours,
+        !failure && GetCurrentThreadId()==s->gameThread?"current":"cached",resourceObserved?GetTickCount()-resourceObserved:0);
     if(gpu.local)length+=sprintf_s(line+length,sizeof(line)-length," gpu_local_usage_mb=%.3f gpu_local_budget_mb=%.3f",gpu.localUsage/mb,gpu.localBudget/mb);
     if(gpu.nonlocal)length+=sprintf_s(line+length,sizeof(line)-length," gpu_nonlocal_usage_mb=%.3f gpu_nonlocal_budget_mb=%.3f",gpu.nonlocalUsage/mb,gpu.nonlocalBudget/mb);
     if(length<=0 || size_t(length)+2>=sizeof(line))return;

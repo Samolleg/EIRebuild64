@@ -107,9 +107,9 @@ BOOL CMappedFile::Open(LPCSTR szFileName, BOOL bWriteAccess)
     }
     // Create view of file
     if (bWriteAccess)
-        pView = OwnedRender::MapResourceView(hMapping, FILE_MAP_WRITE, dwFileSize);
+        pView = OwnedRender::MapResourceView(hMapping, FILE_MAP_WRITE, dwFileSize, hFile);
     else
-        pView = OwnedRender::MapResourceView(hMapping, FILE_MAP_READ, dwFileSize);
+        pView = OwnedRender::MapResourceView(hMapping, FILE_MAP_READ, dwFileSize, hFile);
     if (NULL == pView)
     {
         DWORD dwErrorCode = GetLastError();

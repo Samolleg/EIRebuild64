@@ -46,7 +46,7 @@ BOOL CGeometryManager::AddResource(const std::string &szFileName)
     resources.push_back(SResourceDescriptor());
     SResourceDescriptor &descriptor = resources.back();
     descriptor.szName = szFileName;
-    descriptor.pResource = dbgnew CMappedResource();
+    descriptor.pResource = dbgnew CWin32MappedResource();
     if (!descriptor.pResource->OpenResource(szFileName.c_str()))
     {
         resources.pop_back();
