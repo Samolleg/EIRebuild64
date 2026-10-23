@@ -88,7 +88,7 @@ bool E1AnimationSelectionCache::Select(std::uint64_t worldEpoch,
     }
     if (!cache.animationBlob.bytes) {
         owned::ResourceFailure failure;
-        if (!owned::retained_visual_resolve_native_anm(animationResourceName,
+        if (!owned::retained_visual_copy_selected_memory(animationResourceName,
             selectedAnimation, animationSize, cache.animationBlob,
             cache.animationGeneration, failure) || !cache.animationGeneration ||
             cache.animationGeneration != cache.databaseGeneration)
@@ -135,7 +135,7 @@ bool E1BuildAnimationSelection(const std::string& databaseName,
 
     owned::ResourceBlob animation;
     std::uint64_t animationGeneration = 0;
-    if (!owned::retained_visual_resolve_native_anm(animationResourceName,
+    if (!owned::retained_visual_copy_selected_memory(animationResourceName,
         selectedAnimation, animationSize, animation, animationGeneration, failure) ||
         !animationGeneration) return false;
     auto clip = owned::retained_visual_clip_asset(animation,
