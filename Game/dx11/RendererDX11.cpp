@@ -34,6 +34,7 @@ using Microsoft::WRL::ComPtr;
 
 float G_CLEAR_DEPTH_VALUE = 1.0;
 void CDX11::RetireOwnedWorld() noexcept {
+    const auto access = ownedRenderer.LockFrame();
     if (!rendererFacade || !rendererFacade->Ready()) return;
     const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
         return renderer.retire_embedded_world();
@@ -42,6 +43,7 @@ void CDX11::RetireOwnedWorld() noexcept {
     else GameJournal::MemorySnapshot("world_retired");
 }
 owned::RendererMemoryCounters CDX11::ReadOwnedMemoryCounters() noexcept {
+    const auto access = ownedRenderer.LockFrame();
     owned::RendererMemoryCounters counters;
     if (rendererFacade && rendererFacade->Ready()) rendererFacade->Visit([&](owned::Renderer& renderer) {
         counters = renderer.read_memory_counters(); return S_OK;

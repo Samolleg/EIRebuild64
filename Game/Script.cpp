@@ -2780,7 +2780,7 @@ void SOneScript::Store(CSave &file)
 
 void CScript::RunScript(SSCCmd *pCmd)
 {
-    GameJournal::Event("SCRIPT", "run", "name=%s", GameJournal::Quote(pCmd->szParams[0]).c_str());
+    GameJournal::Count("SCRIPT", "run", pCmd->szParams[0]);
     int i;
     POSITION pos;
     SOneScript *pNewScript;
