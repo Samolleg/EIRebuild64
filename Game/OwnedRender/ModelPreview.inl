@@ -128,7 +128,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             return true;
         }, illumination)) return reject("preview.lighting");
     const BYTE fog = (presentation && presentation->default_fog) || lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG) ? 255 :
-        static_cast<CWorldClient*>(GetWorld())->GetTerrain()->GetFogAlpha(lpObject->GetCP());
+        static_cast<CWorldClient*>(GetWorld())->GetTerrain()->GetObjectFogAlpha(lpObject->GetCP());
     const double textureTime = theWorld.GetPreciseTime();
     // Even an omitted preview must leave no wound binding for the next caller.
     struct Unbind { CRenderer* renderer; ~Unbind() { renderer->BindTexture(1, static_cast<CDXGISurface*>(nullptr)); } } unbind{renderer};

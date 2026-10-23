@@ -3124,7 +3124,7 @@ BOOL CWorldClient::Draw()
         visuals.sunDirection = frameValues.lighting.sunlight_direction;
         visuals.lightingValid = frameValues.lightingValid;
         visuals.fog = [](void* terrain, const float* p) -> unsigned char {
-            return static_cast<CTerrain*>(terrain)->GetFogAlpha(CPlot3D(p[0], p[1], p[2]));
+            return static_cast<CTerrain*>(terrain)->GetObjectFogAlpha(CPlot3D(p[0], p[1], p[2]));
         };
         visuals.fogContext = pTerrain;
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());

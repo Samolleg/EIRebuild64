@@ -16,6 +16,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Terrain.h"
 #include "OwnedRender/NeighbourTerrain.h"
 #include "OwnedRender/E1Terrain.h"
+#include "../external/owned-renderer/Source/neighbour_maps.h"
 
 #include "mapFormat.h"
 
@@ -1630,6 +1631,14 @@ void CTerrain::UpdateLight(CLight *pLight, CPlot3D *pMoveVector, SSectorRect *pR
 }
 
 // Fog
+
+BYTE CTerrain::GetObjectFogAlpha(const CPlot3D &plot) const
+{
+    const float position[2] = {plot.x, plot.y};
+    return owned::neighbour_continued_border_fog(
+        owned::ObjectBorderFogInputs{{GetMaxX(), GetMaxY()}, theSettings.fpTerrainBorderFogDistance,
+            IsHaveRenderState(ETRS_BORDER_FOG) != FALSE}, position, GetFogAlpha(plot));
+}
 
 BYTE CTerrain::GetFogAlpha(const CPlot3D &plot) const
 {

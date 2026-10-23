@@ -7207,26 +7207,14 @@ private:
 // plus the neighbour seam curve (neighbour_fog.h), as the shaders do.
 BYTE neighbour_continued_border_fog(const void* terrain,const float* position,
                                     BYTE fog) noexcept {
-    const auto published=neighbour_border_fog();
-    const NeighbourBounds shift{published.edges.x0-published.active.x0,published.edges.y0-published.active.y0,
-        published.edges.x1-published.active.x1,published.edges.y1-published.active.y1};
-    const auto field=neighbour_fog_field(published.active,published.contacts,published.range);
-    if(!field.span.any(0) && !field.span.any(1) && !field.span.any(2) && !field.span.any(3))return fog;
     __try {
         const auto* bytes=static_cast<const std::uint8_t*>(terrain);
         if((*reinterpret_cast<const std::uint32_t*>(bytes+kTerrainRenderStateOffset)&4u)==0u)return fog;
         const auto* image=reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
         const float distance=*reinterpret_cast<const float*>(image+0x0039bd34);
         const auto* extent=reinterpret_cast<const float*>(bytes+0x10c);
-        if(!std::isfinite(distance) || distance<=0.0f || !finite_vector(extent,2) ||
-           !finite_vector(position,2))return fog;
-        const double inset=double(distance)+1.0;
-        const double x0=inset,y0=inset,x1=extent[0]-inset,y1=extent[1]-inset;
-        const double original=border_fog_density(position[0],position[1],{x0,y0,x1,y1},distance,{});
-        const double moved=border_fog_density(position[0],position[1],
-            {x0+shift.x0,y0+shift.y0,x1+shift.x1,y1+shift.y1},distance,field);
-        const double value=std::round(double(fog)+255.0*(original-moved));
-        return static_cast<BYTE>((std::max)(0.0,(std::min)(255.0,value)));
+        return owned::neighbour_continued_border_fog(
+            ObjectBorderFogInputs{{extent[0],extent[1]},distance,true},position,fog);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return fog;
     }

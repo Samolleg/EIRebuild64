@@ -13,6 +13,12 @@ descending from `c4d1466e40e3dcf074ff227597c67d4282e001a2`. It adds embedded-onl
 composite stage/HRESULT diagnostics and preserves allocation failures as
 `E_OUTOFMEMORY`; shaders and the proxy rendering path are unchanged.
 
+FOGOBJ01: current revision is branch `eirebuild/c79-fogobj`, commit `9ad0e0be735e893ffc6f5d3456844b5c74547169`,
+descending from `b25858678aa800a853f94aa99bf3e7259dc57a45`. The addon object
+border-fog correction is shared through typed extent/distance/enabled inputs;
+the host uses its real terrain state for retained, direct and world-preview figures.
+The seam curves, shaders and non-neighbour behavior are unchanged.
+
 That commit was local and was not available from the upstream repository.
 The previous submodule reference could therefore not be fetched on another machine.
 

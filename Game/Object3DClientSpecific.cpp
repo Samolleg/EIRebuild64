@@ -1156,7 +1156,7 @@ BOOL CObject3DClientSpecific::DrawModelParts(CRenderer *pRend, CRect *pRect)
     // get fog value from terrain
     BYTE cFog = 255; // default fog - completelly unfogged
     if (!lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG))
-        cFog = ((CWorldClient *)GetWorld())->GetTerrain()->GetFogAlpha(objectCP);
+        cFog = ((CWorldClient *)GetWorld())->GetTerrain()->GetObjectFogAlpha(objectCP);
 
     // draw object
     DWORD dwAllFiguresLighted = FIG_LIGHTED;

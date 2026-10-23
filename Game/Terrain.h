@@ -413,6 +413,7 @@ public:
 
     // Fog
     BYTE GetFogAlpha(const CPlot3D &plot) const;
+    BYTE GetObjectFogAlpha(const CPlot3D &plot) const;
 
 private:
     // Initialization
