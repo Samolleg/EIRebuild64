@@ -8,7 +8,7 @@ This merges upstream into the candidate-74 embedded revision `34015b2449ecacf9eb
 The immutable host-surface contact fix (`cb3e84a`) is retained. The Russian F10
 changes (`f69be1d`, `308a547`) are incorporated through the candidate-73
 localization layer, with additional embedded translations preserved.
-CRASHCW01: the current embedded revision is branch `eirebuild/c79-fix`, commit `6951acc3d66ec7148c69480a00719c0dff2f1bc0`,
+CRASHCW01: the current embedded revision is branch `eirebuild/c79-fix`, commit `b25858678aa800a853f94aa99bf3e7259dc57a45`,
 descending from `c4d1466e40e3dcf074ff227597c67d4282e001a2`. It adds embedded-only
 composite stage/HRESULT diagnostics and preserves allocation failures as
 `E_OUTOFMEMORY`; shaders and the proxy rendering path are unchanged.

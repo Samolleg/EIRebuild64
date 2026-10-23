@@ -14936,8 +14936,8 @@ void Renderer::report_scene_failure(const char* operation,HRESULT hr) noexcept{
  if(SUCCEEDED(hr))return;
 #ifdef EID3D11_EMBEDDED
  // Fixed-storage host aggregation remains usable when allocation is failing.
- char detail[160];std::snprintf(detail,sizeof(detail),"operation=%s hr=%08lx",operation,static_cast<unsigned long>(hr));
- embedded_report_render_failure("render_thread_command_failed",detail);
+ char embedded_detail[160];std::snprintf(embedded_detail,sizeof(embedded_detail),"operation=%s hr=%08lx",operation,static_cast<unsigned long>(hr));
+ embedded_report_render_failure("render_thread_command_failed",embedded_detail);
  return;
 #endif
  static std::mutex lock;static std::vector<std::pair<const char*,unsigned>> counts;
