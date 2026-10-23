@@ -1649,15 +1649,34 @@ HRESULT Renderer::composite_world(){
  PERF06_SCOPE("post_composite");
  if(scene_queue()){scene_native_pending_=false;scene_post_frame([this]{report_scene_failure("composite_world",composite_world());});return S_OK;}
  if(scene_composited_)return S_OK;
- if(!context_||!backbuffer_rtv_||!scene_composite_.target())return E_FAIL;
- const HRESULT world=flush_native();if(FAILED(world))return world;
+ const auto checked=[&](const char* operation,auto&& work)->HRESULT{
+#ifdef EID3D11_EMBEDDED
+  native_flush_failure_line_=0;
+  HRESULT hr;const char* cause="hresult";
+  try{hr=work();}
+  catch(const std::bad_alloc&){hr=E_OUTOFMEMORY;cause="bad_alloc";}
+  catch(...){hr=E_FAIL;cause="exception";}
+  if(FAILED(hr)){
+   char detail[256];std::snprintf(detail,sizeof(detail),"operation=%s hr=%08lx cause=%s native_line=%d",
+    operation,static_cast<unsigned long>(hr),cause,native_flush_failure_line_);
+   bridge_report_event("composite_step_failed",detail);
+  }
+  return hr;
+#else
+  (void)operation;return work();
+#endif
+ };
+ if(!context_||!backbuffer_rtv_||!scene_composite_.target())
+  return checked("composite_world.targets",[]{return E_FAIL;});
+ const HRESULT world=checked("composite_world.flush_native",[&]{return flush_native();});if(FAILED(world))return world;
  // Neighbour-map liquids draw last in the world pass, after every figure the
  // game submitted, so the frame's single water scene copy (taken at its first
  // liquid batch) holds the figures: wading legs refract through the water.
  if(neighbour_liquids_pending_){
   neighbour_liquids_pending_=false;
   if(neighbour_liquids_frame_index_==native_frame_index_&&set_native_world_clip(neighbour_liquids_clip_)){
-   const HRESULT liquids=render_neighbour_maps(neighbour_liquids_state_,neighbour_liquids_clip_,true);
+   const HRESULT liquids=checked("composite_world.neighbour_liquids",[&]{
+    return render_neighbour_maps(neighbour_liquids_state_,neighbour_liquids_clip_,true);});
    if(FAILED(liquids))return liquids;
   }
  }
@@ -1669,13 +1688,14 @@ HRESULT Renderer::composite_world(){
   const bool under_water=water_scene_dsv_&&water_capture_ready_&&water_capture_frame_==native_frame_index_;
   ComPtr<ID3D11DepthStencilView> world_depth=dsv_;if(under_water)dsv_=water_scene_dsv_;
   drawing_ground_marks_=true;HRESULT marked=S_OK;
-  for(auto& mark:marks)if(marked=mark();FAILED(marked))break;
+  for(auto& mark:marks)if(marked=checked("composite_world.ground_mark",[&]{return mark();});FAILED(marked))break;
   drawing_ground_marks_=false;dsv_=world_depth;
   context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
   if(FAILED(marked))return marked;
  }
  // The occlusion pyramid describes the world pass only; interface 3D (HUD
  // icons, previews) draws after this point, often without depth testing.
+ return checked("composite_world.postprocess",[&]()->HRESULT{
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
  {
   DebugViewStateGuard guard(context_.Get());
@@ -1742,6 +1762,7 @@ HRESULT Renderer::composite_world(){
   if(FAILED(dim_hr))return dim_hr;
  }
  return S_OK;
+ });
 }
 
 
@@ -11413,6 +11434,9 @@ HRESULT Renderer::ensure_terrain_tessellation() noexcept{
 
 HRESULT Renderer::flush_native(unsigned layout_slot){
  PERF06_SCOPE("batch_flush");
+#ifdef EID3D11_EMBEDDED
+ native_flush_failure_line_=0;
+#endif
  if(scene_queue()){scene_native_pending_=false;scene_post_frame([this,layout_slot]{report_scene_failure("flush_native",flush_native(layout_slot));});return S_OK;}
  const stall_watch::Bracket stall_bracket("flush_native");
  CampClipScope clip_scope{*this};
@@ -11442,7 +11466,11 @@ HRESULT Renderer::flush_native(unsigned layout_slot){
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->VSSetShader(native_vs_.Get(),nullptr,0);
     context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);tessellation_bound=false;
    }
-ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);context_->HSSetShaderResources(8,1,empty);context_->DSSetShaderResources(8,1,empty);context_->VSSetShaderResources(36,1,empty);context_->CSSetShaderResources(10,5,empty);context_->VSSetShaderResources(10,1,empty);context_->VSSetShaderResources(12,2,empty);context_->CSSetShaderResources(15,2,empty);context_->CSSetShaderResources(17,1,empty);context_->PSSetShaderResources(18,2,empty);context_->PSSetShaderResources(13,4,empty);context_->PSSetShaderResources(1,2,empty);context_->PSSetShaderResources(4,2,empty);ID3D11SamplerState* restored_point_sampler=previous_point_sampler.Get();context_->PSSetSamplers(2,1,&restored_point_sampler);context_->PSSetShaderResources(20,2,empty);ID3D11SamplerState* empty_history_sampler=nullptr;context_->PSSetSamplers(3,1,&empty_history_sampler);context_->PSSetSamplers(4,1,&empty_history_sampler);context_->PSSetSamplers(10,1,&empty_history_sampler);ID3D11Buffer* empty_history_constants=nullptr;context_->PSSetConstantBuffers(6,1,&empty_history_constants);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());ID3D11UnorderedAccessView* empty_uav=nullptr;context_->CSSetUnorderedAccessViews(6,1,&empty_uav,nullptr);ID3D11Buffer* empty_constant=nullptr;context_->CSSetConstantBuffers(4,1,&empty_constant);context_->PSSetConstantBuffers(5,1,&empty_constant);}discard_native();return result;};
+ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);context_->HSSetShaderResources(8,1,empty);context_->DSSetShaderResources(8,1,empty);context_->VSSetShaderResources(36,1,empty);context_->CSSetShaderResources(10,5,empty);context_->VSSetShaderResources(10,1,empty);context_->VSSetShaderResources(12,2,empty);context_->CSSetShaderResources(15,2,empty);context_->CSSetShaderResources(17,1,empty);context_->PSSetShaderResources(18,2,empty);context_->PSSetShaderResources(13,4,empty);context_->PSSetShaderResources(1,2,empty);context_->PSSetShaderResources(4,2,empty);ID3D11SamplerState* restored_point_sampler=previous_point_sampler.Get();context_->PSSetSamplers(2,1,&restored_point_sampler);context_->PSSetShaderResources(20,2,empty);ID3D11SamplerState* empty_history_sampler=nullptr;context_->PSSetSamplers(3,1,&empty_history_sampler);context_->PSSetSamplers(4,1,&empty_history_sampler);context_->PSSetSamplers(10,1,&empty_history_sampler);ID3D11Buffer* empty_history_constants=nullptr;context_->PSSetConstantBuffers(6,1,&empty_history_constants);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());ID3D11UnorderedAccessView* empty_uav=nullptr;context_->CSSetUnorderedAccessViews(6,1,&empty_uav,nullptr);ID3D11Buffer* empty_constant=nullptr;context_->CSSetConstantBuffers(4,1,&empty_constant);context_->PSSetConstantBuffers(5,1,&empty_constant);}discard_native();
+#ifdef EID3D11_EMBEDDED
+ if(SUCCEEDED(result))native_flush_failure_line_=0;
+#endif
+ return result;};
  if(!context_||native_geometry_pages_.empty()||!native_build_cs_)return native_flush_failure_line_=__LINE__,finish(E_FAIL);
  if(native_shadow_constants_dirty_){const HRESULT shadow_hr=upload_native_shadow_constants(0);if(FAILED(shadow_hr))return native_flush_failure_line_=__LINE__,finish(shadow_hr);native_shadow_constants_dirty_=false;}
 #ifdef EID3D11_TESTING
@@ -14906,6 +14934,12 @@ void Renderer::scene_sync(const char* reason) noexcept{
 // few each, so a failing queued path is never silent.
 void Renderer::report_scene_failure(const char* operation,HRESULT hr) noexcept{
  if(SUCCEEDED(hr))return;
+#ifdef EID3D11_EMBEDDED
+ // Fixed-storage host aggregation remains usable when allocation is failing.
+ char detail[160];std::snprintf(detail,sizeof(detail),"operation=%s hr=%08lx",operation,static_cast<unsigned long>(hr));
+ embedded_report_render_failure("render_thread_command_failed",detail);
+ return;
+#endif
  static std::mutex lock;static std::vector<std::pair<const char*,unsigned>> counts;
  unsigned count=0;
  {std::lock_guard<std::mutex> guard(lock);

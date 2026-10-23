@@ -38,7 +38,7 @@ void embedded_report_render_failure(const char* event, const char* reason) noexc
             std::strncmp(failure.reason, cause, sizeof(failure.reason) - 1)) continue;
         ++failure.count;
         if (failure.count == 1 || failure.count % 600 == 0)
-            GameJournal::Event("RENDER", name, "reason=%s epoch=%llu failures=%llu",
+            GameJournal::Event("ERROR", name, "reason=%s epoch=%llu failures=%llu",
                 cause, static_cast<unsigned long long>(epoch),
                 static_cast<unsigned long long>(failure.count));
         return;
@@ -62,7 +62,10 @@ bool harness_timed_out(std::uint64_t start, std::uint64_t now, std::uint32_t sec
 }
 void bridge_report_event(const char* event, const char* detail) noexcept {
     // Bounded strings and the existing bounded asynchronous game journal.
-    GameJournal::Event("RENDER", "bridge", "event=%.96s detail=%.768s", event ? event : "", detail ? detail : "");
+    const bool failure = event && (!std::strcmp(event, "render_thread_command_failed") ||
+        !std::strcmp(event, "present_step_failed") || !std::strcmp(event, "composite_step_failed"));
+    GameJournal::Event(failure ? "ERROR" : "RENDER", "bridge",
+        "event=%.96s detail=%.768s", event ? event : "", detail ? detail : "");
 }
 void bridge_append_probe_event(const char*, const char*) noexcept { E2_UNAVAILABLE("retail lifecycle probe"); }
 void bridge_trace_input_focus(HWND, const char*, UINT, WPARAM, int) noexcept { E2_UNAVAILABLE("retail input focus trace"); }

@@ -683,6 +683,9 @@ void CDX11::EndWorld()
     const HRESULT composite = rendererFacade->Visit([](owned::Renderer& renderer) {
         return renderer.composite_world();
     });
+    if (FAILED(composite))
+        GameJournal::Event("ERROR", "world_composite", "operation=composite_world hr=%08lx",
+            static_cast<unsigned long>(composite));
     IfFailedThrowHR(composite);
     ReportC56FigureSkipSummary();
     GameJournal::Event("RENDER", "world_model_owner",

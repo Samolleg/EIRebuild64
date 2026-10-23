@@ -102,6 +102,9 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
                 terrain->pages[page].texture = std::move(texture);
         }
         owned::owned_terrain_classify_swamp_frames(*terrain);
+        // Classification owns its resulting cover/texels. Host draws use
+        // E1Surface GPU atlases, not these temporary MMP source copies.
+        terrain->pages.clear();
     }
     source.source_generation = nextGeneration; source.source_revision = revision;
     source.prepared = std::make_shared<owned::OwnedTerrainPreparedResources>();
