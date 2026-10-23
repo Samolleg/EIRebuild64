@@ -98,6 +98,29 @@ void CI3DToolTip::UpdateText(LPCTSTR pszText)
     Update();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DToolTip::Activate()
+{
+    // Keep the current hover's delay; start a fresh one only on entry.
+    if (m_eMode == TT_WAIT || m_eMode == TT_INC || m_eMode == TT_SHOW)
+        return;
+    RemoveAllFigures();
+    RemoveAllSurfaces();
+    m_fIdleTime = 0;
+    m_eMode = TT_WAIT;
+}
+//
+void CI3DToolTip::Deactivate()
+{
+    if (m_eMode == TT_WAIT)
+    {
+        // A pending tooltip must never become drawable after the pointer left.
+        m_eMode = TT_HIDE;
+        m_fIdleTime = 0;
+    }
+    else if (m_eMode == TT_INC || m_eMode == TT_SHOW)
+        m_eMode = TT_DEC;
+}
+//
 void CI3DToolTip::Process(CPoint point)
 {
     switch (m_eMode)

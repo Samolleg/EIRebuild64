@@ -87,16 +87,11 @@ void CI3DPolyArea::ProcessIdle(CPoint point,bool inside)
 {
     if (pTip)
     {
+        // Waiting is not visible, but leaving must cancel it too.
         if (inside)
-        {
-            if (!pTip->IsActive())
-                pTip->Activate();
-        }
+            pTip->Activate();
         else
-        {
-            if (pTip->IsActive())
-                pTip->Deactivate();
-        }
+            pTip->Deactivate();
         pTip->Process(point);
     }
 }

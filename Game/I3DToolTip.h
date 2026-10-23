@@ -39,8 +39,8 @@ public:
 
     bool IsPointInArea(CPoint &point) { return TRUE; } // m_pArea->PtInArea(point) == TRUE; }
     bool IsActive() { return m_eMode != TT_HIDE && m_eMode != TT_WAIT; }
-    void Activate() { m_eMode = TT_WAIT; }
-    void Deactivate() { m_eMode = TT_DEC; }
+    void Activate();
+    void Deactivate();
     void Process(CPoint point);
 
     const char* JournalText() const noexcept { return szStrings.GetSize() ? (LPCSTR)szStrings[0] : ""; }
