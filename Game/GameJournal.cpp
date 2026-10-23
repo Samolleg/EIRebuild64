@@ -77,7 +77,7 @@ struct State {
     HANDLE file = INVALID_HANDLE_VALUE;
     std::wstring directory, executable;
     std::atomic<bool> stopping{false};
-    DWORD limit = 20 * 1024 * 1024;
+    DWORD limit = 100 * 1024 * 1024;
     unsigned long long bytes = 0;
     bool capped = false;
     DWORD gameThread=0, memoryTick=0, textureTick=0, resourceTick=0;
@@ -168,11 +168,12 @@ void Drain(State& s, bool tryQueue = false, bool critical = false) {
         }
         CombatDrain(s, pending, CombatNow(), true);
         for (auto it = s.repeats.begin(); it != s.repeats.end();) {
-            if(it->second.count){
+            const bool expired = now - it->second.time >= 2000;
+            if(it->second.count && (expired || critical || s.stopping)){
                 pending.push_back(Line("GVAR","repeat",Utf8(it->second.detail.c_str())+" count="+std::to_string(it->second.count)));
                 it->second.count=0;
             }
-            if (s.stopping || now - it->second.time >= 2000) {
+            if (s.stopping || expired) {
                 it = s.repeats.erase(it);
             } else ++it;
         }
@@ -567,7 +568,7 @@ void MemoryErrorText(const char* text) noexcept {
                 MemoryContains(text,"not enough memory") || MemoryContains(text,"bad_alloc")))AllocationFailure("ReportError_text");
 }
 
-void Start() noexcept {try{StartAt(nullptr,20*1024*1024);MemorySnapshot("session_start");}catch(...) {}}
+void Start() noexcept {try{StartAt(nullptr,100*1024*1024);MemorySnapshot("session_start");}catch(...) {}}
 void Stop() noexcept {
     State* s=current.load();if(!s)return;
     if(s->memoryEnded)return;s->memoryEnded=true;
@@ -648,18 +649,35 @@ void Crash(const wchar_t* dump,unsigned long code,const CrashEvidence::Details* 
     ReleaseSRWLockExclusive(&s->writeLock);
 }
 void Variable(const void* set,const char* name,bool present,float oldValue,float newValue,bool deleting) noexcept {
+    if(deleting ? !present : (present && oldValue==newValue))return;
     State* s=current.load();if(!s||s->stopping)return;
     try {
+        if(name && strncmp(name,"jmv.group.",10)==0 && strcmp(source,"engine")==0) {
+            // The final component contains serialized group words, not a stable identity.
+            std::string key(name);key.resize(key.find_last_of('.'));
+            Count("GVAR",deleting?"group_delete":"group_set",key.c_str());
+            return;
+        }
         char numbers[160];sprintf_s(numbers," set=%p present=%d old=%.9g new=%.9g deleting=%d",set,present,oldValue,newValue,deleting);
         std::string detail="name="+Quote(name)+numbers+" source="+Quote(source)+" callback="+Quote(callback.c_str());
         std::string key=std::to_string(reinterpret_cast<size_t>(set))+":"+(name?name:"");
-        DWORD now=GetTickCount();Lock guard(s->queueLock);
+        Lock guard(s->queueLock);DWORD now=GetTickCount();
+        if(s->stopping)return;
         auto it=s->repeats.find(key);
-        if(it!=s->repeats.end()&&it->second.detail==detail&&now-it->second.time<2000){++it->second.count;return;}
-        auto append=[&](Entry e){if(s->queued+e.line.size()>16*1024*1024){++s->dropped;return;}s->queued+=e.line.size();s->queue.push_back(std::move(e));};
-        if(it!=s->repeats.end()&&it->second.count)append(Line("GVAR","repeat",Utf8(it->second.detail.c_str())+" count="+std::to_string(it->second.count)));
-        append(Line("GVAR",deleting?"delete":"set",Utf8(detail.c_str())));
-        if(s->repeats.size()<256||it!=s->repeats.end())s->repeats[key]={now,0,detail};
+        if(it!=s->repeats.end() && now-it->second.time<2000) {
+            // Keep the last set/delete, value and source even when every update differs.
+            it->second.detail=std::move(detail);++it->second.count;return;
+        }
+        auto flush=[&](const Repeat& repeat){if(repeat.count)Append(*s,Line("GVAR","repeat",Utf8(repeat.detail.c_str())+" count="+std::to_string(repeat.count)));};
+        if(it!=s->repeats.end())flush(it->second);
+        else if(s->repeats.size()>=256) {
+            // Bound memory without discarding a pending final value on eviction.
+            auto oldest=std::min_element(s->repeats.begin(),s->repeats.end(),
+                [now](const auto& a,const auto& b){return DWORD(now-a.second.time)>DWORD(now-b.second.time);});
+            flush(oldest->second);s->repeats.erase(oldest);
+        }
+        Append(*s,Line("GVAR",deleting?"delete":"set",Utf8(detail.c_str())));
+        s->repeats[key]={now,0,std::move(detail)};
     }catch(...){}
 }
 void Count(const char* category,const char* event,const char* key) noexcept {

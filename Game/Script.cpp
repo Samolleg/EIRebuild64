@@ -2652,7 +2652,7 @@ void SScriptCondition::RunCheck(CScript *pScript, SOneScript *pOneScript)
         if (fCheck == 0)
             return;
     }
-    GameJournal::Event("SCRIPT", "trigger", "script=%s thread=%d", GameJournal::Quote(pOneScript->szScriptName).c_str(), pActions->GetNumber());
+    GameJournal::Count("SCRIPT", "trigger", pOneScript->szScriptName);
     pScript->RunThread(pActions, pOneScript);
 }
 
