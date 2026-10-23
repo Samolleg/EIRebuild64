@@ -162,7 +162,7 @@ BOOL CResourceManager::AddGraphicsResources(LPCSTR category)
                 std::string key = path;
                 for (char &ch : key) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
                 if (!seen.insert(key).second) continue;
-                auto *archive = dbgnew CMappedResource(true);
+                CMappedResource *archive = figures ? static_cast<CMappedResource*>(dbgnew CWin32MappedResource(true)) : dbgnew CMappedResource(true);
                 if (!archive->OpenResource(path.c_str()))
                 {
                     delete archive;

@@ -213,3 +213,5 @@ Embedded profiles use rddraw_profiles beside the host-selected rddraw.ini;
 proxy profiles retain eid3d11_profiles. Russian menu strings remain in
 renderer_ui_ru.h. The c79 character-pane text fix is included; visual
 acceptance remains with the owner. No reverted diagnostic modes are restored.
+
+MEM01: branch `eirebuild/c79-mem`, commit `5f5d37c26ad06587dc6f7ffa8895c0b1cf82735b`, based on `b25858678aa800a853f94aa99bf3e7259dc57a45`. Identical live memory selections share immutable backing and decoded identity after an exact content comparison. The embedded host retires world GPU resources before loading its successor and reads allocation-free resource counters for its permanent journal. No neighbour content, detail, shader or rendering policy changes.

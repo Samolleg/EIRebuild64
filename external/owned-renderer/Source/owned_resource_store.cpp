@@ -26,6 +26,7 @@ constexpr std::uint32_t kResSignature = 0x019ce23cu;
 constexpr std::uint64_t kResHeaderBytes = 16;
 constexpr std::uint64_t kResEntryBytes = 22;
 std::atomic<std::uint64_t> next_container_incarnation{1};
+std::atomic<std::uint64_t> all_immutable_bytes{0};
 
 // Only the existing selected-member recorder supplies a destination.
 struct SelectedDiagnosticTicks {
@@ -486,7 +487,10 @@ struct ImmutableByteStorage {
     std::vector<std::uint8_t> bytes;
     ImmutableByteStorage(std::shared_ptr<StoreCounters> owner, std::uint64_t reservation, std::size_t size)
         : counters(std::move(owner)), reserved(reservation), bytes(size) {}
-    ~ImmutableByteStorage() { counters->live_immutable_bytes.fetch_sub(reserved,std::memory_order_relaxed); }
+    ~ImmutableByteStorage() {
+        counters->live_immutable_bytes.fetch_sub(reserved,std::memory_order_relaxed);
+        all_immutable_bytes.fetch_sub(reserved,std::memory_order_relaxed);
+    }
 };
 
 bool selected_bytes_equal(const void* selected, const std::uint8_t* owned,
@@ -519,6 +523,12 @@ struct ResourceStore::Impl {
     std::map<std::wstring, ArchiveMount> selected_files;
     mutable std::mutex cache_lock;
     mutable std::unordered_map<std::string, ResourceLocation> cache;
+    struct MemoryCopy {
+        ResourceIdentity identity;
+        std::weak_ptr<const std::vector<std::uint8_t>> bytes;
+    };
+    mutable std::unordered_multimap<std::string, MemoryCopy> memory_copies;
+    mutable unsigned memory_copy_insertions = 0;
     mutable std::mutex container_lock;
     mutable std::vector<ResourceContainerInfo> loose_containers;
 };
@@ -571,6 +581,7 @@ ResourceStore::ResourceStore(std::uint64_t immutable_byte_limit) : impl_(std::ma
     impl_->counters->immutable_byte_limit.store(immutable_byte_limit,std::memory_order_relaxed);
 }
 ResourceStore::~ResourceStore() = default;
+std::uint64_t owned_resource_live_bytes() noexcept { return all_immutable_bytes.load(std::memory_order_relaxed); }
 ResourceStore::ResourceStore(ResourceStore&&) noexcept = default;
 ResourceStore& ResourceStore::operator=(ResourceStore&&) noexcept = default;
 
@@ -592,6 +603,7 @@ std::shared_ptr<std::vector<std::uint8_t>> ResourceStore::allocate_immutable_byt
     } while (!owner->live_immutable_bytes.compare_exchange_weak(used,used+reserved,std::memory_order_relaxed));
     try {
         auto storage = std::make_shared<ImmutableByteStorage>(owner,reserved,bytes);
+        all_immutable_bytes.fetch_add(reserved,std::memory_order_relaxed);
         auto* value = &storage->bytes;
         failure = {};
         return std::shared_ptr<std::vector<std::uint8_t>>(std::move(storage),value);
@@ -613,6 +625,25 @@ bool ResourceStore::copy_selected_memory(const std::string& resource_name,
         fail(failure, ResourceFailureCode::archive_bounds, "native-selected memory range");
         return false;
     }
+    // Memory selections have no file provenance. Reuse only after comparing
+    // every byte of this completed selection, never by its address or name.
+    std::lock_guard<std::mutex> guard(impl_->cache_lock);
+    const auto range = impl_->memory_copies.equal_range(canonical);
+    for (auto entry = range.first; entry != range.second;) {
+        auto backing = entry->second.bytes.lock();
+        if (!backing) { entry = impl_->memory_copies.erase(entry); continue; }
+        if (backing->size() == size &&
+            selected_bytes_equal(selected_bytes, backing->data(), size, *impl_->counters)) {
+            blob = {entry->second.identity, std::move(backing)};
+            impl_->counters->cache_hits.fetch_add(1, std::memory_order_relaxed);
+            failure = {};
+            return true;
+        }
+        ++entry;
+    }
+    if (++impl_->memory_copy_insertions % 64 == 0)
+        for (auto entry = impl_->memory_copies.begin(); entry != impl_->memory_copies.end();)
+            if (entry->second.bytes.expired()) entry = impl_->memory_copies.erase(entry); else ++entry;
     auto bytes = allocate_immutable_bytes(size, failure);
     if (!bytes) return false;
     if (!copy_selected_memory_bytes(bytes->data(), selected_bytes, size)) {
@@ -625,6 +656,7 @@ bool ResourceStore::copy_selected_memory(const std::string& resource_name,
     blob.identity.canonical_name = std::move(canonical);
     blob.identity.bytes = size;
     blob.bytes = std::move(bytes);
+    impl_->memory_copies.emplace(blob.identity.canonical_name, Impl::MemoryCopy{blob.identity, blob.bytes});
     failure = {};
     return true;
 }
@@ -707,6 +739,7 @@ void ResourceStore::close() noexcept {
     if (!impl_) return;
     std::lock_guard<std::mutex> cache_guard(impl_->cache_lock);
     impl_->cache.clear();
+    impl_->memory_copies.clear();
     impl_->archives.clear();
     impl_->selected_files.clear();
     impl_->loose_roots.clear();

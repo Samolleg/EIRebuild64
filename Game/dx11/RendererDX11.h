@@ -163,6 +163,8 @@ public:
     OwnedSpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
     OwnedRendererClient &GetOwnedRenderer() { return ownedRenderer; };
     auto &GetRendererFacade() { return *rendererFacade; };
+    void RetireOwnedWorld() noexcept;
+    owned::RendererMemoryCounters ReadOwnedMemoryCounters() noexcept;
     HRESULT BlitPublishedSurface(std::uint64_t surfaceId, const RECT& destination,
                                  const RECT* source, const DDCOLORKEY* colorKey);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };

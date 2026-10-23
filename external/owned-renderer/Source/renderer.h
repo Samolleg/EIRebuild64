@@ -61,6 +61,12 @@
 #include "constant_ring.h"
 
 namespace owned {
+// Allocation-free attribution, independent of the F10 profiler/recorders.
+struct RendererMemoryCounters {
+    std::uint64_t geometry = 0, textures = 0, animation = 0, world = 0;
+    std::uint64_t surfaceCpu = 0, surfaceGpu = 0, neighbours = 0;
+    bool available = false;
+};
 struct CampDecoration;
 
 using Microsoft::WRL::ComPtr;
@@ -895,6 +901,8 @@ public:
         return clear(0, nullptr, flags, color, z, stencil);
     }
     HRESULT begin_engine_frame();
+    HRESULT retire_embedded_world();
+    RendererMemoryCounters read_memory_counters();
     void begin_scene();
     void end_scene();
     HRESULT draw(D3DPRIMITIVETYPE type, DWORD fvf, const void* vertices,

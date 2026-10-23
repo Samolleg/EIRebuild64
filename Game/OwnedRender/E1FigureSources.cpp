@@ -1,5 +1,6 @@
 #include "E1FigureSources.h"
 #include "owned_asset_loader.h"
+#include "owned_resource_runtime.h"
 #include <cstring>
 
 namespace OwnedRender {
@@ -16,8 +17,8 @@ bool E1FigureSources::Publish(const std::string& part, const void* selected,
     owned::ResourceBlob blob;
     owned::ResourceFailure failure;
     if (!store.copy_selected_memory(part, selected, size, blob, failure)) return false;
-    auto figure = std::make_shared<owned::FigureCpuAsset>();
-    if (!owned::parse_figure_asset(blob, *figure, failure)) return false;
+    auto figure = owned::retained_visual_figure_asset(blob, failure);
+    if (!figure) return false;
     entries.emplace(part, Entry{std::move(blob.bytes), std::move(figure)});
     return true;
 } catch (...) { Remove(part); return false; }

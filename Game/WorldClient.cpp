@@ -639,6 +639,7 @@ void CWorldClient::Destroy()
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
     OwnedRender::E1RetireWorld(this);
+    if (auto* dx = theRenderer.GetD3D()) dx->RetireOwnedWorld();
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     ModWorldBackground::Unload();
     theCamera.ResetFalloutMode();
@@ -1225,6 +1226,9 @@ void CWorldClient::RemoveAllObjects()
     pFigureManager->ClearTrash();
     pMapObjectManager->ClearTrash();
     pSpecificManager->ClearTrash();
+    ((CFigureManager*)pFigureManager)->FreeUnusedResources();
+    if (pGeometryManager)
+        ((CGeometryManager*)(IGeometryManager*)pGeometryManager)->FreeUnusedResources();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // удаляет все эффекты с клиента
@@ -2368,6 +2372,7 @@ BOOL CWorldClient::NewZone(CMemorySave &packet)
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
     OwnedRender::E1RetireWorld(this);
+    if (auto* dx = theRenderer.GetD3D()) dx->RetireOwnedWorld();
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
