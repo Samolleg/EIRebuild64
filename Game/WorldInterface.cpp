@@ -36,6 +36,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PerkDatabase.h"
 #include "SpellDatabase.h"
 #include "ItemDatabase.h"
+#include "I3DScreenNewGameStats.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 CWorldServerInterface IWorldServer;
@@ -820,9 +821,8 @@ void CWorldConnector::NewGame()
     GameJournal::Event("ZONE", "reason", "reason=new_game");
     NConsole::RunAutoExec("exec autoexec.cfg");
     theInterface.SetScreensMustDie();
-    // lets start a new game
     SaveSchema::Slot::NewGame();
-    theHat.NewSingleGame();
+    // The party was created before the starting-attributes screen in DoGo.
     // clear directory with current saves
     CString szCurrentPath;
     szCurrentPath.Format("%sSaves64\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
@@ -981,6 +981,25 @@ void CWorldConnector::DoGo()
         action = CD_NONE;
         return;
     }
+    if (action == CD_NEWGAME)
+    {
+        // Prepare exactly once, before disconnecting the menu's local server.
+        // An asynchronous screen lets the normal client/server loop continue.
+        theHat.NewSingleGame();
+        CParty freshParty;
+        theHat.GetSinglePlayerParty(freshParty);
+        action = CD_STARTPREPAREDNEWGAME;
+        if (theInterface.GetCurrentScreen() &&
+            !theWorld.IsFailedConnection() && freshParty.people.GetSize() > 0 &&
+            !freshParty.szCurrentZone.IsEmpty())
+        {
+            action = CD_NONE;
+            GameJournal::Event("NEWGAME", "attributes_open");
+            theInterface.ActivateScreen(dbgnew CI3DScreenNewGameStats(&theInterface, freshParty));
+            return;
+        }
+        GameJournal::Event("NEWGAME", "attributes_skipped", "reason=no_connected_fresh_party");
+    }
     theInterface.DestroyScreens();
     // clear current server
     theWorldServer.RemoveEverythingDynamic();
@@ -992,7 +1011,7 @@ void CWorldConnector::DoGo()
     case CD_MAINMENU:
         GoMainMenu();
         break;
-    case CD_NEWGAME:
+    case CD_STARTPREPAREDNEWGAME:
         NewGame();
         break;
     }
@@ -1029,6 +1048,11 @@ void CWorldConnector::ReqGoMainMenu()
 void CWorldConnector::ReqNewGame()
 {
     action = CD_NEWGAME;
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CWorldConnector::ReqStartPreparedNewGame()
+{
+    action = CD_STARTPREPAREDNEWGAME;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::ReqLoadGame(const char *pszSaveName)
