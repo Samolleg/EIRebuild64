@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 
 #include <AfxTempl.h>
 
@@ -105,6 +106,10 @@ public:
     }
     virtual void Select(BOOL bSelect) {}
     virtual void Preselect(BOOL bSelect) {}
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline void CObject3DSpecific::RegisterObject3D(CObject3D *lpNewObject)
@@ -286,6 +291,10 @@ public:
     // service : save/load
     virtual void Save(CFile &file) const;
     virtual void Load(CFile &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline CObject3D::CObject3D(const CObject3D &A)

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiAck.h"
@@ -138,16 +139,10 @@ void CAIAcknowledgements::Segment(CUnitServer *pWho)
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIAcknowledgements::Load(CSave &file)
 {
-    file.Read(&curSegmentNeighborAck, sizeof(curSegmentNeighborAck));
-    file.Read(&wantAck, sizeof(curSegmentNeighborAck));
-    file.Read(&curAck, sizeof(curSegmentNeighborAck));
-    file.Read(nCurAckTimeLeft);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIAcknowledgements::Store(CSave &file)
 {
-    file.Write(&curSegmentNeighborAck, sizeof(curSegmentNeighborAck));
-    file.Write(&wantAck, sizeof(curSegmentNeighborAck));
-    file.Write(&curAck, sizeof(curSegmentNeighborAck));
-    file.Write(nCurAckTimeLeft);
+    SaveSchema::RequireDynamicSchema();
 }

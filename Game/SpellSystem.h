@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "GameBase.h"
 #include "sdbFormat.h"
@@ -136,6 +137,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CSpell"; }
     virtual EClassIDs WhoAmI() const { return HPC_SPELL; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CSimplyArray<CSpell *, CSpell *> CSpellPtrArray;
@@ -187,5 +192,9 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CSpellContainer"; }
     virtual EClassIDs WhoAmI() const { return HPC_SPELL_CONTAINER; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////

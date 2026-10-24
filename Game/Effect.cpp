@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "ModSpellTextures.h"
 #include "ModSpellOwner.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -182,29 +183,12 @@ void CEffectSound::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSound::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    file.Read(szSoundName, sizeof(szSoundName));
-    file.Read(fpMinRadius);
-    file.Read(fpMaxRadius);
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    SetMoving();
-    if (file.GetVersion() < 92)
-        return;
-    file.Read(&bLooping, sizeof(bLooping));
-    if (file.GetVersion() < 109)
-        return;
-    file.Read(&bHighPriority, sizeof(bHighPriority));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSound::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(szSoundName, sizeof(szSoundName));
-    file.Write(fpMinRadius);
-    file.Write(fpMaxRadius);
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(&bLooping, sizeof(bLooping));
-    file.Write(&bHighPriority, sizeof(bHighPriority));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ------------------------------ Sound effect ---------------------------------------
@@ -386,27 +370,12 @@ int CEffectSoundSeq::Segment()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSoundSeq::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    file.Read(szStartSound);
-    LoadCStringArray(szSounds, file);
-    file.Read(fpMinRadius);
-    file.Read(fpMaxRadius);
-    SetMoving();
-    if (file.GetVersion() < 109)
-        return;
-    file.Read(&bHighPriority, sizeof(bHighPriority));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSoundSeq::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(szStartSound);
-    StoreCStringArray(szSounds, file);
-    file.Write(fpMinRadius);
-    file.Write(fpMaxRadius);
-    file.Write(&bHighPriority, sizeof(bHighPriority));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // --------------------------- Ambient sound effect ----------------------------------
@@ -477,22 +446,12 @@ void CEffectAmbientSound::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectAmbientSound::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    LoadCStringArray(szSoundNames, file);
-    file.Read(fpMinRadius);
-    file.Read(fpMaxRadius);
-    file.Read(nMsToPlayMin);
-    file.Read(nMsToPlayMax);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectAmbientSound::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    StoreCStringArray(szSoundNames, file);
-    file.Write(fpMinRadius);
-    file.Write(fpMaxRadius);
-    file.Write(nMsToPlayMin);
-    file.Write(nMsToPlayMax);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -610,23 +569,12 @@ void CEffectPointLight::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectPointLight::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    file.Read(&color, sizeof(color));
-    file.Read(fpRange);
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    SetMoving();
-    if (file.GetVersion() < 103)
-        return;
-    file.Read(dwFlags);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectPointLight::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(&color, sizeof(color));
-    file.Write(fpRange);
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(dwFlags);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ------------------------------------- Particle effect
@@ -865,37 +813,12 @@ void CEffectParticle::AttachCarrierOnClient()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectParticle::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    file.Read(&typeID, sizeof(typeID));
-    file.Read(fpScale);
-    file.Read(nAttachedID);
-    nAttachedID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttachedID);
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    SetMoving();
-    file.Read(nStartSegment);
-    file.Read(&ptDest, sizeof(ptDest));
-    if (file.GetVersion() < 67)
-        return;
-    file.Read(nStartID);
-    nStartID = GetWorld()->GetMapObjectManager()->SavedObjectID(nStartID);
-    if (file.GetVersion() < 88)
-        return;
-    file.Read(fpPower);
-    file.Read(fpPower2);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectParticle::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(&typeID, sizeof(typeID));
-    file.Write(fpScale);
-    file.Write(nAttachedID);
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(nStartSegment);
-    file.Write(&ptDest, sizeof(ptDest));
-    file.Write(nStartID);
-    file.Write(fpPower);
-    file.Write(fpPower2);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CEffectParticle::Segment()
@@ -990,14 +913,12 @@ void CEffectWall::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectWall::Load(CSave &file)
 {
-    CEffectParticle::Load(file);
-    file.Read(&ptWallDirection, sizeof(ptWallDirection));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectWall::Store(CSave &file)
 {
-    CEffectParticle::Store(file);
-    file.Write(&ptWallDirection, sizeof(ptWallDirection));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CEffectLightning
@@ -1097,28 +1018,12 @@ void CEffectLightning::SetParams(const CPlot3D &ptNSrc, const CPlot3D &ptNDst, f
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectLightning::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    file.Read(&ptSrc, sizeof(ptSrc));
-    file.Read(&ptDst, sizeof(ptDst));
-    file.Read(fpWidth);
-    file.Read(nAttachedID);
-    nAttachedID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttachedID);
-    file.Read(nCasterID);
-    nCasterID = GetWorld()->GetMapObjectManager()->SavedObjectID(nCasterID);
-    if (file.GetVersion() < 100)
-        return;
-    file.Read(&bColor, sizeof(bColor));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectLightning::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(&ptSrc, sizeof(ptSrc));
-    file.Write(&ptDst, sizeof(ptDst));
-    file.Write(fpWidth);
-    file.Write(nAttachedID);
-    file.Write(nCasterID);
-    file.Write(&bColor, sizeof(bColor));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectLightning::Attach(int nSrcID, int nTargetID)
@@ -1349,37 +1254,12 @@ void CEffectArrow::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrow::Load(CSave &file)
 {
-    DiscardWeaponAttack(); // Legacy save format has no weapon payload.
-    file.Read(&cp, sizeof(cp));
-    file.Read(nTargetID);
-    nTargetID = GetWorld()->GetMapObjectManager()->SavedObjectID(nTargetID);
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    file.Read(bDelivered);
-    file.Read(szSoundName);
-    file.Read(&color, sizeof(color));
-    file.Read(fpRange);
-    file.Read(&typeID, sizeof(typeID));
-    file.Read(fpScale);
-    if (file.GetVersion() < 67)
-        return;
-    file.Read(nAttackerID);
-    nAttackerID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttackerID);
-    file.Read(bNewArrow);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrow::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(nTargetID);
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(bDelivered);
-    file.Write(szSoundName);
-    file.Write(&color, sizeof(color));
-    file.Write(fpRange);
-    file.Write(&typeID, sizeof(typeID));
-    file.Write(fpScale);
-    file.Write(nAttackerID);
-    file.Write(bNewArrow);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CEffectArrowFigure
@@ -1495,30 +1375,12 @@ void CEffectArrowFigure::UpdateTo(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrowFigure::Load(CSave &file)
 {
-    explosivePending=false;attackProcessed=false;
-    if(auto*mod=ModRuntime::Current())mod->ForgetAttack(attackPortion);
-    file.Read(&cp, sizeof(cp));
-    file.Read(nTargetID);
-    nTargetID = GetWorld()->GetMapObjectManager()->SavedObjectID(nTargetID);
-    file.Read(nAttackerID);
-    nAttackerID = GetWorld()->GetMapObjectManager()->SavedObjectID(nAttackerID);
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    file.Read(bDelivered);
-    pMapObj.Load(file, *GetWorld());
-    attackPortion.Load(file);
-    file.Read(bNewArrow);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectArrowFigure::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(nTargetID);
-    file.Write(nAttackerID);
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(bDelivered);
-    pMapObj.Store(file);
-    attackPortion.Store(file);
-    file.Write(bNewArrow);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CEffectShowVisibility
@@ -1595,16 +1457,12 @@ int CEffectShowVisibility::Segment()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectShowVisibility::Load(CSave &file)
 {
-    file.Read(nTargetID);
-    nTargetID = GetWorld()->GetMapObjectManager()->SavedObjectID(nTargetID);
-    file.Read(nWatcherID);
-    nWatcherID = GetWorld()->GetMapObjectManager()->SavedObjectID(nWatcherID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectShowVisibility::Store(CSave &file)
 {
-    file.Write(nTargetID);
-    file.Write(nWatcherID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CEffectMoshka
@@ -1951,18 +1809,12 @@ void CEffectTornado::ApplyParams(EUpdateType tip)
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectTornado::Load(CSave &file)
 {
-    file.Read(&cp, sizeof(cp));
-    file.Read(&vecSpeed, sizeof(vecSpeed));
-    file.Read(nTimeLeft);
-    file.Read(nStartSegment);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectTornado::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    file.Write(&vecSpeed, sizeof(vecSpeed));
-    file.Write(nTimeLeft);
-    file.Write(nStartSegment);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 

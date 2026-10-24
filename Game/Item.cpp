@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
@@ -200,38 +201,12 @@ const SIDBItemGeneralShape *CItem::GetShapeEntry() const
 /////////////////////////////////////////////////////////////////////////////////////
 void CItem::Load(CSave &file)
 {
-    file.Read(dwSubtypeID);
-
-    file.Read(fpHP);
-    file.Read(fpMaxHP);
-    file.Read(fpMP);
-    file.Read(fpMaxMP);
-    file.Read(fpRegenMP);
-
-    file.Read(fpWeight);
-    file.Read(fpPrice);
-    file.Read(fpSize);
-    pSpell = LoadGBSmartPtr<CSpell>(file, (CBaseManager *)GetWorld()->GetSpellManager());
-    file.Read(nCount);
-    file.Read(dwSpellSlots);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItem::Store(CSave &file)
 {
-    file.Write(dwSubtypeID);
-
-    file.Write(fpHP);
-    file.Write(fpMaxHP);
-    file.Write(fpMP);
-    file.Write(fpMaxMP);
-    file.Write(fpRegenMP);
-
-    file.Write(fpWeight);
-    file.Write(fpPrice);
-    file.Write(fpSize);
-    StoreGBPtr(file, pSpell);
-    file.Write(nCount);
-    file.Write(dwSpellSlots);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // BOOL CItem::UpdateTo( CBufferManager* pBufMng, BYTE cUpdateMask, BYTE cDeskType )
@@ -800,20 +775,12 @@ float CItemWeapon::GetRandomDamage() const
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemWeapon::Load(CSave &file)
 {
-    CItem::Load(file);
-    file.Read(dwProficiencyClass);
-    file.Read(fpDamageMin);
-    file.Read(fpDamageRnd);
-    file.Read(fpRange);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemWeapon::Store(CSave &file)
 {
-    CItem::Store(file);
-    file.Write(dwProficiencyClass);
-    file.Write(fpDamageMin);
-    file.Write(fpDamageRnd);
-    file.Write(fpRange);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
@@ -1010,16 +977,12 @@ bool CItemArmor::IsUpper(DWORD dwArmor)
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemArmor::Load(CSave &file)
 {
-    CItem::Load(file);
-    file.Read(fpAbsorbtions[0], sizeof(fpAbsorbtions[0]));
-    file.Read(fpAbsorbtions[1], sizeof(fpAbsorbtions[1]));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemArmor::Store(CSave &file)
 {
-    CItem::Store(file);
-    file.Write(fpAbsorbtions[0], sizeof(fpAbsorbtions[0]));
-    file.Write(fpAbsorbtions[1], sizeof(fpAbsorbtions[1]));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
@@ -1067,14 +1030,12 @@ BOOL CItemQuick::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemQuick::Load(CSave &file)
 {
-    CItem::Load(file);
-    file.Read(dwSkill);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemQuick::Store(CSave &file)
 {
-    CItem::Store(file);
-    file.Write(dwSkill);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemQuick::GetI3DTextureName() const
@@ -1147,14 +1108,12 @@ BOOL CItemQuest::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemQuest::Load(CSave &file)
 {
-    CItem::Load(file);
-    file.Read(dwScriptID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemQuest::Store(CSave &file)
 {
-    CItem::Store(file);
-    file.Write(dwScriptID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemQuest::GetI3DTextureName() const
@@ -1491,21 +1450,12 @@ float CItemLoot::GetPrice() const
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemLoot::Load(CSave &file)
 {
-    CItem::Load(file);
-    DWORD dwValue;
-    file.Read(dwValue);
-    litType = static_cast<EIDBLootItemType>(dwValue);
-    file.Read(dwValue);
-    itInstructionType = static_cast<EIDBInstructionType>(dwValue);
-    file.Read(dwMaterialIndex);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CItemLoot::Store(CSave &file)
 {
-    CItem::Store(file);
-    file.Write(litType);
-    file.Write(itInstructionType);
-    file.Write(dwMaterialIndex);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //

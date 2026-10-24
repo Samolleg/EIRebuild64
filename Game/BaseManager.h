@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; [[noreturn]] void RequireDynamicSchema(); }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "HashMap.h"
 #include "GameBase.h"
@@ -113,6 +114,9 @@ public:
     void CheckReferences();
 
     void ForEach(std::function<void(CGameBase *)> fn);
+public:
+    void SavedKeyRange(int &first, int &last, int &previous) const { first = nKeyRangeFrom; last = nKeyRangeTo; previous = nLastKey; }
+    void RestoreSavedKeyRange(int first, int last, int previous);
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CManagerIterator
@@ -147,113 +151,48 @@ inline CManagerIterator::~CManagerIterator()
 template <class TYPE, class ARG_TYPE>
 void StoreGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file)
 {
-    int i = arr.GetSize();
-    file.Write(&i, sizeof(i));
-    for (i = 0; i < arr.GetSize(); i++)
-    {
-        if (arr[i])
-            file.Write((int)arr[i]->GetID());
-        else
-            file.Write((int)-1);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE, class ARG_TYPE>
 void LoadGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager)
 {
-    int i, nIdx;
-    for (i = 0; i < arr.GetSize(); i++)
-        if (arr[i]) arr[i]->Release();
-    arr.RemoveAll();
-    int count = 0;
-    file.Read(count);
-    if (count < 0 || static_cast<unsigned int>(count) > file.Remaining() / sizeof(int))
-    { file.Fail("invalid_reference_count"); return; }
-    for (i = 0; i < count; i++)
-    {
-        file.Read(&nIdx, sizeof(nIdx));
-        ARG_TYPE object = (ARG_TYPE)pManager->Find(nIdx);
-        arr.Add(object);
-        if (object) object->AddRef();
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // load/store  list of pointers
 template <class TYPE, class ARG_TYPE>
 void StoreGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file)
 {
-    POSITION pos = arr.GetHeadPosition();
-    while (pos)
-        file.Write((int)arr.GetNext(pos)->GetID());
-    file.Write((int)-1);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE, class ARG_TYPE>
 void LoadGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager)
 {
-    int nID;
-    for (;;)
-    {
-        CGameBase *pObj;
-        file.Read(nID);
-        if (nID == -1)
-            break;
-        pObj = (ARG_TYPE)pManager->Find(nID);
-        if (pObj)
-        {
-            arr.AddTail((TYPE)pObj);
-            pObj->AddRef();
-        }
-        else if (!pManager->IsOmittedSaveObject(nID))
-            break;
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE, class ARG_TYPE>
 void LoadGBPtrSmartList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager)
 {
-    int nID;
-    for (;;)
-    {
-        CGameBase *pObj;
-        file.Read(nID);
-        if (nID == -1)
-            break;
-        pObj = (ARG_TYPE)pManager->Find(nID);
-        if (pObj)
-            arr.AddTail((TYPE)((ARG_TYPE)pObj));
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE>
 TYPE *LoadGBPtr(CSave &file, CBaseManager *pManager)
 {
-    int nID;
-    file.Read(nID);
-    if (nID == -1)
-        return NULL;
-    TYPE *pRes = (TYPE *)pManager->Find(nID);
-    if (pRes)
-        pRes->AddRef();
-    return pRes;
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE>
 TYPE *LoadGBSmartPtr(CSave &file, CBaseManager *pManager)
 {
-    int nID;
-    file.Read(nID);
-    if (nID == -1)
-        return NULL;
-    TYPE *pRes = (TYPE *)pManager->Find(nID);
-    return pRes;
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 inline void StoreGBPtr(CSave &file, CGameBase *pObj)
 {
-    if (pObj)
-        file.Write((int)pObj->GetID());
-    else
-        file.Write((int)-1);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////

@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObject.h"
 #include "Inventory.h"
@@ -162,6 +163,10 @@ public:
     virtual void TimeOfDayChanged() {}
     //
     CUnit *GetUnit() { return lpUnit; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline CUnitSpecific::CUnitSpecific()
@@ -481,6 +486,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnit"; };
     virtual EClassIDs WhoAmI() const { return HPC_UNIT; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CUnit *LPUNIT;

@@ -7,6 +7,7 @@
  *>	Copyright (c) 1999, Nival Interactive
  **********************************************************************/
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "ModNativeCrtRandom.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -122,57 +123,24 @@ const float FP_SAFE_DISTANCE = 10;
 // SAITurnLookOrder
 void SAITurnLookOrder::Load(CSave &file)
 {
-    file.Read(fpAngle);
-    file.Read(fpTurnSpeed);
-    file.Read(fpTime);
-    if (file.GetVersion() < 68)
-        return;
-    file.Read(bRest);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SAITurnLookOrder::Store(CSave &file)
 {
-    file.Write(fpAngle);
-    file.Write(fpTurnSpeed);
-    file.Write(fpTime);
-    file.Write(bRest);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CAISpellCaster
 /////////////////////////////////////////////////////////////////////////////////////
 void CAISpellCaster::SAIPotentialAttack::Load(CSave &file)
 {
-    if (file.GetVersion() < 90)
-    {
-        float fpMinDistance;
-        file.Read(nAttackNumber);
-        file.Read(fpMinDistance);
-        attack.Load(file);
-        type = nAttackNumber < 0 ? AT_WEAPON : AT_DIRECT_DAMAGE;
-        fpRange = 1;
-        nTargets = 0;
-        fpHealPower = 0;
-        nSpellID = 0;
-        return;
-    }
-    file.Read(&type, sizeof(type));
-    file.Read(nAttackNumber);
-    file.Read(fpRange);
-    file.Read(nTargets);
-    file.Read(fpDamageRadius);
-    file.Read(nDuration);
-    attack.Load(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAISpellCaster::SAIPotentialAttack::Store(CSave &file)
 {
-    file.Write(&type, sizeof(type));
-    file.Write(nAttackNumber);
-    file.Write(fpRange);
-    file.Write(nTargets);
-    file.Write(fpDamageRadius);
-    file.Write(nDuration);
-    attack.Store(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 float CAISpellCaster::SAIPotentialAttack::GetDamage()
@@ -931,22 +899,12 @@ void CAISpellCaster::FindBestTarget(CAIUnitLogic &logic, CEnemy &res, CUnitList 
 /////////////////////////////////////////////////////////////////////////////////////
 void CAISpellCaster::Load(CSave &file)
 {
-    skillCacheValid=false;
-    companionObserved=companionLogged=false;
-    companionRefusals=0;
-    fpAvrgDamage = 0;
-    LoadCArray(attacks, file);
-    if (file.GetVersion() < 90)
-        return;
-    LoadCArray(heals, file);
-    file.Read(fpAvrgDamage);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAISpellCaster::Store(CSave &file)
 {
-    StoreCArray(attacks, file);
-    StoreCArray(heals, file);
-    file.Write(fpAvrgDamage);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIUnitMotivation
@@ -1031,20 +989,12 @@ void CUMGuard::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMGuard::Load(CSave &file)
 {
-    file.Read(fpGuardRadius);
-    file.Read(fpStayIdleTime);
-    file.Read(&ptGuard, sizeof(ptGuard));
-    if (file.GetVersion() < 102)
-        return;
-    file.Read(nGuardFail);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMGuard::Store(CSave &file)
 {
-    file.Write(fpGuardRadius);
-    file.Write(fpStayIdleTime);
-    file.Write(&ptGuard, sizeof(ptGuard));
-    file.Write(nGuardFail);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation Patrol
@@ -1115,14 +1065,12 @@ void CUMPatrol::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPatrol::Load(CSave &file)
 {
-    LoadCArray<SAIRallyPoint>(patrol, file);
-    file.Read(nCurrentPatrolPoint);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPatrol::Store(CSave &file)
 {
-    StoreCArray<SAIRallyPoint>(patrol, file);
-    file.Write(nCurrentPatrolPoint);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation Sentry
@@ -1154,12 +1102,12 @@ void CUMSentry::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMSentry::Load(CSave &file)
 {
-    file.Read(&ptSentry, sizeof(ptSentry));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMSentry::Store(CSave &file)
 {
-    file.Write(&ptSentry, sizeof(ptSentry));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation Follow
@@ -1178,12 +1126,12 @@ void CUMFollow::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFollow::Load(CSave &file)
 {
-    pFollowTo.Load(file, theWorldServer);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFollow::Store(CSave &file)
 {
-    pFollowTo.Store(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation Suspection
@@ -1266,14 +1214,12 @@ void CUMSuspection::FinishUsing(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMSuspection::Load(CSave &file)
 {
-    file.Read(&ptUnderSuspection, sizeof(CPlot3D));
-    file.Read(nPower);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMSuspection::Store(CSave &file)
 {
-    file.Write(&ptUnderSuspection, sizeof(CPlot3D));
-    file.Write(nPower);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation Aggression
@@ -1418,18 +1364,12 @@ void CUMAggression::FinishUsing(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMAggression::Load(CSave &file)
 {
-    pTarget.Load(file, theWorldServer);
-    file.Read(&bRevenge, sizeof(bRevenge));
-    // file.Read( nRelaxation );
-    // file.Read( nCurrentRelaxStart );
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMAggression::Store(CSave &file)
 {
-    pTarget.Store(file);
-    file.Write(&bRevenge, sizeof(bRevenge));
-    // file.Write( nRelaxation );
-    // file.Write( nCurrentRelaxStart );
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation Corpse Watcher - wants to explore ally corpses
@@ -1450,8 +1390,8 @@ CUMFear::CUMFear(bool _bFearPlayer)
 {
     fpFearRadius = FP_SAFE_DISTANCE;
     fpRandomShift = 3;
-    ptDangerousPlace.x = -1313; // это значение означает, что юнит не находится в режиме страха
-    ptPreparedRunaway.z = 0;    // нет подготовленного места отступления
+    ptDangerousPlace = CPlot3D(-1313, 0, 0); // это значение означает, что юнит не находится в режиме страха
+    ptPreparedRunaway = CPlot3D(0, 0, 0);    // нет подготовленного места отступления
                                 // попасть в опасную область
     bFearPlayer = _bFearPlayer;
 }
@@ -1781,25 +1721,12 @@ void CUMFear::FinishUsing(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFear::Load(CSave &file)
 {
-    ModRetreatReset();
-    file.Read(fpFearRadius);
-    file.Read(fpRandomShift);
-    file.Read(&ptDangerousPlace, sizeof(ptDangerousPlace));
-    if (file.GetVersion() < 83)
-        return;
-    file.Read(bFearPlayer);
-    if (file.GetVersion() < 112)
-        return;
-    file.Read(&ptPreparedRunaway, sizeof(ptPreparedRunaway));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMFear::Store(CSave &file)
 {
-    file.Write(fpFearRadius);
-    file.Write(fpRandomShift);
-    file.Write(&ptDangerousPlace, sizeof(ptDangerousPlace));
-    file.Write(bFearPlayer);
-    file.Write(&ptPreparedRunaway, sizeof(ptPreparedRunaway));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // unit motivation is absent : under players control
@@ -2302,24 +2229,12 @@ void CUMPlayer::CommandUnit(CAIUnitLogic &logic)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::Load(CSave &file)
 {
-    resumeCompanionAttack = false;
-    pTarget.Load(file, theWorldServer);
-    pFollowTo.Load(file, theWorldServer);
-    file.Read(&ptSwarmTarget, sizeof(ptSwarmTarget));
-    file.Read(&cmdState, sizeof(cmdState));
-    if (file.GetVersion() >= 70 && file.GetVersion() < 94)
-    {
-        CScriptObjectGroup swarmTargets;
-        swarmTargets.Load(file);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::Store(CSave &file)
 {
-    pTarget.Store(file);
-    pFollowTo.Store(file);
-    file.Write(&ptSwarmTarget, sizeof(ptSwarmTarget));
-    file.Write(&cmdState, sizeof(cmdState));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIUnitLogic implementation
@@ -3855,130 +3770,12 @@ bool CAIUnitLogic::GenerateGuardRallyPoint(const CPlot3D &ptCenter, float fpRadi
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitLogic::Load(CSave &file)
 {
-    int i, k, iControl, nLogics;
-    CAIUnitMotivation *pLoad;
-    ClearMotivations();
-
-    file.Read(i);
-    state = EUnitState(i);
-    currentRally.Load(file);
-    file.Read(nLookFinishTime);
-    pTarget.Load(file, theWorldServer);
-    pHitBy.Load(file, theWorldServer);
-    file.Read(fpCallForHelpRadius);
-    file.Read(fpSuspectRadius);
-    file.Read(fpAttackRadius);
-    file.Read(fpRadiusKoef);
-    file.Read(&ptPreviousPoint, sizeof(ptPreviousPoint));
-    file.Read(&ptCurrentPoint, sizeof(ptCurrentPoint));
-    file.Read(&alarmCondition, sizeof(alarmCondition));
-    file.Read(nLogics);
-    file.Read(iControl);
-    pControl = NULL;
-    for (k = 0; k < nLogics; k++)
-    {
-        file.Read(i);
-        switch (i)
-        {
-        case AI_UM_GUARD:
-            pLoad = dbgnew CUMGuard;
-            break;
-        case AI_UM_PATROL:
-            pLoad = dbgnew CUMPatrol;
-            break;
-        case AI_UM_SENTRY:
-            pLoad = dbgnew CUMSentry;
-            break;
-        case AI_UM_SUSPECTION:
-            pLoad = dbgnew CUMSuspection;
-            break;
-        case AI_UM_AGGRESSION:
-            pLoad = dbgnew CUMAggression;
-            break;
-        case AI_UM_CORPSEWATCHER:
-            pLoad = dbgnew CUMCorpseWatcher;
-            break;
-        case AI_UM_FEAR:
-            pLoad = dbgnew CUMFear;
-            break;
-        case AI_UM_PLAYER:
-            pLoad = dbgnew CUMPlayer;
-            break;
-        case AI_UM_TAMED:
-            pLoad = dbgnew CUMTamed;
-            break;
-        case AI_UM_FOLLOW:
-            pLoad = dbgnew CUMFollow;
-            break;
-        default:
-            ASSERT(0 && "Unknown motivation loaded");
-            return;
-        }
-        pLoad->Load(file);
-        motivations.AddTail(pLoad);
-        if (k == iControl)
-            pControl = motivations.GetTail();
-    }
-    environment.Load(file);
-    file.Read(nAlarmInvoked);
-    file.Read(nAlarmNumber);
-    LoadCArray<SGeneralUnitLogic, SGeneralUnitLogic &>(alarmLogics, file);
-    file.Read(nAlarmDelay);
-    PatchCallForHelpRadius();
-    file.Read(bAlwaysOnTheRun);
-    if (file.GetVersion() < 75)
-        return;
-    caster.Load(file);
-    if (file.GetVersion() < 113)
-        return;
-    file.Read(nCurrentAlarm);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitLogic::Store(CSave &file)
 {
-    POSITION pos;
-    int k, iControl;
-    CAIUnitMotivation *pLoad;
-
-    file.Write((int)state);
-    currentRally.Store(file);
-    file.Write(nLookFinishTime);
-    pTarget.Store(file);
-    pHitBy.Store(file);
-    file.Write(fpCallForHelpRadius);
-    file.Write(fpSuspectRadius);
-    file.Write(fpAttackRadius);
-    file.Write(fpRadiusKoef);
-    file.Write(&ptPreviousPoint, sizeof(ptPreviousPoint));
-    file.Write(&ptCurrentPoint, sizeof(ptCurrentPoint));
-    file.Write(&alarmCondition, sizeof(alarmCondition));
-    file.Write((int)motivations.GetCount());
-    pos = motivations.GetHeadPosition();
-    iControl = -1;
-    k = 0;
-    while (pos)
-    {
-        pLoad = motivations.GetNext(pos);
-        if (pLoad == pControl)
-            iControl = k;
-        k++;
-    }
-    file.Write(iControl);
-    pos = motivations.GetHeadPosition();
-    while (pos)
-    {
-        pLoad = motivations.GetNext(pos);
-        file.Write((int)pLoad->GetType());
-        pLoad->Store(file);
-    }
-    environment.Store(file);
-    file.Write(nAlarmInvoked);
-    file.Write(nAlarmNumber);
-    StoreCArray<SGeneralUnitLogic, SGeneralUnitLogic &>(alarmLogics, file);
-    file.Write(nAlarmDelay);
-    file.Write(bAlwaysOnTheRun);
-    caster.Store(file);
-    file.Write(nCurrentAlarm);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 

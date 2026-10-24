@@ -827,6 +827,10 @@ public:
     virtual LPCSTR GetGameClassName() const { return "CUnitServer"; }
     SL0AnimationSeq *GetExtendedAnimationSequence(unsigned kind);
     virtual EClassIDs WhoAmI() const { return HPC_UNITSERVERSPECIFIC; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // Terrain check for spell cast

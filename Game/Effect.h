@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 
 /*==========================================================================================================
 
@@ -61,6 +62,10 @@ public:
     virtual void ApplyParams(EUpdateType tip) = 0;
     void StartEffect(int nSegment) { nStartSegment = nSegment; }
     void SetSpeed(const CPlot3D &newSpeed);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -97,6 +102,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectSound"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTSOUND; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -131,6 +140,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectSoundSeq"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTSOUNDSEQ; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -162,6 +175,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectAmbientSound"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTAMBIENTSOUND; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -192,6 +209,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectPointLight"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTPOINTLIGHT; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -235,6 +256,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectParticle"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTPARTICLE; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -260,6 +285,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectWall"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTWALL; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -297,6 +326,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectLightning"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTLIGHTNING; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -318,6 +351,10 @@ public:
     virtual void Clear();
     virtual int Segment();
     BOOL IsDelivered() { return bDelivered; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 // --------------------------------------------------------------------------------------------
 // --------------------------------------------------------------------------------------------
@@ -357,6 +394,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectArrow"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTARROW; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 // --------------------------------------------------------------------------------------------
 // --------------------------------------------------------------------------------------------
@@ -397,6 +438,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectArrowFigure"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTARROWFIGURE; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -429,6 +474,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectShowVisibility"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTSHOWVISIBILITY; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -445,8 +494,8 @@ class CEffectMoshka : public CEffect
     CMapObjectPtr pMapObj;
     CSmartPtr<CParticle> pParticle;
     int nUnitID;
-    float fpPrevTime, fpStateTime, fpBaseAngle, fpRoundAwayH;
-    EState state;
+    float fpPrevTime = 0, fpStateTime = 0, fpBaseAngle = 0, fpRoundAwayH = 0;
+    EState state = Start;
 
     CPlot3D ChooseFarPoint(const CPlot3D &ptBase);
     CPlot3D ChooseFarPoint(const CPlot3D &ptBase, float fpAngle);
@@ -470,6 +519,10 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectMoshka"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTMOSHKA; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -501,4 +554,8 @@ public:
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectTornado"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTTORNADO; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };

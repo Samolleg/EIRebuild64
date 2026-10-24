@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include <unordered_map>
 #include <vector>
@@ -48,5 +49,8 @@ public:
     //
     static void Load(CSave &file, std::vector<SUnitStatistics> &statistics,
                      std::vector<SUnitWearsStatistics> &wears);
+public:
+    void Store(SaveSchema::Writer &) const;
+    static void Load(SaveSchema::Reader &, std::vector<SUnitStatistics> &, std::vector<SUnitWearsStatistics> &);
 };
 /////////////////////////////////////////////////////////////////////////////////////

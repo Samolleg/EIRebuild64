@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObjectServer.h"
@@ -21,22 +22,13 @@ bool SpellEffectPowerEnabled()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CMapObjectPtr::Load(CSave &file, CWorld &world)
 {
-    int nID;
-    file.Read(nID);
-    if (nID == -1)
-        Set(NULL);
-    else
-        Set((CMapObject *)world.GetMapObjectManager()->Find(nID));
-    return !world.GetMapObjectManager()->IsOmittedSaveObject(nID);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 void CMapObjectPtr::Store(CSave &file)
 {
-    if (pObject)
-        file.Write((int)pObject->GetID());
-    else
-        file.Write((int)-1);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CMapObject::CMapObject()
@@ -533,37 +525,12 @@ CPlot3D CMapObject::GetUnitHeadPosition()
 /////////////////////////////////////////////////////////////////////////////////////
 void CMapObject::Load(CSave &file)
 {
-    lpMapObjectSpecific->Load(file);
-    file.Read(fpAnimationCoeff);
-    file.Read(&cp, sizeof(cp));
-    file.Read(&rotation, sizeof(rotation));
-    SetMaskName(file.ReadString());
-    file.Read(&complection, sizeof(complection));
-    LoadCArray<CSpellEffect, CSpellEffect &>(spellEffects, file);
-    // read flags
-    DWORD dwNFlags;
-    file.Read(dwNFlags);
-    ResetAllFlags();
-    SetFlag(dwNFlags);
-    //
-    file.Read(szAttachedQuest);
-    //
-    if (file.GetVersion() > 78)
-        file.Read(&baseComplection, sizeof(baseComplection));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CMapObject::Store(CSave &file)
 {
-    lpMapObjectSpecific->Store(file);
-    file.Write(fpAnimationCoeff);
-    file.Write(&cp, sizeof(cp));
-    file.Write(&rotation, sizeof(rotation));
-    file.WriteString(GetMaskName());
-    file.Write(&complection, sizeof(complection));
-    StoreCArray<CSpellEffect, CSpellEffect &>(spellEffects, file);
-    file.Write(GetFlags());
-    file.Write(szAttachedQuest);
-    file.Write(&baseComplection, sizeof(baseComplection));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CMapObject::IsInvisible() const

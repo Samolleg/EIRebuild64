@@ -9,6 +9,7 @@
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "EngineDiagnostics.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -117,30 +118,12 @@ void SAIPath::Clear()
 /////////////////////////////////////////////////////////////////////////////////////
 void SAIPath::Load(CSave &file)
 {
-    toGo.Load(file);
-    curSegment.Load(file);
-    file.Read(&ptFinish, sizeof(ptFinish));
-    file.Read(&ptDestination, sizeof(ptDestination));
-    file.Read(&bFinished, sizeof(bFinished));
-    file.Read(&bRouteFailed, sizeof(bRouteFailed));
-    file.Read(&bTryAnyPath, sizeof(bTryAnyPath));
-    file.Read(&bFirstTry, sizeof(bFirstTry));
-    LoadCArray<SAIGraphVertice>(excludeVertices, file);
-    file.Read(nPathCost);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SAIPath::Store(CSave &file)
 {
-    toGo.Store(file);
-    curSegment.Store(file);
-    file.Write(&ptFinish, sizeof(ptFinish));
-    file.Write(&ptDestination, sizeof(ptDestination));
-    file.Write(&bFinished, sizeof(bFinished));
-    file.Write(&bRouteFailed, sizeof(bRouteFailed));
-    file.Write(&bTryAnyPath, sizeof(bTryAnyPath));
-    file.Write(&bFirstTry, sizeof(bFirstTry));
-    StoreCArray<SAIGraphVertice>(excludeVertices, file);
-    file.Write(nPathCost);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // SAIObjectPlacement &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&

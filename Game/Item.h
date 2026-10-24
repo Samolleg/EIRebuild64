@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 
 #include "GameBase.h"
 #include "PacketIDs.h"
@@ -122,6 +123,10 @@ public:
     //
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 // --------------------------------------------------------------------------------------------
 inline int CItem::GetTTIndex() const
@@ -219,6 +224,10 @@ public:
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemWeapon"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_WEAPON; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 // --------------------------------------------------------------------------------------------
 // Armor.
@@ -291,6 +300,10 @@ public:
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemArmor"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_ARMOR; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -334,6 +347,10 @@ public:
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemQuick"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_QUICK; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -376,6 +393,10 @@ public:
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemQuest"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_QUEST; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------
@@ -417,6 +438,10 @@ public:
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemLoot"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_LOOT; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------

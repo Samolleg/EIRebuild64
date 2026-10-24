@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /*==========================================================================================================
 
         Common player class header
@@ -137,6 +138,10 @@ public:
 
 private:
     void Clear();
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -166,5 +171,9 @@ public:
     CPlayer *GetPlayer() { return pPlayer; }
     // Packet parsing
     virtual BOOL ParseIncomingPackets() = 0;
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////

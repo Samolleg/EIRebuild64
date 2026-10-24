@@ -1,7 +1,9 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "BaseManager.h"
+#include <memory>
 #include "WorldServer.h"
 #include "WorldClient.h"
 #include "OwnedRender/E1Scene.h"
@@ -225,8 +227,25 @@ CSmartPtr<CGameBase> CBaseManager::CreateSavedData(ETypeIDs type, int id, Object
         explicit Construction(bool &value) : flag(value), previous(value) { flag = true; }
         ~Construction() { flag = previous; }
     } construction(restoringObject);
-    return ObjectIdentity::CreateWith<CSmartPtr<CGameBase>>(savedId,
-        [&]() { return CreateData(type, id); });
+    // Do not dispatch to MapObjectManager::CreateData: it would allocate extra
+    // specifics/animation systems not present in the saved graph.
+    return ObjectIdentity::CreateWith<CSmartPtr<CGameBase>>(savedId, [&]() {
+        std::unique_ptr<CGameBase> object(CreateInstant(type));
+        if (!object) throw std::invalid_argument("unknown saved manager type");
+        object->SetTypeID(type);
+        RegisterInstantAs(id, object.get());
+        try
+        {
+            if (!object->Create()) throw std::invalid_argument("saved object Create failed");
+        }
+        catch (...)
+        {
+            RemoveInstantAt(id);
+            object->SetManager(nullptr);
+            throw;
+        }
+        return object.release();
+    });
 }
 
 // LPGAMEBASE CBaseManager::CreateData( ETypeIDs tidTypeID, int id )
@@ -512,74 +531,22 @@ void CBaseManager::SetupKeyRange(int from, int to)
 /////////////////////////////////////////////////////////////////////////////////////
 void CBaseManager::Load(CSave &file)
 {
-    int nCount, i;
-    ASSERT(list.GetCount() == 0);
-    ClearTrash();
-    file.Read(nCount);
-    if (nCount > 0 && static_cast<unsigned int>(nCount) > file.Remaining() / 12)
-    { file.Fail("invalid_registry_count"); return; }
-    for (i = 0; i < nCount; i++)
-    {
-        int nID;
-        int typeID;
-        DWORD dwSubtype;
-        file.Read(nID);
-        file.Read(typeID);
-        file.Read(dwSubtype);
-        LPGAMEBASE lpData = CreateData(ETypeIDs(typeID), nID);
-        if (!lpData) { file.Fail("invalid_registry_type"); return; }
-        lpData->SetSubtypeID(dwSubtype);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CBaseManager::Store(CSave &file)
 {
-    if (list.GetCount() > INT_MAX) throw std::overflow_error("legacy registry count overflow");
-    file.Write(static_cast<int>(list.GetCount()));
-    POSITION pos = list.GetHeadPosition();
-    while (pos)
-    {
-        CGameBase *pObj = list.GetNext(pos);
-        file.Write(pObj->GetID());
-        file.Write((int)pObj->GetTypeID());
-        file.Write(pObj->GetSubtypeID());
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CBaseManager::LoadData(CSave &file)
 {
-    int nID;
-    char ch;
-    for (;;)
-    {
-        file.Read(nID);
-        if (nID == -1313)
-        {
-            file.Read(ch);
-            if (ch == 0)
-                break;
-        }
-        CGameBase *pObj = Find(nID);
-        ASSERT(pObj);
-        if (!pObj)
-            return;
-        pObj->Load(file);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CBaseManager::StoreData(CSave &file)
 {
-    POSITION pos = list.GetHeadPosition();
-    while (pos)
-    {
-        CGameBase *pObj = list.GetNext(pos);
-        file.Write(pObj->GetID());
-        if (pObj->GetID() == -1313)
-            file.Write((char)1);
-        pObj->Store(file);
-    }
-    file.Write((int)-1313);
-    file.Write((char)0);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CBaseManager::CheckReferences()

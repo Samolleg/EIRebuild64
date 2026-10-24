@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 
 #include "World.h"
 #include "rpgSystem.h"
@@ -70,6 +71,10 @@ public:
     void RemoveSpell(CItemSpell *pItem);
     //
     float GetItemsWeight() const;
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // typedef CArray< CPersonage*, CPersonage* > CPersonages;
@@ -95,6 +100,10 @@ public:
     CParty(const CParty &src);
     // create/destroy
     virtual BOOL Create();
+    BOOL CreateSavedOwners(ObjectId item, ObjectId spell);
+private:
+    BOOL CreateOwners(ObjectId item, ObjectId spell);
+public:
     virtual void Destroy();
     void Clear(BOOL bDelVars, BOOL bDestructor);
     void Clear() { Clear(TRUE, FALSE); }
@@ -153,6 +162,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CParty"; };
     virtual EClassIDs WhoAmI() const { return HPC_PARTY; }
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // поддерживает считывание и запись в отдельные файлы

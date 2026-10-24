@@ -316,6 +316,10 @@ public:
     // identification information
     virtual LPCSTR GetGameClassName() const { return "CCamera"; };
     virtual EClassIDs WhoAmI() const { return HPC_CAMERA; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline void CCamera::SetFPSMode(CObject3D *lpNewCarrier)

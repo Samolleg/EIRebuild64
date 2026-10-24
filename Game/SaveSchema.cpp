@@ -8,6 +8,10 @@
 #include <limits>
 
 namespace SaveSchema {
+[[noreturn]] void RequireDynamicSchema()
+{
+    throw Error(ErrorCode::Incompatible, "dynamic state requires SaveSchema (P17)");
+}
 namespace {
 constexpr std::uint8_t Magic[8] = {'E', 'I', 'R', '6', '4', 'S', 'A', 'V'};
 constexpr ObjectId LastId = (std::numeric_limits<ObjectId>::max)();

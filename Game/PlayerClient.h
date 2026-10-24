@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /*==========================================================================================================
 
         Client specific player class header
@@ -151,4 +152,8 @@ private:
     BOOL PrsRemoveHoover();
     BOOL PrsUnitGainExp();
     BOOL PrsSelect();
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };

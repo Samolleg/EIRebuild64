@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiRoute.h"
@@ -536,27 +537,12 @@ bool CRouteWalker::GetPosition(CWorldBase *pWorld, CAIFullRoute &route, float fp
 /////////////////////////////////////////////////////////////////////////////////////
 void CRouteWalker::Load(CSave &file)
 {
-    cache.Clear();
-    LoadCArray<SWalkerWaypoint>(points, file);
-    LoadCArray<SWalkerTempPoint>(tpoints, file);
-    LoadCArray<float, float>(speeds, file);
-    file.Read(fpBaseSpeed);
-    file.Read(fpAngularSpeed);
-    file.Read(fpActiveAngularSpeed);
-    file.Read(fpStartAngle);
-    file.Read(fpDeltaAngle);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CRouteWalker::Store(CSave &file)
 {
-    StoreCArray<SWalkerWaypoint>(points, file);
-    StoreCArray<SWalkerTempPoint>(tpoints, file);
-    StoreCArray<float, float>(speeds, file);
-    file.Write(fpBaseSpeed);
-    file.Write(fpAngularSpeed);
-    file.Write(fpActiveAngularSpeed);
-    file.Write(fpStartAngle);
-    file.Write(fpDeltaAngle);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -812,23 +798,11 @@ void CAIFullRoute::UpdateFrom(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIFullRoute::Load(CSave &file)
 {
-    file.Read(&moveType, sizeof(moveType));
-    file.Read(&start, sizeof(start));
-    file.Read(fpStartAngle);
-    file.Read(nStartSegment);
-    file.Read(&attack, sizeof(attack));
-    if (moveType == Attack)
-        attack.nTargetID = theWorldServer.GetMapObjectManager()->SavedObjectID(attack.nTargetID);
-    route.Load(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIFullRoute::Store(CSave &file)
 {
-    file.Write(&moveType, sizeof(moveType));
-    file.Write(&start, sizeof(start));
-    file.Write(fpStartAngle);
-    file.Write(nStartSegment);
-    file.Write(&attack, sizeof(attack));
-    route.Store(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////

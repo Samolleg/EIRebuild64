@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; [[noreturn]] void RequireDynamicSchema(); }
 
 #include "Object.h"
 #include "RPGSystem.h"
@@ -57,6 +58,10 @@ public:
     //
     void RegisterMapObject(CMapObject *lpNewMapObject) { lpMapObject = lpNewMapObject; }
     CMapObject *GetMapObject() { return lpMapObject; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline CMapObjectSpecific::CMapObjectSpecific()
@@ -227,6 +232,10 @@ public:
     // load & store
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 typedef CSmartPtr<CMapObject> CMapObjectPtr1;
 
@@ -304,25 +313,13 @@ typedef CList<CMapObjectPtr, CMapObject *> CMapObjectPtrList;
 // --------------------------------------------------------------------------------------------
 inline void StoreMapObjectPtrList(CMapObjectPtrList &arr, CSave &file)
 {
-    int i = arr.GetCount();
-    file.Write(&i, sizeof(i));
-    POSITION pos = arr.GetHeadPosition();
-    while (pos)
-        arr.GetNext(pos).Store(file);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 inline void LoadMapObjectPtrList(CMapObjectPtrList &arr, CSave &file, CWorld &world)
 {
-    int i;
-    file.Read(&i, sizeof(i));
-    while (i-- > 0)
-    {
-        POSITION added = arr.AddTail(CMapObjectPtr());
-        // Consumers of unit/environment/trap lists dereference every member.
-        // An omitted saved object is no member, rather than a null list node.
-        if (!arr.GetAt(added).Load(file, world)) arr.RemoveAt(added);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CMapObject *LPMAPOBJECT;

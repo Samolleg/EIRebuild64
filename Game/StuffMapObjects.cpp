@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "ItemApproachCatalog.h"
 #include "EngineDiagnostics.h"
 #include "ModRegisteredLoot.h"
@@ -176,14 +177,12 @@ BOOL CTrapObject::CanApplyScience(const SRPGScienceStats &tool)
 /////////////////////////////////////////////////////////////////////////////////////
 void CTrapObject::Load(CSave &file)
 {
-    CMapObject::Load(file);
-    file.Read(dwEnemyMask);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTrapObject::Store(CSave &file)
 {
-    CMapObject::Store(file);
-    file.Write(dwEnemyMask);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
@@ -400,28 +399,12 @@ void CMagicTrapObject::RemoveReferencesOn(CMapObject *pTarget)
 /////////////////////////////////////////////////////////////////////////////////////
 void CMagicTrapObject::Load(CSave &file)
 {
-    CMapObject::Load(file);
-    pSpell = LoadGBSmartPtr<CSpell>(file, GetWorld()->GetSpellManager());
-    LoadCArray(trapAreas, file);
-    LoadMapObjectPtrList(trappedPersons, file, *GetWorld());
-    LoadCArray(ptTargets, file);
-    file.Read(nCastingInterval);
-    file.Read(nTimeToCast);
-    file.Read(bCastOnce);
-    file.Read(dwEnemyMask);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CMagicTrapObject::Store(CSave &file)
 {
-    CMapObject::Store(file);
-    StoreGBPtr(file, pSpell);
-    StoreCArray(trapAreas, file);
-    StoreMapObjectPtrList(trappedPersons, file);
-    StoreCArray(ptTargets, file);
-    file.Write(nCastingInterval);
-    file.Write(nTimeToCast);
-    file.Write(bCastOnce);
-    file.Write(dwEnemyMask);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
@@ -767,24 +750,12 @@ void CLeverObject::GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnit
 /////////////////////////////////////////////////////////////////////////////////////
 void CLeverObject::Load(CSave &file)
 {
-    CMapObject::Load(file);
-    file.Read(nCurrentState);
-    file.Read(nTotalStates);
-    file.Read(bCycle);
-    science.Load(file);
-    file.Read(bIsDoor);
-    file.Read(bGraphRecalc);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CLeverObject::Store(CSave &file)
 {
-    CMapObject::Store(file);
-    file.Write(nCurrentState);
-    file.Write(nTotalStates);
-    file.Write(bCycle);
-    science.Store(file);
-    file.Write(bIsDoor);
-    file.Write(bGraphRecalc);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
@@ -849,14 +820,12 @@ BOOL CTorchObject::UpdateFrom(EUpdateType tip)
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObject::Load(CSave &file)
 {
-    CMapObject::Load(file);
-    pTorchSpecific->Load(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObject::Store(CSave &file)
 {
-    CMapObject::Store(file);
-    pTorchSpecific->Store(file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObject::SetSpecific(LPGAMEBASE lpNewSpecific)
@@ -908,28 +877,12 @@ void CTorchObjectSpecific::UpdateFrom(CUpdateHistory &pkt)
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObjectSpecific::Load(CSave &file)
 {
-    file.Read(&tidParticlesType, sizeof(tidParticlesType));
-
-    file.Read(szSFXName);
-    file.Read(fpParticleScale);
-    file.Read(fpLightRange);
-    file.Read(&dcvLightColor, sizeof(dcvLightColor));
-
-    file.Read(&ptParticlesCenter, sizeof(ptParticlesCenter));
-    file.Read(&ptLightCenter, sizeof(ptLightCenter));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObjectSpecific::Store(CSave &file)
 {
-    file.Write(&tidParticlesType, sizeof(tidParticlesType));
-
-    file.Write(szSFXName);
-    file.Write(fpParticleScale);
-    file.Write(fpLightRange);
-    file.Write(&dcvLightColor, sizeof(dcvLightColor));
-
-    file.Write(&ptParticlesCenter, sizeof(ptParticlesCenter));
-    file.Write(&ptLightCenter, sizeof(ptLightCenter));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObjectSpecific::SetParticles(ETypeIDs tidParticlesTypeID, const CPlot3D &position,

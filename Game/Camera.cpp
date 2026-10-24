@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Camera.h"
@@ -1124,51 +1125,12 @@ float CCamera::GetRotateAngle()
 /////////////////////////////////////////////////////////////////////////////////////
 void CCamera::Load(CSave &file)
 {
-    DiscardFieldCampCamera();
-    CameraTerrainCollision::Reset();
-    DWORD dwCameraFlags, dwNewCarrierID;
-
-    file.Read(&ptAnchorPoint, sizeof(ptAnchorPoint));
-    file.Read(fAnchorHeight);
-    file.Read(&qRotate, sizeof(qRotate));
-    file.Read(fPitch);
-    file.Read(fDistance);
-    file.Read(&scroll, sizeof(scroll));
-    file.Read(&rotate, sizeof(rotate));
-    file.Read(&pitch, sizeof(pitch));
-    file.Read(&zoom, sizeof(zoom));
-    file.Read(dwCameraFlags);
-    file.Read(dwNewCarrierID);
-    //
-    if (file.GetVersion() < 111)
-        file.Read(shortcuts, sizeof(shortcuts));
-    else
-        file.Read(shortcuts + 4, sizeof(SCameraShortcut) * 4);
-    //
-    if (dwCameraFlags & CAM_FPS_MODE)
-        SetFPSMode(dwNewCarrierID);
-    else
-        SetCarrier(dwNewCarrierID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CCamera::Store(CSave &file)
 {
-    DWORD dwCameraFlags = GetFlags();
-
-    file.Write(&ptAnchorPoint, sizeof(ptAnchorPoint));
-    file.Write(fAnchorHeight);
-    file.Write(&qRotate, sizeof(qRotate));
-    file.Write(fPitch);
-    file.Write(fDistance);
-    file.Write(&scroll, sizeof(scroll));
-    file.Write(&rotate, sizeof(rotate));
-    file.Write(&pitch, sizeof(pitch));
-    file.Write(&zoom, sizeof(zoom));
-    file.Write(dwCameraFlags);
-    file.Write(dwCarrierID);
-    //
-    file.Write(shortcuts + 4, sizeof(SCameraShortcut) * 4);
-    // file.Write( shortcuts, sizeof(shortcuts) );
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CCamera::ImportShortcuts(const SGeneralSettings &settings)
