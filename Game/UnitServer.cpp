@@ -2,6 +2,7 @@
 #include "CorePerf.h"
 #include "GameJournal.h"
 #include "ModNativeCrtRandom.h"
+#include "NumericPolicy.h"
 #include "EngineDiagnostics.h"
 #include "ModPackage.h"
 #include "ModSpellRules.h"
@@ -6441,30 +6442,6 @@ void CUnitServer::GetAttackParams(SAttackParams &params) const
     params.ApplyDifficultyLevel(bHero);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// Preserve the ASI x87 intermediates before the original float stores.
-static float SpellAddonWeightBonus(float divisor, float attacker, float defender)
-{
-    float result;
-    __asm {
-        fld divisor
-        fmul defender
-        fdivr attacker
-        fstp result
-    }
-    return result;
-}
-static float SpellAddonDistanceModifier(float numerator, float divisor, float defenderRange)
-{
-    float result;
-    __asm {
-        fld defenderRange
-        fmul divisor
-        fadd st(0), st(0)
-        fdivr numerator
-        fstp result
-    }
-    return result;
-}
 // return random to-hit value
 float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
 {
@@ -6478,7 +6455,7 @@ float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
         mod->ConditionalAttackParams(*pAttacker->GetRPGStats(),*pAttacker->lpUnit,apAttacker,true);
         mod->ConditionalAttackParams(*const_cast<CUnitServer*>(this)->GetRPGStats(),*lpUnit,apDefender,true);
         float distance = spellAddonHit
-            ? SpellAddonDistanceModifier(fabs(lpUnit->GetCP()-pAttacker->lpUnit->GetCP())*2.f,
+            ? NumericPolicy::DistanceModifier(fabs(lpUnit->GetCP()-pAttacker->lpUnit->GetCP())*2.f,
                                          rangeDivisor, lpUnit->GetAttackDistance())
             : fabs(lpUnit->GetCP()-pAttacker->lpUnit->GetCP())*2.f/(RPG_CONST_Z*lpUnit->GetAttackDistance()*2.f);
         float jitter=apAttacker.fToHitRandom>0?2.f*random.Get(MINT(apAttacker.fToHitRandom))-(apAttacker.fToHitRandom+1):0.f;
@@ -6488,11 +6465,11 @@ float CUnitServer::GetToHit(CUnitServer *pAttacker, bool bBackstab) const
     GetAttackParams(apDefender);
     bool jmv=ModRuntime::Current()&&ModRuntime::Current()->CombatSetting("JMVAttacks");
     float fWeightBonus = spellAddonHit
-        ? SpellAddonWeightBonus(mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_weight),
+        ? NumericPolicy::WeightBonus(mod->SpellAddon().Scalar(ModSpellAddon::ScalarKey::gameplay_weight),
                                apAttacker.fWeaponWeight, apDefender.fWeaponWeight)
         : apAttacker.fWeaponWeight / (RPG_CONST_Y * apDefender.fWeaponWeight);
     float fDistanceModifier = spellAddonHit
-        ? SpellAddonDistanceModifier(fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f,
+        ? NumericPolicy::DistanceModifier(fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f,
                                      rangeDivisor, lpUnit->GetAttackDistance())
         : fabs(lpUnit->GetCP() - pAttacker->lpUnit->GetCP()) * 2.0f /
           (RPG_CONST_Z * lpUnit->GetAttackDistance() * 2.0f);
@@ -6654,25 +6631,11 @@ int CUnitServer::GetHeroLevel() const
         const float multiplier = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_mullvla);
         const float addOutside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvla);
         const float addInside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvlb);
-        const float experience = rpgUnitStats.fpExperience;
-        float storedResult;
-        int result;
-        // FST does not pop or round ST(0) before FISTP. Keep the current x87 RC.
-        __asm {
-            fld1
-            fld experience
-            fdiv divisor
-            fadd addInside
-            fyl2x
-            fmul multiplier
-            fadd addOutside
-            fst storedResult
-            fistp result
-        }
-        return result;
+        return NumericPolicy::RebalancedHeroLevel(rpgUnitStats.fpExperience, divisor, multiplier,
+                                                   addInside, addOutside);
     }
     float fPower = rpgUnitStats.fpExperience / theAIGeneralSettings.fConsiderModifier;
-    return MINT(log(fPower) / log(theAIGeneralSettings.fConsiderLogBase));
+    return NumericPolicy::HeroLevelFromPower(fPower, theAIGeneralSettings.fConsiderLogBase);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::HaveLowShapes() const

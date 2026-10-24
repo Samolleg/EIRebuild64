@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModNativeCrtRandom.h"
+#include "NumericPolicy.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModAudioPolicy.h"
@@ -2504,29 +2505,13 @@ int CUnitClientSpecific::GetHeroLevel() const
         const float multiplier = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_mullvla);
         const float addOutside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvla);
         const float addInside = profile.Scalar(ModSpellAddon::ScalarKey::rebalanceengine_addlvlb);
-        // ASI uses signed FILD even though the stored field is a DWORD.
-        int experience;
-        const DWORD rawExperience = lpUnit->rpgUserUnitStats.dwExperience;
-        std::memcpy(&experience, &rawExperience, sizeof(experience));
-        float storedResult;
-        int result;
-        // FST does not pop or round ST(0) before FISTP. Keep the current x87 RC.
-        __asm {
-            fld1
-            fild experience
-            fdiv divisor
-            fadd addInside
-            fyl2x
-            fmul multiplier
-            fadd addOutside
-            fst storedResult
-            fistp result
-        }
-        return result;
+        const int32_t experience = NumericPolicy::SignedExperience(lpUnit->rpgUserUnitStats.dwExperience);
+        return NumericPolicy::RebalancedHeroLevel(double(experience), divisor, multiplier,
+                                                   addInside, addOutside);
     }
     float fPower = float(lpUnit->rpgUserUnitStats.dwExperience) /
                    theAIGeneralSettings.fConsiderModifier;
-    return MINT(log(fPower) / log(theAIGeneralSettings.fConsiderLogBase));
+    return NumericPolicy::HeroLevelFromPower(fPower, theAIGeneralSettings.fConsiderLogBase);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitClientSpecific::HaveLowShapes() const

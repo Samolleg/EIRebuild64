@@ -1,5 +1,6 @@
 #pragma once
 #include "ModConfiguration.h"
+#include "NumericPolicy.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -23,26 +24,7 @@ struct Profile {
     }
     float Experience(float exp,int count) const {
         if(!charge&&!(std::fabs(factor-1)>0.00001f))return exp/count;
-        // Native alternate path rounds only after the x87 divide/add/multiply chain.
-        const uint32_t mode=charge;const float multiplier=factor;float result;
-        __asm {
-            fild count
-            cmp mode, 1
-            je multiplyPlayers
-            cmp mode, 2
-            je addPlayers
-            fdivr exp
-            jmp scaleExperience
-        multiplyPlayers:
-            fmul exp
-            jmp scaleExperience
-        addPlayers:
-            fadd exp
-        scaleExperience:
-            fmul multiplier
-            fstp result
-        }
-        return result;
+        return NumericPolicy::Experience(exp,count,charge,factor);
     }
 };
 inline bool Prefix(const std::string& name,const char* prefix) {
