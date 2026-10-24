@@ -598,7 +598,7 @@
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
     <ProjectReference Include="OwnedRenderer\OwnedRenderer.vcxproj" Condition="'$(Configuration)|$(Platform)'=='Release|x64'"><Project>{8F045552-BA21-4F45-9902-631E6359DABD}</Project></ProjectReference>
-    <ProjectReference Include="luajit-x86\luajit.vcxproj"><Project>{2714e7b7-71e0-484a-81df-495cfdb463ad}</Project></ProjectReference>
+    <ProjectReference Include="tools\luajit\luajit.vcxproj"><Project>{2714e7b7-71e0-484a-81df-495cfdb463ad}</Project></ProjectReference>
   </ItemGroup>
   <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(ProjectDir)external\owned-renderer\</OwnedRendererRoot></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(OwnedRendererRoot)\Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile></ItemDefinitionGroup>

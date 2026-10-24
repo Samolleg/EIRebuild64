@@ -5,7 +5,7 @@ VisualStudioVersion = 16.0.30611.23
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64", "EI_Rebuild.vcxproj", "{042A52A4-CF8B-4868-B551-448520F97F44}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "luajit-x64", "luajit-x86\luajit.vcxproj", "{2714E7B7-71E0-484A-81DF-495CFDB463AD}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "luajit-x64", "tools\luajit\luajit.vcxproj", "{2714E7B7-71E0-484A-81DF-495CFDB463AD}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OwnedRenderer", "OwnedRenderer\OwnedRenderer.vcxproj", "{8F045552-BA21-4F45-9902-631E6359DABD}"
 EndProject
