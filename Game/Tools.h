@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <intrin.h>
+#include <xmmintrin.h>
 #include <type_traits>
 /////////////////////////////////////////////////////////////////////////////////////
 // different constants with 'pi'
@@ -289,41 +290,19 @@ public:
 
 inline int RoundFloatToInt(float value, FloatRounding mode)
 {
-    const int indefinite = INT32_MIN;
-    const double input = static_cast<double>(value);
-    if (!std::isfinite(input))
-        return indefinite;
-    double result;
-    switch (mode)
-    {
-    case FloatRounding::Chop:
-        result = std::trunc(input);
-        break;
-    case FloatRounding::Down:
-        result = std::floor(input);
-        break;
-    case FloatRounding::Up:
-        result = std::ceil(input);
-        break;
-    default:
-    {
-        const double lower = std::floor(input);
-        const double fraction = input - lower;
-        result = lower;
-        if (fraction > 0.5 || (fraction == 0.5 && std::fmod(lower, 2.0) != 0.0))
-            result = lower + 1.0;
-        break;
-    }
-    }
-    if (result < -2147483648.0 || result >= 2147483648.0)
-        return indefinite;
-    return static_cast<int>(result);
+    if (mode == FloatRounding::Chop)
+        return _mm_cvttss_si32(_mm_set_ss(value));
+
+    // Explicit modes are independent of the caller's rounding environment.
+    const ScopedFloatRounding rounding(mode);
+    return _mm_cvtss_si32(_mm_set_ss(value));
 }
 
-// Honour local terrain/lighting scopes, including callers in other helpers.
+// Read MXCSR at runtime, also in callers without fenv_access enabled.
+// Masked invalid conversions produce INT32_MIN, as the original x87 FISTP did.
 inline int MINT(const float fpVar)
 {
-    return RoundFloatToInt(fpVar, static_cast<FloatRounding>(std::fegetround()));
+    return _mm_cvtss_si32(_mm_set_ss(fpVar));
 }
 // the same as MINT
 inline int Float2Int(const float fpVar)
