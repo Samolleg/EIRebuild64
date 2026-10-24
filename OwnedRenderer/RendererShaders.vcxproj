@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration></ItemGroup>
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
   <PropertyGroup Label="Globals"><ProjectGuid>{F9F236B9-5E99-4BD6-B032-D727834B2329}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
@@ -84,8 +84,8 @@
   <ItemDefinitionGroup><Link><LargeAddressAware>true</LargeAddressAware><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dxguid.lib;user32.lib;gdi32.lib;comctl32.lib;bcrypt.lib;pdh.lib;psapi.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
   <Target Name="GenerateRendererResources" AfterTargets="Build" Inputs="$(TargetPath);$(OwnedRendererRoot)Source\camp_art.rc;$(OwnedRendererRoot)Assets\camp\stone-bronze-frame.png;$(OwnedRendererRoot)Assets\camp\ui-art-atlas-v4.png;$(OwnedRendererRoot)Assets\camp\hammer-anvil-empty.png" Outputs="$(OutDir)eid3d11_shaders.bin;$(OutDir)eid3d11_shaders.res;$(OutDir)eid3d11_camp_art.res">
     <Exec Command="&quot;$(TargetPath)&quot; eid3d11_shaders.bin" WorkingDirectory="$(OutDir)" />
-    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x86)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo eid3d11_shaders.res eid3d11_shaders.rc" WorkingDirectory="$(OutDir)" />
-    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x86)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo &quot;$(OutDir)eid3d11_camp_art.res&quot; Source\camp_art.rc" WorkingDirectory="$(OwnedRendererRoot)" />
+    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo eid3d11_shaders.res eid3d11_shaders.rc" WorkingDirectory="$(OutDir)" />
+    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo &quot;$(OutDir)eid3d11_camp_art.res&quot; Source\camp_art.rc" WorkingDirectory="$(OwnedRendererRoot)" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

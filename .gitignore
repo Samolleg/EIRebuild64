@@ -213,5 +213,16 @@ __pycache__/
 *.bak
 *.exe
 
-# Supplied LuaJIT VM object is an explicit project input, not build debris.
-!/luajit-x86/lj_vm.obj
+
+# EIRebuild64 dependencies and private local state.
+/dependencies/
+/Saves64/
+/Config64/
+/Logs64/
+[Ss]aves/
+[Ll]ogs/
+*.dump
+*.mdmp
+*.hdmp
+*.dll
+*.lib

@@ -2,8 +2,8 @@
   <PropertyGroup>
     <OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(MSBuildThisFileDirectory)..\external\owned-renderer\</OwnedRendererRoot>
     <OwnedRendererRoot>$([MSBuild]::EnsureTrailingSlash('$(OwnedRendererRoot)'))</OwnedRendererRoot>
-    <OutDir>$(MSBuildThisFileDirectory)..\out\Win32\Release\OwnedRenderer\</OutDir>
-    <IntDir>$(MSBuildThisFileDirectory)..\out\obj\$(MSBuildProjectName)\</IntDir>
+    <OutDir>$(MSBuildThisFileDirectory)..\out\x64\Release\$(MSBuildProjectName)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\out\obj\x64\Release\$(MSBuildProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -17,7 +17,7 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <Target Name="VerifyRendererIdentity" BeforeTargets="PrepareForBuild">
-    <Error Condition="'$(Configuration)|$(Platform)'!='Release|Win32'" Text="Owned renderer is supported only in Release Win32." />
+    <Error Condition="'$(Configuration)|$(Platform)'!='Release|x64'" Text="Owned renderer is supported only in Release x64." />
     <Error Condition="!Exists('$(OwnedRendererRoot)Source\renderer.cpp')" Text="Renderer sources are missing. Download the complete EIRebuild source tree including external/owned-renderer." />
   </Target>
 </Project>

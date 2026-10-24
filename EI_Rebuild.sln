@@ -3,9 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 16
 VisualStudioVersion = 16.0.30611.23
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EI_Rebuild", "EI_Rebuild.vcxproj", "{042A52A4-CF8B-4868-B551-448520F97F44}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64", "EI_Rebuild.vcxproj", "{042A52A4-CF8B-4868-B551-448520F97F44}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "luajit-x86", "luajit-x86\luajit.vcxproj", "{2714E7B7-71E0-484A-81DF-495CFDB463AD}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "luajit-x64", "luajit-x86\luajit.vcxproj", "{2714E7B7-71E0-484A-81DF-495CFDB463AD}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OwnedRenderer", "OwnedRenderer\OwnedRenderer.vcxproj", "{8F045552-BA21-4F45-9902-631E6359DABD}"
 EndProject
@@ -13,40 +13,17 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RendererShaders", "OwnedRen
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
-		Debug|x64 = Debug|x64
-		Debug|x86 = Debug|x86
-		OptimizedDebug|x64 = OptimizedDebug|x64
-		OptimizedDebug|x86 = OptimizedDebug|x86
 		Release|x64 = Release|x64
-		Release|x86 = Release|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{8F045552-BA21-4F45-9902-631E6359DABD}.Release|x86.ActiveCfg = Release|Win32
-		{8F045552-BA21-4F45-9902-631E6359DABD}.Release|x86.Build.0 = Release|Win32
-		{F9F236B9-5E99-4BD6-B032-D727834B2329}.Release|x86.ActiveCfg = Release|Win32
-		{F9F236B9-5E99-4BD6-B032-D727834B2329}.Release|x86.Build.0 = Release|Win32
-		{042A52A4-CF8B-4868-B551-448520F97F44}.Debug|x64.ActiveCfg = Debug|x64
-		{042A52A4-CF8B-4868-B551-448520F97F44}.Debug|x64.Build.0 = Debug|x64
-		{042A52A4-CF8B-4868-B551-448520F97F44}.Debug|x86.ActiveCfg = Debug|Win32
-		{042A52A4-CF8B-4868-B551-448520F97F44}.Debug|x86.Build.0 = Debug|Win32
-		{042A52A4-CF8B-4868-B551-448520F97F44}.OptimizedDebug|x64.ActiveCfg = OptimizedDebug|x64
-		{042A52A4-CF8B-4868-B551-448520F97F44}.OptimizedDebug|x64.Build.0 = OptimizedDebug|x64
-		{042A52A4-CF8B-4868-B551-448520F97F44}.OptimizedDebug|x86.ActiveCfg = OptimizedDebug|Win32
-		{042A52A4-CF8B-4868-B551-448520F97F44}.OptimizedDebug|x86.Build.0 = OptimizedDebug|Win32
 		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x64.ActiveCfg = Release|x64
 		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x64.Build.0 = Release|x64
-		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x86.ActiveCfg = Release|Win32
-		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x86.Build.0 = Release|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Debug|x64.ActiveCfg = Debug|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Debug|x86.ActiveCfg = Debug|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Debug|x86.Build.0 = Debug|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.OptimizedDebug|x64.ActiveCfg = Release|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.OptimizedDebug|x64.Build.0 = Release|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.OptimizedDebug|x86.ActiveCfg = Debug|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.OptimizedDebug|x86.Build.0 = Debug|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Release|x64.ActiveCfg = Release|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Release|x86.ActiveCfg = Release|Win32
-		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Release|x86.Build.0 = Release|Win32
+		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Release|x64.ActiveCfg = Release|x64
+		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Release|x64.Build.0 = Release|x64
+		{8F045552-BA21-4F45-9902-631E6359DABD}.Release|x64.ActiveCfg = Release|x64
+		{8F045552-BA21-4F45-9902-631E6359DABD}.Release|x64.Build.0 = Release|x64
+		{F9F236B9-5E99-4BD6-B032-D727834B2329}.Release|x64.ActiveCfg = Release|x64
+		{F9F236B9-5E99-4BD6-B032-D727834B2329}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
