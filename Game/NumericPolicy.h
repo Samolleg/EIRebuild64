@@ -26,6 +26,72 @@ inline int RoundToInt32(double value, FloatRounding mode)
     return RoundToInt32(value);
 }
 
+// FISTP word has its own signed16 range, not the low bits of a signed32 result.
+// Conversion uses the current MXCSR RC; masked invalid yields 8000h for RN16 too.
+inline int16_t RoundToInt16(double value)
+{
+    const int rounded = RoundToInt32(value);
+    if (rounded < INT16_MIN || rounded > INT16_MAX)
+        return INT16_MIN;
+    return static_cast<int16_t>(rounded);
+}
+
+inline int SpellDuration(int duration, int sourceLevel, int targetLevel,
+                         float sourceInt, float targetInt, float levelCoeff, float intCoeff)
+{
+    const double levelDifference = double(sourceLevel) - targetLevel;
+    const double levelScale = levelDifference * levelCoeff;
+    const double levelTerm = levelScale * duration;
+    const double intDifference = double(sourceInt) - targetInt;
+    const double intScale = intDifference * intCoeff;
+    const double intTerm = intScale * duration;
+    const double baseAndInt = double(duration) + intTerm;
+    const double result = levelTerm + baseAndInt;
+    // x87 C0 is set for both less-than and unordered: either writes zero.
+    return RoundToInt32(!(result >= 1.0) ? 0.0 : result);
+}
+
+inline float SpellPower(float power, float base)
+{
+    return float(double(power) + base);
+}
+
+// Match the reachable ASI mana branch, including unordered comparisons.
+// Keep the store/reload order even when casterMP and targetMP alias.
+inline void ExchangeLinkMana(float& casterMP, float casterMax,
+                             float& targetMP, float targetMax, float power)
+{
+    const double ratio = double(casterMax) / targetMax;
+    const double total = double(targetMP) + casterMP;
+    const double denominator = 1.0 + ratio;
+    const double targetBalance = total / denominator;
+    const double casterBalance = ratio * targetBalance;
+    const double casterFraction = double(casterMP) / casterMax;
+    const double targetFraction = double(targetMP) / targetMax;
+    if (!(targetFraction >= casterFraction))
+    {
+        const double targetPlusPower = double(targetMP) + power;
+        if (!(targetPlusPower >= targetBalance))
+        {
+            casterMP = float(double(casterMP) - power);
+            targetMP = float(double(targetMP) + power);
+            return;
+        }
+    }
+    else
+    {
+        const double casterPlusPower = double(casterMP) + power;
+        if (!(casterPlusPower >= casterBalance))
+        {
+            targetMP = float(double(targetMP) - power);
+            casterMP = float(double(casterMP) + power);
+            return;
+        }
+    }
+    targetMP = float(targetBalance);
+    casterMP = float(casterBalance);
+}
+
 inline float Experience(float experience, int count, uint32_t charge, float factor)
 {
     double result;
