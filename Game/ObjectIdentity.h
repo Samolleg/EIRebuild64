@@ -29,6 +29,29 @@ void SetNext(ObjectId id);
 // Reserve the complete restored namespace before constructors allocate nested IDs.
 void EnsureNext(ObjectId id);
 
+// Simulation-thread staging namespace. Constructors allocate locally; the live
+// counter changes only on Publish(), after the complete slot has been accepted.
+class RestoreNamespace
+{
+    RestoreNamespace *previous;
+    ObjectId next;
+    friend ObjectId Next();
+    friend ObjectId GetNext();
+    friend void SetNext(ObjectId);
+    friend void EnsureNext(ObjectId);
+public:
+    explicit RestoreNamespace(ObjectId minimum);
+    ~RestoreNamespace();
+    RestoreNamespace(const RestoreNamespace &) = delete;
+    RestoreNamespace &operator=(const RestoreNamespace &) = delete;
+    // Successful nested documents reserve their allocations in the enclosing
+    // slot namespace. This never changes the process counter.
+    void KeepInParent();
+    static bool Active();
+    // Call once at world adoption, outside any rejected/temporary namespace.
+    static void Publish(ObjectId minimum);
+};
+
 // Construction-only restore. The ticket is consumed by the first Instance base;
 // nested members get fresh IDs. It cannot assign an ID to an existing object.
 namespace Detail {

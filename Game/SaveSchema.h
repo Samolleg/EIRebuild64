@@ -1,8 +1,11 @@
 #pragma once
 #include "Basic.h"
+#include "GameBase.h"
+#include "SmartPtr.h"
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <typeindex>
@@ -15,15 +18,15 @@ class CGameBase;
 // No auto detection/fallback and no calls to Serialize(CStructureSaver&).
 namespace SaveSchema {
 using Bytes = std::vector<std::uint8_t>;
-constexpr std::uint32_t Version = 1;
-constexpr std::uint32_t HeaderBytes = 32;
-// Wire (all integers LE): magic[8], u32 version, u32 headerBytes,
-// u64 payloadBytes, u32 objectCount, u32 rootBytes. Then the COMPLETE
-// registry [u32 typeId, u64 ObjectId, u32 bodyBytes] in ObjectId order,
-// rootBytes of root fields, then each body in registry order.
-// Reference = u64; string/blob = u32 byte length + bytes; Count = u32.
-// Value = u32 registered typeId + explicitly encoded fields (no native layout).
-// Bool = 0/1 u8; signed = two's complement; floats = IEEE-754 bits LE.
+constexpr std::uint32_t Version = 2;
+constexpr std::uint32_t HeaderBytes = 48;
+// Wire v2 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
+// u32 fundamentCount/rootBytes/gameCount/reserved, u64 nextId.
+// CFundament descriptor: u32 type, u64 id, u32 bodyBytes.
+// CGameBase descriptor: same + i32 mapId, u32 runtimeType/subtype/flags, u64 ownerId.
+// Root, fundament bodies, game bodies follow in descriptor order.
+// Both registries share one namespace reserved before any factory.
+// References = u64; text/blob = u32 length + bytes; Count = u32.
 
 struct Limits
 {
@@ -63,12 +66,21 @@ struct ValueType
     std::function<void(Writer &, const void *)> store;
     std::function<void(Reader &, void *)> load;
 };
-// CGameBase has a different ownership family from CFundament. P16b/P17 own
-// its object table: store discovers/pins nodes, load resolves a complete table.
+// Factories bind staged owners, never global live managers. They capture owners
+// strongly: Graph retains a copy of Registry through cleanup/adoption. The factory
+// restores ObjectId via Create/CreateWith, runtimeType and registration with its
+// staged manager; it must not reuse manager trash. Arguments: id/mapId/type/subtype/ownerId.
+// The owner manifest is staged before loading this graph; ownerId is its saved
+// manager identity, so identical map IDs in different parties stay unambiguous.
+struct GameType
+{
+    std::function<CSmartPtr<CGameBase>(ObjectId, int, std::uint32_t, std::uint32_t, ObjectId)> create;
+    std::function<void(Writer &, CGameBase &)> store;
+    std::function<void(Reader &, CGameBase &)> load;
+    std::function<void(CGameBase &)> discard;
+};
 struct GameObjects
 {
-    std::function<ObjectId(CGameBase *)> store;
-    std::function<CGameBase *(ObjectId)> load;
     // P17 supplies a lookup in the captured map-object table, never the live world.
     std::function<CGameBase *(int)> map;
 };
@@ -79,9 +91,14 @@ class Registry
     std::map<std::uint32_t, ValueType> values;
     std::map<std::type_index, std::uint32_t> valueIds;
     GameObjects gameObjects;
+    std::map<std::uint32_t, GameType> gameTypes;
+    std::map<std::type_index, std::uint32_t> gameIds;
 public:
     void Register(std::uint32_t id, const std::type_info &nativeType, Type type);
     void RegisterValue(std::uint32_t id, const std::type_info &, ValueType);
+    void RegisterGame(std::uint32_t id, const std::type_info &, GameType);
+    const GameType &FindGame(std::uint32_t id) const;
+    std::uint32_t GameTypeId(const CGameBase &) const;
     template <class T> void RegisterValue(std::uint32_t id)
     {
         RegisterValue(id, typeid(T), {
@@ -91,8 +108,6 @@ public:
     std::uint32_t ValueId(const std::type_info &) const;
     const ValueType &FindValue(std::uint32_t id) const;
     void SetGameObjects(GameObjects objects) { gameObjects = std::move(objects); }
-    ObjectId GameId(CGameBase *) const;
-    CGameBase *GameObject(ObjectId) const;
     CGameBase *MapObject(int id) const;
     const Type &Find(std::uint32_t id) const;
     std::uint32_t Id(const CFundament &object) const;
@@ -176,16 +191,26 @@ public:
 // Caller retains this owner until the restored world has adopted its references.
 class Graph
 {
+    std::shared_ptr<const Registry> registryOwner;
     std::map<ObjectId, CPtr<CFundament>> objects;
+    std::map<ObjectId, CSmartPtr<CGameBase>> gameObjects;
+    std::vector<std::function<void()>> discard;
+    ObjectId savedNext = 1;
+    void Swap(Graph &) noexcept;
     friend struct ReadState;
     friend Graph Load(CSave &, const Registry &, const std::function<void(Reader &)> &, Limits);
 public:
     Graph() = default;
     Graph(const Graph &) = delete;
     Graph &operator=(const Graph &) = delete;
-    Graph(Graph &&) = default;
-    Graph &operator=(Graph &&) = default;
+    Graph(Graph &&other) noexcept { Swap(other); }
+    Graph &operator=(Graph &&other) noexcept;
+    ~Graph();
     CFundament *Find(ObjectId id) const;
+    CGameBase *FindGame(ObjectId id) const;
+    ObjectId NextId() const { return savedNext; }
+    // After complete slot adoption only. Before that, destruction breaks cycles.
+    void Adopt();
 };
 
 // Retired native-memory dynamic serializers have no old-save reader.
@@ -197,7 +222,9 @@ void RegisterDynamicTypes(Registry &registry);
 
 // CSave's current stream abstraction is uint32-sized. The format's payload length
 // is uint64, but this implementation rejects documents exceeding Limits/CSave.
-// Exclusive world restore: no concurrent creation or publication in callbacks.
+// Exclusive world restore: factories/callbacks only touch staged owners.
+// To stage several documents, enclose all loads in one RestoreNamespace whose
+// minimum covers every saved document; publish/adopt after the full slot reads.
 void Store(CSave &file, const Registry &registry,
            const std::function<void(Writer &)> &root, Limits limits = {});
 Graph Load(CSave &file, const Registry &registry,

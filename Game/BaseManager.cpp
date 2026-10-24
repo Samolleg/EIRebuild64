@@ -214,12 +214,27 @@ void CBaseManager::SetWorld(CWorld *lpNewWorld)
     lpWorld = lpNewWorld;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+CSmartPtr<CGameBase> CBaseManager::CreateSavedData(ETypeIDs type, int id, ObjectId savedId)
+{
+    if (!ObjectIdentity::RestoreNamespace::Active() || id < 0 || Find(id))
+        throw std::invalid_argument("save factory requires an empty staged manager entry");
+    struct Construction
+    {
+        bool &flag;
+        bool previous;
+        explicit Construction(bool &value) : flag(value), previous(value) { flag = true; }
+        ~Construction() { flag = previous; }
+    } construction(restoringObject);
+    return ObjectIdentity::CreateWith<CSmartPtr<CGameBase>>(savedId,
+        [&]() { return CreateData(type, id); });
+}
+
 // LPGAMEBASE CBaseManager::CreateData( ETypeIDs tidTypeID, int id )
 // create data instant (or get it from trash) and register under desired ID
 LPGAMEBASE CBaseManager::CreateData(ETypeIDs tidTypeID, int id)
 {
     // first, trying to find such data in trash
-    LPGAMEBASE lpData = GetFromTrash(tidTypeID);
+    LPGAMEBASE lpData = restoringObject ? nullptr : GetFromTrash(tidTypeID);
     if (lpData == NULL) // if no such data in trash, create new one
         lpData = CreateInstant(tidTypeID);
     if (lpData == NULL) // if we can't create such data, return with NULL
@@ -236,6 +251,13 @@ LPGAMEBASE CBaseManager::CreateData(ETypeIDs tidTypeID, int id)
         this == theWorld.GetMapObjectManager() ? &theWorld : nullptr, lpData, lpData->GetID());
     const BOOL created = lpData->Create();
     visualCreation.Complete(created != FALSE);
+    if (!created && restoringObject)
+    {
+        RemoveInstantAt(lpData->GetID());
+        lpData->SetManager(nullptr);
+        delete lpData;
+        return nullptr;
+    }
     if(SpellTextures::HasBindings()&&this==theWorldServer.GetEffectManager())SpellTextures::RecordOwner(this,lpData,SpellTextures::currentCode);
 
     return lpData;
@@ -512,7 +534,8 @@ void CBaseManager::Load(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CBaseManager::Store(CSave &file)
 {
-    file.Write(list.GetCount());
+    if (list.GetCount() > INT_MAX) throw std::overflow_error("legacy registry count overflow");
+    file.Write(static_cast<int>(list.GetCount()));
     POSITION pos = list.GetHeadPosition();
     while (pos)
     {
