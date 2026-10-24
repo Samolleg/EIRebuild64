@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "SaveSchema.h"
 #include "SaveLoader.h"
+#include "GameBase.h"
 #include <cstring>
 #include <limits>
 
@@ -51,10 +52,48 @@ void WriteBytes(CSave &file, const Bytes &bytes)
 void Registry::Register(std::uint32_t id, const std::type_info &nativeType, Type type)
 {
     if (!id || !type.create || !type.store || !type.load || !type.discard ||
-        types.count(id) || ids.count(std::type_index(nativeType)))
+        types.count(id) || values.count(id) || ids.count(std::type_index(nativeType)))
         throw Error(ErrorCode::UnknownType, "invalid or duplicate save type registration");
     types.emplace(id, std::move(type));
     ids.emplace(std::type_index(nativeType), id);
+}
+void Registry::RegisterValue(std::uint32_t id, const std::type_info &native, ValueType type)
+{
+    if (!id || !type.store || !type.load || types.count(id) || values.count(id) ||
+        valueIds.count(std::type_index(native)))
+        throw Error(ErrorCode::UnknownType, "invalid or duplicate value type");
+    values.emplace(id, std::move(type));
+    valueIds.emplace(std::type_index(native), id);
+}
+std::uint32_t Registry::ValueId(const std::type_info &native) const
+{
+    auto it = valueIds.find(std::type_index(native));
+    if (it == valueIds.end()) throw Error(ErrorCode::UnknownType, "unregistered value type");
+    return it->second;
+}
+const ValueType &Registry::FindValue(std::uint32_t id) const
+{
+    auto it = values.find(id);
+    if (it == values.end()) throw Error(ErrorCode::UnknownType, "unknown value type");
+    return it->second;
+}
+ObjectId Registry::GameId(CGameBase *object) const
+{
+    if (!object) return 0;
+    if (!gameObjects.store) throw Error(ErrorCode::Identity, "game object writer not bound");
+    const auto id = gameObjects.store(object);
+    if (!id || id >= LastId - 1 || id != object->GetRTID())
+        throw Error(ErrorCode::Identity, "game object writer changed identity");
+    return id;
+}
+CGameBase *Registry::GameObject(ObjectId id) const
+{
+    if (!id) return nullptr;
+    if (!gameObjects.load) throw Error(ErrorCode::Identity, "game object reader not bound");
+    CGameBase *object = gameObjects.load(id);
+    if (!object || object->GetRTID() != id)
+        throw Error(ErrorCode::Identity, "dangling game ObjectId");
+    return object;
 }
 const Type &Registry::Find(std::uint32_t id) const
 {
@@ -101,6 +140,7 @@ struct ReadState
 {
     Graph &graph;
     Limits limits;
+    const Registry &registry;
     CFundament *Reference(ObjectId id)
     {
         if (!id) return nullptr;
@@ -154,6 +194,27 @@ void Writer::Blob(const Bytes &value)
     if (value.size() > state.limits.fieldBytes) throw Error(ErrorCode::Limit, "save blob limit");
     UInt32(static_cast<std::uint32_t>(value.size()));
     Append(value.data(), static_cast<std::uint32_t>(value.size()));
+}
+void Writer::Value(const std::type_info &native, const void *value)
+{
+    const auto id = state.registry.ValueId(native);
+    UInt32(id);
+    state.registry.FindValue(id).store(*this, value);
+}
+void Reader::Value(const std::type_info &native, void *value)
+{
+    const auto id = UInt32();
+    if (id != state.registry.ValueId(native))
+        throw Error(ErrorCode::Invalid, "save value type mismatch");
+    state.registry.FindValue(id).load(*this, value);
+}
+void Writer::GameReference(CGameBase *object) { UInt64(state.registry.GameId(object)); }
+CGameBase *Reader::GameReference() { return state.registry.GameObject(UInt64()); }
+std::int16_t Reader::Int16()
+{
+    const auto bits = UInt16();
+    return bits <= INT16_MAX ? static_cast<std::int16_t>(bits) :
+        static_cast<std::int16_t>(-1 - static_cast<std::int16_t>(static_cast<std::uint16_t>(~bits)));
 }
 void Writer::Reference(CFundament *object) { UInt64(state.Reference(object)); }
 
@@ -323,9 +384,10 @@ Graph Load(CSave &file, const Registry &registry, const std::function<void(Reade
     for (auto &record : records) ReadBytes(file, record.body, record.length);
 
     Graph graph;
-    ReadState state{graph, limits};
+    ReadState state{graph, limits, registry};
     try
     {
+        ObjectIdentity::EnsureNext(maxId + 1);
         // Pass 1: own the complete registry, including unreferenced entries.
         for (const auto &record : records)
         {
@@ -348,7 +410,7 @@ Graph Load(CSave &file, const Registry &registry, const std::function<void(Reade
         for (const auto &record : records)
             if (graph.Find(record.id)->GetRTID() != record.id)
                 throw Error(ErrorCode::Identity, "save loader changed object identity");
-        ObjectIdentity::SetNext(maxId + 1);
+        ObjectIdentity::EnsureNext(maxId + 1);
     }
     catch (...)
     {

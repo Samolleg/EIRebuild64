@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 
 #include "Plot.h"
 #include "sArray.h"
@@ -12,6 +13,8 @@ const int N_NUMBER_OF_ALARM = 5;
 // --------------------------------------------------------------------------------------------
 struct SAlarmInfo
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     bool bActivated;
     int nTime;
     float fpX, fpY;
@@ -21,8 +24,8 @@ struct SAlarmInfo
         nTime = 0;
         fpX = fpY = 0;
     }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // General Unit Logic Type
@@ -58,6 +61,8 @@ const short GUAP_REST = 1; // при выполнении этого ActionPoint юнит должен наход
 /////////////////////////////////////////////////////////////////////////////////////
 struct SActionPoint
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     CPlot3D ptLook;    // точка в которую unit сейчас будет смотреть
     float fpTurnSpeed; // скорость разворота в рад/сегмент, если 0, то разворот максимально быстрый
@@ -72,13 +77,15 @@ public:
         nWaitSeg = 0;
         nFlags = 0;
     }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 typedef CAArray<SActionPoint, SActionPoint &> CActionArray;
 /////////////////////////////////////////////////////////////////////////////////////
 struct SPatrolPoint
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     CPlot3D ptPosition;   // координаты очередной точки патруля
     CActionArray actions; // последовательность действий unit-a, если отсутствует, то действия
@@ -92,6 +99,8 @@ typedef CAArray<SPatrolPoint, SPatrolPoint &> CPatrolPointArray;
 /////////////////////////////////////////////////////////////////////////////////////
 struct SGeneralUnitLogic
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     EUnitModel eLogicModel;
     CPatrolPointArray patrolPoints;

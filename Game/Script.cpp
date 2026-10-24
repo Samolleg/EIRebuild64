@@ -274,12 +274,12 @@ void SLightningInfo::Store(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void SScriptArea::SScriptAreaElement::Load(CSave &file)
 {
-    file.Read(this, sizeof(*this));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SScriptArea::SScriptAreaElement::Store(CSave &file)
 {
-    file.Write(this, sizeof(*this));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool SScriptArea::SScriptAreaElement::IsInArea(float fpX, float fpY)
@@ -3272,9 +3272,11 @@ void CScript::StopExecution()
 
 void CScript::Clear()
 {
+    if (detachedSaveState) { DiscardSaveState(); return; }
     bLoaded = FALSE;
     nSecondaryCount = 0;
     scriptError.text = "Unknown error";
+    scriptError.eError = SC_NO_ERROR;
     scriptError.nLine = 0;
 
     StopExecution();

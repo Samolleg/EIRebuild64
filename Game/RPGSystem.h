@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 namespace ModCombat {struct Defense;struct Feedback;}
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
@@ -26,6 +27,8 @@ struct SIDBWeaponShape;
 /////////////////////////////////////////////////////////////////////////////////////
 struct SRPGScienceStats
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     // mask of tools that can be applied to this object, set of ERPGToolTypes
     DWORD dwTools;
     // key number that is compatible with this object (key number 0 means no special key
@@ -161,6 +164,8 @@ public:
 // attack portion - emmited by attacker and will be processed by target (victim)
 struct SRPGAttackPortion
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     float fpAttacks[RPG_NUM_ATTACK_TYPES]; // damage distribution by attack types
     int nSkill;                            // skill in this attack type
@@ -179,8 +184,8 @@ public:
         memset(this, 0, sizeof(*this));
         fpDamagePercentage = 1;
     }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
     bool IsMagicAttack() const;
 };
 /////////////////////////////////////////////////////////////////////////////////////
@@ -189,19 +194,23 @@ public:
 // атаки по этим видам
 struct SRPGGeneralAttack
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     WORD wToHit;
     WORD wAttacks[RPG_NUM_ATTACK_TYPES];
 
     WORD GetMaxDamage() const;
     WORD CalcDamage(const SRPGGeneralAttack &def) const;
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 static const DWORD RPG_NUM_ARMORS_IN_HL = 2;
 // single armor layer on the hit location
 struct SRPGArmorLayer
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     DWORD dwCrippleMask;                       // cripple mask for this layer
     float fpAbsorbtions[RPG_NUM_ATTACK_TYPES]; // absorbtion for each attack type
@@ -217,6 +226,8 @@ public:
 // hit location: contain HL type, cripple mask, armor layers and HP/MaxHP
 struct SRPGHitLocation
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     ERPGHitLocationTypes hlt;                    // hit location type
     DWORD dwCrippleMask;                         // Cripple mask for hit location
@@ -236,6 +247,8 @@ public:
 // represents primary stat, which have base value and effective value (base with all modifiers)
 struct SRPGPrimaryStat
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     float fpBaseValue;      // base value of this stat
     float fpEffectiveValue; // effective value => base value with all modifiers
@@ -244,6 +257,8 @@ public:
 // represents secondary stat, which have current value, max value and regeneration rate
 struct SRPGSecondaryStat
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     float fpCurrent;    // current value
     float fpMax;        // max value
@@ -255,6 +270,8 @@ public:
 // HP/MP and native resistances and protections
 struct SRPGCommonStats
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     DWORD dwFlags; // just a flags
     //
@@ -281,8 +298,8 @@ public:
     //
     BOOL IsDead() const { return ((short)MINT(ssHP.fpCurrent) <= 0); }
     //
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline bool SRPGCommonStats::RegenerateMP(float fRegenerateRate)
@@ -298,6 +315,8 @@ inline bool SRPGCommonStats::RegenerateMP(float fRegenerateRate)
 // secondary)
 struct SRPGUnitStats
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     DWORD dwFlags; // just a flags
     // exp/char pts

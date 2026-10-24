@@ -1,10 +1,13 @@
 #pragma once
+#include "SaveSchema.h"
 
 #include "RPGSystem.h"
 
 // область, при попадании на который срабатывает MagicTrap
 struct SMEArea
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CPlot2D ptCenter;
     float fRadius;
 
@@ -18,12 +21,14 @@ struct SMEArea
     {
         return sqr(pos.x - ptCenter.x) + sqr(pos.y - ptCenter.y) < sqr(fRadius);
     }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 
 struct SMEMagicTrap
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     SMEMagicTrap()
         : nCastingInterval(15)
         , dwDiplomacy(0xffffffff)
@@ -40,6 +45,8 @@ struct SMEMagicTrap
 
 struct SMELever
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     SMELever()
         : isDoor(false)
         , needGraphRecalc(false)

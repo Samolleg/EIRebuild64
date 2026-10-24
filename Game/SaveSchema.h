@@ -9,6 +9,7 @@
 #include <vector>
 
 class CSave;
+class CGameBase;
 
 // Dynamic saves only. Asset files continue to use CStructureSaver.
 // No auto detection/fallback and no calls to Serialize(CStructureSaver&).
@@ -21,6 +22,7 @@ constexpr std::uint32_t HeaderBytes = 32;
 // registry [u32 typeId, u64 ObjectId, u32 bodyBytes] in ObjectId order,
 // rootBytes of root fields, then each body in registry order.
 // Reference = u64; string/blob = u32 byte length + bytes; Count = u32.
+// Value = u32 registered typeId + explicitly encoded fields (no native layout).
 // Bool = 0/1 u8; signed = two's complement; floats = IEEE-754 bits LE.
 
 struct Limits
@@ -56,12 +58,39 @@ struct Type
     std::function<void(CFundament &)> discard;
 };
 
+struct ValueType
+{
+    std::function<void(Writer &, const void *)> store;
+    std::function<void(Reader &, void *)> load;
+};
+// CGameBase has a different ownership family from CFundament. P16b/P17 own
+// its object table: store discovers/pins nodes, load resolves a complete table.
+struct GameObjects
+{
+    std::function<ObjectId(CGameBase *)> store;
+    std::function<CGameBase *(ObjectId)> load;
+};
 class Registry
 {
     std::map<std::uint32_t, Type> types;
     std::map<std::type_index, std::uint32_t> ids;
+    std::map<std::uint32_t, ValueType> values;
+    std::map<std::type_index, std::uint32_t> valueIds;
+    GameObjects gameObjects;
 public:
     void Register(std::uint32_t id, const std::type_info &nativeType, Type type);
+    void RegisterValue(std::uint32_t id, const std::type_info &, ValueType);
+    template <class T> void RegisterValue(std::uint32_t id)
+    {
+        RegisterValue(id, typeid(T), {
+            [](Writer &w, const void *p) { static_cast<const T *>(p)->Store(w); },
+            [](Reader &r, void *p) { static_cast<T *>(p)->Load(r); }});
+    }
+    std::uint32_t ValueId(const std::type_info &) const;
+    const ValueType &FindValue(std::uint32_t id) const;
+    void SetGameObjects(GameObjects objects) { gameObjects = std::move(objects); }
+    ObjectId GameId(CGameBase *) const;
+    CGameBase *GameObject(ObjectId) const;
     const Type &Find(std::uint32_t id) const;
     std::uint32_t Id(const CFundament &object) const;
 };
@@ -74,12 +103,14 @@ class Writer
     WriteState &state;
     void UInt(std::uint64_t value, unsigned width);
     void Append(const std::uint8_t *data, std::uint32_t count);
+    void Value(const std::type_info &, const void *);
 public:
     Writer(Bytes &bytes, WriteState &state) : bytes(bytes), state(state) {}
     void UInt8(std::uint8_t value) { UInt(value, 1); }
     void UInt16(std::uint16_t value) { UInt(value, 2); }
     void UInt32(std::uint32_t value) { UInt(value, 4); }
     void UInt64(std::uint64_t value) { UInt(value, 8); }
+    void Int16(std::int16_t value) { UInt16(static_cast<std::uint16_t>(value)); }
     void Int32(std::int32_t value) { UInt32(static_cast<std::uint32_t>(value)); }
     void Int64(std::int64_t value) { UInt64(static_cast<std::uint64_t>(value)); }
     void Bool(bool value) { UInt8(value ? 1 : 0); }
@@ -88,6 +119,8 @@ public:
     void Count(std::uint32_t count);
     void String(const std::string &value); // bytes in the consumer's declared encoding
     void Blob(const Bytes &value); // encoded bytes, never a native object image
+    template <class T> void Value(const T &value) { Value(typeid(T), &value); }
+    void GameReference(CGameBase *object);
     void Reference(CFundament *object); // uint64 ObjectId; zero = null
 };
 
@@ -98,12 +131,14 @@ class Reader
     std::uint32_t position = 0;
     std::uint64_t UInt(unsigned width);
     void Require(std::uint32_t count) const;
+    void Value(const std::type_info &, void *);
 public:
     Reader(const Bytes &bytes, ReadState &state) : bytes(bytes), state(state) {}
     std::uint8_t UInt8() { return static_cast<std::uint8_t>(UInt(1)); }
     std::uint16_t UInt16() { return static_cast<std::uint16_t>(UInt(2)); }
     std::uint32_t UInt32() { return static_cast<std::uint32_t>(UInt(4)); }
     std::uint64_t UInt64() { return UInt(8); }
+    std::int16_t Int16();
     std::int32_t Int32();
     std::int64_t Int64();
     bool Bool();
@@ -112,6 +147,15 @@ public:
     std::uint32_t Count();
     std::string String();
     Bytes Blob();
+    template <class T> void Value(T &value) { Value(typeid(T), &value); }
+    CGameBase *GameReference();
+    template <class T> T *GameReferenceAs()
+    {
+        CGameBase *object = GameReference();
+        T *typed = dynamic_cast<T *>(object);
+        if (object && !typed) throw Error(ErrorCode::Invalid, "game reference type mismatch");
+        return typed;
+    }
     CFundament *Reference();
     template <class T> T *ReferenceAs()
     {
@@ -138,6 +182,13 @@ public:
     Graph &operator=(Graph &&) = default;
     CFundament *Find(ObjectId id) const;
 };
+
+// Retired native-memory dynamic serializers have no old-save reader.
+[[noreturn]] inline void RequireDynamicSchema()
+{
+    throw Error(ErrorCode::Incompatible, "dynamic state requires SaveSchema (P17)");
+}
+void RegisterDynamicTypes(Registry &registry);
 
 // CSave's current stream abstraction is uint32-sized. The format's payload length
 // is uint64, but this implementation rejects documents exceeding Limits/CSave.

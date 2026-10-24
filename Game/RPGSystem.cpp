@@ -2473,24 +2473,8 @@ float SRPGUnitStats::GetIntelligenceModifier() const
     return GetPerkModifier(RPGPRK_INTELLIGENCE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SRPGUnitStats::Load(CSave &file)
-{
-    fExpPenalty = 0;
-    if (file.GetVersion() < 69)
-        file.Read(this, sizeof(*this) - 12);
-    else if (file.GetVersion() < 80)
-        file.Read(this, sizeof(*this) - 8);
-    else if (file.GetVersion() < 99)
-        file.Read(this, sizeof(*this) - 4);
-    else
-        file.Read(this, sizeof(*this));
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void SRPGUnitStats::Store(CSave &file)
-{
-    file.Write(this, sizeof(*this));
-}
-/////////////////////////////////////////////////////////////////////////////////////
+void SRPGUnitStats::Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+void SRPGUnitStats::Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 static const float PS_MIN_STAT_VALUE = 15;
 static const float PS_MAX_STAT_VALUE = 35;
 static const float PS_DIF_STAT_VALUE = PS_MAX_STAT_VALUE - PS_MIN_STAT_VALUE;

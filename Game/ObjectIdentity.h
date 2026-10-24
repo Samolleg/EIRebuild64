@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <utility>
+template <class T> class CPtr;
+#include <stdexcept>
 
 using ObjectId = std::uint64_t;
 
@@ -24,6 +26,45 @@ ObjectId GetNext();
 // P15/P17 load boundary only: creation must be stopped and restored live IDs
 // must be below this value. Restoring object IDs/save data is outside P08.
 void SetNext(ObjectId id);
+// Reserve the complete restored namespace before constructors allocate nested IDs.
+void EnsureNext(ObjectId id);
+
+// Construction-only restore. The ticket is consumed by the first Instance base;
+// nested members get fresh IDs. It cannot assign an ID to an existing object.
+namespace Detail {
+class RestoreTicket
+{
+    ObjectId id;
+    RestoreTicket *previous;
+    friend ObjectId InitialId();
+public:
+    explicit RestoreTicket(ObjectId savedId);
+    ~RestoreTicket();
+    RestoreTicket(const RestoreTicket &) = delete;
+    RestoreTicket &operator=(const RestoreTicket &) = delete;
+    void RequireConsumed() const;
+};
+ObjectId InitialId();
+}
+// Owner defaults to CPtr<T>; CMFundament uses CMPtr<T>, CGameBase/CRefCount
+// use CSmartPtr<T>. Matching ownership also cleans up a rejected factory.
+// Exclusive load boundary only. No publication from constructors; the caller
+// must exclude saved IDs still in a live world before creating the new graph.
+template <class Owner, class Factory>
+Owner CreateWith(ObjectId savedId, Factory factory)
+{
+    Detail::RestoreTicket ticket(savedId);
+    Owner object(factory());
+    ticket.RequireConsumed();
+    if (object == nullptr || object->GetRTID() != savedId)
+        throw std::invalid_argument("restored ObjectId belongs to a nested object");
+    return object;
+}
+template <class T, class Owner = CPtr<T>, class... Args>
+Owner Create(ObjectId savedId, Args &&...args)
+{
+    return CreateWith<Owner>(savedId, [&] { return new T(std::forward<Args>(args)...); });
+}
 
 // Copying an object creates a fresh Instance; assignment keeps the target ID.
 // Move is used only to preserve identity across Clear. No registry or owner.
@@ -32,7 +73,7 @@ class Instance
     ObjectId id;
 
 public:
-    Instance() : id(Next()) {}
+    Instance() : id(Detail::InitialId()) {}
     Instance(const Instance &) = delete;
     Instance &operator=(const Instance &) = delete;
     Instance(Instance &&other) noexcept : id(std::exchange(other.id, 0)) {}
