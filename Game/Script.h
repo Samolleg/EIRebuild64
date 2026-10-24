@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /*==========================================================================================================
 
         Scripts classes header
@@ -15,6 +16,7 @@
 #include "MapObject.h"
 #include "ModCampReferences.h"
 
+namespace SaveSchema { struct ScriptCodec; }
 class CWorld;
 class CPlayerClient;
 class CParticle;
@@ -69,7 +71,9 @@ struct SScriptLightInfo
     CPlot3D moveVector;
 
     void Clear();
-    SScriptLightInfo() { pLight = NULL; }
+    SScriptLightInfo()
+        : pLight(NULL), nScriptID(0), bAutoDelete(FALSE), bIsMoving(FALSE),
+          nSegmentsToMove(0), moveVector(0, 0, 0) {}
     ~SScriptLightInfo() { Clear(); }
     void Load(CSave &file);
     void Store(CSave &file);
@@ -89,7 +93,9 @@ struct SParticleInfo
     int nLifeTime;
 
     void Clear();
-    SParticleInfo() { pParticle = NULL; }
+    SParticleInfo()
+        : pParticle(NULL), nScriptID(0), bAutoDelete(FALSE), bIsMoving(FALSE),
+          nSegmentsToMove(0), moveVector(0, 0, 0), nLifeTime(0) {}
     ~SParticleInfo() { Clear(); }
     void Load(CSave &file);
     void Store(CSave &file);
@@ -109,7 +115,9 @@ struct SFXInfo
     int nDelay;
 
     void Clear();
-    SFXInfo() { pSound = NULL; }
+    SFXInfo()
+        : pSound(NULL), nScriptID(0), cp(0, 0, 0), fpMinRadius(0), fpMaxRadius(0),
+          bIsRandomized(FALSE), fpRandRadius(0), nMinSegment(0), nMaxSegment(0), nDelay(0) {}
     ~SFXInfo() { Clear(); }
     void Load(CSave &file);
     void Store(CSave &file);
@@ -135,6 +143,8 @@ struct SScriptArea
 {
     struct SScriptAreaElement
     {
+        void Load(SaveSchema::Reader &);
+        void Store(SaveSchema::Writer &) const;
         bool bRect;
         union
         {
@@ -211,6 +221,7 @@ public:
 // по возрастанию пор€дке
 class CScriptObjectGroup
 {
+    friend struct SaveSchema::ScriptCodec;
     CAArray<CScriptObject, CScriptObject &> members;
 
 public:
@@ -242,6 +253,7 @@ public:
 template <class VAR_TYPE>
 class CScriptVars
 {
+    friend struct SaveSchema::ScriptCodec;
     CAArray<VAR_TYPE> vars;
     CAArray<CString> varNames; // имена переменных
 public:
@@ -308,16 +320,19 @@ public:
 // описание одного параметра - переменной
 struct SScriptParam
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     EScriptParameterType eType; // тип параметра - число, строка или объект
     int nNumber;                // номер параметра в params SSCCmd
     int nVarNumber;             // номер переменной в ScriptVariablesSet
     SScriptParam()
     {
+        eType = ptNone;
         nNumber = 0;
         nVarNumber = 0;
     }
-    void Load(CSave &file) { file.Read(&eType, sizeof(SScriptParam)); }
-    void Store(CSave &file) { file.Write(&eType, sizeof(SScriptParam)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 
 struct SScriptFuncParam;
@@ -417,7 +432,7 @@ public:
 struct SScriptThread
 {
     CAArray<SSCCmd, SSCCmd &> commands;
-    int nIdx;
+    int nIdx = -1;
 
 public:
     void Clear()
@@ -446,6 +461,7 @@ typedef SScriptThread *HScriptThread;
 // объект, выполн€ющий команды треда скрипта
 class CScriptThreadState
 {
+    friend struct SaveSchema::ScriptCodec;
     friend struct ModCampReferences::Access;
     SScriptThread *pThread;
     int nCurCommand;
@@ -461,6 +477,7 @@ public:
     CScriptThreadState()
         : nCurCommand(0)
         , nSegment(0)
+        , nSleepStart(-1)
         , pThread(0)
         , pLinkedOneScript(0)
     {
@@ -546,7 +563,9 @@ public:
 
 class CScript
 {
+    friend struct SaveSchema::ScriptCodec;
     friend struct ModCampReferences::Access;
+    bool detachedSaveState = false;
     // описатели объектов, управл€емых из скрипта
     CAArray<SScriptLightInfo> lights;
     CList<SParticleInfo> particles;
@@ -755,6 +774,11 @@ public:
         bLoaded = TRUE;
     }
     // Serializing data
+    // Load only into a fresh detached staging script. P17 adopts after graph success.
+    void AdoptSaveState() { detachedSaveState = false; }
+    void DiscardSaveState();
+    void LoadScript(SaveSchema::Reader &);
+    void StoreScript(SaveSchema::Writer &) const;
     void LoadScript(CSave &file);
     void StoreScript(CSave &file);
     SScriptThread *GetThreadByIndex(int nIdx);

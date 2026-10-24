@@ -15,8 +15,10 @@
 const int RANDSIZL = 8;
 const int RANDSIZ = 1 << RANDSIZL;
 
+namespace SaveSchema { struct RandomState; }
 class CRandomGenerator
 {
+    friend struct SaveSchema::RandomState;
 private:
     BOOL bIsReady;
     unsigned _int32 randcnt;

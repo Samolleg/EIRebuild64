@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /*==========================================================================================================
 
         Server constants
@@ -104,6 +105,8 @@ typedef CArray<CPersonage *, CPersonage *> CPersonages;
 // идентификатор 0 зарезервирован
 struct SPartyID
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     int nSomeNumber;
 
     SPartyID() { nSomeNumber = 0; }
@@ -114,8 +117,8 @@ struct SPartyID
     bool operator==(const SPartyID &id) const { return nSomeNumber == id.nSomeNumber; }
     bool IsEmpty() const { return nSomeNumber == 0; }
     void Serialize(CStructureSaver &file) { file.Add(1, nSomeNumber); }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // имя переменной партии, содержащей глобальное время
