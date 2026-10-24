@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "ErrorDialog.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1921,147 +1922,12 @@ CSpell *CUnit::GetQSpell(DWORD dwQSpellIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::Load(CSave &file)
 {
-    auto completeWeaponSwitchLoad=[this](){
-        if (auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVAttacks"))
-            ModEquipmentSwitch::AfterLoad(ModEquipmentSwitch::RuntimeCache(),int(GetID()),true);
-    };
-    int i, k, _nPlayer;
-    CMapObject::Load(file);
-    lpUnitSpecific->Load(file);
-    ResetFlag(UNIT_BLOCKED);
-    szName = file.ReadString();
-    file.Read(dwEnemyMask); // маска, показывающая враждебных плееров для этого юнита
-    file.Read(_nPlayer);
-    CPlayer *pSavedOwner = NULL;
-    if (GetWorld()->WhoAmI() == HPC_WORLD_SERVER)
-        pSavedOwner = ((CWorldServer *)GetWorld())->GetPlayer(_nPlayer);
-    file.Read(nPlayerNum);
-
-    file.Read(nStartAnimation);
-    file.Read(nCycleAnimation);
-    fullStartAnimation = NormalizeAnimationId(nStartAnimation);
-    fullCycleAnimation = NormalizeAnimationId(nCycleAnimation);
-    bExtendedAnimationId = false;
-    file.Read(nAnimationStartSegment);
-    file.Read(&animationSpeed, sizeof(animationSpeed));
-    file.Read(&locomotionSpeed, sizeof(locomotionSpeed));
-    file.Read(&currentPose, sizeof(currentPose));
-    file.Read(&wishPose, sizeof(wishPose));
-    file.Read(dwCurrentWeapon);
-    file.Read(dwWishWeapon);
-    file.Read(bDead);
-    file.Read(bMoving);
-
-    walker.Load(file);
-    file.Read(fpBaseZ);
-    // combat targeting, information only
-    file.Read(nAIClass);
-    file.Read(fpAttackDistance);
-    rpgUserUnitStats.Clear();
-    file.Read(dwCurrentWeapon);
-    for (i = 0; i < QI_MAX_WEAPONS; i++)
-        lpQWeapons[i] = LoadGBPtr<CItemWeapon>(file, GetWorld()->GetItemManager());
-    for (i = 0; i < QI_MAX_ITEMS; i++)
-        lpQItems[i] = LoadGBPtr<CItemQuick>(file, GetWorld()->GetItemManager());
-    const int nStoredSpellSlots = file.GetVersion() >= 117 ? QI_MAX_SPELLS : QI_LEGACY_SPELLS;
-    for (i = 0; i < nStoredSpellSlots; i++)
-        lpQSpells[i] = LoadGBPtr<CItemSpell>(file, GetWorld()->GetItemManager());
-    for (; i < QI_MAX_SPELLS; i++)
-        lpQSpells[i] = NULL;
-    for (i = 0; i < RPG_NUM_ARMOR_TYPES; i++)
-        lpArmors[i] = LoadGBPtr<CItemArmor>(file, GetWorld()->GetItemManager());
-
-    file.Read(&sensesDetection, sizeof(sensesDetection));
-    ExportStats();
-    SetOwner(pSavedOwner);
-    file.Read(dwPossibleEnemies);
-    file.Read(i);
-    questItems.SetSize(i);
-    for (k = 0; k < i; k++)
-        questItems[k] = LoadGBPtr<CItemQuest>(file, GetWorld()->GetItemManager());
-    file.Read(fpCollisionDistance);
-    if (file.GetVersion() < 73) {
-        completeWeaponSwitchLoad();
-        return;
-    }
-    file.Read(&aggression, sizeof(aggression));
-    if (file.GetVersion() < 77) {
-        completeWeaponSwitchLoad();
-        return;
-    }
-    CString szProto;
-    // unit prototype
-    file.Read(szProto);
-    SetSubtypeID(theUnitDatabase.prototypes.GetEntryIndex(szProto));
-    if (file.GetVersion() < 106)
-    {
-        SetVoicePrototype(szProto);
-        completeWeaponSwitchLoad();
-        return;
-    }
-    // voice prototype
-    file.Read(szProto);
-    SetVoicePrototype(szProto);
-    completeWeaponSwitchLoad();
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::Store(CSave &file)
 {
-    int i, k, _nPlayer;
-    CMapObject::Store(file);
-    lpUnitSpecific->Store(file);
-    file.WriteString(szName);
-    file.Write(dwEnemyMask); // маска, показывающая враждебных плееров для этого юнита
-    _nPlayer = -1;
-    if (lpOwner)
-        _nPlayer = lpOwner->GetPlayerNumber();
-    file.Write(_nPlayer);
-    file.Write(nPlayerNum);
-
-    file.Write(nStartAnimation);
-    file.Write(nCycleAnimation);
-    file.Write(nAnimationStartSegment);
-    file.Write(&animationSpeed, sizeof(animationSpeed));
-    file.Write(&locomotionSpeed, sizeof(locomotionSpeed));
-    file.Write(&currentPose, sizeof(currentPose));
-    file.Write(&wishPose, sizeof(wishPose));
-    file.Write(dwCurrentWeapon);
-    file.Write(dwWishWeapon);
-    file.Write(bDead);
-    file.Write(bMoving);
-
-    walker.Store(file);
-    file.Write(fpBaseZ);
-    // combat targeting, information only
-    file.Write(nAIClass);
-    file.Write(fpAttackDistance);
-    file.Write(dwCurrentWeapon);
-    for (i = 0; i < QI_MAX_WEAPONS; i++)
-        StoreGBPtr(file, lpQWeapons[i]);
-    for (i = 0; i < QI_MAX_ITEMS; i++)
-        StoreGBPtr(file, lpQItems[i]);
-    for (i = 0; i < QI_MAX_SPELLS; i++)
-        StoreGBPtr(file, lpQSpells[i]);
-    for (i = 0; i < RPG_NUM_ARMOR_TYPES; i++)
-        StoreGBPtr(file, lpArmors[i]);
-
-    file.Write(&sensesDetection, sizeof(sensesDetection));
-    file.Write(dwPossibleEnemies);
-    file.Write(questItems.GetSize());
-    for (k = 0; k < questItems.GetSize(); k++)
-        StoreGBPtr(file, questItems[k]);
-    file.Write(fpCollisionDistance);
-    file.Write(&aggression, sizeof(aggression));
-    // unit prototype
-    CString szProto = GetPrototype()->szName;
-    file.Write(szProto);
-    // voice prototype
-    const SUDBUnitPrototype *pVoicePrototype = GetVoicePrototype();
-    if (pVoicePrototype == 0)
-        szProto = "";
-    else
-        szProto = pVoicePrototype->szName;
-    file.Write(szProto);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 const DWORD UNIT_NUM_SFX_RACES = 14;

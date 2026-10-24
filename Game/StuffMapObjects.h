@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObject.h"
 #include "SmartPtr.h"
@@ -95,6 +96,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CTrapObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_TRAP; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // объект, который кастует спелл в указанные точки или на юнита(юнитов если bCastOnce == FALSE),
@@ -133,6 +138,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CMagicTrapObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_MAGICTRAP; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // флажки, используемые lever`ами
@@ -187,6 +196,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CLeverObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_LEVER; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CTorchObjectSpecific : public CGameBase
@@ -237,6 +250,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CTorchObjectSpecific"; };
     virtual EClassIDs WhoAmI() const { return HPC_TORCHSERVERSPECIFIC; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CTorchObject : public CMapObject
@@ -274,5 +291,9 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CTorchObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_TORCH; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////

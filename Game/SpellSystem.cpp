@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "SpellSystem.h"
@@ -236,43 +237,12 @@ void CSpell::SetNewRunes(const char *pcNewRunes)
 /////////////////////////////////////////////////////////////////////////////////////
 void CSpell::Load(CSave &file)
 {
-    SetNewRunes(0); // old runes clearing
-
-    effect.Load(file);
-    file.Read(fpSpeed);
-    file.Read(fpRange);
-    file.Read(dwNumTargets);
-    file.Read(dwResolve);
-    file.Read(fpManaCost);
-    file.Read(dwSlots);
-    file.Read(fpPrice);
-    file.Read(dwActions);
-
-    file.Read(runes, sizeof(runes));
-
-    DWORD dwFlags1;
-    file.Read(dwFlags1);
-    ResetAllFlags();
-    SetFlag(dwFlags1);
-    //
-    file.Read(dwComplexity);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CSpell::Store(CSave &file)
 {
-    effect.Store(file);
-    file.Write(fpSpeed);
-    file.Write(fpRange);
-    file.Write(dwNumTargets);
-    file.Write(dwResolve);
-    file.Write(fpManaCost);
-    file.Write(dwSlots);
-    file.Write(fpPrice);
-    file.Write(dwActions);
-
-    file.Write(runes, sizeof(runes));
-    file.Write(GetFlags());
-    file.Write(dwComplexity);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 const SSDBSpellPrototype *CSpell::GetPrototype() const

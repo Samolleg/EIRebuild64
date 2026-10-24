@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
 #include "ModNativeCrtRandom.h"
@@ -91,26 +92,12 @@ const float FP_MINIMAL_DISTANCE_TO_POU =
 // SUnitCommand
 void SUnitCommand::Load(CSave &file)
 {
-    file.Read(&cmd, sizeof(cmd));
-    file.Read(&nQSpellNum, sizeof(nQSpellNum));
-    pTarget.Load(file, theWorldServer);
-    file.Read(&ptTarget, sizeof(ptTarget));
-    file.Read(fpParam);
-    file.Read(bDoItFast);
-    if (file.GetVersion() < 72)
-        return;
-    file.Read(bUsePoint);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitCommand::Store(CSave &file)
 {
-    file.Write(&cmd, sizeof(cmd));
-    file.Write(&nQSpellNum, sizeof(nQSpellNum));
-    pTarget.Store(file);
-    file.Write(&ptTarget, sizeof(ptTarget));
-    file.Write(fpParam);
-    file.Write(bDoItFast);
-    file.Write(bUsePoint);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // SL0AnimationSeq
@@ -253,20 +240,12 @@ bool SL0AnimationSeq::IsSame(SL0AnimationSeq &cmp)
 /////////////////////////////////////////////////////////////////////////////////////
 void SL0AnimationSeq::Load(CSave &file)
 {
-    LoadCArray(animations, file);
-    startIds.SetSize(0);
-    cycleIds.SetSize(0);
-    EnsureIds();
-    for (int i = 0; i < animations.GetSize(); ++i)
-        if (animations[i].bStart == 0xff && animations[i].bCyclic == 0xfe)
-            cycleIds[i] = 0xffffffffu; // stock PumpAnimation, unless companion data restores an ID
-    file.Read(nStartSegment);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SL0AnimationSeq::Store(CSave &file)
 {
-    StoreCArray(animations, file);
-    file.Write(nStartSegment);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -305,48 +284,24 @@ void SL1Command::CreateAimlessAttack(SL0AnimationSeq animation, int nTime, int n
 /////////////////////////////////////////////////////////////////////////////////////
 void SL1Command::Load(CSave &file)
 {
-    attackAnimation.Load(file);
-    file.Read(nTimeStrikeMoment);
-    file.Read(nHitTime);
-    file.Read(nTargetID);
-    nTargetID = theWorldServer.GetMapObjectManager()->SavedObjectID(nTargetID);
-    file.Read(&eAttackLocation, sizeof(eAttackLocation));
-    file.Read(fpHitDist2);
-    file.Read(bCast);
-    file.Read(bCalledShot);
-    file.Read(&castType, sizeof(castType));
-    if (file.GetVersion() < 72)
-        return;
-    file.Read(&ptDir, sizeof(ptDir));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SL1Command::Store(CSave &file)
 {
-    attackAnimation.Store(file);
-    file.Write(nTimeStrikeMoment);
-    file.Write(nHitTime);
-    file.Write(nTargetID);
-    file.Write(&eAttackLocation, sizeof(eAttackLocation));
-    file.Write(fpHitDist2);
-    file.Write(bCast);
-    file.Write(bCalledShot);
-    file.Write(&castType, sizeof(castType));
-    file.Write(&ptDir, sizeof(ptDir));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // SContSpellInfo
 /////////////////////////////////////////////////////////////////////////////////////
 void SContSpellInfo::Load(CSave &file)
 {
-    // kind of CRAP, use of theWorldServer has little grounds
-    pItem = LoadGBSmartPtr<CItem>(file, theWorldServer.GetItemManager());
-    file.Read(nDelay);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SContSpellInfo::Store(CSave &file)
 {
-    StoreGBPtr(file, pItem);
-    file.Write(nDelay);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // STrainInfo
@@ -362,14 +317,12 @@ void STrainInfo::RemoveReferencesOn(CMapObject *pTarget)
 /////////////////////////////////////////////////////////////////////////////////////
 void STrainInfo::Load(CSave &file)
 {
-    file.Read(bIsTrain);
-    master = LoadGBSmartPtr<CUnit>(file, theWorldServer.GetMapObjectManager());
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void STrainInfo::Store(CSave &file)
 {
-    file.Write(bIsTrain);
-    StoreGBPtr(file, master);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CUnitServer
@@ -6503,122 +6456,12 @@ SL0AnimationSeq *CUnitServer::GetExtendedAnimationSequence(unsigned kind)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Load(CSave &file)
 {
-    dwSpellAddonLostSight = 0;
-    lastFootstep = 0;
-    file.Read(bL0Frozen);
-    file.Read(bL0MovementFrozen);
-    level0Animation.Load(file);
-    path.Load(file);
-    level1Command.Load(file);
-    file.Read(bL1PlayingSuffer);
-    file.Read(bL1MovementFailed);
-    file.Read(bL1SpeedChanged);
-    file.Read(bL1MoveAnimationSet);
-    sufferAnimationMem.Load(file);
-    file.Read(nL1SufferDirection);
-    file.Read(&eL1State, sizeof(eL1State));
-    currentPose.Load(file);
-    wishPose.Load(file);
-    file.Read(nCanAttackTime);
-    file.Read(nMoveToTargetTime);
-    file.Read(nL1RunFailCounter);
-    curCommand.Load(file);
-    nextCommand.Load(file);
-    rpgUnitStats.Load(file);
-    if (file.GetVersion() < 80)
-        rpgUnitStats.fBaseHP = GetMapObjectServer()->GetRPGStats()->ssHP.fpMax;
-    file.Read(fpModSound);
-    file.Read(fpSModSound);
-    file.Read(fpModVision);
-    file.Read(fpSModVision);
-    // для реализации tame
-    file.Read(&tameLevel, sizeof(tameLevel));
-    file.Read(nOriginalPlayerNum);
-    file.Read(nPlayerWhoTamed);
-    file.Read(nFootstepGenInterval);
-
-    file.Read(dwFutureEnemies);
-    logic.Load(file);
-    acknowledgements.Load(file);
-    file.Read(bLcCommandFail);
-    file.Read(bLcCompletelyDead);
-    file.Read(fpZSpeed);
-    pCastParticle = LoadGBSmartPtr<CEffectParticle>(file, GetWorld()->GetEffectManager());
-    LoadCList(activeContSpells, file);
-    train.Load(file);
-    if (file.GetVersion() < 68)
-        return;
-    file.Read(nAttackParamsSetTime);
-    if (file.GetVersion() < 72)
-        return;
-    EUnitPose oldPose_fake;
-    file.Read(&oldPose_fake, sizeof(oldPose_fake));
-    if (file.GetVersion() < 74)
-        return;
-    file.Read(bLcChangingPoseToAttack);
-    if (file.GetVersion() < 76)
-        return;
-    rpgDefend.Load(file);
-    if (file.GetVersion() < 84)
-        return;
-    file.Read(nBoredCounter);
-    if (file.GetVersion() < 105)
-        return;
-    level1AP.Load(file);
-    if (file.GetVersion() < 115)
-        return;
-    file.Write(nCommandExecStart);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Store(CSave &file)
 {
-    file.Write(bL0Frozen);
-    file.Write(bL0MovementFrozen);
-    level0Animation.Store(file);
-    path.Store(file);
-    level1Command.Store(file);
-    file.Write(bL1PlayingSuffer);
-    file.Write(bL1MovementFailed);
-    file.Write(bL1SpeedChanged);
-    file.Write(bL1MoveAnimationSet);
-    sufferAnimationMem.Store(file);
-    file.Write(nL1SufferDirection);
-    file.Write(&eL1State, sizeof(eL1State));
-    currentPose.Store(file);
-    wishPose.Store(file);
-    file.Write(nCanAttackTime);
-    file.Write(nMoveToTargetTime);
-    file.Write(nL1RunFailCounter);
-    curCommand.Store(file);
-    nextCommand.Store(file);
-    rpgUnitStats.Store(file);
-    file.Write(fpModSound);
-    file.Write(fpSModSound);
-    file.Write(fpModVision);
-    file.Write(fpSModVision);
-    // для реализации tame
-    file.Write(&tameLevel, sizeof(tameLevel));
-    file.Write(nOriginalPlayerNum);
-    file.Write(nPlayerWhoTamed);
-    file.Write(nFootstepGenInterval);
-
-    file.Write(dwFutureEnemies);
-    logic.Store(file);
-    acknowledgements.Store(file);
-    file.Write(bLcCommandFail);
-    file.Write(bLcCompletelyDead);
-    file.Write(fpZSpeed);
-    StoreGBPtr(file, pCastParticle);
-    StoreCList(activeContSpells, file);
-    train.Store(file);
-    file.Write(nAttackParamsSetTime);
-    EUnitPose oldPose_fake = UP_STAND;
-    file.Write(&oldPose_fake, sizeof(oldPose_fake));
-    file.Write(bLcChangingPoseToAttack);
-    rpgDefend.Store(file);
-    file.Write(nBoredCounter);
-    level1AP.Store(file);
-    file.Write(nCommandExecStart);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CUnitServer::GetHeroLevel() const

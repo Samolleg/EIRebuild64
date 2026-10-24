@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "FofSystem.h"
@@ -129,12 +130,10 @@ void CFofTracker::MakeDamage(CUnit *pWho, CUnit *pWhom, int nDamage)
 
 void CFofTracker::Load(CSave &file)
 {
-    file.Read(allyMatrix, sizeof(allyMatrix));
-    file.Read(enemyMatrix, sizeof(enemyMatrix));
+    SaveSchema::RequireDynamicSchema();
 }
 
 void CFofTracker::Store(CSave &file)
 {
-    file.Write(allyMatrix, sizeof(allyMatrix));
-    file.Write(enemyMatrix, sizeof(enemyMatrix));
+    SaveSchema::RequireDynamicSchema();
 }

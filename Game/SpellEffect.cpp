@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "SpellEffect.h"
@@ -16,6 +17,7 @@ CSpellEffect::CSpellEffect()
     nVisStrength = 0;
     nDuration = 0;
     fpPower = 0;
+    fpRadius = 0;
     bQuiet = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -27,19 +29,11 @@ int CSpellEffect::Segment()
 /////////////////////////////////////////////////////////////////////////////////////
 void CSpellEffect::Load(CSave &file)
 {
-    file.Read(nSpellID);
-    file.Read(nVisStrength);
-    file.Read(nDuration);
-    file.Read(fpPower);
-    file.Read(fpRadius);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CSpellEffect::Store(CSave &file)
 {
-    file.Write(nSpellID);
-    file.Write(nVisStrength);
-    file.Write(nDuration);
-    file.Write(fpPower);
-    file.Write(fpRadius);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////

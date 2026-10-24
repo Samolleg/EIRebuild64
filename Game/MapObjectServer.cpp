@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObjectServer.h"
@@ -115,19 +116,11 @@ BOOL CMapObjectServer::ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion)
 /////////////////////////////////////////////////////////////////////////////////////
 void CMapObjectServer::Load(CSave &file)
 {
-    rpgCommonStats.Load(file);
-
-    szPrimTexture = file.ReadString();
-    szSecTexture = file.ReadString();
-    LoadCStringArray(szNames, file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CMapObjectServer::Store(CSave &file)
 {
-    rpgCommonStats.Store(file);
-
-    file.WriteString(szPrimTexture);
-    file.WriteString(szSecTexture);
-    StoreCStringArray(szNames, file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////

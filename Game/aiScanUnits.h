@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /**********************************************************************
  *<
         FILE: aiScanUnits.H
@@ -66,6 +67,10 @@ public:
     void RemoveReferencesOn(CMapObject *pTarget);
     void Load(CSave &file);
     void Store(CSave &file);
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CAIUnitEnvironment;
@@ -87,7 +92,11 @@ class CAIDelayedSoundsList
         }
         void Load(CSave &file);
         void Store(CSave &file);
-    };
+    public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
+};
     CAArray<SSound> soundsQueue;
 
 public:
@@ -98,6 +107,10 @@ public:
     void Segment(CUnit *pUnit, CAIUnitEnvironment &env);
     void Load(CSave &file);
     void Store(CSave &file);
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // SAIMark - универсальный след
@@ -195,6 +208,10 @@ public:
     void Load(CSave &file);
     void Store(CSave &file);
     friend class CAIMarkManager;
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // SAIMarkCell - one cell of footsteps grid
@@ -216,6 +233,11 @@ struct SAIMarkCell
 // CAIMarkManager - управление следами
 class CAIMarkManager
 {
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void BindSavedMap(CAIMap &map) { pAIMap = &map; bVisionInitiated = false; }
+private:
     CAIMap *pAIMap; // pointer to AI map
     int nSegment;   // current segment number
 

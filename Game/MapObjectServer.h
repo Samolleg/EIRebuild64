@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 
 #include "RPGSystem.h"
 #include "MapObject.h"
@@ -49,6 +50,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CMapObjectServer"; };
     virtual EClassIDs WhoAmI() const { return HPC_MAPOBJECTSERVERSPECIFIC; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 
 // --------------------------------------------------------------------------------------------

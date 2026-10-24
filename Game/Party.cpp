@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
+#include <memory>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Party.h"
@@ -70,66 +72,12 @@ void CPersonage::Clear()
 /////////////////////////////////////////////////////////////////////////////////////
 void CPersonage::Load(CSave &file)
 {
-    Clear();
-    file.Read(szName);
-
-    file.Read(szTemplate);
-    file.Read(szPrimTexture);
-    file.Read(szSecondTexture);
-    file.Read(szPrototype);
-    szVoicePrototype = szPrototype;
-
-    file.Read(nID);
-    stats.Load(file);
-    file.Read(&complection, sizeof(complection));
-
-    LoadGBPtrArray<CItemWeapon *, CItemWeapon *>(weapons, file, pCurrentParty->GetItemManager());
-    LoadGBPtrArray<CItemQuick *, CItemQuick *>(items, file, pCurrentParty->GetItemManager());
-    LoadGBPtrArray<CItemArmor *, CItemArmor *>(armors, file, pCurrentParty->GetItemManager());
-    LoadGBPtrArray<CItemSpell *, CItemSpell *>(spells, file, pCurrentParty->GetItemManager());
-    file.Read(szInternalName);
-    if (file.GetVersion() < 81)
-        return;
-    file.Read(&pose, sizeof(pose));
-    file.Read(dwCurrentWeapon);
-    file.Read(bIsSelected);
-    if (file.GetVersion() < 91)
-        return;
-    file.Read(nFollowToID);
-    nFollowToID = theWorldServer.GetMapObjectManager()->SavedObjectID(nFollowToID);
-    if (file.GetVersion() < 97)
-        return;
-    file.Read(&aggression, sizeof(aggression));
-    if (file.GetVersion() < 107)
-        return;
-    file.Read(szVoicePrototype);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CPersonage::Store(CSave &file)
 {
-    file.Write(szName);
-
-    file.Write(szTemplate);
-    file.Write(szPrimTexture);
-    file.Write(szSecondTexture);
-    file.Write(szPrototype);
-
-    file.Write(nID);
-    stats.Store(file);
-    file.Write(&complection, sizeof(complection));
-
-    StoreGBPtrArray<CItemWeapon *, CItemWeapon *>(weapons, file);
-    StoreGBPtrArray<CItemQuick *, CItemQuick *>(items, file);
-    StoreGBPtrArray<CItemArmor *, CItemArmor *>(armors, file);
-    StoreGBPtrArray<CItemSpell *, CItemSpell *>(spells, file);
-    file.Write(szInternalName);
-    file.Write(&pose, sizeof(pose));
-    file.Write(dwCurrentWeapon);
-    file.Write(bIsSelected);
-    file.Write(nFollowToID);
-    file.Write(&aggression, sizeof(aggression));
-
-    file.Write(szVoicePrototype);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CSimplyArray<CItem *, CItem *> CItemArray;
@@ -351,14 +299,24 @@ CParty::CParty(const CParty &src)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CParty::Create()
 {
+    return CreateOwners(0, 0);
+}
+BOOL CParty::CreateSavedOwners(ObjectId item, ObjectId spell)
+{
+    if (!ObjectIdentity::RestoreNamespace::Active() || !item || !spell || item == spell || pItemManager || pSpellManager)
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Identity, "party requires fresh saved owners");
+    return CreateOwners(item, spell);
+}
+BOOL CParty::CreateOwners(ObjectId item, ObjectId spell)
+{
     CWorld::Create();
     ASSERT(!pItemManager);
     // ItemManager
-    pItemManager = dbgnew CItemManager;
+    pItemManager = item ? ObjectIdentity::CreateWith<std::unique_ptr<CItemManager>>(item, [] { return new CItemManager; }).release() : dbgnew CItemManager;
     pItemManager->AddRef();
     ((CBaseManager *)pItemManager)->Create(this);
     // SpellManager
-    pSpellManager = dbgnew CSpellManager;
+    pSpellManager = spell ? ObjectIdentity::CreateWith<std::unique_ptr<CSpellManager>>(spell, [] { return new CSpellManager; }).release() : dbgnew CSpellManager;
     pSpellManager->AddRef();
     ((CBaseManager *)pSpellManager)->Create(this);
     // ItemConstructor
@@ -457,63 +415,12 @@ void CParty::Serialize(CStructureSaver &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CParty::Load(CSave &file, BOOL bVars)
 {
-    if (!pItemManager)
-        Create();
-    pCurrentParty = this;
-    Clear(bVars, FALSE);
-    int i, n;
-
-    file.Read(szCurrentZone);
-    file.Read(nEntrance);
-    pItemManager->Load(file);
-    pSpellManager->Load(file);
-    pItemManager->LoadData(file);
-    pSpellManager->LoadData(file);
-    LoadGBPtrArray<CItem *, CItem *>(allWagonItems, file, GetItemManager());
-
-    file.Read(n);
-    if (n < 0 || static_cast<unsigned int>(n) > file.Remaining())
-    { file.Fail("invalid_party_size"); return; }
-    people.SetSize(n);
-    for (i = 0; i < n; i++)
-        people[i].Load(file);
-    if (bVars)
-        vars.Load(file);
-    pCurrentParty = 0;
-    nMoney = 0;
-    file.Read(nMoney);
-    if (file.GetVersion() > 107)
-    {
-        int nDumbCutter;
-        file.Read(nDumbCutter);
-        nMoney ^= nDumbCutter;
-    }
-    pItemManager->CheckReferences();
-    pSpellManager->CheckReferences();
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CParty::Store(CSave &file, BOOL bVars)
 {
-    int i, n;
-
-    if (!pItemManager)
-        Create();
-    file.Write(szCurrentZone);
-    file.Write(nEntrance);
-    pItemManager->Store(file);
-    pSpellManager->Store(file);
-    pItemManager->StoreData(file);
-    pSpellManager->StoreData(file);
-    StoreGBPtrArray<CItem *, CItem *>(allWagonItems, file);
-
-    file.Write(n = people.GetSize());
-    for (i = 0; i < n; i++)
-        people[i].Store(file);
-    if (bVars)
-        vars.Store(file);
-    int nDumbCutter = random.Get();
-    file.Write(nMoney ^ nDumbCutter);
-    file.Write(nDumbCutter);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // return index of item in allWagonItems, -1 if not found

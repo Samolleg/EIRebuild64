@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 
 #include "Effect.h"
 #include "SpellSystem.h"
@@ -114,4 +115,13 @@ public:
     static void SetCurrentWorld(CWorldServer *_pWS) { pWSstatic = _pWS; }
     void Load(CSave &file);
     void Store(CSave &file);
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
+public:
+    void AdoptSavedState(CWorldServer &);
+private:
+    bool savedStatePending = false;
+    bool savedDangerMapping = false;
 };

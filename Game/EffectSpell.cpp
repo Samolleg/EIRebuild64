@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "GameJournal.h"
 #include "ModSpellRules.h"
 #include "ModSpellOwner.h"
@@ -45,6 +46,7 @@ CEffectSpell::CEffectSpell()
 /////////////////////////////////////////////////////////////////////////////////////
 CEffectSpell::~CEffectSpell()
 {
+    if (savedStatePending) { DiscardSave(); return; }
     if (bDangerIsMapped)
         AddRemoveDangerArea(spell.GetSubtypeID() >> 16, FALSE);
     RemoveEffect();
@@ -86,47 +88,12 @@ BOOL CEffectSpell::Segment()
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::Load(CSave &file)
 {
-    ASSERT(pWSstatic);
-    pWS = pWSstatic;
-    DWORD dwParam;
-    file.Read(&cp, sizeof(cp));
-    pWho.Load(file, *pWS);
-    pTarget.Load(file, *pWS);
-    file.Read(&ptTarget, sizeof(ptTarget));
-    file.Read(&castPhase, sizeof(castPhase));
-    spell.Load(file);
-    file.Read(dwParam);
-    spell.SetSubtypeID(dwParam);
-    pEffect = LoadGBSmartPtr<CEffect>(file, pWS->GetEffectManager());
-    pEffectSound = LoadGBSmartPtr<CEffectSound>(file, pWS->GetEffectManager());
-    pEffectLight = LoadGBSmartPtr<CEffectPointLight>(file, pWS->GetEffectManager());
-    file.Read(nTimeLeft);
-    file.Read(dwFlags);
-    file.Read(&cp, sizeof(cp));
-
-    int nKind = spell.GetSubtypeID() >> 16;
-    if(ModRuntime::Current())
-        ModSpellDanger::ReconstructNativeLoad(nKind,!pEffect.IsEmpty(),[&](int stockKind){AddRemoveDangerArea(stockKind,TRUE);});
-    else
-        AddRemoveDangerArea(nKind, TRUE);
-    if(SpellTextures::HasBindings()&&!pEffect.IsEmpty()){auto*prototype=spell.GetPrototype();if(prototype)SpellTextures::RecordOwner(pWS->GetEffectManager(),pEffect.GetPtr(),prototype->GetCodeName());}
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectSpell::Store(CSave &file)
 {
-    file.Write(&cp, sizeof(cp));
-    pWho.Store(file);
-    pTarget.Store(file);
-    file.Write(&ptTarget, sizeof(ptTarget));
-    file.Write(&castPhase, sizeof(castPhase));
-    spell.Store(file);
-    file.Write(spell.GetSubtypeID());
-    StoreGBPtr(file, pEffect);
-    StoreGBPtr(file, pEffectSound);
-    StoreGBPtr(file, pEffectLight);
-    file.Write(nTimeLeft);
-    file.Write(dwFlags);
-    file.Write(&cp, sizeof(cp));
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // !!! System routines

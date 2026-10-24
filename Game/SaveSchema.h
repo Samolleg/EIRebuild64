@@ -214,10 +214,7 @@ public:
 };
 
 // Retired native-memory dynamic serializers have no old-save reader.
-[[noreturn]] inline void RequireDynamicSchema()
-{
-    throw Error(ErrorCode::Incompatible, "dynamic state requires SaveSchema (P17)");
-}
+[[noreturn]] void RequireDynamicSchema();
 void RegisterDynamicTypes(Registry &registry);
 
 // CSave's current stream abstraction is uint32-sized. The format's payload length

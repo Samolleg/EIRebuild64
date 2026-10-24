@@ -83,14 +83,12 @@ public:
     }
     void Load(CSave &file)
     {
-        file.Read(&ptPoint, sizeof(ptPoint));
-        LoadCArray<SAITurnLookOrder>(lookOrders, file);
-    }
+    SaveSchema::RequireDynamicSchema();
+}
     void Store(CSave &file)
     {
-        file.Write(&ptPoint, sizeof(ptPoint));
-        StoreCArray<SAITurnLookOrder>(lookOrders, file);
-    }
+    SaveSchema::RequireDynamicSchema();
+}
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // использование боевого потенциала юнита
@@ -171,13 +169,17 @@ private:
         void Load(CSave &file);
         void Store(CSave &file);
         float GetDamage();
-    };
+    public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
+};
 
 private:
     CArray<SAIPotentialAttack, SAIPotentialAttack &> attacks;
     CArray<SAIPotentialAttack, SAIPotentialAttack &> heals;
     // средние наносимые юнитом повреждения, характеризуют его ценность
-    float fpAvrgDamage;
+    float fpAvrgDamage = 0;
     CItemWeapon* skillWeapon=nullptr;
     DWORD skillWeaponType=0;
     CSpell* skillSlots[16]={};
@@ -230,6 +232,10 @@ public:
     void Load(CSave &file);
     void Store(CSave &file);
     friend struct SAIPotentialAttack;
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 enum EAIMotivation
@@ -261,8 +267,16 @@ public:
     virtual EAIMotivation GetType() = 0;
     virtual bool IsDuty() { return FALSE; }
     virtual void RemoveReferencesOn(CMapObject *pTarget) {}
-    virtual void Load(CSave &file) {}
-    virtual void Store(CSave &file) {}
+    virtual void Load(CSave &file) {
+    SaveSchema::RequireDynamicSchema();
+}
+    virtual void Store(CSave &file) {
+    SaveSchema::RequireDynamicSchema();
+}
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // abstract class implementing common things for duty motivations
@@ -298,6 +312,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_GUARD; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // patrol - call of duty unit`s motivation, forces unit to walk on the route and
@@ -320,6 +338,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_PATROL; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // sentry - call of duty unit`s motivation, forces unit to stay on some point and
@@ -339,6 +361,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_SENTRY; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // follow - unit wants to sentry - call of duty unit`s motivation, forces unit to stay on some point
@@ -361,6 +387,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_FOLLOW; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // suspection - when unit sees some footstep or hear strange sound
@@ -381,6 +411,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_SUSPECTION; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // aggression - attack enemy in sight
@@ -411,6 +445,10 @@ public:
     CMapObject *GetTarget() { return pTarget; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // corpse watchin is very interesting occupation... for some special people :)
@@ -443,6 +481,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_FEAR; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // player motivation: do nothing ( do not even start idle )
@@ -496,6 +538,10 @@ public:
     virtual EAIMotivation GetType() { return AI_UM_PLAYER; }
     virtual void Load(CSave &file);
     virtual void Store(CSave &file);
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CUMTamed : public CUMPlayer
@@ -702,5 +748,9 @@ public:
     // load&store
     void Load(CSave &file);
     void Store(CSave &file);
+public:
+    void Store(SaveSchema::Writer &) const;
+    void Load(SaveSchema::Reader &);
+    void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////

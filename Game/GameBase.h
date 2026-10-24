@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; [[noreturn]] void RequireDynamicSchema(); }
 
 #include <AfxTempl.h>    // MFC template library
 #include "mm_malloc.h"   // malloc and free blocks, aligned on 32 bytes
@@ -105,11 +106,15 @@ public:
     virtual LPCSTR GetName() const { return "noname"; }
     virtual LPCSTR GetDesc() const { return "nodesc"; }
     // load&store
-    virtual void Load(CSave &file) {}
-    virtual void Store(CSave &file) {}
+    virtual void Load(CSave &file) { SaveSchema::RequireDynamicSchema(); }
+    virtual void Store(CSave &file) { SaveSchema::RequireDynamicSchema(); }
     // class identification functions
     virtual LPCSTR GetGameClassName() const = 0;
     virtual EClassIDs WhoAmI() const = 0;
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave() {}
 };
 /////////////////////////////////////////////////////////////////////////////////////
 #if !defined(__NOMFC__)

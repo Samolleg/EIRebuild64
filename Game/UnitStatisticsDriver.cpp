@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "UnitStatisticsDriver.h"
@@ -10,58 +11,22 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitWearsStatistics::Store(CSave &file) const
 {
-    file.Write(wPrototype);
-    file.Write(armors.size());
-    file.Write(armors.data(), armors.size() * sizeof(DWORD));
-    file.Write(weapons.size());
-    file.Write(weapons.data(), weapons.size() * sizeof(DWORD));
-    file.Write(cCurrentWeaponIndex);
-    file.Write(nID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitWearsStatistics::Load(CSave &file)
 {
-    int nSize;
-
-    file.Read(wPrototype);
-    //
-    file.Read(nSize);
-    armors.resize(nSize);
-    file.Read(armors.data(), armors.size() * sizeof(DWORD));
-    //
-    file.Read(nSize);
-    weapons.resize(nSize);
-    file.Read(weapons.data(), weapons.size() * sizeof(DWORD));
-    file.Read(cCurrentWeaponIndex);
-    //
-    file.Read(nID);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitStatistics::Store(CSave &file) const
 {
-    SUnitWearsStatistics::Store(file);
-    //
-    file.Write(fStrength);
-    file.Write(fGrace);
-    file.Write(fTall);
-    file.Write(szBPs.size());
-    for (int i = 0; i < szBPs.size(); ++i)
-        file.Write(szBPs[i]);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitStatistics::Load(CSave &file)
 {
-    SUnitWearsStatistics::Load(file);
-
-    file.Read(fStrength);
-    file.Read(fGrace);
-    file.Read(fTall);
-    //
-    int nSize;
-    file.Read(nSize);
-    szBPs.resize(nSize);
-    for (int i = 0; i < szBPs.size(); ++i)
-        file.Read(szBPs[i]);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitStatisticsDriver::AddUnit(CUnit *pUnit)
@@ -172,50 +137,12 @@ void CUnitStatisticsDriver::AddUnit(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitStatisticsDriver::Store(CSave &file) const
 {
-    int nCounter = 0;
-    // count elements 'units'
-    for (auto pos1 = units.begin(); pos1 != units.end(); ++pos1)
-    {
-        for (auto pos2 = pos1->second.begin(); pos2 != pos1->second.end(); ++pos2)
-            nCounter++;
-    }
-    // store elements 'units'
-    {
-        file.Write(nCounter);
-        for (auto pos1 = units.begin(); pos1 != units.end(); ++pos1)
-        {
-            for (auto pos2 = pos1->second.begin(); pos2 != pos1->second.end(); ++pos2)
-                pos2->second.Store(file);
-        }
-    }
-    // store elements 'wears'
-    {
-        int nSize = wears.size();
-        file.Write(nSize);
-        for (auto it = wears.begin(); it != wears.end(); ++it)
-            it->second.Store(file);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitStatisticsDriver::Load(CSave &file, std::vector<SUnitStatistics> &statistics,
                                  std::vector<SUnitWearsStatistics> &wears)
 {
-    int nSize;
-    // main statistics
-    {
-        file.Read(nSize);
-        statistics.resize(nSize);
-        //
-        for (auto it = statistics.begin(); it != statistics.end(); ++it)
-            it->Load(file);
-    }
-    // wears statistics
-    {
-        file.Read(nSize);
-        wears.resize(nSize);
-        //
-        for (auto it = wears.begin(); it != wears.end(); ++it)
-            it->Load(file);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////

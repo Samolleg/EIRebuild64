@@ -8,6 +8,7 @@
  **********************************************************************/
 
 #include "StdAfx.h"
+#include "SaveSchema.h"
 #include "NumericPolicy.h"
 #include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -88,24 +89,12 @@ void SVisibilityMask::Clear()
 /////////////////////////////////////////////////////////////////////////////////////
 void SVisibilityMask::Load(CSave &file)
 {
-    // CRAP - need optimization for size ( HUGE optimization is possible ! )
-    file.Read(nShiftX);
-    file.Read(nShiftY);
-    int nSizeX, nSizeY;
-    file.Read(nSizeX);
-    file.Read(nSizeY);
-    data.SetSizes(nSizeX, nSizeY);
-    file.Read(data.GetBuffer(), nSizeX * nSizeY);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SVisibilityMask::Store(CSave &file)
 {
-    file.Write(nShiftX);
-    file.Write(nShiftY);
-    int nSizeX = data.GetXSize(), nSizeY = data.GetYSize();
-    file.Write(nSizeX);
-    file.Write(nSizeY);
-    file.Write(data.GetBuffer(), nSizeX * nSizeY);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SVisibilityMask::Extend(int nCenterX, int nCenterY, int nRadius)
@@ -169,24 +158,13 @@ SAIMark *SAIMark::GetNewMark()
 /////////////////////////////////////////////////////////////////////////////////////
 void SAIMark::Load(CSave &file)
 {
-    file.Read(&ptPosition, sizeof(ptPosition));
-    file.Read(&ptPointPosition, sizeof(ptPointPosition));
-    file.Read(nTime);
-    file.Read(fpStrength, sizeof(fpStrength));
-    file.Read(nUnitID);
-    nUnitID = theWorldServer.GetMapObjectManager()->SavedObjectID(nUnitID);
-    file.Read(nPlayer);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 void SAIMark::Store(CSave &file)
 {
-    file.Write(&ptPosition, sizeof(ptPosition));
-    file.Write(&ptPointPosition, sizeof(ptPointPosition));
-    file.Write(nTime);
-    file.Write(fpStrength, sizeof(fpStrength));
-    file.Write(nUnitID);
-    file.Write(nPlayer);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -795,66 +773,13 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIMarkManager::Load(CSave &file)
 {
-    char ch;
-    SAIMark *pNew;
-    int nPlayerNum;
-    SAIMarkCell *pCell;
-
-    while (1)
-    {
-        ch = 0;
-        file.Read(ch);
-        if (ch)
-        {
-            pNew = SAIMark::GetNewMark();
-            pNew->Load(file);
-            pCell = GetCell(pNew->ptPosition.x, pNew->ptPosition.y);
-            ASSERT(pCell);
-            if (!pCell)
-            {
-                pNew->ReleaseMark();
-                continue;
-            }
-            nPlayerNum = pNew->nPlayer & (N_AI_MARKS_PLAYER_NUM - 1);
-
-            // добавим в список присутствующих марков в сетке
-            pNew->pNext = pCell[0][nPlayerNum];
-            if (pCell[0][nPlayerNum])
-                pCell[0][nPlayerNum]->pPrev = pNew;
-            pNew->pPrev = NULL;
-            pCell[0][nPlayerNum] = pNew;
-            // добавим в список на уничтожение
-            PAIMark &pDel = pDeleteLists[(pNew->nTime - 1) & (N_MAX_MARK_LIFETIME - 1)][nPlayerNum];
-            pNew->pNextDel = pDel;
-            pDel = pNew;
-        }
-        else
-            break;
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIMarkManager::Store(CSave &file)
 {
-    int x, y, i;
-    for (y = 0; y < cells.GetYSize(); y++)
-    {
-        for (x = 0; x < cells.GetXSize(); x++)
-        {
-            SAIMarkCell &c = cells[y][x];
-            for (i = 0; i < N_AI_MARKS_PLAYER_NUM; i++)
-            {
-                SAIMark *pMark = c[i];
-                while (pMark)
-                {
-                    file.Write((char)1);
-                    pMark->Store(file);
-                    pMark = pMark->pNext;
-                }
-            }
-        }
-    }
-    file.Write((char)0);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1120,32 +1045,13 @@ void CAIUnitEnvironment::RemoveReferencesOn(CMapObject *pTarget)
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitEnvironment::Load(CSave &file)
 {
-    nPoIPowerDecrease = -1;
-    LoadMapObjectPtrList(units, file, theWorldServer);
-    LoadMapObjectPtrList(visibleUnits, file, theWorldServer);
-    LoadMapObjectPtrList(seenCorpses, file, theWorldServer);
-    LoadMapObjectPtrList(freshCorpses, file, theWorldServer);
-    file.Read(&ptPointOfInterest, sizeof(ptPointOfInterest));
-    file.Read(nPoIPower);
-    file.Read(nDelayListsUpdate);
-    ignoredList.Load(file);
-    delayedSounds.Load(file);
-    file.Read(nPoIPowerDecrease);
+    SaveSchema::RequireDynamicSchema();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitEnvironment::Store(CSave &file)
 {
-    StoreMapObjectPtrList(units, file);
-    StoreMapObjectPtrList(visibleUnits, file);
-    StoreMapObjectPtrList(seenCorpses, file);
-    StoreMapObjectPtrList(freshCorpses, file);
-    file.Write(&ptPointOfInterest, sizeof(ptPointOfInterest));
-    file.Write(nPoIPower);
-    file.Write(nDelayListsUpdate);
-    ignoredList.Store(file);
-    delayedSounds.Store(file);
-    file.Write(nPoIPowerDecrease);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIIgnoredTargetsList
@@ -1195,24 +1101,12 @@ void CAIIgnoredTargetsList::RemoveReferencesOn(CMapObject *pTarget)
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIIgnoredTargetsList::Load(CSave &file)
 {
-    int nCount;
-    file.Read(nCount);
-    ignoredList.SetSize(nCount);
-    for (int i = 0; i < nCount; i++)
-    {
-        ignoredList[i].pTarget.Load(file, theWorldServer);
-        file.Read(ignoredList[i].nTime);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIIgnoredTargetsList::Store(CSave &file)
 {
-    file.Write((int)ignoredList.GetSize());
-    for (int i = 0; i < ignoredList.GetSize(); i++)
-    {
-        ignoredList[i].pTarget.Store(file);
-        file.Write(ignoredList[i].nTime);
-    }
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIDelayedSoundsList
@@ -1253,19 +1147,12 @@ void CAIDelayedSoundsList::RemoveDiplomacyMsgs()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIDelayedSoundsList::SSound::Load(CSave &file)
 {
-    dwNewEnemies = 0;
-    file.Read(&ptSrc, sizeof(ptSrc));
-    file.Read(nDelay);
-    file.Read(szDescription);
-    file.Read(dwNewEnemies);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIDelayedSoundsList::SSound::Store(CSave &file)
 {
-    file.Write(&ptSrc, sizeof(ptSrc));
-    file.Write(nDelay);
-    file.Write(szDescription);
-    file.Write(dwNewEnemies);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIDelayedSoundsList::AddSound(const CPlot3D &ptSrc, int nDelay, const char *pszText)
@@ -1292,12 +1179,12 @@ void CAIDelayedSoundsList::AddNewEnemies(DWORD dwNewEnemies, int nDelay, const c
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIDelayedSoundsList::Load(CSave &file)
 {
-    LoadCArray<SSound>(soundsQueue, file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIDelayedSoundsList::Store(CSave &file)
 {
-    StoreCArray<SSound>(soundsQueue, file);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // функция вычисляет на каких тайлах pWatcher может заметить объект pTarget с помощью

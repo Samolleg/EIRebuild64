@@ -1,4 +1,5 @@
 #pragma once
+namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Unit.h"
 #include "SoundTypes.h"
@@ -189,6 +190,10 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnitClientSpecific"; };
     virtual EClassIDs WhoAmI() const { return HPC_UNITCLIENTSPECIFIC; };
+public:
+    virtual void Store(SaveSchema::Writer &) const;
+    virtual void Load(SaveSchema::Reader &);
+    virtual void DiscardSave();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 void FormBodypartNames(const SUDBUnitPrototype *pPrototype, const std::vector<DWORD> &armors,
