@@ -2475,7 +2475,7 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
 float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
 {
     float fpHitDist = 0; //, fpMinDist;
-    if(ModRuntime::Current()&&cmd.HasPointOfUse()&&cmd.IsScience()&&cmd.pTarget&&cmd.pTarget->WhoAmI()==HPC_LEVER)
+    if(ModRuntime::Current()&&cmd.HasPointOfUse()&&cmd.IsScience()&&!cmd.pTarget.IsEmpty()&&cmd.pTarget->WhoAmI()==HPC_LEVER)
         return 0.5f;
     if (cmd.HasPointOfUse())
         return FP_MINIMAL_DISTANCE_TO_POU;
@@ -6232,7 +6232,7 @@ void CUnitServer::CmdLoot(CUnit *pTarget, bool bRun)
 bool CUnitServer::HasLeverRingChoice(const SUnitBasicCmd& cmd) const
 {
     if(!modLeverRing||!modLeverTarget||!cmd.IsScience()||!cmd.HasPointOfUse()||
-        cmd.pTarget!=modLeverTarget||cmd.pTarget->GetID()!=modLeverId)return false;
+        static_cast<CMapObject*>(cmd.pTarget)!=modLeverTarget||cmd.pTarget->GetID()!=modLeverId)return false;
     const auto delta=cmd.ptTarget-modLeverPoint;
     return delta.x==0&&delta.y==0&&delta.z==0;
 }
