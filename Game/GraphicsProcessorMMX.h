@@ -2,6 +2,7 @@
 
 #include "GraphicsProcessor.h"
 
+// Historical class/file name; the sole implementation uses C++ and SSE2.
 class CGraphicsProcessorMMX : public CGraphicsProcessor
 {
 public:

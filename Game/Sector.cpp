@@ -308,10 +308,9 @@ static int RemoveClippedVertexes(D3DTLVERTEX *pV, WORD *pFaces, int nVCount, int
 /////////////////////////////////////////////////////////////////////////////////////
 inline void MakeTL(D3DTLVERTEX *pTL, LPBYTE pClip, STXVertex *pTX)
 {
-    /*
+    const SLVertex3D *pLV = pTX->pLVert;
     pTL->tu = pTX->fpU;
     pTL->tv = pTX->fpV;
-    SLVertex3D* pLV = pTX->pLVert;
     pTL->color = pLV->dwColor;
     pTL->specular = pLV->dwSpecular;
     pTL->sx = pLV->sx;
@@ -319,36 +318,6 @@ inline void MakeTL(D3DTLVERTEX *pTL, LPBYTE pClip, STXVertex *pTX)
     pTL->sz = pLV->sz;
     pTL->rhw = pLV->rhw;
     *pClip = pLV->clip;
-    */
-    ///*
-    _asm
-        {       // pTL->tu = pTX->fpU;
-          // pTL->tv = pTX->fpV;
-		mov         ecx, [pTX] // ecx - pTX
-		mov         edx, [pTL] // edx - pTL
-		mov         eax, [ecx] // eax - pLV
-		fild qword ptr [ecx+4]
-		fistp qword ptr [edx+18h]
-                // SLVertex3D* pLV = pTX->pLVert;
-                // pTL->color = pLV->dwColor;
-                // pTL->specular = pLV->dwSpecular;
-		fild qword ptr [eax+11h]
-		fistp qword ptr [edx+10h]
-                // pTL->sx = pLV->sx;
-                // pTL->sy = pLV->sy;
-                // pTL->sz = pLV->sz;
-                // pTL->rhw = pLV->rhw;
-                // *pClip = pLV->clip;
-		fild qword ptr [eax+0h]
-		mov         edi,dword ptr [pClip]
-		fistp qword ptr [edx]
-		mov         cl,byte ptr [eax+10h]
-		fild qword ptr [eax+0h+8]
-		fistp qword ptr [edx+8]
-		mov         byte ptr [edi],cl
-        }
-    ;
-    //*/
 }
 
 /////////////////////////////////////////////////////////////////////////////////////

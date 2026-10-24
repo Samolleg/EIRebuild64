@@ -102,6 +102,7 @@ void CRenderer::SetViewport(const RECT &rect)
 void CRenderer::Create(HWND hWnd, const SGeneralSettings &settings)
 {
     pGeometryProcessor = std::make_unique<CDXGeometryProcessor>();
+    // SSE2 is part of the x64 baseline; there is one graphics processor path.
     pGraphicsProcessor = std::make_unique<CGraphicsProcessorMMX>();
 
     dwDefaultAmbientColor = 0xFF000000;
