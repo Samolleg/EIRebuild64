@@ -79,6 +79,14 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 // typedef CArray< CPersonage*, CPersonage* > CPersonages;
 /////////////////////////////////////////////////////////////////////////////////////
+// Ownership exchange used only after a complete staged slot has been prepared.
+template<class T, class Base = CArray<T>> class CPartySaveArray : public Base {
+public:
+    void Swap(CPartySaveArray &other) noexcept {
+        std::swap(this->m_pData,other.m_pData);std::swap(this->m_nSize,other.m_nSize);
+        std::swap(this->m_nMaxSize,other.m_nMaxSize);std::swap(this->m_nGrowBy,other.m_nGrowBy);
+    }
+};
 class CParty : public CWorld
 {
     CItemManager *pItemManager;
@@ -87,8 +95,8 @@ class CParty : public CWorld
     CSpellConstructor
         *pSpellConstructor; // local spell constructor (spell manager use t to create spells)
 public:
-    CArray<CPersonage> people;
-    CSimplyArray<CItem *, CItem *> allWagonItems;
+    CPartySaveArray<CPersonage> people;
+    CPartySaveArray<CItem *, CSimplyArray<CItem *, CItem *>> allWagonItems;
     int nMoney; // типа общие деньги
     CGSVariableSet vars;
     CString szCurrentZone; // имя текущей зоны
@@ -101,6 +109,7 @@ public:
     // create/destroy
     virtual BOOL Create();
     BOOL CreateSavedOwners(ObjectId item, ObjectId spell);
+    void SwapSavedState(CParty &) noexcept;
 private:
     BOOL CreateOwners(ObjectId item, ObjectId spell);
 public:

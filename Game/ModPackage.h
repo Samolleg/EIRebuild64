@@ -24,6 +24,7 @@ namespace SaveSchema { class Writer; class Reader; }
 #include <vector>
 #include <map>
 #include <memory>
+#include <functional>
 #include <nlohmann/json.hpp>
 struct lua_State;
 struct ModNpcRefreshQueue;
@@ -55,7 +56,8 @@ public:
     struct SaveState;
     void StoreSaveState(SaveSchema::Writer &) const;
     static std::shared_ptr<SaveState> LoadSaveState(SaveSchema::Reader &);
-    void AdoptSaveState(std::shared_ptr<SaveState>);
+    void PrepareSaveState(const std::shared_ptr<SaveState> &,WorldLoadOrigin,const std::function<void()> &);
+    void AdoptSaveState(const std::shared_ptr<SaveState> &) noexcept;
     static SRPGAttackPortion *SavedAttack(CGameBase *, unsigned);
     CModPackage();
     ~CModPackage();
@@ -279,6 +281,7 @@ private:
     const void* npcArmorViewWorld=nullptr;std::string npcArmorViewZone;int npcArmorViewSegment=-1;
     const void* cacheWorld=nullptr;std::string cacheZone;int cacheSegment=-1;
     void SyncRuntimeState();
+    void SwapSaveRuntime(SaveState &) noexcept;
     std::unique_ptr<ModInitialization::Ledger> initialization;
     std::unique_ptr<ModInfoStats::State> infoStats;
     bool CollectArmor(CUnit&,ArmorModifiers&);

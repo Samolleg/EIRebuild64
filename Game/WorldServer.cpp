@@ -58,6 +58,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GameMain.h"
 #include "ModAnimationIdSave.h"
 #include <vector>
+#include <set>
 #include <cmath>
 #include "ModCampReferences.inl"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -75,25 +76,31 @@ const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
 namespace {
 CWorldServer initialWorldServer;
 CWorldServer *publishedWorldServer = &initialWorldServer;
+thread_local CWorldServer *preparingWorldServer = nullptr;
 }
-CWorldServer &ActiveWorldServer() { return *publishedWorldServer; }
+SavedWorldScope::SavedWorldScope(CWorldServer *world) noexcept : previous(preparingWorldServer) { preparingWorldServer=world; }
+SavedWorldScope::~SavedWorldScope() { preparingWorldServer=previous; }
+CWorldServer &ActiveWorldServer() { return *(preparingWorldServer?preparingWorldServer:publishedWorldServer); }
 void PublishWorldServer(CWorldServer *world) noexcept { publishedWorldServer = world; }
 
-namespace {
 struct SFieldCampSnapshot {
-    int id;
-    float hp, mp;
-    SRPGHitLocation hitLocations[RPG_NUM_HIT_LOCATIONS];
+    ObjectId identity=0;
+    int id=-1;
+    float hp=0,mp=0;
+    SRPGHitLocation hitLocations[RPG_NUM_HIT_LOCATIONS]{};
 };
-bool fieldCampArmed = false;
-bool fieldCampInCamp = false;
-int fieldCampReturnHeroId = -1;
 struct SFieldCampVarSnapshot { const char *name; float value; bool existed; };
-CGSVariableSet *fieldCampCommerceVars = nullptr;
-SFieldCampVarSnapshot fieldCampCommerceValues[6] = {};
-std::vector<SFieldCampSnapshot> fieldCampSnapshots;
-const SFieldCampSnapshot *FindFieldCampSnapshot(int id) {
-    for (const auto &snapshot : fieldCampSnapshots) if (snapshot.id == id) return &snapshot;
+struct CWorldServer::FieldCampState {
+    bool armed=false,inCamp=false,commerce=false;
+    int returnHeroId=-1;
+    CGSVariableSet *commerceVars=nullptr;
+    SFieldCampVarSnapshot commerceValues[6]{};
+    std::vector<SFieldCampSnapshot> snapshots;
+    ModCampReferences::Pending pending;
+};
+namespace {
+const SFieldCampSnapshot *FindFieldCampSnapshot(const std::vector<SFieldCampSnapshot> &snapshots, int id) {
+    for (const auto &snapshot : snapshots) if (snapshot.id == id) return &snapshot;
     return nullptr;
 }
 void RestoreFieldCampHitLocations(SRPGUnitStats &stats, const SFieldCampSnapshot &snapshot) {
@@ -116,6 +123,74 @@ void ZeroFieldCampPersonage(CPersonage &personage) {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
+void CWorldServer::StoreFieldCamp(SaveSchema::Writer &w) const
+{
+    using namespace SaveSchema;using namespace Fields;
+    const auto &camp=*fieldCamp;
+    w.Bool(camp.armed);w.Bool(camp.inCamp);w.Int32(camp.returnHeroId);
+    Count(w,camp.snapshots.size());
+    for(const auto &s:camp.snapshots){
+        w.UInt64(s.identity);w.Int32(s.id);w.Float32(s.hp);w.Float32(s.mp);
+        // These are the only hit-location fields restored on return. Armor
+        // pointers in the old scratch copy must not outlive their removed units.
+        for(const auto &hit:s.hitLocations){w.Float32(hit.fpHP);Field(w,hit.dwCrippleMask);Field(w,hit.state);}
+    }
+    w.Bool(camp.commerceVars!=nullptr);
+    if(camp.commerceVars)for(const auto &v:camp.commerceValues){w.Float32(v.value);w.Bool(v.existed);}
+    ModCampReferences::WorldAccess context{const_cast<CWorldServer &>(*this)};
+    std::vector<ModCampReferences::View> views;
+    if(!context.Collect(views))throw Error(ErrorCode::Invalid,"invalid camp script scopes");
+    std::vector<const ModCampReferences::Snapshot *> pending;
+    for(const auto &s:camp.pending)
+        if(std::find(views.begin(),views.end(),s.view)!=views.end())pending.push_back(&s);
+    auto target=[&](int id){
+        for(const auto &s:camp.snapshots)if(s.id==id&&s.identity){w.UInt64(s.identity);return;}
+        throw Error(ErrorCode::Invalid,"missing camp target identity");
+    };
+    auto name=[&](const ModCampReferences::Name &n){w.Bool(n.available);w.Int32(n.count);w.String(n.text);};
+    Count(w,pending.size());for(const auto *s:pending){
+        const auto index=std::find(views.begin(),views.end(),s->view)-views.begin();
+        w.UInt32(static_cast<std::uint32_t>(index));w.Int32(s->view.scope);w.String(s->view.name);
+        Count(w,s->objects.size());for(const auto &o:s->objects){w.Int32(o.index);target(o.id);name(o.name);}
+        Count(w,s->groups.size());for(const auto &g:s->groups){w.Int32(g.index);name(g.name);Count(w,g.ids.size());for(int id:g.ids)target(id);}
+    }
+}
+void CWorldServer::LoadFieldCamp(SaveSchema::Reader &r)
+{
+    using namespace SaveSchema;using namespace Fields;
+    auto camp=std::make_shared<FieldCampState>();
+    camp->armed=r.Bool();camp->inCamp=r.Bool();camp->returnHeroId=r.Int32();
+    auto n=r.Count();if(n>8)throw Error(ErrorCode::Invalid,"too many camp heroes");
+    std::map<ObjectId,int> targets;std::set<int> mapIds;
+    camp->snapshots.resize(n);for(auto &s:camp->snapshots){
+        s.identity=r.UInt64();s.id=r.Int32();s.hp=r.Float32();s.mp=r.Float32();
+        if(!s.identity||s.id<0||!targets.emplace(s.identity,s.id).second||!mapIds.insert(s.id).second)
+            throw Error(ErrorCode::Invalid,"invalid camp hero identity");
+        for(auto &hit:s.hitLocations){hit.fpHP=r.Float32();Field(r,hit.dwCrippleMask);Field(r,hit.state);}
+    }
+    camp->commerce=r.Bool();
+    static const char *names[6]={"constr.current","i.noconstr","i.offspellconstr","i.onspellconstr","i.offitemconstr","i.onitemconstr"};
+    if(camp->commerce)for(int i=0;i<6;++i){auto &v=camp->commerceValues[i];v.name=names[i];v.value=r.Float32();v.existed=r.Bool();}
+    ModCampReferences::WorldAccess context{*this};std::vector<ModCampReferences::View> views;
+    if(!context.Collect(views))throw Error(ErrorCode::Invalid,"invalid saved camp scopes");
+    auto target=[&](){auto id=r.UInt64();auto it=targets.find(id);if(it==targets.end())throw Error(ErrorCode::Invalid,"invalid camp ObjectId reference");return it->second;};
+    auto name=[&](ModCampReferences::Name &v){v.available=r.Bool();v.count=r.Int32();v.text=r.String();if(!ModCampReferences::Bounded(v.count))throw Error(ErrorCode::Invalid,"invalid camp variable metadata");};
+    n=r.Count();std::set<std::uint32_t> scopes;
+    for(std::uint32_t i=0;i<n;++i){
+        auto index=r.UInt32();int scope=r.Int32();auto owner=r.String();
+        if(index>=views.size()||!scopes.insert(index).second||views[index].scope!=scope||views[index].name!=owner)
+            throw Error(ErrorCode::Invalid,"camp script scope mismatch");
+        ModCampReferences::Snapshot s;s.view=views[index];
+        auto count=r.Count();s.objects.resize(count);for(auto &o:s.objects){o.index=r.Int32();o.id=target();name(o.name);}
+        count=r.Count();s.groups.resize(count);for(auto &g:s.groups){g.index=r.Int32();name(g.name);auto members=r.Count();if(members>8)throw Error(ErrorCode::Invalid,"invalid camp group size");g.ids.resize(members);for(auto &id:g.ids)id=target();}
+        camp->pending.push_back(std::move(s));
+    }
+    fieldCamp.swap(camp);
+}
+void CWorldServer::BindSavedCampParty(CParty &party) noexcept
+{
+    fieldCamp->commerceVars=fieldCamp->commerce?&party.vars:nullptr;
+}
 void CWorldServer::SCorpseItems::Store(CSave &file)
 {
     file.Write(nID);
@@ -168,7 +243,7 @@ void CWorldServer::SCorpseItems::Load(CSave &file)
 // ---------------------------------------------------------
 
 /////////////////////////////////////////////////////////////////////////////////////
-CWorldServer::CWorldServer(bool detached) : detachedSave(detached)
+CWorldServer::CWorldServer(bool detached) : detachedSave(detached), fieldCamp(std::make_shared<FieldCampState>())
 {
 #ifdef _DEBUG
     pszGameClassName = GetGameClassName();
@@ -224,19 +299,21 @@ void CWorldServer::Destroy()
 {
     if (!detachedSave) OwnedRender::E1ClearSaveNotice();
     // Kill All clients
+    {
     CPlayer *pPlayer;
-    CPlayerIterator
-        *playerIter = dbgnew CPlayerIterator; // because iterator has refcount on manager
+    CPlayerIterator playerIterator;
+    CPlayerIterator *playerIter=&playerIterator; // pins its manager without allocating
     if (GetPlayerManager())
     {
         pPlayer = playerIter->GetFirst((CPlayerManager *)GetPlayerManager());
         for (; pPlayer; pPlayer = playerIter->GetNext())
         {
+            if(detachedSave)pPlayer->retiringSave=true;
             pPlayer->Disconnect();
             ((CPlayerManager *)GetPlayerManager())->RemovePlayer(pPlayer);
         }
     }
-    delete playerIter;
+    } // release iterator's manager pin before destroying managers
 
     if (pHoover)
     {
@@ -287,12 +364,12 @@ void CWorldServer::RemoveEverything()
     // release all refs on mapobjects from players
     if (GetPlayerManager())
     {
-        CPlayerIterator
-            *playerIter = dbgnew CPlayerIterator; // because iterator has refcount on manager
+        CPlayerIterator playerIterator;
+        CPlayerIterator *playerIter=&playerIterator;
         CPlayer *pPlayer = playerIter->GetFirst((CPlayerManager *)GetPlayerManager());
         for (; pPlayer; pPlayer = playerIter->GetNext())
             pPlayer->RemoveAllObjects();
-        delete playerIter;
+    
     }
     // Destroy map objects
     ASSERT(mapObjects.GetCount() == staticObjs.GetCount() + dynamicObjs.GetCount());
@@ -328,13 +405,10 @@ void CWorldServer::RemoveEverything()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Clear()
 {
-    if (!detachedSave) {
-        ModCampReferences::ResetWorld();
-        fieldCampSnapshots.clear();
-        fieldCampArmed = fieldCampInCamp = false;
-        fieldCampReturnHeroId = -1;
-        fieldCampCommerceVars = nullptr;
-    }
+    // Camp state belongs to this world, including after it has been adopted.
+    ModCampReferences::Reset(fieldCamp->pending);
+    fieldCamp->snapshots.clear();fieldCamp->armed=fieldCamp->inCamp=false;
+    fieldCamp->returnHeroId=-1;fieldCamp->commerceVars=nullptr;fieldCamp->commerce=false;
     RemoveEverything();
     szZoneFileName = "";
     // clear other objects
@@ -1379,7 +1453,7 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
                                     const CQuaternion rot, SDeployPlayerInfo *pInfo)
 {
     int i, k;
-    const bool fieldCampReturn = fieldCampInCamp;
+    const bool fieldCampReturn = fieldCamp->inCamp;
     if(fieldCampReturn)if(auto* mod=ModRuntime::Current())mod->InvalidateInfoStatsCache();
     if (fieldCampReturn) {
         for (i = 0; i < people.GetSize(); ++i) ZeroFieldCampPersonage(*people[i]);
@@ -1575,11 +1649,11 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
         script.LoadText(szAddToScript);
     if (fieldCampReturn) {
         if (ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCampRebindScriptReferences"))
-            ModCampReferences::RestoreWorld(*this);
-        ModCampReferences::ResetWorld();
-        bool restored = !fieldCampSnapshots.empty();
-        for (i = 0; i < static_cast<int>(fieldCampSnapshots.size()); ++i) {
-            const SFieldCampSnapshot &snapshot = fieldCampSnapshots[i];
+            ModCampReferences::RestoreWorld(fieldCamp->pending,*this);
+        ModCampReferences::Reset(fieldCamp->pending);
+        bool restored = !fieldCamp->snapshots.empty();
+        for (i = 0; i < static_cast<int>(fieldCamp->snapshots.size()); ++i) {
+            const SFieldCampSnapshot &snapshot = fieldCamp->snapshots[i];
             CUnit *unit = GetUnit(snapshot.id);
             CUnitServer *unitServer = unit && unit->GetUnitSpecific() && unit->GetUnitSpecific()->WhoAmI() == HPC_UNITSERVERSPECIFIC
                 ? static_cast<CUnitServer *>(unit->GetUnitSpecific()) : nullptr;
@@ -1598,13 +1672,13 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
             unit->SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
             unit->SetUpdated();
         }
-        const int mainHeroId = fieldCampSnapshots.empty() ? -1 : fieldCampSnapshots.front().id;
-        for (const SFieldCampSnapshot &snapshot : fieldCampSnapshots)
+        const int mainHeroId = fieldCamp->snapshots.empty() ? -1 : fieldCamp->snapshots.front().id;
+        for (const SFieldCampSnapshot &snapshot : fieldCamp->snapshots)
             SynchronizeFieldCampUnitEnergy(GetUnit(snapshot.id));
-        fieldCampReturnHeroId = mainHeroId;
-        fieldCampSnapshots.clear();
-        fieldCampInCamp = false;
-        if (!restored) fieldCampArmed = false;
+        fieldCamp->returnHeroId = mainHeroId;
+        fieldCamp->snapshots.clear();
+        fieldCamp->inCamp = false;
+        if (!restored) fieldCamp->armed = false;
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1631,34 +1705,34 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
     // RemovePlayerParty has already moved server items to the wagon. Clear the
     // retained client's old item IDs through the ordinary ordered packet stream.
     CModPackage *campMod = ModRuntime::Current();
-    if (fieldCampArmed && this == &theWorldServer && campMod && campMod->CombatSetting("JMVGoCamp")) {
+    if (fieldCamp->armed && this == &theWorldServer && campMod && campMod->CombatSetting("JMVGoCamp")) {
         CPlayer *player = GetPlayer(0);
         CPlayerServer *server = player ? dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
         if (server && &player->party == pParty && player->curInterface == IFACE_CAMP && player->items.IsEmpty())
             server->RemoveAllHoover();
     }
-    if (fieldCampArmed) {
-        fieldCampSnapshots.clear();
+    if (fieldCamp->armed) {
+        fieldCamp->snapshots.clear();
         for (int index = 0; index < people.GetSize(); ++index) {
             CPersonage &personage = *people[index];
             CUnit *unit = GetUnit(personage.nID);
             CUnitServer *unitServer = unit && unit->GetUnitSpecific() && unit->GetUnitSpecific()->WhoAmI() == HPC_UNITSERVERSPECIFIC
                 ? static_cast<CUnitServer *>(unit->GetUnitSpecific()) : nullptr;
             CMapObjectServer *commonServer = unitServer ? unitServer->GetMapObjectServer() : nullptr;
-            if (!unit || unit->IsDead() || !unitServer || !commonServer) { fieldCampSnapshots.clear(); fieldCampArmed = false; break; }
+            if (!unit || unit->IsDead() || !unitServer || !commonServer) { fieldCamp->snapshots.clear(); fieldCamp->armed = false; break; }
             SFieldCampSnapshot snapshot = {};
-            snapshot.id = personage.nID;
+            snapshot.id = personage.nID; snapshot.identity=unit->GetRTID();
             snapshot.hp = commonServer->GetCurrentHP();
             snapshot.mp = commonServer->GetCurrentMP();
             for (int hit = 0; hit < RPG_NUM_HIT_LOCATIONS; ++hit) snapshot.hitLocations[hit] = unitServer->GetRPGStats()->hls[hit];
-            fieldCampSnapshots.push_back(snapshot);
+            fieldCamp->snapshots.push_back(snapshot);
         }
-        if (fieldCampSnapshots.size() != static_cast<size_t>(people.GetSize())) { fieldCampSnapshots.clear(); fieldCampArmed = false; }
-        if (fieldCampArmed && ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCampRebindScriptReferences")) {
+        if (fieldCamp->snapshots.size() != static_cast<size_t>(people.GetSize())) { fieldCamp->snapshots.clear(); fieldCamp->armed = false; }
+        if (fieldCamp->armed && ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGoCampRebindScriptReferences")) {
             std::vector<int> ids;
-            for (const auto& snapshot : fieldCampSnapshots) ids.push_back(snapshot.id);
-            ModCampReferences::CaptureWorld(*this,ids);
-        } else ModCampReferences::ResetWorld();
+            for (const auto& snapshot : fieldCamp->snapshots) ids.push_back(snapshot.id);
+            ModCampReferences::CaptureWorld(fieldCamp->pending,*this,ids);
+        } else ModCampReferences::Reset(fieldCamp->pending);
     }
     int i, k;
     // store follow info
@@ -1750,10 +1824,10 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
                 pUnit->SetOwner(0);
         }
     }
-    if (fieldCampArmed && fieldCampSnapshots.size() == static_cast<size_t>(people.GetSize())) {
-        for (i = 0; i < people.GetSize(); ++i) if (const SFieldCampSnapshot *snapshot = FindFieldCampSnapshot((*people[i]).nID)) RestoreFieldCampHitLocations((*people[i]).stats, *snapshot);
-        fieldCampArmed = false;
-        fieldCampInCamp = true;
+    if (fieldCamp->armed && fieldCamp->snapshots.size() == static_cast<size_t>(people.GetSize())) {
+        for (i = 0; i < people.GetSize(); ++i) if (const SFieldCampSnapshot *snapshot = FindFieldCampSnapshot(fieldCamp->snapshots, (*people[i]).nID)) RestoreFieldCampHitLocations((*people[i]).stats, *snapshot);
+        fieldCamp->armed = false;
+        fieldCamp->inCamp = true;
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -3048,7 +3122,7 @@ bool CWorldServer::CanBeginFieldCamp()
     CModPackage *mod = ModRuntime::Current();
     if (!mod || !mod->CombatSetting("JMVGoCamp")) return availability(false, "feature-off");
     if (!IsMapLoaded() || curInterface != IFACE_MISSION) return availability(false, "mission-unavailable");
-    if (fieldCampArmed || fieldCampInCamp || fieldCampReturnHeroId >= 0) return availability(false, "transition-active");
+    if (fieldCamp->armed || fieldCamp->inCamp || fieldCamp->returnHeroId >= 0) return availability(false, "transition-active");
     CPlayer *player = const_cast<CWorldServer *>(this)->GetPlayer(0);
     CPlayerServer *playerServer = player ? dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()) : nullptr;
     if (!player || !playerServer) return availability(false, "player-unavailable");
@@ -3085,30 +3159,30 @@ bool CWorldServer::CanBeginFieldCamp()
 bool CWorldServer::BeginFieldCamp()
 {
     if (!CanBeginFieldCamp()) return false;
-    ModCampReferences::ResetWorld();
-    fieldCampSnapshots.clear();
-    fieldCampArmed = true;
+    ModCampReferences::Reset(fieldCamp->pending);
+    fieldCamp->snapshots.clear();
+    fieldCamp->armed = true;
     return true;
 }
-int CWorldServer::FieldCampReturnHeroID() const { return fieldCampReturnHeroId; }
-bool CWorldServer::IsFieldCampPending() const { return fieldCampArmed || fieldCampInCamp || fieldCampReturnHeroId >= 0; }
-bool CWorldServer::IsInFieldCamp() const { return fieldCampInCamp; }
-void CWorldServer::CompleteFieldCampReturn() { fieldCampReturnHeroId = -1; theCamera.DiscardFieldCampCamera(); }
+int CWorldServer::FieldCampReturnHeroID() const { return fieldCamp->returnHeroId; }
+bool CWorldServer::IsFieldCampPending() const { return fieldCamp->armed || fieldCamp->inCamp || fieldCamp->returnHeroId >= 0; }
+bool CWorldServer::IsInFieldCamp() const { return fieldCamp->inCamp; }
+void CWorldServer::CompleteFieldCampReturn() { fieldCamp->returnHeroId = -1; theCamera.DiscardFieldCampCamera(); }
 bool CWorldServer::BeginFieldCampCommerceSuppression()
 {
     GameJournal::Source journalSource("engine.field_camp_suppression");
     CModPackage *mod = ModRuntime::Current();
     CPlayerClient *player = IWorldClient.GetPlayer();
-    if (!fieldCampInCamp || !mod || !mod->CombatSetting("JMVGoCamp") || !player || fieldCampCommerceVars) return false;
+    if (!fieldCamp->inCamp || !mod || !mod->CombatSetting("JMVGoCamp") || !player || fieldCamp->commerceVars) return false;
     static const char *names[6] = { "constr.current", "i.noconstr", "i.offspellconstr", "i.onspellconstr", "i.offitemconstr", "i.onitemconstr" };
     static const float values[6] = { 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f };
     CGSVariableSet &vars = IWorldClient.GetParty().vars;
-    fieldCampCommerceVars = &vars;
+    fieldCamp->commerceVars = &vars;
     for (int i = 0; i < 6; ++i) {
         auto found = vars.find(names[i]);
-        fieldCampCommerceValues[i].name = names[i];
-        fieldCampCommerceValues[i].existed = found != vars.end();
-        fieldCampCommerceValues[i].value = found != vars.end() ? found->second : 0.0f;
+        fieldCamp->commerceValues[i].name = names[i];
+        fieldCamp->commerceValues[i].existed = found != vars.end();
+        fieldCamp->commerceValues[i].value = found != vars.end() ? found->second : 0.0f;
         vars.SetVar(names[i], values[i]);
     }
     return true;
@@ -3116,17 +3190,17 @@ bool CWorldServer::BeginFieldCampCommerceSuppression()
 void CWorldServer::EndFieldCampCommerceSuppression(bool active)
 {
     GameJournal::Source journalSource("engine.field_camp_restore");
-    if (!active || !fieldCampCommerceVars) return;
+    if (!active || !fieldCamp->commerceVars) return;
     for (int i = 0; i < 6; ++i) {
-        const SFieldCampVarSnapshot &snapshot = fieldCampCommerceValues[i];
+        const SFieldCampVarSnapshot &snapshot = fieldCamp->commerceValues[i];
         // SetVar(0) deletes the key; preserve zero-valued keys loaded from saves.
         if (snapshot.existed) {
-            GameJournal::Variable(fieldCampCommerceVars, snapshot.name, fieldCampCommerceVars->find(snapshot.name) != fieldCampCommerceVars->end(), fieldCampCommerceVars->GetVar(snapshot.name), snapshot.value, false);
-            (*fieldCampCommerceVars)[snapshot.name] = snapshot.value;
+            GameJournal::Variable(fieldCamp->commerceVars, snapshot.name, fieldCamp->commerceVars->find(snapshot.name) != fieldCamp->commerceVars->end(), fieldCamp->commerceVars->GetVar(snapshot.name), snapshot.value, false);
+            (*fieldCamp->commerceVars)[snapshot.name] = snapshot.value;
         }
-        else fieldCampCommerceVars->DelVar(snapshot.name);
+        else fieldCamp->commerceVars->DelVar(snapshot.name);
     }
-    fieldCampCommerceVars = nullptr;
+    fieldCamp->commerceVars = nullptr;
 }
 CPlayer *CWorldServer::GetPlayer(int nPlayer)
 {

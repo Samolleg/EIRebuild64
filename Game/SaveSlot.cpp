@@ -91,10 +91,10 @@ struct InterfaceState {
             if(!tutorials.emplace(name,p).second)Invalid("duplicate tutorial");
         }
     }
-    void Apply() {
+    void Apply() noexcept {
         auto &v=theInterface;v.bInfoClosed=info;v.bTextClosed=text;v.bMapClosed=map;
         v.nInfoMode=infoMode;v.nTextMode=textMode;v.nSpeed=speed;
-        v.szLastMissionTutorial=tutorial;v.szLastReceivedQuest=quest;
+        std::swap(v.szLastMissionTutorial,tutorial);std::swap(v.szLastReceivedQuest,quest);
         v.nLastMissionTutorialPage=page;v.tutorials.swap(tutorials);
     }
 };
@@ -354,8 +354,10 @@ void Slot::PrepareWorld(Document &d)
             bool party=false;for(const auto &p:d.players)if(o.id==p.party.item||o.id==p.party.spell)party=true;
             if(party)continue;if(found)Invalid("duplicate zone manager");found=&o;}
         if(!found)Invalid("missing zone manager");
-        auto manager=ObjectIdentity::Create<T,CSmartPtr<T>>(found->id);
-        manager->AddRef();if(!static_cast<CBaseManager *>(static_cast<T *>(manager))->Create(world.get()))Invalid("cannot create staged manager");d.owners->Add(kind,std::shared_ptr<CBaseManager>(world,static_cast<T *>(manager)));return manager;
+        auto manager=ObjectIdentity::Create<T,std::unique_ptr<T>>(found->id);
+        manager->AddRef();
+        if(!static_cast<CBaseManager *>(manager.get())->Create(world.get()))Invalid("cannot create staged manager");
+        d.owners->Add(kind,std::shared_ptr<CBaseManager>(world,manager.get()));return manager.release();
     };
     world->pMapObjectManager=make(OwnerKind::Map,(CMapObjectManager *)nullptr);
     world->pSpecificManager=make(OwnerKind::ServerSpecific,(CServerSpecificManager *)nullptr);
@@ -420,6 +422,7 @@ void Slot::World(Writer &w,const CWorldServer &v)
     Count(w,changed.size());for(const auto &c:changed){w.UInt32(c.kind);w.UInt32(c.x);w.UInt32(c.y);
         for(auto weight:g.vertices[c.kind][c.y][c.x].nWeights)w.Int16(weight);
         w.UInt8(g.places[c.kind][c.y][c.x].nX);w.UInt8(g.places[c.kind][c.y][c.x].nY);w.UInt16(g.colors[c.kind][c.y][c.x]);}
+    v.StoreFieldCamp(w);
 }
 void Slot::World(Reader &r,CWorldServer &v)
 {
@@ -449,7 +452,7 @@ void Slot::World(Reader &r,CWorldServer &v)
         auto px=r.UInt8(),py=r.UInt8();if(px>15||py>15)Invalid("invalid graph node placement");
         g.places[k][y][x].nX=px;g.places[k][y][x].nY=py;g.colors[k][y][x]=r.UInt16();
     }
-    v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
+    v.LoadFieldCamp(r);v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
 }
 
 void Slot::FinalizeWorld(Document &d)
@@ -505,6 +508,8 @@ void Slot::CameraAdopt(const CCamera &camera)
     dst.qRotate=camera.qRotate;dst.fPitch=camera.fPitch;dst.fDistance=camera.fDistance;
     dst.scroll=camera.scroll;dst.rotate=camera.rotate;dst.pitch=camera.pitch;dst.zoom=camera.zoom;
     std::copy(std::begin(camera.shortcuts),std::end(camera.shortcuts),std::begin(dst.shortcuts));
+    if(camera.campPlacementValid)dst.campPlacement=camera.campPlacement;dst.campPlacementValid=camera.campPlacementValid;
+    dst.campEntered=camera.campEntered;dst.campTerrain=theWorld.GetTerrain();dst.campRequestTime=GetTickCount();
     dst.ResetAllFlags();dst.SetFlag(camera.GetFlags());
     if(camera.GetFlags()&CAM_FPS_MODE)dst.SetFPSMode(camera.dwCarrierID);else dst.SetCarrier(camera.dwCarrierID);
 }
@@ -515,76 +520,97 @@ void Slot::ApplyCamera()
 }
 void Slot::Commit(std::unique_ptr<State> state)
 {
-    CWorldServer *current=nullptr;
-    for(auto &d:state->zones)if(d.zone==state->current.c_str())current=d.world.get();
-    if(!current)Invalid("missing current zone");
+    Document *zone=nullptr;
+    for(auto &d:state->zones)if(d.zone==state->current.c_str())zone=&d;
+    if(!zone)Invalid("missing current zone");
+    auto *current=zone->world.get();auto *previous=&theWorldServer;
+    if(ObjectIdentity::RestoreNamespace::Active())Invalid("nested world publication");
     std::set<ObjectId> accepted;
     auto identity=[&](const Document &d){
         for(const auto &o:d.descriptions)if(!accepted.insert(o.id).second)Invalid("duplicate accepted owner identity");
         for(auto id:d.graph.Identities())if(!accepted.insert(id).second)Invalid("duplicate accepted object identity");
     };
     if(state->scenario.scenario)identity(state->scenario);
-    for(const auto &d:state->zones)if(d.world.get()==current)identity(d);
-    CPlayer *player=current->GetPlayer(0);
-    CPlayerServer *server=player?dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()):nullptr;
-    CPlayerClient *client=theWorld.GetPlayer();
+    identity(*zone);
+    auto *player=current->GetPlayer(0);
+    auto *server=player?dynamic_cast<CPlayerServer *>(player->GetPlayerSpecific()):nullptr;
+    auto *client=theWorld.GetPlayer();
+    auto *mod=ModRuntime::Current();if(!mod)Invalid("missing mod at saved-world preparation");
     CPtr<CLocalConnection> clientConnection;
-    CPtr<CConnection> serverConnection;
+    CPtr<CConnection> serverConnection,oldConnection;
+    std::unique_ptr<CParty> clientParty;
+    // Preparation is reversible: no live disconnect, screen destruction,
+    // namespace publication or world ownership changes occur in this scope.
     {
         ObjectIdentity::RestoreNamespace preparation(state->next);
+        SavedWorldScope lookups(current);
+        struct RandomGuard { RandomState before=RandomState::Capture();~RandomGuard(){before.Apply();} } randomGuard;
+        state->random.Apply();
+        for(POSITION p=current->spells.GetHeadPosition();p;)
+            current->spells.GetNext(p)->AdoptSavedState(*current);
+        mod->PrepareSaveState(zone->mod,state->zoneOnly?WorldLoadOrigin::ZoneEntry:WorldLoadOrigin::SavedGame,[&](){
         if(!state->zoneOnly){
             if(!player||!server||!client)Invalid("local restored player specifics missing");
             if(current->GetPlayerManager()->GetNumElements()!=1)Invalid("slot must contain exactly one local player");
-            CLocalNetDriver driver;
-            clientConnection=driver.Connect(current->GetLocalNetDriver());
+            CPtr<CLocalNetDriver> driver=new CLocalNetDriver;clientConnection=driver->Connect(current->GetLocalNetDriver());
             CConnectionsList connections;current->GetLocalNetDriver()->GetNewPlayers(connections);
-            if(!clientConnection.IsValid()||connections.GetCount()!=1)Invalid("cannot prepare local connection");
-            serverConnection=connections.GetHead();
-        }
-        // Danger mapping targets only the fully decoded staged AI map.
-        for(auto &d:state->zones)if(d.world.get()==current)
-            for(POSITION p=current->spells.GetHeadPosition();p;)current->spells.GetNext(p)->AdoptSavedState(*current);
+            if(!clientConnection||connections.GetCount()!=1)Invalid("cannot prepare local connection");
+            serverConnection=connections.GetHead();player->pConnection=serverConnection;
+            server->status=CPlayerServer::PSS_ACTIVE;
+            clientParty=std::make_unique<CParty>();CopyParty(*clientParty,player->party);
+            player->SetChanged(DW_PCHANGED_EVERYTHING);
+            if(current->bMapLoaded&&!current->SendNewZoneToPlayer(player))Invalid("cannot prepare new-zone update");
+            const int savedCounter=server->nStorePartyCounter;
+            server->SendParty();server->nStorePartyCounter=savedCounter;server->SendNewInterface();
+            oldConnection=client->GetPlayer()->pConnection;
+        } else {current->serverMode=SERV_MODE_NONE;current->bCanRunScript=FALSE;} });
         state->next=ObjectIdentity::GetNext();
     }
-    // Every document/root/resource has been decoded before this boundary.
-    // Old connections must disconnect while global access still names the old world.
-    IWorldClient.StopAllSounds();theWorld.Disconnect();
-    if(!active){
-        ObjectIdentity::RestoreNamespace cleanup(state->next);
-        theWorldServer.Destroy();theWorldServer.detachedSave=true;
-        state->next=ObjectIdentity::GetNext();
-    }
-    theInterface.SetScreensMustDie();theInterface.DestroyScreens();
-    // Retire previous graph roots with detached cleanup, never with references
-    // interpreted against the newly published world.
-    if(active)for(auto &d:active->zones)if(d.world){d.world->script.detachedSaveState=true;d.world->scriptTemp.detachedSaveState=true;}
-    if(state->scenario.scenario) PublishGlobalHat(state->scenario.scenario.get());
-    else if(active) state->scenario=std::move(active->scenario);
+    // No callbacks or allocation beyond this point. Retained owners, old
+    // connection and old client party are released only after the whole exchange.
+    previous->detachedSave=true;previous->script.detachedSaveState=true;previous->scriptTemp.detachedSaveState=true;
+    if(state->scenario.scenario)PublishGlobalHat(state->scenario.scenario.get());
+    else if(active)state->scenario=std::move(active->scenario);
     PublishWorldServer(current);
-    for(auto &d:state->zones){
-        if(d.world.get()!=current)continue;
-        d.world->script.AdoptSaveState();d.world->scriptTemp.AdoptSaveState();
-        if(d.world.get()==current)d.graph.Adopt();
-    }
+    current->script.AdoptSaveState();current->scriptTemp.AdoptSaveState();zone->graph.Adopt();
     if(state->scenario.scenario)state->scenario.graph.Adopt();
     ObjectIdentity::RestoreNamespace::Publish(state->next);
-    state->random.Apply();if(state->fullSlot)state->uiState.Apply();
+    mod->AdoptSaveState(zone->mod);
+    if(clientParty){
+        client->GetPlayer()->party.SwapSavedState(*clientParty);
+        client->AdoptSavedConnection(clientConnection.GetPtr());
+        current->BindSavedCampParty(client->GetPlayer()->party);
+    }
+
+    state->random.Apply();theInterface.SetScreensMustDie();
     auto old=std::move(active);active=std::move(state);visited.swap(active->files);
-    {ObjectIdentity::RestoreNamespace cleanup(active->next);old.reset();}
-    if(auto *mod=ModRuntime::Current()){mod->SuccessfulWorldLoad(active->zoneOnly?WorldLoadOrigin::ZoneEntry:WorldLoadOrigin::SavedGame);for(auto &d:active->zones)if(d.world.get()==current)mod->AdoptSaveState(d.mod);}
-    active->random.Apply();
-    if(active->zoneOnly){current->serverMode=SERV_MODE_NONE;current->bCanRunScript=FALSE;return;}
-    if(player){
-        theWorld.StopNetDrivers();theWorld.SetNewConnection(clientConnection.GetPtr());
-        player->pConnection=serverConnection;
-        server->status=CPlayerServer::PSS_ACTIVE;client->status=CPlayerClient::CPS_ACTIVE;
-        client->bSendParty=false;CopyParty(client->GetPlayer()->party,player->party);
-        player->SetChanged(DW_PCHANGED_EVERYTHING);
-        if(current->bMapLoaded)current->SendNewZoneToPlayer(player);
-        const int savedCounter=server->nStorePartyCounter;
-        server->SendParty();server->nStorePartyCounter=savedCounter;server->SendNewInterface();
-        active->random.Apply();
-    } else ApplyCamera();
+    // Retirement is outside the acceptance decision: never report a failed
+    // load after publication. Cleanup still sees its own former world.
+    {
+        SavedWorldScope cleanupLookups(previous);
+        ObjectIdentity::RestoreNamespace cleanup(active->next);
+        struct RandomGuard {RandomState before=RandomState::Capture();~RandomGuard(){before.Apply();}} randomGuard;
+        if(clientParty){
+            // Camp screen deactivation mutates its party and may allocate.
+            // Route it to the retained old party/connection, then discard its
+            // outgoing client commands before exposing the accepted stream.
+            client->GetPlayer()->party.SwapSavedState(*clientParty);
+            std::swap(client->GetPlayer()->pConnection,oldConnection);
+            theInterface.RetireSavedScreens();
+            std::swap(client->GetPlayer()->pConnection,oldConnection);
+            client->GetPlayer()->party.SwapSavedState(*clientParty);
+            client->AdoptSavedConnection(clientConnection.GetPtr());
+        }
+        if(oldConnection)oldConnection->Disconnect();
+        zone->mod.reset();clientParty.reset();
+        if(old)old.reset();
+        else try{previous->Destroy();}catch(CException *e){e->Delete();GameJournal::AllocationFailureInCatch("Save64 retirement");}
+             catch(...){GameJournal::AllocationFailureInCatch("Save64 retirement");}
+    }
+    if(active->fullSlot)active->uiState.Apply();
+    // Audio handles belong to the retired world. This is a non-throwing
+    // best-effort stop, after acceptance, never a reason to reject a staged slot.
+    try{IWorldClient.StopAllSounds();}catch(...){GameJournal::AllocationFailureInCatch("Save64 audio retirement");}
 }
 bool Slot::LoadWorld(CSave &file)
 {
@@ -637,7 +663,7 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
         CheckedName(name);auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         CMemorySave f;Buffer(f,bytes);Registry reg;Bytes info,image;
         auto graph=SaveSchema::Load(f,reg,[&](Reader &r){
-            if(r.String()!="EIRebuild64.slot.1")Invalid("unsupported slot root");
+            if(r.String()!="EIRebuild64.slot.2")Invalid("unsupported slot root");
             r.UInt64();r.String();r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
         },SlotLimits());
         CMemorySave metadata;Buffer(metadata,info);auto g=SaveSchema::Load(metadata,reg,[&](Reader &r){
@@ -678,7 +704,7 @@ bool Slot::Save(const char *name)
         }
         FILETIME time;GetSystemTimeAsFileTime(&time);const std::uint64_t generation=(std::uint64_t(time.dwHighDateTime)<<32)|time.dwLowDateTime;
         CMemorySave envelope;Registry meta;
-        SaveSchema::Store(envelope,meta,[&](Writer &w){w.String("EIRebuild64.slot.1");w.UInt64(generation);
+        SaveSchema::Store(envelope,meta,[&](Writer &w){w.String("EIRebuild64.slot.2");w.UInt64(generation);
             auto *mod=ModRuntime::Current();if(!mod)Invalid("slot requires loaded mod");w.String(mod->Directory());w.String(current);
             w.UInt64(Content(payload));w.Blob(payload);w.Blob(presentation);w.Blob(screenshot);
         },SlotLimits());
@@ -694,7 +720,7 @@ bool Slot::Load(const char *name)
         CheckedName(name);const auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         auto state=std::make_unique<State>();state->fullSlot=true;Bytes payload;Registry meta;CMemorySave f;Buffer(f,bytes);
         auto envelope=SaveSchema::Load(f,meta,[&](Reader &r){
-            if(r.String()!="EIRebuild64.slot.1")throw Error(ErrorCode::Incompatible,"Incompatible save");
+            if(r.String()!="EIRebuild64.slot.2")throw Error(ErrorCode::Incompatible,"Incompatible save");
             if(!r.UInt64())Invalid("invalid slot generation");auto mod=r.String();if(!ModRuntime::Current()||mod!=ModRuntime::Current()->Directory())Invalid("slot belongs to another mod");
             state->current=r.String();CheckedName(state->current.c_str());const auto content=r.UInt64();payload=r.Blob();
             if(Content(payload)!=content)Invalid("slot content mismatch");r.Blob();r.Blob();

@@ -149,7 +149,7 @@ private:
     CQuaternion falloutBaselineRotation;
     float falloutBaselinePitch = 0.0f;
     float falloutTelephotoMultiplier = 2.0f;
-    // Transient field-camp snapshot. Never written by Store/Load.
+    // Field-camp placement: value fields persist; terrain and uptime are rebound.
     struct CampPlacement
     {
         CPlot3D position, anchor;

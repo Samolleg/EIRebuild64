@@ -44,6 +44,9 @@ enum EPCSelectCmd
 class CPlayer : public CGameBase
 {
     friend class SaveSchema::Slot;
+    friend class CPlayerClient;
+    friend class CWorldServer;
+    bool retiringSave=false;
 public:
     enum EPathType
     {

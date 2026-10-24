@@ -123,6 +123,12 @@ void CPlayerClient::RemoveAllObjects()
 {
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+void CPlayerClient::AdoptSavedConnection(CConnection *connection) noexcept
+{
+    // NewConnection/Clear only empty existing buffers and reset the fixed-size
+    // compressors. There is no login, packet generation or resource work here.
+    Clear();pPlayer->pConnection=connection;status=CPS_ACTIVE;bSendParty=false;
+}
 void CPlayerClient::NewConnection()
 {
     Clear();

@@ -295,6 +295,17 @@ BOOL CParty::Create()
 {
     return CreateOwners(0, 0);
 }
+void CParty::SwapSavedState(CParty &other) noexcept
+{
+    people.Swap(other.people);allWagonItems.Swap(other.allWagonItems);
+    vars.swap(other.vars);std::swap(szCurrentZone,other.szCurrentZone);
+    std::swap(nMoney,other.nMoney);std::swap(nEntrance,other.nEntrance);
+    std::swap(pItemManager,other.pItemManager);std::swap(pSpellManager,other.pSpellManager);
+    std::swap(pItemConstructor,other.pItemConstructor);std::swap(pSpellConstructor,other.pSpellConstructor);
+    if(pItemManager)pItemManager->SetWorld(this);if(pSpellManager)pSpellManager->SetWorld(this);
+    if(other.pItemManager)other.pItemManager->SetWorld(&other);
+    if(other.pSpellManager)other.pSpellManager->SetWorld(&other);
+}
 BOOL CParty::CreateSavedOwners(ObjectId item, ObjectId spell)
 {
     if (!ObjectIdentity::RestoreNamespace::Active() || !item || !spell || item == spell || pItemManager || pSpellManager)

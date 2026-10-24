@@ -3,6 +3,7 @@
 #include "ObjectIdentity.h"
 #include <utility>
 #include <vector>
+#include <memory>
 /*==========================================================================================================
 
         Server class header
@@ -45,6 +46,11 @@ public:
 class CWorldServer : public CWorldBase
 {
     friend class SaveSchema::Slot;
+    struct FieldCampState;
+    std::shared_ptr<FieldCampState> fieldCamp;
+    void StoreFieldCamp(SaveSchema::Writer &) const;
+    void LoadFieldCamp(SaveSchema::Reader &);
+    void BindSavedCampParty(CParty &) noexcept;
 private:
     float fpNightPower;  // strength of night for current moment
     float fpVisionBonus; // multiplier of vision due to weather reasons
@@ -295,6 +301,14 @@ public:
     virtual EClassIDs WhoAmI() const { return HPC_WORLD_SERVER; }
 };
 /////////////////////////////////////////////////////////////////////////////////////
+// Simulation-thread lookup scope; publication remains unchanged during preparation.
+class SavedWorldScope {
+    CWorldServer *previous;
+public:
+    explicit SavedWorldScope(CWorldServer *) noexcept;
+    ~SavedWorldScope();
+    SavedWorldScope(const SavedWorldScope &)=delete;
+};
 CWorldServer &ActiveWorldServer();
 void PublishWorldServer(CWorldServer *) noexcept;
 #define theWorldServer (ActiveWorldServer())
