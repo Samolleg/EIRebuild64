@@ -8,6 +8,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "EffectManager.h"
 #include "ModSpellTextures.h"
 #include "SaveLoader.h"
+#include "DebugAlloc.h"
 // #include "World.h"
 
 #include <list>
@@ -363,7 +364,6 @@ LPGAMEBASE CBaseManager::FindType(ETypeIDs tidTypeID)
     return NULL;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void *__cdecl operator new(unsigned int uSize, const char *pszFileName, int nLineNumber);
 
 // BOOL CBaseManager::MoveToTrash( LPGAMEBASE lpData )
 // move data from main hash to trash one

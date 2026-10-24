@@ -147,10 +147,10 @@ void CUnit::Clear()
     //
     dwCurrentWeapon = DWORD(-1);
     rpgUserUnitStats.Clear();
-    MemSetDWord((DWORD *)lpQWeapons, 0, QI_MAX_WEAPONS);
-    MemSetDWord((DWORD *)lpQItems, 0, QI_MAX_ITEMS);
-    MemSetDWord((DWORD *)lpArmors, 0, RPG_NUM_ARMOR_TYPES);
-    MemSetDWord((DWORD *)lpQSpells, 0, QI_MAX_SPELLS);
+    std::fill_n(lpQWeapons, QI_MAX_WEAPONS, nullptr);
+    std::fill_n(lpQItems, QI_MAX_ITEMS, nullptr);
+    std::fill_n(lpArmors, RPG_NUM_ARMOR_TYPES, nullptr);
+    std::fill_n(lpQSpells, QI_MAX_SPELLS, nullptr);
     questItems.SetSize(0);
     //
     bNeedFastPath = FALSE;

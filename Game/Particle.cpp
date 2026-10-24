@@ -1990,7 +1990,7 @@ BOOL CParticle::TornadoSingleCreate(SSingleParticle *pSPart, int)
     pSPart->nLifeTime = 100 + random.Get(0, 8);
 
     float fpSH = h * (TORNADO_NUM_SOURCES - 1);
-    int nSrc = Min(Float2Int(fpSH), locSources.GetSize() - 2);
+    int nSrc = static_cast<int>(Min<INT_PTR>(Float2Int(fpSH), locSources.GetSize() - 2));
     float fpFraction = Min(1.0f, fpSH - nSrc);
     x = locSources[nSrc].respectCP.x * (1 - fpFraction) +
         locSources[nSrc + 1].respectCP.x * fpFraction;
@@ -2039,7 +2039,7 @@ BOOL CParticle::TornadoSingleSegment(SSingleParticle *pSPart)
         return FALSE;
 
     float fpSH = h * (TORNADO_NUM_SOURCES - 1);
-    int nSrc = Min((int)(fpSH), locSources.GetSize() - 2);
+    int nSrc = static_cast<int>(Min<INT_PTR>(static_cast<int>(fpSH), locSources.GetSize() - 2));
     float fpFraction = fpSH - nSrc;
     fpFraction = Min(1.0f, fpFraction);
     x = locSources[nSrc].respectCP.x * (1 - fpFraction) +

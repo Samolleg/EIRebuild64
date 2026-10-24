@@ -151,17 +151,17 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
 
     // absorption
     reg.GetFloatArray("DifficultyLevels", "Absorption", floats);
-    for (int i = 0; i < Min(floats.GetSize(), 3); ++i)
+    for (int i = 0; i < Min<INT_PTR>(floats.GetSize(), 3); ++i)
         fAbsorptionLevels[i] = floats[i];
     // attacks
     floats.RemoveAll();
     reg.GetFloatArray("DifficultyLevels", "Attack", floats);
-    for (int i = 0; i < Min(floats.GetSize(), 3); ++i)
+    for (int i = 0; i < Min<INT_PTR>(floats.GetSize(), 3); ++i)
         fAttackLevels[i] = floats[i];
     // defenses
     floats.RemoveAll();
     reg.GetFloatArray("DifficultyLevels", "Defence", floats);
-    for (int i = 0; i < Min(floats.GetSize(), 3); ++i)
+    for (int i = 0; i < Min<INT_PTR>(floats.GetSize(), 3); ++i)
         fDefenceLevels[i] = floats[i];
     bLoaded = true;
     EngineDiagnostics::Event("AI_SETTINGS source=%s ranged_run=%.3f ranged_attack=%.3f follow=%.3f/%.3f backstab=%.3f/%.3f",

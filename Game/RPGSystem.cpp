@@ -456,7 +456,7 @@ void SRPGArmorLayer::Clear()
     dwCrippleMask = 0;
     MemSetDWord((DWORD *)fpAbsorbtions, 0, RPG_NUM_ATTACK_TYPES);
     state = RPGALS_NOTUSED;
-    MemSetDWord((DWORD *)lpItems, 0, RPG_NUM_ARMORS_IN_HL);
+    std::fill_n(lpItems, RPG_NUM_ARMORS_IN_HL, nullptr);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //

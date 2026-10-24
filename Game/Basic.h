@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 /////////////////////////////////////////////////////////////////////////////////////
 class CStructureSaver;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -176,6 +177,7 @@ class CPtrBase
 {
 private:
     CFundament *ptr;
+    template <class T> friend struct CPtrFaker;
 
 protected:
     CFundament *Get() const { return ptr; }
@@ -260,6 +262,7 @@ public:
 class CObjBase
 {
     CObjectBase *ptr;
+    template <class T> friend struct CObjFaker;
 
 protected:
     void Free()
@@ -385,10 +388,10 @@ struct CObjFaker : public CObj<T>
 {
     CObjFaker(T *_pData)
     {
-        ASSERT(sizeof(*this) == 4);
-        *((void **)(this)) = _pData;
+        // Borrow only until the destination wrapper performs its normal copy.
+        this->ptr = _pData;
     }
-    ~CObjFaker() { *((void **)(this)) = 0; }
+    ~CObjFaker() { this->ptr = nullptr; }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 template <class T>
@@ -405,10 +408,10 @@ struct CPtrFaker : public CPtr<T>
 {
     CPtrFaker(T *_pData)
     {
-        ASSERT(sizeof(*this) == 4);
-        *((void **)(this)) = _pData;
+        // Borrow only until the destination wrapper performs its normal copy.
+        this->ptr = _pData;
     }
-    ~CPtrFaker() { *((void **)(this)) = 0; }
+    ~CPtrFaker() { this->ptr = nullptr; }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 template <class T>

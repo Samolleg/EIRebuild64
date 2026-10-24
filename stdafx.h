@@ -3,8 +3,9 @@
 // Don't include: afxv_w32.h: #error WINDOWS.H already included.  MFC apps must not #include
 // <Windows.h> #include <windows.h>
 
-// FIXME: fix old timestamp size
-#define _USE_32BIT_TIME_T 1
+// Native time_t is 64-bit; asset timestamps retain their explicit __time32_t.
+#include <cstddef>
+#include <cstdint>
 
 #include <afx.h>      // CFile, ...
 #include <afxtempl.h> // CList, ...
