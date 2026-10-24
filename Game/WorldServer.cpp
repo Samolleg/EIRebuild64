@@ -308,7 +308,10 @@ void CWorldServer::Destroy()
         pPlayer = playerIter->GetFirst((CPlayerManager *)GetPlayerManager());
         for (; pPlayer; pPlayer = playerIter->GetNext())
         {
-            if(detachedSave)pPlayer->retiringSave=true;
+            if(detachedSave){
+                pPlayer->retiringSave=true;
+                if(auto *specific=dynamic_cast<CPlayerServer *>(pPlayer->GetPlayerSpecific()))specific->RetireSavedWorld();
+            }
             pPlayer->Disconnect();
             ((CPlayerManager *)GetPlayerManager())->RemovePlayer(pPlayer);
         }

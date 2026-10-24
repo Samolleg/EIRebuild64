@@ -30,6 +30,7 @@ typedef unsigned ESPStatus;
 class CPlayerServer : public CPlayerSpecific
 {
     friend class SaveSchema::Slot;
+    bool retiringSavedWorld=false;
 public:
     enum EPServerStates
     {
@@ -128,6 +129,7 @@ public:
     void SetVarMax(const char *pszName, float fpVal);
     void DelVar(const char *pszName);
     void SendParty();
+    void RetireSavedWorld() noexcept { retiringSavedWorld=true; }
     void SendActiveItems();
     void SendPartyItems();
     void SendNewInterface();

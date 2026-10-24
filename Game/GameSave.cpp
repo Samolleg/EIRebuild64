@@ -1852,6 +1852,7 @@ void CPlayerServer::Load(SaveSchema::Reader &r)
 }
 void CPlayerServer::DiscardSave()
 {
+    RetireSavedWorld();
     addToVisible.Clear(); currentVisible.Clear();
     CPlayerSpecific::DiscardSave();
 }
