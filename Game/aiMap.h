@@ -452,6 +452,7 @@ public:
 // описание карты игры для ai
 class CAIMap
 {
+    friend class SaveSchema::Slot;
     bool bIsLoaded;
     bool bDelayedConvert;    // не преобразовывать проходимости
     bool bEnableGraphRecalc; // перестраивать граф при добавлении/уничтожении объектов

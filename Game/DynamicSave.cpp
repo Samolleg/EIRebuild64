@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "VoiceWaitState.h"
 #include "DynamicSave.h"
 #include "UnitServer.h"
 #include "WaterLevels.h"
@@ -1240,3 +1241,9 @@ void RegisterRemainingDynamicTypes(Registry &registry)
 
 }
 } // namespace SaveSchema
+
+void CScript::AdoptSaveState()
+{
+    for (POSITION p=runningThreads.GetHeadPosition();p;) VoiceWait::AfterLoad(runningThreads.GetNext(p).nSleepStart);
+    detachedSaveState=false;
+}

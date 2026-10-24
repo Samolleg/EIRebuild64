@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSlot.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -675,53 +676,16 @@ static BOOL SaveReadFailure(const char *fallback, const CSaveReadError &error)
     }
     return SaveLoadFailure(source, error.reason, error.offset, at);
 }
-static BOOL ApplyMission(CMemorySave &f)
-{
-    f.SetReadStage("CWorldServer::LoadSave/mission");
-    f.Seek(0);
-    if (f.GetVersion() < 82)
-    { f.SetReadStage("CCamera::Load"); theCamera.Load(f); }
-    if (f.GetVersion() < 71)
-    {
-        interfaceState.Clear();
-        f.SetReadStage("CInterface::Load");
-        theInterface.Load(f);
-        f.SetReadStage("Read/interfaceState");
-        f.Read(interfaceState);
-        interfaceState.SetVersion(f.GetVersion());
-    }
-    f.SetReadStage("CWorldServer::LoadSave/mission");
-    return theWorldServer.LoadSave(f, WorldLoadOrigin::SavedGame);
-}
+
 }
 BOOL CWorldConnector::LoadSave(CSave &file)
 {
-    CMemorySave f;
-    bool applying = false;
-    try
-    {
-        if (!DecompressTo(f, 0x102, N_CURRENT_SAVE_VERSION, N_CURRENT_MINIMAL_SAVE_VERSION, file))
-            return SaveLoadFailure("mission.sav", lastSaveError.reason, lastSaveError.offset);
-        f.SetStrictRead(true, "mission.sav", "CWorldServer::LoadSave/mission");
-        applying = true;
-        IWorldClient.StopAllSounds();
-        if (!ApplyMission(f)) throw CSaveReadError{"mission_apply_failed", f.GetPosition()};
-        return TRUE;
-    }
-    catch (const CSaveReadError &e)
-    { if (applying) GoMainMenu(); return SaveReadFailure("mission.sav", e); }
-    catch (CException *e)
-    { e->Delete(); if (applying) GoMainMenu(); return SaveLoadFailure("mission.sav", "file_or_memory_error", 0); }
-    catch (const std::bad_alloc &)
-    { if (applying) GoMainMenu(); return SaveLoadFailure("mission.sav", "allocation_failed", 0); }
+    return SaveSchema::Slot::LoadWorld(file);
 }
 //
 void CWorldConnector::StoreSave(CSave &file)
 {
-    CMemorySave f;
-    f.SetVersion(N_CURRENT_SAVE_VERSION);
-    theWorldServer.StoreSave(f);
-    CompressTo(file, 0x102, N_CURRENT_SAVE_VERSION, f);
+    SaveSchema::Slot::StoreWorld(file,theWorldServer);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // используется в movetozone, считывается зона при неподключенных плеерах
@@ -771,22 +735,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
         // check if we have to load zone from .mob or from save
         if (party.VisitedZone(szZone))
         {
-            szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-            CString szFileName = szZone + ".sav";
-            CMemorySave f;
-            if (!prepared)
-            {
-                if (!file.OpenRead(szCurrentPath + szFileName)) return FALSE;
-                if (!DecompressTo(f, 0x102, N_CURRENT_SAVE_VERSION, N_CURRENT_MINIMAL_SAVE_VERSION, file))
-                    return SaveLoadFailure(szCurrentPath + szFileName, lastSaveError.reason, lastSaveError.offset);
-                file.CloseFile();
-                prepared = &f;
-            }
-            if (!prepared->IsStrictRead())
-                prepared->SetStrictRead(true, static_cast<const char *>(szCurrentPath + szFileName));
-            prepared->SetReadStage("CWorldServer::LoadSave/zone");
-            prepared->Seek(0);
-            bRv = theWorldServer.LoadSave(*prepared, WorldLoadOrigin::ZoneEntry, pszSpecialTerrain);
+            bRv = SaveSchema::Slot::LoadZone(szZone);
             if (!bRv) return FALSE;
             // process world for some time that should pass on zone during us being absent
             if (party.nEntrance >= 0 && party.nEntrance < pZone->exits.GetSize())
@@ -852,36 +801,11 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::StoreZoneState(CParty &party)
 {
-    GameJournal::Operation journal("SAVE", "zone", party.szCurrentZone);
-    CFileSave file;
-    CString szCurrentPath;
-    CString szZone = theWorldServer.GetCurrentZoneName();
-
-    if (theWorldServer.curInterface == IFACE_MISSION)
-        theCamera.SetCurrentAsShortcut(7);
-    else if (theWorldServer.curInterface == IFACE_BASE)
-        theCamera.SetCurrentAsShortcut(6);
-    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-    szCurrentPath += szZone + ".sav";
-    if (auto* mod = ModRuntime::Current()) mod->SaveSkillCooldowns(party.vars);
-    if (!ModAnimationIdSave::PrepareSave(theWorldServer, party.vars))
-        return FALSE;
-    if (!file.OpenWrite(szCurrentPath))
-    {
-        ReportError("Can`t write to %s", (const char *)szCurrentPath);
-        return FALSE;
-    }
-    theWorldServer.HealAllUnits();
-    CMemorySave f;
-    f.SetVersion(N_CURRENT_SAVE_VERSION);
-    theWorldServer.StoreSave(f);
-    CompressTo(file, 0x102, N_CURRENT_SAVE_VERSION, f);
-    file.CloseFile();
-    party.SetVisitedZone(szZone);
-    // set time of leaving the zone
-    float fpCurTime = party.vars.GetVar(szPartyGlobalTimeVarName);
-    party.vars.SetVar(CString("zt.") + szZone, fpCurTime);
-    { journal.Result(true); return TRUE; }
+    const CString zone=theWorldServer.GetCurrentZoneName();
+    if (!SaveSchema::Slot::StoreZone(zone)) return FALSE;
+    party.SetVisitedZone(zone);
+    party.vars.SetVar(CString("zt.")+zone,party.vars.GetVar(szPartyGlobalTimeVarName));
+    return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void ClearDirectory(LPCTSTR pszPath)
@@ -899,251 +823,19 @@ void ClearDirectory(LPCTSTR pszPath)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::LoadGame(const char *pszSaveName)
 {
-    CorePerf::Operation coreOperation("save.load_game", pszSaveName);
-    GameJournal::Operation journal("LOAD", "game", pszSaveName);
-    if (theWorldServer.GetServerMode() == SERV_MODE_LMP ||
-        theWorldServer.GetServerMode() == SERV_MODE_MMP) return FALSE;
-    CString savePath, currentPath, failedPath;
-    savePath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSaveName);
-    currentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-    bool applying = false;
-    try
-    {
-        coreOperation.Stage("read_and_prepare");
-        PreparedSave scenario, mission;
-        std::vector<std::unique_ptr<PreparedSave>> zones;
-        failedPath = savePath + "scenario.sav";
-        if (!PrepareSave(scenario, failedPath, 0xDEAD))
-            return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
-        // Deserialize into a private hat to select the exact set of used files.
-        CGlobalHat candidate;
-        scenario.payload.SetReadStage("CGlobalHat::Load/candidate");
-        candidate.Load(scenario.payload);
-        auto &partySet = candidate.GetSinglePlayerPartySet();
-        for (const auto &entry : partySet.parties)
-            if (!entry) throw CSaveReadError{"null_party_reference", scenario.payload.GetPosition()};
-        if (!partySet.GetParty(partySet.szCurrentParty))
-            throw CSaveReadError{"missing_current_party", scenario.payload.GetPosition()};
-        CParty party;
-        candidate.GetSinglePlayerParty(party);
-        SScenarioZone *zone = theMap.GetZoneByName(party.szCurrentZone);
-        if (!zone) throw CSaveReadError{"unknown_party_zone", scenario.payload.GetPosition()};
-        CString allod = zone->szAllodName;
-        for (int i = 0; i < theMap.GetZoneNum(); ++i)
-        {
-            SScenarioZone *visited = theMap.GetZone(i);
-            if (!party.VisitedZone(visited->szName) || !IsToBeStored(allod, visited)) continue;
-            auto prepared = std::make_unique<PreparedSave>();
-            failedPath = savePath + visited->szName + ".sav";
-            const auto result = PrepareOptionalSave(*prepared, failedPath);
-            if (result == PreparedSave::Result::Missing)
-            {
-                party.ResetVisitedZone(visited->szName);
-                MissingSave(failedPath, "zone_missing");
-                continue;
-            }
-            if (result == PreparedSave::Result::Failed)
-                return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
-            zones.push_back(std::move(prepared));
-        }
-        bool hasMission = zone->eType == GM_REALZONE || zone->eType == GM_BASE;
-        if (hasMission)
-        {
-            failedPath = savePath + "mission.sav";
-            const auto result = PrepareOptionalSave(mission, failedPath);
-            if (result == PreparedSave::Result::Missing)
-            { MissingSave(failedPath, "mission_missing"); return FALSE; }
-            if (result == PreparedSave::Result::Failed)
-                return SaveLoadFailure(failedPath, lastSaveError.reason, lastSaveError.offset);
-        }
-        // Stage B starts here. Nothing above clears current or changes the live world.
-        coreOperation.Stage("prepare_world");
-        failedPath = "stage=prepare_world";
-        applying = true;
-        GameJournal::CombatBoundary("saved_game");
-        NConsole::RunAutoExec("exec autoexec.cfg");
-        theCursor.SetMode(CT_WAIT);
-        theInterface.SetScreensMustDie();
-        theInterface.DestroyScreens();
-        theWorldServer.RemoveEverythingDynamic();
-        IWorldClient.StopAllSounds();
-        LMPReloadDatabases(IsLMP());
-        ConnectLocalServer();
-        failedPath = "stage=start_server";
-        theWorldServer.StartServer(SERV_MODE_LOCAL);
-        coreOperation.Stage("initial_segments");
-        failedPath = "stage=initial_segments";
-        theWorld.Segment(); theWorldServer.Segment();
-        theWorld.Segment(); theWorldServer.Segment();
-        coreOperation.Stage("restore_state_and_files");
-        failedPath = "stage=clear_current";
-        ClearDirectory(currentPath);
-        failedPath = scenario.path;
-        scenario.payload.Seek(0);
-        scenario.payload.SetReadStage("CGlobalHat::Load/live");
-        theHat.Load(scenario.payload);
-        if (scenario.payload.GetVersion() >= 71)
-        {
-            interfaceState.Clear();
-            scenario.payload.SetReadStage("CInterface::Load");
-            theInterface.Load(scenario.payload);
-            scenario.payload.SetReadStage("Read/interfaceState");
-            scenario.payload.Read(interfaceState);
-            interfaceState.SetVersion(scenario.payload.GetVersion());
-        }
-        if (scenario.payload.GetVersion() >= 82)
-        { scenario.payload.SetReadStage("CCamera::Load"); theCamera.Load(scenario.payload); }
-        for (const auto &prepared : zones)
-        {
-            failedPath = prepared->path;
-            CString name = prepared->path.Mid(savePath.GetLength());
-            CFileSave destination;
-            if (!destination.OpenWrite(currentPath + name))
-                throw CSaveReadError{"copy_zone_failed", 0};
-            destination.Write(prepared->raw.GetBuffer(), prepared->raw.GetSize());
-            destination.CloseFile();
-        }
-        for (int i = 0; i < theMap.GetZoneNum(); ++i)
-        {
-            SScenarioZone *visited = theMap.GetZone(i);
-            if (!IsToBeStored(allod, visited)) party.ResetVisitedZone(visited->szName);
-        }
-        theHat.SetSinglePlayerParty(party);
-        coreOperation.Stage("apply_world");
-        if (hasMission)
-        {
-            failedPath = mission.path;
-            if (!ApplyMission(mission.payload))
-                throw CSaveReadError{"mission_apply_failed", mission.payload.GetPosition()};
-            theWorldServer.SetExits(zone->exits);
-        }
-        else
-        {
-            failedPath = "stage=move_to_zone";
-            // MoveToZone already reports its own precise payload/stage failure.
-            if (!MoveToZone(party.szCurrentZone)) return FALSE;
-        }
-        NConsole::game << "Loaded " << pszSaveName << endl;
-        coreOperation.Result(true);
-        journal.Result(true);
-        return TRUE;
-    }
-    catch (const CSaveReadError &e)
-    {
-        if (applying) GoMainMenu();
-        return SaveReadFailure(failedPath, e);
-    }
-    catch (CException *e)
-    {
-        e->Delete();
-        if (applying) GoMainMenu();
-        return SaveLoadFailure(failedPath, "file_or_memory_error", 0);
-    }
-    catch (const std::bad_alloc &)
-    {
-        if (applying) GoMainMenu();
-        return SaveLoadFailure(failedPath, "allocation_failed", 0);
-    }
+    return SaveSchema::Slot::Load(pszSaveName);
 }
 //
 BOOL CWorldConnector::SaveGame(const char *pszSaveName)
 {
-    GameJournal::Event("SAVE", "kind", "source=%s name=%s", GameJournal::CurrentSource(), GameJournal::Quote(pszSaveName).c_str());
-    GameJournal::Operation journal("SAVE", "game", pszSaveName);
-    // store current game state and copy files to specified path
-    int i;
-    CFileSave file;
-    SScenarioZone *pZone;
-    CString szTmp;
-    CString szSavePath;
-    CString szCurrentPath;
-
-    if (theWorldServer.GetServerMode() != SERV_MODE_LOCAL)
-        return FALSE;
-    theCursor.SetMode(CT_WAIT);
-    szSavePath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSaveName);
-    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-    // check directory existing
-    // clear directory
-    ClearDirectory(szSavePath);
-    // some cheat for saving party when player is on global map, because server`s state is not
-    // stored in the case, single player only
-    // correct decision is to store worldserver when on global map too
-    if (theWorldServer.curInterface == IFACE_GLOBAL_MAP)
-    {
-        CPlayer *pPlayer = theWorldServer.GetPlayer(0);
-        ASSERT(pPlayer);
-        if (pPlayer)
-            theHat.SetSinglePlayerParty(pPlayer->party);
-    }
-    //
-    CParty party;
-    theHat.GetSinglePlayerParty(party);
-    if (auto* mod = ModRuntime::Current()) mod->SaveSkillCooldowns(party.vars);
-    if (!ModAnimationIdSave::PrepareSave(theWorldServer, party.vars))
-        return FALSE;
-    //
-    // copy zone saves from current to save
-    CString szCurrentAllod;
-    szCurrentAllod = theMap.GetZoneByName(party.szCurrentZone)->szAllodName;
-    for (i = 0; i < theMap.GetZoneNum(); i++)
-    {
-        pZone = theMap.GetZone(i);
-        if (party.VisitedZone(pZone->szName) && IsToBeStored(szCurrentAllod, pZone))
-        {
-            szTmp = pZone->szName;
-            if (!CopyFile(szCurrentPath + szTmp + ".sav", szSavePath + szTmp + ".sav", FALSE))
-                party.ResetVisitedZone(pZone->szName);
-        }
-        else
-            party.ResetVisitedZone(pZone->szName);
-    }
-    theHat.SetSinglePlayerParty(party);
-    //
-    // scenario saving
-    if (!file.OpenWrite(szSavePath + "scenario.sav"))
-    {
-        GoMainMenu();
-        return FALSE;
-    }
-    CMemorySave f;
-    f.SetVersion(N_CURRENT_SAVE_VERSION);
-    theHat.Store(f);
-    // interface vars saving
-    theInterface.Store(f);
-    interfaceState.Clear();
-    theInterface.StoreSpecific();
-    f.Write(interfaceState);
-    interfaceState.Clear();
-    // camera storing
-    theCamera.Store(f);
-    //
-    CompressTo(file, 0xDEAD, N_CURRENT_SAVE_VERSION, f);
-    //
-    file.CloseFile();
-    //
-    // store current zone
-    pZone = theMap.GetZoneByName(party.szCurrentZone);
-    if (pZone->eType == GM_REALZONE || pZone->eType == GM_BASE)
-    {
-        ASSERT(theWorldServer.IsMapLoaded());
-        // store current zone
-        if (!file.OpenWrite(szSavePath + "mission.sav"))
-            return FALSE;
-        StoreSave(file);
-        file.CloseFile();
-    }
-
-    theCursor.SetMode(CT_DEFAULT);
-    NConsole::game << "Saved " << pszSaveName << endl;
-    { journal.Result(true); return TRUE; }
+    return SaveSchema::Slot::Save(pszSaveName);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 int CWorldConnector::GetSaveSize()
 {
     CFileFind find;
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\*.*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
+    szCurrentPath.Format("%sSaves64\\current\\*.*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     BOOL bFind = find.FindFile(szCurrentPath);
     int nRes = 1000000; // this should be enough for single zone
     while (bFind)
@@ -1168,10 +860,11 @@ void CWorldConnector::NewGame()
     NConsole::RunAutoExec("exec autoexec.cfg");
     theInterface.SetScreensMustDie();
     // lets start a new game
+    SaveSchema::Slot::NewGame();
     theHat.NewSingleGame();
     // clear directory with current saves
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
+    szCurrentPath.Format("%sSaves64\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     ClearDirectory(szCurrentPath);
     // fetch party
     CParty party;
@@ -1189,7 +882,7 @@ BOOL CWorldConnector::StartServer(const char *pszZone)
         return FALSE;
 
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
+    szCurrentPath.Format("%sSaves64\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     PreparedSave prepared;
     prepared.path = szCurrentPath + pszZone + ".sav";
     CString failedPath = prepared.path;
@@ -1279,17 +972,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
             SScenarioZone *target = theMap.GetZoneByName(pszZoneName);
             if (target && target->szTerrainName != "" && targetParty.VisitedZone(pszZoneName))
             {
-                CString path;
-                path.Format("%ssaves\\current\\%s.sav", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszZoneName);
-                failedPath = path;
-                const auto result = PrepareOptionalSave(prepared, path);
-                // Legacy MoveToZone/LoadZoneState returns false for an absent
-                // visited-zone state; it does not invent a replacement world.
-                if (result == PreparedSave::Result::Missing)
-                { MissingSave(path, "zone_missing"); return FALSE; }
-                if (result == PreparedSave::Result::Failed)
-                    return SaveLoadFailure(path, lastSaveError.reason, lastSaveError.offset);
-                havePrepared = true;
+                if (!SaveSchema::Slot::HasZone(pszZoneName)) return FALSE;
             }
         }
         coreOperation.Stage("release_and_previous_save");
@@ -1584,7 +1267,7 @@ void CWorldConnector::LMPConnectAbort()
 void CWorldConnector::SelectLMPZone(const char *pszZone)
 {
     CString szCurrentPath;
-    szCurrentPath.Format("%ssaves\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
+    szCurrentPath.Format("%sSaves64\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     // clear directory current dir
     ClearDirectory(szCurrentPath);
     //

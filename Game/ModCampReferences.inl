@@ -31,8 +31,6 @@ struct WorldAccess {
  void Set(const View& v,int index,Token object){Vars(v).oVars[index].SetObject(reinterpret_cast<CMapObject*>(object));}
  void Add(const View& v,int index,Token object){Vars(v).gVars[index].Add(reinterpret_cast<CMapObject*>(object));}
 };
-static Pending pending;
-inline void ResetWorld(){Reset(pending);}
-inline bool CaptureWorld(CWorldServer& world,const std::vector<int>& ids){WorldAccess context{world};return Capture(pending,context,ids);}
-inline void RestoreWorld(CWorldServer& world){WorldAccess context{world};Restore(pending,context);}
+inline bool CaptureWorld(Pending& pending,CWorldServer& world,const std::vector<int>& ids){WorldAccess context{world};return Capture(pending,context,ids);}
+inline void RestoreWorld(Pending& pending,CWorldServer& world){WorldAccess context{world};Restore(pending,context);}
 }

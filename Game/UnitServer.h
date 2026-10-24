@@ -370,6 +370,7 @@ typedef void (*ServerAnimationSwitchCallback)(CUnit *pUnit);
 /////////////////////////////////////////////////////////////////////////////////////
 class CUnitServer : public CUnitSpecific
 {
+    friend class CModPackage;
     friend class CUnit;
 
 private:

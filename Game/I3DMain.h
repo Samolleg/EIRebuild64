@@ -132,6 +132,7 @@ public:
     void DoModal(CI3DScreen *pScreen, bool bSaveBack = true, bool bGrayBack = true);
     void ExitFromModal(DWORD dwRetValue = 0);
     void DestroyScreens();
+    void RetireSavedScreens() noexcept;
     void SetScreensMustDie() { bScreensMustDie = true; }
     void CheckScreensMustDie();
     CI3DScreen *GetCurrentScreen();

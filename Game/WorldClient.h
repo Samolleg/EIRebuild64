@@ -107,6 +107,7 @@ class CEffectMoshka;
 /////////////////////////////////////////////////////////////////////////////////////
 class CWorldClient : public CWorldBase
 {
+    friend class SaveSchema::Slot;
     typedef std::list<CMapObject *> CMapObjectPtrList;
     typedef CList<CMapObject *, CMapObject *> CMapObjectsList;
     typedef CHashMap<int, POSITION> CPositionMap;

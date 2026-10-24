@@ -183,14 +183,15 @@ void CWorldBase::Destroy()
     if (GetSpellManager())
     {
         {
-            CManagerIterator *spellIter = dbgnew CManagerIterator;
+            CManagerIterator spellIterator;
+            CManagerIterator *spellIter=&spellIterator;
             CGameBase *pThing = spellIter->GetFirst(GetSpellManager());
             while (pThing)
             {
                 pThing->FreeReferences();
                 pThing = spellIter->GetNext();
             }
-            delete spellIter;
+
         }
     }
     // delete player manager

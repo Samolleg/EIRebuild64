@@ -17,6 +17,7 @@ class CGameBase;
 // Dynamic saves only. Asset files continue to use CStructureSaver.
 // No auto detection/fallback and no calls to Serialize(CStructureSaver&).
 namespace SaveSchema {
+class Slot;
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::uint32_t Version = 2;
 constexpr std::uint32_t HeaderBytes = 48;
@@ -209,6 +210,7 @@ public:
     CFundament *Find(ObjectId id) const;
     CGameBase *FindGame(ObjectId id) const;
     ObjectId NextId() const { return savedNext; }
+    std::vector<ObjectId> Identities() const;
     // After complete slot adoption only. Before that, destruction breaks cycles.
     void Adopt();
 };

@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #include "StdAfx.h"
 #include "SaveLoader.h"
@@ -112,6 +113,7 @@ struct SHatUser
 /////////////////////////////////////////////////////////////////////////////////////
 class CGlobalHat
 {
+    friend class SaveSchema::Slot;
     struct SPartyHash
     {
         int operator()(const SPartyID &p) const { return p.nSomeNumber; }
@@ -152,4 +154,6 @@ public:
     void GetUnusedPartyID(SPartyID &res);
 };
 /////////////////////////////////////////////////////////////////////////////////////
-extern CGlobalHat theHat;
+CGlobalHat &ActiveGlobalHat();
+void PublishGlobalHat(CGlobalHat *) noexcept;
+#define theHat (ActiveGlobalHat())

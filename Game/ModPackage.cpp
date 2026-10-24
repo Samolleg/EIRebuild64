@@ -1,4 +1,7 @@
 #include "StdAfx.h"
+#include "GameSave.h"
+#include "Effect.h"
+#include <set>
 #include "CorePerf.h"
 #include "GameJournal.h"
 #include "ModNativeCrtRandom.h"
@@ -2378,4 +2381,117 @@ bool InspectModConfigurationCommandLine(int& result){
   report["assertions"]=assertions;report["success"]=true;result=0;
  }catch(const std::exception& e){report["error"]=e.what();}
  std::ofstream stream(output,std::ios::binary);stream<<report.dump(2);return true;
+}
+
+
+struct CModPackage::SaveState {
+ std::map<int,std::shared_ptr<ModDelayedShot>> shots;
+ std::map<const SRPGAttackPortion *,CriticalRecord> attacks;
+ ModCustomLower::CriticalCache custom;
+ bool helmets=false,upper=false;
+ // Fresh runtime owners are allocated before any reversible preparation begins.
+ std::unique_ptr<ModNpcRefreshQueue> refresh=std::make_unique<ModNpcRefreshQueue>();
+ std::unique_ptr<ModInitialization::Ledger> initialized=std::make_unique<ModInitialization::Ledger>();
+ std::unique_ptr<ModInfoStats::State> info=std::make_unique<ModInfoStats::State>();
+ ModSkills::Cooldowns cooldowns;
+ std::map<int,ArmorModifiers> armor,armorView;
+ const void *world=nullptr,*viewWorld=nullptr;
+ std::string zone,viewZone;int segment=-1,viewSegment=-1;
+ bool migrate=false;
+ SRegisteredLootState loot;
+ decltype(G_npcCombatConsumableStates) consumables;
+ std::string consumableZone,consumableMob;
+ int visitToken=0;bool freshVisit=false;CGSVariableSet *vars=nullptr;
+};
+SRPGAttackPortion *CModPackage::SavedAttack(CGameBase *object,unsigned kind){
+ if(kind==0){auto *p=dynamic_cast<CUnitServer *>(object);return p?&p->level1AP:nullptr;}
+ if(kind==1){auto *p=dynamic_cast<CEffectArrow *>(object);return p?&p->weaponAttack:nullptr;}
+ if(kind==2){auto *p=dynamic_cast<CEffectArrowFigure *>(object);return p?&p->attackPortion:nullptr;}
+ return nullptr;
+}
+void CModPackage::StoreSaveState(SaveSchema::Writer &w) const {
+ using namespace SaveSchema;using namespace Fields;
+ w.Bool(hidePartyHelmets);w.Bool(hidePartyUpperArmor);
+ auto record=[&](const CriticalRecord &v){w.Bool(v.critical);w.Bool(v.left);w.Int32(v.skillImpact);w.GameReference(v.weapon.get());};
+ std::set<const SRPGAttackPortion *> saved;
+ std::vector<std::pair<int,std::shared_ptr<ModDelayedShot>>> pending;
+ for(const auto &x:delayedShots){
+  if(theWorldServer.GetUnit(x.first)&&theWorldServer.GetMapObject(x.second->target))pending.push_back(x);
+  else if(criticalAttacks.count(&x.second->ap))saved.insert(&x.second->ap); // cancelled work
+ }
+ Count(w,pending.size());for(const auto &x:pending){const auto &s=*x.second;
+  w.GameReference(theWorldServer.GetUnit(x.first));w.GameReference(theWorldServer.GetMapObject(s.target));
+  w.Int32(s.start);w.Int32(s.due);w.Value(s.ap);
+  auto it=criticalAttacks.find(&s.ap);w.Bool(it!=criticalAttacks.end());if(it!=criticalAttacks.end()){record(it->second);saved.insert(&s.ap);}
+ }
+ struct Entry {CGameBase *owner;unsigned kind;const CriticalRecord *value;};std::vector<Entry> entries;
+ auto inspect=[&](CGameBase *o){for(unsigned k=0;k<3;++k)if(auto *ap=SavedAttack(o,k)){
+  auto it=criticalAttacks.find(ap);if(it!=criticalAttacks.end()){entries.push_back({o,k,&it->second});saved.insert(ap);}}};
+ theWorldServer.GetSpecificManager()->ForEach(inspect);theWorldServer.GetEffectManager()->ForEach(inspect);
+ if(saved.size()!=criticalAttacks.size())throw Error(ErrorCode::Invalid,"save is inside a transient combat callback");
+ Count(w,entries.size());for(const auto &x:entries){w.GameReference(x.owner);w.UInt32(x.kind);record(*x.value);}
+ Count(w,customCriticals.SavedRecords().size());for(const auto &x:customCriticals.SavedRecords()){
+  w.Float32(x.second.damage);w.Bool(x.second.critical);w.Bool(x.second.staff);
+ }
+}
+std::shared_ptr<CModPackage::SaveState> CModPackage::LoadSaveState(SaveSchema::Reader &r){
+ using namespace SaveSchema;
+ auto state=std::make_shared<SaveState>();state->helmets=r.Bool();state->upper=r.Bool();
+ auto record=[&](){CriticalRecord v{};v.critical=r.Bool();v.left=r.Bool();v.skillImpact=r.Int32();auto *weapon=r.GameReferenceAs<CItemWeapon>();
+  if(weapon){weapon->AddRef();v.weapon={weapon,[](CItemWeapon *p){p->Release();}};}return v;};
+ auto n=r.Count();if(n>64)throw Error(ErrorCode::Invalid,"too many delayed shots");
+ for(UINT i=0;i<n;++i){auto *who=r.GameReferenceAs<CUnit>();auto *target=r.GameReferenceAs<CMapObject>();
+  auto shot=std::make_shared<ModDelayedShot>();shot->target=target?target->GetID():-1;shot->start=r.Int32();shot->due=r.Int32();r.Value(shot->ap);shot->world=nullptr;
+  bool critical=r.Bool();if(critical)state->attacks.emplace(&shot->ap,record());
+  if(!who || !state->shots.emplace(who->GetID(),shot).second)throw Error(ErrorCode::Invalid,"invalid delayed shot source");
+ }
+ n=r.Count();for(UINT i=0;i<n;++i){auto *owner=r.GameReference();auto kind=r.UInt32();auto *ap=SavedAttack(owner,kind);
+  if(!ap || !state->attacks.emplace(ap,record()).second)throw Error(ErrorCode::Invalid,"invalid critical attack owner");}
+ n=r.Count();for(UINT i=0;i<n;++i){float damage=r.Float32();bool critical=r.Bool(),staff=r.Bool();state->custom.Put(damage,critical,staff);}
+ return state;
+}
+void CModPackage::SwapSaveRuntime(SaveState &s) noexcept
+{
+ delayedShots.swap(s.shots);criticalAttacks.swap(s.attacks);std::swap(customCriticals,s.custom);
+ std::swap(hidePartyHelmets,s.helmets);std::swap(hidePartyUpperArmor,s.upper);
+ refreshQueue.swap(s.refresh);initialization.swap(s.initialized);infoStats.swap(s.info);
+ std::swap(skillCooldowns,s.cooldowns);npcArmorCache.swap(s.armor);npcArmorViewCache.swap(s.armorView);
+ std::swap(cacheWorld,s.world);cacheZone.swap(s.zone);std::swap(cacheSegment,s.segment);
+ std::swap(npcArmorViewWorld,s.viewWorld);npcArmorViewZone.swap(s.viewZone);std::swap(npcArmorViewSegment,s.viewSegment);
+ std::swap(npcEquipmentMigrationPending,s.migrate);
+ std::swap(G_registeredLoot,s.loot);G_npcCombatConsumableStates.swap(s.consumables);
+ G_npcCombatConsumableZone.swap(s.consumableZone);G_npcCombatConsumableRawMobName.swap(s.consumableMob);
+ std::swap(G_npcCombatConsumableVisitToken,s.visitToken);std::swap(G_npcCombatConsumableFreshVisit,s.freshVisit);
+ std::swap(G_npcCombatConsumableVars,s.vars);
+}
+void CModPackage::PrepareSaveState(const std::shared_ptr<SaveState> &saved,WorldLoadOrigin origin,const std::function<void()> &prepareClient)
+{
+ if(!saved)throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"missing saved mod state");
+ // SavedWorldScope routes all server lookups to the staged owner. The live
+ // package's transient state is exchanged back on success and every exception.
+ saved->world=theWorldServer.GetSpecificManager();saved->zone=(LPCSTR)theWorldServer.szMobFileName;
+ saved->segment=theWorldServer.GetSegmentTimeCounter();
+ SwapSaveRuntime(*saved);
+ try {
+  LoadSkillCooldowns();JMV_RegisteredLootOnSuccessfulSaveLoad();JMV_NpcConsumablesLoaded(origin);
+  npcEquipmentMigrationPending=npcDatabaseMigration&&origin==WorldLoadOrigin::SavedGame;
+  InitializeLoadedHeroes();
+  // Apply only server visuals here. The accepted client's new-zone stream
+  // recreates its figures; touching the displayed old world would break rollback.
+  if(partyVisualOptions)if(auto *player=theWorldServer.GetPlayer(0))
+   for(INT_PTR i=0;i<player->party.people.GetSize();++i)
+    if(auto *unit=theWorldServer.GetUnit(player->party.people[i].nID)){
+     unit->ShowHelmet(!hidePartyHelmets);unit->SetUpdateMask(CMapObject::VLD_MASK_INVENTORY);
+    }
+  for(auto &x:delayedShots)x.second->world=theWorldServer.GetSpecificManager();
+  prepareClient();
+ } catch(...) {SwapSaveRuntime(*saved);throw;}
+ SwapSaveRuntime(*saved);
+}
+void CModPackage::AdoptSaveState(const std::shared_ptr<SaveState> &saved) noexcept
+{
+ if(!saved)return;
+ SwapSaveRuntime(*saved);
+ // Pure invalidation: no Lua, packet construction, resource access or allocation.
+ ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();
 }

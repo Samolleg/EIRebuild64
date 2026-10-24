@@ -25,6 +25,7 @@ typedef unsigned ESPStatus;
 // -------------------------------------------------------------
 class CPlayerClient : public CPlayerSpecific
 {
+    friend class SaveSchema::Slot;
 public:
     enum EPClientStates
     {
@@ -67,6 +68,7 @@ public:
     bool IsIgnoreInterfaceChange() { return bIgnoreInterfaceChange; }
     EPClientStates GetStatus() const { return status; }
     void FinishZoneLoading();
+    void AdoptSavedConnection(CConnection *) noexcept;
     // Get Client world
     CWorldClient *GetWorldClient() { return (CWorldClient *)pPlayer->GetWorld(); }
     // packets

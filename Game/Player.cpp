@@ -107,6 +107,7 @@ void CPlayer::RemoveAllObjects()
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayer::Clear()
 {
+    if(retiringSave){DiscardSave();pConnection=0;return;}
     activeItems.RemoveAll();
     RemoveAllObjects();
     party.Destroy();

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSlot.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Gdi.h"
 #include "GameJournal.h"
@@ -608,54 +609,16 @@ void CI3DScreenSaveLoad::MoveScrollToSelection()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::Save()
 {
-    if (nCurrentSlot < 0 || nCurrentSlot >= slots.size())
-        return;
-    SSaveSlotDesc *pSlot = &slots[nCurrentSlot];
-
-    if (!IsEnoughSpace())
-    {
-        CI3DScreenMessageBox *pScr = dbgnew CI3DScreenMessageBox(pI3D, "no_disc_space",
-                                                                 "no_disc_space_msg", 0x00030000,
-                                                                 MBF_OK);
-        pI3D->DoModal(pScr);
-        return;
-    }
-
-    CString szFullPath;
-    szFullPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pSlot->szPath);
-    CString szMsg;
-    IWorld.GetTextManager()->GetSystemString("notify_saving", szMsg);
-    theInterface.DrawTextOverFrame(szMsg);
-
-    GameJournal::Source journalSave("manual");
-    IWorldConnector.ReqSaveGame(pSlot->szPath);
-
-    theCursor.SetMode(CT_WAIT);
-
-    CFileSave file;
-    file.OpenWrite(szFullPath + "info.sav");
-    if (bEdited)
-        slots[0].szName = szEditName;
-    else if (nCurrentSlot == 0)
-        slots[0].szName.Empty();
-    else
-        slots[0].szName = pSlot->szName;
-    slots[0].time = CTime32::GetCurrentTime();
-    slots[0].Store(file);
-    file.CloseFile();
-
-    if (pCurrentShot)
-    {
-        // pI3D->ExitFromModal(0x00100002);
-        CDXGISurface *pSurfaceSrc = pCurrentShot->GetSurface();
-        const HRESULT picture = pSurfaceSrc->SaveThumbnailFile(szFullPath + "shot.sav", BG_SMALL_PICTURE.cy);
-        if (FAILED(picture)) GameJournal::Event("RENDER", "save_thumbnail_failed",
-            "stage=manual_write hr=%08lx", static_cast<unsigned long>(picture));
-    }
-
-    theCursor.SetMode(CT_DEFAULT);
-
-    pI3D->ExitFromModal(0x00100002);
+    if (nCurrentSlot < 0 || nCurrentSlot >= slots.size() || !IsEnoughSpace()) return;
+    SSaveSlotDesc desc=slots[nCurrentSlot];
+    if(bEdited) desc.szName=szEditName;
+    desc.time=CTime32::GetCurrentTime();
+    try {
+        SaveSchema::Slot::SetPresentation(desc,pCurrentShot?pCurrentShot->GetSurface():nullptr);
+        GameJournal::Source source("manual");
+        if(!SaveSchema::Slot::Save(desc.szPath))return;
+        pI3D->ExitFromModal(0x00100002);
+    } catch(const std::exception &e){ReportError("Save64: %s",e.what());}
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::Load()
@@ -667,7 +630,6 @@ void CI3DScreenSaveLoad::Load()
     CString szMsg;
     IWorld.GetTextManager()->GetSystemString("notify_loading", szMsg);
     theInterface.DrawTextOverFrame(szMsg);
-    IWorldClient.StopAllSounds();
     pI3D->BeginFX("buttons\\messbox\\ok.wav");
     IWorldConnector.ReqLoadGame(slots[nCurrentSlot].szPath);
 }
@@ -678,7 +640,7 @@ void CI3DScreenSaveLoad::Delete()
         return;
 
     CString szDelPath;
-    szDelPath.Format("%ssaves\\%s", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), slots[nCurrentSlot].szPath);
+    szDelPath.Format("%sSaves64\\%s", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), slots[nCurrentSlot].szPath);
 
     CFileFind find;
     BOOL bFind = find.FindFile(szDelPath + "\\*.*");
@@ -712,7 +674,7 @@ public:
 void CI3DScreenSaveLoad::FormSlotsList()
 {
     CString szWildcard;
-    szWildcard.Format("%ssaves\\save*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
+    szWildcard.Format("%sSaves64\\save*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
     CFileFind find;
 
     slots.clear();
@@ -730,27 +692,9 @@ void CI3DScreenSaveLoad::FormSlotsList()
             SSaveSlotDesc *pSlot = &slots.back();
             pSlot->szPath = find.GetFileName();
 
-            CFileFind findDesc;
-            if (findDesc.FindFile(find.GetFilePath() + "\\info.sav"))
-            {
-                findDesc.FindNextFile();
-                // findDesc.GetLastWriteTime( pSlot->time );
-
-                CFileSave file;
-                file.OpenRead(findDesc.GetFilePath());
-                pSlot->Load(file);
-                file.CloseFile();
-
-                if (pSlot->szName.IsEmpty())
-                    pSlot->FormName();
-                pSlot->bNoInfo = false;
-            }
-            else
-            {
-                pSlot->bNoInfo = true;
-                pSlot->szName = "Error Save";
-            }
-            findDesc.Close();
+            pSlot->bNoInfo=!SaveSchema::Slot::Presentation(pSlot->szPath,*pSlot);
+            if(pSlot->bNoInfo)pSlot->szName="Несовместимое сохранение";
+            else if(pSlot->szName.IsEmpty())pSlot->FormName();
 
             if (pSlot->szPath.GetLength() > 4)
             {
@@ -934,72 +878,40 @@ void CI3DScreenSaveLoad::ReloadPicture()
         return;
     }
 
-    CString szTexPath;
-    szTexPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pSlot->szPath);
-    CFileFind find;
-    if (find.FindFile(szTexPath + "shot.sav"))
-    {
-        CDXGISurface *pSurface = textures[1]->GetSurface();
-
-        const HRESULT picture = pSurface->LoadThumbnailFile(szTexPath + "shot.sav", BG_SMALL_PICTURE.cy);
-        if (SUCCEEDED(picture)) {
-            figures[3]->Show(TRUE);
-            figures[3]->SetTexture(textures[1]);
-        } else GameJournal::Event("RENDER", "save_thumbnail_failed",
-            "stage=read slot=%s hr=%08lx", (LPCSTR)pSlot->szPath, static_cast<unsigned long>(picture));
-    }
+    SaveSchema::Bytes shot;
+    SSaveSlotDesc info;
+    if(!SaveSchema::Slot::Presentation(pSlot->szPath,info,&shot)||shot.empty())return;
+    try{
+        CMemorySave f;f.Write(shot.data(),static_cast<UINT>(shot.size()));f.Seek(0);
+        SaveSchema::Registry reg;
+        auto graph=SaveSchema::Load(f,reg,[&](SaveSchema::Reader &r){
+            auto width=r.UInt32(),height=r.UInt32(),count=r.Count();
+            auto *surface=textures[1]->GetSurface();
+            if(width!=surface->GetWidth()||height!=surface->GetHeight()||std::uint64_t(width)*height!=count)
+                throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"thumbnail dimensions");
+            std::vector<DWORD> pixels(count);for(auto &p:pixels)p=r.UInt32();
+            D3D11_SUBRESOURCE_DATA data{};data.pSysMem=pixels.data();data.SysMemPitch=width*sizeof(DWORD);
+            D3D11_BOX region{0,0,0,width,height,1};surface->UpdateTexture(0,&region,&data,MMP_FORMAT_8888);
+        });
+        figures[3]->Show(TRUE);figures[3]->SetTexture(textures[1]);
+    }catch(const std::exception &e){GameJournal::Event("SAVE","thumbnail_invalid","reason=%s",e.what());}
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
 {
-    GameJournal::Source journalSave(bIsAuto?"auto":"manual_quick");
-    if (IWorldConnector.IsLMP())
-        return;
-    if (!IsEnoughSpace())
-        return;
-
-    std::unique_ptr<CI3DSurface> pBGScreen;
-    if (bIsAuto)
-        NGame::DrawFrame(false);
-    pBGScreen = std::make_unique<CI3DSurface>(&theInterface, 0, 0, 800, 600, BS_VISIBLE);
-    pBGScreen->GetFromScreen(true);
-
-    theCursor.SetMode(CT_WAIT);
-
-    theInterface.SetModalPause(IWorld.IsCombatPause());
-
-    CString szMsg;
-    IWorld.GetTextManager()->GetSystemString("notify_saving", szMsg);
-    theInterface.DrawTextOverFrame(szMsg);
-
-    // save game
-    IWorldConnector.ReqSaveGame(pszSlotName);
-
-    // save info
-    SSaveSlotDesc slot;
-    slot.time = CTime32::GetCurrentTime();
-    slot.fGameTime = IWorldClient.GSGetVar(szPartyGlobalTimeVarName);
-    slot.szZoneName = IWorldClient.GetCurrentZoneName();
-    SScenarioZone *pZone = theMap.GetZoneByName(slot.szZoneName);
-    if (pZone)
-        slot.szAllodName = pZone->szAllodName;
-
-    CString szFullPath;
-    szFullPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSlotName);
-    CFileSave file;
-    file.OpenWrite(szFullPath + "info.sav");
-    slot.Store(file);
-    file.CloseFile();
-
-    if (SUCCEEDED(pBGScreen->GetPixelReadbackStatus())) {
-        auto pBGSmallScreen = SmallScreenFromScreen(pBGScreen.get());
-        const HRESULT picture = pBGSmallScreen->SaveThumbnailFile(szFullPath + "shot.sav", BG_SMALL_PICTURE.cy);
-        if (FAILED(picture)) GameJournal::Event("RENDER", "save_thumbnail_failed",
-            "stage=quick_write hr=%08lx", static_cast<unsigned long>(picture));
-    } else GameJournal::Event("RENDER", "save_thumbnail_failed",
-        "stage=quick_capture hr=%08lx", static_cast<unsigned long>(pBGScreen->GetPixelReadbackStatus()));
-
-    theCursor.SetMode(CT_DEFAULT);
+    GameJournal::Source source(bIsAuto?"auto":"manual_quick");
+    if(IWorldConnector.IsLMP() || !IsEnoughSpace())return;
+    if(bIsAuto)NGame::DrawFrame(false);
+    auto screen=std::make_unique<CI3DSurface>(&theInterface,0,0,800,600,BS_VISIBLE);
+    screen->GetFromScreen(true);
+    SSaveSlotDesc desc;desc.szPath=pszSlotName;desc.szName="";desc.time=CTime32::GetCurrentTime();
+    desc.fGameTime=IWorldClient.GSGetVar(szPartyGlobalTimeVarName);desc.szZoneName=IWorldClient.GetCurrentZoneName();
+    if(auto *zone=theMap.GetZoneByName(desc.szZoneName))desc.szAllodName=zone->szAllodName;
+    try{
+        auto thumbnail=SmallScreenFromScreen(screen.get());
+        SaveSchema::Slot::SetPresentation(desc,thumbnail.get());
+        IWorldConnector.ReqSaveGame(pszSlotName);
+    }catch(const std::exception &e){ReportError("Save64: %s",e.what());}
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::QuickLoad(LPCTSTR pszSlotName)
@@ -1007,14 +919,13 @@ void CI3DScreenSaveLoad::QuickLoad(LPCTSTR pszSlotName)
     if (IWorldConnector.IsLMP())
         return;
     CString szFullPath;
-    szFullPath.Format("%ssaves\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSlotName);
+    szFullPath.Format("%sSaves64\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSlotName);
 
     if (_access(szFullPath, 0) != -1)
     {
         CString szMsg;
         IWorld.GetTextManager()->GetSystemString("notify_loading", szMsg);
         theInterface.DrawTextOverFrame(szMsg);
-        IWorldClient.StopAllSounds();
         IWorldConnector.ReqLoadGame(pszSlotName);
     }
 }

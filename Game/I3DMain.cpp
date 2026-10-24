@@ -620,6 +620,25 @@ void CInterface3D::ExitFromModal(DWORD dwRetValue)
     bExitModal = true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CInterface3D::RetireSavedScreens() noexcept
+{
+    // Acceptance has already succeeded. Each detached screen must be deleted
+    // while its former world/party still exist, even if its deactivation fails.
+    try {OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);theCursor.SetMode(CT_WAIT);}
+    catch(CException *e){e->Delete();GameJournal::AllocationFailureInCatch("Save64 screen retirement");}
+    catch(...){GameJournal::AllocationFailureInCatch("Save64 screen retirement");}
+    while(!pScreens.empty()){
+        auto *screen=pScreens.back();pScreens.pop_back();
+        try{screen->ResetInputState();screen->OnDeactivate();}
+        catch(CException *e){e->Delete();GameJournal::AllocationFailureInCatch("Save64 screen deactivation");}
+        catch(...){GameJournal::AllocationFailureInCatch("Save64 screen deactivation");}
+        delete screen;
+    }
+    try{ResetInputState();NGame::DestroyInputMessages();}
+    catch(CException *e){e->Delete();GameJournal::AllocationFailureInCatch("Save64 input retirement");}
+    catch(...){GameJournal::AllocationFailureInCatch("Save64 input retirement");}
+    bScreensMustDie=false;NGame::bNeedRender=false;
+}
 void CInterface3D::DestroyScreens()
 {
     OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);

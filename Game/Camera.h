@@ -122,6 +122,7 @@ struct SEarthquakeEffect
 /////////////////////////////////////////////////////////////////////////////////////
 class CCamera : public CBase3D
 {
+    friend class SaveSchema::Slot;
 private:
     // different camera restrictions and params
     SGeneralSettings *pSettings; // here we'll use only camera settings
@@ -148,7 +149,7 @@ private:
     CQuaternion falloutBaselineRotation;
     float falloutBaselinePitch = 0.0f;
     float falloutTelephotoMultiplier = 2.0f;
-    // Transient field-camp snapshot. Never written by Store/Load.
+    // Field-camp placement: value fields persist; terrain and uptime are rebound.
     struct CampPlacement
     {
         CPlot3D position, anchor;
@@ -190,6 +191,7 @@ private:
     void CorrectDistanceToCarrier();
 
 public:
+    bool detachedSave = false;
     CCamera();
     virtual ~CCamera();
     //
