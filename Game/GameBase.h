@@ -6,9 +6,8 @@
 #include "HashMap.h"     // simply fast hash map w/o constructor/destructor call
 #include "sArray.h"      // 2d arrays & array with copy operation
 #include "Tools.h"       // some useful functions
-#include "LuaState.h"
 #include "ObjectIdentity.h"
-#include "luajit-x86/lua.hpp"
+#include <lua.hpp>
 /////////////////////////////////////////////////////////////////////////////////////
 class CBaseManager;
 class CWorld;

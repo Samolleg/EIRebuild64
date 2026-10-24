@@ -9,7 +9,7 @@
 #include "WorldServer.h"
 #include "Player.h"
 #include "ModStatRules.h"
-#include "luajit-x86/lua.hpp"
+#include <lua.hpp>
 #include "RpgSystem.h"
 #include "Unit.h"
 #include "Item.h"
@@ -34,6 +34,16 @@ struct Ref {
 const char *meta="EIRebuild.TypedObject";
 const char *perkHostMeta="EIRebuild.PerkHost";
 const char perkHostKey=0;
+const char unitRefsKey=0;
+constexpr ObjectId maxUnitCacheKey=0xffffffffULL;
+static_assert(sizeof(lua_Integer)==8,"The host requires LuaJIT x64 public headers");
+int PushUnitCacheKey(lua_State*s,const CUnit&unit){
+ const auto id=unit.GetRTID();
+ // The installed equipment cache accepts only uint32 numeric keys. Never wrap
+ // or recycle ObjectId here: that would alias another live/cache entry.
+ if(!id||id>maxUnitCacheKey)return luaL_error(s,"Unit ObjectId exceeds the Lua cache key range (1..4294967295)");
+ lua_pushnumber(s,static_cast<lua_Number>(id));return 1;
+}
 struct PerkHostBinding {std::weak_ptr<const PerkHostLifetime> lifetime;};
 int PerkHostGC(lua_State*s){((PerkHostBinding*)luaL_checkudata(s,1,perkHostMeta))->~PerkHostBinding();return 0;}
 PerkHostBinding *FindPerkHost(lua_State*s){
@@ -61,6 +71,18 @@ bool ItemRecordAlive(const Ref&r){
  }
 }
 Ref &Get(lua_State*s,int n=1){
+ if(lua_type(s,n)==LUA_TNUMBER){
+  const double id=lua_tonumber(s,n);
+  if(!std::isfinite(id)||floor(id)!=id||id<1||id>maxUnitCacheKey)
+   luaL_error(s,"Expected an exact unit ObjectId cache key");
+  // Only units supplied to this callback can be resolved. Numbers are never
+  // converted to pointers, and a retained key grants no access after the call.
+  lua_pushlightuserdata(s,const_cast<char*>(&unitRefsKey));lua_rawget(s,LUA_REGISTRYINDEX);
+  if(!lua_istable(s,-1))luaL_error(s,"Unit key outside an active engine callback");
+  lua_pushnumber(s,id);lua_rawget(s,-2);lua_remove(s,-2);
+  if(lua_isnil(s,-1))luaL_error(s,"Unit key is not bound in this engine callback");
+  lua_replace(s,n);
+ }
  auto*p=(Ref*)luaL_checkudata(s,n,meta);
  if(p->scope&&!p->scope->active)luaL_error(s,"Expired engine callback object");
  if(p->kind==Perk){
@@ -82,10 +104,31 @@ void PushPerkRef(lua_State*s,int index,const std::shared_ptr<Scope>&scope){
  luaL_getmetatable(s,meta);lua_setmetatable(s,-2);
 }
 void InstallPerkConstructor(lua_State*s);
-void PushRef(lua_State*s,void*p,Kind k,const std::shared_ptr<Scope>&scope,int count=0){if(!p){lua_pushnil(s);return;}auto*r=new(lua_newuserdata(s,sizeof(Ref))) Ref{p,k,count,scope};luaL_getmetatable(s,meta);lua_setmetatable(s,-2);}
+void PushRef(lua_State*s,void*p,Kind k,const std::shared_ptr<Scope>&scope,int count=0){
+ if(!p){lua_pushnil(s);return;}
+ new(lua_newuserdata(s,sizeof(Ref))) Ref{p,k,count,scope};
+ luaL_getmetatable(s,meta);lua_setmetatable(s,-2);
+ if(k==Unit){
+  const auto id=static_cast<CUnit*>(p)->GetRTID();const int ref=lua_gettop(s);
+  lua_pushlightuserdata(s,const_cast<char*>(&unitRefsKey));lua_rawget(s,LUA_REGISTRYINDEX);
+  if(lua_istable(s,-1)&&id&&id<=maxUnitCacheKey){
+   lua_pushnumber(s,static_cast<lua_Number>(id));lua_pushvalue(s,ref);lua_rawset(s,-3);
+  }
+  lua_pop(s,1);
+ }
+}
 int GC(lua_State*s){((Ref*)luaL_checkudata(s,1,meta))->~Ref();return 0;}
 template<class T>int Field(lua_State*s,T&v,bool write){if constexpr(std::is_enum<T>::value){auto n=static_cast<typename std::underlying_type<T>::type>(v);int result=Field(s,n,write);if(write)v=static_cast<T>(n);return result;}else {if(write){double n=luaL_checknumber(s,3);if(!std::isfinite(n)||n<(std::numeric_limits<T>::lowest)()||n>(std::numeric_limits<T>::max)()||(std::is_integral<T>::value&&floor(n)!=n)){char error[192];snprintf(error,sizeof(error),"Engine field out of range: field=%s value=%.17g",lua_tostring(s,2)?lua_tostring(s,2):"<index>",n);return luaL_error(s,"%s",error);}v=static_cast<T>(n);return 0;}lua_pushnumber(s,v);return 1;}}
 int CheckedInteger(lua_State*s,int index){double n=luaL_checknumber(s,index);if(!std::isfinite(n)||floor(n)!=n||n<(std::numeric_limits<int>::min)()||n>(std::numeric_limits<int>::max)())return luaL_error(s,"Expected exact engine integer");return int(n);}
+// Slots use -1 for absence. Check before converting to the engine's uint32
+// index, so a GC64 integer cannot wrap into a different valid slot.
+DWORD CheckedSlot(lua_State*s,int index){
+ const double n=luaL_checknumber(s,index);
+ if(n==-1)return DWORD(-1);
+ if(!std::isfinite(n)||floor(n)!=n||n<0||n>(std::numeric_limits<DWORD>::max)())
+  luaL_error(s,"Expected a uint32 slot or -1");
+ return static_cast<DWORD>(n);
+}
 struct ItemArraySpan {const void*data;int size;int memoryType;};
 ItemArraySpan ItemArray(const Ref&r){
  if(r.itemTable==DbWeapon){const auto*p=theItemDatabase.weapons.GetEntry(r.count);
@@ -119,16 +162,16 @@ int ArrayValue(lua_State*s){auto&r=Get(s);
  }int i=CheckedInteger(s,2);if(i<0||i>=r.count)return luaL_error(s,"Engine array index out of range");if(r.kind==Bytes||r.kind==ReadOnlyBytes)lua_pushnumber(s,((BYTE*)r.object)[i]);else if(r.kind==Floats||r.kind==ReadOnlyFloats)lua_pushnumber(s,((float*)r.object)[i]);else return luaL_error(s,"Expected engine array");return 1;}
 int ArraySet(lua_State*s){auto&r=Get(s);if(r.kind==DbArray)return luaL_error(s,"Item database arrays are read-only");int i=CheckedInteger(s,2);if(i<0||i>=r.count)return luaL_error(s,"Engine array index out of range");if(r.kind==Bytes)return Field(s,((BYTE*)r.object)[i],true);if(r.kind==Floats)return Field(s,((float*)r.object)[i],true);return luaL_error(s,"Expected engine array");}
 int PerkModifier(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if((r.kind!=Stats&&r.kind!=ClientStats)||i<0||i>=RPG_NUM_PERKS)return luaL_error(s,"Expected stats and valid perk");lua_pushnumber(s,r.kind==Stats?((SRPGUnitStats*)r.object)->GetPerkModifier(i):((const SRPGUserUnitStats*)r.object)->GetPerkModifier(i));return 1;}
-int PrimaryAt(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);int mode=lua_tointeger(s,lua_upvalueindex(1));if(mode==2){if(r.kind!=Common||i<0||i>=RPG_NUM_ATTACK_TYPES)return luaL_error(s,"Invalid absorption index");PushRef(s,&((SRPGCommonStats*)r.object)->psAbsorbtions[i],Primary,r.scope);}else {if(r.kind!=Stats||i<0||i>=RPG_NUM_SENSES)return luaL_error(s,"Invalid sense index");auto*p=(SRPGUnitStats*)r.object;PushRef(s,mode?&p->percepts[i]:&p->senses[i],Primary,r.scope);}return 1;}
+int PrimaryAt(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);int mode=CheckedInteger(s,lua_upvalueindex(1));if(mode==2){if(r.kind!=Common||i<0||i>=RPG_NUM_ATTACK_TYPES)return luaL_error(s,"Invalid absorption index");PushRef(s,&((SRPGCommonStats*)r.object)->psAbsorbtions[i],Primary,r.scope);}else {if(r.kind!=Stats||i<0||i>=RPG_NUM_SENSES)return luaL_error(s,"Invalid sense index");auto*p=(SRPGUnitStats*)r.object;PushRef(s,mode?&p->percepts[i]:&p->senses[i],Primary,r.scope);}return 1;}
 
-int StatAdjust(lua_State*s){auto&r=Get(s);int mode=lua_tointeger(s,lua_upvalueindex(1));float *value=nullptr;
+int StatAdjust(lua_State*s){auto&r=Get(s);int mode=CheckedInteger(s,lua_upvalueindex(1));float *value=nullptr;
  if(r.kind==Primary && mode/2<=1){auto*p=(SRPGPrimaryStat*)r.object;value=mode/2==0?&p->fpBaseValue:&p->fpEffectiveValue;}
  if(r.kind==Secondary && mode/2>=1){auto*p=(SRPGSecondaryStat*)r.object;value=mode/2==1?&p->fpCurrent:mode/2==2?&p->fpMax:&p->fpRegenerate;}
  if(!value)return luaL_error(s,"Invalid stat adjustment");double delta=luaL_checknumber(s,2);lua_settop(s,2);lua_pushnumber(s,*value+(mode%2?-delta:delta));return Field(s,*value,true);
 }
 int HitAt(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=Stats||i<0||i>=RPG_NUM_HIT_LOCATIONS)return luaL_error(s,"Invalid hit location index");PushRef(s,&((SRPGUnitStats*)r.object)->hls[i],HitLocation,r.scope);return 1;}
 int LayerAt(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=HitLocation||i<0||i>=RPG_NUM_ARMOR_LAYERS)return luaL_error(s,"Invalid armor layer index");PushRef(s,&((SRPGHitLocation*)r.object)->layers[i],ArmorLayer,r.scope);return 1;}
-int HitPoints(lua_State*s){auto&r=Get(s);if(r.kind!=Stats)return luaL_error(s,"Expected native stats");auto*p=(SRPGUnitStats*)r.object;double hp=luaL_checknumber(s,2);int op=lua_tointeger(s,lua_upvalueindex(1));
+int HitPoints(lua_State*s){auto&r=Get(s);if(r.kind!=Stats)return luaL_error(s,"Expected native stats");auto*p=(SRPGUnitStats*)r.object;double hp=luaL_checknumber(s,2);int op=CheckedInteger(s,lua_upvalueindex(1));
  if(!std::isfinite(hp)||fabs(hp)>(std::numeric_limits<float>::max)())return luaL_error(s,"Invalid hit points");
  // Native distribution writes only used hit locations; an empty skeleton is a no-op.
  if(op!=2){bool used=false;for(const auto&h:p->hls)used=used||h.state>RPGALS_NOTUSED;if(!used)return 0;}
@@ -156,12 +199,12 @@ int AddPerkRecord(lua_State*s){auto&r=Get(s);int index=CheckedInteger(s,2),level
  catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("ModLuaBridge");lua_pushstring(s,e.what());return lua_error(s);}lua_pushinteger(s,level);return 1;
 }
 int LeftHand(lua_State*s){auto&r=Get(s);if(r.kind!=Unit)return luaL_error(s,"Expected typed unit for left hand");auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Left hand requires native unit-specific component");lua_pushinteger(s,r.scope->LeftHand(*p));return 1;}
-int UnitWeapon(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=Unit||i<0||i>=QI_MAX_WEAPONS)return luaL_error(s,"Invalid weapon slot");auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Weapons require native unit-specific component");PushRef(s,r.scope->Weapon(*p,i),Item,r.scope);return 1;}
+int UnitWeapon(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=Unit||i < -1||i>=QI_MAX_WEAPONS)return luaL_error(s,"Invalid weapon slot");if(i==-1){lua_pushnil(s);return 1;}auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Weapons require native unit-specific component");PushRef(s,r.scope->Weapon(*p,i),Item,r.scope);return 1;}
 int UnitEffect(lua_State*s){auto&r=Get(s);if(r.kind!=Unit)return luaL_error(s,"Expected unit");int id=CheckedInteger(s,2);if(id<0||id>=53)return luaL_error(s,"Invalid spell effect id");lua_pushnumber(s,((CUnit*)r.object)->GetEffectValue(id));return 1;}
 int UnitArmor(lua_State*s){auto&r=Get(s);int index=CheckedInteger(s,2);if(r.kind!=Unit)return luaL_error(s,"Expected unit");if(index<0||index>=RPG_NUM_ARMOR_TYPES){lua_pushnil(s);return 1;}PushRef(s,((CUnit*)r.object)->GetQArmor(index),Item,r.scope);return 1;}
 int UnitSpellValue(lua_State*s,bool addressResult){
  auto&r=Get(s);if(r.kind!=Unit)return luaL_error(s,"Expected typed unit for spell slot");
- const DWORD index=static_cast<DWORD>(luaL_checkinteger(s,2));auto*unit=static_cast<CUnit*>(r.object);
+ const DWORD index=CheckedSlot(s,2);auto*unit=static_cast<CUnit*>(r.object);
  auto*specific=unit->GetUnitSpecific();
  const bool ownedClient=specific&&specific->WhoAmI()==HPC_UNITCLIENTSPECIFIC&&unit->GetOwner();
  const DWORD limit=ownedClient?QI_MAX_SPELLS:QI_NPC_SPELLS;
@@ -174,7 +217,7 @@ int UnitSpellValue(lua_State*s,bool addressResult){
 }
 int UnitSpell(lua_State*s){return UnitSpellValue(s,false);}
 int GetUnitSpell(lua_State*s){return UnitSpellValue(s,true);}
-int UnitQuick(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=Unit||i<0||i>=QI_MAX_ITEMS)return luaL_error(s,"Invalid quick item slot");auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Quick items require native unit-specific component");if(p->GetUnitSpecific()->WhoAmI()==HPC_UNITCLIENTSPECIFIC&&!p->GetOwner()){lua_pushnil(s);return 1;}PushRef(s,p->GetQItem(i),Item,r.scope);return 1;}
+int UnitQuick(lua_State*s){auto&r=Get(s);int i=CheckedInteger(s,2);if(r.kind!=Unit||i<0)return luaL_error(s,"Invalid quick item slot");auto*p=(CUnit*)r.object;if(!p->GetUnitSpecific())return luaL_error(s,"Quick items require native unit-specific component");if(p->GetUnitSpecific()->WhoAmI()==HPC_UNITCLIENTSPECIFIC&&!p->GetOwner()){lua_pushnil(s);return 1;}PushRef(s,p->GetQItem(i),Item,r.scope);return 1;}
 int ArmorMaterialName(lua_State*s){auto&r=Get(s);int index=CheckedInteger(s,2);if(r.kind!=Unit)return luaL_error(s,"Expected unit");if(index<0||index>=RPG_NUM_ARMOR_TYPES){lua_pushnil(s);return 1;}auto*armor=((CUnit*)r.object)->GetQArmor(index);if(!armor){lua_pushnil(s);return 1;}auto id=armor->GetMaterial();if(id>=unsigned(theItemDatabase.materials.GetNumEntries()))return luaL_error(s,"Equipped material missing from database");lua_pushstring(s,theItemDatabase.materials.GetEntry(int(id))->szName);return 1;}
 void InstallItemConstructors(lua_State*s);
 template<class T>void PushItemRecord(lua_State*s,const CDatabase<T>&table,int kind,int index,const PerkHostBinding&host,const std::shared_ptr<Scope>&scope={}){
@@ -184,7 +227,7 @@ template<class T>void PushItemRecord(lua_State*s,const CDatabase<T>&table,int ki
  luaL_getmetatable(s,meta);lua_setmetatable(s,-2);
 }
 int NativeItemRecord(lua_State*s,int table){
- const int index=static_cast<int>(luaL_checkinteger(s,1));
+ const int index=CheckedInteger(s,1);
  const auto*host=FindPerkHost(s);if(!host)return luaL_error(s,"Item database requires a live Lua package owner");
  // Installed Lua wrappers resolve their constructor after this getter returns.
  InstallItemConstructors(s);
@@ -325,7 +368,7 @@ int Heal(lua_State*s){
 }
 int RegenMp(lua_State*s){auto&r=Get(s);double value=luaL_checknumber(s,2);if(r.kind!=Common||!std::isfinite(value)||fabs(value)>(std::numeric_limits<float>::max)())return luaL_error(s,"Invalid native MP regeneration");lua_pushboolean(s,((SRPGCommonStats*)r.object)->RegenerateMP(float(value)));return 1;}
 int NativeGetPerkRecord(lua_State*s){
- const int index=static_cast<int>(luaL_checkinteger(s,1));
+ const int index=CheckedInteger(s,1);
  if(!FindPerkHost(s))return luaL_error(s,"Perk database requires a live Lua package owner");
  // database.lua's getRecord looks up the constructor after this getter returns.
  // Install only that constructor when its module exists; do not change require order.
@@ -348,7 +391,7 @@ int NativeItemsWeight(lua_State*s){
  lua_pushnumber(s,weight);return 1;
 }
 int NativeEquipment(lua_State*s,int kind){
- auto& ref=Get(s);const DWORD index=static_cast<DWORD>(luaL_checkinteger(s,2));
+ auto& ref=Get(s);const DWORD index=CheckedSlot(s,2);
  if(ref.kind!=Unit)return luaL_error(s,"Expected scoped unit for equipment");
  auto* unit=static_cast<CUnit*>(ref.object);auto* specific=unit->GetUnitSpecific();
  if(!specific)return luaL_error(s,"Equipment requires an existing unit-specific owner");
@@ -374,12 +417,12 @@ int NativeGetWeapon(lua_State*s){return NativeEquipment(s,0);}
 int NativeGetArmor(lua_State*s){return NativeEquipment(s,1);}
 int NativeGetQuick(lua_State*s){return NativeEquipment(s,2);}
 int NativeGetEffectValue(lua_State*s){
- auto& ref=Get(s);const int id=static_cast<int>(luaL_checkinteger(s,2));
+ auto& ref=Get(s);const int id=CheckedInteger(s,2);
  if(ref.kind!=Unit)return luaL_error(s,"Expected scoped unit for effect value");
  lua_pushnumber(s,static_cast<CUnit*>(ref.object)->GetEffectValue(id));return 1;
 }
 int NativePerkModifier(lua_State*s,bool client){
- auto& ref=Get(s);const int id=static_cast<int>(luaL_checkinteger(s,2));
+ auto& ref=Get(s);const int id=CheckedInteger(s,2);
  if(ref.kind!=(client?ClientStats:Stats)||id<0||id>=RPG_NUM_PERKS)
   return luaL_error(s,"Expected matching scoped stats and valid perk ID");
  lua_pushnumber(s,client?static_cast<const SRPGUserUnitStats*>(ref.object)->GetPerkModifier(id):
@@ -448,7 +491,10 @@ int Access(lua_State*s,bool write){auto&r=Get(s);const char*k=luaL_checkstring(s
 #define F(name,member) if(strcmp(k,name)==0)return Field(s,p->member,write)
 #define CHILD(name,member,type) if(!write&&strcmp(k,name)==0){PushRef(s,&p->member,type,r.scope);return 1;}
 #define ARRAY(name,member,type) if(!write&&strcmp(k,name)==0){PushRef(s,p->member,type,r.scope,_countof(p->member));return 1;}
- if(!write&&strcmp(k,"addr")==0){lua_pushvalue(s,1);return 1;}
+ if(!write&&strcmp(k,"addr")==0){
+  if(r.kind==Unit)return PushUnitCacheKey(s,*static_cast<CUnit*>(r.object));
+  lua_pushvalue(s,1);return 1;
+ }
  if(r.kind==DbRecord||r.kind==DbAbsorbtion||r.kind==DbArray)return ItemRecordAccess(s,r,k,write);
  if(r.kind==Perk&&!write){const auto*p=thePerkDatabase.GetPerk(r.count);
 #define PERK_STRING(name,member) if(strcmp(k,name)==0){lua_pushstring(s,p->member);return 1;}
@@ -549,7 +595,7 @@ int Access(lua_State*s,bool write){auto&r=Get(s);const char*k=luaL_checkstring(s
  return luaL_error(s,"Unported engine property '%s' (kind %d, write %d)",k,int(r.kind),int(write));
 }
 int Index(lua_State*s){return Access(s,false);}int NewIndex(lua_State*s){return Access(s,true);}
-int Factory(lua_State*s){int arg=lua_istable(s,1)?2:1;auto&r=Get(s,arg);int kind=lua_tointeger(s,lua_upvalueindex(1));if(int(r.kind)!=kind)return luaL_error(s,"Wrong engine object kind");lua_pushvalue(s,arg);return 1;}
+int Factory(lua_State*s){int arg=lua_istable(s,1)?2:1;auto&r=Get(s,arg);int kind=CheckedInteger(s,lua_upvalueindex(1));if(int(r.kind)!=kind)return luaL_error(s,"Wrong engine object kind");lua_pushvalue(s,arg);return 1;}
 void Constructor(lua_State*s,Kind kind){
  lua_newtable(s);lua_pushinteger(s,kind);lua_pushcclosure(s,Factory,1);lua_setfield(s,-2,"new");
  lua_newtable(s);lua_pushinteger(s,kind);lua_pushcclosure(s,Factory,1);lua_setfield(s,-2,"__call");lua_setmetatable(s,-2);
@@ -571,7 +617,7 @@ void InstallPerkConstructor(lua_State*s){
 enum ItemFactoryKind {GeneralItemFactory=4,ArmorAbsorbtionFactory=5};
 int ItemFactory(lua_State*s){
  const int arg=lua_istable(s,1)?2:1;const auto&r=Get(s,arg);
- const int kind=lua_tointeger(s,lua_upvalueindex(1));bool matches=false;
+ const int kind=CheckedInteger(s,lua_upvalueindex(1));bool matches=false;
  if(kind==GeneralItemFactory)matches=r.kind==DbRecord&&r.itemTable!=DbMaterial;
  else if(kind==ArmorAbsorbtionFactory)matches=r.kind==DbAbsorbtion&&r.itemTable==DbArmor;
  else matches=r.kind==DbRecord&&r.itemTable==kind;
@@ -604,8 +650,8 @@ void InstallItemConstructors(lua_State*s){
 int PerkIndex(lua_State*s){return NativeGetPerkIndex(s);}
 
 int IntegerMath(lua_State*s){
- auto a=luaL_checkinteger(s,1),b=luaL_checkinteger(s,2);
- if(b==0||(a==(std::numeric_limits<lua_Integer>::lowest)()&&b==-1))return luaL_error(s,"Invalid integer division");
+ const int a=CheckedInteger(s,1),b=CheckedInteger(s,2);
+ if(b==0||(a==(std::numeric_limits<int>::lowest)()&&b==-1))return luaL_error(s,"Invalid integer division");
  lua_pushinteger(s,lua_toboolean(s,lua_upvalueindex(1))?a%b:a/b);return 1;
 }
 int UnitItemsWeight(lua_State*s){auto&r=Get(s);if(r.kind!=Unit)return luaL_error(s,"Expected unit");auto*u=(CUnit*)r.object;float weight=u->GetItemsWeight();if(u->GetUnitSpecific()&&(u->GetUnitSpecific()->WhoAmI()!=HPC_UNITCLIENTSPECIFIC||u->GetOwner()))for(DWORD i=0;i<u->GetSpellSlotCount();i++)if(u->GetQSpellItem(i))weight+=1;lua_pushnumber(s,weight);return 1;}
@@ -614,8 +660,8 @@ int Difficulty(lua_State*s){lua_pushinteger(s,theSettings.nDifficultyLevel);retu
 int PlayUnitSound(lua_State*s){
  auto& ref=Get(s);if(ref.kind!=Unit)return luaL_error(s,"Expected unit");
  const char* name=luaL_checklstring(s,2,nullptr);
- const int minimum=static_cast<int>(luaL_checkinteger(s,3));
- const int maximum=static_cast<int>(luaL_checkinteger(s,4));
+ const int minimum=CheckedInteger(s,3);
+ const int maximum=CheckedInteger(s,4);
  auto* manager=theWorld.GetSoundManager();
  if(!manager)return luaL_error(s,"Sound manager unavailable");
  manager->BeginFX(name,0,static_cast<CUnit*>(ref.object)->GetCP(),
@@ -662,6 +708,16 @@ int TempDumpVars(lua_State*s){
  }
  return 0;
 }
+// The installed complex-cache closures index their first argument directly.
+// Normalize both host userdata and nested Lua calls to the same ObjectId key,
+// retaining the actual Lua formulas/cache closures as the implementation.
+int ComplexCallback(lua_State*s){
+ const int args=lua_gettop(s);auto&r=Get(s);
+ if(r.kind!=Unit)return luaL_error(s,"Complex cache requires a typed unit or callback-bound ObjectId");
+ PushUnitCacheKey(s,*static_cast<CUnit*>(r.object));lua_replace(s,1);
+ lua_pushvalue(s,lua_upvalueindex(1));lua_insert(s,1);lua_call(s,args,LUA_MULTRET);
+ return lua_gettop(s);
+}
 int RawRejected(lua_State*s){return luaL_error(s,"Original-EXE memory accessor unavailable; use typed engine object");}
 }
 void Push(lua_State*s,const CSpell*p,const std::shared_ptr<Scope>&scope){PushRef(s,const_cast<CSpell*>(p),Spell,scope);}
@@ -683,11 +739,27 @@ void Register(lua_State*s){
  lua_pushcfunction(s,NativeGetArmorRecord);lua_setglobal(s,"GetArmorRecord");
  lua_pushcfunction(s,ArmorMaterialName);lua_setglobal(s,"GetEquippedArmorMaterialName");for(int mod=0;mod<2;mod++){lua_pushboolean(s,mod);lua_pushcclosure(s,IntegerMath,1);lua_setglobal(s,mod?"IMod":"IDiv");}lua_pushcfunction(s,Difficulty);lua_setglobal(s,"GetDifficulty");lua_pushcfunction(s,PlayUnitSound);lua_setglobal(s,"PlaySound");lua_pushcfunction(s,GetUnitSpell);lua_setglobal(s,"GetSpell");lua_pushcfunction(s,GetUnitGSVar);lua_setglobal(s,"GetGSVar");lua_pushcfunction(s,SetUnitGSVar);lua_setglobal(s,"SetGSVar");lua_pushcfunction(s,IsHostUnit);lua_setglobal(s,"UnitIsHost");lua_pushcfunction(s,NativeRound);lua_setglobal(s,"Round");lua_pushcfunction(s,FixHitLocations);lua_setglobal(s,"FixHls");lua_pushcfunction(s,EngineClassId);lua_setglobal(s,"GetClassId");lua_pushcfunction(s,NativeGetEffectValue);lua_setglobal(s,"GetEffectValue");lua_pushcfunction(s,NativeServerPerkModifier);lua_setglobal(s,"GetPerkModifierForServer");lua_pushcfunction(s,NativeClientPerkModifier);lua_setglobal(s,"GetPerkModifierForClient");lua_pushcfunction(s,NativeHeal);lua_setglobal(s,"Heal");lua_pushcfunction(s,NativeRegenMp);lua_setglobal(s,"RegenMp");lua_pushcfunction(s,NativeDistributeHp);lua_setglobal(s,"DistributeHp");lua_pushcfunction(s,NativeDistributeHpProportional);lua_setglobal(s,"DistributeHpProportional");lua_pushcfunction(s,NativeCollectHp);lua_setglobal(s,"CollectHp");lua_pushcfunction(s,NativeItemsWeight);lua_setglobal(s,"GetItemsWeight");lua_pushcfunction(s,NativeGetWeapon);lua_setglobal(s,"GetWeapon");lua_pushcfunction(s,NativeGetArmor);lua_setglobal(s,"GetArmor");lua_pushcfunction(s,NativeGetQuick);lua_setglobal(s,"GetQuick");lua_pushcfunction(s,NativeGetPerkIndex);lua_setglobal(s,"GetPerkIndex");lua_pushcfunction(s,NativeGetPerkRecord);lua_setglobal(s,"GetPerkRecord");luaL_newmetatable(s,meta);lua_pushcfunction(s,Index);lua_setfield(s,-2,"__index");lua_pushcfunction(s,NewIndex);lua_setfield(s,-2,"__newindex");lua_pushcfunction(s,GC);lua_setfield(s,-2,"__gc");lua_pushliteral(s,"engine object");lua_setfield(s,-2,"__metatable");lua_pop(s,1);lua_pushcfunction(s,Console);lua_setglobal(s,"ConsoleWriteLine");lua_pushcfunction(s,TempDumpVars);lua_setglobal(s,"TempDumpVars");
  const char* types[]={"Str","Float","Double","UInt32","UInt16","UInt8","Int32","Int16","Int8"};for(auto t:types)for(auto suffix:{"FromMem","ToMem"}){std::string name=std::string(t)+suffix;lua_pushcfunction(s,RawRejected);lua_setglobal(s,name.c_str());}}
+int BeginCallbackScope(lua_State*s){
+ lua_pushlightuserdata(s,const_cast<char*>(&unitRefsKey));lua_rawget(s,LUA_REGISTRYINDEX);
+ const int previous=luaL_ref(s,LUA_REGISTRYINDEX);
+ lua_pushlightuserdata(s,const_cast<char*>(&unitRefsKey));lua_newtable(s);lua_rawset(s,LUA_REGISTRYINDEX);
+ return previous;
+}
+void EndCallbackScope(lua_State*s,int previous){
+ lua_pushlightuserdata(s,const_cast<char*>(&unitRefsKey));
+ if(previous==LUA_REFNIL)lua_pushnil(s);else lua_rawgeti(s,LUA_REGISTRYINDEX,previous);
+ lua_rawset(s,LUA_REGISTRYINDEX);luaL_unref(s,LUA_REGISTRYINDEX,previous);
+}
 void InstallFactories(lua_State*s){
   lua_pushcfunction(s,ClientHlsPercent);lua_setglobal(s,"GetHlsPercent");lua_pushcfunction(s,UnitItemsWeight);lua_setglobal(s,"GetUnitItemsWeight");
  lua_pushcfunction(s,AddPerkRecord);lua_setglobal(s,"AddPerkRecord");lua_pushcfunction(s,LeftHand);lua_setglobal(s,"GetLeftHand");
  lua_newtable(s);lua_pushcfunction(s,EffectArray);lua_setfield(s,-2,"new");lua_newtable(s);lua_pushcfunction(s,EffectArray);lua_setfield(s,-2,"__call");lua_setmetatable(s,-2);lua_setglobal(s,"Array");struct Entry{const char*name;Kind kind;};const Entry entries[]={{"Spell",Spell},{"SpellEffect",SpellEffect},{"AttackParams",Attack},{"ItemSpell",Item},{"UnitClientStats",ClientStats},{"UnitServerStats",Stats},{"UnitServerCommonStats",Common},{"UnitServer",Unit},{"UnitClient",Unit},{"BaseUnit",Unit},{"BaseItem",Item},{"ItemWeapon",Item},{"ItemArmor",Item},{"ItemQuick",Item},{"PrimaryStat",Primary},{"SecondaryStat",Secondary},{"HitLocation",HitLocation},{"ArmorLayer",ArmorLayer}};for(auto&e:entries){Constructor(s,e.kind);lua_setglobal(s,e.name);}
  InstallPerkConstructor(s);lua_getglobal(s,"PerksDatabase");lua_getfield(s,-1,"PerksTable");lua_pushcfunction(s,PerkIndex);lua_setfield(s,-2,"getRecordIndex");lua_pop(s,2);
+ for(const char*name:{"GetComplexItemsStats","GetComplexStats","GetComplexSummStats"}){
+  lua_getglobal(s,name);
+  if(!lua_isfunction(s,-1))throw std::runtime_error(std::string("Missing complex stats callback: ")+name);
+  lua_pushcclosure(s,ComplexCallback,1);lua_setglobal(s,name);
+ }
  // Keep the installed Lua getRecord wrappers: empty0->nil and dynamic typed factory.
  InstallItemConstructors(s);
 

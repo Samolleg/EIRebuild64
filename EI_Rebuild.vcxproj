@@ -48,7 +48,7 @@
       <SDLCheck>false</SDLCheck>
       <PreprocessorDefinitions>EID3D11_EMBEDDED;BRANCH_DX11;NDEBUG;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_CONSOLE;NODEBUGINFO;DONT_DISPLAY_DEBUG_IDS;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)out\include;$(ProjectDir)out\x64\Release\luajit\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -214,7 +214,6 @@
     <ClCompile Include="Game\Light.cpp" />
     <ClCompile Include="Game\LightManager.cpp" />
     <ClCompile Include="Game\Lightning.cpp" />
-    <ClCompile Include="Game\LuaState.cpp" />
     <ClCompile Include="Game\ModPackage.cpp" />
     <ClCompile Include="Game\ModLuaBridge.cpp" />
     <ClCompile Include="Game\ModRuntime.cpp" />
@@ -459,7 +458,6 @@
     <ClInclude Include="Game\LightManager.h" />
     <ClInclude Include="Game\Lightning.h" />
     <ClInclude Include="Game\LRUStorage.h" />
-    <ClInclude Include="Game\LuaState.h" />
     <ClInclude Include="Game\MapEditObject.h" />
     <ClInclude Include="Game\MapEditorChunkIDs.h" />
     <ClInclude Include="Game\mapFormat.h" />
