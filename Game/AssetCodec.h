@@ -55,17 +55,26 @@ class Archive
     {
         static_assert(std::is_integral_v<T> || std::is_enum_v<T> || std::is_same_v<T, float>,
                       "Only numeric fields can be packed");
-        return (std::is_same_v<T, bool> || std::is_same_v<T, char> ||
-                std::is_same_v<T, signed char> || std::is_same_v<T, unsigned char>) ? 1 : 4;
+        if constexpr (std::is_integral_v<T>)
+        {
+            static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4,
+                          "Asset integers must be 1, 2 or 4 bytes; no native size_t/64-bit fields");
+            return static_cast<int>(sizeof(T));
+        }
+        else
+        {
+            static_assert(sizeof(T) == 4, "Asset enums and binary32 must be 4 bytes");
+            return 4;
+        }
     }
-    static void PutWord(unsigned char *out, std::uint32_t bits)
+    static void PutWord(unsigned char *out, std::uint32_t bits, int width)
     {
-        for (int i = 0; i < 4; ++i) out[i] = static_cast<unsigned char>(bits >> (8 * i));
+        for (int i = 0; i < width; ++i) out[i] = static_cast<unsigned char>(bits >> (8 * i));
     }
-    static std::uint32_t GetWord(const unsigned char *in)
+    static std::uint32_t GetWord(const unsigned char *in, int width)
     {
         std::uint32_t bits = 0;
-        for (int i = 0; i < 4; ++i) bits |= std::uint32_t(in[i]) << (8 * i);
+        for (int i = 0; i < width; ++i) bits |= std::uint32_t(in[i]) << (8 * i);
         return bits;
     }
     template <class T>
@@ -83,7 +92,7 @@ class Archive
                 static_assert(sizeof(T) <= 4, "No native pointer/size_t/64-bit field in assets");
                 bits = static_cast<std::uint32_t>(value);
             }
-            PutWord(out, bits);
+            PutWord(out, bits, Width<T>());
         }
     }
     template <class T>
@@ -91,18 +100,17 @@ class Archive
     {
         if constexpr (std::is_same_v<T, bool>)
             value = in[0] != 0;
-        else if constexpr (Width<T>() == 1)
-            value = static_cast<T>(in[0]);
         else
         {
-            const std::uint32_t bits = GetWord(in);
+            const std::uint32_t bits = GetWord(in, Width<T>());
             if constexpr (std::is_same_v<T, float>)
                 std::memcpy(&value, &bits, 4);
             else if constexpr (std::is_signed_v<T> || std::is_enum_v<T>)
             {
-                // Signed x86 fields/enums are two's complement int32.
-                const std::int64_t number = bits <= 0x7fffffffU ? bits :
-                    static_cast<std::int64_t>(bits) - 0x100000000LL;
+                // Sign-extend the fixed-width x86 two's complement field.
+                constexpr std::int64_t modulus = 1LL << (8 * Width<T>());
+                const std::int64_t number = bits < modulus / 2 ? bits :
+                    static_cast<std::int64_t>(bits) - modulus;
                 value = static_cast<T>(number);
             }
             else
