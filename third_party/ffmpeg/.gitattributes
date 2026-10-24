@@ -1,0 +1,4 @@
+source.lock text eol=lf
+configure.args text eol=lf
+COPYING.LGPLv2.1 -text
+LICENSE.md -text
