@@ -282,6 +282,10 @@ int CStructureSaver::CountChunks(const chunk_id idChunk)
 /////////////////////////////////////////////////////////////////////////////////////
 void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
 {
+    if (IsReading())
+        ReleaseObjects();
+    resourceLabels.clear();
+    toStore.clear();
     chunks.clear();
     obj.Clear();
     data.Clear();
@@ -296,16 +300,20 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
         GetShortChunkSave(res, 2, data);
         chunks.back().nLength = data.GetSize();
         // create all objects from obj
-        if (obj.GetSize() % 8) obj.Fail("invalid_object_registry_length");
+        if (obj.GetSize() % 8)
+        { obj.Fail("invalid_object_registry_length"); return; }
         while (obj.GetPosition() < obj.GetSize())
         {
             int nTypeID = 0;
-            void *pServer = 0;
+            std::uint32_t label = 0;
             obj.Read(&nTypeID, 4);
-            obj.Read(&pServer, 4);
-            CFundament *pObject = SSClasses.CreateObject(nTypeID);
-            toStore.push_back(pObject);
-            objects[pServer] = pObject;
+            obj.Read(&label, 4);
+            if (!label || resourceObjects.count(label))
+            { obj.Fail("invalid_resource_object_label"); return; }
+            CPtr<CFundament> pObject = SSClasses.CreateObject(nTypeID);
+            if (!pObject.GetPtr())
+            { obj.Fail("unknown_resource_object_type"); return; }
+            resourceObjects.emplace(label, pObject);
         }
         // CRAP
         if (_nVersion == 1)
@@ -317,12 +325,15 @@ void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
         int nCount = CountChunks((chunk_id)1);
         for (int i = 0; i < nCount; i++)
         {
-            void *pServer = 0;
+            std::uint32_t label = 0;
             CFundament *pObject;
             SetChunkCounter(i + 1);
             StartChunk((chunk_id)1);
-            DataChunk(0, &pServer, 4);
-            pObject = (CFundament *)objects[pServer];
+            DataChunk(0, &label, 4);
+            const auto found = resourceObjects.find(label);
+            if (found == resourceObjects.end())
+            { data.Fail("unknown_resource_object_label"); return; }
+            pObject = found->second.GetPtr();
             ASSERT(pObject);
             if (pObject)
                 Add(1, *pObject);
@@ -354,14 +365,16 @@ void CStructureSaver::Finish(CSave &res)
         {
             CFundament *pObject = toStore.front();
             toStore.pop_front();
-            // save object type and its server pointer
+            // Fixed resource type and opaque file label.
             int nTypeID = SSClasses.GetObjectTypeID(pObject);
             ASSERT(nTypeID != -1);
             obj.Write(&nTypeID, 4);
-            obj.Write(&pObject, 4);
+            const std::uint32_t label = resourceLabels.at(pObject);
+            obj.Write(&label, 4);
             // save object data
             StartChunk((chunk_id)1);
-            DataChunk(0, &pObject, 4);
+            std::uint32_t fieldLabel = label;
+            DataChunk(0, &fieldLabel, 4);
             Add(1, *pObject);
             FinishChunk();
         }
@@ -371,48 +384,55 @@ void CStructureSaver::Finish(CSave &res)
         AlignDataFileSize();
         WriteShortChunkSave(res, 2, data);
     }
-    else
-    {
-        ReleaseObjects();
-    }
     obj.Clear();
     data.Clear();
-    objects.clear();
+    if (IsReading())
+        ReleaseObjects();
+    resourceLabels.clear();
     toStore.clear();
     chunks.clear();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CStructureSaver::ReleaseObjects()
 {
-    // Pin the whole graph before any Release can destroy another entry.
-    // Pointer hashes are lookup-only; cleanup order is runtime identity order.
+    // Pin the complete resource graph while releasing the label table.
     std::vector<CPtr<CFundament>> keep;
-    for (const auto &entry : objects)
-        keep.emplace_back(static_cast<CFundament *>(entry.second));
+    for (const auto &entry : resourceObjects)
+        keep.push_back(entry.second);
     std::sort(keep.begin(), keep.end(), [](const auto &a, const auto &b) {
-        return ObjectIdentity::IdOf(a.GetPtr()) < ObjectIdentity::IdOf(b.GetPtr());
+        return a->GetRTID() < b->GetRTID();
     });
-    objects.clear();
+    resourceObjects.clear();
     for (auto &object : keep)
         object = nullptr;
 }
 void CStructureSaver::StoreObject(const chunk_id idChunk, CFundament *pObject)
 {
-    if (objects.find(pObject) == objects.end())
+    std::uint32_t label = 0;
+    if (pObject)
     {
-        toStore.push_back(pObject);
-        objects[pObject] = this; // важно присвоить хоть что-нибудь
+        auto found = resourceLabels.find(pObject);
+        if (found == resourceLabels.end())
+        {
+            if (resourceLabels.size() >= UINT32_MAX)
+            { data.Fail("resource_label_overflow"); return; }
+            label = static_cast<std::uint32_t>(resourceLabels.size() + 1);
+            resourceLabels.emplace(pObject, label);
+            // Writing tracks labels only; ownership remains with the caller.
+            toStore.push_back(pObject);
+        }
+        else
+            label = found->second;
     }
-    DataChunk(idChunk, &pObject, 4);
+    DataChunk(idChunk, &label, 4);
 }
-/////////////////////////////////////////////////////////////////////////////////////
 CFundament *CStructureSaver::LoadObject(const chunk_id idChunk)
 {
-    void *pServerPtr = 0;
-    DataChunk(idChunk, &pServerPtr, 4);
-    auto pFound = objects.find(pServerPtr);
-    if (pFound != objects.end())
-        return (CFundament *)pFound->second;
-    return 0;
+    std::uint32_t label = 0;
+    DataChunk(idChunk, &label, 4);
+    if (!label) return nullptr;
+    const auto found = resourceObjects.find(label);
+    if (found == resourceObjects.end())
+    { data.Fail("unknown_resource_reference"); return nullptr; }
+    return found->second.GetPtr();
 }
-/////////////////////////////////////////////////////////////////////////////////////
