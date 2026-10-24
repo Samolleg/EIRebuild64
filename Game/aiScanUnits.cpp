@@ -8,6 +8,7 @@
  **********************************************************************/
 
 #include "StdAfx.h"
+#include "NumericPolicy.h"
 #include "CorePerf.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -685,13 +686,8 @@ static bool KeepSpellAddonUnseenUnit(CUnitServer *pObserver, float fpDist,
         return false;
     }
     // FISTP writes a signed WORD into a zero DWORD, without sign extension.
-    // Preserve the caller's x87 rounding, including the indefinite WORD 8000h.
-    DWORD distance = 0;
-    __asm
-    {
-        fld fpDist
-        fistp word ptr distance
-    }
+    // Preserve the current rounding and the indefinite WORD 8000h, zero-extended.
+    const DWORD distance = static_cast<uint16_t>(NumericPolicy::RoundToInt16(fpDist));
     const DWORD factor1 = DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_losefactor1))));
     const DWORD factor2 = DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_losefactor2))));
     const DWORD factor3 = DWORD(int(static_cast<signed char>(profile.Int(ModSpellAddon::IntKey::gameplay_losefactor3))));

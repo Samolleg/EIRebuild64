@@ -6,6 +6,7 @@
 #include "ModSpellTextures.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "NumericPolicy.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "EffectSpell.h"
@@ -534,45 +535,13 @@ static void PrepareControlMagic(int kind, CSpell& spell, CMapObject* caster, CMa
                 const float targetInt = destinationServer->GetRPGStats()->psIntelligence.fpEffectiveValue;
                 const float levelCoeff = profile.Scalar(ScalarKey::gameplay_lvldurcoeff);
                 const float intCoeff = profile.Scalar(ScalarKey::gameplay_durcoeff);
-                const float one = 1.0f;
-                const float zero = 0.0f;
-                long duration = effect.nDuration;
-                __asm
-                {
-                    fild sourceLevel
-                    fild targetLevel
-                    fsubp st(1), st(0)
-                    fmul levelCoeff
-                    fild duration
-                    fmul st(1), st(0)
-                    fld targetInt
-                    fsubr sourceInt
-                    fmul intCoeff
-                    fmul st(0), st(1)
-                    faddp st(1), st(0)
-                    faddp st(1), st(0)
-                    fcom one
-                    fnstsw ax
-                    test ah, 1
-                    jz storeDuration
-                    fstp st(0)
-                    fld zero
-                storeDuration:
-                    fistp duration
-                }
-                effect.nDuration = duration;
+                effect.nDuration = NumericPolicy::SpellDuration(effect.nDuration,
+                    sourceLevel, targetLevel, sourceInt, targetInt, levelCoeff, intCoeff);
             }
         }
         // Flags 19 skip duration; flags 11 with no caster do so as well.
         const float base = profile.Scalar(rule.base);
-        float power = effect.fpPower;
-        __asm
-        {
-            fld power
-            fadd base
-            fstp power
-        }
-        effect.fpPower = power;
+        effect.fpPower = NumericPolicy::SpellPower(effect.fpPower, base);
         return;
     }
 }
@@ -1122,74 +1091,6 @@ void CEffectSpell::DeliverSpell(int nKind)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// Match the reachable ASI mana branch, including x87 comparisons and rounding.
-// Typed arguments avoid retail object offsets; no HP branch or extra clamping.
-static void ExchangeLinkMana(float& casterMP, float casterMax,
-                             float& targetMP, float targetMax, float power)
-{
-    float* caster = &casterMP;
-    float* target = &targetMP;
-    __asm
-    {
-        mov ecx, caster
-        mov edx, target
-        fld targetMax
-        fdivr casterMax
-        fld dword ptr [edx]
-        fadd dword ptr [ecx]
-        fld1
-        fadd st(0), st(2)
-        fdiv st(1), st(0)
-        fstp st(0)
-        fmul st(1), st(0)
-        fld dword ptr [ecx]
-        fdiv casterMax
-        fld dword ptr [edx]
-        fdiv targetMax
-        fcomp st(1)
-        fstp st(0)
-        fnstsw ax
-        test ah, 1
-        je casterReceives
-        fld dword ptr [edx]
-        fadd power
-        fcomp st(1)
-        fnstsw ax
-        test ah, 1
-        jne targetLimited
-        jmp balanced
-    casterReceives:
-        fld dword ptr [ecx]
-        fadd power
-        fcomp st(2)
-        fnstsw ax
-        test ah, 1
-        jne casterLimited
-    balanced:
-        fstp dword ptr [edx]
-        fstp dword ptr [ecx]
-        jmp done
-    targetLimited:
-        fld dword ptr [ecx]
-        fsub power
-        fstp dword ptr [ecx]
-        fld dword ptr [edx]
-        fadd power
-        fstp dword ptr [edx]
-        jmp discardBalances
-    casterLimited:
-        fld dword ptr [edx]
-        fsub power
-        fstp dword ptr [edx]
-        fld dword ptr [ecx]
-        fadd power
-        fstp dword ptr [ecx]
-    discardBalances:
-        fstp st(0)
-        fstp st(0)
-    done:
-    }
-}
 void CEffectSpell::ActionSpell(int nKind)
 {
     if(ExtendedAction(nKind))return;
@@ -1347,7 +1248,7 @@ void CEffectSpell::ActionSpell(int nKind)
         {
             auto* casterStats = ((CMapObjectServer*)pWho->GetMapObjectSpecific())->GetRPGStats();
             auto* targetStats = ((CMapObjectServer*)pTarget->GetMapObjectSpecific())->GetRPGStats();
-            ExchangeLinkMana(casterStats->ssMP.fpCurrent, casterStats->ssMP.fpMax,
+            NumericPolicy::ExchangeLinkMana(casterStats->ssMP.fpCurrent, casterStats->ssMP.fpMax,
                              targetStats->ssMP.fpCurrent, targetStats->ssMP.fpMax, GetPower());
             pWho->SetUpdateMask(CMapObject::VLD_MASK_STATS);
             pTarget->SetUpdateMask(CMapObject::VLD_MASK_STATS);
