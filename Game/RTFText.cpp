@@ -17,7 +17,7 @@ extern HWND hWnd;           // main window handler
 extern HINSTANCE hInstance; // aplication instance
 }; // namespace NGame
 
-static DWORD CALLBACK RTFStreamInCallback(DWORD dwCookie, LPBYTE pbBuff, LONG cb, LONG *pcb)
+static DWORD CALLBACK RTFStreamInCallback(DWORD_PTR dwCookie, LPBYTE pbBuff, LONG cb, LONG *pcb)
 {
     CFile *pFile = reinterpret_cast<CFile *>(dwCookie);
     *pcb = pFile->Read(pbBuff, cb);
@@ -59,7 +59,7 @@ bool CI3DTetxRTF::LoadFromFile(const char *pszFileName)
     CFile cFile(pszFileName, CFile::modeRead | CFile::typeBinary);
 
     EDITSTREAM es;
-    es.dwCookie = (DWORD)&cFile;
+    es.dwCookie = reinterpret_cast<DWORD_PTR>(&cFile);
     es.pfnCallback = RTFStreamInCallback;
     m_nTextLenght = ::SendMessage(m_hRichEditCtrl, // handle to destination window
                                   EM_STREAMIN,     // message to send
@@ -86,7 +86,7 @@ bool CI3DTetxRTF::LoadFromMemory(BYTE *pData, int nLen)
     CMemFile cFile(pData, nLen);
 
     EDITSTREAM es;
-    es.dwCookie = (DWORD)&cFile;
+    es.dwCookie = reinterpret_cast<DWORD_PTR>(&cFile);
     es.pfnCallback = RTFStreamInCallback;
     m_nTextLenght = ::SendMessage(m_hRichEditCtrl, // handle to destination window
                                   EM_STREAMIN,     // message to send

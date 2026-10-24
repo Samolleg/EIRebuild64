@@ -10,6 +10,7 @@
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 
+#include <cstdint>
 #include "Base3D.h"
 #include "Plot.h"
 #include "typedefs.h"
@@ -113,7 +114,11 @@ private:
     int nParticlesMax;       // maximum number of particles
     int nAnimPhases;         // number of animation phases
     int nAnimPerTexSize;     // number of animation tiles per texture size
-    int nLifeOfPhase;        // live of one phase
+    union
+    {
+        int nLifeOfPhase;        // live of one phase
+        std::uintptr_t powerHitWeaponToken; // PowerHit uses this slot instead of phase timing.
+    };
     int nInvisibleCounter; // when this counter exceeds certain value and PS_PAUSE_INVISIBLE is set
                            // no segments are called
 
@@ -169,7 +174,7 @@ public:
     void ConfigurePowerHit(CUnit*,const CPlot3D&,const CPlot3D&,int);
     bool IsPowerHitGlow(int hit) const {return createFunc==&CParticle::PowerHitSingleCreate&&fpParam1==0&&locSources.GetSize()==1&&locSources[0].nPhase==hit;}
     void MarkPowerHitDelivered(){if(fpParam2>=0&&fpPower2==0){fpPower2=1;locSources[0].reserved.y=6;}}
-    void SetPowerHitWindup(int ticks,int token){locSources[0].reserved.x=float(ticks);nLifeOfPhase=token;}
+    void SetPowerHitWindup(int ticks,std::uintptr_t token){locSources[0].reserved.x=float(ticks);powerHitWeaponToken=token;}
     static void StopPowerHitLights();
     const char* ConfigureArrow(ETypeIDs type);
     bool ConfigureExtendedSpell(ETypeIDs type,char*texture); // Configuration only; texture binding is owned by Create.

@@ -9,6 +9,7 @@
 ==========================================================================================================*/
 /////////////////////////////////////////////////////////////////////////////////////
 #include <utility>
+#include <cstdint>
 
 #include "Unit.h"
 #include "MapObjectServer.h"
@@ -413,7 +414,7 @@ public:
     bool HasAISpellMana(int slot);
     bool HasAISkillCommand(int slot,CUnit* target);
     bool TagAISkill(int slot,CUnit* target);
-    bool PowerHitTrailActive(int hit,bool delivered,int weaponToken);
+    bool PowerHitTrailActive(int hit,bool delivered,std::uintptr_t weaponToken);
     bool TagWeaponSkill(int slot,CMapObject*target);
     void CancelFollowOnLostSight(CUnit* target);
     const SUnitCommand& GetScriptCommand() const { return curCommand; }

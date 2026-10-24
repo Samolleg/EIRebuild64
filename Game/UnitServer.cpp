@@ -6749,10 +6749,10 @@ int CUnitServer::PrepareExplosiveShot(){
  mod->StartSkillCooldown(*lpUnit,spell,config);curCommand.dwParam=0;GetMapObjectServer()->ChangeCurrentMP(-config.Cost(spell->GetManaCost()));return 1;
 }
 
-bool CUnitServer::PowerHitTrailActive(int hit,bool delivered,int weaponToken){
+bool CUnitServer::PowerHitTrailActive(int hit,bool delivered,std::uintptr_t weaponToken){
  if(lpUnit->IsDead()||lpUnit->CheckFlag(UNIT_STUN)||bL1PlayingSuffer)return false;
  auto*weapon=lpUnit->GetCurrentQWeapon();if(!weapon||(weapon->GetWeaponType()!=4&&weapon->GetWeaponType()!=14))return false;
- if(delivered)return (L1IsFree()||L1IsIdle()||(L1IsAttacking()&&level1Command.nHitTime==hit))&&reinterpret_cast<int>(weapon)==weaponToken;
+ if(delivered)return (L1IsFree()||L1IsIdle()||(L1IsAttacking()&&level1Command.nHitTime==hit))&&reinterpret_cast<std::uintptr_t>(weapon)==weaponToken;
  if(!L1IsAttacking()||level1Command.nHitTime!=hit)return false;
  int slot=ModSkills::Slot(curCommand.dwParam);if(slot<0||curCommand.cmd!=UC_ATTACK)return false;
  auto*spell=GetSpell(slot);if(!spell||!spell->GetPrototype())return false;
@@ -6765,7 +6765,7 @@ void CUnitServer::StartPowerHitGlow(int now){
  if(!carrier||!manager||carrier->FindPowerHitGlow(hit))return;
  auto*particle=manager->CreateParticleSystem(PTID_LIGHTNINGBLAST);if(!particle)return;
  particle->ConfigurePowerHit(carrier,CPlot3D(0,0,0),CPlot3D(0,0,0),hit);
- particle->SetPowerHitWindup(hit-now,reinterpret_cast<int>(lpUnit->GetCurrentQWeapon()));
+ particle->SetPowerHitWindup(hit-now,reinterpret_cast<std::uintptr_t>(lpUnit->GetCurrentQWeapon()));
 }
 void CUnitServer::PowerHitFeedback(CUnit*attacker,float beforeHp){
  if(beforeHp<=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent)return;

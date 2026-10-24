@@ -136,7 +136,7 @@ static CPlot3D GetCenteredRandomRoundPoint()
 
 namespace {
 std::map<CParticle*,CSmartPtr<CEffectPointLight>> powerHitLights;
-bool PowerHitCarrierActive(CObject3D*carrier,const void*world,int hit,bool delivered,int weapon){
+bool PowerHitCarrierActive(CObject3D*carrier,const void*world,int hit,bool delivered,std::uintptr_t weapon){
  if(!carrier||!world||world!=theWorldServer.GetSpecificManager()||theWorld.GetUnit(carrier->GetID())!=carrier)return false;
  auto*unit=theWorldServer.GetUnit(carrier->GetID());auto*server=unit?dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()):nullptr;
  return server&&server->PowerHitTrailActive(hit,delivered,weapon);
@@ -5797,7 +5797,7 @@ void CParticle::ConfigurePowerHit(CUnit* carrier, const CPlot3D& point,
     nMinTrys = carrier ? 2 : 14;
     fpLenToSingleDice = 1.0f;
     nLifeSpan = carrier ? 128 : 9;
-    nLifeOfPhase = 1;
+    powerHitWeaponToken = 1;
     fpSize = carrier ? 0.55f : 0.26f;
     fpParam2 = 0.0f;
     fpPower2 = 0.0f;
@@ -5829,7 +5829,7 @@ void CParticle::PowerHitSourceSegment(SLocalSource* source)
     {
         if (fpParam2 < 0.0f || source->nLifeTime-- <= 0 ||
             (fpPower2 > 0.0f && source->reserved.y <= 0.0f) ||
-            !PowerHitCarrierActive(pCarrier,powerHitWorld,source->nPhase,fpPower2>0,nLifeOfPhase) ||
+            !PowerHitCarrierActive(pCarrier,powerHitWorld,source->nPhase,fpPower2>0,powerHitWeaponToken) ||
             !static_cast<CUnit*>(pCarrier)->MatchFigure("rh3"))
         {
             fpParam2 = -1.0f;

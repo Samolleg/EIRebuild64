@@ -112,12 +112,11 @@ public:
     int ShiftToMipLevel(int nMipLevel) const;
     LPVOID GetUsedData() const
     {
-        return reinterpret_cast<LPVOID>(reinterpret_cast<int>(this) + sizeof(*this));
+        return const_cast<BYTE *>(reinterpret_cast<const BYTE *>(this) + sizeof(*this));
     }
     LPVOID GetMipLevelData(int nMipLevel) const
     {
-        return reinterpret_cast<LPVOID>(reinterpret_cast<int>(GetUsedData()) +
-                                        ShiftToMipLevel(nMipLevel));
+        return static_cast<BYTE *>(GetUsedData()) + ShiftToMipLevel(nMipLevel);
     }
     // default pixel format initialization
     void InitializeDefaultFormat0000();

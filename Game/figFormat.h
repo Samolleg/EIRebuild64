@@ -30,11 +30,10 @@ public:
 public:
     LPVOID GetUsedData() const
     {
-        return reinterpret_cast<LPVOID>(reinterpret_cast<int>(this) + sizeof(*this));
+        return const_cast<BYTE *>(reinterpret_cast<const BYTE *>(this) + sizeof(*this));
     }
     LPVOID GetFigureData() const
     {
-        return reinterpret_cast<LPVOID>(reinterpret_cast<int>(GetUsedData()) +
-                                        static_cast<int>(dwUserDataShift));
+        return static_cast<BYTE *>(GetUsedData()) + dwUserDataShift;
     }
 };

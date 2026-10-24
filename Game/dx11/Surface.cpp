@@ -342,7 +342,7 @@ int CopyToSurface(CDXGISurface *pDXDDS, const SMMPFileHeader *pHdr, DWORD dwFrom
         auto depthPitch = pHdr->dwBitDepth * dwNewSizeX / 8 * dwNewSizeY;
         srd.SysMemSlicePitch = 0;
         pDXDDS->UpdateTexture(sub_index, nullptr, &srd);
-        lpData = reinterpret_cast<LPBYTE>(reinterpret_cast<int>(lpData) + depthPitch);
+        lpData += depthPitch;
         nTotalSize += depthPitch;
         // get next mip-map surface
         // correct sizes
