@@ -66,7 +66,7 @@
 #include "ModHDEquipmentLayer.h"
 #include "mapFormat.h"
 #include "adFormat.h"
-#include "luajit-x86/lua.hpp"
+#include <lua.hpp>
 #include <filesystem>
 #include <fstream>
 void ModDeathFearReset();
@@ -265,9 +265,9 @@ struct StunEntry {
  ~StunEntry(){if(!committed){lua_rawgeti(s,LUA_REGISTRYINDEX,table);if(previous==LUA_REFNIL)lua_pushnil(s);else lua_rawgeti(s,LUA_REGISTRYINDEX,previous);lua_rawseti(s,-2,id);lua_pop(s,1);}luaL_unref(s,LUA_REGISTRYINDEX,table);luaL_unref(s,LUA_REGISTRYINDEX,previous);}
 };
 struct CallbackFrame {
- lua_State *state;int top;std::shared_ptr<ModLua::Scope> scope=std::make_shared<ModLua::Scope>();
- explicit CallbackFrame(lua_State*s):state(s),top(0){if(!s)throw std::runtime_error("Mod package not loaded");top=lua_gettop(s);}
- ~CallbackFrame(){scope->active=false;lua_settop(state,top);}
+ lua_State *state;int top;int previousUnits=LUA_REFNIL;std::shared_ptr<ModLua::Scope> scope=std::make_shared<ModLua::Scope>();
+ explicit CallbackFrame(lua_State*s):state(s),top(0){if(!s)throw std::runtime_error("Mod package not loaded");top=lua_gettop(s);previousUnits=ModLua::BeginCallbackScope(s);}
+ ~CallbackFrame(){scope->active=false;ModLua::EndCallbackScope(state,previousUnits);lua_settop(state,top);}
 };
 double Number(lua_State*s,const char*name){
  if(lua_type(s,-1)!=LUA_TNUMBER)throw std::runtime_error(std::string(name)+": expected numeric result");
@@ -1667,7 +1667,7 @@ bool CModPackage::GetNpcCombatConsumableConfig(const char*zone,int id,const char
   ModStaticLookup::ConsumableValue result;
   Stack stack(state);lua_getglobal(state,"GetNpcCombatConsumableConfig");if(!lua_isfunction(state,-1))return result;lua_pushstring(state,zone);lua_pushinteger(state,id);lua_pushstring(state,name);lua_pushinteger(state,kind);lua_pushinteger(state,variant);Call(5,4);
   if(lua_isnil(state,-4) && lua_isnil(state,-3) && lua_isboolean(state,-2) && !lua_toboolean(state,-2) && lua_isboolean(state,-1) && !lua_toboolean(state,-1)){valid=true;return result;}
-  if(!lua_isstring(state,-4)||!lua_isnumber(state,-3))return result;const char*formula=lua_tostring(state,-4);int charges=int(lua_tointeger(state,-3));if(!formula||!formula[0]||charges<1||charges>7)return result;
+  if(!lua_isstring(state,-4)||!lua_isnumber(state,-3))return result;const char*formula=lua_tostring(state,-4);const double chargeValue=lua_tonumber(state,-3);if(!formula||!formula[0]||!std::isfinite(chargeValue)||chargeValue<1||chargeValue>7||floor(chargeValue)!=chargeValue)return result;const int charges=static_cast<int>(chargeValue);
   result.config.spellFormula=formula;result.config.charges=charges;result.config.automatic=lua_toboolean(state,-2)!=0;result.config.prototypeFallback=lua_toboolean(state,-1)!=0;
   result.found=true;valid=true;return result;
  });
@@ -2118,7 +2118,12 @@ bool CModPackage::TargetSkill(CSpell*spell)const{
 }
 float CModPackage::InfoProperty(const char*callback,const char*name,int property){
  CallbackFrame frame(state);BeginCallback(callback);lua_pushstring(state,name);lua_pushinteger(state,property);Call(2,1);
- if(!strcmp(callback,"GetSetItemStats"))return float(static_cast<int32_t>(lua_tointeger(state,-1)));
+ if(!strcmp(callback,"GetSetItemStats")){
+  const double value=Number(state,callback);
+  if(value<(std::numeric_limits<int32_t>::lowest)()||value>(std::numeric_limits<int32_t>::max)())
+   throw std::runtime_error("Set item property exceeds int32 range");
+  return float(static_cast<int32_t>(value)); // Existing truncation, after the range check.
+ }
  double n=Number(state,callback);if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Info property overflow");return float(n);
 }
 bool CModPackage::InfoForbiddenSpell(const char*name,int shop){

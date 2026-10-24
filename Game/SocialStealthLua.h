@@ -1,6 +1,6 @@
 #pragma once
 #include "SocialStealthRules.h"
-#include "luajit-x86/lua.hpp"
+#include <lua.hpp>
 #include <cmath>
 
 namespace SocialStealth {

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Header Files">
@@ -627,9 +627,6 @@
       <Filter>Sources\dx11</Filter>
     </ClCompile>
     <ClCompile Include="Game\TextureDescriptor.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\LuaState.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\OwnedRender\CampSubmission.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -1368,9 +1365,6 @@
       <Filter>Sources\dx11</Filter>
     </ClInclude>
     <ClInclude Include="Game\TextureDescriptor.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\LuaState.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\Internal.h">

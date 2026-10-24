@@ -35,6 +35,9 @@ void PushFloats(lua_State*,float*,int,const std::shared_ptr<Scope>&);
 void Push(lua_State*,const SRPGUserUnitStats*,const std::shared_ptr<Scope>&);
 void Register(lua_State *state);
 void InstallFactories(lua_State *state);
+// Stack of callback-local ObjectId -> typed unit bindings; no world lookup.
+int BeginCallbackScope(lua_State*);
+void EndCallbackScope(lua_State*,int previous);
 void Push(lua_State*,SRPGUnitStats*,const std::shared_ptr<Scope>&);
 void Push(lua_State*,SRPGCommonStats*,const std::shared_ptr<Scope>&);
 void Push(lua_State*,const CUnit*,const std::shared_ptr<Scope>&);

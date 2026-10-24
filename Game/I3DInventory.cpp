@@ -36,7 +36,6 @@ static float ModInfoProperty(const char*callback,const char*name,int property)
 #include "RandomGen.h"
 #include "Party.h"
 #include "GameMain.h"
-#include "LuaState.h"
 #include "UnitServer.h"
 #include "WorldServer.h"
 #include "I3DScreenCamp.h"

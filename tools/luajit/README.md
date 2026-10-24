@@ -30,8 +30,8 @@ Outputs: `out/x64/Release/luajit/luajit.lib`, matching public headers in `includ
 generated headers, VM object and compiler PDB remain in the private intermediate
 directory. Existing successful output is reused when its inputs are unchanged.
 
-This replaces the old solution/project dependency, retaining its project GUID
-and library path. It does not migrate host includes or pointer handling; those
-remain P13/P14. The old `luajit-x86` headers/CMake sources remain reference-only
-until that migration; the old Visual Studio project and tracked x86 VM object
-are removed. Building this library does not imply that EIRebuild64 links or runs.
+The solution/project dependency retains its project GUID and library path.
+The host includes only the matching public headers from the generated include/
+directory and links this library. P14 removes LuaState and the entire old
+luajit-x86 tree; no internal lj_* headers are used by the host.
+Building this library does not imply that EIRebuild64 links or runs.

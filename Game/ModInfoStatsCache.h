@@ -97,7 +97,7 @@ struct Cache {
 #include <vector>
 #include <utility>
 #include "ModLuaBridge.h"
-#include "luajit-x86/lua.hpp"
+#include <lua.hpp>
 #include "Unit.h"
 #include "Item.h"
 #include "ItemDatabase.h"

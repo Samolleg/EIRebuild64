@@ -29,7 +29,7 @@
 #include "ItemManager.h"
 #include "WorldServer.h"
 #include "ServerSpecificManager.h"
-#include "luajit-x86/lua.hpp"
+#include <lua.hpp>
 #include <stdexcept>
 #include <filesystem>
 #include <shellapi.h>
