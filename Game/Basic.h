@@ -36,7 +36,7 @@ class CObj;
 class CFundament
 {
 private:
-    ObjectIdentity::Instance identity{this};
+    ObjectIdentity::Instance identity;
     union
     {
         struct

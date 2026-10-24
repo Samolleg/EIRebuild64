@@ -813,9 +813,11 @@ void CWorldServer::AddActiveObject(CMapObject *pObject)
 /////////////////////////////////////////////////////////////////////////////////////
 // Snapshot keys rather than pointers: Segment may remove or replace another object.
 // Objects activated during this pass start on the next pass.
-static std::vector<std::pair<ObjectId, int>> OrderedTickObjects(CMapObjPtrHash &objects)
+static const std::vector<std::pair<ObjectId, int>> &OrderedTickObjects(
+    CMapObjPtrHash &objects, std::vector<std::pair<ObjectId, int>> &order)
 {
-    std::vector<std::pair<ObjectId, int>> order;
+    order.clear();
+    order.reserve(objects.GetCount());
     CMapObjPtrHashIterator iter;
     for (auto *object = iter.GetFirst(&objects); object; object = iter.GetNext())
         order.emplace_back(object->GetRTID(), object->GetID());
@@ -842,7 +844,7 @@ void CWorldServer::ActiveObjectsSegment()
     if(auto*mod=ModRuntime::Current())mod->TickStatRefresh();
     if (curInterface != IFACE_MISSION)
     {
-        for (const auto &key : OrderedTickObjects(dynamicObjs))
+        for (const auto &key : OrderedTickObjects(dynamicObjs, tickObjectOrder))
         {
             pMO = FindTickObject(dynamicObjs, key);
             if (!pMO) continue;
@@ -855,14 +857,14 @@ void CWorldServer::ActiveObjectsSegment()
     else
     {
         // The addon keeps spell durations moving for objects outside the active set.
-        for (const auto &key : OrderedTickObjects(dynamicObjs))
+        for (const auto &key : OrderedTickObjects(dynamicObjs, tickObjectOrder))
         {
             pMO = FindTickObject(dynamicObjs, key);
             if (!pMO) continue;
             if (!pMO->IsInvalid() && !pMO->IsUnreferenced() && pMO->TickInactiveSpellEffects())
                 AddActiveObject(pMO);
         }
-        for (const auto &key : OrderedTickObjects(activeSet))
+        for (const auto &key : OrderedTickObjects(activeSet, tickObjectOrder))
         {
             pMO = FindTickObject(activeSet, key);
             if (!pMO) continue;

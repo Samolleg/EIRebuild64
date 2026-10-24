@@ -10,7 +10,7 @@ class CRefCount
 {
 private:
     mutable int nRefCount;
-    ObjectIdentity::Instance identity{this};
+    ObjectIdentity::Instance identity;
 
 protected:
     virtual ~CRefCount() {} // this object cannot be deleted directly - only through 'Release'

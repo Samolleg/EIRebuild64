@@ -46,7 +46,7 @@ public:
 class CMFundament
 {
 private:
-    ObjectIdentity::Instance identity{this};
+    ObjectIdentity::Instance identity;
     std::atomic<unsigned int> nRefCount;
     //  functions to work with ref count.
     // they are private in order to disable explicit manipulation!

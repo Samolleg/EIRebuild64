@@ -1,88 +1,38 @@
 #include "StdAfx.h"
 #include "ObjectIdentity.h"
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
 namespace ObjectIdentity {
-ObjectId Registry::Register(const void *object)
+namespace {
+std::atomic<ObjectId> nextId{1};
+}
+
+ObjectId Next()
 {
-    if (!object)
-        throw std::invalid_argument("ObjectId requires a live owner");
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!state.nextId)
-        throw std::overflow_error("ObjectId namespace exhausted");
-    const auto id = state.nextId;
-    if (!objects.emplace(id, object).second)
-        throw std::logic_error("Duplicate ObjectId");
-    // Zero marks exhaustion, never an allocated ID.
-    state.nextId = id == (std::numeric_limits<ObjectId>::max)() ? 0 : id + 1;
+    const ObjectId id = nextId.fetch_add(1, std::memory_order_relaxed);
+    if (!id || id == (std::numeric_limits<ObjectId>::max)())
+    {
+        // Fatal rather than recoverable: fetch_add has reached the wrap boundary.
+        // No caller may continue creating objects with reused IDs.
+        std::fputs("ObjectId namespace exhausted\n", stderr);
+        std::abort();
+    }
     return id;
 }
 
-void Registry::Unregister(ObjectId id, const void *object) noexcept
+ObjectId GetNext()
 {
-    std::lock_guard<std::mutex> lock(mutex);
-    const auto found = objects.find(id);
-    if (found != objects.end() && found->second == object)
-        objects.erase(found);
+    return nextId.load(std::memory_order_relaxed);
 }
 
-const void *Registry::Resolve(ObjectId id, std::uint64_t epoch) const
+void SetNext(ObjectId id)
 {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!id || epoch != state.epoch)
-        return nullptr;
-    const auto found = objects.find(id);
-    return found == objects.end() ? nullptr : found->second;
-}
-
-State Registry::GetState() const
-{
-    std::lock_guard<std::mutex> lock(mutex);
-    return state;
-}
-
-void Registry::BeginEpoch()
-{
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!objects.empty())
-        throw std::logic_error("Cannot reset ObjectId with live objects");
-    if (state.epoch == (std::numeric_limits<std::uint64_t>::max)())
-        throw std::overflow_error("ObjectId epoch exhausted");
-    ++state.epoch;
-    state.nextId = 1;
-}
-
-Registry &Runtime()
-{
-    // Process lifetime: global objects may unregister during static teardown.
-    static Registry *registry = new Registry;
-    return *registry;
-}
-
-Instance::Instance(const void *object, Registry &domain)
-    : registry(&domain), owner(object), id(domain.Register(object))
-{
-}
-
-Instance::~Instance()
-{
-    if (registry)
-        registry->Unregister(id, owner);
-}
-
-Instance::Instance(Instance &&other) noexcept
-    : registry(other.registry), owner(other.owner), id(other.id)
-{
-    other.registry = nullptr;
-    other.owner = nullptr;
-    other.id = 0;
-}
-
-void Instance::Swap(Instance &other) noexcept
-{
-    std::swap(registry, other.registry);
-    std::swap(owner, other.owner);
-    std::swap(id, other.id);
+    if (!id)
+        throw std::invalid_argument("Next ObjectId must be nonzero");
+    nextId.store(id, std::memory_order_relaxed);
 }
 } // namespace ObjectIdentity

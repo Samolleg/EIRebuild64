@@ -34,7 +34,7 @@ const DWORD CGB_LAST_BIT = MAKE_LAST_BIT(GENERIC_LAST_BIT, 2);
 class CGameBase
 {
 private:
-    ObjectIdentity::Instance identity{this};
+    ObjectIdentity::Instance identity;
     int nRefCount; // reference count. access to it only via IncRefCount/DecRefCount
     DWORD dwFlags; // different flags
 

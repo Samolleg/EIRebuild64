@@ -1,5 +1,8 @@
 #pragma once
 #include "WorldLoadOrigin.h"
+#include "ObjectIdentity.h"
+#include <utility>
+#include <vector>
 /*==========================================================================================================
 
         Server class header
@@ -53,6 +56,7 @@ private:
     CAArray<SZoneExit, SZoneExit &> exits; // exits from current zone
     bool bTransferItemCreates, bCreateUnits;
     CMapObjPtrHash activeSet;
+    std::vector<std::pair<ObjectId, int>> tickObjectOrder;
     bool bSendCenterCamera;
     bool bLoadDynamic;
     bool bLoadStatic;
