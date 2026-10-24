@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSlot.h"
 #include "SaveSchema.h"
 #include <memory>
 static const char LOCAL_FILE[] = __FILE__;
@@ -274,11 +275,7 @@ CParty::~CParty()
 /////////////////////////////////////////////////////////////////////////////////////
 CParty &CParty::operator=(const CParty &src)
 {
-    CMemorySave mem;
-    Clear();
-    const_cast<CParty *>(&src)->Store(mem);
-    mem.Seek(0);
-    Load(mem);
+    if (this != &src) SaveSchema::Slot::CopyParty(*this, src);
     return *this;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -291,10 +288,7 @@ CParty::CParty(const CParty &src)
 #ifdef _DEBUG
     pszGameClassName = GetGameClassName();
 #endif // _DEBUG
-    CMemorySave mem;
-    const_cast<CParty *>(&src)->Store(mem);
-    mem.Seek(0);
-    Load(mem);
+    SaveSchema::Slot::CopyParty(*this, src);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CParty::Create()
@@ -415,12 +409,14 @@ void CParty::Serialize(CStructureSaver &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CParty::Load(CSave &file, BOOL bVars)
 {
-    SaveSchema::RequireDynamicSchema();
+    CGSVariableSet held=vars;
+    SaveSchema::Slot::LoadParty(file,*this);
+    if (!bVars) vars=held;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CParty::Store(CSave &file, BOOL bVars)
 {
-    SaveSchema::RequireDynamicSchema();
+    SaveSchema::Slot::StoreParty(file,*this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // return index of item in allWagonItems, -1 if not found

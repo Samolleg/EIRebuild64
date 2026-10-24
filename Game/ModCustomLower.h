@@ -44,6 +44,7 @@ class CriticalCache {
  std::map<int,Critical> records;
  static bool Match(float a,float b){return std::fabs(a-b)<(std::numeric_limits<float>::epsilon)();}
 public:
+ const std::map<int,Critical>& SavedRecords()const{return records;}
  void Clear(){records.clear();}
  size_t Size()const{return records.size();}
  void Put(float damage,bool critical,bool staff){records[DamageKey(damage)]={damage,critical,staff};}

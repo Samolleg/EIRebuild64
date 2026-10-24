@@ -17,6 +17,8 @@ class CGSVariableSet;
 class CItem;
 class CMapObject;
 struct ModDelayedShot;
+class CGameBase;
+namespace SaveSchema { class Writer; class Reader; }
 #include <string>
 #include <optional>
 #include <vector>
@@ -50,6 +52,11 @@ struct ModGenocideConfig {
 // Engine-owned package data; no original EXE addresses or addon DLL loading.
 class CModPackage {
 public:
+    struct SaveState;
+    void StoreSaveState(SaveSchema::Writer &) const;
+    static std::shared_ptr<SaveState> LoadSaveState(SaveSchema::Reader &);
+    void AdoptSaveState(std::shared_ptr<SaveState>);
+    static SRPGAttackPortion *SavedAttack(CGameBase *, unsigned);
     CModPackage();
     ~CModPackage();
     CModPackage(const CModPackage&)=delete;

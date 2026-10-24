@@ -90,6 +90,8 @@
     <ClCompile Include="Game\SaveSchema.cpp" />
     <ClCompile Include="Game\DynamicSave.cpp" />
     <ClCompile Include="Game\GameSave.cpp" />
+    <ClCompile Include="Game\SaveSlot.cpp" />
+    <ClInclude Include="Game\SaveSlot.h" />
     <ClCompile Include="Game\BinkVideo.cpp" />
     <ClCompile Include="Game\Camera.cpp" />
     <ClCompile Include="Game\CameraTerrainCollision.cpp" />

@@ -379,6 +379,14 @@ Graph::~Graph()
     }
 }
 
+std::vector<ObjectId> Graph::Identities() const
+{
+    std::vector<ObjectId> result;
+    for (const auto &x:objects) result.push_back(x.first);
+    for (const auto &x:gameObjects) result.push_back(x.first);
+    return result;
+}
+
 void Graph::Adopt()
 {
     ObjectIdentity::RestoreNamespace::Publish(savedNext);

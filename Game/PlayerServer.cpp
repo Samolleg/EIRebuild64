@@ -104,7 +104,7 @@ void CPlayerServer::Clear()
     partyPlace.Clear();
     packerSend.Clear();
     packerRecv.Clear();
-    nStorePartyCounter = random.Get(60 * 15, 120 * 15);
+    nStorePartyCounter = ObjectIdentity::RestoreNamespace::Active() ? 0 : random.Get(60 * 15, 120 * 15);
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerServer::RemoveAllObjects()
@@ -816,7 +816,7 @@ void CPlayerServer::SendParty()
     pPlayer->party.Store(file);
     wpkt.Write(PID_PARTY);
     wpkt.Write(file);
-    nStorePartyCounter = random.Get(60 * 15, 120 * 15);
+    nStorePartyCounter = ObjectIdentity::RestoreNamespace::Active() ? 0 : random.Get(60 * 15, 120 * 15);
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerServer::SendActiveItems()

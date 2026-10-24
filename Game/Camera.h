@@ -122,6 +122,7 @@ struct SEarthquakeEffect
 /////////////////////////////////////////////////////////////////////////////////////
 class CCamera : public CBase3D
 {
+    friend class SaveSchema::Slot;
 private:
     // different camera restrictions and params
     SGeneralSettings *pSettings; // here we'll use only camera settings
@@ -190,6 +191,7 @@ private:
     void CorrectDistanceToCarrier();
 
 public:
+    bool detachedSave = false;
     CCamera();
     virtual ~CCamera();
     //

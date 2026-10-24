@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #include "idbFormat.h"
 #include "sdbFormat.h"
@@ -41,6 +42,7 @@ enum EAGItemType
 /////////////////////////////////////////////////////////////////////////////////////
 class CAssortmentGenerator
 {
+    friend class SaveSchema::Slot;
     friend struct ModAssortmentInspection;
 private:
     CWorld *pWorld;

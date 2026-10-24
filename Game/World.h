@@ -132,6 +132,7 @@ const float TIME_EVENING = 20.0f;
 /////////////////////////////////////////////////////////////////////////////////////
 class CWorldBase : public CWorld
 {
+    friend class SaveSchema::Slot;
     float fpTimeModifier, fpTimeScale;
 
 protected:

@@ -170,6 +170,8 @@ void SavedOwners::StoreMembers(Writer &w) const
         description.Store(w);
         std::vector<CGameBase *> members;
         x.second.manager->ForEach([&](CGameBase *object) {
+            if (omitPlayers && (x.second.kind==OwnerKind::Player ||
+                (x.second.kind==OwnerKind::ServerSpecific && object->GetTypeID()==SPTID_PLAYER_SPECIFIC))) return;
             // Figure specifics contain renderer resources, not simulation state.
             // They are recreated from the staged model at P17c adoption.
             if (x.second.kind==OwnerKind::ClientSpecific && object->GetTypeID()==SPTID_FIGURE_SPECIFIC) return;
@@ -214,7 +216,9 @@ template<class T> void Game(Registry &r, std::shared_ptr<SavedOwners> owners,
             const auto runtime=static_cast<ETypeIDs>(type);
             if (std::find(allowed.begin(),allowed.end(),runtime)==allowed.end())
                 throw Error(ErrorCode::UnknownType,"saved runtime type does not match schema type");
-            auto object=owners->Find(owner,kind).CreateSavedData(runtime,mapId,saved);
+            auto found=owners->prepared.find(saved);
+            auto object=found!=owners->prepared.end() ? found->second :
+                owners->Find(owner,kind).CreateSavedData(runtime,mapId,saved);
             if (!dynamic_cast<T *>(static_cast<CGameBase *>(object)) || typeid(*static_cast<CGameBase *>(object))!=typeid(T))
                 throw Error(ErrorCode::UnknownType,"manager factory returned wrong class");
             object->SetSubtypeID(subtype);

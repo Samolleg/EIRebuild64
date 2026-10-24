@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSlot.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1Notices.h"
 #include "OwnedRender/E2EffectDistance.h"
@@ -59,17 +60,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <vector>
 #include <cmath>
 #include "ModCampReferences.inl"
-#include "SavedMapObject.h"
-// Raw on-disk sizes used by the discard-only grammar, checked by this build.
-static_assert(sizeof(SRPGCommonStats) == 88 && sizeof(SRPGUnitStats) == 1796);
-static_assert(sizeof(SRPGAttackPortion) == 60 && sizeof(SRPGGeneralAttack) == 16);
-static_assert(sizeof(SL0Animation) == 12 && sizeof(SL1Pose) == 8);
-static_assert(sizeof(SRouteSegment) == 40 && sizeof(SRouteUnit) == 8);
-static_assert(sizeof(SWalkerWaypoint) == 28 && sizeof(SWalkerTempPoint) == 12);
-static_assert(sizeof(SActionPoint) == 20 && sizeof(SUnitVisibilityInfo) == 20);
-static_assert(QI_MAX_WEAPONS == 4 && QI_MAX_ITEMS == 4 && QI_MAX_SPELLS == 16 && QI_LEGACY_SPELLS == 8);
-static_assert(RPG_NUM_ARMOR_TYPES == 7 && sizeof(CPlot2D) == 8 && sizeof(CPlot3D) == 12);
-
 /////////////////////////////////////////////////////////////////////////////////////
 const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
 /////////////////////////////////////////////////////////////////////////////////////
@@ -82,7 +72,12 @@ const int N_TIMERECALCINTERVAL = 63; // should be power of 2 - 1
 
 ==========================================================================================================*/
 
-CWorldServer theWorldServer;
+namespace {
+CWorldServer initialWorldServer;
+CWorldServer *publishedWorldServer = &initialWorldServer;
+}
+CWorldServer &ActiveWorldServer() { return *publishedWorldServer; }
+void PublishWorldServer(CWorldServer *world) noexcept { publishedWorldServer = world; }
 
 namespace {
 struct SFieldCampSnapshot {
@@ -173,7 +168,7 @@ void CWorldServer::SCorpseItems::Load(CSave &file)
 // ---------------------------------------------------------
 
 /////////////////////////////////////////////////////////////////////////////////////
-CWorldServer::CWorldServer()
+CWorldServer::CWorldServer(bool detached) : detachedSave(detached)
 {
 #ifdef _DEBUG
     pszGameClassName = GetGameClassName();
@@ -227,7 +222,7 @@ BOOL CWorldServer::Create()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Destroy()
 {
-    OwnedRender::E1ClearSaveNotice();
+    if (!detachedSave) OwnedRender::E1ClearSaveNotice();
     // Kill All clients
     CPlayer *pPlayer;
     CPlayerIterator
@@ -333,11 +328,13 @@ void CWorldServer::RemoveEverything()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Clear()
 {
-    ModCampReferences::ResetWorld();
-    fieldCampSnapshots.clear();
-    fieldCampArmed = fieldCampInCamp = false;
-    fieldCampReturnHeroId = -1;
-    fieldCampCommerceVars = nullptr;
+    if (!detachedSave) {
+        ModCampReferences::ResetWorld();
+        fieldCampSnapshots.clear();
+        fieldCampArmed = fieldCampInCamp = false;
+        fieldCampReturnHeroId = -1;
+        fieldCampCommerceVars = nullptr;
+    }
     RemoveEverything();
     szZoneFileName = "";
     // clear other objects
@@ -3840,136 +3837,13 @@ void CWorldServer::LoadScriptFromMOB(const char *pszMobName)
 /////////////////////////////////////////////////////////////////////////////////////
 // some functions to store/load dynamic objects
 /////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::StoreDynamic(CSave &file)
-{
-    CMapObjPtrHashIterator mapobjIter;
-    for (CMapObject *pMO = mapobjIter.GetFirst(&dynamicObjs); pMO; pMO = mapobjIter.GetNext())
-    {
-        file.Write(pMO->GetID());
-        file.Write((int)pMO->GetTypeID());
-        file.Write(pMO->GetSubtypeID());
-    }
-    file.Write((int)-1);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::StoreDynamicData(CSave &file)
-{
-    CMapObjPtrHashIterator mapobjIter;
-    for (CMapObject *pMO = mapobjIter.GetFirst(&dynamicObjs); pMO; pMO = mapobjIter.GetNext())
-    {
-        file.Write(pMO->GetID());
-        if (pMO->WhoAmI() == HPC_UNIT)
-            file.WriteString(static_cast<CUnit *>(pMO)->GetPrototype()->szName);
-        else
-            file.WriteString(pMO->GetMaskName());
-        pMO->Store(file);
-        file.Write((DWORD)pMO->update.GetStartUpdateMask());
-    }
-    file.Write((int)-1);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::LoadDynamic(CSave &file, const char* loadingZone)
-{
-    omittedDynamicObjects.clear();
-    int nID;
-    int typeID;
-    DWORD dwSubtype;
-    for (;;)
-    {
-        file.Read(nID);
-        if (nID == -1)
-            break;
-        file.Read(typeID);
-        file.Read(dwSubtype);
-        // Only a real object of the freshly loaded map wins; duplicates within
-        // the dynamic registry retain their original CreateData semantics.
-        CMapObject* mapObject = nullptr;
-        if (mapObjects.Lookup(nID, mapObject) && mapObject)
-        {
-            if (omittedDynamicObjects.emplace(nID, typeID).second)
-                GameJournal::Event("SAVE", "dynamic_conflict", "zone=%s id=%d type=%d subtype=%lu map_object=%s",
-                    GameJournal::Quote(loadingZone).c_str(), nID, typeID, dwSubtype,
-                    GameJournal::Quote(mapObject->GetMaskName()).c_str());
-            continue;
-        }
-        LPGAMEBASE lpData = pMapObjectManager->CreateData(ETypeIDs(typeID), nID);
-        if (!lpData) { file.Fail("invalid_dynamic_type"); return; }
-        lpData->SetSubtypeID(dwSubtype);
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::LoadDynamicData(CSave &file)
-{
-    int nID;
-    DWORD dwStartUpdate;
-    for (;;)
-    {
-        file.Read(nID);
-        if (nID == -1)
-            break;
-        auto omitted = omittedDynamicObjects.find(nID);
-        if (omitted != omittedDynamicObjects.end())
-        {
-            if (file.GetVersion() > 88) SavedMapObject::Text(file);
-            SavedMapObject::Skip(file, omitted->second);
-            file.Read(dwStartUpdate);
-            continue;
-        }
-        CMapObject *pMO = (CMapObject *)pMapObjectManager->Find(nID);
-        if (!pMO) { file.Fail("unknown_dynamic_id"); return; }
-        if (file.GetVersion() > 88)
-        {
-            CString szTemplate;
-            file.Read(szTemplate);
-            pMO->LoadDefaultClientStats(szTemplate);
-        }
-        pMO->UpdateInit();
-        pMO->Load(file);
-        file.Read(dwStartUpdate);
 
-        ASSERT(pMO);
-        if (!pMO)
-            continue;
-        pMO->AddRef();
-        pMO->SetUpdateMask();
+/////////////////////////////////////////////////////////////////////////////////////
 
-        if (pMO->GetTypeID() != MOTID_TRAP)
-        {
-            pMO->LoadFigureBoundingVolumes(pMO->GetMaskName());
-            aiMap.AddObject(pMO);
-        }
-        CMapObject* previousMapObject = nullptr;
-        mapObjects.Lookup(pMO->GetID(),previousMapObject);
-        OwnedRender::E1ObserveSaveReplacement(pMO->GetID(),previousMapObject,pMO);
-        assert(mapObjects.Seek(pMO->GetID()) == NULL);
-        mapObjects.SetAt(pMO->GetID(), pMO);
-        AddToDynamic(pMO);
-        if (pMO->GetAttachedQuest()[0])
-            questMapObjs.SetAt(pMO->GetID(), pMO);
-        // set animation coeffs for units
-        if (pMO->WhoAmI() == HPC_UNIT)
-        {
-            CUnit *pUnit = (CUnit *)pMO;
-            auto *prototype = ((CMapObjectManager *)pMapObjectManager)->GetPrototype(pUnit->GetSubtypeID());
-            if (!prototype) { file.Fail("unknown_unit_prototype"); return; }
-            auto *race = ((CMapObjectManager *)pMapObjectManager)->GetRace(prototype->dwRaceIndex);
-            if (!race) { file.Fail("unknown_unit_race"); return; }
-            pUnit->SetRaceAnimationCoeffs(race->fAnimationCoeffs);
-        }
-        // set every
-        int nMax = pMO->update.GetHistoriesNumber();
-        for (int i = 0; i < nMax; i++)
-        {
-            if (dwStartUpdate && (1 << i))
-                pMO->SetUpdateMask(i);
-        }
-        // add to active set
-        CUnit *pUnit = (CUnit *)pMO;
-        if (pMO->WhoAmI() != HPC_UNIT ||
-            ((CUnitServer *)pUnit->GetUnitSpecific())->IsAlwaysActive())
-            AddActiveObject(pMO);
-    }
-}
+/////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////
+
 /////////////////////////////////////////////////////////////////////////////////////
 // уничтожить все объекты, €вл€ющиес€ динамическими
 void CWorldServer::RemoveDynamicObjects()
@@ -3993,420 +3867,12 @@ void CWorldServer::RemoveDynamicObjects()
 // and should not be in local or multiplayer mode
 BOOL CWorldServer::LoadSave(CSave &file, WorldLoadOrigin origin, const char *pszTerrain)
 {
-    CorePerf::Operation coreOperation(origin == WorldLoadOrigin::SavedGame ? "world.load_save" : "world.load_zone_state", pszTerrain);
-    OwnedRender::E1ClearSaveNotice();
-    GameJournal::Event("LOAD", "origin", "value=%d reason=%s", int(origin), origin==WorldLoadOrigin::SavedGame?"saved_game":"zone_entry");
-    GameJournal::Operation journal("LOAD", "world", pszTerrain);
-    char ch;
-    int nID, i;
-    BOOL bRv;
-    float fpWorldTime, fpTimeScale;
-    CMapObject *pMO;
-    CMemorySave mobGraph, gameGraph;
-    CMapObjectIterator mapobjIter;
-    CString szNewMob, szNewZone, szNewCurrentZoneName;
-    ASSERT(serverMode != SERV_MODE_LMP && serverMode != SERV_MODE_MMP);
-    // by default we have state of server without any clients
-    serverMode = SERV_MODE_NONE;
-    bCanRunScript = FALSE;
-
-    if (GetPlayerManager())
-    {
-        CPlayerIterator playerIter;
-        CPlayer *pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
-        for (; pPlayer; pPlayer = playerIter.GetNext())
-        {
-            // if at least one client exist then we are in local mode, this is save of server
-            // in action
-            serverMode = SERV_MODE_LOCAL;
-            bCanRunScript = TRUE;
-            pPlayer->RemoveAllObjects();
-        }
-    }
-    StartZoneLoading();
-
-    coreOperation.Stage("read_header");
-    szNewMob = file.ReadString();
-    szNewZone = file.ReadString();
-    szNewCurrentZoneName = file.ReadString();
-    coreOperation.Target(szNewCurrentZoneName);
-    if (pszTerrain)
-        szNewZone = pszTerrain;
-
-    szCurrentZoneName = szNewCurrentZoneName;
-    SetupScreenWait(szNewCurrentZoneName);
-    C2DScreenWait::Step(0);
-    //
-    SetChangedFlags(DW_PCHANGED_EVERYTHING);
-
-    file.Read(&ptWindDirection, sizeof(ptWindDirection));
-    file.Read(fpWindForce);
-    file.Read(fpNightPower);
-    for (i = 0; i < ARRAY_SIZE(alarms); i++)
-        alarms[i].Load(file);
-    file.Read(nSegmentTimeCounter);
-    file.Read(&curWeather, sizeof(curWeather));
-    file.Read(fpWeatherComeTime);
-    file.Read(fpWorldTime);
-    if (file.GetVersion() > 75)
-    {
-        file.Read(fpTimeScale);
-        if (file.GetVersion() > 115)
-            file.Read(nLastLightningTime);
-    }
-    else
-    {
-        int nCrap;
-        file.Read(nCrap);
-        fpTimeScale = nCrap;
-    }
-    file.Read(&curInterface, sizeof(curInterface));
-
-    // load graph
-    coreOperation.Stage("ai_graph");
-    bRv = LoadAIGraph(szNewZone, szNewMob, mobGraph);
-    ASSERT(bRv);
-    if (!bRv)
-        return FALSE;
-    // load graph updates
-    coreOperation.Stage("graph_difference");
-    gameGraph.LoadFromDifference(mobGraph, file);
-    C2DScreenWait::Step(1);
-
-    // load static data from mob
-    coreOperation.Stage("static_mob");
-    if (!LoadMainMob(szNewZone, szNewMob, gameGraph, true))
-        return ReportError("CWorldServer::LoadSave()\n Can't load map.\n");
-
-    // load objects and other stuff
-    coreOperation.Stage("object_records");
-    LoadDynamic(file, szNewCurrentZoneName);
-    CBaseManager::SavedReferences savedReferences(*pMapObjectManager, omittedDynamicObjects);
-    pEffectManager->Load(file);
-    pSpellManager->Load(file);
-    pItemManager->Load(file);
-
-    C2DScreenWait::Step(5);
-
-    coreOperation.Stage("object_data");
-    LoadDynamicData(file);
-    pEffectManager->LoadData(file);
-    pSpellManager->LoadData(file);
-    pItemManager->LoadData(file);
-    C2DScreenWait::Step(6);
-
-    // add spells and effects to appropriate structures;
-    while (1)
-    {
-        file.Read(nID);
-        if (nID == -1)
-            break;
-        CEffect *pEff = (CEffect *)pEffectManager->Find(nID);
-        if (!pEff) { file.Fail("invalid_effect_reference"); return FALSE; }
-
-        pEff->AddRef();
-        pEff->SetUpdateMask();
-
-        assert(effects.Seek(pEff->GetID()) == NULL);
-        effects.SetAt(pEff->GetID(), pEff);
-    }
-    CEffectSpell::SetCurrentWorld(this);
-    for (;;)
-    {
-        file.Read(ch);
-        if (ch == 0)
-            break;
-        CEffectSpell *pES = dbgnew CEffectSpell;
-        pES->Load(file);
-        spells.AddTail(pES);
-    }
-
-    aiMap.marks.Load(file);
-    script.LoadScript(file);
-    fof.Load(file);
-    //
-    file.Read(&weatherChange, sizeof(weatherChange));
-    file.Read(&skyType, sizeof(skyType));
-    if (file.GetVersion() > 77)
-        waterLevels.Load(file);
-    for (;;)
-    {
-        int nID;
-        file.Read(nID);
-        if (nID < 0)
-            break;
-        CItem *pItem = (CItem *)pItemManager->Find(nID);
-        ASSERT(pItem);
-        if (pItem)
-            activeItems.AddHead(pItem);
-    }
-    // CRAP - works correct only for single player
-    if (GetPlayerManager())
-    {
-        CPlayerIterator playerIter; // releases its manager reference during unwind
-        CPlayer *pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
-        for (; pPlayer; pPlayer = playerIter.GetNext())
-        {
-            CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
-            pPlayer->partyID.Load(file);
-            pPlayer->party.Load(file);
-            pPlayer->nTimeWasAddedSegment = GetSegmentTimeCounter();
-            file.Read(&pPlayer->curInterface, sizeof(pPlayer->curInterface));
-            LoadGBPtrList<CItem *, CItem *>(pPlayer->items, file, GetItemManager());
-            file.Read(pPlayer->bGod);
-            if (file.GetVersion() > 84)
-                LoadCList(pPlayer->activeItems, file);
-            if (file.GetVersion() < 73)
-            {
-                char cCrap;
-                file.Read(&cCrap, sizeof(cCrap));
-            }
-            if (file.GetVersion() < 70)
-            {
-                CScriptObjectGroup swarmTargets;
-                swarmTargets.Load(file);
-            }
-            pPS->SendParty();
-            pPS->SetPartyIsDeployed(true);
-        }
-    }
-    // end of CRAP
-    file.Read(bCombatPause);
-    // load deploy info for items
-    if (file.GetVersion() > 84)
-    {
-        // Unlike ASI 4004FC, this unsaved counter starts at zero for each load.
-        // The binding limit and over-budget exit apply within this load only.
-        unsigned int spellAddonBindingCount = 0;
-        const auto *mod = ModRuntime::Current();
-        const bool limitBindings = mod && mod->SpellAddon().Feature21() == 8;
-        int nID, nBind;
-        for (;;)
-        {
-            nID = -1;
-            file.Read(nID);
-            if (nID == -1)
-                break;
-            if (limitBindings)
-            {
-                // Compare before increment, and leave nBind unread on this exit.
-                if (spellAddonBindingCount > 0x19445u)
-                {
-                    spellAddonBindingCount = 0;
-                    break;
-                }
-                ++spellAddonBindingCount;
-            }
-            file.Read(nBind);
-            CItem *pItem = (CItem *)GetItemManager()->Find(nID);
-            ASSERT(pItem);
-            if (pItem)
-            {
-                CItemSrcInfo *pInfo = dbgnew CItemSrcInfo;
-                pInfo->nSrcItemID = nBind;
-                pItem->AttachUserData(pInfo);
-            }
-        }
-    }
-    coreOperation.Stage("finalize_and_placement");
-    savedReferences.End(); // map IDs are available to live logic again
-    C2DScreenWait::Step(7);
-
-    szCurrentZoneName = szNewCurrentZoneName;
-    SetWorldTimeScale(fpTimeScale);
-    SetWorldTime(fpWorldTime);
-    FinishZoneLoading();
-
-    // now kill all unlucky units who happen to stay on unpassable terrain or near unpassable
-    // terrain
-    CArray<int, int> deadUnits;
-    CMapObjPtrHashIterator moIter;
-    for (pMO = moIter.GetFirst(&mapObjects); !moIter.IsReachEnd(); pMO = moIter.GetNext())
-    {
-        if (pMO->WhoAmI() == HPC_UNIT)
-        {
-            CUnit *pUnit = (CUnit *)pMO;
-            if (!aiMap.CanPutUnitRelaxed(pUnit))
-                deadUnits.Add(pUnit->GetID());
-        }
-    }
-    // ASSERT(deadUnits.GetSize() == 0);
-#ifndef FINALRELEASE
-    if (deadUnits.GetSize() != 0)
-    {
-        CString szString(
-            "Some units have invalid placement; attempting to move them to passable terrain:\n");
-        char buff[256];
-        for (i = 0; i < deadUnits.GetSize(); ++i)
-        {
-            sprintf(buff, "%d ", deadUnits[i]);
-            szString += buff;
-        }
-
-        ReportWarning("%s", szString.GetString());
-
-        //::MessageBox(0, szString, "WARNING", MB_OK | MB_ICONWARNING);
-    }
-#endif // FINALRELEASE
-    for (i = 0; i < deadUnits.GetSize(); i++)
-    {
-        CUnit *pUnit = GetUnit(deadUnits[i]);
-        // if (pUnit && pUnit->GetID() > 100000000) // pUnit->GetOwner() )
-        {
-            // put it to passable space (this is all that can be done for this unit this time)
-            aiMap.RemoveObject(pUnit);
-            CPlot3D ptPlace = pUnit->GetCP(), ptNewUnitPlace = pUnit->GetCP();
-            aiMap.FindUnitPosition(pUnit, ptPlace, ptNewUnitPlace);
-            pUnit->SetCP(ptNewUnitPlace);
-            aiMap.AddObject(pUnit);
-            ((CUnitServer *)pUnit->GetUnitSpecific())->InitializeUnit();
-        }
-        // else
-        //     RemoveMapObject(deadUnits[i]);
-    }
-    if (file.GetVersion() > 95)
-        LoadCStringArray(szLoadedMobs, file);
-    else
-        szLoadedMobs.RemoveAll();
-    if (file.GetVersion() > 109)
-        LoadCList(LMPCorpses, file);
-
-    pMapObjectManager->CheckReferences();
-    pEffectManager->CheckReferences();
-    pSpellManager->CheckReferences();
-    pItemManager->CheckReferences();
-
-    if(auto*mod=ModRuntime::Current())mod->SuccessfulWorldLoad(origin);
-    ModAnimationIdSave::AfterSuccessfulLoad(*this);
-
-    // Keep equipped enchanted-item energy synchronized with the owning player after load.
-    CMapObjPtrHashIterator loadedUnitIter;
-    for (pMO = loadedUnitIter.GetFirst(&dynamicObjs); !loadedUnitIter.IsReachEnd(); pMO = loadedUnitIter.GetNext())
-    {
-        if (pMO && pMO->WhoAmI() == HPC_UNIT)
-            SynchronizeFieldCampUnitEnergy(static_cast<CUnit *>(pMO));
-    }
-    { coreOperation.Result(true); journal.Result(true); return TRUE; }
+    return SaveSchema::Slot::LoadWorld(file);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::StoreSave(CSave &file)
 {
-    BOOL bRv;
-    POSITION pos;
-    CEffect *pEff;
-    CMemorySave mobGraph, gameGraph;
-    CEffectPtrHashIterator effIter;
-    CMapObjPtrHashIterator mapobjIter;
-    // ASSERT( serverMode == SERV_MODE_LOCAL );
-    //
-    if (curInterface == IFACE_MISSION || curInterface == IFACE_BASE)
-        AddPlayersGlobalTime();
-    pMapObjectManager->CheckReferences();
-    pEffectManager->CheckReferences();
-    pSpellManager->CheckReferences();
-    pItemManager->CheckReferences();
-    // start saving
-    file.WriteString(szMobFileName);
-    file.WriteString(szZoneFileName);
-    file.WriteString(szCurrentZoneName);
-    file.Write(&ptWindDirection, sizeof(ptWindDirection));
-    file.Write(fpWindForce);
-    file.Write(fpNightPower);
-    for (int i = 0; i < ARRAY_SIZE(alarms); i++)
-        alarms[i].Store(file);
-    file.Write(nSegmentTimeCounter);
-    file.Write(&curWeather, sizeof(curWeather));
-    file.Write(fpWeatherComeTime);
-
-    float fpCurrentTime, fpTimeScale;
-    GetTimeParams(fpCurrentTime, fpTimeScale);
-    file.Write(fpCurrentTime);
-    file.Write(fpTimeScale);
-    file.Write(nLastLightningTime);
-    file.Write(&curInterface, sizeof(curInterface));
-
-    // store graph
-    bRv = LoadAIGraph(szZoneFileName, szMobFileName, mobGraph);
-    ASSERT(bRv);
-    aiMap.StoreGraph(gameGraph);
-    file.StoreDifference(mobGraph, gameGraph);
-
-    // store world objects
-    StoreDynamic(file);
-    pEffectManager->Store(file);
-    pSpellManager->Store(file);
-    pItemManager->Store(file);
-    StoreDynamicData(file);
-    pEffectManager->StoreData(file);
-    pSpellManager->StoreData(file);
-    pItemManager->StoreData(file);
-
-    // store information about active mapobject and active effects
-    pEff = effIter.GetFirst(&effects);
-    while (!effIter.IsReachEnd())
-    {
-        file.Write((int)pEff->GetID());
-        pEff = effIter.GetNext();
-    }
-    file.Write((int)-1);
-    pos = spells.GetHeadPosition();
-    while (pos)
-    {
-        CEffectSpell *pES = spells.GetNext(pos);
-        file.Write((char)1);
-        pES->Store(file);
-    }
-    file.Write((char)0);
-
-    aiMap.marks.Store(file);
-    script.StoreScript(file);
-    fof.Store(file);
-    file.Write(&weatherChange, sizeof(weatherChange));
-    file.Write(&skyType, sizeof(skyType));
-    waterLevels.Store(file);
-    // store active items list
-    for (pos = activeItems.GetHeadPosition(); pos;)
-    {
-        CItem *pItem = activeItems.GetNext(pos);
-        file.Write((int)pItem->GetID());
-    }
-    file.Write((int)-1);
-
-    // CRAP - works correct only for single player
-    if (GetPlayerManager())
-    {
-        CPlayerIterator
-            *playerIter = dbgnew CPlayerIterator; // because iterator has refcount on manager
-        CPlayer *pPlayer = playerIter->GetFirst((CPlayerManager *)GetPlayerManager());
-        for (; pPlayer; pPlayer = playerIter->GetNext())
-        {
-            pPlayer->partyID.Store(file);
-            pPlayer->party.Store(file);
-            file.Write(&pPlayer->curInterface, sizeof(pPlayer->curInterface));
-            StoreGBPtrList<CItem *, CItem *>(pPlayer->items, file);
-            file.Write(pPlayer->bGod);
-            StoreCList(pPlayer->activeItems, file);
-        }
-        delete playerIter;
-    }
-    // end of CRAP
-    file.Write(bCombatPause);
-    // store deploy info for items
-    {
-        CItemIterator itemIter;
-        for (CItem *pItem = itemIter.GetFirst(GetItemManager()); pItem; pItem = itemIter.GetNext())
-        {
-            CItemSrcInfo *pInfo = (CItemSrcInfo *)pItem->GetUserData();
-            if (pInfo)
-            {
-                file.Write(pItem->GetID());
-                file.Write(pInfo->nSrcItemID);
-            }
-        }
-        file.Write(-1);
-    }
-    StoreCStringArray(szLoadedMobs, file);
-    StoreCList(LMPCorpses, file);
+    SaveSchema::Slot::StoreWorld(file,*this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 

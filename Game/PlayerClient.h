@@ -25,6 +25,7 @@ typedef unsigned ESPStatus;
 // -------------------------------------------------------------
 class CPlayerClient : public CPlayerSpecific
 {
+    friend class SaveSchema::Slot;
 public:
     enum EPClientStates
     {

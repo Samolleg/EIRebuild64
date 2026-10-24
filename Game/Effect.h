@@ -360,6 +360,7 @@ public:
 // --------------------------------------------------------------------------------------------
 class CEffectArrow : public CEffectArrowBase
 {
+    friend class CModPackage;
     CEffectParticle particle;
     CEffectPointLight pointLight;
     CEffectSound sound;

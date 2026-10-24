@@ -32,6 +32,8 @@ public:
     std::vector<OwnerDescription> Describe() const;
     CBaseManager &Find(ObjectId, OwnerKind) const;
     CGameBase *Map(int) const;
+    std::map<ObjectId, CSmartPtr<CGameBase>> prepared;
+    bool omitPlayers = false;
     // Serializes every member as a graph reference, including unreferenced ones.
     // Reading validates exact owner membership; factories have already run.
     void StoreMembers(Writer &) const;

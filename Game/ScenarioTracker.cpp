@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSlot.h"
 #include "GameJournal.h"
 #include "ModNativeCrtRandom.h"
 #include "ModRuntime.h"
@@ -13,7 +14,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ItemManager.h"
 #include "SpellManager.h"
 /////////////////////////////////////////////////////////////////////////////////////
-CGlobalHat theHat;
+namespace { CGlobalHat initialHat; CGlobalHat *publishedHat=&initialHat; }
+CGlobalHat &ActiveGlobalHat() { return *publishedHat; }
+void PublishGlobalHat(CGlobalHat *hat) noexcept { publishedHat=hat; }
 /////////////////////////////////////////////////////////////////////////////////////
 // CSingleParty
 /////////////////////////////////////////////////////////////////////////////////////
@@ -119,10 +122,7 @@ void SPartySet::SetPartyFromServer(CParty &res)
     ASSERT(pRes);
     if (pRes)
     {
-        CMemorySave save;
-        res.Store(save);
-        save.Seek(0);
-        pRes->Load(save);
+        *pRes = res;
     }
     // sync global vars with other parties
     CGSVariableSet vars = res.vars;
@@ -140,10 +140,7 @@ void SPartySet::GetCurrentParty(CParty &res)
     CParty *pRes = GetParty(szCurrentParty);
     if (pRes)
     {
-        CMemorySave save;
-        pRes->Store(save);
-        save.Seek(0);
-        res.Load(save);
+        res = *pRes;
     }
     else
         res.Clear();
@@ -179,29 +176,7 @@ CShop::~CShop()
 /////////////////////////////////////////////////////////////////////////////////////
 void CShop::Serialize(CStructureSaver &file)
 {
-    file.Add(1, nID);
-    file.Add(2, bItem);
-    file.Add(3, bSpell);
-    file.AddRaw(4, fKoeffs, sizeof(fKoeffs));
-    CMemorySave f;
-    if (file.IsReading())
-    {
-        file.Add(5, f);
-        f.SetVersion(file.GetVersion());
-        itemAssort.Load(f, FALSE);
-        spellAssort.Load(f, FALSE);
-        itemGenerator.Load(f);
-        spellGenerator.Load(f);
-    }
-    else
-    {
-        itemAssort.Store(f, FALSE);
-        spellAssort.Store(f, FALSE);
-        itemGenerator.Store(f);
-        spellGenerator.Store(f);
-        file.Add(5, f);
-    }
-    file.Add(6, bNeedUpdate);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CShop::SetAssortmentParameters(float *fMinLevels, float *fMaxLevels)
@@ -545,23 +520,12 @@ void CGlobalHat::Serialize(CStructureSaver &file)
 /////////////////////////////////////////////////////////////////////////////////////
 void CGlobalHat::Load(CSave &file)
 {
-    CMemorySave f;
-    file.Read(f);
-    f.Seek(0);
-    CStructureSaver s;
-    s.Start(f, true, file.GetVersion());
-    Serialize(s);
-    s.Finish(f);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CGlobalHat::Store(CSave &file)
 {
-    CMemorySave f;
-    CStructureSaver s;
-    s.Start(f, false, file.GetVersion());
-    Serialize(s);
-    s.Finish(f);
-    file.Write(f);
+    SaveSchema::RequireDynamicSchema();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // Get party from hat if partyID is not initialized then use first party

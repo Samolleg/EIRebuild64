@@ -44,6 +44,7 @@ public:
 // -----------------------------------------------------------
 class CWorldServer : public CWorldBase
 {
+    friend class SaveSchema::Slot;
 private:
     float fpNightPower;  // strength of night for current moment
     float fpVisionBonus; // multiplier of vision due to weather reasons
@@ -66,7 +67,7 @@ private:
     int nLastLightningTime;
 
 public:
-    CHoover *pHoover; // just stuff hoover :)
+    CHoover *pHoover = nullptr; // just stuff hoover :)
 
     CFileRegistry messages; // server messages data
 
@@ -139,11 +140,6 @@ private:
     void RemovePlayerItems(CPlayer *pPlayer);
     // separates objects on dynamic and static ones, fill initial update packet
     void CreateInitialUpdate();
-    void StoreDynamic(CSave &file);
-    void StoreDynamicData(CSave &file);
-    std::map<int, int> omittedDynamicObjects; // ID -> saved type, per LoadDynamic
-    void LoadDynamic(CSave &file, const char* loadingZone);
-    void LoadDynamicData(CSave &file);
     void RemoveDynamicObjects();
     // active objects handling
     void AddActiveObject(CMapObject *pObject);
@@ -154,7 +150,8 @@ private:
     void RemoveFromDynamic(CMapObject *pObj);
 
 public:
-    CWorldServer();
+    bool detachedSave = false;
+    explicit CWorldServer(bool detached = false);
     virtual ~CWorldServer();
     // create/destroy
     virtual BOOL Create();
@@ -298,5 +295,7 @@ public:
     virtual EClassIDs WhoAmI() const { return HPC_WORLD_SERVER; }
 };
 /////////////////////////////////////////////////////////////////////////////////////
-extern CWorldServer theWorldServer;
+CWorldServer &ActiveWorldServer();
+void PublishWorldServer(CWorldServer *) noexcept;
+#define theWorldServer (ActiveWorldServer())
 /////////////////////////////////////////////////////////////////////////////////////

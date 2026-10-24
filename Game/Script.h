@@ -461,6 +461,7 @@ typedef SScriptThread *HScriptThread;
 // объект, выполн€ющий команды треда скрипта
 class CScriptThreadState
 {
+    friend class CScript;
     friend struct SaveSchema::ScriptCodec;
     friend struct ModCampReferences::Access;
     SScriptThread *pThread;
@@ -563,6 +564,7 @@ public:
 
 class CScript
 {
+    friend class SaveSchema::Slot;
     friend struct SaveSchema::ScriptCodec;
     friend struct ModCampReferences::Access;
     bool detachedSaveState = false;
@@ -775,7 +777,7 @@ public:
     }
     // Serializing data
     // Load only into a fresh detached staging script. P17 adopts after graph success.
-    void AdoptSaveState() { detachedSaveState = false; }
+    void AdoptSaveState();
     void DiscardSaveState();
     void LoadScript(SaveSchema::Reader &);
     void StoreScript(SaveSchema::Writer &) const;

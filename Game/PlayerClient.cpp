@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "SaveSlot.h"
 #include "GameJournal.h"
 #include "ModRuntime.h"
 #include "ModSpellRules.h"
@@ -1164,7 +1165,8 @@ BOOL CPlayerClient::PrsSelect()
 // ---------------------------------------------------------
 static void WriteUnitArray(CPacket &wpkt, CArray<CUnit *, CUnit *> &units)
 {
-    wpkt.Write(units.GetSize());
+    if (units.GetSize() > INT32_MAX) throw SaveSchema::Error(SaveSchema::ErrorCode::Limit,"too many local unit references");
+    wpkt.Write(static_cast<int>(units.GetSize()));
     for (int i = 0; i < units.GetSize(); i++)
     {
         CUnit *pUnit = units[i];
@@ -1393,6 +1395,7 @@ void CPlayerClient::FinishCamp()
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerClient::FinishZoneLoading()
 {
+    SaveSchema::Slot::ApplyCamera();
     wpkt.Write(PID_ZONE_LOADED);
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////

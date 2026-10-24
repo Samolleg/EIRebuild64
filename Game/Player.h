@@ -43,6 +43,7 @@ enum EPCSelectCmd
 // ------------------------------------------------------------
 class CPlayer : public CGameBase
 {
+    friend class SaveSchema::Slot;
 public:
     enum EPathType
     {
