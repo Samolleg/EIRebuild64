@@ -373,11 +373,7 @@ void CStructureSaver::Finish(CSave &res)
     }
     else
     {
-        // remove unreferenced objects
-        for (auto i = objects.begin(); i != objects.end(); i++)
-        {
-            CPtr<CObjectBase> ref((CObjectBase *)i->second);
-        }
+        ReleaseObjects();
     }
     obj.Clear();
     data.Clear();
@@ -386,6 +382,20 @@ void CStructureSaver::Finish(CSave &res)
     chunks.clear();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CStructureSaver::ReleaseObjects()
+{
+    // Pin the whole graph before any Release can destroy another entry.
+    // Pointer hashes are lookup-only; cleanup order is runtime identity order.
+    std::vector<CPtr<CFundament>> keep;
+    for (const auto &entry : objects)
+        keep.emplace_back(static_cast<CFundament *>(entry.second));
+    std::sort(keep.begin(), keep.end(), [](const auto &a, const auto &b) {
+        return ObjectIdentity::IdOf(a.GetPtr()) < ObjectIdentity::IdOf(b.GetPtr());
+    });
+    objects.clear();
+    for (auto &object : keep)
+        object = nullptr;
+}
 void CStructureSaver::StoreObject(const chunk_id idChunk, CFundament *pObject)
 {
     if (objects.find(pObject) == objects.end())

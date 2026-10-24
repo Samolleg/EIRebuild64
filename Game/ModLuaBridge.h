@@ -1,4 +1,5 @@
 #pragma once
+#include "ObjectIdentity.h"
 #include <memory>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -20,9 +21,9 @@ struct Scope {
  bool active=true;
  const CUnit *unit=nullptr;
  SRPGUnitStats *stagedStats=nullptr;
- std::map<CItem*,float> itemRegeneration;
- std::map<CItem*,float> itemMana;
- std::map<CItem*,int> itemCounts;
+ std::map<CItem*,float,ObjectIdLess<CItem>> itemRegeneration;
+ std::map<CItem*,float,ObjectIdLess<CItem>> itemMana;
+ std::map<CItem*,int,ObjectIdLess<CItem>> itemCounts;
  std::map<std::pair<const CUnit*,int>,std::shared_ptr<CItemWeapon>> weaponViews;
  CItemWeapon* Weapon(const CUnit&,int);
  int LeftHand(const CUnit&);

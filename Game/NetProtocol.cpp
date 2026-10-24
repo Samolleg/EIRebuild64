@@ -81,9 +81,9 @@ void SetBASCII( LPVOID& pDstBuf, LPCSTR pszBuf )
 // ------------------------ RADIX sort of LPGAMEBASE array by ID
 // -------------------------------------------
 
-inline unsigned int GetID(void *pSome)
+inline ObjectId GetID(const CGameBase *object)
 {
-    return (unsigned int)pSome;
+    return object ? object->GetRTID() : 0;
 }
 inline void SortOne(int shift, CGameBasePtrArray &src, CGameBasePtrArray &dst)
 {
@@ -115,6 +115,10 @@ void SortGameBaseArrayByID(CGameBasePtrArray &toSort)
     SortOne(8, tempSort, toSort);
     SortOne(16, toSort, tempSort);
     SortOne(24, tempSort, toSort);
+    SortOne(32, toSort, tempSort);
+    SortOne(40, tempSort, toSort);
+    SortOne(48, toSort, tempSort);
+    SortOne(56, tempSort, toSort);
     // erase duplicates
     CGameBase **pCur, **pFinish, **pDst;
     pCur = toSort.GetData();
@@ -123,7 +127,7 @@ void SortGameBaseArrayByID(CGameBasePtrArray &toSort)
     *pDst++ = *pCur++;
     while (pCur < pFinish)
     {
-        if (pCur[0] == pCur[-1])
+        if (GetID(pCur[0]) == GetID(pCur[-1]))
             pCur++;
         else
             *pDst++ = *pCur++;
@@ -155,7 +159,7 @@ void SelectIDs(CGameBasePtrArray &previousIDs, CGameBasePtrArray &newIDs, CGameB
     for (int i = 0; nPrevLeft && nNewLeft; i++)
     {
         ASSERT((*pNew)->IsValid());
-        if (*pPrev != *pNew)
+        if (GetID(*pPrev) != GetID(*pNew))
         {
             bAddOrRem = TRUE;
             if (GetID(*pPrev) < GetID(*pNew))

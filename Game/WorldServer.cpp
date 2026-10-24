@@ -783,7 +783,7 @@ static int ActiveObjectPeriod(CMapObject *object)
     const bool extended = mod && mod->ExtendActiveObjectsArea();
     // The installed addon extends both the base period and the stagger.
     return (extended ? 256 : 128) +
-           ((((int)object) >> (extended ? 4 : 5)) & (extended ? 30 : 15));
+           static_cast<int>((object->GetRTID() & 15) << (extended ? 1 : 0));
 }
 void CWorldServer::AddActiveSpot(const CPlot3D &ptCenter, float fpRadius)
 {
@@ -811,6 +811,22 @@ void CWorldServer::AddActiveObject(CMapObject *pObject)
     activeSet.SeekNew(pObject->GetID()) = pObject;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Snapshot keys rather than pointers: Segment may remove or replace another object.
+// Objects activated during this pass start on the next pass.
+static std::vector<std::pair<ObjectId, int>> OrderedTickObjects(CMapObjPtrHash &objects)
+{
+    std::vector<std::pair<ObjectId, int>> order;
+    CMapObjPtrHashIterator iter;
+    for (auto *object = iter.GetFirst(&objects); object; object = iter.GetNext())
+        order.emplace_back(object->GetRTID(), object->GetID());
+    std::sort(order.begin(), order.end());
+    return order;
+}
+static CMapObject *FindTickObject(CMapObjPtrHash &objects, const std::pair<ObjectId, int> &key)
+{
+    auto *slot = objects.Seek(key.second);
+    return slot && *slot && (*slot)->GetRTID() == key.first ? *slot : nullptr;
+}
 void CWorldServer::ActiveObjectsSegment()
 {
     CorePerf::Scope coreTiming(CorePerf::ActiveObjects);
@@ -819,7 +835,6 @@ void CWorldServer::ActiveObjectsSegment()
     CMapObject *pMO;
     static CIntArray invalidObjects;
     static CIntArray notActiveObjects;
-    CMapObjPtrHashIterator mapobjIter;
 
     CorePerf::Objects(dynamicObjs.GetCount(), activeSet.GetCount());
     invalidObjects.SetSize(0);
@@ -827,27 +842,30 @@ void CWorldServer::ActiveObjectsSegment()
     if(auto*mod=ModRuntime::Current())mod->TickStatRefresh();
     if (curInterface != IFACE_MISSION)
     {
-        pMO = mapobjIter.GetFirst(&dynamicObjs);
-        while (pMO)
+        for (const auto &key : OrderedTickObjects(dynamicObjs))
         {
+            pMO = FindTickObject(dynamicObjs, key);
+            if (!pMO) continue;
             CorePerf::ObjectVisited();
             pMO->Segment();
             if (!pMO->IsValid())
                 invalidObjects.Add(pMO->GetID());
-            pMO = mapobjIter.GetNext();
         }
     }
     else
     {
         // The addon keeps spell durations moving for objects outside the active set.
-        for (pMO = mapobjIter.GetFirst(&dynamicObjs); pMO; pMO = mapobjIter.GetNext())
+        for (const auto &key : OrderedTickObjects(dynamicObjs))
         {
+            pMO = FindTickObject(dynamicObjs, key);
+            if (!pMO) continue;
             if (!pMO->IsInvalid() && !pMO->IsUnreferenced() && pMO->TickInactiveSpellEffects())
                 AddActiveObject(pMO);
         }
-        pMO = mapobjIter.GetFirst(&activeSet);
-        while (pMO)
+        for (const auto &key : OrderedTickObjects(activeSet))
         {
+            pMO = FindTickObject(activeSet, key);
+            if (!pMO) continue;
             CorePerf::ObjectVisited();
             pMO->Segment();
             if (!pMO->IsValid())
@@ -860,7 +878,6 @@ void CWorldServer::ActiveObjectsSegment()
                 else
                     pMO->SetActivityCounter(ActiveObjectPeriod(pMO));
             }
-            pMO = mapobjIter.GetNext();
         }
     }
     // call segment for items

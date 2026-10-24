@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include "ObjectIdentity.h"
 /////////////////////////////////////////////////////////////////////////////////////
 class CStructureSaver;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -35,6 +36,7 @@ class CObj;
 class CFundament
 {
 private:
+    ObjectIdentity::Instance identity{this};
     union
     {
         struct
@@ -62,6 +64,7 @@ protected:
 
 public:
     typedef CPtr<CFundament> CSimplePtr;
+    ObjectId GetRTID() const { return identity.GetId(); }
     CFundament() {}
     // do not copy refcount when copy object
     CFundament(const CFundament &a) { ASSERT(0); }
@@ -127,7 +130,10 @@ public:
     void Clear()
     {
         AddRef();
+        // Clear reconstructs contents at the same address; references keep their identity.
+        ObjectIdentity::Instance savedIdentity(std::move(identity));
         DestroyContents();
+        identity.Swap(savedIdentity);
         DecRef();
     }
     //
@@ -248,10 +254,10 @@ public:
     // bool operator==( const T *a    ) const { return static_cast<T*>(Get()) == a; }
     bool operator!=(const CPtr &a) const { return Get() != a.Get(); }
     bool operator!=(const T *a) const { return static_cast<T *>(Get()) != a; }
-    bool operator<(const CPtr &a) const { return Get() < a.Get(); }
-    bool operator>(const CPtr &a) const { return Get() > a.Get(); }
-    bool operator<=(const CPtr &a) const { return Get() <= a.Get(); }
-    bool operator>=(const CPtr &a) const { return Get() >= a.Get(); }
+    bool operator<(const CPtr &a) const { return ObjectIdentity::IdOf(Get()) < ObjectIdentity::IdOf(a.Get()); }
+    bool operator>(const CPtr &a) const { return ObjectIdentity::IdOf(Get()) > ObjectIdentity::IdOf(a.Get()); }
+    bool operator<=(const CPtr &a) const { return ObjectIdentity::IdOf(Get()) <= ObjectIdentity::IdOf(a.Get()); }
+    bool operator>=(const CPtr &a) const { return ObjectIdentity::IdOf(Get()) >= ObjectIdentity::IdOf(a.Get()); }
     // access
     T *operator->() const { return static_cast<T *>(Get()); }
     operator T *() const { return static_cast<T *>(Get()); }
@@ -357,10 +363,10 @@ public:
     bool operator==(const T *a) const { return static_cast<T *>(Get()) == a; }
     bool operator!=(const CObj &a) const { return Get() != a.Get(); }
     bool operator!=(const T *a) const { return static_cast<T *>(Get()) != a; }
-    bool operator<(const CObj &a) const { return Get() < a.Get(); }
-    bool operator>(const CObj &a) const { return Get() > a.Get(); }
-    bool operator<=(const CObj &a) const { return Get() <= a.Get(); }
-    bool operator>=(const CObj &a) const { return Get() >= a.Get(); }
+    bool operator<(const CObj &a) const { return ObjectIdentity::IdOf(Get()) < ObjectIdentity::IdOf(a.Get()); }
+    bool operator>(const CObj &a) const { return ObjectIdentity::IdOf(Get()) > ObjectIdentity::IdOf(a.Get()); }
+    bool operator<=(const CObj &a) const { return ObjectIdentity::IdOf(Get()) <= ObjectIdentity::IdOf(a.Get()); }
+    bool operator>=(const CObj &a) const { return ObjectIdentity::IdOf(Get()) >= ObjectIdentity::IdOf(a.Get()); }
     // access
     T *operator->() const { return static_cast<T *>(Get()); }
     operator T *() const { return static_cast<T *>(Get()); }
