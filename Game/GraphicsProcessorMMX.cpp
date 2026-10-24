@@ -1,233 +1,128 @@
 #include "StdAfx.h"
 #include "GraphicsProcessorMMX.h"
-#include <mmintrin.h>
+#include <emmintrin.h>
+
+namespace
+{
+// Four BGRA pixels, with the original per-word multiply/shift and byte saturation.
+inline void BlendFour(LPDWORD pDst, const DWORD *pSrc, bool rle)
+{
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i src = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pSrc));
+    const __m128i dst = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pDst));
+    // The non-RLE assembly uses pixel 1's alpha for BOTH pixels 0 and 1.
+    const __m128i alphaSrc = rle ? src : _mm_shuffle_epi32(src, _MM_SHUFFLE(3, 2, 1, 1));
+    __m128i lo = _mm_unpacklo_epi8(alphaSrc, zero);
+    __m128i hi = _mm_unpackhi_epi8(alphaSrc, zero);
+    lo = _mm_shufflehi_epi16(_mm_shufflelo_epi16(lo, _MM_SHUFFLE(3, 3, 3, 3)),
+                            _MM_SHUFFLE(3, 3, 3, 3));
+    hi = _mm_shufflehi_epi16(_mm_shufflelo_epi16(hi, _MM_SHUFFLE(3, 3, 3, 3)),
+                            _MM_SHUFFLE(3, 3, 3, 3));
+    lo = _mm_sub_epi16(_mm_set1_epi16(255), lo);
+    hi = _mm_sub_epi16(_mm_set1_epi16(255), hi);
+    lo = _mm_add_epi16(_mm_srli_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(dst, zero), lo), 8),
+                       _mm_unpacklo_epi8(src, zero));
+    hi = _mm_add_epi16(_mm_srli_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(dst, zero), hi), 8),
+                       _mm_unpackhi_epi8(src, zero));
+    __m128i result = _mm_packus_epi16(lo, hi);
+    // A literal zero at the start of an RLE group leaves that destination pixel alone.
+    if (rle && pSrc[0] == 0)
+    {
+        const __m128i first = _mm_set_epi32(0, 0, 0, -1);
+        result = _mm_or_si128(_mm_and_si128(first, dst), _mm_andnot_si128(first, result));
+    }
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(pDst), result);
+}
+
+inline DWORD BlendPixel(DWORD dst, DWORD src, unsigned alpha)
+{
+    DWORD result = 0;
+    for (unsigned shift = 0; shift != 32; shift += 8)
+    {
+        const unsigned value = (((dst >> shift) & 255) * (255 - alpha) >> 8) +
+                               ((src >> shift) & 255);
+        result |= Min(value, 255u) << shift;
+    }
+    return result;
+}
+
+inline __m128i BlurAlpha(__m128i sum)
+{
+    // Signed PMULHW is exact here: sums are nonnegative and at most 3 * 255.
+    return _mm_and_si128(_mm_slli_epi16(_mm_mulhi_epi16(sum, _mm_set1_epi16(0x5556)), 8),
+                         _mm_set1_epi16(static_cast<short>(0xf000)));
+}
+}
 
 void CGraphicsProcessorMMX::PutOneLayer(LPDWORD pDst, LPDWORD pSrc, int nPix, bool bRLE)
 {
-    if (bRLE)
-        __asm {
-		pxor mm0, mm0
-		mov edi, nPix
-		shr edi, 2
-		mov esi, pDst
-		mov ecx, pSrc
-a0:
-		xor eax, eax
-		mov al, [ecx+3]
-		cmp eax, 0
-		jz a2
-
-		movd mm3, [esi]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi], mm3
-a1:
-		movd mm3, [esi+4]
-		xor eax, eax
-		mov al, [ecx+7]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx+4]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi+4], mm3
-
-		movd mm3, [esi+8]
-		xor eax, eax
-		mov al, [ecx+11]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx+8]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi+8], mm3
-
-		movd mm3, [esi+12]
-		xor eax, eax
-		mov al, [ecx+15]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx+12]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi+12], mm3
-
-		add esi, 16
-		add ecx, 16
-		dec edi
-		jnz a0
-		jmp a3
-a2:
-		mov ebx, [ecx]
-		cmp ebx, 0
-		jz a1
-
-		add esi, ebx
-		add ecx, 4
-		shr ebx, 4
-		sub edi, ebx
-		jnz a0
-a3:
-		emms
+    while (nPix > 0)
+    {
+        if (bRLE && (pSrc[0] >> 24) == 0 && pSrc[0] != 0)
+        {
+            // A run is a byte count, not a pointer or a native-sized word.
+            const DWORD skip = *pSrc++ >> 2;
+            pDst += skip;
+            nPix -= static_cast<int>(skip);
+            continue;
         }
+        if (nPix >= 4)
+            BlendFour(pDst, pSrc, bRLE);
         else
         {
-            __asm {
-		pxor mm0, mm0
-		mov edi, nPix
-		shr edi, 2
-		mov esi, pDst
-		mov ecx, pSrc
-a4:
-		movd mm3, [esi]
-		xor eax, eax
-		mov al, [ecx+7]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi], mm3
-
-		movd mm3, [esi+4]
-		xor eax, eax
-		mov al, [ecx+7]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx+4]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi+4], mm3
-
-		movd mm3, [esi+8]
-		xor eax, eax
-		mov al, [ecx+11]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx+8]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi+8], mm3
-
-		movd mm3, [esi+12]
-		xor eax, eax
-		mov al, [ecx+15]
-		xor eax, 0x000000FF
-		movd mm5, eax
-		movd mm2, [ecx+12]
-		punpcklbw mm5, mm5
-		punpcklbw mm2, mm0
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		paddw mm3, mm2
-		packuswb mm3, mm0
-		movd [esi+12], mm3
-
-		add esi, 16
-		add ecx, 16
-		dec edi
-		jne a4
-		emms
+            for (int i = 0; i < nPix; ++i)
+            {
+                if (bRLE && i == 0 && pSrc[0] == 0)
+                    continue;
+                const int alphaIndex = !bRLE && i == 0 && nPix > 1 ? 1 : i;
+                pDst[i] = BlendPixel(pDst[i], pSrc[i], pSrc[alphaIndex] >> 24);
             }
         }
+        const int count = Min(nPix, 4);
+        pSrc += count;
+        pDst += count;
+        nPix -= count;
+    }
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CGraphicsProcessorMMX::GenerateMipmapLevel(LPDWORD pDst, LPDWORD pSrc, int iDstSize)
 {
-    __asm {
-		pxor mm0, mm0
-		mov edx, iDstSize
-		mov ecx, pSrc
-		mov ebx, pDst
-		mov eax, 0x80000000
-		movd mm7, eax
-		punpcklbw mm7, mm0
-		mov esi, edx
-		mov edi, edx
-a0:
-		mov eax, [ecx]
-		movd mm2, eax
-		mov eax, [ecx+4]
-		punpcklbw mm2, mm0
-		movd mm3, eax
-		mov eax, [ecx+edx*8]
-		punpcklbw mm3, mm0
-		movd mm4, eax
-		paddw mm2, mm3
-		mov eax, [ecx+edx*8+4]
-		punpcklbw mm4, mm0
-		movd mm5, eax
-		paddw mm2, mm4
-		add ecx, 8
-		paddw mm2, mm7
-		punpcklbw mm5, mm0
-		paddw mm2, mm5
-		psrlw mm2, 2
-		packuswb mm2, mm0
-		movd [ebx], mm2
-		add ebx, 4
-		dec edi
-		jne a0
-		lea ecx, [ecx+edx*8]
-		mov edi, edx
-		dec esi
-		jne a0
-		emms
+    if (iDstSize <= 0)
+        return;
+    const size_t srcWidth = size_t(iDstSize) * 2;
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i alphaBias = _mm_set_epi16(128, 0, 0, 0, 128, 0, 0, 0);
+    for (int y = 0; y < iDstSize; ++y)
+    {
+        const DWORD *top = pSrc + size_t(y) * 2 * srcWidth;
+        const DWORD *bottom = top + srcWidth;
+        int x = 0;
+        for (; x + 1 < iDstSize; x += 2)
+        {
+            const __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(top + x * 2));
+            const __m128i b = _mm_loadu_si128(reinterpret_cast<const __m128i *>(bottom + x * 2));
+            const __m128i lo = _mm_add_epi16(_mm_unpacklo_epi8(a, zero), _mm_unpacklo_epi8(b, zero));
+            const __m128i hi = _mm_add_epi16(_mm_unpackhi_epi8(a, zero), _mm_unpackhi_epi8(b, zero));
+            const __m128i sums = _mm_unpacklo_epi64(_mm_add_epi16(lo, _mm_srli_si128(lo, 8)),
+                                                   _mm_add_epi16(hi, _mm_srli_si128(hi, 8)));
+            const __m128i result = _mm_packus_epi16(_mm_srli_epi16(_mm_add_epi16(sums, alphaBias), 2), zero);
+            _mm_storel_epi64(reinterpret_cast<__m128i *>(pDst + x), result);
+        }
+        if (x < iDstSize)
+        {
+            DWORD result = 0;
+            for (unsigned shift = 0; shift != 32; shift += 8)
+            {
+                const unsigned sum = ((top[x * 2] >> shift) & 255) +
+                                     ((top[x * 2 + 1] >> shift) & 255) +
+                                     ((bottom[x * 2] >> shift) & 255) +
+                                     ((bottom[x * 2 + 1] >> shift) & 255) +
+                                     (shift == 24 ? 128 : 0);
+                result |= Min(sum >> 2, 255u) << shift;
+            }
+            pDst[x] = result;
+        }
+        pDst += iDstSize;
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -866,364 +761,129 @@ void CGraphicsProcessorMMX::RasterizeTriangleWithAlpha(SShadowTextureRenderParam
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+namespace
+{
+inline WORD Interpolate565(WORD a, WORD b)
+{
+    // Preserve PMULHW with 0x5555 (not division by 3), including green's masked bits.
+    const unsigned blue = (((a & 31) * 2 + (b & 31)) * 0x5555) >> 16;
+    const unsigned green = ((((a & 0x07e0) * 2 + (b & 0x07e0)) * 0x5555) >> 16) & 0x07e0;
+    const unsigned red = (((a >> 11) * 2 + (b >> 11)) * 0x5555) >> 16;
+    return static_cast<WORD>(blue | green | (red << 11));
+}
+
+inline WORD Average565(WORD a, WORD b)
+{
+    const unsigned blue = ((a & 31) + (b & 31)) >> 1;
+    const unsigned green = (((a & 0x07e0) + (b & 0x07e0)) >> 1) & 0x07e0;
+    const unsigned red = ((a >> 11) + (b >> 11)) >> 1;
+    return static_cast<WORD>(blue | green | (red << 11));
+}
+}
+
 void CGraphicsProcessorMMX::DecompressDXT(LPWORD pDst, LPBYTE pSrc, EDXTDecodeTypes decodeType,
                                           int nSizeX, int nSizeY)
 {
-    // DXTn decoding
-    LPWORD colors, color2, color3, alpha;
-
-    DWORD pix;
-    WORD alpha4;
-    LPWORD ptrdst;
-    int i, j, n;
-    __m64 _mmx_const1, _mmx_const2, _mmx_const3, _mmx_const4, _mmx_alpha;
-    __m64 _mmx_color0, _mmx_color1, _mmx_color2, _mmx_color3, _mmx_colors;
-    color2 = (LPWORD)&_mmx_color2;
-    color3 = (LPWORD)&_mmx_color3;
-    colors = (LPWORD)&_mmx_colors;
-
-    _mmx_const3 = _mm_set1_pi16(0x5555);
-
-    switch (decodeType)
+    if (decodeType < DXT1_TO_565 || decodeType > DXT3_TO_4444)
+        return;
+    const bool explicitAlpha = decodeType == DXT2_TO_4444 || decodeType == DXT3_TO_4444;
+    for (int by = 0; by < (nSizeY >> 2); ++by)
     {
-        //////////////////////////////////////////////// DXT1_TO_565
-    case DXT1_TO_565:
-
-        j = nSizeY >> 2;
-        while (j)
+        for (int bx = 0; bx < (nSizeX >> 2); ++bx)
         {
-            i = nSizeX >> 2;
-            while (i)
+            const BYTE *block = pSrc + (explicitAlpha ? 8 : 0);
+            WORD colors[4];
+            DWORD indices;
+            memcpy(colors, block, 2 * sizeof(WORD));
+            memcpy(&indices, block + 4, sizeof(indices));
+            const bool fourColors = explicitAlpha || colors[0] > colors[1];
+            colors[2] = fourColors ? Interpolate565(colors[0], colors[1]) :
+                                    Average565(colors[0], colors[1]);
+            colors[3] = fourColors ? Interpolate565(colors[1], colors[0]) : 0;
+            for (int c = 0; c < 4; ++c)
             {
-                colors[0] = *((LPWORD)pSrc);
-                colors[1] = *((LPWORD)(pSrc + 2));
-                pix = *((LPDWORD)(pSrc + 4));
-                _mmx_color0 = _mm_set_pi16(0, colors[0] >> 11, colors[0] & 0x07e0,
-                                           colors[0] & 0x001f);
-                _mmx_color1 = _mm_set_pi16(0, colors[1] >> 11, colors[1] & 0x07e0,
-                                           colors[1] & 0x001f);
-                if (colors[0] > colors[1])
+                if (decodeType == DXT1_TO_555 || decodeType == DXT1_TO_1555)
                 {
-                    _mmx_color2 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color0, 1), _mmx_color1),
-                                            _mmx_const3);
-                    _mmx_color3 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color1, 1), _mmx_color0),
-                                            _mmx_const3);
-                    colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                    colors[3] = color3[0] | (color3[1] & 0x07e0) | (color3[2] << 11);
+                    colors[c] = static_cast<WORD>(((colors[c] & 0xffc0) >> 1) | (colors[c] & 31));
+                    if (decodeType == DXT1_TO_1555 && (fourColors || c != 3))
+                        colors[c] |= 0x8000;
                 }
-                else
-                {
-                    _mmx_color2 = _m_psrlwi(_m_paddw(_mmx_color0, _mmx_color1), 1);
-                    colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                    colors[3] = 0;
-                }
-                ptrdst = pDst;
-                n = 4;
-                while (n)
-                {
-                    ptrdst[0] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[1] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[2] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[3] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst += nSizeX;
-                    n--;
-                }
-                pSrc += 8;
-                pDst += 4;
-                i--;
+                else if (explicitAlpha)
+                    colors[c] = static_cast<WORD>(((colors[c] & 0xf000) >> 4) |
+                                                  ((colors[c] & 0x0780) >> 3) |
+                                                  ((colors[c] & 0x001e) >> 1));
             }
-            pDst += nSizeX * 3;
-            j--;
-        }
-
-        break;
-
-        //////////////////////////////////////////////// DXT1_TO_555
-    case DXT1_TO_555:
-
-        _mmx_const1 = _mm_set1_pi16(0xffc0);
-        _mmx_const2 = _mm_set1_pi16(0x001f);
-        j = nSizeY >> 2;
-        while (j)
-        {
-            i = nSizeX >> 2;
-            while (i)
+            WORD *dst = pDst + size_t(by) * 4 * nSizeX + bx * 4;
+            for (int y = 0; y < 4; ++y)
             {
-                colors[0] = *((LPWORD)pSrc);
-                colors[1] = *((LPWORD)(pSrc + 2));
-                pix = *((LPDWORD)(pSrc + 4));
-                _mmx_color0 = _mm_set_pi16(0, colors[0] >> 11, colors[0] & 0x07e0,
-                                           colors[0] & 0x001f);
-                _mmx_color1 = _mm_set_pi16(0, colors[1] >> 11, colors[1] & 0x07e0,
-                                           colors[1] & 0x001f);
-                if (colors[0] > colors[1])
+                WORD alpha = 0;
+                if (explicitAlpha)
+                    memcpy(&alpha, pSrc + y * sizeof(WORD), sizeof(alpha));
+                for (int x = 0; x < 4; ++x)
                 {
-                    _mmx_color2 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color0, 1), _mmx_color1),
-                                            _mmx_const3);
-                    _mmx_color3 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color1, 1), _mmx_color0),
-                                            _mmx_const3);
-                    colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                    colors[3] = color3[0] | (color3[1] & 0x07e0) | (color3[2] << 11);
+                    dst[x] = colors[indices & 3] | ((alpha & 15) << 12);
+                    indices >>= 2;
+                    alpha >>= 4;
                 }
-                else
-                {
-                    _mmx_color2 = _m_psrlwi(_m_paddw(_mmx_color0, _mmx_color1), 1);
-                    colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                    colors[3] = 0;
-                }
-                // convert from 565 to 555
-                _mmx_colors = _m_por(_m_psrlwi(_m_pand(_mmx_colors, _mmx_const1), 1),
-                                     _m_pand(_mmx_colors, _mmx_const2));
-                ptrdst = pDst;
-                n = 4;
-                while (n)
-                {
-                    ptrdst[0] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[1] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[2] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[3] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst += nSizeX;
-                    n--;
-                }
-                pSrc += 8;
-                pDst += 4;
-                i--;
+                dst += nSizeX;
             }
-            pDst += nSizeX * 3;
-            j--;
+            pSrc += explicitAlpha ? 16 : 8;
         }
-
-        break;
-
-        //////////////////////////////////////////////// DXT1_TO_1555
-    case DXT1_TO_1555:
-
-        _mmx_const1 = _mm_set1_pi16(0xffc0);
-        _mmx_const2 = _mm_set1_pi16(0x001f);
-        _mmx_alpha = _mm_set1_pi16(0x8000);
-        alpha = (LPWORD)&_mmx_alpha;
-        j = nSizeY >> 2;
-        while (j)
-        {
-            i = nSizeX >> 2;
-            while (i)
-            {
-                colors[0] = *((LPWORD)pSrc);
-                colors[1] = *((LPWORD)(pSrc + 2));
-                pix = *((LPDWORD)(pSrc + 4));
-                _mmx_color0 = _mm_set_pi16(0, colors[0] >> 11, colors[0] & 0x07e0,
-                                           colors[0] & 0x001f);
-                _mmx_color1 = _mm_set_pi16(0, colors[1] >> 11, colors[1] & 0x07e0,
-                                           colors[1] & 0x001f);
-                if (colors[0] > colors[1])
-                {
-                    _mmx_color2 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color0, 1), _mmx_color1),
-                                            _mmx_const3);
-                    _mmx_color3 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color1, 1), _mmx_color0),
-                                            _mmx_const3);
-                    colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                    colors[3] = color3[0] | (color3[1] & 0x07e0) | (color3[2] << 11);
-                    alpha[3] = 0x8000;
-                }
-                else
-                {
-                    _mmx_color2 = _m_psrlwi(_m_paddw(_mmx_color0, _mmx_color1), 1);
-                    colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                    colors[3] = 0;
-                    alpha[3] = 0;
-                }
-                // convert from 565 to 1555
-                _mmx_colors = _m_por(_mmx_alpha,
-                                     _m_por(_m_psrlwi(_m_pand(_mmx_colors, _mmx_const1), 1),
-                                            _m_pand(_mmx_colors, _mmx_const2)));
-                ptrdst = pDst;
-                n = 4;
-                while (n)
-                {
-                    ptrdst[0] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[1] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[2] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst[3] = colors[pix & 3];
-                    pix >>= 2;
-                    ptrdst += nSizeX;
-                    n--;
-                }
-                pSrc += 8;
-                pDst += 4;
-                i--;
-            }
-            pDst += nSizeX * 3;
-            j--;
-        }
-
-        break;
-
-        //////////////////////////////////////////////// DXT2_TO_4444, DXT3_TO_4444
-    case DXT2_TO_4444:
-    case DXT3_TO_4444:
-
-        _mmx_const1 = _mm_set1_pi16(0xf000);
-        _mmx_const2 = _mm_set1_pi16(0x0780);
-        _mmx_const4 = _mm_set1_pi16(0x001e);
-        pSrc += 8;
-        j = nSizeY >> 2;
-        while (j)
-        {
-            i = nSizeX >> 2;
-            while (i)
-            {
-                colors[0] = *((LPWORD)pSrc);
-                colors[1] = *((LPWORD)(pSrc + 2));
-                pix = *((LPDWORD)(pSrc + 4));
-                _mmx_color0 = _mm_set_pi16(0, colors[0] >> 11, colors[0] & 0x07e0,
-                                           colors[0] & 0x001f);
-                _mmx_color1 = _mm_set_pi16(0, colors[1] >> 11, colors[1] & 0x07e0,
-                                           colors[1] & 0x001f);
-                _mmx_color2 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color0, 1), _mmx_color1),
-                                        _mmx_const3);
-                _mmx_color3 = _m_pmulhw(_m_paddw(_m_psllwi(_mmx_color1, 1), _mmx_color0),
-                                        _mmx_const3);
-                colors[2] = color2[0] | (color2[1] & 0x07e0) | (color2[2] << 11);
-                colors[3] = color3[0] | (color3[1] & 0x07e0) | (color3[2] << 11);
-                // convert from 565 to 444
-                _mmx_colors = _m_por(_m_psrlwi(_m_pand(_mmx_colors, _mmx_const1), 4),
-                                     _m_por(_m_psrlwi(_m_pand(_mmx_colors, _mmx_const2), 3),
-                                            _m_psrlwi(_m_pand(_mmx_colors, _mmx_const4), 1)));
-                ptrdst = pDst;
-                n = 4;
-                while (n)
-                {
-                    alpha4 = *((LPWORD)pSrc - n);
-                    ptrdst[0] = colors[pix & 3] | ((alpha4 & 15) << 12);
-                    pix >>= 2;
-                    alpha4 >>= 4;
-                    ptrdst[1] = colors[pix & 3] | ((alpha4 & 15) << 12);
-                    pix >>= 2;
-                    alpha4 >>= 4;
-                    ptrdst[2] = colors[pix & 3] | ((alpha4 & 15) << 12);
-                    pix >>= 2;
-                    alpha4 >>= 4;
-                    ptrdst[3] = colors[pix & 3] | ((alpha4 & 15) << 12);
-                    pix >>= 2;
-                    ptrdst += nSizeX;
-                    n--;
-                }
-                pSrc += 16;
-                pDst += 4;
-                i--;
-            }
-            pDst += nSizeX * 3;
-            j--;
-        }
-
-        break;
     }
-    _m_empty();
 }
-/////////////////////////////////////////////////////////////////////////////////////
+//
 void CGraphicsProcessorMMX::BlurVertical(LPWORD pSrc, int nSizeX, int nSizeY)
 {
-    int i, j, step;
-    __m64 _mmx_prev, _mmx_sum, _mmx_const, _mmx_const2;
-    __m64 *_mmx_ptr, *_mmx_ptr_1, *_mmx_ptr1;
-
-    _mmx_const = _mm_set1_pi16(0xf000);
-    _mmx_const2 = _mm_set1_pi16(0x5556);
-    i = step = nSizeX >> 2;
-    while (i)
+    if (nSizeX <= 0 || nSizeY <= 0)
+        return;
+    int x = 0;
+    for (; x + 7 < nSizeX; x += 8)
     {
-        _mmx_ptr_1 = (__m64 *)pSrc;
-        _mmx_ptr = _mmx_ptr_1 + step;
-        _mmx_ptr1 = _mmx_ptr + step;
-
-        *_mmx_ptr_1 = _m_psrlwi(*_mmx_ptr_1, 8);
-        *_mmx_ptr = _m_psrlwi(*_mmx_ptr, 8);
-
-        _mmx_sum = _m_paddw(*_mmx_ptr_1, *_mmx_ptr);
-        _mmx_prev = _m_pand(_m_psllwi(_m_pmulhw(_mmx_sum, _mmx_const2), 8), _mmx_const);
-
-        j = nSizeY - 2;
-        while (j)
+        WORD *dst = pSrc + x;
+        __m128i prev = _mm_srli_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i *>(dst)), 8);
+        if (nSizeY == 1)
         {
-            *_mmx_ptr1 = _m_psrlwi(*_mmx_ptr1, 8);
-
-            _mmx_sum = _m_paddw(_m_paddw(*_mmx_ptr_1, *_mmx_ptr), *_mmx_ptr1);
-            *_mmx_ptr_1 = _mmx_prev;
-            _mmx_prev = _m_pand(_m_psllwi(_m_pmulhw(_mmx_sum, _mmx_const2), 8), _mmx_const);
-
-            _mmx_ptr_1 += step;
-            _mmx_ptr += step;
-            _mmx_ptr1 += step;
-
-            j--;
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), BlurAlpha(prev));
+            continue;
         }
-        _mmx_sum = _m_paddw(*_mmx_ptr_1, *_mmx_ptr);
-        *_mmx_ptr_1 = _mmx_prev;
-        *_mmx_ptr = _m_pand(_m_psllwi(_m_pmulhw(_mmx_sum, _mmx_const2), 8), _mmx_const);
-        pSrc += 4;
-        i--;
+        __m128i current = _mm_srli_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i *>(dst + nSizeX)), 8);
+        __m128i result = BlurAlpha(_mm_add_epi16(prev, current));
+        for (int y = 2; y < nSizeY; ++y)
+        {
+            const __m128i next = _mm_srli_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i *>(dst + size_t(y) * nSizeX)), 8);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), result);
+            dst += nSizeX;
+            result = BlurAlpha(_mm_add_epi16(_mm_add_epi16(prev, current), next));
+            prev = current;
+            current = next;
+        }
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), result);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + nSizeX), BlurAlpha(_mm_add_epi16(prev, current)));
     }
-    _m_empty();
-    /*
-            int i, j, step;
-            __m64 _mmx_prev, _mmx_sum, _mmx_const;
-            __m64 *_mmx_ptr, *_mmx_ptr_1, *_mmx_ptr1, *_mmx_ptr2;
-
-            _mmx_const = _mm_set1_pi16( 0xf000 );
-            i = step = nSizeX >> 2;
-            while (i)
-            {
-                    _mmx_ptr_1 = (__m64*)pSrc;
-                    _mmx_ptr   = _mmx_ptr_1 + step;
-                    _mmx_ptr1  = _mmx_ptr + step;
-                    _mmx_ptr2  = _mmx_ptr1 + step;
-
-                    *_mmx_ptr_1 = _m_psrlwi( *_mmx_ptr_1, 2 );
-                    *_mmx_ptr   = _m_psrlwi( *_mmx_ptr, 2 );
-                    *_mmx_ptr1  = _m_psrlwi( *_mmx_ptr1, 2 );
-
-                    _mmx_sum = _m_paddw( _m_paddw( *_mmx_ptr_1, *_mmx_ptr ), *_mmx_ptr1 );
-                    _mmx_prev = _m_pand( _mmx_sum, _mmx_const );
-
-                    j = nSizeY - 3;
-                    while (j)
-                    {
-                            *_mmx_ptr2 = _m_psrlwi( *_mmx_ptr2, 2 );
-
-                            _mmx_sum = _m_paddw( _m_paddw( _m_paddw( *_mmx_ptr_1, *_mmx_ptr ),
-       *_mmx_ptr1 ), *_mmx_ptr2 );
-                            *_mmx_ptr_1 = _mmx_prev;
-                            _mmx_prev = _m_pand( _mmx_sum, _mmx_const );
-
-                            _mmx_ptr_1 += step;
-                            _mmx_ptr   += step;
-                            _mmx_ptr1  += step;
-                            _mmx_ptr2  += step;
-
-                            j--;
-                    }
-                    _mmx_sum = _m_paddw( _m_paddw( *_mmx_ptr_1, *_mmx_ptr ), *_mmx_ptr1 );
-                    *_mmx_ptr_1 = _mmx_prev;
-                    _mmx_prev = _m_pand( _mmx_sum, _mmx_const );
-                    _mmx_sum = _m_paddw( *_mmx_ptr, *_mmx_ptr1 );
-                    *_mmx_ptr = _mmx_prev;
-                    *_mmx_ptr1 = _m_pand( _mmx_sum, _mmx_const );
-                    pSrc += 4;
-                    i--;
-            }
-            _m_empty();
-    */
+    // Complete columns outside the SIMD group without reading beyond the row.
+    for (; x < nSizeX; ++x)
+    {
+        WORD *dst = pSrc + x;
+        unsigned prev = *dst >> 8;
+        if (nSizeY == 1)
+        {
+            *dst = static_cast<WORD>(((prev * 0x5556) >> 16) << 8) & 0xf000;
+            continue;
+        }
+        unsigned current = dst[nSizeX] >> 8;
+        WORD result = static_cast<WORD>((((prev + current) * 0x5556) >> 16) << 8) & 0xf000;
+        for (int y = 2; y < nSizeY; ++y)
+        {
+            const unsigned next = pSrc[size_t(y) * nSizeX + x] >> 8;
+            *dst = result;
+            dst += nSizeX;
+            result = static_cast<WORD>((((prev + current + next) * 0x5556) >> 16) << 8) & 0xf000;
+            prev = current;
+            current = next;
+        }
+        *dst = result;
+        dst[nSizeX] = static_cast<WORD>((((prev + current) * 0x5556) >> 16) << 8) & 0xf000;
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CGraphicsProcessorMMX::BlurHorizontal(LPWORD pSrc, int nSizeX, int nSizeY)
@@ -1289,72 +949,32 @@ void CGraphicsProcessorMMX::BlurHorizontal(LPWORD pSrc, int nSizeX, int nSizeY)
 /////////////////////////////////////////////////////////////////////////////////////
 void CGraphicsProcessorMMX::PrecalculateAsLayer(LPDWORD pSrc, int nPix)
 {
-    __asm {
-		pxor mm0, mm0
-		mov edi, nPix
-		shr edi, 2
-		mov ecx, pSrc
-a0:
-		movd mm3, [ecx]
-		xor eax, eax
-		mov al, [ecx+3]
-		movd mm5, eax
-		punpcklbw mm5, mm5
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		packuswb mm3, mm0
-		movd [ecx], mm3
-		mov [ecx+3], al
-
-		movd mm3, [ecx+4]
-		xor eax, eax
-		mov al, [ecx+7]
-		movd mm5, eax
-		punpcklbw mm5, mm5
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		packuswb mm3, mm0
-		movd [ecx+4], mm3
-		mov [ecx+7], al
-
-		movd mm3, [ecx+8]
-		xor eax, eax
-		mov al, [ecx+11]
-		movd mm5, eax
-		punpcklbw mm5, mm5
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		packuswb mm3, mm0
-		movd [ecx+8], mm3
-		mov [ecx+11], al
-
-		movd mm3, [ecx+12]
-		xor eax, eax
-		mov al, [ecx+15]
-		movd mm5, eax
-		punpcklbw mm5, mm5
-		punpcklbw mm5, mm5
-		punpcklbw mm3, mm0
-		punpcklbw mm5, mm0
-		pmullw mm3, mm5
-		psrlw mm3, 8
-		packuswb mm3, mm0
-		movd [ecx+12], mm3
-		mov [ecx+15], al
-
-		add ecx, 16
-		dec edi
-		jne a0
-		emms
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i alphaMask = _mm_set1_epi32(static_cast<int>(0xff000000u));
+    int i = 0;
+    for (; i + 3 < nPix; i += 4)
+    {
+        const __m128i src = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pSrc + i));
+        __m128i lo = _mm_unpacklo_epi8(src, zero);
+        __m128i hi = _mm_unpackhi_epi8(src, zero);
+        const __m128i alphaLo = _mm_shufflehi_epi16(_mm_shufflelo_epi16(lo, _MM_SHUFFLE(3, 3, 3, 3)),
+                                                   _MM_SHUFFLE(3, 3, 3, 3));
+        const __m128i alphaHi = _mm_shufflehi_epi16(_mm_shufflelo_epi16(hi, _MM_SHUFFLE(3, 3, 3, 3)),
+                                                   _MM_SHUFFLE(3, 3, 3, 3));
+        lo = _mm_srli_epi16(_mm_mullo_epi16(lo, alphaLo), 8);
+        hi = _mm_srli_epi16(_mm_mullo_epi16(hi, alphaHi), 8);
+        const __m128i rgb = _mm_packus_epi16(lo, hi);
+        const __m128i result = _mm_or_si128(_mm_andnot_si128(alphaMask, rgb), _mm_and_si128(alphaMask, src));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(pSrc + i), result);
+    }
+    for (; i < nPix; ++i)
+    {
+        const DWORD src = pSrc[i];
+        const unsigned alpha = src >> 24;
+        pSrc[i] = (src & 0xff000000) |
+                  ((((src >> 16) & 255) * alpha >> 8) << 16) |
+                  ((((src >> 8) & 255) * alpha >> 8) << 8) |
+                  ((src & 255) * alpha >> 8);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
