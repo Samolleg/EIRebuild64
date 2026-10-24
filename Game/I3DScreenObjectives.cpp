@@ -213,8 +213,7 @@ void CI3DScreenObjectives::OnActivate()
                 SScenarioZone *pZ = theMap.GetZoneByName(szVarParts[1]);
                 if (!pZ)
                     continue;
-                if (!IWorldConnector.IsLMP() &&
-                    pZ->szAllodName.CompareNoCase(pBZ->szAllodName) != 0)
+                if (pZ->szAllodName.CompareNoCase(pBZ->szAllodName) != 0)
                     continue;
                 bool bIs = false;
                 for (auto it = szAllZones.begin(); it != szAllZones.end(); ++it)
@@ -887,19 +886,6 @@ void CI3DScreenObjectives::ReloadObjPos(LPCTSTR pszName)
     crosses.clear();
     CPlot2D res;
 
-    if (IWorldConnector.IsLMP())
-    {
-        const SQDBQuest *pQ = theQuestDatabase.quests[pszName];
-        if (!pQ)
-            return;
-        for (int i = 0; i + 1 < pQ->places.size(); i += 2)
-        {
-            res.x = pQ->places[i];
-            res.y = pQ->places[i + 1];
-            crosses.push_back(res);
-        }
-    }
-    else
     {
         CString szTmp;
         CStringArray szTmpArray;

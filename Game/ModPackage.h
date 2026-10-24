@@ -65,9 +65,6 @@ public:
     CModPackage& operator=(const CModPackage&)=delete;
     bool RegisteredLootEnabled() const { return registeredLoot; }
     bool SinglePlayerAllowed() const { return singlePlayerAllowed; }
-    bool MultiplayerAllowed() const { return multiplayerAllowed; }
-    bool CustomMpZones() const { return customMpZones; }
-    bool MatchesMpZone(int allod, const char *terrain) const;
     bool ExtendActiveObjectsArea() const { return extendActiveObjectsArea; }
     bool BriefingWeaponsEnabled() const { return briefingWeapons; }
     bool WorldBackgroundEnabled() const { return worldBackground; }
@@ -120,11 +117,9 @@ public:
     float SpellAddonManaBonus(const SRPGUnitStats&);
     bool NpcArmorPercepts(CUnit&,CUnit*,float& sight,float& hearing);
     float ManaBonus(const SRPGUserUnitStats&);
-    float DistributeExperience(float experience,int players);
     float ChargeExperience(float exp,int count) const { return settingsProfile.Experience(exp,count); }
     int AutomaticSkillLimit(int index,bool nativeRedraw=false) const { return settingsProfile.SkillLimit(index,nativeRedraw); }
     bool ForceTutorial() const { return forceTutorial; }
-    void LogChat(unsigned color,const char* nickname,const char* text) const;
     void SpellTooltipOverrides(CUnit* server,ModSpellTooltip::Values&,float& durationTicks);
     void RecalcShops(SShopSet&,bool lmp);
     int ShopConstructLimit(int shop);
@@ -242,14 +237,11 @@ private:
     ModSettingsPolicy::Profile settingsProfile;
     ModSpellAddon::Profile spellAddon;
     bool forceTutorial=false;
-    std::string chatHtmlFile;
     std::string gameDebugFile;
     FalloutSettings falloutSettings;
     float magicRandomLimit=-1.0f;
     bool saveInMod=true;
-    bool singlePlayerAllowed=true,multiplayerAllowed=true;
-    bool customMpZones=false;
-    std::vector<std::string> mpZones[3];
+    bool singlePlayerAllowed=true;
     bool extendActiveObjectsArea=false;
     bool briefingWeapons=true;
     bool worldBackground=true;

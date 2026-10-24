@@ -96,7 +96,7 @@ struct SShopSet
     void Clear();
     CShop *GetShop(int nID);
     void Serialize(CStructureSaver &file);
-    void NewGame(bool bLMP);
+    void NewGame();
 };
 /////////////////////////////////////////////////////////////////////////////////////
 struct SHatUser
@@ -142,16 +142,11 @@ public:
     // create new party with specified id
     // bool NewGame( SPartyID &partyID );
     // Get party from hat if partyID is not initialized then use first party
-    bool GetParty(const char *pszUserName, const char *pszPassword, const SPartyID &partyID,
-                  CParty &res);
     // Set modified party to hat from game
-    bool SetParty(const SPartyID &partyID, CParty &res);
     SPartySet &GetSinglePlayerPartySet() { return singleParty; }
     void GetSinglePlayerParty(CParty &res);
     void SetSinglePlayerParty(CParty &res);
     void NewSingleGame();
-    void NewLMPGame();
-    void GetUnusedPartyID(SPartyID &res);
 };
 /////////////////////////////////////////////////////////////////////////////////////
 CGlobalHat &ActiveGlobalHat();

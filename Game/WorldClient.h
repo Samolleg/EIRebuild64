@@ -291,7 +291,6 @@ public:
     BOOL IsWireframe() const { return CheckFlag(WC_RENDER_WIREFRAME) != 0; }
     //
     void ConnectLocal(CLocalNetDriver *pServerDriver);
-    bool ConnectTcp(const char *pszAddress);
     void Disconnect();
     bool HasPacket();
     bool IsConnected();

@@ -9,7 +9,6 @@
 #include "ModPackage.h"
 #include "ModConfiguration.h"
 #include "Console.h"
-#include "ChatServer.h"
 #include "WorldServer.h"
 #include "WorldInterface.h"
 #include "Player.h"
@@ -28,8 +27,7 @@ SRWLOCK lock = SRWLOCK_INIT;
 char recent[24][200] = {}, snapshot[24][200] = {};
 unsigned next = 0, count = 0, snapshotCount = 0;
 bool silent = false;
-bool fullDump = false, autoRecover = false;
-std::string configuredAddonPath;
+bool fullDump = false;
 LPTOP_LEVEL_EXCEPTION_FILTER previousHandler = nullptr;
 volatile LONG handling = 0;
 CFileLogger fileLog;
@@ -48,32 +46,7 @@ private:
 DWORD Setting(const wchar_t *name, DWORD fallback) {
     return SettingsProfile::Dword(L"Settings",name,fallback);
 }
-std::string RecoverSaves() {
-    if (!pChatServer || !pChatServer->IsValid()) return {};
-    CPlayer *player = theWorldServer.GetPlayer(0);
-    if (!player) return {};
-    CParty *party = &player->party;
-    const auto *mod = ModRuntime::Resources();
-    std::string folder = mod ? mod->Directory() : configuredAddonPath;
-    AddTrailingSlash(folder); folder += "mp\\backup\\";
-    if (!DirExists(folder) && !CreateDirectoryA(folder.c_str(), nullptr)) return {};
-    const std::string unique = GetUniqPath(folder);
-    // Exhaustion is not permission to write into a different/root directory.
-    if (unique.empty()) return {};
-    folder = unique + "\\";
-    if (!DirExists(folder) && !CreateDirectoryA(folder.c_str(), nullptr)) return {};
-    const std::string name = (LPCSTR)LMPPartySet.currentParty.szFileName;
-    ModDiagnosticsPolicy::Recover(name,
-        [&] { theWorldServer.FakeRemoveParty(player); },
-        [&](const std::string& fileName) {
-            CMemorySave mem; party->Store(mem, TRUE);
-            CFileSave file; file.OpenWrite((folder + fileName).c_str());
-            CompressTo(file, 0x114, N_CURRENT_SAVE_VERSION, mem); file.CloseFile();
-        },
-        [&] { theWorldServer.FakeDeployParty(player); },
-        [&] { theWorldServer.LootAllCorpses(); });
-    return folder;
-}
+
 HANDLE runtimeLog = INVALID_HANDLE_VALUE;
 volatile LONG eventCount = 0;
 // Retain the existing typed reporting-point context beside the native logger ring.
@@ -109,8 +82,6 @@ void Note(const char *text) {
 void Initialize(bool quiet) {
     silent = quiet;
     fullDump = Setting(L"FullDump", 0) != 0;
-    autoRecover = Setting(L"AutoRecover", 1) != 0;
-    configuredAddonPath = SettingsProfile::Ansi(SettingsProfile::String(L"",L"AddonPath",SettingsProfile::String(L"Settings",L"AddonPath")));
     std::wstring starter = std::filesystem::path(SettingsProfile::Path()).parent_path().wstring();
     if (starter.empty()) starter = GetDirectoryName(GetCurrentModulePath());
     AddTrailingSlash(starter);
@@ -143,16 +114,13 @@ LONG WINAPI Filter(EXCEPTION_POINTERS *info) {
     if (r.alreadyHandling)
         return previousHandler ? previousHandler(info) : EXCEPTION_CONTINUE_SEARCH;
     GameJournal::Crash(CrashEvidence::DumpPath(), code, &CrashEvidence::LastDetails());
-    const std::string backup = autoRecover ? RecoverSaves() : std::string();
-    GameJournal::Event("SAVE", "crash_recovery", "enabled=%d result=%s folder=%s", autoRecover, !autoRecover?"disabled":backup.empty()?"unavailable":"written", GameJournal::Quote(backup.c_str()).c_str());
     GameJournal::FlushCritical();
     CrashEvidence::FinishHandling();
     if (!silent) {
         wchar_t text[1600];
         _snwprintf_s(text, 1600, _TRUNCATE,
-            L"EIRebuild stopped after an error. Code: 0x%08lX\nReport: %s (error %lu)\nDump: %s (error %lu)\nBackup: %s",
-            code, CrashEvidence::ReportPath(), r.reportError, CrashEvidence::DumpPath(), r.dumpError,
-            AnsiToWide(backup).c_str());
+            L"EIRebuild stopped after an error. Code: 0x%08lX\nReport: %s (error %lu)\nDump: %s (error %lu)",
+            code, CrashEvidence::ReportPath(), r.reportError, CrashEvidence::DumpPath(), r.dumpError);
         ErrorDialog::ShowW(GetActiveWindow(), text, L"EIRebuild crash diagnostics", MB_OK | MB_ICONERROR, false);
     }
     ExitProcess(code);

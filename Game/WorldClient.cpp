@@ -88,8 +88,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TerrainPrintsDatabase.h"
 #include "Console.h"
 
-#include "NetChat.h"
-#include "ChatServer.h"
 #include "GameMain.h"
 
 #include <DirectXHelpers.h>
@@ -97,7 +95,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <Effects.h>
 #include "VertexTypes.h"
 #include <PrimitiveBatch.h>
-extern void LMPTimePassed();
 /////////////////////////////////////////////////////////////////////////////////////
 #include <functional>
 #include <algorithm>
@@ -1032,14 +1029,7 @@ int CWorldClient::Segment()
             pMoshka->Segment();
         coreEffects.Finish();
     }
-    if (IWorldConnector.IsLMP() && theInterface.GetScreensNum() > 1)
-    {
-        // Call SetExactPosition() for all mapobjects
-        float fpTime = GetPreciseTime();
-        POSITION objpos = objList.GetHeadPosition();
-        while (objpos)
-            objList.GetNext(objpos)->SetExactPosition(fpTime);
-    }
+
     CorePerf::Scope coreParticles(CorePerf::ClientParticles);
     // Particles segment
     if (pParticleManager)
@@ -2014,42 +2004,9 @@ void CWorldClient::SetNewConnection(CConnection *pConnection)
 void CWorldClient::ConnectLocal(CLocalNetDriver *pServerDriver)
 {
     // CRAP
-    StopNetDrivers();
     ASSERT(pNetDriver.IsValid());
     ASSERT(pPlayer);
     SetNewConnection(pNetDriver->Connect(pServerDriver));
-}
-/////////////////////////////////////////////////////////////////////////////////////
-bool CWorldClient::ConnectTcp(const char *pszAddress)
-{
-    ASSERT(pChatClient->IsValid());
-    if (!pChatClient->IsValid())
-        return false;
-    const CCSBase::CClientList &clients = pChatClient->GetClients();
-    if (clients.empty())
-        return false;
-    StartNetDrivers();
-    ASSERT(pChatDriver.IsValid());
-    SetNewConnection(pChatDriver->Connect(clients.front()));
-    return true;
-    /*	CTcpConnection *pCon;
-            StartNetDrivers();
-            ASSERT( pTcpDriver.IsValid() );
-            ASSERT( pPlayer );
-            pPlayer->SetConnection( 0 );
-            if ( !pTcpDriver->StartConnect( pszAddress ) )
-                    return false;
-            for(;;)
-            {
-                    bool bInProgress;
-                    pCon = pTcpDriver->GetConnection( bInProgress );
-                    if ( pCon )
-                            break;
-                    if ( !bInProgress )
-                            return false;
-                    Sleep( 50 );
-            }
-            SetNewConnection( pCon );*/
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClient::Disconnect()
@@ -2099,8 +2056,7 @@ void CWorldClient::NetSegment()
 {
     if (pNetDriver)
         pNetDriver->Segment();
-    if (pChatDriver)
-        pChatDriver->Segment(pChatClient);
+
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClient::DeployClientPersonages(CPersonages &people, bool bShowHelm)
@@ -2376,7 +2332,6 @@ BOOL CWorldClient::NewZone(CMemorySave &packet)
     if (++ownedRenderGeneration == 0) ++ownedRenderGeneration;
     OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
-    IWorldConnector.LMPClientRecvZone();
     CString szZone, szMob;
     EGMZoneSky sky;
 
@@ -3056,7 +3011,6 @@ BOOL CWorldClient::Draw()
     pRend->GetD3D()->BeginWorld(ownedWorld);
     OwnedRender::E1ClaimSky(CheckFlag(WC_RENDER_SKY) && pSky);
 #ifndef _A4
-    LMPTimePassed();
 #endif // _A4
     coreParts.Stage(CorePerf::WorldTerrainBase);
        // render terrain's main part
@@ -3073,7 +3027,6 @@ BOOL CWorldClient::Draw()
     coreParts.Stage(CorePerf::WorldPrepare);
     Prepare3DScene();
     coreParts.Stage(CorePerf::WorldSceneInputs);
-    LMPTimePassed();
     std::vector<owned::RetainedWorldPointLight> ownedPointLights;
     const bool ownedDrawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
     if(pTerrain && pTerrain->IsLoaded()){
@@ -3151,7 +3104,6 @@ BOOL CWorldClient::Draw()
         pRend->SetTexturingAlphaMode(AM_VERTEX);
         pTerrain->DrawTransparent(&theRenderer);
     }
-    LMPTimePassed();
     coreParts.Stage(CorePerf::WorldEffects);
     // render effects
     if (CheckFlag(WC_RENDER_EFFECTS))
@@ -3180,7 +3132,6 @@ BOOL CWorldClient::Draw()
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
     }
     pRend->SetTexturingAlphaMode(AM_VERTEX);
-    LMPTimePassed();
     //
     coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();

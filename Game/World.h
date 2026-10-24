@@ -21,7 +21,6 @@ class CItemManager;
 class CPlayerManager;
 class CWorldBase;
 class CTextureManager;
-class CChatNetDriver;
 /////////////////////////////////////////////////////////////////////////////////////
 // GUID
 const GUID gGameGUID = {
@@ -152,7 +151,6 @@ protected:
     CBaseManager *pItemManager;           // item manager
     CItemConstructor *pItemConstructor;   // item constructor
     CObj<CLocalNetDriver> pNetDriver;     // handling of network stuff
-    CObj<CChatNetDriver> pChatDriver;     // handling of network stuff
                                           // time
     int nSegmentTimeCounter;              // segment time counter <= for game time tracking
     int nUpdateCounter; // update counter to update only when objects really changed, used on server
@@ -168,8 +166,6 @@ public:
     // create/destroy
     virtual BOOL Create();
     virtual void Destroy();
-    void StartNetDrivers();
-    void StopNetDrivers();
     // 'z' value virtual function
     virtual float GetZValue(float x, float y) const = 0;
     virtual float GetSurfaceValue(float x, float y) const = 0;

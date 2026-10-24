@@ -24,7 +24,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "UnitServer.h"
 #include "PlayerServer.h"
 #include "A3Cursor.h"
-#include "ChatServer.h"
 #include "TextManager.h"
 #include <algorithm>
 #include "QuestDatabase.h"
@@ -251,10 +250,7 @@ CString CWorldClientInterface::GetCurrentZoneName()
 void CWorldClientInterface::ExitZone(int nExitPoint)
 {
     GameJournal::Event("ZONE", "request", "reason=exit point=%d zone=%s", nExitPoint, GameJournal::Quote(theWorld.GetExitZoneName(nExitPoint)).c_str());
-    if (pChatClient->IsValid())
-        IWorldConnector.LMPExitZone();
-    else
-        theWorld.GetPlayer()->ExitZone(nExitPoint);
+    theWorld.GetPlayer()->ExitZone(nExitPoint);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClientInterface::GoCamp(EInterface iface)
@@ -319,11 +315,9 @@ EWorldDangerState CWorldClientInterface::GetDangerState()
 /////////////////////////////////////////////////////////////////////////////////////
 // CWorldInterface
 /////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////
 float CWorldInterface::GSGetVar(const char *pszName)
 {
-    if (IWorldConnector.IsLMP())
-        return IWorldClient.GSGetVar(pszName);
+
     CPlayer *pPlayer = theWorldServer.GetPlayer(0);
     if (!pPlayer)
         return 0;
@@ -332,11 +326,7 @@ float CWorldInterface::GSGetVar(const char *pszName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldInterface::GSGetVars(const char *pszName, CGSVariableSet &vars)
 {
-    if (IWorldConnector.IsLMP())
-    {
-        IWorldClient.GSGetVars(pszName, vars);
-        return;
-    }
+
     CPlayer *pPlayer = theWorldServer.GetPlayer(0);
     if (pPlayer)
         pPlayer->party.vars.GetVars(pszName, vars);
@@ -499,7 +489,6 @@ void CWorldInterface::SetActiveState(bool bActive)
     //
     ShiftPlayers((CPlayerManager *)theWorld.GetPlayerManager(), false, dwRnd);
     ShiftPlayers((CPlayerManager *)theWorldServer.GetPlayerManager(), true, dwRnd);
-    ShiftParty(LMPPartySet.currentParty.party, dwRnd);
     //
     bWasActive = bActive;
 }
@@ -509,34 +498,6 @@ void CWorldInterface::SetActiveState(bool bActive)
 void CWorldConnector::ConnectLocalServer()
 {
     theWorld.ConnectLocal(theWorldServer.GetLocalNetDriver());
-    theWorld.GetPlayer()->SetSendParty(false);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::ConnectLocalLMPServer(CParty &party)
-{
-    theWorld.GetPlayer()->GetPlayer()->SetParty(party);
-    theWorld.ConnectLocal(theWorldServer.GetLocalNetDriver());
-    theWorld.GetPlayer()->SetSendParty(true);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::ConnectTcpAddress(const char *pszAddress, CParty &party)
-{
-    CPlayer *pPlayer = theWorld.GetPlayer()->GetPlayer();
-    pPlayer->SetParty(party);
-    theWorldServer.RemoveEverythingDynamic();
-    if (!theWorld.ConnectTcp(pszAddress))
-    {
-        if (pChatClient->IsValid())
-        {
-            ASSERT(0);
-            // CRAP inform about connection failure
-            // failed to connect to specified zone - go back to base
-            LMPConnected();
-        }
-        else
-            GoMainMenu();
-    }
-    theWorld.GetPlayer()->SetSendParty(true);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::Disconnect()
@@ -873,87 +834,6 @@ void CWorldConnector::NewGame()
     MoveToZone(party.szCurrentZone);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CWorldConnector::StartServer(const char *pszZone)
-{
-    CorePerf::Operation coreOperation("zone.start_server", pszZone);
-    SScenarioZone *pZone = 0;
-    pZone = theMap.GetZoneByName(pszZone);
-    if (!pZone || pZone->eType != GM_REALZONE)
-        return FALSE;
-
-    CString szCurrentPath;
-    szCurrentPath.Format("%sSaves64\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-    PreparedSave prepared;
-    prepared.path = szCurrentPath + pszZone + ".sav";
-    CString failedPath = prepared.path;
-    bool applying = false;
-    try
-    {
-        const auto result = PrepareOptionalSave(prepared, prepared.path);
-        const bool existing = result == PreparedSave::Result::Ready;
-        if (result == PreparedSave::Result::Missing) MissingSave(prepared.path, "zone_missing");
-        if (result == PreparedSave::Result::Failed)
-            return SaveLoadFailure(prepared.path, lastSaveError.reason, lastSaveError.offset);
-        coreOperation.Stage("release");
-        failedPath = "stage=start_server_resources";
-        applying = true;
-        theInterface.SetScreensMustDie();
-        theInterface.DestroyScreens();
-        LMPReloadDatabases(IsLMP());
-        theWorldServer.RemoveEverythingDynamic();
-        coreOperation.Stage("create_world");
-        if (existing)
-        {
-            failedPath = prepared.path;
-            prepared.payload.SetReadStage("CWorldServer::LoadSave/zone");
-            if (!theWorldServer.LoadSave(prepared.payload, WorldLoadOrigin::ZoneEntry, 0))
-                throw CSaveReadError{"zone_apply_failed", prepared.payload.GetPosition()};
-        }
-        else
-        {
-            if (!theWorldServer.NewZone(pZone->szTerrainName + ".mpr", pZone->szMobName + ".mob",
-                                        pszZone))
-                return FALSE;
-            theWorldServer.SetWorldTime(4.0f);
-        }
-        coreOperation.Stage("connect");
-        failedPath = "stage=start_server";
-        CAArray<SZoneExit, SZoneExit &> exits = pZone->exits;
-        for (int i = 0; i < exits.GetSize(); i++)
-            exits[i].szZone = "MPGame1";
-        theWorldServer.SetExits(exits);
-        theWorldServer.SetWeatherChange(pZone->eWeatherType);
-        theWorldServer.SetSky(pZone->eSkyType);
-
-        theWorldServer.curInterface = IFACE_MISSION;
-        theWorldServer.StartServer(SERV_MODE_LMP);
-        theSettings.nDrawVisibleOnly = 1;
-        if (pChatServer->IsValid())
-        {
-            char szHost[128];
-            if (!gethostname(szHost, 100))
-            {
-                CCSNodeAddress addr;
-                addr.SetInetName(szHost, 8000);
-                CString szAddr(addr.GetFastName().c_str());
-                pChatServer->pZone = dbgnew CChatZone;
-                pChatServer->pZone->szAddress = szAddr; // CString(szHost) + ":8000";
-                pChatServer->pZone->szZoneName = pszZone;
-                pChatServer->InformAllButLeader(CMS_ZONEENABLED, pszZone);
-            }
-            theWorldServer.AddSecondaryMob(CString(pszZone) + ".mob");
-        }
-        coreOperation.Result(true);
-        return TRUE;
-    }
-    catch (const CSaveReadError &e)
-    { if (applying) GoMainMenu(); return SaveReadFailure(failedPath, e); }
-    catch (CException *e)
-    { e->Delete(); if (applying) GoMainMenu(); return SaveLoadFailure(failedPath, "file_or_memory_error", 0); }
-    catch (const std::bad_alloc &)
-    { if (applying) GoMainMenu(); return SaveLoadFailure(failedPath, "allocation_failed", 0); }
-}
-/////////////////////////////////////////////////////////////////////////////////////
 // server side, spawning a new server (with disconnecting everyone from server)
 BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
 {
@@ -981,16 +861,13 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
         if (action == CD_MOVETOZONE)
         {
             theInterface.DestroyScreens();
-            LMPReloadDatabases(IsLMP());
         }
-        if (action == CD_MOVETOZONE &&
-            (theWorldServer.GetServerMode() == SERV_MODE_LOCAL || theWorldServer.GetServerMode() == SERV_MODE_LMP) &&
-            (theWorldServer.curInterface == IFACE_MISSION || theWorldServer.curInterface == IFACE_BASE))
+        if (action == CD_MOVETOZONE && (theWorldServer.GetServerMode() == SERV_MODE_LOCAL) && (theWorldServer.curInterface == IFACE_MISSION || theWorldServer.curInterface == IFACE_BASE))
         {
             CParty oldParty;
             theHat.GetSinglePlayerParty(oldParty);
             StoreZoneState(oldParty);
-            if (theWorldServer.GetServerMode() == SERV_MODE_LOCAL) theHat.SetSinglePlayerParty(oldParty);
+            theHat.SetSinglePlayerParty(oldParty);
         }
         EServerMode servMode = SERV_MODE_NONE;
         theCursor.SetMode(CT_WAIT);
@@ -1022,8 +899,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
         if (iface != IFACE_ENDGAME && iface != IFACE_MAINMENU && !pZone)
         {
             ReportError("Zone %s not found", pszZoneName);
-            if (IWorldConnector.IsLMP())
-                IWorldConnector.StopLMP();
+
             iface = IFACE_MAINMENU;
         }
 
@@ -1095,19 +971,13 @@ void CWorldConnector::DoGo()
         return;
     if (action == CD_LOADGAME)
     {
-        if (LoadGame(szConnectDest)) LMPTimePassed();
+        LoadGame(szConnectDest);
         action = CD_NONE;
         return;
     }
     if (action == CD_MOVETOZONE)
     {
-        if (MoveToZone(szConnectDest)) LMPTimePassed();
-        action = CD_NONE;
-        return;
-    }
-    if (action == CD_MAKELMPSERVER)
-    {
-        if (StartServer(szConnectDest)) { ConnectLocalLMPServer(party); LMPTimePassed(); }
+        MoveToZone(szConnectDest);
         action = CD_NONE;
         return;
     }
@@ -1116,7 +986,6 @@ void CWorldConnector::DoGo()
     theWorldServer.RemoveEverythingDynamic();
     // while ( !theWorld.IsFailedConnection() )
     // theWorld.Segment();
-    LMPReloadDatabases(IsLMP());
     // start new server
     switch (action)
     {
@@ -1126,749 +995,10 @@ void CWorldConnector::DoGo()
     case CD_NEWGAME:
         NewGame();
         break;
-    case CD_CONNECTLMP:
-        ConnectTcpAddress(szConnectDest, party);
-        break;
     }
     action = CD_NONE;
-
-    LMPTimePassed();
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-static void ReloadDatabases(const char *pszDatabase)
-{
-    theUnitDatabase.Clear();
-    theUnitDatabase.Load(theSettings.szResourcePath, pszDatabase);
-    theUnitDatabase.SetupWithSounds(theWorld.GetSoundManager());
-    thePerkDatabase.Clear();
-    thePerkDatabase.LoadDatabase(theSettings.szResourcePath, pszDatabase);
-    theSpellDatabase.Clear();
-    theSpellDatabase.Load(theSettings.szResourcePath, pszDatabase);
-    theItemDatabase.Clear();
-    theItemDatabase.Load(theSettings.szResourcePath, pszDatabase);
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPReloadDatabases(bool bLMP)
-{
-    static CString szCurrentRes("database.res");
-    CString szRes = bLMP ? "databaseLMP.res" : "database.res";
-    if (szRes == szCurrentRes)
-        return;
-    szCurrentRes = szRes;
-    ReloadDatabases(szRes);
-    // set difficulty level for LMP as 1 or restore for non-LMP
-    if (bLMP)
-    {
-        theSettings.nDifficultyLevel2 = theSettings.nDifficultyLevel;
-        theSettings.nDifficultyLevel = 0;
-    }
-    else
-        theSettings.nDifficultyLevel = theSettings.nDifficultyLevel2;
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-CString CWorldConnector::GetLMPBase()
-{
-    switch (pChatClient->allod)
-    {
-    case LMPA_GIPAT:
-        return "bz1mpg";
-    case LMPA_INGOS:
-        return "bz2mpg";
-    case LMPA_SUSLANGER:
-        return "bz3mpg";
-    case LMPA_RIK:
-        return "bz4mpg";
-    }
-    ASSERT(0);
-    return "bz1mpg";
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::StartLMPServer(const char *pszServerName, int nMaxClients, ELMPAllod allod,
-                                     const char *pszPassword, bool bPrivate, unsigned int nClientID)
-{
-    LMPLoadQuestsInfo();
-    pCSLog = &NConsole::net;
-    pChatServer = dbgnew CChatServer(allod);
-    pChatClient = dbgnew CChatClient;
-    CCSNodeAddress addr;
-    addr.SetInetName("127.0.0.1", NCSParams::nCSServerPort);
-    ConnectLMPServer(addr, pszPassword);
-    pChatClient->pSelf->bLocalServer = true;
-    if (!pszServerName || pszServerName[0] == 0)
-        pChatServer->szServerName = "Server";
-    else
-        pChatServer->szServerName = pszServerName;
-    pChatServer->nMaxClients = nMaxClients;
-    if (pszPassword && pszPassword[0])
-        pChatServer->SetPassword(pszPassword);
-    pChatServer->SetInformMaster(!bPrivate);
-    pChatClient->allod = allod;
-    pChatServer->nUniqueClientID = nClientID;
-    InitLMPInfo();
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::ConnectLMPServer(const CCSNodeAddress &addr, const char *pszPassword)
-{
-    CMemoryStream pkt;
-    char szPwd[N_CHAT_PASSWORD_LENGTH];
-    memset(szPwd, 0, sizeof(szPwd));
-    if (pszPassword)
-        strncpy(szPwd, pszPassword, N_CHAT_PASSWORD_LENGTH);
-    pkt.Write(szPwd, sizeof(szPwd));
-    pChatClient->ConnectServer(addr, pkt);
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::StartLMPClient()
-{
-    GameJournal::Event("SESSION", "role", "role=client");
-    pCSLog = &NConsole::net;
-    pChatServer = 0;
-    pChatClient = dbgnew CChatClient;
-    InitLMPInfo();
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::InitLMPInfo()
-{
-    ASSERT(pChatClient->IsValid());
-    //
-    LMPReloadDatabases(true);
-    // clear party`s variables
-    CParty &party = LMPPartySet.currentParty.party;
-    ClearLMPPartyVariables(party.vars);
-    party.RemoveAllQuestItems();
-    if (party.people.GetSize() == 1)
-    {
-        CPersonage &pers = party.people[0];
-        pChatClient->pSelf->szPrototype = pers.szPrototype;
-        pChatClient->pSelf->szName = pers.szName;
-    }
-    else
-    {
-        ASSERT(0);
-        pChatClient->pSelf->szPrototype = "Human Hero";
-        pChatClient->pSelf->szName = "Bug";
-    }
-    pChatClient->pSelf->state = CPS_BASE; // CRAP , some kind of cps_connect
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::StopLMP()
-{
-    theInterface.SetCheckDisconnect(false);
-    pChatServer = 0;
-    pChatClient = 0;
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPConnectAbort()
-{
-    StopLMP();
-    LMPReloadDatabases(false);
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::SelectLMPZone(const char *pszZone)
-{
-    CString szCurrentPath;
-    szCurrentPath.Format("%sSaves64\\current\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-    // clear directory current dir
-    ClearDirectory(szCurrentPath);
-    //
-    szLMPZone = pszZone;
-    if (pChatServer->IsValid() && !pChatClient->IsValid())
-    {
-        // dedicated server
-        if (pszZone)
-            StartServer(pszZone);
-        else
-            ; // CRAP - stop server
-    }
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPExitZone()
-{
-    if (bIsOnZone)
-    {
-        pChatClient->pSelf->state = CPS_BASE;
-        pChatClient->pSelf->SetUpdated();
-        // CRAP test if everyone has left the zone
-        if (pChatServer->IsValid())
-        {
-            // some checks that everybody has left the server
-            ClientGoZone(GetLMPBase(), 0);
-            if (pChatServer->pZone->IsValid())
-                pChatServer->InformAllButLeader(CMS_ZONEDISABLED,
-                                                pChatServer->pZone->szZoneName.c_str());
-            pChatServer->pZone = 0;
-        }
-        else
-        {
-            ClientGoZone(GetLMPBase(), 0);
-        }
-        bIsOnZone = false;
-    }
-    else
-    {
-        // CRAP
-        if (pChatServer->IsValid())
-        {
-            const CCSBase::CClientList &clients = pChatServer->GetClients();
-            for (auto i = clients.begin(); i != clients.end(); ++i)
-            {
-                (*i)->channelInBuf.Clear();
-            }
-        }
-        // end of CRAP
-        CParty party;
-        CPlayer *pPlayer = theWorldServer.GetPlayer(0);
-        ASSERT(pPlayer);
-        if (pPlayer && ((CPlayerServer *)pPlayer->GetPlayerSpecific())->IsPartyDeployed())
-        {
-            theWorldServer.FakeRemoveParty(pPlayer);
-            party = pPlayer->party;
-            theWorldServer.FakeDeployParty(pPlayer);
-        }
-        else
-            party = LMPPartySet.currentParty.party;
-        // CParty &party = LMPPartySet.currentParty.party;
-        party.szCurrentZone = szLMPZone;
-        pChatClient->pSelf->state = CPS_CONNECTING;
-        pChatClient->pSelf->SetUpdated();
-        if (pChatServer->IsValid())
-            ReqStartLMPServer(szLMPZone, party);
-        else
-        {
-            ASSERT(pChatClient->IsValid());
-            if (pChatClient->pZone->IsValid())
-                party.szCurrentZone = pChatClient->pZone->szZoneName.c_str();
-            if (pChatClient->pZone->IsValid())
-                ReqConnectTcpAddress(pChatClient->pZone->szAddress.c_str(), party);
-            else
-                ASSERT(0);
-        }
-        bIsOnZone = true; // CRAP, should be set after connect
-    }
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// during LMP always store party to disk
-void CWorldConnector::LMPClientRecvParty()
-{
-    if (pChatClient->IsValid())
-    {
-        CParty &party = theWorld.GetPlayer()->GetPlayer()->party;
-        LMPPartySet.currentParty.party = party;
-        theHat.SetSinglePlayerParty(party);
-        LMPPartySet.currentParty.Store(LMPPartySet.szDir);
-        LMPSyncBriefings();
-    }
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPClientRecvZone()
-{
-    if (pChatClient->IsValid())
-    {
-        LMPSyncBriefings();
-        if (pChatClient->pSelf->state == CPS_CONNECTING)
-        {
-            pChatClient->pSelf->state = CPS_ZONE;
-            pChatClient->pSelf->SetUpdated();
-        }
-    }
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPRecalc()
-{
-    CParty &party = theWorld.GetPlayer()->GetPlayer()->party;
-    if (pChatClient->IsValid() && !pChatServer->IsValid())
-    {
-        if (pChatClient->pZone->IsValid())
-            party.vars.DelVar("z.MPGame1");
-        else
-            party.vars.SetVar("z.MPGame1", 1);
-    }
-    if (pChatClient->IsValid() && pChatServer->IsValid())
-    {
-        if (bIsOnZone)
-        {
-            if (theWorldServer.GetPlayerManager()->GetNumElements() > 1)
-                party.vars.SetVar("z.MPGame1", 1);
-            else
-                party.vars.DelVar("z.MPGame1");
-        }
-        else
-        {
-            if (pChatClient->pQuest->IsValid())
-                party.vars.DelVar("z.MPGame1");
-            else
-                party.vars.SetVar("z.MPGame1", 1);
-        }
-    }
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPConnected()
-{
-    theHat.NewLMPGame();
-    CParty &party = LMPPartySet.currentParty.party;
-    // one more CRAP; main pers is to have 1000011214 ID
-    if (party.people.GetSize() == 1)
-        party.people[0].nID = 1000011214;
-    party.szCurrentZone = GetLMPBase();
-    party.vars.SetVar("z.MPGame1", 1);
-    theHat.SetSinglePlayerParty(LMPPartySet.currentParty.party);
-    ReqMoveToZone(GetLMPBase(), 0); // CRAP
-    bIsOnZone = false;
-    pChatClient->pSelf->state = CPS_BASE;
-    pChatClient->pSelf->SetUpdated();
-    theInterface.SetCheckDisconnect(true);
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPFinishOnTcpDisconnect()
-{
-    pChatClient = 0;
-    pChatClient = dbgnew CChatClient;
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////
-bool CWorldConnector::IsLMP()
-{
-    return (pChatClient->IsValid());
-}
-/////////////////////////////////////////////////////////////////////////////////////
-struct SLMPQuest
-{
-    CString szQuest;
-    CString szZone;
-    ELMPAllod allod;
-};
-static std::vector<SLMPQuest> szLMPQuests;
-/////////////////////////////////////////////////////////////////////////////////////
-static bool IsOneOf(const char **pszTest, const char *pszString)
-{
-    while (*pszTest[0])
-    {
-        if (strcmpi(pszTest[0], pszString) == 0)
-            return true;
-        pszTest++;
-    }
-    return false;
-}
-ELMPAllod Terrain2Allod(const char *pszAllod)
-{
-    if (auto *mod = ModRuntime::Current(); mod && mod->CustomMpZones())
-    {
-        if (mod->MatchesMpZone(0, pszAllod)) return LMPA_GIPAT;
-        if (mod->MatchesMpZone(1, pszAllod)) return LMPA_INGOS;
-        if (mod->MatchesMpZone(2, pszAllod)) return LMPA_SUSLANGER;
-        return LMPA_RIK;
-    }
-    static const char *szAllods[][10] = { { "zone2", "zone3", "zone3obr", "zone4", "zone5", "zone6",
-                                            "zone7", "zone8", "zone9", "" },
-                                          { "zone12", "zone13", "" },
-                                          { "zone17", "zone18", "" },
-                                          { "zone19", "" } };
-    if (IsOneOf(szAllods[0], pszAllod))
-        return LMPA_GIPAT;
-    if (IsOneOf(szAllods[1], pszAllod))
-        return LMPA_INGOS;
-    if (IsOneOf(szAllods[2], pszAllod))
-        return LMPA_SUSLANGER;
-    return LMPA_RIK;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPLoadQuestsInfo()
-{
-    if (szLMPQuests.size())
-        return;
-    CFileFind find;
-    BOOL bFind = find.FindFile(theWorldServer.GetMobPath() + "*.mq");
-    while (bFind)
-    {
-        bFind = find.FindNextFile();
-        CString szQuest = find.GetFileTitle();
-        LMPLoadQuestResources(szQuest);
-        LMPFreeTextResources();
-        //
-        SScenarioZone *pZone;
-        CString szZone;
-        ELMPAllod allod;
-        pZone = theMap.GetZoneByName(szQuest);
-        if (pZone)
-        {
-            szZone = pZone->szTerrainName;
-            allod = Terrain2Allod(szZone);
-            //
-            szLMPQuests.emplace_back();
-            szLMPQuests.back().szQuest = szQuest;
-            szLMPQuests.back().szZone = szZone;
-            szLMPQuests.back().allod = allod;
-        }
-    }
-    find.Close();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPGetQuests(std::vector<std::string> &szQuests, ELMPAllod allod,
-                                   const char *pszExclude)
-{
-    std::list<SLMPQuest> allodQuests, zoneQuests;
-    for (auto i = szLMPQuests.begin(); i != szLMPQuests.end(); ++i)
-    {
-        if (i->allod != allod)
-            continue;
-        allodQuests.push_back(*i);
-    }
-    while (!allodQuests.empty())
-    {
-        // select quests for single zone
-        CString szZone = allodQuests.front().szZone;
-        zoneQuests.clear();
-        for (auto i = allodQuests.begin(); i != allodQuests.end();)
-        {
-            if (i->szZone == szZone)
-            {
-                zoneQuests.push_back(*i);
-                i = allodQuests.erase(i);
-            }
-            else
-                ++i;
-        }
-        // erase exclude quest if more then one quest on this zone
-        if (zoneQuests.size() > 1)
-        {
-            for (auto k = zoneQuests.begin(); k != zoneQuests.end();)
-            {
-                if (k->szQuest == pszExclude)
-                {
-                    k = zoneQuests.erase(k);
-                    // The committed addon patch exits this exclusion scan after one erase.
-                    if (auto *mod = ModRuntime::Current(); mod && mod->CombatSetting("ShowAllQuests"))
-                        break;
-                }
-                else
-                    ++k;
-            }
-        }
-        // select one of quests
-        if (zoneQuests.size() > 0)
-        {
-            int n = random.Get(0, zoneQuests.size() - 1);
-            auto k = zoneQuests.begin();
-            while (n > 0)
-            {
-                n--;
-                ++k;
-            }
-            szQuests.push_back((const char *)k->szQuest);
-        }
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPBriefingComplete(const char *pszBriefing)
-{
-    if (!pChatClient->IsValid())
-        return;
-    pChatClient->Command(CC_COMPLETE_BRIEFING, pszBriefing);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-bool CWorldConnector::LMPQuestComplete(const char *pszQuest)
-{
-    return pChatServer->IsValid() && pChatServer->CompleteQuest(pszQuest);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-CString CWorldConnector::LMPGetPersByBriefing(const char *pszBriefing)
-{
-    CTextManager *pTxtMng = theWorld.GetTextManager();
-    if (!pTxtMng->GetText(CString("briefing ") + pszBriefing))
-        return CString("");
-
-    CStringArray szTmpArray;
-    while (pTxtMng->FindNextCommand("#show"))
-    {
-        pTxtMng->GetStringArray(szTmpArray);
-        if (szTmpArray.GetSize() < 2)
-            continue;
-        if (szTmpArray[1].CompareNoCase("Hero") == 0)
-            continue;
-        return szTmpArray[1];
-    }
-    return CString("");
-}
-/////////////////////////////////////////////////////////////////////////////////////
-CString CWorldConnector::LMPGetFullBriefing(const char *pszBriefing)
-{
-    CString szBrief = LMPGetPersByBriefing(pszBriefing);
-    //	ASSERT( szBrief != "" );
-    if (szBrief != "")
-        szBrief = CString("b.") + szBrief + "." + pszBriefing;
-    else
-        szBrief = CString("b.elder.") + pszBriefing;
-    return szBrief;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPAddBriefing(const char *pszBriefing)
-{
-    CParty &party = theWorld.GetPlayer()->GetPlayer()->party;
-    int nLeng = strlen(pszBriefing);
-    if (nLeng > 2 && pszBriefing[nLeng - 2] == '_')
-    {
-        CString szQuest(pszBriefing);
-        szQuest = szQuest.Left(szQuest.GetLength() - 2);
-        LMPAddTextResource(szQuest);
-    }
-    //
-    CString szBrief = LMPGetFullBriefing(pszBriefing);
-    party.vars.SetVar(szBrief, 1);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPDelBriefing(const char *pszBriefing)
-{
-    CParty &party = theWorld.GetPlayer()->GetPlayer()->party;
-    //
-    CString szBrief = LMPGetFullBriefing(pszBriefing);
-    party.vars.DelVar(szBrief);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-// sync current client party briefings and global vars with chat client
-static void ShowVarSet(CChatClient::CGSVars::iterator i)
-{
-    CString szVar = (*i)->szVarName.c_str();
-    float fpVal = (*i)->fpVal;
-    if (szVar.Left(2) == "q.")
-    {
-        {
-            theInterface.QuestUpdate(szVar, fpVal);
-            theWorld.UpdateQuestState(szVar, fpVal);
-        }
-    }
-}
-struct SShowCmp
-{
-    bool operator()(CChatClient::CGSVars::iterator a, CChatClient::CGSVars::iterator b) const
-    {
-        return (*a)->nOrder < (*b)->nOrder;
-    }
-};
-void CWorldConnector::LMPSyncBriefings()
-{
-    if (!pChatClient->IsValid())
-        return;
-    LMPFreeTextResources();
-    CParty &party = theWorld.GetPlayer()->GetPlayer()->party;
-    CGSVariableSet briefs;
-    float fpConstr = party.vars.GetVar("constr.current");
-    CGSVariableSet oldVars = party.vars;
-    ClearLMPPartyVariables(party.vars);
-    party.vars.SetVar("constr.current", fpConstr);
-    /*party.vars.GetVars( "b.", briefs );
-    for ( auto i =  briefs.begin(); i != briefs.end(); ++i )
-            party.vars.DelVar( i->first );*/
-    if (pChatClient->pQuest->IsValid())
-        LMPAddTextResource(pChatClient->pQuest->szQuestName.c_str());
-    CString szIntro;
-    switch (pChatClient->allod)
-    {
-    case LMPA_GIPAT:
-        party.vars.SetVar("b.smith.constr_1", 1);
-        szIntro = "intro_1";
-        break;
-    case LMPA_INGOS:
-        party.vars.SetVar("b.Shopper.constr_3", 1);
-        szIntro = "intro_2";
-        break;
-    case LMPA_SUSLANGER:
-        party.vars.SetVar("b.kuzn.constr_4", 1);
-        szIntro = "intro_3";
-        break;
-    case LMPA_RIK:
-        party.vars.SetVar("b.golem.constr_5", 1);
-        szIntro = "intro_4";
-        break;
-    default:
-        ASSERT(0);
-    }
-    CString szIntroQ = LMPGetFullBriefing(szIntro + "q");
-    CString szIntroK = LMPGetFullBriefing(szIntro + "k");
-    party.vars.SetVar(szIntroQ, Max(1.0f, party.vars.GetVar(szIntroQ)));
-    party.vars.SetVar(szIntroK, Max(1.0f, party.vars.GetVar(szIntroK)));
-
-    for (auto k = pChatClient->briefings.begin(); k != pChatClient->briefings.end(); ++k)
-        LMPAddBriefing((*k)->szBriefingName.c_str());
-    //
-    // load quest resources
-    CChatClient::CGSVars::iterator i;
-    for (i = pChatClient->vars.begin(); i != pChatClient->vars.end(); ++i)
-    {
-        CString szVar = (*i)->szVarName.c_str();
-        float fpVal = (*i)->fpVal;
-        if (szVar.Left(2) == "q.")
-        {
-            CString szZone = szVar.Right(szVar.GetLength() - 2);
-            int nIdx = szZone.Find(".");
-            if (nIdx > 0)
-                LMPLoadQuestResources(szZone.Left(nIdx));
-            //
-        }
-    }
-    //
-    // set variables
-    static unsigned int nPrevMax = 0;    // index of last encountered var
-    static unsigned int nAlreadySet = 0; // index of last set variable
-    if (theWorld.GetPlayer()->GetPlayer()->curInterface == IFACE_MISSION)
-    {
-        //
-        // update ordering system
-        // static DWORD dwTimeSet;              //
-        // DWORD dwCurTime = timeGetTime();
-        unsigned int nShowMin = nAlreadySet;
-        if (nPrevMax > nAlreadySet + 2) ///*dwCurTime - dwTimeSet > 10000 ||*/ oldVars.empty() )
-            nAlreadySet = nPrevMax + 1;
-        // dwTimeSet = dwCurTime;
-        //
-        std::vector<CChatClient::CGSVars::iterator> toShow;
-        for (i = pChatClient->vars.begin(); i != pChatClient->vars.end(); ++i)
-        {
-            nPrevMax = Max(nPrevMax, (*i)->nOrder);
-            if ((*i)->nOrder < nAlreadySet && (*i)->nOrder >= nShowMin)
-                toShow.push_back(i);
-        }
-        std::sort(toShow.begin(), toShow.end(), SShowCmp());
-        for (auto z = toShow.begin(); z != toShow.end(); ++z)
-            ShowVarSet(*z);
-        //
-        for (;;)
-        {
-            bool bBreak = true;
-            for (i = pChatClient->vars.begin(); i != pChatClient->vars.end(); ++i)
-            {
-                if ((*i)->nOrder <= nAlreadySet)
-                {
-                    if ((*i)->nOrder == nAlreadySet)
-                    {
-                        ShowVarSet(i);
-                        bBreak = false;
-                        nAlreadySet++;
-                    }
-                    party.vars.SetVar((*i)->szVarName.c_str(), (*i)->fpVal);
-                }
-            }
-            if (bBreak)
-                break;
-        }
-    }
-    else
-    {
-        for (i = pChatClient->vars.begin(); i != pChatClient->vars.end(); ++i)
-        {
-            nPrevMax = Max(nPrevMax, (*i)->nOrder);
-            CString szVar = (*i)->szVarName.c_str();
-            float fpVal = (*i)->fpVal;
-            party.vars.SetVar((*i)->szVarName.c_str(), (*i)->fpVal);
-        }
-        nAlreadySet = 0; // nPrevMax + 1;
-    }
-    //
-    /*
-    for ( i = pChatClient->vars.begin(); i != pChatClient->vars.end(); ++i )
-    {
-            CString szVar = (*i)->szVarName.c_str();
-            float fpVal = party.vars//(*i)->fpVal;
-            if ( szVar.Left(2) == "q." )
-            {
-                    if ( oldVars.GetVar( szVar ) != fpVal &&
-    theWorld.GetPlayer()->GetPlayer()->curInterface == IFACE_MISSION )
-                    {
-                            theInterface.QuestUpdate( szVar, fpVal );
-                            theWorld.UpdateQuestState( szVar, fpVal );
-                    }
-            }
-    }*/
-    LMPRecalc();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-static std::vector<std::string> szTextRes;
-bool CWorldConnector::LMPAddTextResource(const char *pszQuest)
-{
-    CTextManager *pText = theWorld.GetTextManager();
-    if (!pText)
-        return false;
-    CString szFile = CString(pszQuest) + ".mq";
-    if (!HasLMPFile(szFile))
-        return false;
-    std::string szRes = (theWorldServer.GetMobPath() + szFile).GetString();
-    if (pChatServer->IsValid())
-    {
-        CMemoryStream file;
-        CFileStream r;
-        r.OpenRead(szRes.c_str());
-        r.ReadTo(&file, r.GetSize());
-        pChatServer->AddFile((const char *)szFile, file);
-    }
-    if (std::find(szTextRes.begin(), szTextRes.end(), szRes) == szTextRes.end())
-    {
-        szTextRes.push_back(szRes);
-        pText->SelectResource(szRes.c_str());
-    }
-    return true;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPFreeTextResources()
-{
-    CTextManager *pText = theWorld.GetTextManager();
-    if (!pText)
-        return;
-    for (auto i = szTextRes.begin(); i != szTextRes.end(); ++i)
-        pText->CloseResource(i->c_str());
-    szTextRes.clear();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-static std::vector<std::string> szLoadedQuestRes;
-void CWorldConnector::LMPLoadQuestResources(const char *pszQuest)
-{
-    CTextManager *pText = theWorld.GetTextManager();
-    if (!pText)
-    {
-        ASSERT(0);
-        return;
-    }
-    if (!LMPAddTextResource(pszQuest))
-        return;
-    if (std::find(szLoadedQuestRes.begin(), szLoadedQuestRes.end(), pszQuest) !=
-        szLoadedQuestRes.end())
-        return;
-    if (pText->GetText(CString(pszQuest) + "\\quest.reg"))
-        theQuestDatabase.AddInfo((BYTE *)pText->GetPos());
-    else
-        return;
-    theMap.LoadZones(CString(pszQuest) + "\\map.txt");
-    szLoadedQuestRes.push_back(pszQuest);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-bool CWorldConnector::HasLMPFile(const char *pszFName)
-{
-    CFileFind find;
-    return find.FindFile(theWorldServer.GetMobPath() + pszFName) != FALSE;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::LMPAddFile(const char *pszFName, CMemoryStream &file)
-{
-    CFileSave f;
-    f.OpenWrite(theWorldServer.GetMobPath() + pszFName);
-    f.Write(file.GetBuffer(), file.GetSize());
-    f.CloseFile();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-CString CWorldConnector::LMPGetQuestNameLocalised()
-{
-    CString szQuest;
-    if (!pChatClient->IsValid() || !pChatClient->pQuest->IsValid())
-    {
-        if (!pChatServer->IsValid() || !pChatServer->pQuest->IsValid())
-            return "";
-        szQuest = pChatServer->pQuest->szQuestName.c_str();
-    }
-    else
-        szQuest = pChatClient->pQuest->szQuestName.c_str();
-    CTextManager *pText = theWorld.GetTextManager();
-    if (pText->GetText(CString("quest ") + szQuest))
-        pText->GetLine(szQuest);
-    return szQuest;
-}
-/////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::ReqSaveGame(const char *pszSaveName)
 {
     ASSERT(theWorldServer.GetServerMode() == SERV_MODE_LOCAL);
@@ -1893,7 +1023,6 @@ void CWorldConnector::ReqGoMainMenu()
     theCamera.ResetFalloutMode();
     // ATM: TODO: "check pers storing in this case"
     // CRAP - check pers storing in this case
-    StopLMP();
     action = CD_MAINMENU;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1915,19 +1044,5 @@ void CWorldConnector::ReqMoveToZone(const char *pszZoneName, int nEntrance)
     szConnectDest = pszZoneName;
     // nParam = nEntrance; // ATM: wtf is nEntrance, why to autoplay nParam variable?
     //  TODO: remove nEntrance if true not needed!
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::ReqConnectTcpAddress(const char *pszAddress, CParty &_party)
-{
-    action = CD_CONNECTLMP;
-    szConnectDest = pszAddress;
-    party = _party;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::ReqStartLMPServer(const char *pszZone, CParty &_party)
-{
-    action = CD_MAKELMPSERVER;
-    szConnectDest = pszZone;
-    party = _party;
 }
 /////////////////////////////////////////////////////////////////////////////////////

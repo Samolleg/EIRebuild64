@@ -17,7 +17,6 @@ class CPlayerClient;
 struct SScriptError;
 struct SRPGUnitStats;
 class CMemoryStream;
-class CCSNodeAddress;
 /////////////////////////////////////////////////////////////////////////////////////
 extern int N_CURRENT_SAVE_VERSION;
 extern int N_CURRENT_MINIMAL_SAVE_VERSION;
@@ -135,12 +134,9 @@ class CWorldConnector
         CD_LOADGAME,
         CD_NEWGAME,
         CD_MOVETOZONE,
-        CD_CONNECTLMP,
-        CD_MAKELMPSERVER,
     };
     EConnectAction action;
     CString szConnectDest;
-    CParty party;
     // load&store server&client states
     BOOL LoadSave(CSave &file);
     void StoreSave(CSave &file);
@@ -149,13 +145,10 @@ class CWorldConnector
     BOOL StoreZoneState(CParty &party);
     // connections
     void ConnectLocalServer();
-    void ConnectLocalLMPServer(CParty &party);
-    void ConnectTcpAddress(const char *pszAddress, CParty &party);
     void Disconnect();
     // most general operations on game world
     void NewGame();
     void GoMainMenu();
-    BOOL StartServer(const char *pszZone);
     BOOL LoadGame(const char *pszSaveName);
     BOOL SaveGame(const char *pszSaveName);
     // переключить клиента на другой сервер, в случае сингла старый сервер убивается,
@@ -172,45 +165,7 @@ public:
     void ReqLoadGame(const char *pszSaveName);
     void ReqSaveGame(const char *pszSaveName);
     void ReqMoveToZone(const char *pszZoneName, int nEntrance);
-    void ReqConnectTcpAddress(const char *pszAddress, CParty &_party);
-    void ReqStartLMPServer(const char *pszZone, CParty &_party);
     int GetSaveSize();
-    // LMP
-    void LMPReloadDatabases(bool bLMP);
-    CString szLMPZone;
-    bool bIsOnZone;
-
-    CString GetLMPBase();
-    void StartLMPServer(const char *pszServerName, int nMaxClients, ELMPAllod allod,
-                        const char *pszPassword, bool bPrivate, unsigned int nClientID);
-    void StartLMPClient();
-    void ConnectLMPServer(const CCSNodeAddress &addr, const char *pszPassword);
-    void InitLMPInfo();
-    void SelectLMPZone(const char *pszZone);
-    void LMPExitZone();
-    void StopLMP();
-    void LMPConnectAbort();
-    void LMPConnected(); // called by chatserver on connection
-    void LMPClientRecvParty();
-    void LMPClientRecvZone();
-    void LMPRecalc();
-    bool IsLMP();
-    void LMPLoadQuestsInfo();
-    void LMPGetQuests(std::vector<std::string> &szQuests, ELMPAllod allod, const char *pszExclude);
-    void LMPBriefingComplete(const char *pszBriefing);
-    void LMPAddBriefing(const char *pszBriefing);
-    void LMPDelBriefing(const char *pszBriefing);
-    void LMPSyncBriefings();
-    bool LMPAddTextResource(const char *pszQuest);
-    void LMPFreeTextResources();
-    bool LMPQuestComplete(const char *pszQuest);
-    void LMPLoadQuestResources(const char *pszQuest);
-    bool HasLMPFile(const char *pszFName);
-    void LMPAddFile(const char *pszFName, CMemoryStream &file);
-    void LMPFinishOnTcpDisconnect();
-    CString LMPGetPersByBriefing(const char *pszBriefing);
-    CString LMPGetFullBriefing(const char *pszBriefing); // b.elder.z1q1
-    CString LMPGetQuestNameLocalised();
     // client side funcs
     void ClientSideDisconnect();
     // эта функция может быть использована для перехода на другую карту в single player mode

@@ -42,7 +42,6 @@ SScenarioAllod *CGlobalMap::GetAllodByMobName(LPCTSTR pszName)
 void CGlobalMap::Init()
 {
     LoadZones("map.txt");
-    LoadZones("map-LMP.txt");
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CGlobalMap::LoadZones(const char *pszFileName)

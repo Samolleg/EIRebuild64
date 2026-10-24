@@ -38,8 +38,6 @@ public:
     float fConsiderModifier;
     float fConsiderLogBase;
     //
-    float fpLMPLostMoney;
-    float fpLMPLostXP;
     //
     int nQuestsToRespawn;
     //

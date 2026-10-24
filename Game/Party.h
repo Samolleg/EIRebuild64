@@ -136,7 +136,6 @@ public:
     BOOL RemovePersonage(int nID);
     // this function gives items to person as specified in template, use CreatePersonage()
     BOOL InitPersFromPrototype(CPersonage &man);
-    BOOL InitLMPPers(CPersonage &man);
     /// <summary>
     /// Создаёт персонажа
     /// </summary>
@@ -178,25 +177,3 @@ public:
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // поддерживает считывание и запись в отдельные файлы
-class CLMPPartySet
-{
-public:
-    struct SOneParty
-    {
-        CParty party;
-        CString szFileName;
-        operator CParty &() { return party; }
-        bool Load(const char *pszDir);
-        void Store(const char *pszDir);
-    };
-    CString szDir; // active dir for mp personages
-    std::vector<SOneParty> parties;
-    SOneParty currentParty;
-
-    void Remove(SOneParty &party);
-    void SetCurrent(SOneParty &party);
-    void Load();
-    void Store();
-};
-/////////////////////////////////////////////////////////////////////////////////////
-extern CLMPPartySet LMPPartySet;

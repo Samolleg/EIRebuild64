@@ -51,7 +51,6 @@ SGeneralSettings::SGeneralSettings()
     szCameraSettings = "Camera Settings";
     szShadowSettings = "Shadow Settings";
     szPathSettings = "Path Settings";
-    szNetworkSettings = "Network Settings";
     // common general settings (visualization settings)
     nDrawingTarget = 0;
     dwWidth = 800;
@@ -455,8 +454,6 @@ void SGeneralSettings::ReadSettingsFromFile(LPCSTR szSettingsFileName)
                                            fpFogNightStartDistance);
     fpFogDayStartDistance = reg.GetFloat(szGameSpecificSettings, "FogDayStartDistance",
                                          fpFogDayStartDistance);
-    // networking
-    szMasterServerName = reg.GetString(szNetworkSettings, "Master Server Name", szMasterServerName);
     //
     reg.Close();
 }
@@ -645,8 +642,6 @@ void SGeneralSettings::WriteSettingsToFile(LPCSTR szSettingsFileName)
     reg.SetString(szGameSpecificSettings, "DefaultStreamingSound", szDefaultStreamingSound);
     reg.SetFloat(szGameSpecificSettings, "FogNightStartDistance", fpFogNightStartDistance);
     reg.SetFloat(szGameSpecificSettings, "FogDayStartDistance", fpFogDayStartDistance);
-    // networking
-    reg.SetString(szNetworkSettings, "Master Server Name", szMasterServerName);
     //
     reg.Close();
 }
@@ -913,8 +908,6 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
                                            fpFogNightStartDistance);
     fpFogDayStartDistance = reg.GetFloat(szGameSpecificSettings, "FogDayStartDistance",
                                          fpFogDayStartDistance);
-    // networking
-    szMasterServerName = reg.GetString(szNetworkSettings, "Master Server Name", szMasterServerName);
     //
     reg.Close();
 }
@@ -1104,8 +1097,6 @@ void SGeneralSettings::WriteSettingsToRegistry(LPCSTR pszRegistryKey)
     reg.SetString(szGameSpecificSettings, "DefaultStreamingSound", szDefaultStreamingSound);
     reg.SetFloat(szGameSpecificSettings, "FogNightStartDistance", fpFogNightStartDistance);
     reg.SetFloat(szGameSpecificSettings, "FogDayStartDistance", fpFogDayStartDistance);
-    // networking
-    reg.SetString(szNetworkSettings, "Master Server Name", szMasterServerName);
     //
     reg.Close();
 }

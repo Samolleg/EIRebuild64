@@ -27,11 +27,6 @@ void RunAutoExec(const char* original);
 float ObjectsDrawRadius();
 float LandscapeDrawRadius();
 bool ApplyNoGui(bool& show);
-// Existing EI_Starter network settings, captured once for this process.
-void InitializeNetworkSettings();
-bool RejectServerMQ();
-bool MpSpeedControlEnabled();
-bool MpConsoleEnabled();
 
 class CConsoleStream;
 typedef void (*PConsoleManip)(CConsoleStream &stream);

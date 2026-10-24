@@ -321,82 +321,11 @@ void SShopSet::Serialize(CStructureSaver &file)
     file.AddTT(1, shops);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SShopSet::NewGame(bool bLMP)
+void SShopSet::NewGame()
 {
     Clear();
     CShop *pShop;
 
-    if (bLMP)
-    {
-        // GIPAT ITEMS AND SPELLS
-        pShop = dbgnew CShop;
-        pShop->nID = 1;
-        pShop->bItem = true;
-        pShop->bSpell = true;
-        pShop->fKoeffs[0] = 1.f;
-        pShop->fKoeffs[1] = 0.5f;
-        pShop->fKoeffs[2] = 0.2f;
-        pShop->fKoeffs[3] = 0.1f;
-        pShop->fKoeffs[4] = 1.f;
-        pShop->fKoeffs[5] = 0.5f;
-        pShop->fKoeffs[6] = 0.2f;
-        pShop->fKoeffs[7] = 0.1f;
-        pShop->fKoeffs[8] = 0.2f;
-        pShop->FillStartAssortment();
-        shops.push_back(pShop);
-
-        // KANIA ITEMS & SPELLS
-        pShop = dbgnew CShop;
-        pShop->nID = 3;
-        pShop->bItem = true;
-        pShop->bSpell = true;
-        pShop->fKoeffs[0] = 1.f;
-        pShop->fKoeffs[1] = 0.5f;
-        pShop->fKoeffs[2] = 0.2f;
-        pShop->fKoeffs[3] = 0.1f;
-        pShop->fKoeffs[4] = 1.f;
-        pShop->fKoeffs[5] = 0.5f;
-        pShop->fKoeffs[6] = 0.2f;
-        pShop->fKoeffs[7] = 0.1f;
-        pShop->fKoeffs[8] = 0.2f;
-        pShop->FillStartAssortment();
-        shops.push_back(pShop);
-
-        // HADAGAN ITEMS AND SPELLS
-        pShop = dbgnew CShop;
-        pShop->nID = 4;
-        pShop->bItem = true;
-        pShop->bSpell = true;
-        pShop->fKoeffs[0] = 1.f;
-        pShop->fKoeffs[1] = 0.5f;
-        pShop->fKoeffs[2] = 0.2f;
-        pShop->fKoeffs[3] = 0.1f;
-        pShop->fKoeffs[4] = 1.f;
-        pShop->fKoeffs[5] = 0.5f;
-        pShop->fKoeffs[6] = 0.2f;
-        pShop->fKoeffs[7] = 0.1f;
-        pShop->fKoeffs[8] = 0.2f;
-        pShop->FillStartAssortment();
-        shops.push_back(pShop);
-
-        // RICK ITEMS AND SPELLS
-        pShop = dbgnew CShop;
-        pShop->nID = 5;
-        pShop->bItem = true;
-        pShop->bSpell = true;
-        pShop->fKoeffs[0] = 1.f;
-        pShop->fKoeffs[1] = 0.5f;
-        pShop->fKoeffs[2] = 0.2f;
-        pShop->fKoeffs[3] = 0.1f;
-        pShop->fKoeffs[4] = 1.f;
-        pShop->fKoeffs[5] = 0.5f;
-        pShop->fKoeffs[6] = 0.2f;
-        pShop->fKoeffs[7] = 0.1f;
-        pShop->fKoeffs[8] = 0.2f;
-        pShop->FillStartAssortment();
-        shops.push_back(pShop);
-    }
-    else
     {
         // GIPAT ITEMS
         pShop = dbgnew CShop;
@@ -486,7 +415,7 @@ void SShopSet::NewGame(bool bLMP)
         pShop->FillStartAssortment();
         shops.push_back(pShop);
     }
-    if(auto*mod=ModRuntime::Current())mod->RecalcShops(*this,bLMP);
+    if(auto*mod=ModRuntime::Current())mod->RecalcShops(*this,false);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // SHatUser
@@ -529,58 +458,10 @@ void CGlobalHat::Store(CSave &file)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // Get party from hat if partyID is not initialized then use first party
-bool CGlobalHat::GetParty(const char *pszUserName, const char *pszPassword, const SPartyID &partyID,
-                          CParty &res)
-{
-    if (!partyID.IsEmpty())
-    {
-        auto pos = parties.find(partyID);
-        if (pos == parties.end())
-        {
-            ASSERT(0);
-            return false;
-        }
-        res = pos->second;
-        return true;
-    }
-    /*	SHatUser *pUser = GetUser( pszUserName, pszPassword );
-            if ( !pUser )
-            {
-                    ASSERT(0);
-                    return false;
-            }
-            if ( !pUser->HasParty( partyID ) )
-            {
-                    ASSERT(0);
-                    return false;
-            }
-            auto pos =  parties.find( partyID );
-            if ( pos == parties.end() )
-            {
-                    ASSERT(0);
-                    return false;
-            }
-            pos->second.GetCurrentParty( res );*/
-    ASSERT(0);
-    res.Clear();
-    return true;
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // Set modified party to hat from game
-bool CGlobalHat::SetParty(const SPartyID &partyID, CParty &res)
-{
-    auto pos = parties.find(partyID);
-    if (pos == parties.end())
-    {
-        // CRAP
-        // for local mp only
-        // ASSERT(0);
-        parties[partyID] = res;
-        return true;
-    }
-    pos->second = res;
-    return true;
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 void CGlobalHat::GetSinglePlayerParty(CParty &res)
 {
@@ -595,26 +476,12 @@ void CGlobalHat::SetSinglePlayerParty(CParty &res)
 void CGlobalHat::NewSingleGame()
 {
     singleParty.NewGame();
-    shops.NewGame(false);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CGlobalHat::NewLMPGame()
-{
-    singleParty.NewGame();
-    shops.NewGame(true);
+    shops.NewGame();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CGlobalHat::UpdateAssortment()
 {
     for (int i = 0; i < shops.shops.size(); i++)
         shops.shops[i]->bNeedUpdate = true;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CGlobalHat::GetUnusedPartyID(SPartyID &res)
-{
-    // CRAP
-    // for local mp only
-    static int nRes = 1;
-    res.nSomeNumber = nRes++;
 }
 /////////////////////////////////////////////////////////////////////////////////////

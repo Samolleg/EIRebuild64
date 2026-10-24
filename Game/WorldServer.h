@@ -98,17 +98,6 @@ public:
     typedef CSmartPtr<CItem> CItemPtr;
     CList<CItemPtr, CItem *> activeItems; // all active items for whom segment is called
 
-    struct SCorpseItems
-    {
-        int nID;
-        int nCanLootBy;
-        DWORD dwMoney;
-        CAArray<CItemPtr, CItem *> items; // all items from hoover of dead unit in LMP
-        //
-        void Store(CSave &file);
-        void Load(CSave &file);
-    };
-    CList<SCorpseItems> LMPCorpses;
 
 private:
     void Clear();
@@ -186,8 +175,6 @@ public:
     //  this function updates inventory of party from current state on server
     void RemovePlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo = 0);
     // these functions are used to update party of CPlayer
-    void FakeRemoveParty(CPlayer *pPlayer);
-    void FakeDeployParty(CPlayer *pPlayer);
     //
     // give experience
     void GainExperience(CPlayer *pPlayer, float fpExp);
@@ -224,9 +211,6 @@ public:
     void EndFieldCampCommerceSuppression(bool active);
     bool HooverUnit(CUnit *pVictim, CPlayer *pWho);
     bool HooverUnitAddon(CUnit *pVictim, CPlayer *pWho, CUnitServer *unitServer, bool loot);
-    void AddCorpse(int nID, int nLootByID, DWORD dwMoney, CList<CItem *, CItem *> &items);
-    bool CanLoot(int nTargetID, int nUnitID);
-    void GetCorpses(int nUnitID, CScriptObjectGroup &res);
     CItem *CreateItem(const char *pszItem);
     CItemSpell *CreateItemSpell(const char *pszItem);
     CItem *DuplicateItem(CItem *pItem);

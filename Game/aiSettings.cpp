@@ -60,8 +60,6 @@ CAIGeneralSettings::CAIGeneralSettings()
     //
     nQuestsToRespawn = 3;
     //
-    fpLMPLostMoney = 0.1f;
-    fpLMPLostXP = 0.1f;
     //
     for (int i = 0; i < 3; ++i)
     {
@@ -138,8 +136,6 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
     //
     nQuestsToRespawn = reg.GetInt("Scenario", "QuestsToRespawn", nQuestsToRespawn);
     //
-    fpLMPLostMoney = reg.GetFloat("LMP", "Lost Money", fpLMPLostMoney);
-    fpLMPLostXP = reg.GetFloat("LMP", "Lost XP", fpLMPLostXP);
     // difficulty levels - multiplayers for respective params
     CFloatArray floats;
     for (int i = 0; i < 3; ++i)

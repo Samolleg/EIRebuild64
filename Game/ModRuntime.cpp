@@ -45,7 +45,6 @@ std::string CameraPath(const char*path){return resources?resources->ResolveCamer
 std::string MoviePath(const char*path){return resources?resources->ResolveMovie(path,path):path;}
 std::string SaveRoot(const char*fallback){return resources?resources->ResolveSaveRoot(fallback):fallback;}
 bool SinglePlayerAllowed(){return !resources||resources->SinglePlayerAllowed();}
-bool MultiplayerAllowed(){return !resources||resources->MultiplayerAllowed();}
 std::string MapPath(const char*path){
  if(!resources)return path;std::string normalized=path;for(char&c:normalized){if(c=='/')c='\\';else if(c>='A'&&c<='Z')c+=32;}
  auto ext=std::filesystem::path(normalized).extension().string();if(ext!=".mpr"&&ext!=".mob"&&ext!=".mq")return path;

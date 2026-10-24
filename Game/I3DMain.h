@@ -30,8 +30,6 @@ class CI3DHandler;
 class CI3DSurface;
 class CRenderer;
 class CI3DEffects;
-class CI3DChat;
-enum EChatMessages;
 class CDXGISurface;
 /////////////////////////////////////////////////////////////////////////////////////
 class CInterface3D
@@ -45,7 +43,6 @@ private:
     CI3DCursor *pCursor;     // cursor
     CI3DConsole *pConsole;
     CI3DEffects *m_pEffects;
-    CI3DChat *pChat;
 
     std::unique_ptr<CI3DSurface> pSurfaceFPS;
     float fRefreshFPSTime;
@@ -83,7 +80,6 @@ private:
 
     std::list<CString> missionTutorials;
 
-    bool bCheckDisconnect;
 
 public:
     // window states
@@ -141,7 +137,6 @@ public:
     bool GetModalPause() { return bModalPause; }
     void SetModalPause(bool bPause) { bModalPause = bPause; }
 
-    void SetCheckDisconnect(bool b) { bCheckDisconnect = b; }
 
     // tutorial
     void CheckTutorial(bool bForce = false);
@@ -167,14 +162,8 @@ public:
     void StringEvent(LPCTSTR pszText);
     void ActionFailure(DWORD dwUnitID, DWORD dwFailure);
     void QuestUpdate(LPCTSTR pszQuestVar, float fState);
-    void LMPPersonsUpdate(bool bAddDelete = true);
-    void LMPPhrase(LPCTSTR pszPhrase, int nOrder);
-    void LMPItemXCHGComplete(CParty &itemsRemote, CParty &itemsOffer, CParty &itemsInv);
 
-    void BeginChatLine();
-    void ClearChatLines();
 
-    CString FormChatMessageString(EChatMessages eMsg, LPCTSTR pszParam);
 
     float InternetRefreshProgress();
 

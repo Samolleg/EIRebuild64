@@ -4,7 +4,6 @@
 
 #include "I3DScreen.h"
 #include "Unit.h"
-#include "ChatServer.h"
 #include <map>
 /////////////////////////////////////////////////////////////////////////////////////
 class CWorldClient;
@@ -62,16 +61,6 @@ struct SI3DFaceState
     int nUniquePersonID;
 };
 /////////////////////////////////////////////////////////////////////////////////////
-struct SLMPFacesState
-{
-    std::vector<int> nPeopleIDs;
-    int nMainHeroID;
-    std::vector<int> nUniqueIDs;
-
-    bool operator==(const SLMPFacesState &a) const;
-    bool operator!=(const SLMPFacesState &a) const { return !(*this == a); }
-};
-/////////////////////////////////////////////////////////////////////////////////////
 class CI3DObjectWeapons;
 class CI3DObjectItems;
 class CI3DObjectSpells;
@@ -87,7 +76,6 @@ class CI3DScreenMission : public CI3DScreen
 {
     friend struct E3HudAccess;
 private:
-    CUnit *pLMPUnit;
     CArray<CUnit *, CUnit *> pUnits;
 
     int nInputMode;
@@ -122,11 +110,9 @@ private:
     int nQuestSound;
     bool bNeedAutosave;
 
-    SLMPFacesState lmpState;
 
 public:
     SRPGScienceStats tool;
-    EKickMode eKickMode;
 
 private:
     void CheckCursorType() {}
@@ -151,12 +137,10 @@ public:
     void AddControlUnit(CUnit *pUnit);
     void RemoveControlUnit(CUnit *pUnit);
     void GameOver(bool bVictory);
-    void LMPPersonsUpdate(bool bAddDelete);
     void PlayAcknowlegment(DWORD dwUnitID, DWORD dwAck, const char *pszAckID);
     void QuestUpdate(LPCTSTR pszQuestVar, float fState);
     bool Autosave();
     void StoreSpecific();
-    void SetKickMode(EKickMode eMode) { eKickMode = eMode; }
 
     // called from inside
     CUnit *GetSelection(int &nSelected, int &nIndex);

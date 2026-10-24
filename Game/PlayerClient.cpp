@@ -32,7 +32,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Particle.h"
 #include "ParticleManager.h"
 #include "Console.h"
-#include "ChatServer.h"
 #include "GameMain.h"
 
 #include <unordered_set>
@@ -151,11 +150,7 @@ int CPlayerClient::Segment()
     case CPS_WAITING_FOR_CONNECTION:
         if (pConnection && pConnection->CanSend())
         {
-            if (bSendParty)
-            {
-                wpkt.Write(PID_CLIENT_PARTY);
-                pPlayer->party.Store(wpkt);
-            }
+
             SNP_LOGIN loginInfo;
             loginInfo.dwClientVersion = DW_REQUIRED_CLIENT_VERSION;
             strcpy(loginInfo.pszUser, "Tango");
@@ -271,12 +266,7 @@ void CPlayerClient::UnitHasChangedOwner(CUnit *pUnit)
         theInterface.AddControlUnit(pUnit);
     else
         theInterface.RemoveControlUnit(pUnit);
-    if (pChatClient->IsValid() && pPlayer->party.people.GetSize() == 1 &&
-        pPlayer->party.people[0].nID == pUnit->GetID())
-    {
-        pChatClient->pSelf->nServerID = pUnit->GetOwner() ? pUnit->GetID() : -1;
-        pChatClient->pSelf->SetUpdated();
-    }
+
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::PrsMoveCamera()
@@ -693,10 +683,6 @@ BOOL CPlayerClient::PrsVisibleUnits()
     oldVisibleUnitIDs.clear();
     pkt.Read(&dangerState, sizeof(dangerState));
     GetWorldClient()->SetDangerState(dangerState);
-    pkt.Read(nSize);
-    LMPCorpsesIDs.SetSize(nSize);
-    for (i = 0; i < nSize; i++)
-        pkt.Read(LMPCorpsesIDs[i]);
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -926,11 +912,9 @@ BOOL CPlayerClient::PrsParty()
             pItem = i.GetNext();
         }
     }
-    if (IWorldConnector.IsLMP())
-        pPlayer->party.vars = holdVars;
+
     theWorld.RecheckAllQuestStates();
     NConsole::net << "party received on client" << endl;
-    IWorldConnector.LMPClientRecvParty();
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -969,8 +953,7 @@ BOOL CPlayerClient::PrsNewInterface()
          pUnit = unitIter.GetNext())
         UnitHasChangedOwner(pUnit);
 
-    if (IWorldConnector.IsLMP())
-        IWorldConnector.LMPSyncBriefings();
+
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1393,7 +1376,6 @@ void CPlayerClient::FinishCamp()
     ASSERT(status == CPS_CAMP);
     if (status != CPS_CAMP)
         return;
-    IWorldConnector.LMPClientRecvParty();
     SendPartyToServer();
     wpkt.Write(PID_FINISHCAMP);
     status = CPS_ACTIVE;

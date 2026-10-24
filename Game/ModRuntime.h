@@ -24,7 +24,6 @@ std::string CameraPath(const char*);
 std::string MoviePath(const char*);
 std::string SaveRoot(const char*);
 bool SinglePlayerAllowed();
-bool MultiplayerAllowed();
 std::string MapPath(const char*);
 class Host {
  std::unique_ptr<CModPackage> package;

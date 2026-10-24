@@ -19,7 +19,7 @@ inline bool Voice(SSCCmd& cmd,int* state,BOOL* next) {
   MiniaudioOneShotSfx::PartyVoiceBinding party={uint32_t(unit->GetID()),0,0};
   if(count==3){party.nearDistance=cmd.params[1];party.farDistance=cmd.params[2];if(!std::isfinite(party.nearDistance)||!std::isfinite(party.farDistance)||party.nearDistance<0||party.farDistance<=party.nearDistance){error("Expected finite 0 <= near < far");return 0;}}
   auto* manager=theWorld.GetSoundManager();
-  if(IWorldConnector.IsLMP() || !manager || !manager->IsActive()){error("Ready single-player sound manager required");return 0;}
+  if(!manager || !manager->IsActive()){error("Ready single-player sound manager required");return 0;}
   auto id=manager->BeginScenarioVoice(name,int(volume+.5f),count==3?&party:nullptr);
   if(id==SND_EMPTY){error("Unable to start voice resource");return 0;}
   return MiniaudioOneShotSfx::CaptureVoiceWait(manager,id);

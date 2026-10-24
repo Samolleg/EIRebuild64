@@ -2,7 +2,6 @@
 
 #include "I3DScreen.h"
 #include "SoundTypes.h"
-#include "ChatServer.h"
 /////////////////////////////////////////////////////////////////////////////////////
 enum EBaseScreenModes
 {
@@ -35,22 +34,6 @@ struct SBriefingQuestItem
 
     CI3DFigure *pFigFrame;
     CI3DFigure *pFigBack;
-};
-/////////////////////////////////////////////////////////////////////////////////////
-class CI3DBaseFaces : public CI3DObject
-{
-    int nPersons;
-    int nFaces;
-    std::vector<CPtr<CChatPerson>> pPersons;
-    CStringArray szStatusStrings;
-    void AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName);
-
-public:
-    CI3DBaseFaces(CInterface3D *pI);
-    void AddFaces();
-    virtual void OnIdle();
-    virtual void OnLButtonDown(UINT nFlags, CPoint point);
-    virtual void OnMouseMove(UINT nFlags, CPoint point);
 };
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DScrollBar;
@@ -107,7 +90,6 @@ private:
 
     bool bNeedAutosave;
 
-    CI3DBaseFaces *pFaces;
     std::vector<int> nBriefingPersIDs;
 
     float fIdleTime;
@@ -116,7 +98,6 @@ public:
     std::vector<SBriefingUnit> parts;
     bool briefingWeaponsHidden = false;
     std::vector<int> briefingWeaponUnitIds;
-    EKickMode eKickMode;
 
 private:
     void PlayBriefing(bool bForce = true, bool bNeedMemorizePos = true);
@@ -150,10 +131,8 @@ public:
     void AddControlUnit(CUnit *pUnit);
     void RemoveControlUnit(CUnit *pUnit);
     void GameOver(bool bVictory);
-    void LMPPersonsUpdate(bool bAddDelete);
     bool Autosave();
     void StoreSpecific();
-    void SetKickMode(EKickMode eMode) { eKickMode = eMode; }
 
     void PlayRndAnimation(CUnit *pUnit, bool bTalk = false, bool bShortPhrase = false);
     void PlayAnimation(CUnit *pUnit, int nAnim);

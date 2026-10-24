@@ -59,9 +59,6 @@
     <ClCompile Include="Game\Cruncher.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
-    <ClCompile Include="Game\Crypto.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
     <ClCompile Include="Game\idbFormat.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
@@ -329,15 +326,6 @@
     <ClCompile Include="Game\ClientSpecificManager.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
-    <ClCompile Include="Game\CSbase.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\CSlink.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\CSmain.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
     <ClCompile Include="Game\FlyingHitPoints.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
@@ -473,9 +461,6 @@
     <ClCompile Include="Game\I3DScrollText.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
-    <ClCompile Include="Game\I3DChat.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
     <ClCompile Include="Game\I3DScreenBase.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
@@ -494,12 +479,6 @@
     <ClCompile Include="Game\I3DMapObjTranslation.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
-    <ClCompile Include="Game\I3DScreenChoosePers.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\I3DScreenConnection.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
     <ClCompile Include="Game\I3DScrollBar.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
@@ -513,9 +492,6 @@
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\I3DScreenEndGame.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\I3DScreenExchange.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\I3DScreenGlobalMap.cpp">
@@ -542,9 +518,6 @@
     <ClCompile Include="Game\I3DScreenTutorial.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
-    <ClCompile Include="Game\A3ServerDesc.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
     <ClCompile Include="Game\DebugAlloc.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
@@ -558,18 +531,6 @@
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\MapObjectServer.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\NetChat.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\NetPacker.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\NetStream.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\NetTcp.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\PolyLine.cpp">
@@ -588,9 +549,6 @@
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\A3Cursor.cpp">
-      <Filter>Sources</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\ChatServer.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\GameMain.cpp">
@@ -650,9 +608,6 @@
     <ClInclude Include="Game\Cruncher.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Game\Crypto.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Game\GameBase.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -696,9 +651,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\A3Cursor.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\A3ServerDesc.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\AckDatabase.h">
@@ -767,9 +719,6 @@
     <ClInclude Include="Game\Camera.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Game\ChatServer.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Game\ChunkFile.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -792,15 +741,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\CResourceBase.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\CSbase.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\CSlink.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\CSmain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\Database.h">
@@ -890,9 +830,6 @@
     <ClInclude Include="Game\Hoover.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Game\I3DChat.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Game\I3DConsole.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -932,12 +869,6 @@
     <ClInclude Include="Game\I3DScreenCamp.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Game\I3DScreenChoosePers.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\I3DScreenConnection.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Game\I3DScreenConstructor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -948,9 +879,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\I3DScreenEndGame.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\I3DScreenExchange.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\I3DScreenGlobalMap.h">
@@ -1070,19 +998,7 @@
     <ClInclude Include="Game\Net.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Game\NetChat.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\NetPacker.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Game\NetProtocol.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\NetStream.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\NetTcp.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\NetUpdate.h">
