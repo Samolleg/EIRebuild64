@@ -1,5 +1,7 @@
 # Работа с EIRebuild64
 
+Перед сборкой — `tools/prepare-worktree.ps1` (локальный кэш NuGet, JSON и LuaJIT; без скачивания).
+
 ## Git и приёмка
 
 `origin` — отдельный приватный EIRebuild64 в аккаунте владельца.
