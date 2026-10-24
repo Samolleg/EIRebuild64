@@ -282,7 +282,8 @@ int CStructureSaver::CountChunks(const chunk_id idChunk)
 /////////////////////////////////////////////////////////////////////////////////////
 void CStructureSaver::Start(CSave &res, bool bRead, int _nVersion)
 {
-    ReleaseObjects();
+    if (IsReading())
+        ReleaseObjects();
     resourceLabels.clear();
     toStore.clear();
     chunks.clear();
@@ -385,7 +386,8 @@ void CStructureSaver::Finish(CSave &res)
     }
     obj.Clear();
     data.Clear();
-    ReleaseObjects();
+    if (IsReading())
+        ReleaseObjects();
     resourceLabels.clear();
     toStore.clear();
     chunks.clear();
@@ -416,7 +418,7 @@ void CStructureSaver::StoreObject(const chunk_id idChunk, CFundament *pObject)
             { data.Fail("resource_label_overflow"); return; }
             label = static_cast<std::uint32_t>(resourceLabels.size() + 1);
             resourceLabels.emplace(pObject, label);
-            resourceObjects.emplace(label, pObject);
+            // Writing tracks labels only; ownership remains with the caller.
             toStore.push_back(pObject);
         }
         else
