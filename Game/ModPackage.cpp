@@ -138,26 +138,9 @@ void CModPackage::Load(const std::string &directory){
  CFileRegistry config;if(!config.Open(Join(root,"config.reg").c_str()))throw std::runtime_error("Cannot open mod config.reg");
  saveInMod=config.GetInt("MOD","GameSaves",1)!=0;
   forceTutorial=ModConfiguration::Bool(config,"MOD","ForceShowTutorial",false);
-  chatHtmlFile=(LPCSTR)config.GetString("Dev","ChatHtmlFile","");
   gameDebugFile=(LPCSTR)config.GetString("Dev","GameDebugFile","");
   combatSettings["PreventZone1Animation"]=int(ModConfiguration::Bool(config,"MOD","PreventZone1Animation",false));
  singlePlayerAllowed=config.GetInt("MOD","Single",1)!=0;
- multiplayerAllowed=config.GetInt("MOD","Multi",1)!=0;
-  CStringArray zoneLists[3];
-  customMpZones=config.GetStringArray("MPZone","Gipath",zoneLists[0]) &&
-                config.GetStringArray("MPZone","Ingos",zoneLists[1]) &&
-                config.GetStringArray("MPZone","Suslanger",zoneLists[2]);
-  if(customMpZones){
-   for(int a=0;a<3;++a){
-    for(int i=0;i<zoneLists[a].GetSize();++i)mpZones[a].push_back((LPCSTR)zoneLists[a][i]);
-    if(!mpZones[a].empty()&&mpZones[a].back().empty())mpZones[a].pop_back();
-   }
-   // Validate the complete arrays, including entries after an internal empty.
-   for(int a=0;a<3;++a)for(size_t i=0;i<mpZones[a].size();++i)
-    for(int b=a;b<3;++b)for(size_t j=b==a?i+1:0;j<mpZones[b].size();++j)
-     if(_stricmp(mpZones[a][i].c_str(),mpZones[b][j].c_str())==0)
-      throw std::runtime_error("Duplicate zone name found in file: "+Join(root,"config.reg"));
-  }
  CStringArray entries;config.GetEntries("RES",entries);
  for(int i=0;i<entries.GetSize();i++){
    std::string key=Lower((LPCSTR)entries[i]);CStringArray paths;config.GetStringArray("RES",entries[i],paths);
@@ -186,14 +169,7 @@ void CModPackage::Load(const std::string &directory){
  Require("table_indexes");indexRef=luaL_ref(state,LUA_REGISTRYINDEX);
  Require("static_table_values");lua_getfield(state,-1,"new");lua_rawgeti(state,LUA_REGISTRYINDEX,indexRef);Call(1,1);lua_getfield(state,-1,"last");lookupRef=luaL_ref(state,LUA_REGISTRYINDEX);
 }
-bool CModPackage::MatchesMpZone(int allod,const char* terrain) const{
- if(!customMpZones||allod<0||allod>=3)return false;
- for(const auto& zone:mpZones[allod]){
-  if(zone.empty())break;
-  if(_stricmp(zone.c_str(),terrain)==0)return true;
- }
- return false;
-}
+
 bool CModPackage::ConfigureAddonSettings(CFileRegistry& settings){
  ConfigureModAudio(settings,root);
  falloutSettings.yaw=ModConfiguration::Float(settings,"Addon","JMVFalloutCameraYaw",45.0f);
@@ -807,21 +783,10 @@ void CModPackage::SpellTooltipOverrides(CUnit* server,ModSpellTooltip::Values& v
    CallbackFrame frame(state);BeginCallback(names[field]);ModLua::Push(state,server->GetUserUnitStats(),frame.scope);
    ModLua::Push(state,server,frame.scope);Call(2,1);return float(Number(state,names[field]));});
 }
-void CModPackage::LogChat(unsigned color,const char* nick,const char* text) const
-{
- if(chatHtmlFile.empty())return;
- if(GetFileAttributesA(chatHtmlFile.c_str())==INVALID_FILE_ATTRIBUTES){
-  FILE* file=nullptr;if(!fopen_s(&file,chatHtmlFile.c_str(),"a")&&file){
-   fputs("<html><head><title>Chat log</title><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1251\"><style type=\"text/css\"><!--body{background-color:#000000;color:#FFFFFF}.1{color:#0000FF}.2{color:#00FF00}.3{color:#00FFFF}.4{color:#FF0000}.5{color:#FF00FF}.6{color:#FFFF00}.7{color:#FFFFFF)}--></style></head>\n",file);fclose(file);}}
- FILE* file=nullptr;if(!fopen_s(&file,chatHtmlFile.c_str(),"a")&&file){
-  const auto line=ModSettingsPolicy::Chat(color,nick,text);fputs(line.c_str(),file);fclose(file);}
-}
+
 
 float CModPackage::ManaBonus(const SRPGUserUnitStats&stats){if(scalarManaBonus)return ScalarManaBonus(static_cast<float>(stats.cIntelligence));CallbackFrame frame(state);BeginCallback("GetManaBonusOnClient");ModLua::Push(state,&stats,frame.scope);Call(1,1);double n=Number(state,"Client mana multiplier");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("Mana multiplier overflow");return float(n);}
-float CModPackage::DistributeExperience(float experience,int players){
- if(!std::isfinite(experience)||players<=0)throw std::runtime_error("Invalid LMP experience input");
- CallbackFrame frame(state);BeginCallback("DistributeLmpExp");lua_pushnumber(state,experience);lua_pushinteger(state,players);Call(2,1);double n=Number(state,"LMP experience");if(fabs(n)>(std::numeric_limits<float>::max)())throw std::runtime_error("LMP experience overflow");return float(n);
-}
+
 void CModPackage::RecalcShops(SShopSet&shops,bool lmp){
  const size_t expected=lmp?4:5;if(shops.shops.size()!=expected)throw std::runtime_error("Lua shop layout expects four LMP or five campaign shops");
  std::vector<float> values;values.reserve(expected*9);for(auto&shop:shops.shops)for(int j=0;j<9;j++)values.push_back(shop->fKoeffs[j]);
@@ -941,7 +906,7 @@ nlohmann::json CModPackage::CheckEconomy(){
  auto require=[](bool v,const char*msg){if(!v)throw std::runtime_error(msg);};
  auto number=[&](const char*fn,float n){CallbackFrame frame(state);BeginCallback(fn);lua_pushnumber(state,n);Call(1,1);return Number(state,fn);};
  auto run=[&](const char*code){if(luaL_loadstring(state,code)||lua_pcall(state,0,0,0))throw std::runtime_error(lua_tostring(state,-1));};
- Json shopResults=Json::array();int scalarCases=0,shareCases=0;
+ Json shopResults=Json::array();int scalarCases=0;
  for(int intelligence:{10,25,50,100,150,255}){
   SRPGUnitStats server={};server.psIntelligence.fpEffectiveValue=float(intelligence);server.fpExperience=100;server.fExpPenalty=-50;
   SRPGUserUnitStats client={};client.cIntelligence=BYTE(intelligence);
@@ -951,8 +916,6 @@ nlohmann::json CModPackage::CheckEconomy(){
   server.GainExperience(10);double penalty=-50+10*expected;
   require(fabs(server.fpExperience-(100+(std::max)(0.0,penalty)))<.001&&fabs(server.fExpPenalty-(std::min)(0.0,penalty))<.001,"Experience penalty repayment mismatch");scalarCases++;
  }
- for(int players:{1,2,4,8})for(float exp:{0.f,100.f,1001.f}){require(fabs(DistributeExperience(exp,players)-exp/players)<.0001,"LMP XP split mismatch");shareCases++;}
- bool badPlayers=false;try{DistributeExperience(10,0);}catch(const std::runtime_error&){badPlayers=true;}require(badPlayers,"Zero player count accepted");
  for(bool lmp:{false,true}){
   SShopSet shops;for(int i=0;i<(lmp?4:5);i++){CShop*shop=new CShop;for(int j=0;j<NUM_SHOP_KOEFFS;j++)shop->fKoeffs[j]=float(100+i*10+j);shops.shops.push_back(shop);}
   RecalcShops(shops,lmp);
@@ -968,7 +931,7 @@ nlohmann::json CModPackage::CheckEconomy(){
   run("RecalcShopsPriceMultipliers=__r19_shop_callback; __r19_shop_callback=nil; assert(not pcall(function() return __r19_expired:value(0) end)); __r19_expired=nil");
   require(failed,"Shop failed callback accepted");size_t n=0;for(auto&shop:shops.shops)for(float v:shop->fKoeffs)require(v==before[n++],"Partial shop write escaped rollback");
  }
- return {{"success",true},{"shopCoefficients",shopResults},{"scalarCases",scalarCases},{"shareCases",shareCases},{"shopModes",2},{"shopRollback",true},{"expiredShopArrayRejected",true},{"nativeExperiencePenalty",true},{"clientServerParity",true},{"gameplayActivated",false}};
+ return {{"success",true},{"shopCoefficients",shopResults},{"scalarCases",scalarCases},{"shopModes",2},{"shopRollback",true},{"expiredShopArrayRejected",true},{"nativeExperiencePenalty",true},{"clientServerParity",true},{"gameplayActivated",false}};
 }
 namespace {
 Json CheckItemDetails(const std::string &directory){
@@ -1182,8 +1145,6 @@ Json CheckUIRange(const std::string& directory){
  report["settings"]["RPG/Consider Log Base"]=settings.fConsiderLogBase;
  report["settings"]["RPG/Item Durability Critical"]=settings.fItemDurabilityCritical;
  report["settings"]["Scenario/QuestsToRespawn"]=settings.nQuestsToRespawn;
- report["settings"]["LMP/Lost Money"]=settings.fpLMPLostMoney;
- report["settings"]["LMP/Lost XP"]=settings.fpLMPLostXP;
  report["settings"]["DifficultyLevels/Absorption"]={settings.fAbsorptionLevels[0],settings.fAbsorptionLevels[1],settings.fAbsorptionLevels[2]};
  report["settings"]["DifficultyLevels/Attack"]={settings.fAttackLevels[0],settings.fAttackLevels[1],settings.fAttackLevels[2]};
  report["settings"]["DifficultyLevels/Defence"]={settings.fDefenceLevels[0],settings.fDefenceLevels[1],settings.fDefenceLevels[2]};

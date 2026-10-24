@@ -404,7 +404,6 @@ void Slot::World(Writer &w,const CWorldServer &v)
     std::vector<CItem *> sources;v.pItemManager->ForEach([&](CGameBase *o){auto *item=dynamic_cast<CItem *>(o);if(item&&item->GetUserData())sources.push_back(item);});
     Count(w,sources.size());for(auto *item:sources){w.GameReference(item);w.Int32(static_cast<CItemSrcInfo *>(item->GetUserData())->nSrcItemID);}
     // v1 is single-player: LMP corpse transport is not part of the slot.
-    if(v.LMPCorpses.GetCount())Invalid("multiplayer corpse state in local slot");
     auto &map=const_cast<CAIMap &>(v.aiMap);auto &g=map.aiGraph;
     CMemorySave resource;CAIGraph base;
     if(!v.szZoneFileName.IsEmpty()){

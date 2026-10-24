@@ -888,20 +888,10 @@ void CI3DScreenCamp::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     switch (nChar)
     {
     case 13:
-        if (IWorldConnector.IsLMP())
-        {
-            pI3D->BeginChatLine();
-            SetProcessed();
-            return;
-        }
+
         break;
     case VK_BACK:
-        if (IWorldConnector.IsLMP())
-        {
-            pI3D->ClearChatLines();
-            SetProcessed();
-            return;
-        }
+
         break;
     case VK_ESCAPE:
         SetScreenMode(ISM_EXIT);

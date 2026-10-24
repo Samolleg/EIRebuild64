@@ -22,7 +22,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScreenDebug.h"
 #include "I3DEffects.h"
 
-#include "I3DChat.h"
 #include "GameMain.h"
 #include "I3DScreenMainMenu.h"
 #include "I3DScreenMission.h"
@@ -32,7 +31,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScreenEndGame.h"
 #include "I3DScreenTutorial.h"
 #include "I3DScreenObjectives.h"
-#include "I3DScreenExchange.h"
 #include "I3DScreenMessageBox.h"
 
 #include "WorldClient.h"
@@ -162,7 +160,6 @@ void CInterface3D::Init(CRenderer *pNewRend)
     pConsole = dbgnew CI3DConsole(this);
     theDebugInfoSystem.Init(this);
 
-    pChat = dbgnew CI3DChat(this);
 
     m_pCapture = 0;
 
@@ -219,7 +216,6 @@ void CInterface3D::Init(CRenderer *pNewRend)
 
     ShowFPS(true);
 
-    bCheckDisconnect = false;
     OwnedRender::E1TextInterfaceBegin((HFONT)GetFont(0)->GetSafeHandle());
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -255,11 +251,7 @@ void CInterface3D::Fini()
 
     theDebugInfoSystem.Fini();
 
-    if (pChat)
-    {
-        delete pChat;
-        pChat = 0;
-    }
+
 
     if (pConsole)
     {
@@ -357,9 +349,6 @@ void CInterface3D::Draw2D()
 
     pDX11->GetSpriteBatch()->Begin();
 
-    if (IWorldConnector.IsLMP() && pScreens.size() == 1)
-        pChat->Draw2D();
-
     theDebugInfoSystem.Draw2D();
     {
         nCountFrames++;
@@ -433,8 +422,7 @@ void CInterface3D::OnIdle()
             pBGSmallScreen = 0;
 
             eBGFlag = BG_FLAG_NOTHING;
-            if (!IWorldConnector.IsLMP())
-                IWorld.CombatPause(bModalPause);
+            IWorld.CombatPause(bModalPause);
             bModalPause = false;
         }
         if (!pScreens.empty())
@@ -445,7 +433,6 @@ void CInterface3D::OnIdle()
         if (dwModalRetValue == 0x00990001)
         {
             SetScreensMustDie();
-            IWorldConnector.StopLMP();
             IWorldConnector.ReqGoMainMenu();
         }
         ReleaseCapture();
@@ -464,19 +451,9 @@ void CInterface3D::OnIdle()
 
     lastCursorPos = theCursor.GetPos();
 
-    if (bCheckDisconnect && IWorldConnector.IsLMP() && !pChatClient->IsConnected())
-    {
-        bCheckDisconnect = false;
-
-        CI3DScreenMessageBox *pScr = dbgnew CI3DScreenMessageBox(this, "disconnect",
-                                                                 "disconnect_msg", 0x00990000,
-                                                                 MBF_OK);
-        DoModal(pScr);
-    }
-    else if (!pScreens.empty())
+    if (!pScreens.empty())
         pScreens.back()->OnIdle();
 
-    pChat->OnIdle();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::CheckScreensMustDie()
@@ -520,9 +497,6 @@ void CInterface3D::ActivateScreen(EInterface iface)
         break;
     case IFACE_CAMP:
         pScreen = dbgnew CI3DScreenCamp(this);
-        break;
-    case IFACE_EXCHANGE:
-        pScreen = dbgnew CI3DScreenExchange(this);
         break;
     case IFACE_AUTOPLAY:
         break;
@@ -580,8 +554,7 @@ void CInterface3D::DoModal(CI3DScreen *pScreen, bool bSaveBack, bool bGrayBack)
     if (pScreens.size() == 1)
     {
         bModalPause = IWorld.IsCombatPause();
-        if (!IWorldConnector.IsLMP())
-            IWorld.CombatPause(true);
+        IWorld.CombatPause(true);
         if (bSaveBack && bGrayBack)
         {
             eBGFlag = BG_FLAG_CREATE;
@@ -811,12 +784,6 @@ void CInterface3D::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         return;
     }
 
-    if (IWorldConnector.IsLMP() && pChat->IsEntering())
-    {
-        pChat->OnKeyDown(nChar, nRepCnt, nFlags);
-        return;
-    }
-
     if (!pScreens.empty())
         pScreens.back()->OnKeyDown(nChar, nRepCnt, nFlags);
 
@@ -847,12 +814,6 @@ void CInterface3D::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags)
         return;
     }
 
-    if (IWorldConnector.IsLMP() && pChat->IsEntering())
-    {
-        pChat->OnChar(nChar, nRepCnt, nFlags);
-        return;
-    }
-
     if (!pScreens.empty())
         pScreens.back()->OnChar(nChar, nRepCnt, nFlags);
 }
@@ -880,18 +841,6 @@ void CInterface3D::OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags)
 
     if (!pScreens.empty())
         pScreens.back()->OnKeyUp(nChar, nRepCnt, nFlags);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CInterface3D::BeginChatLine()
-{
-    if (!pChat->IsEntering())
-        pChat->SetEntering(true);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CInterface3D::ClearChatLines()
-{
-    if (!pChat->IsEntering())
-        pChat->ClearLines();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::VirtualToScreen(CRect &rect)
@@ -1060,23 +1009,6 @@ void CInterface3D::ActionFailure(DWORD dwUnitID, DWORD dwFailure)
         pScreens.back()->PlayAcknowlegment(dwUnitID, dwFailure, 0);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CInterface3D::LMPPersonsUpdate(bool bAddDelete)
-{
-    if (!pScreens.empty())
-        pScreens.back()->LMPPersonsUpdate(bAddDelete);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CInterface3D::LMPPhrase(LPCTSTR pszPhrase, int nOrder)
-{
-    pChat->NewPhrase(pszPhrase, nOrder);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CInterface3D::LMPItemXCHGComplete(CParty &itemsRemote, CParty &itemsOffer, CParty &itemsInv)
-{
-    if (!pScreens.empty())
-        pScreens.back()->LMPItemXCHGComplete(itemsRemote, itemsOffer, itemsInv);
-}
-/////////////////////////////////////////////////////////////////////////////////////
 CSize CInterface3D::TextSize(CString szStr, int nFont)
 {
     const auto layout = owned::widescreen::make_layout(float(nScreenWidth), float(nScreenHeight));
@@ -1206,59 +1138,6 @@ void CInterface3D::ResetInputState()
     bLDblClk = false;
     if (!pScreens.empty())
         pScreens.back()->ResetInputState();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-CString CInterface3D::FormChatMessageString(EChatMessages eMsg, LPCTSTR pszParam)
-{
-    CString szTemplate, szOut;
-    switch (eMsg)
-    {
-    case CMS_PLAYERENTER:
-        szTemplate = "lmp_player_connected";
-        break;
-    case CMS_PLAYERLEAVE:
-        szTemplate = "lmp_player_disconnected";
-        break;
-    case CMS_PLAYERKICKED:
-        szTemplate = "lmp_player_kicked";
-        break;
-    case CMS_PLAYERBANNED:
-        szTemplate = "lmp_player_banned";
-        break;
-    case CMS_PLAYERDROPPED:
-        szTemplate = "lmp_player_lost_connection";
-        break;
-    case CMS_QUESTTAKEN:
-        szTemplate = "lmp_quest_taken";
-        break;
-    case CMS_QUESTCANCELED:
-        szTemplate = "lmp_quest_canceled";
-        break;
-    case CMS_QUESTCOMPLETED:
-        szTemplate = "lmp_quest_completed";
-        break;
-    case CMS_ZONEENABLED:
-        szTemplate = "lmp_zone_enabled";
-        break;
-    case CMS_ZONEDISABLED:
-        szTemplate = "lmp_zone_disabled";
-        break;
-    case CMS_TRADEREQUEST:
-        szTemplate = "lmp_trade_requested";
-        break;
-    case CMS_TRADECANCEL:
-        szTemplate = "lmp_trade_canceled";
-        break;
-    case CMS_PAUSEDBY:
-        szTemplate = "reserved_02";
-        break;
-    }
-    theWorld.GetTextManager()->GetSystemString(szTemplate, szTemplate);
-    if (pszParam)
-        szOut.Format(szTemplate, pszParam);
-    else
-        szOut = szTemplate;
-    return szOut;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 

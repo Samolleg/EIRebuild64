@@ -31,7 +31,6 @@ static const char LOCAL_FILE[] = __FILE__;
 // crap for camera
 #include "WorldInterface.h"
 
-#include "ChatServer.h"
 #include "BinkVideo.h"
 #include "Renderer.h"
 
@@ -1179,9 +1178,6 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, float &re
         res = theWorldServer.GetMercsNumber((int)params[0]);
         break;
     case SC_GSGETVAR:
-        if (IWorldConnector.IsLMP() && pChatServer->IsValid())
-            res = pChatServer->GSGetVar((const char *)szParams[0]);
-        else
         {
             res = 0;
             pPlayer = theWorldServer.GetPlayer((int)params[0]);
@@ -1300,9 +1296,6 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CScriptOb
         res[0]->SetObject(pMO);
         break;
     case SC_GETLEADER:
-        if (pChatServer->IsValid())
-            res[0]->SetObject(theWorldServer.GetMapObject(pChatServer->GetLeaderServerID()));
-        else
         {
             int nID = 1000011214;
             pPlayer = theWorldServer.GetPlayer(0);
@@ -2031,9 +2024,6 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
             script.DeleteSFXSource(pCmd);
             break;
         case SC_GSSETVAR:
-            if (IWorldConnector.IsLMP() && pChatServer->IsValid())
-                pChatServer->GSSetVar((const char *)pCmd->szParams[0], pCmd->params[1]);
-            else
             {
                 pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
                 if (pPlayer)
@@ -2042,9 +2032,6 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
             }
             break;
         case SC_GSSETVARMAX:
-            if (IWorldConnector.IsLMP() && pChatServer->IsValid())
-                pChatServer->GSSetVarMax((const char *)pCmd->szParams[0], pCmd->params[1]);
-            else
             {
                 pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
                 if (pPlayer)
@@ -2053,9 +2040,6 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
             }
             break;
         case SC_GSDELVAR:
-            if (IWorldConnector.IsLMP() && pChatServer->IsValid())
-                pChatServer->GSDelVar((const char *)pCmd->szParams[0]);
-            else
             {
                 pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
                 if (pPlayer)
@@ -2421,16 +2405,6 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
         }
         break;
         case SC_QUESTCOMPLETE:
-            if (IWorldConnector.IsLMP())
-            {
-                if (IWorldConnector.LMPQuestComplete(pCmd->szParams[0]))
-                {
-                    const SQDBQuest *pQuest = theQuestDatabase.quests.GetEntry(pCmd->szParams[0]);
-                    if (pQuest)
-                        theWorldServer.GainExperience(0, pQuest->fExp);
-                }
-            }
-            else
             {
                 pPlayer = theWorldServer.GetPlayer(pCmd->params[0]);
                 if (pPlayer)

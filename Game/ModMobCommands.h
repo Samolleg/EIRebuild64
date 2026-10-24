@@ -16,7 +16,6 @@
 #include "Player.h"
 #include "MusicSystem.h"
 #include "RandomGen.h"
-#include "ChatServer.h"
 #include "Console.h"
 #include "Item.h"
 #include "aiSettings.h"
@@ -275,10 +274,8 @@ inline bool Action(SSCCmd&cmd){
  case 317:if(server){server->GainExperience(a);if(auto*p=unit->GetOwner())if(auto*ps=dynamic_cast<CPlayerServer*>(p->GetPlayerSpecific()))ps->GainExp(unit->GetID(),a);}break;
  case 318:IWorldClient.StartCameraSave(cmd.szParams[0]);break;
  case 319:IWorldClient.StopCameraSave();break;
- case 320:if(IWorldConnector.IsLMP()&&pChatServer&&pChatServer->IsValid())pChatServer->AddChatPhrase(Join(cmd).c_str());break;
  case 126:NConsole::game<<Join(cmd).c_str()<<std::endl;break;
  case 232:if(server)server->logic.ResetScriptTarget();break;
- case 340:if(auto*p=PlayerServer(CheckedInt(a)))p->ResendParty();break;
  case 342:{auto*p=theWorldServer.GetPlayer(CheckedInt(a));if(p&&unit&&unit->IsDead()){theWorldServer.HooverUnit(unit,p);theWorldServer.RemoveMapObject(unit->GetID());}break;}
  case 343:if(auto*p=PlayerServer(0))p->SendStringEvent(0,"gameover");break;
  case 344:if(auto*p=PlayerServer(0))p->SendStringEvent(0,(std::string("gameover ")+(LPCSTR)cmd.szParams[0]+" "+(LPCSTR)cmd.szParams[1]).c_str());break;
@@ -290,7 +287,7 @@ inline bool Action(SSCCmd&cmd){
  case 372:if(!server||!IntegralArgument(cmd.params[1],0.0,RPG_NUM_ATTACK_TYPES)||!IntegralArgument(cmd.params[2],0.0,RPGHL_ALL+1.0))return Reject("InflictDamageEx","Invalid server, attack type or hit location");if(server){SRPGAttackPortion portion;portion.Clear();portion.nSkill=0;portion.fpToHit=100;portion.fpAttacks[int(cmd.params[1])]=1;portion.hl=ERPGHitLocations(int(cmd.params[2]));portion.fBackStabMultiplier=cmd.params[3];portion.fpDamage=a;InflictDamageExConsumer(server,portion);}break;
  case 376:if(server)server->CmdSkill(ObjectArg(cmd,1),CheckedInt(cmd.params[1]),DWORD(CheckedInt(cmd.params[2])),a!=0,DWORD(CheckedInt(cmd.params[3])));break;
  case 388:if(!JMV_RegisterLoot(ObjectArg(cmd),cmd.szParams[0]))return Reject("RegisterLoot","Registration rejected");break;
- case 389:if(IWorldConnector.IsLMP())return Reject("ShowMessage","Requires single player");if(const char*error=ModMessages::Show(cmd.szParams[0]))return Reject("ShowMessage",error);break;
+ case 389:if(const char*error=ModMessages::Show(cmd.szParams[0]))return Reject("ShowMessage",error);break;
  case 384:if(!std::isfinite(a)||a<-2147483648.f||a>=2147483648.f)return Reject("NpcCombatConsumable","Invalid charges");if(server&&!JMV_RegisterNpcCombatConsumable(unit,cmd.szParams[0],cmd.szParams[1],int(a)))return Reject("NpcCombatConsumable","Profile rejected");break;
  case 382:if(unit)unit->SetAggression(EUnitAggression(CheckedInt(a)));break;
  default:return false;

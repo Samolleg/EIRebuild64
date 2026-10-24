@@ -34,9 +34,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "AckDatabase.h"
 
-#include "ChatServer.h"
 #include "GameMain.h"
-#include "CSbase.h"
 // end of CRAP
 /////////////////////////////////////////////////////////////////////////////////////
 #include <map>
@@ -66,20 +64,12 @@ void ProcessExec(const CStringArray &szParams);
 void ProcessDebugInfo(const CStringArray &szParams);
 void ProcessGive(const CStringArray &szParams);
 void ProcessFadeout(const CStringArray &szParams);
-void ProcessJoin(const CStringArray &szParams);
-void ProcessServer(const CStringArray &szParams);
 void ProcessMemUsage(const CStringArray &szParams);
 void ProcessLootAll(const CStringArray &szParams);
 void ProcessNet(const CStringArray &szParams);
-void ProcessDisconnect(const CStringArray &szParams);
 void ProcessGenerateAcks(const CStringArray &szParams);
 void ProcessDays(const CStringArray &szParams);
-void ProcessPartyResend(const CStringArray &szParams);
-void ProcessKick(const CStringArray &szParams);
-void ProcessBan(const CStringArray &szParams);
 void ProcessFPS(const CStringArray &szParams);
-void ProcessRate(const CStringArray &szParams);
-void ProcessLocalRate(const CStringArray &szParams);
 
 }; // namespace NConsole
 /////////////////////////////////////////////////////////////////////////////////////
@@ -169,21 +159,6 @@ const char pszConsoleActivateWord[] = { 0x12, 0x0e, 0x0f, 0x08, 0x01, 0x07,
                                         0x0b, 0x07, 0x04, 0x09, 0x04, 0 };
 namespace {
 ModSettingsPolicy::Gui gui;
-struct StarterNetwork {
-    bool rejectServerMQ, mpSpeedControl, mpConsole;
-    StarterNetwork()
-    {
-        const wchar_t *key = L"Software\\Gipat.Ru\\EI_Starter\\Settings";
-        rejectServerMQ = RegGetBool(HKEY_CURRENT_USER, key, L"MQ client");
-        mpSpeedControl = RegGetBool(HKEY_CURRENT_USER, key, L"MP Speed-control");
-        mpConsole = RegGetBool(HKEY_CURRENT_USER, key, L"MP console");
-    }
-};
-const StarterNetwork& NetworkSettings()
-{
-    static const StarterNetwork settings;
-    return settings;
-}
 struct Starter {
  std::vector<std::string> registry,file;DWORD objects=100,landscape=100;
  Starter(){
@@ -246,10 +221,6 @@ void ProcessNoGui(const CStringArray& args){
  theCursor.Show(gui.cursor);game<<"GUI: "<<(gui.controls?"show":"hide")<<", cursor: "<<(gui.cursor?"show":"hide")<<endl;
 }
 }
-void NConsole::InitializeNetworkSettings(){(void)NetworkSettings();}
-bool NConsole::RejectServerMQ(){return NetworkSettings().rejectServerMQ;}
-bool NConsole::MpSpeedControlEnabled(){return NetworkSettings().mpSpeedControl;}
-bool NConsole::MpConsoleEnabled(){return NetworkSettings().mpConsole;}
 bool NConsole::ApplyNoGui(bool& show){return gui.Apply(show);}
 float NConsole::ObjectsDrawRadius(){return ModRuntime::Resources()?float(StarterSettings().objects):100.f;}
 float NConsole::LandscapeDrawRadius(){return ModRuntime::Resources()?float(StarterSettings().landscape):100.f;}
@@ -284,20 +255,12 @@ void NConsole::Process(const char *pszCommand)
     commandsCommon["execute"] = ProcessExec;
     commands["give"] = ProcessGive;
     commands["fadeout"] = ProcessFadeout;
-    commands["join"] = ProcessJoin;
-    commands["server"] = ProcessServer;
     commands["memusage"] = ProcessMemUsage;
     commands["lootall"] = ProcessLootAll;
     commands["net"] = ProcessNet;
-    commands["disconnect"] = ProcessDisconnect;
     commands["generateacks"] = ProcessGenerateAcks;
     commands["days"] = ProcessDays;
-    commands["partyresend"] = ProcessPartyResend;
-    commandsCommon["kick"] = ProcessKick;
-    commandsCommon["ban"] = ProcessBan;
     commandsCommon["fps"] = ProcessFPS;
-    commandsCommon["rate"] = ProcessRate;
-    commandsCommon["localrate"] = ProcessLocalRate;
 
     // parse input string
     CString szCmd;
@@ -310,26 +273,23 @@ void NConsole::Process(const char *pszCommand)
 
     szCmd = szParams[0];
     szParams.RemoveAt(0);
-    const CModPackage *package = ModRuntime::Current();
-    const bool spellAddonCheats = package && package->SpellAddon().Feature04() == 1;
-    const bool bAllowCheats = spellAddonCheats || !IWorldConnector.IsLMP() || MpConsoleEnabled();
 
     // processing
     if (szCmd[0] == '@') // script commands
     {
-        if (bConsoleActive && bAllowCheats)
+        if (bConsoleActive)
             ProcessScript(szCmd.Mid(1), szParams, "WorldScript(", ")");
         return;
     }
     else if (szCmd[0] == '#') // script function returning float
     {
-        if (bConsoleActive && bAllowCheats)
+        if (bConsoleActive)
             ProcessScript(szCmd.Mid(1), szParams, "WorldScript( ConsoleFloat( ", " ))");
         return;
     }
     else if (szCmd[0] == '$') // script function returning string
     {
-        if (bConsoleActive && bAllowCheats)
+        if (bConsoleActive)
             ProcessScript(szCmd.Mid(1), szParams, "WorldScript( ConsoleString( ", " ))");
         return;
     }
@@ -360,8 +320,8 @@ void NConsole::Process(const char *pszCommand)
         }
         else if (bConsoleActive && commands[szCmd]) // another console commands
         {
-            if (bAllowCheats)
-                commands[szCmd](szParams);
+
+            commands[szCmd](szParams);
         }
         else // unknown command
             game << "Unknown command" << endl;
@@ -604,10 +564,7 @@ void NConsole::ProcessListVar(const CStringArray &szParams)
         return;
     }
     CPlayer *pPlayer;
-    if (IWorldConnector.IsLMP())
-        pPlayer = theWorld.GetPlayer()->GetPlayer();
-    else
-        pPlayer = theWorldServer.GetPlayer(atoi(szParams[0]));
+    pPlayer = theWorldServer.GetPlayer(atoi(szParams[0]));
     if (!pPlayer)
     {
         game << "Wrong player number" << endl;
@@ -751,31 +708,6 @@ void NConsole::ProcessGive(const CStringArray &szParams)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessJoin(const CStringArray &szParams)
-{
-    if (szParams.GetSize() != 1)
-    {
-        game << "Join has 1 parameter, server name" << endl;
-        return;
-    }
-    CParty crapSquad;
-    crapSquad.CreatePersonage("F", "Human Hero", "Hercules");
-    IWorldConnector.ReqConnectTcpAddress(szParams[0], crapSquad);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessServer(const CStringArray &szParams)
-{
-    if (szParams.GetSize() != 1)
-    {
-        game << "Join has 1 parameter, map name" << endl;
-        return;
-    }
-    game << "Starting up a server" << endl;
-    CParty crapSquad;
-    IWorldConnector.ReqStartLMPServer(szParams[0], crapSquad);
-    crapSquad.CreatePersonage("F", "Human Hero", "Serv");
-}
-/////////////////////////////////////////////////////////////////////////////////////
 extern void TypeMemoryUsage();
 void NConsole::ProcessMemUsage(const CStringArray &szParams)
 {
@@ -854,16 +786,8 @@ void NConsole::ProcessNet(const CStringArray &szParams)
         nShowClientTimeBalance = atoi(szParams[1]);
     if (szParams[0].CompareNoCase("zone") == 0)
     {
-        if (pChatClient->IsValid())
-        {
-            pChatClient->Command(CC_SELECT_ZONE, szParams[1]);
-        }
+
     }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessDisconnect(const CStringArray &szParams)
-{
-    IWorldConnector.ClientSideDisconnect();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void ProcOut(CStdioFile &file, const SAckEntryVector *pVector)
@@ -979,51 +903,6 @@ wrongpar:
     game << "Your age: 8192 days" << endl;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessPartyResend(const CStringArray &szParams)
-{
-    CPlayer *pPlayer = theWorldServer.GetPlayer(0);
-    if (pPlayer)
-        ((CPlayerServer *)pPlayer->GetPlayerSpecific())->ResendParty();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessKick(const CStringArray &szParams)
-{
-    if (szParams.GetSize() == 0 && pChatClient->IsValid())
-    {
-        if (pChatClient->pState->pPerson->bLeader)
-            theInterface.GetCurrentScreen()->SetKickMode(KM_KICK);
-        return;
-    }
-    if (szParams.GetSize() != 1 || szParams[0] == "")
-        return;
-    CString szName = szParams[0];
-    if (szName[0] == '"' && szName[szName.GetLength() - 1] == '"')
-    {
-        szName = szName.Mid(1, szName.GetLength() - 2);
-    }
-    if (pChatClient->IsValid())
-        pChatClient->Command(CC_KICK, szName);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessBan(const CStringArray &szParams)
-{
-    if (szParams.GetSize() == 0 && pChatClient->IsValid())
-    {
-        if (pChatClient->pState->pPerson->bLeader)
-            theInterface.GetCurrentScreen()->SetKickMode(KM_BAN);
-        return;
-    }
-    if (szParams.GetSize() != 1 || szParams[0] == "")
-        return;
-    CString szName = szParams[0];
-    if (szName[0] == '"' && szName[szName.GetLength() - 1] == '"')
-    {
-        szName = szName.Mid(1, szName.GetLength() - 2);
-    }
-    if (pChatClient->IsValid())
-        pChatClient->Command(CC_BAN, szName);
-}
-/////////////////////////////////////////////////////////////////////////////////////
 void NConsole::ProcessFPS(const CStringArray &szParams)
 {
     if (szParams.GetSize() < 1)
@@ -1035,31 +914,5 @@ void NConsole::ProcessFPS(const CStringArray &szParams)
         theInterface.ShowFPS(true);
     else if (szParams[0] == "0" || szParams[0] == "off")
         theInterface.ShowFPS(false);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessRate(const CStringArray &szParams)
-{
-    if (szParams.GetSize() != 1)
-    {
-        game << "Rate has one parameter - connection rate in bytes per second" << endl;
-        return;
-    }
-    int nRate = atoi(szParams[0]);
-    nRate = Max(500, nRate);
-    nRate = Min(100000, nRate);
-    NCSParams::nCSRate = nRate;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void NConsole::ProcessLocalRate(const CStringArray &szParams)
-{
-    if (szParams.GetSize() != 1)
-    {
-        game << "LocalRate has one parameter - connection rate in bytes per second" << endl;
-        return;
-    }
-    int nRate = atoi(szParams[0]);
-    nRate = Max(500, nRate);
-    nRate = Min(100000, nRate);
-    NCSParams::nCSLocalRate = nRate;
 }
 /////////////////////////////////////////////////////////////////////////////////////

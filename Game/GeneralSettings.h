@@ -31,7 +31,6 @@ private:
     CString szCameraSettings;           // camera section name
     CString szShadowSettings;           // shadow section name
     CString szPathSettings;             // path section name
-    CString szNetworkSettings;          // networking...
 public:
     // USER INDEPENDENT SETTINGS
     // path settings
@@ -165,8 +164,6 @@ public:
     CString szDefaultStreamingSound; // default streaming sound name
     float fpFogNightStartDistance;   // night fog distance
     float fpFogDayStartDistance;     // day fog distance
-    // network settings
-    CString szMasterServerName;
 
 public:
     SGeneralSettings();

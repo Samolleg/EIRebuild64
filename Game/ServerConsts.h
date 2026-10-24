@@ -139,23 +139,10 @@ enum EInterface
     IFACE_EXCHANGE
 };
 /////////////////////////////////////////////////////////////////////////////////////
-enum ELMPAllod
-{
-    LMPA_GIPAT,
-    LMPA_INGOS,
-    LMPA_SUSLANGER,
-    LMPA_RIK,
-    LMPA_NONE
-};
-/////////////////////////////////////////////////////////////////////////////////////
-// режимы оперирования сервера, от них зависит поведение сервера при
-// подключении новых игроков
 enum EServerMode
 {
     SERV_MODE_NONE,
     SERV_MODE_LOCAL,
-    SERV_MODE_LMP,
-    SERV_MODE_MMP,
     SERV_MODE_INTERFACE, // server is running zone for mainmenu etc
 };
 /////////////////////////////////////////////////////////////////////////////////////

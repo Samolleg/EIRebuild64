@@ -24,7 +24,6 @@ typedef BOOL (CPlayerServer::*fPlayerServerParser)();
 typedef unsigned ESPStatus;
 
 /////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////
 // ----------------------------- Server player
 // -------------------------------------------------------------
 class CPlayerServer : public CPlayerSpecific
@@ -142,7 +141,6 @@ public:
     void StartZoneLoading();
     void GainExperience(float fpExp);
     void GainExp(int nID, float fpExp);
-    void ResendParty();
     void Select(EPCSelectCmd cmd, int nID);
 
     virtual void AddItemsToHoover(CList<CItem *, CItem *> &newItems, bool bCrippled);
@@ -185,7 +183,6 @@ private:
     BOOL PrsFinishCamp();
     BOOL PrsGoZone();
     BOOL PrsBriefingComplete();
-    BOOL PrsClientParty();
     BOOL PrsZoneLoaded();
 public:
     virtual void Store(SaveSchema::Writer &) const;

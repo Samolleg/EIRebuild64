@@ -2040,7 +2040,7 @@ void CUnitClientSpecific::ClearAcks()
 bool CUnitClientSpecific::BeginPlayAck(SAckDescriptor &ack)
 {
     ModAudioPolicy::AckScope route(lpUnit ? unsigned(lpUnit->GetID()) : 0, ack.dwType,
-        ModRuntime::Current() && lpUnit && !IWorldConnector.IsLMP());
+        ModRuntime::Current() && lpUnit);
     DWORD dwTime = timeGetTime();
     if ((pLastAck == ack.pAck) && (dwTime - dwLastAckTime < 5000))
         return false;

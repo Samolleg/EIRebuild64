@@ -224,10 +224,6 @@ LINK32=xilink6.exe
 # PROP Default_Filter "cpp;c;cxx;rc;def;r;odl;idl;hpj;bat"
 # Begin Source File
 
-SOURCE=.\A3ServerDesc.cpp
-# End Source File
-# Begin Source File
-
 SOURCE=.\Base2D.cpp
 
 !IF  "$(CFG)" == "Game - Win32 Release with Debug"
@@ -340,10 +336,6 @@ SOURCE=.\Camera.cpp
 # End Source File
 # Begin Source File
 
-SOURCE=.\ChatServer.cpp
-# End Source File
-# Begin Source File
-
 SOURCE=.\ChunkFile.cpp
 # End Source File
 # Begin Source File
@@ -365,22 +357,6 @@ SOURCE=.\Console.cpp
 # Begin Source File
 
 SOURCE=.\Cruncher.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\Crypto.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\CSbase.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\CSlink.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\CSmain.cpp
 # End Source File
 # Begin Source File
 
@@ -556,23 +532,7 @@ SOURCE=.\Net.cpp
 # End Source File
 # Begin Source File
 
-SOURCE=.\NetChat.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\NetPacker.cpp
-# End Source File
-# Begin Source File
-
 SOURCE=.\NetProtocol.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\NetStream.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\NetTcp.cpp
 # End Source File
 # Begin Source File
 
@@ -851,10 +811,6 @@ SOURCE=.\ZoneExit.cpp
 # PROP Default_Filter "h;hpp;hxx;hm;inl"
 # Begin Source File
 
-SOURCE=.\A3ServerDesc.h
-# End Source File
-# Begin Source File
-
 SOURCE=.\AreaMap.h
 # End Source File
 # Begin Source File
@@ -903,10 +859,6 @@ SOURCE=.\Camera.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\ChatServer.h
-# End Source File
-# Begin Source File
-
 SOURCE=.\ChunkFile.h
 # End Source File
 # Begin Source File
@@ -936,22 +888,6 @@ SOURCE=.\copy_if.h
 # Begin Source File
 
 SOURCE=.\Cruncher.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\Crypto.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\CSbase.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\CSlink.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\CSmain.h
 # End Source File
 # Begin Source File
 
@@ -1083,23 +1019,7 @@ SOURCE=.\Net.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\NetChat.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\NetPacker.h
-# End Source File
-# Begin Source File
-
 SOURCE=.\NetProtocol.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\NetStream.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\NetTcp.h
 # End Source File
 # Begin Source File
 
@@ -1934,14 +1854,6 @@ SOURCE=.\FlyingHitPoints.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\I3DChat.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\I3DChat.h
-# End Source File
-# Begin Source File
-
 SOURCE=.\I3DConsole.cpp
 # End Source File
 # Begin Source File
@@ -2050,22 +1962,6 @@ SOURCE=.\I3DScreenCamp.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\I3DScreenChoosePers.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\I3DScreenChoosePers.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\I3DScreenConnection.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\I3DScreenConnection.h
-# End Source File
-# Begin Source File
-
 SOURCE=.\I3DScreenConstructor.cpp
 # End Source File
 # Begin Source File
@@ -2095,14 +1991,6 @@ SOURCE=.\I3DScreenEndGame.cpp
 # Begin Source File
 
 SOURCE=.\I3DScreenEndGame.h
-# End Source File
-# Begin Source File
-
-SOURCE=.\I3DScreenExchange.cpp
-# End Source File
-# Begin Source File
-
-SOURCE=.\I3DScreenExchange.h
 # End Source File
 # Begin Source File
 

@@ -28,7 +28,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "RandomGen.h"
 #include "ItemManager.h"
 #include "UnitDatabase.h"
-#include "ChatServer.h"
 /////////////////////////////////////////////////////////////////////////////////////
 // ----------------------------- Create/destroy
 // ------------------------------------------------------------
@@ -77,7 +76,6 @@ BOOL CPlayerServer::Create()
     parsers[PID_BRIEFING_DONE] = &CPlayerServer::PrsBriefingComplete;
     parsers[PID_CMD_AGGRESSION] = &CPlayerServer::PrsUnitCommandAggresion;
     parsers[PID_CMD_SWARM] = &CPlayerServer::PrsUnitCommandSwarm;
-    parsers[PID_CLIENT_PARTY] = &CPlayerServer::PrsClientParty;
     parsers[PID_ZONE_LOADED] = &CPlayerServer::PrsZoneLoaded;
 
     return TRUE;
@@ -146,17 +144,10 @@ void CPlayerServer::OnDisconnect()
         WantToRemoveParty(); // undeploy units of the player from server
         switch (theWorldServer.GetServerMode())
         {
-        case SERV_MODE_LMP:
-            SendParty();
-            break;
-        case SERV_MODE_MMP:
-            ASSERT(0);
-            break;
         default:
             break;
         }
         // SendServerChangeCmd( pszZone );
-        // theHat.SetParty( pPlayer->partyID, pPlayer->party );
     }
     if (status != PSS_LOGOUT)
     {
@@ -248,8 +239,7 @@ BOOL CPlayerServer::ParseIncomingPackets()
             prevPacketID = packetID;
             if (!pkt.Read(&packetID, 1))
                 break;
-            if (status == PSS_WAITING_FOR_LOGIN &&
-                (packetID != PID_LOGIN && packetID != PID_CLIENT_PARTY))
+            if (status == PSS_WAITING_FOR_LOGIN && packetID != PID_LOGIN)
                 break;
             // return FALSE;//ReportError( "Serv waiting for login but none arrived" );
             if (packetID < 0 || packetID >= parsers.GetSize())
@@ -630,16 +620,6 @@ BOOL CPlayerServer::SendVisibleUnitsList()
     }
     wpkt.Write(&dangerState, sizeof(dangerState));
     //
-    CScriptObjectGroup corpses;
-    if (IWorldConnector.IsLMP() && pPlayer->party.people.GetSize() == 1)
-        theWorldServer.GetCorpses(pPlayer->party.people[0].nID, corpses);
-    nSize = corpses.GetSize();
-    wpkt.Write(nSize);
-    for (i = 0; i < nSize; i++)
-    {
-        CUnit *pUnit = corpses.GetAt(i).GetUnit();
-        wpkt.Write(pUnit->GetID());
-    }
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -885,8 +865,7 @@ void CPlayerServer::LeaveToZone(const char *pszZone, int nZoneEntrance)
         if (!pMainHero || pMainHero->IsDead())
         {
             GameOver();
-            if (!IWorldConnector.IsLMP())
-                return;
+            return;
         }
     }
     WantToRemoveParty();
@@ -906,103 +885,17 @@ void CPlayerServer::LeaveToZone(const char *pszZone, int nZoneEntrance)
     case SERV_MODE_LOCAL:
         theHat.SetSinglePlayerParty(pPlayer->party);
         break;
-    case SERV_MODE_LMP:
-        if (pPlayer->party.people.GetSize() == 1)
-            pPlayer->party.people[0].nID = 1000011214; // its a CRAP for LMP, look WorldInterface
-        SendParty();
-        break;
     case SERV_MODE_INTERFACE:
     default:
         ASSERT(0);
         break;
-        // theHat.SetParty( pPlayer->partyID, pPlayer->party );
     }
     SendServerChangeCmd(pszZone, nZoneEntrance);
     SendUpdate();
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
-void CPlayerServer::ResendParty()
-{
-    if (status != PSS_ACTIVE)
-        return;
-    if (bPartyDeployed)
-    {
-        NConsole::net << "Resending party of player " << pPlayer->GetPlayerNumber() << endl;
-        theWorldServer.FakeRemoveParty(pPlayer);
-        SendParty();
-        theWorldServer.FakeDeployParty(pPlayer);
-    }
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerServer::GameOver()
 {
-    if (IWorldConnector.IsLMP())
-    {
-        int nNewID, nWasID;
-        if (pPlayer->party.people.GetSize() == 1)
-        {
-            DWORD dwMoney = Float2Int(pPlayer->party.nMoney * theAIGeneralSettings.fpLMPLostMoney);
-            pPlayer->party.nMoney -= dwMoney;
-            int nID = pPlayer->party.people[0].nID;
-            nWasID = nID;
-            CUnit *pUnit = theWorldServer.GetUnit(nID);
-            if (pUnit)
-            {
-                SendFailure(pUnit, ACK_CLEAR);
-            }
-            if (nID < 1001000000)
-                nID += 1000000;
-            while (theWorldServer.GetMapObject(nID))
-                nID++;
-            nNewID = nID;
-            theWorldServer.AddCorpse(nWasID, nWasID, dwMoney, pPlayer->items);
-            pPlayer->RemoveAllHoover();
-        }
-        WantToRemoveParty();
-        // heal pers
-        if (pPlayer->party.people.GetSize() == 1)
-        {
-            pPlayer->party.people[0].nID = nNewID;
-            SRPGUnitStats &stats = pPlayer->party.people[0].stats;
-            stats.ResurrectAll(); // CRAP
-            // минус "несгораемая" экспа
-            float fRealExp = stats.GetRealExp();
-            const SUDBNPCPrototype *pNPC = theUnitDatabase
-                                               .npcs[pPlayer->party.people[0].szPrototype];
-            if (pNPC)
-                fRealExp = Max(0.0f, fRealExp - pNPC->fExpToDistribute);
-            stats.AddExpPenalty(fRealExp * theAIGeneralSettings.fpLMPLostXP);
-            //
-        }
-        else
-            ASSERT(0);
-        SendParty();
-        cameraCP.z = -1313; // он подал знак
-        WantToDeployParty();
-        // keep visible corpses set and add new corpse
-        {
-            CUnit *pNew = theWorldServer.GetUnit(nNewID);
-            CUnit *pWas = theWorldServer.GetUnit(nWasID);
-            if (pNew && pWas)
-            {
-                CMapObjectPtrList &p = ((CUnitServer *)pWas->GetUnitSpecific())
-                                           ->logic.environment.seenCorpses;
-                CMapObjectPtrList &r = ((CUnitServer *)pNew->GetUnitSpecific())
-                                           ->logic.environment.seenCorpses;
-                for (POSITION pos = p.GetHeadPosition(); pos;)
-                {
-                    CUnit *pUnit = (CUnit *)p.GetNext(pos);
-                    if (!pUnit || pUnit->WhoAmI() != HPC_UNIT)
-                        continue;
-                    if (r.Find(pUnit) == 0)
-                        r.AddTail(pUnit);
-                }
-                if (r.Find(pWas) == 0)
-                    r.AddTail(pWas);
-            }
-        }
-    }
-    else
     {
         wpkt.Write(PID_GAMEOVER);
         int nID = pPlayer->party.people[0].nID;
@@ -1053,17 +946,6 @@ BOOL CPlayerServer::PrsLogin()
     // Search for requested party
     switch (theWorldServer.GetServerMode())
     {
-    case SERV_MODE_MMP:
-        if (!theHat.GetParty(loginInfo.pszUser, loginInfo.pszPassword, pPlayer->partyID,
-                             pPlayer->party))
-            return FALSE;
-        break;
-    case SERV_MODE_LMP:
-        // client_party msg from client should preceed this!
-        if (!theHat.GetParty(loginInfo.pszUser, loginInfo.pszPassword, pPlayer->partyID,
-                             pPlayer->party))
-            return FALSE;
-        break;
     case SERV_MODE_LOCAL:
         theHat.GetSinglePlayerParty(pPlayer->party);
         pPlayer->party.AutoAvailableZones();
@@ -1106,15 +988,7 @@ BOOL CPlayerServer::PrsCombatPause()
 {
     char cPause;
     pkt.Read(cPause);
-    if (IWorldConnector.IsLMP() && pChatServer->IsValid() && cPause)
-    {
-        int nServerID = pChatServer->GetLeaderServerID();
-        if (pPlayer->party.people[0].nID != nServerID)
-            return TRUE;
-        CChatPerson *pLeader = pChatServer->GetPerson(nServerID);
-        if (pLeader->IsValid())
-            pChatServer->Inform(CMS_PAUSEDBY, pLeader->szName.c_str());
-    }
+
     GetWorldServer()->RequestCombatPause(cPause != 0);
     return TRUE;
 }
@@ -1508,28 +1382,7 @@ BOOL CPlayerServer::PrsBriefingComplete()
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 // for local mp only, very vulnurable in all respects
-BOOL CPlayerServer::PrsClientParty()
-{
-    CParty party;
-    party.Load(pkt);
-    ASSERT(party.people.GetSize() == 1);
-    if (party.people.GetSize() != 1)
-        return FALSE;
-    // choose partyID, unit IDs
-    theHat.GetUnusedPartyID(pPlayer->partyID);
-    static int nUnitID = 1000000013;
-    for (;; nUnitID++)
-    {
-        if (!theWorldServer.GetMapObject(nUnitID))
-        {
-            party.people[0].nID = nUnitID++;
-            break;
-        }
-    }
-    // store created party to hat
-    theHat.SetParty(pPlayer->partyID, party);
-    return TRUE;
-}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerServer::PrsZoneLoaded()
 {

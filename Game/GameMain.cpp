@@ -59,7 +59,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PlayerClient.h"
 #include "IniFile.h"
 #include "2DScreenWait.h"
-#include "ChatServer.h"
 #include "DebugAlloc.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
@@ -71,7 +70,6 @@ static const char LOCAL_FILE[] = __FILE__;
 // #define USE_SETTINGS_INI 1
 /*#define DONT_DISPLAY_DEBUG_IDS
 #define DONT_USE_SETTINGS_INI 1*/
-/////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 static inline double GetI64(const ULARGE_INTEGER *t)
 {
@@ -442,7 +440,6 @@ BOOL NGame::LoadGame()
             return ReportError("Can't load map \"%s\".\n", szTerrainFileName);
         theWorldServer.StartServer(SERV_MODE_LOCAL);
         theWorld.ConnectLocal(theWorldServer.GetLocalNetDriver());
-        theWorld.GetPlayer()->SetSendParty(false);
         theWorldServer.curInterface = IFACE_DEBUG;
         if (!szScriptFileName.IsEmpty())
         {
@@ -495,9 +492,6 @@ static bool CountTime()
     //
     if (theWorld.IsFailedConnection())
     {
-        if (IWorldConnector.IsLMP())
-            IWorldConnector.LMPFinishOnTcpDisconnect();
-        else
         {
             ASSERT(0);
             // MessageBox( NULL, "Client side connection lost", "ERROR", MB_OK | MB_ICONERROR );
@@ -507,8 +501,6 @@ static bool CountTime()
     // calc general timestep
     if (dwTimeStep > 0x80000000)
         dwTimeStep = 0;
-    // LMP time elapsed
-    LMPTimePassed();
     // limit maximal passed time
     if (dwTimeStep > DW_SEGMENT_TIME * 5)
         dwTimeStep = DW_SEGMENT_TIME * 5;
@@ -534,7 +526,6 @@ static bool CountTime()
             if (!theWorldServer.Segment())
                 return true;
             dwPassedTime -= DW_SEGMENT_TIME;
-            LMPTimePassed();
         }
 
         if (dwClientPassedTime >= DW_SEGMENT_TIME)
@@ -545,7 +536,6 @@ static bool CountTime()
                 if (!theWorld.Segment())
                     return true;
                 dwClientPassedTime -= DW_SEGMENT_TIME;
-                LMPTimePassed();
             }
         }
 
@@ -980,7 +970,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     struct JournalEnd { ~JournalEnd() { CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
     try { SettingsProfile::Initialize();
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
-        NConsole::InitializeNetworkSettings(); if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
+        if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
     catch(const std::exception&e){ GameJournal::AllocationFailureInCatch("GameMain");EngineDiagnostics::Caught(e.what());return BAD_RESULT;}
     if (!ModRuntime::Current())
     {

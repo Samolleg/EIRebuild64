@@ -67,7 +67,6 @@
   <ItemGroup>
     <ClCompile Include="Game\2DScreenWait.cpp" />
     <ClCompile Include="Game\A3Cursor.cpp" />
-    <ClCompile Include="Game\A3ServerDesc.cpp" />
     <ClCompile Include="Game\AckDatabase.cpp" />
     <ClCompile Include="Game\ackFormat.cpp" />
     <ClCompile Include="Game\aiAck.cpp" />
@@ -96,7 +95,6 @@
     <ClCompile Include="Game\Camera.cpp" />
     <ClCompile Include="Game\CameraTerrainCollision.cpp" />
     <ClCompile Include="Game\ItemApproachCatalog.cpp" />
-    <ClCompile Include="Game\ChatServer.cpp" />
     <ClCompile Include="Game\ChunkFile.cpp" />
     <ClCompile Include="Game\ClientSpecificManager.cpp" />
     <ClCompile Include="Game\CMappedResource.cpp" />
@@ -105,10 +103,6 @@
     <ClCompile Include="Game\Console.cpp" />
     <ClCompile Include="Game\CResourceBase.cpp" />
     <ClCompile Include="Game\Cruncher.cpp" />
-    <ClCompile Include="Game\Crypto.cpp" />
-    <ClCompile Include="Game\CSbase.cpp" />
-    <ClCompile Include="Game\CSlink.cpp" />
-    <ClCompile Include="Game\CSmain.cpp" />
     <ClCompile Include="Game\DebugAlloc.cpp" />
     <ClCompile Include="Game\DebugInfoSystem.cpp" />
     <ClCompile Include="Game\dx11\ConstantBuffer.cpp" />
@@ -175,7 +169,6 @@
     <ClCompile Include="Game\GraphicsProcessorMMX.cpp" />
     <ClCompile Include="Game\GSVars.cpp" />
     <ClCompile Include="Game\Hoover.cpp" />
-    <ClCompile Include="Game\I3DChat.cpp" />
     <ClCompile Include="Game\I3DConsole.cpp" />
     <ClCompile Include="Game\I3DCursor.cpp" />
     <ClCompile Include="Game\I3DEffects.cpp" />
@@ -188,13 +181,10 @@
     <ClCompile Include="Game\I3DScreen.cpp" />
     <ClCompile Include="Game\I3DScreenBase.cpp" />
     <ClCompile Include="Game\I3DScreenCamp.cpp" />
-    <ClCompile Include="Game\I3DScreenChoosePers.cpp" />
-    <ClCompile Include="Game\I3DScreenConnection.cpp" />
     <ClCompile Include="Game\I3DScreenConstructor.cpp" />
     <ClCompile Include="Game\I3DScreenDebug.cpp" />
     <ClCompile Include="Game\I3DScreenEcsapeMenu.cpp" />
     <ClCompile Include="Game\I3DScreenEndGame.cpp" />
-    <ClCompile Include="Game\I3DScreenExchange.cpp" />
     <ClCompile Include="Game\I3DScreenGlobalMap.cpp" />
     <ClCompile Include="Game\I3DScreenMainMenu.cpp" />
     <ClCompile Include="Game\I3DScreenMessageBox.cpp" />
@@ -232,11 +222,7 @@
     <ClCompile Include="Game\MEUnitStats.cpp" />
     <ClCompile Include="Game\MusicSystem.cpp" />
     <ClCompile Include="Game\Net.cpp" />
-    <ClCompile Include="Game\NetChat.cpp" />
-    <ClCompile Include="Game\NetPacker.cpp" />
     <ClCompile Include="Game\NetProtocol.cpp" />
-    <ClCompile Include="Game\NetStream.cpp" />
-    <ClCompile Include="Game\NetTcp.cpp" />
     <ClCompile Include="Game\NetUpdate.cpp" />
     <ClCompile Include="Game\Notification.cpp" />
     <ClCompile Include="Game\Object.cpp" />
@@ -332,7 +318,6 @@
   <ItemGroup>
     <ClInclude Include="Game\2DScreenWait.h" />
     <ClInclude Include="Game\A3Cursor.h" />
-    <ClInclude Include="Game\A3ServerDesc.h" />
     <ClInclude Include="Game\AckDatabase.h" />
     <ClInclude Include="Game\ackFormat.h" />
     <ClInclude Include="Game\adFormat.h" />
@@ -364,7 +349,6 @@
     <ClInclude Include="Game\Camera.h" />
     <ClInclude Include="Game\CameraTerrainCollision.h" />
     <ClInclude Include="Game\ItemApproachCatalog.h" />
-    <ClInclude Include="Game\ChatServer.h" />
     <ClInclude Include="Game\ChunkFile.h" />
     <ClInclude Include="Game\ClassIDs.h" />
     <ClInclude Include="Game\ClientSpecificManager.h" />
@@ -374,10 +358,6 @@
     <ClInclude Include="Game\Console.h" />
     <ClInclude Include="Game\CResourceBase.h" />
     <ClInclude Include="Game\Cruncher.h" />
-    <ClInclude Include="Game\Crypto.h" />
-    <ClInclude Include="Game\CSbase.h" />
-    <ClInclude Include="Game\CSlink.h" />
-    <ClInclude Include="Game\CSmain.h" />
     <ClInclude Include="Game\Database.h" />
     <ClInclude Include="Game\DebugAlloc.h" />
     <ClInclude Include="Game\DebugInfoSystem.h" />
@@ -417,7 +397,6 @@
     <ClInclude Include="Game\GSVars.h" />
     <ClInclude Include="Game\HashMap.h" />
     <ClInclude Include="Game\Hoover.h" />
-    <ClInclude Include="Game\I3DChat.h" />
     <ClInclude Include="Game\I3DConsole.h" />
     <ClInclude Include="Game\I3DCursor.h" />
     <ClInclude Include="Game\I3DEffects.h" />
@@ -431,13 +410,10 @@
     <ClInclude Include="Game\I3DScreen.h" />
     <ClInclude Include="Game\I3DScreenBase.h" />
     <ClInclude Include="Game\I3DScreenCamp.h" />
-    <ClInclude Include="Game\I3DScreenChoosePers.h" />
-    <ClInclude Include="Game\I3DScreenConnection.h" />
     <ClInclude Include="Game\I3DScreenConstructor.h" />
     <ClInclude Include="Game\I3DScreenDebug.h" />
     <ClInclude Include="Game\I3DScreenEcsapeMenu.h" />
     <ClInclude Include="Game\I3DScreenEndGame.h" />
-    <ClInclude Include="Game\I3DScreenExchange.h" />
     <ClInclude Include="Game\I3DScreenGlobalMap.h" />
     <ClInclude Include="Game\I3DScreenMainMenu.h" />
     <ClInclude Include="Game\I3DScreenMessageBox.h" />
@@ -480,11 +456,7 @@
     <ClInclude Include="Game\mm_malloc.h" />
     <ClInclude Include="Game\MusicSystem.h" />
     <ClInclude Include="Game\Net.h" />
-    <ClInclude Include="Game\NetChat.h" />
-    <ClInclude Include="Game\NetPacker.h" />
     <ClInclude Include="Game\NetProtocol.h" />
-    <ClInclude Include="Game\NetStream.h" />
-    <ClInclude Include="Game\NetTcp.h" />
     <ClInclude Include="Game\NetUpdate.h" />
     <ClInclude Include="Game\Notification.h" />
     <ClInclude Include="Game\Object.h" />

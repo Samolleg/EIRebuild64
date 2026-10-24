@@ -6,7 +6,6 @@
 #include <string>
 #include <strstream>
 #include <windows.h>
-#include <winsock.h>
 
 // Fuckin' windows.h
 #ifdef GetObject

@@ -7,14 +7,6 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Net.h"
 
-#ifdef __GAME__
-#include "NetChat.h"
-#else
-class CChatNetDriver : public CObjectBase
-{
-    OBJECT_BASIC_METHODS(CChatNetDriver);
-};
-#endif
 
 #include "PlayerManager.h"
 #include "FigureManager.h"
@@ -166,16 +158,6 @@ BOOL CWorldBase::Create()
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CWorldBase::StartNetDrivers()
-{
-    pChatDriver = dbgnew CChatNetDriver;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldBase::StopNetDrivers()
-{
-    pChatDriver = 0;
-}
-/////////////////////////////////////////////////////////////////////////////////////
 // destroy all internal data structures
 void CWorldBase::Destroy()
 {
@@ -203,7 +185,6 @@ void CWorldBase::Destroy()
     }
     // network connections deinitialization
     pNetDriver = 0;
-    pChatDriver = 0;
 
     // data managers destruction
     // delete map object manager

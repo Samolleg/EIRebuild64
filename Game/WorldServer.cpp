@@ -53,8 +53,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Console.h"
 #include "SpellManager.h"
 #include "SimpleCryptographer.h"
-#include "NetChat.h"
-#include "ChatServer.h"
 #include "GameMain.h"
 #include "ModAnimationIdSave.h"
 #include <vector>
@@ -191,16 +189,7 @@ void CWorldServer::BindSavedCampParty(CParty &party) noexcept
 {
     fieldCamp->commerceVars=fieldCamp->commerce?&party.vars:nullptr;
 }
-void CWorldServer::SCorpseItems::Store(CSave &file)
-{
-    file.Write(nID);
-    file.Write(nCanLootBy);
-    file.Write(dwMoney);
-    int n = items.GetSize();
-    file.Write(n);
-    for (int i = 0; i < n; i++)
-        file.Write(items[i]->GetID());
-}
+
 static void SynchronizeFieldCampItemEnergy(CUnitServer &unitServer, CItem *item) {
     if (!item || !item->GetUserData() || !item->GetSpell(0)) return;
     const float mp = item->GetMP();
@@ -219,24 +208,6 @@ static void SynchronizeFieldCampUnitEnergy(CUnit *unit) {
         SynchronizeFieldCampItemEnergy(unitServer, unit->GetQItem(i));
     for (int i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
         SynchronizeFieldCampItemEnergy(unitServer, unit->GetQArmor(i));
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::SCorpseItems::Load(CSave &file)
-{
-    int n;
-    file.Read(nID);
-    file.Read(nCanLootBy);
-    file.Read(dwMoney);
-    file.Read(n);
-    for (int i = 0; i < n; i++)
-    {
-        int nID;
-        file.Read(nID);
-        CItem *pItem = (CItem *)theWorldServer.GetItemManager()->Find(nID);
-        ASSERT(pItem);
-        if (pItem)
-            items.Add(pItem);
-    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // -------------------------------- Create/destroy
@@ -352,7 +323,6 @@ void CWorldServer::RemoveEffects()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RemoveEverything()
 {
-    LMPCorpses.RemoveAll();
     szLoadedMobs.RemoveAll();
     waterLevels.Clear();
     // remove exits from zone
@@ -601,11 +571,7 @@ BOOL CWorldServer::UpdatePlayer(CPlayer *pPl)
         pPlServ->AddEffects(toAdd);
         pPlServ->UpdateEffects(toUpdate);
 
-        if (curInterface == IFACE_MISSION && IWorldConnector.IsLMP())
-        {
-            if (--pPlServ->nStorePartyCounter <= 0 && pPlServ->dangerState == WDS_NORMAL)
-                pPlServ->ResendParty();
-        }
+
 
         // send changed items mana
         /*
@@ -1014,18 +980,14 @@ void CWorldServer::NetDriverSegment(CLowLevelNetDriver *pDriver)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::StartServer(EServerMode mode)
 {
-    GameJournal::Event("SESSION", "role", "server_mode=%d role=%s", int(mode), mode == SERV_MODE_LOCAL ? "single" : mode == SERV_MODE_LMP ? "server" : mode == SERV_MODE_MMP ? "multiplayer" : "interface");
+    GameJournal::Event("SESSION", "role", "server_mode=%d role=%s", int(mode), mode == SERV_MODE_LOCAL ? "single" : "interface");
     ASSERT(GetPlayerManager()->GetNumElements() == 0);
     ASSERT(serverMode == SERV_MODE_NONE);
     ASSERT(mode != SERV_MODE_NONE);
     if (serverMode != SERV_MODE_NONE)
         return;
     serverMode = mode;
-    if (mode == SERV_MODE_LMP || mode == SERV_MODE_MMP)
-    {
-        StartNetDrivers();
-        pChatDriver->StartServer();
-    }
+
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::WorldSegment(bool bForceScriptRun)
@@ -1127,13 +1089,7 @@ BOOL CWorldServer::Segment()
         pNetDriver->Segment();
         NetDriverSegment(pNetDriver);
     }
-    if (pChatDriver)
-    {
-        // ASSERT( pChatServer->IsValid() );
-        if (pChatServer->IsValid())
-            pChatDriver->Segment(pChatServer);
-        NetDriverSegment(pChatDriver);
-    }
+
     coreNetwork.Finish();
     // world processing
     if (!IsCombatPause())
@@ -1597,7 +1553,6 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
             szTemp.Format("AddObject( Heroes, GetObjectByID( \"%i\" ) )", pUnit->GetID());
             szAddToScript += szTemp;
             //
-            // if ( bFirstDeploy && GetServerMode() != SERV_MODE_LMP )
             // pUnit->LowSetPoses( UP_LAY, UP_LAY );
             if (curInterface == IFACE_MISSION)
             {
@@ -1637,7 +1592,7 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
             }
         }
     }
-    if (bFirstDeploy && GetServerMode() != SERV_MODE_LMP)
+    if (bFirstDeploy)
         szAddToScript +=
             //		"BlockUnit(GetObjectByName( \"hero\" ),1)"
             "PlayAnimation(GetObjectByName( \"hero\" ),\"uspecial25\")"
@@ -1768,7 +1723,7 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
                                                  pUnit->GetOrientation(), pUnit->GetShowPose(),
                                                  pUnit->GetCurrentWeaponSlotIndex()));
             }
-            if (!pUnit->IsDead() || IWorldConnector.IsLMP())
+            if (!pUnit->IsDead())
             {
                 while (pers.armors.GetSize())
                     pers.RemoveArmor(pers.armors[0]);
@@ -1818,7 +1773,6 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
                 }
                 pers.aggression = pUnit->GetAggression();
                 //
-                // if ( IWorldConnector.IsLMP() )
                 pers.stats.ResurrectAll();
             }
             if (!pUnit->IsDead())
@@ -1880,7 +1834,7 @@ void CWorldServer::SelectQuestItems(CSimplyArray<CItem *, CItem *> &wagon,
             CItemQuest *pItem = (CItemQuest *)wagon[k];
             const SIDBQuestItemShape *pShape = (const SIDBQuestItemShape *)pItem->GetShapeEntry();
             bool bTake = false;
-            if (curInterface == IFACE_MISSION && !IWorldConnector.IsLMP())
+            if (curInterface == IFACE_MISSION)
             {
                 if (pShape)
                 {
@@ -1923,14 +1877,7 @@ void CWorldServer::DeployPlayerItems(CPlayer *pPlayer)
     CList<CItem *, CItem *> questItems;
     if (curInterface == IFACE_GLOBAL_MAP)
         return;
-    if (IWorldConnector.IsLMP())
-    {
-        for (int i = 0; i < pPlayer->party.allWagonItems.GetSize(); i++)
-            questItems.AddTail(pPlayer->party.allWagonItems[i]);
-        pPlayer->party.allWagonItems.RemoveAll();
-    }
-    else
-        SelectQuestItems(pPlayer->party.allWagonItems, questItems);
+    SelectQuestItems(pPlayer->party.allWagonItems, questItems);
     DeployHooverItems(pPlayer, questItems);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1959,11 +1906,7 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
         pers.Add(&pPlayer->party.people[i]);
 
     // mark current zone for local parties
-    if (GetServerMode() == SERV_MODE_LMP)
-    {
-        pPlayer->party.szCurrentZone = szCurrentZoneName;
-        pPlayer->party.nEntrance = 0;
-    }
+
     // determine deploy place
     CPlot3D ptPlace = CPlot3D(0, 0, 0);
     float fAngle = 0, fPersAngle;
@@ -2040,101 +1983,13 @@ void CWorldServer::RemovePlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo)
         CPersonage &pers = pPlayer->party.people[i];
         CUnit *pUnit = GetUnit(pers.nID);
         ASSERT(pUnit);
-        if (!pUnit || (pUnit->IsDead() && !IWorldConnector.IsLMP()))
+        if (!pUnit || (pUnit->IsDead()))
             pPlayer->party.people.RemoveAt(i--);
     }
     for (i = 0; i < pPlayer->party.people.GetSize(); i++)
         pers.Add(&pPlayer->party.people[i]);
     // get items and stats from alive ones
     RemovePersonages(pers, &pPlayer->party, pInfo);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::FakeRemoveParty(CPlayer *pPlayer)
-{
-    int i, k;
-    ASSERT(IWorldConnector.IsLMP());
-    // "remove" player items (but not really removing them from server, just copying
-    // RemovePlayerItems( pPlayer );
-    for (POSITION pos = pPlayer->items.GetHeadPosition(); pos;)
-    {
-        CItem *pItem = pPlayer->items.GetNext(pos);
-        pPlayer->party.AddItemToWagon(pItem, true);
-    }
-
-    // copy items people are wearing
-    CPersonages people;
-    for (i = 0; i < pPlayer->party.people.GetSize(); i++)
-        people.Add(&pPlayer->party.people[i]);
-    CParty *pParty = &pPlayer->party;
-    for (i = 0; i < people.GetSize(); i++)
-    {
-        CPersonage &pers = *people[i];
-        CUnit *pUnit = GetUnit(pers.nID);
-        ASSERT(pUnit);
-        if (pUnit)
-        {
-            CUnitServer *pUS = (CUnitServer *)pUnit->GetUnitSpecific();
-            if (!pUnit->IsDead())
-            {
-                while (pers.armors.GetSize())
-                    pers.RemoveArmor(pers.armors[0]);
-                while (pers.weapons.GetSize())
-                    pers.RemoveWeapon(pers.weapons[0]);
-                while (pers.spells.GetSize())
-                    pers.RemoveSpell(pers.spells[0]);
-                while (pers.items.GetSize())
-                    pers.RemoveQuick(pers.items[0]);
-                for (k = 0; k < QI_MAX_WEAPONS; k++)
-                {
-                    CItemWeapon *pWeapon = pUnit->GetQWeapon(k);
-                    if (pWeapon)
-                    {
-                        CItem *pSrc = pers.AddWeapon(
-                            CSmartPtr<CItemWeapon>((CItemWeapon *)pParty->DuplicateItem(pWeapon)));
-                        UpdateItemSrc(pWeapon, pSrc);
-                    }
-                }
-                for (k = 0; k < RPG_NUM_ARMOR_TYPES; k++)
-                {
-                    CItemArmor *pItem = pUnit->GetQArmor(k);
-                    if (pItem)
-                    {
-                        CItem *pSrc = pers.AddArmor(
-                            CSmartPtr<CItemArmor>((CItemArmor *)pParty->DuplicateItem(pItem)));
-                        UpdateItemSrc(pItem, pSrc);
-                    }
-                }
-                for (k = 0; k < QI_MAX_ITEMS; k++)
-                {
-                    CItemQuick *pItem = pUnit->GetQItem(k);
-                    if (pItem && pItem->GetCount() > 0)
-                    {
-                        CItem *pDup = pParty->DuplicateItem(pItem);
-                        pDup->SetCount(pItem->GetCount());
-                        CItem *pSrc = pers.AddQuick(CSmartPtr<CItemQuick>((CItemQuick *)pDup));
-                        UpdateItemSrc(pItem, pSrc);
-                    }
-                }
-                for (k = 0; k < QI_MAX_SPELLS; k++)
-                {
-                    CItemSpell *pItem = pUnit->GetQSpellItem(k);
-                    if (pItem)
-                        pers.AddSpell(
-                            CSmartPtr<CItemSpell>((CItemSpell *)pParty->DuplicateItem(pItem)));
-                }
-                pUS->GetRPGStats(&pers.stats);
-            }
-        }
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::FakeDeployParty(CPlayer *pPlayer)
-{
-    // DeployPlayerItems( pPlayer );
-    CParty &wagon = pPlayer->party;
-    // clear wagon (as it should be because copies of items were created during FakeRemoveParty()
-    while (wagon.allWagonItems.GetSize())
-        wagon.RemoveItemFromWagon(wagon.allWagonItems[0], true);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // using easiest path to create unit - via CParty
@@ -2149,93 +2004,12 @@ void CWorldServer::AddPersonage(int nID, const char *pszPrototype, const char *p
     DeployPersonages(0, pers, ptPlace, QNULL);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-struct SUnitExp
-{
-    CUnitServer *pUS;
-    float fpExp;
-    //
-    SUnitExp() = default;
-    SUnitExp(CUnit *pUnit)
-    {
-        pUS = (CUnitServer *)pUnit->GetUnitSpecific();
-        fpExp = 0;
-    }
-};
-// раздать экспириенс всем заслуживающим
 void CWorldServer::GainExperience(CPlayer *pPlayer, float fpExp)
 {
     if (fpExp == 0)
         return;
     if (!pPlayer)
-    {
-        POSITION pos;
-        // распределение XP (только дл€ LMP)
-        int nDiv = GetPlayerManager()->GetNumElements();
-        if (nDiv == 0)
-            return;
-        float fpTotalExp = 0;
-        CList<SUnitExp> units;
-        //
-        CPlayerIterator playerIter;
-        // тупой способ дл€ подсчЄта total exp...
-        pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
-        for (; pPlayer; pPlayer = playerIter.GetNext())
-        {
-            CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
-            if (!pPS)
-                continue;
-            if (pPlayer->party.people.GetSize() == 1)
-            {
-                CUnit *pUnit = GetUnit(pPlayer->party.people[0].nID);
-                ASSERT(pUnit);
-                if (pUnit && pUnit->GetUnitSpecific())
-                {
-                    units.AddTail(SUnitExp(pUnit));
-                    fpTotalExp += sqrt(units.GetTail().pUS->GetRPGStats()->GetRealExp());
-                }
-            }
-        }
-        // а теперь раздадим плюшки
-        fpTotalExp = Max(fpTotalExp, 0.01f);
-        for (pos = units.GetHeadPosition(); pos;)
-        {
-            SUnitExp &ue = units.GetNext(pos);
-            ue.fpExp = ModRuntime::Current() ? ModRuntime::Current()->DistributeExperience(fpExp,nDiv)
-                : fpExp * sqrt(ue.pUS->GetRPGStats()->GetRealExp()) / fpTotalExp;
-            ue.pUS->GainExperience(ue.fpExp);
-        }
-        // запишем розданную exp в партию
-        pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
-        pos = units.GetHeadPosition();
-        for (; pPlayer; pPlayer = playerIter.GetNext())
-        {
-            CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
-            if (!pPS)
-                continue;
-            if (pPlayer->party.people.GetSize() == 1)
-            {
-                CUnit *pUnit = GetUnit(pPlayer->party.people[0].nID);
-                ASSERT(pUnit);
-                if (pUnit && pUnit->GetUnitSpecific())
-                    pPlayer->party.people[0].stats.GainExperience(units.GetNext(pos).fpExp);
-            }
-        }
-        // запишем розданную exp на рассылку
-        pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
-        for (; pPlayer; pPlayer = playerIter.GetNext())
-        {
-            CPlayerServer *pPS = (CPlayerServer *)pPlayer->GetPlayerSpecific();
-            if (!pPS)
-                continue;
-            for (pos = units.GetHeadPosition(); pos;)
-            {
-                SUnitExp &ue = units.GetNext(pos);
-                pPS->GainExp(ue.pUS->GetUnit()->GetID(), ue.fpExp);
-            }
-        }
-
         return;
-    }
     CParty &people = pPlayer->party;
     CArray<int, int> dudes;
     CUnitPtrHashIterator unitIter;
@@ -2497,16 +2271,7 @@ void CWorldServer::OnBriefingCompleteMercs(CPlayer *pPlayer, const char *pszBrie
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::BriefingComplete(int nPlayer, const char *pszBriefing)
 {
-    if (IWorldConnector.IsLMP())
-    {
-        CStringArray szParts;
-        NStrProc::SplitString(pszBriefing, szParts, '.');
-        if (szParts.GetSize() == 3)
-        {
-            IWorldConnector.LMPBriefingComplete(szParts[2]);
-        }
-        return;
-    }
+
     CStringArray szParts;
     const SQDBBriefing *pBrief = 0;
     NStrProc::SplitString(pszBriefing, szParts, '.');
@@ -3274,51 +3039,13 @@ bool CWorldServer::HooverUnit(CUnit *pVictim, CPlayer *pWho)
     if (pVictim->IsHero() && !pVictim->IsDead())
         return false;
     if (pVictim->CheckFlag(UNIT_LOOT_LOCKED))
-    {
-        for (pos = LMPCorpses.GetHeadPosition(); pos;)
-        {
-            POSITION delPos = pos;
-            SCorpseItems &it = LMPCorpses.GetNext(pos);
-            if (it.nID == pVictim->GetID())
-            {
-                for (int i = 0; i < it.items.GetSize(); i++)
-                    hooveredItems.AddTail(it.items[i]);
-                pWho->party.nMoney += it.dwMoney;
-                pWho->AddItemsToHoover(hooveredItems);
-                LMPCorpses.RemoveAt(delPos);
-                return true;
-            }
-        }
-        // no corpse info found
-        ASSERT(0);
         return false;
-    }
+
     if (pHoover->Hoover(this, pVictim, hooveredItems, newItems, newSpells, nMoney))
     {
         pHoover->HooverCarriedLoot(this, pVictim, hooveredItems, newItems, nMoney);
         // в случае мп квестовые итема идут лидеру
-        if (IWorldConnector.IsLMP())
-        {
-            CPlayer *pLeader = GetPlayer(0);
-            if (pLeader)
-            {
-                CList<CItem *, CItem *> leaderQuest;
-                for (pos = hooveredItems.GetHeadPosition(); pos;)
-                {
-                    POSITION delPos = pos;
-                    CItem *pItem = hooveredItems.GetNext(pos);
-                    if (pItem->WhoAmI() == HPC_ITEM_QUEST)
-                    {
-                        leaderQuest.AddTail(pItem);
-                        hooveredItems.RemoveAt(delPos);
-                    }
-                }
-                if (leaderQuest.GetCount() > 0)
-                    pLeader->AddItemsToHoover(leaderQuest);
-                for (pos = leaderQuest.GetHeadPosition(); pos;)
-                    leaderQuest.GetNext(pos)->Release();
-            }
-        }
+
         // here some items can be added to inventory of some units
         // update hoover of pWho
         pWho->party.nMoney += nMoney;
@@ -3333,13 +3060,12 @@ bool CWorldServer::HooverUnit(CUnit *pVictim, CPlayer *pWho)
 bool CWorldServer::HooverUnitAddon(CUnit *victim,CPlayer *player,CUnitServer *unitServer,bool loot)
 {
  if(!victim||!player||!unitServer||(victim->IsHero()&&!victim->IsDead())) return false;
- if(victim->CheckFlag(UNIT_LOOT_LOCKED)) return HooverUnit(victim,player);
+
  int money=0; POSITION pos; CList<CItem*,CItem*> items,newItems; CList<CSpell*,CSpell*> newSpells;
  if(loot&&!victim->CheckFlag(UNIT_ALREADY_HOOVER))
  {
   pHoover->HooverAddon(this,victim,items,newItems,newSpells,money,unitServer->GetRPGStats()->GetManualSkillLevel(RPGMSKL_SCIENCE,victim),unitServer->GetRPGStats()->psDexterity.fpEffectiveValue,false);
-  if(IWorldConnector.IsLMP()) if(CPlayer *leader=GetPlayer(0))
-  { CList<CItem*,CItem*> quest; for(pos=items.GetHeadPosition();pos;){POSITION cur=pos;CItem *item=items.GetNext(pos);if(item->WhoAmI()==HPC_ITEM_QUEST){quest.AddTail(item);items.RemoveAt(cur);}} if(quest.GetCount())leader->AddItemsToHoover(quest);for(pos=quest.GetHeadPosition();pos;)quest.GetNext(pos)->Release(); }
+
   if(!victim->CheckFlag(UNIT_ALREADY_MHOOVER)){newItems.RemoveAll();pHoover->HooverAddon(this,victim,items,newItems,newSpells,money,unitServer->GetRPGStats()->GetManualSkillLevel(RPGMSKL_SCIENCE,victim),unitServer->GetRPGStats()->psDexterity.fpEffectiveValue,true);player->party.nMoney+=money;victim->SetFlag(UNIT_ALREADY_MHOOVER);}pHoover->HooverCarriedLoot(this,victim,items,newItems,money);
   if(items.GetCount())player->AddItemsToHoover(items);for(pos=items.GetHeadPosition();pos;)items.GetNext(pos)->Release();victim->SetFlag(UNIT_ALREADY_HOOVER);return items.GetCount()>0||money>0;
  }
@@ -3348,69 +3074,7 @@ bool CWorldServer::HooverUnitAddon(CUnit *victim,CPlayer *player,CUnitServer *un
  return false;
 }
 
-void CWorldServer::AddCorpse(int nID, int nLootByID, DWORD dwMoney, CList<CItem *, CItem *> &items)
-{
-    int nWho = -1;
-    POSITION pos;
-    if (pChatServer->IsValid())
-    {
-        CChatPerson *pPerson = pChatServer->GetPerson(nID);
-        ASSERT(pPerson);
-        if (pPerson)
-            nWho = pPerson->nUniquePersonID;
-    }
-    //
-    LMPCorpses.AddHead(SCorpseItems());
-    SCorpseItems &it = LMPCorpses.GetHead();
-    it.nID = nID;
-    it.nCanLootBy = nWho;
-    it.dwMoney = dwMoney;
-    for (pos = items.GetHeadPosition(); pos;)
-        it.items.Add(items.GetNext(pos));
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
-bool CWorldServer::CanLoot(int nTargetID, int nUnitID)
-{
-    int nWho = -1;
-    if (pChatServer->IsValid())
-    {
-        CChatPerson *pPerson = pChatServer->GetPerson(nUnitID);
-        ASSERT(pPerson);
-        if (pPerson)
-            nWho = pPerson->nUniquePersonID;
-    }
-    for (POSITION pos = LMPCorpses.GetHeadPosition(); pos;)
-    {
-        SCorpseItems &it = LMPCorpses.GetNext(pos);
-        if (it.nID == nTargetID && (it.nCanLootBy == nWho || it.nCanLootBy == -1))
-            return true;
-    }
-    return false;
-}
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::GetCorpses(int nUnitID, CScriptObjectGroup &res)
-{
-    res.Clear();
-    int nWho = -1;
-    if (pChatServer->IsValid())
-    {
-        CChatPerson *pPerson = pChatServer->GetPerson(nUnitID);
-        // ASSERT( pPerson );
-        if (pPerson)
-            nWho = pPerson->nUniquePersonID;
-    }
-    for (POSITION pos = LMPCorpses.GetHeadPosition(); pos;)
-    {
-        CUnit *pUnit;
-        SCorpseItems &it = LMPCorpses.GetNext(pos);
-        if (it.nCanLootBy == nWho || it.nCanLootBy == -1)
-        {
-            pUnit = GetUnit(it.nID);
-            if (pUnit)
-                res.Add(pUnit);
-        }
-    }
-}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 CItem *CWorldServer::CreateItem(const char *pszItem)
 {
@@ -3688,7 +3352,6 @@ void CWorldServer::RemoveEverythingDynamic()
         ((CPlayerManager *)GetPlayerManager())->RemovePlayer(pPlayer);
     }
     bMapLoaded = FALSE;
-    LMPCorpses.RemoveAll();
     szLoadedMobs.RemoveAll();
     aiMap.SetGraphRebuild(false);
     script.Clear();
@@ -3697,7 +3360,6 @@ void CWorldServer::RemoveEverythingDynamic()
     RemoveDynamicObjects();
     spells.RemoveAll();
     RemoveEffects();
-    StopNetDrivers();
     serverMode = SERV_MODE_NONE;
     curInterface = IFACE_NONE;
 }
@@ -3913,14 +3575,6 @@ void CWorldServer::LoadScriptFromMOB(const char *pszMobName)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // some functions to store/load dynamic objects
-/////////////////////////////////////////////////////////////////////////////////////
-
-/////////////////////////////////////////////////////////////////////////////////////
-
-/////////////////////////////////////////////////////////////////////////////////////
-
-/////////////////////////////////////////////////////////////////////////////////////
-
 /////////////////////////////////////////////////////////////////////////////////////
 // уничтожить все объекты, €вл€ющиес€ динамическими
 void CWorldServer::RemoveDynamicObjects()

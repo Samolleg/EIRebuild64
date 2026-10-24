@@ -903,7 +903,6 @@ void CI3DScreenOptions::ApplyParameters()
     theSettings.fContrast = controls[OPTION_CONTRAST].nValue / 50.f - 1;
     theSettings.fGamma = controls[OPTION_GAMMA].nValue / 50.f - 1;
 
-    if (!IWorldConnector.IsLMP())
     {
         const int value = controls[OPTION_DIFFICULTY].nValue;
         theSettings.nDifficultyLevel = theSettings.nDifficultyLevel2 =

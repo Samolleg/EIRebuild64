@@ -15,7 +15,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScreenSaveLoad.h"
 #include "I3DScreenOptions.h"
 #include "I3DScreenMessageBox.h"
-#include "I3DScreenChoosePers.h"
 
 #include "I3DScreenEndGame.h"
 
@@ -50,8 +49,7 @@ enum
     MMBT_LOAD,
     MMBT_EXIT,
     MMBT_OPTIONS,
-    MMBT_CREDITS,
-    MMBT_MULTIPLAYER
+    MMBT_CREDITS
 };
 /////////////////////////////////////////////////////////////////////////////////////
 SI3DMenuRects theMenuRects;
@@ -60,7 +58,6 @@ void CI3DScreenMainMenu::OnActivate()
 {
     pI3D->ClearStates();
 
-    IWorldConnector.LMPReloadDatabases(false);
 
     AddHandler(dbgnew CI3DHandlerSystemKeys(pI3D));
 
@@ -82,8 +79,6 @@ void CI3DScreenMainMenu::OnActivate()
     pArea->MakeRect(theMenuRects.rcMMOptions);
     pArea = AddArea();
     pArea->MakeRect(theMenuRects.rcMMCredits);
-    pArea = AddArea();
-    pArea->MakeRect(theMenuRects.rcMMMultiplayer);
 
 #ifdef _DEBUG
     // AlexK - draw rects to debug texture loading
@@ -138,7 +133,6 @@ void CI3DScreenMainMenu::OnDeactivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMainMenu::OnExitFromModal(DWORD dwRetValue)
 {
-    IWorldConnector.LMPReloadDatabases(false);
     IWorld.CombatPause(false);
     switch (dwRetValue)
     {
@@ -220,8 +214,7 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
     CI3DScreen *pVideoScr = NULL;
     int nHit = HitTest(point);
     JournalHit(nHit);
-    if (((nHit == MMBT_NEWGAME || nHit == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed()) ||
-        (nHit == MMBT_MULTIPLAYER && !ModRuntime::MultiplayerAllowed()))
+    if ((nHit == MMBT_NEWGAME || nHit == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed())
         return;
 
     switch (nHit)
@@ -268,29 +261,6 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
     }
     break;
 
-#ifndef __SINGLEONLY__
-    case MMBT_MULTIPLAYER: {
-        CString szMsg;
-        IWorld.GetTextManager()->GetSystemString("reserved_04", szMsg);
-        theInterface.DrawTextOverFrame(szMsg);
-
-        IWorld.CombatPause(true);
-
-        pI3D->BeginFX("buttons\\menu\\ok.wav");
-        CI3DScreenChoosePers *pScreen = dbgnew CI3DScreenChoosePers(pI3D);
-        pI3D->DoModal(pScreen);
-    }
-    break;
-#else
-    case MMBT_MULTIPLAYER: {
-        pI3D->BeginFX("buttons\\menu\\no.wav");
-        CI3DScreenMessageBox *pScr = dbgnew CI3DScreenMessageBox(pI3D, "reserved_10", "reserved_11",
-                                                                 0x00050000, MBF_OK);
-        pI3D->DoModal(pScr);
-    }
-
-    break;
-#endif // __SINGLEONLY__
     }
     CI3DScreen::OnLButtonDown(nFlags, point);
 }
@@ -302,8 +272,7 @@ void CI3DScreenMainMenu::OnMouseMove(UINT nFlags, CPoint point)
     if (lpUnit)
     {
         int nHitTest = HitTest(point);
-        if (((nHitTest == MMBT_NEWGAME || nHitTest == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed()) ||
-            (nHitTest == MMBT_MULTIPLAYER && !ModRuntime::MultiplayerAllowed()))
+        if ((nHitTest == MMBT_NEWGAME || nHitTest == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed())
             nHitTest = -1;
         CString szUnitMaskName = lpUnit->GetMaskName();
         if (nHitTest != m_nPrevHitTest)
@@ -356,12 +325,7 @@ void CI3DScreenMainMenu::OnMouseMove(UINT nFlags, CPoint point)
                 pI3D->BeginFX( "buttons\\menu\\stone.wav" );
                 break;
                 */
-            case MMBT_MULTIPLAYER: {
-                const SADEntry *pEntry = lpUnit->GetSpecialAnimationEntry(9);
-                lpUnit->SetNextAnimation(pEntry, TRUE);
-            }
-                pI3D->BeginFX("buttons\\menu\\stone.wav");
-                break;
+
 
             default: {
                 SADEntry *lpEntry = lpMapObjectManager->GetAnimationEntry(

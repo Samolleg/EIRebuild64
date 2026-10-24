@@ -78,7 +78,6 @@ const float SLIDE_TIME = .3f;
 const float DISTANCE_DRAW_UNIT = 9.f;
 const float RULER_UNIT_SCALE = 15.f;
 
-static bool SpellAddonMpSpeedAllowed();
 
 static bool UseModInterfaceHD()
 {
@@ -108,9 +107,6 @@ void CI3DScreenMission::StoreSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnActivate()
 {
-    // CRAP{ - for advanced kick/ban
-    eKickMode = KM_NONE;
-    // CRAP} - for advanced kick/ban
 
     float fZoom = 1.f;
     CString szInitOutput;
@@ -232,10 +228,7 @@ void CI3DScreenMission::OnActivate()
             int id = GetPersonageIDByName(szPersFiles[i].Mid(5));
             localNames[id] = szTmp;
         }
-    pLMPUnit = 0;
-    if (IWorldConnector.IsLMP())
-        LMPPersonsUpdate(true);
-    lmpState.nMainHeroID = -1;
+
     OwnedRender::E3HudCommitVisuals(this);
     OwnedRender::E3MissionEnter(this);
 }
@@ -267,7 +260,6 @@ void CI3DScreenMission::OnExitFromModal(DWORD dwRetValue)
     case 0x00100001:
     case 0x00090001:
         pI3D->SetScreensMustDie();
-        IWorldConnector.StopLMP();
         IWorldConnector.ReqGoMainMenu();
         break;
     case 0x00020001: {
@@ -330,11 +322,7 @@ void CI3DScreenMission::NewHooveredItems(CList<CItem *, CItem *> &newItems, int 
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::AddControlUnit(CUnit *pUnit)
 {
-    if (IWorldConnector.IsLMP())
-    {
-        pOutput->ClearOutput();
-        return;
-    }
+
     CArray<CPersonage> *people = &IWorldClient.GetParty().people;
     int j = 0;
     bool bInParty = false;
@@ -372,11 +360,7 @@ void CI3DScreenMission::AddControlUnit(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::RemoveControlUnit(CUnit *pUnit)
 {
-    if (IWorldConnector.IsLMP())
-    {
-        pOutput->ClearOutput();
-        return;
-    }
+
     for (int i = 0; i < pUnits.GetSize(); i++)
         if (pUnits[i] == pUnit)
         {
@@ -412,10 +396,6 @@ void CI3DScreenMission::GameOver(bool bVictory)
                                                                  "end_of_game_msg", 0xFFFF0000);
         pI3D->DoModal(pScr);
     }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DScreenMission::LMPPersonsUpdate(bool bAddDelete)
-{
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::PlayAcknowlegment(DWORD dwUnitID, DWORD dwAck, const char *pszAckID)
@@ -488,8 +468,7 @@ void CI3DScreenMission::QuestUpdate(LPCTSTR pszQuestVar, float fState)
     }
     else if (szVarParts.GetSize() == 4) // subobj
     {
-        if (!IWorldConnector.IsLMP() &&
-            IWorldClient.GSGetVar(szVarParts[0] + "." + szVarParts[1] + "." + szVarParts[2]) == 0)
+        if (IWorldClient.GSGetVar(szVarParts[0] + "." + szVarParts[1] + "." + szVarParts[2]) == 0)
             return;
         if (fState == 2)
             pTxtMng->GetSystemString("combat_complete_subobj", szOut2);
@@ -646,8 +625,7 @@ void CI3DScreenMission::CenterCamera(int num)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::SelectionUpdate(int num)
 {
-    if (IWorldConnector.IsLMP())
-        return;
+
 
     if (num >= pUnits.GetSize())
         return;
@@ -705,8 +683,7 @@ void CI3DScreenMission::SelectionUpdate(int num)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::ResetSelection()
 {
-    if (IWorldConnector.IsLMP())
-        return;
+
     theWorld.ResetSelection();
     for (int i = 0; i < pUnits.GetSize(); i++)
     {
@@ -838,21 +815,6 @@ ERPGHitLocations CI3DScreenMission::GetCShotState()
     return hl;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool SLMPFacesState::operator==(const SLMPFacesState &a) const
-{
-    if (nPeopleIDs.size() != a.nPeopleIDs.size())
-        return false;
-    if (nPeopleIDs.size() > 0 &&
-        !std::equal(nPeopleIDs.begin(), nPeopleIDs.end(), a.nPeopleIDs.begin()))
-        return false;
-    if (nUniqueIDs.size() != a.nUniqueIDs.size())
-        return false;
-    if (nUniqueIDs.size() > 0 &&
-        !std::equal(nUniqueIDs.begin(), nUniqueIDs.end(), a.nUniqueIDs.begin()))
-        return false;
-    return true;
-}
-/////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnIdle()
 {
     static int fieldCampHeroId = -1;
@@ -922,62 +884,7 @@ void CI3DScreenMission::OnIdle()
         pInfo->SetUnit(pUnit);
     }
 
-    if (IWorldConnector.IsLMP())
-    {
-        CChatClient::CChatPersonList &people = pChatClient->people;
-        CChatClient::CChatPersonList::const_iterator it;
 
-        SLMPFacesState lmpStateNew;
-        lmpStateNew.nMainHeroID = -1;
-        for (it = people.begin(); it != people.end(); ++it)
-            if ((*it)->state == CPS_ZONE && (*it)->nServerID >= 0)
-            {
-                CUnit *pU = theWorld.GetUnit((*it)->nServerID);
-                if (!pU)
-                {
-                    lmpStateNew.nUniqueIDs.push_back((*it)->nUniquePersonID);
-                    continue;
-                }
-                lmpStateNew.nPeopleIDs.push_back((*it)->nServerID);
-                if (pChatClient->pState->IsValid() && pChatClient->pState->pPerson == (*it))
-                    lmpStateNew.nMainHeroID = (*it)->nServerID;
-            }
-            else
-                lmpStateNew.nUniqueIDs.push_back((*it)->nUniquePersonID);
-        std::sort(lmpStateNew.nPeopleIDs.begin(), lmpStateNew.nPeopleIDs.end());
-        std::sort(lmpStateNew.nUniqueIDs.begin(), lmpStateNew.nUniqueIDs.end());
-
-        if (lmpStateNew != lmpState)
-        {
-            // add units
-            int nCurID;
-            pUnits.RemoveAll();
-            bool bIsMainHero = false;
-            std::vector<int>::iterator itt;
-            for (itt = lmpStateNew.nPeopleIDs.begin(); itt != lmpStateNew.nPeopleIDs.end(); ++itt)
-            {
-                nCurID = (*itt);
-                CUnit *pU = theWorld.GetUnit(nCurID);
-                if (!pU)
-                    continue;
-                if (nCurID == lmpStateNew.nMainHeroID)
-                {
-                    theWorld.SelectObject(pU);
-                    pUnits.InsertAt(0, pU);
-                    bIsMainHero = true;
-                }
-                else
-                    pUnits.Add(pU);
-            }
-            pFaces->AddFaces(bIsMainHero);
-            if (lmpState.nMainHeroID != lmpStateNew.nMainHeroID)
-            {
-                theCamera.SetCarrier(lmpStateNew.nMainHeroID);
-                UpdateAllObjects();
-            }
-            lmpState = lmpStateNew;
-        }
-    }
 
     CI3DScreen::OnIdle();
 
@@ -1048,7 +955,7 @@ void CI3DScreenMission::OnLButtonDown(UINT nFlags, CPoint point)
 {
     // Addon LS_MissionOnLButtonDown/DoubleClickExtendedSpells intercepts the
     // icon before native screen routing; single click only selects a target mode.
-    if (eKickMode == KM_NONE && ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
+    if (ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
         const int slot = pSpells->HitTest(point);
         if (slot >= 0 && slot < QI_MAX_SPELLS) {
             SetProcessed(); bLButDown = bRubberSel = false;
@@ -1058,14 +965,6 @@ void CI3DScreenMission::OnLButtonDown(UINT nFlags, CPoint point)
         }
     }
 
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-    {
-        if (pFaces)
-            pFaces->OnLButtonDown(nFlags, point);
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     if (!bLButDown)
     {
@@ -1082,7 +981,7 @@ void CI3DScreenMission::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
     // Addon LS_MissionOnLButtonDown/DoubleClickExtendedSpells intercepts the
     // icon before native screen routing; single click only selects a target mode.
-    if (eKickMode == KM_NONE && ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
+    if (ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
         const int slot = pSpells->HitTest(point);
         if (slot >= 0 && slot < QI_MAX_SPELLS) {
             SetProcessed(); bLButDown = bRubberSel = false;
@@ -1091,10 +990,6 @@ void CI3DScreenMission::OnLButtonDblClk(UINT nFlags, CPoint point)
         }
     }
 
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-        return;
-    // CRAP} - for advanced kick/ban
 
     if (!bLButDown)
     {
@@ -1109,10 +1004,6 @@ void CI3DScreenMission::OnLButtonDblClk(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnLButtonUp(UINT nFlags, CPoint point)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-        return;
-    // CRAP} - for advanced kick/ban
 
     if (!bLButDown)
     {
@@ -1120,7 +1011,7 @@ void CI3DScreenMission::OnLButtonUp(UINT nFlags, CPoint point)
         return;
     }
     bLButDown = false;
-    if (bRubberSel && !IWorldConnector.IsLMP())
+    if (bRubberSel)
     {
         int nSomeoneFirst = -1;
         std::list<CMapObject *> mobs;
@@ -1396,19 +1287,10 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
 void CI3DScreenMission::OnMouseMove(UINT nFlags, CPoint point)
 {
     if (OwnedRender::E3EditorPaused()) return;
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-    {
-        theCursor.SetMode(CT_CANCEL);
-        if (pFaces)
-            pFaces->OnMouseMove(nFlags, point);
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     theCursor.SetMode(CT_DEFAULT);
 
-    if (bLButDown && theSettings.nCameraFrameSelectionSensetiveArea > 0 && !IWorldConnector.IsLMP())
+    if (bLButDown && theSettings.nCameraFrameSelectionSensetiveArea > 0)
     {
         if (abs(point.x - startRubber.x) > theSettings.nCameraFrameSelectionSensetiveArea ||
             abs(point.y - startRubber.y) > theSettings.nCameraFrameSelectionSensetiveArea)
@@ -1656,27 +1538,9 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
             return;
         }
     }
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-    {
-        if (nChar == VK_ESCAPE)
-            eKickMode = KM_NONE;
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
-    if (nChar == 13 && IWorldConnector.IsLMP())
-    {
-        pI3D->BeginChatLine();
-        SetProcessed();
-        return;
-    }
-    if (nChar == VK_BACK && IWorldConnector.IsLMP())
-    {
-        pI3D->ClearChatLines();
-        SetProcessed();
-        return;
-    }
+
+
 
     CI3DScreen::OnKeyDown(nChar, nRepCnt, nFlags);
     if (GetProcessed())
@@ -1750,12 +1614,10 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         SetProcessed();
         return;
     case KA_ACCELERATE:
-        if (!IWorldConnector.IsLMP() || SpellAddonMpSpeedAllowed() || NConsole::MpSpeedControlEnabled())
-            pClock->AccelerateFromKeyboard();
+        pClock->AccelerateFromKeyboard();
         break;
     case KA_DECELERATE:
-        if (!IWorldConnector.IsLMP() || SpellAddonMpSpeedAllowed() || NConsole::MpSpeedControlEnabled())
-            pClock->DecelerateFromKeyboard();
+        pClock->DecelerateFromKeyboard();
         break;
     case KA_OBJECTIVES:
         pClock->ViewObjectives();
@@ -1954,7 +1816,6 @@ void CI3DScreenMission::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
                         break;
         */
     case KA_SELECTALL:
-        if (!IWorldConnector.IsLMP())
         {
             pI3D->BeginFX("buttons\\battle\\on_off.wav");
             for (int i = 0; i < pUnits.GetSize(); i++)
@@ -2009,10 +1870,6 @@ case KA_CAMERA_CENTER:
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-        return;
-    // CRAP} - for advanced kick/ban
 
     CI3DScreen::OnKeyUp(nChar, nRepCnt, nFlags);
 
@@ -2041,10 +1898,6 @@ void CI3DScreenMission::OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DScreenMission::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-        return TRUE;
-    // CRAP} - for advanced kick/ban
 
     pMap->SetProcessed(false);
     pMap->OnMouseWheel(nFlags, zDelta, pt);
@@ -3738,21 +3591,8 @@ void CI3DObjectFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName, boo
     CI3DFigure *pFig;
     pFig = AddFigure(pszFigureName);
 
-    bool bLMP = IWorldConnector.IsLMP();
     int w1 = 56, w2 = 40, h1 = 90, h2 = 65;
     int w, h, l, r, t, b;
-    if (bLMP)
-    {
-        w = bIsMainHero ? w1 : w2;
-        l = 400 - (w + w2 * (pChatClient->people.size() - 1)) / 2;
-        if (i > 0)
-        {
-            l += (w + w2 * (i - 1));
-            w = w2;
-        }
-        h = h1;
-    }
-    else
     {
         w = w1;
         h = h1;
@@ -3880,42 +3720,12 @@ void CI3DObjectFaces::AddFaces(bool bIsMainHero)
         faces[i].nUniquePersonID = -1;
 
         pScreen->GetUnitName(pScreen->GetUnit(i), szUnitName);
-        if (KA_SELECT1 + i < KA_SELECTALL && !IWorldConnector.IsLMP())
+        if (KA_SELECT1 + i < KA_SELECTALL)
             areas[i]->SetToolTip(szUnitName, 1, KA_SELECT1 + i);
         else
             areas[i]->SetToolTip(szUnitName, 1);
     }
-    if (IWorldConnector.IsLMP())
-    {
-        CChatClient::CChatPersonList &people = pChatClient->people;
-        CChatClient::CChatPersonList::const_iterator it;
-        for (it = people.begin(); it != people.end(); ++it)
-        {
-            CUnit *pU = 0;
-            if ((*it)->nServerID >= 0)
-                pU = theWorld.GetUnit((*it)->nServerID);
-            if ((*it)->state != CPS_ZONE || (*it)->nServerID < 0 || !pU)
-            {
-                const SUDBUnitPrototype *pProt = theUnitDatabase.prototypes[(*it)->szPrototype];
-                const SUDBRaceModel *pRace = theUnitDatabase.races[pProt->szRace];
-                if (strcmp(pRace->szMaskName, "unhuma") == 0)
-                    szSex = "m";
-                else if (strcmp(pRace->szMaskName, "unhufe") == 0)
-                    szSex = "f";
-                szGrace = "me";
-                szFigureName.Format("infa%s%s%dface", pRace->szMaskName, szGrace,
-                                    pProt->dwHair + 1);
-                szTextureName.Format("face%s%02d", szSex, pProt->dwSkinIndex);
-                AddFace(szFigureName, szTextureName, bIsMainHero, true);
-                faces[nFaces - 1].fTime = 0;
-                faces[nFaces - 1].nOldHP = 0;
-                faces[nFaces - 1].szTexName = szTextureName;
-                faces[nFaces - 1].nCurTex = 0;
-                faces[nFaces - 1].nUniquePersonID = (*it)->nUniquePersonID;
-                areas[nFaces - 1]->SetToolTip((*it)->szName.c_str(), 1);
-            }
-        }
-    }
+
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::SelectFace(int numFace, BOOL bSelect)
@@ -4144,38 +3954,6 @@ void CI3DObjectFaces::OnLButtonDown(UINT nFlags, CPoint point)
     int i = HitTest(point);
     JournalHit(i);
 
-    // CRAP{ - for advanced kick/ban
-    EKickMode eKickMode = ((CI3DScreenMission *)pI3D->GetCurrentScreen())->eKickMode;
-    if (eKickMode != KM_NONE)
-    {
-        if (i >= 0 && i < nFaces)
-        {
-            int nUniqueID = -1;
-            if (faces[i].bNotOnZone)
-                nUniqueID = faces[i].nUniquePersonID;
-            else
-            {
-                int nUnitID = pScreen->GetUnit(i)->GetID();
-                CChatClient::CChatPersonList &people = pChatClient->people;
-                CChatClient::CChatPersonList::const_iterator it;
-                for (it = people.begin(); it != people.end(); ++it)
-                    if ((*it)->nServerID == nUnitID)
-                    {
-                        nUniqueID = (*it)->nUniquePersonID;
-                        break;
-                    }
-            }
-            char szBuf[128];
-            sprintf(szBuf, "%d", nUniqueID);
-            if (eKickMode == KM_KICK)
-                pChatClient->Command(CC_KICK_ID, szBuf);
-            else if (eKickMode == KM_BAN)
-                pChatClient->Command(CC_BAN_ID, szBuf);
-            ((CI3DScreenMission *)pI3D->GetCurrentScreen())->eKickMode = KM_NONE;
-        }
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     if (i >= 0)
     {
@@ -4187,11 +3965,6 @@ void CI3DObjectFaces::OnLButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectFaces::OnLButtonUp(UINT nFlags, CPoint point)
 {
-    // CRAP{ - for advanced kick/ban
-    EKickMode eKickMode = ((CI3DScreenMission *)pI3D->GetCurrentScreen())->eKickMode;
-    if (eKickMode != KM_NONE)
-        return;
-    // CRAP} - for advanced kick/ban
 
     if (pI3D->GetCapture() != this)
         return;
@@ -4210,15 +3983,6 @@ void CI3DObjectFaces::OnMouseMove(UINT nFlags, CPoint point)
 {
     int i = HitTest(point);
 
-    // CRAP{ - for advanced kick/ban
-    EKickMode eKickMode = ((CI3DScreenMission *)pI3D->GetCurrentScreen())->eKickMode;
-    if (eKickMode != KM_NONE)
-    {
-        if (i >= 0 && i < nFaces)
-            theCursor.SetMode(CT_DEFAULT);
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     if (i >= 0)
     {
@@ -4727,8 +4491,7 @@ void CI3DObjectMap::PlaceUnits()
     nume = theWorld.GetNumExits();
 
     // corpses
-    if (IWorldConnector.IsLMP())
-        numc = pPl->LMPCorpsesIDs.GetSize();
+
 
     // fill vertices
     pFig->SetPlotsSize(num + numq + nume + numc);
@@ -4990,63 +4753,7 @@ void CI3DObjectMap::PlaceUnits()
     }
 
     // corpses
-    if (IWorldConnector.IsLMP())
-        for (i = 0; i < numc; i++)
-        {
-            pFig->SetIndex(nInd, nComp);
-            pFig->SetIndex(nInd + 1, nComp + 2);
-            pFig->SetIndex(nInd + 2, nComp + 1);
-            pFig->SetIndex(nInd + 3, nComp + 1);
-            pFig->SetIndex(nInd + 4, nComp + 2);
-            pFig->SetIndex(nInd + 5, nComp + 3);
-            nInd += 6;
 
-            pUnit = (CUnit *)pMobMng->Find(pPl->LMPCorpsesIDs[i]);
-            if (!pUnit)
-            {
-                pFig->SetComponent(nComp, 0, 0);
-                pFig->SetComponent(nComp + 1, 0, 0);
-                pFig->SetComponent(nComp + 2, 0, 0);
-                pFig->SetComponent(nComp + 3, 0, 0);
-                nComp += 4;
-                nPlot++;
-                continue;
-            }
-
-            pos.x = pUnit->GetCP().x;
-            pos.y = pUnit->GetCP().y;
-
-            CPlot2D pos2 = FromTerrainToFigure(pos, TRUE);
-            if (pos2.x * pos2.x + pos2.y * pos2.y > 0.6f)
-            {
-                pos2 = FromTerrainToFigure(pos, FALSE);
-                if (pos2.x * pos2.x + pos2.y * pos2.y < 0.68f || fabs(pos2.x) > 0.97f ||
-                    fabs(pos2.y) > 0.97f)
-                {
-                    pFig->SetComponent(nComp, 0, 0);
-                    pFig->SetComponent(nComp + 1, 0, 0);
-                    pFig->SetComponent(nComp + 2, 0, 0);
-                    pFig->SetComponent(nComp + 3, 0, 0);
-                    nComp += 4;
-                    nPlot++;
-                    continue;
-                }
-            }
-
-            pFig->SetPlot(nPlot, 0, pos2.x, pos2.y - 0.04f);
-            pFig->SetPlot(nPlot, 1, pos2.x + 0.04f, pos2.y);
-            pFig->SetPlot(nPlot, 2, pos2.x - 0.04f, pos2.y);
-            pFig->SetPlot(nPlot, 3, pos2.x, pos2.y + 0.04f);
-
-            pFig->SetComponent(nComp, nComp, 0);
-            pFig->SetComponent(nComp + 1, nComp + 1, 0);
-            pFig->SetComponent(nComp + 2, nComp + 2, 0);
-            pFig->SetComponent(nComp + 3, nComp + 3, 0);
-            nComp += 4;
-            nPlot++;
-        }
-
-    pFig->MapAfterModify();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CPlot2D CI3DObjectMap::FromTerrainToFigure(CPlot2D pt, BOOL bZoom)
@@ -5631,7 +5338,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
                 value.Format("%s %s",szStrings[CONSIDER],label);
                 draw(value,RGB((std::min)(255,delta>0?225+delta*6:0),(std::min)(255,(delta<0?185:215)-delta*6),0));
             }
-            if(IWorldConnector.IsLMP()&&!alien){value.Format("%s %d",get("camp_current_exp"),stats->nFreeExp);draw(value);}
+
         }else {
             value.Format("%s: %d",raw("perk Strength"),stats->cStrength);draw(value);
             value.Format("%s: %d",raw("perk Dexterity"),stats->cDexterity);draw(value);
@@ -5817,13 +5524,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         rc += shift;
     }
 
-    if (IWorldConnector.IsLMP() && !bAlien)
-    {
-        pTxtMng->GetSystemString("camp_current_exp", szTmp);
-        szOut.Format("%s %d", szTmp, pStats->nFreeExp);
-        pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
-        rc += shift;
-    }
+
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectInfo::DrawTotalHP(CUnit *pUnit)
@@ -6167,11 +5868,7 @@ BOOL CI3DObjectInfo::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 /////////////////////////////////////////////////////////////////////////////////////
 enum class ClockSpeedInput { Init, Button, Keyboard };
 
-static bool SpellAddonMpSpeedAllowed()
-{
-    const CModPackage *package = ModRuntime::Current();
-    return package && package->SpellAddon().Feature45() == 1;
-}
+
 
 static DWORD ClockSegmentTime(int mode, ClockSpeedInput input)
 {
@@ -6249,7 +5946,6 @@ void CI3DObjectClock::Init(int nInitSpeed)
     }
 
     areas[0]->SetToolTip(10400, 1, KA_PAUSE);
-    if (!IWorldConnector.IsLMP())
     {
         areas[1]->SetToolTip(10402, 1, KA_DECELERATE);
         areas[2]->SetToolTip(10403, 1, KA_ACCELERATE);
@@ -6352,8 +6048,7 @@ void CI3DObjectClock::OnLButtonUp(UINT nFlags, CPoint point)
         break;
     case 1:
         SetProcessed();
-        if (IWorldConnector.IsLMP() && !SpellAddonMpSpeedAllowed() && !NConsole::MpSpeedControlEnabled())
-            break;
+
         if (IWorld.IsMissionCombatPause())
             IWorld.MissionCombatPause(false);
         nMode = 0;
@@ -6363,8 +6058,7 @@ void CI3DObjectClock::OnLButtonUp(UINT nFlags, CPoint point)
         break;
     case 2:
         SetProcessed();
-        if (IWorldConnector.IsLMP() && !SpellAddonMpSpeedAllowed() && !NConsole::MpSpeedControlEnabled())
-            break;
+
         if (IWorld.IsMissionCombatPause())
             IWorld.MissionCombatPause(false);
         nMode = 1;
@@ -6420,14 +6114,14 @@ void CI3DObjectClock::DecelerateFromKeyboard()
 }
 void CI3DObjectClock::Accelerate()
 {
-    if (IWorld.IsMissionCombatPause() || IWorldConnector.IsLMP())
+    if (IWorld.IsMissionCombatPause())
         return;
     SetSpeedMode(1);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectClock::Decelerate()
 {
-    if (IWorld.IsMissionCombatPause() || IWorldConnector.IsLMP())
+    if (IWorld.IsMissionCombatPause())
         return;
     SetSpeedMode(0);
 }

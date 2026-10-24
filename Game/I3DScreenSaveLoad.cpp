@@ -900,7 +900,7 @@ void CI3DScreenSaveLoad::ReloadPicture()
 void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
 {
     GameJournal::Source source(bIsAuto?"auto":"manual_quick");
-    if(IWorldConnector.IsLMP() || !IsEnoughSpace())return;
+    if(!IsEnoughSpace())return;
     if(bIsAuto)NGame::DrawFrame(false);
     auto screen=std::make_unique<CI3DSurface>(&theInterface,0,0,800,600,BS_VISIBLE);
     screen->GetFromScreen(true);
@@ -916,8 +916,7 @@ void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::QuickLoad(LPCTSTR pszSlotName)
 {
-    if (IWorldConnector.IsLMP())
-        return;
+
     CString szFullPath;
     szFullPath.Format("%sSaves64\\%s\\", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), pszSlotName);
 

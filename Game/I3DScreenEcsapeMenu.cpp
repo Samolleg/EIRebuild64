@@ -98,7 +98,7 @@ void CI3DScreenEscapeMenu::OnMouseMove(UINT nFlags, CPoint point)
     switch (HitTest(point))
     {
     case 0:
-        if (m_nLastButton != 0 && ModSpellAddonAllowsSave() && !IWorldConnector.IsLMP())
+        if (m_nLastButton != 0 && ModSpellAddonAllowsSave())
         {
             pI3D->BeginFX("buttons\\menu\\stone.wav");
             pObj->PlaySpecialAnmation(2);
@@ -106,7 +106,7 @@ void CI3DScreenEscapeMenu::OnMouseMove(UINT nFlags, CPoint point)
         m_nLastButton = 0;
         break;
     case 1:
-        if (m_nLastButton != 1 && !IWorldConnector.IsLMP())
+        if (m_nLastButton != 1)
         {
             pI3D->BeginFX("buttons\\menu\\stone.wav");
             pObj->PlaySpecialAnmation(3);
@@ -162,7 +162,7 @@ void CI3DScreenEscapeMenu::OnLButtonDown(UINT nFlags, CPoint point)
     switch (ht)
     {
     case 0:
-        if (ModSpellAddonAllowsSave() && !IWorldConnector.IsLMP())
+        if (ModSpellAddonAllowsSave())
         {
             CI3DScreenSaveLoad *pScreen = dbgnew CI3DScreenSaveLoad(pI3D);
             pScreen->SetParams(true, true);
@@ -170,7 +170,6 @@ void CI3DScreenEscapeMenu::OnLButtonDown(UINT nFlags, CPoint point)
         }
         break;
     case 1:
-        if (!IWorldConnector.IsLMP())
         {
             CI3DScreenSaveLoad *pScreen = dbgnew CI3DScreenSaveLoad(pI3D);
             pScreen->SetParams(false, true);

@@ -3,15 +3,6 @@
 #include "I3DObject.h"
 #include <vector>
 /////////////////////////////////////////////////////////////////////////////////////
-enum EKickMode
-{
-    KM_NONE,
-    KM_KICK,
-    KM_BAN
-};
-/////////////////////////////////////////////////////////////////////////////////////
-class CItem;
-class CUnit;
 class CI3DScreen : public CI3DObject
 {
 protected:
@@ -38,9 +29,6 @@ public:
     virtual void QuestUpdate(LPCTSTR pszQuestVar, float fState) {}
     virtual void ForceBriefing(LPCTSTR pszBriefing) {}
     virtual bool Autosave() { return false; }
-    virtual void LMPPersonsUpdate(bool bAddDelete) {}
-    virtual void LMPItemXCHGComplete(CParty &itemsRemote, CParty &itemsOffer, CParty &itemsInv) {}
-    virtual void SetKickMode(EKickMode eKickMode) {}
     virtual void GenerateCheatAssortment() {}
 
     virtual void StoreSpecific() {}

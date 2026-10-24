@@ -42,14 +42,13 @@ private:
     CPacket pkt;                 // packet for reading incoming data
     CPacket wpkt;                // packet for updates
     bool bIgnoreInterfaceChange; // for autoplay mode. ATM: not using now!
-    bool bSendParty;             // send local party to server during connection or not
+    bool bSendParty;             // reserved P17 payload field; remote party upload removed
     CNetCompressor packerSend, packerRecv;
 
     CString ReadMsg();
 
 public:
     CSimplyArray<int, int> visibleUnitIDs;
-    CSimplyArray<int, int> LMPCorpsesIDs;
 
     CPlayerClient();
     virtual ~CPlayerClient();
@@ -64,7 +63,6 @@ public:
     void StartTrafficStoring(const char *pszFilename);
     void StopTrafficStoring();
     void SetIgnoreInterfaceChange(bool bIgnore) { bIgnoreInterfaceChange = bIgnore; }
-    void SetSendParty(bool bFlag) { bSendParty = bFlag; }
     bool IsIgnoreInterfaceChange() { return bIgnoreInterfaceChange; }
     EPClientStates GetStatus() const { return status; }
     void FinishZoneLoading();

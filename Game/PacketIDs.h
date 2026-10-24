@@ -57,7 +57,6 @@ const PACKET_ID PID_GOCAMP = 0x04;    // int nInterface ( EInterface )
 const PACKET_ID PID_FINISHCAMP = 0x05;
 const PACKET_ID PID_GOZONE = 0x06;        // string zone name, int nEntrance, single only
 const PACKET_ID PID_BRIEFING_DONE = 0x07; // string briefing name
-const PACKET_ID PID_CLIENT_PARTY = 0x08;  // CParty stored with Store()
 const PACKET_ID PID_ZONE_LOADED = 0x09;   // inform server that zone has been loaded
 // general commands
 const PACKET_ID PID_COMBAT_PAUSE = 0x10; // byte - pause state

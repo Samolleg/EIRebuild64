@@ -23,7 +23,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "RandomGen.h"
 /////////////////////////////////////////////////////////////////////////////////////
 static CParty *pCurrentParty = 0;
-CLMPPartySet LMPPartySet;
 /////////////////////////////////////////////////////////////////////////////////////
 // CPersonage
 /////////////////////////////////////////////////////////////////////////////////////
@@ -577,43 +576,6 @@ BOOL CParty::InitPersFromPrototype(CPersonage &man)
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CParty::InitLMPPers(CPersonage &man)
-{
-    int i;
-    // разденем man`a
-    while (man.spells.GetSize())
-        man.RemoveSpell(man.spells[0]);
-    while (man.weapons.GetSize())
-        man.RemoveWeapon(man.weapons[0]);
-    const SUDBNPCPrototype *pUP = theUnitDatabase.npcs.GetEntry(man.szPrototype);
-    if (!pUP)
-        return FALSE;
-    for (i = 0; i < pUP->szSpells.size(); i++)
-        man.AddSpell(CSmartPtr<CItemSpell>(
-            GetItemManager()->CreateItemSpell(pUP->szSpells[i], GetSpellManager())));
-    for (i = 0; i < pUP->szQItems.size(); i++)
-        man.AddQuick(
-            CSmartPtr<CItemQuick>((CItemQuick *)GetItemManager()->CreateItem(pUP->szQItems[i])));
-    for (i = 0; i < pUP->szWeapons.size(); i++)
-        man.AddWeapon(
-            CSmartPtr<CItemWeapon>((CItemWeapon *)GetItemManager()->CreateItem(pUP->szWeapons[i])));
-    nMoney += pUP->dwMoney;
-    man.stats.AddExperience(pUP->fExpToDistribute);
-    man.szVoicePrototype = man.szPrototype;
-    // CRAP - this should be used to modify man.stats
-    /*	DWORD dwCharacterPoints;
-            float fExpirience;
-            // primary stats
-            float fStrength;
-            float fDexterity;
-            float fIntelligence;
-            // skills & perks
-            BYTE cManualSkills[RPG_NUM_MANUAL_SKILLS];
-            BYTE cAutoSkills[RPG_NUM_AUTO_SKILLS];
-            std::vector<CString> szPerks;*/
-    return TRUE;
-}
-/////////////////////////////////////////////////////////////////////////////////////
 CPersonage &CParty::CreatePersonage(const char *pszIntName, const char *pszPrototype,
                                     const char *pszName)
 {
@@ -650,87 +612,5 @@ void CParty::AutoAvailableZones()
             }
         }
     }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-// CLMPPartySet
-/////////////////////////////////////////////////////////////////////////////////////
-void CLMPPartySet::SOneParty::Store(const char *pszDir)
-{
-    // проверить, является ли имя перса строкой типа <номер>.mp
-    {
-        int nPos = szFileName.ReverseFind('.');
-        if (nPos == -1)
-        {
-            DeleteFile(CString(pszDir) + szFileName);
-            return;
-        }
-        for (int i = 0; i < nPos; ++i)
-        {
-            if (isdigit(szFileName[i]) == 0)
-            {
-                DeleteFile(CString(pszDir) + szFileName);
-                return;
-            }
-        }
-    }
-    // работаем с этим именем дальше - оно правильное...
-    MoveFile(CString(pszDir) + szFileName, CString(pszDir) + "temp.mp");
-    {
-        CFileSave file;
-        CMemorySave mem;
-        file.OpenWrite(CString(pszDir) + szFileName);
-        party.Store(mem);
-        CompressTo(file, 0x114, N_CURRENT_SAVE_VERSION, mem);
-    }
-    DeleteFile(CString(pszDir) + "temp.mp");
-}
-/////////////////////////////////////////////////////////////////////////////////////
-bool CLMPPartySet::SOneParty::Load(const char *pszDir)
-{
-    CFileSave file;
-    CMemorySave mem;
-    file.OpenRead(CString(pszDir) + szFileName);
-    if (!DecompressTo(mem, 0x114, N_CURRENT_SAVE_VERSION, N_CURRENT_MINIMAL_SAVE_VERSION, file))
-        return FALSE;
-    party.Load(mem);
-    return mem.IsOk();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CLMPPartySet::SetCurrent(SOneParty &party)
-{
-    currentParty = party;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CLMPPartySet::Load()
-{
-    ASSERT(szDir != "");
-    parties.clear();
-    WIN32_FIND_DATA fd;
-    HANDLE h = FindFirstFile(szDir + "\\*.mp", &fd);
-    if (h != INVALID_HANDLE_VALUE)
-    {
-        do
-        {
-            SOneParty p;
-            p.szFileName = fd.cFileName;
-            if (!p.Load(szDir))
-                continue;
-            ClearLMPPartyVariables(p.party.vars);
-            if (p.party.people.GetSize() == 1)
-                parties.push_back(p);
-        } while (FindNextFile(h, &fd));
-        FindClose(h);
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-extern void ClearDirectory(LPCTSTR pszPath);
-void CLMPPartySet::Store()
-{
-    ASSERT(szDir != "");
-    if (szDir == "")
-        return;
-    ClearDirectory(szDir);
-    for (int i = 0; i < parties.size(); i++)
-        parties[i].Store(szDir);
 }
 /////////////////////////////////////////////////////////////////////////////////////

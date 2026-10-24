@@ -28,7 +28,6 @@ bool C2DScreenWait::bIgnoreSteps = false;
 HBINK C2DScreenWait::hBink = 0;
 DWORD C2DScreenWait::dwSurfaceType = 0;
 #endif
-extern void LMPTimePassed();
 
 const char *C2DScreenWait::pszProgressName = "progres.bik";
 std::unique_ptr<CDXGISurface> C2DScreenWait::pSurface = 0;
@@ -171,7 +170,6 @@ void C2DScreenWait::Clear()
 void C2DScreenWait::Step(int nNumb)
 {
     if (ModCliTool::GeneratingGraph()) return;
-    LMPTimePassed();
     if (bIgnoreSteps) return;
     theCursor.Show(false);
 #ifndef __VIDEO__

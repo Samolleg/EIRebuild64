@@ -70,7 +70,6 @@ void CI3DScreenBase::StoreSpecific()
 void CI3DScreenBase::OnActivate()
 {
     journalTopicTarget = -1;
-    eKickMode = KM_NONE;
 
     bNeedAutosave = false;
     if (interfaceState.GetSize())
@@ -158,13 +157,6 @@ void CI3DScreenBase::OnActivate()
     hPhraseSound = SND_EMPTY;
     pWhosTalking = 0;
 
-    if (IWorldConnector.IsLMP())
-    {
-        AddObject(pFaces = dbgnew CI3DBaseFaces(pI3D));
-        LMPPersonsUpdate(true);
-    }
-    else
-        pFaces = 0;
 
     CMapObjPtrHash &objects = theWorld.GetPlayer()->GetPlayer()->visibleObjects;
     CMapObjPtrHashIterator mapobjIter;
@@ -271,16 +263,6 @@ void CI3DScreenBase::RemoveControlUnit(CUnit *pUnit)
         }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DScreenBase::LMPPersonsUpdate(bool bAddDelete)
-{
-    if (!IWorldConnector.IsLMP())
-        return;
-    if (!bAddDelete)
-        return;
-    if (pFaces)
-        pFaces->AddFaces();
-}
-/////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::ForceBriefing(LPCTSTR pszBriefing)
 {
     szBriefing = pszBriefing;
@@ -289,14 +271,6 @@ void CI3DScreenBase::ForceBriefing(LPCTSTR pszBriefing)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::OnLButtonDown(UINT nFlags, CPoint point)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-    {
-        if (pFaces)
-            pFaces->OnLButtonDown(nFlags, point);
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     CI3DScreen::OnLButtonDown(nFlags, point);
     if (GetProcessed())
@@ -390,10 +364,6 @@ void CI3DScreenBase::OnLButtonDown(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::OnLButtonDblClk(UINT nFlags, CPoint point)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-        return;
-    // CRAP} - for advanced kick/ban
 
     CI3DScreen::OnLButtonDblClk(nFlags, point);
     if (GetProcessed())
@@ -448,14 +418,6 @@ void CI3DScreenBase::OnLButtonDblClk(UINT nFlags, CPoint point)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-    {
-        if (nChar == VK_ESCAPE)
-            eKickMode = KM_NONE;
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     CI3DScreen::OnKeyDown(nChar, nRepCnt, nFlags);
     if (GetProcessed()) return;
@@ -491,12 +453,7 @@ void CI3DScreenBase::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         SetProcessed();
         return;
     case 13:
-        if (IWorldConnector.IsLMP())
-        {
-            pI3D->BeginChatLine();
-            SetProcessed();
-            return;
-        }
+
         if (eMode == BSM_BRIEFING)
         {
             pI3D->BeginFX("buttons\\base\\click1.wav");
@@ -511,12 +468,7 @@ void CI3DScreenBase::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         SetProcessed();
         return;
     case VK_BACK:
-        if (IWorldConnector.IsLMP())
-        {
-            pI3D->ClearChatLines();
-            SetProcessed();
-            return;
-        }
+
         break;
     case VK_SPACE:
         if (eMode == BSM_BRIEFING)
@@ -573,8 +525,7 @@ void CI3DScreenBase::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
                 SScenarioZone *pZ = theMap.GetZoneByName(szVarParts[1]);
                 if (!pZ)
                     continue;
-                if (!IWorldConnector.IsLMP() &&
-                    pZ->szAllodName.CompareNoCase(pBZ->szAllodName) != 0)
+                if (pZ->szAllodName.CompareNoCase(pBZ->szAllodName) != 0)
                     continue;
                 bAreQuests = true;
                 break;
@@ -599,15 +550,6 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::OnMouseMove(UINT nFlags, CPoint point)
 {
-    // CRAP{ - for advanced kick/ban
-    if (eKickMode != KM_NONE)
-    {
-        theCursor.SetMode(CT_CANCEL);
-        if (pFaces)
-            pFaces->OnMouseMove(nFlags, point);
-        return;
-    }
-    // CRAP} - for advanced kick/ban
 
     theCursor.SetMode(CT_DEFAULT);
     CI3DScreen::OnMouseMove(nFlags, point);
@@ -641,8 +583,7 @@ void CI3DScreenBase::OnMouseMove(UINT nFlags, CPoint point)
     if (pUnit && !pUnit->IsDead())
     {
         int nUnitID = pUnit->GetID();
-        if (IWorldConnector.IsLMP() && pMainHero && pMainHero->GetID() == nUnitID)
-            return;
+
         // for ( auto it =  walks.begin(); it != walks.end(); ++it )
         //	if ( it->pUnit->GetID() == nUnitID )
         //		return;
@@ -1087,24 +1028,7 @@ void CI3DScreenBase::NextCommand(bool bSkip)
             }
             //
             pTxtMng->GetSystemString("brief_lost_item", szTmp);
-            if (IWorldConnector.IsLMP() && szBriefing.GetLength() > 0 &&
-                szBriefing.Left(1).CompareNoCase("z") == 0)
-            {
-                CPlayer *pPlayer = theWorldServer.GetPlayer(0);
-                if (pPlayer)
-                    for (POSITION pos = pPlayer->items.GetHeadPosition(); pos;)
-                    {
-                        CItem *pItem = pPlayer->items.GetNext(pos);
-                        if (pItem->WhoAmI() == HPC_ITEM_QUEST)
-                        {
-                            pTxtMng->GetExtendedItemName(pItem, szName);
-                            szOut.Format("\aC\x0ff\x0ff\x0ff %s %s\n", szTmp, szName);
-                            szAllTalk += szOut;
-                            if (!bSkip)
-                                pScroll->AddText(szOut);
-                        }
-                    }
-            }
+
             for (it = pBr->szRemoveItems.begin(); it != pBr->szRemoveItems.end(); it++)
             {
                 CItem *pItem = theWorld.GetItemManager()->CreateItem(*it);
@@ -1579,7 +1503,6 @@ void CI3DScreenBase::OnExitFromModal(DWORD dwRetValue)
     case 0x00100001:
     case 0x00090001:
         pI3D->SetScreensMustDie();
-        IWorldConnector.StopLMP();
         IWorldConnector.ReqGoMainMenu();
         break;
     case 0x00020001: {
@@ -1590,8 +1513,7 @@ void CI3DScreenBase::OnExitFromModal(DWORD dwRetValue)
     }
     break;
     }
-    if (IWorldConnector.IsLMP())
-        LMPPersonsUpdate(true);
+
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::RedrawTopics()
@@ -1648,8 +1570,7 @@ void CI3DScreenBase::FillBriefingsList(int nUnitID)
                     szTopics.push_back((const char *)szBr);
             }
         }
-    if (IWorldConnector.IsLMP())
-        std::sort(szTopics.begin(), szTopics.end(), SCompareTopics());
+
     szBriefings.RemoveAll();
     std::vector<std::string>::iterator i;
     for (i = szTopics.begin(); i != szTopics.end(); ++i)
@@ -2112,238 +2033,5 @@ bool CI3DScreenBase::Autosave()
           }
     */
     return true;
-}
-/////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////
-CI3DBaseFaces::CI3DBaseFaces(CInterface3D *pI)
-    : CI3DObject(pI)
-{
-    SetRect(464, 0, 800, 160);
-    AddSurface(dbgnew CI3DSurface(pI3D, 464, 75, 800, 105));
-    nFaces = 0;
-
-    const char *pszStr[] = { "lmp_status_zone",
-                             "lmp_status_base",
-                             "lmp_status_camp",
-                             "lmp_status_connect",
-                             "lmp_exch_we_offer",
-                             "lmp_exch_they_offer",
-                             0 };
-    CTextManager *pTxtMng = theWorld.GetTextManager();
-    CString szTmp;
-    const char **ppszStr = pszStr;
-    while (*ppszStr)
-    {
-        pTxtMng->GetSystemString(*ppszStr, szTmp);
-        szStatusStrings.Add(szTmp);
-        ppszStr++;
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DBaseFaces::AddFace(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
-{
-    int x, y;
-    switch (nFaces % 4)
-    {
-    case 0:
-        x = 0;
-        y = 0;
-        AddTexture(256, 256);
-        break;
-    case 1:
-        x = 128;
-        y = 0;
-        break;
-    case 2:
-        x = 0;
-        y = 128;
-        break;
-    case 3:
-        x = 128;
-        y = 128;
-        break;
-    }
-
-    PasteTexture(textures[textures.GetSize() - 1], pszTextureName, 128, 128, 128, 128, x, y);
-
-    CI3DFigure *pFig;
-    pFig = AddFigure(pszFigureName);
-
-    int w = 56, h = 80;
-    int l, r, t, b;
-    // l = 400 - nPersons * w / 2 + nFaces * w;
-    l = 800 - (nFaces + 1) * w;
-    r = l + w;
-    t = 0;
-    b = h;
-
-    if (pFig)
-    {
-        pFig->SetRelativeToScreen((l + r) / 2.f, t + 32.f, 7.f);
-        pFig->SetScale(.3f);
-        pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI * 1.05f));
-    }
-    else
-    {
-        pFig = AddFigure();
-        pFig->MakeBar(7, 100, l, t, r, b - 20, 0, 0, 128, 128);
-    }
-
-    pFig->SetUShift(x / 256.f);
-    pFig->SetVShift((128 + y) / 256.f);
-    pFig->SetTexture(textures[textures.GetSize() - 1]);
-
-    nFaces++;
-
-    AddArea()->MakeRect(l, t, r, b);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DBaseFaces::AddFaces()
-{
-    RemoveAllFigures();
-    RemoveAllAreas();
-    RemoveAllTextures();
-
-    nFaces = 0;
-    CString szFigureName, szTextureName, szUnitName, szSex, szGrace;
-    CChatClient::CChatPersonList &people = pChatClient->people;
-    CChatClient::CChatPersonList::const_iterator it;
-    nPersons = 0;
-    pPersons.clear();
-    for (it = people.begin(); it != people.end(); ++it)
-    {
-        if (!pChatClient->pState->IsValid())
-            continue;
-        if (pChatClient->pState->pPerson == (*it))
-            pPersons.insert(pPersons.begin(), *it);
-        else
-            pPersons.push_back(*it);
-        nPersons++;
-    }
-    std::vector<CPtr<CChatPerson>>::const_iterator itt;
-    for (itt = pPersons.begin(); itt != pPersons.end(); ++itt)
-    {
-        const SUDBUnitPrototype *pProt = theUnitDatabase.prototypes[(*itt)->szPrototype];
-        const SUDBRaceModel *pRace = theUnitDatabase.races[pProt->szRace];
-        if (strcmp(pRace->szMaskName, "unhuma") == 0)
-            szSex = "m";
-        else if (strcmp(pRace->szMaskName, "unhufe") == 0)
-            szSex = "f";
-        /*
-        SComplection compl;
-        pUnit->GetComplection( compl );
-        szGrace = "me";
-        if ( compl.grace < 0.2f )
-                szGrace = "th";
-        else if ( compl.grace > 0.8f )
-                szGrace = "fa";
-        */
-        szGrace = "me";
-        szFigureName.Format("infa%s%s%dface", pRace->szMaskName, szGrace, pProt->dwHair + 1);
-        szTextureName.Format("face%s%02d", szSex, pProt->dwSkinIndex);
-        AddFace(szFigureName, szTextureName);
-        areas[nFaces - 1]->SetToolTip((*itt)->szName.c_str());
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DBaseFaces::OnIdle()
-{
-    if (pChatClient->pItemXCHG->IsValid())
-    {
-        IWorldClient.GoCamp(IFACE_EXCHANGE);
-        return;
-    }
-
-    CI3DSurface *pSurf = surfaces[0];
-    int w = 56;
-    // int l = 168 - pPersons.size() * w / 2;
-    int l = 336 - w;
-    pSurf->GetDC();
-    pSurf->Clear();
-
-    CString szStatus;
-    CString szRequestTrade;
-    std::vector<CPtr<CChatPerson>>::const_iterator it;
-    int i;
-    for (i = 0, it = pPersons.begin(); it != pPersons.end(); ++it, ++i)
-    {
-        szStatus.Empty();
-        switch ((*it)->state)
-        {
-        case CPS_ZONE:
-            szStatus = szStatusStrings[0];
-            break;
-        case CPS_BASE:
-            szStatus = szStatusStrings[1];
-            break;
-        case CPS_CAMP:
-            szStatus = szStatusStrings[2];
-            break;
-        case CPS_CONNECTING:
-        case CPS_START:
-            szStatus = szStatusStrings[3];
-            break;
-        }
-        szRequestTrade.Empty();
-        if (pChatClient->pProposal.IsValid() && pChatClient->pProposal->pWhom == (*it))
-            szRequestTrade = szStatusStrings[4];
-        for (auto itt = pChatClient->trades.begin(); itt != pChatClient->trades.end(); ++itt)
-            if ((*itt)->pWho == (*it))
-            {
-                szRequestTrade = szStatusStrings[5];
-                break;
-            }
-        if (!szStatus.IsEmpty())
-            pSurf->DrawText(szStatus, CRect(l, 0, l + w, 15), 0, RGB(255, 255, 255), DT_CENTER);
-        if (!szRequestTrade.IsEmpty())
-            pSurf->DrawText(szRequestTrade, CRect(l, 15, l + w, 30), 0, RGB(255, 255, 255),
-                            DT_CENTER);
-        // l += w;
-        l -= w;
-    }
-    pSurf->ReleaseDC();
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DBaseFaces::OnLButtonDown(UINT nFlags, CPoint point)
-{
-    int ht = HitTest(point);
-    JournalHit(ht);
-    if (ht >= 0 && ht < pPersons.size())
-    {
-        SetProcessed();
-        // CRAP{ - for advanced kick/ban
-        EKickMode eKickMode = ((CI3DScreenBase *)pI3D->GetCurrentScreen())->eKickMode;
-        if (eKickMode != KM_NONE)
-        {
-            char szBuf[128];
-            sprintf(szBuf, "%d", pPersons[ht]->nUniquePersonID);
-            if (eKickMode == KM_KICK)
-                pChatClient->Command(CC_KICK_ID, szBuf);
-            else if (eKickMode == KM_BAN)
-                pChatClient->Command(CC_BAN_ID, szBuf);
-            ((CI3DScreenBase *)pI3D->GetCurrentScreen())->eKickMode = KM_NONE;
-            return;
-        }
-        // CRAP} - for advanced kick/ban
-        pI3D->BeginFX("buttons\\battle\\on_off.wav");
-        if (pChatClient->pState->pPerson != pPersons[ht])
-        {
-            if (pChatClient->pProposal.IsValid() && pChatClient->pProposal->pWhom == pPersons[ht])
-                pChatClient->CancelTradeRequest();
-            else
-                pChatClient->RequestTrade(pPersons[ht]);
-        }
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void CI3DBaseFaces::OnMouseMove(UINT nFlags, CPoint point)
-{
-    int ht = HitTest(point);
-    if (((CI3DScreenBase *)pI3D->GetCurrentScreen())->eKickMode != KM_NONE)
-    {
-        if (ht >= 0 && ht < pPersons.size())
-            theCursor.SetMode(CT_DEFAULT);
-        return;
-    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
