@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BasicChunk.h"
+#include "AssetCodec.h"
 
 #include <vector>
 #include <unordered_map>
@@ -189,8 +190,9 @@ void CDatabase<TYPE>::Load(CSave &file, int nID)
 
     saver.Start(file, true);
     recordIdentity.reset(); // AddT may clear/resize before deserializing records
-    saver.AddT(nID, data);
+    AssetCodec::DatabaseRecords(saver, nID, data);
     saver.Finish(file);
+    datamap.clear(); // discard pointers into the replaced record vector
     // store in map for the fast search
     for (auto pos = data.begin(); pos != data.end(); ++pos)
         datamap[pos->GetCode()] = &(*pos);

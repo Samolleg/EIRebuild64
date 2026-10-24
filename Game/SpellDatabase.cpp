@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "SpellDatabase.h"
 
 #include "CMappedResource.h"
+#include "AssetCodec.h"
 /////////////////////////////////////////////////////////////////////////////////////
 SSpellDatabase theSpellDatabase;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -31,9 +32,9 @@ BOOL SSpellDatabase::Load(LPCSTR pszPath, LPCSTR pszFName)
     //
     CStructureSaver saver;
     saver.Start(file, true);
-    saver.AddT(3, cspells);
-    saver.AddT(4, carmors);
-    saver.AddT(5, cweapons);
+    AssetCodec::Archive(saver).AddT(3, cspells);
+    AssetCodec::Archive(saver).AddT(4, carmors);
+    AssetCodec::Archive(saver).AddT(5, cweapons);
     saver.Finish(file);
     //
     res.CloseFile(pData);

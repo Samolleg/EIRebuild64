@@ -6,6 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "StringProcessing.h"
 #include "BasicChunk.h"
 #include "CMappedResource.h"
+#include "AssetCodec.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CPerkDatabase thePerkDatabase;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -85,8 +86,8 @@ BOOL CPerkDatabase::SaveDatabase(LPCSTR pszPath)
 
     file.OpenWrite(szPath + "perks.pdb");
     saver.Start(file, false);
-    saver.AddT(1, skills);
-    saver.AddT(2, perks);
+    AssetCodec::Archive(saver).AddT(1, skills);
+    AssetCodec::Archive(saver).AddT(2, perks);
     saver.Finish(file);
     file.CloseFile();
 
@@ -115,8 +116,8 @@ BOOL CPerkDatabase::LoadDatabase(LPCSTR pszPath, LPCSTR pszFName)
     saver.Start(file, true);
     // Invalidate borrowed records before any existing vector replacement, including partial load.
     recordIdentity = std::make_shared<RecordIdentity>();
-    saver.AddT(1, skills);
-    saver.AddT(2, perks);
+    AssetCodec::Archive(saver).AddT(1, skills);
+    AssetCodec::Archive(saver).AddT(2, perks);
     saver.Finish(file);
     //
     res.CloseFile(pData);
