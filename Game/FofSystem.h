@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 
 /**********************************************************************
  *<
@@ -35,6 +36,10 @@ enum EDiplomacy
 
 class CFofTracker
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
+private:
     // терпимость к случайным нападениям
     // SFofDamageCount damages[32][32]; // [y][x], вред, полученный плеером y от плеера x,
     // характеризует

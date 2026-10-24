@@ -2,6 +2,7 @@
 #include "SaveSchema.h"
 #include "SaveLoader.h"
 #include "GameBase.h"
+#include "MapObject.h"
 #include <cstring>
 #include <limits>
 
@@ -93,6 +94,16 @@ CGameBase *Registry::GameObject(ObjectId id) const
     CGameBase *object = gameObjects.load(id);
     if (!object || object->GetRTID() != id)
         throw Error(ErrorCode::Identity, "dangling game ObjectId");
+    return object;
+}
+CGameBase *Registry::MapObject(int id) const
+{
+    if (id == -1) return nullptr;
+    if (id < 0 || !gameObjects.map)
+        throw Error(ErrorCode::Identity, "map object writer not bound or invalid map ID");
+    CGameBase *object = gameObjects.map(id);
+    if (!dynamic_cast<CMapObject *>(object) || object->GetID() != id)
+        throw Error(ErrorCode::Identity, "dangling runtime map ID");
     return object;
 }
 const Type &Registry::Find(std::uint32_t id) const
@@ -210,6 +221,14 @@ void Reader::Value(const std::type_info &native, void *value)
 }
 void Writer::GameReference(CGameBase *object) { UInt64(state.registry.GameId(object)); }
 CGameBase *Reader::GameReference() { return state.registry.GameObject(UInt64()); }
+void Writer::MapReference(int id) { GameReference(state.registry.MapObject(id)); }
+int Reader::MapReference()
+{
+    auto *object = GameReferenceAs<CMapObject>();
+    if (!object) return -1;
+    if (object->GetID() < 0) throw Error(ErrorCode::Identity, "invalid restored map ID");
+    return object->GetID();
+}
 std::int16_t Reader::Int16()
 {
     const auto bits = UInt16();

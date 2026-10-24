@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /**********************************************************************
  *<
         FILE: aiUnitLogic.h
@@ -37,6 +38,9 @@ class CItemWeapon;
 /////////////////////////////////////////////////////////////////////////////////////
 struct SAITurnLookOrder
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     float fpAngle;     // угол в направление которого нужно смотреть
     float fpTurnSpeed; // скорость разворота в направлении fpAngle
     float fpTime;      // время, в течение которого нужно в этом направлении смотреть в сегментах
@@ -57,6 +61,9 @@ typedef CAArray<SAITurnLookOrder> CAITLOrders;
 // точка маршрута патруля
 struct SAIRallyPoint
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CPlot3D ptPoint;
     CAITLOrders lookOrders;
     void Clear()

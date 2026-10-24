@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /*==========================================================================================================
 
         Server specific unit class header
@@ -53,6 +54,9 @@ enum EUnitL1State
 // использования скилов итп
 struct SUnitBasicCmd
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     EUnitCommand cmd;      // command id
     int nQSpellNum;        // number of quick spell to cast
     CMapObjectPtr pTarget; // command target if there is one
@@ -62,6 +66,8 @@ struct SUnitBasicCmd
     void Clear()
     {
         cmd = UC_NONE;
+        nQSpellNum = 0;
+        ptTarget = CPlot3D(0, 0, 0);
         pTarget.Clear();
         bUsePoint = false;
     }
@@ -130,6 +136,9 @@ struct SUnitBasicCmd
 /////////////////////////////////////////////////////////////////////////////////////
 struct SUnitCommand : public SUnitBasicCmd
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     // SUnitAttack cmd;               // описание команды с необходимыми параметрами
     union
     {
@@ -154,6 +163,9 @@ struct SUnitCommand : public SUnitBasicCmd
 // скорости анимации
 struct SL0Animation
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     BYTE bStart, bCyclic, bSoundSet;
     int nLength;
     EUnitAnimationSpeed animationSpeed;
@@ -176,17 +188,20 @@ struct SL0Animation
                a.animationSpeed == animationSpeed && a.bSoundSet == bSoundSet;
     }
     bool IsEmpty() { return bStart == 0xff && bCyclic == 0xff; }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // последовательность анимаций, используется в L0 как элементарная анимация
 struct SL0AnimationSeq
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CAArray<SL0Animation> animations;
     // Full ADB indices live beside the byte-sized, on-disk animation records.
     CAArray<DWORD> startIds, cycleIds;
-    int nStartSegment; // -1 if start from current
+    int nStartSegment = -1; // -1 if start from current
 
     SL0AnimationSeq &operator+=(const SL0AnimationSeq &add);
     void Clear()
@@ -220,6 +235,9 @@ struct SL0AnimationSeq
 // полное описание позы для определения анимации suffer, переходов между состояниями и др
 struct SL1Pose
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     EUnitPose pose; // no run, only stan/crawl/lay
     bool bAggressive;
     BYTE bRun; // набор битиков, каждый из которых может заставлять юнит бежать, 1 - от
@@ -231,8 +249,8 @@ struct SL1Pose
         bAggressive = false;
         bRun = 0;
     }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
     void Convert(EUnitPose p)
     {
         bRun = 0;
@@ -258,6 +276,9 @@ struct SL1Pose
 // 1-й уровень обеспечивает прозрачную отработку stun/suffer
 struct SL1Command
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     SL0AnimationSeq attackAnimation; // анимация атаки/ходьбы
     int nTimeStrikeMoment; // момент начала состояния атаки (анимация для атаки содержится в
                            // nAttackAnimation)
@@ -268,7 +289,7 @@ struct SL1Command
     ERPGHitLocations eAttackLocation;
     bool bCalledShot;
     ERPGMagicSubtypes castType;
-    CPlot3D ptDir;
+    CPlot3D ptDir = CPlot3D(0, 0, 0);
 
     void Clear();
     void CreateCastAttack(SL0AnimationSeq animation, int nTime, int nHit,
@@ -285,17 +306,23 @@ struct SL1Command
 /////////////////////////////////////////////////////////////////////////////////////
 struct SContSpellInfo
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CSmartPtr<CItem> pItem; // pointer to spell with some continous spell
     int nDelay;             // delay to cast next time
     bool bIsUsed;           // for temprorary use in BuildContinousSpells list
 
-    SContSpellInfo() { nDelay = 0; }
+    SContSpellInfo() { nDelay = 0; bIsUsed = false; }
     void Load(CSave &file);
     void Store(CSave &file);
 };
 /////////////////////////////////////////////////////////////////////////////////////
 struct STrainInfo
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     bool bIsTrain;
     CSmartPtr<CUnit> master;
 

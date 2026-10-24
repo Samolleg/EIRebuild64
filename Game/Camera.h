@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Plot.h"
 #include "Quaternion.h"
@@ -57,6 +58,8 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////
 struct SCameraPlacement
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     float fpTime;
     float step;
     CPlot3D plot;
@@ -65,6 +68,8 @@ struct SCameraPlacement
 /////////////////////////////////////////////////////////////////////////////////////
 struct SCameraShortcut
 {
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     float fDistance;     // rod in polar coords
     CQuaternion qRotate; // rotation around Z axis

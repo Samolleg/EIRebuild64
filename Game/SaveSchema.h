@@ -69,6 +69,8 @@ struct GameObjects
 {
     std::function<ObjectId(CGameBase *)> store;
     std::function<CGameBase *(ObjectId)> load;
+    // P17 supplies a lookup in the captured map-object table, never the live world.
+    std::function<CGameBase *(int)> map;
 };
 class Registry
 {
@@ -91,6 +93,7 @@ public:
     void SetGameObjects(GameObjects objects) { gameObjects = std::move(objects); }
     ObjectId GameId(CGameBase *) const;
     CGameBase *GameObject(ObjectId) const;
+    CGameBase *MapObject(int id) const;
     const Type &Find(std::uint32_t id) const;
     std::uint32_t Id(const CFundament &object) const;
 };
@@ -121,6 +124,7 @@ public:
     void Blob(const Bytes &value); // encoded bytes, never a native object image
     template <class T> void Value(const T &value) { Value(typeid(T), &value); }
     void GameReference(CGameBase *object);
+    void MapReference(int id); // runtime map ID -> UInt64 ObjectId; -1 -> null
     void Reference(CFundament *object); // uint64 ObjectId; zero = null
 };
 
@@ -149,6 +153,7 @@ public:
     Bytes Blob();
     template <class T> void Value(T &value) { Value(typeid(T), &value); }
     CGameBase *GameReference();
+    int MapReference(); // UInt64 ObjectId -> restored map ID; null -> -1
     template <class T> T *GameReferenceAs()
     {
         CGameBase *object = GameReference();

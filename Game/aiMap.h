@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /**********************************************************************
  *<
         FILE: aiMap.H
@@ -44,6 +45,9 @@ const int AI_N_SAND_TYPE_ID = 3; // attentively watch after aiinfo.res
 /////////////////////////////////////////////////////////////////////////////////////
 struct SRectRegion
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     int nLowX, nHighX, nLowY, nHighY;
 
     void Clear()
@@ -83,8 +87,8 @@ struct SRectRegion
         nHighY = Max(nHighY, nY);
     }
     bool IsIn(int nX, int nY) { return nX >= nLowX && nX <= nHighX && nY >= nLowY && nY <= nHighY; }
-    void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-    void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -92,12 +96,15 @@ struct SRectRegion
 struct SAIPath
 {
 public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
+public:
     CAIFullRoute curSegment; // текущий сегмент пути
 
     // CAIRoute graphRoute;                // маршрут по графу
     CAIRoute toGo;         // осталось пройти эту часть пути
     CPlot2D ptFinish;      // точка назначения рассчитанного маршрута в AITile`s
-    CPlot3D ptDestination; // изначальная точка назначения ( a wish point )
+    CPlot3D ptDestination = CPlot3D(0, 0, 0); // изначальная точка назначения ( a wish point )
     bool bFinished;        // если TRUE curSegment - последний сегмент пути
                            // bRouteFailed показывает удалось ли дойти до намеченной цели, если
                            // подходы к цели были непроходимы, то считается что route был успешным
