@@ -236,6 +236,7 @@
     <ClCompile Include="Game\NetUpdate.cpp" />
     <ClCompile Include="Game\Notification.cpp" />
     <ClCompile Include="Game\Object.cpp" />
+    <ClCompile Include="Game\ObjectIdentity.cpp" />
     <ClCompile Include="Game\Object3DClientSpecific.cpp" />
     <ClCompile Include="Game\Object3DServer.cpp" />
     <ClCompile Include="Game\ObjectDBReader.cpp" />

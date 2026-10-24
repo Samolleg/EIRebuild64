@@ -7,6 +7,7 @@
 #include "sArray.h"      // 2d arrays & array with copy operation
 #include "Tools.h"       // some useful functions
 #include "LuaState.h"
+#include "ObjectIdentity.h"
 #include "luajit-x86/lua.hpp"
 /////////////////////////////////////////////////////////////////////////////////////
 class CBaseManager;
@@ -33,6 +34,7 @@ const DWORD CGB_LAST_BIT = MAKE_LAST_BIT(GENERIC_LAST_BIT, 2);
 class CGameBase
 {
 private:
+    ObjectIdentity::Instance identity;
     int nRefCount; // reference count. access to it only via IncRefCount/DecRefCount
     DWORD dwFlags; // different flags
 
@@ -58,6 +60,7 @@ public:
     // id, type id and subtype id functions
     void SetID(int nNewID) { nID = nNewID; }
     int GetID() const { return nID; }
+    ObjectId GetRTID() const { return identity.GetId(); }
     void SetTypeID(ETypeIDs tidNewTypeID) { tidTypeID = tidNewTypeID; }
     ETypeIDs GetTypeID() const { return tidTypeID; }
     void SetSubtypeID(DWORD dwNewSubtypeID) { dwSubtypeID = dwNewSubtypeID; }
@@ -133,7 +136,7 @@ inline void CGameBase::operator=(const CGameBase &base)
     tidTypeID = base.tidTypeID;
     dwSubtypeID = base.dwSubtypeID;
 }
-inline CGameBase::CGameBase(const CGameBase &base)
+inline CGameBase::CGameBase(const CGameBase &base) : CGameBase()
 {
     (*this) = base;
 }

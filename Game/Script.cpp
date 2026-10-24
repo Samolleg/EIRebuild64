@@ -446,6 +446,11 @@ void CScriptObject::Store(CSave &file)
     file.Write(&nId, 4);
 }
 
+static ObjectId ScriptObjectId(const CMapObject *object)
+{
+    return object ? object->GetRTID() : 0;
+}
+
 //------------------------ CScriptObjectGroup ----------------------------------------------
 void CScriptObjectGroup::Add(CScriptObjectGroup &grpA, CScriptObjectGroup &grpB)
 {
@@ -472,7 +477,7 @@ void CScriptObjectGroup::Add(CScriptObjectGroup &grpA, CScriptObjectGroup &grpB)
             nB++;
             continue;
         }
-        if (pA > pB)
+        if (ScriptObjectId(pA) > ScriptObjectId(pB))
         {
             members[nRes++].SetObject(pB);
             nB++;
@@ -514,7 +519,7 @@ void CScriptObjectGroup::Sub(CScriptObjectGroup &grpA, CScriptObjectGroup &grpB)
             nB++;
             continue;
         }
-        if (pA > pB)
+        if (ScriptObjectId(pA) > ScriptObjectId(pB))
         {
             nB++;
         }
@@ -554,7 +559,7 @@ void CScriptObjectGroup::Cross(CScriptObjectGroup &grpA, CScriptObjectGroup &grp
             nB++;
             continue;
         }
-        if (pA > pB)
+        if (ScriptObjectId(pA) > ScriptObjectId(pB))
         {
             nB++;
         }
@@ -569,10 +574,9 @@ void CScriptObjectGroup::Cross(CScriptObjectGroup &grpA, CScriptObjectGroup &grp
 static int __cdecl CmpObjects(const void *ppA, const void *ppB)
 {
     // !!! to do this can be optimized, but replacement of qsort() on something will give more
-    const CScriptObject *pA = ((CScriptObject **)ppA)[0], *pB = ((CScriptObject **)ppB)[0];
-    if (pA < pB)
-        return -1;
-    return pA > pB;
+    const auto a = ScriptObjectId(static_cast<const CScriptObject *>(ppA)->GetObject());
+    const auto b = ScriptObjectId(static_cast<const CScriptObject *>(ppB)->GetObject());
+    return a < b ? -1 : a > b ? 1 : 0;
 }
 
 void CScriptObjectGroup::Sort()
@@ -623,7 +627,7 @@ void CScriptObjectGroup::Add(CMapObject *pMO)
         pMOMid = members[nMid].GetObject();
         if (pMO == pMOMid)
             return;
-        if (pMO > pMOMid)
+        if (ScriptObjectId(pMO) > ScriptObjectId(pMOMid))
             nDown = nMid + 1;
         else
             nUp = nMid - 1;
@@ -632,11 +636,11 @@ void CScriptObjectGroup::Add(CMapObject *pMO)
 
     members.SetSize(nSize + 1);
     pData = members.GetData();
-    ASSERT(sizeof(pData[0]) == 4);
+    // CScriptObject contains a native pointer; initialize the whole empty slot.
     if (nSize > nDown)
         memmove(pData + nDown + 1, pData + nDown, sizeof(pData[0]) * (nSize - nDown));
 
-    ((int *)pData)[nDown] = 0;
+    ::new (pData + nDown) CScriptObject;
     pData[nDown].SetObject(pMO);
 }
 

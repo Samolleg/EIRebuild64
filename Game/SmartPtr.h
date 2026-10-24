@@ -1,5 +1,5 @@
 #pragma once
-#include <cstdint>
+#include "ObjectIdentity.h"
 // ******************************************************************************** //
 // **                            class CRefCount                                 ** //
 // **          this class have only one goal - track ref counter                 ** //
@@ -10,6 +10,7 @@ class CRefCount
 {
 private:
     mutable int nRefCount;
+    ObjectIdentity::Instance identity;
 
 protected:
     virtual ~CRefCount() {} // this object cannot be deleted directly - only through 'Release'
@@ -18,6 +19,8 @@ public:
         : nRefCount(0)
     {
     } // by default, object created with ref count = '1'
+    CRefCount(const CRefCount &) : nRefCount(0) {}
+    CRefCount &operator=(const CRefCount &) { return *this; }
     // ref count methods
     void AddRef() const { ++nRefCount; }
     void Release() const
@@ -30,7 +33,7 @@ public:
     bool IsReferenced() const { return nRefCount != 0; }
     bool IsUnreferenced() const { return nRefCount == 0; }
     // unique ID of the object
-    uintptr_t GetRTID() const { return reinterpret_cast<uintptr_t>(this); }
+    ObjectId GetRTID() const { return identity.GetId(); }
 };
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //

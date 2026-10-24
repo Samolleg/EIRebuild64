@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include "ObjectIdentity.h"
 /////////////////////////////////////////////////////////////////////////////////////
 // refcounting with multithread support
 /////////////////////////////////////////////////////////////////////////////////////
@@ -45,6 +46,7 @@ public:
 class CMFundament
 {
 private:
+    ObjectIdentity::Instance identity;
     std::atomic<unsigned int> nRefCount;
     //  functions to work with ref count.
     // they are private in order to disable explicit manipulation!
@@ -63,12 +65,13 @@ protected:
     virtual ~CMFundament() {}
 
 public:
+    ObjectId GetRTID() const { return identity.GetId(); }
     CMFundament()
         : nRefCount(0)
     {
     }
     // do not copy refcount when copy object
-    CMFundament(const CMFundament &a) {}
+    CMFundament(const CMFundament &a) : CMFundament() {}
     CMFundament &operator=(const CMFundament &a) { return *this; }
     //
     bool IsValid() const { return this != 0; } //-V704 this check is needed
@@ -157,10 +160,10 @@ public:
     bool operator==(const T *a) const { return static_cast<T *>(Get()) == a; }
     bool operator!=(const CMPtr &a) const { return Get() != a.Get(); }
     bool operator!=(const T *a) const { return static_cast<T *>(Get()) != a; }
-    bool operator<(const CMPtr &a) const { return Get() < a.Get(); }
-    bool operator>(const CMPtr &a) const { return Get() > a.Get(); }
-    bool operator<=(const CMPtr &a) const { return Get() <= a.Get(); }
-    bool operator>=(const CMPtr &a) const { return Get() >= a.Get(); }
+    bool operator<(const CMPtr &a) const { return ObjectIdentity::IdOf(Get()) < ObjectIdentity::IdOf(a.Get()); }
+    bool operator>(const CMPtr &a) const { return ObjectIdentity::IdOf(Get()) > ObjectIdentity::IdOf(a.Get()); }
+    bool operator<=(const CMPtr &a) const { return ObjectIdentity::IdOf(Get()) <= ObjectIdentity::IdOf(a.Get()); }
+    bool operator>=(const CMPtr &a) const { return ObjectIdentity::IdOf(Get()) >= ObjectIdentity::IdOf(a.Get()); }
     // access
     T *operator->() const { return static_cast<T *>(Get()); }
     operator T *() const { return static_cast<T *>(Get()); }

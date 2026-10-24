@@ -58,6 +58,7 @@ private:
     typedef std::unordered_map<void *, void *, SDefaultPtrHash> CObjectsHash;
     CObjectsHash objects;
     std::list<CFundament *> toStore;
+    void ReleaseObjects();
 
     bool ReadShortChunk(CChunkLevel &src, int &nPos, CChunkLevel &res);
     bool WriteShortChunk(CChunkLevel &dst, chunk_id dwID, const char *pData, int nLength);
@@ -82,13 +83,8 @@ public:
     CStructureSaver() { nVersion = 1; bIsReading = false; }
     ~CStructureSaver()
     {
-        if (bIsReading && !objects.empty())
-        {
-            // Pin every created object before releasing any of them during unwind.
-            std::vector<CPtr<CFundament>> keep;
-            for (const auto &entry : objects) keep.emplace_back((CFundament *)entry.second);
-            objects.clear();
-        }
+        if (bIsReading)
+            ReleaseObjects();
     }
     bool IsReading() { return bIsReading; }
     int GetVersion() { return nVersion; }
