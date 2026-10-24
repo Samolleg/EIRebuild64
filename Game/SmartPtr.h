@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // ******************************************************************************** //
 // **                            class CRefCount                                 ** //
 // **          this class have only one goal - track ref counter                 ** //
@@ -29,7 +30,7 @@ public:
     bool IsReferenced() const { return nRefCount != 0; }
     bool IsUnreferenced() const { return nRefCount == 0; }
     // unique ID of the object
-    DWORD GetRTID() const { return reinterpret_cast<DWORD>(this); }
+    uintptr_t GetRTID() const { return reinterpret_cast<uintptr_t>(this); }
 };
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //

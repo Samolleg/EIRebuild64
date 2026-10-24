@@ -138,7 +138,7 @@ void SLightningLeafFunc::CreateRandom(float fpAmpl)
 CPlot3D SLightningLeaf::GetSrcCoord(float fpFrac)
 {
     int nIdx = Float2Int((points.GetSize()) * fpFrac);
-    nIdx = Min(nIdx, points.GetSize() - 1);
+    nIdx = static_cast<int>(Min<INT_PTR>(nIdx, points.GetSize() - 1));
     SXYZW &ptSrc = points[nIdx];
     return CPlot3D(ptSrc.x, ptSrc.y, ptSrc.z);
 }

@@ -571,7 +571,7 @@ BOOL CScript::CreateLexemesList(CString &szFile, CLexemeList &lexemes)
         }
         // Create draft lexeme
         char lexeme[256];
-        int nLexLen = Min(255, bufPtr - lexemeStartPtr);
+        int nLexLen = static_cast<int>(Min<ptrdiff_t>(255, bufPtr - lexemeStartPtr));
         strncpy(lexeme, lexemeStartPtr, nLexLen);
         if (nLexLen == 0)
             continue;

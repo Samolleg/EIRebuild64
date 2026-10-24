@@ -235,7 +235,7 @@ void CI3DConsole::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     case VK_HOME:
         if (bCtrlDown)
         {
-            nCurrentLine = Max(0, szLines.GetSize() - nVisibleLines);
+            nCurrentLine = static_cast<int>(Max<INT_PTR>(0, szLines.GetSize() - nVisibleLines));
             RedrawLines();
         }
         else

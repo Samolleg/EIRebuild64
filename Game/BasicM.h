@@ -1,55 +1,33 @@
 #pragma once
+#include <atomic>
 /////////////////////////////////////////////////////////////////////////////////////
 // refcounting with multithread support
 /////////////////////////////////////////////////////////////////////////////////////
 // специальные функи для refcounts в условиях мульти тредности и мультипроцессорности
-inline void MTSInc(unsigned int *pnRefs)
+inline void MTSInc(std::atomic<unsigned int> *pnRefs)
 {
-    _asm { 
-	mov eax, pnRefs
-	lock inc dword ptr[eax]
-    }
+    pnRefs->fetch_add(1);
 }
-inline void MTSDec(unsigned int *pnRefs)
+inline void MTSDec(std::atomic<unsigned int> *pnRefs)
 {
-    _asm { 
-	mov eax, pnRefs
-	lock dec dword ptr[eax]
-    }
+    pnRefs->fetch_sub(1);
 }
-inline bool MTSDecTest(unsigned int *pnRefs)
+inline bool MTSDecTest(std::atomic<unsigned int> *pnRefs)
 {
-    bool bRes;
-    _asm {
-	mov eax, pnRefs
-	lock dec dword ptr[eax]
-	setz al
-	mov bRes, al
-    }
-    return bRes;
+    return pnRefs->fetch_sub(1) == 1;
 }
-inline void MTSInc(unsigned char *pnRefs)
+inline void MTSInc(std::atomic<unsigned char> *pnRefs)
 {
-    _asm { 
-	mov eax, pnRefs
-	lock inc byte ptr[eax]
-    }
+    pnRefs->fetch_add(1);
 }
-inline bool MTSDecTest(unsigned char *pnRefs)
+inline bool MTSDecTest(std::atomic<unsigned char> *pnRefs)
 {
-    bool bRes;
-    _asm {
-	mov eax, pnRefs
-	lock dec byte ptr[eax]
-	setz al
-	mov bRes, al
-    }
-    return bRes;
+    return pnRefs->fetch_sub(1) == 1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 class CMTSLock
 {
-    unsigned char cLock;
+    std::atomic<unsigned char> cLock;
 
 public:
     CMTSLock() { cLock = 1; }
@@ -67,7 +45,7 @@ public:
 class CMFundament
 {
 private:
-    unsigned int nRefCount;
+    std::atomic<unsigned int> nRefCount;
     //  functions to work with ref count.
     // they are private in order to disable explicit manipulation!
     // use CMPtr templates instead

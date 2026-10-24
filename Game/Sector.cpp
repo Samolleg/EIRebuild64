@@ -185,15 +185,7 @@ void CSector::SetBorderLODsFlags()
 
 inline void Copy12Bytes(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		mov eax, [ ECX + 8 ]
-		fistp qword ptr [ EDX ]
-		mov [ EDX + 8 ], eax
-    }
+    std::memcpy(fpDst, fpSrc, 12);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1433,6 +1425,8 @@ void CSector::LightVertexWithSun(CLight *pSunLight, CPlot3D *pPlot, SLVertex3D *
 
 /////////////////////////////////////////////////////////////////////////////////////
 
+#pragma float_control(precise, on, push)
+#pragma fenv_access(on)
 void CSector::SetLight(CLight *pLight, CTerrain *pTerrain, BOOL bIsDynOnly, int x1, int y1, int x2,
                        int y2)
 {
@@ -1440,8 +1434,7 @@ void CSector::SetLight(CLight *pLight, CTerrain *pTerrain, BOOL bIsDynOnly, int 
 
     bHaveSpecular = false;
 
-    unsigned int nOldControl87 = _control87(0, 0);
-    _control87(_RC_CHOP, _MCW_RC);
+    ScopedFloatRounding rounding(FloatRounding::Chop);
 
     pTerrain->SetSector(this);
     if (bHaveLayers)
@@ -1490,11 +1483,13 @@ void CSector::SetLight(CLight *pLight, CTerrain *pTerrain, BOOL bIsDynOnly, int 
     }
     AddState(ESS_LIGHTED);
 
-    _control87(nOldControl87, 0xFFFFFFFF);
+    rounding.Restore();
 
     if (bIsDynOnly == FALSE)
         nRelightDelay = -1;
 }
+#pragma fenv_access(off)
+#pragma float_control(pop)
 
 /////////////////////////////////////////////////////////////////////////////////////
 void CSector::Free()

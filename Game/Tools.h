@@ -1,6 +1,14 @@
 #pragma once
 /////////////////////////////////////////////////////////////////////////////////////
 #include <assert.h>
+#include <algorithm>
+#include <cfenv>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <intrin.h>
+#include <type_traits>
 /////////////////////////////////////////////////////////////////////////////////////
 // different constants with 'pi'
 const double pi = 3.141592653589793238462;
@@ -25,10 +33,21 @@ inline void FREE(T *&pointer)
     pointer = 0;
 }
 
+template <class TYPE_OUT, class TYPE_IN>
+inline TYPE_OUT bit_cast(TYPE_IN val)
+{
+    static_assert(sizeof(TYPE_OUT) == sizeof(TYPE_IN), "bit_cast requires equal sizes");
+    static_assert(std::is_trivially_copyable<TYPE_OUT>::value &&
+                  std::is_trivially_copyable<TYPE_IN>::value, "bit_cast requires trivial types");
+    TYPE_OUT result;
+    std::memcpy(&result, &val, sizeof(result));
+    return result;
+}
+
 const DWORD FP_ONE_BITS = 0x3F800000;
 inline DWORD FP_BITS(float fp)
 {
-    return *reinterpret_cast<DWORD *>(&fp);
+    return bit_cast<DWORD>(fp);
 }
 inline DWORD FP_ABS_BITS(float fp)
 {
@@ -42,11 +61,7 @@ inline DWORD FP_SIGN_BIT(float fp)
 // standard is long long but msvc does not support this name
 typedef __int64 int64;
 /////////////////////////////////////////////////////////////////////////////////////
-template <class TYPE_OUT, class TYPE_IN>
-inline TYPE_OUT bit_cast(TYPE_IN val)
-{
-    return *reinterpret_cast<TYPE_OUT *>(&val);
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE_OUT, class TYPE_IN>
 inline TYPE_OUT *ptr_cast(TYPE_IN *pVal)
@@ -57,43 +72,22 @@ inline TYPE_OUT *ptr_cast(TYPE_IN *pVal)
 // Return the next power of 2 higher than the input
 // If the input is already a power of 2, the output will be the same as the input.
 // Got this from Brian Sharp's sweng mailing list.
-inline int GetNextPow2(DWORD n)
+inline size_t GetNextPow2(size_t n)
 {
-    n -= 1;
-
-    n |= n >> 16;
-    n |= n >> 8;
-    n |= n >> 4;
-    n |= n >> 2;
-    n |= n >> 1;
-
+    --n;
+    for (size_t shift = 1; shift < sizeof(n) * 8; shift *= 2)
+        n |= n >> shift;
     return n + 1;
-}
-inline int GetNextPow2(int n)
-{
-    return GetNextPow2(DWORD(n));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // 'magic' division on '2' and '4' in float
 inline float Div2(float fVal)
 {
-    _asm
-    {
-		mov eax, [fVal]
-		add eax, 0xff800000
-		mov [fVal], eax
-    }
-    return fVal;
+    return bit_cast<float>(FP_BITS(fVal) + static_cast<DWORD>(0xff800000));
 }
 inline float Div4(float fVal)
 {
-    _asm
-    {
-		mov eax, [fVal]
-		add eax, 0xff000000
-		mov [fVal], eax
-    }
-    return fVal;
+    return bit_cast<float>(FP_BITS(fVal) + static_cast<DWORD>(0xff000000));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE_RESULT, class TYPE_VAL>
@@ -121,8 +115,8 @@ inline TYPE_RESULT IsValInRangeCenter(TYPE_VAL valVal, TYPE_VAL valMin, TYPE_VAL
 // return: 1.0f/fp
 inline float nr_rcpr(float fp)
 {
-    int _i = 2 * FP_ONE_BITS - *reinterpret_cast<int *>(&fp);
-    float r = *reinterpret_cast<float *>(&_i);
+    DWORD _i = 2 * FP_ONE_BITS - FP_BITS(fp);
+    float r = bit_cast<float>(_i);
     return (r * (2.0f - fp * r));
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -132,7 +126,7 @@ inline float fast_exp(float fp)
 {
     float e = -1.44269504f * static_cast<float>(0x00800000) * fp;
     int _i = static_cast<int>(e) + FP_ONE_BITS;
-    return *reinterpret_cast<float *>(&_i);
+    return bit_cast<float>(_i);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // square and triple functions
@@ -159,13 +153,7 @@ inline TYPE triple(TYPE x)
 /////////////////////////////////////////////////////////////////////////////////////
 inline float FlipSign(float fVal)
 {
-    _asm
-    {
-		mov eax, [fVal]
-		xor eax, 0x80000000
-		mov [fVal], eax
-    }
-    return fVal;
+    return bit_cast<float>(FP_BITS(fVal) ^ static_cast<DWORD>(0x80000000));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // signum function
@@ -180,32 +168,16 @@ inline TYPE Sign(const TYPE x)
         return 0;
 }
 // calculates sign for integer variable, returns -1, 0, 1. template specialization
-#pragma warning(disable : 4035)
 template <>
 inline int Sign<int>(const int nVal)
 {
-    _asm
-    {
-		mov eax, nVal
-		test eax, 0x7FFFFFFF
-		setne cl
-		sar eax, 31
-		or al, cl
-    }
+    return (nVal > 0) - (nVal < 0);
 }
 template <>
 inline short int Sign<short int>(const short int nVal)
 {
-    _asm
-    {
-		mov ax, nVal
-		test ax, 0x7FFF
-		setne cl
-		sar ax, 15
-		or al, cl
-    }
+    return static_cast<short>((nVal > 0) - (nVal < 0));
 }
-#pragma warning(default : 4035)
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 // dice and random functions
@@ -256,30 +228,14 @@ inline TYPE NormalizeAngleInRadian(const TYPE angle)
     return TYPE(angle % (2.0 * pi));
 }
 /////////////////////////////////////////////////////////////////////////////////////
-inline void MemSetDWord(DWORD *lpData, const DWORD value, const int nCount)
+inline void MemSetDWord(DWORD *lpData, const DWORD value, const size_t nCount)
 {
-    _asm
-    {
-		push edi
-		mov ecx, nCount
-		mov edi, lpData
-		mov eax, value
-		rep stosd
-		pop edi
-    }
+    std::fill_n(lpData, nCount, value);
 }
 
-inline void MemSetInt(int *lpData, const int value, const int nCount)
+inline void MemSetInt(int *lpData, const int value, const size_t nCount)
 {
-    _asm
-    {
-		push edi
-		mov ecx, nCount
-		mov edi, lpData
-		mov eax, value
-		rep stosd
-		pop edi
-    }
+    std::fill_n(lpData, nCount, value);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -295,218 +251,128 @@ inline float CorrectCosAngle(float angle)
     return angle;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-// very fast float-to-int conversion. uses current FPU rounding state
+// Float-to-int conversion with explicit signed32 overflow behaviour.
+// Explicit conversion policy; ordinary execution starts in nearest/even mode.
+enum class FloatRounding
+{
+    NearestEven = FE_TONEAREST,
+    Chop = FE_TOWARDZERO,
+    Down = FE_DOWNWARD,
+    Up = FE_UPWARD
+};
+
+// fenv controls the x64 SSE environment. Restore rounding on every exit; leave
+// exception flags alone. Scope this object to the original rounding region.
+class ScopedFloatRounding
+{
+    int saved;
+    bool active = true;
+
+public:
+    explicit ScopedFloatRounding(FloatRounding mode)
+        : saved(std::fegetround())
+    {
+        std::fesetround(static_cast<int>(mode));
+    }
+    void Restore()
+    {
+        if (active)
+        {
+            std::fesetround(saved);
+            active = false;
+        }
+    }
+    ~ScopedFloatRounding() { Restore(); }
+    ScopedFloatRounding(const ScopedFloatRounding &) = delete;
+    ScopedFloatRounding &operator=(const ScopedFloatRounding &) = delete;
+};
+
+inline int RoundFloatToInt(float value, FloatRounding mode)
+{
+    const int indefinite = INT32_MIN;
+    const double input = static_cast<double>(value);
+    if (!std::isfinite(input))
+        return indefinite;
+    double result;
+    switch (mode)
+    {
+    case FloatRounding::Chop:
+        result = std::trunc(input);
+        break;
+    case FloatRounding::Down:
+        result = std::floor(input);
+        break;
+    case FloatRounding::Up:
+        result = std::ceil(input);
+        break;
+    default:
+    {
+        const double lower = std::floor(input);
+        const double fraction = input - lower;
+        result = lower;
+        if (fraction > 0.5 || (fraction == 0.5 && std::fmod(lower, 2.0) != 0.0))
+            result = lower + 1.0;
+        break;
+    }
+    }
+    if (result < -2147483648.0 || result >= 2147483648.0)
+        return indefinite;
+    return static_cast<int>(result);
+}
+
+// Honour local terrain/lighting scopes, including callers in other helpers.
 inline int MINT(const float fpVar)
 {
-    int nRet;
-    __asm {
-		fld dword ptr fpVar
-		fistp nRet
-    }
-    ;
-    return nRet;
+    return RoundFloatToInt(fpVar, static_cast<FloatRounding>(std::fegetround()));
 }
 // the same as MINT
 inline int Float2Int(const float fpVar)
 {
-    int nRet;
-    __asm {
-		fld dword ptr fpVar
-		fistp nRet
-    }
-    ;
-    return nRet;
+    return MINT(fpVar);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline float select_lt( float x, float y, float val1, float val2 )
 // very fast comparison: 'x' < 'y' ? val1 : val2
 inline float select_lt(float x, float y, float val1, float val2)
 {
-    float z;
-    _asm
-    {
-        // loading 'x' and compare with 'y'
-		xor					eax, eax
-		fld         dword ptr [x]
-		fcomp       dword ptr [y]
-        // store compare flags
-		fnstsw      ax
-            // test comparison result and set '1' or '0'
-            // load 'val1' and 'val2'
-		mov					edx, [val1]
-		mov					ecx, [val2]
-            // create mask for merging
-		and					eax, 0100h
-		shl					eax, 23
-		sar					eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and					edx, eax
-		not					eax
-		and					ecx, eax
-		or					edx, ecx
-
-		mov					[z], edx
-    }
-    return z;
+    // x87 C0 is also set for unordered operands.
+    return !(x >= y) ? val1 : val2;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline float select_gt( float x, float y, float val1, float val2 )
 // very fast comparison: 'x' > 'y' ? val1 : val2
 inline float select_gt(float x, float y, float val1, float val2)
 {
-    float z;
-    _asm
-    {
-        // loading 'x' and compare with 'y'
-		xor					eax, eax
-		fld         dword ptr [x]
-		fcomp       dword ptr [y]
-        // store compare flags
-		fnstsw      ax
-            // test comparison result and set '1' or '0'
-            // load 'val1' and 'val2'
-		mov					edx, [val1]
-		mov					ecx, [val2]
-        // create mask for merging
-		test        ah, 41h
-		sete				al
-		shl					eax, 31
-		sar					eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and					edx, eax
-		not					eax
-		and					ecx, eax
-		or					edx, ecx
-
-		mov					[z], edx
-    }
-    return z;
+    return x > y ? val1 : val2;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline float select_le( float x, float y, float val1, float val2 )
 // very fast comparison: 'x' <= 'y' ? val1 : val2
 inline float select_le(float x, float y, float val1, float val2)
 {
-    float z;
-    _asm
-    {
-        // loading 'x' and compare with 'y'
-		xor					eax, eax
-		fld         dword ptr [x]
-		fcomp       dword ptr [y]
-        // store compare flags
-		fnstsw      ax
-            // test comparison result and set '1' or '0'
-            // load 'val1' and 'val2'
-		mov					edx, [val1]
-		mov					ecx, [val2]
-        // create mask for merging
-		test        ah, 41h
-		setne				al
-		shl					eax, 31
-		sar					eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and					edx, eax
-		not					eax
-		and					ecx, eax
-		or					edx, ecx
-
-		mov					[z], edx
-    }
-    return z;
+    return !(x > y) ? val1 : val2;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline float select_ge( float x, float y, float val1, float val2 )
 // very fast comparison: 'x' >= 'y' ? val1 : val2
 inline float select_ge(float x, float y, float val1, float val2)
 {
-    float z;
-    _asm
-    {
-        // loading 'x' and compare with 'y'
-		xor					eax, eax
-		fld         dword ptr [x]
-		fcomp       dword ptr [y]
-        // store compare flags
-		fnstsw      ax
-            // test comparison result and set '1' or '0'
-            // load 'val1' and 'val2'
-		mov					edx, [val1]
-		mov					ecx, [val2]
-            // create mask for merging
-		and					eax, 0100h
-		xor					eax, 0100h
-		shl					eax, 23
-		sar					eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and					edx, eax
-		not					eax
-		and					ecx, eax
-		or					edx, ecx
-
-		mov					[z], edx
-    }
-    return z;
+    return x >= y ? val1 : val2;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline float select_eq( float x, float y, float val1, float val2 )
 // very fast comparison: 'x' == 'y' ? val1 : val2
 inline float select_eq(float x, float y, float val1, float val2)
 {
-    float z;
-    _asm
-    {
-        // loading 'x' and compare with 'y'
-		xor					eax, eax
-		mov edx, [x]
-		cmp edx, [y]
-        // test comparison result and set '1' or '0'
-        // load 'val1' and 'val2'
-        // create mask for merging
-		sete				al
-		mov					edx, [val1]
-		shl					eax, 31
-		mov					ecx, [val2]
-		sar					eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and					edx, eax
-		not					eax
-		and					ecx, eax
-		or					edx, ecx
-
-		mov					[z], edx
-    }
-    return z;
+    // These two selectors compare representations, including NaNs and +/-0.
+    return FP_BITS(x) == FP_BITS(y) ? val1 : val2;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline float select_ne( float x, float y, float val1, float val2 )
 // very fast comparison: 'x' != 'y' ? val1 : val2
 inline float select_ne(float x, float y, float val1, float val2)
 {
-    float z;
-    _asm
-    {
-        // loading 'x' and compare with 'y'
-		xor					eax, eax
-		mov edx, [x]
-		cmp edx, [y]
-        // test comparison result and set '1' or '0'
-        // load 'val1' and 'val2'
-        // create mask for merging
-		setne				al
-		mov					edx, [val1]
-		shl					eax, 31
-		mov					ecx, [val2]
-		sar					eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and					edx, eax
-		not					eax
-		and					ecx, eax
-		or					edx, ecx
-
-		mov					[z], edx
-    }
-    return z;
+    return FP_BITS(x) != FP_BITS(y) ? val1 : val2;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // inline BYTE CheckForViewingFrustum( float xp, float yp, float zp, float wp )
@@ -519,49 +385,15 @@ inline float select_ne(float x, float y, float val1, float val2)
 //			( (zp >   wp) << 5 );
 inline BYTE CheckForViewingFrustum(float xp, float yp, float zp, float wp)
 {
-    float wp2 = wp + wp;
-    BYTE value;
-
+    const float wp2 = wp + wp;
     xp += wp;
     yp += wp;
-
-    _asm
-        {         // xp <= 0, yp <= 0, zp <= 0
- 		mov 	edx, xp
- 		mov 	eax, yp
- 		shr 	edx, 31
- 		mov 	ecx, zp
- 		shr 	eax, 31
- 		shr 	ecx, 31
- 		shl 	eax, 2
- 		shl 	ecx, 4
- 		or 		edx, eax
-                  // xp > wp2, yp > wp2, zp > wp
- 		fld 	[wp2]
- 		fcomp [xp]
- 		or 		edx, ecx
- 		fnstsw ax
- 		fld 	[wp2]
- 		and 	eax, 0100h
- 		fcomp [yp]
- 		shr 	eax, 7
- 		or 		edx, eax
- 		fnstsw ax
- 		fld 	[wp]
- 		and 	eax, 0100h
- 		fcomp [zp]
- 		shr 	eax, 5
- 		or 		edx, eax
- 		fnstsw ax
- 		and 	eax, 0100h
- 		shr 	eax, 3
-                  // form return value in eax and move it to 'value'
-		or 		eax, edx
-		mov [value], al
-        }
-    ;
-
-    return value;
+    return static_cast<BYTE>((FP_BITS(xp) >> 31) |
+                            (static_cast<DWORD>(!(wp2 >= xp)) << 1) |
+                            ((FP_BITS(yp) >> 31) << 2) |
+                            (static_cast<DWORD>(!(wp2 >= yp)) << 3) |
+                            ((FP_BITS(zp) >> 31) << 4) |
+                            (static_cast<DWORD>(!(wp >= zp)) << 5));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // min/max functions
@@ -580,47 +412,14 @@ inline TYPE Max(TYPE val1, TYPE val2)
 template <>
 inline float Min<float>(float a, float b)
 {
-    float fpRet;
-    _asm
-    {
-        // comparing
-		fld         dword ptr [b]
-		fcomp		dword ptr [a]
-		fnstsw      ax
-		mov			ecx, dword ptr [b]
-		shl			eax, 23
-		sar			eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and			ecx, eax
-		not			eax
-		and			eax, dword ptr [a]
-		or			eax, ecx
-		mov			[fpRet], eax
-    }
-    return fpRet;
+    // Keep the first operand on ties and the second on unordered comparisons.
+    return !(b >= a) ? b : a;
 }
 // returns minimum of two float values
 template <>
 inline float Max<float>(float a, float b)
 {
-    float fpRet;
-    _asm
-    {
-        // comparing
-		fld         dword ptr [a]
-		fcomp		dword ptr [b]
-		fnstsw      ax
-		mov			ecx, dword ptr [b]
-		shl			eax, 23
-		sar			eax, 31
-            // merging: (val1 & mask) | (val2 & ~mask)
-		and			ecx, eax
-		not			eax
-		and			eax, dword ptr [a]
-		or			eax, ecx
-		mov			[fpRet], eax
-    }
-    return fpRet;
+    return !(a >= b) ? b : a;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // Calc normalized canonical line equation ax+by+c=0
@@ -650,19 +449,19 @@ inline void GetLineEq(float x1, float x2, float y1, float y2, float *a, float *b
 //	Floats as dwords
 inline DWORD Float2DW(float fpVar)
 {
-    return *(reinterpret_cast<unsigned int *>(&fpVar));
+    return FP_BITS(fpVar);
 }
 inline BOOL IsNegative(float fpVar)
 {
-    return *(reinterpret_cast<unsigned int *>(&fpVar)) & 0x80000000;
+    return static_cast<BOOL>(FP_BITS(fpVar) & static_cast<DWORD>(0x80000000));
 }
 inline BOOL IsPositive(float fpVar)
 {
-    return (*(reinterpret_cast<unsigned int *>(&fpVar)) & 0x80000000) == 0;
+    return (FP_BITS(fpVar) & static_cast<DWORD>(0x80000000)) == 0;
 }
 inline BOOL IsZero(float fpVar)
 {
-    return *(reinterpret_cast<unsigned int *>(&fpVar)) == 0;
+    return FP_BITS(fpVar) == 0;
 }
 /*
 inline float fabs( const float fpValue )
@@ -750,130 +549,63 @@ inline float ACos(float fpCos)
     return static_cast<float>(acos(fpCos));
 }
 /////////////////////////////////////////////////////////////////////////////////////
-#define MINIMIZE_INT(nToMin, nHow)                                                      \
-    _asm mov ecx, nToMin _asm cmp ecx, nHow _asm setl al _asm shl eax, 31 _asm sar eax, \
-        31 _asm and nToMin, eax _asm not eax _asm and eax, nHow _asm or nToMin, eax
+template <class T, class U>
+inline void MINIMIZE_INT(T &nToMin, U nHow)
+{
+    const int32_t current = static_cast<int32_t>(nToMin);
+    const int32_t limit = static_cast<int32_t>(nHow);
+    nToMin = static_cast<T>(current < limit ? current : limit);
+}
 
-#define MINIMIZE_UINT(nToMin, nHow)                                                     \
-    _asm mov ecx, nToMin _asm cmp ecx, nHow _asm setb al _asm shl eax, 31 _asm sar eax, \
-        31 _asm and nToMin, eax _asm not eax _asm and eax, nHow _asm or nToMin, eax
+template <class T, class U>
+inline void MINIMIZE_UINT(T &nToMin, U nHow)
+{
+    const uint32_t current = static_cast<uint32_t>(nToMin);
+    const uint32_t limit = static_cast<uint32_t>(nHow);
+    nToMin = static_cast<T>(current < limit ? current : limit);
+}
 /////////////////////////////////////////////////////////////////////////////////////
 inline void Copy64Bits(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		fistp qword ptr [ EDX ]
-    }
+    std::memcpy(fpDst, fpSrc, 8);
 }
 
 inline void Copy128Bits(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		fistp qword ptr [ EDX ]
-		fild qword ptr [ ECX + 8 ]
-		fistp qword ptr [ EDX + 8 ]
-    }
+    std::memcpy(fpDst, fpSrc, 16);
 }
 
 inline void Copy256Bits(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		fistp qword ptr [ EDX ]
-		fild qword ptr [ ECX + 8 ]
-		fistp qword ptr [ EDX + 8 ]
-		fild qword ptr [ ECX + 16 ]
-		fistp qword ptr [ EDX + 16 ]
-		fild qword ptr [ ECX + 24 ]
-		fistp qword ptr [ EDX + 24 ]
-    }
+    std::memcpy(fpDst, fpSrc, 32);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 inline void Copy8Bytes(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		fistp qword ptr [ EDX ]
-    }
+    std::memcpy(fpDst, fpSrc, 8);
 }
 
 inline void Copy16Bytes(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		fistp qword ptr [ EDX ]
-		fild qword ptr [ ECX + 8 ]
-		fistp qword ptr [ EDX + 8 ]
-    }
+    std::memcpy(fpDst, fpSrc, 16);
 }
 
 inline void Copy32Bytes(void *fpDst, const void *fpSrc)
 {
-    _asm
-    {
-		mov ecx, [ fpSrc ]
-		mov edx, [ fpDst ]
-		fild qword ptr [ ECX ]
-		fistp qword ptr [ EDX ]
-		fild qword ptr [ ECX + 8 ]
-		fistp qword ptr [ EDX + 8 ]
-		fild qword ptr [ ECX + 16 ]
-		fistp qword ptr [ EDX + 16 ]
-		fild qword ptr [ ECX + 24 ]
-		fistp qword ptr [ EDX + 24 ]
-    }
+    std::memcpy(fpDst, fpSrc, 32);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 const DWORD CPUID_MMX_FEATURE_PRESENT = 0x00800000;
 const DWORD CPUID_SSE_FEATURE_PRESENT = 0x02000000;
-#define GET_CPUID __asm _emit 0x0f __asm _emit 0xa2
 inline void GetCPUID(char str[13], DWORD &dwRes)
 {
-    static char szRez[13];
-    static DWORD dwRes1;
-    szRez[12] = 0;
-    _asm {
-		pusha // keep compiler happy
-		pushfd // get extended flags
-		pop eax // store extended flags in eax
-		mov ebx, eax // save current flags
-		xor eax, 200000h // toggle bit 21
-		push eax // put new flags on stack
-		popfd // flags updated now in flags
-		pushfd // get extended flags
-		pop eax // store extended flags in eax
-		xor eax, ebx // if bit 21 r/w then eax <> 0
-		je q // can't toggle id bit (21) no cpuid here
-
-		mov	eax, 1
-		GET_CPUID // perform CPUID command
-		mov dwRes1, edx // store CPUID in dwRes1
-		mov dword ptr[szRez], eax // store ASCII vendor name
-		mov dword ptr[szRez]+4, ebx // in the szRez
-		mov dword ptr[szRez]+8, ecx //
-	q:
-		popa
-    }
-    strcpy(str, szRez);
-    dwRes = dwRes1;
+    int registers[4];
+    __cpuid(registers, 1);
+    // Preserve the legacy leaf-1 EAX/EBX/ECX bytes, not a leaf-0 vendor ID.
+    std::memcpy(str, registers, 12);
+    str[12] = 0;
+    dwRes = static_cast<DWORD>(registers[3]);
 }
-#undef GET_CPUID
 
 // for each по CList с возможностью удаления элемента (через CList::RemoveAt)
 template <class Arg, class ArgType>

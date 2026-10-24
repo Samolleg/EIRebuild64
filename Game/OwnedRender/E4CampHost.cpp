@@ -243,7 +243,7 @@ OwnedRender::E4::Scroll E4CampAccess::Scroll(void* owner,List list){
     if(!grid||!grid->IsVisible())return {};
     PrepareGrid(grid);
     const int cols=Layout().grid_columns(list!=List::stash);
-    return {true,First(grid)/cols,(grid->pSortedItems.GetSize()+cols-1)/cols,Layout().grid_rows(list!=List::stash),grid->nSortMode};
+    return {true,First(grid)/cols,static_cast<int>((grid->pSortedItems.GetSize()+cols-1)/cols),Layout().grid_rows(list!=List::stash),grid->nSortMode};
 }
 void E4CampAccess::ScrollTo(void* owner,List list,int pos){
     auto* s=static_cast<CI3DScreenCamp*>(owner);const auto value=Scroll(owner,list);

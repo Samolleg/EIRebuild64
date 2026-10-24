@@ -980,6 +980,8 @@ struct SCoordInfo
     int nCellX, nCellY;
 };
 
+#pragma float_control(precise, on, push)
+#pragma fenv_access(on)
 void CTerrain::GetProjection(CXYZW4Array &coords)
 {
     assert(FP_CL_MP_SIZE == 1.f);
@@ -988,8 +990,7 @@ void CTerrain::GetProjection(CXYZW4Array &coords)
     if (coords.GetSize() == 0)
         return;
 
-    unsigned int nOldControl87 = _control87(0, 0);
-    _control87(_RC_CHOP, _MCW_RC);
+    ScopedFloatRounding rounding(FloatRounding::Chop);
 
     coordInfo.SetSize(coords.GetSize() * 4);
     SXYZW4 *pCoord = coords.GetData();
@@ -1015,7 +1016,7 @@ void CTerrain::GetProjection(CXYZW4Array &coords)
         }
     }
 
-    _control87(nOldControl87, 0xFFFFFFFF);
+    rounding.Restore();
 
     for (int j = nMinSY; j <= nMaxSY; j++)
         for (int i = nMinSX; i <= nMaxSX; i++)
@@ -1040,6 +1041,8 @@ void CTerrain::GetProjection(CXYZW4Array &coords)
             }
         }
 }
+#pragma fenv_access(off)
+#pragma float_control(pop)
 
 // Get terrain type using map header terrain type info for given X, Y coordinates
 ETERRTYPE CTerrain::GetTerrainType(float fpX, float fpY)
@@ -1261,14 +1264,15 @@ BOOL CTerrain::TraceToSun(CPlot3D *pFrom)
 
 // ------------------ Trace ray to first terrain's surface for visible terrain part
 // ------------------------
+#pragma float_control(precise, on, push)
+#pragma fenv_access(on)
 BOOL CTerrain::TraceRayForVisibleTerrain(const CPlot3D *pPtStart, const CQuaternion *pDirection,
                                          const float fpMaxRayLen, CPlot3D *pResult)
 {
     if (!IsLoaded())
         return FALSE;
 
-    unsigned int nOldControl87 = _control87(0, 0);
-    _control87(_RC_DOWN, _MCW_RC);
+    ScopedFloatRounding rounding(FloatRounding::Down);
 
     CPlot3D ptOrt(0, 0, 1);
     ptOrt = pDirection->Rotate(ptOrt);
@@ -1319,15 +1323,17 @@ BOOL CTerrain::TraceRayForVisibleTerrain(const CPlot3D *pPtStart, const CQuatern
                     pResult->y = ptStart.y;
                     pResult->z = fpMidZ;
                 }
-                _control87(nOldControl87, 0xFFFFFFFF);
+                rounding.Restore();
                 return TRUE;
             }
         }
         ptStart += ptOrt;
     }
-    _control87(nOldControl87, 0xFFFFFFFF);
+    rounding.Restore();
     return FALSE;
 }
+#pragma fenv_access(off)
+#pragma float_control(pop)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 

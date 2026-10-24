@@ -73,16 +73,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #define DONT_USE_SETTINGS_INI 1*/
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
-static inline double GetI64(_ULARGE_INTEGER *t)
+static inline double GetI64(const ULARGE_INTEGER *t)
 {
-    double fpRes;
-    _asm
-    {
-		mov eax, t
-		fild qword ptr [eax]
-		fstp fpRes
-    }
-    return fpRes;
+    return static_cast<double>(t->QuadPart);
 }
 
 double NGame::GetFreeDiskSpace(const char *pszDrive)
