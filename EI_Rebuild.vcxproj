@@ -87,6 +87,7 @@
     <ClCompile Include="Game\BaseManager.cpp" />
     <ClCompile Include="Game\Basic.cpp" />
     <ClCompile Include="Game\BasicChunk.cpp" />
+    <ClCompile Include="Game\SaveSchema.cpp" />
     <ClCompile Include="Game\BinkVideo.cpp" />
     <ClCompile Include="Game\Camera.cpp" />
     <ClCompile Include="Game\CameraTerrainCollision.cpp" />
@@ -351,6 +352,7 @@
     <ClInclude Include="Game\BaseManager.h" />
     <ClInclude Include="Game\Basic.h" />
     <ClInclude Include="Game\BasicChunk.h" />
+    <ClInclude Include="Game\SaveSchema.h" />
     <ClInclude Include="Game\BasicFactory.h" />
     <ClInclude Include="Game\BasicM.h" />
     <ClInclude Include="Game\BinkVideo.h" />

@@ -15,8 +15,8 @@ extern CClassFactory<CFundament> SSClasses;
 // a) chunk structure
 // b) ptr/ref storage
 // system is able to store ref/ptr only for objectbase ancestors
-// final save file structure
-// -header section list of object types with pointers
+// Fixed resource file structure (dynamic saves: SaveSchema.h)
+// -header section list of object types with opaque uint32 labels
 // -object data separated in chunks one chunk per object
 // c)replace memorysave with specialized objects to increase perfomance
 
@@ -53,10 +53,10 @@ private:
     typedef std::list<CChunkLevel>::reverse_iterator CChunkLevelReverseIterator;
     int nVersion;
     bool bIsReading;
-    // maps objects addresses during save(first) to addresses during load(second) - during loading
-    // or serves as a sign that some object has been already stored - during storing
-    typedef std::unordered_map<void *, void *, SDefaultPtrHash> CObjectsHash;
-    CObjectsHash objects;
+    // Asset labels are opaque uint32 file IDs, never native addresses.
+    // Dynamic saves use SaveSchema, not this fixed resource format.
+    std::map<std::uint32_t, CPtr<CFundament>> resourceObjects;
+    std::unordered_map<CFundament *, std::uint32_t, SDefaultPtrHash> resourceLabels;
     std::list<CFundament *> toStore;
     void ReleaseObjects();
 
