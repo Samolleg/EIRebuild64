@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Plot.h"
 #include "spline.h"
@@ -25,6 +26,9 @@ const short N_RT_NORUN = 2;
 const WORD N_RT_SPEED = 512;
 struct SRouteUnit
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     union
     {
         struct
@@ -36,8 +40,8 @@ struct SRouteUnit
             short nX, nY;
         };
     };
-    WORD wSpeed256; // *N_RT_SPEED base speed multiplier
-    WORD wFlags;    // флаги того, что юнит идет по мосту, по воде, etc
+    WORD wSpeed256 = N_RT_SPEED; // *N_RT_SPEED base speed multiplier
+    WORD wFlags = 0;    // флаги того, что юнит идет по мосту, по воде, etc
 
     SRouteUnit()
     {
@@ -54,8 +58,8 @@ struct SRouteUnit
     {
         wFlags = bWater * N_RT_WATER_FLAG + bNoRun * N_RT_NORUN;
     }
-    void Load(CSave &file) { file.Read(this, sizeof(SRouteUnit)); }
-    void Store(CSave &file) { file.Write(this, sizeof(SRouteUnit)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 typedef CList<SRouteUnit> CRouteList;
 
@@ -72,6 +76,9 @@ inline int Is8Connected(const SRouteUnit &a, const SRouteUnit &b)
 // тайловый маршрут
 class CAIRoute
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     CRouteList route;
 
@@ -114,6 +121,9 @@ public:
 // содержит узлов, а конечное направление содержитс€ в finish
 class CAIFullRoute
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
 public:
     enum EMovement
     {
@@ -189,12 +199,15 @@ inline float Distance(CPlot2D &a, CPlot2D &b)
 // один сегмент маршрута
 struct SRouteSegment
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CPlot2D start, startV;
     CPlot2D finish, finishV;
     float fpAlpha,
         fpAlphaInc; // alpha - maximal alpha for the segment, alphainc - alpha increment per segment
-    void Load(CSave &file) { file.Read(this, sizeof(SRouteSegment)); }
-    void Store(CSave &file) { file.Write(this, sizeof(SRouteSegment)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -202,17 +215,23 @@ struct SRouteSegment
 // waypoint к другому )
 struct SWalkerWaypoint
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CPlot2D point, speed; // point in ai tiles, speed is an ort
     float fpSpeed;        // speed in ai tiles per second
     int nTileX, nTileY;   // тайл, который должен быть свободен, при перемещении юнита к этой точке
     float GetAngle() { return float(atan2(speed.y, speed.x)); }
-    void Load(CSave &file) { file.Read(this, sizeof(SWalkerWaypoint)); }
-    void Store(CSave &file) { file.Write(this, sizeof(SWalkerWaypoint)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 
 // represents routes turning point
 struct SWalkerTempPoint
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
     CPlot2D point; // point in ai tiles
     int nNumber;   // number of tiles, following this point to the next turning point
     SWalkerTempPoint() {}
@@ -222,8 +241,8 @@ struct SWalkerTempPoint
         point.y = fpY;
         nNumber = 0;
     }
-    void Load(CSave &file) { file.Read(this, sizeof(SWalkerTempPoint)); }
-    void Store(CSave &file) { file.Write(this, sizeof(SWalkerTempPoint)); }
+    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -249,14 +268,18 @@ struct SRouteSegmentCache
 // класс, осуществл€ющий перемещение по маршруту
 class CRouteWalker
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
+private:
     CAArray<SWalkerWaypoint> points;
     CAArray<SWalkerTempPoint> tpoints;
     CAArray<float, float> speeds;
     float fpBaseSpeed; // units characteristics
     float fpAngularSpeed;
-    float fpActiveAngularSpeed; // реальна€ углова€ скорость поворота, используетс€ дл€ медленных
+    float fpActiveAngularSpeed = 0; // реальна€ углова€ скорость поворота, используетс€ дл€ медленных
                                 // поворотов
-    float fpStartAngle, fpDeltaAngle;
+    float fpStartAngle = 0, fpDeltaAngle = 0;
     SRouteSegmentCache cache;
 
     void Clear();

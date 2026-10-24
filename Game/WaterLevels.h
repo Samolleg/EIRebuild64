@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #include "SaveLoader.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -8,6 +9,10 @@ class CSave;
 // класс для описания высот различных объектов террейна, таких как озера итп
 class CWaterLevels
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
+private:
     struct SLevel
     {
         int nObjectID;
@@ -15,8 +20,8 @@ class CWaterLevels
         float fpH;
         float fpDH;
 
-        void Load(CSave &file) { file.Read(this, sizeof(*this)); }
-        void Store(CSave &file) { file.Write(this, sizeof(*this)); }
+        void Load(CSave &file) { file.Read(nObjectID); file.Read(nSegments); file.Read(fpH); file.Read(fpDH); }
+        void Store(CSave &file) { file.Write(nObjectID); file.Write(nSegments); file.Write(fpH); file.Write(fpDH); }
     };
     CArray<SLevel> levels;
 

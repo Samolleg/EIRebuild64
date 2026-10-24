@@ -1,5 +1,12 @@
 #include "StdAfx.h"
 #include "DynamicSave.h"
+#include "UnitServer.h"
+#include "WaterLevels.h"
+#include "FofSystem.h"
+#include "Camera.h"
+#include "ScenarioTracker.h"
+#include "UnitStatisticsDriver.h"
+#include <cstring>
 #include "RPGSystem.h"
 #include "GeneralUnitLogic.h"
 #include "METraps.h"
@@ -419,6 +426,7 @@ void SScriptArea::SScriptAreaElement::Load(SaveSchema::Reader &r)
 namespace SaveSchema {
 void RegisterDynamicTypes(Registry &registry)
 {
+    RegisterRemainingDynamicTypes(registry);
     registry.RegisterValue<SRPGScienceStats>(0x1601);
     registry.RegisterValue<SRPGAttackPortion>(0x1602);
     registry.RegisterValue<SRPGGeneralAttack>(0x1603);
@@ -815,5 +823,420 @@ void RandomState::Load(Reader &r)
     for(auto &x:results)x=r.UInt32();
     for(auto &x:memory)x=r.UInt32();
     a=r.UInt32();b=r.UInt32();c=r.UInt32();nativeCrt=r.UInt32();
+}
+} // namespace SaveSchema
+
+// P16b payloads. World/slot publication and graph ownership belong to P17.
+namespace SaveSchema { namespace {
+template <class T, class A> void ValueList(Writer &w, const CList<T,A> &a)
+{
+    WriteCount(w,a.GetCount());
+    POSITION pos=a.GetHeadPosition();
+    while(pos) w.Value(a.GetNext(pos));
+}
+template <class T, class A> void ValueList(Reader &r, CList<T,A> &a)
+{
+    a.RemoveAll();
+    const auto count=r.Count();
+    for(std::uint32_t i=0;i<count;++i) r.Value(a.GetAt(a.AddTail(T{})));
+}
+} }
+
+void SUnitBasicCmd::Store(SaveSchema::Writer &w) const
+{
+    w.Int32(cmd); w.Int32(nQSpellNum);
+    w.GameReference(static_cast<CMapObject *>(pTarget));
+    w.Value(ptTarget); w.Bool(bUsePoint);
+}
+void SUnitBasicCmd::Load(SaveSchema::Reader &r)
+{
+    cmd=static_cast<EUnitCommand>(r.Int32()); nQSpellNum=r.Int32();
+    pTarget=r.GameReferenceAs<CMapObject>(); r.Value(ptTarget); bUsePoint=r.Bool();
+    if(cmd<UC_IDLE || cmd>UC_REST) throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid unit command");
+}
+void SUnitCommand::Store(SaveSchema::Writer &w) const
+{
+    SUnitBasicCmd::Store(w);
+    // The parameter is an untagged float/DWORD union. Preserve its 32 bits,
+    // including integer masks and NaNs, without accessing the inactive member.
+    std::uint32_t bits; std::memcpy(&bits,&fpParam,4);
+    w.UInt32(bits); w.Bool(bDoItFast);
+}
+void SUnitCommand::Load(SaveSchema::Reader &r)
+{
+    SUnitBasicCmd::Load(r);
+    const auto bits=r.UInt32(); std::memcpy(&fpParam,&bits,4); bDoItFast=r.Bool();
+}
+void SL0Animation::Store(SaveSchema::Writer &w) const
+{
+    w.UInt8(bStart); w.UInt8(bCyclic); w.UInt8(bSoundSet);
+    w.Int32(nLength); w.Int32(animationSpeed);
+}
+void SL0Animation::Load(SaveSchema::Reader &r)
+{
+    bStart=r.UInt8(); bCyclic=r.UInt8(); bSoundSet=r.UInt8();
+    nLength=r.Int32(); animationSpeed=static_cast<EUnitAnimationSpeed>(r.Int32());
+}
+void SL0AnimationSeq::Store(SaveSchema::Writer &w) const
+{
+    // Full indices and the pump marker must survive independently of byte IDs.
+    SaveSchema::WriteCount(w,animations.GetSize());
+    for(int i=0;i<animations.GetSize();++i) {
+        w.Value(animations[i]); w.UInt32(GetStartId(i)); w.UInt32(GetCycleId(i));
+    }
+    w.Int32(nStartSegment);
+}
+void SL0AnimationSeq::Load(SaveSchema::Reader &r)
+{
+    Clear(); const auto count=r.Count();
+    for(std::uint32_t i=0;i<count;++i) {
+        SL0Animation animation; r.Value(animation);
+        const auto start=r.UInt32(), cycle=r.UInt32(); Append(animation,start,cycle);
+    }
+    nStartSegment=r.Int32();
+}
+void SL1Pose::Store(SaveSchema::Writer &w) const
+{
+    w.Int32(pose); w.Bool(bAggressive); w.UInt8(bRun);
+}
+void SL1Pose::Load(SaveSchema::Reader &r)
+{
+    pose=static_cast<EUnitPose>(r.Int32()); bAggressive=r.Bool(); bRun=r.UInt8();
+}
+void SL1Command::Store(SaveSchema::Writer &w) const
+{
+    w.Value(attackAnimation); w.Int32(nTimeStrikeMoment); w.Int32(nHitTime);
+    w.MapReference(nTargetID); w.Float32(fpHitDist2); w.Bool(bCast);
+    w.Int32(eAttackLocation); w.Bool(bCalledShot); w.Int32(castType); w.Value(ptDir);
+}
+void SL1Command::Load(SaveSchema::Reader &r)
+{
+    r.Value(attackAnimation); nTimeStrikeMoment=r.Int32(); nHitTime=r.Int32();
+    nTargetID=r.MapReference(); fpHitDist2=r.Float32(); bCast=r.Bool();
+    eAttackLocation=static_cast<ERPGHitLocations>(r.Int32()); bCalledShot=r.Bool();
+    castType=static_cast<ERPGMagicSubtypes>(r.Int32()); r.Value(ptDir);
+}
+void SContSpellInfo::Store(SaveSchema::Writer &w) const
+{
+    w.GameReference(pItem); w.Int32(nDelay); w.Bool(bIsUsed);
+}
+void SContSpellInfo::Load(SaveSchema::Reader &r)
+{
+    pItem=r.GameReferenceAs<CItem>(); nDelay=r.Int32(); bIsUsed=r.Bool();
+}
+void STrainInfo::Store(SaveSchema::Writer &w) const
+{
+    w.Bool(bIsTrain); w.GameReference(master);
+}
+void STrainInfo::Load(SaveSchema::Reader &r)
+{
+    bIsTrain=r.Bool(); master=r.GameReferenceAs<CUnit>();
+}
+void SRectRegion::Store(SaveSchema::Writer &w) const
+{
+    w.Int32(nLowX); w.Int32(nHighX); w.Int32(nLowY); w.Int32(nHighY);
+}
+void SRectRegion::Load(SaveSchema::Reader &r)
+{
+    nLowX=r.Int32(); nHighX=r.Int32(); nLowY=r.Int32(); nHighY=r.Int32();
+}
+void SRouteUnit::Store(SaveSchema::Writer &w) const
+{
+    w.UInt16(wX); w.UInt16(wY); w.UInt16(wSpeed256); w.UInt16(wFlags);
+}
+void SRouteUnit::Load(SaveSchema::Reader &r)
+{
+    wX=r.UInt16(); wY=r.UInt16(); wSpeed256=r.UInt16(); wFlags=r.UInt16();
+}
+void CAIRoute::Store(SaveSchema::Writer &w) const { SaveSchema::ValueList(w,route); }
+void CAIRoute::Load(SaveSchema::Reader &r) { SaveSchema::ValueList(r,route); }
+void CAIFullRoute::Store(SaveSchema::Writer &w) const
+{
+    w.Int32(moveType); w.Value(start); w.Float32(fpStartAngle); w.Int32(nStartSegment);
+    // Only the active movement branch, never the largest union image.
+    switch(moveType) {
+    case Stand: break;
+    case Walk: w.Float32(walk.fpFinishX); w.Float32(walk.fpFinishY); break;
+    case Rotate: w.Float32(rotate.fpFinalAngle); w.Float32(rotate.fpAngleSpeed); break;
+    case Attack: w.MapReference(attack.nTargetID); w.Int32(attack.nHitSegment); w.Int32(attack.nTurnFinishSegment); break;
+    case AttackPoint: w.Float32(attack1.fpFinalAngle); w.Int32(attack1.nHitSegment); w.Int32(attack1.nTurnFinishSegment); break;
+    default: throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid movement branch");
+    }
+    w.Value(route);
+}
+void CAIFullRoute::Load(SaveSchema::Reader &r)
+{
+    Clear(); moveType=static_cast<EMovement>(r.Int32()); r.Value(start);
+    fpStartAngle=r.Float32(); nStartSegment=r.Int32();
+    switch(moveType) {
+    case Stand: break;
+    case Walk: walk.fpFinishX=r.Float32(); walk.fpFinishY=r.Float32(); break;
+    case Rotate: rotate.fpFinalAngle=r.Float32(); rotate.fpAngleSpeed=r.Float32(); break;
+    case Attack: attack.nTargetID=r.MapReference(); attack.nHitSegment=r.Int32(); attack.nTurnFinishSegment=r.Int32(); break;
+    case AttackPoint: attack1.fpFinalAngle=r.Float32(); attack1.nHitSegment=r.Int32(); attack1.nTurnFinishSegment=r.Int32(); break;
+    default: throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid movement branch");
+    }
+    r.Value(route);
+}
+void SRouteSegment::Store(SaveSchema::Writer &w) const
+{
+    w.Value(start); w.Value(startV); w.Value(finish); w.Value(finishV);
+    w.Float32(fpAlpha); w.Float32(fpAlphaInc);
+}
+void SRouteSegment::Load(SaveSchema::Reader &r)
+{
+    r.Value(start); r.Value(startV); r.Value(finish); r.Value(finishV);
+    fpAlpha=r.Float32(); fpAlphaInc=r.Float32();
+}
+void SWalkerWaypoint::Store(SaveSchema::Writer &w) const
+{
+    w.Value(point); w.Value(speed); w.Float32(fpSpeed); w.Int32(nTileX); w.Int32(nTileY);
+}
+void SWalkerWaypoint::Load(SaveSchema::Reader &r)
+{
+    r.Value(point); r.Value(speed); fpSpeed=r.Float32(); nTileX=r.Int32(); nTileY=r.Int32();
+}
+void SWalkerTempPoint::Store(SaveSchema::Writer &w) const { w.Value(point); w.Int32(nNumber); }
+void SWalkerTempPoint::Load(SaveSchema::Reader &r) { r.Value(point); nNumber=r.Int32(); }
+void CRouteWalker::Store(SaveSchema::Writer &w) const
+{
+    SaveSchema::Array(w,points); SaveSchema::Array(w,tpoints);
+    SaveSchema::WriteCount(w,speeds.GetSize());
+    for(int i=0;i<speeds.GetSize();++i) w.Float32(speeds[i]);
+    w.Float32(fpBaseSpeed); w.Float32(fpAngularSpeed); w.Float32(fpActiveAngularSpeed);
+    w.Float32(fpStartAngle); w.Float32(fpDeltaAngle);
+    // cache is derived from points and deliberately rebuilt, like the old Load.
+}
+void CRouteWalker::Load(SaveSchema::Reader &r)
+{
+    cache.Clear(); SaveSchema::Array(r,points); SaveSchema::Array(r,tpoints);
+    speeds.SetSize(r.Count()); for(int i=0;i<speeds.GetSize();++i) speeds[i]=r.Float32();
+    fpBaseSpeed=r.Float32(); fpAngularSpeed=r.Float32(); fpActiveAngularSpeed=r.Float32();
+    fpStartAngle=r.Float32(); fpDeltaAngle=r.Float32();
+}
+void SAIPath::Store(SaveSchema::Writer &w) const
+{
+    w.Value(toGo); w.Value(curSegment); w.Value(ptFinish); w.Value(ptDestination);
+    w.Bool(bFinished); w.Bool(bRouteFailed); w.Bool(bTryAnyPath); w.Bool(bFirstTry);
+    SaveSchema::WriteCount(w,excludeVertices.GetSize());
+    for(int i=0;i<excludeVertices.GetSize();++i) {
+        w.Int32(excludeVertices[i].nX); w.Int32(excludeVertices[i].nY);
+    }
+    w.Int32(nPathCost);
+}
+void SAIPath::Load(SaveSchema::Reader &r)
+{
+    r.Value(toGo); r.Value(curSegment); r.Value(ptFinish); r.Value(ptDestination);
+    bFinished=r.Bool(); bRouteFailed=r.Bool(); bTryAnyPath=r.Bool(); bFirstTry=r.Bool();
+    excludeVertices.SetSize(r.Count());
+    for(int i=0;i<excludeVertices.GetSize();++i) {
+        excludeVertices[i].nX=r.Int32(); excludeVertices[i].nY=r.Int32();
+    }
+    nPathCost=r.Int32();
+}
+void CWaterLevels::Store(SaveSchema::Writer &w) const
+{
+    SaveSchema::WriteCount(w,levels.GetSize());
+    for(int i=0;i<levels.GetSize();++i) {
+        const auto &v=levels[i];
+        // nObjectID is a terrain/placement index, not a CGameBase reference.
+        w.Int32(v.nObjectID); w.Int32(v.nSegments); w.Float32(v.fpH); w.Float32(v.fpDH);
+    }
+}
+void CWaterLevels::Load(SaveSchema::Reader &r)
+{
+    levels.SetSize(r.Count());
+    for(int i=0;i<levels.GetSize();++i) {
+        auto &v=levels[i]; v.nObjectID=r.Int32(); v.nSegments=r.Int32();
+        v.fpH=r.Float32(); v.fpDH=r.Float32();
+    }
+}
+void CFofTracker::Store(SaveSchema::Writer &w) const
+{
+    for(auto v:allyMatrix) w.UInt32(v);
+    for(auto v:enemyMatrix) w.UInt32(v);
+}
+void CFofTracker::Load(SaveSchema::Reader &r)
+{
+    for(auto &v:allyMatrix) v=r.UInt32();
+    for(auto &v:enemyMatrix) v=r.UInt32();
+}
+void CAIAcknowledgements::Store(SaveSchema::Writer &w) const
+{
+    w.Int32(curSegmentNeighborAck); w.Int32(wantAck); w.Int32(curAck); w.Int32(nCurAckTimeLeft);
+}
+void CAIAcknowledgements::Load(SaveSchema::Reader &r)
+{
+    curSegmentNeighborAck=static_cast<EAIAcks>(r.Int32()); wantAck=static_cast<EAIAcks>(r.Int32());
+    curAck=static_cast<EAIAcks>(r.Int32()); nCurAckTimeLeft=r.Int32();
+}
+void SAITurnLookOrder::Store(SaveSchema::Writer &w) const
+{
+    w.Float32(fpAngle); w.Float32(fpTurnSpeed); w.Float32(fpTime); w.Bool(bRest);
+}
+void SAITurnLookOrder::Load(SaveSchema::Reader &r)
+{
+    fpAngle=r.Float32(); fpTurnSpeed=r.Float32(); fpTime=r.Float32(); bRest=r.Bool();
+}
+void SAIRallyPoint::Store(SaveSchema::Writer &w) const { w.Value(ptPoint); SaveSchema::Array(w,lookOrders); }
+void SAIRallyPoint::Load(SaveSchema::Reader &r) { r.Value(ptPoint); SaveSchema::Array(r,lookOrders); }
+void SCameraPlacement::Store(SaveSchema::Writer &w) const
+{
+    w.Float32(fpTime); w.Float32(step); w.Value(plot); w.Value(quat);
+}
+void SCameraPlacement::Load(SaveSchema::Reader &r)
+{
+    fpTime=r.Float32(); step=r.Float32(); r.Value(plot); r.Value(quat);
+}
+void SCameraShortcut::Store(SaveSchema::Writer &w) const
+{
+    w.Float32(fDistance); w.Value(qRotate); w.Float32(fPitch);
+}
+void SCameraShortcut::Load(SaveSchema::Reader &r)
+{
+    fDistance=r.Float32(); r.Value(qRotate); fPitch=r.Float32();
+}
+namespace SaveSchema {
+void ShopCoefficients::Store(Writer &w) const { for(float v:values) w.Float32(v); }
+void ShopCoefficients::Load(Reader &r) { for(float &v:values) v=r.Float32(); }
+void RegisterRemainingDynamicTypes(Registry &registry)
+{
+    static_assert(NUM_SHOP_KOEFFS==10,"shop payload width changed");
+    registry.RegisterValue<SUnitBasicCmd>(0x1650);
+    registry.RegisterValue<SUnitCommand>(0x1651);
+    registry.RegisterValue<SL0Animation>(0x1652);
+    registry.RegisterValue<SL0AnimationSeq>(0x1653);
+    registry.RegisterValue<SL1Pose>(0x1654);
+    registry.RegisterValue<SL1Command>(0x1655);
+    registry.RegisterValue<SContSpellInfo>(0x1656);
+    registry.RegisterValue<STrainInfo>(0x1657);
+    registry.RegisterValue<SRectRegion>(0x1660);
+    registry.RegisterValue<SRouteUnit>(0x1661);
+    registry.RegisterValue<CAIRoute>(0x1662);
+    registry.RegisterValue<CAIFullRoute>(0x1663);
+    registry.RegisterValue<SRouteSegment>(0x1664);
+    registry.RegisterValue<SWalkerWaypoint>(0x1665);
+    registry.RegisterValue<SWalkerTempPoint>(0x1666);
+    registry.RegisterValue<CRouteWalker>(0x1667);
+    registry.RegisterValue<SAIPath>(0x1668);
+    registry.RegisterValue<CWaterLevels>(0x1670);
+    registry.RegisterValue<CFofTracker>(0x1671);
+    registry.RegisterValue<CAIAcknowledgements>(0x1672);
+    registry.RegisterValue<SAITurnLookOrder>(0x1673);
+    registry.RegisterValue<SAIRallyPoint>(0x1674);
+    registry.RegisterValue<ShopCoefficients>(0x1675);
+    registry.RegisterValue<SCameraPlacement>(0x1680);
+    registry.RegisterValue<SCameraShortcut>(0x1681);
+    registry.RegisterValue(0x1682,typeid(CQuaternion),{
+        [](Writer &w,const void *p) {
+            float qw,qx,qy,qz; static_cast<const CQuaternion *>(p)->GetComponents(qw,qx,qy,qz);
+            w.Float32(qw); w.Float32(qx); w.Float32(qy); w.Float32(qz);
+        },
+        [](Reader &r,void *p) {
+            const auto qw=r.Float32(),qx=r.Float32(),qy=r.Float32(),qz=r.Float32();
+            *static_cast<CQuaternion *>(p)=CQuaternion(qw,qx,qy,qz);
+        }});
+    registry.RegisterValue(0x1683,typeid(SCameraMovement<float>),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SCameraMovement<float> *>(p);
+            w.Float32(v.value); w.Float32(v.desired); w.Float32(v.fpAccelerationCoeff);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SCameraMovement<float> *>(p);
+            v.value=r.Float32(); v.desired=r.Float32(); v.fpAccelerationCoeff=r.Float32();
+        }});
+    registry.RegisterValue(0x1684,typeid(SCameraMovement<CPlot3D>),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SCameraMovement<CPlot3D> *>(p);
+            w.Value(v.value); w.Value(v.desired); w.Float32(v.fpAccelerationCoeff);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SCameraMovement<CPlot3D> *>(p);
+            r.Value(v.value); r.Value(v.desired); v.fpAccelerationCoeff=r.Float32();
+        }});
+    registry.RegisterValue(0x1685,typeid(SComplection),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SComplection *>(p);
+            w.Float32(v.strength); w.Float32(v.grace); w.Float32(v.tall);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SComplection *>(p);
+            v.strength=r.Float32(); v.grace=r.Float32(); v.tall=r.Float32();
+        }});
+    registry.RegisterValue(0x1686,typeid(SUnitVisibilityInfo),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SUnitVisibilityInfo *>(p);
+            w.Float32(v.fpSight); w.Float32(v.fpSmell); w.Float32(v.fpSound);
+            w.Float32(v.fpTracking); w.Float32(v.fpSenseLife);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SUnitVisibilityInfo *>(p);
+            v.fpSight=r.Float32(); v.fpSmell=r.Float32(); v.fpSound=r.Float32();
+            v.fpTracking=r.Float32(); v.fpSenseLife=r.Float32();
+        }});
+    registry.RegisterValue(0x1687,typeid(SVisibilityMask),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SVisibilityMask *>(p);
+            const auto x=v.data.GetXSize(), y=v.data.GetYSize();
+            const auto cells=static_cast<std::uint64_t>(x)*y;
+            if(x<=0 || y<=0 || cells>INT32_MAX) throw Error(ErrorCode::Limit,"visibility dimensions");
+            w.Int32(v.nShiftX); w.Int32(v.nShiftY); w.Count(x); w.Count(y); w.Count(static_cast<std::uint32_t>(cells));
+            for(std::uint32_t i=0;i<cells;++i) w.UInt8(static_cast<unsigned char>(v.data.GetBuffer()[i]));
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SVisibilityMask *>(p);
+            v.nShiftX=r.Int32(); v.nShiftY=r.Int32();
+            const auto x=r.Count(), y=r.Count(), cells=r.Count();
+            if(!x || !y || static_cast<std::uint64_t>(x)*y!=cells || cells>INT32_MAX)
+                throw Error(ErrorCode::Invalid,"visibility dimensions");
+            v.data.SetSizes(x,y);
+            for(std::uint32_t i=0;i<cells;++i) {
+                const auto bits=r.UInt8(); std::memcpy(v.data.GetBuffer()+i,&bits,1);
+            }
+        }});
+    registry.RegisterValue(0x1688,typeid(SAIMark),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SAIMark *>(p);
+            w.Value(v.ptPosition); w.Value(v.ptPointPosition); w.Int32(v.nTime);
+            for(float f:v.fpStrength) w.Float32(f);
+            w.MapReference(v.nUnitID); w.Int32(v.nPlayer);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SAIMark *>(p);
+            // P17 owns the mark lists. Link only after every value is loaded.
+            v.pNext=v.pPrev=v.pNextDel=nullptr;
+            r.Value(v.ptPosition); r.Value(v.ptPointPosition); v.nTime=r.Int32();
+            for(float &f:v.fpStrength) f=r.Float32();
+            v.nUnitID=r.MapReference(); v.nPlayer=r.Int32();
+        }});
+    registry.RegisterValue(0x1689,typeid(SUnitWearsStatistics),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SUnitWearsStatistics *>(p);
+            w.UInt16(v.wPrototype);
+            WriteCount(w,v.armors.size()); for(auto id:v.armors) w.UInt32(id);
+            WriteCount(w,v.weapons.size()); for(auto id:v.weapons) w.UInt32(id);
+            w.UInt8(static_cast<unsigned char>(v.cCurrentWeaponIndex)); w.MapReference(v.nID);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SUnitWearsStatistics *>(p);
+            v.wPrototype=r.UInt16();
+            v.armors.resize(r.Count()); for(auto &id:v.armors) id=r.UInt32();
+            v.weapons.resize(r.Count()); for(auto &id:v.weapons) id=r.UInt32();
+            const auto bits=r.UInt8(); std::memcpy(&v.cCurrentWeaponIndex,&bits,1); v.nID=r.MapReference();
+        }});
+    registry.RegisterValue(0x168a,typeid(SUnitStatistics),{
+        [](Writer &w,const void *p) {
+            const auto &v=*static_cast<const SUnitStatistics *>(p);
+            w.Value(static_cast<const SUnitWearsStatistics &>(v));
+            w.Float32(v.fStrength); w.Float32(v.fGrace); w.Float32(v.fTall);
+            WriteCount(w,v.szBPs.size()); for(const auto &name:v.szBPs) Text(w,name);
+        },
+        [](Reader &r,void *p) {
+            auto &v=*static_cast<SUnitStatistics *>(p);
+            r.Value(static_cast<SUnitWearsStatistics &>(v));
+            v.fStrength=r.Float32(); v.fGrace=r.Float32(); v.fTall=r.Float32();
+            v.szBPs.resize(r.Count()); for(auto &name:v.szBPs) Text(r,name);
+        }});
+
 }
 } // namespace SaveSchema

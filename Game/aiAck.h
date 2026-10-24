@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveSchema.h"
 /**********************************************************************
  *<
         FILE: aiMap.H
@@ -31,6 +32,10 @@ enum EAIAcks
 /////////////////////////////////////////////////////////////////////////////////////
 class CAIAcknowledgements
 {
+public:
+    void Load(SaveSchema::Reader &);
+    void Store(SaveSchema::Writer &) const;
+private:
     // уровень ack соседних дружественных юнитов
     EAIAcks curSegmentNeighborAck;
     // ack, который хочет юнит (будет приведен в действие через сегмент, когда окажется,

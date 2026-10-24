@@ -16,4 +16,13 @@ struct RandomState
     void Store(Writer &) const;
     void Load(Reader &);
 };
+// Coefficients of CShop's legacy AddRaw field. P17 copies the complete array
+// without applying prices or rebuilding the assortment while staging.
+struct ShopCoefficients
+{
+    std::array<float, 10> values{};
+    void Store(Writer &) const;
+    void Load(Reader &);
+};
+void RegisterRemainingDynamicTypes(Registry &);
 } // namespace SaveSchema
