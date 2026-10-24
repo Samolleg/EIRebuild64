@@ -320,7 +320,7 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
   if(cmd.command==395){if(server)server->StopAnimationLoop();else vars->DelVar(key.c_str());return true;}
   const char* name=cmd.szParams[0].GetString();
   if(!name||!*name)return Reject(e->name,"Empty animation name");
-  auto* manager=theWorldServer.GetMapObjectManager();if(!manager)return defer();
+  auto* manager=static_cast<CMapObjectManager*>(theWorldServer.GetMapObjectManager());if(!manager)return defer();
   const auto* entry=manager->GetAnimationEntry(unit->GetMaskName(),name);
   if(!entry||entry->dwEntryIndex>=16777215u)return Reject(e->name,"Invalid animation");
   vars->SetVar(key.c_str(),float(entry->dwEntryIndex+1));
