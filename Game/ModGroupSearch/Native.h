@@ -7,6 +7,7 @@ class CAIUnitLogic;
 namespace ModGroupSearch {
 // Producer must persist home/phase before exposing an intent. Membership is
 // supplied from the current active-set batch, never inferred by this adapter.
+bool IsBriefingZone();
 void Reset();
 void Update();
 void SetActive(const std::set<GroupSearch::Identity>& units);

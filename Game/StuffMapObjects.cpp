@@ -669,13 +669,31 @@ static void LeverFallback(CLeverObject&lever,CArray<CPlot3D,CPlot3D&>&points,flo
  const auto&p=lever.GetCP();if(!std::isfinite(radius)||radius<=0||!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z))return;
  points.SetSize(16);for(int i=0;i<16;i++){double angle=i*(6.2831853071795864769/16);points[i]=CPlot3D(p.x+radius*float(cos(angle)),p.y+radius*float(sin(angle)),p.z);}
 }
+void CLeverObject::GetFallbackUsePoints(CArray<CPlot3D,CPlot3D&>& points,float radius){
+ LeverFallback(*this,points,radius);
+}
 bool CLeverObject::ScriptActivationAllowed(CUnit*who){
- if(!who||UsesAuthoredInteraction())return true;auto*server=dynamic_cast<CUnitServer*>(who->GetUnitSpecific());if(!server)return false;
+ if(!who)return true;
+ auto*server=dynamic_cast<CUnitServer*>(who->GetUnitSpecific());
+ const bool authored=UsesAuthoredInteraction();
+ if(authored&&(!server||!server->HasLeverRingChoice(server->GetScriptCommand()))){
+  if(server){
+   const auto& cmd=server->GetScriptCommand();
+   if(cmd.IsScience()&&cmd.pTarget==this&&cmd.HasPointOfUse()){
+    CArray<CPlot3D,CPlot3D&> points;GetUsePoints(points,who->GetAttackDistance());
+    bool matches=false;
+    for(int i=0;i<points.GetSize();++i){auto d=cmd.ptTarget-points[i];if(d.x==0&&d.y==0&&d.z==0)matches=true;}
+    if(!matches)return false;
+   }
+  }
+  return true;
+ }
+ if(!server)return false;
  float radius=who->GetAttackDistance();CArray<CPlot3D,CPlot3D&> points;LeverFallback(*this,points,radius);const auto&cmd=server->GetScriptCommand();bool current=false;
  for(int i=0;i<points.GetSize();i++){auto d=cmd.ptTarget-points[i];if(d.x==0&&d.y==0&&d.z==0)current=true;}
  float dx=who->GetCP().x-cmd.ptTarget.x,dy=who->GetCP().y-cmd.ptTarget.y,ox=who->GetCP().x-GetCP().x,oy=who->GetCP().y-GetCP().y;
- float distance=dx*dx+dy*dy,objectDistance=ox*ox+oy*oy,reach=radius+.2f;
- return cmd.IsScience()&&cmd.pTarget==this&&cmd.HasPointOfUse()&&current&&std::isfinite(distance)&&distance<=.2f*.2f&&std::isfinite(objectDistance)&&std::isfinite(reach)&&radius>0&&objectDistance<=reach*reach;
+ float distance=dx*dx+dy*dy,objectDistance=ox*ox+oy*oy,reach=radius+.5f;
+ return cmd.IsScience()&&cmd.pTarget==this&&cmd.HasPointOfUse()&&current&&std::isfinite(distance)&&distance<=.5f*.5f&&std::isfinite(objectDistance)&&std::isfinite(reach)&&radius>0&&objectDistance<=reach*reach;
 }
 void CLeverObject::GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnitRadius)
 {

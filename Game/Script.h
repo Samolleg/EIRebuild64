@@ -669,6 +669,7 @@ public:
     SScriptArea &GetArea(int nID);
     void DeleteArea(int nID);
     // для предотвращения уничтожения временных переменных при использовании циклов
+    bool CanDeferCommand() const { return nForCount == 0; }
     void IncForFlag() { nForCount++; }
     void DecForFlag() { nForCount--; }
 

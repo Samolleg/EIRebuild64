@@ -157,6 +157,7 @@ static void GGS_ImportR4(GGSRuntimeSide &runtime,CGSVariableSet *vars)
     auto snapshot=runtime.expedition.Save();auto &s=snapshot.awareness;
     const std::string prefix="jmv.murderawareness.ally.v2."+s.zone+".";
     size_t imported=0,unresolved=0;
+    const int tick=theWorldServer.GetSegmentTimeCounter();
     struct Legacy {unsigned checkpoint;int phase;GroupSearch::Memory memory;};
     std::map<GroupSearch::Identity,Legacy> latest;
     for(const auto &entry:*vars)
@@ -165,7 +166,9 @@ static void GGS_ImportR4(GGSRuntimeSide &runtime,CGSVariableSet *vars)
         int observer=-1,ally=-1,phase=0;unsigned os=0,as=0,x=0,y=0,z=0,t=0;char trailing=0;
         if(std::sscanf(name+prefix.size(),"%d.%u.%d.%u.%d.%8x.%8x.%8x.%8x%c",
             &observer,&os,&ally,&as,&phase,&x,&y,&z,&t,&trailing)!=9 ||
-            observer<0||ally<0||phase<1||phase>4||!std::isfinite(entry.second)||entry.second<1)continue;
+            observer<0||ally<0||phase<1||phase>4||
+            t>static_cast<unsigned>((std::numeric_limits<int>::max)())||
+            !std::isfinite(entry.second)||entry.second<1)continue;
         // Old schema has no side field. Resolve ID/subtype/side only, never
         // inspect hidden health/position to decide whether someone is missing.
         CUnit *o=theWorldServer.GetUnit(observer),*a=theWorldServer.GetUnit(ally);
@@ -176,7 +179,16 @@ static void GGS_ImportR4(GGSRuntimeSide &runtime,CGSVariableSet *vars)
         if(!GroupSearch::Finite(m.lastSeen))continue;
         if(phase==2)
             m.unseenTicks=GroupSearch::MissingTicks-int((std::min)(float(GroupSearch::MissingTicks),entry.second-1));
-        if(phase==3||phase==4)
+        if(phase==3)
+        {
+            int remaining=int((std::min)(float(GroupSearch::MissingTicks+1),entry.second)+0.5f)-1;
+            const int checkpoint=static_cast<int>(t);
+            if(tick>=checkpoint)remaining=(std::max)(0,remaining-(tick-checkpoint));
+            m.unseenTicks=GroupSearch::MissingTicks-remaining;
+            m.absent=remaining==0;
+            if(m.absent)m.episode=1;
+        }
+        else if(phase==4)
         {
             m.absent=true;m.unseenTicks=GroupSearch::MissingTicks;m.episode=1;
         }
@@ -189,7 +201,7 @@ static void GGS_ImportR4(GGSRuntimeSide &runtime,CGSVariableSet *vars)
     for(const auto &entry:latest)
     {
         if(!s.memories.emplace(entry.first,entry.second.memory).second)continue;
-        if(entry.second.phase==3)
+        if(entry.second.phase==3&&entry.second.memory.absent)
             s.pending.push_back({entry.first,1,entry.second.memory.lastSeen});
         else if(entry.second.phase==4)s.floor=1;
         ++imported;
@@ -437,14 +449,11 @@ static bool GGS_PrepareSearchRoute(GGSRuntimeSide &runtime,
 
 // Called only after a successful GS commit. Compare the actual transition,
 // not the current phase: restore, blocked ticks and leader changes stay silent.
-template<class Before,class After> static void GGS_PlaySignal(const Before &before,
-    const After &after,bool started,
+template<class After> static void GGS_PlaySignal(const After &after,bool started,
     const std::map<GroupSearch::Identity,CUnit *> &active)
 {
-    const auto phase=after.awareness.phase;
-    const char *event=started && phase==GroupSearch::Phase::Gather ? "gather" :
-        before.awareness.phase==GroupSearch::Phase::Gather && phase==GroupSearch::Phase::LastSeen ? "depart" : nullptr;
-    if(!event)return;
+    if(!started || after.awareness.phase!=GroupSearch::Phase::Gather)return;
+    const char *event="gather";
     const char *status="no-active-leader";
     const auto leader=active.find(after.awareness.leader);
     if(leader!=active.end() && leader->second && !leader->second->IsDead())
@@ -470,29 +479,25 @@ static bool GGS_Pickup(GGSRuntimeSide& runtime,const std::map<GroupSearch::Ident
 {
     const auto& s=runtime.expedition.Awareness().Save();auto leader=activeUnits.find(s.leader);
     if(!GGS_InspectPhase(s.phase)||leader==activeUnits.end())return false;
-    for(auto id:s.party){
-        auto member=activeUnits.find(id);CUnitServer* server=nullptr;
-        if(member==activeUnits.end()||member->second->IsDead()||CheckEligibility(member->second,server)||!server)return false;
-        if(!GGS_IsAvailable(member->second,server)){
-            // Abort only transaction metadata on priority interruption; never
-            // stop/replace a foreign animation, attack or script command.
-            if(PriorityBlocked(server->logic)){
-                auto st=g_addonCorpseSearch.find(s.leader.id);
-                if(st!=g_addonCorpseSearch.end()){st->second.haulAnimationPhase=st->second.haulAnimationCount=0;st->second.nextHaulTick=tick+18;}
-                return false;
-            }
-            const auto st=g_addonCorpseSearch.find(id.id);
-            if(!(id==s.leader)||st==g_addonCorpseSearch.end()||st->second.observer!=member->second||
-                st->second.server!=server||st->second.observerSubtype!=id.subtype||st->second.haulAnimationPhase==0)return false;
-        }
-    }
     auto* unit=leader->second;CUnitServer* server=nullptr;
     if(unit->IsDead()||CheckEligibility(unit,server)||!server)return false;
     const auto saved=runtime.expedition.View();auto home=saved.roster.homes.find(s.leader);
     const SGeneralUnitLogic* logic=nullptr;int alarm=-1;
-    if(home==saved.roster.homes.end()||!CurrentLogic(server,logic,alarm)||
+    if(home==saved.roster.homes.end()||!CurrentLogic(server,logic,alarm)||!logic||
         alarm!=home->second.alarm||int(logic->eLogicModel)!=home->second.model||unit->GetPlayerNum()!=s.side||revoked.count(s.leader))return false;
     auto& state=PickupState(unit,server);
+    auto abort=[&](){
+        if(state.haulAnimationPhase){state.haulAnimationPhase=state.haulAnimationCount=0;state.nextHaulTick=tick+18;}
+    };
+    if(PriorityBlocked(server->logic)){abort();return false;}
+    for(auto id:s.party){
+        auto member=activeUnits.find(id);CUnitServer* memberServer=nullptr;
+        if(member==activeUnits.end()||member->second->IsDead()||CheckEligibility(member->second,memberServer)||
+            !memberServer||!GGS_IsAvailable(member->second,memberServer)){
+            // Only the unblocked leader's own pickup may keep the transaction.
+            if(!(id==s.leader)||!memberServer||state.haulAnimationPhase==0){abort();return false;}
+        }
+    }
     if(state.corpseId<0&&GGS_IsAvailable(unit,server)){
         CUnit* chosen=nullptr;float best=0;
         for(auto* body:seenBodies){
@@ -530,6 +535,7 @@ static bool GGS_Pickup(GGSRuntimeSide& runtime,const std::map<GroupSearch::Ident
 void Update()
 {
     if(!theWorldServer.IsMapLoaded())return;
+    if(IsBriefingZone()){Reset();return;}
     CGSVariableSet *vars=PartyVars();if(!vars)return;
     const std::string zone=CurrentZone();
     static bool waiting=false;
@@ -646,7 +652,7 @@ void Update()
         for(const auto &order:result.commands)
         {auto unit=activeUnits.find(order.unit);if(unit!=activeUnits.end())Request(unit->second,order.intent);}
         const auto after=runtime.expedition.View();
-        GGS_PlaySignal(before,after,result.started,activeUnits);
+        GGS_PlaySignal(after,result.started,activeUnits);
         if(before.awareness.phase!=after.awareness.phase || result.started || result.ended || result.failed ||
             runtime.lastSummary<0 || tick-runtime.lastSummary>=1091)
         {

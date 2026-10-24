@@ -6,6 +6,8 @@
 #include "ModRuntime.h"
 #include "ModMobFlagArguments.h"
 #include "ModMessages.h"
+#include "ModAnimationLoop.h"
+#include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include <cmath>
 #include <stdexcept>
@@ -117,6 +119,8 @@ inline const Entry registry[]={
  {391,"JmvBranchUnless","ff",true},
  {392,"JmvBranchSkip","f",true},
  {393,"PartyDisguiseMatches","Fs",true},
+ {394,"PlayAnimationLoop","os",true},
+ {395,"StopAnimationLoop","o",true},
 };
 inline const Entry* Find(int id){for(const auto&e:registry)if(e.id==id)return &e;return nullptr;}
 // Native added command 372 owns the direct custom consumer, not recipient virtual dispatch.
@@ -139,7 +143,7 @@ inline std::string Expand(const char*format,const SSCCmd&cmd){
 }
 inline void Validate(const Entry&e,const SSCCmd&cmd){const char*p=e.format;if(*p&&strchr("FSOG",*p))++p;Expand(p,cmd);}
 inline bool ValidateDispatch(const Entry&e,const SSCCmd&cmd){
- switch(cmd.command){case 302:case 311:case 365:case 372:case 384:case 388:case 389:case 391:case 392:
+ switch(cmd.command){case 302:case 311:case 365:case 372:case 384:case 388:case 389:case 391:case 392:case 394:case 395:
   try{Validate(e,cmd);return true;}catch(const ArgumentError&error){Reject(e.name,error.what());return false;}
  default:Validate(e,cmd);return true;}
 }
@@ -300,9 +304,29 @@ inline bool BranchForward(int&index,int count,bool skip,float amount){
 }
 #include "ModVoiceCommands.h"
 namespace ModMob {
-inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr){
+inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true){
  auto*mod=ModRuntime::Current();if(!mod)return false;auto*e=Find(cmd.command);if(!e)return false;
  if(cmd.command==387||cmd.command==390){Validate(*e,cmd);return Voice(cmd,sleep,next);}
+ if(cmd.command==394||cmd.command==395){
+  if(!ValidateDispatch(*e,cmd))return true;
+  auto defer=[&](){if(next&&canDefer){*next=FALSE;return true;}return Reject(e->name,"Unit is not ready; defer outside synchronous loops");};
+  auto* unit=UnitArg(cmd);
+  if(!unit){if(cmd.command==394&&!ObjectArg(cmd))return defer();return Reject(e->name,"Invalid unit");}
+  if(cmd.command==394&&unit->IsDead())return Reject(e->name,"Dead unit");
+  std::string key;auto* vars=ModAnimationLoop::Variables(unit,key);
+  if(!vars)return defer();
+  auto* serverUnit=theWorldServer.GetUnit(unit->GetID());
+  auto* server=serverUnit?dynamic_cast<CUnitServer*>(serverUnit->GetUnitSpecific()):nullptr;
+  if(cmd.command==395){if(server)server->StopAnimationLoop();else vars->DelVar(key.c_str());return true;}
+  const char* name=cmd.szParams[0].GetString();
+  if(!name||!*name)return Reject(e->name,"Empty animation name");
+  auto* manager=theWorldServer.GetMapObjectManager();if(!manager)return defer();
+  const auto* entry=manager->GetAnimationEntry(unit->GetMaskName(),name);
+  if(!entry||entry->dwEntryIndex>=16777215u)return Reject(e->name,"Invalid animation");
+  vars->SetVar(key.c_str(),float(entry->dwEntryIndex+1));
+  if(server&&!serverUnit->IsInvalid())server->QueueAnimationLoop(entry->dwEntryIndex);
+  return true;
+ }
  if(e->ready&&(cmd.command==391||cmd.command==392)){
   if(!ValidateDispatch(*e,cmd))return true;bool skip=cmd.command==392||cmd.params[0]==0;float amount=cmd.params[cmd.command==391?1:0];
   if(!index||!BranchForward(*index,count,skip,amount))return Reject(e->name,"Invalid branch state/offset");return true;
