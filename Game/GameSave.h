@@ -201,10 +201,9 @@ template<class T, class A> struct Codec<CList<T, A>>
         Clear(v); const auto n = r.Count();
         for (std::uint32_t i = 0; i < n; ++i)
         {
-            POSITION p;
-            // MFC's optimized scalar CList specializations have no AddTail().
-            if constexpr (std::is_arithmetic_v<T> || std::is_pointer_v<T>) p=v.AddTail(T{});
-            else p=v.AddTail();
+            // MFC requires an initial element; an empty owner converts to its null ARG_TYPE.
+            T empty{};
+            POSITION p=v.AddTail(empty);
             Field(r,v.GetAt(p));
         }
     }
