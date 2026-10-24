@@ -2,6 +2,7 @@
 #include "SaveSchema.h"
 #include "SaveLoader.h"
 #include "GameBase.h"
+#include "BaseManager.h"
 #include "MapObject.h"
 #include <cstring>
 #include <limits>
@@ -16,6 +17,9 @@ struct Record
     ObjectId id = 0;
     std::uint32_t length = 0;
     Bytes body;
+    ObjectId owner = 0;
+    int mapId = -1;
+    std::uint32_t runtimeType = 0, subtype = 0, flags = 0;
 };
 void Put(Bytes &bytes, std::uint64_t value, unsigned width)
 {
@@ -53,18 +57,38 @@ void WriteBytes(CSave &file, const Bytes &bytes)
 void Registry::Register(std::uint32_t id, const std::type_info &nativeType, Type type)
 {
     if (!id || !type.create || !type.store || !type.load || !type.discard ||
-        types.count(id) || values.count(id) || ids.count(std::type_index(nativeType)))
+        types.count(id) || values.count(id) || gameTypes.count(id) || ids.count(std::type_index(nativeType)))
         throw Error(ErrorCode::UnknownType, "invalid or duplicate save type registration");
     types.emplace(id, std::move(type));
     ids.emplace(std::type_index(nativeType), id);
 }
 void Registry::RegisterValue(std::uint32_t id, const std::type_info &native, ValueType type)
 {
-    if (!id || !type.store || !type.load || types.count(id) || values.count(id) ||
+    if (!id || !type.store || !type.load || types.count(id) || values.count(id) || gameTypes.count(id) ||
         valueIds.count(std::type_index(native)))
         throw Error(ErrorCode::UnknownType, "invalid or duplicate value type");
     values.emplace(id, std::move(type));
     valueIds.emplace(std::type_index(native), id);
+}
+void Registry::RegisterGame(std::uint32_t id, const std::type_info &native, GameType type)
+{
+    if (!id || !type.create || !type.store || !type.load || !type.discard ||
+        types.count(id) || values.count(id) || gameTypes.count(id) || gameIds.count(std::type_index(native)))
+        throw Error(ErrorCode::UnknownType, "invalid or duplicate game type");
+    gameTypes.emplace(id, std::move(type));
+    gameIds.emplace(std::type_index(native), id);
+}
+const GameType &Registry::FindGame(std::uint32_t id) const
+{
+    const auto it = gameTypes.find(id);
+    if (it == gameTypes.end()) throw Error(ErrorCode::UnknownType, "unknown game typeId");
+    return it->second;
+}
+std::uint32_t Registry::GameTypeId(const CGameBase &object) const
+{
+    const auto it = gameIds.find(std::type_index(typeid(object)));
+    if (it == gameIds.end()) throw Error(ErrorCode::UnknownType, "unregistered game object");
+    return it->second;
 }
 std::uint32_t Registry::ValueId(const std::type_info &native) const
 {
@@ -77,24 +101,6 @@ const ValueType &Registry::FindValue(std::uint32_t id) const
     auto it = values.find(id);
     if (it == values.end()) throw Error(ErrorCode::UnknownType, "unknown value type");
     return it->second;
-}
-ObjectId Registry::GameId(CGameBase *object) const
-{
-    if (!object) return 0;
-    if (!gameObjects.store) throw Error(ErrorCode::Identity, "game object writer not bound");
-    const auto id = gameObjects.store(object);
-    if (!id || id >= LastId - 1 || id != object->GetRTID())
-        throw Error(ErrorCode::Identity, "game object writer changed identity");
-    return id;
-}
-CGameBase *Registry::GameObject(ObjectId id) const
-{
-    if (!id) return nullptr;
-    if (!gameObjects.load) throw Error(ErrorCode::Identity, "game object reader not bound");
-    CGameBase *object = gameObjects.load(id);
-    if (!object || object->GetRTID() != id)
-        throw Error(ErrorCode::Identity, "dangling game ObjectId");
-    return object;
 }
 CGameBase *Registry::MapObject(int id) const
 {
@@ -125,13 +131,35 @@ struct WriteState
     Limits limits;
     std::map<ObjectId, CPtr<CFundament>> objects;
     std::vector<ObjectId> pending;
+    std::map<ObjectId, CSmartPtr<CGameBase>> gameObjects;
+    std::vector<ObjectId> pendingGames;
+    ObjectId GameReference(CGameBase *object)
+    {
+        if (!object) return 0;
+        const auto id = object->GetRTID();
+        if (!id || id >= LastId - 1 || objects.count(id))
+            throw Error(ErrorCode::Identity, "invalid or overlapping game ObjectId");
+        const auto it = gameObjects.find(id);
+        if (it != gameObjects.end())
+        {
+            if (static_cast<CGameBase *>(it->second) != object)
+                throw Error(ErrorCode::Identity, "duplicate game ObjectId");
+            return id;
+        }
+        registry.FindGame(registry.GameTypeId(*object));
+        if (gameObjects.size() + objects.size() >= limits.objects)
+            throw Error(ErrorCode::Limit, "save object count limit");
+        gameObjects.emplace(id, object);
+        pendingGames.push_back(id);
+        return id;
+    }
     std::uint64_t bodyBytes = 0;
 
     ObjectId Reference(CFundament *object)
     {
         if (!object) return 0;
         const ObjectId id = object->GetRTID();
-        if (!id || id >= LastId - 1) throw Error(ErrorCode::Identity, "invalid save ObjectId");
+        if (!id || id >= LastId - 1 || gameObjects.count(id)) throw Error(ErrorCode::Identity, "invalid save ObjectId");
         const auto found = objects.find(id);
         if (found != objects.end())
         {
@@ -140,7 +168,7 @@ struct WriteState
             return id;
         }
         registry.Find(registry.Id(*object));
-        if (objects.size() >= limits.objects)
+        if (objects.size() + gameObjects.size() >= limits.objects)
             throw Error(ErrorCode::Limit, "save object count limit");
         objects.emplace(id, object); // pin before visiting ANY fields: cycles are legal
         pending.push_back(id);
@@ -219,8 +247,15 @@ void Reader::Value(const std::type_info &native, void *value)
         throw Error(ErrorCode::Invalid, "save value type mismatch");
     state.registry.FindValue(id).load(*this, value);
 }
-void Writer::GameReference(CGameBase *object) { UInt64(state.registry.GameId(object)); }
-CGameBase *Reader::GameReference() { return state.registry.GameObject(UInt64()); }
+void Writer::GameReference(CGameBase *object) { UInt64(state.GameReference(object)); }
+CGameBase *Reader::GameReference()
+{
+    const auto id = UInt64();
+    if (!id) return nullptr;
+    auto *object = state.graph.FindGame(id);
+    if (!object) throw Error(ErrorCode::Identity, "dangling game ObjectId");
+    return object;
+}
 void Writer::MapReference(int id) { GameReference(state.registry.MapObject(id)); }
 int Reader::MapReference()
 {
@@ -314,6 +349,38 @@ CFundament *Graph::Find(ObjectId id) const
     return found == objects.end() ? nullptr : found->second.GetPtr();
 }
 
+CGameBase *Graph::FindGame(ObjectId id) const
+{
+    const auto it = gameObjects.find(id);
+    return it == gameObjects.end() ? nullptr : static_cast<CGameBase *>(it->second);
+}
+void Graph::Swap(Graph &other) noexcept
+{
+    registryOwner.swap(other.registryOwner);
+    objects.swap(other.objects); gameObjects.swap(other.gameObjects);
+    discard.swap(other.discard); std::swap(savedNext, other.savedNext);
+}
+Graph &Graph::operator=(Graph &&other) noexcept
+{
+    if (this != &other) { Graph old(std::move(other)); Swap(old); }
+    return *this;
+}
+Graph::~Graph()
+{
+    if (!discard.empty())
+    {
+        ObjectIdentity::RestoreNamespace cleanup(savedNext);
+        for (auto &release : discard) release();
+        discard.clear(); objects.clear(); gameObjects.clear();
+    }
+}
+
+void Graph::Adopt()
+{
+    ObjectIdentity::RestoreNamespace::Publish(savedNext);
+    discard.clear();
+}
+
 void Store(CSave &file, const Registry &registry, const std::function<void(Writer &)> &root, Limits limits)
 {
     if (file.GetPosition() != file.GetSize())
@@ -322,123 +389,168 @@ void Store(CSave &file, const Registry &registry, const std::function<void(Write
     Bytes rootBody;
     Writer rootWriter(rootBody, state);
     root(rootWriter);
-    std::map<ObjectId, Record> records;
-    for (std::uint32_t i = 0; i < state.pending.size(); ++i)
+    std::map<ObjectId, Record> records, games;
+    std::size_t fi = 0, gi = 0;
+    while (fi < state.pending.size() || gi < state.pendingGames.size())
     {
-        const auto id = state.pending[i];
-        CFundament *object = state.objects.at(id).GetPtr();
-        Record record;
-        record.id = id;
-        record.type = registry.Id(*object);
-        Writer writer(record.body, state);
-        registry.Find(record.type).store(writer, *object);
-        record.length = static_cast<std::uint32_t>(record.body.size());
-        records.emplace(id, std::move(record));
+        if (fi < state.pending.size())
+        {
+            Record record;
+            record.id = state.pending[fi++];
+            auto *object = state.objects.at(record.id).GetPtr();
+            record.type = registry.Id(*object);
+            Writer writer(record.body, state);
+            registry.Find(record.type).store(writer, *object);
+            record.length = static_cast<std::uint32_t>(record.body.size());
+            records.emplace(record.id, std::move(record));
+        }
+        else
+        {
+            Record record;
+            record.id = state.pendingGames[gi++];
+            CGameBase *object = state.gameObjects.at(record.id);
+            record.type = registry.GameTypeId(*object);
+            record.owner = ObjectIdentity::IdOf(object->GetManager());
+            record.runtimeType = static_cast<std::uint32_t>(object->GetTypeID());
+            record.mapId = object->GetID(); record.subtype = object->GetSubtypeID(); record.flags = object->GetFlags();
+            Writer writer(record.body, state);
+            registry.FindGame(record.type).store(writer, *object);
+            record.length = static_cast<std::uint32_t>(record.body.size());
+            games.emplace(record.id, std::move(record));
+        }
     }
     for (const auto &entry : state.objects)
         if (entry.second->GetRTID() != entry.first)
             throw Error(ErrorCode::Identity, "save writer changed object identity");
-    const std::uint64_t payload = records.size() * std::uint64_t{16} + state.bodyBytes;
+    for (const auto &entry : state.gameObjects)
+        if (entry.second->GetRTID() != entry.first)
+            throw Error(ErrorCode::Identity, "save writer changed game identity");
+    const std::uint64_t payload = records.size() * std::uint64_t{16} + games.size() * std::uint64_t{40} + state.bodyBytes;
     if (payload > limits.payloadBytes || payload + HeaderBytes > UINT32_MAX - file.GetPosition())
         throw Error(ErrorCode::Limit, "save document limit");
     Bytes header(Magic, Magic + 8);
-    Put(header, Version, 4);
-    Put(header, HeaderBytes, 4);
-    Put(header, payload, 8);
-    Put(header, records.size(), 4);
-    Put(header, rootBody.size(), 4);
-    file.StartSaving();
-    WriteBytes(file, header);
-    for (const auto &entry : records)
-    {
-        const auto &record = entry.second;
-        Bytes descriptor;
-        Put(descriptor, record.type, 4);
-        Put(descriptor, record.id, 8);
-        Put(descriptor, record.length, 4);
-        WriteBytes(file, descriptor);
-    }
+    Put(header, Version, 4); Put(header, HeaderBytes, 4); Put(header, payload, 8);
+    Put(header, records.size(), 4); Put(header, rootBody.size(), 4);
+    Put(header, games.size(), 4); Put(header, 0, 4); Put(header, ObjectIdentity::GetNext(), 8);
+    file.StartSaving(); WriteBytes(file, header);
+    auto descriptor = [&](const Record &record, bool game) {
+        Bytes bytes;
+        Put(bytes, record.type, 4); Put(bytes, record.id, 8); Put(bytes, record.length, 4);
+        if (game) { Put(bytes, static_cast<std::uint32_t>(record.mapId), 4);
+            Put(bytes, record.runtimeType, 4); Put(bytes, record.subtype, 4); Put(bytes, record.flags, 4); Put(bytes, record.owner, 8); }
+        WriteBytes(file, bytes);
+    };
+    for (const auto &entry : records) descriptor(entry.second, false);
+    for (const auto &entry : games) descriptor(entry.second, true);
     WriteBytes(file, rootBody);
     for (const auto &entry : records) WriteBytes(file, entry.second.body);
+    for (const auto &entry : games) WriteBytes(file, entry.second.body);
 }
 
 Graph Load(CSave &file, const Registry &registry, const std::function<void(Reader &)> &root, Limits limits)
 {
     file.StartLoading();
     std::uint8_t magic[8] = {};
-    if (file.Remaining() < HeaderBytes || file.Read(magic, 8) != 8 ||
-        std::memcmp(magic, Magic, 8) != 0)
+    if (file.Remaining() < HeaderBytes || file.Read(magic, 8) != 8 || std::memcmp(magic, Magic, 8) != 0)
         throw Error(ErrorCode::Incompatible, "Несовместимое сохранение: требуется EIR64SAV");
     const auto version = Get(file, 4), headerSize = Get(file, 4), payload = Get(file, 8);
-    const auto count = Get(file, 4), rootSize = Get(file, 4);
-    if (version != Version || headerSize != HeaderBytes)
+    const auto count = Get(file, 4), rootSize = Get(file, 4), gameCount = Get(file, 4);
+    const auto reserved = Get(file, 4), next = Get(file, 8);
+    if (version != Version || headerSize != HeaderBytes || reserved)
         throw Error(ErrorCode::Incompatible, "Несовместимое сохранение: версия схемы не поддерживается");
-    if (payload > limits.payloadBytes || count > limits.objects || rootSize > limits.fieldBytes)
+    if (payload > limits.payloadBytes || count + gameCount > limits.objects || rootSize > limits.fieldBytes)
         throw Error(ErrorCode::Limit, "save header limit");
-    if (payload != file.Remaining() || count * 16 + rootSize > payload)
+    const std::uint64_t tableBytes = count * 16 + gameCount * 40;
+    if (payload != file.Remaining() || tableBytes + rootSize > payload)
         throw Error(ErrorCode::Invalid, "invalid save payload length");
-    std::vector<Record> records;
-    records.reserve(static_cast<std::uint32_t>(count));
+    std::vector<Record> records, games;
+    records.reserve(static_cast<std::uint32_t>(count)); games.reserve(static_cast<std::uint32_t>(gameCount));
     std::map<ObjectId, bool> seen;
-    std::uint64_t total = count * 16 + rootSize;
+    std::uint64_t total = tableBytes + rootSize;
     ObjectId maxId = 0;
-    for (std::uint32_t i = 0; i < count; ++i)
-    {
+    auto descriptor = [&](bool game) {
         Record record;
-        record.type = static_cast<std::uint32_t>(Get(file, 4));
-        record.id = Get(file, 8);
+        record.type = static_cast<std::uint32_t>(Get(file, 4)); record.id = Get(file, 8);
         record.length = static_cast<std::uint32_t>(Get(file, 4));
-        registry.Find(record.type); // reject all unknown types before constructing anything
+        if (game)
+        {
+            registry.FindGame(record.type);
+            const auto bits = static_cast<std::uint32_t>(Get(file, 4));
+            record.mapId = bits <= INT32_MAX ? static_cast<int>(bits) : -1 - static_cast<int>(~bits);
+            record.runtimeType = static_cast<std::uint32_t>(Get(file, 4));
+            record.subtype = static_cast<std::uint32_t>(Get(file, 4)); record.flags = static_cast<std::uint32_t>(Get(file, 4));
+            record.owner = Get(file, 8);
+            if (record.owner >= LastId - 1) throw Error(ErrorCode::Identity, "invalid save owner identity");
+        }
+        else registry.Find(record.type);
         if (!record.id || record.id >= LastId - 1 || !seen.emplace(record.id, true).second)
             throw Error(ErrorCode::Identity, "invalid or duplicate save ObjectId");
         if (record.length > limits.fieldBytes || record.length > payload - total)
             throw Error(ErrorCode::Invalid, "invalid save object length");
-        total += record.length;
-        maxId = (std::max)(maxId, record.id);
-        records.push_back(std::move(record));
-    }
-    if (total != payload) throw Error(ErrorCode::Invalid, "inconsistent save body lengths");
+        total += record.length; maxId = (std::max)(maxId, (std::max)(record.id, record.owner));
+        return record;
+    };
+    for (std::uint32_t i = 0; i < count; ++i) records.push_back(descriptor(false));
+    for (std::uint32_t i = 0; i < gameCount; ++i) games.push_back(descriptor(true));
+    if (total != payload || next <= maxId || next >= LastId)
+        throw Error(ErrorCode::Identity, "inconsistent save sizes/next ObjectId");
     Bytes rootBody;
     ReadBytes(file, rootBody, static_cast<std::uint32_t>(rootSize));
     for (auto &record : records) ReadBytes(file, record.body, record.length);
-
+    for (auto &record : games) ReadBytes(file, record.body, record.length);
     Graph graph;
+    graph.registryOwner = std::make_shared<Registry>(registry);
+    graph.savedNext = next;
     ReadState state{graph, limits, registry};
-    try
+    ObjectIdentity::RestoreNamespace allocation(next); // both tables, before any constructor
+    // Persist the local watermark even if a later factory/field throws.
+    struct Watermark
     {
-        ObjectIdentity::EnsureNext(maxId + 1);
-        // Pass 1: own the complete registry, including unreferenced entries.
-        for (const auto &record : records)
-        {
-            auto object = registry.Find(record.type).create(record.id);
-            if (!object.GetPtr() || object->GetRTID() != record.id || registry.Id(*object) != record.type)
-                throw Error(ErrorCode::Identity, "save factory did not restore identity/type");
-            graph.objects.emplace(record.id, object);
-        }
-        // Pass 2: every reference can resolve now, including forward links/cycles.
-        for (const auto &record : records)
-        {
-            Reader reader(record.body, state);
-            registry.Find(record.type).load(reader, *graph.Find(record.id));
-            reader.Finish();
-        }
-        // Root callback only stages references; publication belongs to the caller.
-        Reader reader(rootBody, state);
-        root(reader);
-        reader.Finish();
-        for (const auto &record : records)
-            if (graph.Find(record.id)->GetRTID() != record.id)
-                throw Error(ErrorCode::Identity, "save loader changed object identity");
-        ObjectIdentity::EnsureNext(maxId + 1);
-    }
-    catch (...)
+        ObjectId &saved;
+        ~Watermark() { saved = ObjectIdentity::GetNext(); }
+    } watermark{graph.savedNext};
+    graph.discard.reserve(records.size() + games.size());
+    for (const auto &record : records)
     {
-        // Break any partially restored cycles while ALL registry entries are pinned.
-        for (const auto &record : records)
-            if (CFundament *object = graph.Find(record.id))
-                registry.Find(record.type).discard(*object);
-        throw;
+        const auto &type = registry.Find(record.type);
+        auto object = type.create(record.id);
+        if (!object.GetPtr() || object->GetRTID() != record.id || registry.Id(*object) != record.type)
+            throw Error(ErrorCode::Identity, "save factory did not restore identity/type");
+        graph.objects.emplace(record.id, object);
+        graph.discard.emplace_back([object, release = type.discard]() { release(*object); });
     }
+    for (const auto &record : games)
+    {
+        const auto &type = registry.FindGame(record.type);
+        auto object = type.create(record.id, record.mapId, record.runtimeType, record.subtype, record.owner);
+        if (object == nullptr || object->GetRTID() != record.id || registry.GameTypeId(*object) != record.type ||
+            static_cast<std::uint32_t>(object->GetTypeID()) != record.runtimeType ||
+            ObjectIdentity::IdOf(object->GetManager()) != record.owner)
+            throw Error(ErrorCode::Identity, "game factory did not restore identity/type");
+        object->SetID(record.mapId); object->SetSubtypeID(record.subtype);
+        object->ResetAllFlags(); object->SetFlag(record.flags);
+        graph.gameObjects.emplace(record.id, object);
+        graph.discard.emplace_back([object, release = type.discard]() { release(*object); });
+    }
+    for (const auto &record : games)
+    {
+        Reader reader(record.body, state);
+        registry.FindGame(record.type).load(reader, *graph.FindGame(record.id)); reader.Finish();
+    }
+    for (const auto &record : records)
+    {
+        Reader reader(record.body, state);
+        registry.Find(record.type).load(reader, *graph.Find(record.id)); reader.Finish();
+    }
+    Reader reader(rootBody, state); root(reader); reader.Finish();
+    for (const auto &record : records)
+        if (graph.Find(record.id)->GetRTID() != record.id)
+            throw Error(ErrorCode::Identity, "save loader changed object identity");
+    for (const auto &record : games)
+        if (graph.FindGame(record.id)->GetRTID() != record.id)
+            throw Error(ErrorCode::Identity, "save loader changed game identity");
+    graph.savedNext = ObjectIdentity::GetNext();
+    allocation.KeepInParent();
     return graph;
 }
 } // namespace SaveSchema

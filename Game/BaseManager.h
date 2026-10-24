@@ -2,6 +2,7 @@
 /////////////////////////////////////////////////////////////////////////////////////
 #include "HashMap.h"
 #include "GameBase.h"
+#include "SmartPtr.h"
 #include "SaveLoader.h"
 #include <map>
 /////////////////////////////////////////////////////////////////////////////////////
@@ -12,6 +13,7 @@ class CBaseManager : public CGameBase
 {
     friend class CManagerIterator;
     const std::map<int, int>* omittedSaveObjects = nullptr;
+    bool restoringObject = false;
 
 protected:
     // main data
@@ -77,6 +79,9 @@ public:
     void ClearTrash();
     // data creating/releasing
     virtual LPGAMEBASE CreateData(ETypeIDs tidTypeID, int id = -1);
+    // Only in a RestoreNamespace and only on a staged manager. Bypasses trash
+    // so the construction ticket cannot bind an identity to a reused object.
+    CSmartPtr<CGameBase> CreateSavedData(ETypeIDs type, int id, ObjectId savedId);
     virtual void Release(LPGAMEBASE lpData);
     // Only while applying serialized state: omitted save IDs resolve to null.
     // The guard restores normal map lookups on success and exception alike.

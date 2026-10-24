@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "ObjectIdentity.h"
 #include <atomic>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -9,6 +10,7 @@
 namespace ObjectIdentity {
 namespace {
 std::atomic<ObjectId> nextId{1};
+thread_local RestoreNamespace *restoreNamespace = nullptr;
 }
 
 namespace Detail {
@@ -36,8 +38,35 @@ ObjectId InitialId()
 }
 }
 
+RestoreNamespace::RestoreNamespace(ObjectId minimum)
+    : previous(restoreNamespace), next((std::max)(GetNext(), minimum))
+{
+    if (!minimum || minimum >= (std::numeric_limits<ObjectId>::max)())
+        throw std::invalid_argument("invalid restore namespace");
+    restoreNamespace = this;
+}
+RestoreNamespace::~RestoreNamespace() { restoreNamespace = previous; }
+bool RestoreNamespace::Active() { return restoreNamespace != nullptr; }
+void RestoreNamespace::KeepInParent()
+{
+    if (previous) previous->next = (std::max)(previous->next, next);
+}
+void RestoreNamespace::Publish(ObjectId minimum)
+{
+    if (restoreNamespace) throw std::logic_error("cannot publish inside restore namespace");
+    EnsureNext(minimum);
+}
+
 ObjectId Next()
 {
+    if (restoreNamespace)
+    {
+        const auto id = restoreNamespace->next;
+        if (!id || id >= (std::numeric_limits<ObjectId>::max)() - 1)
+            throw std::overflow_error("restored ObjectId namespace exhausted");
+        ++restoreNamespace->next;
+        return id;
+    }
     const ObjectId id = nextId.fetch_add(1, std::memory_order_relaxed);
     if (!id || id == (std::numeric_limits<ObjectId>::max)())
     {
@@ -51,12 +80,13 @@ ObjectId Next()
 
 ObjectId GetNext()
 {
-    return nextId.load(std::memory_order_relaxed);
+    return restoreNamespace ? restoreNamespace->next : nextId.load(std::memory_order_relaxed);
 }
 
 void EnsureNext(ObjectId id)
 {
     if (!id) throw std::invalid_argument("Next ObjectId must be nonzero");
+    if (restoreNamespace) { restoreNamespace->next = (std::max)(restoreNamespace->next, id); return; }
     ObjectId next=nextId.load(std::memory_order_relaxed);
     while(next<id && !nextId.compare_exchange_weak(next,id,std::memory_order_relaxed)) {}
 }
@@ -65,6 +95,7 @@ void SetNext(ObjectId id)
 {
     if (!id)
         throw std::invalid_argument("Next ObjectId must be nonzero");
+    if (restoreNamespace) { restoreNamespace->next = id; return; }
     nextId.store(id, std::memory_order_relaxed);
 }
 } // namespace ObjectIdentity
