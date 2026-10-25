@@ -3336,7 +3336,7 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 				for (int i = 0; i < pPers->armors.GetSize(); i++) {
 					if (pPers)
 						if (pPers->armors.GetSize() != 0)
-							if (pPers->armors[i] && int(pPers->armors[i]) != 0x249 && int(pPers->armors[i]) != 0x219) {
+							if (pPers->armors[i] && reinterpret_cast<uintptr_t>(pPers->armors[i]) != 0x249 && reinterpret_cast<uintptr_t>(pPers->armors[i]) != 0x219) {
 								CString armorMat = ModInfoMaterialName(pPers->armors[i]);
 								ArmorRestoration += mod->InfoProperty("GetMaterialPropsInside", armorMat.GetString(), 3) * 0.01f;
 							}
