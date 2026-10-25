@@ -44,7 +44,7 @@
 				Name="VCCustomBuildTool"/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib imagehlp.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib imagehlp.lib"
 				OutputFile="c:\home\Allods3\Game\ReleaseInt/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"
@@ -109,7 +109,7 @@
 				Name="VCCustomBuildTool"/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib imagehlp.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib imagehlp.lib"
 				OutputFile="c:\home\Allods3\Game\DebugInt/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"
@@ -179,7 +179,7 @@
 				Name="VCCustomBuildTool"/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib "
 				OutputFile="c:\home\Allods3\Game\ReleaseAuto/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"
@@ -244,7 +244,7 @@
 				Name="VCCustomBuildTool"/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib "
 				OutputFile="c:\home\Allods3\Game\Debug/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"
@@ -319,7 +319,7 @@
 				Name="VCCustomBuildTool"/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib "
 				OutputFile="c:\home\Allods3\Game\Release/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"
@@ -387,7 +387,7 @@
 			<Tool
 				Name="VCLinkerTool"
 				AdditionalOptions="/FIXED:NO"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib "
 				OutputFile="c:\home\Allods3\Game\RD1/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"
@@ -453,7 +453,7 @@
 				Name="VCCustomBuildTool"/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib mss32.lib"
+				AdditionalDependencies="dplayx.lib wsock32.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib "
 				OutputFile=".\Game___Win32_Debug_Interface_BC/Game.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="TRUE"

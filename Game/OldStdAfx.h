@@ -42,8 +42,6 @@
 #include <D3DTypes.h> // Direct3D types
 #include <DDraw.h>    // DirectDraw
 #include <D3D.h>      // Direct3D
-#include <DInput.h>   // DirectInput
-#include <DSound.h>   // DirectSound
 //////////////////////////////////////////////////////////////////////////////////////
 typedef unsigned int uint;
 #include "DebugAlloc.h"

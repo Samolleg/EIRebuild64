@@ -61,6 +61,7 @@ SGeneralSettings::SGeneralSettings()
     nFullScreen = 1;
     nJoystick = 0;
     nVideo = 0;
+    szAudioDevice.Empty();
     nAudio = 1;
     nAudioStreaming = 100;
     nAudioSFX = 100;
@@ -233,6 +234,7 @@ void SGeneralSettings::ReadSettingsFromFile(LPCSTR szSettingsFileName)
     // joystick
     nJoystick = reg.GetInt(szGeneralSettings, "Joystick", 0);
     // Audio settings
+    szAudioDevice = reg.GetString(szGeneralSettings, "AudioDevice", szAudioDevice);
     nAudio = reg.GetInt(szGeneralSettings, "Audio", nAudio);
     nVideo = reg.GetInt(szGeneralSettings, "Video", nVideo);
     nAudioStreaming = reg.GetInt(szGeneralSettings, "AudioStreaming", nAudioStreaming);
@@ -487,6 +489,7 @@ void SGeneralSettings::WriteSettingsToFile(LPCSTR szSettingsFileName)
     reg.SetInt(szGeneralSettings, "Joystick", 0);
     // Audio settings
     reg.SetInt(szGeneralSettings, "Video", nVideo);
+    reg.SetString(szGeneralSettings, "AudioDevice", szAudioDevice);
     reg.SetInt(szGeneralSettings, "Audio", nAudio);
     reg.SetInt(szGeneralSettings, "AudioStreaming", nAudioStreaming);
     reg.SetInt(szGeneralSettings, "AudioSFX", nAudioSFX);
@@ -691,6 +694,7 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
     nJoystick = reg.GetInt(szGeneralSettings, "Joystick", 0);
     // Audio settings
     nVideo = reg.GetInt(szGeneralSettings, "Video", nVideo);
+    szAudioDevice = reg.GetString(szGeneralSettings, "AudioDevice", szAudioDevice);
     nAudio = reg.GetInt(szGeneralSettings, "Audio", nAudio);
     nAudioStreaming = reg.GetInt(szGeneralSettings, "AudioStreaming", nAudioStreaming);
     nAudioSFX = reg.GetInt(szGeneralSettings, "AudioSFX", nAudioSFX);
@@ -941,6 +945,7 @@ void SGeneralSettings::WriteSettingsToRegistry(LPCSTR pszRegistryKey)
     reg.SetInt(szGeneralSettings, "Joystick", 0);
     // Audio settings
     reg.SetInt(szGeneralSettings, "Video", nVideo);
+    reg.SetString(szGeneralSettings, "AudioDevice", szAudioDevice);
     reg.SetInt(szGeneralSettings, "Audio", nAudio);
     reg.SetInt(szGeneralSettings, "AudioStreaming", nAudioStreaming);
     reg.SetInt(szGeneralSettings, "AudioSFX", nAudioSFX);

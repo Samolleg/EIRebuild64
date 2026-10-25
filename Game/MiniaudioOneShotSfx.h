@@ -2,12 +2,17 @@
 
 #include <stdint.h>
 
+class CStringArray;
+
 namespace MiniaudioOneShotSfx
 {
+// Host-thread device snapshot: display names and stable endpoint IDs, same indices.
+bool GetPlaybackDevices(CStringArray& names, CStringArray& ids);
 // Host-thread API: release after the video sound has detached.
 void* AcquireVideoEngine();
 void ReleaseVideoEngine();
 bool VideoAudioEnabled();
+bool OutputDeviceAvailable(); // Atomic query, also safe on decoder threads.
 bool VideoSuspended();
 float VideoGain();
 double VideoTimeSeconds();

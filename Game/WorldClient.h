@@ -157,7 +157,7 @@ private:
     int nPrintsRelightCounter;
     //
     // non-basemanager-derived
-    CSoundManager *pSoundManager;  // sound manager (with IDirectSound interface incorporated)
+    CSoundManager *pSoundManager;  // sound manager (miniaudio output)
     CTextManager *pTextManager;    // text manager (loads strings)
     CBridgeManager bridgesManager; // object to calculate bridge height at given point
     // player for connection with server
