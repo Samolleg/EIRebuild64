@@ -425,38 +425,143 @@ void SScriptArea::SScriptAreaElement::Load(SaveSchema::Reader &r)
 }
 
 namespace SaveSchema {
-void RegisterDynamicTypes(Registry &registry)
+ValueType ValueCodec<SRPGScienceStats>::Get()
 {
-    RegisterRemainingDynamicTypes(registry);
-    registry.RegisterValue<SRPGScienceStats>(0x1601);
-    registry.RegisterValue<SRPGAttackPortion>(0x1602);
-    registry.RegisterValue<SRPGGeneralAttack>(0x1603);
-    registry.RegisterValue<SRPGPrimaryStat>(0x1604);
-    registry.RegisterValue<SRPGSecondaryStat>(0x1605);
-    registry.RegisterValue<SRPGArmorLayer>(0x1606);
-    registry.RegisterValue<SRPGHitLocation>(0x1607);
-    registry.RegisterValue<SRPGCommonStats>(0x1608);
-    registry.RegisterValue<SRPGUnitStats>(0x1609);
-    registry.RegisterValue<SAlarmInfo>(0x160a);
-    registry.RegisterValue<SActionPoint>(0x160b);
-    registry.RegisterValue<SMEArea>(0x160c);
-    registry.RegisterValue<SMEMagicTrap>(0x160d);
-    registry.RegisterValue<SMELever>(0x160e);
-    registry.RegisterValue<SPartyID>(0x160f);
-    registry.RegisterValue<SPatrolPoint>(0x1610);
-    registry.RegisterValue<SGeneralUnitLogic>(0x1611);
-    registry.RegisterValue<SScriptParam>(0x1612);
-    registry.RegisterValue<RandomState>(0x1640);
-    registry.RegisterValue<SScriptArea::SScriptAreaElement>(0x1620);
-    registry.RegisterValue(0x1621, typeid(CPlot2D), {
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGScienceStats *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGScienceStats *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGAttackPortion>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGAttackPortion *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGAttackPortion *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGGeneralAttack>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGGeneralAttack *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGGeneralAttack *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGPrimaryStat>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGPrimaryStat *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGPrimaryStat *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGSecondaryStat>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGSecondaryStat *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGSecondaryStat *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGArmorLayer>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGArmorLayer *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGArmorLayer *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGHitLocation>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGHitLocation *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGHitLocation *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGCommonStats>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGCommonStats *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGCommonStats *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRPGUnitStats>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRPGUnitStats *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRPGUnitStats *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SAlarmInfo>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SAlarmInfo *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SAlarmInfo *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SActionPoint>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SActionPoint *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SActionPoint *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SMEArea>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SMEArea *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SMEArea *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SMEMagicTrap>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SMEMagicTrap *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SMEMagicTrap *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SMELever>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SMELever *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SMELever *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SPartyID>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SPartyID *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SPartyID *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SPatrolPoint>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SPatrolPoint *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SPatrolPoint *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SGeneralUnitLogic>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SGeneralUnitLogic *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SGeneralUnitLogic *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SScriptParam>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SScriptParam *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SScriptParam *>(p)->Load(r); }};
+}
+ValueType ValueCodec<RandomState>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const RandomState *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<RandomState *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SScriptArea::SScriptAreaElement>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SScriptArea::SScriptAreaElement *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SScriptArea::SScriptAreaElement *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CPlot2D>::Get()
+{
+    return {
         [](Writer &w, const void *p) { auto &v=*static_cast<const CPlot2D *>(p); w.Float32(v.x); w.Float32(v.y); },
-        [](Reader &r, void *p) { auto &v=*static_cast<CPlot2D *>(p); v.x=r.Float32(); v.y=r.Float32(); }});
-    registry.RegisterValue(0x1622, typeid(CPlot3D), {
+        [](Reader &r, void *p) { auto &v=*static_cast<CPlot2D *>(p); v.x=r.Float32(); v.y=r.Float32(); }};
+}
+ValueType ValueCodec<CPlot3D>::Get()
+{
+    return {
         [](Writer &w, const void *p) { auto &v=*static_cast<const CPlot3D *>(p); w.Float32(v.x); w.Float32(v.y); w.Float32(v.z); },
-        [](Reader &r, void *p) { auto &v=*static_cast<CPlot3D *>(p); v.x=r.Float32(); v.y=r.Float32(); v.z=r.Float32(); }});
-    registry.RegisterValue(0x1630, typeid(CScript), {
+        [](Reader &r, void *p) { auto &v=*static_cast<CPlot3D *>(p); v.x=r.Float32(); v.y=r.Float32(); v.z=r.Float32(); }};
+}
+ValueType ValueCodec<CScript>::Get()
+{
+    return {
         [](Writer &w, const void *p) { static_cast<const CScript *>(p)->StoreScript(w); },
-        [](Reader &r, void *p) { static_cast<CScript *>(p)->LoadScript(r); }});
+        [](Reader &r, void *p) { static_cast<CScript *>(p)->LoadScript(r); }};
 }
 } // namespace SaveSchema
 
@@ -1100,35 +1205,160 @@ void SCameraShortcut::Load(SaveSchema::Reader &r)
 namespace SaveSchema {
 void ShopCoefficients::Store(Writer &w) const { for(float v:values) w.Float32(v); }
 void ShopCoefficients::Load(Reader &r) { for(float &v:values) v=r.Float32(); }
-void RegisterRemainingDynamicTypes(Registry &registry)
-{
     static_assert(NUM_SHOP_KOEFFS==10,"shop payload width changed");
-    registry.RegisterValue<SUnitBasicCmd>(0x1650);
-    registry.RegisterValue<SUnitCommand>(0x1651);
-    registry.RegisterValue<SL0Animation>(0x1652);
-    registry.RegisterValue<SL0AnimationSeq>(0x1653);
-    registry.RegisterValue<SL1Pose>(0x1654);
-    registry.RegisterValue<SL1Command>(0x1655);
-    registry.RegisterValue<SContSpellInfo>(0x1656);
-    registry.RegisterValue<STrainInfo>(0x1657);
-    registry.RegisterValue<SRectRegion>(0x1660);
-    registry.RegisterValue<SRouteUnit>(0x1661);
-    registry.RegisterValue<CAIRoute>(0x1662);
-    registry.RegisterValue<CAIFullRoute>(0x1663);
-    registry.RegisterValue<SRouteSegment>(0x1664);
-    registry.RegisterValue<SWalkerWaypoint>(0x1665);
-    registry.RegisterValue<SWalkerTempPoint>(0x1666);
-    registry.RegisterValue<CRouteWalker>(0x1667);
-    registry.RegisterValue<SAIPath>(0x1668);
-    registry.RegisterValue<CWaterLevels>(0x1670);
-    registry.RegisterValue<CFofTracker>(0x1671);
-    registry.RegisterValue<CAIAcknowledgements>(0x1672);
-    registry.RegisterValue<SAITurnLookOrder>(0x1673);
-    registry.RegisterValue<SAIRallyPoint>(0x1674);
-    registry.RegisterValue<ShopCoefficients>(0x1675);
-    registry.RegisterValue<SCameraPlacement>(0x1680);
-    registry.RegisterValue<SCameraShortcut>(0x1681);
-    registry.RegisterValue(0x1682,typeid(CQuaternion),{
+ValueType ValueCodec<SUnitBasicCmd>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SUnitBasicCmd *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SUnitBasicCmd *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SUnitCommand>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SUnitCommand *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SUnitCommand *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SL0Animation>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SL0Animation *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SL0Animation *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SL0AnimationSeq>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SL0AnimationSeq *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SL0AnimationSeq *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SL1Pose>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SL1Pose *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SL1Pose *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SL1Command>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SL1Command *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SL1Command *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SContSpellInfo>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SContSpellInfo *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SContSpellInfo *>(p)->Load(r); }};
+}
+ValueType ValueCodec<STrainInfo>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const STrainInfo *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<STrainInfo *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRectRegion>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRectRegion *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRectRegion *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRouteUnit>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRouteUnit *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRouteUnit *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CAIRoute>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const CAIRoute *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<CAIRoute *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CAIFullRoute>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const CAIFullRoute *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<CAIFullRoute *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SRouteSegment>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SRouteSegment *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SRouteSegment *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SWalkerWaypoint>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SWalkerWaypoint *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SWalkerWaypoint *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SWalkerTempPoint>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SWalkerTempPoint *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SWalkerTempPoint *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CRouteWalker>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const CRouteWalker *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<CRouteWalker *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SAIPath>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SAIPath *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SAIPath *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CWaterLevels>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const CWaterLevels *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<CWaterLevels *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CFofTracker>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const CFofTracker *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<CFofTracker *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CAIAcknowledgements>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const CAIAcknowledgements *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<CAIAcknowledgements *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SAITurnLookOrder>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SAITurnLookOrder *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SAITurnLookOrder *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SAIRallyPoint>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SAIRallyPoint *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SAIRallyPoint *>(p)->Load(r); }};
+}
+ValueType ValueCodec<ShopCoefficients>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const ShopCoefficients *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<ShopCoefficients *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SCameraPlacement>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SCameraPlacement *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SCameraPlacement *>(p)->Load(r); }};
+}
+ValueType ValueCodec<SCameraShortcut>::Get()
+{
+    return {
+        [](Writer &w, const void *p) { static_cast<const SCameraShortcut *>(p)->Store(w); },
+        [](Reader &r, void *p) { static_cast<SCameraShortcut *>(p)->Load(r); }};
+}
+ValueType ValueCodec<CQuaternion>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             float qw,qx,qy,qz; static_cast<const CQuaternion *>(p)->GetComponents(qw,qx,qy,qz);
             w.Float32(qw); w.Float32(qx); w.Float32(qy); w.Float32(qz);
@@ -1136,8 +1366,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
         [](Reader &r,void *p) {
             const auto qw=r.Float32(),qx=r.Float32(),qy=r.Float32(),qz=r.Float32();
             *static_cast<CQuaternion *>(p)=CQuaternion(qw,qx,qy,qz);
-        }});
-    registry.RegisterValue(0x1683,typeid(SCameraMovement<float>),{
+        }};
+}
+ValueType ValueCodec<SCameraMovement<float>>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SCameraMovement<float> *>(p);
             w.Float32(v.value); w.Float32(v.desired); w.Float32(v.fpAccelerationCoeff);
@@ -1145,8 +1378,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
         [](Reader &r,void *p) {
             auto &v=*static_cast<SCameraMovement<float> *>(p);
             v.value=r.Float32(); v.desired=r.Float32(); v.fpAccelerationCoeff=r.Float32();
-        }});
-    registry.RegisterValue(0x1684,typeid(SCameraMovement<CPlot3D>),{
+        }};
+}
+ValueType ValueCodec<SCameraMovement<CPlot3D>>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SCameraMovement<CPlot3D> *>(p);
             w.Value(v.value); w.Value(v.desired); w.Float32(v.fpAccelerationCoeff);
@@ -1154,8 +1390,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
         [](Reader &r,void *p) {
             auto &v=*static_cast<SCameraMovement<CPlot3D> *>(p);
             r.Value(v.value); r.Value(v.desired); v.fpAccelerationCoeff=r.Float32();
-        }});
-    registry.RegisterValue(0x1685,typeid(SComplection),{
+        }};
+}
+ValueType ValueCodec<SComplection>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SComplection *>(p);
             w.Float32(v.strength); w.Float32(v.grace); w.Float32(v.tall);
@@ -1163,8 +1402,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
         [](Reader &r,void *p) {
             auto &v=*static_cast<SComplection *>(p);
             v.strength=r.Float32(); v.grace=r.Float32(); v.tall=r.Float32();
-        }});
-    registry.RegisterValue(0x1686,typeid(SUnitVisibilityInfo),{
+        }};
+}
+ValueType ValueCodec<SUnitVisibilityInfo>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SUnitVisibilityInfo *>(p);
             w.Float32(v.fpSight); w.Float32(v.fpSmell); w.Float32(v.fpSound);
@@ -1174,8 +1416,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
             auto &v=*static_cast<SUnitVisibilityInfo *>(p);
             v.fpSight=r.Float32(); v.fpSmell=r.Float32(); v.fpSound=r.Float32();
             v.fpTracking=r.Float32(); v.fpSenseLife=r.Float32();
-        }});
-    registry.RegisterValue(0x1687,typeid(SVisibilityMask),{
+        }};
+}
+ValueType ValueCodec<SVisibilityMask>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SVisibilityMask *>(p);
             const auto x=v.data.GetXSize(), y=v.data.GetYSize();
@@ -1194,8 +1439,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
             for(std::uint32_t i=0;i<cells;++i) {
                 const auto bits=r.UInt8(); std::memcpy(v.data.GetBuffer()+i,&bits,1);
             }
-        }});
-    registry.RegisterValue(0x1688,typeid(SAIMark),{
+        }};
+}
+ValueType ValueCodec<SAIMark>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SAIMark *>(p);
             w.Value(v.ptPosition); w.Value(v.ptPointPosition); w.Int32(v.nTime);
@@ -1209,8 +1457,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
             r.Value(v.ptPosition); r.Value(v.ptPointPosition); v.nTime=r.Int32();
             for(float &f:v.fpStrength) f=r.Float32();
             v.nUnitID=r.MapReference(); v.nPlayer=r.Int32();
-        }});
-    registry.RegisterValue(0x1689,typeid(SUnitWearsStatistics),{
+        }};
+}
+ValueType ValueCodec<SUnitWearsStatistics>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SUnitWearsStatistics *>(p);
             w.UInt16(v.wPrototype);
@@ -1224,8 +1475,11 @@ void RegisterRemainingDynamicTypes(Registry &registry)
             v.armors.resize(r.Count()); for(auto &id:v.armors) id=r.UInt32();
             v.weapons.resize(r.Count()); for(auto &id:v.weapons) id=r.UInt32();
             const auto bits=r.UInt8(); std::memcpy(&v.cCurrentWeaponIndex,&bits,1); v.nID=r.MapReference();
-        }});
-    registry.RegisterValue(0x168a,typeid(SUnitStatistics),{
+        }};
+}
+ValueType ValueCodec<SUnitStatistics>::Get()
+{
+    return {
         [](Writer &w,const void *p) {
             const auto &v=*static_cast<const SUnitStatistics *>(p);
             w.Value(static_cast<const SUnitWearsStatistics &>(v));
@@ -1237,8 +1491,7 @@ void RegisterRemainingDynamicTypes(Registry &registry)
             r.Value(static_cast<SUnitWearsStatistics &>(v));
             v.fStrength=r.Float32(); v.fGrace=r.Float32(); v.fTall=r.Float32();
             v.szBPs.resize(r.Count()); for(auto &name:v.szBPs) Text(r,name);
-        }});
-
+        }};
 }
 } // namespace SaveSchema
 

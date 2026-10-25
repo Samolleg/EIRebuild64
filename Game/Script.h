@@ -170,6 +170,9 @@ struct SScriptArea
     void Load(CSave &file);
     void Store(CSave &file);
 };
+namespace SaveSchema {
+template<> struct ValueCodec<SScriptArea::SScriptAreaElement> { static constexpr std::uint32_t Id = 0x1620; static ValueType Get(); };
+}
 //--------------------------------- Script related objects -----------------------------------
 
 // возможные типы параметров

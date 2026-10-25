@@ -24,5 +24,4 @@ struct ShopCoefficients
     void Store(Writer &) const;
     void Load(Reader &);
 };
-void RegisterRemainingDynamicTypes(Registry &);
 } // namespace SaveSchema

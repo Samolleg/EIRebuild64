@@ -2,6 +2,7 @@
 #include "Basic.h"
 #include "GameBase.h"
 #include "SmartPtr.h"
+#include "SaveValueCodecs.h"
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -19,14 +20,15 @@ class CGameBase;
 namespace SaveSchema {
 class Slot;
 using Bytes = std::vector<std::uint8_t>;
-constexpr std::uint32_t Version = 2;
+constexpr std::uint32_t Version = 3;
 constexpr std::uint32_t HeaderBytes = 48;
-// Wire v2 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
+// Wire v3 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
 // u32 fundamentCount/rootBytes/gameCount/reserved, u64 nextId.
 // CFundament descriptor: u32 type, u64 id, u32 bodyBytes.
 // CGameBase descriptor: same + i32 mapId, u32 runtimeType/subtype/flags, u64 ownerId.
 // Root, fundament bodies, game bodies follow in descriptor order.
 // Both registries share one namespace reserved before any factory.
+// v3 defines CStringArray fields (u32 count followed by length-prefixed strings).
 // References = u64; text/blob = u32 length + bytes; Count = u32.
 
 struct Limits
@@ -42,7 +44,7 @@ class Error : public std::runtime_error
 {
 public:
     const ErrorCode code;
-    Error(ErrorCode code, const char *message) : std::runtime_error(message), code(code) {}
+    Error(ErrorCode code, const std::string &message) : std::runtime_error(message), code(code) {}
 };
 
 class Writer;
@@ -62,10 +64,11 @@ struct Type
     std::function<void(CFundament &)> discard;
 };
 
+// Selected by ValueCodec<T> at compile time; callbacks never capture runtime state.
 struct ValueType
 {
-    std::function<void(Writer &, const void *)> store;
-    std::function<void(Reader &, void *)> load;
+    void (*store)(Writer &, const void *);
+    void (*load)(Reader &, void *);
 };
 // Factories bind staged owners, never global live managers. They capture owners
 // strongly: Graph retains a copy of Registry through cleanup/adoption. The factory
@@ -89,25 +92,14 @@ class Registry
 {
     std::map<std::uint32_t, Type> types;
     std::map<std::type_index, std::uint32_t> ids;
-    std::map<std::uint32_t, ValueType> values;
-    std::map<std::type_index, std::uint32_t> valueIds;
     GameObjects gameObjects;
     std::map<std::uint32_t, GameType> gameTypes;
     std::map<std::type_index, std::uint32_t> gameIds;
 public:
     void Register(std::uint32_t id, const std::type_info &nativeType, Type type);
-    void RegisterValue(std::uint32_t id, const std::type_info &, ValueType);
     void RegisterGame(std::uint32_t id, const std::type_info &, GameType);
     const GameType &FindGame(std::uint32_t id) const;
     std::uint32_t GameTypeId(const CGameBase &) const;
-    template <class T> void RegisterValue(std::uint32_t id)
-    {
-        RegisterValue(id, typeid(T), {
-            [](Writer &w, const void *p) { static_cast<const T *>(p)->Store(w); },
-            [](Reader &r, void *p) { static_cast<T *>(p)->Load(r); }});
-    }
-    std::uint32_t ValueId(const std::type_info &) const;
-    const ValueType &FindValue(std::uint32_t id) const;
     void SetGameObjects(GameObjects objects) { gameObjects = std::move(objects); }
     CGameBase *MapObject(int id) const;
     const Type &Find(std::uint32_t id) const;
@@ -122,7 +114,6 @@ class Writer
     WriteState &state;
     void UInt(std::uint64_t value, unsigned width);
     void Append(const std::uint8_t *data, std::uint32_t count);
-    void Value(const std::type_info &, const void *);
 public:
     Writer(Bytes &bytes, WriteState &state) : bytes(bytes), state(state) {}
     void UInt8(std::uint8_t value) { UInt(value, 1); }
@@ -138,7 +129,12 @@ public:
     void Count(std::uint32_t count);
     void String(const std::string &value); // bytes in the consumer's declared encoding
     void Blob(const Bytes &value); // encoded bytes, never a native object image
-    template <class T> void Value(const T &value) { Value(typeid(T), &value); }
+    template <class T, class Codec = ValueCodec<T>> void Value(const T &value)
+    {
+        UInt32(Codec::Id);
+        try { Codec::Get().store(*this, &value); }
+        catch (const Error &e) { throw Error(e.code, std::string(typeid(T).name()) + ": " + e.what()); }
+    }
     void GameReference(CGameBase *object);
     void MapReference(int id); // runtime map ID -> UInt64 ObjectId; -1 -> null
     void Reference(CFundament *object); // uint64 ObjectId; zero = null
@@ -151,7 +147,6 @@ class Reader
     std::uint32_t position = 0;
     std::uint64_t UInt(unsigned width);
     void Require(std::uint32_t count) const;
-    void Value(const std::type_info &, void *);
 public:
     Reader(const Bytes &bytes, ReadState &state) : bytes(bytes), state(state) {}
     std::uint8_t UInt8() { return static_cast<std::uint8_t>(UInt(1)); }
@@ -167,7 +162,15 @@ public:
     std::uint32_t Count();
     std::string String();
     Bytes Blob();
-    template <class T> void Value(T &value) { Value(typeid(T), &value); }
+    template <class T, class Codec = ValueCodec<T>> void Value(T &value)
+    {
+        const auto id = UInt32();
+        if (id != Codec::Id)
+            throw Error(ErrorCode::Invalid, std::string("save value type mismatch: ") + typeid(T).name() +
+                " stored typeId=" + std::to_string(id) + " expected=" + std::to_string(Codec::Id));
+        try { Codec::Get().load(*this, &value); }
+        catch (const Error &e) { throw Error(e.code, std::string(typeid(T).name()) + ": " + e.what()); }
+    }
     CGameBase *GameReference();
     int MapReference(); // UInt64 ObjectId -> restored map ID; null -> -1
     template <class T> T *GameReferenceAs()
@@ -217,7 +220,6 @@ public:
 
 // Retired native-memory dynamic serializers have no old-save reader.
 [[noreturn]] void RequireDynamicSchema();
-void RegisterDynamicTypes(Registry &registry);
 
 // CSave's current stream abstraction is uint32-sized. The format's payload length
 // is uint64, but this implementation rejects documents exceeding Limits/CSave.

@@ -5,11 +5,12 @@
 static const char LOCAL_FILE[] = __FILE__;
 
 namespace {
-SaveSchema::Registry LocalPrecacheTypes()
+using namespace SaveSchema;
+template<class T> struct LocalPrecacheCodec { static_assert(!std::is_same_v<T, T>, "Save64: missing local precache codec for T"); };
+template<> struct LocalPrecacheCodec<SUnitWearsStatistics>
 {
-    using namespace SaveSchema;
-    Registry types;
-    types.RegisterValue(0x17c1,typeid(SUnitWearsStatistics),{
+    static constexpr std::uint32_t Id = 0x17c1;
+    static ValueType Get() { return {
         [](Writer &w,const void *p){const auto &v=*static_cast<const SUnitWearsStatistics *>(p);
             w.UInt16(v.wPrototype);w.Count(static_cast<UINT>(v.armors.size()));for(auto id:v.armors)w.UInt32(id);
             w.Count(static_cast<UINT>(v.weapons.size()));for(auto id:v.weapons)w.UInt32(id);
@@ -17,23 +18,26 @@ SaveSchema::Registry LocalPrecacheTypes()
         [](Reader &r,void *p){auto &v=*static_cast<SUnitWearsStatistics *>(p);
             v.wPrototype=r.UInt16();v.armors.resize(r.Count());for(auto &id:v.armors)id=r.UInt32();
             v.weapons.resize(r.Count());for(auto &id:v.weapons)id=r.UInt32();
-            v.cCurrentWeaponIndex=static_cast<char>(r.UInt8());v.nID=r.Int32();}});
-    types.RegisterValue(0x17c2,typeid(SUnitStatistics),{
+            v.cCurrentWeaponIndex=static_cast<char>(r.UInt8());v.nID=r.Int32();}}; }
+};
+template<> struct LocalPrecacheCodec<SUnitStatistics>
+{
+    static constexpr std::uint32_t Id = 0x17c2;
+    static ValueType Get() { return {
         [](Writer &w,const void *p){const auto &v=*static_cast<const SUnitStatistics *>(p);
-            w.Value(static_cast<const SUnitWearsStatistics &>(v));w.Float32(v.fStrength);w.Float32(v.fGrace);w.Float32(v.fTall);
+            w.Value<SUnitWearsStatistics, LocalPrecacheCodec<SUnitWearsStatistics>>(static_cast<const SUnitWearsStatistics &>(v));w.Float32(v.fStrength);w.Float32(v.fGrace);w.Float32(v.fTall);
             w.Count(static_cast<UINT>(v.szBPs.size()));for(const auto &name:v.szBPs)w.String((LPCSTR)name);},
         [](Reader &r,void *p){auto &v=*static_cast<SUnitStatistics *>(p);
-            r.Value(static_cast<SUnitWearsStatistics &>(v));v.fStrength=r.Float32();v.fGrace=r.Float32();v.fTall=r.Float32();
-            v.szBPs.resize(r.Count());for(auto &name:v.szBPs)name=r.String().c_str();}});
-    return types;
-}
+            r.Value<SUnitWearsStatistics, LocalPrecacheCodec<SUnitWearsStatistics>>(static_cast<SUnitWearsStatistics &>(v));v.fStrength=r.Float32();v.fGrace=r.Float32();v.fTall=r.Float32();
+            v.szBPs.resize(r.Count());for(auto &name:v.szBPs)name=r.String().c_str();}}; }
+};
 template<class F> void WriteLocal(CSave &file,F root)
 {
-    CMemorySave f;auto types=LocalPrecacheTypes();SaveSchema::Store(f,types,root);file.Write(f);
+    CMemorySave f;SaveSchema::Registry types;SaveSchema::Store(f,types,root);file.Write(f);
 }
 template<class F> void ReadLocal(CSave &file,F root)
 {
-    CMemorySave f;file.Read(f);f.Seek(0);auto types=LocalPrecacheTypes();auto graph=SaveSchema::Load(f,types,root);
+    CMemorySave f;file.Read(f);f.Seek(0);SaveSchema::Registry types;auto graph=SaveSchema::Load(f,types,root);
 }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -46,22 +50,22 @@ template<class F> void ReadLocal(CSave &file,F root)
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitWearsStatistics::Store(CSave &file) const
 {
-    WriteLocal(file,[&](SaveSchema::Writer &w){w.Value(*this);});
+    WriteLocal(file,[&](SaveSchema::Writer &w){w.Value<SUnitWearsStatistics, LocalPrecacheCodec<SUnitWearsStatistics>>(*this);});
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitWearsStatistics::Load(CSave &file)
 {
-    ReadLocal(file,[&](SaveSchema::Reader &r){r.Value(*this);});
+    ReadLocal(file,[&](SaveSchema::Reader &r){r.Value<SUnitWearsStatistics, LocalPrecacheCodec<SUnitWearsStatistics>>(*this);});
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitStatistics::Store(CSave &file) const
 {
-    WriteLocal(file,[&](SaveSchema::Writer &w){w.Value(*this);});
+    WriteLocal(file,[&](SaveSchema::Writer &w){w.Value<SUnitStatistics, LocalPrecacheCodec<SUnitStatistics>>(*this);});
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void SUnitStatistics::Load(CSave &file)
 {
-    ReadLocal(file,[&](SaveSchema::Reader &r){r.Value(*this);});
+    ReadLocal(file,[&](SaveSchema::Reader &r){r.Value<SUnitStatistics, LocalPrecacheCodec<SUnitStatistics>>(*this);});
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitStatisticsDriver::AddUnit(CUnit *pUnit)

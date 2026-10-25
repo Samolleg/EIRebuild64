@@ -61,49 +61,29 @@ void WriteBytes(CSave &file, const Bytes &bytes)
 void Registry::Register(std::uint32_t id, const std::type_info &nativeType, Type type)
 {
     if (!id || !type.create || !type.store || !type.load || !type.discard ||
-        types.count(id) || values.count(id) || gameTypes.count(id) || ids.count(std::type_index(nativeType)))
-        throw Error(ErrorCode::UnknownType, "invalid or duplicate save type registration");
+        types.count(id) || gameTypes.count(id) || ids.count(std::type_index(nativeType)))
+        throw Error(ErrorCode::UnknownType, std::string("invalid or duplicate save type: ") + nativeType.name() + " typeId=" + std::to_string(id));
     types.emplace(id, std::move(type));
     ids.emplace(std::type_index(nativeType), id);
-}
-void Registry::RegisterValue(std::uint32_t id, const std::type_info &native, ValueType type)
-{
-    if (!id || !type.store || !type.load || types.count(id) || values.count(id) || gameTypes.count(id) ||
-        valueIds.count(std::type_index(native)))
-        throw Error(ErrorCode::UnknownType, "invalid or duplicate value type");
-    values.emplace(id, std::move(type));
-    valueIds.emplace(std::type_index(native), id);
 }
 void Registry::RegisterGame(std::uint32_t id, const std::type_info &native, GameType type)
 {
     if (!id || !type.create || !type.store || !type.load || !type.discard ||
-        types.count(id) || values.count(id) || gameTypes.count(id) || gameIds.count(std::type_index(native)))
-        throw Error(ErrorCode::UnknownType, "invalid or duplicate game type");
+        types.count(id) || gameTypes.count(id) || gameIds.count(std::type_index(native)))
+        throw Error(ErrorCode::UnknownType, std::string("invalid or duplicate game type: ") + native.name() + " typeId=" + std::to_string(id));
     gameTypes.emplace(id, std::move(type));
     gameIds.emplace(std::type_index(native), id);
 }
 const GameType &Registry::FindGame(std::uint32_t id) const
 {
     const auto it = gameTypes.find(id);
-    if (it == gameTypes.end()) throw Error(ErrorCode::UnknownType, "unknown game typeId");
+    if (it == gameTypes.end()) throw Error(ErrorCode::UnknownType, "unknown game typeId: " + std::to_string(id));
     return it->second;
 }
 std::uint32_t Registry::GameTypeId(const CGameBase &object) const
 {
     const auto it = gameIds.find(std::type_index(typeid(object)));
-    if (it == gameIds.end()) throw Error(ErrorCode::UnknownType, "unregistered game object");
-    return it->second;
-}
-std::uint32_t Registry::ValueId(const std::type_info &native) const
-{
-    auto it = valueIds.find(std::type_index(native));
-    if (it == valueIds.end()) throw Error(ErrorCode::UnknownType, "unregistered value type");
-    return it->second;
-}
-const ValueType &Registry::FindValue(std::uint32_t id) const
-{
-    auto it = values.find(id);
-    if (it == values.end()) throw Error(ErrorCode::UnknownType, "unknown value type");
+    if (it == gameIds.end()) throw Error(ErrorCode::UnknownType, std::string("unregistered game object: ") + typeid(object).name());
     return it->second;
 }
 CGameBase *Registry::MapObject(int id) const
@@ -119,13 +99,13 @@ CGameBase *Registry::MapObject(int id) const
 const Type &Registry::Find(std::uint32_t id) const
 {
     const auto found = types.find(id);
-    if (found == types.end()) throw Error(ErrorCode::UnknownType, "unknown save typeId");
+    if (found == types.end()) throw Error(ErrorCode::UnknownType, "unknown save typeId: " + std::to_string(id));
     return found->second;
 }
 std::uint32_t Registry::Id(const CFundament &object) const
 {
     const auto found = ids.find(std::type_index(typeid(object)));
-    if (found == ids.end()) throw Error(ErrorCode::UnknownType, "unregistered save object");
+    if (found == ids.end()) throw Error(ErrorCode::UnknownType, std::string("unregistered save object: ") + typeid(object).name());
     return found->second;
 }
 
@@ -237,19 +217,6 @@ void Writer::Blob(const Bytes &value)
     if (value.size() > state.limits.fieldBytes) throw Error(ErrorCode::Limit, "save blob limit");
     UInt32(static_cast<std::uint32_t>(value.size()));
     Append(value.data(), static_cast<std::uint32_t>(value.size()));
-}
-void Writer::Value(const std::type_info &native, const void *value)
-{
-    const auto id = state.registry.ValueId(native);
-    UInt32(id);
-    state.registry.FindValue(id).store(*this, value);
-}
-void Reader::Value(const std::type_info &native, void *value)
-{
-    const auto id = UInt32();
-    if (id != state.registry.ValueId(native))
-        throw Error(ErrorCode::Invalid, "save value type mismatch");
-    state.registry.FindValue(id).load(*this, value);
 }
 void Writer::GameReference(CGameBase *object) { UInt64(state.GameReference(object)); }
 CGameBase *Reader::GameReference()
