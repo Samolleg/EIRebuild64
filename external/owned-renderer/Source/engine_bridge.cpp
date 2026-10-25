@@ -43,7 +43,9 @@
 #include "camp_inventory.h"
 
 #include "critters.h"
+#if !defined(EID3D11_EMBEDDED)
 #include "unit_percepts.h"
+#endif
 #include "figure_selection_bounds.h"
 #include "owned_preview_policy.h"
 #include "model_draw.h"
@@ -53,7 +55,9 @@
 #include "model_preview_producer.h"
 #include "model_preview_presentation.h"
 #include "model_lighting.h"
+#if !defined(EID3D11_EMBEDDED)
 #include "unit_blood.h"
+#endif
 #include "game_sites.h"
 #include "hud_native_sites.h"
 #include "visual_native_sites.h"
@@ -2788,6 +2792,7 @@ void note_foreign_entry(const std::uint8_t* entry, const char* when, const char*
 // Our patch record without the executable-page requirement (renderer slots).
 void record_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept;
 
+#if !defined(EID3D11_EMBEDDED)
 const std::uint8_t* game_image_base() noexcept {
     return reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
 }
@@ -2810,6 +2815,7 @@ bool game_image_contains(const void* address) noexcept {
     const auto* at = static_cast<const std::uint8_t*>(address);
     return base && at >= base && at < base + game_image_size();
 }
+#endif // !EID3D11_EMBEDDED
 
 // A world draw completed through our hook (the ownership check point).
 std::atomic<bool> g_ownership_world_seen{false};
@@ -2836,6 +2842,7 @@ constexpr std::array<std::uint32_t, 46> kObserverEntryRvas{{
     0x291630, 0x18dcd0, 0x26e130, 0x18b750,                     // camp texture destroy, close diagnostics
     0x10e9f0, 0x10f1e0, 0x10f2d0, 0x10f5b0}};                   // server object change writers
 
+#if !defined(EID3D11_EMBEDDED)
 bool observer_entry_forwarded(const void* entry, const void* target, const wchar_t* module) noexcept {
     const auto* image = game_image_base();
     const auto* at = static_cast<const std::uint8_t*>(entry);
@@ -2853,11 +2860,13 @@ bool observer_entry_forwarded(const void* entry, const void* target, const wchar
     return true;
 }
 const bool g_observer_entry_check_registered = (set_observer_entry_check(&observer_entry_forwarded), true);
+#endif
 
 // Ownership of a game entry the bridge detours: stock bytes, or the addon's
 // hook-framework chain (forward through its dispatcher, which stays owned by
 // the addon and is never freed; uninstall restores the addon's entry bytes).
 // Anything else is rejected and named once in the bridge log.
+#if !defined(EID3D11_EMBEDDED)
 EntryResolution resolve_hook_entry(const std::uint8_t* entry,
                                    const std::uint8_t* stock,
                                    std::size_t stock_bytes,
@@ -2881,11 +2890,13 @@ EntryResolution resolve_hook_entry(const std::uint8_t* entry,
     }
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 // A fully replaced entry never calls its previous owner, so only stock bytes
 // are accepted. An addon hook-framework chain there would be silently
 // dropped by our jump; it stays installed and the feature is rejected
 // visibly instead (any other foreign owner is named by resolve_hook_entry).
+#if !defined(EID3D11_EMBEDDED)
 bool replaced_entry_is_stock(std::uint8_t* entry, const std::uint8_t* stock,
                              std::size_t stock_bytes) noexcept {
     const auto owner = resolve_hook_entry(entry, stock, stock_bytes, 5);
@@ -2899,6 +2910,7 @@ bool hook_entry_usable(const std::uint8_t* entry, const std::uint8_t* stock,
     return resolve_hook_entry(entry, stock, stock_bytes, hook_bytes).owner !=
         EntryOwner::rejected;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool restore_forwarding_hook(std::uint8_t* entry,const std::uint8_t* original,
     std::size_t bytes,const void* hook,bool call,const char* owner) noexcept;
@@ -2929,8 +2941,11 @@ std::map<std::array<std::uint64_t, 3>, TerrainContentGenerations>
 std::uint32_t g_terrain_content_epoch = 1;
 std::uint64_t g_terrain_content_source_generation = 0;
 
+#if !defined(EID3D11_EMBEDDED)
 static_assert(sizeof(void*) == 4, "The legacy engine record layout is 32-bit x86");
+#endif
 
+#if !defined(EID3D11_EMBEDDED)
 bool decode_tile_mask_record(const std::uint8_t* record, const std::uint8_t*& data,
                              std::uint32_t& count) noexcept {
     if (!record) return false;
@@ -2938,6 +2953,7 @@ bool decode_tile_mask_record(const std::uint8_t* record, const std::uint8_t*& da
     std::memcpy(&count, record + kTileMaskArrayCountOffset, sizeof(count));
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct NativeFigureContext {
     bool active = false;
@@ -3415,6 +3431,7 @@ std::size_t owned_visual_frame_index(const LifecycleIdentity& identity) noexcept
     return static_cast<std::size_t>(found-entities.begin());
 }
 
+#if !defined(EID3D11_EMBEDDED)
 std::uintptr_t active_wound_surface_interface(
     const std::uint8_t* const* render_state_manager_slot,
     const std::uint8_t* object) noexcept {
@@ -3452,6 +3469,7 @@ std::uintptr_t active_wound_surface_interface(
         return 0;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 HudAtlasProducerContext hud_atlas_producer_context(
     HudAtlasProducerKind kind, void* destination_texture, int atlas_width,
@@ -3475,6 +3493,7 @@ HudAtlasProducerContext hud_atlas_producer_context(
     return context;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 IDirectDrawSurface7* current_texture_surface(void* texture) noexcept {
     if (!texture) return nullptr;
     __try {
@@ -3513,6 +3532,7 @@ bool __stdcall hook_addon_hud_atlas_producer(
     }
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool hud_draw_receiver(void* receiver, HudVisualLane lane) noexcept;
 void* hud_lane_atlas(void* receiver) noexcept;
@@ -3541,6 +3561,7 @@ void repaint_hud_skill_icon(const char* resource_name, int source_width, int sou
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool __fastcall hook_stock_hud_atlas_producer(
     void* self, void*, void* destination_texture, const char* resource_name,
     int source_width, int source_height, int copy_width, int copy_height,
@@ -3587,6 +3608,7 @@ bool safe_copy_hud_resource(std::uint8_t* destination,
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 std::size_t hud_lane_index(HudVisualLane lane) noexcept {
     const auto value = static_cast<std::uint8_t>(lane);
@@ -3597,6 +3619,7 @@ std::size_t hud_lane_index(HudVisualLane lane) noexcept {
 
 void* hud_lane_atlas(void* receiver) noexcept;
 
+#if !defined(EID3D11_EMBEDDED)
 void* hud_lane_receiver(void* screen, HudVisualLane lane) noexcept {
     const auto index = hud_lane_index(lane);
     if (!screen || index >= kHudLaneMemberOffsets.size()) return nullptr;
@@ -3797,6 +3820,7 @@ void* hud_lane_atlas(void* receiver) noexcept {
         return nullptr;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 void finish_hud_lane_after_call(bool armed, bool completed) noexcept;
 
@@ -3809,6 +3833,7 @@ void close_hud_auto_capture() noexcept {
 
 // The first AddSkill of a rebuild (no skills yet) on the active, published
 // skill lane, with no capture open, starts an automatic lane capture.
+#if !defined(EID3D11_EMBEDDED)
 void open_hud_auto_capture(void* self) noexcept {
     if (g_hud_auto_capture || g_hud_visuals.capturing_lane() || g_hud_visual_capture_suspended ||
         !hud_draw_receiver(self, HudVisualLane::skill) ||
@@ -3837,6 +3862,7 @@ bool begin_hud_lane_capture(void* self, HudVisualLane lane) noexcept {
     }
     return hud_capture_receiver(self, lane) && g_hud_visuals.begin_lane(lane);
 }
+#endif // !EID3D11_EMBEDDED
 
 void finish_hud_lane_after_call(bool armed, bool completed) noexcept {
     const auto lane=g_hud_visuals.capturing_lane_id();
@@ -3910,6 +3936,7 @@ void diagnose_hud_publication_failure_once(
                         EngineBridge::instance().sites_verified());
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_hud_item_set_unit(void* self, void*, void* unit) {
     const bool armed = begin_hud_lane_capture(self, HudVisualLane::item);
     const bool previous_suspended = g_hud_visual_capture_suspended;
@@ -3999,8 +4026,10 @@ void __stdcall hook_hud_skill_set_unit(void* self, void* unit, bool enabled) {
         finish_hud_lane_after_call(armed, completed);
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // Stock panel entries (no addon contract). Same lane transaction as above.
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_hud_native_weapon_set_unit(void* self, void*, void* unit) {
     const bool armed = begin_hud_lane_capture(self, HudVisualLane::weapon);
     const bool previous_suspended = g_hud_visual_capture_suspended;
@@ -4186,6 +4215,7 @@ bool __fastcall hook_hud_visual_stock_producer(
         canonical.c_str(), placement, &native_source_found);
     return published && native_source_found;
 }
+#endif // !EID3D11_EMBEDDED
 
 void* dispatch_hud_visual_add_figure(
     void* self, const char* resource_name, std::uintptr_t return_address) {
@@ -4219,12 +4249,14 @@ void* dispatch_hud_visual_add_figure(
     return carrier;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void* __fastcall hook_hud_visual_add_figure(
     void* self, void*, const char* resource_name) {
     return dispatch_hud_visual_add_figure(
         self, resource_name,
         reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
 }
+#endif // !EID3D11_EMBEDDED
 
 HudVisualLane hud_lane_from_draw_return(const void* address) noexcept {
     if (!g_hud_visual_game_image || !address) return HudVisualLane::none;
@@ -4240,6 +4272,7 @@ HudVisualLane hud_lane_from_draw_return(const void* address) noexcept {
     return HudVisualLane::none;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_hud_lane_draw(void* self, void*, void* rect) {
     close_hud_auto_capture();
     const HudDrawContext previous = g_hud_draw;
@@ -4371,6 +4404,7 @@ void __fastcall hook_resource_destroy(void* self, void*) {
     invalidate_hud_manager(self, true);
     g_resource_destroy(self);
 }
+#endif // !EID3D11_EMBEDDED
 
 #ifdef EID3D11_TESTING
 BOOL __fastcall hook_figure_placed(
@@ -4785,6 +4819,7 @@ bool test_hud_visual_spell_set_unit_exception(void* receiver) noexcept {
 }
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 int __fastcall hook_addon_hud_atlas_texture_lock(
     void* texture, void*, void* description) {
     // Arm only the exact producer's existing CTexture::Lock call. Calling its
@@ -4803,6 +4838,7 @@ int __fastcall hook_addon_hud_atlas_texture_lock(
     }
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 #ifdef EID3D11_TESTING
 constexpr DWORD kHudAtlasTestException = 0xe1d3110au;
@@ -4904,6 +4940,7 @@ bool __fastcall test_stock_hud_atlas_producer(
 }
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 bool terrain_content_identity(
     void* sector, std::array<std::uint64_t, 3>& identity) {
     identity = {};
@@ -5016,6 +5053,7 @@ bool bump_terrain_content_generation(void* sector) {
 bool bump_all_terrain_generations(void* sector) {
     return bump_terrain_generations(sector, true, true);
 }
+#endif // !EID3D11_EMBEDDED
 
 void clear_terrain_content_generations() {
     AcquireSRWLockExclusive(&g_terrain_generation_lock);
@@ -5036,6 +5074,7 @@ bool finite_vector(const float* value, std::size_t count) {
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool capture_native_figure_metadata(void* figure, const std::uint8_t* object,
                                     NativeFigureContext& context,
                                     bool allow_unbounded_interface = false,
@@ -5130,14 +5169,15 @@ bool world_figure_renderer_owns_scene_renderer(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept;
 
 FigureFallbackReason publish_retained_world_lighting(
     void* scene_renderer) noexcept {
 #ifdef EID3D11_EMBEDDED
-    if (g_embedded_visual_inputs) return publish_native_world_lighting(scene_renderer);
-#endif
+    return publish_native_world_lighting(scene_renderer);
+#else
     const auto* image = reinterpret_cast<const std::uint8_t*>(
         GetModuleHandleA(nullptr));
     if (!image) return FigureFallbackReason::renderer_state;
@@ -5147,6 +5187,7 @@ FigureFallbackReason publish_retained_world_lighting(
             world_renderer, scene_renderer))
         return FigureFallbackReason::renderer_state;
     return publish_native_world_lighting(world_renderer);
+#endif
 }
 
 FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
@@ -5171,19 +5212,25 @@ FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
             return frame.result;
         }
         frame.lighting = g_embedded_visual_inputs->lighting;
-    } else
-#endif
+    } else {
+        embedded_report_render_failure("embedded_input_missing", "world_lighting");
+        frame.result = FigureFallbackReason::renderer_state;
+        return frame.result;
+    }
+#else
     if (!snapshot_native_world_lighting(
             renderer, frame.lighting)) {
         frame.result = FigureFallbackReason::renderer_state;
         return frame.result;
     }
+#endif
     frame.result = g_native_sink_world_lighting(
         g_native_sink_context, frame.lighting)
         ? FigureFallbackReason::none : FigureFallbackReason::unavailable;
     return frame.result;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 FigureFallbackReason capture_live_figure_transform(
     void* renderer, std::array<float, 16>& object_to_world) {
     const auto* renderer_bytes = static_cast<const std::uint8_t*>(renderer);
@@ -5346,6 +5393,7 @@ bool suppress_cpu_morph(void* figure, std::int32_t& original_morph_count) {
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool extract_native_transform(void* renderer, std::array<float, 16>& transform,
                               std::uint32_t& default_diffuse);
@@ -5561,6 +5609,7 @@ struct HudLiveDrawInputs {
     float v_shift = 0.0f;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_hud_live_draw_inputs(void* renderer, void* figure, void* material,
                                HudLiveDrawInputs& inputs) noexcept {
     inputs = {};
@@ -5586,6 +5635,7 @@ bool read_hud_live_draw_inputs(void* renderer, void* figure, void* material,
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 void install_owned_scene_inputs(void* sinks,const BridgeSceneHandoff& handoff,
     const std::vector<std::shared_ptr<SurfaceImage>>* textures,
@@ -5642,6 +5692,7 @@ bool queue_hud_visual(const HudPublishedVisual& slot, const HudLiveDrawInputs& i
     } catch (...) { return false; }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL submit_hud_visual(void* renderer, void* figure, void* material,
                        BYTE fog, void* rect,
                        const HudPublishedVisual& slot) noexcept {
@@ -5754,6 +5805,7 @@ bool advance_animated_figure_texture(void* figure) {
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool extract_native_transform(void* renderer, std::array<float, 16>& transform,
                               std::uint32_t& default_diffuse);
@@ -5764,6 +5816,7 @@ struct FigureExtentRecord {
     FigureExtentContractViolation violation = FigureExtentContractViolation::none;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 FigureExtentRecord inspect_figure_extent_record(void* figure) noexcept {
     if (!figure)
         return {nullptr, FigureExtentContractViolation::missing_figure};
@@ -5780,6 +5833,7 @@ FigureExtentRecord inspect_figure_extent_record(void* figure) noexcept {
         return {nullptr, FigureExtentContractViolation::unreadable_record};
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 FigureExtentContractViolation finalize_figure_post_render(
     const FigureExtentRecord& record, void* caller_rect, const RECT* extents,
@@ -5813,6 +5867,7 @@ FigureExtentContractViolation finalize_figure_post_render(
     return FigureExtentContractViolation::none;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_figure_name(void* figure, const char*& name, std::size_t& length) {
     name = nullptr;
     length = 0;
@@ -6167,6 +6222,7 @@ bool apply_object_plan_lighted_authority(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 std::array<float, 16> multiply_object_plan_matrix(
     const std::array<float, 16>& left,
@@ -6180,6 +6236,7 @@ std::array<float, 16> multiply_object_plan_matrix(
     return result;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool refresh_object_plan_placement(
     void* object, std::array<float, 16>& matrix) noexcept {
     matrix = {};
@@ -6231,6 +6288,7 @@ bool object_plan_owner(void* specific, void*& owner,
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 void report_object_suffix_cut_failure(const char* stage) noexcept {
     static volatile LONG reported = 0;
@@ -6252,6 +6310,7 @@ bool object_suffix_guarded_copy(const void* source, T& value) noexcept {
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool object_suffix_capture_stacks(
     void* renderer, void*& geometry,
     ObjectSuffixMatrixStackSnapshot& clip,
@@ -6306,6 +6365,7 @@ bool object_suffix_capture_stacks(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool object_suffix_stack_equal(
     const ObjectSuffixMatrixStackSnapshot& left,
@@ -6384,6 +6444,7 @@ ObjectSuffixCutToken object_suffix_begin_invocation(
     return token;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool object_suffix_prepare_invocation(
     const ObjectSuffixCutToken& token, void* owner,
     const void* immediate_return,
@@ -6407,6 +6468,7 @@ bool object_suffix_prepare_invocation(
         invocation.entry_world);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 ObjectSuffixCutInvocation* object_suffix_current_invocation() noexcept {
     if (!g_object_suffix_cut_installed ||
@@ -6481,6 +6543,7 @@ bool object_suffix_compose_matrices(
         finite_vector(world.data(), world.size());
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool object_suffix_build_explicit_inputs(
     void* frame, void* specific, void* owner,
     const ObjectSuffixMatrixStackSnapshot& clip,
@@ -6544,6 +6607,7 @@ bool object_suffix_build_explicit_inputs(
     if (!success) output = {};
     return success;
 }
+#endif // !EID3D11_EMBEDDED
 
 void erase_resolved_object_plan_geometry(
     const LifecycleIdentity& identity) noexcept {
@@ -6586,6 +6650,7 @@ void reset_positive_object_render_plans() noexcept {
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void invalidate_object_render_plan_owner(void* owner) noexcept {
     std::int32_t signed_id = 0;
     if (!owner) return;
@@ -6667,6 +6732,7 @@ void __fastcall hook_object_plan_set_complection(
             OuterFrameAppearanceCallback::complection);
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool object_plan_contains_figure(const ObjectRenderPlan& plan,
                                  const void* figure) noexcept {
@@ -6677,6 +6743,7 @@ bool object_plan_contains_figure(const ObjectRenderPlan& plan,
         });
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool build_object_render_plan(
     const LifecycleIdentity& identity, void* owner, void* specific,
     ObjectRenderPlan*& output) noexcept {
@@ -6843,6 +6910,7 @@ bool write_object_plan_loop_outputs(void* frame, std::uint32_t visible,
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool merge_object_plan_extents(RECT& output, const RECT& value,
                                bool visible, bool& have_extents) noexcept {
@@ -6859,6 +6927,7 @@ bool merge_object_plan_extents(RECT& output, const RECT& value,
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool publish_object_plan_extents(
     void* specific, const RECT& value) noexcept {
     if (!specific) return false;
@@ -6870,6 +6939,7 @@ bool publish_object_plan_extents(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 volatile LONG g_object_plan_failure_reported = 0;
 void report_object_plan_failure(const char* stage) noexcept {
@@ -6963,6 +7033,7 @@ void report_object_plan_omission(
 thread_local const char* g_interaction_failure_stage = nullptr;
 // The game's model mask (first figure +0x124) names the unit even when no
 // owned sample exists: specific +0x1C owner, owner +0xD0 figure list.
+#if !defined(EID3D11_EMBEDDED)
 void read_pick_model_mask(const void* specific, char* out, std::size_t size) noexcept {
     out[0] = 0;
     __try {
@@ -7015,6 +7086,7 @@ void report_pick_state_cleared(const char* stage, const char* inner,
         index < frame.prepared.size() && frame.prepared[index].claimed ? "true" : "false");
     append_bridge_event("pick_state_cleared", detail, true);
 }
+#endif // !EID3D11_EMBEDDED
 
 struct ObjectPlanFigureSemanticScope {
     SemanticContext previous{};
@@ -7031,6 +7103,7 @@ struct ObjectPlanFigureSemanticScope {
     }
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_object_plan_fog(void* frame, BYTE& fog) noexcept {
     if (!frame) return false;
     __try {
@@ -7072,6 +7145,7 @@ bool resolve_object_plan_base_inputs(
             renderer, base_object_to_world) ==
             FigureFallbackReason::none;
 }
+#endif // !EID3D11_EMBEDDED
 
 enum class VisualWorldTickTimingKind : std::uint8_t {
     parent,
@@ -7205,6 +7279,7 @@ private:
 // process fog distance define the band). Where accepted neighbour
 // maps touch or continue the sides, swap the original band's share for the moved band
 // plus the neighbour seam curve (neighbour_fog.h), as the shaders do.
+#if !defined(EID3D11_EMBEDDED)
 BYTE neighbour_continued_border_fog(const void* terrain,const float* position,
                                     BYTE fog) noexcept {
     __try {
@@ -7266,6 +7341,7 @@ bool submit_object_plan_geometry(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // Scene thread option: the game thread's own cache of interaction boxes.
 // The box is a pure function of the immutable figure asset (held here, so its
@@ -7334,6 +7410,7 @@ bool owned_interaction_shape_bounds(const RetainedVisualSample& sample,std::size
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool add_native_interaction_morph_bounds(void* figure,NativeWorldBounds& bounds) noexcept {
     // This is the existing camera-admitted interaction metadata read. It never
     // supplies deformation to color or shadows and does not prepare game data.
@@ -7357,6 +7434,7 @@ bool add_native_interaction_morph_bounds(void* figure,NativeWorldBounds& bounds)
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool submit_owned_visual_records(const RetainedVisualSample& sample,
     const NativePreparedPartSubmission* const* parts,std::uint32_t count,
@@ -7405,6 +7483,7 @@ struct OwnedWoundRequest {
 bool scene_handoff_active() noexcept;
 bool queue_owned_wound_layer(std::vector<OwnedWoundRequest>&& requests) noexcept;
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_figure_bounding_volume(const void* figure, FigureBoundingVolume& volume) noexcept {
     volume = {};
     __try {
@@ -7417,6 +7496,7 @@ bool read_figure_bounding_volume(const void* figure, FigureBoundingVolume& volum
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+#endif // !EID3D11_EMBEDDED
 
 // The game's interaction outputs for one object: per-figure screen extents
 // and FIG_VISIBLE, the object rectangle and the loop's visible/lighted
@@ -7425,6 +7505,7 @@ bool read_figure_bounding_volume(const void* figure, FigureBoundingVolume& volum
 // ready, supplies only tighter part boxes and the wound-layer submission.
 // A sample that is missing, faulted or unmappable omits the visual, never
 // the interaction (AGENTS.md: interaction must not depend on rendering).
+#if !defined(EID3D11_EMBEDDED)
 ObjectPlanExecutionStatus execute_owned_object_interaction(
     void* frame,void* owner,void* specific,void* renderer,void* caller_rect,
     ObjectRenderPlan& plan,std::size_t sample_index,
@@ -7625,6 +7706,7 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
         return ObjectPlanExecutionStatus::failure;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool prepare_owned_preview_pose(ObjectRenderPlan& plan, void* owner,
     ObjectSuffixWorldRoute route, RetainedVisualSample& sample,
@@ -7743,6 +7825,7 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     clear_owned_scene_inputs(handoff);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 ObjectPlanExecutionStatus execute_owned_preview_render_plan(
     void* frame, void* owner, void* specific, void* renderer, ObjectRenderPlan& plan,
     ObjectSuffixWorldRoute route, const std::array<float,16>& base_clip,
@@ -8215,6 +8298,7 @@ ObjectPlanExecutionStatus execute_owned_object_render_plan(
     }
     return ObjectPlanExecutionStatus::success;
 }
+#endif // !EID3D11_EMBEDDED
 
 void finish_object_plan_transaction(
     ObjectPlanExecutionOutput& output, bool commit) noexcept {
@@ -8223,6 +8307,7 @@ void finish_object_plan_transaction(
     output.transaction_open = false;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool publish_object_suffix_output_values(
     void* frame, void* specific, void* owner, void* caller_rect,
     const ObjectPlanExecutionOutput& output,
@@ -8271,6 +8356,7 @@ bool publish_object_suffix_output_values(
         published = false;
     return published;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct ObjectSuffixLightingSnapshot {
     std::uint32_t owner_flags = 0;
@@ -8279,6 +8365,7 @@ struct ObjectSuffixLightingSnapshot {
     std::uint32_t reshadow = 0;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool capture_object_suffix_lighting_snapshot(
     void* owner, void* specific,
     ObjectSuffixLightingSnapshot& snapshot) noexcept {
@@ -8597,6 +8684,7 @@ extern "C" __declspec(naked) void hook_object_visual_loop() {
         jmp dword ptr [g_object_visual_loop_trampoline]
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 int __fastcall hook_native_geometry(
     void* self, void*, const NativePackedGroup* positions, int position_groups,
@@ -8677,6 +8765,7 @@ bool lifecycle_probe_requested() noexcept {
            value[0] == '1';
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool lifecycle_read_signed_id(const void* object, std::int32_t& id) noexcept {
     if (!object) return false;
     __try {
@@ -8711,6 +8800,7 @@ bool lifecycle_lookup_signed_id(void* self, std::int32_t id,
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 void fail_lifecycle_contract() noexcept {
     g_lifecycle_draw_oracle.store(false, std::memory_order_release);
@@ -8782,11 +8872,13 @@ std::uint32_t g_pose_catch_up_buckets = 0;
 // ~0.5-0.8 us per capture on the Suslanger and Dejavu routes (4,030 objects
 // in 1.6-3.1 ms): 1024 keeps a burst frame under ~1 ms.
 constexpr std::size_t kPoseCapturesPerFrame = 1024;
+#if !defined(EID3D11_EMBEDDED)
 void mark_object_pose_pending(void* object) noexcept {
     std::int32_t id = 0;
     if (!g_visual_publication_active || !visual_object_id(object,id)) return;
     try { g_pose_pending_ids.push_back(id); } catch (...) { g_pose_full_sweep = true; }
 }
+#endif // !EID3D11_EMBEDDED
 using VisualAnimationReceivedFn = void (__thiscall*)(void*, float);
 using VisualRouteWriterFn = void (__thiscall*)(void*, void*);
 using VisualDatabaseFn = void* (__thiscall*)(void*);
@@ -8983,6 +9075,7 @@ struct VisualReadTestBoundary {
 thread_local VisualReadTestBoundary* g_visual_read_test_boundary = nullptr;
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_read_bytes(const void* base, std::size_t offset, void* value, std::size_t bytes) noexcept {
     const auto address = reinterpret_cast<std::uintptr_t>(base);
     if (!address || offset > UINTPTR_MAX-address || bytes > UINTPTR_MAX-address-offset)
@@ -8990,10 +9083,12 @@ bool visual_read_bytes(const void* base, std::size_t offset, void* value, std::s
     return safe_copy_hud_resource(static_cast<std::uint8_t*>(value),
         reinterpret_cast<const std::uint8_t*>(address+offset), bytes);
 }
+#endif // !EID3D11_EMBEDDED
 
 // One guarded fixed-size copy: sizeof(T) is a constant, so the copy is a
 // plain load instead of a CRT memcpy call with a runtime size (its byte loop
 // was ~1.7% of the main thread in a pan sample; thousands of reads a frame).
+#if !defined(EID3D11_EMBEDDED)
 template<class T> bool visual_read_fixed(std::uintptr_t source, T& value) noexcept {
     __try {
         std::memcpy(&value, reinterpret_cast<const void*>(source), sizeof(T));
@@ -9020,12 +9115,14 @@ template<class T> bool visual_read(const void* base, std::size_t offset, T& valu
         return false;
     return visual_read_fixed(address+offset, value);
 }
+#endif // !EID3D11_EMBEDDED
 
 std::uint64_t next_visual_event() noexcept {
     if (++g_visual_event == 0) ++g_visual_event;
     return g_visual_event;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_client_unit(void* object, void*& specific) noexcept {
     specific = nullptr;
     void* owner = nullptr;
@@ -9037,6 +9134,7 @@ bool visual_client_unit(void* object, void*& specific) noexcept {
         visual_read(specific, 0, table) && table == g_visual_game_image + 0x33ecd8 &&
         visual_read(specific, 0x1c, owner) && owner == object;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The game's own software shadows are skipped (stock_shadow_suppression.h).
 bool g_stock_shadows_suppressed = false;
@@ -9048,6 +9146,7 @@ void* g_visual_shadow_invisible_next = nullptr;
 // The cut runs after the game's visible flag/list publication, or after its
 // invisible flag clear. It must not depend on camera admission or pose success:
 // a failed claimed visual remains missing instead of recovering a stock shadow.
+#if !defined(EID3D11_EMBEDDED)
 BOOL __stdcall owned_shadow_covers_object(void* object) noexcept {
     if (!g_visual_publication_active) return FALSE;
     std::int32_t id = 0;
@@ -9144,6 +9243,7 @@ bool visual_string(const void* object, std::size_t offset, std::string& result,
     }
     return false;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct AppearanceDiagnosticContext {
     OuterFrameAppearanceDiagnostic* value = nullptr;
@@ -9283,6 +9383,7 @@ bool visual_selected_resource(const std::string& name, const void* selected,
         visual_failure(predicate, resource_failure_code_name(failure.code));
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_named_resource(HudResourceRole role, const std::string& name, ResourceBlob& blob,
     std::uint64_t& generation, ResourceFailure& failure, bool* native_missing = nullptr,
     const char** predicate = nullptr, bool native_anm = false,
@@ -9383,6 +9484,7 @@ bool visual_figure_resource(const std::string& name, ResourceBlob& blob,
     if (appearance_backings) appearance_backings->push_back(blob.bytes);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The game selected an ADB entry whose clip this renderer cannot use: absent
 // from <mask>.anm (shipped Dejavu data has such entries, e.g. 2hscidle22) or
@@ -9412,6 +9514,7 @@ bool unresolved_visual_clip_selection(const std::string& outer_name,
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_selected_clip_unprofiled(void* object, const void* selected_entry,
     VisualClipSelection& selection, std::uint64_t& generation, const char** predicate = nullptr) {
     std::int32_t id = 0;
@@ -9563,11 +9666,13 @@ bool visual_main_selector(void* controller, const char** failure = nullptr) noex
     }
     return link == nullptr || visual_failure(failure, "selector.tail");
 }
+#endif // !EID3D11_EMBEDDED
 
 // The supported x86 material deque saves a 16-byte emissive value on each
 // native Highlight(TRUE). Highlight(FALSE) reads this same top entry before
 // popping it (game.exe 51CA81-51CAB8). Read that authoritative saved value,
 // without mutating the game's stack or retaining any engine address.
+#if !defined(EID3D11_EMBEDDED)
 bool visual_previous_highlight_emissive(const void* material,
                                        std::array<float, 4>& previous) noexcept {
     void* begin = nullptr;
@@ -9681,6 +9786,7 @@ bool visual_preset_material(void* object, std::uint32_t type,
     return visual_read(object, 0x14, manager) && visual_read(manager, 0xac, world) &&
         visual_world_preset_material(world, type, value);
 }
+#endif // !EID3D11_EMBEDDED
 
 bool visual_primary_texture(std::uint32_t type) noexcept {
     // 51B31F/51B460, including the default-to-secondary branch.
@@ -9689,6 +9795,7 @@ bool visual_primary_texture(std::uint32_t type) noexcept {
     return type && type <= std::size(primary) && primary[type-1];
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_addon_string(const void* value, std::string& result) {
     std::uint32_t length = 0, capacity = 0;
     if (!visual_read(value, 0x10, length) || !visual_read(value, 0x14, capacity) ||
@@ -9865,12 +9972,14 @@ bool visual_part_texture(void* specific, void* texture, std::uint32_t type,
     }
     return part.texture != nullptr;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct BorrowedVisualPartMaterial {
     void* material = nullptr;
     void* texture = nullptr;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_part_materials(void* specific,
                            std::map<void*, BorrowedVisualPartMaterial>& parts) {
     for (std::size_t set_index = 0; set_index < 2; ++set_index) {
@@ -9965,6 +10074,7 @@ bool visual_completed_skeleton(void* object,
     }
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 std::uint16_t visual_appearance_change_mask(const VisualAppearanceChanges* changes) noexcept {
     if (!changes) return 0;
@@ -10050,6 +10160,7 @@ void report_missing_bone_part(const ModelCpuAsset& model, std::uint32_t node_ind
     } catch (...) {}
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_publish_appearance(void* object, const VisualAppearanceChanges* changes,
     const char** predicate, OuterFrameAppearanceCallback callback) noexcept {
     if (!g_visual_publication_active) return true;
@@ -10321,6 +10432,7 @@ bool visual_publish_appearance(void* object, const VisualAppearanceChanges* chan
     } catch (...) {}
     return visual_failure(predicate, "appearance.exception");
 }
+#endif // !EID3D11_EMBEDDED
 
 bool merge_visual_material_alpha(VisualAppearanceChanges& target,
     const VisualMaterialAlphaReceipt& value) {
@@ -10382,6 +10494,7 @@ bool merge_visual_appearance(VisualAppearanceChanges& target, VisualAppearanceCh
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void publish_visual_appearance_changes(void* object, VisualAppearanceChanges& changes,
                                        bool success, const char* predicate = nullptr,
                                        OuterFrameAppearanceCallback callback = OuterFrameAppearanceCallback::unknown) noexcept {
@@ -10646,6 +10759,7 @@ void __fastcall hook_visual_set_materials(void* self, void*) {
             fail_visual_appearance(scope, "materials.initial_alpha_contract");
         finish_visual_appearance(scope, !AbnormalTermination()); }
 }
+#endif // !EID3D11_EMBEDDED
 
 // A null result is a normal game outcome: the model has no part of that name,
 // and every caller skips the attach (e.g. 5356E0). The part is simply absent;
@@ -10665,6 +10779,7 @@ void visual_capture_native_weapon_part(VisualAppearanceScope* scope,
     } catch (...) { fail_visual_appearance(scope, "appearance.name_exception"); }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void* __fastcall hook_visual_load_figure(void* self, void*, const char* name, void* model, BOOL load) {
     const bool weapon = g_visual_native && _ReturnAddress() ==
         g_visual_game_image + kVisualNativeWeaponLoadFigureReturnRva;
@@ -10877,6 +10992,7 @@ bool visual_read_intent(void* object, double time, VisualPoseIntent& intent, con
     }
     return node == nullptr || visual_failure(failure, "intent.queue_tail");
 }
+#endif // !EID3D11_EMBEDDED
 
 // The per-object render-time read performs the same checks as
 // visual_object_id + visual_main_selector and the placement/controller reads,
@@ -10894,6 +11010,7 @@ struct RawObjectCapture {
     void* selected = nullptr;
     float phase = 0;
 };
+#if !defined(EID3D11_EMBEDDED)
 template<class T> T raw_field(const std::uint8_t* base,std::size_t offset) noexcept {
     T value; std::memcpy(&value,base+offset,sizeof(T)); return value;
 }
@@ -10938,6 +11055,7 @@ RawObjectCaptureResult raw_capture_object(const std::uint8_t* object,RawObjectCa
         return RawObjectCaptureResult::fault;
     }
 }
+#endif // !EID3D11_EMBEDDED
 const char* raw_object_capture_failure(RawObjectCaptureResult result) noexcept {
     switch(result) {
     case RawObjectCaptureResult::id: return "object_pose.id";
@@ -10958,6 +11076,7 @@ const char* raw_object_capture_failure(RawObjectCaptureResult result) noexcept {
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_capture_object_values(void* object,std::int32_t expected_id,
     const VisualObjectPublicationSnapshot& snapshot,VisualObjectPose& values,
     const char** failure = nullptr) noexcept {
@@ -11083,12 +11202,14 @@ BOOL __fastcall hook_visual_base_create(void* self, void*) {
     }
     return g_visual_base_create(self);
 }
+#endif // !EID3D11_EMBEDDED
 
 bool visual_event_has_assembly(VisualResourceIncarnation resource) noexcept {
     return resource.serial &&
         static_cast<bool>(retained_visual_scene().visual_assembly(resource));
 }
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall invoke_visual_virtual_create(void* self, VisualCreateFn original) {
     VisualCreateScope scope{};
     scope.previous = g_visual_creation;
@@ -11619,12 +11740,14 @@ VisualPacketScope* begin_visual_packet(void* object) noexcept {
         return nullptr;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // The shipped last-invisibility writer has one direct game caller (511075).
 // It clears alpha on the resident native material list after the caller has
 // cleared the invisibility flag. Capture only those actual members, after the
 // original returns, for this enclosing unit packet. Later equipment can add
 // another group or reuse one of these same materials.
+#if !defined(EID3D11_EMBEDDED)
 void observe_visual_reset_alpha(void* specific) noexcept {
     if (!g_visual_publication_active || !g_visual_packet) return;
     auto* const scope = g_visual_packet;
@@ -12053,6 +12176,7 @@ void __fastcall hook_visual_idle_append(void* self, void*, const void* entry) {
         } else observe_visual_idle(self, entry, false);
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // The list endpoints are a transient append receipt, never marker identity.
 struct GroundCoverFootprintAppend { const void* head = nullptr; const void* tail = nullptr; };
@@ -12060,6 +12184,7 @@ GroundCoverFootprintAppend begin_ground_cover_footprint_append() noexcept;
 void publish_ground_cover_footprint_append(void* object, VisualResourceIncarnation resource,
     GroundCoverFootprintAppend before) noexcept;
 
+#if !defined(EID3D11_EMBEDDED)
 int __fastcall hook_visual_unit_segment(void* self, void*) {
     float applied_fade = 1;
     const bool fade_valid = !g_visual_publication_active || visual_read(self, 0x78, applied_fade);
@@ -12099,6 +12224,7 @@ int __fastcall hook_visual_unit_segment(void* self, void*) {
     }
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct VisualVisibleUnitReceipt {
     struct Previous {
@@ -12108,6 +12234,7 @@ struct VisualVisibleUnitReceipt {
     std::vector<Previous> previous;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_visible_unit_ids(void* receiver, std::vector<std::int32_t>& ids) noexcept {
     std::int32_t count = 0;
     const std::int32_t* data = nullptr;
@@ -12213,6 +12340,7 @@ BOOL __fastcall hook_visual_visible_units(void* self, void*) {
     }
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 void report_quest_light_omission(const char* reason) noexcept {
     static volatile LONG reported = 0;
@@ -12227,6 +12355,7 @@ void report_world_point_light_omission(const char* reason) noexcept {
             reason ? reason : "unknown", true);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_capture_world_point_lights(void* world,
     std::vector<RetainedWorldPointLight>& lights,const char** failure) noexcept {
     lights.clear();
@@ -12286,10 +12415,12 @@ bool visual_capture_world_point_lights(void* world,
         return visual_failure(failure,"world_point_light.membership_tail");
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The game defines a hero by its current player-owner field. Its attached
 // light belongs to the world light manager; the ID is used only to tag that
 // same completed light capture, never as persistent lifetime identity.
+#if !defined(EID3D11_EMBEDDED)
 bool visual_capture_hero_light_id(void* world,void* object,std::int32_t& id,
     bool& present,const char** failure) noexcept {
     present=false;
@@ -12311,6 +12442,7 @@ bool visual_capture_hero_light_id(void* world,void* object,std::int32_t& id,
     present=true;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Far lamp memory and the mobile-light rule live in world_lamp_memory.h.
 WorldLampMemory<RetainedWorldPointLight> g_world_lamp_memory;
@@ -12329,6 +12461,7 @@ void retain_world_point_lights(std::vector<RetainedWorldPointLight>& lights) noe
     } catch (...) {}
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool visual_capture_quest_light(void* world,void* object,std::int32_t id,
     RetainedQuestLight& result,bool& present,const char** failure) noexcept {
     present=false;
@@ -12353,6 +12486,7 @@ bool visual_capture_quest_light(void* world,void* object,std::int32_t id,
     present=true;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The world object list walk performs the membership-link, object-id, unit
 // and quest-light-candidate reads of visual_object_id, visual_client_unit and
@@ -12364,6 +12498,7 @@ struct RawWorldObject {
     void* object; std::int32_t id; bool unit; bool hero; std::uint8_t quest; // 0 none, 1 candidate or failure
 };
 enum class RawWalkResult : std::uint8_t { ok, link, tail, fault };
+#if !defined(EID3D11_EMBEDDED)
 RawWalkResult raw_walk_world_objects(const std::uint8_t* node,std::uint32_t count,
     RawWorldObject* out,const std::uint8_t*& previous) noexcept {
     const std::uint8_t* image=g_visual_game_image;
@@ -12534,6 +12669,7 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     pending.swap(deferred);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept {
 #ifdef EID3D11_EMBEDDED
@@ -12541,7 +12677,9 @@ bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept {
         time = g_embedded_visual_inputs->time;
         return std::isfinite(time) && time >= 0;
     }
-#endif
+    embedded_report_render_failure("embedded_input_missing", "world_time");
+    return false;
+#else
     std::int32_t tick = 0;
     float fraction = 0;
     if (!visual_read(image, kWorldSegmentTimeCounterRva, tick) ||
@@ -12551,8 +12689,10 @@ bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept {
     // when waiting for a packet. Native visual readers use the entire value.
     time = tick + static_cast<double>(fraction);
     return true;
+#endif
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool capture_owned_terrain_geometry_values(const void* terrain,
     const std::uint8_t* image, const TerrainCpuAsset& source, double time,
     OwnedTerrainGeometryValues& output, StartupStage stage = StartupStage::terrain_capture) {
@@ -12661,9 +12801,11 @@ bool publish_owned_terrain_geometry_values(void* world, double time,
     startup_end(StartupStage::terrain_publish,traced,"retired_unavailable_geometry");
     return false;
 }
+#endif // !EID3D11_EMBEDDED
 
 void reconcile_server_seeds() noexcept;
 
+#if !defined(EID3D11_EMBEDDED)
 bool publish_visual_world_tick(void* world, const char** failure = nullptr) noexcept {
     const auto force_flag = g_addon.layout.visual.force_flag;
     const auto force_list = g_addon.layout.visual.force_list;
@@ -12882,6 +13024,7 @@ int __fastcall hook_lifecycle_tick(void* self, void*) {
     if (result > 0 && g_lifecycle_tick_depth == 0) visual_complete_world_tick(self);
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Server camera window (issue #59), static disassembly of the supported
 // game.exe. The local server sends a script/quest-flagged (dynamic) non-unit
@@ -12917,6 +13060,7 @@ SRWLOCK g_window_exit_lock = SRWLOCK_INIT;
 std::set<std::int32_t> g_window_exit_marks;
 std::atomic<std::size_t> g_window_exit_mark_count{0};
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_server_object_id(const void* object, std::int32_t& id, bool& server) noexcept {
     id = 0; server = false;
     if (!object) return false;
@@ -12932,6 +13076,7 @@ bool read_server_object_id(const void* object, std::int32_t& id, bool& server) n
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 void set_window_exit_mark(std::int32_t id, bool marked) noexcept {
     AcquireSRWLockExclusive(&g_window_exit_lock);
@@ -12966,6 +13111,7 @@ void retire_window_copy(std::int32_t id) noexcept {
     if (scene.visual_has_detached()) scene.visual_retire_detached(id);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 extern "C" void __stdcall observe_server_object_change(void* object) noexcept {
     if (!g_window_exit_mark_count.load(std::memory_order_acquire) &&
         !retained_visual_scene().visual_has_detached())
@@ -13012,6 +13158,7 @@ EID3D11_WINDOW_CHANGE_STUB(1)
 EID3D11_WINDOW_CHANGE_STUB(2)
 EID3D11_WINDOW_CHANGE_STUB(3)
 #undef EID3D11_WINDOW_CHANGE_STUB
+#endif // !EID3D11_EMBEDDED
 
 // Render-only seeds from the local server's object list (issue #59). Window
 // retention above only covers objects the client once held; a windowed object
@@ -13072,6 +13219,7 @@ struct RawServerSeedObject {
 
 // Reads the streamed candidates of the local server. Returns false when the
 // list itself is not the verified structure.
+#if !defined(EID3D11_EMBEDDED)
 bool collect_server_seed_objects(const std::uint8_t* image, RawServerSeedObject* out,
     std::size_t capacity, std::size_t& written) noexcept {
     written = 0;
@@ -13119,6 +13267,7 @@ bool collect_server_seed_objects(const std::uint8_t* image, RawServerSeedObject*
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 struct ServerSeedAppearance {
     std::string mask, primary, secondary;
@@ -13134,6 +13283,7 @@ struct ServerSeedAppearance {
     }
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_server_seed_appearance(const RawServerSeedObject& raw, ServerSeedAppearance& value) {
     const void* specific = nullptr;
     const void* names = nullptr;
@@ -13153,6 +13303,7 @@ bool read_server_seed_appearance(const RawServerSeedObject& raw, ServerSeedAppea
     value.tree = raw.type == kTreeObjectTypeId;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The client builds the copy from the same values (PrsCreateMapobj 667EC0):
 // LoadByTemplate(mask, names) loads every skeleton node when names is empty,
@@ -13160,6 +13311,7 @@ bool read_server_seed_appearance(const RawServerSeedObject& raw, ServerSeedAppea
 // (SetMaterial 68EAF0) and LoadTextures binds primary/secondary by texture
 // type. World non-unit figures keep the CFigure defaults (white colours, not
 // hidden, no default-colour flag), scale 1 and no centre shift.
+#if !defined(EID3D11_EMBEDDED)
 std::shared_ptr<const VisualAssemblyAsset> build_server_seed_assembly(
     const ServerSeedAppearance& source, const char*& reason) {
     ResourceFailure failure{};
@@ -13257,6 +13409,7 @@ std::shared_ptr<const VisualAssemblyAsset> build_server_seed_assembly(
     assembly->revision = next_visual_event();
     return assembly;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct ServerSeedState {
     std::uint64_t source_generation = 0;
@@ -13277,6 +13430,7 @@ void report_server_seed_omission(const char* reason) noexcept {
 }
 
 // Main thread, after the client tick: the server is between segments.
+#if !defined(EID3D11_EMBEDDED)
 void reconcile_server_seeds() noexcept {
     auto& scene = retained_visual_scene();
     auto& state = g_server_seeds;
@@ -13472,6 +13626,7 @@ void __fastcall hook_lifecycle_positive_reset(void* self, void*) {
     }
     reset_positive_object_render_plans();
 }
+#endif // !EID3D11_EMBEDDED
 
 void report_retained_static_failure(const char* stage) noexcept;
 
@@ -13664,6 +13819,7 @@ bool retained_shape_matches(const std::array<float, 3>& current,
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool retained_current_object_type(void* object,
                                   std::uint32_t& type) noexcept {
     type = 0;
@@ -13771,6 +13927,7 @@ bool capture_retained_owned_visibility(
     entry.world_position = position;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool retained_frame_owns(std::int32_t signed_id) noexcept {
     const auto found = g_retained_owned_visibility.find(signed_id);
@@ -13804,6 +13961,7 @@ bool owned_merged_member(const RetainedVisualSample& sample,std::size_t part) no
 }
 constexpr bool scenery_object_type(std::uint32_t type) noexcept { return type == 0x52u || type == 0x54u || type == 0x56u; }
 
+#if !defined(EID3D11_EMBEDDED)
 extern "C" BOOL __stdcall dispatch_retained_owned_visibility(
     void* object, const void* camera_rotation) noexcept {
     if (g_skip_scenery_draw_walk && g_visual_publication_active && g_scene_3d_depth != 0) {
@@ -13887,6 +14045,7 @@ extern "C" __declspec(naked) void hook_retained_owned_visibility() {
         jmp dword ptr [g_retained_visibility_resume]
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 struct RetainedFrameContext {
     std::array<float, 16> base_object_to_clip{};
@@ -13900,6 +14059,7 @@ struct RetainedFrameContext {
     bool batch_started = false;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 bool retained_static_frame_clip(
     void* scene_renderer,
     std::array<float, 16>& base_object_to_clip) noexcept {
@@ -13910,6 +14070,7 @@ bool retained_static_frame_clip(
         std::all_of(base_object_to_clip.begin(), base_object_to_clip.end(),
                     [](float value) { return std::isfinite(value); });
 }
+#endif // !EID3D11_EMBEDDED
 
 bool exact_loaded_module(HMODULE module, std::uint32_t expected_image_size,
                          const std::array<std::uint8_t, 32>& expected_hash) noexcept;
@@ -13920,6 +14081,7 @@ bool signature(const std::uint8_t* address, std::initializer_list<std::uint8_t> 
 // 004E4C03. The pipeline's slot 5/35 must be the supported 3DfpFPU functions.
 // The verified TL module, or null with a reason naming the loaded file. A
 // failure is retried every few seconds, not cached: the module may load later.
+#if !defined(EID3D11_EMBEDDED)
 const std::uint8_t* supported_tl_module(const char*& reason, const TlModuleContract*& contract) noexcept {
     static const std::uint8_t* module = nullptr;
     static const TlModuleContract* selected = nullptr;
@@ -13992,11 +14154,13 @@ const std::uint8_t* supported_tl_module(const char*& reason, const TlModuleContr
     }
     return module;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Static CWorldClient (0x7AF5B8): hour = fmod(ticks(+0x64)*scale(+0x20) +
 // base(+0x1C), 24) as at 00566386; +0x6E0 selects the day fog start; its
 // CWeather (+0x6F4) keeps current/next type (+0xB4/+0xB8) and the pending
 // change's start tick and length as floats (+0xC0/+0xC4), set at 004E3FC0.
+#if !defined(EID3D11_EMBEDDED)
 void read_world_environment(WorldEnvironment& environment) noexcept {
     environment = {};
     const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
@@ -14105,6 +14269,7 @@ bool capture_retained_scene_world_to_clip(
     world_to_clip = captured.world_to_clip;
     return captured.valid;
 }
+#endif // !EID3D11_EMBEDDED
 
 void report_retained_static_failure(const char* stage) noexcept {
     static volatile LONG reported = 0;
@@ -14126,7 +14291,9 @@ bool retained_world_fog(void* controller,
         fog = g_embedded_visual_inputs->fog(g_embedded_visual_inputs->fog_context, position.data());
         return true;
     }
-#endif
+    embedded_report_render_failure("embedded_input_missing", "world_fog");
+    return false;
+#else
     auto* image = reinterpret_cast<std::uint8_t*>(GetModuleHandleA(nullptr));
     if (!image) return false;
     __try {
@@ -14143,19 +14310,23 @@ bool retained_world_fog(void* controller,
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+#endif
 }
 
 void* retained_scene_fog_controller(void* scene) noexcept {
     if (!scene) return nullptr;
 #ifdef EID3D11_EMBEDDED
     if (g_embedded_visual_inputs) return scene;
-#endif
+    embedded_report_render_failure("embedded_input_missing", "fog_controller");
+    return nullptr;
+#else
     __try {
         return *reinterpret_cast<void**>(
             static_cast<std::uint8_t*>(scene) + 0x180);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
     }
+#endif
 }
 
 struct RetainedSubmitCounts {
@@ -14327,6 +14498,7 @@ bool retained_owned_instance_visibility(
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool publish_retained_visibility_and_shadow(
     const RetainedOwnedVisibilityEntry& entry, bool visible,
     bool& shadow_published) noexcept {
@@ -14383,6 +14555,7 @@ bool publish_retained_visibility_and_shadow(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool owned_visual_part_casts(const RetainedVisualSample& sample,const VisualPartAsset& part,
     bool draw_undetected) noexcept;
@@ -14691,7 +14864,12 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
     frame.draw_undetected_units = draw_undetected;
     frame.serial = ++g_object_render_presentation_serial;
     if (!frame.serial) frame.serial = ++g_object_render_presentation_serial;
+#ifdef EID3D11_EMBEDDED
+    if(hovered_shadow_observation_enabled() && g_embedded_visual_inputs)
+        frame.observed_hover={g_embedded_visual_inputs->hover_id,g_embedded_visual_inputs->hover_serial};
+#else
     if(hovered_shadow_observation_enabled() && !g_scene_frame_values_installed)frame.observed_hover=hovered_shadow_observation_target();
+#endif
     const auto entity_count=frame.values->entities.size();
     auto receivers = shadows_enabled ? terrain_receivers : std::vector<NativeWorldBounds>{};
     // Static receivers are unioned per terrain-sector-sized cell, as terrain
@@ -15767,6 +15945,7 @@ void dump_owned_units_on_request(const std::array<float,16>& world_to_clip) noex
 }
 
 // The seam's submissions once its shadow frame is prepared (both modes).
+#if !defined(EID3D11_EMBEDDED)
 bool finish_owned_visual_scene(void* fog_controller,const std::array<float,16>& world_to_clip) {
     auto& frame=g_owned_visual_world_frame;
     if(!frame.shadow_ready || frame.coverage.world_to_clip!=world_to_clip) {
@@ -15800,10 +15979,12 @@ bool submit_owned_visual_scene(void* scene,void* renderer,
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool queue_owned_visual_scene(void* scene,void* renderer,
     const std::array<float,16>& world_to_clip) noexcept;
 
+#if !defined(EID3D11_EMBEDDED)
 extern "C" void __stdcall dispatch_retained_static_scene(
     void* scene, void* renderer) noexcept {
     if (!g_retained_scene_seam_installed) return;
@@ -15977,6 +16158,7 @@ bool retained_static_claims_object(void* specific) noexcept {
     if (!object_plan_owner(specific, owner, signed_id)) return false;
     return retained_frame_owns(signed_id);
 }
+#endif // !EID3D11_EMBEDDED
 
 void begin_retained_static_binding_frame() noexcept {
     if (!g_world_draw_depth) reset_owned_visual_world_frame();
@@ -16019,6 +16201,7 @@ bool retained_copy_source_name(
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool retained_read_admission(
     const void* source, std::uint32_t& nid, std::uint32_t& family) noexcept {
     if (!source) return false;
@@ -16141,11 +16324,13 @@ void end_rejected_sky_omission(void* world,std::uint32_t restore) noexcept {
         *flags |= restore;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
+#endif // !EID3D11_EMBEDDED
 
 // The local single-player server runs a loaded mission (the server-seed
 // contract above: server vtable, mode +138 = 1, map loaded +15C, interface
 // +12D64 = 1). The load pause acts only there: never in the menu, on the
 // travel map or against a remote server.
+#if !defined(EID3D11_EMBEDDED)
 bool local_single_player_mission() noexcept {
     const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
     const void* world = image + kWorldServerRva;
@@ -16156,6 +16341,7 @@ bool local_single_player_mission() noexcept {
         visual_read(world, kServerMapLoadedOffset, loaded) && loaded &&
         visual_read(world, kServerInterfaceOffset, interface_mode) && interface_mode == 1;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Scene thread (render_thread option): its frames begin and end at the
 // outer world draw's place in the stream (outside hook_world_draw, whose
@@ -16180,6 +16366,7 @@ void post_scene_world_end() noexcept {
     } catch (...) {}
 }
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_world_draw(void* self, void*) {
     const bool accounted = frame_acct::push(frame_acct::ours_world_setup);
     bool accounted_game = false;
@@ -16427,6 +16614,7 @@ DWORD WINAPI hook_outer_count_time_clock() {
     frame_acct::set_root(frame_acct::game_sim);
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct OuterDirectTimingToken {
     OuterFrameDirectCall kind = OuterFrameDirectCall::pre_tick;
@@ -16493,6 +16681,7 @@ void outer_direct_timing_end(OuterDirectTimingToken& token,
     token.active = false;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 int __fastcall hook_outer_pre_tick(void* self, void*) {
     auto timing = outer_direct_timing_begin(OuterFrameDirectCall::pre_tick);
     const auto camp_begin = camp_inventory_observation_enabled() ? bridge_now() : 0;
@@ -16956,6 +17145,7 @@ bool extract_terrain_transform(void* renderer, std::array<float, 16>& transform)
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 struct TerrainRangeContract {
     void** textures = nullptr;
@@ -17099,6 +17289,7 @@ void release_owned_terrain_runtime_storage() noexcept {
     std::vector<void*>().swap(g_owned_terrain_frame.texture_handles);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool exact_random_1_to_1000(std::uint32_t& result) {
     result = 0;
     __try {
@@ -17411,6 +17602,7 @@ bool exact_terrain_sector_visible(void* sector, bool& visible) {
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 
 void mix_owned_terrain_bytes(std::uint64_t& hash, const void* bytes,
@@ -17422,6 +17614,7 @@ void mix_owned_terrain_bytes(std::uint64_t& hash, const void* bytes,
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool capture_owned_terrain_dynamic(
     void* live_sector, const TerrainSectorCpuAsset& source_sector,
     std::uint64_t source_revision, OwnedTerrainDynamicSector& output,
@@ -17502,6 +17695,7 @@ bool capture_owned_terrain_dynamic(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 
 bool decode_owned_terrain_source(void* opaque,
@@ -17543,6 +17737,7 @@ bool source_terrain_world_record(const RetainedTerrainSourceSnapshot& source,
     return result;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool capture_owned_terrain_world_transform(void* terrain,void* renderer) noexcept {
     auto& frame=g_owned_terrain_frame;frame.world_transform_valid=false;
     void* processor=nullptr;void* matrices=nullptr;std::uint32_t count=0;
@@ -17557,6 +17752,7 @@ bool capture_owned_terrain_world_transform(void* terrain,void* renderer) noexcep
     for(float value:frame.object_to_world)if(!std::isfinite(value))return false;
     frame.world_transform_valid=true;return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool apply_owned_terrain_world_transform(NativeGeometryView& view) noexcept {
     const auto& frame=g_owned_terrain_frame;
@@ -17617,6 +17813,25 @@ bool terrain_shadow_alpha_inputs(const NativeOwnedFixedState& state,bool& textur
 void* owned_terrain_texture_wrapper(std::size_t material) noexcept;
 std::shared_ptr<const OwnedVisualSurface> owned_terrain_shadow_texture(
     std::uint32_t material,RetainedStaticScene& scene) {
+#ifdef EID3D11_EMBEDDED
+    // Resolve through the host surface publisher and retain the immutable value.
+    // The host terrain source itself need not carry an atlas collection.
+    auto& frame=g_owned_terrain_frame;
+    std::shared_ptr<const OwnedVisualSurface> value;
+    const char* failure=nullptr;
+    if(!bridge_terrain_atlas(material,value,&failure) || !value) {
+        embedded_report_render_failure("embedded_input_missing",
+            failure?failure:"terrain_shadow_texture");
+        return nullptr;
+    }
+    if(!scene.publish_terrain_texture(frame.source_values.source_generation,
+        frame.source_values.source_revision,material,value)) {
+        embedded_report_render_failure("embedded_input_rejected", "terrain_shadow_texture");
+        return nullptr;
+    }
+    frame.source_values.textures=scene.terrain_source_snapshot().textures;
+    return value;
+#else
     auto& frame=g_owned_terrain_frame;
     if(material>=frame.shadow_texture_observed.size())return nullptr;
     if(!frame.shadow_texture_observed[material]) {
@@ -17643,6 +17858,7 @@ std::shared_ptr<const OwnedVisualSurface> owned_terrain_shadow_texture(
     if(!textures)return nullptr;
     const auto found=textures->find(material);
     return found!=textures->end() && found->second.available ? found->second.surface : nullptr;
+#endif
 }
 
 bool same_shadow_terrain_inputs(const OwnedTerrainFrameInputs& a,const OwnedTerrainFrameInputs& b) noexcept;
@@ -19608,8 +19824,10 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
         if(!read_owned_world_time(nullptr,in.time))throw "owned_shadow_time_unreadable_or_invalid";
         visible_only=g_embedded_visual_inputs->draw_undetected?0:1;interface_kind=1;
         in.flags=g_embedded_visual_inputs->scene_flags;
-    } else
-#endif
+    } else {
+        throw "embedded_shadow_inputs_missing";
+    }
+#else
     {
     if(!read_owned_world_time(g_visual_game_image,in.time))throw "owned_shadow_time_unreadable_or_invalid";
     if(!visual_read(g_visual_game_image,0x39be6c,visible_only))throw "owned_shadow_visibility_setting_unreadable";
@@ -19617,17 +19835,17 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
     if(!visual_read(player,0x100,interface_kind))throw "owned_shadow_interface_unreadable";
     if(!visual_read(scene,8,in.flags))throw "owned_shadow_flags_unreadable";
     }
+#endif
     // This seam follows the original completed nonunit render-time writer.
     // Read common values, never its camera list or a game animation method.
     const char* object_failure = nullptr;
-#ifdef EID3D11_EMBEDDED
-    if(!g_embedded_visual_inputs)
-#endif
+#if !defined(EID3D11_EMBEDDED)
     {
         CityRetainedOwnerGuard pose_timing(CityRetainedOwner::nonunit_pose);
         if (!publish_visual_object_poses(scene,&object_failure))
             throw object_failure ? object_failure : "owned_shadow_object_values";
     }
+#endif
     CityRetainedOwnerGuard lighting_timing(CityRetainedOwner::lighting_publish);
     if(publish_retained_world_lighting(renderer)!=FigureFallbackReason::none)throw "owned_shadow_lighting_unavailable";
     auto& shadow_scene=retained_visual_scene();
@@ -19858,6 +20076,7 @@ std::vector<void*> owned_terrain_wrappers() {
 
 // Game thread: the game's own bind of each atlas (with its side effects) and
 // a snapshot of the texture it bound.
+#if !defined(EID3D11_EMBEDDED)
 std::vector<std::shared_ptr<SurfaceImage>> owned_terrain_bound_textures(void* renderer,
     const std::vector<void*>& wrappers,const std::vector<std::uint8_t>* wanted) {
     std::vector<std::shared_ptr<SurfaceImage>> textures(wrappers.size());
@@ -19879,8 +20098,10 @@ std::vector<std::shared_ptr<SurfaceImage>> owned_terrain_bound_textures(void* re
     }
     return textures;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Game thread: the published atlas surfaces terrain shadow casters sample.
+#if !defined(EID3D11_EMBEDDED)
 std::vector<std::shared_ptr<const OwnedVisualSurface>> owned_terrain_shadow_sources() {
     const auto& frame=g_owned_terrain_frame;
     std::vector<std::shared_ptr<const OwnedVisualSurface>> sources(frame.shadow_texture_observed.size());
@@ -19894,6 +20115,7 @@ std::vector<std::shared_ptr<const OwnedVisualSurface>> owned_terrain_shadow_sour
     }
     return sources;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Scene thread: install a queued world command's inputs; clear afterwards.
 void install_owned_scene_inputs(void* sinks,const BridgeSceneHandoff& handoff,
@@ -19914,6 +20136,7 @@ void clear_owned_scene_inputs(const BridgeSceneHandoff& handoff) noexcept {
     if(handoff.install_sinks)handoff.install_sinks(nullptr);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void run_owned_visual_scene(OwnedSceneCommand& command) noexcept {
     const frame_acct::Scope accounted(frame_acct::scene_world);
     install_owned_scene_inputs(command.sinks.get(),command.handoff,&command.terrain_textures,
@@ -20030,6 +20253,7 @@ bool queue_owned_visual_scene(void* scene,void* renderer,
     }
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Game thread: queue one object's wound layer behind the world command. The
 // command keeps the copied values the parts were chosen from and submits only
@@ -20091,6 +20315,7 @@ bool queue_owned_wound_layer(std::vector<OwnedWoundRequest>&& requests) noexcept
         });
     } catch(...) { return false; }
 }
+#if !defined(EID3D11_EMBEDDED)
 bool complete_owned_terrain_light_state(
     void* self, unsigned char* terrain, DWORD dynamic_only,
     DWORD first_x, DWORD first_y, DWORD final_x, DWORD final_y) noexcept {
@@ -20193,10 +20418,12 @@ bool exact_bind_terrain_texture(void* renderer, void* texture) {
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // Binds the atlas a terrain submission samples. On the scene thread the game
 // thread made the game's own bind when it queued the command and the sinks
 // receive the texture it bound (a snapshot); there is no game call here.
+#if !defined(EID3D11_EMBEDDED)
 bool bind_owned_terrain_texture(void* renderer,std::size_t index,void* wrapper) {
     if(g_scene_terrain_textures) {
         if(!wrapper || !g_scene_bind_texture || !g_scene_sinks)return false;
@@ -20207,6 +20434,7 @@ bool bind_owned_terrain_texture(void* renderer,std::size_t index,void* wrapper) 
     }
     return exact_bind_terrain_texture(renderer,wrapper);
 }
+#endif // !EID3D11_EMBEDDED
 
 // The texture slots (material % (nTextures + 2)) any sector of an immutable
 // terrain source contains tiles of, computed once per source.
@@ -20280,6 +20508,7 @@ bool capture_owned_terrain_texture_handles_with_operation(
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool capture_owned_terrain_texture_handles(
     const TerrainRangeContract& contract, OwnedTerrainRuntimeFrame& frame) {
     if (!contract.textures) return false;
@@ -20290,6 +20519,7 @@ bool capture_owned_terrain_texture_handles(
             return true;
         });
 }
+#endif // !EID3D11_EMBEDDED
 
 void mix_owned_terrain_value(std::uint64_t& hash,
                              std::uint64_t value) noexcept {
@@ -20299,6 +20529,7 @@ void mix_owned_terrain_value(std::uint64_t& hash,
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_owned_terrain_inputs_guarded(
     void* terrain, void* renderer, const TerrainRangeContract& contract,
     const RetainedTerrainSourceSnapshot& source,
@@ -20419,6 +20650,7 @@ struct ExactTerrainPublicationOperations {
             sector, source, revision, dynamic,geometry_owned);
     }
 };
+#endif // !EID3D11_EMBEDDED
 
 template <typename Operations>
 bool publish_game_terrain_visibility_with_operations(
@@ -20520,6 +20752,7 @@ bool publish_game_terrain_visibility_with_operations(
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool publish_game_terrain_visibility(
     void* terrain, void* renderer, const TerrainRangeContract& contract,
     OwnedTerrainRuntimeFrame& frame) {
@@ -20527,6 +20760,7 @@ bool publish_game_terrain_visibility(
     return publish_game_terrain_visibility_with_operations(
         contract, frame, operations);
 }
+#endif // !EID3D11_EMBEDDED
 
 const char* owned_terrain_omission_reason(
     OwnedTerrainRangeAction action) noexcept {
@@ -20560,6 +20794,7 @@ void report_owned_terrain_omission(OwnedTerrainRangeAction action) noexcept {
     } else append_bridge_event("owned_terrain_omitted",owned_terrain_omission_reason(action),true);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool submit_source_owned_terrain_commands(
     void* renderer, const std::vector<OwnedTerrainCommand>& commands,
     const NativeOwnedFixedState* captured_state = nullptr) {
@@ -20644,10 +20879,12 @@ bool submit_source_owned_terrain_commands(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool owned_terrain_static_op(NativeStaticSubmission& request,const char** failure);
 void report_owned_terrain_set_failure(const char* stage,std::uint32_t sector,std::uint32_t material,const char* detail);
 
+#if !defined(EID3D11_EMBEDDED)
 bool draw_source_owned_terrain_range(
     void* terrain, void* renderer, int material_from, int material_to,
     BOOL& result,const void* range_caller=nullptr) {
@@ -20935,6 +21172,7 @@ bool draw_source_owned_terrain_range(
     }
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Base terrain as a persistent renderer set (#62). Every opaque base piece
 // (sector x material, all sub-parts, full detail) is registered once and
@@ -21005,6 +21243,7 @@ void* owned_terrain_texture_wrapper(std::size_t material) noexcept {
     return texture;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool register_owned_terrain_piece(void* renderer,const OwnedTerrainCommand& command,bool& deferred) {
     auto& frame=g_owned_terrain_frame;auto& state=g_owned_terrain_set;
     deferred=false;
@@ -21107,6 +21346,7 @@ bool submit_owned_terrain_set(void* renderer) {
     return state.per_frame.empty() ||
         submit_source_owned_terrain_commands(renderer,state.per_frame,&frame.shadow_material);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Terrain LOD draws the base terrain per frame, but the neighbouring maps are
 // drawn by the terrain set flush. Flush an empty set on that path too, after
@@ -21127,6 +21367,7 @@ bool flush_owned_terrain_lod_set() {
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool submit_pending_owned_terrain_base() noexcept {
     auto& frame=g_owned_terrain_frame;
     if (!frame.base_pending) return true;
@@ -21194,6 +21435,7 @@ BOOL __fastcall hook_terrain_range_draw(void* self, void*, void* renderer,
     }
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 int native_geometry_sink(
     void* self, const NativePackedGroup* positions, int position_groups,
@@ -21207,6 +21449,7 @@ int native_geometry_sink(
 
 // The native geometry sink, charged to ours_native_geom (frame accounting);
 // the body keeps its SEH block, which cannot share a function with a scope.
+#if !defined(EID3D11_EMBEDDED)
 int __fastcall hook_native_geometry(
     void* self, void*, const NativePackedGroup* positions, int position_groups,
     const NativePackedGroup* normals, int normal_groups,
@@ -21385,9 +21628,11 @@ void __fastcall hook_camera_mouse_pitch(void* self, void*, float pitch_delta) {
     apply_camera_mouse_pitch(pitch_angle, pitch_delta,
                              minimum_pitch, maximum_pitch);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Stock __thiscall (screen size {width, height}, POINT* in/out), ret 4. Only
 // the RMB handler's main-thread displacement call reaches it.
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_camera_mouse_normalize(const std::int32_t* screen, void*,
                                             std::int32_t* delta) {
     const std::int32_t dimensions[]{
@@ -21407,11 +21652,13 @@ void __fastcall hook_camera_mouse_normalize(const std::int32_t* screen, void*,
         append_bridge_event("input_mouse_delta", detail, true);
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // Stock __thiscall CSkyObject::Draw(CVisualizator*, const CPlot3D*), ret 8.
 // Owned: record that the game asked for its sky in this frame and draw
 // nothing; the renderer draws the owned sky behind the world. sky_clouds 0
 // is the user's explicit comparison setting and keeps the stock sky.
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_owned_sky_draw(void* sky, void*, void* visualizator, const void* position) {
     if (!g_owned_sky_enabled) {
         using StockDraw = void(__fastcall*)(void*, void*, void*, const void*);
@@ -21420,6 +21667,7 @@ void __fastcall hook_owned_sky_draw(void* sky, void*, void* visualizator, const 
     }
     g_owned_sky_request_serial = g_bridge_frame_serial;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool sha256_file(const char* path, std::array<std::uint8_t, 32>& digest) {
     BCRYPT_ALG_HANDLE algorithm = nullptr;
@@ -21456,6 +21704,7 @@ bool sha256_file(const char* path, std::array<std::uint8_t, 32>& digest) {
     return ok;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool signature(const std::uint8_t* address, std::initializer_list<std::uint8_t> bytes) {
     return address && std::memcmp(address, bytes.begin(), bytes.size()) == 0;
 }
@@ -21475,11 +21724,13 @@ bool write_relative_jump(std::uint8_t* from, const void* target) {
     if (!game_image_contains(target)) bridge_note_owned_patch(from, before, sizeof(before));
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Forwarding code for one of our entry detours, always owned (and freed) by
 // the bridge: the stock prologue copy plus a jump back, or for an addon
 // hook-framework chain a single jump to the addon's dispatcher, which itself
 // stays addon-owned. Returns nullptr for any other entry owner.
+#if !defined(EID3D11_EMBEDDED)
 std::uint8_t* make_entry_forwarder(std::uint8_t* entry, const std::uint8_t* stock,
                                    std::size_t stock_bytes,
                                    std::size_t hook_bytes) noexcept {
@@ -21650,6 +21901,7 @@ bool uninstall_engine_frame_begin_hook() noexcept {
     if (restored) g_engine_frame_begin_image = nullptr;
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool outer_frame_gap_profile_requested() noexcept {
     static const bool requested = [] {
@@ -21662,6 +21914,7 @@ bool outer_frame_gap_profile_requested() noexcept {
     return requested;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool outer_hook_relative_calls_fit(std::uint8_t* image) noexcept {
     if (!image) return false;
     return relative_call_fits(
@@ -21937,6 +22190,7 @@ bool exact_span(const std::uint8_t* image, std::uint32_t rva,
                 const std::array<std::uint8_t, Size>& expected) noexcept {
     return image && std::memcmp(image + rva, expected.data(), Size) == 0;
 }
+#endif // !EID3D11_EMBEDDED
 
 template <std::size_t Size>
 void write_u32(std::array<std::uint8_t, Size>& bytes, std::size_t offset,
@@ -21944,19 +22198,23 @@ void write_u32(std::array<std::uint8_t, Size>& bytes, std::size_t offset,
     std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
+#if !defined(EID3D11_EMBEDDED)
 std::uint32_t loaded_address(const std::uint8_t* image,
                              std::uint32_t rva) noexcept {
     return static_cast<std::uint32_t>(
         reinterpret_cast<std::uintptr_t>(image) + rva);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Discovery proved that every reference to the route byte is its config
 // writer or a boolean test, so only its live value needs checking here.
+#if !defined(EID3D11_EMBEDDED)
 bool generated_mmp_route_live_contract(std::uint8_t* addon) noexcept {
     const auto route = g_addon.layout.visual.route;
     return addon && route && addon == g_addon.image &&
         addon[route] <= kGeneratedMmpMemoryRoute;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct HudAtlasRelocatedBytes {
     std::array<std::uint8_t, 7> stock_entry{{
@@ -21976,6 +22234,7 @@ struct HudAtlasRelocatedBytes {
         0x68,0x00,0x00,0x00,0x00,0xff,0x15,0x00,0x00,0x00,0x00}};
 };
 
+#if !defined(EID3D11_EMBEDDED)
 HudAtlasRelocatedBytes hud_atlas_relocated_bytes(
     const std::uint8_t* game_image) noexcept {
     HudAtlasRelocatedBytes expected{};
@@ -22043,6 +22302,7 @@ bool hud_atlas_live_contract(const std::uint8_t* game_image,
         exact_span(game_image, kTextureUnlockOperationRva,
                    kTextureUnlockOperationBytes);
 }
+#endif // !EID3D11_EMBEDDED
 
 struct HudAtlasPatch {
     std::uint8_t* entry = nullptr;
@@ -22054,6 +22314,7 @@ struct HudAtlasPatch {
 using HudAtlasPatchSet = std::array<HudAtlasPatch, 3>;
 using HudAtlasOriginalSet = std::array<const std::uint8_t*, 3>;
 
+#if !defined(EID3D11_EMBEDDED)
 bool apply_hud_atlas_patch(const HudAtlasPatch& item) noexcept {
     DWORD protection = 0;
     if (!item.entry || item.bytes < 5 || !item.replacement ||
@@ -22076,6 +22337,7 @@ bool owns_hud_atlas_patch(const HudAtlasPatch& item) noexcept {
         ? relative_call_targets(item.entry, item.replacement)
         : relative_jump_target(item.entry) == item.replacement;
 }
+#endif // !EID3D11_EMBEDDED
 
 enum class HudAtlasPatchResult : std::uint8_t {
     installed,
@@ -22083,6 +22345,7 @@ enum class HudAtlasPatchResult : std::uint8_t {
     rollback_failed,
 };
 
+#if !defined(EID3D11_EMBEDDED)
 HudAtlasPatchResult apply_hud_atlas_patch_transaction(
     const HudAtlasPatchSet& patches,
     const HudAtlasOriginalSet& originals) noexcept {
@@ -22144,6 +22407,7 @@ bool exact_loaded_module(HMODULE module, std::uint32_t expected_image_size,
     std::array<std::uint8_t, 32> digest{};
     return sha256_file(path, digest) && digest == expected_hash;
 }
+#endif // !EID3D11_EMBEDDED
 
 // How find_addon_module recognised the loaded addon.dll, for the player
 // notice (bridge_addon_notice). none also covers "no addon.dll loaded".
@@ -22151,6 +22415,7 @@ enum class AddonRecognition : std::uint8_t { none, full, partial, rejected };
 AddonRecognition g_addon_recognition = AddonRecognition::none;
 char g_addon_hash[65] = "unavailable";
 
+#if !defined(EID3D11_EMBEDDED)
 void addon_module_hash(const std::uint8_t* image, char (&hash)[65]) noexcept {
     char path[MAX_PATH]{};
     std::array<std::uint8_t, 32> digest{};
@@ -22160,11 +22425,13 @@ void addon_module_hash(const std::uint8_t* image, char (&hash)[65]) noexcept {
     for (std::size_t index = 0; index < digest.size(); ++index)
         std::snprintf(hash + index * 2, 3, "%02x", digest[index]);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Selects the loaded addon.dll by its discovered content. Base and mod
 // addons may share the basename; the candidate whose image yields addon
 // contracts is selected, and an ambiguous choice selects nothing. The
 // selected module is logged once with its hash and per-contract status.
+#if !defined(EID3D11_EMBEDDED)
 std::uint8_t* find_addon_module() noexcept {
     struct Candidate {
         std::uint8_t* image;
@@ -22238,6 +22505,7 @@ std::uint8_t* find_addon_module() noexcept {
     }
     return selected->image;
 }
+#endif // !EID3D11_EMBEDDED
 
 // BridgeFeatureOff bits noted by the installs (engine_bridge.h).
 std::uint32_t g_features_off = 0;
@@ -22273,6 +22541,7 @@ void publish_addon_notice() noexcept {
     append_bridge_event("addon_features_off", detail, true);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool install_hud_atlas_hooks(std::uint8_t* game_image) noexcept {
     g_hud_atlas_install_detail = "invalid_game_or_already_installed";
     if (!game_image || g_hud_atlas_hooks_installed) return false;
@@ -22421,6 +22690,7 @@ bool uninstall_hud_atlas_hooks() noexcept {
     g_addon_hud_atlas_lock_pending = false;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct HudVisualEntryPatch {
     std::uint8_t* entry = nullptr;
@@ -22434,6 +22704,7 @@ struct HudVisualCallPatch {
     const void* replacement = nullptr;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 std::array<HudVisualEntryPatch, 14> hud_visual_entry_patches(
     std::uint8_t* game, std::uint8_t* addon) noexcept {
     // A null addon selects the stock weapon/spell/skill panel entries.
@@ -22513,6 +22784,7 @@ std::vector<HudVisualCallPatch> hud_visual_call_patches(
                      reinterpret_cast<const void*>(&hook_hud_carrier_draw)});
     return result;
 }
+#endif // !EID3D11_EMBEDDED
 
 bool executable_address(const void* address) noexcept;
 bool visual_thiscall_chain(const std::uint8_t* entry, const void* callback,
@@ -22527,6 +22799,7 @@ constexpr std::array<std::uint32_t, 11> kHudVisualGameEntryRvas{{
 constexpr std::array<std::size_t, 11> kHudVisualGameEntryHookBytes{{
     7, 9, 7, 7, 6, 6, 7, 7, 8, 6, 6}};
 
+#if !defined(EID3D11_EMBEDDED)
 std::array<std::array<std::uint8_t, 16>, 11> hud_visual_game_stock(
     const std::uint8_t* game) noexcept {
     std::array<std::array<std::uint8_t, 16>, 11> game_entries{{
@@ -22552,9 +22825,11 @@ std::array<std::array<std::uint8_t, 16>, 11> hud_visual_game_stock(
     write_u32(game_entries[7], 3u, loaded_address(game, 0x00326f2cu));
     return game_entries;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Stock entry or a verified addon hook-framework chain (e.g. the HUD
 // destructor in builds that detour it). Other owners reject the contract.
+#if !defined(EID3D11_EMBEDDED)
 EntryResolution hud_visual_game_entry_owner(const std::uint8_t* game,
                                             std::size_t index) noexcept {
     const auto stock = hud_visual_game_stock(game);
@@ -22562,9 +22837,11 @@ EntryResolution hud_visual_game_entry_owner(const std::uint8_t* game,
                               stock[index].data(), stock[index].size(),
                               kHudVisualGameEntryHookBytes[index]);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Stock weapon/spell/skill panel prologues our trampolines replay when no
 // addon yields a HUD contract. Any other owner rejects the native contract.
+#if !defined(EID3D11_EMBEDDED)
 EntryResolution hud_native_entry_owner(const std::uint8_t* game, std::size_t index) noexcept {
     std::array<std::uint8_t, 16> weapon{{
         0x6a,0xff,0x68,0,0,0,0,0x64,0xa1,0,0,0,0,0x50,0x64,0x89}};
@@ -22588,11 +22865,13 @@ bool hud_native_entries_usable(const std::uint8_t* game) noexcept {
         if (hud_native_entry_owner(game,index).owner==EntryOwner::rejected) return false;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 const char* g_hud_live_mismatch = "none";
 std::size_t g_hud_live_game_entry = SIZE_MAX;
 // A null addon checks the native contract: game entries, stock panel
 // entries and stock lanes only.
+#if !defined(EID3D11_EMBEDDED)
 bool hud_visual_live_contract(std::uint8_t* game,
                               std::uint8_t* addon) noexcept {
     if (addon && (g_addon.layout.hud_visual_failure || addon != g_addon.image)) {
@@ -22667,6 +22946,7 @@ std::uint8_t* make_hud_visual_trampoline(std::uint8_t* entry,
     FlushInstructionCache(GetCurrentProcess(), trampoline, bytes + 5u);
     return trampoline;
 }
+#endif // !EID3D11_EMBEDDED
 
 void clear_hud_visual_runtime_state() noexcept {
     g_hud_visuals.clear_contract();
@@ -22707,6 +22987,7 @@ void clear_hud_visual_runtime_state() noexcept {
     InterlockedExchange(&g_hud_visual_diagnostic_mask, 0);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool install_hud_visual_hooks_images(std::uint8_t* game,
                                      std::uint8_t* addon) noexcept {
     // A null addon installs the native contract on the stock panel entries.
@@ -22866,9 +23147,11 @@ bool install_hud_visual_hooks_images(std::uint8_t* game,
                                           "verified_native_four_lane_publication";
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // An addon that yields a HUD contract owns the panels; otherwise the stock
 // panel entries are hooked when their game sites match.
+#if !defined(EID3D11_EMBEDDED)
 bool install_hud_visual_hooks(std::uint8_t* game) noexcept {
     auto* addon = find_addon_module();
     if (addon && !g_addon.layout.hud_visual_failure)
@@ -22925,6 +23208,7 @@ bool uninstall_hud_visual_hooks() noexcept {
     clear_hud_visual_runtime_state();
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 std::uint64_t next_character_pane_ui_epoch() noexcept {
     std::uint64_t epoch = g_character_pane_next_ui_epoch.fetch_add(
@@ -22947,6 +23231,7 @@ void retire_character_pane_text() noexcept {
     next_character_pane_ui_epoch();
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool character_pane_fonts_ready(void* interface_owner) noexcept {
     if (!interface_owner) return false;
     __try {
@@ -22971,6 +23256,7 @@ bool character_pane_fonts_ready(void* interface_owner) noexcept {
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 void publish_character_pane_text(
     const CharacterPaneTextInvocation& invocation) noexcept {
@@ -23013,6 +23299,7 @@ void report_character_pane_text_failure(
         character_pane_text_failure_name(failure), true);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool character_pane_receivers(
     void* pane, int& mode, void*& interface_surface,
     IDirectDrawSurface7*& surface) noexcept {
@@ -23045,6 +23332,7 @@ bool character_pane_receivers(
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // ---- Stats-mode refresh throttle (#19) ----
 // The addon's stats page (pane mode 2) re-evaluates every value through Lua
@@ -23084,6 +23372,7 @@ void record_character_pane_stats_text(void* surface, const char* text, const REC
     } catch (...) { g_stats_valid = false; g_stats_recording = false; }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_character_pane_effects(void* pane,void*,void* unit) {
     auto* invocation=current_character_pane_text_invocation();
     if (!invocation || !invocation->armed || invocation->pane!=pane || !unit) return;
@@ -23288,10 +23577,12 @@ void __fastcall hook_character_pane_interface_fini(void* self, void*) {
     if (g_character_pane_interface_fini)
         g_character_pane_interface_fini(self);
 }
+#endif // !EID3D11_EMBEDDED
 
 // The displayed unit's name as the pane itself shows it (temporary unit
 // +0x150 with its name +0x168, else unit +0x14C with +0x164). Empty when
 // unreadable; that only leaves the 100 ms cadence as the refresh trigger.
+#if !defined(EID3D11_EMBEDDED)
 std::string character_pane_displayed_unit(void* pane) noexcept {
     void* temporary = nullptr;
     std::string name;
@@ -23301,8 +23592,10 @@ std::string character_pane_displayed_unit(void* pane) noexcept {
     } catch (...) { name.clear(); }
     return name;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Runs the addon's stats page while its text is recorded; recording always ends.
+#if !defined(EID3D11_EMBEDDED)
 bool run_character_pane_stats(void* pane, void* renderer) noexcept {
     bool completed = false;
     __try { g_character_pane_stats(pane, renderer); completed = true; }
@@ -23370,9 +23663,11 @@ bool write_stock_shadow_window(std::uint8_t* window, const std::uint8_t* bytes,
     FlushInstructionCache(GetCurrentProcess(), window, size);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Both branches are verified before either is written, so the stock shadow
 // path is either fully skipped or left exactly as found.
+#if !defined(EID3D11_EMBEDDED)
 bool install_stock_shadow_suppression(std::uint8_t* image) noexcept {
     if (!image || g_stock_shadows_suppressed) return g_stock_shadows_suppressed;
     std::array<std::array<std::uint8_t, 13>, kStockShadowBranches.size()> forced{};
@@ -23411,12 +23706,14 @@ bool uninstall_stock_shadow_suppression(std::uint8_t* image) noexcept {
     if (restored) g_stock_shadows_suppressed = false;
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct CharacterPaneEntryPatch {
     std::uint8_t* entry = nullptr;
     const void* replacement = nullptr;
 };
 
+#if !defined(EID3D11_EMBEDDED)
 std::array<CharacterPaneEntryPatch, kCharacterPaneHookCount>
 character_pane_entry_patches(std::uint8_t* image) noexcept {
     return {{
@@ -23430,6 +23727,7 @@ character_pane_entry_patches(std::uint8_t* image) noexcept {
          reinterpret_cast<const void*>(&hook_character_pane_interface_fini)},
     }};
 }
+
 
 bool character_pane_widescreen_chain(
     std::uint8_t* image, std::uint8_t* addon) noexcept {
@@ -23460,10 +23758,12 @@ bool character_pane_widescreen_chain(
                image + kCharacterPaneDrawTextTransformCallRva,
                image + kCharacterPaneVirtualToScreenRva);
 }
+#endif // !EID3D11_EMBEDDED
 
 constexpr std::uint8_t kCharacterPaneDrawStock[kCharacterPanePatchBytes] = {
     0x81,0xec,0x00,0x01,0x00,0x00};
 
+#if !defined(EID3D11_EMBEDDED)
 bool character_pane_native_chain(std::uint8_t* image) noexcept {
     return image &&
         std::memcmp(image + kCharacterPaneDrawRva, kCharacterPaneDrawStock,
@@ -23477,6 +23777,7 @@ bool character_pane_native_chain(std::uint8_t* image) noexcept {
         relative_call_targets(image + kCharacterPaneDrawTextTransformCallRva,
                               image + kCharacterPaneVirtualToScreenRva);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Common stock prologues after the pane draw entry.
 constexpr std::array<std::array<std::uint8_t, kCharacterPanePatchBytes>,
@@ -23485,6 +23786,7 @@ constexpr std::array<std::array<std::uint8_t, kCharacterPanePatchBytes>,
     {{0x64,0xa1,0x00,0x00,0x00,0x00}},
     {{0x64,0xa1,0x00,0x00,0x00,0x00}},
 }};
+#if !defined(EID3D11_EMBEDDED)
 bool combat_values_contract(std::uint8_t* image) noexcept {
     if (!image) return false;
     std::array<std::uint8_t, 6> begin{{0x8b,0x35,0,0,0,0}}, end{{0x8b,0x15,0,0,0,0}};
@@ -23521,6 +23823,7 @@ bool combat_server_contract(std::uint8_t* image) noexcept {
         signature(image + 0x14a866, {0xc7,0x86,0x90,0x01,0x00,0x00,0x09,0x00,0x00,0x00}) &&
         signature(image + 0x14a870, {0x8b,0x8e,0x98,0x01,0x00,0x00});
 }
+#endif // !EID3D11_EMBEDDED
 
 bool g_combat_values_checked = false, g_combat_values_ready = false;
 bool g_combat_server_ready = false, g_combat_portraits_ready = false, g_combat_catalog_ready = false;
@@ -23528,6 +23831,7 @@ bool g_combat_cast_ready = false, g_combat_ai_ready = false;
 bool g_combat_amounts_ready = false;
 std::array<bool, 39> g_combat_stock_offensive{};
 
+#if !defined(EID3D11_EMBEDDED)
 bool combat_ai_contract(std::uint8_t* image) noexcept {
     // The embedded AI owner selects a motivation independently of the short
     // attack/cast command. Its native getter returns only the selected target.
@@ -23566,11 +23870,13 @@ bool combat_amounts_contract(std::uint8_t* game) noexcept {
     const auto owner=resolve_hook_entry(game+0x246b90,entry.data(),entry.size(),7);
     return owner.owner==EntryOwner::framework_chain && owner.callback==g_addon.image+g_addon.layout.effect_value_callback;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The addon's perk modifier, as both discovered addon forms read it: the
 // unit's level of perk subtype+7 (+0x413+perk), then entry perk*3+level-1 of
 // the native perk database (0x7AF268: entries +0xC..+0x10, 0x44 bytes) and
 // its modifier at +0x34. No level, or no such entry, is modifier 0.
+#if !defined(EID3D11_EMBEDDED)
 bool combat_perk_modifier(void* unit,unsigned subtype,std::uint32_t& modifier) noexcept {
     const int perk=int(subtype)+7;
     std::uint8_t level=0; std::uintptr_t begin=0,end=0;
@@ -24025,6 +24331,7 @@ bool uninstall_character_pane_text_hooks() noexcept {
     InterlockedExchange(&g_character_pane_failure_reported, 0);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // ---- Chat phrase text (CI3DChat::NewPhrase / Draw2D) ----
 // NewPhrase creates one CI3DSurface per wrapped line and fills it once:
@@ -24042,6 +24349,7 @@ void report_chat_text_failure(CharacterPaneTextFailure failure) noexcept {
                         character_pane_text_failure_name(failure), true);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_chat_new_phrase(
     void* self, void*, const char* phrase, int order) {
     const std::size_t index = g_character_pane_text_stack.depth++;
@@ -24086,12 +24394,14 @@ void __fastcall hook_chat_draw2d(void* self, void*) {
         --g_chat_draw_depth;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 constexpr std::uint8_t kChatNewPhraseStock[kChatNewPhrasePatchBytes] = {
     0x6a,0xff,0x68,0x24,0x8f,0x72,0x00};
 constexpr std::uint8_t kChatDraw2DStock[kChatDraw2DPatchBytes] = {
     0x53,0x8b,0xd9,0x56,0x8b,0x83,0x48,0x01,0x00,0x00};
 
+#if !defined(EID3D11_EMBEDDED)
 bool chat_live_contract(const std::uint8_t* image) noexcept {
     return hook_entry_usable(image + kChatNewPhraseRva, kChatNewPhraseStock,
                              kChatNewPhrasePatchBytes, kChatNewPhrasePatchBytes) &&
@@ -24133,9 +24443,11 @@ void release_chat_trampolines() noexcept {
     g_chat_new_phrase = nullptr;
     g_chat_draw2d = nullptr;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Requires the character pane text transaction (DrawText, GetDC/ReleaseDC
 // and Blt admission, font generation) to be installed first.
+#if !defined(EID3D11_EMBEDDED)
 bool install_chat_text_hooks(std::uint8_t* image) noexcept {
     g_chat_install_detail = "pane_text_inactive_or_already_installed";
     if (!image || g_chat_hooks_installed || !g_character_pane_hooks_installed ||
@@ -24204,6 +24516,7 @@ bool uninstall_chat_text_hooks() noexcept {
     InterlockedExchange(&g_chat_failure_reported, 0);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 enum class TerrainSetLightPatchResult {
     installed,
@@ -24211,6 +24524,7 @@ enum class TerrainSetLightPatchResult {
     rollback_failed,
 };
 
+#if !defined(EID3D11_EMBEDDED)
 template <typename PatchCall, typename RestoreCall>
 TerrainSetLightPatchResult patch_terrain_set_light_calls_transaction(
     const std::array<std::uint8_t*, 2>& calls,
@@ -24369,6 +24683,7 @@ bool executable_address(const void* address) noexcept {
         protection == PAGE_EXECUTE_READWRITE ||
         protection == PAGE_EXECUTE_WRITECOPY;
 }
+#endif // !EID3D11_EMBEDDED
 
 // This is a finite patch contract for the supported pair of images. It is
 // deliberately not a detour decoder: an unknown active chain rejects the set.
@@ -24396,6 +24711,7 @@ int g_visual_test_patch_failure = -1;
 bool g_visual_test_route_postwrite_failure = false;
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 bool write_generated_mmp_route(std::uint8_t* route, std::uint8_t expected,
                                std::uint8_t replacement) noexcept {
     if (!route || *route != expected) return false;
@@ -24547,10 +24863,12 @@ bool visual_thiscall_chain(const std::uint8_t* entry, const void* callback,
     const std::array<std::uint8_t,9> tail{{0x8d,0x65,0xf8,0x5a,0x59,0xc9,0xc2,argument_bytes,0}};
     return std::memcmp(bytes.data()+offset, tail.data(), tail.size()) == 0;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Function-entry patches may sit behind an addon hook-framework chain.
 // Call-site adapters, mid-function adapters and the relocated SetMaterials
 // prefix stay exact.
+#if !defined(EID3D11_EMBEDDED)
 EntryResolution visual_patch_owner(const VisualProducerPatch& patch) noexcept {
     const bool entry = !patch.call_site && patch.relative_call == SIZE_MAX &&
         patch.hook != reinterpret_cast<const void*>(&visual_shadow_visible_adapter) &&
@@ -24566,12 +24884,14 @@ EntryResolution visual_patch_owner(const VisualProducerPatch& patch) noexcept {
     }
     return exact;
 }
+#endif // !EID3D11_EMBEDDED
 
 const char* g_visual_live_mismatch = "none";
 
 // The selected addon's discovered resolver occupies the resource Get slot and
 // its native-Get data word still holds the stock Get, so the stock appearance
 // producers' Get entry hook observes every override and stock resolution.
+#if !defined(EID3D11_EMBEDDED)
 bool addon_resolver_reaches_native_get(std::uint8_t* game, const void* slot_value) noexcept {
     if (!g_addon.image || g_addon.layout.resolver_failure ||
         slot_value != g_addon.image + g_addon.layout.resolver.thunk) return false;
@@ -24579,8 +24899,10 @@ bool addon_resolver_reaches_native_get(std::uint8_t* game, const void* slot_valu
     return visual_read(g_addon.image, g_addon.layout.resolver.member_slot, native) &&
         native == game + 0x271b40;
 }
+#endif // !EID3D11_EMBEDDED
 // A null addon checks the native contract: the same game sites, the stock
 // entries in place of the addon's, and the stock receiver and resource slot.
+#if !defined(EID3D11_EMBEDDED)
 bool visual_publication_live_contract(std::uint8_t* game, std::uint8_t* addon) noexcept {
     if (addon && (g_addon.layout.visual_failure || addon != g_addon.image)) {
         g_visual_live_mismatch = "addon_layout";
@@ -26426,6 +26748,7 @@ bool uninstall_terrain_hooks(std::uint8_t* image) {
     clear_terrain_content_generations();
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 void uninstall_camera_mouse_yaw_hook(std::uint8_t* image);
 void uninstall_camera_mouse_pitch_hook(std::uint8_t* image);
@@ -26448,6 +26771,7 @@ volatile LONG g_input_trace_cursor_flags = 0;
 
 // Runs the game's own animation/position/clip update and publishes its frame
 // instead of saving/compositing/blitting screen pixels.
+#if !defined(EID3D11_EMBEDDED)
 void owned_cursor_step(std::uint8_t* self) noexcept {
     OwnedCursorFrame frame{};
     __try {
@@ -26492,9 +26816,11 @@ void owned_cursor_step(std::uint8_t* self) noexcept {
 void __fastcall hook_cursor_draw(void* self, void*) {
     owned_cursor_step(static_cast<std::uint8_t*>(self));
 }
+#endif // !EID3D11_EMBEDDED
 
 // Replaces the FPS-independent cursor thread body: same ~41 ms cadence, same
 // shutdown flag and exit event, no screen reads or writes.
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_cursor_thread(void* self, void*) {
     auto* bytes = static_cast<std::uint8_t*>(self);
     if (!bytes[0x91]) return;
@@ -26510,9 +26836,11 @@ void __fastcall hook_cursor_thread(void* self, void*) {
     }
     SetEvent(*reinterpret_cast<HANDLE*>(bytes + 0x1c));
 }
+#endif // !EID3D11_EMBEDDED
 
 // The stock restore blits the saved background back to the screen; with no
 // saved background there is nothing to restore.
+#if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_cursor_restore(void*, void*, int) {}
 
 bool install_owned_cursor_hooks(std::uint8_t* image) {
@@ -26657,6 +26985,7 @@ void uninstall_camera_mouse_pitch_hook(std::uint8_t* image) {
     }
     g_camera_mouse_pitch_installed = false;
 }
+#endif // !EID3D11_EMBEDDED
 
 // ---- Renderer highlight: options and the game's cursor target ----
 // Render-only observers of the game's own hover decisions. Each verified call
@@ -26704,6 +27033,7 @@ void set_highlight_hover(VisualResourceIncarnation resource, std::int32_t mode) 
     ReleaseSRWLockExclusive(&g_highlight_hover_lock);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool highlight_cursor_mode(std::int32_t& mode) noexcept {
     return g_visual_game_image &&
         visual_read(g_visual_game_image+kHighlightCursorRva, 0x18, mode);
@@ -26824,9 +27154,11 @@ bool uninstall_highlight_hooks(std::uint8_t* image) {
     combat_ui_publish_hover(0,0);
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The base (briefing) screen is open while it is on the interface screen stack
 // (DoModal 5F7350 pushes CI3DScreen*, GetCurrentScreen 5F7590 reads the top).
+#if !defined(EID3D11_EMBEDDED)
 bool highlight_base_screen_open() noexcept {
     if (!g_visual_game_image) return false;
     const auto* face = g_visual_game_image + kHighlightInterfaceRva;
@@ -26842,6 +27174,7 @@ bool highlight_base_screen_open() noexcept {
     }
     return false;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Once per rendered frame, before the frame samples are taken.
 void publish_highlight_state() noexcept {
@@ -26897,6 +27230,7 @@ constexpr std::array<std::uint8_t, 76> kCameraWideNormalizeBytes{{
     0x31,0xc9,0xe9,0xcb,0xff,0xff,0xff,0xb8,0x58,0x02,0,0,
     0xf7,0x6e,0x04,0xb9,0,0,0,0,0xf7,0xf9,0x89,0x46,0x04,0x5e,0x59,0xc2,0x04,0}};
 
+#if !defined(EID3D11_EMBEDDED)
 bool install_camera_mouse_normalize_hook(std::uint8_t* image,
                                         std::uint8_t* addon = nullptr) {
     if (!image || g_camera_mouse_normalize_installed) return false;
@@ -26960,6 +27294,7 @@ void uninstall_camera_mouse_normalize_hook(std::uint8_t* image) {
     g_camera_mouse_effective_height = nullptr;
     g_camera_mouse_carry = {};
 }
+#endif // !EID3D11_EMBEDDED
 
 struct WindowChangeHook {
     std::uint32_t rva;
@@ -26967,12 +27302,15 @@ struct WindowChangeHook {
     std::array<std::uint8_t, 9> prologue;
     void (*stub)();
 };
+#if !defined(EID3D11_EMBEDDED)
 const std::array<WindowChangeHook, kWindowChangeHookCount> kWindowChangeHooks{{
     {0x0010e9f0, 7, {0x56,0x8b,0xf1,0x8b,0x4c,0x24,0x08}, &hook_server_object_change_0},
     {0x0010f1e0, 6, {0x53,0x55,0x8b,0xe9,0x56,0x57}, &hook_server_object_change_1},
     {0x0010f2d0, 6, {0x55,0x8b,0xec,0x83,0xec,0x24}, &hook_server_object_change_2},
     {0x0010f5b0, 9, {0x56,0x8b,0xf1,0x8b,0x86,0x98,0x01,0x00,0x00}, &hook_server_object_change_3},
 }};
+#endif // !EID3D11_EMBEDDED
+
 std::array<std::array<std::uint8_t, 5>, 2> g_window_call_originals{};
 std::array<std::array<std::uint8_t, 9>, kWindowChangeHookCount> g_window_change_originals{};
 // Bytes each writer entry patch covers: ours for stock entries, the addon's
@@ -26980,6 +27318,7 @@ std::array<std::array<std::uint8_t, 9>, kWindowChangeHookCount> g_window_change_
 // it is live code the addon's trampoline resumes into).
 std::array<std::size_t, kWindowChangeHookCount> g_window_change_bytes{};
 
+#if !defined(EID3D11_EMBEDDED)
 bool window_call_targets(const std::uint8_t* call, const std::uint8_t* target) noexcept {
     if (call[0] != 0xe8) return false;
     std::int32_t relative = 0;
@@ -26996,9 +27335,11 @@ bool patch_window_code(std::uint8_t* at, const void* target, bool call) noexcept
     FlushInstructionCache(GetCurrentProcess(), at, 5);
     return wrote;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Accept stock sites or addon hook-framework chains. Unknown ownership
 // rejects the transaction before any window-exit state changes.
+#if !defined(EID3D11_EMBEDDED)
 bool install_window_membership_hooks(std::uint8_t* image) noexcept {
     if (!image || g_window_membership_installed) return false;
     auto* exit_call = image + kServerWindowExitCallRva;
@@ -27101,6 +27442,7 @@ bool uninstall_window_membership_hooks(std::uint8_t* image) noexcept {
     clear_window_exit_marks();g_window_membership_installed=false;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Save/map object ID clash report (read-only; user decision 2026-10-09).
 // CWorldServer::LoadSave loads the zone's static objects from its .mob first,
@@ -27125,6 +27467,7 @@ std::atomic<ULONGLONG> g_save_clash_notice_until{0};
 struct SaveClashEntry { std::int32_t id = 0; const void* object = nullptr; };
 
 // Every {ID, object} of a server object hash; false when it is not readable.
+#if !defined(EID3D11_EMBEDDED)
 bool read_server_object_hash(const std::uint8_t* hash, std::vector<SaveClashEntry>& out) {
     out.clear();
     std::uintptr_t begin = 0, end = 0;
@@ -27251,9 +27594,12 @@ bool uninstall_owned_sky_hook(std::uint8_t* image) {
     g_stock_sky_draw=nullptr;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Stock __thiscall CWeather::DrawRain/DrawSnow(CVisualizator*), ret 4.
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_owned_weather_draw(void*, void*, void*) { return TRUE; }
+#endif // !EID3D11_EMBEDDED
 
 struct OwnedWeatherSite {
     std::uint32_t call_rva, entry_rva;
@@ -27271,6 +27617,7 @@ constexpr std::array<OwnedWeatherSite, 2> kOwnedWeatherSites{{
 // entry, or an entry another hook framework chains (an addon observing or
 // drawing weather), keeps that call: owned precipitation still draws, so the
 // doubled weather and the F10 line make the rejection visible.
+#if !defined(EID3D11_EMBEDDED)
 bool install_owned_weather_hooks(std::uint8_t* image) noexcept {
     if (!game_sites_ok(GameSiteGroup::bridge)) { g_owned_weather_status = "game sites differ: stock rain/snow kept (doubled)"; return false; }
     bool all = true;
@@ -27312,6 +27659,7 @@ bool uninstall_owned_weather_hooks(std::uint8_t* image) noexcept {
     if (restored) g_owned_weather_status = "not installed";
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 
 // ---- Owned DrawFrameSelection rectangles ----
 // CVisualizatorD3D::DrawFrameSelection(x1, y1, x2, y2, char alpha, bool frame)
@@ -27331,6 +27679,7 @@ void* g_screen_rectangle_sink_context = nullptr;
 ScreenRectangleSubmitFn g_screen_rectangle_sink = nullptr;
 volatile LONG g_frame_selection_failure_reported = 0;
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_draw_frame_selection(void*, void*, int x1, int y1,
                                           int x2, int y2, char alpha,
                                           bool frame) {
@@ -27380,6 +27729,7 @@ bool uninstall_owned_frame_selection_hook(std::uint8_t* image) noexcept {
         reinterpret_cast<const void*>(&hook_draw_frame_selection),false,"selection.entry"))return false;
     g_frame_selection_installed=false;return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // CVisualizatorD3D::DrawParticles, renderer vtable slot 17 (0x00502CA0):
 // __thiscall (bool additive, CSimplyArray<SXYZW>& points,
@@ -27407,6 +27757,7 @@ void report_game_particle_omission(const char* reason) noexcept {
 }
 
 // Copies the game's arrays once at the ABI boundary. False on unreadable input.
+#if !defined(EID3D11_EMBEDDED)
 bool copy_game_particles(const void* points, const void* particles, GameParticle* output,
                          std::uint32_t count, std::uint32_t first = 0) noexcept {
     __try {
@@ -27442,9 +27793,11 @@ bool read_game_particle_counts(const void* points, const void* particles, std::i
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // The clip-rect half extents of the pipeline DrawParticles calls, after
 // checking that its slots 1 and 24 are the verified 3DfpFPU functions.
+#if !defined(EID3D11_EMBEDDED)
 const char* read_game_particle_clip_rect(void* renderer, float& half_width, float& half_height) noexcept {
     const char* module_reason = "";
     const TlModuleContract* contract = nullptr;
@@ -27511,10 +27864,12 @@ BOOL __fastcall hook_game_particles(void* self, void*, std::uint32_t additive, c
     }
     return TRUE;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Claims slot 17 only when it still points at the stock entry and the entry
 // bytes are unpatched; otherwise another owner is present and the game keeps
 // drawing particles (reported as rejected).
+#if !defined(EID3D11_EMBEDDED)
 bool install_game_particle_hook(std::uint8_t* image) {
     auto** table = reinterpret_cast<void**>(image + kRendererTableRva);
     if (table[kGameParticleSlot] != image + kGameParticleRva ||
@@ -27549,6 +27904,7 @@ bool uninstall_game_particle_hook(std::uint8_t* image) {
     }
     g_game_particles_installed=false;g_game_particles_original=nullptr;return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // CVisualizatorD3D::Draw3DLine, renderer vtable slot 16 (0x00501D90):
 // __thiscall (CSimplyArray<SXYZW>& points, float width, int clip_flags,
@@ -27576,6 +27932,7 @@ void report_game_ribbon_omission(const char* reason) noexcept {
     append_bridge_event("game_lightning_omitted", reason, true);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_game_ribbon_points(const void* points, std::int32_t& count, const float*& data) noexcept {
     __try {
         data = *reinterpret_cast<const float* const*>(points);
@@ -27585,6 +27942,7 @@ bool read_game_ribbon_points(const void* points, std::int32_t& count, const floa
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 bool copy_game_ribbon_points(const float* data, GameRibbonPoint* output, std::uint32_t count) noexcept {
     __try {
@@ -27595,6 +27953,7 @@ bool copy_game_ribbon_points(const float* data, GameRibbonPoint* output, std::ui
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_game_ribbon(void* self, void*, const void* points, float width, std::int32_t clip_flags,
                                  float texture_length, float v_start, float v_width) {
     const bool interface_pass = g_semantic.kind == SemanticKind::ui;
@@ -27641,9 +28000,11 @@ BOOL __fastcall hook_game_ribbon(void* self, void*, const void* points, float wi
     if (!g_game_ribbon_sink(g_game_ribbon_sink_context, view)) report_game_ribbon_omission("renderer_draw_failed");
     return TRUE;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Claims slot 16 only when it still points at the stock entry and the entry
 // bytes are unpatched; otherwise the game keeps drawing (reported rejected).
+#if !defined(EID3D11_EMBEDDED)
 bool install_game_ribbon_hook(std::uint8_t* image) {
     auto** table = reinterpret_cast<void**>(image + kRendererTableRva);
     if (table[kGameRibbonSlot] != image + kGameRibbonRva ||
@@ -27678,6 +28039,7 @@ bool uninstall_game_ribbon_hook(std::uint8_t* image) {
     }
     g_game_ribbon_installed=false;g_game_ribbon_original=nullptr;return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // CVisualizatorD3D::DrawSelection(const CPlot3D& cp, float size, const
 // CPlot3D& x_axis, const CPlot3D& y_axis), __thiscall, ret 10h (0x00503F13),
@@ -27717,6 +28079,7 @@ bool read_game_selection(const float* cp, float size, const float* x_axis, const
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_game_selection(void* self, void*, const float* cp, float size, const float* x_axis,
                                     const float* y_axis) {
     SemanticScope scope(SemanticKind::particles, _ReturnAddress());
@@ -27744,9 +28107,11 @@ BOOL __fastcall hook_game_selection(void* self, void*, const float* cp, float si
         report_game_selection_omission("renderer_draw_failed");
     return TRUE;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The call must still target the stock entry and the entry must be stock;
 // an addon chain on it keeps the stock marker (reported rejected).
+#if !defined(EID3D11_EMBEDDED)
 bool install_game_selection_hook(std::uint8_t* image) noexcept {
     if (g_game_selection_installed) return true;
     auto* call = image + kDrawSelectionCallRva;
@@ -27767,6 +28132,7 @@ bool uninstall_game_selection_hook(std::uint8_t* image) noexcept {
     g_game_selection_installed = false;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Game terrain prints (game_particles.h). Draw3DScene draws the blood, foot
 // and fire print lists (CWorldClient +0x1B8/+0x1BC/+0x1C0, STLport lists:
@@ -27819,6 +28185,7 @@ bool copy_game_print_mesh(const float* plots, const float* maps, std::uint32_t v
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 int __fastcall hook_game_print(void*, void*, const float* plots, const float* maps, std::int32_t groups,
                                const WORD* indices, std::int32_t index_count, std::uint32_t color, std::uint32_t,
                                const void*, float) {
@@ -27853,8 +28220,10 @@ int __fastcall hook_game_print(void*, void*, const float* plots, const float* ma
     if (!g_game_print_sink(g_game_print_sink_context, view)) report_game_print_omission("renderer_draw_failed");
     return kTrvVisibleNoClip;
 }
+#endif // !EID3D11_EMBEDDED
 
 // True when the print's node is the last one of its list.
+#if !defined(EID3D11_EMBEDDED)
 bool game_print_is_last(const void* print, std::uint32_t list_offset) noexcept {
     __try {
         const auto* world = g_game_print_image + kVisualClientWorldRva;
@@ -27881,6 +28250,7 @@ int __fastcall hook_game_fire_prints(void* print, void*) { return game_print_lis
 const std::array<const void*, 3> kGamePrintWrappers{{reinterpret_cast<const void*>(&hook_game_blood_prints),
     reinterpret_cast<const void*>(&hook_game_foot_prints), reinterpret_cast<const void*>(&hook_game_fire_prints)}};
 
+
 bool write_game_print_push(std::uint8_t* site, const void* target) noexcept {
     DWORD protection = 0;
     if (!VirtualProtect(site + 1, 4, PAGE_EXECUTE_READWRITE, &protection)) return false;
@@ -27891,10 +28261,12 @@ bool write_game_print_push(std::uint8_t* site, const void* target) noexcept {
     FlushInstructionCache(GetCurrentProcess(), site + 1, 4);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // All four sites must be stock (the three pushes name the stock Draw, the
 // Render call targets the stock entry and Draw's entry is unpatched); then
 // all are patched together, or none stay patched.
+#if !defined(EID3D11_EMBEDDED)
 bool install_game_print_hooks(std::uint8_t* image) noexcept {
     if (g_game_prints_installed) return true;
     const auto draw = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(image + kPrintsDrawRva));
@@ -27939,6 +28311,7 @@ bool uninstall_game_print_hooks(std::uint8_t* image) noexcept {
     if (restored) g_game_prints_installed = false;
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Owned floating combat text (combat_text.h). CWorldClient::Draw calls
 // CFlyingHitPoints::Draw(CVisualizator*) at 0x0056A337 (ecx = world +0x1B4,
@@ -28000,6 +28373,7 @@ void report_combat_text_omission(const char* reason) noexcept {
 }
 
 // Game time in milliseconds for the damage list (receive stamps and draw).
+#if !defined(EID3D11_EMBEDDED)
 DWORD __stdcall combat_text_clock_ms() noexcept {
     static DWORD last = 0;
     double segments = 0;
@@ -28007,9 +28381,11 @@ DWORD __stdcall combat_text_clock_ms() noexcept {
         last = static_cast<DWORD>(static_cast<std::uint64_t>(segments * kCombatTextSecondsPerSegment * 1000.0));
     return last;
 }
+#endif // !EID3D11_EMBEDDED
 
 struct CombatTextNode { void* node; std::int32_t unit, amount; std::uint32_t flags, time; };
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_combat_text_list(void* text, void*& sentinel, std::vector<CombatTextNode>& nodes) noexcept {
     __try {
         sentinel = *reinterpret_cast<void**>(static_cast<std::uint8_t*>(text) + 4);
@@ -28052,8 +28428,10 @@ bool erase_combat_text_node(void* text, void* node) noexcept {
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 // The entry's anchor and owner colour, or false when stock draws nothing.
+#if !defined(EID3D11_EMBEDDED)
 bool read_combat_text_unit(std::int32_t id, int& x, int& y, bool& owned) noexcept {
     __try {
         auto* unit = static_cast<std::uint8_t*>(reinterpret_cast<CombatTextGetUnitFn>(
@@ -28104,8 +28482,10 @@ bool bind_combat_text_texture(void* text, void* visualizator, bool& missing) noe
         return false;
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 #ifndef EID3D11_EMBEDDED
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
     SemanticScope scope(SemanticKind::particles, _ReturnAddress());
     if (!text || !visualizator) { report_combat_text_omission("null_list_or_visualizator"); return FALSE; }
@@ -28172,8 +28552,10 @@ BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
         }
     return TRUE;
 }
+#endif // !EID3D11_EMBEDDED
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 bool write_combat_text_clock_call(std::uint8_t* site, const void* target) noexcept {
     DWORD protection = 0;
     if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &protection)) return false;
@@ -28194,10 +28576,12 @@ bool restore_combat_text_clock_call(std::uint8_t* site, const std::array<std::ui
     FlushInstructionCache(GetCurrentProcess(), site, 6);
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 // The Draw call, Draw's entry, ReceiveDamage's entry and both receive clock
 // calls must be stock; then all are patched, or none stay patched.
 #ifndef EID3D11_EMBEDDED
+#if !defined(EID3D11_EMBEDDED)
 bool install_combat_text_hooks(std::uint8_t* image) noexcept {
     if (g_combat_text_installed) return true;
     const auto draw_owner = resolve_hook_entry(image + kCombatTextDrawRva, kCombatTextDrawPrologue.data(),
@@ -28228,9 +28612,11 @@ bool install_combat_text_hooks(std::uint8_t* image) noexcept {
     g_combat_text_installed = true;
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 #endif
 
 #ifndef EID3D11_EMBEDDED
+#if !defined(EID3D11_EMBEDDED)
 bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
     if (!g_combat_text_installed) return true;
     if (!image) return false;
@@ -28247,6 +28633,7 @@ bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
     if (restored) g_combat_text_installed = false;
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 #endif
 
 std::string debug_root() {
@@ -28271,6 +28658,7 @@ void bridge_update_combat_portraits() noexcept {
     // Embedded portraits are completed by the source HUD owner, before draw.
 }
 
+#if !defined(EID3D11_EMBEDDED)
 std::uint64_t bridge_camp_texture_generation() noexcept {
     return g_hud_visual_game_image && g_hud_visuals.role_ready(HudResourceRole::texture)
         ? g_hud_visuals.role_generation(HudResourceRole::texture) : 0;
@@ -28353,6 +28741,7 @@ void bridge_ground_cover_corpses(float center_x,float center_y,float radius,
     build_ground_cover_corpses(*visual.values,*terrain.source_values.terrain,center_x,center_y,radius,
         visual.draw_undetected_units,output);
 }
+#endif // !EID3D11_EMBEDDED
 
 namespace {
 // Immutable geometry/mapping plus expiry segment identifies a game marker.
@@ -28372,6 +28761,7 @@ struct CreatedCoverMarker {
 std::map<CoverMarkerKey, CreatedCoverMarker> g_cover_markers;
 std::uint64_t g_cover_marker_epoch = 0;
 
+#if !defined(EID3D11_EMBEDDED)
 bool ground_cover_marker_contract() noexcept {
     return g_visual_game_image && g_visual_publication_active &&
         relative_call_targets(g_visual_game_image+0x134350,g_visual_game_image+0x134b60) &&
@@ -28381,12 +28771,14 @@ bool ground_cover_marker_contract() noexcept {
         signature(g_visual_game_image+0x2ced3a,{0xd8,0x4a,0x50,0xd9,0x5a,0x4c}) &&
         signature(g_visual_game_image+0x16d32a,{0x81,0xc6,0xbc,0x01,0x00,0x00});
 }
+#endif // !EID3D11_EMBEDDED
 
 void refresh_cover_marker_epoch() noexcept {
     const auto epoch=lifecycle_observer().snapshot().positive_world_epoch;
     if(epoch!=g_cover_marker_epoch){g_cover_markers.clear();g_cover_marker_epoch=epoch;}
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool read_cover_marker(const void* node, std::int32_t tick, bool just_created,
     CoverMarkerKey& key, std::uint8_t& visible, float& alpha) noexcept {
     const void* table=nullptr;
@@ -28457,8 +28849,10 @@ void publish_ground_cover_footprint_append(void* object, VisualResourceIncarnati
         previous=node;node=links[0];
     }
 } catch(...) { append_bridge_event("ground_cover_marker_omitted","creation snapshot allocation failed",true); }
+#endif // !EID3D11_EMBEDDED
 
 // Game thread: the footprint list read (and the marker records it keeps).
+#if !defined(EID3D11_EMBEDDED)
 bool read_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
     std::vector<FootprintTrailPoint>* trail_points) noexcept {
     output.clear();
@@ -28588,9 +28982,11 @@ bool read_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& out
     } catch(...) {return fail("expired footprint endpoint allocation failed; ground cover omitted");}
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 } // namespace
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& output,
     std::vector<FootprintTrailPoint>* trail_points) noexcept {
     if(!g_scene_frame_values_installed)return read_ground_cover_footprints(output,trail_points);
@@ -28614,9 +29010,11 @@ bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& o
     }
     return snapshot->ok;
 }
+#endif // !EID3D11_EMBEDDED
 
 namespace {
 // Game thread: the atlas behind one terrain texture wrapper.
+#if !defined(EID3D11_EMBEDDED)
 std::shared_ptr<const OwnedVisualSurface> read_terrain_atlas(void* texture,const char*& reason) noexcept {
     std::shared_ptr<const OwnedVisualSurface> output;
     reason="terrain atlas read failed";
@@ -28629,10 +29027,12 @@ std::shared_ptr<const OwnedVisualSurface> read_terrain_atlas(void* texture,const
     } catch(...) { output.reset(); }
     return output;
 }
+#endif // !EID3D11_EMBEDDED
 
 // Game thread, as it queues a world command: every terrain material's atlas.
 // The scene thread's bridge_terrain_atlas answers from this snapshot, carried
 // with the frame values of every later post.
+#if !defined(EID3D11_EMBEDDED)
 void capture_terrain_atlases(const std::vector<void*>& wrappers) noexcept {
     try {
         auto snapshot=std::make_shared<TerrainAtlasSnapshot>();
@@ -28643,8 +29043,10 @@ void capture_terrain_atlases(const std::vector<void*>& wrappers) noexcept {
         g_terrain_atlases=std::move(snapshot);
     } catch(...) { g_terrain_atlases.reset(); }
 }
+#endif // !EID3D11_EMBEDDED
 } // namespace
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_terrain_atlas(std::uint32_t material,std::shared_ptr<const OwnedVisualSurface>& output,
     const char** failure) noexcept {
     output.reset();
@@ -28673,6 +29075,7 @@ void bridge_append_probe_event(const char* event,const char* detail) noexcept {
 void bridge_request_hovered_shadow_capture() noexcept {
     if(hovered_shadow_observation_enabled())g_hovered_shadow_capture_requested=true;
 }
+#endif // !EID3D11_EMBEDDED
 
 namespace {
 void complete_hovered_shadow_capture() noexcept {
@@ -28723,6 +29126,7 @@ void complete_hovered_shadow_capture() noexcept {
 }
 } // namespace
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_liquid_ripples(NativeLiquidRipples& output) noexcept {
     output={};
     const auto& visual=g_owned_visual_world_frame;
@@ -28764,6 +29168,7 @@ bool bridge_critter_obstacles(float x,float y,float radius,
     const auto& visual=g_owned_visual_world_frame;
     return visual.active&&visual.values&&build_critter_obstacles(*visual.values,x,y,radius,output);
 }
+#endif // !EID3D11_EMBEDDED
 namespace {
 // One FIG vertex (component) at a complection, posed by its node: model space.
 std::array<double,3> perch_model_point(const FigureCpuAsset& figure,const VisualNodeSample& node,
@@ -28986,6 +29391,7 @@ bool bridge_prepare_critter_perch_models(unsigned budget_us) noexcept try {
     return true;
 } catch(...) {return true;}
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_critter_perches(float x,float y,float radius,std::vector<CritterPerchTree>& output) noexcept try {
     output.clear();
     const auto& visual=g_owned_visual_world_frame;
@@ -29028,6 +29434,7 @@ bool bridge_critter_perches(float x,float y,float radius,std::vector<CritterPerc
     }
     return true;
 } catch(...) {output.clear();return false;}
+#endif // !EID3D11_EMBEDDED
 
 namespace {
 // Ground-cover object contacts (#164). The store holds every eligible non-unit
@@ -29155,6 +29562,7 @@ bool same_ground_contact_entry(const GroundContactStore::Entry& left,const Groun
 }
 } // namespace
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_release_ground_contacts() noexcept {
     g_ground_contacts.clear();
     std::vector<float>().swap(g_ground_contacts.sector_top);
@@ -29279,6 +29687,7 @@ bool bridge_ground_cover_objects(float x,float y,float radius,
     store.answer_revision=done==pending.size()?store.revision:0;
     return true;
 } catch(...) {output.clear();g_ground_contacts.clear();return false;}
+#endif // !EID3D11_EMBEDDED
 
 
 #ifdef EID3D11_TESTING
@@ -29288,6 +29697,7 @@ bool bridge_test_build_owned_point_shadow_faces(const RetainedWorldPointLight& l
 }
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_consume_hud_atlas_window(
     IDirectDrawSurface7* surface, const void* lock_caller,
     HudAtlasMutationWindow& window) noexcept {
@@ -29396,11 +29806,13 @@ bool bridge_finish_character_pane_releasedc(
     }
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 void bridge_retire_owned_text_surface(std::uint64_t surface_id) noexcept {
     g_chat_text_frames.retire(surface_id);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_consume_character_pane_blt(
     std::uint64_t source_id, const void* caller,
     const RECT& destination, const RECT* source_rect,
@@ -29474,6 +29886,7 @@ bool bridge_character_pane_text_epoch_current(
          ui_epoch == g_chat_text_ui_epoch) &&
         frame_serial == g_bridge_frame_serial;
 }
+#endif // !EID3D11_EMBEDDED
 
 #ifdef EID3D11_TESTING
 namespace {
@@ -41171,6 +41584,7 @@ bool bridge_test_object_plan_diagnostic_tail_route() noexcept {
 
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {
     switch (reason) {
     case FigureFallbackReason::none: return "none";
@@ -41189,6 +41603,7 @@ const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {
     default: return "unknown";
     }
 }
+#endif // !EID3D11_EMBEDDED
 
 EngineBridge& EngineBridge::instance() {
     static EngineBridge bridge;
@@ -41199,6 +41614,7 @@ void bridge_set_completed_visual_surface_reader(CompletedVisualSurfaceReader rea
     g_visual_surface_reader = reader;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_set_camp_input_overlay(DebugOverlay* overlay) noexcept {
     g_camp_input_overlay=overlay;
 }
@@ -41701,6 +42117,7 @@ bool EngineBridge::uninstall() {
     if (restored) installed_ = false;
     return restored;
 }
+#endif // !EID3D11_EMBEDDED
 
 SemanticContext EngineBridge::current() const { return g_semantic; }
 
@@ -41821,6 +42238,7 @@ std::uint32_t EngineBridge::image_rva(const void* address) const {
         ? static_cast<std::uint32_t>(value - base) : 0;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 const wchar_t* EngineBridge::resource_registry_key() const noexcept {
     if (!sites_verified_ || !image_) return nullptr;
     // The supported startup selects its registry root with this PUSH operand.
@@ -41879,16 +42297,19 @@ bool EngineBridge::patch_slots() {
     FlushInstructionCache(GetCurrentProcess(), table, 26 * sizeof(void*));
     return true;
 }
+#endif // !EID3D11_EMBEDDED
 
 void EngineBridge::report(const char* event, const char* detail) const {
     append_bridge_event(event, detail, sites_verified_);
 }
 
+#if !defined(EID3D11_EMBEDDED)
 SemanticContext current_semantic_context() { return EngineBridge::instance().current(); }
 
 void bridge_report_event(const char* event, const char* detail) noexcept {
     append_bridge_event(event, detail, EngineBridge::instance().sites_verified());
 }
+#endif // !EID3D11_EMBEDDED
 
 void bridge_profile_begin_frame() {
     if (!bridge_profile_enabled()) g_latest_bridge_profile.owned_visual={};
@@ -41945,6 +42366,7 @@ void bridge_profile_end_frame() {
     g_bridge_sample.active = false;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_outer_frame_timing_supported() noexcept {
     return g_outer_frame_timing_hooks_installed;
 }
@@ -41960,6 +42382,7 @@ void bridge_set_outer_frame_timing_active(bool active) noexcept {
     InterlockedExchange(&g_outer_frame_timing_active,
                         active && g_outer_frame_timing_hooks_installed ? 1 : 0);
 }
+#endif // !EID3D11_EMBEDDED
 
 PostEngineSurfaceTimingToken bridge_post_engine_surface_timing_begin(
     PostEngineSurfaceTimingKind kind) noexcept {
@@ -42050,6 +42473,7 @@ void bridge_post_engine_surface_timing_end(
     }
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_post_engine_surface_material_group_scan() noexcept {
     if (!outer_frame_timing_active() ||
         !g_outer_frame_timing.frame_ended ||
@@ -42210,6 +42634,7 @@ bool bridge_outer_frame_timing_matches(
     return snapshot.fresh && bridge && bridge->frame != 0 &&
         snapshot.bridge_frame == bridge->frame;
 }
+#endif // !EID3D11_EMBEDDED
 
 void bridge_profile_api_entry(const char* kind, const void* caller) {
     if (!bridge_profile_enabled()) return;
@@ -42243,6 +42668,7 @@ void bridge_profile_api_entry(const char* kind, const void* caller) {
     g_previous_api_rva = caller_rva;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 SceneRendererTimingToken bridge_scene_renderer_timing_begin(
     SceneRendererTimingKind kind) noexcept {
     SceneRendererTimingToken token{};
@@ -42290,6 +42716,7 @@ void bridge_scene_renderer_timing_end(
         values[token.context] += elapsed;
     token = {};
 }
+#endif // !EID3D11_EMBEDDED
 
 SceneQueueTimingToken bridge_scene_queue_timing_begin() noexcept {
     SceneQueueTimingToken token{};
@@ -42354,10 +42781,12 @@ void bridge_scene_queue_timing_end(SceneQueueTimingToken& token) noexcept {
     token = {};
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_set_profile_enabled(bool enabled) {
     InterlockedExchange(&g_bridge_runtime_profile, enabled ? 1 : 0);
     if (!enabled) g_latest_bridge_profile.owned_visual={};
 }
+#endif // !EID3D11_EMBEDDED
 
 void bridge_set_shadow_settings(std::uint32_t map_side,
     std::uint8_t close_cascades,bool far_shadows,bool point_shadows,bool sun_shadows) noexcept {
@@ -42394,6 +42823,7 @@ void bridge_set_point_shadow_merge_distance(float distance) noexcept {
     g_point_shadow_merge_distance=std::isfinite(distance)&&distance>0?distance:0;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_set_terrain_lod_enabled(bool enabled) noexcept {
     g_owned_terrain_lod_enabled=enabled;
 }
@@ -42447,6 +42877,7 @@ void appendf(char* out, std::size_t size, std::size_t& used, const char* format,
     if (written > 0) used = (std::min)(size - 1, used + static_cast<std::size_t>(written));
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool game_code_contains(const void* address) noexcept {
     if (!game_image_contains(address)) return false;
     const auto* base = game_image_base();
@@ -42461,6 +42892,7 @@ bool game_code_contains(const void* address) noexcept {
     }
     return false;
 }
+#endif // !EID3D11_EMBEDDED
 
 void module_name_of(const void* address, char* out, std::size_t size) noexcept {
     HMODULE module = nullptr;
@@ -42557,6 +42989,7 @@ bool live_patch_targets_renderer(const std::uint8_t* address, std::size_t size) 
 }
 
 // One hook_taken_over line per address, naming the live bytes' owner.
+#if !defined(EID3D11_EMBEDDED)
 void report_foreign_once(const std::uint8_t* address, std::size_t size,
                          const char* when, const char* reason) noexcept {
     bool fresh = false;
@@ -42595,9 +43028,11 @@ void report_foreign_once(const std::uint8_t* address, std::size_t size,
     append_bridge_event("hook_taken_over", detail, true);
     publish_takeover(name);
 }
+#endif // !EID3D11_EMBEDDED
 
 // Where each of game.exe's ddraw.dll import slots points. Stack only (it
 // also runs at process exit); true when every slot points into this DLL.
+#if !defined(EID3D11_EMBEDDED)
 bool ddraw_import_detail(char* out, std::size_t size) noexcept {
     std::size_t used = 0;
     if (size) out[0] = '\0';
@@ -42698,9 +43133,11 @@ void note_foreign_entry(const std::uint8_t* entry, const char* when, const char*
     if (game_image_contains(entry) && !live_patch_targets_renderer(entry, kOwnedPatchBytes))
         report_foreign_once(entry, kOwnedPatchBytes, when, reason);
 }
+#endif // !EID3D11_EMBEDDED
 
 } // namespace
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_note_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept {
     // Code only: data the game itself rewrites is not a hook entry.
     if (game_code_contains(address)) record_owned_patch(address, original, bytes);
@@ -42790,6 +43227,7 @@ void bridge_log_never_called_at_exit() noexcept {
               &written, nullptr);
     CloseHandle(file);
 }
+#endif // !EID3D11_EMBEDDED
 
 const char* bridge_takeover_notice() noexcept {
     return g_takeover_notice.load(std::memory_order_acquire);
@@ -42799,8 +43237,10 @@ const char* bridge_save_id_clash_notice() noexcept {
     return GetTickCount64() < g_save_clash_notice_until.load() ?
         "Save ID clash: this save may crash on reload or exit (see bridge.jsonl)" : nullptr;
 }
+#endif // !EID3D11_EMBEDDED
 void bridge_note_feature_off(std::uint32_t features) noexcept { g_features_off |= features; }
 const char* bridge_addon_notice() noexcept { return g_addon_notice[0] ? g_addon_notice : nullptr; }
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_game_sites_all_verified() noexcept {
     try {
         const auto& report = running_game_sites().report;
@@ -42811,6 +43251,7 @@ bool bridge_owned_sky_requested() noexcept {
     if (g_scene_frame_values_installed) return g_scene_frame_values.owned_sky_requested;
     return g_owned_sky_installed && g_owned_sky_request_serial == g_bridge_frame_serial;
 }
+#endif // !EID3D11_EMBEDDED
 #ifdef EID3D11_TESTING
 std::array<std::uint32_t,4> bridge_test_shadow_settings() noexcept {
     return {g_owned_shadow_settings.map_side,g_owned_shadow_settings.close_cascades,
@@ -42821,6 +43262,7 @@ bool bridge_test_terrain_lod_enabled() noexcept {
 }
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 const BridgeProfileSnapshot* bridge_latest_profile() noexcept {
     return g_has_latest_bridge_profile ? &g_latest_bridge_profile : nullptr;
 }
@@ -42848,6 +43290,7 @@ WorldFogSnapshot bridge_world_fog_snapshot() noexcept {
 }
 
 ShadowInputDiagnostics bridge_shadow_reuse_diagnostics() noexcept {return g_shadow_reuse_inputs;}
+#endif // !EID3D11_EMBEDDED
 
 #ifndef EID3D11_EMBEDDED
 std::uint64_t bridge_current_world_epoch() noexcept {
@@ -42911,6 +43354,7 @@ constexpr std::uint32_t kProgressMovieNameRva = 0x00391ee0;
 constexpr std::uint32_t kProgressMovieHandleRva = 0x003c5550;
 constexpr std::uint32_t kProgressWorkPathRva = 0x003af460;
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_progress_movie(ProgressMovie& movie) noexcept {
     movie = {};
     try {
@@ -42960,9 +43404,27 @@ WorldDrawCompletionSnapshot bridge_world_draw_completion_snapshot() noexcept {
 std::uint64_t bridge_world_draw_completion_counter() noexcept {
     return g_world_draw_completion_counter;
 }
+#endif // !EID3D11_EMBEDDED
 
-BridgeFrameValues bridge_capture_frame_values() noexcept {
-    BridgeFrameValues values;
+bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept {
+    values = {};
+#ifdef EID3D11_EMBEDDED
+    // Use host-owned facts, never the layout of the process executable.
+    bridge_read_world_environment(values.environment);
+    values.world_time_valid = bridge_current_world_time(values.world_time);
+    values.local_single_player = bridge_local_single_player_mission();
+    values.owned_sky_requested = bridge_owned_sky_requested();
+    values.completion = bridge_world_draw_completion_snapshot();
+    values.completion_counter = bridge_world_draw_completion_counter();
+    values.world_to_clip = bridge_scene_world_to_clip_snapshot();
+    values.fog = bridge_world_fog_snapshot();
+    values.world_epoch = bridge_current_world_epoch();
+    // No complete host publication exists yet for the queue's frame serial,
+    // draw-active flag, text epochs and pinned atlas collection. A partial
+    // snapshot must not be installed as a completed scene-thread command.
+    embedded_report_render_failure("embedded_input_missing", "scene_queue_frame_metadata");
+    return false;
+#else
     values.frame_serial = g_bridge_frame_serial;
     read_world_environment(values.environment);
     values.world_time_valid = g_visual_game_image && read_owned_world_time(g_visual_game_image, values.world_time);
@@ -42977,7 +43439,8 @@ BridgeFrameValues bridge_capture_frame_values() noexcept {
     values.chat_text_ui_epoch = g_chat_text_ui_epoch;
     values.terrain_atlases = g_terrain_atlases;
     values.world_epoch = lifecycle_observer().snapshot().positive_world_epoch;
-    return values;
+    return true;
+#endif
 }
 
 void bridge_install_frame_values(const BridgeFrameValues& values) noexcept {
@@ -43002,6 +43465,7 @@ void bridge_install_profile_values(const BridgeProfileValues& values) noexcept {
     if (values.has_profile) g_latest_bridge_profile = values.profile;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_current_world_time(double& time) noexcept {
     if (g_scene_frame_values_installed) {
         time = g_scene_frame_values.world_time;
@@ -43009,6 +43473,7 @@ bool bridge_current_world_time(double& time) noexcept {
     }
     return g_visual_game_image && read_owned_world_time(g_visual_game_image, time);
 }
+#endif // !EID3D11_EMBEDDED
 
 #ifdef EID3D11_TESTING
 void bridge_test_world_draw_completion(bool success) noexcept {
@@ -43019,10 +43484,12 @@ void bridge_test_world_draw_completion(bool success) noexcept {
 }
 #endif
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_set_native_terrain_animation_owned(bool enabled) noexcept {
     InterlockedExchange(&g_native_terrain_animation_owned,
                         enabled && g_terrain_hooks_installed ? 1 : 0);
 }
+#endif // !EID3D11_EMBEDDED
 
 bool bridge_owned_cursor_frame(OwnedCursorFrame& frame) noexcept {
     if (!g_owned_cursor_installed) { frame = {}; return false; }
@@ -43032,6 +43499,7 @@ bool bridge_owned_cursor_frame(OwnedCursorFrame& frame) noexcept {
     return true;
 }
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_trace_input_focus(HWND window, const char* phase, UINT message,
                               WPARAM wparam, int overlay_mode) noexcept {
     if (!input_focus_trace_enabled() || !g_owned_cursor_installed) return;
@@ -43083,6 +43551,7 @@ bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept 
 void bridge_neighbour_diagnostic(const char* reason) noexcept {
     append_bridge_event("neighbour_maps",reason,false);
 }
+#endif // !EID3D11_EMBEDDED
 
 namespace {
 // The terrain decode without the bridge sample counters (render-thread state).
