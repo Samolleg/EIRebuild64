@@ -110,7 +110,7 @@ public:
     static const CString &GetWorkPath() { return szWorkPath; }
     static const CString &GetResourcePath() { return szResourcePath; }
     static const CString &GetCDPath() { return szCDPath; }
-    static void InitCurrentDir();
+    static void InitCurrentDir(const char *dataRoot = nullptr);
     CString GetMobPath();
     // CRAP
     virtual LPCSTR GetTexturesPath() const { return NULL; }

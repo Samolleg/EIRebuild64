@@ -68,8 +68,13 @@ CString CWorld::GetMobPath()
     return CString(GetWorkPath()) + "maps\\";
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CWorld::InitCurrentDir()
+void CWorld::InitCurrentDir(const char *dataRoot)
 {
+    if (dataRoot)
+    {
+        SetCurrentDir(dataRoot);
+        return;
+    }
     // get current directory
     char buffer[1024];
     // get current directory
