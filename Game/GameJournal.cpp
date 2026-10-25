@@ -1,5 +1,4 @@
 #ifndef GAME_JOURNAL_STANDALONE
-#include "RuntimePaths64.h"
 #include "StdAfx.h"
 #include "Unit.h"
 #include "WorldClient.h"
@@ -17,6 +16,7 @@
 #include "../external/owned-renderer/Source/res_mapping.h"
 #endif
 #include "GameJournal.h"
+#include "RuntimePaths64.h"
 #include "CrashEvidence.h"
 #include "GameMemorySnapshot.h"
 #include <new>
