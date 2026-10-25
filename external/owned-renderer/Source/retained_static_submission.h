@@ -278,13 +278,5 @@ bool retained_visual_group_depth_revision(const RetainedVisualSample& sample,
 bool retained_visual_group_submission(const RetainedVisualSample& sample,
     std::size_t group_index,const NativeWorldBounds& bounds,NativeContribution contribution,
     double time,std::uint8_t fog,NativePreparedPartSubmission*& record);
-#ifdef EID3D11_TESTING
-bool retained_visual_part_view(const RetainedVisualSample& sample,
-    std::size_t part_index, const std::vector<VisualNodeSample>& nodes,
-    const NativeWorldBounds& bounds, NativeContribution contribution,
-    const std::array<float,16>& world_to_clip, double time, std::uint8_t fog,
-    std::uint64_t presentation_serial, NativeGeometryView& view,
-    std::array<NativeOwnedTextureMip,32>& texture_mips) noexcept;
-#endif
 
 } // namespace owned

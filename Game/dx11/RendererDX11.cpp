@@ -21,6 +21,8 @@
 #include "../OwnedRender/E1Terrain.h"
 #include "../OwnedRender/E1TerrainSubmission.h"
 #include "../GameJournal.h"
+#include "../GeneralSettings.h"
+#include <cmath>
 
 #include "Utils.h"
 #include "Vertex.h"
@@ -896,10 +898,37 @@ CDX11::~CDX11()
     ownedRenderer.Shutdown();
 }
 
+void CDX11::SetGammaCorrection(float brightness, float contrast, float gamma) noexcept {
+    const auto access = ownedRenderer.LockFrame();
+    if (!rendererFacade || !rendererFacade->Ready()) return;
+    const auto bounded = [](float value) {
+        return std::isfinite(value) ? std::clamp(value, -1.f, 1.f) * .5f : 0.f;
+    };
+    brightness = bounded(brightness); contrast = bounded(contrast); gamma = bounded(gamma);
+    float slope = std::abs(contrast) * 4.f + 1.f;
+    if (contrast < 0.f) slope = 1.f / slope;
+    const float offset = (1.f - slope) * .5f;
+    const float exponent = gamma == 0.f ? 1.f : 1.f / (1.f + gamma * (gamma > 0.f ? 5.f : .5f));
+    // The source game's display ramp: gamma, centred contrast, then brightness.
+    // Preserve its float intermediate clamps and truncation to a 16-bit ramp.
+    std::array<WORD, 256> ramp{};
+    for (unsigned i = 0; i != ramp.size(); ++i) {
+        float value = static_cast<float>(std::pow(double(i) * double(1.f / 255.f), exponent) * slope + offset);
+        value = std::clamp(value, 0.f, 1.f) + brightness;
+        value = std::clamp(value, 0.f, 1.f);
+        ramp[i] = static_cast<WORD>(double(value) * 65280.0);
+    }
+    rendererFacade->Visit([&](owned::Renderer& renderer) {
+        renderer.set_gamma_ramp(ramp.data(), ramp.data(), ramp.data());
+        return S_OK;
+    });
+}
+
 bool CDX11::Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
 {
     if (!InitializeDX(hWnd, dwWidth, dwHeight))
         return false;
+    SetGammaCorrection(theSettings.fBrightness, theSettings.fContrast, theSettings.fGamma);
 
     Video::SetMovieRenderer(this);
     return true;

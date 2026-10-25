@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include "x64_remote_device.h"
 
 namespace owned {
 
@@ -59,6 +60,7 @@ public:
         }
         if (offset_ + size > capacity_) { offset_ = 0; discard_ = true; wrapped_ = true; ++generation_; }
         D3D11_MAPPED_SUBRESOURCE mapped{};
+        x64remote::declare_map_range(context, buffer_.Get(), offset_, bytes);
         const HRESULT hr = context->Map(buffer_.Get(), 0, discard_ ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped);
         if (FAILED(hr)) return hr;
         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) + offset_, data, bytes);
@@ -204,6 +206,7 @@ public:
             slot.capacity = capacity; slot.used = 0; fresh = true;
         }
         D3D11_MAPPED_SUBRESOURCE mapped{};
+        x64remote::declare_map_range(context, slot.buffer.Get(), slot.used, bytes);
         const HRESULT hr = context->Map(slot.buffer.Get(), 0, fresh ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped);
         if (FAILED(hr)) return hr;
         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) + slot.used, data, bytes);

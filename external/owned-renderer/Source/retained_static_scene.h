@@ -4,6 +4,7 @@
 #include "owned_asset_loader.h"
 #include "owned_visual_evaluation.h"
 #include "owned_terrain_front_end.h"
+#include "retained_publication.h"
 
 #include <atomic>
 #include <cstddef>
@@ -280,15 +281,21 @@ struct VisualPreparedResources {
     // colour record. Each component carries its part's skeleton node and
     // position base, so the GPU animates every part as before. Built once per
     // assembly (NPCs never change appearance on a map); rebuilt on change.
-    struct MergedGroup {
-        std::vector<std::uint32_t> parts;
-        std::uint32_t shape_count = 0, position_groups = 0, normal_groups = 0;
+    // Immutable merged vertices, one copy per content identity: identical
+    // characters (a squad of guards) share it instead of each holding its own
+    // eight-shape copy (#188).
+    struct MergedGeometry {
         std::vector<NativePackedGroup> positions, normals;
         std::vector<NativeTextureCoordinate> texture_coordinates;
         std::vector<NativeVertexComponent> components;
         std::vector<std::uint32_t> component_parts;   // skeleton node | position base << 16
         std::vector<std::uint16_t> indices;
         ResourceIdentity identity;                    // content identity: shared by identical characters
+    };
+    struct MergedGroup {
+        std::vector<std::uint32_t> parts;
+        std::uint32_t shape_count = 0, position_groups = 0, normal_groups = 0;
+        std::shared_ptr<const MergedGeometry> geometry;
         NativePreparedMeshHandle mesh{};
         NativePreparedMaterialHandle material{};
         NativePreparedMaterialHandle wound_material{};
@@ -850,6 +857,13 @@ public:
     bool visual_tick_values(VisualResourceIncarnation resource,
         VisualTickValues& values) const noexcept;
     // Source values for a separate UI view; no world traversal or pose sampling.
+    // The clip selection an object preview shows (view 0: character panel,
+    // 1: inventory), published by the game process when the preview
+    // re-anchors and recorded, so the host's replica draws the same pose.
+    void visual_publish_preview(VisualResourceIncarnation resource, std::uint32_t view,
+        const VisualClipSelection& selection) noexcept;
+    bool visual_preview_selection(VisualResourceIncarnation resource, std::uint32_t view,
+        VisualClipSelection& selection) const noexcept;
     bool visual_preview_source(VisualResourceIncarnation resource,
         RetainedVisualSample& sample, std::uint64_t& selection_revision) const noexcept;
     bool visual_publish_object_pose(VisualResourceIncarnation resource,
@@ -928,6 +942,15 @@ public:
     bool binding(std::int32_t signed_id,
                  RetainedStaticBinding& result) const noexcept;
     RetainedSceneIdentitySnapshot identity_snapshot() const;
+
+    // Publication stream (retained_publication.h). Attach before the first
+    // mutation; the recorder outlives the scene's use. Null: standard mode.
+    void set_publication_recorder(RetainedPublicationRecorder* recorder) noexcept {
+        recorder_.store(recorder, std::memory_order_release);
+    }
+    // The x64 host's replica: visual_detach keeps no renderer texture copy
+    // (the replica draws nothing yet; S3 decides pixel ownership there).
+    void set_replica() noexcept { replica_ = true; }
 
 private:
     friend class RetainedStaticBindingView;
@@ -1162,6 +1185,13 @@ private:
     bool collision_free_ = true;
     RetainedStaticPrepareDiagnostic prepare_diagnostic_{};
     mutable RetainedStaticInstrumentation instrumentation_{};
+    std::atomic<RetainedPublicationRecorder*> recorder_{nullptr};
+    bool replica_ = false;
+    // visual_publish_preview: per (resource id, view) the incarnation and selection.
+    std::unordered_map<std::uint64_t, std::pair<VisualResourceIncarnation, VisualClipSelection>> preview_selections_;
+    RetainedPublicationRecorder* recorder() const noexcept {
+        return recorder_.load(std::memory_order_relaxed);
+    }
 };
 
 } // namespace owned

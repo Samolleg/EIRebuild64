@@ -1361,7 +1361,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
         SSCCmd *pCmd = &pThread->commands[nCurCommand];
         pCmd->CalcParameters(pScript, variables);
         bNextCommand = TRUE;
-        if(!ModMob::Void(*pCmd,&nCurCommand,pThread->commands.GetSize(),&nSleepStart,&bNextCommand))switch (pCmd->command)
+        if(!ModMob::Void(*pCmd,&nCurCommand,pThread->commands.GetSize(),&nSleepStart,&bNextCommand,pScript->CanDeferCommand()))switch (pCmd->command)
         {
         case SC_WAITSEGMENT:
             if (nSegment < Float2Int(pCmd->params[0]))

@@ -17,6 +17,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModSpellRules.h"
 #include "ModTacticalSpells.h"
 #include "ModGroupSearch/Native.h"
+#include "GlobalMap.h"
 #include "ModGroupSearch/GroupSearchSave.h"
 #include "ModGroupSearch/GroupSearchBodySave.h"
 #include "ModGroupSearch/GroupSearchWitnessSave.h"

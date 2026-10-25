@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <array>
 #include <cmath>
 
@@ -253,6 +254,35 @@ struct OutputScope {
     bool previous = primary_output;
     explicit OutputScope(bool output) noexcept { primary_output = output; }
     ~OutputScope() { primary_output = previous; }
+};
+
+// ---- core mode (claude/s3-store) ----
+// The camp state one composed submission depends on: captured on the game
+// thread where the submission is sent (the scene sinks, a scene packet) and
+// applied around it where it runs (the x64 host). The preview glow is the
+// item card's specular RGB the game process advances once per draw
+// (camp_inventory_preview_specular_rgb); the host's answer is preview_glow.
+struct SubmissionState {
+    Composition visual{};
+    bool composing = false, output = true, glow = false;
+    std::uint32_t glow_rgb = 0;
+};
+inline thread_local bool preview_glow = false;
+inline thread_local std::uint32_t preview_glow_rgb = 0;
+struct SubmissionScope {
+    bool active, glow;
+    std::uint32_t glow_rgb;
+    VisualScope placement;
+    OutputScope output;
+    explicit SubmissionScope(const SubmissionState& state) noexcept
+        : active(state.composing), glow(preview_glow), glow_rgb(preview_glow_rgb),
+          placement(state.composing ? state.visual : visual, state.composing ? true : composing),
+          output(state.composing ? state.output : primary_output) {
+        if (active) { preview_glow = state.glow; preview_glow_rgb = state.glow_rgb; }
+    }
+    ~SubmissionScope() { if (active) { preview_glow = glow; preview_glow_rgb = glow_rgb; } }
+    SubmissionScope(const SubmissionScope&) = delete;
+    SubmissionScope& operator=(const SubmissionScope&) = delete;
 };
 
 } // namespace owned::camp

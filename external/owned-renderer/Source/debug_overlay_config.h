@@ -142,13 +142,13 @@ public:
     // exited cleanly ([setup] over_budget_pending; DebugOverlay owns it).
     bool over_budget_pending() const noexcept { return over_budget_pending_; }
     void set_over_budget_pending(bool pending) noexcept {
-        if (over_budget_pending_ != pending) { over_budget_pending_ = pending; dirty_ = true; }
+        if (over_budget_pending_ != pending) { over_budget_pending_ = pending; mark_changed(); }
     }
     // The driver crashed in a parallel shader preparation: prepare on one
     // worker from now on ([setup] serial_shader_preparation; Renderer owns it).
     bool serial_shader_preparation() const noexcept { return serial_shader_preparation_; }
     void set_serial_shader_preparation(bool serial) noexcept {
-        if (serial_shader_preparation_ != serial) { serial_shader_preparation_ = serial; dirty_ = true; }
+        if (serial_shader_preparation_ != serial) { serial_shader_preparation_ = serial; mark_changed(); }
     }
     // True when the loaded file carried [overlay] mode (players then keep the
     // developer monitor they chose; otherwise players start hidden).
@@ -158,8 +158,11 @@ public:
     // it after dropping the values whose registered default changed since.
     int settings_version() const noexcept { return settings_version_; }
     void set_settings_version(int version) noexcept {
-        if (settings_version_ != version) { settings_version_ = version; dirty_ = true; }
+        if (settings_version_ != version) { settings_version_ = version; mark_changed(); }
     }
+    // Bumped by every change of a value, mode or registration (a load too):
+    // core mode sends the options to the host when it moves.
+    std::uint64_t revision() const noexcept { return revision_; }
     bool dirty() const noexcept { return dirty_; }
     void clear_dirty() noexcept { dirty_ = false; }
 
@@ -167,6 +170,8 @@ public:
     // can share a file. Saving uses write-flush-atomic-replace semantics.
     bool load(const wchar_t* path);
     bool save(const wchar_t* path) const;
+    // Successful saves (core mode: the host tells the game process to reload).
+    std::uint64_t saves() const noexcept { return saves_; }
     // An interface profile: only interface_profile_option keys, written as an
     // [interface] section; loading ignores every other key in the file.
     bool save_interface_profile(const wchar_t* path) const;
@@ -174,6 +179,7 @@ public:
 
 private:
     static void apply_value(RendererOption& option, const std::string& value);
+    bool save_text(const wchar_t* path) const;
     RendererOption* find_mutable(const char* key) noexcept;
     bool register_option(RendererOption option);
 
@@ -194,6 +200,9 @@ private:
     bool overlay_mode_loaded_ = false;
     int settings_version_ = 0;
     bool dirty_ = false;
+    std::uint64_t revision_ = 0;
+    mutable std::uint64_t saves_ = 0;
+    void mark_changed() noexcept { dirty_ = true; ++revision_; }
 };
 
 } // namespace owned

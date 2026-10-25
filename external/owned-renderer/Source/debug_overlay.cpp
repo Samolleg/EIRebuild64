@@ -13,6 +13,8 @@
 #include "widescreen.h"
 #include "world_fog.h"
 #include "camp_inventory.h"
+#include "x64_remote_device.h"
+#include "dlss_frame.h"
 
 #include <dxgi1_4.h>
 
@@ -35,10 +37,13 @@
 #include <string>
 #include <vector>
 
+#include <psapi.h>
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window, UINT message,
                                                              WPARAM wparam, LPARAM lparam);
 
 namespace owned {
+void address_space_mb(std::uint64_t& used, std::uint64_t& largest_free, bool walk) noexcept; // renderer_diagnostics.cpp
 namespace {
 
 constexpr UINT_PTR kOverlaySubclassId = 0x45494431u; // "EID1"
@@ -123,6 +128,21 @@ int configured_value(const RendererConfig& config, const char* key) {
     return option && option->type == RendererOptionType::integer ? option->integer_value : 0;
 }
 
+// The renderer this session runs (debug_overlay_set_running_renderer).
+const char* g_running_renderer = nullptr;
+bool g_running_core = false;
+// Core mode, host: the game process's address space (MB) from the control block.
+std::atomic<std::uint32_t> g_core_game_va_used_mb{0}, g_core_game_va_free_mb{0};
+
+// The upscaler method that runs (the renderer's configured_*_mode): the
+// chosen one when it is available, else off.
+int active_upscaler(const RendererConfig& config) {
+    const int method = configured_value(config, "upscaler");
+    if (method == kUpscalerDlss && !dlss_unavailable_reason()) return kUpscalerDlss;
+    if (method == kUpscalerFsr && !fsr_unavailable_reason()) return kUpscalerFsr;
+    return kUpscalerOff;
+}
+
 // An option that has no effect under the current value of the one it
 // depends on: drawn greyed with a note, its own value kept for later.
 const char* blocked_option_note(const RendererConfig& config, const char* key) {
@@ -180,6 +200,20 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
     if (const char* suffix = std::strstr(key, "_fade_transparency")) {
         const std::string parent = std::string(key, suffix) + "_auto_fade";
         if (!boolean(parent.c_str())) return "needs this widget's auto fade";
+    }
+    // The Upscaling method (dlss_frame.h): DLSS runs in the 64-bit host on an
+    // RTX card, FSR on any Direct3D 11.3 card; greyed only when neither can.
+    if (std::strcmp(key, "upscaler") == 0 && dlss_unavailable_reason() && fsr_unavailable_reason())
+        return "no upscaler available";
+    const int upscaler = active_upscaler(config);
+    // Quality and sharpening belong to a running upscaler.
+    if ((std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0) &&
+        upscaler == kUpscalerOff)
+        return "needs upscaling";
+    // An active upscaler replaces SMAA, and its quality sets the render size.
+    if (std::strcmp(key, "smaa") == 0 || std::strcmp(key, "render_scale") == 0) {
+        if (upscaler == kUpscalerDlss) return "replaced by DLSS";
+        if (upscaler == kUpscalerFsr) return "replaced by FSR";
     }
     return nullptr;
 }
@@ -294,6 +328,11 @@ void remove_quit_hook() {
 struct DebugOverlay::Implementation {
     CombatUiRenderer combat_ui;
     HWND window = nullptr;
+    // Core mode: host_child (the host's overlay: no hook, focus from the
+    // game), core_input (the game process: hook only, host capture flags).
+    bool host_child = false;
+    bool external_focused = false;
+    DebugOverlay::CoreInputHooks core_input{};
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
     ImGuiContext* imgui = nullptr;
@@ -392,12 +431,13 @@ namespace {
 LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                                        UINT_PTR, DWORD_PTR reference) {
     auto* overlay = reinterpret_cast<DebugOverlay*>(reference);
-    if (!overlay || !overlay->initialized()) {
+    if (!overlay || !overlay->input_ready()) {
         camp_inventory_cancel_drag();return DefSubclassProc(window, message, wparam, lparam);
     }
+    const auto forward = overlay->core_forward();
     // Hover-only combat UI observes motion while gameplay keeps owning input.
     // Keep the backend's tracked position current after F10 has closed.
-    if (!overlay->captures_input() && (message==WM_MOUSEMOVE || message==WM_MOUSELEAVE ||
+    if (!forward && !overlay->captures_input() && (message==WM_MOUSEMOVE || message==WM_MOUSELEAVE ||
         message==WM_NCMOUSEMOVE || message==WM_NCMOUSELEAVE)) {
         std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
         ImGui_ImplWin32_WndProcHandler(window,message,wparam,lparam);
@@ -405,7 +445,24 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
     // Camp rail ownership must end before focus swallowing or renderer controls
     // can hide a release. No native item, rotation or keyboard route is replaced.
     if(overlay->process_camp_input(message,wparam,lparam))return 0;
-    {
+    if (forward) {
+        // Core mode: the overlay and the combat UI run on the host. The wheel
+        // always goes there (the pane's effect list scrolls; the game still
+        // gets it unless the overlay takes input); keys and characters while
+        // the overlay takes input.
+        const bool wheel = message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL;
+        if (wheel || (overlay->captures_input() && (is_keyboard_message(message) || message==WM_CHAR || message==WM_UNICHAR))) {
+            // The host's child window is Unicode: an ANSI game window's
+            // character arrives in the game's code page.
+            WPARAM forwarded = wparam;
+            if (message == WM_CHAR && !IsWindowUnicode(window)) {
+                const char byte = static_cast<char>(wparam & 0xff);
+                wchar_t wide = 0;
+                if (MultiByteToWideChar(CP_ACP, 0, &byte, 1, &wide, 1) == 1) forwarded = wide;
+            }
+            forward(message, forwarded, lparam);
+        }
+    } else {
         std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
         if(overlay->process_combat_input(message,wparam,lparam))return 0;
     }
@@ -423,7 +480,7 @@ LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam,
 
     if (overlay->captures_input()) {
         LRESULT handled = 0;
-        {
+        if (!forward) {
             std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
             handled = ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
         }
@@ -865,26 +922,26 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
                            "Controls appear here only after the backing renderer feature exists."));
         return;
     }
-    // One two-column table per group: the label wraps on the left, the
-    // control fills the right, so long (translated) labels never clip.
-    std::string current_group;
-    bool table_open = false;
+    // The options that pass the tab and the search, and their groups in the
+    // order each group first appears in the registration.
+    std::vector<const RendererOption*> shown;
+    std::vector<const std::string*> groups;
     for (const auto& option : config.options()) {
         if (option.group == "Combat UI" || option.type == RendererOptionType::text) continue;
         if(option.group=="HUD layout" || (option.group==kDiagnosticsGroup)!=diagnostics ||
            (!diagnostics && interface_option(option)!=ui_only))continue;
+        const std::string searchable = std::string(ui_option_label(option)) + " " + option.label + " " + option.key +
+                                       " " + option.group + " " + ui_option_description(option);
+        if (!filter.PassFilter(searchable.c_str())) continue;
+        shown.push_back(&option);
+        if (std::none_of(groups.begin(), groups.end(), [&](const std::string* group) { return *group == option.group; }))
+            groups.push_back(&option.group);
+    }
+    // One option row: the label wraps on the left, the control fills the
+    // right, so long (translated) labels never clip.
+    const auto draw_row = [&](const RendererOption& option) {
         const char* label = ui_option_label(option);
         const char* description = ui_option_description(option);
-        const std::string searchable = std::string(label) + " " + option.label + " " + option.key + " " +
-                                       option.group + " " + description;
-        if (!filter.PassFilter(searchable.c_str())) continue;
-        if (option.group != current_group || !table_open) {
-            if (table_open) ImGui::EndTable();
-            current_group = option.group;
-            ImGui::SeparatorText(ui_text(current_group.c_str()));
-            table_open = ImGui::BeginTable(current_group.c_str(), 2, ImGuiTableFlags_SizingStretchSame);
-            if (!table_open) continue;
-        }
         ImGui::PushID(option.key.c_str());
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
@@ -954,8 +1011,16 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
         }
         }
         ImGui::PopID();
+    };
+    // One header and one two-column table per group, its options in
+    // registration order.
+    for (const std::string* group : groups) {
+        ImGui::SeparatorText(ui_text(group->c_str()));
+        if (!ImGui::BeginTable(group->c_str(), 2, ImGuiTableFlags_SizingStretchSame)) continue;
+        for (const RendererOption* option : shown)
+            if (option->group == *group) draw_row(*option);
+        ImGui::EndTable();
     }
-    if (table_open) ImGui::EndTable();
 }
 
 void close_settings(DebugOverlay::Implementation& state,RendererConfig& config,bool keep);
@@ -1540,6 +1605,7 @@ void close_settings(DebugOverlay::Implementation& state, RendererConfig& config,
 bool setting_memory_group(const char* key, VideoMemoryGroup& group) noexcept {
     static constexpr struct { const char* key; VideoMemoryGroup group; } kRows[] = {
         {"render_scale", VideoMemoryGroup::screen},
+        {"upscaler", VideoMemoryGroup::screen},
         {"water_reflection_quality", VideoMemoryGroup::water},
         {"shadow_cascade_quality", VideoMemoryGroup::sun_shadows},
         {"point_shadow_quality", VideoMemoryGroup::lamp_shadows},
@@ -1558,6 +1624,49 @@ bool setting_memory_group(const char* key, VideoMemoryGroup& group) noexcept {
 void text_megabytes(std::uint64_t bytes) {
     const double value = mib(bytes);
     ImGui::TextDisabled(ui_text(value < 10.0 ? "%.1f MB" : "%.0f MB"), value);
+}
+
+// The process memory line beside the video memory: the 32-bit game's
+// address space in use and its largest free block (what large maps run out
+// of), and the 64-bit render host's private memory when one runs. Sampled at
+// most once a second while drawn. Core mode draws this on the host: the game
+// process sends its address space through the control block
+// (debug_overlay_set_game_address_space); the host reads its own process.
+void draw_process_memory() {
+    struct Sample {
+        ULONGLONG at_ms = 0;
+        std::uint64_t game_used_mb = 0, game_free_mb = 0, host_private_bytes = 0;
+    };
+    static Sample sample;
+    const ULONGLONG now = GetTickCount64();
+    if (!sample.at_ms || now - sample.at_ms >= 1000) {
+        sample = {};
+        sample.at_ms = now;
+        if (g_running_core) {
+            sample.game_used_mb = g_core_game_va_used_mb.load(std::memory_order_relaxed);
+            sample.game_free_mb = g_core_game_va_free_mb.load(std::memory_order_relaxed);
+            PROCESS_MEMORY_COUNTERS_EX counters{};
+            counters.cb = sizeof(counters);
+            if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+                                     sizeof(counters)))
+                sample.host_private_bytes = counters.PrivateUsage;
+        } else {
+            address_space_mb(sample.game_used_mb, sample.game_free_mb, true);
+            sample.host_private_bytes = x64remote::host_private_bytes();
+        }
+    }
+    if (sample.game_used_mb)
+        ImGui::Text(ui_text("Game address space: %.0f MB used, largest free block %.0f MB"),
+                    static_cast<double>(sample.game_used_mb), static_cast<double>(sample.game_free_mb));
+    else
+        ImGui::TextUnformatted(ui_text("Game address space: n/a"));
+    ImGui::SetItemTooltip(ui_text("The 32-bit game can address at most 4 GB (2 GB without 4 GB mode). "
+                          "When the largest free block gets small, large maps can run out of memory."));
+    if (sample.host_private_bytes) {
+        ImGui::Text(ui_text("Render host memory: %.0f MB"), mib(sample.host_private_bytes));
+        ImGui::SetItemTooltip(ui_text("Private memory of the 64-bit render host process, which holds the graphics driver "
+                              "and the renderer's own data outside the game's address space."));
+    }
 }
 
 // "Video memory: X MB used of Y MB available" and the
@@ -1583,6 +1692,7 @@ void draw_video_memory(const DebugOverlay::Implementation& state, const Renderer
         ImGui::SetItemTooltip(ui_text("The game needs more video memory than this card offers, which causes stutter. "
                               "Lower the render scale, shadow resolution, fog quality or ground cover."));
     }
+    draw_process_memory();
     if (resources.vram_budget.enforced && resources.vram_budget.level) {
         ImGui::TextColored(warning, ui_text("Reduced to fit video memory: %s (about %.0f MB needed)"),
                            ui_text(vram_budget_level_text(resources.vram_budget.level)),
@@ -1617,6 +1727,53 @@ void draw_video_memory(const DebugOverlay::Implementation& state, const Renderer
     ImGui::EndTable();
 }
 
+// The Upscaling method: Off, DLSS when the x64 host can run it, FSR 2 when
+// this device can; why one is missing is shown below the list. A saved
+// method that is unavailable reads as off in the renderer and is marked here.
+void draw_upscaler_choice(RendererConfig& config, const RendererOption& option) {
+    static constexpr const char* kLabels[kUpscalerMethodMaximum + 1] = {"Off", "NVIDIA DLSS", "AMD FSR 2"};
+    const char* dlss_reason = dlss_unavailable_reason();
+    const char* fsr_reason = fsr_unavailable_reason();
+    const auto available = [&](int value) {
+        return value == kUpscalerOff || (value == kUpscalerDlss ? !dlss_reason : !fsr_reason);
+    };
+    const int current = std::clamp(option.integer_value, 0, kUpscalerMethodMaximum);
+    char preview[160]{};
+    std::snprintf(preview, sizeof(preview), available(current) ? "%s" : "%s (%s)", ui_text(kLabels[current]),
+                  ui_text("unavailable"));
+    const char* note = blocked_option_note(config, option.key.c_str());
+    ImGui::BeginDisabled(note != nullptr);
+    if (ImGui::BeginCombo("##value", preview)) {
+        for (int value = 0; value <= kUpscalerMethodMaximum; ++value)
+            if (available(value) && ImGui::Selectable(ui_text(kLabels[value]), value == current))
+                config.set_integer(option.key.c_str(), value);
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (dlss_reason) ImGui::TextDisabled("DLSS: %s", ui_text(dlss_reason));
+    if (fsr_reason) ImGui::TextDisabled("FSR: %s", ui_text(fsr_reason));
+}
+
+// The quality presets of the running method, in that method's own names
+// (DLAA for DLSS, Native AA for FSR); greyed with a note while upscaling is off.
+void draw_upscaler_quality_choice(RendererConfig& config, const RendererOption& option) {
+    static constexpr const char* kLabels[2][kUpscalerQualityMaximum + 1] = {
+        {"Quality", "Balanced", "Performance", "Ultra Performance", "DLAA"},
+        {"Quality", "Balanced", "Performance", "Ultra Performance", "Native AA"}};
+    const int method = active_upscaler(config);
+    const auto& labels = kLabels[method == kUpscalerDlss ? 0 : 1];
+    const int current = std::clamp(option.integer_value, 0, kUpscalerQualityMaximum);
+    const char* note = blocked_option_note(config, option.key.c_str());
+    ImGui::BeginDisabled(note != nullptr);
+    if (ImGui::BeginCombo("##value", ui_text(labels[current]))) {
+        for (int value = 0; value <= kUpscalerQualityMaximum; ++value)
+            if (ImGui::Selectable(ui_text(labels[value]), value == current)) config.set_integer(option.key.c_str(), value);
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (note) ImGui::TextDisabled("%s", ui_text(note));
+}
+
 void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& setting, bool developer,
                          DebugOverlay::Implementation& state, const VideoMemoryBreakdown& memory) {
     const RendererOption* option = config.find(setting.key);
@@ -1637,6 +1794,7 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     if (ui_russian()) ImGui::TextWrapped("%s", ui_setting_label(setting));
     else ImGui::TextUnformatted(setting.label);
     ImGui::SetItemTooltip("%s", tooltip);
+    if (option->restart_required) { ImGui::SameLine(); ImGui::TextDisabled("%s", ui_text("restart required")); }
     if (VideoMemoryGroup group{}; memory.valid && setting_memory_group(setting.key, group)) {
         ImGui::SameLine();
         text_megabytes(memory.bytes[static_cast<std::size_t>(group)]);
@@ -1673,9 +1831,15 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         break;
     }
     case RendererOptionType::integer: {
-        if (std::strcmp(setting.key, "render_scale") == 0) {
+        if (std::strcmp(setting.key, "upscaler") == 0) {
+            draw_upscaler_choice(config, *option);
+        } else if (std::strcmp(setting.key, "upscaler_quality") == 0) {
+            draw_upscaler_quality_choice(config, *option);
+        } else if (std::strcmp(setting.key, "render_scale") == 0) {
             char preview[16]{};
             std::snprintf(preview, sizeof(preview), "%d%%", option->integer_value);
+            const char* note = blocked_option_note(config, setting.key);
+            ImGui::BeginDisabled(note != nullptr);
             if (ImGui::BeginCombo("##value", preview)) {
                 for (const int percent : kRenderScaleChoices) {
                     char label[16]{};
@@ -1685,6 +1849,8 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
                 }
                 ImGui::EndCombo();
             }
+            ImGui::EndDisabled();
+            if (note) ImGui::TextDisabled("%s", ui_text(note));
         } else if (std::strcmp(setting.key, "window_width") == 0) {
             // One row for both client dimensions; 0 x 0 is the monitor's size.
             int width = option->integer_value, height = configured_value(config, "window_height");
@@ -1764,8 +1930,12 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     }
     case RendererOptionType::floating_point: {
         float value = option->floating_value;
+        const char* note = blocked_option_note(config, setting.key);
+        ImGui::BeginDisabled(note != nullptr);
         if (ImGui::SliderFloat("##value", &value, option->floating_minimum, option->floating_maximum, "%.2f"))
             config.set_floating_point(setting.key, value);
+        ImGui::EndDisabled();
+        if (note) ImGui::TextDisabled("%s", ui_text(note));
         break;
     }
     }
@@ -1955,6 +2125,25 @@ void apply_ui_language(DebugOverlay::Implementation& state, const RendererConfig
     ImGui::GetIO().FontDefault = ui_russian() ? state.cyrillic_font : state.latin_font;
 }
 
+// The WDDM local video memory budget of the device's adapter (0: unknown).
+std::uint64_t adapter_local_budget(ID3D11Device* device) noexcept {
+    std::uint64_t budget = 0;
+    IDXGIDevice* dxgi_device = nullptr;
+    if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device)))) return 0;
+    IDXGIAdapter* adapter = nullptr;
+    if (SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+        IDXGIAdapter3* adapter3 = nullptr;
+        if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3)))) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+            if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) budget = local.Budget;
+            adapter3->Release();
+        }
+        adapter->Release();
+    }
+    dxgi_device->Release();
+    return budget;
+}
+
 // First-run hint: UMA adapters expose no non-local segment; discrete cards
 // are graded by their local budget (DXGI_ADAPTER_DESC sizes are 32-bit here).
 void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* device) {
@@ -2017,11 +2206,19 @@ bool renderer_controls_capture_input(HWND window) noexcept {
     DWORD_PTR reference = 0;
     if (!GetWindowSubclass(window, overlay_subclass_proc, kOverlaySubclassId, &reference)) return false;
     const auto* overlay = reinterpret_cast<const DebugOverlay*>(reference);
-    return overlay && overlay->initialized() && overlay->captures_input();
+    // Core mode: the game process's hook-only overlay takes the input for the host's.
+    return overlay && overlay->input_ready() && overlay->captures_input();
 }
 
 DebugOverlay::~DebugOverlay() {
     shutdown();
+}
+
+void DebugOverlay::load_config_only(const wchar_t* config_path) {
+    shutdown();
+    const std::wstring path = config_path && *config_path ? std::wstring(config_path) : renderer_config_path();
+    config_.load(path.c_str());
+    set_ui_language(configured_value(config_, "ui_language"));
 }
 
 HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
@@ -2064,6 +2261,11 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
                       graphics_preset_name(preset));
         bridge_report_event("vram_budget_reset", detail);
     }
+    // The settings window's video memory line falls back to this budget while
+    // the telemetry sampler is idle (it only runs with a developer overlay).
+    // Only the first-run adapter suggestion set it, so a configured install
+    // showed "Video memory: n/a" there.
+    if (!state->adapter_budget_bytes) state->adapter_budget_bytes = adapter_local_budget(device);
     state->f10_was_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     state->f11_was_down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     state->ui_scale = overlay_scale_for_window(window);
@@ -2109,6 +2311,10 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     }
     implementation_ = std::move(state);
     implementation_->combat_ui.initialize(device, context);
+    if (initialize_host_child_) {
+        implementation_->host_child = true;
+        return S_OK;
+    }
     if (!SetWindowSubclass(window, overlay_subclass_proc, kOverlaySubclassId,
                            reinterpret_cast<DWORD_PTR>(this))) {
         shutdown();
@@ -2118,8 +2324,58 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     return S_OK;
 }
 
+bool DebugOverlay::input_ready() const noexcept { return implementation_ && !implementation_->host_child; }
+void (*DebugOverlay::core_forward() const noexcept)(UINT, WPARAM, LPARAM) noexcept {
+    return implementation_ ? implementation_->core_input.forward : nullptr;
+}
+
+HRESULT DebugOverlay::initialize_host(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
+                                      const wchar_t* config_path) {
+    initialize_host_child_ = true;
+    const HRESULT hr = initialize(window, device, context, config_path);
+    initialize_host_child_ = false;
+    return hr;
+}
+
+void DebugOverlay::set_external_focus(bool focused) noexcept {
+    if (implementation_) implementation_->external_focused = focused;
+}
+
+void DebugOverlay::process_forwarded_input(UINT message, WPARAM wparam, LPARAM lparam) noexcept {
+    if (!implementation_ || !implementation_->imgui) return;
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+    ImGui::SetCurrentContext(implementation_->imgui);
+    if (captures_input()) ImGui_ImplWin32_WndProcHandler(implementation_->window, message, wparam, lparam);
+    else if (message == WM_MOUSEWHEEL) implementation_->combat_ui.process_input(message, wparam, lparam);
+}
+
+HRESULT DebugOverlay::initialize_core_input(HWND window, const CoreInputHooks& hooks) {
+    if (implementation_ || !window || !hooks.flags || !hooks.forward) return E_INVALIDARG;
+    auto state = std::make_unique<Implementation>();
+    state->window = window;
+    state->config_path = renderer_config_path();
+    state->developer = renderer_developer_mode();
+    state->core_input = hooks;
+    implementation_ = std::move(state);
+    if (!SetWindowSubclass(window, overlay_subclass_proc, kOverlaySubclassId, reinterpret_cast<DWORD_PTR>(this))) {
+        implementation_.reset();
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    bridge_set_camp_input_overlay(this);
+    return S_OK;
+}
+
+void DebugOverlay::reload_config() noexcept {
+    try {
+        const std::wstring path = implementation_ ? implementation_->config_path : renderer_config_path();
+        config_.load(path.c_str());
+        config_.clear_dirty();
+        set_ui_language(configured_value(config_, "ui_language"));
+    } catch (...) {}
+}
+
 bool DebugOverlay::process_camp_input(UINT message,WPARAM wparam,LPARAM lparam) noexcept {
-    if(!initialized())return false;
+    if(!implementation_ || implementation_->host_child)return false;
     const HWND window=implementation_->window;
     const bool controls=captures_input();
     if(camp_inventory_input(window,message,wparam,game_native_mouse_message(message,lparam,true),controls))return true;
@@ -2138,10 +2394,12 @@ void DebugOverlay::shutdown() noexcept {
     if (implementation_->imgui) ImGui::SetCurrentContext(implementation_->imgui);
     remove_quit_hook();
     implementation_->combat_ui.shutdown();
-    release_cursor_confinement(implementation_->cursor_confinement);
-    if (GetCapture() == implementation_->window) ReleaseCapture();
-    if (implementation_->window)
-        RemoveWindowSubclass(implementation_->window, overlay_subclass_proc, kOverlaySubclassId);
+    if (!implementation_->host_child) {
+        release_cursor_confinement(implementation_->cursor_confinement);
+        if (GetCapture() == implementation_->window) ReleaseCapture();
+        if (implementation_->window)
+            RemoveWindowSubclass(implementation_->window, overlay_subclass_proc, kOverlaySubclassId);
+    }
     if (implementation_->imgui) {
         ImGui::SetCurrentContext(implementation_->imgui);
         ImGui_ImplDX11_Shutdown();
@@ -2287,8 +2545,10 @@ void DebugOverlay::maintain() noexcept {
             set_game_hud_editing(false);implementation_->pending_save=true;
         }
     }
-    const bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    const bool focused = GetForegroundWindow() == implementation_->window;
+    const bool core_input = implementation_->core_input.flags != nullptr;
+    const bool host_child = implementation_->host_child;
+    const bool f10_down = !core_input && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    const bool focused = host_child ? implementation_->external_focused : GetForegroundWindow() == implementation_->window;
     const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     if (focused && f10_down && !implementation_->f10_was_down) {
         // Developer mode: F10 = developer cycle, Shift+F10 = player settings.
@@ -2303,7 +2563,8 @@ void DebugOverlay::maintain() noexcept {
         }
     }
     implementation_->f10_was_down = f10_down;
-    const bool f11_down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    // Core mode: F11 goes to the host as its own command (core_present).
+    const bool f11_down = !core_input && !host_child && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     if (focused && f11_down && !implementation_->f11_was_down) {
         if (shift_down) implementation_->cull_freeze_toggle = true;
         else request_capture(*implementation_, config_);
@@ -2359,21 +2620,24 @@ void DebugOverlay::maintain() noexcept {
             }
             ImGui::SetNextFrameWantCaptureMouse(true);
             ImGui::SetNextFrameWantCaptureKeyboard(captures_keyboard());
-            if (GetCapture() != implementation_->window) SetCapture(implementation_->window);
+            if (!host_child && GetCapture() != implementation_->window) SetCapture(implementation_->window);
         } else if (implementation_->full_input_active) {
             for (std::size_t index = 0; index < implementation_->mouse_was_down.size(); ++index) {
                 if (implementation_->mouse_was_down[index]) io.AddMouseButtonEvent(static_cast<int>(index), false);
                 implementation_->mouse_was_down[index] = false;
             }
-            if (GetCapture() == implementation_->window) ReleaseCapture();
+            if (!host_child && GetCapture() == implementation_->window) ReleaseCapture();
         }
     }
     implementation_->full_input_active = full_input;
-    update_cursor_confinement(implementation_->cursor_confinement,
-                              implementation_->window, focused,
-                              cursor_confinement_option_enabled(config_));
-    bridge_trace_input_focus(implementation_->window, "frame", 0, 0,
-                              static_cast<int>(config_.overlay_mode()));
+    // The game window's own process confines the cursor (core mode: the game process).
+    if (!host_child) {
+        update_cursor_confinement(implementation_->cursor_confinement,
+                                  implementation_->window, focused,
+                                  cursor_confinement_option_enabled(config_));
+        bridge_trace_input_focus(implementation_->window, "frame", 0, 0,
+                                  static_cast<int>(config_.overlay_mode()));
+    }
     if (g_quit_seen.load()) config_.set_over_budget_pending(false);  // cleared at WM_QUIT
     if (!implementation_->pending_save) return;
     if (config_.save(implementation_->config_path.c_str())) {
@@ -2399,6 +2663,7 @@ bool DebugOverlay::visible() const noexcept {
         game_hud_editing();
 }
 bool DebugOverlay::captures_keyboard() const noexcept {
+    if (implementation_ && implementation_->core_input.flags) return (implementation_->core_input.flags() & 1) != 0;
     return mode()==DebugOverlayMode::full || settings_open() ||
         game_hud_editing();
 }
@@ -2523,6 +2788,16 @@ void DebugOverlay::set_mode(DebugOverlayMode mode) noexcept {
 
 bool DebugOverlay::initialized() const noexcept {
     return implementation_ && implementation_->imgui;
+}
+
+void debug_overlay_set_running_renderer(const char* text, bool core) noexcept {
+    g_running_renderer = text;
+    g_running_core = core;
+}
+
+void debug_overlay_set_game_address_space(std::uint32_t used_mb, std::uint32_t largest_free_mb) noexcept {
+    g_core_game_va_used_mb.store(used_mb, std::memory_order_relaxed);
+    g_core_game_va_free_mb.store(largest_free_mb, std::memory_order_relaxed);
 }
 
 } // namespace owned

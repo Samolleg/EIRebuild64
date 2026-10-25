@@ -91,11 +91,6 @@ class Expedition
         Intent i; i.order=order; i.serial=saved.serial; i.target=target;
         i.angle=angle; return i;
     }
-    Intent DutyLook(const Candidate &c) const
-    {
-        return OrderFor(awareness.ShouldLook()?Order::Look:Order::Release,c.position,
-            float(c.unit.id%17)*0.37f+(awareness.Save().lookRemaining>LookDurationTicks/2?1.4f:-1.4f));
-    }
     bool BodyNeedsWitness(Identity body) const
     {
         const auto &s=awareness.Save();const auto m=s.memories.find(body);
@@ -325,7 +320,7 @@ public:
                         saved.roster.deferredReturns.count(c.unit)) continue;
                     const bool justReturned=std::any_of(out.commands.begin(),out.commands.end(),[&](const Assignment &a){return a.unit==c.unit;});
                     if(justReturned)continue;
-                    out.commands.push_back({c.unit,DutyLook(c)});
+                    out.commands.push_back({c.unit,OrderFor(Order::Release,c.position)});
                 }
                 return out;
             }
@@ -355,15 +350,15 @@ public:
         Phase phase=awareness.Save().phase;
         if (phase!=before) {NextPhase();out.phaseChanged=true;}
         auto party=awareness.Save().party;
-        // Bystanders use the side's level3 cadence. Searchers and deferred
-        // returns keep their phase-owned commands, never periodic turns.
+        // Bystanders keep native duty. Searchers and deferred returns
+        // keep their phase-owned commands.
         for(const auto &c:active)
         {
             if(!c.active||!c.eligible||!c.available||c.side!=side||
                 saved.roster.homes.count(c.unit)||saved.roster.deferredReturns.count(c.unit))continue;
             if(std::find(out.forget.begin(),out.forget.end(),c.unit)!=out.forget.end())continue;
             if(std::none_of(out.commands.begin(),out.commands.end(),[&](const Assignment &a){return a.unit==c.unit;}))
-                out.commands.push_back({c.unit,DutyLook(c)});
+                out.commands.push_back({c.unit,OrderFor(Order::Release,c.position)});
         }
         if(changes.paused || pickupBusy || routeBusy)
         {

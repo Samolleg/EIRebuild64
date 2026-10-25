@@ -18,6 +18,7 @@
 #include "ModStealingPolicy.h"
 #include "ModStatRules.h"
 #include "ModRuntime.h"
+#include "ModOutOfCombatRegeneration.h"
 #include "StuffMapObjects.h"
 #include <cctype>
 #include <cmath>
@@ -74,6 +75,8 @@ const float FP_MIN_ATTACK_OPACITY = 0.1f;
 #include "ItemManager.h"
 #include "aiSettings.h"
 #include "WorldInterface.h"
+#include "ModMessages.h"
+#include "ModAnimationLoop.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #ifndef _DEBUG
 #pragma optimize("agw", on)
@@ -325,6 +328,8 @@ void CUnitServer::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Clear()
 {
+    ModOutOfCombatRegeneration::Forget(this);
+    modLeverTarget=nullptr;modLeverId=0;modLeverRing=false;
     if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
     curCommand.Clear();
     nextCommand.Clear();
@@ -502,6 +507,7 @@ void CUnitServer::LowRemoveUnitsForPathFind(CUnitList &units, const CPlot3D &ptD
 // здесь проверяется не пришло ли время сменить текущий фрагмент анимации на следующий
 bool CUnitServer::L0ShiftAnimations()
 {
+    UpdateAnimationLoop();
     bool bRv = false;
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     int nTime = pWS->GetSegmentTimeCounter();
@@ -2471,6 +2477,8 @@ bool CUnitServer::IsCastPossible(const SUnitBasicCmd &cmd)
 float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
 {
     float fpHitDist = 0; //, fpMinDist;
+    if(ModRuntime::Current()&&cmd.HasPointOfUse()&&cmd.IsScience()&&!cmd.pTarget.IsEmpty()&&cmd.pTarget->WhoAmI()==HPC_LEVER)
+        return 0.5f;
     if (cmd.HasPointOfUse())
         return FP_MINIMAL_DISTANCE_TO_POU;
     if(cmd.cmd==UC_CASTPOINT){auto*mod=ModRuntime::Current();auto*spell=GetSpell(cmd);if(mod&&mod->CombatSetting("JMVExplosiveShot")&&mod->PointSkill(spell))return (std::max)(0.f,GetCurrentWeaponRange());}
@@ -3181,45 +3189,36 @@ bool CUnitServer::CalcAttackDest(SUnitCommand &cmd, CAIFullRoute *pRes)
         switch (cmd.nQSpellNum)
         {
         case RPGMSKL_SCIENCE: {
-            const bool fallback=ModRuntime::Current() && pTarget->WhoAmI()==HPC_LEVER && !static_cast<CLeverObject*>(pTarget)->UsesAuthoredInteraction();
-            if(fallback)cmd.bUsePoint=false;
+            auto* lever=ModRuntime::Current()&&pTarget->WhoAmI()==HPC_LEVER?static_cast<CLeverObject*>(pTarget):nullptr;
+            const bool missingPoints=lever&&!lever->UsesAuthoredInteraction();
+            bool ring=missingPoints;
+            if(lever){cmd.bUsePoint=false;modLeverTarget=nullptr;modLeverId=0;modLeverRing=false;}
             CArray<CPlot3D, CPlot3D &> points;
-            cmd.pTarget->GetUsePoints(points, lpUnit->GetAttackDistance());
-            if(fallback && points.GetSize()==0)return false;
-            if (points.GetSize() > 0)
-            {
+            pTarget->GetUsePoints(points,lpUnit->GetAttackDistance());
+            if(missingPoints&&points.IsEmpty())return false;
+            if(!points.IsEmpty()){
                 SAIPath pathFake;
-                int nBestCost = 0x7fffffff;
-                // choose closest use point
-                CPlot3D ptBestPoint;
-                for (int i = 0; i < points.GetSize(); i++)
-                {
-                    bool bFound;
-                    CPlot3D ptDest = points[i];
-                    pathFake.Clear();
-                    bFound = pWS->aiMap.NewPath(lpUnit, ptDest, pathFake);
-                    //
-                    if (bFound)
-                        bFound = distanceXY2(pathFake.GetFinalPoint(), ptDest) <
-                                 sqr(FP_MINIMAL_DISTANCE_TO_POU);
-                    if (bFound)
-                    {
-                        if (pathFake.nPathCost < nBestCost)
-                        {
-                            nBestCost = pathFake.nPathCost;
-                            ptBestPoint = ptDest;
-                            if (pRes)
-                                pathFake.GetWholeRoute(*pRes);
+                int bestCost=0x7fffffff;CPlot3D bestPoint;
+                for(int attempt=0;attempt<2;++attempt){
+                    for(int i=0;i<points.GetSize();++i){
+                        CPlot3D destination=points[i];pathFake.Clear();
+                        bool found=pWS->aiMap.NewPath(lpUnit,destination,pathFake);
+                        const float tolerance=lever?0.5f:FP_MINIMAL_DISTANCE_TO_POU;
+                        if(found)found=distanceXY2(pathFake.GetFinalPoint(),destination)<sqr(tolerance);
+                        if(found&&pathFake.nPathCost<bestCost){
+                            bestCost=pathFake.nPathCost;bestPoint=destination;
+                            if(pRes)pathFake.GetWholeRoute(*pRes);
                         }
                     }
+                    if(bestCost!=0x7fffffff||!lever||ring)break;
+                    // Retry rejected authored/world-XY points on the close ring.
+                    points.SetSize(0);lever->GetFallbackUsePoints(points,lpUnit->GetAttackDistance());ring=true;
                 }
-                //
                 static unsigned leverPathSamples=0;
-                if(ModRuntime::Current()&&leverPathSamples++<24)EngineDiagnostics::Event("Lever route object=%d candidates=%d fallback=%d found=%d radius=%g",pTarget->GetID(),points.GetSize(),fallback,nBestCost!=0x7fffffff,lpUnit->GetAttackDistance());
-                if (nBestCost == 0x7fffffff)
-                    return false;
-                cmd.ptTarget = ptBestPoint;
-                cmd.bUsePoint = true;
+                if(ModRuntime::Current()&&leverPathSamples++<24)EngineDiagnostics::Event("Lever route object=%d candidates=%d fallback=%d found=%d radius=%g",pTarget->GetID(),points.GetSize(),ring,bestCost!=0x7fffffff,lpUnit->GetAttackDistance());
+                if(bestCost==0x7fffffff){if(lever)cmd.bUsePoint=false;return false;}
+                cmd.ptTarget=bestPoint;cmd.bUsePoint=true;
+                if(lever){modLeverTarget=lever;modLeverId=lever->GetRTID();modLeverPoint=bestPoint;modLeverRing=ring;}
             }
         }
         break;
@@ -5584,17 +5583,7 @@ void TrackGenocidePlayerKill(CWorldServer& world,CUnit& victim,CUnit* attacker){
  const std::string mobName=GenocideMobName(world.szMobFileName);
  ModGenocideConfig config;
  if(mobName.empty()||!mod->GenocideMapConfig(mobName.c_str(),config))return;
- auto& groups=world.script.GetGlobalVars().gVars;
- const int index=groups.GetVariableIndex(config.eligibleGroup.c_str());
- if(index<0||index>=groups.GetSize()||groups.GetSize()>10000)return;
- CScriptObjectGroup* group=groups.GetVar(index);
- if(!group||group->GetSize()<0||group->GetSize()>10000)return;
- bool eligible=false;
- for(int i=0;i<group->GetSize();++i){
-  CMapObject* object=group->GetAt(i).GetObject();
-  if(object&&!object->IsInvalid()&&object==&victim){eligible=true;break;}
- }
- if(!eligible)return;
+ if(victim.IsInvalid())return;
  const std::string counter="jmv.genocide.kills."+config.resultVar;
  float stored=player->party.vars.GetVar(counter.c_str());
  if(!(stored>=0))stored=0;
@@ -5607,10 +5596,23 @@ void TrackGenocidePlayerKill(CWorldServer& world,CUnit& victim,CUnit* attacker){
  const int stage=kills*100>=config.population*config.stageTwoPercent?2:
    kills*100>=config.population*config.stageOnePercent?1:0;
  if(stage>oldStage)player->party.vars.SetVar(config.resultVar.c_str(),float(stage));
+ const int newStage=(std::max)(stage,oldStage);
+ static const char* const messages[]={
+  "\xC2\xE5\xEB\xE8\xEA\xE8\xE5\x20\xF1\xE8\xEB\xFB\x20\xF7\xF3\xFE\xF2\x20\xEA\xF0\xEE\xE2\xFC\x20\xED\xE0\x20\xE2\xE0\xF8\xE8\xF5\x20\xF0\xF3\xEA\xE0\xF5",
+  "\xC2\xE5\xEB\xE8\xEA\xE8\xE5\x20\xF1\xE8\xEB\xFB\x20\xE2\xEE\xE7\xEC\xF3\xF9\xE5\xED\xFB\x20\xE2\xE0\xF8\xE5\xE9\x20\xEA\xF0\xEE\xE2\xEE\xE6\xE0\xE4\xED\xEE\xF1\xF2\xFC\xFE"
+ };
+ const std::string messageKey="jmv.genocide.msg."+config.resultVar;
+ const float announced=player->party.vars.GetVar(messageKey.c_str());
+ const int announcedStage=announced>=2?2:announced>=1?1:0;
+ for(int next=announcedStage+1;next<=newStage;++next){
+  if(ModMessages::Show(messages[next-1]))break;
+  player->party.vars.SetVar(messageKey.c_str(),float(next));
+ }
 }
 }
 void CUnitServer::TakeDamage(CUnit *pAttacker, BOOL bAreaSpell)
 {
+    StopAnimationLoop();
     const bool wasDead = lpUnit->IsDead() != FALSE;
     CPlot3D ptDamageFrom;
     CWorldServer *pWS = (CWorldServer *)GetWorld();
@@ -6227,6 +6229,58 @@ void CUnitServer::CmdLoot(CUnit *pTarget, bool bRun)
     if (!pTarget || !pTarget->IsDead() || pTarget == lpUnit)
         return;
     CmdSkill(pTarget, RPGMSKL_LOOT, 0, bRun, ACK_HERO_ACK_LOOT);
+}
+
+bool CUnitServer::HasLeverRingChoice(const SUnitBasicCmd& cmd) const
+{
+    if(!modLeverRing||!modLeverTarget||!cmd.IsScience()||!cmd.HasPointOfUse()||
+        static_cast<CMapObject*>(cmd.pTarget)!=modLeverTarget||cmd.pTarget->GetRTID()!=modLeverId)return false;
+    const auto delta=cmd.ptTarget-modLeverPoint;
+    return delta.x==0&&delta.y==0&&delta.z==0;
+}
+
+void CUnitServer::QueueAnimationLoop(DWORD id)
+{
+    nextCommand.Clear();
+    nextCommand.dwParam=id;
+    nextCommand.cmd=UC_PLAYANIMCYCLE;
+}
+
+void CUnitServer::StopAnimationLoop()
+{
+    CGSVariableSet* vars;std::string key;DWORD id;
+    if(!ModAnimationLoop::Read(this,vars,key,id))return;
+    vars->DelVar(key.c_str());
+    const bool pending=ModAnimationLoop::Matches(nextCommand,id);
+    const bool current=ModAnimationLoop::Matches(curCommand,id)||
+        (pending&&curCommand.cmd==UC_PLAYANIMCYCLE);
+    if(current&&eL1State==UL1_SPECIAL_CYCLE)L1SetPhase(UL1_NONE);
+    if(pending)nextCommand.Clear();
+    if(current&&nextCommand.cmd==UC_NONE){
+        nextCommand.Clear();nextCommand.cmd=UC_IDLE;nextCommand.bDoItFast=true;
+    }
+}
+
+void CUnitServer::UpdateAnimationLoop()
+{
+    CGSVariableSet* vars;std::string key;DWORD id;
+    if(!ModAnimationLoop::Read(this,vars,key,id))return;
+    if(lpUnit->IsDead()||lpUnit->IsInvalid()){vars->DelVar(key.c_str());return;}
+    const bool pending=ModAnimationLoop::Matches(nextCommand,id);
+    const bool current=ModAnimationLoop::Matches(curCommand,id);
+    if((!ModAnimationLoop::Housekeeping(nextCommand.cmd)&&!pending)||
+        (!pending&&!current&&!ModAnimationLoop::Housekeeping(curCommand.cmd))){
+        StopAnimationLoop();return;
+    }
+    if(pending){
+        if(eL1State==UL1_SPECIAL_CYCLE&&curCommand.cmd==UC_PLAYANIMCYCLE)L1SetPhase(UL1_NONE);
+        return;
+    }
+    if(current&&eL1State==UL1_SPECIAL_CYCLE){
+        if(nextCommand.cmd!=UC_NONE)nextCommand.Clear();
+        return;
+    }
+    QueueAnimationLoop(id);
 }
 
 void CUnitServer::CmdPlayAnimation(const char *pszAnimation)

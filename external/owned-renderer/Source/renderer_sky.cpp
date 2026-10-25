@@ -544,7 +544,7 @@ void Renderer::draw_owned_sky() noexcept {
     context_->OMSetDepthStencilState(sky_depth_state_.Get(), 0);
     const float factor[4] = {1, 1, 1, 1};context_->OMSetBlendState(sky_blend_state_.Get(), factor, 0xffffffffu);
     context_->RSSetState(sky_raster_state_.Get());
-    D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1};context_->RSSetViewports(1, &viewport);
+    D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1, &viewport);
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* none[2]{};context_->PSSetShaderResources(3, 2, none);
     profiler_.add_draw(1, 1);profiler_.add_batch();

@@ -165,6 +165,7 @@ private:
 public:
     bool UsesAuthoredInteraction() const;
     bool ScriptActivationAllowed(CUnit* who);
+    void GetFallbackUsePoints(CArray<CPlot3D, CPlot3D &>& points, float radius);
     CLeverObject();
     virtual ~CLeverObject();
     void SetParams(SMELever &data);

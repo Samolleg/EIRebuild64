@@ -43,6 +43,14 @@ struct ResourceFailure {
     }
 };
 
+// The store's canonical (ASCII-folded, backslash) resource name.
+bool resource_canonical_name(const std::string& input, std::string& canonical,
+                             ResourceFailure& failure);
+// Container incarnations are process-local lifetime tokens. The x64 render
+// host starts its own above this base, so an identity it sends never equals
+// one the game process created (resource and texture cache keys use them).
+void resource_store_set_incarnation_base(std::uint64_t base) noexcept;
+
 struct ResourceContainerInfo {
     std::uint32_t mount_ordinal = 0;
     bool loose_file = false;
@@ -70,9 +78,21 @@ struct ResourceIdentity {
     std::string key() const;
 };
 
+// A selected container member read piecewise from its held file rather than
+// copied whole: a nested archive opened on it reads only its index and the
+// members it resolves (#188; whole race models and ANMs were tens of MB each).
+struct ResourceSlice {
+    virtual ~ResourceSlice() = default;
+    virtual bool read(std::uint64_t offset, std::uint64_t size,
+                      std::vector<std::uint8_t>& output, ResourceFailure& failure) const = 0;
+    std::uint64_t size = 0;
+};
+
 struct ResourceBlob {
     ResourceIdentity identity;
     std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+    // Set instead of bytes for a container read (resolve_selected_file).
+    std::shared_ptr<const ResourceSlice> slice;
 };
 
 class ResourceLocation {
@@ -96,6 +116,16 @@ struct ResourceStoreConfig {
     // callers supply the complete active mod priority plus base fallback.
     std::vector<std::wstring> loose_roots;
     std::vector<std::wstring> archives;
+    // Which lookups each archive serves, parallel to `archives`; empty: every
+    // archive serves every lookup. The game's texture manager searches its own
+    // archive chain for .mmp names, the figure manager its chain for the rest.
+    std::vector<std::uint8_t> archive_kinds;
+};
+
+enum ResourceArchiveKind : std::uint8_t {
+    kArchiveFigures = 1,
+    kArchiveTextures = 2,
+    kArchiveAllKinds = 3,
 };
 
 struct ResourceStoreStats {
@@ -174,7 +204,8 @@ public:
                                std::uint64_t selected_file_offset,
                                ResourceBlob& blob, ResourceFailure& failure,
                                SelectedResourceReadDiagnostic* diagnostic = nullptr,
-                               bool verified_read_only_mapping = false);
+                               bool verified_read_only_mapping = false,
+                               bool container = false);
     // Only the supported native ANM getter, whose validated mapper creates
     // whole-file read views. Derives fresh mapping provenance from the borrowed
     // span; an immutable member proof belongs to the held file incarnation.
@@ -205,7 +236,7 @@ private:
         const std::string& canonical_name, const void* selected_bytes,
         std::uint64_t selected_size, std::uint64_t selected_file_offset,
         bool verified_read_only_mapping, ResourceBlob& blob, ResourceFailure& failure,
-        SelectedResourceReadDiagnostic* diagnostic = nullptr);
+        SelectedResourceReadDiagnostic* diagnostic = nullptr, bool container = false);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

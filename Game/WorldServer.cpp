@@ -7,6 +7,7 @@
 #include "GameJournal.h"
 #include "EngineDiagnostics.h"
 #include "ModRuntime.h"
+#include "ModOutOfCombatRegeneration.h"
 #include "ModPackage.h"
 #include "ModItemUiPolicy.h"
 #include "ModCliTool.h"
@@ -268,6 +269,7 @@ BOOL CWorldServer::Create()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Destroy()
 {
+    if (!detachedSave) ModOutOfCombatRegeneration::Reset();
     if (!detachedSave) OwnedRender::E1ClearSaveNotice();
     // Kill All clients
     {
@@ -378,6 +380,7 @@ void CWorldServer::RemoveEverything()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::Clear()
 {
+    if (!detachedSave) ModOutOfCombatRegeneration::Reset();
     // Camp state belongs to this world, including after it has been adopted.
     ModCampReferences::Reset(fieldCamp->pending);
     fieldCamp->snapshots.clear();fieldCamp->armed=fieldCamp->inCamp=false;
@@ -2916,7 +2919,7 @@ bool CWorldServer::CanBeginFieldCamp()
         // Match the addon: detached objects no longer belong to the live world.
         if (!object || object->IsInvalid() || object->IsUnreferenced() || object->WhoAmI() != HPC_UNIT) continue;
         CUnit *enemy = static_cast<CUnit *>(object);
-        if (enemy->IsDead() || !enemy->IsEnemy(player->GetPlayerNumber())) continue;
+        if (!ModOutOfCombatRegeneration::IsLivingHostile(enemy, player->GetPlayerNumber())) continue;
         for (CUnit *member : partyUnits) {
             const float distanceSquared = distanceXY2(enemy->GetCP(), member->GetCP());
             if (distanceSquared <= radiusSquared)

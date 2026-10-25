@@ -8,6 +8,7 @@
 #endif
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -1149,6 +1150,59 @@ bool RetainedOwnedTextFrames::publish(
         return true;
     } catch (const std::bad_alloc&) {
         entries_.erase(surface_id);
+        return false;
+    }
+}
+
+bool fit_retained_text_frame(const CharacterPaneTextFrame& frame,
+    std::uint32_t visible_height, float minimum_scale,
+    CharacterPaneTextFit& fit) noexcept {
+    fit = {};
+    if (!visible_height || !frame.width) return false;
+    // The block's lines: each glyph's DrawText rectangle (raster glyphs keep
+    // it as clip), solid underline quads their own rectangle.
+    LONG top = LONG_MAX, bottom = LONG_MIN;
+    for (const auto& quad : frame.quads) {
+        if (!quad.color) continue;
+        const RECT& line = quad.raster_scale > 0.f ? quad.clip : quad.destination;
+        if (line.bottom <= line.top) continue;
+        top = (std::min)(top, line.top);
+        bottom = (std::max)(bottom, line.bottom);
+    }
+    const LONG height = static_cast<LONG>(visible_height);
+    if (top >= bottom || bottom <= height || top >= height) return false;
+    // The same margin below the block as the producer left above it, at most
+    // 2% of the surface.
+    const float margin = (std::min)(float(top), float(height) * .02f);
+    const float available = float(height) - margin - float(top);
+    float scale = available > 0.f ? available / float(bottom - top) : 0.f;
+    if (!(scale > 0.f)) return false;
+    scale = (std::max)(scale, minimum_scale);
+    fit.scale = (std::min)(scale, 1.0f);
+    fit.center_x = float(frame.width) * .5f;
+    fit.top = float(top);
+    fit.bottom = float(height);
+    return true;
+}
+
+bool RetainedOwnedTextFrames::append(
+    std::uint64_t surface_id, std::uint64_t generation,
+    CharacterPaneTextFrame&& frame) noexcept {
+    const auto found = entries_.find(surface_id);
+    if (found == entries_.end()) return false;
+    auto& entry = found->second;
+    if (entry.generation != generation || entry.frame.width != frame.width ||
+        entry.frame.height != frame.height) {
+        entries_.erase(found);
+        return false;
+    }
+    try {
+        entry.frame.quads.insert(entry.frame.quads.end(),
+            std::make_move_iterator(frame.quads.begin()),
+            std::make_move_iterator(frame.quads.end()));
+        return true;
+    } catch (const std::bad_alloc&) {
+        entries_.erase(found);
         return false;
     }
 }

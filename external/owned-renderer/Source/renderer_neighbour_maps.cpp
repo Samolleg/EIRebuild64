@@ -1,5 +1,7 @@
 #include "renderer.h"
 #include "neighbour_maps.h"
+#include "neighbour_piece.h"
+#include "neighbour_client.h"
 #include "owned_resource_runtime.h"
 #include "retained_static_scene.h"
 #include "native_instance_flags.h"
@@ -8,8 +10,75 @@
 #include <cstdio>
 #include <cfloat>
 #include <climits>
+#include <unordered_map>
 
 namespace owned {
+// The piece's terrain commands at the active map's current placement, in
+// stream order, with their prebuilt meshes and atlas pages; commands wholly in
+// full neighbour fog are not uploaded. The stream already rejected an
+// incomplete terrain (NeighbourPiece::terrain_failure).
+bool Renderer::submit_neighbour_terrain(const NeighbourPiece& piece,const std::array<float,16>& world_to_clip,
+    NativeGeometrySubmitFn submit,void* opaque,const char*& failure) {
+    failure="terrain.input";
+    if(!submit || neighbours_.weak_owner.expired())return false;
+    // This neighbour's contact maps (its tile grid with the material blend
+    // rows and its atlas copy) bind to its terrain draws, as to its
+    // decorations: key first part + 1 (Renderer::add_ground_cover_neighbour).
+    const std::uint32_t contact_map=neighbours_.next_part+1;
+    std::array<float,16> placement;
+    failure="terrain.world_transform";
+    if(!bridge_neighbour_world_transform(placement))return false;
+    const std::array<float,16> offset{1,0,0,float(piece.selection.x),0,1,0,float(piece.selection.y),0,0,1,0,0,0,0,1};
+    placement=retained_multiply_matrix(placement,offset);
+    std::vector<NativeOwnedTextureMip> texture_mips;
+    for(const auto& draw:piece.terrain) {
+        NativeGeometryView view;
+        view.geometry_revision=draw.geometry_revision;view.geometry_revision_valid=true;
+        view.position_groups=draw.position_groups;view.normal_groups=draw.normal_groups;
+        view.texture_coordinate_count=draw.texture_coordinate_count;view.component_count=draw.component_count;
+        view.index_count=draw.index_count;
+        view.object_to_clip=world_to_clip;
+        view.semantic_kind=SemanticKind::terrain;view.flags=8u;
+        view.decoded_channels=native_decoded_terrain;
+        view.terrain=draw.terrain;view.terrain_page_count=draw.terrain_page_count;
+        view.world.enabled=true;view.world.identity=&piece.identities[draw.identity];view.world.owner=&neighbours_.weak_owner;
+        view.world.record_revision=1;view.world.part=draw.material;
+        view.world.object_to_world=view.lighting.object_to_world=placement;view.lighting.enabled=1;
+        view.world.world_to_clip=world_to_clip;
+        view.bounds_minimum.fill(FLT_MAX);view.bounds_maximum.fill(-FLT_MAX);
+        for(unsigned corner=0;corner<8;++corner)for(unsigned axis=0;axis<3;++axis) {
+            float value=placement[axis*4+3];
+            for(unsigned n=0;n<3;++n)value+=placement[axis*4+n]*((corner&(1u<<n))?draw.bounds_maximum[n]:draw.bounds_minimum[n]);
+            view.bounds_minimum[axis]=(std::min)(view.bounds_minimum[axis],value);
+            view.bounds_maximum[axis]=(std::max)(view.bounds_maximum[axis],value);
+        }
+        // Wholly inside full neighbour fog: nothing would be visible.
+        if(neighbour_fog_hides({view.bounds_minimum[0],view.bounds_minimum[1],
+            view.bounds_maximum[0],view.bounds_maximum[1]},piece.fog_cull)) {++piece.fog_culled;continue;}
+        NativePreparedMeshHandle mesh;NativePreparedMaterialHandle skin;
+        view.prepared_mesh=&mesh;view.prepared_material=&skin;
+        view.prebuilt_mesh=&piece.meshes[draw.mesh];
+        view.prepared_identity={INT_MIN,piece.epoch,piece.epoch,1,neighbours_.next_part++,0,1,true,true};
+        view.owned_texture=neighbour_piece_texture_view(piece.textures[draw.texture],texture_mips);
+        // Frozen decoration layers use their authored initial topology. The
+        // current world light and atmosphere remain frame-owned GPU values.
+        view.flags|=native_neighbour_flag;view.contribution={true,true,0};
+        view.contact_map=contact_map;
+        // The piece's raw edges (fog_edges); the shader insets them and
+        // lets the band give way where other rendered pieces adjoin.
+        view.terrain.fog_min[0]=placement[3]+float(piece.fog_edges.x0-piece.selection.x);
+        view.terrain.fog_min[1]=placement[7]+float(piece.fog_edges.y0-piece.selection.y);
+        view.terrain.fog_max[0]=placement[3]+float(piece.fog_edges.x1-piece.selection.x);
+        view.terrain.fog_max[1]=placement[7]+float(piece.fog_edges.y1-piece.selection.y);
+        view.ordering=draw.reorderable?NativeOrdering::reorderable:NativeOrdering::preserve;
+        NativeGeometryResult result;
+        failure="terrain.submit";
+        if(!submit(opaque,view,result))return false;
+    }
+    failure=nullptr;
+    return true;
+}
+
 FixedState neighbour_submission_state(const FixedState& frame,SemanticKind kind,
     NativeOrdering ordering) noexcept {
     FixedState state=frame;
@@ -70,7 +139,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
     const bool enabled=option && option->boolean_value;
     neighbour_maps_enable(enabled);
     if(!enabled) {
-        if(neighbours_.owner){neighbour_maps_stop();release_neighbour_maps();}
+        if(neighbours_.owner){neighbour_client_stop();release_neighbour_maps();}
         return S_OK;
     }
     const auto source=retained_static_terrain_source_snapshot();
@@ -86,20 +155,20 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
     try {
         if(neighbours_.epoch!=epoch || neighbours_.renderer_generation!=native_static_generation_ ||
             neighbours_.fog_range!=fog_range) {
-            if(neighbours_.owner && neighbours_.fog_range!=fog_range)neighbour_maps_stop();
+            if(neighbours_.owner && neighbours_.fog_range!=fog_range)neighbour_client_stop();
             release_neighbour_maps();
             neighbours_.epoch=epoch;neighbours_.renderer_generation=native_static_generation_;
             neighbours_.fog_range=fog_range;
             neighbours_.owner=std::make_shared<const int>(0);neighbours_.weak_owner=neighbours_.owner;
             ResourceStoreConfig mounts;
-            if(owned_resource_runtime_mounts(mounts))neighbour_maps_begin(source.map->terrain_resource,epoch,mounts);
+            if(owned_resource_runtime_mounts(mounts))neighbour_client_begin(source.map->terrain_resource,epoch,mounts);
         }
         if(!ordered) {
             // One neighbour per frame in play; while the loading screen is
             // held, every ready one. Their geometry arrives in prebuilt pages
             // (no render-thread upload burst), so adoption is cheap.
             for(unsigned taken=0;taken==0||load_reveal_holding_;++taken) {
-            auto upload=neighbour_maps_take(epoch);
+            auto upload=neighbour_client_take(epoch);
             if(!upload)break;
             {
                 const auto old_mesh=native_mesh_resident_bytes_;
@@ -177,31 +246,37 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 bake_neighbour_impostors(*upload);
                 // Prebuilt meshes no draw registered (fog culled, a rejected piece)
                 // are released before the upload dies, also on an exception.
-                struct UnusedPrebuilt {Renderer& self;const NeighbourMapUpload* upload;
+                struct UnusedPrebuilt {Renderer& self;const NeighbourPiece* upload;
                     void release() noexcept {if(upload)self.release_unused_prebuilt(*upload);upload=nullptr;}
                     ~UnusedPrebuilt(){release();}} unused_prebuilt{*this,upload.get()};
-                const char* step=upload->welded?nullptr:"terrain.not_welded";
-                bool accepted=upload->welded&&bridge_upload_neighbour_terrain(*upload,neighbours_.weak_owner,world_to_clip,
-                    submit,&submission,neighbours_.next_part,step);
+                const char* step=!upload->welded?"terrain.not_welded":
+                    upload->terrain_failure.empty()?nullptr:upload->terrain_failure.c_str();
+                bool accepted=!step&&submit_neighbour_terrain(*upload,world_to_clip,submit,&submission,step);
                 if(accepted && !placed){accepted=false;step="decoration.world_transform";}
-                if(accepted)for(std::size_t candidate_index=0;candidate_index<upload->decorations.size();++candidate_index){
-                    const auto& candidate=upload->decorations[candidate_index];
-                    float contact_lo=FLT_MAX,contact_hi=-FLT_MAX;
-                    for(const auto& node:candidate->nodes){
+                if(accepted) {
+                    // Each MOB object's ground-contact span over all its nodes.
+                    std::unordered_map<std::uint32_t,std::array<float,2>> contact;
+                    for(const auto& node:upload->decorations) {
                         auto local=node.object_to_world;local[3]+=float(upload->selection.x);local[7]+=float(upload->selection.y);
-                        const auto z=contact_world_vertical_bounds(node.bounds.center,node.bounds.minimum,node.bounds.maximum,
+                        const auto z=contact_world_vertical_bounds(node.bounds_center,node.bounds_minimum,node.bounds_maximum,
                             retained_multiply_matrix(map_placement,local));
-                        contact_lo=(std::min)(contact_lo,z[0]);contact_hi=(std::max)(contact_hi,z[1]);
+                        auto& span=contact.try_emplace(node.candidate,std::array<float,2>{FLT_MAX,-FLT_MAX}).first->second;
+                        span[0]=(std::min)(span[0],z[0]);span[1]=(std::max)(span[1],z[1]);
                     }
-                    for(std::size_t node_index=0;node_index<candidate->nodes.size();++node_index) {
-                    const auto& node=candidate->nodes[node_index];
-                    const auto& figure=*node.figure;
+                    std::vector<NativeOwnedTextureMip> texture_mips;
+                    for(const auto& node:upload->decorations) {
+                    const auto& figure=upload->figures[node.figure];
+                    const auto& texture=upload->textures[node.texture];
                     // The figure's mesh at this decoration's shape, shared by every
                     // node drawing it at that shape, in object space.
-                    NativeGeometryView view=neighbour_figure_view(figure,node.positions.data(),candidate->source->shape);
-                    if(const auto found=upload->prebuilt_figures.find(neighbour_figure_shape(node.figure,candidate->source->shape));
-                       found!=upload->prebuilt_figures.end())view.prebuilt_mesh=&found->second;
-                    view.world.impostor=neighbour_impostor_slice(node.figure,node.texture_identity);
+                    NativeGeometryView view;
+                    view.position_groups=figure.position_groups;view.normal_groups=figure.normal_groups;
+                    view.texture_coordinate_count=figure.texture_coordinate_count;
+                    view.component_count=figure.component_count;view.index_count=figure.index_count;
+                    view.world.enabled=true;view.world.identity=&upload->identities[figure.identity];
+                    view.world.shape=node.shape;view.world.object_space=true;
+                    view.prebuilt_mesh=&upload->meshes[node.mesh];
+                    view.world.impostor=neighbour_impostor_slice(upload->identities[figure.identity],texture.view_identity);
                     view.prepared_identity={INT_MIN,epoch,epoch,1,neighbours_.next_part++,0,1,true,true};
                     NativePreparedMeshHandle mesh;NativePreparedMaterialHandle material;
                     view.prepared_mesh=&mesh;view.prepared_material=&material;
@@ -214,8 +289,8 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.bounds_minimum.fill(FLT_MAX);view.bounds_maximum.fill(-FLT_MAX);
                     for(unsigned corner=0;corner<8;++corner)for(unsigned axis=0;axis<3;++axis) {
                         float value=view.world.object_to_world[axis*4+3];
-                        for(unsigned n=0;n<3;++n)value+=view.world.object_to_world[axis*4+n]*(node.bounds.center[n]+
-                            ((corner&(1u<<n))?node.bounds.maximum[n]:node.bounds.minimum[n]));
+                        for(unsigned n=0;n<3;++n)value+=view.world.object_to_world[axis*4+n]*(node.bounds_center[n]+
+                            ((corner&(1u<<n))?node.bounds_maximum[n]:node.bounds_minimum[n]));
                         view.bounds_minimum[axis]=(std::min)(view.bounds_minimum[axis],value);
                         view.bounds_maximum[axis]=(std::max)(view.bounds_maximum[axis],value);
                     }
@@ -226,35 +301,24 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.terrain.fog_min[1]=map_placement[7]+float(upload->fog_edges.y0);
                     view.terrain.fog_max[0]=map_placement[3]+float(upload->fog_edges.x1);
                     view.terrain.fog_max[1]=map_placement[7]+float(upload->fog_edges.y1);
-                    view.owned_texture.identity=node.texture_identity;view.owned_texture.generation=1;
-                    view.owned_texture.resource=&node.texture->identity;view.owned_texture.value_source=1;
-                    view.owned_texture.format=node.texture_format;view.owned_texture.mips=node.texture_mips.data();
-                    view.owned_texture.mip_count=static_cast<UINT>(node.texture_mips.size());
+                    view.owned_texture=neighbour_piece_texture_view(texture,texture_mips);
                     view.semantic_kind=SemanticKind::figure;view.flags=native_neighbour_flag|native_ground_contact_flag|8u;
-                    // Sway and foliage by the main map's rule
-                    // (retained_visual_part_values): a tree's parts sway around
-                    // its root node, and a part of a swaying plant whose
-                    // triangles sample cut-out texels is foliage. The assembly's
-                    // parts are its drawn nodes, in order.
-                    if(const auto* assembly=candidate->assembly.get();
-                       assembly&&assembly->sways&&assembly->parts.size()==candidate->nodes.size()) {
-                        const auto& part=assembly->parts[node_index];
-                        if(retained_visual_part_sway(part).foliage)view.flags|=native_foliage_part_flag;
-                        const auto sway=candidate->root_valid?retained_object_space_sway_flags(*assembly,part):0u;
-                        if(sway) {
-                            view.flags|=sway;
-                            const std::array<float,4> root{candidate->root_world[0]+float(upload->selection.x),
-                                candidate->root_world[1]+float(upload->selection.y),candidate->root_world[2],1.f};
-                            for(unsigned axis=0;axis<3;++axis)
-                                view.world.sway_root[axis]=map_placement[axis*4]*root[0]+map_placement[axis*4+1]*root[1]+
-                                    map_placement[axis*4+2]*root[2]+map_placement[axis*4+3];
-                        }
+                    // Sway and foliage by the main map's rule (the stream read
+                    // them from the assembly): a tree's parts sway around its
+                    // root node; a swaying plant's cut-out part is foliage.
+                    view.flags|=node.flags;
+                    if(node.sway) {
+                        const std::array<float,4> root{node.root_world[0]+float(upload->selection.x),
+                            node.root_world[1]+float(upload->selection.y),node.root_world[2],1.f};
+                        for(unsigned axis=0;axis<3;++axis)
+                            view.world.sway_root[axis]=map_placement[axis*4]*root[0]+map_placement[axis*4+1]*root[1]+
+                                map_placement[axis*4+2]*root[2]+map_placement[axis*4+3];
                     }
-                    view.contact_world_height=contact_hi-contact_lo;view.contact_map=first_part+1;
+                    const auto& span=contact[node.candidate];
+                    view.contact_world_height=span[1]-span[0];view.contact_map=first_part+1;
                     view.ordering=NativeOrdering::reorderable;view.contribution={true,true,0};
                     NativeGeometryResult result;if(!submit(&submission,view,result)){accepted=false;step="decoration.submit";break;}
-                }
-                    if(!accepted)break;
+                    }
                 }
                 if(accepted) {
                     ++neighbour_caster_revision_; // its decorations cast from the next sun redraw
@@ -291,24 +355,24 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 native_texture_share_floor_=0;
                 // One line per neighbour; a rejected neighbour is omitted whole.
                 char text[1536];std::snprintf(text,sizeof(text),
-                    "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f %s",
+                    "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu unbuilt_decorations=%u fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f %s",
                     upload->selection.placement.mpr.c_str(),accepted?1:0,accepted?"none":step?step:"unknown",
                     submission.failure?"/":"",submission.failure?submission.failure:"",
-                    neighbours_.geometry_bytes,neighbours_.texture_bytes,native_texture_shared_,native_texture_shared_bytes_,neighbours_.peak_decoded_bytes,upload->omitted_decorations,upload->fog_culled,
-                    impostors_.baked-impostors_before,upload->impostor_sources.size(),impostors_.bake_ms-impostor_ms_before,impostors_.count,
+                    neighbours_.geometry_bytes,neighbours_.texture_bytes,native_texture_shared_,native_texture_shared_bytes_,neighbours_.peak_decoded_bytes,upload->omitted_decorations,upload->unbuilt_decorations,upload->fog_culled,
+                    impostors_.baked-impostors_before,upload->impostors.size(),impostors_.bake_ms-impostor_ms_before,impostors_.count,
                     impostors_.failed?" impostors_failed":"",
-                    // prebuilt=none: the prebuild failed and decorations decoded here, without LOD levels.
-                    upload->prebuilt_pages.empty()?"prebuilt=none":"ready",upload->lod_stats.reduced_figures,upload->lod_stats.figures,
+                    // prebuilt=none: the stream built no pages; the piece was rejected (terrain.prebuild_failed).
+                    upload->pages.empty()?"prebuilt=none":"ready",upload->lod_stats.reduced_figures,upload->lod_stats.figures,
                     (unsigned long long)upload->lod_stats.full_triangles,(unsigned long long)upload->lod_stats.level_triangles[0],
                     (unsigned long long)upload->lod_stats.level_triangles[1],(unsigned long long)upload->lod_stats.level_triangles[2],
                     upload->lod_stats.milliseconds,upload->lod_stats.prebuild_milliseconds,
                     upload->decoration_summary.c_str());
                 bridge_neighbour_diagnostic(text);
                 unused_prebuilt.release();
-                upload.reset();neighbour_maps_uploaded(epoch);
+                upload.reset();neighbour_client_uploaded(epoch);
             }
             }
-            auto error=neighbour_maps_error(epoch);
+            auto error=neighbour_client_error(epoch);
             if(error!=neighbours_.error) {neighbours_.error=std::move(error);if(!neighbours_.error.empty())bridge_neighbour_diagnostic(neighbours_.error.c_str());}
             // Each neighbour's tile families (beach sand, terrain material blend)
             // as soon as they load, with or without its cover pass.
@@ -328,7 +392,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
         native_static_frame_=&frame;const auto hr=flush_native();native_static_frame_=nullptr;
         return hr;
     } catch(...) {
-        neighbour_maps_uploaded(epoch);native_static_frame_=nullptr;
+        neighbour_client_uploaded(epoch);native_static_frame_=nullptr;
         bridge_neighbour_diagnostic("Neighbour map allocation failed; background omitted");
         release_neighbour_maps();return S_OK;
     }

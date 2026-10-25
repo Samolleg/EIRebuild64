@@ -2,6 +2,8 @@
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
 #endif
+#include "neighbour_piece.h"
+#include "ground_cover_neighbour.h"
 #include "owned_resource_runtime.h"
 #include "owned_terrain_front_end.h"
 #include "retained_static_scene.h"
@@ -44,8 +46,10 @@ struct Stream {
     // current is stopped and never touches the shared state again, so a
     // stream that does not exit in time can be left to finish detached.
     std::uint64_t run = 0, exited = 0;
-    // Layout-order slots: a decoded upload, or empty after a failed decode.
-    std::map<std::size_t, std::unique_ptr<NeighbourMapUpload>> ready;
+    // Layout-order slots: a neighbour's piece, or empty after a failed decode.
+    std::map<std::size_t, std::unique_ptr<NeighbourPiece>> ready;
+    // Set when the stream stops: ends a tile family load in flight early.
+    std::atomic<bool> cancel{false};
     std::size_t next_take = 0;
     std::size_t total = 0; // neighbours in the selected layout, once read (0 before)
     unsigned resident = 0; // decoded maps alive (in decode, waiting or in upload)
@@ -93,7 +97,7 @@ std::string map_name(std::string name) {
     if(name.size()>4 && name.substr(name.size()-4)==".mpr")name.resize(name.size()-4);
     return name;
 }
-bool profile_matches(const ResourceStoreConfig& mounts) {
+bool profile_matches(const ResourceStoreConfig& mounts,const std::wstring& layout) {
     for(const auto& path:mounts.archives) {
         const auto slash=path.find_last_of(L"/\\");
         auto name=path.substr(slash==std::wstring::npos?0:slash+1);
@@ -102,7 +106,6 @@ bool profile_matches(const ResourceStoreConfig& mounts) {
     }
     // Dejavu ships databaseJmv.res in the addon's res folder without listing
     // it among the visual archives.
-    const auto layout=layout_file();
     const auto database=layout.substr(0,layout.find_last_of(L"/\\")+1)+L"res\\databaseJmv.res";
     const auto attributes=GetFileAttributesW(database.c_str());
     return attributes!=INVALID_FILE_ATTRIBUTES&&!(attributes&FILE_ATTRIBUTE_DIRECTORY);
@@ -225,12 +228,14 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
         upload.lod_stats.prebuild_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lod_start).count();
         if(!finish_native_prebuilt_pages(builder) || builder.failed){drop();return;}
         upload.prebuilt_pages=std::move(builder.pages);
-        // Its atlas pages and decoration textures, once each, unless resident.
+        // Its atlas pages and decoration textures, once each. Always created:
+        // its piece carries no mips, so adoption must find every texture it binds
+        // (one already resident wins there and this copy is dropped).
         std::unordered_set<std::string> seen;
         const auto texture=[&](const NativeOwnedTextureView& view) {
             if(!view.resource)return;
             const auto key=native_owned_archive_texture_key(*view.resource,view.generation,false);
-            if(!seen.insert(key).second || neighbour_texture_is_resident(key))return;
+            if(!seen.insert(key).second)return;
             NativePrebuiltTexture made;
             if(build_native_prebuilt_texture(builder.device.Get(),view,made))upload.prebuilt_textures.push_back(std::move(made));
         };
@@ -262,7 +267,8 @@ std::string read_layout(const std::wstring& file) {
     if(!input.read(json.data(),std::streamsize(json.size())))throw std::runtime_error("Cannot read neighbour layout");
     return json;
 }
-void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mounts,std::uint64_t id,std::string no_sea_maps) {
+void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mounts,std::uint64_t id,std::string no_sea_maps,
+    NeighbourStreamSource source_inputs) {
     const BackgroundWorkerPriority priority;
     // Under s.lock: this stream was stopped or replaced.
     const auto stopped=[&s,id] {return s.stop || s.run!=id;};
@@ -270,8 +276,10 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
         std::lock_guard<std::mutex> guard(s.lock);if(s.run==id)s.error=error;
     };
     try {
-        if(!profile_matches(mounts))throw std::runtime_error("No verified neighbour resource profile");
-        const auto file=layout_file(); const auto root=file.substr(0,file.find_last_of(L"/\\")+1);
+        const auto& file=source_inputs.layout_file;
+        if(file.empty())throw std::runtime_error("Neighbour maps: loaded addon unavailable (no layout file)");
+        if(!profile_matches(mounts,file))throw std::runtime_error("No verified neighbour resource profile");
+        const auto root=file.substr(0,file.find_last_of(L"/\\")+1);
         const auto neighbours=select_neighbour_layout(parse_neighbour_layout(read_layout(file)),"deja-vu",map_name(active));
         {std::lock_guard<std::mutex> guard(s.lock);if(s.run==id)s.total=neighbours.size();}
         std::size_t next_claim=0; // guarded by s.lock
@@ -288,8 +296,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                 // its terrain is published before the load returns.
                 const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
                 for(;;) {
-                    const auto source=retained_static_terrain_source_snapshot();
-                    if(source.map && source.terrain && source.map->generation==epoch){active_terrain=source.terrain;break;}
+                    if(source_inputs.active_terrain && (active_terrain=source_inputs.active_terrain()))break;
                     {std::lock_guard<std::mutex> guard(s.lock);if(stopped())return false;}
                     if(std::chrono::steady_clock::now()>deadline)
                         throw std::runtime_error("active map terrain was not published");
@@ -342,16 +349,28 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                     ++next_weld;
                 }
                 s.wake.notify_all();
+                // The piece the renderer adopts; the decoded map dies here.
+                std::unique_ptr<NeighbourPiece> piece;
                 if(upload) {
-                    prebuild_neighbour(*upload);
-                    upload->ground_cover_inputs=prepare_ground_cover_neighbour_inputs(*upload);
-                    upload->liquid_surf=prepare_liquid_surf_neighbour(*upload,no_sea_maps);
+                    try {
+                        prebuild_neighbour(*upload);
+                        upload->ground_cover_inputs=prepare_ground_cover_neighbour_inputs(*upload->map,mounts,&s.cancel);
+                        upload->liquid_surf=prepare_liquid_surf_neighbour(upload->ground_cover_inputs.get(),
+                            upload->selection.placement.mpr,no_sea_maps);
+                        ID3D11Device* device=nullptr;
+                        {std::lock_guard<std::mutex> guard(device_lock);device=stream_device;if(device)device->AddRef();}
+                        piece=make_neighbour_piece(*upload,device);
+                        if(device)device->Release();
+                    }
+                    catch(const std::exception& e) {set_error(s,neighbours[index].placement.zone+": "+e.what());}
+                    catch(...) {set_error(s,neighbours[index].placement.zone+": neighbour piece allocation failed");}
+                    upload.reset();
                 }
                 {
                     std::lock_guard<std::mutex> guard(s.lock);
                     if(stopped())break; // a new stream reset the resident count
-                    if(!upload)--s.resident; // only a delivered map stays resident
-                    s.ready[index]=std::move(upload);
+                    if(!piece)--s.resident; // only a delivered piece stays resident
+                    s.ready[index]=std::move(piece);
                 }
                 s.wake.notify_all();
             }
@@ -483,10 +502,13 @@ std::size_t neighbour_weld_edge_normals(TerrainCpuAsset& terrain,double x,double
     return welded;
 }
 void neighbour_maps_enable(bool value) noexcept {enabled.store(value,std::memory_order_release);}
+bool neighbour_maps_enabled() noexcept {return enabled.load(std::memory_order_acquire);}
+std::wstring neighbour_layout_file() {return layout_file();}
 bool neighbour_layout_origin(const std::string& mpr,const ResourceStoreConfig& mounts,double& x,double& y) noexcept try {
     x=y=0;
-    if(!profile_matches(mounts))return false;
-    const auto& active=neighbour_layout_active(parse_neighbour_layout(read_layout(layout_file())),"deja-vu",map_name(mpr));
+    const auto file=neighbour_layout_file();
+    if(!profile_matches(mounts,file))return false;
+    const auto& active=neighbour_layout_active(parse_neighbour_layout(read_layout(file)),"deja-vu",map_name(mpr));
     if(!std::isfinite(active.x)||!std::isfinite(active.y))return false;
     x=active.x;y=active.y;return true;
 } catch(...) {x=y=0;return false;}
@@ -539,6 +561,7 @@ NeighbourBorderFog neighbour_border_fog() noexcept {
 void neighbour_maps_stop() noexcept {
     auto& s=stream();
     std::uint64_t id=0;
+    s.cancel.store(true,std::memory_order_relaxed);
     {std::lock_guard<std::mutex> guard(s.lock);s.stop=true;s.ready.clear();s.in_upload=false;id=s.run;}
     s.wake.notify_all();
     if(s.worker.joinable()) {
@@ -566,7 +589,9 @@ std::mutex g_no_sea_lock;std::string g_no_sea_maps="zone7";
 void neighbour_maps_set_no_sea_maps(const std::string& maps) noexcept {
     try {std::lock_guard<std::mutex> guard(g_no_sea_lock);if(g_no_sea_maps!=maps)g_no_sea_maps=maps;} catch(...) {}
 }
-void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts) noexcept {
+std::string neighbour_maps_no_sea_maps() {std::lock_guard<std::mutex> guard(g_no_sea_lock);return g_no_sea_maps;}
+void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
+    NeighbourStreamSource source) noexcept {
     auto& s=stream();
     std::string no_sea_maps;
     try {std::lock_guard<std::mutex> guard(g_no_sea_lock);no_sea_maps=g_no_sea_maps;} catch(...) {}
@@ -576,13 +601,14 @@ void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const Resou
     try {
         {std::lock_guard<std::mutex> guard(s.lock);s.epoch=epoch;s.stop=false;s.finished=false;
             s.ready.clear();s.next_take=0;s.total=0;s.resident=0;s.in_upload=false;id=++s.run;}
-        s.worker=std::thread(run,std::ref(s),mpr,epoch,mounts,id,no_sea_maps);
+        s.cancel.store(false,std::memory_order_relaxed);
+        s.worker=std::thread(run,std::ref(s),mpr,epoch,mounts,id,no_sea_maps,std::move(source));
     } catch(...) {
         std::lock_guard<std::mutex> guard(s.lock);
         s.error="Neighbour map worker creation failed";s.finished=true;s.exited=(std::max)(s.exited,id);
     }
 }
-std::unique_ptr<NeighbourMapUpload> neighbour_maps_take(std::uint64_t epoch) noexcept {
+std::unique_ptr<NeighbourPiece> neighbour_maps_take(std::uint64_t epoch) noexcept {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);
     if(s.epoch!=epoch || s.in_upload)return nullptr;
     // The next neighbour in layout order only; failed ones are skipped.

@@ -14,6 +14,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "FigureManager.h"
 #include "TextureManager.h"
 #include "ModRuntime.h"
+#include "ModOutOfCombatRegeneration.h"
 #include "ModPackage.h"
 #include "ModItemUiPolicy.h"
 #include "ModCampStats.h"
@@ -3271,7 +3272,7 @@ void CI3DObjectItemInfo::SetModSkill(SCampSkillMouseInfo* pSkillInfo)
 						(magicBloodBonus + JewelryRegeneration + ArmorRegeneration +
 						 complexRegeneration);
 					const float maxHp = max(1.0f, float(regenUnit->GetMaxHP()));
-					const float safeMultiplier = float(2 + theSettings.nDifficultyLevel);
+					const float safeMultiplier = ModOutOfCombatRegeneration::GetMultiplier(regenUnit);
 					const float regenSpell = hp_regen > 0.0f
 						? regenUnit->GetEffectValue(SPELL_ID_REGENERATION) / 30.0f
 						: 0.0f;
@@ -4803,7 +4804,7 @@ switch (pSkillInfo->nType)
                         const float maxHp = max(1.0f, float(regenUnit->GetMaxHP()));
                         const float regenerationSpell = hpRegeneration > 0.0f
                             ? regenUnit->GetEffectValue(SPELL_ID_REGENERATION) / 30.0f : 0.0f;
-                        result = maxHp * hpRegeneration * float(2 + theSettings.nDifficultyLevel) + regenerationSpell;
+                        result = maxHp * hpRegeneration * ModOutOfCombatRegeneration::GetMultiplier(regenUnit) + regenerationSpell;
                         fullResult = result > 0.000001f ? maxHp / result : 0.0f;
                     }
                     else

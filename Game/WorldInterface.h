@@ -133,6 +133,7 @@ class CWorldConnector
         CD_MAINMENU,
         CD_LOADGAME,
         CD_NEWGAME,
+        CD_STARTPREPAREDNEWGAME,
         CD_MOVETOZONE,
     };
     EConnectAction action;
@@ -162,6 +163,8 @@ public:
     bool HasReq() { return action != CD_NONE; }
     void ReqGoMainMenu();
     void ReqNewGame();
+    // Resume only the already prepared new-game transaction after UI input.
+    void ReqStartPreparedNewGame();
     void ReqLoadGame(const char *pszSaveName);
     void ReqSaveGame(const char *pszSaveName);
     void ReqMoveToZone(const char *pszZoneName, int nEntrance);

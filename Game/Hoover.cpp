@@ -6,6 +6,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Hoover.h"
 #include "ItemManager.h"
 #include "GSVars.h"
+#include "ModGroupSearch/Native.h"
 #include "randomGen.h"
 #include "WorldServer.h"
 #include "Player.h"
@@ -153,7 +154,7 @@ int CHoover::HooverCarriedLoot(CWorldServer *world, CUnit *carrier,
                                int &money)
 {
     const int maxCarriedCorpses = 128;
-    if (!world || !carrier)
+    if (!world || !carrier || ModGroupSearch::IsBriefingZone())
         return 0;
     CPlayer *player = world->GetPlayer(0);
     if (!player)

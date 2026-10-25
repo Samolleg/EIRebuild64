@@ -42,9 +42,21 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"window_width", kCategories[0], "Window size",
      "Size of the game window in windowed mode; the interface is laid out for it. "
      "Use Apply display to change it without restarting.", nullptr, false, {0, 0, 0, 0}},
+    {"upscaler", kCategories[0], "Upscaling",
+     "Renders the world at a lower resolution and rebuilds a sharp, smooth image at the screen size. "
+     "Replaces anti-aliasing and render scale while on. NVIDIA DLSS needs the 64-bit render host and an RTX card; "
+     "AMD FSR 2 runs on most graphics cards from 2015 on, in both modes. Off renders at the render scale.",
+     nullptr, false, {0, 0, 0, 0}},
+    {"upscaler_quality", kCategories[0], "Upscaling quality",
+     "The internal resolution of the upscaler. Quality looks best, Ultra Performance is fastest; "
+     "DLAA and FSR Native AA keep the full resolution and only smooth.",
+     nullptr, false, {0, 0, 0, 0}},
+    {"upscale_sharpness", kCategories[0], "Sharpening",
+     "Sharpens the image after the upscaler, DLSS or FSR. Keep it low to stay close to the original look; 0 turns it off.",
+     nullptr, false, {.2f, .2f, .2f, .2f}},
     {"render_scale", kCategories[0], "Render scale",
      "The 3D world renders at this share of the screen resolution and is sharpened back up to it. "
-     "The interface, text and cursor always stay at full resolution. Lower is faster.",
+     "The interface, text and cursor always stay at full resolution. Lower is faster. Only with Upscaling off.",
      nullptr, true, {67, 85, 100, 100}},
     {"smaa", kCategories[0], "Anti-aliasing (SMAA)",
      "Smooths jagged edges in the world. Cheap.", nullptr, true, {0, 1, 1, 1}},
@@ -61,6 +73,11 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "What the game does while another window is in front. Keep running: the world and the picture go on "
      "(at the background frame rate below). Pause: the world stops and the last picture stays on screen.",
      "Keep running\0" "Pause\0", false, {0, 0, 0, 0}},
+    {"x64_render_host", kCategories[0], "64-bit render host",
+     "Moves the graphics card and driver into a separate 64-bit process, leaving the game more memory "
+     "(fewer out-of-memory crashes on big maps). Applies after restarting the game. "
+     "If the host does not start, the option turns itself off.",
+     nullptr, false, {0, 0, 0, 0}},
     {"background_frame_limit", kCategories[0], "Background frame rate limit",
      "Caps the frame rate while another window is in front, so a game left running idles quietly. Off is uncapped.",
      nullptr, false, {0, 0, 0, 0}},
@@ -137,6 +154,10 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Off\0" "Low\0" "Normal\0" "High\0", true, {1, 1, 2, 3}},
     {"ground_cover_distance", kCategories[4], "Ground cover distance (m)",
      "How far grass and ground cover reach. Shorter is faster.", nullptr, true, {75, 100, 200, 300}},
+    {"ground_cover_shadows", kCategories[4], "Ground cover shadows",
+     "Sun shadows of the ground cover. Large only: snow and sand piles, fallen branches, dead bushes and cave roots. "
+     "All adds grass, flowers and small debris; costs noticeably more.",
+     "Off\0" "Large only\0" "All\0", false, {1, 1, 1, 1}},
     {"tree_sway", kCategories[4], "Swaying trees",
      "Tree and bush leaves move in the wind.", nullptr, false, {0, 0, 0, 0}},
     // Atmosphere

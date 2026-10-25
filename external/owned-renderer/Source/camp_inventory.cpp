@@ -9,6 +9,10 @@
 #include "owned_resource_runtime.h"
 #include "widescreen.h"
 #include "renderer.h"
+#include "camp_icon_decode.h"
+#include "scene_core_types.h"
+#include "x64_remote_link.h"
+#include "x64_remote_protocol.h"
 
 #include <array>
 #include <cstdio>
@@ -227,17 +231,14 @@ std::int64_t close_observation_qpc = 0;
 // context calls stay on the game thread; draw only adopts completed values.
 using CampIconData = PreparedCampIcon;
 
-// The admitted addon allocator gives geometry-facing icon families different
-// canvas sizes. Keep those sizes and bottom alignment; never resample an icon.
-unsigned camp_icon_canvas(const std::string& name, unsigned variant) noexcept {
-    if (!variant) return 256;
-    const auto begins = [&](const char* prefix) { return name.compare(0,std::strlen(prefix),prefix)==0; };
-    if (begins("unhuma")) return 1024;
-    for (const auto* prefix : {"spell","modifier","material","qitem","litem","quitem","prototype00"})
-        if (begins(prefix)) return 2048;
-    for (const auto* prefix : {"pl","lg","sh","pt","gl","bt"})
-        if (begins(prefix)) return 1024;
-    return variant == 4 ? 2048 : 1024;
+// The game thread's command to the core-mode host (scene_core.h ids), sent
+// in ring order with the Renderer's own commands.
+template <class C> void core_send(const C& command) {
+    std::vector<std::uint8_t> bytes{0};
+    scene_wire::encode_into(bytes, command);
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
+    x64remote::scene_message(static_cast<std::uint16_t>(scene_core::wire_command<C>::id), bytes.data(), bytes.size());
+#endif
 }
 
 class CampIconLoader {
@@ -245,6 +246,7 @@ class CampIconLoader {
         std::shared_ptr<const CampIconData> data;
         std::string failure;
         bool reported = false, pending = true;
+        std::uint64_t serial = 0; // core mode: the host request
     };
     std::mutex mutex_;
     std::condition_variable wake_;
@@ -256,6 +258,14 @@ class CampIconLoader {
     std::array<std::thread,2> workers_;
     bool stopping_ = false;
     std::uint64_t world_epoch_ = 0;
+    // Core mode (claude/s3-store): the x64 host decodes the icons and owns
+    // their GPU homes (Host/core_camp.cpp). This process keeps each entry's
+    // request serial and the canvas the host answered: no pixels, no texture.
+    bool core_started_ = false;
+    std::uint64_t core_serial_ = 0;
+    long core_answers_read_ = 0;
+    std::map<std::uint64_t, std::string> core_requested_; // unanswered serial -> name
+    std::vector<std::uint64_t> core_priority_sent_;
 
     // Icon GPU homes (256..2048 square BGRA, up to 16 MB each) serve the
     // screens of one world; kept for the session they grew with every
@@ -315,64 +325,12 @@ class CampIconLoader {
             std::shared_ptr<const CampIconData> data;
             std::string error;
             try {
-                ResourceBlob blob; TextureCpuAsset texture; ResourceFailure why;
-                unsigned variant = 0;
-                bool resolved = false;
-                if (opened && high_resolution) {
-                    resolved = store.resolve(name + ".x4.mmp",blob,why);
-                    if (resolved) variant = 4;
-                    else {
-                        resolved = store.resolve(name + ".x2.mmp",blob,why);
-                        if (resolved) variant = 2;
-                    }
-                }
-                if (opened && !resolved) resolved = store.resolve(name + ".mmp",blob,why);
-                const unsigned canvas = camp_icon_canvas(name,variant);
                 if (!opened) error = opening.message;
-                else if (!resolved || !parse_texture_asset(blob,texture,why)) error = why.message;
-                else if (texture.format != MmpFormat::argb8888 || texture.bit_count != 32 ||
-                         texture.width > canvas || texture.height > canvas)
-                    error = "icon does not match the admitted BGRA/PNT3 canvas contract";
                 else {
                     auto result = std::make_shared<CampIconData>();
-                    auto& description=result->description;
-                    description.width=description.height=canvas; description.pitch=canvas*2;
-                    description.format.dwSize=sizeof(DDPIXELFORMAT);
-                    description.format.dwFlags=DDPF_RGB|DDPF_ALPHAPIXELS;
-                    description.format.dwRGBBitCount=16; description.format.dwRBitMask=0x7c00;
-                    description.format.dwGBitMask=0x03e0; description.format.dwBBitMask=0x001f;
-                    description.format.dwRGBAlphaBitMask=0x8000;
                     SurfaceImage image;
-                    image.width=image.height=canvas; image.pitch=canvas*4;
-                    image.format.dwSize=sizeof(DDPIXELFORMAT);
-                    image.format.dwFlags=DDPF_RGB|DDPF_ALPHAPIXELS;
-                    image.format.dwRGBBitCount=32; image.format.dwRBitMask=0x00ff0000;
-                    image.format.dwGBitMask=0x0000ff00; image.format.dwBBitMask=0x000000ff;
-                    image.format.dwRGBAlphaBitMask=0xff000000;
-                    image.pixels.resize(std::size_t(image.pitch)*canvas);
-                    auto cut=std::make_shared<std::vector<std::uint8_t>>(
-                        (std::size_t(canvas)*canvas+7)/8,std::uint8_t{0xff});
-                    bool opaque=texture.width==canvas && texture.height==canvas;
-                    const auto* source=texture.source->data()+texture.mips[0].byte_offset;
-                    for (unsigned y=0;y<texture.height;++y)
-                        for (unsigned x=0;x<texture.width;++x) {
-                            std::uint32_t colour;
-                            std::memcpy(&colour,source+(y*texture.width+x)*4,4);
-                            const std::uint32_t alpha=(colour&0x80000000u)?0xff000000u:0;
-                            // Exactly the native 1555 quantization followed by
-                            // the normal upload's value*255/31 expansion.
-                            const std::uint32_t expanded=alpha|
-                                ((((colour>>19)&31u)*255u/31u)<<16)|
-                                ((((colour>>11)&31u)*255u/31u)<<8)|
-                                (((colour>>3)&31u)*255u/31u);
-                            const std::size_t bit=std::size_t(canvas-texture.height+y)*canvas+x;
-                            std::memcpy(image.pixels.data()+bit*4,&expanded,4);
-                            if (alpha) (*cut)[bit/8]&=std::uint8_t(~(1u<<(bit%8)));
-                            else opaque=false;
-                        }
-                    description.alpha_fully_opaque=opaque;
-                    if (!opaque) description.alpha_cut_mask=std::move(cut);
-                    if (FAILED(create_completed_surface_texture(device.Get(),image,result->texture,result->srv)))
+                    error = decode_camp_icon(store,name,high_resolution,image,result->description);
+                    if (error.empty() && FAILED(create_completed_surface_texture(device.Get(),image,result->texture,result->srv)))
                         error="owned icon GPU creation failed";
                     if (error.empty()) data = std::move(result);
                 }
@@ -382,8 +340,96 @@ class CampIconLoader {
             entry.data = std::move(data); entry.failure = std::move(error);
         }
     }
+
+    // Core mode: the host's answers (Control::camp_icon_answers) complete
+    // their entries. A ring that overflowed lost answers: every outstanding
+    // request is sent again (the host answers a known serial again).
+    void core_poll_locked() {
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
+        auto& control = x64remote::control();
+        const long written = control.camp_icon_answers_written;
+        if (written - core_answers_read_ > long(x64remote::kCampIconAnswers)) {
+            core_answers_read_ = written;
+            for (const auto& [serial, name] : core_requested_)
+                core_send(scene_core::CampIconRequest{serial, world_epoch_, name});
+        }
+        for (; core_answers_read_ < written; ++core_answers_read_) {
+            MemoryBarrier();
+            const auto answer = control.camp_icon_answers[static_cast<std::uint32_t>(core_answers_read_) % x64remote::kCampIconAnswers];
+            const auto requested = core_requested_.find(answer.serial);
+            if (requested == core_requested_.end()) continue;
+            const auto found = entries_.find(requested->second);
+            if (found != entries_.end() && found->second.serial == answer.serial) {
+                auto& entry = found->second;
+                if (!answer.canvas) entry.failure = "the core-mode host could not decode the icon (host log)";
+                else {
+                    auto result = std::make_shared<CampIconData>();
+                    auto& description = result->description;
+                    description.width = description.height = answer.canvas; description.pitch = answer.canvas * 2;
+                    description.format.dwSize = sizeof(DDPIXELFORMAT);
+                    description.format.dwFlags = DDPF_RGB | DDPF_ALPHAPIXELS;
+                    description.format.dwRGBBitCount = 16; description.format.dwRBitMask = 0x7c00;
+                    description.format.dwGBitMask = 0x03e0; description.format.dwBBitMask = 0x001f;
+                    description.format.dwRGBAlphaBitMask = 0x8000;
+                    description.alpha_fully_opaque = answer.opaque != 0;
+                    result->core_serial = answer.serial;
+                    entry.data = std::move(result);
+                }
+            }
+            core_requested_.erase(requested);
+        }
+#endif
+    }
+    std::shared_ptr<const CampIconData> core_request(const std::string& name, bool visible) {
+        if (!core_started_) {
+            scene_core::CampIconMounts mounts;
+            if (!bridge_camp_texture_mounts(mounts.mounts)) {
+                reject("icon_texture_manager_mount_contract_unavailable");
+                return {};
+            }
+            mounts.high_resolution = addon_icon_lookup;
+            core_send(mounts);
+            core_started_ = true;
+        }
+        std::lock_guard lock(mutex_);
+        retire_previous_world_locked();
+        core_poll_locked();
+        auto [where, inserted] = entries_.try_emplace(name);
+        auto& entry = where->second;
+        if (inserted) {
+            // The host decodes it now: the entry is "decoding" until answered.
+            entry.serial = ++core_serial_; entry.pending = false;
+            core_requested_[entry.serial] = name;
+            core_send(scene_core::CampIconRequest{entry.serial, world_epoch_, name});
+        }
+        if (visible && !entry.data && entry.failure.empty() &&
+            std::find(visible_[3].begin(),visible_[3].end(),name)==visible_[3].end())
+            visible_[3].push_back(name);
+        if (!entry.failure.empty() && !entry.reported) {
+            entry.reported = true;
+            const std::string detail = name + ": " + entry.failure;
+            bridge_append_probe_event("camp_icon_omitted", detail.c_str());
+        }
+        return entry.data;
+    }
+    // Core mode: the unanswered icons the camp shows now go to the host's
+    // worker first; sent when that set changes.
+    void core_send_priority_locked() {
+        std::vector<std::uint64_t> serials;
+        for (const auto& lane : visible_)
+            for (const auto& name : lane) {
+                const auto found = entries_.find(name);
+                if (found != entries_.end() && core_requested_.count(found->second.serial) &&
+                    std::find(serials.begin(),serials.end(),found->second.serial)==serials.end())
+                    serials.push_back(found->second.serial);
+            }
+        if (serials == core_priority_sent_) return;
+        core_priority_sent_ = serials;
+        core_send(scene_core::CampIconPriority{std::move(serials)});
+    }
 public:
     std::shared_ptr<const CampIconData> request(const std::string& name, bool visible = false) {
+        if (x64remote::core_active()) return core_request(name, visible);
         if (!workers_[0].joinable()) {
             ResourceStoreConfig mounts;
             if (!bridge_camp_texture_mounts(mounts)) {
@@ -411,6 +457,13 @@ public:
         }
         return entry.data;
     }
+    // The icon has no owned home and never will this world (its decode
+    // failed: no x4/x2/plain member in the icon mounts, or a bad file).
+    bool failed(const std::string& name) {
+        std::lock_guard lock(mutex_);
+        const auto found = entries_.find(name);
+        return found != entries_.end() && !found->second.failure.empty();
+    }
     void begin_priority_frame(const std::array<bool,3>& reset) {
         std::lock_guard lock(mutex_);
         for (auto& lane : visible_) lane.clear();
@@ -422,6 +475,7 @@ public:
         for (const auto& name : selected) request(name);
         std::lock_guard lock(mutex_);
         visible_[lane]=visible;
+        if (x64remote::core_active()) { core_send_priority_locked(); return; }
         auto& tab = selected_[lane];
         for (const auto& name : selected) if (entries_.at(name).pending &&
             std::find(tab.begin(),tab.end(),name)==tab.end()) tab.push_back(name);
@@ -434,6 +488,7 @@ public:
         for (auto& lane : visible_) lane.clear();
         visible_lane_=selected_lane_=0;
         for (auto& tab : selected_) tab.clear();
+        core_started_ = false; core_requested_.clear(); core_priority_sent_.clear();
         stopping_ = false;
     }
     ~CampIconLoader() { shutdown(); }
@@ -683,7 +738,15 @@ bool __stdcall resolve_item_texture(const char* name, void* self, void** output)
         // icon acquires the native compatibility binding.
         const auto key = std::make_pair(generation,std::string(name));
         if (camp_textures.find(key)==camp_textures.end()) {
-            if (!camp_icon_loader.request(key.second,true)) return true;
+            if (!camp_icon_loader.request(key.second,true)) {
+                // An icon whose decode failed for good (sw_12.0, hl_05.1,
+                // hl_05.2: no member in any mounted archive) takes the game's
+                // own lookup, as the stock game does: the texture LRU's
+                // CreateObject (the addon's x4/x2/plain loader in Dejavu)
+                // makes its canvas for the name, white where nothing loads.
+                if (camp_icon_loader.failed(key.second)) { *output = nullptr; return false; }
+                return true;
+            }
             miss.start();
         }
         auto* texture = ready_item_texture(key.second,generation);
@@ -1088,7 +1151,7 @@ template<class T> void call_hover_setter(HookId id,void* self,T value,HoverKind 
     __finally {hover_setter=previous;}
 }
 void __fastcall info_text(void* self,void*) {
-    original<VoidFn>(info_text_id)(self);
+    bridge_item_card_text_describe(self,original<VoidFn>(info_text_id));
     if(self==comparison_owner)comparison_modifiers=int(item_modifiers());
     if(self==blueprint_owner)blueprint_modifiers=int(item_modifiers());
     if(screen&&layout.wide&&valid&&self==field<void*>(screen,0x1dc))result_modifiers=int(item_modifiers());

@@ -141,8 +141,24 @@ LRESULT __fastcall focus_message_handler(UINT message, WPARAM wparam, LPARAM lpa
     const HWND window = g_window;
     // The native full dispatcher acts on clicks before reaching the HWND
     // subclass. Deliver renderer-control input to that subclass first.
-    if(input_message(message) && (g_hud_editing || renderer_controls_capture_input(window)))
-        return window?SendMessageW(window,message,wparam,lparam):0;
+    if(input_message(message) && (g_hud_editing || renderer_controls_capture_input(window))) {
+        if(!window)return 0;
+        const LRESULT result=SendMessageW(window,message,wparam,lparam);
+        // The game's loop never translates keys (GetMessage straight into this
+        // handler, no TranslateMessage), so renderer text fields (the F10
+        // filter) never received characters. Each key-down's characters are
+        // made here, with the thread's keyboard state, and delivered as
+        // WM_CHAR; ToUnicode flag 4 leaves the dead-key state alone.
+        if(message==WM_KEYDOWN||message==WM_SYSKEYDOWN){
+            BYTE state[256]{};
+            if(GetKeyboardState(state)){
+                WCHAR characters[4]{};
+                const int count=ToUnicode(static_cast<UINT>(wparam),static_cast<UINT>((lparam>>16)&0xff),state,characters,4,4u);
+                for(int index=0;index<count;++index)SendMessageW(window,WM_CHAR,characters[index],lparam);
+            }
+        }
+        return result;
+    }
     // The message handler answers Alt+Tab's key-up by calling the window
     // procedure's WA_INACTIVE path itself; the real WM_ACTIVATE decides
     // instead. While another window is in front, keyboard and mouse (a

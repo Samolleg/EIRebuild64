@@ -27,9 +27,12 @@
 #include <utility>
 #include <vector>
 #include "engine_bridge.h"
+#include "scene_sinks.h"
 #include "game_sites.h"
 #include "widescreen.h"
 #include "cursor_image.h"
+#include "x64_remote_device.h"
+#include "x64_remote_link.h"
 #include "hud_atlas_mutation.h"
 #include "res_mapping.h"
 #include "owned_ui_layers.h"
@@ -41,6 +44,7 @@
 #include "retained_static_scene.h"
 #include "camp_inventory.h"
 #include "stall_watchdog.h"
+#include "scene_commands_ui.h"
 
 namespace owned {
 #ifdef EID3D11_TESTING
@@ -843,6 +847,7 @@ public:
  HRESULT legacyCpuAccess();
  bool displayResizeIdle() const noexcept {return !locked_ && !dc_active_ && !image_.cpu_access_active;}
  void resizeDisplayCanvas(UINT width,UINT height) noexcept {
+  fill_pending_=false;
   freeDcStorage();image_.pixels=SurfacePixels{};image_.texture.Reset();image_.srv.Reset();
   image_.width=desc_.dwWidth=width;image_.height=desc_.dwHeight=height;
   image_.pitch=desc_.lPitch=surface_pitch(width,image_.format);image_.gpu_captured=false;image_.cpu_released=false;
@@ -941,6 +946,13 @@ private:
  // invalidation or a new generation's publication; destruction releases it.
  std::shared_ptr<const OwnedVisualSurface> held_publication_;
  bool visual_cpu_current_ = true;
+ // The primary's CPU mirror is never presented (the renderer owns the output)
+ // and is read only by a Lock, GetDC or a Blt from it. A colour fill of the
+ // whole primary therefore records its colour instead of writing the full
+ // CPU copy (32 MB at 4K); the first real reader materialises it exactly.
+ bool fill_pending_ = false;
+ DWORD fill_color_ = 0;
+ HRESULT materializePendingFill() noexcept;
  std::uint64_t dc_last_present_ = 0;
  void freeDcStorage() noexcept;
  std::atomic<ULONG> refs_{1};DD* owner_{};DDSURFACEDESC2 desc_{};SurfaceImage image_{};Surface* attached_{};HDC dc_{};HBITMAP dc_bitmap_{};HGDIOBJ dc_old_bitmap_{};void* dc_bits_{};HDC owned_text_dc_{};HBITMAP owned_text_bitmap_{};HGDIOBJ owned_text_old_bitmap_{};void* owned_text_bits_{};RECT locked_rect_{};DWORD locked_flags_{};HudAtlasMutationSnapshot hud_atlas_snapshot_{};bool dc_active_{};bool dc_owned_text_{};bool lost_{};bool locked_{};bool has_key_{};DDCOLORKEY key_{};DWORD unique_{1},priority_{},lod_{};
@@ -976,6 +988,7 @@ public:
  }
  [[noreturn]] void deviceRemovedExit(HRESULT reason) noexcept;
  bool startup_display_pending=true;
+ long core_surface_requests_read_=0; // core mode: Control::surface_requests retired
  void applyDisplay(const owned::DisplaySettings& settings);
  void invalidateVisualOutput() noexcept{if(active_target)active_target->invalidateVisualCpu();if(primary&&primary!=active_target)primary->invalidateVisualCpu();}
  HRESULT flushVisualUi(){if(renderer.has_pending_ui())invalidateVisualOutput();else if(renderer.scene_queue())return DD_OK;return renderer.flush_ui();}
@@ -1027,6 +1040,13 @@ public:
  }
  HRESULT presentVisual(){
   ++g_present_serial;
+  // Idle surfaces drop their CPU copy even if never sampled (#188).
+  if(!(g_present_serial&63))
+   for(auto& entry:g_surfaces_by_id){
+    SurfaceImage& image=*entry.second->image();
+    if(!image.cpu_released&&g_present_serial-image.last_cpu_present>=Renderer::kSurfaceCpuIdlePresents)
+     renderer.release_idle_surface_pixels(image);
+   }
   if(renderer.scene_queue()){serviceSceneSurfaceRequests();bridge_update_combat_portraits();}
   for(std::size_t i=g_dc_holders.size();i-->0;)g_dc_holders[i]->sweepDcStorage();
   queueOwnedCursor();
@@ -1258,173 +1278,7 @@ private:
  HRESULT unsupported(const char* n){trace(n);return DDERR_UNSUPPORTED;}
  std::atomic<ULONG> refs_{1};DD* core_{};
 };
-
-// ---- Scene thread (render_thread option): native sinks over a device copy ---
-// The bridge's queued world commands (the retained scene seam, transparent
-// terrain, wound layers) submit through these on the scene thread. They do
-// what the Device sinks do, with the D3D7 fixed state and frame state copied
-// when the command was queued (Device::captureSceneSinks), the stage-0 texture
-// the bridge binds as a snapshot, and a wound surface resolved to its
-// snapshot. The device's own bookkeeping (its pending legacy draws, UI flush,
-// native sequence) ran on the game thread before the command was queued.
-struct SceneSinks {
- Renderer* renderer=nullptr;
- FixedState state{};
- NativeFrameState frame{};bool frame_valid=false;
- std::shared_ptr<SurfaceImage> bound;
- std::uintptr_t wound_interface=0;std::shared_ptr<SurfaceImage> wound;
- bool sequence=false,batch_active=false,object_active=false;
- Renderer::NativeQueueCheckpoint checkpoint{};
- void flushUi(){if(renderer->has_pending_ui())(void)renderer->flush_ui();}
- SurfaceImage* woundImage(std::uintptr_t surface_interface) const{return surface_interface&&surface_interface==wound_interface?wound.get():nullptr;}
- static SceneSinks& of(void* context){return *static_cast<SceneSinks*>(context);}
- static bool submit(void* context,const NativeGeometryView& view,NativeGeometryResult& result) noexcept{
-  try{
-   auto& self=of(context);auto& renderer=*self.renderer;result={};
-   if(!self.sequence){self.flushUi();self.sequence=true;}
-   if(view.static_submission){
-    const auto& request=*view.static_submission;
-    using Operation=NativeStaticSubmission::Operation;
-    request.generation=renderer.native_static_generation();
-    if(request.operation==Operation::generation)return true;
-    if(request.operation==Operation::shadow_static||request.operation==Operation::shadow_dynamic){
-     request.generation=renderer.set_native_shadow_phase(request.operation==Operation::shadow_static?1u:2u);return true;}
-    if(request.operation==Operation::terrain_frame){
-     if(!request.terrain_state){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.terrain_frame";return false;}
-     return SUCCEEDED(renderer.set_native_terrain_frame(*request.terrain_state,request.full_sun,request.layer_shifts));
-    }
-    if(request.operation==Operation::remove){renderer.remove_native_static_object(request.key,request.terrain);return true;}
-    if(request.operation==Operation::flush){
-     if(!request.world_to_clip){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_clip";return false;}
-     const HRESULT hr=request.terrain?renderer.flush_native_static_terrain(self.state,*request.world_to_clip):
-      renderer.flush_native_static(self.state,*request.world_to_clip);
-     if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="scene.static_flush";
-      char detail[96];std::snprintf(detail,sizeof(detail),"hr=%08lx draws=%zu",static_cast<unsigned long>(hr),renderer.native_static_draw_count());
-      owned::bridge_append_probe_event("static_flush_failed",detail);return false;}
-     return true;
-    }
-    bool registered=false;HRESULT hr=S_OK;
-    if(request.terrain){
-     if(!request.terrain_view){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_terrain_view";return false;}
-     const auto& terrain=*request.terrain_view;
-     const FixedState terrain_state=terrain.owned_fixed_state.enabled?native_owned_submission_state(self.state,terrain.owned_fixed_state):self.state;
-     hr=renderer.set_native_static_terrain(request.key,terrain,terrain_state,
-      terrain.owned_texture.identity?nullptr:self.bound.get(),registered,&result);
-     request.registered=registered;return SUCCEEDED(hr);
-    }
-    if(!request.records){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_records";return false;}
-    hr=renderer.set_native_static_object(request.key,*request.records,self.state,registered,&result);
-    request.registered=registered;
-    if(FAILED(hr)){char detail[160];std::snprintf(detail,sizeof(detail),"hr=%08lx op=%s",static_cast<unsigned long>(hr),
-     result.failure_operation?result.failure_operation:"-");owned::bridge_append_probe_event("static_set_failed",detail);}
-    return SUCCEEDED(hr);
-   }
-   if(view.depth_submission)return SUCCEEDED(renderer.queue_native_depth(*view.depth_submission,self.state,&result));
-   if(view.prepared_submission){
-    const auto& submission=*view.prepared_submission;SurfaceImage* wound=nullptr;
-    if(submission.wound_surface_interface){
-     wound=self.woundImage(submission.wound_surface_interface);
-     if(!wound){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.prepared_wound";return false;}
-    }
-    return SUCCEEDED(renderer.queue_native_records(submission,self.state,wound,&result));
-   }
-   const bool prepared=view.prepared_mesh&&view.prepared_material&&view.prepared_identity.valid;
-   const FixedState submission_state=view.owned_fixed_state.enabled?native_owned_submission_state(self.state,view.owned_fixed_state):self.state;
-   const auto queue=[&](const NativeGeometryView& packet,const FixedState& state,SurfaceImage* texture,NativeGeometryResult* output){
-    if(packet.owned_texture.identity)return renderer.queue_native_owned(packet,state,output);
-    return prepared?renderer.queue_native_prepared(packet,state,texture,output):renderer.queue_native(packet,state,texture,output);
-   };
-   SurfaceImage* wound=view.wound_surface_interface?self.woundImage(view.wound_surface_interface):nullptr;
-   if(view.wound_only&&!wound)return false;
-   const bool owned_depth=view.owned_fixed_state.enabled&&view.contribution.known&&!view.contribution.color&&view.contribution.light_mask;
-   if(!wound)return SUCCEEDED(queue(view,submission_state,view.owned_texture.identity||owned_depth?nullptr:self.bound.get(),&result));
-   if(!view.wound_only&&FAILED(queue(view,submission_state,self.bound.get(),&result)))return false;
-   FixedState wound_state=submission_state;
-   wound_state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;wound_state.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_INVSRCALPHA;
-   wound_state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=TRUE;wound_state.stage[0][D3DTSS_TEXCOORDINDEX]=0;
-   NativeGeometryView wound_view=view;wound_view.wound_surface_interface=0;wound_view.wound_only=false;wound_view.owned_texture={};
-   if(prepared)wound_view.prepared_material=view.prepared_wound_material;
-   if(prepared&&!wound_view.prepared_material)return false;
-   if(FAILED(prepared?renderer.queue_native_prepared(wound_view,wound_state,wound,view.wound_only?&result:nullptr):
-                      renderer.queue_native(wound_view,wound_state,wound,view.wound_only?&result:nullptr)))return !view.wound_only;
-   return true;
-  }catch(...){if(!result.failure_operation)result.failure_operation="scene.exception";return false;}
- }
- static bool beginBatch(void* context,SemanticKind) noexcept{
-  try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();
-   if(FAILED(self.renderer->flush_native()))return false;self.sequence=true;self.batch_active=true;return true;}catch(...){return false;}
- }
- static void endBatch(void* context,bool commit) noexcept{
-  try{auto& self=of(context);if(!self.batch_active)return;if(!commit)self.renderer->discard_native();self.batch_active=false;}catch(...){}
- }
- static bool beginObject(void* context) noexcept{
-  try{auto& self=of(context);if(self.object_active||!self.renderer->checkpoint_native(self.checkpoint))return false;self.object_active=true;return true;}catch(...){return false;}
- }
- static void endObject(void* context,bool commit) noexcept{
-  try{auto& self=of(context);if(!self.object_active)return;if(!commit)self.renderer->rollback_native(self.checkpoint);else self.renderer->release_native_checkpoint(self.checkpoint);self.object_active=false;}catch(...){}
- }
- static bool frameState(void* context,NativeFrameState& output) noexcept{
-  const auto& self=of(context);if(!self.frame_valid)return false;output=self.frame;return true;
- }
- static bool worldLighting(void* context,const NativeWorldLighting& lighting) noexcept{
-  try{return of(context).renderer->set_native_world_lighting(lighting);}catch(...){return false;}
- }
- static bool pointLights(void* context,const RetainedVisualFrame& frame) noexcept{
-  try{return of(context).renderer->set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}
- }
- static bool pointShadowBatch(void* context,std::uint64_t& generation,bool& pressure) noexcept{
-  try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();self.sequence=true;
-   return self.renderer->begin_native_point_shadow_batch(generation,&pressure);}catch(...){return false;}
- }
- static bool pointShadowAllocate(void* context,bool overlay,int& slot) noexcept{return of(context).renderer->allocate_native_point_shadow(overlay,slot);}
- static void pointShadowRelease(void* context,std::uint64_t generation,int slot) noexcept{of(context).renderer->release_native_point_shadow(generation,slot);}
- static void pointShadowPublish(void* context,const std::vector<NativePointShadowPublication>& lights,const NativePointShadowStats& stats) noexcept{
-  try{of(context).renderer->publish_native_point_shadows(lights,stats);}catch(...){}
- }
- static bool pointShadowFaces(void* context,std::uint32_t light,std::uint32_t first_face,const NativePointShadowFrame& faces) noexcept{
-  try{auto& self=of(context);if(self.batch_active)return false;self.sequence=true;
-   return self.renderer->begin_native_point_shadow_faces(light,first_face,faces);}catch(...){return false;}
- }
- static bool pointShadowFacesEnd(void* context,bool commit) noexcept{try{return of(context).renderer->end_native_point_shadow_faces(commit);}catch(...){return false;}}
- static void cullProjection(void* context,NativeShadowCullProjection& projection) noexcept{of(context).renderer->native_shadow_cull_projection(projection);}
- static bool shadowsBegin(void* context,const NativeShadowFrame& frame,std::uint8_t& dirty) noexcept{
-  try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();self.sequence=true;
-   return self.renderer->begin_native_shadows(frame,dirty);}catch(...){return false;}
- }
- static bool shadowsEnd(void* context,bool commit) noexcept{try{return of(context).renderer->end_native_shadows(commit);}catch(...){return false;}}
- static bool staticDepth(void* context,const RetainedShadowCasterValue* casters,std::uint32_t count,std::uint64_t store_revision,
-  std::vector<RetainedShadowCasterValue>& missing) noexcept{
-  try{return of(context).renderer->queue_native_static_shadow_depth(casters,count,store_revision,missing);}catch(...){return false;}
- }
- static bool terrainBake(void* context,const NativeTerrainShadowEntry* entries,std::uint32_t count,std::vector<std::uint32_t>& absent) noexcept{
-  try{return of(context).renderer->queue_native_terrain_shadow_bake(entries,count,absent);}catch(...){return false;}
- }
- static void shadowDiagnostics(void* context,std::uint64_t world_serial,const NativeShadowSourceDiagnostics& values) noexcept{
-  try{of(context).renderer->record_native_shadow_source_diagnostics(world_serial,values);}catch(...){}
- }
- static bool rainBegin(void* context,const NativeShadowSlice& slice,std::uint32_t side) noexcept{
-  try{auto& self=of(context);if(self.batch_active)return false;self.sequence=true;
-   return self.renderer->begin_native_rain_occlusion(slice,side);}catch(...){return false;}
- }
- static bool rainEnd(void* context,bool commit) noexcept{try{return of(context).renderer->end_native_rain_occlusion(commit);}catch(...){return false;}}
- static void install(void* context) noexcept{
-  // The shelter (rain occlusion) sinks are thread-local like the others: the
-  // scene thread's world preparation bakes through these.
-  if(!context){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_rain_occlusion_sink(nullptr,nullptr);return;}
-  bridge_set_rain_occlusion_sink(&rainBegin,&rainEnd);
-  bridge_set_native_geometry_sink(context,&submit,&beginBatch,&endBatch,&beginObject,&endObject,&frameState,&worldLighting,
-   &shadowsBegin,&shadowsEnd,&shadowDiagnostics,&pointLights,&pointShadowFaces,&pointShadowFacesEnd,&staticDepth,
-   &pointShadowBatch,&pointShadowPublish,&pointShadowAllocate,&pointShadowRelease,&cullProjection,&terrainBake);
- }
- static void bind(void* context,const std::shared_ptr<SurfaceImage>& texture) noexcept{of(context).bound=texture;}
- static void adopt(void* context,const void* from) noexcept{
-  auto& self=of(context);const auto& source=*static_cast<const SceneSinks*>(from);
-  self.state=source.state;self.frame=source.frame;self.frame_valid=source.frame_valid;self.bound=source.bound;
- }
- static void setWound(void* context,std::uintptr_t surface_interface,const std::shared_ptr<SurfaceImage>& texture) noexcept{
-  auto& self=of(context);self.wound_interface=surface_interface;self.wound=texture;
- }
-};
+// SceneSinks (scene_sinks.h): native sinks over a device copy, shared with the core-mode host.
 
 class Device final:public IDirect3DDevice7 {
 public:
@@ -1540,11 +1394,14 @@ private:
   // Camp inventory composition keeps the device path (its icon textures are
   // resolved against the live bound surface). The world draws into the
   // composition output too, so only the composing state can tell them apart.
+  // Core mode has no device path: camp composition is sent too, with the
+  // camp placement in the captured sinks (captureSceneSinks).
   handoff.active=[](void* context){
-   return !camp::composing&&static_cast<Device*>(context)->dd_->renderer.scene_queue();};
+   const auto& renderer=static_cast<Device*>(context)->dd_->renderer;
+   return (!camp::composing||renderer.core_mode())&&renderer.scene_queue();};
   handoff.post=[](void* context,std::function<void()> work){
    auto& renderer=static_cast<Device*>(context)->dd_->renderer;
-   renderer.scene_note_native();renderer.scene_post_frame(std::move(work));return true;};
+   renderer.scene_note_native();renderer.scene_post_frame(std::move(work),"bridge_handoff_post");return true;};
   handoff.capture_sinks=&Device::captureSceneSinks;
   handoff.install_sinks=&SceneSinks::install;
   handoff.bound_texture=[](void* context){auto* self=static_cast<Device*>(context);
@@ -1556,7 +1413,18 @@ private:
   handoff.set_wound=&SceneSinks::setWound;
   handoff.sync=[](void* context,const char* reason){static_cast<Device*>(context)->dd_->renderer.scene_sync(reason);};
   handoff.adopt_sinks=&SceneSinks::adopt;
+  handoff.core_renderer=[](void* context)->Renderer*{auto& renderer=static_cast<Device*>(context)->dd_->renderer;
+   return renderer.core_mode()?&renderer:nullptr;};
   bridge_set_scene_handoff(handoff);
+ }
+ // Core mode: the camp state a composed submission depends on (sent with it;
+ // the device path reads the same thread-locals inline). Only while composing.
+ camp::SubmissionState campSubmission() const noexcept{
+  camp::SubmissionState value;
+  if(!camp::composing)return value;
+  value.composing=true;value.visual=camp::visual;value.output=target_&&target_->compositionOutput();
+  value.glow=camp_inventory_preview_specular_rgb(value.glow_rgb);
+  return value;
  }
  // Game thread: a native sequence begins (queued legacy draws and UI go
  // first), then the state the scene sinks read is copied.
@@ -1568,6 +1436,9 @@ private:
    auto sinks=std::make_shared<SceneSinks>();
    sinks->renderer=&self->dd_->renderer;sinks->state=self->state_;
    sinks->frame_valid=nativeFrameState(self,sinks->frame);
+   // Core mode: the camp placement the inline device path would apply
+   // (queueNativeGeometry's output scope and the composing state).
+   sinks->camp_state=self->campSubmission();
    return sinks;
   }catch(...){return nullptr;}
  }
@@ -1774,58 +1645,21 @@ private:
  // the game needs only the selection result back from. That result is
  // computed here from the packet (Renderer::native_packet_extents), the
  // packet's arrays are copied off the game's memory and the submission is
- // queued with the device state and texture snapshots. Prepared, decoded,
- // world, terrain-page and surface-texture packets keep the synchronous path.
- struct ScenePacket {
-  NativeGeometryView view;
-  std::vector<NativePackedGroup> positions,normals;
-  std::vector<std::uint32_t> diffuse,specular;
-  std::vector<NativeTextureCoordinate> coordinates;
-  std::vector<NativeVertexComponent> components;
-  std::vector<std::uint16_t> indices;
-  std::vector<NativeMorphOffset> morphs;
-  std::vector<NativeOwnedTextureMip> mips;
-  std::vector<std::vector<std::uint8_t>> mip_bytes;
- };
- static bool scenePacketEligible(const NativeGeometryView& view) noexcept{
+ // queued as a typed command (scene_ui::Packet) with the device state and
+ // the surfaces named by handle; their snapshots ride in its residency.
+ // Prepared, decoded, world, terrain-page and surface-texture packets keep
+ // the synchronous path.
+ struct ScenePacketCommand { scene_ui::Packet packet; scene_ui::Residency residency; };
+ // Core mode also sends prepared (non-world) figure packets: the host keeps
+ // its own prepared handles per identity (scene_ui::Packet::run).
+ static bool scenePacketEligible(const NativeGeometryView& view,bool core=false) noexcept{
   const bool prepared=view.prepared_mesh&&view.prepared_material&&view.prepared_identity.valid;
-  return !prepared&&!view.decode&&!view.decode_colors&&!view.world.enabled&&!view.prebuilt_mesh&&!view.lods&&
+  return (core||!prepared)&&!view.decode&&!view.decode_colors&&!view.world.enabled&&!view.prebuilt_mesh&&!view.lods&&
    !view.component_parts&&!view.terrain_page&&!view.terrain_vertices&&!view.terrain_vertex_count&&
    !view.terrain_animation_phases&&!view.terrain_phase_values&&!view.owned_texture.surface&&
    !view.owned_texture.resource&&(!view.owned_texture.identity||view.owned_texture.mips)&&
    view.positions&&view.normals&&view.components&&view.texture_coordinates&&view.indices&&
    view.position_groups&&view.normal_groups&&view.component_count&&view.texture_coordinate_count&&view.index_count;
- }
- static std::shared_ptr<ScenePacket> copyScenePacket(const NativeGeometryView& source){
-  auto packet=std::make_shared<ScenePacket>();
-  auto& view=packet->view;view=source;
-  if(!view.cache_identity&&!view.cache_pointers_valid){
-   view.cache_pointers={reinterpret_cast<std::uintptr_t>(source.positions),reinterpret_cast<std::uintptr_t>(source.normals),
-    reinterpret_cast<std::uintptr_t>(source.components),reinterpret_cast<std::uintptr_t>(source.texture_coordinates),
-    reinterpret_cast<std::uintptr_t>(source.indices)};
-   view.cache_pointers_valid=true;
-  }
-  const std::size_t colors=static_cast<std::size_t>(source.normal_groups)*4u;
-  packet->positions.assign(source.positions,source.positions+source.position_groups);view.positions=packet->positions.data();
-  packet->normals.assign(source.normals,source.normals+source.normal_groups);view.normals=packet->normals.data();
-  if(source.diffuse){packet->diffuse.assign(source.diffuse,source.diffuse+colors);view.diffuse=packet->diffuse.data();}
-  if(source.specular){packet->specular.assign(source.specular,source.specular+colors);view.specular=packet->specular.data();}
-  packet->coordinates.assign(source.texture_coordinates,source.texture_coordinates+source.texture_coordinate_count);
-  view.texture_coordinates=packet->coordinates.data();
-  packet->components.assign(source.components,source.components+source.component_count);view.components=packet->components.data();
-  packet->indices.assign(source.indices,source.indices+source.index_count);view.indices=packet->indices.data();
-  if(source.morphs&&source.morph_count){packet->morphs.assign(source.morphs,source.morphs+source.morph_count);view.morphs=packet->morphs.data();}
-  else{view.morphs=nullptr;view.morph_count=0;}
-  if(source.owned_texture.identity&&source.owned_texture.mips){
-   packet->mips.assign(source.owned_texture.mips,source.owned_texture.mips+source.owned_texture.mip_count);
-   packet->mip_bytes.resize(packet->mips.size());
-   for(std::size_t index=0;index<packet->mips.size();++index){
-    auto& mip=packet->mips[index];
-    if(mip.data&&mip.bytes){packet->mip_bytes[index].assign(mip.data,mip.data+mip.bytes);mip.data=packet->mip_bytes[index].data();}
-   }
-   view.owned_texture.mips=packet->mips.data();
-  }
-  return packet;
  }
  bool queueScenePacket(const NativeGeometryView& view,NativeGeometryResult& result){
   result={};
@@ -1846,18 +1680,46 @@ private:
    if(FAILED(hr)){result.failure_hresult=hr;result.failure_operation="scene.screen_extents";return false;}
    result.visible=hr==S_OK;result.screen_extents_valid=true;result.screen_extents=extents;
   }
-  auto sinks=std::make_shared<SceneSinks>();
-  sinks->renderer=&dd_->renderer;sinks->state=state_;sinks->sequence=true;
-  sinks->frame_valid=nativeFrameState(this,sinks->frame);
-  sinks->bound=dd_->renderer.scene_surface(bound);
-  if(wound){sinks->wound_interface=view.wound_surface_interface;sinks->wound=dd_->renderer.scene_surface(wound->image());}
-  auto packet=copyScenePacket(view);
+  auto command=std::make_unique<ScenePacketCommand>();
+  auto& packet=command->packet;
+  packet.state=state_;packet.frame_valid=nativeFrameState(this,packet.frame);
+  if(auto snapshot=dd_->renderer.scene_surface(bound)){
+   packet.bound=scene_ui::surface_handle(*snapshot);command->residency.add({packet.bound,std::move(snapshot)});}
+  if(wound)if(auto snapshot=dd_->renderer.scene_surface(wound->image())){
+   packet.wound=scene_ui::surface_handle(*snapshot);command->residency.add({packet.wound,std::move(snapshot)});}
+  copy_scene_packet(view,packet);
   dd_->renderer.scene_note_native();
-  dd_->renderer.scene_post_frame([sinks,packet]{
-   NativeGeometryResult ignored{};
-   if(!SceneSinks::submit(sinks.get(),packet->view,ignored))
-    Renderer::report_scene_failure(ignored.failure_operation?ignored.failure_operation:"scene.packet",
-     ignored.failure_hresult?ignored.failure_hresult:E_FAIL);
+  // Core mode: the host submits it through its own sinks (scene_ui::Packet::run).
+  if(dd_->renderer.core_mode()){
+   // ---- camp composition and prepared figures (claude/s3-store) ----
+   packet.camp_state=campSubmission();
+   packet.prepared_handles=std::uint8_t((view.prepared_mesh?1u:0u)|(view.prepared_material?2u:0u)|
+    (view.prepared_wound_material?4u:0u));
+   packet.view.prepared_mesh=nullptr;packet.view.prepared_material=nullptr;packet.view.prepared_wound_material=nullptr;
+   // A camp item icon: the bound native binding's owned GPU home replaces
+   // the bound texture, with the device path's submission state (the
+   // inline path queues it through queue_native_owned the same way).
+   const bool owned_depth=view.owned_fixed_state.enabled&&view.contribution.known&&
+    !view.contribution.color&&view.contribution.light_mask;
+   if(camp::composing&&bound&&!view.owned_texture.identity&&!owned_depth){
+    NativeOwnedTextureView camp_texture{};
+    if(!camp_inventory_texture(bound->id,bound->generation,camp_texture)){
+     result.failure_operation="scene.camp_icon";return false;}
+    if(camp_texture.identity&&camp_texture.surface){
+     packet.camp_surface=*camp_texture.surface;packet.camp_surface.alpha_cut_mask.reset();
+     packet.camp_surface_present=true;
+     camp_texture.surface=nullptr;
+     packet.view.owned_texture=camp_texture;packet.view.owned_fixed_state={};
+     packet.state=submission_state;
+    }
+   }
+   dd_->renderer.core_post_command(packet,"scene_packet");return true;
+  }
+  dd_->renderer.scene_post_frame([renderer=&dd_->renderer,command=std::move(command)]{
+   auto& packet=command->packet;
+   auto bound=command->residency.snapshot(packet.bound);
+   auto wound=packet.wound.present?command->residency.snapshot(packet.wound):nullptr;
+   submit_scene_packet(*renderer,packet,std::move(bound),std::move(wound));
   });
   return true;
  }
@@ -1916,7 +1778,7 @@ private:
    invalidateVisualTarget();
    return SUCCEEDED(dd_->renderer.queue_native_records(submission,state_,wound?wound->image():nullptr,&result));
   }
-  if(!camp::composing&&dd_->renderer.scene_queue()&&scenePacketEligible(view)){
+  if(dd_->renderer.scene_queue()&&(dd_->renderer.core_mode()?scenePacketEligible(view,true):!camp::composing&&scenePacketEligible(view))){
    try{return queueScenePacket(view,result);}
    catch(...){result.failure_operation="scene.packet_copy";return false;}
   }
@@ -2058,6 +1920,9 @@ bool Surface::publishCampIcon(const PreparedCampIcon& icon,
     std::shared_ptr<const OwnedVisualSurface>& value) noexcept {
     // Admit the worker's completed GPU home. No CPU bytes, alpha scan,
     // conversion, upload, native decoder or immediate context call here.
+    // Core mode: the host decoded the icon (no texture, no alpha mask here);
+    // the bind makes its host texture this surface's GPU home.
+    const bool core = owner_->renderer.core_mode() && icon.core_serial;
     const auto& prepared = icon.description;
     const auto& format = image_.format;
     if ((image_.width != 256 && image_.width != 1024 && image_.width != 2048) ||
@@ -2066,12 +1931,14 @@ bool Surface::publishCampIcon(const PreparedCampIcon& icon,
         format.dwGBitMask != 0x03e0 || format.dwBBitMask != 0x001f ||
         format.dwRGBAlphaBitMask != 0x8000 || prepared.width != image_.width ||
         prepared.height != image_.height || prepared.pitch != image_.pitch ||
-        !icon.texture || !icon.srv ||
-        (!prepared.alpha_fully_opaque && (!prepared.alpha_cut_mask ||
+        (!core && (!icon.texture || !icon.srv)) ||
+        (!core && !prepared.alpha_fully_opaque && (!prepared.alpha_cut_mask ||
             prepared.alpha_cut_mask->size() != (std::size_t(image_.width)*image_.height+7)/8)) ||
         !image_.pixels.empty() || image_.texture || image_.gpu_captured || locked_ || dc_active_) return false;
-    ComPtr<ID3D11Device> device; icon.texture->GetDevice(&device);
-    if (device.Get() != owner_->renderer.resource_device()) return false;
+    if (!core) {
+        ComPtr<ID3D11Device> device; icon.texture->GetDevice(&device);
+        if (device.Get() != owner_->renderer.resource_device()) return false;
+    }
     OwnedVisualSurface description = prepared;
     description.id = image_.id; description.generation = image_.generation;
     description.format = format;
@@ -2084,6 +1951,11 @@ bool Surface::publishCampIcon(const PreparedCampIcon& icon,
     ++image_.texture_serial; clear_surface_dirty(image_);
     visual_cpu_current_ = true; visual_source_observed_ = true;
     update_surface_memory_accounting(image_);
+    if (core) {
+        owner_->renderer.core_post_command(scene_core::CampIconBind{icon.core_serial,image_.id,image_.generation},
+            "camp_icon_bind");
+        return true;
+    }
     if (owner_->renderer.scene_queue()) {
         owner_->renderer.scene_publish_surface_texture(image_);
         std::lock_guard<std::mutex> guard(g_scene_surface_lock);
@@ -2144,6 +2016,24 @@ void register_scene_surface_texture(DD& owner,SurfaceImage& image) noexcept{
 }
 
 void DD::serviceSceneSurfaceRequests() noexcept{
+    // Core mode: the host Renderer's resolver missed these generations; their
+    // writes go out with this frame (upload sends SurfaceWrite in core mode).
+    if(renderer.core_mode()){
+        auto& control=x64remote::control();
+        const long written=control.surface_requests_written;
+        if(written-core_surface_requests_read_>long(x64remote::kSurfaceRequests))core_surface_requests_read_=written-long(x64remote::kSurfaceRequests);
+        for(;core_surface_requests_read_<written;++core_surface_requests_read_){
+            MemoryBarrier();
+            const auto request=control.surface_requests[static_cast<std::uint32_t>(core_surface_requests_read_)%x64remote::kSurfaceRequests];
+            const auto found=g_surfaces_by_id.find(request.id);
+            if(found==g_surfaces_by_id.end()||found->second->owner()!=this)continue;
+            auto& image=*found->second->image();
+            if(image.generation!=request.generation||image.gpu_captured)continue;
+            if(image.cpu_access_active&&image.uploaded_generation!=image.generation)continue;
+            (void)renderer.upload(image);
+        }
+        return;
+    }
     std::vector<std::pair<std::uint64_t,std::uint64_t>> requests;
     {std::lock_guard<std::mutex> guard(g_scene_surface_lock);requests.swap(g_scene_surface_requests);}
     for(const auto& request:requests){
@@ -2279,7 +2169,19 @@ HRESULT Surface::legacyCpuAccess() {
 
 Surface::Surface(DD* o,const DDSURFACEDESC2& d):owner_(o),desc_(d){g_surface_vtable=*reinterpret_cast<void* const*>(static_cast<IDirectDrawSurface7*>(this));image_.static_mip_hint=(d.ddsCaps.dwCaps&DDSCAPS_TEXTURE)&&!(d.ddsCaps.dwCaps&(DDSCAPS_3DDEVICE|DDSCAPS_PRIMARYSURFACE|DDSCAPS_BACKBUFFER))&&(d.ddsCaps.dwCaps2&DDSCAPS2_HINTSTATIC)&&!(d.ddsCaps.dwCaps2&DDSCAPS2_HINTDYNAMIC);image_.gpu_primary=(d.ddsCaps.dwCaps&DDSCAPS_TEXTURE)&&!(d.ddsCaps.dwCaps&(DDSCAPS_SYSTEMMEMORY|DDSCAPS_3DDEVICE|DDSCAPS_PRIMARYSURFACE|DDSCAPS_BACKBUFFER|DDSCAPS_ZBUFFER));owner_->AddRef();image_.id=++g_next_surface_id;try{g_surfaces_by_id[image_.id]=this;}catch(...){image_.gpu_primary=false;}if(!desc_.dwSize)desc_.dwSize=sizeof(desc_);image_.width=std::max<DWORD>(1,desc_.dwWidth?desc_.dwWidth:owner_->width);image_.height=std::max<DWORD>(1,desc_.dwHeight?desc_.dwHeight:owner_->height);image_.format=(desc_.dwFlags&DDSD_PIXELFORMAT)?desc_.ddpfPixelFormat:bgra32();image_.pitch=surface_pitch(image_.width,image_.format);desc_.dwWidth=image_.width;desc_.dwHeight=image_.height;desc_.lPitch=image_.pitch;desc_.ddpfPixelFormat=image_.format;desc_.dwFlags|=DDSD_WIDTH|DDSD_HEIGHT|DDSD_PITCH|DDSD_PIXELFORMAT;if(primary())owner_->primary=this;trace("Surface.Create","id=%llu caps=%08lx %ux%u flags=%08lx fourcc=%08lx bpp=%lu pitch=%ld backing=lazy",(unsigned long long)image_.id,desc_.ddsCaps.dwCaps,image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount,image_.pitch);}
 Surface::~Surface(){if(visual_source_observed_){retained_visual_retire_surface(image_.id);visual_source_observed_=false;}if(dc_layer_){ui_layer_abort(layer_dc_);dc_layer_=false;dc_active_=false;image_.cpu_access_active=false;}if(dc_active_)ReleaseDC(dc_owned_text_?owned_text_dc_:dc_);if(owned_text_dc_){bridge_retire_owned_text_surface(image_.id);SelectObject(owned_text_dc_,owned_text_old_bitmap_);DeleteObject(owned_text_bitmap_);DeleteDC(owned_text_dc_);}freeDcStorage();g_surfaces_by_id.erase(image_.id);scene_surface_texture_erase(image_.id);if(attached_)attached_->Release();if(owner_->primary==this)owner_->primary=nullptr;owner_->renderer.retire_surface(image_.id);release_surface_memory_accounting(image_);owner_->Release();trace("Surface.Destroy");}
-HRESULT Surface::ensurePixels(){if(image_.cpu_released)return restoreReleased();if(!image_.pixels.empty())return DD_OK;const auto bytes=(size_t)image_.pitch*surface_rows(image_.height,image_.format);try{image_.pixels.resize(bytes);}catch(const std::bad_alloc&){trace("Surface.AllocationFailed","%ux%u bytes=%llu",image_.width,image_.height,(unsigned long long)bytes);return DDERR_OUTOFMEMORY;}update_surface_memory_accounting(image_);return DD_OK;}
+HRESULT Surface::ensurePixels(){if(fill_pending_)return materializePendingFill();if(image_.cpu_released)return restoreReleased();if(!image_.pixels.empty())return DD_OK;const auto bytes=(size_t)image_.pitch*surface_rows(image_.height,image_.format);try{image_.pixels.resize(bytes);}catch(const std::bad_alloc&){trace("Surface.AllocationFailed","%ux%u bytes=%llu",image_.width,image_.height,(unsigned long long)bytes);return DDERR_OUTOFMEMORY;}update_surface_memory_accounting(image_);return DD_OK;}
+HRESULT Surface::materializePendingFill() noexcept{
+ // The recorded whole-surface fill, exactly as the colour fill would have
+ // written it (fill_pending_ replaces the CPU pixels of the whole surface).
+ const auto bytes=(size_t)image_.pitch*surface_rows(image_.height,image_.format);
+ try{image_.pixels.resize(bytes);}catch(const std::bad_alloc&){return DDERR_OUTOFMEMORY;}
+ fill_pending_=false;
+ const DWORD pixel=pixel_bytes(image_.format);
+ for(UINT y=0;y<image_.height;++y){auto* row=image_.pixels.data()+(size_t)y*image_.pitch;
+  for(UINT x=0;x<image_.width;++x,row+=pixel)std::memcpy(row,&fill_color_,pixel);}
+ update_surface_memory_accounting(image_);
+ return DD_OK;
+}
 HRESULT Surface::ensureDcStorage(){if(dc_&&dc_bitmap_&&dc_bits_)return DD_OK;BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=(LONG)image_.width;info.bmiHeader.biHeight=-(LONG)image_.height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;dc_=CreateCompatibleDC(nullptr);if(!dc_)return DDERR_GENERIC;dc_bitmap_=CreateDIBSection(dc_,&info,DIB_RGB_COLORS,&dc_bits_,nullptr,0);if(!dc_bitmap_||!dc_bits_){if(dc_bitmap_)DeleteObject(dc_bitmap_);DeleteDC(dc_);dc_=nullptr;dc_bitmap_=nullptr;dc_bits_=nullptr;return DDERR_GENERIC;}dc_old_bitmap_=SelectObject(dc_,dc_bitmap_);try{g_dc_holders.push_back(this);}catch(...){freeDcStorage();return DDERR_OUTOFMEMORY;}return DD_OK;}
 HRESULT Surface::ensurePixelsForWrite(bool full_overwrite){
  // A complete overwrite needs no readback of the released contents.
@@ -2291,6 +2193,7 @@ HRESULT Surface::ensurePixelsForWrite(bool full_overwrite){
 }
 void Surface::freeDcStorage() noexcept{dib_generation_=0;if(!dc_)return;g_dc_holders.erase(std::remove(g_dc_holders.begin(),g_dc_holders.end(),this),g_dc_holders.end());SelectObject(dc_,dc_old_bitmap_);DeleteObject(dc_bitmap_);DeleteDC(dc_);dc_=nullptr;dc_bitmap_=nullptr;dc_old_bitmap_=nullptr;dc_bits_=nullptr;}
 HRESULT Surface::restoreReleased(bool pin){
+ if(fill_pending_){const HRESULT filled=materializePendingFill();if(FAILED(filled))return filled;}
  if(!image_.cpu_released&&!pin)return DD_OK;
  if(image_.cpu_released&&!owner_->renderer.ready())return DDERR_SURFACELOST;
  return owner_->renderer.restore_surface_pixels(image_,pin);
@@ -2302,7 +2205,30 @@ void Surface::finishCpuWrite() noexcept{
  if(SUCCEEDED(owner_->renderer.upload(image_)))owner_->renderer.release_surface_pixels(image_);
 }
 HRESULT Surface::ensureOwnedTextDc(){if(owned_text_dc_&&owned_text_bitmap_&&owned_text_bits_)return DD_OK;BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=1;info.bmiHeader.biHeight=-1;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;owned_text_dc_=CreateCompatibleDC(nullptr);if(!owned_text_dc_)return DDERR_GENERIC;owned_text_bitmap_=CreateDIBSection(owned_text_dc_,&info,DIB_RGB_COLORS,&owned_text_bits_,nullptr,0);if(!owned_text_bitmap_||!owned_text_bits_){if(owned_text_bitmap_)DeleteObject(owned_text_bitmap_);DeleteDC(owned_text_dc_);owned_text_dc_=nullptr;owned_text_bitmap_=nullptr;owned_text_bits_=nullptr;return DDERR_GENERIC;}owned_text_old_bitmap_=SelectObject(owned_text_dc_,owned_text_bitmap_);if(!owned_text_old_bitmap_||owned_text_old_bitmap_==HGDI_ERROR){DeleteObject(owned_text_bitmap_);DeleteDC(owned_text_dc_);owned_text_dc_=nullptr;owned_text_bitmap_=nullptr;owned_text_old_bitmap_=nullptr;owned_text_bits_=nullptr;return DDERR_GENERIC;}return DD_OK;}
-HRESULT Surface::QueryInterface(REFIID r,void** o){trace_iid("Surface.QueryInterface",r);if(!o)return E_POINTER;*o=nullptr;if(r==IID_IUnknown||r==IID_IDirectDrawSurface7){*o=this;AddRef();return S_OK;}return E_NOINTERFACE;}
+// The primary surface's gamma control: the game sets its brightness/contrast/
+// gamma ramp here (game.exe 00504A60); the renderer applies it at present.
+class GammaControl final:public IDirectDrawGammaControl {
+public:
+ explicit GammaControl(Surface* surface):surface_(surface){surface_->AddRef();}
+ ~GammaControl(){surface_->Release();}
+ HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r,void** out) override{
+  if(!out)return E_POINTER;*out=nullptr;
+  if(r==IID_IUnknown||r==IID_IDirectDrawGammaControl){*out=this;AddRef();return S_OK;}
+  return surface_->QueryInterface(r,out);
+ }
+ ULONG STDMETHODCALLTYPE AddRef() override{return ++refs_;}
+ ULONG STDMETHODCALLTYPE Release() override{ULONG n=--refs_;if(!n)delete this;return n;}
+ HRESULT STDMETHODCALLTYPE GetGammaRamp(DWORD,LPDDGAMMARAMP ramp) override{
+  if(!ramp)return DDERR_INVALIDPARAMS;surface_->owner()->renderer.gamma_ramp(ramp->red,ramp->green,ramp->blue);return DD_OK;}
+ HRESULT STDMETHODCALLTYPE SetGammaRamp(DWORD,LPDDGAMMARAMP ramp) override{
+  trace("GammaControl.SetGammaRamp");
+  if(!ramp)return DDERR_INVALIDPARAMS;surface_->owner()->renderer.set_gamma_ramp(ramp->red,ramp->green,ramp->blue);return DD_OK;}
+private:
+ Surface* surface_;ULONG refs_=1;
+};
+HRESULT Surface::QueryInterface(REFIID r,void** o){trace_iid("Surface.QueryInterface",r);if(!o)return E_POINTER;*o=nullptr;if(r==IID_IUnknown||r==IID_IDirectDrawSurface7){*o=this;AddRef();return S_OK;}
+ if(r==IID_IDirectDrawGammaControl&&primary()){auto* control=new(std::nothrow)GammaControl(this);if(!control)return E_OUTOFMEMORY;*o=control;return S_OK;}
+ return E_NOINTERFACE;}
 HRESULT Surface::AddAttachedSurface(LPDIRECTDRAWSURFACE7 s){trace("Surface.AddAttachedSurface");auto* p=dynamic_cast<Surface*>(s);if(!p)return DDERR_INVALIDOBJECT;if(attached_)attached_->Release();attached_=p;attached_->AddRef();return DD_OK;}
 HRESULT Surface::DeleteAttachedSurface(DWORD,LPDIRECTDRAWSURFACE7 s){trace("Surface.DeleteAttachedSurface");if(attached_!=s)return DDERR_NOTFOUND;attached_->Release();attached_=nullptr;return DD_OK;}
 HRESULT Surface::EnumAttachedSurfaces(LPVOID c,LPDDENUMSURFACESCALLBACK7 cb){trace("Surface.EnumAttachedSurfaces");if(!cb)return DDERR_INVALIDPARAMS;if(attached_){DDSURFACEDESC2 d{};attached_->GetSurfaceDesc(&d);cb(attached_,&d,c);}return DD_OK;}
@@ -2316,7 +2242,7 @@ bool Surface::compositionOutput()const noexcept {
 HRESULT Surface::GetCaps(LPDDSCAPS2 c){if(!c)return DDERR_INVALIDPARAMS;*c=desc_.ddsCaps;return DD_OK;}
 HRESULT Surface::GetPixelFormat(LPDDPIXELFORMAT f){if(!f)return DDERR_INVALIDPARAMS;*f=image_.format;return DD_OK;}
 HRESULT Surface::GetSurfaceDesc(LPDDSURFACEDESC2 d){if(!d)return DDERR_INVALIDPARAMS;DWORD size=d->dwSize;*d=desc_;d->dwSize=size?size:sizeof(*d);d->lpSurface=locked_?image_.pixels.data():nullptr;return DD_OK;}
-HRESULT Surface::beginDibSession(){HRESULT hr=restoreReleased(false);if(FAILED(hr))return hr;hr=legacyCpuAccess();if(FAILED(hr))return hr;hr=ensureDcStorage();if(FAILED(hr))return hr;dc_last_present_=g_present_serial;image_.cpu_access_active=true;const auto& format=image_.format;const DWORD bytes=pixel_bytes(format);auto* output=static_cast<DWORD*>(dc_bits_);const bool native_bgra=format.dwRGBBitCount==32&&format.dwRBitMask==0x00ff0000&&format.dwGBitMask==0x0000ff00&&format.dwBBitMask==0x000000ff&&format.dwRGBAlphaBitMask==0xff000000;if(native_bgra){const size_t row_bytes=(size_t)image_.width*4;for(UINT y=0;y<image_.height;++y)std::memcpy(output+(size_t)y*image_.width,image_.pixels.data()+(size_t)y*image_.pitch,row_bytes);}else for(UINT y=0;y<image_.height;++y)for(UINT x=0;x<image_.width;++x){DWORD raw{};std::memcpy(&raw,image_.pixels.data()+(size_t)y*image_.pitch+(size_t)x*bytes,std::min<DWORD>(bytes,4));const BYTE r=expand_mask(raw,format.dwRBitMask,0),g=expand_mask(raw,format.dwGBitMask,0),b=expand_mask(raw,format.dwBBitMask,0),a=expand_mask(raw,format.dwRGBAlphaBitMask,255);output[(size_t)y*image_.width+x]=(DWORD(a)<<24)|(DWORD(r)<<16)|(DWORD(g)<<8)|b;}return DD_OK;}
+HRESULT Surface::beginDibSession(){HRESULT hr=restoreReleased(false);if(FAILED(hr))return hr;hr=legacyCpuAccess();if(FAILED(hr))return hr;hr=ensureDcStorage();if(FAILED(hr))return hr;dc_last_present_=g_present_serial;image_.cpu_access_active=true;image_.last_cpu_present=g_present_serial;const auto& format=image_.format;const DWORD bytes=pixel_bytes(format);auto* output=static_cast<DWORD*>(dc_bits_);const bool native_bgra=format.dwRGBBitCount==32&&format.dwRBitMask==0x00ff0000&&format.dwGBitMask==0x0000ff00&&format.dwBBitMask==0x000000ff&&format.dwRGBAlphaBitMask==0xff000000;if(native_bgra){const size_t row_bytes=(size_t)image_.width*4;for(UINT y=0;y<image_.height;++y)std::memcpy(output+(size_t)y*image_.width,image_.pixels.data()+(size_t)y*image_.pitch,row_bytes);}else for(UINT y=0;y<image_.height;++y)for(UINT x=0;x<image_.width;++x){DWORD raw{};std::memcpy(&raw,image_.pixels.data()+(size_t)y*image_.pitch+(size_t)x*bytes,std::min<DWORD>(bytes,4));const BYTE r=expand_mask(raw,format.dwRBitMask,0),g=expand_mask(raw,format.dwGBitMask,0),b=expand_mask(raw,format.dwBBitMask,0),a=expand_mask(raw,format.dwRGBAlphaBitMask,255);output[(size_t)y*image_.width+x]=(DWORD(a)<<24)|(DWORD(r)<<16)|(DWORD(g)<<8)|b;}return DD_OK;}
 HRESULT Surface::GetDC(HDC* out){trace("Surface.GetDC","%ux%u flags=%08lx fourcc=%08lx bpp=%lu",image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount);if(!out)return DDERR_INVALIDPARAMS;*out=nullptr;if(dc_active_)return DDERR_DCALREADYCREATED;if(locked_||block_compressed(image_.format)||!(image_.format.dwFlags&DDPF_RGB))return DDERR_UNSUPPORTED;const bool owned_text=bridge_begin_character_pane_getdc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.width,image_.height,owner_->renderer.owned_text_raster_scale());if(owned_text){const HRESULT hr=ensureOwnedTextDc();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=true;*out=owned_text_dc_;return DD_OK;}if(ownedLayerClaim(_ReturnAddress())){const HDC dc=ui_layer_begin(this,&Surface::promoteLayer);if(dc){dc_active_=true;dc_layer_=true;layer_dc_=dc;*out=dc;return DD_OK;}bridge_append_probe_event("owned_ui_text_omitted","recording_dc_unavailable");}const HRESULT hr=beginDibSession();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=false;*out=dc_;return DD_OK;}
 HRESULT Surface::ReleaseDC(HDC value){trace("Surface.ReleaseDC");if(!dc_active_)return DDERR_NODC;if(dc_layer_)return releaseLayerDc(value);if(dc_owned_text_){if(!owned_text_dc_||value!=owned_text_dc_)return DDERR_NODC;bridge_finish_character_pane_releasedc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.generation);dc_active_=false;dc_owned_text_=false;return DD_OK;}if(!dc_||value!=dc_)return DDERR_NODC;dc_active_=false;
  // A GDI session publishes only the pixels it changed. Interface text redrawn
@@ -2404,7 +2330,7 @@ void Surface::omitLayer(UiLayerFailure failure){
  if(!(reported&bit)){reported|=bit;bridge_append_probe_event("owned_ui_text_omitted",ui_layer_failure_name(failure));}
  layer_state_={};
  if(FAILED(ensurePixelsForWrite(true))||FAILED(ensureDcStorage())){image_.cpu_access_active=false;return;}
- image_.cpu_access_active=true;dc_last_present_=g_present_serial;
+ image_.cpu_access_active=true;image_.last_cpu_present=g_present_serial;dc_last_present_=g_present_serial;
  std::memset(dc_bits_,0,(size_t)image_.width*image_.height*4);
  // Diagnostic marker: an omitted layer shows only a magenta outline.
  const RECT whole{0,0,(LONG)image_.width,(LONG)image_.height};
@@ -2427,7 +2353,7 @@ HRESULT Surface::releaseLayerDc(HDC value){
  // what the replay drew. Otherwise unpack the surface first, as legacy does.
  const bool current=dc_&&dib_generation_==image_.generation&&!image_.gpu_captured&&!image_.cpu_released&&!image_.pixels.empty();
  HRESULT hr=DD_OK;
- if(current){image_.cpu_access_active=true;dc_last_present_=g_present_serial;}else hr=beginDibSession();
+ if(current){image_.cpu_access_active=true;image_.last_cpu_present=g_present_serial;dc_last_present_=g_present_serial;}else hr=beginDibSession();
  RECT touched{};
  if(FAILED(hr)||!ui_layer_replay(layer_recipe_.data(),layer_recipe_.size(),dc_,&touched)){image_.cpu_access_active=false;omitLayer(UiLayerFailure::allocation);return DD_OK;}
  RECT rect{};const bool changed=packDibRect(touched,rect);finishLayerWrite(changed,rect);dib_generation_=image_.generation;
@@ -2461,7 +2387,7 @@ HRESULT Surface::Lock(LPRECT r,LPDDSURFACEDESC2 d,DWORD flags,HANDLE){
  try{pixels=image_.pixels.data();}catch(const std::bad_alloc&){return DDERR_OUTOFMEMORY;}
  if(image_.mip_source_used)image_.static_mip_hint=false;
  locked_=true;
- image_.cpu_access_active=true;
+ image_.cpu_access_active=true;image_.last_cpu_present=g_present_serial;
  locked_flags_=flags;
  locked_rect_=r?*r:RECT{0,0,(LONG)image_.width,(LONG)image_.height};
  if(hud_candidate)capture_hud_atlas_mutation(
@@ -2563,7 +2489,16 @@ HRESULT Surface::Blt(LPRECT dr,LPDIRECTDRAWSURFACE7 src,LPRECT sr,DWORD flags,LP
  PostEngineSurfaceTimingScope proxy_timing(PostEngineSurfaceTimingKind::proxy);
  camp::OutputScope output(compositionOutput());
  RECT requested=dr?*dr:RECT{0,0,(LONG)image_.width,(LONG)image_.height};trace("Surface.Blt","flags=%08lx rect=%ld,%ld,%ld,%ld target=%ux%u",flags,requested.left,requested.top,requested.right,requested.bottom,image_.width,image_.height);
- if(flags&(DDBLT_COLORFILL|DDBLT_DEPTHFILL)){if(!fx)return DDERR_INVALIDPARAMS;DWORD c=(flags&DDBLT_DEPTHFILL)?fx->dwFillDepth:fx->dwFillColor;RECT r{std::max<LONG>(0,requested.left),std::max<LONG>(0,requested.top),std::min<LONG>((LONG)image_.width,requested.right),std::min<LONG>((LONG)image_.height,requested.bottom)};if(r.right<=r.left||r.bottom<=r.top)return DDERR_INVALIDRECT;HRESULT hr=ensurePixelsForWrite(r.left==0&&r.top==0&&r.right==(LONG)image_.width&&r.bottom==(LONG)image_.height);if(FAILED(hr))return hr;DWORD bytes=pixel_bytes(image_.format);PostEngineSurfaceTimingScope rect_timing(PostEngineSurfaceTimingKind::cpu_rect);for(LONG y=r.top;y<r.bottom;y++){auto* row=image_.pixels.data()+(size_t)y*image_.pitch+(size_t)r.left*bytes;for(LONG x=r.left;x<r.right;x++,row+=bytes)std::memcpy(row,&c,bytes);}mark_surface_dirty(image_,r);advance_surface_generation(image_,&r);rect_timing.finish((std::uint64_t)(r.right-r.left)*(r.bottom-r.top));completedVisualCpuWrite(r.left==0&&r.top==0&&r.right==(LONG)image_.width&&r.bottom==(LONG)image_.height,true);if(primary()){proxy_timing.finish();hr=owner_->presentVisual();}return hr;}
+ if(flags&(DDBLT_COLORFILL|DDBLT_DEPTHFILL)){if(!fx)return DDERR_INVALIDPARAMS;DWORD c=(flags&DDBLT_DEPTHFILL)?fx->dwFillDepth:fx->dwFillColor;RECT r{std::max<LONG>(0,requested.left),std::max<LONG>(0,requested.top),std::min<LONG>((LONG)image_.width,requested.right),std::min<LONG>((LONG)image_.height,requested.bottom)};if(r.right<=r.left||r.bottom<=r.top)return DDERR_INVALIDRECT;const bool full_fill=r.left==0&&r.top==0&&r.right==(LONG)image_.width&&r.bottom==(LONG)image_.height;
+  // A whole-primary colour fill: record the colour (materializePendingFill).
+  if(full_fill&&primary()&&!(flags&DDBLT_DEPTHFILL)&&!locked_&&!dc_active_&&!image_.cpu_access_active&&!image_.cpu_released&&
+     !block_compressed(image_.format)){
+   // A whole-surface fill overwrites every byte: an existing copy goes too.
+   image_.pixels=SurfacePixels{};fill_pending_=true;fill_color_=c;update_surface_memory_accounting(image_);
+   mark_surface_dirty(image_,r);advance_surface_generation(image_,&r);completedVisualCpuWrite(true,true);
+   proxy_timing.finish();return owner_->presentVisual();
+  }
+  HRESULT hr=ensurePixelsForWrite(full_fill);if(FAILED(hr))return hr;DWORD bytes=pixel_bytes(image_.format);PostEngineSurfaceTimingScope rect_timing(PostEngineSurfaceTimingKind::cpu_rect);for(LONG y=r.top;y<r.bottom;y++){auto* row=image_.pixels.data()+(size_t)y*image_.pitch+(size_t)r.left*bytes;for(LONG x=r.left;x<r.right;x++,row+=bytes)std::memcpy(row,&c,bytes);}mark_surface_dirty(image_,r);advance_surface_generation(image_,&r);rect_timing.finish((std::uint64_t)(r.right-r.left)*(r.bottom-r.top));completedVisualCpuWrite(r.left==0&&r.top==0&&r.right==(LONG)image_.width&&r.bottom==(LONG)image_.height,true);if(primary()){proxy_timing.finish();hr=owner_->presentVisual();}return hr;}
  auto* s=dynamic_cast<Surface*>(src);if(!s)return DDERR_INVALIDOBJECT;trace("Surface.Blt.Source","id=%llu %ux%u flags=%08lx fourcc=%08lx bpp=%lu active_target=%d",(unsigned long long)s->image()->id,s->image()->width,s->image()->height,s->image()->format.dwFlags,s->image()->format.dwFourCC,s->image()->format.dwRGBBitCount,s==owner_->active_target?1:0);if(state_trace_enabled()){RECT sourceRect=sr?*sr:RECT{0,0,(LONG)s->image()->width,(LONG)s->image()->height};char event[320]{};sprintf_s(event,"Diagnostic.Blt.t%llu.tp%d.s%llu.sa%d.f%08lx.d%ld.%ld.%ld.%ld.r%ld.%ld.%ld.%ld",(unsigned long long)image_.id,primary()?1:0,(unsigned long long)s->image()->id,s==owner_->active_target?1:0,flags,requested.left,requested.top,requested.right,requested.bottom,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);trace(event);}
  if(owner_->active_device&&(this==owner_->active_target||primary()||s==owner_->active_target)){HRESULT flush=owner_->active_device->flushForSurface();if(FAILED(flush))return owner_->checkDevice(flush);}
  if(primary()&&s==owner_->active_target){invalidateVisualCpu();proxy_timing.finish();return owner_->presentVisual();}
@@ -2599,6 +2534,14 @@ HRESULT Device::Load(LPDIRECTDRAWSURFACE7 destination,LPPOINT point,LPDIRECTDRAW
 
 namespace {
 DWORD WINAPI device_removed_message(LPVOID) {
+ // Remote device: the x64 render host is gone; name its reason instead.
+ if(const char* reason=x64remote::remote_lost_reason()){
+  wchar_t text[512];
+  swprintf_s(text,L"The x64 render host stopped (%hs). The game cannot draw without it and will close.\n\n"
+   L"host.log and x86_remote.log next to the host executable have the details.",reason);
+  MessageBoxW(nullptr,text,L"Evil Islands",MB_OK|MB_ICONERROR|MB_TOPMOST|MB_SETFOREGROUND);
+  return 0;
+ }
  MessageBoxW(nullptr,
   L"The graphics driver stopped responding (GPU timeout). Lower graphics settings (F10) or update the driver.",
   L"Evil Islands",MB_OK|MB_ICONERROR|MB_TOPMOST|MB_SETFOREGROUND);
@@ -2627,7 +2570,7 @@ HRESULT DD::EnumDisplayModes(DWORD,LPDDSURFACEDESC2 filter,LPVOID c,LPDDENUMMODE
 HRESULT DD::GetCaps(LPDDCAPS d,LPDDCAPS h){
  trace("DD.GetCaps");auto fill=[](LPDDCAPS c){if(!c)return;DWORD requested=c->dwSize;std::memset(c,0,std::min<size_t>(requested,sizeof(*c)));c->dwSize=requested;
   c->dwCaps=DDCAPS_3D|DDCAPS_BLT|DDCAPS_BLTSTRETCH|DDCAPS_COLORKEY|DDCAPS_GDI|DDCAPS_PALETTE|DDCAPS_READSCANLINE|DDCAPS_ZBLTS|DDCAPS_BLTCOLORFILL|DDCAPS_BLTDEPTHFILL|DDCAPS_CANBLTSYSMEM;
-  c->dwCaps2=DDCAPS2_CANRENDERWINDOWED;c->dwVidMemTotal=512u<<20;c->dwVidMemFree=384u<<20;
+  c->dwCaps2=DDCAPS2_CANRENDERWINDOWED|DDCAPS2_PRIMARYGAMMA;c->dwVidMemTotal=512u<<20;c->dwVidMemFree=384u<<20;
   c->ddsCaps.dwCaps=DDSCAPS_3DDEVICE|DDSCAPS_BACKBUFFER|DDSCAPS_COMPLEX|DDSCAPS_FLIP|DDSCAPS_FRONTBUFFER|DDSCAPS_OFFSCREENPLAIN|DDSCAPS_PRIMARYSURFACE|DDSCAPS_SYSTEMMEMORY|DDSCAPS_TEXTURE|DDSCAPS_VIDEOMEMORY|DDSCAPS_LOCALVIDMEM|DDSCAPS_ZBUFFER;
  };fill(d);fill(h);return DD_OK;
 }

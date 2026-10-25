@@ -9,8 +9,10 @@
 #include "owned_asset_loader.h"
 #include "owned_resource_runtime.h"
 #include "imgui.h"
+#include "scene_wire.h"
 #include <wrl/client.h>
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cfloat>
 #include <cstdlib>
@@ -40,7 +42,18 @@ struct State {
     std::unordered_map<std::int32_t, unsigned> incoming;
     std::vector<PlateAnchor> plates;
     std::vector<CombatPortraitAnchor> portraits;
-    SpellList spell_list;
+    // One list per recent frame serial. With the render thread the game
+    // thread publishes frame N+1's pane while the scene thread still places
+    // and draws frame N; one shared list made frame N find N+1's values and
+    // drop the pane's effect list (flicker). Readers take the slot that is
+    // current for their own installed frame serial.
+    std::array<SpellList,4> spell_lists;
+    SpellList& spell_list_slot(std::uint64_t frame) { return spell_lists[frame%spell_lists.size()]; }
+    const SpellList* current_spell_list() const {
+        for (const auto& list:spell_lists)
+            if (list.placed && bridge_character_pane_text_epoch_current(list.epoch,list.frame)) return &list;
+        return nullptr;
+    }
     std::array<CombatEffectDefinition, 256> catalog{};
     std::uint64_t catalog_revision = 0;
     std::vector<std::uint8_t> font_bytes;
@@ -56,6 +69,8 @@ struct State {
     std::string status = "Waiting for an active mission.";
 };
 State& state() { static State value; return value; }
+std::atomic<std::uint64_t> g_game_revision{1};
+void game_changed() noexcept { g_game_revision.fetch_add(1, std::memory_order_relaxed); }
 float plate_opacity(const State& s,const CombatUnitValue& unit) {
     if (unit.dead || unit.health<=0) return 0;
     const bool combat=unit.attacking || s.incoming.count(unit.id)!=0;
@@ -222,6 +237,7 @@ bool contains(ImVec2 lo,ImVec2 hi,ImVec2 point,float margin=0) {
 } // namespace
 
 void combat_ui_publish_unit(const CombatUnitValue& value) noexcept {
+    game_changed();
     try {
         auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
         auto& previous = s.units[value.id];
@@ -240,11 +256,12 @@ void combat_ui_publish_unit(const CombatUnitValue& value) noexcept {
     } catch (...) { combat_ui_set_status("Combat UI publication failed."); }
 }
 void combat_ui_retire_unit(std::int32_t id, std::uint64_t incarnation) noexcept {
+    game_changed();
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
     const auto it = s.units.find(id);
     if (incarnation && (it == s.units.end() || it->second.incarnation != incarnation)) return;
     if (it != s.units.end()) { remove_attack(s, it->second); s.units.erase(it); }
-    if (s.spell_list.unit.id==id) s.spell_list={};
+    for (auto& list:s.spell_lists) if (list.unit.id==id) list={};
     if (s.hover_id==id) { s.hover_id=0; s.hover_incarnation=0; }
 }
 #ifdef EID3D11_EMBEDDED
@@ -257,7 +274,7 @@ void combat_ui_begin_embedded_frame(bool paused) noexcept {
 void combat_ui_retire_embedded_world() noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
     s.units.clear(); s.incoming.clear(); s.plates.clear(); s.portraits.clear();
-    s.spell_list = {}; s.paused = false; s.hover_id = 0; s.hover_incarnation = 0;
+    s.spell_lists = {}; s.paused = false; s.hover_id = 0; s.hover_incarnation = 0;
 }
 bool combat_ui_embedded_portrait(std::int32_t id, unsigned slot,
     const RECT& native, const POINT& shift, CombatPortraitAnchor& output) noexcept {
@@ -276,11 +293,12 @@ bool combat_ui_embedded_portrait(std::int32_t id, unsigned slot,
 #endif
 void combat_ui_publish_spell_list(std::int32_t id,std::uint64_t incarnation,
     std::uint64_t epoch,std::uint64_t frame,const RECT& local_viewport) noexcept {
+    game_changed();
     auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
-    s.spell_list={};
+    auto& list=s.spell_list_slot(frame);
+    list={};
     const auto found=s.units.find(id);
     if (found==s.units.end() || found->second.incarnation!=incarnation) return;
-    auto& list=s.spell_list;
     list.unit.id=id; list.unit.incarnation=incarnation; list.unit.effect_count=found->second.effect_count;
     std::copy_n(found->second.effects.begin(),list.unit.effect_count,list.unit.effects.begin());
     list.epoch=epoch; list.frame=frame; list.local=local_viewport;
@@ -289,7 +307,7 @@ void combat_ui_place_spell_list(std::uint64_t epoch,std::uint64_t frame,
     const RECT& destination,const RECT& source,const widescreen::HudComposition& h,
     unsigned width,unsigned height) noexcept {
     auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
-    auto& list=s.spell_list;
+    auto& list=s.spell_list_slot(frame);
     if (list.epoch!=epoch || list.frame!=frame || source.right<=source.left || source.bottom<=source.top) return;
     const auto x=[&](float pixel) { return widescreen::compose_x(destination.left+
         (pixel-source.left)*float(destination.right-destination.left)/(source.right-source.left),h); };
@@ -306,12 +324,14 @@ void combat_ui_place_spell_list(std::uint64_t epoch,std::uint64_t frame,
         list.clip_hi.x>list.clip_lo.x && list.clip_hi.y>list.clip_lo.y && list.opacity>0;
 }
 void combat_ui_publish_catalog(const std::array<CombatEffectDefinition, 256>& catalog) noexcept {
+    game_changed();
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
     if (std::memcmp(s.catalog.data(), catalog.data(), sizeof(catalog)) != 0) {
         s.catalog = catalog; ++s.catalog_revision;
     }
 }
 void combat_ui_publish_font(const void* bytes,std::size_t size,std::uint64_t generation) noexcept {
+    game_changed();
     try {
         auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
         s.font_bytes.clear(); s.font_generation=0;
@@ -322,11 +342,12 @@ void combat_ui_publish_font(const void* bytes,std::size_t size,std::uint64_t gen
     } catch (...) { combat_ui_set_status("Combat text omitted: font snapshot allocation failed."); }
 }
 void combat_ui_set_mission(bool active) noexcept {
+    game_changed();
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
     s.mission = active;
     s.plates.clear(); s.portraits.clear();
     if (!active) {
-        s.units.clear(); s.incoming.clear(); s.spell_list={};
+        s.units.clear(); s.incoming.clear(); s.spell_lists={};
         s.paused=false; s.hover_id=0; s.hover_incarnation=0;
     }
 }
@@ -345,10 +366,12 @@ void combat_ui_set_options(const RendererConfig& config) noexcept {
     s.idle_opacity=config.find("combat_plate_idle_opacity")->integer_value/100.f;
 }
 void combat_ui_publish_hover(std::int32_t id,std::uint64_t incarnation) noexcept {
+    game_changed();
     auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
     s.hover_id=id; s.hover_incarnation=incarnation;
 }
 void combat_ui_set_status(const char* status) noexcept {
+    game_changed();
     try { auto& s = state(); std::lock_guard<std::mutex> guard(s.lock); s.status = status; } catch (...) {}
 }
 void combat_ui_publish_plate(std::int32_t id, float x, float y) noexcept {
@@ -359,17 +382,102 @@ void combat_ui_publish_plate(std::int32_t id, float x, float y) noexcept {
     } catch (...) {}
 }
 void combat_ui_publish_portraits(const CombatPortraitAnchor* anchors, std::size_t count) noexcept {
+    game_changed();
     try {
         auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
         if (anchors && count) s.portraits.assign(anchors, anchors + count);
         else s.portraits.clear();
     } catch (...) {}
 }
+namespace {
+// The wire form of the game-side half (combat_ui_encode_game).
+template <class A> void unit_fields(A& a, CombatUnitValue& v) {
+    scene_wire::fields_of(a, v.id, v.incarnation, v.health, v.maximum_health, v.dead, v.attack_targets, v.attacking, v.effect_count);
+    if (v.effect_count > v.effects.size()) { v.effect_count = 0; if constexpr (A::decoding) a.failed = true; }
+    a.raw(v.effects.data(), sizeof(CombatEffectValue) * v.effect_count);
+}
+template <class A> void portrait_fields(A& a, std::vector<CombatPortraitAnchor>& v) {
+    std::uint32_t count = static_cast<std::uint32_t>(v.size());
+    scene_wire::field(a, count);
+    if constexpr (A::decoding) { if (!a.plausible(count, 20)) return; v.resize(count); }
+    for (auto& p : v) scene_wire::fields_of(a, p.id, p.left, p.top, p.right, p.bottom);
+}
+template <class A> void definition_fields(A& a, std::array<CombatEffectDefinition, 256>& v) {
+    for (auto& d : v) scene_wire::fields_of(a, d.valid, d.hd_icon, d.debuff, d.icon, d.name);
+}
+template <class A> void spell_fields(A& a, SpellList& v) {
+    unit_fields(a, v.unit);
+    scene_wire::fields_of(a, v.epoch, v.frame, v.local.left, v.local.top, v.local.right, v.local.bottom);
+}
+} // namespace
+
+std::uint64_t combat_ui_game_revision() noexcept { return g_game_revision.load(std::memory_order_relaxed); }
+
+bool combat_ui_encode_game(std::vector<std::uint8_t>& bytes, std::uint64_t& catalog_sent,
+    std::uint64_t& font_sent) noexcept try {
+    auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
+    scene_wire::Out out{bytes};
+    scene_wire::fields_of(out, s.mission, s.hover_id, s.hover_incarnation, s.status);
+    portrait_fields(out, s.portraits);
+    std::uint32_t count = static_cast<std::uint32_t>(s.units.size());
+    scene_wire::field(out, count);
+    for (auto& entry : s.units) unit_fields(out, entry.second);
+    for (auto& list : s.spell_lists) spell_fields(out, list);
+    bool catalog = catalog_sent != s.catalog_revision;
+    scene_wire::field(out, catalog);
+    if (catalog) { scene_wire::field(out, s.catalog_revision); definition_fields(out, s.catalog); }
+    bool font = font_sent != s.font_generation;
+    scene_wire::field(out, font);
+    if (font) scene_wire::fields_of(out, s.font_generation, s.font_bytes);
+    catalog_sent = s.catalog_revision; font_sent = s.font_generation;
+    return true;
+} catch (...) { return false; }
+
+bool combat_ui_decode_game(const std::uint8_t* data, std::size_t size) noexcept try {
+    scene_wire::In in{data, data + size};
+    bool mission = false; std::int32_t hover_id = 0; std::uint64_t hover_incarnation = 0;
+    std::string status; std::vector<CombatPortraitAnchor> portraits;
+    scene_wire::fields_of(in, mission, hover_id, hover_incarnation, status);
+    portrait_fields(in, portraits);
+    std::uint32_t count = 0;
+    scene_wire::field(in, count);
+    if (!in.plausible(count, 1)) return false;
+    std::vector<CombatUnitValue> units(count);
+    for (auto& unit : units) unit_fields(in, unit);
+    std::array<SpellList, 4> lists{};
+    for (auto& list : lists) spell_fields(in, list);
+    bool catalog = false; std::uint64_t catalog_revision = 0; std::array<CombatEffectDefinition, 256> definitions{};
+    scene_wire::field(in, catalog);
+    if (catalog) { scene_wire::field(in, catalog_revision); definition_fields(in, definitions); }
+    bool font = false; std::uint64_t font_generation = 0; std::vector<std::uint8_t> font_bytes;
+    scene_wire::field(in, font);
+    if (font) scene_wire::fields_of(in, font_generation, font_bytes);
+    if (!in.ok()) return false;
+    auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
+    if (s.mission != mission) { s.plates.clear(); s.portraits.clear(); if (!mission) s.paused = false; }
+    s.mission = mission; s.hover_id = hover_id; s.hover_incarnation = hover_incarnation;
+    s.status = std::move(status); s.portraits = std::move(portraits);
+    s.units.clear(); s.incoming.clear();
+    for (auto& unit : units) {
+        if (unit.attacking) for (const auto target : unit.attack_targets) if (target) ++s.incoming[target];
+        const std::int32_t id = unit.id;
+        s.units.emplace(id, std::move(unit));
+    }
+    // A pane list the host already placed for the same frame keeps its placement.
+    for (std::size_t i = 0; i < lists.size(); ++i) {
+        auto& mine = s.spell_lists[i];
+        if (mine.epoch == lists[i].epoch && mine.frame == lists[i].frame && mine.unit.id == lists[i].unit.id) continue;
+        mine = lists[i];
+    }
+    if (catalog) { s.catalog = definitions; s.catalog_revision = catalog_revision; }
+    if (font) { s.font_bytes = std::move(font_bytes); s.font_generation = font_generation; }
+    return true;
+} catch (...) { return false; }
+
 bool combat_ui_has_output() noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
-    return s.mission && (s.plates_enabled || s.portraits_enabled ||
-        (s.spell_list.placed && s.spell_list.unit.effect_count &&
-         bridge_character_pane_text_epoch_current(s.spell_list.epoch,s.spell_list.frame)));
+    const auto* list=s.current_spell_list();
+    return s.mission && (s.plates_enabled || s.portraits_enabled || (list && list->unit.effect_count));
 }
 bool combat_ui_needs_plate(std::int32_t id) noexcept {
     auto& s = state(); std::lock_guard<std::mutex> guard(s.lock);
@@ -645,8 +753,8 @@ struct CombatUiRenderer::Implementation {
         // Presentation consumes current anchors. Native profiling hooks are
         // optional and cannot own an overlay's lifetime.
         s.plates.clear();
-        spell_list=s.spell_list.placed && bridge_character_pane_text_epoch_current(s.spell_list.epoch,s.spell_list.frame)
-            ? s.spell_list : SpellList{};
+        const auto* current=s.current_spell_list();
+        spell_list=current ? *current : SpellList{};
         if (scroll_unit!=spell_list.unit.id || scroll_incarnation!=spell_list.unit.incarnation) {
             scroll_unit=spell_list.unit.id; scroll_incarnation=spell_list.unit.incarnation;
             list_scroll=0; list_wheel=0; list_drag=false;
@@ -663,12 +771,19 @@ void CombatUiRenderer::initialize(ID3D11Device* device, ID3D11DeviceContext* con
     s.priority.fill(-1); s.blacklist.fill(-1);
     s.effect_priorities.fill(100);
     s.buff_override.fill(-1); s.debuff_override.fill(-1);
+    if (!start_worker()) combat_ui_set_status("Combat icons unavailable: active resource mounts are missing.");
+}
+// The icon/text worker needs the active resource mounts. The core-mode host
+// initializes its overlay before the game process sends them
+// (scene_core::ResourceMounts), so prepare() starts the worker once they exist.
+bool CombatUiRenderer::start_worker() {
+    auto& s = *implementation_;
+    if (s.worker.joinable()) return true;
+    if (!owned_visual_resource_mounts(s.mounts)) return false;
     owned_text_resource_mounts(s.text_mounts);
-    if (owned_visual_resource_mounts(s.mounts)) {
-        s.requests.push_back({256, 0});
-        s.worker = std::thread([&s] { s.run(); });
-    }
-    else combat_ui_set_status("Combat icons unavailable: active resource mounts are missing.");
+    s.requests.push_back({256, 0});
+    s.worker = std::thread([&s] { s.run(); });
+    return true;
 }
 void CombatUiRenderer::shutdown() noexcept {
     if (!implementation_) return;
@@ -681,6 +796,7 @@ void CombatUiRenderer::shutdown() noexcept {
 bool CombatUiRenderer::prepare(RendererConfig& config) {
     if (!implementation_) return false;
     auto& s = *implementation_;
+    if (!s.worker.joinable()) (void)start_worker();
     s.sync_font();
     const auto* portrait_option = config.find("combat_portrait_effects");
     const auto* plate_option = config.find("combat_healthplates");
@@ -1065,7 +1181,8 @@ bool CombatUiRenderer::process_input(UINT message,WPARAM wparam,LPARAM lparam) n
     if (message==WM_MOUSEWHEEL && s.popup.open && s.popup.hovered) { s.popup_wheel+=float(GET_WHEEL_DELTA_WPARAM(wparam))/WHEEL_DELTA; return true; }
     if (message==WM_KILLFOCUS || (message==WM_ACTIVATEAPP && !wparam)) { s.popup={}; s.list_drag=false; }
     const auto& list=s.spell_list;
-    if (!list.placed || !bridge_character_pane_text_epoch_current(list.epoch,list.frame)) { s.list_drag=false; return false; }
+    // The drawn copy: collect() keeps it only while current for the presented frame.
+    if (!list.placed) { s.list_drag=false; return false; }
     POINT point{static_cast<short>(LOWORD(lparam)),static_cast<short>(HIWORD(lparam))};
     if (message==WM_MOUSEWHEEL) {
         const auto window=static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);

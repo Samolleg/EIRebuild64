@@ -246,6 +246,27 @@ public:
 
     HRESULT initialize(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
                        const wchar_t* config_path = nullptr);
+    // Core mode (EI_RENDERER_X64_CORE, no D3D11 device in the game process): the
+    // ini and the menu language only (initialized() stays false).
+    void load_config_only(const wchar_t* config_path = nullptr);
+    // Core mode, host: the overlay draws on the host Renderer's child window
+    // (another thread's, another process's child: no window hook). Its input
+    // comes from polling and from process_forwarded_input; its focus from
+    // set_external_focus (the game window in front).
+    HRESULT initialize_host(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
+                            const wchar_t* config_path);
+    void set_external_focus(bool focused) noexcept;
+    void process_forwarded_input(UINT message, WPARAM wparam, LPARAM lparam) noexcept;
+    // Core mode, game process: the window hook only (camp input, focus
+    // swallowing, cursor confinement, load cursor), with the host overlay's
+    // input capture (flags bit 0) and message forwarding through hooks.
+    struct CoreInputHooks {
+        long (*flags)() noexcept = nullptr;
+        void (*forward)(UINT message, WPARAM wparam, LPARAM lparam) noexcept = nullptr;
+    };
+    HRESULT initialize_core_input(HWND window, const CoreInputHooks& hooks);
+    // Core mode, game process: reload the ini the host saved (keeps the hook).
+    void reload_config() noexcept;
     void shutdown() noexcept;
 
     // Call once, after the renderer's world and game UI passes and immediately
@@ -317,11 +338,24 @@ public:
     void add_graphics_reset_notice(const char* text) noexcept;
 
     struct Implementation;
+    // The window hook is installed (standard and core-input modes).
+    bool input_ready() const noexcept;
+    // Core mode, game process: forwards a message to the host overlay (else null).
+    void (*core_forward() const noexcept)(UINT, WPARAM, LPARAM) noexcept;
 
 private:
+    bool initialize_host_child_ = false;
     std::unique_ptr<Implementation> implementation_;
     RendererConfig config_;
     const char* notice_ = nullptr;
 };
+
+// The renderer this session runs, shown read-only beside the 64-bit render
+// host option (a static text; core: the option does not apply).
+void debug_overlay_set_running_renderer(const char* text, bool core) noexcept;
+// Core mode, host: the game process's address space in use and its largest
+// free block (MB; 0: not sampled), sent through the control block. The F10
+// memory line reads the latest values.
+void debug_overlay_set_game_address_space(std::uint32_t used_mb, std::uint32_t largest_free_mb) noexcept;
 
 } // namespace owned

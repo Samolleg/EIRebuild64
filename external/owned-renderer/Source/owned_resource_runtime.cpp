@@ -7,6 +7,7 @@
 #include "owned_asset_loader.h"
 #include "retained_static_scene.h"
 #include "neighbour_maps.h"
+#include "neighbour_client.h"
 
 #include <windows.h>
 
@@ -113,6 +114,7 @@ struct RuntimeState {
     std::shared_ptr<OwnedResourceLoader> loader;
     ResourceStoreConfig mounts;
     ResourceStoreConfig text_mounts;
+    bool mounts_adopted = false; // x64 host: mounts from the game process, no loader
     std::vector<PendingLoad> pending;
     PendingLoad active;
     RetainedStaticScene& scene = retained_visual_scene();
@@ -433,11 +435,16 @@ bool read_mount_config(const std::wstring& path, std::vector<std::uint8_t>& byte
     return success;
 }
 
+// The config.reg [RES] families the owned mounts follow.
+enum Family : unsigned { kFigures, kTextures, kTexts, kRedress, kMenus, kFamilies };
+constexpr const char* kFamilyNames[kFamilies] = {"figures.res", "textures.res", "texts.res", "redress.res", "menus.res"};
+
 // Compiled REG files have little-endian counts/offsets and length-prefixed
-// strings. Decode the map-loader families and the owned spell-text family;
-// do not map archives or retain configuration bytes in the x86 process.
+// strings. Decode the figure and texture managers' families (kFamilyNames)
+// and the owned spell-text family; do not map archives or retain
+// configuration bytes in the x86 process.
 bool visual_archive_lists(const std::vector<std::uint8_t>& bytes,
-    std::array<std::vector<std::wstring>, 3>& lists, std::array<bool, 3>& ignore_base) {
+    std::array<std::vector<std::wstring>, kFamilies>& lists, std::array<bool, kFamilies>& ignore_base) {
     const auto span = [&](std::size_t at, std::size_t count) {
         return at <= bytes.size() && count <= bytes.size()-at;
     };
@@ -466,7 +473,7 @@ bool visual_archive_lists(const std::vector<std::uint8_t>& bytes,
         found_res = true;
         const auto table = section+4+length;
         if (!span(table, std::size_t(count)*6)) return false;
-        std::array<bool, 3> seen{};
+        std::array<bool, kFamilies> seen{};
         for (std::size_t v = 0; v < count; ++v) {
             const std::size_t offset = u32(table+v*6+2);
             if (!span(section, offset)) return false;
@@ -474,9 +481,9 @@ bool visual_archive_lists(const std::vector<std::uint8_t>& bytes,
             if (!span(value, 3)) return false;
             const auto name_length = u16(value+1);
             if (!span(value+3, name_length)) return false;
-            const int family = named(value+3, name_length, "figures.res") ? 0 :
-                (named(value+3, name_length, "textures.res") ? 1 :
-                (named(value+3, name_length, "texts.res") ? 2 : -1));
+            int family = -1;
+            for (int f = 0; f < int(kFamilies); ++f)
+                if (named(value+3, name_length, kFamilyNames[f])) family = f;
             if (family < 0) continue;
             if (seen[family]) return false;
             seen[family] = true;
@@ -548,7 +555,15 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
             return false;
     }
     if (loose_override) mounts.loose_roots = split_paths(loose);
-    if (archive_override) mounts.archives = split_paths(archives);
+    if (archive_override) { mounts.archives = split_paths(archives); mounts.archive_kinds.clear(); }
+    // A configured archive that is missing stays in the game's list, empty
+    // (CResourceManager::AddArchiveOf ignores the open result): drop it.
+    for (std::size_t index = mounts.archives.size(); index-- > 0;) {
+        const auto attributes = GetFileAttributesW(mounts.archives[index].c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        mounts.archives.erase(mounts.archives.begin() + index);
+        if (!mounts.archive_kinds.empty()) mounts.archive_kinds.erase(mounts.archive_kinds.begin() + index);
+    }
 #endif
     if (mounts.loose_roots.empty() || mounts.archives.empty()) {
         failure = {ResourceFailureCode::parse, "owned resource mount list is empty"};
@@ -558,13 +573,6 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
         const auto attributes = GetFileAttributesW(root.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
             failure = {ResourceFailureCode::file_open, "owned resource loose map root is missing"};
-            return false;
-        }
-    }
-    for (const auto& archive : mounts.archives) {
-        const auto attributes = GetFileAttributesW(archive.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            failure = {ResourceFailureCode::file_open, "owned resource archive is missing"};
             return false;
         }
     }
@@ -656,8 +664,8 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
     ResourceFailure& failure, ResourceStoreConfig* text_mounts) {
     mounts = {};
     failure = {};
-    std::array<std::vector<std::wstring>, 3> lists;
-    std::array<bool, 3> ignore_base{};
+    std::array<std::vector<std::wstring>, kFamilies> lists;
+    std::array<bool, kFamilies> ignore_base{};
     if (work_path.empty() || resource_path.empty() ||
         (!addon_path.empty() && !visual_archive_lists(config, lists, ignore_base))) {
         failure = {ResourceFailureCode::parse, "active mod resource configuration is invalid"};
@@ -666,21 +674,42 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
     ResourceStoreConfig derived;
     if (!addon_path.empty()) derived.loose_roots.push_back(child_path(addon_path, L"Maps"));
     derived.loose_roots.push_back(child_path(work_path, L"Maps"));
-    // Preserve each compiled array's order. No wildcard enumeration or sorting:
-    // HD overrides must precede the lower-priority mod/base archive entries.
-    for (unsigned family=0;family<2;++family) for (const auto& relative : lists[family]) {
-        std::wstring path;
-        if (!full_path(child_path(addon_path, relative), path)) {
-            failure = {ResourceFailureCode::invalid_name, "mod archive path could not be resolved"};
-            return false;
+    // The game's two archive chains in one ordered list, each archive tagged
+    // with the lookups it serves. Figure manager: the mod's figures.res and
+    // menus.res values, then base figures and menus. Texture manager: base
+    // textures and redress each searched after the mod's values for them,
+    // then base menus, then the mod's menus values (its textures/redress
+    // values follow there again but were already searched). Each compiled
+    // array keeps its order: HD overrides precede lower-priority entries.
+    const auto add_mod = [&](unsigned family, std::uint8_t kinds) {
+        for (const auto& relative : lists[family]) {
+            std::wstring path;
+            if (!full_path(child_path(addon_path, relative), path)) {
+                failure = {ResourceFailureCode::invalid_name, "mod archive path could not be resolved"};
+                return false;
+            }
+            derived.archives.push_back(std::move(path));
+            derived.archive_kinds.push_back(kinds);
         }
-        derived.archives.push_back(std::move(path));
-    }
-    if (!ignore_base[0]) derived.archives.push_back(child_path(resource_path, L"figures.res"));
-    if (!ignore_base[1]) derived.archives.push_back(child_path(resource_path, L"textures.res"));
+        return true;
+    };
+    const auto add_base = [&](unsigned family, std::uint8_t kinds) {
+        if (ignore_base[family]) return;
+        const std::string name = kFamilyNames[family];
+        derived.archives.push_back(child_path(resource_path, std::wstring(name.begin(), name.end())));
+        derived.archive_kinds.push_back(kinds);
+    };
+    if (!add_mod(kFigures, kArchiveFigures) || !add_mod(kMenus, kArchiveFigures) ||
+        !add_mod(kTextures, kArchiveTextures)) return false;
+    add_base(kFigures, kArchiveFigures);
+    add_base(kTextures, kArchiveTextures);
+    if (!add_mod(kRedress, kArchiveTextures)) return false;
+    add_base(kRedress, kArchiveTextures);
+    add_base(kMenus, kArchiveAllKinds);
+    if (!add_mod(kMenus, kArchiveTextures)) return false;
     if (text_mounts) {
         *text_mounts={};
-        for (const auto& relative:lists[2]) {
+        for (const auto& relative:lists[kTexts]) {
             std::wstring path;
             if (!full_path(child_path(addon_path,relative),path)) {
                 failure={ResourceFailureCode::invalid_name,"mod text archive path could not be resolved"};
@@ -688,7 +717,7 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
             }
             text_mounts->archives.push_back(std::move(path));
         }
-        if (!ignore_base[2]) text_mounts->archives.push_back(child_path(resource_path,L"texts.res"));
+        if (!ignore_base[kTexts]) text_mounts->archives.push_back(child_path(resource_path,L"texts.res"));
     }
     mounts = std::move(derived);
     return true;
@@ -782,7 +811,7 @@ void owned_resource_runtime_release() noexcept {
 #ifndef EID3D11_EMBEDDED
     camp_inventory_shutdown_icons();
 #endif
-    if (loader) { neighbour_maps_stop(); loader->shutdown(); }
+    if (loader) { neighbour_client_stop(); loader->shutdown(); }
 }
 
 bool retained_static_runtime_requested() noexcept {
@@ -792,9 +821,24 @@ bool retained_static_runtime_requested() noexcept {
 bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept {
     RuntimeState& state = runtime();
     std::lock_guard<std::mutex> guard(state.lock);
-    if (!state.loader || state.mounts.archives.empty()) return false;
+    if ((!state.loader && !state.mounts_adopted) || state.mounts.archives.empty()) return false;
     try { mounts = state.mounts; } catch (...) { return false; }
     return true;
+}
+
+void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,
+    const ResourceStoreConfig& text_mounts) noexcept {
+    RuntimeState& state = runtime();
+    std::lock_guard<std::mutex> guard(state.lock);
+    try {
+        state.mounts = mounts;
+        state.text_mounts = text_mounts;
+        state.mounts_adopted = true;
+    } catch (...) {
+        state.mounts = {};
+        state.text_mounts = {};
+        state.mounts_adopted = false;
+    }
 }
 
 namespace {
@@ -817,7 +861,7 @@ std::uint64_t retained_static_begin_source(
     // under this lock (deadlock while it was held).
     struct NeighbourStart {
         bool armed = false; std::string terrain; std::uint64_t epoch = 0; ResourceStoreConfig mounts;
-        ~NeighbourStart() { if (armed) neighbour_maps_begin(terrain, epoch, mounts); }
+        ~NeighbourStart() { if (armed) neighbour_client_begin(terrain, epoch, mounts); }
     } neighbour_start;
     std::lock_guard<std::mutex> guard(state.lock);
     if (!state.users || !state.loader) return 0;
@@ -972,13 +1016,13 @@ void retained_static_lifecycle_added(
 bool retained_visual_resolve_selected(const std::wstring& physical_file,
     const std::string& name, const void* selected, std::uint32_t size, std::uint64_t file_offset,
     ResourceBlob& blob, std::uint64_t& source_generation, ResourceFailure& failure,
-    SelectedResourceReadDiagnostic* diagnostic, bool verified_read_only_mapping) {
+    SelectedResourceReadDiagnostic* diagnostic, bool verified_read_only_mapping, bool container) {
     auto& state = runtime();
     std::lock_guard<std::mutex> guard(state.lock);
     source_generation = state.resolver_generation;
     return state.selected_resources.resolve_selected_file(
         physical_file, name, selected, size, file_offset, blob, failure, diagnostic,
-        verified_read_only_mapping);
+        verified_read_only_mapping, container);
 }
 
 bool retained_visual_copy_selected_memory(const std::string& name,

@@ -9,7 +9,10 @@
   <PropertyGroup><TargetName>RendererShaderEmbed</TargetName></PropertyGroup>
   <ItemGroup>
     <ClCompile Include="$(OwnedRendererRoot)Tools\shader_embed.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_device.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_shadows.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\graphics_settings.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_precipitation.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_liquid.cpp" />

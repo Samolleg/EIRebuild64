@@ -753,6 +753,10 @@ public:
     void CmdNewPose(EUnitPose pose);
     void CmdNewWeapon(DWORD dwWeapon);
     void CmdPlayAnimation(const char *pszAnimation);
+    bool HasLeverRingChoice(const SUnitBasicCmd& cmd) const;
+    void QueueAnimationLoop(DWORD id);
+    void StopAnimationLoop();
+    void UpdateAnimationLoop();
     void CmdUseTrap(int nQItemNum);
     void InterruptCommand();
     void SetAnimationSwitchCallback(ServerAnimationSwitchCallback cb) { animCallback = cb; }
@@ -832,6 +836,12 @@ public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
     virtual void DiscardSave();
+private:
+    // AD07 selection evidence is transient. A loaded ring must be reselected.
+    const CMapObject* modLeverTarget = nullptr;
+    ObjectId modLeverId = 0;
+    CPlot3D modLeverPoint;
+    bool modLeverRing = false;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // Terrain check for spell cast

@@ -5,6 +5,38 @@
 #include <array>
 
 namespace OwnedRender {
+// Same ordered figure/texture chains consumed by the renderer and source managers.
+// ResourcePlan already contains the selected mod and ignore-original decisions.
+template<class Package, class Resolve>
+void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
+    const std::filesystem::path& resourceRoot, const Package* package, Resolve resolve) {
+    const char* categories[] = {"figures.res", "textures.res", "redress.res", "menus.res"};
+    std::array<bool, 4> ignore{};
+    std::array<std::vector<std::string>, 4> replacements;
+    for (size_t i = 0; i != ignore.size(); ++i)
+        if (package) package->ResourcePlan(categories[i], replacements[i], ignore[i]);
+    const auto addMod = [&](size_t i, std::uint8_t kind) {
+        for (const auto& path : replacements[i]) {
+            mounts.archives.push_back(resolve(path));
+            mounts.archive_kinds.push_back(kind);
+        }
+    };
+    const auto addBase = [&](size_t i, std::uint8_t kind) {
+        if (ignore[i]) return;
+        mounts.archives.push_back((resourceRoot / categories[i]).wstring());
+        mounts.archive_kinds.push_back(kind);
+    };
+    addMod(0, owned::kArchiveFigures);
+    addMod(3, owned::kArchiveFigures);
+    addMod(1, owned::kArchiveTextures);
+    addBase(0, owned::kArchiveFigures);
+    addBase(1, owned::kArchiveTextures);
+    addMod(2, owned::kArchiveTextures);
+    addBase(2, owned::kArchiveTextures);
+    addBase(3, owned::kArchiveAllKinds);
+    addMod(3, owned::kArchiveTextures);
+}
+
 inline std::filesystem::path ResolveProfilePath(const std::filesystem::path& value,
     const std::filesystem::path& profileDirectory) {
     if (value.empty() || value.wstring().find(L'\0') != std::wstring::npos ||
@@ -33,19 +65,9 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
     paths.world_map_layouts = (modRoot / L"world-map-layouts.json").wstring();
     if (package) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
     paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
-    const char* categories[] = {"figures.res", "menus.res", "textures.res", "redress.res"};
-    std::array<bool, 4> ignore{};
-    for (size_t i = 0; i != ignore.size(); ++i) {
-        std::vector<std::string> replacements;
-        if (package) package->ResourcePlan(categories[i], replacements, ignore[i]);
-        for (const auto& replacement : replacements)
-            paths.mounts.archives.push_back(ResolveProfilePath(
-                std::filesystem::path(replacement), profileDirectory).wstring());
-    }
-    // All selected overrides precede base archives, as in candidate-56.
-    // Include menus.res for menu figure assets, just as the host figure chain.
-    for (size_t i = 0; i != ignore.size(); ++i)
-        if (!ignore[i]) paths.mounts.archives.push_back((resourceRoot / categories[i]).wstring());
+    CaptureGraphicsMounts(paths.mounts, resourceRoot, package, [&](const std::string& replacement) {
+        return ResolveProfilePath(std::filesystem::path(replacement), profileDirectory).wstring();
+    });
     return paths;
 }
 }

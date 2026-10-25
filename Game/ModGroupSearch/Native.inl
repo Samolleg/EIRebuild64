@@ -1,6 +1,11 @@
 // Included in aiUnitLogic.cpp after its existing corpse/death-fear helpers.
 // Source: 39454a3 GroupSearchNative.inl / GroupSearchPath.inl; native types only.
 namespace ModGroupSearch {
+bool IsBriefingZone() {
+    auto* player=theWorldServer.GetPlayer(0);
+    auto* current=player?theMap.GetZoneByName(player->party.szCurrentZone):nullptr;
+    return current && current->eType==GM_BASE;
+}
 static void ResetCoordinator();
 static bool OwnsPickupAnimation(CUnit*,CUnitServer*,int);
 namespace {
@@ -83,7 +88,7 @@ std::vector<Feedback> ReadFeedback() {
     return result;
 }
 bool CommandDuty(void* duty, CAIUnitLogic& logic) {
-    if (!duty || !logic.GetUnitServer() || !logic.GetUnit() || !Context()) return false;
+    if (!duty || !logic.GetUnitServer() || !logic.GetUnit() || IsBriefingZone() || !Context()) return false;
     CUnit* unit=logic.GetUnit(); auto id=Id(unit); auto it=leases.find(id);
     if (it==leases.end()) return false;
     auto& lease=it->second; const auto* general=logic.GetCurrentGeneralLogic();

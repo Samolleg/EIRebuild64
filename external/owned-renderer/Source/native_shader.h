@@ -70,6 +70,8 @@ cbuffer NativeShadowConstants:register(b2){row_major float4x4 shadowLight[6];row
 #define NATIVE_SUN_SHADOWS_LIVE (shadowControl.x!=0||shadowBias[4].z>.5)
 #endif
 Texture2DArray<float> shadowDepth:register(t9);
+// Early-out cells of the sun maps (nativeShadowEarly): nearest, 1 - farthest.
+Texture2DArray<float2> shadowRange:register(t64);
 SamplerComparisonState shadowSampler:register(s1);
 SamplerComparisonState pointShadowSampler:register(s2);
 SamplerComparisonState shadowFarSampler:register(s4);
@@ -98,7 +100,6 @@ float2 terrainTapSize(uint2 ref,out float levels){
 }
 @TERRAIN_MATERIAL@
 ByteAddressBuffer nativeGeometry:register(t1);
-ByteAddressBuffer nativeMorphGeometry:register(t17);
 ByteAddressBuffer nativeDynamic:register(t2);
 StructuredBuffer<uint4> nativeVisibleTriangles:register(t4);
 StructuredBuffer<NativeDraw> nativeDraws:register(t5);
@@ -381,7 +382,11 @@ struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 
  float2 bedLiquid:TEXCOORD12;nointerpolation uint terrainVertexFlags:TEXCOORD13;
  nointerpolation float4 liquidUvBounds:TEXCOORD14;float4 liquidDirections:TEXCOORD15;float2 liquidTileLocal:TEXCOORD16;
  float3 terrainSlope:TEXCOORD17;nointerpolation float terrainTiles:TEXCOORD18;nointerpolation uint swaying:TEXCOORD19;nointerpolation uint neighbour:TEXCOORD21;
- nointerpolation uint contact:TEXCOORD22;nointerpolation float contactHeight:TEXCOORD23;float2 liquidFall:TEXCOORD27;
+ nointerpolation uint contact:TEXCOORD22;nointerpolation float contactHeight:TEXCOORD23;
+ // Its own register (zw unused): packed beside liquidTileLocal, the drop and
+ // pit fill reached the pixels as garbage that changed every frame on the
+ // untessellated draws (NVIDIA, save1152/zone3obr waterfall pool).
+ float4 liquidFall:TEXCOORD27;
  // Facet flatness (terrain_facet_flatness: flattest, mean), interpolated per vertex.
  float2 terrainFlat:TEXCOORD29;
  // Rest (undisplaced) world position: shadow lookups stay attached to swaying leaves.
@@ -614,10 +619,6 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
    float3 second=asfloat(nativeAnimation.Load3(node.morphSecond+local*12));
    position+=lerp(first,second,node.morphFraction);
   }
- }else if(component.x<instance.morphCount){
-   float3 first=asfloat(nativeMorphGeometry.Load3(instance.morphOffset+component.x*12));
-   float3 second=asfloat(nativeMorphGeometry.Load3(instance.secondMorphOffset+component.x*12));
-  position+=lerp(first,second,instance.morphFraction);
  }
  output.undeformedXY=mul(instance.objectToWorld,float4(position,1)).xy;
  if(instance.terrainVertexOffset!=0xffffffff){
@@ -1181,12 +1182,12 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
    float3 right,up;nativeImpostorBasis(impostorView,right,up);
    h=((preparedIndex&2u)!=0?1:-1)/max(up.z,.3)*.5+.5;
   }else h=(world.p.z-centre.z)/max(sphere.w*scale,1e-3)*.5+.5;
-  output.liquidFall=float2(saturate(h),1);
+  output.liquidFall=float4(saturate(h),1,0,0);
  }else [branch]if((instance.nativeFlags&0x200u)!=0&&treeSwayAnchored(instance)){
   // Object-space swaying parts without an impostor table read the same
   // anchor from their record (treeSwayBase).
   float plantHeight=max(((instance.nativeFlags>>22)&63u)*.25,.25);
-  output.liquidFall=float2(saturate((world.p.z-treeSwayBase(instance).z)/plantHeight),1);
+  output.liquidFall=float4(saturate((world.p.z-treeSwayBase(instance).z)/plantHeight),1,0,0);
  }
  if(sway){world.p.xyz+=treeSwayOffset(world.p.xyz,instance);output.swaying=treeSwayStrength(instance)>0?1u:0u;}
  // Static LOD crossfade code (nativeStaticLodSelect) for the pixel stages.
@@ -1312,7 +1313,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
    // Slope and cascade foam are scalars; the downhill current turns with the instance.
    output.liquidDirections=float4(terrain.liquidBend,terrain.liquidCascade,
        mul((float3x3)instance.objectToWorld,float3(terrain.liquidCurrent,0)).xy);
-   output.liquidFall=float2(terrain.liquidDrop,terrain.liquidFill);
+   output.liquidFall=float4(terrain.liquidDrop,terrain.liquidFill,0,0);
   }
  }
  // Sector.cpp stores wave glint in byte RGB; normalize its 50-unit scale to 0..1.
@@ -1435,12 +1436,32 @@ float nativeShadowRotation(float2 pixel,bool temporal){
  float2 jitter=temporal?shadowJitter.xy:0;
  return 6.2831853*frac(52.9829189*frac(dot(floor(pixel)+jitter,float2(.06711056,.00583715))));
 }
+// The soft filter's blocker search radius in texels; its taps stay inside it.
+float nativeShadowSearch(uint slice,float minTexels){
+ return clamp(shadowBias[5].y/max(shadowBias[slice].x,1e-6),max(2.0,minTexels),24.0);
+}
+// Exact early-out (shadow_early_out): 1 when every texel the filter can read
+// (within `reach` texels per axis of `texel`) compares lit, 0 when every one
+// is a blocker, -1 otherwise. Those are the full filter's own results: each
+// tap is a 0/1 compare against the receiver plane, bilinear-weighted. The
+// cell holds the nearest and 1 - farthest depth within two cells of the
+// pixel's cell (build_native_shadow_range); shadowScrollControl.w marks the
+// maps whose cells are current. An unbound view reads zeros: never a skip.
+int nativeShadowEarly(uint slice,float2 texel,float side,float receiver,float2 depthStep,float reach){
+ if((shadowScrollControl.w&(1u<<slice))==0)return -1;
+ int cells=int(side)/16;
+ float2 range=shadowRange.Load(int4(clamp(int2(texel/16),0,cells-1),slice,0));
+ float extent=(abs(depthStep.x)+abs(depthStep.y))*reach;
+ if(range.x>saturate(receiver+extent))return 1;
+ if(1-range.y+1e-6<saturate(receiver-extent))return 0;
+ return -1;
+}
 float nativeShadowSoft(uint slice,float3 coordinate,float2 texel,float2 depthStep,float bias,float side,
                        float minTexels,float rotation){
  // Orthographic maps: depth is linear, so depth differences are world gaps.
  float texelWorld=max(shadowBias[slice].x,1e-6),depthWorld=1/max(shadowBias[slice].y,1e-12);
  bool high=shadowBias[5].z>1.5;
- float search=clamp(shadowBias[5].y/texelWorld,max(2.0,minTexels),24.0);
+ float search=nativeShadowSearch(slice,minTexels);
  uint searchTaps=high?16:8;
  float blockers=0,blockerDepth=0;
  [loop]for(uint k=0;k<searchTaps;++k){
@@ -1482,11 +1503,18 @@ float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float
   float bias=.5*shadowBias[slice].x*shadowBias[slice].y;
   float2 texel=float2(coordinate.x*.5+.5,.5-coordinate.y*.5)*side;
   bool farFootprint=slice>=3&&shadowBias[4].z>.5;
+  bool soft=shadowBias[5].z>.5;
+  float minTexels=farFootprint?min(1.5,.5/max(shadowBias[slice].x,1e-6)):1.5;
+  // Read reach per axis: the soft taps' radius stays within the search, the
+  // far 3x3 taps within 1.5 texels, the 5x5 taps within 2.5; the plane
+  // compare's 2x2 Gather adds 1.5.
+  int early=nativeShadowEarly(slice,texel,side,coordinate.z-bias,depthStep,
+   (soft?nativeShadowSearch(slice,minTexels):farFootprint?1.5:2.5)+1.5);
+  [branch]if(early>=0)return early;
   // The soft kernel never falls below the fixed filter's footprint, so the
   // penumbra (a world radius) only widens the existing edge.
-  [branch]if(shadowBias[5].z>.5)
-   return nativeShadowSoft(slice,coordinate,texel,depthStep,bias,side,
-    farFootprint?min(1.5,.5/max(shadowBias[slice].x,1e-6)):1.5,rotation);
+  [branch]if(soft)
+   return nativeShadowSoft(slice,coordinate,texel,depthStep,bias,side,minTexels,rotation);
   // The owned spatial maps carry a world-space texel size for this footprint.
   if(farFootprint){
     // Keep the far filter's tap centers within one world unit even when a
@@ -3195,6 +3223,54 @@ NativeOutput nativeTerrainDSPlain(NativeTessFactors factors,float3 b:SV_DomainLo
 // Liquid batches never take the prepass, so the domain has no liquid path.
 NativeDepthOutput nativePrepassVS(uint vertexId:SV_VertexID){
  NativeOutput o=nativeVertex(vertexId,true);precise float4 position=o.p;o.p=position;return nativeDepthOf(o);
+}
+// DLSS object motion (flush_native, posed batches after their material
+// draw): the same vertex as the material pass (precise, so a LESS_EQUAL test
+// meets its depth), plus where it was last frame. World-vertex records
+// (merged characters, posed figures) take the change of their prepared
+// position since the previous frame's copy of the world vertices (same
+// slot, same source vertex and part); other records only the camera.
+cbuffer NativeMotionConstants:register(b11){row_major float4x4 nativeMotionPreviousClip;float4 nativeMotionJitter;};
+StructuredBuffer<NativeWorldVertex> nativePreviousWorldVertices:register(t46);
+struct NativeMotionOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 uv:TEXCOORD0;nointerpolation uint2 textureReference:TEXCOORD1;
+ float4 objectClip:TEXCOORD2;float4 cameraClip:TEXCOORD3;};
+NativeMotionOutput nativeMotionVS(uint vertexId:SV_VertexID){
+ NativeOutput o=nativeVertex(vertexId,true);precise float4 position=o.p;
+ NativeMotionOutput r;r.p=position;r.d=o.d;r.s=o.s;r.uv=o.uv;r.textureReference=o.textureReference;
+ uint4 triangleRef=nativeVisibleTriangles[nativeTriangleBase+vertexId/3];
+ uint preparedIndex=(vertexId%3)==0?triangleRef.y:((vertexId%3)==1?triangleRef.z:triangleRef.w);
+ NativeInstance instance=loadNativeInstance(triangleRef.x);
+ r.objectClip=0;r.cameraClip=0;
+ [branch]if(instance.worldGeometry!=0){
+  float3 previous=o.worldPosition;
+  r.cameraClip=mul(nativeMotionPreviousClip,float4(previous,1));
+  [branch]if((instance.worldGeometry&@WORLD_OBJECT_SPACE@)==0){
+   NativeWorldVertex now=nativeWorldVertices[preparedIndex],before=nativePreviousWorldVertices[preparedIndex];
+   if(before.sourcePosition==now.sourcePosition&&before.partNode==now.partNode)previous+=before.p.xyz-now.p.xyz;
+  }
+  r.objectClip=mul(nativeMotionPreviousClip,float4(previous,1));
+ }
+ return r;
+}
+struct NativeMotionResult{float2 motion:SV_Target0;float depth:SV_Target1;};
+NativeMotionResult nativeMotionPS(NativeMotionOutput i){
+ // Records without a world position stay with the camera pass.
+ if(i.cameraClip.w<=1e-6||i.objectClip.w<=1e-6)discard;
+ [branch]if(nativeAlphaTest!=0){
+  float4 t=float4(1,1,1,1);
+  if(nativeTextured!=0)t=i.textureReference.y!=0?nativeTextureArray.Sample(nativeSampler,float3(i.uv,i.textureReference.x)):nativeTexture.Sample(nativeSampler,i.uv);
+  if(!nativeCompare(nativeCombineAlpha(i.d,i.s,t)))discard;
+ }
+ float2 size=nativeMotionJitter.zw;
+ float2 pixel=i.p.xy-nativeMotionJitter.xy;
+ float2 objectPixel=float2(i.objectClip.x/i.objectClip.w*.5+.5,.5-i.objectClip.y/i.objectClip.w*.5)*size;
+ float2 cameraPixel=float2(i.cameraClip.x/i.cameraClip.w*.5+.5,.5-i.cameraClip.y/i.cameraClip.w*.5)*size;
+ // A reused slot whose old contents happen to match (same source vertex)
+ // would give a jump across the screen: more than a tenth of the width
+ // beyond the camera motion keeps the camera motion.
+ float2 motion=objectPixel-pixel;
+ if(length(objectPixel-cameraPixel)>.1*size.x)motion=cameraPixel-pixel;
+ NativeMotionResult o;o.motion=motion;o.depth=i.p.z;return o;
 }
 struct NativeDepthTessPoint{NativeDepthOutput o;float3 tessNormal:TEXCOORD24;float4 tessClipNormal:TEXCOORD25;float tessLimit:TEXCOORD26;float4 tessClipUp:TEXCOORD28;};
 NativeDepthTessPoint nativePrepassTessVS(uint vertexId:SV_VertexID){

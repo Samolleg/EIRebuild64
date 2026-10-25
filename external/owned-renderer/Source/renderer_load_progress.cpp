@@ -48,13 +48,12 @@ void* game_import(const char* dll, const char* name) noexcept {
 
 constexpr unsigned kBinkSurface32 = 3; // BGRA bytes
 
-// The frames after `shown` of the movie at `path` as GPU textures, decoded
-// through the game's own binkw32 imports. Null on success, else why not.
-// The game thread only: the game calls these imports from it.
-const char* decode_progress_frames(ID3D11Device* device, const std::string& path, unsigned width, unsigned height,
-    unsigned frames, unsigned shown, std::vector<SurfaceImage>& output) {
+// The frames after `shown` of the movie at `path` as BGRA pixels (opaque
+// alpha), decoded through the game's own binkw32 imports. Null on success,
+// else why not. The game thread only: the game calls these imports from it.
+const char* decode_progress_pixels(const std::string& path, unsigned width, unsigned height, unsigned frames,
+    unsigned shown, std::vector<std::vector<std::uint8_t>>& output) {
     output.clear();
-    if (!device) return "no device";
     const auto open = reinterpret_cast<void*(__stdcall*)(const char*, unsigned)>(game_import("binkw32.dll", "_BinkOpen@8"));
     const auto do_frame = reinterpret_cast<int(__stdcall*)(void*)>(game_import("binkw32.dll", "_BinkDoFrame@4"));
     const auto copy = reinterpret_cast<int(__stdcall*)(void*, void*, int, unsigned, unsigned, unsigned, unsigned)>(
@@ -78,7 +77,7 @@ const char* decode_progress_frames(ID3D11Device* device, const std::string& path
     // the game decodes into its one surface.
     const std::size_t pitch = std::size_t(width) * 4;
     std::vector<std::uint8_t> pixels(pitch * height, 0);
-    std::vector<SurfaceImage> after;
+    std::vector<std::vector<std::uint8_t>> after;
     after.reserve(frames - shown - 1);
     for (unsigned index = 0; index < frames; ++index) {
         do_frame(handle);
@@ -86,6 +85,21 @@ const char* decode_progress_frames(ID3D11Device* device, const std::string& path
         if (index + 1 < frames) next(handle);
         if (index <= shown) continue;
         for (std::size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
+        after.push_back(pixels);
+    }
+    output = std::move(after);
+    return nullptr;
+}
+
+// Decoded progress frames as GPU textures (the held picture's GPU sources).
+const char* create_progress_textures(ID3D11Device* device, unsigned width, unsigned height,
+    const std::vector<std::vector<std::uint8_t>>& frames, std::vector<SurfaceImage>& output) {
+    output.clear();
+    const std::size_t pitch = std::size_t(width) * 4;
+    std::vector<SurfaceImage> after;
+    after.reserve(frames.size());
+    for (const auto& pixels : frames) {
+        if (pixels.size() != pitch * height) return "frame size differs from the movie";
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width; desc.Height = height; desc.MipLevels = desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -103,6 +117,15 @@ const char* decode_progress_frames(ID3D11Device* device, const std::string& path
     return nullptr;
 }
 
+// The frames after `shown` as GPU textures (game thread; standard and scene mode).
+const char* decode_progress_frames(ID3D11Device* device, const std::string& path, unsigned width, unsigned height,
+    unsigned frames, unsigned shown, std::vector<SurfaceImage>& output) {
+    output.clear();
+    if (!device) return "no device";
+    std::vector<std::vector<std::uint8_t>> pixels;
+    if (const char* why = decode_progress_pixels(path, width, height, frames, shown, pixels)) return why;
+    return create_progress_textures(device, width, height, pixels, output);
+}
 #endif // retail Bink imports and PE32 parsing
 
 void report_progress_failure(const std::string& path, const char* why) noexcept {
@@ -168,7 +191,8 @@ void Renderer::capture_load_progress_movie(bool fitted) noexcept try {
 bool Renderer::decode_load_progress_movie() noexcept try {
     auto& state = load_progress_movie_;
     if (state.attempted) return !state.after.empty();
-    if (on_scene_thread()) {
+    // Scene thread, or the core-mode host: the game process decodes (its binkw32).
+    if (on_scene_thread() || core_host_) {
         std::lock_guard<std::mutex> lock(load_progress_decode_lock_);
         auto& decode = load_progress_decode_;
         if (!decode.serial || decode.path != state.path || decode.width != state.width || decode.height != state.height ||
@@ -319,4 +343,54 @@ void Renderer::draw_load_progress(float progress) noexcept try {
 #endif
 } catch (...) { pending_blits_.clear(); }
 
+// Core mode, host: the decode request the game process has not taken yet.
+#if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
+bool Renderer::core_take_progress_request(std::string& path, unsigned& width, unsigned& height, unsigned& frames,
+    unsigned& shown, std::uint64_t& serial) noexcept { return false; }
+#else
+bool Renderer::core_take_progress_request(std::string& path, unsigned& width, unsigned& height, unsigned& frames,
+    unsigned& shown, std::uint64_t& serial) noexcept try {
+    std::lock_guard<std::mutex> lock(load_progress_decode_lock_);
+    auto& pending = load_progress_decode_;
+    if (!pending.serial || pending.taken) return false;
+    path = pending.path; width = pending.width; height = pending.height; frames = pending.frames; shown = pending.shown;
+    serial = pending.serial; pending.taken = true;
+    return true;
+} catch (...) { return false; }
+#endif
+
+// Core mode, host: the game process's decoded frames for request `serial`
+// (empty with `failure`: reported, the held picture stays as it is).
+#if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
+void Renderer::core_progress_frames(std::uint64_t serial, unsigned width, unsigned height,
+    const std::vector<std::vector<std::uint8_t>>& frames, const char* failure) noexcept {  }
+#else
+void Renderer::core_progress_frames(std::uint64_t serial, unsigned width, unsigned height,
+    const std::vector<std::vector<std::uint8_t>>& frames, const char* failure) noexcept try {
+    std::vector<SurfaceImage> after;
+    const char* why = failure;
+    if (!why) why = create_progress_textures(device_.Get(), width, height, frames, after);
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(load_progress_decode_lock_);
+        auto& decode = load_progress_decode_;
+        if (decode.serial != serial) return; // cancelled or replaced
+        path = decode.path;
+        decode.done = true;
+        if (!why) decode.after = std::move(after);
+    }
+    if (why) report_progress_failure(path, why);
+} catch (...) {}
+#endif
+
+// Core mode, game process: decode a host request with the game's binkw32.
+#ifndef EID3D11_EMBEDDED
+const char* core_decode_progress_pixels(const std::string& path, unsigned width, unsigned height, unsigned frames,
+    unsigned shown, std::vector<std::vector<std::uint8_t>>& output) {
+    try { return decode_progress_pixels(path, width, height, frames, shown, output); }
+    catch (...) { output.clear(); return "decode failed (allocation)"; }
+}
+
+#endif
 } // namespace owned
+

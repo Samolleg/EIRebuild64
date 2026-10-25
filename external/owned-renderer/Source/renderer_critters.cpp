@@ -31,8 +31,8 @@
 // Pass: opaque world colour in flush_native_static after the ground cover,
 // depth-tested and depth-writing, lit by the shared world light and point
 // lights, receives the sun cascades, writes the AO ambient share and takes the
-// border fog and world atmosphere. Fading uses a screen-door dither. Casts no
-// shadows.
+// border fog and world atmosphere. Fading uses a screen-door dither. Casts sun
+// shadows into the close maps whenever sun shadows are on (draw_critter_shadows).
 #include "critters.h"
 #include "ambient_occlusion.h"
 #include "owned_asset_loader.h"
@@ -87,9 +87,11 @@ struct CrOut{float4 p:SV_Position;float3 wp:TEXCOORD0;float2 uv:TEXCOORD1;nointe
 // Smooth parts carry an octahedral normal (flags bit 1, 2 x 12 bits).
 float3 crNormal(uint f){float2 e=float2((f>>8)&4095u,(f>>20)&4095u)/4095.0*2-1;float3 n=float3(e,1-abs(e.x)-abs(e.y));
  if(n.z<0)n.xy=(1-abs(n.yx))*float2(n.x>=0?1:-1,n.y>=0?1:-1);return normalize(n);}
-CrOut crVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
+// A vertex's world position and model-space normal (crVS and the sun
+// shadow caster crShadowVS share it).
+float3 crPlace(uint vid,uint iid,out float3 ln){
  CrVertex v=crVertices[crFirst+vid];CrInstance inst=crInstances[crBase+iid];
- uint mode=inst.a.y&255u;float3 lp;float3 ln=0;
+ uint mode=inst.a.y&255u;float3 lp;ln=0;
  if(mode==0u){CrBone b=crBones[inst.a.x+v.bone];lp=crApply(b,v.p);
   if((v.flags&2u)!=0u){float3 n=crNormal(v.flags);ln=float3(dot(b.r0.xyz,n),dot(b.r1.xyz,n),dot(b.r2.xyz,n));}}
  else if(mode==1u){
@@ -115,9 +117,14 @@ CrOut crVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
   float sway=(crLarva1.y*(1-search)+crLarva1.z*search)*L*sin(6.2831853*inst.c.x/crLarva2.x);
   w.x+=sway*head;w.z+=crLarva1.w*L*search*head;lp=w;
  }
- CrOut o;
  float4 h=float4(lp,1);
- o.wp=float3(dot(inst.r0,h),dot(inst.r1,h),dot(inst.r2,h));
+ return float3(dot(inst.r0,h),dot(inst.r1,h),dot(inst.r2,h));
+}
+CrOut crVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
+ CrVertex v=crVertices[crFirst+vid];CrInstance inst=crInstances[crBase+iid];
+ float3 ln;
+ CrOut o;
+ o.wp=crPlace(vid,iid,ln);
  o.p=mul(crClip,float4(o.wp,1));o.uv=v.uv;o.slice=inst.a.y>>8;o.alpha=inst.b.x;
  o.n=float3(dot(inst.r0.xyz,ln),dot(inst.r1.xyz,ln),dot(inst.r2.xyz,ln));
  o.border=1;
@@ -125,6 +132,14 @@ CrOut crVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
   o.border=1-floor(borderFogDensity(o.wp.xy,crFogRange,crFogControl.x,crFogSeam,crFogCurve,crFogSpanLo,crFogSpanHi)*255)/255;
  }
  return o;
+}
+// Sun shadow caster (renderer_shadows.cpp, a close map's per-frame layer):
+// the drawn critter projected into the map being drawn. One mostly faded out
+// (its screen-door alpha below a half) casts none.
+float4 crShadowVS(uint vid:SV_VertexID,uint iid:SV_InstanceID):SV_Position{
+ float3 ln;const float3 wp=crPlace(vid,iid,ln);
+ if(crInstances[crBase+iid].b.x<.5)return float4(0,0,-1,1);
+ return mul(shadowLight[shadowControl.y],float4(wp,1));
 }
 struct CrPixel{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
 CrPixel crPS(CrOut i){
@@ -3996,9 +4011,12 @@ HRESULT make_structured_srv(ID3D11Device* device, ID3D11Buffer* buffer, UINT cou
 
 
 struct Renderer::CritterState {
-    std::future<std::array<ComPtr<ID3DBlob>, 2>> compile;
+    std::future<std::array<ComPtr<ID3DBlob>, 3>> compile;
     std::future<std::shared_ptr<CritterAssets>> assets;
-    ComPtr<ID3D11VertexShader> vs; ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11VertexShader> vs, shadow_vs; ComPtr<ID3D11PixelShader> ps;
+    // The instance and part buffers and instances_scratch hold a drawn frame
+    // (the next frame's sun shadow pass draws them before render_critters).
+    bool shadow_ready = false;
     ComPtr<ID3D11Buffer> frame_constants, draw_constants, vertices, baked, instances, bones;
     ComPtr<ID3D11ShaderResourceView> vertex_srv, baked_srv, instance_srv, bone_srv, skins_srv;
     ComPtr<ID3D11RasterizerState> raster; ComPtr<ID3D11DepthStencilState> depth; ComPtr<ID3D11BlendState> blend;
@@ -4083,6 +4101,7 @@ void append_critter_shader_programs(std::vector<ShaderProgram>& out) {
     static const std::string source = owned_native_shader_source() + kCritterShader;
     out.push_back({source, "critters", nullptr, "crVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "critters", nullptr, "crPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "critters", nullptr, "crShadowVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -4103,6 +4122,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         return status((reason + "; omitted").c_str());
     };
     if (critters_failed_) return S_OK; // preserve the original failure
+    // The sun shadow pass draws only a frame this call completes.
+    if (critters_) critters_->shadow_ready = false;
     if (!device_ || !context_ || !rtv_ || !dsv_ || scene_composited_) return status("world targets unavailable");
     try {
         if (!critters_) {
@@ -4114,8 +4135,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             append_critter_shader_programs(programs);
             state->compile = std::async(std::launch::async, [programs = std::move(programs)]() {
                 const BackgroundWorkerPriority priority;
-                std::array<ComPtr<ID3DBlob>, 2> blobs;
-                for (unsigned k = 0; k < 2; ++k) {
+                std::array<ComPtr<ID3DBlob>, 3> blobs;
+                for (unsigned k = 0; k < 3; ++k) {
                     ComPtr<ID3DBlob> errors;
                     if (FAILED(compile_shader(programs[k], &blobs[k], &errors))) {
                         if (errors) OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
@@ -4138,11 +4159,12 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 cr.assets.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return status("loading assets/shaders");
             const auto blobs = cr.compile.get();
             const auto assets = cr.assets.get();
-            if (!blobs[0] || !blobs[1]) return fail("shaders unavailable");
+            if (!blobs[0] || !blobs[1] || !blobs[2]) return fail("shaders unavailable");
             if (!assets || !assets->error.empty()) return fail(assets ? assets->error : std::string("asset build failed"));
             HRESULT hr = S_OK;
             if (FAILED(hr = create_shader(device_.Get(),blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &cr.vs)) ||
-                FAILED(hr = create_shader(device_.Get(),blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &cr.ps)))
+                FAILED(hr = create_shader(device_.Get(),blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &cr.ps)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[2]->GetBufferPointer(), blobs[2]->GetBufferSize(), nullptr, &cr.shadow_vs)))
                 return fail("shader objects unavailable");
             const auto& a = *assets;
             if (FAILED(make_buffer(device_.Get(), UINT(a.vertices.size() * sizeof(CrVertex)), D3D11_BIND_SHADER_RESOURCE,
@@ -4760,8 +4782,10 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             if (FAILED(context_->Map(cr.bones.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return S_OK;
             std::memcpy(mapped.pData, cr.bone_scratch.data(), cr.bone_scratch.size() * sizeof(Bone)); context_->Unmap(cr.bones.Get(), 0);
         }
+        cr.shadow_ready = true;
         CrFrame c{};
         std::memcpy(c.clip, world_to_clip.data(), sizeof(c.clip));
+        jitter_clip(c.clip);
         c.eye[0] = w.eye.x; c.eye[1] = w.eye.y; c.eye[2] = w.eye.z;
         const auto& fog = ambient_terrain_state_;
         c.fog_range[0] = fog.fog_min[0]; c.fog_range[1] = fog.fog_min[1]; c.fog_range[2] = fog.fog_max[0]; c.fog_range[3] = fog.fog_max[1];
@@ -4783,7 +4807,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         ao_ambient_written_ |= write_ambient;
         ID3D11RenderTargetView* targets[3]{rtv_.Get(), nullptr, write_ambient ? ao_ambient_rtv_.Get() : nullptr};
         context_->OMSetRenderTargets(write_ambient ? 3u : 1u, targets, dsv_.Get());
-        D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1}; context_->RSSetViewports(1, &viewport);
+        D3D11_VIEWPORT viewport = target_viewport(); context_->RSSetViewports(1, &viewport);
         context_->RSSetState(cr.raster.Get()); context_->OMSetDepthStencilState(showcase == 3 ? cr.depth_xray.Get() : cr.depth.Get(), 0);
         const float factor[4]{1, 1, 1, 1}; context_->OMSetBlendState(cr.blend.Get(), factor, ~0u);
         context_->IASetInputLayout(nullptr); context_->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
@@ -4802,7 +4826,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         context_->PSSetConstantBuffers(2, 1, native_shadow_constants_.GetAddressOf());
         context_->PSSetConstantBuffers(5, 1, native_point_light_constants_.GetAddressOf());
         context_->PSSetConstantBuffers(6, 1, shadow_history_constants_.GetAddressOf());
-        context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf());
+        context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf()); context_->PSSetShaderResources(64, 1, native_shadow_range_srv_.GetAddressOf());
         ID3D11ShaderResourceView* point_lights = native_point_lights_.empty() ? nullptr : native_point_light_srv_.Get();
         context_->PSSetShaderResources(18, 1, &point_lights);
         ID3D11ShaderResourceView* point_light_grid = native_point_lights_.empty() ? nullptr : native_point_light_grid_srv_.Get();
@@ -4844,6 +4868,65 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         return fail("allocation failed");
     }
     return S_OK;
+}
+
+
+// Sun shadow casters of the critters (renderer_shadows.cpp, a close map's
+// per-frame layer): whenever sun shadows are on and critters are drawn. The
+// pass runs before render_critters, so it draws the previous frame's
+// critters from the buffers that frame uploaded (its instances_scratch
+// ranges). Depth only.
+void Renderer::draw_critter_shadows(UINT slice) noexcept {
+    (void)slice;
+    if (!critters_ || critters_failed_) return;
+    auto& cr = *critters_;
+    if (!cr.ready || !cr.shadow_ready || !cr.shadow_vs || cr.instances_scratch.empty() || !cr.vertex_srv ||
+        !cr.instance_srv || !cr.baked_srv || !cr.frame_constants || !cr.draw_constants || !cr.raster)
+        return;
+    if (profiler_.pass_active()) profiler_.sub_scope("critter_shadows");
+    ID3D11Buffer* frame_buffers[2]{cr.frame_constants.Get(), cr.draw_constants.Get()};
+    context_->VSSetConstantBuffers(11, 2, frame_buffers);
+    ID3D11ShaderResourceView* vs_srvs[4]{cr.vertex_srv.Get(), cr.instance_srv.Get(), cr.bone_srv.Get(), cr.baked_srv.Get()};
+    context_->VSSetShaderResources(27, 4, vs_srvs);
+    context_->IASetInputLayout(nullptr); context_->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+    context_->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->RSSetState(cr.raster.Get()); context_->OMSetDepthStencilState(cr.depth.Get(), 0);
+    context_->VSSetShader(cr.shadow_vs.Get(), nullptr, 0); context_->PSSetShader(nullptr, nullptr, 0);
+    UINT draws = 0;
+    for (std::size_t begin = 0; begin < cr.instances_scratch.size();) {
+        const Mesh mesh = cr.instances_scratch[begin].first;
+        std::size_t end = begin;
+        while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+        const auto& range = cr.meshes[mesh];
+        const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
+        if (FAILED(push_constants(constant_vs, 12, values, sizeof(values), cr.draw_constants.Get()))) break;
+        context_->DrawInstanced(range.count, UINT(end - begin), 0, 0);
+        ++draws;
+        begin = end;
+    }
+    if (profiler_.pass_active()) profiler_.add_sub_draw(draws, 0);
+    ID3D11ShaderResourceView* empty[4]{};
+    context_->VSSetShaderResources(27, 4, empty);
+    ID3D11Buffer* no_buffers[2]{};
+    context_->VSSetConstantBuffers(11, 2, no_buffers);
+}
+
+
+bool Renderer::owned_shadow_casters_animate() const noexcept {
+    if (critters_ && !critters_failed_ && critters_->shadow_ready && !critters_->instances_scratch.empty()) return true;
+    return gc_shadow_ready_ && configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1) >= 2 &&
+        configured_integer(debug_overlay_.config(), "ground_cover", 2) > 0;
+}
+
+
+std::uint32_t Renderer::owned_shadow_casters_key() const noexcept {
+    const auto& config = debug_overlay_.config();
+    const int cover = configured_integer(config, "ground_cover", 2) > 0 ?
+        std::clamp(configured_integer(config, "ground_cover_shadows", 1), 0, 2) : 0;
+    const bool critters = critters_ && !critters_failed_ && critters_->shadow_ready && !critters_->instances_scratch.empty();
+    return std::uint32_t(cover) | (gc_shadow_ready_ ? 4u : 0u) | (critters ? 8u : 0u) |
+        (configured_integer(config, "critters", 2) > 0 ? 16u : 0u);
 }
 
 #endif

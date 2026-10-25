@@ -5,6 +5,7 @@
 // shader draws a far crown as one camera-facing quad that samples it.
 #include "renderer.h"
 #include "neighbour_maps.h"
+#include "neighbour_piece.h"
 #include "static_lod.h"
 #include "engine_bridge.h"
 #include <algorithm>
@@ -58,8 +59,8 @@ struct ImpostorBakeConstants {
     std::uint32_t frame[4];
 };
 
-std::string impostor_key(const FigureCpuAsset* figure, std::uint64_t texture) {
-    return figure->identity.key() + "|" + std::to_string(texture);
+std::string impostor_key(const ResourceIdentity& figure, std::uint64_t texture) {
+    return figure.key() + "|" + std::to_string(texture);
 }
 
 // Saves and restores the pipeline state the bake changes (it runs inside the
@@ -217,26 +218,23 @@ HRESULT Renderer::ensure_impostor_atlas(UINT slices) noexcept try {
     return E_OUTOFMEMORY;
 }
 
-HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noexcept try {
-    if (impostors_.failed || upload.impostor_sources.empty() || !device_ || !context_) return S_OK;
+HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcept try {
+    if (impostors_.failed || upload.impostors.empty() || !device_ || !context_) return S_OK;
     const auto start = std::chrono::steady_clock::now();
     struct Pending {
         std::string key;
-        const NeighbourMapUpload::ImpostorSource* source = nullptr;
+        const NeighbourPieceImpostor* source = nullptr;
         ComPtr<ID3D11ShaderResourceView> texture;
     };
     std::vector<Pending> pending;
-    for (const auto& [key, source] : upload.impostor_sources) {
-        if (source.source.indices.empty() || !source.node || !source.node->texture) continue;
-        std::string name = impostor_key(key.first, key.second);
+    std::vector<NativeOwnedTextureMip> texture_mips;
+    for (const auto& source : upload.impostors) {
+        if (!source.index_count || !source.vertex_view || !source.indices) continue;
+        const auto& texture_source = upload.textures[source.texture];
+        std::string name = impostor_key(upload.identities[upload.figures[source.figure].identity], texture_source.view_identity);
         if (impostors_.slices.count(name)) continue;
         // The decoration's own texture (the cache entry its records share).
-        const auto& node = *source.node;
-        NativeOwnedTextureView view{};
-        view.identity = node.texture_identity; view.generation = 1;
-        view.resource = &node.texture->identity; view.value_source = 1;
-        view.format = node.texture_format; view.mips = node.texture_mips.data();
-        view.mip_count = static_cast<std::uint32_t>(node.texture_mips.size());
+        const NativeOwnedTextureView view = neighbour_piece_texture_view(texture_source, texture_mips);
         Pending item{std::move(name), &source, nullptr};
         std::uint64_t backing = 0;
         if (FAILED(get_native_owned_texture(view, item.texture, backing, nullptr)) || !item.texture) continue;
@@ -299,21 +297,8 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noe
         context_->OMSetBlendState(impostors_.blend.Get(), nullptr, 0xffffffffu);
         context_->OMSetDepthStencilState(impostors_.depth_state.Get(), 0);
         for (auto& item : pending) {
-            const auto& source = item.source->source;
-            D3D11_BUFFER_DESC vertices{};
-            vertices.ByteWidth = static_cast<UINT>(source.vertices.size() * sizeof(float));
-            vertices.Usage = D3D11_USAGE_IMMUTABLE;
-            vertices.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            vertices.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            vertices.StructureByteStride = 8 * sizeof(float);
-            D3D11_SUBRESOURCE_DATA vertex_data{source.vertices.data()};
-            D3D11_BUFFER_DESC indices{};
-            indices.ByteWidth = static_cast<UINT>(source.indices.size() * sizeof(std::uint32_t));
-            indices.Usage = D3D11_USAGE_IMMUTABLE;
-            indices.BindFlags = D3D11_BIND_INDEX_BUFFER;
-            D3D11_SUBRESOURCE_DATA index_data{source.indices.data()};
-            ComPtr<ID3D11Buffer> vertex_buffer, index_buffer;
-            ComPtr<ID3D11ShaderResourceView> vertex_view;
+            // Its triangles, created by the stream (NeighbourPieceImpostor).
+            const auto& source = *item.source;
             const UINT slice = impostors_.count;
             D3D11_RENDER_TARGET_VIEW_DESC target{};
             target.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -321,9 +306,7 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noe
             target.Texture2DArray.FirstArraySlice = slice;
             target.Texture2DArray.ArraySize = 1;
             ComPtr<ID3D11RenderTargetView> albedo_target, normal_target;
-            if (FAILED(device_->CreateBuffer(&vertices, &vertex_data, &vertex_buffer)) ||
-                FAILED(device_->CreateShaderResourceView(vertex_buffer.Get(), nullptr, &vertex_view)) ||
-                FAILED(device_->CreateBuffer(&indices, &index_data, &index_buffer)) ||
+            if (
                 FAILED(device_->CreateRenderTargetView(impostors_.albedo.Get(), &target, &albedo_target)) ||
                 FAILED(device_->CreateRenderTargetView(impostors_.normal.Get(), &target, &normal_target)))
                 continue;
@@ -333,9 +316,9 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noe
             context_->ClearDepthStencilView(impostors_.depth_view.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
             ID3D11RenderTargetView* targets[2] = {albedo_target.Get(), normal_target.Get()};
             context_->OMSetRenderTargets(2, targets, impostors_.depth_view.Get());
-            context_->VSSetShaderResources(1, 1, vertex_view.GetAddressOf());
+            context_->VSSetShaderResources(1, 1, source.vertex_view.GetAddressOf());
             context_->PSSetShaderResources(0, 1, item.texture.GetAddressOf());
-            context_->IASetIndexBuffer(index_buffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+            context_->IASetIndexBuffer(source.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
             for (UINT frame = 0; frame < kImpostorFrames * kImpostorFrames; ++frame) {
                 const UINT x = frame % kImpostorFrames, y = frame / kImpostorFrames;
                 const D3D11_VIEWPORT viewport{float(x * kImpostorFrameTexels), float(y * kImpostorFrameTexels),
@@ -347,7 +330,7 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noe
                                              {x, y, 0, 0}};
                 std::memcpy(mapped.pData, &values, sizeof(values));
                 context_->Unmap(impostors_.constants.Get(), 0);
-                context_->DrawIndexed(static_cast<UINT>(source.indices.size()), 0, 0);
+                context_->DrawIndexed(source.index_count, 0, 0);
             }
             impostors_.slices.emplace(item.key, slice);
             ++impostors_.count;
@@ -365,7 +348,7 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourMapUpload& upload) noe
     return S_OK;
 }
 
-std::uint32_t Renderer::neighbour_impostor_slice(const FigureCpuAsset* figure, std::uint64_t texture) const {
+std::uint32_t Renderer::neighbour_impostor_slice(const ResourceIdentity& figure, std::uint64_t texture) const {
     const auto found = impostors_.slices.find(impostor_key(figure, texture));
     return found == impostors_.slices.end() ? 0u : found->second + 1u;
 }

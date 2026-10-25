@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include <d3d11.h>
 
 namespace owned {
@@ -58,6 +59,16 @@ void combat_ui_place_spell_list(std::uint64_t epoch, std::uint64_t frame,
     const RECT& destination, const RECT& source, const widescreen::HudComposition& composition,
     unsigned canvas_width, unsigned canvas_height) noexcept;
 bool combat_ui_has_output() noexcept;
+// Core mode: the game-thread half of the state (units, effects, catalog,
+// font, mission, pane effect lists, portraits, hover, status) travels to the
+// host's renderer as one snapshot whenever it changed. revision moves with
+// every game-side publication; encode writes the snapshot (catalog and font
+// only when their revision/generation differs from what was sent), decode
+// replaces the host's game-side half and keeps its own placements.
+std::uint64_t combat_ui_game_revision() noexcept;
+bool combat_ui_encode_game(std::vector<std::uint8_t>& bytes, std::uint64_t& catalog_sent,
+    std::uint64_t& font_sent) noexcept;
+bool combat_ui_decode_game(const std::uint8_t* data, std::size_t size) noexcept;
 bool combat_ui_needs_plate(std::int32_t id) noexcept;
 void register_combat_ui_options(RendererConfig& config);
 #ifdef EID3D11_EMBEDDED
@@ -81,6 +92,7 @@ public:
     void draw_settings(RendererConfig& config);
     bool process_input(UINT message, WPARAM wparam, LPARAM lparam) noexcept;
 private:
+    bool start_worker();
     struct Implementation;
     std::unique_ptr<Implementation> implementation_;
 };

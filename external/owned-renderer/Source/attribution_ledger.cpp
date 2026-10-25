@@ -12,9 +12,7 @@
 #include <iterator>
 #include <string>
 
-#ifndef EID3D11_BUILD_COMMIT
-#define EID3D11_BUILD_COMMIT "unknown"
-#endif
+#include "build_version.h"
 
 namespace owned {
 namespace {
@@ -441,7 +439,7 @@ bool AttributionLedger::initialize(const char* diagnostic_log_path) {
         static_cast<unsigned long long>(process_creation_filetime_100ns_),
         static_cast<unsigned long>(GetCurrentProcessId()),
         static_cast<unsigned long long>(capture_qpc.QuadPart));
-    strncpy_s(commit_.data(), commit_.size(), EID3D11_BUILD_COMMIT, _TRUNCATE);
+    strncpy_s(commit_.data(), commit_.size(), kBuildCommit, _TRUNCATE);
     char hash[65]{};
     if (module_sha256(hash)) strncpy_s(module_hash_.data(), module_hash_.size(), hash, _TRUNCATE);
     else strncpy_s(module_hash_.data(), module_hash_.size(), "unavailable", _TRUNCATE);

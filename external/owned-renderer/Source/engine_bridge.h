@@ -209,6 +209,9 @@ struct PreparedCampIcon {
     OwnedVisualSurface description;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+    // Core mode (claude/s3-store): no texture here; the host decoded this
+    // icon (CampIconRequest serial) and binds it to the native surface.
+    std::uint64_t core_serial = 0;
 };
 bool proxy_publish_camp_texture(IDirectDrawSurface7* surface,
     const PreparedCampIcon& icon,
@@ -674,18 +677,6 @@ struct NativePreparedIdentity {
     bool terrain_source = false;
 };
 
-// Immutable ANM samples are uploaded once. The current frame pair is a value,
-// not a pointer to a controller or a camera-produced morph array.
-struct NativeMorphFramesView {
-    const ResourceIdentity* identity = nullptr;
-    const float* values = nullptr;
-    std::uint32_t frame_count = 0;
-    std::uint32_t point_count = 0;
-    std::uint32_t first_frame = 0;
-    std::uint32_t second_frame = 0;
-    float fraction = 0;
-};
-
 struct NativeWorldBounds {
     std::array<float, 3> minimum{};
     std::array<float, 3> maximum{};
@@ -755,7 +746,6 @@ struct NativeWorldGeometry {
     std::array<float, 3> shape{};
     std::array<float, 16> object_to_world{};
     std::array<float, 16> world_to_clip{};
-    NativeMorphFramesView morph{};
     // A current owned pose is evaluated once on the GPU, independently of the
     // camera and pass. The binding owns immutable assets, never engine objects.
     struct Pose {
@@ -1334,6 +1324,10 @@ bool bridge_consume_character_pane_blt(
     const RECT& destination, const RECT* source_rect,
     Renderer& renderer, HRESULT& result,
     std::uint64_t source_generation = 0) noexcept;
+// camp_inventory's DescribeItem (005EE760) hook: runs describe(panel) with
+// the panel's description surface adopted for owned item card text.
+void bridge_item_card_text_describe(void* panel,
+                                    void (__thiscall* describe)(void*));
 void bridge_retire_owned_text_surface(std::uint64_t surface_id) noexcept;
 bool bridge_character_pane_text_epoch_current(
     std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept;
@@ -1524,6 +1518,10 @@ struct BridgeSceneHandoff {
     // frame state and stage-0 texture captured in `from` (one transaction
     // across several captured render-state sets).
     void (*adopt_sinks)(void* sinks, const void* from) = nullptr;
+    // Game thread, core mode (EI_RENDERER_X64_CORE): the device-free Renderer
+    // that sends typed world commands to the host (null outside core mode;
+    // the bridge then posts closures as above).
+    Renderer* (*core_renderer)(void* context) = nullptr;
 };
 void bridge_set_scene_handoff(const BridgeSceneHandoff& handoff) noexcept;
 void bridge_clear_scene_handoff(void* context) noexcept;
@@ -1548,6 +1546,7 @@ struct BridgeFrameValues {
     WorldFogSnapshot fog{};
     std::uint64_t character_pane_ui_epoch = 0;
     std::uint64_t chat_text_ui_epoch = 0;
+    std::uint64_t item_card_text_ui_epoch = 0;
     // Game reads the renderer makes: on the scene thread the bridge answers
     // these from the installed copy, never from game memory.
     WorldEnvironment environment{};
@@ -2035,6 +2034,7 @@ struct EmbeddedVisualOmission {
 // Shadows (sun and point), point lights and the colour pass of every visual
 // the retained scene claims, for the current world draw.
 // drawn receives the IDs of the visuals this frame drew (colour submitted).
+const EmbeddedVisualFrameInputs* bridge_embedded_visual_inputs() noexcept;
 bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
                                         std::vector<std::int32_t>* drawn = nullptr,
                                         std::vector<EmbeddedVisualOmission>* omitted = nullptr) noexcept;

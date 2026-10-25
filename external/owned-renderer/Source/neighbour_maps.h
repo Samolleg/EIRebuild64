@@ -8,7 +8,9 @@
 #include <memory>
 #include <array>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <string>
 
 namespace owned {
 // One dedicated geometry page a worker created with its final contents.
@@ -86,15 +88,10 @@ inline NativeGeometryView neighbour_figure_view(const FigureCpuAsset& figure, co
     return view;
 }
 // The CPU inputs of a neighbour's ground cover and contact maps, computed by
-// the stream after the weld (renderer_ground_cover.cpp).
+// the stream after the weld (ground_cover_neighbour.h).
 struct GroundCoverNeighbourInputs;
-struct NeighbourMapUpload;
-std::shared_ptr<GroundCoverNeighbourInputs> prepare_ground_cover_neighbour_inputs(
-    const NeighbourMapUpload& upload) noexcept;
-// Its sea surf field (liquid_surf.h) from those inputs' area grid; null
-// without water or inputs.
 struct LiquidSurfField;
-std::shared_ptr<const LiquidSurfField> prepare_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::string& no_sea_maps) noexcept;
+struct NeighbourPiece; // neighbour_piece.h
 struct NeighbourMapUpload {
     std::uint64_t epoch = 0;
     std::shared_ptr<GroundCoverNeighbourInputs> ground_cover_inputs;
@@ -184,6 +181,7 @@ void neighbour_weld_edge_heights(TerrainCpuAsset& terrain, double x, double y,
 std::size_t neighbour_weld_edge_normals(TerrainCpuAsset& terrain, double x, double y,
     const std::vector<NeighbourEdgeStrip>& strips);
 void neighbour_maps_enable(bool enabled) noexcept;
+bool neighbour_maps_enabled() noexcept;
 // The map's origin in the saved world layout (its component's frame, the
 // same numbers the neighbour placement subtracts), read from the layout file
 // for the verified profile; false and 0,0 when the map is not in it. A map
@@ -248,17 +246,32 @@ std::uint64_t neighbour_border_fog_revision() noexcept;
 void neighbour_receivers_publish(std::vector<NativeWorldBounds> cells) noexcept;
 void neighbour_receivers_append_visible(const std::array<float,16>& world_to_clip,
     std::vector<NativeWorldBounds>& receivers) noexcept;
+// What a stream reads besides the archives: the world layout file next to the
+// loaded addon, and the active map's decoded terrain for the edge weld (null
+// until it is published; the stream waits up to 60 s). The renderer DLL takes
+// both from its own process (renderer_neighbour_maps.cpp); the x64 render
+// host gets the layout path in its begin record and decodes the active MPR.
+struct NeighbourStreamSource {
+    std::wstring layout_file;
+    std::function<std::shared_ptr<const TerrainCpuAsset>()> active_terrain;
+};
+// The layout file next to addon.dll in this process; throws without the addon.
+std::wstring neighbour_layout_file();
+// The stream of this process (the renderer DLL's own in standard mode, the
+// host's in remote mode; the DLL reaches either through neighbour_client.h).
 void neighbour_maps_begin(const std::string& mpr, std::uint64_t epoch,
-    const ResourceStoreConfig& mounts) noexcept;
+    const ResourceStoreConfig& mounts, NeighbourStreamSource source) noexcept;
 // The water_surf_no_sea_maps list neighbour sea fields are built with (the
 // renderer publishes it; a stream takes it when it starts).
 void neighbour_maps_set_no_sea_maps(const std::string& maps) noexcept;
+std::string neighbour_maps_no_sea_maps();
 void neighbour_maps_stop() noexcept;
 // Stops the stream only while it serves this map generation. A world change
 // releases the uploaded neighbours; a reload of the same map keeps its
 // generation, so its drained stream must go or begin() would reuse it.
 void neighbour_maps_stop_epoch(std::uint64_t epoch) noexcept;
-std::unique_ptr<NeighbourMapUpload> neighbour_maps_take(std::uint64_t epoch) noexcept;
+// The next neighbour's piece in layout order (neighbour_piece.h).
+std::unique_ptr<NeighbourPiece> neighbour_maps_take(std::uint64_t epoch) noexcept;
 void neighbour_maps_uploaded(std::uint64_t epoch) noexcept;
 std::string neighbour_maps_error(std::uint64_t epoch);
 // True once no stream runs for this epoch (disabled, no profile, never begun)
@@ -269,10 +282,4 @@ bool neighbour_maps_settled(std::uint64_t epoch) noexcept;
 bool neighbour_maps_remaining(std::uint64_t epoch,std::size_t& remaining) noexcept;
 bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept;
 void bridge_neighbour_diagnostic(const char* reason) noexcept;
-// Synchronous preparation into the shipped owned terrain decoder; callback
-// uploads each piece before the borrowed context dies. No live game reads.
-// On failure, failure names the rejected step.
-bool bridge_upload_neighbour_terrain(const NeighbourMapUpload& upload,
-    const std::weak_ptr<const void>& owner, const std::array<float,16>& world_to_clip,
-    NativeGeometrySubmitFn submit, void* context, std::uint32_t& part, const char*& failure);
 }

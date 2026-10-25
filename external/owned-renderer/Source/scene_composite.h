@@ -5,6 +5,7 @@
 #include "shader_cache.h"
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include "smaa_embedded.h"
 #include "../ThirdParty/smaa/Textures/AreaTex.h"
 #include "../ThirdParty/smaa/Textures/SearchTex.h"
@@ -39,7 +40,21 @@ class SceneComposite {
     Ptr<ID3D11ShaderResourceView> color_srv_, edges_srv_, weights_srv_, resolved_srv_, area_, search_;
     Ptr<ID3D11VertexShader> vs_;
     Ptr<ID3D11PixelShader> edge_ps_, weight_ps_, blend_ps_, copy_ps_, upscale_ps_, upscale_depth_ps_;
-    Ptr<ID3D11Buffer> metrics_;
+    Ptr<ID3D11PixelShader> motion_ps_, present_ps_, present_depth_ps_;
+    // Temporal upscaler (DLSS or FSR) only: render-size camera motion (RG16F,
+    // render pixels, current -> previous) and the output-size upscaled image
+    // the upscaler writes (the DLSS host or FSR through the UAV).
+    Ptr<ID3D11Texture2D> motion_, dlss_output_;
+    Ptr<ID3D11RenderTargetView> motion_rtv_;
+    Ptr<ID3D11ShaderResourceView> motion_srv_, dlss_output_srv_;
+    Ptr<ID3D11UnorderedAccessView> dlss_output_uav_;
+    // DLSS only: object motion written by the world pass (posed records) and
+    // the depth it was written at; the camera pass takes it where that depth
+    // is still the world depth.
+    Ptr<ID3D11Texture2D> object_motion_, object_depth_;
+    Ptr<ID3D11RenderTargetView> object_motion_rtv_, object_depth_rtv_;
+    Ptr<ID3D11ShaderResourceView> object_motion_srv_, object_depth_srv_;
+    Ptr<ID3D11Buffer> metrics_, motion_constants_;
     Ptr<ID3D11SamplerState> linear_, point_;
     Ptr<ID3D11DepthStencilState> depth_copy_;
     UINT width_ = 0, height_ = 0, output_width_ = 0, output_height_ = 0;
@@ -47,8 +62,25 @@ public:
     ID3D11RenderTargetView* target() const { return color_rtv_.Get(); }
     ID3D11Texture2D* color() const { return color_.Get(); }
     ID3D11ShaderResourceView* color_view() const { return color_srv_.Get(); }
-    std::uint64_t storage_bytes() const { return color_?std::uint64_t(width_)*height_*(resolved_?14u:10u)+AREATEX_SIZE+SEARCHTEX_SIZE:0; }
+    std::uint64_t storage_bytes() const { return color_?std::uint64_t(width_)*height_*(resolved_?14u:10u)+AREATEX_SIZE+SEARCHTEX_SIZE+
+        (motion_?std::uint64_t(width_)*height_*12u+std::uint64_t(output_width_)*output_height_*4u:0u):0; }
+    // The object motion targets (motion, depth), bound by the world pass.
+    ID3D11RenderTargetView* object_motion_target() const { return object_motion_rtv_.Get(); }
+    ID3D11RenderTargetView* object_depth_target() const { return object_depth_rtv_.Get(); }
+    // Start of a world frame: no object motion anywhere.
+    void clear_object_motion(ID3D11DeviceContext* context) const {
+        const float zero[4]{}, far_away[4]{2.f, 2.f, 2.f, 2.f};
+        if(object_motion_rtv_)context->ClearRenderTargetView(object_motion_rtv_.Get(),zero);
+        if(object_depth_rtv_)context->ClearRenderTargetView(object_depth_rtv_.Get(),far_away);
+    }
     bool scaled() const { return resolved_ != nullptr; }
+    bool dlss() const { return dlss_output_ != nullptr; }
+    ID3D11Texture2D* resolved() const { return resolved_.Get(); }
+    ID3D11Texture2D* motion() const { return motion_.Get(); }
+    ID3D11Texture2D* dlss_output() const { return dlss_output_.Get(); }
+    ID3D11ShaderResourceView* resolved_view() const { return resolved_srv_.Get(); }
+    ID3D11ShaderResourceView* motion_view() const { return motion_srv_.Get(); }
+    ID3D11UnorderedAccessView* dlss_output_view() const { return dlss_output_uav_.Get(); }
     // Where SMAA/copy, sun rays and bloom write: the output itself at 100%.
     ID3D11RenderTargetView* resolve_target(ID3D11RenderTargetView* output) const {
         return resolved_ ? resolved_rtv_.Get() : output;
@@ -58,11 +90,18 @@ public:
         color_srv_.Reset(); edges_srv_.Reset(); weights_srv_.Reset(); resolved_srv_.Reset();
         color_rtv_.Reset(); edges_rtv_.Reset(); weights_rtv_.Reset(); resolved_rtv_.Reset();
         color_.Reset(); edges_.Reset(); weights_.Reset(); resolved_.Reset(); metrics_.Reset();
+        motion_rtv_.Reset(); motion_srv_.Reset(); dlss_output_srv_.Reset(); dlss_output_uav_.Reset();
+        motion_.Reset(); dlss_output_.Reset();
+        object_motion_rtv_.Reset(); object_depth_rtv_.Reset(); object_motion_srv_.Reset(); object_depth_srv_.Reset();
+        object_motion_.Reset(); object_depth_.Reset();
         width_ = height_ = output_width_ = output_height_ = 0;
     }
     // width x height is the world render size; the output (swap chain) size
     // defaults to it. A smaller world adds the resolved image and upscale().
-    HRESULT create(ID3D11Device* device, UINT width, UINT height, UINT output_width = 0, UINT output_height = 0) {
+    // dlss: the resolved image always exists (DLAA renders at output size),
+    // plus the motion target and the host's output image.
+    HRESULT create(ID3D11Device* device, UINT width, UINT height, UINT output_width = 0, UINT output_height = 0,
+                   bool dlss = false) {
         reset_targets();
         if (!point_) {
             const HRESULT hr = create_device_resources(device);
@@ -85,8 +124,23 @@ public:
         if(FAILED(hr))return hr;
         if(FAILED(hr=target(DXGI_FORMAT_R8G8_UNORM,edges_,edges_rtv_,edges_srv_)))return hr;
         if(FAILED(hr=target(DXGI_FORMAT_R8G8B8A8_UNORM,weights_,weights_rtv_,weights_srv_)))return hr;
-        if((output_width_!=width||output_height_!=height)&&
+        if((dlss||output_width_!=width||output_height_!=height)&&
            FAILED(hr=target(DXGI_FORMAT_B8G8R8A8_UNORM,resolved_,resolved_rtv_,resolved_srv_)))return hr;
+        if(dlss){
+            if(FAILED(hr=target(DXGI_FORMAT_R16G16_FLOAT,motion_,motion_rtv_,motion_srv_)))return hr;
+            if(FAILED(hr=target(DXGI_FORMAT_R16G16_FLOAT,object_motion_,object_motion_rtv_,object_motion_srv_)))return hr;
+            if(FAILED(hr=target(DXGI_FORMAT_R32_FLOAT,object_depth_,object_depth_rtv_,object_depth_srv_)))return hr;
+            // The host writes the upscaled image through an unordered-access view.
+            D3D11_TEXTURE2D_DESC d{};d.Width=output_width_;d.Height=output_height_;
+            d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            d.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;
+            if(FAILED(hr=device->CreateTexture2D(&d,nullptr,&dlss_output_)))return hr;
+            if(FAILED(hr=device->CreateShaderResourceView(dlss_output_.Get(),nullptr,&dlss_output_srv_)))return hr;
+            if(FAILED(hr=device->CreateUnorderedAccessView(dlss_output_.Get(),nullptr,&dlss_output_uav_)))return hr;
+            D3D11_BUFFER_DESC m{};m.ByteWidth=sizeof(float)*48;m.Usage=D3D11_USAGE_DYNAMIC;
+            m.BindFlags=D3D11_BIND_CONSTANT_BUFFER;m.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+            if(!motion_constants_&&FAILED(hr=device->CreateBuffer(&m,nullptr,&motion_constants_)))return hr;
+        }
         const float values[]={1.f/width,1.f/height,float(width),float(height)};
         D3D11_BUFFER_DESC b{};b.ByteWidth=16;b.Usage=D3D11_USAGE_IMMUTABLE;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         D3D11_SUBRESOURCE_DATA data{values,0,0};return device->CreateBuffer(&b,&data,&metrics_);
@@ -165,6 +219,37 @@ UpscaleOutput upscaleDepthPS(FullVertex i) {
     int2 texel = min(int2(i.uv * metrics.zw), int2(metrics.zw) - 1);
     o.depth = worldDepth.Load(int3(texel, 0)); return o;
 }
+// DLSS camera motion (render size): from the jittered world depth and the
+// unjittered current inverse and previous view-projection, the motion in
+// render pixels from this frame's unjittered position to the previous one.
+cbuffer CameraMotion : register(b1) {
+    row_major float4x4 motionClipToWorld; row_major float4x4 motionPreviousWorldToClip;
+    float4 motionJitter; // xy: this frame's viewport jitter (pixels), zw: render size
+};
+Texture2D<float2> objectMotion : register(t1);
+Texture2D<float> objectDepth : register(t2);
+float2 cameraMotionPS(FullVertex i) : SV_Target {
+    float2 size = motionJitter.zw;
+    float2 pixel = i.position.xy - motionJitter.xy;
+    float depth = worldDepth.Load(int3(i.position.xy, 0));
+    // A posed record wrote its own motion here and is still the visible
+    // surface (its depth survived; D24 rounding is far below the tolerance).
+    if (abs(objectDepth.Load(int3(i.position.xy, 0)) - depth) <= 1e-6) return objectMotion.Load(int3(i.position.xy, 0));
+    float2 uv = pixel / size;
+    float4 world = mul(motionClipToWorld, float4(uv.x * 2 - 1, 1 - uv.y * 2, depth, 1));
+    float4 previous = mul(motionPreviousWorldToClip, float4(world.xyz / world.w, 1));
+    if (previous.w <= 1e-6) return 0;
+    float2 previousPixel = float2(previous.x / previous.w * .5 + .5, .5 - previous.y / previous.w * .5) * size;
+    return previousPixel - pixel;
+}
+// The host's upscaled image (output size) to the output, and with depth the
+// world depth (nearest world texel) to the interface depth.
+float4 dlssPresentPS(FullVertex i) : SV_Target { return float4(input0.Load(int3(i.position.xy, 0)).rgb, 1); }
+UpscaleOutput dlssPresentDepthPS(FullVertex i) {
+    UpscaleOutput o; o.color = float4(input0.Load(int3(i.position.xy, 0)).rgb, 1);
+    int2 texel = min(int2(i.uv * metrics.zw), int2(metrics.zw) - 1);
+    o.depth = worldDepth.Load(int3(texel, 0)); return o;
+}
 )";
     }
 public:
@@ -174,7 +259,8 @@ public:
         static const std::string source=build_shader_source();
         if(source.empty())return;
         out.push_back({source,"SMAA",nullptr,"sceneVS","vs_4_1",D3DCOMPILE_OPTIMIZATION_LEVEL3});
-        for(const char* entry:{"edgePS","weightPS","blendPS","copyPS","upscalePS","upscaleDepthPS"})
+        for(const char* entry:{"edgePS","weightPS","blendPS","copyPS","upscalePS","upscaleDepthPS",
+                               "cameraMotionPS","dlssPresentPS","dlssPresentDepthPS"})
             out.push_back({source,"SMAA",nullptr,entry,"ps_4_1",D3DCOMPILE_OPTIMIZATION_LEVEL3});
     }
 private:
@@ -201,8 +287,9 @@ private:
         Ptr<ID3DBlob> code;
         if(FAILED(hr=compile(programs[0],code)))return hr;
         if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs_)))return hr;
-        Ptr<ID3D11PixelShader>* shaders[]={&edge_ps_,&weight_ps_,&blend_ps_,&copy_ps_,&upscale_ps_,&upscale_depth_ps_};
-        for(unsigned i=0;i<6;++i){code.Reset();if(FAILED(hr=compile(programs[1+i],code)))return hr;
+        Ptr<ID3D11PixelShader>* shaders[]={&edge_ps_,&weight_ps_,&blend_ps_,&copy_ps_,&upscale_ps_,&upscale_depth_ps_,
+                                           &motion_ps_,&present_ps_,&present_depth_ps_};
+        for(unsigned i=0;i<9;++i){code.Reset();if(FAILED(hr=compile(programs[1+i],code)))return hr;
             if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,shaders[i]->GetAddressOf())))return hr;}
         D3D11_SAMPLER_DESC s{};s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
         s.MaxLOD=0;s.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
@@ -255,6 +342,56 @@ public:
         ID3D11ShaderResourceView* views[4]={resolved_srv_.Get(),nullptr,nullptr,depth?world_depth:nullptr};
         context->PSSetShaderResources(0,4,views);
         context->PSSetShader(depth?upscale_depth_ps_.Get():upscale_ps_.Get(),nullptr,0);context->Draw(3,0);
+        context->PSSetShaderResources(0,4,empty);
+    }
+private:
+    void bind_full_screen(ID3D11DeviceContext* context,UINT width,UINT height,ID3D11DepthStencilState* depth) const {
+        context->IASetInputLayout(nullptr);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs_.Get(),nullptr,0);context->GSSetShader(nullptr,nullptr,0);
+        context->HSSetShader(nullptr,nullptr,0);context->DSSetShader(nullptr,nullptr,0);
+        context->RSSetState(nullptr);D3D11_VIEWPORT viewport{0,0,float(width),float(height),0,1};
+        context->RSSetViewports(1,&viewport);context->OMSetDepthStencilState(depth,0);
+        context->OMSetBlendState(nullptr,nullptr,~0u);context->PSSetConstantBuffers(0,1,metrics_.GetAddressOf());
+    }
+public:
+    // DLSS only: the camera motion of every world pixel into motion().
+    // clip_to_world: inverse of this frame's unjittered world_to_clip;
+    // previous: last frame's unjittered world_to_clip (row_major, mul(M, v)).
+    bool camera_motion(ID3D11DeviceContext* context,ID3D11ShaderResourceView* world_depth,const float clip_to_world[16],
+                       const float previous[16],float jitter_x,float jitter_y) const {
+        if(!motion_rtv_||!motion_constants_||!world_depth)return false;
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(FAILED(context->Map(motion_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return false;
+        float* values=static_cast<float*>(mapped.pData);
+        std::memcpy(values,clip_to_world,64);std::memcpy(values+16,previous,64);
+        values[32]=jitter_x;values[33]=jitter_y;values[34]=float(width_);values[35]=float(height_);
+        context->Unmap(motion_constants_.Get(),0);
+        ID3D11ShaderResourceView* empty[4]{};context->PSSetShaderResources(0,4,empty);
+        context->OMSetRenderTargets(1,motion_rtv_.GetAddressOf(),nullptr);
+        bind_full_screen(context,width_,height_,nullptr);
+        context->PSSetConstantBuffers(1,1,motion_constants_.GetAddressOf());
+        ID3D11ShaderResourceView* views[4]={nullptr,object_motion_srv_.Get(),object_depth_srv_.Get(),world_depth};context->PSSetShaderResources(0,4,views);
+        context->PSSetShader(motion_ps_.Get(),nullptr,0);context->Draw(3,0);
+        context->PSSetShaderResources(0,4,empty);
+        ID3D11Buffer* none=nullptr;context->PSSetConstantBuffers(1,1,&none);
+        return true;
+    }
+    void clear_motion(ID3D11DeviceContext* context) const {
+        const float zero[4]{};if(motion_rtv_)context->ClearRenderTargetView(motion_rtv_.Get(),zero);
+    }
+    // DLSS only: the host's upscaled image to the output, and the world depth
+    // to the interface depth when both are given (they differ below DLAA).
+    void dlss_present(ID3D11DeviceContext* context,ID3D11RenderTargetView* output,
+                      ID3D11ShaderResourceView* world_depth,ID3D11DepthStencilView* interface_depth) const {
+        if(!dlss_output_srv_)return;
+        const bool depth=world_depth&&interface_depth;
+        ID3D11ShaderResourceView* empty[4]{};context->PSSetShaderResources(0,4,empty);
+        context->OMSetRenderTargets(1,&output,depth?interface_depth:nullptr);
+        if(depth)context->ClearDepthStencilView(interface_depth,D3D11_CLEAR_STENCIL,1.f,0);
+        bind_full_screen(context,output_width_,output_height_,depth?depth_copy_.Get():nullptr);
+        ID3D11ShaderResourceView* views[4]={dlss_output_srv_.Get(),nullptr,nullptr,depth?world_depth:nullptr};
+        context->PSSetShaderResources(0,4,views);
+        context->PSSetShader(depth?present_depth_ps_.Get():present_ps_.Get(),nullptr,0);context->Draw(3,0);
         context->PSSetShaderResources(0,4,empty);
     }
 };

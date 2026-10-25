@@ -31,6 +31,10 @@ inline std::array<float,2> contact_world_vertical_bounds(const std::array<float,
 
 // Terrain materials whose atlas can be read by the blend (availability bits).
 constexpr std::uint32_t contact_blend_max_materials = 64u;
+// Contact atlas side cap. A map's terrain pages need not share one size
+// (Dejavu zone1 ships 1024 and 2048 HD pages together); every page is copied
+// from its mip at most this wide, so one array holds them all.
+constexpr std::uint32_t contact_blend_atlas_side = 1024u;
 
 // Shared by the production object pixel shader and the focused WARP regression.
 constexpr char kContactBlendShader[] = R"(
