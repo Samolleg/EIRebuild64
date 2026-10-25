@@ -227,7 +227,7 @@ LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
         *pnDataSize = pRec->dwSize;
 
     recByName[pRec->szName] = pRec;
-    recByData[DWORD(pRec->pAllocatedMemory)] = pRec;
+    recByData[pRec->pAllocatedMemory] = pRec;
     resourcePayloadBytes.fetch_add(pRec->dwSize, std::memory_order_relaxed);
     return pRec->pAllocatedMemory;
 }
@@ -241,7 +241,7 @@ bool CMappedResource::CloseFile(LPBYTE pFileImage)
     if (!pFileImage)
         return false;
 
-    auto pos = recByData.find(DWORD(pFileImage));
+    auto pos = recByData.find(pFileImage);
     if (pos == recByData.end())
     {
         // ReportWarning("CMappedResource::CloseFile()\nFile already closed\n");

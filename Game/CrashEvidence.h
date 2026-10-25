@@ -8,7 +8,8 @@ namespace CrashEvidence
 // Fixed storage; the fatal path must not depend on allocating a C++ container.
 struct Frame
 {
-    DWORD address, rva, line;
+    ULONG_PTR address;
+    DWORD rva, line;
     bool processImage;
     char module[128], function[256], file[384];
 };

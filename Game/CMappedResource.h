@@ -21,7 +21,7 @@ private:
     int hFile;           // handle to resource file
     LPBYTE pBaseAddress; // NULL if opened from file
     BOOL bWriteAccess;
-    std::unordered_map<DWORD, SResourceFileRecord *> recByData;
+    std::unordered_map<LPBYTE, SResourceFileRecord *> recByData;
     std::unordered_map<std::string, SResourceFileRecord *> recByName;
 
 public:

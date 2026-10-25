@@ -184,7 +184,7 @@ public:
 ////////////////////////////////////////////////////////////////////////////////////
 inline float SADEntry::GetHeightCorrection(float fTall) const
 {
-    const SADBFileHeader *pHdr = (const SADBFileHeader *)(int(this) -
+    const SADBFileHeader *pHdr = (const SADBFileHeader *)((const BYTE *)this -
                                                           dwEntryIndex * sizeof(SADEntry) -
                                                           sizeof(SADBFileHeader));
     return pHdr->GetHeightCorrection(fTall);
@@ -228,7 +228,7 @@ inline DWORD SADBFileHeader::ShiftToEntry(DWORD dwNumber) const
 ////////////////////////////////////////////////////////////////////////////////////
 inline SADEntry *SADBFileHeader::GetEntry(DWORD dwNumber) const
 {
-    return (SADEntry *)(DWORD(this) + ShiftToEntry(dwNumber));
+    return (SADEntry *)((const BYTE *)this + ShiftToEntry(dwNumber));
 }
 ////////////////////////////////////////////////////////////////////////////////////
 #ifndef __NO_MFC__

@@ -97,23 +97,23 @@ const char *ExceptionKind(DWORD code)
     }
 }
 
-// MSVC x86 EH metadata contains absolute pointers, unlike x64 image-relative EH.
-struct ThrowInfo32 { DWORD attributes, unwind, forward, catchables; };
-struct Catchable32 { DWORD properties, type; int mdisp, pdisp, vdisp, size; DWORD copy; };
+// MSVC x64 EH metadata uses 32-bit image-relative offsets, not truncated pointers.
+struct ThrowInfoRva { DWORD attributes; int unwind, forward, catchables; };
+struct CatchableRva { DWORD properties; int type, mdisp, pdisp, vdisp, size, copy; };
 
-bool AdjustObject(ULONG_PTR object, const Catchable32 &type, ULONG_PTR &adjusted)
+bool AdjustObject(ULONG_PTR object, const CatchableRva &type, ULONG_PTR &adjusted)
 {
     __int64 offset = type.mdisp;
     if (type.pdisp >= 0)
     {
-        DWORD table = 0;
+        ULONG_PTR table = 0;
         int displacement = 0;
         if (!ReadMemory(object + type.pdisp, &table, sizeof(table)) ||
             !ReadMemory(table + type.vdisp, &displacement, sizeof(displacement))) return false;
         offset += type.pdisp + displacement;
     }
     __int64 value = static_cast<__int64>(object) + offset;
-    if (value <= 0 || value > MAXDWORD) return false;
+    if (value <= 0) return false;
     adjusted = static_cast<ULONG_PTR>(value);
     return true;
 }
@@ -122,9 +122,10 @@ bool ReadWhat(ULONG_PTR object, char *message, size_t capacity)
 {
     // Call only the recognized std::exception base, with SEH isolation. Unknown
     // exception vtables are never invoked; pointers and returned text are guarded.
-    DWORD vtable = 0, method = 0;
+    ULONG_PTR vtable = 0, method = 0;
     MEMORY_BASIC_INFORMATION region = {};
-    if (!ReadMemory(object, &vtable, 4) || !ReadMemory(vtable + 4, &method, 4) ||
+    if (!ReadMemory(object, &vtable, sizeof(vtable)) ||
+        !ReadMemory(vtable + sizeof(void *), &method, sizeof(method)) ||
         !VirtualQuery(reinterpret_cast<void *>(method), &region, sizeof(region)) ||
         region.State != MEM_COMMIT || !(region.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) || (region.Protect & PAGE_GUARD)) return false;
@@ -138,21 +139,23 @@ bool ReadWhat(ULONG_PTR object, char *message, size_t capacity)
 
 void DecodeCpp(const EXCEPTION_RECORD &record)
 {
-    if (record.NumberParameters < 3 || record.ExceptionInformation[0] < 0x19930520 ||
+    if (record.NumberParameters < 4 || record.ExceptionInformation[0] < 0x19930520 ||
         record.ExceptionInformation[0] > 0x19930522) return;
-    ThrowInfo32 info = {};
+    ThrowInfoRva info = {};
     int count = 0;
-    if (!ReadMemory(record.ExceptionInformation[2], &info, sizeof(info)) ||
-        !ReadMemory(info.catchables, &count, sizeof(count)) || count <= 0 || count > 64) return;
+    const ULONG_PTR imageBase = record.ExceptionInformation[3];
+    if (!ReadMemory(record.ExceptionInformation[2], &info, sizeof(info))) return;
+    const ULONG_PTR catchables = imageBase + info.catchables;
+    if (!ReadMemory(catchables, &count, sizeof(count)) || count <= 0 || count > 64) return;
     const ULONG_PTR object = record.ExceptionInformation[1];
     for (int i = 0; i < count; ++i)
     {
-        DWORD pointer = 0;
-        Catchable32 type = {};
+        int typeRva = 0;
+        CatchableRva type = {};
         char decorated[384] = {}, name[384] = {};
-        if (!ReadMemory(info.catchables + 4 + i * 4, &pointer, 4) ||
-            !ReadMemory(pointer, &type, sizeof(type)) ||
-            !ReadString(type.type + 8, decorated, sizeof(decorated))) continue;
+        if (!ReadMemory(catchables + sizeof(count) + i * sizeof(typeRva), &typeRva, sizeof(typeRva)) ||
+            !ReadMemory(imageBase + typeRva, &type, sizeof(type)) ||
+            !ReadString(imageBase + type.type + 2 * sizeof(void *), decorated, sizeof(decorated))) continue;
         const char *input = decorated[0] == '.' ? decorated + 1 : decorated;
         if (!pUnDecorateSymbolName || !pUnDecorateSymbolName(input, name, sizeof(name), UNDNAME_NO_ARGUMENTS))
             strncpy_s(name, decorated, _TRUNCATE);
@@ -196,7 +199,6 @@ void DecodeCpp(const EXCEPTION_RECORD &record)
 
 DWORD64 CALLBACK ModuleBase(HANDLE, DWORD64 address)
 {
-    if (address > MAXDWORD) return 0;
     MEMORY_BASIC_INFORMATION region = {};
     if (!VirtualQuery(reinterpret_cast<void *>(static_cast<ULONG_PTR>(address)), &region, sizeof(region)) ||
         region.Type != MEM_IMAGE) return 0;
@@ -206,7 +208,7 @@ DWORD64 CALLBACK ModuleBase(HANDLE, DWORD64 address)
 BOOL CALLBACK StackRead(HANDLE, DWORD64 address, PVOID buffer, DWORD size, LPDWORD read)
 {
     SIZE_T amount = 0;
-    BOOL ok = address <= MAXDWORD && ReadProcessMemory(GetCurrentProcess(),
+    BOOL ok = ReadProcessMemory(GetCurrentProcess(),
         reinterpret_cast<void *>(static_cast<ULONG_PTR>(address)), buffer, size, &amount);
     *read = static_cast<DWORD>(amount);
     return ok;
@@ -218,13 +220,13 @@ PVOID CALLBACK FunctionTable(HANDLE process, DWORD64 address)
         ? pSymFunctionTableAccess64(process, address) : nullptr;
 }
 
-void AddFrame(DWORD address)
+void AddFrame(ULONG_PTR address)
 {
     if (!address || details.frameCount == 64) return;
     Frame &frame = details.frames[details.frameCount++];
     frame.address = address;
-    DWORD base = static_cast<DWORD>(ModuleBase(GetCurrentProcess(), address));
-    frame.rva = base ? address - base : address;
+    const ULONG_PTR base = ModuleBase(GetCurrentProcess(), address);
+    frame.rva = base ? static_cast<DWORD>(address - base) : 0;
     frame.processImage = base == reinterpret_cast<ULONG_PTR>(GetModuleHandleW(nullptr));
     char path[MAX_PATH] = {};
     if (base && GetModuleFileNameA(reinterpret_cast<HMODULE>(base), path, MAX_PATH))
@@ -266,7 +268,7 @@ void CollectDetails(EXCEPTION_POINTERS *pointers)
         strcpy_s(details.access, record.ExceptionInformation[0] == 0 ? "read" :
             record.ExceptionInformation[0] == 1 ? "write" : record.ExceptionInformation[0] == 8 ? "execute" : "unknown");
         details.accessAddress = record.ExceptionInformation[1];
-        _snprintf_s(details.message, _TRUNCATE, "%s address=0x%08lX", details.access, details.accessAddress);
+        _snprintf_s(details.message, _TRUNCATE, "%s address=%p", details.access, reinterpret_cast<void *>(details.accessAddress));
     }
     if (record.ExceptionCode == 0xE06D7363) DecodeCpp(record);
 #if defined(_M_IX86)
@@ -587,9 +589,8 @@ void WriteMemory(ReportWriter &out)
             break;
         address = next;
     }
-    out.Print("Address space: committed=%lu reserved=%lu free=%lu regions=%u%s\r\n",
-              static_cast<unsigned long>(committed), static_cast<unsigned long>(reserved),
-              static_cast<unsigned long>(freeBytes), regions,
+    out.Print("Address space: committed=%zu reserved=%zu free=%zu regions=%u%s\r\n",
+              committed, reserved, freeBytes, regions,
               regions == 65536 ? " (truncated)" : "");
 }
 
@@ -736,7 +737,8 @@ bool WriteReport(EXCEPTION_POINTERS *info, RecentCountFn countFn,
     for (unsigned i = 0; i < details.frameCount; ++i)
     {
         const Frame &frame = details.frames[i];
-        out.Print("#%02u %s+0x%08lX pc=0x%08lX", i, frame.module, frame.rva, frame.address);
+        out.Print("#%02u %s+0x%08lX pc=%p", i, frame.module, frame.rva,
+                  reinterpret_cast<void *>(frame.address));
         if (frame.function[0]) { out.Print(" "); out.Text(frame.function); }
         if (frame.file[0]) { out.Print(" "); out.Text(frame.file); out.Print(":%lu", frame.line); }
         out.Print("\r\n");

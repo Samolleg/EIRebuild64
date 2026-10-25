@@ -49,7 +49,7 @@ void CI3DScreenEndGame::OnActivate()
 
     m_fWaitTime = 0;
 
-    SystemParametersInfo(SPI_GETFONTSMOOTHING, UINT(&m_isFontSmooth), 0, 0);
+    SystemParametersInfo(SPI_GETFONTSMOOTHING, 0, &m_isFontSmooth, 0);
     SystemParametersInfo(SPI_SETFONTSMOOTHING, FALSE, 0, 0);
 
     VERIFY(m_resText.OpenResource(theSettings.szResourcePath + "outro.res"));
