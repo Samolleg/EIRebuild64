@@ -90,8 +90,8 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ui.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_prepare.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_state.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
-    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_shadows.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
-    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_consumers.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_shadows.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_consumers.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_views.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_codec.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_selected.cpp" />
