@@ -79,10 +79,6 @@ inline std::vector<std::wstring> MultiString(const wchar_t* data,size_t count) {
         if(end==count)return {};out.emplace_back(data+i,end-i);i=end+1;}
     return out;
 }
-template<class Exists,class Load>
-bool ModBink(const std::string& path,Exists exists,Load load,bool& selected) {
-    selected=!path.empty()&&exists(path);return !selected||load(path);
-}
 inline std::string Chat(uint32_t color,const char* nick,const char* text) {
     return "<font class="+std::to_string(color)+">"+(nick?nick:"")+"</font>: "+(text?text:"")+"<BR>";
 }

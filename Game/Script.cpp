@@ -31,7 +31,7 @@ static const char LOCAL_FILE[] = __FILE__;
 // crap for camera
 #include "WorldInterface.h"
 
-#include "BinkVideo.h"
+#include "MoviePlayback.h"
 #include "Renderer.h"
 
 /*==========================================================================================================
@@ -2524,7 +2524,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
             IWorldClient.StartCameraPlay(pCmd->szParams[0]);
             break;
         case SC_PLAYMOVIE:
-            CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\" + pCmd->szParams[0]);
+            Video::Movie::Play(IWorld.GetCDPath() + "Movies\\" + pCmd->szParams[0]);
             break;
         case SC_HIDEOBJECT:
             ASSERT(theWorldServer.curInterface == IFACE_BASE);

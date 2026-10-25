@@ -45,7 +45,7 @@ void CI3DScreenEndGame::OnActivate()
     else
     */
     theCursor.Show(FALSE);
-    NGame::PlayMoviesSequence(mszBinkName + "fin", true, false, false, false);
+    NGame::PlayMoviesSequence(mszMovieName + "fin", true, false, false, false);
 
     m_fWaitTime = 0;
 
@@ -97,14 +97,14 @@ void CI3DScreenEndGame::OnActivate()
 
     //	if ( !bFromMainMenu )
     {
-        bink.BeginPlay(IWorld.GetCDPath() + "Movies\\" + mszBinkName + ".bik", false);
+        movie.BeginPlay(IWorld.GetCDPath() + "Movies\\" + mszMovieName + ".bik", false);
     }
     bCreditsDone = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenEndGame::OnDeactivate()
 {
-    bink.StopPlaying();
+    movie.StopPlaying();
     m_aTexts.clear();
     SystemParametersInfo(SPI_SETFONTSMOOTHING, m_isFontSmooth, 0, 0);
 
@@ -157,10 +157,10 @@ BOOL CI3DScreenEndGame::Draw(CRenderer *pRend)
     //		IWorldClient.Draw();
     //	else
     {
-        if (!bink.PlayNextFrame(NGame::IsFlipEnable() != true) && bCreditsDone)
+        if (!movie.PlayNextFrame(NGame::IsFlipEnable() != true) && bCreditsDone)
         {
-            bink.StopPlaying();
-            NGame::PlayMoviesSequence(mszBinkName + "fout", false, false, false, false);
+            movie.StopPlaying();
+            NGame::PlayMoviesSequence(mszMovieName + "fout", false, false, false, false);
             NGame::bNeedRender = false;
             Exit();
             return TRUE;
@@ -171,7 +171,7 @@ BOOL CI3DScreenEndGame::Draw(CRenderer *pRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenEndGame::OnExitFromModal(DWORD dwRetValue)
 {
-    bink.StopPlaying();
+    movie.StopPlaying();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenEndGame::OnLButtonDown(UINT nFlags, CPoint point)
@@ -193,6 +193,7 @@ void CI3DScreenEndGame::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenEndGame::Exit()
 {
+    movie.StopPlaying();
     if (bFromMainMenu)
         pI3D->ExitFromModal(0xCCCCCCCC);
     else

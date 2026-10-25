@@ -26,7 +26,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "adFormat.h"
 #include "ScenarioTracker.h"
 #include "RandomGen.h"
-#include "BinkVideo.h"
+#include "MoviePlayback.h"
 #include "TextManager.h"
 #include "MusicSystem.h"
 #include "Renderer.h"
@@ -138,14 +138,14 @@ void CI3DScreenMainMenu::OnExitFromModal(DWORD dwRetValue)
     {
     case 0x00010001:
         // CRAP{
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
         // CRAP}
         NGame::QuitProgram(0);
         break;
 
     case 0x00020001:
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Intro.bik");
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Intro.bik");
         NGame::bNeedRender = false;
         //		IWorldClient.BeginStreaming();
         IWorldConnector.ReqNewGame();
@@ -237,8 +237,8 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
 
     case MMBT_EXIT:
         // CRAP{
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
         // CRAP}
         NGame::QuitProgram(0);
         break;

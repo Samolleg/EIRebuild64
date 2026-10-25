@@ -51,7 +51,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TerrainPrintsDatabase.h"
 #include "I3DMain.h"
 #include "A3Cursor.h"
-#include "BinkVideo.h"
+#include "MoviePlayback.h"
 #include "aiSettings.h"
 #include "Console.h"
 #include "DXGeometryProcessor.h"
@@ -979,6 +979,18 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
                     L"EIRebuild", MB_OK | MB_ICONERROR);
         return BAD_RESULT;
     }
+    // Also covers failed startup/load and exception exits before normal FINI.
+    struct MovieLifetime {
+        bool active = true;
+        void Finish() {
+            if (!active) return;
+            C2DScreenWait::Clear();
+            Video::StopMovies();
+            Video::SetMovieRenderer(nullptr);
+            active = false;
+        }
+        ~MovieLifetime() { Finish(); }
+    } movieLifetime;
     OutputDebugStringA("Hello!\n");
     try
     {
@@ -1015,6 +1027,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     // EngineDiagnostics owns the outer exception boundary.
 #endif // !defined( NODEBUGINFO ) && !defined( _DEBUG )
 
+    movieLifetime.Finish();
     FrameDiagnostics::Flush();
     GameJournal::Stop();
     // FINI
@@ -1290,7 +1303,7 @@ void NGame::PlayMoviesSequence(LPCSTR pszSection, bool bInitialClear,
 
     for (int i = 0; i < szNames.GetSize(); ++i)
     {
-        CBinkVideo::Play(theWorld.GetCDPath() + "Movies\\" + szNames[i], 0, true, false,
+        Video::Movie::Play(theWorld.GetCDPath() + "Movies\\" + szNames[i], 0, true, false,
                          bInitialClear || bClearSurfaceBetweenMovies, bStopAllSounds, bUseOverlays);
     }
 }

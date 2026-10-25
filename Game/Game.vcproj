@@ -1213,7 +1213,7 @@
 				</FileConfiguration>
 			</File>
 			<File
-				RelativePath="BinkVideo.cpp">
+				RelativePath="MoviePlayback.cpp">
 				<FileConfiguration
 					Name="Release_Interface|Win32">
 					<Tool
@@ -7056,7 +7056,7 @@
 				RelativePath="BasicM.h">
 			</File>
 			<File
-				RelativePath="BinkVideo.h">
+				RelativePath="MoviePlayback.h">
 			</File>
 			<File
 				RelativePath="BoundCube.h">

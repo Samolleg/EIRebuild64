@@ -59,7 +59,7 @@ BSC32=bscmake.exe
 LINK32=xilink6.exe
 # ADD BASE LINK32 wsock32.lib dplayx.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib /nologo /subsystem:windows /pdb:none /machine:I386
 # SUBTRACT BASE LINK32 /profile /map /debug /nodefaultlib
-# ADD LINK32 imagehlp.lib binkw32.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /map /debug /machine:I386 /nodefaultlib:"libcpmt.lib" /fixed:no
+# ADD LINK32 imagehlp.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /map /debug /machine:I386 /nodefaultlib:"libcpmt.lib" /fixed:no
 # SUBTRACT LINK32 /verbose
 
 !ELSEIF  "$(CFG)" == "Game - Win32 Debug with Optimization"
@@ -117,7 +117,7 @@ BSC32=bscmake.exe
 LINK32=xilink6.exe
 # ADD BASE LINK32 wsock32.lib dplayx.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib /nologo /subsystem:windows /pdb:none /machine:I386
 # SUBTRACT BASE LINK32 /profile /map /debug /nodefaultlib
-# ADD LINK32 imagehlp.lib binkw32.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /machine:I386 /nodefaultlib:"libcpmt.lib"
+# ADD LINK32 imagehlp.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /machine:I386 /nodefaultlib:"libcpmt.lib"
 # SUBTRACT LINK32 /profile /map /debug /nodefaultlib
 
 !ELSEIF  "$(CFG)" == "Game - Win32 Debug Interface"
@@ -147,7 +147,7 @@ BSC32=bscmake.exe
 LINK32=xilink6.exe
 # ADD BASE LINK32 dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
 # SUBTRACT BASE LINK32 /map
-# ADD LINK32 binkw32.lib msacm32.lib dinput.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib /nologo /subsystem:windows /debug /machine:I386 /nodefaultlib:"libcpmtd.lib" /pdbtype:sept
+# ADD LINK32 msacm32.lib dinput.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib /nologo /subsystem:windows /debug /machine:I386 /nodefaultlib:"libcpmtd.lib" /pdbtype:sept
 # SUBTRACT LINK32 /pdb:none
 
 !ELSEIF  "$(CFG)" == "Game - Win32 Debug Interface with BC"
@@ -175,9 +175,9 @@ BSC32=bscmake.exe
 # ADD BASE BSC32 /nologo
 # ADD BSC32 /nologo
 LINK32=xilink6.exe
-# ADD BASE LINK32 dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib binkw32.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
+# ADD BASE LINK32 dplayx.lib wsock32.lib dinput.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib msacm32.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
 # SUBTRACT BASE LINK32 /map
-# ADD LINK32 binkw32.lib dinput.lib vtuneapi.lib msacm32.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
+# ADD LINK32 dinput.lib vtuneapi.lib msacm32.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib winmm.lib /nologo /subsystem:windows /debug /machine:I386 /pdbtype:sept
 # SUBTRACT LINK32 /map
 
 !ELSEIF  "$(CFG)" == "Game - Win32 Release Interface PCD"
@@ -204,9 +204,9 @@ BSC32=bscmake.exe
 # ADD BASE BSC32 /nologo
 # ADD BSC32 /nologo
 LINK32=xilink6.exe
-# ADD BASE LINK32 sdklib.lib imagehlp.lib binkw32.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /machine:I386 /nodefaultlib:"libcpmt.lib"
+# ADD BASE LINK32 sdklib.lib imagehlp.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /machine:I386 /nodefaultlib:"libcpmt.lib"
 # SUBTRACT BASE LINK32 /profile /map /debug /nodefaultlib
-# ADD LINK32 sdklib.lib imagehlp.lib binkw32.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /machine:I386 /nodefaultlib:"libcpmt.lib"
+# ADD LINK32 sdklib.lib imagehlp.lib mss32.lib dplayx.lib wsock32.lib dsound.lib ddraw.lib d3drm.lib dxguid.lib dinput.lib winmm.lib /nologo /subsystem:windows /pdb:none /machine:I386 /nodefaultlib:"libcpmt.lib"
 # SUBTRACT LINK32 /profile /map /debug /nodefaultlib
 
 !ENDIF 
@@ -1838,11 +1838,11 @@ SOURCE=.\A3Cursor.h
 # End Source File
 # Begin Source File
 
-SOURCE=.\BinkVideo.cpp
+SOURCE=.\MoviePlayback.cpp
 # End Source File
 # Begin Source File
 
-SOURCE=.\BinkVideo.h
+SOURCE=.\MoviePlayback.h
 # End Source File
 # Begin Source File
 

@@ -40,7 +40,6 @@
 
 #include <timeapi.h> // timeGetTime
 
-#include <bink.h>
 
 #include <algorithm>
 

@@ -34,7 +34,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(ProjectDir)SDKs\BinkW32;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)SDKs\dx7sdk\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64);$(LibraryPath)</LibraryPath>
     <OutDir>$(MSBuildThisFileDirectory)out\x64\Release\$(MSBuildProjectName)\</OutDir>
     <TargetName>EIRebuild64</TargetName>
@@ -62,7 +62,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)dependencies\ffmpeg\8.1.3\x64\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avformat.lib;avcodec.lib;avutil.lib;swscale.lib;swresample.lib;dxgi.lib;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_shaders.res;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_camp_art.res;$(ProjectDir)out\x64\Release\luajit\luajit.lib;binkw32.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avformat.lib;avcodec.lib;avutil.lib;swscale.lib;swresample.lib;dxgi.lib;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_shaders.res;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_camp_art.res;$(ProjectDir)out\x64\Release\luajit\luajit.lib;dsound.lib;dinput.lib;dxguid.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -92,7 +92,7 @@
     <ClCompile Include="Game\GameSave.cpp" />
     <ClCompile Include="Game\SaveSlot.cpp" />
     <ClInclude Include="Game\SaveSlot.h" />
-    <ClCompile Include="Game\BinkVideo.cpp" />
+    <ClCompile Include="Game\MoviePlayback.cpp" />
     <ClCompile Include="Game\VideoPlayer.cpp" />
     <ClCompile Include="Game\VideoAudio.cpp" />
     <ClInclude Include="Game\VideoPlayer.h" />
@@ -349,7 +349,7 @@
     <ClInclude Include="Game\DynamicSave.h" />
     <ClInclude Include="Game\BasicFactory.h" />
     <ClInclude Include="Game\BasicM.h" />
-    <ClInclude Include="Game\BinkVideo.h" />
+    <ClInclude Include="Game\MoviePlayback.h" />
     <ClInclude Include="Game\BoundCube.h" />
     <ClInclude Include="Game\Camera.h" />
     <ClInclude Include="Game\CameraTerrainCollision.h" />

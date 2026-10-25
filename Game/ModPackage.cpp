@@ -24,7 +24,6 @@
 #include "TextureManager.h"
 #include "ModMobCommands.h"
 #include "ModAudioConfig.h"
-#include "BinkVideo.h"
 #include "ModRegisteredLoot.inl"
 #include "ModNpcConsumables.inl"
 #include "Unit.h"
@@ -636,7 +635,7 @@ Json CheckStartup(const std::string&directory){
   throw std::runtime_error("Installed audio registry could not be opened");
  ConfigureModAudio(activeAudioConfig,directory);
  bool showAllQuestsConfigured=activeAudioConfig.GetInt("Addon","ShowAllQuests",0)!=0;
- if(!CBinkVideo::DecoderAvailable())throw std::runtime_error("Game Bink decoder was not found");
+
  CMappedResource native;CWin32MappedResource mapped;int entries=0;std::string base=(fs::current_path()/"res/database.res").string();
  DWORD zoneXSectors=0,zoneYSectors=0;
  DWORD femaleAnimationCount=0,maleAnimationCount=0,twoHandedLootAxe=0,twoHandedLootSword=0;
@@ -709,7 +708,7 @@ Json CheckStartup(const std::string&directory){
  }
  if(ModRuntime::Current()||ModRuntime::Resources())throw std::runtime_error("Host leaked its binding");
  DWORD size=0;auto*p=mapped.GetFile("units.udb",&size);if(!p||!mapped.CloseFile(p))throw std::runtime_error("Resource handle lifetime depended on destroyed Host");
- return {{"success",true},{"hostLifecycle",true},{"nativeReaderEntries",entries},{"mappedReaderEntries",entries},{"resourceOwnership",true},{"enumeration",true},{"femaleAnimationCount",femaleAnimationCount},{"maleAnimationCount",maleAnimationCount},{"twoHandedLootAxeIndex",twoHandedLootAxe},{"twoHandedLootSwordIndex",twoHandedLootSword},{"configConsumer",true},{"binkMiniaudioEnabled",true},{"showAllQuestsSetting",showAllQuestsConfigured},{"binkDecoderAvailable",true},{"cameraConsumer",true},{"cameraPath",expected.ResolveCamera("mainmenu.cam","")},{"mapReadConsumer",true},{"gameplayMapReader",true},{"zone1XSectors",zoneXSectors},{"zone1YSectors",zoneYSectors},{"gameplayActivated",false}};
+ return {{"success",true},{"hostLifecycle",true},{"nativeReaderEntries",entries},{"mappedReaderEntries",entries},{"resourceOwnership",true},{"enumeration",true},{"femaleAnimationCount",femaleAnimationCount},{"maleAnimationCount",maleAnimationCount},{"twoHandedLootAxeIndex",twoHandedLootAxe},{"twoHandedLootSwordIndex",twoHandedLootSword},{"configConsumer",true},{"showAllQuestsSetting",showAllQuestsConfigured},{"cameraConsumer",true},{"cameraPath",expected.ResolveCamera("mainmenu.cam","")},{"mapReadConsumer",true},{"gameplayMapReader",true},{"zone1XSectors",zoneXSectors},{"zone1YSectors",zoneYSectors},{"gameplayActivated",false}};
 }
 }
 float CModPackage::ExperienceMultiplier(const SRPGUnitStats&stats){return StatsNumber("GetExpMultiplierOnServer",stats);}
