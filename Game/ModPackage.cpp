@@ -83,6 +83,7 @@ void ModDeathFearReset();
 #include "ModItemUiPolicy.h"
 #include "Console.h"
 #include "ModNpcMigration.inl"
+#include "ModOutOfCombatRegeneration.inl"
 struct ModDelayedShot {SRPGAttackPortion ap;int target,start,due;const void*world;};
 namespace fs=std::filesystem;
 using Json=nlohmann::json;
@@ -298,6 +299,8 @@ bool CModPackage::IsNpcManaCaster(CUnit*unit){
 }
 bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*unit,bool hpOnly){
  if(!unit||!unit->GetUnitSpecific())throw std::runtime_error("Mod regeneration requires a native unit-specific component");
+ SyncRuntimeState();
+ ModOutOfCombatRegeneration::Update(unit);
  if(scheduledRegeneration&&common.ssHP.fpCurrent<=0)return false;
  ModGroupSearch::Update(); // native awareness producer, before the regen cadence gate
  if(scheduledRegeneration){
@@ -306,18 +309,12 @@ bool CModPackage::Regenerate(SRPGCommonStats&common,SRPGUnitStats&stats,CUnit*un
   if(next>0&&next<15){common.nRegenerateCounter=static_cast<int>(next);JMV_NpcConsumablesUpdate(&common,unit);return false;}
   common.nRegenerateCounter=0;
  }
- SyncRuntimeState();const unsigned epoch=initialization->epoch;bool ready=initialization->Ready(*unit,common,stats);
+ const unsigned epoch=initialization->epoch;bool ready=initialization->Ready(*unit,common,stats);
  ModInitialization::Inputs inputs(common,stats,*unit);
  if(IsNpcManaCaster(unit))hpOnly=false;
  CallbackFrame frame(state);SRPGCommonStats stagedCommon=common;SRPGUnitStats staged=stats;
  frame.scope->unit=unit;frame.scope->stagedStats=&staged;
- bool safe=false;
- if(theWorldServer.GetPlayerManager())if(auto*player=theWorldServer.GetPlayer(0)){
-  if(player==unit->GetOwner()){
-   auto*specific=player->GetPlayerSpecific();
-   if(auto*server=dynamic_cast<CPlayerServer*>(specific))safe=server->dangerState!=WDS_COMBAT;
-  }else if(auto*server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()))safe=!server->IsAggressive();
- }
+ const bool safe=ModOutOfCombatRegeneration::IsSafe(unit);
  BeginCallback(scheduledRegeneration?"RegenerateHpAndMpJmvDue":"RegenerateHpAndMpJmv");ModLua::Push(state,&stagedCommon,frame.scope);ModLua::Push(state,&staged,frame.scope);ModLua::Push(state,unit,frame.scope);lua_pushboolean(state,hpOnly);lua_pushboolean(state,safe);Call(5,1);
  if(!lua_isboolean(state,-1))throw std::runtime_error("Regeneration callback must return boolean");
  bool changed=lua_toboolean(state,-1)!=0;
@@ -336,12 +333,12 @@ float CModPackage::MurderAwarenessValue(int property,float fallback){
  lua_pushinteger(state,property);lua_pushnumber(state,fallback);Call(2,1);
  return lua_isnumber(state,-1)?static_cast<float>(lua_tonumber(state,-1)):fallback;
 }
-void CModPackage::ResetRuntimeState(){InvalidateInfoStatsCache();ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();customCriticals.Clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
+void CModPackage::ResetRuntimeState(){ModOutOfCombatRegeneration::Reset();InvalidateInfoStatsCache();ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();customCriticals.Clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
 void CModPackage::SyncRuntimeState(){
  const void*world=theWorldServer.GetSpecificManager();std::string zone;
  zone=(LPCSTR)theWorldServer.szMobFileName;
  int segment=theWorldServer.GetSegmentTimeCounter();
- if(world!=cacheWorld||zone!=cacheZone||(cacheSegment>=0&&segment<cacheSegment)){for(auto&i:delayedShots)ForgetAttack(i.second->ap);delayedShots.clear();skillCooldowns.Clear();JMV_RegisteredLootReset("world-epoch");npcArmorCache.clear();initialization->Reset();InvalidateInfoStatsCache();refreshQueue->Reset();}
+ if(world!=cacheWorld||zone!=cacheZone||(cacheSegment>=0&&segment<cacheSegment)){ModOutOfCombatRegeneration::Reset();for(auto&i:delayedShots)ForgetAttack(i.second->ap);delayedShots.clear();skillCooldowns.Clear();JMV_RegisteredLootReset("world-epoch");npcArmorCache.clear();initialization->Reset();InvalidateInfoStatsCache();refreshQueue->Reset();}
  cacheWorld=world;cacheZone=zone;cacheSegment=segment;
 }
 namespace {

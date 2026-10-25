@@ -18,6 +18,7 @@
 #include "ModStealingPolicy.h"
 #include "ModStatRules.h"
 #include "ModRuntime.h"
+#include "ModOutOfCombatRegeneration.h"
 #include "StuffMapObjects.h"
 #include <cctype>
 #include <cmath>
@@ -327,6 +328,7 @@ void CUnitServer::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Clear()
 {
+    ModOutOfCombatRegeneration::Forget(this);
     modLeverTarget=nullptr;modLeverId=-1;modLeverRing=false;
     if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
     curCommand.Clear();
