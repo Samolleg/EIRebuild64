@@ -1238,7 +1238,9 @@ public:
     // queued interface work lost its placement and slid-out panel clip.
     template <class F> void scene_post_frame(F&& work) {
         if (!scene_queue()) { work(); return; }
-        scene_post([this, values = bridge_capture_frame_values(), hud = widescreen::hud_blit,
+        BridgeFrameValues values;
+        if (!bridge_capture_frame_values(values)) return;
+        scene_post([this, values = std::move(values), hud = widescreen::hud_blit,
                     work = std::forward<F>(work)]() mutable {
             if (!on_scene_thread()) { work(); return; }
             bridge_install_frame_values(values);

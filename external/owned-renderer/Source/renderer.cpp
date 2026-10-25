@@ -15096,7 +15096,7 @@ HRESULT Renderer::queue_present(){
  inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
   inputs.harness_camera_steps,inputs.harness_on_travel_map);
 #endif
- inputs.bridge=bridge_capture_frame_values();
+ if(!bridge_capture_frame_values(inputs.bridge))return E_FAIL;
  bridge_capture_profile_values(inputs.profile);
  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);
  #ifdef EID3D11_EMBEDDED

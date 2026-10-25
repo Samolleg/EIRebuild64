@@ -1559,7 +1559,8 @@ struct BridgeFrameValues {
     std::uint64_t world_epoch = 0;   // lifecycle positive world epoch when queued
     std::shared_ptr<const TerrainAtlasSnapshot> terrain_atlases;
 };
-BridgeFrameValues bridge_capture_frame_values() noexcept;
+// False means the host has not published a complete queue snapshot.
+bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept;
 void bridge_install_frame_values(const BridgeFrameValues& values) noexcept;
 // The bridge frame profile (large; once per presented frame).
 struct BridgeProfileValues {
