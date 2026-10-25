@@ -10,6 +10,7 @@
  **********************************************************************/
 
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Net.h"
@@ -25,7 +26,7 @@ CConnection::CConnection()
 void CConnection::StartTrafficSaving(const char *fname)
 {
     ASSERT(!bStoreTraffic);
-    trafficSaver.OpenWrite(fname);
+    trafficSaver.OpenWrite(RuntimePaths64::Log(std::filesystem::path(fname).filename().string().c_str()).string().c_str());
     bSkipSegment = TRUE;
     bStoreTraffic = TRUE;
 }

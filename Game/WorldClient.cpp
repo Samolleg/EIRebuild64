@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 #include "CorePerf.h"
 #include "ItemApproachCatalog.h"
 #include "OwnedRender/E2Host.h"
@@ -426,7 +427,7 @@ BOOL CWorldClient::Create()
     OwnedRender::E1Scene().Begin(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
     //
-    szTexturesPath = GetWorkPath() + "textures\\";
+    szTexturesPath = CString(RuntimePaths64::Textures().c_str());
     //
     LoadLights("LightsGipat.ini");
     //

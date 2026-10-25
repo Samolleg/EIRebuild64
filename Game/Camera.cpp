@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 #include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -360,12 +361,12 @@ BOOL CCamera::BeginCameraPlacementsSave(LPCSTR pszFileName)
     CFileFind find;
     CFile file;
 
-    BOOL bCheck = find.FindFile(".\\camera\\camera.cam");
+    BOOL bCheck = find.FindFile((RuntimePaths64::Camera() + "camera.cam").c_str());
     if (bCheck == TRUE)
     {
         int nMaxNumber = 0;
         int nNumber = 0;
-        bCheck = find.FindFile(".\\camera\\camera0*.cam");
+        bCheck = find.FindFile((RuntimePaths64::Camera() + "camera0*.cam").c_str());
         while (bCheck)
         {
             bCheck = find.FindNextFile();
@@ -376,17 +377,17 @@ BOOL CCamera::BeginCameraPlacementsSave(LPCSTR pszFileName)
                 nMaxNumber = nNumber;
         }
         CString szPrevCameraFileName;
-        szPrevCameraFileName.Format(".\\camera\\camera%.4d.cam", nMaxNumber + 1);
-        bCheck = MoveFile(".\\camera\\camera.cam", szPrevCameraFileName);
+        szPrevCameraFileName.Format("%scamera%.4d.cam", RuntimePaths64::Camera().c_str(), nMaxNumber + 1);
+        bCheck = MoveFile((RuntimePaths64::Camera() + "camera.cam").c_str(), szPrevCameraFileName);
     }
 
     theWorld.SetFlag(WC_SAVE_CAMERA);
 
-    if (file.Open(CString(".\\camera\\") + pszFileName, CFile::modeCreate | CFile::modeWrite) ==
+    if (file.Open(CString(RuntimePaths64::Camera().c_str()) + std::filesystem::path(pszFileName).filename().string().c_str(), CFile::modeCreate | CFile::modeWrite) ==
         FALSE)
         return FALSE;
 
-    szPlacementsFileName = CString(".\\camera\\") + pszFileName;
+    szPlacementsFileName = CString(RuntimePaths64::Camera().c_str()) + std::filesystem::path(pszFileName).filename().string().c_str();
     SetFlag(CAM_SAVE_PLACEMENTS);
 
     file.Close();
@@ -437,6 +438,8 @@ BOOL CCamera::LoadCameraPlacements(LPCSTR pszFileName, int nRemove)
 
     CString cameraPath = CString(theWorld.GetWorkPath()) + "camera\\" + pszFileName;
     std::string resolvedCamera = ModRuntime::CameraPath((LPCSTR)cameraPath);
+    const auto recorded = std::filesystem::path(RuntimePaths64::Camera()) / std::filesystem::path(pszFileName).filename();
+    if (std::filesystem::is_regular_file(recorded)) resolvedCamera = recorded.string();
     if (file.Open(resolvedCamera.c_str(), CFile::modeRead) ==
         FALSE)
         return FALSE;

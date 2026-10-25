@@ -16,6 +16,7 @@
 #include "../external/owned-renderer/Source/res_mapping.h"
 #endif
 #include "GameJournal.h"
+#include "RuntimePaths64.h"
 #include "CrashEvidence.h"
 #include "GameMemorySnapshot.h"
 #include <new>
@@ -270,7 +271,7 @@ void StartAt(const wchar_t* directory, DWORD limit) {
     try {
         wchar_t exe[32768];DWORD n=GetModuleFileNameW(nullptr,exe,32768);
         if(!n||n==32768){delete s;return;} s->executable.assign(exe,n);
-        s->directory=directory?directory:s->executable.substr(0,s->executable.find_last_of(L"\\/"))+L"\\Logs";
+        s->directory=directory?directory:RuntimePaths64::Directory(L"Logs64").wstring();
         s->limit=limit;
         s->wake=CreateEventW(nullptr,FALSE,FALSE,nullptr);s->ready=CreateEventW(nullptr,TRUE,FALSE,nullptr);
         if(!s->wake||!s->ready)throw 1;

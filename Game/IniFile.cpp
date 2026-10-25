@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "IniFile.h"
@@ -11,7 +12,10 @@ CIniFile::CIniFile(LPCSTR pszIniFileName)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CIniFile::Open(LPCSTR pszIniFileName)
 {
-    szIniFileName = ModRuntime::ConfigPath(pszIniFileName).c_str();
+    const auto requested = std::filesystem::absolute(pszIniFileName).lexically_normal();
+    const auto config = RuntimePaths64::Root() / L"Config64";
+    szIniFileName = _wcsicmp(requested.parent_path().c_str(), config.c_str()) == 0
+        ? pszIniFileName : ModRuntime::ConfigPath(pszIniFileName).c_str();
 
     return TRUE;
 }
@@ -294,7 +298,7 @@ BOOL CIniFile::GetUIntArray(LPCSTR pszSection, LPCSTR pszEntry, CUIntArray &arra
 // ******************************************************************************** //
 BOOL CIniFile::SetString(LPCSTR pszSection, LPCSTR pszEntry, CString szData)
 {
-    return WritePrivateProfileString(pszSection, pszEntry, szData, szIniFileName);
+    return WritePrivateProfileString(pszSection, pszEntry, szData, RuntimePaths64::Config(std::filesystem::path((LPCSTR)szIniFileName).filename().string().c_str()).string().c_str());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CIniFile::SetChar(LPCSTR pszSection, LPCSTR pszEntry, char cData)

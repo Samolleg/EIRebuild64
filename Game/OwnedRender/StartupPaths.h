@@ -1,4 +1,5 @@
 #pragma once
+#include "../RuntimePaths64.h"
 #include "ResourceBootstrap.h"
 #include <filesystem>
 #include <array>
@@ -26,7 +27,7 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
     const auto resourceRoot = ResolveProfilePath(resources, profileDirectory);
     owned::EmbeddedHostPaths paths;
     if (!engine.is_absolute()) throw std::invalid_argument("relative engine directory");
-    paths.renderer_config = (engine / L"rddraw.ini").wstring();
+    paths.renderer_config = RuntimePaths64::Config("rddraw.ini").wstring();
     const auto modRoot = package ? ResolveProfilePath(std::filesystem::path(package->Directory()),
         profileDirectory) : workRoot;
     paths.world_map_layouts = (modRoot / L"world-map-layouts.json").wstring();

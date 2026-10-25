@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "TextureManager.h"
@@ -279,7 +280,7 @@ void CTextureManager::DeleteUnitLayerTextures()
     ModCriticalLifecycle::Clear(ModRuntime::Current());
     ModHitHistory::ClearRuntimeHitHistory("texture-layer-delete");
     CFileFind find;
-    CString szMaskName = CString(((CWorld *)GetWorld())->GetWorkPath()) + "textures\\*.mmp";
+    CString szMaskName = CString(RuntimePaths64::Textures().c_str()) + "*.mmp";
     BOOL bCheck = find.FindFile(szMaskName);
     //
     while (bCheck)
@@ -644,7 +645,7 @@ BOOL CTextureManager::LoadTexture(LPTEXTURE lpTexture, BOOL bReportMissing)
         else
         {
             CFile file;
-            szString.Format("%stextures\\%s.mmp", ((CWorld *)GetWorld())->GetWorkPath(),
+            szString.Format("%s%s.mmp", RuntimePaths64::Textures().c_str(),
                             sourceName.c_str());
             if (file.Open(szString, CFile::modeRead) == FALSE)
             {
@@ -752,7 +753,7 @@ BOOL CTextureManager::GetUserData(LPCSTR pszFileName, CBYTEArray &data)
     CString szString;
     CFile file;
     // first, try to load from file
-    szString.Format("%stextures\\%s.mmp", GetWorld()->GetWorkPath(), pszFileName);
+    szString.Format("%s%s.mmp", RuntimePaths64::Textures().c_str(), pszFileName);
     if (file.Open(szString, CFile::modeRead) != FALSE)
     {
         file.Read(&hdr, sizeof(hdr));
@@ -1020,7 +1021,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
         }
     }
     if(ComposeTexturesInMemory())return ComposeTextureMemory(szResultName,set,desiredName,dwNumMipLevels,dwResultFormat);
-    CString szResultFileName(theWorld.GetWorkPath() + "textures\\" + desiredName + ".mmp");
+    CString szResultFileName(CString(RuntimePaths64::Textures().c_str()) + desiredName + ".mmp");
     SMMPFileHeader hdr;
     CBYTEArray data;
     CFile file;
@@ -1047,7 +1048,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     {
         // check alternate name texture
         szResultName = alternateName;
-        szResultFileName = theWorld.GetWorkPath() + "textures\\" + alternateName + ".mmp";
+        szResultFileName = CString(RuntimePaths64::Textures().c_str()) + alternateName + ".mmp";
         if (file.Open(szResultFileName, CFile::modeRead))
         {
             // read user data
@@ -1064,7 +1065,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                 (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
                 return TRUE;
             szResultName = desiredName;
-            szResultFileName = theWorld.GetWorkPath() + "textures\\" + desiredName + ".mmp";
+            szResultFileName = CString(RuntimePaths64::Textures().c_str()) + desiredName + ".mmp";
         }
     }
     //
@@ -1243,7 +1244,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
 BOOL CTextureManager::ComposeLayer(const STextureSetDescription &set, const CString &szFileName,
                                    DWORD dwBGColor)
 {
-    CString szResultFileName(theWorld.GetWorkPath() + "textures\\" + szFileName + ".mmp");
+    CString szResultFileName(CString(RuntimePaths64::Textures().c_str()) + szFileName + ".mmp");
     SMMPFileHeader hdr;
     CFile file;
     // first, check for such texture already exist

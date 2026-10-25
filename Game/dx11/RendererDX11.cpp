@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../RuntimePaths64.h"
 #include <vector>;
 #include <SimpleMath.h>
 
@@ -1043,7 +1044,7 @@ void CDX11::MakeScreenShot()
     rendererFacade->VisitOutput(nullptr,
         [](void*, ID3D11DeviceContext* context, ID3D11Texture2D* output) -> HRESULT {
             return DirectX::SaveWICTextureToFile(context, output,
-                GUID_ContainerFormatJpeg, L"SCREENSHOT.JPG");
+                GUID_ContainerFormatJpeg, (RuntimePaths64::Directory(L"Screenshots64") / L"SCREENSHOT.JPG").c_str());
         });
 }
 

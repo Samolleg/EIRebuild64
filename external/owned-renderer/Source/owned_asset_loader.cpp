@@ -1,4 +1,5 @@
 #include "owned_asset_loader.h"
+#include "debug_output_paths.h"
 #include "owned_terrain_front_end.h"
 #include "procedural_falls.h"
 #include "worker_priority.h"
@@ -3733,18 +3734,18 @@ void OwnedResourceLoader::shutdown() noexcept {
 
 bool write_owned_loader_receipt(const OwnedMapSnapshot& snapshot,
                                 ResourceFailure& failure) {
-    DWORD required = GetEnvironmentVariableW(L"EI_RENDERER_DEBUG_DIR", nullptr, 0);
+    DWORD required = GetEnvironmentVariableW(debug_output_environment_w, nullptr, 0);
     if (!required) {
         fail(failure, ResourceFailureCode::invalid_name,
-             "EI_RENDERER_DEBUG_DIR is not configured");
+             "Renderer debug output directory is not configured");
         return false;
     }
     std::wstring directory(required, L'\0');
-    const DWORD copied = GetEnvironmentVariableW(L"EI_RENDERER_DEBUG_DIR",
+    const DWORD copied = GetEnvironmentVariableW(debug_output_environment_w,
                                                   directory.data(), required);
     if (!copied || copied >= required) {
         fail(failure, ResourceFailureCode::invalid_name,
-             "EI_RENDERER_DEBUG_DIR could not be read");
+             "Renderer debug output directory could not be read");
         return false;
     }
     directory.resize(copied);
@@ -3752,7 +3753,7 @@ bool write_owned_loader_receipt(const OwnedMapSnapshot& snapshot,
     if (attributes == INVALID_FILE_ATTRIBUTES ||
         !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
         fail(failure, ResourceFailureCode::file_open,
-             "EI_RENDERER_DEBUG_DIR does not name an existing directory");
+             "Renderer debug output directory does not exist");
         return false;
     }
     std::wstring path = directory;
