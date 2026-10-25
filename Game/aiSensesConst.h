@@ -79,6 +79,9 @@ struct SVisibilityMask
     void AddRound(float fpX, float fpY, float fpRadius);
     void Load(CSave &file) = delete;
     void Store(CSave &file) = delete;
+    // Visibility effect update packet, independent of slot serialization.
+    bool LoadLocal(CSave &file);
+    void StoreLocal(CSave &file) const;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // интересность точек, полученных разным путем (различные чувства), чем больше, тем интереснее

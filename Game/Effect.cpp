@@ -1370,7 +1370,7 @@ BOOL CEffectShowVisibility::UpdateFrom(EUpdateType tip, CUpdateHistory &pkt)
     CMemorySave msk;
     if (!pkt.ReadDirect(msk))
         return FALSE;
-    mask.Load(msk);
+    if (!mask.LoadLocal(msk)) return FALSE;
     ApplyParams(tip);
     return TRUE;
 }
@@ -1378,7 +1378,7 @@ BOOL CEffectShowVisibility::UpdateFrom(EUpdateType tip, CUpdateHistory &pkt)
 void CEffectShowVisibility::UpdateTo(CUpdateHistory &pkt)
 {
     CMemorySave msk;
-    mask.Store(msk);
+    mask.StoreLocal(msk);
     pkt.WriteDirect(msk);
 }
 /////////////////////////////////////////////////////////////////////////////////////

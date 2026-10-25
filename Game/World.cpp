@@ -3,6 +3,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "World.h"
 #include "SaveSchema.h"
+#include <set>
 
 #include "WinRegistry.h"
 

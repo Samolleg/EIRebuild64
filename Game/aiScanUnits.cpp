@@ -1176,3 +1176,31 @@ void BuildVisionMask(CUnit *pWatcher, CUnit *pTarget, SVisibilityMask &res)
         map.TraceVisionToArea(ptLookFrom, fpPeripheralSenseRadius, ptUnitDir, 0, -1000, res);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+// Explicit local visibility payload: origin, dimensions and one byte per cell.
+void SVisibilityMask::StoreLocal(CSave &file) const
+{
+    const int x = data.GetXSize(), y = data.GetYSize();
+    const auto cells = static_cast<std::uint64_t>(x) * y;
+    if (x <= 0 || y <= 0 || cells > INT32_MAX)
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Limit, "local visibility dimensions");
+    file.Write(nShiftX); file.Write(nShiftY);
+    file.Write(x); file.Write(y);
+    file.Write(data.GetBuffer(), static_cast<UINT>(cells));
+}
+bool SVisibilityMask::LoadLocal(CSave &file)
+{
+    int shiftX = 0, shiftY = 0, x = 0, y = 0;
+    file.Read(shiftX); file.Read(shiftY);
+    file.Read(x); file.Read(y);
+    const auto cells = static_cast<std::uint64_t>(x) * y;
+    if (!file.IsOk() || x <= 0 || y <= 0 || cells > INT32_MAX || cells != file.Remaining())
+    {
+        file.Fail("invalid_local_visibility_dimensions");
+        return false;
+    }
+    data.SetSizes(x, y);
+    if (file.Read(data.GetBuffer(), static_cast<UINT>(cells)) != cells || !file.IsOk()) return false;
+    nShiftX = shiftX; nShiftY = shiftY;
+    return true;
+}

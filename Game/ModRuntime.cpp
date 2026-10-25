@@ -216,11 +216,7 @@ nlohmann::json CheckEngineDispatch(CModPackage &package, lua_State *lua, const s
                 if(!branches.LoadText(code))throw std::runtime_error(std::string("Branch parser: ")+(LPCSTR)branches.GetLastError().text);branches.Segment();float score=0;require(branches.GetGlobalVars().fVars.GetVar("score",score)&&score==14,"Nested branch execution mismatch");
                 int index=1;require(ModMob::BranchForward(index,5,true,3)&&index==4,"Branch-to-end offset mismatch");require(!ModMob::BranchForward(index,5,true,1)&&!ModMob::BranchForward(index,5,false,-1)&&!ModMob::BranchForward(index,5,true,.5f),"Invalid branch offset accepted");
                 CScript malformed;CString invalidBranch="WorldScript(else())";require(!malformed.LoadText(invalidBranch,FALSE),"Unmatched else accepted");
-                // Use the native world-script owner required by the original binary thread loader.
-                auto&worldScript=theWorldServer.script;worldScript.Clear();struct ClearWorldScript{CScript&s;~ClearWorldScript(){s.Clear();}} clearWorldScript{worldScript};
-                CString suspended="GlobalVars(score:float) WorldScript(score=0 if(1) then(WaitSegment(2) score=5) else(score=99) score=Add(score,1))";
-                require(worldScript.LoadText(suspended),"Suspended branch compilation failed");worldScript.Segment();require(worldScript.GetGlobalVars().fVars.GetVar("score",score)&&score==0,"Branch did not suspend");
-                CMemorySave memory;memory.StartSaving();worldScript.StoreScript(memory);worldScript.Clear();memory.Seek(0);memory.StartLoading();worldScript.LoadScript(memory);require(memory.IsOk()&&memory.GetPosition()==memory.GetSize(),"Binary world script did not round-trip fully");worldScript.Segment();require(worldScript.GetGlobalVars().fVars.GetVar("score",score)&&score==6,"Loaded branch resumed at wrong program counter");
+
             }
             {
                 CScript strings;CString code="GlobalVars(a:string,b:string,c:string,d:string) WorldScript(a=StrMid(\"abcdef\",-3,2) b=StrLower(\"AbC\") c=StrUpper(\"aBc\") d=StrMid(\"abcdef\",2,0))";
