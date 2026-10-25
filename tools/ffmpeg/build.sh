@@ -46,13 +46,21 @@ done < "$vendor/configure.args"
 cd -- "$work_root/build"
 # Do not inherit compiler/linker options from another project.
 unset CL _CL_ LINK _LINK_
-"$source_dir/configure" "${args[@]}" --prefix="$work_root/install"
+# Keep the wrapper path free of spaces, like the source/build paths.
+cp -- "$repo/tools/ffmpeg/msvc.sh" "$work_root/msvc.sh"
+"$source_dir/configure" "${args[@]}" --prefix="$work_root/install" \
+    --cc="bash $work_root/msvc.sh cl" --cxx="bash $work_root/msvc.sh cl" \
+    --ld="bash $work_root/msvc.sh link"
 # These are configure-result guards, not test/decoding runs.
 grep -qx '#define CONFIG_GPL 0' config.h || die 'GPL enabled unexpectedly.'
 grep -qx '#define CONFIG_NONFREE 0' config.h || die 'Nonfree enabled unexpectedly.'
 grep -qx '#define CONFIG_VERSION3 0' config.h || die 'Version3 enabled unexpectedly.'
 make -j"${NUMBER_OF_PROCESSORS:-2}"
 make install
+# MSVC install puts import libraries beside DLLs; expose them in lib for P20.
+for library in avformat avcodec avutil swscale swresample; do
+    cp -- "$work_root/install/bin/$library.lib" "$work_root/install/lib/"
+done
 
 # Install locally without exposing workspace spaces to generated Makefiles.
 # Copy upstream license/source identity and the actual configure receipt too.
@@ -61,6 +69,8 @@ mkdir -p -- "$notice"
 cp -- "$vendor/COPYING.LGPLv2.1" "$vendor/LICENSE.md" "$vendor/PROVENANCE.md" \
     "$vendor/COMPONENTS.md" "$vendor/source.lock" "$vendor/configure.args" "$notice/"
 cp -- config.h config_components.h ffbuild/config.mak ffbuild/config.log "$notice/"
+cp -- "$repo/tools/ffmpeg/build.sh" "$repo/tools/ffmpeg/msvc.sh" \
+    "$repo/tools/ffmpeg/README.md" "$notice/"
 for dir in bin include lib; do
     [[ -d "$work_root/install/$dir" ]] || die "Missing installed directory: $dir"
 done

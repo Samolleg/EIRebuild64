@@ -1,6 +1,14 @@
-param([string]$VSInstallDir)
+param(
+    [string]$VSInstallDir,
+    [string]$FFmpegSource
+)
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (!$FFmpegSource) {
+    $work = Split-Path $repo
+    if ((Split-Path $work -Leaf) -eq 'eirebuild64-wt') { $work = Split-Path $work }
+    $FFmpegSource = Join-Path $work 'deps64/ffmpeg/8.1.3/x64'
+}
 $cache = Join-Path $env:USERPROFILE '.nuget/packages'
 [xml]$config = Get-Content -LiteralPath (Join-Path $repo 'packages.config') -Raw
 
@@ -27,7 +35,18 @@ if (!(Test-Path -LiteralPath (Join-Path $jsonSource 'json.hpp') -PathType Leaf))
     throw "Missing repository JSON headers: $jsonSource"
 }
 
-# Only ignored packages/ and out/ receive generated/copied files.
+$ffmpegDestination = Join-Path $repo 'dependencies/ffmpeg/8.1.3/x64'
+$ffmpegMissing = !(Test-Path -LiteralPath $ffmpegDestination)
+if ($ffmpegMissing -and !(Test-Path -LiteralPath $FFmpegSource -PathType Container)) {
+    throw "Missing FFmpeg 8.1.3 x64 dependency at $FFmpegSource. Build it using tools/ffmpeg/README.md or pass -FFmpegSource. Nothing will be downloaded."
+}
+
+# Only ignored packages/, out/ and dependencies/ receive generated/copied files.
+if ($ffmpegMissing) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $ffmpegDestination) | Out-Null
+    Copy-Item -LiteralPath $FFmpegSource -Destination $ffmpegDestination -Recurse
+    Write-Output "Prepared FFmpeg 8.1.3 x64 from $FFmpegSource."
+}
 foreach ($package in $packages) {
     $destination = Join-Path $repo ('packages/' + $package.Id + '.' + $package.Version)
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
