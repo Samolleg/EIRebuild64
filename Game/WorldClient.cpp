@@ -2255,18 +2255,18 @@ BOOL CWorldClient::ArePersonagesAtExit(CPersonages &people, int nExitPoint,
     return bResult;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-static BOOL LoadList(CBaseManager *pMan, CMemorySave &packet)
+static BOOL LoadList(CBaseManager *pMan, CSpellManager &spells, CMemorySave &packet)
 {
-    char cCont;
+    char cCont = 0;
     CGameBase *pObj;
     int nID, nTypeID, nSubTypeID;
     for (;;)
     {
         packet.Read(cCont);
-        if (!cCont)
-            break;
         if (!packet.IsOk())
             return FALSE;
+        if (!cCont)
+            break;
         packet.Read(nID);
         packet.Read(nTypeID);
         packet.Read(nSubTypeID);
@@ -2281,8 +2281,19 @@ static BOOL LoadList(CBaseManager *pMan, CMemorySave &packet)
         }
         // create new one
         pObj = pMan->CreateData(ETypeIDs(nTypeID), nID);
+        if (!pObj) return FALSE;
         pObj->SetSubtypeID((DWORD)nSubTypeID);
-        pObj->Load(packet);
+        DWORD flags = 0;
+        packet.Read(flags);
+        pObj->ResetAllFlags();
+        pObj->SetFlag(flags);
+        if (auto *item = dynamic_cast<CItem *>(pObj))
+            item->LoadLocal(packet, spells);
+        else if (auto *spell = dynamic_cast<CSpell *>(pObj))
+            spell->LoadLocal(packet);
+        else
+            return FALSE;
+        if (!packet.IsOk()) return FALSE;
         pObj->AddRef();
     }
     return TRUE;
@@ -2293,36 +2304,14 @@ BOOL CWorldClient::AddItems(CMemorySave &packet)
     packet.Seek(0);
     packet.SetOk();
     // load
-    if (!LoadList(GetSpellManager(), packet))
+    if (!LoadList(GetSpellManager(), *GetSpellManager(), packet))
         return FALSE;
-    if (!LoadList(GetItemManager(), packet))
+    if (!LoadList(GetItemManager(), *GetSpellManager(), packet))
         return FALSE;
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CWorldClient::NewItems(CMemorySave &packet)
-{
-#ifdef _DEBUG
-    // make sure no objects exist on server at this moment
-    for (auto pos = objects.begin(); pos != objects.end(); ++pos)
-    {
-        CMapObject *pObject = *pos;
-        ASSERT((pObject->GetID() <= 0));
-    }
-#endif
-    // erasing all objects
-    RemoveQuickItemsAndSpells();
-    // transmitting all items and spells from server to client, make it happen dude :)
-    if (packet.GetSize())
-    {
-        pSpellManager->Load(packet);
-        pItemManager->Load(packet);
-        pSpellManager->LoadData(packet);
-        pItemManager->LoadData(packet);
-        AddQuickReferences();
-    }
-    return TRUE;
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {

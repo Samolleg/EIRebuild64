@@ -53,8 +53,8 @@ public:
         , bRest(bR)
     {
     }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 typedef CAArray<SAITurnLookOrder> CAITLOrders;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -81,14 +81,8 @@ public:
         Clear();
         ptPoint = point;
     }
-    void Load(CSave &file)
-    {
-    SaveSchema::RequireDynamicSchema();
-}
-    void Store(CSave &file)
-    {
-    SaveSchema::RequireDynamicSchema();
-}
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // использование боевого потенциала юнита
@@ -166,8 +160,8 @@ private:
         };
         SRPGGeneralAttack attack; // description of maximal possible damage
 
-        void Load(CSave &file);
-        void Store(CSave &file);
+        void Load(CSave &file) = delete;
+        void Store(CSave &file) = delete;
         float GetDamage();
     public:
     void Store(SaveSchema::Writer &) const;
@@ -229,8 +223,8 @@ public:
     void CastHeals(CAIUnitLogic &logic, bool bDoNotMove); // when situation is peaceful
     bool HasHeals() { return heals.GetSize() != 0; }
     //
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
     friend struct SAIPotentialAttack;
 public:
     void Store(SaveSchema::Writer &) const;
@@ -267,12 +261,8 @@ public:
     virtual EAIMotivation GetType() = 0;
     virtual bool IsDuty() { return FALSE; }
     virtual void RemoveReferencesOn(CMapObject *pTarget) {}
-    virtual void Load(CSave &file) {
-    SaveSchema::RequireDynamicSchema();
-}
-    virtual void Store(CSave &file) {
-    SaveSchema::RequireDynamicSchema();
-}
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -310,8 +300,8 @@ public:
     }
     virtual void CommandUnit(CAIUnitLogic &logic);
     virtual EAIMotivation GetType() { return AI_UM_GUARD; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -336,8 +326,8 @@ public:
     virtual int GetPower(CAIUnitLogic &logic);
     virtual void CommandUnit(CAIUnitLogic &logic);
     virtual EAIMotivation GetType() { return AI_UM_PATROL; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -359,8 +349,8 @@ public:
     CUMSentry(const CPlot3D &plot) { Set(plot); }
     virtual void CommandUnit(CAIUnitLogic &logic);
     virtual EAIMotivation GetType() { return AI_UM_SENTRY; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -385,8 +375,8 @@ public:
     virtual void RemoveReferencesOn(CMapObject *pTarget);
     virtual void CommandUnit(CAIUnitLogic &logic);
     virtual EAIMotivation GetType() { return AI_UM_FOLLOW; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -409,8 +399,8 @@ public:
     virtual void StartUsing(CAIUnitLogic &logic);
     virtual void FinishUsing(CAIUnitLogic &logic);
     virtual EAIMotivation GetType() { return AI_UM_SUSPECTION; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -443,8 +433,8 @@ public:
             pTarget = NULL;
     }
     CMapObject *GetTarget() { return pTarget; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -479,8 +469,8 @@ public:
     virtual void StartUsing(CAIUnitLogic &logic);
     virtual void FinishUsing(CAIUnitLogic &logic);
     virtual EAIMotivation GetType() { return AI_UM_FEAR; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -536,8 +526,8 @@ public:
     virtual void CommandUnit(CAIUnitLogic &logic);
     virtual void RemoveReferencesOn(CMapObject *_pTarget);
     virtual EAIMotivation GetType() { return AI_UM_PLAYER; }
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -746,8 +736,8 @@ public:
     CMapObject *GetLastHitBy() { return pHitBy; }
     bool WasHitByAlly();
     // load&store
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 public:
     void Store(SaveSchema::Writer &) const;
     void Load(SaveSchema::Reader &);

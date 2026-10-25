@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "World.h"
+#include "SaveSchema.h"
+#include <set>
 
 #include "WinRegistry.h"
 
@@ -34,16 +36,24 @@ CString CWorld::szCDPath;       // CD-ROM path
 // store list of gamebase derivatives
 void StoreList(const CGameBaseList &objs, CMemorySave &packet)
 {
+    std::set<int> sent;
     POSITION pos;
     pos = objs.GetHeadPosition();
     while (pos)
     {
         CGameBase *pObj = objs.GetNext(pos);
+        if (!sent.insert(pObj->GetID()).second) continue;
         packet.Write((char)1);
         packet.Write(pObj->GetID());
         packet.Write((int)pObj->GetTypeID());
         packet.Write(pObj->GetSubtypeID());
-        pObj->Store(packet);
+        packet.Write(pObj->GetFlags());
+        if (auto *item = dynamic_cast<CItem *>(pObj))
+            item->StoreLocal(packet);
+        else if (auto *spell = dynamic_cast<CSpell *>(pObj))
+            spell->StoreLocal(packet);
+        else
+            throw SaveSchema::Error(SaveSchema::ErrorCode::UnknownType, "unsupported local inventory object");
     }
     packet.Write((char)0);
 }

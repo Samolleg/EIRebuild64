@@ -121,8 +121,11 @@ public:
     //
     virtual int Segment();
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    // In-process item packets use manager-local IDs, never slot ObjectId.
+    virtual void StoreLocal(CSave &file) const;
+    virtual void LoadLocal(CSave &file, CSpellManager &spells);
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -219,8 +222,11 @@ public:
     }
     virtual BOOL Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const;
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    // In-process item packets use manager-local IDs, never slot ObjectId.
+    virtual void StoreLocal(CSave &file) const;
+    virtual void LoadLocal(CSave &file, CSpellManager &spells);
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemWeapon"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_WEAPON; }
@@ -295,8 +301,11 @@ public:
     }
     virtual BOOL Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const;
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    // In-process item packets use manager-local IDs, never slot ObjectId.
+    virtual void StoreLocal(CSave &file) const;
+    virtual void LoadLocal(CSave &file, CSpellManager &spells);
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemArmor"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_ARMOR; }
@@ -342,8 +351,11 @@ public:
     //
     EIDBQuickItemType GetQuickItemType() const;
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    // In-process item packets use manager-local IDs, never slot ObjectId.
+    virtual void StoreLocal(CSave &file) const;
+    virtual void LoadLocal(CSave &file, CSpellManager &spells);
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemQuick"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_QUICK; }
@@ -386,8 +398,11 @@ public:
         return tool;
     }
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    // In-process item packets use manager-local IDs, never slot ObjectId.
+    virtual void StoreLocal(CSave &file) const;
+    virtual void LoadLocal(CSave &file, CSpellManager &spells);
     //
     DWORD GetScriptID() const { return dwScriptID; }
     // identification
@@ -433,8 +448,11 @@ public:
     DWORD GetInstructionItemIndex() const { return dwMaterialIndex; }
     void SetInstructionItemIndex(DWORD dwIndex) { dwMaterialIndex = dwIndex; }
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    // In-process item packets use manager-local IDs, never slot ObjectId.
+    virtual void StoreLocal(CSave &file) const;
+    virtual void LoadLocal(CSave &file, CSpellManager &spells);
     // identification
     virtual LPCSTR GetGameClassName() const { return "CItemLoot"; }
     virtual EClassIDs WhoAmI() const { return HPC_ITEM_LOOT; }

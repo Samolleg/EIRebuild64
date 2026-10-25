@@ -235,15 +235,9 @@ void CSpell::SetNewRunes(const char *pcNewRunes)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CSpell::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CSpell::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 const SSDBSpellPrototype *CSpell::GetPrototype() const
 {
@@ -456,3 +450,43 @@ BOOL CSpellContainer::Recalculate()
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+// Local spell payload has only scalar fields; IDs/type/flags are in StoreList.
+void CSpell::StoreLocal(CSave &file) const
+{
+    file.Write(effect.nSpellID);
+    file.Write(effect.nVisStrength);
+    file.Write(effect.nDuration);
+    file.Write(effect.fpPower);
+    file.Write(effect.fpRadius);
+    file.Write(effect.bQuiet);
+    file.Write(fpSpeed);
+    file.Write(fpRange);
+    file.Write(dwNumTargets);
+    file.Write(dwResolve);
+    file.Write(fpManaCost);
+    file.Write(dwSlots);
+    file.Write(fpPrice);
+    file.Write(dwActions);
+    file.Write(dwComplexity);
+    for (auto &rune : runes) file.Write(rune);
+}
+void CSpell::LoadLocal(CSave &file)
+{
+    file.Read(effect.nSpellID);
+    file.Read(effect.nVisStrength);
+    file.Read(effect.nDuration);
+    file.Read(effect.fpPower);
+    file.Read(effect.fpRadius);
+    file.Read(effect.bQuiet);
+    file.Read(fpSpeed);
+    file.Read(fpRange);
+    file.Read(dwNumTargets);
+    file.Read(dwResolve);
+    file.Read(fpManaCost);
+    file.Read(dwSlots);
+    file.Read(fpPrice);
+    file.Read(dwActions);
+    file.Read(dwComplexity);
+    for (auto &rune : runes) file.Read(rune);
+}

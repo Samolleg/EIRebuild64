@@ -24,8 +24,8 @@ struct SAlarmInfo
         nTime = 0;
         fpX = fpY = 0;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // General Unit Logic Type
@@ -77,8 +77,8 @@ public:
         nWaitSeg = 0;
         nFlags = 0;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 typedef CAArray<SActionPoint, SActionPoint &> CActionArray;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -92,8 +92,8 @@ public:
                           // определ€ютс€ CUMPatrol
 public:
     int AddActionPoint(CPlot3D point);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 typedef CAArray<SPatrolPoint, SPatrolPoint &> CPatrolPointArray;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -131,8 +131,8 @@ public:
     }
     void SetAggressionMode(EUnitAggressionMode mode) { aggressionMode = mode; }
     void ClearMotivation() { dwLogicFlags = 0; }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 //-----------------------------------------------------------------------------------------------------

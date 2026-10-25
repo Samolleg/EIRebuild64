@@ -87,15 +87,9 @@ void SVisibilityMask::Clear()
     data.FillZero();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SVisibilityMask::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void SVisibilityMask::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 void SVisibilityMask::Extend(int nCenterX, int nCenterY, int nRadius)
 {
@@ -156,16 +150,10 @@ SAIMark *SAIMark::GetNewMark()
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
-void SAIMark::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 
 /////////////////////////////////////////////////////////////////////////////////////
-void SAIMark::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIMarkManager
@@ -771,16 +759,10 @@ void CAIMarkManager::Feel(CUnitServer *pHero, CAIUnitEnvironment &env)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIMarkManager::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIMarkManager::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1043,16 +1025,10 @@ void CAIUnitEnvironment::RemoveReferencesOn(CMapObject *pTarget)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIUnitEnvironment::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIUnitEnvironment::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIIgnoredTargetsList
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1099,15 +1075,9 @@ void CAIIgnoredTargetsList::RemoveReferencesOn(CMapObject *pTarget)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIIgnoredTargetsList::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIIgnoredTargetsList::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // CAIDelayedSoundsList
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1145,15 +1115,9 @@ void CAIDelayedSoundsList::RemoveDiplomacyMsgs()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIDelayedSoundsList::SSound::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIDelayedSoundsList::SSound::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIDelayedSoundsList::AddSound(const CPlot3D &ptSrc, int nDelay, const char *pszText)
 {
@@ -1177,15 +1141,9 @@ void CAIDelayedSoundsList::AddNewEnemies(DWORD dwNewEnemies, int nDelay, const c
     soundsQueue.Add(n);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIDelayedSoundsList::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIDelayedSoundsList::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // функция вычисляет на каких тайлах pWatcher может заметить объект pTarget с помощью
 // надежного чувства
@@ -1218,3 +1176,31 @@ void BuildVisionMask(CUnit *pWatcher, CUnit *pTarget, SVisibilityMask &res)
         map.TraceVisionToArea(ptLookFrom, fpPeripheralSenseRadius, ptUnitDir, 0, -1000, res);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+// Explicit local visibility payload: origin, dimensions and one byte per cell.
+void SVisibilityMask::StoreLocal(CSave &file) const
+{
+    const int x = data.GetXSize(), y = data.GetYSize();
+    const auto cells = static_cast<std::uint64_t>(x) * y;
+    if (x <= 0 || y <= 0 || cells > INT32_MAX)
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Limit, "local visibility dimensions");
+    file.Write(nShiftX); file.Write(nShiftY);
+    file.Write(x); file.Write(y);
+    file.Write(data.GetBuffer(), static_cast<UINT>(cells));
+}
+bool SVisibilityMask::LoadLocal(CSave &file)
+{
+    int shiftX = 0, shiftY = 0, x = 0, y = 0;
+    file.Read(shiftX); file.Read(shiftY);
+    file.Read(x); file.Read(y);
+    const auto cells = static_cast<std::uint64_t>(x) * y;
+    if (!file.IsOk() || x <= 0 || y <= 0 || cells > INT32_MAX || cells != file.Remaining())
+    {
+        file.Fail("invalid_local_visibility_dimensions");
+        return false;
+    }
+    data.SetSizes(x, y);
+    if (file.Read(data.GetBuffer(), static_cast<UINT>(cells)) != cells || !file.IsOk()) return false;
+    nShiftX = shiftX; nShiftY = shiftY;
+    return true;
+}

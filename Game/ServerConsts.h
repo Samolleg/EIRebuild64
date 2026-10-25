@@ -117,8 +117,8 @@ struct SPartyID
     bool operator==(const SPartyID &id) const { return nSomeNumber == id.nSomeNumber; }
     bool IsEmpty() const { return nSomeNumber == 0; }
     void Serialize(CStructureSaver &file) { file.Add(1, nSomeNumber); }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // имя переменной партии, содержащей глобальное время

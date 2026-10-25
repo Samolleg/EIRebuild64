@@ -20,8 +20,8 @@ public:
     //
     int Segment();
     //
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CArray<CSpellEffect, CSpellEffect &> CSpellEffectArray;

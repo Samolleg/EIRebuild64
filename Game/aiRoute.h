@@ -58,8 +58,8 @@ public:
     {
         wFlags = bWater * N_RT_WATER_FLAG + bNoRun * N_RT_NORUN;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 typedef CList<SRouteUnit> CRouteList;
 
@@ -110,8 +110,8 @@ public:
     BOOL Is8Connected();
     void AddHeadUnit(WORD wX, WORD wY) { route.AddHead(SRouteUnit(wX, wY)); }
     void AddTailUnit(WORD wX, WORD wY) { route.AddTail(SRouteUnit(wX, wY)); }
-    void Load(CSave &file) { LoadCList<SRouteUnit>(route, file); }
-    void Store(CSave &file) { StoreCList<SRouteUnit>(route, file); }
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -183,8 +183,8 @@ public:
     void Clear();
     void SetSpeed(WORD wSpeed256 = N_RT_SPEED);
     CPlot3D GetFinalPoint(); // result is in meters
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
     friend class CRouteWalker;
 };
 
@@ -206,8 +206,8 @@ public:
     CPlot2D finish, finishV;
     float fpAlpha,
         fpAlphaInc; // alpha - maximal alpha for the segment, alphainc - alpha increment per segment
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -222,8 +222,8 @@ public:
     float fpSpeed;        // speed in ai tiles per second
     int nTileX, nTileY;   // тайл, который должен быть свободен, при перемещении юнита к этой точке
     float GetAngle() { return float(atan2(speed.y, speed.x)); }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 
 // represents routes turning point
@@ -241,8 +241,8 @@ public:
         point.y = fpY;
         nNumber = 0;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -332,6 +332,6 @@ public:
         fpAngularSpeed = fpNewAngSpeed;
     }
     // load&store
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };

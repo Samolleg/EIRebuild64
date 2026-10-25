@@ -155,8 +155,8 @@ public:
     }
     // bool IsPointAttack() const { return ptTarget.z >= 0; }
     SUnitCommand() { Clear(); }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // описание единичной анимации для L0, если IsEmpty(), то предназначен просто для смены
@@ -188,8 +188,8 @@ public:
                a.animationSpeed == animationSpeed && a.bSoundSet == bSoundSet;
     }
     bool IsEmpty() { return bStart == 0xff && bCyclic == 0xff; }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // последовательность анимаций, используется в L0 как элементарная анимация
@@ -228,8 +228,8 @@ public:
     void SetSoundSet(BYTE bSoundSet);
     bool IsEndless();
     int GetLength();
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // полное описание позы для определения анимации suffer, переходов между состояниями и др
@@ -249,8 +249,8 @@ public:
         bAggressive = false;
         bRun = 0;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
     void Convert(EUnitPose p)
     {
         bRun = 0;
@@ -295,8 +295,8 @@ public:
     void CreateCastAttack(SL0AnimationSeq animation, int nTime, int nHit,
                           ERPGMagicSubtypes magicType);
     void CreateAimlessAttack(SL0AnimationSeq animation, int nTime, int nHit);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
     void Freeze(int nTime)
     {
         nTimeStrikeMoment += nTime;
@@ -314,8 +314,8 @@ public:
     bool bIsUsed;           // for temprorary use in BuildContinousSpells list
 
     SContSpellInfo() { nDelay = 0; bIsUsed = false; }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 struct STrainInfo
@@ -333,8 +333,8 @@ public:
         master = 0;
     }
     void RemoveReferencesOn(CMapObject *pTarget);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // объект для запоминания наиболее часто используемых анимаций
@@ -783,8 +783,8 @@ public:
     virtual void RemoveReferencesOn(CMapObject *pTarget);
     //
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // get some sense parameters
     // прямые, достоверные чувства
     float GetVisionSense() const

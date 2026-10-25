@@ -87,8 +87,8 @@ public:
         nHighY = Max(nHighY, nY);
     }
     bool IsIn(int nX, int nY) { return nX >= nLowX && nX <= nHighX && nY >= nLowY && nY <= nHighY; }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -142,8 +142,8 @@ public:
         return CPlot3D(AITile2Meter(ptFinish.x), AITile2Meter(ptFinish.y), 0);
     }
     int GetSegmentLength();
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////

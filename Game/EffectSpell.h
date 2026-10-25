@@ -113,8 +113,8 @@ public:
     BOOL Segment();
     // load&store
     static void SetCurrentWorld(CWorldServer *_pWS) { pWSstatic = _pWS; }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 public:
     void Store(SaveSchema::Writer &) const;
     void Load(SaveSchema::Reader &);

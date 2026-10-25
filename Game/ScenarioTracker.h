@@ -132,8 +132,8 @@ public:
 public:
     void Clear();
     void Serialize(CStructureSaver &file);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 
     // called from QuestComplete
     void UpdateAssortment();

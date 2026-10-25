@@ -91,8 +91,8 @@ template<class K, class T> struct Codec<CHashMap<K,T *>>
 
 using namespace SaveSchema::Fields;
 
-void CGameBase::Store(SaveSchema::Writer &) const { SaveSchema::RequireDynamicSchema(); }
-void CGameBase::Load(SaveSchema::Reader &) { SaveSchema::RequireDynamicSchema(); }
+void CGameBase::Store(SaveSchema::Writer &) const { throw SaveSchema::Error(SaveSchema::ErrorCode::UnknownType, "unregistered game object schema"); }
+void CGameBase::Load(SaveSchema::Reader &) { throw SaveSchema::Error(SaveSchema::ErrorCode::UnknownType, "unregistered game object schema"); }
 
 void CBaseManager::RestoreSavedKeyRange(int first, int last, int previous)
 {

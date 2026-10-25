@@ -97,8 +97,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectSound"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTSOUND; }
@@ -135,8 +135,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectSoundSeq"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTSOUNDSEQ; }
@@ -170,8 +170,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectAmbientSound"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTAMBIENTSOUND; }
@@ -204,8 +204,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectPointLight"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTPOINTLIGHT; }
@@ -251,8 +251,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectParticle"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTPARTICLE; }
@@ -280,8 +280,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectWall"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTWALL; }
@@ -321,8 +321,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectLightning"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTLIGHTNING; }
@@ -390,8 +390,8 @@ public:
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);
     virtual void UpdateTo(CUpdateHistory &pkt);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectArrow"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTARROW; }
@@ -434,8 +434,8 @@ public:
     virtual void UpdateTo(CUpdateHistory &pkt);
     virtual int Segment();
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectArrowFigure"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTARROWFIGURE; }
@@ -470,8 +470,8 @@ public:
     virtual void UpdateTo(CUpdateHistory &pkt);
     virtual int Segment();
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectShowVisibility"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTSHOWVISIBILITY; }
@@ -550,8 +550,8 @@ public:
     virtual void UpdateTo(CUpdateHistory &pkt);
     virtual void ApplyParams(EUpdateType tip);
     // load&store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification information
     virtual LPCSTR GetGameClassName() const { return "CEffectTornado"; }
     virtual EClassIDs WhoAmI() const { return HPC_EFFECTTORNADO; }

@@ -91,8 +91,8 @@ public:
     virtual bool ApplyScience(const SRPGScienceStats &tool, CUnit *pWho);
     virtual BOOL CanApplyScience(const SRPGScienceStats &tool);
     //
-    virtual void Load(CSave &file); // if trap will use diplomacy save dwEnemyMask here
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete; // if trap will use diplomacy save dwEnemyMask here
+    virtual void Store(CSave &file) = delete;
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CTrapObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_TRAP; };
@@ -133,8 +133,8 @@ public:
     virtual int Segment();
     virtual void RemoveReferencesOn(CMapObject *pTarget);
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CMagicTrapObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_MAGICTRAP; };
@@ -191,8 +191,8 @@ public:
     void SwitchState(int nState, float fpTime = -10);
     void EnableLever(bool bEnable);
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CLeverObject"; };
     virtual EClassIDs WhoAmI() const { return HPC_LEVER; };
@@ -238,8 +238,8 @@ public:
     virtual void TurnOff() {}
     virtual void StartupEffect() {}
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     //
     virtual void SetParticles(ETypeIDs tidParticlesTypeID, const CPlot3D &position,
                               const float fpScale);
@@ -277,8 +277,8 @@ public:
     virtual void Destroy();
     virtual bool IsDynamic() { return true; } // CRAP
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // Update
     virtual void UpdateTo();
     virtual BOOL UpdateFrom(EUpdateType tip);

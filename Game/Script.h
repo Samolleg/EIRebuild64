@@ -75,8 +75,8 @@ struct SScriptLightInfo
         : pLight(NULL), nScriptID(0), bAutoDelete(FALSE), bIsMoving(FALSE),
           nSegmentsToMove(0), moveVector(0, 0, 0) {}
     ~SScriptLightInfo() { Clear(); }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // структура, описывающа€ партикл эффект, принадлежащий скрипту, этот эффект будет освобожден
@@ -97,8 +97,8 @@ struct SParticleInfo
         : pParticle(NULL), nScriptID(0), bAutoDelete(FALSE), bIsMoving(FALSE),
           nSegmentsToMove(0), moveVector(0, 0, 0), nLifeTime(0) {}
     ~SParticleInfo() { Clear(); }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 struct SFXInfo
@@ -119,8 +119,8 @@ struct SFXInfo
         : pSound(NULL), nScriptID(0), cp(0, 0, 0), fpMinRadius(0), fpMaxRadius(0),
           bIsRandomized(FALSE), fpRandRadius(0), nMinSegment(0), nMaxSegment(0), nDelay(0) {}
     ~SFXInfo() { Clear(); }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 struct SLightningInfo
@@ -135,8 +135,8 @@ struct SLightningInfo
         pLightning = NULL;
     }
     ~SLightningInfo() { Clear(); }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 struct SScriptArea
@@ -158,8 +158,8 @@ struct SScriptArea
             };
         };
         bool IsInArea(float fpX, float fpY);
-        void Load(CSave &file);
-        void Store(CSave &file);
+        void Load(CSave &file) = delete;
+        void Store(CSave &file) = delete;
     };
     CAArray<SScriptAreaElement, SScriptAreaElement &> areas;
     int nID;
@@ -167,8 +167,8 @@ struct SScriptArea
     void AddSquare(float fpLowX, float fpLowY, float fpHighX, float fpHighY);
     void AddRound(float fpCenterX, float fpCenterY, float fpRadius);
     bool IsInArea(float fpX, float fpY);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 namespace SaveSchema {
 template<> struct ValueCodec<SScriptArea::SScriptAreaElement> { static constexpr std::uint32_t Id = 0x1620; static ValueType Get(); };
@@ -216,8 +216,8 @@ public:
     operator CMapObjectServer *() { return GetSpecific(); }
     // дл€ регул€рной проверки верности ссылки
     void CheckObjectRefs() { CheckObjectValid(); }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // группа объектов, иногда бывает полезно, элементы всегда наход€тс€ в отсортированом
@@ -246,8 +246,8 @@ public:
     void AddList(CMapObjectPtrList &list);  // добавить указатели на юниты из list в Group
     void MakeList(CMapObjectPtrList &list); // записать в список все юниты из группы
     BOOL HasMapObject(CMapObject *pSearch);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // множество переменных скрипта одного типа
@@ -283,8 +283,8 @@ public:
     void AddVars(const CScriptVars<VAR_TYPE> &a);
     // скопировать только значени€ переменных, без имен
     void CopyValues(const CScriptVars<VAR_TYPE> &src) { vars = src.vars; }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // набор переменных всех типов
@@ -316,8 +316,8 @@ public:
     // скопировать только значени€ переменных, без имен
     void CopyValues(const SScriptVariablesSet &src);
     // запись/считывание
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // описание одного параметра - переменной
@@ -334,8 +334,8 @@ struct SScriptParam
         nNumber = 0;
         nVarNumber = 0;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 
 struct SScriptFuncParam;
@@ -380,8 +380,8 @@ public:
     void CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CString &res);
     void CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CScriptObject **res);
     void CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CScriptObjectGroup **res);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // описание одного параметра - функции
@@ -417,18 +417,8 @@ public:
         nNumber = 0;
         cmd->Clear();
     }
-    void Load(CSave &file)
-    {
-        file.Read(&eType, sizeof(eType));
-        file.Read(&nNumber, sizeof(nNumber));
-        cmd->Load(file);
-    }
-    void Store(CSave &file)
-    {
-        file.Write(&eType, sizeof(eType));
-        file.Write(&nNumber, sizeof(nNumber));
-        cmd->Store(file);
-    }
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // объект, описывающий один тред команд скрипта или множество условий( event`ov из секции if )
@@ -447,16 +437,8 @@ public:
     void Add(SSCCmd &cmd) { commands.Add(cmd); }
     void SetNumber(int nNumber) { nIdx = nNumber; }
     int GetNumber() { return nIdx; }
-    void Load(CSave &file)
-    {
-        file.Read(&nIdx, sizeof(nIdx));
-        LoadCArray<SSCCmd, SSCCmd &>(commands, file);
-    }
-    void Store(CSave &file)
-    {
-        file.Write(&nIdx, sizeof(nIdx));
-        StoreCArray<SSCCmd, SSCCmd &>(commands, file);
-    }
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 typedef SScriptThread *HScriptThread;
@@ -503,8 +485,8 @@ public:
     void RunThread(SScriptThread *pNewThread, SScriptVariablesSet *newVars = NULL);
     // прилинковать OneScript, только дл€ возможности выполнени€ команды KillScript()
     void LinkOneScript(SOneScript *pNewOScript) { pLinkedOneScript = pNewOScript; }
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // объект, описывающий один тригер, при выполнении всех условий, назначенных на этот тригер
@@ -527,8 +509,8 @@ public:
     }
     // проверить выполнение условий, если все ok, то запустить список команд из секции then
     void RunCheck(CScript *pScript, SOneScript *pOneScript);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 // состо€ние объекта с соответсвующими ему conditions (один из допустимых скриптов объекта)
@@ -561,8 +543,8 @@ public:
     BOOL AddParameter(CString &szParam, EScriptParameterType eType);
     SOneScript() { nDelFlag = 0; }
     ~SOneScript() {}
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 
 class CScript
@@ -784,8 +766,8 @@ public:
     void DiscardSaveState();
     void LoadScript(SaveSchema::Reader &);
     void StoreScript(SaveSchema::Writer &) const;
-    void LoadScript(CSave &file);
-    void StoreScript(CSave &file);
+    void LoadScript(CSave &file) = delete;
+    void StoreScript(CSave &file) = delete;
     SScriptThread *GetThreadByIndex(int nIdx);
     // эта функци€ не добавл€ет к имени скрипта ничего, только дл€ load/store
     SOneScript *GetScriptByName(const char *szName);
@@ -857,32 +839,6 @@ void CScriptVars<VAR_TYPE>::AddVars(const CScriptVars<VAR_TYPE> &a)
 }
 
 // loading & storing scriptvars
-template <class VAR_TYPE>
-void CScriptVars<VAR_TYPE>::Load(CSave &file)
-{
-    int i = 0;
-    file.Read(&i, sizeof(i));
-    vars.SetSize(i);
-    varNames.SetSize(i);
-    for (i = 0; i < vars.GetSize(); i++)
-    {
-        LoadObject<VAR_TYPE>(vars[i], file);
-        LoadObject<CString>(varNames[i], file);
-    }
-}
 
-template <class VAR_TYPE>
-void CScriptVars<VAR_TYPE>::Store(CSave &file)
-{
-    int i, nZero = 0;
-    i = vars.GetSize();
-    file.Write(&i, sizeof(i));
-    for (i = 0; i < vars.GetSize(); i++)
-    {
-        StoreObject<VAR_TYPE>(vars[i], file);
-        if (i < varNames.GetSize())
-            StoreObject<CString>(varNames[i], file);
-        else
-            file.Write(&nZero, 1);
-    }
-}
+
+

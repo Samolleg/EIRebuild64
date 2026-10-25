@@ -56,7 +56,7 @@ public:
     // лучше вызывать эту функцию во время работы unitserver::segment()
     void SayAck(EAIAcks ack);
     void Segment(CUnitServer *pWho);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////

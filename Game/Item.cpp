@@ -199,15 +199,9 @@ const SIDBItemGeneralShape *CItem::GetShapeEntry() const
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CItem::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CItem::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // BOOL CItem::UpdateTo( CBufferManager* pBufMng, BYTE cUpdateMask, BYTE cDeskType )
 //{
@@ -773,15 +767,9 @@ float CItemWeapon::GetRandomDamage() const
         return fpDamageMin;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemWeapon::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemWeapon::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // CItemArmor
@@ -975,15 +963,9 @@ bool CItemArmor::IsUpper(DWORD dwArmor)
     return theItemDatabase.armors[CItem::GetShape(dwArmor)]->IsUpper();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemArmor::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemArmor::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // CItemQuick
@@ -1028,15 +1010,9 @@ BOOL CItemQuick::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemQuick::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemQuick::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemQuick::GetI3DTextureName() const
 {
@@ -1106,15 +1082,9 @@ BOOL CItemQuest::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemQuest::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemQuest::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemQuest::GetI3DTextureName() const
 {
@@ -1448,15 +1418,9 @@ float CItemLoot::GetPrice() const
     return -1;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemLoot::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CItemLoot::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // CItemSpell
@@ -1494,3 +1458,103 @@ CString CItemSpell::GetI3DFigureName() const
     return CString("initqi1item");
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+// Local inventory transfer; independent of the slot save graph.
+void CItem::StoreLocal(CSave &file) const
+{
+    file.Write(fpHP);
+    file.Write(fpMaxHP);
+    file.Write(fpMP);
+    file.Write(fpMaxMP);
+    file.Write(fpRegenMP);
+    file.Write(fpWeight);
+    file.Write(fpPrice);
+    file.Write(fpSize);
+    file.Write(nCount);
+    file.Write(dwSpellSlots);
+    file.Write(pSpell ? pSpell->GetID() : -1);
+}
+void CItem::LoadLocal(CSave &file, CSpellManager &spells)
+{
+    file.Read(fpHP);
+    file.Read(fpMaxHP);
+    file.Read(fpMP);
+    file.Read(fpMaxMP);
+    file.Read(fpRegenMP);
+    file.Read(fpWeight);
+    file.Read(fpPrice);
+    file.Read(fpSize);
+    file.Read(nCount);
+    file.Read(dwSpellSlots);
+    int spellId = -1;
+    file.Read(spellId);
+    pSpell = nullptr;
+    if (spellId != -1)
+    {
+        auto *spell = dynamic_cast<CSpell *>(spells.Find(spellId));
+        if (!spell) throw SaveSchema::Error(SaveSchema::ErrorCode::Identity, "local item spell ID not found");
+        pSpell = spell;
+    }
+}
+void CItemWeapon::StoreLocal(CSave &file) const
+{
+    CItem::StoreLocal(file);
+    file.Write(dwProficiencyClass);
+    file.Write(fpDamageMin);
+    file.Write(fpDamageRnd);
+    file.Write(fpRange);
+}
+void CItemWeapon::LoadLocal(CSave &file, CSpellManager &spells)
+{
+    CItem::LoadLocal(file, spells);
+    file.Read(dwProficiencyClass);
+    file.Read(fpDamageMin);
+    file.Read(fpDamageRnd);
+    file.Read(fpRange);
+}
+void CItemArmor::StoreLocal(CSave &file) const
+{
+    CItem::StoreLocal(file);
+    for (auto &row : fpAbsorbtions) for (auto &value : row) file.Write(value);
+    for (auto &mask : dwCrippleMasks) file.Write(mask);
+}
+void CItemArmor::LoadLocal(CSave &file, CSpellManager &spells)
+{
+    CItem::LoadLocal(file, spells);
+    for (auto &row : fpAbsorbtions) for (auto &value : row) file.Read(value);
+    for (auto &mask : dwCrippleMasks) file.Read(mask);
+}
+void CItemQuick::StoreLocal(CSave &file) const
+{
+    CItem::StoreLocal(file);
+    file.Write(dwSkill);
+}
+void CItemQuick::LoadLocal(CSave &file, CSpellManager &spells)
+{
+    CItem::LoadLocal(file, spells);
+    file.Read(dwSkill);
+}
+void CItemQuest::StoreLocal(CSave &file) const
+{
+    CItem::StoreLocal(file);
+    file.Write(dwScriptID);
+}
+void CItemQuest::LoadLocal(CSave &file, CSpellManager &spells)
+{
+    CItem::LoadLocal(file, spells);
+    file.Read(dwScriptID);
+}
+void CItemLoot::StoreLocal(CSave &file) const
+{
+    CItem::StoreLocal(file);
+    file.Write(static_cast<int>(litType));
+    file.Write(static_cast<int>(itInstructionType));
+    file.Write(dwMaterialIndex);
+}
+void CItemLoot::LoadLocal(CSave &file, CSpellManager &spells)
+{
+    CItem::LoadLocal(file, spells);
+    int litTypeValue = 0; file.Read(litTypeValue); litType = static_cast<decltype(litType)>(litTypeValue);
+    int itInstructionTypeValue = 0; file.Read(itInstructionTypeValue); itInstructionType = static_cast<decltype(itInstructionType)>(itInstructionTypeValue);
+    file.Read(dwMaterialIndex);
+}

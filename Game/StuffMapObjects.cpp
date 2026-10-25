@@ -175,15 +175,9 @@ BOOL CTrapObject::CanApplyScience(const SRPGScienceStats &tool)
     return tool.CanDisarmTrap();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CTrapObject::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CTrapObject::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
@@ -397,15 +391,9 @@ void CMagicTrapObject::RemoveReferencesOn(CMapObject *pTarget)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CMagicTrapObject::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CMagicTrapObject::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // **                     class CLeverObject functions                           ** //
@@ -748,15 +736,9 @@ void CLeverObject::GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnit
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CLeverObject::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CLeverObject::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // ******************************************************************************** //
 // **                            CTorchObject                                    ** //
@@ -818,15 +800,9 @@ BOOL CTorchObject::UpdateFrom(EUpdateType tip)
     return bRv;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CTorchObject::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CTorchObject::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObject::SetSpecific(LPGAMEBASE lpNewSpecific)
 {
@@ -875,15 +851,9 @@ void CTorchObjectSpecific::UpdateFrom(CUpdateHistory &pkt)
     */
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CTorchObjectSpecific::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CTorchObjectSpecific::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 void CTorchObjectSpecific::SetParticles(ETypeIDs tidParticlesTypeID, const CPlot3D &position,
                                         const float fpScale)

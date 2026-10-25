@@ -21,8 +21,8 @@ struct SMEArea
     {
         return sqr(pos.x - ptCenter.x) + sqr(pos.y - ptCenter.y) < sqr(fRadius);
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 
 struct SMEMagicTrap

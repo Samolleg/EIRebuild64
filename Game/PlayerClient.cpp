@@ -74,7 +74,6 @@ BOOL CPlayerClient::Create()
     parsers[PID_WEATHER] = &CPlayerClient::PrsWeather;
     parsers[PID_WORLDTIME] = &CPlayerClient::PrsWorldTime;
     parsers[PID_WIND] = &CPlayerClient::PrsWind;
-    parsers[PID_NEWSPELLITEMS] = &CPlayerClient::PrsNewItems;
     parsers[PID_ADDSPELLITEMS] = &CPlayerClient::PrsAddItems;
     parsers[PID_ADDITEMSTOHOOVER] = &CPlayerClient::PrsNewHooverItems;
     parsers[PID_REMOVEITEM] = &CPlayerClient::PrsRemoveItem;
@@ -699,15 +698,7 @@ BOOL CPlayerClient::PrsNewZone()
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
-BOOL CPlayerClient::PrsNewItems()
-{
-    CMemorySave packet;
-    if (!pkt.ReadPacket(packet))
-        return FALSE;
-    // loading information about new items
-    theWorld.NewItems(packet);
-    return TRUE;
-}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerClient::PrsAddItems()
 {
