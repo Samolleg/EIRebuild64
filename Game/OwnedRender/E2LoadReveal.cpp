@@ -13,6 +13,7 @@ OwnedRender::LoadRevealPause pause;
 }
 namespace owned {
 bool bridge_local_single_player_mission() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->local_single_player;
     std::lock_guard<std::mutex> lock(requestLock);
     return localMissionActive && localMissionEpoch && localMissionEpoch == bridge_current_world_epoch();
 }

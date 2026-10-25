@@ -20,6 +20,7 @@
 
 namespace owned {
 namespace {
+#ifndef EID3D11_EMBEDDED
 // The function an import slot of game.exe holds now (what the game calls,
 // an addon's replacement included), found by the import's name.
 void* game_import(const char* dll, const char* name) noexcept {
@@ -102,6 +103,8 @@ const char* decode_progress_frames(ID3D11Device* device, const std::string& path
     return nullptr;
 }
 
+#endif // retail Bink imports and PE32 parsing
+
 void report_progress_failure(const std::string& path, const char* why) noexcept {
     char text[512];
     std::snprintf(text, sizeof(text), "%s: %s; the held picture stays as it is", path.c_str(), why);
@@ -109,10 +112,29 @@ void report_progress_failure(const std::string& path, const char* why) noexcept 
 }
 } // namespace
 
+#ifdef EID3D11_EMBEDDED
+void Renderer::set_embedded_movie_image(std::shared_ptr<const SurfaceImage> image) {
+    if (scene_queue()) {
+        scene_post([this, image = std::move(image)] { set_embedded_movie_image(image); });
+        return;
+    }
+    embedded_movie_image_ = std::move(image);
+    load_progress_movie_valid_ = bool(embedded_movie_image_);
+    if (!embedded_movie_image_) {
+        load_picture_.Reset();
+        load_picture_this_frame_ = load_picture_fitted_ = false;
+        load_progress_movie_ = {};
+    }
+}
+#endif
+
 // At a loading picture present (the game is inside 005DA400 while it shows a
 // progress frame): which frame of which movie the picture shows. Scene
 // thread: the game thread read it at the picture (present_image).
 void Renderer::capture_load_progress_movie(bool fitted) noexcept try {
+#ifdef EID3D11_EMBEDDED
+    load_progress_movie_valid_ = fitted && bool(embedded_movie_image_);
+#else
     auto& state = load_progress_movie_;
     ProgressMovie movie;
     const auto read_movie = [&] {
@@ -135,12 +157,14 @@ void Renderer::capture_load_progress_movie(bool fitted) noexcept try {
         state.source = movie.source;
     }
     load_progress_movie_valid_ = shown + 1 < movie.frames;
+#endif
 } catch (...) { load_progress_movie_ = {}; load_progress_movie_valid_ = false; }
 
 // Once per load, on the first held frame: the frames after the shown one as
 // GPU textures, decoded on the game thread (the game's own movie calls).
 // Scene thread: the request goes to queue_present; the frames arrive a frame
 // or two later, until then the held picture shows as it is.
+#ifndef EID3D11_EMBEDDED
 bool Renderer::decode_load_progress_movie() noexcept try {
     auto& state = load_progress_movie_;
     if (state.attempted) return !state.after.empty();
@@ -198,6 +222,8 @@ void Renderer::service_load_progress_decode() noexcept try {
     if (decode.serial == request.serial) { decode.done = true; decode.after = std::move(request.after); }
 } catch (...) {}
 
+#endif // retail decoder service
+
 // Scene thread at the reveal: no decode result outlives its load.
 void Renderer::cancel_load_progress_decode() noexcept {
     std::lock_guard<std::mutex> lock(load_progress_decode_lock_);
@@ -208,6 +234,22 @@ void Renderer::cancel_load_progress_decode() noexcept {
 // movie position the progress reaches (frames past the shown one, never
 // back), drawn as the game's picture of that frame with the next one faded in.
 void Renderer::draw_load_progress(float progress) noexcept try {
+#ifdef EID3D11_EMBEDDED
+    (void)progress; // Playback time belongs to the host FFmpeg player.
+    if (!embedded_movie_image_ || !scene_composited_ ||
+        !pending_blits_.empty() || rtv_ != backbuffer_rtv_) return;
+    const auto image = embedded_movie_image_;
+    if (FAILED(present_image(*image, nullptr, nullptr))) {
+        pending_blits_.clear();
+        bridge_report_event("load_progress", "host movie composition failed");
+        return;
+    }
+    load_picture_this_frame_ = load_picture_fitted_ = false;
+    if (FAILED(render_pending_blits())) {
+        pending_blits_.clear();
+        bridge_report_event("load_progress", "host movie draw failed");
+    }
+#else
     auto& state = load_progress_movie_;
     // The frame's world and interface passes are done (present): the back
     // buffer is the target and nothing else is queued.
@@ -274,6 +316,7 @@ void Renderer::draw_load_progress(float progress) noexcept try {
         bridge_report_event("load_progress", "composition failed; the held picture shows instead");
         state.after.clear();
     }
+#endif
 } catch (...) { pending_blits_.clear(); }
 
 } // namespace owned

@@ -3,7 +3,10 @@
 #endif
 #include "E1World.h"
 #include "embedded_sky.h"
+#include "embedded_host.h"
 #include "E1Scene.h"
+#include "E1Terrain.h"
+#include "character_pane_owned_text.h"
 #include "E1VisualFrame.h"
 #include "precipitation.h"
 #include "weather_wind.h"
@@ -135,6 +138,30 @@ void E1WorldDraw::Complete() noexcept {
 }
 }
 namespace owned {
+bool bridge_capture_embedded_frame_values(BridgeFrameValues& output) noexcept try {
+    // Host thread at queue submission. No borrowed host pointer survives.
+    BridgeFrameValues snapshot;
+    snapshot.frame_serial = frame;
+    snapshot.world_draw_active = activeDraw != 0;
+    snapshot.environment = values.environment;
+    snapshot.world_time = values.environment.world_time;
+    snapshot.world_time_valid = values.environment.valid;
+    snapshot.local_single_player = bridge_local_single_player_mission();
+    snapshot.owned_sky_requested = bridge_owned_sky_requested();
+    snapshot.completion = activeDraw ? WorldDrawCompletionSnapshot{} : completed;
+    snapshot.completion_counter = completions;
+    snapshot.world_to_clip = values.camera;
+    snapshot.fog = values.fog;
+    snapshot.world_epoch = OwnedRender::E1Scene().Epoch();
+    owned_text_snapshot_epochs(snapshot.character_pane_ui_epoch, snapshot.chat_text_ui_epoch);
+    snapshot.terrain_atlases = OwnedRender::E1CaptureTerrainAtlases();
+    output = std::move(snapshot);
+    return true;
+} catch (...) {
+    output = {};
+    embedded_report_render_failure("embedded_input_missing", "scene_queue_frame_capture");
+    return false;
+}
 const char* bridge_owned_weather_problem() noexcept { return nullptr; }
 void bridge_set_weather_visual(int test, int strength) noexcept {
     weatherTest = test; weatherStrength = strength;
@@ -147,23 +174,42 @@ bool bridge_progress_movie(ProgressMovie& movie) noexcept try {
 } catch (...) { movie = {}; return false; }
 void bridge_set_owned_sky(bool enabled) noexcept { embedded_sky().configure(enabled); }
 bool bridge_owned_sky_installed() noexcept { return embedded_sky().installed(); }
-bool bridge_owned_sky_requested() noexcept { return skyRevision && skyRevision == embedded_sky().revision() && embedded_sky().enabled(); }
+bool bridge_owned_sky_requested() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->owned_sky_requested;
+    return skyRevision && skyRevision == embedded_sky().revision() && embedded_sky().enabled(); }
 bool bridge_read_world_environment(WorldEnvironment& output) noexcept {
-    output = values.environment;
+    if (const auto* snapshot = bridge_embedded_installed_frame()) output = snapshot->environment;
+    else output = values.environment;
     return output.valid;
 }
 bool bridge_current_world_time(double& output) noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) {
+        output = snapshot->world_time; return snapshot->world_time_valid;
+    }
     if (!values.environment.valid) return false;
     output = values.environment.world_time;
     return true;
 }
 // One world epoch for scene and draw, as the game.exe bridge reads it from the
 // lifecycle: a separate draw counter made published statics an "earlier world".
-std::uint64_t bridge_current_world_epoch() noexcept { return OwnedRender::E1Scene().Epoch(); }
-SceneWorldToClipSnapshot bridge_scene_world_to_clip_snapshot() noexcept { return values.camera; }
-WorldFogSnapshot bridge_world_fog_snapshot() noexcept { return values.fog; }
+std::uint64_t bridge_current_world_epoch() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->world_epoch;
+    return OwnedRender::E1Scene().Epoch();
+}
+SceneWorldToClipSnapshot bridge_scene_world_to_clip_snapshot() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->world_to_clip;
+    return values.camera;
+}
+WorldFogSnapshot bridge_world_fog_snapshot() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->fog;
+    return values.fog;
+}
 WorldDrawCompletionSnapshot bridge_world_draw_completion_snapshot() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->completion;
     return activeDraw ? WorldDrawCompletionSnapshot{} : completed;
 }
-std::uint64_t bridge_world_draw_completion_counter() noexcept { return completions; }
+std::uint64_t bridge_world_draw_completion_counter() noexcept {
+    if (const auto* snapshot = bridge_embedded_installed_frame()) return snapshot->completion_counter;
+    return completions;
+}
 }

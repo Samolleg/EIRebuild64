@@ -12,11 +12,13 @@ const char* C2DScreenWait::pszProgressName = "progres.bik";
 namespace {
 // Created/updated/destroyed only on the host thread, never a render worker.
 std::unique_ptr<Video::Movie> progressVideo;
-bool videoAttempted = false;
+bool videoAttempted = false, updatingVideo = false;
+ULONGLONG nextVideoUpdate = 0;
 }
 void C2DScreenWait::Clear() {
     progressVideo.reset();
     videoAttempted = false;
+    nextVideoUpdate = 0;
     theCursor.Show(true);
 }
 void C2DScreenWait::Step(int nNumb) {
@@ -40,5 +42,16 @@ void C2DScreenWait::Step(int nNumb) {
             return;
         }
     }
-    if (progressVideo) progressVideo->PlayNextFrame(true);
+    Update();
+}
+void C2DScreenWait::Update() {
+    if (!progressVideo || updatingVideo || bIgnoreSteps) return;
+    const auto now = GetTickCount64();
+    if (now < nextVideoUpdate) return;
+    nextVideoUpdate = now + 16;
+    updatingVideo = true;
+    struct EndUpdate { ~EndUpdate() { updatingVideo = false; } } endUpdate;
+    MSG quit;
+    if (PeekMessage(&quit, nullptr, WM_QUIT, WM_QUIT, PM_NOREMOVE)) { Clear(); return; }
+    progressVideo->PlayNextFrame(true);
 }

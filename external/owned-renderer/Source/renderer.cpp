@@ -1105,7 +1105,11 @@ HRESULT Renderer::disable_nvidia_shader_disk_cache() noexcept {
   bridge_report_event("nvidia_shader_disk_cache_rejected",detail);
   return E_FAIL;
  };
+#if defined(_WIN64)
+ HMODULE module=LoadLibraryExW(L"nvapi64.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+#else
  HMODULE module=LoadLibraryExW(L"nvapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+#endif
  if(!module)return fail("load NVAPI",static_cast<int>(GetLastError()));
  using QueryInterfaceFn=void* (__cdecl*)(unsigned int);
  using InitializeFn=int (__cdecl*)();
@@ -15140,7 +15144,12 @@ HRESULT Renderer::queue_present(){
  },true);
  // A load progress movie decode the scene thread asked for (the game's
  // binkw32 imports run on this thread only), after this frame's present was queued.
- if(queued){service_load_progress_decode();return previous;}
+ if(queued){
+#ifndef EID3D11_EMBEDDED
+  service_load_progress_decode();
+#endif
+  return previous;
+ }
  const SceneInlineScope scene_inline(this,"present_allocation_failed");
  return present_frame(shared.get());
 }

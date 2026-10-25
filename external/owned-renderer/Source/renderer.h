@@ -1097,6 +1097,10 @@ public:
     // A large picture reached the primary this frame (loading screens, movies,
     // also when not exactly full-screen): the load reveal keeps the latest one.
     void mark_load_picture() noexcept { if(scene_queue()){scene_post([this]{load_picture_this_frame_=true;});return;} load_picture_this_frame_ = true; }
+#ifdef EID3D11_EMBEDDED
+    // Immutable host-decoded loading frame; queue commands retain its pixels.
+    void set_embedded_movie_image(std::shared_ptr<const SurfaceImage> image);
+#endif
     void retire_surface(std::uint64_t surface_id) noexcept;
     void retire_camp_texture(std::uint64_t surface_id,
                              std::uint64_t generation) noexcept;
@@ -4057,6 +4061,9 @@ private:
         std::array<unsigned, 2> image_frames{UINT_MAX, UINT_MAX};
         bool source_failed = false;
     } load_progress_movie_;
+#ifdef EID3D11_EMBEDDED
+    std::shared_ptr<const SurfaceImage> embedded_movie_image_;
+#endif
     bool load_progress_movie_valid_ = false; // the latest loading picture was a progress frame
     // Per component (world, neighbours, critter perches, shader sets, ground
     // cover, warm-up): the most work units seen outstanding during this hold.
@@ -4064,7 +4071,9 @@ private:
     bool load_reveal_perches_ready_ = false;
     bool load_picture_fitted_ = false;      // present_image composed a full-screen picture this frame
     void capture_load_progress_movie(bool fitted) noexcept;
+#ifndef EID3D11_EMBEDDED
     bool decode_load_progress_movie() noexcept;
+#endif
     // Scene mode: the game's progress movie state as the game thread read it
     // at the latest fitted picture (present_image); the scene thread's
     // capture_load_progress_movie uses it instead of game memory.
@@ -4083,7 +4092,9 @@ private:
     std::mutex load_progress_decode_lock_;   // guards the two members below
     LoadProgressDecode load_progress_decode_;
     std::uint64_t load_progress_decode_serials_ = 0;
+#ifndef EID3D11_EMBEDDED
     void service_load_progress_decode() noexcept; // game thread, queue_present
+#endif
     void cancel_load_progress_decode() noexcept;
     void draw_load_progress(float progress) noexcept;
     float load_reveal_progress() noexcept;  // 0..1 of the work outstanding during this hold, done
