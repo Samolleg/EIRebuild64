@@ -106,6 +106,19 @@ template<> struct Codec<CString>
     }
     static void Clear(CString &) {}
 };
+// CStringArray is an MFC concrete container, not CArray<CString>.
+// Resource names remain opaque strings, never native CString/pointer bytes.
+template<> struct Codec<CStringArray>
+{
+    static void Store(Writer &w, const CStringArray &v)
+    { Count(w, v.GetSize()); for (INT_PTR i = 0; i < v.GetSize(); ++i) Field(w, v[i]); }
+    static void Load(Reader &r, CStringArray &v)
+    {
+        v.RemoveAll(); v.SetSize(r.Count());
+        for (INT_PTR i = 0; i < v.GetSize(); ++i) Field(r, v[i]);
+    }
+    static void Clear(CStringArray &v) { v.RemoveAll(); }
+};
 template<> struct Codec<std::string>
 {
     static void Store(Writer &w, const std::string &v) { w.String(v); }

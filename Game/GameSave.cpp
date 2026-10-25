@@ -219,12 +219,12 @@ template<class T> void Game(Registry &r, std::shared_ptr<SavedOwners> owners,
         [owners,kind,allowed](ObjectId saved, int mapId, std::uint32_t type, std::uint32_t subtype, ObjectId owner) {
             const auto runtime=static_cast<ETypeIDs>(type);
             if (std::find(allowed.begin(),allowed.end(),runtime)==allowed.end())
-                throw Error(ErrorCode::UnknownType,"saved runtime type does not match schema type");
+                throw Error(ErrorCode::UnknownType,std::string("saved runtime type does not match schema: ") + typeid(T).name() + " runtimeType=" + std::to_string(type));
             auto found=owners->prepared.find(saved);
             auto object=found!=owners->prepared.end() ? found->second :
                 owners->Find(owner,kind).CreateSavedData(runtime,mapId,saved);
             if (!dynamic_cast<T *>(static_cast<CGameBase *>(object)) || typeid(*static_cast<CGameBase *>(object))!=typeid(T))
-                throw Error(ErrorCode::UnknownType,"manager factory returned wrong class");
+                throw Error(ErrorCode::UnknownType,std::string("manager factory returned wrong class for ") + typeid(T).name() + " runtimeType=" + std::to_string(type));
             object->SetSubtypeID(subtype);
             return object;
         },
@@ -244,7 +244,6 @@ template<class T> void Motivation(Registry &r, std::uint32_t id)
 void RegisterGameTypes(Registry &r, std::shared_ptr<SavedOwners> owners)
 {
     if (!owners) throw Error(ErrorCode::Invalid,"missing saved owner manifest");
-    RegisterDynamicTypes(r);
     r.SetGameObjects({[owners](int id) { return owners->Map(id); }});
     Game<CUnit>(r,owners,0x1701,OwnerKind::Map,{MOTID_UNIT,MOTID_HUMAN,MOTID_ANIMAL,MOTID_MONSTER});
     Game<CTree>(r,owners,0x1702,OwnerKind::Map,{MOTID_TREE});

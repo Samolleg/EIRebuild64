@@ -662,7 +662,7 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
         CheckedName(name);auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         CMemorySave f;Buffer(f,bytes);Registry reg;Bytes info,image;
         auto graph=SaveSchema::Load(f,reg,[&](Reader &r){
-            if(r.String()!="EIRebuild64.slot.2")Invalid("unsupported slot root");
+            if(r.String()!="EIRebuild64.slot.3")Invalid("unsupported slot root");
             r.UInt64();r.String();r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
         },SlotLimits());
         CMemorySave metadata;Buffer(metadata,info);auto g=SaveSchema::Load(metadata,reg,[&](Reader &r){
@@ -691,7 +691,7 @@ bool Slot::Save(const char *name)
         Document currentWorld;BindWorld(currentWorld,{&theWorldServer,[](CWorldServer *){}});currentWorld.zone=current.c_str();
         files[current]=Encode(currentWorld,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w);ModRuntime::Current()->StoreSaveState(w);});
         // All visited zones survive, irrespective of the selected allod.
-        CMemorySave contents;Registry types;RegisterDynamicTypes(types);
+        CMemorySave contents;Registry types;
         RandomState rng=RandomState::Capture();const auto next=ObjectIdentity::GetNext();
         SaveSchema::Store(contents,types,[&](Writer &w){w.UInt64(next);w.Value(rng);Interface(w,theInterface);
             auto *mod=ModRuntime::Current();w.Bool(mod&&mod->HidePartyHelmets());w.Bool(mod&&mod->HidePartyUpperArmor());
@@ -703,7 +703,7 @@ bool Slot::Save(const char *name)
         }
         FILETIME time;GetSystemTimeAsFileTime(&time);const std::uint64_t generation=(std::uint64_t(time.dwHighDateTime)<<32)|time.dwLowDateTime;
         CMemorySave envelope;Registry meta;
-        SaveSchema::Store(envelope,meta,[&](Writer &w){w.String("EIRebuild64.slot.2");w.UInt64(generation);
+        SaveSchema::Store(envelope,meta,[&](Writer &w){w.String("EIRebuild64.slot.3");w.UInt64(generation);
             auto *mod=ModRuntime::Current();if(!mod)Invalid("slot requires loaded mod");w.String(mod->Directory());w.String(current);
             w.UInt64(Content(payload));w.Blob(payload);w.Blob(presentation);w.Blob(screenshot);
         },SlotLimits());
@@ -719,12 +719,12 @@ bool Slot::Load(const char *name)
         CheckedName(name);const auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         auto state=std::make_unique<State>();state->fullSlot=true;Bytes payload;Registry meta;CMemorySave f;Buffer(f,bytes);
         auto envelope=SaveSchema::Load(f,meta,[&](Reader &r){
-            if(r.String()!="EIRebuild64.slot.2")throw Error(ErrorCode::Incompatible,"Incompatible save");
+            if(r.String()!="EIRebuild64.slot.3")throw Error(ErrorCode::Incompatible,"Incompatible save");
             if(!r.UInt64())Invalid("invalid slot generation");auto mod=r.String();if(!ModRuntime::Current()||mod!=ModRuntime::Current()->Directory())Invalid("slot belongs to another mod");
             state->current=r.String();CheckedName(state->current.c_str());const auto content=r.UInt64();payload=r.Blob();
             if(Content(payload)!=content)Invalid("slot content mismatch");r.Blob();r.Blob();
         },SlotLimits());
-        CMemorySave contents;Buffer(contents,payload);Registry types;RegisterDynamicTypes(types);
+        CMemorySave contents;Buffer(contents,payload);Registry types;
         Bytes scenario;
         auto graph=SaveSchema::Load(contents,types,[&](Reader &r){state->next=r.UInt64();r.Value(state->random);state->uiState.Read(r);state->helmets=r.Bool();state->upper=r.Bool();
             scenario=r.Blob();const auto n=r.Count();for(std::uint32_t i=0;i<n;++i){auto key=r.String();CheckedName(key.c_str());auto content=r.UInt64();auto document=r.Blob();
