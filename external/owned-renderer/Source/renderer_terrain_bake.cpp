@@ -21,6 +21,7 @@
 #include <vector>
 
 namespace owned {
+#if !defined(EID3D11_SHADER_EMBED)
 namespace {
 
 std::array<double,4> bake_multiply(const std::array<float,16>& m,double x,double y,double z,double w){
@@ -168,6 +169,7 @@ struct Renderer::TerrainBakeResidency{
  double pixels_at_unit_depth=0;std::array<double,3> eye{};
 };
 
+#endif
 void append_terrain_bake_shader_programs(std::vector<ShaderProgram>& out){
  const std::string& source=owned_native_shader_source();
  // NATIVE_TERRAIN_BAKE_PASS: the bake keeps the tile blend at every distance
@@ -191,6 +193,7 @@ void append_terrain_bake_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({{kTerrainBakeBc7Shader,sizeof(kTerrainBakeBc7Shader)-1},"terrain_bake_bc7",nullptr,"terrainBakeBc7CS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 // Shaders, fixed buffers and the staging atlas with its block targets.
 // The cache's shader objects, created with the startup shader preparation
 // (prepare_shaders), never on the first bake frame: creating them there let
@@ -966,4 +969,5 @@ bool Renderer::draw_terrain_baked(ID3D11Buffer* arguments,UINT offset,bool tesse
 // drawn (finalize_terrain_bake).
 void Renderer::finish_terrain_bake() noexcept{terrain_bake_drawn_=false;}
 
+#endif
 }  // namespace owned

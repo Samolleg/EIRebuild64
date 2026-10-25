@@ -52,6 +52,7 @@ ImpostorBakeTargets impostorBakePS(ImpostorBakeOutput i){
     return source;
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 struct ImpostorBakeConstants {
     float sphere[4];
     std::uint32_t frame[4];
@@ -144,6 +145,7 @@ private:
     UINT stencil_ = 0;
 };
 
+#endif
 } // namespace
 
 void append_impostor_shader_programs(std::vector<ShaderProgram>& out) {
@@ -152,6 +154,7 @@ void append_impostor_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "impostor_bake", nullptr, "impostorBakePS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 void Renderer::impostor_failure(const char* reason) noexcept {
     if (impostors_.failed) return;
     impostors_.failed = true;
@@ -367,4 +370,5 @@ std::uint32_t Renderer::neighbour_impostor_slice(const FigureCpuAsset* figure, s
     return found == impostors_.slices.end() ? 0u : found->second + 1u;
 }
 
+#endif
 } // namespace owned

@@ -172,6 +172,7 @@ CrPixel crPS(CrOut i){
 }
 )";
 
+#if !defined(EID3D11_SHADER_EMBED)
 // ---------------------------------------------------------------- math
 struct V3 { float x = 0, y = 0, z = 0; };
 V3 operator+(V3 a, V3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -4075,12 +4076,16 @@ std::uint64_t Renderer::critter_video_bytes() const noexcept {
     return bytes;
 }
 
+#else
+} // namespace
+#endif
 void append_critter_shader_programs(std::vector<ShaderProgram>& out) {
     static const std::string source = owned_native_shader_source() + kCritterShader;
     out.push_back({source, "critters", nullptr, "crVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "critters", nullptr, "crPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::render_critters(const FixedState& frame, const std::array<float, 16>& world_to_clip) noexcept {
     const int level = configured_integer(debug_overlay_.config(), "critters", 2);
     const int showcase = std::clamp(configured_integer(debug_overlay_.config(), "critter_showcase", 0), 0, 3);
@@ -4841,4 +4846,5 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
     return S_OK;
 }
 
+#endif
 } // namespace owned

@@ -39,6 +39,7 @@ void append_hiz_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({{kHiZShader, sizeof(kHiZShader) - 1}, nullptr, nullptr, "hizReduceCS", "cs_5_0", 0});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::build_native_hiz() noexcept {
     if (!native_occlusion_enabled_ || native_hiz_failed_ || !device_ || !context_ || !depth_srv_) return S_FALSE;
     HRESULT hr = S_OK;
@@ -118,4 +119,5 @@ bool Renderer::native_occlusion_active() const noexcept {
         !native_cull_frozen_ && native_world_clip_valid_ && native_hiz_clip_ == native_world_clip_;
 }
 
+#endif
 } // namespace owned

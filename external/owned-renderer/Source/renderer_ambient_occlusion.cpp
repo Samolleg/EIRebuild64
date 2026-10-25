@@ -10,6 +10,7 @@
 
 namespace owned {
 
+#if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_ambient_occlusion_targets() noexcept {
     ao_ambient_texture_.Reset();ao_raw_texture_.Reset();ao_filtered_texture_.Reset();ao_depth_texture_.Reset();
     ao_ambient_rtv_.Reset();ao_raw_rtv_.Reset();ao_filtered_rtv_.Reset();ao_depth_rtv_.Reset();
@@ -17,6 +18,7 @@ void Renderer::release_ambient_occlusion_targets() noexcept {
     ao_divisor_=0;ao_ambient_written_=false;
 }
 
+#endif
 // Called at a composite boundary so a whole world frame either writes the
 // ambient share or does not.
 void append_ambient_occlusion_shader_programs(std::vector<ShaderProgram>& out){
@@ -26,6 +28,7 @@ void append_ambient_occlusion_shader_programs(std::vector<ShaderProgram>& out){
         out.push_back({source,nullptr,nullptr,entry,"ps_4_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::update_ambient_occlusion_targets() noexcept {
     if(!device_||!context_)return E_UNEXPECTED;
     const auto preset=ambient_occlusion_preset(configured_integer(debug_overlay_.config(),"ao_quality",2));
@@ -166,4 +169,5 @@ HRESULT Renderer::render_ambient_occlusion() noexcept {
     return S_OK;
 }
 
+#endif
 }  // namespace owned

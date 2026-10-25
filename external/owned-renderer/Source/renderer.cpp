@@ -78,6 +78,7 @@ namespace owned {
 namespace {
 
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT native_geometry_failure(NativeGeometryResult* result, HRESULT hr,
     const char* operation, bool texture = false) noexcept {
  if(result && FAILED(hr)) {
@@ -284,6 +285,7 @@ static_assert(sizeof(NativeWorldLighting) == 48,
               "native world-light constant layout changed");
 static_assert(sizeof(NativeTerrainVertex) == 120, "native terrain vertex layout changed");
 static_assert(sizeof(NativeTerrainState) == 72, "native terrain state layout changed");
+#endif
 constexpr char kShader[] = R"(
 cbuffer C:register(b0){row_major float4x4 world;row_major float4x4 view;row_major float4x4 projection;float4 viewport;float4 fogColor;float4 textureFactor;uint transformed;uint textured;uint colorOp;uint alphaOp;uint colorArg1;uint colorArg2;uint alphaArg1;uint alphaArg2;uint alphaTest;uint alphaFunc;float alphaRef;uint fogEnable;uint specularEnable;uint nativeTriangleBase;uint2 rasterPadding;float4 contactUnused;uint4 contactParamsUnused;uint2 combinerUnused;float hudOpacity;uint hudUnused;};
 Texture2D tex0:register(t0);SamplerState samp0:register(s0);
@@ -396,6 +398,7 @@ struct RectangleVertex{float2 position:POSITION;float4 color:COLOR;};
 struct RectanglePixel{float4 position:SV_Position;float4 color:COLOR;};
 RectanglePixel rectangleVS(RectangleVertex input){RectanglePixel output;output.position=float4(input.position,0,1);output.color=input.color.bgra;return output;}
 float4 rectanglePS(RectanglePixel input):SV_Target{return input.color;})";
+#if !defined(EID3D11_SHADER_EMBED)
 struct ScreenRectangleVertex { float x, y; std::uint32_t color; };
 constexpr UINT kScreenRectangleMaximumVertices = 5u * 6u;
 
@@ -1831,12 +1834,16 @@ const NativePixelMember* Renderer::native_specialised_members() noexcept{
  static_assert(std::size(members)==std::tuple_size<NativeSpecialisedSet>::value,"one specialised slot per member");
  return members;
 }
+#else
+} // namespace
+#endif
 namespace {
 // The key's defines (renderer.h key bits).
 constexpr const char* kNativeSpecDefines[]={"NATIVE_OFF_ANTITILE","NATIVE_OFF_HEIGHT_BLEND","NATIVE_OFF_CONTACT","NATIVE_OFF_CLIFFS",
  "NATIVE_OFF_BLEND","NATIVE_OFF_POINT_SHADOWS","NATIVE_OFF_SUN_SHADOWS"};
 // Bits 9-11 (bits 7 and 8 are the fog quality).
 constexpr const char* kNativeSpecDefinesHigh[]={"NATIVE_DEBUG_COVERAGE","NATIVE_OFF_POINT_SOFT","NATIVE_FAST_COMBINER"};
+#if !defined(EID3D11_SHADER_EMBED)
 // The disk cache next to the DLL (eid3d11_shader_cache\<program key>.dxbc).
 std::wstring native_spec_cache_path(const ShaderKey& key){
  std::wstring path=renderer_config_path();
@@ -1854,6 +1861,7 @@ bool native_spec_cache_read(const std::wstring& path,std::vector<char>& code){
  std::uint32_t recorded=0;if(ok)std::memcpy(&recorded,code.data()+24,4);
  return ok&&std::memcmp(code.data(),"DXBC",4)==0&&recorded==code.size();
 }
+#endif
 }  // namespace
 
 std::wstring native_spec_cache_file_name(const ShaderKey& key){
@@ -1916,6 +1924,7 @@ std::vector<std::uint32_t> native_shipped_specialisation_keys(){
 
 // One set being built: its prebuilt program files and the shader objects the
 // workers create (the driver translates the bytecode in CreatePixelShader).
+#if !defined(EID3D11_SHADER_EMBED)
 struct Renderer::NativeSpecialisationJob{
  std::uint32_t key=0;
  std::vector<std::wstring> files; // the prebuilt programs (native_spec_files_)
@@ -2582,6 +2591,7 @@ HRESULT Renderer::render_debug_resource_view(DebugResourceView view,
  return hr;
 }
 
+#endif
 // Feature level 9_3 interface programs: the game pipeline (vsMain, psMain),
 // then the screen rectangle.
 #pragma warning(push)
@@ -2649,9 +2659,16 @@ namespace {
 struct ShaderGroup {
  const char* name;
  void (*append)(std::vector<ShaderProgram>&);
+#if defined(EID3D11_SHADER_EMBED)
+ // The offline list needs every producer, without runtime settings callbacks.
+ template<class Used,class Disable>
+ constexpr ShaderGroup(const char* n,void (*a)(std::vector<ShaderProgram>&),Used,const char*,Disable)
+  :name(n),append(a){}
+#else
  bool (*used)(const RendererConfig&);
  const char* option;
  void (*disable)(RendererConfig&);
+#endif
 };
 constexpr ShaderGroup kShaderGroups[]={
  {"interface",append_interface_shader_programs,[](const RendererConfig&){return true;},nullptr,nullptr},
@@ -2708,6 +2725,7 @@ constexpr ShaderGroup kShaderGroups[]={
 static_assert(std::size(kShaderGroups)<=32,"one bit per shader group");
 }  // namespace
 
+#if !defined(EID3D11_SHADER_EMBED)
 std::uint32_t shader_groups_for_settings(const RendererConfig& config,bool feature_level_11){
  std::uint32_t groups=0;
  for(std::uint32_t group=0;group<std::size(kShaderGroups);++group)
@@ -2715,11 +2733,13 @@ std::uint32_t shader_groups_for_settings(const RendererConfig& config,bool featu
  return groups;
 }
 
+#endif
 void append_shader_groups(std::uint32_t groups,std::vector<ShaderProgram>& out){
  for(std::uint32_t group=0;group<std::size(kShaderGroups);++group)
   if(groups&(1u<<group))kShaderGroups[group].append(out);
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 namespace {
 // The shader crash breadcrumb beside the ini. Workers write it when the
 // highest program group handed to the driver advances, so it names the last
@@ -3144,6 +3164,7 @@ HRESULT Renderer::create_clear_pipeline(){
  return S_OK;
 }
 
+#endif
 // Native world programs in create_native_pipeline's order: nativeVS, nativePS,
 // then the compute and shadow stages (the stage follows the entry suffix),
 // last the two terrain pixel variants, embedded at build time like the rest,
@@ -3231,6 +3252,7 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,low,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::create_native_pipeline(){
 #ifdef EID3D11_TESTING
  for(const char* entry:{"nativeBuildCS","nativeShadowPrepareCS"}){
@@ -11411,6 +11433,7 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
  return S_OK;
 }
 
+#endif
 // Cliff tessellation stages, compiled on first use (terrain_tessellation > 0).
 // A failure is reported once and leaves the standard terrain path.
 void append_terrain_tessellation_shader_programs(std::vector<ShaderProgram>& out){
@@ -11426,6 +11449,7 @@ void append_terrain_tessellation_shader_programs(std::vector<ShaderProgram>& out
   out.push_back({source,nullptr,nullptr,entry,entry[std::strlen(entry)-2]=='V'?"vs_5_0":entry[std::strlen(entry)-2]=='H'?"hs_5_0":"ds_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::ensure_terrain_tessellation() noexcept{
  if(terrain_tess_vs_&&terrain_hs_&&terrain_ds_&&terrain_hs_plain_&&terrain_ds_plain_)return S_OK;
  if(terrain_tessellation_failed_||!device_||feature_level_<D3D_FEATURE_LEVEL_11_0)return E_FAIL;
@@ -16183,5 +16207,6 @@ HRESULT Renderer::blit_srv(ID3D11ShaderResourceView* image,const RECT& destinati
 }
 #ifdef EID3D11_EMBEDDED
 #include "embedded_figure_material.inl"
+#endif
 #endif
 } // namespace owned

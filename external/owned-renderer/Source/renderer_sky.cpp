@@ -11,6 +11,7 @@
 #include <cstring>
 
 namespace owned {
+#if !defined(EID3D11_SHADER_EMBED)
 namespace {
 struct SkyQuality {
     unsigned cloud_divisor, max_cloud_width, steps, light_steps, shadow_size, probe_width;
@@ -49,6 +50,7 @@ void Renderer::release_owned_sky() noexcept {
     sky_lut_inputs_.clear();sky_shadow_inputs_.clear();
 }
 
+#endif
 void append_sky_shader_programs(std::vector<ShaderProgram>& out) {
     for (const char* entry : {"skyShapeCS", "skyDetailCS", "skyWeatherCS", "skyLutCS", "skyShadowCS", "skyShadowBlurCS", "skyCloudsCS",
                               "skyResolveCS", "skyProbeCS"})
@@ -57,6 +59,7 @@ void append_sky_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({{kSkyShader, sizeof(kSkyShader) - 1}, nullptr, nullptr, "skyPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::ensure_owned_sky(int quality) noexcept {
     HRESULT hr = S_OK;
     auto fail = [&](const char* reason, HRESULT result) { sky_reason_ = reason; return result; };
@@ -547,4 +550,5 @@ void Renderer::draw_owned_sky() noexcept {
     profiler_.add_draw(1, 1);profiler_.add_batch();
 }
 
+#endif
 }  // namespace owned
