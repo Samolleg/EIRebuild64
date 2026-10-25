@@ -2473,8 +2473,8 @@ float SRPGUnitStats::GetIntelligenceModifier() const
     return GetPerkModifier(RPGPRK_INTELLIGENCE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SRPGUnitStats::Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-void SRPGUnitStats::Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+
+
 static const float PS_MIN_STAT_VALUE = 15;
 static const float PS_MAX_STAT_VALUE = 35;
 static const float PS_DIF_STAT_VALUE = PS_MAX_STAT_VALUE - PS_MIN_STAT_VALUE;

@@ -70,6 +70,6 @@ public:
     EDiplomacy GetDiplomacy(int nPlayer1, int nPlayer2);
     // юнит pWho вероломно нанес nDamage юниту pWhom, не пора ли дать сдачи ?
     void MakeDamage(CUnit *pWho, CUnit *pWhom, int nDamage);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };

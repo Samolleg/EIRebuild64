@@ -126,7 +126,6 @@ private:
     BOOL PrsStringEvent();
     BOOL PrsVisibleUnits();
     BOOL PrsNewZone();
-    BOOL PrsNewItems();
     BOOL PrsAddItems();
     BOOL PrsRemoveItem();
     BOOL PrsNewHooverItems();

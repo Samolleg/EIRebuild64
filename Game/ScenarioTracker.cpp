@@ -174,11 +174,12 @@ CShop::~CShop()
     spellAssort.Destroy();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CShop::Serialize(CStructureSaver &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
+void CShop::Serialize(CStructureSaver &)
+{
+    throw SaveSchema::Error(SaveSchema::ErrorCode::Incompatible, "CShop is a dynamic slot object, not a resource");
+}
 void CShop::SetAssortmentParameters(float *fMinLevels, float *fMaxLevels)
 {
     if(auto* mod=ModRuntime::Current();mod&&mod->AdvancedUI("useLS_SetAssortmentParameters")){
@@ -447,15 +448,9 @@ void CGlobalHat::Serialize(CStructureSaver &file)
     file.Add(5, singleParty);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CGlobalHat::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CGlobalHat::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // Get party from hat if partyID is not initialized then use first party
 

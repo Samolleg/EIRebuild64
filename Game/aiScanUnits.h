@@ -65,8 +65,8 @@ public:
     void Segment();
     void AddIgnoredTarget(CMapObject *pTarget, int nTime);
     void RemoveReferencesOn(CMapObject *pTarget);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 public:
     void Store(SaveSchema::Writer &) const;
     void Load(SaveSchema::Reader &);
@@ -90,8 +90,8 @@ class CAIDelayedSoundsList
             , dwNewEnemies(0)
         {
         }
-        void Load(CSave &file);
-        void Store(CSave &file);
+        void Load(CSave &file) = delete;
+        void Store(CSave &file) = delete;
     public:
     void Store(SaveSchema::Writer &) const;
     void Load(SaveSchema::Reader &);
@@ -105,8 +105,8 @@ public:
     void AddNewEnemies(DWORD dwNewEnemies, int nDelay, const char *pszText);
     void RemoveDiplomacyMsgs();
     void Segment(CUnit *pUnit, CAIUnitEnvironment &env);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 public:
     void Store(SaveSchema::Writer &) const;
     void Load(SaveSchema::Reader &);
@@ -137,8 +137,8 @@ struct SAIMark
         pFree = this;
     }
     // persistance
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 typedef SAIMark *PAIMark;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -205,8 +205,8 @@ public:
         ignoredList.AddIgnoredTarget(pTarget, nTime);
     }
     // load&store
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
     friend class CAIMarkManager;
 public:
     void Store(SaveSchema::Writer &) const;
@@ -296,8 +296,8 @@ public:
     // порезать старые запахи по необходимости
     void Segment(int nCurSegment);
     // load&store
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 extern void BuildVisionMask(CUnit *pWatcher, CUnit *pTarget, SVisibilityMask &res);

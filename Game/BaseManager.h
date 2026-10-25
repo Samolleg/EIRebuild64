@@ -1,5 +1,5 @@
 #pragma once
-namespace SaveSchema { class Writer; class Reader; [[noreturn]] void RequireDynamicSchema(); }
+namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "HashMap.h"
 #include "GameBase.h"
@@ -107,10 +107,10 @@ public:
     // load&store
     // load/store for manager has 2 phases in first it stores types of objects in second
     // it stores data for each object in the manager, loading is inverse process
-    void Load(CSave &file);
-    void Store(CSave &file);
-    void LoadData(CSave &file);
-    void StoreData(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
+    void LoadData(CSave &file) = delete;
+    void StoreData(CSave &file) = delete;
     void CheckReferences();
 
     void ForEach(std::function<void(CGameBase *)> fn);
@@ -149,50 +149,26 @@ inline CManagerIterator::~CManagerIterator()
 /////////////////////////////////////////////////////////////////////////////////////
 // load/store  arrays of pointers
 template <class TYPE, class ARG_TYPE>
-void StoreGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+void StoreGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE, class ARG_TYPE>
-void LoadGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+void LoadGBPtrArray(CSimplyArray<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 // load/store  list of pointers
 template <class TYPE, class ARG_TYPE>
-void StoreGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+void StoreGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE, class ARG_TYPE>
-void LoadGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+void LoadGBPtrList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE, class ARG_TYPE>
-void LoadGBPtrSmartList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+void LoadGBPtrSmartList(CList<TYPE, ARG_TYPE> &arr, CSave &file, CBaseManager *pManager) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE>
-TYPE *LoadGBPtr(CSave &file, CBaseManager *pManager)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+TYPE *LoadGBPtr(CSave &file, CBaseManager *pManager) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 template <class TYPE>
-TYPE *LoadGBSmartPtr(CSave &file, CBaseManager *pManager)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+TYPE *LoadGBSmartPtr(CSave &file, CBaseManager *pManager) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
-inline void StoreGBPtr(CSave &file, CGameBase *pObj)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+inline void StoreGBPtr(CSave &file, CGameBase *pObj) = delete;
 /////////////////////////////////////////////////////////////////////////////////////

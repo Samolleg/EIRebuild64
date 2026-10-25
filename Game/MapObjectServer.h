@@ -45,8 +45,8 @@ public:
     //
     virtual void LeaveMap();
     // load & store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CMapObjectServer"; };
     virtual EClassIDs WhoAmI() const { return HPC_MAPOBJECTSERVERSPECIFIC; };

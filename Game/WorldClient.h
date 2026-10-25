@@ -300,7 +300,6 @@ public:
     //
     void RemoveQuickItemsAndSpells();
     BOOL NewZone(CMemorySave &packet);
-    BOOL NewItems(CMemorySave &packet);
     BOOL AddItems(CMemorySave &packet);
     //
     BOOL NewWaterLevels(CMemorySave &packet);

@@ -137,12 +137,6 @@ void CAIAcknowledgements::Segment(CUnitServer *pWho)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIAcknowledgements::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIAcknowledgements::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+

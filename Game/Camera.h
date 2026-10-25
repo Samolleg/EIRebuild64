@@ -311,8 +311,8 @@ public:
     float GetDistance() const { return fDistance; }
     float GetPitch() const { return fPitch; }
     // save/load placement
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
     void ImportShortcuts(const SGeneralSettings &settings);
     void ExportShortcuts(SGeneralSettings &settings);
     // identification information

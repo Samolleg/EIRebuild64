@@ -183,103 +183,27 @@ void SFXInfo::Clear()
 
 /////////////////////////////////////////////////////////////////////////////////////
 // load/store script effects information
-void SScriptLightInfo::Load(CSave &file)
-{
-    pLight = LoadGBPtr<CEffectPointLight>(file, theWorldServer.GetEffectManager());
-    file.Read(nScriptID);
-    file.Read(bAutoDelete);
-    file.Read(bIsMoving);
-    file.Read(nSegmentsToMove);
-    file.Read(&moveVector, sizeof(moveVector));
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void SScriptLightInfo::Store(CSave &file)
-{
-    StoreGBPtr(file, pLight);
-    file.Write(nScriptID);
-    file.Write(bAutoDelete);
-    file.Write(bIsMoving);
-    file.Write(nSegmentsToMove);
-    file.Write(&moveVector, sizeof(moveVector));
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void SParticleInfo::Load(CSave &file)
-{
-    pParticle = LoadGBPtr<CEffectParticle>(file, theWorldServer.GetEffectManager());
-    file.Read(nScriptID);
-    file.Read(bAutoDelete);
-    file.Read(bIsMoving);
-    file.Read(nSegmentsToMove);
-    file.Read(&moveVector, sizeof(moveVector));
-    file.Read(nLifeTime);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void SParticleInfo::Store(CSave &file)
-{
-    StoreGBPtr(file, pParticle);
-    file.Write(nScriptID);
-    file.Write(bAutoDelete);
-    file.Write(bIsMoving);
-    file.Write(nSegmentsToMove);
-    file.Write(&moveVector, sizeof(moveVector));
-    file.Write(nLifeTime);
-}
-/////////////////////////////////////////////////////////////////////////////////////
-void SFXInfo::Load(CSave &file)
-{
-    pSound = LoadGBPtr<CEffectSound>(file, theWorldServer.GetEffectManager());
-    file.Read(nScriptID);
-    szSoundName = file.ReadString();
-    file.Read(&cp, sizeof(cp));
-    file.Read(fpMinRadius);
-    file.Read(fpMaxRadius);
 
-    file.Read(bIsRandomized);
-    file.Read(fpRandRadius);
-    file.Read(nMinSegment);
-    file.Read(nMaxSegment);
-    file.Read(nDelay);
-}
 /////////////////////////////////////////////////////////////////////////////////////
-void SFXInfo::Store(CSave &file)
-{
-    StoreGBPtr(file, pSound);
-    file.Write(nScriptID);
-    file.WriteString(szSoundName);
-    file.Write(&cp, sizeof(cp));
-    file.Write(fpMinRadius);
-    file.Write(fpMaxRadius);
 
-    file.Write(bIsRandomized);
-    file.Write(fpRandRadius);
-    file.Write(nMinSegment);
-    file.Write(nMaxSegment);
-    file.Write(nDelay);
-}
 /////////////////////////////////////////////////////////////////////////////////////
-void SLightningInfo::Load(CSave &file)
-{
-    pLightning = LoadGBPtr<CEffectLightning>(file, theWorldServer.GetEffectManager());
-    file.Read(nScriptID);
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void SLightningInfo::Store(CSave &file)
-{
-    StoreGBPtr(file, pLightning);
-    file.Write(nScriptID);
-}
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////
+
 /////////////////////////////////////////////////////////////////////////////////////
 // SScriptArea
 /////////////////////////////////////////////////////////////////////////////////////
-void SScriptArea::SScriptAreaElement::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void SScriptArea::SScriptAreaElement::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 bool SScriptArea::SScriptAreaElement::IsInArea(float fpX, float fpY)
 {
@@ -317,17 +241,9 @@ bool SScriptArea::IsInArea(float fpX, float fpY)
     return false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void SScriptArea::Load(CSave &file)
-{
-    file.Read(nID);
-    LoadCArray(areas, file);
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
-void SScriptArea::Store(CSave &file)
-{
-    file.Write(nID);
-    StoreCArray(areas, file);
-}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // --------------- GetUnit/MapObject specific by object identificator -------------------------
 // get mapobjectspecific by object identificator
@@ -427,23 +343,9 @@ void CScriptObject::CheckObjectValid()
     }
 }
 
-void CScriptObject::Load(CSave &file)
-{
-    int nId;
-    file.Read(&nId, 4);
-    if (nId == -1)
-        SetObject(NULL);
-    else
-        SetObject(theWorldServer.GetMapObject(nId));
-}
 
-void CScriptObject::Store(CSave &file)
-{
-    int nId = -1;
-    if (pObject)
-        nId = pObject->GetID();
-    file.Write(&nId, 4);
-}
+
+
 
 static ObjectId ScriptObjectId(const CMapObject *object)
 {
@@ -680,23 +582,9 @@ BOOL CScriptObjectGroup::HasMapObject(CMapObject *pSearch)
     return FALSE;
 }
 
-void CScriptObjectGroup::Load(CSave &file)
-{
-    int nMembers, i;
-    file.Read(&nMembers, 4);
-    members.SetSize(nMembers);
-    for (i = 0; i < nMembers; i++)
-        members[i].Load(file);
-    Sort();
-}
 
-void CScriptObjectGroup::Store(CSave &file)
-{
-    int nMembers = members.GetSize(), i;
-    file.Write(&nMembers, 4);
-    for (i = 0; i < nMembers; i++)
-        members[i].Store(file);
-}
+
+
 
 // --------------------------- SScriptVariablesSet ---------------------------
 void SScriptVariablesSet::SetZeroValues()
@@ -772,21 +660,9 @@ void SScriptVariablesSet::CopyValues(const SScriptVariablesSet &src)
     gVars.CopyValues(src.gVars);
 }
 
-void SScriptVariablesSet::Load(CSave &file)
-{
-    fVars.Load(file);
-    szVars.Load(file);
-    oVars.Load(file);
-    gVars.Load(file);
-}
 
-void SScriptVariablesSet::Store(CSave &file)
-{
-    fVars.Store(file);
-    szVars.Store(file);
-    oVars.Store(file);
-    gVars.Store(file);
-}
+
+
 
 // ------------------------- SSCCmd ------------------------------------------
 
@@ -1392,43 +1268,9 @@ void SSCCmd::Clear()
     pLoopBody = NULL;
 }
 
-void SSCCmd::Load(CSave &file)
-{
-    int nIdx, i;
-    file.Read(&command, sizeof(command));
-    LoadCArray<float, float>(params, file);
-    LoadCArray<CString, CString &>(szParams, file); // параметры команды/функции - строчки
-    file.Read(nIdx);
-    oParams.SetSize(nIdx);
-    for (i = 0; i < nIdx; i++)
-        oParams[i] = 0;
-    file.Read(nIdx);
-    gParams.SetSize(nIdx);
-    for (i = 0; i < nIdx; i++)
-        gParams[i] = 0;
-    LoadCArray<SScriptParam, SScriptParam &>(localParameters, file);
-    LoadCArray<SScriptParam, SScriptParam &>(globalParameters, file);
-    LoadCArray<SScriptFuncParam, SScriptFuncParam &>(funcParameters, file);
-    file.Read(&nIdx, sizeof(nIdx));
-    pLoopBody = theWorldServer.script.GetThreadByIndex(nIdx);
-}
 
-void SSCCmd::Store(CSave &file)
-{
-    int nIdx;
-    file.Write(&command, sizeof(command));
-    StoreCArray<float, float>(params, file);
-    StoreCArray<CString, CString &>(szParams, file); // параметры команды/функции - строчки
-    file.Write((int)oParams.GetSize());
-    file.Write((int)gParams.GetSize());
-    StoreCArray<SScriptParam, SScriptParam &>(localParameters, file);
-    StoreCArray<SScriptParam, SScriptParam &>(globalParameters, file);
-    StoreCArray<SScriptFuncParam, SScriptFuncParam &>(funcParameters, file);
-    nIdx = -1;
-    if (pLoopBody)
-        nIdx = pLoopBody->GetNumber();
-    file.Write(&nIdx, sizeof(nIdx));
-}
+
+
 
 //----------------------- CScriptThreadState ---------------------------------
 // **************************************************
@@ -2587,33 +2429,9 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
     return TRUE;
 }
 
-void CScriptThreadState::Load(CSave &file)
-{
-    int nIdx;
-    CString szName;
-    file.Read(&nIdx, sizeof(nIdx));
-    pThread = theWorldServer.script.GetThreadByIndex(nIdx);
-    file.Read(&nCurCommand, sizeof(nCurCommand));
-    file.Read(&nSegment, sizeof(nSegment));
-    file.Read(&nSleepStart, sizeof(nSleepStart));
-    if(ModRuntime::Current())VoiceWait::AfterLoad(nSleepStart);
-    file.Read(nIdx);
-    pLinkedOneScript = pLoadingScript->GetRunningScript(nIdx);
-    variables.Load(file);
-}
 
-void CScriptThreadState::Store(CSave &file)
-{
-    int nIdx;
-    ASSERT(pThread);
-    nIdx = pThread->GetNumber();
-    file.Write(&nIdx, sizeof(nIdx));
-    file.Write(&nCurCommand, sizeof(nCurCommand));
-    file.Write(&nSegment, sizeof(nSegment));
-    file.Write(&nSleepStart, sizeof(nSleepStart));
-    file.Write((int)pLoadingScript->GetRunningScriptIndex(pLinkedOneScript));
-    variables.Store(file);
-}
+
+
 
 // -------------------------------- SScriptCondition --------------------------------------------
 void SScriptCondition::RunCheck(CScript *pScript, SOneScript *pOneScript)
@@ -2634,25 +2452,9 @@ void SScriptCondition::RunCheck(CScript *pScript, SOneScript *pOneScript)
     pScript->RunThread(pActions, pOneScript);
 }
 
-void SScriptCondition::Load(CSave &file)
-{
-    int nIdx = -1;
-    file.Read(&nIdx, sizeof(nIdx));
-    pConditions = theWorldServer.script.GetThreadByIndex(nIdx);
-    file.Read(&nIdx, sizeof(nIdx));
-    pActions = theWorldServer.script.GetThreadByIndex(nIdx);
-}
 
-void SScriptCondition::Store(CSave &file)
-{
-    int nIdx;
-    ASSERT(pConditions);
-    ASSERT(pActions);
-    nIdx = pConditions->GetNumber();
-    file.Write(&nIdx, sizeof(nIdx));
-    nIdx = pActions->GetNumber();
-    file.Write(&nIdx, sizeof(nIdx));
-}
+
+
 
 // ----------------------------------- COneScript ---------------------------------------------
 void SOneScript::SetParameters(SSCCmd &cmd)
@@ -2733,23 +2535,9 @@ void SOneScript::Segment(CScript *pScript)
     }
 }
 
-void SOneScript::Load(CSave &file)
-{
-    file.Read(&nDelFlag, sizeof(nDelFlag));
-    LoadObject<CString>(szScriptName, file);
-    LoadObject<CString>(szScriptParams, file);
-    LoadCArray<SScriptCondition, SScriptCondition &>(conditions, file);
-    vars.Load(file);
-}
 
-void SOneScript::Store(CSave &file)
-{
-    file.Write(&nDelFlag, sizeof(nDelFlag));
-    StoreObject<CString>(szScriptName, file);
-    StoreObject<CString>(szScriptParams, file);
-    StoreCArray<SScriptCondition, SScriptCondition &>(conditions, file);
-    vars.Store(file);
-}
+
+
 
 // ----------------------------------- CScript ------------------------------------------------
 // **************************************************
@@ -3656,55 +3444,6 @@ BOOL CScript::ParseCommandThread(const char *pszOneScriptName, HScriptThread pTh
 }
 
 // -------------------- CScript load&store ---------------------------------------
-void CScript::LoadScript(CSave &file)
-{
-    pLoadingScript = this;
-    LoadCArray<SScriptLightInfo>(lights, file);
-    LoadCList<SParticleInfo>(particles, file);
-    LoadCList<SFXInfo>(sfxes, file);
-    LoadCList<SLightningInfo>(lightnings, file);
-    file.Read(&nPrevNegativeParticleSourceID, sizeof(nPrevNegativeParticleSourceID));
-    file.Read(&nPrevNegativeSoundID, sizeof(nPrevNegativeSoundID));
-    // LoadCList<SScriptThread, SScriptThread&>( threads, file );
-    // here is workaround of a large problem with referencing on each other threads
-    int i, num;
-    file.Read(&num, sizeof(num));
-    for (i = 0; i < num; i++)
-        AllocateNewThread();
-    POSITION pos = threads.GetHeadPosition();
-    while (pos)
-        LoadObject<SScriptThread>(threads.GetNext(pos), file);
-    // end of workaround
-    LoadCList<SScriptThread>(worldActions, file);
-    LoadCArray<SOneScript>(scripts, file);
-    globalVars.Load(file);
-    LoadCList<SOneScript>(runningScripts, file);
-    LoadCList<CScriptThreadState>(runningThreads, file);
-    file.Read(&bLoaded, sizeof(bLoaded));
-    file.Read(&nSecondaryCount, sizeof(nSecondaryCount));
-    pLoadingScript = NULL;
-    if (file.GetVersion() < 87)
-        return;
-    LoadCArray(scriptAreas, file);
-}
 
-void CScript::StoreScript(CSave &file)
-{
-    pLoadingScript = this;
-    StoreCArray<SScriptLightInfo>(lights, file);
-    StoreCList<SParticleInfo>(particles, file);
-    StoreCList<SFXInfo>(sfxes, file);
-    StoreCList<SLightningInfo>(lightnings, file);
-    file.Write(&nPrevNegativeParticleSourceID, sizeof(nPrevNegativeParticleSourceID));
-    file.Write(&nPrevNegativeSoundID, sizeof(nPrevNegativeSoundID));
-    StoreCList<SScriptThread>(threads, file);
-    StoreCList<SScriptThread>(worldActions, file);
-    StoreCArray<SOneScript>(scripts, file);
-    globalVars.Store(file);
-    StoreCList<SOneScript>(runningScripts, file);
-    StoreCList<CScriptThreadState>(runningThreads, file);
-    file.Write(&bLoaded, sizeof(bLoaded));
-    file.Write(&nSecondaryCount, sizeof(nSecondaryCount));
-    pLoadingScript = NULL;
-    StoreCArray(scriptAreas, file);
-}
+
+

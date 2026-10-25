@@ -132,8 +132,10 @@ public:
     int GetRunesCount() const;
     DWORD GetComplexity() const { return dwComplexity; }
     //
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
+    void StoreLocal(CSave &file) const;
+    void LoadLocal(CSave &file);
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CSpell"; }
     virtual EClassIDs WhoAmI() const { return HPC_SPELL; }

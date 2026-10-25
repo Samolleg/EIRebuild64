@@ -54,8 +54,8 @@ public:
     void ClearItems();
     void CopyFrom(CPersonage &src, CWorld *pMyWorld);
     void CopyItemsFrom(CPersonage &src, CWorld *pMyWorld);
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
     // функциям add/remove в качестве аргументов передаются items принадлежащие itemmanager`y
     // CParty этого персонажа, при передаче в Add застеканого itema с него снимается копия, иначе
     // добавляется сам item, если функция AddXXX возвращает ее аргумент, значит item был перенесен,

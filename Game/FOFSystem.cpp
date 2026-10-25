@@ -128,12 +128,6 @@ void CFofTracker::MakeDamage(CUnit *pWho, CUnit *pWhom, int nDamage)
             }*/
 }
 
-void CFofTracker::Load(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
 
-void CFofTracker::Store(CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+
+

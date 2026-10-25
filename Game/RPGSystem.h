@@ -184,8 +184,8 @@ public:
         memset(this, 0, sizeof(*this));
         fpDamagePercentage = 1;
     }
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
     bool IsMagicAttack() const;
 };
 /////////////////////////////////////////////////////////////////////////////////////
@@ -201,8 +201,8 @@ struct SRPGGeneralAttack
 
     WORD GetMaxDamage() const;
     WORD CalcDamage(const SRPGGeneralAttack &def) const;
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 static const DWORD RPG_NUM_ARMORS_IN_HL = 2;
@@ -298,8 +298,8 @@ public:
     //
     BOOL IsDead() const { return ((short)MINT(ssHP.fpCurrent) <= 0); }
     //
-    void Load(CSave &) { SaveSchema::RequireDynamicSchema(); }
-    void Store(CSave &) { SaveSchema::RequireDynamicSchema(); }
+    void Load(CSave &) = delete;
+    void Store(CSave &) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 inline bool SRPGCommonStats::RegenerateMP(float fRegenerateRate)
@@ -500,8 +500,8 @@ public:
     bool PresentDexterity(int nValue, CUnit *pUnit);
     bool PresentIntelligence(int nValue, CUnit *pUnit);
     //
-    void Load(CSave &file);
-    void Store(CSave &file);
+    void Load(CSave &file) = delete;
+    void Store(CSave &file) = delete;
 };
 #pragma pack()
 /////////////////////////////////////////////////////////////////////////////////////

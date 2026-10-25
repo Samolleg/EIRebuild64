@@ -218,9 +218,6 @@ public:
     void Adopt();
 };
 
-// Retired native-memory dynamic serializers have no old-save reader.
-[[noreturn]] void RequireDynamicSchema();
-
 // CSave's current stream abstraction is uint32-sized. The format's payload length
 // is uint64, but this implementation rejects documents exceeding Limits/CSave.
 // Exclusive world restore: factories/callbacks only touch staged owners.

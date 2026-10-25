@@ -1,5 +1,5 @@
 #pragma once
-namespace SaveSchema { class Writer; class Reader; [[noreturn]] void RequireDynamicSchema(); }
+namespace SaveSchema { class Writer; class Reader; }
 
 #include "Object.h"
 #include "RPGSystem.h"
@@ -230,8 +230,8 @@ public:
     BOOL LeaveMap();
     BOOL ReturnOnMap();
     // load & store
-    virtual void Load(CSave &file);
-    virtual void Store(CSave &file);
+    virtual void Load(CSave &file) = delete;
+    virtual void Store(CSave &file) = delete;
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
@@ -302,8 +302,8 @@ public:
         if (pObject->IsInvalid())
             Clear();
     }
-    bool Load(CSave &file, CWorld &world); // false only for an intentionally omitted save ID
-    void Store(CSave &file);
+    bool Load(CSave &file, CWorld &world) = delete; // false only for an intentionally omitted save ID
+    void Store(CSave &file) = delete;
 };
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CList<CMapObjectPtr, CMapObject *> CMapObjectPtrList;
@@ -311,15 +311,9 @@ typedef CList<CMapObjectPtr, CMapObject *> CMapObjectPtrList;
 // --------------------------------------------------------------------------------------------
 // load&store for mapobjectptrs lists
 // --------------------------------------------------------------------------------------------
-inline void StoreMapObjectPtrList(CMapObjectPtrList &arr, CSave &file)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+inline void StoreMapObjectPtrList(CMapObjectPtrList &arr, CSave &file) = delete;
 
 /////////////////////////////////////////////////////////////////////////////////////
-inline void LoadMapObjectPtrList(CMapObjectPtrList &arr, CSave &file, CWorld &world)
-{
-    SaveSchema::RequireDynamicSchema();
-}
+inline void LoadMapObjectPtrList(CMapObjectPtrList &arr, CSave &file, CWorld &world) = delete;
 /////////////////////////////////////////////////////////////////////////////////////
 typedef CMapObject *LPMAPOBJECT;
