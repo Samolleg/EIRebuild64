@@ -1,5 +1,5 @@
 #include "StdAfx.h"
-#include "SaveSchema.h"
+#include "GameSave.h"
 #include "SaveLoader.h"
 #include "UnitStatisticsDriver.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -176,12 +176,30 @@ void CUnitStatisticsDriver::AddUnit(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitStatisticsDriver::Store(CSave &file) const
 {
-    WriteLocal(file,[&](SaveSchema::Writer &w){Store(w);});
+    // Precache IDs belong to the live map, not the persistent slot graph.
+    WriteLocal(file,[&](SaveSchema::Writer &w){
+        std::uint64_t count=0;
+        for (const auto &group : units) count+=group.second.size();
+        SaveSchema::Fields::Count(w,count);
+        for (const auto &group : units)
+            for (const auto &unit : group.second)
+                w.Value<SUnitStatistics, LocalPrecacheCodec<SUnitStatistics>>(unit.second);
+        SaveSchema::Fields::Count(w,wears.size());
+        for (const auto &entry : wears)
+            w.Value<SUnitWearsStatistics, LocalPrecacheCodec<SUnitWearsStatistics>>(entry.second);
+    });
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitStatisticsDriver::Load(CSave &file, std::vector<SUnitStatistics> &statistics,
                                  std::vector<SUnitWearsStatistics> &wears)
 {
-    ReadLocal(file,[&](SaveSchema::Reader &r){Load(r,statistics,wears);});
+    ReadLocal(file,[&](SaveSchema::Reader &r){
+        statistics.resize(r.Count());
+        for (auto &entry : statistics)
+            r.Value<SUnitStatistics, LocalPrecacheCodec<SUnitStatistics>>(entry);
+        wears.resize(r.Count());
+        for (auto &entry : wears)
+            r.Value<SUnitWearsStatistics, LocalPrecacheCodec<SUnitWearsStatistics>>(entry);
+    });
 }
 /////////////////////////////////////////////////////////////////////////////////////
