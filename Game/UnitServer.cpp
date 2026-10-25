@@ -6438,45 +6438,6 @@ SL0AnimationSeq *CUnitServer::GetExtendedAnimationSequence(unsigned kind)
 }
 // !!! SAVE/LOAD code
 /////////////////////////////////////////////////////////////////////////////////////
-<<<<<<< HEAD
-=======
-void CUnitServer::Load(CSave &file)
-{
-    modLeverTarget=nullptr;modLeverId=-1;modLeverRing=false;
-    dwSpellAddonLostSight = 0;
-    lastFootstep = 0;
-    file.Read(bL0Frozen);
-    file.Read(bL0MovementFrozen);
-    level0Animation.Load(file);
-    path.Load(file);
-    level1Command.Load(file);
-    file.Read(bL1PlayingSuffer);
-    file.Read(bL1MovementFailed);
-    file.Read(bL1SpeedChanged);
-    file.Read(bL1MoveAnimationSet);
-    sufferAnimationMem.Load(file);
-    file.Read(nL1SufferDirection);
-    file.Read(&eL1State, sizeof(eL1State));
-    currentPose.Load(file);
-    wishPose.Load(file);
-    file.Read(nCanAttackTime);
-    file.Read(nMoveToTargetTime);
-    file.Read(nL1RunFailCounter);
-    curCommand.Load(file);
-    nextCommand.Load(file);
-    rpgUnitStats.Load(file);
-    if (file.GetVersion() < 80)
-        rpgUnitStats.fBaseHP = GetMapObjectServer()->GetRPGStats()->ssHP.fpMax;
-    file.Read(fpModSound);
-    file.Read(fpSModSound);
-    file.Read(fpModVision);
-    file.Read(fpSModVision);
-    // для реализации tame
-    file.Read(&tameLevel, sizeof(tameLevel));
-    file.Read(nOriginalPlayerNum);
-    file.Read(nPlayerWhoTamed);
-    file.Read(nFootstepGenInterval);
->>>>>>> a9c325b (ADSYNC01: port current addon search, lever, genocide and animation loop behavior)
 
 /////////////////////////////////////////////////////////////////////////////////////
 

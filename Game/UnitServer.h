@@ -832,19 +832,16 @@ public:
     virtual LPCSTR GetGameClassName() const { return "CUnitServer"; }
     SL0AnimationSeq *GetExtendedAnimationSequence(unsigned kind);
     virtual EClassIDs WhoAmI() const { return HPC_UNITSERVERSPECIFIC; }
-<<<<<<< HEAD
 public:
     virtual void Store(SaveSchema::Writer &) const;
     virtual void Load(SaveSchema::Reader &);
     virtual void DiscardSave();
-=======
 private:
     // AD07 selection evidence is transient. A loaded ring must be reselected.
     const CMapObject* modLeverTarget = nullptr;
     int modLeverId = -1;
     CPlot3D modLeverPoint;
     bool modLeverRing = false;
->>>>>>> a9c325b (ADSYNC01: port current addon search, lever, genocide and animation loop behavior)
 };
 /////////////////////////////////////////////////////////////////////////////////////
 // Terrain check for spell cast

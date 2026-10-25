@@ -569,6 +569,7 @@ void CUnitServer::Store(SaveSchema::Writer &w) const
 }
 void CUnitServer::Load(SaveSchema::Reader &r)
 {
+    modLeverTarget=nullptr;modLeverId=-1;modLeverRing=false;
     CUnitSpecific::Load(r);
     Field(r, bL0Frozen);
     Field(r, bL0MovementFrozen);
