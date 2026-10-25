@@ -18,6 +18,7 @@
 #include "Player.h"
 #include "Unit.h"
 #include <cstdarg>
+#include <atomic>
 #include <cstdio>
 static void NativeAudioLog(const char* fmt,...) { char buffer[2048]; va_list args;va_start(args,fmt);vsnprintf(buffer,sizeof(buffer),fmt,args);va_end(args);OutputDebugStringA(buffer);OutputDebugStringA("\n"); }
 #define LOGINFO NativeAudioLog
@@ -485,6 +486,9 @@ bool AppAudioSuspended = false;
 bool WorldSfxSuspended = false;
 bool ModalSpeechSuspended = false;
 bool GamePauseSpeechSelectorActive = false;
+std::atomic<unsigned> VideoEngineUsers{0};
+std::atomic<bool> VideoAppSuspended{false};
+ULONGLONG VideoPauseStart = 0, VideoPausedMilliseconds = 0;
 bool BinkDeferredEngineShutdown = false;
 volatile LONG BinkActiveVoiceCount = 0;
 volatile LONG BinkVoiceSequence = 0;
@@ -4642,7 +4646,7 @@ void UnregisterBinkVoice(SBinkVoice *voice)
 
 void FinalizeDeferredBinkEngineShutdown()
 {
-    if (!BinkDeferredEngineShutdown || CurrentSoundManager != nullptr ||
+    if (!BinkDeferredEngineShutdown || CurrentSoundManager != nullptr || VideoEngineUsers != 0 ||
         InterlockedCompareExchange(&BinkActiveVoiceCount, 0, 0) != 0 ||
         !EngineInitialized)
     {
@@ -7741,6 +7745,8 @@ void Pause(const char *reason)
     if (AppAudioSuspended)
         return;
     AppAudioSuspended = true;
+    VideoPauseStart = GetTickCount64();
+    VideoAppSuspended = true;
     const unsigned int paused = EngineInitialized
         ? PauseVoicesForApp()
         : 0;
@@ -7763,6 +7769,8 @@ void Resume(const char *reason)
         return;
     SyncWorldSfxPause();
     AppAudioSuspended = false;
+    if (VideoAppSuspended) VideoPausedMilliseconds += GetTickCount64() - VideoPauseStart;
+    VideoAppSuspended = false;
     if (!EngineInitialized && InitAttempted)
         LastInitAttemptTick = 0;
     const bool deviceReady = !EngineInitialized ||
@@ -7910,7 +7918,7 @@ void Shutdown(const char *reason)
     ReleaseDecodedSounds();
     const LONG activeBink = InterlockedCompareExchange(
         &BinkActiveVoiceCount, 0, 0);
-    const bool keepEngineForBink = EngineInitialized && activeBink != 0;
+    const bool keepEngineForBink = EngineInitialized && (activeBink != 0 || VideoEngineUsers != 0);
     EngineDiagnostics::Event("Audio shutdown reason=%s initialized=%d bink=%ld deferred=%d manager=%p",
         reason?reason:"unknown",EngineInitialized?1:0,activeBink,keepEngineForBink?1:0,CurrentSoundManager);
     if (EngineInitialized && !keepEngineForBink)
@@ -7939,6 +7947,8 @@ void Shutdown(const char *reason)
     EngineInitialized = keepEngineForBink;
     InitAttempted = keepEngineForBink;
     AppAudioSuspended = false;
+    if (VideoAppSuspended) VideoPausedMilliseconds += GetTickCount64() - VideoPauseStart;
+    VideoAppSuspended = false;
     ModalSpeechSuspended = false;
     WorldSfxSuspended = false;
     GamePauseSpeechSelectorActive = false;
@@ -7962,5 +7972,25 @@ void Shutdown(const char *reason)
     ReverbSpeechBypassLogged = false;
     ReverbDialogBypassLogged = false;
     BinkDeferredEngineShutdown = keepEngineForBink;
+}
+void* AcquireVideoEngine()
+{
+    if (!theSettings.nAudio || !EnsureEngine() || !EnsureDeviceStarted("video_open"))
+        return nullptr;
+    ++VideoEngineUsers;
+    return &Engine;
+}
+void ReleaseVideoEngine()
+{
+    if (VideoEngineUsers) --VideoEngineUsers;
+    FinalizeDeferredBinkEngineShutdown();
+}
+bool VideoAudioEnabled() { return theSettings.nAudio != 0; }
+bool VideoSuspended() { return VideoAppSuspended.load(); }
+float VideoGain() { return BinkMovieGain(); }
+double VideoTimeSeconds()
+{
+    const ULONGLONG now = VideoAppSuspended ? VideoPauseStart : GetTickCount64();
+    return double(now - VideoPausedMilliseconds) * 0.001;
 }
 } // namespace MiniaudioOneShotSfx

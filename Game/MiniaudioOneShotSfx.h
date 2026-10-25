@@ -4,6 +4,13 @@
 
 namespace MiniaudioOneShotSfx
 {
+// Host-thread API: release after the video sound has detached.
+void* AcquireVideoEngine();
+void ReleaseVideoEngine();
+bool VideoAudioEnabled();
+bool VideoSuspended();
+float VideoGain();
+double VideoTimeSeconds();
 struct PartyVoiceBinding
 {
     uint32_t speakerId;
