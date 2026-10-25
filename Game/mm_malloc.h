@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 #include <assert.h>
 #include <malloc.h>
 
@@ -10,22 +11,19 @@
 template <class TYPE>
 inline TYPE *mm_malloc(int nNumElements)
 {
-    int size = nNumElements * sizeof(TYPE);
-    char *oldp = dbgnew char[size + 32 + 4]; // malloc( size + 32 + 4 );
-    char *newp = NULL;
-    unsigned *savedp = NULL;
-
-    newp = oldp + 31 + 4;
-    newp = reinterpret_cast<char *>(DWORD(newp) & (~0x1F));
-
-    savedp = reinterpret_cast<unsigned *>(newp - 4);
-    *savedp = reinterpret_cast<unsigned>(oldp);
+    const size_t size = static_cast<size_t>(nNumElements) * sizeof(TYPE);
+    const size_t overhead = 31 + sizeof(char *);
+    char *oldp = dbgnew char[size + overhead];
+    const uintptr_t address = reinterpret_cast<uintptr_t>(oldp + overhead);
+    char *newp = reinterpret_cast<char *>(address & ~uintptr_t(0x1F));
+    char **savedp = reinterpret_cast<char **>(newp - sizeof(char *));
+    *savedp = oldp;
 
 #ifdef _DEBUG
-    assert((DWORD(newp) & 0x1F) == 0);               // alignment is correct
-    assert((newp - 4) >= oldp);                      // stay above lower bound
-    assert((newp + size) <= (oldp + size + 32 + 4)); // stay below upper bound
-#endif                                               // _DEBUG
+    assert((reinterpret_cast<uintptr_t>(newp) & 0x1F) == 0);
+    assert((newp - sizeof(char *)) >= oldp);
+    assert((newp + size) <= (oldp + size + overhead));
+#endif // _DEBUG
 
     return (TYPE *)newp;
 }
@@ -35,13 +33,6 @@ inline TYPE *mm_malloc(int nNumElements)
 // --------------------------------------------------------------------------------------------
 inline void mm_free(void *ptr)
 {
-#ifdef _DEBUG
-    unsigned *savedp = reinterpret_cast<unsigned *>(reinterpret_cast<char *>(ptr) - 4);
-    char *oldp = reinterpret_cast<char *>(*savedp);
-    delete[] oldp;
-//	free( oldp );
-#else  // in non-debug case
-    delete[] ((char *)(*((unsigned *)((char *)ptr - 4))));
-//	free( (char*)(*((unsigned*)((char*)ptr - 4))) );
-#endif // _DEBUG
+    char **savedp = reinterpret_cast<char **>(reinterpret_cast<char *>(ptr) - sizeof(char *));
+    delete[] *savedp;
 }
