@@ -803,8 +803,6 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     // setup registry key
     CWorld::SetRegistryKey("Software\\Gipat.ru\\EI_Starter\\EvilIslands");
     CWorld::InitCurrentDir();
-    // read ai settings
-    theAIGeneralSettings.ReadFromFile(CWorld::GetCurrentPath() + "config\\ai.reg");
     theSettings.ReadSettingsFromRegistry(CWorld::GetRegistryKey());
 #if !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
     theSettings.ReadSettingsFromFile(RuntimePaths64::ConfigRead("settings.ini", theSettings.szWorkPath + "config\\settings.ini").c_str());
@@ -813,6 +811,10 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
        //
        // set new memory depleted handler
        // create worlds and establish connection to local server
+    // Game data is rooted at WorkPath, independently of the launcher CWD.
+    // Writable settings/logs remain owned by RuntimePaths64.
+    CWorld::SetCurrentDir(theSettings.szWorkPath);
+    theAIGeneralSettings.ReadFromFile(CWorld::GetCurrentPath() + "config\\ai.reg");
     OwnedRender::ConfigureStartup();
     ownedResourceRuntime = std::make_unique<OwnedRender::ResourceRuntimeLease>();
     theWorld.Create();

@@ -26,6 +26,10 @@
 #include "FigureClientSpecific.h"
 
 namespace SaveSchema::Fields {
+// Party arrays add ownership swapping, but keep the base array's field codec.
+// Template specialization does not select Codec<Base> for a derived container.
+template<class T, class Base> struct Codec<CPartySaveArray<T, Base>> : Codec<Base> {};
+
 template<> struct Codec<D3DCOLORVALUE>
 {
     static void Store(Writer &w, const D3DCOLORVALUE &v)
