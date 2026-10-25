@@ -733,6 +733,7 @@ bool flush_owned_terrain_lod_set() {
 }
 
 } // namespace
+#if !defined(EID3D11_EMBEDDED)
 bool submit_pending_owned_terrain_base() noexcept {
     auto& frame=g_owned_terrain_frame;
     if (!frame.base_pending) return true;
@@ -769,6 +770,7 @@ bool submit_pending_owned_terrain_base() noexcept {
 }
 
 
+#endif // !EID3D11_EMBEDDED
 // The outer world draw's frame bracket (the game thread inline, the scene
 // thread or the core-mode host from its queued begin/end commands).
 thread_local std::uint64_t g_owned_terrain_world_serial = 0;

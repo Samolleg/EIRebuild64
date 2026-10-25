@@ -1040,6 +1040,7 @@ void dump_owned_units_on_request(const std::array<float,16>& world_to_clip) noex
 
 } // namespace
 // The seam's submissions once its shadow frame is prepared (both modes).
+#if !defined(EID3D11_EMBEDDED)
 bool finish_owned_visual_scene(void* fog_controller,const std::array<float,16>& world_to_clip) {
     auto& frame=g_owned_visual_world_frame;
     if(!frame.shadow_ready || frame.coverage.world_to_clip!=world_to_clip) {
@@ -1060,6 +1061,7 @@ bool finish_owned_visual_scene(void* fog_controller,const std::array<float,16>& 
     dump_owned_units_on_request(world_to_clip);
     return terrain_submitted && color_submitted;
 }
+#endif // !EID3D11_EMBEDDED
 namespace {
 
 // Scene-thread presentation serials stay apart from the game thread's (both
