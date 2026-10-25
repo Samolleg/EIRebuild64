@@ -15,17 +15,17 @@
 
 #define IfFailedThrowHR(expr) \
     {                         \
-        HRESULT hr = (expr);  \
-        if (hr == E_OUTOFMEMORY) GameJournal::AllocationFailure("HRESULT"); \
-        if (FAILED(hr))       \
-            throw hr;         \
+        HRESULT ifFailedThrowHr_ = (expr);  \
+        if (ifFailedThrowHr_ == E_OUTOFMEMORY) GameJournal::AllocationFailure("HRESULT"); \
+        if (FAILED(ifFailedThrowHr_))       \
+            throw ifFailedThrowHr_;         \
     }
 #define IfFailedThrowHR(expr, msg) \
     {                              \
-        HRESULT hr = (expr);       \
-        if (hr == E_OUTOFMEMORY) GameJournal::AllocationFailure("HRESULT"); \
-        if (FAILED(hr))            \
-            throw hr;              \
+        HRESULT ifFailedThrowHr_ = (expr);       \
+        if (ifFailedThrowHr_ == E_OUTOFMEMORY) GameJournal::AllocationFailure("HRESULT"); \
+        if (FAILED(ifFailedThrowHr_))            \
+            throw ifFailedThrowHr_;              \
     }
 
 #define D3D_OVERLOADS
