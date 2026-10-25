@@ -216,7 +216,7 @@ bool Renderer::begin_native_point_shadow_faces(UINT slot,UINT light_index,
 
 bool Renderer::end_native_point_shadow_faces(bool commit) noexcept {
  // As end_native_shadows: the per-EndScene abort is queued in scene mode.
- if(!commit&&scene_queue()){scene_post([this]{(void)end_native_point_shadow_faces(false);});return false;}
+ if(!commit&&scene_queue()){scene_post_command(scene_cmd::AbortPointShadowFaces{});return false;}
  SCENE_ENTRY("end_native_point_shadow_faces");
  if(!native_point_shadow_active_)return false;
  HRESULT hr=E_FAIL;
@@ -228,4 +228,11 @@ bool Renderer::end_native_point_shadow_faces(bool commit) noexcept {
  // own b2 at submission; there is no directional save/restore operation here.
  return SUCCEEDED(hr);
 }
+
+// Typed collection aborts (scene_commands_world.h). The directional abort's
+// body is end_native_shadows (renderer_shadows.cpp); both are queued only by
+// the per-EndScene sink teardown in scene mode.
+void scene_cmd::AbortPointShadowFaces::run(Renderer& r){(void)r.end_native_point_shadow_faces(false);}
+void scene_cmd::AbortDirectionalShadows::run(Renderer& r){(void)r.end_native_shadows(false);}
 } // namespace owned
+

@@ -1,4 +1,6 @@
 #include "retained_static_submission.h"
+#include <map>
+#include <mutex>
 #include "fast_float.h"
 #include "shadow_foliage.h"
 #include "visual_highlight.h"
@@ -2688,12 +2690,36 @@ bool merge_parts_compatible(const VisualPartAsset& a,const VisualPartAsset& b) n
 }
 } // namespace
 
+namespace {
+// One immutable merged geometry per content identity, shared by every
+// character whose merged parts are identical; the last holder frees it.
+template<class Build>
+std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(const std::string& content, Build build) {
+    static std::mutex lock;
+    static std::map<std::string,std::weak_ptr<const VisualPreparedResources::MergedGeometry>> cache;
+    std::lock_guard<std::mutex> guard(lock);
+    if (const auto found=cache.find(content); found!=cache.end())
+        if (auto shared=found->second.lock()) return shared;
+    if (cache.size()>256) for (auto entry=cache.begin();entry!=cache.end();)
+        entry=entry->second.expired()?cache.erase(entry):std::next(entry);
+    auto geometry=std::make_shared<VisualPreparedResources::MergedGeometry>();
+    build(*geometry);
+    geometry->identity.canonical_name=content;
+    std::shared_ptr<const VisualPreparedResources::MergedGeometry> result=std::move(geometry);
+    cache[content]=result;
+    return result;
+}
+}
+
 bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
     if (prepared.merged_assembly==sample.assembly) return true;
     if (!prepared.gpu_pose.binding) return false;
     prepared.merged_groups.clear();prepared.merged_part_group.assign(assembly.parts.size(),-1);
+    // Without a pose binding yet the parts draw singly for now; do not record
+    // the assembly as merged, or it never merges once the binding exists.
+    if (!prepared.gpu_pose.binding) return true;
     prepared.merged_assembly=sample.assembly;
     std::vector<std::vector<std::uint32_t>> members;
     for (std::uint32_t index=0;index<assembly.parts.size();++index) {
@@ -2722,43 +2748,45 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
             prepared.merged_groups.pop_back();continue;   // the rest stay per part
         }
         group.parts=list;group.shape_count=shapes;
+        // Preserve X64P01 bounds before narrowing to this x86 container size.
+        const VisualPreparedResources::MergedGeometry limits;
+        if (indices > limits.indices.max_size() ||
+            (position_groups && shapes > limits.positions.max_size() / position_groups)) {
+            prepared.merged_groups.pop_back(); continue;
+        }
         group.position_groups=static_cast<std::uint32_t>(position_groups);
         group.normal_groups=static_cast<std::uint32_t>(normal_groups);
-        // Validate before narrowing counts to the x86 container/iterator sizes.
-        if (indices > group.indices.max_size() ||
-            (group.position_groups && shapes > group.positions.max_size() / group.position_groups)) {
-            prepared.merged_groups.pop_back();continue; // keep the existing per-part path
-        }
-        group.positions.resize(std::size_t(shapes)*group.position_groups);
-        group.normals.reserve(group.normal_groups);
-        group.texture_coordinates.reserve(static_cast<std::size_t>(uvs));
-        group.components.reserve(static_cast<std::size_t>(components));
-        group.component_parts.reserve(static_cast<std::size_t>(components));
-        group.indices.reserve(static_cast<std::size_t>(indices));
-        std::uint32_t position_base=0,normal_base=0,uv_base=0,component_base=0;
         std::string content="merged-parts";
         for (const auto index:list) {
-            const auto& part=assembly.parts[index];const auto& figure=*part.geometry;
-            for (std::uint32_t shape=0;shape<shapes;++shape)
-                std::copy_n(figure.positions.begin()+std::ptrdiff_t(shape)*figure.position_groups,figure.position_groups,
-                    group.positions.begin()+std::ptrdiff_t(shape)*group.position_groups+position_base/4);
-            group.normals.insert(group.normals.end(),figure.normals.begin(),figure.normals.end());
-            group.texture_coordinates.insert(group.texture_coordinates.end(),
-                figure.texture_coordinates.begin(),figure.texture_coordinates.end());
-            for (const auto& component:figure.components) {
-                group.components.push_back({static_cast<std::uint16_t>(component.position+position_base),
-                    static_cast<std::uint16_t>(component.normal+normal_base),
-                    static_cast<std::uint16_t>(component.texture+uv_base)});
-                group.component_parts.push_back(part.skeleton_node|(position_base<<16));
-            }
-            for (const auto value:figure.indices) group.indices.push_back(static_cast<std::uint16_t>(value+component_base));
-            content+='|'+figure.identity.key()+'@'+std::to_string(part.skeleton_node);
-            position_base+=figure.position_groups*4;normal_base+=figure.normal_groups*4;
-            uv_base+=static_cast<std::uint32_t>(figure.texture_coordinates.size());
-            component_base+=static_cast<std::uint32_t>(figure.components.size());
+            const auto& part=assembly.parts[index];
+            content+='|'+part.geometry->identity.key()+'@'+std::to_string(part.skeleton_node);
             prepared.merged_part_group[index]=static_cast<std::int32_t>(next);
         }
-        group.identity.canonical_name=std::move(content);
+        group.geometry=merged_geometry(content,[&](VisualPreparedResources::MergedGeometry& geometry) {
+            geometry.positions.resize(std::size_t(shapes)*position_groups);geometry.normals.reserve(normal_groups);
+            geometry.texture_coordinates.reserve(uvs);geometry.components.reserve(components);
+            geometry.component_parts.reserve(components);geometry.indices.reserve(indices);
+            std::uint32_t position_base=0,normal_base=0,uv_base=0,component_base=0;
+            for (const auto index:list) {
+                const auto& part=assembly.parts[index];const auto& figure=*part.geometry;
+                for (std::uint32_t shape=0;shape<shapes;++shape)
+                    std::copy_n(figure.positions.begin()+std::ptrdiff_t(shape)*figure.position_groups,figure.position_groups,
+                        geometry.positions.begin()+std::ptrdiff_t(shape)*position_groups+position_base/4);
+                geometry.normals.insert(geometry.normals.end(),figure.normals.begin(),figure.normals.end());
+                geometry.texture_coordinates.insert(geometry.texture_coordinates.end(),
+                    figure.texture_coordinates.begin(),figure.texture_coordinates.end());
+                for (const auto& component:figure.components) {
+                    geometry.components.push_back({static_cast<std::uint16_t>(component.position+position_base),
+                        static_cast<std::uint16_t>(component.normal+normal_base),
+                        static_cast<std::uint16_t>(component.texture+uv_base)});
+                    geometry.component_parts.push_back(part.skeleton_node|(position_base<<16));
+                }
+                for (const auto value:figure.indices) geometry.indices.push_back(static_cast<std::uint16_t>(value+component_base));
+                position_base+=figure.position_groups*4;normal_base+=figure.normal_groups*4;
+                uv_base+=static_cast<std::uint32_t>(figure.texture_coordinates.size());
+                component_base+=static_cast<std::uint32_t>(figure.components.size());
+            }
+        });
         ++next;
     }
     prepared.merged_groups.resize(next);
@@ -2782,14 +2810,15 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         bounds.maximum[2]-bounds.minimum[2]})*.5f;
     if (!view.world.enabled) {
         view={};
-        view.world.enabled=true;view.world.identity=&group.identity;view.world.shape_count=group.shape_count;
+        const auto& geometry=*group.geometry;
+        view.world.enabled=true;view.world.identity=&geometry.identity;view.world.shape_count=group.shape_count;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
-        view.positions=group.positions.data();view.position_groups=group.position_groups;
-        view.normals=group.normals.data();view.normal_groups=group.normal_groups;
-        view.texture_coordinates=group.texture_coordinates.data();view.texture_coordinate_count=static_cast<UINT>(group.texture_coordinates.size());
-        view.components=group.components.data();view.component_count=static_cast<UINT>(group.components.size());
-        view.component_parts=group.component_parts.data();
-        view.indices=group.indices.data();view.index_count=static_cast<UINT>(group.indices.size());
+        view.positions=geometry.positions.data();view.position_groups=group.position_groups;
+        view.normals=geometry.normals.data();view.normal_groups=group.normal_groups;
+        view.texture_coordinates=geometry.texture_coordinates.data();view.texture_coordinate_count=static_cast<UINT>(geometry.texture_coordinates.size());
+        view.components=geometry.components.data();view.component_count=static_cast<UINT>(geometry.components.size());
+        view.component_parts=geometry.component_parts.data();
+        view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
         view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
@@ -2893,146 +2922,5 @@ bool retained_visual_preserve_color_order(const RetainedVisualSample& sample,
         part.texture->format==MmpFormat::argb4444 ||
         part.texture->format==MmpFormat::argb8888;
 }
-
-#ifdef EID3D11_TESTING
-bool retained_visual_part_view(const RetainedVisualSample& sample,
-    std::size_t part_index, const std::vector<VisualNodeSample>& nodes,
-    const NativeWorldBounds& bounds, NativeContribution contribution,
-    const std::array<float,16>& world_to_clip, double time, std::uint8_t fog,
-    std::uint64_t presentation_serial, NativeGeometryView& view,
-    std::array<NativeOwnedTextureMip,32>& texture_mips) noexcept {
-    view = {};
-    view.contribution = contribution;
-    if (!contribution.known) return false;
-    if (!contribution.color && !contribution.light_mask) return true;
-    if (!sample.assembly || !sample.prepared || !finite_world_bounds(bounds) ||
-        part_index >= sample.assembly->parts.size() || !presentation_serial) return false;
-    const auto& assembly = *sample.assembly;
-    const auto& part = assembly.parts[part_index];
-    if (!part.source_available || !part.geometry || !part.material ||
-        part.skeleton_node >= nodes.size()) return false;
-    try {
-        if (sample.prepared->parts.size() != assembly.parts.size())
-            sample.prepared->parts.resize(assembly.parts.size());
-        const auto& figure = *part.geometry;
-        auto& prepared = sample.prepared->parts[part_index];
-        const auto& node = nodes[part.skeleton_node];
-        view.world.enabled = true;
-        view.world.identity = &figure.identity;
-        // The full resource identity selects immutable bytes. The revision is
-        // constant within that value, independent of pose and appearance time.
-        view.geometry_revision = {1,0,0,0,0};
-        view.geometry_revision_valid = true;
-        view.world.shape_count = figure.shape_count;
-        view.world.shape = retained_visual_shape(sample);
-        view.world.world_to_clip = world_to_clip;
-        if (!sample.values.unit) {
-            std::array<float,16> placement{};
-            if (!retained_object_matrix(sample.object_pose.position,
-                sample.object_pose.quaternion, placement)) return false;
-            VisualPoseState local_root;
-            local_root.tilted_facing = local_root.root_rotation_valid = true;
-            local_root.root_rotation = {1,0,0,0};
-            std::array<float,16> local{};
-            if (!visual_node_world_matrix(local_root,node,assembly.scale,local)) return false;
-            view.world.object_to_world = retained_multiply_matrix(placement, local);
-        } else {
-            if (!visual_node_world_matrix(sample.pose, node, assembly.scale,
-                                           view.world.object_to_world))
-                return false;
-        }
-        if (!sample.selection.neutral) {
-            if (!sample.selection.clip) return false;
-            const auto track = sample.selection.clip->tracks.find(
-                assembly.skeleton->nodes[part.skeleton_node].name);
-            if (!visual_morph_frames(track == sample.selection.clip->tracks.end() ? nullptr :
-                &track->second, sample.pose.phase, view.world.morph)) return false;
-        }
-        view.prepared_identity = {sample.lifecycle.id, sample.lifecycle.generation,
-            sample.lifecycle.positive_world_epoch, sample.resource.serial,
-            static_cast<std::uint32_t>(part_index),0,presentation_serial,true};
-        view.prepared_mesh = &prepared.mesh;
-        view.prepared_material = &prepared.material;
-        view.prepared_wound_material = &prepared.wound_material;
-        view.positions = figure.positions.data();
-        view.position_groups = figure.position_groups;
-        view.normals = figure.normals.data();
-        view.normal_groups = figure.normal_groups;
-        view.texture_coordinates = figure.texture_coordinates.data();
-        view.texture_coordinate_count = static_cast<std::uint32_t>(figure.texture_coordinates.size());
-        view.components = figure.components.data();
-        view.component_count = static_cast<std::uint32_t>(figure.components.size());
-        view.indices = figure.indices.data();
-        view.index_count = static_cast<std::uint32_t>(figure.indices.size());
-        view.bounds_valid = true;
-        view.bounds_flags = 2;
-        view.bounds_minimum = bounds.minimum;
-        view.bounds_maximum = bounds.maximum;
-        view.object_to_clip = world_to_clip;
-        view.semantic_kind = SemanticKind::figure;
-        view.ordering = retained_visual_preserve_color_order(sample,part) ?
-            NativeOrdering::preserve : NativeOrdering::derive_from_state;
-        view.fog = (sample.values.object_flags & 0x800u) ? 255 : fog;
-        const bool default_colors = (part.figure_flags & 0x100u) != 0;
-        const bool uses_specular = (part.material_flags & 0x10u) != 0 || sample.values.stunned;
-        view.flags = (default_colors ? 4u : 0u) | (uses_specular ? 8u : 0u);
-        // The shipped default-color branch bypasses material alpha and color
-        // evaluation, including effect writes. Its authored packed values stay
-        // unchanged; only the shared material specular-enable rule follows it.
-        view.default_diffuse = default_colors ? part.diffuse : 0xffffffffu;
-        view.default_specular = default_colors ? part.specular : std::uint32_t(view.fog) << 24;
-        view.lighting.enabled = default_colors ? 0 : 1;
-        view.lighting.object_to_world = view.world.object_to_world;
-        std::copy_n(part.material->diffuse.begin(),3,view.lighting.material_diffuse.begin());
-        view.lighting.material_alpha = retained_visual_effective_alpha(sample,part);
-        view.lighting.emissive = retained_visual_emissive(sample.values,sample.quest_light_active,*part.material);
-        view.lighting.specular = part.material->specular;
-        // Stun writes material specular RGB, which is added AFTER texturing.
-        // Putting it in emissive would incorrectly modulate the pulse by texels.
-        if (sample.values.stunned) view.lighting.specular = {sample.effects.stun_red,0,0,1};
-        view.lighting.specular[3] = 1;
-        if (!retained_visual_texture_shift(part.texture_type,time,view.u_shift,view.v_shift)) return false;
-        auto& state = view.owned_fixed_state;
-        state.enabled = true;
-        state.cull_mode = D3DCULL_CW; state.fill_mode = D3DFILL_SOLID;
-        state.z_enable = D3DZB_TRUE; state.z_write_enable = TRUE; state.z_func = D3DCMP_LESSEQUAL;
-        state.alpha_blend_enable = TRUE;
-        state.source_blend = D3DBLEND_SRCALPHA; state.destination_blend = D3DBLEND_INVSRCALPHA;
-        state.alpha_test_enable = TRUE; state.alpha_func = D3DCMP_GREATER;
-        // The two established world material spans use distinct cutout refs.
-        state.alpha_ref = sample.values.unit ? 10 : 200;
-        state.texture_factor = 0xffffffffu; state.specular_enable = uses_specular ? TRUE : FALSE;
-        state.color_op = state.alpha_op = D3DTOP_MODULATE;
-        state.color_arg1 = state.alpha_arg1 = D3DTA_TEXTURE;
-        state.color_arg2 = state.alpha_arg2 = D3DTA_DIFFUSE;
-        state.address_u = state.address_v = D3DTADDRESS_WRAP;
-        state.min_filter = state.mag_filter = D3DTFG_LINEAR;
-        if (part.surface) {
-            view.owned_texture.identity = part.surface->id;
-            view.owned_texture.generation = part.surface->generation;
-            view.owned_texture.surface = part.surface.get();
-        } else if (part.texture && part.texture->source &&
-            !part.texture->mips.empty() && part.texture->mips.size() <= texture_mips.size()) {
-            const auto& texture = *part.texture;
-            for (std::size_t i = 0; i < texture.mips.size(); ++i) {
-                const auto& mip = texture.mips[i];
-                if (mip.byte_offset > texture.source->size() || mip.bytes > texture.source->size()-mip.byte_offset)
-                    return false;
-                texture_mips[i] = {texture.source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes};
-            }
-            view.owned_texture.value_source = static_cast<std::uint32_t>(texture.value_source)+1;
-            view.owned_texture.identity = texture.value_source == TextureValueSource::archive ? 1 : texture.value_serial;
-            view.owned_texture.generation = 1;
-            view.owned_texture.resource = texture.value_source == TextureValueSource::archive ? &texture.identity : nullptr;
-            view.owned_texture.format = texture_format(texture.format);
-            view.owned_texture.mips = texture_mips.data();
-            view.owned_texture.mip_count = static_cast<std::uint32_t>(texture.mips.size());
-            view.owned_texture.opaque_mips = texture.opaque_mips;
-        } else return false;
-        return true;
-    } catch (...) { return false; }
-}
-
-#endif
 
 } // namespace owned

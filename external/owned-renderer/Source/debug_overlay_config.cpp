@@ -266,6 +266,7 @@ bool RendererConfig::register_option(RendererOption option) {
     if (!valid_key(option.key.c_str()) || option.label.empty() || find(option.key.c_str())) return false;
     const std::uint64_t hash = option_key_hash(option.key.c_str());
     options_.push_back(std::move(option));
+    ++revision_;
     if (!index_.emplace(hash, options_.size() - 1).second) index_collision_ = true;
     return true;
 }
@@ -342,7 +343,7 @@ bool RendererConfig::set_boolean(const char* key, bool value) noexcept {
     if (!option || option->type != RendererOptionType::boolean) return false;
     if (option->boolean_value != value) {
         option->boolean_value = value;
-        dirty_ = true;
+        mark_changed();
     }
     return true;
 }
@@ -353,7 +354,7 @@ bool RendererConfig::set_integer(const char* key, int value) noexcept {
     value = std::clamp(value, option->integer_minimum, option->integer_maximum);
     if (option->integer_value != value) {
         option->integer_value = value;
-        dirty_ = true;
+        mark_changed();
     }
     return true;
 }
@@ -364,7 +365,7 @@ bool RendererConfig::set_floating_point(const char* key, float value) noexcept {
     value = std::clamp(value, option->floating_minimum, option->floating_maximum);
     if (option->floating_value != value) {
         option->floating_value = value;
-        dirty_ = true;
+        mark_changed();
     }
     return true;
 }
@@ -372,21 +373,21 @@ bool RendererConfig::set_floating_point(const char* key, float value) noexcept {
 void RendererConfig::set_overlay_mode(DebugOverlayMode mode) noexcept {
     if (overlay_mode_ != mode) {
         overlay_mode_ = mode;
-        dirty_ = true;
+        mark_changed();
     }
 }
 
 void RendererConfig::set_first_run_done(bool done) noexcept {
     if (first_run_done_ != done) {
         first_run_done_ = done;
-        dirty_ = true;
+        mark_changed();
     }
 }
 
 void RendererConfig::set_nvidia_cache_id(const std::string& id) {
     if (nvidia_cache_id_ != id) {
         nvidia_cache_id_ = id;
-        dirty_ = true;
+        mark_changed();
     }
 }
 
@@ -394,7 +395,7 @@ void RendererConfig::set_debug_resource_view(DebugResourceView view) noexcept {
     if (view >= DebugResourceView::count) view = DebugResourceView::disabled;
     if (debug_resource_view_ != view) {
         debug_resource_view_ = view;
-        dirty_ = true;
+        mark_changed();
     }
 }
 
@@ -415,7 +416,7 @@ bool RendererConfig::set_text(const char* key, const char* value) {
         std::strlen(value) > 1023 || std::strpbrk(value, "\r\n")) return false;
     if (option->text_value == value) return true;
     option->text_value = value;
-    dirty_ = true;
+    mark_changed();
     return true;
 }
 
@@ -433,6 +434,7 @@ bool RendererConfig::reset_to_default(const char* key) noexcept {
 
 bool RendererConfig::load(const wchar_t* path) {
     if (!path || !*path) return false;
+    ++revision_;
     std::string text;bool missing = false;
     if (!read_text_file(path, text, missing)) return missing;
 
@@ -525,6 +527,7 @@ void RendererConfig::apply_value(RendererOption& option, const std::string& valu
 
 bool RendererConfig::load_interface_profile(const wchar_t* path) {
     if (!path || !*path) return false;
+    ++revision_;
     std::string text;bool missing = false;
     if (!read_text_file(path, text, missing)) return false;
     std::size_t offset = 0;
@@ -539,7 +542,7 @@ bool RendererConfig::load_interface_profile(const wchar_t* path) {
         auto* option = find_mutable(trim(std::string_view(line).substr(0, equals)).c_str());
         if (option && interface_profile_option(*option)) {
             apply_value(*option, trim(std::string_view(line).substr(equals + 1)));
-            dirty_ = true;
+            mark_changed();
         }
     }
     return true;
@@ -547,6 +550,12 @@ bool RendererConfig::load_interface_profile(const wchar_t* path) {
 
 bool RendererConfig::save(const wchar_t* path) const {
     if (!path || !*path) return false;
+    if (!save_text(path)) return false;
+    ++saves_;
+    return true;
+}
+
+bool RendererConfig::save_text(const wchar_t* path) const {
     std::string text = "; EID3D11 renderer-owned configuration\r\n[overlay]\r\nmode=";
     text += debug_overlay_mode_name(overlay_mode_);
     text += "\r\ndebug_resource_view=";

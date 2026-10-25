@@ -219,6 +219,7 @@ void Renderer::render_wind_trails() {
     if (!count) return;
 
     std::memcpy(c.clip,native_world_clip_.data(),sizeof(c.clip));
+    jitter_clip(c.clip);
     for (unsigned k = 0; k < 3; ++k) c.eye[k] = float(eye[k]);
     c.eye[3] = float(pixel_scale);
     // Region tint: desert dust, snow-pale specks, pale air elsewhere; lit by
@@ -259,7 +260,7 @@ void Renderer::render_wind_trails() {
     ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
     transition_profile_pass("wind_trails");
     context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
-    D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1};context_->RSSetViewports(1,&viewport);
+    D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(wind_trails_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(wind_trails_blend_.Get(),factor,~0u);
     context_->IASetInputLayout(nullptr);context_->IASetVertexBuffers(0,0,nullptr,nullptr,nullptr);

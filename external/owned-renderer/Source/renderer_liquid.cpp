@@ -9,6 +9,7 @@
 #include "renderer.h"
 #include "engine_bridge.h"
 #include "neighbour_maps.h"
+#include "neighbour_piece.h"
 #include "owned_asset_loader.h"
 #include "worker_priority.h"
 #include <d3dcompiler.h>
@@ -612,7 +613,7 @@ void Renderer::update_liquid_surf() noexcept try {
  bridge_report_event("water_surf","omitted: CPU allocation failed; water shows no surf");
 }
 
-void Renderer::add_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::array<float,16>& active_to_world) noexcept try {
+void Renderer::add_liquid_surf_neighbour(const NeighbourPiece& upload,const std::array<float,16>& active_to_world) noexcept try {
  const auto& field=upload.liquid_surf;
  if(!field)return; // no water (or no grids): nothing to say
  std::array<float,3> origin{};
@@ -740,8 +741,18 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
   return false;
  };
  const bool enabled=configured_boolean(debug_overlay_.config(),"water_reflections",true);
- if(water_capture_frame_!=native_frame_index_) {
-  water_capture_frame_=native_frame_index_;water_capture_ready_=false;
+ // The snapshot is the scene behind this flush's water: taken at the first
+ // liquid batch of every flush that draws liquid. Once per frame, a frame
+ // whose liquid came in two flushes (an early flush, forced by the game's
+ // next draw, carrying a few liquid records; then the main liquid flush after
+ // the particles and later world work) refracted the main water through the
+ // early snapshot on those frames and through a complete one on the others:
+ // whatever was drawn between the two flushes (waterfall spray, mist) showed
+ // through the water or was hidden by it frame to frame (save1152 waterfall
+ // and lake popping, user captures 526/527: the copy before or after the game
+ // particles). Everything drawn before a flush's water is now behind it.
+ if(water_capture_frame_!=native_frame_index_||water_capture_flush_!=native_flush_serial_) {
+  water_capture_frame_=native_frame_index_;water_capture_flush_=native_flush_serial_;water_capture_ready_=false;
   if(!enabled)return false;
   if(!native_world_clip_valid_||FAILED(create_water_reflection_targets()))
    {++water_reflection_resource_failures_;return unavailable("EID3D11 water reflections: scene resources unavailable; using analytic sky\n");}

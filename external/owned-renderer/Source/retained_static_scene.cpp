@@ -19,6 +19,7 @@ RetainedStaticScene& retained_visual_scene() noexcept {
     static RetainedStaticScene* scene = new RetainedStaticScene();
     return *scene;
 }
+using codec::io;
 namespace {
 
 struct ExclusiveLock {
@@ -36,6 +37,10 @@ struct SharedLock {
     ~SharedLock() { ReleaseSRWLockShared(lock); }
     SRWLOCK* lock;
 };
+
+void put_resource(RetainedDeltaOut& d, const VisualResourceIncarnation& resource) {
+    io(d.out, resource.signed_id); io(d.out, resource.serial);
+}
 
 bool same_resource(const ResourceIdentity& a, const ResourceIdentity& b) noexcept {
     return a.container_incarnation == b.container_incarnation &&
@@ -145,6 +150,9 @@ std::uint64_t RetainedStaticScene::begin_source(
     if (selected_mob && !selected_mob[0]) return 0;
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::begin_source, [&](RetainedDeltaOut& d) {
+            io(d.out, role); delta_text(d, name); delta_text(d, selected_mob);
+        });
         if (next_transaction_ == (std::numeric_limits<std::uint64_t>::max)())
             return 0;
         const std::uint64_t serial = ++next_transaction_;
@@ -208,6 +216,9 @@ bool RetainedStaticScene::record_parser_source(
     if (!transaction || !name || !name[0]) return false;
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::record_parser_source, [&](RetainedDeltaOut& d) {
+            io(d.out, transaction); delta_text(d, name);
+        });
         const auto found = transactions_.find(transaction);
         if (found == transactions_.end() || found->second.engine_finished)
             return false;
@@ -239,6 +250,9 @@ void RetainedStaticScene::record_admission(
     if (!transaction) return;
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::record_admission, [&](RetainedDeltaOut& d) {
+            io(d.out, transaction); io(d.out, nid); io(d.out, family); io(d.out, signed_id);
+        });
         const auto found = transactions_.find(transaction);
         if (found == transactions_.end() || found->second.engine_finished) return;
         found->second.admissions.push_back({nid, family, signed_id});
@@ -256,6 +270,9 @@ bool RetainedStaticScene::finish_source(
     if (!transaction) return false;
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::finish_source, [&](RetainedDeltaOut& d) {
+            io(d.out, transaction); io(d.out, owner_success); io(d.out, common_parser_ran);
+        });
         const auto found = transactions_.find(transaction);
         if (found == transactions_.end() || found->second.engine_finished)
             return false;
@@ -301,6 +318,7 @@ bool RetainedStaticScene::finish_source(
 void RetainedStaticScene::abandon_source(std::uint64_t transaction) noexcept {
     if (!transaction) return;
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::abandon_source, [&](RetainedDeltaOut& d) { io(d.out, transaction); });
     const auto found = transactions_.find(transaction);
     if (found == transactions_.end()) return;
     if (selected_main_transition_ == transaction)
@@ -319,6 +337,10 @@ bool RetainedStaticScene::publish_source(
         (!snapshot_value->terrain->immutable_descriptor_validated ||
          snapshot_value->terrain->immutable_descriptor_validation_count != 1u))
         return false;
+    // Defined outside the scene lock (terrain and models are large); the
+    // delta below is recorded only at the commit, because the unlocked
+    // candidate phase can lose a race the replica would not reproduce.
+    if (auto* r = recorder()) r->asset(snapshot_value);
     try {
         Source source{};
         std::shared_ptr<const TerrainCpuAsset> terrain;
@@ -401,6 +423,11 @@ bool RetainedStaticScene::publish_source(
             // snapshot or value publication can observe it.
             sources_.back().publication_revision = source_revision_;
         }
+        if (auto* r = recorder()) {
+            r->delta(RetainedOp::publish_source, [&](RetainedDeltaOut& d) {
+                io(d.out, transaction); d.ref(snapshot_value);
+            });
+        }
         transactions_.erase(found);
         return true;
     } catch (...) {
@@ -415,6 +442,7 @@ void RetainedStaticScene::lifecycle_added(
         return;
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::lifecycle_added, [&](RetainedDeltaOut& d) { io(d.out, identity); });
         const auto previous = live_.find(identity.id);
         const bool same_membership=previous!=live_.end()&&previous->second.generation==identity.generation&&
             previous->second.positive_world_epoch==identity.positive_world_epoch;
@@ -447,6 +475,7 @@ void RetainedStaticScene::lifecycle_added(
 void RetainedStaticScene::lifecycle_removed(std::int32_t signed_id) noexcept {
     if (signed_id <= 0) return;
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::lifecycle_removed, [&](RetainedDeltaOut& d) { io(d.out, signed_id); });
     lifecycle_removed_unlocked(signed_id);
 }
 
@@ -510,7 +539,7 @@ bool RetainedStaticScene::visual_detach(std::int32_t signed_id) noexcept {
         // detach after the renderer retained each such generation's copy.
         std::vector<DetachedSurfaceTexture> textures;
         for (const auto& part : entity.assembly->parts) {
-            if (!part.surface) continue;
+            if (!part.surface || replica_) continue;
             if (std::any_of(textures.begin(), textures.end(), [&](const auto& texture) {
                     return texture.surface_id == part.surface->id &&
                         texture.generation == part.surface->generation;
@@ -532,6 +561,9 @@ bool RetainedStaticScene::visual_detach(std::int32_t signed_id) noexcept {
         visuals_.erase(visual);
         lifecycle_removed_unlocked(signed_id);
         detached_changed_unlocked();
+        // Recorded only once it succeeded: success depends on the renderer's
+        // texture retainer, which the replica does not have.
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_detach, [&](RetainedDeltaOut& d) { io(d.out, signed_id); });
         return true;
     } catch (...) {
         return false;
@@ -582,6 +614,7 @@ RetainedStaticScene::retire_detached_unlocked(
 
 void RetainedStaticScene::visual_retire_detached(std::int32_t signed_id) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_retire_detached, [&](RetainedDeltaOut& d) { io(d.out, signed_id); });
     const auto copy = detached_.find(signed_id);
     if (copy == detached_.end()) return;
     retire_detached_unlocked(copy);
@@ -598,6 +631,7 @@ void RetainedStaticScene::visual_set_surface_texture_retainer(
 void RetainedStaticScene::visual_clear_surface_texture_retainer(void* context) noexcept {
     ExclusiveLock guard(lock_);
     if (surface_texture_retainer_context_ != context) return;
+    if (auto* r = recorder()) r->delta(RetainedOp::retainer_cleared, [](RetainedDeltaOut&) {});
     surface_texture_retainer_ = nullptr;
     surface_texture_retainer_context_ = nullptr;
     // Copies belong to the departing device; never carry them to the next.
@@ -647,8 +681,13 @@ bool RetainedStaticScene::visual_seed(std::int32_t signed_id,
     std::array<float,16> matrix{};
     if (!std::all_of(pose.shape.begin(),pose.shape.end(),finite) ||
         !retained_object_matrix(pose.position,pose.quaternion,matrix)) return false;
+    auto* r = recorder();
+    if (r) r->asset(assembly);
     try {
         ExclusiveLock guard(lock_);
+        if (r) r->delta(RetainedOp::visual_seed, [&](RetainedDeltaOut& d) {
+            io(d.out, signed_id); d.ref(assembly); delta_io(d, pose);
+        });
         if (live_.count(signed_id) || detached_.count(signed_id)) return false;
         DetachedVisual seed{};
         if (++next_seed_generation_ >= (1ull << 63)) next_seed_generation_ = 1;
@@ -700,6 +739,9 @@ void RetainedStaticScene::visual_reconcile_seeds(const std::vector<std::int32_t>
         }
         if (!retire) return;
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_reconcile_seeds, [&](RetainedDeltaOut& d) {
+            io(d.out, eligible); io(d.out, authoritative);
+        });
         for (auto it = detached_.begin(); it != detached_.end();)
             it = retired(it->first, it->second) ? retire_detached_unlocked(it) : std::next(it);
         detached_changed_unlocked();
@@ -731,6 +773,7 @@ void RetainedStaticScene::positive_lifecycle_reset(
     std::uint64_t new_epoch) noexcept {
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::positive_lifecycle_reset, [&](RetainedDeltaOut& d) { io(d.out, new_epoch); });
         shadow_input_domain_.reset();
         // Main selection is the authoritative zone-source lifetime. Positive
         // client resets rebuild lifecycle identities beneath that selection;
@@ -821,6 +864,7 @@ void RetainedStaticScene::positive_lifecycle_reset(
 
 void RetainedStaticScene::reset() noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::reset, [](RetainedDeltaOut&) {});
     shadow_input_domain_.reset();
     visual_structure_changed_unlocked();
     visual_values_changed_unlocked();
@@ -1283,10 +1327,21 @@ RetainedStaticScene::VisualEntity* RetainedStaticScene::visual_find_unlocked(
 bool RetainedStaticScene::publish_terrain_geometry(std::uint64_t generation,
     std::uint64_t revision, const OwnedTerrainGeometryValues* incoming) noexcept {
     ExclusiveLock guard(lock_);
+    // Recorded only where it mutates: an unchanged per-frame publication
+    // (the common case) changes nothing and costs no message.
+    const auto record = [&] {
+        if (auto* r = recorder()) r->delta(RetainedOp::publish_terrain_geometry, [&](RetainedDeltaOut& d) {
+            io(d.out, generation); io(d.out, revision);
+            const bool present = incoming != nullptr;
+            io(d.out, present);
+            if (present) delta_io(d, *incoming);
+        });
+    };
     for (auto& source : sources_) {
         if (source.role != MobSourceRole::main || !source.snapshot || !source.snapshot->terrain) continue;
         if (generation != source_generation_ || revision != source.publication_revision) return false;
         if (!incoming) {
+            record();
             if(source.terrain_geometry)visual_frame_changed_unlocked();
             source.terrain_geometry.reset();
             source.terrain_textures.reset();
@@ -1313,6 +1368,7 @@ bool RetainedStaticScene::publish_terrain_geometry(std::uint64_t generation,
         const bool same_shifts=previous && previous->layer_shifts==values.layer_shifts;
         if (same_structure && same_shifts &&
             std::memcmp(&previous->animation,&values.animation,sizeof(a))==0) return true;
+        record();
         try {
             auto next=std::make_shared<OwnedTerrainGeometryValues>(values);
             next->layer_shift_range=previous && previous->layer_shift_range.size()==values.layer_shifts.size()
@@ -1341,6 +1397,9 @@ bool RetainedStaticScene::publish_terrain_texture(std::uint64_t generation,
     std::uint64_t revision, std::uint32_t material,
     std::shared_ptr<const OwnedVisualSurface> surface) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::publish_terrain_texture, [&](RetainedDeltaOut& d) {
+        io(d.out, generation); io(d.out, revision); io(d.out, material); d.ref(surface);
+    });
     if (surface && (!surface->id || !surface->generation)) return false;
     for (auto& source : sources_) {
         if (source.role != MobSourceRole::main || !source.snapshot || !source.snapshot->terrain) continue;
@@ -1379,6 +1438,7 @@ VisualResourceIncarnation RetainedStaticScene::visual_begin_resource(
     std::int32_t signed_id) noexcept {
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_begin_resource, [&](RetainedDeltaOut& d) { io(d.out, signed_id); });
         VisualEntity next{};
         visual_structure_changed_unlocked();
         visual_values_changed_unlocked(signed_id);
@@ -1398,6 +1458,9 @@ VisualResourceIncarnation RetainedStaticScene::visual_begin_resource(
 bool RetainedStaticScene::visual_finish_resource(
     VisualResourceIncarnation resource, bool success) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_finish_resource, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); io(d.out, success);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity) return false;
     if (!success) {
@@ -1415,6 +1478,7 @@ bool RetainedStaticScene::visual_finish_resource(
 
 void RetainedStaticScene::visual_destroy_resource(std::int32_t signed_id) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_destroy_resource, [&](RetainedDeltaOut& d) { io(d.out, signed_id); });
     visual_values_changed_unlocked(signed_id);
     const auto previous=visuals_.find(signed_id);
     if(previous==visuals_.end())return;
@@ -1433,6 +1497,9 @@ VisualResourceIncarnation RetainedStaticScene::visual_resource(
 
 bool RetainedStaticScene::visual_declare_mesh(VisualResourceIncarnation resource, bool present) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_declare_mesh, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); io(d.out, present);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity) return false;
     if (entity->mesh_declared == present) return true;
@@ -1460,6 +1527,9 @@ bool RetainedStaticScene::visual_bind_database(VisualResourceIncarnation resourc
     std::uint64_t source_generation,
     std::shared_ptr<const AnimationDatabaseAsset> database) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_bind_database, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); io(d.out, source_generation); d.ref(database);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity || !source_generation || !database ||
         !database->identity.container_incarnation || database->identity.canonical_name.empty()) return false;
@@ -1571,7 +1641,12 @@ bool RetainedStaticScene::visual_refresh_envelope(VisualEntity& entity, bool inv
 
 bool RetainedStaticScene::visual_publish_assembly(VisualResourceIncarnation resource,
     std::shared_ptr<const VisualAssemblyAsset> assembly, bool weapons_replaced) noexcept {
+    auto* r = recorder();
+    if (r) r->asset(assembly); // parts and textures: outside the scene lock
     ExclusiveLock guard(lock_);
+    if (r) r->delta(RetainedOp::visual_publish_assembly, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); d.ref(assembly); io(d.out, weapons_replaced);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity || !assembly || !assembly->revision || !assembly->skeleton ||
         assembly->parts.empty() || assembly->parts.size() > kVisualPartLimit ||
@@ -1624,6 +1699,9 @@ bool RetainedStaticScene::visual_replace_surface(std::uint64_t id,
     std::shared_ptr<const OwnedVisualSurface> value) noexcept {
     if (!id || (value && value->id != id)) return false;
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_replace_surface, [&](RetainedDeltaOut& d) {
+        io(d.out, id); d.ref(value);
+    });
     visual_frame_changed_unlocked();
     bool success = true;
     for (auto& source : sources_) {
@@ -1702,7 +1780,12 @@ bool RetainedStaticScene::visual_replace_generated_texture(const std::string& so
     if (source_name.empty() || (value &&
         (value->value_source != source ||
          value->source_name != source_name || !value->source || !value->value_serial))) return false;
+    auto* r = recorder();
+    if (r) r->asset(value); // texture bytes: outside the scene lock
     ExclusiveLock guard(lock_);
+    if (r) r->delta(RetainedOp::visual_replace_generated_texture, [&](RetainedDeltaOut& d) {
+        io(d.out, source_name); d.ref(value); io(d.out, source);
+    });
     bool success = true;
     bool values_changed = false;
     retire_detached_using_unlocked([&source_name, source](const VisualPartAsset& part) {
@@ -1757,6 +1840,12 @@ bool RetainedStaticScene::visual_replace_generated_texture(const std::string& so
 bool RetainedStaticScene::visual_publish_route(VisualResourceIncarnation resource,
     std::shared_ptr<const CompiledVisualRoute> route) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_route, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource);
+        const bool present = bool(route);
+        io(d.out, present);
+        if (present) delta_io(d, *route);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity || !route || !route->generation) return false;
     entity->tick.route_start_tick = route->values.start_tick;
@@ -1772,6 +1861,9 @@ bool RetainedStaticScene::visual_publish_intent(VisualResourceIncarnation resour
     VisualPoseState anchor{};
     if (!anchor_visual_pose(intent, root, anchor, failure)) return false;
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_intent, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); delta_io(d, intent); io(d.out, root);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity) return visual_failure(failure, "intent.resource");
     if (intent.resource_source_generation && entity->resolver_generation != intent.resource_source_generation)
@@ -1818,6 +1910,9 @@ bool RetainedStaticScene::visual_publish_intent(VisualResourceIncarnation resour
 bool RetainedStaticScene::visual_publish_root_rotation(VisualResourceIncarnation resource,
     const std::array<float, 4>& rotation, double time, const char** failure) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_root_rotation, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); io(d.out, rotation); io(d.out, time);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity) return visual_failure(failure, "placement.resource");
     auto next = entity->anchor;
@@ -1838,6 +1933,9 @@ bool RetainedStaticScene::visual_append_idle(VisualResourceIncarnation resource,
     std::uint64_t event, double time, VisualClipSelection selected, const char** failure) noexcept {
     try {
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_append_idle, [&](RetainedDeltaOut& d) {
+            put_resource(d, resource); io(d.out, event); io(d.out, time); delta_io(d, selected);
+        });
         auto* entity = visual_find_unlocked(resource);
         if (!entity) return visual_failure(failure, "idle.resource");
         if (!event) return visual_failure(failure, "idle.event");
@@ -1879,6 +1977,9 @@ bool RetainedStaticScene::visual_publish_tick_values(VisualResourceIncarnation r
     for (float extent : values.target_half_extent)
         if (!std::isfinite(extent) || extent < 0) return visual_failure(failure, "tick.target_extent");
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_tick_values, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); delta_io(d, values);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity) return visual_failure(failure, "tick.resource");
     const auto& old=entity->tick;
@@ -1918,6 +2019,9 @@ bool RetainedStaticScene::visual_publish_tick_values(VisualResourceIncarnation r
 bool RetainedStaticScene::visual_publish_detection(
     VisualResourceIncarnation resource, bool detected) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_detection, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); io(d.out, detected);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity || !entity->tick.unit) return false;
     const auto flags = (entity->tick.object_flags & ~0x00400000u) |
@@ -1949,12 +2053,18 @@ void RetainedStaticScene::visual_reject_detection_unlocked(
 void RetainedStaticScene::visual_reject_detection(
     VisualResourceIncarnation resource, const char* predicate) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_reject_detection, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); delta_text(d, predicate);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (entity) visual_reject_detection_unlocked(*entity,predicate);
 }
 
 void RetainedStaticScene::visual_reject_detected_unit_detection(const char* predicate) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_reject_detected_unit_detection, [&](RetainedDeltaOut& d) {
+        delta_text(d, predicate);
+    });
     for (auto& item : visuals_)
         if (item.second.tick.object_flags & 0x00400000u)
             visual_reject_detection_unlocked(item.second,predicate);
@@ -1966,6 +2076,29 @@ bool RetainedStaticScene::visual_tick_values(VisualResourceIncarnation resource,
     const auto* entity = visual_find_unlocked(resource);
     if (!entity) return false;
     values = entity->tick;
+    return true;
+}
+
+void RetainedStaticScene::visual_publish_preview(VisualResourceIncarnation resource, std::uint32_t view,
+    const VisualClipSelection& selection) noexcept {
+    try {
+        ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_preview, [&](RetainedDeltaOut& d) {
+            put_resource(d, resource); io(d.out, view); delta_io(d, selection);
+        });
+        const std::uint64_t key = (std::uint64_t(std::uint32_t(resource.signed_id)) << 1) | (view & 1u);
+        preview_selections_[key] = {resource, selection};
+    } catch (...) {}
+}
+
+bool RetainedStaticScene::visual_preview_selection(VisualResourceIncarnation resource, std::uint32_t view,
+    VisualClipSelection& selection) const noexcept {
+    SharedLock guard(lock_);
+    const std::uint64_t key = (std::uint64_t(std::uint32_t(resource.signed_id)) << 1) | (view & 1u);
+    const auto found = preview_selections_.find(key);
+    if (found == preview_selections_.end() || found->second.first.signed_id != resource.signed_id ||
+        found->second.first.serial != resource.serial) return false;
+    try { selection = found->second.second; } catch (...) { return false; }
     return true;
 }
 
@@ -2080,6 +2213,9 @@ bool RetainedStaticScene::visual_publish_object_pose_unlocked(
 bool RetainedStaticScene::visual_publish_object_pose(
     const VisualObjectPublicationSnapshot& snapshot,const VisualObjectPose& values) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_object_pose, [&](RetainedDeltaOut& d) {
+        delta_io(d, snapshot); delta_io(d, values);
+    });
     bool changed=false;
     return visual_publish_object_pose_unlocked(snapshot,values,true,changed);
 }
@@ -2088,6 +2224,9 @@ bool RetainedStaticScene::visual_reject_object_pose_if_current(
     const VisualObjectPublicationSnapshot& snapshot,RetainedVisualStatus reason,
     const char* predicate,const char* scope) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_reject_object_pose_if_current, [&](RetainedDeltaOut& d) {
+        delta_io(d, snapshot); io(d.out, reason); delta_text(d, predicate); delta_text(d, scope);
+    });
     auto* entity=visual_find_unlocked(snapshot.resource);
     if(!entity || !visual_object_publication_current_unlocked(*entity,snapshot))return false;
     visual_reject_unlocked(*entity,reason,predicate,scope,true);
@@ -2144,6 +2283,8 @@ bool RetainedStaticScene::visual_publish_bridges(
         if(!bridge_index_dirty_ && accepted_bridge_planes_.size()==planes.size() &&
             (planes.empty() || std::memcmp(accepted_bridge_planes_.data(),planes.data(),
                 planes.size()*sizeof(VisualBridgePlane))==0)) return true;
+        // After the unchanged fast path, which mutates nothing (per tick).
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_bridges, [&](RetainedDeltaOut& d) { io(d.out, planes); });
         auto accepted=planes;
         std::map<std::int32_t,std::vector<VisualBridgePlane>> replacement;
         for (const auto& plane:planes) {
@@ -2219,6 +2360,8 @@ bool RetainedStaticScene::visual_publish_quest_lights(
                         a.source.generation==b.source.generation &&
                         a.source.positive_world_epoch==b.source.positive_world_epoch;
                 })) return true;
+        // Recorded where it changes the scene (an unchanged list is per frame).
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_quest_lights, [&](RetainedDeltaOut& d) { delta_io(d, lights); });
         quest_lights_.swap(lights);
         visual_frame_changed_unlocked();
         return true;
@@ -2227,6 +2370,7 @@ bool RetainedStaticScene::visual_publish_quest_lights(
 
 void RetainedStaticScene::visual_publish_highlight(const RetainedHighlightState& state) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_highlight, [&](RetainedDeltaOut& d) { delta_io(d, state); });
     const auto& old=highlight_;
     const bool same_hover=old.hover.signed_id==state.hover.signed_id &&
         old.hover.serial==state.hover.serial;
@@ -2267,6 +2411,8 @@ bool RetainedStaticScene::visual_publish_world_point_lights(
                         a.casts_shadow==b.casts_shadow &&
                         a.attached==b.attached && a.hero==b.hero;
                 })) return true;
+        // Recorded where it changes the scene (an unchanged list is per frame).
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_world_point_lights, [&](RetainedDeltaOut& d) { delta_io(d, lights); });
         world_point_lights_.swap(lights);
         visual_frame_changed_unlocked();
         return true;
@@ -2288,6 +2434,8 @@ bool RetainedStaticScene::visual_publish_forced_weapon_ids(
         std::sort(desired.begin(),desired.end());
         desired.erase(std::unique(desired.begin(),desired.end()),desired.end());
         ExclusiveLock guard(lock_);
+        if (auto* r = recorder(); r && !(desired.empty() && !forced_weapon_hidden_any_))
+            r->delta(RetainedOp::visual_publish_forced_weapon_ids, [&](RetainedDeltaOut& d) { io(d.out, desired); });
         // The usual tick: no forced ids and none left hidden. Walking every
         // entity (one cold node each) for nothing cost ~2% of the main
         // thread in a pan sample.
@@ -2348,6 +2496,9 @@ void RetainedStaticScene::visual_reject_unlocked(VisualEntity& entity,
 void RetainedStaticScene::visual_reject(VisualResourceIncarnation resource,
     RetainedVisualStatus reason, const char* predicate, const char* scope) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_reject, [&](RetainedDeltaOut& d) {
+        put_resource(d, resource); io(d.out, reason); delta_text(d, predicate); delta_text(d, scope);
+    });
     auto* entity = visual_find_unlocked(resource);
     if (!entity) return;
     // A partial/unknown producer cannot leave an apparently coherent old
@@ -2359,6 +2510,9 @@ void RetainedStaticScene::visual_reject(VisualResourceIncarnation resource,
 void RetainedStaticScene::visual_reject_all(RetainedVisualStatus reason,
     const char* predicate, const char* scope) noexcept {
     ExclusiveLock guard(lock_);
+    if (auto* r = recorder()) r->delta(RetainedOp::visual_reject_all, [&](RetainedDeltaOut& d) {
+        io(d.out, reason); delta_text(d, predicate); delta_text(d, scope);
+    });
     retire_all_detached_unlocked();
     for (auto& item : visuals_) {
         auto& entity = item.second;
@@ -3018,6 +3172,8 @@ bool RetainedStaticScene::visual_commit_tick(double time, const char** failure,
     try {
         if (committed_entities) *committed_entities = 0;
         ExclusiveLock guard(lock_);
+        auto* r = recorder();
+        if (r) r->delta(RetainedOp::visual_commit_tick, [&](RetainedDeltaOut& d) { io(d.out, time); });
         if (!std::isfinite(time) || time != std::floor(time)) return visual_failure(failure, "tick.time");
         if (time == visual_tick_time_) {
             if (committed_entities && visual_frame_cache_)
@@ -3080,5 +3236,6 @@ bool RetainedStaticScene::visual_commit_tick(double time, const char** failure,
         return true;
     } catch (...) { return visual_failure(failure, "tick.exception"); }
 }
+
 
 } // namespace owned

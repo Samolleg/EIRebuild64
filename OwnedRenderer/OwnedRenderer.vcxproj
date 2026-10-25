@@ -77,6 +77,32 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_impostors.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\simplifier.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\meshoptimizer\src\allocator.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_device.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_diagnostics.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_flush.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_frame.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_game.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_native_queue.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_shadows.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_static_set.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_surfaces.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ui.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_prepare.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_state.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_shadows.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_world_consumers.cpp"><ForcedIncludeFiles>$(MSBuildThisFileDirectory)EmbeddedBridgeRename.h;%(ForcedIncludeFiles)</ForcedIncludeFiles></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_terrain_views.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_codec.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_selected.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_client.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_piece.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\ground_cover_neighbour.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\camp_icon_decode.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\native_prebuilt.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_remote_stubs.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\terrain_bake_cells.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\build_version.cpp" />
   </ItemGroup>
 
   <ItemGroup><ClInclude Include="$(OwnedRendererRoot)Source\liquid_surf.h" /><ClInclude Include="$(OwnedRendererRoot)Source\embedded_game_effects.h" /></ItemGroup>

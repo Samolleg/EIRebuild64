@@ -1,5 +1,27 @@
 # Renderer source provenance
 
+RUPD01 (2026-10-25): current imported upstream is
+`accepted/water-untess-fix-20261025`, commit
+`24e5d54828a8bc0a8a1573c4aec68b7aed34838b` (from candidate-79).
+The source host integration is maintained in EIRebuild `task/RUPD01`, based
+on `3053bac`. The older revision notes below record the preserved local work,
+not the current upstream identity. Local changes follow the new renderer and
+owned-world translation units: typed embedded ingress, composite failure
+reporting, object border fog, resource sharing and world retirement, and
+x86 size guards. Source managers and renderer use the same ordered, typed
+figure/texture archive chains, including redress and menus.
+The x64 remote device/host and core transport are not linked. Embedded calls
+use the local neighbour stream; remote-only API entry points reject use.
+FSR 2 remains the upstream local-device implementation. Upstream DLSS needs
+its x64 host and is unavailable in EIRebuild x86; no substitute is supplied.
+Temporary pane, focus/startup, corpse-shadow, shadow summary, VA and camera
+trace diagnostics are excluded for EID3D11_EMBEDDED. The permanent game
+journal and accepted composite diagnostics are retained.
+Game gamma-ramp application is imported. The source host builds the original
+display ramp from its brightness/contrast/gamma settings, supplies it at
+initialization and on slider changes, and restores saved values on leaving
+the options screen. See RUPD01/REPORT.md for the acceptance limits.
+
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
 
 This is the EIRebuild embedded integration, based on candidate-79 (`791acfb9b10ece99c0afa832862687eb4ae115b0`) with local

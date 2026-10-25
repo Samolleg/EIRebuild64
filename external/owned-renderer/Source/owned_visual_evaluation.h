@@ -236,8 +236,6 @@ bool sample_visual_skeleton(const ModelCpuAsset& model,
                             double phase,
                             std::vector<VisualNodeSample>& nodes,
                             bool include_morphs = true);
-bool visual_morph_frames(const AnimationTrackAsset* track, double phase,
-                         NativeMorphFramesView& result) noexcept;
 // The ANM quaternion action preserves its supplied magnitude. This matrix is
 // shared by both visual passes, including attachments and non-unit samples.
 std::array<float, 3> visual_root_vector(const VisualPoseState& pose,

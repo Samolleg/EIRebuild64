@@ -579,6 +579,7 @@ void Renderer::render_precipitation() {
 
     PrecipitationConstants c{};
     std::memcpy(c.clip,view.constants.clip,sizeof(c.clip));
+    jitter_clip(c.clip);
     std::memcpy(c.eye,view.constants.eye,sizeof(c.eye));
     c.eye[3] = view.constants.right[3];  // pixel scale
     if (sand) {
@@ -754,7 +755,7 @@ void Renderer::render_precipitation() {
     ID3D11ShaderResourceView* saved_vs=nullptr;context_->VSGetShaderResources(0,1,&saved_vs);
     ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
     context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
-    D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1};context_->RSSetViewports(1,&viewport);
+    D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(precipitation_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(precipitation_blend_.Get(),factor,~0u);
     context_->IASetInputLayout(nullptr);context_->IASetVertexBuffers(0,0,nullptr,nullptr,nullptr);

@@ -298,6 +298,7 @@ void Renderer::render_ambient_particles() {
     const unsigned columns = view.columns, rows = view.rows;
     const float density = configured_floating_point(debug_overlay_.config(),"ambient_particle_density",1.f);
     AmbientConstants& c = view.constants;
+    jitter_clip(c.clip); // the particles and waterfall shells draw with the upscaler jitter
 
     // Environment: region, cave, hour and weather from the game; wind is the
     // renderer's shared wind of this world frame (the map's wind when wind
@@ -359,7 +360,7 @@ void Renderer::render_ambient_particles() {
             ID3D11SamplerState* saved_sampler=nullptr;context_->PSGetSamplers(0,1,&saved_sampler);
             ID3D11ShaderResourceView* no_depth=nullptr;context_->PSSetShaderResources(2,1,&no_depth); // depth is bound for testing
             context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),world_dsv_.Get());
-            D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1};context_->RSSetViewports(1,&viewport);
+            D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
             context_->RSSetState(ambient_raster_.Get());context_->OMSetDepthStencilState(fall_shell_depth_.Get(),0);
             const float factor[4]{1,1,1,1};context_->OMSetBlendState(ambient_blend_.Get(),factor,~0u);
             context_->IASetInputLayout(nullptr);context_->IASetVertexBuffers(0,0,nullptr,nullptr,nullptr);
@@ -387,7 +388,7 @@ void Renderer::render_ambient_particles() {
     ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
     transition_profile_pass("ambient_particles");
     context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
-    D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1};context_->RSSetViewports(1,&viewport);
+    D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(ambient_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(ambient_blend_.Get(),factor,~0u);
     context_->IASetInputLayout(nullptr);context_->IASetVertexBuffers(0,0,nullptr,nullptr,nullptr);

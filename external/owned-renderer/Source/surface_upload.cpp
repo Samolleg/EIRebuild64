@@ -1,8 +1,9 @@
 #include "renderer.h"
+#include "surface_convert.h"
 #include "texture_mips.h"
+#include "x64_remote_surfaces.h"
 
 #include <algorithm>
-#include <array>
 #include <cstring>
 #include <new>
 #include <vector>
@@ -12,209 +13,11 @@ namespace {
 #ifdef EID3D11_TESTING
 bool fail_next_surface_srv_creation = false;
 #endif
-
-struct ChannelDecoder {
-    std::uint32_t mask = 0;
-    std::uint32_t maximum = 0;
-    unsigned shift = 0;
-    std::uint8_t fallback = 0;
-    bool use_lookup = false;
-    std::array<std::uint8_t, 256> lookup{};
-
-    std::uint8_t decode(std::uint32_t raw) const noexcept {
-        if (!mask) return fallback;
-        const std::uint32_t value = (raw & mask) >> shift;
-        if (use_lookup) return lookup[value];
-        return static_cast<std::uint8_t>(value * 255u / maximum);
-    }
-};
-
-ChannelDecoder make_channel_decoder(std::uint32_t mask,
-                                    std::uint8_t fallback) noexcept {
-    ChannelDecoder decoder{};
-    decoder.mask = mask;
-    decoder.fallback = fallback;
-    if (!mask) return decoder;
-    while (((mask >> decoder.shift) & 1u) == 0u) ++decoder.shift;
-    decoder.maximum = mask >> decoder.shift;
-    decoder.use_lookup = decoder.maximum <= 255u;
-    if (decoder.use_lookup) {
-        for (std::uint32_t value = 0; value <= decoder.maximum; ++value)
-            decoder.lookup[value] = static_cast<std::uint8_t>(
-                value * 255u / decoder.maximum);
-    }
-    return decoder;
-}
-
-template <UINT SourceBytes>
-std::uint32_t load_pixel(const std::uint8_t* source) noexcept {
-    if constexpr (SourceBytes == 1) {
-        return source[0];
-    } else if constexpr (SourceBytes == 2) {
-        return static_cast<std::uint32_t>(source[0]) |
-            (static_cast<std::uint32_t>(source[1]) << 8);
-    } else if constexpr (SourceBytes == 3) {
-        return static_cast<std::uint32_t>(source[0]) |
-            (static_cast<std::uint32_t>(source[1]) << 8) |
-            (static_cast<std::uint32_t>(source[2]) << 16);
-    } else {
-        std::uint32_t raw = 0;
-        std::memcpy(&raw, source, sizeof(raw));
-        return raw;
-    }
-}
-
-template <UINT SourceBytes, bool HasAlpha, bool HasColorKey>
-void convert_pixels(const SurfaceImage& image, const RECT& rect, UINT width,
-                    UINT height, const ChannelDecoder& red,
-                    const ChannelDecoder& green, const ChannelDecoder& blue,
-                    const ChannelDecoder& alpha, std::uint32_t* destination) noexcept {
-    for (UINT y = 0; y < height; ++y) {
-        const auto* source = image.pixels.data() +
-            static_cast<std::size_t>(rect.top + static_cast<LONG>(y)) * image.pitch +
-            static_cast<std::size_t>(rect.left) * SourceBytes;
-        auto* row = destination + static_cast<std::size_t>(y) * width;
-        for (UINT x = 0; x < width; ++x, source += SourceBytes) {
-            const std::uint32_t raw = load_pixel<SourceBytes>(source);
-            std::uint8_t a = HasAlpha ? alpha.decode(raw) : 255u;
-            if constexpr (HasColorKey) {
-                if (raw >= image.color_key.dwColorSpaceLowValue &&
-                    raw <= image.color_key.dwColorSpaceHighValue) a = 0;
-            }
-            row[x] = (static_cast<std::uint32_t>(a) << 24) |
-                (static_cast<std::uint32_t>(red.decode(raw)) << 16) |
-                (static_cast<std::uint32_t>(green.decode(raw)) << 8) |
-                blue.decode(raw);
-        }
-    }
-}
-
-template <bool HasAlpha, bool HasColorKey>
-void convert_strided_pixels(const SurfaceImage& image, const RECT& rect,
-                            UINT width, UINT height, UINT source_bytes,
-                            const ChannelDecoder& red,
-                            const ChannelDecoder& green,
-                            const ChannelDecoder& blue,
-                            const ChannelDecoder& alpha,
-                            std::uint32_t* destination) noexcept {
-    for (UINT y = 0; y < height; ++y) {
-        const auto* source = image.pixels.data() +
-            static_cast<std::size_t>(rect.top + static_cast<LONG>(y)) * image.pitch +
-            static_cast<std::size_t>(rect.left) * source_bytes;
-        auto* row = destination + static_cast<std::size_t>(y) * width;
-        for (UINT x = 0; x < width; ++x, source += source_bytes) {
-            const std::uint32_t raw = load_pixel<4>(source);
-            std::uint8_t a = HasAlpha ? alpha.decode(raw) : 255u;
-            if constexpr (HasColorKey) {
-                if (raw >= image.color_key.dwColorSpaceLowValue &&
-                    raw <= image.color_key.dwColorSpaceHighValue) a = 0;
-            }
-            row[x] = (static_cast<std::uint32_t>(a) << 24) |
-                (static_cast<std::uint32_t>(red.decode(raw)) << 16) |
-                (static_cast<std::uint32_t>(green.decode(raw)) << 8) |
-                blue.decode(raw);
-        }
-    }
-}
-
-template <UINT SourceBytes, bool HasAlpha, bool HasColorKey>
-void convert_standard_bgr(const SurfaceImage& image, const RECT& rect,
-                          UINT width, UINT height,
-                          std::uint32_t* destination) noexcept {
-    for (UINT y = 0; y < height; ++y) {
-        const auto* source = image.pixels.data() +
-            static_cast<std::size_t>(rect.top + static_cast<LONG>(y)) * image.pitch +
-            static_cast<std::size_t>(rect.left) * SourceBytes;
-        auto* row = destination + static_cast<std::size_t>(y) * width;
-        for (UINT x = 0; x < width; ++x, source += SourceBytes) {
-            const std::uint32_t raw = load_pixel<SourceBytes>(source);
-            std::uint32_t alpha = HasAlpha ? (raw & 0xff000000u) : 0xff000000u;
-            if constexpr (HasColorKey) {
-                if (raw >= image.color_key.dwColorSpaceLowValue &&
-                    raw <= image.color_key.dwColorSpaceHighValue) alpha = 0;
-            }
-            row[x] = alpha | (raw & 0x00ffffffu);
-        }
-    }
-}
-
-template <UINT SourceBytes, bool HasAlpha>
-void dispatch_standard_bgr(const SurfaceImage& image, const RECT& rect,
-                           UINT width, UINT height,
-                           std::uint32_t* destination) noexcept {
-    if (image.has_color_key) {
-        convert_standard_bgr<SourceBytes, HasAlpha, true>(
-            image, rect, width, height, destination);
-    } else {
-        convert_standard_bgr<SourceBytes, HasAlpha, false>(
-            image, rect, width, height, destination);
-    }
-}
-
-template <UINT SourceBytes, bool HasAlpha>
-void dispatch_keyed_conversion(const SurfaceImage& image, const RECT& rect,
-                               UINT width, UINT height,
-                               const ChannelDecoder& red,
-                               const ChannelDecoder& green,
-                               const ChannelDecoder& blue,
-                               const ChannelDecoder& alpha,
-                               std::uint32_t* destination) noexcept {
-    if (image.has_color_key) {
-        convert_pixels<SourceBytes, HasAlpha, true>(
-            image, rect, width, height, red, green, blue, alpha, destination);
-    } else {
-        convert_pixels<SourceBytes, HasAlpha, false>(
-            image, rect, width, height, red, green, blue, alpha, destination);
-    }
-}
-
-template <UINT SourceBytes>
-void dispatch_alpha_conversion(const SurfaceImage& image, const RECT& rect,
-                               UINT width, UINT height,
-                               const ChannelDecoder& red,
-                               const ChannelDecoder& green,
-                               const ChannelDecoder& blue,
-                               const ChannelDecoder& alpha,
-                               std::uint32_t* destination) noexcept {
-    if (image.format.dwRGBAlphaBitMask) {
-        dispatch_keyed_conversion<SourceBytes, true>(
-            image, rect, width, height, red, green, blue, alpha, destination);
-    } else {
-        dispatch_keyed_conversion<SourceBytes, false>(
-            image, rect, width, height, red, green, blue, alpha, destination);
-    }
-}
-
 } // namespace
 
-// BC2/BC3 retain the encoded DXT2/DXT4 premultiplied values as supplied.
-// Format selection does not unpremultiply texels or alter the caller's blend state.
 bool surface_dxgi_format(const DDPIXELFORMAT& format, DXGI_FORMAT& output,
                          UINT& block_bytes) noexcept {
-    block_bytes = 0;
-    if (format.dwFlags & DDPF_FOURCC) {
-        if (format.dwFourCC == MAKEFOURCC('D', 'X', 'T', '1')) {
-            output = DXGI_FORMAT_BC1_UNORM;
-            block_bytes = 8;
-            return true;
-        }
-        if (format.dwFourCC == MAKEFOURCC('D', 'X', 'T', '2') ||
-            format.dwFourCC == MAKEFOURCC('D', 'X', 'T', '3')) {
-            output = DXGI_FORMAT_BC2_UNORM;
-            block_bytes = 16;
-            return true;
-        }
-        if (format.dwFourCC == MAKEFOURCC('D', 'X', 'T', '4') ||
-            format.dwFourCC == MAKEFOURCC('D', 'X', 'T', '5')) {
-            output = DXGI_FORMAT_BC3_UNORM;
-            block_bytes = 16;
-            return true;
-        }
-        return false;
-    }
-    if (!(format.dwFlags & DDPF_RGB) || !format.dwRGBBitCount) return false;
-    output = DXGI_FORMAT_B8G8R8A8_UNORM;
-    return true;
+    return surface_convert::target_format(format, output, block_bytes);
 }
 
 bool surface_pixels_round_trip_exact(const SurfaceImage& image) noexcept {
@@ -288,117 +91,18 @@ bool is_full_rect(const SurfaceImage& image, const RECT& rect) noexcept {
         rect.bottom == static_cast<LONG>(image.height);
 }
 
-struct PreparedUpload {
-    const void* data = nullptr;
-    UINT pitch = 0;
-    std::uint64_t bytes = 0;
-    std::vector<std::uint32_t> converted;
-};
+
+using PreparedUpload = surface_convert::Prepared;
 
 HRESULT prepare_upload(const SurfaceImage& image, const RECT& rect,
                        UINT block_bytes, PreparedUpload& output) {
-    const UINT width = static_cast<UINT>(rect.right - rect.left);
-    const UINT height = static_cast<UINT>(rect.bottom - rect.top);
-    if (block_bytes) {
-        output.data = image.pixels.data() +
-            static_cast<std::size_t>(rect.top / 4) * image.pitch +
-            static_cast<std::size_t>(rect.left / 4) * block_bytes;
-        output.pitch = static_cast<UINT>(image.pitch);
-        output.bytes = static_cast<std::uint64_t>((width + 3) / 4) *
-            ((height + 3) / 4) * block_bytes;
-        return S_OK;
-    }
-
-    const UINT source_bytes = std::max<UINT>(1, image.format.dwRGBBitCount / 8);
-    const bool direct_bgra = source_bytes == 4 && !image.has_color_key &&
-        image.format.dwRBitMask == 0x00ff0000 &&
-        image.format.dwGBitMask == 0x0000ff00 &&
-        image.format.dwBBitMask == 0x000000ff &&
-        image.format.dwRGBAlphaBitMask == 0xff000000;
-    output.bytes = static_cast<std::uint64_t>(width) * height * 4u;
-    if (direct_bgra) {
-        output.data = image.pixels.data() +
-            static_cast<std::size_t>(rect.top) * image.pitch +
-            static_cast<std::size_t>(rect.left) * source_bytes;
-        output.pitch = static_cast<UINT>(image.pitch);
-        return S_OK;
-    }
-
-    try {
-        output.converted.resize(static_cast<std::size_t>(width) * height);
-    } catch (const std::bad_alloc&) {
-        return E_OUTOFMEMORY;
-    }
-    auto* destination = output.converted.data();
-    const bool standard_bgr = image.format.dwRBitMask == 0x00ff0000 &&
-        image.format.dwGBitMask == 0x0000ff00 &&
-        image.format.dwBBitMask == 0x000000ff &&
-        (!image.format.dwRGBAlphaBitMask ||
-         image.format.dwRGBAlphaBitMask == 0xff000000);
-    if (standard_bgr && source_bytes == 3 &&
-        !image.format.dwRGBAlphaBitMask) {
-        dispatch_standard_bgr<3, false>(image, rect, width, height, destination);
-        output.data = output.converted.data();
-        output.pitch = width * 4u;
-        return S_OK;
-    }
-    if (standard_bgr && source_bytes == 4) {
-        if (image.format.dwRGBAlphaBitMask) {
-            dispatch_standard_bgr<4, true>(image, rect, width, height, destination);
-        } else {
-            dispatch_standard_bgr<4, false>(image, rect, width, height, destination);
-        }
-        output.data = output.converted.data();
-        output.pitch = width * 4u;
-        return S_OK;
-    }
-    const ChannelDecoder red = make_channel_decoder(image.format.dwRBitMask, 0);
-    const ChannelDecoder green = make_channel_decoder(image.format.dwGBitMask, 0);
-    const ChannelDecoder blue = make_channel_decoder(image.format.dwBBitMask, 0);
-    const ChannelDecoder alpha = make_channel_decoder(
-        image.format.dwRGBAlphaBitMask, 255);
-    switch (source_bytes) {
-    case 1:
-        dispatch_alpha_conversion<1>(image, rect, width, height,
-                                     red, green, blue, alpha, destination);
-        break;
-    case 2:
-        dispatch_alpha_conversion<2>(image, rect, width, height,
-                                     red, green, blue, alpha, destination);
-        break;
-    case 3:
-        dispatch_alpha_conversion<3>(image, rect, width, height,
-                                     red, green, blue, alpha, destination);
-        break;
-    case 4:
-        dispatch_alpha_conversion<4>(image, rect, width, height,
-                                     red, green, blue, alpha, destination);
-        break;
-    default:
-        if (image.format.dwRGBAlphaBitMask) {
-            if (image.has_color_key) {
-                convert_strided_pixels<true, true>(
-                    image, rect, width, height, source_bytes,
-                    red, green, blue, alpha, destination);
-            } else {
-                convert_strided_pixels<true, false>(
-                    image, rect, width, height, source_bytes,
-                    red, green, blue, alpha, destination);
-            }
-        } else if (image.has_color_key) {
-            convert_strided_pixels<false, true>(
-                image, rect, width, height, source_bytes,
-                red, green, blue, alpha, destination);
-        } else {
-            convert_strided_pixels<false, false>(
-                image, rect, width, height, source_bytes,
-                red, green, blue, alpha, destination);
-        }
-        break;
-    }
-    output.data = output.converted.data();
-    output.pitch = width * 4u;
-    return S_OK;
+    surface_convert::Source source;
+    source.pixels = image.pixels.data();
+    source.pitch = static_cast<std::size_t>(image.pitch);
+    source.format = image.format;
+    source.has_color_key = image.has_color_key;
+    source.color_key = image.color_key;
+    return surface_convert::prepare(source, rect, block_bytes, output);
 }
 
 } // namespace
@@ -563,6 +267,137 @@ HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
         result->full_surface = full;
         result->dirty_rect = dirty;
         result->upload_bytes = upload.bytes;
+    }
+    return S_OK;
+}
+
+// Remote mode: the same state transitions as upload_surface_image, but the
+// host converts and writes (surface protocol). Only the texture and view
+// creations stay proxy device calls (client handles); the content steps go
+// out as SurfaceStep records, queued for the scene thread's commit when
+// `queued`, else applied at once in ring order.
+HRESULT upload_surface_image_remote(ID3D11Device* device, bool queued,
+                                    SurfaceImage& image, SurfaceUploadResult* result) {
+    if (result) *result = {};
+    if (!device || !image.width || !image.height || image.pitch <= 0) return E_INVALIDARG;
+
+    DXGI_FORMAT target_format = DXGI_FORMAT_UNKNOWN;
+    UINT block_bytes = 0;
+    if (!surface_dxgi_format(image.format, target_format, block_bytes)) return E_NOTIMPL;
+    const bool generate_mips=image.static_mip_hint&&image.world_mip_use&&!image.gpu_captured&&!block_bytes;
+    const SurfaceUploadShape current_shape = surface_upload_shape(image);
+    const bool shape_matches = same_surface_upload_shape(image.uploaded_shape, current_shape);
+    const bool texture_matches = shape_matches &&
+        matching_texture(image.texture.Get(), image.width, image.height, target_format,generate_mips);
+    if (texture_matches && image.srv && image.uploaded_generation == image.generation)
+        return S_OK;
+
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = image.width;
+    description.Height = image.height;
+    description.MipLevels = generate_mips?full_mip_count(image.width,image.height):1;
+    description.ArraySize = 1;
+    description.Format = target_format;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if(generate_mips){description.BindFlags|=D3D11_BIND_RENDER_TARGET;description.MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS;}
+
+    if (image.cpu_released) {
+        // The texture is the only copy (see upload_surface_image): only the
+        // mip layout changed, so level 0 is copied on the host.
+        if (!shape_matches || image.uploaded_generation != image.generation || !image.texture)
+            return E_UNEXPECTED;
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        HRESULT hr = device->CreateTexture2D(&description, nullptr, &texture);
+        if (FAILED(hr)) return hr;
+        hr = device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
+        if (FAILED(hr)) return hr;
+        x64remote::surface_copy(queued, texture.Get(), srv.Get(), image.texture.Get(), false, generate_mips);
+        image.mip_source_used = true;
+        image.texture = texture;
+        image.srv = srv;
+        ++image.texture_serial;
+        if (result) {
+            result->uploaded = true;
+            result->recreated = true;
+            result->full_surface = true;
+            result->dirty_rect = full_rect(image);
+        }
+        return S_OK;
+    }
+
+    const UINT source_rows = block_bytes ? std::max<UINT>(1, (image.height + 3) / 4) : image.height;
+    const std::size_t required = static_cast<std::size_t>(image.pitch) * source_rows;
+    try {
+        if (image.pixels.size() < required) image.pixels.resize(required);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    }
+
+    const bool recreate = !texture_matches;
+    const RECT dirty = normalize_dirty_rect(image, recreate, block_bytes);
+    const bool full = is_full_rect(image, dirty);
+    ComPtr<ID3D11Texture2D> texture = image.texture;
+    ComPtr<ID3D11ShaderResourceView> srv = image.srv;
+    if (recreate) {
+        texture.Reset();
+        srv.Reset();
+        HRESULT hr = device->CreateTexture2D(&description, nullptr, &texture);
+        if (FAILED(hr)) return hr;
+        hr = device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
+        if (FAILED(hr)) return hr;
+    } else if (!srv) {
+        const HRESULT hr = device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
+        if (FAILED(hr)) return hr;
+    }
+
+    // Read-only access: a shared (copy-on-write) pixel snapshot is not detached.
+    const std::uint8_t* const pixels = static_cast<const SurfaceImage&>(image).pixels.data();
+    const UINT width = static_cast<UINT>(dirty.right - dirty.left);
+    const UINT height = static_cast<UINT>(dirty.bottom - dirty.top);
+    const UINT source_bytes = std::max<UINT>(1, image.format.dwRGBBitCount / 8);
+    x64remote::SurfaceWrite write{};
+    write.texture = texture.Get();
+    write.srv = srv.Get();
+    write.x = static_cast<UINT>(dirty.left);
+    write.y = static_cast<UINT>(dirty.top);
+    write.width = width;
+    write.height = height;
+    write.source_pitch = static_cast<UINT>(image.pitch);
+    if (block_bytes) {
+        write.source = pixels + static_cast<std::size_t>(dirty.top / 4) * image.pitch +
+            static_cast<std::size_t>(dirty.left / 4) * block_bytes;
+        write.row_bytes = (width + 3) / 4 * block_bytes;
+        write.rows = (height + 3) / 4;
+    } else {
+        write.source = pixels + static_cast<std::size_t>(dirty.top) * image.pitch +
+            static_cast<std::size_t>(dirty.left) * source_bytes;
+        write.row_bytes = width * source_bytes;
+        write.rows = height;
+    }
+    write.format = &image.format;
+    write.color_key = image.has_color_key ? &image.color_key : nullptr;
+    write.generate_mips = generate_mips;
+    x64remote::surface_write(queued, write);
+
+    image.mip_source_used=true;
+    if (recreate) ++image.texture_serial;
+    image.texture = texture;
+    image.srv = srv;
+    image.uploaded_generation = image.generation;
+    image.uploaded_shape = current_shape;
+    image.gpu_captured = false;
+    clear_surface_dirty(image);
+    if (result) {
+        result->uploaded = true;
+        result->recreated = recreate;
+        result->full_surface = full;
+        result->dirty_rect = dirty;
+        result->upload_bytes = block_bytes
+            ? static_cast<std::uint64_t>(write.row_bytes) * write.rows
+            : static_cast<std::uint64_t>(width) * height * 4u;
     }
     return S_OK;
 }

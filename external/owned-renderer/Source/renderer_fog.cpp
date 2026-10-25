@@ -291,8 +291,11 @@ HRESULT Renderer::bind_world_fog() noexcept {
             const char* look = names[std::clamp(preset, 0, 2)];
             // One event per state change: the look, volume, stock read and problem.
             char state[256];
-            std::snprintf(state, sizeof(state), "%d|%d|%d|%s|%s|%s", preset, test_state ? 1 : 0, volume ? 1 : 0,
-                          fog.valid ? "" : fog.failure, problem ? problem : "", fog_volume_reason_);
+            // The region and outdoor state are in the key too, so each map's
+            // fog look is logged once (core mode compares them per map).
+            std::snprintf(state, sizeof(state), "%d|%d|%d|%s|%s|%s|%d|%d", preset, test_state ? 1 : 0, volume ? 1 : 0,
+                          fog.valid ? "" : fog.failure, problem ? problem : "", fog_volume_reason_,
+                          fog.environment.valid ? fog.environment.region : -1, fog.environment.valid && !fog.environment.cave ? 1 : 0);
             const bool event_changed = fog_status_state_ != state;
             if (event_changed || status_text_wanted())
                 std::snprintf(fog_status_, sizeof(fog_status_), "Fog %s%s | volume %s | stock %s | %s%s%s", look,

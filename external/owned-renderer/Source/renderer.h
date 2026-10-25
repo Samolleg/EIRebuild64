@@ -1,5 +1,6 @@
 #pragma once
 #include "scene_composite.h"
+#include "fsr2_upscaler.h"
 #include "bloom.h"
 #include "sun_shafts.h"
 #include "depth_of_field.h"
@@ -19,6 +20,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <atomic>
 #include <set>
@@ -72,6 +74,7 @@ struct CampDecoration;
 using Microsoft::WRL::ComPtr;
 
 struct CharacterPaneTextFrame;
+struct CharacterPaneTextFit;
 struct CharacterPaneGlyphAsset;
 struct RetainedSceneIdentitySnapshot;
 struct RetainedWorldPointLight;
@@ -82,6 +85,7 @@ struct TerrainTexturePage;
 struct AnimationClipAsset;
 struct HarnessCommand;
 struct NeighbourMapUpload;
+struct NeighbourPiece; // neighbour_piece.h
 struct FigureCpuAsset;
 struct LiquidSurfField;
 
@@ -199,6 +203,7 @@ struct SurfaceImage {
     std::uint8_t sampled_frames = 0;
     std::uint32_t restore_readbacks = 0;
     std::uint64_t last_restore_frame = 0;
+    std::uint64_t last_cpu_present = 0; // proxy present serial at the last Lock/DC session
     std::uint64_t texture_serial = 0; // advances when the texture object changes
     // The owned texture cache holds this texture as its copy of a generation
     // (one texture per image). An in-place GPU write must first move the
@@ -215,6 +220,8 @@ struct SurfaceImage {
 };
 
 void update_surface_memory_accounting(SurfaceImage& image) noexcept;
+// A pixel-free copy of the surface's GPU home and description (renderer_surfaces.cpp).
+std::shared_ptr<SurfaceImage> surface_snapshot(const SurfaceImage& image);
 void release_surface_memory_accounting(SurfaceImage& image) noexcept;
 // True when converting the CPU pixels to the GPU texture format and packing
 // the texture back reproduces every CPU byte (block data, or <=8-bit masks
@@ -391,6 +398,11 @@ HRESULT create_completed_surface_texture(ID3D11Device* device, const SurfaceImag
 HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
                              SurfaceImage& image,
                              SurfaceUploadResult* result = nullptr);
+// Remote device only (surface protocol): the host converts and writes;
+// `queued` steps wait for the scene thread's commit (game-thread uploads).
+HRESULT upload_surface_image_remote(ID3D11Device* device, bool queued,
+                                    SurfaceImage& image,
+                                    SurfaceUploadResult* result = nullptr);
 bool surface_dxgi_format(const DDPIXELFORMAT& format, DXGI_FORMAT& output,
                          UINT& block_bytes) noexcept;
 #ifdef EID3D11_TESTING
@@ -739,6 +751,7 @@ void append_terrain_tessellation_shader_programs(std::vector<ShaderProgram>& out
 void append_terrain_bake_shader_programs(std::vector<ShaderProgram>& out);
 void append_impostor_shader_programs(std::vector<ShaderProgram>& out);
 void append_hiz_shader_programs(std::vector<ShaderProgram>& out);
+void append_shadow_range_shader_programs(std::vector<ShaderProgram>& out);
 void append_liquid_wave_shader_programs(std::vector<ShaderProgram>& out);
 void append_ambient_occlusion_shader_programs(std::vector<ShaderProgram>& out);
 void append_sky_shader_programs(std::vector<ShaderProgram>& out);
@@ -860,11 +873,67 @@ struct ScenePresentInputs {
 // (frame_accounting.h; harness runs only).
 #define SCENE_ENTRY(reason) const ::frame_acct::Scope frame_acct_entry_(this->on_scene_thread() ? ::frame_acct::none : ::frame_acct::entry_part()); const ::owned::Renderer::SceneInlineScope scene_inline_scope_(const_cast<Renderer*>(this),reason)
 
+} // namespace owned
+#include "scene_commands_world.h"
+namespace owned {
+
+namespace scene_core { struct Present; struct Config; struct Resize; struct Readback; struct CaptureRequest; struct ProgressFrames; struct DisplayApplyResult; }  // core-mode commands (scene_core_types.h)
+namespace scene_ui {  // UI payloads the core-mode host runs (scene_commands_ui.h)
+struct Quad; struct Residency; struct SurfaceHandle; struct Blits; struct PresentImage; struct DrawFrame; struct Cursor;
+struct RetireSurface; struct FlushUi; struct ScreenRectangle; struct HudFrameLayer; struct SurfaceWrite; struct Packet;
+struct Capture; struct CampDecorationFrame; struct BeginCampPopup; struct EndCampPopup; struct ResetCampPopup;
+struct CharacterPaneText; struct GlyphAtlas;
+}
+
 class Renderer {
     friend struct ContactBlendSmokeAccess;
     friend struct LiquidSurfaceSmokeAccess;
     friend struct SceneCompositeSmokeAccess;
     friend struct AmbientMapRegressionAccess;
+    // Typed scene commands (scene_commands_world.h) run Renderer internals.
+    friend struct scene_cmd::BeginEngineFrame;
+    friend struct scene_cmd::BeginScene;
+    friend struct scene_cmd::EndScene;
+    friend struct scene_cmd::FlushNative;
+    friend struct scene_cmd::CompositeWorld;
+    friend struct scene_cmd::WorldLighting;
+    friend struct scene_cmd::Clear;
+    friend struct scene_cmd::GameParticles;
+    friend struct scene_cmd::GameRibbon;
+    friend struct scene_cmd::GameSelection;
+    friend struct scene_cmd::GameGlyphs;
+    friend struct scene_cmd::GamePrintRun;
+    friend struct scene_cmd::DiscardNative;
+    friend struct scene_cmd::TakeNativeCheckpoint;
+    friend struct scene_cmd::ReleaseNativeCheckpoint;
+    friend struct scene_cmd::RollbackNative;
+    friend struct scene_cmd::AbortDirectionalShadows;
+    friend struct scene_cmd::AbortPointShadowFaces;
+    friend struct scene_core::Present;
+    friend struct scene_core::Config;
+    friend struct scene_core::Resize;
+    friend struct scene_core::Readback;
+    friend struct scene_core::CaptureRequest;
+    friend struct scene_core::ProgressFrames;
+    friend struct scene_core::DisplayApplyResult;
+    friend struct scene_ui::Blits;
+    friend struct scene_ui::PresentImage;
+    friend struct scene_ui::DrawFrame;
+    friend struct scene_ui::Cursor;
+    friend struct scene_ui::RetireSurface;
+    friend struct scene_ui::FlushUi;
+    friend struct scene_ui::ScreenRectangle;
+    friend struct scene_ui::HudFrameLayer;
+    friend struct scene_ui::SurfaceWrite;
+    friend struct scene_ui::Packet;
+    friend struct scene_ui::Capture;
+    friend struct scene_ui::CampDecorationFrame;
+    friend struct scene_ui::BeginCampPopup;
+    friend struct scene_ui::EndCampPopup;
+    friend struct scene_ui::ResetCampPopup;
+    friend struct scene_ui::CharacterPaneText;
+    friend struct scene_ui::GlyphAtlas;
+    friend struct scene_cmd::MarkLoadPicture;
 public:
     Renderer() = default;
     Renderer(const Renderer&) = delete;
@@ -891,9 +960,13 @@ public:
     }
     HRESULT ensure_with_driver(HWND hwnd, UINT width, UINT height, D3D_DRIVER_TYPE driver);
     HRESULT resize(UINT width, UINT height);
-    bool consume_display_apply(DisplaySettings& settings) noexcept { return debug_overlay_.consume_display_apply(settings); }
+    // Core mode: the Apply comes from the host overlay (Control) and its result goes back.
+    bool consume_display_apply(DisplaySettings& settings) noexcept {
+        return core_mode_ ? core_take_display_apply(settings) : debug_overlay_.consume_display_apply(settings);
+    }
     void finish_display_apply(const DisplaySettings& settings, HRESULT result, const char* message) noexcept {
-        debug_overlay_.finish_display_apply(settings, result, message);
+        if (core_mode_) core_display_apply_result(settings, result, message);
+        else debug_overlay_.finish_display_apply(settings, result, message);
     }
     HRESULT clear(DWORD rectangle_count, const D3DRECT* rectangles,
                   DWORD flags, D3DCOLOR color, float z, DWORD stencil);
@@ -1074,6 +1147,10 @@ public:
     HRESULT queue_cursor(std::uint64_t cache_key, const std::vector<std::uint32_t>& pixels,
                          UINT width, UINT height, const RECT& destination);
     int cursor_scale_percent() const noexcept { return cursor_scale_percent_; }
+    // The game's brightness/contrast/gamma ramp (IDirectDrawGammaControl on the
+    // primary surface; game.exe 00504A60). 256 WORDs per channel; any thread.
+    void set_gamma_ramp(const WORD* red, const WORD* green, const WORD* blue) noexcept;
+    void gamma_ramp(WORD* red, WORD* green, WORD* blue) const noexcept;
     // While the loading picture is held the game cursor is the system cursor
     // (cursor_image.h show_load_cursor); not while renderer controls own input.
     bool load_cursor_wanted() const noexcept { return load_reveal_holding_ && !debug_overlay_.captures_input(); }
@@ -1096,7 +1173,7 @@ public:
                           const RECT* placed = nullptr);
     // A large picture reached the primary this frame (loading screens, movies,
     // also when not exactly full-screen): the load reveal keeps the latest one.
-    void mark_load_picture() noexcept { if(scene_queue()){scene_post([this]{load_picture_this_frame_=true;});return;} load_picture_this_frame_ = true; }
+    void mark_load_picture() noexcept { if(scene_queue()){scene_post_command(scene_cmd::MarkLoadPicture{});return;} load_picture_this_frame_ = true; }
 #ifdef EID3D11_EMBEDDED
     // Immutable host-decoded loading frame; queue commands retain its pixels.
     void set_embedded_movie_image(std::shared_ptr<const SurfaceImage> image);
@@ -1104,22 +1181,36 @@ public:
     void retire_surface(std::uint64_t surface_id) noexcept;
     void retire_camp_texture(std::uint64_t surface_id,
                              std::uint64_t generation) noexcept;
+    // interface_space: the destination is interface space and takes the HUD
+    // composition, as a UI surface blit does; camp-mapped pieces do not.
+    // observe_scale: a composed-scale mismatch updates the shared raster
+    // scale (pane and chat); retained card text keeps its own per surface.
     HRESULT queue_character_pane_text(
         const CharacterPaneTextFrame& frame, std::uint64_t ui_epoch,
         std::uint64_t frame_serial, const RECT& destination,
-        const RECT* source_rect);
+        const RECT* source_rect, bool interface_space = true,
+        bool observe_scale = true,
+        const CharacterPaneTextFit* fit = nullptr);
+    // A retained text surface presented where its blit would land: the same
+    // camp decoration and piece mapping as blit(), then the glyphs. Sets
+    // composed_scale to the output pixels per surface pixel (vertical) it was
+    // placed at, 0 when nothing was placed, for that surface's next raster.
+    HRESULT queue_retained_owned_text(
+        const CharacterPaneTextFrame& frame, std::uint64_t ui_epoch,
+        std::uint64_t frame_serial, const RECT& destination,
+        const RECT* source_rect, float& composed_scale,
+        const CharacterPaneTextFit* fit = nullptr);
     // Output pixels per surface pixel that owned text drawn now will be
     // composed at (the current HUD composition times output/canvas), so its
-    // glyphs can be rasterized at that size. Game thread. Output sizes whose
-    // canvas rounds unevenly (e.g. 2000x1125) differ between the axes by a
-    // hair; they rasterize at the vertical scale, so glyphs still land near
-    // 1:1 (falling back to stock-size glyphs scaled one by one made letter
-    // heights jump, #185). 1 when the axes genuinely differ.
+    // glyphs can be rasterized at that size. Game thread. Glyphs rasterize at
+    // the vertical scale the pane text was last actually composed at (its
+    // blit can scale the pane surface too, which the composition alone does
+    // not show); before the first blit, the composition's vertical scale.
+    // Stock-size glyphs scaled one by one made letter heights jump (#185).
     float owned_text_raster_scale() const noexcept {
+        if (observed_text_scale_ > 0.f) return observed_text_scale_;
         const auto& h = widescreen::interface_owned ? widescreen::hud_blit : widescreen::HudComposition{};
-        const float sx = float(output_width_) / float(canvas_width()), sy = float(output_height_) / float(canvas_height());
-        const float x = h.scale * sx, y = h.scale_y * sy;
-        return std::fabs(x - y) <= .01f * y ? y : 1.0f;
+        return h.scale_y * float(output_height_) / float(canvas_height());
     }
     HRESULT capture(SurfaceImage& destination, const RECT& destination_rect,
                     const RECT& source_rect);
@@ -1162,6 +1253,10 @@ public:
     static constexpr std::uint8_t kSurfaceCpuGraceFrames = 2;
     // Drops a draw-only GPU-primary generation after its sampling grace period.
     void release_surface_pixels(SurfaceImage& image) noexcept;
+    // Presents a surface must go without CPU access before an unsampled
+    // generation drops its CPU copy (the proxy sweeps; #188).
+    static constexpr std::uint64_t kSurfaceCpuIdlePresents = 300;
+    void release_idle_surface_pixels(SurfaceImage& image) noexcept;
     void sampled_surface_pixels(SurfaceImage& image,bool resolved=false) noexcept;
     // Completed proxy sources carry no pixels. The proxy resolves a current
     // surface generation to its texture, uploading it if needed. `image`
@@ -1177,7 +1272,7 @@ public:
     void queue_camp_decoration(const CampDecoration& frame, bool include_popup = true) noexcept;
     HRESULT begin_camp_popup(bool clear);
     void end_camp_popup(bool complete) noexcept;
-    void invalidate_camp_popup() noexcept { if(scene_queue()){scene_post([this]{camp_popup_ready_=false;});return;} camp_popup_ready_=false; }
+    void invalidate_camp_popup() noexcept;
     void reset_camp_popup() noexcept;
     HRESULT flush_ui();
     // Scene mode, game thread: whether UI work the game thread queued may still
@@ -1222,8 +1317,12 @@ public:
         SceneInlineScope(const SceneInlineScope&) = delete;
         SceneInlineScope& operator=(const SceneInlineScope&) = delete;
     };
-    template <class F> void scene_post(F&& work) {
+    // Core mode (EI_RENDERER_X64_CORE, x86 only): a closure cannot cross to
+    // the host. A post that is not a typed core command is refused: logged
+    // once by its site, counted per 600 frames, its visual omitted.
+    template <class F> void scene_post(F&& work, const char* site = __builtin_FUNCTION()) {
         if (scene_queue()) {
+            if (core_mode_) { core_refuse(site); return; }
             if (game_upload_pending_) flush_game_uploads();
             if (scene_thread_->post(std::forward<F>(work))) return;
             // Allocation failed: run it here, in order, with the scene thread
@@ -1240,8 +1339,9 @@ public:
     // the anchored panel/slot's offset, scale and panel clip) travels with the
     // command too; the scene thread's own copy is identity, so without it
     // queued interface work lost its placement and slid-out panel clip.
-    template <class F> void scene_post_frame(F&& work) {
+    template <class F> void scene_post_frame(F&& work, const char* site = __builtin_FUNCTION()) {
         if (!scene_queue()) { work(); return; }
+        if (core_mode_) { core_refuse(site); return; }
         BridgeFrameValues values;
         if (!bridge_capture_frame_values(values)) return;
         scene_post([this, values = std::move(values), hud = widescreen::hud_blit,
@@ -1252,8 +1352,46 @@ public:
             widescreen::hud_blit = hud;
             work();
             widescreen::hud_blit = previous;
-        });
+        }, site);
     }
+    // A typed scene command (scene_commands_world.h): queued as above, with
+    // the frame values when the command declares frame_values. The Renderer
+    // is supplied at run time; the command itself holds values only. Core
+    // mode encodes it for the host (scene_core_post.h) or refuses it.
+    template <class C> void scene_post_command(C command, const char* site = __builtin_FUNCTION()) {
+        if (core_mode_ && scene_queue()) { core_post_command(command, site); return; }
+        if constexpr (C::frame_values)
+            scene_post_frame([this, command = std::move(command)]() mutable { command.run(*this); }, site);
+        else
+            scene_post([this, command = std::move(command)]() mutable { command.run(*this); }, site);
+    }
+    // ---- Core mode (EI_RENDERER_X64_CORE=1, S3) -------------------------------
+    // The x86 Renderer has no device: it runs the game-thread halves and sends
+    // typed commands to the host's Renderer. False in the host and in the
+    // standard and call-stream modes.
+    bool core_mode() const noexcept { return core_mode_; }
+    // Host, core mode: the UI flush dropped cached quads the game process's
+    // overlay mirror still claims (core_host publishes it through Control).
+    bool take_overlay_mirror_reset() noexcept { return overlay_mirror_reset_.exchange(false, std::memory_order_acq_rel); }
+    // Host, core mode: a pixel-free snapshot of the game surface (id,
+    // generation) from the surface table; null (logged) when the host does not
+    // hold that generation. Used while decoding a command's surface handles.
+    std::shared_ptr<SurfaceImage> core_surface_snapshot(std::uint64_t id, std::uint64_t generation);
+    // Host, core mode: the completed visual surface (id, generation) from the
+    // table for the owned texture cache (the SurfaceTextureResolver contract);
+    // E_PENDING when the host does not hold that generation yet.
+    HRESULT core_resolve_surface(std::uint64_t id, std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture,
+                                 SurfaceImage*& image) noexcept;
+    // Host, core mode: a GPU home the host made itself (a camp icon its icon
+    // worker decoded) becomes the game surface's table entry.
+    void core_adopt_surface(std::shared_ptr<SurfaceImage> image) {
+        if (image) { const auto id = image->id; core_surfaces_[id] = std::move(image); }
+    }
+    template <class C> void core_post_command(const C& command, const char* site);  // scene_core_post.h
+    void core_refuse(const char* site) noexcept;
+    // Host: core mode's frame start on its own device and swap chain (the
+    // game window's child the host created). ensure() minus device creation.
+    HRESULT ensure_host(HWND window, UINT width, UINT height);
     // Game thread, scene mode: native or UI work was queued (proxy flushes
     // queue a flush only when something may be pending).
     void scene_note_native() noexcept { scene_native_pending_ = true; }
@@ -1266,12 +1404,16 @@ public:
     // Null for null. Off (or on the scene thread) it returns a non-owning
     // pointer to the image itself.
     std::shared_ptr<SurfaceImage> scene_surface(SurfaceImage* image);
-    bool ready() const { return device_ != nullptr; }
+    // Core mode: ready once the host link is up (no device in this process).
+    bool ready() const { return device_ != nullptr || core_mode_; }
     // S_OK while the device works; the DXGI removal reason after a driver
     // timeout (TDR) or reset. Callers query it only after a failed HRESULT.
+    // Core mode: the host link's loss (named in the device-removed box).
     HRESULT device_removed_reason() const noexcept {
+        if (core_mode_) return core_removed_reason();
         return device_ ? device_->GetDeviceRemovedReason() : S_OK;
     }
+    HRESULT core_removed_reason() const noexcept;
     // One bridge event naming the removal reason, adapter, driver and memory.
     void report_device_removed(HRESULT reason) noexcept;
     ID3D11Device* resource_device() const noexcept { return device_.Get(); }
@@ -1336,9 +1478,6 @@ public:
     }
     bool test_native_mesh_span(std::uintptr_t cache_identity,
                                UINT& page, UINT& offset, UINT& bytes) const noexcept;
-    bool test_native_morph_span(const ResourceIdentity& identity,
-                                UINT& page, UINT& offset, UINT& bytes,
-                                UINT& owners, UINT& references) const noexcept;
     void test_advance_native_geometry_frame() noexcept { ++native_frame_index_; }
     void test_fail_native_geometry_upload(UINT countdown) noexcept {
         test_native_geometry_upload_failure_ = countdown;
@@ -1584,7 +1723,10 @@ private:
     TestInitializationObserver test_initialization_observer_ = nullptr;
     void* test_initialization_observer_context_ = nullptr;
     GpuBlitKey gpu_blit_key_;
-    struct PendingBlit { std::uint64_t source_id{}, cache_key{}, generation{}, base_generation{}, revision{}, ui_epoch{}, frame_serial{}; bool native_canvas{true}; bool output_space{}, filtered_text{}; bool keyed{}, gpu{}, cached{}, partial{}, force_opaque_alpha{}, batchable_text{}, source_is_surface{}, source_destroyed{}, quarter_turn{}, backdrop{}, presentation_fill{}; widescreen::HudComposition composition{}; RECT source{}, destination{}, update{}; DDCOLORKEY color_key{}; UINT width{}, height{}, pitch{}; std::uint32_t diffuse{0xffffffffu}; float u0{}, v0{}, u1{1}, v1{1}; std::vector<std::uint32_t> pixels; std::shared_ptr<const CharacterPaneGlyphAsset> text_asset; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
+    struct PendingBlit { std::uint64_t source_id{}, cache_key{}, generation{}, base_generation{}, revision{}, ui_epoch{}, frame_serial{}; bool native_canvas{true}; bool output_space{}, filtered_text{}; bool keyed{}, gpu{}, cached{}, partial{}, force_opaque_alpha{}, batchable_text{}, source_is_surface{}, source_destroyed{}, quarter_turn{}, backdrop{}, presentation_fill{}; widescreen::HudComposition composition{}; RECT source{}, destination{}, update{}; DDCOLORKEY color_key{}; UINT width{}, height{}, pitch{}; std::uint32_t diffuse{0xffffffffu}; float u0{}, v0{}, u1{1}, v1{1}; std::vector<std::uint32_t> pixels; std::shared_ptr<const CharacterPaneGlyphAsset> text_asset; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv;
+        // Remote mode (surface protocol): the update as game-format rows (pitch
+        // bytes each) in raw_format; the host converts them, pixels stays empty.
+        std::vector<std::uint8_t> raw_rows; DDPIXELFORMAT raw_format{}; };
     struct OverlayTexture { UINT width{}, height{}; std::uint64_t generation{}, revision{}, surface_id{}; RECT source{}; bool keyed{}; DDCOLORKEY color_key{}; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
     // Scene mode: the game thread's view of overlay_textures_ (what the cache
     // will hold once its queued blits ran), used to choose cached/partial
@@ -1828,17 +1970,14 @@ private:
     struct NativePreparedMeshSlot {
         struct DeformationKey {
             std::array<float, 24> values{};
-            std::string morph_resource;
-            UINT first_frame = 0, second_frame = 0, wave_flags = 0;
-            float morph_fraction = 0;
+            UINT wave_flags = 0;
             UINT pose_slot = UINT_MAX;
             UINT pose_allocation = UINT_MAX;
             std::uint64_t layer_shift_revision = 0; // terrain: shader-applied layer shifts
             bool operator==(const DeformationKey& other) const noexcept {
-                return values == other.values && morph_resource == other.morph_resource &&
+                return values == other.values &&
                     layer_shift_revision == other.layer_shift_revision &&
-                    first_frame == other.first_frame && second_frame == other.second_frame &&
-                    wave_flags == other.wave_flags && morph_fraction == other.morph_fraction &&
+                    wave_flags == other.wave_flags &&
                     pose_slot == other.pose_slot && pose_allocation == other.pose_allocation;
             }
         };
@@ -1867,14 +2006,6 @@ private:
         UINT world_allocation = UINT_MAX;
         std::uint64_t world_generation = 0;
         bool world_valid = false;
-    };
-    struct NativeMorphFrames {
-        NativeGeometrySpan allocation{};
-        UINT frame_count = 0, point_count = 0;
-        UINT references = 0, owners = 0;
-        std::uint64_t generation = 1;
-        std::uint64_t last_used_frame = 0;
-        bool occupied = false;
     };
     // The source slot owns a range; queued consumers pin its exact allocation.
     // Retired ranges can be reused only after the last queued reference ends.
@@ -1990,9 +2121,6 @@ private:
     struct NativeQueuedDraw {
         NativeMesh* mesh = nullptr;
         UINT geometry_page = UINT_MAX;
-        UINT morph_page = UINT_MAX;
-        UINT morph_allocation = UINT_MAX;
-        std::uint64_t morph_generation = 0;
         NativeInstanceGpu instance{};
         float bounds_min[3]{};
         float bounds_max[3]{};
@@ -2072,7 +2200,7 @@ private:
     };
     struct NativeDispatchRange {
         UINT first = 0, count = 0;
-        UINT geometry_page = UINT_MAX, morph_page = UINT_MAX;
+        UINT geometry_page = UINT_MAX;
         UINT preparations = 0;
     };
     struct NativeSubmissionLayout {
@@ -2196,10 +2324,6 @@ private:
     // pass, then erases those meshes.
     void erase_retiring_native_meshes() noexcept;
     void invalidate_native_prepared_handles() noexcept;
-    HRESULT get_native_morph_frames(const NativeMorphFramesView& source,
-                                    UINT& first, UINT& second,
-                                    UINT& page, UINT& allocation,
-                                    std::uint64_t& generation);
     HRESULT get_native_skeleton_asset(const std::shared_ptr<const VisualSkeletonBinding>& binding,
                                      UINT& offset,UINT& allocation);
     HRESULT ensure_native_animation_buffer(UINT required);
@@ -2254,6 +2378,10 @@ private:
     void retire_native_world_range(NativePreparedMeshSlot& slot) noexcept;
     void retire_native_source_values() noexcept;
     HRESULT create_native_shadow_resources();
+    // Sun-shadow early-out cells (after create_native_shadow_resources).
+    HRESULT build_native_shadow_range(std::uint8_t slices) noexcept;
+    void ensure_native_shadow_range() noexcept;
+    void release_native_shadow_range() noexcept;
     HRESULT create_shadow_history_targets();
     bool prepare_shadow_history() noexcept;
     void commit_shadow_history() noexcept;
@@ -2289,10 +2417,6 @@ private:
     HRESULT upload_native_geometry(UINT page, UINT offset,
                                    const void* data, UINT bytes);
     ID3D11ShaderResourceView* native_geometry_page_srv(UINT page) const noexcept;
-    bool native_morph_allocation_current(UINT allocation,
-                                         std::uint64_t generation) const noexcept;
-    void acquire_native_morph_owner(const NativeQueuedDraw& draw) noexcept;
-    void release_native_morph_owner(const NativeQueuedDraw& draw) noexcept;
     void refresh_native_mesh_records(NativeMesh& mesh) noexcept;
     HRESULT upload_native_work_range(const NativeDispatchRange& range);
     HRESULT trim_native_mesh_cache();
@@ -2406,7 +2530,74 @@ private:
     UINT canvas_height() const noexcept { return widescreen_interface_owned() ? UINT(widescreen_layout().height) : output_height_; }
     UINT target_width() const noexcept { return scene_composited_ ? output_width_ : width_; }
     UINT target_height() const noexcept { return scene_composited_ ? output_height_ : height_; }
+    // The full viewport of the active colour target: always whole pixels.
+    // The temporal upscalers' sub-pixel jitter is in the projection instead
+    // (jitter_clip): a fractional viewport origin let the rasterizer's
+    // integer viewport scissor drop the last row and column on negative
+    // jitter phases (the flickering bottom edge with DLSS and FSR, depth view
+    // of ab497e20).
+    D3D11_VIEWPORT target_viewport() const noexcept {
+        return D3D11_VIEWPORT{0, 0, float(target_width()), float(target_height()), 0, 1};
+    }
+    // A camera world-to-clip (row-major, clip = M * v) with this frame's
+    // upscaler jitter (x pixels right, y pixels down) while the world pass
+    // renders into the upscaler's input: not after the composite, not
+    // without a temporal upscaler. Applied once, where each world pass
+    // uploads its camera clip; light-space (shadow) clips never take it.
+    bool upscaler_jitter_ndc(float& dx, float& dy) const noexcept {
+        if (scene_composited_ || !temporal_upscaler() || (dlss_jitter_[0] == 0.f && dlss_jitter_[1] == 0.f)) return false;
+        dx = 2.f * dlss_jitter_[0] / float(target_width()); dy = -2.f * dlss_jitter_[1] / float(target_height());
+        return true;
+    }
+    void jitter_clip(float* clip) const noexcept {
+        float dx = 0, dy = 0;
+        if (!upscaler_jitter_ndc(dx, dy)) return;
+        for (int column = 0; column < 4; ++column) {
+            clip[column] += dx * clip[12 + column];
+            clip[4 + column] += dy * clip[12 + column];
+        }
+    }
+    std::array<float, 16> jittered_clip(std::array<float, 16> clip) const noexcept { jitter_clip(clip.data()); return clip; }
     void apply_render_scale();
+    // DLSS (player options upscaler and upscaler_quality, dlss_frame.h; x64
+    // host only). dlss_mode_: the NGX mode the world targets were built for, -1 off.
+    int dlss_mode_ = -1;
+    // AMD FSR 2 (the same options, fsr2_upscaler.h): the FSR mode the world
+    // targets were built for (0 Quality .. 4 Native AA), -1 off. FSR and DLSS
+    // share the render size, jitter, motion and reset path below.
+    int fsr_mode_ = -1;
+    Fsr2Upscaler fsr_;
+    UpscaleSharpen upscale_sharpen_;  // upscale_sharpness after DLSS (FSR sharpens inside fsr_)
+    std::chrono::steady_clock::time_point fsr_last_frame_{};  // FSR frame time (its delta time constant)
+    bool temporal_upscaler() const noexcept { return dlss_mode_ >= 0 || fsr_mode_ >= 0; }
+    float dlss_jitter_[2]{};
+    std::uint32_t dlss_jitter_index_ = 0;
+    bool dlss_reset_ = true;
+    bool dlss_previous_valid_ = false;
+    std::uint64_t dlss_last_evaluate_ms_ = 0;  // GetTickCount64 of the last evaluation
+    std::array<float,16> dlss_previous_clip_{};
+    // Object motion: last frame's world vertices (copied at the start of each
+    // world frame, same slots), the motion stages and their constants.
+    ComPtr<ID3D11Buffer> dlss_previous_world_, dlss_motion_constants_;
+    ComPtr<ID3D11ShaderResourceView> dlss_previous_world_srv_;
+    ComPtr<ID3D11VertexShader> native_motion_vs_;
+    ComPtr<ID3D11PixelShader> native_motion_ps_;
+    ComPtr<ID3D11DepthStencilState> dlss_motion_depth_;
+    std::uint64_t dlss_motion_constants_frame_ = UINT64_MAX;
+    void begin_dlss_object_motion() noexcept;
+    bool draw_dlss_object_motion(UINT args_offset);
+    int configured_dlss_mode() noexcept;
+    int configured_fsr_mode() noexcept;
+    void set_world_size() noexcept;
+    void advance_dlss_jitter() noexcept;
+    // One upscaler frame: camera motion and the reset decision (shared), then
+    // DLSS (x64 host) or FSR 2 (this device) into the output-size image, then
+    // that image to the output. False: the upscaler failed this frame.
+    struct UpscalerFrame { bool camera = false, reset = true; float clip_to_world[16]{}; std::array<float,16> world_to_clip{}; };
+    UpscalerFrame begin_upscaler_frame();
+    void finish_upscaler_frame(const UpscalerFrame& frame);
+    bool render_dlss();
+    bool render_fsr();
     ComPtr<IDXGISwapChain> swap_;
     UINT swap_flags_=0;bool tearing_supported_=false;
     FrameLimiter frame_limiter_;  // player frame_limit option, paces Present
@@ -2453,6 +2644,72 @@ private:
     // at a frame boundary, with the scene thread drained.
     std::unique_ptr<SceneThread> scene_thread_;
     std::atomic<bool> scene_mode_{false};
+    // ---- Core mode state (x86 game process; renderer_game.cpp) ----------------
+    bool core_mode_ = false;
+    std::uint64_t core_present_serial_ = 0;      // presents sent (the host publishes presents_done)
+    std::uint64_t core_config_revision_ = ~0ull; // config revision last sent
+    std::vector<std::uint8_t> core_envelope_;    // frame envelope last sent (unchanged ones are not resent)
+    std::vector<std::pair<const char*, std::uint64_t>> core_refusals_, core_refusal_window_;
+    std::uint64_t core_window_frames_ = 0;
+    long core_harness_acks_read_ = 0;              // host harness acks retired
+    long core_overlay_resets_seen_ = 0;           // Control::overlay_mirror_resets last applied
+    long core_camp_answers_seen_[3] = {};          // Control::camp_answers last applied
+    bool core_f11_down_ = false;                    // game process: F11 held at the last present
+    std::vector<std::uint8_t> core_widescreen_sent_; // game process: WidescreenState last sent (encoded)
+    std::vector<std::uint8_t> core_mounts_sent_;     // game process: ResourceMounts last sent (encoded)
+    std::uint64_t core_combat_revision_sent_ = 0, core_combat_catalog_sent_ = 0, core_combat_font_sent_ = 0;
+    void core_sync_combat() noexcept;                // game process: CombatState when the combat UI changed
+    void core_send_mounts() noexcept;                // game process: ResourceMounts when they changed
+    long core_config_saved_seen_ = 0;                // game process: host ini saves already reloaded
+    std::uint64_t core_border_fog_seen_ = 0;          // game process: host border fog revision already published here
+    long core_display_apply_seen_ = 0;               // game process: host display Apply already taken
+    bool core_take_display_apply(DisplaySettings& settings) noexcept;
+    void core_display_apply_result(const DisplaySettings& settings, HRESULT result, const char* message) noexcept;
+    std::uint64_t core_va_epoch_ = 0;                // game process: world epoch of the last va_regions
+    ULONGLONG core_va_due_ms_ = 0;                   // game process: when that epoch's va_regions is due (0: none)
+    bool core_capture_request_ = false;             // host: an F11 capture the game process asked for
+    // Glyph atlases: the (generation, revision) last sent per identity (game
+    // process) and the latest atlas per identity (host).
+    std::unordered_map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> core_glyphs_sent_;
+    std::unordered_map<std::uint64_t, std::shared_ptr<const CharacterPaneGlyphAsset>> core_glyphs_;
+    std::shared_ptr<const TerrainAtlasSnapshot> core_atlases_sent_; // terrain atlas snapshot last sent
+    std::uint8_t core_game_status_sent_[4] = {0xff, 0, 0, 0};    // GameStatus last sent (sky, slots, sites; [3] unused)
+    const char* core_weather_problem_sent_ = reinterpret_cast<const char*>(1);
+    unsigned long core_harness_config_entry_ = 0;  // harness config step applied here
+    // Game process: sends the surface's pending write to the host (SurfaceWrite)
+    // and marks it uploaded; its CPU pixels stay (no GPU copy exists here).
+    HRESULT core_surface_write(SurfaceImage& image);
+    // Host, core mode: the game's surfaces by id. Each entry is the host's CPU
+    // mirror and GPU home of the latest write it received.
+    std::unordered_map<std::uint64_t, std::shared_ptr<SurfaceImage>> core_surfaces_;
+    // Host: the handles of one command resolved through core_surfaces_ (a
+    // handle whose generation the host does not hold resolves to nothing:
+    // that quad or packet is omitted, logged once per surface).
+    scene_ui::Residency core_residency(const std::vector<scene_ui::SurfaceHandle>& handles);
+    // The bodies of queued UI payloads, shared by the standard-mode closures
+    // and the core-mode host's run().
+    void ui_run_blits(std::vector<scene_ui::Quad>& quads, const scene_ui::Residency& residency);
+    void ui_run_present_image(scene_ui::PresentImage& command, const scene_ui::Residency& residency);
+    void ui_run_draw_frame(scene_ui::DrawFrame& command, const scene_ui::Residency& residency);
+    HRESULT core_ensure();
+    HRESULT core_present();
+    HRESULT core_resize(UINT width, UINT height);
+    // Game process, core mode: the host's tight BGRA rows of the back buffer box
+    // (back_buffer) or of a game surface's GPU home, chunked through the
+    // readback area (synchronous: one round trip per chunk).
+    HRESULT core_readback(bool back_buffer, std::uint64_t id, std::uint64_t generation, const RECT& box,
+                          std::vector<std::uint8_t>& bgra);
+    HRESULT core_capture(SurfaceImage& destination, const RECT& destination_rect, const RECT& native_source_rect);
+    HRESULT core_readback_surface(SurfaceImage& image);
+    // Host, core mode: the packed copy a chunked Readback serves.
+    std::vector<std::uint8_t> core_readback_copy_;
+    void core_send_config() noexcept;
+    void core_send(std::uint16_t command, const std::vector<std::uint8_t>& bytes) noexcept;
+    void report_core_refusal_window() noexcept;
+    // The option list and the startup values of the loaded options (ensure,
+    // core_ensure and ensure_host share them).
+    void register_config_options();
+    void apply_config_settings();
     std::vector<std::pair<const char*,std::uint64_t>> scene_syncs_; // game thread: reasons, first logged
     unsigned scene_inline_=0;        // game thread: depth of SceneInlineScope (calls run inline)
     std::vector<std::pair<const char*,std::uint64_t>> scene_sync_window_; // game thread: waits this window
@@ -2610,7 +2867,7 @@ private:
     // plane waves along it instead of rings around the coastline.
     std::array<float,4> liquid_surf_swell_{};
     void update_liquid_surf() noexcept;
-    void add_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::array<float,16>& active_to_world) noexcept;
+    void add_liquid_surf_neighbour(const NeighbourPiece& upload,const std::array<float,16>& active_to_world) noexcept;
     // Ambient particles (renderer_ambient_particles.cpp): camera-local,
     // area-driven motes/leaves/embers drawn into the world colour after the
     // world pass and before SMAA and the interface. Off creates nothing.
@@ -2679,6 +2936,19 @@ public:
     static constexpr unsigned kGroundCoverMeshes = 34;
 private:
     HRESULT render_ground_cover(const FixedState& frame,const std::array<float,16>& world_to_clip) noexcept;
+    // The sun shadow pass (flush_native_shadows, a close map's per-frame layer):
+    // the previous frame's cover placement and critters as depth casters.
+    void draw_ground_cover_shadows(UINT slice) noexcept;
+    void draw_critter_shadows(UINT slice) noexcept;
+    // Casters that move every frame (critters drawn last frame; swaying cover at
+    // ground_cover_shadows 2): the close maps' per-frame layer is redrawn
+    // each frame while they exist, so their shadows follow them.
+    bool owned_shadow_casters_animate() const noexcept;
+    // What the close maps' renderer-owned casters were last drawn with (cover
+    // level and placement ready, critters on and drawn): a change redraws
+    // them once, so a setting change shows in a still or paused scene.
+    std::uint32_t owned_shadow_casters_key() const noexcept;
+    std::uint32_t native_shadow_extras_key_ = 0;
     HRESULT ensure_ground_cover_pipeline() noexcept;
     HRESULT update_ground_cover_maps(const AmbientWorldSource& inputs) noexcept;
     void release_ground_cover() noexcept;
@@ -2794,6 +3064,15 @@ private:
     std::array<ComPtr<ID3D11ComputeShader>,8> gc_prep_cs_;
     // Depth prepass permutations (cover, snow pile): the material programs' placement, alpha test only.
     std::array<ComPtr<ID3D11VertexShader>,4> gc_depth_vs_;std::array<ComPtr<ID3D11PixelShader>,3> gc_depth_ps_;
+    // Sun shadow casters (ground_cover_shadows): the placement vertex program
+    // into the sun map (cover, snow pile), the active map's per-mesh draw
+    // counts and frame constants kept after its draws (the neighbour passes
+    // reset the shared counts), whether that placement is complete, and the
+    // large meshes (level 1: the rule table's widest LOD class).
+    std::array<ComPtr<ID3D11VertexShader>,2> gc_shadow_vs_;
+    ComPtr<ID3D11Buffer> gc_shadow_args_,gc_shadow_frame_;
+    bool gc_shadow_ready_=false;
+    std::uint64_t gc_large_mesh_mask_=0;
     ComPtr<ID3D11Buffer> gc_draw_inputs_;ComPtr<ID3D11ShaderResourceView> gc_draw_input_srv_;ComPtr<ID3D11UnorderedAccessView> gc_draw_input_uav_;
     std::array<std::uint8_t,kGroundCoverMeshes> gc_mesh_kind_{};
     ComPtr<ID3D11VertexShader> gc_trail_vs_,gc_trail_full_vs_,gc_object_vs_;ComPtr<ID3D11PixelShader> gc_trail_ps_,gc_trail_decay_ps_,gc_object_ps_;
@@ -2887,9 +3166,12 @@ private:
         DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
     };
     ContactBlendMaps contact_maps_;
+    HRESULT build_contact_tiles(std::vector<std::array<std::uint32_t,4>> tiles,std::uint64_t used,UINT tx,UINT ty,
+        ContactBlendMaps& maps,std::vector<std::array<std::uint32_t,4>>* rows=nullptr);
     HRESULT build_contact_tiles(const TerrainCpuAsset& terrain,UINT tx,UINT ty,ContactBlendMaps& maps,
         std::vector<std::array<std::uint32_t,4>>* rows=nullptr);
-    HRESULT copy_contact_atlas(ID3D11Texture2D* source,UINT slice,UINT material,ContactBlendMaps& maps);
+    HRESULT copy_contact_atlas(ID3D11Texture2D* source,UINT slice,UINT material,ContactBlendMaps& maps,
+        char* detail=nullptr,std::size_t detail_size=0);
     ComPtr<ID3D11SamplerState> contact_sampler_;
     std::uint64_t contact_map_generation_=0,contact_constants_generation_=UINT64_MAX,contact_retry_frame_=0,contact_update_frame_=UINT64_MAX;
     bool contact_incompatible_logged_=false;
@@ -2968,7 +3250,7 @@ private:
         std::shared_ptr<const TerrainBakeCells> bake_cells;
     };
     std::vector<GcNeighbour> gc_neighbours_;
-    void add_ground_cover_neighbour(const NeighbourMapUpload& upload,const std::array<float,16>& active_to_world,UINT contact_map) noexcept;
+    void add_ground_cover_neighbour(const NeighbourPiece& upload,const std::array<float,16>& active_to_world,UINT contact_map) noexcept;
     // Once a neighbour's tile families load: its beach-sand cover types and
     // its terrain material blend rows.
     void apply_neighbour_tile_families(GcNeighbour& neighbour) noexcept;
@@ -3045,6 +3327,9 @@ private:
     ComPtr<ID3D11SamplerState> water_reflection_sampler_;
     std::array<float,16> water_capture_clip_{},water_capture_inverse_{};
     std::uint64_t water_capture_frame_ = UINT64_MAX;
+    // The flush whose first liquid batch took the snapshot (native_flush_serial_
+    // counts flushes): a later flush of the same frame retakes it (prepare_water_reflections).
+    std::uint64_t water_capture_flush_ = 0, native_flush_serial_ = 0;
     bool water_capture_ready_ = false, water_failure_reported_ = false;
     bool water_late_draw_reported_ = false; // opaque world draw after the water copy (probe event, once)
     std::vector<std::function<HRESULT()>> deferred_ground_marks_; // draw_game_selection_held, draw_game_print_run_held
@@ -3507,10 +3792,10 @@ private:
         UINT baked = 0;
         double bake_ms = 0;
     } impostors_;
-    HRESULT bake_neighbour_impostors(const NeighbourMapUpload& upload) noexcept;
+    HRESULT bake_neighbour_impostors(const NeighbourPiece& upload) noexcept;
     HRESULT ensure_impostor_atlas(UINT slices) noexcept;
     void impostor_failure(const char* reason) noexcept;
-    std::uint32_t neighbour_impostor_slice(const FigureCpuAsset* figure, std::uint64_t texture) const;
+    std::uint32_t neighbour_impostor_slice(const ResourceIdentity& figure, std::uint64_t texture) const;
     float fog_cull_distance_ = 0.f;
     std::uint64_t fog_cull_frame_ = 0;
     // Occlusion culling (renderer_occlusion.cpp): a max-depth pyramid built
@@ -3603,6 +3888,17 @@ private:
     std::uint64_t test_native_terrain_phase_upload_bytes_ = 0;
 #endif
     int cursor_scale_percent_ = 100;
+    // Gamma ramp (set_gamma_ramp), applied to the finished frame before
+    // Present (apply_gamma_ramp); an identity ramp costs nothing.
+    HRESULT apply_gamma_ramp() noexcept;
+    mutable std::mutex gamma_lock_;
+    std::array<WORD,768> gamma_ramp_{};
+    bool gamma_identity_ = true, gamma_changed_ = false, gamma_set_ = false, gamma_failed_ = false;
+    ComPtr<ID3D11Texture2D> gamma_lut_, gamma_copy_;
+    ComPtr<ID3D11ShaderResourceView> gamma_lut_srv_, gamma_copy_srv_;
+    ComPtr<ID3D11VertexShader> gamma_vs_;
+    ComPtr<ID3D11PixelShader> gamma_ps_;
+    ComPtr<ID3D11SamplerState> gamma_sampler_;
     ComPtr<ID3D11ComputeShader> native_shadow_prepare_cs_, native_shadow_commit_cs_, native_shadow_build_cs_;
     UINT native_shadow_chunks(const NativeSubmissionLayout& layout,const NativeDispatchRange& range,bool triangles) const noexcept;
     ComPtr<ID3D11VertexShader> native_shadow_vs_;
@@ -3610,6 +3906,17 @@ private:
     ComPtr<ID3D11Texture2D> native_shadow_depth_;
     ComPtr<ID3D11ShaderResourceView> native_shadow_depth_srv_;
     std::array<ComPtr<ID3D11DepthStencilView>,5> native_shadow_dsv_;
+    // Early-out cells of the sun maps (t64; build_native_shadow_range): per
+    // 16-texel cell the nearest depth and one minus the farthest, dilated.
+    // native_shadow_range_mask_: slices whose cells match their map.
+    ComPtr<ID3D11Texture2D> native_shadow_cells_, native_shadow_range_;
+    ComPtr<ID3D11ShaderResourceView> native_shadow_cells_srv_, native_shadow_range_srv_;
+    ComPtr<ID3D11UnorderedAccessView> native_shadow_cells_uav_, native_shadow_range_uav_;
+    ComPtr<ID3D11ComputeShader> native_shadow_reduce_cs_, native_shadow_dilate_cs_;
+    ComPtr<ID3D11Buffer> native_shadow_range_constants_;
+    UINT native_shadow_range_side_ = 0;
+    std::uint8_t native_shadow_range_mask_ = 0;
+    bool native_shadow_early_out_ = true, native_shadow_range_failed_ = false;
     std::array<ComPtr<ID3D11Texture2D>,2> shadow_history_mask_;
     std::array<ComPtr<ID3D11RenderTargetView>,2> shadow_history_rtv_;
     std::array<ComPtr<ID3D11ShaderResourceView>,2> shadow_history_srv_;
@@ -3681,6 +3988,9 @@ private:
     unsigned native_shadow_phase_ = 0;   // 0 single pass, 1 static layer, 2 dynamic overlay
     std::uint8_t native_shadow_dirty_mask_ = 0;
     std::uint8_t native_shadow_cleared_mask_ = 0;
+    // Close maps whose ground cover and critter casters were drawn in this
+    // collection (a flush can run more than once).
+    std::uint8_t native_shadow_extras_mask_ = 0;
     bool native_shadow_collecting_ = false, native_shadow_failed_ = false;
     // Atomic: the game thread's frame-state sink reads it in scene thread mode.
     std::atomic<bool> native_shadows_enabled_{true};
@@ -3788,9 +4098,12 @@ private:
     void release_neighbour_maps() noexcept;
     // Prebuilt neighbour geometry: adopt the upload's pages, and afterwards
     // release every prebuilt mesh no draw registered (fog culled, failures).
-    void adopt_prebuilt_pages(const NeighbourMapUpload& upload) noexcept;
-    void adopt_prebuilt_textures(const NeighbourMapUpload& upload) noexcept;
-    void release_unused_prebuilt(const NeighbourMapUpload& upload) noexcept;
+    void adopt_prebuilt_pages(const NeighbourPiece& upload) noexcept;
+    void adopt_prebuilt_textures(const NeighbourPiece& upload) noexcept;
+    void release_unused_prebuilt(const NeighbourPiece& upload) noexcept;
+    // The piece's terrain commands, placed and fog culled (renderer_neighbour_maps.cpp).
+    bool submit_neighbour_terrain(const NeighbourPiece& piece,const std::array<float,16>& world_to_clip,
+        NativeGeometrySubmitFn submit,void* context,const char*& failure);
     void retire_dedicated_geometry() noexcept;
     bool dedicated_geometry_stale_ = false; // released neighbours may leave dedicated meshes
     bool dedicated_geometry_remaining_ = false; // the last sweep left a dedicated mesh in place
@@ -3873,9 +4186,6 @@ private:
     std::uint64_t native_texture_share_floor_ = 0, native_texture_shared_ = 0, native_texture_shared_bytes_ = 0;
     std::uint64_t native_prepared_mesh_hits_ = 0;
     std::unordered_map<NativeMeshKey, NativeMesh, NativeMeshKeyHash> native_meshes_;
-    std::unordered_map<std::string, UINT> native_morph_frames_;
-    std::vector<NativeMorphFrames> native_morph_allocations_;
-    std::vector<UINT> native_morph_free_;
     std::vector<NativePreparedMeshSlot> native_prepared_mesh_slots_;
     std::vector<NativePreparedMaterialSlot> native_prepared_material_slots_;
     std::size_t native_prepared_mesh_reuse_cursor_ = 0;
@@ -3928,6 +4238,9 @@ private:
     std::int64_t last_present_tick_ = 0;
     double present_interval_ms_ = 0.0;
     double present_smoothed_ms_ = 0.0;
+    // Vertical output scale owned pane text was last composed at (#185).
+    float observed_text_scale_ = 0.f;
+    unsigned text_scale_mismatch_reports_ = 0;
     std::array<float, 4> debug_projection_coefficients_{};
     bool debug_projection_valid_ = false;
     DebugResourceViewWorkSnapshot debug_resource_view_work_{};
@@ -3949,16 +4262,13 @@ private:
     std::uint64_t perf_native_vertices_ = 0;
     std::uint64_t perf_native_dynamic_bytes_ = 0;
     std::uint64_t perf_native_gpu_lit_draws_ = 0;
-    std::uint64_t perf_native_morph_bytes_ = 0;
     std::uint64_t perf_native_mesh_hits_ = 0;
     std::uint64_t perf_native_mesh_misses_ = 0;
     std::uint64_t perf_native_mesh_evictions_ = 0;
-    // Temporary (camera-motion churn): miss classes and morph-set traffic,
-    // reported per present in camera_path lines.
+    // Temporary (camera-motion churn): miss classes, reported per present in
+    // camera_path lines.
     std::uint64_t perf_native_mesh_content_misses_ = 0;
     std::uint64_t perf_native_mesh_world_misses_ = 0;
-    std::uint64_t perf_native_morph_misses_ = 0;
-    std::uint64_t perf_native_morph_evictions_ = 0;
     std::uint64_t native_generic_ingress_calls_ = 0;
     std::uint64_t native_prepared_ingress_calls_ = 0;
     struct NativeFrameStats : RendererResourceSnapshot {
@@ -4095,6 +4405,20 @@ private:
 #ifndef EID3D11_EMBEDDED
     void service_load_progress_decode() noexcept; // game thread, queue_present
 #endif
+    // Core mode: the host's progress-movie decode request and its answer.
+    bool core_take_progress_request(std::string& path, unsigned& width, unsigned& height, unsigned& frames,
+                                    unsigned& shown, std::uint64_t& serial) noexcept;
+    void core_progress_frames(std::uint64_t serial, unsigned width, unsigned height,
+                              const std::vector<std::vector<std::uint8_t>>& frames, const char* failure) noexcept;
+    bool core_host_ = false;                 // host, core mode: this Renderer is the core-mode host's
+    // Host, core mode: the game window was in front at the game's present
+    // (scene_core::Present). The host's own window is a child of another
+    // process's top-level window, so GetForegroundWindow never names it.
+    bool core_foreground_ = true;
+    bool window_in_front() const noexcept {
+        return core_host_ ? core_foreground_ : (!hwnd_ || GetForegroundWindow() == hwnd_);
+    }
+    std::uint64_t core_progress_seen_ = 0;   // game process: the host decode request last served
     void cancel_load_progress_decode() noexcept;
     void draw_load_progress(float progress) noexcept;
     float load_reveal_progress() noexcept;  // 0..1 of the work outstanding during this hold, done
@@ -4124,7 +4448,7 @@ private:
     // camera_path (temporary): the previous present's counter, the present
     // count and the last profiler frame written.
     std::int64_t harness_path_previous_=0;unsigned harness_path_present_=0;std::uint64_t harness_path_profile_frame_=0;
-    std::array<std::uint64_t,6> harness_path_cache_counters_{};
+    std::array<std::uint64_t,4> harness_path_cache_counters_{};
     // Frame accounting (frame_accounting.h): the camera_path row of this
     // present waits for the frame's end; the game thread's last closed frame;
     // D3D counters and shadow decision counts at the previous row; buffered rows.
@@ -4138,6 +4462,22 @@ private:
     std::string harness_capture_directory_;
     std::string harness_overlay_shot_;   // screenshot path waiting for this present's overlay pass
     bool harness_profile_armed_ = false;
+
+    // ---- x64 host core (S2f, Host/core_host.cpp) ----
+public:
+    // The host's one device-creation function made device and context; the
+    // Renderer adopts them without a window (the host presenter owns present).
+    // Idle until the host feeds it records (S3): no targets, shaders or jobs.
+    HRESULT adopt_host_device(ID3D11Device* device, ID3D11DeviceContext* context, UINT width, UINT height) noexcept;
+private:
+    // Constant/structured ring support of the adopted or created device.
+    void detect_device_options() noexcept;
 };
 
 } // namespace owned
+
+// Core mode: the typed-command encoder (needs the complete Renderer and
+// scene_core_types.h; when that header included us, it includes this itself).
+#ifndef SCENE_CORE_TYPES_DEFERRED_POST
+#include "scene_core_post.h"
+#endif

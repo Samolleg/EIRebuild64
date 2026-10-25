@@ -58,6 +58,21 @@ struct CharacterPaneTextFrame {
 };
 void character_pane_text_content(const CharacterPaneTextFrame& frame) noexcept;
 
+// A retained text frame placed smaller than recorded so its whole block fits
+// the visible surface (item cards, claude/s3-store): surface positions are
+// scaled by scale about (center_x, top); lines whose scaled rectangle ends
+// below bottom (the visible surface height) are left out.
+struct CharacterPaneTextFit {
+    float scale = 1.0f;
+    float center_x = 0.0f, top = 0.0f, bottom = 0.0f;
+};
+// The fit of a recorded frame into visible_height surface rows: none (false)
+// when every line already ends inside; else uniformly smaller down to
+// minimum_scale, the lines that still do not fit then left out.
+bool fit_retained_text_frame(const CharacterPaneTextFrame& frame,
+    std::uint32_t visible_height, float minimum_scale,
+    CharacterPaneTextFit& fit) noexcept;
+
 enum class CharacterPaneTextFailure : std::uint8_t {
     none,
     dimensions,
@@ -255,7 +270,7 @@ private:
 };
 
 // Frames of text surfaces drawn once and presented on later frames (chat
-// lines). Keyed by the proxy surface identity; each entry also records the
+// lines, item cards). Keyed by the proxy surface identity; each entry also records the
 // surface content generation at publication so any later non-owned write to
 // that surface makes the frame stale. Publishing the same surface again
 // replaces the whole frame, which is the producer's clear-then-redraw. The
@@ -266,6 +281,11 @@ public:
 
     bool publish(std::uint64_t surface_id, std::uint64_t generation,
                  CharacterPaneTextFrame&& frame) noexcept;
+    // Adds a later DC session's glyphs to a ready entry (the item card draws
+    // its text over several sessions between clears). False, and the entry
+    // retired, when it is absent or stale: its earlier content is unknown.
+    bool append(std::uint64_t surface_id, std::uint64_t generation,
+                CharacterPaneTextFrame&& frame) noexcept;
     Lookup find(std::uint64_t surface_id, std::uint64_t generation,
                 const CharacterPaneTextFrame*& frame) noexcept;
     void retire(std::uint64_t surface_id) noexcept;

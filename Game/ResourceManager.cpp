@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E3HudVisual.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "OwnedRender/StartupPaths.h"
 
 #include "World.h"
 #include "FileRegistry.h"
@@ -143,34 +144,31 @@ BOOL CResourceManager::AddGraphicsResources(LPCSTR category)
 {
     if (auto *mod = ModRuntime::Resources())
     {
-        // The addon searches the complete figure/texture override list before
-        // any original archive, not each base archive's overlays in isolation.
         const bool textures = _stricmp(category, "textures.res") == 0;
         const bool figures = _stricmp(category, "figures.res") == 0;
         if (!textures && !figures) return TRUE;
-        const char *groups[3] = {category, textures ? "redress.res" : "menus.res",
-                                 textures ? "menus.res" : nullptr};
-        std::set<std::string> seen;
-        for (const char *group : groups)
+        owned::ResourceStoreConfig mounts;
+        const CString resourcePath = ((CWorld*)GetWorld())->GetResourcePath();
+        OwnedRender::CaptureGraphicsMounts(mounts, std::filesystem::path((LPCSTR)resourcePath), mod,
+            [](const std::string& path) { return std::filesystem::path(path).wstring(); });
+        const auto kind = figures ? owned::kArchiveFigures : owned::kArchiveTextures;
+        std::set<std::wstring> seen;
+        for (size_t i = 0; i != mounts.archives.size(); ++i)
         {
-            if (!group) continue;
-            std::vector<std::string> paths;
-            bool ignore = false;
-            mod->ResourcePlan(group, paths, ignore);
-            for (const auto &path : paths)
+            if (!(mounts.archive_kinds[i] & kind)) continue;
+            std::wstring key = mounts.archives[i];
+            for (auto& ch : key) if (ch >= L'A' && ch <= L'Z') ch += L'a' - L'A';
+            if (!seen.insert(key).second) continue;
+            const std::string path = std::filesystem::path(mounts.archives[i]).string();
+            CMappedResource* archive = figures ? static_cast<CMappedResource*>(dbgnew CWin32MappedResource(true))
+                                              : dbgnew CMappedResource(true);
+            if (!archive->OpenResource(path.c_str()))
             {
-                std::string key = path;
-                for (char &ch : key) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
-                if (!seen.insert(key).second) continue;
-                CMappedResource *archive = figures ? static_cast<CMappedResource*>(dbgnew CWin32MappedResource(true)) : dbgnew CMappedResource(true);
-                if (!archive->OpenResource(path.c_str()))
-                {
-                    delete archive;
-                    return ReportError("Cannot open mod graphics archive %s", path.c_str());
-                }
-                OwnedRender::E3HudResourceChanged(this);
-                resources.push_back(CResourcePair(path, archive));
+                delete archive;
+                return ReportError("Cannot open graphics archive %s", path.c_str());
             }
+            OwnedRender::E3HudResourceChanged(this);
+            resources.push_back(CResourcePair(path, archive));
         }
         return TRUE;
     }

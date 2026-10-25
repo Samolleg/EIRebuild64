@@ -18,7 +18,8 @@
 // Pass: opaque world colour after terrain and before the static objects and
 // liquids (flush_native_static). Lit with the shared world light and point
 // lights, receives the sun cascades, writes the AO ambient share, fogged with
-// the border fog and world atmosphere. Casts no shadows.
+// the border fog and world atmosphere. Casts sun shadows into the close maps
+// by ground_cover_shadows (draw_ground_cover_shadows).
 #include "ground_cover.h"
 #include "contact_blend.h"
 #include "ground_cover_surface.h"
@@ -30,6 +31,8 @@
 #include "ambient_terrain_grids.h"
 #include "liquid_surf.h"
 #include "neighbour_maps.h"
+#include "neighbour_piece.h"
+#include "ground_cover_neighbour.h"
 #include "owned_asset_loader.h"
 #include "owned_terrain_decode.h"
 #include "renderer.h"
@@ -1582,6 +1585,15 @@ GcDepthOut gcDepthVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
 #endif
  return o;
 }
+// Sun shadow caster (ground_cover_shadows): the same placement, projected
+// into the sun map the shadow pass is drawing (renderer_shadows.cpp
+// flush_native_shadows uploads that slice's index into shadowControl.y).
+// Depth only: the cover's footprint and buried-snow clips are world-space
+// details under props and under the ground, which cast no visible shadow.
+float4 gcShadowVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID):SV_Position{
+ const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
+ return mul(shadowLight[shadowControl.y],float4(f.wp,1));
+}
 float3 gcRectSample(Texture2D t,float4 rect,float2 uv){
  return t.SampleGrad(gcWrap,rect.xy+frac(uv)*rect.zw,ddx(uv)*rect.zw,ddy(uv)*rect.zw).rgb;
 }
@@ -2183,8 +2195,6 @@ struct GroundCoverConstants {
     float shelter[3][4];    // soft shelter map rows (gcShelterRow); row 0 w 1 while bound
 };
 static_assert(sizeof(GroundCoverConstants) % 16 == 0);
-struct GcTileGpu { float uv[8]; std::uint32_t material, padding[3]; };
-static_assert(sizeof(GcTileGpu) == 48);
 struct GcInstanceGpu { float root[4]; std::uint32_t shape[4], color[4], extra[4]; };
 static_assert(sizeof(GcInstanceGpu) == 64);
 
@@ -2238,157 +2248,12 @@ HRESULT make_grid_srv(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT
     return FAILED(hr) ? hr : device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
 }
 
-// Tile atlas cells (base tiles only): material and corner UVs by world corner.
-// used: per material, 1 where a base tile uses it.
-std::vector<GcTileGpu> ground_cover_tiles(const TerrainCpuAsset& terrain, UINT tiles_x, UINT tiles_y,
-                                          std::vector<std::uint8_t>& used) {
-    std::vector<GcTileGpu> tiles(std::size_t(tiles_x) * tiles_y);
-    for (auto& tile : tiles) tile.material = 0xffffffffu;
-    constexpr std::uint32_t layer = 33u * 33u;
-    for (const auto& sector : terrain.sectors) {
-        if (sector.map_x >= terrain.sector_count_x || sector.map_y >= terrain.sector_count_y) continue;
-        for (const auto& tile : sector.tiles) {
-            if (tile.transparent || tile.vertex_indices[0] >= layer) continue;
-            std::uint32_t lx = 33, ly = 33;
-            for (const unsigned k : {0u, 2u, 6u, 8u}) {
-                lx = std::min(lx, std::uint32_t(tile.vertex_indices[k] % 33u)); ly = std::min(ly, std::uint32_t(tile.vertex_indices[k] / 33u));
-            }
-            const std::uint32_t gx = sector.map_x * 16u + lx / 2u, gy = sector.map_y * 16u + ly / 2u;
-            if (gx >= tiles_x || gy >= tiles_y || lx > 30 || ly > 30) continue;
-            auto& out = tiles[std::size_t(gy) * tiles_x + gx];
-            bool complete = true;
-            const auto tile_uvs = owned::terrain_tile_uvs(terrain, tile);
-            for (const unsigned k : {0u, 2u, 6u, 8u}) {
-                const std::uint32_t cx = (tile.vertex_indices[k] % 33u - lx) / 2u, cy = (tile.vertex_indices[k] / 33u - ly) / 2u;
-                if (cx > 1 || cy > 1) { complete = false; break; }
-                out.uv[(cy * 2 + cx) * 2] = tile_uvs[k].u;
-                out.uv[(cy * 2 + cx) * 2 + 1] = tile_uvs[k].v;
-            }
-            if (!complete) continue;
-            out.material = tile.material_index;
-            if (tile.material_index >= used.size()) used.resize(std::size_t(tile.material_index) + 1, 0);
-            used[tile.material_index] = 1;
-        }
-    }
-    return tiles;
-}
-
-// Per base tile: the slot signature corner (NW, NE, SE, SW) at each world
-// corner cy*2+cx, two bits each (terrain_cover_types lanes). Same base tile
-// as terrain_base_slots: the MPR decoder stores positional vertex indices
-// (index 0 is the tile's min corner; rotation lives only in the UVs) and
-// marks exactly the layer tiles transparent, whose indices start past the
-// base layer, so both skip the same tiles and land on the same cell.
-std::vector<std::uint8_t> ground_cover_corner_lanes(const std::vector<GcTileGpu>& tiles) {
-    std::vector<std::uint8_t> lanes(tiles.size(), 0);
-    for (std::size_t t = 0; t < tiles.size(); ++t) {
-        if (tiles[t].material == 0xffffffffu) continue;
-        const float* uv = tiles[t].uv;
-        const auto corner = terrain_tile_world_corners({0, 1, 2, 3}, {{{uv[0], uv[1]}, {uv[2], uv[3]}, {uv[4], uv[5]}, {uv[6], uv[7]}}});
-        for (unsigned k = 0; k < 4; ++k) lanes[t] = std::uint8_t(lanes[t] | (corner[k] << (2 * k)));
-    }
-    return lanes;
-}
-
-// Per tile: deciduous, conifer and non-conifer woody influence of the placed MOB trees,
-// and the undead affinity of cave burial sites (alpha).
-std::vector<std::array<std::uint8_t,4>> ground_cover_trees(const OwnedMapSnapshot& map, UINT tiles_x, UINT tiles_y) {
-    std::vector<std::array<std::uint8_t,4>> trees(std::size_t(tiles_x)*tiles_y);
-    for (const auto& object : map.objects) {
-        const auto kind = ambient::tree_kind(object.visual_reference.c_str());
-        if (kind == ambient::tree_none) continue;
-        const int cx = int(std::floor(object.position[0]*.5f)), cy = int(std::floor(object.position[1]*.5f));
-        for (int dy=-3;dy<=3;++dy) for (int dx=-3;dx<=3;++dx) {
-            const int x=cx+dx,y=cy+dy;
-            if (x<0||y<0||x>=int(tiles_x)||y>=int(tiles_y)) continue;
-            auto& value=trees[std::size_t(y)*tiles_x+x];
-            const float influence = tree_litter_falloff(x*2.f+1.f-object.position[0], y*2.f+1.f-object.position[1]);
-            add_tree_litter_influence(value, kind, influence);
-        }
-    }
-    if(map.mob && map.mob->bytes) {
-        const auto& bytes=*map.mob->bytes;
-        const auto sites=[&](const auto& self,const std::vector<MobChunkRecord>& chunks)->void {
-            for(const auto& chunk:chunks) {
-                if(chunk.id==0xbbbb0000u) {
-                    const MobChunkRecord* model=nullptr;const MobChunkRecord* position=nullptr;bool duplicate=false;
-                    for(const auto& field:chunk.children) {
-                        if(field.id==0xb006u){duplicate|=model!=nullptr;model=&field;}
-                        if(field.id==0xb009u){duplicate|=position!=nullptr;position=&field;}
-                    }
-                    std::array<float,2> site{};
-                    // Chunk extents were validated once by parse_mob_document.
-                    if(!duplicate && model && position && cave_undead_site(bytes.data()+model->payload_offset,model->payload_bytes,
-                        bytes.data()+position->payload_offset,position->payload_bytes,site)) {
-                        const int cx=int(std::floor(site[0]*.5f)),cy=int(std::floor(site[1]*.5f));
-                        for(int dy=-10;dy<=10;++dy)for(int dx=-10;dx<=10;++dx) {
-                            const int x=cx+dx,y=cy+dy;if(x<0||y<0||x>=int(tiles_x)||y>=int(tiles_y))continue;
-                            auto& value=trees[std::size_t(y)*tiles_x+x][3];
-                            const auto affinity=std::uint8_t(std::max(0.f,1.f-std::sqrt(float(dx*dx+dy*dy))/10.f)*255);
-                            value=std::max(value,affinity);
-                        }
-                    }
-                }
-                self(self,chunk.children);
-            }
-        };
-        sites(sites,map.mob->roots);
-    }
-    return trees;
-}
-
 std::string lower_name(std::string name) {
     for (char& c : name) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
     return name;
 }
 } // namespace
 
-// Pure CPU, from the welded neighbour terrain and its map: the shared grids,
-// tile atlas cells and used materials, corner lanes, trees, tile families
-// (their job starts here), and the material blend inputs. Runs on the
-// neighbour stream's worker; add_ground_cover_neighbour turns them into GPU
-// resources on the render thread.
-struct GroundCoverNeighbourInputs {
-    ambient::TerrainGrids grids;
-    std::vector<GcTileGpu> tiles;
-    std::vector<std::uint8_t> used, base_lanes;
-    std::vector<std::array<std::uint8_t,4>> trees;
-    TileFamiliesJob families;
-    std::vector<std::uint16_t> base_slots;
-    std::vector<std::uint32_t> slot_types;
-    std::shared_ptr<TerrainTileBlendInput> blend_input; // only for 8-tile atlas sides
-    std::shared_ptr<const TerrainBakeCells> bake_cells;  // terrain material cache (terrain_bake.h)
-    bool grids_valid = false;
-};
-std::shared_ptr<GroundCoverNeighbourInputs> prepare_ground_cover_neighbour_inputs(
-    const NeighbourMapUpload& upload) noexcept try {
-    if (!upload.map || !upload.map->terrain) return nullptr;
-    const auto& terrain = *upload.map->terrain;
-    auto inputs = std::make_shared<GroundCoverNeighbourInputs>();
-    inputs->grids_valid = !terrain.sectors.empty() && ambient::build_terrain_grids(terrain, upload.map.get(), inputs->grids);
-    if (!inputs->grids_valid) return inputs;
-    const UINT tx = inputs->grids.tiles_x, ty = inputs->grids.tiles_y;
-    inputs->families = load_terrain_tile_families_async(terrain);
-    if (inputs->families.valid()) { inputs->base_slots = ambient::terrain_base_slots(terrain); inputs->slot_types = terrain.tile_types; }
-    inputs->tiles = ground_cover_tiles(terrain, tx, ty, inputs->used);
-    if (inputs->families.valid()) inputs->base_lanes = ground_cover_corner_lanes(inputs->tiles);
-    inputs->trees = ground_cover_trees(*upload.map, tx, ty);
-    inputs->bake_cells = std::make_shared<const TerrainBakeCells>(terrain_bake_cells(inputs->grids.height, tx, ty));
-    if (inputs->families.valid() && terrain.tiles_per_texture_side == 8)
-        inputs->blend_input = std::make_shared<TerrainTileBlendInput>(owned_terrain_tile_blend_input(terrain, tx, ty));
-    return inputs;
-} catch (...) { return nullptr; }
-
-std::shared_ptr<const LiquidSurfField> prepare_liquid_surf_neighbour(const NeighbourMapUpload& upload,const std::string& no_sea_maps) noexcept try {
-    const auto& inputs = upload.ground_cover_inputs;
-    if (!inputs || !inputs->grids_valid) return nullptr;
-    auto field = std::make_shared<LiquidSurfField>(
-        build_liquid_surf_field(inputs->grids.area, inputs->grids.level.liquid_area, inputs->grids.height,
-                                inputs->grids.ground, inputs->grids.tiles_x, inputs->grids.tiles_y,
-                                liquid_surf_map_takes_sea(upload.selection.placement.mpr,no_sea_maps)));
-    if (field->texels.empty()) return nullptr;
-    return field;
-} catch (...) { return nullptr; }
 
 #else
 } // namespace
@@ -2419,7 +2284,9 @@ enum GcProgram : unsigned {
     gp_depth_vs = gp_ps_strand + 12, // 4: cover, snow pile without / with trails, strands
     gp_depth_ps = gp_depth_vs + 4, // 3: cover, snow pile, strands
     gp_trail_vs = gp_depth_ps + 3, gp_trail_ps, gp_trail_full_vs, gp_trail_decay_ps, gp_object_vs, gp_object_ps,
-    gp_snow_stamp_vs, gp_snow_stamp_ps, gp_snow_recover_ps, gp_snow_tile_vs, gp_count};
+    gp_snow_stamp_vs, gp_snow_stamp_ps, gp_snow_recover_ps, gp_snow_tile_vs, 
+    gp_shadow_vs,                 // 2: sun shadow casters: cover, snow pile (no trails)
+    gp_count = gp_shadow_vs + 2};
 // The placement shader's per-rule features (its GC_F_* guards).
 enum PlaceFeature : unsigned { pf_edge = 1, pf_cluster = 2, pf_far = 4, pf_trail = 8, pf_pal1 = 16, pf_pal23 = 32,
                                pf_wall = 64, pf_beach = 128, pf_pile = 256 };
@@ -2538,6 +2405,9 @@ void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
     add("gcTrailDecayPS", "ps_5_0", nullptr); add("gcObjectVS", "vs_5_0", nullptr); add("gcObjectPS", "ps_5_0", nullptr);
     add("gcSnowStampVS", "vs_5_0", nullptr); add("gcSnowStampPS", "ps_5_0", nullptr); add("gcSnowRecoverPS", "ps_5_0", nullptr);
     add("gcSnowTileVS", "vs_5_0", nullptr);
+    // Sun shadow casters (ground_cover_shadows): cover, snow pile without trails.
+    add("gcShadowVS", "vs_5_0", list({{"GC_VS", "1"}}));
+    add("gcShadowVS", "vs_5_0", list({{"GC_VS", "1"}, {"GC_VS_SNOW", "1"}, {"GC_SNOW_TRAILS", "0"}}));
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -2593,6 +2463,8 @@ void Renderer::release_ground_cover() noexcept {
     gc_tiles_srv_.Reset(); gc_bark_srv_.Reset(); gc_stone_srv_.Reset(); gc_trees_srv_.Reset();
     gc_zone_pieces_.Reset(); gc_zone_srv_.Reset(); gc_zone_uploaded_.clear();
     gc_raster_.Reset(); gc_depth_.Reset(); gc_blend_.Reset(); gc_clamp_.Reset(); gc_wrap_.Reset();
+    for (auto& value : gc_shadow_vs_) value.Reset();
+    gc_shadow_args_.Reset(); gc_shadow_frame_.Reset(); gc_shadow_ready_ = false;
     gc_map_.reset(); gc_material_state_.clear(); gc_neighbours_.clear();
     gc_capacity_.fill(0); gc_instance_capacity_ = 0; gc_readback_head_ = gc_readback_pending_ = 0;
     gc_map_generation_ = 0; gc_failed_ = false; gc_grow_ = false;
@@ -2605,6 +2477,7 @@ void Renderer::release_ground_cover() noexcept {
 // its own null/capacity check at the new map's demand (gc_map_generation_ 0
 // rebuilds the map fields; an empty pool starts from the rule estimate).
 void Renderer::release_ground_cover_world() noexcept {
+    gc_shadow_ready_ = false; // the pool holds the previous world's cover
     bridge_release_ground_contacts();
     gc_cell_jobs_.Reset(); gc_cell_job_uav_.Reset(); gc_cell_job_srv_.Reset(); gc_cell_job_capacity_ = 0;
     std::vector<std::uint64_t>().swap(gc_cell_masks_); gc_cell_masks_key_ = UINT64_MAX; gc_cell_mask_srv_.Reset();
@@ -2713,6 +2586,8 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
         if (FAILED(hr = blob_vs(gp_depth_vs + k, gc_depth_vs_[k]))) return hr;
     for (unsigned k = 0; k < gc_depth_ps_.size(); ++k)
         if (FAILED(hr = blob_ps(gp_depth_ps + k, gc_depth_ps_[k]))) return hr;
+    for (unsigned k = 0; k < gc_shadow_vs_.size(); ++k)
+        if (FAILED(hr = blob_vs(gp_shadow_vs + k, gc_shadow_vs_[k]))) return hr;
     for (UINT round = 0; round < kGcMaxRounds; ++round) { // GcRun: the round index, bound per round
         const UINT values[4]{round, 0, 0, 0};
         if (FAILED(hr = make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, values, gc_round_constants_[round],
@@ -2788,6 +2663,15 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
             }
             gc_mesh_kind_[m] = std::uint8_t(kind);
         }
+        // Large cover for its sun shadow level 1 (ground_cover_shadows): the meshes
+        // the rule table gives the widest LOD range (lod_near >= 70 m: fallen logs
+        // and branches, dead bushes, snow and sand piles, 0.4-1.4 m), the ones it
+        // keeps whole at every distance because their size reads from afar.
+        gc_large_mesh_mask_ = 0;
+        for (const auto& rule : rules) if (rule.lod_near >= 70) gc_large_mesh_mask_ |= std::uint64_t(1) << rule.mesh;
+        // Cave wall roots (0.4-0.9 m, lod_near 60) are large too (user decision
+        // 2026-10-25), by their mesh class rather than a lower threshold.
+        gc_large_mesh_mask_ |= std::uint64_t(1) << gm_roots;
     }
     // Placed-instance work of each pass (gcFinalizeCS): dispatch arguments,
     // total and per-mesh prefix, read by the per-instance passes.
@@ -3074,10 +2958,10 @@ HRESULT Renderer::update_ground_cover_maps(const AmbientWorldSource& inputs) noe
 // map and tile atlas cells go to immutable GPU textures; the CPU values die
 // here. Fields and the colour map follow on the first cover frame with the
 // pipeline ready (prepare_ground_cover_neighbour). Contact shares these inputs.
-void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
+void Renderer::add_ground_cover_neighbour(const NeighbourPiece& upload,
     const std::array<float,16>& active_to_world,UINT contact_map) noexcept {
     const bool tile_blend = configured_integer(debug_overlay_.config(), "terrain_blend", 1) > 0;
-    if (!device_ || !upload.map || !upload.map->terrain ||
+    if (!device_ ||
         (configured_integer(debug_overlay_.config(), "ground_cover", 2) <= 0 &&
          configured_floating_point(debug_overlay_.config(), "contact_blend", .7f) <= 0 && !tile_blend)) return;
     const auto report = [&](const char* text) {
@@ -3090,10 +2974,8 @@ void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
         if (!neighbour_cover_origin(active_to_world, upload.selection.x, upload.selection.y, n.origin))
             return report("omitted reason=placement_not_translation");
         n.layout_origin = {neighbour_layout_tile_origin(upload.selection.placement.x), neighbour_layout_tile_origin(upload.selection.placement.y)};
-        const auto& terrain = *upload.map->terrain;
-        // The stream computed the CPU inputs after the weld; compute them here
-        // only when it could not.
-        auto inputs = upload.ground_cover_inputs ? upload.ground_cover_inputs : prepare_ground_cover_neighbour_inputs(upload);
+        // The stream computed the CPU inputs after the weld (ground_cover_neighbour.h).
+        const auto& inputs = upload.ground_cover;
         if (!inputs) return report("omitted reason=cpu_allocation");
         if (!inputs->grids_valid) return report("omitted reason=empty_terrain");
         const auto& grids = inputs->grids;
@@ -3101,19 +2983,21 @@ void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
         n.bake_cells = inputs->bake_cells;
         n.fog_band = {active_to_world[3] + float(upload.fog_edges.x0), active_to_world[7] + float(upload.fog_edges.y0),
                       active_to_world[3] + float(upload.fog_edges.x1), active_to_world[7] + float(upload.fog_edges.y1)};
-        n.lowest = terrain.sectors.front().bounds.minimum[2]; n.highest = terrain.sectors.front().bounds.maximum[2];
-        for (const auto& sector : terrain.sectors) {
-            n.lowest = std::min(n.lowest, sector.bounds.minimum[2]); n.highest = std::max(n.highest, sector.bounds.maximum[2]);
-        }
+        n.lowest = inputs->lowest; n.highest = inputs->highest;
         const UINT tx = n.tiles_x, ty = n.tiles_y, vx = tx * 2 + 1, vy = ty * 2 + 1;
         // Sand-family tiles for the beach rules join n.type once this
         // neighbour's tile families load; ETERRTYPE sand only until then.
-        n.families = std::move(inputs->families);
-        if (n.families.valid()) { n.base_slots = std::move(inputs->base_slots); n.slot_types = std::move(inputs->slot_types); }
+        if (inputs->families_valid) {
+            // Loaded by the stream: a job that is ready at once.
+            std::promise<TerrainTileFamilies> loaded;
+            loaded.set_value(inputs->families);
+            n.families = TileFamiliesJob(loaded.get_future(), nullptr);
+            n.base_slots = inputs->base_slots; n.slot_types = inputs->slot_types;
+        }
         else report("beach_sand=terrain_type_only reason=no_resource_mounts");
         const auto& used = inputs->used;
         const auto& tiles = inputs->tiles;
-        if (n.families.valid()) n.base_lanes = std::move(inputs->base_lanes);
+        if (n.families.valid()) n.base_lanes = inputs->base_lanes;
         const auto& trees = inputs->trees;
         n.tile_classes.resize(std::size_t(tx) * ty);
         for (std::size_t t = 0; t < n.tile_classes.size(); ++t) {
@@ -3136,24 +3020,18 @@ void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
         // them (same view, so the owned texture pool returns the same SRV).
         n.atlases.resize(used.size());
         UINT missing = 0;
+        std::vector<NativeOwnedTextureMip> page_mips;
         for (std::size_t material = 0; material < used.size(); ++material) {
             if (!used[material]) continue;
-            const auto page_index = material % (terrain.texture_count + 2u);
-            if (page_index >= terrain.pages.size() || !terrain.pages[page_index].texture || terrain.pages[page_index].mips.empty()) {
-                ++missing; continue;
-            }
-            const auto& page = terrain.pages[page_index];
-            NativeOwnedTextureView view{};
-            view.identity = page.texture->identity.container_incarnation; view.generation = 1;
-            view.resource = &page.texture->identity; view.value_source = 1;
-            view.format = static_cast<NativeOwnedTextureFormat>(page.texture->format);
-            view.mips = page.mips.data(); view.mip_count = static_cast<std::uint32_t>(page.mips.size());
+            const auto texture = material < inputs->atlas_textures.size() ? inputs->atlas_textures[material] : UINT32_MAX;
+            if (texture >= upload.textures.size()) { ++missing; continue; }
+            const NativeOwnedTextureView view = neighbour_piece_texture_view(upload.textures[texture], page_mips);
             std::uint64_t backing = 0;
             if (FAILED(get_native_owned_texture(view, n.atlases[material], backing, nullptr, true))) { n.atlases[material].Reset(); ++missing; }
         }
         if(configured_floating_point(debug_overlay_.config(),"contact_blend",.7f)>0||
            configured_integer(debug_overlay_.config(),"ground_cover",2)>0||tile_blend){
-            if(FAILED(build_contact_tiles(terrain,tx,ty,n.contact,&n.contact_rows)))return report("contact omitted reason=tile_upload_failed");
+            if(FAILED(build_contact_tiles(inputs->contact_tiles,inputs->contact_used,tx,ty,n.contact,&n.contact_rows)))return report("contact omitted reason=tile_upload_failed");
             // The neighbour's terrain draws read this grid (terrain cliffs and
             // the material blend at its own origin), so it carries the blend
             // half like the active map's: no material until the families load.
@@ -3162,9 +3040,8 @@ void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
                 grid.resize(grid.size()*2,std::array<std::uint32_t,4>{~0u,~0u,0u,~0u});
                 if(FAILED(make_grid_srv(device_.Get(),tx,ty*2,DXGI_FORMAT_R32G32B32A32_UINT,grid.data(),tx*16u,n.contact.tiles)))
                     return report("contact omitted reason=tile_upload_failed");
-                if(tile_blend&&n.families.valid()&&terrain.tiles_per_texture_side==8)
-                    n.blend_input=inputs->blend_input?inputs->blend_input:
-                        std::make_shared<TerrainTileBlendInput>(owned_terrain_tile_blend_input(terrain,tx,ty));
+                if(tile_blend&&n.families.valid()&&inputs->tiles_per_texture_side==8&&inputs->blend_input)
+                    n.blend_input=inputs->blend_input;
                 else std::vector<std::array<std::uint32_t,4>>().swap(n.contact_rows);
             }
             for(UINT material=0;material<n.atlases.size()&&material<contact_blend_max_materials;++material){
@@ -3172,9 +3049,14 @@ void Renderer::add_ground_cover_neighbour(const NeighbourMapUpload& upload,
                 ComPtr<ID3D11Resource> resource;n.atlases[material]->GetResource(&resource);
                 ComPtr<ID3D11Texture2D> texture;
                 D3D11_SHADER_RESOURCE_VIEW_DESC desc{};n.atlases[material]->GetDesc(&desc);
-                if(FAILED(resource.As(&texture))||desc.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D||
-                   copy_contact_atlas(texture.Get(),0,material,n.contact)!=S_OK)
-                    report("contact omitted reason=atlas_copy_failed");
+                char detail[160]{};
+                if(FAILED(resource.As(&texture))||desc.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D){report("contact omitted reason=atlas_copy_failed");continue;}
+                // A page the atlas cannot take (format, or size without the
+                // atlas-size mip) is named, as the active map's path names it.
+                if(copy_contact_atlas(texture.Get(),0,material,n.contact,detail,sizeof(detail))!=S_OK){
+                    char line[256];std::snprintf(line,sizeof(line),"map=%s contact art omitted for one material (%s)",n.name.c_str(),detail[0]?detail:"copy failed");
+                    bridge_neighbour_diagnostic(line);
+                }
             }
         }
         // Resident after preparation: grids, trees, fields (per metre) and the
@@ -3531,6 +3413,9 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // Only in a frame whose terrain was drawn.
     if (ambient_terrain_frame_ != native_frame_index_) return skip("no terrain frame published this frame");
     gc_drawn_frame_ = native_frame_index_;
+    // The sun shadow pass of the next frame draws this frame's placement only
+    // once it completed (the snapshot after the active draws).
+    gc_shadow_ready_ = false;
     // The CPU preparation below (scene walks, uploads) is ground cover work;
     // open the scope before it so it is not billed to the preceding pass.
     transition_profile_pass("ground_cover");
@@ -3981,6 +3866,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     c.snow_materials[0]=std::uint32_t(contact_maps_.ready);
     c.snow_materials[1]=std::uint32_t(contact_maps_.ready>>32);
     std::memcpy(c.clip, world_to_clip.data(), sizeof(c.clip));
+    jitter_clip(c.clip);
     const auto& m = world_to_clip;
     const auto plane = [&](unsigned index, float sign, unsigned row) {
         float v[4];
@@ -4464,7 +4350,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     ID3D11ShaderResourceView* history_srvs[2]{history ? shadow_history_srv_[shadow_history_previous_index_].Get() : nullptr,
                                               history ? shadow_history_depth_srv_.Get() : nullptr};
     context_->PSSetShaderResources(20, 2, history_srvs);
-    D3D11_VIEWPORT viewport{0, 0, float(target_width()), float(target_height()), 0, 1}; context_->RSSetViewports(1, &viewport);
+    D3D11_VIEWPORT viewport = target_viewport(); context_->RSSetViewports(1, &viewport);
     context_->RSSetState(gc_raster_.Get()); context_->OMSetDepthStencilState(gc_depth_.Get(), 0);
     const float factor[4]{1, 1, 1, 1}; context_->OMSetBlendState(gc_blend_.Get(), factor, ~0u);
     context_->IASetInputLayout(nullptr); context_->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
@@ -4506,7 +4392,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     context_->PSSetConstantBuffers(2, 1, native_shadow_constants_.GetAddressOf());
     context_->PSSetConstantBuffers(5, 1, native_point_light_constants_.GetAddressOf());
     context_->PSSetConstantBuffers(6, 1, shadow_history_constants_.GetAddressOf());
-    context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf());
+    context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf()); context_->PSSetShaderResources(64, 1, native_shadow_range_srv_.GetAddressOf());
     ID3D11ShaderResourceView* point_lights = native_point_lights_.empty() ? nullptr : native_point_light_srv_.Get();
     context_->PSSetShaderResources(18, 1, &point_lights);
     ID3D11ShaderResourceView* point_light_grid = native_point_lights_.empty() ? nullptr : native_point_light_grid_srv_.Get();
@@ -4603,7 +4489,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         context_->PSSetConstantBuffers(1, 1, native_world_lighting_constants_.GetAddressOf());
         context_->PSSetConstantBuffers(2, 1, native_shadow_constants_.GetAddressOf());
         context_->PSSetConstantBuffers(6, 1, shadow_history_constants_.GetAddressOf());
-        context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf());
+        context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf()); context_->PSSetShaderResources(64, 1, native_shadow_range_srv_.GetAddressOf());
         context_->PSSetSamplers(1, 1, native_shadow_sampler_.GetAddressOf());
         context_->PSSetSamplers(4, 1, native_shadow_far_sampler_.GetAddressOf());
         context_->PSSetSamplers(10, 1, native_shadow_gather_sampler_.GetAddressOf());
@@ -4625,6 +4511,21 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         ++draws;
     }
     if (history && draws) shadow_history_written_ = true;
+    // Sun shadow casters (ground_cover_shadows): the next frame's shadow pass
+    // runs before this pass and draws this placement. The neighbour passes
+    // below re-place only the far meshes into the same pool but reset every
+    // count, so the active map's counts and frame constants are kept here.
+    if (configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1) > 0) {
+        if (!gc_shadow_args_ && FAILED(make_buffer(device_.Get(), UINT(sizeof(gc_args_template_)), 0,
+                D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS, 0, nullptr, gc_shadow_args_))) gc_shadow_args_.Reset();
+        if (!gc_shadow_frame_ && FAILED(make_buffer(device_.Get(), sizeof(GroundCoverConstants), D3D11_BIND_CONSTANT_BUFFER, 0, 0,
+                nullptr, gc_shadow_frame_))) gc_shadow_frame_.Reset();
+        if (gc_shadow_args_ && gc_shadow_frame_) {
+            context_->CopyResource(gc_shadow_args_.Get(), gc_args_.Get());
+            context_->UpdateSubresource(gc_shadow_frame_.Get(), 0, nullptr, &c, 0, 0);
+            gc_shadow_ready_ = true;
+        }
+    }
     profiler_.add_draw(draws, draws); profiler_.add_batch(draws);
     // Neighbour maps: the same rules on each neighbour's own grids at its
     // world origin, thinner (kNeighbourCoverDensity) and far meshes only; no
@@ -4782,6 +4683,59 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     } catch (const std::bad_alloc&) {
         return fail("EID3D11 ground cover: CPU allocation failed; ground cover omitted.");
     }
+}
+
+
+// Sun shadow casters of the ground cover (ground_cover_shadows; the shadow
+// pass of a close map, renderer_shadows.cpp). The pass runs before this
+// frame's cover placement, so it draws the previous frame's active-map
+// placement: per-mesh counts and frame constants kept after its draws. 1:
+// the large meshes; 2: every mesh except the strands (kelp, seagrass: alpha-
+// cut cards under or at the water) and the far meshes (placed beyond the
+// close maps; the neighbour passes re-place them into the same pool).
+void Renderer::draw_ground_cover_shadows(UINT slice) noexcept {
+    (void)slice; // the slice's constants are bound by the caller
+    const auto& config = debug_overlay_.config();
+    const int level = configured_integer(config, "ground_cover_shadows", 1);
+    if (level <= 0 || !gc_shadow_ready_ || configured_integer(config, "ground_cover", 2) <= 0 ||
+        !gc_shadow_vs_[0] || !gc_shadow_vs_[1] || !gc_shadow_args_ || !gc_shadow_frame_ || !gc_instance_srv_ ||
+        !gc_draw_input_srv_ || !gc_vertex_srv_ || !gc_indices_ || !ambient_ground_srv_)
+        return;
+    std::uint64_t meshes = gc_large_mesh_mask_;
+    if (level >= 2) {
+        meshes = 0;
+        for (unsigned mesh = 0; mesh < gm_count; ++mesh)
+            if (gc_mesh_kind_[mesh] != 4) meshes |= std::uint64_t(1) << mesh;
+        for (const unsigned far_mesh : {unsigned(gm_blades_far), unsigned(gm_flower_far), unsigned(gm_reed_far),
+                                        unsigned(gm_cattail_far), unsigned(gm_seagrass_far)})
+            meshes &= ~(std::uint64_t(1) << far_mesh);
+    }
+    if (!meshes) return;
+    if (profiler_.pass_active()) profiler_.sub_scope(level >= 2 ? "ground_cover_all" : "ground_cover_large");
+    ID3D11ShaderResourceView* inputs[5]{ambient_ground_srv_.Get(), nullptr, gc_vertex_srv_.Get(), gc_instance_srv_.Get(),
+                                        gc_draw_input_srv_.Get()};
+    context_->VSSetShaderResources(0, 5, inputs);
+    context_->VSSetConstantBuffers(11, 1, gc_shadow_frame_.GetAddressOf());
+    context_->IASetInputLayout(nullptr); context_->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+    context_->IASetIndexBuffer(gc_indices_.Get(), DXGI_FORMAT_R32_UINT, 0);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // Two-sided like the cover's own pass; depth only, the map's depth test.
+    context_->RSSetState(gc_raster_.Get()); context_->OMSetDepthStencilState(gc_depth_.Get(), 0);
+    context_->PSSetShader(nullptr, nullptr, 0);
+    UINT draws = 0;
+    for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
+        if (!(meshes & (std::uint64_t(1) << mesh)) || !gc_capacity_[mesh] || !gc_draw_constants_[mesh]) continue;
+        context_->VSSetShader(gc_shadow_vs_[gc_mesh_kind_[mesh] == 3 ? 1 : 0].Get(), nullptr, 0);
+        context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
+        context_->DrawIndexedInstancedIndirect(gc_shadow_args_.Get(), mesh * 20u);
+        ++draws;
+    }
+    if (profiler_.pass_active()) profiler_.add_sub_draw(draws, 0);
+    ID3D11ShaderResourceView* empty[5]{};
+    context_->VSSetShaderResources(0, 5, empty);
+    ID3D11Buffer* no_buffers[2]{};
+    context_->VSSetConstantBuffers(11, 2, no_buffers);
+    context_->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
 }
 
 #endif

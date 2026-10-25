@@ -12,6 +12,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "TextManager.h"
 #include "I3DMapObjTranslation.h"
 #include "SoundManager.h"
+#include "Renderer.h"
+#include "dx11/RendererDX11.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
 const unsigned char VERSION_CHAR_2 = 151;
@@ -176,6 +178,8 @@ void CI3DScreenOptions::OnActivate()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenOptions::OnDeactivate()
 {
+    if (auto* renderer = theRenderer.GetD3D())
+        renderer->SetGammaCorrection(theSettings.fBrightness, theSettings.fContrast, theSettings.fGamma);
 }
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenOptions::OnExitFromModal(DWORD dwRetValue)
@@ -275,6 +279,8 @@ void CI3DScreenOptions::OnIdle()
                 float fBrightness = controls[OPTION_BRIGHTNESS].nValue / 50.f - 1;
                 float fContrast = controls[OPTION_CONTRAST].nValue / 50.f - 1;
                 float fGamma = controls[OPTION_GAMMA].nValue / 50.f - 1;
+                if (auto* renderer = theRenderer.GetD3D())
+                    renderer->SetGammaCorrection(fBrightness, fContrast, fGamma);
             }
             break;
             }

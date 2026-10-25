@@ -708,24 +708,6 @@ bool sample_visual_skeleton(const ModelCpuAsset& model,
     return true;
 }
 
-bool visual_morph_frames(const AnimationTrackAsset* track, double phase,
-                         NativeMorphFramesView& result) noexcept {
-    result = {};
-    if (!std::isfinite(phase) || phase < 0) return false;
-    if (!track || !track->morph_frames) return true;
-    if (!track->morph_points || static_cast<std::uint64_t>(track->morph_frames) *
-        track->morph_points != track->morphs.size()) return false;
-    const double bounded = (std::min)(phase, static_cast<double>(track->morph_frames - 1));
-    result.identity = &track->identity;
-    result.values = track->morphs.front().data();
-    result.frame_count = track->morph_frames;
-    result.point_count = track->morph_points;
-    result.first_frame = static_cast<std::uint32_t>(bounded);
-    result.second_frame = (std::min)(result.first_frame + 1, track->morph_frames - 1);
-    result.fraction = static_cast<float>(bounded - result.first_frame);
-    return true;
-}
-
 std::array<float, 3> visual_root_vector(const VisualPoseState& pose,
                                       const std::array<float, 3>& vector) noexcept {
     if (pose.tilted_facing) return rotate(pose.root_rotation, vector);

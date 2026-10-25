@@ -1,8 +1,6 @@
 #include "owned_resource_store.h"
-#include "res_mapping.h"
 #include <charconv>
 
-#include <psapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -121,6 +119,12 @@ std::int32_t read_i32(const std::uint8_t* bytes) noexcept {
     return static_cast<std::int32_t>(read_u32(bytes));
 }
 
+// The game folds resource names with the CRT tolower of its "Font CharSet"
+// code page (1251 or 1252) for the hash and the compare. Bytes 0xE0-0xFF are
+// lowercase letters in both, which tolower keeps; the other high bytes
+// depend on the code page and stay unsupported.
+bool high_byte_folds_to_itself(unsigned char value) noexcept { return value >= 0xE0u; }
+
 bool canonical_resource_name(const std::string& input, std::string& canonical,
                              ResourceFailure& failure) {
     canonical.clear();
@@ -133,7 +137,7 @@ bool canonical_resource_name(const std::string& input, std::string& canonical,
     std::size_t segment_start = 0;
     for (std::size_t index = 0; index < input.size(); ++index) {
         const auto value = static_cast<unsigned char>(input[index]);
-        if (value >= 0x80u) {
+        if (value >= 0x80u && !high_byte_folds_to_itself(value)) {
             fail(failure, ResourceFailureCode::unsupported_encoding,
                  "high-bit resource lookup requires an unproved legacy locale rule");
             return false;
@@ -169,9 +173,11 @@ bool canonical_resource_name(const std::string& input, std::string& canonical,
     return true;
 }
 
+// Names whose game folding is known: ASCII plus high_byte_folds_to_itself.
 bool ascii_name(const std::string& value) noexcept {
     return std::all_of(value.begin(), value.end(), [](char byte) {
-        return static_cast<unsigned char>(byte) < 0x80u && byte != '\0';
+        const auto code = static_cast<unsigned char>(byte);
+        return (code < 0x80u || high_byte_folds_to_itself(code)) && byte != '\0';
     });
 }
 
@@ -479,6 +485,7 @@ struct ArchiveMount {
     std::shared_ptr<FileOwner> file;
     std::vector<ArchiveEntry> entries;
     ResourceContainerInfo container;
+    std::uint8_t kinds = kArchiveAllKinds;
 };
 
 struct ImmutableByteStorage {
@@ -514,6 +521,20 @@ struct ResourceLocation::State {
     mutable std::weak_ptr<const std::vector<std::uint8_t>> backing;
     // The held file denies writers; its exact member proof lasts for this incarnation.
     mutable bool read_only_mapping_verified = false; // Protected by read_lock.
+};
+
+struct FileSlice final : ResourceSlice {
+    std::shared_ptr<FileOwner> file;
+    std::uint64_t base = 0;
+    bool read(std::uint64_t offset, std::uint64_t bytes, std::vector<std::uint8_t>& output,
+              ResourceFailure& failure) const override {
+        std::uint64_t end = 0;
+        if (!checked_add(offset, bytes, end) || end > size) {
+            fail(failure, ResourceFailureCode::archive_bounds, "container slice read is outside its member");
+            return false;
+        }
+        return file->read(base + offset, bytes, output, failure);
+    }
 };
 
 struct ResourceStore::Impl {
@@ -558,6 +579,17 @@ const char* resource_failure_code_name(ResourceFailureCode code) noexcept {
     case ResourceFailureCode::parse: return "parse";
     }
     return "unknown";
+}
+
+bool resource_canonical_name(const std::string& input, std::string& canonical,
+                             ResourceFailure& failure) {
+    return canonical_resource_name(input, canonical, failure);
+}
+
+void resource_store_set_incarnation_base(std::uint64_t base) noexcept {
+    auto current = next_container_incarnation.load(std::memory_order_relaxed);
+    while (current < base && !next_container_incarnation.compare_exchange_weak(
+        current, base, std::memory_order_relaxed)) {}
 }
 
 // "incarnation:offset:bytes:name". The mesh cache builds this per queued
@@ -670,6 +702,10 @@ void ResourceStore::set_immutable_byte_limit_for_test(std::uint64_t bytes) noexc
 bool ResourceStore::open(const ResourceStoreConfig& config,
                          ResourceFailure& failure) {
     close();
+    if (!config.archive_kinds.empty() && config.archive_kinds.size() != config.archives.size()) {
+        fail(failure, ResourceFailureCode::parse, "archive kinds do not match the archive list");
+        return false;
+    }
     impl_->loose_roots = config.loose_roots;
     for (std::size_t index = 0; index < config.archives.size(); ++index) {
         auto file = std::make_shared<FileOwner>(config.archives[index],
@@ -680,6 +716,7 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
         }
         ArchiveMount mount{};
         mount.file = file;
+        if (!config.archive_kinds.empty()) mount.kinds = config.archive_kinds[index];
         mount.container.mount_ordinal = static_cast<std::uint32_t>(
             impl_->loose_roots.size() + index);
         mount.container.bytes = file->size();
@@ -811,7 +848,10 @@ bool ResourceStore::locate(const std::string& resource_name,
         failure = {};
         return true;
     }
+    const bool texture = canonical.size() >= 4 && canonical.compare(canonical.size() - 4, 4, ".mmp") == 0;
+    const std::uint8_t kind = texture ? kArchiveTextures : kArchiveFigures;
     for (const ArchiveMount& archive : impl_->archives) {
+        if (!(archive.kinds & kind)) continue;
         std::uint32_t entry_index = 0;
         if (!find_archive_entry(archive.entries, canonical, entry_index)) continue;
         const ArchiveEntry& entry = archive.entries[entry_index];
@@ -930,87 +970,23 @@ bool ResourceStore::resolve_selected_file(const std::wstring& physical_file,
                                           ResourceBlob& blob,
                                           ResourceFailure& failure,
                                           SelectedResourceReadDiagnostic* diagnostic,
-                                          bool verified_read_only_mapping) {
+                                          bool verified_read_only_mapping,
+                                          bool container) {
     blob = {};
     if (diagnostic) *diagnostic = {};
     std::string canonical;
     if (physical_file.empty() || !selected_bytes ||
         !canonical_resource_name(resource_name, canonical, failure)) return false;
     return resolve_selected_file_impl(physical_file, canonical, selected_bytes,
-        selected_size, selected_file_offset, verified_read_only_mapping, blob, failure, diagnostic);
-}
-
-bool ResourceStore::resolve_native_mapped_anm(const std::string& resource_name,
-    const void* selected_bytes, std::uint64_t selected_size,
-    ResourceBlob& blob, ResourceFailure& failure) {
-    blob = {};
-    std::string canonical;
-    if (!canonical_resource_name(resource_name, canonical, failure)) return false;
-    if (canonical.size() < 5 || canonical.compare(canonical.size()-4, 4, ".anm") != 0) {
-        fail(failure, ResourceFailureCode::invalid_name, "native animation selection requires an ANM member");
-        return false;
-    }
-    const auto address = reinterpret_cast<std::uintptr_t>(selected_bytes);
-    if (!selected_bytes || !selected_size || selected_size > SIZE_MAX ||
-        selected_size > UINTPTR_MAX-address) {
-        fail(failure, ResourceFailureCode::archive_bounds, "native animation selection range");
-        return false;
-    }
-    {
-        // A live view the mapping hooks hold needs no OS query (L-021).
-        const void* view_base = nullptr;
-        std::wstring held;
-        if (res_mapping_view_containing(selected_bytes, selected_size, view_base, held))
-            return resolve_selected_file_impl(held, canonical, selected_bytes, selected_size,
-                address-reinterpret_cast<std::uintptr_t>(view_base), true, blob, failure);
-    }
-    const auto end = address+static_cast<std::uintptr_t>(selected_size);
-    std::uintptr_t origin = 0;
-    for (auto cursor = address; cursor < end;) {
-        MEMORY_BASIC_INFORMATION memory{};
-        if (!VirtualQuery(reinterpret_cast<const void*>(cursor), &memory, sizeof(memory)) ||
-            memory.State != MEM_COMMIT || memory.Type != MEM_MAPPED ||
-            memory.AllocationProtect != PAGE_READONLY || memory.Protect != PAGE_READONLY ||
-            !memory.AllocationBase) {
-            fail(failure, ResourceFailureCode::selection_mismatch,
-                "native animation selection is not an original read-only file view");
-            return false;
-        }
-        const auto allocation = reinterpret_cast<std::uintptr_t>(memory.AllocationBase);
-        const auto region = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
-        if ((!origin ? address < allocation : origin != allocation) || region > cursor ||
-            memory.RegionSize > UINTPTR_MAX-region || region+memory.RegionSize <= cursor) {
-            fail(failure, ResourceFailureCode::archive_bounds, "native animation selection crosses its mapped allocation");
-            return false;
-        }
-        origin = allocation;
-        cursor = (std::min)(end, static_cast<std::uintptr_t>(region+memory.RegionSize));
-    }
-    std::wstring physical;
-    if (!res_mapping_view_provenance(reinterpret_cast<const void*>(origin), physical)) {
-        physical.assign(32768, L'\0');
-        const DWORD count = GetMappedFileNameW(GetCurrentProcess(), const_cast<void*>(selected_bytes),
-            physical.data(), static_cast<DWORD>(physical.size()));
-        if (!count || count >= physical.size()) {
-            fail(failure, ResourceFailureCode::file_open, "native animation selection has no mapped-file provenance");
-            return false;
-        }
-        physical.resize(count);
-        physical.insert(0, L"\\\\?\\GLOBALROOT");
-    }
-    // Existing installation validation proves the native mapper's offset-zero,
-    // full-file read view. Never retain its address or infer identity from it;
-    // the one scoped exception is the provenance the mapping hooks hold for a
-    // live view they mapped (res_mapping_view_provenance).
-    return resolve_selected_file_impl(physical, canonical, selected_bytes,
-        selected_size, address-origin, true, blob, failure);
+        selected_size, selected_file_offset, verified_read_only_mapping, blob, failure, diagnostic,
+        container);
 }
 
 bool ResourceStore::resolve_selected_file_impl(const std::wstring& physical_file,
     const std::string& canonical, const void* selected_bytes,
     std::uint64_t selected_size, std::uint64_t selected_file_offset,
     bool verified_read_only_mapping, ResourceBlob& blob, ResourceFailure& failure,
-    SelectedResourceReadDiagnostic* diagnostic) {
+    SelectedResourceReadDiagnostic* diagnostic, bool container) {
     SelectedDiagnosticTicks resolve_timing(diagnostic ? &diagnostic->resolve_ticks : nullptr);
     try {
     auto found = impl_->selected_files.find(physical_file);
@@ -1079,6 +1055,23 @@ bool ResourceStore::resolve_selected_file_impl(const std::wstring& physical_file
         const auto key = std::string(":selected:")+location.identity_.key();
         location = impl_->cache.emplace(key,location).first->second;
     }
+    // A container whose exact member was already proven needs no bytes: its
+    // nested archive reads index and members from the held file.
+    const auto as_slice = [&] {
+        auto slice = std::make_shared<FileSlice>();
+        slice->file = location.state_->file;
+        slice->base = location.state_->offset;
+        slice->size = location.state_->bytes;
+        blob = {};
+        blob.identity = location.identity_;
+        blob.slice = std::move(slice);
+        failure = {};
+        return true;
+    };
+    if (container && verified_read_only_mapping) {
+        std::lock_guard<std::mutex> guard(location.state_->read_lock);
+        if (location.state_->read_only_mapping_verified) return as_slice();
+    }
     ResourceBlob result{};
     bool backing_cache_hit = false;
     if (!read(location, result, failure,
@@ -1102,6 +1095,7 @@ bool ResourceStore::resolve_selected_file_impl(const std::wstring& physical_file
             if (verified_read_only_mapping) location.state_->read_only_mapping_verified = true;
         }
     }
+    if (container) return as_slice();
     blob = std::move(result);
     failure = {};
     return true;
@@ -1169,6 +1163,34 @@ bool MemoryResourceArchive::open(const ResourceBlob& container,
     impl_->container = {};
     std::vector<ArchiveEntry>{}.swap(impl_->entries);
     impl_->index_reservation.reset();
+    if (!container.bytes && container.slice) {
+        // Header, then the record table and the name pool after it (to the end).
+        const auto& slice = *container.slice;
+        std::vector<std::uint8_t> header, tail;
+        std::uint64_t names_offset = 0, table_bytes = 0;
+        if (slice.size < kResHeaderBytes || !slice.read(0, kResHeaderBytes, header, failure)) return false;
+        const std::uint32_t count = read_u32(header.data() + 4), table_offset = read_u32(header.data() + 8);
+        if (read_u32(header.data()) != kResSignature) {
+            fail(failure, ResourceFailureCode::archive_signature, "RES signature or archive compression variant is unsupported");
+            return false;
+        }
+        if (!checked_multiply(count, kResEntryBytes, table_bytes) ||
+            !checked_add(table_offset, table_bytes, names_offset) || names_offset > slice.size) {
+            fail(failure, ResourceFailureCode::archive_bounds, "RES table is outside the container");
+            return false;
+        }
+        if (!slice.read(table_offset, slice.size - table_offset, tail, failure)) return false;
+        const auto names_bytes = static_cast<std::uint32_t>((std::min)(slice.size - names_offset, std::uint64_t{UINT32_MAX}));
+        if (!parse_archive_records(tail.data(), count, tail.data() + table_bytes, names_bytes, slice.size,
+                                   impl_->entries, failure, budget, &impl_->index_reservation)) {
+            std::vector<ArchiveEntry>{}.swap(impl_->entries);
+            impl_->index_reservation.reset();
+            return false;
+        }
+        impl_->container = container;
+        failure = {};
+        return true;
+    }
     if (!container.bytes ||
         !parse_archive_bytes(container.bytes->data(), container.bytes->size(),
                              impl_->entries, failure, budget, &impl_->index_reservation)) {
@@ -1212,6 +1234,13 @@ bool MemoryResourceArchive::resolve(const std::string& resource_name,
     auto bytes = budget ? budget->allocate_immutable_bytes(entry.size,failure) :
         std::make_shared<std::vector<std::uint8_t>>();
     if (!bytes) return false;
+    if (!impl_->container.bytes) {
+        if (!impl_->container.slice->read(entry.offset, entry.size, *bytes, failure)) return false;
+        blob.identity = std::move(identity);
+        blob.bytes = std::move(bytes);
+        failure = {};
+        return true;
+    }
     try {
         bytes->assign(impl_->container.bytes->begin() + entry.offset,
                       impl_->container.bytes->begin() + entry.offset + entry.size);

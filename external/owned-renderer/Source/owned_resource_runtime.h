@@ -40,7 +40,7 @@ bool retained_visual_resolve_selected(const std::wstring& physical_file,
     const std::string& name, const void* selected, std::uint32_t size, std::uint64_t file_offset,
     ResourceBlob& blob, std::uint64_t& source_generation, ResourceFailure& failure,
     struct SelectedResourceReadDiagnostic* diagnostic = nullptr,
-    bool verified_read_only_mapping = false);
+    bool verified_read_only_mapping = false, bool container = false);
 bool retained_visual_resolve_native_anm(const std::string& name,
     const void* selected, std::uint32_t size, ResourceBlob& blob,
     std::uint64_t& source_generation, ResourceFailure& failure);
@@ -114,6 +114,10 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
     const std::vector<std::uint8_t>& config, ResourceStoreConfig& mounts,
     ResourceFailure& failure, ResourceStoreConfig* text_mounts = nullptr);
 bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept;
+// x64 host (core mode): the game process's mounts (scene_core::ResourceMounts);
+// the host runs no loader of its own.
+void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,
+    const ResourceStoreConfig& text_mounts) noexcept;
 std::uint64_t retained_static_begin_source(MobSourceRole role,
                                            const char* name,
                                            const char* selected_mob = nullptr) noexcept;

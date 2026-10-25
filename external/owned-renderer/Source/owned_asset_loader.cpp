@@ -673,7 +673,12 @@ void extract_static_objects(const std::vector<std::uint8_t>& bytes,
                 object.nid = nid ? read_u32(bytes.data() + nid->payload_offset) : UINT32_MAX;
                 object.family = read_u32(bytes.data() + type->payload_offset);
                 object.owner = owner ? bytes[owner->payload_offset] : 0u;
-                object.quest = quest && bytes[quest->payload_offset] == 1u ? 1u : 0u;
+                // The game marks the object synchronised (flags 0x20000, game.exe
+                // 005927C0) for use-in-script or for a non-empty script name
+                // (B016): scripts address either, so neither is immutable.
+                std::string script_name;
+                (void)legacy_string(bytes, unique_field(fields, kFieldQuestInfo), script_name);
+                object.quest = (quest && bytes[quest->payload_offset] == 1u) || !script_name.empty() ? 1u : 0u;
                 object.shadow = !shadow || bytes[shadow->payload_offset] == 1u ? 1u : 0u;
                 object.prototype_nid = parent_nid ? read_u32(
                     bytes.data() + parent_nid->payload_offset) : UINT32_MAX;
