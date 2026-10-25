@@ -9,6 +9,12 @@
   идентифицирует полученный архив, но не заменяет проверку подписи. Ключ с
   https://ffmpeg.org/ffmpeg-devel.asc получен, сам по себе архив не удостоверяет.
 
+X64FF, 2026-10-25: `.asc` (520 байт) и ключ (1709 байт) получены с указанных
+адресов. Единственная попытка проверки GPG не завершилась: Windows-путь
+`--homedir` был неверно обработан MSYS GPG, импорт ключа не состоялся,
+результат `Can't check signature: No public key`. Повторов не было;
+подпись по-прежнему **не проверена**.
+
 Архив и распакованный неизменённый source находятся локально в игнорируемом
 `dependencies/ffmpeg/8.1.3/`: `downloads/ffmpeg-8.1.3.tar.xz` и `ffmpeg-8.1.3/`.
 Полный source, архив, полученные headers/import libs/DLL не включены в Git.
@@ -22,10 +28,13 @@ nonfree, version3 и autodetect сторонних библиотек. Сост�
 `config.h`, `config_components.h`, `ffbuild/config.mak` и `ffbuild/config.log`
 в `dependencies/ffmpeg/8.1.3/x64/share/ffmpeg/`.
 
-На этой машине найдены MSVC Build Tools 2022 и Git for Windows bash, но нет
-MSYS2 make и NASM. Сборка не начата; DLL/import libs/headers ещё не получены.
-Конфигурация пока подтверждена чтением исходников, а не результатом configure.
-Ни FFmpeg, ни игровой хост, ни декодирование медиа не запускались.
+X64FF: сборка MSVC x64 завершена 2026-10-25 после подготовки MSYS2 владельцем
+и исправления распознавания локализованного MSVC в рецепте. Получены DLL,
+import libs и headers; configure сообщил `LGPL version 2.1 or later`, demuxer
+`bink` и decoders `bink`, `binkaudio_dct`, `binkaudio_rdft`.
+Общий локальный комплект: `work/deps64/ffmpeg/8.1.3/x64`.
+Сохранены исходный архив, recipe и фактический configure receipt;
+тесты, декодирование медиа и игровой хост не запускались.
 
 Для будущего распространения DLL сохранять соответствующий полный исходный
 архив, этот рецепт/параметры и notices рядом с комплектом поставки по процедуре
