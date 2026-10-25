@@ -355,6 +355,7 @@ const PlayerGraphicsSetting* player_graphics_settings(std::size_t& count) noexce
     return kSettings;
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 const char* const* player_graphics_categories(std::size_t& count) noexcept {
     count = std::size(kCategories);
     return kCategories;
@@ -476,4 +477,5 @@ bool renderer_developer_mode() noexcept {
     return length > 0 && length < sizeof(value) && !(value[0] == '0' && value[1] == '\0');
 }
 
+#endif
 } // namespace owned

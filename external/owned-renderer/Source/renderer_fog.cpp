@@ -11,6 +11,7 @@
 
 namespace owned {
 
+#if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_world_fog_volume() noexcept {
     for (auto& value : fog_scatter_) value.Reset();
     for (auto& value : fog_scatter_uav_) value.Reset();
@@ -19,12 +20,14 @@ void Renderer::release_world_fog_volume() noexcept {
     fog_volume_quality_=-1;fog_history_valid_=false;
 }
 
+#endif
 void append_fog_volume_shader_programs(std::vector<ShaderProgram>& out) {
     static const std::string source = owned_native_shader_source() + kFogVolumeShader;
     out.push_back({source, nullptr, nullptr, "fogInjectCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, nullptr, nullptr, "fogIntegrateCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::ensure_world_fog_volume(int quality) noexcept {
     if (fog_integrated_srv_ && fog_volume_quality_ == quality) return S_OK;
     release_world_fog_volume();
@@ -370,4 +373,5 @@ HRESULT Renderer::bind_world_fog() noexcept {
     return S_OK;
 }
 
+#endif
 }  // namespace owned

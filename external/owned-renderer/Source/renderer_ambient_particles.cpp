@@ -50,6 +50,7 @@ HRESULT ambient_texture(ID3D11Device* device, UINT width, UINT height, DXGI_FORM
 }
 } // namespace
 
+#if !defined(EID3D11_SHADER_EMBED)
 // A layer shift step (game water level) rewrites only the liquid-surface
 // heights, wet area classes and wet emissive tiles, in place, and uploads the
 // two small textures they live in. Bounded by the liquid vertices/tiles.
@@ -71,6 +72,7 @@ bool Renderer::update_ambient_liquid_level(const std::vector<float>& shifts) noe
     return false;
 }
 
+#endif
 // The shared world atmosphere (b10/t11/s7) is prepended so particles use the
 // exact fog functions of world surfaces.
 const std::string& owned_ambient_particle_shader_source() {
@@ -86,6 +88,7 @@ void append_ambient_particle_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "ambient", nullptr, "fallShellPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 // World change (release_world_state): the shared per-map grids, their
 // textures and everything keyed by them. Forgetting the terrain makes the
 // next rebuild_ambient_particle_map a new map (ambient_map_generation_ steps),
@@ -477,4 +480,5 @@ void Renderer::render_ambient_particles() {
     profiler_.add_draw(draws,draws);profiler_.add_batch(draws);
 }
 
+#endif
 } // namespace owned

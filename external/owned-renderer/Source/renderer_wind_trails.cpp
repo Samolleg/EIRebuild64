@@ -63,6 +63,7 @@ void append_wind_trail_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "wind_trails", nullptr, "windTrailPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 void Renderer::render_wind_trails() {
     const auto& config = debug_overlay_.config();
     const int level = configured_integer(config,"wind_trails",1);
@@ -275,4 +276,5 @@ void Renderer::render_wind_trails() {
     profiler_.add_draw(1,1);profiler_.add_batch(1);
 }
 
+#endif
 } // namespace owned

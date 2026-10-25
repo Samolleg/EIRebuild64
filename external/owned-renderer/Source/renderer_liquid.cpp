@@ -23,6 +23,7 @@
 #include <vector>
 
 namespace owned {
+#if !defined(EID3D11_SHADER_EMBED)
 namespace {
 // Uploads a generated RGBA8 texture with its full mip chain (liquid_map_mips).
 HRESULT create_generated_liquid_texture(ID3D11Device* device,UINT size,std::vector<std::array<float,4>> level,
@@ -109,10 +110,12 @@ void Renderer::clear_water_reflection_bindings() noexcept {
  context_->PSSetConstantBuffers(7,1,&constant);context_->PSSetConstantBuffers(8,1,&constant);context_->PSSetSamplers(5,1,&sampler);
 }
 
+#endif
 void append_liquid_wave_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({{kLiquidWaveShader,sizeof(kLiquidWaveShader)-1},nullptr,nullptr,"liquidWaveCS","cs_5_0",0});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
  values.wave={};
  if(liquid_wave_failed_)return;
@@ -931,4 +934,5 @@ void Renderer::draw_game_particle_depth(UINT vertex_count) {
  if(depth)depth->Release();if(blend)blend->Release();if(test)test->Release();if(pixel)pixel->Release();
 }
 
+#endif
 } // namespace owned

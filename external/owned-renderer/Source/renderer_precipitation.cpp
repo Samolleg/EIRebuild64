@@ -50,6 +50,7 @@ void append_precipitation_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({kShelterFilterShader, "precipitation_shelter", nullptr, "shelterFilterCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 // Shelter map (precipitation occlusion): the persistent static casters drawn
 // straight down into one depth map through the shadow depth path, so no
 // rain, splash or wetness reaches under roofs, bridges or dense canopies.
@@ -840,4 +841,5 @@ void Renderer::render_precipitation() {
            stock_sep,stock_text);
 }
 
+#endif
 } // namespace owned

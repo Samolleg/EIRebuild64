@@ -1851,6 +1851,7 @@ GcPixel gcPS(GcOut i){
 }
 )";
 
+#if !defined(EID3D11_SHADER_EMBED)
 // ---------------------------------------------------------------- meshes
 // Independently authored procedural meshes of the approved prototype
 // (Prototypes/ground_cover/ground_cover.cpp, C-v4), unit-sized.
@@ -2389,6 +2390,9 @@ std::shared_ptr<const LiquidSurfField> prepare_liquid_surf_neighbour(const Neigh
     return field;
 } catch (...) { return nullptr; }
 
+#else
+} // namespace
+#endif
 // One production source for asynchronous pipeline compilation and shader checks.
 const std::string& owned_ground_cover_shader_source(){
     static const std::string source=
@@ -2396,6 +2400,7 @@ const std::string& owned_ground_cover_shader_source(){
     return source;
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 namespace {
 // Program order of append_ground_cover_shader_programs (the blob order).
 enum GcProgram : unsigned {
@@ -2454,6 +2459,7 @@ constexpr unsigned kPixelKindMaterials[5] = {(1u << mat_plain) | (1u << mat_grou
                                              1u << mat_bark, 1u << mat_stone, 1u << mat_snow, (1u << mat_strand) | (1u << mat_wrack)};
 } // namespace
 
+#endif
 // Order is the pipeline's blob order in ensure_ground_cover_pipeline (GcProgram).
 void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
     using M = D3D_SHADER_MACRO;
@@ -2534,6 +2540,7 @@ void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
     add("gcSnowTileVS", "vs_5_0", nullptr);
 }
 
+#if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_ground_cover() noexcept {
     gc_place_cs_.Reset(); gc_finalize_cs_.Reset(); gc_paint_cs_.Reset(); gc_fields_cs_.Reset();
     for (auto& value : gc_shade_cs_) value.Reset();
@@ -4777,4 +4784,5 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     }
 }
 
+#endif
 } // namespace owned

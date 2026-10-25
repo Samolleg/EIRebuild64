@@ -70,8 +70,8 @@ int main(int argc, char** argv) {
     }
 #endif
 #ifdef EID3D11_EMBEDDED
-    // The tool's renderer objects are retail, but this host embeds the same
-    // homogeneous native source as its runtime. Keep the borrowed views alive.
+    // The tool and embedded runtime use the same shader producers and
+    // homogeneous native source. Keep the borrowed views alive.
     std::vector<std::string> embeddedSources;
     embeddedSources.reserve(programs.size());
     for (auto& program : programs) {
