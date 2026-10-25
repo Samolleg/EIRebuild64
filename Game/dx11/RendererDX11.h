@@ -8,6 +8,7 @@ namespace owned {struct HudPublishedVisual; struct EmbeddedHudVisualInput; struc
 #include "../OwnedRender/E1RendererFacade.h"
 namespace OwnedRender { struct E1VisualInputs; }
 #include "FakeDX7.h"
+#include "../MoviePlayback.h"
 #include "DirectXHelpers.h"
 
 namespace owned { struct NativeGeometryView; struct ScreenRectangleRequest; }
@@ -27,9 +28,13 @@ class CDXGISurface;
 class CConstantBuffers;
 class FakeD3D7State;
 
-class CDX11
+class CDX11 : private Video::MovieRenderer
 {
 private:
+    const void* movieOwner = nullptr;
+    std::uint64_t movieGeneration = 0;
+    bool SubmitMovie(const void*, std::shared_ptr<const Video::Frame>, const Video::Presentation&) override;
+    void ClearMovie(const void*) override;
     bool itemColorSum = false; // Per-draw item state, never a configuration option.
     std::shared_ptr<UIColorKeyBlit> uiColorKey;
     DWORD m_width, m_height;

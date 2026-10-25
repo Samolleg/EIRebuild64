@@ -11,6 +11,7 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
     std::string& failure, E1TerrainRead readTexture = nullptr,
     void* textureContext = nullptr) noexcept;
 bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept;
+std::shared_ptr<const owned::TerrainAtlasSnapshot> E1CaptureTerrainAtlases();
 bool E1ShadowTerrain(owned::EmbeddedVisualFrameInputs& inputs,
     owned::RetainedTerrainSourceSnapshot& pinned) noexcept;
 void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>& surfaces) noexcept;

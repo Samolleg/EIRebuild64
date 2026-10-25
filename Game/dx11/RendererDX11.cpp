@@ -26,6 +26,7 @@
 #include "../Renderer.h"
 #include "../OwnedRender/E1VisualFrame.h"
 #include "../OwnedRender/E4Camp.h"
+#include "../OwnedRender/E1World.h"
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -648,6 +649,66 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
     }
 }
 
+bool CDX11::SubmitMovie(const void* owner, std::shared_ptr<const Video::Frame> frame,
+                       const Video::Presentation& presentation)
+{
+    const auto access = ownedRenderer.LockFrame();
+    if (!owner || !frame || !rendererFacade || !rendererFacade->Ready() ||
+        frame->format != Video::Frame::Format::BGRA8 || !frame->width || !frame->height ||
+        frame->width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        frame->height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+        frame->stride < size_t(frame->width) * 4 ||
+        frame->pixels.size() < size_t(frame->stride) * frame->height) return false;
+    const bool ownFrame = !rendererFacade->FrameActive();
+    try {
+        auto image = std::make_shared<owned::SurfaceImage>();
+        image->id = reinterpret_cast<std::uintptr_t>(this);
+        if (!++movieGeneration) ++movieGeneration;
+        image->generation = movieGeneration;
+        image->width = frame->width; image->height = frame->height;
+        image->pitch = LONG(frame->stride);
+        image->format.dwSize = sizeof(image->format);
+        image->format.dwFlags = DDPF_RGB;
+        image->format.dwRGBBitCount = 32;
+        image->format.dwRBitMask = 0x00ff0000;
+        image->format.dwGBitMask = 0x0000ff00;
+        image->format.dwBBitMask = 0x000000ff;
+        image->pixels = frame->pixels;
+        if (ownFrame) { OwnedRender::E1BeginFrame(); BeginFrame(); }
+        movieOwner = owner;
+        const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+            renderer.set_embedded_movie_image(presentation.loading ? image : nullptr);
+            if (presentation.loading) renderer.mark_load_picture();
+            // Composition, aspect fit and bars belong to the renderer.
+            return renderer.present_image(*image, nullptr, nullptr);
+        });
+        if (FAILED(hr)) {
+            GameJournal::Event("render", "movie_submit_failed", "hr=%08lx", static_cast<unsigned long>(hr));
+            if (ownFrame) EndFrame(false);
+            return false;
+        }
+        // A credits/UI draw owns its enclosing frame; never close it here.
+        if (ownFrame) EndFrame(presentation.present);
+        return true;
+    } catch (...) {
+        if (ownFrame && rendererFacade->FrameActive()) {
+            rendererFacade->DiscardFrame(); frameTiming.End(false);
+        }
+        GameJournal::Event("render", "movie_submit_failed");
+        return false;
+    }
+}
+void CDX11::ClearMovie(const void* owner)
+{
+    const auto access = ownedRenderer.LockFrame();
+    if (movieOwner != owner) return;
+    movieOwner = nullptr;
+    if (rendererFacade) rendererFacade->Visit([](owned::Renderer& renderer) {
+        renderer.set_embedded_movie_image(nullptr);
+        return S_OK;
+    });
+}
+
 void CDX11::MarkLoadPicture()
 {
     if (!rendererFacade) return;
@@ -811,6 +872,7 @@ HRESULT CDX11::BlitPublishedSurface(std::uint64_t surfaceId,
 
 CDX11::~CDX11()
 {
+    Video::SetMovieRenderer(nullptr); // Clear all movie sources before the device.
     owned::camp_inventory_shutdown_icons();
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);
     uiColorKey.reset();
@@ -838,6 +900,7 @@ bool CDX11::Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
     if (!InitializeDX(hWnd, dwWidth, dwHeight))
         return false;
 
+    Video::SetMovieRenderer(this);
     return true;
 }
 

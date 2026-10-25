@@ -1264,6 +1264,10 @@ void owned_text_interface_begin(HFONT combat_font, OwnedTextErrorSink error_sink
     s.recorder.initialize_fonts(s.font_generation);
     character_pane_publish_combat_font(combat_font, s.font_generation);
 }
+void owned_text_snapshot_epochs(std::uint64_t& pane, std::uint64_t& chat) noexcept {
+    auto& s = text_session();
+    pane = s.pane_epoch.load(); chat = s.chat_epoch.load();
+}
 void owned_text_begin_frame() noexcept {
     auto& s = text_session();
     if (!++s.frame) ++s.frame;

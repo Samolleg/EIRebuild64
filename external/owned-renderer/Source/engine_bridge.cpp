@@ -43409,21 +43409,7 @@ std::uint64_t bridge_world_draw_completion_counter() noexcept {
 bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept {
     values = {};
 #ifdef EID3D11_EMBEDDED
-    // Use host-owned facts, never the layout of the process executable.
-    bridge_read_world_environment(values.environment);
-    values.world_time_valid = bridge_current_world_time(values.world_time);
-    values.local_single_player = bridge_local_single_player_mission();
-    values.owned_sky_requested = bridge_owned_sky_requested();
-    values.completion = bridge_world_draw_completion_snapshot();
-    values.completion_counter = bridge_world_draw_completion_counter();
-    values.world_to_clip = bridge_scene_world_to_clip_snapshot();
-    values.fog = bridge_world_fog_snapshot();
-    values.world_epoch = bridge_current_world_epoch();
-    // No complete host publication exists yet for the queue's frame serial,
-    // draw-active flag, text epochs and pinned atlas collection. A partial
-    // snapshot must not be installed as a completed scene-thread command.
-    embedded_report_render_failure("embedded_input_missing", "scene_queue_frame_metadata");
-    return false;
+    return bridge_capture_embedded_frame_values(values);
 #else
     values.frame_serial = g_bridge_frame_serial;
     read_world_environment(values.environment);
@@ -43442,6 +43428,12 @@ bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept {
     return true;
 #endif
 }
+
+#ifdef EID3D11_EMBEDDED
+const BridgeFrameValues* bridge_embedded_installed_frame() noexcept {
+    return g_scene_frame_values_installed ? &g_scene_frame_values : nullptr;
+}
+#endif
 
 void bridge_install_frame_values(const BridgeFrameValues& values) noexcept {
     g_scene_frame_values = values;

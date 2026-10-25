@@ -653,12 +653,16 @@ static bool NGame::ProcessMessages()
 {
     MSG msg;
     bool bActive = true;
+    // Decode advancement and rendering stay on the host thread, including
+    // intervals between loading steps when the host pumps messages/idle.
+    C2DScreenWait::Update();
     // Idle processing until no new message come
     while (!PeekMessage(&msg, 0, 0, 0,
                         PM_NOREMOVE)) // no messages in the queue => process OnIdle
     {
         CorePerf::Frame coreFrame;
         GameJournal::MemoryFrame(GetTickCount());
+        C2DScreenWait::Update();
         // Update render state
         UpdateRenderEnable();
         bool diagnosticFrameOwner = FrameDiagnostics::Begin(ModShadowSchedule::generationTicks);

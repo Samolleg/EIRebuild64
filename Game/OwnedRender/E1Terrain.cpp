@@ -32,6 +32,19 @@ bool current() noexcept {
 }
 }
 namespace OwnedRender {
+std::shared_ptr<const owned::TerrainAtlasSnapshot> E1CaptureTerrainAtlases() {
+    auto snapshot = std::make_shared<owned::TerrainAtlasSnapshot>();
+    if (current()) {
+        snapshot->surfaces.reserve(atlasIds.size());
+        snapshot->failures.reserve(atlasIds.size());
+        for (const auto id : atlasIds) {
+            auto surface = E1SurfaceValue(id);
+            snapshot->failures.push_back(surface ? nullptr : "terrain atlas not loaded");
+            snapshot->surfaces.push_back(std::move(surface));
+        }
+    }
+    return snapshot; // Survives surface replacement and world retirement.
+}
 bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept {
     output = {};
     if (!current()) return false;
@@ -296,6 +309,14 @@ bool bridge_terrain_atlas(std::uint32_t material, std::shared_ptr<const OwnedVis
     const char** failure) noexcept {
     output.reset();
     if (failure) *failure = nullptr;
+    if (const auto* frame = bridge_embedded_installed_frame()) {
+        const auto& atlases = frame->terrain_atlases;
+        if (atlases && material < atlases->surfaces.size()) {
+            output = atlases->surfaces[material];
+            if (failure) *failure = atlases->failures[material];
+        } else if (failure) *failure = "terrain frame unavailable";
+        return bool(output);
+    }
     const char* why = "terrain frame unavailable";
     if (current()) {
         why = "terrain atlas not loaded";

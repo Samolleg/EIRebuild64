@@ -291,6 +291,7 @@ using OwnedTextErrorSink = void (*)(const char*) noexcept;
 void owned_text_interface_begin(HFONT combat_font, OwnedTextErrorSink error_sink = nullptr) noexcept;
 void owned_text_interface_end() noexcept;
 void owned_text_begin_frame() noexcept;
+void owned_text_snapshot_epochs(std::uint64_t& pane, std::uint64_t& chat) noexcept;
 OwnedTextStamp owned_text_begin(OwnedTextKind kind, const void* owner,
     std::uint64_t pane_surface = 0) noexcept;
 void owned_text_complete(OwnedTextStamp stamp, bool success) noexcept;

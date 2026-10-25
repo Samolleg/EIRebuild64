@@ -1561,6 +1561,11 @@ struct BridgeFrameValues {
 };
 // False means the host has not published a complete queue snapshot.
 bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept;
+#ifdef EID3D11_EMBEDDED
+// Host publishes synchronously; the scene thread uses its installed owning copy.
+bool bridge_capture_embedded_frame_values(BridgeFrameValues& values) noexcept;
+const BridgeFrameValues* bridge_embedded_installed_frame() noexcept;
+#endif
 void bridge_install_frame_values(const BridgeFrameValues& values) noexcept;
 // The bridge frame profile (large; once per presented frame).
 struct BridgeProfileValues {
