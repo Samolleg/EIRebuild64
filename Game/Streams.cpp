@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 #include <stdio.h>
 #include "Streams.h"
@@ -142,7 +143,7 @@ unsigned char *CMemoryStream::AllocBuffer(int nSize)
         pRes = (unsigned char *)VirtualAlloc(0, nSize, MEM_COMMIT, PAGE_READWRITE);
         if (pRes == 0)
         {
-            FILE *pFile = fopen("error.txt", "wt");
+            FILE *pFile = fopen(RuntimePaths64::Log("error.txt").string().c_str(), "wt");
             fprintf(pFile, "ERROR!: can't alloc %d bytes", nSize);
             fflush(pFile);
             fclose(pFile);

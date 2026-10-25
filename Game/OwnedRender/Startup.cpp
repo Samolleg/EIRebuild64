@@ -20,7 +20,7 @@ void ConfigureStartup() {
         std::filesystem::path((LPCSTR)theSettings.szResourcePath), ModRuntime::Resources());
     const auto roots = paths.mounts.loose_roots.size();
     const auto archives = paths.mounts.archives.size();
-    ConfigureResources(engine.wstring(), paths.world_map_layouts, std::move(paths.mounts));
+    owned::embedded_host_configuration().configure(std::move(paths));
     GameJournal::Event("RENDER", "resource_bootstrap",
         "source=SettingsProfile/ModRuntime roots=%zu archives=%zu device_created=0", roots, archives);
 }

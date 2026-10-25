@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "RuntimePaths64.h"
 #include "GameJournal.h"
 
 #include <string>
@@ -35,7 +36,7 @@ void ReportGameDebug(const char *format, ...)
     wvsprintfA(buffer, format, args);
     va_end(args);
     FILE *file = nullptr;
-    if (fopen_s(&file, mod->GameDebugFile().c_str(), "a") == 0 && file) {
+    if (fopen_s(&file, RuntimePaths64::Log("game-debug.log").string().c_str(), "a") == 0 && file) {
         fprintf(file, "%s\n", buffer);
         fclose(file);
     }
@@ -65,7 +66,7 @@ static void TraceString(const char *str)
     static bool isFirst = true;
 
     std::ios_base::openmode mode = isFirst ? std::ios::ate : std::ios::app;
-    std::ofstream file("errors.txt", mode);
+    std::ofstream file(RuntimePaths64::Log("errors.txt"), mode);
     if (file.is_open())
         file << ss.str();
 

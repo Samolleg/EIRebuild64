@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 #include "GameJournal.h"
 #include "ErrorDialog.h"
 #include "EngineDiagnostics.h"
@@ -82,10 +83,10 @@ void Note(const char *text) {
 void Initialize(bool quiet) {
     silent = quiet;
     fullDump = Setting(L"FullDump", 0) != 0;
-    std::wstring starter = std::filesystem::path(SettingsProfile::Path()).parent_path().wstring();
+    std::wstring starter = RuntimePaths64::Directory(L"Logs64").wstring();
     if (starter.empty()) starter = GetDirectoryName(GetCurrentModulePath());
     AddTrailingSlash(starter);
-    fileLog.Start(starter + L"addon.log", L"a", CLogger::LevelFromInt(int(Setting(L"LogLevel", 1))));
+    fileLog.Start(starter + L"eirebuild64.log", L"a", CLogger::LevelFromInt(int(Setting(L"LogLevel", 1))));
     consoleLog.Start(CLogger::LevelFromInt(int(Setting(L"ConsoleLogLevel", 3))));
     std::wstring directory = starter + L"Dumps\\", path;
     if (CreateDirectoryW(directory.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS)

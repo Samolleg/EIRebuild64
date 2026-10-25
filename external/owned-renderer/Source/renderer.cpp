@@ -1292,7 +1292,9 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  // nvwgf2um (dumps of 2026-10-11..13). Ask the driver to keep its internal
  // threads off this device.
  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};HRESULT hr;
+#if !defined(EID3D11_EMBEDDED) || !defined(_WIN64)
  delete_recorded_nvidia_cache();
+#endif
  hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
  if(FAILED(hr))return hr;
  shader_objects_=ShaderObjects::attach(device_.Get());

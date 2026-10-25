@@ -1,4 +1,5 @@
 #pragma once
+#include "RuntimePaths64.h"
 #include "ModTerrainHorizon.h"
 #include <vector>
 #include <memory>
@@ -44,7 +45,7 @@ public:
             if(result && day && pendingKey==requested){
                 previous=current;current=std::move(result);key=pendingKey;published=now;
                 width=current->field.surface_width;height=current->field.surface_height;pixels.resize(size_t(width)*height);ready=true;changed=true;
-                FILE *f=fopen("eirebuild-terrain-shadow.log","a");
+                FILE *f=fopen(RuntimePaths64::Log("eirebuild-terrain-shadow.log").string().c_str(),"a");
                 if(f){fprintf(f,"R7 field=%ux%u key=%d build_ms=%lu complete=1\n",width,height,key,current->field.horizon_build_ms);fclose(f);}
             }
         }

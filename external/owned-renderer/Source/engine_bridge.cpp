@@ -1,4 +1,5 @@
 #include "embedded_perf06.h"
+#include "debug_output_paths.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
 #endif
@@ -28637,13 +28638,7 @@ bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
 #endif
 
 std::string debug_root() {
-    char explicit_path[MAX_PATH]{};
-    if (GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR", explicit_path,
-                                static_cast<DWORD>(sizeof(explicit_path))) != 0) return explicit_path;
-    char local[MAX_PATH]{};
-    if (GetEnvironmentVariableA("LOCALAPPDATA", local, static_cast<DWORD>(sizeof(local))) == 0)
-        return ".\\EID3D11-debug";
-    return std::string(local) + "\\EID3D11";
+    return debug_output_root();
 }
 
 } // namespace

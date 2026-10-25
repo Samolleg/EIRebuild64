@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 #include "CorePerf.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Input.h"
@@ -806,7 +807,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     theAIGeneralSettings.ReadFromFile(CWorld::GetCurrentPath() + "config\\ai.reg");
     theSettings.ReadSettingsFromRegistry(CWorld::GetRegistryKey());
 #if !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
-    theSettings.ReadSettingsFromFile(CWorld::GetCurrentPath() + "config\\" + "settings.ini");
+    theSettings.ReadSettingsFromFile(RuntimePaths64::ConfigRead("settings.ini", theSettings.szWorkPath + "config\\settings.ini").c_str());
 #endif // !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
        //
        //
@@ -860,15 +861,9 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     }
 
     //
-    // create saves\current
     CString szPath;
-    szPath.Format("%ssaves\\", ModRuntime::SaveRoot(theWorld.GetWorkPath()).c_str());
-    CreateDirectory(szPath, 0);
-    // create multiplayer dir
-    szPath.Format("%smp\\", ModRuntime::SaveRoot(theWorld.GetWorkPath()).c_str());
-    CreateDirectory(szPath, 0);
     // create textures directory
-    szPath.Format("%stextures\\", theWorld.GetWorkPath());
+    szPath.Format("%s", RuntimePaths64::Textures().c_str());
     CreateDirectory(szPath, 0);
     // Perform application initialization
     if (!NGame::InitInstance(hInstance, nCmdShow))
@@ -1042,7 +1037,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     //
     theSettings.WriteSettingsToRegistry(theWorld.GetRegistryKey());
 #if !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
-    theSettings.WriteSettingsToFile(theSettings.szWorkPath + "config\\" + "settings.ini");
+    theSettings.WriteSettingsToFile(RuntimePaths64::Config("settings.ini").string().c_str());
 #endif // !defined(FINALRELEASE) || defined(USE_SETTINGS_INI) && !defined(DONT_USE_SETTINGS_INI)
        //
     theWorld.SetCamera(0);

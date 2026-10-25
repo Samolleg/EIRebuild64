@@ -1,4 +1,5 @@
 #include "render_profiler.h"
+#include "debug_output_paths.h"
 #include "debug_overlay.h"
 #include "camp_inventory.h"
 #include "engine_bridge.h"
@@ -1721,16 +1722,7 @@ bool RenderProfiler::write_shadow_temporal_maps(const std::string& path,
 }
 
 std::string RenderProfiler::make_debug_root() const {
-    char explicit_path[MAX_PATH]{};
-    if (GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR", explicit_path,
-                                static_cast<DWORD>(sizeof(explicit_path))) != 0) {
-        return explicit_path;
-    }
-    char local[MAX_PATH]{};
-    if (GetEnvironmentVariableA("LOCALAPPDATA", local, static_cast<DWORD>(sizeof(local))) == 0) {
-        return ".\\EID3D11-debug";
-    }
-    return std::string(local) + "\\EID3D11";
+    return debug_output_root();
 }
 
 } // namespace owned

@@ -1,4 +1,5 @@
 #pragma once
+#include "RuntimePaths64.h"
 #include <windows.h>
 #include <cstdio>
 namespace ModShadowSchedule {
@@ -16,7 +17,7 @@ inline void EndFrame(){
     ++frames;
     if(frames==300 || frames==1200){
         LARGE_INTEGER frequency;QueryPerformanceFrequency(&frequency);
-        FILE *f=fopen("eirebuild-shadow-perf.log","a");
+        FILE *f=fopen(RuntimePaths64::Log("eirebuild-shadow-perf.log").string().c_str(),"a");
         if(f){fprintf(f,"R6 frames=%u rebuilt=%u reused=%u culled=%u generation_ms_per_frame=%.4f\n",frames,rebuilt,reused,culled,1000.0*generationTicks/frequency.QuadPart/frames);fclose(f);}
     }
 }

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1TextLifetime.h"
 #include "widescreen_layout.h"
@@ -194,7 +195,7 @@ void CInterface3D::Init(CRenderer *pNewRend)
 
     CStdioFile file;
     CString tutorialPath = IWorld.GetWorkPath() + "config\\tutorial.ini";
-    std::string resolvedTutorialPath = ModRuntime::ConfigPath((LPCSTR)tutorialPath);
+    std::string resolvedTutorialPath = RuntimePaths64::ConfigRead("tutorial.ini", ModRuntime::ConfigPath((LPCSTR)tutorialPath).c_str());
     if (file.Open(resolvedTutorialPath.c_str(), CFile::modeRead | CFile::typeText))
     {
         CString szStr;
@@ -226,9 +227,7 @@ void CInterface3D::Fini()
     DestroyScreens();
 
     CStdioFile file;
-    CString tutorialPath = IWorld.GetWorkPath() + "config\\tutorial.ini";
-    std::string resolvedTutorialPath = ModRuntime::ConfigPath((LPCSTR)tutorialPath);
-    if (file.Open(resolvedTutorialPath.c_str(),
+    if (file.Open(RuntimePaths64::Config("tutorial.ini").string().c_str(),
                   CFile::modeCreate | CFile::modeWrite))
     {
         CString szStr;

@@ -145,7 +145,7 @@ struct State {
         wchar_t exe[32768]={}; auto n=GetModuleFileNameW(nullptr,exe,_countof(exe));
         if(!n || n==_countof(exe)) throw std::runtime_error("Cannot resolve profile location");
         fs::path root=fs::path(exe).parent_path().parent_path();
-        target=root/L"restarter-settings.xml";
+        target=root/L"restarter64-settings.xml";
         int argc=0; auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);
         if(!argv) throw std::runtime_error("Cannot parse -profile");
         struct Free { LPWSTR* p; ~Free(){LocalFree(p);} } free{argv};
@@ -155,10 +155,13 @@ struct State {
                 throw std::runtime_error("Expected one -profile path");
             target=fs::absolute(argv[++i]); explicitPath=true;
         }
+        const auto filename = Fold(target.filename().wstring());
+        if (filename == L"restarter-settings.xml" || filename == L"restarter-defaults.xml")
+            throw std::runtime_error("EIRebuild64 cannot write an x86 profile");
         source=target; fallback=explicitPath?"explicit_profile":"profile";
         if(!fs::exists(source)) {
-            source=root/L"restarter-defaults.xml";
-            fallback=fs::exists(source)?"restarter-defaults.xml":"embedded_engine_defaults";
+            source=root/L"restarter64-defaults.xml";
+            fallback=fs::exists(source)?"restarter64-defaults.xml":"embedded_engine_defaults";
         }
         Com com; auto doc=Load(source); values=Read(doc);
         initialized=true;

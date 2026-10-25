@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "KeyMap.h"
@@ -261,7 +262,7 @@ void NKeyMap::Init()
     bool bKeyFound, bActFound;
     for (i = 0; i < TOTAL_NUM_SCANCODES; i++)
         keyMap[i] = KA_UNKNOWN;
-    if (file.Open(IWorld.GetWorkPath() + "config\\keyboard.ini",
+    if (file.Open(RuntimePaths64::ConfigRead("keyboard.ini", IWorld.GetWorkPath() + "config\\keyboard.ini").c_str(),
                   CFile::modeRead | CFile::typeText) == FALSE)
         return;
     while (file.ReadString(szStr))
@@ -296,7 +297,7 @@ void NKeyMap::Fini()
     CStdioFile file;
     int i, j, k;
     bool bKeyFound, bActFound;
-    if (file.Open(IWorld.GetWorkPath() + "config\\keyboard.ini",
+    if (file.Open(RuntimePaths64::Config("keyboard.ini").string().c_str(),
                   CFile::modeCreate | CFile::modeWrite) == FALSE)
         return;
     for (k = 0; k < TOTAL_NUM_SCANCODES; k++)

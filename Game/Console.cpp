@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include <sstream>
@@ -576,7 +577,7 @@ void NConsole::ProcessListVar(const CStringArray &szParams)
     CStdioFile file;
     if (szParams.GetSize() > 1)
     {
-        bOutputFile = file.Open(szParams[1], CFile::modeWrite | CFile::modeCreate);
+        bOutputFile = file.Open(RuntimePaths64::Log(std::filesystem::path((LPCSTR)szParams[1]).filename().string().c_str()).string().c_str(), CFile::modeWrite | CFile::modeCreate);
         if (!bOutputFile)
             game << "Cannot open file " << szParams[1] << " for writing" << endl;
     }
@@ -618,7 +619,9 @@ void NConsole::ProcessLoadVar(const CStringArray &szParams)
     CString szStr;
     CStringArray szStrArray;
     CStdioFile file;
-    if (!file.Open(szParams[1], CFile::modeRead))
+    const auto captured = RuntimePaths64::Log(std::filesystem::path((LPCSTR)szParams[1]).filename().string().c_str());
+    const CString input = std::filesystem::is_regular_file(captured) ? CString(captured.string().c_str()) : szParams[1];
+    if (!file.Open(input, CFile::modeRead))
     {
         game << "Cannot open file " << szParams[1] << " for reading" << endl;
         return;
@@ -821,7 +824,7 @@ void ProcOut2(CStdioFile &file, const SAckEntryBoredVector *pVector)
 void NConsole::ProcessGenerateAcks(const CStringArray &szParams)
 {
     CStdioFile file;
-    if (file.Open(IWorld.GetWorkPath() + "scenack.txt", CFile::modeCreate | CFile::modeWrite) ==
+    if (file.Open(RuntimePaths64::Log("scenack.txt").string().c_str(), CFile::modeCreate | CFile::modeWrite) ==
         FALSE)
         return;
     int i;

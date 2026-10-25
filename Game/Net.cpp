@@ -1,4 +1,5 @@
 /**********************************************************************
+#include "RuntimePaths64.h"
  *<
         FILE: Net.cpp
 
@@ -25,7 +26,7 @@ CConnection::CConnection()
 void CConnection::StartTrafficSaving(const char *fname)
 {
     ASSERT(!bStoreTraffic);
-    trafficSaver.OpenWrite(fname);
+    trafficSaver.OpenWrite(RuntimePaths64::Log(std::filesystem::path(fname).filename().string().c_str()).string().c_str());
     bSkipSegment = TRUE;
     bStoreTraffic = TRUE;
 }
