@@ -429,7 +429,6 @@ BOOL CWorldServer::UpdatePlayer(CPlayer *pPl)
         {
             if (!SendNewZoneToPlayer(pPl))
                 return FALSE;
-            pPlServ->StartZoneLoading();
             pPlServ->SendActiveItems();
             return pPlServ->SendUpdate();
         }
@@ -645,6 +644,9 @@ BOOL CWorldServer::SendNewZoneToPlayer(CPlayer *pPl)
         return bRv;
     // send inventory update
     pPlServ->AddItemsToHoover(pPl->items, false);
+    // Both normal entry and saved-world adoption must wait for PID_ZONE_LOADED.
+    // Queue inventory while still active, then await the client's acknowledgement.
+    pPlServ->StartZoneLoading();
     return bRv;
     /*
                     // transmitting all items and spells from server to client, make it happen dude
