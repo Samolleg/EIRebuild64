@@ -125,6 +125,7 @@ static const char *LogSec = "MiniaudioOneShotSfx";
 
 namespace MiniaudioOneShotSfx
 {
+void ReleaseStreamingSound(const char *reason);
 namespace
 {
 const size_t SOUND_MANAGER_LISTENER_X_OFFSET = ModAudioLayout::LISTENER_X;
@@ -509,13 +510,24 @@ bool PlaybackSnapshot(ma_device_info*& devices, ma_uint32& count)
 }
 std::atomic<bool> OutputDeviceLost{false};
 std::atomic<bool> OutputClosing{false};
+std::atomic<bool> OutputInterrupted{false};
+std::atomic<bool> OutputRerouted{false};
+std::atomic<bool> OutputUsesDefault{true};
+const CString& RequestedPlaybackDevice()
+{
+    // Keep UI changes pending until the next process launch, including retries.
+    static const CString requested = theSettings.szAudioDevice;
+    return requested;
+}
 bool OutputFailureLogged = false;
 bool OutputUnavailable()
 {
+    if (OutputRerouted.exchange(false))
+        EngineDiagnostics::Event("Audio default output rerouted by WASAPI");
     if (!OutputDeviceLost.load()) return false;
     if (!OutputFailureLogged)
     {
-        EngineDiagnostics::Event("Audio output device stopped or unavailable; continuing without sound until restart");
+        EngineDiagnostics::Event("Audio output device stopped or unavailable; silent while retrying the configured device");
         OutputFailureLogged = true;
     }
     return true;
@@ -524,20 +536,35 @@ void OutputNotification(const ma_device_notification* notification)
 {
     // Never call engine APIs or logging from the audio thread.
     if (OutputClosing.load()) return;
-    if (notification->type == ma_device_notification_type_stopped ||
-        notification->type == ma_device_notification_type_rerouted ||
-        notification->type == ma_device_notification_type_interruption_began)
+    switch (notification->type)
+    {
+    case ma_device_notification_type_stopped:
         OutputDeviceLost = true;
+        break;
+    case ma_device_notification_type_rerouted:
+        if (OutputUsesDefault.load()) OutputRerouted = true;
+        else OutputDeviceLost = true;
+        break;
+    case ma_device_notification_type_interruption_began:
+        OutputInterrupted = true;
+        break;
+    case ma_device_notification_type_interruption_ended:
+        OutputInterrupted = false;
+        break;
+    default:
+        break;
+    }
 }
 bool SelectPlaybackDevice(ma_device_id& selected)
 {
-    // Freeze the setting on first audio use; UI changes apply on next process launch.
-    static const CString requested = theSettings.szAudioDevice;
+    const CString& requested = RequestedPlaybackDevice();
+    OutputUsesDefault = requested.IsEmpty();
+    if (requested.IsEmpty() && OutputContext().Init()) return true;
     ma_device_info* devices = nullptr;
     ma_uint32 count = 0;
-    if (PlaybackSnapshot(devices, count))
+    if (!requested.IsEmpty() && PlaybackSnapshot(devices, count))
         for (ma_uint32 i = 0; i < count; ++i)
-            if (requested.IsEmpty() ? devices[i].isDefault != 0 : EndpointKey(devices[i].id) == requested)
+            if (EndpointKey(devices[i].id) == requested)
             {
                 selected = devices[i].id;
                 return true;
@@ -3601,6 +3628,12 @@ bool IsGameAudioForeground()
 void RenderMiniaudioOutput(ma_device *device, void *output,
                             const void *input, ma_uint32 frames)
 {
+    if (OutputInterrupted.load())
+    {
+        ma_silence_pcm_frames(output, frames, device->playback.format,
+                              device->playback.channels);
+        return;
+    }
     // Render once so voices, music and video keep their playback positions.
     ma_engine_data_callback_internal(device, output, input, frames);
     if (OutputDeviceLost.load() || !IsGameAudioForeground())
@@ -3610,7 +3643,22 @@ void RenderMiniaudioOutput(ma_device *device, void *output,
 
 bool EnsureEngine()
 {
-    if (OutputUnavailable()) return false;
+    if (OutputUnavailable() && EngineInitialized)
+    {
+        // A movie owns engine nodes until Close. Keep it silent on the host
+        // clock; the next movie can use the recovered engine.
+        if (VideoEngineUsers != 0) return false;
+        ReleaseStreamingSound("device_lost");
+        ReleaseAllVoices("device_lost");
+        DestroyMiniaudioReverbGraph(true, "device_lost");
+        OutputClosing = true;
+        ma_engine_uninit(&Engine);
+        OutputClosing = false;
+        EngineInitialized = false;
+        // Try immediately after releasing the old engine (also between movies).
+        // Failed attempts below retain the existing two-second retry interval.
+        LastInitAttemptTick = 0;
+    }
     if (EngineInitialized)
         return true;
 
@@ -3633,10 +3681,12 @@ bool EnsureEngine()
     ma_device_id selected{};
     if (!SelectPlaybackDevice(selected)) return false;
     config.pContext = &OutputContext().value;
-    // Explicit endpoint IDs disable WASAPI automatic stream rerouting.
-    config.pPlaybackDeviceID = &selected;
+    // Only an explicit selection pins the endpoint. Default follows Windows.
+    config.pPlaybackDeviceID = RequestedPlaybackDevice().IsEmpty() ? nullptr : &selected;
     config.notificationCallback = OutputNotification;
     config.dataCallback = RenderMiniaudioOutput;
+    OutputDeviceLost = false;
+    OutputInterrupted = false;
     const ma_result result = ma_engine_init(&config, &Engine);
     EngineDiagnostics::Event("Audio engine init attempt=%u result=%d description=%s",EngineInitAttemptCount,int(result),ma_result_description(result));
     if (result != MA_SUCCESS)
@@ -3656,6 +3706,9 @@ bool EnsureEngine()
     }
 
     EngineInitialized = true;
+    if (OutputFailureLogged && !OutputDeviceLost.load())
+        EngineDiagnostics::Event("Audio configured output recovered");
+    OutputFailureLogged = false;
     LastInitAttemptTick = 0;
     LastDeviceRecoveryAttemptTick = 0;
     EnsureMiniaudioReverbGraph();
@@ -3684,8 +3737,7 @@ bool EnsureEngine()
 
 bool EnsureDeviceStarted(const char *phase)
 {
-    if (OutputUnavailable()) return false;
-    if (!EngineInitialized)
+    if (OutputUnavailable() || OutputInterrupted.load() || !EngineInitialized)
         return false;
     ma_device *device = ma_engine_get_device(&Engine);
     if (device != nullptr &&
@@ -6515,9 +6567,9 @@ const char* GetNativeStreamingName(){return Streaming.playing ? Streaming.curren
 bool IsNativeStreamingSwitching(){return Streaming.pendingStop || Streaming.pendingName[0] != '\0';}
 void Tick(void *soundManager)
 {
-    SyncWorldSfxPause();
-    if (!EngineInitialized)
+    if (!EnsureEngine())
         return;
+    SyncWorldSfxPause();
     if (!IsManagerReady(soundManager))
     {
         if (CurrentSoundManager != nullptr)
