@@ -329,7 +329,7 @@ void CUnitServer::Destroy()
 void CUnitServer::Clear()
 {
     ModOutOfCombatRegeneration::Forget(this);
-    modLeverTarget=nullptr;modLeverId=-1;modLeverRing=false;
+    modLeverTarget=nullptr;modLeverId=0;modLeverRing=false;
     if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
     curCommand.Clear();
     nextCommand.Clear();
@@ -3192,7 +3192,7 @@ bool CUnitServer::CalcAttackDest(SUnitCommand &cmd, CAIFullRoute *pRes)
             auto* lever=ModRuntime::Current()&&pTarget->WhoAmI()==HPC_LEVER?static_cast<CLeverObject*>(pTarget):nullptr;
             const bool missingPoints=lever&&!lever->UsesAuthoredInteraction();
             bool ring=missingPoints;
-            if(lever){cmd.bUsePoint=false;modLeverTarget=nullptr;modLeverId=-1;modLeverRing=false;}
+            if(lever){cmd.bUsePoint=false;modLeverTarget=nullptr;modLeverId=0;modLeverRing=false;}
             CArray<CPlot3D, CPlot3D &> points;
             pTarget->GetUsePoints(points,lpUnit->GetAttackDistance());
             if(missingPoints&&points.IsEmpty())return false;
@@ -3218,7 +3218,7 @@ bool CUnitServer::CalcAttackDest(SUnitCommand &cmd, CAIFullRoute *pRes)
                 if(ModRuntime::Current()&&leverPathSamples++<24)EngineDiagnostics::Event("Lever route object=%d candidates=%d fallback=%d found=%d radius=%g",pTarget->GetID(),points.GetSize(),ring,bestCost!=0x7fffffff,lpUnit->GetAttackDistance());
                 if(bestCost==0x7fffffff){if(lever)cmd.bUsePoint=false;return false;}
                 cmd.ptTarget=bestPoint;cmd.bUsePoint=true;
-                if(lever){modLeverTarget=lever;modLeverId=lever->GetID();modLeverPoint=bestPoint;modLeverRing=ring;}
+                if(lever){modLeverTarget=lever;modLeverId=lever->GetRTID();modLeverPoint=bestPoint;modLeverRing=ring;}
             }
         }
         break;
@@ -6234,7 +6234,7 @@ void CUnitServer::CmdLoot(CUnit *pTarget, bool bRun)
 bool CUnitServer::HasLeverRingChoice(const SUnitBasicCmd& cmd) const
 {
     if(!modLeverRing||!modLeverTarget||!cmd.IsScience()||!cmd.HasPointOfUse()||
-        static_cast<CMapObject*>(cmd.pTarget)!=modLeverTarget||cmd.pTarget->GetID()!=modLeverId)return false;
+        static_cast<CMapObject*>(cmd.pTarget)!=modLeverTarget||cmd.pTarget->GetRTID()!=modLeverId)return false;
     const auto delta=cmd.ptTarget-modLeverPoint;
     return delta.x==0&&delta.y==0&&delta.z==0;
 }

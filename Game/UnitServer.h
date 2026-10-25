@@ -839,7 +839,7 @@ public:
 private:
     // AD07 selection evidence is transient. A loaded ring must be reselected.
     const CMapObject* modLeverTarget = nullptr;
-    int modLeverId = -1;
+    ObjectId modLeverId = 0;
     CPlot3D modLeverPoint;
     bool modLeverRing = false;
 };

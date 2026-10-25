@@ -15,10 +15,10 @@ struct Entry {
     int checkedAt = -1;
     bool inCombat = false, hadCombat = false, safe = false;
 };
-std::unordered_map<int, Entry>& Entries() {
+std::unordered_map<ObjectId, Entry>& Entries() {
     // Process lifetime: global world/unit destructors also call Reset/Forget.
     // Entries themselves are cleared with each world and are never serialized.
-    static auto* entries = new std::unordered_map<int, Entry>;
+    static auto* entries = new std::unordered_map<ObjectId, Entry>;
     return *entries;
 }
 bool SameUnit(const Entry& entry, CUnit* unit) {
@@ -61,10 +61,11 @@ void Forget(CUnitServer* server) {
 }
 void Update(CUnit* unit) {
     if (!unit || !theWorldServer.IsMapLoaded()) return;
-    const int id = unit->GetID();
+    const int mapId = unit->GetID();
+    const ObjectId id = unit->GetRTID();
     auto* server = dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());
     if (!server || unit->IsInvalid() || unit->IsUnreferenced() || unit->IsDead() ||
-        id == 666666 || id == 640706) { Entries().erase(id); return; }
+        mapId == 666666 || mapId == 640706) { Entries().erase(id); return; }
     const int tick = theWorldServer.GetSegmentTimeCounter();
     Entry& entry = Entries()[id];
     if (!SameUnit(entry, unit)) {
@@ -73,7 +74,7 @@ void Update(CUnit* unit) {
         entry.server = server;
         entry.owner = unit->GetOwner();
         entry.playerNumber = unit->GetPlayerNum();
-        const unsigned phase = static_cast<unsigned>(id) % CheckSegments;
+        const unsigned phase = static_cast<unsigned>(mapId) % CheckSegments;
         const unsigned nowPhase = static_cast<unsigned>(tick) % CheckSegments;
         entry.nextCheck = static_cast<long long>(tick) + (phase + CheckSegments - nowPhase) % CheckSegments;
     }
@@ -96,7 +97,7 @@ bool IsSafe(CUnit* unit) {
     // UI objects are client-side: resolve the corresponding authoritative instance.
     unit = theWorldServer.GetUnit(unit->GetID());
     if (!unit || unit->IsInvalid() || unit->IsUnreferenced() || unit->IsDead()) return false;
-    const auto it = Entries().find(unit->GetID());
+    const auto it = Entries().find(unit->GetRTID());
     if (it == Entries().end() || !SameUnit(it->second, unit)) return false;
     const Entry& entry = it->second;
     const long long age = static_cast<long long>(theWorldServer.GetSegmentTimeCounter()) - entry.checkedAt;
