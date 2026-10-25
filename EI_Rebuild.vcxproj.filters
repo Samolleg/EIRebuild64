@@ -563,7 +563,7 @@
     <ClCompile Include="Game\dx11\RendererDX11.cpp">
       <Filter>Sources\dx11</Filter>
     </ClCompile>
-    <ClCompile Include="Game\BinkVideo.cpp">
+    <ClCompile Include="Game\MoviePlayback.cpp">
       <Filter>Sources</Filter>
     </ClCompile>
     <ClCompile Include="Game\dx11\Utils.cpp">
@@ -1262,7 +1262,7 @@
     <ClInclude Include="Game\dx11\ConstantBuffer.h">
       <Filter>Sources\dx11</Filter>
     </ClInclude>
-    <ClInclude Include="Game\BinkVideo.h">
+    <ClInclude Include="Game\MoviePlayback.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Game\dx11\Utils.h">

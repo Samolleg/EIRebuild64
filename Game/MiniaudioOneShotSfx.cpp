@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
 #include "MiniaudioOneShotSfx.h"
+#include "MoviePlayback.h"
 #include "GeneralSettings.h"
 #include "VoiceWaitState.h"
 #include "EngineDiagnostics.h"
@@ -113,9 +114,6 @@ static const char *LogSec = "MiniaudioOneShotSfx";
 #define JMV_MINIAUDIO_BINAURAL_DIAGNOSTICS 0
 #endif
 
-#ifndef JMV_MINIAUDIO_BINK_DIAGNOSTICS
-#define JMV_MINIAUDIO_BINK_DIAGNOSTICS 0
-#endif
 
 #ifndef JMV_MINIAUDIO_MODAL_SPEECH_PAUSE_DIAGNOSTICS
 #define JMV_MINIAUDIO_MODAL_SPEECH_PAUSE_DIAGNOSTICS 0
@@ -458,14 +456,6 @@ unsigned int BinauralFilterReadyDiagnosticCount = 0;
 unsigned int BinauralFilterErrorDiagnosticCount = 0;
 unsigned int BinauralApplyDiagnosticCount = 0;
 unsigned int BinauralProcessDiagnosticCount = 0;
-unsigned int BinkSystemEntryDiagnosticCount = 0;
-unsigned int BinkSystemDiagnosticCount = 0;
-unsigned int BinkTrackEntryDiagnosticCount = 0;
-unsigned int BinkTrackPhaseDiagnosticCount = 0;
-unsigned int BinkReadyDiagnosticCount = 0;
-unsigned int BinkLockDiagnosticCount = 0;
-unsigned int BinkStartDeferredDiagnosticCount = 0;
-unsigned int BinkBufferDiagnosticCount = 0;
 LONG ReverbLastDiagnosticBlocks = 0;
 int ReverbLastRequestedProfile = -1;
 int ReverbLastSettledProfile = -1;
@@ -489,9 +479,7 @@ bool GamePauseSpeechSelectorActive = false;
 std::atomic<unsigned> VideoEngineUsers{0};
 std::atomic<bool> VideoAppSuspended{false};
 ULONGLONG VideoPauseStart = 0, VideoPausedMilliseconds = 0;
-bool BinkDeferredEngineShutdown = false;
-volatile LONG BinkActiveVoiceCount = 0;
-volatile LONG BinkVoiceSequence = 0;
+bool VideoDeferredEngineShutdown = false;
 VirtualDynamicGainResolver DynamicGainResolver = nullptr;
 DWORD LastInitAttemptTick = 0;
 DWORD LastDeviceRecoveryAttemptTick = 0;
@@ -3326,7 +3314,7 @@ void ResetForManager(void *soundManager, const char *reason)
         ReleaseDecodedSounds();
     CurrentSoundManager = soundManager;
     if (soundManager != nullptr)
-        BinkDeferredEngineShutdown = false;
+        VideoDeferredEngineShutdown = false;
     LastUniqueCounter = soundManager != nullptr
         ? *reinterpret_cast<const DWORD *>(
               static_cast<const uint8_t *>(soundManager) +
@@ -3537,7 +3525,7 @@ bool IsGameAudioForeground()
 void RenderMiniaudioOutput(ma_device *device, void *output,
                             const void *input, ma_uint32 frames)
 {
-    // Render once so voices, music and Bink keep their playback positions.
+    // Render once so voices, music and video keep their playback positions.
     ma_engine_data_callback_internal(device, output, input, frames);
     if (!IsGameAudioForeground())
         ma_silence_pcm_frames(output, frames, device->playback.format,
@@ -3590,9 +3578,9 @@ bool EnsureEngine()
     LastDeviceState = device != nullptr
         ? ma_device_get_state(device)
         : ma_device_state_uninitialized;
-    EngineDiagnostics::Event("Audio engine ready backend=%s state=%d manager=%p bink=%ld",
+    EngineDiagnostics::Event("Audio engine ready backend=%s state=%d manager=%p video=%u",
         device && device->pContext ? ma_get_backend_name(device->pContext->backend):"none",
-        int(LastDeviceState),CurrentSoundManager,InterlockedCompareExchange(&BinkActiveVoiceCount,0,0));
+        int(LastDeviceState),CurrentSoundManager,VideoEngineUsers.load());
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
     const char *backend = device != nullptr && device->pContext != nullptr
         ? ma_get_backend_name(device->pContext->backend)
@@ -3639,10 +3627,10 @@ bool EnsureDeviceStarted(const char *phase)
     const bool recovered = result == MA_SUCCESS &&
         after == ma_device_state_started;
     static unsigned recoveryNotes=0;
-    if(recoveryNotes++<24)EngineDiagnostics::Event("Audio device recovery phase=%s backend=%s before=%d after=%d result=%d description=%s recovered=%d voices=%u bink=%ld deferred=%d",
+    if(recoveryNotes++<24)EngineDiagnostics::Event("Audio device recovery phase=%s backend=%s before=%d after=%d result=%d description=%s recovered=%d voices=%u video=%u deferred=%d",
         phase?phase:"unknown",device && device->pContext?ma_get_backend_name(device->pContext->backend):"none",
         int(before),int(after),int(result),ma_result_description(result),recovered?1:0,ActiveVoiceCount,
-        InterlockedCompareExchange(&BinkActiveVoiceCount,0,0),BinkDeferredEngineShutdown?1:0);
+        VideoEngineUsers.load(),VideoDeferredEngineShutdown?1:0);
     if (recovered)
         LastDeviceRecoveryAttemptTick = 0;
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
@@ -4154,509 +4142,15 @@ EStartResult StartDecoded(
     return STARTED;
 }
 
-struct SBinkSoundInterface;
-
-typedef int(__stdcall *BinkTrackOpenProc)(
-    SBinkSoundInterface *soundInterface,
-    uint32_t frequency,
-    int bits,
-    int channels,
-    uint32_t flags,
-    void *bink);
-typedef int(__stdcall *BinkReadyProc)(SBinkSoundInterface *soundInterface);
-typedef int(__stdcall *BinkLockProc)(
-    SBinkSoundInterface *soundInterface,
-    uint8_t **address,
-    uint32_t *length);
-typedef int(__stdcall *BinkUnlockProc)(
-    SBinkSoundInterface *soundInterface,
-    uint32_t filledBytes);
-typedef void(__stdcall *BinkVolumeProc)(
-    SBinkSoundInterface *soundInterface,
-    int volume);
-typedef void(__stdcall *BinkPanProc)(
-    SBinkSoundInterface *soundInterface,
-    int pan);
-typedef int(__stdcall *BinkStateProc)(
-    SBinkSoundInterface *soundInterface,
-    int status);
-typedef void(__stdcall *BinkCloseProc)(SBinkSoundInterface *soundInterface);
-typedef HANDLE(WINAPI *CreateWaitableTimerExWProc)(
-    LPSECURITY_ATTRIBUTES timerAttributes,
-    LPCWSTR timerName,
-    DWORD flags,
-    DWORD desiredAccess);
-
-struct SBinkSoundInterface
+void FinalizeDeferredVideoEngineShutdown()
 {
-    BinkReadyProc Ready;
-    BinkLockProc Lock;
-    BinkUnlockProc Unlock;
-    BinkVolumeProc Volume;
-    BinkPanProc Pan;
-    BinkStateProc Pause;
-    BinkStateProc SetOnOff;
-    BinkCloseProc Close;
-    uint32_t preferredBytes;
-};
-
-static_assert(sizeof(SBinkSoundInterface) == 0x24,
-              "The supported Bink sound callback table is x86-only");
-static_assert(offsetof(SBinkSoundInterface, preferredBytes) == 0x20,
-              "Bink 1.0t reads the preferred PCM block size at +0x20");
-
-const size_t BINK_RETAIL_SOUND_WORKSPACE_BYTES = 0xC0;
-const uint64_t BINK_READY_PRECISE_WAIT_US = 1000;
-const LONGLONG BINK_READY_PRECISE_WAIT_100NS = -10000LL;
-const DWORD BINK_READY_PRECISE_WAIT_TIMEOUT_MS = 50;
-const DWORD BINK_READY_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
-
-enum EBinkReadyWaitBackend
-{
-    BINK_READY_WAIT_HIGH_RES_TIMER = 0,
-    BINK_READY_WAIT_YIELD_FALLBACK,
-};
-
-struct SBinkVoice
-{
-    SBinkSoundInterface *soundInterface;
-    HANDLE readyWaitTimer;
-    ma_pcm_rb ring;
-    ma_sound sound;
-    ma_format format;
-    uint32_t frequency;
-    uint32_t flags;
-    uint32_t bytesPerFrame;
-    ma_uint32 preferredFrames;
-    ma_uint32 lockedFrames;
-    uint64_t committedBytes;
-    void *bink;
-    int bits;
-    int channels;
-    int sequence;
-    int volume;
-    int pan;
-    uint32_t readyCalls;
-    uint32_t readyAccepts;
-    uint32_t lockCalls;
-    uint32_t unlockCalls;
-    uint32_t readyBackpressureWaits;
-    uint32_t readyBackpressureHighResolutionWaits;
-    uint32_t readyBackpressureFallbackYields;
-    uint32_t readyBackpressureWaitFailures;
-    uint32_t readyNoProgressStreak;
-    uint32_t readyMaxNoProgressStreak;
-    uint32_t readyEmptyRingProbes;
-    uint32_t readyEmptyRingStreak;
-    uint32_t readyMaxEmptyRingStreak;
-    uint32_t lastReadyUnlockCalls;
-    uint64_t readyBackpressureRequestedUs;
-    uint64_t readyBackpressureElapsedUs;
-    uint64_t readyBackpressureMaxElapsedUs;
-    LONGLONG readyWaitQpcFrequency;
-    DWORD readyWaitTimerCreateError;
-    DWORD readyWaitLastError;
-    int lastReadyState;
-    bool ringInitialized;
-    bool soundInitialized;
-    bool locked;
-    bool started;
-    bool paused;
-    bool onOff;
-    bool registered;
-    bool readyWaitTimerHighResolution;
-};
-
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-bool ShouldLogBinkReadyState(SBinkVoice *voice, int state)
-{
-    if (voice == nullptr)
-        return false;
-
-    const uint32_t calls = voice->readyCalls;
-    const bool firstCalls = calls <= 4;
-    const bool stateChanged = voice->lastReadyState != state;
-    const bool exponentialSample =
-        calls != 0 && (calls & (calls - 1)) == 0;
-    voice->lastReadyState = state;
-    if (!firstCalls && !stateChanged && !exponentialSample)
-        return false;
-
-    ++BinkReadyDiagnosticCount;
-    return true;
-}
-
-bool ShouldLogBinkReadyBackpressure(const SBinkVoice *voice)
-{
-    if (voice == nullptr)
-        return false;
-
-    const uint32_t waits = voice->readyBackpressureWaits;
-    return waits <= 4 || (waits != 0 && (waits & (waits - 1)) == 0);
-}
-#endif
-
-const char *GetBinkReadyWaitBackendName(EBinkReadyWaitBackend backend)
-{
-    switch (backend)
-    {
-    case BINK_READY_WAIT_HIGH_RES_TIMER:
-        return "high_res_timer";
-    case BINK_READY_WAIT_YIELD_FALLBACK:
-        return "yield_fallback";
-    default:
-        return "yield_fallback";
-    }
-}
-
-const char *GetConfiguredBinkReadyWaitBackend(const SBinkVoice *voice)
-{
-    return voice != nullptr && voice->readyWaitTimer != nullptr
-        ? "high_res_timer"
-        : "yield_fallback";
-}
-
-void CloseBinkReadyWaitTimer(SBinkVoice *voice)
-{
-    if (voice == nullptr || voice->readyWaitTimer == nullptr)
-        return;
-
-    CancelWaitableTimer(voice->readyWaitTimer);
-    CloseHandle(voice->readyWaitTimer);
-    voice->readyWaitTimer = nullptr;
-}
-
-void InitializeBinkReadyPreciseWait(SBinkVoice *voice)
-{
-    if (voice == nullptr)
-        return;
-
-    LARGE_INTEGER qpcFrequency = {};
-    if (QueryPerformanceFrequency(&qpcFrequency))
-        voice->readyWaitQpcFrequency = qpcFrequency.QuadPart;
-
-
-
-    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    CreateWaitableTimerExWProc createTimer = kernel32 != nullptr
-        ? reinterpret_cast<CreateWaitableTimerExWProc>(
-              GetProcAddress(kernel32, "CreateWaitableTimerExW"))
-        : nullptr;
-    if (createTimer == nullptr)
-    {
-        voice->readyWaitTimerCreateError = kernel32 == nullptr
-            ? GetLastError()
-            : ERROR_PROC_NOT_FOUND;
-        voice->readyWaitLastError = voice->readyWaitTimerCreateError;
-    }
-    else
-    {
-        SetLastError(ERROR_SUCCESS);
-        voice->readyWaitTimer = createTimer(
-            nullptr,
-            nullptr,
-            BINK_READY_WAITABLE_TIMER_HIGH_RESOLUTION,
-            TIMER_MODIFY_STATE | SYNCHRONIZE);
-        if (voice->readyWaitTimer == nullptr)
-        {
-            voice->readyWaitTimerCreateError = GetLastError();
-            voice->readyWaitLastError = voice->readyWaitTimerCreateError;
-        }
-        else
-        {
-            voice->readyWaitTimerHighResolution = true;
-        }
-    }
-
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_PRECISE_WAIT_INIT seq=%d result=%s backend=%s requested_us=%I64u create_error=%lu qpc_frequency=%I64d fail_open=yield",
-            voice->sequence,
-            voice->readyWaitTimer != nullptr ? "ready" : "fallback",
-            GetConfiguredBinkReadyWaitBackend(voice),
-            BINK_READY_PRECISE_WAIT_US,
-            static_cast<unsigned long>(voice->readyWaitTimerCreateError),
-            voice->readyWaitQpcFrequency);
-#endif
-}
-
-void DisableBinkReadyWaitTimer(
-    SBinkVoice *voice,
-    const char *phase,
-    DWORD error)
-{
-    if (voice == nullptr)
-        return;
-
-    ++voice->readyBackpressureWaitFailures;
-    voice->readyWaitLastError = error;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    const uint32_t failures = voice->readyBackpressureWaitFailures;
-    if (failures <= 4 || (failures & (failures - 1)) == 0)
-    {
-        LOGWARN("MINIAUDIO_BINK_PRECISE_WAIT_FAILURE seq=%d phase=%s error=%lu failures=%u fail_open=yield",
-                voice->sequence,
-                phase != nullptr ? phase : "unknown",
-                static_cast<unsigned long>(error),
-                failures);
-    }
-#endif
-    CloseBinkReadyWaitTimer(voice);
-}
-
-EBinkReadyWaitBackend YieldBinkReadyWait(SBinkVoice *voice)
-{
-    if (voice != nullptr)
-        ++voice->readyBackpressureFallbackYields;
-    if (!SwitchToThread())
-        Sleep(0);
-    return BINK_READY_WAIT_YIELD_FALLBACK;
-}
-
-EBinkReadyWaitBackend WaitBinkReadyBackpressure(SBinkVoice *voice)
-{
-
-
-    if (voice->readyWaitTimer == nullptr)
-        return YieldBinkReadyWait(voice);
-
-    LARGE_INTEGER dueTime = {};
-    dueTime.QuadPart = BINK_READY_PRECISE_WAIT_100NS;
-    if (!SetWaitableTimer(
-            voice->readyWaitTimer,
-            &dueTime,
-            0,
-            nullptr,
-            nullptr,
-            FALSE))
-    {
-        DisableBinkReadyWaitTimer(
-            voice, "set_timer", GetLastError());
-        return YieldBinkReadyWait(voice);
-    }
-
-    const DWORD waitResult = WaitForSingleObject(
-        voice->readyWaitTimer, BINK_READY_PRECISE_WAIT_TIMEOUT_MS);
-    if (waitResult == WAIT_OBJECT_0)
-    {
-        ++voice->readyBackpressureHighResolutionWaits;
-        return BINK_READY_WAIT_HIGH_RES_TIMER;
-    }
-
-    DWORD error = ERROR_GEN_FAILURE;
-    if (waitResult == WAIT_TIMEOUT)
-        error = ERROR_TIMEOUT;
-    else if (waitResult == WAIT_FAILED)
-        error = GetLastError();
-    DisableBinkReadyWaitTimer(voice, "wait_timer", error);
-    return YieldBinkReadyWait(voice);
-}
-
-uint64_t MeasureBinkReadyWaitMicroseconds(
-    const SBinkVoice *voice,
-    const LARGE_INTEGER &qpcStarted,
-    bool qpcReady,
-    DWORD tickStarted)
-{
-    LARGE_INTEGER qpcFinished = {};
-    if (voice != nullptr && qpcReady &&
-        voice->readyWaitQpcFrequency > 0 &&
-        QueryPerformanceCounter(&qpcFinished) &&
-        qpcFinished.QuadPart >= qpcStarted.QuadPart)
-    {
-        const uint64_t delta = static_cast<uint64_t>(
-            qpcFinished.QuadPart - qpcStarted.QuadPart);
-        return delta * 1000000ULL /
-            static_cast<uint64_t>(voice->readyWaitQpcFrequency);
-    }
-    return static_cast<uint64_t>(GetTickCount() - tickStarted) * 1000ULL;
-}
-
-void ApplyBinkReadyBackpressure(SBinkVoice *voice)
-{
-    if (voice == nullptr)
-    {
-        return;
-    }
-
-    // Bink calls Ready immediately after every successful Unlock so that it
-    // can fill another output block without delay. Only repeated probes with
-    // no new producer progress are throttled; the first probe and every probe
-    // following a new PCM commit remain immediate.
-    if (voice->lastReadyUnlockCalls != voice->unlockCalls)
-    {
-        voice->lastReadyUnlockCalls = voice->unlockCalls;
-        voice->readyNoProgressStreak = 0;
-        return;
-    }
-
-    ++voice->readyNoProgressStreak;
-    if (voice->readyNoProgressStreak > voice->readyMaxNoProgressStreak)
-        voice->readyMaxNoProgressStreak = voice->readyNoProgressStreak;
-
-    LARGE_INTEGER qpcStarted = {};
-    const bool qpcReady = voice->readyWaitQpcFrequency > 0 &&
-        QueryPerformanceCounter(&qpcStarted) != FALSE;
-    const DWORD tickStarted = GetTickCount();
-    const EBinkReadyWaitBackend backend =
-        WaitBinkReadyBackpressure(voice);
-    const uint64_t elapsedUs = MeasureBinkReadyWaitMicroseconds(
-        voice, qpcStarted, qpcReady, tickStarted);
-    ++voice->readyBackpressureWaits;
-    voice->readyBackpressureRequestedUs += BINK_READY_PRECISE_WAIT_US;
-    voice->readyBackpressureElapsedUs += elapsedUs;
-    if (elapsedUs > voice->readyBackpressureMaxElapsedUs)
-        voice->readyBackpressureMaxElapsedUs = elapsedUs;
-
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogBinkReadyBackpressure(voice))
-    {
-        LOGINFO("MINIAUDIO_BINK_BACKPRESSURE seq=%d reason=no_producer_progress backend=%s requested_us=%I64u elapsed_us=%I64u call=%u wait=%u unlocks=%u streak=%u high_res_waits=%u fallback_yields=%u wait_failures=%u last_error=%lu",
-                voice->sequence,
-                GetBinkReadyWaitBackendName(backend),
-                BINK_READY_PRECISE_WAIT_US,
-                elapsedUs,
-                voice->readyCalls,
-                voice->readyBackpressureWaits,
-                voice->unlockCalls,
-                voice->readyNoProgressStreak,
-                voice->readyBackpressureHighResolutionWaits,
-                voice->readyBackpressureFallbackYields,
-                voice->readyBackpressureWaitFailures,
-                static_cast<unsigned long>(voice->readyWaitLastError));
-    }
-#endif
-}
-
-SRWLOCK BinkVoiceRegistryLock = SRWLOCK_INIT;
-std::vector<SBinkVoice *> BinkVoiceRegistry;
-
-bool BinkMovieAudioFailed = false;
-bool BinkMovieAudioErrorLogged = false;
-std::string BinkMovieName;
-void BinkAudioError(const char *phase, const char *reason)
-{
-    BinkMovieAudioFailed = true;
-    if (BinkMovieAudioErrorLogged) return;
-    BinkMovieAudioErrorLogged = true;
-    GameJournal::Event("AUDIO", "bink_muted", "movie=%s phase=%s reason=%s",
-        GameJournal::Quote(BinkMovieName.c_str()).c_str(), phase, reason);
-}
-
-int __stdcall BinkMiniaudioReady(SBinkSoundInterface *soundInterface);
-int __stdcall BinkMiniaudioLock(
-    SBinkSoundInterface *soundInterface,
-    uint8_t **address,
-    uint32_t *length);
-int __stdcall BinkMiniaudioUnlock(
-    SBinkSoundInterface *soundInterface,
-    uint32_t filledBytes);
-void __stdcall BinkMiniaudioVolume(
-    SBinkSoundInterface *soundInterface,
-    int volume);
-void __stdcall BinkMiniaudioPan(
-    SBinkSoundInterface *soundInterface,
-    int pan);
-int __stdcall BinkMiniaudioPause(
-    SBinkSoundInterface *soundInterface,
-    int status);
-int __stdcall BinkMiniaudioSetOnOff(
-    SBinkSoundInterface *soundInterface,
-    int status);
-void __stdcall BinkMiniaudioClose(SBinkSoundInterface *soundInterface);
-int __stdcall BinkMiniaudioTrackOpen(
-    SBinkSoundInterface *soundInterface,
-    uint32_t frequency,
-    int bits,
-    int channels,
-    uint32_t flags,
-    void *bink);
-BinkTrackOpenProc __stdcall BinkMiniaudioSystemOpen(uintptr_t param);
-
-SBinkVoice *GetBinkVoice(SBinkSoundInterface *soundInterface)
-{
-    if (soundInterface == nullptr)
-        return nullptr;
-
-    AcquireSRWLockShared(&BinkVoiceRegistryLock);
-    SBinkVoice *result = nullptr;
-    for (size_t i = 0; i < BinkVoiceRegistry.size(); ++i)
-    {
-        SBinkVoice *const voice = BinkVoiceRegistry[i];
-        if (voice != nullptr && voice->soundInterface == soundInterface)
-        {
-            result = voice;
-            break;
-        }
-    }
-    ReleaseSRWLockShared(&BinkVoiceRegistryLock);
-    return result;
-}
-
-bool RegisterBinkVoice(SBinkVoice *voice)
-{
-    if (voice == nullptr || voice->soundInterface == nullptr)
-        return false;
-
-    bool registered = false;
-    try
-    {
-        SExclusiveSrwLockGuard registryLock(BinkVoiceRegistryLock);
-        bool duplicate = false;
-        for (size_t i = 0; i < BinkVoiceRegistry.size(); ++i)
-        {
-            SBinkVoice *const current = BinkVoiceRegistry[i];
-            if (current == voice ||
-                (current != nullptr &&
-                 current->soundInterface == voice->soundInterface))
-            {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate)
-        {
-            BinkVoiceRegistry.push_back(voice);
-            registered = true;
-        }
-    }
-    catch (const std::exception &error)
-    { GameJournal::AllocationFailureInCatch("MiniaudioOneShotSfx");
-        LOGERR("MINIAUDIO_BINK_REGISTRY_ERROR reason=std_exception detail=%s",
-            error.what());
-    }
-    return registered;
-}
-
-void UnregisterBinkVoice(SBinkVoice *voice)
-{
-    if (voice == nullptr)
-        return;
-
-    AcquireSRWLockExclusive(&BinkVoiceRegistryLock);
-    for (size_t i = 0; i < BinkVoiceRegistry.size(); ++i)
-    {
-        if (BinkVoiceRegistry[i] == voice)
-        {
-            BinkVoiceRegistry.erase(BinkVoiceRegistry.begin() + i);
-            break;
-        }
-    }
-    ReleaseSRWLockExclusive(&BinkVoiceRegistryLock);
-}
-
-void FinalizeDeferredBinkEngineShutdown()
-{
-    if (!BinkDeferredEngineShutdown || CurrentSoundManager != nullptr || VideoEngineUsers != 0 ||
-        InterlockedCompareExchange(&BinkActiveVoiceCount, 0, 0) != 0 ||
+    if (!VideoDeferredEngineShutdown || CurrentSoundManager != nullptr || VideoEngineUsers != 0 ||
         !EngineInitialized)
     {
         return;
     }
 
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_ENGINE_RELEASE reason=deferred_sound_manager_shutdown active=0");
-#endif
-    EngineDiagnostics::Event("Audio engine release phase=bink_deferred manager=%p bink=0",CurrentSoundManager);
+    EngineDiagnostics::Event("Audio engine release phase=video_deferred manager=%p",CurrentSoundManager);
     ma_engine_uninit(&Engine);
     AudioResources::Shutdown();
     memset(&Engine, 0, sizeof(Engine));
@@ -4665,737 +4159,10 @@ void FinalizeDeferredBinkEngineShutdown()
     LastInitAttemptTick = 0;
     LastDeviceRecoveryAttemptTick = 0;
     LastDeviceState = ma_device_state_uninitialized;
-    BinkDeferredEngineShutdown = false;
+    VideoDeferredEngineShutdown = false;
 }
 
-void DestroyBinkVoice(SBinkVoice *voice, const char *reason)
-{
-    if (voice == nullptr)
-        return;
-
-    const char *readyWaitBackend = GetConfiguredBinkReadyWaitBackend(voice);
-    LONG active = InterlockedCompareExchange(&BinkActiveVoiceCount, 0, 0);
-    if (voice->registered)
-    {
-        UnregisterBinkVoice(voice);
-        active = InterlockedDecrement(&BinkActiveVoiceCount);
-        voice->registered = false;
-    }
-    if (voice->soundInitialized)
-    {
-        ma_sound_stop(&voice->sound);
-        ma_sound_uninit(&voice->sound);
-        voice->soundInitialized = false;
-    }
-    if (voice->ringInitialized)
-    {
-        ma_pcm_rb_uninit(&voice->ring);
-        voice->ringInitialized = false;
-    }
-    CloseBinkReadyWaitTimer(voice);
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_CLOSE seq=%d reason=%s bytes=%I64u ready_calls=%u ready_accepts=%u lock_calls=%u unlock_calls=%u ready_backpressure=%d precise_wait=%d wait_backend=%s backpressure_waits=%u backpressure_requested_us=%I64u backpressure_elapsed_us=%I64u backpressure_max_wait_us=%I64u high_res_waits=%u fallback_yields=%u wait_failures=%u timer_create_error=%lu last_wait_error=%lu max_no_progress_streak=%u empty_ring_probes=%u max_empty_ring_streak=%u active=%ld",
-            voice->sequence,
-            reason != nullptr ? reason : "close",
-            voice->committedBytes,
-            voice->readyCalls,
-            voice->readyAccepts,
-            voice->lockCalls,
-            voice->unlockCalls,
-            1,
-            1,
-            readyWaitBackend,
-            voice->readyBackpressureWaits,
-            voice->readyBackpressureRequestedUs,
-            voice->readyBackpressureElapsedUs,
-            voice->readyBackpressureMaxElapsedUs,
-            voice->readyBackpressureHighResolutionWaits,
-            voice->readyBackpressureFallbackYields,
-            voice->readyBackpressureWaitFailures,
-            static_cast<unsigned long>(voice->readyWaitTimerCreateError),
-            static_cast<unsigned long>(voice->readyWaitLastError),
-            voice->readyMaxNoProgressStreak,
-            voice->readyEmptyRingProbes,
-            voice->readyMaxEmptyRingStreak,
-            active);
-#endif
-    delete voice;
-    FinalizeDeferredBinkEngineShutdown();
-}
-
-
-
-
-
-void LogBinkTrackPhase(
-    int sequence,
-    const char *phase,
-    const char *result)
-{
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkTrackPhaseDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_BINK_TRACK_PHASE seq=%d phase=%s result=%s total=%u",
-                sequence,
-                phase != nullptr ? phase : "unknown",
-                result != nullptr ? result : "unknown",
-                BinkTrackPhaseDiagnosticCount);
-    }
-#endif
-}
-
-enum EBinkStartOutcome
-{
-    BINK_START_NOT_NEEDED,
-    BINK_START_DEFERRED,
-    BINK_START_STARTED,
-    BINK_START_DEVICE_FAILED,
-    BINK_START_SOUND_FAILED,
-};
-
-EBinkStartOutcome TryStartBinkVoice(
-    SBinkVoice *voice,
-    const char *phase)
-{
-    if (BinkMovieAudioFailed || voice == nullptr || !voice->onOff || voice->paused ||
-        voice->started)
-    {
-        return BINK_START_NOT_NEEDED;
-    }
-
-    const ma_uint32 queuedFrames = ma_pcm_rb_available_read(&voice->ring);
-    if (queuedFrames == 0)
-    {
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        if (ShouldLogLimited(BinkStartDeferredDiagnosticCount))
-        {
-            LOGINFO("MINIAUDIO_BINK_START_DEFER seq=%d phase=%s reason=no_pcm queued_frames=0 total=%u",
-                    voice->sequence,
-                    phase != nullptr ? phase : "unknown",
-                    BinkStartDeferredDiagnosticCount);
-        }
-#endif
-        return BINK_START_DEFERRED;
-    }
-
-    if (!EnsureDeviceStarted("bink_pcm_start"))
-    {
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGERR("MINIAUDIO_BINK_DEVICE_ERROR phase=%s seq=%d reason=device_not_started queued_frames=%u",
-               phase != nullptr ? phase : "start",
-               voice->sequence,
-               queuedFrames);
-#endif
-        return BINK_START_DEVICE_FAILED;
-    }
-
-    const ma_result result = ma_sound_start(&voice->sound);
-    if (result != MA_SUCCESS)
-    {
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGERR("MINIAUDIO_BINK_DEVICE_ERROR phase=%s seq=%d result=%d description=%s queued_frames=%u",
-               phase != nullptr ? phase : "start",
-               voice->sequence,
-               result,
-               ma_result_description(result),
-               queuedFrames);
-#endif
-        return BINK_START_SOUND_FAILED;
-    }
-
-    voice->started = true;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_START seq=%d phase=%s queued_frames=%u active=%ld",
-            voice->sequence,
-            phase != nullptr ? phase : "start",
-            queuedFrames,
-            InterlockedCompareExchange(&BinkActiveVoiceCount, 0, 0));
-#endif
-    return BINK_START_STARTED;
-}
-
-float BinkMovieGain()
-{
-    // Movies are streamed, non-spatial audio; use the existing music/stream
-    // slider even before a world (and its sound manager) exists.
-    const int percent = (std::max)(0, (std::min)(100, theSettings.nAudioStreaming));
-    return theSettings.nAudio ? static_cast<float>(percent) * 0.01f : 0.0f;
-}
-
-int __stdcall BinkMiniaudioTrackOpen(
-    SBinkSoundInterface *soundInterface,
-    uint32_t frequency,
-    int bits,
-    int channels,
-    uint32_t flags,
-    void *bink)
-{
-    const int sequence = static_cast<int>(
-        InterlockedIncrement(&BinkVoiceSequence));
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkTrackEntryDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_BINK_TRACK_ENTRY seq=%d interface=0x%p frequency=%u bits=%d channels=%d flags=0x%08X bink=0x%p total=%u",
-                sequence,
-                soundInterface,
-                frequency,
-                bits,
-                channels,
-                flags,
-                bink,
-                BinkTrackEntryDiagnosticCount);
-    }
-#endif
-
-    if (BinkMovieAudioFailed) return 0;
-    ma_format format = ma_format_unknown;
-    if (bits == 16)
-        format = ma_format_s16;
-    else if (bits == 8)
-        format = ma_format_u8;
-
-    if (soundInterface == nullptr || frequency < 4000 ||
-        frequency > 192000 || (channels != 1 && channels != 2) ||
-        format == ma_format_unknown)
-    {
-        LogBinkTrackPhase(sequence, "format_validate", "rejected");
-        BinkAudioError("track_open", "unsupported_format");
-        return 0;
-    }
-    LogBinkTrackPhase(sequence, "format_validate", "accepted");
-
-    LogBinkTrackPhase(sequence, "engine_device", "begin");
-    const bool engineReady = EnsureEngine();
-    const bool deviceReady = engineReady &&
-        EnsureDeviceStarted("bink_track_open");
-    LogBinkTrackPhase(
-        sequence,
-        "engine_device",
-        deviceReady ? "ready" : (engineReady ? "device_failed" : "engine_failed"));
-    if (!deviceReady)
-    {
-        BinkAudioError("track_open", "device");
-        return 0;
-    }
-
-    LogBinkTrackPhase(sequence, "voice_allocation", "begin");
-    SBinkVoice *voice = new (std::nothrow) SBinkVoice();
-    if (voice == nullptr)
-    {
-        LogBinkTrackPhase(sequence, "voice_allocation", "failed");
-        BinkAudioError("track_open", "allocation");
-        return 0;
-    }
-    LogBinkTrackPhase(sequence, "voice_allocation", "ready");
-
-    voice->soundInterface = soundInterface;
-    voice->format = format;
-    voice->frequency = frequency;
-    voice->bits = bits;
-    voice->channels = channels;
-    voice->flags = flags;
-    voice->bink = bink;
-    voice->sequence = sequence;
-    voice->volume = 32768;
-    voice->pan = 32768;
-    // The supported retail track ABI initializes its output voice before it
-    // publishes SetOnOff. Bink only calls SetOnOff for later explicit state
-    // changes, so a freshly opened track is active by default.
-    voice->onOff = true;
-    voice->lastReadyState = -1;
-    voice->lastReadyUnlockCalls = 0xFFFFFFFFu;
-    voice->bytesPerFrame = ma_get_bytes_per_frame(
-        format, static_cast<ma_uint32>(channels));
-    voice->preferredFrames = 16384u / voice->bytesPerFrame;
-    if (voice->preferredFrames < 256)
-        voice->preferredFrames = 256;
-    const ma_uint32 capacityFrames = voice->preferredFrames * 2;
-
-    // Video PCM is charged to the same 64 MiB resource budget.
-    if (!AudioResources::PrepareStreamMemory(
-            static_cast<size_t>(capacityFrames) * voice->bytesPerFrame))
-    {
-        delete voice;
-        BinkAudioError("track_open", "resource_budget");
-        return 0;
-    }
-    LogBinkTrackPhase(sequence, "ring_init", "begin");
-    ma_result result = ma_pcm_rb_init(
-        format,
-        static_cast<ma_uint32>(channels),
-        capacityFrames,
-        nullptr,
-        AudioResources::Allocator(),
-        &voice->ring);
-    if (result != MA_SUCCESS)
-    {
-        LogBinkTrackPhase(sequence, "ring_init", "failed");
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGERR("MINIAUDIO_BINK_DEVICE_ERROR phase=ring_init seq=%d result=%d description=%s",
-               voice->sequence,
-               result,
-               ma_result_description(result));
-#endif
-        delete voice;
-        BinkAudioError("track_open", "ring_init");
-        return 0;
-    }
-    voice->ringInitialized = true;
-    ma_pcm_rb_set_sample_rate(&voice->ring, frequency);
-    LogBinkTrackPhase(sequence, "ring_init", "ready");
-
-    LogBinkTrackPhase(sequence, "sound_init", "begin");
-    result = ma_sound_init_from_data_source(
-        &Engine,
-        reinterpret_cast<ma_data_source *>(&voice->ring),
-        MA_SOUND_FLAG_NO_SPATIALIZATION,
-        nullptr,
-        &voice->sound);
-    if (result != MA_SUCCESS)
-    {
-        LogBinkTrackPhase(sequence, "sound_init", "failed");
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGERR("MINIAUDIO_BINK_DEVICE_ERROR phase=sound_init seq=%d result=%d description=%s",
-               voice->sequence,
-               result,
-               ma_result_description(result));
-#endif
-        ma_pcm_rb_uninit(&voice->ring);
-        delete voice;
-        BinkAudioError("track_open", "sound_init");
-        return 0;
-    }
-    voice->soundInitialized = true;
-    ma_sound_set_spatialization_enabled(&voice->sound, MA_FALSE);
-    ma_sound_set_volume(&voice->sound, BinkMovieGain());
-    ma_sound_set_pan(&voice->sound, 0.0f);
-    LogBinkTrackPhase(sequence, "sound_init", "ready_waiting_for_pcm");
-    InitializeBinkReadyPreciseWait(voice);
-
-    // The exact supported retail track opener clears 0x30 dwords before
-    // publishing this callback table. The ABI prefix gate prevents this
-    // workspace size from being used with an unknown Bink build.
-    LogBinkTrackPhase(sequence, "callback_publish", "begin");
-    memset(soundInterface, 0, BINK_RETAIL_SOUND_WORKSPACE_BYTES);
-    soundInterface->preferredBytes =
-        voice->preferredFrames * voice->bytesPerFrame;
-    if (!RegisterBinkVoice(voice))
-    {
-        LogBinkTrackPhase(sequence, "callback_publish", "registry_failed");
-        DestroyBinkVoice(voice, "registry_failed");
-        BinkAudioError("track_open", "registry");
-        return 0;
-    }
-    soundInterface->Ready = BinkMiniaudioReady;
-    soundInterface->Lock = BinkMiniaudioLock;
-    soundInterface->Unlock = BinkMiniaudioUnlock;
-    soundInterface->Volume = BinkMiniaudioVolume;
-    soundInterface->Pan = BinkMiniaudioPan;
-    soundInterface->Pause = BinkMiniaudioPause;
-    soundInterface->SetOnOff = BinkMiniaudioSetOnOff;
-    soundInterface->Close = BinkMiniaudioClose;
-    voice->registered = true;
-    const LONG active = InterlockedIncrement(&BinkActiveVoiceCount);
-    LogBinkTrackPhase(sequence, "callback_publish", "ready");
-
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_OPEN seq=%d frequency=%u bits=%d channels=%d flags=0x%08X chunk_bytes=%u ring_bytes=%u bink=0x%p route=miniaudio initial_on=%d ready_backpressure=%d precise_wait=%d wait_backend=%s requested_us=%I64u timer_create_error=%lu active=%ld",
-             voice->sequence,
-            frequency,
-            bits,
-            channels,
-            flags,
-            voice->preferredFrames * voice->bytesPerFrame,
-             capacityFrames * voice->bytesPerFrame,
-             bink,
-             voice->onOff ? 1 : 0,
-             1,
-             1,
-             GetConfiguredBinkReadyWaitBackend(voice),
-             BINK_READY_PRECISE_WAIT_US,
-             static_cast<unsigned long>(voice->readyWaitTimerCreateError),
-             active);
-#endif
-    return 1;
-}
-
-BinkTrackOpenProc __stdcall BinkMiniaudioSystemOpen(uintptr_t param)
-{
-    return BinkMiniaudioTrackOpen;
-}
-
-int __stdcall BinkMiniaudioReady(SBinkSoundInterface *soundInterface)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr)
-        return 0;
-    if (BinkMovieAudioFailed) { ma_sound_stop(&voice->sound); return 1; }
-    ++voice->readyCalls;
-    if (voice->locked)
-    {
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        if (ShouldLogBinkReadyState(voice, 2))
-        {
-            LOGINFO("MINIAUDIO_BINK_READY seq=%d result=busy reason=locked queued_frames=%u call=%u total=%u",
-                    voice->sequence,
-                    ma_pcm_rb_available_read(&voice->ring),
-                    voice->readyCalls,
-                    BinkReadyDiagnosticCount);
-        }
-#endif
-        return 0;
-    }
-    ApplyBinkReadyBackpressure(voice);
-    if (!EnsureDeviceStarted("bink_ready"))
-    {
-        BinkAudioError("ready", "device");
-        ma_sound_stop(&voice->sound);
-        return 1;
-    }
-    const ma_uint32 writableFrames = ma_pcm_rb_available_write(&voice->ring);
-    const ma_uint32 queuedFrames = ma_pcm_rb_available_read(&voice->ring);
-    const int ready = writableFrames >= voice->preferredFrames ? 1 : 0;
-    if (ready != 0)
-        ++voice->readyAccepts;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (voice->started && voice->onOff && !voice->paused && queuedFrames == 0)
-    {
-        ++voice->readyEmptyRingProbes;
-        ++voice->readyEmptyRingStreak;
-        if (voice->readyEmptyRingStreak > voice->readyMaxEmptyRingStreak)
-            voice->readyMaxEmptyRingStreak = voice->readyEmptyRingStreak;
-        const uint32_t probes = voice->readyEmptyRingProbes;
-        if (probes <= 4 || (probes & (probes - 1)) == 0)
-        {
-            LOGWARN("MINIAUDIO_BINK_RING_EMPTY seq=%d probe=%u streak=%u max_streak=%u ready_call=%u unlocks=%u wait_backend=%s",
-                    voice->sequence,
-                    probes,
-                    voice->readyEmptyRingStreak,
-                    voice->readyMaxEmptyRingStreak,
-                    voice->readyCalls,
-                    voice->unlockCalls,
-                    GetConfiguredBinkReadyWaitBackend(voice));
-        }
-    }
-    else
-    {
-        voice->readyEmptyRingStreak = 0;
-    }
-    if (ShouldLogBinkReadyState(voice, ready != 0 ? 1 : 0))
-    {
-        LOGINFO("MINIAUDIO_BINK_READY seq=%d result=%s writable_frames=%u required_frames=%u queued_frames=%u on=%d call=%u accepted=%u total=%u",
-                voice->sequence,
-                ready != 0 ? "ready" : "full",
-                writableFrames,
-                voice->preferredFrames,
-                queuedFrames,
-                voice->onOff ? 1 : 0,
-                voice->readyCalls,
-                voice->readyAccepts,
-                BinkReadyDiagnosticCount);
-    }
-#endif
-    return ready;
-}
-
-int __stdcall BinkMiniaudioLock(
-    SBinkSoundInterface *soundInterface,
-    uint8_t **address,
-    uint32_t *length)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr || address == nullptr || length == nullptr ||
-        voice->locked)
-    {
-        return 0;
-    }
-    if (BinkMovieAudioFailed)
-    {
-        ma_sound_stop(&voice->sound);
-        *address = static_cast<uint8_t *>(ma_pcm_rb_get_subbuffer_ptr(&voice->ring, 0, voice->ring.rb.pBuffer));
-        *length = voice->preferredFrames * voice->bytesPerFrame;
-        voice->locked = true;
-        return *address != nullptr;
-    }
-    ++voice->lockCalls;
-
-    ma_uint32 frames = voice->preferredFrames;
-    void *buffer = nullptr;
-    const ma_result result = ma_pcm_rb_acquire_write(
-        &voice->ring, &frames, &buffer);
-    if (result != MA_SUCCESS || frames == 0 || buffer == nullptr)
-    {
-        BinkAudioError("lock", "ring_acquire");
-        ma_sound_stop(&voice->sound);
-        *address = static_cast<uint8_t *>(ma_pcm_rb_get_subbuffer_ptr(&voice->ring, 0, voice->ring.rb.pBuffer));
-        *length = voice->preferredFrames * voice->bytesPerFrame;
-        voice->locked = true;
-        return *address != nullptr;
-    }
-
-    voice->locked = true;
-    voice->lockedFrames = frames;
-    *address = static_cast<uint8_t *>(buffer);
-    *length = frames * voice->bytesPerFrame;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkLockDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_BINK_LOCK seq=%d frames=%u bytes=%u call=%u total=%u",
-                voice->sequence,
-                frames,
-                *length,
-                voice->lockCalls,
-                BinkLockDiagnosticCount);
-    }
-#endif
-    return 1;
-}
-
-int __stdcall BinkMiniaudioUnlock(
-    SBinkSoundInterface *soundInterface,
-    uint32_t filledBytes)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr || !voice->locked)
-        return 0;
-    if (BinkMovieAudioFailed)
-    {
-        voice->locked = false;
-        voice->lockedFrames = 0;
-        return 1;
-    }
-    ++voice->unlockCalls;
-
-    const uint32_t lockedBytes = voice->lockedFrames * voice->bytesPerFrame;
-    if (filledBytes > lockedBytes)
-        filledBytes = lockedBytes;
-    filledBytes -= filledBytes % voice->bytesPerFrame;
-    const ma_uint32 filledFrames = filledBytes / voice->bytesPerFrame;
-    const ma_result result = ma_pcm_rb_commit_write(
-        &voice->ring, filledFrames);
-    voice->locked = false;
-    voice->lockedFrames = 0;
-    if (result != MA_SUCCESS)
-    {
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGERR("MINIAUDIO_BINK_DEVICE_ERROR phase=buffer_commit seq=%d result=%d description=%s",
-               voice->sequence,
-               result,
-               ma_result_description(result));
-#endif
-        BinkAudioError("pcm", "device_or_buffer");
-        ma_sound_stop(&voice->sound);
-        return 1;
-    }
-
-    voice->committedBytes += filledBytes;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    if (ShouldLogLimited(BinkBufferDiagnosticCount))
-    {
-        LOGINFO("MINIAUDIO_BINK_BUFFER seq=%d filled=%u queued_frames=%u committed_bytes=%I64u active=%ld total=%u",
-                voice->sequence,
-                filledBytes,
-                ma_pcm_rb_available_read(&voice->ring),
-                voice->committedBytes,
-                InterlockedCompareExchange(&BinkActiveVoiceCount, 0, 0),
-                BinkBufferDiagnosticCount);
-    }
-#endif
-
-    const EBinkStartOutcome startOutcome = TryStartBinkVoice(
-        voice, "first_pcm");
-    if (startOutcome == BINK_START_DEVICE_FAILED ||
-        startOutcome == BINK_START_SOUND_FAILED)
-    {
-        BinkAudioError("pcm", "device_or_buffer");
-        ma_sound_stop(&voice->sound);
-        return 1;
-    }
-    return 1;
-}
-
-void __stdcall BinkMiniaudioVolume(
-    SBinkSoundInterface *soundInterface,
-    int volume)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr)
-        return;
-    if (volume < 0)
-        volume = 0;
-    if (volume > 32768)
-        volume = 32768;
-    voice->volume = volume;
-    ma_sound_set_volume(
-        &voice->sound, static_cast<float>(volume) / 32768.0f * BinkMovieGain());
-}
-
-void __stdcall BinkMiniaudioPan(
-    SBinkSoundInterface *soundInterface,
-    int pan)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr)
-        return;
-    if (pan < 0)
-        pan = 0;
-    if (pan > 65536)
-        pan = 65536;
-    voice->pan = pan;
-    ma_sound_set_pan(
-        &voice->sound,
-        static_cast<float>(pan - 32768) / 32768.0f);
-}
-
-int __stdcall BinkMiniaudioPause(
-    SBinkSoundInterface *soundInterface,
-    int status)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr)
-        return status;
-
-    if (status == 1)
-    {
-        ma_sound_stop(&voice->sound);
-        voice->paused = true;
-        voice->started = false;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGINFO("MINIAUDIO_BINK_PAUSE seq=%d queued_frames=%u",
-                voice->sequence,
-                ma_pcm_rb_available_read(&voice->ring));
-#endif
-        return status;
-    }
-
-    voice->paused = false;
-    const EBinkStartOutcome startOutcome = TryStartBinkVoice(
-        voice, "resume");
-    if (startOutcome == BINK_START_DEVICE_FAILED ||
-        startOutcome == BINK_START_SOUND_FAILED)
-    {
-        BinkAudioError("resume", "sound_start");
-        ma_sound_stop(&voice->sound);
-        return status;
-    }
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    LOGINFO("MINIAUDIO_BINK_RESUME seq=%d on=%d started=%d queued_frames=%u",
-            voice->sequence,
-            voice->onOff ? 1 : 0,
-            voice->started ? 1 : 0,
-            ma_pcm_rb_available_read(&voice->ring));
-#endif
-    return status;
-}
-
-int __stdcall BinkMiniaudioSetOnOff(
-    SBinkSoundInterface *soundInterface,
-    int status)
-{
-    SBinkVoice *voice = GetBinkVoice(soundInterface);
-    if (voice == nullptr)
-        return 0;
-
-    if (status == 1)
-    {
-        voice->onOff = true;
-        voice->paused = false;
-        const EBinkStartOutcome startOutcome = TryStartBinkVoice(
-            voice, "set_on_off");
-        if (startOutcome == BINK_START_DEVICE_FAILED ||
-            startOutcome == BINK_START_SOUND_FAILED)
-        {
-            BinkAudioError("set_on_off", "sound_start");
-            ma_sound_stop(&voice->sound);
-            return 1;
-        }
-        return 1;
-    }
-    if (status == 0)
-    {
-        ma_sound_stop(&voice->sound);
-        voice->started = false;
-        voice->onOff = false;
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-        LOGINFO("MINIAUDIO_BINK_STOP seq=%d queued_frames=%u",
-                voice->sequence,
-                ma_pcm_rb_available_read(&voice->ring));
-#endif
-        return 0;
-    }
-    return voice->onOff ? 1 : 0;
-}
-
-void __stdcall BinkMiniaudioClose(SBinkSoundInterface *soundInterface)
-{
-    DestroyBinkVoice(GetBinkVoice(soundInterface), "bink_close");
-}
 } // namespace
-
-bool IsSupportedBinkAudioAbi(
-    const void *setSoundSystem)
-{
-    static const uint8_t setSoundSystemPrefix[] = {
-        0x8B, 0x4C, 0x24, 0x04, 0x85, 0xC9, 0x75,
-        0x05, 0x33, 0xC0, 0xC2, 0x08, 0x00,
-    };
-    if (!setSoundSystem || memcmp(setSoundSystem, setSoundSystemPrefix, sizeof(setSoundSystemPrefix)) != 0)
-        return false;
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            static_cast<const char *>(setSoundSystem), &module)) return false;
-    char path[MAX_PATH] = {};
-    const DWORD length = GetModuleFileNameA(module, path, MAX_PATH);
-    if (!length || length >= MAX_PATH) return false;
-    DWORD ignored = 0;
-    const DWORD size = GetFileVersionInfoSizeA(path, &ignored);
-    if (!size) return false;
-    std::vector<uint8_t> version(size);
-    if (!GetFileVersionInfoA(path, 0, size, version.data())) return false;
-    struct Translation { WORD language, codepage; } *translations = nullptr;
-    UINT bytes = 0;
-    const auto supportedVersion = [&](const char *key)
-    {
-        char *value = nullptr;
-        UINT valueBytes = 0;
-        return VerQueryValueA(version.data(), key, reinterpret_cast<void **>(&value), &valueBytes) &&
-            value && valueBytes >= sizeof("1.0t") && memcmp(value, "1.0t", sizeof("1.0t")) == 0;
-    };
-    if (VerQueryValueA(version.data(), "\\VarFileInfo\\Translation",
-            reinterpret_cast<void **>(&translations), &bytes) && translations)
-    {
-        for (UINT i = 0; i < bytes / sizeof(Translation); ++i)
-        {
-            char key[80] = {};
-            sprintf_s(key, "\\StringFileInfo\\%04x%04x\\ProductVersion", translations[i].language, translations[i].codepage);
-            if (supportedVersion(key)) return true;
-        }
-    }
-    // Retail 1.0t has this string table but no VarFileInfo/Translation block.
-    // Keep both the exact version and callback-prefix requirements.
-    return supportedVersion("\\StringFileInfo\\040904E4\\ProductVersion");
-}
-
-
-
-void BeginBinkAudioMovie(const char *name)
-{
-    BinkMovieName = name ? name : "";
-    BinkMovieAudioFailed = BinkMovieAudioErrorLogged = false;
-}
-void MuteBinkAudioMovie(const char *reason) { BinkAudioError("configure", reason); }
-bool HasBinkAudioMovieFailed() { return BinkMovieAudioFailed; }
-
-void *GetBinkMiniaudioSystemOpen()
-{
-    return reinterpret_cast<void *>(BinkMiniaudioSystemOpen);
-}
-
-unsigned int CountActiveBinkVoices()
-{
-    return static_cast<unsigned int>(InterlockedCompareExchange(
-        &BinkActiveVoiceCount, 0, 0));
-}
 
 void SetVirtualDynamicGainResolver(VirtualDynamicGainResolver resolver)
 {
@@ -7908,6 +6675,7 @@ void SetModalSpeechPaused(
 
 void Shutdown(const char *reason)
 {
+    Video::StopMovies();
     ReleaseStreamingSound(reason != nullptr ? reason : "shutdown");
     ReleaseAllVoices(reason != nullptr ? reason : "shutdown");
     if (ReverbGraphInitialized || ReverbGraphAttempted)
@@ -7916,12 +6684,10 @@ void Shutdown(const char *reason)
             true, reason != nullptr ? reason : "shutdown");
     }
     ReleaseDecodedSounds();
-    const LONG activeBink = InterlockedCompareExchange(
-        &BinkActiveVoiceCount, 0, 0);
-    const bool keepEngineForBink = EngineInitialized && (activeBink != 0 || VideoEngineUsers != 0);
-    EngineDiagnostics::Event("Audio shutdown reason=%s initialized=%d bink=%ld deferred=%d manager=%p",
-        reason?reason:"unknown",EngineInitialized?1:0,activeBink,keepEngineForBink?1:0,CurrentSoundManager);
-    if (EngineInitialized && !keepEngineForBink)
+    const bool keepEngineForVideo = EngineInitialized && VideoEngineUsers != 0;
+    EngineDiagnostics::Event("Audio shutdown reason=%s initialized=%d video=%u deferred=%d manager=%p",
+        reason?reason:"unknown",EngineInitialized?1:0,VideoEngineUsers.load(),keepEngineForVideo?1:0,CurrentSoundManager);
+    if (EngineInitialized && !keepEngineForVideo)
     {
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
         LOGINFO("MINIAUDIO_ONESHOT_SHUTDOWN reason=%s",
@@ -7929,23 +6695,15 @@ void Shutdown(const char *reason)
 #endif
         ma_engine_uninit(&Engine);
     }
-    if (!keepEngineForBink)
+    if (!keepEngineForVideo)
     {
         AudioResources::Shutdown();
         memset(&Engine, 0, sizeof(Engine));
     }
-#if JMV_MINIAUDIO_BINK_DIAGNOSTICS
-    else
-    {
-        LOGINFO("MINIAUDIO_BINK_ENGINE_DEFER reason=%s active=%ld",
-                reason != nullptr ? reason : "shutdown",
-                activeBink);
-    }
-#endif
     for (unsigned int i = 0; i < MAX_ACTIVE_VOICES; ++i)
         ResetVoice(Voices[i]);
-    EngineInitialized = keepEngineForBink;
-    InitAttempted = keepEngineForBink;
+    EngineInitialized = keepEngineForVideo;
+    InitAttempted = keepEngineForVideo;
     AppAudioSuspended = false;
     if (VideoAppSuspended) VideoPausedMilliseconds += GetTickCount64() - VideoPauseStart;
     VideoAppSuspended = false;
@@ -7955,7 +6713,7 @@ void Shutdown(const char *reason)
     LastInitAttemptTick = 0;
     LastDeviceRecoveryAttemptTick = 0;
     ModalSpeechResumeFailureDiagnosticCount = 0;
-    if (!keepEngineForBink)
+    if (!keepEngineForVideo)
         EngineInitAttemptCount = 0;
     CurrentSoundManager = nullptr;
     LastUniqueCounter = 0;
@@ -7971,7 +6729,7 @@ void Shutdown(const char *reason)
     ReverbInterfaceBypassLogged = false;
     ReverbSpeechBypassLogged = false;
     ReverbDialogBypassLogged = false;
-    BinkDeferredEngineShutdown = keepEngineForBink;
+    VideoDeferredEngineShutdown = keepEngineForVideo;
 }
 void* AcquireVideoEngine()
 {
@@ -7983,11 +6741,14 @@ void* AcquireVideoEngine()
 void ReleaseVideoEngine()
 {
     if (VideoEngineUsers) --VideoEngineUsers;
-    FinalizeDeferredBinkEngineShutdown();
+    FinalizeDeferredVideoEngineShutdown();
 }
 bool VideoAudioEnabled() { return theSettings.nAudio != 0; }
 bool VideoSuspended() { return VideoAppSuspended.load(); }
-float VideoGain() { return BinkMovieGain(); }
+float VideoGain() {
+    const int percent = (std::max)(0, (std::min)(100, theSettings.nAudioStreaming));
+    return theSettings.nAudio ? static_cast<float>(percent) * 0.01f : 0.0f;
+}
 double VideoTimeSeconds()
 {
     const ULONGLONG now = VideoAppSuspended ? VideoPauseStart : GetTickCount64();

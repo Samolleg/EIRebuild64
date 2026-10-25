@@ -32,7 +32,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PreparedSave.h"
 #include <memory>
 #include "Streams.h"
-#include "BinkVideo.h"
+#include "MoviePlayback.h"
 #include "PerkDatabase.h"
 #include "SpellDatabase.h"
 #include "ItemDatabase.h"
@@ -673,7 +673,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
     case 1:
         if (szZone == "bz3g")
         {
-            CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\dcity.bik");
+            Video::Movie::Play(IWorld.GetCDPath() + "Movies\\dcity.bik");
             party.vars.DelVar("movie");
         }
         break;

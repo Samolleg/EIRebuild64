@@ -570,7 +570,7 @@ void LogStatistics(const char* reason, bool force)
     if (!force && now - LastLogTick < 2000) return;
     LastLogTick = now;
     const Statistics s = GetStatistics();
-    LOGINFO("AUDIO_RESOURCES reason=%s limit_bytes=%u bytes=%u peak=%u entries=%u pinned=%u captures=%u hits=%u evictions=%u denied=%u vfs_reads=%u owner_reads=%u generation=%u workers=2 fx_decode=jobs music_decode=jobs bink_pcm=shared_budget",
+    LOGINFO("AUDIO_RESOURCES reason=%s limit_bytes=%u bytes=%u peak=%u entries=%u pinned=%u captures=%u hits=%u evictions=%u denied=%u vfs_reads=%u owner_reads=%u generation=%u workers=2 fx_decode=jobs music_decode=jobs video_pcm=bounded_queue",
         reason, static_cast<unsigned>(CacheLimitBytes), static_cast<unsigned>(s.bytes),
         static_cast<unsigned>(s.peakBytes), s.entries, s.pinned, s.captures, s.hits,
         s.evictions, s.deniedAllocations, s.reads, s.ownerReads, s.generation);

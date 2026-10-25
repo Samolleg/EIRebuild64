@@ -8,7 +8,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DScrollBar.h"
 
 // CRAP{
-#include "BinkVideo.h"
+#include "MoviePlayback.h"
 #include "GameMain.h"
 // CRAP}
 /////////////////////////////////////////////////////////////////////////////////////
@@ -151,8 +151,8 @@ void CI3DScreenMessageBox::OnLButtonDown(UINT nFlags, CPoint point)
     // CRAP{
     if (ht == 0 && dwParam == 0xFFFF0000)
     {
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
-        CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
+        Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
         NGame::QuitProgram(0);
         return;
     }
@@ -189,8 +189,8 @@ void CI3DScreenMessageBox::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         // CRAP{
         if (dwParam == 0xFFFF0000)
         {
-            CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
-            CBinkVideo::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
+            Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
+            Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit2.bik", 30000, false, true);
             NGame::QuitProgram(0);
         }
         else

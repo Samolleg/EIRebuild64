@@ -135,14 +135,6 @@ void FadeInStreaming();
 void PauseStreaming(const char *reason);
 void ResumeStreaming(const char *reason);
 
-bool IsSupportedBinkAudioAbi(
-    const void *setSoundSystem);
-void BeginBinkAudioMovie(const char *name);
-void MuteBinkAudioMovie(const char *reason);
-bool HasBinkAudioMovieFailed();
-void *GetBinkMiniaudioSystemOpen();
-unsigned int CountActiveBinkVoices();
-
 void PrepareNativeManager(void *soundManager);
 const char* GetNativeStreamingName();
 bool IsNativeStreamingSwitching();

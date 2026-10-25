@@ -2,7 +2,7 @@
 
 #include "I3DScreen.h"
 #include "CMappedResource.h"
-#include "BinkVideo.h"
+#include "MoviePlayback.h"
 #include <list>
 ////////////////////////////////////////////////////////////////////////////////////////////////
 class CI3DTetxRTF;
@@ -26,8 +26,8 @@ class CI3DScreenEndGame : public CI3DScreen
     float m_fWaitTime;
     CShowTextList::const_iterator m_itCurText;
 
-    CString mszBinkName;
-    CBinkVideo bink;
+    CString mszMovieName;
+    Video::Movie movie;
 
     bool bFromMainMenu;
     bool bCreditsDone;
@@ -37,10 +37,10 @@ private:
     void Exit();
 
 public:
-    CI3DScreenEndGame(CInterface3D *pI, bool bMain, LPCTSTR pszBinkName)
+    CI3DScreenEndGame(CInterface3D *pI, bool bMain, LPCTSTR pszMovieName)
         : CI3DScreen(pI)
         , bFromMainMenu(bMain)
-        , mszBinkName(pszBinkName)
+        , mszMovieName(pszMovieName)
     {
     }
 

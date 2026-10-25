@@ -77,13 +77,8 @@ inline nlohmann::json Run() {
  Require(Object("CUnit",42)=="<CUnit:42>"&&Variable("obj","object","null")=="obj : object = null","gvar formatting");
  cases.push_back({{"name","console_metadata_gui_and_mock_autoexec_order"},{"commandsExecuted",false},{"hiveRead",false}});
 
- bool selected=false;int loads=0;
- auto exists=[](const std::string&){return true;};auto load=[&](const std::string&){++loads;return false;};
- Require(!ModBink("mod/binkw32.dll",exists,load,selected)&&selected&&loads==1,"Existing bad mod Bink silently fell back");
- loads=0;Require(ModBink("mod/binkw32.dll",[](const std::string&){return false;},load,selected)&&!selected&&loads==0,"Absent mod Bink loaded candidate");
- Require(ModBink("",exists,load,selected)&&!selected&&loads==0,"No mod changed original fallback");
  Require(Chat(7,"A&B","<text>")=="<font class=7>A&B</font>: <text><BR>","Native raw HTML append format");
- cases.push_back({{"name","mock_bink_priority_failure_and_chat_format"},{"dllLoaded",false},{"chatFileWritten",false}});
+ cases.push_back({{"name","chat_format"},{"chatFileWritten",false}});
  return cases;
 }
 }
