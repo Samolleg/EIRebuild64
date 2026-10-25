@@ -16189,6 +16189,7 @@ bool bind_owned_terrain_texture(void* renderer,std::size_t index,void* wrapper) 
     }
     return exact_bind_terrain_texture(renderer,wrapper);
 }
+#endif // !EID3D11_EMBEDDED
 namespace {
 
 // The texture slots (material % (nTextures + 2)) any sector of an immutable
@@ -16823,6 +16824,7 @@ bool draw_source_owned_terrain_range(
 #endif // !EID3D11_EMBEDDED
 
 
+#if !defined(EID3D11_EMBEDDED)
 BOOL __fastcall hook_terrain_range_draw(void* self, void*, void* renderer,
                                         int material_from, int material_to) {
     SemanticScope scope(SemanticKind::terrain, _ReturnAddress());
@@ -20044,6 +20046,7 @@ bool uninstall_chat_text_hooks() noexcept {
 // that surface; afterwards each GetDC 005FDC00 session on it is claimed and
 // its glyphs kept in the surface's retained frame, which the CI3DSurface::
 // Draw blit presents. A Clear inside a claimed session restarts the frame.
+#if !defined(EID3D11_EMBEDDED)
 void report_item_card_text_failure(CharacterPaneTextFailure failure) noexcept {
     if (InterlockedCompareExchange(&g_item_card_failure_reported, 1, 0) != 0)
         return;
@@ -20210,6 +20213,7 @@ bool uninstall_item_card_text_hooks() noexcept {
     return true;
 }
 
+#endif // !EID3D11_EMBEDDED
 enum class TerrainSetLightPatchResult {
     installed,
     rejected,
@@ -24489,6 +24493,7 @@ bool bridge_camp_texture_mounts(ResourceStoreConfig& mounts) noexcept {
     } catch (...) { mounts = {}; return false; }
     return !mounts.archives.empty();
 }
+#endif // !EID3D11_EMBEDDED
 
 namespace {
 // Immutable geometry/mapping plus expiry segment identifies a game marker.
@@ -24856,6 +24861,7 @@ void complete_hovered_shadow_capture() noexcept {
 } // namespace
 
 
+#if !defined(EID3D11_EMBEDDED)
 bool bridge_read_world_environment(WorldEnvironment& output) noexcept {
     if (g_scene_frame_values_installed) {
         output = g_scene_frame_values.environment;
@@ -24864,6 +24870,7 @@ bool bridge_read_world_environment(WorldEnvironment& output) noexcept {
     read_world_environment(output);
     return output.valid;
 }
+#endif // !EID3D11_EMBEDDED
 
 
 
@@ -24994,11 +25001,13 @@ bool bridge_finish_character_pane_releasedc(
 }
 #endif // !EID3D11_EMBEDDED
 
+#if !defined(EID3D11_EMBEDDED)
 void bridge_item_card_text_describe(void* panel,
                                     void (__thiscall* describe)(void*)) {
     item_card_text_describe(panel, describe);
 }
 
+#endif // !EID3D11_EMBEDDED
 void bridge_retire_owned_text_surface(std::uint64_t surface_id) noexcept {
     g_chat_text_frames.retire(surface_id);
     g_item_card_text_frames.retire(surface_id);
@@ -25124,6 +25133,7 @@ bool bridge_character_pane_text_epoch_current(
 }
 #endif // !EID3D11_EMBEDDED
 
+#if !defined(EID3D11_EMBEDDED)
 const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {
     switch (reason) {
     case FigureFallbackReason::none: return "none";
