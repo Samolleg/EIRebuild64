@@ -32,8 +32,6 @@
 #include <d3dtypes.h>
 #include <ddraw.h>
 #include <d3d.h>
-#include <dinput.h>
-#include <dsound.h>
 #define D3DCOLORVALUE_DEFINED
 
 #include <afxwin.h> // AfxBeginThread

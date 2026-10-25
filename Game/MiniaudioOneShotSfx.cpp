@@ -125,6 +125,7 @@ static const char *LogSec = "MiniaudioOneShotSfx";
 
 namespace MiniaudioOneShotSfx
 {
+void ReleaseStreamingSound(const char *reason);
 namespace
 {
 const size_t SOUND_MANAGER_LISTENER_X_OFFSET = ModAudioLayout::LISTENER_X;
@@ -470,6 +471,108 @@ bool ReverbDialogBypassLogged = false;
 bool BinauralSpeechBypassLogged = false;
 bool BinauralDialogBypassLogged = false;
 bool BinauralFlatBypassLogged = false;
+struct PlaybackContext
+{
+    ma_context value{};
+    bool ready = false;
+    ~PlaybackContext() { if (ready) ma_context_uninit(&value); }
+    bool Init()
+    {
+        if (ready) return true;
+        const ma_backend backend = ma_backend_wasapi;
+        const ma_result result = ma_context_init(&backend, 1, nullptr, &value);
+        ready = result == MA_SUCCESS;
+        if (!ready) EngineDiagnostics::Event("Audio WASAPI context failed result=%d; no fallback", int(result));
+        return ready;
+    }
+};
+PlaybackContext& OutputContext() { static PlaybackContext context; return context; }
+CString EndpointKey(const ma_device_id& id)
+{
+    // Hex preserves the Unicode endpoint identity through ANSI settings.
+    CString key;
+    for (const wchar_t* p = id.wasapi; *p; ++p)
+    {
+        char part[5];
+        sprintf_s(part, "%04x", unsigned(*p));
+        key += part;
+    }
+    return key;
+}
+bool PlaybackSnapshot(ma_device_info*& devices, ma_uint32& count)
+{
+    auto& context = OutputContext();
+    if (!context.Init()) return false;
+    const ma_result result = ma_context_get_devices(&context.value, &devices, &count, nullptr, nullptr);
+    if (result != MA_SUCCESS)
+        EngineDiagnostics::Event("Audio device enumeration failed result=%d", int(result));
+    return result == MA_SUCCESS;
+}
+std::atomic<bool> OutputDeviceLost{false};
+std::atomic<bool> OutputClosing{false};
+std::atomic<bool> OutputInterrupted{false};
+std::atomic<bool> OutputRerouted{false};
+std::atomic<bool> OutputUsesDefault{true};
+const CString& RequestedPlaybackDevice()
+{
+    // Keep UI changes pending until the next process launch, including retries.
+    static const CString requested = theSettings.szAudioDevice;
+    return requested;
+}
+bool OutputFailureLogged = false;
+bool OutputUnavailable()
+{
+    if (OutputRerouted.exchange(false))
+        EngineDiagnostics::Event("Audio default output rerouted by WASAPI");
+    if (!OutputDeviceLost.load()) return false;
+    if (!OutputFailureLogged)
+    {
+        EngineDiagnostics::Event("Audio output device stopped or unavailable; silent while retrying the configured device");
+        OutputFailureLogged = true;
+    }
+    return true;
+}
+void OutputNotification(const ma_device_notification* notification)
+{
+    // Never call engine APIs or logging from the audio thread.
+    if (OutputClosing.load()) return;
+    switch (notification->type)
+    {
+    case ma_device_notification_type_stopped:
+        OutputDeviceLost = true;
+        break;
+    case ma_device_notification_type_rerouted:
+        if (OutputUsesDefault.load()) OutputRerouted = true;
+        else OutputDeviceLost = true;
+        break;
+    case ma_device_notification_type_interruption_began:
+        OutputInterrupted = true;
+        break;
+    case ma_device_notification_type_interruption_ended:
+        OutputInterrupted = false;
+        break;
+    default:
+        break;
+    }
+}
+bool SelectPlaybackDevice(ma_device_id& selected)
+{
+    const CString& requested = RequestedPlaybackDevice();
+    OutputUsesDefault = requested.IsEmpty();
+    if (requested.IsEmpty() && OutputContext().Init()) return true;
+    ma_device_info* devices = nullptr;
+    ma_uint32 count = 0;
+    if (!requested.IsEmpty() && PlaybackSnapshot(devices, count))
+        for (ma_uint32 i = 0; i < count; ++i)
+            if (EndpointKey(devices[i].id) == requested)
+            {
+                selected = devices[i].id;
+                return true;
+            }
+    OutputDeviceLost = true;
+    OutputUnavailable();
+    return false;
+}
 bool EngineInitialized = false;
 bool InitAttempted = false;
 bool AppAudioSuspended = false;
@@ -3525,15 +3628,37 @@ bool IsGameAudioForeground()
 void RenderMiniaudioOutput(ma_device *device, void *output,
                             const void *input, ma_uint32 frames)
 {
+    if (OutputInterrupted.load())
+    {
+        ma_silence_pcm_frames(output, frames, device->playback.format,
+                              device->playback.channels);
+        return;
+    }
     // Render once so voices, music and video keep their playback positions.
     ma_engine_data_callback_internal(device, output, input, frames);
-    if (!IsGameAudioForeground())
+    if (OutputDeviceLost.load() || !IsGameAudioForeground())
         ma_silence_pcm_frames(output, frames, device->playback.format,
                               device->playback.channels);
 }
 
 bool EnsureEngine()
 {
+    if (OutputUnavailable() && EngineInitialized)
+    {
+        // A movie owns engine nodes until Close. Keep it silent on the host
+        // clock; the next movie can use the recovered engine.
+        if (VideoEngineUsers != 0) return false;
+        ReleaseStreamingSound("device_lost");
+        ReleaseAllVoices("device_lost");
+        DestroyMiniaudioReverbGraph(true, "device_lost");
+        OutputClosing = true;
+        ma_engine_uninit(&Engine);
+        OutputClosing = false;
+        EngineInitialized = false;
+        // Try immediately after releasing the old engine (also between movies).
+        // Failed attempts below retain the existing two-second retry interval.
+        LastInitAttemptTick = 0;
+    }
     if (EngineInitialized)
         return true;
 
@@ -3553,11 +3678,21 @@ bool EnsureEngine()
     config.pResourceManager = AudioResources::Manager();
     if (config.pResourceManager == nullptr)
         return false;
+    ma_device_id selected{};
+    if (!SelectPlaybackDevice(selected)) return false;
+    config.pContext = &OutputContext().value;
+    // Only an explicit selection pins the endpoint. Default follows Windows.
+    config.pPlaybackDeviceID = RequestedPlaybackDevice().IsEmpty() ? nullptr : &selected;
+    config.notificationCallback = OutputNotification;
     config.dataCallback = RenderMiniaudioOutput;
+    OutputDeviceLost = false;
+    OutputInterrupted = false;
     const ma_result result = ma_engine_init(&config, &Engine);
     EngineDiagnostics::Event("Audio engine init attempt=%u result=%d description=%s",EngineInitAttemptCount,int(result),ma_result_description(result));
     if (result != MA_SUCCESS)
     {
+        OutputDeviceLost = true;
+        OutputUnavailable();
         if (ShouldLogLimited(DeviceErrorDiagnosticCount))
         {
             LOGERR("MINIAUDIO_ONESHOT_DEVICE_ERROR phase=init attempt=%u retry_ms=%lu result=%d description=%s total=%u",
@@ -3571,6 +3706,9 @@ bool EnsureEngine()
     }
 
     EngineInitialized = true;
+    if (OutputFailureLogged && !OutputDeviceLost.load())
+        EngineDiagnostics::Event("Audio configured output recovered");
+    OutputFailureLogged = false;
     LastInitAttemptTick = 0;
     LastDeviceRecoveryAttemptTick = 0;
     EnsureMiniaudioReverbGraph();
@@ -3599,7 +3737,7 @@ bool EnsureEngine()
 
 bool EnsureDeviceStarted(const char *phase)
 {
-    if (!EngineInitialized)
+    if (OutputUnavailable() || OutputInterrupted.load() || !EngineInitialized)
         return false;
     ma_device *device = ma_engine_get_device(&Engine);
     if (device != nullptr &&
@@ -4151,7 +4289,9 @@ void FinalizeDeferredVideoEngineShutdown()
     }
 
     EngineDiagnostics::Event("Audio engine release phase=video_deferred manager=%p",CurrentSoundManager);
+    OutputClosing = true;
     ma_engine_uninit(&Engine);
+    OutputClosing = false;
     AudioResources::Shutdown();
     memset(&Engine, 0, sizeof(Engine));
     EngineInitialized = false;
@@ -4163,6 +4303,25 @@ void FinalizeDeferredVideoEngineShutdown()
 }
 
 } // namespace
+
+bool GetPlaybackDevices(CStringArray& names, CStringArray& ids)
+{
+    names.RemoveAll();
+    ids.RemoveAll();
+    ma_device_info* devices = nullptr;
+    ma_uint32 count = 0;
+    if (!PlaybackSnapshot(devices, count)) return false;
+    for (ma_uint32 i = 0; i < count; ++i)
+    {
+        wchar_t wide[MA_MAX_DEVICE_NAME_LENGTH + 1]{};
+        char display[(MA_MAX_DEVICE_NAME_LENGTH + 1) * 2]{};
+        MultiByteToWideChar(CP_UTF8, 0, devices[i].name, -1, wide, _countof(wide));
+        WideCharToMultiByte(1251, 0, wide, -1, display, sizeof(display), nullptr, nullptr);
+        names.Add(display);
+        ids.Add(EndpointKey(devices[i].id));
+    }
+    return true;
+}
 
 void SetVirtualDynamicGainResolver(VirtualDynamicGainResolver resolver)
 {
@@ -6408,9 +6567,9 @@ const char* GetNativeStreamingName(){return Streaming.playing ? Streaming.curren
 bool IsNativeStreamingSwitching(){return Streaming.pendingStop || Streaming.pendingName[0] != '\0';}
 void Tick(void *soundManager)
 {
-    SyncWorldSfxPause();
-    if (!EngineInitialized)
+    if (!EnsureEngine())
         return;
+    SyncWorldSfxPause();
     if (!IsManagerReady(soundManager))
     {
         if (CurrentSoundManager != nullptr)
@@ -6693,7 +6852,9 @@ void Shutdown(const char *reason)
         LOGINFO("MINIAUDIO_ONESHOT_SHUTDOWN reason=%s",
                 reason != nullptr ? reason : "shutdown");
 #endif
+        OutputClosing = true;
         ma_engine_uninit(&Engine);
+        OutputClosing = false;
     }
     if (!keepEngineForVideo)
     {
@@ -6743,7 +6904,8 @@ void ReleaseVideoEngine()
     if (VideoEngineUsers) --VideoEngineUsers;
     FinalizeDeferredVideoEngineShutdown();
 }
-bool VideoAudioEnabled() { return theSettings.nAudio != 0; }
+bool VideoAudioEnabled() { return theSettings.nAudio != 0 && EnsureEngine(); }
+bool OutputDeviceAvailable() { return !OutputDeviceLost.load(); }
 bool VideoSuspended() { return VideoAppSuspended.load(); }
 float VideoGain() {
     const int percent = (std::max)(0, (std::min)(100, theSettings.nAudioStreaming));
@@ -6751,6 +6913,7 @@ float VideoGain() {
 }
 double VideoTimeSeconds()
 {
+    OutputUnavailable(); // Report device loss even during a movie without world ticks.
     const ULONGLONG now = VideoAppSuspended ? VideoPauseStart : GetTickCount64();
     return double(now - VideoPausedMilliseconds) * 0.001;
 }

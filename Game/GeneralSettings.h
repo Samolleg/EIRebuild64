@@ -47,6 +47,7 @@ public:
     int nFullScreen;     // is going fullscreen ? (1 = yes, 0 = no)
     int nJoystick;       // is using joystick ?
     int nVideo;          // video playing type
+    CString szAudioDevice; // WASAPI endpoint ID; empty selects the default at startup.
     int nAudio;          // enable audio in general
     int nAudioStreaming; // streaming audio volume
     int nAudioSFX;       // SFX audio volume

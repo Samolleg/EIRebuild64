@@ -44,14 +44,10 @@ CSoundManager::~CSoundManager()
     Destroy();
 }
 
-BOOL CALLBACK DriversCallbackForNames(LPGUID, LPCSTR lpcstrDescription, LPCSTR, LPVOID lpContext)
-{
-    ((CStringArray *)lpContext)->Add(CString(lpcstrDescription));
-    return TRUE;
-}
 BOOL CSoundManager::GetDrivers(CStringArray &szDrivers)
 {
-    return DS_OK == DirectSoundEnumerate(DriversCallbackForNames, &szDrivers);
+    CStringArray ids;
+    return MiniaudioOneShotSfx::GetPlaybackDevices(szDrivers, ids);
 }
 
 // volumes
@@ -73,6 +69,18 @@ void CSoundManager::SetReverb(float fpLevel, float fpReflectionTime, float fpDec
 BOOL CSoundManager::Create(HWND hWnd, BOOL _bAllowReverb, int nDriver, DWORD dwMixerFreq,
                            WORD wMixerBits)
 {
+    // Legacy callers may supply an index from GetDrivers. Persist its stable ID.
+    if (nDriver >= 0)
+    {
+        CStringArray names, ids;
+        if (MiniaudioOneShotSfx::GetPlaybackDevices(names, ids) && nDriver < ids.GetSize())
+            theSettings.szAudioDevice = ids[nDriver];
+        else
+        {
+            EngineDiagnostics::Event("Audio selected device index unavailable; sound disabled");
+            theSettings.szAudioDevice = "unavailable";
+        }
+    }
     Destroy();
     bAllowReverb = _bAllowReverb;
     bReady = TRUE;

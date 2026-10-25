@@ -341,17 +341,6 @@ static const char *ErrorToString(HRESULT code)
     case D3DERR_SCENE_END_FAILED:
         return "D3DERR_SCENE_END_FAILED\n";
 
-    // DirectInput error codes
-    case DIERR_OTHERAPPHASPRIO:
-        return "Another application has a higher priority level, preventing this call from "
-               "succeeding\n";
-    case DIERR_NOTINITIALIZED:
-        return "This object has not been initialized\n";
-    case DIERR_INPUTLOST:
-        return "Access to the input device has been lost. It must be reacquired\n";
-    case DIERR_NOTACQUIRED:
-        return "The operation cannot be performed unless the device is acquired\n";
-
     default:
         return "Unrecognized error value.\n";
     }

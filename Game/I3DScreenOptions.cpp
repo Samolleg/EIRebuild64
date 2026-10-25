@@ -36,6 +36,7 @@ const char *PARTY_HELMET_TIP = "\xD1\xEA\xF0\xFB\xE2\xE0\xF2\xFC\x20\xF8\xEB\xE5
 const char *PARTY_ARMOR_TIP = "\xD1\xEA\xF0\xFB\xE2\xE0\xF2\xFC\x20\xE4\xEE\xF1\xEF\xE5\xF5\xE8\n"
     "\xC2\xE5\xF0\xF5\xED\xE8\xE5\x20\xE4\xEE\xF1\xEF\xE5\xF5\xE8\x20\xF7\xEB\xE5\xED\xEE\xE2\x20\xE3\xF0\xF3\xEF\xEF\xFB.";
 
+const char* AUDIO_DEVICE_TIP = "\xC2\xFB\xE1\xEE\xF0\x20\xEF\xF0\xE8\xEC\xE5\xED\xFF\xE5\xF2\xF1\xFF\x20\xEF\xEE\xF1\xEB\xE5\x20\xEF\xE5\xF0\xE5\xE7\xE0\xEF\xF3\xF1\xEA\xE0\x20\xE8\xE3\xF0\xFB\x2E";
 const int NUM_ALTERN_KEYS = 1;
 
 const char *pszOptionGroups[] = { "video",   "sound",  "sens",  "game",   "select",
@@ -141,6 +142,7 @@ void CI3DScreenOptions::OnActivate()
     pKeyDesc = 0;
 
     FormControlsList();
+    FormAudioDevices();
     GetParameters();
     FormActionsList();
 
@@ -242,6 +244,14 @@ void CI3DScreenOptions::OnIdle()
         }
     }
 
+    if (nCurrentMode == OG_SOUND && audioDeviceControl.pSwitcher)
+    {
+        int selected = 0;
+        audioDeviceControl.pSwitcher->GetState(selected);
+        if (selected >= 0 && selected < audioDeviceNames.GetSize())
+            areas[2 + TOTAL_NUM_OPTION_GROUPS + 6]->SetToolTip(
+                audioDeviceNames[selected] + "\n" + AUDIO_DEVICE_TIP);
+    }
     for (int i = 0; i < TOTAL_NUM_GAME_OPTIONS; i++)
     {
         int n;
@@ -630,6 +640,36 @@ void CI3DScreenOptions::FormActionsList()
     }
 }
 ////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenOptions::FormAudioDevices()
+{
+    audioDeviceControl = {};
+    CStringArray names, ids;
+    MiniaudioOneShotSfx::GetPlaybackDevices(names, ids);
+    audioDeviceNames.RemoveAll();
+    audioDeviceIds.RemoveAll();
+    audioDeviceNames.Add("\xCF\xEE\x20\xF3\xEC\xEE\xEB\xF7\xE0\xED\xE8\xFE");
+    audioDeviceIds.Add("");
+    int selected = theSettings.szAudioDevice.IsEmpty() ? 0 : -1;
+    for (int i = 0; i < names.GetSize(); ++i)
+    {
+        audioDeviceNames.Add(names[i]);
+        audioDeviceIds.Add(ids[i]);
+        if (ids[i] == theSettings.szAudioDevice) selected = i + 1;
+    }
+    if (selected < 0)
+    {
+        selected = int(audioDeviceIds.GetSize());
+        audioDeviceNames.Add("\xCD\xE5\xE4\xEE\xF1\xF2\xF3\xEF\xED\xEE");
+        audioDeviceIds.Add(theSettings.szAudioDevice);
+    }
+    audioDeviceControl.szOptionLocalName = "\xD3\xF1\xF2\xF0\xEE\xE9\xF1\xF2\xE2\xEE\x20\xE7\xE2\xF3\xEA\xE0";
+    auto* control = dbgnew CI3DSwitcher(pI3D, CRect(530, 304, 690, 320), audioDeviceNames[0]);
+    for (int i = 1; i < audioDeviceNames.GetSize(); ++i) control->AddState(audioDeviceNames[i]);
+    control->SetState(selected);
+    audioDeviceControl.pSwitcher = control;
+    AddObject(control);
+}
+
 void CI3DScreenOptions::FormControlsList()
 {
     NKeyMap::allOptions[OPTION_DIFFICULTY].eType = NKeyMap::SpellAddonDifficultyLevels()
@@ -717,6 +757,7 @@ void CI3DScreenOptions::SetScreenMode(int nMode)
     if (nMode >= TOTAL_NUM_OPTION_GROUPS)
         nMode = TOTAL_NUM_OPTION_GROUPS - 1;
     nCurrentMode = nMode;
+    if (audioDeviceControl.pSwitcher) audioDeviceControl.pSwitcher->Show(nMode == OG_SOUND);
 
     for (i = 0; i < NUM_GROUP_LINES; i++)
     {
@@ -758,6 +799,11 @@ void CI3DScreenOptions::SetScreenMode(int nMode)
             if (lines[i].pControl->pSwitcher)
                 lines[i].pControl->pSwitcher->Show(TRUE);
         }
+    if (nMode == OG_SOUND && audioDeviceControl.pSwitcher)
+    {
+        lines[6].pControl = &audioDeviceControl;
+        areas[2 + TOTAL_NUM_OPTION_GROUPS + 6]->SetToolTip("\xC2\xFB\xE1\xEE\xF0\x20\xEF\xF0\xE8\xEC\xE5\xED\xFF\xE5\xF2\xF1\xFF\x20\xEF\xEE\xF1\xEB\xE5\x20\xEF\xE5\xF0\xE5\xE7\xE0\xEF\xF3\xF1\xEA\xE0\x20\xE8\xE3\xF0\xFB\x2E");
+    }
     nCurrentLine = -1;
     NextLine();
     if (nCurrentLine == -1)
@@ -865,6 +911,13 @@ void CI3DScreenOptions::ApplyParameters()
 {
     memcpy(NKeyMap::keyMap, keyMap, TOTAL_NUM_SCANCODES);
 
+    if (audioDeviceControl.pSwitcher)
+    {
+        int selected = 0;
+        audioDeviceControl.pSwitcher->GetState(selected);
+        if (selected >= 0 && selected < audioDeviceIds.GetSize())
+            theSettings.szAudioDevice = audioDeviceIds[selected];
+    }
     theSettings.nAudioSFX = controls[OPTION_VOLUME_SFX].nValue;
     theSettings.nAudioStreaming = controls[OPTION_VOLUME_STREAM].nValue;
     theSettings.nAudioSpeech = controls[OPTION_VOLUME_VOICE].nValue;

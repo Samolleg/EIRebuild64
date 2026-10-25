@@ -60,6 +60,9 @@ private:
     std::vector<SKeyToActionRemap> actions;
     std::vector<SOptionControl> controls;
 
+    SOptionControl audioDeviceControl{};
+    CStringArray audioDeviceNames, audioDeviceIds;
+    void FormAudioDevices();
     SLineDesc lines[NUM_GROUP_LINES];
 
     bool bKeyInput;

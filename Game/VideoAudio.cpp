@@ -93,7 +93,10 @@ struct Audio::Impl {
         std::unique_lock<std::mutex> lock(mutex);
         const size_t capacity = ring.size() / channels;
         while (frames) {
-            space.wait(lock, [&] { return cancelled || count < capacity; });
+            space.wait(lock, [&] {
+                return cancelled || count < capacity || !MiniaudioOneShotSfx::OutputDeviceAvailable();
+            });
+            if (!MiniaudioOneShotSfx::OutputDeviceAvailable()) return !cancelled;
             if (cancelled) return false;
             const size_t late = size_t((std::min)(uint64_t(frames), consumed > produced ? consumed - produced : 0));
             frames -= late; produced += late;
@@ -146,6 +149,7 @@ bool Audio::Open() {
     return true;
 }
 bool Audio::Decode(const AVFrame& frame, double pts) {
+    if (!MiniaudioOneShotSfx::OutputDeviceAvailable()) return true;
     if (!p->engine || frame.sample_rate <= 0 || frame.nb_samples < 0) return false;
     if (!p->swr) {
         AVChannelLayout output{};
@@ -187,6 +191,12 @@ void Audio::Close() {
     if (p->engine) { p->engine = nullptr; MiniaudioOneShotSfx::ReleaseVideoEngine(); }
 }
 void Audio::Control(bool paused) {
+    if (!MiniaudioOneShotSfx::OutputDeviceAvailable()) {
+        // Wake a decoder blocked on a full ring after the device stopped.
+        { std::lock_guard<std::mutex> lock(p->mutex); p->count = 0; }
+        p->space.notify_all();
+        return;
+    }
     if (!p->soundReady) return;
     ma_sound_set_volume(&p->sound, MiniaudioOneShotSfx::VideoGain());
     if (paused || MiniaudioOneShotSfx::VideoSuspended()) ma_sound_stop(&p->sound);
@@ -198,6 +208,6 @@ double Audio::Clock() const {
 }
 bool Audio::Drained() const {
     std::lock_guard<std::mutex> lock(p->mutex);
-    return p->eof && p->count == 0;
+    return !MiniaudioOneShotSfx::OutputDeviceAvailable() || (p->eof && p->count == 0);
 }
 }
