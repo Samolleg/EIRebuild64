@@ -7,6 +7,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WinRegistry.h"
 #include "FileRegistry.h"
 #include "EngineDiagnostics.h"
+#include "ModRuntime.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CAIGeneralSettings theAIGeneralSettings;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -77,10 +78,11 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
         return;
 // The configured ai.reg is a binary registry, including float arrays.
     CFileRegistry reg;
+    const std::string resolved = ModRuntime::ConfigPath(pszFileName);
 
-    if (!reg.Open(pszFileName))
+    if (!reg.Open(resolved.c_str()))
     {
-        ReportError("Unable to open %s", pszFileName);
+        ReportError("Unable to open %s", resolved.c_str());
         return;
     }
 
@@ -161,6 +163,6 @@ void CAIGeneralSettings::ReadFromFile(const char *pszFileName)
         fDefenceLevels[i] = floats[i];
     bLoaded = true;
     EngineDiagnostics::Event("AI_SETTINGS source=%s ranged_run=%.3f ranged_attack=%.3f follow=%.3f/%.3f backstab=%.3f/%.3f",
-        pszFileName, fpRangedRunDist, fpRangedAttackDist, fpFollowMinDist, fpFollowMaxDist, fpBackstabAdd, fpBackstabMult);
+        resolved.c_str(), fpRangedRunDist, fpRangedAttackDist, fpFollowMinDist, fpFollowMaxDist, fpBackstabAdd, fpBackstabMult);
 }
 /////////////////////////////////////////////////////////////////////////////////////
