@@ -74,7 +74,7 @@ void CI3DScreenBase::OnActivate()
     bNeedAutosave = false;
     if (interfaceState.GetSize())
         interfaceState.SetSize(0);
-    else if (theWorld.GetPlayer()->GetPlayer()->prevInterface != IFACE_CAMP)
+    else if (!pI3D->IsRestoringSavedScreen() && theWorld.GetPlayer()->GetPlayer()->prevInterface != IFACE_CAMP)
         bNeedAutosave = true;
 
     SScenarioZone *pB = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());

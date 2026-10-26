@@ -533,10 +533,13 @@ void CInterface3D::ActivateScreen(CI3DScreen *pScreen)
     GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHAREF, 128);
 
     NGame::bNeedRender = true;
+    bActivatingSavedScreen = bSavedScreenPending;
+    bSavedScreenPending = false;
 
     GameJournal::Event("SCREEN", "open", "class=%s", GameJournal::Quote(typeid(*pScreen).name()).c_str());
     pScreen->OnActivate();
 
+    bActivatingSavedScreen = false;
     NGame::DestroyInputMessages();
     ReleaseCapture();
     theCursor.SetMode(CT_DEFAULT);

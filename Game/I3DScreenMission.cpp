@@ -140,7 +140,7 @@ void CI3DScreenMission::OnActivate()
     else if (IWorldClient.GetParty().people.GetSize() > 0)
     {
         selectionIDs.Add(IWorldClient.GetParty().people[0].nID);
-        bNeedAutosave = true;
+        bNeedAutosave = !pI3D->IsRestoringSavedScreen();
     }
     AddHandler(dbgnew CI3DHandlerSystemKeys(pI3D));
 

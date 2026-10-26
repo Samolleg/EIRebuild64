@@ -25,6 +25,7 @@
 #include "SpellDatabase.h"
 #include "GameJournal.h"
 #include "UnitServer.h"
+#include "OwnedRender/E1MobSource.h"
 #include "dx11/Surface.h"
 #include <filesystem>
 #include <set>
@@ -463,6 +464,9 @@ void Slot::FinalizeWorld(Document &d)
                     if(!animation)Invalid("cannot create saved animation system");
                     object->SetAnimationSystem2(animation);object->LoadFigureBoundingVolumes(object->GetMaskName());
                     if(auto *unit=dynamic_cast<CUnit *>(object)){
+                        const auto *race=unit->GetRaceModel();
+                        if(!race)Invalid("saved unit race unavailable");
+                        unit->SetRaceAnimationCoeffs(race->fAnimationCoeffs);
                         auto id=unit->GetStartAnimationId();
                         if(id!=0xffffffffu){auto *entry=unit->GetAnimationEntryByIndex(id);if(!entry)Invalid("saved animation unavailable");unit->SetCurrentAnimationEntry(entry);animation->SetAnimation(entry);}
                         unit->RecalcAIParams();
@@ -552,6 +556,10 @@ void Slot::Commit(std::unique_ptr<State> state)
     CPtr<CLocalConnection> clientConnection;
     CPtr<CConnection> serverConnection,oldConnection;
     std::unique_ptr<CParty> clientParty;
+    std::vector<owned::RetainedAdmission> renderMembers;
+    renderMembers.reserve(current->mapObjects.GetCount());
+    for(const auto &x:current->mapObjects)if(x.first>0)
+        renderMembers.push_back({std::uint32_t(x.first),std::uint32_t(x.second->GetTypeID()),x.first});
     // Preparation is reversible: no live disconnect, screen destruction,
     // namespace publication or world ownership changes occur in this scope.
     {
@@ -633,7 +641,15 @@ void Slot::Commit(std::unique_ptr<State> state)
     zone->graph=Graph{};zone->owners.reset();
     active->scenario.graph=Graph{};active->scenario.owners.reset();
     current->detachedSave=false;
-    if(active->fullSlot)active->uiState.Apply();
+    // The staged loader deliberately never runs the MOB parser. Publish the
+    // accepted source to the renderer now, before the client new-zone stream.
+    if(!current->szZoneFileName.IsEmpty()&&!current->szMobFileName.IsEmpty()){
+        OwnedRender::E1RestoreSavedWorldSource(current->szZoneFileName,current->szMobFileName,renderMembers);
+        for(INT_PTR i=0;i<current->szLoadedMobs.GetSize();++i)
+            if(current->szLoadedMobs[i].CompareNoCase(current->szMobFileName)!=0)
+                OwnedRender::E1RestoreSavedWorldSource(nullptr,current->szLoadedMobs[i],renderMembers);
+    }
+    if(active->fullSlot){active->uiState.Apply();theInterface.AdoptSavedInterface();}
     // Audio handles belong to the retired world. This is a non-throwing
     // best-effort stop, after acceptance, never a reason to reject a staged slot.
     try{IWorldClient.StopAllSounds();}catch(...){GameJournal::AllocationFailureInCatch("Save64 audio retirement");}
