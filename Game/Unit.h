@@ -437,6 +437,7 @@ public:
     virtual void SetStunFlag(BOOL bStun);
     // position prediction, server only
     virtual CPlot3D GetFuturePosition(int nSegment);
+    bool GetRoutePosition(float time,CPlot3D &position);
     virtual CPlot3D GetTargetCP();
 
     // рассчитать высоту юнита над землей в точке (x,y)

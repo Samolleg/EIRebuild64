@@ -7,21 +7,24 @@ class CMapObject;
 class CUnit;
 class CAIMap;
 class CWorldServer;
+namespace owned { struct FigureCpuAsset; }
 class NavigationWorld {
     Navigation::Geometry terrain;
     std::shared_ptr<Navigation::Geometry> geometry;
-    std::map<int,std::vector<Navigation::Solid>> objects;
+    std::map<int,Navigation::Geometry> objects, pendingObjects;
+    std::map<std::string,std::shared_ptr<const owned::FigureCpuAsset>> figures;
     std::map<std::string,Navigation::Bytes> sources;
     std::map<std::pair<int,int>,std::unique_ptr<Navigation::Mesh>> meshes;
     std::string scene, error;
     std::uint64_t generation = 1;
     unsigned failures = 0;
     void Changed();
+    void SyncObjects();
+    std::shared_ptr<const owned::FigureCpuAsset> Figure(CMapObject* object,const char* part);
     Navigation::Mesh* ForProfile(float radius,int aiClass,const char* phase);
     Navigation::Mesh* ForUnit(CUnit* unit,int aiClass = 3,const char* phase = "late");
 public:
     void Source(const std::string& name,const void* data,size_t size);
-    void MobSource(const char* path);
     void Scene(const char* mpr,const char* mob);
     Navigation::Geometry& Terrain() { return terrain; }
     void Object(CMapObject* object,bool remove,CAIMap& map);

@@ -381,7 +381,6 @@ void Slot::PrepareWorld(Document &d)
     if(!d.terrain.IsEmpty()) {
         if(!world->aiMap.Load(world->GetFullMobName(d.terrain)))Invalid("cannot load saved terrain");
         world->aiMap.Navigation().Scene(d.terrain,d.mob);
-        world->aiMap.Navigation().MobSource(world->GetFullMobName(d.mob));
     }
     world->szZoneFileName=d.terrain;world->szMobFileName=d.mob;world->szCurrentZoneName=d.zone;
     world->aiMap.SetGraphRebuild(false);
@@ -428,7 +427,6 @@ void Slot::World(Reader &r,CWorldServer &v)
     v.szLoadedMobs.SetSize(r.Count());for(INT_PTR i=0;i<v.szLoadedMobs.GetSize();++i)Field(r,v.szLoadedMobs[i]);
     const auto n=r.Count();for(std::uint32_t i=0;i<n;++i){auto *item=r.GameReferenceAs<CItem>();if(!item||item->GetManager()!=v.pItemManager||item->GetUserData())Invalid("invalid item origin");auto *info=new CItemSrcInfo;info->nSrcItemID=r.Int32();item->AttachUserData(info);}
     if(r.UInt32()!=Navigation::ContainerVersion)Invalid("incompatible Nav64 world");
-    for(INT_PTR i=0;i<v.szLoadedMobs.GetSize();++i)v.aiMap.Navigation().MobSource(v.GetFullMobName(v.szLoadedMobs[i]));
     v.LoadFieldCamp(r);v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
 }
 

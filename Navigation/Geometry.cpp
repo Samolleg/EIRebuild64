@@ -18,7 +18,7 @@ void Geometry::Bounds() {
             auto source=groundSources.upper_bound(i);
             std::string name="unknown sector";size_t first=0;
             if(source!=groundSources.begin()){--source;name=source->second;first=source->first;}
-            throw std::runtime_error("Nav64: non-finite MPR geometry sector="+name+" triangle="+std::to_string(i-first));
+            throw std::runtime_error("Nav64: non-finite surface geometry source="+name+" triangle="+std::to_string(i-first));
         }
         add(t.a);add(t.b);add(t.c);
     }

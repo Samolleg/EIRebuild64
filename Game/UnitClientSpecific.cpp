@@ -873,11 +873,17 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
     pos = lpUnit->GetCP();
     pos.x = Meter2AITile(pos.x);
     pos.y = Meter2AITile(pos.y);
+    float supportZ=0;
+    const bool supported=route.IsMoving() && route.route.route.GetCount()>=2;
     bMoved = lpUnit->walker.GetPosition(GetWorldBase(), route, fpTime, bRotating, pos, vec, fpSpeed,
-                                        nX, nY);
+                                        nX, nY, supported?&supportZ:nullptr);
     // ASSERT( bMoved );
     pos.x = AITile2Meter(pos.x);
     pos.y = AITile2Meter(pos.y);
+    if(supported) {
+        lpUnit->navLocation.surface=1;
+        lpUnit->navLocation.position={pos.x,pos.y,supportZ};
+    }
     pos.z = lpUnit->CalcZ(pos.x, pos.y) + lpUnit->fpBaseZ;
     GetWorldBase()->MoveObject(lpUnit, pos);
     // we don't need orientation in the object viewer

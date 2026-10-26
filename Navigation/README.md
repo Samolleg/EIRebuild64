@@ -10,30 +10,45 @@ Game `(x,y,z)` maps to Recast `(x,z,-y)`. Input lengths are metres. Ground is
 the original MPR triangle mesh with sector vertex offsets; solid geometry is
 the selected, BON/constitution-adjusted, rotated part BV, not object AABBs.
 Solid volumes are cut from the compact field before radius erosion, including
-head clearance. Their tops never become walkable surfaces. BASE, CROWN and
-EMPTY do not acquire new walkable geometry in this slice.
+head clearance. Their tops never become walkable surfaces. In r6, selected
+BASE/IsBridge parts contribute their actual FIG triangles, decoded by the
+embedded renderer, interpolated by constitution and transformed with BON and
+the object rotation/origin. CROWN and EMPTY retain their pass/ignore semantics.
+Surface area is the existing bridge-road material. A floor touching the top
+of a solid is supported; a body overlapping that solid is blocked.
 
 The initial policy is standing-human ground, 0.1 m voxels, 0.05 m height,
 256-voxel tiles, 40 degree slope and 0.35 m climb. Collision radii round up to
-fixed classes: 0.1, 0.4, 0.7, 1, 1.5, 2, 4 m. AI classes 0..7 retain heights
-2, 0.4, 1, 1.6, 2.2, 1.7, 3, 6 m. At most 56 profiles exist; identical sizes
+fixed classes: 0.1 through 1.0 in 0.1 m steps, then 1.25, 1.5, 2, 3, 4 m.
+AI classes 0..7 retain heights 2, 0.4, 1, 1.6, 2.2, 1.7, 3, 6 m.
+At most 120 profiles exist; identical sizes
 share a mesh. Prepare warms the default human probe and every current unit's
 profile during NewZone and staged save loading, before publishing the world.
 Party deployment also warms final owned/equipped sizes before scripts/control.
 A missing class first used later (AddMob, summon or a new pose) loads/builds
 once per geometry generation. NAV ready logs class, radius, height, built/cache,
-ms and phase (prepare/party/late); cache hits in memory do not log again.
+ms and phase (prepare/party/late), fingerprint, generation, worker count and
+raster/polygon CPU milliseconds; cache hits in memory do not log again.
+NAV prepared records the complete phase time and resident profile count.
 This is not acceptance of the full eight-class/water/flight policy (NAV04).
 Material areas 1..15 use existing costs, while movement uses existing speed
 tables. Directional search costs are deferred to NAV04. No crowd controller,
-door topology, bridge decks or old search fallback is present.
+door topology or old search fallback is present. Independent multi-floor
+surface identity and complete bridge semantics remain later packages.
+
+Tiles are binned spatially before building. Triangles are converted/classified
+once per profile, solid hulls are computed once, and each tile visits only its
+overlapping inputs (including the full erosion border). Up to eight workers,
+one per two hardware threads, each own their Recast context and temporaries.
+Completed blobs enter Detour on the simulation thread in fixed z/x order.
+Voxel sizes, slope, climb and the upward radius classes are unchanged.
 
 ## Container v1 (little endian)
 
 No raw host structs/pointers are written. The only native layout is the tile
 payload returned by the pinned library's `dtCreateNavMeshData`.
 
-* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=1,
+* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=2,
   library=`0x010600`, endian=`0x12345678`, polyrefBytes=8.
 * u32 text length + UTF-8/ASCII SHA-256 input fingerprint, maximum 4096 bytes.
 * Profile: six f32 (radius,height,slope,climb,cellSize,cellHeight), u32 tileCells.
@@ -41,7 +56,7 @@ payload returned by the pinned library's `dtCreateNavMeshData`.
   (u32). Limits: 4096 tiles, 32768 polygons/tile, 16 MiB/tile, 512 MiB/file.
 * u32 sectionCount=3; each section has u32 type and byteLength.
   Type 1: u32 tileCount followed by (u32 size, Detour tile bytes), no stored
-  refs. Type 2: u32 surfaceCount=1, u32 surfaceId=1 (MPR ground).
+  refs. Type 2: u32 surfaceCount=1, u32 surfaceId=1 (imported triangle surfaces).
   Type 3: u32 buildLayerCount=0, reserved for NAV05's TileCache data.
   Unknown versions/sections, stale fingerprints and ABI mismatches regenerate
   through the same builder. Exact lengths/counts are validated before addTile.
@@ -50,9 +65,15 @@ payload returned by the pinned library's `dtCreateNavMeshData`.
 identical bytes. Mapper NAV03 must use this API/profile/input normalization;
 new metadata/layers require an explicit container/algorithm revision.
 Fingerprint inputs are scene MPR + primary MOB + authoring variant, effective
-MPR header/sectors, material registry, primary/secondary MOB payloads, selected
-transformed BV geometry, all imported ground triangles, profile and ABI/build
-settings. No file dates or EXE hashes participate. Runtime object deltas change
+MPR header/sectors, material registry, selected transformed BV geometry, actual
+object/ground triangles, profile and ABI/build settings. Raw MOB script/unit
+payloads, party/equipment, transient IDs and generation counters do not enter
+the key. A script-only AddMob (including AutoRunSpellAddon123) does not invalidate
+geometry. Initial static objects enter the snapshot before Prepare. Remove/add
+pairs are compared by their final geometric contribution at the next query;
+identical updates and objects without a contribution do not advance generation.
+Real changes log NAV geometry_changed and still rebuild synchronously until NAV05.
+No file dates or EXE hashes participate. Runtime object deltas change
 the fingerprint and do not overwrite authored files. Cache writes flush a
 temporary file and atomically replace the target.
 
@@ -61,6 +82,10 @@ has a 65536-iteration bound, an 8192-polygon corridor and 8192 straight points.
 The segment executor carries exact points, uses piecewise linear motion and
 limits the complete proposed step by a Detour raycast; it never splines or
 rounds through a wall. Physical neighbours cause waiting, never pushing.
+Point queries use the current bridge/deck height as their initial hint instead
+of discarding it for original MPR height. Route supportZ already present in the
+packet drives both client walking/turning and path-preview particles; visual
+support is retained at a stopped endpoint and cleared on authoritative placement.
 The complete crowd/queue policy and dynamic tile budgets belong to NAV05/06.
 
 SaveSchema 4 replaces version 3 without migration. Unit address is stable
@@ -71,7 +96,7 @@ Legacy embedded MOB graph/GRP data is neither read nor modified.
 
 Source recovery (X64NAV01 r5): existing authored positions may be just outside
 an eroded polygon. Find, step and save restoration share a bounded ingress
-(radius + two cells) over continuous non-null MPR ground. The actual position
+(radius + two cells) over continuous non-null imported triangles. The actual position
 and ingress are part of the route/preview; movement must reduce the distance
 to the mesh, preserve body clearance and cross no raw solid or ground gap.
 This does not change mesh radius/slope or relax placement/target projection.

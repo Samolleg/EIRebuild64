@@ -1552,7 +1552,7 @@ bool CAIMap::CanPutObject(CMapObject *pMapObject, const CPlot3D &p)
     if(pMapObject->WhoAmI()!=HPC_UNIT)return true;
     if(!TileInBounds(Float2AITile(p.x),Float2AITile(p.y)))return false;
     auto* unit=static_cast<CUnit*>(pMapObject);
-    return navigation.CanPlace(unit,{p.x,p.y,GetOriginalTileHeight(p)}) && CheckCircleCollision(unit,p)==nullptr;
+    return navigation.CanPlace(unit,{p.x,p.y,GetTileHeight(p)}) && CheckCircleCollision(unit,p)==nullptr;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // locking operations
@@ -2272,7 +2272,7 @@ bool CAIMap::CanPutUnit(CUnit *pUnit)
 bool CAIMap::CanPutUnit(int nAIClass, const CPlot3D &ptPos)
 {
     if(!TileInBounds(Float2AITile(ptPos.x),Float2AITile(ptPos.y)))return false;
-    return navigation.CanPlace(nullptr,{ptPos.x,ptPos.y,GetOriginalTileHeight(ptPos)},nAIClass);
+    return navigation.CanPlace(nullptr,{ptPos.x,ptPos.y,GetTileHeight(ptPos)},nAIClass);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutUnitRelaxed(CUnit *pUnit)
@@ -2282,15 +2282,15 @@ bool CAIMap::CanPutUnitRelaxed(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::FindUnitPosition(CUnit *pUnit, const CPlot3D &ptBasePoint, CPlot3D &ptResPos)
 {
-    auto from=navigation.Position(pUnit,*this);from.x=ptBasePoint.x;from.y=ptBasePoint.y;from.z=GetOriginalTileHeight(ptBasePoint);
-    auto route=navigation.Find(pUnit,from,{ptResPos.x,ptResPos.y,GetOriginalTileHeight(ptResPos)},1.e6f,1.f);
+    auto from=navigation.Position(pUnit,*this);from.x=ptBasePoint.x;from.y=ptBasePoint.y;from.z=GetTileHeight(ptBasePoint);
+    auto route=navigation.Find(pUnit,from,{ptResPos.x,ptResPos.y,GetTileHeight(ptResPos)},1.e6f,1.f);
     if(route.status!=Navigation::Status::Complete||route.points.empty())return false;
     auto p=route.points.back().position;ptResPos.x=p.x;ptResPos.y=p.y;return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::FindPathDestination(CUnit *pUnit, CPlot3D &finish, bool bAccountColor, float fpMinDistance)
 {
-    auto route=navigation.Find(pUnit,navigation.Position(pUnit,*this),{finish.x,finish.y,GetOriginalTileHeight(finish)},1.e6f,fpMinDistance);
+    auto route=navigation.Find(pUnit,navigation.Position(pUnit,*this),{finish.x,finish.y,GetTileHeight(finish)},1.e6f,fpMinDistance);
     if(route.status!=Navigation::Status::Complete||route.points.empty())return false;
     auto p=route.points.back().position;finish.x=Meter2AITile(p.x);finish.y=Meter2AITile(p.y);return true;
 }
@@ -2322,7 +2322,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;
     if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)||!TileInBounds(Float2AITile(ptDst.x),Float2AITile(ptDst.y)))return false;
     auto from=navigation.Position(pUnit,*this);
-    Navigation::Point goal{ptDst.x,ptDst.y,GetOriginalTileHeight(ptDst)}; // ptDst.z is a command distance, not world height.
+    Navigation::Point goal{ptDst.x,ptDst.y,GetTileHeight(ptDst)}; // ptDst.z is a command distance, not world height.
     if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,&pUnit->navLocation)) {res.bRouteFailed=true;return false;}
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
     if(res.toGo.route.GetCount()<2){res.toGo.Clear();return false;}

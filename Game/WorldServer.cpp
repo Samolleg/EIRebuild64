@@ -3451,8 +3451,6 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     }
 
     aiMap.Navigation().Scene(pszMprName,pszMobName);
-    try { aiMap.Navigation().MobSource(GetFullMobName(pszMobName)); }
-    catch(const std::exception& e) { return ReportError("Nav64 source: %s",e.what()); }
 
     // prepare for map objects loading
     if (szMobFileName.CompareNoCase(pszMobName) == 0)
@@ -3516,8 +3514,6 @@ BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
                            pszMobName);
     else
     {
-        try { aiMap.Navigation().MobSource(GetFullMobName(pszMobName)); }
-        catch(const std::exception& e) { reader.Close();return ReportError("Nav64 source: %s",e.what()); }
         OwnedRender::E1MobSource::Parsed(pszMobName);
         bRv = reader.Load(this, bSkipScript);
         reader.Close();

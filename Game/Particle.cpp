@@ -4474,11 +4474,11 @@ BOOL CParticle::PathSingleCreate(SSingleParticle *pSPart, int nNumber)
     if (nNumber > fpPower2)
         return FALSE;
     int nTime = theWorld.GetSegmentTimeCounter() + nNumber;
-    ptPos = pMO->GetFuturePosition(nTime);
+    if(pMO->WhoAmI()!=HPC_UNIT || !static_cast<CUnit*>(pMO)->GetRoutePosition(float(nTime),ptPos))return FALSE;
     if (locSources[0].reserved == ptPos)
         return FALSE;
     locSources[0].reserved = ptPos;
-    ptPos.z = theWorld.GetBridgeSurfaceZValue(ptPos.x, ptPos.y) + 0.15f;
+    ptPos.z += 0.15f;
 #else
     CPlot3D ptPos(-1, -1, -1);
 #endif

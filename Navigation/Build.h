@@ -17,6 +17,9 @@ struct Mesh {
     std::string fingerprint;
     std::uint64_t generation = 0;
     std::uint32_t tiles = 0;
+    // Build telemetry only; no change to the container or serialized addresses.
+    std::uint32_t workers = 0;
+    std::uint64_t rasterMs = 0, polygonMs = 0;
 };
 std::unique_ptr<Mesh> Build(const Geometry& geometry,const Profile& profile,const std::string& key);
 Bytes Store(const Mesh& mesh);

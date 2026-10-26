@@ -310,30 +310,37 @@ bool CRouteWalker::GetRotation(float fpTime, CPlot3D &vec)
 /////////////////////////////////////////////////////////////////////////////////////
 // получить направление поворота и, возможно, позицию юнита через fpTime после начала
 // движения
-bool CRouteWalker::GetMovement(float time, bool &rotating, CPlot3D &pos, CPlot3D &vec, float &speed, int &tileX, int &tileY)
+bool CRouteWalker::GetMovement(float time, bool &rotating, CPlot3D &pos, CPlot3D &vec, float &speed, int &tileX, int &tileY, const CAIRoute &support, float *supportZ)
 {
     if(points.GetSize()<2){speed=0;return false;}
+    POSITION at=support.route.GetHeadPosition();
+    const SRouteUnit* node=supportZ&&at?&support.route.GetNext(at):nullptr;
     float angle=fpStartAngle;
     for(int i=0;i<points.GetSize()-1;++i) {
         auto& a=points[i];auto& b=points[i+1];
+        const SRouteUnit* next=supportZ&&at?&support.route.GetNext(at):nullptr;
+        if(supportZ&&(!node||!next))return false;
         float desired=a.GetAngle(),delta=desired-angle;
         while(delta>FP_PI)delta-=FP_2PI;while(delta<-FP_PI)delta+=FP_2PI;
         float turn=std::abs(delta)/(std::max)(.0001f,fpAngularSpeed);
         pos.x=a.point.x;pos.y=a.point.y;tileX=a.nTileX;tileY=a.nTileY;
+        if(supportZ)*supportZ=node->supportZ;
         if(time<turn){rotating=true;angle+=delta*time/(std::max)(.0001f,turn);vec.x=std::cos(angle);vec.y=std::sin(angle);speed=0;return true;}
         time-=turn;angle=desired;float length=Distance(a.point,b.point),duration=length/a.fpSpeed;
         if(time<duration){float f=time/(std::max)(.00001f,duration);pos.x=a.point.x+(b.point.x-a.point.x)*f;pos.y=a.point.y+(b.point.y-a.point.y)*f;
+            if(supportZ)*supportZ=node->supportZ+(next->supportZ-node->supportZ)*f;
             rotating=false;vec.x=a.speed.x;vec.y=a.speed.y;speed=a.fpSpeed;tileX=b.nTileX;tileY=b.nTileY;return true;}
-        time-=duration;
+        time-=duration;node=next;
     }
     auto& last=points[points.GetSize()-1];pos.x=last.point.x;pos.y=last.point.y;vec.x=last.speed.x;vec.y=last.speed.y;vec.z=0;
+    if(supportZ&&node)*supportZ=node->supportZ;
     tileX=last.nTileX;tileY=last.nTileY;speed=0;rotating=false;return false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // NOTE, can be speed up immensely by caching...
 bool CRouteWalker::GetPosition(CWorldBase *pWorld, CAIFullRoute &route, float fpTime,
                                bool &bRotating, CPlot3D &pos, CPlot3D &vec, float &fpSpeed,
-                               int &nTileX, int &nTileY)
+                               int &nTileX, int &nTileY, float *supportZ)
 {
     bool bRv = true;
     nTileX = -1;
@@ -359,7 +366,7 @@ bool CRouteWalker::GetPosition(CWorldBase *pWorld, CAIFullRoute &route, float fp
         break;
     case CAIFullRoute::Walk:
         bRv = GetMovement(fpTime - route.nStartSegment, bRotating, pos, vec, fpSpeed, nTileX,
-                          nTileY);
+                          nTileY, route.route, supportZ);
         break;
     case CAIFullRoute::AttackPoint:
         bRotating = GetRotation(fpTime - route.nStartSegment, vec);

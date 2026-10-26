@@ -6,7 +6,7 @@
 
 namespace Navigation {
 constexpr std::uint32_t ContainerVersion = 1;
-constexpr std::uint32_t AlgorithmVersion = 1;
+constexpr std::uint32_t AlgorithmVersion = 2;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -23,7 +23,7 @@ struct Profile {
 };
 struct Location {
     Point position;
-    std::uint64_t surface = 0; // 1 = imported MPR ground. BV tops are never floors.
+    std::uint64_t surface = 0; // 1 = imported terrain/object triangle surfaces, never solid BV tops.
     float radius = 0, height = 0;
     std::uint32_t area = 1; // derived material policy, re-resolved on load
     // Transient. Never serialized: rebuilding a tile invalidates Detour references.

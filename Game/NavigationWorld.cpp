@@ -8,6 +8,8 @@
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "RuntimePaths64.h"
+#include "FigureManager.h"
+#include "../external/owned-renderer/Source/owned_asset_loader.h"
 #include <bcrypt.h>
 #include <algorithm>
 #include <chrono>
@@ -55,36 +57,108 @@ void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
     if(ok)ok=MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;
     if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Nav64: cannot commit cache atomically");}
 }
+bool Same(Navigation::Point a,Navigation::Point b) {return a.x==b.x&&a.y==b.y&&a.z==b.z;}
+bool Same(const Navigation::Geometry& a,const Navigation::Geometry& b) {
+    if(a.ground.size()!=b.ground.size()||a.solids.size()!=b.solids.size())return false;
+    for(size_t i=0;i<a.ground.size();++i) {
+        const auto& x=a.ground[i];const auto& y=b.ground[i];
+        if(x.area!=y.area||!Same(x.a,y.a)||!Same(x.b,y.b)||!Same(x.c,y.c))return false;
+    }
+    for(size_t i=0;i<a.solids.size();++i) {
+        if(a.solids[i].error!=b.solids[i].error)return false;
+        for(int j=0;j<8;++j)if(!Same(a.solids[i].corners[j],b.solids[i].corners[j]))return false;
+    }
+    return true;
+}
 }
 void NavigationWorld::Changed() {meshes.clear();geometry.reset();++generation;}
+void NavigationWorld::SyncObjects() {
+    bool changed=false;
+    for(auto& entry:pendingObjects) {
+        auto old=objects.find(entry.first);auto& next=entry.second;
+        bool empty=next.solids.empty()&&next.ground.empty();
+        if(old==objects.end()?empty:Same(old->second,next))continue;
+        if(!meshes.empty())GameJournal::Event("NAV","geometry_changed","NID=%d operation=%s solids=%zu triangles=%zu generation=%llu",entry.first,empty?"remove":old==objects.end()?"add":"update",next.solids.size(),next.ground.size(),static_cast<unsigned long long>(generation));
+        if(empty)objects.erase(entry.first);else objects[entry.first]=std::move(next);
+        changed=true;
+    }
+    pendingObjects.clear();if(changed)Changed();
+}
 void NavigationWorld::Source(const std::string& name,const void* data,size_t size) {
     if(size>512u*1024*1024)throw std::runtime_error("Nav64: oversized source");
     auto p=static_cast<const std::uint8_t*>(data);auto& target=sources[name];
+    if(target.size()==size&&std::equal(target.begin(),target.end(),p))return;
     target.assign(p,p+size);Changed();
-}
-void NavigationWorld::MobSource(const char* path) {
-    auto bytes=Read(ModRuntime::MapPath(path));Source(std::string("mob:")+ResourceName(path),bytes.data(),bytes.size());
 }
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
     scene=ResourceName(mpr)+"|"+ResourceName(mob)+"|navsrc:none";
-    for(auto i=sources.begin();i!=sources.end();)if(i->first.compare(0,4,"mob:")==0)i=sources.erase(i);else ++i;
+    figures.clear();
     Changed();failures=0;
+}
+std::shared_ptr<const owned::FigureCpuAsset> NavigationWorld::Figure(CMapObject* object,const char* part) {
+    const std::string key=std::string(object->GetMaskName())+"/"+part;
+    auto found=figures.find(key);if(found!=figures.end())return found->second;
+    auto* manager=static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager());
+    auto* model=manager->GetModel(object->GetMaskName());DWORD size=0;
+    const auto file=std::string(object->GetMaskName())+part+".fig";
+    auto* data=model?model->GetModel()->GetFile(part,&size):manager->GetFile(file.c_str(),&size);
+    if(!data)throw std::runtime_error("missing walkable FIG");
+    owned::ResourceBlob blob;
+    try {blob.bytes=std::make_shared<const std::vector<std::uint8_t>>(data,data+size);}
+    catch(...) {if(model)model->GetModel()->CloseFile(data);else manager->CloseFile(data);throw;}
+    if(model)model->GetModel()->CloseFile(data);else manager->CloseFile(data);
+    blob.identity.canonical_name=key;blob.identity.bytes=size;
+    auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
+    if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error(failure.message);
+    figures.emplace(key,figure);return figure;
 }
 void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(object->WhoAmI()==HPC_UNIT)return;
     auto id=object->GetID();
-    if(remove){if(objects.erase(id))Changed();return;}
+    // Move/orient/lever updates remove and add synchronously. Compare their
+    // final contribution at the next query, not their intermediate absence.
+    if(remove){if(objects.count(id)||pendingObjects.count(id))pendingObjects[id]={};return;}
     object->CreateCurrentPlacement();
     auto* specific=static_cast<CMapObjectServer*>(object->GetMapObjectSpecific());
     const CStringArray& parts=specific->szNames.GetSize()?specific->szNames:object->GetBodyPartNames();
-    std::vector<Navigation::Solid> solids;
+    Navigation::Geometry input;
     for(INT_PTR n=0;n<parts.GetSize();++n){int i=object->GetFigureIndexByName(parts[n]);if(i<0)continue;
         const auto& bv=object->fbvs[i];
         if(bv.IsIgnored()) {
             if(!bv.IsBox()&&!bv.IsSphere())GameJournal::Event("NAV","empty_part","NID=%d model=%s part=%s reason=zero_geometry",id,GameJournal::Quote(object->GetMaskName()).c_str(),GameJournal::Quote(parts[n]).c_str());
             continue;
         }
-        if(bv.IsBridge()||bv.GetPassability()!=AI_PASS_NO)continue;
+        if(bv.IsBridge()) {
+            std::ostringstream label;label<<"object NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
+            try {
+                const auto figure=Figure(object,parts[n]);const auto& c=object->GetComplection();
+                const float shape[3]={c.strength,c.grace,c.tall};float weights[8]{};
+                for(unsigned s=0;s<figure->shape_count;++s) {
+                    weights[s]=1;
+                    if(figure->shape_count!=1)for(int axis=0;axis<3;++axis)weights[s]*=(s&(1u<<axis))?shape[axis]:1-shape[axis];
+                }
+                auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
+                std::vector<Navigation::Point> vertices(figure->components.size());
+                for(size_t j=0;j<vertices.size();++j) {
+                    const auto index=figure->components[j].position;CPlot3D p(0,0,0);
+                    for(unsigned s=0;s<figure->shape_count;++s) {
+                        const auto& group=figure->positions[s*figure->position_groups+index/4];const auto lane=index%4;
+                        p+=CPlot3D(group.x[lane],group.y[lane],group.z[lane])*weights[s];
+                    }
+                    // FIG vertices are origin-relative; ptCenter belongs only
+                    // to the collision BV. BON already contains linked offsets.
+                    p=object->RotateVector(p+bv.ptBone)+base;vertices[j]=Point(p);
+                    if(!Navigation::Finite(vertices[j]))throw std::runtime_error("non-finite transformed triangle vertex");
+                }
+                const size_t first=input.ground.size();input.groundSources.emplace(first,label.str());
+                for(size_t j=0;j<figure->indices.size();j+=3)
+                    input.ground.push_back({vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],map.NavigationBridgeArea()});
+            }catch(const std::exception& e) {
+                Navigation::Solid failure{};failure.error="Nav64: invalid walkable geometry "+label.str()+" reason="+e.what();input.solids.push_back(std::move(failure));
+            }
+            continue;
+        }
+        if(bv.GetPassability()!=AI_PASS_NO)continue;
         Navigation::Solid solid;auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
         bool valid=Navigation::Finite(Point(bv.ptBone))&&Navigation::Finite(Point(bv.ptCenter))&&
             Navigation::Finite(Point(bv.ptMin))&&Navigation::Finite(Point(bv.ptMax))&&Navigation::Finite(Point(base))&&
@@ -99,12 +173,14 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
             detail<<" rotation=("<<w<<","<<x<<","<<y<<","<<z<<") constitution=("<<c.strength<<","<<c.grace<<","<<c.tall<<")";
             solid.error=detail.str();
         }
-        solids.push_back(std::move(solid));
+        input.solids.push_back(std::move(solid));
     }
-    if(!solids.empty()){objects[id]=std::move(solids);Changed();}
+    if(!input.ground.empty()&&!objects.count(id)&&!pendingObjects.count(id))GameJournal::Event("NAV","walkable_object","NID=%d model=%s triangles=%zu",id,GameJournal::Quote(object->GetMaskName()).c_str(),input.ground.size());
+    if(!input.solids.empty()||!input.ground.empty()||objects.count(id)||pendingObjects.count(id))pendingObjects[id]=std::move(input);
 }
 Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const char* phase) {
     try {
+        SyncObjects();
         if(!std::isfinite(radius)||radius<=0||radius>4||aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid agent size/class");
         const auto* radiusClass=std::lower_bound(std::begin(RadiusClasses),std::end(RadiusClasses),radius);
         const auto key=std::make_pair(int(radiusClass-std::begin(RadiusClasses)),aiClass);
@@ -112,7 +188,12 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const cha
         auto start=std::chrono::steady_clock::now();Navigation::Profile profile;profile.radius=*radiusClass;profile.height=ClassHeights[aiClass];
         if(!geometry) {
             auto input=std::make_shared<Navigation::Geometry>(terrain);
-            for(const auto& entry:objects)input->solids.insert(input->solids.end(),entry.second.begin(),entry.second.end());
+            for(const auto& entry:objects) {
+                const auto& object=entry.second;const auto first=input->ground.size();
+                for(const auto& source:object.groundSources)input->groundSources.emplace(first+source.first,source.second);
+                input->ground.insert(input->ground.end(),object.ground.begin(),object.ground.end());
+                input->solids.insert(input->solids.end(),object.solids.begin(),object.solids.end());
+            }
             input->Bounds();geometry=std::move(input);
         }
         Navigation::Bytes source;
@@ -131,7 +212,7 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const cha
         if(!mesh){mesh=Navigation::Build(*geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
         mesh->generation=generation;mesh->geometry=geometry;
         auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase,mesh->tiles?"":" reason=\"no walkable ground\"");
+        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s workers=%u raster_cpu_ms=%llu polygons_cpu_ms=%llu key=%s generation=%llu%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase,mesh->workers,static_cast<unsigned long long>(mesh->rasterMs),static_cast<unsigned long long>(mesh->polygonMs),fingerprint.c_str(),static_cast<unsigned long long>(generation),mesh->tiles?"":" reason=\"no walkable ground\"");
         auto result=mesh.get();meshes.emplace(key,std::move(mesh));error.clear();return result;
     }catch(const std::exception& e){error=e.what();if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());return nullptr;}
 }
@@ -140,17 +221,20 @@ Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass,const char* p
     return ForProfile(unit?(std::max)(.05f,unit->GetCollisionDistance()):(c>=0&&c<8?DefaultRadii[c]:0),c,phase);
 }
 bool NavigationWorld::Prepare(CWorldServer& world,const char* phase) {
+    const auto start=std::chrono::steady_clock::now();
     // Keep the default human probe, then warm every size actually in the world.
     if(!ForUnit(nullptr,3,phase))return false;
     for(const auto& entry:world.mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
         if(!ForUnit(static_cast<CUnit*>(entry.second),3,phase))return false;
     }
+    const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+    GameJournal::Event("NAV","prepared","scene=%s phase=%s profiles=%zu ms=%lld generation=%llu",GameJournal::Quote(scene.c_str()).c_str(),phase,meshes.size(),static_cast<long long>(ms),static_cast<unsigned long long>(generation));
     return true;
 }
 Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     auto p=Point(unit->GetCP());
     // GetCP.z is the legacy ground-relative altitude, never the world support Z.
-    p.z=map.GetOriginalTileHeight(unit->GetCP());
+    p.z=map.GetTileHeight(unit->GetCP());
     if(unit->navLocation.surface==1 && std::hypot(p.x-unit->navLocation.position.x,p.y-unit->navLocation.position.y)<.1f)p.z=unit->navLocation.position.z;
     return p;
 }

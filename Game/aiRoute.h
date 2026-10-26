@@ -303,7 +303,7 @@ private:
     void StartRotation(float fpX, float fpY, float fpAngSpeed = 0);
     bool GetRotation(float fpTime, CPlot3D &vec);
     bool GetMovement(float fpTime, bool &bRotating, CPlot3D &pos, CPlot3D &vec, float &fpSpeed,
-                     int &nTileX, int &nTileY);
+                     int &nTileX, int &nTileY, const CAIRoute &support, float *supportZ);
     void GetSegment(int N, SRouteSegment &segment)
     {
         segment.start = points[N].point;
@@ -327,7 +327,7 @@ public:
     // this motion nTileX == -1 if no lock check is required return FALSE in case of
     // movement/rotation if action is over
     bool GetPosition(CWorldBase *pWorld, CAIFullRoute &route, float fpTime, bool &bRotating,
-                     CPlot3D &pos, CPlot3D &vec, float &fpSpeed, int &nTileX, int &nTileY);
+                     CPlot3D &pos, CPlot3D &vec, float &fpSpeed, int &nTileX, int &nTileY, float *supportZ = nullptr);
     // новые скорости перемещения, если при этом не перерасчитать путь, то юнит переместится скачком
     void SetSpeeds(float fpMoveSpeed, float fpNewAngSpeed)
     {
