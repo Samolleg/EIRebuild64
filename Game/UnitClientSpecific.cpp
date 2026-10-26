@@ -35,6 +35,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "AISettings.h"
 #include "ModItemSpellPolicy.h"
 #include "dx11/Surface.h"
+#include "OwnedRender/E1Scene.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -71,7 +72,7 @@ static bool CopyMouthTexture(ITexture *pDst, const POINT *pPoint, ITexture *pSrc
         if (box.right > src.Width || box.bottom > src.Height ||
             x > dst.Width || y > dst.Height ||
             box.right - box.left > dst.Width - x || box.bottom - box.top > dst.Height - y)
-            return copied;
+            break;
         sDst->CopySubresourceRegion(i, x, y, 0, sSrc, i, &box);
         copied = true;
         box.left >>= 1; box.top >>= 1; box.right >>= 1; box.bottom >>= 1;
@@ -79,7 +80,12 @@ static bool CopyMouthTexture(ITexture *pDst, const POINT *pPoint, ITexture *pSrc
         src.Width = max(1U, src.Width >> 1); src.Height = max(1U, src.Height >> 1);
         dst.Width = max(1U, dst.Width >> 1); dst.Height = max(1U, dst.Height >> 1);
     }
-    return copied;
+    if (!copied) return false;
+    // Publish once after every mip is copied. The retained assembly and its
+    // texture cache otherwise keep the previous mouth surface generation.
+    const auto completed = OwnedRender::E1SurfaceValue(sDst->OwnedSurfaceId());
+    return completed && OwnedRender::E1Scene().Scene().visual_replace_surface(
+        completed->id, completed);
 }
 static bool UseHDCharacterTextures()
 {
