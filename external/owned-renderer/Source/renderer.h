@@ -1,6 +1,9 @@
 #pragma once
 #include "scene_composite.h"
 #include "fsr2_upscaler.h"
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+#include "dlss_backend.h"
+#endif
 #include "bloom.h"
 #include "sun_shafts.h"
 #include "depth_of_field.h"
@@ -2613,6 +2616,9 @@ private:
     std::atomic<bool> shader_marker_open_{false};  // a preparation's breadcrumb awaits a completed present
     HRESULT create_swap_chain();
     ComPtr<ID3D11Device> device_;
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+    DlssBackend dlss_backend_; // destroyed before device_, also explicitly shut down by release()
+#endif
     ComPtr<ID3D11DeviceContext> context_;
     // Per-draw constants (constant_ring.h, issue #162): appended with
     // NO_OVERWRITE and bound by range through context1_ (the immediate context as an

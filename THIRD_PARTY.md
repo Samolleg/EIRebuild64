@@ -64,3 +64,31 @@ avcodec/bink/binkaudio_rdft/binkaudio_dct, avutil, swscale, swresample.
 
 Ссылки фиксируют происхождение, а не факт получения или сборки dependencies.
 Полный x64 граф, итоговый набор notices и игровая приёмка остаются открытыми.
+
+## NVIDIA DLSS / NGX (X64DLSS01)
+
+NVIDIA DLSS SDK v310.9.16, NVIDIA/DLSS tag v310.9.16, commit
+`9981c6350dc58c0ce21f024fd65e31e851c31689`.
+Source: https://github.com/NVIDIA/DLSS/tree/v310.9.16 .
+This product uses NVIDIA DLSS and NVIDIA NGX. NVIDIA and GeForce RTX are
+trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and
+other countries. Copyright NVIDIA Corporation. All rights reserved.
+
+The SDK is external, not vendored. Run tools/prepare-worktree.ps1; its
+-DlssSdkSource parameter or EIREBUILD64_DLSS_SDK environment variable overrides
+the default work/deps64/dlss-sdk/v310.9.16 source. Build property DlssSdkRoot
+can override the prepared dependencies/dlss/v310.9.16 location. The host links
+the Windows x64 nvsdk_ngx_d.lib (/MD), preserving the existing CRT. Only the
+release nvngx_dlss.dll is shipped beside EIRebuild64.exe, with the unchanged
+SDK LICENSE.txt at licenses/NVIDIA-DLSS-LICENSE.txt. Headers/import libraries
+and development DLLs are excluded from the handoff and Git.
+
+Release obligations remain with the owner: NVIDIA RTX SDK License plus RTX
+Supplement (March 14, 2024), especially base sections 1(c), 2 and supplement
+1, 4, 6.2, 7.1(b), 7.2(c). Notify NVIDIA before commercial release; provide
+the required application attribution and NVIDIA Marks on splash screens,
+About (if present) and game credits; obtain applicable prior approval for
+mark usage. This documentation notice does not replace those application
+requirements. No notification, trademark approval or acceptance on behalf
+of the owner is performed by the build. Review distribution/EULA conditions
+and resolve these obligations before public release.

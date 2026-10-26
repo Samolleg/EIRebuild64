@@ -13,10 +13,13 @@ const char* remote_notice() noexcept { return nullptr; }
 const char* remote_lost_reason() noexcept { return nullptr; }
 HRESULT create_remote_device(HWND, UINT, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**) noexcept { return E_NOTIMPL; }
 void declare_map_range(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT) noexcept {}
+#if !defined(EID3D11_EMBEDDED)
 bool dlss_caps(DlssCaps& out) noexcept { out={}; return false; }
 bool dlss_render_size(UINT,UINT,int,UINT&,UINT&) noexcept { return false; }
-HRESULT dlss_evaluate(ID3D11DeviceContext*,const DlssEvaluate&) noexcept { return E_NOTIMPL; }
 void dlss_release() noexcept {}
+#endif // embedded lifecycle/optimal settings use owned::DlssBackend
+// Existing frame entry remains unconnected until X64DLSS02; no NGX Evaluate here.
+HRESULT dlss_evaluate(ID3D11DeviceContext*,const DlssEvaluate&) noexcept { return E_NOTIMPL; }
 bool host_presented() noexcept { return false; }
 void surface_write(bool,const SurfaceWrite&) noexcept {}
 void surface_copy(bool,ID3D11Texture2D*,ID3D11ShaderResourceView*,ID3D11Texture2D*,bool,bool) noexcept {}

@@ -487,6 +487,9 @@ void Renderer::report_adapter() noexcept try{
 }catch(...){}
 
 void Renderer::report_device_removed(HRESULT reason) noexcept try{
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ dlss_backend_.device_lost(reason);
+#endif
  static bool reported=false;
  if(reported)return;
  reported=true;
@@ -615,11 +618,18 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  }
  if(FAILED(hr))return hr;
  debug_overlay_set_running_renderer(remote?"64-bit host (call stream)":"32-bit in the game process",false);
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ dlss_backend_.initialize(device_.Get(),[](const char* text){bridge_report_event("dlss_backend",text);});
+ // Hardware capability is real, but this package must not enable Evaluate/UI.
+ set_dlss_unavailable_reason(dlss_backend_.capability().available ?
+  "DLSS rendering is not enabled in this build" : dlss_backend_.capability().reason);
+#else
  // DLSS runs only in the x64 host; the Upscaling option shows why not.
  if(!remote)set_dlss_unavailable_reason("needs the 64-bit render host");
  else{x64remote::DlssCaps caps{};
   if(!x64remote::dlss_caps(caps))set_dlss_unavailable_reason("the 64-bit host did not answer");
   else{caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.available?nullptr:(caps.reason[0]?caps.reason:"not available"));}}
+#endif
  // FSR 2 runs on this device in either mode; the Upscaling list shows why not.
  set_fsr_unavailable_reason(Fsr2Upscaler::unavailable_reason(device_.Get()));
  shader_objects_=ShaderObjects::attach(device_.Get());
@@ -983,9 +993,14 @@ HRESULT Renderer::ensure_host(HWND window,UINT w,UINT h){
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);hwnd_=window;
  debug_overlay_set_running_renderer("64-bit host (core mode)",true);
  // DLSS on this device (the host's NGX instance, host_bridge.cpp).
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ set_dlss_unavailable_reason(dlss_backend_.capability().available ?
+  "DLSS rendering is not enabled in this build" : dlss_backend_.capability().reason);
+#else
  {x64remote::DlssCaps caps{};
   if(!x64remote::dlss_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.reason[0]?caps.reason:"not available");}
   else set_dlss_unavailable_reason(nullptr);}
+#endif
  set_fsr_unavailable_reason(Fsr2Upscaler::unavailable_reason(device_.Get()));
  shader_objects_=ShaderObjects::attach(device_.Get());
  frame_acct::install_device_counters(device_.Get(),context_.Get());
@@ -1077,7 +1092,11 @@ void Renderer::apply_render_scale(){
   context_->VSSetShaderResources(46,1,&empty_history[0]);
   dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_motion_constants_.Reset();
  }
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(old_mode>=0&&dlss_mode_<0)dlss_backend_.release_feature();
+#else
  if(old_mode>=0&&dlss_mode_<0)x64remote::dlss_release();
+#endif
 }
 
 // DLSS (dlss_frame.h): the NGX mode of the upscaler method and quality, -1
@@ -1102,7 +1121,12 @@ void Renderer::set_world_size() noexcept {
  if(fsr_mode_>=0){width_=fsr_render_extent(output_width_,fsr_mode_);height_=fsr_render_extent(output_height_,fsr_mode_);return;}
  if(dlss_mode_>=0){
   UINT w=0,h=0;
-  if(x64remote::dlss_render_size(output_width_,output_height_,dlss_mode_,w,h)&&w&&h&&w<=output_width_&&h<=output_height_){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  const bool sized=dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
+#else
+  const bool sized=x64remote::dlss_render_size(output_width_,output_height_,dlss_mode_,w,h);
+#endif
+  if(sized&&w&&h&&w<=output_width_&&h<=output_height_){
    width_=w;height_=h;return;
   }
   char reason[96];std::snprintf(reason,sizeof(reason),"DLSS has no render size for %ux%u",output_width_,output_height_);
@@ -3086,6 +3110,9 @@ void Renderer::release() {
  // owns the renderer for teardown.
  set_scene_mode(false);
  scene_thread_.reset();
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ dlss_backend_.shutdown(); // no remaining frame calls; before any device resources are released
+#endif
  write_harness_path_rows(); // frame accounting rows still buffered
 #ifndef EID3D11_EMBEDDED
  camp_inventory_shutdown_icons();
