@@ -2,10 +2,54 @@
 #if defined(__SANITIZE_ADDRESS__)
 #include <sanitizer/asan_interface.h>
 
+namespace ASanReporting64 {
+namespace {
+wchar_t coePath[32768]{};
+
+// ASan reads COE_LOG_FILE while initializing, before WinMain/CRT filesystem code.
+// Use the same <game>/Engine64 layout as RuntimePaths64, only Win32 and BSS here.
+__declspec(no_sanitize_address) void PrepareCOEPath() noexcept {
+    DWORD n = GetModuleFileNameW(nullptr, coePath, _countof(coePath));
+    if (!n || n >= _countof(coePath)) { coePath[0] = 0; return; }
+    unsigned separators = 0;
+    while (n && separators != 2) {
+        --n;
+        if (coePath[n] == L'\\' || coePath[n] == L'/') ++separators;
+    }
+    if (separators != 2 || n + 100 >= _countof(coePath)) { coePath[0] = 0; return; }
+    const wchar_t* suffix = L"\\Logs64\\asan";
+    while (*suffix) {
+        if (*suffix == L'\\') {
+            coePath[n] = 0;
+            CreateDirectoryW(coePath, nullptr);
+        }
+        coePath[n++] = *suffix++;
+    }
+    coePath[n] = 0;
+    CreateDirectoryW(coePath, nullptr);
+    suffix = L"\\coe-";
+    while (*suffix) coePath[n++] = *suffix++;
+    const DWORD id[] = {GetCurrentProcessId(), GetTickCount()};
+    for (DWORD value : id) {
+        for (int shift = 28; shift >= 0; shift -= 4)
+            coePath[n++] = L"0123456789abcdef"[(value >> shift) & 15];
+        coePath[n++] = L'-';
+    }
+    --n;
+    suffix = L".txt";
+    while (*suffix) coePath[n++] = *suffix++;
+    coePath[n] = 0;
+    if (!SetEnvironmentVariableW(L"COE_LOG_FILE", coePath)) coePath[0] = 0;
+}
+}
+}
+
 extern "C" __declspec(no_sanitize_address)
 const char* __cdecl __asan_default_options() {
-    // MSVC uses continue_on_error; halt_on_error alone is not sufficient.
-    return "halt_on_error=1:continue_on_error=0:symbolize=1";
+    ASanReporting64::PrepareCOEPath();
+    // COE owns duplicate-stack suppression and exact Raw HitCnt statistics.
+    // MSVC disables suppress_equal_pcs in this mode; do not fight that policy.
+    return "halt_on_error=0:continue_on_error=2:symbolize=1";
 }
 
 namespace ASanReporting64 {
@@ -13,43 +57,92 @@ namespace {
 wchar_t reportPath[32768]{};
 char runtimePath[32768]{};
 volatile LONG reporting = 0;
+struct SeenReport {
+    void* pc;
+    unsigned long long count, lastTotal;
+    SeenReport* next;
+};
+struct SeenPage { SeenPage* next; size_t used; SeenReport entries[256]; };
+SeenPage firstPage{};
+SeenPage* currentPage = &firstPage;
+SeenReport* buckets[4096]{};
 
-// No filesystem/STL allocations, journal queue, or instrumented memory accesses
-// while ASan holds its reporting locks. Preserve the entire supplied string.
+// Grow only for new PCs, without the CRT heap or a fixed unique-error limit.
+__declspec(no_sanitize_address) SeenReport* Remember(void* pc, size_t bucket) noexcept {
+    if (currentPage->used == _countof(currentPage->entries)) {
+        auto* page = static_cast<SeenPage*>(VirtualAlloc(nullptr, sizeof(SeenPage),
+            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!page) return nullptr;
+        currentPage->next = page;
+        currentPage = page;
+    }
+    SeenReport* entry = &currentPage->entries[currentPage->used++];
+    *entry = {pc, 1, 0, buckets[bucket]};
+    buckets[bucket] = entry;
+    return entry;
+}
+
+// No allocations or journal queue while ASan holds its reporting locks.
+__declspec(no_sanitize_address) DWORD Append(const char* text) noexcept {
+    if (!reportPath[0]) return ERROR_PATH_NOT_FOUND;
+    HANDLE file = CreateFileW(reportPath, FILE_APPEND_DATA, FILE_SHARE_READ,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return GetLastError();
+    size_t remaining = 0;
+    while (text[remaining]) ++remaining;
+    DWORD error = ERROR_SUCCESS;
+    while (remaining) {
+        const DWORD chunk = remaining > MAXDWORD ? MAXDWORD : static_cast<DWORD>(remaining);
+        DWORD written = 0;
+        if (!WriteFile(file, text, chunk, &written, nullptr) || !written) {
+            error = GetLastError();
+            if (!error) error = ERROR_WRITE_FAULT;
+            break;
+        }
+        text += written;
+        remaining -= written;
+    }
+    if (!FlushFileBuffers(file) && !error) error = GetLastError();
+    CloseHandle(file);
+    return error;
+}
+
+__declspec(no_sanitize_address) void CountLine(void* pc, unsigned long long count,
+                                              bool final) noexcept {
+    char line[192];
+    sprintf_s(line, "\r\nASAN_%s pc=%p callback_count=%llu (raw hits: COE transcript)\r\n",
+        final ? "TOTAL" : "REPEAT", pc, count);
+    const DWORD error = Append(line);
+    GameJournal::ASanReport(reportPath, error, pc, count, true);
+}
+
 __declspec(no_sanitize_address) void Report(const char* text) {
     if (!text || InterlockedCompareExchange(&reporting, 1, 0)) return;
-    DWORD error = ERROR_PATH_NOT_FOUND;
-    if (reportPath[0]) {
-        HANDLE file = CreateFileW(reportPath, GENERIC_WRITE, FILE_SHARE_READ,
-            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-        if (file != INVALID_HANDLE_VALUE) {
-            size_t remaining = 0;
-            while (text[remaining]) ++remaining;
-            error = ERROR_SUCCESS;
-            while (remaining) {
-                const DWORD chunk = remaining > MAXDWORD ? MAXDWORD : static_cast<DWORD>(remaining);
-                DWORD written = 0;
-                if (!WriteFile(file, text, chunk, &written, nullptr) || !written) {
-                    error = GetLastError();
-                    if (!error) error = ERROR_WRITE_FAULT;
-                    break;
-                }
-                text += written;
-                remaining -= written;
-            }
-            if (!FlushFileBuffers(file) && !error) error = GetLastError();
-            CloseHandle(file);
-        } else error = GetLastError();
+    void* pc = __asan_get_report_pc();
+    const size_t bucket = (reinterpret_cast<size_t>(pc) >> 4) % _countof(buckets);
+    SeenReport* entry = pc ? buckets[bucket] : nullptr;
+    // Unknown PCs are not collapsed: fatal reports can lack a generic-error PC.
+    while (entry && entry->pc != pc) entry = entry->next;
+    if (entry) {
+        const auto count = ++entry->count;
+        // At most 64 tiny updates per PC, even for a hot recurring error.
+        if ((count & (count - 1)) == 0) CountLine(pc, count, false);
+    } else {
+        if (pc) Remember(pc, bucket);
+        // On OS allocation failure retain the full report rather than lose it.
+        DWORD error = Append("\r\n================ ASAN REPORT ================\r\n");
+        const DWORD bodyError = Append(text);
+        if (!error) error = bodyError;
+        GameJournal::ASanReport(reportPath, error, pc, 1, false);
     }
-    // The report is already flushed before touching the journal.
-    GameJournal::ASanReport(reportPath, error);
+    // COE returns to the application: a one-shot latch would discard later bugs.
+    InterlockedExchange(&reporting, 0);
 }
 }
 
 void Initialize() noexcept {
-    // Set the runtime's log_path directly, before registering the callback.
-    // Bypass flag parsing, including the drive colon, spaces and quotes.
-    // ASan writes runtimePath.<pid> before invoking Report, independently of it.
+    // Independent runtime log_path; COE transcript additionally contains native
+    // duplicate counts even when the runtime suppresses a callback/report.
     try {
         wchar_t local[32768];
         const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
@@ -66,8 +159,6 @@ void Initialize() noexcept {
             else runtimePath[0] = 0;
         }
     } catch (...) { runtimePath[0] = 0; }
-    // WinMain follows VCAsan's CRT initializer, so our callback owns this slot.
-    __asan_set_error_report_callback(Report);
     try {
         const auto directory = RuntimePaths64::Directory(L"Logs64") / L"asan";
         std::filesystem::create_directories(directory);
@@ -79,12 +170,28 @@ void Initialize() noexcept {
         if (path.native().size() < _countof(reportPath))
             wcscpy_s(reportPath, path.c_str());
     } catch (...) { reportPath[0] = 0; }
+    // WinMain follows VCAsan's CRT initializer; replace its IDE exception callback
+    // only after preparing the destination for reports.
+    __asan_set_error_report_callback(Report);
+}
+
+__declspec(no_sanitize_address) void Finish() noexcept {
+    if (InterlockedCompareExchange(&reporting, 1, 0)) return;
+    for (SeenPage* page = &firstPage; page; page = page->next)
+        for (size_t i = 0; i < page->used; ++i) {
+            SeenReport& entry = page->entries[i];
+            if (entry.count > 1 && entry.lastTotal != entry.count) {
+                CountLine(entry.pc, entry.count, true);
+                entry.lastTotal = entry.count;
+            }
+        }
+    InterlockedExchange(&reporting, 0);
 }
 
 void JournalReady() noexcept {
     GameJournal::Event("SESSION", "asan_reporting",
-        "callback=true report_path_ready=%u runtime_log_path=%s",
-        reportPath[0] ? 1u : 0u, runtimePath[0] ? runtimePath : "unavailable");
+        "callback=true continue_on_error=2 report_path_ready=%u coe_path_ready=%u runtime_log_path=%s",
+        reportPath[0] ? 1u : 0u, coePath[0] ? 1u : 0u, runtimePath[0] ? runtimePath : "unavailable");
 }
 }
 #endif

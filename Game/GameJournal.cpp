@@ -623,7 +623,7 @@ void Notification(const char* type, const char* text, const char* extra) noexcep
 }
 void FlushCritical() noexcept{State* s=current.load();if(s)Synchronize(*s);}
 #if defined(__SANITIZE_ADDRESS__)
-__declspec(no_sanitize_address) void ASanReport(const wchar_t* path, unsigned long error) noexcept {
+__declspec(no_sanitize_address) void ASanReport(const wchar_t* path, unsigned long error, const void* pc, unsigned long long count, bool repeat) noexcept {
     State* s = current.load();
     if (!s || WaitForSingleObject(s->ready, 250) != WAIT_OBJECT_0) return;
     const DWORD started = GetTickCount();
@@ -638,8 +638,8 @@ __declspec(no_sanitize_address) void ASanReport(const wchar_t* path, unsigned lo
             strcpy_s(utf8, "path_unavailable");
         char line[4352];
         SYSTEMTIME t; GetLocalTime(&t);
-        const int n = sprintf_s(line, "%02u:%02u:%02u.%03u ERROR asan_report saved=%u win32_error=%lu path=%s\r\n",
-            t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, error == ERROR_SUCCESS ? 1u : 0u, error, utf8);
+        const int n = sprintf_s(line, "%02u:%02u:%02u.%03u ERROR asan_report saved=%u win32_error=%lu pc=%p callback_count=%llu repeat=%u path=%s\r\n",
+            t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, error == ERROR_SUCCESS ? 1u : 0u, error, pc, count, repeat ? 1u : 0u, utf8);
         if (n > 0) {
             DWORD written = 0;
             WriteFile(s->file, line, static_cast<DWORD>(n), &written, nullptr);

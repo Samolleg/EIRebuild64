@@ -2637,6 +2637,9 @@ BOOL CParticle::FireBlastSingleSegment(SSingleParticle *pSPart)
         }
         pSPart->reserved2.x = pSPart->coord.w;
         pSPart->reserved *= (locSources[0].reserved.z - 0.03f);
+        // The accelerating phase can skip past the last table entry in one step.
+        if (static_cast<unsigned>(pSPart->nPhase) >= _countof(dwFireBlastAlpha))
+            return FALSE;
         pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwFireBlastAlpha[pSPart->nPhase]);
     }
     else
@@ -3520,6 +3523,9 @@ BOOL CParticle::ClayRingSingleSegment(SSingleParticle *pSPart)
         return FALSE;
     if (pSPart->nPhase == 0)
     {
+        // The source can expire before this particle's own lifetime ends.
+        if (static_cast<unsigned>(locSources[0].nLifeTime) >= _countof(dwClayAlpha))
+            return FALSE;
         pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwClayAlpha[locSources[0].nLifeTime]);
         pSPart->coord = locSources[pSPart->nSpecial].respectCP;
         pSPart->coord.w = 0.2f;
@@ -4047,7 +4053,7 @@ BOOL CParticle::CastingFailedSingleSegment(SSingleParticle *pSPart)
 {
     if (--(pSPart->nLifeTime) == 0)
         return FALSE;
-    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwCastFailedAlpha[11 - pSPart->nLifeTime]);
+    pSPart->dwColor = RGBA_MAKE(0xFF, 0xFF, 0xFF, dwCastFailedAlpha[Max(0, 11 - pSPart->nLifeTime)]);
     pSPart->nPhase++;
     float fpW = pSPart->coord.w;
     pSPart->coord = carrierCP + pSPart->reserved;
@@ -4427,6 +4433,8 @@ static DWORD dwZEAlpha[] = { 0,    0x50, 0xb0, 0xff, 0xff, 0xff, 0xff, 0xff,
                              0xff,0xff,0xff,0xff,   0xff,0xff,0x80,0 };*/
 BOOL CParticle::ZoneExitSingleSegment(SSingleParticle *pSPart)
 {
+    if (static_cast<unsigned>(pSPart->nLifeTime) >= _countof(dwZEAlpha))
+        return FALSE;
     pSPart->dwColor &= RGBA_MAKE(0xFF, 0xFF, 0xFF, 0);
     pSPart->dwColor |= RGBA_MAKE(0, 0, 0, dwZEAlpha[pSPart->nLifeTime]);
     if (--pSPart->nLifeTime < 0)
@@ -4488,7 +4496,8 @@ BOOL CParticle::PathSingleSegment(SSingleParticle *pSPart)
 {
     if (pSPart->nLifeTime == -10)
     {
-        pSPart->nLifeTime = 7 + 8 * pSPart->nPhaseLifeTime / particles.GetCount();
+        // Creation attempts can outnumber particles when duplicate positions are rejected.
+        pSPart->nLifeTime = static_cast<int>(Min<INT_PTR>(16, 7 + 8 * pSPart->nPhaseLifeTime / particles.GetCount()));
     }
     if (--pSPart->nLifeTime < 0)
         return FALSE;
@@ -5660,6 +5669,8 @@ int CParticle::Segment()
         {
             particles.RemoveAt(posOld);
             ((CParticleManager *)lpManager)->deleteParticle(pPart);
+            // Deferred deletion keeps the last interpolation frame, not another update.
+            continue;
         }
         pPart->prevcoord = pPart->coord;
         pPart->dwPrevColor = pPart->dwColor;

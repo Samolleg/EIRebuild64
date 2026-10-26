@@ -919,8 +919,15 @@ void Prepare(HMODULE addonModule)
         LOAD_DBG(SymFromAddr); LOAD_DBG(SymGetLineFromAddr64);
         LOAD_DBG(SymFunctionTableAccess64); LOAD_DBG(UnDecorateSymbolName);
 #undef LOAD_DBG
+#if !defined(__SANITIZE_ADDRESS__)
         __try { PrepareSymbols(); }
         __except (EXCEPTION_EXECUTE_HANDLER) { details.exactPdb = false; }
+#else
+        // ASan owns the process DbgHelp session and its symbol options. A second
+        // SymInitialize(GetCurrentProcess()) fails and disrupts its symbolizer.
+        // Retain minidumps for fatal SEH, without a competing symbol session.
+        details.exactPdb = false;
+#endif
     }
 }
 
