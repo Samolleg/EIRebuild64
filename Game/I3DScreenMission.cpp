@@ -2017,8 +2017,12 @@ void CI3DObjectWeapons::AddWeapon(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
     OwnedRender::E3HudIcon(OwnedRender::E3HudLane::weapon,pszTextureName,canvasSize,
         iconSize,iconSize,hdInterface?iconSize:42,iconSize,x,y,hdInterface);
 
-    CI3DFigure *pFig;
-    pFig = AddFigure(pszFigureName);
+    CI3DFigure *pFig = AddFigure(pszFigureName);
+    if (!pFig) {
+        ReportError("Cannot create HUD weapon figure: %s", pszFigureName);
+        throw std::runtime_error("HUD weapon figure missing");
+    }
+
     if (pFig)
     {
         if (hdInterface) pFig->SetTexture(textures[0]);
@@ -2116,11 +2120,11 @@ void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
                     szOut.Format("damage_%d", i);
                     theWorld.GetTextManager()->GetSystemString(szOut, szDesc);
                 }
-                szOut.Format("%s %d-%d %s\n", szStrings[DAMAGE], (int)pWeapon->GetDamageMin(),
-                             (int)pWeapon->GetDamageMax(), szDesc);
+                szOut.Format("%s %d-%d %s\n", static_cast<LPCSTR>(szStrings[DAMAGE]), (int)pWeapon->GetDamageMin(),
+                             (int)pWeapon->GetDamageMax(), static_cast<LPCSTR>(szDesc));
                 szName += szOut;
-                szOut.Format("%s %d  %s %d\n", szStrings[ACTIONPTS], pWeapon->GetActionPoints(),
-                             szStrings[RANGE], (int)pWeapon->GetRange());
+                szOut.Format("%s %d  %s %d\n", static_cast<LPCSTR>(szStrings[ACTIONPTS]), pWeapon->GetActionPoints(),
+                             static_cast<LPCSTR>(szStrings[RANGE]), (int)pWeapon->GetRange());
                 szName += szOut;
 
                 CSpell *pSpell = 0;
@@ -2132,7 +2136,7 @@ void CI3DObjectWeapons::SetUnit(CUnit *pNewUnit)
                     if (theWorld.GetTextManager()->GetText(CString("spell ") +
                                                            pSpell->GetPrototype()->szCodeName))
                         theWorld.GetTextManager()->GetLine(szDesc);
-                    szOut.Format("%s %s\n", szStrings[SPELL], szDesc);
+                    szOut.Format("%s %s\n", static_cast<LPCSTR>(szStrings[SPELL]), static_cast<LPCSTR>(szDesc));
                     szName += szOut;
                 }
 
@@ -2347,8 +2351,12 @@ void CI3DObjectItems::AddItem(LPCTSTR pszFigureName, LPCTSTR pszTextureName)
     OwnedRender::E3HudIcon(OwnedRender::E3HudLane::item,pszTextureName,canvasSize,
         iconSize,iconSize,iconSize,iconSize,x,y,hdInterface);
 
-    CI3DFigure *pFig;
-    pFig = AddFigure(pszFigureName);
+    CI3DFigure *pFig = AddFigure(pszFigureName);
+    if (!pFig) {
+        ReportError("Cannot create HUD item figure: %s", pszFigureName);
+        throw std::runtime_error("HUD item figure missing");
+    }
+
     if (hdInterface && pFig) pFig->SetTexture(textures[0]);
     if (pFig)
         pFig->SetOrientation(CQuaternion(CPlot3D(1, 0, 0), FP_PI));
@@ -2448,42 +2456,42 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
     if (pSpell && pQuick->GetQuickItemType() == IDB_WAND)
     {
         szName += " \n";
-        szOut.Format("%s %d/%d (%d)\n", szStrings[MANA], (int)pSpell->GetManaCost(),
+        szOut.Format("%s %d/%d (%d)\n", static_cast<LPCSTR>(szStrings[MANA]), (int)pSpell->GetManaCost(),
                      (int)pQuick->GetMaxMP(), (int)pQuick->GetMP());
         szName += szOut;
 
         if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
-            szOut.Format("%s %s  ", szStrings[EFFECT], szStrings[FIXEDEFF]);
+            szOut.Format("%s %s  ", static_cast<LPCSTR>(szStrings[EFFECT]), static_cast<LPCSTR>(szStrings[FIXEDEFF]));
         else
             if (improveInfoWindows)
-                szOut.Format("%s %.1f  ", szStrings[EFFECT], pSpell->GetPower());
+                szOut.Format("%s %.1f  ", static_cast<LPCSTR>(szStrings[EFFECT]), pSpell->GetPower());
             else
-                szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
+                szOut.Format("%s %d  ", static_cast<LPCSTR>(szStrings[EFFECT]), (int)pSpell->GetPower());
         szName += szOut;
 
         if (pSpell->GetSpeed() < 1.f)
-            szOut.Format("%s %s \n", szStrings[SPEED], szStrings[INSTANT]);
+            szOut.Format("%s %s \n", static_cast<LPCSTR>(szStrings[SPEED]), static_cast<LPCSTR>(szStrings[INSTANT]));
         else
-            szOut.Format("%s %d \n", szStrings[SPEED], (int)pSpell->GetSpeed());
+            szOut.Format("%s %d \n", static_cast<LPCSTR>(szStrings[SPEED]), (int)pSpell->GetSpeed());
         szName += szOut;
 
-        szOut.Format("%s %d%s  ", szStrings[RANGE], (int)pSpell->GetRange(), szStrings[METERS]);
+        szOut.Format("%s %d%s  ", static_cast<LPCSTR>(szStrings[RANGE]), (int)pSpell->GetRange(), static_cast<LPCSTR>(szStrings[METERS]));
         szName += szOut;
 
         if (pSpell->IsOnUnit())
-            szOut.Format("%s %s \n", szStrings[AREA], szStrings[AREAUNIT]);
+            szOut.Format("%s %s \n", static_cast<LPCSTR>(szStrings[AREA]), static_cast<LPCSTR>(szStrings[AREAUNIT]));
         else
-            szOut.Format("%s %.1f%s \n", szStrings[AREA], pSpell->GetArea(), szStrings[METERS]);
+            szOut.Format("%s %.1f%s \n", static_cast<LPCSTR>(szStrings[AREA]), pSpell->GetArea(), static_cast<LPCSTR>(szStrings[METERS]));
         szName += szOut;
 
         if (pSpell->GetDuration() < 2)
-            szOut.Format("%s %s  ", szStrings[DURATION], szStrings[INSTANT]);
+            szOut.Format("%s %s  ", static_cast<LPCSTR>(szStrings[DURATION]), static_cast<LPCSTR>(szStrings[INSTANT]));
         else
-            szOut.Format("%s %.1f%s  ", szStrings[DURATION], pSpell->GetDuration() / 15.f,
-                         szStrings[SECONDS]);
+            szOut.Format("%s %.1f%s  ", static_cast<LPCSTR>(szStrings[DURATION]), pSpell->GetDuration() / 15.f,
+                         static_cast<LPCSTR>(szStrings[SECONDS]));
         szName += szOut;
 
-        szOut.Format("%s %d \n", szStrings[TARGETS], pSpell->GetNumTargets());
+        szOut.Format("%s %d \n", static_cast<LPCSTR>(szStrings[TARGETS]), pSpell->GetNumTargets());
         szName += szOut;
     }
 
@@ -2491,19 +2499,19 @@ void CI3DObjectItems::FormToolTip(int nQItem, CString &szName)
     {
         szName += " \n";
         if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
-            szOut.Format("%s %s\n", szStrings[EFFECT], szStrings[FIXEDEFF]);
+            szOut.Format("%s %s\n", static_cast<LPCSTR>(szStrings[EFFECT]), static_cast<LPCSTR>(szStrings[FIXEDEFF]));
         else
             if (improveInfoWindows)
-                szOut.Format("%s %.1f\n", szStrings[EFFECT], pSpell->GetPower());
+                szOut.Format("%s %.1f\n", static_cast<LPCSTR>(szStrings[EFFECT]), pSpell->GetPower());
             else
-                szOut.Format("%s %d\n", szStrings[EFFECT], (int)pSpell->GetPower());
+                szOut.Format("%s %d\n", static_cast<LPCSTR>(szStrings[EFFECT]), (int)pSpell->GetPower());
         szName += szOut;
 
         if (pSpell->GetDuration() < 2)
-            szOut.Format("%s %s\n", szStrings[DURATION], szStrings[INSTANT]);
+            szOut.Format("%s %s\n", static_cast<LPCSTR>(szStrings[DURATION]), static_cast<LPCSTR>(szStrings[INSTANT]));
         else
-            szOut.Format("%s %.1f%s\n", szStrings[DURATION], pSpell->GetDuration() / 15.f,
-                         szStrings[SECONDS]);
+            szOut.Format("%s %.1f%s\n", static_cast<LPCSTR>(szStrings[DURATION]), pSpell->GetDuration() / 15.f,
+                         static_cast<LPCSTR>(szStrings[SECONDS]));
         szName += szOut;
     }
 }
@@ -2923,7 +2931,7 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
                             pUnit->GetID(), j, (LPCSTR)pSpell->GetPrototype()->szCodeName,
                             double(tooltip.mana), double(tooltip.effect), double(tooltip.castSeconds));
                     }
-                    szOut.Format("%s %d  ", szStrings[MANA], (int)tooltip.mana);
+                    szOut.Format("%s %d  ", static_cast<LPCSTR>(szStrings[MANA]), (int)tooltip.mana);
                     szName += szOut;
                     szOut = "Unknown";
                     szDesc.Format("school_%d", mod ? pSpell->GetMagicSubtype() : pSpell->GetMagicSchool());
@@ -2934,44 +2942,44 @@ void CI3DObjectSpells::SetUnit(CUnit *pNewUnit)
 
                     if (tooltipMod) {
                         if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
-                            szOut.Format("%s %.1f", szStrings[EFFECT], tooltip.effect);
+                            szOut.Format("%s %.1f", static_cast<LPCSTR>(szStrings[EFFECT]), tooltip.effect);
                         else
-                            szOut.Format("%s %.0f  ", szStrings[EFFECT], tooltip.effect);
+                            szOut.Format("%s %.0f  ", static_cast<LPCSTR>(szStrings[EFFECT]), tooltip.effect);
                     } else if (!pSpell->GetPrototype()->bRuneAllowed[SDBAR_EFFECT])
-                        szOut.Format("%s %s  ", szStrings[EFFECT], szStrings[FIXEDEFF]);
+                        szOut.Format("%s %s  ", static_cast<LPCSTR>(szStrings[EFFECT]), static_cast<LPCSTR>(szStrings[FIXEDEFF]));
                     else if (improveInfoWindows)
-                        szOut.Format("%s %.1f  ", szStrings[EFFECT], pSpell->GetPower());
+                        szOut.Format("%s %.1f  ", static_cast<LPCSTR>(szStrings[EFFECT]), pSpell->GetPower());
                     else
-                        szOut.Format("%s %d  ", szStrings[EFFECT], (int)pSpell->GetPower());
+                        szOut.Format("%s %d  ", static_cast<LPCSTR>(szStrings[EFFECT]), (int)pSpell->GetPower());
                     szName += szOut;
 
                     if (mod ? pSpell->GetActionPoints() < 1 : pSpell->GetSpeed() < 1.f)
-                        szOut.Format("%s %s \n", szStrings[SPEED], szStrings[INSTANT]);
+                        szOut.Format("%s %s \n", static_cast<LPCSTR>(szStrings[SPEED]), static_cast<LPCSTR>(szStrings[INSTANT]));
                     else if (mod)
-                        szOut.Format("%s %.1f%s\n", szStrings[SPEED], tooltip.castSeconds, szStrings[SECONDS]);
+                        szOut.Format("%s %.1f%s\n", static_cast<LPCSTR>(szStrings[SPEED]), tooltip.castSeconds, static_cast<LPCSTR>(szStrings[SECONDS]));
                     else
-                        szOut.Format("%s %d \n", szStrings[SPEED], (int)pSpell->GetSpeed());
+                        szOut.Format("%s %d \n", static_cast<LPCSTR>(szStrings[SPEED]), (int)pSpell->GetSpeed());
                     szName += szOut;
 
-                    szOut.Format("%s %d%s  ", szStrings[RANGE], (int)pSpell->GetRange(),
-                                 szStrings[METERS]);
+                    szOut.Format("%s %d%s  ", static_cast<LPCSTR>(szStrings[RANGE]), (int)pSpell->GetRange(),
+                                 static_cast<LPCSTR>(szStrings[METERS]));
                     szName += szOut;
 
                     if (pSpell->IsOnUnit())
-                        szOut.Format("%s %s \n", szStrings[AREA], szStrings[AREAUNIT]);
+                        szOut.Format("%s %s \n", static_cast<LPCSTR>(szStrings[AREA]), static_cast<LPCSTR>(szStrings[AREAUNIT]));
                     else
-                        szOut.Format("%s %.1f%s \n", szStrings[AREA], mod ? pSpell->GetRadius() : pSpell->GetArea(),
-                                     szStrings[METERS]);
+                        szOut.Format("%s %.1f%s \n", static_cast<LPCSTR>(szStrings[AREA]), mod ? pSpell->GetRadius() : pSpell->GetArea(),
+                                     static_cast<LPCSTR>(szStrings[METERS]));
                     szName += szOut;
 
                     if (durationTicks < 2)
-                        szOut.Format("%s %s  ", szStrings[DURATION], szStrings[INSTANT]);
+                        szOut.Format("%s %s  ", static_cast<LPCSTR>(szStrings[DURATION]), static_cast<LPCSTR>(szStrings[INSTANT]));
                     else
-                        szOut.Format("%s %.1f%s  ", szStrings[DURATION],
-                                     durationTicks / 15.f, szStrings[SECONDS]);
+                        szOut.Format("%s %.1f%s  ", static_cast<LPCSTR>(szStrings[DURATION]),
+                                     durationTicks / 15.f, static_cast<LPCSTR>(szStrings[SECONDS]));
                     szName += szOut;
 
-                    szOut.Format("%s %d \n", szStrings[TARGETS], pSpell->GetNumTargets());
+                    szOut.Format("%s %d \n", static_cast<LPCSTR>(szStrings[TARGETS]), pSpell->GetNumTargets());
                     szName += szOut;
                 }
                 GetArea(j)->SetToolTip(szName, 1, j < 8 ? KA_SPELL1 + j : KA_UNKNOWN);
@@ -3211,8 +3219,12 @@ void CI3DObjectSkills::AddSkill(LPCTSTR pszFigureName, LPCTSTR pszTextureName, i
 
     OwnedRender::E3HudIcon(OwnedRender::E3HudLane::skill,pszTextureName,256,64,64,64,64,x,y);
 
-    CI3DFigure *pFig;
-    pFig = AddFigure(pszFigureName);
+    CI3DFigure *pFig = AddFigure(pszFigureName);
+    if (!pFig) {
+        ReportError("Cannot create HUD skill figure: %s", pszFigureName);
+        throw std::runtime_error("HUD skill figure missing");
+    }
+
     pFig->SetUShift(x / 256.f);
     pFig->SetVShift((64 + y) / 256.f);
     pFig->SetOrientation(CQuaternion(CPlot3D(0, 0, 1), FP_PI));
@@ -3329,9 +3341,9 @@ void CI3DObjectSkills::SetUnit(CUnit *pNewUnit, bool bIsSomeone)
             if (pTxtMng->GetText(CString("perk ") + szSkill))
                 pTxtMng->GetLine(szName);
             if (ModRuntime::Current())
-                szSkill.Format("%s %.0f\n", szStrings[0], ModHudAssignment::ManualSkill(*pStats, i));
+                szSkill.Format("%s %.0f\n", static_cast<LPCSTR>(szStrings[0]), ModHudAssignment::ManualSkill(*pStats, i));
             else
-                szSkill.Format("%s %d\n", szStrings[0], pStats->cManualSkills[i]);
+                szSkill.Format("%s %d\n", static_cast<LPCSTR>(szStrings[0]), pStats->cManualSkills[i]);
             if (pTxtMng->GetText("tip 10511"))
                 pTxtMng->GetUntilNextCommand(szDesc);
             szName = szName + "\n" + szSkill + szDesc;
@@ -3692,9 +3704,9 @@ void CI3DObjectFaces::AddFaces(bool bIsMainHero)
         else if (comp.grace > 0.8f)
             szGrace = "fa";
         // szFigureName.Format( "infa%s%dface", pUnit->GetMaskName(), nProt );
-        szFigureName.Format("infa%s%s%dface", pUnit->GetMaskName(), szGrace,
+        szFigureName.Format("infa%s%s%dface", pUnit->GetMaskName(), static_cast<LPCSTR>(szGrace),
                             pUnit->GetPrototype()->dwHair + 1);
-        szTextureName.Format("face%s%02d", szSex, nProt);
+        szTextureName.Format("face%s%02d", static_cast<LPCSTR>(szSex), nProt);
 
         //		}
         //		else
@@ -5277,20 +5289,20 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         auto get=[&](const char*key){CString result;text->GetSystemString(key,result);return result;};
         auto raw=[&](const char*key){CString result;if(text->GetText(key))text->GetLine(result);return result;};
         bool alien=true;for(int i=0;i<pScreen->GetNumUnits();++i)if(pScreen->GetUnit(i)==pUnit){alien=false;break;}
-        value.Format("%s %d/%d",szStrings[HEALTH],(std::max)(0,pUnit->GetHP()),pUnit->GetMaxHP());draw(value);
-        value.Format("%s %d/%d",szStrings[MANA],(std::max)(0,pUnit->GetMP()),pUnit->GetMaxMP());draw(value);
+        value.Format("%s %d/%d",static_cast<LPCSTR>(szStrings[HEALTH]),(std::max)(0,pUnit->GetHP()),pUnit->GetMaxHP());draw(value);
+        value.Format("%s %d/%d",static_cast<LPCSTR>(szStrings[MANA]),(std::max)(0,pUnit->GetMP()),pUnit->GetMaxMP());draw(value);
         if(!pI3D->IsAltDown()) {
             if(stats->cLocomotion>1&&pUnit->GetShowPose()>1){value.Format("move_%d",int(pUnit->GetShowPose())-1);text->GetSystemString(value,label);}
-            value.Format("%s %.1f %s",szStrings[SPEED],(alien?pUnit->GetShowSpeed(UP_RUN):pUnit->GetShowSpeed())*FP_CL_MP_SIZE*7.5f,label);draw(value);
+            value.Format("%s %.1f %s",static_cast<LPCSTR>(szStrings[SPEED]),(alien?pUnit->GetShowSpeed(UP_RUN):pUnit->GetShowSpeed())*FP_CL_MP_SIZE*7.5f,static_cast<LPCSTR>(label));draw(value);
             float night=theWorld.GetNightPowerSlow();
             const bool finalBattle=ModSafetyLookup::FinalBattle(theWorldServer.GetPlayerManager()!=nullptr,
                 [](){return theWorldServer.GetPlayer(0);},
                 [](CPlayer* player){return player->party.szCurrentZone.CompareNoCase("gz20g")==0;});
             night=ModSafetyLookup::NightPower(night,theWorld.IsCaveZone(),finalBattle);
-            value.Format("%s %d%s(%d%%)",szStrings[SIGHT],MINT(stats->GetSightRange(night)),szStrings[METERS],int((stats->cSenses[RPGS_INFRA]*night*.01f+1-night)*100));draw(value);
+            value.Format("%s %d%s(%d%%)",static_cast<LPCSTR>(szStrings[SIGHT]),MINT(stats->GetSightRange(night)),static_cast<LPCSTR>(szStrings[METERS]),int((stats->cSenses[RPGS_INFRA]*night*.01f+1-night)*100));draw(value);
             SAttackParams params;data.GetAttackParams(params);
-            value.Format("%s %d",szStrings[ATTACK],params.nAttack);draw(value);
-            value.Format("%s %d",szStrings[DEFENSE],params.nDefense);draw(value);
+            value.Format("%s %d",static_cast<LPCSTR>(szStrings[ATTACK]),params.nAttack);draw(value);
+            value.Format("%s %d",static_cast<LPCSTR>(szStrings[DEFENSE]),params.nDefense);draw(value);
             int selectionCount=0,selectionIndex=-1;auto*selected=pScreen->GetSelection(selectionCount,selectionIndex);
             auto*comparison=selected?theWorldServer.GetUnit(selected->GetID()):nullptr;
             if(serverUnit&&comparison&&serverUnit!=comparison){
@@ -5307,11 +5319,11 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
                 float lo=mod->PanelDamage(data,minimum,slot,left),hi=mod->PanelDamage(data,maximum,slot,left);
                 float chance=mod->PanelCritical(data,slot,left,false),critical=mod->PanelCritical(data,slot,left,true)*.01f;
                 if(fabs(lo-hi)<.0001f){
-                    if(chance>0)value.Format("%s %s%.0f[%.0f%%]%.0f",szStrings[DAMAGE],label,lo,chance,lo+lo*critical);
-                    else value.Format("%s %s%.0f",szStrings[DAMAGE],label,lo);
+                    if(chance>0)value.Format("%s %s%.0f[%.0f%%]%.0f",static_cast<LPCSTR>(szStrings[DAMAGE]),static_cast<LPCSTR>(label),lo,chance,lo+lo*critical);
+                    else value.Format("%s %s%.0f",static_cast<LPCSTR>(szStrings[DAMAGE]),static_cast<LPCSTR>(label),lo);
                 }else {
-                    if(chance>0)value.Format("%s %s%.0f-%.0f[%.0f%%]%.0f-%.0f",szStrings[DAMAGE],label,lo,hi,chance,lo+lo*critical,hi+hi*critical);
-                    else value.Format("%s %s%.0f-%.0f",szStrings[DAMAGE],label,lo,hi);
+                    if(chance>0)value.Format("%s %s%.0f-%.0f[%.0f%%]%.0f-%.0f",static_cast<LPCSTR>(szStrings[DAMAGE]),static_cast<LPCSTR>(label),lo,hi,chance,lo+lo*critical,hi+hi*critical);
+                    else value.Format("%s %s%.0f-%.0f",static_cast<LPCSTR>(szStrings[DAMAGE]),static_cast<LPCSTR>(label),lo,hi);
                 }draw(value);
             };
             if(pUnit->GetTypeID()==MOTID_HUMAN){
@@ -5327,29 +5339,29 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
             }
             // Read effective authoritative actions, not a client byte or UI-only recalculation.
             float actions=server?server->GetRPGStats()->action.fpEffectiveValue:float(stats->cAction);
-            value.Format("%s %.1f(%d%%)",szStrings[ACTIONS],actions,int(actions*100/15));draw(value);
+            value.Format("%s %.1f(%d%%)",static_cast<LPCSTR>(szStrings[ACTIONS]),actions,int(actions*100/15));draw(value);
             float absorbs[RPG_NUM_ATTACK_TYPES]={};
             if(IsIDofPersonage(pUnit->GetID()))stats->GetAbsorbtions(&pUnit->GetUserCommonStats(),absorbs,true);
             else for(int i=0;i<RPG_NUM_ATTACK_TYPES;++i)absorbs[i]=pUnit->GetUserCommonStats().wAbsorbtions[i];
-            for(int group=0;group<2;++group){CString line;for(int i=0;i<3;++i){int type=group*3+i;CString key;key.Format("dmg_%d",type);value.Format("%s%d",get(key),int(absorbs[type]));if(i)line+="|";line+=value;}value.Format("%s %s",szStrings[ABSORPTION],line);draw(value);}
+            for(int group=0;group<2;++group){CString line;for(int i=0;i<3;++i){int type=group*3+i;CString key;key.Format("dmg_%d",type);value.Format("%s%d",static_cast<LPCSTR>(get(key)),int(absorbs[type]));if(i)line+="|";line+=value;}value.Format("%s %s",static_cast<LPCSTR>(szStrings[ABSORPTION]),static_cast<LPCSTR>(line));draw(value);}
             if(mod->AdvancedUI("useLS_ShowEnemyConsider")&&!pUnit->GetOwner())alien=true;
             if(alien&&pScreen->GetNumUnits()>0){int delta=(std::max)(-25,(std::min)(25,pUnit->GetLevel()-pScreen->GetUnit(0)->GetLevel()));
                 value.Format(delta>=0?"consider_more%d":"consider_less%d",abs(delta));text->GetSystemString(value,label);
-                value.Format("%s %s",szStrings[CONSIDER],label);
+                value.Format("%s %s",static_cast<LPCSTR>(szStrings[CONSIDER]),static_cast<LPCSTR>(label));
                 draw(value,RGB((std::min)(255,delta>0?225+delta*6:0),(std::min)(255,(delta<0?185:215)-delta*6),0));
             }
 
         }else {
-            value.Format("%s: %d",raw("perk Strength"),stats->cStrength);draw(value);
-            value.Format("%s: %d",raw("perk Dexterity"),stats->cDexterity);draw(value);
-            value.Format("%s: %d",raw("perk Intelligence"),stats->cIntelligence);draw(value);
+            value.Format("%s: %d",static_cast<LPCSTR>(raw("perk Strength")),stats->cStrength);draw(value);
+            value.Format("%s: %d",static_cast<LPCSTR>(raw("perk Dexterity")),stats->cDexterity);draw(value);
+            value.Format("%s: %d",static_cast<LPCSTR>(raw("perk Intelligence")),stats->cIntelligence);draw(value);
             float jewelry=1,extra=0;
             for(int i=0;i<4;++i)if(auto*q=data.GetQItem(i))jewelry+=mod->InfoProperty("GetJewelryPropsInside",q->GetShapeEntry()->szName,12)*.01f;
             if(server){const auto&effects=data.GetSpellEffects();for(int i=0;i<effects.GetSize();++i){const auto&e=effects[i];if(e.nSpellID==SPELL_ID_STRENGTHEN)extra+=e.fpPower;if(e.nSpellID==SPELL_ID_WEAKEN)extra-=e.fpPower;}}
             int capacity=int(stats->cStrength*12.f*(1+stats->GetPerkModifier(1)*.01f)*jewelry*(1+mod->InfoComplex(data,8)*.01f)+extra);
             int weight=int(data.GetItemsWeight());
-            if(pUnit->GetTypeID()==MOTID_HUMAN){value.Format("%s: %d/%d(%d%%)",raw("perk Encumbrance"),weight,capacity,capacity>0?int((weight+1)*100.f/capacity):0);draw(value);}
-            value.Format("%s: %d",raw("perk Experience"),alien?int(pUnit->GetPrototype()->fExp):int(stats->dwExperience));draw(value);
+            if(pUnit->GetTypeID()==MOTID_HUMAN){value.Format("%s: %d/%d(%d%%)",static_cast<LPCSTR>(raw("perk Encumbrance")),weight,capacity,capacity>0?int((weight+1)*100.f/capacity):0);draw(value);}
+            value.Format("%s: %d",static_cast<LPCSTR>(raw("perk Experience")),alien?int(pUnit->GetPrototype()->fExp):int(stats->dwExperience));draw(value);
             float hearing=1.f,sight=1.f;
             if(server){
                 hearing=server->GetFSSoundDetect();sight=server->GetVisionDetect();
@@ -5365,13 +5377,13 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
                     }
                 }
             }
-            value.Format("%s %.0f%%",raw("string infoitem_51"),hearing*100);draw(value);
-            value.Format("%s %.0f%%",raw("string infoitem_53"),sight*100);draw(value);
+            value.Format("%s %.0f%%",static_cast<LPCSTR>(raw("string infoitem_51")),hearing*100);draw(value);
+            value.Format("%s %.0f%%",static_cast<LPCSTR>(raw("string infoitem_53")),sight*100);draw(value);
             int count=0;if(auto*player=theWorldServer.GetPlayer(0))count=player->party.allWagonItems.GetSize()+player->items.GetCount();
-            value.Format("%s: %d",raw("camphelp 22"),count);draw(value);
+            value.Format("%s: %d",static_cast<LPCSTR>(raw("camphelp 22")),count);draw(value);
             float block=0,parry=0;mod->PanelDefense(data,weight,capacity,block,parry);
-            if(block>0){value.Format("%s %.0f%%",raw("string infoitem_45"),block);draw(value);}
-            value.Format("%s %.0f%%",raw("string infoitem_47"),parry);draw(value);
+            if(block>0){value.Format("%s %.0f%%",static_cast<LPCSTR>(raw("string infoitem_45")),block);draw(value);}
+            value.Format("%s %.0f%%",static_cast<LPCSTR>(raw("string infoitem_47")),parry);draw(value);
         }
         return;
     }
@@ -5389,7 +5401,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
     COLORREF color = INFO_COLOR;
 
     // HEALTH
-    szOut.Format("%s %d/%d", szStrings[HEALTH], pUnit->GetHP() > 0 ? pUnit->GetHP() : 0,
+    szOut.Format("%s %d/%d", static_cast<LPCSTR>(szStrings[HEALTH]), pUnit->GetHP() > 0 ? pUnit->GetHP() : 0,
                  pUnit->GetMaxHP());
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
@@ -5405,7 +5417,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
     // MANA
     // if ( !bAlien )
     //{
-    szOut.Format("%s %d/%d", szStrings[MANA], pUnit->GetMP() > 0 ? pUnit->GetMP() : 0,
+    szOut.Format("%s %d/%d", static_cast<LPCSTR>(szStrings[MANA]), pUnit->GetMP() > 0 ? pUnit->GetMP() : 0,
                  pUnit->GetMaxMP());
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
@@ -5424,7 +5436,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         fSp = pUnit->GetShowSpeed(UP_RUN);
     else
         fSp = pUnit->GetShowSpeed();
-    szOut.Format("%s %.1f %s", szStrings[SPEED], fSp * FP_CL_MP_SIZE * 7.5f, szTmp);
+    szOut.Format("%s %.1f %s", static_cast<LPCSTR>(szStrings[SPEED]), fSp * FP_CL_MP_SIZE * 7.5f, static_cast<LPCSTR>(szTmp));
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
 
@@ -5436,7 +5448,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         nightPower = 0.0f;
     int nSight = MINT(pStats->GetSightRange(nightPower));
     //
-    szOut.Format("%s %d%s", szStrings[SIGHT], nSight, szStrings[METERS]);
+    szOut.Format("%s %d%s", static_cast<LPCSTR>(szStrings[SIGHT]), nSight, static_cast<LPCSTR>(szStrings[METERS]));
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
 
@@ -5444,10 +5456,10 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
     pUnit->GetAttackParams(attackParams);
 
     // ATTACK & DEFENSE
-    szOut.Format("%s %d", szStrings[ATTACK], attackParams.nAttack);
+    szOut.Format("%s %d", static_cast<LPCSTR>(szStrings[ATTACK]), attackParams.nAttack);
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
-    szOut.Format("%s %d", szStrings[DEFENSE], attackParams.nDefense);
+    szOut.Format("%s %d", static_cast<LPCSTR>(szStrings[DEFENSE]), attackParams.nDefense);
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
 
@@ -5457,13 +5469,13 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         szOut.Format("dmg_%d", attackParams.rpgAttackType);
         pTxtMng->GetSystemString(szOut, szTmp);
     }
-    szOut.Format("%s %d-%d %s", szStrings[DAMAGE], static_cast<int>(attackParams.fDamageMin),
-                 static_cast<int>(attackParams.fDamageMax), szTmp);
+    szOut.Format("%s %d-%d %s", static_cast<LPCSTR>(szStrings[DAMAGE]), static_cast<int>(attackParams.fDamageMin),
+                 static_cast<int>(attackParams.fDamageMax), static_cast<LPCSTR>(szTmp));
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
 
     // ACTIONS
-    szOut.Format("%s %d", szStrings[ACTIONS], pStats->cAction);
+    szOut.Format("%s %d", static_cast<LPCSTR>(szStrings[ACTIONS]), pStats->cAction);
     pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
     rc += shift;
 
@@ -5519,7 +5531,7 @@ void CI3DObjectInfo::DrawStats(CUnit *pUnit)
         else
             szTmp.Format("consider_less%d", -nDiff);
         pTxtMng->GetSystemString(szTmp, szTmp);
-        szOut.Format("%s %s", szStrings[CONSIDER], szTmp);
+        szOut.Format("%s %s", static_cast<LPCSTR>(szStrings[CONSIDER]), static_cast<LPCSTR>(szTmp));
         pSurf->DrawText(szOut, rc, 0, color, DT_LEFT);
         rc += shift;
     }

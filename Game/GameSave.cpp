@@ -471,6 +471,10 @@ void CUnit::Store(SaveSchema::Writer &w) const
 }
 void CUnit::Load(SaveSchema::Reader &r)
 {
+    if (!GetPrototype()) {
+        ReportError("Save64: unit %d has invalid prototype %u", GetID(), GetSubtypeID());
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid, "saved unit prototype missing");
+    }
     CMapObject::Load(r);
     Field(r, lpUnitSpecific);
     lpOwner = r.GameReferenceAs<std::remove_pointer_t<decltype(lpOwner)>>();
@@ -770,6 +774,7 @@ void CItemLoot::Load(SaveSchema::Reader &r)
     Field(r, litType);
     Field(r, itInstructionType);
     Field(r, dwMaterialIndex);
+    ValidateInstruction();
 }
 void CItemLoot::DiscardSave()
 {

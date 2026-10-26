@@ -395,6 +395,7 @@ public:
     void OnIdle();
     // screen selection functions
     void PickMapObjects(const CRect &rcRect, std::list<CMapObject *> &mapobjects);
+    void InvalidatePicking();
     CMapObject *RayPickFirstMapObject(const CPoint &point);
     CMapObject *RoughlyPickFirstMapObject(const CPoint &point);
     CMapObject *PickFirstMapObject(const CPoint &point);

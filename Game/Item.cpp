@@ -1112,8 +1112,45 @@ CItemLoot::~CItemLoot()
 {
 }
 /////////////////////////////////////////////////////////////////////////////////////
+const SIDBItemGeneralShape *CItemLoot::ResolveInstructionShape(EIDBInstructionType type, DWORD index)
+{
+    const SIDBItemGeneralShape *shape = nullptr;
+    if (index <= INT_MAX) {
+        switch (type) {
+        case IDBINS_WEAPON: shape = theItemDatabase.weapons[static_cast<int>(index)]; break;
+        case IDBINS_ARMOR: shape = theItemDatabase.armors[static_cast<int>(index)]; break;
+        case IDBINS_QUICK: shape = theItemDatabase.quickItems[static_cast<int>(index)]; break;
+        }
+    }
+    if (!shape) {
+        ReportError("Invalid instruction: type=%u shape=%u", unsigned(type), index);
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid, "instruction type or shape missing");
+    }
+    return shape;
+}
+void CItemLoot::ValidateInstructionReference(EIDBInstructionType type, DWORD index)
+{
+    if (type != IDBINS_PROTOTYPE && type != IDBINS_RUNE) {
+        ResolveInstructionShape(type, index);
+        return;
+    }
+    const bool valid = index <= INT_MAX && (type == IDBINS_PROTOTYPE
+        ? theSpellDatabase.spells[static_cast<int>(index)] != nullptr
+        : theSpellDatabase.runes[static_cast<int>(index)] != nullptr);
+    if (!valid) {
+        ReportError("Invalid spell instruction: type=%u index=%u", unsigned(type), index);
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid, "spell instruction reference missing");
+    }
+}
 void CItemLoot::Setup(const SIDBItemGeneralShape *lpShape)
 {
+    const auto *loot = static_cast<const SIDBLootItemShape *>(lpShape);
+    // Generated instructions receive their final index after construction.
+    if (loot->litType == IDBLIT_INSTRUCTION &&
+        (loot->itInstructionType < IDBINS_WEAPON || loot->itInstructionType > IDBINS_RUNE)) {
+        ReportError("Invalid instruction type: %u", unsigned(loot->itInstructionType));
+        throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid, "instruction type invalid");
+    }
     CItem::Setup(lpShape);
 
     litType = ((const SIDBLootItemShape *)lpShape)->litType;
@@ -1154,6 +1191,7 @@ BOOL CItemLoot::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemLoot::GetI3DTextureName() const
 {
+    ValidateInstruction();
     CString szName;
     if (GetLootType() == IDBLIT_INSTRUCTION)
     {
@@ -1275,6 +1313,7 @@ CString CItemLoot::GetI3DTextureName() const
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemLoot::GetI3DFigureName() const
 {
+    ValidateInstruction();
     CString szName;
     if (GetLootType() == IDBLIT_INSTRUCTION)
     {
@@ -1392,6 +1431,7 @@ CString CItemLoot::GetI3DFigureName() const
 /////////////////////////////////////////////////////////////////////////////////////
 float CItemLoot::GetPrice() const
 {
+    ValidateInstruction();
     switch (litType)
     {
     case IDBLIT_TREASURE:
@@ -1557,4 +1597,5 @@ void CItemLoot::LoadLocal(CSave &file, CSpellManager &spells)
     int litTypeValue = 0; file.Read(litTypeValue); litType = static_cast<decltype(litType)>(litTypeValue);
     int itInstructionTypeValue = 0; file.Read(itInstructionTypeValue); itInstructionType = static_cast<decltype(itInstructionType)>(itInstructionTypeValue);
     file.Read(dwMaterialIndex);
+    ValidateInstruction();
 }

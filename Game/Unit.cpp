@@ -232,6 +232,10 @@ void CUnit::SetUnitSpecific(LPGAMEBASE lpNewUnitSpecific)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CUnit::FinalDataLoading()
 {
+    if (!GetPrototype()) {
+        ReportError("Cannot publish unit %d: invalid prototype %u", GetID(), GetSubtypeID());
+        throw std::runtime_error("unit prototype missing at publication");
+    }
     if (CheckFlag(OBJ_LOADED))
         return TRUE;
     BOOL bRv = CMapObject::FinalDataLoading();

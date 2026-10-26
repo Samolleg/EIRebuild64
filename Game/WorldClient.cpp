@@ -633,6 +633,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    InvalidatePicking();
     ItemApproachCatalog::Reset();
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
@@ -1198,6 +1199,7 @@ BOOL CWorldClient::HasObject(int nID)
 // удаляет все объекты с положительными идентификаторами
 void CWorldClient::RemoveAllObjects()
 {
+    InvalidatePicking();
     areaLights.RemoveAll();  // remove all lights from area map
     areaObjects.RemoveAll(); // remove all objects from area map
     bridgesManager.RemoveAllBridges();
@@ -1475,16 +1477,25 @@ CMapObject *CWorldClient::PickMapObject(const CPoint &point)
 
 /////////////////////////////////////////////////////////////////////////////////////
 // pick all map objects, which maps to this screen point, sort it and select first by respectCP.z
+void CWorldClient::InvalidatePicking()
+{
+    lstScreenObjects.clear();
+    vcPicked.clear();
+    vciLastPicked = vcPicked.end();
+    nPickedIndex = 0;
+}
 CMapObject *CWorldClient::RayPickFirstMapObject(const CPoint &point)
 {
     // first, remove all the old picked elements
     vcPicked.clear();
+    vciLastPicked = vcPicked.end();
     auto cameraPos = theCamera.GetCP();
     SRayPicker picker(point, cameraPos);
     CMapObjectManager *pMOManager = static_cast<CMapObjectManager *>(GetMapObjectManager());
     for (auto const &it : lstScreenObjects)
     {
         CMapObject *pMO = static_cast<CMapObject *>(pMOManager->Find(it.nID));
+        if (!pMO) continue;
         const CPlot3D pos = pMO->GetCP();
         const SBoundingVolume &bv = pMO->GetBoundingVolume();
         if (picker.CheckBV(pos, bv))
@@ -1515,6 +1526,7 @@ CMapObject *CWorldClient::RoughlyPickFirstMapObject(const CPoint &point)
 {
     // first, remove all the old picked elements
     vcPicked.clear();
+    vciLastPicked = vcPicked.end();
     //
     CMapObjectManager *pMOManager = static_cast<CMapObjectManager *>(GetMapObjectManager());
     std::back_insert_iterator<CObjectScreenRectVector> result(vcPicked);
@@ -1545,6 +1557,7 @@ CMapObject *CWorldClient::PickFirstMapObject(const CPoint &point)
     // Use visible figure bounds, including attached lever body parts.
     // first, remove all the old picked elements
     vcPicked.clear();
+    vciLastPicked = vcPicked.end();
     //
     CMapObjectManager *pMOManager = static_cast<CMapObjectManager *>(GetMapObjectManager());
     std::back_insert_iterator<CObjectScreenRectVector> result(vcPicked);
@@ -1580,6 +1593,7 @@ CMapObject *CWorldClient::CombinedPickFirstMapObject(const CPoint &point)
 // return next element from 'picked' array
 CMapObject *CWorldClient::PickNextMapObject()
 {
+    if (vcPicked.empty() || vciLastPicked == vcPicked.end()) return nullptr;
     ++vciLastPicked;
     while (vciLastPicked != vcPicked.end())
     {
@@ -2315,6 +2329,7 @@ BOOL CWorldClient::AddItems(CMemorySave &packet)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
+    InvalidatePicking();
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
     OwnedRender::E1RetireWorld(this);
@@ -2572,9 +2587,9 @@ void CWorldClient::PrecacheData(std::vector<SUnitStatistics> &statistics,
             CString szFileName;
             set.szTextures.RemoveAll();
             if (pPrototype)
-                szFileName.Format("%sskin_%.2d.mmp", pRace->szMaskName, pPrototype->dwSkinIndex);
+                szFileName.Format("%sskin_%.2d.mmp", static_cast<LPCSTR>(pRace->szMaskName), pPrototype->dwSkinIndex);
             else
-                szFileName.Format("%sskin_00.mmp", pRace->szMaskName);
+                szFileName.Format("%sskin_00.mmp", static_cast<LPCSTR>(pRace->szMaskName));
             set.szTextures.Add(szFileName);
             // 2nd armor layer (non-shaped armors)
             for (i = RPGAST_SHIRT; i <= RPGAST_GLOVES; ++i)
@@ -3448,10 +3463,10 @@ BOOL CWorldClient::Prepare3DScene()
 // Only remaining overlays: world object colour and shadows have no OpenEI draw.
 BOOL CWorldClient::Draw3DScene()
 {
+    InvalidatePicking();
     if (!pTerrain || !pTerrain->IsLoaded()) return FALSE;
     CRenderer *pRend = &theRenderer;
     CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    lstScreenObjects.clear();
     auto record = [this](CMapObject* object, bool selectable) {
         if (object->CheckFlag(OBJ_HIDDEN) || !object->CheckFlag(OBJ_VISIBLE)) return;
         OwnedRender::E1ReportOwnedVisual(object->GetID());

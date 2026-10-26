@@ -445,7 +445,7 @@ bool CModPackage::NpcArmorPercepts(CUnit&unit,CUnit*fallback,float&sight,float&h
 }
 bool CModPackage::RecalcUnitStats(SRPGUnitStats&stats,SRPGCommonStats&common,CUnit&unit){
  auto statsFailure=[&](const char* reason,const SRPGUnitStats& s,const SRPGCommonStats& c){char message[768];
- snprintf(message,sizeof(message),"%s\nUnit ID=%u prototype=%s\nHP=%g MP=%g bodyWeight=%g\nMove=%g sight=%g hearing=%g",reason,unsigned(unit.GetID()),unit.GetPrototype()?unit.GetPrototype()->szName:"<none>",double(c.ssHP.fpMax),double(c.ssMP.fpMax),double(s.hls[RPGHL_BODY].fpHPWeight),double(s.move.fpEffectiveValue),double(s.percepts[RPGS_SIGHT].fpEffectiveValue),double(s.percepts[RPGS_HEARING].fpEffectiveValue));return std::runtime_error(message);};
+ snprintf(message,sizeof(message),"%s\nUnit ID=%u prototype=%s\nHP=%g MP=%g bodyWeight=%g\nMove=%g sight=%g hearing=%g",reason,unsigned(unit.GetID()),static_cast<LPCSTR>(unit.GetPrototype()?unit.GetPrototype()->szName:"<none>"),double(c.ssHP.fpMax),double(c.ssMP.fpMax),double(s.hls[RPGHL_BODY].fpHPWeight),double(s.move.fpEffectiveValue),double(s.percepts[RPGS_SIGHT].fpEffectiveValue),double(s.percepts[RPGS_HEARING].fpEffectiveValue));return std::runtime_error(message);};
  CallbackFrame frame(state);StunEntry stun(state,unit.GetID());SyncRuntimeState();
  initialization->Invalidate(unit.GetID());const unsigned epoch=initialization->epoch;
  SRPGUnitStats staged=stats;SRPGCommonStats stagedCommon=common;frame.scope->unit=&unit;frame.scope->stagedStats=&staged;

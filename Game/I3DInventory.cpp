@@ -2355,6 +2355,7 @@ void CI3DObjectItemInfo::FormMaterialInfo()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectItemInfo::FormInstructionInfo()
 {
+    static_cast<CItemLoot *>(GetItem())->ValidateInstruction();
     if (auto *mod = ModRuntime::Current();mod && mod->AdvancedUI("useLS_FormTextInfo")) {
 
 	CItem* pItem = GetItem();
@@ -2566,24 +2567,23 @@ void CI3DObjectItemInfo::FormInstructionInfo()
     CTextManager *pTxtMng = theWorld.GetTextManager();
     CItemManager *pItmMng = theWorld.GetItemManager();
 
-    const SIDBItemGeneralShape *pShape;
     CItemLoot *pLoot = static_cast<CItemLoot *>(pItem);
+    const SIDBItemGeneralShape *pShape = pLoot->GetInstructionShape();
     assert((pLoot->GetInstructionType() >= IDBINS_WEAPON) &&
            (pLoot->GetInstructionType() <= IDBINS_QUICK));
     switch (pLoot->GetInstructionType())
     {
     case IDBINS_WEAPON:
         nType = INSTR_WEAPON;
-        pShape = pItmMng->GetWeaponShape(pLoot->GetInstructionItemIndex());
         break;
     case IDBINS_ARMOR:
         nType = INSTR_ARMOR;
-        pShape = pItmMng->GetArmorShape(pLoot->GetInstructionItemIndex());
         break;
     case IDBINS_QUICK:
         nType = INSTR_WAND;
-        pShape = pItmMng->GetQuickItemShape(pLoot->GetInstructionItemIndex());
         break;
+    default:
+        throw std::runtime_error("unexpected physical instruction type");
     }
 
     CString szName, szDesc, szType;
