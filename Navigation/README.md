@@ -14,9 +14,16 @@ head clearance. Their tops never become walkable surfaces. BASE, CROWN and
 EMPTY do not acquire new walkable geometry in this slice.
 
 The initial policy is standing-human ground, 0.1 m voxels, 0.05 m height,
-256-voxel tiles, 40 degree slope and 0.35 m climb. Individual collision radius
-and current class height get a conservatively quantized mesh on demand;
-this is not acceptance of the full eight-class/water/flight policy (NAV04).
+256-voxel tiles, 40 degree slope and 0.35 m climb. Collision radii round up to
+fixed classes: 0.1, 0.4, 0.7, 1, 1.5, 2, 4 m. AI classes 0..7 retain heights
+2, 0.4, 1, 1.6, 2.2, 1.7, 3, 6 m. At most 56 profiles exist; identical sizes
+share a mesh. Prepare warms the default human probe and every current unit's
+profile during NewZone and staged save loading, before publishing the world.
+Party deployment also warms final owned/equipped sizes before scripts/control.
+A missing class first used later (AddMob, summon or a new pose) loads/builds
+once per geometry generation. NAV ready logs class, radius, height, built/cache,
+ms and phase (prepare/party/late); cache hits in memory do not log again.
+This is not acceptance of the full eight-class/water/flight policy (NAV04).
 Material areas 1..15 use existing costs, while movement uses existing speed
 tables. Directional search costs are deferred to NAV04. No crowd controller,
 door topology, bridge decks or old search fallback is present.

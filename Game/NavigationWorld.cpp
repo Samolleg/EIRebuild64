@@ -2,12 +2,14 @@
 #include "NavigationWorld.h"
 #include "aiMap.h"
 #include "Unit.h"
+#include "WorldServer.h"
 #include "MapObjectServer.h"
 #include "GameJournal.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "RuntimePaths64.h"
 #include <bcrypt.h>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iterator>
@@ -17,6 +19,10 @@
 #pragma comment(lib,"bcrypt.lib")
 
 namespace {
+// A bounded registry shared by loading and queries. Never round a radius down.
+constexpr float RadiusClasses[]={.1f,.4f,.7f,1.f,1.5f,2.f,4.f};
+constexpr float ClassHeights[]={2.f,.4f,1.f,1.6f,2.2f,1.7f,3.f,6.f};
+constexpr float DefaultRadii[]={.4f,.4f,.4f,.4f,.4f,.7f,.7f,1.5f};
 Navigation::Point Point(const CPlot3D& p) { return {p.x,p.y,p.z}; }
 std::string ResourceName(const char* name) {
     auto result=std::filesystem::path(name?name:"").filename().generic_string();
@@ -82,13 +88,13 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
     }
     if(!solids.empty()){objects[id]=std::move(solids);Changed();}
 }
-Navigation::Mesh* NavigationWorld::ForProfile(float radius,float height) {
+Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const char* phase) {
     try {
-        if(!std::isfinite(radius)||!std::isfinite(height)||radius<=0||radius>4||height<=0||height>10)throw std::runtime_error("Nav64: invalid agent size");
-        // Conservative radius quantization; it can never widen a unit's passage.
-        const auto key=std::make_pair(int(std::ceil(radius/.05f)),int(std::ceil(height/.05f)));
+        if(!std::isfinite(radius)||radius<=0||radius>4||aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid agent size/class");
+        const auto* radiusClass=std::lower_bound(std::begin(RadiusClasses),std::end(RadiusClasses),radius);
+        const auto key=std::make_pair(int(radiusClass-std::begin(RadiusClasses)),aiClass);
         auto existing=meshes.find(key);if(existing!=meshes.end())return existing->second.get();
-        auto start=std::chrono::steady_clock::now();Navigation::Profile profile;profile.radius=key.first*.05f;profile.height=key.second*.05f;
+        auto start=std::chrono::steady_clock::now();Navigation::Profile profile;profile.radius=*radiusClass;profile.height=ClassHeights[aiClass];
         Navigation::Geometry geometry=terrain;for(const auto& entry:objects)geometry.solids.insert(geometry.solids.end(),entry.second.begin(),entry.second.end());geometry.Bounds();
         Navigation::Bytes source;
         // Each resource is delimited and named; effective payloads, not timestamps.
@@ -106,17 +112,22 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,float height) {
         if(!mesh){mesh=Navigation::Build(geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
         mesh->generation=generation;
         auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV","ready","scene=%s tiles=%u ms=%lld source=%s radius=%.2f height=%.2f",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",profile.radius,profile.height);
+        GameJournal::Event("NAV","ready","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase);
         auto result=mesh.get();meshes.emplace(key,std::move(mesh));error.clear();return result;
     }catch(const std::exception& e){error=e.what();if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());return nullptr;}
 }
-Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass) {
-    static const float heights[8]={2,.4f,1,1.6f,2.2f,1.7f,3,6};
-    static const float radii[8]={.4f,.4f,.4f,.4f,.4f,.7f,.7f,1.5f};
-    int c=unit?unit->GetAIClass():aiClass;if(c<0||c>=8)return nullptr;
-    return ForProfile(unit?(std::max)(.05f,unit->GetCollisionDistance()):radii[c],heights[c]);
+Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass,const char* phase) {
+    int c=unit?unit->GetAIClass():aiClass;
+    return ForProfile(unit?(std::max)(.05f,unit->GetCollisionDistance()):(c>=0&&c<8?DefaultRadii[c]:0),c,phase);
 }
-bool NavigationWorld::Prepare(){return ForProfile(.4f,1.6f)!=nullptr;}
+bool NavigationWorld::Prepare(CWorldServer& world,const char* phase) {
+    // Keep the default human probe, then warm every size actually in the world.
+    if(!ForUnit(nullptr,3,phase))return false;
+    for(const auto& entry:world.mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
+        if(!ForUnit(static_cast<CUnit*>(entry.second),3,phase))return false;
+    }
+    return true;
+}
 Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     auto p=Point(unit->GetCP());
     // GetCP.z is the legacy ground-relative altitude, never the world support Z.
