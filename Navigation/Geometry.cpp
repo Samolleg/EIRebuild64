@@ -21,6 +21,11 @@ void Geometry::Bounds() {
             throw std::runtime_error("Nav64: non-finite surface geometry source="+name+" triangle="+std::to_string(i-first));
         }
         add(t.a);add(t.b);add(t.c);
+        if(!Finite(t.waterDepth)||t.waterDepth.x<0||t.waterDepth.y<0||t.waterDepth.z<0)
+            throw std::runtime_error("Nav64: invalid MPR water depth");
+        add({t.a.x,t.a.y,t.a.z+t.waterDepth.x});
+        add({t.b.x,t.b.y,t.b.z+t.waterDepth.y});
+        add({t.c.x,t.c.y,t.c.z+t.waterDepth.z});
     }
     for(const auto& s:solids) {
         if(!s.error.empty())throw std::runtime_error(s.error);

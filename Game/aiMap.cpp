@@ -861,8 +861,12 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
             };
             for(int y=0;y<N_CL_PSECTOR_S;++y)for(int x=0;x<N_CL_PSECTOR_S;++x) {
                 auto lu=vertex(x,y),ru=vertex(x+1,y),ld=vertex(x,y+1),rd=vertex(x+1,y+1);
-                navigation.Terrain().ground.push_back({lu,ru,rd,1});
-                navigation.Terrain().ground.push_back({lu,rd,ld,1});
+                auto depth=[&](int vx,int vy,Navigation::Point base) {
+                    return bHaveLayers?(std::max)(0.f,GetFloatValueByRange(navVertices[N_V_PSECTOR+vy*N_V_PSECTOR_S+vx].usZ,fpMaxZ)-base.z):0.f;
+                };
+                const float wlu=depth(x,y,lu),wru=depth(x+1,y,ru),wld=depth(x,y+1,ld),wrd=depth(x+1,y+1,rd);
+                navigation.Terrain().ground.push_back({lu,ru,rd,1,{wlu,wru,wrd}});
+                navigation.Terrain().ground.push_back({lu,rd,ld,1,{wlu,wrd,wld}});
             }
             SSectVert2 *pVert2 = (SSectVert2 *)pSector;
             // Reading heights and depths
@@ -1041,6 +1045,7 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
         int x=Float2AITile((triangle.a.x+triangle.b.x+triangle.c.x)/3);
         int y=Float2AITile((triangle.a.y+triangle.b.y+triangle.c.y)/3);
         triangle.area=TileInBounds(x,y)?BYTE((tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains>>12)&15):0;
+        triangle.levitateArea=TileInBounds(x,y)?BYTE(tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains&15):0;
     }
     // Initialize rest objects
     dLocks.SetSizes(nMapSizeX, nMapSizeY);
@@ -2122,6 +2127,7 @@ bool CAIMap::FindPath(int nAIClass, int nSrcX, int nSrcY, int nDstX, int nDstY, 
     if(!TileInBounds(nSrcX,nSrcY)||!TileInBounds(nDstX,nDstY))return false;
     Navigation::Point from{AITile2Meter(nSrcX+.5f),AITile2Meter(nSrcY+.5f),GetTileHeight(nSrcX,nSrcY)};
     Navigation::Point goal{AITile2Meter(nDstX+.5f),AITile2Meter(nDstY+.5f),GetTileHeight(nDstX,nDstY)};
+    if(nAIClass==0){from.z=GetTileSurface(CPlot3D(from.x,from.y,0));goal.z=GetTileSurface(CPlot3D(goal.x,goal.y,0));}
     bool ok=NavRoute(nullptr,from,goal,res,1.e6f,0,nAIClass);if(nResCost)*nResCost=ok?int(res.route.GetCount()):N_INFINITE;return ok;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2234,10 +2240,10 @@ void CAIMap::CalcSpeeds(CUnit *pUnit, CAIRoute &route)
     for(POSITION pos=route.route.GetHeadPosition();pos;) {
         auto& current=route.route.GetNext(pos);const auto& next=pos?route.route.GetAt(pos):current;
         if(!TileInBounds(current.nX,current.nY)||!TileInBounds(next.nX,next.nY))continue;
-        const int area=current.terrain;int speed=nTerrainSpeeds[area],cost=nTerrainCosts[area];
+        const int area=current.terrain;int speed=pUnit->GetAIClass()==0?1024:nTerrainSpeeds[area],cost=pUnit->GetAIClass()==0?1:nTerrainCosts[area];
         float distance=AITile2Meter(Distance(current.point,const_cast<CPlot2D&>(next.point)));
         float dz=next.supportZ-current.supportZ,angle=std::atan2(std::abs(dz),(std::max)(.001f,distance));
-        float multiplier=std::pow(1+std::pow(std::sin(angle),2.f),2.f);if(dz<0)multiplier=1/std::sqrt(multiplier);
+        float multiplier=pUnit->GetAIClass()==0?1.f:std::pow(1+std::pow(std::sin(angle),2.f),2.f);if(dz<0)multiplier=1/std::sqrt(multiplier);
         current.wSpeed256=WORD((std::max)(1,(std::min)(65535,int(speed*N_RT_SPEED/1024.f/multiplier))));
         current.SetFlags(false,cost>N_AI_RUN_COST_LIMIT);
     }
@@ -2272,7 +2278,7 @@ bool CAIMap::CanPutUnit(CUnit *pUnit)
 bool CAIMap::CanPutUnit(int nAIClass, const CPlot3D &ptPos)
 {
     if(!TileInBounds(Float2AITile(ptPos.x),Float2AITile(ptPos.y)))return false;
-    return navigation.CanPlace(nullptr,{ptPos.x,ptPos.y,GetTileHeight(ptPos)},nAIClass);
+    return navigation.CanPlace(nullptr,{ptPos.x,ptPos.y,nAIClass==0?GetTileSurface(ptPos):GetTileHeight(ptPos)},nAIClass);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutUnitRelaxed(CUnit *pUnit)

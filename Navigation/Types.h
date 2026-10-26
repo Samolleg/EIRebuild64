@@ -6,7 +6,7 @@
 
 namespace Navigation {
 constexpr std::uint32_t ContainerVersion = 1;
-constexpr std::uint32_t AlgorithmVersion = 2;
+constexpr std::uint32_t AlgorithmVersion = 3;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -21,6 +21,17 @@ struct Profile {
     float cellSize = .1f, cellHeight = .05f;
     std::uint32_t tileCells = 256;
 };
+// Four nested clearance permissions, independent of material areas. A human
+// uses one mesh in every pose; the query chooses one of these bits.
+constexpr float PoseHeights[] = {.4f,1.f,1.6f,2.2f};
+inline bool PoseClearance(const Profile& p) { return p.height==PoseHeights[0]; }
+inline unsigned short ClearanceMask(const Profile& p,float height) {
+    if(!std::isfinite(height)||height<=0)return 0;
+    if(!PoseClearance(p))return height<=p.height?1:0;
+    for(unsigned i=0;i<4;++i)if(height<=PoseHeights[i])return static_cast<unsigned short>(1u<<i);
+    return 0;
+}
+inline bool Levitates(const Profile& p) { return p.slope==60.f; }
 struct Location {
     Point position;
     std::uint64_t surface = 0; // 1 = imported terrain/object triangle surfaces, never solid BV tops.
@@ -33,7 +44,7 @@ enum class Status { Complete, NoMesh, Invalid, NoStart, NoGoal, NoPath, Limit, T
 const char* StatusName(Status status);
 struct Request {
     Point source, goal;
-    float goalRadius = 0, maxLength = 1.e6f;
+    float goalRadius = 0, maxLength = 1.e6f, height = 0;
     float areaCosts[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 };
 struct Route {

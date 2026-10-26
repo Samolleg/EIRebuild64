@@ -14,14 +14,14 @@ class NavigationWorld {
     std::map<int,Navigation::Geometry> objects, pendingObjects;
     std::map<std::string,std::shared_ptr<const owned::FigureCpuAsset>> figures;
     std::map<std::string,Navigation::Bytes> sources;
-    std::map<std::pair<int,int>,std::unique_ptr<Navigation::Mesh>> meshes;
+    std::map<int,std::unique_ptr<Navigation::Mesh>> meshes;
     std::string scene, error;
     std::uint64_t generation = 1;
     unsigned failures = 0;
     void Changed();
     void SyncObjects();
     std::shared_ptr<const owned::FigureCpuAsset> Figure(CMapObject* object,const char* part);
-    Navigation::Mesh* ForProfile(float radius,int aiClass,const char* phase);
+    Navigation::Mesh* ForProfile(int type,const char* phase);
     Navigation::Mesh* ForUnit(CUnit* unit,int aiClass = 3,const char* phase = "late");
 public:
     void Source(const std::string& name,const void* data,size_t size);

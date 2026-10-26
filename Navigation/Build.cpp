@@ -29,7 +29,7 @@ struct Wire {
 };
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
-        p.cellSize==.1f && p.cellHeight==.05f && p.tileCells==256 && p.slope==40 && p.climb==.35f,"Nav64: unsupported build profile");
+        (p.cellSize==.1f||p.cellSize==.2f||p.cellSize==.4f) && p.cellHeight==.05f && p.tileCells==256 && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
 }
 // v1.6.0 addTile does not take bounds for its internal sections. Validate all
 // counts and the exact aligned library layout BEFORE handing it cached bytes.
@@ -53,7 +53,8 @@ void CheckTile(const unsigned char* data,size_t size) {
     const auto* polys=reinterpret_cast<const dtPoly*>(data+offset);
     for(int i=0;i<h.polyCount;++i) {
         Require(polys[i].vertCount>=3 && polys[i].vertCount<=DT_VERTS_PER_POLYGON && polys[i].getType()==DT_POLYTYPE_GROUND&&
-            polys[i].getArea()>0&&polys[i].getArea()<16&&polys[i].flags==1,"Nav64: invalid polygon");
+            polys[i].getArea()>0&&polys[i].getArea()<16&&polys[i].flags>0&&polys[i].flags<=15&&
+            (polys[i].flags&(polys[i].flags+1))==0,"Nav64: invalid polygon");
         for(int j=0;j<polys[i].vertCount;++j) {
             Require(polys[i].verts[j]<h.vertCount,"Nav64: invalid vertex index");
             auto nei=polys[i].neis[j];Require((nei&DT_EXT_LINK)?((nei&0xff)<8):(nei<=h.polyCount),"Nav64: invalid neighbour index");
@@ -86,7 +87,7 @@ Bytes Inputs(const Geometry& g,const Profile& p,const std::string& scene,const B
     Wire w;w.U(ContainerVersion);w.U(AlgorithmVersion);w.U(LibraryVersion);w.U(sizeof(dtPolyRef));w.ProfileOut(p);w.S(scene);
     w.U(std::uint32_t(source.size()));w.B(source.data(),source.size());
     w.U(std::uint32_t(g.ground.size()));
-    for(const auto& t:g.ground){w.P(t.a);w.P(t.b);w.P(t.c);w.U(t.area);}
+    for(const auto& t:g.ground){w.P(t.a);w.P(t.b);w.P(t.c);w.U(t.area);w.P(t.waterDepth);w.U(t.levitateArea);}
     w.U(std::uint32_t(g.solids.size()));for(const auto& s:g.solids)for(auto v:s.corners)w.P(v);
     return std::move(w.bytes);
 }
@@ -118,7 +119,7 @@ std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string
             (solid?inputs[z*nx+x].solids:inputs[z*nx+x].triangles).push_back(index);
     };
     for(size_t i=0;i<g.ground.size();++i) {
-        const auto& t=g.ground[i];Point a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+        const auto t=Surface(g.ground[i],p);Point a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
         for(auto v:{a,b,c}){allIndices.push_back(int(allVertices.size()/3));allVertices.insert(allVertices.end(),{v.x,v.y,v.z});}
         allAreas.push_back(t.area);
         bin(std::min({a.x,b.x,c.x}),std::min({a.z,b.z,c.z}),std::max({a.x,b.x,c.x}),std::max({a.z,b.z,c.z}),int(i),false);
@@ -147,7 +148,7 @@ std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string
         rcConfig cfg{};cfg.cs=p.cellSize;cfg.ch=p.cellHeight;cfg.walkableSlopeAngle=p.slope;
         cfg.walkableHeight=int(std::ceil(p.height/cfg.ch));cfg.walkableClimb=int(std::floor(p.climb/cfg.ch));cfg.walkableRadius=int(std::ceil(p.radius/cfg.cs));
         cfg.tileSize=p.tileCells;cfg.borderSize=cfg.walkableRadius+3;cfg.width=cfg.height=cfg.tileSize+cfg.borderSize*2;
-        cfg.maxEdgeLen=120;cfg.maxSimplificationError=1.3f;cfg.minRegionArea=0;cfg.mergeRegionArea=400;cfg.maxVertsPerPoly=6;
+        cfg.maxEdgeLen=120;cfg.maxSimplificationError=PoseClearance(p)?0.f:1.3f;cfg.minRegionArea=0;cfg.mergeRegionArea=400;cfg.maxVertsPerPoly=6;
         cfg.detailSampleDist=.6f;cfg.detailSampleMaxError=.05f;
         cfg.bmin[0]=g.minimum.x+x*tileSize-cfg.borderSize*cfg.cs;cfg.bmin[1]=g.minimum.y-2;cfg.bmin[2]=g.minimum.z+z*tileSize-cfg.borderSize*cfg.cs;
         cfg.bmax[0]=g.minimum.x+(x+1)*tileSize+cfg.borderSize*cfg.cs;cfg.bmax[1]=g.maximum.y+p.height+2;cfg.bmax[2]=g.minimum.z+(z+1)*tileSize+cfg.borderSize*cfg.cs;
@@ -160,22 +161,75 @@ std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string
             areas.push_back(allAreas[triangle]);
         }
         Require(rcRasterizeTriangles(&context,vertices.data(),int(vertices.size()/3),indices.data(),areas.data(),int(areas.size()),*r.height,cfg.walkableClimb),"Nav64: ground rasterization failed");
+        // Insert each real solid as a non-walkable prism. Unlike subtracting
+        // at one agent height, this retains the underside as a ceiling for all
+        // poses, and never creates a walkable BV top. Quantize outwards.
+        for(int solid:inputs[index].solids) {
+            const auto& s=solids[solid];
+            float minx=s.hull[0],maxx=minx,minz=s.hull[2],maxz=minz;
+            for(size_t j=0;j<s.hull.size();j+=3){minx=std::min(minx,s.hull[j]);maxx=std::max(maxx,s.hull[j]);minz=std::min(minz,s.hull[j+2]);maxz=std::max(maxz,s.hull[j+2]);}
+            int x0=std::max(0,int(std::floor((minx-cfg.bmin[0])/cfg.cs))),x1=std::min(cfg.width-1,int(std::floor((maxx-cfg.bmin[0])/cfg.cs)));
+            int z0=std::max(0,int(std::floor((minz-cfg.bmin[2])/cfg.cs))),z1=std::min(cfg.height-1,int(std::floor((maxz-cfg.bmin[2])/cfg.cs)));
+            int bottom=std::clamp(int(std::floor((s.low-cfg.bmin[1])/cfg.ch)),0,RC_SPAN_MAX_HEIGHT-1);
+            int top=std::clamp(int(std::ceil((s.high-cfg.bmin[1])/cfg.ch)),bottom+1,RC_SPAN_MAX_HEIGHT);
+            for(int iz=z0;iz<=z1;++iz)for(int ix=x0;ix<=x1;++ix) {
+                const float lx=cfg.bmin[0]+ix*cfg.cs,lz=cfg.bmin[2]+iz*cfg.cs;
+                bool inside=true;
+                // Footprint() returns a counter-clockwise convex hull in XZ.
+                // A cell belongs if its rectangle intersects every half-plane.
+                for(size_t j=0;j<s.hull.size();j+=3) {
+                    const auto k=(j+3)%s.hull.size();float ax=s.hull[j],az=s.hull[j+2],dx=s.hull[k]-ax,dz=s.hull[k+2]-az;
+                    const float px=dz>0?lx:lx+cfg.cs,pz=dx>0?lz+cfg.cs:lz;
+                    if(dx*(pz-az)-dz*(px-ax)<-1.e-6f){inside=false;break;}
+                }
+                if(inside)Require(rcAddSpan(&context,*r.height,ix,iz,static_cast<unsigned short>(bottom),static_cast<unsigned short>(top),RC_NULL_AREA,0),"Nav64: solid rasterization failed");
+            }
+        }
         rcFilterLedgeSpans(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height);
         rcFilterWalkableLowHeightSpans(&context,cfg.walkableHeight,*r.height);
         r.compact=rcAllocCompactHeightfield();Require(r.compact&&rcBuildCompactHeightfield(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height,*r.compact),"Nav64: compact heightfield failed");
-        for(int solid:inputs[index].solids) {
-            const auto& s=solids[solid];
-            rcMarkConvexPolyArea(&context,s.hull.data(),int(s.hull.size()/3),s.low-p.height+.001f,s.high-.001f,RC_NULL_AREA,*r.compact);
-        }
         rasterUs.fetch_add(micros(begin));begin=std::chrono::steady_clock::now();
-        Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
+        if(PoseClearance(p)) {
+            auto& chf=*r.compact;
+            const std::vector<unsigned char> material(chf.areas,chf.areas+chf.spanCount);
+            std::vector<unsigned char> tiers(chf.spanCount,0),clearance(chf.spanCount);
+            // Include overlap across a step, so two individually tall spans
+            // cannot connect through a shorter ceiling at their common edge.
+            for(int iz=0;iz<chf.height;++iz)for(int ix=0;ix<chf.width;++ix) {
+                const auto& cell=chf.cells[ix+iz*chf.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                    const auto& span=chf.spans[j];int free=span.h;
+                    for(int dir=0;dir<4;++dir)if(rcGetCon(span,dir)!=RC_NOT_CONNECTED) {
+                        const int nx=ix+rcGetDirOffsetX(dir),nz=iz+rcGetDirOffsetY(dir);
+                        const auto& other=chf.spans[chf.cells[nx+nz*chf.width].index+rcGetCon(span,dir)];
+                        free=std::min(free,int(std::min(span.y+span.h,other.y+other.h))-int(std::max(span.y,other.y)));
+                    }
+                    clearance[j]=static_cast<unsigned char>(std::max(0,free));
+                }
+            }
+            // Rasterization and compact data are shared by every pose. Erode
+            // each permission at the full agent radius, then split contours at
+            // the resulting clearance boundary. 4 * 15 material IDs fit Recast's
+            // 63 area IDs; Detour receives the original material and pose flags.
+            for(unsigned tier=0;tier<4;++tier) {
+                const int cells=int(std::ceil(PoseHeights[tier]/cfg.ch));
+                for(int j=0;j<chf.spanCount;++j)chf.areas[j]=clearance[j]>=cells?material[j]:RC_NULL_AREA;
+                Require(rcErodeWalkableArea(&context,cfg.walkableRadius,chf),"Nav64: pose radius erosion failed");
+                for(int j=0;j<chf.spanCount;++j)if(chf.areas[j])tiers[j]=static_cast<unsigned char>(tier+1);
+            }
+            for(int j=0;j<chf.spanCount;++j)chf.areas[j]=tiers[j]?static_cast<unsigned char>((tiers[j]-1)*15+material[j]):RC_NULL_AREA;
+        } else Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
         Require(rcBuildDistanceField(&context,*r.compact)&&rcBuildRegions(&context,*r.compact,cfg.borderSize,cfg.minRegionArea,cfg.mergeRegionArea),"Nav64: region build failed");
         r.contours=rcAllocContourSet();Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
         r.polys=rcAllocPolyMesh();Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: polygon build failed");
         if(!r.polys->npolys){polygonUs.fetch_add(micros(begin));return;}
         Require(r.polys->npolys<=params.maxPolys&&r.polys->nverts<65536,"Nav64: tile polygon limit exceeded");
         r.detail=rcAllocPolyMeshDetail();Require(r.detail&&rcBuildPolyMeshDetail(&context,*r.polys,*r.compact,cfg.detailSampleDist,cfg.detailSampleMaxError,*r.detail),"Nav64: detail build failed");
-        for(int i=0;i<r.polys->npolys;++i)r.polys->flags[i]=1;
+        for(int i=0;i<r.polys->npolys;++i) {
+            const auto encoded=r.polys->areas[i];
+            r.polys->flags[i]=PoseClearance(p)?static_cast<unsigned short>((1u<<((encoded-1)/15+1))-1):1;
+            if(PoseClearance(p))r.polys->areas[i]=static_cast<unsigned char>((encoded-1)%15+1);
+        }
         dtNavMeshCreateParams create{};create.verts=r.polys->verts;create.vertCount=r.polys->nverts;create.polys=r.polys->polys;create.polyAreas=r.polys->areas;create.polyFlags=r.polys->flags;create.polyCount=r.polys->npolys;create.nvp=r.polys->nvp;
         create.detailMeshes=r.detail->meshes;create.detailVerts=r.detail->verts;create.detailVertsCount=r.detail->nverts;create.detailTris=r.detail->tris;create.detailTriCount=r.detail->ntris;
         create.walkableHeight=p.height;create.walkableRadius=p.radius;create.walkableClimb=p.climb;create.tileX=x;create.tileY=z;create.tileLayer=0;
@@ -223,7 +277,7 @@ std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std:
     auto mesh=std::make_unique<Mesh>();mesh->fingerprint=w.S();Require(mesh->fingerprint==key,"Nav64: stale input fingerprint");mesh->profile=w.ProfileIn();CheckProfile(mesh->profile);
     Wire a,b;a.ProfileOut(expected);b.ProfileOut(mesh->profile);Require(a.bytes==b.bytes,"Nav64: mismatched profile");
     dtNavMeshParams p{};for(auto& v:p.orig)v=w.F();p.tileWidth=w.F();p.tileHeight=w.F();p.maxTiles=w.U();p.maxPolys=w.U();
-    Require(p.maxTiles>0&&p.maxTiles<=4096&&dtNextPow2(p.maxTiles)==p.maxTiles&&p.maxPolys==32768&&p.tileWidth==25.6f&&p.tileHeight==25.6f,"Nav64: invalid mesh limits");
+    Require(p.maxTiles>0&&p.maxTiles<=4096&&dtNextPow2(p.maxTiles)==p.maxTiles&&p.maxPolys==32768&&p.tileWidth==expected.cellSize*expected.tileCells&&p.tileHeight==expected.cellSize*expected.tileCells,"Nav64: invalid mesh limits");
     mesh->data.reset(dtAllocNavMesh());Require(mesh->data&&dtStatusSucceed(mesh->data->init(&p)),"Nav64: mesh initialization failed");
     Require(w.U()==3,"Nav64: invalid section count");
     Require(w.U()==1,"Nav64: missing tile section");auto section=w.U();Require(section<=bytes.size()-w.at,"Nav64: truncated tile section");auto end=w.at+section;

@@ -2,6 +2,7 @@
 #include "NavigationWorld.h"
 #include "aiMap.h"
 #include "Unit.h"
+#include "UnitServer.h"
 #include "WorldServer.h"
 #include "MapObjectServer.h"
 #include "GameJournal.h"
@@ -18,13 +19,46 @@
 #include <sstream>
 #include <iomanip>
 #include <cctype>
+#include <cstring>
 #pragma comment(lib,"bcrypt.lib")
 
 namespace {
-// A bounded registry shared by loading and queries. Never round a radius down.
-constexpr float RadiusClasses[]={.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1.f,1.25f,1.5f,2.f,3.f,4.f};
-constexpr float ClassHeights[]={2.f,.4f,1.f,1.6f,2.2f,1.7f,3.f,6.f};
-constexpr float DefaultRadii[]={.4f,.4f,.4f,.4f,.4f,.7f,.7f,1.5f};
+// Constant agent types. Pose changes never create another mesh. The collision
+// radius is capped at 2 m by CUnit::RecalcAIParams; owned humans need 0.65 m.
+enum AgentType { Small, Human, Huge, Giant, LevitateSmall, Levitate, AgentCount };
+struct Agent { const char* name; Navigation::Profile profile; };
+const Agent Agents[]={
+    {"small",          {.4f,.4f,40.f,.35f,.1f}},
+    {"human",          {.7f,.4f,40.f,.35f,.1f}},
+    {"huge",           {2.f,5.f,40.f,.35f,.2f}},
+    {"giant",          {2.f,7.5f,40.f,.35f,.4f}},
+    {"levitate_small", {.1f,2.f,60.f,.35f,.1f}},
+    {"levitate",       {2.f,2.f,60.f,.35f,.2f}}
+};
+int Type(CUnit* unit,int aiClass) {
+    if(aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid AI class");
+    const float radius=unit?unit->GetCollisionDistance():.7f;
+    if(!std::isfinite(radius)||radius<=0||radius>2)throw std::runtime_error("Nav64: invalid collision radius");
+    if(aiClass==0)return radius<=Agents[LevitateSmall].profile.radius?LevitateSmall:Levitate;
+    int standing=aiClass;
+    if(unit&&unit->GetUnitSpecific()->WhoAmI()==HPC_UNITSERVERSPECIFIC)
+        standing=static_cast<CUnitServer*>(unit->GetUnitSpecific())->GetRPGStats()->wAIClassStay;
+    // Permanent body dimensions, not the current pose. Current installed
+    // troll/ogre bounds reach 4.753/3.722 m; cyclopes reach 7.314 m. Some
+    // trolls have legacy class 7 solely because of their chest radius.
+    const float bodyHeight=unit?unit->GetUnitHeight():0;
+    if(!std::isfinite(bodyHeight)||bodyHeight<0||bodyHeight>Agents[Giant].profile.height)
+        throw std::runtime_error("Nav64: ground body exceeds the largest agent type");
+    if((unit&&std::strcmp(unit->GetRaceModel()->szMaskName,"unmocy")==0)||bodyHeight>Agents[Huge].profile.height||(!unit&&standing==7))return Giant;
+    if(standing>=5||radius>Agents[Human].profile.radius||bodyHeight>Navigation::PoseHeights[3])return Huge;
+    return radius<=Agents[Small].profile.radius?Small:Human;
+}
+float Height(CUnit* unit,int aiClass=3) {
+    const int c=unit?unit->GetAIClass():aiClass;
+    const auto& profile=Agents[Type(unit,c)].profile;
+    if(!Navigation::PoseClearance(profile))return profile.height;
+    switch(c) {case 1:return Navigation::PoseHeights[0];case 2:return Navigation::PoseHeights[1];case 3:return Navigation::PoseHeights[2];default:return Navigation::PoseHeights[3];}
+}
 Navigation::Point Point(const CPlot3D& p) { return {p.x,p.y,p.z}; }
 std::string ResourceName(const char* name) {
     auto result=std::filesystem::path(name?name:"").filename().generic_string();
@@ -62,7 +96,7 @@ bool Same(const Navigation::Geometry& a,const Navigation::Geometry& b) {
     if(a.ground.size()!=b.ground.size()||a.solids.size()!=b.solids.size())return false;
     for(size_t i=0;i<a.ground.size();++i) {
         const auto& x=a.ground[i];const auto& y=b.ground[i];
-        if(x.area!=y.area||!Same(x.a,y.a)||!Same(x.b,y.b)||!Same(x.c,y.c))return false;
+        if(x.area!=y.area||x.levitateArea!=y.levitateArea||!Same(x.waterDepth,y.waterDepth)||!Same(x.a,y.a)||!Same(x.b,y.b)||!Same(x.c,y.c))return false;
     }
     for(size_t i=0;i<a.solids.size();++i) {
         if(a.solids[i].error!=b.solids[i].error)return false;
@@ -178,14 +212,12 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(!input.ground.empty()&&!objects.count(id)&&!pendingObjects.count(id))GameJournal::Event("NAV","walkable_object","NID=%d model=%s triangles=%zu",id,GameJournal::Quote(object->GetMaskName()).c_str(),input.ground.size());
     if(!input.solids.empty()||!input.ground.empty()||objects.count(id)||pendingObjects.count(id))pendingObjects[id]=std::move(input);
 }
-Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const char* phase) {
+Navigation::Mesh* NavigationWorld::ForProfile(int type,const char* phase) {
     try {
         SyncObjects();
-        if(!std::isfinite(radius)||radius<=0||radius>4||aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid agent size/class");
-        const auto* radiusClass=std::lower_bound(std::begin(RadiusClasses),std::end(RadiusClasses),radius);
-        const auto key=std::make_pair(int(radiusClass-std::begin(RadiusClasses)),aiClass);
-        auto existing=meshes.find(key);if(existing!=meshes.end())return existing->second.get();
-        auto start=std::chrono::steady_clock::now();Navigation::Profile profile;profile.radius=*radiusClass;profile.height=ClassHeights[aiClass];
+        if(type<0||type>=AgentCount)throw std::runtime_error("Nav64: invalid agent type");
+        auto existing=meshes.find(type);if(existing!=meshes.end())return existing->second.get();
+        auto start=std::chrono::steady_clock::now();const auto& profile=Agents[type].profile;
         if(!geometry) {
             auto input=std::make_shared<Navigation::Geometry>(terrain);
             for(const auto& entry:objects) {
@@ -212,18 +244,18 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const cha
         if(!mesh){mesh=Navigation::Build(*geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
         mesh->generation=generation;mesh->geometry=geometry;
         auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s workers=%u raster_cpu_ms=%llu polygons_cpu_ms=%llu key=%s generation=%llu%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase,mesh->workers,static_cast<unsigned long long>(mesh->rasterMs),static_cast<unsigned long long>(mesh->polygonMs),fingerprint.c_str(),static_cast<unsigned long long>(generation),mesh->tiles?"":" reason=\"no walkable ground\"");
-        auto result=mesh.get();meshes.emplace(key,std::move(mesh));error.clear();return result;
+        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s type=%s radius=%.2f height=%.2f cell=%.2f poses=%s phase=%s workers=%u raster_cpu_ms=%llu polygons_cpu_ms=%llu key=%s generation=%llu%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",Agents[type].name,profile.radius,profile.height,profile.cellSize,Navigation::PoseClearance(profile)?"0.4/1.0/1.6/2.2":"fixed",phase,mesh->workers,static_cast<unsigned long long>(mesh->rasterMs),static_cast<unsigned long long>(mesh->polygonMs),fingerprint.c_str(),static_cast<unsigned long long>(generation),mesh->tiles?"":" reason=\"no walkable ground\"");
+        auto result=mesh.get();meshes.emplace(type,std::move(mesh));error.clear();return result;
     }catch(const std::exception& e){error=e.what();if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());return nullptr;}
 }
 Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass,const char* phase) {
-    int c=unit?unit->GetAIClass():aiClass;
-    return ForProfile(unit?(std::max)(.05f,unit->GetCollisionDistance()):(c>=0&&c<8?DefaultRadii[c]:0),c,phase);
+    try {return ForProfile(Type(unit,unit?unit->GetAIClass():aiClass),phase);}
+    catch(const std::exception& e){error=e.what();return nullptr;}
 }
 bool NavigationWorld::Prepare(CWorldServer& world,const char* phase) {
     const auto start=std::chrono::steady_clock::now();
-    // Keep the default human probe, then warm every size actually in the world.
-    if(!ForUnit(nullptr,3,phase))return false;
+    // Six types, including all future poses and summons, before world publication.
+    for(int type=0;type<AgentCount;++type)if(!ForProfile(type,phase))return false;
     for(const auto& entry:world.mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
         if(!ForUnit(static_cast<CUnit*>(entry.second),3,phase))return false;
     }
@@ -234,23 +266,30 @@ bool NavigationWorld::Prepare(CWorldServer& world,const char* phase) {
 Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     auto p=Point(unit->GetCP());
     // GetCP.z is the legacy ground-relative altitude, never the world support Z.
-    p.z=map.GetTileHeight(unit->GetCP());
+    p.z=unit->GetAIClass()==0?map.GetTileSurface(unit->GetCP()):map.GetTileHeight(unit->GetCP());
     if(unit->navLocation.surface==1 && std::hypot(p.x-unit->navLocation.position.x,p.y-unit->navLocation.position.y)<.1f)p.z=unit->navLocation.position.z;
     return p;
 }
 Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass) {
     auto* mesh=ForUnit(unit,aiClass);if(!mesh){Navigation::Route route;route.status=Navigation::Status::NoMesh;return route;}
-    Navigation::Request request;request.source=from;request.goal=goal;request.maxLength=maxLength;request.goalRadius=goalRadius;
-    if(costs)std::copy(costs,costs+16,request.areaCosts);
+    Navigation::Request request;request.source=from;request.goal=goal;request.maxLength=maxLength;request.goalRadius=goalRadius;request.height=Height(unit,aiClass);
+    if(Navigation::Levitates(mesh->profile)&&unit) {
+        auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+        request.source.z=map.GetTileSurface(CPlot3D(from.x,from.y,0));
+        request.goal.z=map.GetTileSurface(CPlot3D(goal.x,goal.y,0));
+    }
+    if(costs&&!Navigation::Levitates(mesh->profile))std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
     if(route.status!=Navigation::Status::Complete&&failures++<16)GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.2f,%.2f,%.2f) goal=(%.2f,%.2f,%.2f)",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z);
     return route;
 }
 bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) {
-    auto* mesh=ForUnit(unit,aiClass);Navigation::Location location;return mesh&&Navigation::Project(*mesh,point,.05f,4.f,location);
+    auto* mesh=ForUnit(unit,aiClass);if(!mesh)return false;
+    if(Navigation::Levitates(mesh->profile)&&unit)point.z=static_cast<CWorldServer*>(unit->GetWorld())->aiMap.GetTileSurface(CPlot3D(point.x,point.y,0));
+    Navigation::Location location;return Navigation::Project(*mesh,point,.05f,4.f,location,Height(unit,aiClass));
 }
 bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result) {
-    auto* mesh=ForUnit(unit);return mesh&&Navigation::Constrain(*mesh,from,desired,result);
+    auto* mesh=ForUnit(unit);return mesh&&Navigation::Constrain(*mesh,from,desired,result,Height(unit));
 }
 bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     auto& saved=unit->navLocation;if(!saved.surface)return true;
@@ -258,6 +297,6 @@ bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     if(saved.surface!=1||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<=0||saved.radius>4||
         !std::isfinite(saved.height)||saved.height<=0||saved.height>10||std::hypot(cp.x-saved.position.x,cp.y-saved.position.y)>.1f)return false;
     auto* mesh=ForUnit(unit);Navigation::Location location;
-    if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location)||std::abs(location.position.z-saved.position.z)>.25f)return false;
+    if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location,Height(unit))||std::abs(location.position.z-saved.position.z)>.25f)return false;
     saved=location;return true;
 }

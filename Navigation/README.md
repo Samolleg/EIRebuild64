@@ -17,20 +17,52 @@ the object rotation/origin. CROWN and EMPTY retain their pass/ignore semantics.
 Surface area is the existing bridge-road material. A floor touching the top
 of a solid is supported; a body overlapping that solid is blocked.
 
-The initial policy is standing-human ground, 0.1 m voxels, 0.05 m height,
-256-voxel tiles, 40 degree slope and 0.35 m climb. Collision radii round up to
-fixed classes: 0.1 through 1.0 in 0.1 m steps, then 1.25, 1.5, 2, 3, 4 m.
-AI classes 0..7 retain heights 2, 0.4, 1, 1.6, 2.2, 1.7, 3, 6 m.
-At most 120 profiles exist; identical sizes
-share a mesh. Prepare warms the default human probe and every current unit's
-profile during NewZone and staged save loading, before publishing the world.
-Party deployment also warms final owned/equipped sizes before scripts/control.
-A missing class first used later (AddMob, summon or a new pose) loads/builds
-once per geometry generation. NAV ready logs class, radius, height, built/cache,
-ms and phase (prepare/party/late), fingerprint, generation, worker count and
-raster/polygon CPU milliseconds; cache hits in memory do not log again.
-NAV prepared records the complete phase time and resident profile count.
-This is not acceptance of the full eight-class/water/flight policy (NAV04).
+There are exactly six permanent agent types (X64NAV01 r7):
+
+| Type | Radius (m) | Minimum/full height (m) | Cell size (m) | Membership |
+|---|---:|---:|---:|---|
+| small | 0.4 | 0.4, pose flags up to 2.2 | 0.1 | narrow ground bodies <= 0.4 m |
+| human | 0.7 | 0.4, pose flags up to 2.2 | 0.1 | humans and comparable bodies <= 0.7 m |
+| huge | 2 | 5 | 0.2 | wide/tall ground bodies, trolls/ogres |
+| giant | 2 | 7.5 | 0.4 | cyclopes and bodies taller than 5 m |
+| levitate_small | 0.1 | 2 | 0.1 | class 0 with the existing high-altitude radius reduction |
+| levitate | 2 | 2 | 0.2 | remaining class-0 bodies |
+
+The collision radius remains capped at 2 m by the game. Owned humans require
+0.65 m (0.5 m BV * 0.9 + 0.2); their shared type rounds up to 0.7 m. Standing
+AI class, body height and radius choose a ground type, independently of pose.
+Cyclopes retain their type at every constitution. Actual installed prototype
+ranges give maximum neutral bounds of 4.753 m for trolls, 3.722 m for ogres,
+and 7.314 m for cyclopes. Unsupported bodies are rejected, never rounded down.
+Small bodies keep narrower passages than the human type. Large-body envelopes
+are conservative: a smaller member can lose passages, never gain false ones.
+
+For the two pose-aware types, rasterize once at 0.4 m minimum height. Nonwalkable
+solid prisms preserve their actual undersides as ceilings; BV tops stay blocked.
+Compact spans supply measured headroom, including overlap over a step. Erode
+permissions for 0.4/1.0/1.6/2.2 m at the full profile radius on that same compact
+field, split contours by material and clearance, then restore Detour areas
+1..15 and encode nested permissions as polygon flags 1/3/7/15. Zero contour
+simplification error preserves clearance boundaries. This uses at most 60
+Recast area IDs; final material IDs never encode pose. Find, placement, ingress,
+step and save restoration use the current height bit. Existing AI classes
+1/2/3/4 select 0.4/1.0/1.6/2.2 m: pose-to-class mapping still comes from the game.
+
+Class 0 retains supported levitation, not free 3D flight: the actual MPR water
+layer raises its floor, class-0 material policy admits water, slope is limited
+to the existing 60 degrees, body clearance stays 2 m and solids still block.
+The game's altitude and high-altitude radius reduction are unchanged. Its
+terrain cost/speed is flat (1024), without the ground uphill speed penalty.
+Ground types keep the 40 degree slope; all types retain 0.35 m climb and 0.05 m
+vertical cells. Full ground water/terrain cost policy still belongs to NAV04.
+
+Prepare warms all six types during NewZone and staged save loading, before
+publishing the world; party warm-up reuses them. A new pose or ordinary summon
+cannot introduce a new type/mesh. Parallel tile workers retain their own Recast
+contexts; only the simulation thread inserts Detour blobs in fixed z/x order.
+NAV ready records type, radius, height, cell size, built/cache, wall ms, phase,
+fingerprint, generation, workers and raster/polygon CPU ms. NAV prepared gives
+total time/profile count. Timing on zone1 still requires the owner's game log.
 Material areas 1..15 use existing costs, while movement uses existing speed
 tables. Directional search costs are deferred to NAV04. No crowd controller,
 door topology or old search fallback is present. Independent multi-floor
@@ -41,14 +73,14 @@ once per profile, solid hulls are computed once, and each tile visits only its
 overlapping inputs (including the full erosion border). Up to eight workers,
 one per two hardware threads, each own their Recast context and temporaries.
 Completed blobs enter Detour on the simulation thread in fixed z/x order.
-Voxel sizes, slope, climb and the upward radius classes are unchanged.
+Cells depend on the permanent type; radius always rounds upwards to its type.
 
 ## Container v1 (little endian)
 
 No raw host structs/pointers are written. The only native layout is the tile
 payload returned by the pinned library's `dtCreateNavMeshData`.
 
-* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=2,
+* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=3,
   library=`0x010600`, endian=`0x12345678`, polyrefBytes=8.
 * u32 text length + UTF-8/ASCII SHA-256 input fingerprint, maximum 4096 bytes.
 * Profile: six f32 (radius,height,slope,climb,cellSize,cellHeight), u32 tileCells.

@@ -1278,16 +1278,16 @@ const SADEntry *CUnit::GetAnimationByIndex(DWORD nIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::CalcZ(float fpX, float fpY)
 {
-    if(navLocation.surface==1 &&
-        std::abs(fpX-navLocation.position.x)<.01f && std::abs(fpY-navLocation.position.y)<.01f)
-        return navLocation.position.z;
+    const bool supported=navLocation.surface==1 &&
+        std::abs(fpX-navLocation.position.x)<.01f && std::abs(fpY-navLocation.position.y)<.01f;
+    if(supported && rpgUserUnitStats.cLocomotion!=2)return navLocation.position.z;
     CWorldBase *pWorld = GetWorldBase();
     if (rpgUserUnitStats.cLocomotion == 2)
     {
         if (lpUnitSpecific->WhoAmI() == HPC_UNITSERVERSPECIFIC)
-            return pWorld->GetBridgeSurfaceZValue(fpX, fpY) + cp.z;
+            return (supported?navLocation.position.z:pWorld->GetBridgeSurfaceZValue(fpX, fpY)) + cp.z;
         else
-            return pWorld->GetBridgeSurfaceZValue(fpX, fpY) + fpBaseZ;
+            return (supported?navLocation.position.z:pWorld->GetBridgeSurfaceZValue(fpX, fpY)) + fpBaseZ;
     }
     else
         return pWorld->GetBridgeZValue(fpX, fpY);
