@@ -1,4 +1,5 @@
 #pragma once
+#include "../Navigation/Types.h"
 namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObject.h"
@@ -189,6 +190,9 @@ inline void CUnitSpecific::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 class CUnit : public CMapObject
 {
+public:
+    Navigation::Location navLocation;
+private:
     struct SItemIDs
     {
         DWORD dwWeaponsID[QI_MAX_WEAPONS];

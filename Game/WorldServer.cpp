@@ -3297,11 +3297,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
         access(ModRuntime::MapPath(GetMobPath() + pszMobName).c_str(), 0) == -1)
         return FALSE;
 
-    coreOperation.Stage("ai_graph");
-    CMemorySave graphChunk;
-    if (!ModCliTool::GeneratingGraph() && !LoadAIGraph(pszMapName, pszMobName, graphChunk))
-        return ReportError("CWorldServer::LoadMap.\n Can't load AIGraph.\n");
-
+    CMemorySave graphChunk; // obsolete parameter, no legacy graph input
     coreOperation.Stage("static_mob");
     szLoadedMobs.RemoveAll();
     StartZoneLoading();
@@ -3311,6 +3307,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     C2DScreenWait::Step(6);
     coreOperation.Stage("finalize");
     FinishZoneLoading();
+    if(!aiMap.Navigation().Prepare()) { bMapLoaded=FALSE;return ReportError("Nav64: cannot enter zone: %s",aiMap.Navigation().Error().c_str()); }
     C2DScreenWait::Step(7);
     if (pszZoneName)
         szCurrentZoneName = pszZoneName;
@@ -3446,10 +3443,9 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
         szMobFileName = "";
     }
 
-    // unconditionally load aiGraph
-    graphChunk.Seek(0);
-    if (graphChunk.GetSize() > 0 && !aiMap.LoadGraph(graphChunk))
-        return FALSE;
+    aiMap.Navigation().Scene(pszMprName,pszMobName);
+    try { aiMap.Navigation().MobSource(GetFullMobName(pszMobName)); }
+    catch(const std::exception& e) { return ReportError("Nav64 source: %s",e.what()); }
 
     // prepare for map objects loading
     if (szMobFileName.CompareNoCase(pszMobName) == 0)
@@ -3513,6 +3509,8 @@ BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
                            pszMobName);
     else
     {
+        try { aiMap.Navigation().MobSource(GetFullMobName(pszMobName)); }
+        catch(const std::exception& e) { reader.Close();return ReportError("Nav64 source: %s",e.what()); }
         OwnedRender::E1MobSource::Parsed(pszMobName);
         bRv = reader.Load(this, bSkipScript);
         reader.Close();

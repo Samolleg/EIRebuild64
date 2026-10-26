@@ -752,6 +752,16 @@ void CUnitServer::L1NewPathSegment()
     L1StartRotateAnimation();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::RestoreNavigation()
+{
+    if(!path.curSegment.IsMoving())return true;
+    auto* world=static_cast<CWorldServer*>(GetWorld());auto goal=path.ptDestination;
+    if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
+        path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);lpUnit->LowNewRoute();return true;
+    }
+    path.toGo.Clear();if(!world->aiMap.NewPath(lpUnit,goal,path))return false;
+    lpUnit->LowNewRoute();return true;
+}
 void CUnitServer::L1ExecMove()
 {
     CorePerf::Scope coreTiming(CorePerf::MoveCollisions);
@@ -801,93 +811,17 @@ void CUnitServer::L1ExecMove()
         }
     }
 
-    if (nCheckTileX >= 0)
-    {
-        CUnit *pObstacle;
-        pWS->aiMap.RemoveObject(lpUnit);
-        bMoved = pWS->aiMap.CanMoveTo(lpUnit, nCheckTileX, nCheckTileY, lock);
-        if (!bMoved)
-        {
-            pObstacle = pWS->aiMap.CheckCircleCollision(lpUnit, pos);
-            if (pObstacle)
-            {
-                bool bTestMore = true;
-                if (lpUnit->GetOwner() && pObstacle->GetOwner() == lpUnit->GetOwner())
-                {
-                    CUnitServer *pOb = (CUnitServer *)pObstacle->GetUnitSpecific();
-                    if (pOb->logic.GetPlayerLeader() == lpUnit &&
-                        theWorldServer.GetSegmentTimeCounter() < nCommandExecStart + 2)
-                    {
-                        lock = AI_LOCK_DYNAMIC;
-                        bTestMore = false;
-                    }
-                }
-                if (bTestMore)
-                {
-                    if (train.bIsTrain && pObstacle == train.master)
-                        lock = AI_LOCK_DYNAMIC;
-                    else
-                    {
-                        CUnitServer *pMaster = (CUnitServer *)pObstacle->GetUnitSpecific();
-                        if (pObstacle->GetPlayerNum() == GetUnit()->GetPlayerNum() &&
-                            IsAttacking() && pMaster->IsAttacking() &&
-                            (CMapObject *)pMaster->curCommand.pTarget == curCommand.pTarget &&
-                            pObstacle->GetAIClass() == GetUnit()->GetAIClass() &&
-                            !pMaster->L1IsAttacking() &&
-                            fabs2(curCommand.pTarget->GetCP() - lpUnit->GetCP()) > 60)
-                        {
-                            bool bCanTrain = true;
-                            // проверим не приведет ли огранизация паровоза к зацикленному
-                            // локомотиву
-                            CUnitServer *pTest = pMaster;
-                            while (pTest->train.bIsTrain)
-                            {
-                                if (pTest->train.master == 0)
-                                    break;
-                                if (pTest->train.master == lpUnit)
-                                {
-                                    bCanTrain = false; // однако приведет
-                                    break;
-                                }
-                                pTest = (CUnitServer *)pTest->train.master->GetUnitSpecific();
-                            }
-                            //
-                            if (!bCanTrain)
-                            {
-                                // we can run into problems - break train
-                                pMaster->train.bIsTrain = false;
-                                pMaster->train.master = 0;
-                                train.bIsTrain = false;
-                                train.master = 0;
-                                lock = AI_LOCK_STATIC;
-                                bConvertLocks = TRUE;
-                            }
-                            else
-                            {
-                                train.bIsTrain = true;
-                                train.master = pObstacle;
-                                lock = AI_LOCK_DYNAMIC;
-                            }
-                        }
-                        else
-                        {
-                            if (GetUnit()->GetSpeed() > pObstacle->GetSpeed() &&
-                                lock == AI_LOCK_DYNAMIC)
-                            {
-                                lock = AI_LOCK_STATIC;
-                                bConvertLocks = TRUE;
-                            }
-                        }
-                    }
-                }
-            }
-            else
-                bMoved = true;
-        }
-        pWS->aiMap.AddObject(lpUnit);
+    Navigation::Location support;
+    auto from=pWS->aiMap.Navigation().Position(lpUnit,pWS->aiMap);
+    if(!pWS->aiMap.Navigation().Step(lpUnit,from,{pos.x,pos.y,from.z},support)) {
+        path.ClearCalcedPath();
+        if(LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z))L1NewPathSegment();
+        else L1StopMovement(true);
+        return;
     }
-    else
-        bMoved = true;
+    // Q1: a physical neighbour makes us wait, never pushes us through it.
+    bMoved=pWS->aiMap.CheckCircleCollision(lpUnit,pos)==nullptr;
+    lock=bMoved?AI_LOCK_NO:AI_LOCK_DYNAMIC;
     // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
     if (eL1State == UL1_MOVE && pWS->aiMap.IsDangerous(pos) &&
         segment.GetStartSegment() < pWS->aiMap.GetLastDangerAddTime())
@@ -904,6 +838,8 @@ void CUnitServer::L1ExecMove()
         bMoved = pWS->aiMap.MoveObject(
             lpUnit,
             pos); // SetCP( pos ); setcp нельзя использовать, теперь только aimap::moveobject
+        if(bMoved)lpUnit->navLocation=support;
+        else lock=AI_LOCK_STATIC;
         ASSERT(bMoved);
     }
     if (!bMoved)

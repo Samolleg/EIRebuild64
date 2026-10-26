@@ -1267,6 +1267,9 @@ const SADEntry *CUnit::GetAnimationByIndex(DWORD nIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::CalcZ(float fpX, float fpY)
 {
+    if(lpUnitSpecific->WhoAmI()==HPC_UNITSERVERSPECIFIC && navLocation.surface==1 &&
+        std::abs(fpX-navLocation.position.x)<.01f && std::abs(fpY-navLocation.position.y)<.01f)
+        return navLocation.position.z;
     CWorldBase *pWorld = GetWorldBase();
     if (rpgUserUnitStats.cLocomotion == 2)
     {

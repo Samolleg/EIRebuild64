@@ -1048,11 +1048,11 @@ void SRectRegion::Load(SaveSchema::Reader &r)
 }
 void SRouteUnit::Store(SaveSchema::Writer &w) const
 {
-    w.UInt16(wX); w.UInt16(wY); w.UInt16(wSpeed256); w.UInt16(wFlags);
+    w.UInt16(wX); w.UInt16(wY); w.UInt16(wSpeed256); w.UInt16(wFlags); w.Value(point); w.Float32(supportZ); w.UInt16(terrain);
 }
 void SRouteUnit::Load(SaveSchema::Reader &r)
 {
-    wX=r.UInt16(); wY=r.UInt16(); wSpeed256=r.UInt16(); wFlags=r.UInt16();
+    wX=r.UInt16(); wY=r.UInt16(); wSpeed256=r.UInt16(); wFlags=r.UInt16(); r.Value(point); supportZ=r.Float32(); terrain=r.UInt16(); if(terrain<1||terrain>15)throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid route material");
 }
 void CAIRoute::Store(SaveSchema::Writer &w) const { SaveSchema::ValueList(w,route); }
 void CAIRoute::Load(SaveSchema::Reader &r) { SaveSchema::ValueList(r,route); }

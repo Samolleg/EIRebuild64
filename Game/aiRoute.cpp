@@ -81,18 +81,11 @@ CAIRoute CAIRoute::Invert()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIRoute::EraseDuplicates()
 {
-    WORD wPrevX = 0xffff, wPrevY = 0xffff;
-    POSITION pos = route.GetHeadPosition(), prevPos;
-    while (pos)
-    {
-        BOOL bErase;
-        prevPos = pos;
-        SRouteUnit &r = route.GetNext(pos);
-        bErase = r.wX == wPrevX && r.wY == wPrevY;
-        wPrevX = r.wX;
-        wPrevY = r.wY;
-        if (bErase)
-            route.RemoveAt(prevPos);
+    bool have=false;CPlot2D previous;
+    for(POSITION pos=route.GetHeadPosition();pos;) {
+        POSITION current=pos;auto& node=route.GetNext(pos);
+        bool duplicate=have&&Distance(previous,node.point)<.0001f;
+        previous=node.point;have=true;if(duplicate)route.RemoveAt(current);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -248,92 +241,29 @@ void CRouteWalker::SetCheckTiles(CAIFullRoute &route)
 /////////////////////////////////////////////////////////////////////////////////////
 void CRouteWalker::CreateWalkerRoute(CAIFullRoute &route)
 {
-    POSITION pos, fpos;
-    Clear();
-    CAIRoute &r = route.route;
-
-    fpStartAngle = route.fpStartAngle;
-    switch (route.GetMoveType())
-    {
-    case CAIFullRoute::Stand:
-    case CAIFullRoute::Attack:
-        return;
-    case CAIFullRoute::AttackPoint:
-        StartRotation((float)cos(route.attack1.fpFinalAngle),
-                      (float)sin(route.attack1.fpFinalAngle), 0);
-        return;
-    case CAIFullRoute::Rotate:
-        StartRotation((float)cos(route.rotate.fpFinalAngle), (float)sin(route.rotate.fpFinalAngle),
-                      route.rotate.fpAngleSpeed);
-        return;
-    case CAIFullRoute::Walk:
-        break;
-    default:
-        ASSERT(0 && "Unknown route type");
-        break;
-    };
-    // normal movement
-    EAIDirection dir, prevDir = NULL_DIR;
-    MarkPoint(route.start.x, route.start.y);
-    for (pos = r.route.GetHeadPosition(); pos;)
-    {
-        SRouteUnit &cur = r.route.GetNext(pos);
-        AddSpeed(cur.wSpeed256);
-        if (!pos)
-            break;
-        SRouteUnit &next = r.route.GetAt(pos);
-        fpos = pos;
-        r.route.GetNext(fpos);
-        dir = GetRouteDirection(cur, next);
-        switch (dir)
-        {
-        case UPLEFT:
-            MarkPoint(cur.nX, cur.nY + 1.0f);
-            break;
-        case UPRIGHT:
-            MarkPoint(cur.nX + 1.0f, cur.nY + 1.0f);
-            break;
-        case DOWNLEFT:
-            MarkPoint(cur.nX, cur.nY);
-            break;
-        case DOWNRIGHT:
-            MarkPoint(cur.nX + 1.0f, cur.nY);
-            break;
-        }
-        if ((prevDir != NULL_DIR && DirectionDifference(dir, prevDir) > 1) ||
-            (fpos && DirectionDifference(dir, GetRouteDirection(next, r.route.GetAt(fpos))) > 1))
-        {
-            switch (dir)
-            {
-            case LEFT:
-                MarkPoint(cur.nX, cur.nY + 0.5f);
-                break;
-            case RIGHT:
-                MarkPoint(cur.nX + 1.0f, cur.nY + 0.5f);
-                break;
-            case DOWN:
-                MarkPoint(cur.nX + 0.5f, cur.nY);
-                break;
-            case UP:
-                MarkPoint(cur.nX + 0.5f, cur.nY + 1.0f);
-                break;
-            }
-        }
-        prevDir = dir;
+    Clear();fpStartAngle=route.fpStartAngle;
+    switch(route.GetMoveType()) {
+    case CAIFullRoute::Stand:case CAIFullRoute::Attack:return;
+    case CAIFullRoute::AttackPoint:StartRotation(float(cos(route.attack1.fpFinalAngle)),float(sin(route.attack1.fpFinalAngle)),0);return;
+    case CAIFullRoute::Rotate:StartRotation(float(cos(route.rotate.fpFinalAngle)),float(sin(route.rotate.fpFinalAngle)),route.rotate.fpAngleSpeed);return;
+    case CAIFullRoute::Walk:break;
+    default:return;
     }
-    MarkPoint(route.walk.fpFinishX, route.walk.fpFinishY);
-    CreateWaypointList();
-    LimitAngularSpeed(fpAngularSpeed);
-    // skip starting rotation if unit is facing right direction
-    if (cos(atan2(points[0].speed.y, points[0].speed.x) - fpStartAngle) > 0.9)
-    {
-        fpDeltaAngle = 0;
-        points[0].speed.x = (float)cos(fpStartAngle);
-        points[0].speed.y = (float)sin(fpStartAngle);
+    // Detour already straightens the corridor. Never spline outside it or round
+    // its corners back onto the legacy 0.5 m lattice.
+    for(POSITION pos=route.route.route.GetHeadPosition();pos;) {
+        const auto& node=route.route.route.GetNext(pos);SWalkerWaypoint p;
+        p.point=node.point;p.speed=CPlot2D(0,0);p.nTileX=node.nX;p.nTileY=node.nY;
+        p.fpSpeed=(std::max)(.0001f,fpBaseSpeed*node.wSpeed256/N_RT_SPEED);points.Add(p);
     }
-    else
-        StartRotation(points[0].speed.x, points[0].speed.y);
-    SetCheckTiles(route);
+    for(int i=0;i<points.GetSize()-1;++i) {
+        float length=Distance(points[i].point,points[i+1].point);
+        if(length>.00001f)points[i].speed=(points[i+1].point-points[i].point)/length;
+    }
+    if(points.GetSize()>1) {
+        points[points.GetSize()-1].speed=points[points.GetSize()-2].speed;
+        StartRotation(points[0].speed.x,points[0].speed.y);
+    } else fpDeltaAngle=0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CRouteWalker::StartRotation(float fpX, float fpY, float fpAngSpeed)
@@ -380,75 +310,24 @@ bool CRouteWalker::GetRotation(float fpTime, CPlot3D &vec)
 /////////////////////////////////////////////////////////////////////////////////////
 // получить направление поворота и, возможно, позицию юнита через fpTime после начала
 // движения
-bool CRouteWalker::GetMovement(float fpTime, bool &bRotating, CPlot3D &pos, CPlot3D &vec,
-                               float &fpSpeed, int &nTileX, int &nTileY)
+bool CRouteWalker::GetMovement(float time, bool &rotating, CPlot3D &pos, CPlot3D &vec, float &speed, int &tileX, int &tileY)
 {
-    // check for cache
-    if (cache.IsValid(fpTime))
-    {
-        bRotating = false;
-        cache.GetPos(fpTime, pos, vec, fpSpeed);
-        nTileX = points[cache.nSegment + 1].nTileX;
-        nTileY = points[cache.nSegment + 1].nTileY;
-        return true;
+    if(points.GetSize()<2){speed=0;return false;}
+    float angle=fpStartAngle;
+    for(int i=0;i<points.GetSize()-1;++i) {
+        auto& a=points[i];auto& b=points[i+1];
+        float desired=a.GetAngle(),delta=desired-angle;
+        while(delta>FP_PI)delta-=FP_2PI;while(delta<-FP_PI)delta+=FP_2PI;
+        float turn=std::abs(delta)/(std::max)(.0001f,fpAngularSpeed);
+        pos.x=a.point.x;pos.y=a.point.y;tileX=a.nTileX;tileY=a.nTileY;
+        if(time<turn){rotating=true;angle+=delta*time/(std::max)(.0001f,turn);vec.x=std::cos(angle);vec.y=std::sin(angle);speed=0;return true;}
+        time-=turn;angle=desired;float length=Distance(a.point,b.point),duration=length/a.fpSpeed;
+        if(time<duration){float f=time/(std::max)(.00001f,duration);pos.x=a.point.x+(b.point.x-a.point.x)*f;pos.y=a.point.y+(b.point.y-a.point.y)*f;
+            rotating=false;vec.x=a.speed.x;vec.y=a.speed.y;speed=a.fpSpeed;tileX=b.nTileX;tileY=b.nTileY;return true;}
+        time-=duration;
     }
-    //
-    float fpCurTime;
-    int nSegment;
-    if (!cache.IsValid() || cache.fpStartTime > fpTime)
-    {
-        bRotating = true;
-        // первая фаза - поворот
-        fpActiveAngularSpeed = fpAngularSpeed;
-        fpCurTime = fabs(fpDeltaAngle / fpActiveAngularSpeed); // time to rotate
-        if (fpTime <= fpCurTime)
-        {
-            GetRotation(fpTime, vec);
-            return true;
-        }
-        nSegment = 0;
-    }
-    else
-    {
-        fpCurTime = cache.fpStartTime;
-        nSegment = cache.nSegment;
-    }
-    // если поворот уже произошел, то ищем сегмент на котором находится юнит и возвращаем информацию
-    // по этому сегменту
-    bRotating = false;
-    float fpSaveCache = cache.fpStartTime;
-    for (int i = nSegment; i < GetSegmentsNumber(); i++)
-    {
-        cache.fpStartTime = fpCurTime;
-        SRouteSegment &segment = cache.segment;
-
-        GetSegment(i, segment);
-        ASSERT(cache.segment.fpAlphaInc > 0.0001);
-        fpCurTime += segment.fpAlpha / segment.fpAlphaInc;
-        if (fpTime <= fpCurTime)
-        {
-            // interval fits, fill in cache
-            cache.CalcPolys();
-            cache.fpFinishTime = fpCurTime;
-            cache.nSegment = i;
-            //
-            cache.GetPos(fpTime, pos, vec, fpSpeed);
-            nTileX = points[cache.nSegment + 1].nTileX;
-            nTileY = points[cache.nSegment + 1].nTileY;
-            return true;
-        }
-    }
-    cache.fpStartTime = fpSaveCache;
-    // юнит оказывается прошел весь маршрут, вернем последнюю точку маршрута
-    fpSpeed = 0;
-    pos.x = points[points.GetSize() - 1].point.x;
-    pos.y = points[points.GetSize() - 1].point.y;
-    vec.x = points[points.GetSize() - 1].speed.x;
-    vec.y = points[points.GetSize() - 1].speed.y;
-    vec.z = 0;
-    nTileX = points[points.GetSize() - 1].nTileX;
-    nTileY = points[points.GetSize() - 1].nTileY;
-    return false;
+    auto& last=points[points.GetSize()-1];pos.x=last.point.x;pos.y=last.point.y;vec.x=last.speed.x;vec.y=last.speed.y;vec.z=0;
+    tileX=last.nTileX;tileY=last.nTileY;speed=0;rotating=false;return false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // NOTE, can be speed up immensely by caching...
@@ -762,6 +641,7 @@ void CAIFullRoute::UpdateTo(CUpdateHistory &pkt)
         SRouteUnit &unit = route.route.GetNext(pos);
         FormUpdateUnit(updateUnit, unit, nPrevX, nPrevY);
         WriteUpdateUnit(pkt, updateUnit, unit);
+        pkt.WriteDirect(&unit.point.x,4);pkt.WriteDirect(&unit.point.y,4);pkt.WriteDirect(&unit.supportZ,4);pkt.WriteDirect(&unit.terrain,2);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -787,6 +667,7 @@ void CAIFullRoute::UpdateFrom(CUpdateHistory &pkt)
     {
         SRouteUnit &unit = route.route.GetAt(route.route.AddTail(SRouteUnit()));
         ReadUpdateUnit(pkt, unit, nPrevX, nPrevY);
+        pkt.ReadDirect(&unit.point.x,4);pkt.ReadDirect(&unit.point.y,4);pkt.ReadDirect(&unit.supportZ,4);pkt.ReadDirect(&unit.terrain,2);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////

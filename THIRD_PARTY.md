@@ -92,3 +92,11 @@ mark usage. This documentation notice does not replace those application
 requirements. No notification, trademark approval or acceptance on behalf
 of the owner is performed by the build. Review distribution/EULA conditions
 and resolve these obligations before public release.
+
+## RecastNavigation (X64NAV01)
+
+Recast/Detour, official tag v1.6.0, commit 6dc1667f580357e8a2154c28b7867bea7e8ad3a7.
+Source: https://github.com/recastnavigation/recastnavigation/releases/tag/v1.6.0 .
+Archive SHA-256: 8b50c62177249554b226514b307e6c529934a62b3926822777bf6abb8906a155.
+Unmodified Recast and Detour modules only, statically compiled x64 /MD, DT_POLYREF64.
+zlib license: external/recastnavigation/License.txt. Pin: third_party/recastnavigation.lock.json.

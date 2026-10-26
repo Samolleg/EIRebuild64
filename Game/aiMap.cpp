@@ -98,7 +98,7 @@ void SAIPath::GetWholeRoute(CAIFullRoute &res)
         return;
     res.route += toGo;
     res.route.EraseDuplicates();
-    res.SetSpeed();
+    // Preview uses the same speeds as execution.
     res.MakeMovement(ptFinish.x, ptFinish.y);
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -759,12 +759,14 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
            pMapHeader + sizeof(SMapHeader) + mapHeader.wObjectsCount * sizeof(SMapObject),
            int(mapHeader.dwTiles) * sizeof(int));
     //
+    navigation.Source("mpr:header", pMapHeader, dwHdSize);
     mapRes.CloseFile(pMapHeader);
     // Creating tiles info table
     CMappedResource aiRes;
     if (!aiRes.OpenResource(CString(theWorldServer.GetResourcePath()) + "aiinfo.res"))
         return ReportError("Unable to read file aiinfo.res");
-    LPBYTE pLoc = aiRes.GetFile("tileDesc.reg");
+    DWORD navMaterialSize=0;
+    LPBYTE pLoc = aiRes.GetFile("tileDesc.reg", &navMaterialSize);
     if (!pLoc)
         return ReportError("CAIMap::Load.\n Can't open file \"tileDesc.reg\"");
     CFileRegistry aiReg;
@@ -803,6 +805,7 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
         tilesInfo[nNmb].fpFootstepStrengths[2] = aiReg.GetInt(sections[i], "StepSound", 100) /
                                                  100.0f;
     }
+    navigation.Source("materials", pLoc, navMaterialSize);
     aiReg.Close();
     aiRes.CloseFile(pLoc);
     aiRes.CloseResource();
@@ -848,6 +851,18 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
 
             pSector += sizeof(header);
 
+            navigation.Source(pszSectorName, pBaseSector, dwSize);
+            const auto* navVertices=reinterpret_cast<const SSectVert2*>(pSector);
+            auto vertex=[&](int x,int y) {
+                const auto& v=navVertices[y*N_V_PSECTOR_S+x];
+                return Navigation::Point{GetCoord(v.sbXOff,float(i*N_CL_PSECTOR_S+x)*FP_CL_MP_SIZE),
+                    GetCoord(v.sbYOff,float(j*N_CL_PSECTOR_S+y)*FP_CL_MP_SIZE),GetFloatValueByRange(v.usZ,fpMaxZ)};
+            };
+            for(int y=0;y<N_CL_PSECTOR_S;++y)for(int x=0;x<N_CL_PSECTOR_S;++x) {
+                auto lu=vertex(x,y),ru=vertex(x+1,y),ld=vertex(x,y+1),rd=vertex(x+1,y+1);
+                navigation.Terrain().ground.push_back({lu,ru,rd,1});
+                navigation.Terrain().ground.push_back({lu,rd,ld,1});
+            }
             SSectVert2 *pVert2 = (SSectVert2 *)pSector;
             // Reading heights and depths
             for (int js = 0; js < N_CL_PSECTOR_S; js++)
@@ -1017,6 +1032,13 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
     // Initialize passailities tables
     CalcDefaultPassabilities();
     InitializeBasicTerrainCosts();
+    // Material boundaries are retained by Recast. This first slice imports the
+    // standing-human ground policy; the complete class/water policy is NAV04.
+    for(auto& triangle:navigation.Terrain().ground) {
+        int x=Float2AITile((triangle.a.x+triangle.b.x+triangle.c.x)/3);
+        int y=Float2AITile((triangle.a.y+triangle.b.y+triangle.c.y)/3);
+        triangle.area=TileInBounds(x,y)?BYTE((map[y][x].dwTerrains>>12)&15):0;
+    }
     // Initialize rest objects
     dLocks.SetSizes(nMapSizeX, nMapSizeY);
     dLocks.FillZero();
@@ -1338,6 +1360,7 @@ bool CAIMap::AddRemoveMOLowLevel(CMapObject *pObject, bool bRemove)
 
     int nBodyPart, i, j, k, l;
     // test if the object is Human set only one AI tile under the object
+    navigation.Object(pObject,bRemove,*this);
     int nID = pObject->GetID();
     int nX = Float2AITile(pObject->GetCP().x);
     int nY = Float2AITile(pObject->GetCP().y);
@@ -1515,23 +1538,18 @@ bool CAIMap::RemoveDangerArea(SAIObjectPlacement &place)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutObject(CMapObject *pMapObject, int nX, int nY)
 {
-    EAILock lock;
-    if (pMapObject->WhoAmI() != HPC_UNIT)
-        return true;
-    if (NotLocked(pMapObject, nX, nY, lock))
-        return TerrainIsPassable(((CUnit *)pMapObject)->GetAIClass(), nX, nY);
-    return false;
+    if(pMapObject->WhoAmI()!=HPC_UNIT)return true;
+    if(!TileInBounds(nX,nY))return false;
+    auto* unit=static_cast<CUnit*>(pMapObject);Navigation::Point point{AITile2Meter(nX+.5f),AITile2Meter(nY+.5f),GetTileHeight(nX,nY)};
+    return navigation.CanPlace(unit,point) && CheckCircleCollision(unit,CPlot3D(point.x,point.y,unit->GetCP().z))==nullptr;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutObject(CMapObject *pMapObject, const CPlot3D &p)
 {
-    bool bRv;
-    if (pMapObject->WhoAmI() != HPC_UNIT)
-        return true;
-    RemoveObject(pMapObject);
-    bRv = CanPutObject(pMapObject, Float2AITile(p.x), Float2AITile(p.y));
-    AddObject(pMapObject);
-    return bRv;
+    if(pMapObject->WhoAmI()!=HPC_UNIT)return true;
+    if(!TileInBounds(Float2AITile(p.x),Float2AITile(p.y)))return false;
+    auto* unit=static_cast<CUnit*>(pMapObject);
+    return navigation.CanPlace(unit,{p.x,p.y,GetOriginalTileHeight(p)}) && CheckCircleCollision(unit,p)==nullptr;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // locking operations
@@ -1640,31 +1658,12 @@ bool CAIMap::NotLocked(CMapObject *pObject, int nX, int nY, EAILock &res)
 // можно при текущем раскладе блокировок юниту pUnit переместится на (nX, nY)
 bool CAIMap::CanMoveTo(CUnit *pUnit, int nX, int nY, EAILock &res)
 {
-    if (nX < 0 || nX >= XSize() || nY < 0 || nY >= YSize())
-        return false;
-    int nSrcX, nSrcY;
-    BYTE nCheck = GetUnitLockCheck(pUnit);
-    res = AI_LOCK_STATIC;
-    if (map[nY][nX].IsLocked(nCheck))
-    {
-        // этот тайл похоже залокан, но идти в сторону неувеличения залоканности все же разрешается
-        nSrcX = Float2AITile(pUnit->GetCP().x);
-        nSrcY = Float2AITile(pUnit->GetCP().y);
-        if (map[nY][nX].nLocked > map[nSrcY][nSrcX].nLocked)
-            return false;
-    }
-    res = AI_LOCK_DYNAMIC;
-    if (dLocks[nY][nX] > nCheck)
-    {
-        // этот тайл похоже залокан динамически, но идти в сторону неувеличения залоканности все же
-        // разрешается
-        nSrcX = Float2AITile(pUnit->GetCP().x);
-        nSrcY = Float2AITile(pUnit->GetCP().y);
-        if (dLocks[nY][nX] > dLocks[nSrcY][nSrcX])
-            return false;
-    }
-    res = AI_LOCK_NO;
-    return true;
+    res=AI_LOCK_STATIC;if(!TileInBounds(nX,nY))return false;
+    auto from=navigation.Position(pUnit,*this);Navigation::Location location;
+    Navigation::Point target{AITile2Meter(nX+.5f),AITile2Meter(nY+.5f),from.z};
+    if(!navigation.Step(pUnit,from,target,location))return false;
+    if(CheckCircleCollision(pUnit,CPlot3D(target.x,target.y,pUnit->GetCP().z))){res=AI_LOCK_DYNAMIC;return false;}
+    res=AI_LOCK_NO;return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CLockMatrix *CAIMap::GetUnitLockMatrix(float fpRadius)
@@ -2084,38 +2083,43 @@ bool CAIMap::BiWaveFindPath(CAIRoute &res, int *nResCost)
     return bRv;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::FindPath(CUnit *pUnit, int nSrcX, int nSrcY, int nDstX, int nDstY, CAIRoute &res,
-                      int *nResCost)
+bool CAIMap::NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& result, float maxLength, float goalRadius, int aiClass, Navigation::Location* source)
 {
-    ASSERT(nSrcX != nDstX || nSrcY != nDstY);
-    res.Clear();
-    if (nSrcX == nDstX && nSrcY == nDstY)
-        return false;
-    if (!wave.StartSearch(pUnit, nSrcX, nSrcY, nDstX, nDstY))
-        return false;
-    if (!waveBack.StartSearch(pUnit, nDstX, nDstY, nSrcX, nSrcY))
-    {
-        wave.CleanUp();
-        return false;
+    result.Clear();
+    float costs[16];SRouteCostsInfo info;
+    if(unit)GetRouteCostsPathFind(unit,info);else GetRouteCosts(aiClass,info);
+    costs[0]=1;for(int i=1;i<16;++i)costs[i]=float(info.pTerrainCosts[i])/1024.f;
+    const auto route=navigation.Find(unit,from,goal,maxLength,goalRadius,costs,aiClass);
+    if(route.status!=Navigation::Status::Complete)return false;
+    if(source&&!route.points.empty())*source=route.points.front();
+    auto append=[&](Navigation::Point p, unsigned area) {
+        SRouteUnit node(WORD(Float2AITile(p.x)),WORD(Float2AITile(p.y)));
+        node.point=CPlot2D(Meter2AITile(p.x),Meter2AITile(p.y));node.supportZ=p.z;node.terrain=WORD(area);
+        if(result.route.GetCount()&&Distance(result.route.GetTail().point,node.point)<.0001f)return;
+        result.route.AddTail(node);
+    };
+    for(size_t i=0;i<route.points.size();++i) {
+        auto p=route.points[i].position;
+        if(i){auto a=route.points[i-1].position;int n=(std::max)(1,int(std::ceil(Navigation::Distance(a,p)/.25f)));
+            if(result.route.GetCount()+n>60000){result.Clear();return false;}
+            for(int k=1;k<n;++k){float f=float(k)/n;append({a.x+(p.x-a.x)*f,a.y+(p.y-a.y)*f,a.z+(p.z-a.z)*f},route.points[i-1].area);}}
+        append(p,route.points[i].area);
     }
-    return BiWaveFindPath(res, nResCost);
+    return result.route.GetCount()>0;
+}
+bool CAIMap::FindPath(CUnit *pUnit, int nSrcX, int nSrcY, int nDstX, int nDstY, CAIRoute &res, int *nResCost)
+{
+    auto from=navigation.Position(pUnit,*this);from.x=AITile2Meter(nSrcX+.5f);from.y=AITile2Meter(nSrcY+.5f);
+    Navigation::Point goal{AITile2Meter(nDstX+.5f),AITile2Meter(nDstY+.5f),GetTileHeight(nDstX,nDstY)};
+    bool ok=NavRoute(pUnit,from,goal,res);if(nResCost)*nResCost=ok?int(res.route.GetCount()):N_INFINITE;return ok;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::FindPath(int nAIClass, int nSrcX, int nSrcY, int nDstX, int nDstY, CAIRoute &res,
-                      int *nResCost)
+bool CAIMap::FindPath(int nAIClass, int nSrcX, int nSrcY, int nDstX, int nDstY, CAIRoute &res, int *nResCost)
 {
-    ASSERT(nSrcX != nDstX || nSrcY != nDstY);
-    res.Clear();
-    if (nSrcX == nDstX && nSrcY == nDstY)
-        return false;
-    if (!wave.StartSearch(nAIClass, nSrcX, nSrcY, nDstX, nDstY))
-        return false;
-    if (!waveBack.StartSearch(nAIClass, nDstX, nDstY, nSrcX, nSrcY))
-    {
-        wave.CleanUp();
-        return false;
-    }
-    return BiWaveFindPath(res, nResCost);
+    if(!TileInBounds(nSrcX,nSrcY)||!TileInBounds(nDstX,nDstY))return false;
+    Navigation::Point from{AITile2Meter(nSrcX+.5f),AITile2Meter(nSrcY+.5f),GetTileHeight(nSrcX,nSrcY)};
+    Navigation::Point goal{AITile2Meter(nDstX+.5f),AITile2Meter(nDstY+.5f),GetTileHeight(nDstX,nDstY)};
+    bool ok=NavRoute(nullptr,from,goal,res,1.e6f,0,nAIClass);if(nResCost)*nResCost=ok?int(res.route.GetCount()):N_INFINITE;return ok;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIMap::BackTracePath(int nX, int nY, CAIRoute &res)
@@ -2213,193 +2217,26 @@ struct SWishPoint
     }
 };
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::FindGraphPath(CUnit *pUnit, int nSrcX, int nSrcY, int nDstX, int nDstY, SAIPath &res,
-                           bool bTryWalkAround, int nMaxPathLength)
+bool CAIMap::FindGraphPath(CUnit *pUnit, int nSrcX, int nSrcY, int nDstX, int nDstY, SAIPath &res, bool bTryWalkAround, int nMaxPathLength)
 {
-    int nCurX, nCurY;         // точка из которой производится поиск пути
-    int nReachedX, nReachedY; // позиция до которой алгоритм смог дойти на текущем этапе
-    bool bRv, bRouteFailed = false, bWaypointReached;
-    POSITION pos, posFail, posCur;
-    int nWaypointsCount;
-    CAIRoute gRoute;
-    static CAIGridMesh gridMesh;
-    SAIGridPoint *gridPoint;
-    int nGridCount, i;
-    int nUnitClass;
-
-    ASSERT(nSrcX != nDstX || nSrcY != nDstY);
-
-    nUnitClass = pUnit->GetAIClass();
-    res.toGo.Clear();
-    bRv = aiGraph.FindGraphPath(nUnitClass, nSrcX, nSrcY, nDstX, nDstY, gRoute,
-                                res.excludeVertices);
-    if (!bRv)
-        return false;
-    if (gRoute.route.GetCount() * N_AI_GRAPH_CELL_SIZE > nMaxPathLength)
-        return false;
-    ClearMapForLongBackTrace(gRoute);
-    nReachedX = nCurX = nSrcX;
-    nReachedY = nCurY = nSrcY;
-    // create a wish points list
-    CList<SWishPoint> wish;
-    pos = gRoute.route.GetHeadPosition();
-    posCur = pos;
-    while (pos)
-    {
-        posFail = posCur;
-        posCur = pos;
-        SRouteUnit &unit = gRoute.route.GetNext(pos);
-        int nX = unit.nX * N_AI_GRAPH_CELL_SIZE + aiGraph.places[nUnitClass][unit.nY][unit.nX].nX;
-        int nY = unit.nY * N_AI_GRAPH_CELL_SIZE + aiGraph.places[nUnitClass][unit.nY][unit.nX].nY;
-        wish.AddTail(SWishPoint(nX, nY, posFail));
-    }
-    wish.AddTail(SWishPoint(nDstX, nDstY, posCur));
-    // obtain list of squares to find reached point
-    gridPoint = gridMesh.GetGridPoints(1e20f, nGridCount);
-    // walk along wish list
-    pos = wish.GetHeadPosition();
-    nWaypointsCount = 0;
-    bWaypointReached = true;
-    while (pos)
-    {
-        SWishPoint &wp = wish.GetNext(pos);
-        if (wp.nX == nCurX && wp.nY == nCurY)
-            continue;
-
-        if (nWaypointsCount == 0)
-            bRv = wave.StartSearch(pUnit, nCurX, nCurY, wp.nX, wp.nY);
-        else
-            bRv = wave.ContinueSearch(nCurX, nCurY, wp.nX, wp.nY, !bWaypointReached);
-
-        ASSERT(bRv);
-        nWaypointsCount++;
-
-        // запустим pathfinder на новом окне
-        if (bRv)
-        {
-            if (wave.RunSimpleOneWave(wp.nX, wp.nY))
-            {
-                bWaypointReached = true;
-                nReachedX = wp.nX;
-                nReachedY = wp.nY;
-            }
-            else
-            {
-                bWaypointReached = false;
-                // получим достигнутую точку
-                bRv = false;
-                for (i = 0; i < nGridCount; i++)
-                {
-                    int nTestX = wp.nX + gridPoint[i].nDX, nTestY = wp.nY + gridPoint[i].nDY;
-                    if (wave.GetPermanentCost(nTestX, nTestY) < N_INFINITE)
-                    {
-                        nReachedX = nTestX;
-                        nReachedY = nTestY;
-                        bRv = true;
-                        break;
-                    }
-                }
-            }
-        }
-        // если последняя точка пути, то дойдем до конца
-        if (bRv && !pos)
-        {
-            // а может мы уже дошли до конца ?
-            if (wave.GetPermanentCost(nDstX, nDstY) == N_INFINITE)
-            {
-                nCurX = nReachedX;
-                nCurY = nReachedY;
-                wave.CopyBackDirs();
-                bRv = wave.ContinueSearch(nCurX, nCurY, nDstX, nDstY, true);
-                ASSERT(bRv);
-                if (bRv)
-                {
-                    wave.RunSquare();
-                    bRv = wave.GetPermanentCost(nDstX, nDstY) != N_INFINITE;
-                }
-            }
-        }
-        // если нас постигла неудача, то в зависимости от расстояния
-        if (!bRv)
-        {
-            if (ManhattenDistance(nSrcX, nSrcY, nReachedX, nReachedY) >
-                1.5 * N_AI_MAX_DISTANCE_FROM_GRAPH_PATH) // nWaypointsCount > 3 )
-            {
-                wave.CopyBackDirs();
-                nDstX = nReachedX;
-                nDstY = nReachedY;
-                bRouteFailed = true; // удалось пройти только часть маршрута
-                res.bRouteFailed = true;
-                res.ptFinish = CPlot2D(float(nDstX) + 0.5f, float(nDstY) + 0.5f);
-                bRv = true;
-                break;
-            }
-            else
-            {
-                wave.CleanUp();
-                if (bTryWalkAround)
-                {
-                    // уберем предыдущую вершину графа из списка возможных для пути и попробуем еще
-                    // раз
-                    SRouteUnit &firstGUnit = gRoute.route.GetAt(wp.pos);
-                    res.excludeVertices.Add(SAIGraphVertice(firstGUnit.nX, firstGUnit.nY));
-                    return FindGraphPath(pUnit, nSrcX, nSrcY, nDstX, nDstY, res, bTryWalkAround,
-                                         nMaxPathLength);
-                }
-                return false;
-            }
-        }
-        nCurX = nReachedX;
-        nCurY = nReachedY;
-        wave.CopyBackDirs();
-    }
-    if (bRv)
-    {
-        tempMap[nSrcY][nSrcX] = NULL_DIR;
-        BackTracePath(nDstX, nDstY, res.toGo);
-        ASSERT(res.toGo.route.GetHead().nX == nSrcX && res.toGo.route.GetHead().nY == nSrcY);
-        if (res.toGo.route.GetHead().nX != nSrcX || res.toGo.route.GetHead().nY != nSrcY)
-            bRv = false;
-    }
-    wave.CleanUp();
-    return bRv;
+    if(!TileInBounds(nSrcX,nSrcY)||!TileInBounds(nDstX,nDstY))return false;
+    auto from=navigation.Position(pUnit,*this);from.x=AITile2Meter(nSrcX+.5f);from.y=AITile2Meter(nSrcY+.5f);
+    Navigation::Point goal{AITile2Meter(nDstX+.5f),AITile2Meter(nDstY+.5f),GetTileHeight(nDstX,nDstY)};
+    return NavRoute(pUnit,from,goal,res.toGo,AITile2Meter(float(nMaxPathLength)));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIMap::CalcSpeeds(CUnit *pUnit, CAIRoute &route)
 {
-    SRouteCostsInfo speedsInfo, costsInfo;
-    GetRouteSpeeds(pUnit, speedsInfo);
-    GetRouteCosts(pUnit, costsInfo);
-    POSITION pos = route.route.GetHeadPosition();
-    while (pos)
-    {
-        int nSpeed, nMul, nCost;
-        SRouteUnit &cur = route.route.GetNext(pos);
-        SAITile &srcTile = map[cur.nY][cur.nX];
-        if (!pos)
-        {
-            nCost = srcTile.GetTerrainCost(costsInfo);
-            cur.SetFlags(srcTile.bWaterFlag, nCost > N_AI_RUN_COST_LIMIT);
-            break;
-        }
-        SRouteUnit &next = route.route.GetAt(pos);
-        EAIDirection dir = GetRouteDirection(cur, next);
-
-        SAITile &dstTile = map[next.nY][next.nX];
-
-        nSpeed = dstTile.GetTerrainCost(speedsInfo);
-        nCost = dstTile.GetTerrainCost(costsInfo);
-        ASSERT(nSpeed > 0);
-        if (nSpeed < 0)
-            nSpeed = 1024;
-        nMul = speedsInfo.pElevationCosts[dstTile.nHeight - srcTile.nHeight];
-        ASSERT(nMul > 0);
-        if (nMul < 0)
-            nSpeed = N_RT_SPEED;
-        else
-            nSpeed = nSpeed * N_RT_SPEED / nMul;
-        cur.wSpeed256 = nSpeed;
-        cur.SetFlags(dstTile.bWaterFlag, nCost > N_AI_RUN_COST_LIMIT);
+    SRouteCostsInfo speeds,costs;GetRouteSpeeds(pUnit,speeds);GetRouteCosts(pUnit,costs);
+    for(POSITION pos=route.route.GetHeadPosition();pos;) {
+        auto& current=route.route.GetNext(pos);const auto& next=pos?route.route.GetAt(pos):current;
+        if(!TileInBounds(current.nX,current.nY)||!TileInBounds(next.nX,next.nY))continue;
+        const int area=current.terrain;int speed=nTerrainSpeeds[area],cost=nTerrainCosts[area];
+        float distance=AITile2Meter(Distance(current.point,const_cast<CPlot2D&>(next.point)));
+        float dz=next.supportZ-current.supportZ,angle=std::atan2(std::abs(dz),(std::max)(.001f,distance));
+        float multiplier=std::pow(1+std::pow(std::sin(angle),2.f),2.f);if(dz<0)multiplier=1/std::sqrt(multiplier);
+        current.wSpeed256=WORD((std::max)(1,(std::min)(65535,int(speed*N_RT_SPEED/1024.f/multiplier))));
+        current.SetFlags(false,cost>N_AI_RUN_COST_LIMIT);
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2426,219 +2263,40 @@ bool CAIMap::CanRun(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutUnit(CUnit *pUnit)
 {
-    int nDstX = Float2AITile(pUnit->GetCP().x);
-    int nDstY = Float2AITile(pUnit->GetCP().y);
-    if (!TileInBounds(nDstX, nDstY))
-        return false;
-    return TerrainIsPassable(pUnit->GetAIClass(), nDstX, nDstY);
+    return navigation.CanPlace(pUnit,navigation.Position(pUnit,*this));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutUnit(int nAIClass, const CPlot3D &ptPos)
 {
-    int nDstX = Float2AITile(ptPos.x);
-    int nDstY = Float2AITile(ptPos.y);
-    if (!TileInBounds(nDstX, nDstY))
-        return false;
-    return TerrainIsPassable(nAIClass, nDstX, nDstY);
+    if(!TileInBounds(Float2AITile(ptPos.x),Float2AITile(ptPos.y)))return false;
+    return navigation.CanPlace(nullptr,{ptPos.x,ptPos.y,GetOriginalTileHeight(ptPos)},nAIClass);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::CanPutUnitRelaxed(CUnit *pUnit)
 {
-    const int nD[9][2] = { { 0, 0 }, { 1, 0 },  { -1, 0 }, { 0, 1 },  { 0, -1 },
-                           { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } };
-    int nDstX = Float2AITile(pUnit->GetCP().x);
-    int nDstY = Float2AITile(pUnit->GetCP().y);
-    if (!TileInBounds(nDstX, nDstY))
-        return false;
-    int nAIClass = pUnit->GetAIClass();
-    int *pElevationCost = nAIClass == 0 ? nElevationMultipliersFly.GetData() +
-                                              nElevationMultipliersFly.GetSize() / 2
-                                        : nElevationMultipliers.GetData() +
-                                              nElevationMultipliers.GetSize() / 2;
-    int nH = map[nDstY][nDstX].nHeight;
-    for (int i = 0; i < 9; i++)
-    {
-        int nX = nDstX + nD[i][0], nY = nDstY + nD[i][1];
-        if (!TileInBounds(nX, nY))
-            continue;
-        if (!TerrainIsPassable(nAIClass, nX, nY))
-            continue;
-        int nH1 = map[nY][nX].nHeight;
-        if (pElevationCost[nH1 - nH] > 0)
-            return true;
-    }
-    return false;
+    return CanPutUnit(pUnit);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::FindUnitPosition(CUnit *pUnit, const CPlot3D &ptBasePoint, CPlot3D &ptResPos)
 {
-    static CAIGridMesh gridMesh;
-    SAIGridPoint *gridPoint;
-    int nGridCount, i;
-
-    int nAIClass = pUnit->GetAIClass();
-    int nSrcX = Float2AITile(ptBasePoint.x);
-    int nSrcY = Float2AITile(ptBasePoint.y);
-    if (nSrcX < 1 || nSrcY < 1 || nSrcX >= XSize() - 1 || nSrcY >= YSize() - 1)
-        return false;
-    AIGRAPHNODECOLOR color = aiGraph.GetColor(nAIClass, nSrcX, nSrcY);
-    int nDstX = Float2AITile(ptResPos.x);
-    int nDstY = Float2AITile(ptResPos.y);
-
-    // obtain list of squares to find passable point to put unit on
-    gridPoint = gridMesh.GetGridPoints(1e20f, nGridCount);
-    for (i = 0; i < nGridCount; i++)
-    {
-        EAILock lock;
-        int nX = nDstX + gridPoint[i].nDX;
-        int nY = nDstY + gridPoint[i].nDY;
-        if (NotLocked(pUnit, nX, nY, lock) && TerrainIsPassable(nAIClass, nX, nY))
-        {
-            AIGRAPHNODECOLOR colorNew = aiGraph.GetColor(nAIClass, nX, nY);
-            // if ( (color == 0 && colorNew != 0) || (color != 0 && colorNew == color) )
-            if ((color == 0) || (color != 0 && colorNew == color))
-            {
-                if (i != 0)
-                {
-                    ptResPos.x = AITile2Meter(nX + 0.5f);
-                    ptResPos.y = AITile2Meter(nY + 0.5f);
-                }
-                return true;
-            }
-        }
-    }
-    return false;
+    auto from=navigation.Position(pUnit,*this);from.x=ptBasePoint.x;from.y=ptBasePoint.y;from.z=GetOriginalTileHeight(ptBasePoint);
+    auto route=navigation.Find(pUnit,from,{ptResPos.x,ptResPos.y,GetOriginalTileHeight(ptResPos)},1.e6f,1.f);
+    if(route.status!=Navigation::Status::Complete||route.points.empty())return false;
+    auto p=route.points.back().position;ptResPos.x=p.x;ptResPos.y=p.y;return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::FindPathDestination(CUnit *pUnit, CPlot3D &finish, bool bAccountColor,
-                                 float fpMinDistance)
+bool CAIMap::FindPathDestination(CUnit *pUnit, CPlot3D &finish, bool bAccountColor, float fpMinDistance)
 {
-    int nDstX = Float2AITile(finish.x);
-    int nDstY = Float2AITile(finish.y);
-    finish.x = Meter2AITile(finish.x);
-    finish.y = Meter2AITile(finish.y);
-    // if the destination tile is not passable => move the destination tile closer to unit
-    if (!bAccountColor && CanPutObject(pUnit, nDstX, nDstY))
-        return true;
-    CPlot3D src = pUnit->GetCP();
-    int nSrcX = Float2AITile(src.x);
-    int nSrcY = Float2AITile(src.y);
-
-    int nAIClass = pUnit->GetAIClass();
-    AIGRAPHNODECOLOR color;
-    if (bAccountColor)
-    {
-        // вычислим цвет исходной позиции
-        color = aiGraph.GetColor(nAIClass, nSrcX, nSrcY);
-        // очистим место под кеширование результатов проверки цвета
-        int nSizeX = abs(nDstX - nSrcX) + 1;
-        int nSizeY = abs(nDstY - nSrcY) + 1;
-        int nMinX, nMinY, nMaxX, nMaxY;
-        nMinX = nDstX - nSizeX;
-        nMinY = nDstY - nSizeY;
-        nMaxX = nDstX + nSizeX + 1;
-        nMaxY = nDstY + nSizeY + 1;
-        nMinX = Max(0, nMinX);
-        nMaxX = Min(XSize(), nMaxX);
-        nMinY = Max(0, nMinY);
-        nMaxY = Min(YSize(), nMaxY);
-        for (int y = nMinY; y < nMaxY; y++)
-        {
-            for (int x = nMinX; x < nMaxX; x++)
-                tempMap[y][x] = 0;
-        }
-    }
-    // setup line parameters
-    int nDeltaX = nDstX - nSrcX, nDeltaY = nDstY - nSrcY, nStepNumber = -1;
-    float fpOffsetX = 0, fpOffsetY = 0;
-    if (abs(nDeltaX) > abs(nDeltaY))
-    {
-        fpOffsetX = 1.0f;
-        fpOffsetY = float(nDeltaY) / abs(nDeltaX); //|...| < 1
-        nStepNumber = abs(nDeltaX);
-        if (nDeltaX < 0)
-            fpOffsetX = -fpOffsetX;
-    }
-    else
-    {
-        fpOffsetY = 1.0f;
-        fpOffsetX = float(nDeltaX) / abs(nDeltaY); //|...| < 1
-        nStepNumber = abs(nDeltaY);
-        if (nDeltaY < 0)
-            fpOffsetY = -fpOffsetY;
-    }
-    float fpOffsetX45, fpOffsetY45, fpMn;
-    fpOffsetX45 = 0.707f * fpOffsetX - 0.707f * fpOffsetY;
-    fpOffsetY45 = 0.707f * fpOffsetX + 0.707f * fpOffsetY;
-    // equality of distances for all directions is more important then walking by exactly one tile
-    if (fabs(fpOffsetX45) > fabs(fpOffsetY45))
-        fpMn = 1 / fabs(fpOffsetX45);
-    else
-        fpMn = 1 / fabs(fpOffsetY45);
-    if (fpMn < 1)
-    {
-        fpOffsetX45 *= fpMn;
-        fpOffsetY45 *= fpMn;
-        fpOffsetY *= fpMn;
-        fpOffsetX *= fpMn;
-    }
-
-    // search itself
-    const int NSearchDirs = 8;
-    float fp8Directions[NSearchDirs][2] = {
-        { fpOffsetX, fpOffsetY },       { fpOffsetX45, fpOffsetY45 }, { fpOffsetY45, -fpOffsetX45 },
-        { fpOffsetY, -fpOffsetX },      { -fpOffsetY, fpOffsetX },    { -fpOffsetY45, fpOffsetX45 },
-        { -fpOffsetX45, -fpOffsetY45 }, { -fpOffsetX, -fpOffsetY }
-    };
-    // perform search itself
-    int nStartDistance = Float2Int(Meter2AITile(fpMinDistance)) - 1;
-    nStartDistance = Max(0, nStartDistance);
-    for (int i = nStartDistance; i <= nStepNumber; i++)
-    {
-        const int nMaxDirs = (i == 0 ? 1 : NSearchDirs);
-        // if ne cannot go directly by the front - try to go from other sides
-        for (int j = 0; j < nMaxDirs; j++)
-        {
-            int nNewX = nDstX - Float2Int(fp8Directions[j][0] * i),
-                nNewY = nDstY - Float2Int(fp8Directions[j][1] * i);
-            if (CanPutObject(pUnit, nNewX, nNewY))
-            {
-                if (bAccountColor)
-                {
-                    char cRes = tempMap[nNewY][nNewX];
-                    if (cRes != 1)
-                    {
-                        if (cRes == 2)
-                            continue;
-                        if (!aiGraph.CheckColor(nAIClass, nNewX, nNewY, color, tempMap))
-                            continue;
-                    }
-                }
-                if (i != 0)
-                {
-                    finish.x = float(nNewX) + 0.5f;
-                    finish.y = float(nNewY) + 0.5f;
-                    if (finish.x > nDstX)
-                        finish.x -= 0.49f;
-                    if (finish.x < nDstX)
-                        finish.x += 0.49f;
-                    if (finish.y > nDstY)
-                        finish.y -= 0.49f;
-                    if (finish.y < nDstY)
-                        finish.y += 0.49f;
-                }
-                return true;
-            }
-        }
-    }
-    return false;
+    auto route=navigation.Find(pUnit,navigation.Position(pUnit,*this),{finish.x,finish.y,GetOriginalTileHeight(finish)},1.e6f,fpMinDistance);
+    if(route.status!=Navigation::Status::Complete||route.points.empty())return false;
+    auto p=route.points.back().position;finish.x=Meter2AITile(p.x);finish.y=Meter2AITile(p.y);return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIMap::CreatePathSegment(CUnit *pUnit, SAIPath &path)
 {
     CAIFullRoute &s = path.curSegment;
     s.Clear();
-    s.SetStartPos(pUnit->GetCP(), -pUnit->GetYAxis(), theWorldServer.GetSegmentTimeCounter() - 1);
+    s.SetStartPos(pUnit->GetCP(), -pUnit->GetYAxis(), static_cast<CWorldServer*>(pUnit->GetWorld())->GetSegmentTimeCounter() - 1);
     while (s.route.route.GetCount() < N_AI_MAX_SEGMENT_SIZE && path.toGo.route.GetCount() > 0)
         s.route.route.AddTail(path.toGo.route.RemoveHead());
     if (path.toGo.route.GetCount() > 0)
@@ -2646,113 +2304,28 @@ void CAIMap::CreatePathSegment(CUnit *pUnit, SAIPath &path)
         path.bFinished = false;
         SRouteUnit &last = s.route.route.GetTail();
         path.toGo.route.AddHead(last);
-        s.MakeMovement(last.nX + 0.5f, last.nY + 0.5f);
+        s.MakeMovement(last.point.x, last.point.y);
     }
     else
     {
         path.bFinished = true;
         s.MakeMovement(path.ptFinish.x, path.ptFinish.y);
     }
-    CalcSpeeds(pUnit, s.route);
+    // Speeds and exact corner points were assigned before segmenting.
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength,
-                     float fpMinDistance)
+bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength, float fpMinDistance)
 {
-    bool bRv, bLong;
-    CPlot3D start = pUnit->GetCP(), finish;
-    ASSERT(res.toGo.route.GetCount() == 0);
-    finish = ptDst;
-    res.ptDestination = ptDst;
-    // check for incorrect destination
-    if (((double)ptDst.x) * ptDst.x + ((double)ptDst.y) * ptDst.y > 1e8)
-        return false;
-    // уберем собственные локи
-    RemoveObject(pUnit);
-    // найдем точку назначения, если заданная недостижима
-    if (!FindPathDestination(pUnit, finish, false, fpMinDistance))
-    {
-        AddObject(pUnit);
-        return false;
-    }
-    start.x = Meter2AITile(start.x);
-    start.y = Meter2AITile(start.y);
-    res.ptFinish.x = finish.x;
-    res.ptFinish.y = finish.y;
-    if (sqr(start.x - finish.x) + sqr(start.y - finish.y) < 0.001f)
-    {
-        // расстояние на которое нужно пройти меньше 3-х сантиметров
-        AddObject(pUnit);
-        return false;
-    }
-    int nDstX = Float2AITile(AITile2Meter(finish.x));
-    int nDstY = Float2AITile(AITile2Meter(finish.y));
-    int nSrcX = Float2AITile(AITile2Meter(start.x));
-    int nSrcY = Float2AITile(AITile2Meter(start.y));
-    if (nSrcX == nDstX && nSrcY == nDstY)
-    {
-        // поход внутри одного тайла
-        if (CanPutObject(pUnit, nDstX, nDstY))
-        {
-            // успешный
-            res.toGo.AddHeadUnit(nSrcX, nSrcY);
-            res.toGo.route.GetHead().wSpeed256 = N_RT_SPEED;
-            bRv = true;
-        }
-        else
-            bRv = false; // неудачный
-    }
-    else
-    {
-        bLong = ManhattenDistance(nSrcX, nSrcY, nDstX, nDstY) > N_AI_MAX_WAVE_SEARCH_LENG;
-        if (!bLong)
-            bRv = FindPath(pUnit, nSrcX, nSrcY, nDstX, nDstY, res.toGo);
-        if (bLong || !bRv)
-        {
-            // настало время использовать продвинутый способ поиска точки назначения
-            finish = ptDst;
-            if (!FindPathDestination(pUnit, finish, true, fpMinDistance))
-            {
-                AddObject(pUnit);
-                return false;
-            }
-            nDstX = Float2AITile(AITile2Meter(finish.x));
-            nDstY = Float2AITile(AITile2Meter(finish.y));
-            res.ptFinish.x = finish.x; // this bug was funny to track ;)
-            res.ptFinish.y = finish.y;
-            // нашли новую точку назначения, может она совпадает с текущей
-            if (nSrcX == nDstX && nSrcY == nDstY)
-            {
-                // поход внутри одного тайла
-                res.toGo.AddHeadUnit(nSrcX, nSrcY);
-                res.toGo.route.GetHead().wSpeed256 = N_RT_SPEED;
-                bRv = true;
-            }
-            else
-            {
-                // поищем путь продвинутым способом
-                bRv = FindGraphPath(pUnit, nSrcX, nSrcY, nDstX, nDstY, res,
-                                    res.bTryAnyPath || res.bFirstTry,
-                                    Float2AITile(fpMaxPathLength));
-            }
-        }
-        if (bRv)
-        {
-            CPlot3D vec = -pUnit->GetYAxis();
-            float fpDX = fabs(res.ptFinish.x - Float2Int(res.ptFinish.x)) * 2;
-            float fpDY = fabs(res.ptFinish.x - Float2Int(res.ptFinish.x)) * 2;
-            float fpCentered = Min(fpDX, fpDY);
-            res.nPathCost = routeOptimizer.OptimizeRoute(pUnit, this, res.toGo,
-                                                         GetDirection(vec.x, vec.y), fpCentered);
-        }
-    }
-    if (bRv)
-        CreatePathSegment(pUnit, res);
-    AddObject(pUnit);
-    if (!bRv)
-        res.bRouteFailed = true;
-    res.bFirstTry = false;
-    return bRv;
+    res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;
+    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)||!TileInBounds(Float2AITile(ptDst.x),Float2AITile(ptDst.y)))return false;
+    auto from=navigation.Position(pUnit,*this);
+    Navigation::Point goal{ptDst.x,ptDst.y,GetOriginalTileHeight(ptDst)}; // ptDst.z is a command distance, not world height.
+    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,&pUnit->navLocation)) {res.bRouteFailed=true;return false;}
+    auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
+    if(res.toGo.route.GetCount()<2){res.toGo.Clear();return false;}
+    // NavRoute returned the stable address including the actual profile.
+    res.nPathCost=int(res.toGo.route.GetCount());res.bFirstTry=false;
+    CalcSpeeds(pUnit,res.toGo);CreatePathSegment(pUnit,res);return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::ContinuePath(CUnit *pUnit, SAIPath &res)

@@ -45,9 +45,9 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>MA_ENABLE_ONLY_SPECIFIC_BACKENDS;MA_ENABLE_WASAPI;EID3D11_EMBEDDED;BRANCH_DX11;NDEBUG;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_CONSOLE;NODEBUGINFO;DONT_DISPLAY_DEBUG_IDS;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>DT_POLYREF64;MA_ENABLE_ONLY_SPECIFIC_BACKENDS;MA_ENABLE_WASAPI;EID3D11_EMBEDDED;BRANCH_DX11;NDEBUG;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_CONSOLE;NODEBUGINFO;DONT_DISPLAY_DEBUG_IDS;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(ProjectDir)dependencies\ffmpeg\8.1.3\x64\include;$(ProjectDir);$(ProjectDir)out\include;$(ProjectDir)out\x64\Release\luajit\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\recastnavigation\Recast\Include;$(ProjectDir)external\recastnavigation\Detour\Include;$(ProjectDir)dependencies\ffmpeg\8.1.3\x64\include;$(ProjectDir);$(ProjectDir)out\include;$(ProjectDir)out\x64\Release\luajit\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -64,6 +64,30 @@
       <AdditionalDependencies>avformat.lib;avcodec.lib;avutil.lib;swscale.lib;swresample.lib;dxgi.lib;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_shaders.res;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_camp_art.res;$(ProjectDir)out\x64\Release\luajit\luajit.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Game\NavigationWorld.cpp" />
+    <ClCompile Include="Navigation\Geometry.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Geometry.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="Navigation\Build.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Build.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="Navigation\Query.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Query.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\Recast.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastAlloc.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastArea.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastAssert.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastContour.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastFilter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastLayers.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastMesh.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastMeshDetail.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastRasterization.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastRegion.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourAlloc.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourAssert.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourCommon.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMesh.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMeshBuilder.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMeshQuery.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNode.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+  </ItemGroup>
   <Import Project="OwnedRenderer\DlssSdk.props" />
   <ItemGroup>
     <ClCompile Include="Game\2DScreenWait.cpp" />

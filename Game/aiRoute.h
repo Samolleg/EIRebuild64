@@ -40,6 +40,9 @@ public:
             short nX, nY;
         };
     };
+    CPlot2D point = CPlot2D(0,0); // exact waypoint, in the existing route units
+    WORD terrain = 1; // Detour material area, independent of legacy object cells
+    float supportZ = 0; // world support height, never command distance
     WORD wSpeed256 = N_RT_SPEED; // *N_RT_SPEED base speed multiplier
     WORD wFlags = 0;    // флаги того, что юнит идет по мосту, по воде, etc
 
@@ -52,6 +55,7 @@ public:
     {
         wX = wNx;
         wY = wNy;
+        point=CPlot2D(float(wNx)+.5f,float(wNy)+.5f);
     }
     SRouteUnit Move(EAIDirection dir);
     void SetFlags(BOOL bWater, BOOL bNoRun)

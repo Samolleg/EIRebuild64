@@ -1,4 +1,5 @@
 #pragma once
+#include "NavigationWorld.h"
 #include "SaveSchema.h"
 /**********************************************************************
  *<
@@ -478,6 +479,7 @@ class CAIMap
 
     SRouteOptimizer routeOptimizer;
     CAIGraph aiGraph;
+    NavigationWorld navigation;
     CWavePathFinder wave, waveBack;
     int nLastDangerAddTime; // Segment on which last dangerous area was added to map
 
@@ -557,6 +559,8 @@ public:
     CAIMarkManager marks;
 
     CAIMap();
+    NavigationWorld& Navigation() { return navigation; }
+    bool NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& route, float maxLength=1.e6f, float goalRadius=0, int aiClass=3, Navigation::Location* source=nullptr);
     BOOL Load(LPCSTR pszMapName);
     void Clear();
     int XSize() const { return map.GetXSize(); }
@@ -564,7 +568,7 @@ public:
     bool SetGraphRebuild(bool bGraph)
     {
         bool bRes = bEnableGraphRecalc;
-        bEnableGraphRecalc = bGraph;
+        bEnableGraphRecalc = false; // X64NAV01: the old graph is never rebuilt for navigation.
         return bRes;
     }
 

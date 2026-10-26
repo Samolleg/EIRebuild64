@@ -466,6 +466,8 @@ void CUnit::Store(SaveSchema::Writer &w) const
     Field(w, dwPossibleEnemies);
     Field(w, questItems);
     Field(w, fpCollisionDistance);
+    w.UInt64(navLocation.surface);w.Float32(navLocation.position.x);w.Float32(navLocation.position.y);w.Float32(navLocation.position.z);
+    w.Float32(navLocation.radius);w.Float32(navLocation.height);
     Field(w, aggression);
     Field(w, dwVoicePrototype);
 }
@@ -508,6 +510,9 @@ void CUnit::Load(SaveSchema::Reader &r)
     Field(r, dwPossibleEnemies);
     Field(r, questItems);
     Field(r, fpCollisionDistance);
+    navLocation.surface=r.UInt64();navLocation.position={r.Float32(),r.Float32(),r.Float32()};
+    navLocation.radius=r.Float32();navLocation.height=r.Float32();navLocation.polygon=navLocation.generation=0;
+    if(navLocation.surface>1 || !Navigation::Finite(navLocation.position))throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid saved navigation address");
     Field(r, aggression);
     Field(r, dwVoicePrototype);
     rpgUserUnitStats.Clear();
