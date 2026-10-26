@@ -57,9 +57,30 @@ namespace {
 wchar_t reportPath[32768]{};
 char runtimePath[32768]{};
 volatile LONG reporting = 0;
-struct SeenReport { void* pc; unsigned long long count; unsigned long long lastTotal; };
-SeenReport seen[4096]{};
-size_t seenCount = 0;
+struct SeenReport {
+    void* pc;
+    unsigned long long count, lastTotal;
+    SeenReport* next;
+};
+struct SeenPage { SeenPage* next; size_t used; SeenReport entries[256]; };
+SeenPage firstPage{};
+SeenPage* currentPage = &firstPage;
+SeenReport* buckets[4096]{};
+
+// Grow only for new PCs, without the CRT heap or a fixed unique-error limit.
+__declspec(no_sanitize_address) SeenReport* Remember(void* pc, size_t bucket) noexcept {
+    if (currentPage->used == _countof(currentPage->entries)) {
+        auto* page = static_cast<SeenPage*>(VirtualAlloc(nullptr, sizeof(SeenPage),
+            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!page) return nullptr;
+        currentPage->next = page;
+        currentPage = page;
+    }
+    SeenReport* entry = &currentPage->entries[currentPage->used++];
+    *entry = {pc, 1, 0, buckets[bucket]};
+    buckets[bucket] = entry;
+    return entry;
+}
 
 // No allocations or journal queue while ASan holds its reporting locks.
 __declspec(no_sanitize_address) DWORD Append(const char* text) noexcept {
@@ -98,19 +119,17 @@ __declspec(no_sanitize_address) void CountLine(void* pc, unsigned long long coun
 __declspec(no_sanitize_address) void Report(const char* text) {
     if (!text || InterlockedCompareExchange(&reporting, 1, 0)) return;
     void* pc = __asan_get_report_pc();
-    SeenReport* entry = nullptr;
+    const size_t bucket = (reinterpret_cast<size_t>(pc) >> 4) % _countof(buckets);
+    SeenReport* entry = pc ? buckets[bucket] : nullptr;
     // Unknown PCs are not collapsed: fatal reports can lack a generic-error PC.
-    if (pc) {
-        for (size_t i = 0; i < seenCount; ++i)
-            if (seen[i].pc == pc) { entry = &seen[i]; break; }
-    }
+    while (entry && entry->pc != pc) entry = entry->next;
     if (entry) {
         const auto count = ++entry->count;
         // At most 64 tiny updates per PC, even for a hot recurring error.
         if ((count & (count - 1)) == 0) CountLine(pc, count, false);
     } else {
-        if (pc && seenCount < _countof(seen)) seen[seenCount++] = {pc, 1, 0};
-        // A full fixed table degrades to full reports rather than losing errors.
+        if (pc) Remember(pc, bucket);
+        // On OS allocation failure retain the full report rather than lose it.
         DWORD error = Append("\r\n================ ASAN REPORT ================\r\n");
         const DWORD bodyError = Append(text);
         if (!error) error = bodyError;
@@ -158,10 +177,13 @@ void Initialize() noexcept {
 
 __declspec(no_sanitize_address) void Finish() noexcept {
     if (InterlockedCompareExchange(&reporting, 1, 0)) return;
-    for (size_t i = 0; i < seenCount; ++i)
-        if (seen[i].count > 1 && seen[i].lastTotal != seen[i].count) {
-            CountLine(seen[i].pc, seen[i].count, true);
-            seen[i].lastTotal = seen[i].count;
+    for (SeenPage* page = &firstPage; page; page = page->next)
+        for (size_t i = 0; i < page->used; ++i) {
+            SeenReport& entry = page->entries[i];
+            if (entry.count > 1 && entry.lastTotal != entry.count) {
+                CountLine(entry.pc, entry.count, true);
+                entry.lastTotal = entry.count;
+            }
         }
     InterlockedExchange(&reporting, 0);
 }
