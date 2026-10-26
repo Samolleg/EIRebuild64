@@ -91,7 +91,7 @@ bool DlssBackend::initialize(ID3D11Device* device, Log log) noexcept {
     capability_.available = true;
     capability_.result = static_cast<std::uint32_t>(result);
     capability_.reason[0] = error_[0] = 0;
-    if (log_) log_("DLSS NGX backend available; frame integration pending X64DLSS02");
+    if (log_) log_("DLSS NGX backend available");
     return true;
 }
 
@@ -148,6 +148,35 @@ bool DlssBackend::create_feature(ID3D11DeviceContext* context, const DlssShape& 
     shape_ = shape;
     error_[0] = 0;
     if (log_) log_("DLSS feature created");
+    return true;
+}
+
+bool DlssBackend::evaluate(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept {
+    if (!frame.color || !frame.depth || !frame.motion || !frame.output)
+        return fail("DLSS frame inputs are missing", static_cast<std::uint32_t>(E_INVALIDARG));
+    const bool recreated = !feature_ || !(shape_ == frame.shape);
+    if (!create_feature(context, frame.shape)) return false;
+    // Same NGX contract as upstream Host/dlss.cpp, without wire records/IDs.
+    NVSDK_NGX_D3D11_DLSS_Eval_Params eval{};
+    eval.Feature.pInColor = frame.color;
+    eval.Feature.pInOutput = frame.output;
+    eval.Feature.InSharpness = 0.f; // shared renderer RCAS runs afterwards
+    eval.pInDepth = frame.depth;
+    eval.pInMotionVectors = frame.motion;
+    eval.pInExposureTexture = frame.exposure;
+    eval.InJitterOffsetX = frame.jitter_x;
+    eval.InJitterOffsetY = frame.jitter_y;
+    eval.InRenderSubrectDimensions.Width = frame.shape.render_width;
+    eval.InRenderSubrectDimensions.Height = frame.shape.render_height;
+    eval.InReset = frame.reset || recreated;
+    eval.InMVScaleX = frame.mv_scale_x;
+    eval.InMVScaleY = frame.mv_scale_y;
+    const auto result = NGX_D3D11_EVALUATE_DLSS_EXT(context, feature_, parameters_, &eval);
+    if (NVSDK_NGX_FAILED(result)) {
+        release_feature();
+        return fail("DLSS evaluation failed", result);
+    }
+    error_[0] = 0;
     return true;
 }
 

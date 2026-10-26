@@ -126,9 +126,40 @@ void Renderer::finish_upscaler_frame(const UpscalerFrame& frame){
  profiler_.add_draw(1,1);profiler_.add_batch();
 }
 
-// DLSS: the host's evaluation into the output-size image. False: DLSS
-// failed this frame; it is turned off with the reason shown on the list.
+// DLSS into the shared output-size image. Embedded failures refuse the
+// world frame; the selected mode stays DLSS and the menu shows the reason.
 bool Renderer::render_dlss(){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ const auto fail=[this](const char* reason){
+  set_dlss_unavailable_reason(reason);bridge_report_event("dlss_frame_refused",reason);
+  dlss_reset_=true;dlss_previous_valid_=false;return false;
+ };
+ if(dlss_unavailable_reason()){dlss_reset_=true;dlss_previous_valid_=false;return false;}
+ // Menus/loading/video have no world camera. Never evaluate their UI or
+ // accept it into history, even if the next world starts immediately.
+ if(!scene_updated_||!bridge_scene_world_to_clip_snapshot().valid){
+  dlss_reset_=true;dlss_previous_valid_=false;dlss_last_evaluate_ms_=0;
+  const float black[4]{};context_->ClearRenderTargetView(backbuffer_rtv_.Get(),black);
+  if(interface_dsv_)context_->ClearDepthStencilView(interface_dsv_.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1.f,0);
+  return true;
+ }
+ const UpscalerFrame frame=begin_upscaler_frame();
+ DlssFrame evaluate{};
+ evaluate.color=scene_composite_.resolved();evaluate.depth=depth_.Get();evaluate.motion=scene_composite_.motion();
+ evaluate.output=scene_composite_.dlss_output();
+ // Guide 3.6.1-3.7.3: screen pixels, right/down positive, as applied by
+ // jitter_clip/target_viewport. Motion has jitter removed; MVLowRes, scale 1.
+ evaluate.jitter_x=dlss_jitter_[0];evaluate.jitter_y=dlss_jitter_[1];
+ evaluate.shape.render_width=width_;evaluate.shape.render_height=height_;
+ evaluate.shape.output_width=output_width_;evaluate.shape.output_height=output_height_;
+ evaluate.shape.quality=static_cast<DlssQuality>(dlss_mode_);
+ evaluate.reset=frame.reset; // LDR, non-inverted D24, auto exposure (no texture)
+ transition_profile_pass("scene_dlss");
+ ID3D11ShaderResourceView* empty[4]{};context_->PSSetShaderResources(0,4,empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
+ // Native device/context need no remote host's first-Present workaround.
+ // Feature creation is lazy here; shape/quality changes recreate it.
+ if(!dlss_backend_.evaluate(context_.Get(),evaluate))return fail(dlss_backend_.last_error());
+#else
  // First-Present deferral: with DLSS saved on, a remote start ran the host's
  // DLSS feature creation and evaluation in the session's first frame and the
  // NVIDIA driver crashed inside that first host Present (integ2 7035b2f0,
@@ -155,6 +186,7 @@ bool Renderer::render_dlss(){
   OutputDebugStringA("EID3D11 DLSS evaluation failed; DLSS turned off\n");
   dlss_previous_valid_=false;return false;
  }
+#endif
  // The player's Sharpening after DLSS (fsr2_upscaler.h UpscaleSharpen):
  // NGX gets no sharpness; RCAS sharpens its output-size image in place.
  if(const float sharpness=std::clamp(configured_floating_point(debug_overlay_.config(),"upscale_sharpness",.2f),0.f,1.f);sharpness>0.f){
@@ -334,6 +366,7 @@ HRESULT Renderer::composite_world(){
  // icons, previews) draws after this point, often without depth testing.
  return checked("composite_world.postprocess",[&]()->HRESULT{
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
+ bool dlss_frame_refused=false;
  {
   DebugViewStateGuard guard(context_.Get());
   // AO needs the finished world depth and ambient share, and must precede
@@ -375,10 +408,22 @@ HRESULT Renderer::composite_world(){
    transition_profile_pass("scene_bloom");UINT draws=0;
    if(SUCCEEDED(bloom_.render(device_.Get(),context_.Get(),scene_composite_.color_view(),depth_srv_.Get(),glow_frame_==native_frame_index_?glow_srv_.Get():nullptr,resolved,width_,height_,bloom,configured_floating_point(debug_overlay_.config(),"bloom_strength",1.f),bloom_ceiling(native_world_lighting_.ambient.data(),native_world_lighting_.sunlight_diffuse.data(),fog_prepared_frame_==native_frame_index_*2u?bloom_fog_headroom_:0.f),configured_floating_point(debug_overlay_.config(),"bloom_threshold",1.f),&draws,configured_boolean(debug_overlay_.config(),"bloom_debug_view",false)))){profiler_.add_draw(draws,draws);profiler_.add_batch(draws);}
   }
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  if(dlss_mode_>=0){
+   if(!render_dlss()){
+    // Refuse this world's output, including DLAA. Neither the resolved
+    // input nor stale NGX output may reach the backbuffer after failure.
+    const float black[4]{};context_->ClearRenderTargetView(backbuffer_rtv_.Get(),black);
+    if(interface_dsv_)context_->ClearDepthStencilView(interface_dsv_.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1.f,0);
+    dlss_frame_refused=true;
+   }
+  }else if(scene_composite_.dlss()&&render_fsr()){}
+#else
   if(scene_composite_.dlss()&&(fsr_mode_>=0?render_fsr():render_dlss())){}
+#endif
   else if(scene_composite_.scaled()){
    transition_profile_pass("scene_upscale");
-   // DLAA (a failed DLSS frame) renders at output size: the world depth is the interface depth.
+   // At native AA size the world depth is also the interface depth.
    const bool separate_depth=interface_dsv_.Get()!=world_dsv_.Get();
    scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),separate_depth?depth_srv_.Get():nullptr,separate_depth?interface_dsv_.Get():nullptr);
    profiler_.add_draw(1,1);profiler_.add_batch();
@@ -389,6 +434,11 @@ HRESULT Renderer::composite_world(){
  // AO settings take effect on whole world frames.
  ao_ambient_written_=false;update_ambient_occlusion_targets();
  rtv_=backbuffer_rtv_;dsv_=interface_dsv_;context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+ // Seal the refused world and restore UI targets. S_FALSE means no world
+ // image was accepted; UI/settings and Present must remain usable so the
+ // player can explicitly change an unavailable selection to Off or FSR.
+ // a later interface call cannot retry or expose the rejected world image.
+ if(dlss_frame_refused){pending_screen_rectangles_.clear();return S_FALSE;}
  // Selection rectangles requested after the world pass and before this
  // composite are the first interface output.
  for(const auto& pending:pending_screen_rectangles_)
@@ -683,7 +733,7 @@ HRESULT Renderer::clear_rectangles(DWORD rectangle_count,const D3DRECT* rectangl
  return S_OK;
 }
 
-void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
+void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(dlss_mode_<0&&!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
 void Renderer::transition_profile_pass(const char* name){if(profiler_.current_pass_is(name))return;end_profile_pass();profiler_.begin_pass(name);}
 const char* Renderer::terrain_profile_scope(bool neighbour,bool tessellated,TerrainProfilePart part) noexcept{
  static const char* const names[2][2][8]={
@@ -704,6 +754,7 @@ HRESULT Renderer::retire_embedded_world(){
  if(FAILED(hr=render_pending_blits()))return hr;
  world_state_epoch_=bridge_current_world_epoch();
  release_world_state();scene_world_epoch_=world_state_epoch_;
+ dlss_reset_=true;dlss_previous_valid_=false;dlss_last_evaluate_ms_=0;
  return S_OK;
 }
 RendererMemoryCounters Renderer::read_memory_counters(){
@@ -778,7 +829,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  if(FAILED(hr=render_pending_blits()))return hr;
  // The first engine frame of a new world (map or main menu): a clean slate.
  if(world_epoch&&world_epoch!=world_state_epoch_&&native_pending_draws_.empty()){
-  world_state_epoch_=world_epoch;release_world_state();dlss_reset_=true;
+  world_state_epoch_=world_epoch;release_world_state();dlss_reset_=true;dlss_previous_valid_=false;dlss_last_evaluate_ms_=0;
  }
  reap_tile_family_jobs(); // dropped tile family jobs, once each has stopped
  ++native_frame_index_;advance_dlss_jitter();begin_dlss_object_motion();

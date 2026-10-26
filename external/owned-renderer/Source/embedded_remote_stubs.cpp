@@ -18,8 +18,10 @@ bool dlss_caps(DlssCaps& out) noexcept { out={}; return false; }
 bool dlss_render_size(UINT,UINT,int,UINT&,UINT&) noexcept { return false; }
 void dlss_release() noexcept {}
 #endif // embedded lifecycle/optimal settings use owned::DlssBackend
-// Existing frame entry remains unconnected until X64DLSS02; no NGX Evaluate here.
+#ifdef EID3D11_SHADER_EMBED
+// The shader producer has no native NGX backend and never evaluates frames.
 HRESULT dlss_evaluate(ID3D11DeviceContext*,const DlssEvaluate&) noexcept { return E_NOTIMPL; }
+#endif
 bool host_presented() noexcept { return false; }
 void surface_write(bool,const SurfaceWrite&) noexcept {}
 void surface_copy(bool,ID3D11Texture2D*,ID3D11ShaderResourceView*,ID3D11Texture2D*,bool,bool) noexcept {}

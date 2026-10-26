@@ -31,6 +31,19 @@ struct DlssShape {
             auto_exposure == b.auto_exposure;
     }
 };
+// Native resources shared with FSR 2. Motion is current -> previous in render
+// pixels, without jitter; jitter is the applied screen displacement, right/down.
+struct DlssFrame {
+    DlssShape shape{};
+    ID3D11Resource* color = nullptr;
+    ID3D11Resource* depth = nullptr;
+    ID3D11Resource* motion = nullptr;
+    ID3D11Resource* output = nullptr;
+    ID3D11Resource* exposure = nullptr;
+    float jitter_x = 0, jitter_y = 0;
+    float mv_scale_x = 1, mv_scale_y = 1;
+    bool reset = true;
+};
 class DlssBackend {
 public:
     using Log = void (*)(const char*);
@@ -48,7 +61,7 @@ public:
     void release_feature() noexcept;
     void device_lost(HRESULT reason) noexcept;
     void shutdown() noexcept;
-    // Evaluate and its frame inputs intentionally belong to X64DLSS02.
+    bool evaluate(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept;
 private:
     void cleanup() noexcept;
     bool fail(const char* operation, std::uint32_t result) noexcept;

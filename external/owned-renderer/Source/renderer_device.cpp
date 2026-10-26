@@ -620,9 +620,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  debug_overlay_set_running_renderer(remote?"64-bit host (call stream)":"32-bit in the game process",false);
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  dlss_backend_.initialize(device_.Get(),[](const char* text){bridge_report_event("dlss_backend",text);});
- // Hardware capability is real, but this package must not enable Evaluate/UI.
- set_dlss_unavailable_reason(dlss_backend_.capability().available ?
-  "DLSS rendering is not enabled in this build" : dlss_backend_.capability().reason);
+ set_dlss_unavailable_reason(dlss_backend_.capability().available ? nullptr : dlss_backend_.capability().reason);
 #else
  // DLSS runs only in the x64 host; the Upscaling option shows why not.
  if(!remote)set_dlss_unavailable_reason("needs the 64-bit render host");
@@ -994,8 +992,7 @@ HRESULT Renderer::ensure_host(HWND window,UINT w,UINT h){
  debug_overlay_set_running_renderer("64-bit host (core mode)",true);
  // DLSS on this device (the host's NGX instance, host_bridge.cpp).
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
- set_dlss_unavailable_reason(dlss_backend_.capability().available ?
-  "DLSS rendering is not enabled in this build" : dlss_backend_.capability().reason);
+ set_dlss_unavailable_reason(dlss_backend_.capability().available ? nullptr : dlss_backend_.capability().reason);
 #else
  {x64remote::DlssCaps caps{};
   if(!x64remote::dlss_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.reason[0]?caps.reason:"not available");}
@@ -1102,7 +1099,11 @@ void Renderer::apply_render_scale(){
 // DLSS (dlss_frame.h): the NGX mode of the upscaler method and quality, -1
 // when off or when the x64 host cannot run it (the method list shows why).
 int Renderer::configured_dlss_mode() noexcept {
+#if !defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_EMBED)
  if(dlss_unavailable_reason())return -1;
+#endif
+ // Embedded retains selected DLSS even when unavailable: refuse the world
+ // frame instead of interpreting the selection as Off or ordinary upscale.
  const auto& config=debug_overlay_.config();
  return dlss_ngx_mode(configured_integer(config,"upscaler",kUpscalerOff),configured_integer(config,"upscaler_quality",0));
 }
@@ -1120,6 +1121,13 @@ int Renderer::configured_fsr_mode() noexcept {
 void Renderer::set_world_size() noexcept {
  if(fsr_mode_>=0){width_=fsr_render_extent(output_width_,fsr_mode_);height_=fsr_render_extent(output_height_,fsr_mode_);return;}
  if(dlss_mode_>=0){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  if(const char* reason=dlss_unavailable_reason()){
+   bridge_report_event("dlss_frame_refused",reason);
+   // Allocation sizes keep UI usable, never a substitute world result.
+   width_=output_width_;height_=output_height_;return;
+  }
+#endif
   UINT w=0,h=0;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
   const bool sized=dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
@@ -1130,7 +1138,14 @@ void Renderer::set_world_size() noexcept {
    width_=w;height_=h;return;
   }
   char reason[96];std::snprintf(reason,sizeof(reason),"DLSS has no render size for %ux%u",output_width_,output_height_);
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  const char* error=dlss_backend_.last_error();
+  set_dlss_unavailable_reason(error[0]?error:reason);
+  bridge_report_event("dlss_frame_refused",dlss_unavailable_reason());
+  width_=output_width_;height_=output_height_;return;
+#else
   set_dlss_unavailable_reason(reason);bridge_append_probe_event("dlss_omitted",reason);dlss_mode_=-1;
+#endif
  }
  width_=render_scale_extent(output_width_,render_scale_percent_);height_=render_scale_extent(output_height_,render_scale_percent_);
 }
@@ -2040,7 +2055,14 @@ constexpr ShaderGroup kShaderGroups[]={
    const int method=configured_integer(c,"upscaler",kUpscalerOff);
    return method==kUpscalerFsr||(method==kUpscalerDlss&&!dlss_unavailable_reason()&&
     configured_floating_point(c,"upscale_sharpness",.2f)>0.f);},
-  "upscaler",[](RendererConfig& c){c.set_integer("upscaler",kUpscalerOff);}},
+  "upscaler",[](RendererConfig& c){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+   if(configured_integer(c,"upscaler",kUpscalerOff)==kUpscalerDlss){
+    set_dlss_unavailable_reason("DLSS shader preparation failed; selected DLSS world frames are refused");
+    bridge_report_event("dlss_frame_refused",dlss_unavailable_reason());return;
+   }
+#endif
+   c.set_integer("upscaler",kUpscalerOff);}},
 };
 static_assert(std::size(kShaderGroups)<=32,"one bit per shader group");
 }  // namespace
