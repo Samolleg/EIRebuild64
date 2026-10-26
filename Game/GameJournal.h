@@ -54,6 +54,9 @@ void MemoryFrame(unsigned long now) noexcept;
 void AllocationFailure(const char* source) noexcept;
 void AllocationFailureInCatch(const char* source) noexcept; // Only inside a catch block.
 void MemoryErrorText(const char* text) noexcept;
+#if defined(__SANITIZE_ADDRESS__)
+void ASanReport(const wchar_t* path, unsigned long error) noexcept;
+#endif
 void Start() noexcept;
 void Stop() noexcept;
 void Tick(unsigned long tick) noexcept;

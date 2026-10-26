@@ -622,6 +622,34 @@ void Notification(const char* type, const char* text, const char* extra) noexcep
     } catch (...) {}
 }
 void FlushCritical() noexcept{State* s=current.load();if(s)Synchronize(*s);}
+#if defined(__SANITIZE_ADDRESS__)
+__declspec(no_sanitize_address) void ASanReport(const wchar_t* path, unsigned long error) noexcept {
+    State* s = current.load();
+    if (!s || WaitForSingleObject(s->ready, 250) != WAIT_OBJECT_0) return;
+    const DWORD started = GetTickCount();
+    while (!TryAcquireSRWLockExclusive(&s->writeLock)) {
+        if (GetTickCount() - started >= 250) return;
+        Sleep(1);
+    }
+    // Bypass allocations and the queue: a memory error may occur inside either.
+    if (s->file != INVALID_HANDLE_VALUE) {
+        char utf8[4096]{};
+        if (!WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, sizeof(utf8), nullptr, nullptr))
+            strcpy_s(utf8, "path_unavailable");
+        char line[4352];
+        SYSTEMTIME t; GetLocalTime(&t);
+        const int n = sprintf_s(line, "%02u:%02u:%02u.%03u ERROR asan_report saved=%u win32_error=%lu path=%s\r\n",
+            t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, error == ERROR_SUCCESS ? 1u : 0u, error, utf8);
+        if (n > 0) {
+            DWORD written = 0;
+            WriteFile(s->file, line, static_cast<DWORD>(n), &written, nullptr);
+            s->bytes += written;
+            FlushFileBuffers(s->file);
+        }
+    }
+    ReleaseSRWLockExclusive(&s->writeLock);
+}
+#endif
 void Crash(const wchar_t* dump,unsigned long code,const CrashEvidence::Details* details) noexcept {
     State* s=current.load();if(!s)return;
     if(WaitForSingleObject(s->ready,2000)!=WAIT_OBJECT_0)return;
