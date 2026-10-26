@@ -696,6 +696,7 @@ static bool native_alpha_is_one(const FixedState& state,NativeAlphaEvidence alph
 
 NativeOpacityClass native_opacity_class(const FixedState& state,
                                       float material_alpha,NativeAlphaEvidence alpha) noexcept {
+ constexpr float material_opaque_threshold=254.5f/255.f;
  const bool blend=state.render[D3DRENDERSTATE_ALPHABLENDENABLE]!=FALSE;
  const bool overwrite=!blend || (state.render[D3DRENDERSTATE_SRCBLEND]==D3DBLEND_ONE &&
                                 state.render[D3DRENDERSTATE_DESTBLEND]==D3DBLEND_ZERO);
@@ -704,13 +705,24 @@ NativeOpacityClass native_opacity_class(const FixedState& state,
  const bool test=state.render[D3DRENDERSTATE_ALPHATESTENABLE]!=FALSE;
  const bool owns_depth=state.render[D3DRENDERSTATE_ZENABLE]!=D3DZB_FALSE &&
                        state.render[D3DRENDERSTATE_ZWRITEENABLE]!=FALSE;
- if(std::isfinite(material_alpha) && material_alpha>=(254.5f/255.f) && owns_depth) {
+ // Preserve a real blend even when its scalar happens to be one (for
+ // example, a texture with fractional alpha). Alpha facts are cached by
+ // the immutable texture/surface loader, never inspected here per frame.
+ if(alpha.ordered_blend && !overwrite)return NativeOpacityClass::ordered;
+ const auto function=state.render[D3DRENDERSTATE_ALPHAFUNC];
+ const auto reference=state.render[D3DRENDERSTATE_ALPHAREF]&255u;
+ const bool alpha_one_passes=!test || function==D3DCMP_ALWAYS ||
+  function==D3DCMP_GREATEREQUAL || (function==D3DCMP_GREATER && reference<255u);
+ if(owns_depth && (overwrite || standard_alpha) && alpha_one_passes &&
+    material_alpha>=material_opaque_threshold && native_alpha_is_one(state,alpha))
+  return NativeOpacityClass::opaque;
+ if(material_alpha>=material_opaque_threshold && owns_depth) {
   if(overwrite)return test ? NativeOpacityClass::cutout : NativeOpacityClass::opaque;
   if(standard_alpha && test)return NativeOpacityClass::cutout;
  }
  // Standard alpha with a proved fragment alpha1 has the same coverage as an
  // overwrite. Never infer it from the blend flag or an unused material scalar.
- if(standard_alpha && !test && owns_depth && native_alpha_is_one(state,alpha))
+ if(standard_alpha && !test && owns_depth && material_alpha>=material_opaque_threshold && native_alpha_is_one(state,alpha))
   return NativeOpacityClass::opaque;
  return NativeOpacityClass::ordered;
 }

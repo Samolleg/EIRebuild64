@@ -101,6 +101,7 @@ std::uint64_t hash_bytes(std::uint64_t hash,const void* bytes,std::size_t size){
 static NativeAlphaEvidence native_alpha_evidence(const NativeGeometryView& view,
  const FixedState&,bool owned_texture_bound,const NativePreparedPartValues* values=nullptr) noexcept {
  NativeAlphaEvidence result;
+ result.ordered_blend=(values?static_cast<NativeOrdering>(values->ordering):view.ordering)==NativeOrdering::preserve;
  if(owned_texture_bound)result.texture_opaque=native_texture_alpha_opaque(
   view.owned_texture,D3DTFP_LINEAR);
  // Terrain has per-vertex opacity. A default instance alpha is not its proof.
@@ -113,10 +114,16 @@ static NativeAlphaEvidence native_alpha_evidence(const NativeGeometryView& view,
  return result;
 }
 
-// Static LOD: opaque, reorderable object-space records whose mesh holds
-// reduced levels. Cut-out records keep every triangle (a collapse there
-// removes silhouette, not detail); ordered and order-preserving records
-// draw their full list in order.
+static void native_opacity_state(FixedState& state,NativeOpacityClass opacity) noexcept {
+ if(opacity==NativeOpacityClass::opaque){
+  state.render[D3DRENDERSTATE_ALPHATESTENABLE]=FALSE;
+  state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=FALSE;
+ }
+}
+
+// Static LOD: opaque, effectively reorderable rigid records with reduced
+// levels. Retained statics keep their prepared world vertices; cut-outs,
+// units, swaying and animated parts keep their complete index list.
 // Crown impostors: cut-out, reorderable object-space records with a baked
 // impostor and a mesh that holds its bounding sphere.
 bool native_record_takes_impostor(const NativeGeometryView& view,NativeOpacityClass opacity,bool sphere_block) noexcept{
@@ -124,8 +131,12 @@ bool native_record_takes_impostor(const NativeGeometryView& view,NativeOpacityCl
   view.ordering==NativeOrdering::reorderable;
 }
 bool native_record_takes_lod(const NativeGeometryView& view,NativeOpacityClass opacity,UINT lod_levels) noexcept{
- return lod_levels&&view.world.object_space&&opacity==NativeOpacityClass::opaque&&
-  view.ordering==NativeOrdering::reorderable;
+ const bool reorderable=view.ordering==NativeOrdering::reorderable ||
+  (view.ordering==NativeOrdering::derive_from_state &&
+   (view.semantic_kind==SemanticKind::figure || view.semantic_kind==SemanticKind::terrain ||
+    view.semantic_kind==SemanticKind::simple_geometry) && opacity!=NativeOpacityClass::ordered);
+ return lod_levels&&view.world.enabled&&(view.world.object_space||view.world.static_lod)&&
+  !view.morph_count&&opacity==NativeOpacityClass::opaque&&reorderable;
 }
 
 std::size_t Renderer::NativeTextureArrayKeyHash::operator()(
@@ -140,7 +151,7 @@ std::size_t Renderer::NativeTextureArrayKeyHash::operator()(
 }
 
 std::size_t Renderer::NativeMeshKeyHash::operator()(const NativeMeshKey& key) const noexcept{
- std::uint64_t hash=hash_bytes(1469598103934665603ull,key.resource_key.data(),key.resource_key.size());auto mix=[&](std::uint64_t value){hash^=value+0x9e3779b97f4a7c15ull+(hash<<6)+(hash>>2);};const auto& selector=key.selector;mix(selector.cache_identity);mix(selector.object_token);mix(selector.figure_token);mix(selector.geometry_token);mix(selector.positions);mix(selector.normals);mix(selector.components);mix(selector.texture_coordinates);mix(selector.indices);mix(selector.content_fingerprint);mix(selector.content_keyed?1u:0u);mix(key.world_part);mix(key.shape_count);mix(key.shape_bits[0]);mix(key.shape_bits[1]);mix(key.shape_bits[2]);mix(key.position_groups);mix(key.normal_groups);mix(key.component_count);mix(key.texture_coordinate_count);mix(key.index_count);mix(key.decoded_channels);return static_cast<std::size_t>(hash^(hash>>32));
+ std::uint64_t hash=hash_bytes(1469598103934665603ull,key.resource_key.data(),key.resource_key.size());auto mix=[&](std::uint64_t value){hash^=value+0x9e3779b97f4a7c15ull+(hash<<6)+(hash>>2);};const auto& selector=key.selector;mix(selector.cache_identity);mix(selector.object_token);mix(selector.figure_token);mix(selector.geometry_token);mix(selector.positions);mix(selector.normals);mix(selector.components);mix(selector.texture_coordinates);mix(selector.indices);mix(selector.content_fingerprint);mix(selector.content_keyed?1u:0u);mix(key.world_part);mix(key.static_lods?1u:0u);mix(key.shape_count);mix(key.shape_bits[0]);mix(key.shape_bits[1]);mix(key.shape_bits[2]);mix(key.position_groups);mix(key.normal_groups);mix(key.component_count);mix(key.texture_coordinate_count);mix(key.index_count);mix(key.decoded_channels);return static_cast<std::size_t>(hash^(hash>>32));
 }
 
 std::size_t Renderer::NativeMaterialKeyHash::operator()(const NativeMaterialKey& key) const noexcept{
@@ -653,6 +664,7 @@ void Renderer::refresh_native_mesh_records(NativeMesh& mesh) noexcept{
   draw.instance.terrain_vertex_offset=mesh.terrain_vertex_offset;
   record.descriptor.component_offset=mesh.component_offset;
   record.descriptor.index_offset=mesh.index_offset;record.descriptor.steep_first_triangle=mesh.steep_first_triangle;
+  if(!mesh.lod_levels)draw.instance.world_geometry&=~native_world_lod;
   record.uploaded=false;record.descriptor_uploaded=false;
  }
  native_layout_changed();native_static_content_changed();
@@ -690,6 +702,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   if(!content.valid)return E_INVALIDARG;}
  NativeMeshKey key{};key.selector=native_mesh_cache_selector(view,content);
  key.shape_count=shape_count;
+ key.static_lods=view.lod_figure!=nullptr || view.lods!=nullptr;
  if(view.world.enabled){key.resource_key=view.world.identity->key();key.world_part=view.world.part;key.selector={};}
  // An object-space record's shape-resolved mesh is shared by every record
  // of that figure with exactly this shape.
@@ -882,7 +895,9 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   for(UINT axis=0;axis<3;++axis)if(mesh.bounds_min[axis]>mesh.bounds_max[axis])
    mesh.bounds_min[axis]=mesh.bounds_max[axis]=0;
  };
- if(found!=native_meshes_.end()){
+ // A changed source with a LOD table needs a fresh contiguous layout:
+ // reduced level sizes can change even when the full mesh counts do not.
+ if(found!=native_meshes_.end()&&!(revision_changed&&key.static_lods)){
   auto& mesh=found->second;
   if(revision_changed){
    std::vector<NativeGpuComponent> components;std::vector<std::uint32_t> indices;
@@ -948,7 +963,20 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  const frame_acct::Scope build_scope(frame_acct::mesh_build);
  std::vector<NativeGpuComponent> components;std::vector<std::uint32_t> indices;
  HRESULT hr=build_topology(components,indices);if(FAILED(hr))return hr;
- NativeMesh mesh{};UINT cursor=0;
+ NativeMeshLods generated_lods;
+ const NativeMeshLods* lods=view.lods;
+ if(view.lod_figure){build_static_lods(*view.lod_figure,generated_lods);lods=&generated_lods;}
+ if(lods&&!lods->levels)lods=nullptr;
+ if(lods){
+  if(lods->levels>kStaticLodMaxLevels||has_terrain)return E_INVALIDARG;
+  for(UINT level=0;level<lods->levels;++level){
+   if(lods->indices[level].empty()||lods->indices[level].size()%3||
+      !std::isfinite(lods->error[level])||lods->error[level]<0)return E_INVALIDARG;
+   for(const auto index:lods->indices[level])if(index>=source.component_count)return E_INVALIDARG;
+  }
+ }
+ NativeMesh mesh{};UINT cursor=0,lod_table_at=0;
+ std::array<UINT,kStaticLodMaxLevels> lod_at{};
  auto reserve=[&](std::uint64_t bytes,UINT& offset){
   if(!align_up_checked(cursor,16,cursor)||cursor>native_geometry_page_limit()||
    bytes>native_geometry_page_limit()-cursor)return false;
@@ -960,8 +988,12 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      !reserve(color_bytes,mesh.diffuse_storage_offset)||
      !reserve(color_bytes,mesh.specular_storage_offset)||
      (has_terrain&&!reserve(terrain_bytes,mesh.terrain_vertex_offset))||
-     !reserve(index_bytes,mesh.index_offset)||!align_up_checked(cursor,16,cursor))
+     (lods&&!reserve(64,lod_table_at))||!reserve(index_bytes,mesh.index_offset))
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+ for(UINT level=0;lods&&level<lods->levels;++level)
+  if(!reserve(std::uint64_t(lods->indices[level].size())*sizeof(std::uint32_t),lod_at[level]))
+   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+ if(!align_up_checked(cursor,16,cursor))return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  if(FAILED(hr=allocate_native_geometry_span(cursor,mesh.allocation)))return hr;
  frame_acct::add(frame_acct::mesh_uploads,1);frame_acct::add(frame_acct::mesh_upload_bytes,cursor);
  const auto abandon=[&](HRESULT result){release_native_geometry_span(mesh.allocation);return result;};
@@ -981,6 +1013,18 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   if(source.specular)put(mesh.specular_storage_offset,source.specular,color_bytes);
   if(has_terrain)put(mesh.terrain_vertex_offset,source.terrain_vertices,terrain_bytes);
   put(mesh.index_offset,indices.data(),index_bytes);
+  if(lods){
+   auto* table=reinterpret_cast<UINT*>(blob.data()+lod_table_at);
+   table[0]=lods->levels;
+   for(UINT level=0;level<lods->levels;++level){
+    const auto& list=lods->indices[level];
+    put(lod_at[level],list.data(),list.size()*sizeof(std::uint32_t));
+    auto* entry=table+4*(level+1);
+    entry[0]=mesh.allocation.offset+lod_at[level];entry[1]=static_cast<UINT>(list.size()/3);
+    std::memcpy(&entry[2],&lods->error[level],sizeof(float));
+   }
+   mesh.lod_levels=lods->levels;mesh.lod_extra_triangles=static_cast<UINT>(lods->indices[0].size()/3);
+  }
   if(FAILED(hr=upload_native_geometry(mesh.allocation.page,mesh.allocation.offset,blob.data(),cursor)))return abandon(hr);
  }
  const UINT base=mesh.allocation.offset;
@@ -996,6 +1040,14 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  mesh.color_revision_valid=source.color_revision_valid;
  mesh.bytes=mesh.allocation.bytes;mesh.last_used_frame=native_frame_index_;
  const NativeGeometrySpan allocated_span=mesh.allocation;
+ if(found!=native_meshes_.end()){
+  auto& old=found->second;
+  if(old.pending_references&&FAILED(hr=flush_native()))return abandon(hr);
+  mesh.pending_references=old.pending_references;mesh.owned_references=old.owned_references;
+  const auto retired=old.allocation;
+  old=std::move(mesh);refresh_native_mesh_records(old);
+  release_native_geometry_span(retired);output=&old;++perf_native_mesh_misses_;return S_OK;
+ }
  try{auto inserted=native_meshes_.emplace(key,std::move(mesh));
   if(!inserted.second){release_native_geometry_span(allocated_span);return E_FAIL;}
   output=&inserted.first->second;++perf_native_mesh_misses_;
@@ -2639,12 +2691,13 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
     (native_record_takes_lod(view,opacity,draw.mesh->lod_levels)?native_world_lod:0u)|
     (native_record_takes_impostor(view,opacity,draw.mesh->sphere_block)?native_world_impostor:0u);
    if(draw.instance.world_geometry&native_world_impostor)draw.instance.second_morph_offset=view.world.impostor-1;
-   FixedState shadow_state;
-   const FixedState* material_state=&state;
-   if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout){
-    shadow_state=state;shadow_state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
-    material_state=&shadow_state;
-   }
+   else if((draw.instance.world_geometry&native_world_lod)&&!view.world.object_space)
+    draw.instance.second_morph_offset=draw.world_base;
+   FixedState resolved_state=state;
+   native_opacity_state(resolved_state,opacity);
+   if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout)
+    resolved_state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
+   const FixedState* material_state=&resolved_state;
    const auto key=native_material_key(*material_state,SemanticKind::terrain,opacity,view.lighting.enabled!=0,
     group.texture_srv!=nullptr,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
    if(!(key==group.material_key)){
@@ -3100,12 +3153,14 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       std::copy(values.specular.begin(),values.specular.end(),value.specular);
       value.uv_shift[0]=values.u_shift;value.uv_shift[1]=values.v_shift;
       const auto& group=native_state_buckets_[draw.state_bucket];
-      FixedState state=group.state;
-      state.render[D3DRENDERSTATE_CULLMODE]=source.owned_fixed_state.cull_mode;
+      // Rebuild from the authored state: the prior opaque command has its
+      // blend/test disabled, and cannot describe a later fade or mask.
+      FixedState state=native_owned_submission_state(frame,source.owned_fixed_state);
       state.render[D3DRENDERSTATE_FOGENABLE]=inherited[0];state.render[D3DRENDERSTATE_FOGCOLOR]=inherited[1];
       state.stage[0][D3DTSS_MIPFILTER]=inherited[2];state.render[D3DRENDERSTATE_SPECULARENABLE]=values.specular_enable;
       const auto opacity=native_opacity_class(state,values.alpha,
        native_alpha_evidence(source,state,!wound,&values));
+      native_opacity_state(state,opacity);
       if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout)
        state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
       const auto key=native_material_key(state,source.semantic_kind,opacity,values.lighting_enabled!=0,
@@ -3116,6 +3171,13 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       draw.preserve_order=ordering==NativeOrdering::preserve;
       if(FAILED(hr=get_native_material_group(key,state,group.texture_srv.Get(),group.texture_array,source.semantic_kind,
           opacity,native_material_state_key(key),draw.state_bucket)))return fail(hr,"records.material");
+     }
+     NativeGeometryView lod_view=source;
+     lod_view.ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
+     draw.instance.world_geometry&=~native_world_lod;
+     if(native_record_takes_lod(lod_view,native_state_buckets_[draw.state_bucket].opacity,draw.mesh->lod_levels)){
+      draw.instance.world_geometry|=native_world_lod;
+      if(!lod_view.world.object_space)draw.instance.second_morph_offset=draw.world_base;
      }
      auto& slot=native_prepared_material_slots_[handle->slot];
      if(FAILED(hr=store_native_instance(slot.persistent_instance[pass],submission.pose->owner,draw)))
@@ -3474,16 +3536,18 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   direct_texture_generation:(texture_array?0:(texture?texture->generation:0));
  const NativeOpacityClass opacity=native_opacity_class(st,view.lighting.material_alpha,
   native_alpha_evidence(view,st,direct_texture!=nullptr && texture==nullptr));
- if(native_record_takes_lod(view,opacity,mesh->lod_levels))draw.instance.world_geometry|=native_world_lod;
+ if(native_record_takes_lod(view,opacity,mesh->lod_levels)){
+  draw.instance.world_geometry|=native_world_lod;
+  if(!view.world.object_space)draw.instance.second_morph_offset=draw.world_base;
+ }
  if(native_record_takes_impostor(view,opacity,mesh->sphere_block)){
   draw.instance.world_geometry|=native_world_impostor;draw.instance.second_morph_offset=view.world.impostor-1;
  }
- FixedState shadow_state;
- const FixedState* material_state=&st;
- if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout){
-  shadow_state=st;shadow_state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
-  material_state=&shadow_state;
- }
+ FixedState resolved_state=st;
+ native_opacity_state(resolved_state,opacity);
+ if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout)
+  resolved_state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
+ const FixedState* material_state=&resolved_state;
  const bool native_world=view.semantic_kind==SemanticKind::figure||
   view.semantic_kind==SemanticKind::terrain||
   view.semantic_kind==SemanticKind::simple_geometry;

@@ -998,11 +998,13 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
   if(draw.preservesOrder!=0)outputTriangle=draw.outputTriangleBase+draw.orderedTriangleOffset+tri;
   else if(tri>=flatCount)outputTriangle=work.steepOutputTriangleBase+nativeBuildSteepBase/3+(tri-flatCount);
   else outputTriangle=draw.outputTriangleBase+nativeShadowGroupBase/3+tri;
-  // Crossfade code above the 16-bit component index (object-space records
-  // only): the successor level takes the other half of the dither.
+  // LOD records encode a mesh-relative 16-bit component plus the existing
+  // crossfade code. Prepared world ranges can start above 65535: their base
+  // lives in secondMorphOffset, independently of these dither bits.
   uint code=(fade!=0?(fade|(second?256u:0u))<<16:0u)|(second&&impostorSecond?1024u<<16:0u);
-  nativeTriangleOutput[outputTriangle]=uint4(draw.instanceIndex,(draw.preparedVertexBase+componentIndex.x)|code,
-                                           (draw.preparedVertexBase+componentIndex.y)|code,(draw.preparedVertexBase+componentIndex.z)|code);
+  uint base=(instance.worldGeometry&(@WORLD_OBJECT_SPACE@|@WORLD_LOD@))!=0?0:draw.preparedVertexBase;
+  nativeTriangleOutput[outputTriangle]=uint4(draw.instanceIndex,(base+componentIndex.x)|code,
+                                           (base+componentIndex.y)|code,(base+componentIndex.z)|code);
  }
 }
 
@@ -1115,7 +1117,10 @@ void nativeShadowLodSelect(NativeDraw draw,NativeInstance instance,uint slice,in
  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0)return;
  for(uint tri=threadId.x;tri<triangleCount;tri+=64){
   uint3 component=nativeGeometry.Load3(indexOffset+(firstTriangle+tri)*12);
-  nativeTriangleOutput[draw.outputTriangleBase+nativeShadowGroupBase/3+tri]=uint4(draw.instanceIndex,draw.preparedVertexBase+component.x,draw.preparedVertexBase+component.y,draw.preparedVertexBase+component.z);
+  // Retained world LOD keeps the full caster geometry. Use the same
+  // relative-index representation as its color command, without dither.
+  uint base=(instance.worldGeometry&@WORLD_LOD@)!=0?0:draw.preparedVertexBase;
+  nativeTriangleOutput[draw.outputTriangleBase+nativeShadowGroupBase/3+tri]=uint4(draw.instanceIndex,base+component.x,base+component.y,base+component.z);
  }
 }
 
@@ -1159,7 +1164,11 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  else if(objectSpace)world=nativeObjectSpaceVertex(instance,preparedIndex&0xffffu);
  // Units sink into trail troughs, in every pass (shadow casters and the
  // receiver position included), so the shadow and self-shadow follow.
- else{world=nativeWorldVertices[preparedIndex];world.p.z+=nativeFigureTrailSink(instance);}
+ else{
+  uint worldIndex=(instance.worldGeometry&@WORLD_LOD@)!=0?
+   instance.secondMorphOffset+(preparedIndex&0xffffu):preparedIndex;
+  world=nativeWorldVertices[worldIndex];world.p.z+=nativeFigureTrailSink(instance);
+ }
  // Depth-map passes keep the resting shape so cached static shadow maps stay valid.
  output.shadowPosition=world.p.xyz;
  // Height within the plant, 0 bottom to 1 top, for the snow on its branches
@@ -1191,7 +1200,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  }
  if(sway){world.p.xyz+=treeSwayOffset(world.p.xyz,instance);output.swaying=treeSwayStrength(instance)>0?1u:0u;}
  // Static LOD crossfade code (nativeStaticLodSelect) for the pixel stages.
- if(objectSpace)output.swaying|=(preparedIndex>>16)<<8;
+ if(objectSpace||(instance.worldGeometry&@WORLD_LOD@)!=0)output.swaying|=(preparedIndex>>16)<<8;
  // Bit 30: a foliage part (instance flag 0x100, native_foliage_part_flag)
  // for the pixel stages' snow build-up; the LOD code above ends at bit 23.
  if((instance.nativeFlags&0x100u)!=0)output.swaying|=1u<<30;
@@ -3233,10 +3242,10 @@ NativeDepthOutput nativePrepassVS(uint vertexId:SV_VertexID){
 cbuffer NativeMotionConstants:register(b11){row_major float4x4 nativeMotionPreviousClip;float4 nativeMotionJitter;};
 StructuredBuffer<NativeWorldVertex> nativePreviousWorldVertices:register(t46);
 struct NativeMotionOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 uv:TEXCOORD0;nointerpolation uint2 textureReference:TEXCOORD1;
- float4 objectClip:TEXCOORD2;float4 cameraClip:TEXCOORD3;};
+ float4 objectClip:TEXCOORD2;float4 cameraClip:TEXCOORD3;nointerpolation uint swaying:TEXCOORD4;};
 NativeMotionOutput nativeMotionVS(uint vertexId:SV_VertexID){
  NativeOutput o=nativeVertex(vertexId,true);precise float4 position=o.p;
- NativeMotionOutput r;r.p=position;r.d=o.d;r.s=o.s;r.uv=o.uv;r.textureReference=o.textureReference;
+ NativeMotionOutput r;r.p=position;r.d=o.d;r.s=o.s;r.uv=o.uv;r.textureReference=o.textureReference;r.swaying=o.swaying;
  uint4 triangleRef=nativeVisibleTriangles[nativeTriangleBase+vertexId/3];
  uint preparedIndex=(vertexId%3)==0?triangleRef.y:((vertexId%3)==1?triangleRef.z:triangleRef.w);
  NativeInstance instance=loadNativeInstance(triangleRef.x);
@@ -3245,7 +3254,9 @@ NativeMotionOutput nativeMotionVS(uint vertexId:SV_VertexID){
   float3 previous=o.worldPosition;
   r.cameraClip=mul(nativeMotionPreviousClip,float4(previous,1));
   [branch]if((instance.worldGeometry&@WORLD_OBJECT_SPACE@)==0){
-   NativeWorldVertex now=nativeWorldVertices[preparedIndex],before=nativePreviousWorldVertices[preparedIndex];
+   uint worldIndex=(instance.worldGeometry&@WORLD_LOD@)!=0?
+    instance.secondMorphOffset+(preparedIndex&0xffffu):preparedIndex;
+   NativeWorldVertex now=nativeWorldVertices[worldIndex],before=nativePreviousWorldVertices[worldIndex];
    if(before.sourcePosition==now.sourcePosition&&before.partNode==now.partNode)previous+=before.p.xyz-now.p.xyz;
   }
   r.objectClip=mul(nativeMotionPreviousClip,float4(previous,1));
@@ -3254,6 +3265,7 @@ NativeMotionOutput nativeMotionVS(uint vertexId:SV_VertexID){
 }
 struct NativeMotionResult{float2 motion:SV_Target0;float depth:SV_Target1;};
 NativeMotionResult nativeMotionPS(NativeMotionOutput i){
+ if(nativeLodDiscard(i.swaying,i.p))discard;
  // Records without a world position stay with the camera pass.
  if(i.cameraClip.w<=1e-6||i.objectClip.w<=1e-6)discard;
  [branch]if(nativeAlphaTest!=0){
