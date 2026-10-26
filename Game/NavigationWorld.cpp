@@ -23,42 +23,20 @@
 #pragma comment(lib,"bcrypt.lib")
 
 namespace {
-// Constant agent types. Pose changes never create another mesh. The collision
-// radius is capped at 2 m by CUnit::RecalcAIParams; owned humans need 0.65 m.
-enum AgentType { Small, Human, Huge, Giant, LevitateSmall, Levitate, AgentCount };
+// Radius is half the FIG torso/shoulder width, independent of unit separation.
+// Select the greatest fixed radius NOT exceeding that width. No per-unit mesh.
+enum AgentType { Tiny, Small, Human, Large, Giant, LevitateTiny, LevitateSmall, Levitate, AgentCount };
 struct Agent { const char* name; Navigation::Profile profile; };
 const Agent Agents[]={
-    {"small",          {.4f,.4f,40.f,.35f,.1f}},
-    {"human",          {.7f,.4f,40.f,.35f,.1f}},
-    {"huge",           {2.f,5.f,40.f,.35f,.2f}},
-    {"giant",          {2.f,7.5f,40.f,.35f,.4f}},
-    {"levitate_small", {.1f,2.f,60.f,.35f,.1f}},
-    {"levitate",       {2.f,2.f,60.f,.35f,.2f}}
+    {"tiny",           {.05f,.2f,40.f,.35f,.05f}},
+    {"small",          {.15f,.2f,40.f,.35f,.05f}},
+    {"human",          {.25f,.4f,40.f,.35f,.05f}},
+    {"large",          {.5f,.4f,40.f,.35f,.1f}},
+    {"giant",          {1.f,.4f,40.f,.35f,.2f}},
+    {"levitate_tiny",  {.05f,.2f,60.f,.35f,.05f}},
+    {"levitate_small", {.25f,.2f,60.f,.35f,.05f}},
+    {"levitate",       {.5f,.2f,60.f,.35f,.1f}}
 };
-int Type(CUnit* unit,int aiClass) {
-    if(aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid AI class");
-    const float radius=unit?unit->GetCollisionDistance():.7f;
-    if(!std::isfinite(radius)||radius<=0||radius>2)throw std::runtime_error("Nav64: invalid collision radius");
-    if(aiClass==0)return radius<=Agents[LevitateSmall].profile.radius?LevitateSmall:Levitate;
-    int standing=aiClass;
-    if(unit&&unit->GetUnitSpecific()->WhoAmI()==HPC_UNITSERVERSPECIFIC)
-        standing=static_cast<CUnitServer*>(unit->GetUnitSpecific())->GetRPGStats()->wAIClassStay;
-    // Permanent body dimensions, not the current pose. Current installed
-    // troll/ogre bounds reach 4.753/3.722 m; cyclopes reach 7.314 m. Some
-    // trolls have legacy class 7 solely because of their chest radius.
-    const float bodyHeight=unit?unit->GetUnitHeight():0;
-    if(!std::isfinite(bodyHeight)||bodyHeight<0||bodyHeight>Agents[Giant].profile.height)
-        throw std::runtime_error("Nav64: ground body exceeds the largest agent type");
-    if((unit&&std::strcmp(unit->GetRaceModel()->szMaskName,"unmocy")==0)||bodyHeight>Agents[Huge].profile.height||(!unit&&standing==7))return Giant;
-    if(standing>=5||radius>Agents[Human].profile.radius||bodyHeight>Navigation::PoseHeights[3])return Huge;
-    return radius<=Agents[Small].profile.radius?Small:Human;
-}
-float Height(CUnit* unit,int aiClass=3) {
-    const int c=unit?unit->GetAIClass():aiClass;
-    const auto& profile=Agents[Type(unit,c)].profile;
-    if(!Navigation::PoseClearance(profile))return profile.height;
-    switch(c) {case 1:return Navigation::PoseHeights[0];case 2:return Navigation::PoseHeights[1];case 3:return Navigation::PoseHeights[2];default:return Navigation::PoseHeights[3];}
-}
 Navigation::Point Point(const CPlot3D& p) { return {p.x,p.y,p.z}; }
 std::string ResourceName(const char* name) {
     auto result=std::filesystem::path(name?name:"").filename().generic_string();
@@ -127,6 +105,7 @@ void NavigationWorld::Source(const std::string& name,const void* data,size_t siz
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
     scene=ResourceName(mpr)+"|"+ResourceName(mob)+"|navsrc:none";
     figures.clear();
+    bodies.clear();poses.clear();bodySizes.clear();
     Changed();failures=0;
 }
 std::shared_ptr<const owned::FigureCpuAsset> NavigationWorld::Figure(CMapObject* object,const char* part) {
@@ -136,7 +115,7 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationWorld::Figure(CMapObject*
     auto* model=manager->GetModel(object->GetMaskName());DWORD size=0;
     const auto file=std::string(object->GetMaskName())+part+".fig";
     auto* data=model?model->GetModel()->GetFile(part,&size):manager->GetFile(file.c_str(),&size);
-    if(!data)throw std::runtime_error("missing walkable FIG");
+    if(!data)throw std::runtime_error("missing navigation FIG: "+file);
     owned::ResourceBlob blob;
     try {blob.bytes=std::make_shared<const std::vector<std::uint8_t>>(data,data+size);}
     catch(...) {if(model)model->GetModel()->CloseFile(data);else manager->CloseFile(data);throw;}
@@ -145,6 +124,142 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationWorld::Figure(CMapObject*
     auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
     if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error(failure.message);
     figures.emplace(key,figure);return figure;
+}
+const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
+    const auto& c=unit->GetComplection();const std::string mask=unit->GetMaskName();
+    if(!std::isfinite(c.strength)||!std::isfinite(c.grace)||!std::isfinite(c.tall))
+        throw std::runtime_error("Nav64: invalid body constitution: "+mask);
+    const auto key=std::make_tuple(mask,c.strength,c.grace,c.tall);
+    auto size=bodySizes.find(key);if(size!=bodySizes.end())return size->second;
+    auto* manager=static_cast<CFigureManager*>(unit->GetWorld()->GetFigureManager());
+    auto* model=manager->GetModel(mask);
+    auto read=[](auto* resource,const std::string& name) {
+        DWORD count=0;auto* data=resource?resource->GetFile(name.c_str(),&count):nullptr;
+        if(!data)throw std::runtime_error("Nav64: missing body resource: "+name);
+        owned::ResourceBlob blob;
+        try {blob.bytes=std::make_shared<const std::vector<std::uint8_t>>(data,data+count);}
+        catch(...) {resource->CloseFile(data);throw;}
+        resource->CloseFile(data);blob.identity.canonical_name=name;blob.identity.bytes=count;return blob;
+    };
+    auto body=bodies.find(mask);
+    if(body==bodies.end()) {
+        auto skeleton=std::make_shared<owned::ModelCpuAsset>();owned::ResourceFailure failure;
+        const auto links=model?read(model->GetModel(),mask):read(manager,mask+".lnk");
+        auto bone=[&](const std::string& name,owned::ResourceBlob& blob,owned::ResourceFailure&) {
+            blob=model?read(model->GetBones(),name):read(manager,mask+name+".bon");return true;
+        };
+        if(!owned::decode_selected_skeleton(links,mask,bone,*skeleton,failure))
+            throw std::runtime_error("Nav64: invalid body skeleton: "+mask+": "+failure.message);
+        body=bodies.emplace(mask,std::move(skeleton)).first;
+    }
+    const auto& skeleton=*body->second;
+    std::vector<bool> included(skeleton.nodes.size());
+    for(size_t i=0;i<skeleton.nodes.size();++i) {
+        auto name=skeleton.nodes[i].name;for(auto& ch:name)ch=char(std::tolower(static_cast<unsigned char>(ch)));
+        const auto parent=skeleton.links[i].parent_index;
+        included[i]=name.find('.')==std::string::npos&&name.rfind("base",0)!=0&&name.rfind("empty",0)!=0&&name.rfind("eye",0)!=0&&(parent>=i||included[parent]);
+    }
+    const float shape[]={c.strength,c.grace,c.tall};float weights[8]{};
+    for(unsigned s=0;s<8;++s){weights[s]=1;for(int a=0;a<3;++a)weights[s]*=(s&(1u<<a))?shape[a]:1-shape[a];}
+    CADEntryPtrArray entries;unit->GetAllAnimationEntries(entries);
+    const SADEntry* selected[3]{};
+    for(int pose=0;pose<3;++pose) {
+        const DWORD state=pose==0?ADB_STATE_NEUTRAL:pose==1?ADB_STATE_WARRY:ADB_STATE_LIE;
+        const DWORD caps=state|ADB_ACTION_IDLE|ADB_MODIFIER_IDLE_STAY;
+        for(INT_PTR i=0;i<entries.GetSize();++i)if((entries[i]->dwFlags&0x3fff8000u)==caps){selected[pose]=entries[i];break;}
+        // Monsters use the combat idle as their ordinary standing posture.
+        if(!selected[pose]&&pose==0)for(INT_PTR i=0;i<entries.GetSize();++i)
+            if((entries[i]->dwFlags&0x3fff8000u)==(caps|ADB_STATE_ATTACK)){selected[pose]=entries[i];break;}
+        if(!selected[pose])selected[pose]=selected[0];
+    }
+    if(!selected[0])throw std::runtime_error("Nav64: body has no standing animation: "+mask);
+    BodySize measured;
+    for(int pose=0;pose<3;++pose) {
+        const std::string poseKey=mask+"/"+selected[pose]->pszAnimationName;
+        auto clip=poses.find(poseKey);
+        if(clip==poses.end()) {
+            auto decoded=std::make_shared<owned::AnimationClipAsset>();owned::ResourceFailure failure;
+            auto* animation=manager->GetModelAnimation(mask,selected[pose]->pszAnimationName);
+            if(!animation)throw std::runtime_error("Nav64: missing body animation: "+poseKey);
+            // Missing tracks have the game's identity transform. Do not mutate
+            // live animation state or use random animation selection.
+            for(size_t i=0;i<skeleton.nodes.size();++i) {
+                if(!included[i])continue;const auto& node=skeleton.nodes[i];
+                owned::AnimationTrackAsset track;DWORD count=0;auto* data=animation->GetFile(node.name.c_str(),&count);
+                if(data) {
+                    owned::ResourceBlob bytes;
+                    try {bytes.bytes=std::make_shared<const std::vector<std::uint8_t>>(data,data+count);}
+                    catch(...) {animation->CloseFile(data);throw;}
+                    animation->CloseFile(data);bytes.identity.canonical_name=poseKey+"/"+node.name;
+                    if(!owned::parse_animation_track(bytes,track,failure))throw std::runtime_error(failure.message);
+                }
+                decoded->tracks.emplace(node.name,std::move(track));
+            }
+            clip=poses.emplace(poseKey,std::move(decoded)).first;
+        }
+        std::vector<CPlot3D> positions(skeleton.nodes.size());
+        std::vector<CQuaternion> rotations(skeleton.nodes.size(),QNULL);
+        float lowX=FLT_MAX,highX=-FLT_MAX,lowZ=FLT_MAX,highZ=-FLT_MAX;
+        for(size_t i=0;i<skeleton.nodes.size();++i) {
+            if(!included[i])continue;
+            const auto& node=skeleton.nodes[i];CPlot3D bone(0,0,0);
+            auto name=node.name;for(auto& ch:name)ch=char(std::tolower(static_cast<unsigned char>(ch)));
+            if(!node.transform_available||node.bone_positions.empty())throw std::runtime_error("Nav64: unavailable body bone: "+mask+"/"+node.name);
+            const auto count=node.bone_positions.size()/3;
+            for(size_t s=0;s<count;++s)bone+=CPlot3D(node.bone_positions[s*3],node.bone_positions[s*3+1],node.bone_positions[s*3+2])*(count==1?1:weights[s]);
+            const auto& track=clip->second->tracks.at(node.name);
+            CQuaternion local=QNULL;if(!track.rotations.empty()){const auto& q=track.rotations[0];local=CQuaternion(q[0],q[1],q[2],q[3]);}
+            const auto parent=skeleton.links[i].parent_index;
+            if(parent<i) {positions[i]=rotations[parent].Rotate(bone)+positions[parent];rotations[i]=local*rotations[parent];}
+            else {positions[i]=CPlot3D(0,0,0);rotations[i]=local;}
+            const auto figure=Figure(unit,node.name.c_str());
+            const bool torso=name=="bd"||name=="hp"||name=="chest"||name=="body"||name=="abdomen"||name=="column"||name.rfind("bd0",0)==0;
+            const bool shoulder=name=="lh1"||name=="rh1";
+            std::vector<CPlot3D> vertices;float armLength2=0;
+            for(const auto& component:figure->components) {
+                const auto index=component.position;CPlot3D p(0,0,0);
+                for(unsigned s=0;s<figure->shape_count;++s) {
+                    const auto& group=figure->positions[s*figure->position_groups+index/4];const auto lane=index%4;
+                    p+=CPlot3D(group.x[lane],group.y[lane],group.z[lane])*(figure->shape_count==1?1:weights[s]);
+                }
+                vertices.push_back(p);if(shoulder)armLength2=(std::max)(armLength2,p*p);
+            }
+            for(const auto& vertex:vertices) {
+                const auto p=rotations[i].Rotate(vertex)+positions[i];
+                if(!Navigation::Finite(Point(p)))throw std::runtime_error("Nav64: non-finite body geometry: "+mask+"/"+node.name);
+                lowZ=(std::min)(lowZ,p.z);highZ=(std::max)(highZ,p.z);
+                // The proximal quarter of the upper arm is the shoulder, not an outstretched arm.
+                if(pose==0&&(torso||(shoulder&&vertex*vertex<=armLength2*.0625f))) {lowX=(std::min)(lowX,p.x);highX=(std::max)(highX,p.x);}
+            }
+        }
+        measured.height[pose]=highZ-lowZ;
+        if(pose==0)measured.radius=(highX-lowX)*.5f;
+        if(!std::isfinite(measured.height[pose])||measured.height[pose]<=0)throw std::runtime_error("Nav64: invalid body height: "+mask);
+    }
+    if(!std::isfinite(measured.radius)||measured.radius<=0)throw std::runtime_error("Nav64: missing torso/shoulder geometry: "+mask);
+    GameJournal::Event("NAV","body","model=%s shape=(%.3f,%.3f,%.3f) width=%.3f heights=(%.3f,%.3f,%.3f)",mask.c_str(),c.strength,c.grace,c.tall,measured.radius*2,measured.height[0],measured.height[1],measured.height[2]);
+    return bodySizes.emplace(key,measured).first->second;
+}
+int NavigationWorld::Type(CUnit* unit,int aiClass) {
+    if(aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid AI class");
+    const float radius=unit?Body(unit).radius:aiClass>=7?1.f:aiClass>=5?.5f:.25f;
+    const int first=aiClass==0?LevitateTiny:Tiny,last=aiClass==0?Levitate:Giant;
+    if(radius<Agents[first].profile.radius)throw std::runtime_error("Nav64: body is smaller than minimum profile");
+    int type=first;for(int i=first+1;i<=last;++i)if(Agents[i].profile.radius<=radius)type=i;
+    return type;
+}
+float NavigationWorld::Height(CUnit* unit,int aiClass) {
+    const int c=unit?unit->GetAIClass():aiClass;
+    const auto& profile=Agents[Type(unit,c)].profile;
+    // Geometry chooses clearance; retain the old class's ceiling as an upper
+    // bound, so a taller visual does not lose an already permitted passage.
+    constexpr float legacy[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};
+    const int pose=unit?(unit->GetCurrentPose()==UP_LAY?2:unit->GetCurrentPose()==UP_CRAWL?1:0):0;
+    const float height=unit?(std::min)(Body(unit).height[pose],legacy[c]):legacy[c];
+    const auto& tiers=Navigation::ClearanceHeights(profile);float selected=tiers[0];
+    if(height<selected)throw std::runtime_error("Nav64: body is lower than minimum profile");
+    for(float tier:tiers)if(tier<=height)selected=tier;
+    return selected;
 }
 void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(object->WhoAmI()==HPC_UNIT)return;
@@ -244,7 +359,7 @@ Navigation::Mesh* NavigationWorld::ForProfile(int type,const char* phase) {
         if(!mesh){mesh=Navigation::Build(*geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
         mesh->generation=generation;mesh->geometry=geometry;
         auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s type=%s radius=%.2f height=%.2f cell=%.2f poses=%s phase=%s workers=%u raster_cpu_ms=%llu polygons_cpu_ms=%llu key=%s generation=%llu%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",Agents[type].name,profile.radius,profile.height,profile.cellSize,Navigation::PoseClearance(profile)?"0.4/1.0/1.6/2.2":"fixed",phase,mesh->workers,static_cast<unsigned long long>(mesh->rasterMs),static_cast<unsigned long long>(mesh->polygonMs),fingerprint.c_str(),static_cast<unsigned long long>(generation),mesh->tiles?"":" reason=\"no walkable ground\"");
+        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s type=%s radius=%.2f height=%.2f cell=%.2f poses=(%.2f/%.2f/%.2f/%.2f) phase=%s workers=%u raster_cpu_ms=%llu polygons_cpu_ms=%llu key=%s generation=%llu%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",Agents[type].name,profile.radius,profile.height,profile.cellSize,Navigation::ClearanceHeights(profile)[0],Navigation::ClearanceHeights(profile)[1],Navigation::ClearanceHeights(profile)[2],Navigation::ClearanceHeights(profile)[3],phase,mesh->workers,static_cast<unsigned long long>(mesh->rasterMs),static_cast<unsigned long long>(mesh->polygonMs),fingerprint.c_str(),static_cast<unsigned long long>(generation),mesh->tiles?"":" reason=\"no walkable ground\"");
         auto result=mesh.get();meshes.emplace(type,std::move(mesh));error.clear();return result;
     }catch(const std::exception& e){error=e.what();if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());return nullptr;}
 }
@@ -254,7 +369,7 @@ Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass,const char* p
 }
 bool NavigationWorld::Prepare(CWorldServer& world,const char* phase) {
     const auto start=std::chrono::steady_clock::now();
-    // Six types, including all future poses and summons, before world publication.
+    // All fixed types, including future poses and summons, before publication.
     for(int type=0;type<AgentCount;++type)if(!ForProfile(type,phase))return false;
     for(const auto& entry:world.mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
         if(!ForUnit(static_cast<CUnit*>(entry.second),3,phase))return false;

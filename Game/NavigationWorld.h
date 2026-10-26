@@ -1,18 +1,23 @@
 #pragma once
 #include "../Navigation/Query.h"
 #include <map>
+#include <tuple>
 #include "Plot.h"
 
 class CMapObject;
 class CUnit;
 class CAIMap;
 class CWorldServer;
-namespace owned { struct FigureCpuAsset; }
+namespace owned { struct FigureCpuAsset; struct ModelCpuAsset; struct AnimationClipAsset; }
 class NavigationWorld {
     Navigation::Geometry terrain;
     std::shared_ptr<Navigation::Geometry> geometry;
     std::map<int,Navigation::Geometry> objects, pendingObjects;
     std::map<std::string,std::shared_ptr<const owned::FigureCpuAsset>> figures;
+    std::map<std::string,std::shared_ptr<const owned::ModelCpuAsset>> bodies;
+    std::map<std::string,std::shared_ptr<const owned::AnimationClipAsset>> poses;
+    struct BodySize { float radius=0; float height[3]{}; };
+    std::map<std::tuple<std::string,float,float,float>,BodySize> bodySizes;
     std::map<std::string,Navigation::Bytes> sources;
     std::map<int,std::unique_ptr<Navigation::Mesh>> meshes;
     std::string scene, error;
@@ -21,6 +26,9 @@ class NavigationWorld {
     void Changed();
     void SyncObjects();
     std::shared_ptr<const owned::FigureCpuAsset> Figure(CMapObject* object,const char* part);
+    const BodySize& Body(CUnit* unit);
+    int Type(CUnit* unit,int aiClass);
+    float Height(CUnit* unit,int aiClass=3);
     Navigation::Mesh* ForProfile(int type,const char* phase);
     Navigation::Mesh* ForUnit(CUnit* unit,int aiClass = 3,const char* phase = "late");
 public:

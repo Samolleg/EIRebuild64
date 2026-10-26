@@ -29,7 +29,7 @@ struct Wire {
 };
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
-        (p.cellSize==.1f||p.cellSize==.2f||p.cellSize==.4f) && p.cellHeight==.05f && p.tileCells==256 && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
+        (p.cellSize==.05f||p.cellSize==.1f||p.cellSize==.2f||p.cellSize==.4f) && p.cellHeight==.05f && p.tileCells==256 && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
 }
 // v1.6.0 addTile does not take bounds for its internal sections. Validate all
 // counts and the exact aligned library layout BEFORE handing it cached bytes.
@@ -212,7 +212,7 @@ std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string
             // the resulting clearance boundary. 4 * 15 material IDs fit Recast's
             // 63 area IDs; Detour receives the original material and pose flags.
             for(unsigned tier=0;tier<4;++tier) {
-                const int cells=int(std::ceil(PoseHeights[tier]/cfg.ch));
+                const int cells=int(std::ceil(ClearanceHeights(p)[tier]/cfg.ch));
                 for(int j=0;j<chf.spanCount;++j)chf.areas[j]=clearance[j]>=cells?material[j]:RC_NULL_AREA;
                 Require(rcErodeWalkableArea(&context,cfg.walkableRadius,chf),"Nav64: pose radius erosion failed");
                 for(int j=0;j<chf.spanCount;++j)if(chf.areas[j])tiers[j]=static_cast<unsigned char>(tier+1);

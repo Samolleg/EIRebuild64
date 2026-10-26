@@ -17,36 +17,49 @@ the object rotation/origin. CROWN and EMPTY retain their pass/ignore semantics.
 Surface area is the existing bridge-road material. A floor touching the top
 of a solid is supported; a body overlapping that solid is blocked.
 
-There are exactly six permanent agent types (X64NAV01 r7):
+There are eight permanent agent profiles (X64NAV01 r8):
 
-| Type | Radius (m) | Minimum/full height (m) | Cell size (m) | Membership |
-|---|---:|---:|---:|---|
-| small | 0.4 | 0.4, pose flags up to 2.2 | 0.1 | narrow ground bodies <= 0.4 m |
-| human | 0.7 | 0.4, pose flags up to 2.2 | 0.1 | humans and comparable bodies <= 0.7 m |
-| huge | 2 | 5 | 0.2 | wide/tall ground bodies, trolls/ogres |
-| giant | 2 | 7.5 | 0.4 | cyclopes and bodies taller than 5 m |
-| levitate_small | 0.1 | 2 | 0.1 | class 0 with the existing high-altitude radius reduction |
-| levitate | 2 | 2 | 0.2 | remaining class-0 bodies |
+| Type | Radius (m) | Clearance tiers (m) | Cell size (m) |
+|---|---:|---|---:|
+| tiny | 0.05 | 0.2 / 0.4 / 1 / 1.6 | 0.05 |
+| small | 0.15 | 0.2 / 0.4 / 1 / 1.6 | 0.05 |
+| human | 0.25 | 0.4 / 1 / 1.6 / 2.2 | 0.05 |
+| large | 0.5 | 0.4 / 1.6 / 2.2 / 3 | 0.1 |
+| giant | 1 | 0.4 / 1.6 / 3 / 6 | 0.2 |
+| levitate_tiny | 0.05 | 0.2 / 0.4 / 1 / 2 | 0.05 |
+| levitate_small | 0.25 | 0.2 / 0.4 / 1 / 2 | 0.05 |
+| levitate | 0.5 | 0.2 / 0.4 / 1 / 2 | 0.1 |
 
-The collision radius remains capped at 2 m by the game. Owned humans require
-0.65 m (0.5 m BV * 0.9 + 0.2); their shared type rounds up to 0.7 m. Standing
-AI class, body height and radius choose a ground type, independently of pose.
-Cyclopes retain their type at every constitution. Actual installed prototype
-ranges give maximum neutral bounds of 4.753 m for trolls, 3.722 m for ogres,
-and 7.314 m for cyclopes. Unsupported bodies are rejected, never rounded down.
-Small bodies keep narrower passages than the human type. Large-body envelopes
-are conservative: a smaller member can lose passages, never gain false ones.
+NavigationWorld::Body reads the effective FIG/BON/LNK and first ordinary idle
+frame from the existing managers. The model's X axis is left/right. Torso and
+hips plus the proximal quarter-length of upper arms define shoulders; distal
+arms, weapons, armor alternatives and their descendants do not inflate width.
+Radius is half that measured width at the unit's current strength/grace/tall.
+Geometry is interpolated without clamping constitution or forcing the human
+BV to one metre. Pose evaluation uses the game's left quaternion multiplication
+(local * parent), with BON offsets rotated by the parent. Parsed figures,
+skeletons, pose tracks and measured constitutions are cached within the scene.
+No unit animation, random state, collision distance or attack distance changes.
 
-For the two pose-aware types, rasterize once at 0.4 m minimum height. Nonwalkable
-solid prisms preserve their actual undersides as ceilings; BV tops stay blocked.
-Compact spans supply measured headroom, including overlap over a step. Erode
-permissions for 0.4/1.0/1.6/2.2 m at the full profile radius on that same compact
-field, split contours by material and clearance, then restore Detour areas
-1..15 and encode nested permissions as polygon flags 1/3/7/15. Zero contour
-simplification error preserves clearance boundaries. This uses at most 60
-Recast area IDs; final material IDs never encode pose. Find, placement, ingress,
-step and save restoration use the current height bit. Existing AI classes
-1/2/3/4 select 0.4/1.0/1.6/2.2 m: pose-to-class mapping still comes from the game.
+Choose the largest fixed radius <= the measured radius, never round upwards.
+This deliberately follows the owner's passage-preservation rule. Grouped
+radii can be smaller than the exact body; exact swept shape/crowd behaviour
+remains later work. Missing/unsupported body geometry is an explicit error.
+Class-only calls without an individual model retain fixed class defaults.
+Fine profiles use 0.05 m cells, so erosion does not round their radius upwards
+to a 0.1 m multiple; larger profile radii are exact multiples of their cells.
+
+All profiles share rasterization between four clearance tiers, including
+levitation. Solid prisms retain actual ceilings and never become walkable tops.
+Measure standing/crawl/lie height from the corresponding model idle poses;
+monsters without a pose use their ordinary standing animation. The query picks
+the greatest tier <= that height AND <= the original AI class height. The
+latter preserves old clearance permissions rather than enlarging the unit
+because of a visual envelope. Find, placement, ingress, step and save restoration
+use this same bit. Up to 60 temporary Recast areas encode material/clearance;
+Detour restores material IDs 1..15 and nested flags 1/3/7/15. Clearance-boundary
+contours retain zero simplification error. Profile selection never uses
+GetCollisionDistance, body BV correction, ownership or attack distances.
 
 Class 0 retains supported levitation, not free 3D flight: the actual MPR water
 layer raises its floor, class-0 material policy admits water, slope is limited
@@ -56,7 +69,7 @@ terrain cost/speed is flat (1024), without the ground uphill speed penalty.
 Ground types keep the 40 degree slope; all types retain 0.35 m climb and 0.05 m
 vertical cells. Full ground water/terrain cost policy still belongs to NAV04.
 
-Prepare warms all six types during NewZone and staged save loading, before
+Prepare warms all eight types during NewZone and staged save loading, before
 publishing the world; party warm-up reuses them. A new pose or ordinary summon
 cannot introduce a new type/mesh. Parallel tile workers retain their own Recast
 contexts; only the simulation thread inserts Detour blobs in fixed z/x order.
@@ -73,14 +86,14 @@ once per profile, solid hulls are computed once, and each tile visits only its
 overlapping inputs (including the full erosion border). Up to eight workers,
 one per two hardware threads, each own their Recast context and temporaries.
 Completed blobs enter Detour on the simulation thread in fixed z/x order.
-Cells depend on the permanent type; radius always rounds upwards to its type.
+Cells depend on the permanent type; radius and clearance tiers round down to the body.
 
 ## Container v1 (little endian)
 
 No raw host structs/pointers are written. The only native layout is the tile
 payload returned by the pinned library's `dtCreateNavMeshData`.
 
-* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=3,
+* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=4,
   library=`0x010600`, endian=`0x12345678`, polyrefBytes=8.
 * u32 text length + UTF-8/ASCII SHA-256 input fingerprint, maximum 4096 bytes.
 * Profile: six f32 (radius,height,slope,climb,cellSize,cellHeight), u32 tileCells.
