@@ -39,6 +39,7 @@ struct VisualSkeletonBinding;
 struct RetainedVisualFrame;
 struct RetainedWorldPointLight;
 struct TerrainCpuAsset;
+struct FigureCpuAsset;
 struct TerrainTexturePage;
 struct OwnedTerrainGeometryValues;
 namespace ground_cover { struct FootprintSplat; }
@@ -735,6 +736,9 @@ struct NativeWorldGeometry {
     // shared mesh with this record's transform, and the record owns no world
     // vertices (static_lod.h native_world_object_space).
     bool object_space = false;
+    // A non-animated retained figure may use reduced indices while keeping
+    // its existing prepared world vertices, pose and shadow-caster identity.
+    bool static_lod = false;
     // Object space: the plant's root point in world space, the sway anchor a
     // posed record reads from its root pose node (instance flags 0x200 and
     // the trunk shape carry the rest). Unused without sway flags.
@@ -824,6 +828,9 @@ struct NativeGeometryView {
     const NativePrebuiltMesh* prebuilt_mesh = nullptr;
     // Reduced index levels (static_lod.h) stored after the full index list.
     const struct NativeMeshLods* lods = nullptr;
+    // Borrowed immutable source for a cold ordinary mesh-cache build only.
+    // The cache owns the uploaded LOD table; warm records never simplify.
+    const FigureCpuAsset* lod_figure = nullptr;
     std::uint32_t contact_map = 0; // active map 0; neighbour upload identity otherwise
     // A compact owned-scene invocation uses the existing synchronous sink.
     // Its immutable source descriptions are read only on initial registration

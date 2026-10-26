@@ -447,6 +447,7 @@ enum class NativeOpacityClass : std::uint32_t { opaque, cutout, ordered };
 struct NativeAlphaEvidence {
     bool texture_opaque = false;
     float diffuse_alpha = std::numeric_limits<float>::quiet_NaN();
+    bool ordered_blend = false;
 };
 bool native_texture_alpha_opaque(const NativeOwnedTextureView& texture,
                                 std::uint32_t mip_filter) noexcept;
@@ -1773,6 +1774,7 @@ private:
         NativeMeshCacheSelector selector{};
         std::string resource_key;
         std::uint32_t world_part = 0;
+        bool static_lods = false;
         std::uint32_t shape_count = 1;
         // Object-space shape-resolved meshes: the exact shape (float bits).
         std::array<std::uint32_t, 3> shape_bits{};
@@ -1784,7 +1786,7 @@ private:
         std::uint32_t decoded_channels = 0;
         bool operator==(const NativeMeshKey& other) const {
             return selector == other.selector && resource_key == other.resource_key &&
-                world_part == other.world_part &&
+                world_part == other.world_part && static_lods == other.static_lods &&
                 shape_count == other.shape_count && shape_bits == other.shape_bits &&
                 position_groups == other.position_groups && normal_groups == other.normal_groups &&
                 component_count == other.component_count &&
