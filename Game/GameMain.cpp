@@ -975,7 +975,11 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #if defined(__SANITIZE_ADDRESS__)
     ASanReporting64::JournalReady();
 #endif
-    struct JournalEnd { ~JournalEnd() { CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
+    struct JournalEnd { ~JournalEnd() {
+#if defined(__SANITIZE_ADDRESS__)
+        ASanReporting64::Finish();
+#endif
+        CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
     try { SettingsProfile::Initialize();
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
         if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }
@@ -1037,6 +1041,9 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 
     movieLifetime.Finish();
     FrameDiagnostics::Flush();
+#if defined(__SANITIZE_ADDRESS__)
+    ASanReporting64::Finish();
+#endif
     GameJournal::Stop();
     // FINI
     theWorld.GetTextureManager()->DeleteUnitLayerTextures();

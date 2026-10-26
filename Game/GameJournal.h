@@ -55,7 +55,7 @@ void AllocationFailure(const char* source) noexcept;
 void AllocationFailureInCatch(const char* source) noexcept; // Only inside a catch block.
 void MemoryErrorText(const char* text) noexcept;
 #if defined(__SANITIZE_ADDRESS__)
-void ASanReport(const wchar_t* path, unsigned long error) noexcept;
+void ASanReport(const wchar_t* path, unsigned long error, const void* pc, unsigned long long count, bool repeat) noexcept;
 #endif
 void Start() noexcept;
 void Stop() noexcept;
