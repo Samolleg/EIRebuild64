@@ -134,11 +134,15 @@ bool g_running_core = false;
 // Core mode, host: the game process's address space (MB) from the control block.
 std::atomic<std::uint32_t> g_core_game_va_used_mb{0}, g_core_game_va_free_mb{0};
 
-// The upscaler method that runs (the renderer's configured_*_mode): the
-// chosen one when it is available, else off.
+// Renderer selection. Embedded retains unavailable DLSS and refuses world
+// frames; the menu must describe that choice rather than calling it Off.
 int active_upscaler(const RendererConfig& config) {
     const int method = configured_value(config, "upscaler");
+#ifdef EID3D11_EMBEDDED
+    if (method == kUpscalerDlss) return kUpscalerDlss; // retained selection; failed world frames are refused
+#else
     if (method == kUpscalerDlss && !dlss_unavailable_reason()) return kUpscalerDlss;
+#endif
     if (method == kUpscalerFsr && !fsr_unavailable_reason()) return kUpscalerFsr;
     return kUpscalerOff;
 }
@@ -201,11 +205,15 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
         const std::string parent = std::string(key, suffix) + "_auto_fade";
         if (!boolean(parent.c_str())) return "needs this widget's auto fade";
     }
-    // The Upscaling method (dlss_frame.h): DLSS runs in the 64-bit host on an
+    // The Upscaling method (dlss_frame.h): DLSS needs NGX on an
     // RTX card, FSR on any Direct3D 11.3 card; greyed only when neither can.
-    if (std::strcmp(key, "upscaler") == 0 && dlss_unavailable_reason() && fsr_unavailable_reason())
+    // A saved unavailable DLSS must still be changeable to Off in this menu.
+    if (std::strcmp(key, "upscaler") == 0 && dlss_unavailable_reason() && fsr_unavailable_reason()
+        && integer("upscaler") != kUpscalerDlss)
         return "no upscaler available";
     const int upscaler = active_upscaler(config);
+    if (upscaler == kUpscalerDlss && dlss_unavailable_reason() &&
+        (is("upscaler_quality") || is("upscale_sharpness"))) return dlss_unavailable_reason();
     // Quality and sharpening belong to a running upscaler.
     if ((std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0) &&
         upscaler == kUpscalerOff)
@@ -1729,7 +1737,7 @@ void draw_video_memory(const DebugOverlay::Implementation& state, const Renderer
 
 // The Upscaling method: Off, DLSS when the x64 host can run it, FSR 2 when
 // this device can; why one is missing is shown below the list. A saved
-// method that is unavailable reads as off in the renderer and is marked here.
+// method that is unavailable is marked here; embedded DLSS refuses world frames.
 void draw_upscaler_choice(RendererConfig& config, const RendererOption& option) {
     static constexpr const char* kLabels[kUpscalerMethodMaximum + 1] = {"Off", "NVIDIA DLSS", "AMD FSR 2"};
     const char* dlss_reason = dlss_unavailable_reason();

@@ -1,6 +1,6 @@
 #pragma once
-// DLSS Super Resolution, renderer side (the evaluation runs in the x64 host,
-// x64_remote_device.h). Small pure helpers shared by renderer.cpp and the
+// DLSS Super Resolution, renderer side (native backend in embedded, x64 host
+// in retail). Small pure helpers shared by renderer.cpp and the
 // settings menu.
 #include <array>
 #include <cmath>
@@ -109,7 +109,11 @@ inline std::array<float, 16> dlss_jittered_clip(std::array<float, 16> m, float j
 // Why the Upscaling option is greyed out (null: DLSS available). Set once
 // after device creation, and again if an evaluation fails.
 inline char* dlss_unavailable_storage() noexcept {
+#ifdef EID3D11_EMBEDDED
+    static char reason[160] = "NGX capability has not been queried";
+#else
     static char reason[160] = "needs the 64-bit render host";
+#endif
     return reason;
 }
 inline const char* dlss_unavailable_reason() noexcept {

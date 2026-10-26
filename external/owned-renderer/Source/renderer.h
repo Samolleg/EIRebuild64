@@ -2562,8 +2562,8 @@ private:
     }
     std::array<float, 16> jittered_clip(std::array<float, 16> clip) const noexcept { jitter_clip(clip.data()); return clip; }
     void apply_render_scale();
-    // DLSS (player options upscaler and upscaler_quality, dlss_frame.h; x64
-    // host only). dlss_mode_: the NGX mode the world targets were built for, -1 off.
+    // DLSS (upscaler/upscaler_quality, dlss_frame.h): direct native backend
+    // in embedded, remote host in retail. Mode of the world targets, -1 off.
     int dlss_mode_ = -1;
     // AMD FSR 2 (the same options, fsr2_upscaler.h): the FSR mode the world
     // targets were built for (0 Quality .. 4 Native AA), -1 off. FSR and DLSS
@@ -2594,7 +2594,7 @@ private:
     void set_world_size() noexcept;
     void advance_dlss_jitter() noexcept;
     // One upscaler frame: camera motion and the reset decision (shared), then
-    // DLSS (x64 host) or FSR 2 (this device) into the output-size image, then
+    // DLSS (native embedded backend / retail host) or FSR 2 into the output-size image, then
     // that image to the output. False: the upscaler failed this frame.
     struct UpscalerFrame { bool camera = false, reset = true; float clip_to_world[16]{}; std::array<float,16> world_to_clip{}; };
     UpscalerFrame begin_upscaler_frame();
