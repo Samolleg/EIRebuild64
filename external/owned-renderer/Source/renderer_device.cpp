@@ -537,8 +537,13 @@ std::string migrate_upscaling(RendererConfig& config) noexcept try{
  const std::wstring path=renderer_config_path();
  const int legacy=static_cast<int>(GetPrivateProfileIntW(L"graphics",L"dlss_mode",0,path.c_str()));
  int method=kUpscalerOff,quality=0;legacy_upscaling_choice(legacy,method,quality);
- config.set_integer("upscaler",method);
- if(method!=kUpscalerOff)config.set_integer("upscaler_quality",quality);
+ // A launcher may already have written v3 keys to a fresh/older ini.
+ // Migrate only missing keys, without skipping unrelated version migrations.
+ wchar_t current[32]{};
+ const bool has_method=GetPrivateProfileStringW(L"graphics",L"upscaler",L"",current,32,path.c_str())>0;
+ const bool has_quality=GetPrivateProfileStringW(L"graphics",L"upscaler_quality",L"",current,32,path.c_str())>0;
+ if(!has_method)config.set_integer("upscaler",method);
+ if(!has_quality&&method!=kUpscalerOff)config.set_integer("upscaler_quality",quality);
  wchar_t text[32]{};
  bool sharpness_read=false;float sharpness=0.f;
  if(GetPrivateProfileStringW(L"graphics",L"fsr_sharpness",L"",text,32,path.c_str())>0){
@@ -547,7 +552,7 @@ std::string migrate_upscaling(RendererConfig& config) noexcept try{
   if(sharpness_read)config.set_floating_point("upscale_sharpness",std::clamp(sharpness,0.f,1.f));
  }
  char detail[96];
- std::snprintf(detail,sizeof(detail),"dlss_mode %d -> upscaler %d quality %d; fsr_sharpness %s",legacy,method,quality,sharpness_read?"kept":"absent");
+ std::snprintf(detail,sizeof(detail),"legacy %d -> upscaler %d quality %d (v3 keys kept); fsr_sharpness %s",legacy,method,quality,sharpness_read?"kept":"absent");
  return detail;
 }catch(...){return "failed";}
 
