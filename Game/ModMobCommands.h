@@ -254,9 +254,18 @@ inline bool String(SSCCmd&cmd,CString&result){
   else if(!strcmp(e->name,"GetUnitArmor")){int slot=Index(cmd.params[0],RPG_NUM_ARMOR_TYPES);auto*item=unit->GetQArmor(slot);if(item)result=item->GetShapeEntry()->szName;}
  }
  else if(!strcmp(e->name,"FloatToStr")){
-  int precision=cmd.params.GetSize()>=2?int(cmd.params[1]):3;precision=(std::max)(0,(std::min)(8,precision));
-  char format[10],buf[100];sprintf_s(format,"%%.%df",precision);int len=sprintf_s(buf,format,cmd.params[0]);
-  int i=len-1;while(i>0&&buf[i]=='0')--i;if(buf[i]=='.')buf[i]=0;else buf[i+1]=0;result=buf;
+  int precision=cmd.params.GetSize()>=2?CheckedInt(cmd.params[1]):3;precision=(std::max)(0,(std::min)(8,precision));
+  char buf[100];int len=sprintf_s(buf,"%.*f",precision,cmd.params[0]);
+  if(len<0)throw std::runtime_error("FloatToStr formatting failed");
+  // Precision is the number of fractional digits, including under a non-C locale.
+  if(precision>0 && len>precision){
+   int decimal=len-precision-1;
+   if(buf[decimal]=='.'||buf[decimal]==','){
+    while(len>decimal+1&&buf[len-1]=='0')--len;
+    if(len==decimal+1)--len;buf[len]=0;
+   }
+  }
+  result=buf;
  }
  return true;
 }
