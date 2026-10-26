@@ -870,6 +870,12 @@ bool gcHabitatOf(GcCandidate c,out GcSurvivor o){
  if((rule.flags&16u)!=0&&baseType!=2&&baseType!=4&&baseType!=7&&baseType!=15)return false;
  // Dead bushes belong to soil/field/drygrass, never grass, sand, paving or rock.
  if(rule.mesh==10u&&baseType!=1u&&baseType!=5u&&baseType!=11u)return false;
+ // Classified soil/paving/rock is not grass habitat. The existing corner
+ // mask also covers the bare half of grass/road transitions; unclassified
+ // slots and the grassy half keep the current placement and density.
+#if GC_F_EDGE
+ if((rule.mesh==0u||cluster==1u)&&gcBareShare(p)>=.5)return false;
+#endif
  // Bare dirt/roads grow only a little grass, predominantly along meadow
  // edges. The same world-space coverage field serves active and neighbour maps.
 #if GC_F_EDGE
