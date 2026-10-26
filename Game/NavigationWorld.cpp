@@ -20,7 +20,7 @@
 
 namespace {
 // A bounded registry shared by loading and queries. Never round a radius down.
-constexpr float RadiusClasses[]={.1f,.4f,.7f,1.f,1.5f,2.f,4.f};
+constexpr float RadiusClasses[]={.1f,.2f,.3f,.4f,.5f,.6f,.7f,.8f,.9f,1.f,1.25f,1.5f,2.f,3.f,4.f};
 constexpr float ClassHeights[]={2.f,.4f,1.f,1.6f,2.2f,1.7f,3.f,6.f};
 constexpr float DefaultRadii[]={.4f,.4f,.4f,.4f,.4f,.7f,.7f,1.5f};
 Navigation::Point Point(const CPlot3D& p) { return {p.x,p.y,p.z}; }
