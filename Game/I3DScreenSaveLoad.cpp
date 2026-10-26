@@ -910,6 +910,10 @@ void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
     try{
         auto thumbnail=SmallScreenFromScreen(screen.get());
         SaveSchema::Slot::SetPresentation(desc,thumbnail.get());
+        struct CursorReset { ~CursorReset(){theCursor.SetMode(CT_DEFAULT);} } cursorReset;
+        theCursor.SetMode(CT_WAIT);
+        CString message;IWorld.GetTextManager()->GetSystemString("notify_saving",message);
+        theInterface.DrawTextOverFrame(message);
         IWorldConnector.ReqSaveGame(pszSlotName);
     }catch(const std::exception &e){ReportError("Save64: %s",e.what());}
 }

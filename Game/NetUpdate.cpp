@@ -220,7 +220,10 @@ inline void CheckAndReplace(CMemorySave &data, const void *pData, int nSize, BOO
 void CUpdateHistory::Write(const void *pData, int nSize)
 {
     // compare data with reference frame and store difference
-    CheckAndReplace(start, pData, nSize, bStartReplace, startPkt);
+    if (absoluteStart)
+        StoreFirstDifference(pData, nSize, startPkt);
+    else
+        CheckAndReplace(start, pData, nSize, bStartReplace, startPkt);
     CheckAndReplace(frame, pData, nSize, bFrameReplace, framePkt);
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////

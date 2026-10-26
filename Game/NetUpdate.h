@@ -44,6 +44,7 @@ class CUpdateHistory
     static CPacket *pSrcPacket;
     static BOOL bStartReplace, bFrameReplace;
     static CMemorySave *pReference;
+    bool absoluteStart = false;
     CMemorySave start, frame; // states of object on starting moment and on previous frame
 public:
     CPacket startPkt,
@@ -51,11 +52,14 @@ public:
 
     void Clear()
     {
+        absoluteStart = false;
         start.SetSize(0);
         frame.SetSize(0);
         startPkt.SetSize(0);
         framePkt.SetSize(0);
     }
+    // A restored object has no shared creation baseline with the client.
+    void UseAbsoluteStart() { absoluteStart = true; }
     void StartUpdateTo(EUpdateType dest);
     void StartUpdateFrom(EUpdateType tip, CPacket &pkt);
     void FinishUpdate();
@@ -242,6 +246,15 @@ public:
     CUpdateMultiple() { Clear(); }
     void SetHistoriesNumber(int nNum) { histories.SetSize(nNum); }
     int GetHistoriesNumber() const { return histories.GetSize(); }
+    void RestoreState()
+    {
+        Clear();
+        for (int i = 0; i < histories.GetSize(); ++i)
+        {
+            histories[i].UseAbsoluteStart();
+            SetUpdateMask(i);
+        }
+    }
     void SetUpdateMask(int nBit)
     {
         WORD wMask = 1 << nBit;

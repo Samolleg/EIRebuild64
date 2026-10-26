@@ -16,7 +16,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 namespace { CGlobalHat initialHat; CGlobalHat *publishedHat=&initialHat; }
 CGlobalHat &ActiveGlobalHat() { return *publishedHat; }
-void PublishGlobalHat(CGlobalHat *hat) noexcept { publishedHat=hat; }
+void PublishGlobalHat(CGlobalHat *hat) noexcept { publishedHat=hat ? hat : &initialHat; }
 /////////////////////////////////////////////////////////////////////////////////////
 // CSingleParty
 /////////////////////////////////////////////////////////////////////////////////////
