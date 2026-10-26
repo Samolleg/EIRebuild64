@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Opt-in only: /p:ForceImportBeforeCppTargets=<absolute path to this file>.
+       Keep Release shader resources and prebuilt dependencies; isolate every
+       instrumented object, PCH, library, EXE and PDB under out/.../ASan. -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild' Or '$(MSBuildProjectName)'=='OwnedRenderer'">
+    <ASanRepoRoot>$(MSBuildThisFileDirectory)..\</ASanRepoRoot>
+    <OutDir>$(ASanRepoRoot)out\x64\ASan\$(MSBuildProjectName)\</OutDir>
+    <IntDir>$(ASanRepoRoot)out\obj\x64\ASan\$(MSBuildProjectName)\</IntDir>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <EnableASAN>true</EnableASAN>
+    <CopyAsanBinariesToOutDir>true</CopyAsanBinariesToOutDir>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild' Or '$(MSBuildProjectName)'=='OwnedRenderer'">
+    <ClCompile>
+      <EnableASAN>true</EnableASAN>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- Third-party compiled sources stay uninstrumented. The miniaudio TU
+       also contains host glue: that glue is outside ASan coverage as well.
+       Do not reuse the instrumented host PCH for this mixed TU. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild'">
+    <ClCompile Update="Game\MiniaudioOneShotSfx.cpp">
+      <EnableASAN>false</EnableASAN>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <!-- MSVC's supported mixed-library mode: retain compatible STL container
+           annotations without compiler instrumentation of the miniaudio TU. -->
+      <PreprocessorDefinitions>_ANNOTATE_VECTOR;_ANNOTATE_STRING;%(ClCompile.PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='OwnedRenderer'">
+    <ClCompile Update="$(OwnedRendererRoot)ThirdParty\**\*.cpp">
+      <EnableASAN>false</EnableASAN>
+    </ClCompile>
+  </ItemGroup>
+</Project>
