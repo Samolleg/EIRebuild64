@@ -558,8 +558,10 @@ void Slot::Commit(std::unique_ptr<State> state)
     std::unique_ptr<CParty> clientParty;
     std::vector<owned::RetainedAdmission> renderMembers;
     renderMembers.reserve(current->mapObjects.GetCount());
-    for(const auto &x:current->mapObjects)if(x.first>0)
-        renderMembers.push_back({std::uint32_t(x.first),std::uint32_t(x.second->GetTypeID()),x.first});
+    for(const auto &x:current->mapObjects){
+        const int id=x.second->GetID();
+        if(id>0)renderMembers.push_back({std::uint32_t(id),std::uint32_t(x.second->GetTypeID()),id});
+    }
     // Preparation is reversible: no live disconnect, screen destruction,
     // namespace publication or world ownership changes occur in this scope.
     {
