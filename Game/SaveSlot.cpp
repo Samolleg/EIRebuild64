@@ -679,7 +679,11 @@ void Slot::Shutdown()
     // Retire accepted save owners before global databases and renderer resources.
     theWorldServer.Destroy();
     PublishWorldServer(nullptr);PublishGlobalHat(nullptr);
-    active.reset();visited.clear();presentation.clear();screenshot.clear();
+    active.reset();
+    // The initial new-game scenario survives the first slot adoption. Retire
+    // its shops before the global world server's virtual bases are destroyed.
+    theHat.Clear();
+    visited.clear();presentation.clear();screenshot.clear();
 }
 bool Slot::HasZone(const char *name){return visited.find(name)!=visited.end();}
 bool Slot::StoreZone(const char *name)
