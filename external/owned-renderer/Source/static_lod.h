@@ -29,7 +29,9 @@ inline constexpr float kStaticLodBand = 1.0f;
 //   bit 0  world geometry (always set with the others)
 //   bit 1  object space: the vertex stage evaluates the shared mesh with the
 //          record's transform; the record owns no world vertices
-//   bit 2  static LOD: nativeBuildCS picks a reduced index level
+//   bit 2  static LOD: nativeBuildCS picks a reduced index level; a retained
+//          world record keeps its prepared vertices and puts their base in
+//          secondMorphOffset (world records have no legacy morph stream).
 inline constexpr std::uint32_t native_world_geometry = 1u;
 inline constexpr std::uint32_t native_world_object_space = 2u;
 inline constexpr std::uint32_t native_world_lod = 4u;

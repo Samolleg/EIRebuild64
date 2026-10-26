@@ -2615,6 +2615,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if (target.bound_assembly!=sample.assembly) {
         view={};const auto& figure=*part.geometry;
         view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape_count=figure.shape_count;
+        if(!sample.values.unit&&!assembly.sways)view.lod_figure=&figure;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
         view.positions=figure.positions.data();view.position_groups=figure.position_groups;
         view.normals=figure.normals.data();view.normal_groups=figure.normal_groups;
@@ -2645,6 +2646,13 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
         view.prepared_identity={sample.lifecycle.id,sample.lifecycle.generation,sample.lifecycle.positive_world_epoch,
             sample.resource.serial,static_cast<UINT>(index),0,1,true};
         view.world.pose_node=part.skeleton_node;view.world.geometry_radius=target.geometry_radius;
+    }
+    const bool static_lod=view.lod_figure && prepared.gpu_pose.binding->neutral &&
+        part.texture_type!=13 && part.texture_type!=14 && part.texture_type!=16;
+    if(view.world.static_lod!=static_lod){
+        view.world.static_lod=static_lod;
+        if(++target.record_revision==0)++target.record_revision;
+        view.world.record_revision=target.record_revision;
     }
     if (view.world.geometry_radius != target.geometry_radius) {
         view.world.geometry_radius=target.geometry_radius;
@@ -2902,7 +2910,8 @@ bool retained_visual_current_nodes(const RetainedVisualSample& sample,
 
 bool retained_visual_preserve_color_order(const RetainedVisualSample& sample,
     const VisualPartAsset& part) noexcept {
-    if (!part.material || retained_visual_effective_alpha(sample,part) < 254.5f/255.f)
+    if (!part.material || retained_visual_effective_alpha(sample,part) != 1.f ||
+        ((part.figure_flags&0x100u) && (part.diffuse>>24)!=255u))
         return true;
     // Actual alpha1 content removes the old format-only order constraint.
     // Other textures retain their established format-based ordering policy.
