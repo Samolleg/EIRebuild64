@@ -7,6 +7,9 @@
 #include <game_focus.h>
 #include <cursor_confinement.h>
 #include "GameJournal.h"
+#if defined(__SANITIZE_ADDRESS__)
+#include "ASanReporting64.inl"
+#endif
 #include "ErrorDialog.h"
 #include <cursor_image.h>
 #include "SettingsProfile.h"
@@ -969,6 +972,9 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
     CorePerf::Initialize();
     GameJournal::Start();
+#if defined(__SANITIZE_ADDRESS__)
+    ASanReporting64::JournalReady();
+#endif
     struct JournalEnd { ~JournalEnd() { CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
     try { SettingsProfile::Initialize();
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
@@ -1350,6 +1356,9 @@ bool InspectRendererFacadeCheckCommandLine(int& result);
 
 int APIENTRY WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command, int show)
 {
+#if defined(__SANITIZE_ADDRESS__)
+    ASanReporting64::Initialize();
+#endif
     int profileResult=0;
     if (InspectRendererFacadeCheckCommandLine(profileResult)) return profileResult;
     if(InspectSettingsProfileCommandLine(profileResult))return profileResult;
