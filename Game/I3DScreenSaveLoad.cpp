@@ -115,13 +115,13 @@ void SSaveSlotDesc::FormName(bool bDate)
     IWorld.GetTextManager()->GetSystemString("save_auto_enter", szASaveStr);
     IWorld.GetTextManager()->GetSystemString("save_auto_exit", szBSaveStr);
     if (szPath.CompareNoCase("saveq") == 0)
-        szName.Format("%s", szQSaveStr);
+        szName.Format("%s", static_cast<LPCSTR>(szQSaveStr));
     else if (szPath.CompareNoCase("savea") == 0)
-        szName.Format("%s", szASaveStr);
+        szName.Format("%s", static_cast<LPCSTR>(szASaveStr));
     else if (szPath.CompareNoCase("saveb") == 0)
-        szName.Format("%s", szBSaveStr);
+        szName.Format("%s", static_cast<LPCSTR>(szBSaveStr));
     else
-        szName.Format("%s", GetZoneLocalName());
+        szName.Format("%s", static_cast<LPCSTR>(GetZoneLocalName()));
     /*
     if ( bDate )
     {
@@ -640,7 +640,7 @@ void CI3DScreenSaveLoad::Delete()
         return;
 
     CString szDelPath;
-    szDelPath.Format("%sSaves64\\%s", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), slots[nCurrentSlot].szPath);
+    szDelPath.Format("%sSaves64\\%s", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str(), static_cast<LPCSTR>(slots[nCurrentSlot].szPath));
 
     CFileFind find;
     BOOL bFind = find.FindFile(szDelPath + "\\*.*");
@@ -832,10 +832,10 @@ void CI3DScreenSaveLoad::RedrawSlots()
     rc = CRect(340, 260, 590, 284);
     CString szTmp;
 
-    szTmp.Format("%s", pSlot->GetAllodLocalName());
+    szTmp.Format("%s", static_cast<LPCSTR>(pSlot->GetAllodLocalName()));
     pSurf->DrawText(szTmp, rc, 1, SAVELOAD_COLOR_TEXT, DT_LEFT);
     rc += shift;
-    szTmp.Format("%s", pSlot->GetZoneLocalName());
+    szTmp.Format("%s", static_cast<LPCSTR>(pSlot->GetZoneLocalName()));
     pSurf->DrawText(szTmp, rc, 1, SAVELOAD_COLOR_TEXT, DT_LEFT);
     rc += shift;
 
@@ -850,7 +850,7 @@ void CI3DScreenSaveLoad::RedrawSlots()
     CString szDayString;
     IWorld.GetTextManager()->GetSystemString("save_day", szDayString);
 
-    szTmp.Format("%s  %d,  %d:%02d", szDayString, nDay + 1, nHour, nMinute);
+    szTmp.Format("%s  %d,  %d:%02d", static_cast<LPCSTR>(szDayString), nDay + 1, nHour, nMinute);
     pSurf->DrawText(szTmp, rc, 1, SAVELOAD_COLOR_TEXT, DT_LEFT);
 
     pSurf->DrawText(pSlot->szPath, CRect(340, 360, 580, 385), 1, SAVELOAD_COLOR_TEXT, DT_RIGHT);

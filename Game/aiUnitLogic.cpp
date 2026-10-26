@@ -2879,7 +2879,7 @@ void CAIUnitLogic::Segment()
                 break;
             }
             szTemp.Format("Unit %i new motivation %s with power of %i",
-                          pUnitServer->GetUnit()->GetID(), szMotive, nBestPower);
+                          pUnitServer->GetUnit()->GetID(), static_cast<LPCSTR>(szMotive), nBestPower);
             aiLog << szTemp << endl;
             // не пора ли поднять аларм?
             switch (pBest->GetType())

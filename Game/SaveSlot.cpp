@@ -587,6 +587,7 @@ void Slot::Commit(std::unique_ptr<State> state)
     previous->detachedSave=true;previous->script.detachedSaveState=true;previous->scriptTemp.detachedSaveState=true;
     if(state->scenario.scenario)PublishGlobalHat(state->scenario.scenario.get());
     else if(active)state->scenario=std::move(active->scenario);
+    theWorld.InvalidatePicking();
     PublishWorldServer(current);
     // CreatePlayer normally owns one reference until RemovePlayer. Saved
     // factories instead hold temporary graph/prepared pins; transfer that root.

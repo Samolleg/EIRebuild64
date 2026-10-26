@@ -412,7 +412,12 @@ BOOL CPlayerClient::PrsCreateMapobj()
     pMO->SetAttachedQuest(szAttachedQuest);
     if (bIsUnit)
     {
-        DWORD dwRaceModel = theUnitDatabase.prototypes[mapobjCreate.dwSubtype]->dwRaceIndex;
+        const auto *prototype = static_cast<CUnit *>(pMO)->GetPrototype();
+        if (!prototype) {
+            ReportError("Cannot receive unit %d: invalid prototype %u", pMO->GetID(), mapobjCreate.dwSubtype);
+            throw std::runtime_error("received unit prototype missing");
+        }
+        DWORD dwRaceModel = prototype->dwRaceIndex;
         const SUDBRaceModel *pRace = theUnitDatabase.races[dwRaceModel];
         float fpCenterShift = pRace->fpCenterShift;
         pMO->SetCenterShift(CPlot3D(0, fpCenterShift, 0));

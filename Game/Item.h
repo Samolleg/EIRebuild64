@@ -443,10 +443,14 @@ public:
     virtual CString GetI3DFigureName() const;
     //
     EIDBLootItemType GetLootType() const { return litType; }
+    static const SIDBItemGeneralShape *ResolveInstructionShape(EIDBInstructionType type, DWORD index);
+    const SIDBItemGeneralShape *GetInstructionShape() const { return ResolveInstructionShape(itInstructionType, dwMaterialIndex); }
+    static void ValidateInstructionReference(EIDBInstructionType type, DWORD index);
+    void ValidateInstruction() const { if (litType == IDBLIT_INSTRUCTION) ValidateInstructionReference(itInstructionType, dwMaterialIndex); }
     EIDBInstructionType GetInstructionType() const { return itInstructionType; }
     DWORD GetMaterialIndex() const { return dwMaterialIndex; }
     DWORD GetInstructionItemIndex() const { return dwMaterialIndex; }
-    void SetInstructionItemIndex(DWORD dwIndex) { dwMaterialIndex = dwIndex; }
+    void SetInstructionItemIndex(DWORD dwIndex) { if (litType == IDBLIT_INSTRUCTION) ValidateInstructionReference(itInstructionType, dwIndex); dwMaterialIndex = dwIndex; }
     //
     virtual void Load(CSave &file) = delete;
     virtual void Store(CSave &file) = delete;

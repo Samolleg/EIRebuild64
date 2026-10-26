@@ -233,7 +233,7 @@ void CInterface3D::Fini()
         CString szStr;
         for (auto it = tutorials.begin(); it != tutorials.end(); ++it)
         {
-            szStr.Format("%s %d\n", it->first, it->second);
+            szStr.Format("%s %d\n", static_cast<LPCSTR>(it->first), it->second);
             file.WriteString(szStr);
         }
         file.Close();

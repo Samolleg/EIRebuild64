@@ -352,7 +352,7 @@ BOOL CUnitClientSpecific::GetStepSound(int nTerrainType, CString &szSFXName) con
         ((nTerrainType != TERRTYPE_SWAMP) && (nTerrainType != TERRTYPE_WATER)))
         szSFXName.Format("steps\\human\\crawl\\%d.wav", Dice(6));
     else
-        szSFXName.Format("%s\\%d.wav", pRace->szSteps[nTerrainType],
+        szSFXName.Format("%s\\%d.wav", static_cast<LPCSTR>(pRace->szSteps[nTerrainType]),
                          Dice(pRace->dwNumSteps[nTerrainType]));
 
     return TRUE;
@@ -399,17 +399,17 @@ BOOL CUnitClientSpecific::GetActionSound(const SADEntry *pADEntry, float fTime1,
             return TRUE;
         }
         else if (Random(100) < pRace->dwAttackProbability)
-            szSFXName.Format("%s\\attack\\%d.wav", szSFXPath, dwIndex);
+            szSFXName.Format("%s\\attack\\%d.wav", static_cast<LPCSTR>(szSFXPath), dwIndex);
         break;
     case ADB_ACTION_SUFFER:
-        szSFXName.Format("%s\\hit\\%d.wav", szSFXPath, dwIndex);
+        szSFXName.Format("%s\\hit\\%d.wav", static_cast<LPCSTR>(szSFXPath), dwIndex);
         break;
     case ADB_ACTION_DEATH:
-        szSFXName.Format("%s\\death\\%d.wav", szSFXPath, dwIndex);
+        szSFXName.Format("%s\\death\\%d.wav", static_cast<LPCSTR>(szSFXPath), dwIndex);
         break;
     case ADB_ACTION_IDLE:
         if (Random(100) < pRace->dwIdleProbability)
-            szSFXName.Format("%s\\idle\\%d.wav", szSFXPath, dwIndex);
+            szSFXName.Format("%s\\idle\\%d.wav", static_cast<LPCSTR>(szSFXPath), dwIndex);
         break;
     case ADB_ACTION_SPECIAL: // tame, loot, steal and science animations
         switch ((pADEntry->dwFlags & ADB_MODIFIERS) / ADB_MODIFIER_SPECIAL_1)
@@ -1675,35 +1675,35 @@ void CUnitClientSpecific::HLDamaged(ERPGHitLocations hl, float fpDamage, BYTE cF
         {
         case RPGWST_SWORD:
         case RPGWST_AXE:
-            szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\slash\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_DAGGER:
         case RPGWST_SPEAR:
         case RPGWST_BOW:
         case RPGWST_CROSSBOW:
         case RPGWST_HANDS2:
-            szSFXName.Format("weapons\\pierce\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\pierce\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HAMMER:
-            szSFXName.Format("weapons\\crash\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\crash\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS1:
-            szSFXName.Format("weapons\\hands1\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\hands1\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS3:
-            szSFXName.Format("weapons\\crash\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\crash\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS4:
-            szSFXName.Format("weapons\\hands4\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\hands4\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS5:
-            szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\slash\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS6:
-            szSFXName.Format("weapons\\hands6\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\hands6\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS7:
-            szSFXName.Format("weapons\\hands7\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\hands7\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         }
     }
@@ -1715,23 +1715,23 @@ void CUnitClientSpecific::HLDamaged(ERPGHitLocations hl, float fpDamage, BYTE cF
         case RPGWST_HANDS4:
         case RPGWST_HANDS5:
         case RPGWST_AXE:
-            szSFXName.Format("weapons\\slash\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\slash\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_DAGGER:
         case RPGWST_SPEAR:
         case RPGWST_BOW:
         case RPGWST_CROSSBOW:
         case RPGWST_HANDS2:
-            szSFXName.Format("weapons\\pierce\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\pierce\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HAMMER:
         case RPGWST_HANDS1:
         case RPGWST_HANDS6:
-            szSFXName.Format("weapons\\hands6\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\hands6\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         case RPGWST_HANDS3:
         case RPGWST_HANDS7:
-            szSFXName.Format("weapons\\hands7\\%s\\1.wav", szMaterialName);
+            szSFXName.Format("weapons\\hands7\\%s\\1.wav", static_cast<LPCSTR>(szMaterialName));
             break;
         }
     }
@@ -2120,7 +2120,7 @@ bool CUnitClientSpecific::Wear(DWORD dwArmor)
                 szBodypartName.Format("hr.%.2d", dwHair);
             }
             CFigure *pFigure = lpUnit->MatchFigure(szBodypartName);
-            szString.Format("%s.armor%.2d", szBodypartName, pShape->dwTextureTypeIndex);
+            szString.Format("%s.armor%.2d", static_cast<LPCSTR>(szBodypartName), pShape->dwTextureTypeIndex);
             if (pModel->GetModel()->CheckFileExist(szString))
             {
                 lpUnit->LoadFigure(szString, pModel, lpUnit->CheckFlag(OBJ_LOADED));
