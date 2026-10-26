@@ -248,3 +248,11 @@ renderer_ui_ru.h. The c79 character-pane text fix is included; visual
 acceptance remains with the owner. No reverted diagnostic modes are restored.
 
 MEM01: branch `eirebuild/c79-mem`, commit `5f5d37c26ad06587dc6f7ffa8895c0b1cf82735b`, based on `b25858678aa800a853f94aa99bf3e7259dc57a45`. Identical live memory selections share immutable backing and decoded identity after an exact content comparison. The embedded host retires world GPU resources before loading its successor and reads allocation-free resource counters for its permanent journal. No neighbour content, detail, shader or rendering policy changes.
+
+X64DLSS01: renderer-owned dlss_backend.h/.cpp adapts the NGX lifecycle and
+feature creation from upstream Host/dlss.cpp/.h at
+ae33899bce960a72f6d6dca2cdf76b5e60a0a645 (local read-only reference).
+No IPC/protocol/resource IDs or upstream ProjectID are imported. Each embedded
+Renderer owns its NGX instance; capability and optimal settings use the real
+D3D11 device. Frame evaluation and settings integration remain X64DLSS02/03.
+SDK v310.9.16 and distribution notices: repository THIRD_PARTY.md.

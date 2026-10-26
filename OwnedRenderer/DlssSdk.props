@@ -1,0 +1,17 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <DlssSdkRoot Condition="'$(DlssSdkRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\dlss\v310.9.16\</DlssSdkRoot>
+    <DlssSdkRoot>$([MSBuild]::EnsureTrailingSlash('$(DlssSdkRoot)'))</DlssSdkRoot>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><AdditionalIncludeDirectories>$(DlssSdkRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><AdditionalDependencies>$(DlssSdkRoot)lib\Windows_x86_64\x64\nvsdk_ngx_d.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <Target Name="VerifyDlssSdk" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(DlssSdkRoot)include\nvsdk_ngx.h') Or !Exists('$(DlssSdkRoot)include\nvsdk_ngx_helpers_d3d.h') Or !Exists('$(DlssSdkRoot)include\nvsdk_ngx_helpers_cuda.h') Or !Exists('$(DlssSdkRoot)lib\Windows_x86_64\x64\nvsdk_ngx_d.lib') Or !Exists('$(DlssSdkRoot)lib\Windows_x86_64\rel\nvngx_dlss.dll') Or !Exists('$(DlssSdkRoot)LICENSE.txt')" Text="DLSS SDK v310.9.16 missing. Run tools/prepare-worktree.ps1 -DlssSdkSource &lt;SDK&gt; (or set EIREBUILD64_DLSS_SDK), or supply /p:DlssSdkRoot=&lt;SDK&gt;. Required: headers, x64 /MD nvsdk_ngx_d.lib, release nvngx_dlss.dll and LICENSE.txt." />
+  </Target>
+  <Target Name="CopyDlssRuntime" AfterTargets="Build" Condition="'$(ConfigurationType)'=='Application'">
+    <Copy SourceFiles="$(DlssSdkRoot)lib\Windows_x86_64\rel\nvngx_dlss.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(DlssSdkRoot)LICENSE.txt" DestinationFiles="$(OutDir)licenses\NVIDIA-DLSS-LICENSE.txt" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
