@@ -20,6 +20,7 @@ public:
     static bool Save(const char *name);
     static bool Load(const char *name);
     static void NewGame();
+    static void Shutdown();
     static void StoreWorld(CSave &, CWorldServer &);
     static bool LoadWorld(CSave &);
     static void CopyParty(CParty &, const CParty &);

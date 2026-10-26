@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "RuntimePaths64.h"
+#include "SaveSlot.h"
 #include "CorePerf.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Input.h"
@@ -1046,7 +1047,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     // The renderer and its TL pipeline hold references to the sunlight owned
     // by the world's light manager: drop them while that light still exists.
     GetRenderer()->SetSunlight(nullptr);
-    theWorldServer.Destroy();
+    SaveSchema::Slot::Shutdown();
     theWorld.Destroy();
     GetRenderer()->Destroy();
     ownedResourceRuntime.reset();

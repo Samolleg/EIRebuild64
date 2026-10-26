@@ -80,7 +80,7 @@ thread_local CWorldServer *preparingWorldServer = nullptr;
 SavedWorldScope::SavedWorldScope(CWorldServer *world) noexcept : previous(preparingWorldServer) { preparingWorldServer=world; }
 SavedWorldScope::~SavedWorldScope() { preparingWorldServer=previous; }
 CWorldServer &ActiveWorldServer() { return *(preparingWorldServer?preparingWorldServer:publishedWorldServer); }
-void PublishWorldServer(CWorldServer *world) noexcept { publishedWorldServer = world; }
+void PublishWorldServer(CWorldServer *world) noexcept { publishedWorldServer = world ? world : &initialWorldServer; }
 
 struct SFieldCampSnapshot {
     ObjectId identity=0;

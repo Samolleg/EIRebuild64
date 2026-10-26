@@ -456,6 +456,7 @@ void Slot::World(Reader &r,CWorldServer &v)
 
 void Slot::FinalizeWorld(Document &d)
 {
+                SavedWorldScope lookups(d.world.get());
                 for(const auto &x:d.world->mapObjects){
                     auto *object=x.second;
                     auto *animation=static_cast<CAnimationSystem2 *>(d.world->GetFigureManager()->CreateData(ASTID_ANIMATION_SYSTEM2));
@@ -466,10 +467,23 @@ void Slot::FinalizeWorld(Document &d)
                         if(id!=0xffffffffu){auto *entry=unit->GetAnimationEntryByIndex(id);if(!entry)Invalid("saved animation unavailable");unit->SetCurrentAnimationEntry(entry);animation->SetAnimation(entry);}
                         unit->RecalcAIParams();
                     }
-                    object->ExportStats();object->SetUpdateMask();
+                    // Rebuild every history, including ownership and animation.
+                    // SetUpdateMask() without a bit only marks the object dirty.
+                    object->ExportStats();object->update.RestoreState();object->UpdateFrame();
                     d.world->aiMap.AddObject(object);
                 }
+                for(const auto &x:d.world->effects){x.second->SetUpdateMask();x.second->UpdateFrame();}
                 d.world->aiMap.SetGraphRebuild(true);
+                // Static objects are sent once by NewZone, outside visibility updates.
+                auto snapshotPlayer=std::unique_ptr<CPlayer,void(*)(CPlayer *)>(
+                    static_cast<CPlayerManager *>(d.world->GetPlayerManager())->CreatePlayer(),
+                    [](CPlayer *p){p->Release();});
+                if(!snapshotPlayer)Invalid("cannot create static snapshot player");
+                auto *snapshotServer=static_cast<CPlayerServer *>(snapshotPlayer->GetPlayerSpecific());
+                CGameBasePtrArray objects;
+                for(const auto &x:d.world->staticObjs)objects.Add(x.second);
+                snapshotServer->AddMapObjects(objects);
+                snapshotServer->CopyUpdatePkt(d.world->theWSInitialUpdate);
 }
 
 void Slot::StoreParty(CSave &file,const CParty &party)
@@ -557,6 +571,9 @@ void Slot::Commit(std::unique_ptr<State> state)
             serverConnection=connections.GetHead();player->pConnection=serverConnection;
             server->status=CPlayerServer::PSS_ACTIVE;
             clientParty=std::make_unique<CParty>();CopyParty(*clientParty,player->party);
+            // Restore the local map ID before the first unit ownership packet.
+            SCP_LOGGED logged;logged.nPlayerID=player->GetID();
+            server->wpkt.Write(PID_LOGGED);server->wpkt.Write(&logged,sizeof(logged));
             player->SetChanged(DW_PCHANGED_EVERYTHING);
             if(current->bMapLoaded&&!current->SendNewZoneToPlayer(player))Invalid("cannot prepare new-zone update");
             const int savedCounter=server->nStorePartyCounter;
@@ -565,12 +582,15 @@ void Slot::Commit(std::unique_ptr<State> state)
         } else {current->serverMode=SERV_MODE_NONE;current->bCanRunScript=FALSE;} });
         state->next=ObjectIdentity::GetNext();
     }
-    // No callbacks or allocation beyond this point. Retained owners, old
+    // Publication does not allocate. Retained owners, old
     // connection and old client party are released only after the whole exchange.
     previous->detachedSave=true;previous->script.detachedSaveState=true;previous->scriptTemp.detachedSaveState=true;
     if(state->scenario.scenario)PublishGlobalHat(state->scenario.scenario.get());
     else if(active)state->scenario=std::move(active->scenario);
     PublishWorldServer(current);
+    // CreatePlayer normally owns one reference until RemovePlayer. Saved
+    // factories instead hold temporary graph/prepared pins; transfer that root.
+    if(player)player->AddRef();
     current->script.AdoptSaveState();current->scriptTemp.AdoptSaveState();zone->graph.Adopt();
     if(state->scenario.scenario)state->scenario.graph.Adopt();
     ObjectIdentity::RestoreNamespace::Publish(state->next);
@@ -606,6 +626,12 @@ void Slot::Commit(std::unique_ptr<State> state)
         else try{previous->Destroy();}catch(CException *e){e->Delete();GameJournal::AllocationFailureInCatch("Save64 retirement");}
              catch(...){GameJournal::AllocationFailureInCatch("Save64 retirement");}
     }
+    // Managers force-delete their members on Destroy, regardless of refcount.
+    // Drop staging pins while every manager is alive, not at process shutdown.
+    zone->staged=false;
+    zone->graph=Graph{};zone->owners.reset();
+    active->scenario.graph=Graph{};active->scenario.owners.reset();
+    current->detachedSave=false;
     if(active->fullSlot)active->uiState.Apply();
     // Audio handles belong to the retired world. This is a non-throwing
     // best-effort stop, after acceptance, never a reason to reject a staged slot.
@@ -629,6 +655,13 @@ CString Slot::Directory()
     return (path.string()+"\\").c_str();
 }
 void Slot::NewGame(){visited.clear();presentation.clear();screenshot.clear();}
+void Slot::Shutdown()
+{
+    // Retire accepted save owners before global databases and renderer resources.
+    theWorldServer.Destroy();
+    PublishWorldServer(nullptr);PublishGlobalHat(nullptr);
+    active.reset();visited.clear();presentation.clear();screenshot.clear();
+}
 bool Slot::HasZone(const char *name){return visited.find(name)!=visited.end();}
 bool Slot::StoreZone(const char *name)
 {
@@ -709,7 +742,9 @@ bool Slot::Save(const char *name)
         },SlotLimits());
         std::filesystem::create_directories(std::filesystem::path((LPCSTR)Directory())/name);
         AtomicFile(Directory()+name+CString("\\slot.sav"),Snapshot(envelope));
-        presentation.clear();screenshot.clear();return true;
+        presentation.clear();screenshot.clear();
+        GameJournal::Event("SAVE","complete","slot=%s source=%s",GameJournal::Quote(name).c_str(),GameJournal::Quote(GameJournal::CurrentSource()).c_str());
+        return true;
     }catch(const std::exception &e){ReportError("Save64: %s",e.what());return false;}
     catch(CException *e){e->Delete();ReportError("Save64: file or memory error");return false;}
 }
@@ -745,7 +780,9 @@ bool Slot::Load(const char *name)
             state->next=ObjectIdentity::GetNext();
         }
         state->zones.erase(std::remove_if(state->zones.begin(),state->zones.end(),[&](const Document &d){return d.zone!=state->current.c_str();}),state->zones.end());
-        Commit(std::move(state));return true;
+        Commit(std::move(state));
+        GameJournal::Event("SAVE","loaded","slot=%s",GameJournal::Quote(name).c_str());
+        return true;
     }catch(const Error &e){ReportError("Save64: %s",e.code==ErrorCode::Incompatible?"Несовместимое сохранение":e.what());return false;}
     catch(const std::exception &e){ReportError("Save64: %s",e.what());return false;}
     catch(CException *e){e->Delete();ReportError("Save64: file or memory error");return false;}
