@@ -77,6 +77,8 @@ private:
     bool bRButDown;
 
     bool bNeedAutosave;
+    bool bSavedScreenPending = false;
+    bool bActivatingSavedScreen = false;
 
     std::list<CString> missionTutorials;
 
@@ -129,6 +131,8 @@ public:
     void ExitFromModal(DWORD dwRetValue = 0);
     void DestroyScreens();
     void RetireSavedScreens() noexcept;
+    void AdoptSavedInterface() noexcept { bNeedAutosave=false; bSavedScreenPending=true; }
+    bool IsRestoringSavedScreen() const noexcept { return bActivatingSavedScreen; }
     void SetScreensMustDie() { bScreensMustDie = true; }
     void CheckScreensMustDie();
     CI3DScreen *GetCurrentScreen();

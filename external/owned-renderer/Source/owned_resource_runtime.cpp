@@ -929,6 +929,67 @@ void retained_static_record_admission(
     state.scene.record_admission(transaction, nid, family, signed_id);
 }
 
+bool retained_static_restore_source(MobSourceRole role, const char* terrain,
+    const char* mob, const std::vector<RetainedAdmission>& members) noexcept try {
+    if (!mob || !*mob || (role == MobSourceRole::main && (!terrain || !*terrain))) return false;
+    auto& state = runtime();
+    std::unique_lock<std::mutex> guard(state.lock);
+    if (!state.users || !state.loader) return false;
+    if (role == MobSourceRole::main) {
+        retire_active(state); state.pending.clear();
+        // Even the same map has different saved membership. Never reuse the
+        // preceding world's admissions, point lights or supplemental sources.
+        state.scene.reset();
+    }
+    if (state.generation == (std::numeric_limits<std::uint64_t>::max)()) return false;
+    const auto generation = ++state.generation;
+    const auto loader = state.loader;
+    OwnedMapLoadRequest request{};
+    request.generation = generation; request.map_resource = mob;
+    if (role == MobSourceRole::main) request.terrain_resource = terrain;
+    request.mounts = state.mounts; request.load_object_assets = false;
+    request.extra_textures = {"tree02", "stone02"};
+    request.prepare_terrain_shading = role == MobSourceRole::main;
+    ResourceFailure failure{}; OwnedResourceRequestToken token{};
+    if (!loader->request(request, failure, &token)) return false;
+    struct RetireRequest {
+        std::shared_ptr<OwnedResourceLoader> loader; std::uint64_t generation;
+        ~RetireRequest() { loader->retire_generation(generation); }
+    } retire{loader, generation};
+    guard.unlock();
+    std::shared_ptr<const OwnedMapSnapshot> snapshot;
+    const auto result = loader->wait_publish(token, snapshot);
+    guard.lock();
+    if (result != OwnedResourceWaitResult::ready || !snapshot || !snapshot->mob ||
+        (role == MobSourceRole::main && !snapshot->terrain) || state.loader != loader ||
+        state.generation != generation) return false;
+    const auto transaction = state.scene.begin_source(role,
+        role == MobSourceRole::main ? terrain : mob, role == MobSourceRole::main ? mob : nullptr);
+    if (!transaction) return false;
+    if (!state.scene.record_source(transaction, mob)) {
+        state.scene.abandon_source(transaction); return false;
+    }
+    // Saved IDs include spawned objects and other MOBs. Only the intersection
+    // with this immutable source may claim its static candidates.
+    std::map<std::pair<std::uint32_t,std::uint32_t>,std::int32_t> accepted;
+    for (const auto& member : members)
+        if (member.signed_id > 0 && member.nid == std::uint32_t(member.signed_id))
+            accepted.emplace(std::make_pair(member.nid, member.family), member.signed_id);
+    for (const auto& object : snapshot->objects) {
+        const auto found = accepted.find({object.nid, object.family});
+        if (found != accepted.end())
+            state.scene.record_admission(transaction, object.nid, object.family, found->second);
+    }
+    std::string name, project;
+    if (!state.scene.finish_source(transaction, true, true, name, &project) ||
+        !state.scene.publish_source(transaction, snapshot)) {
+        state.scene.abandon_source(transaction); return false;
+    }
+    guard.unlock();
+    if (role == MobSourceRole::main) neighbour_client_begin(terrain, generation, request.mounts);
+    return true;
+} catch (...) { return false; }
+
 void retained_static_finish_source(
     std::uint64_t transaction, bool owner_success,
     bool common_parser_ran) noexcept {

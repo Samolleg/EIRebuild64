@@ -16,6 +16,7 @@ struct RetainedSceneIdentitySnapshot;
 struct RetainedTerrainSourceSnapshot;
 struct RetainedTerrainSourceIdentity;
 class RetainedStaticScene;
+struct RetainedAdmission;
 struct ResourceBlob;
 struct ResourceFailure;
 struct ResourceStoreStats;
@@ -127,6 +128,10 @@ void retained_static_record_admission(std::uint64_t transaction,
                                       std::uint32_t nid,
                                       std::uint32_t family,
                                       std::int32_t signed_id) noexcept;
+// Rebuild renderer resources from accepted saved-world names and membership;
+// never rerun the game's MOB parser, factories, scripts or simulation.
+bool retained_static_restore_source(MobSourceRole role, const char* terrain,
+    const char* mob, const std::vector<RetainedAdmission>& members) noexcept;
 void retained_static_finish_source(std::uint64_t transaction,
                                    bool owner_success,
                                    bool common_parser_ran) noexcept;

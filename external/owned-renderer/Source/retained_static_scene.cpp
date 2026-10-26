@@ -211,7 +211,7 @@ std::uint64_t RetainedStaticScene::begin_source(
     }
 }
 
-bool RetainedStaticScene::record_parser_source(
+bool RetainedStaticScene::record_source(
     std::uint64_t transaction, const char* name) noexcept {
     if (!transaction || !name || !name[0]) return false;
     try {
@@ -223,8 +223,8 @@ bool RetainedStaticScene::record_parser_source(
         if (found == transactions_.end() || found->second.engine_finished)
             return false;
         Transaction& value = found->second;
-        if (value.parser_ran) {
-            // The supported owner paths contain exactly one nested parser call.
+        if (value.source_confirmed) {
+            // Each owner confirms exactly one selected source.
             // Refuse to mix admissions from an unestablished second source.
             value.discarded = true;
             return false;
@@ -237,7 +237,7 @@ bool RetainedStaticScene::record_parser_source(
         } else {
             value.mob_name = name;
         }
-        value.parser_ran = true;
+        value.source_confirmed = true;
         return true;
     } catch (...) {
         return false;
@@ -262,7 +262,7 @@ void RetainedStaticScene::record_admission(
 
 bool RetainedStaticScene::finish_source(
     std::uint64_t transaction, bool owner_success,
-    bool common_parser_ran, std::string& authoritative_name,
+    bool common_source_confirmed, std::string& authoritative_name,
     std::string* terrain_resource, bool* reused_existing) noexcept {
     authoritative_name.clear();
     if (terrain_resource) terrain_resource->clear();
@@ -271,7 +271,7 @@ bool RetainedStaticScene::finish_source(
     try {
         ExclusiveLock guard(lock_);
         if (auto* r = recorder()) r->delta(RetainedOp::finish_source, [&](RetainedDeltaOut& d) {
-            io(d.out, transaction); io(d.out, owner_success); io(d.out, common_parser_ran);
+            io(d.out, transaction); io(d.out, owner_success); io(d.out, common_source_confirmed);
         });
         const auto found = transactions_.find(transaction);
         if (found == transactions_.end() || found->second.engine_finished)
@@ -279,12 +279,11 @@ bool RetainedStaticScene::finish_source(
         Transaction& value = found->second;
         value.engine_finished = true;
         value.engine_success = owner_success;
-        // A new source still requires the nested parser to prove that the
-        // selected MOB was actually loaded. The shared main owner may omit that
-        // parser only when it retained the exact already-published MPR+MOB.
+        // A new source needs confirmation from its loader or accepted saved
+        // document. Exact main reuse retains the already-established identity.
         value.discarded = value.discarded || !owner_success ||
             (!value.reuse_published_main &&
-             (!common_parser_ran || !value.parser_ran));
+             (!common_source_confirmed || !value.source_confirmed));
         if (value.discarded) {
             if (selected_main_transition_ == value.serial)
                 selected_main_transition_ = 0;
@@ -1302,7 +1301,7 @@ RetainedSceneIdentitySnapshot RetainedStaticScene::identity_snapshot() const {
                 ? RetainedSceneIdentityStatus::loading
                 : RetainedSceneIdentityStatus::selected;
             result.main_outer_resource = transaction.outer_name;
-            if (transaction.parser_ran)
+            if (transaction.source_confirmed)
                 result.main_mob_resource = transaction.mob_name;
         }
     }

@@ -756,13 +756,17 @@ public:
     std::uint64_t begin_source(MobSourceRole role, const char* name,
                                const char* selected_mob = nullptr,
                                bool* reused_existing = nullptr) noexcept;
-    bool record_parser_source(std::uint64_t transaction,
-                              const char* name) noexcept;
+    // Confirmation comes from either the common MOB parser or an accepted
+    // saved-world document. Both establish the same selected source name.
+    bool record_source(std::uint64_t transaction, const char* name) noexcept;
+    bool record_parser_source(std::uint64_t transaction, const char* name) noexcept {
+        return record_source(transaction, name);
+    }
     void record_admission(std::uint64_t transaction, std::uint32_t nid,
                           std::uint32_t family,
                           std::int32_t signed_id) noexcept;
     bool finish_source(std::uint64_t transaction, bool owner_success,
-                       bool common_parser_ran,
+                       bool common_source_confirmed,
                        std::string& authoritative_name,
                        std::string* terrain_resource = nullptr,
                        bool* reused_existing = nullptr) noexcept;
@@ -1054,7 +1058,7 @@ private:
         std::vector<RetainedAdmission> admissions;
         bool engine_finished = false;
         bool engine_success = false;
-        bool parser_ran = false;
+        bool source_confirmed = false;
         bool mob_preselected = false;
         bool reuse_published_main = false;
         bool discarded = false;
