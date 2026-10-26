@@ -112,7 +112,7 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const cha
         if(!mesh){mesh=Navigation::Build(geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
         mesh->generation=generation;
         auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV","ready","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase);
+        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase,mesh->tiles?"":" reason=\"no walkable ground\"");
         auto result=mesh.get();meshes.emplace(key,std::move(mesh));error.clear();return result;
     }catch(const std::exception& e){error=e.what();if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());return nullptr;}
 }

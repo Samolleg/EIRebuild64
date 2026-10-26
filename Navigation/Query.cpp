@@ -29,13 +29,13 @@ bool Nearest(dtNavMeshQuery& q,Point point,float horizontal,float vertical,const
 bool Limited(dtStatus s){return dtStatusDetail(s,DT_OUT_OF_NODES)||dtStatusDetail(s,DT_BUFFER_TOO_SMALL);}
 }
 bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& result) {
-    if(!m.data)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
+    if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
     dtQueryFilter filter;dtPolyRef ref=0;Point near;
     if(!Nearest(q,p,horizontal,vertical,filter,ref,near))return false;
     result=Address(m,near,ref);return true;
 }
 Route Find(const Mesh& m,const Request& r) {
-    Route result;if(!m.data){result.status=Status::NoMesh;return result;}
+    Route result;if(!m.data||!m.tiles){result.status=Status::NoMesh;return result;}
     if(!Finite(r.source)||!Finite(r.goal)||!std::isfinite(r.maxLength)||r.maxLength<0||!std::isfinite(r.goalRadius)||r.goalRadius<0)return result;
     auto* query=Query(m);if(!query){result.status=Status::Limit;return result;}auto& q=*query;
     dtQueryFilter filter;for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
@@ -63,7 +63,7 @@ Route Find(const Mesh& m,const Request& r) {
     result.status=Status::Complete;return result;
 }
 bool Constrain(const Mesh& m,Point from,Point desired,Location& result) {
-    if(!Finite(from)||!Finite(desired)||!m.data)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
+    if(!Finite(from)||!Finite(desired)||!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
     dtQueryFilter filter;dtPolyRef ref=0;Point near;
     if(!Nearest(q,from,.15f,2.f,filter,ref,near))return false;
     auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},normal[3]{},t=0;

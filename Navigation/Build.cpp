@@ -143,7 +143,7 @@ std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string
         if(dtStatusFailed(status)){dtFree(data);throw std::runtime_error("Nav64: Detour tile insertion failed");}
         ++mesh->tiles;
     }
-    Require(mesh->tiles>0,"Nav64: no walkable ground for this profile");
+    // No traversable polygons is a valid empty mesh, not a build/data failure.
     return mesh;
 }
 Bytes Store(const Mesh& mesh) {
@@ -168,7 +168,7 @@ std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std:
     mesh->data.reset(dtAllocNavMesh());Require(mesh->data&&dtStatusSucceed(mesh->data->init(&p)),"Nav64: mesh initialization failed");
     Require(w.U()==3,"Nav64: invalid section count");
     Require(w.U()==1,"Nav64: missing tile section");auto section=w.U();Require(section<=bytes.size()-w.at,"Nav64: truncated tile section");auto end=w.at+section;
-    auto count=w.U();Require(count>0&&count<=std::uint32_t(p.maxTiles),"Nav64: tile count limit");
+    auto count=w.U();Require(count<=std::uint32_t(p.maxTiles),"Nav64: tile count limit");
     for(std::uint32_t i=0;i<count;++i){auto n=w.U();Require(w.at<=end&&n<=end-w.at,"Nav64: truncated tile");CheckTile(bytes.data()+w.at,n);
         auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,bytes.data()+w.at,n);w.at+=n;
         auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;

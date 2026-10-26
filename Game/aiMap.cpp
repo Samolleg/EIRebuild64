@@ -1034,10 +1034,12 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
     InitializeBasicTerrainCosts();
     // Material boundaries are retained by Recast. This first slice imports the
     // standing-human ground policy; the complete class/water policy is NAV04.
+    // Use the initialized material table: per-cell dwTerrains is still zero
+    // while StartZoneLoading defers conversion until FinishZoneLoading.
     for(auto& triangle:navigation.Terrain().ground) {
         int x=Float2AITile((triangle.a.x+triangle.b.x+triangle.c.x)/3);
         int y=Float2AITile((triangle.a.y+triangle.b.y+triangle.c.y)/3);
-        triangle.area=TileInBounds(x,y)?BYTE((map[y][x].dwTerrains>>12)&15):0;
+        triangle.area=TileInBounds(x,y)?BYTE((tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains>>12)&15):0;
     }
     // Initialize rest objects
     dLocks.SetSizes(nMapSizeX, nMapSizeY);
