@@ -696,6 +696,7 @@ static bool native_alpha_is_one(const FixedState& state,NativeAlphaEvidence alph
 
 NativeOpacityClass native_opacity_class(const FixedState& state,
                                       float material_alpha,NativeAlphaEvidence alpha) noexcept {
+ constexpr float material_opaque_threshold=254.5f/255.f;
  const bool blend=state.render[D3DRENDERSTATE_ALPHABLENDENABLE]!=FALSE;
  const bool overwrite=!blend || (state.render[D3DRENDERSTATE_SRCBLEND]==D3DBLEND_ONE &&
                                 state.render[D3DRENDERSTATE_DESTBLEND]==D3DBLEND_ZERO);
@@ -713,15 +714,15 @@ NativeOpacityClass native_opacity_class(const FixedState& state,
  const bool alpha_one_passes=!test || function==D3DCMP_ALWAYS ||
   function==D3DCMP_GREATEREQUAL || (function==D3DCMP_GREATER && reference<255u);
  if(owns_depth && (overwrite || standard_alpha) && alpha_one_passes &&
-    material_alpha==1.f && native_alpha_is_one(state,alpha))
+    material_alpha>=material_opaque_threshold && native_alpha_is_one(state,alpha))
   return NativeOpacityClass::opaque;
- if(material_alpha==1.f && owns_depth) {
+ if(material_alpha>=material_opaque_threshold && owns_depth) {
   if(overwrite)return test ? NativeOpacityClass::cutout : NativeOpacityClass::opaque;
   if(standard_alpha && test)return NativeOpacityClass::cutout;
  }
  // Standard alpha with a proved fragment alpha1 has the same coverage as an
  // overwrite. Never infer it from the blend flag or an unused material scalar.
- if(standard_alpha && !test && owns_depth && material_alpha==1.f && native_alpha_is_one(state,alpha))
+ if(standard_alpha && !test && owns_depth && material_alpha>=material_opaque_threshold && native_alpha_is_one(state,alpha))
   return NativeOpacityClass::opaque;
  return NativeOpacityClass::ordered;
 }
