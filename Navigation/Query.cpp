@@ -26,6 +26,77 @@ bool Nearest(dtNavMeshQuery& q,Point point,float horizontal,float vertical,const
     result={near[0],near[1],near[2]};
     return std::hypot(p.x-result.x,p.z-result.z)<=horizontal+.001f && std::abs(p.y-result.y)<=vertical;
 }
+// Clip a line parameter to the non-negative half-plane v + t*d >= 0.
+bool Clip(float v,float d,float& low,float& high) {
+    if(std::abs(d)<1.e-8f)return v>=-1.e-6f;
+    float t=-v/d;if(d>0)low=std::max(low,t);else high=std::min(high,t);
+    return low<=high+1.e-6f;
+}
+float Cross(Point a,Point b,Point p) {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
+float SegmentDistance2(Point p,Point a,Point b) {
+    float dx=b.x-a.x,dy=b.y-a.y,n=dx*dx+dy*dy;
+    float t=n>0?std::clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/n,0.f,1.f):0;
+    dx=p.x-a.x-t*dx;dy=p.y-a.y-t*dy;return dx*dx+dy*dy;
+}
+// Only an existing source may leave the eroded fringe. Prove continuous MPR
+// support and body clearance on the complete short ingress, never snap/teleport.
+// The regular corridor, placement and target still use the full eroded mesh.
+bool GroundIngress(const Mesh& m,Point from,Point to,Point& supportedFrom,Point& supportedTo) {
+    if(!m.geometry)return false;
+    std::vector<std::pair<float,float>> spans;
+    bool haveFrom=false,haveTo=false;float fromZ=0,toZ=0;
+    const float tolerance=m.profile.climb+2*m.profile.cellHeight;
+    for(const auto& t:m.geometry->ground) {
+        if(!t.area || std::max({t.a.x,t.b.x,t.c.x})<std::min(from.x,to.x) ||
+            std::min({t.a.x,t.b.x,t.c.x})>std::max(from.x,to.x) ||
+            std::max({t.a.y,t.b.y,t.c.y})<std::min(from.y,to.y) ||
+            std::min({t.a.y,t.b.y,t.c.y})>std::max(from.y,to.y))continue;
+        float det=Cross(t.a,t.b,t.c);if(det<=1.e-8f)continue;
+        auto u=[&](Point p){return Cross(t.a,p,t.c)/det;};
+        auto v=[&](Point p){return Cross(t.a,t.b,p)/det;};
+        float u0=u(from),v0=v(from),du=u(to)-u0,dv=v(to)-v0,low=0,high=1;
+        if(!Clip(u0,du,low,high)||!Clip(v0,dv,low,high)||!Clip(1-u0-v0,-du-dv,low,high))continue;
+        auto height=[&](float at){return t.a.z+(u0+du*at)*(t.b.z-t.a.z)+(v0+dv*at)*(t.c.z-t.a.z);};
+        if(std::abs(height(low)-(from.z+(to.z-from.z)*low))>tolerance ||
+            std::abs(height(high)-(from.z+(to.z-from.z)*high))>tolerance)continue;
+        spans.emplace_back(low,high);
+        if(low<=1.e-6f){fromZ=height(0);haveFrom=true;}
+        if(high>=1-1.e-6f){toZ=height(1);haveTo=true;}
+    }
+    if(!haveFrom||!haveTo)return false;
+    std::sort(spans.begin(),spans.end());float covered=0;
+    for(auto span:spans){if(span.first>covered+1.e-5f)return false;covered=std::max(covered,span.second);}
+    if(covered<1-1.e-5f)return false;
+    supportedFrom=from;supportedFrom.z=fromZ;supportedTo=to;supportedTo.z=toZ;
+    for(const auto& solid:m.geometry->solids) {
+        float bottom,top;auto hull=Footprint(solid,bottom,top);
+        if(hull.size()<9 || std::max(fromZ,toZ)+m.profile.height<=bottom || std::min(fromZ,toZ)>=top)continue;
+        std::vector<Point> polygon;
+        for(size_t i=0;i<hull.size();i+=3)polygon.push_back({hull[i],-hull[i+2],0});
+        float area=0;for(size_t i=0;i<polygon.size();++i){auto a=polygon[i],b=polygon[(i+1)%polygon.size()];area+=a.x*b.y-b.x*a.y;}
+        float sign=area>0?1.f:-1.f,low=0,high=1;bool intersects=true;
+        float startDistance=std::numeric_limits<float>::max(),segmentDistance=startDistance;
+        for(size_t i=0;i<polygon.size();++i) {
+            auto a=polygon[i],b=polygon[(i+1)%polygon.size()];
+            float s=sign*Cross(a,b,from),e=sign*Cross(a,b,to);
+            if(!Clip(s,e-s,low,high))intersects=false;
+            startDistance=std::min(startDistance,SegmentDistance2(from,a,b));
+            segmentDistance=std::min({segmentDistance,SegmentDistance2(from,a,b),SegmentDistance2(to,a,b),SegmentDistance2(a,from,to)});
+        }
+        // Never cross a raw solid, nor increase an initial radius overlap.
+        if(intersects)return false;
+        float clearance=std::min(m.profile.radius,std::sqrt(startDistance));
+        if(std::sqrt(segmentDistance)+.001f<clearance)return false;
+    }
+    return true;
+}
+bool Start(const Mesh& m,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress) {
+    ingress=false;
+    if(Nearest(q,p,.05f,2.f,filter,ref,near)){actual=FromNav(near);return true;}
+    if(!Nearest(q,p,m.profile.radius+2*m.profile.cellSize,2.f,filter,ref,near))return false;
+    Point end;if(!GroundIngress(m,p,FromNav(near),actual,end))return false;
+    ingress=true;return true;
+}
 bool Limited(dtStatus s){return dtStatusDetail(s,DT_OUT_OF_NODES)||dtStatusDetail(s,DT_BUFFER_TOO_SMALL);}
 }
 bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& result) {
@@ -34,13 +105,19 @@ bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& res
     if(!Nearest(q,p,horizontal,vertical,filter,ref,near))return false;
     result=Address(m,near,ref);return true;
 }
+bool StartLocation(const Mesh& m,Point p,Location& result) {
+    if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;
+    dtQueryFilter filter;dtPolyRef ref=0;Point near,actual;bool ingress=false;
+    if(!Start(m,*query,p,filter,ref,near,actual,ingress))return false;
+    result=Address(m,ingress?ToNav(actual):near,ref);return true;
+}
 Route Find(const Mesh& m,const Request& r) {
     Route result;if(!m.data||!m.tiles){result.status=Status::NoMesh;return result;}
     if(!Finite(r.source)||!Finite(r.goal)||!std::isfinite(r.maxLength)||r.maxLength<0||!std::isfinite(r.goalRadius)||r.goalRadius<0)return result;
     auto* query=Query(m);if(!query){result.status=Status::Limit;return result;}auto& q=*query;
     dtQueryFilter filter;for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
-    dtPolyRef from=0,to=0;Point source,goal;
-    if(!Nearest(q,r.source,.05f,2.f,filter,from,source)){result.status=Status::NoStart;return result;}
+    dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
+    if(!Start(m,q,r.source,filter,from,source,actual,ingress)){result.status=Status::NoStart;return result;}
     if(!Nearest(q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal)){result.status=Status::NoGoal;return result;}
     float start[3]={source.x,source.y,source.z},end[3]={goal.x,goal.y,goal.z};
     // Fixed work bound within Detour, no retry with a different pathfinder.
@@ -57,6 +134,7 @@ Route Find(const Mesh& m,const Request& r) {
     if(Limited(status)){result.status=Status::Limit;return result;}
     if(dtStatusFailed(status)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END)){result.status=Status::NoPath;return result;}
     result.corridor.assign(corridor.begin(),corridor.begin()+count);
+    if(ingress)result.points.push_back(Address(m,ToNav(actual),from));
     for(int i=0;i<n;++i){Point p{points[i*3],points[i*3+1],points[i*3+2]};auto l=Address(m,p,refs[i]?refs[i]:to);
         if(!result.points.empty())result.length+=Distance(result.points.back().position,l.position);result.points.push_back(l);}
     if(result.length>r.maxLength){result.points.clear();result.corridor.clear();result.status=Status::TooLong;return result;}
@@ -65,7 +143,18 @@ Route Find(const Mesh& m,const Request& r) {
 bool Constrain(const Mesh& m,Point from,Point desired,Location& result) {
     if(!Finite(from)||!Finite(desired)||!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
     dtQueryFilter filter;dtPolyRef ref=0;Point near;
-    if(!Nearest(q,from,.15f,2.f,filter,ref,near))return false;
+    Point actual;bool ingress=false;
+    if(!Start(m,q,from,filter,ref,near,actual,ingress))return false;
+    if(ingress) {
+        if(std::hypot(desired.x-from.x,desired.y-from.y)<.00001f){result=Address(m,ToNav(actual),ref);return true;} // Turning/standing, no ingress step.
+        if(std::hypot(desired.x-from.x,desired.y-from.y)>m.profile.radius+2*m.profile.cellSize)return false;
+        dtPolyRef target=0;Point next;
+        if(!Nearest(q,desired,m.profile.radius+2*m.profile.cellSize,2.f,filter,target,next))return false;
+        float oldDistance=std::hypot(from.x-near.x,from.y+near.z),newDistance=std::hypot(desired.x-next.x,desired.y+next.z);
+        if(newDistance>=oldDistance-.0001f)return false;
+        Point begin,end;if(!GroundIngress(m,actual,desired,begin,end))return false;
+        result=Address(m,ToNav(end),target);return true;
+    }
     auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},normal[3]{},t=0;
     dtPolyRef visited[512];int count=0;
     auto status=q.raycast(ref,start,end,&filter,&t,normal,visited,&count,512);

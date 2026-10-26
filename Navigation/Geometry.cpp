@@ -12,8 +12,20 @@ void Geometry::Bounds() {
         minimum.x=std::min(minimum.x,p.x); minimum.y=std::min(minimum.y,p.y); minimum.z=std::min(minimum.z,p.z);
         maximum.x=std::max(maximum.x,p.x); maximum.y=std::max(maximum.y,p.y); maximum.z=std::max(maximum.z,p.z);
     };
-    for(const auto& t:ground) { add(t.a);add(t.b);add(t.c); }
-    for(const auto& s:solids) for(auto p:s.corners) add(p);
+    for(size_t i=0;i<ground.size();++i) {
+        const auto& t=ground[i];
+        if(!Finite(t.a)||!Finite(t.b)||!Finite(t.c)) {
+            auto source=groundSources.upper_bound(i);
+            std::string name="unknown sector";size_t first=0;
+            if(source!=groundSources.begin()){--source;name=source->second;first=source->first;}
+            throw std::runtime_error("Nav64: non-finite MPR geometry sector="+name+" triangle="+std::to_string(i-first));
+        }
+        add(t.a);add(t.b);add(t.c);
+    }
+    for(const auto& s:solids) {
+        if(!s.error.empty())throw std::runtime_error(s.error);
+        for(auto p:s.corners)add(p);
+    }
 }
 std::vector<float> Footprint(const Solid& solid,float& low,float& high) {
     std::vector<Point> p;

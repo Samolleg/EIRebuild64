@@ -68,3 +68,12 @@ surface + world XYZ + profile radius/height. Polygon refs/generation and query
 state are transient. Staged load builds the mesh from restored objects,
 resolves addresses and rebuilds moving routes before publishing the world.
 Legacy embedded MOB graph/GRP data is neither read nor modified.
+
+Source recovery (X64NAV01 r5): existing authored positions may be just outside
+an eroded polygon. Find, step and save restoration share a bounded ingress
+(radius + two cells) over continuous non-null MPR ground. The actual position
+and ingress are part of the route/preview; movement must reduce the distance
+to the mesh, preserve body clearance and cross no raw solid or ground gap.
+This does not change mesh radius/slope or relax placement/target projection.
+Fully empty FIG nodes are ignored explicitly; invalid nonempty BV data still
+rejects the zone with NID/model/part and input values, or an MPR sector name.

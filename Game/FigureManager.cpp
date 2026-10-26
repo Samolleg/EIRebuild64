@@ -494,8 +494,19 @@ BOOL CFigureManager::LoadBoundingVolume(SBoundingVolume &bv, CModelResourceEntry
     memcpy(&hdr, pData, sizeof(hdr));
     if ((hdr.dwSignature & FIG_SIGNATURE_MASK) == FIG_SIGNATURE_FIGN)
     {
-        pData += sizeof(hdr) + 2 * sizeof(ETypeIDs);
-        JustLoadBoundingVolume(bv, pData, fpStrength, fpGrace, fpTall, hdr.dwSignature);
+        // Empty FIG nodes retain sentinel bounds (FLT_MAX/-FLT_MAX, radius inf).
+        // They have no collision geometry; never interpolate/transform that sentinel.
+        if (!hdr.dwNumVertices && !hdr.dwNumNormales && !hdr.dwNumMaps &&
+            !hdr.dwNumIndices && !hdr.dwNumComponents && !hdr.dwNumLightComponents)
+        {
+            bv = SBoundingVolume();
+            bv.SetIgnore(true);
+        }
+        else
+        {
+            pData += sizeof(hdr) + 2 * sizeof(ETypeIDs);
+            JustLoadBoundingVolume(bv, pData, fpStrength, fpGrace, fpTall, hdr.dwSignature);
+        }
     }
     else
     {

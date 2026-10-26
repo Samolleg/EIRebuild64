@@ -9,6 +9,7 @@ class CAIMap;
 class CWorldServer;
 class NavigationWorld {
     Navigation::Geometry terrain;
+    std::shared_ptr<Navigation::Geometry> geometry;
     std::map<int,std::vector<Navigation::Solid>> objects;
     std::map<std::string,Navigation::Bytes> sources;
     std::map<std::pair<int,int>,std::unique_ptr<Navigation::Mesh>> meshes;

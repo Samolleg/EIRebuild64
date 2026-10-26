@@ -13,6 +13,7 @@ struct Mesh {
     std::unique_ptr<dtNavMesh,MeshDeleter> data;
     mutable std::unique_ptr<dtNavMeshQuery,QueryDeleter> query;
     Profile profile;
+    std::shared_ptr<const Geometry> geometry; // Current inputs, shared by profiles; never serialized.
     std::string fingerprint;
     std::uint64_t generation = 0;
     std::uint32_t tiles = 0;

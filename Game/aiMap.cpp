@@ -852,6 +852,7 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
             pSector += sizeof(header);
 
             navigation.Source(pszSectorName, pBaseSector, dwSize);
+            navigation.Terrain().groundSources.emplace(navigation.Terrain().ground.size(),pszSectorName);
             const auto* navVertices=reinterpret_cast<const SSectVert2*>(pSector);
             auto vertex=[&](int x,int y) {
                 const auto& v=navVertices[y*N_V_PSECTOR_S+x];

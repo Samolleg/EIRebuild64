@@ -56,7 +56,7 @@ void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
     if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Nav64: cannot commit cache atomically");}
 }
 }
-void NavigationWorld::Changed() {meshes.clear();++generation;}
+void NavigationWorld::Changed() {meshes.clear();geometry.reset();++generation;}
 void NavigationWorld::Source(const std::string& name,const void* data,size_t size) {
     if(size>512u*1024*1024)throw std::runtime_error("Nav64: oversized source");
     auto p=static_cast<const std::uint8_t*>(data);auto& target=sources[name];
@@ -80,11 +80,26 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
     std::vector<Navigation::Solid> solids;
     for(INT_PTR n=0;n<parts.GetSize();++n){int i=object->GetFigureIndexByName(parts[n]);if(i<0)continue;
         const auto& bv=object->fbvs[i];
-        if(bv.IsIgnored()||bv.IsBridge()||bv.GetPassability()!=AI_PASS_NO)continue;
+        if(bv.IsIgnored()) {
+            if(!bv.IsBox()&&!bv.IsSphere())GameJournal::Event("NAV","empty_part","NID=%d model=%s part=%s reason=zero_geometry",id,GameJournal::Quote(object->GetMaskName()).c_str(),GameJournal::Quote(parts[n]).c_str());
+            continue;
+        }
+        if(bv.IsBridge()||bv.GetPassability()!=AI_PASS_NO)continue;
         Navigation::Solid solid;auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
+        bool valid=Navigation::Finite(Point(bv.ptBone))&&Navigation::Finite(Point(bv.ptCenter))&&
+            Navigation::Finite(Point(bv.ptMin))&&Navigation::Finite(Point(bv.ptMax))&&Navigation::Finite(Point(base))&&
+            bv.ptMin.x<=bv.ptMax.x&&bv.ptMin.y<=bv.ptMax.y&&bv.ptMin.z<=bv.ptMax.z;
         for(int j=0;j<8;++j){CPlot3D p((j&1)?bv.ptMax.x:bv.ptMin.x,(j&2)?bv.ptMax.y:bv.ptMin.y,(j&4)?bv.ptMax.z:bv.ptMin.z);
-            p+=bv.ptBone+bv.ptCenter;p=object->RotateVector(p);p+=base;solid.corners[j]=Point(p);}
-        solids.push_back(solid);
+            p+=bv.ptBone+bv.ptCenter;p=object->RotateVector(p);p+=base;solid.corners[j]=Point(p);valid=valid&&Navigation::Finite(solid.corners[j]);}
+        if(!valid) {
+            std::ostringstream detail;detail<<"Nav64: invalid solid geometry NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
+            auto point=[&](const char* field,const CPlot3D& p){detail<<" "<<field<<"=("<<p.x<<","<<p.y<<","<<p.z<<")";};
+            point("ptMin",bv.ptMin);point("ptMax",bv.ptMax);point("ptBone",bv.ptBone);point("ptCenter",bv.ptCenter);point("CP",object->GetCP());point("worldBase",base);
+            float w,x,y,z;object->GetOrientation().GetComponents(w,x,y,z);const auto& c=object->GetComplection();
+            detail<<" rotation=("<<w<<","<<x<<","<<y<<","<<z<<") constitution=("<<c.strength<<","<<c.grace<<","<<c.tall<<")";
+            solid.error=detail.str();
+        }
+        solids.push_back(std::move(solid));
     }
     if(!solids.empty()){objects[id]=std::move(solids);Changed();}
 }
@@ -95,11 +110,15 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const cha
         const auto key=std::make_pair(int(radiusClass-std::begin(RadiusClasses)),aiClass);
         auto existing=meshes.find(key);if(existing!=meshes.end())return existing->second.get();
         auto start=std::chrono::steady_clock::now();Navigation::Profile profile;profile.radius=*radiusClass;profile.height=ClassHeights[aiClass];
-        Navigation::Geometry geometry=terrain;for(const auto& entry:objects)geometry.solids.insert(geometry.solids.end(),entry.second.begin(),entry.second.end());geometry.Bounds();
+        if(!geometry) {
+            auto input=std::make_shared<Navigation::Geometry>(terrain);
+            for(const auto& entry:objects)input->solids.insert(input->solids.end(),entry.second.begin(),entry.second.end());
+            input->Bounds();geometry=std::move(input);
+        }
         Navigation::Bytes source;
         // Each resource is delimited and named; effective payloads, not timestamps.
         for(const auto& entry:sources){for(auto v:entry.first)source.push_back(v);source.push_back(0);auto digest=Digest(entry.second);source.insert(source.end(),digest.begin(),digest.end());}
-        auto fingerprint=Digest(Navigation::Inputs(geometry,profile,scene,source));
+        auto fingerprint=Digest(Navigation::Inputs(*geometry,profile,scene,source));
         std::unique_ptr<Navigation::Mesh> mesh;bool cached=false;
         const auto cache=RuntimePaths64::Directory(L"Cache64/Nav")/(fingerprint+".nav64");
         // The future mapper and the runtime cache use exactly the same container.
@@ -109,8 +128,8 @@ Navigation::Mesh* NavigationWorld::ForProfile(float radius,int aiClass,const cha
             try{mesh=Navigation::Load(Read(path),profile,fingerprint);cached=true;break;}
             catch(const std::exception& e){GameJournal::Event("NAV","cache_rejected","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());}
         }
-        if(!mesh){mesh=Navigation::Build(geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
-        mesh->generation=generation;
+        if(!mesh){mesh=Navigation::Build(*geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
+        mesh->generation=generation;mesh->geometry=geometry;
         auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
         GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s class=%d radius=%.2f height=%.2f phase=%s%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",aiClass,profile.radius,profile.height,phase,mesh->tiles?"":" reason=\"no walkable ground\"");
         auto result=mesh.get();meshes.emplace(key,std::move(mesh));error.clear();return result;
@@ -155,6 +174,6 @@ bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     if(saved.surface!=1||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<=0||saved.radius>4||
         !std::isfinite(saved.height)||saved.height<=0||saved.height>10||std::hypot(cp.x-saved.position.x,cp.y-saved.position.y)>.1f)return false;
     auto* mesh=ForUnit(unit);Navigation::Location location;
-    if(!mesh||!Navigation::Project(*mesh,saved.position,.05f,.25f,location))return false;
+    if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location)||std::abs(location.position.z-saved.position.z)>.25f)return false;
     saved=location;return true;
 }
