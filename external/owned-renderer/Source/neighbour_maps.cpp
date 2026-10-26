@@ -508,7 +508,8 @@ bool neighbour_layout_origin(const std::string& mpr,const ResourceStoreConfig& m
     x=y=0;
     const auto file=neighbour_layout_file();
     if(!profile_matches(mounts,file))return false;
-    const auto& active=neighbour_layout_active(parse_neighbour_layout(read_layout(file)),"deja-vu",map_name(mpr));
+    const auto layout=parse_neighbour_layout(read_layout(file));
+    const auto& active=neighbour_layout_active(layout,"deja-vu",map_name(mpr));
     if(!std::isfinite(active.x)||!std::isfinite(active.y))return false;
     x=active.x;y=active.y;return true;
 } catch(...) {x=y=0;return false;}

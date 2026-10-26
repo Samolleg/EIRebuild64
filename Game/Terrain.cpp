@@ -1078,7 +1078,7 @@ ETERRTYPE CTerrain::GetTerrainType(float fpX, float fpY)
 
 int _cdecl SectorsByCoordsCompare(const void *elem1, const void *elem2)
 {
-    CSector *pS1 = (CSector *)elem1, *pS2 = (CSector *)elem2;
+    CSector *pS1 = *(CSector * const *)elem1, *pS2 = *(CSector * const *)elem2;
     if (pS1->GetMapY() < pS2->GetMapY())
         return -1;
     if (pS1->GetMapY() > pS2->GetMapY())
