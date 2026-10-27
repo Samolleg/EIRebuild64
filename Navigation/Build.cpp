@@ -139,9 +139,12 @@ void CheckTile(const unsigned char* data,size_t size) {
     }
 }
 struct BakeContext final : rcContext {
-    unsigned material; float radius; int x,z; bool printing; std::string failure;
+    unsigned material; float radius; int x,z; bool printing; bool multipleOutlines=false; std::string failure;
     BakeContext(const Profile& p,int tx,int tz,bool logging):rcContext(true),material(p.materialClass),radius(p.radius),x(tx),z(tz),printing(logging) {}
     void doLog(const rcLogCategory category,const char* message,const int length) override {
+        if(category==RC_LOG_ERROR && std::string(message,length).find("rcBuildContours: Multiple outlines for region ")==0) {
+            multipleOutlines=true;return;
+        }
         if(category==RC_LOG_ERROR&&failure.empty())failure.assign(message,length);
         if(category==RC_LOG_ERROR&&printing)fprintf(stderr,"RECAST class=%u radius=%.2f tile=%d,%d reason=%.*s\n",material,radius,x,z,length,message);
     }
@@ -384,6 +387,50 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         cfg.maxSimplificationError=holes?.25f:1.f;
         r.contours=rcAllocContourSet();
         Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
+        if(context.multipleOutlines&&context.failure.empty()) {
+            // Monotone's merge pass can join sweeps around a narrow hole, and
+            // even a quarter-cell error can collapse its contour. Select an
+            // exact monotone contour for this tile only; do not accept the
+            // ambiguous contour set returned by the first pass.
+            context.multipleOutlines=false;
+            rcFreeContourSet(r.contours);r.contours=nullptr;
+            Require(rcBuildRegionsMonotone(&context,*r.compact,cfg.borderSize,cfg.minRegionArea,0),"Nav64: exact monotone region build failed");
+            // Recast's final merge is also applied when mergeRegionArea is
+            // zero (interior regions still merge). Keep each connected row run
+            // separate on this exceptional tile. Such monotone strips have no
+            // holes; shared region boundaries still connect in Detour.
+            auto& field=*r.compact;
+            std::vector<unsigned short> regions(field.spanCount);
+            for(int i=0;i<field.spanCount;++i)regions[i]=field.spans[i].reg;
+            unsigned short nextRegion=0;
+            for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
+                const auto& cell=field.cells[ix+iz*field.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                    auto& span=field.spans[j];const auto original=regions[j];
+                    if(!original||(original&RC_BORDER_REG))continue;
+                    unsigned short left=0;
+                    if(ix>0&&rcGetCon(span,0)!=RC_NOT_CONNECTED) {
+                        const auto k=field.cells[ix-1+iz*field.width].index+rcGetCon(span,0);
+                        if(regions[k]==original&&field.areas[k]==field.areas[j])left=field.spans[k].reg;
+                    }
+                    if(left)span.reg=left;
+                    else {
+                        Require(nextRegion+1<RC_BORDER_REG,"Nav64: monotone strip region limit");
+                        span.reg=++nextRegion;
+                    }
+                }
+            }
+            field.maxRegions=nextRegion;
+            r.contours=rcAllocContourSet();
+            Require(r.contours&&rcBuildContours(&context,field,0.f,cfg.maxEdgeLen,*r.contours),"Nav64: exact monotone contour build failed");
+            if(context.printing)fprintf(stderr,"MONOTONE_TILE class=%u radius=%.2f tile=%d,%d exact=1\n",p.materialClass,p.radius,x,z);
+        }
+        if(context.multipleOutlines) {
+            const auto reason="Nav64: multiple outlines remain after monotone strips tile="+std::to_string(x)+","+std::to_string(z);
+            if(context.printing)fprintf(stderr,"RECAST class=%u radius=%.2f tile=%d,%d reason=%s\n",p.materialClass,p.radius,x,z,reason.c_str());
+            throw std::runtime_error(reason);
+        }
+        if(!context.failure.empty())throw std::runtime_error("Nav64: Recast tile="+std::to_string(x)+","+std::to_string(z)+": "+context.failure);
         r.polys=rcAllocPolyMesh();
         Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: polygon build failed");
         if(!context.failure.empty())throw std::runtime_error("Nav64: Recast tile="+std::to_string(x)+","+std::to_string(z)+": "+context.failure);

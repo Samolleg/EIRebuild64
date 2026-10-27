@@ -41,9 +41,12 @@ stored: Detour triangulates the polygon fan, and gameplay supplies support Z.
 Contour error is selected from the compact region topology before contouring:
 0.25 cell on tiles with holes (Euler characteristic), otherwise one cell.
 A one-cell error was observed collapsing a hole and misclassifying its outline.
-The current refinement is insufficient: zone18 still reports multiple outlines
-for region 6 (flight radius 0.2, tile 29,51). Full campaign release is blocked.
-Every Recast error fails the tile even if a library function returns success.
+If this produces multiple outlines for a region, the tile selects monotone
+partitioning followed by connected monotone row strips and exact contours
+(zero simplification error). Recast merges interior regions even with zero
+merge area; separate row runs cannot form holes and preserve walkable spans. MONOTONE_TILE lists each selected tile
+and profile in the baker log. The same selection runs during worker rebuilds.
+Any remaining multiple outline or other Recast error rejects the tile.
 No library sources are modified.
 
 The game reads ready tiles and one shared navgeom, indexes source triangles
@@ -78,7 +81,7 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 15, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 16, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   No layer section exists. Loader validates exact profile, bounds and ABI.
 - <mpr>--<mob>.navworld: JSON version 2, baked static NIDs.
