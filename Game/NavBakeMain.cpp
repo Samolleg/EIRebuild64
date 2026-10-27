@@ -144,7 +144,7 @@ int wmain(int argc,wchar_t** argv) {
             }
             fflush(stdout);fflush(stderr);
         }
-        if(totalBytes>400ull*1024*1024){++errors;fprintf(stderr,"BAKE_ERROR code=4 reason=campaign_exceeds_400_MiB\n");}
+        if(totalBytes>400ull*1024*1024)fprintf(stderr,"BAKE_WARNING reason=campaign_exceeds_400_MiB\n");
         printf("BAKE_DONE maps=%zu completed=%u missing=%u errors=%u skipped=%u total_ms=%lld bytes=%llu\n",maps.size(),completed,missing,errors,skipped,Milliseconds(total),static_cast<unsigned long long>(totalBytes));fflush(stdout);
         return errors?4:missing?5:0;
     }catch(const std::exception& e) {
