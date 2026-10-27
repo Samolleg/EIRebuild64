@@ -3,6 +3,8 @@
 #include "Cache.h"
 #include <memory>
 #include <cstddef>
+#include <tuple>
+#include <set>
 #include "../external/recastnavigation/Detour/Include/DetourNavMesh.h"
 #include "../external/recastnavigation/Detour/Include/DetourNavMeshQuery.h"
 
@@ -14,6 +16,11 @@ struct Mesh {
     std::unique_ptr<dtNavMesh,MeshDeleter> data;
     mutable std::unique_ptr<dtNavMeshQuery,QueryDeleter> query;
     Profile profile;
+    std::shared_ptr<const Geometry> sources;
+    std::set<int> excludedObjects;
+    std::map<std::pair<int,int>,std::vector<size_t>> surfaceTriangles;
+    std::map<int,bool> doorOpen;
+    std::map<std::tuple<int,int,int,int>,unsigned short> doorFlags;
     std::vector<Bytes> layers;
     std::unique_ptr<Cache> cache;
     std::string mapName, mobName, profileId; // Self-describing offline artifact identity.
@@ -24,6 +31,12 @@ struct Mesh {
     std::uint64_t rasterMs = 0, polygonMs = 0, buildMs = 0;
 };
 struct BuildRequest { Profile profile; };
+Bytes StoreSources(const Geometry& geometry);
+std::shared_ptr<Geometry> LoadSources(Bytes bytes);
+void IndexSurfaces(Mesh& mesh);
+std::unique_ptr<Mesh> RebuildTile(const Geometry& geometry,const Profile& profile,int x,int z);
+void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z);
+void DoorState(Mesh& mesh,int object,bool open);
 std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& geometry,const std::vector<BuildRequest>& requests);
 std::unique_ptr<Mesh> Build(const Geometry& geometry,const Profile& profile,const std::string& key);
 Bytes Store(const Mesh& mesh);

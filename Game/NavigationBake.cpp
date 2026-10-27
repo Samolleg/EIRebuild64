@@ -8,6 +8,7 @@
 #include "Unit.h"
 #include "WorldServer.h"
 #include "MapObjectServer.h"
+#include "StuffMapObjects.h"
 #include "MapObjectManager.h"
 #include "FigureManager.h"
 #include "UnitDatabase.h"
@@ -35,7 +36,7 @@ void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
 // of this map is written. Never repair/clamp a bad height after construction.
 void CheckReleaseHeights(const Navigation::Mesh& mesh) {
     const dtNavMesh& data=*mesh.data;
-    const float tolerance=mesh.profile.cellHeight*2; // 10 cm, including Recast's +ch detail offset.
+    const float tolerance=mesh.profile.cellHeight*2+1.e-4f; // 10 cm, including Recast's +ch detail offset.
     for(int i=0;i<data.getMaxTiles();++i) {
         const auto* tile=data.getTile(i);if(!tile||!tile->header)continue;
         const auto& h=*tile->header;
@@ -192,6 +193,26 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(!NavigationObject(object))return;
     const auto idValue=object->GetID();
     const auto kind=object->WhoAmI();
+    if(authored.doors.count(idValue)||(kind==HPC_LEVER&&static_cast<CLeverObject*>(object)->IsNavigationDoor())) {
+        if(remove){doors.erase(idValue);return;}
+        if(authored.doors.count(idValue))doors[idValue]=authored.doors.at(idValue);
+        else {
+            object->CreateCurrentPlacement();Door d;d.object=idValue;
+            d.minimum={FLT_MAX,FLT_MAX,FLT_MAX};d.maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+            auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);bool solid=false;
+            for(INT_PTR i=0;i<object->fbvs.GetSize();++i) {
+                const auto& bv=object->fbvs[i];if(bv.IsIgnored()||bv.GetPassability()!=AI_PASS_NO)continue;
+                solid=true;for(int j=0;j<8;++j) {
+                    auto p=object->RotateVector(CPlot3D((j&1)?bv.ptMax.x:bv.ptMin.x,(j&2)?bv.ptMax.y:bv.ptMin.y,(j&4)?bv.ptMax.z:bv.ptMin.z)+bv.ptBone+bv.ptCenter)+base;
+                    d.minimum.x=(std::min)(d.minimum.x,p.x);d.minimum.y=(std::min)(d.minimum.y,p.y);d.minimum.z=(std::min)(d.minimum.z,p.z);
+                    d.maximum.x=(std::max)(d.maximum.x,p.x);d.maximum.y=(std::max)(d.maximum.y,p.y);d.maximum.z=(std::max)(d.maximum.z,p.z);
+                }
+            }
+            if(!solid)throw std::runtime_error("Nav64: open door needs explicit navsrc aperture NID="+std::to_string(idValue));
+            d.minimum.z-=.35f;doors[idValue]=d;
+        }
+        return;
+    }
     const bool staticKind=kind==HPC_TREE||kind==HPC_STONE||kind==HPC_BUILDING;
     const bool fixed=authored.fixed.count(idValue)||(!authored.dynamic.count(idValue)&&staticKind&&!object->IsDynamic());
     if(!fixed)return;
@@ -233,8 +254,11 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                     if(!Navigation::Finite(vertices[j]))throw std::runtime_error("non-finite transformed triangle vertex");
                 }
                 const size_t first=input.ground.size();input.groundSources.emplace(first,label.str());
-                for(size_t j=0;j<figure->indices.size();j+=3)
-                    input.ground.push_back({vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],walkable?map.NavigationBridgeArea():BYTE(0)});
+                for(size_t j=0;j<figure->indices.size();j+=3) {
+                    Triangle t{vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],walkable?map.NavigationBridgeArea():BYTE(0)};
+                    t.object=id;t.surface=walkable?(std::uint64_t(unsigned(id))<<32)|unsigned(i+2):0;
+                    input.ground.push_back(t);
+                }
             }catch(const std::exception& e) {
                 Navigation::Solid failure{};failure.error="Nav64: invalid walkable geometry "+label.str()+" reason="+e.what();input.solids.push_back(std::move(failure));
             }
@@ -245,6 +269,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
 
 Navigation::Geometry NavigationBake::Geometry() {
     Navigation::Geometry input=terrain;
+    for(const auto& door:doors)input.doors.push_back(door.second);
     for(const auto& entry:objects) {
         const auto& object=entry.second;const auto first=input.ground.size();
         for(const auto& source:object.groundSources)input.groundSources.emplace(first+source.first,source.second);
@@ -286,15 +311,12 @@ Navigation::Bytes NavigationBake::Bodies(CWorldServer& world) {
 }
 std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string& mobName,const std::filesystem::path& directory,const Navigation::Bytes& table,const Navigation::Bytes& authored) {
     bodyTable=Navigation::LoadBodies(table);
-    for(auto& t:terrain.ground) {
-        const int x=Float2AITile((t.a.x+t.b.x+t.c.x)/3),y=Float2AITile((t.a.y+t.b.y+t.c.y)/3);
-        for(int c=0;c<8;++c)if(!sourceMap->NavigationGradientAllows(c,x,y))t.classAreas[c]=0;
-        t.levitateArea=t.classAreas[0];
-    }
     auto geometry=Geometry();
     std::vector<Navigation::BuildRequest> requests;
-    for(int type=0;type<AgentCount;++type){auto p=Agents[type].profile;p.climb=sourceMap->NavigationClimb(p.materialClass);requests.push_back({p});}
+    for(int type=0;type<AgentCount;++type){requests.push_back({Agents[type].profile});}
     auto built=Navigation::BuildProfiles(geometry,requests);
+    auto sources=std::make_shared<Navigation::Geometry>(geometry);
+    for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs;
     for(int type=0;type<AgentCount;++type) {
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;
@@ -326,6 +348,17 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         }
         printf("QUALITY mpr=%s mob=%s profile=%s class=%d legacy_cells=%u lost=%u step_samples=%u step_failed=%u step_stalled=%u\n",mapName.c_str(),mobName.c_str(),Agents[type].name,c,oldCount,lost,stepCount,stepFailed,stepStalled);fflush(stdout);
     }
+    if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
+        auto& mesh=*built[Small];Point start{55.55f,138.78f,19.24f};Location placed,next;
+        const bool place=Project(mesh,start,1.f,4.f,placed,1.6f);
+        Request request;request.source=place?placed.position:start;request.goal={58.9822f,139.653f,19.24f};request.height=1.6f;
+        const auto route=Find(mesh,request);bool step=false;
+        if(place&&route.status==Status::Complete&&route.points.size()>1) {
+            auto to=route.points[1].position;const float length=std::hypot(to.x-placed.position.x,to.y-placed.position.y);
+            if(length>0){to.x=placed.position.x+(to.x-placed.position.x)*.02f/length;to.y=placed.position.y+(to.y-placed.position.y)*.02f/length;step=Constrain(mesh,placed.position,to,next,1.6f);}
+        }
+        printf("HERO_START profile=small original=(55.55,138.78,19.24) place=%d placed=(%.5f,%.5f,%.5f) goal=(58.9822,139.653) route=%s step=%d moved=%.6f\n",int(place),placed.position.x,placed.position.y,placed.position.z,StatusName(route.status),int(step),step?std::hypot(next.position.x-placed.position.x,next.position.y-placed.position.y):0);fflush(stdout);
+    }
     std::ofstream units(directory/(stem+".placements.csv"));units<<"id,model,profile,x,y,z,distance,reason\n";
     for(const auto& entry:sourceWorld->mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
         auto* unit=static_cast<CUnit*>(entry.second);auto cp=unit->GetCP();const auto& shape=unit->GetComplection();
@@ -348,7 +381,11 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             static_cast<unsigned long long>(mesh.polygonMs),bytes.size());
         fflush(stdout);
     }
-    nlohmann::json catalogue={{"version",1},{"static",staticIds}};
+    auto sourceBytes=StoreSources(geometry);const auto decoded=LoadSources(sourceBytes);
+    if(decoded->ground.size()!=geometry.ground.size()||decoded->doors.size()!=geometry.doors.size())throw std::runtime_error("Nav64: source serialization mismatch");
+    Atomic(directory/(stem+".navgeom"),sourceBytes);totalBytes+=sourceBytes.size();
+    printf("SOURCES triangles=%zu doors=%zu offmesh=%zu bytes=%zu\n",geometry.ground.size(),geometry.doors.size(),geometry.connections.size(),sourceBytes.size());fflush(stdout);
+    nlohmann::json catalogue={{"version",2},{"static",staticIds}};
     const auto text=catalogue.dump();Navigation::Bytes bytes(text.begin(),text.end());
     Atomic(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navworld"),bytes);
     return totalBytes+bytes.size();

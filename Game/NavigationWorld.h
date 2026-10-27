@@ -3,6 +3,8 @@
 #include "../Navigation/BodyTable.h"
 #include "../Navigation/Profiles.h"
 #include <filesystem>
+#include <future>
+#include <deque>
 #include "../Navigation/Authoring.h"
 
 class CMapObject;
@@ -17,13 +19,22 @@ class NavigationWorld {
     std::unique_ptr<NavigationBake> baker; // Allocated only in the offline tool.
     std::string mapName,mobName,error;
     std::uint64_t generation=0;
-    unsigned failures=0;
+    unsigned failures=0,stepFailures=0;
+    std::uint64_t nextStepLog=0;
     bool loaded=false;
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
     std::map<int,std::vector<dtObstacleRef>> obstacleRefs;
     std::set<int> bakedStatic,dirtyObjects;
     unsigned updateProfile=0;
+    std::shared_ptr<Navigation::Geometry> sources;
+    std::set<int> absentStatic;
+    std::set<std::tuple<int,int,int>> sourceDirty;
+    std::future<std::unique_ptr<Navigation::Mesh>> sourceJob;
+    std::tuple<int,int,int> sourceTask;
+    std::map<int,int> liveDoors;
+    void UpdateSources(bool initial);
+
     bool cacheReady=true;
     bool Dynamic(int id) const { return !bakedStatic.count(id); }
     void SyncObjects(bool initial=false);

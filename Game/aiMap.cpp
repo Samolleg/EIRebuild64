@@ -2673,21 +2673,4 @@ void CAIMap::TraceVisionToArea(const CPlot3D &ptSrc, float fpSenseRadius,
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
-float CAIMap::NavigationClimb(int kind) const {
-    const auto& values=kind==0?nElevationMultipliersFly:nElevationMultipliers;
-    int limit=0;while(values[values.GetSize()/2+limit]>-1)++limit;
-    return float(limit-1)/fpZMult+.1f;
-}
-bool CAIMap::NavigationGradientAllows(int kind,int x,int y) const {
-    if(x<3||y<3||x>=XSize()-3||y>=YSize()-3)return false;
-    const auto gradient=[&](int xx,int yy) {
-        int d=0;for(const auto& offset:{CPoint(1,0),CPoint(-1,0),CPoint(0,1),CPoint(0,-1)})
-            d=(std::max)(d,std::abs(int(map[yy+offset.y][xx+offset.x].nHeight)-int(map[yy][xx].nHeight)));
-        return d;
-    };
-    const int ground=Float2Int((NavigationClimb(3)-.1f)*fpZMult),flying=Float2Int((NavigationClimb(0)-.1f)*fpZMult);
-    if(gradient(x,y)>(kind==0?flying:ground))return false;
-    if((N_UNIT_MASK_3X3>>(kind*4))&15)for(const auto& d:{CPoint(1,0),CPoint(-1,0),CPoint(0,1),CPoint(0,-1)})if(gradient(x+d.x,y+d.y)>ground)return false;
-    if((N_UNIT_MASK_7X7>>(kind*4))&15)for(const auto& d:{CPoint(0,2),CPoint(-1,1),CPoint(0,1),CPoint(1,1),CPoint(-2,0),CPoint(-1,0),CPoint(0,0),CPoint(1,0),CPoint(2,0),CPoint(-1,-1),CPoint(0,-1),CPoint(1,-1),CPoint(0,-2)})if(gradient(x+d.x,y+d.y)>ground)return false;
-    return true;
-}
+

@@ -512,7 +512,7 @@ void CUnit::Load(SaveSchema::Reader &r)
     Field(r, fpCollisionDistance);
     navLocation.surface=r.UInt64();navLocation.position={r.Float32(),r.Float32(),r.Float32()};
     navLocation.radius=r.Float32();navLocation.height=r.Float32();navLocation.polygon=navLocation.generation=0;
-    if(navLocation.surface>1 || !Navigation::Finite(navLocation.position))throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid saved navigation address");
+    if((navLocation.surface>1 && (navLocation.surface>>32)==0) || !Navigation::Finite(navLocation.position))throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid saved navigation address");
     Field(r, aggression);
     Field(r, dwVoicePrototype);
     rpgUserUnitStats.Clear();

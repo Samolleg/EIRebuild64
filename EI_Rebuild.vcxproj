@@ -80,7 +80,7 @@
     <ClCompile Include="external\recastnavigation\Recast\Source\RecastAssert.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="external\recastnavigation\Recast\Source\RecastContour.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="external\recastnavigation\Recast\Source\RecastFilter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastLayers.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastLayers.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>RC_MAX_LAYERS_DEF=255;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
     <ClCompile Include="external\recastnavigation\Recast\Source\RecastMesh.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="external\recastnavigation\Recast\Source\RecastMeshDetail.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="external\recastnavigation\Recast\Source\RecastRasterization.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>

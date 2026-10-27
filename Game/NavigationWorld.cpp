@@ -5,6 +5,7 @@
 #include "../Navigation/Profiles.h"
 #include "aiMap.h"
 #include "Unit.h"
+#include "StuffMapObjects.h"
 #include "WorldServer.h"
 #include "GameJournal.h"
 #include "CorePerf.h"
@@ -38,7 +39,8 @@ Navigation::Geometry* NavigationWorld::Terrain() {return baker?&baker->terrain:n
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
     mapName=Navigation::ResourceName(mpr);mobName=Navigation::ResourceName(mob);
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
-    loaded=false;error.clear();failures=0;++generation;
+    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;
+    if(sourceJob.valid())sourceJob.get();sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
     liveObjects.clear();obstacleRefs.clear();bakedStatic.clear();dirtyObjects.clear();cacheReady=true;
     if(baker) {
         authoring={};auto path=std::filesystem::path(ModRuntime::MapPath(mapName.c_str()));path.replace_extension(".navsrc");
@@ -49,6 +51,13 @@ void NavigationWorld::Scene(const char* mpr,const char* mob) {
             for(int id:json.value("static",std::vector<int>{})) {
                 if(authoring.dynamic.count(id))throw std::runtime_error("Nav64: contradictory navsrc object policy");
                 authoring.fixed.insert(id);
+            }
+            for(const auto& value:json.value("doors",nlohmann::json::array())) {
+                Door d;d.object=value.at("id").get<int>();d.openState=value.value("open_state",1);
+                const auto a=value.at("min").get<std::array<float,3>>(),b=value.at("max").get<std::array<float,3>>();
+                d.minimum={a[0],a[1],a[2]};d.maximum={b[0],b[1],b[2]};
+                if(!Finite(d.minimum)||!Finite(d.maximum)||d.minimum.x>=d.maximum.x||d.minimum.y>=d.maximum.y||d.minimum.z>=d.maximum.z)throw std::runtime_error("Nav64: invalid door aperture");
+                authoring.doors.emplace(d.object,d);
             }
             for(const auto& part:json.value("walkable",nlohmann::json::array()))authoring.walkable[part.at("id").get<int>()].insert(Navigation::ResourceName(part.at("part").get<std::string>().c_str()));
         }
@@ -84,9 +93,11 @@ bool NavigationWorld::Load() {
         for(int type=0;type<AgentCount;++type){auto result=pending[type].get();bytes+=result.bytes;meshes[type]=std::move(result.mesh);}
         const auto catalogue=Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navworld"));
         const auto json=nlohmann::json::parse(catalogue.begin(),catalogue.end());
-        if(json.at("version").get<int>()!=1)throw std::runtime_error("Nav64: incompatible world catalogue");
-        for(int id:json.at("static"))bakedStatic.insert(id);
-        loaded=true;SyncObjects(true);
+        if(json.at("version").get<int>()!=2)throw std::runtime_error("Nav64: incompatible world catalogue");
+        for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);}
+        sources=LoadSources(Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navgeom")));
+        for(auto& mesh:meshes){mesh->sources=sources;IndexSurfaces(*mesh);}
+        loaded=true;SyncObjects(true);UpdateSources(true);
         // Actual world placements are resolved by the zone/party activation.
 
         const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
@@ -113,6 +124,10 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(baker){baker->Object(object,remove,map);return;}
     if(!NavigationObject(object))return;
     const int id=object->GetID();dirtyObjects.insert(id);
+    if(object->WhoAmI()==HPC_LEVER) {
+        auto* lever=static_cast<CLeverObject*>(object);
+        liveDoors[id]=remove?-1:lever->GetCurrentState();
+    }
     if(remove){liveObjects.erase(id);return;}
     object->CreateCurrentPlacement();auto& boxes=liveObjects[id];boxes.clear();
     for(INT_PTR i=0;i<object->fbvs.GetSize();++i) {
@@ -159,7 +174,7 @@ Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     auto p=GamePoint(unit->GetCP());
     // GetCP.z is the legacy ground-relative altitude, never the world support Z.
     p.z=unit->GetAIClass()==0?map.GetTileSurface(unit->GetCP()):map.GetTileHeight(unit->GetCP());
-    if(unit->navLocation.surface==1 && std::hypot(p.x-unit->navLocation.position.x,p.y-unit->navLocation.position.y)<.1f)p.z=unit->navLocation.position.z;
+    if(unit->navLocation.surface>=1 && std::hypot(p.x-unit->navLocation.position.x,p.y-unit->navLocation.position.y)<.1f)p.z=unit->navLocation.position.z;
     return p;
 }
 Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass) {
@@ -185,13 +200,18 @@ bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) 
 bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationStep);
     auto* mesh=ForUnit(unit);
-    if(!mesh||!Navigation::Constrain(*mesh,from,desired,result,Height(unit))) {
-        if(failures++<16)GameJournal::Event("NAV","step_rejected","unit=%d reason=%s from=(%.3f,%.3f,%.3f) desired=(%.3f,%.3f,%.3f)",unit?unit->GetID():-1,mesh?"outside_corridor":"no_mesh",from.x,from.y,from.z,desired.x,desired.y,desired.z);
+    const char* reason=mesh?"clearance":"no_mesh";
+    if(!mesh||!Navigation::Constrain(*mesh,from,desired,result,Height(unit),&reason)) {
+        const auto now=GetTickCount64();
+        if(stepFailures++<16||now>=nextStepLog) {
+            nextStepLog=now+2000;
+            GameJournal::Event("NAV","step_rejected","unit=%d reason=%s from=(%.3f,%.3f,%.3f) desired=(%.3f,%.3f,%.3f)",unit?unit->GetID():-1,reason,from.x,from.y,from.z,desired.x,desired.y,desired.z);
+        }
         return false;
     }
     if(unit) {
         auto& world=*static_cast<CWorldServer*>(unit->GetWorld());
-        result.position.z=unit->GetAIClass()==0?world.aiMap.GetTileSurface(CPlot3D(result.position.x,result.position.y,0)):world.GetBridgeSurfaceZValue(result.position.x,result.position.y);
+        if(result.surface==1)result.position.z=unit->GetAIClass()==0?world.aiMap.GetTileSurface(CPlot3D(result.position.x,result.position.y,0)):world.GetBridgeSurfaceZValue(result.position.x,result.position.y);
     }
     return true;
 }
@@ -199,10 +219,10 @@ bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationRestore);
     auto& saved=unit->navLocation;if(!saved.surface)return true;
     auto cp=unit->GetCP();
-    if(saved.surface!=1||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<0||saved.radius>4||
+    if(!saved.surface||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<0||saved.radius>4||
         !std::isfinite(saved.height)||saved.height<=0||saved.height>10||std::hypot(cp.x-saved.position.x,cp.y-saved.position.y)>.1f)return false;
     auto* mesh=ForUnit(unit);Navigation::Location location;
-    if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location,Height(unit))||std::abs(location.position.z-saved.position.z)>.25f)return false;
+    if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location,Height(unit))||location.surface!=saved.surface||std::abs(location.position.z-saved.position.z)>.25f)return false;
     saved=location;return true;
 }
 
@@ -212,8 +232,27 @@ void NavigationWorld::SyncObjects(bool initial) {
     do {
         if(cacheReady&&!dirtyObjects.empty()) {
             const int id=*dirtyObjects.begin();dirtyObjects.erase(dirtyObjects.begin());
+            if(sources) {
+                auto door=std::find_if(sources->doors.begin(),sources->doors.end(),[&](const Door& d){return d.object==id;});
+                if(door!=sources->doors.end()) {
+                    const bool open=liveDoors.count(id)?(liveDoors.at(id)<0||liveDoors.at(id)==door->openState):!liveObjects.count(id);
+                    for(auto& mesh:meshes)DoorState(*mesh,id,open);
+                    continue;
+                }
+            }
             if(!Dynamic(id)) {
-                if(!liveObjects.count(id))GameJournal::Event("NAV","static_removed","NID=%d reason=source_layers_required",id);
+                const bool absent=!liveObjects.count(id);const bool changed=absent?absentStatic.insert(id).second:absentStatic.erase(id)!=0;
+                if(changed&&sources) {
+                    const auto* params=meshes[0]->data->getParams();const float width=params->tileWidth;
+                    for(const auto& t:sources->ground)if(t.object==id) {
+                        auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);const float border=1.3f;
+                        const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
+                        const int x0=(std::max)(0,int(std::floor(((std::min)({a.x,b.x,c.x})-border-params->orig[0])/width))),x1=(std::min)(nx-1,int(std::floor(((std::max)({a.x,b.x,c.x})+border-params->orig[0])/width)));
+                        const int z0=(std::max)(0,int(std::floor(((std::min)({a.z,b.z,c.z})-border-params->orig[2])/width))),z1=(std::min)(nz-1,int(std::floor(((std::max)({a.z,b.z,c.z})+border-params->orig[2])/width)));
+                        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)for(int type=0;type<AgentCount;++type)sourceDirty.emplace(type,x,z);
+                    }
+                    GameJournal::Event("NAV","static_changed","NID=%d absent=%d queued_profile_tiles=%zu",id,int(absent),sourceDirty.size());
+                }
                 continue;
             }
             auto old=obstacleRefs.find(id);
@@ -245,9 +284,9 @@ void NavigationWorld::SyncObjects(bool initial) {
     }while(initial||std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<2);
 }
 void NavigationWorld::Advance() {
-    if(!loaded||cacheReady&&dirtyObjects.empty())return;
+    if(!loaded||(cacheReady&&dirtyObjects.empty()&&sourceDirty.empty()&&!sourceJob.valid()))return;
     CorePerf::Scope total(CorePerf::NavigationTotal);
-    try{SyncObjects();}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
+    try{if(!cacheReady||!dirtyObjects.empty()||(sourceDirty.empty()&&!sourceJob.valid()))SyncObjects();else UpdateSources(false);}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
 }
 bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
     if(!loaded)return false;auto* mesh=ForUnit(unit);if(!mesh)return false;
@@ -261,7 +300,7 @@ bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
         if(!map.MoveObject(unit,cp))return false;
         GameJournal::Event("NAV","placement","unit=%d distance=%.3f",unit->GetID(),std::hypot(cp.x-from.x,cp.y-from.y));
     }
-    location.position.z=unit->GetAIClass()==0?map.GetTileSurface(cp):static_cast<CWorldServer*>(unit->GetWorld())->GetBridgeSurfaceZValue(cp.x,cp.y);
+    if(location.surface==1)location.position.z=unit->GetAIClass()==0?map.GetTileSurface(cp):static_cast<CWorldServer*>(unit->GetWorld())->GetBridgeSurfaceZValue(cp.x,cp.y);
     unit->navLocation=location;return true;
 }
 
@@ -269,4 +308,36 @@ bool NavigationWorld::RandomGoal(CUnit* unit,Navigation::Point center,float radi
     auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
     return Navigation::RandomReachable(*mesh,Position(unit,map),center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal);
+}
+
+void NavigationWorld::UpdateSources(bool initial) {
+    do {
+        if(!cacheReady||!dirtyObjects.empty())return;
+        if(sourceJob.valid()) {
+            if(!initial&&sourceJob.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+            auto replacement=sourceJob.get();const auto [type,x,z]=sourceTask;
+            if(!sourceDirty.count(sourceTask)) {
+                const auto start=std::chrono::steady_clock::now();meshes[type]->excludedObjects=absentStatic;
+                ReplaceTile(*meshes[type],*replacement,x,z);
+                for(const auto& door:meshes[type]->doorOpen)DoorState(*meshes[type],door.first,door.second);
+                const double applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+                GameJournal::Event("NAV","source_tile","profile=%d tile=%d,%d worker_ms=%llu apply_ms=%.3f pending=%zu",type,x,z,static_cast<unsigned long long>(replacement->buildMs),applyMs,sourceDirty.size());
+            }
+        }
+        if(sourceDirty.empty())return;
+        sourceTask=*sourceDirty.begin();sourceDirty.erase(sourceDirty.begin());const auto [type,x,z]=sourceTask;
+        auto snapshot=sources;auto absent=absentStatic;auto profile=meshes[type]->profile;
+        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z] {
+            Geometry input;input.minimum=snapshot->minimum;input.maximum=snapshot->maximum;input.doors=snapshot->doors;
+            const float width=profile.tileCells*profile.cellSize,border=1.3f;
+            const float lowX=input.minimum.x+x*width-border,highX=lowX+width+border*2;
+            const float lowZ=input.minimum.z+z*width-border,highZ=lowZ+width+border*2;
+            for(const auto& t:snapshot->ground) {
+                if(t.object&&absent.count(t.object))continue;auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+                if((std::max)({a.x,b.x,c.x})<lowX||(std::min)({a.x,b.x,c.x})>highX||(std::max)({a.z,b.z,c.z})<lowZ||(std::min)({a.z,b.z,c.z})>highZ)continue;
+                input.ground.push_back(t);
+            }
+            return RebuildTile(input,profile,x,z);
+        });
+    }while(initial);
 }

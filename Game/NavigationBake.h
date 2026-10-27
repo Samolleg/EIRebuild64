@@ -21,6 +21,7 @@ class NavigationBake {
     CAIMap* sourceMap=nullptr;
     CWorldServer* sourceWorld=nullptr;
     std::set<int> staticIds;
+    std::map<int,Navigation::Door> doors;
     std::set<std::string> normalizedBounds;
     std::shared_ptr<const owned::FigureCpuAsset> Figure(CFigureManager& manager,const std::string& mask,const char* part);
     const Navigation::BodySize& Body(CWorldServer& world,const std::string& mask,float strength,float grace,float tall);

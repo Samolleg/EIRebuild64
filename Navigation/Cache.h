@@ -13,6 +13,7 @@ struct LayerCodec final : dtTileCacheCompressor {
     dtStatus decompress(const unsigned char*,int,unsigned char*,int,int*) override;
 };
 struct LayerProcess final : dtTileCacheMeshProcess {
+    Mesh* owner=nullptr;
     void process(dtNavMeshCreateParams*,unsigned char*,unsigned short*) override;
 };
 struct Cache {

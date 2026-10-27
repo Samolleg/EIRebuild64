@@ -32,7 +32,9 @@ dtStatus LayerCodec::decompress(const unsigned char* src,int n,unsigned char* ds
         else {if(count>n-in)return DT_FAILURE;std::memcpy(dst+out,src+in,count);in+=count;}
         out+=count;
     }
-    if(out!=cap)return DT_FAILURE;
+    // Detour compresses heights/areas/cons (3 grids), but provides capacity
+    // for an additional scratch regions grid during decompression.
+    if(cap%4||out!=cap/4*3)return DT_FAILURE;
     *size=out;return DT_SUCCESS;
 }
 void LayerProcess::process(dtNavMeshCreateParams* params,unsigned char* areas,unsigned short* flags) {
@@ -41,9 +43,24 @@ void LayerProcess::process(dtNavMeshCreateParams* params,unsigned char* areas,un
         if(!encoded||encoded>60){areas[i]=0;flags[i]=0;continue;}
         flags[i]=static_cast<unsigned short>((1u<<((encoded-1)/15+1))-1);
         areas[i]=static_cast<unsigned char>((encoded-1)%15+1);
+        if(owner)owner->doorFlags[{params->tileX,params->tileY,params->tileLayer,i}]=flags[i];
+        if(areas[i]==15&&owner&&owner->sources) {
+            Point center{};int count=0;
+            for(int k=0;k<params->nvp;++k) {
+                const auto index=params->polys[i*params->nvp*2+k];if(index==0xffff)break;
+                const auto* v=params->verts+index*3;
+                center.x+=params->bmin[0]+v[0]*params->cs;center.y-=params->bmin[2]+v[2]*params->cs;center.z+=params->bmin[1]+v[1]*params->ch;++count;
+            }
+            if(count)for(const auto& door:owner->sources->doors) {
+                auto state=owner->doorOpen.find(door.object);if(state==owner->doorOpen.end()||state->second)continue;
+                const float x=center.x/count,y=center.y/count;
+                if(x>=door.minimum.x-.01f&&x<=door.maximum.x+.01f&&y>=door.minimum.y-.01f&&y<=door.maximum.y+.01f&&center.z/count>=door.minimum.z-.01f&&center.z/count<=door.maximum.z+.01f)flags[i]=0;
+            }
+        }
     }
 }
 Cache::Cache(Mesh& mesh):data(std::make_unique<dtTileCache>()) {
+    process.owner=&mesh;
     dtTileCacheParams p{};const auto& profile=mesh.profile;
     std::memcpy(p.orig,mesh.data->getParams()->orig,sizeof(p.orig));
     p.cs=profile.cellSize;p.ch=profile.cellHeight;p.width=p.height=profile.tileCells;

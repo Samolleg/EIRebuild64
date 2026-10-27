@@ -12,15 +12,21 @@ struct Triangle {
     std::uint8_t levitateArea = 1;
     std::array<std::uint8_t,8> classAreas = {1,1,1,1,1,1,1,1};
     bool terrain = false;
+    int object = 0;
+    std::uint64_t surface = 1;
 };
 inline Triangle Surface(Triangle t,const Profile& p) {
     if(t.terrain)t.area=t.classAreas[p.materialClass];
-    if(Levitates(p)) {t.a.z+=t.waterDepth.x;t.b.z+=t.waterDepth.y;t.c.z+=t.waterDepth.z;t.area=t.levitateArea;}
+    if(t.terrain&&Levitates(p)) {t.a.z+=t.waterDepth.x;t.b.z+=t.waterDepth.y;t.c.z+=t.waterDepth.z;t.area=t.levitateArea;}
     return t;
 }
 struct Solid { std::array<Point,8> corners; std::string error; };
+struct Door { int object=0,openState=1; Point minimum,maximum; };
+struct OffMesh { Point from,to; float radius=0; std::uint64_t fromSurface=1,toSurface=1; unsigned flags=0; };
 struct Geometry {
     std::vector<Triangle> ground;
+    std::vector<Door> doors;
+    std::vector<OffMesh> connections;
     std::map<std::size_t,std::string> groundSources; // First triangle of each source sector, diagnostics only.
     std::vector<Solid> solids;
     Point minimum, maximum;

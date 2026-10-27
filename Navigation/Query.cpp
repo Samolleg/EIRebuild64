@@ -12,7 +12,22 @@ dtNavMeshQuery* Query(const Mesh& m) {
     return m.query.get();
 }
 Location Address(const Mesh& m,Point p,dtPolyRef ref,float height) {Location l;l.position=FromNav(p);l.surface=1;l.radius=m.profile.radius;l.height=height;l.polygon=ref;l.generation=m.generation;
-    unsigned char area=1;m.data->getPolyArea(ref,&area);l.area=area;return l;}
+    unsigned char area=1;m.data->getPolyArea(ref,&area);l.area=area;
+    if(m.sources) {
+        const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
+        if(dtStatusSucceed(m.data->getTileAndPolyByRef(ref,&tile,&poly))) {
+            auto found=m.surfaceTriangles.find({tile->header->x,tile->header->y});float gap=.15f;
+            if(found!=m.surfaceTriangles.end())for(size_t i:found->second) {
+                const auto& t=m.sources->ground[i];if(m.excludedObjects.count(t.object))continue;const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
+                if(std::abs(det)<1.e-8f)continue;const float x=l.position.x-t.a.x,y=l.position.y-t.a.y;
+                const float u=(x*by-y*bx)/det,v=(ax*y-ay*x)/det;
+                if(u<-.001f||v<-.001f||u+v>1.001f)continue;
+                const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z),distance=std::abs(z-l.position.z);
+                if(distance<gap){gap=distance;l.surface=t.surface;l.position.z=z;}
+            }
+        }
+    }
+    return l;}
 bool Nearest(dtNavMeshQuery& q,Point point,float horizontal,float vertical,const dtQueryFilter& filter,dtPolyRef& ref,Point& result) {
     if(!Finite(point)||!std::isfinite(horizontal)||horizontal<0||!std::isfinite(vertical)||vertical<=0)return false;
     auto p=ToNav(point);float pos[3]={p.x,p.y,p.z},ext[3]={horizontal,vertical,horizontal},near[3]{};ref=0;
@@ -72,17 +87,21 @@ Route Find(const Mesh& m,const Request& r) {
     if(result.length>r.maxLength){result.points.clear();result.corridor.clear();result.status=Status::TooLong;return result;}
     result.status=Status::Complete;return result;
 }
-bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height) {
-    if(!Finite(from)||!Finite(desired)||!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
+bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height,const char** reason) {
+    auto reject=[&](const char* text){if(reason)*reason=text;return false;};
+    if(!Finite(from)||!Finite(desired))return reject("non_finite");
+    if(!m.data||!m.tiles)return reject("empty_mesh");auto* query=Query(m);if(!query)return reject("no_query");auto& q=*query;
     height=height>0?height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
     Point actual;bool ingress=false;
-    if(!Start(m,q,from,filter,ref,near,actual,ingress,height))return false;
+    if(!Start(m,q,from,filter,ref,near,actual,ingress,height))return reject("no_start");
     auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},normal[3]{},t=0;
     dtPolyRef visited[512];int count=0;
     auto status=q.raycast(ref,start,end,&filter,&t,normal,visited,&count,512);
-    if(dtStatusFailed(status)||Limited(status)||t<1.f||!count)return false;
-    float support=0;if(dtStatusFailed(q.getPolyHeight(visited[count-1],end,&support)))return false;
+    if(dtStatusFailed(status))return reject("raycast_failed");
+    if(Limited(status))return reject("raycast_limit");
+    if(t<1.f||!count)return reject("blocked_edge");
+    float support=0;if(dtStatusFailed(q.getPolyHeight(visited[count-1],end,&support)))return reject("no_support_height");
     goal.y=support;result=Address(m,goal,visited[count-1],height);return true;
 }
 bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,float height,float (*random)(),Point& result) {

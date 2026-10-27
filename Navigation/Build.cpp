@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <functional>
 #include <tuple>
+#include <cstdio>
 #define NOMINMAX
 #include <windows.h>
 #include <compressapi.h>
@@ -64,7 +65,7 @@ Bytes Unpack(const void* input,size_t size,size_t expected) {
 }
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
-        p.cellSize==.1f && p.cellHeight==.05f && p.tileCells==128 && (p.slope==40||p.slope==60) && p.climb>=0&&p.climb<=10,"Nav64: unsupported build profile");
+        p.cellSize==.1f && p.cellHeight==.05f && p.tileCells==64 && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
 }
 // v1.6.0 addTile does not take bounds for its internal sections. Validate all
 // counts and the exact aligned library layout BEFORE handing it cached bytes.
@@ -137,6 +138,13 @@ void CheckTile(const unsigned char* data,size_t size) {
         Require(nodes[i].i>=0?nodes[i].i<h.polyCount:(std::int64_t(-std::int64_t(nodes[i].i))<=h.bvNodeCount-i),"Nav64: invalid BV node index");
     }
 }
+struct BakeContext final : rcContext {
+    unsigned material; float radius; int x,z;
+    BakeContext(const Profile& p,int tx,int tz,bool logging):rcContext(logging),material(p.materialClass),radius(p.radius),x(tx),z(tz) {}
+    void doLog(const rcLogCategory category,const char* message,const int length) override {
+        if(category==RC_LOG_ERROR)fprintf(stderr,"RECAST class=%u radius=%.2f tile=%d,%d reason=%.*s\n",material,radius,x,z,length,message);
+    }
+};
 struct Resources {
     rcHeightfield* height=nullptr;rcCompactHeightfield* compact=nullptr;rcContourSet* contours=nullptr;rcPolyMesh* polys=nullptr;rcPolyMeshDetail* detail=nullptr;
     ~Resources(){rcFreeHeightField(height);rcFreeCompactHeightfield(compact);rcFreeContourSet(contours);rcFreePolyMesh(polys);rcFreePolyMeshDetail(detail);}
@@ -192,7 +200,7 @@ struct RasterBatch {
     }
 };
 }
-static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit) {
+static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1) {
     const auto buildStart=std::chrono::steady_clock::now();
     CheckProfile(p);
     const auto& domain=batch?batch->Domain(p):p;
@@ -200,7 +208,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     Require(bool(mesh->data),"Nav64: cannot allocate Detour mesh");
     float tileSize=p.cellSize*p.tileCells;
     int nx=int(std::ceil((g.maximum.x-g.minimum.x)/tileSize)), nz=int(std::ceil((g.maximum.z-g.minimum.z)/tileSize));
-    Require(nx>0&&nz>0&&std::uint64_t(nx)*nz<=4096,"Nav64: zone exceeds tile limit");
+    Require(nx>0&&nz>0&&std::uint64_t(nx)*nz<=16384,"Nav64: zone exceeds tile limit");
     dtNavMeshParams params{};params.orig[0]=g.minimum.x;params.orig[1]=g.minimum.y-2;params.orig[2]=g.minimum.z;
     params.tileWidth=params.tileHeight=tileSize;params.maxTiles=int(dtNextPow2(nx*nz*4));params.maxPolys=32768;
     // Bin once, instead of scanning every triangle/solid again for each tile.
@@ -228,7 +236,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     }
     rcContext classifier(false);std::vector<unsigned char> slopes(allAreas.size(),RC_NULL_AREA);
     rcMarkWalkableTriangles(&classifier,p.slope,allVertices.data(),int(allVertices.size()/3),allIndices.data(),int(allAreas.size()),slopes.data());
-    for(size_t i=0;i<allAreas.size();++i)if(!g.ground[i].terrain&&slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
+    for(size_t i=0;i<allAreas.size();++i)if(slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
     for(const auto& s:g.solids) {
         SolidInput input;input.hull=Footprint(s,input.low,input.high);
         if(input.hull.size()<9)continue;
@@ -245,8 +253,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     auto micros=[](auto begin){return std::uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-begin).count());};
     auto tile=[&](int index) {
         const int x=index%nx,z=index/nx;
-        if(inputs[index].triangles.empty())return;
-        rcContext context(false);auto begin=std::chrono::steady_clock::now();
+        if((onlyX>=0&&(x!=onlyX||z!=onlyZ))||inputs[index].triangles.empty())return;
+        BakeContext context(p,x,z,onlyX<0);auto begin=std::chrono::steady_clock::now();
         rcConfig cfg{};cfg.cs=p.cellSize;cfg.ch=p.cellHeight;cfg.walkableSlopeAngle=p.slope;
         cfg.walkableHeight=int(std::ceil(p.height/cfg.ch));cfg.walkableClimb=int(std::floor(p.climb/cfg.ch));cfg.walkableRadius=int(std::ceil(p.radius/cfg.cs));
         cfg.tileSize=p.tileCells;cfg.borderSize=int(std::ceil(domain.radius/p.cellSize))+3;cfg.width=cfg.height=cfg.tileSize+cfg.borderSize*2;
@@ -306,6 +314,12 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         rcFilterWalkableLowHeightSpans(&context,cfg.walkableHeight,*r.height);
         r.compact=rcAllocCompactHeightfield();Require(r.compact&&rcBuildCompactHeightfield(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height,*r.compact),"Nav64: compact heightfield failed");
         rasterUs.fetch_add(micros(begin));begin=std::chrono::steady_clock::now();
+        for(const auto& door:g.doors) {
+            const auto a=ToNav(door.minimum),b=ToNav(door.maximum);
+            const float low[]={std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z)};
+            const float high[]={std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)};
+            rcMarkBoxArea(&context,low,high,15,*r.compact);
+        }
         if(PoseClearance(p)) {
             auto& chf=*r.compact;
             const std::vector<unsigned char> material(chf.areas,chf.areas+chf.spanCount);
@@ -337,7 +351,22 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             for(int j=0;j<chf.spanCount;++j)chf.areas[j]=tiers[j]?static_cast<unsigned char>((tiers[j]-1)*15+material[j]):RC_NULL_AREA;
         } else Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
         std::unique_ptr<rcHeightfieldLayerSet,decltype(&rcFreeHeightfieldLayerSet)> set(rcAllocHeightfieldLayerSet(),rcFreeHeightfieldLayerSet);
-        Require(set&&rcBuildHeightfieldLayers(&context,*r.compact,cfg.borderSize,cfg.walkableHeight,*set),"Nav64: layer build failed");
+        if(!set||!rcBuildHeightfieldLayers(&context,*r.compact,cfg.borderSize,cfg.walkableHeight,*set)) {
+            if(onlyX>=0)throw std::runtime_error("Nav64: source tile layer build failed");
+            unsigned maximum=0,walkable=0;
+            for(int j=0;j<r.compact->width*r.compact->height;++j) {
+                unsigned count=0;const auto& cell=r.compact->cells[j];
+                for(unsigned k=cell.index;k<cell.index+cell.count;++k)if(r.compact->areas[k])++count;
+                maximum=std::max(maximum,count);walkable+=count;
+            }
+            fprintf(stderr,"LAYER_INPUT class=%u radius=%.2f tile=%d,%d spans=%d walkable=%u max_stack=%u triangles=%zu bounds=(%.2f,%.2f)-(%.2f,%.2f)\n",p.materialClass,p.radius,x,z,r.compact->spanCount,walkable,maximum,inputs[index].triangles.size(),cfg.bmin[0],-cfg.bmax[2],cfg.bmax[0],-cfg.bmin[2]);
+            std::map<std::string,unsigned> sourceCounts;
+            for(int t:inputs[index].triangles) {
+                auto at=g.groundSources.upper_bound(t);if(at!=g.groundSources.begin()){--at;++sourceCounts[at->second];}
+            }
+            for(const auto& source:sourceCounts)fprintf(stderr,"LAYER_SOURCE triangles=%u source=%s\n",source.second,source.first.c_str());
+            throw std::runtime_error("Nav64: layer build failed class="+std::to_string(p.materialClass)+" tile="+std::to_string(x)+","+std::to_string(z));
+        }
         Require(set->nlayers<=255,"Nav64: surface layer limit");
         LayerCodec codec;
         for(int i=0;i<set->nlayers;++i) {
@@ -348,6 +377,14 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             h.minx=static_cast<unsigned char>(layer.minx);h.maxx=static_cast<unsigned char>(layer.maxx);
             h.miny=static_cast<unsigned char>(layer.miny);h.maxy=static_cast<unsigned char>(layer.maxy);
             h.hmin=static_cast<unsigned short>(layer.hmin);h.hmax=static_cast<unsigned short>(layer.hmax);
+            // Recast matches portal heights against adjacent regions AFTER it
+            // computes the layer bounds. Keep the actual grids unchanged and
+            // describe their full extent, including those portal heights.
+            unsigned maximumHeight=0;
+            for(int cell=0;cell<layer.width*layer.height;++cell)if(layer.areas[cell])maximumHeight=std::max(maximumHeight,unsigned(layer.heights[cell]));
+            h.bmax[1]=std::max(h.bmax[1],h.bmin[1]+maximumHeight*cfg.ch);
+            Require(unsigned(h.hmin)+maximumHeight<=65535,"Nav64: layer vertical range overflow");
+            h.hmax=static_cast<unsigned short>(std::max(unsigned(h.hmax),unsigned(h.hmin)+maximumHeight));
             unsigned char* data=nullptr;int size=0;
             Require(dtStatusSucceed(dtBuildTileCacheLayer(&codec,&h,layer.heights,layer.areas,layer.cons,&data,&size)),"Nav64: layer encoding failed");
             layers[index].emplace_back(data,data+size);dtFree(data);
@@ -368,13 +405,14 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     for(const auto& error:errors)if(error)std::rethrow_exception(error);
     mesh->rasterMs=rasterUs.load()/1000;mesh->polygonMs=polygonUs.load()/1000;
     for(auto& tile:layers)for(auto& layer:tile)mesh->layers.push_back(std::move(layer));
-    params.maxTiles=int(dtNextPow2(static_cast<unsigned>((std::max)(size_t(1),mesh->layers.size()))));
+    params.maxTiles=int(dtNextPow2(static_cast<unsigned>((std::max)(size_t(nx*nz*4),mesh->layers.size()*2))));
     Require(params.maxTiles<=32768&&dtStatusSucceed(mesh->data->init(&params)),"Nav64: cannot initialize Detour mesh");
 
     mesh->cache=std::make_unique<Cache>(*mesh);
     for(int i=0;i<mesh->cache->data->getTileCount();++i) {
         const auto* layer=mesh->cache->data->getTile(i);if(!layer||!layer->header)continue;
-        Require(dtStatusSucceed(mesh->cache->data->buildNavMeshTile(mesh->cache->data->getTileRef(layer),mesh->data.get())),"Nav64: ready tile creation failed");
+        const auto status=mesh->cache->data->buildNavMeshTile(mesh->cache->data->getTileRef(layer),mesh->data.get());
+        if(dtStatusFailed(status))throw std::runtime_error("Nav64: ready tile creation failed class="+std::to_string(p.materialClass)+" tile="+std::to_string(layer->header->tx)+","+std::to_string(layer->header->ty)+","+std::to_string(layer->header->tlayer)+" status="+std::to_string(status));
     }
     const dtNavMesh& finalMesh=*mesh->data;
     for(int i=0;i<finalMesh.getMaxTiles();++i)if(finalMesh.getTile(i)->header)++mesh->tiles;
@@ -425,7 +463,7 @@ Bytes Store(const Mesh& mesh) {
     const auto packed=Pack(tiles.bytes);
     w.U(1);w.U(std::uint32_t(packed.size()+12));w.U(COMPRESS_ALGORITHM_LZMS);
     w.U(std::uint32_t(tiles.bytes.size()));w.U(std::uint32_t(packed.size()));w.B(packed.data(),packed.size());
-    w.U(2);w.U(8);w.U(1);w.U(1); // one imported terrain/object surface domain
+    w.U(2);w.U(8);w.U(1);w.U(2); // terrain=1, BASE=(NID<<32)|(part+2), source/off-mesh section in navgeom
     Wire layers;layers.U(static_cast<std::uint32_t>(mesh.layers.size()));
     for(const auto& layer:mesh.layers){layers.U(static_cast<std::uint32_t>(layer.size()));layers.B(layer.data(),layer.size());}
     w.U(3);w.U(static_cast<std::uint32_t>(layers.bytes.size()));w.B(layers.bytes.data(),layers.bytes.size());
@@ -454,7 +492,7 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
         auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,raw.data(),n);tiles.at+=n;
         auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;
     }
-    Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==1&&w.U()==3,"Nav64: invalid surface/layer sections");
+    Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==2&&w.U()==3,"Nav64: invalid surface/layer sections");
     const auto layerBytes=w.U();Require(layerBytes<=w.bytes.size()-w.at,"Nav64: truncated layer section");const auto layerEnd=w.at+layerBytes;
     const auto layerCount=w.U();Require(layerCount<=static_cast<unsigned>(p.maxTiles),"Nav64: layer count limit");
     for(unsigned i=0;i<layerCount;++i) {
@@ -465,5 +503,94 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     mesh->cache=std::make_unique<Cache>(*mesh);
     mesh->query.reset(dtAllocNavMeshQuery());Require(mesh->query&&dtStatusSucceed(mesh->query->init(mesh->data.get(),65535)),"Nav64: query allocation failed");
     return mesh;
+}
+
+Bytes StoreSources(const Geometry& g) {
+    Wire w;w.U(0x4352534e);w.U(1);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(g.ground.size()));
+    for(const auto& t:g.ground) {
+        w.P(t.a);w.P(t.b);w.P(t.c);w.P(t.waterDepth);w.U(t.area);w.U(t.levitateArea);
+        for(auto area:t.classAreas)w.U(area);
+        w.U(t.terrain);w.U(t.object);w.U(unsigned(t.surface));w.U(unsigned(t.surface>>32));
+    }
+    w.U(unsigned(g.doors.size()));for(const auto& d:g.doors){w.U(d.object);w.U(d.openState);w.P(d.minimum);w.P(d.maximum);}
+    w.U(unsigned(g.connections.size()));for(const auto& c:g.connections) {
+        w.P(c.from);w.P(c.to);w.F(c.radius);w.U(unsigned(c.fromSurface));w.U(unsigned(c.fromSurface>>32));
+        w.U(unsigned(c.toSurface));w.U(unsigned(c.toSurface>>32));w.U(c.flags);
+    }
+    const auto packed=Pack(w.bytes);Wire out;out.U(unsigned(w.bytes.size()));out.B(packed.data(),packed.size());return std::move(out.bytes);
+}
+std::shared_ptr<Geometry> LoadSources(Bytes bytes) {
+    Wire in;in.bytes=std::move(bytes);auto size=in.U();Wire w;w.bytes=Unpack(in.bytes.data()+in.at,in.bytes.size()-in.at,size);
+    Require(w.U()==0x4352534e&&w.U()==1,"Nav64: incompatible source section");
+    auto g=std::make_shared<Geometry>();auto point=[&](){return Point{w.F(),w.F(),w.F()};};
+    g->minimum=point();g->maximum=point();auto n=w.U();Require(n<4000000,"Nav64: source triangle limit");g->ground.reserve(n);
+    for(unsigned i=0;i<n;++i) {
+        Triangle t;t.a=point();t.b=point();t.c=point();t.waterDepth=point();t.area=w.U();t.levitateArea=w.U();
+        for(auto& area:t.classAreas)area=w.U();t.terrain=w.U()!=0;t.object=int(w.U());
+        auto low=w.U();t.surface=low|(std::uint64_t(w.U())<<32);g->ground.push_back(t);
+    }
+    n=w.U();Require(n<=65536,"Nav64: door count limit");for(unsigned i=0;i<n;++i){Door d;d.object=int(w.U());d.openState=int(w.U());d.minimum=point();d.maximum=point();g->doors.push_back(d);}
+    n=w.U();Require(n<=65536,"Nav64: connection count limit");for(unsigned i=0;i<n;++i) {
+        OffMesh c;c.from=point();c.to=point();c.radius=w.F();auto low=w.U();c.fromSurface=low|(std::uint64_t(w.U())<<32);
+        low=w.U();c.toSurface=low|(std::uint64_t(w.U())<<32);c.flags=w.U();g->connections.push_back(c);
+    }
+    Require(w.at==w.bytes.size(),"Nav64: trailing source bytes");return g;
+}
+void IndexSurfaces(Mesh& mesh) {
+    mesh.surfaceTriangles.clear();if(!mesh.sources)return;
+    const auto* params=mesh.data->getParams();const float width=params->tileWidth;
+    for(size_t i=0;i<mesh.sources->ground.size();++i) {
+        const auto& t=mesh.sources->ground[i];if(t.surface<=1||!t.area)continue;
+        auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+        const int x0=int(std::floor((std::min({a.x,b.x,c.x})-params->orig[0])/width)),x1=int(std::floor((std::max({a.x,b.x,c.x})-params->orig[0])/width));
+        const int z0=int(std::floor((std::min({a.z,b.z,c.z})-params->orig[2])/width)),z1=int(std::floor((std::max({a.z,b.z,c.z})-params->orig[2])/width));
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)mesh.surfaceTriangles[{x,z}].push_back(i);
+    }
+}
+std::unique_ptr<Mesh> RebuildTile(const Geometry& g,const Profile& p,int x,int z) {return BuildProfile(g,p,"",nullptr,1,x,z);}
+void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z) {
+    // No query observes a half-replaced tile: called on the simulation thread.
+    auto* cache=mesh.cache->data.get();
+    for(int i=0;i<cache->getTileCount();++i) {
+        const auto* t=cache->getTile(i);if(!t||!t->header||t->header->tx!=x||t->header->ty!=z)continue;
+        cache->removeTile(cache->getTileRef(t),nullptr,nullptr);
+    }
+    const dtNavMesh& old=*mesh.data;
+    for(int i=0;i<old.getMaxTiles();++i) {
+        const auto* t=old.getTile(i);if(t&&t->header&&t->header->x==x&&t->header->y==z)mesh.data->removeTile(mesh.data->getTileRef(t),nullptr,nullptr);
+    }
+    for(const auto& bytes:replacement.layers) {
+        auto* data=static_cast<unsigned char*>(dtAlloc(bytes.size(),DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: replacement layer allocation failed");std::memcpy(data,bytes.data(),bytes.size());
+        dtCompressedTileRef ref=0;auto status=cache->addTile(data,int(bytes.size()),DT_COMPRESSEDTILE_FREE_DATA,&ref);
+        if(dtStatusFailed(status)){dtFree(data);throw std::runtime_error("Nav64: replacement layer limit");}
+    }
+    // The cache is fully drained before replacement. Its public obstacle records
+    // must address the new compressed-layer salts before rebuilding polygons.
+    for(int i=0;i<cache->getObstacleCount();++i) {
+        auto* o=const_cast<dtTileCacheObstacle*>(cache->getObstacle(i));if(o->state==DT_OBSTACLE_EMPTY)continue;
+        float low[3],high[3];cache->getObstacleBounds(o,low,high);dtCompressedTileRef refs[DT_MAX_TOUCHED_TILES+1];int n=0;
+        Require(dtStatusSucceed(cache->queryTiles(low,high,refs,&n,DT_MAX_TOUCHED_TILES+1))&&n<=DT_MAX_TOUCHED_TILES,"Nav64: obstacle overlaps too many source layers");
+        std::copy(refs,refs+n,o->touched);o->ntouched=static_cast<unsigned char>(n);o->npending=0;
+    }
+    Require(dtStatusSucceed(cache->buildNavMeshTilesAt(x,z,mesh.data.get())),"Nav64: replacement tile build failed");
+    ++mesh.generation;
+}
+void DoorState(Mesh& mesh,int object,bool open) {
+    mesh.doorOpen[object]=open;if(!mesh.sources)return;
+    const auto d=std::find_if(mesh.sources->doors.begin(),mesh.sources->doors.end(),[&](const Door& d){return d.object==object;});
+    if(d==mesh.sources->doors.end())return;
+    const dtNavMesh& data=*mesh.data;
+    for(int i=0;i<data.getMaxTiles();++i) {
+        const auto* t=data.getTile(i);if(!t||!t->header)continue;
+        for(int j=0;j<t->header->polyCount;++j) {
+            const auto& p=t->polys[j];if(p.getArea()!=15)continue;Point center{};
+            for(int k=0;k<p.vertCount;++k){const auto* v=t->verts+p.verts[k]*3;center.x+=v[0]/p.vertCount;center.y-=v[2]/p.vertCount;center.z+=v[1]/p.vertCount;}
+            if(center.x<d->minimum.x-.01f||center.x>d->maximum.x+.01f||center.y<d->minimum.y-.01f||center.y>d->maximum.y+.01f||center.z<d->minimum.z-.01f||center.z>d->maximum.z+.01f)continue;
+            const auto ref=data.getPolyRefBase(t)|dtPolyRef(j);const auto key=std::make_tuple(t->header->x,t->header->y,t->header->layer,j);
+            auto saved=mesh.doorFlags.emplace(key,p.flags).first;
+            mesh.data->setPolyFlags(ref,open?saved->second:0);
+        }
+    }
+    ++mesh.generation;
 }
 }
