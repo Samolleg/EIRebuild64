@@ -280,6 +280,64 @@ Navigation::Geometry NavigationBake::Geometry() {
         input.ground.insert(input.ground.end(),object.ground.begin(),object.ground.end());
         input.solids.insert(input.solids.end(),object.solids.begin(),object.solids.end());
     }
+    // Close only sub-cell gaps between facing boundary edges of the SAME
+    // walkable BASE part. Each half uses its own original plane, so a small
+    // step remains a step; steep side faces are never promoted to a floor.
+    struct Edge { Point a,b; size_t triangle=0; unsigned count=0; };
+    using Vertex=std::array<float,3>;
+    using EdgeKey=std::pair<Vertex,Vertex>;
+    std::map<std::uint64_t,std::map<EdgeKey,Edge>> boundaries;
+    const float slopeCos=std::cos(40.f*FP_PI/180.f),gapLimit=.1f,climb=.35f;
+    for(size_t i=0;i<input.ground.size();++i) {
+        const auto& t=input.ground[i];if(t.terrain||!t.area||t.surface<=1)continue;
+        const auto a=t.a,b=t.b,c=t.c;
+        const float nx=(b.y-a.y)*(c.z-a.z)-(b.z-a.z)*(c.y-a.y),
+            ny=(b.z-a.z)*(c.x-a.x)-(b.x-a.x)*(c.z-a.z),
+            nz=(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
+        if(nz<=1.e-8f||nz/std::sqrt(nx*nx+ny*ny+nz*nz)<=slopeCos)continue;
+        auto& group=boundaries[t.surface];
+        for(auto edge:std::array<std::pair<Point,Point>,3>{{{a,b},{b,c},{c,a}}}) {
+            Vertex va{edge.first.x,edge.first.y,edge.first.z},vb{edge.second.x,edge.second.y,edge.second.z};
+            const EdgeKey key=va<vb?EdgeKey{va,vb}:EdgeKey{vb,va};
+            auto inserted=group.emplace(key,Edge{edge.first,edge.second,i,0});++inserted.first->second.count;
+        }
+    }
+    std::vector<Triangle> seams;
+    auto plane=[](const Triangle& t,Point p) {
+        const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
+        const float u=((p.x-t.a.x)*by-(p.y-t.a.y)*bx)/det,v=(ax*(p.y-t.a.y)-ay*(p.x-t.a.x))/det;
+        p.z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);return p;
+    };
+    for(const auto& group:boundaries) {
+        std::vector<Edge> edges;for(const auto& entry:group.second)if(entry.second.count==1)edges.push_back(entry.second);
+        for(size_t i=0;i<edges.size();++i)for(size_t j=i+1;j<edges.size();++j) {
+            const auto a=edges[i],b=edges[j];
+            const float length=std::hypot(a.b.x-a.a.x,a.b.y-a.a.y),other=std::hypot(b.b.x-b.a.x,b.b.y-b.a.y);
+            if(length<.001f||other<.001f)continue;
+            const float dx=(a.b.x-a.a.x)/length,dy=(a.b.y-a.a.y)/length,
+                vx=b.b.x-b.a.x,vy=b.b.y-b.a.y,dot=dx*vx+dy*vy;
+            if(dot>-.98f*other)continue;
+            const float d0=dx*(b.a.y-a.a.y)-dy*(b.a.x-a.a.x),d1=dx*(b.b.y-a.a.y)-dy*(b.b.x-a.a.x);
+            if(d0>=-.0001f||d1>=-.0001f||d0< -gapLimit||d1< -gapLimit)continue;
+            const float t0=dx*(b.a.x-a.a.x)+dy*(b.a.y-a.a.y),t1=t0+dot,
+                lo=(std::max)(0.f,t1),hi=(std::min)(length,t0);
+            if(hi-lo<.001f)continue;
+            Point ap{a.a.x+dx*lo,a.a.y+dy*lo,0},aq{a.a.x+dx*hi,a.a.y+dy*hi,0},
+                bp{b.a.x+vx*((lo-t0)/dot),b.a.y+vy*((lo-t0)/dot),0},
+                bq{b.a.x+vx*((hi-t0)/dot),b.a.y+vy*((hi-t0)/dot),0},
+                mp{(ap.x+bp.x)*.5f,(ap.y+bp.y)*.5f,0},mq{(aq.x+bq.x)*.5f,(aq.y+bq.y)*.5f,0};
+            const auto& ta=input.ground[a.triangle];const auto& tb=input.ground[b.triangle];
+            if(std::abs(plane(ta,mp).z-plane(tb,mp).z)>climb||std::abs(plane(ta,mq).z-plane(tb,mq).z)>climb)continue;
+            auto add=[&](const Triangle& source,Point p,Point q,Point v) {
+                Triangle t=source;t.a=plane(source,p);t.b=plane(source,q);t.c=plane(source,v);
+                if((t.b.x-t.a.x)*(t.c.y-t.a.y)-(t.b.y-t.a.y)*(t.c.x-t.a.x)<0)std::swap(t.b,t.c);
+                seams.push_back(t);
+            };
+            add(ta,ap,mp,mq);add(ta,ap,mq,aq);add(tb,mp,bp,bq);add(tb,mp,bq,mq);
+        }
+    }
+    if(!seams.empty())input.groundSources.emplace(input.ground.size(),"derived same-BASE sub-cell support seams");
+    input.ground.insert(input.ground.end(),seams.begin(),seams.end());
     input.Bounds();return input;
 }
 Navigation::Bytes NavigationBake::Bodies(CWorldServer& world,const Navigation::Bytes& previous) {
@@ -335,7 +393,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         Atomic(directory/BodyFilename,expanded);table=std::move(expanded);
         printf("BODIES_EXTENDED models_and_shapes=%zu bytes=%zu\n",bodyTable.samples.size(),table.size());fflush(stdout);
     }
-    // Build and runtime rebuild consume the exact same quantized input.
+    // Build, runtime support and tile rebuild consume lossless imported planes.
     auto input=Geometry();IndexSources(input,tileCells*.1f);auto sourceBytes=StoreSources(input);
     auto sources=LoadSources(sourceBytes);const auto& geometry=*sources;
     std::vector<Navigation::BuildRequest> requests;
@@ -560,11 +618,37 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             if(supported)maxSupportError=(std::max)(maxSupportError,supportError);
             if(delta>limit+.001f||!supported||supportError>.025f||b.z<terrainZ-.025f||!client) {
                 ++continuityFailures;
-                printf("HEIGHT_DISCONTINUITY name=%s profile=%s from=(%.6f,%.6f,%.6f) to=(%.6f,%.6f,%.6f) delta=%.6f limit=%.6f surface=%llu support_error=%.6f terrain=%.6f\n",name,mesh.profileId.c_str(),a.x,a.y,a.z,b.x,b.y,b.z,delta,limit,static_cast<unsigned long long>(next.surface),supportError,terrainZ);fflush(stdout);
+                printf("HEIGHT_DISCONTINUITY name=%s profile=%s from=(%.6f,%.6f,%.6f) to=(%.6f,%.6f,%.6f) delta=%.6f limit=%.6f surface=%llu support_error=%.6f terrain=%.6f client=%d client_surface=%llu client_z=%.6f\n",name,mesh.profileId.c_str(),a.x,a.y,a.z,b.x,b.y,b.z,delta,limit,static_cast<unsigned long long>(next.surface),supportError,terrainZ,int(client),static_cast<unsigned long long>(displayed.surface),displayed.position.z);fflush(stdout);
                 return false;
             }
             return true;
         };
+        if(mobName=="zone1.mob") {
+            // Exact sites rejected in r3/r4 development, retained even if a
+            // lossless source plane slightly changes the funnel's route.
+            struct SupportSite { Point point; int type; };
+            const SupportSite sites[]={
+                {{70.252174f,142.291306f,14.329783f},Small},
+                {{70.253365f,142.291519f,14.329289f},Small},
+                {{74.453560f,143.699066f,14.370000f},Human},
+                {{70.249107f,142.295761f,14.330360f},Human},
+                {{195.559174f,113.828857f,7.223805f},Small},
+                {{195.559174f,113.828857f,7.223805f},Human},
+                {{194.589737f,113.851402f,6.837992f},Small},
+                {{194.588196f,113.851440f,6.836030f},Human}
+            };
+            for(const auto& site:sites) {
+                const auto& mesh=*built[site.type];Location at,previous;previous.position=site.point;
+                const bool placed=Project(mesh,site.point,.001f,mesh.profile.climb,at,1.6f);
+                const bool valid=placed&&continuity(mesh,previous,at,site.point,"source_seam");
+                printf("SUPPORT_REGRESSION profile=%s at=(%.6f,%.6f,%.6f) placed=%d valid=%d surface=%llu z=%.6f\n",mesh.profileId.c_str(),site.point.x,site.point.y,site.point.z,int(placed),int(valid),static_cast<unsigned long long>(at.surface),at.position.z);fflush(stdout);
+                if(!valid) {
+                    Location nearest;const bool found=Project(mesh,site.point,.001f,4.f,nearest,1.6f);
+                    printf("SUPPORT_NEAREST found=%d surface=%llu at=(%.6f,%.6f,%.6f)\n",int(found),static_cast<unsigned long long>(nearest.surface),nearest.position.x,nearest.position.y,nearest.position.z);fflush(stdout);
+                    ++failed;
+                }
+            }
+        }
         for(const auto& walk:walks)for(int type=walk.first;type<=walk.last;++type) {
             const auto& mesh=*built[type];const float height=type==Tiny?.4f:type==Large?3.f:type==Giant?6.f:1.6f;
             auto a=walk.a,b=walk.b;
@@ -621,7 +705,10 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             printf("ROUTE_STEPS name=%s profile=%s route=%s steps=%u complete=%d reason=%s at=(%.6f,%.6f,%.6f) desired=(%.6f,%.6f,%.6f)\n",walk.name,Agents[type].name,StatusName(route.status),steps,int(ok),stepReason,at.position.x,at.position.y,at.position.z,desired.x,desired.y,desired.z);fflush(stdout);
         }
         printf("HEIGHT_CONTINUITY routes=%zu steps=%u failures=%u max_delta=%.6f max_source_error=%.6f\n",std::size(walks),continuitySteps,continuityFailures,maxJump,maxSupportError);fflush(stdout);
-        if(failed||continuityFailures)throw std::runtime_error("Nav64: route-to-step release quality failures="+std::to_string(failed));
+        if(failed||continuityFailures) {
+            Atomic(reportDirectory/(stem+".failure.navgeom"),sourceBytes);
+            throw std::runtime_error("Nav64: route-to-step release quality failures="+std::to_string(failed));
+        }
     }
     if(mapName=="zonemainmenunew.mpr") {
         auto* object=sourceWorld->GetMapObject(1);

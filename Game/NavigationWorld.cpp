@@ -77,6 +77,11 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
         const auto* mod=ModRuntime::Resources();if(!mod)throw std::runtime_error("Nav64: no loaded mod");
         const auto directory=inputDirectory.empty()?std::filesystem::path(mod->Directory())/"Maps"/"Nav64":inputDirectory;
         const auto bodies=Read(directory/Navigation::BodyFilename);bodyTable=Navigation::LoadBodies(bodies);
+        // Independent ready meshes and lossless source planes are decoded
+        // together; neither depends on the other until IndexSurfaces below.
+        auto sourcePending=std::async(std::launch::async,[&] {
+            return LoadSources(Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navgeom")));
+        });
         struct Loaded {std::unique_ptr<Navigation::Mesh> mesh;size_t bytes;};
         std::array<std::future<Loaded>,AgentCount> pending;
         for(int type=0;type<AgentCount;++type)pending[type]=std::async(std::launch::async,[&,type]{
@@ -107,7 +112,7 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
             }
         }
         for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);}
-        sources=LoadSources(Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navgeom")));
+        sources=sourcePending.get();
         for(auto& mesh:meshes){mesh->sources=sources;IndexSurfaces(*mesh);}
         loaded=true;SyncObjects(true);
         const auto initialTiles=sourceDirty.size();UpdateSources(true);

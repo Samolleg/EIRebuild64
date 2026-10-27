@@ -3453,7 +3453,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         }
         char detail[320]; std::snprintf(detail, sizeof(detail), "%s: %lld sand slots (%s)",
             type ? "terrain type or sand family" : "terrain type only", static_cast<long long>(count), tile_families_.source.c_str());
-        bridge_append_probe_event("ground_cover_beach_sand", detail);
+        bridge_report_event("ground_cover_beach_sand", detail);
     }
     if (FAILED(update_ground_cover_maps(inputs)))
         return fail("EID3D11 ground cover: terrain fields or colour map unavailable; ground cover omitted.");

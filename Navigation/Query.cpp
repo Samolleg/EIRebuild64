@@ -28,9 +28,9 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
         const bool admitted=std::find(surfaces.begin(),surfaces.end(),original.surface)!=surfaces.end();
         if((!admitted&&!original.terrain)||m.excludedObjects.count(original.object))continue;
         const auto surface=original.surface;
-        // The mesh can bridge a sub-cell seam between source faces. Source
-        // vertices are stored in centimetres: permit a quarter cell only on
-        // this polygon's declared BASE, never on terrain or a solid object.
+        // Recast can join a sub-cell seam between imported BASE faces. Only
+        // declared connected BASE planes may cover it, never solid BV tops.
+        // The spatial catalogue includes the same quarter-cell margin.
         const float tolerance=original.terrain?.0011f:m.profile.cellSize*.25f;
         if(l.position.x<std::min({original.a.x,original.b.x,original.c.x})-tolerance||
             l.position.x>std::max({original.a.x,original.b.x,original.c.x})+tolerance||
@@ -47,29 +47,34 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
         }
         const float x=l.position.x-t.a.x,y=l.position.y-t.a.y;
         const float u=(x*by-y*bx)/det,v=(ax*y-ay*x)/det;
-        // At most 1 mm of edge roundoff, measured in metres, not barycentrics.
+        // Footprint margins are measured in metres, not barycentric coordinates.
         const float e0=std::max(0.f,-u)*std::abs(det)/std::max(1.e-8f,std::hypot(bx,by));
         const float e1=std::max(0.f,-v)*std::abs(det)/std::max(1.e-8f,std::hypot(ax,ay));
         const float e2=std::max(0.f,u+v-1)*std::abs(det)/std::max(1.e-8f,std::hypot(bx-ax,by-ay));
         if(std::max({e0,e1,e2})>tolerance)continue;
-        const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z),distance=std::abs(z-referenceZ);
-        if(t.terrain)terrainZ=z;
-        // An intersecting BASE underside is not a floor below intact terrain.
-        if(!admitted||(!t.terrain&&z<terrainZ-.015f))continue;
-        heights.emplace_back(z,surface);
-        const bool same=surface==surfaces.front();
-        if((same&&!primary)||(same==primary&&distance<best)){best=distance;l.surface=surface;l.position.z=z;primary=same;}
-        if(t.terrain&&surfaces.size()==1)return l;
+        const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);
+        if(t.terrain) {
+            terrainZ=std::max(terrainZ,z);
+            if(admitted&&surfaces.size()==1){l.surface=surface;l.position.z=z;return l;}
+        }
+        if(admitted)heights.emplace_back(z,surface);
     }
-    // Two upward faces of a thin BASE skin can overlap within one raster
-    // span. The upper skin is support; its underside cannot form another floor
-    // (the 10 cm band is below every profile's minimum 20 cm clearance).
-    const float floor=l.position.z;
-    for(const auto& at:heights)if(at.second==l.surface&&at.first>=floor&&at.first-floor<=m.profile.cellHeight*2+.0001f)
-        l.position.z=std::max(l.position.z,at.first);
+    for(const auto& at:heights) {
+        if(at.second!=1&&at.first<terrainZ-.015f)continue;
+        bool covered=false;
+        for(const auto& upper:heights)if(upper.first>at.first+.000001f&&upper.first-at.first<height) {covered=true;break;}
+        if(covered)continue;
+        const float distance=std::abs(at.first-referenceZ);
+        const bool same=at.second==surfaces.front();
+        // Select between floors by original world height, only after rejecting
+        // a lower skin with insufficient body clearance below another support.
+        if(distance<best-.000001f||(std::abs(distance-best)<=.000001f&&same&&!primary)) {
+            best=distance;l.surface=at.second;l.position.z=at.first;primary=same;
+        }
+    }
     return l;
 }
-bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float vertical,const dtQueryFilter& filter,dtPolyRef& ref,Point& result,std::uint64_t hint=0) {
+bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float vertical,const dtQueryFilter& filter,dtPolyRef& ref,Point& result,std::uint64_t hint=0,float height=0) {
     if(!Finite(point)||!m.sources||!std::isfinite(horizontal)||horizontal<0||!std::isfinite(vertical)||vertical<=0)return false;
     const auto p=ToNav(point);const auto& g=*m.sources;
     // Enumerate overlapping XY polygons through the whole source height range.
@@ -79,24 +84,33 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
     dtPolyRef refs[2048];int count=0;ref=0;
     const auto status=q.queryPolygons(pos,ext,&filter,refs,&count,2048);
     if(dtStatusFailed(status)||dtStatusDetail(status,DT_BUFFER_TOO_SMALL))return false;
-    float best=1.e30f;bool exact=false;std::uint64_t selectedSurface=0;
+    height=height>0?height:m.profile.height;
+    std::vector<std::pair<dtPolyRef,Location>> candidates;
     for(int i=0;i<count;++i) {
         const float input[]={p.x,p.y,p.z};float near[3]{};
         if(dtStatusFailed(q.closestPointOnPoly(refs[i],input,near,nullptr)))continue;
-        auto at=Address(m,{near[0],near[1],near[2]},refs[i],m.profile.height,point.z);
+        auto at=Address(m,{near[0],near[1],near[2]},refs[i],height,point.z);
         if(!at.surface)continue;
         const float xy=std::hypot(at.position.x-point.x,at.position.y-point.y),dz=std::abs(at.position.z-point.z);
         if(xy>horizontal+.001f||dz>vertical)continue;
+        candidates.emplace_back(refs[i],at);
+    }
+    float best=1.e30f;bool exact=false;std::uint64_t selectedSurface=0;
+    for(const auto& candidate:candidates) {
+        const auto& at=candidate.second;bool covered=false;
+        for(const auto& upper:candidates)if(std::hypot(at.position.x-upper.second.position.x,at.position.y-upper.second.position.y)<=.001f&&upper.second.position.z>at.position.z+.000001f&&upper.second.position.z-at.position.z<height) {covered=true;break;}
+        if(covered)continue;
+        const float xy=std::hypot(at.position.x-point.x,at.position.y-point.y),dz=std::abs(at.position.z-point.z);
         const bool same=xy<=.001f;if(exact&&!same)continue;
         const float score=xy*xy+dz*dz;
         if((same&&!exact)||score<best-.000001f||
             (same==exact&&std::abs(score-best)<=.000001f&&at.surface==hint&&selectedSurface!=hint)) {
-            best=score;ref=refs[i];result=ToNav(at.position);exact=same;selectedSurface=at.surface;
+            best=score;ref=candidate.first;result=ToNav(at.position);exact=same;selectedSurface=at.surface;
         }
     }
     return ref!=0;
 }
-bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float,const Location* address=nullptr) {
+bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float height,const Location* address=nullptr) {
     ingress=false;
     // Keep the address reached by the previous move. A new nearest-poly
     // search at every edge can choose a different overlapping floor/region.
@@ -110,7 +124,7 @@ bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filte
             }
         }
     }
-    if(!Nearest(mesh,q,p,.05f,4.f,filter,ref,near))return false;
+    if(!Nearest(mesh,q,p,.05f,4.f,filter,ref,near,0,height))return false;
     actual=FromNav(near);return true;
 }
 bool Limited(dtStatus s){return dtStatusDetail(s,DT_OUT_OF_NODES)||dtStatusDetail(s,DT_BUFFER_TOO_SMALL);}
@@ -119,14 +133,14 @@ bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& res
     if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
     height=height>0?height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
-    if(!Nearest(m,q,p,horizontal,vertical,filter,ref,near))return false;
+    if(!Nearest(m,q,p,horizontal,vertical,filter,ref,near,0,height))return false;
     result=Address(m,near,ref,height,p.z);return true;
 }
 bool ResolveLocation(const Mesh& m,Point p,const Location* hint,Location& result,float height) {
     if(!m.query||!m.data||!m.tiles)return false;
     const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
-    if(!Nearest(m,*m.query,p,1.f,4.f,filter,ref,near,hint?hint->surface:0))return false;
+    if(!Nearest(m,*m.query,p,1.f,4.f,filter,ref,near,hint?hint->surface:0,height))return false;
     result=Address(m,near,ref,height,p.z);return result.surface!=0;
 }
 bool StartLocation(const Mesh& m,Point p,Location& result,float height) {
@@ -144,7 +158,7 @@ Route Find(const Mesh& m,const Request& r) {
     dtQueryFilter filter;filter.setIncludeFlags(mask);for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
     if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
-    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal)){result.status=Status::NoGoal;return result;}
+    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,0,height)){result.status=Status::NoGoal;return result;}
     float start[3]={source.x,source.y,source.z},end[3]={goal.x,goal.y,goal.z};
     // Fixed work bound within Detour, no retry with a different pathfinder.
     auto status=q.initSlicedFindPath(from,to,start,end,&filter);
@@ -200,7 +214,9 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
         if(!candidate.surface){failure="missing_original_support";continue;}
         if(std::abs(candidate.position.z-from.z)>limit){failure="height_jump";continue;}
         const float score=std::abs(candidate.position.z-from.z);
-        if(error<bestXY-.00001f||(std::abs(error-bestXY)<=.00001f&&score<best)){best=score;bestXY=error;selected=candidate;}
+        const bool upper=selected.surface&&candidate.position.z>selected.position.z+.000001f&&candidate.position.z-selected.position.z<height;
+        const bool below=selected.surface&&selected.position.z>candidate.position.z+.000001f&&selected.position.z-candidate.position.z<height;
+        if(!below&&(upper||error<bestXY-.00001f||(std::abs(error-bestXY)<=.00001f&&score<best))){best=score;bestXY=error;selected=candidate;}
     }
     if(!selected.surface)return reject(failure);
     result=selected;return true;
@@ -234,7 +250,7 @@ bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,flo
     if(!mesh.query||!Finite(source)||!Finite(center)||!std::isfinite(radius)||radius<=0||!random)return false;
     dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(mesh.profile,height));
     dtPolyRef first=0;Point near;
-    if(!Nearest(mesh,*mesh.query,source,.05f,4.f,filter,first,near))return false;
+    if(!Nearest(mesh,*mesh.query,source,.05f,4.f,filter,first,near,0,height))return false;
     const float start[]={near.x,near.y,near.z};
     const float search=radius+std::hypot(source.x-center.x,source.y-center.y);
     for(int attempt=0;attempt<8;++attempt) {

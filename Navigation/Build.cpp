@@ -657,19 +657,20 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
 }
 
 Bytes StoreSources(const Geometry& g) {
-    // Shared indexed centimetre vertices, one geometry stream for all profiles.
-    using Vertex=std::array<std::int32_t,3>;
-    auto quantize=[](Point p){return Vertex{std::int32_t(std::lround(p.x*100)),std::int32_t(std::lround(p.y*100)),std::int32_t(std::lround(p.z*100))};};
+    // Preserve the imported planes exactly. Centimetre rounding changes the
+    // slope and even collapses thin BASE faces; it cannot define support Z.
+    using Vertex=std::array<float,3>;
+    auto vertex=[](Point p){return Vertex{p.x,p.y,p.z};};
     std::map<Vertex,unsigned> indices;std::vector<Vertex> vertices;
     for(const auto& t:g.ground)for(auto p:{t.a,t.b,t.c}) {
-        const auto v=quantize(p);if(indices.emplace(v,unsigned(vertices.size())).second)vertices.push_back(v);
+        const auto v=vertex(p);if(indices.emplace(v,unsigned(vertices.size())).second)vertices.push_back(v);
     }
-    Wire w;w.U(0x4352534e);w.U(3);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
-    for(const auto& v:vertices)for(auto c:v)w.U(std::uint32_t(c));
+    Wire w;w.U(0x4352534e);w.U(4);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
+    for(const auto& v:vertices)for(auto c:v)w.F(c);
     w.U(unsigned(g.ground.size()));
     for(const auto& t:g.ground) {
-        for(auto p:{t.a,t.b,t.c})w.U(indices.at(quantize(p)));
-        for(float d:{t.waterDepth.x,t.waterDepth.y,t.waterDepth.z})w.U(std::uint32_t(std::int32_t(std::lround(d*100))));
+        for(auto p:{t.a,t.b,t.c})w.U(indices.at(vertex(p)));
+        w.P(t.waterDepth);
         w.bytes.push_back(t.area);w.bytes.push_back(t.levitateArea);w.bytes.push_back(t.terrain?1:0);
         for(auto area:t.classAreas)w.bytes.push_back(area);
         w.U(t.object);w.U(unsigned(t.surface));w.U(unsigned(t.surface>>32));
@@ -699,7 +700,7 @@ Bytes StoreSources(const Geometry& g) {
         const size_t a=w.bytes.size()*i/chunks,b=w.bytes.size()*(i+1)/chunks;
         return Pack(Bytes(w.bytes.begin()+a,w.bytes.begin()+b));
     });
-    Wire out;out.U(0x4352534e);out.U(4);out.U(unsigned(w.bytes.size()));out.U(chunks);
+    Wire out;out.U(0x4352534e);out.U(5);out.U(unsigned(w.bytes.size()));out.U(chunks);
     for(unsigned i=0;i<chunks;++i) {
         auto packed=pending[i].get();out.U(unsigned(w.bytes.size()*(i+1)/chunks-w.bytes.size()*i/chunks));
         out.U(unsigned(packed.size()));out.B(packed.data(),packed.size());
@@ -707,7 +708,7 @@ Bytes StoreSources(const Geometry& g) {
     return std::move(out.bytes);
 }
 std::shared_ptr<Geometry> LoadSources(Bytes bytes) {
-    Wire in;in.bytes=std::move(bytes);Require(in.U()==0x4352534e&&in.U()==4,"Nav64: incompatible source container");
+    Wire in;in.bytes=std::move(bytes);Require(in.U()==0x4352534e&&in.U()==5,"Nav64: incompatible source container");
     const auto size=in.U(),count=in.U();Require(size>=4&&size<=512ull*1024*1024&&count==4,"Nav64: source block limits");
     Wire w;w.bytes.resize(size);std::array<std::future<void>,4> pending;size_t offset=0;
     for(unsigned i=0;i<count;++i) {
@@ -721,16 +722,15 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes) {
     }
     Require(offset==size&&in.at==in.bytes.size(),"Nav64: source block size mismatch");
     for(auto& job:pending)job.get();
-    Require(w.U()==0x4352534e&&w.U()==3,"Nav64: incompatible source section");
+    Require(w.U()==0x4352534e&&w.U()==4,"Nav64: incompatible source section");
     auto g=std::make_shared<Geometry>();auto point=[&](){return Point{w.F(),w.F(),w.F()};};
     g->minimum=point();g->maximum=point();auto n=w.U();Require(n<12000000&&n<= (w.bytes.size()-w.at)/12,"Nav64: source vertex limit");
     std::vector<Point> vertices;vertices.reserve(n);
-    auto coordinate=[&](){return std::int32_t(w.U())*.01f;};
-    for(unsigned i=0;i<n;++i)vertices.push_back({coordinate(),coordinate(),coordinate()});
+    for(unsigned i=0;i<n;++i)vertices.push_back(point());
     n=w.U();Require(n<4000000,"Nav64: source triangle limit");g->ground.reserve(n);
     for(unsigned i=0;i<n;++i) {
         auto vertex=[&](){auto j=w.U();Require(j<vertices.size(),"Nav64: invalid source index");return vertices[j];};
-        Triangle t;t.a=vertex();t.b=vertex();t.c=vertex();t.waterDepth={coordinate(),coordinate(),coordinate()};
+        Triangle t;t.a=vertex();t.b=vertex();t.c=vertex();t.waterDepth=point();
         Require(w.bytes.size()-w.at>=11,"Nav64: truncated source metadata");
         t.area=w.bytes[w.at++];t.levitateArea=w.bytes[w.at++];t.terrain=w.bytes[w.at++]!=0;
         for(auto& area:t.classAreas)area=w.bytes[w.at++];t.object=int(w.U());
@@ -764,15 +764,14 @@ void IndexSources(Geometry& g,float width) {
     const int nx=int(std::ceil((g.maximum.x-g.minimum.x)/width)),nz=int(std::ceil((g.maximum.z-g.minimum.z)/width));
     for(size_t i=0;i<g.ground.size();++i) {
         const auto& t=g.ground[i];
-        auto quantize=[](Point p){return ToNav({std::lround(p.x*100)*.01f,std::lround(p.y*100)*.01f,std::lround(p.z*100)*.01f});};
-        const auto a=quantize(t.a),b=quantize(t.b),c=quantize(t.c);
+        const auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
         auto bin=[&](float border,auto& index,bool objects) {
             const int x0=std::max(0,int(std::floor((std::min({a.x,b.x,c.x})-border-g.minimum.x)/width))),x1=std::min(nx-1,int(std::floor((std::max({a.x,b.x,c.x})+border-g.minimum.x)/width)));
             const int z0=std::max(0,int(std::floor((std::min({a.z,b.z,c.z})-border-g.minimum.z)/width))),z1=std::min(nz-1,int(std::floor((std::max({a.z,b.z,c.z})+border-g.minimum.z)/width)));
             for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){index[{x,z}].push_back(i);if(objects&&t.object)g.objectTiles[t.object].emplace(x,z);}
         };
         bin(1.3f,g.tileTriangles,true);
-        if(t.terrain||(t.surface>1&&t.area))bin(.002f,g.surfaceTriangles,false);
+        if(t.terrain||(t.surface>1&&t.area))bin(.025f,g.surfaceTriangles,false);
     }
 }
 void IndexSurfaces(Mesh& mesh) {

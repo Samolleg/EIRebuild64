@@ -848,7 +848,10 @@ bool ResourceStore::locate(const std::string& resource_name,
         failure = {};
         return true;
     }
-    const bool texture = canonical.size() >= 4 && canonical.compare(canonical.size() - 4, 4, ".mmp") == 0;
+    const bool texture =
+        (canonical.size() >= 4 && canonical.compare(canonical.size() - 4, 4, ".mmp") == 0) ||
+        (canonical.compare(0, 17, "ei_atlas_profile_") == 0 &&
+         canonical.size() >= 5 && canonical.compare(canonical.size() - 5, 5, ".json") == 0);
     const std::uint8_t kind = texture ? kArchiveTextures : kArchiveFigures;
     for (const ArchiveMount& archive : impl_->archives) {
         if (!(archive.kinds & kind)) continue;
