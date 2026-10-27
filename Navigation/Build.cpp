@@ -240,7 +240,10 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     }
     rcContext classifier(false);std::vector<unsigned char> slopes(allAreas.size(),RC_NULL_AREA);
     rcMarkWalkableTriangles(&classifier,p.slope,allVertices.data(),int(allVertices.size()/3),allIndices.data(),int(allAreas.size()),slopes.data());
-    for(size_t i=0;i<allAreas.size();++i)if(slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
+    // MPR class areas already contain the legacy terrain policy. Recast slope
+    // classification applies only to model surfaces; it must not remove terrain
+    // that the old graph permits (for example the raised ground in zone1/cz1g).
+    for(size_t i=0;i<allAreas.size();++i)if(!g.ground[i].terrain&&slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
     for(const auto& s:g.solids) {
         SolidInput input;input.hull=Footprint(s,input.low,input.high);
         if(input.hull.size()<9)continue;

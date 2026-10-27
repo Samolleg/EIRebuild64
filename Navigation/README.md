@@ -30,7 +30,8 @@ boxes rasterized as non-walkable prisms; they never supply walkable BV tops.
 
 Recast uses 0.1 m cells, 0.05 m vertical cells, climb 0.35 m, slope 40 degrees,
 flight slope 60 degrees. Eight profiles retain four clearance tiers each.
-Material/water policy is independent of slope. All profiles bake the decoded
+MPR terrain retains its legacy material/water class areas regardless of slope.
+The 40/60 degree slope filter applies only to model surfaces. All profiles bake the decoded
 centimetre source geometry, exactly as runtime tile rebuilds do. Ready files
 are decoded by the runtime loader before baker quality queries.
 
@@ -81,7 +82,7 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 17, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 18, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   No layer section exists. Loader validates exact profile, bounds and ABI.
 - <mpr>--<mob>.navworld: JSON version 3, baked static NIDs and initial dynamic obstacle boxes.
@@ -94,7 +95,7 @@ separate from this baker contract.
 - Surface 1 is terrain. BASE IDs encode (unsigned NID << 32) | (part + 2).
   Server placement/step/restore resolve exact BASE triangles. Complete client
   floor selection remains open. Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 17, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 18, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
