@@ -35,6 +35,7 @@ struct BuildRequest { Profile profile; };
 Bytes StoreSources(const Geometry& geometry);
 std::shared_ptr<Geometry> LoadSources(Bytes bytes);
 void IndexSurfaces(Mesh& mesh);
+void IndexSources(Geometry& geometry,float tileWidth);
 std::unique_ptr<Mesh> RebuildTile(const Geometry& geometry,const Profile& profile,int x,int z);
 void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z);
 void DoorState(Mesh& mesh,int object,bool open);

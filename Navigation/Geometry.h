@@ -2,6 +2,7 @@
 #include "Types.h"
 #include <array>
 #include <map>
+#include <set>
 
 namespace Navigation {
 struct Triangle {
@@ -30,6 +31,10 @@ struct Geometry {
     std::map<std::size_t,std::string> groundSources; // First triangle of each source sector, diagnostics only.
     std::vector<Solid> solids;
     Point minimum, maximum;
+    float tileWidth=0;
+    // Offline spatial catalogues shared by all profiles; no runtime binning.
+    std::map<std::pair<int,int>,std::vector<size_t>> tileTriangles,surfaceTriangles;
+    std::map<int,std::set<std::pair<int,int>>> objectTiles;
     void Bounds();
 };
 // Convex XZ footprint of an actual transformed solid BV, not its world AABB.

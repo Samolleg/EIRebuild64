@@ -36,8 +36,17 @@ bool Nearest(dtNavMeshQuery& q,Point point,float horizontal,float vertical,const
     result={near[0],near[1],near[2]};
     return std::hypot(p.x-result.x,p.z-result.z)<=horizontal+.001f && std::abs(p.y-result.y)<=vertical;
 }
-bool Start(const Mesh&,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float) {
+bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float,const Location* address=nullptr) {
     ingress=false;
+    // Keep the address reached by the previous move. A new nearest-poly
+    // search at every edge can choose a different overlapping floor/region.
+    if(address&&address->generation==mesh.generation&&q.isValidPolyRef(address->polygon,&filter)) {
+        const auto nav=ToNav(p);const float point[]={nav.x,nav.y,nav.z};float closest[3]{};
+        if(dtStatusSucceed(q.closestPointOnPoly(address->polygon,point,closest,nullptr))&&
+            std::hypot(closest[0]-nav.x,closest[2]-nav.z)<=.001f&&std::abs(closest[1]-nav.y)<=mesh.profile.climb+.15f) {
+            ref=address->polygon;near={closest[0],closest[1],closest[2]};actual=FromNav(near);return true;
+        }
+    }
     if(!Nearest(q,p,.05f,4.f,filter,ref,near))return false;
     actual=FromNav(near);return true;
 }
@@ -64,7 +73,7 @@ Route Find(const Mesh& m,const Request& r) {
     const float height=r.height>0?r.height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return result;
     dtQueryFilter filter;filter.setIncludeFlags(mask);for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
-    if(!Start(m,q,r.source,filter,from,source,actual,ingress,height)){result.status=Status::NoStart;return result;}
+    if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
     if(!Nearest(q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal)){result.status=Status::NoGoal;return result;}
     float start[3]={source.x,source.y,source.z},end[3]={goal.x,goal.y,goal.z};
     // Fixed work bound within Detour, no retry with a different pathfinder.
@@ -87,22 +96,62 @@ Route Find(const Mesh& m,const Request& r) {
     if(result.length>r.maxLength){result.points.clear();result.corridor.clear();result.status=Status::TooLong;return result;}
     result.status=Status::Complete;return result;
 }
-bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height,const char** reason) {
+bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height,const char** reason,const Location* address) {
     auto reject=[&](const char* text){if(reason)*reason=text;return false;};
+    if(reason)*reason="none";
     if(!Finite(from)||!Finite(desired))return reject("non_finite");
     if(!m.data||!m.tiles)return reject("empty_mesh");auto* query=Query(m);if(!query)return reject("no_query");auto& q=*query;
     height=height>0?height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
     Point actual;bool ingress=false;
-    if(!Start(m,q,from,filter,ref,near,actual,ingress,height))return reject("no_start");
-    auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},normal[3]{},t=0;
+    if(!Start(m,q,from,filter,ref,near,actual,ingress,height,address))return reject("no_start");
+    auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},moved[3]{};
     dtPolyRef visited[512];int count=0;
-    auto status=q.raycast(ref,start,end,&filter,&t,normal,visited,&count,512);
-    if(dtStatusFailed(status))return reject("raycast_failed");
-    if(Limited(status))return reject("raycast_limit");
-    if(t<1.f||!count)return reject("blocked_edge");
-    float support=0;if(dtStatusFailed(q.getPolyHeight(visited[count-1],end,&support)))return reject("no_support_height");
-    goal.y=support;result=Address(m,goal,visited[count-1],height);return true;
+    // Surface traversal handles shared edges/vertices without raycast's strict
+    // last-polygon test at a floating-point portal endpoint. A clipped move is
+    // still a rejection: never slide through a real obstacle or teleport.
+    auto status=q.moveAlongSurface(ref,start,end,&filter,moved,visited,&count,512);
+    if(dtStatusFailed(status))return reject("surface_move_failed");
+    if(Limited(status))return reject("surface_move_limit");
+    if(!count)return reject("blocked_edge");
+    // A portal can have a few float ulps of separation (tile-local origins),
+    // or the target can lie exactly on a diagonal shared edge. In that case
+    // Detour's strict inside test finds no containing polygon and reports an
+    // unrelated wall. Project only onto polygons actually reached in this
+    // local traversal, with at most 1 mm of numerical correction.
+    float supported[3]{},best=1.e30f;dtPolyRef support=0;
+    for(int i=0;i<count;++i) {
+        float point[3]{};if(dtStatusFailed(q.closestPointOnPoly(visited[i],end,point,nullptr)))continue;
+        const float error=std::hypot(point[0]-end[0],point[2]-end[2]);
+        if(error<best){best=error;support=visited[i];std::copy(point,point+3,supported);}
+    }
+    if(!support||best>.001f)return reject("blocked_edge");
+    result=Address(m,{supported[0],supported[1],supported[2]},support,height);return true;
+}
+bool Follow(const Mesh& mesh,Point from,Point desired,const std::vector<Point>& path,Location& result,float height,const char** reason,const Location* address) {
+    auto progress=[&](Point point,float& along) {
+        float best=1.e30f,total=0;along=0;
+        for(size_t i=1;i<path.size();++i) {
+            const auto a=path[i-1],b=path[i];const float dx=b.x-a.x,dy=b.y-a.y,len=std::hypot(dx,dy);
+            const float f=len>0?std::clamp(((point.x-a.x)*dx+(point.y-a.y)*dy)/(len*len),0.f,1.f):0;
+            const float distance=std::hypot(point.x-a.x-dx*f,point.y-a.y-dy*f);
+            if(distance<best){best=distance;along=total+len*f;}
+            total+=len;
+        }
+        return best<=.002f;
+    };
+    float begin=0,end=0;
+    if(!progress(from,begin)||!progress(desired,end)||end+.002f<begin) {
+        if(reason)*reason="off_corridor";return false;
+    }
+    Location at;if(address)at=*address;Point current=from;float total=0;
+    for(size_t i=1;i<path.size();++i) {
+        total+=std::hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y);
+        if(total<=begin+.0001f||total>=end-.0001f)continue;
+        Location next;if(!Constrain(mesh,current,path[i],next,height,reason,at.polygon?&at:nullptr))return false;
+        current=next.position;at=next;
+    }
+    return Constrain(mesh,current,desired,result,height,reason,at.polygon?&at:nullptr);
 }
 bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,float height,float (*random)(),Point& result) {
     if(!mesh.query||!Finite(source)||!Finite(center)||!std::isfinite(radius)||radius<=0||!random)return false;

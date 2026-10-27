@@ -11,6 +11,7 @@ class CMapObject;
 class CWorldServer;
 class CUnit;
 class CAIMap;
+class CAIRoute;
 class NavigationBake;
 class NavigationWorld {
     std::array<std::unique_ptr<Navigation::Mesh>,Navigation::AgentCount> meshes;
@@ -25,8 +26,7 @@ class NavigationWorld {
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
     std::map<int,std::vector<Navigation::Solid>> appliedObjects;
-    std::map<std::pair<int,int>,std::vector<size_t>> sourceTiles;
-    std::map<int,std::set<std::pair<int,int>>> objectTiles;
+
     std::set<int> bakedStatic,dirtyObjects;
     unsigned updateProfile=0;
     std::shared_ptr<Navigation::Geometry> sources;
@@ -36,6 +36,7 @@ class NavigationWorld {
     std::tuple<int,int,int> sourceTask;
     std::map<int,int> liveDoors;
     void UpdateSources(bool initial);
+    bool Load(const std::filesystem::path& directory);
 
     void QueueBox(const Navigation::Solid& box);
     bool Dynamic(int id) const { return !bakedStatic.count(id); }
@@ -60,6 +61,6 @@ public:
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;
     Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
-    bool Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result);
+    bool Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route=nullptr);
     bool Restore(CUnit* unit,CAIMap& map);
 };

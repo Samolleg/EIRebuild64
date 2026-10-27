@@ -722,6 +722,7 @@ void CUnitServer::L1StandStill()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L1StopMovement(bool bFailed)
 {
+    navigationRejects=0;
     L1StandStill();
     L1SetPhase(UL1_NONE);
     bL1MovementFailed = bFailed;
@@ -778,9 +779,10 @@ void CUnitServer::L1ExecMove()
     pos = lpUnit->GetCP();
     pos.x = Meter2AITile(pos.x);
     pos.y = Meter2AITile(pos.y);
+    float desiredSupport=0;
     bSegmentFinished = !lpUnit->walker.GetPosition(pWS, segment, pWS->GetSegmentTimeCounter(),
                                                    bRotating, pos, vec, fpSpeed, nCheckTileX,
-                                                   nCheckTileY);
+                                                   nCheckTileY,&desiredSupport);
     pos.x = AITile2Meter(pos.x);
     pos.y = AITile2Meter(pos.y);
 
@@ -813,10 +815,24 @@ void CUnitServer::L1ExecMove()
 
     Navigation::Location support;
     auto from=pWS->aiMap.Navigation().Position(lpUnit,pWS->aiMap);
-    if(!pWS->aiMap.Navigation().Step(lpUnit,from,{pos.x,pos.y,from.z},support)) {
+    if(!pWS->aiMap.Navigation().Step(lpUnit,from,{pos.x,pos.y,segment.GetMoveType()==CAIFullRoute::Walk?desiredSupport:from.z},support,segment.GetMoveType()==CAIFullRoute::Walk?&segment.route:nullptr)) {
         path.ClearCalcedPath();
-        if(LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z))L1NewPathSegment();
-        else L1StopMovement(true);
+        if(++navigationRejects>1) {
+            GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());
+            L1StopMovement(true);return;
+        }
+        bool replanned=LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z);
+        // Reject an unchanged first movement immediately; rebuilding the same
+        // path every tick otherwise leaves a permanently running animation.
+        if(replanned)for(POSITION i=path.curSegment.route.route.GetHeadPosition();i;) {
+            const auto& node=path.curSegment.route.route.GetNext(i);
+            Navigation::Point next{AITile2Meter(node.point.x),AITile2Meter(node.point.y),from.z};
+            const float length=std::hypot(next.x-from.x,next.y-from.y);if(length<.001f)continue;
+            const float fraction=(std::min)(1.f,.05f/length);next.x=from.x+(next.x-from.x)*fraction;next.y=from.y+(next.y-from.y)*fraction;
+            Navigation::Location probe;replanned=pWS->aiMap.Navigation().Step(lpUnit,from,next,probe,&path.curSegment.route);break;
+        }
+        GameJournal::Event("NAV","step_replan","unit=%d result=%s",lpUnit->GetID(),replanned?"ready":"stopped");
+        if(replanned)L1NewPathSegment();else L1StopMovement(true);
         return;
     }
     pos.x=support.position.x;pos.y=support.position.y;
@@ -865,7 +881,10 @@ void CUnitServer::L1ExecMove()
         bMoved = pWS->aiMap.MoveObject(
             lpUnit,
             pos); // SetCP( pos ); setcp нельзя использовать, теперь только aimap::moveobject
-        if(bMoved)lpUnit->navLocation=support;
+        if(bMoved) {
+            lpUnit->navLocation=support;
+            if(std::hypot(support.position.x-from.x,support.position.y-from.y)>.001f)navigationRejects=0;
+        }
         else lock=AI_LOCK_STATIC;
         ASSERT(bMoved);
     }

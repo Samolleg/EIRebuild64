@@ -335,11 +335,22 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         printf("BODIES_EXTENDED models_and_shapes=%zu bytes=%zu\n",bodyTable.samples.size(),table.size());fflush(stdout);
     }
     // Build and runtime rebuild consume the exact same quantized input.
-    auto sourceBytes=StoreSources(Geometry());
+    auto input=Geometry();IndexSources(input,tileCells*.1f);auto sourceBytes=StoreSources(input);
     auto sources=LoadSources(sourceBytes);const auto& geometry=*sources;
     std::vector<Navigation::BuildRequest> requests;
     for(int type=0;type<AgentCount;++type){auto p=Agents[type].profile;p.tileCells=tileCells;requests.push_back({p});}
-    auto built=Navigation::BuildProfiles(geometry,requests);
+    std::map<int,std::vector<Solid>> initialObjects;
+    auto initial=geometry;
+    for(const auto& entry:sourceWorld->mapObjects) {
+        auto* object=entry.second;
+        if(!NavigationObject(object)||staticIds.count(entry.first)||doors.count(entry.first))continue;
+        auto boxes=NavigationBoxes(object,*sourceMap);
+        initial.solids.insert(initial.solids.end(),boxes.begin(),boxes.end());
+        initialObjects.emplace(entry.first,std::move(boxes));
+    }
+    // Initial dynamic occupancy is baked once; later worker rebuilds use the
+    // static source triangles plus the current live obstacle snapshot.
+    auto built=Navigation::BuildProfiles(initial,requests);
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
     for(int type=0;type<AgentCount;++type) {
@@ -431,6 +442,102 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         }
 
     }
+    if(mapName=="zone1.mpr") {
+        std::ofstream identities(reportDirectory/(stem+".objects.csv"));
+        identities<<"id,kind,model,x,y,z,owner,name,prototype,class,hero\n";
+        for(const auto& entry:sourceWorld->mapObjects) {
+            auto* o=entry.second;const auto p=o->GetCP();
+            identities<<entry.first<<','<<int(o->WhoAmI())<<','<<o->GetMaskName()<<','<<p.x<<','<<p.y<<','<<p.z<<',';
+            if(o->WhoAmI()==HPC_UNIT) {auto* u=static_cast<CUnit*>(o);identities<<u->GetOwnerNum()<<','<<u->GetName()<<','<<u->GetPrototype()->szName<<','<<u->GetAIClass()<<','<<u->IsHero();}
+            identities<<'\n';
+        }
+        std::ofstream vegetation(reportDirectory/(stem+".vegetation.csv"));
+        vegetation<<"id,model,triangles,walkable,surfaces\n";
+        for(const auto& entry:objects) {
+            auto* object=sourceWorld->GetMapObject(entry.first);if(!object||object->WhoAmI()!=HPC_TREE)continue;
+            const auto p=object->GetCP();if(std::hypot(p.x-81.2f,p.y-136.1f)>10)continue;
+            unsigned walkable=0;std::set<unsigned long long> surfaces;
+            for(const auto& t:entry.second.ground)if(t.area){++walkable;surfaces.insert(t.surface);}
+            vegetation<<entry.first<<','<<object->GetMaskName()<<','<<entry.second.ground.size()<<','<<walkable<<',';
+            for(auto s:surfaces)vegetation<<s<<' ';vegetation<<'\n';
+        }
+        nlohmann::json occupancy=nlohmann::json::array();
+        for(const auto& entry:initialObjects)for(const auto& box:entry.second) {
+            nlohmann::json points=nlohmann::json::array();for(auto p:box.corners)points.push_back({p.x,p.y,p.z});
+            occupancy.push_back({{"id",entry.first},{"corners",points}});
+        }
+        std::ofstream(reportDirectory/(stem+".occupancy.json"))<<occupancy.dump(2);
+        struct Walk {const char* name;Point a,b;int first,last;};
+        const Walk walks[]={
+            {"forest_video_1",{81.0518f,134.829f,0},{80.1159f,136.388f,0},Small,Human},
+            {"forest_video_2",{80.0643f,134.072f,0},{82.925f,137.092f,0},Small,Human},
+            {"forest_video_3",{79.7675f,135.033f,0},{83.0217f,137.281f,0},Small,Human},
+            {"forest_video_4",{80.3086f,136.03f,0},{76.733f,137.009f,0},Small,Human},
+            {"forest_video_5",{79.0708f,133.304f,0},{70.5251f,128.469f,0},Small,Human},
+            {"forest_video_6",{70.5251f,128.469f,0},{74.236f,129.858f,0},Small,Human},
+            {"unit1945",{141.485f,47.941f,6.039f},{142.5f,49.5f,6.f},LevitateTiny,Levitate},
+            {"unit1458",{126.582f,188.528f,8.362f},{126.637f,188.413f,8.362f},Tiny,Human},
+            {"start_exit",{55.55f,138.78f,19.24f},{78.f,145.f,14.f},Small,Human},
+            {"settlement",{188.f,116.f,0},{192.f,135.f,0},Small,Human},
+            {"main_gate",{188.f,108.f,6.2f},{188.f,116.f,6.2f},Small,Giant},
+            {"samvlrmp01",{192.5f,113.9f,6.f},{197.3f,113.8f,7.85f},Small,Human}
+        };
+        unsigned failed=0;
+        for(const auto& walk:walks)for(int type=walk.first;type<=walk.last;++type) {
+            const auto& mesh=*built[type];const float height=type==Tiny?.4f:type==Large?3.f:type==Giant?6.f:1.6f;
+            auto a=walk.a,b=walk.b;
+            if(!a.z)a.z=sourceMap->GetTileHeight(CPlot3D(a.x,a.y,0));
+            if(!b.z)b.z=sourceMap->GetTileHeight(CPlot3D(b.x,b.y,0));
+            Location at,goal;bool ok=Project(mesh,a,1.f,4.f,at,height)&&Project(mesh,b,1.f,4.f,goal,height);
+            Request request;request.source=at.position;request.goal=goal.position;request.height=height;
+            auto route=ok?Find(mesh,request):Route{};ok=ok&&route.status==Status::Complete;
+            const char* reason=ok?"none":StatusName(route.status);unsigned steps=0;Point desired=at.position;
+            for(size_t i=1;ok&&i<route.points.size();++i) {
+                const auto start=at.position,end=route.points[i].position;
+                const auto n=(std::max)(1,int(std::ceil(std::hypot(end.x-start.x,end.y-start.y)/.05f)));
+                for(int k=1;ok&&k<=n;++k) {
+                    const float f=float(k)/n;desired={start.x+(end.x-start.x)*f,start.y+(end.y-start.y)*f,start.z+(end.z-start.z)*f};
+                    Location next;++steps;ok=Constrain(mesh,at.position,desired,next,height,&reason,&at);
+                    if(ok)at=next;
+
+                }
+            }
+            if(route.status==Status::Complete&&!ok)++failed;
+            if(route.status==Status::Complete) {
+                std::vector<Point> corners;for(const auto& location:route.points)corners.push_back(location.position);
+                Location current=route.points.front();size_t segment=1;float offset=0;unsigned ticks=0;bool followed=true;
+                while(segment<corners.size()&&followed) {
+                    float budget=.17f;Point target=current.position;
+                    while(segment<corners.size()) {
+                        const auto start=corners[segment-1],end=corners[segment];const float length=std::hypot(end.x-start.x,end.y-start.y);
+                        const float distance=(std::min)(budget,(std::max)(0.f,length-offset));offset+=distance;budget-=distance;
+                        const float f=length>0?offset/length:1;target={start.x+(end.x-start.x)*f,start.y+(end.y-start.y)*f,start.z+(end.z-start.z)*f};
+                        if(offset<length-.00001f)break;offset=0;++segment;if(budget<=.00001f)break;
+                    }
+                    Location next;++ticks;followed=Follow(mesh,current.position,target,corners,next,height,&reason,&current);
+                    if(followed)current=next;
+                }
+                printf("FOLLOW_STEPS name=%s profile=%s ticks=%u complete=%d reason=%s at=(%.6f,%.6f,%.6f)\n",walk.name,Agents[type].name,ticks,int(followed),reason,current.position.x,current.position.y,current.position.z);fflush(stdout);
+                if(!followed)++failed;
+            }
+            printf("ROUTE_STEPS name=%s profile=%s route=%s steps=%u complete=%d reason=%s at=(%.6f,%.6f,%.6f) desired=(%.6f,%.6f,%.6f)\n",walk.name,Agents[type].name,StatusName(route.status),steps,int(ok),reason,at.position.x,at.position.y,at.position.z,desired.x,desired.y,desired.z);fflush(stdout);
+        }
+        if(failed)throw std::runtime_error("Nav64: route-to-step release quality failures="+std::to_string(failed));
+    }
+    if(mapName=="zonemainmenunew.mpr") {
+        auto* object=sourceWorld->GetMapObject(1);
+        if(object&&object->WhoAmI()==HPC_UNIT) {
+            auto* unit=static_cast<CUnit*>(object);const auto shape=unit->GetComplection();
+            const auto body=bodyTable.Lookup(ResourceName(unit->GetMaskName()),shape.strength,shape.grace,shape.tall);
+            const auto& mesh=*built[ProfileForRadius(body.radius,unit->GetAIClass()==0)];
+            Location at,next;const float height=(std::min)(body.height[0],2.f);
+            const bool placed=Project(mesh,{103.291f,51.737f,3.112f},1.f,4.f,at,height);
+            const char* reason="no_start";
+            const bool step=placed&&Constrain(mesh,at.position,{103.106f,51.830f,at.position.z},next,height,&reason,&at);
+            printf("MENU_STEP unit=1 model=%s profile=%s placed=%d step=%d reason=%s\n",unit->GetMaskName(),mesh.profileId.c_str(),int(placed),int(step),reason);fflush(stdout);
+            if(!step)throw std::runtime_error("Nav64: menu route-step regression");
+        }
+    }
     std::ofstream connections(reportDirectory/(stem+".connections.csv"));
     connections<<"profile,id,model,surface,x,y,z,out_x,out_y,status,length\n";
     for(const auto& entry:objects) {
@@ -482,7 +589,16 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     if(decoded->ground.size()!=geometry.ground.size()||decoded->doors.size()!=geometry.doors.size())throw std::runtime_error("Nav64: source serialization mismatch");
     Atomic(directory/(stem+".navgeom"),sourceBytes);totalBytes+=sourceBytes.size();
     printf("SOURCES triangles=%zu doors=%zu offmesh=%zu bytes=%zu\n",geometry.ground.size(),geometry.doors.size(),geometry.connections.size(),sourceBytes.size());fflush(stdout);
-    nlohmann::json catalogue={{"version",2},{"static",staticIds}};
+    nlohmann::json catalogue={{"version",3},{"static",staticIds},{"dynamic",nlohmann::json::array()}};
+    for(const auto& entry:initialObjects) {
+        nlohmann::json boxes=nlohmann::json::array();
+        for(const auto& box:entry.second) {
+            nlohmann::json corners=nlohmann::json::array();
+            for(auto p:box.corners)corners.push_back({p.x,p.y,p.z});
+            boxes.push_back(std::move(corners));
+        }
+        catalogue["dynamic"].push_back({{"id",entry.first},{"boxes",std::move(boxes)}});
+    }
     const auto text=catalogue.dump();Navigation::Bytes bytes(text.begin(),text.end());
     Atomic(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navworld"),bytes);
     return totalBytes+bytes.size();

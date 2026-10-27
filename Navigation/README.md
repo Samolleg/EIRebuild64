@@ -81,19 +81,20 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 16, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 17, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   No layer section exists. Loader validates exact profile, bounds and ABI.
-- <mpr>--<mob>.navworld: JSON version 2, baked static NIDs.
-- <mpr>--<mob>.navgeom: shared LZMS-compressed NSRC version 2, original bounds,
+- <mpr>--<mob>.navworld: JSON version 3, baked static NIDs and initial dynamic obstacle boxes.
+- <mpr>--<mob>.navgeom: shared NSRC version 4 (four parallel LZMS blocks), original bounds,
   indexed common signed centimetre vertices; per-triangle indices, centimetre
   water depths, byte material/class metadata, static object and surface IDs;
   door apertures and reserved off-mesh endpoint/surface/radius/flag records.
-  One copy serves all profiles. No source import occurs during gameplay.
+  Includes precomputed triangle/surface/object tile indices. One copy serves
+  all profiles. No source import or spatial binning occurs during gameplay.
 - Surface 1 is terrain. BASE IDs encode (unsigned NID << 32) | (part + 2).
   Server placement/step/restore resolve exact BASE triangles. Complete client
   floor selection remains open. Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 15, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 17, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -102,7 +103,12 @@ separate from this baker contract.
 HERO_START must advance by 0.02 m in shared Project/Find/Constrain code; the
 baker fails if it does not. QUALITY preserves total gained_water_m2 and
 separately reports gained_forbidden_water_m2 under the original depth rule.
-CSV reports include losses, water reasons, BASE connections and placements.
+CSV reports include losses, water reasons, BASE connections, placements and
+private object/vegetation identity. Zone1 release validation walks complete
+paths in 5 cm moves and 17 cm ticks across corners, using the runtime surface
+traversal. A failed step on a complete route rejects the map. Unreachable
+goals remain explicitly reported as no_path. Shared loader time is measured
+including reconciliation with the imported live objects, without a game tick.
 Runtime performance, save/load, queues/doors, full random-goal coverage,
 common-radius class policy and complete client floor selection remain
 separate acceptance items. See the private REPORT for measured release data.

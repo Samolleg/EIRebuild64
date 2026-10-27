@@ -371,6 +371,7 @@ typedef void (*ServerAnimationSwitchCallback)(CUnit *pUnit);
 class CUnitServer : public CUnitSpecific
 {
     unsigned navigationWait=0;
+    unsigned navigationRejects=0; // transient; turns do not erase a failed-move retry
 
     friend class CModPackage;
     friend class CUnit;

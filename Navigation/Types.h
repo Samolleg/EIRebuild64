@@ -7,7 +7,7 @@
 
 namespace Navigation {
 constexpr std::uint32_t ContainerVersion = 7;
-constexpr std::uint32_t AlgorithmVersion = 16;
+constexpr std::uint32_t AlgorithmVersion = 17;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -52,6 +52,7 @@ enum class Status { Complete, NoMesh, Invalid, NoStart, NoGoal, NoPath, Limit, T
 const char* StatusName(Status status);
 struct Request {
     Point source, goal;
+    const Location* start = nullptr; // transient source polygon; never serialized
     float goalRadius = 0, maxLength = 1.e6f, height = 0;
     float areaCosts[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 };
