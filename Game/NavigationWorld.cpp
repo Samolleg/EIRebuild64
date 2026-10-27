@@ -8,7 +8,7 @@
 #include "GameJournal.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
-#include "RuntimePaths64.h"
+#include <cstdio>
 #include "FigureManager.h"
 #include "../external/owned-renderer/Source/owned_asset_loader.h"
 #include <bcrypt.h>
@@ -28,13 +28,13 @@ namespace {
 enum AgentType { Tiny, Small, Human, Large, Giant, LevitateTiny, LevitateSmall, Levitate, AgentCount };
 struct Agent { const char* name; Navigation::Profile profile; };
 const Agent Agents[]={
-    {"tiny",           {.05f,.2f,40.f,.35f,.05f}},
-    {"small",          {.15f,.2f,40.f,.35f,.05f}},
-    {"human",          {.25f,.4f,40.f,.35f,.05f}},
+    {"tiny",           {0.f,.2f,40.f,.35f,.1f}},
+    {"small",          {.1f,.2f,40.f,.35f,.1f}},
+    {"human",          {.2f,.4f,40.f,.35f,.1f}},
     {"large",          {.5f,.4f,40.f,.35f,.1f}},
     {"giant",          {1.f,.4f,40.f,.35f,.2f}},
-    {"levitate_tiny",  {.05f,.2f,60.f,.35f,.05f}},
-    {"levitate_small", {.25f,.2f,60.f,.35f,.05f}},
+    {"levitate_tiny",  {0.f,.2f,60.f,.35f,.1f}},
+    {"levitate_small", {.2f,.2f,60.f,.35f,.1f}},
     {"levitate",       {.5f,.2f,60.f,.35f,.1f}}
 };
 Navigation::Point Point(const CPlot3D& p) { return {p.x,p.y,p.z}; }
@@ -56,7 +56,7 @@ std::string Digest(const Navigation::Bytes& bytes) {
 }
 Navigation::Bytes Read(const std::filesystem::path& path) {
     auto n=std::filesystem::file_size(path);
-    if(n>512ull*1024*1024)throw std::runtime_error("Nav64: input/cache exceeds 512 MiB");
+    if(n>512ull*1024*1024)throw std::runtime_error("Nav64: input exceeds 512 MiB");
     std::ifstream file(path,std::ios::binary);Navigation::Bytes bytes(static_cast<size_t>(n));
     if(!file || (n&&!file.read(reinterpret_cast<char*>(bytes.data()),n)))throw std::runtime_error("Nav64: incomplete file read");
     return bytes;
@@ -64,10 +64,10 @@ Navigation::Bytes Read(const std::filesystem::path& path) {
 void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
     auto temp=path;temp+=L"."+std::to_wstring(GetCurrentProcessId())+L".tmp";
     HANDLE f=CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(f==INVALID_HANDLE_VALUE)throw std::runtime_error("Nav64: cannot create temporary cache");
+    if(f==INVALID_HANDLE_VALUE)throw std::runtime_error("Nav64: cannot create temporary nav64");
     DWORD done=0;bool ok=WriteFile(f,data.data(),DWORD(data.size()),&done,nullptr)&&done==data.size()&&FlushFileBuffers(f);CloseHandle(f);
     if(ok)ok=MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;
-    if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Nav64: cannot commit cache atomically");}
+    if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Nav64: cannot commit nav64 atomically");}
 }
 bool Same(Navigation::Point a,Navigation::Point b) {return a.x==b.x&&a.y==b.y&&a.z==b.z;}
 bool Same(const Navigation::Geometry& a,const Navigation::Geometry& b) {
@@ -83,7 +83,7 @@ bool Same(const Navigation::Geometry& a,const Navigation::Geometry& b) {
     return true;
 }
 }
-void NavigationWorld::Changed() {meshes.clear();geometry.reset();++generation;}
+void NavigationWorld::Changed() {meshes.clear();geometry.reset();inputKey.clear();++generation;}
 void NavigationWorld::SyncObjects() {
     bool changed=false;
     for(auto& entry:pendingObjects) {
@@ -100,10 +100,21 @@ void NavigationWorld::Source(const std::string& name,const void* data,size_t siz
     if(size>512u*1024*1024)throw std::runtime_error("Nav64: oversized source");
     auto p=static_cast<const std::uint8_t*>(data);auto& target=sources[name];
     if(target.size()==size&&std::equal(target.begin(),target.end(),p))return;
-    target.assign(p,p+size);Changed();
+    if(size)target.assign(p,p+size);else target.clear();Changed();
 }
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
-    scene=ResourceName(mpr)+"|"+ResourceName(mob)+"|navsrc:none";
+
+    mapName=ResourceName(mpr);mobName=ResourceName(mob);
+    scene=mapName+"|"+mobName;
+    modelInputs.clear();
+    normalizedBounds.clear();
+    for(const auto& input: {std::make_pair(std::string("mpr"),std::string(mpr?mpr:"")),std::make_pair(std::string("mob"),std::string(mob?mob:""))}) {
+        auto bytes=Read(ModRuntime::MapPath(input.second.c_str()));
+        Source("scene:"+input.first,bytes.data(),bytes.size());
+    }
+    auto navsrc=std::filesystem::path(ModRuntime::MapPath(mpr));navsrc.replace_extension(".navsrc");
+    Navigation::Bytes authored;if(std::filesystem::exists(navsrc))authored=Read(navsrc);
+    Source("navsrc",authored.data(),authored.size());
     figures.clear();
     bodies.clear();poses.clear();bodySizes.clear();
     Changed();failures=0;
@@ -124,6 +135,23 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationWorld::Figure(CMapObject*
     auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
     if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error(failure.message);
     figures.emplace(key,figure);return figure;
+}
+
+void NavigationWorld::ModelInputs(CMapObject* object) {
+    const std::string mask=object->GetMaskName();
+    if(!modelInputs.insert(mask).second)return;
+    auto* manager=static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager());
+    auto add=[&](const std::string& name) {
+        DWORD size=0;auto* data=manager->GetFile(name.c_str(),&size);
+        if(!data)return;
+        try {Source("model:"+name,data,size);}catch(...) {manager->CloseFile(data);throw;}
+        manager->CloseFile(data);
+    };
+    add(mask+".mod");add(mask+".bon");add(mask+".lnk");
+    if(!manager->GetModel(mask))for(INT_PTR i=0;i<object->GetBodyPartNames().GetSize();++i) {
+        const std::string part=object->GetBodyPartNames()[i];
+        add(mask+part+".fig");add(mask+part+".bon");
+    }
 }
 const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
     const auto& c=unit->GetComplection();const std::string mask=unit->GetMaskName();
@@ -172,20 +200,19 @@ const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
             if((entries[i]->dwFlags&0x3fff8000u)==(caps|ADB_STATE_ATTACK)){selected[pose]=entries[i];break;}
         if(!selected[pose])selected[pose]=selected[0];
     }
-    if(!selected[0])throw std::runtime_error("Nav64: body has no standing animation: "+mask);
+    // No idle entry is a valid bind-pose creature, not a navigation error.
     BodySize measured;
     for(int pose=0;pose<3;++pose) {
-        const std::string poseKey=mask+"/"+selected[pose]->pszAnimationName;
+        const std::string poseKey=mask+"/"+(selected[pose]?selected[pose]->pszAnimationName:"<bind>");
         auto clip=poses.find(poseKey);
         if(clip==poses.end()) {
             auto decoded=std::make_shared<owned::AnimationClipAsset>();owned::ResourceFailure failure;
-            auto* animation=manager->GetModelAnimation(mask,selected[pose]->pszAnimationName);
-            if(!animation)throw std::runtime_error("Nav64: missing body animation: "+poseKey);
+            auto* animation=selected[pose]?manager->GetModelAnimation(mask,selected[pose]->pszAnimationName):nullptr;
             // Missing tracks have the game's identity transform. Do not mutate
             // live animation state or use random animation selection.
             for(size_t i=0;i<skeleton.nodes.size();++i) {
                 if(!included[i])continue;const auto& node=skeleton.nodes[i];
-                owned::AnimationTrackAsset track;DWORD count=0;auto* data=animation->GetFile(node.name.c_str(),&count);
+                owned::AnimationTrackAsset track;DWORD count=0;auto* data=animation?animation->GetFile(node.name.c_str(),&count):nullptr;
                 if(data) {
                     owned::ResourceBlob bytes;
                     try {bytes.bytes=std::make_shared<const std::vector<std::uint8_t>>(data,data+count);}
@@ -199,7 +226,7 @@ const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
         }
         std::vector<CPlot3D> positions(skeleton.nodes.size());
         std::vector<CQuaternion> rotations(skeleton.nodes.size(),QNULL);
-        float lowX=FLT_MAX,highX=-FLT_MAX,lowZ=FLT_MAX,highZ=-FLT_MAX;
+        float lowX=FLT_MAX,highX=-FLT_MAX,bodyLowX=FLT_MAX,bodyHighX=-FLT_MAX,lowZ=FLT_MAX,highZ=-FLT_MAX;
         for(size_t i=0;i<skeleton.nodes.size();++i) {
             if(!included[i])continue;
             const auto& node=skeleton.nodes[i];CPlot3D bone(0,0,0);
@@ -228,12 +255,13 @@ const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
                 const auto p=rotations[i].Rotate(vertex)+positions[i];
                 if(!Navigation::Finite(Point(p)))throw std::runtime_error("Nav64: non-finite body geometry: "+mask+"/"+node.name);
                 lowZ=(std::min)(lowZ,p.z);highZ=(std::max)(highZ,p.z);
+                if(name!="lh1"&&name!="rh1"&&name!="lh2"&&name!="rh2"&&name!="lh3"&&name!="rh3"){bodyLowX=(std::min)(bodyLowX,p.x);bodyHighX=(std::max)(bodyHighX,p.x);}
                 // The proximal quarter of the upper arm is the shoulder, not an outstretched arm.
                 if(pose==0&&(torso||(shoulder&&vertex*vertex<=armLength2*.0625f))) {lowX=(std::min)(lowX,p.x);highX=(std::max)(highX,p.x);}
             }
         }
         measured.height[pose]=highZ-lowZ;
-        if(pose==0)measured.radius=(highX-lowX)*.5f;
+        if(pose==0)measured.radius=(highX>=lowX?highX-lowX:bodyHighX-bodyLowX)*.5f;
         if(!std::isfinite(measured.height[pose])||measured.height[pose]<=0)throw std::runtime_error("Nav64: invalid body height: "+mask);
     }
     if(!std::isfinite(measured.radius)||measured.radius<=0)throw std::runtime_error("Nav64: missing torso/shoulder geometry: "+mask);
@@ -241,15 +269,14 @@ const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
     return bodySizes.emplace(key,measured).first->second;
 }
 int NavigationWorld::Type(CUnit* unit,int aiClass) {
-    if(aiClass<0||aiClass>=8)throw std::runtime_error("Nav64: invalid AI class");
+    aiClass=std::clamp(aiClass,0,7);
     const float radius=unit?Body(unit).radius:aiClass>=7?1.f:aiClass>=5?.5f:.25f;
     const int first=aiClass==0?LevitateTiny:Tiny,last=aiClass==0?Levitate:Giant;
-    if(radius<Agents[first].profile.radius)throw std::runtime_error("Nav64: body is smaller than minimum profile");
     int type=first;for(int i=first+1;i<=last;++i)if(Agents[i].profile.radius<=radius)type=i;
     return type;
 }
 float NavigationWorld::Height(CUnit* unit,int aiClass) {
-    const int c=unit?unit->GetAIClass():aiClass;
+    const int c=std::clamp(unit?unit->GetAIClass():aiClass,0,7);
     const auto& profile=Agents[Type(unit,c)].profile;
     // Geometry chooses clearance; retain the old class's ceiling as an upper
     // bound, so a taller visual does not lose an already permitted passage.
@@ -257,7 +284,7 @@ float NavigationWorld::Height(CUnit* unit,int aiClass) {
     const int pose=unit?(unit->GetCurrentPose()==UP_LAY?2:unit->GetCurrentPose()==UP_CRAWL?1:0):0;
     const float height=unit?(std::min)(Body(unit).height[pose],legacy[c]):legacy[c];
     const auto& tiers=Navigation::ClearanceHeights(profile);float selected=tiers[0];
-    if(height<selected)throw std::runtime_error("Nav64: body is lower than minimum profile");
+    // A smaller body fits the lowest clearance tier; do not reject it.
     for(float tier:tiers)if(tier<=height)selected=tier;
     return selected;
 }
@@ -310,9 +337,16 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
         if(bv.GetPassability()!=AI_PASS_NO)continue;
         Navigation::Solid solid;auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
         bool valid=Navigation::Finite(Point(bv.ptBone))&&Navigation::Finite(Point(bv.ptCenter))&&
-            Navigation::Finite(Point(bv.ptMin))&&Navigation::Finite(Point(bv.ptMax))&&Navigation::Finite(Point(base))&&
-            bv.ptMin.x<=bv.ptMax.x&&bv.ptMin.y<=bv.ptMax.y&&bv.ptMin.z<=bv.ptMax.z;
-        for(int j=0;j<8;++j){CPlot3D p((j&1)?bv.ptMax.x:bv.ptMin.x,(j&2)?bv.ptMax.y:bv.ptMin.y,(j&4)?bv.ptMax.z:bv.ptMin.z);
+            Navigation::Finite(Point(bv.ptMin))&&Navigation::Finite(Point(bv.ptMax))&&Navigation::Finite(Point(base));
+        // CFigure::RecalcBoundingBoxWithRotation reduces all eight transformed
+        // endpoints with Min/Max. Endpoint order is not a validity condition.
+        CPlot3D low((std::min)(bv.ptMin.x,bv.ptMax.x),(std::min)(bv.ptMin.y,bv.ptMax.y),(std::min)(bv.ptMin.z,bv.ptMax.z));
+        CPlot3D high((std::max)(bv.ptMin.x,bv.ptMax.x),(std::max)(bv.ptMin.y,bv.ptMax.y),(std::max)(bv.ptMin.z,bv.ptMax.z));
+        if(valid&&(bv.ptMin.x>bv.ptMax.x||bv.ptMin.y>bv.ptMax.y||bv.ptMin.z>bv.ptMax.z)) {
+            std::ostringstream label;label<<"NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
+            normalizedBounds.insert(label.str());
+        }
+        for(int j=0;j<8;++j){CPlot3D p((j&1)?high.x:low.x,(j&2)?high.y:low.y,(j&4)?high.z:low.z);
             p+=bv.ptBone+bv.ptCenter;p=object->RotateVector(p);p+=base;solid.corners[j]=Point(p);valid=valid&&Navigation::Finite(solid.corners[j]);}
         if(!valid) {
             std::ostringstream detail;detail<<"Nav64: invalid solid geometry NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
@@ -324,44 +358,90 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
         }
         input.solids.push_back(std::move(solid));
     }
+    if(!input.solids.empty()||!input.ground.empty())ModelInputs(object);
     if(!input.ground.empty()&&!objects.count(id)&&!pendingObjects.count(id))GameJournal::Event("NAV","walkable_object","NID=%d model=%s triangles=%zu",id,GameJournal::Quote(object->GetMaskName()).c_str(),input.ground.size());
     if(!input.solids.empty()||!input.ground.empty()||objects.count(id)||pendingObjects.count(id))pendingObjects[id]=std::move(input);
+}
+
+void NavigationWorld::Snapshot() {
+    SyncObjects();
+    if(geometry&&!inputKey.empty())return;
+    auto input=std::make_shared<Navigation::Geometry>(terrain);
+    for(const auto& entry:objects) {
+        const auto& object=entry.second;const auto first=input->ground.size();
+        for(const auto& source:object.groundSources)input->groundSources.emplace(first+source.first,source.second);
+        input->ground.insert(input->ground.end(),object.ground.begin(),object.ground.end());
+        input->solids.insert(input->solids.end(),object.solids.begin(),object.solids.end());
+    }
+    input->Bounds();geometry=std::move(input);
+    Navigation::Bytes source;
+    for(const auto& entry:sources) {
+        source.insert(source.end(),entry.first.begin(),entry.first.end());source.push_back(0);
+        const auto digest=Digest(entry.second);source.insert(source.end(),digest.begin(),digest.end());
+    }
+    inputKey=Digest(Navigation::Inputs(*geometry,Navigation::Profile{},scene,source));
+}
+std::string NavigationWorld::Fingerprint(int type) {
+    Snapshot();
+    Navigation::Bytes key(inputKey.begin(),inputKey.end());
+    return Digest(Navigation::Inputs({},Agents[type].profile,scene,key));
+}
+std::string NavigationWorld::Filename(int type) const {
+    return std::filesystem::path(mapName).stem().string()+"--"+
+        std::filesystem::path(mobName).stem().string()+"."+Agents[type].name+".nav64";
 }
 Navigation::Mesh* NavigationWorld::ForProfile(int type,const char* phase) {
     try {
         SyncObjects();
-        if(type<0||type>=AgentCount)throw std::runtime_error("Nav64: invalid agent type");
         auto existing=meshes.find(type);if(existing!=meshes.end())return existing->second.get();
-        auto start=std::chrono::steady_clock::now();const auto& profile=Agents[type].profile;
-        if(!geometry) {
-            auto input=std::make_shared<Navigation::Geometry>(terrain);
-            for(const auto& entry:objects) {
-                const auto& object=entry.second;const auto first=input->ground.size();
-                for(const auto& source:object.groundSources)input->groundSources.emplace(first+source.first,source.second);
-                input->ground.insert(input->ground.end(),object.ground.begin(),object.ground.end());
-                input->solids.insert(input->solids.end(),object.solids.begin(),object.solids.end());
-            }
-            input->Bounds();geometry=std::move(input);
+        const auto start=std::chrono::steady_clock::now();const auto& profile=Agents[type].profile;
+        const auto fingerprint=Fingerprint(type);
+        const auto* mod=ModRuntime::Resources();
+        const auto published=mod?std::filesystem::path(mod->Directory())/"Maps"/"Nav64"/Filename(type):std::filesystem::path();
+        std::unique_ptr<Navigation::Mesh> mesh;
+        try {
+            if(published.empty()||!std::filesystem::is_regular_file(published))
+                throw std::runtime_error("missing baked file "+published.string());
+            mesh=Navigation::Load(Read(published),profile,fingerprint,mapName,mobName,Agents[type].name);
+        }catch(const std::exception& e) {
+            throw std::runtime_error("Nav64: map "+mapName+" / "+mobName+" profile "+Agents[type].name+
+                ": "+e.what()+"; \xef\xe5\xf0\xe5\xef\xe5\xea\xe8\xf2\xe5 \xea\xe0\xf0\xf2\xf3 \xe2 \xec\xe0\xef\xef\xe5\xf0\xe5");
         }
-        Navigation::Bytes source;
-        // Each resource is delimited and named; effective payloads, not timestamps.
-        for(const auto& entry:sources){for(auto v:entry.first)source.push_back(v);source.push_back(0);auto digest=Digest(entry.second);source.insert(source.end(),digest.begin(),digest.end());}
-        auto fingerprint=Digest(Navigation::Inputs(*geometry,profile,scene,source));
-        std::unique_ptr<Navigation::Mesh> mesh;bool cached=false;
-        const auto cache=RuntimePaths64::Directory(L"Cache64/Nav")/(fingerprint+".nav64");
-        // The future mapper and the runtime cache use exactly the same container.
-        const auto* mod=ModRuntime::Current();
-        const auto published=mod?std::filesystem::path(mod->Directory())/"Maps"/"Nav64"/(fingerprint+".nav64"):std::filesystem::path();
-        for(const auto& path:{published,cache})if(!path.empty()&&std::filesystem::exists(path)) {
-            try{mesh=Navigation::Load(Read(path),profile,fingerprint);cached=true;break;}
-            catch(const std::exception& e){GameJournal::Event("NAV","cache_rejected","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());}
-        }
-        if(!mesh){mesh=Navigation::Build(*geometry,profile,fingerprint);Atomic(cache,Navigation::Store(*mesh));}
         mesh->generation=generation;mesh->geometry=geometry;
-        auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV",mesh->tiles?"ready":"empty","scene=%s tiles=%u ms=%lld source=%s type=%s radius=%.2f height=%.2f cell=%.2f poses=(%.2f/%.2f/%.2f/%.2f) phase=%s workers=%u raster_cpu_ms=%llu polygons_cpu_ms=%llu key=%s generation=%llu%s",GameJournal::Quote(scene.c_str()).c_str(),mesh->tiles,static_cast<long long>(elapsed),cached?"cache":"built",Agents[type].name,profile.radius,profile.height,profile.cellSize,Navigation::ClearanceHeights(profile)[0],Navigation::ClearanceHeights(profile)[1],Navigation::ClearanceHeights(profile)[2],Navigation::ClearanceHeights(profile)[3],phase,mesh->workers,static_cast<unsigned long long>(mesh->rasterMs),static_cast<unsigned long long>(mesh->polygonMs),fingerprint.c_str(),static_cast<unsigned long long>(generation),mesh->tiles?"":" reason=\"no walkable ground\"");
-        auto result=mesh.get();meshes.emplace(type,std::move(mesh));error.clear();return result;
-    }catch(const std::exception& e){error=e.what();if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",GameJournal::Quote(scene.c_str()).c_str(),GameJournal::Quote(e.what()).c_str());return nullptr;}
+        const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+        GameJournal::Event("NAV","ready","scene=%s type=%s tiles=%u ms=%lld source=baked phase=%s key=%s generation=%llu",
+            scene.c_str(),Agents[type].name,mesh->tiles,static_cast<long long>(ms),phase,fingerprint.c_str(),static_cast<unsigned long long>(generation));
+        auto* result=mesh.get();meshes.emplace(type,std::move(mesh));error.clear();return result;
+    }catch(const std::exception& e) {
+        error=e.what();
+        if(failures++<8)GameJournal::Event("NAV","unavailable","scene=%s reason=%s",scene.c_str(),GameJournal::Quote(e.what()).c_str());
+        return nullptr;
+    }
+}
+std::uint64_t NavigationWorld::Bake(CWorldServer& world,const std::filesystem::path& directory) {
+    // Same body sizing as Prepare; no simulation, script execution or renderer.
+    for(const auto& entry:world.mapObjects)if(entry.second->WhoAmI()==HPC_UNIT)Body(static_cast<CUnit*>(entry.second));
+    Snapshot();std::vector<Navigation::BuildRequest> requests;
+    for(int type=0;type<AgentCount;++type)requests.push_back({Agents[type].profile,Fingerprint(type)});
+    auto built=Navigation::BuildProfiles(*geometry,requests);
+    std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs;
+    for(int type=0;type<AgentCount;++type) {
+        auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;
+        outputs.push_back(Navigation::Store(mesh));totalBytes+=outputs.back().size();
+    }
+    if(totalBytes>8u*1024*1024)throw std::runtime_error("Nav64: baked map exceeds 8 MiB ("+std::to_string(totalBytes)+" bytes)");
+    std::filesystem::create_directories(directory);
+    for(const auto& entry:normalizedBounds)printf("BOUNDS_NORMALIZED mpr=%s mob=%s %s\n",mapName.c_str(),mobName.c_str(),entry.c_str());
+    for(int type=0;type<AgentCount;++type) {
+        const auto& mesh=*built[type];const auto& bytes=outputs[type];
+        Atomic(directory/Filename(type),bytes);
+        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu key=%s\n",
+            mapName.c_str(),mobName.c_str(),Agents[type].name,mesh.profile.radius,mesh.tiles,
+            static_cast<unsigned long long>(mesh.buildMs),static_cast<unsigned long long>(mesh.rasterMs),
+            static_cast<unsigned long long>(mesh.polygonMs),bytes.size(),mesh.fingerprint.c_str());
+        fflush(stdout);
+    }
+    return totalBytes;
 }
 Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass,const char* phase) {
     try {return ForProfile(Type(unit,unit?unit->GetAIClass():aiClass),phase);}
@@ -409,7 +489,7 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
 bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     auto& saved=unit->navLocation;if(!saved.surface)return true;
     auto cp=unit->GetCP();
-    if(saved.surface!=1||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<=0||saved.radius>4||
+    if(saved.surface!=1||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<0||saved.radius>4||
         !std::isfinite(saved.height)||saved.height<=0||saved.height>10||std::hypot(cp.x-saved.position.x,cp.y-saved.position.y)>.1f)return false;
     auto* mesh=ForUnit(unit);Navigation::Location location;
     if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location,Height(unit))||std::abs(location.position.z-saved.position.z)>.25f)return false;

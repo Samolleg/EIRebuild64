@@ -109,7 +109,7 @@ private:
     BOOL LoadAIGraph(LPCSTR pszMapName, LPCSTR pszMobName, CMemorySave &graphChunk);
     BOOL LoadMapObjects(LPCSTR pszMobName, bool bSkipScript);
     BOOL LoadMainMob(const char *pszMprName, const char *pszMobName, CMemorySave &graphChunk,
-                     bool bStaticOnly);
+                     bool bStaticOnly, bool skipScripts = false);
     void StartZoneLoading();
     void FinishZoneLoading();
     void SetChangedFlags(DWORD dwFlags);
@@ -150,6 +150,7 @@ public:
     virtual ~CWorldServer();
     // create/destroy
     virtual BOOL Create();
+    bool LoadNavigationScene(const char* mpr,const char* mob);
     virtual void Destroy();
     // client/server determinition
     virtual BOOL IsServer() { return TRUE; }

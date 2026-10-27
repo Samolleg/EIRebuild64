@@ -17,6 +17,14 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 };
+// Resource resolution for offline data tools; no simulation/Lua entry point.
+class ResourceScope {
+public:
+    explicit ResourceScope(CModPackage& package);
+    ~ResourceScope();
+    ResourceScope(const ResourceScope&)=delete;
+    ResourceScope& operator=(const ResourceScope&)=delete;
+};
 CModPackage *Current();
 CModPackage *Resources();
 std::string ConfigPath(const char*);

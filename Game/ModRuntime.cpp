@@ -40,6 +40,11 @@ namespace ModRuntime {
 namespace { thread_local CModPackage *current = nullptr;thread_local CModPackage *resources = nullptr; }
 CModPackage *Current() { return current; }
 CModPackage *Resources(){return resources;}
+ResourceScope::ResourceScope(CModPackage& package) {
+    if(resources||current)throw std::runtime_error("A mod resource scope is already active");
+    resources=&package;
+}
+ResourceScope::~ResourceScope(){resources=nullptr;}
 std::string ConfigPath(const char*path){return resources?resources->ResolveConfig(std::filesystem::path(path).filename().string(),path):path;}
 std::string CameraPath(const char*path){return resources?resources->ResolveCamera(std::filesystem::path(path).filename().string(),path):path;}
 std::string MoviePath(const char*path){return resources?resources->ResolveMovie(path,path):path;}

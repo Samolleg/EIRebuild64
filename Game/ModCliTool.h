@@ -3,7 +3,7 @@
 
 // Lexical tool ownership; not a setting or a gameplay feature switch.
 namespace ModCliTool {
-enum class Kind { None, Compiler, Graph };
+enum class Kind { None, Compiler, Graph, NavBake };
 inline Kind& CurrentKind() {
     static thread_local Kind kind = Kind::None;
     return kind;

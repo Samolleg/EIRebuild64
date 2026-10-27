@@ -46,9 +46,13 @@ void CGlobalMap::Init()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CGlobalMap::LoadZones(const char *pszFileName)
 {
+    return LoadZones(pszFileName,*theWorld.GetTextManager());
+}
+bool CGlobalMap::LoadZones(const char *pszFileName,CTextManager& texts)
+{
     CStringArray szTmpArray;
 
-    CTextManager *pTxtMng = theWorld.GetTextManager();
+    CTextManager *pTxtMng = &texts;
     if (!pTxtMng->GetText(pszFileName))
         return false;
 

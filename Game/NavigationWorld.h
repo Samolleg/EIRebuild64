@@ -2,6 +2,8 @@
 #include "../Navigation/Query.h"
 #include <map>
 #include <tuple>
+#include <set>
+#include <filesystem>
 #include "Plot.h"
 
 class CMapObject;
@@ -20,11 +22,17 @@ class NavigationWorld {
     std::map<std::tuple<std::string,float,float,float>,BodySize> bodySizes;
     std::map<std::string,Navigation::Bytes> sources;
     std::map<int,std::unique_ptr<Navigation::Mesh>> meshes;
-    std::string scene, error;
+    std::string scene, mapName, mobName, inputKey, error;
+    std::set<std::string> modelInputs;
+    std::set<std::string> normalizedBounds; // Offline release diagnostics, one entry per object/part.
     std::uint64_t generation = 1;
     unsigned failures = 0;
     void Changed();
     void SyncObjects();
+    void ModelInputs(CMapObject* object);
+    void Snapshot();
+    std::string Fingerprint(int type);
+    std::string Filename(int type) const;
     std::shared_ptr<const owned::FigureCpuAsset> Figure(CMapObject* object,const char* part);
     const BodySize& Body(CUnit* unit);
     int Type(CUnit* unit,int aiClass);
@@ -36,6 +44,7 @@ public:
     void Scene(const char* mpr,const char* mob);
     Navigation::Geometry& Terrain() { return terrain; }
     void Object(CMapObject* object,bool remove,CAIMap& map);
+    std::uint64_t Bake(CWorldServer& world,const std::filesystem::path& directory);
     bool Prepare(CWorldServer& world,const char* phase = "prepare");
     const std::string& Error() const { return error; }
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;

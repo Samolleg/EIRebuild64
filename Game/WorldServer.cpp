@@ -3436,7 +3436,7 @@ CString CWorldServer::GetFullMobName(const char *pszFileName)
 // aiMap.StartDelayConvert should be called before this function (use StartZoneLoading() )
 // script and fof are cleared if requested static only
 BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
-                               CMemorySave &graphChunk, bool bStaticOnly)
+                               CMemorySave &graphChunk, bool bStaticOnly, bool skipScripts)
 {
     OwnedRender::E1MobSource ownedSource(pszMprName, pszMobName);
     // load ai map if changed
@@ -3481,7 +3481,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     if (bLoadStatic || bLoadDynamic)
     {
         szMobFileName = pszMobName;
-        if (!LoadMapObjects(pszMobName, !bLoadDynamic))
+        if (!LoadMapObjects(pszMobName, !bLoadDynamic || skipScripts))
             return FALSE;
         if (!bLoadDynamic)
         {
@@ -3504,6 +3504,17 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CWorldServer::LoadNavigationScene(const char* mpr,const char* mob)
+{
+    // Offline data import calls the same MPR/MOB/BASE path as NewZone. It never
+    // starts a server, compiles/runs MOB scripts, deploys a party or enters UI.
+    szLoadedMobs.RemoveAll();
+    StartZoneLoading();
+    CMemorySave unusedGraph;
+    if(!LoadMainMob(mpr,mob,unusedGraph,false,true))return false;
+    FinishZoneLoading();
+    return true;
+}
 BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
 {
     CGameMOBFile reader;

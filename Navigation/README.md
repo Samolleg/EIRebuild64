@@ -1,149 +1,165 @@
-# Nav64, first ground slice (X64NAV01)
+# Nav64 offline data contract (X64NAV01 r11)
 
-RecastNavigation v1.6.0, unmodified Recast and Detour, zlib. Pin and archive
-digest: `third_party/recastnavigation.lock.json`. Both modules and the host use
-`DT_POLYREF64`, x64, `/MD`. The simulation thread owns each Mesh and Query.
-`Geometry`, `Build`, `Query` and the coordinate conversion have no game/Win32
-dependency and are the shared entry point for the future mapper/baker.
+RecastNavigation v1.6.0 (zlib), unchanged sources; pin/archive digest:
+third_party/recastnavigation.lock.json. Recast and Detour use DT_POLYREF64.
+Algorithm 6, container 2, library 0x010600, SaveSchema 4.
 
-Game `(x,y,z)` maps to Recast `(x,z,-y)`. Input lengths are metres. Ground is
-the original MPR triangle mesh with sector vertex offsets; solid geometry is
-the selected, BON/constitution-adjusted, rotated part BV, not object AABBs.
-Solid volumes are cut from the compact field before radius erosion, including
-head clearance. Their tops never become walkable surfaces. In r6, selected
-BASE/IsBridge parts contribute their actual FIG triangles, decoded by the
-embedded renderer, interpolated by constitution and transformed with BON and
-the object rotation/origin. CROWN and EMPTY retain their pass/ignore semantics.
-Surface area is the existing bridge-road material. A floor touching the top
-of a solid is supported; a body overlapping that solid is blocked.
+The game ONLY reads Maps/Nav64 in the active mod. No navmesh generation on
+zone entry, no Cache64/Nav reads/writes, no fallback to the legacy graph.
+Missing, stale or incompatible data rejects the zone before publication and
+names its MPR/MOB/profile with a request to re-bake in the mapper.
+Old Cache64/Nav files are unused; this task does not remove installed files.
 
-There are eight permanent agent profiles (X64NAV01 r8):
+## Production baker / mapper interface
 
-| Type | Radius (m) | Clearance tiers (m) | Cell size (m) |
+EIRebuild64NavBake.exe is a console target in EI_Rebuild.sln. Its build first
+builds EI_Rebuild, then links the SAME engine objects with NavBakeMain.cpp.
+No second MPR/MOB/BASE extractor, body measurement or profile implementation.
+No renderer/audio/window/server startup. MOB scripts are neither compiled nor
+executed. ResourceScope resolves the effective mod archives without entering a
+mod simulation session; only package lookup tables are loaded.
+
+Example (paths containing spaces require quotes):
+
+    Engine64/EIRebuild64NavBake.exe --game-root "C:/GOG Games/PZ" --mod MODS/Dejavu --all --output-root "D:/nav-release/MODS/Dejavu"
+
+One map:
+
+    Engine64/EIRebuild64NavBake.exe --game-root "C:/GOG Games/PZ" --mod MODS/Dejavu --map zone1 --mob zone1 --output-root "D:/nav-release/MODS/Dejavu"
+
+--game-root, --mod and --output-root are required. --mod may be relative to the
+game root. Output goes to <output-root>/Maps/Nav64. --map and --mob may include
+extensions; --mob defaults to the --map stem. Use either --all or --map.
+--all reads the effective texts.res/map.txt using CGlobalMap::LoadZones, includes
+the menu and both zone6/zone6_2 terrain states selected by WorldInterface,
+deduplicates MPR/MOB pairs, and continues after a map error.
+
+Exit codes: 0 = all requested outputs written; 2 = invalid arguments;
+3 = package/database/registration initialization failure; 4 = one or more map
+imports, builds or output writes failed. Errors identify the map and reason.
+stdout is flushed after MAP_BEGIN, PROFILE, MAP_DONE and BAKE_DONE records;
+stderr contains MAP_ERROR/BAKE_ERROR. PROFILE gives type, radius, tiles, wall
+ms, raster/polygon CPU ms, bytes and fingerprint. MAP_DONE gives import and
+total wall ms and the sum of eight profile file sizes. BAKE_DONE gives
+counts/errors, total wall ms and total bytes. BOUNDS_NORMALIZED records
+MPR/MOB/NID/model/part for every reversed finite solid BV, once per map part.
+Fields are space-separated key=value; names are resource names without spaces,
+reason is the remaining text after reason=. Times are integer milliseconds,
+bytes are decimal byte counts. The mapper must check exit code and BAKE_DONE,
+not infer completion from a PROFILE record alone.
+A failed map is not reported as complete. Each nav64 file is written through
+a flushed temporary file and MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH).
+
+Filename: <mpr-stem>--<mob-stem>.<profile-name>.nav64.
+Names are lowercase ASCII resource basenames, with .mpr/.mob extensions in
+the header. Each file embeds BOTH source names and the profile ID; the mapper
+matches that triple against its open MPR/MOB pair and requested profile,
+then checks the fingerprint. Do not infer a map solely from a filename/hash.
+Renaming a file cannot change its embedded identity. The game checks the same
+triple before adding tiles. Container 1/algorithm 5 files must be re-baked.
+The container embeds a SHA-256 of normalized geometry, effective MPR header/
+sectors/material registry, raw primary MPR/MOB, effective object model/BON
+payloads, authoring .navsrc bytes (explicitly empty when absent), profile,
+coordinate conversion, algorithm/library/container/ABI settings. Script-only
+secondary MOBs do not add geometry. A primary MOB edit requires re-baking.
+No file dates, installation paths, transient IDs or EXE hashes enter the key.
+.navsrc authoring semantics remain NAV03; this slice fingerprints the sidecar.
+Geometry is assembled in the same stable object order in both executables.
+
+## Fixed profiles and body/pose selection
+
+| Type | Radius m | Clearance tiers m | Cell m |
 |---|---:|---|---:|
-| tiny | 0.05 | 0.2 / 0.4 / 1 / 1.6 | 0.05 |
-| small | 0.15 | 0.2 / 0.4 / 1 / 1.6 | 0.05 |
-| human | 0.25 | 0.4 / 1 / 1.6 / 2.2 | 0.05 |
+| tiny | 0 | 0.2 / 0.4 / 1 / 1.6 | 0.1 |
+| small | 0.1 | 0.2 / 0.4 / 1 / 1.6 | 0.1 |
+| human | 0.2 | 0.4 / 1 / 1.6 / 2.2 | 0.1 |
 | large | 0.5 | 0.4 / 1.6 / 2.2 / 3 | 0.1 |
 | giant | 1 | 0.4 / 1.6 / 3 / 6 | 0.2 |
-| levitate_tiny | 0.05 | 0.2 / 0.4 / 1 / 2 | 0.05 |
-| levitate_small | 0.25 | 0.2 / 0.4 / 1 / 2 | 0.05 |
+| levitate_tiny | 0 | 0.2 / 0.4 / 1 / 2 | 0.1 |
+| levitate_small | 0.2 | 0.2 / 0.4 / 1 / 2 | 0.1 |
 | levitate | 0.5 | 0.2 / 0.4 / 1 / 2 | 0.1 |
 
-NavigationWorld::Body reads the effective FIG/BON/LNK and first ordinary idle
-frame from the existing managers. The model's X axis is left/right. Torso and
-hips plus the proximal quarter-length of upper arms define shoulders; distal
-arms, weapons, armor alternatives and their descendants do not inflate width.
-Radius is half that measured width at the unit's current strength/grace/tall.
-Geometry is interpolated without clamping constitution or forcing the human
-BV to one metre. Pose evaluation uses the game's left quaternion multiplication
-(local * parent), with BON offsets rotated by the parent. Parsed figures,
-skeletons, pose tracks and measured constitutions are cached within the scene.
-No unit animation, random state, collision distance or attack distance changes.
+Radius uses half the FIG torso/shoulder width in the current constitution,
+not GetCollisionDistance or database dimensions. Distal arms, weapons and
+armor do not enlarge width. Models without standard torso names use remaining
+body vertices. Missing idle/pose clips use that model's bind transforms.
+Choose the largest fixed radius <= the body. A zero-radius minimum avoids
+enlarging creatures narrower than 0.1 m. A body lower than the lowest clearance
+receives that tier; no exception. Other tiers round down, capped by the old AI
+class permission. Missing model/FIG/BON remains an explicit resource error;
+corrupt/nonfinite resources are not treated as valid geometry.
+Body measurement never modifies live animation, collision separation or attacks.
 
-Choose the largest fixed radius <= the measured radius, never round upwards.
-This deliberately follows the owner's passage-preservation rule. Grouped
-radii can be smaller than the exact body; exact swept shape/crowd behaviour
-remains later work. Missing/unsupported body geometry is an explicit error.
-Class-only calls without an individual model retain fixed class defaults.
-Fine profiles use 0.05 m cells, so erosion does not round their radius upwards
-to a 0.1 m multiple; larger profile radii are exact multiples of their cells.
+All eight profiles are baked, including future summons/poses. They build
+concurrently. Raw rasterization is shared per (cell size, ground/levitation)
+tile using the largest group border; water/slope policies require separate
+ground and levitation rasters. A bounded 32-tile domain store limits memory.
+Each profile copies raw spans, applies its original ledge/height filters and
+builds its own compact field, radius erosion, clearance contours and detail.
+All radii are exact cell multiples; erosion never rounds a radius above the
+measured half-width. Contour simplification error is one cell instead of
+zero; region adjacency and area/pose boundaries still constrain contours.
+Detail height samples are RETAINED: Detour projection/step/restore use them,
+including BASE over terrain. Removing them would flatten interior hills and
+change floor selection. In inspected r10 tiles detail was only 13-16% of bytes;
+polygon/link/BV/vertex counts dominated. The fix reduces voxel stairs and
+compresses the section instead of discarding height information.
+Detour tiles enter each mesh in fixed z/x order. A map exceeding 8 MiB across
+profiles fails before output replacement; --all also enforces 400 MiB total.
 
-All profiles share rasterization between four clearance tiers, including
-levitation. Solid prisms retain actual ceilings and never become walkable tops.
-Measure standing/crawl/lie height from the corresponding model idle poses;
-monsters without a pose use their ordinary standing animation. The query picks
-the greatest tier <= that height AND <= the original AI class height. The
-latter preserves old clearance permissions rather than enlarging the unit
-because of a visual envelope. Find, placement, ingress, step and save restoration
-use this same bit. Up to 60 temporary Recast areas encode material/clearance;
-Detour restores material IDs 1..15 and nested flags 1/3/7/15. Clearance-boundary
-contours retain zero simplification error. Profile selection never uses
-GetCollisionDistance, body BV correction, ownership or attack distances.
+Game (x,y,z) maps to Recast (x,z,-y). Units are metres. Ground is the actual
+MPR triangles with sector offsets/water. BASE/IsBridge parts use effective FIG
+triangles, BON/constitution, orientation and origin; CROWN/EMPTY keep their
+semantics. Other solid BVs become prisms, never walkable tops. Climb is 0.35 m;
+ground slope 40 degrees, supported levitation slope 60 degrees. Levitation is
+not free 3D flight. Four clearance permissions share each profile mesh.
+The decoder is the embedded owned renderer's production decoder. Finite BV
+endpoints are normalized on each local axis before transforming all eight
+corners. CFigure::RecalcBoundingBoxWithRotation (Figure.cpp) likewise computes
+Min/Max over all eight endpoints; the old aiMap object path also enumerates
+both endpoints rather than requiring their order. Negative constitution is
+not a corrupt volume. NaN/infinite geometry still reports its source.
 
-Class 0 retains supported levitation, not free 3D flight: the actual MPR water
-layer raises its floor, class-0 material policy admits water, slope is limited
-to the existing 60 degrees, body clearance stays 2 m and solids still block.
-The game's altitude and high-altitude radius reduction are unchanged. Its
-terrain cost/speed is flat (1024), without the ground uphill speed penalty.
-Ground types keep the 40 degree slope; all types retain 0.35 m climb and 0.05 m
-vertical cells. Full ground water/terrain cost policy still belongs to NAV04.
+## Container 2
 
-Prepare warms all eight types during NewZone and staged save loading, before
-publishing the world; party warm-up reuses them. A new pose or ordinary summon
-cannot introduce a new type/mesh. Parallel tile workers retain their own Recast
-contexts; only the simulation thread inserts Detour blobs in fixed z/x order.
-NAV ready records type, radius, height, cell size, built/cache, wall ms, phase,
-fingerprint, generation, workers and raster/polygon CPU ms. NAV prepared gives
-total time/profile count. Timing on zone1 still requires the owner's game log.
-Material areas 1..15 use existing costs, while movement uses existing speed
-tables. Directional search costs are deferred to NAV04. No crowd controller,
-door topology or old search fallback is present. Independent multi-floor
-surface identity and complete bridge semantics remain later packages.
+Little endian fields, no raw host pointers/structs except pinned Detour tile
+payloads: NAV664 magic (u32 0x3656414e, 0x00003436), container=2, algorithm=6,
+library=0x010600, endian=0x12345678, polyrefBytes=8; four length-prefixed UTF-8
+strings: fingerprint, MPR basename, MOB basename, profile ID. String lengths
+are u32 byte counts without NUL. Then six f32 profile fields (radius, height,
+slope, climb, cellSize, cellHeight), u32 tileCells; three f32 origin values,
+two f32 tile dimensions, u32 maxTiles/maxPolys; u32 sectionCount=3.
+Each section is u32 type, u32 payloadBytes, payload:
 
-Tiles are binned spatially before building. Triangles are converted/classified
-once per profile, solid hulls are computed once, and each tile visits only its
-overlapping inputs (including the full erosion border). Up to eight workers,
-one per two hardware threads, each own their Recast context and temporaries.
-Completed blobs enter Detour on the simulation thread in fixed z/x order.
-Cells depend on the permanent type; radius and clearance tiers round down to the body.
+- 1: u32 codec=5 (Windows Compression API LZMS, buffer mode, no RAW),
+  u32 expandedBytes, u32 compressedBytes, compressed buffer. The expanded
+  buffer is u32 tileCount followed by (u32 tileBytes, Detour tile bytes).
+  Expansion is bounded to 512 MiB and must have exactly the declared length.
+- 2: u32 domainCount=1, u32 domainId=1 (imported terrain/BASE).
+- 3: u32 layerCount=0 (reserved until NAV05).
 
-## Container v1 (little endian)
+Compression is lossless and uses the OS cabinet.dll, linked via cabinet.lib;
+no dependency DLL is added to the package. API contract:
+[Compress](https://learn.microsoft.com/en-us/windows/win32/api/compressapi/nf-compressapi-compress),
+[Decompress](https://learn.microsoft.com/en-us/windows/win32/api/compressapi/nf-compressapi-decompress).
+The production reader validates
+versions, SHA, profile, exact lengths, counts, indices and tile ABI before
+addTile. Limits: 4096 tiles, 32768 polygons/tile, 16 MiB/tile, 512 MiB/file.
+Zero walkable tiles is valid. Stale data is rejected, never regenerated.
 
-No raw host structs/pointers are written. The only native layout is the tile
-payload returned by the pinned library's `dtCreateNavMeshData`.
+## Runtime / remaining packages
 
-* u32 magic `0x3656414e`, `0x00003436` (NAV664), container=1, algorithm=4,
-  library=`0x010600`, endian=`0x12345678`, polyrefBytes=8.
-* u32 text length + UTF-8/ASCII SHA-256 input fingerprint, maximum 4096 bytes.
-* Profile: six f32 (radius,height,slope,climb,cellSize,cellHeight), u32 tileCells.
-* Detour parameters: origin[3], tileWidth, tileHeight (f32), maxTiles, maxPolys
-  (u32). Limits: 4096 tiles, 32768 polygons/tile, 16 MiB/tile, 512 MiB/file.
-* u32 sectionCount=3; each section has u32 type and byteLength.
-  Type 1: u32 tileCount followed by (u32 size, Detour tile bytes), no stored
-  refs. Type 2: u32 surfaceCount=1, u32 surfaceId=1 (imported triangle surfaces).
-  Type 3: u32 buildLayerCount=0, reserved for NAV05's TileCache data.
-  Unknown versions/sections, stale fingerprints and ABI mismatches regenerate
-  through the same builder. Exact lengths/counts are validated before addTile.
+Prepare reads every fixed profile before publishing NewZone/staged load and
+resolves restored unit addresses. Query entry points still route exclusively
+through NavigationWorld. Preview, exact linear corridor, constrained Detour
+step, bounded source ingress, pose masks and SaveSchema 4 remain as in r8.
+Old x64 saves are rejected without migration; transient polygon refs are not
+serialized. Partial paths and bounded-search exhaustion are failures.
+Moving units wait rather than push. Full crowd/queue/terrain costs and robust
+independent floors remain later NAV packages.
 
-`Maps/Nav64/<fingerprint>.nav64` and `Cache64/Nav/<fingerprint>.nav64` use
-identical bytes. Mapper NAV03 must use this API/profile/input normalization;
-new metadata/layers require an explicit container/algorithm revision.
-Fingerprint inputs are scene MPR + primary MOB + authoring variant, effective
-MPR header/sectors, material registry, selected transformed BV geometry, actual
-object/ground triangles, profile and ABI/build settings. Raw MOB script/unit
-payloads, party/equipment, transient IDs and generation counters do not enter
-the key. A script-only AddMob (including AutoRunSpellAddon123) does not invalidate
-geometry. Initial static objects enter the snapshot before Prepare. Remove/add
-pairs are compared by their final geometric contribution at the next query;
-identical updates and objects without a contribution do not advance generation.
-Real changes log NAV geometry_changed and still rebuild synchronously until NAV05.
-No file dates or EXE hashes participate. Runtime object deltas change
-the fingerprint and do not overwrite authored files. Cache writes flush a
-temporary file and atomically replace the target.
-
-Queries reject partial paths and exhausted buffers/nodes. Sliced Detour work
-has a 65536-iteration bound, an 8192-polygon corridor and 8192 straight points.
-The segment executor carries exact points, uses piecewise linear motion and
-limits the complete proposed step by a Detour raycast; it never splines or
-rounds through a wall. Physical neighbours cause waiting, never pushing.
-Point queries use the current bridge/deck height as their initial hint instead
-of discarding it for original MPR height. Route supportZ already present in the
-packet drives both client walking/turning and path-preview particles; visual
-support is retained at a stopped endpoint and cleared on authoritative placement.
-The complete crowd/queue policy and dynamic tile budgets belong to NAV05/06.
-
-SaveSchema 4 replaces version 3 without migration. Unit address is stable
-surface + world XYZ + profile radius/height. Polygon refs/generation and query
-state are transient. Staged load builds the mesh from restored objects,
-resolves addresses and rebuilds moving routes before publishing the world.
-Legacy embedded MOB graph/GRP data is neither read nor modified.
-
-Source recovery (X64NAV01 r5): existing authored positions may be just outside
-an eroded polygon. Find, step and save restoration share a bounded ingress
-(radius + two cells) over continuous non-null imported triangles. The actual position
-and ingress are part of the route/preview; movement must reduce the distance
-to the mesh, preserve body clearance and cross no raw solid or ground gap.
-This does not change mesh radius/slope or relax placement/target projection.
-Fully empty FIG nodes are ignored explicitly; invalid nonempty BV data still
-rejects the zone with NID/model/part and input values, or an MPR sector name.
+Real runtime geometry changes invalidate the snapshot. No runtime builder or
+old graph is used; until NAV05 dynamic tiles are implemented, an unpublished
+changed snapshot is unavailable. Exact campaign gameplay and the zone1
+passages (1.3 m opening/ramp, 1.5 m courtyards, 0.8 m door, 6 m giant gates)
+require owner acceptance. samvlrmp01 measured width remains 1.30 m.

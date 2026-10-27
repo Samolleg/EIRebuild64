@@ -15,15 +15,19 @@ struct Mesh {
     Profile profile;
     std::shared_ptr<const Geometry> geometry; // Current inputs, shared by profiles; never serialized.
     std::string fingerprint;
+    std::string mapName, mobName, profileId; // Self-describing offline artifact identity.
     std::uint64_t generation = 0;
     std::uint32_t tiles = 0;
     // Build telemetry only; no change to the container or serialized addresses.
     std::uint32_t workers = 0;
-    std::uint64_t rasterMs = 0, polygonMs = 0;
+    std::uint64_t rasterMs = 0, polygonMs = 0, buildMs = 0;
 };
+struct BuildRequest { Profile profile; std::string fingerprint; };
+std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& geometry,const std::vector<BuildRequest>& requests);
 std::unique_ptr<Mesh> Build(const Geometry& geometry,const Profile& profile,const std::string& key);
 Bytes Store(const Mesh& mesh);
-std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std::string& key);
+std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std::string& key,
+    const std::string& mapName,const std::string& mobName,const std::string& profileId);
 // Canonical LE input bytes, also used by the host's SHA-256 fingerprint.
 Bytes Inputs(const Geometry& geometry,const Profile& profile,const std::string& scene,const Bytes& source);
 }

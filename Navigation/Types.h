@@ -6,8 +6,8 @@
 #include <array>
 
 namespace Navigation {
-constexpr std::uint32_t ContainerVersion = 1;
-constexpr std::uint32_t AlgorithmVersion = 4;
+constexpr std::uint32_t ContainerVersion = 2;
+constexpr std::uint32_t AlgorithmVersion = 6;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -28,7 +28,7 @@ inline const std::array<float,4>& ClearanceHeights(const Profile& p) {
     static constexpr std::array<float,4> tiny={.2f,.4f,1.f,1.6f}, human={.4f,1.f,1.6f,2.2f},
         large={.4f,1.6f,2.2f,3.f}, giant={.4f,1.6f,3.f,6.f}, levitate={.2f,.4f,1.f,2.f};
     if(p.slope==60.f)return levitate;
-    return p.radius<.25f?tiny:p.radius<.5f?human:p.radius<1.f?large:giant;
+    return p.radius<.2f?tiny:p.radius<.5f?human:p.radius<1.f?large:giant;
 }
 inline bool PoseClearance(const Profile&) { return true; }
 inline unsigned short ClearanceMask(const Profile& p,float height) {
