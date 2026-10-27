@@ -4,6 +4,7 @@
 #include "../Navigation/Profiles.h"
 #include "../Navigation/Query.h"
 #include <fstream>
+#include <future>
 #include "aiMap.h"
 #include "Unit.h"
 #include "WorldServer.h"
@@ -317,27 +318,35 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     auto built=Navigation::BuildProfiles(geometry,requests);
     auto sources=std::make_shared<Navigation::Geometry>(geometry);
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
-    std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs;
+    auto sourceOutput=std::async(std::launch::async,[&]{return StoreSources(geometry);});
+    std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
     for(int type=0;type<AgentCount;++type) {
-        auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;
-        CheckReleaseHeights(mesh);
-        outputs.push_back(Navigation::Store(mesh));totalBytes+=outputs.back().size();
+        auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;CheckReleaseHeights(mesh);
     }
+    auto serialize=[&](int first){for(int type=first;type<AgentCount;type+=2)outputs[type]=Navigation::Store(*built[type]);};
+    auto parallel=std::async(std::launch::async,[&]{serialize(1);});serialize(0);parallel.get();
+    for(int type=0;type<AgentCount;++type)totalBytes+=outputs[type].size();
     std::filesystem::create_directories(directory);
     // Release-data quality is part of the baker, on the actual map meshes.
     // No standalone test, simulation, game tick, script or renderer runs here.
     const auto stem=std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string();
     std::ofstream losses(directory/(stem+".losses.csv"));losses<<"profile,class,x,y,z,reason\n";
+    std::ofstream water(directory/(stem+".water-gains.csv"));water<<"profile,x,y,z,depth,water_limit,forbidden,surface\n";
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const int c=mesh.profile.materialClass;
-        unsigned oldCount=0,lost=0,gained=0,waterGained=0,stepCount=0,stepFailed=0,stepStalled=0;
+        unsigned oldCount=0,lost=0,gained=0,waterGained=0,forbiddenWaterGained=0,stepCount=0,stepFailed=0,stepStalled=0;
         const float heights[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};const float height=(std::min)(heights[c],ClearanceHeights(mesh.profile).back());
         for(int y=3;y<sourceMap->YSize()-3;++y)for(int x=3;x<sourceMap->XSize()-3;++x) {
             const bool oldPass=((sourceMap->map[y][x].dwTerrains>>(c*4))&15)!=0;
             if(oldPass)++oldCount;CPlot3D cp(AITile2Meter(x+.5f),AITile2Meter(y+.5f),0);
             Point p{cp.x,cp.y,c==0?sourceMap->GetTileSurface(cp):sourceMap->GetTileHeight(cp)};Location at;
             const bool onMesh=Project(mesh,p,.05f,4.f,at,height);
-            if(!oldPass){if(onMesh){++gained;if(sourceMap->map[y][x].nDepth>0)++waterGained;}continue;}
+            if(!oldPass){if(onMesh){++gained;if(sourceMap->map[y][x].nDepth>0) {
+                ++waterGained;const int depth=sourceMap->map[y][x].nDepth,limit=c==1?0:sourceMap->GetMapHeight(heights[c]);
+                const bool forbidden=c!=0&&(depth==N_AI_MAX_DEPTH+1||depth>=limit-1);
+                if(forbidden)++forbiddenWaterGained;
+                water<<Agents[type].name<<','<<p.x<<','<<p.y<<','<<p.z<<','<<depth<<','<<limit<<','<<forbidden<<','<<at.surface<<'\n';
+            }}continue;}
             if(!onMesh) {++lost;losses<<Agents[type].name<<','<<c<<','<<p.x<<','<<p.y<<','<<p.z<<",no_polygon_or_clearance\n";continue;}
             if((x%16)==0&&(y%16)==0) {
                 Point to=at.position;to.x+=.02f;Location target;
@@ -349,7 +358,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             }
         }
         const float cellArea=AITile2Meter(1.f)*AITile2Meter(1.f);
-        printf("QUALITY mpr=%s mob=%s profile=%s class=%d legacy_cells=%u lost=%u lost_m2=%.2f gained=%u gained_m2=%.2f gained_water_m2=%.2f step_samples=%u step_failed=%u step_stalled=%u\n",mapName.c_str(),mobName.c_str(),Agents[type].name,c,oldCount,lost,lost*cellArea,gained,gained*cellArea,waterGained*cellArea,stepCount,stepFailed,stepStalled);fflush(stdout);
+        printf("QUALITY mpr=%s mob=%s profile=%s class=%d legacy_cells=%u lost=%u lost_m2=%.2f gained=%u gained_m2=%.2f gained_water_m2=%.2f gained_forbidden_water_m2=%.2f step_samples=%u step_failed=%u step_stalled=%u\n",mapName.c_str(),mobName.c_str(),Agents[type].name,c,oldCount,lost,lost*cellArea,gained,gained*cellArea,waterGained*cellArea,forbiddenWaterGained*cellArea,stepCount,stepFailed,stepStalled);fflush(stdout);
     }
     if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
         auto& mesh=*built[Small];Point start{55.55f,138.78f,19.24f};Location placed,next;
@@ -361,6 +370,48 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             if(length>0){to.x=placed.position.x+(to.x-placed.position.x)*.02f/length;to.y=placed.position.y+(to.y-placed.position.y)*.02f/length;step=Constrain(mesh,placed.position,to,next,1.6f);}
         }
         printf("HERO_START profile=small original=(55.55,138.78,19.24) place=%d placed=(%.5f,%.5f,%.5f) goal=(58.9822,139.653) route=%s step=%d moved=%.6f\n",int(place),placed.position.x,placed.position.y,placed.position.z,StatusName(route.status),int(step),step?std::hypot(next.position.x-placed.position.x,next.position.y-placed.position.y):0);fflush(stdout);
+        if(!step||std::hypot(next.position.x-placed.position.x,next.position.y-placed.position.y)<.019f)throw std::runtime_error("Nav64: HERO_START does not advance");
+        // Anchors are actual zone1 sites, not synthetic corridor fixtures.
+        struct Passage {const char* name;Point a,b;int first,last;};
+        const Passage passages[]={
+            {"start_exit",{55.55f,138.78f,19.24f},{78.f,145.f,14.f},Small,Human},
+            {"main_gate",{188.f,108.f,6.2f},{188.f,116.f,6.2f},Small,Giant},
+            {"elder_entrance",{197.98f,143.7f,6.3f},{197.98f,145.5f,6.3f},Small,Human},
+            {"samvlrmp01",{192.5f,113.9f,6.f},{197.3f,113.8f,7.85f},Small,Human}
+        };
+        for(const auto& passage:passages)for(int type=passage.first;type<=passage.last;++type) {
+            const auto& candidate=*built[type];Location a,b;const float height=type==Giant?6.f:type==Large?3.f:1.6f;
+            const bool source=Project(candidate,passage.a,.5f,4.f,a,height),goal=Project(candidate,passage.b,.5f,4.f,b,height);
+            Request r;r.source=a.position;r.goal=b.position;r.height=height;r.maxLength=100;
+            Route path;if(source&&goal)path=Find(candidate,r);
+            printf("PASSAGE name=%s profile=%s source=%d goal=%d route=%s length=%.3f from=(%.3f,%.3f,%.3f) to=(%.3f,%.3f,%.3f)\n",passage.name,Agents[type].name,int(source),int(goal),StatusName(path.status),path.length,a.position.x,a.position.y,a.position.z,b.position.x,b.position.y,b.position.z);fflush(stdout);
+        }
+
+    }
+    std::ofstream connections(directory/(stem+".connections.csv"));
+    connections<<"profile,id,model,surface,x,y,z,out_x,out_y,status,length\n";
+    for(const auto& entry:objects) {
+        std::vector<Point> samples;Point low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
+        std::uint64_t surface=0;
+        for(const auto& t:entry.second.ground)if(t.area&&t.surface>1) {
+            for(auto p:{t.a,t.b,t.c}) {low.x=(std::min)(low.x,p.x);low.y=(std::min)(low.y,p.y);low.z=(std::min)(low.z,p.z);high.x=(std::max)(high.x,p.x);high.y=(std::max)(high.y,p.y);high.z=(std::max)(high.z,p.z);}
+            samples.push_back({(t.a.x+t.b.x+t.c.x)/3,(t.a.y+t.b.y+t.c.y)/3,(t.a.z+t.b.z+t.c.z)/3});surface=t.surface;
+        }
+        if(samples.empty())continue;
+        auto* object=sourceWorld->GetMapObject(entry.first);const char* model=object?static_cast<LPCSTR>(object->GetMaskName()):"unknown";
+        for(int type=0;type<AgentCount;++type) {
+            const auto& mesh=*built[type];Location start;bool placed=false;
+            const float classHeights[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};const float height=classHeights[mesh.profile.materialClass];
+            for(size_t k=0;k<samples.size();k+= (std::max)(size_t(1),samples.size()/32))if(Project(mesh,samples[k],.05f,.3f,start,height)&&(start.surface>>32)==unsigned(entry.first)){placed=true;break;}
+            Route best;Point destination{};
+            if(placed)for(Point outside:std::vector<Point>{{low.x-1,(low.y+high.y)*.5f,0},{high.x+1,(low.y+high.y)*.5f,0},{(low.x+high.x)*.5f,low.y-1,0},{(low.x+high.x)*.5f,high.y+1,0}}) {
+                outside.z=sourceMap->GetTileHeight(CPlot3D(outside.x,outside.y,0));Location goal;
+                if(!Project(mesh,outside,1.f,4.f,goal,height)||goal.surface!=1)continue;
+                Request r;r.source=start.position;r.goal=goal.position;r.height=height;r.maxLength=100;
+                auto route=Find(mesh,r);best=std::move(route);destination=goal.position;if(best.status==Status::Complete)break;
+            }
+            connections<<Agents[type].name<<','<<entry.first<<','<<model<<','<<(placed?start.surface:surface)<<','<<start.position.x<<','<<start.position.y<<','<<start.position.z<<','<<destination.x<<','<<destination.y<<','<<(placed?StatusName(best.status):"no_surface")<<','<<best.length<<'\n';
+        }
     }
     std::ofstream units(directory/(stem+".placements.csv"));units<<"id,model,profile,x,y,z,distance,reason\n";
     for(const auto& entry:sourceWorld->mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
@@ -384,7 +435,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             static_cast<unsigned long long>(mesh.polygonMs),bytes.size());
         fflush(stdout);
     }
-    auto sourceBytes=StoreSources(geometry);const auto decoded=LoadSources(sourceBytes);
+    auto sourceBytes=sourceOutput.get();const auto decoded=LoadSources(sourceBytes);
     if(decoded->ground.size()!=geometry.ground.size()||decoded->doors.size()!=geometry.doors.size())throw std::runtime_error("Nav64: source serialization mismatch");
     Atomic(directory/(stem+".navgeom"),sourceBytes);totalBytes+=sourceBytes.size();
     printf("SOURCES triangles=%zu doors=%zu offmesh=%zu bytes=%zu\n",geometry.ground.size(),geometry.doors.size(),geometry.connections.size(),sourceBytes.size());fflush(stdout);

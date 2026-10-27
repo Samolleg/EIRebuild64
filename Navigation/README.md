@@ -1,6 +1,7 @@
 # Nav64 X64NAVCORE working candidate
 
-Not a release. The latest source has not completed the zone1 pilot. See
+Not a release. zone1 builds and the start/exit/gate/ramp queries pass.
+The exact 1.3/0.8 m sites and site losses still need pilot acceptance. See
 work/supervision/X64NAVCORE/REPORT.md, section "Доработка" in the private
 workspace. Game installation and launch are not authorized by this task.
 
@@ -66,9 +67,10 @@ closed/open geometry and queues still require gameplay acceptance.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 5, algorithm 12, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 6, algorithm 13, Recast 0x010600,
   DT_POLYREF64; names/profile; ready shuffled/LZMS tiles; surface schema;
-  losslessly compressed multi-level TileCache layers.
+  losslessly compressed multi-level TileCache layers. The whole RLE layer
+  section is additionally compressed with LZMS; runtime RLE is unchanged.
 - <mpr>--<mob>.navworld: JSON version 2, baked static NIDs.
 - <mpr>--<mob>.navgeom: compressed shared source section NSRC version 1,
   original bounds, triangles with object ID and surface ID, class areas,
@@ -79,7 +81,7 @@ closed/open geometry and queues still require gameplay acceptance.
   selection remains open; the current client still uses its world support.
 - Off-mesh records hold both endpoints, radius, endpoint surface IDs and
   flags; none are emitted or connected in the current importer.
-- bodies.navbody: BODY version 1, algorithm 12, model/constitution, radius,
+- bodies.navbody: BODY version 1, algorithm 13, model/constitution, radius,
   profile and pose heights. Effective un*.mod/un*.lnk resources are covered.
 
 Runtime cache state and Detour references are not saved. Existing UInt64
@@ -88,8 +90,14 @@ CSV losses/placements are private release-data reports, not runtime inputs.
 
 ## Remaining acceptance
 
-Exact r16 flat-ground cause, all required zone1 passages, old-graph losses,
-placement lists, all spawn/random-goal paths, class policy, runtime timing,
+HERO_START must advance by 0.02 m through the shared query code; the baker
+fails if it does not. QUALITY retains total gained_water_m2 and separately
+reports gained_forbidden_water_m2 using the original SetWater depth limit.
+water-gains.csv records every gained water cell, its limit and surface.
+connections.csv uses the named object surface and the class clearance.
+
+Exact narrow-passage sites, classification of remaining site losses,
+all spawn/random-goal paths, class policy, runtime timing,
 save/load, door crowds and complete client floor selection remain open.
 All-map baking and handoff are gated on the full zone1 pilot. No runtime
 performance or gameplay result is inferred from a successful build.

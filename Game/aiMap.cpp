@@ -1037,20 +1037,63 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
     // Initialize passailities tables
     CalcDefaultPassabilities();
     InitializeBasicTerrainCosts();
-    // Material boundaries are retained by Recast. This first slice imports the
-    // standing-human ground policy; the complete class/water policy is NAV04.
-    // Use the initialized material table: per-cell dwTerrains is still zero
-    // while StartZoneLoading defers conversion until FinishZoneLoading.
-    if(auto* navTerrain=navigation.Terrain())for(auto& triangle:navTerrain->ground) {
-        int x=Float2AITile((triangle.a.x+triangle.b.x+triangle.c.x)/3);
-        int y=Float2AITile((triangle.a.y+triangle.b.y+triangle.c.y)/3);
-        triangle.area=TileInBounds(x,y)?BYTE((tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains>>12)&15):0;
-        triangle.levitateArea=TileInBounds(x,y)?BYTE(tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains&15):0;
-        triangle.terrain=true;
-        for(int c=0;c<8;++c) {
+    // Keep the MPR geometry, but split material/water boundaries at the exact
+    // half-metre AI cells. A centroid classification of a metre triangle lets
+    // its dry half extend over water forbidden by SetWater.
+    if(auto* navTerrain=navigation.Terrain()) {
+        using Policy=std::array<BYTE,8>;
+        std::vector<Policy> policies(size_t(XSize())*YSize());
+        for(int y=0;y<YSize();++y)for(int x=0;x<XSize();++x)for(int c=0;c<8;++c) {
             STerrainTile policy;
-            triangle.classAreas[c]=TileInBounds(x,y)?BYTE(CalcOneTilePassability(policy,c,Float2Int(fpUnitsHeights[c]*fpZMult),x,y)):0;
+            policies[size_t(y)*XSize()+x][c]=BYTE(CalcOneTilePassability(policy,c,Float2Int(fpUnitsHeights[c]*fpZMult),x,y));
         }
+        auto policyAt=[&](int x,int y) {return TileInBounds(x,y)?policies[size_t(y)*XSize()+x]:Policy{};};
+        struct Vertex {Navigation::Point p;float water;};
+        auto clip=[](std::vector<Vertex> polygon,int axis,float bound,bool greater) {
+            std::vector<Vertex> result;
+            if(polygon.empty())return result;
+            auto coordinate=[&](const Vertex& v){return axis==0?v.p.x:v.p.y;};
+            Vertex prev=polygon.back();bool insidePrev=greater?coordinate(prev)>=bound:coordinate(prev)<=bound;
+            for(const auto& v:polygon) {
+                bool inside=greater?coordinate(v)>=bound:coordinate(v)<=bound;
+                if(inside!=insidePrev) {
+                    const float t=(bound-coordinate(prev))/(coordinate(v)-coordinate(prev));
+                    Vertex q{{prev.p.x+(v.p.x-prev.p.x)*t,prev.p.y+(v.p.y-prev.p.y)*t,prev.p.z+(v.p.z-prev.p.z)*t},prev.water+(v.water-prev.water)*t};
+                    if(axis==0)q.p.x=bound;else q.p.y=bound;
+                    result.push_back(q);
+                }
+                if(inside)result.push_back(v);prev=v;insidePrev=inside;
+            }
+            return result;
+        };
+        std::vector<Navigation::Triangle> classified;classified.reserve(navTerrain->ground.size());
+        std::map<size_t,std::string> labels;
+        for(size_t index=0;index<navTerrain->ground.size();++index) {
+            const auto& t=navTerrain->ground[index];
+            auto label=navTerrain->groundSources.find(index);if(label!=navTerrain->groundSources.end())labels[classified.size()]=label->second;
+            const int x0=Float2AITile((std::min)({t.a.x,t.b.x,t.c.x})),x1=Float2AITile((std::max)({t.a.x,t.b.x,t.c.x})-.00001f);
+            const int y0=Float2AITile((std::min)({t.a.y,t.b.y,t.c.y})),y1=Float2AITile((std::max)({t.a.y,t.b.y,t.c.y})-.00001f);
+            const auto first=policyAt(x0,y0);bool uniform=true;
+            for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x)if(policyAt(x,y)!=first)uniform=false;
+            auto append=[&](Navigation::Triangle triangle,const Policy& policy) {
+                triangle.classAreas=policy;triangle.area=policy[3];triangle.levitateArea=policy[0];triangle.terrain=true;
+                classified.push_back(triangle);
+            };
+            if(uniform){append(t,first);continue;}
+            for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x) {
+                std::vector<Vertex> polygon={{t.a,t.waterDepth.x},{t.b,t.waterDepth.y},{t.c,t.waterDepth.z}};
+                polygon=clip(std::move(polygon),0,AITile2Meter(float(x)),true);
+                polygon=clip(std::move(polygon),0,AITile2Meter(float(x+1)),false);
+                polygon=clip(std::move(polygon),1,AITile2Meter(float(y)),true);
+                polygon=clip(std::move(polygon),1,AITile2Meter(float(y+1)),false);
+                for(size_t k=1;k+1<polygon.size();++k) {
+                    const auto& a=polygon[0];const auto& b=polygon[k];const auto& c=polygon[k+1];
+                    if(std::abs((b.p.x-a.p.x)*(c.p.y-a.p.y)-(b.p.y-a.p.y)*(c.p.x-a.p.x))<1.e-8f)continue;
+                    auto triangle=t;triangle.a=a.p;triangle.b=b.p;triangle.c=c.p;triangle.waterDepth={a.water,b.water,c.water};append(triangle,policyAt(x,y));
+                }
+            }
+        }
+        navTerrain->ground=std::move(classified);navTerrain->groundSources=std::move(labels);
     }
     // Initialize rest objects
     dLocks.SetSizes(nMapSizeX, nMapSizeY);

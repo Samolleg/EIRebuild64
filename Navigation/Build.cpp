@@ -466,7 +466,8 @@ Bytes Store(const Mesh& mesh) {
     w.U(2);w.U(8);w.U(1);w.U(2); // terrain=1, BASE=(NID<<32)|(part+2), source/off-mesh section in navgeom
     Wire layers;layers.U(static_cast<std::uint32_t>(mesh.layers.size()));
     for(const auto& layer:mesh.layers){layers.U(static_cast<std::uint32_t>(layer.size()));layers.B(layer.data(),layer.size());}
-    w.U(3);w.U(static_cast<std::uint32_t>(layers.bytes.size()));w.B(layers.bytes.data(),layers.bytes.size());
+    const auto packedLayers=Pack(layers.bytes);
+    w.U(3);w.U(static_cast<std::uint32_t>(packedLayers.size()+4));w.U(static_cast<std::uint32_t>(layers.bytes.size()));w.B(packedLayers.data(),packedLayers.size());
     return std::move(w.bytes);
 }
 std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
@@ -493,13 +494,15 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
         auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;
     }
     Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==2&&w.U()==3,"Nav64: invalid surface/layer sections");
-    const auto layerBytes=w.U();Require(layerBytes<=w.bytes.size()-w.at,"Nav64: truncated layer section");const auto layerEnd=w.at+layerBytes;
-    const auto layerCount=w.U();Require(layerCount<=static_cast<unsigned>(p.maxTiles),"Nav64: layer count limit");
+    const auto layerBytes=w.U();Require(layerBytes>=4&&layerBytes<=w.bytes.size()-w.at,"Nav64: truncated layer section");
+    const auto layerEnd=w.at+layerBytes;const auto expandedLayers=w.U();
+    Wire layers;layers.bytes=Unpack(w.bytes.data()+w.at,layerEnd-w.at,expandedLayers);w.at=layerEnd;
+    const auto layerCount=layers.U();Require(layerCount<=static_cast<unsigned>(p.maxTiles),"Nav64: layer count limit");
     for(unsigned i=0;i<layerCount;++i) {
-        const auto size=w.U();Require(size<=layerEnd-w.at&&size<=1024*1024,"Nav64: layer size limit");
-        mesh->layers.emplace_back(w.bytes.begin()+w.at,w.bytes.begin()+w.at+size);w.at+=size;
+        const auto size=layers.U();Require(size<=layers.bytes.size()-layers.at&&size<=1024*1024,"Nav64: layer size limit");
+        mesh->layers.emplace_back(layers.bytes.begin()+layers.at,layers.bytes.begin()+layers.at+size);layers.at+=size;
     }
-    Require(w.at==layerEnd&&w.at==w.bytes.size(),"Nav64: unexpected layer bytes");
+    Require(layers.at==layers.bytes.size()&&w.at==w.bytes.size(),"Nav64: unexpected layer bytes");
     mesh->cache=std::make_unique<Cache>(*mesh);
     mesh->query.reset(dtAllocNavMeshQuery());Require(mesh->query&&dtStatusSucceed(mesh->query->init(mesh->data.get(),65535)),"Nav64: query allocation failed");
     return mesh;
