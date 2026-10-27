@@ -8,6 +8,7 @@
 #include "GameJournal.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "GeneralSettings.h"
 #include <cstdio>
 #include "FigureManager.h"
 #include "../external/owned-renderer/Source/owned_asset_loader.h"
@@ -114,11 +115,13 @@ void NavigationWorld::SyncObjects() {
         auto old=objects.find(entry.first);auto& next=entry.second;
         bool empty=next.solids.empty()&&next.ground.empty();
         if(old==objects.end()?empty:Same(old->second,next))continue;
-        if(!meshes.empty())GameJournal::Event("NAV","geometry_changed","NID=%d operation=%s solids=%zu triangles=%zu generation=%llu",entry.first,empty?"remove":old==objects.end()?"add":"update",next.solids.size(),next.ground.size(),static_cast<unsigned long long>(generation));
+        if(prepared)GameJournal::Event("NAV","geometry_deferred","NID=%d operation=%s before_solids=%zu before_triangles=%zu after_solids=%zu after_triangles=%zu generation=%llu reason=X64NAV05 baked_unchanged=1",entry.first,empty?"remove":old==objects.end()?"add":"update",old==objects.end()?0:old->second.solids.size(),old==objects.end()?0:old->second.ground.size(),next.solids.size(),next.ground.size(),static_cast<unsigned long long>(generation));
         if(empty)objects.erase(entry.first);else objects[entry.first]=std::move(next);
         changed=true;
     }
-    pendingObjects.clear();if(changed)Changed();
+    // Keep the live contribution inventory for events/zone reloads, but retain
+    // the published mesh, source key and ingress geometry until the next Scene.
+    pendingObjects.clear();if(changed&&!prepared)Changed();
 }
 void NavigationWorld::Source(const std::string& name,const void* data,size_t size) {
     if(size>512u*1024*1024)throw std::runtime_error("Nav64: oversized source");
@@ -126,11 +129,14 @@ void NavigationWorld::Source(const std::string& name,const void* data,size_t siz
     if(target.size()==size&&std::equal(target.begin(),target.end(),p))return;
     if(size)target.assign(p,p+size);else target.clear();Changed();
 }
-void NavigationWorld::Scene(const char* mpr,const char* mob) {
-
+void NavigationWorld::Scene(CWorldServer& world,const char* mpr,const char* mob) {
+    SyncObjects();prepared=false;
     mapName=ResourceName(mpr);mobName=ResourceName(mob);
     scene=mapName+"|"+mobName;
     modelInputs.clear();
+    for(auto i=sources.begin();i!=sources.end();) {
+        if(i->first.rfind("model:",0)==0)i=sources.erase(i);else ++i;
+    }
     normalizedBounds.clear();
     for(const auto& input: {std::make_pair(std::string("mpr"),std::string(mpr?mpr:"")),std::make_pair(std::string("mob"),std::string(mob?mob:""))}) {
         auto bytes=Read(ModRuntime::MapPath(input.second.c_str()));
@@ -139,6 +145,9 @@ void NavigationWorld::Scene(const char* mpr,const char* mob) {
     auto navsrc=std::filesystem::path(ModRuntime::MapPath(mpr));navsrc.replace_extension(".navsrc");
     Navigation::Bytes authored;if(std::filesystem::exists(navsrc))authored=Read(navsrc);
     Source("navsrc",authored.data(),authored.size());
+    const std::uint8_t quantization=theSettings.nAutomaticQuantization?1:0;
+    Source("object:quantization",&quantization,sizeof(quantization));
+    SourceModels(*static_cast<CFigureManager*>(world.GetFigureManager()));
     figures.clear();
     bodies.clear();poses.clear();bodySizes.clear();
     Changed();failures=0;
@@ -161,21 +170,51 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationWorld::Figure(CMapObject*
     figures.emplace(key,figure);return figure;
 }
 
-void NavigationWorld::ModelInputs(CMapObject* object) {
-    const std::string mask=object->GetMaskName();
-    if(!modelInputs.insert(mask).second)return;
-    auto* manager=static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager());
-    auto add=[&](const std::string& name) {
-        DWORD size=0;auto* data=manager->GetFile(name.c_str(),&size);
-        if(!data)return;
-        try {Source("model:"+name,data,size);}catch(...) {manager->CloseFile(data);throw;}
-        manager->CloseFile(data);
+void NavigationWorld::SourceModels(CFigureManager& manager) {
+    // Read the immutable primary MOB, including objects absent/changed in a
+    // saved world. No object factories, scripts, RNG or runtime state here.
+    owned::ResourceBlob blob;
+    blob.bytes=std::make_shared<const Navigation::Bytes>(sources.at("scene:mob"));
+    blob.identity.canonical_name=mobName;blob.identity.bytes=blob.bytes->size();
+    owned::MobDocument document;std::vector<owned::StaticObjectSource> unused;
+    owned::ResourceFailure failure;
+    if(!owned::parse_mob_document(blob,document,unused,failure,true))
+        throw std::runtime_error("Nav64: invalid source MOB: "+failure.message);
+    std::function<void(const std::vector<owned::MobChunkRecord>&)> visit;
+    visit=[&](const std::vector<owned::MobChunkRecord>& chunks) {
+        for(const auto& chunk:chunks) {
+            if(chunk.id==0x0000b006) { // ID_OBJTEMPLATE, for every original object family.
+                auto begin=blob.bytes->begin()+chunk.payload_offset;
+                auto end=std::find(begin,begin+chunk.payload_bytes,0);
+                ModelInputs(manager,ResourceName(std::string(begin,end).c_str()));
+            }
+            visit(chunk.children);
+        }
     };
-    add(mask+".mod");add(mask+".bon");add(mask+".lnk");
-    if(!manager->GetModel(mask))for(INT_PTR i=0;i<object->GetBodyPartNames().GetSize();++i) {
-        const std::string part=object->GetBodyPartNames()[i];
-        add(mask+part+".fig");add(mask+part+".bon");
-    }
+    visit(document.roots);
+}
+void NavigationWorld::ModelInputs(CFigureManager& manager,const std::string& mask) {
+    if(mask.empty()||!modelInputs.insert(mask).second)return;
+    auto add=[&](const std::string& name) {
+        DWORD size=0;auto* data=manager.GetFile(name.c_str(),&size);Navigation::Bytes bytes;
+        try {if(data)bytes.assign(data,data+size);}catch(...) {if(data)manager.CloseFile(data);throw;}
+        if(data)manager.CloseFile(data);
+        // Absence is explicit: adding a previously absent resource changes the key.
+        Source("model:"+name,bytes.data(),bytes.size());return bytes;
+    };
+    const auto model=add(mask+".mod");add(mask+".bon");const auto links=add(mask+".lnk");
+    if(!model.empty()||links.empty())return; // Packed MOD/BON already cover every part.
+    owned::ResourceBlob blob;blob.bytes=std::make_shared<const Navigation::Bytes>(links);
+    blob.identity.canonical_name=mask;blob.identity.bytes=links.size();
+    owned::ModelCpuAsset skeleton;owned::ResourceFailure failure;
+    auto bone=[&](const std::string& name,owned::ResourceBlob& selected,owned::ResourceFailure& failure) {
+        auto bytes=add(mask+name+".bon");
+        if(bytes.empty()){failure.code=owned::ResourceFailureCode::not_found;return false;}
+        selected.bytes=std::make_shared<const Navigation::Bytes>(std::move(bytes));return true;
+    };
+    if(!owned::decode_selected_skeleton(blob,mask,bone,skeleton,failure))
+        throw std::runtime_error("Nav64: invalid source skeleton: "+mask+": "+failure.message);
+    for(const auto& node:skeleton.nodes)add(mask+node.name+".fig");
 }
 const NavigationWorld::BodySize& NavigationWorld::Body(CUnit* unit) {
     const auto& c=unit->GetComplection();const std::string mask=unit->GetMaskName();
@@ -382,7 +421,6 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
         }
         input.solids.push_back(std::move(solid));
     }
-    if(!input.solids.empty()||!input.ground.empty())ModelInputs(object);
     if(!input.ground.empty()&&!objects.count(id)&&!pendingObjects.count(id))GameJournal::Event("NAV","walkable_object","NID=%d model=%s triangles=%zu",id,GameJournal::Quote(object->GetMaskName()).c_str(),input.ground.size());
     if(!input.solids.empty()||!input.ground.empty()||objects.count(id)||pendingObjects.count(id))pendingObjects[id]=std::move(input);
 }
@@ -403,7 +441,9 @@ void NavigationWorld::Snapshot() {
         source.insert(source.end(),entry.first.begin(),entry.first.end());source.push_back(0);
         const auto digest=Digest(entry.second);source.insert(source.end(),digest.begin(),digest.end());
     }
-    inputKey=Digest(Navigation::Inputs(*geometry,Navigation::Profile{},scene,source));
+    // Only original file inputs identify baked data. Live/saved object state
+    // supplies local support geometry, never a reason to reject a source file.
+    inputKey=Digest(Navigation::Inputs({},Navigation::Profile{},scene,source));
 }
 std::string NavigationWorld::Fingerprint(int type) {
     Snapshot();
@@ -473,11 +513,13 @@ Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass,const char* p
 }
 bool NavigationWorld::Prepare(CWorldServer& world,const char* phase) {
     const auto start=std::chrono::steady_clock::now();
-    // All fixed types, including future poses and summons, before publication.
-    for(int type=0;type<AgentCount;++type)if(!ForProfile(type,phase))return false;
+    // Load/verify original inputs once, including every future pose/summon type.
+    // Party deployment and repeat preparation reuse the same published snapshot.
+    if(!prepared)for(int type=0;type<AgentCount;++type)if(!ForProfile(type,phase))return false;
     for(const auto& entry:world.mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
         if(!ForUnit(static_cast<CUnit*>(entry.second),3,phase))return false;
     }
+    prepared=true;
     const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
     GameJournal::Event("NAV","prepared","scene=%s phase=%s profiles=%zu ms=%lld generation=%llu",GameJournal::Quote(scene.c_str()).c_str(),phase,meshes.size(),static_cast<long long>(ms),static_cast<unsigned long long>(generation));
     return true;
@@ -499,7 +541,7 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     }
     if(costs&&!Navigation::Levitates(mesh->profile))std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
-    if(route.status!=Navigation::Status::Complete&&failures++<16)GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.2f,%.2f,%.2f) goal=(%.2f,%.2f,%.2f)",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z);
+    if(route.status!=Navigation::Status::Complete&&failures++<16)GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.2f,%.2f,%.2f) goal=(%.2f,%.2f,%.2f) profile=%s height=%.2f max_length=%.3f route_length=%.3f",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z,mesh->profileId.c_str(),request.height,maxLength,route.length);
     return route;
 }
 bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) {

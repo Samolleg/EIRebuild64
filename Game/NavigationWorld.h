@@ -9,6 +9,7 @@
 class CMapObject;
 class CUnit;
 class CAIMap;
+class CFigureManager;
 class CWorldServer;
 namespace owned { struct FigureCpuAsset; struct ModelCpuAsset; struct AnimationClipAsset; }
 class NavigationWorld {
@@ -27,9 +28,11 @@ class NavigationWorld {
     std::set<std::string> normalizedBounds; // Offline release diagnostics, one entry per object/part.
     std::uint64_t generation = 1;
     unsigned failures = 0;
+    bool prepared = false; // Published baked snapshot; runtime objects cannot invalidate it.
     void Changed();
     void SyncObjects();
-    void ModelInputs(CMapObject* object);
+    void ModelInputs(CFigureManager& manager,const std::string& mask);
+    void SourceModels(CFigureManager& manager);
     void Snapshot();
     std::string Fingerprint(int type);
     std::string Filename(int type) const;
@@ -41,7 +44,7 @@ class NavigationWorld {
     Navigation::Mesh* ForUnit(CUnit* unit,int aiClass = 3,const char* phase = "late");
 public:
     void Source(const std::string& name,const void* data,size_t size);
-    void Scene(const char* mpr,const char* mob);
+    void Scene(CWorldServer& world,const char* mpr,const char* mob);
     Navigation::Geometry& Terrain() { return terrain; }
     void Object(CMapObject* object,bool remove,CAIMap& map);
     std::uint64_t Bake(CWorldServer& world,const std::filesystem::path& directory);

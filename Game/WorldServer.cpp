@@ -3450,7 +3450,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
         szMobFileName = "";
     }
 
-    aiMap.Navigation().Scene(pszMprName,pszMobName);
+    aiMap.Navigation().Scene(*this,pszMprName,pszMobName);
 
     // prepare for map objects loading
     if (szMobFileName.CompareNoCase(pszMobName) == 0)

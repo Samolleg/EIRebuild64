@@ -380,7 +380,7 @@ void Slot::PrepareWorld(Document &d)
     // SetWeather, camera, script execution, RNG initialization or renderer calls.
     if(!d.terrain.IsEmpty()) {
         if(!world->aiMap.Load(world->GetFullMobName(d.terrain)))Invalid("cannot load saved terrain");
-        world->aiMap.Navigation().Scene(d.terrain,d.mob);
+        world->aiMap.Navigation().Scene(*world,d.terrain,d.mob);
     }
     world->szZoneFileName=d.terrain;world->szMobFileName=d.mob;world->szCurrentZoneName=d.zone;
     world->aiMap.SetGraphRebuild(false);
