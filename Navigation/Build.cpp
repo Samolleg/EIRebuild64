@@ -64,15 +64,15 @@ Bytes Unpack(const void* input,size_t size,size_t expected) {
 }
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
-        (p.cellSize==.05f||p.cellSize==.1f||p.cellSize==.2f||p.cellSize==.4f) && p.cellHeight==.05f && p.tileCells==256 && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
+        p.cellSize==.1f && p.cellHeight==.05f && p.tileCells==256 && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
 }
 // v1.6.0 addTile does not take bounds for its internal sections. Validate all
 // counts and the exact aligned library layout BEFORE handing it cached bytes.
-void CheckTile(const unsigned char* data,size_t size) {
+dtMeshHeader CheckTileHeader(const unsigned char* data,size_t size) {
     Require(size>=sizeof(dtMeshHeader)&&size<=16*1024*1024,"Nav64: invalid tile size");
     dtMeshHeader h;std::memcpy(&h,data,sizeof(h));
     Require(h.magic==DT_NAVMESH_MAGIC && h.version==DT_NAVMESH_VERSION && h.layer==0 &&
-        h.polyCount>0&&h.polyCount<=32768 && h.vertCount>0&&h.vertCount<65536 && h.maxLinkCount>=0&&h.maxLinkCount<1000000 &&
+        h.polyCount>0&&h.polyCount<=32768 && h.vertCount>0&&h.vertCount<65536 && h.maxLinkCount>0&&h.maxLinkCount<1000000 &&
         h.detailMeshCount==h.polyCount&&h.detailVertCount>=0&&h.detailVertCount<1000000&&h.detailTriCount>=0&&h.detailTriCount<1000000&&
         h.bvNodeCount>=0&&h.bvNodeCount<=h.polyCount*2 && h.offMeshConCount==0&&h.offMeshBase==h.polyCount,"Nav64: invalid tile header");
     size_t needed=dtAlign4(sizeof(dtMeshHeader))+dtAlign4(sizeof(float)*3*h.vertCount)+dtAlign4(sizeof(dtPoly)*h.polyCount)+
@@ -82,6 +82,30 @@ void CheckTile(const unsigned char* data,size_t size) {
     Require(std::isfinite(h.walkableHeight)&&h.walkableHeight>0&&std::isfinite(h.walkableRadius)&&h.walkableRadius>=0&&
         std::isfinite(h.walkableClimb)&&h.walkableClimb>=0&&std::isfinite(h.bvQuantFactor)&&h.bvQuantFactor>0,"Nav64: invalid tile metrics");
     for(int i=0;i<3;++i)Require(std::isfinite(h.bmin[i])&&std::isfinite(h.bmax[i])&&h.bmin[i]<=h.bmax[i],"Nav64: invalid tile bounds");
+    return h;
+}
+// Byte lanes of each fixed-size array record are contiguous on disk. This is
+// reversible (including float bits); no vertex, height or polygon is quantized.
+// The header is unchanged so the decoder can bound every array before unshuffle.
+Bytes ShuffleTile(const unsigned char* data,size_t size,bool encode) {
+    const auto h=CheckTileHeader(data,size);Bytes result(size);
+    size_t offset=dtAlign4(sizeof(dtMeshHeader));std::memcpy(result.data(),data,offset);
+    auto array=[&](size_t count,size_t width) {
+        for(size_t lane=0;lane<width;++lane)for(size_t i=0;i<count;++i) {
+            const size_t plain=i*width+lane,packed=lane*count+i;
+            result[offset+(encode?packed:plain)]=data[offset+(encode?plain:packed)];
+        }
+        offset+=dtAlign4(int(count*width));
+    };
+    array(h.vertCount,sizeof(float)*3);array(h.polyCount,sizeof(dtPoly));
+    array(h.maxLinkCount,sizeof(dtLink));array(h.detailMeshCount,sizeof(dtPolyDetail));
+    array(h.detailVertCount,sizeof(float)*3);array(h.detailTriCount,4);
+    array(h.bvNodeCount,sizeof(dtBVNode));
+    Require(offset==size,"Nav64: shuffled tile layout mismatch");
+    return result;
+}
+void CheckTile(const unsigned char* data,size_t size) {
+    const auto h=CheckTileHeader(data,size);
     const auto* vertices=reinterpret_cast<const float*>(data+dtAlign4(sizeof(dtMeshHeader)));
     for(int i=0;i<h.vertCount*3;++i)Require(std::isfinite(vertices[i]),"Nav64: invalid tile vertex");
     size_t offset=dtAlign4(sizeof(dtMeshHeader))+dtAlign4(sizeof(float)*3*h.vertCount);
@@ -238,7 +262,9 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         // A zero error retained every voxel stair in every clearance contour.
         // One cell removes those stairs without removing region/pose borders.
         cfg.maxEdgeLen=120;cfg.maxSimplificationError=1.f;cfg.minRegionArea=0;cfg.mergeRegionArea=400;cfg.maxVertsPerPoly=6;
-        cfg.detailSampleDist=.6f;cfg.detailSampleMaxError=.05f;
+        // Keep Detour's floor/BASE heights, with a coarser sample grid and at
+        // most 10 cm sample error. This does not change walkable contours.
+        cfg.detailSampleDist=1.2f;cfg.detailSampleMaxError=.1f;
         cfg.bmin[0]=g.minimum.x+x*tileSize-cfg.borderSize*cfg.cs;cfg.bmin[1]=g.minimum.y-2;cfg.bmin[2]=g.minimum.z+z*tileSize-cfg.borderSize*cfg.cs;
         cfg.bmax[0]=g.minimum.x+(x+1)*tileSize+cfg.borderSize*cfg.cs;cfg.bmax[1]=g.maximum.y+domain.height+2;cfg.bmax[2]=g.minimum.z+(z+1)*tileSize+cfg.borderSize*cfg.cs;
         auto rasterize=[&]() -> RawField {
@@ -386,7 +412,19 @@ Bytes Store(const Mesh& mesh) {
     w.U(3); // Typed sections: tiles, surface metadata, reserved build layers.
     Wire tiles;tiles.U(mesh.tiles);
     const dtNavMesh* data=mesh.data.get();
-    for(int i=0;i<data->getMaxTiles();++i){const auto* t=data->getTile(i);if(t&&t->header){tiles.U(t->dataSize);tiles.B(t->data,t->dataSize);}}
+    for(int i=0;i<data->getMaxTiles();++i) {
+        const auto* t=data->getTile(i);if(!t||!t->header)continue;
+        Bytes raw(t->data,t->data+t->dataSize);
+        const size_t polyOffset=dtAlign4(sizeof(dtMeshHeader))+dtAlign4(sizeof(float)*3*t->header->vertCount);
+        auto* polys=reinterpret_cast<dtPoly*>(raw.data()+polyOffset);
+        for(int j=0;j<t->header->polyCount;++j)polys[j].firstLink=DT_NULL_LINK;
+        // addTile/connectIntLinks rebuild all links, including neighbour links.
+        // Never persist the process-local references of an already added tile.
+        std::memset(raw.data()+polyOffset+dtAlign4(sizeof(dtPoly)*t->header->polyCount),0,
+            dtAlign4(sizeof(dtLink)*t->header->maxLinkCount));
+        const auto shuffled=ShuffleTile(raw.data(),raw.size(),true);
+        tiles.U(std::uint32_t(shuffled.size()));tiles.B(shuffled.data(),shuffled.size());
+    }
     const auto packed=Pack(tiles.bytes);
     w.U(1);w.U(std::uint32_t(packed.size()+12));w.U(COMPRESS_ALGORITHM_LZMS);
     w.U(std::uint32_t(tiles.bytes.size()));w.U(std::uint32_t(packed.size()));w.B(packed.data(),packed.size());
@@ -412,8 +450,9 @@ std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std:
     auto expanded=w.U(),packed=w.U();Require(w.at<=end&&packed==end-w.at,"Nav64: truncated compressed tiles");
     Wire tiles;tiles.bytes=Unpack(bytes.data()+w.at,packed,expanded);w.at=end;
     auto count=tiles.U();Require(count<=std::uint32_t(p.maxTiles),"Nav64: tile count limit");
-    for(std::uint32_t i=0;i<count;++i){auto n=tiles.U();Require(n<=tiles.bytes.size()-tiles.at,"Nav64: truncated tile");CheckTile(tiles.bytes.data()+tiles.at,n);
-        auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,tiles.bytes.data()+tiles.at,n);tiles.at+=n;
+    for(std::uint32_t i=0;i<count;++i){auto n=tiles.U();Require(n<=tiles.bytes.size()-tiles.at,"Nav64: truncated tile");
+        const auto raw=ShuffleTile(tiles.bytes.data()+tiles.at,n,false);CheckTile(raw.data(),raw.size());
+        auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,raw.data(),n);tiles.at+=n;
         auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;
     }
     Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==1&&w.U()==3&&w.U()==4&&w.U()==0&&w.at==bytes.size(),"Nav64: invalid metadata/layer sections");

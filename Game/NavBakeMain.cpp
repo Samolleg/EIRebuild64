@@ -89,7 +89,7 @@ int wmain(int argc,wchar_t** argv) {
             const auto map=Extension(options.at(L"--map").string(),".mpr");
             maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
         }
-        const auto total=Clock::now();unsigned completed=0,errors=0;std::uint64_t totalBytes=0;
+        const auto total=Clock::now();unsigned completed=0,errors=0,missing=0;std::uint64_t totalBytes=0;
         exitCode=4;
         printf("BAKE_BEGIN maps=%zu output=%s algorithm=%u\n",maps.size(),output.string().c_str(),Navigation::AlgorithmVersion);fflush(stdout);
         for(const auto& map:maps) {
@@ -98,6 +98,14 @@ int wmain(int argc,wchar_t** argv) {
             try {
                 CWorldServer world(true);SavedWorldScope worldScope(&world);
                 struct DestroyWorld {CWorldServer& world;~DestroyWorld(){world.Destroy();}} cleanup{world};
+                const bool haveMpr=std::filesystem::is_regular_file(ModRuntime::MapPath(world.GetFullMobName(map.first.c_str())));
+                const bool haveMob=std::filesystem::is_regular_file(ModRuntime::MapPath(world.GetFullMobName(map.second.c_str())));
+                if(!haveMpr||!haveMob) {
+                    ++missing;
+                    fprintf(stderr,"MAP_MISSING mpr=%s mob=%s code=5 mpr_present=%d mob_present=%d reason=no_sources\n",
+                        map.first.c_str(),map.second.c_str(),int(haveMpr),int(haveMob));
+                    fflush(stderr);continue;
+                }
                 if(!world.Create()||!world.LoadNavigationScene(map.first.c_str(),map.second.c_str()))
                     throw std::runtime_error("Shared MPR/MOB import failed");
                 const auto importMs=Milliseconds(start);
@@ -107,13 +115,13 @@ int wmain(int argc,wchar_t** argv) {
                     map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),static_cast<unsigned long long>(bytes));
             }catch(const std::exception& e) {
                 ++errors;
-                fprintf(stderr,"MAP_ERROR mpr=%s mob=%s ms=%lld reason=%s\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),e.what());
+                fprintf(stderr,"MAP_ERROR mpr=%s mob=%s code=4 ms=%lld reason=%s\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),e.what());
             }
             fflush(stdout);fflush(stderr);
         }
         if(totalBytes>400ull*1024*1024){++errors;fprintf(stderr,"BAKE_ERROR code=4 reason=campaign_exceeds_400_MiB\n");}
-        printf("BAKE_DONE maps=%zu completed=%u errors=%u total_ms=%lld bytes=%llu\n",maps.size(),completed,errors,Milliseconds(total),static_cast<unsigned long long>(totalBytes));fflush(stdout);
-        return errors?4:0;
+        printf("BAKE_DONE maps=%zu completed=%u missing=%u errors=%u total_ms=%lld bytes=%llu\n",maps.size(),completed,missing,errors,Milliseconds(total),static_cast<unsigned long long>(totalBytes));fflush(stdout);
+        return errors?4:missing?5:0;
     }catch(const std::exception& e) {
         fprintf(stderr,"BAKE_ERROR code=%d reason=%s\n",exitCode,e.what());return exitCode;
     }

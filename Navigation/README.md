@@ -1,8 +1,8 @@
-# Nav64 offline data contract (X64NAV01 r11)
+# Nav64 offline data contract (X64NAV01 r12)
 
 RecastNavigation v1.6.0 (zlib), unchanged sources; pin/archive digest:
 third_party/recastnavigation.lock.json. Recast and Detour use DT_POLYREF64.
-Algorithm 6, container 2, library 0x010600, SaveSchema 4.
+Algorithm 7, container 3, library 0x010600, SaveSchema 4.
 
 The game ONLY reads Maps/Nav64 in the active mod. No navmesh generation on
 zone entry, no Cache64/Nav reads/writes, no fallback to the legacy graph.
@@ -36,12 +36,19 @@ deduplicates MPR/MOB pairs, and continues after a map error.
 
 Exit codes: 0 = all requested outputs written; 2 = invalid arguments;
 3 = package/database/registration initialization failure; 4 = one or more map
-imports, builds or output writes failed. Errors identify the map and reason.
+imports, builds or output writes failed, or campaign size exceeds 400 MiB;
+5 = some registered MPR/MOB sources are absent, all other maps were processed.
+Code 4 takes precedence over 5 if both occur. No map-size limit applies.
+Missing sources are resolved through the SAME effective mod/Base map lookup
+as the importer, before importing. MAP_MISSING identifies MPR/MOB, code=5,
+mpr_present/mob_present and reason=no_sources. It does not change registrations
+or replace a missing map. Other data/import errors remain MAP_ERROR code=4.
 stdout is flushed after MAP_BEGIN, PROFILE, MAP_DONE and BAKE_DONE records;
-stderr contains MAP_ERROR/BAKE_ERROR. PROFILE gives type, radius, tiles, wall
+stderr contains MAP_MISSING/MAP_ERROR/BAKE_ERROR. PROFILE gives type, radius, tiles, wall
 ms, raster/polygon CPU ms, bytes and fingerprint. MAP_DONE gives import and
 total wall ms and the sum of eight profile file sizes. BAKE_DONE gives
-counts/errors, total wall ms and total bytes. BOUNDS_NORMALIZED records
+counts (completed, missing, errors), total wall ms and total bytes. Every
+requested pair belongs to exactly one of those three counts. BOUNDS_NORMALIZED records
 MPR/MOB/NID/model/part for every reversed finite solid BV, once per map part.
 Fields are space-separated key=value; names are resource names without spaces,
 reason is the remaining text after reason=. Times are integer milliseconds,
@@ -56,7 +63,7 @@ the header. Each file embeds BOTH source names and the profile ID; the mapper
 matches that triple against its open MPR/MOB pair and requested profile,
 then checks the fingerprint. Do not infer a map solely from a filename/hash.
 Renaming a file cannot change its embedded identity. The game checks the same
-triple before adding tiles. Container 1/algorithm 5 files must be re-baked.
+triple before adding tiles. Older containers/algorithms must be re-baked.
 The container embeds a SHA-256 of normalized geometry, effective MPR header/
 sectors/material registry, raw primary MPR/MOB, effective object model/BON
 payloads, authoring .navsrc bytes (explicitly empty when absent), profile,
@@ -74,7 +81,7 @@ Geometry is assembled in the same stable object order in both executables.
 | small | 0.1 | 0.2 / 0.4 / 1 / 1.6 | 0.1 |
 | human | 0.2 | 0.4 / 1 / 1.6 / 2.2 | 0.1 |
 | large | 0.5 | 0.4 / 1.6 / 2.2 / 3 | 0.1 |
-| giant | 1 | 0.4 / 1.6 / 3 / 6 | 0.2 |
+| giant | 1 | 0.4 / 1.6 / 3 / 6 | 0.1 |
 | levitate_tiny | 0 | 0.2 / 0.4 / 1 / 2 | 0.1 |
 | levitate_small | 0.2 | 0.2 / 0.4 / 1 / 2 | 0.1 |
 | levitate | 0.5 | 0.2 / 0.4 / 1 / 2 | 0.1 |
@@ -101,11 +108,15 @@ measured half-width. Contour simplification error is one cell instead of
 zero; region adjacency and area/pose boundaries still constrain contours.
 Detail height samples are RETAINED: Detour projection/step/restore use them,
 including BASE over terrain. Removing them would flatten interior hills and
-change floor selection. In inspected r10 tiles detail was only 13-16% of bytes;
-polygon/link/BV/vertex counts dominated. The fix reduces voxel stairs and
-compresses the section instead of discarding height information.
-Detour tiles enter each mesh in fixed z/x order. A map exceeding 8 MiB across
-profiles fails before output replacement; --all also enforces 400 MiB total.
+change floor selection. The detail grid is 1.2 m (previously 0.6 m), with
+sample height error at most 0.1 m (previously 0.05 m). Walkable contours,
+clearance masks and polygon adjacency are unchanged by detail settings.
+All profiles use 0.1 m cells, including giant (previously 0.2 m).
+Detour tiles enter each mesh in fixed z/x order. Disk copies omit runtime
+links (zeroed link storage, firstLink=DT_NULL_LINK), which addTile reconstructs
+from the retained polygon neighbours and tile portals. Each tile array is
+then byte-shuffled before lossless LZMS compression (see below).
+There is no per-map size cap. Campaign target is 300 MiB, strict cap 400 MiB.
 
 Game (x,y,z) maps to Recast (x,z,-y). Units are metres. Ground is the actual
 MPR triangles with sector offsets/water. BASE/IsBridge parts use effective FIG
@@ -120,10 +131,10 @@ Min/Max over all eight endpoints; the old aiMap object path also enumerates
 both endpoints rather than requiring their order. Negative constitution is
 not a corrupt volume. NaN/infinite geometry still reports its source.
 
-## Container 2
+## Container 3
 
 Little endian fields, no raw host pointers/structs except pinned Detour tile
-payloads: NAV664 magic (u32 0x3656414e, 0x00003436), container=2, algorithm=6,
+payloads: NAV664 magic (u32 0x3656414e, 0x00003436), container=3, algorithm=7,
 library=0x010600, endian=0x12345678, polyrefBytes=8; four length-prefixed UTF-8
 strings: fingerprint, MPR basename, MOB basename, profile ID. String lengths
 are u32 byte counts without NUL. Then six f32 profile fields (radius, height,
@@ -133,10 +144,21 @@ Each section is u32 type, u32 payloadBytes, payload:
 
 - 1: u32 codec=5 (Windows Compression API LZMS, buffer mode, no RAW),
   u32 expandedBytes, u32 compressedBytes, compressed buffer. The expanded
-  buffer is u32 tileCount followed by (u32 tileBytes, Detour tile bytes).
+  buffer is u32 tileCount followed by (u32 tileBytes, filtered Detour tile).
   Expansion is bounded to 512 MiB and must have exactly the declared length.
 - 2: u32 domainCount=1, u32 domainId=1 (imported terrain/BASE).
 - 3: u32 layerCount=0 (reserved until NAV05).
+
+Filtered tiles keep the 4-aligned dtMeshHeader unchanged. Following arrays,
+in Detour order, transpose bytes within each fixed-size record array:
+vertices (12 bytes), dtPoly (32), dtLink (16), dtPolyDetail (12), detail
+vertices (12), detail triangles (4), dtBVNode (16). For N records of width W,
+stored[lane*N+i] = native[i*W+lane]. Counts come from the unchanged header;
+each section remains 4-aligned. No off-mesh connections are present. After
+LZMS decompression, the reader bounds the header/counts/array lengths, reverses
+the shuffle and performs the existing complete tile checks before addTile.
+This preserves every geometry float bit, index, material and clearance flag;
+only runtime links are regenerated by Detour, as for an ordinary new tile.
 
 Compression is lossless and uses the OS cabinet.dll, linked via cabinet.lib;
 no dependency DLL is added to the package. API contract:

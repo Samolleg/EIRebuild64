@@ -32,7 +32,7 @@ const Agent Agents[]={
     {"small",          {.1f,.2f,40.f,.35f,.1f}},
     {"human",          {.2f,.4f,40.f,.35f,.1f}},
     {"large",          {.5f,.4f,40.f,.35f,.1f}},
-    {"giant",          {1.f,.4f,40.f,.35f,.2f}},
+    {"giant",          {1.f,.4f,40.f,.35f,.1f}},
     {"levitate_tiny",  {0.f,.2f,60.f,.35f,.1f}},
     {"levitate_small", {.2f,.2f,60.f,.35f,.1f}},
     {"levitate",       {.5f,.2f,60.f,.35f,.1f}}
@@ -429,7 +429,6 @@ std::uint64_t NavigationWorld::Bake(CWorldServer& world,const std::filesystem::p
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;
         outputs.push_back(Navigation::Store(mesh));totalBytes+=outputs.back().size();
     }
-    if(totalBytes>8u*1024*1024)throw std::runtime_error("Nav64: baked map exceeds 8 MiB ("+std::to_string(totalBytes)+" bytes)");
     std::filesystem::create_directories(directory);
     for(const auto& entry:normalizedBounds)printf("BOUNDS_NORMALIZED mpr=%s mob=%s %s\n",mapName.c_str(),mobName.c_str(),entry.c_str());
     for(int type=0;type<AgentCount;++type) {
