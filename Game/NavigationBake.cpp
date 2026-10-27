@@ -279,8 +279,12 @@ Navigation::Geometry NavigationBake::Geometry() {
     }
     input.Bounds();return input;
 }
-Navigation::Bytes NavigationBake::Bodies(CWorldServer& world) {
+Navigation::Bytes NavigationBake::Bodies(CWorldServer& world,const Navigation::Bytes& previous) {
     std::set<std::string> models,missing;
+    // Partial map/model releases retain the other maps' model coverage, but
+    // remeasure it from current resources instead of copying old body sizes.
+    if(!previous.empty())for(const auto& entry:Navigation::LoadBodies(previous).samples)
+        models.insert(std::get<0>(entry.first));
     auto* manager=static_cast<CFigureManager*>(world.GetFigureManager());
     for(int i=0;i<theUnitDatabase.prototypes.GetNumEntries();++i) {
         const auto& prototype=*theUnitDatabase.prototypes[i];
@@ -310,8 +314,24 @@ Navigation::Bytes NavigationBake::Bodies(CWorldServer& world) {
         Body(world,mask,float(strength),float(grace),float(tall));
     return Navigation::StoreBodies(bodyTable);
 }
-std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string& mobName,const std::filesystem::path& directory,const Navigation::Bytes& table,const Navigation::Bytes& authored) {
+std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string& mobName,const std::filesystem::path& directory,Navigation::Bytes& table,const Navigation::Bytes& authored) {
     bodyTable=Navigation::LoadBodies(table);
+    // MOB units may use models outside the conventional un* resource names.
+    // Measure those real bodies offline and retain their full morph grid in
+    // the shared campaign table; the game still only reads that table.
+    const auto previousSamples=bodyTable.samples.size();
+    for(const auto& entry:sourceWorld->mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
+        auto* unit=static_cast<CUnit*>(entry.second);
+        const auto mask=ResourceName(unit->GetMaskName());
+        if(!bodyTable.samples.count({mask,0.f,0.f,0.f}))
+            for(int strength=0;strength<=2;++strength)for(int grace=0;grace<=2;++grace)for(int tall=0;tall<=2;++tall)
+                Body(*sourceWorld,mask,float(strength),float(grace),float(tall));
+    }
+    if(bodyTable.samples.size()!=previousSamples) {
+        auto expanded=StoreBodies(bodyTable);
+        Atomic(directory/BodyFilename,expanded);table=std::move(expanded);
+        printf("BODIES_EXTENDED models_and_shapes=%zu bytes=%zu\n",bodyTable.samples.size(),table.size());fflush(stdout);
+    }
     auto geometry=Geometry();
     std::vector<Navigation::BuildRequest> requests;
     for(int type=0;type<AgentCount;++type){requests.push_back({Agents[type].profile});}

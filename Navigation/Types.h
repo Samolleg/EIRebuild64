@@ -7,7 +7,7 @@
 
 namespace Navigation {
 constexpr std::uint32_t ContainerVersion = 6;
-constexpr std::uint32_t AlgorithmVersion = 13;
+constexpr std::uint32_t AlgorithmVersion = 14;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -20,7 +20,7 @@ inline Point FromNav(Point p) { return {p.x,-p.z,p.y}; }
 struct Profile {
     float radius = .4f, height = 1.6f, slope = 40.f, climb = .35f;
     float cellSize = .1f, cellHeight = .05f;
-    std::uint32_t tileCells = 64;
+    std::uint32_t tileCells = 32;
     unsigned materialClass = 3;
 };
 // Four nested clearance permissions, independent of material areas. A human

@@ -406,7 +406,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     mesh->rasterMs=rasterUs.load()/1000;mesh->polygonMs=polygonUs.load()/1000;
     for(auto& tile:layers)for(auto& layer:tile)mesh->layers.push_back(std::move(layer));
     params.maxTiles=int(dtNextPow2(static_cast<unsigned>((std::max)(size_t(nx*nz*4),mesh->layers.size()*2))));
-    Require(params.maxTiles<=32768&&dtStatusSucceed(mesh->data->init(&params)),"Nav64: cannot initialize Detour mesh");
+    Require(params.maxTiles<=131072&&dtStatusSucceed(mesh->data->init(&params)),"Nav64: cannot initialize Detour mesh");
 
     mesh->cache=std::make_unique<Cache>(*mesh);
     for(int i=0;i<mesh->cache->data->getTileCount();++i) {
@@ -480,7 +480,7 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     mesh->profile=w.ProfileIn();CheckProfile(mesh->profile);
     Wire a,b;auto profile=expected;profile.climb=mesh->profile.climb;a.ProfileOut(profile);b.ProfileOut(mesh->profile);Require(a.bytes==b.bytes,"Nav64: mismatched profile");
     dtNavMeshParams p{};for(auto& v:p.orig)v=w.F();p.tileWidth=w.F();p.tileHeight=w.F();p.maxTiles=w.U();p.maxPolys=w.U();
-    Require(p.maxTiles>0&&p.maxTiles<=32768&&dtNextPow2(p.maxTiles)==p.maxTiles&&p.maxPolys==32768&&p.tileWidth==expected.cellSize*expected.tileCells&&p.tileHeight==expected.cellSize*expected.tileCells,"Nav64: invalid mesh limits");
+    Require(p.maxTiles>0&&p.maxTiles<=131072&&dtNextPow2(p.maxTiles)==p.maxTiles&&p.maxPolys==32768&&p.tileWidth==expected.cellSize*expected.tileCells&&p.tileHeight==expected.cellSize*expected.tileCells,"Nav64: invalid mesh limits");
     mesh->data.reset(dtAllocNavMesh());Require(mesh->data&&dtStatusSucceed(mesh->data->init(&p)),"Nav64: mesh initialization failed");
     Require(w.U()==3,"Nav64: invalid section count");
     Require(w.U()==1,"Nav64: missing tile section");auto section=w.U();Require(section<=w.bytes.size()-w.at,"Nav64: truncated tile section");auto end=w.at+section;

@@ -30,8 +30,8 @@ public:
     Navigation::Geometry terrain;
     void Bind(CWorldServer& world,CAIMap& map) { sourceWorld=&world;sourceMap=&map; }
     void Configure(const Navigation::Authoring& policy) { authored=policy; }
-    Navigation::Bytes Bodies(CWorldServer& world);
+    Navigation::Bytes Bodies(CWorldServer& world,const Navigation::Bytes& previous={});
     void Object(CMapObject* object,bool remove,CAIMap& map);
     std::uint64_t Bake(const std::string& map,const std::string& mob,const std::filesystem::path& directory,
-        const Navigation::Bytes& table,const Navigation::Bytes& authored);
+        Navigation::Bytes& table,const Navigation::Bytes& authored);
 };

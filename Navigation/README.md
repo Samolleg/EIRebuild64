@@ -1,7 +1,7 @@
 # Nav64 X64NAVCORE working candidate
 
 Not a release. zone1 builds and the start/exit/gate/ramp queries pass.
-The exact 1.3/0.8 m sites and site losses still need pilot acceptance. See
+The zone1 pilot was accepted offline in REVIEW rework 3. See
 work/supervision/X64NAVCORE/REPORT.md, section "Доработка" in the private
 workspace. Game installation and launch are not authorized by this task.
 
@@ -50,7 +50,7 @@ remain; complete AI-class policy at a common radius is still open.
 Recast v1.6.0 source is unchanged. RC_MAX_LAYERS_DEF=255 uses its supported
 compile-time parameter: monotone region IDs are bytes, and the previous
 63-entry overlap list could overflow with only four vertical floors.
-The 64-cell tiles are 6.4 m wide (cell size 0.1 m, cell height 0.05 m).
+The 32-cell tiles are 3.2 m wide (cell size 0.1 m, cell height 0.05 m).
 Layer headers include actual portal-adjusted height grids. LayerCodec
 consumes three compressed grids and accepts Detour's four-grid capacity.
 
@@ -67,7 +67,7 @@ closed/open geometry and queues still require gameplay acceptance.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 6, algorithm 13, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 6, algorithm 14, Recast 0x010600,
   DT_POLYREF64; names/profile; ready shuffled/LZMS tiles; surface schema;
   losslessly compressed multi-level TileCache layers. The whole RLE layer
   section is additionally compressed with LZMS; runtime RLE is unchanged.
@@ -81,8 +81,10 @@ closed/open geometry and queues still require gameplay acceptance.
   selection remains open; the current client still uses its world support.
 - Off-mesh records hold both endpoints, radius, endpoint surface IDs and
   flags; none are emitted or connected in the current importer.
-- bodies.navbody: BODY version 1, algorithm 13, model/constitution, radius,
+- bodies.navbody: BODY version 1, algorithm 14, model/constitution, radius,
   profile and pose heights. Effective un*.mod/un*.lnk resources are covered.
+  Imported MOB units additionally contribute any models outside un* and their
+  complete morph grids to the shared body table during campaign baking.
 
 Runtime cache state and Detour references are not saved. Existing UInt64
 navigation addresses now admit attributed BASE IDs, validated on restore.
@@ -98,8 +100,8 @@ legacy rejection stage (cell policy, cell expansion, gradient or border).
 The old mask explanation is read-only and does not supply Recast parameters.
 connections.csv uses the named object surface and the class clearance.
 
-Exact narrow-passage sites, classification of remaining site losses,
+Further classification of site losses,
 all spawn/random-goal paths, class policy, runtime timing,
 save/load, door crowds and complete client floor selection remain open.
-All-map baking and handoff are gated on the full zone1 pilot. No runtime
+All-map baking and pilot handoff were authorized by REVIEW rework 3. No runtime
 performance or gameplay result is inferred from a successful build.

@@ -48,7 +48,7 @@ public:
     Navigation::Geometry* Terrain(); // Null in game sessions.
     void Scene(const char* mpr,const char* mob);
     void Object(CMapObject* object,bool remove,CAIMap& map);
-    std::uint64_t Bake(const std::filesystem::path& directory,const Navigation::Bytes& table,CWorldServer& world);
+    std::uint64_t Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world);
     bool Load();
     void Advance();
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }

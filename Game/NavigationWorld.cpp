@@ -142,7 +142,7 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
         boxes.push_back(box);
     }
 }
-std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,const Navigation::Bytes& table,CWorldServer& world) {
+std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world) {
     if(!baker)throw std::runtime_error("Nav64: baking requires NavBake tool");
     auto path=std::filesystem::path(ModRuntime::MapPath(mapName.c_str()));path.replace_extension(".navsrc");
     const auto authored=std::filesystem::exists(path)?Read(path):Navigation::Bytes{};

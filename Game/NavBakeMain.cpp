@@ -98,7 +98,16 @@ int wmain(int argc,wchar_t** argv) {
             const auto started=Clock::now();CWorldServer world(true);SavedWorldScope scope(&world);
             struct Destroy {CWorldServer& world;~Destroy(){world.Destroy();}} cleanup{world};
             if(!world.Create())throw std::runtime_error("Cannot create body table importer");
-            NavigationBake baker;bodyTable=baker.Bodies(world);
+            Navigation::Bytes previous;
+            const auto previousPath=output/Navigation::BodyFilename;
+            if(!all&&std::filesystem::is_regular_file(previousPath)) {
+                std::ifstream file(previousPath,std::ios::binary|std::ios::ate);
+                const auto size=file.tellg();
+                if(size<=0||size>16*1024*1024)throw std::runtime_error("Invalid previous body table; re-bake with --all");
+                previous.resize(static_cast<size_t>(size));file.seekg(0);
+                if(!file.read(reinterpret_cast<char*>(previous.data()),previous.size()))throw std::runtime_error("Cannot read previous body table");
+            }
+            NavigationBake baker;bodyTable=baker.Bodies(world,previous);
             printf("BODIES models_and_shapes=%zu bytes=%zu ms=%lld file=%s\n",Navigation::LoadBodies(bodyTable).samples.size(),bodyTable.size(),Milliseconds(started),Navigation::BodyFilename);fflush(stdout);
         }
         {
@@ -111,6 +120,7 @@ int wmain(int argc,wchar_t** argv) {
             if(!MoveFileExW(temporary.c_str(),(output/Navigation::BodyFilename).c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot publish body table");
             totalBytes+=bodyTable.size();
         }
+        const auto initialBodyBytes=bodyTable.size();
         printf("BAKE_BEGIN maps=%zu output=%s algorithm=%u\n",maps.size(),output.string().c_str(),Navigation::AlgorithmVersion);fflush(stdout);
         for(const auto& map:maps) {
             const auto start=Clock::now();
@@ -144,6 +154,8 @@ int wmain(int argc,wchar_t** argv) {
             }
             fflush(stdout);fflush(stderr);
         }
+        // Individual MOBs may extend the shared table with non-un* models.
+        totalBytes+=bodyTable.size()-initialBodyBytes;
         if(totalBytes>400ull*1024*1024)fprintf(stderr,"BAKE_WARNING reason=campaign_exceeds_400_MiB\n");
         printf("BAKE_DONE maps=%zu completed=%u missing=%u errors=%u skipped=%u total_ms=%lld bytes=%llu\n",maps.size(),completed,missing,errors,skipped,Milliseconds(total),static_cast<unsigned long long>(totalBytes));fflush(stdout);
         return errors?4:missing?5:0;
