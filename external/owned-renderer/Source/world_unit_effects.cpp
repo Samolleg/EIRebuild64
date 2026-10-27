@@ -111,8 +111,16 @@ void build_ground_cover_units(const RetainedVisualFrame& frame,const TerrainCpuA
             // Cover rows (no details) leave levitating races out: they never
             // part the grass. Critter threat rows keep them.
             if(!details&&!ground_cover::unit_presses_cover(unit.values.locomotion))continue;
-            // Flying or levitating units can report a root at ground height;
-            // only a posed model that reaches the ground parts the grass.
+            // Cover contact is the unit position, independent of animation.
+            // Posed part envelopes change between walking, running and crawling
+            // and are unsuitable for either contact or the pressing radius.
+            if(!details){
+                if(p[2]>ground+.5f||!(snow_trail_extent(unit.values.target_half_extent)>0))continue;
+                output.push_back({p[0],p[1],std::max(p[2],ground),unit.envelope_radius});
+                if(trails)trails->push_back(snow_trail_row(unit));
+                continue;
+            }
+            // Critter threat rows retain their posed-height rule.
             float lowest=std::numeric_limits<float>::max();
             if(unit.assembly)for(std::size_t part=0;part<unit.assembly->parts.size();++part){
                 NativeWorldBounds bounds{};
