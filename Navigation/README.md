@@ -39,8 +39,10 @@ compact fields, monotone regions, contours and polygon meshes produce ready
 Detour tiles including multiple elevations. No detail-mesh samples are
 stored: Detour triangulates the polygon fan, and gameplay supplies support Z.
 Contour error is selected from the compact region topology before contouring:
-0.25 cell on tiles with holes (Euler characteristic), otherwise one cell. This preserves
-narrow holes which a one-cell error can collapse and misclassify as outlines.
+0.25 cell on tiles with holes (Euler characteristic), otherwise one cell.
+A one-cell error was observed collapsing a hole and misclassifying its outline.
+The current refinement is insufficient: zone18 still reports multiple outlines
+for region 6 (flight radius 0.2, tile 29,51). Full campaign release is blocked.
 Every Recast error fails the tile even if a library function returns success.
 No library sources are modified.
 
