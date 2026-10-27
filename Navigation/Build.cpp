@@ -350,13 +350,15 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         r.polys=rcAllocPolyMesh();Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: polygon build failed");
         if(!r.polys->npolys){polygonUs.fetch_add(micros(begin));return;}
         Require(r.polys->npolys<=params.maxPolys&&r.polys->nverts<65536,"Nav64: tile polygon limit exceeded");
-        // Detail samples use floor(XZ/cs), while simplified contours follow
-        // voxel corners. Their one-cell contour error can therefore leave a
-        // sample TWO cells from a valid height span when radius erosion is zero.
-        // Recast derives its height search radius from maxEdgeError; include
-        // this cell-quantization margin for sampling ONLY, after polygon build.
-        // Contours, agent radii and passage connectivity remain unchanged.
-        r.polys->maxEdgeError=std::ceil(cfg.maxSimplificationError)+1.f;
+        // A simplified contour can sample an unset cell in its height patch,
+        // especially without radius erosion. Recast uses maxEdgeError as the
+        // search radius and returns 0xffff if that radius finds no height.
+        // Cover the entire local patch, whose dimensions cannot exceed the
+        // compact field. getHeight still stops at the FIRST valid ring, so
+        // ordinary samples cost the same and stay on this patch's surface.
+        // Set this sampling-only input AFTER polygon build: no contour,
+        // erosion, radius or passage connectivity is changed.
+        r.polys->maxEdgeError=float(std::max(r.compact->width,r.compact->height));
         r.detail=rcAllocPolyMeshDetail();Require(r.detail&&rcBuildPolyMeshDetail(&context,*r.polys,*r.compact,cfg.detailSampleDist,cfg.detailSampleMaxError,*r.detail),"Nav64: detail build failed");
         for(int i=0;i<r.polys->npolys;++i) {
             const auto encoded=r.polys->areas[i];

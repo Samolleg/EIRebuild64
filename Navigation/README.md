@@ -192,13 +192,16 @@ The tile border was already max(domain radius / cell size) + 3 cells:
 13 cells for ground and 8 for levitation. Zero-radius profiles have the same
 border as their domain. No border, erosion or passage contour is changed.
 After polygon construction only, maxEdgeError supplied to the detail builder
-is ceil(contour simplification error) + 1 cell (2 cells here). Recast v1.6.0
-uses ceil(maxEdgeError) as getHeight's search radius. The extra cell accounts
-for floor(XZ/cell size) sampling of voxel-corner contours: one-cell contour
-simplification can put a sample two cells from valid compact-height spans.
-A one-cell search can return RC_UNSET_HEIGHT, which used to become a 3273 m
-vertex. The expanded search reads the nearest valid ring in the SAME height
-patch/layer; it does not change the polygons or clamp resulting heights.
+is max(compact-field width, height), bounding the search by the WHOLE local
+height patch. Recast v1.6.0 uses ceil(maxEdgeError) as getHeight's search
+radius. A contour sample can fall on an unset cell; the previous one-cell
+search could return RC_UNSET_HEIGHT, later converted into a 3273 m vertex.
+Even two cells were insufficient on zone19/tiny and zone8/levitate_tiny.
+Every clamped sample and every filled height-patch cell is within this bound
+because a polygon's height patch is no larger than the compact field.
+getHeight still stops at the FIRST filled ring of the SAME height patch/layer;
+ordinary samples do not scan the whole field. No polygon, erosion, radius or
+passage contour is changed, and resulting heights are never clamped.
 
 Before writing any profile of a map, the baker checks every polygon and
 stored detail vertex against that tile's vertical bounds, allowing 2 cell
