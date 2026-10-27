@@ -625,14 +625,15 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             return true;
         };
         if(mobName=="zone1.mob") {
-            // Exact sites rejected in r3/r4 development, retained even if a
-            // lossless source plane slightly changes the funnel's route.
+            // Exact support sites. The first three were moved to the nearest
+            // points of the same terrain platform after GPJUN02 geometry
+            // changed (REVIEW 14); projection/continuity tolerances stay fixed.
             struct SupportSite { Point point; int type; };
             const SupportSite sites[]={
-                {{70.252174f,142.291306f,14.329783f},Small},
-                {{70.253365f,142.291519f,14.329289f},Small},
+                {{70.252174f,142.300003f,14.332336f},Small},
+                {{70.253365f,142.300003f,14.331959f},Small},
                 {{74.453560f,143.699066f,14.370000f},Human},
-                {{70.249107f,142.295761f,14.330360f},Human},
+                {{70.249107f,142.399994f,14.343869f},Human},
                 {{195.559174f,113.828857f,7.223805f},Small},
                 {{195.559174f,113.828857f,7.223805f},Human},
                 {{194.589737f,113.851402f,6.837992f},Small},
