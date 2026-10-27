@@ -10,8 +10,11 @@ struct Triangle {
     // MPR water layer, per vertex, above the original ground. Objects use zero.
     Point waterDepth;
     std::uint8_t levitateArea = 1;
+    std::array<std::uint8_t,8> classAreas = {1,1,1,1,1,1,1,1};
+    bool terrain = false;
 };
 inline Triangle Surface(Triangle t,const Profile& p) {
+    if(t.terrain)t.area=t.classAreas[p.materialClass];
     if(Levitates(p)) {t.a.z+=t.waterDepth.x;t.b.z+=t.waterDepth.y;t.c.z+=t.waterDepth.z;t.area=t.levitateArea;}
     return t;
 }

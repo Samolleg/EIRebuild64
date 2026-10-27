@@ -7,14 +7,14 @@ namespace Navigation {
 enum AgentType { Tiny, Small, Human, Large, Giant, LevitateTiny, LevitateSmall, Levitate, AgentCount };
 struct Agent { const char* name; Profile profile; };
 inline const Agent Agents[]={
-    {"tiny",           {0.f,.2f,40.f,.35f,.1f}},
-    {"small",          {.1f,.2f,40.f,.35f,.1f}},
+    {"tiny",           {0.f,.2f,40.f,.35f,.1f,.05f,128,1}},
+    {"small",          {.1f,.2f,40.f,.35f,.1f,.05f,128,2}},
     {"human",          {.2f,.4f,40.f,.35f,.1f}},
-    {"large",          {.5f,.4f,40.f,.35f,.1f}},
-    {"giant",          {1.f,.4f,40.f,.35f,.1f}},
-    {"levitate_tiny",  {0.f,.2f,60.f,.35f,.1f}},
-    {"levitate_small", {.2f,.2f,60.f,.35f,.1f}},
-    {"levitate",       {.5f,.2f,60.f,.35f,.1f}}
+    {"large",          {.5f,.4f,40.f,.35f,.1f,.05f,128,6}},
+    {"giant",          {1.f,.4f,40.f,.35f,.1f,.05f,128,7}},
+    {"levitate_tiny",  {0.f,.2f,60.f,.35f,.1f,.05f,128,0}},
+    {"levitate_small", {.2f,.2f,60.f,.35f,.1f,.05f,128,0}},
+    {"levitate",       {.5f,.2f,60.f,.35f,.1f,.05f,128,0}}
 };
 inline int ProfileForRadius(float radius,bool levitate) {
     const int first=levitate?LevitateTiny:Tiny,last=levitate?Levitate:Giant;

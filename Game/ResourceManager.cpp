@@ -194,3 +194,12 @@ BOOL CResourceManager::AddGraphicsResources(LPCSTR category)
     }
     return TRUE;
 }
+
+void CResourceManager::GetFileList(CStringArray& names,LPCSTR mask) {
+    std::set<std::string> unique;
+    for(const auto& resource:resources) {
+        CStringArray entries;resource.second->GetFileList(entries,mask);
+        for(INT_PTR i=0;i<entries.GetSize();++i)unique.emplace(entries[i].GetString());
+    }
+    for(const auto& name:unique)names.Add(name.c_str());
+}

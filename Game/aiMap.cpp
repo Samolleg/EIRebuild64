@@ -1046,6 +1046,11 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
         int y=Float2AITile((triangle.a.y+triangle.b.y+triangle.c.y)/3);
         triangle.area=TileInBounds(x,y)?BYTE((tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains>>12)&15):0;
         triangle.levitateArea=TileInBounds(x,y)?BYTE(tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains&15):0;
+        triangle.terrain=true;
+        for(int c=0;c<8;++c) {
+            STerrainTile policy;
+            triangle.classAreas[c]=TileInBounds(x,y)?BYTE(CalcOneTilePassability(policy,c,Float2Int(fpUnitsHeights[c]*fpZMult),x,y)):0;
+        }
     }
     // Initialize rest objects
     dLocks.SetSizes(nMapSizeX, nMapSizeY);
@@ -1585,34 +1590,18 @@ BYTE CAIMap::GetUnitLockCheck(CUnit *pUnit)
 /////////////////////////////////////////////////////////////////////////////////////
 CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos)
 {
-    CUnitList nearUnits;
-    POSITION pos;
-    float fpRad1 = pUnit->GetCollisionDistance(), fpRad;
-    mapObjects.GetUnitsNear(newPos, nearUnits, 10);
-    pos = nearUnits.GetHeadPosition();
-    while (pos)
-    {
-        CUnit *pCheck = nearUnits.GetNext(pos);
-        if (pUnit == pCheck)
-            continue;
-        fpRad = sqr(fpRad1 + pCheck->GetCollisionDistance());
-        if (distanceXY2(newPos, pCheck->GetCP()) < fpRad && !pCheck->IsDead())
-        {
-            int nX = Float2AITile(pUnit->GetCP().x);
-            int nY = Float2AITile(pUnit->GetCP().y);
-            int nOX = Float2AITile(pCheck->GetCP().x);
-            int nOY = Float2AITile(pCheck->GetCP().y);
-            int nDx, nDy;
-            CLockMatrix *pMatrix = GetUnitLockMatrix(pCheck->GetCollisionDistance());
-            nDx = N_AI_LOCK_MATRIX_SIZE / 2 + nX - nOX;
-            nDy = N_AI_LOCK_MATRIX_SIZE / 2 + nY - nOY;
-            int nCheck = GetUnitLockCheck(pUnit);
-            if (!pMatrix || nDx < 0 || nDy < 0 || nDx >= N_AI_LOCK_MATRIX_SIZE ||
-                nDy >= N_AI_LOCK_MATRIX_SIZE)
-                return pCheck;
-            if (pMatrix->nLocks[nDy][nDx] >= nCheck)
-                return pCheck;
-        }
+    CUnitList nearUnits;const float radius=navigation.Radius(pUnit);
+    mapObjects.GetUnitsNear(newPos,nearUnits,10);
+    for(POSITION pos=nearUnits.GetHeadPosition();pos;) {
+        auto* other=nearUnits.GetNext(pos);if(other==pUnit||other->IsDead())continue;
+        const float sum=radius+navigation.Radius(other);
+        const float next=distanceXY2(newPos,other->GetCP());
+        if(next>=sum*sum)continue;
+        const float previous=distanceXY2(pUnit->GetCP(),other->GetCP());
+        if(previous<sum*sum&&next>previous+.00001f)continue;
+        auto first=navigation.Position(pUnit,*this),second=navigation.Position(other,*this);
+        if(std::abs(first.z-second.z)>2.f)continue;
+        return other;
     }
     return 0;
 }
@@ -2683,3 +2672,22 @@ void CAIMap::TraceVisionToArea(const CPlot3D &ptSrc, float fpSenseRadius,
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+float CAIMap::NavigationClimb(int kind) const {
+    const auto& values=kind==0?nElevationMultipliersFly:nElevationMultipliers;
+    int limit=0;while(values[values.GetSize()/2+limit]>-1)++limit;
+    return float(limit-1)/fpZMult+.1f;
+}
+bool CAIMap::NavigationGradientAllows(int kind,int x,int y) const {
+    if(x<3||y<3||x>=XSize()-3||y>=YSize()-3)return false;
+    const auto gradient=[&](int xx,int yy) {
+        int d=0;for(const auto& offset:{CPoint(1,0),CPoint(-1,0),CPoint(0,1),CPoint(0,-1)})
+            d=(std::max)(d,std::abs(int(map[yy+offset.y][xx+offset.x].nHeight)-int(map[yy][xx].nHeight)));
+        return d;
+    };
+    const int ground=Float2Int((NavigationClimb(3)-.1f)*fpZMult),flying=Float2Int((NavigationClimb(0)-.1f)*fpZMult);
+    if(gradient(x,y)>(kind==0?flying:ground))return false;
+    if((N_UNIT_MASK_3X3>>(kind*4))&15)for(const auto& d:{CPoint(1,0),CPoint(-1,0),CPoint(0,1),CPoint(0,-1)})if(gradient(x+d.x,y+d.y)>ground)return false;
+    if((N_UNIT_MASK_7X7>>(kind*4))&15)for(const auto& d:{CPoint(0,2),CPoint(-1,1),CPoint(0,1),CPoint(1,1),CPoint(-2,0),CPoint(-1,0),CPoint(0,0),CPoint(1,0),CPoint(2,0),CPoint(-1,-1),CPoint(0,-1),CPoint(1,-1),CPoint(0,-2)})if(gradient(x+d.x,y+d.y)>ground)return false;
+    return true;
+}

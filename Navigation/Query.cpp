@@ -21,28 +21,10 @@ bool Nearest(dtNavMeshQuery& q,Point point,float horizontal,float vertical,const
     result={near[0],near[1],near[2]};
     return std::hypot(p.x-result.x,p.z-result.z)<=horizontal+.001f && std::abs(p.y-result.y)<=vertical;
 }
-// The already loaded zero-radius mesh supplies support and raw obstacle
-// boundaries. Short ingress uses Detour only, never an MPR/MOB geometry scan.
-bool GroundIngress(const Mesh& m,Point from,Point to,Point& supportedFrom,Point& supportedTo,float bodyHeight) {
-    if(!m.support||!m.support->query)return false;
-    const auto& support=*m.support;auto& q=*support.query;
-    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(support.profile,bodyHeight));
-    dtPolyRef first=0,last=0;Point a,b;
-    if(!Nearest(q,from,.05f,m.profile.climb+2*m.profile.cellHeight,filter,first,a)||
-        !Nearest(q,to,.05f,m.profile.climb+2*m.profile.cellHeight,filter,last,b))return false;
-    float start[]={a.x,a.y,a.z},end[]={b.x,b.y,b.z},t=0,normal[3]{};
-    dtPolyRef visited[64];int count=0;
-    auto status=q.raycast(first,start,end,&filter,&t,normal,visited,&count,64);
-    if(dtStatusFailed(status)||dtStatusDetail(status,DT_BUFFER_TOO_SMALL)||t<1.f||!count||visited[count-1]!=last)return false;
-    float height=0;if(dtStatusFailed(q.getPolyHeight(last,end,&height)))return false;
-    supportedFrom=FromNav(a);supportedTo=FromNav({b.x,height,b.z});return true;
-}
-bool Start(const Mesh& m,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float height) {
+bool Start(const Mesh&,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float) {
     ingress=false;
-    if(Nearest(q,p,.05f,2.f,filter,ref,near)){actual=FromNav(near);return true;}
-    if(!Nearest(q,p,m.profile.radius+2*m.profile.cellSize,2.f,filter,ref,near))return false;
-    Point end;if(!GroundIngress(m,p,FromNav(near),actual,end,height))return false;
-    ingress=true;return true;
+    if(!Nearest(q,p,.05f,4.f,filter,ref,near))return false;
+    actual=FromNav(near);return true;
 }
 bool Limited(dtStatus s){return dtStatusDetail(s,DT_OUT_OF_NODES)||dtStatusDetail(s,DT_BUFFER_TOO_SMALL);}
 }
@@ -96,16 +78,6 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
     Point actual;bool ingress=false;
     if(!Start(m,q,from,filter,ref,near,actual,ingress,height))return false;
-    if(ingress) {
-        if(std::hypot(desired.x-from.x,desired.y-from.y)<.00001f){result=Address(m,ToNav(actual),ref,height);return true;} // Turning/standing, no ingress step.
-        if(std::hypot(desired.x-from.x,desired.y-from.y)>m.profile.radius+2*m.profile.cellSize)return false;
-        dtPolyRef target=0;Point next;
-        if(!Nearest(q,desired,m.profile.radius+2*m.profile.cellSize,2.f,filter,target,next))return false;
-        float oldDistance=std::hypot(from.x-near.x,from.y+near.z),newDistance=std::hypot(desired.x-next.x,desired.y+next.z);
-        if(newDistance>=oldDistance-.0001f)return false;
-        Point begin,end;if(!GroundIngress(m,actual,desired,begin,end,height))return false;
-        result=Address(m,ToNav(end),target,height);return true;
-    }
     auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},normal[3]{},t=0;
     dtPolyRef visited[512];int count=0;
     auto status=q.raycast(ref,start,end,&filter,&t,normal,visited,&count,512);
@@ -113,4 +85,21 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     float support=0;if(dtStatusFailed(q.getPolyHeight(visited[count-1],end,&support)))return false;
     goal.y=support;result=Address(m,goal,visited[count-1],height);return true;
 }
+bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,float height,float (*random)(),Point& result) {
+    if(!mesh.query||!Finite(source)||!Finite(center)||!std::isfinite(radius)||radius<=0||!random)return false;
+    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(mesh.profile,height));
+    dtPolyRef first=0;Point near;
+    if(!Nearest(*mesh.query,source,.05f,4.f,filter,first,near))return false;
+    const float start[]={near.x,near.y,near.z};
+    const float search=radius+std::hypot(source.x-center.x,source.y-center.y);
+    for(int attempt=0;attempt<8;++attempt) {
+        dtPolyRef ref=0;float point[3]{};
+        const auto status=mesh.query->findRandomPointAroundCircle(first,start,search,&filter,random,&ref,point);
+        if(dtStatusFailed(status)||Limited(status)||!ref)return false;
+        const auto p=FromNav({point[0],point[1],point[2]});
+        if(std::hypot(p.x-center.x,p.y-center.y)<=radius) {result=p;return true;}
+    }
+    return false;
+}
+
 }

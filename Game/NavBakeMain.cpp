@@ -36,18 +36,17 @@ int wmain(int argc,wchar_t** argv) {
     // This executable has no renderer/audio/window/session initialization.
     // Flush stdout after every map/profile so the mapper can show progress.
     std::map<std::wstring,std::filesystem::path> options;
-    bool all=false,fingerprint=false;
+    bool all=false;
     for(int i=1;i<argc;++i) {
         const std::wstring name=argv[i];
         if(name==L"--all"){if(all)return 2;all=true;continue;}
-        if(name==L"--fingerprint"){if(fingerprint)return 2;fingerprint=true;continue;}
-        if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--mob"&&name!=L"--output-root")return 2;
+        if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root")return 2;
         if(i+1>=argc||options.count(name))return 2;
         options[name]=argv[++i];
     }
-    if(!options.count(L"--game-root")||!options.count(L"--mod")||(!fingerprint&&!options.count(L"--output-root"))||
-        all==bool(options.count(L"--map"))||(all&&options.count(L"--mob"))) {
-        fprintf(stderr,"Usage: EIRebuild64NavBake --game-root DIR --mod DIR (--all | --map NAME [--mob NAME]) [--fingerprint | --output-root DIR]\n");
+    if(!options.count(L"--game-root")||!options.count(L"--mod")||!options.count(L"--output-root")||
+        (unsigned(all)+unsigned(options.count(L"--map"))+unsigned(options.count(L"--model"))!=1)||(!options.count(L"--map")&&options.count(L"--mob"))) {
+        fprintf(stderr,"Usage: EIRebuild64NavBake --game-root DIR --mod DIR (--all | --model NAME | --map NAME [--mob NAME]) --output-root DIR\n");
         return 2;
     }
     ModCliTool::Scope tool(ModCliTool::Kind::NavBake);
@@ -55,7 +54,7 @@ int wmain(int argc,wchar_t** argv) {
     try {
         const auto root=std::filesystem::absolute(options.at(L"--game-root")).lexically_normal();
         auto mod=options.at(L"--mod");if(mod.is_relative())mod=root/mod;
-        const auto output=fingerprint?std::filesystem::path():std::filesystem::absolute(options.at(L"--output-root")).lexically_normal()/"Maps"/"Nav64";
+        const auto output=std::filesystem::absolute(options.at(L"--output-root")).lexically_normal()/"Maps"/"Nav64";
         const auto base=std::filesystem::is_directory(root/"Base"/"Res")?root/"Base":root;
         CModPackage package;package.Load(mod.string());
         ModRuntime::ResourceScope resources(package);
@@ -73,7 +72,7 @@ int wmain(int argc,wchar_t** argv) {
             !theAckDatabase.Load(res)||!theTPDatabase.Load(res))
             throw std::runtime_error("Cannot load effective game databases");
         std::set<std::pair<std::string,std::string>> maps;
-        if(all) {
+        if(all||options.count(L"--model")) {
             CTextManager texts;texts.SelectResource((std::string(res)+"texts.res").c_str());
             CGlobalMap registry;
             if(!registry.LoadZones("map.txt",texts))throw std::runtime_error("Cannot load mod map.txt registrations");
@@ -92,7 +91,7 @@ int wmain(int argc,wchar_t** argv) {
             const auto map=Extension(options.at(L"--map").string(),".mpr");
             maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
         }
-        const auto total=Clock::now();unsigned completed=0,errors=0,missing=0;std::uint64_t totalBytes=0;
+        const auto total=Clock::now();unsigned completed=0,errors=0,missing=0,skipped=0;std::uint64_t totalBytes=0;
         exitCode=4;
         Navigation::Bytes bodyTable;
         {
@@ -102,7 +101,7 @@ int wmain(int argc,wchar_t** argv) {
             NavigationBake baker;bodyTable=baker.Bodies(world);
             printf("BODIES models_and_shapes=%zu bytes=%zu ms=%lld file=%s\n",Navigation::LoadBodies(bodyTable).samples.size(),bodyTable.size(),Milliseconds(started),Navigation::BodyFilename);fflush(stdout);
         }
-        if(!fingerprint) {
+        {
             std::filesystem::create_directories(output);
             auto temporary=output/Navigation::BodyFilename;temporary+=L".tmp";
             {
@@ -129,11 +128,16 @@ int wmain(int argc,wchar_t** argv) {
                 }
                 if(!world.Create()||!world.LoadNavigationScene(map.first.c_str(),map.second.c_str()))
                     throw std::runtime_error("Shared MPR/MOB import failed");
+                if(options.count(L"--model")) {
+                    const auto selected=Navigation::ResourceName(options.at(L"--model").stem().string().c_str());bool present=false;
+                    for(const auto& object:world.mapObjects)if(Navigation::ResourceName(object.second->GetMaskName())==selected){present=true;break;}
+                    if(!present){++skipped;printf("MAP_SKIPPED mpr=%s mob=%s reason=model_absent\n",map.first.c_str(),map.second.c_str());fflush(stdout);continue;}
+                }
                 const auto importMs=Milliseconds(start);
-                const auto bytes=world.aiMap.Navigation().Bake(output,bodyTable,fingerprint);totalBytes+=bytes;
+                const auto bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
                 ++completed;
                 printf("MAP_DONE mpr=%s mob=%s import_ms=%lld total_ms=%lld profiles=%u bytes=%llu\n",
-                    map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),fingerprint?0:8,static_cast<unsigned long long>(bytes));
+                    map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),8,static_cast<unsigned long long>(bytes));
             }catch(const std::exception& e) {
                 ++errors;
                 fprintf(stderr,"MAP_ERROR mpr=%s mob=%s code=4 ms=%lld reason=%s\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),e.what());
@@ -141,7 +145,7 @@ int wmain(int argc,wchar_t** argv) {
             fflush(stdout);fflush(stderr);
         }
         if(totalBytes>400ull*1024*1024){++errors;fprintf(stderr,"BAKE_ERROR code=4 reason=campaign_exceeds_400_MiB\n");}
-        printf("BAKE_DONE maps=%zu completed=%u missing=%u errors=%u total_ms=%lld bytes=%llu\n",maps.size(),completed,missing,errors,Milliseconds(total),static_cast<unsigned long long>(totalBytes));fflush(stdout);
+        printf("BAKE_DONE maps=%zu completed=%u missing=%u errors=%u skipped=%u total_ms=%lld bytes=%llu\n",maps.size(),completed,missing,errors,skipped,Milliseconds(total),static_cast<unsigned long long>(totalBytes));fflush(stdout);
         return errors?4:missing?5:0;
     }catch(const std::exception& e) {
         fprintf(stderr,"BAKE_ERROR code=%d reason=%s\n",exitCode,e.what());return exitCode;

@@ -6,8 +6,8 @@
 #include <array>
 
 namespace Navigation {
-constexpr std::uint32_t ContainerVersion = 3;
-constexpr std::uint32_t AlgorithmVersion = 10;
+constexpr std::uint32_t ContainerVersion = 4;
+constexpr std::uint32_t AlgorithmVersion = 11;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -20,7 +20,8 @@ inline Point FromNav(Point p) { return {p.x,-p.z,p.y}; }
 struct Profile {
     float radius = .4f, height = 1.6f, slope = 40.f, climb = .35f;
     float cellSize = .1f, cellHeight = .05f;
-    std::uint32_t tileCells = 256;
+    std::uint32_t tileCells = 128;
+    unsigned materialClass = 3;
 };
 // Four nested clearance permissions, independent of material areas. A human
 // uses one mesh in every pose; the query chooses one of these bits.

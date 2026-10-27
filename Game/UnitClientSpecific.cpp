@@ -882,7 +882,7 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
     pos.y = AITile2Meter(pos.y);
     if(supported) {
         lpUnit->navLocation.surface=1;
-        lpUnit->navLocation.position={pos.x,pos.y,supportZ};
+        lpUnit->navLocation.position={pos.x,pos.y,GetWorldBase()->GetBridgeSurfaceZValue(pos.x,pos.y)};
     }
     pos.z = lpUnit->CalcZ(pos.x, pos.y) + lpUnit->fpBaseZ;
     GetWorldBase()->MoveObject(lpUnit, pos);

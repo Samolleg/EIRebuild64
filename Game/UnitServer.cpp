@@ -819,8 +819,35 @@ void CUnitServer::L1ExecMove()
         else L1StopMovement(true);
         return;
     }
+    pos.x=support.position.x;pos.y=support.position.y;
     // Q1: a physical neighbour makes us wait, never pushes us through it.
-    bMoved=pWS->aiMap.CheckCircleCollision(lpUnit,pos)==nullptr;
+    auto* neighbour=pWS->aiMap.CheckCircleCollision(lpUnit,pos);
+    bool avoided=false;
+    if(neighbour) {
+        ++navigationWait;
+        if(navigationWait>5&&!bRotating) {
+            const float dx=pos.x-from.x,dy=pos.y-from.y,length=std::hypot(dx,dy);
+            if(length>.00001f)for(int side:{1,-1}) {
+                const Navigation::Point candidate{from.x+(dx-dy*side)*.70710678f,from.y+(dy+dx*side)*.70710678f,from.z};
+                Navigation::Location next;
+                if(pWS->aiMap.Navigation().Step(lpUnit,from,candidate,next)&&!pWS->aiMap.CheckCircleCollision(lpUnit,CPlot3D(next.position.x,next.position.y,pos.z))) {
+                    support=next;pos.x=next.position.x;pos.y=next.position.y;neighbour=nullptr;avoided=true;break;
+                }
+            }
+        }
+        if(neighbour) {
+            segment.Freeze(1);L0Freeze(true);LowSetMoving(FALSE);
+            if(navigationWait==1)GameJournal::Event("NAV","queue_wait","unit=%d blocker=%d",lpUnit->GetID(),neighbour->GetID());
+            if(navigationWait>=10) {
+                navigationWait=0;path.ClearCalcedPath();
+                if(LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z))L1NewPathSegment();
+                else L1StopMovement(true);
+            }
+            return;
+        }
+    }
+    navigationWait=0;L0Freeze(false);
+    bMoved=neighbour==nullptr;
     lock=bMoved?AI_LOCK_NO:AI_LOCK_DYNAMIC;
     // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
     if (eL1State == UL1_MOVE && pWS->aiMap.IsDangerous(pos) &&
@@ -888,6 +915,12 @@ void CUnitServer::L1ExecMove()
         // юнит продолжает путь
         LowSetMoving(eL1State == UL1_MOVE);
         lpUnit->SetOrientationXY(vec);
+        if(avoided) {
+            path.ClearCalcedPath();
+            if(LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z))L1NewPathSegment();
+            else L1StopMovement(true);
+            return;
+        }
         if (bSegmentFinished)
         {
             if (path.IsPathFinished())

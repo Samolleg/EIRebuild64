@@ -2,6 +2,8 @@
 #include "NavigationBake.h"
 #include "NavigationObject.h"
 #include "../Navigation/Profiles.h"
+#include "../Navigation/Query.h"
+#include <fstream>
 #include "aiMap.h"
 #include "Unit.h"
 #include "WorldServer.h"
@@ -16,21 +18,11 @@
 #include <cstdio>
 #include <sstream>
 #include <iomanip>
+#include "nlohmann/json.hpp"
 #pragma comment(lib,"bcrypt.lib")
 using namespace Navigation;
 namespace {
 Navigation::Point GamePoint(const CPlot3D& p) {return {p.x,p.y,p.z};}
-std::string Digest(const Navigation::Bytes& bytes) {
-    BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
-    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)throw std::runtime_error("Nav64: SHA-256 unavailable");
-    unsigned char digest[32]{};
-    auto s=BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0);
-    if(s>=0)s=BCryptHashData(hash,const_cast<PUCHAR>(bytes.data()),ULONG(bytes.size()),0);
-    if(s>=0)s=BCryptFinishHash(hash,digest,32,0);
-    if(hash)BCryptDestroyHash(hash);BCryptCloseAlgorithmProvider(algorithm,0);
-    if(s<0)throw std::runtime_error("Nav64: SHA-256 failed");
-    std::ostringstream text;for(auto v:digest)text<<std::hex<<std::setw(2)<<std::setfill('0')<<int(v);return text.str();
-}
 void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
     auto temp=path;temp+=L"."+std::to_wstring(GetCurrentProcessId())+L".tmp";
     HANDLE f=CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -78,7 +70,7 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationBake::Figure(CFigureManag
     if(model)model->GetModel()->CloseFile(data);else manager.CloseFile(data);
     blob.identity.canonical_name=key;blob.identity.bytes=size;
     auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
-    if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error(failure.message);
+    if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error("Nav64: "+key+": "+failure.message);
     figures.emplace(key,figure);return figure;
 }
 
@@ -198,6 +190,12 @@ const Navigation::BodySize& NavigationBake::Body(CWorldServer& world,const std::
 }
 void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(!NavigationObject(object))return;
+    const auto idValue=object->GetID();
+    const auto kind=object->WhoAmI();
+    const bool staticKind=kind==HPC_TREE||kind==HPC_STONE||kind==HPC_BUILDING;
+    const bool fixed=authored.fixed.count(idValue)||(!authored.dynamic.count(idValue)&&staticKind&&!object->IsDynamic());
+    if(!fixed)return;
+    if(remove)staticIds.erase(idValue);else staticIds.insert(idValue);
     auto id=object->GetID();
     // Move/orient/lever updates remove and add synchronously. Compare their
     // final contribution at the next query, not their intermediate absence.
@@ -209,7 +207,10 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     for(INT_PTR n=0;n<parts.GetSize();++n){int i=object->GetFigureIndexByName(parts[n]);if(i<0)continue;
         const auto& bv=object->fbvs[i];
         if(bv.IsIgnored())continue;
-        if(bv.IsBridge()) {
+        const auto partName=Navigation::ResourceName(parts[n]);
+        const bool walkable=bv.IsBridge()||(authored.walkable.count(id)&&authored.walkable.at(id).count(partName));
+        if(!walkable&&bv.GetPassability()!=AI_PASS_NO)continue;
+        {
             std::ostringstream label;label<<"object NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
             try {
                 const auto figure=Figure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);const auto& c=object->GetComplection();
@@ -233,35 +234,11 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                 }
                 const size_t first=input.ground.size();input.groundSources.emplace(first,label.str());
                 for(size_t j=0;j<figure->indices.size();j+=3)
-                    input.ground.push_back({vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],map.NavigationBridgeArea()});
+                    input.ground.push_back({vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],walkable?map.NavigationBridgeArea():BYTE(0)});
             }catch(const std::exception& e) {
                 Navigation::Solid failure{};failure.error="Nav64: invalid walkable geometry "+label.str()+" reason="+e.what();input.solids.push_back(std::move(failure));
             }
-            continue;
         }
-        if(bv.GetPassability()!=AI_PASS_NO)continue;
-        Navigation::Solid solid;auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
-        bool valid=Navigation::Finite(GamePoint(bv.ptBone))&&Navigation::Finite(GamePoint(bv.ptCenter))&&
-            Navigation::Finite(GamePoint(bv.ptMin))&&Navigation::Finite(GamePoint(bv.ptMax))&&Navigation::Finite(GamePoint(base));
-        // CFigure::RecalcBoundingBoxWithRotation reduces all eight transformed
-        // endpoints with Min/Max. Endpoint order is not a validity condition.
-        CPlot3D low((std::min)(bv.ptMin.x,bv.ptMax.x),(std::min)(bv.ptMin.y,bv.ptMax.y),(std::min)(bv.ptMin.z,bv.ptMax.z));
-        CPlot3D high((std::max)(bv.ptMin.x,bv.ptMax.x),(std::max)(bv.ptMin.y,bv.ptMax.y),(std::max)(bv.ptMin.z,bv.ptMax.z));
-        if(valid&&(bv.ptMin.x>bv.ptMax.x||bv.ptMin.y>bv.ptMax.y||bv.ptMin.z>bv.ptMax.z)) {
-            std::ostringstream label;label<<"NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
-            normalizedBounds.insert(label.str());
-        }
-        for(int j=0;j<8;++j){CPlot3D p((j&1)?high.x:low.x,(j&2)?high.y:low.y,(j&4)?high.z:low.z);
-            p+=bv.ptBone+bv.ptCenter;p=object->RotateVector(p);p+=base;solid.corners[j]=GamePoint(p);valid=valid&&Navigation::Finite(solid.corners[j]);}
-        if(!valid) {
-            std::ostringstream detail;detail<<"Nav64: invalid solid geometry NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
-            auto point=[&](const char* field,const CPlot3D& p){detail<<" "<<field<<"=("<<p.x<<","<<p.y<<","<<p.z<<")";};
-            point("ptMin",bv.ptMin);point("ptMax",bv.ptMax);point("ptBone",bv.ptBone);point("ptCenter",bv.ptCenter);point("CP",object->GetCP());point("worldBase",base);
-            float w,x,y,z;object->GetOrientation().GetComponents(w,x,y,z);const auto& c=object->GetComplection();
-            detail<<" rotation=("<<w<<","<<x<<","<<y<<","<<z<<") constitution=("<<c.strength<<","<<c.grace<<","<<c.tall<<")";
-            solid.error=detail.str();
-        }
-        input.solids.push_back(std::move(solid));
     }
     if(input.solids.empty()&&input.ground.empty())objects.erase(id);else objects[id]=std::move(input);
 }
@@ -296,27 +273,27 @@ Navigation::Bytes NavigationBake::Bodies(CWorldServer& world) {
         }
         models.insert(mask);Body(world,mask,prototype.fStrength,prototype.fGrace,prototype.fTall);
     }
+    for(const char* pattern:{"un*.mod","un*.lnk"}) {
+        CStringArray names;manager->GetFileList(names,pattern);
+        for(INT_PTR i=0;i<names.GetSize();++i) {
+            const auto mask=Navigation::ResourceName(std::filesystem::path(names[i].GetString()).stem().string().c_str());
+            if(!missing.count(mask))models.insert(mask);
+        }
+    }
     for(const auto& mask:models)for(int strength=0;strength<=2;++strength)for(int grace=0;grace<=2;++grace)for(int tall=0;tall<=2;++tall)
         Body(world,mask,float(strength),float(grace),float(tall));
     return Navigation::StoreBodies(bodyTable);
 }
-std::string NavigationBake::Fingerprint(const std::string& mapName,const std::string& mobName,const Navigation::Bytes& table,const Navigation::Bytes& authored) {
-    // Hash exactly the imported build streams, the measured table and authored
-    // policy. No MOB/MPR bytes, object IDs, units, scripts or model catalog.
-    auto geometry=Geometry();Navigation::Bytes source;
-    for(const auto& bytes:{&table,&authored}) {
-        const auto hash=Digest(*bytes);source.insert(source.end(),hash.begin(),hash.end());
-    }
-    for(const auto& agent:Agents) {
-        const auto hash=Digest(Navigation::Inputs({},agent.profile,"",{}));source.insert(source.end(),hash.begin(),hash.end());
-    }
-    return Digest(Navigation::Inputs(geometry,Navigation::Profile{},mapName+"|"+mobName,source));
-}
 std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string& mobName,const std::filesystem::path& directory,const Navigation::Bytes& table,const Navigation::Bytes& authored) {
-    auto geometry=Geometry();const auto started=std::chrono::steady_clock::now();const auto key=Fingerprint(mapName,mobName,table,authored);
-    printf("FINGERPRINT mpr=%s mob=%s algorithm=%u key=%s ms=%.3f\n",mapName.c_str(),mobName.c_str(),AlgorithmVersion,key.c_str(),std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count());
+    bodyTable=Navigation::LoadBodies(table);
+    for(auto& t:terrain.ground) {
+        const int x=Float2AITile((t.a.x+t.b.x+t.c.x)/3),y=Float2AITile((t.a.y+t.b.y+t.c.y)/3);
+        for(int c=0;c<8;++c)if(!sourceMap->NavigationGradientAllows(c,x,y))t.classAreas[c]=0;
+        t.levitateArea=t.classAreas[0];
+    }
+    auto geometry=Geometry();
     std::vector<Navigation::BuildRequest> requests;
-    for(int type=0;type<AgentCount;++type)requests.push_back({Agents[type].profile,key});
+    for(int type=0;type<AgentCount;++type){auto p=Agents[type].profile;p.climb=sourceMap->NavigationClimb(p.materialClass);requests.push_back({p});}
     auto built=Navigation::BuildProfiles(geometry,requests);
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs;
     for(int type=0;type<AgentCount;++type) {
@@ -325,15 +302,54 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         outputs.push_back(Navigation::Store(mesh));totalBytes+=outputs.back().size();
     }
     std::filesystem::create_directories(directory);
+    // Release-data quality is part of the baker, on the actual map meshes.
+    // No standalone test, simulation, game tick, script or renderer runs here.
+    const auto stem=std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string();
+    std::ofstream losses(directory/(stem+".losses.csv"));losses<<"profile,class,x,y,z,reason\n";
+    for(int type=0;type<AgentCount;++type) {
+        const auto& mesh=*built[type];const int c=mesh.profile.materialClass;
+        unsigned oldCount=0,lost=0,stepCount=0,stepFailed=0,stepStalled=0;
+        const float heights[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};const float height=(std::min)(heights[c],ClearanceHeights(mesh.profile).back());
+        for(int y=3;y<sourceMap->YSize()-3;++y)for(int x=3;x<sourceMap->XSize()-3;++x) {
+            if(!((sourceMap->map[y][x].dwTerrains>>(c*4))&15))continue;
+            ++oldCount;CPlot3D cp(AITile2Meter(x+.5f),AITile2Meter(y+.5f),0);
+            Point p{cp.x,cp.y,c==0?sourceMap->GetTileSurface(cp):sourceMap->GetTileHeight(cp)};Location at;
+            if(!Project(mesh,p,.05f,4.f,at,height)) {++lost;losses<<Agents[type].name<<','<<c<<','<<p.x<<','<<p.y<<','<<p.z<<",no_polygon_or_clearance\n";continue;}
+            if((x%16)==0&&(y%16)==0) {
+                Point to=at.position;to.x+=.02f;Location target;
+                if(Project(mesh,to,.001f,1.f,target,height)) {
+                    ++stepCount;Location next;
+                    if(!Constrain(mesh,at.position,to,next,height))++stepFailed;
+                    else if(std::hypot(next.position.x-at.position.x,next.position.y-at.position.y)<.001f)++stepStalled;
+                }
+            }
+        }
+        printf("QUALITY mpr=%s mob=%s profile=%s class=%d legacy_cells=%u lost=%u step_samples=%u step_failed=%u step_stalled=%u\n",mapName.c_str(),mobName.c_str(),Agents[type].name,c,oldCount,lost,stepCount,stepFailed,stepStalled);fflush(stdout);
+    }
+    std::ofstream units(directory/(stem+".placements.csv"));units<<"id,model,profile,x,y,z,distance,reason\n";
+    for(const auto& entry:sourceWorld->mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
+        auto* unit=static_cast<CUnit*>(entry.second);auto cp=unit->GetCP();const auto& shape=unit->GetComplection();
+        const auto size=bodyTable.Lookup(ResourceName(unit->GetMaskName()),shape.strength,shape.grace,shape.tall);
+        const int type=ProfileForRadius(size.radius,unit->GetAIClass()==0);const auto& mesh=*built[type];
+        Point p{cp.x,cp.y,unit->GetAIClass()==0?sourceMap->GetTileSurface(cp):sourceMap->GetTileHeight(cp)};Location at;
+        const float height=(std::min)(size.height[0],ClearanceHeights(mesh.profile).back());
+        if(!Project(mesh,p,.05f,4.f,at,height)) {
+            const bool withinPlacement=Project(mesh,p,1.f,4.f,at,height);const float distance=withinPlacement?std::hypot(at.position.x-p.x,at.position.y-p.y):-1;
+            units<<unit->GetID()<<','<<unit->GetMaskName()<<','<<Agents[type].name<<','<<p.x<<','<<p.y<<','<<p.z<<','<<distance<<','<<(withinPlacement?"placement_within_1m":"no_polygon_within_1m")<<'\n';
+        }
+    }
     for(const auto& entry:normalizedBounds)printf("BOUNDS_NORMALIZED mpr=%s mob=%s %s\n",mapName.c_str(),mobName.c_str(),entry.c_str());
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const auto& bytes=outputs[type];
         Atomic(directory/Navigation::MeshFilename(mapName,mobName,type),bytes);
-        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu height_outliers=0 key=%s\n",
+        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu height_outliers=0\n",
             mapName.c_str(),mobName.c_str(),Agents[type].name,mesh.profile.radius,mesh.tiles,
             static_cast<unsigned long long>(mesh.buildMs),static_cast<unsigned long long>(mesh.rasterMs),
-            static_cast<unsigned long long>(mesh.polygonMs),bytes.size(),mesh.fingerprint.c_str());
+            static_cast<unsigned long long>(mesh.polygonMs),bytes.size());
         fflush(stdout);
     }
-    return totalBytes;
+    nlohmann::json catalogue={{"version",1},{"static",staticIds}};
+    const auto text=catalogue.dump();Navigation::Bytes bytes(text.begin(),text.end());
+    Atomic(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navworld"),bytes);
+    return totalBytes+bytes.size();
 }

@@ -3666,18 +3666,9 @@ bool CAIUnitLogic::GenerateGuardRallyPoint(const CPlot3D &ptCenter, float fpRadi
         nGuardPntFail--;
         return false;
     }
-    float fpX, fpY;
-    int nSafeCounter = 10;
-    do
-    {
-        fpX = random.GetFloat(-fpRadius, fpRadius);
-        fpY = random.GetFloat(-fpRadius, fpRadius);
-        if (--nSafeCounter < 0)
-            break;
-    } while (sqr(fpX) + sqr(fpY) > sqr(fpRadius));
-    fpX = ptCenter.x + fpX;
-    fpY = ptCenter.y + fpY;
-    ptRes = CPlot3D(fpX, fpY, 0);
+    Navigation::Point goal;
+    if(!theWorldServer.aiMap.Navigation().RandomGoal(GetUnit(),{ptCenter.x,ptCenter.y,ptCenter.z},fpRadius,goal))return false;
+    ptRes=CPlot3D(goal.x,goal.y,0);
     // check if terrain is flat enough
     if (theWorldServer.aiMap.GetTerrainGrad(ptRes) > 0.3f)
         return FALSE;

@@ -997,6 +997,7 @@ void CWorldServer::StartServer(EServerMode mode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::WorldSegment(bool bForceScriptRun)
 {
+    aiMap.Navigation().Advance();
     CorePerf::Scope coreTiming(CorePerf::WorldSegment);
     POSITION pos;
     CEffect *pEff;
@@ -1938,6 +1939,7 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
     rot.FromAxisAngle(CPlot3D(0, 0, 1), fPersAngle);
     // deploy itself
     DeployPersonages(pPlayer, pers, ptPlace, rot, pInfo);
+    for(const auto& entry:mapObjects)if(entry.second->WhoAmI()==HPC_UNIT)aiMap.Navigation().Place(static_cast<CUnit*>(entry.second),aiMap);
     if (pInfo)
         pInfo->Clear();
     // set camera position for objects send
