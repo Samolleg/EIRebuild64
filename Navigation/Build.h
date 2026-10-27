@@ -18,7 +18,10 @@ struct Mesh {
     Profile profile;
     std::shared_ptr<const Geometry> sources;
     std::set<int> excludedObjects;
-    std::map<std::pair<int,int>,std::vector<size_t>> surfaceTriangles;
+
+    // Original support identity, in tile polygon order. Never inferred from
+    // Detour's polygon fan height during queries.
+    std::map<std::pair<int,int>,std::vector<std::vector<std::uint64_t>>> polygonSurfaces;
     std::map<int,bool> doorOpen;
     std::map<std::tuple<int,int,int,int>,unsigned short> doorFlags;
     unsigned char* replacementData=nullptr;

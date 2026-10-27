@@ -142,7 +142,8 @@ struct BakeContext final : rcContext {
     unsigned material; float radius; int x,z; bool printing; bool multipleOutlines=false; std::string failure;
     BakeContext(const Profile& p,int tx,int tz,bool logging):rcContext(true),material(p.materialClass),radius(p.radius),x(tx),z(tz),printing(logging) {}
     void doLog(const rcLogCategory category,const char* message,const int length) override {
-        if(category==RC_LOG_ERROR && std::string(message,length).find("rcBuildContours: Multiple outlines for region ")==0) {
+        if(category==RC_LOG_ERROR && (std::string(message,length).find("rcBuildContours: Multiple outlines for region ")==0||
+            std::string(message,length).find("rcBuildContours: Bad outline for region ")==0)) {
             multipleOutlines=true;return;
         }
         if(category==RC_LOG_ERROR&&failure.empty())failure.assign(message,length);
@@ -240,10 +241,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     }
     rcContext classifier(false);std::vector<unsigned char> slopes(allAreas.size(),RC_NULL_AREA);
     rcMarkWalkableTriangles(&classifier,p.slope,allVertices.data(),int(allVertices.size()/3),allIndices.data(),int(allAreas.size()),slopes.data());
-    // MPR class areas already contain the legacy terrain policy. Recast slope
-    // classification applies only to model surfaces; it must not remove terrain
-    // that the old graph permits (for example the raised ground in zone1/cz1g).
-    for(size_t i=0;i<allAreas.size();++i)if(!g.ground[i].terrain&&slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
+    // Material permissions only restrict geometry; they never override slope.
+    for(size_t i=0;i<allAreas.size();++i)if(slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
     for(const auto& s:g.solids) {
         SolidInput input;input.hull=Footprint(s,input.low,input.high);
         if(input.hull.size()<9)continue;
@@ -253,7 +252,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     }
     // Workers own all Recast state and output blobs. Only the simulation thread
     // mutates Detour, in fixed z/x order, so cache bytes/references stay stable.
-    struct TileBlob {unsigned char* data=nullptr;int size=0;~TileBlob(){dtFree(data);}};
+    struct TileBlob {unsigned char* data=nullptr;int size=0;std::vector<std::vector<std::uint64_t>> surfaces;~TileBlob(){dtFree(data);}};
     std::vector<std::unique_ptr<TileBlob>> tiles(nx*nz);std::vector<std::exception_ptr> errors(nx*nz);
     std::atomic<int> next{0};std::atomic<bool> failed{false};
     std::atomic<std::uint64_t> rasterUs{0},polygonUs{0};
@@ -282,7 +281,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             for(int j=0;j<3;++j){indices.push_back(int(vertices.size()/3));vertices.insert(vertices.end(),v+j*3,v+j*3+3);}
             areas.push_back(allAreas[triangle]);
         }
-        Require(rcRasterizeTriangles(&context,vertices.data(),int(vertices.size()/3),indices.data(),areas.data(),int(areas.size()),*field,cfg.walkableClimb),"Nav64: ground rasterization failed");
+        Require(rcRasterizeTriangles(&context,vertices.data(),int(vertices.size()/3),indices.data(),areas.data(),int(areas.size()),*field,0),"Nav64: ground rasterization failed");
         // Insert each real solid as a non-walkable prism. Unlike subtracting
         // at one agent height, this retains the underside as a ceiling for all
         // poses, and never creates a walkable BV top. Quantize outwards.
@@ -357,7 +356,70 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             }
             for(int j=0;j<chf.spanCount;++j)chf.areas[j]=tiers[j]?static_cast<unsigned char>((tiers[j]-1)*15+material[j]):RC_NULL_AREA;
         } else Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
-        Require(rcBuildRegionsMonotone(&context,*r.compact,cfg.borderSize,cfg.minRegionArea,cfg.mergeRegionArea),"Nav64: region build failed");
+        // Recover raster provenance before contours discard the source identity.
+        // Match the clipped triangle's raster top, never a Detour polygon Z.
+        auto& field=*r.compact;
+        std::vector<std::uint64_t> support(field.spanCount,1);
+        bool layered=false;
+        for(int ti:inputs[index].triangles)if(allAreas[ti]&&g.ground[ti].surface>1){layered=true;break;}
+        if(layered) {
+            std::fill(support.begin(),support.end(),0);
+            std::vector<float> gaps(field.spanCount,1.e30f);
+            for(int ti:inputs[index].triangles)if(allAreas[ti]&&g.ground[ti].surface) {
+                const auto t=Surface(g.ground[ti],p);const Point a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+                const int x0=std::max(0,int(std::floor((std::min({a.x,b.x,c.x})-cfg.bmin[0])/cfg.cs))),
+                    x1=std::min(field.width-1,int(std::floor((std::max({a.x,b.x,c.x})-cfg.bmin[0])/cfg.cs))),
+                    z0=std::max(0,int(std::floor((std::min({a.z,b.z,c.z})-cfg.bmin[2])/cfg.cs))),
+                    z1=std::min(field.height-1,int(std::floor((std::max({a.z,b.z,c.z})-cfg.bmin[2])/cfg.cs)));
+                for(int iz=z0;iz<=z1;++iz)for(int ix=x0;ix<=x1;++ix) {
+                    std::vector<Point> clipped={a,b,c};
+                    auto clip=[&](bool xaxis,float edge,bool greater) {
+                        std::vector<Point> out;if(clipped.empty())return;
+                        auto previous=clipped.back();float pv=(xaxis?previous.x:previous.z)-edge;
+                        for(auto current:clipped) {
+                            const float cv=(xaxis?current.x:current.z)-edge;
+                            if((pv>=0)!=(cv>=0)) {const float f=pv/(pv-cv);out.push_back({previous.x+(current.x-previous.x)*f,previous.y+(current.y-previous.y)*f,previous.z+(current.z-previous.z)*f});}
+                            if(greater?cv>=0:cv<=0)out.push_back(current);
+                            previous=current;pv=cv;
+                        }
+                        clipped=std::move(out);
+                    };
+                    clip(true,cfg.bmin[0]+ix*cfg.cs,true);clip(true,cfg.bmin[0]+(ix+1)*cfg.cs,false);
+                    clip(false,cfg.bmin[2]+iz*cfg.cs,true);clip(false,cfg.bmin[2]+(iz+1)*cfg.cs,false);
+                    if(clipped.size()<3)continue;float top=-1.e30f;for(auto v:clipped)top=std::max(top,v.y);
+                    const auto& cell=field.cells[ix+iz*field.width];
+                    for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                        const float gap=std::abs(cfg.bmin[1]+field.spans[j].y*cfg.ch-top);
+                        if(gap<=cfg.ch*1.01f&&gap<gaps[j]){gaps[j]=gap;support[j]=t.surface;}
+                    }
+                }
+            }
+            for(int j=0;j<field.spanCount;++j)if(!support[j])field.areas[j]=RC_NULL_AREA;
+        }
+        std::vector<std::uint64_t> regionSupport;
+        auto splitSupports=[&] {
+            std::vector<unsigned short> old(field.spanCount);for(int j=0;j<field.spanCount;++j)old[j]=field.spans[j].reg;
+            std::vector<bool> seen(field.spanCount,false);std::vector<std::tuple<int,int,unsigned>> stack;
+            unsigned short next=0;regionSupport.assign(1,0);
+            for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
+                const auto& cell=field.cells[ix+iz*field.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(!seen[j]&&old[j]&&!(old[j]&RC_BORDER_REG)) {
+                    Require(next+1<RC_BORDER_REG,"Nav64: surface region limit");++next;regionSupport.push_back(support[j]);
+                    seen[j]=true;stack.emplace_back(ix,iz,j);
+                    while(!stack.empty()) {
+                        const auto [cx,cz,k]=stack.back();stack.pop_back();auto& span=field.spans[k];span.reg=next;
+                        for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
+                            const int nx=cx+rcGetDirOffsetX(d),nz=cz+rcGetDirOffsetY(d);
+                            const unsigned n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
+                            if(!seen[n]&&old[n]==old[j]&&support[n]==support[j]&&field.areas[n]==field.areas[j]){seen[n]=true;stack.emplace_back(nx,nz,n);}
+                        }
+                    }
+                }
+            }
+            field.maxRegions=next;
+        };
+        Require(rcBuildRegionsMonotone(&context,field,cfg.borderSize,cfg.minRegionArea,cfg.mergeRegionArea),"Nav64: region build failed");
+        splitSupports();
         // Classify holes from the region's actual grid topology, not an
         // axis-aligned gap width: a slanted/branched hole evades that heuristic.
         // Euler characteristic for 4-connected pixels, in quarter units:
@@ -387,7 +449,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         bool holes=false;for(size_t i=1;i<euler.size();++i)if(present[i]&&euler[i]<=0){holes=true;break;}
         // Keep hole boundaries within a quarter cell; one full cell can
         // collapse them to zero signed area and turn holes into outlines.
-        cfg.maxSimplificationError=holes?.25f:1.f;
+        cfg.maxSimplificationError=layered?0.f:holes?.25f:1.f;
         r.contours=rcAllocContourSet();
         Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
         if(context.multipleOutlines&&context.failure.empty()) {
@@ -398,6 +460,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             context.multipleOutlines=false;
             rcFreeContourSet(r.contours);r.contours=nullptr;
             Require(rcBuildRegionsMonotone(&context,*r.compact,cfg.borderSize,cfg.minRegionArea,0),"Nav64: exact monotone region build failed");
+            splitSupports();
             // Recast's final merge is also applied when mergeRegionArea is
             // zero (interior regions still merge). Keep each connected row run
             // separate on this exceptional tile. Such monotone strips have no
@@ -405,7 +468,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             auto& field=*r.compact;
             std::vector<unsigned short> regions(field.spanCount);
             for(int i=0;i<field.spanCount;++i)regions[i]=field.spans[i].reg;
-            unsigned short nextRegion=0;
+            unsigned short nextRegion=0;regionSupport.assign(1,0);
             for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
                 const auto& cell=field.cells[ix+iz*field.width];
                 for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
@@ -419,7 +482,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                     if(left)span.reg=left;
                     else {
                         Require(nextRegion+1<RC_BORDER_REG,"Nav64: monotone strip region limit");
-                        span.reg=++nextRegion;
+                        span.reg=++nextRegion;regionSupport.push_back(support[j]);
                     }
                 }
             }
@@ -434,6 +497,10 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             throw std::runtime_error(reason);
         }
         if(!context.failure.empty())throw std::runtime_error("Nav64: Recast tile="+std::to_string(x)+","+std::to_string(z)+": "+context.failure);
+        // Keep border vertices: removing one can merge different source regions
+        // into RC_MULTIPLE_REGS and lose the exact floor identity.
+        for(int i=0;i<r.contours->nconts;++i)for(int j=0;j<r.contours->conts[i].nverts;++j)
+            r.contours->conts[i].verts[j*4+3]&=~RC_BORDER_VERTEX;
         r.polys=rcAllocPolyMesh();
         Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: polygon build failed");
         if(!context.failure.empty())throw std::runtime_error("Nav64: Recast tile="+std::to_string(x)+","+std::to_string(z)+": "+context.failure);
@@ -453,6 +520,27 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         create.cs=cfg.cs;create.ch=cfg.ch;create.buildBvTree=true;
         // Detour emits polygon fans without a detail mesh. Game support supplies Z.
         auto blob=std::make_unique<TileBlob>();
+        // Voxel boundaries can straddle two exact source surfaces. Retain only
+        // supports joined by a real compact-field edge in this region; never
+        // admit arbitrary overlapping floors or a solid object's top.
+        std::vector<std::set<std::uint64_t>> neighbours(regionSupport.size());
+        for(size_t i=1;i<regionSupport.size();++i)neighbours[i].insert(regionSupport[i]);
+        for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
+            const auto& cell=field.cells[ix+iz*field.width];
+            for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                const auto& span=field.spans[j];if(!span.reg||(span.reg&RC_BORDER_REG))continue;
+                for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
+                    const int nx=ix+rcGetDirOffsetX(d),nz=iz+rcGetDirOffsetY(d);
+                    const auto n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
+                    if(field.areas[n]&&support[n])neighbours[span.reg].insert(support[n]);
+                }
+            }
+        }
+        for(int i=0;i<poly.npolys;++i) {
+            Require(poly.regs[i]<regionSupport.size()&&regionSupport[poly.regs[i]],"Nav64: polygon has no original support");
+            const auto primary=regionSupport[poly.regs[i]];const auto& group=neighbours[poly.regs[i]];
+            blob->surfaces.push_back({primary});for(auto id:group)if(id!=primary)blob->surfaces.back().push_back(id);
+        }
         Require(dtCreateNavMeshData(&create,&blob->data,&blob->size),"Nav64: ready tile creation failed");
         tiles[index]=std::move(blob);
         polygonUs.fetch_add(micros(begin));
@@ -471,7 +559,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     for(const auto& error:errors)if(error)std::rethrow_exception(error);
     mesh->rasterMs=rasterUs.load()/1000;mesh->polygonMs=polygonUs.load()/1000;
     Require(params.maxTiles<=131072&&dtStatusSucceed(mesh->data->init(&params)),"Nav64: cannot initialize Detour mesh");
-    for(auto& blob:tiles)if(blob) {
+    for(size_t index=0;index<tiles.size();++index)if(auto& blob=tiles[index]) {
+        mesh->polygonSurfaces[{int(index)%nx,int(index)/nx}]=std::move(blob->surfaces);
         Require(dtStatusSucceed(mesh->data->addTile(blob->data,blob->size,DT_TILE_FREE_DATA,0,nullptr)),"Nav64: cannot add ready tile");
         blob->data=nullptr;
     }
@@ -520,6 +609,9 @@ Bytes Store(const Mesh& mesh) {
             dtAlign4(sizeof(dtLink)*t->header->maxLinkCount));
         const auto shuffled=ShuffleTile(raw.data(),raw.size(),true);
         tiles.U(std::uint32_t(shuffled.size()));tiles.B(shuffled.data(),shuffled.size());
+        const auto& support=mesh.polygonSurfaces.at({t->header->x,t->header->y});
+        Require(support.size()==size_t(t->header->polyCount),"Nav64: polygon support count");
+        tiles.U(unsigned(support.size()));for(const auto& group:support){tiles.U(unsigned(group.size()));for(auto id:group){tiles.U(unsigned(id));tiles.U(unsigned(id>>32));}}
     }
     const auto packed=Pack(tiles.bytes);
     w.U(1);w.U(std::uint32_t(packed.size()+12));w.U(COMPRESS_ALGORITHM_LZMS);
@@ -548,6 +640,15 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     for(std::uint32_t i=0;i<count;++i){auto n=tiles.U();Require(n<=tiles.bytes.size()-tiles.at,"Nav64: truncated tile");
         const auto raw=ShuffleTile(tiles.bytes.data()+tiles.at,n,false);CheckTile(raw.data(),raw.size());
         auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,raw.data(),n);tiles.at+=n;
+        const auto header=CheckTileHeader(data,n);const auto supports=tiles.U();
+        Require(supports==unsigned(header.polyCount),"Nav64: polygon support count");
+        auto& identities=mesh->polygonSurfaces[{header.x,header.y}];
+        for(unsigned j=0;j<supports;++j) {
+            const auto count=tiles.U();Require(count>0&&count<=1024,"Nav64: polygon support group limit");
+            std::vector<std::uint64_t> group;
+            for(unsigned k=0;k<count;++k){const auto low=tiles.U();const auto id=low|(std::uint64_t(tiles.U())<<32);Require(id>0,"Nav64: invalid polygon support");group.push_back(id);}
+            identities.push_back(std::move(group));
+        }
         auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;
     }
     Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==2&&w.at==w.bytes.size(),"Nav64: invalid surface section");
@@ -671,13 +772,13 @@ void IndexSources(Geometry& g,float width) {
             for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){index[{x,z}].push_back(i);if(objects&&t.object)g.objectTiles[t.object].emplace(x,z);}
         };
         bin(1.3f,g.tileTriangles,true);
-        if(t.surface>1&&t.area)bin(0.f,g.surfaceTriangles,false);
+        if(t.terrain||(t.surface>1&&t.area))bin(.002f,g.surfaceTriangles,false);
     }
 }
 void IndexSurfaces(Mesh& mesh) {
-    mesh.surfaceTriangles.clear();if(!mesh.sources)return;
+    if(!mesh.sources)return;
     Require(mesh.sources->tileWidth==mesh.data->getParams()->tileWidth,"Nav64: mismatched source tile width");
-    mesh.surfaceTriangles=mesh.sources->surfaceTriangles;
+    // Catalogue storage is shared by all profiles; queries read it in place.
 }
 std::unique_ptr<Mesh> RebuildTile(const Geometry& g,const Profile& p,int x,int z) {
     auto result=BuildProfile(g,p,"",nullptr,1,x,z);
@@ -696,7 +797,9 @@ void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z) {
     // No query observes a half-replaced tile: called on the simulation thread.
     const auto* previous=mesh.data->getTileAt(x,z,0);
     if(previous)Require(dtStatusSucceed(mesh.data->removeTile(mesh.data->getTileRef(previous),nullptr,nullptr)),"Nav64: cannot remove source tile");
+    mesh.polygonSurfaces.erase({x,z});
     if(replacement.replacementData) {
+        mesh.polygonSurfaces[{x,z}]=std::move(replacement.polygonSurfaces.at({x,z}));
         Require(dtStatusSucceed(mesh.data->addTile(replacement.replacementData,replacement.replacementSize,DT_TILE_FREE_DATA,0,nullptr)),"Nav64: cannot install replacement tile");
         replacement.replacementData=nullptr;
     }

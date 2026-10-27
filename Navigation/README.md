@@ -30,21 +30,44 @@ boxes rasterized as non-walkable prisms; they never supply walkable BV tops.
 
 Recast uses 0.1 m cells, 0.05 m vertical cells, climb 0.35 m, slope 40 degrees,
 flight slope 60 degrees. Eight profiles retain four clearance tiers each.
-MPR terrain retains its legacy material/water class areas regardless of slope.
-The 40/60 degree slope filter applies only to model surfaces. All profiles bake the decoded
+MPR material/water class areas only restrict traversal. The 40/60 degree
+slope filter applies to terrain and model surfaces for every profile. All profiles bake the decoded
 centimetre source geometry, exactly as runtime tile rebuilds do. Ready files
 are decoded by the runtime loader before baker quality queries.
 
 No TileCache layers or DetourTileCache dependency remain. Regular Recast
 compact fields, monotone regions, contours and polygon meshes produce ready
 Detour tiles including multiple elevations. No detail-mesh samples are
-stored: Detour triangulates the polygon fan, and gameplay supplies support Z.
+stored: Detour triangulates the polygon fan, but no support or floor query
+uses its height. Before contouring, compact spans are attributed to original
+walkable triangles and regions are split by terrain/BASE identity. Polygons
+retain that identity, with only directly connected source neighbours admitted
+at voxel boundaries. The primary source wins wherever its footprint exists.
+Original triangle interpolation supplies Z; intact terrain hides buried BASE.
+Catalogue storage is shared by all profiles. Solid geometry never supplies a
+floor ID. Raster area merging cannot promote a nearby non-walkable top.
+Queries enumerate XY polygons and choose between their original heights.
+Movement uses Detour's connected surface traversal (512 visited-polygon
+bound), accepts at most 1 mm of endpoint roundoff, then checks original Z
+against climb + tan(slope) * horizontal distance. A clipped move is rejected.
+Layered tiles keep exact contours: simplifying terrain and BASE boundaries
+independently can create overlapping polygons and a funnel shortcut outside
+the mesh. Thin overlapping upward faces within a single 10 cm raster band
+resolve to the upper skin; that band cannot contain another agent floor.
+The declared BASE may interpolate its walkable source plane over a seam of
+at most 0.25 cell (2.5 cm), covering centimetre rounding and sub-cell face
+gaps already joined in Recast. Terrain retains its strict 1 mm footprint;
+steep BASE faces and unrelated/solid parts cannot supply this support.
+Release checks independently evaluate the unrounded BASE source planes.
+The local client resolves interpolated XY against the same server-owned mesh;
+it never replaces the selected floor with the highest expanded bridge BV.
 Contour error is selected from the compact region topology before contouring:
 0.25 cell on tiles with holes (Euler characteristic), otherwise one cell.
 A one-cell error was observed collapsing a hole and misclassifying its outline.
 If this produces multiple outlines for a region, the tile selects monotone
 partitioning followed by connected monotone row strips and exact contours
-(zero simplification error). Recast merges interior regions even with zero
+(zero simplification error). Bad/collapsed outlines select the same exact
+construction. Surface border vertices are retained to preserve provenance. Recast merges interior regions even with zero
 merge area; separate row runs cannot form holes and preserve walkable spans. MONOTONE_TILE lists each selected tile
 and profile in the baker log. The same selection runs during worker rebuilds.
 Any remaining multiple outline or other Recast error rejects the tile.
@@ -88,8 +111,13 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 7, algorithm 18, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 8, algorithm 19, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
+  In the expanded tile stream, each tile blob is followed by a u32 polygon
+  support count (must equal polyCount). Each polygon has u32 source-count and
+  that many u64 source IDs (low/high u32), primary first, connected neighbours
+  afterwards. These records belong to that tile's polygon order and move with
+  tile replacement. Readers of container 7 must reject container 8.
   No layer section exists. Loader validates exact profile, bounds and ABI.
 - <mpr>--<mob>.navworld: JSON version 3, baked static NIDs and initial dynamic obstacle boxes.
 - <mpr>--<mob>.navgeom: shared NSRC version 4 (four parallel LZMS blocks), original bounds,
@@ -99,9 +127,10 @@ separate from this baker contract.
   Includes precomputed triangle/surface/object tile indices. One copy serves
   all profiles. No source import or spatial binning occurs during gameplay.
 - Surface 1 is terrain. BASE IDs encode (unsigned NID << 32) | (part + 2).
-  Server placement/step/restore resolve exact BASE triangles. Complete client
-  floor selection remains open. Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 18, resource-derived models and
+  Placement/step/restore and the local client resolve original terrain/BASE
+  triangles through polygon provenance. Gameplay acceptance remains separate.
+  Off-mesh records remain reserved, not linked.
+- bodies.navbody: BODY version 1, algorithm 19, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -113,9 +142,13 @@ separately reports gained_forbidden_water_m2 under the original depth rule.
 CSV reports include losses, water reasons, BASE connections, placements and
 private object/vegetation identity. Zone1 release validation walks complete
 paths in 5 cm moves and 17 cm ticks across corners, using the runtime surface
-traversal. A failed step on a complete route rejects the map. Unreachable
+traversal. The original 56 profile/map pairs plus journal-derived ruin-wall,
+mountain and NPC-height routes check each accepted step/tick against the
+climb/slope height budget, unrounded source support, terrain and client floor.
+HEIGHT_CONTINUITY reports counts/errors; a discontinuity prints coordinates.
+A failed step or discontinuity on a complete route rejects the map. Unreachable
 goals remain explicitly reported as no_path. Shared loader time is measured
 including reconciliation with the imported live objects, without a game tick.
 Runtime performance, save/load, queues/doors, full random-goal coverage,
-common-radius class policy and complete client floor selection remain
+common-radius class policy and in-game client floor acceptance remain
 separate acceptance items. See the private REPORT for measured release data.

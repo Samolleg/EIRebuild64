@@ -880,10 +880,14 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
     // ASSERT( bMoved );
     pos.x = AITile2Meter(pos.x);
     pos.y = AITile2Meter(pos.y);
-    if(supported) {
-        lpUnit->navLocation.surface=1;
-        lpUnit->navLocation.position={pos.x,pos.y,GetWorldBase()->GetBridgeSurfaceZValue(pos.x,pos.y)};
-    }
+    // The single-player server owns the mesh. Resolve the interpolated XY on
+    // its original support, instead of asking the BV bridge manager for a top.
+    if(auto* server=theWorldServer.GetUnit(lpUnit->GetID())) {
+        Navigation::Location location;
+        const float z=supported?supportZ:server->navLocation.position.z;
+        if(theWorldServer.aiMap.Navigation().Support(server,{pos.x,pos.y,z},location))lpUnit->navLocation=location;
+        else return;
+    } else return;
     pos.z = lpUnit->CalcZ(pos.x, pos.y) + lpUnit->fpBaseZ;
     GetWorldBase()->MoveObject(lpUnit, pos);
     // we don't need orientation in the object viewer

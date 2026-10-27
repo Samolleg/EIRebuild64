@@ -8,6 +8,7 @@
 #include "aiMap.h"
 #include "Unit.h"
 #include "WorldServer.h"
+#include "WorldClient.h"
 #include "MapObjectServer.h"
 #include "StuffMapObjects.h"
 #include "MapObjectManager.h"
@@ -451,6 +452,43 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             if(o->WhoAmI()==HPC_UNIT) {auto* u=static_cast<CUnit*>(o);identities<<u->GetOwnerNum()<<','<<u->GetName()<<','<<u->GetPrototype()->szName<<','<<u->GetAIClass()<<','<<u->IsHero();}
             identities<<'\n';
         }
+        CBridgeManager legacyBridges;
+        for(const auto& entry:sourceWorld->mapObjects) {
+            auto* object=entry.second;if(object->WhoAmI()!=HPC_BUILDING&&object->WhoAmI()!=HPC_LEVER)continue;
+            auto cp=object->GetCP();cp.z+=sourceMap->GetOriginalTileHeight(cp);
+            for(INT_PTR i=0;i<object->fbvs.GetSize();++i)if(object->fbvs[i].IsBridge())
+                legacyBridges.AddBridge(entry.first,object->fbvs[i],cp,object->GetOrientation());
+        }
+        for(auto point:{Point{66.8446f,140.352f,14.3403f},Point{66.7652f,140.422f,14.4166f},Point{66.8539f,140.519f,14.3892f},Point{66.9009f,140.942f,14.4771f},Point{66.5964f,140.981f,14.5257f},Point{67.1842f,140.672f,14.3528f}}) {
+            Location exact;const bool placed=Project(*built[Small],point,.001f,4.f,exact,1.6f);
+            const float old=legacyBridges.CalcZ(CPlot3D(point.x,point.y,0),point.z);
+            printf("WALL_SUPPORT x=%.6f y=%.6f placed=%d source_z=%.6f legacy_client_z=%.6f excess=%.6f surface=%llu\n",point.x,point.y,int(placed),placed?exact.position.z:point.z,old,old-(placed?exact.position.z:point.z),static_cast<unsigned long long>(exact.surface));fflush(stdout);
+        }
+        std::ofstream wall(reportDirectory/(stem+".wall-parts.csv"));
+        wall<<"id,model,part,bridge,passability,triangles,walkable,min_x,max_x,min_y,max_y,min_z,max_z\n";
+        for(const auto& entry:objects) {
+            auto* object=sourceWorld->GetMapObject(entry.first);if(!object)continue;
+            std::map<unsigned,std::vector<const Triangle*>> parts;
+            for(const auto& t:entry.second.ground) {
+                const float x0=(std::min)({t.a.x,t.b.x,t.c.x}),x1=(std::max)({t.a.x,t.b.x,t.c.x}),
+                    y0=(std::min)({t.a.y,t.b.y,t.c.y}),y1=(std::max)({t.a.y,t.b.y,t.c.y});
+                if(x1<65.5f||x0>68.f||y1<139.5f||y0>142.f)continue;
+                const auto label=entry.second.groundSources.upper_bound(size_t(&t-entry.second.ground.data()));
+                unsigned part=0;
+                if(t.surface>1)part=unsigned(t.surface)-2;
+                else if(label!=entry.second.groundSources.begin()) {
+                    const auto& text=std::prev(label)->second;const auto at=text.find(" part=");
+                    if(at!=std::string::npos)part=unsigned(object->GetFigureIndexByName(text.substr(at+6).c_str()));
+                }
+                parts[part].push_back(&t);
+            }
+            for(const auto& group:parts) {
+                const auto part=group.first;if(part>=unsigned(object->fbvs.GetSize()))continue;
+                Point low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};unsigned walkable=0;
+                for(auto* t:group.second){if(t->area)++walkable;for(auto v:{t->a,t->b,t->c}){low.x=(std::min)(low.x,v.x);low.y=(std::min)(low.y,v.y);low.z=(std::min)(low.z,v.z);high.x=(std::max)(high.x,v.x);high.y=(std::max)(high.y,v.y);high.z=(std::max)(high.z,v.z);}}
+                wall<<entry.first<<','<<object->GetMaskName()<<','<<object->GetBodyPartNames()[part].GetString()<<','<<object->fbvs[part].IsBridge()<<','<<object->fbvs[part].GetPassability()<<','<<group.second.size()<<','<<walkable<<','<<low.x<<','<<high.x<<','<<low.y<<','<<high.y<<','<<low.z<<','<<high.z<<'\n';
+            }
+        }
         std::ofstream vegetation(reportDirectory/(stem+".vegetation.csv"));
         vegetation<<"id,model,triangles,walkable,surfaces\n";
         for(const auto& entry:objects) {
@@ -480,9 +518,53 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             {"start_exit",{55.55f,138.78f,19.24f},{78.f,145.f,14.f},Small,Human},
             {"settlement",{188.f,116.f,0},{192.f,135.f,0},Small,Human},
             {"main_gate",{188.f,108.f,6.2f},{188.f,116.f,6.2f},Small,Giant},
-            {"samvlrmp01",{192.5f,113.9f,6.f},{197.3f,113.8f,7.85f},Small,Human}
+            {"samvlrmp01",{192.5f,113.9f,6.f},{197.3f,113.8f,7.85f},Small,Human},
+            {"ruin_wall_video2_a",{66.8446f,140.352f,0},{66.7652f,140.422f,0},Small,Human},
+            {"ruin_wall_video2_b",{66.8539f,140.519f,0},{66.9009f,140.942f,0},Small,Human},
+            {"ruin_wall_video2_c",{66.5964f,140.981f,0},{67.1842f,140.672f,0},Small,Human},
+            {"mountain_193425",{68.5084f,125.304f,0},{66.1163f,121.391f,0},Small,Human},
+            {"mountain_193427",{65.8008f,125.409f,0},{65.0339f,121.688f,0},Small,Human},
+            {"mountain_193452",{83.398f,131.061f,0},{85.7246f,129.781f,0},Small,Human},
+            {"npc1365_height",{153.076f,111.926f,6.229f},{153.118f,111.925f,7.307f},Small,Human}
         };
-        unsigned failed=0;
+        unsigned failed=0,continuitySteps=0,continuityFailures=0;
+        float maxJump=0,maxSupportError=0;
+        auto continuity=[&](const Mesh& mesh,const Location& previous,const Location& next,Point interpolated,const char* name) {
+            ++continuitySteps;
+            const auto a=previous.position,b=next.position;
+            const float delta=std::abs(b.z-a.z),limit=mesh.profile.climb+std::tan(mesh.profile.slope*FP_PI/180.f)*std::hypot(b.x-a.x,b.y-a.y);
+            maxJump=(std::max)(maxJump,delta);
+            bool supported=false;float supportError=FLT_MAX,terrainZ=-FLT_MAX;
+            const auto* params=mesh.data->getParams();const float width=params->tileWidth;
+            const auto found=geometry.surfaceTriangles.find({int(std::floor((b.x-params->orig[0])/width)),int(std::floor((-b.y-params->orig[2])/width))});
+            if(found!=geometry.surfaceTriangles.end())for(auto ti:found->second) {
+                const auto t=Surface(input.ground[ti],mesh.profile);
+                if(!t.area)continue;
+                const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
+                if(det<=1.e-8f)continue;
+                const float u=((b.x-t.a.x)*by-(b.y-t.a.y)*bx)/det,v=(ax*(b.y-t.a.y)-ay*(b.x-t.a.x))/det;
+                if(t.terrain) {if(u<-.001f||v<-.001f||u+v>1.001f)continue;}
+                else {
+                    const float nx=ay*(t.c.z-t.a.z)-(t.b.z-t.a.z)*by,ny=(t.b.z-t.a.z)*bx-ax*(t.c.z-t.a.z);
+                    if(det/std::sqrt(nx*nx+ny*ny+det*det)<=std::cos(mesh.profile.slope*FP_PI/180.f))continue;
+                    const float distance=(std::max)({(std::max)(0.f,-u)*det/std::hypot(bx,by),(std::max)(0.f,-v)*det/std::hypot(ax,ay),(std::max)(0.f,u+v-1)*det/std::hypot(bx-ax,by-ay)});
+                    if(distance>mesh.profile.cellSize*.25f)continue;
+                }
+                const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);
+                if(t.terrain)terrainZ=(std::max)(terrainZ,z);
+                if(t.surface==next.surface){supported=true;supportError=(std::min)(supportError,std::abs(z-b.z));}
+            }
+            Location displayed;
+            const bool client=Project(mesh,interpolated,.001f,4.f,displayed,next.height)&&
+                displayed.surface==next.surface&&Distance(displayed.position,b)<.003f;
+            if(supported)maxSupportError=(std::max)(maxSupportError,supportError);
+            if(delta>limit+.001f||!supported||supportError>.025f||b.z<terrainZ-.025f||!client) {
+                ++continuityFailures;
+                printf("HEIGHT_DISCONTINUITY name=%s profile=%s from=(%.6f,%.6f,%.6f) to=(%.6f,%.6f,%.6f) delta=%.6f limit=%.6f surface=%llu support_error=%.6f terrain=%.6f\n",name,mesh.profileId.c_str(),a.x,a.y,a.z,b.x,b.y,b.z,delta,limit,static_cast<unsigned long long>(next.surface),supportError,terrainZ);fflush(stdout);
+                return false;
+            }
+            return true;
+        };
         for(const auto& walk:walks)for(int type=walk.first;type<=walk.last;++type) {
             const auto& mesh=*built[type];const float height=type==Tiny?.4f:type==Large?3.f:type==Giant?6.f:1.6f;
             auto a=walk.a,b=walk.b;
@@ -498,11 +580,26 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
                 for(int k=1;ok&&k<=n;++k) {
                     const float f=float(k)/n;desired={start.x+(end.x-start.x)*f,start.y+(end.y-start.y)*f,start.z+(end.z-start.z)*f};
                     Location next;++steps;ok=Constrain(mesh,at.position,desired,next,height,&reason,&at);
+                    if(ok)ok=continuity(mesh,at,next,desired,walk.name);
                     if(ok)at=next;
 
                 }
             }
             if(route.status==Status::Complete&&!ok)++failed;
+            const char* stepReason=reason;
+            if(route.status==Status::Complete&&!ok) {
+                nlohmann::json dump={{"name",walk.name},{"profile",mesh.profileId},{"from",{at.position.x,at.position.y,at.position.z}},{"desired",{desired.x,desired.y,desired.z}},{"polygon",at.polygon},{"polygons",nlohmann::json::array()}};
+                for(auto ref:route.corridor) {
+                    const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
+                    if(dtStatusFailed(mesh.data->getTileAndPolyByRef(ref,&tile,&poly)))continue;
+                    float distance=FLT_MAX;nlohmann::json vertices=nlohmann::json::array(),links=nlohmann::json::array();
+                    for(int i=0;i<poly->vertCount;++i){const auto* v=tile->verts+poly->verts[i]*3;vertices.push_back({v[0],-v[2],v[1]});distance=(std::min)(distance,std::hypot(v[0]-desired.x,-v[2]-desired.y));}
+                    if(distance>1)continue;
+                    for(auto i=poly->firstLink;i!=DT_NULL_LINK;i=tile->links[i].next){const auto& l=tile->links[i];links.push_back({l.ref,l.edge,l.side,l.bmin,l.bmax});}
+                    dump["polygons"].push_back({{"ref",ref},{"vertices",vertices},{"links",links},{"supports",mesh.polygonSurfaces.at({tile->header->x,tile->header->y})[size_t(poly-tile->polys)]}});
+                }
+                std::ofstream(reportDirectory/(stem+"."+walk.name+"."+mesh.profileId+".failure.json"))<<dump.dump(2);
+            }
             if(route.status==Status::Complete) {
                 std::vector<Point> corners;for(const auto& location:route.points)corners.push_back(location.position);
                 Location current=route.points.front();size_t segment=1;float offset=0;unsigned ticks=0;bool followed=true;
@@ -515,14 +612,16 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
                         if(offset<length-.00001f)break;offset=0;++segment;if(budget<=.00001f)break;
                     }
                     Location next;++ticks;followed=Follow(mesh,current.position,target,corners,next,height,&reason,&current);
+                    if(followed)followed=continuity(mesh,current,next,target,walk.name);
                     if(followed)current=next;
                 }
                 printf("FOLLOW_STEPS name=%s profile=%s ticks=%u complete=%d reason=%s at=(%.6f,%.6f,%.6f)\n",walk.name,Agents[type].name,ticks,int(followed),reason,current.position.x,current.position.y,current.position.z);fflush(stdout);
                 if(!followed)++failed;
             }
-            printf("ROUTE_STEPS name=%s profile=%s route=%s steps=%u complete=%d reason=%s at=(%.6f,%.6f,%.6f) desired=(%.6f,%.6f,%.6f)\n",walk.name,Agents[type].name,StatusName(route.status),steps,int(ok),reason,at.position.x,at.position.y,at.position.z,desired.x,desired.y,desired.z);fflush(stdout);
+            printf("ROUTE_STEPS name=%s profile=%s route=%s steps=%u complete=%d reason=%s at=(%.6f,%.6f,%.6f) desired=(%.6f,%.6f,%.6f)\n",walk.name,Agents[type].name,StatusName(route.status),steps,int(ok),stepReason,at.position.x,at.position.y,at.position.z,desired.x,desired.y,desired.z);fflush(stdout);
         }
-        if(failed)throw std::runtime_error("Nav64: route-to-step release quality failures="+std::to_string(failed));
+        printf("HEIGHT_CONTINUITY routes=%zu steps=%u failures=%u max_delta=%.6f max_source_error=%.6f\n",std::size(walks),continuitySteps,continuityFailures,maxJump,maxSupportError);fflush(stdout);
+        if(failed||continuityFailures)throw std::runtime_error("Nav64: route-to-step release quality failures="+std::to_string(failed));
     }
     if(mapName=="zonemainmenunew.mpr") {
         auto* object=sourceWorld->GetMapObject(1);

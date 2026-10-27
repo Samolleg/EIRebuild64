@@ -6,8 +6,8 @@
 #include <array>
 
 namespace Navigation {
-constexpr std::uint32_t ContainerVersion = 7;
-constexpr std::uint32_t AlgorithmVersion = 18;
+constexpr std::uint32_t ContainerVersion = 8;
+constexpr std::uint32_t AlgorithmVersion = 19;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }

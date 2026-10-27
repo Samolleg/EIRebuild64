@@ -243,6 +243,10 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     if(route.status!=Navigation::Status::Complete&&failures++<16)GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.2f,%.2f,%.2f) goal=(%.2f,%.2f,%.2f) profile=%s height=%.2f max_length=%.3f route_length=%.3f",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z,mesh->profileId.c_str(),request.height,maxLength,route.length);
     return route;
 }
+bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Location& result) {
+    auto* mesh=ForUnit(unit);
+    return mesh&&Navigation::Project(*mesh,point,.001f,4.f,result,Height(unit));
+}
 bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPlace);
     auto* mesh=ForUnit(unit,aiClass);if(!mesh)return false;
@@ -269,10 +273,6 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
             GameJournal::Event("NAV","step_rejected","unit=%d reason=%s from=(%.3f,%.3f,%.3f) desired=(%.3f,%.3f,%.3f)",unit?unit->GetID():-1,reason,from.x,from.y,from.z,desired.x,desired.y,desired.z);
         }
         return false;
-    }
-    if(unit) {
-        auto& world=*static_cast<CWorldServer*>(unit->GetWorld());
-        if(result.surface==1)result.position.z=unit->GetAIClass()==0?world.aiMap.GetTileSurface(CPlot3D(result.position.x,result.position.y,0)):world.GetBridgeSurfaceZValue(result.position.x,result.position.y);
     }
     return true;
 }
@@ -343,7 +343,6 @@ bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
         if(!map.MoveObject(unit,cp))return false;
         GameJournal::Event("NAV","placement","unit=%d distance=%.3f",unit->GetID(),std::hypot(cp.x-from.x,cp.y-from.y));
     }
-    if(location.surface==1)location.position.z=unit->GetAIClass()==0?map.GetTileSurface(cp):static_cast<CWorldServer*>(unit->GetWorld())->GetBridgeSurfaceZValue(cp.x,cp.y);
     unit->navLocation=location;return true;
 }
 

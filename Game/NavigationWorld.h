@@ -61,6 +61,7 @@ public:
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;
     Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
+    bool Support(CUnit* unit,Navigation::Point point,Navigation::Location& result);
     bool Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route=nullptr);
     bool Restore(CUnit* unit,CAIMap& map);
 };
