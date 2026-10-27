@@ -41,7 +41,7 @@ void NavigationWorld::Scene(const char* mpr,const char* mob) {
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
     loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;
     if(sourceJob.valid())sourceJob.get();sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
-    liveObjects.clear();obstacleRefs.clear();bakedStatic.clear();dirtyObjects.clear();cacheReady=true;
+    liveObjects.clear();appliedObjects.clear();sourceTiles.clear();objectTiles.clear();bakedStatic.clear();dirtyObjects.clear();
     if(baker) {
         authoring={};auto path=std::filesystem::path(ModRuntime::MapPath(mapName.c_str()));path.replace_extension(".navsrc");
         if(std::filesystem::exists(path)) {
@@ -97,6 +97,14 @@ bool NavigationWorld::Load() {
         for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);}
         sources=LoadSources(Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navgeom")));
         for(auto& mesh:meshes){mesh->sources=sources;IndexSurfaces(*mesh);}
+        const float width=meshes[0]->data->getParams()->tileWidth,border=1.3f;
+        const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
+        for(size_t i=0;i<sources->ground.size();++i) {
+            const auto& t=sources->ground[i];auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+            const int x0=(std::max)(0,int(std::floor(((std::min)({a.x,b.x,c.x})-border-sources->minimum.x)/width))),x1=(std::min)(nx-1,int(std::floor(((std::max)({a.x,b.x,c.x})+border-sources->minimum.x)/width)));
+            const int z0=(std::max)(0,int(std::floor(((std::min)({a.z,b.z,c.z})-border-sources->minimum.z)/width))),z1=(std::min)(nz-1,int(std::floor(((std::max)({a.z,b.z,c.z})+border-sources->minimum.z)/width)));
+            for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){sourceTiles[{x,z}].push_back(i);if(t.object)objectTiles[t.object].emplace(x,z);}
+        }
         loaded=true;SyncObjects(true);UpdateSources(true);
         // Actual world placements are resolved by the zone/party activation.
 
@@ -226,67 +234,43 @@ bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     saved=location;return true;
 }
 
+void NavigationWorld::QueueBox(const Solid& box) {
+    const auto* params=meshes[0]->data->getParams();const float width=params->tileWidth,border=1.3f;
+    float lowX=FLT_MAX,lowZ=FLT_MAX,highX=-FLT_MAX,highZ=-FLT_MAX;
+    for(auto corner:box.corners){const auto p=ToNav(corner);lowX=(std::min)(lowX,p.x);lowZ=(std::min)(lowZ,p.z);highX=(std::max)(highX,p.x);highZ=(std::max)(highZ,p.z);}
+    const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
+    const int x0=(std::max)(0,int(std::floor((lowX-border-params->orig[0])/width))),x1=(std::min)(nx-1,int(std::floor((highX+border-params->orig[0])/width)));
+    const int z0=(std::max)(0,int(std::floor((lowZ-border-params->orig[2])/width))),z1=(std::min)(nz-1,int(std::floor((highZ+border-params->orig[2])/width)));
+    for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)for(int type=0;type<AgentCount;++type)sourceDirty.emplace(type,x,z);
+}
 void NavigationWorld::SyncObjects(bool initial) {
     if(!loaded)return;
     const auto start=std::chrono::steady_clock::now();
-    do {
-        if(cacheReady&&!dirtyObjects.empty()) {
-            const int id=*dirtyObjects.begin();dirtyObjects.erase(dirtyObjects.begin());
-            if(sources) {
-                auto door=std::find_if(sources->doors.begin(),sources->doors.end(),[&](const Door& d){return d.object==id;});
-                if(door!=sources->doors.end()) {
-                    const bool open=liveDoors.count(id)?(liveDoors.at(id)<0||liveDoors.at(id)==door->openState):!liveObjects.count(id);
-                    for(auto& mesh:meshes)DoorState(*mesh,id,open);
-                    continue;
-                }
+    while(!dirtyObjects.empty()) {
+        const int id=*dirtyObjects.begin();dirtyObjects.erase(dirtyObjects.begin());
+        auto door=std::find_if(sources->doors.begin(),sources->doors.end(),[&](const Door& d){return d.object==id;});
+        if(door!=sources->doors.end()) {
+            const bool open=liveDoors.count(id)?(liveDoors.at(id)<0||liveDoors.at(id)==door->openState):!liveObjects.count(id);
+            for(auto& mesh:meshes)DoorState(*mesh,id,open);
+        } else if(!Dynamic(id)) {
+            const bool absent=!liveObjects.count(id);const bool changed=absent?absentStatic.insert(id).second:absentStatic.erase(id)!=0;
+            if(changed) {
+                for(const auto& tile:objectTiles[id])for(int type=0;type<AgentCount;++type)sourceDirty.emplace(type,tile.first,tile.second);
+                GameJournal::Event("NAV","static_changed","NID=%d absent=%d queued_profile_tiles=%zu",id,int(absent),sourceDirty.size());
             }
-            if(!Dynamic(id)) {
-                const bool absent=!liveObjects.count(id);const bool changed=absent?absentStatic.insert(id).second:absentStatic.erase(id)!=0;
-                if(changed&&sources) {
-                    const auto* params=meshes[0]->data->getParams();const float width=params->tileWidth;
-                    for(const auto& t:sources->ground)if(t.object==id) {
-                        auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);const float border=1.3f;
-                        const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
-                        const int x0=(std::max)(0,int(std::floor(((std::min)({a.x,b.x,c.x})-border-params->orig[0])/width))),x1=(std::min)(nx-1,int(std::floor(((std::max)({a.x,b.x,c.x})+border-params->orig[0])/width)));
-                        const int z0=(std::max)(0,int(std::floor(((std::min)({a.z,b.z,c.z})-border-params->orig[2])/width))),z1=(std::min)(nz-1,int(std::floor(((std::max)({a.z,b.z,c.z})+border-params->orig[2])/width)));
-                        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)for(int type=0;type<AgentCount;++type)sourceDirty.emplace(type,x,z);
-                    }
-                    GameJournal::Event("NAV","static_changed","NID=%d absent=%d queued_profile_tiles=%zu",id,int(absent),sourceDirty.size());
-                }
-                continue;
-            }
-            auto old=obstacleRefs.find(id);
-            if(old!=obstacleRefs.end()) {
-                for(size_t k=0;k<old->second.size();++k)if(old->second[k])
-                    if(dtStatusFailed(meshes[k%AgentCount]->cache->data->removeObstacle(old->second[k])))throw std::runtime_error("Nav64: cannot remove obstacle");
-                obstacleRefs.erase(old);
-            }
-            const auto live=liveObjects.find(id);
-            if(live!=liveObjects.end())for(const auto& box:live->second) {
-                Point center{};float low=box.corners[0].z,high=low;
-                for(auto p:box.corners){center.x+=p.x/8;center.y+=p.y/8;low=(std::min)(low,p.z);high=(std::max)(high,p.z);}
-                auto a=box.corners[0],x=box.corners[1],y=box.corners[2];
-                const float hx=std::hypot(x.x-a.x,x.y-a.y)/2,hy=std::hypot(y.x-a.x,y.y-a.y)/2;
-                const float angle=-std::atan2(x.y-a.y,x.x-a.x);
-                for(int type=0;type<AgentCount;++type) {
-                    const float radius=Agents[type].profile.radius;
-                    const float c[]={center.x,(low+high)*.5f,-center.y},e[]={hx+radius,(high-low)*.5f,hy+radius};dtObstacleRef ref=0;
-                    if(dtStatusFailed(meshes[type]->cache->data->addBoxObstacle(c,e,angle,&ref)))throw std::runtime_error("Nav64: obstacle capacity/request limit");
-                    obstacleRefs[id].push_back(ref);
-                }
-            }
-            cacheReady=false;
+        } else {
+            auto old=appliedObjects.find(id);if(old!=appliedObjects.end())for(const auto& box:old->second)QueueBox(box);
+            auto live=liveObjects.find(id);
+            if(live!=liveObjects.end()){for(const auto& box:live->second)QueueBox(box);appliedObjects[id]=live->second;}
+            else appliedObjects.erase(id);
         }
-        bool ready=true;
-        for(auto& mesh:meshes)ready=mesh->cache->Update(*mesh)&&ready;
-        cacheReady=ready;
-        if(cacheReady&&dirtyObjects.empty())break;
-    }while(initial||std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<2);
+        if(!initial&&std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()>=2)break;
+    }
 }
 void NavigationWorld::Advance() {
-    if(!loaded||(cacheReady&&dirtyObjects.empty()&&sourceDirty.empty()&&!sourceJob.valid()))return;
+    if(!loaded||(dirtyObjects.empty()&&sourceDirty.empty()&&!sourceJob.valid()))return;
     CorePerf::Scope total(CorePerf::NavigationTotal);
-    try{if(!cacheReady||!dirtyObjects.empty()||(sourceDirty.empty()&&!sourceJob.valid()))SyncObjects();else UpdateSources(false);}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
+    try{if(!dirtyObjects.empty())SyncObjects();else UpdateSources(false);}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
 }
 bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
     if(!loaded)return false;auto* mesh=ForUnit(unit);if(!mesh)return false;
@@ -312,14 +296,20 @@ bool NavigationWorld::RandomGoal(CUnit* unit,Navigation::Point center,float radi
 
 void NavigationWorld::UpdateSources(bool initial) {
     do {
-        if(!cacheReady||!dirtyObjects.empty())return;
+        if(!dirtyObjects.empty())return;
         if(sourceJob.valid()) {
             if(!initial&&sourceJob.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
             auto replacement=sourceJob.get();const auto [type,x,z]=sourceTask;
             if(!sourceDirty.count(sourceTask)) {
                 const auto start=std::chrono::steady_clock::now();meshes[type]->excludedObjects=absentStatic;
                 ReplaceTile(*meshes[type],*replacement,x,z);
-                for(const auto& door:meshes[type]->doorOpen)DoorState(*meshes[type],door.first,door.second);
+                const auto* params=meshes[type]->data->getParams();const float width=params->tileWidth;
+                for(const auto& door:sources->doors) {
+                    const float lx=params->orig[0]+x*width,lz=params->orig[2]+z*width;
+                    if(door.maximum.x<lx||door.minimum.x>lx+width||-door.minimum.y<lz||-door.maximum.y>lz+width)continue;
+                    const auto state=meshes[type]->doorOpen.find(door.object);
+                    if(state!=meshes[type]->doorOpen.end())DoorState(*meshes[type],door.object,state->second);
+                }
                 const double applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
                 GameJournal::Event("NAV","source_tile","profile=%d tile=%d,%d worker_ms=%llu apply_ms=%.3f pending=%zu",type,x,z,static_cast<unsigned long long>(replacement->buildMs),applyMs,sourceDirty.size());
             }
@@ -327,16 +317,19 @@ void NavigationWorld::UpdateSources(bool initial) {
         if(sourceDirty.empty())return;
         sourceTask=*sourceDirty.begin();sourceDirty.erase(sourceDirty.begin());const auto [type,x,z]=sourceTask;
         auto snapshot=sources;auto absent=absentStatic;auto profile=meshes[type]->profile;
-        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z] {
-            Geometry input;input.minimum=snapshot->minimum;input.maximum=snapshot->maximum;input.doors=snapshot->doors;
-            const float width=profile.tileCells*profile.cellSize,border=1.3f;
-            const float lowX=input.minimum.x+x*width-border,highX=lowX+width+border*2;
-            const float lowZ=input.minimum.z+z*width-border,highZ=lowZ+width+border*2;
-            for(const auto& t:snapshot->ground) {
-                if(t.object&&absent.count(t.object))continue;auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
-                if((std::max)({a.x,b.x,c.x})<lowX||(std::min)({a.x,b.x,c.x})>highX||(std::max)({a.z,b.z,c.z})<lowZ||(std::min)({a.z,b.z,c.z})>highZ)continue;
-                input.ground.push_back(t);
-            }
+        const auto triangles=sourceTiles[{x,z}];
+        std::vector<Solid> boxes;
+        const float width=profile.tileCells*profile.cellSize,border=1.3f;
+        const float lowX=sources->minimum.x+x*width-border,highX=lowX+width+border*2;
+        const float lowZ=sources->minimum.z+z*width-border,highZ=lowZ+width+border*2;
+        for(const auto& entry:appliedObjects)for(const auto& box:entry.second) {
+            float a=FLT_MAX,b=FLT_MAX,c=-FLT_MAX,d=-FLT_MAX;
+            for(auto p:box.corners){p=ToNav(p);a=(std::min)(a,p.x);b=(std::min)(b,p.z);c=(std::max)(c,p.x);d=(std::max)(d,p.z);}
+            if(c>=lowX&&a<=highX&&d>=lowZ&&b<=highZ)boxes.push_back(box);
+        }
+        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z,triangles,boxes=std::move(boxes)] {
+            Geometry input;input.minimum=snapshot->minimum;input.maximum=snapshot->maximum;input.doors=snapshot->doors;input.solids=boxes;
+            for(auto index:triangles){const auto& t=snapshot->ground[index];if(!t.object||!absent.count(t.object))input.ground.push_back(t);}
             return RebuildTile(input,profile,x,z);
         });
     }while(initial);

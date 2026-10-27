@@ -47,7 +47,7 @@
       <SDLCheck>false</SDLCheck>
       <PreprocessorDefinitions>DT_POLYREF64;MA_ENABLE_ONLY_SPECIFIC_BACKENDS;MA_ENABLE_WASAPI;EID3D11_EMBEDDED;BRANCH_DX11;NDEBUG;__GAME__;__WIN2K__;__NOTIFY_FILE__;DIRECT3D_VERSION=0x0700;_WINSOCK_DEPRECATED_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0A00;_AFXDLL;WIN32;_CONSOLE;NODEBUGINFO;DONT_DISPLAY_DEBUG_IDS;MASTER_SERVER;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeader>Use</PrecompiledHeader>
-      <AdditionalIncludeDirectories>$(ProjectDir)external\recastnavigation\DetourTileCache\Include;$(ProjectDir)external\recastnavigation\Recast\Include;$(ProjectDir)external\recastnavigation\Detour\Include;$(ProjectDir)dependencies\ffmpeg\8.1.3\x64\include;$(ProjectDir);$(ProjectDir)out\include;$(ProjectDir)out\x64\Release\luajit\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\recastnavigation\Recast\Include;$(ProjectDir)external\recastnavigation\Detour\Include;$(ProjectDir)dependencies\ffmpeg\8.1.3\x64\include;$(ProjectDir);$(ProjectDir)out\include;$(ProjectDir)out\x64\Release\luajit\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -68,9 +68,6 @@
     <ClCompile Include="Game\NavigationWorld.cpp" />
     <ClCompile Include="Game\NavigationBake.cpp" />
     <ClCompile Include="Navigation\BodyTable.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_BodyTable.obj</ObjectFileName></ClCompile>
-    <ClCompile Include="Navigation\Cache.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Cache.obj</ObjectFileName></ClCompile>
-    <ClCompile Include="external\recastnavigation\DetourTileCache\Source\DetourTileCache.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\DetourTileCache\Source\DetourTileCacheBuilder.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Navigation\Geometry.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Geometry.obj</ObjectFileName></ClCompile>
     <ClCompile Include="Navigation\Build.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Build.obj</ObjectFileName></ClCompile>
     <ClCompile Include="Navigation\Query.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Query.obj</ObjectFileName></ClCompile>

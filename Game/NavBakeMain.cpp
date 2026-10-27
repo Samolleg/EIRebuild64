@@ -40,15 +40,24 @@ int wmain(int argc,wchar_t** argv) {
     for(int i=1;i<argc;++i) {
         const std::wstring name=argv[i];
         if(name==L"--all"){if(all)return 2;all=true;continue;}
-        if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root")return 2;
+        if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root"&&name!=L"--report-root"&&name!=L"--tile-cells")return 2;
         if(i+1>=argc||options.count(name))return 2;
         options[name]=argv[++i];
     }
-    if(!options.count(L"--game-root")||!options.count(L"--mod")||!options.count(L"--output-root")||
+    if(!options.count(L"--game-root")||!options.count(L"--mod")||!options.count(L"--output-root")||!options.count(L"--report-root")||
         (unsigned(all)+unsigned(options.count(L"--map"))+unsigned(options.count(L"--model"))!=1)||(!options.count(L"--map")&&options.count(L"--mob"))) {
-        fprintf(stderr,"Usage: EIRebuild64NavBake --game-root DIR --mod DIR (--all | --model NAME | --map NAME [--mob NAME]) --output-root DIR\n");
+        fprintf(stderr,"Usage: EIRebuild64NavBake --game-root DIR --mod DIR (--all | --model NAME | --map NAME [--mob NAME]) --output-root DIR --report-root PRIVATE_DIR [--tile-cells 32|64|96|128]\n");
         return 2;
     }
+    NavigationBake::reportDirectory=std::filesystem::absolute(options.at(L"--report-root")).lexically_normal();
+    if(options.count(L"--tile-cells")) {
+        const auto value=options.at(L"--tile-cells").wstring();
+        if(value!=L"32"&&value!=L"64"&&value!=L"96"&&value!=L"128")return 2;
+        NavigationBake::tileCells=unsigned(std::stoul(value));
+    }
+    const auto outputPath=std::filesystem::absolute(options.at(L"--output-root")).lexically_normal()/"Maps"/"Nav64";
+    auto relative=NavigationBake::reportDirectory.lexically_relative(outputPath);
+    if(relative.empty()||*relative.begin()!=L"..")return 2;
     ModCliTool::Scope tool(ModCliTool::Kind::NavBake);
     int exitCode=3;
     try {

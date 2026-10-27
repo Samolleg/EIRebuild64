@@ -1,6 +1,6 @@
 #pragma once
 #include "Geometry.h"
-#include "Cache.h"
+
 #include <memory>
 #include <cstddef>
 #include <tuple>
@@ -21,8 +21,9 @@ struct Mesh {
     std::map<std::pair<int,int>,std::vector<size_t>> surfaceTriangles;
     std::map<int,bool> doorOpen;
     std::map<std::tuple<int,int,int,int>,unsigned short> doorFlags;
-    std::vector<Bytes> layers;
-    std::unique_ptr<Cache> cache;
+    unsigned char* replacementData=nullptr;
+    int replacementSize=0;
+    ~Mesh(){dtFree(replacementData);}
     std::string mapName, mobName, profileId; // Self-describing offline artifact identity.
     std::uint64_t generation = 0;
     std::uint32_t tiles = 0;

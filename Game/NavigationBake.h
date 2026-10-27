@@ -27,6 +27,8 @@ class NavigationBake {
     const Navigation::BodySize& Body(CWorldServer& world,const std::string& mask,float strength,float grace,float tall);
     Navigation::Geometry Geometry();
 public:
+    static unsigned tileCells;
+    static std::filesystem::path reportDirectory;
     Navigation::Geometry terrain;
     void Bind(CWorldServer& world,CAIMap& map) { sourceWorld=&world;sourceMap=&map; }
     void Configure(const Navigation::Authoring& policy) { authored=policy; }

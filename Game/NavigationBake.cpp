@@ -23,6 +23,8 @@
 #include "nlohmann/json.hpp"
 #pragma comment(lib,"bcrypt.lib")
 using namespace Navigation;
+unsigned NavigationBake::tileCells=96;
+std::filesystem::path NavigationBake::reportDirectory;
 namespace {
 Navigation::Point GamePoint(const CPlot3D& p) {return {p.x,p.y,p.z};}
 void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
@@ -332,26 +334,32 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         Atomic(directory/BodyFilename,expanded);table=std::move(expanded);
         printf("BODIES_EXTENDED models_and_shapes=%zu bytes=%zu\n",bodyTable.samples.size(),table.size());fflush(stdout);
     }
-    auto geometry=Geometry();
+    // Build and runtime rebuild consume the exact same quantized input.
+    auto sourceBytes=StoreSources(Geometry());
+    auto sources=LoadSources(sourceBytes);const auto& geometry=*sources;
     std::vector<Navigation::BuildRequest> requests;
-    for(int type=0;type<AgentCount;++type){requests.push_back({Agents[type].profile});}
+    for(int type=0;type<AgentCount;++type){auto p=Agents[type].profile;p.tileCells=tileCells;requests.push_back({p});}
     auto built=Navigation::BuildProfiles(geometry,requests);
-    auto sources=std::make_shared<Navigation::Geometry>(geometry);
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
-    auto sourceOutput=std::async(std::launch::async,[&]{return StoreSources(geometry);});
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
     for(int type=0;type<AgentCount;++type) {
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;CheckReleaseHeights(mesh);
     }
     auto serialize=[&](int first){for(int type=first;type<AgentCount;type+=2)outputs[type]=Navigation::Store(*built[type]);};
     auto parallel=std::async(std::launch::async,[&]{serialize(1);});serialize(0);parallel.get();
-    for(int type=0;type<AgentCount;++type)totalBytes+=outputs[type].size();
+    for(int type=0;type<AgentCount;++type) {
+        auto ready=Navigation::Load(outputs[type],built[type]->profile,mapName,mobName,Agents[type].name);
+        ready->buildMs=built[type]->buildMs;ready->rasterMs=built[type]->rasterMs;ready->polygonMs=built[type]->polygonMs;
+        ready->sources=sources;IndexSurfaces(*ready);built[type]=std::move(ready);
+        totalBytes+=outputs[type].size();
+    }
     std::filesystem::create_directories(directory);
     // Release-data quality is part of the baker, on the actual map meshes.
     // No standalone test, simulation, game tick, script or renderer runs here.
     const auto stem=std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string();
-    std::ofstream losses(directory/(stem+".losses.csv"));losses<<"profile,class,x,y,z,reason\n";
-    std::ofstream water(directory/(stem+".water-gains.csv"));water<<"profile,x,y,z,depth,water_limit,forbidden,surface,legacy_reason\n";
+    std::filesystem::create_directories(reportDirectory);
+    std::ofstream losses(reportDirectory/(stem+".losses.csv"));losses<<"profile,class,x,y,z,reason\n";
+    std::ofstream water(reportDirectory/(stem+".water-gains.csv"));water<<"profile,x,y,z,depth,water_limit,forbidden,surface,legacy_reason\n";
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const int c=mesh.profile.materialClass;
         unsigned oldCount=0,lost=0,gained=0,waterGained=0,forbiddenWaterGained=0,stepCount=0,stepFailed=0,stepStalled=0;
@@ -391,6 +399,21 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         }
         printf("HERO_START profile=small original=(55.55,138.78,19.24) place=%d placed=(%.5f,%.5f,%.5f) goal=(58.9822,139.653) route=%s step=%d moved=%.6f\n",int(place),placed.position.x,placed.position.y,placed.position.z,StatusName(route.status),int(step),step?std::hypot(next.position.x-placed.position.x,next.position.y-placed.position.y):0);fflush(stdout);
         if(!step||std::hypot(next.position.x-placed.position.x,next.position.y-placed.position.y)<.019f)throw std::runtime_error("Nav64: HERO_START does not advance");
+        const float width=mesh.profile.tileCells*mesh.profile.cellSize;
+        const int tx=int((start.x-geometry.minimum.x)/width),tz=int((-start.y-geometry.minimum.z)/width);
+        const auto begin=std::chrono::steady_clock::now();
+        auto rebuild=std::async(std::launch::async,[&]{
+            Navigation::Geometry input;input.minimum=geometry.minimum;input.maximum=geometry.maximum;input.doors=geometry.doors;
+            const float border=1.3f,lx=geometry.minimum.x+tx*width-border,lz=geometry.minimum.z+tz*width-border;
+            for(const auto& t:geometry.ground){auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+                if((std::max)({a.x,b.x,c.x})>=lx&&(std::min)({a.x,b.x,c.x})<=lx+width+2*border&&(std::max)({a.z,b.z,c.z})>=lz&&(std::min)({a.z,b.z,c.z})<=lz+width+2*border)input.ground.push_back(t);}
+            return RebuildTile(input,mesh.profile,tx,tz);
+        });
+        auto replacement=rebuild.get();
+        const double workerMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+        const auto apply=std::chrono::steady_clock::now();ReplaceTile(mesh,*replacement,tx,tz);
+        const double applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-apply).count();
+        printf("REBUILD tile_cells=%u tile=%d,%d worker_ms=%.3f apply_ms=%.3f\n",tileCells,tx,tz,workerMs,applyMs);fflush(stdout);
         // Anchors are actual zone1 sites, not synthetic corridor fixtures.
         struct Passage {const char* name;Point a,b;int first,last;};
         const Passage passages[]={
@@ -408,7 +431,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         }
 
     }
-    std::ofstream connections(directory/(stem+".connections.csv"));
+    std::ofstream connections(reportDirectory/(stem+".connections.csv"));
     connections<<"profile,id,model,surface,x,y,z,out_x,out_y,status,length\n";
     for(const auto& entry:objects) {
         std::vector<Point> samples;Point low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
@@ -433,7 +456,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             connections<<Agents[type].name<<','<<entry.first<<','<<model<<','<<(placed?start.surface:surface)<<','<<start.position.x<<','<<start.position.y<<','<<start.position.z<<','<<destination.x<<','<<destination.y<<','<<(placed?StatusName(best.status):"no_surface")<<','<<best.length<<'\n';
         }
     }
-    std::ofstream units(directory/(stem+".placements.csv"));units<<"id,model,profile,x,y,z,distance,reason\n";
+    std::ofstream units(reportDirectory/(stem+".placements.csv"));units<<"id,model,profile,x,y,z,distance,reason\n";
     for(const auto& entry:sourceWorld->mapObjects)if(entry.second->WhoAmI()==HPC_UNIT) {
         auto* unit=static_cast<CUnit*>(entry.second);auto cp=unit->GetCP();const auto& shape=unit->GetComplection();
         const auto size=bodyTable.Lookup(ResourceName(unit->GetMaskName()),shape.strength,shape.grace,shape.tall);
@@ -455,7 +478,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             static_cast<unsigned long long>(mesh.polygonMs),bytes.size());
         fflush(stdout);
     }
-    auto sourceBytes=sourceOutput.get();const auto decoded=LoadSources(sourceBytes);
+    const auto decoded=LoadSources(sourceBytes);
     if(decoded->ground.size()!=geometry.ground.size()||decoded->doors.size()!=geometry.doors.size())throw std::runtime_error("Nav64: source serialization mismatch");
     Atomic(directory/(stem+".navgeom"),sourceBytes);totalBytes+=sourceBytes.size();
     printf("SOURCES triangles=%zu doors=%zu offmesh=%zu bytes=%zu\n",geometry.ground.size(),geometry.doors.size(),geometry.connections.size(),sourceBytes.size());fflush(stdout);

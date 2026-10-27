@@ -24,7 +24,9 @@ class NavigationWorld {
     bool loaded=false;
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
-    std::map<int,std::vector<dtObstacleRef>> obstacleRefs;
+    std::map<int,std::vector<Navigation::Solid>> appliedObjects;
+    std::map<std::pair<int,int>,std::vector<size_t>> sourceTiles;
+    std::map<int,std::set<std::pair<int,int>>> objectTiles;
     std::set<int> bakedStatic,dirtyObjects;
     unsigned updateProfile=0;
     std::shared_ptr<Navigation::Geometry> sources;
@@ -35,7 +37,7 @@ class NavigationWorld {
     std::map<int,int> liveDoors;
     void UpdateSources(bool initial);
 
-    bool cacheReady=true;
+    void QueueBox(const Navigation::Solid& box);
     bool Dynamic(int id) const { return !bakedStatic.count(id); }
     void SyncObjects(bool initial=false);
     const Navigation::BodySize& Body(CUnit* unit);
