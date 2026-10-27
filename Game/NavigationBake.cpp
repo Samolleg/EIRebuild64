@@ -330,13 +330,15 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     std::ofstream losses(directory/(stem+".losses.csv"));losses<<"profile,class,x,y,z,reason\n";
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const int c=mesh.profile.materialClass;
-        unsigned oldCount=0,lost=0,stepCount=0,stepFailed=0,stepStalled=0;
+        unsigned oldCount=0,lost=0,gained=0,waterGained=0,stepCount=0,stepFailed=0,stepStalled=0;
         const float heights[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};const float height=(std::min)(heights[c],ClearanceHeights(mesh.profile).back());
         for(int y=3;y<sourceMap->YSize()-3;++y)for(int x=3;x<sourceMap->XSize()-3;++x) {
-            if(!((sourceMap->map[y][x].dwTerrains>>(c*4))&15))continue;
-            ++oldCount;CPlot3D cp(AITile2Meter(x+.5f),AITile2Meter(y+.5f),0);
+            const bool oldPass=((sourceMap->map[y][x].dwTerrains>>(c*4))&15)!=0;
+            if(oldPass)++oldCount;CPlot3D cp(AITile2Meter(x+.5f),AITile2Meter(y+.5f),0);
             Point p{cp.x,cp.y,c==0?sourceMap->GetTileSurface(cp):sourceMap->GetTileHeight(cp)};Location at;
-            if(!Project(mesh,p,.05f,4.f,at,height)) {++lost;losses<<Agents[type].name<<','<<c<<','<<p.x<<','<<p.y<<','<<p.z<<",no_polygon_or_clearance\n";continue;}
+            const bool onMesh=Project(mesh,p,.05f,4.f,at,height);
+            if(!oldPass){if(onMesh){++gained;if(sourceMap->map[y][x].nDepth>0)++waterGained;}continue;}
+            if(!onMesh) {++lost;losses<<Agents[type].name<<','<<c<<','<<p.x<<','<<p.y<<','<<p.z<<",no_polygon_or_clearance\n";continue;}
             if((x%16)==0&&(y%16)==0) {
                 Point to=at.position;to.x+=.02f;Location target;
                 if(Project(mesh,to,.001f,1.f,target,height)) {
@@ -346,7 +348,8 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
                 }
             }
         }
-        printf("QUALITY mpr=%s mob=%s profile=%s class=%d legacy_cells=%u lost=%u step_samples=%u step_failed=%u step_stalled=%u\n",mapName.c_str(),mobName.c_str(),Agents[type].name,c,oldCount,lost,stepCount,stepFailed,stepStalled);fflush(stdout);
+        const float cellArea=AITile2Meter(1.f)*AITile2Meter(1.f);
+        printf("QUALITY mpr=%s mob=%s profile=%s class=%d legacy_cells=%u lost=%u lost_m2=%.2f gained=%u gained_m2=%.2f gained_water_m2=%.2f step_samples=%u step_failed=%u step_stalled=%u\n",mapName.c_str(),mobName.c_str(),Agents[type].name,c,oldCount,lost,lost*cellArea,gained,gained*cellArea,waterGained*cellArea,stepCount,stepFailed,stepStalled);fflush(stdout);
     }
     if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
         auto& mesh=*built[Small];Point start{55.55f,138.78f,19.24f};Location placed,next;
