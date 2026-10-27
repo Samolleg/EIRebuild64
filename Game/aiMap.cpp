@@ -1924,6 +1924,24 @@ int CAIMap::CalcOneTilePassability(STerrainTile &terra, int nUnitClass, int nUni
     return terra.GetMapTerrainIndex();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Read-only explanation of the old mask, for release-data comparisons.
+// This is not a movement policy and never applies legacy values to Recast.
+const char* CAIMap::NavigationLegacyRejection(int unitClass,int x,int y)
+{
+    if(!TileInBounds(x,y))return "border";
+    if((map[y][x].dwTerrains>>(unitClass*4))&15)return "not_rejected";
+    STerrainTile policy;
+    const int height=Float2Int(fpUnitsHeights[unitClass]*fpZMult);
+    if(!CalcOneTilePassability(policy,unitClass,height,x,y))return "cell_material_water_or_object";
+    auto* area=GetTerrainArea(unitClass);
+    for(int i=0;i<area->GetSize();++i) {
+        const int nx=x+(*area)[i].x,ny=y+(*area)[i].y;
+        if(TileInBounds(nx,ny)&&!CalcOneTilePassability(policy,unitClass,height,nx,ny))return "legacy_cell_expansion";
+    }
+    if(x<3||y<3||x>=XSize()-3||y>=YSize()-3)return "border";
+    // RealConvert has only the gradient stage left after cell expansion.
+    return "legacy_gradient";
+}
 void CAIMap::RealConvertObjMapToPassabilities(int nLowX, int nHighX, int nLowY, int nHighY)
 {
     int x, y, i, k;

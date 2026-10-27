@@ -93,7 +93,9 @@ CSV losses/placements are private release-data reports, not runtime inputs.
 HERO_START must advance by 0.02 m through the shared query code; the baker
 fails if it does not. QUALITY retains total gained_water_m2 and separately
 reports gained_forbidden_water_m2 using the original SetWater depth limit.
-water-gains.csv records every gained water cell, its limit and surface.
+water-gains.csv records every gained water cell, its limit, surface and
+legacy rejection stage (cell policy, cell expansion, gradient or border).
+The old mask explanation is read-only and does not supply Recast parameters.
 connections.csv uses the named object surface and the class clearance.
 
 Exact narrow-passage sites, classification of remaining site losses,

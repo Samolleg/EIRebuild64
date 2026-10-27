@@ -561,6 +561,7 @@ public:
     CAIMap();
     NavigationWorld& Navigation() { return navigation; }
     BYTE NavigationBridgeArea() const { return BYTE((tilesInfo[AI_N_ROAD_TYPE_ID].dwTerrains>>12)&15); }
+    const char* NavigationLegacyRejection(int unitClass,int x,int y); // Baker report only.
     bool NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& route, float maxLength=1.e6f, float goalRadius=0, int aiClass=3, Navigation::Location* source=nullptr);
     BOOL Load(LPCSTR pszMapName);
     void Clear();

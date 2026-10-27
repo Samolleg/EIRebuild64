@@ -331,7 +331,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     // No standalone test, simulation, game tick, script or renderer runs here.
     const auto stem=std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string();
     std::ofstream losses(directory/(stem+".losses.csv"));losses<<"profile,class,x,y,z,reason\n";
-    std::ofstream water(directory/(stem+".water-gains.csv"));water<<"profile,x,y,z,depth,water_limit,forbidden,surface\n";
+    std::ofstream water(directory/(stem+".water-gains.csv"));water<<"profile,x,y,z,depth,water_limit,forbidden,surface,legacy_reason\n";
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const int c=mesh.profile.materialClass;
         unsigned oldCount=0,lost=0,gained=0,waterGained=0,forbiddenWaterGained=0,stepCount=0,stepFailed=0,stepStalled=0;
@@ -345,7 +345,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
                 ++waterGained;const int depth=sourceMap->map[y][x].nDepth,limit=c==1?0:sourceMap->GetMapHeight(heights[c]);
                 const bool forbidden=c!=0&&(depth==N_AI_MAX_DEPTH+1||depth>=limit-1);
                 if(forbidden)++forbiddenWaterGained;
-                water<<Agents[type].name<<','<<p.x<<','<<p.y<<','<<p.z<<','<<depth<<','<<limit<<','<<forbidden<<','<<at.surface<<'\n';
+                water<<Agents[type].name<<','<<p.x<<','<<p.y<<','<<p.z<<','<<depth<<','<<limit<<','<<forbidden<<','<<at.surface<<','<<sourceMap->NavigationLegacyRejection(c,x,y)<<'\n';
             }}continue;}
             if(!onMesh) {++lost;losses<<Agents[type].name<<','<<c<<','<<p.x<<','<<p.y<<','<<p.z<<",no_polygon_or_clearance\n";continue;}
             if((x%16)==0&&(y%16)==0) {
