@@ -1692,6 +1692,10 @@ bool CUnitServer::LcChangePose()
         }
     }
     lpUnit->RecalcAIParams();
+    if (bChangePose && lpUnit->GetOwner())
+        GameJournal::Event("UNIT", "pose_changed", "unit=%d previous=%d current=%d at=(%.3f,%.3f)",
+                           lpUnit->GetID(), int(prevPose.Get()), int(currentPose.Get()),
+                           lpUnit->GetCPX(), lpUnit->GetCPY());
     LcRestartCommand();
     return true;
 }
@@ -2475,12 +2479,23 @@ float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
             if (((CUnit *)pTarget)->GetOwner() && lpUnit->GetOwner())
                 fpWeaponRange -= 0.4f;
             fpWeaponRange = Max(GetCurrentWeaponRange(), fpWeaponRange);
-            fpHitDist = lpUnit->GetCollisionDistance() +
-                        ((CUnit *)pTarget)->GetCollisionDistance() + fpWeaponRange;
+            // Preserve the existing weapon/natural reach. Only melee bodies
+            // use the same measured radii as placement and crowd avoidance.
+            const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
+                                   GetCurrentWeaponType() != RPGWST_MAGIC;
+            auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
+            fpHitDist = (bodyMelee ? navigation.Radius(lpUnit) : lpUnit->GetCollisionDistance()) +
+                        (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
+                                     ((CUnit *)pTarget)->GetCollisionDistance()) + fpWeaponRange;
         }
         else
-            fpHitDist = lpUnit->GetAttackDistance() + pTarget->GetAttackDistance() +
-                        GetCurrentWeaponRange();
+        {
+            const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
+                                   GetCurrentWeaponType() != RPGWST_MAGIC;
+            const float body = bodyMelee ? ((CWorldServer *)GetWorld())->aiMap.Navigation().Radius(lpUnit) + 0.05f
+                                        : lpUnit->GetAttackDistance();
+            fpHitDist = body + pTarget->GetAttackDistance() + GetCurrentWeaponRange();
+        }
         break;
     }
     return fpHitDist;
@@ -2500,8 +2515,12 @@ float CUnitServer::GetCloseAttackDist(const SUnitBasicCmd &cmd)
         // выпрыгивает на половину собственной длины)
         float fpAttackKoef = rpgUnitStats.fpAttackDistance;
         // fpAttackKoef = ( 1 - complection.tall ) + complection.tall * fpAttackKoef;
+        const bool bodyMelee = !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC;
+        auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
+        if (bodyMelee) fpAttackDistance = navigation.Radius(lpUnit) + 0.05f;
         fpAttackDistance *= (1 + fpAttackKoef);
-        fpHitDist = fpAttackDistance + ((CUnit *)pTarget)->GetCollisionDistance();
+        fpHitDist = fpAttackDistance + (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
+                                                 ((CUnit *)pTarget)->GetCollisionDistance());
     }
     return fpHitDist;
 }
@@ -6121,6 +6140,10 @@ void CUnitServer::CmdRest()
 
 void CUnitServer::CmdNewPose(EUnitPose pose)
 {
+    if (lpUnit->GetOwner())
+        GameJournal::Event("CMD", "pose", "unit=%d current=%d requested=%d at=(%.3f,%.3f)",
+                           lpUnit->GetID(), int(currentPose.Get()), int(pose),
+                           lpUnit->GetCPX(), lpUnit->GetCPY());
     nBoredCounter = 0;
     lpUnit->wishPose = pose;
     if (LcCanChangePose(pose))

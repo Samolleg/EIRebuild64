@@ -504,11 +504,11 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     }
     if(mapName=="zone1.mpr") {
         std::ofstream identities(reportDirectory/(stem+".objects.csv"));
-        identities<<"id,kind,model,x,y,z,owner,name,prototype,class,hero\n";
+        identities<<std::setprecision(9)<<"id,kind,model,x,y,z,owner,name,prototype,class,hero,collision_radius,body_radius,pose\n";
         for(const auto& entry:sourceWorld->mapObjects) {
             auto* o=entry.second;const auto p=o->GetCP();
             identities<<entry.first<<','<<int(o->WhoAmI())<<','<<o->GetMaskName()<<','<<p.x<<','<<p.y<<','<<p.z<<',';
-            if(o->WhoAmI()==HPC_UNIT) {auto* u=static_cast<CUnit*>(o);identities<<u->GetOwnerNum()<<','<<u->GetName()<<','<<u->GetPrototype()->szName<<','<<u->GetAIClass()<<','<<u->IsHero();}
+            if(o->WhoAmI()==HPC_UNIT) {auto* u=static_cast<CUnit*>(o);identities<<u->GetOwnerNum()<<','<<u->GetName()<<','<<u->GetPrototype()->szName<<','<<u->GetAIClass()<<','<<u->IsHero()<<','<<u->GetCollisionDistance();const auto& c=u->GetComplection();identities<<','<<bodyTable.Lookup(ResourceName(u->GetMaskName()),c.strength,c.grace,c.tall).radius<<','<<int(u->GetCurrentPose());}
             identities<<'\n';
         }
         CBridgeManager legacyBridges;

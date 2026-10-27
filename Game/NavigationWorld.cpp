@@ -463,7 +463,14 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     const auto from=Position(unit,map);
     move.desired={AITile2Meter(pos.x),AITile2Meter(pos.y),segment.IsMoving()?z:from.z};
     move.direction={direction.x,direction.y,0};
-    if(!Step(unit,from,move.desired,move.support,segment.IsMoving()?&segment.route:nullptr))return false;
+    // Script/patrol turns do not move the body. A clearance projection must
+    // neither reject them nor replace their heading with a corridor tangent.
+    if(!segment.IsMoving()) {
+        move.desired=from;move.support=unit->navLocation;
+        move.support.position=from;wait=0;queues.erase(unit->GetID());
+        return true;
+    }
+    if(!Step(unit,from,move.desired,move.support,&segment.route))return false;
     pos.x=move.support.position.x;pos.y=move.support.position.y;
     if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return true;
     auto* neighbour=map.CheckCircleCollision(unit,pos);
