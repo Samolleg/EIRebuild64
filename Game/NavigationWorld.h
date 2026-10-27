@@ -12,6 +12,8 @@ class CWorldServer;
 class CUnit;
 class CAIMap;
 class CAIRoute;
+class CAIFullRoute;
+struct SAIPath;
 class NavigationBake;
 class NavigationWorld {
     std::array<std::unique_ptr<Navigation::Mesh>,Navigation::AgentCount> meshes;
@@ -35,6 +37,9 @@ class NavigationWorld {
     std::future<std::unique_ptr<Navigation::Mesh>> sourceJob;
     std::tuple<int,int,int> sourceTask;
     std::map<int,int> liveDoors;
+    struct Queue { Navigation::Point goal;std::vector<Navigation::Obstacle> blockers;int blocker=0;bool attempted=false;const Navigation::Mesh* mesh=nullptr;std::uint64_t generation=0;float height=0; };
+    std::map<int,Queue> queues;
+    const std::vector<Navigation::Obstacle>* queryObstacles=nullptr;
     void UpdateSources(bool initial);
     bool Load(const std::filesystem::path& directory);
 
@@ -64,4 +69,16 @@ public:
     bool Support(CUnit* unit,Navigation::Point point,Navigation::Location& result);
     bool Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route=nullptr);
     bool Restore(CUnit* unit,CAIMap& map);
+    struct Movement {
+        Navigation::Location support;
+        Navigation::Point desired,direction;
+        float speed=0;
+        bool rotating=false,finished=false,waiting=false,replanned=false;
+        double detourMs=0;
+        int blocker=-1;
+        unsigned avoidanceAttempts=0;
+    };
+    // Shared by L1ExecMove and the offline release walker. Time is in game ticks.
+    bool Move(CUnit*,SAIPath&,float time,unsigned& wait,Movement&);
+
 };

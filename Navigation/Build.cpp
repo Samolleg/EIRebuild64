@@ -32,7 +32,7 @@ struct Wire {
     void P(Point v){F(v.x);F(v.y);F(v.z);}
     void B(const void* p,size_t n){auto b=static_cast<const std::uint8_t*>(p);if(n)bytes.insert(bytes.end(),b,b+n);}
     void S(const std::string& s){U(std::uint32_t(s.size()));B(s.data(),s.size());}
-    std::uint32_t U(){Require(at<=bytes.size() && bytes.size()-at>=4,"Nav64: truncated field");std::uint32_t n=0;for(int i=0;i<4;++i)n|=std::uint32_t(bytes[at++])<<(8*i);return n;}
+    std::uint32_t U(){Require(at<=bytes.size() && bytes.size()-at>=4,"Nav64: truncated field");std::uint32_t n;std::memcpy(&n,bytes.data()+at,4);at+=4;return n;}
     float F(){auto n=U();float v;std::memcpy(&v,&n,4);Require(std::isfinite(v),"Nav64: invalid float");return v;}
     std::string S(){auto n=U();Require(n<=4096 && n<=bytes.size()-at,"Nav64: invalid text");std::string s(reinterpret_cast<const char*>(bytes.data()+at),n);at+=n;return s;}
     void ProfileOut(const Profile& p){F(p.radius);F(p.height);F(p.slope);F(p.climb);F(p.cellSize);F(p.cellHeight);U(p.tileCells);U(p.materialClass);}
@@ -452,7 +452,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         cfg.maxSimplificationError=layered?0.f:holes?.25f:1.f;
         r.contours=rcAllocContourSet();
         Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
-        if(context.multipleOutlines&&context.failure.empty()) {
+        auto exactContours=[&] {
             // Monotone's merge pass can join sweeps around a narrow hole, and
             // even a quarter-cell error can collapse its contour. Select an
             // exact monotone contour for this tile only; do not accept the
@@ -490,7 +490,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             r.contours=rcAllocContourSet();
             Require(r.contours&&rcBuildContours(&context,field,0.f,cfg.maxEdgeLen,*r.contours),"Nav64: exact monotone contour build failed");
             if(context.printing)fprintf(stderr,"MONOTONE_TILE class=%u radius=%.2f tile=%d,%d exact=1\n",p.materialClass,p.radius,x,z);
-        }
+        };
+        if(context.multipleOutlines&&context.failure.empty())exactContours();
         if(context.multipleOutlines) {
             const auto reason="Nav64: multiple outlines remain after monotone strips tile="+std::to_string(x)+","+std::to_string(z);
             if(context.printing)fprintf(stderr,"RECAST class=%u radius=%.2f tile=%d,%d reason=%s\n",p.materialClass,p.radius,x,z,reason.c_str());
@@ -504,6 +505,33 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         r.polys=rcAllocPolyMesh();
         Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: polygon build failed");
         if(!context.failure.empty())throw std::runtime_error("Nav64: Recast tile="+std::to_string(x)+","+std::to_string(z)+": "+context.failure);
+        auto validPolygons=[](const rcPolyMesh& mesh) {
+            for(int i=0;i<mesh.npolys;++i) {
+                const auto* poly=mesh.polys+i*mesh.nvp*2;int count=0;
+                while(count<mesh.nvp&&poly[count]!=RC_MESH_NULL_IDX)++count;
+                if(count<3)return false;
+                std::int64_t area=0;
+                for(int j=0;j<count;++j) {
+                    const auto* a=mesh.verts+poly[j]*3;const auto* b=mesh.verts+poly[(j+1)%count]*3;const auto* c=mesh.verts+poly[(j+2)%count]*3;
+                    area+=std::int64_t(a[0])*b[2]-std::int64_t(b[0])*a[2];
+                    if((std::int64_t(b[0])-a[0])*(std::int64_t(c[2])-b[2])-(std::int64_t(b[2])-a[2])*(std::int64_t(c[0])-b[0])>0)return false;
+                }
+                if(area>=0)return false; // Detour requires clockwise convex XZ.
+            }
+            return true;
+        };
+        if(!validPolygons(*r.polys)) {
+            // A simplified narrow contour can triangulate to a reversed face.
+            // Its links remain connected but the funnel walks outside the
+            // polygon. Repartition the actual compact cells as exact row runs;
+            // never reverse overlapping faces or open a hole in the mesh.
+            exactContours();
+            for(int i=0;i<r.contours->nconts;++i)for(int j=0;j<r.contours->conts[i].nverts;++j)r.contours->conts[i].verts[j*4+3]&=~RC_BORDER_VERTEX;
+            rcFreePolyMesh(r.polys);r.polys=rcAllocPolyMesh();
+            Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: exact polygon build failed");
+            Require(context.failure.empty()&&!context.multipleOutlines&&validPolygons(*r.polys),"Nav64: nonconvex/reversed polygon after exact row partition");
+            if(context.printing)fprintf(stderr,"POLYGON_STRIPS class=%u radius=%.2f tile=%d,%d exact=1\n",p.materialClass,p.radius,x,z);
+        }
         auto& poly=*r.polys;if(!poly.npolys)return;
         for(int i=0;i<poly.npolys;++i) {
             const unsigned encoded=poly.areas[i];
@@ -642,10 +670,10 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
         auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,raw.data(),n);tiles.at+=n;
         const auto header=CheckTileHeader(data,n);const auto supports=tiles.U();
         Require(supports==unsigned(header.polyCount),"Nav64: polygon support count");
-        auto& identities=mesh->polygonSurfaces[{header.x,header.y}];
+        auto& identities=mesh->polygonSurfaces[{header.x,header.y}];identities.reserve(supports);
         for(unsigned j=0;j<supports;++j) {
             const auto count=tiles.U();Require(count>0&&count<=1024,"Nav64: polygon support group limit");
-            std::vector<std::uint64_t> group;
+            std::vector<std::uint64_t> group;group.reserve(count);
             for(unsigned k=0;k<count;++k){const auto low=tiles.U();const auto id=low|(std::uint64_t(tiles.U())<<32);Require(id>0,"Nav64: invalid polygon support");group.push_back(id);}
             identities.push_back(std::move(group));
         }

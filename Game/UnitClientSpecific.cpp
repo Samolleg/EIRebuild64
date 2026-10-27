@@ -894,10 +894,10 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
     if (bFirstSetpos)
     {
         bFirstSetpos = false;
-        lpUnit->OrientInYDirection(vec, FALSE);
+        lpUnit->SetOrientationXY(vec);
     }
     if (lpUnit->CheckFlag(UNIT_OLDROTATE))
-        lpUnit->OrientInYDirection(vec, TRUE);
+        lpUnit->SetOrientationXY(vec);
     else if (fpStep > 0)
     {
         CPlot3D ptYDir = lpUnit->GetYAxis();

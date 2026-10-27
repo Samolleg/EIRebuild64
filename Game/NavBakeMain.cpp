@@ -40,16 +40,17 @@ int wmain(int argc,wchar_t** argv) {
     for(int i=1;i<argc;++i) {
         const std::wstring name=argv[i];
         if(name==L"--all"){if(all)return 2;all=true;continue;}
-        if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root"&&name!=L"--report-root"&&name!=L"--tile-cells")return 2;
+        if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root"&&name!=L"--report-root"&&name!=L"--tile-cells"&&name!=L"--replay-input")return 2;
         if(i+1>=argc||options.count(name))return 2;
         options[name]=argv[++i];
     }
     if(!options.count(L"--game-root")||!options.count(L"--mod")||!options.count(L"--output-root")||!options.count(L"--report-root")||
         (unsigned(all)+unsigned(options.count(L"--map"))+unsigned(options.count(L"--model"))!=1)||(!options.count(L"--map")&&options.count(L"--mob"))) {
-        fprintf(stderr,"Usage: EIRebuild64NavBake --game-root DIR --mod DIR (--all | --model NAME | --map NAME [--mob NAME]) --output-root DIR --report-root PRIVATE_DIR [--tile-cells 32|64|96|128]\n");
+        fprintf(stderr,"Usage: EIRebuild64NavBake --game-root DIR --mod DIR (--all | --model NAME | --map NAME [--mob NAME]) --output-root DIR --report-root PRIVATE_DIR [--tile-cells 32|64|96|128] [--replay-input PRIVATE_JSON]\n");
         return 2;
     }
     NavigationBake::reportDirectory=std::filesystem::absolute(options.at(L"--report-root")).lexically_normal();
+    if(options.count(L"--replay-input"))NavigationBake::replayInput=std::filesystem::absolute(options.at(L"--replay-input"));
     if(options.count(L"--tile-cells")) {
         const auto value=options.at(L"--tile-cells").wstring();
         if(value!=L"32"&&value!=L"64"&&value!=L"96"&&value!=L"128")return 2;

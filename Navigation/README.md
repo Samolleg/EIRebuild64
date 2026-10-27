@@ -117,7 +117,7 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 8, algorithm 20, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 8, algorithm 21, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   In the expanded tile stream, each tile blob is followed by a u32 polygon
   support count (must equal polyCount). Each polygon has u32 source-count and
@@ -138,7 +138,7 @@ separate from this baker contract.
   Placement/step/restore and the local client resolve original terrain/BASE
   triangles through polygon provenance. Gameplay acceptance remains separate.
   Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 20, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 21, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -163,3 +163,32 @@ including reconciliation with the imported live objects, without a game tick.
 Runtime performance, save/load, queues/doors, full random-goal coverage,
 common-radius class policy and in-game client floor acceptance remain
 separate acceptance items. See the private REPORT for measured release data.
+
+The baker accepts --replay-input PRIVATE_JSON for journal-derived release inputs.
+Records are an array: scene [mpr,mob], kind (step_rejected/query_failed/walk),
+unit, source/goal [x,y,z], optional profile/height/max_length. Required walk
+records additionally set name, required=true and optionally neighbour=true.
+The private report records Place/Find/Step outcomes and source-floor evidence.
+Walk records run CAIMap::NewPath/CalcSpeeds/CreatePathSegment, CRouteWalker and
+NavigationWorld::Move shared with L1ExecMove, then the client support resolver.
+One iteration is one game tick. Neighbour release records exercise waiting and
+bounded avoidance; a route that never encounters the neighbour is a failure.
+No scripts, animations, renderer or game session are started.
+
+All emitted polygons must be clockwise and convex in Detour XZ. A tile whose
+simplified contour yields an inverted face is partitioned into exact compact
+row runs before publication. Invalid output is rejected. Step traversal clips
+the actual segment against linked convex polygons and exact cross-tile portal
+edges; it retains the 1 mm numerical allowance and original height limits.
+The server publishes frozen route clocks during queue waiting so the client
+does not keep advancing the old route while the server stands still.
+
+Standing-unit queue queries wait 27 game ticks (1.485 s at the default tick),
+then search once around standing bodies using query-local circumscribed rings.
+Each visibility edge is a normal Find corridor, checked against every supplied
+body, with material costs and max length preserved. No mesh flags are changed.
+At most four obstructing rings (50 vertices) bound the secondary query; an
+unavailable/limited detour waits without repeated queries. Moving/resized bodies,
+profile/pose changes and navigation generation changes allow another query.
+Release walk records may set neighbour_distance, release_after_wait (0 keeps
+the neighbour standing) and require_detour. Their results include detour_max_ms.

@@ -722,7 +722,7 @@ void CUnitServer::L1StandStill()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L1StopMovement(bool bFailed)
 {
-    navigationRejects=0;
+    navigationRejects=navigationWait=0;
     L1StandStill();
     L1SetPhase(UL1_NONE);
     bL1MovementFailed = bFailed;
@@ -781,15 +781,12 @@ void CUnitServer::L1ExecMove()
     int nTime = pWS->GetSegmentTimeCounter();
     CAIFullRoute &segment = path.curSegment;
 
-    pos = lpUnit->GetCP();
-    pos.x = Meter2AITile(pos.x);
-    pos.y = Meter2AITile(pos.y);
-    float desiredSupport=0;
-    bSegmentFinished = !lpUnit->walker.GetPosition(pWS, segment, pWS->GetSegmentTimeCounter(),
-                                                   bRotating, pos, vec, fpSpeed, nCheckTileX,
-                                                   nCheckTileY,&desiredSupport);
-    pos.x = AITile2Meter(pos.x);
-    pos.y = AITile2Meter(pos.y);
+    NavigationWorld::Movement movement;
+    const auto from=pWS->aiMap.Navigation().Position(lpUnit,pWS->aiMap);
+    const bool accepted=pWS->aiMap.Navigation().Move(lpUnit,path,float(nTime),navigationWait,movement);
+    pos=lpUnit->GetCP();pos.x=movement.support.position.x;pos.y=movement.support.position.y;
+    vec=CPlot3D(movement.direction.x,movement.direction.y,0);
+    bRotating=movement.rotating;bSegmentFinished=movement.finished;fpSpeed=movement.speed;
 
     if (!bRotating && !bL1MoveAnimationSet)
     {
@@ -818,9 +815,8 @@ void CUnitServer::L1ExecMove()
         }
     }
 
-    Navigation::Location support;
-    auto from=pWS->aiMap.Navigation().Position(lpUnit,pWS->aiMap);
-    if(!pWS->aiMap.Navigation().Step(lpUnit,from,{pos.x,pos.y,segment.GetMoveType()==CAIFullRoute::Walk?desiredSupport:from.z},support,segment.GetMoveType()==CAIFullRoute::Walk?&segment.route:nullptr)) {
+    auto support=movement.support;
+    if(!accepted) {
         path.ClearCalcedPath();
         if(++navigationRejects>1) {
             GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());
@@ -840,35 +836,14 @@ void CUnitServer::L1ExecMove()
         if(replanned)L1NewPathSegment();else L1StopMovement(true);
         return;
     }
-    pos.x=support.position.x;pos.y=support.position.y;
-    // Q1: a physical neighbour makes us wait, never pushes us through it.
-    auto* neighbour=pWS->aiMap.CheckCircleCollision(lpUnit,pos);
-    bool avoided=false;
-    if(neighbour) {
-        ++navigationWait;
-        if(navigationWait>5&&!bRotating) {
-            const float dx=pos.x-from.x,dy=pos.y-from.y,length=std::hypot(dx,dy);
-            if(length>.00001f)for(int side:{1,-1}) {
-                const Navigation::Point candidate{from.x+(dx-dy*side)*.70710678f,from.y+(dy+dx*side)*.70710678f,from.z};
-                Navigation::Location next;
-                if(pWS->aiMap.Navigation().Step(lpUnit,from,candidate,next)&&!pWS->aiMap.CheckCircleCollision(lpUnit,CPlot3D(next.position.x,next.position.y,pos.z))) {
-                    support=next;pos.x=next.position.x;pos.y=next.position.y;neighbour=nullptr;avoided=true;break;
-                }
-            }
-        }
-        if(neighbour) {
-            segment.Freeze(1);L0Freeze(true);LowSetMoving(FALSE);
-            if(navigationWait==1)GameJournal::Event("NAV","queue_wait","unit=%d blocker=%d",lpUnit->GetID(),neighbour->GetID());
-            if(navigationWait>=10) {
-                navigationWait=0;path.ClearCalcedPath();
-                if(LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z))L1NewPathSegment();
-                else L1StopMovement(true);
-            }
-            return;
-        }
+    if(movement.replanned){L1NewPathSegment();return;}
+    if(movement.waiting) {
+        segment.Freeze(1);lpUnit->SetUpdateMask(CMapObject::VLD_MASK_ROUTE);
+        L0Freeze(true);LowSetMoving(FALSE);
+        if(navigationWait==1)GameJournal::Event("NAV","queue_wait","unit=%d blocker=%d",lpUnit->GetID(),movement.blocker);
+        return;
     }
-    navigationWait=0;L0Freeze(false);
-    bMoved=neighbour==nullptr;
+    L0Freeze(false);bMoved=true;
     lock=bMoved?AI_LOCK_NO:AI_LOCK_DYNAMIC;
     // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
     if (eL1State == UL1_MOVE && pWS->aiMap.IsDangerous(pos) &&
@@ -939,12 +914,6 @@ void CUnitServer::L1ExecMove()
         // юнит продолжает путь
         LowSetMoving(eL1State == UL1_MOVE);
         lpUnit->SetOrientationXY(vec);
-        if(avoided) {
-            path.ClearCalcedPath();
-            if(LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z))L1NewPathSegment();
-            else L1StopMovement(true);
-            return;
-        }
         if (bSegmentFinished)
         {
             if (path.IsPathFinished())

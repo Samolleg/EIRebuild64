@@ -26,6 +26,7 @@
 using namespace Navigation;
 unsigned NavigationBake::tileCells=96;
 std::filesystem::path NavigationBake::reportDirectory;
+std::filesystem::path NavigationBake::replayInput;
 namespace {
 Navigation::Point GamePoint(const CPlot3D& p) {return {p.x,p.y,p.z};}
 void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {

@@ -128,6 +128,7 @@ bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filte
     actual=FromNav(near);return true;
 }
 bool Limited(dtStatus s){return dtStatusDetail(s,DT_OUT_OF_NODES)||dtStatusDetail(s,DT_BUFFER_TOO_SMALL);}
+Route FindAround(const Mesh&,const Request&);
 }
 bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& result,float height) {
     if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
@@ -156,6 +157,7 @@ Route Find(const Mesh& m,const Request& r) {
     auto* query=Query(m);if(!query){result.status=Status::Limit;return result;}auto& q=*query;
     const float height=r.height>0?r.height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return result;
     dtQueryFilter filter;filter.setIncludeFlags(mask);for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
+    if(r.obstacles&&!r.obstacles->empty())return FindAround(m,r);
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
     if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
     if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,0,height)){result.status=Status::NoGoal;return result;}
@@ -181,6 +183,83 @@ Route Find(const Mesh& m,const Request& r) {
     if(result.length>r.maxLength){result.points.clear();result.corridor.clear();result.status=Status::TooLong;return result;}
     result.status=Status::Complete;return result;
 }
+namespace {
+Route FindAround(const Mesh& mesh,const Request& request) {
+    Request plain=request;plain.obstacles=nullptr;
+    auto direct=Find(mesh,plain);
+    if(direct.status!=Status::Complete)return direct;
+    auto intersects=[](Point a,Point b,const Obstacle& obstacle) {
+        const float dx=b.x-a.x,dy=b.y-a.y,length=dx*dx+dy*dy;
+        const float t=length>0?std::clamp(((obstacle.position.x-a.x)*dx+(obstacle.position.y-a.y)*dy)/length,0.f,1.f):0;
+        // Same floor policy as the live circle-collision query. Never block an
+        // independent bridge/floor with a unit on the terrain below it.
+        if(std::abs(a.z+(b.z-a.z)*t-obstacle.position.z)>2.f)return false;
+        return std::hypot(a.x+dx*t-obstacle.position.x,a.y+dy*t-obstacle.position.y)+.0001f<obstacle.radius;
+    };
+    auto clearSegment=[&](Point a,Point b) {
+        for(const auto& obstacle:*request.obstacles)if(intersects(a,b,obstacle))return false;
+        return true;
+    };
+    auto clearRoute=[&](const Route& route) {
+        for(size_t i=1;i<route.points.size();++i)if(!clearSegment(route.points[i-1].position,route.points[i].position))return false;
+        return true;
+    };
+    if(clearRoute(direct))return direct;
+    // Query-local visibility vertices: circumscribed dodecagons preserve the
+    // physical radii even on their chords. Every graph edge is a real Find
+    // corridor on the original mesh and is checked against ALL standing units.
+    // No mesh flags or tiles are changed, including the source polygon.
+    std::vector<const Obstacle*> rings;
+    for(const auto& obstacle:*request.obstacles) {
+        bool blocks=false;
+        for(size_t i=1;i<direct.points.size()&&!blocks;++i)blocks=intersects(direct.points[i-1].position,direct.points[i].position,obstacle);
+        if(blocks)rings.push_back(&obstacle);
+    }
+    std::sort(rings.begin(),rings.end(),[&](const Obstacle* a,const Obstacle* b){return Distance(a->position,request.source)<Distance(b->position,request.source);});
+    // Explicit bounded work in dense crowds; a queued unit will wait for an
+    // obstacle change instead of expanding an unbounded secondary search.
+    if(rings.size()>4){Route failed;failed.status=Status::Limit;return failed;}
+    std::vector<Location> nodes{direct.points.front(),direct.points.back()};
+    const float height=request.height>0?request.height:mesh.profile.height;
+    for(const auto* obstacle:rings)for(int i=0;i<12;++i) {
+        const float angle=float(i)*6.283185307f/12,radius=(obstacle->radius+.025f)/.965925826f;
+        Point p{obstacle->position.x+radius*std::cos(angle),obstacle->position.y+radius*std::sin(angle),obstacle->position.z};
+        Location at;
+        if(Project(mesh,p,.001f,4.f,at,height)&&clearSegment(at.position,at.position))nodes.push_back(at);
+    }
+    std::vector<float> cost(nodes.size(),1.e30f),length(nodes.size(),0);
+    std::vector<int> previous(nodes.size(),-1);std::vector<bool> closed(nodes.size(),false);
+    std::vector<Route> incoming(nodes.size());cost[0]=0;
+    for(size_t iteration=0;iteration<nodes.size();++iteration) {
+        size_t from=nodes.size();float best=1.e30f;
+        for(size_t i=0;i<nodes.size();++i)if(!closed[i]&&cost[i]<best){best=cost[i];from=i;}
+        if(from==nodes.size()||from==1)break;
+        closed[from]=true;
+        for(size_t to=1;to<nodes.size();++to) {
+            if(closed[to]||to==from||!clearSegment(nodes[from].position,nodes[to].position))continue;
+            Request edge=plain;edge.source=nodes[from].position;edge.start=&nodes[from];
+            edge.goal=nodes[to].position;edge.goalRadius=.001f;edge.maxLength=request.maxLength-length[from];
+            auto route=Find(mesh,edge);
+            if(route.status!=Status::Complete||!clearRoute(route)||Distance(route.points.back().position,nodes[to].position)>.003f)continue;
+            float weight=0;
+            for(size_t i=1;i<route.points.size();++i)weight+=Distance(route.points[i-1].position,route.points[i].position)*request.areaCosts[route.points[i-1].area];
+            if(cost[from]+weight>=cost[to])continue;
+            cost[to]=cost[from]+weight;length[to]=length[from]+route.length;previous[to]=int(from);incoming[to]=std::move(route);
+        }
+    }
+    Route result;result.status=Status::NoPath;
+    if(previous[1]<0)return result;
+    std::vector<int> chain;for(int i=1;i!=0;i=previous[i])chain.push_back(i);
+    std::reverse(chain.begin(),chain.end());
+    for(int i:chain) {
+        const auto& edge=incoming[i];
+        for(const auto& p:edge.points)if(result.points.empty()||Distance(result.points.back().position,p.position)>.00001f)result.points.push_back(p);
+        for(auto ref:edge.corridor)if(result.corridor.empty()||result.corridor.back()!=ref)result.corridor.push_back(ref);
+        result.length+=edge.length;
+    }
+    result.status=Status::Complete;return result;
+}
+}
 bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height,const char** reason,const Location* address) {
     auto reject=[&](const char* text){if(reason)*reason=text;return false;};
     if(reason)*reason="none";
@@ -190,14 +269,79 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
     Point actual;bool ingress=false;
     if(!Start(m,q,from,filter,ref,near,actual,ingress,height,address))return reject("no_start");
-    auto goal=ToNav(desired);float start[3]={near.x,near.y,near.z},end[3]={goal.x,goal.y,goal.z},moved[3]{};
-    dtPolyRef visited[512];int count=0;
-    // Surface traversal handles shared edges/vertices without raycast's strict
-    // last-polygon test at a floating-point portal endpoint. A clipped move is
-    // still a rejection: never slide through a real obstacle or teleport.
-    auto status=q.moveAlongSurface(ref,start,end,&filter,moved,visited,&count,512);
-    if(dtStatusFailed(status))return reject("surface_move_failed");
-    if(Limited(status))return reject("surface_move_limit");
+    auto goal=ToNav(desired);float end[3]={goal.x,goal.y,goal.z};
+    // Clip the actual step against convex polygons in double precision. Both
+    // Detour local walkers use strict float edge tests; at a funnel corner
+    // they can pick an unrelated wall or stop before a valid shared portal.
+    // Traverse only linked portals intersected by this segment, in order.
+    // The 1 mm margin is solely the existing numerical endpoint allowance.
+    constexpr double epsilon=.001;
+    const double x=near.x,z=near.z,dx=goal.x-x,dz=goal.z-z;
+    auto bound=[](double value,double delta,double minimum,double& lo,double& hi) {
+        if(std::abs(delta)<1.e-15)return value>=minimum;
+        const double t=(minimum-value)/delta;
+        if(delta>0)lo=std::max(lo,t);else hi=std::min(hi,t);
+        return lo<=hi+1.e-12;
+    };
+    auto interval=[&](const dtMeshTile* tile,const dtPoly* poly,double& lo,double& hi) {
+        double winding=0;
+        for(int i=0;i<poly->vertCount;++i) {
+            const float* a=tile->verts+poly->verts[i]*3;const float* b=tile->verts+poly->verts[(i+1)%poly->vertCount]*3;
+            winding+=double(a[0])*b[2]-double(b[0])*a[2];
+        }
+        const double sign=winding>=0?1:-1;
+        for(int i=0;i<poly->vertCount;++i) {
+            const float* a=tile->verts+poly->verts[i]*3;const float* b=tile->verts+poly->verts[(i+1)%poly->vertCount]*3;
+            const double ex=double(b[0])-a[0],ez=double(b[2])-a[2],length=std::hypot(ex,ez);
+            if(length<1.e-12)continue;
+            if(!bound(sign*(ex*(z-a[2])-ez*(x-a[0])),sign*(ex*dz-ez*dx),-epsilon*length,lo,hi))return false;
+        }
+        return true;
+    };
+    struct Reached {dtPolyRef ref;double arrival;};
+    std::vector<Reached> reached{{ref,0}};dtPolyRef visited[512];int count=0;
+    for(size_t at=0;at<reached.size();++at) {
+        if(reached.size()>512)return reject("surface_move_limit");
+        const auto node=reached[at];const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
+        if(dtStatusFailed(m.data->getTileAndPolyByRef(node.ref,&tile,&poly)))return reject("invalid_polygon");
+        double low=node.arrival,high=1;
+        if(!interval(tile,poly,low,high))continue;
+        if(high>=1.-1.e-12)visited[count++]=node.ref;
+        for(auto linkIndex=poly->firstLink;linkIndex!=DT_NULL_LINK;linkIndex=tile->links[linkIndex].next) {
+            const auto& link=tile->links[linkIndex];if(!link.ref)continue;
+            const dtMeshTile* otherTile=nullptr;const dtPoly* other=nullptr;
+            if(dtStatusFailed(m.data->getTileAndPolyByRef(link.ref,&otherTile,&other))||!filter.passFilter(link.ref,otherTile,other))continue;
+            const auto* va=tile->verts+poly->verts[link.edge]*3;const auto* vb=tile->verts+poly->verts[(link.edge+1)%poly->vertCount]*3;
+            double ax=va[0],az=va[2],bx=vb[0],bz=vb[2];
+            if(link.side!=0xff) {
+                // bmin/bmax quantize an entire tile edge to 255 intervals.
+                // Recover the exact shared slab from the linked polygon edges;
+                // a centimetre-sized quantization loss must not close a portal.
+                const int axis=(link.side==0||link.side==4)?2:0,across=axis==2?0:2;
+                double otherLow=1.e30,otherHigh=-1.e30;
+                for(int i=0;i<other->vertCount;++i) {
+                    const auto* a=otherTile->verts+other->verts[i]*3;const auto* b=otherTile->verts+other->verts[(i+1)%other->vertCount]*3;
+                    if(std::abs(double(a[across])-va[across])>epsilon||std::abs(double(b[across])-va[across])>epsilon)continue;
+                    otherLow=std::min({otherLow,double(a[axis]),double(b[axis])});otherHigh=std::max({otherHigh,double(a[axis]),double(b[axis])});
+                }
+                const double first=std::max(std::min(double(va[axis]),double(vb[axis])),otherLow),last=std::min(std::max(double(va[axis]),double(vb[axis])),otherHigh);
+                if(last<first-epsilon||std::abs(double(vb[axis])-va[axis])<1.e-12)continue;
+                double f=(first-va[axis])/(double(vb[axis])-va[axis]),g=(last-va[axis])/(double(vb[axis])-va[axis]);
+                ax=va[0]+(double(vb[0])-va[0])*f;az=va[2]+(double(vb[2])-va[2])*f;
+                bx=va[0]+(double(vb[0])-va[0])*g;bz=va[2]+(double(vb[2])-va[2])*g;
+            }
+            const double ex=bx-ax,ez=bz-az,length=std::hypot(ex,ez);if(length<1.e-12)continue;
+            double enter=low,exit=high;
+            const double side=ex*(z-az)-ez*(x-ax),sideDelta=ex*dz-ez*dx;
+            const double along=ex*(x-ax)+ez*(z-az),alongDelta=ex*dx+ez*dz;
+            if(!bound(side,sideDelta,-epsilon*length,enter,exit)||!bound(-side,-sideDelta,-epsilon*length,enter,exit)||
+               !bound(along,alongDelta,-epsilon*length,enter,exit)||!bound(-along,-alongDelta,-length*length-epsilon*length,enter,exit)||
+               !interval(otherTile,other,enter,exit))continue;
+            auto found=std::find_if(reached.begin(),reached.end(),[&](const Reached& p){return p.ref==link.ref;});
+            if(found==reached.end())reached.push_back({link.ref,enter});
+            else if(enter<found->arrival-1.e-12){found->arrival=enter;if(size_t(found-reached.begin())<at)reached.push_back({link.ref,enter});}
+        }
+    }
     if(!count)return reject("blocked_edge");
     // A portal can have a few float ulps of separation (tile-local origins),
     // or the target can lie exactly on a diagonal shared edge. In that case

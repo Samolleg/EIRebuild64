@@ -201,6 +201,7 @@ private:
     friend class CUnitSpecific;
     friend class CUnitClientSpecific;
     friend class CUnitServer;
+    friend class NavigationWorld;
     friend struct ModNpcMigrationAccess;
     friend struct OwnedPreviewSourceAccess;
 

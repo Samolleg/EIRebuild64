@@ -29,6 +29,7 @@ class NavigationBake {
 public:
     static unsigned tileCells;
     static std::filesystem::path reportDirectory;
+    static std::filesystem::path replayInput;
     Navigation::Geometry terrain;
     void Bind(CWorldServer& world,CAIMap& map) { sourceWorld=&world;sourceMap=&map; }
     void Configure(const Navigation::Authoring& policy) { authored=policy; }
