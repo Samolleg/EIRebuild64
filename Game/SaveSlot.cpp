@@ -380,7 +380,7 @@ void Slot::PrepareWorld(Document &d)
     // SetWeather, camera, script execution, RNG initialization or renderer calls.
     if(!d.terrain.IsEmpty()) {
         if(!world->aiMap.Load(world->GetFullMobName(d.terrain)))Invalid("cannot load saved terrain");
-        world->aiMap.Navigation().Scene(*world,d.terrain,d.mob);
+        world->aiMap.Navigation().Scene(d.terrain,d.mob);
     }
     world->szZoneFileName=d.terrain;world->szMobFileName=d.mob;world->szCurrentZoneName=d.zone;
     world->aiMap.SetGraphRebuild(false);
@@ -453,7 +453,7 @@ void Slot::FinalizeWorld(Document &d)
                 }
                 for(const auto &x:d.world->effects){x.second->SetUpdateMask();x.second->UpdateFrame();}
                 if(!d.terrain.IsEmpty()) {
-                    if(!d.world->aiMap.Navigation().Prepare(*d.world))Invalid(d.world->aiMap.Navigation().Error().c_str());
+                    if(!d.world->aiMap.Navigation().Load())Invalid(d.world->aiMap.Navigation().Error().c_str());
                     for(const auto& entry:d.world->mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
                         if(!d.world->aiMap.Navigation().Restore(unit,d.world->aiMap))Invalid("saved navigation support is unavailable");
                         if(!static_cast<CUnitServer*>(unit->GetUnitSpecific())->RestoreNavigation())Invalid("saved navigation route is unavailable");

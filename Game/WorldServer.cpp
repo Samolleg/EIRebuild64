@@ -1938,13 +1938,6 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
     rot.FromAxisAngle(CPlot3D(0, 0, 1), fPersAngle);
     // deploy itself
     DeployPersonages(pPlayer, pers, ptPlace, rot, pInfo);
-    // Ownership and equipment can enlarge the party's final collision radius.
-    // Prepare it before scripts/control can issue the first movement command.
-    if(!aiMap.Navigation().Prepare(*this,"party")) {
-        bMapLoaded=FALSE;
-        ReportError("Nav64: cannot deploy party: %s",aiMap.Navigation().Error().c_str());
-        return;
-    }
     if (pInfo)
         pInfo->Clear();
     // set camera position for objects send
@@ -3314,7 +3307,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     C2DScreenWait::Step(6);
     coreOperation.Stage("finalize");
     FinishZoneLoading();
-    if(!aiMap.Navigation().Prepare(*this)) { bMapLoaded=FALSE;return ReportError("Nav64: cannot enter zone: %s",aiMap.Navigation().Error().c_str()); }
+    if(!aiMap.Navigation().Load()) { bMapLoaded=FALSE;return ReportError("Nav64: cannot enter zone: %s",aiMap.Navigation().Error().c_str()); }
     C2DScreenWait::Step(7);
     if (pszZoneName)
         szCurrentZoneName = pszZoneName;
@@ -3450,7 +3443,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
         szMobFileName = "";
     }
 
-    aiMap.Navigation().Scene(*this,pszMprName,pszMobName);
+    aiMap.Navigation().Scene(pszMprName,pszMobName);
 
     // prepare for map objects loading
     if (szMobFileName.CompareNoCase(pszMobName) == 0)

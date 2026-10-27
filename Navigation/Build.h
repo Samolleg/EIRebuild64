@@ -13,7 +13,7 @@ struct Mesh {
     std::unique_ptr<dtNavMesh,MeshDeleter> data;
     mutable std::unique_ptr<dtNavMeshQuery,QueryDeleter> query;
     Profile profile;
-    std::shared_ptr<const Geometry> geometry; // Current inputs, shared by profiles; never serialized.
+    const Mesh* support=nullptr; // Baked zero-radius profile for short source ingress.
     std::string fingerprint;
     std::string mapName, mobName, profileId; // Self-describing offline artifact identity.
     std::uint64_t generation = 0;
@@ -26,7 +26,7 @@ struct BuildRequest { Profile profile; std::string fingerprint; };
 std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& geometry,const std::vector<BuildRequest>& requests);
 std::unique_ptr<Mesh> Build(const Geometry& geometry,const Profile& profile,const std::string& key);
 Bytes Store(const Mesh& mesh);
-std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std::string& key,
+std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     const std::string& mapName,const std::string& mobName,const std::string& profileId);
 // Canonical LE input bytes, also used by the host's SHA-256 fingerprint.
 Bytes Inputs(const Geometry& geometry,const Profile& profile,const std::string& scene,const Bytes& source);

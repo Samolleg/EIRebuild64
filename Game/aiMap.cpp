@@ -11,6 +11,7 @@
 #include "StdAfx.h"
 #include "SaveSchema.h"
 #include "EngineDiagnostics.h"
+#include "NavigationBake.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "aiMap.h"
@@ -759,7 +760,6 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
            pMapHeader + sizeof(SMapHeader) + mapHeader.wObjectsCount * sizeof(SMapObject),
            int(mapHeader.dwTiles) * sizeof(int));
     //
-    navigation.Source("mpr:header", pMapHeader, dwHdSize);
     mapRes.CloseFile(pMapHeader);
     // Creating tiles info table
     CMappedResource aiRes;
@@ -805,7 +805,6 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
         tilesInfo[nNmb].fpFootstepStrengths[2] = aiReg.GetInt(sections[i], "StepSound", 100) /
                                                  100.0f;
     }
-    navigation.Source("materials", pLoc, navMaterialSize);
     aiReg.Close();
     aiRes.CloseFile(pLoc);
     aiRes.CloseResource();
@@ -851,8 +850,8 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
 
             pSector += sizeof(header);
 
-            navigation.Source(pszSectorName, pBaseSector, dwSize);
-            navigation.Terrain().groundSources.emplace(navigation.Terrain().ground.size(),pszSectorName);
+            if(auto* navTerrain=navigation.Terrain()) {
+            navTerrain->groundSources.emplace(navTerrain->ground.size(),pszSectorName);
             const auto* navVertices=reinterpret_cast<const SSectVert2*>(pSector);
             auto vertex=[&](int x,int y) {
                 const auto& v=navVertices[y*N_V_PSECTOR_S+x];
@@ -865,8 +864,9 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
                     return bHaveLayers?(std::max)(0.f,GetFloatValueByRange(navVertices[N_V_PSECTOR+vy*N_V_PSECTOR_S+vx].usZ,fpMaxZ)-base.z):0.f;
                 };
                 const float wlu=depth(x,y,lu),wru=depth(x+1,y,ru),wld=depth(x,y+1,ld),wrd=depth(x+1,y+1,rd);
-                navigation.Terrain().ground.push_back({lu,ru,rd,1,{wlu,wru,wrd}});
-                navigation.Terrain().ground.push_back({lu,rd,ld,1,{wlu,wrd,wld}});
+                navTerrain->ground.push_back({lu,ru,rd,1,{wlu,wru,wrd}});
+                navTerrain->ground.push_back({lu,rd,ld,1,{wlu,wrd,wld}});
+            }
             }
             SSectVert2 *pVert2 = (SSectVert2 *)pSector;
             // Reading heights and depths
@@ -1041,7 +1041,7 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
     // standing-human ground policy; the complete class/water policy is NAV04.
     // Use the initialized material table: per-cell dwTerrains is still zero
     // while StartZoneLoading defers conversion until FinishZoneLoading.
-    for(auto& triangle:navigation.Terrain().ground) {
+    if(auto* navTerrain=navigation.Terrain())for(auto& triangle:navTerrain->ground) {
         int x=Float2AITile((triangle.a.x+triangle.b.x+triangle.c.x)/3);
         int y=Float2AITile((triangle.a.y+triangle.b.y+triangle.c.y)/3);
         triangle.area=TileInBounds(x,y)?BYTE((tilesInfo[mapObj[y][x].nTerrainIndex].dwTerrains>>12)&15):0;

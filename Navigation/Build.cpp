@@ -194,6 +194,8 @@ struct RasterBatch {
 }
 Bytes Inputs(const Geometry& g,const Profile& p,const std::string& scene,const Bytes& source) {
     Wire w;w.U(ContainerVersion);w.U(AlgorithmVersion);w.U(LibraryVersion);w.U(sizeof(dtPolyRef));w.ProfileOut(p);w.S(scene);
+    // Recast parameters shared by every profile, in addition to Profile fields.
+    w.U(120);w.F(1.f);w.U(0);w.U(400);w.U(6);w.F(1.2f);w.F(.1f);w.U(3);
     w.U(std::uint32_t(source.size()));w.B(source.data(),source.size());
     w.U(std::uint32_t(g.ground.size()));
     for(const auto& t:g.ground){w.P(t.a);w.P(t.b);w.P(t.c);w.U(t.area);w.P(t.waterDepth);w.U(t.levitateArea);}
@@ -441,11 +443,11 @@ Bytes Store(const Mesh& mesh) {
     w.U(3);w.U(4);w.U(0); // no TileCache layers until X64NAV05
     return std::move(w.bytes);
 }
-std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std::string& key,
+std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     const std::string& mapName,const std::string& mobName,const std::string& profileId) {
-    Wire w;w.bytes=bytes;
+    Wire w;w.bytes=std::move(bytes);
     Require(w.U()==0x3656414e&&w.U()==0x00003436&&w.U()==ContainerVersion&&w.U()==AlgorithmVersion&&w.U()==LibraryVersion&&w.U()==0x12345678&&w.U()==sizeof(dtPolyRef),"Nav64: incompatible container/ABI");
-    auto mesh=std::make_unique<Mesh>();mesh->fingerprint=w.S();Require(mesh->fingerprint==key,"Nav64: stale input fingerprint");
+    auto mesh=std::make_unique<Mesh>();mesh->fingerprint=w.S();
     mesh->mapName=w.S();mesh->mobName=w.S();mesh->profileId=w.S();
     Require(mesh->mapName==mapName&&mesh->mobName==mobName&&mesh->profileId==profileId,"Nav64: mismatched map identity");
     mesh->profile=w.ProfileIn();CheckProfile(mesh->profile);
@@ -454,17 +456,18 @@ std::unique_ptr<Mesh> Load(const Bytes& bytes,const Profile& expected,const std:
     Require(p.maxTiles>0&&p.maxTiles<=4096&&dtNextPow2(p.maxTiles)==p.maxTiles&&p.maxPolys==32768&&p.tileWidth==expected.cellSize*expected.tileCells&&p.tileHeight==expected.cellSize*expected.tileCells,"Nav64: invalid mesh limits");
     mesh->data.reset(dtAllocNavMesh());Require(mesh->data&&dtStatusSucceed(mesh->data->init(&p)),"Nav64: mesh initialization failed");
     Require(w.U()==3,"Nav64: invalid section count");
-    Require(w.U()==1,"Nav64: missing tile section");auto section=w.U();Require(section<=bytes.size()-w.at,"Nav64: truncated tile section");auto end=w.at+section;
+    Require(w.U()==1,"Nav64: missing tile section");auto section=w.U();Require(section<=w.bytes.size()-w.at,"Nav64: truncated tile section");auto end=w.at+section;
     Require(section>=12&&w.U()==COMPRESS_ALGORITHM_LZMS,"Nav64: incompatible compression");
     auto expanded=w.U(),packed=w.U();Require(w.at<=end&&packed==end-w.at,"Nav64: truncated compressed tiles");
-    Wire tiles;tiles.bytes=Unpack(bytes.data()+w.at,packed,expanded);w.at=end;
+    Wire tiles;tiles.bytes=Unpack(w.bytes.data()+w.at,packed,expanded);w.at=end;
     auto count=tiles.U();Require(count<=std::uint32_t(p.maxTiles),"Nav64: tile count limit");
     for(std::uint32_t i=0;i<count;++i){auto n=tiles.U();Require(n<=tiles.bytes.size()-tiles.at,"Nav64: truncated tile");
         const auto raw=ShuffleTile(tiles.bytes.data()+tiles.at,n,false);CheckTile(raw.data(),raw.size());
         auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,raw.data(),n);tiles.at+=n;
         auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;
     }
-    Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==1&&w.U()==3&&w.U()==4&&w.U()==0&&w.at==bytes.size(),"Nav64: invalid metadata/layer sections");
+    Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==1&&w.U()==3&&w.U()==4&&w.U()==0&&w.at==w.bytes.size(),"Nav64: invalid metadata/layer sections");
+    mesh->query.reset(dtAllocNavMeshQuery());Require(mesh->query&&dtStatusSucceed(mesh->query->init(mesh->data.get(),65535)),"Nav64: query allocation failed");
     return mesh;
 }
 }
