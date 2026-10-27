@@ -69,6 +69,30 @@ void Atomic(const std::filesystem::path& path,const Navigation::Bytes& data) {
     if(ok)ok=MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;
     if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Nav64: cannot commit nav64 atomically");}
 }
+// Release validation runs on the actual Detour vertices before any profile
+// of this map is written. Never repair/clamp a bad height after construction.
+void CheckReleaseHeights(const Navigation::Mesh& mesh) {
+    const dtNavMesh& data=*mesh.data;
+    const float tolerance=mesh.profile.cellHeight*2; // 10 cm, including Recast's +ch detail offset.
+    for(int i=0;i<data.getMaxTiles();++i) {
+        const auto* tile=data.getTile(i);if(!tile||!tile->header)continue;
+        const auto& h=*tile->header;
+        auto check=[&](const float* vertices,int count,const char* kind) {
+            for(int vertex=0;vertex<count;++vertex) {
+                const float y=vertices[vertex*3+1];
+                if(std::isfinite(y)&&y>=h.bmin[1]-tolerance&&y<=h.bmax[1]+tolerance)continue;
+                std::ostringstream error;
+                error<<"Nav64: height_out_of_bounds mpr="<<mesh.mapName<<" mob="<<mesh.mobName
+                    <<" profile="<<mesh.profileId<<" tile="<<h.x<<","<<h.y<<","<<h.layer
+                    <<" kind="<<kind<<" vertex="<<vertex<<" y="<<y
+                    <<" min="<<h.bmin[1]<<" max="<<h.bmax[1]<<" tolerance="<<tolerance;
+                throw std::runtime_error(error.str());
+            }
+        };
+        check(tile->verts,h.vertCount,"polygon");
+        check(tile->detailVerts,h.detailVertCount,"detail");
+    }
+}
 bool Same(Navigation::Point a,Navigation::Point b) {return a.x==b.x&&a.y==b.y&&a.z==b.z;}
 bool Same(const Navigation::Geometry& a,const Navigation::Geometry& b) {
     if(a.ground.size()!=b.ground.size()||a.solids.size()!=b.solids.size())return false;
@@ -427,6 +451,7 @@ std::uint64_t NavigationWorld::Bake(CWorldServer& world,const std::filesystem::p
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs;
     for(int type=0;type<AgentCount;++type) {
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;
+        CheckReleaseHeights(mesh);
         outputs.push_back(Navigation::Store(mesh));totalBytes+=outputs.back().size();
     }
     std::filesystem::create_directories(directory);
@@ -434,7 +459,7 @@ std::uint64_t NavigationWorld::Bake(CWorldServer& world,const std::filesystem::p
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const auto& bytes=outputs[type];
         Atomic(directory/Filename(type),bytes);
-        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu key=%s\n",
+        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu height_outliers=0 key=%s\n",
             mapName.c_str(),mobName.c_str(),Agents[type].name,mesh.profile.radius,mesh.tiles,
             static_cast<unsigned long long>(mesh.buildMs),static_cast<unsigned long long>(mesh.rasterMs),
             static_cast<unsigned long long>(mesh.polygonMs),bytes.size(),mesh.fingerprint.c_str());

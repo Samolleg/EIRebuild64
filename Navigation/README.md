@@ -1,8 +1,8 @@
-# Nav64 offline data contract (X64NAV01 r12)
+# Nav64 offline data contract (X64NAV01 r13)
 
 RecastNavigation v1.6.0 (zlib), unchanged sources; pin/archive digest:
 third_party/recastnavigation.lock.json. Recast and Detour use DT_POLYREF64.
-Algorithm 7, container 3, library 0x010600, SaveSchema 4.
+Algorithm 8, container 3, library 0x010600, SaveSchema 4.
 
 The game ONLY reads Maps/Nav64 in the active mod. No navmesh generation on
 zone entry, no Cache64/Nav reads/writes, no fallback to the legacy graph.
@@ -185,3 +185,27 @@ old graph is used; until NAV05 dynamic tiles are implemented, an unpublished
 changed snapshot is unavailable. Exact campaign gameplay and the zone1
 passages (1.3 m opening/ramp, 1.5 m courtyards, 0.8 m door, 6 m giant gates)
 require owner acceptance. samvlrmp01 measured width remains 1.30 m.
+
+## Detail height sampling and release validation (r13)
+
+The tile border was already max(domain radius / cell size) + 3 cells:
+13 cells for ground and 8 for levitation. Zero-radius profiles have the same
+border as their domain. No border, erosion or passage contour is changed.
+After polygon construction only, maxEdgeError supplied to the detail builder
+is ceil(contour simplification error) + 1 cell (2 cells here). Recast v1.6.0
+uses ceil(maxEdgeError) as getHeight's search radius. The extra cell accounts
+for floor(XZ/cell size) sampling of voxel-corner contours: one-cell contour
+simplification can put a sample two cells from valid compact-height spans.
+A one-cell search can return RC_UNSET_HEIGHT, which used to become a 3273 m
+vertex. The expanded search reads the nearest valid ring in the SAME height
+patch/layer; it does not change the polygons or clamp resulting heights.
+
+Before writing any profile of a map, the baker checks every polygon and
+stored detail vertex against that tile's vertical bounds, allowing 2 cell
+heights (0.1 m, including the library's +cellHeight detail offset). Nonfinite
+or out-of-bounds heights cause MAP_ERROR code=4; reason includes MPR, MOB,
+profile, tile x/y/layer, vertex kind/index, height, bounds and tolerance.
+PROFILE includes height_outliers=0 only after this check succeeds for the map.
+This is release-data validation, not an alternate reader or test executable.
+Container 3, compression, filenames, command line and exit codes are unchanged;
+algorithm 8 fingerprints require re-baking all profiles.
