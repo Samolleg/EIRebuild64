@@ -780,6 +780,16 @@ void CDX11::EndWorld()
     SetRenderStates();
 }
 
+void CDX11::BeginInterface()
+{
+    // Interface-only 3D must follow world composition, just like the mission HUD.
+    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.composite_world();
+    }));
+    RefreshOwnedTargets();
+    SetRenderStates();
+}
+
 void CDX11::RefreshOwnedTargets()
 {
     IfFailedThrowHR(rendererFacade->VisitDevice(nullptr, &OwnedRender::E1BindTargets));

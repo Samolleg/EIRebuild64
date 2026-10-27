@@ -30,6 +30,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Renderer.h"
 #include "IDebugInfoSystem.h"
 #include "dx11/Surface.h"
+#include "dx11/RendererDX11.h"
 #include <vector>
 /////////////////////////////////////////////////////////////////////////////////////
 const int GM_NF = 3;
@@ -417,6 +418,7 @@ void CI3DScreenGlobalMap::ApplyCloudsParams()
 BOOL CI3DScreenGlobalMap::Draw(CRenderer *pRend)
 {
     CorePerf::Scope coreTiming(CorePerf::ScreenGlobalMap);
+    pRend->GetD3D()->BeginInterface();
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
