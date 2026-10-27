@@ -760,7 +760,12 @@ bool CUnitServer::RestoreNavigation()
     if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
         path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);lpUnit->LowNewRoute();return true;
     }
-    path.toGo.Clear();if(!world->aiMap.NewPath(lpUnit,goal,path))return false;
+    path.toGo.Clear();
+    if(!lpUnit->navLocation.surface||!world->aiMap.NewPath(lpUnit,goal,path)) {
+        // A derived route may become unavailable after world reconstruction.
+        // Keep the loaded unit, stop this move; a new command can request a path.
+        path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);
+    }
     lpUnit->LowNewRoute();return true;
 }
 void CUnitServer::L1ExecMove()

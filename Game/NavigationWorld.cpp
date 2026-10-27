@@ -160,6 +160,44 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
     const auto start=std::chrono::steady_clock::now();
     if(!Load(directory))throw std::runtime_error(error);
     printf("LOAD_RELEASE mpr=%s mob=%s ms=%.3f pending=%zu\n",mapName.c_str(),mobName.c_str(),std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),sourceDirty.size());fflush(stdout);
+    if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
+        CUnit* probe=nullptr;
+        for(const auto& entry:world.mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
+            if(Type(unit,unit->GetAIClass())==Small&&unit->GetAIClass()!=0){probe=unit;break;}
+        }
+        if(!probe)throw std::runtime_error("Nav64: restore release has no small unit");
+        const auto originalCP=probe->GetCP();const auto originalLocation=probe->navLocation;
+        auto check=[&](const char* name,Point point,std::uint64_t surface) {
+            world.aiMap.MoveObject(probe,CPlot3D(point.x,point.y,originalCP.z));
+            probe->navLocation={};probe->navLocation.position=point;probe->navLocation.surface=surface;
+            const bool placed=Place(probe,world.aiMap);const auto saved=probe->navLocation;
+            Location strict;const bool r2=placed&&StartLocation(*ForUnit(probe),saved.position,strict,Height(probe))&&strict.surface==saved.surface&&std::abs(strict.position.z-saved.position.z)<=.25f;
+            // Match the serialized fields: polygon/generation are not stored.
+            probe->navLocation.polygon=probe->navLocation.generation=0;
+            const bool restored=placed&&Restore(probe,world.aiMap);
+            const auto loaded=probe->navLocation;
+            const bool same=restored&&Distance(saved.position,loaded.position)<.02f;
+            // Surface identity can change; only height/position select a floor.
+            probe->navLocation.surface=~std::uint64_t(0);
+            const bool stale=same&&Restore(probe,world.aiMap)&&Distance(saved.position,probe->navLocation.position)<.02f;
+            printf("RESTORE_RELEASE name=%s placed=%d r2_strict=%d restored=%d stale_hint=%d surface=%llu at=(%.6f,%.6f,%.6f)\n",name,int(placed),int(r2),int(same),int(stale),static_cast<unsigned long long>(loaded.surface),loaded.position.x,loaded.position.y,loaded.position.z);fflush(stdout);
+            if(!stale)throw std::runtime_error(std::string("Nav64: placement/restore release failure: ")+name);
+        };
+        check("HERO_START",{55.55f,138.78f,19.24f},1);
+        for(int id:{195,1492,1748}) {
+            bool checked=false;
+            for(const auto& triangle:sources->ground)if(triangle.object==id&&triangle.area&&triangle.surface>1) {
+                Point p{(triangle.a.x+triangle.b.x+triangle.c.x)/3,(triangle.a.y+triangle.b.y+triangle.c.y)/3,(triangle.a.z+triangle.b.z+triangle.c.z)/3};
+                Location location;
+                if(!ResolveLocation(*ForUnit(probe),p,nullptr,location,Height(probe))||int(location.surface>>32)!=id)continue;
+                check(("BASE_"+std::to_string(id)).c_str(),location.position,location.surface);checked=true;break;
+            }
+            // A paired MOB can legitimately contain no such model.
+            const bool present=std::any_of(sources->ground.begin(),sources->ground.end(),[&](const Triangle& t){return t.object==id&&t.surface>1;});
+            if(present&&!checked)throw std::runtime_error("Nav64: BASE restore release has no placement: "+std::to_string(id));
+        }
+        world.aiMap.MoveObject(probe,originalCP);probe->navLocation=originalLocation;
+    }
     baker=std::move(importer);
     return bytes;
 }
@@ -240,13 +278,15 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
 }
 bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationRestore);
-    auto& saved=unit->navLocation;if(!saved.surface)return true;
-    auto cp=unit->GetCP();
-    if(!saved.surface||!Navigation::Finite(saved.position)||!std::isfinite(saved.radius)||saved.radius<0||saved.radius>4||
-        !std::isfinite(saved.height)||saved.height<=0||saved.height>10||std::hypot(cp.x-saved.position.x,cp.y-saved.position.y)>.1f)return false;
-    auto* mesh=ForUnit(unit);Navigation::Location location;
-    if(!mesh||!Navigation::StartLocation(*mesh,saved.position,location,Height(unit))||location.surface!=saved.surface||std::abs(location.position.z-saved.position.z)>.25f)return false;
-    saved=location;return true;
+    // Saved navigation is a placement hint, never an admission condition for
+    // the world. Place uses saved Z to choose the floor and rebuilds all refs.
+    const auto saved=unit->navLocation;const auto cp=unit->GetCP();
+    if(!Navigation::Finite(saved.position)||std::hypot(cp.x-saved.position.x,cp.y-saved.position.y)>.1f)
+        unit->navLocation={};
+    if(Place(unit,map))return true;
+    unit->navLocation={};
+    GameJournal::Event("NAV","restore_unplaced","unit=%d at=(%.3f,%.3f,%.3f) hint=%llu",unit->GetID(),cp.x,cp.y,saved.position.z,static_cast<unsigned long long>(saved.surface));
+    return false;
 }
 
 void NavigationWorld::QueueBox(const Solid& box) {
@@ -294,7 +334,7 @@ void NavigationWorld::Advance() {
 bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
     if(!loaded)return false;auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto from=Position(unit,map);Navigation::Location location;
-    if(!Navigation::Project(*mesh,from,1.f,4.f,location,Height(unit))) {
+    if(!Navigation::ResolveLocation(*mesh,from,&unit->navLocation,location,Height(unit))) {
         if(failures++<16)GameJournal::Event("NAV","placement_failed","unit=%d profile=%s radius=1",unit->GetID(),mesh->profileId.c_str());
         return false;
     }

@@ -61,6 +61,12 @@ flags and invalidates references by generation. At most one completed tile
 is applied per frame. Actual worst-case frame timing needs gameplay evidence.
 On zone load, current dynamic obstacles and absent static objects are applied
 before placement. Mesh state and process-local references are not saved.
+Loaded positions use the same placement resolver: at most 1 m horizontally,
+nearest saved world height, with surface identity used only to break floor ties.
+Re-resolve polygon references and actual terrain/BASE height; do not compare
+the exact game height with the approximate Detour height as a save-load gate.
+Unavailable placement stops the derived move and is journaled, without rejecting
+the saved world. The existing serialized address fields remain advisory.
 
 Door material 15 changes flags without rebuilding. Door updates visit only
 aperture tiles. Replacements restore current door states and clearance flags.

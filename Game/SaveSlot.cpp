@@ -455,7 +455,7 @@ void Slot::FinalizeWorld(Document &d)
                 if(!d.terrain.IsEmpty()) {
                     if(!d.world->aiMap.Navigation().Load())Invalid(d.world->aiMap.Navigation().Error().c_str());
                     for(const auto& entry:d.world->mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
-                        if(!d.world->aiMap.Navigation().Restore(unit,d.world->aiMap))Invalid("saved navigation support is unavailable");
+                        d.world->aiMap.Navigation().Restore(unit,d.world->aiMap);
                         if(!static_cast<CUnitServer*>(unit->GetUnitSpecific())->RestoreNavigation())Invalid("saved navigation route is unavailable");
                     }
                 }

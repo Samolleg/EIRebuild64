@@ -11,7 +11,7 @@ namespace {
 dtNavMeshQuery* Query(const Mesh& m) {
     return m.query.get();
 }
-Location Address(const Mesh& m,Point p,dtPolyRef ref,float height) {Location l;l.position=FromNav(p);l.surface=1;l.radius=m.profile.radius;l.height=height;l.polygon=ref;l.generation=m.generation;
+Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,std::uint64_t hint=0) {Location l;l.position=FromNav(p);l.surface=1;l.radius=m.profile.radius;l.height=height;l.polygon=ref;l.generation=m.generation;
     unsigned char area=1;m.data->getPolyArea(ref,&area);l.area=area;
     if(m.sources) {
         const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
@@ -22,8 +22,10 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height) {Location l;l
                 if(std::abs(det)<1.e-8f)continue;const float x=l.position.x-t.a.x,y=l.position.y-t.a.y;
                 const float u=(x*by-y*bx)/det,v=(ax*y-ay*x)/det;
                 if(u<-.001f||v<-.001f||u+v>1.001f)continue;
-                const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z),distance=std::abs(z-l.position.z);
-                if(distance<gap){gap=distance;l.surface=t.surface;l.position.z=z;}
+                const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z),distance=std::abs(z-p.y);
+                if(distance<gap||(hint&&t.surface==hint&&std::abs(distance-gap)<.00001f)) {
+                    gap=distance;l.surface=t.surface;l.position.z=z;
+                }
             }
         }
     }
@@ -58,6 +60,28 @@ bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& res
     dtQueryFilter filter;filter.setIncludeFlags(mask);dtPolyRef ref=0;Point near;
     if(!Nearest(q,p,horizontal,vertical,filter,ref,near))return false;
     result=Address(m,near,ref,height);return true;
+}
+bool ResolveLocation(const Mesh& m,Point p,const Location* hint,Location& result,float height) {
+    if(!m.data||!m.tiles||!m.query||!Finite(p))return false;
+    const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);
+    const auto nav=ToNav(p);const float point[]={nav.x,nav.y,nav.z},extent[]={1.f,4.f,1.f};
+    dtPolyRef refs[2048];int count=0;
+    const auto status=m.query->queryPolygons(point,extent,&filter,refs,&count,2048);
+    if(dtStatusFailed(status)||Limited(status))return false;
+    float best=1.e30f;bool found=false,foundExact=false;
+    for(int i=0;i<count;++i) {
+        float near[3]{};if(dtStatusFailed(m.query->closestPointOnPoly(refs[i],point,near,nullptr)))continue;
+        if(std::hypot(near[0]-nav.x,near[2]-nav.z)>1.001f||std::abs(near[1]-nav.y)>4.f)continue;
+        auto candidate=Address(m,{near[0],near[1],near[2]},refs[i],height,hint?hint->surface:0);
+        const float dx=candidate.position.x-p.x,dy=candidate.position.y-p.y,dz=candidate.position.z-p.z;
+        const bool exact=dx*dx+dy*dy<=.000001f;
+        if(foundExact&&!exact)continue;
+        const float score=dx*dx+dy*dy+dz*dz;
+        const bool prefer=found&&hint&&candidate.surface==hint->surface&&result.surface!=hint->surface&&std::abs(score-best)<.00001f;
+        if((exact&&!foundExact)||score<best-.00001f||prefer||!found){best=score;result=candidate;found=true;foundExact=exact;}
+    }
+    return found;
 }
 bool StartLocation(const Mesh& m,Point p,Location& result,float height) {
     if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;
