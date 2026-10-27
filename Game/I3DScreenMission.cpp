@@ -4766,6 +4766,8 @@ void CI3DObjectMap::PlaceUnits()
 
     // corpses
 
+    // Resizing the marker arrays can move them; publish current streams/counts.
+    pFig->MapAfterModify();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CPlot2D CI3DObjectMap::FromTerrainToFigure(CPlot2D pt, BOOL bZoom)
