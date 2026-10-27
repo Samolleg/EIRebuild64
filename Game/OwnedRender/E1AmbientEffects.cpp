@@ -154,9 +154,10 @@ bool E1PublishGroundCoverFootprints(const std::vector<E1GroundCoverFootprintFact
                     unit.resource.serial != created.creator.serial) continue;
                 if (unit.height_valid && retained_visual_sample_shown(unit, false) &&
                     !unit.values.dead && !unit.values.invisible) {
-                    created.stamp = owned::ground_cover::live_unit_splat(
-                        created.center_x, created.center_y, unit.envelope_radius);
                     created.half_extent = owned::snow_trail_extent(unit.values.target_half_extent);
+                    if (!(created.half_extent > 0)) continue;
+                    created.stamp = owned::ground_cover::live_body_splat(
+                        created.center_x, created.center_y, created.half_extent);
                     created.walks = owned::ground_cover::unit_presses_cover(unit.values.locomotion);
                     created.captured = true;
                 }

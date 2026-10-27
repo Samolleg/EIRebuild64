@@ -1088,7 +1088,7 @@ void gcBuildOf(GcSurvivor c){
   if(snowRaw.x>0){
    const float packed=snowTrailCompaction(snowRaw);
    const float2 rise=gcSnowTrailSlope(p+gcOrigin.xy);const float rl=length(rise);
-   push+=(rl>1e-4?rise/rl:float2(cos(yaw),sin(yaw)))*packed;flatten=max(flatten,packed);
+   push+=rise/max(rl,.1)*packed;flatten=max(flatten,packed);
   }
   if(pressed>0){
    float2 step=gcView.yz, world=p+gcOrigin.xy;
@@ -1098,7 +1098,9 @@ void gcBuildOf(GcSurvivor c){
     if(axis==0)gradient.x=g;else gradient.y=g;
    }
    float l=length(gradient);
-   float2 away=l>1e-4?-gradient/l:float2(cos(yaw),sin(yaw));
+   // Fade the direction at flat mask centres: normalizing tiny gradients
+   // or switching to random tuft yaw made blades flip as a unit moved.
+   float2 away=-gradient/max(l,.1);
    push+=away*pressed;flatten=max(flatten,pressed);
   }
   float l=length(push);if(l>1)push/=l;
@@ -3616,8 +3618,10 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // Reuse the authoritative shown, grounded, live-unit snapshot. Hidden,
     // undetected and invisible units were rejected by that bridge (the unit
     // drawing rule) and never stamp here, so cover cannot reveal them.
-    for (const auto& unit : gc_unit_input_)
-        gc_footprint_input_.push_back(live_unit_splat(unit[0], unit[1], unit[3]));
+    for (std::size_t k = 0; k < gc_unit_input_.size(); ++k) {
+        const auto& unit = gc_unit_input_[k];
+        gc_footprint_input_.push_back(live_body_splat(unit[0], unit[1], gc_unit_trails_[k].half_extent));
+    }
     if (gc_footprint_input_.size() > UINT_MAX / sizeof(FootprintSplat))
         return fail("EID3D11 ground cover: footprint buffer exceeds D3D11 addressable size; cover omitted.");
     const UINT footprint_count = static_cast<UINT>(gc_footprint_input_.size());
