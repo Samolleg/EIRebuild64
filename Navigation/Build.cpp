@@ -139,10 +139,11 @@ void CheckTile(const unsigned char* data,size_t size) {
     }
 }
 struct BakeContext final : rcContext {
-    unsigned material; float radius; int x,z;
-    BakeContext(const Profile& p,int tx,int tz,bool logging):rcContext(logging),material(p.materialClass),radius(p.radius),x(tx),z(tz) {}
+    unsigned material; float radius; int x,z; bool printing; std::string failure;
+    BakeContext(const Profile& p,int tx,int tz,bool logging):rcContext(true),material(p.materialClass),radius(p.radius),x(tx),z(tz),printing(logging) {}
     void doLog(const rcLogCategory category,const char* message,const int length) override {
-        if(category==RC_LOG_ERROR)fprintf(stderr,"RECAST class=%u radius=%.2f tile=%d,%d reason=%.*s\n",material,radius,x,z,length,message);
+        if(category==RC_LOG_ERROR&&failure.empty())failure.assign(message,length);
+        if(category==RC_LOG_ERROR&&printing)fprintf(stderr,"RECAST class=%u radius=%.2f tile=%d,%d reason=%.*s\n",material,radius,x,z,length,message);
     }
 };
 struct Resources {
@@ -351,10 +352,41 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             for(int j=0;j<chf.spanCount;++j)chf.areas[j]=tiers[j]?static_cast<unsigned char>((tiers[j]-1)*15+material[j]):RC_NULL_AREA;
         } else Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
         Require(rcBuildRegionsMonotone(&context,*r.compact,cfg.borderSize,cfg.minRegionArea,cfg.mergeRegionArea),"Nav64: region build failed");
+        // Classify holes from the region's actual grid topology, not an
+        // axis-aligned gap width: a slanted/branched hole evades that heuristic.
+        // Euler characteristic for 4-connected pixels, in quarter units:
+        // chi*4 = single corners - triple corners + 2*diagonal pairs.
+        const auto& compact=*r.compact;
+        std::vector<int> euler(compact.maxRegions+1,0);
+        std::vector<bool> present(compact.maxRegions+1,false);
+        std::vector<std::pair<unsigned short,unsigned>> masks;masks.reserve(16);
+        for(int iz=0;iz<=compact.height;++iz)for(int ix=0;ix<=compact.width;++ix) {
+            masks.clear();
+            for(int corner=0;corner<4;++corner) {
+                const int cx=ix-1+(corner&1),cz=iz-1+(corner>>1);
+                if(cx<0||cz<0||cx>=compact.width||cz>=compact.height)continue;
+                const auto& cell=compact.cells[cx+cz*compact.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                    const auto reg=compact.spans[j].reg;if(!reg||(reg&RC_BORDER_REG))continue;
+                    auto i=std::find_if(masks.begin(),masks.end(),[&](const auto& pair){return pair.first==reg;});
+                    if(i==masks.end())masks.emplace_back(reg,1u<<corner);else i->second|=1u<<corner;
+                }
+            }
+            for(const auto& entry:masks) {
+                const auto mask=entry.second;const int count=(mask&1)+((mask>>1)&1)+((mask>>2)&1)+((mask>>3)&1);
+                present[entry.first]=true;
+                euler[entry.first]+=count==1?1:count==3?-1:(mask==6||mask==9)?2:0;
+            }
+        }
+        bool holes=false;for(size_t i=1;i<euler.size();++i)if(present[i]&&euler[i]<=0){holes=true;break;}
+        // Keep hole boundaries within a quarter cell; one full cell can
+        // collapse them to zero signed area and turn holes into outlines.
+        cfg.maxSimplificationError=holes?.25f:1.f;
         r.contours=rcAllocContourSet();
         Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
         r.polys=rcAllocPolyMesh();
         Require(r.polys&&rcBuildPolyMesh(&context,*r.contours,cfg.maxVertsPerPoly,*r.polys),"Nav64: polygon build failed");
+        if(!context.failure.empty())throw std::runtime_error("Nav64: Recast tile="+std::to_string(x)+","+std::to_string(z)+": "+context.failure);
         auto& poly=*r.polys;if(!poly.npolys)return;
         for(int i=0;i<poly.npolys;++i) {
             const unsigned encoded=poly.areas[i];

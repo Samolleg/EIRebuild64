@@ -38,6 +38,11 @@ No TileCache layers or DetourTileCache dependency remain. Regular Recast
 compact fields, monotone regions, contours and polygon meshes produce ready
 Detour tiles including multiple elevations. No detail-mesh samples are
 stored: Detour triangulates the polygon fan, and gameplay supplies support Z.
+Contour error is selected from the compact region topology before contouring:
+0.25 cell on tiles with holes (Euler characteristic), otherwise one cell. This preserves
+narrow holes which a one-cell error can collapse and misclassify as outlines.
+Every Recast error fails the tile even if a library function returns success.
+No library sources are modified.
 
 The game reads ready tiles and one shared navgeom, indexes source triangles
 by tile and static object, and queues affected old/new footprints. A single
