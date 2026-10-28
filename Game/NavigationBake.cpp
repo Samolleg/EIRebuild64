@@ -1,5 +1,7 @@
 #include "StdAfx.h"
 #include "NavigationBake.h"
+#include "NavigationCanopy.h"
+#include "TextureManager.h"
 #include "NavigationObject.h"
 #include "../Navigation/Profiles.h"
 #include "../Navigation/Query.h"
@@ -78,6 +80,33 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationBake::Figure(CFigureManag
     auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
     if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error("Nav64: "+key+": "+failure.message);
     figures.emplace(key,figure);return figure;
+}
+
+const NavigationCanopy& NavigationBake::Canopy(const CMapObjectServer& object,const owned::FigureCpuAsset& figure) {
+    owned::StaticObjectSource source;
+    source.primary_texture=Navigation::ResourceName((LPCSTR)object.szPrimTexture);
+    source.secondary_texture=Navigation::ResourceName((LPCSTR)object.szSecTexture);
+    const auto* selected=owned::figure_texture_for_type(source,figure.texture_number);
+    if(!selected)throw std::runtime_error("Nav64: canopy has no selected texture");
+    auto found=canopyTextures.find(*selected);if(found!=canopyTextures.end())return *found->second;
+    if(!canopyResources) {
+        auto resources=std::make_shared<CTextureManager>();resources->SetWorld(sourceWorld);
+        const auto base=sourceWorld->GetResourcePath();
+        if(!resources->AddGraphicsResources("textures.res")||!resources->AddGraphicsResources("redress.res")||
+            !resources->AddNewResource(base+"textures.res")||!resources->AddNewResource(base+"redress.res"))
+            throw std::runtime_error("Nav64: cannot mount effective canopy textures");
+        canopyResources=std::move(resources);
+    }
+    const auto name=*selected+".mmp";DWORD size=0;auto* data=canopyResources->GetFile(name.c_str(),&size);
+    if(!data)throw std::runtime_error("Nav64: missing canopy texture "+name);
+    owned::ResourceBlob blob;
+    try {blob.bytes=std::make_shared<const std::vector<std::uint8_t>>(data,data+size);}
+    catch(...) {canopyResources->CloseFile(data);throw;}
+    canopyResources->CloseFile(data);blob.identity.canonical_name=name;blob.identity.bytes=size;
+    owned::TextureCpuAsset texture;owned::ResourceFailure failure;
+    if(!owned::parse_texture_asset(blob,texture,failure))throw std::runtime_error("Nav64: "+name+": "+failure.message);
+    auto coverage=std::make_shared<NavigationCanopy>(texture);
+    canopyTextures.emplace(*selected,coverage);return *coverage;
 }
 
 const Navigation::BodySize& NavigationBake::Body(CWorldServer& world,const std::string& mask,float strength,float grace,float tall) {
@@ -280,33 +309,29 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                     p=object->RotateVector(p+bv.ptBone)+base;vertices[j]=GamePoint(p);
                     if(!Navigation::Finite(vertices[j]))throw std::runtime_error("non-finite transformed triangle vertex");
                 }
+                const auto* alpha=foliage?&Canopy(*specific,*figure):nullptr;
                 const size_t first=input.ground.size();input.groundSources.emplace(first,label.str());
                 for(size_t j=0;j<figure->indices.size();j+=3) {
                     Triangle t{vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],walkable?map.NavigationBridgeArea():BYTE(0)};
                     if(foliage) {
-                        // Only the bottom envelope is an obstacle. Clip each
-                        // leaf triangle to the column before taking its minimum;
-                        // a low vertex must not lower the entire crown footprint.
+                        // Clip world position and UV together. Only visible texture
+                        // coverage contributes to the lower envelope of this column.
                         const int x0=int(std::floor((std::min)({t.a.x,t.b.x,t.c.x})/canopyCell)),x1=int(std::floor((std::max)({t.a.x,t.b.x,t.c.x})/canopyCell)),
                             y0=int(std::floor((std::min)({t.a.y,t.b.y,t.c.y})/canopyCell)),y1=int(std::floor((std::max)({t.a.y,t.b.y,t.c.y})/canopyCell));
+                        NavigationCanopy::Polygon triangle;
+                        for(size_t k=0;k<3;++k) {
+                            const auto index=figure->indices[j+k];const auto& uv=figure->texture_coordinates[figure->components[index].texture];
+                            triangle.push_back({vertices[index],uv.u,uv.v});
+                        }
                         for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x) {
-                            std::vector<Point> clipped={t.a,t.b,t.c};
-                            auto clip=[&](bool xaxis,float edge,bool greater) {
-                                std::vector<Point> out;if(clipped.empty())return;
-                                auto previous=clipped.back();float pv=(xaxis?previous.x:previous.y)-edge;
-                                for(auto current:clipped) {
-                                    const float cv=(xaxis?current.x:current.y)-edge;
-                                    if((pv>=0)!=(cv>=0)){const float f=pv/(pv-cv);out.push_back({previous.x+(current.x-previous.x)*f,previous.y+(current.y-previous.y)*f,previous.z+(current.z-previous.z)*f});}
-                                    if(greater?cv>=0:cv<=0)out.push_back(current);
-                                    previous=current;pv=cv;
-                                }
-                                clipped=std::move(out);
-                            };
-                            clip(true,x*canopyCell,true);clip(true,(x+1)*canopyCell,false);
-                            clip(false,y*canopyCell,true);clip(false,(y+1)*canopyCell,false);
-                            if(clipped.size()<3)continue;
-                            float low=FLT_MAX;for(auto p:clipped)low=(std::min)(low,p.z);
-                            auto cell=canopy.emplace(std::make_pair(x,y),low);cell.first->second=(std::min)(cell.first->second,low);
+                            auto clipped=NavigationCanopy::Clip(triangle,0,x*canopyCell,true);
+                            clipped=NavigationCanopy::Clip(clipped,0,(x+1)*canopyCell,false);
+                            clipped=NavigationCanopy::Clip(clipped,1,y*canopyCell,true);
+                            clipped=NavigationCanopy::Clip(clipped,1,(y+1)*canopyCell,false);
+                            const auto key=std::make_pair(x,y);const auto previous=canopy.find(key);
+                            const float low=alpha->Minimum(clipped,previous==canopy.end()?FLT_MAX:previous->second);
+                            if(low==FLT_MAX)continue;
+                            if(previous==canopy.end())canopy.emplace(key,low);else previous->second=low;
                         }
                         continue;
                     }

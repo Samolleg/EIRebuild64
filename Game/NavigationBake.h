@@ -7,6 +7,9 @@
 class CMapObject;
 class CWorldServer;
 class CFigureManager;
+class CTextureManager;
+class CMapObjectServer;
+struct NavigationCanopy;
 class CAIMap;
 namespace owned {struct FigureCpuAsset;struct ModelCpuAsset;struct AnimationClipAsset;}
 // Offline importer/measurement state. NavigationWorld allocates it exclusively
@@ -14,6 +17,8 @@ namespace owned {struct FigureCpuAsset;struct ModelCpuAsset;struct AnimationClip
 class NavigationBake {
     std::map<int,Navigation::Geometry> objects;
     std::map<std::string,std::shared_ptr<const owned::FigureCpuAsset>> figures;
+    std::shared_ptr<CTextureManager> canopyResources;
+    std::map<std::string,std::shared_ptr<const NavigationCanopy>> canopyTextures;
     std::map<std::string,std::shared_ptr<const owned::ModelCpuAsset>> bodies;
     std::map<std::string,std::shared_ptr<const owned::AnimationClipAsset>> poses;
     Navigation::BodyTable bodyTable;
@@ -27,6 +32,7 @@ class NavigationBake {
     const Navigation::BodySize& Body(CWorldServer& world,const std::string& mask,float strength,float grace,float tall);
     Navigation::Geometry Geometry();
     float GroundHeight(Navigation::Point point);
+    const NavigationCanopy& Canopy(const CMapObjectServer& object,const owned::FigureCpuAsset& figure);
 public:
     static unsigned tileCells;
     static std::filesystem::path reportDirectory;

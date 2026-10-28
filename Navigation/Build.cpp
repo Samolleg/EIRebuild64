@@ -474,6 +474,11 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                 const int ceiling=int(std::floor((c.base+h*.05f-cfg.bmin[1])/cfg.ch));
                 const int maximum=int(std::ceil(ClearanceHeights(p).back()/cfg.ch))+cfg.walkableClimb;
                 for(int iz=z0;iz<=z1;++iz)for(int ix=x0;ix<=x1;++ix) {
+                    // A shared boundary has no covered area. Inclusive source
+                    // bounds must not lower the next row/column of free cells.
+                    const float cellX=cfg.bmin[0]+ix*cfg.cs,cellZ=cfg.bmin[2]+iz*cfg.cs;
+                    if(std::min(highX,cellX+cfg.cs)-std::max(lowX,cellX)<=cfg.cs*.001f||
+                        std::min(highZ,cellZ+cfg.cs)-std::max(lowZ,cellZ)<=cfg.cs*.001f)continue;
                     const auto& cell=chf.cells[ix+iz*chf.width];
                     for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
                         auto& span=chf.spans[j];const int free=ceiling-int(span.y);

@@ -146,6 +146,40 @@ bool texture_alpha_texel_cut(const TextureAlphaPixels& source,
     }
 }
 
+bool texture_alpha_texel_empty(const TextureAlphaPixels& source,
+                               std::uint32_t x, std::uint32_t y) noexcept {
+    if (!source.data || x >= source.width || y >= source.height ||
+        source.format == TextureAlphaFormat::cut_bits) return false;
+    if (source.format == TextureAlphaFormat::bc1)
+        return texture_alpha_texel_cut(source, x, y);
+    if (source.format == TextureAlphaFormat::packed) {
+        if (source.pixel_bytes < 2 || source.pixel_bytes > 4) return false;
+        const std::size_t offset = std::size_t(y) * source.pitch + std::size_t(x) * source.pixel_bytes;
+        if (offset + source.pixel_bytes > source.bytes) return false;
+        std::uint32_t raw = 0;
+        std::memcpy(&raw, source.data + offset, source.pixel_bytes);
+        return (source.alpha_mask && !(raw & source.alpha_mask)) ||
+            (source.has_color_key && raw >= source.key_low && raw <= source.key_high);
+    }
+    const std::size_t offset = std::size_t(y / 4) * source.pitch + std::size_t(x / 4) * 16u;
+    if (offset + 16u > source.bytes) return false;
+    const auto* block = source.data + offset;
+    const unsigned texel = (y % 4) * 4 + x % 4;
+    std::uint64_t alpha = 0;
+    if (source.format == TextureAlphaFormat::bc2) {
+        std::memcpy(&alpha, block, 8);
+        return ((alpha >> (texel * 4)) & 15) == 0;
+    }
+    if (source.format != TextureAlphaFormat::bc3) return false;
+    std::memcpy(&alpha, block + 2, 6);
+    const unsigned selector = unsigned((alpha >> (texel * 3)) & 7);
+    if (selector < 2) return block[selector] == 0;
+    if (block[0] > block[1])
+        return ((8 - selector) * unsigned(block[0]) + (selector - 1) * unsigned(block[1])) / 7 == 0;
+    if (selector >= 6) return selector == 6;
+    return ((6 - selector) * unsigned(block[0]) + (selector - 1) * unsigned(block[1])) / 5 == 0;
+}
+
 std::shared_ptr<const std::vector<std::uint8_t>> texture_alpha_cut_mask(
     const TextureAlphaPixels& source) {
     if (!source.width || !source.height) return nullptr;

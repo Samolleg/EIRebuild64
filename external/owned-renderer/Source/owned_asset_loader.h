@@ -254,6 +254,10 @@ bool texture_alpha_fully_opaque(const TextureAlphaPixels& source) noexcept;
 // One texel's alpha under the same rule: true when it is not fully opaque.
 bool texture_alpha_texel_cut(const TextureAlphaPixels& source,
                              std::uint32_t x, std::uint32_t y) noexcept;
+// Raw texture alpha is exactly zero (partial alpha is retained). Cut-bit masks
+// only encode non-opaque pixels and cannot establish this stronger predicate.
+bool texture_alpha_texel_empty(const TextureAlphaPixels& source,
+                               std::uint32_t x, std::uint32_t y) noexcept;
 // Alpha description of a completed native surface's bytes at publication.
 bool visual_surface_raw_alpha(const OwnedVisualSurface& surface,
                               const std::uint8_t* data, std::size_t bytes,
