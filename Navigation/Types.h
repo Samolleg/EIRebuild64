@@ -52,8 +52,12 @@ enum class Status { Complete, NoMesh, Invalid, NoStart, NoGoal, NoPath, Limit, T
 const char* StatusName(Status status);
 // Physical standing-unit footprint, used only by one synchronous path query.
 struct Obstacle { Point position; float radius=0,height=0; int id=0; };
+// User movement can approach an unavailable click. Exact internal targets
+// (attacks, placement, visibility-graph edges) keep their original contract.
+enum class GoalPolicy { Exact, ClosestReachable };
 struct Request {
     Point source, goal;
+    GoalPolicy goalPolicy = GoalPolicy::Exact;
     const Location* start = nullptr; // transient source polygon; never serialized
     const std::vector<Obstacle>* obstacles = nullptr;
     unsigned short excludedFlags = 0;
@@ -62,6 +66,7 @@ struct Request {
 };
 struct Route {
     Status status = Status::Invalid;
+    Status goalStatus = Status::Complete; // Original refusal when the end is adjusted.
     std::vector<Location> points;
     std::vector<std::uint64_t> corridor;
     float length = 0;

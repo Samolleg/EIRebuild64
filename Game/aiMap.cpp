@@ -2141,13 +2141,13 @@ bool CAIMap::BiWaveFindPath(CAIRoute &res, int *nResCost)
     return bRv;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& result, float maxLength, float goalRadius, int aiClass, Navigation::Location* source)
+bool CAIMap::NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& result, float maxLength, float goalRadius, int aiClass, Navigation::Location* source, Navigation::GoalPolicy goalPolicy)
 {
     result.Clear();
     float costs[16];SRouteCostsInfo info;
     if(unit)GetRouteCostsPathFind(unit,info);else GetRouteCosts(aiClass,info);
     costs[0]=1;for(int i=1;i<16;++i)costs[i]=float(info.pTerrainCosts[i])/1024.f;
-    const auto route=navigation.Find(unit,from,goal,maxLength,goalRadius,costs,aiClass);
+    const auto route=navigation.Find(unit,from,goal,maxLength,goalRadius,costs,aiClass,goalPolicy);
     if(route.status!=Navigation::Status::Complete)return false;
     if(source&&!route.points.empty())*source=route.points.front();
     auto append=[&](Navigation::Point p, unsigned area) {
@@ -2373,14 +2373,22 @@ void CAIMap::CreatePathSegment(CUnit *pUnit, SAIPath &path)
     // Speeds and exact corner points were assigned before segmenting.
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength, float fpMinDistance)
+bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength, float fpMinDistance, Navigation::GoalPolicy goalPolicy)
 {
     res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;
-    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)||!TileInBounds(Float2AITile(ptDst.x),Float2AITile(ptDst.y)))return false;
+    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y))return false;
+    const bool inside=ptDst.x>=0&&ptDst.y>=0&&ptDst.x<AITile2Meter(float(XSize()))&&ptDst.y<AITile2Meter(float(YSize()));
+    if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact)return false;
     auto from=navigation.Position(pUnit,*this);
-    Navigation::Point goal{ptDst.x,ptDst.y,GetTileHeight(ptDst)}; // ptDst.z is a command distance, not world height.
-    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance)) {res.bRouteFailed=true;return false;}
+    // ptDst.z is a command distance, not world height.
+    Navigation::Point goal{ptDst.x,ptDst.y,inside?GetTileHeight(ptDst):from.z};
+    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy)) {res.bRouteFailed=true;return false;}
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
+    if(goalPolicy==Navigation::GoalPolicy::ClosestReachable) {
+        // Replans and crowd avoidance must retain the accepted endpoint.
+        res.ptDestination.x=AITile2Meter(last.point.x);res.ptDestination.y=AITile2Meter(last.point.y);
+        if(res.toGo.route.GetCount()<2){res.CreateStand(pUnit);return true;}
+    }
     if(res.toGo.route.GetCount()<2){res.toGo.Clear();return false;}
     // Queries, including movement previews, never replace the live support.
     // Only placement and an accepted physical step own navLocation.

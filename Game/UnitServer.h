@@ -464,7 +464,7 @@ private:
     void LowNewPose(EUnitPose pose);
     void LowNewWishPose(EUnitPose pose);
     bool LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                     float fpMaxPathLength = 1e6f);
+                     float fpMaxPathLength = 1e6f, Navigation::GoalPolicy goalPolicy = Navigation::GoalPolicy::Exact);
     void LowRemoveUnitsForPathFind(CUnitList &units, const CPlot3D &ptDest, bool bGroup);
     // LEVEL 0 of unit control
     bool L0ShiftAnimations();

@@ -1,6 +1,8 @@
 #include "Query.h"
 #include "../external/recastnavigation/Detour/Include/DetourNavMeshQuery.h"
+#include "../external/recastnavigation/Detour/Include/DetourNode.h"
 #include <algorithm>
+#include <unordered_set>
 
 
 namespace Navigation {
@@ -110,6 +112,58 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
     }
     return ref!=0;
 }
+// Geometric distance is measured from the click in map XY, with the
+// original support height breaking ties between overlapping floors.
+struct ClosestGoalQuery final : dtPolyQuery {
+    const Mesh& mesh;dtNavMeshQuery& query;Point target;float height;
+    Location best;float bestXY=1.e30f,bestZ=1.e30f;
+    std::unordered_set<dtPolyRef> seen;bool limited=false;
+    ClosestGoalQuery(const Mesh& m,dtNavMeshQuery& q,Point p,float h)
+        :mesh(m),query(q),target(p),height(h){seen.reserve(256);}
+    void Consider(dtPolyRef ref) {
+        const auto nav=ToNav(target);const float input[]={nav.x,nav.y,nav.z};float near[3]{};
+        if(dtStatusFailed(query.closestPointOnPoly(ref,input,near,nullptr)))return;
+        const float dx=near[0]-nav.x,dy=near[2]-nav.z,xy=dx*dx+dy*dy;
+        if(xy>bestXY+.000001f)return;
+        const auto at=Address(mesh,{near[0],near[1],near[2]},ref,height,target.z);
+        if(!at.surface)return;
+        const float dz=std::abs(at.position.z-target.z);
+        if(!best.polygon||xy<bestXY-.000001f||
+           (std::abs(xy-bestXY)<=.000001f&&(dz<bestZ-.001f||
+            (std::abs(dz-bestZ)<=.001f&&ref<best.polygon)))) {
+            best=at;bestXY=xy;bestZ=dz;
+        }
+    }
+    void process(const dtMeshTile*,dtPoly**,dtPolyRef* refs,int count) override {
+        for(int i=0;i<count;++i) {
+            if(limited)return;
+            if(!seen.insert(refs[i]).second)continue;
+            if(seen.size()>65535){limited=true;return;}
+            Consider(refs[i]);
+        }
+    }
+};
+Status ClosestGoal(const Mesh& mesh,dtNavMeshQuery& query,Point point,
+                   const dtQueryFilter& filter,float height,Location& result) {
+    if(!mesh.sources)return Status::NoGoal;
+    const auto nav=ToNav(point);const auto& g=*mesh.sources;
+    const float center[]={nav.x,(g.minimum.y+g.maximum.y)*.5f,nav.z};
+    const float maximum=std::max({.15f,std::abs(nav.x-g.minimum.x),std::abs(nav.x-g.maximum.x),
+                                std::abs(nav.z-g.minimum.z),std::abs(nav.z-g.maximum.z)})+mesh.profile.cellSize;
+    ClosestGoalQuery closest(mesh,query,point,height);float radius=.15f;
+    for(;;) {
+        const float extent[]={radius,(g.maximum.y-g.minimum.y)*.5f+2,radius};
+        const auto status=query.queryPolygons(center,extent,&filter,&closest);
+        if(dtStatusFailed(status)||closest.limited)return Status::Limit;
+        // An XY circle inside the queried square proves that no unqueried
+        // polygon can be closer. Each polygon is evaluated at most once.
+        if(closest.best.polygon&&closest.bestXY<=radius*radius+.000001f) {
+            result=closest.best;return Status::Complete;
+        }
+        if(radius>=maximum)return Status::NoGoal;
+        radius=std::min(maximum,radius*2);
+    }
+}
 bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filter,dtPolyRef& ref,Point& near,Point& actual,bool& ingress,float height,const Location* address=nullptr) {
     ingress=false;
     // Keep the address reached by the previous move. A new nearest-poly
@@ -169,7 +223,12 @@ Route Find(const Mesh& m,const Request& r) {
     if(r.obstacles&&!r.obstacles->empty())return FindAround(m,r);
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
     if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
-    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,0,height)){result.status=Status::NoGoal;return result;}
+    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,0,height)) {
+        if(r.goalPolicy==GoalPolicy::Exact){result.status=Status::NoGoal;return result;}
+        Location closest;const auto selected=ClosestGoal(m,q,r.goal,filter,height,closest);
+        if(selected!=Status::Complete){result.status=selected;return result;}
+        to=closest.polygon;goal=ToNav(closest.position);result.goalStatus=Status::NoGoal;
+    }
     float start[3]={source.x,source.y,source.z},end[3]={goal.x,goal.y,goal.z};
     // Fixed work bound within Detour, no retry with a different pathfinder.
     auto status=q.initSlicedFindPath(from,to,start,end,&filter);
@@ -177,9 +236,28 @@ Route Find(const Mesh& m,const Request& r) {
     while(dtStatusInProgress(status)&&iterations<65536){int done=0;status=q.updateSlicedFindPath(2048,&done);iterations+=done;if(!done)break;}
     if(dtStatusInProgress(status)||Limited(status)){result.status=Status::Limit;return result;}
     if(dtStatusFailed(status)){result.status=Status::NoPath;return result;}
-    std::vector<dtPolyRef> corridor(8192);int count=0;status=q.finalizeSlicedFindPath(corridor.data(),&count,int(corridor.size()));
+    const bool reached=from==to||q.isInClosedList(to);
+    bool selectedPartial=false;
+    if(!reached&&r.goalPolicy==GoalPolicy::ClosestReachable) {
+        // An exhausted A* contains the entire reachable component. Choose the
+        // closest actual polygon boundary to the click, not the heuristic's
+        // closest portal midpoint and not the closest point to the unit.
+        ClosestGoalQuery closest(m,q,r.goal,height);
+        const auto* pool=q.getNodePool();
+        for(int i=1;i<=pool->getNodeCount();++i) {
+            const auto* node=pool->getNodeAtIdx(unsigned(i));
+            if(node->flags&DT_NODE_CLOSED)closest.Consider(node->id);
+        }
+        if(!closest.best.polygon){result.status=Status::NoPath;return result;}
+        to=closest.best.polygon;goal=ToNav(closest.best.position);
+        end[0]=goal.x;end[1]=goal.y;end[2]=goal.z;
+        result.goalStatus=Status::NoPath;selectedPartial=true;
+    }
+    std::vector<dtPolyRef> corridor(8192);int count=0;
+    status=selectedPartial?q.finalizeSlicedFindPathPartial(&to,1,corridor.data(),&count,int(corridor.size())):
+                           q.finalizeSlicedFindPath(corridor.data(),&count,int(corridor.size()));
     if(Limited(status)){result.status=Status::Limit;return result;}
-    if(dtStatusFailed(status)||dtStatusDetail(status,DT_PARTIAL_RESULT)||!count||corridor[count-1]!=to){result.status=Status::NoPath;return result;}
+    if(dtStatusFailed(status)||(!selectedPartial&&dtStatusDetail(status,DT_PARTIAL_RESULT))||!count||corridor[count-1]!=to){result.status=Status::NoPath;return result;}
     float commonCost=filter.getAreaCost(m.data->getTileByRef(corridor[0])->polys[m.data->decodePolyIdPoly(corridor[0])].getArea());
     bool uniform=true;
     for(int i=1;i<count;++i) {
@@ -278,6 +356,7 @@ Route FindAround(const Mesh& mesh,const Request& input) {
             if(closed[to]||to==from||!clearSegment(nodes[from].position,nodes[to].position))continue;
             Request edge=plain;edge.source=nodes[from].position;edge.start=&nodes[from];
             edge.goal=nodes[to].position;edge.goalRadius=.001f;edge.maxLength=request.maxLength-length[from];
+            edge.goalPolicy=GoalPolicy::Exact;
             auto route=Find(mesh,edge);
             if(route.status!=Status::Complete||!clearRoute(route)||Distance(route.points.back().position,nodes[to].position)>.003f)continue;
             float weight=0;
@@ -296,7 +375,7 @@ Route FindAround(const Mesh& mesh,const Request& input) {
         for(auto ref:edge.corridor)if(result.corridor.empty()||result.corridor.back()!=ref)result.corridor.push_back(ref);
         result.length+=edge.length;
     }
-    result.status=Status::Complete;return result;
+    result.goalStatus=direct.goalStatus;result.status=Status::Complete;return result;
 }
 }
 bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height,const char** reason,const Location* address,unsigned short excludedFlags) {

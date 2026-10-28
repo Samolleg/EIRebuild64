@@ -440,7 +440,7 @@ void CUnitServer::LowNewWishPose(EUnitPose pose)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                              float fpMaxPathLength)
+                              float fpMaxPathLength, Navigation::GoalPolicy goalPolicy)
 {
     CorePerf::Scope coreTiming(CorePerf::FindPath);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
@@ -452,7 +452,7 @@ bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPat
     //
     BOOL bSaveFastPath = lpUnit->bNeedFastPath;
     lpUnit->bNeedFastPath = bFastPath;
-    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength);
+    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy);
     lpUnit->bNeedFastPath = bSaveFastPath;
     return bFound;
 }
@@ -1028,11 +1028,18 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength)
     bL1SpeedChanged = false;
     bL1MovementFailed = false;
     path.Clear();
-    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength))
+    const auto goalPolicy=curCommand.cmd==UC_MOVETO&&lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact;
+    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy))
     {
         bL1MoveAnimationSet = false;
         L1StopMovement(path.bRouteFailed == TRUE);
         return false;
+    }
+    if(!path.curSegment.IsMoving()) {
+        // Already at the nearest reachable point: successful no-op, not a
+        // refusal and not a standing segment left in the movement phase.
+        const auto accepted=path.ptDestination;
+        L1StopMovement(false);path.CreateStand(lpUnit);path.ptDestination=accepted;return true;
     }
     path.ptDestination.z = fpMaxPathLength;
     nL1RunFailCounter = 0;
@@ -3370,7 +3377,7 @@ void CUnitServer::ShowFoundMovePath(SAIPath &move, bool bFound)
     {
         move.GetWholeRoute(full);
         float fpLength = distanceXY2(lpUnit->GetCP(), move.ptDestination);
-        if (distanceXY2(move.GetFinalPoint(), move.ptDestination) < sqr(0.1f) * fpLength)
+        if (distanceXY2(move.GetFinalPoint(), move.ptDestination) <= (std::max)(sqr(.001f), sqr(0.1f) * fpLength))
         {
             ShowFoundPath(full, move.ptDestination, CPlayer::PPT_MOVE, CPlayer::PPR_OK);
             if (!logic.GetPlayerLeader())
@@ -6001,7 +6008,8 @@ void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, 
         pWS->aiMap.AddObject(lpUnit);
     }
     //
-    bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist);
+    bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist,
+                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact);
     //
     if (bRun)
     {

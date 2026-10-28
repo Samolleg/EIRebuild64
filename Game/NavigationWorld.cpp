@@ -476,14 +476,14 @@ Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     if(unit->navLocation.surface>=1 && std::hypot(p.x-unit->navLocation.position.x,p.y-unit->navLocation.position.y)<.1f)p.z=unit->navLocation.position.z;
     return p;
 }
-Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass) {
+Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass,Navigation::GoalPolicy goalPolicy) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPath);
     auto* mesh=ForUnit(unit,aiClass);if(!mesh){
         Navigation::Route route;route.status=Navigation::Status::NoMesh;
         if(unit&&unit->IsHero())GameJournal::Event("NAV","query_failed","unit=%d reason=no_mesh from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) detail=%s",unit->GetID(),from.x,from.y,from.z,goal.x,goal.y,goal.z,GameJournal::Quote(error.c_str()).c_str());
         return route;
     }
-    Navigation::Request request;request.start=unit?&unit->navLocation:nullptr;request.source=from;request.goal=goal;request.maxLength=maxLength;request.goalRadius=goalRadius;request.height=Height(unit,aiClass);
+    Navigation::Request request;request.goalPolicy=goalPolicy;request.start=unit?&unit->navLocation:nullptr;request.source=from;request.goal=goal;request.maxLength=maxLength;request.goalRadius=goalRadius;request.height=Height(unit,aiClass);
     if(Navigation::Levitates(mesh->profile)&&unit) {
         auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
         request.source.z=map.GetTileSurface(CPlot3D(from.x,from.y,0));
@@ -493,6 +493,10 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     request.obstacles=queryObstacles;
     if(costs&&!Navigation::Levitates(mesh->profile))std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
+    if(route.status==Status::Complete&&route.goalStatus!=Status::Complete&&unit&&unit->IsHero()&&!route.points.empty()) {
+        const auto at=route.points.back().position;
+        GameJournal::Event("NAV","goal_adjusted","unit=%d reason=%s requested=(%.3f,%.3f,%.3f) accepted=(%.3f,%.3f,%.3f) offset_xy=%.3f profile=%s height=%.3f",unit->GetID(),StatusName(route.goalStatus),goal.x,goal.y,goal.z,at.x,at.y,at.z,std::hypot(at.x-goal.x,at.y-goal.y),mesh->profileId.c_str(),request.height);
+    }
     // Hero failures remain observable after NPCs exhaust the background quota.
     if(route.status!=Navigation::Status::Complete&&((unit&&unit->IsHero())||failures++<16))
         GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) profile=%s class=%d pose=%d height=%.3f goal_radius=%.3f max_length=%.3f route_length=%.3f start_surface=%llu start_polygon=%llu mesh_generation=%llu obstacles=%zu",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z,mesh->profileId.c_str(),unit?unit->GetAIClass():aiClass,unit?int(unit->GetCurrentPose()):-1,request.height,goalRadius,maxLength,route.length,static_cast<unsigned long long>(unit?unit->navLocation.surface:0),static_cast<unsigned long long>(unit?unit->navLocation.polygon:0),static_cast<unsigned long long>(mesh->generation),queryObstacles?queryObstacles->size():0);
