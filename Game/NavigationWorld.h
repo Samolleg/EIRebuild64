@@ -37,7 +37,7 @@ class NavigationWorld {
     std::future<std::unique_ptr<Navigation::Mesh>> sourceJob;
     std::tuple<int,int,int> sourceTask;
     std::map<int,int> liveDoors;
-    struct Queue { Navigation::Point goal;std::vector<Navigation::Obstacle> blockers;int blocker=0;bool attempted=false;const Navigation::Mesh* mesh=nullptr;std::uint64_t generation=0;float height=0; };
+    struct Queue { Navigation::Point goal;int blocker=0; };
     std::map<int,Queue> queues;
     const std::vector<Navigation::Obstacle>* queryObstacles=nullptr;
     void UpdateSources(bool initial);

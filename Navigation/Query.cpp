@@ -125,7 +125,16 @@ bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filte
         }
     }
     if(!Nearest(mesh,q,p,.05f,4.f,filter,ref,near,0,height))return false;
-    actual=FromNav(near);return true;
+    actual=FromNav(near);
+    ingress=std::hypot(actual.x-p.x,actual.y-p.y)>.001f;
+    if(ingress) {
+        // The existing 5 cm admission margin is an explicit entry segment,
+        // never an unreported replacement of the route's physical origin.
+        const auto at=Address(mesh,ToNav(p),ref,height,p.z);
+        if(!at.surface||std::abs(at.position.z-p.z)>mesh.profile.climb+.001f)return false;
+        actual=at.position;
+    }
+    return true;
 }
 bool Limited(dtStatus s){return dtStatusDetail(s,DT_OUT_OF_NODES)||dtStatusDetail(s,DT_BUFFER_TOO_SMALL);}
 Route FindAround(const Mesh&,const Request&);
@@ -211,12 +220,19 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     Request plain=request;plain.obstacles=nullptr;
     auto direct=Find(mesh,plain);
     if(direct.status!=Status::Complete)return direct;
-    auto intersects=[](Point a,Point b,const Obstacle& obstacle) {
+    auto intersects=[&](Point a,Point b,const Obstacle& obstacle) {
         const float dx=b.x-a.x,dy=b.y-a.y,length=dx*dx+dy*dy;
         const float t=length>0?std::clamp(((obstacle.position.x-a.x)*dx+(obstacle.position.y-a.y)*dy)/length,0.f,1.f):0;
         // Same floor policy as the live circle-collision query. Never block an
         // independent bridge/floor with a unit on the terrain below it.
         if(std::abs(a.z+(b.z-a.z)*t-obstacle.position.z)>2.f)return false;
+        // A moving neighbour can overlap the source before this query. Match
+        // CheckCircleCollision: allow only an outward first edge, retaining
+        // the full body radius and rejecting every later re-entry.
+        const float ax=a.x-obstacle.position.x,ay=a.y-obstacle.position.y;
+        const float before=ax*ax+ay*ay,after=(ax+dx)*(ax+dx)+(ay+dy)*(ay+dy);
+        if(std::hypot(a.x-request.source.x,a.y-request.source.y)<=.001f&&
+           before<obstacle.radius*obstacle.radius&&ax*dx+ay*dy>=0&&after>before+.00001f)return false;
         return std::hypot(a.x+dx*t-obstacle.position.x,a.y+dy*t-obstacle.position.y)+.0001f<obstacle.radius;
     };
     auto clearSegment=[&](Point a,Point b) {
@@ -292,6 +308,18 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(excludedFlags);dtPolyRef ref=0;Point near;
     Point actual;bool ingress=false;
     if(!Start(m,q,from,filter,ref,near,actual,ingress,height,address))return reject("no_start");
+    if(ingress) {
+        const auto entry=FromNav(near);const float dx=entry.x-actual.x,dy=entry.y-actual.y;
+        const float length=std::hypot(dx,dy),along=((desired.x-actual.x)*dx+(desired.y-actual.y)*dy)/(length*length);
+        if(along<1.f) {
+            const float lateral=std::hypot(desired.x-actual.x-dx*along,desired.y-actual.y-dy*along);
+            if(along<-.001f/length||lateral>.001f)return reject("ingress_direction");
+            auto at=Address(m,ToNav(desired),ref,height,from.z);
+            if(!at.surface)return reject("missing_original_support");
+            if(std::abs(at.position.z-from.z)>m.profile.climb+.001f)return reject("height_jump");
+            result=at;return true;
+        }
+    }
     auto goal=ToNav(desired);float end[3]={goal.x,goal.y,goal.z};
     // Clip the actual step against convex polygons in double precision. Both
     // Detour local walkers use strict float edge tests; at a funnel corner

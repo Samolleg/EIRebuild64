@@ -822,6 +822,10 @@ void CUnitServer::L1ExecMove()
 
     auto support=movement.support;
     if(!accepted) {
+        if(movement.blocker>=0) {
+            GameJournal::Event("NAV","queue_stopped","unit=%d blocker=%d reason=no_detour",lpUnit->GetID(),movement.blocker);
+            L1StopMovement(true);return;
+        }
         path.ClearCalcedPath();
         if(++navigationRejects>1) {
             GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());

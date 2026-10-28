@@ -160,7 +160,7 @@ Navigation::Mesh* NavigationWorld::ForUnit(CUnit* unit,int aiClass) {
     if(!loaded)return nullptr;
     try {return meshes[Type(unit,unit?unit->GetAIClass():aiClass)].get();}
     catch(const std::exception& e) {
-        error=e.what();if(failures++<16)GameJournal::Event("NAV","query_failed","unit=%d reason=%s",unit?unit->GetID():-1,GameJournal::Quote(e.what()).c_str());
+        error=e.what();if((unit&&unit->IsHero())||failures++<16)GameJournal::Event("NAV","query_failed","unit=%d stage=body reason=%s",unit?unit->GetID():-1,GameJournal::Quote(e.what()).c_str());
         return nullptr;
     }
 }
@@ -478,7 +478,11 @@ Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
 }
 Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPath);
-    auto* mesh=ForUnit(unit,aiClass);if(!mesh){Navigation::Route route;route.status=Navigation::Status::NoMesh;return route;}
+    auto* mesh=ForUnit(unit,aiClass);if(!mesh){
+        Navigation::Route route;route.status=Navigation::Status::NoMesh;
+        if(unit&&unit->IsHero())GameJournal::Event("NAV","query_failed","unit=%d reason=no_mesh from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) detail=%s",unit->GetID(),from.x,from.y,from.z,goal.x,goal.y,goal.z,GameJournal::Quote(error.c_str()).c_str());
+        return route;
+    }
     Navigation::Request request;request.start=unit?&unit->navLocation:nullptr;request.source=from;request.goal=goal;request.maxLength=maxLength;request.goalRadius=goalRadius;request.height=Height(unit,aiClass);
     if(Navigation::Levitates(mesh->profile)&&unit) {
         auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
@@ -489,7 +493,9 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     request.obstacles=queryObstacles;
     if(costs&&!Navigation::Levitates(mesh->profile))std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
-    if(route.status!=Navigation::Status::Complete&&failures++<16)GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.2f,%.2f,%.2f) goal=(%.2f,%.2f,%.2f) profile=%s height=%.2f max_length=%.3f route_length=%.3f",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z,mesh->profileId.c_str(),request.height,maxLength,route.length);
+    // Hero failures remain observable after NPCs exhaust the background quota.
+    if(route.status!=Navigation::Status::Complete&&((unit&&unit->IsHero())||failures++<16))
+        GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) profile=%s class=%d pose=%d height=%.3f goal_radius=%.3f max_length=%.3f route_length=%.3f start_surface=%llu start_polygon=%llu mesh_generation=%llu obstacles=%zu",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z,mesh->profileId.c_str(),unit?unit->GetAIClass():aiClass,unit?int(unit->GetCurrentPose()):-1,request.height,goalRadius,maxLength,route.length,static_cast<unsigned long long>(unit?unit->navLocation.surface:0),static_cast<unsigned long long>(unit?unit->navLocation.polygon:0),static_cast<unsigned long long>(mesh->generation),queryObstacles?queryObstacles->size():0);
     return route;
 }
 bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Location& result) {
@@ -500,7 +506,9 @@ bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) 
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPlace);
     auto* mesh=ForUnit(unit,aiClass);if(!mesh)return false;
     if(Navigation::Levitates(mesh->profile)&&unit)point.z=static_cast<CWorldServer*>(unit->GetWorld())->aiMap.GetTileSurface(CPlot3D(point.x,point.y,0));
-    Navigation::Location location;return Navigation::Project(*mesh,point,.05f,4.f,location,Height(unit,aiClass),static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4)));
+    // A pose must fit at the actual point; projecting it by 5 cm can admit a
+    // taller pose beside a crown, then leave the new route outside its mesh.
+    Navigation::Location location;return Navigation::Project(*mesh,point,.001f,4.f,location,Height(unit,aiClass),static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4)));
 }
 bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationStep);
@@ -517,9 +525,9 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
     const bool accepted=mesh&&(route?Navigation::Follow(*mesh,from,desired,corners,result,Height(unit),&reason,address,static_cast<unsigned short>(1u<<(unit->GetAIClass()+4))):Navigation::Constrain(*mesh,from,desired,result,Height(unit),&reason,address,static_cast<unsigned short>(1u<<(unit->GetAIClass()+4))));
     if(!accepted) {
         const auto now=GetTickCount64();
-        if(stepFailures++<16||now>=nextStepLog) {
+        if((unit&&unit->IsHero())||stepFailures++<16||now>=nextStepLog) {
             nextStepLog=now+2000;
-            GameJournal::Event("NAV","step_rejected","unit=%d reason=%s from=(%.3f,%.3f,%.3f) desired=(%.3f,%.3f,%.3f)",unit?unit->GetID():-1,reason,from.x,from.y,from.z,desired.x,desired.y,desired.z);
+            GameJournal::Event("NAV","step_rejected","unit=%d reason=%s from=(%.3f,%.3f,%.3f) desired=(%.3f,%.3f,%.3f) profile=%s height=%.3f pose=%d path_points=%zu start_polygon=%llu mesh_generation=%llu",unit?unit->GetID():-1,reason,from.x,from.y,from.z,desired.x,desired.y,desired.z,mesh?mesh->profileId.c_str():"none",mesh?Height(unit):0.f,unit?int(unit->GetCurrentPose()):-1,corners.size(),static_cast<unsigned long long>(address?address->polygon:0),static_cast<unsigned long long>(mesh?mesh->generation:0));
         }
         return false;
     }
@@ -550,39 +558,31 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
         wait=(std::min)(wait+1,1000000u);
         auto& queue=queues[unit->GetID()];
         const Point goal{path.ptDestination.x,path.ptDestination.y,path.ptDestination.z};
-        if(Distance(queue.goal,goal)>.001f||queue.blocker!=neighbour->GetID()){queue={goal,{},neighbour->GetID(),false};wait=1;}
-        // Once blocked, retry only after an actual change of the saved standing
-        // obstacles. A failed search never turns into another search each tick.
-        const auto* mesh=ForUnit(unit);const float clearance=Height(unit);
-        if(queue.attempted&&(queue.mesh!=mesh||queue.generation!=mesh->generation||queue.height!=clearance))queue.attempted=false;
-        if(queue.attempted)for(const auto& saved:queue.blockers) {
-            auto* other=world.GetUnit(saved.id);
-            if(!other||other->IsMoving()||Distance(Position(other,map),saved.position)>.02f||
-                std::abs(Radius(other)+Radius(unit)-saved.radius)>.001f||
-                std::abs(Height(other)-saved.height)>.001f) {queue.attempted=false;break;}
-        }
-        // 27 game ticks at 55 ms: bounded Q1/Q2 wait, then one detour query.
-        if(wait>=27&&!move.rotating&&!neighbour->IsMoving()&&!queue.attempted) {
-            queue.blockers.clear();queue.attempted=true;++move.avoidanceAttempts;
-            queue.mesh=mesh;queue.generation=mesh->generation;queue.height=clearance;
+        if(Distance(queue.goal,goal)>.001f){queue={goal,neighbour->GetID()};wait=1;}
+        else queue.blocker=neighbour->GetID();
+        // A changing neighbour must not restart the bounded wait forever.
+        // Its movement flag is not proof that this body can make progress.
+        if(wait>=27&&!move.rotating) {
+            ++move.avoidanceAttempts;
+            std::vector<Navigation::Obstacle> blockers;
             for(const auto& entry:world.mapObjects)if(auto* other=dynamic_cast<CUnit*>(entry.second)) {
-                if(other==unit||other->IsMoving()||other->IsDead())continue;
+                if(other==unit||other->IsDead())continue;
                 const auto at=Position(other,map);
                 if(std::hypot(at.x-from.x,at.y-from.y)>24.f)continue;
-                queue.blockers.push_back({at,Radius(other)+Radius(unit),Height(other),other->GetID()});
+                blockers.push_back({at,Radius(other)+Radius(unit),Height(other),other->GetID()});
             }
-            if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake)for(const auto& obstacle:queue.blockers)
+            if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake)for(const auto& obstacle:blockers)
                 printf("DETOUR_INPUT unit=%d from=(%.6f,%.6f,%.6f) obstacle=%d at=(%.6f,%.6f,%.6f) radius=%.6f start_distance=%.6f\n",unit->GetID(),from.x,from.y,from.z,obstacle.id,obstacle.position.x,obstacle.position.y,obstacle.position.z,obstacle.radius,std::hypot(from.x-obstacle.position.x,from.y-obstacle.position.y));
             SAIPath alternate;
             struct QueryScope {
                 NavigationWorld& owner;
                 ~QueryScope(){owner.queryObstacles=nullptr;}
             } scope{*this};
-            queryObstacles=&queue.blockers;
+            queryObstacles=&blockers;
             const auto start=std::chrono::steady_clock::now();
             const bool found=map.NewPath(unit,path.ptDestination,alternate);
             move.detourMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-            GameJournal::Event("NAV","queue_detour","unit=%d blocker=%d result=%s obstacles=%zu ms=%.3f",unit->GetID(),neighbour->GetID(),found?"ready":"waiting",queue.blockers.size(),move.detourMs);
+            GameJournal::Event("NAV","queue_detour","unit=%d blocker=%d result=%s wait=%u blocker_moving=%d distance=%.3f body_radius=%.3f obstacles=%zu ms=%.3f",unit->GetID(),neighbour->GetID(),found?"ready":"stopped",wait,int(neighbour->IsMoving()),std::hypot(from.x-Position(neighbour,map).x,from.y-Position(neighbour,map).y),Radius(unit)+Radius(neighbour),blockers.size(),move.detourMs);
             if(found) {
                 path.curSegment=alternate.curSegment;path.toGo=alternate.toGo;
                 path.ptFinish=alternate.ptFinish;path.bFinished=alternate.bFinished;
@@ -592,6 +592,9 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
                 move.replanned=true;move.finished=false;move.support=unit->navLocation;
                 wait=0;queues.erase(unit->GetID());return true;
             }
+            // An impossible detour is a failed movement command. Let its owner
+            // choose the next action instead of freezing an unchanged queue.
+            move.blocker=neighbour->GetID();return false;
         }
         move.waiting=true;move.blocker=neighbour->GetID();return true;
     }

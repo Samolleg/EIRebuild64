@@ -2379,10 +2379,11 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)||!TileInBounds(Float2AITile(ptDst.x),Float2AITile(ptDst.y)))return false;
     auto from=navigation.Position(pUnit,*this);
     Navigation::Point goal{ptDst.x,ptDst.y,GetTileHeight(ptDst)}; // ptDst.z is a command distance, not world height.
-    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,&pUnit->navLocation)) {res.bRouteFailed=true;return false;}
+    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance)) {res.bRouteFailed=true;return false;}
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
     if(res.toGo.route.GetCount()<2){res.toGo.Clear();return false;}
-    // NavRoute returned the stable address including the actual profile.
+    // Queries, including movement previews, never replace the live support.
+    // Only placement and an accepted physical step own navLocation.
     res.nPathCost=int(res.toGo.route.GetCount());res.bFirstTry=false;
     CalcSpeeds(pUnit,res.toGo);CreatePathSegment(pUnit,res);return true;
 }
