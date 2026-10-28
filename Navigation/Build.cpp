@@ -65,18 +65,36 @@ Bytes Unpack(const void* input,size_t size,size_t expected) {
 }
 // Byte planes preserve every float/index bit while making repeated source
 // metadata and grid-coordinate exponents adjacent for the lossless codec.
-void SourceArray(Bytes& bytes,size_t offset,size_t count,size_t width,bool encoding) {
+void SourceArray(Bytes& bytes,size_t offset,size_t count,size_t width) {
     Require(offset<=bytes.size()&&count<=(bytes.size()-offset)/width,"Nav64: truncated source array");
     Bytes result(count*width);const auto* input=bytes.data()+offset;
-    // Transpose cache-sized row blocks. A full-column scatter revisits the
-    // entire 36 MB triangle array once per byte and dominates zone entry.
     for(size_t first=0;first<count;first+=256) {
         const auto end=std::min(count,first+256);
-        if(encoding)for(size_t c=0;c<width;++c)for(size_t i=first;i<end;++i)result[c*count+i]=input[i*width+c];
-        else for(size_t c=0;c<width;++c)for(size_t i=first;i<end;++i)result[i*width+c]=input[c*count+i];
+        for(size_t c=0;c<width;++c)for(size_t i=first;i<end;++i)result[c*count+i]=input[i*width+c];
     }
     std::copy(result.begin(),result.end(),bytes.begin()+offset);
 }
+// Read the existing byte planes directly into Geometry. Reassembling packed
+// records first would allocate/write/copy the full 47-byte triangle array.
+// Bounds are checked once per array; index and finite-float checks stay below.
+template<size_t Width> struct SourceColumns {
+    std::array<const std::uint8_t*,Width> lanes;
+    SourceColumns(Wire& w,size_t count) {
+        Require(w.at<=w.bytes.size()&&count<=(w.bytes.size()-w.at)/Width,"Nav64: truncated source array");
+        for(size_t c=0;c<Width;++c)lanes[c]=w.bytes.data()+w.at+c*count;
+        w.at+=count*Width;
+    }
+    std::uint8_t B(size_t row,size_t column) const {return lanes[column][row];}
+    std::uint32_t U(size_t row,size_t column) const {
+        return std::uint32_t(B(row,column))|(std::uint32_t(B(row,column+1))<<8)|
+            (std::uint32_t(B(row,column+2))<<16)|(std::uint32_t(B(row,column+3))<<24);
+    }
+    float F(size_t row,size_t column) const {
+        const auto n=U(row,column);float v;std::memcpy(&v,&n,4);
+        Require(std::isfinite(v),"Nav64: invalid float");return v;
+    }
+    Point P(size_t row,size_t column) const {return {F(row,column),F(row,column+4),F(row,column+8)};}
+};
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
         p.cellSize==.1f && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
@@ -102,9 +120,9 @@ dtMeshHeader CheckTileHeader(const unsigned char* data,size_t size) {
 // Byte lanes of each fixed-size array record are contiguous on disk. This is
 // reversible (including float bits); no vertex, height or polygon is quantized.
 // The header is unchanged so the decoder can bound every array before unshuffle.
-Bytes ShuffleTile(const unsigned char* data,size_t size,bool encode) {
-    const auto h=CheckTileHeader(data,size);Bytes result(size);
-    size_t offset=dtAlign4(sizeof(dtMeshHeader));std::memcpy(result.data(),data,offset);
+void ShuffleTile(const unsigned char* data,size_t size,bool encode,unsigned char* result) {
+    const auto h=CheckTileHeader(data,size);
+    size_t offset=dtAlign4(sizeof(dtMeshHeader));std::memcpy(result,data,offset);
     auto array=[&](size_t count,size_t width) {
         for(size_t lane=0;lane<width;++lane)for(size_t i=0;i<count;++i) {
             const size_t plain=i*width+lane,packed=lane*count+i;
@@ -117,7 +135,6 @@ Bytes ShuffleTile(const unsigned char* data,size_t size,bool encode) {
     array(h.detailVertCount,sizeof(float)*3);array(h.detailTriCount,4);
     array(h.bvNodeCount,sizeof(dtBVNode));
     Require(offset==size,"Nav64: shuffled tile layout mismatch");
-    return result;
 }
 void CheckTile(const unsigned char* data,size_t size) {
     const auto h=CheckTileHeader(data,size);
@@ -804,7 +821,7 @@ Bytes Store(const Mesh& mesh) {
         // Never persist the process-local references of an already added tile.
         std::memset(raw.data()+polyOffset+dtAlign4(sizeof(dtPoly)*t->header->polyCount),0,
             dtAlign4(sizeof(dtLink)*t->header->maxLinkCount));
-        const auto shuffled=ShuffleTile(raw.data(),raw.size(),true);
+        Bytes shuffled(raw.size());ShuffleTile(raw.data(),raw.size(),true,shuffled.data());
         tiles.U(std::uint32_t(shuffled.size()));tiles.B(shuffled.data(),shuffled.size());
         const auto& support=mesh.polygonSurfaces.at({t->header->x,t->header->y});
         Require(support.size()==size_t(t->header->polyCount),"Nav64: polygon support count");
@@ -835,9 +852,12 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     Wire tiles;tiles.bytes=Unpack(w.bytes.data()+w.at,packed,expanded);w.at=end;
     auto count=tiles.U();Require(count<=std::uint32_t(p.maxTiles),"Nav64: tile count limit");
     for(std::uint32_t i=0;i<count;++i){auto n=tiles.U();Require(n<=tiles.bytes.size()-tiles.at,"Nav64: truncated tile");
-        const auto raw=ShuffleTile(tiles.bytes.data()+tiles.at,n,false);CheckTile(raw.data(),raw.size());
-        auto* data=static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM));Require(data!=nullptr,"Nav64: tile allocation failed");std::memcpy(data,raw.data(),n);tiles.at+=n;
-        const auto header=CheckTileHeader(data,n);const auto supports=tiles.U();
+        const auto header=CheckTileHeader(tiles.bytes.data()+tiles.at,n);
+        auto freeTile=[](unsigned char* p){dtFree(p);};
+        std::unique_ptr<unsigned char,decltype(freeTile)> data(static_cast<unsigned char*>(dtAlloc(n,DT_ALLOC_PERM)),freeTile);
+        Require(data!=nullptr,"Nav64: tile allocation failed");
+        ShuffleTile(tiles.bytes.data()+tiles.at,n,false,data.get());CheckTile(data.get(),n);tiles.at+=n;
+        const auto supports=tiles.U();
         Require(supports==unsigned(header.polyCount),"Nav64: polygon support count");
         auto& identities=mesh->polygonSurfaces[{header.x,header.y}];identities.reserve(supports);
         for(unsigned j=0;j<supports;++j) {
@@ -846,7 +866,7 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
             for(unsigned k=0;k<count;++k){const auto low=tiles.U();const auto id=low|(std::uint64_t(tiles.U())<<32);Require(id>0,"Nav64: invalid polygon support");group.push_back(id);}
             identities.push_back(std::move(group));
         }
-        auto s=mesh->data->addTile(data,n,DT_TILE_FREE_DATA,0,nullptr);if(dtStatusFailed(s)){dtFree(data);throw std::runtime_error("Nav64: invalid/duplicate tile");}++mesh->tiles;
+        auto s=mesh->data->addTile(data.get(),n,DT_TILE_FREE_DATA,0,nullptr);Require(dtStatusSucceed(s),"Nav64: invalid/duplicate tile");data.release();++mesh->tiles;
     }
     Require(tiles.at==tiles.bytes.size()&&w.at==end&&w.U()==2&&w.U()==8&&w.U()==1&&w.U()==2&&w.at==w.bytes.size(),"Nav64: invalid surface section");
     mesh->query.reset(dtAllocNavMeshQuery());Require(mesh->query&&dtStatusSucceed(mesh->query->init(mesh->data.get(),65535)),"Nav64: query allocation failed");
@@ -865,7 +885,7 @@ Bytes StoreSources(const Geometry& g) {
     Wire w;w.U(0x4352534e);w.U(6);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
     const auto vertexStart=w.bytes.size();
     for(const auto& v:vertices)for(auto c:v)w.F(c);
-    SourceArray(w.bytes,vertexStart,vertices.size(),12,true);
+    SourceArray(w.bytes,vertexStart,vertices.size(),12);
     w.U(unsigned(g.ground.size()));const auto triangleStart=w.bytes.size();
     for(const auto& t:g.ground) {
         for(auto p:{t.a,t.b,t.c})w.U(indices.at(vertex(p)));
@@ -874,7 +894,7 @@ Bytes StoreSources(const Geometry& g) {
         for(auto area:t.classAreas)w.bytes.push_back(area);
         w.U(t.object);w.U(unsigned(t.surface));w.U(unsigned(t.surface>>32));
     }
-    SourceArray(w.bytes,triangleStart,g.ground.size(),47,true);
+    SourceArray(w.bytes,triangleStart,g.ground.size(),47);
     w.U(unsigned(g.ceilings.size()));
     for(const auto& c:g.ceilings) {
         w.U(c.object);w.U(c.x);w.U(c.y);w.U(c.width);w.U(c.height);w.F(c.base);
@@ -934,26 +954,29 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
     Require(w.U()==0x4352534e&&w.U()==6,"Nav64: incompatible source section");
     auto g=std::make_shared<Geometry>();auto point=[&](){return Point{w.F(),w.F(),w.F()};};
     g->minimum=point();g->maximum=point();auto n=w.U();Require(n<12000000&&n<= (w.bytes.size()-w.at)/12,"Nav64: source vertex limit");
-    auto arrayStart=std::chrono::steady_clock::now();SourceArray(w.bytes,w.at,n,12,false);arrayMs+=ms(arrayStart);
+    const auto arrayStart=std::chrono::steady_clock::now();const SourceColumns<12> vertexColumns(w,n);
     std::vector<Point> vertices;vertices.reserve(n);
-    for(unsigned i=0;i<n;++i)vertices.push_back(point());
+    for(unsigned i=0;i<n;++i)vertices.push_back(vertexColumns.P(i,0));
     n=w.U();Require(n<4000000,"Nav64: source triangle limit");g->ground.reserve(n);
-    arrayStart=std::chrono::steady_clock::now();SourceArray(w.bytes,w.at,n,47,false);arrayMs+=ms(arrayStart);
+    const SourceColumns<47> triangleColumns(w,n);
     for(unsigned i=0;i<n;++i) {
-        auto vertex=[&](){auto j=w.U();Require(j<vertices.size(),"Nav64: invalid source index");return vertices[j];};
-        Triangle t;t.a=vertex();t.b=vertex();t.c=vertex();t.waterDepth=point();
-        Require(w.bytes.size()-w.at>=11,"Nav64: truncated source metadata");
-        t.area=w.bytes[w.at++];t.levitateArea=w.bytes[w.at++];t.terrain=w.bytes[w.at++]!=0;
-        for(auto& area:t.classAreas)area=w.bytes[w.at++];t.object=int(w.U());
-        auto low=w.U();t.surface=low|(std::uint64_t(w.U())<<32);g->ground.push_back(t);
+        auto vertex=[&](size_t column){auto j=triangleColumns.U(i,column);Require(j<vertices.size(),"Nav64: invalid source index");return vertices[j];};
+        Triangle t;t.a=vertex(0);t.b=vertex(4);t.c=vertex(8);t.waterDepth=triangleColumns.P(i,12);
+        t.area=triangleColumns.B(i,24);t.levitateArea=triangleColumns.B(i,25);t.terrain=triangleColumns.B(i,26)!=0;
+        for(size_t c=0;c<t.classAreas.size();++c)t.classAreas[c]=triangleColumns.B(i,27+c);
+        t.object=int(triangleColumns.U(i,35));
+        t.surface=triangleColumns.U(i,39)|(std::uint64_t(triangleColumns.U(i,43))<<32);g->ground.push_back(t);
     }
+    arrayMs=ms(arrayStart);
     n=w.U();Require(n<=100000,"Nav64: canopy grid limit");g->ceilings.reserve(n);
     for(unsigned i=0;i<n;++i) {
         CeilingGrid c;c.object=int(w.U());c.x=int(w.U());c.y=int(w.U());c.width=w.U();c.height=w.U();c.base=w.F();
         const auto count=std::uint64_t(c.width)*c.height;
         Require(c.object>0&&c.width&&c.height&&count<=4000000&&count<=(w.bytes.size()-w.at)/2,"Nav64: invalid canopy grid");
-        c.heights.reserve(size_t(count));
-        for(size_t j=0;j<count;++j){const auto h=w.bytes[w.at]|(unsigned(w.bytes[w.at+1])<<8);w.at+=2;c.heights.push_back(static_cast<std::uint16_t>(h));}
+        // Windows x64 uses the same little-endian uint16 samples as NSRC.
+        // Keep both the quantized heights and the empty 0xffff sentinel exact.
+        c.heights.resize(size_t(count));const auto sampleBytes=size_t(count)*sizeof(std::uint16_t);
+        std::memcpy(c.heights.data(),w.bytes.data()+w.at,sampleBytes);w.at+=sampleBytes;
         g->ceilings.push_back(std::move(c));
     }
     n=w.U();Require(n<=65536,"Nav64: door count limit");for(unsigned i=0;i<n;++i){Door d;d.object=int(w.U());d.openState=int(w.U());d.minimum=point();d.maximum=point();g->doors.push_back(d);}
@@ -966,7 +989,7 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
         auto count=w.U();Require(count<=131072,"Nav64: source catalogue limit");
         for(unsigned i=0;i<count;++i) {
             const int x=int(w.U()),z=int(w.U());auto n=w.U();Require(n<4000000&&n<=(w.bytes.size()-w.at)/4,"Nav64: source index limit");
-            auto inserted=index.emplace(std::make_pair(x,z),std::vector<size_t>{});Require(inserted.second,"Nav64: duplicate source tile");
+            auto inserted=index.emplace(std::make_pair(x,z),std::vector<std::uint32_t>{});Require(inserted.second,"Nav64: duplicate source tile");
             auto& list=inserted.first->second;list.reserve(n);
             for(unsigned j=0;j<n;++j){auto triangle=w.U();Require(triangle<limit,"Nav64: invalid source index");list.push_back(triangle);}
         }
@@ -981,6 +1004,7 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
     if(stages)*stages={unpackMs,arrayMs,ms(unpacked)-arrayMs};return g;
 }
 void IndexSources(Geometry& g,float width) {
+    Require(g.ground.size()<4000000&&g.ceilings.size()<=100000,"Nav64: source catalogue index limit");
     g.tileWidth=width;g.tileTriangles.clear();g.surfaceTriangles.clear();g.tileCeilings.clear();g.objectTiles.clear();
     const int nx=int(std::ceil((g.maximum.x-g.minimum.x)/width)),nz=int(std::ceil((g.maximum.z-g.minimum.z)/width));
     for(size_t i=0;i<g.ground.size();++i) {
@@ -989,7 +1013,7 @@ void IndexSources(Geometry& g,float width) {
         auto bin=[&](float border,auto& index,bool objects) {
             const int x0=std::max(0,int(std::floor((std::min({a.x,b.x,c.x})-border-g.minimum.x)/width))),x1=std::min(nx-1,int(std::floor((std::max({a.x,b.x,c.x})+border-g.minimum.x)/width)));
             const int z0=std::max(0,int(std::floor((std::min({a.z,b.z,c.z})-border-g.minimum.z)/width))),z1=std::min(nz-1,int(std::floor((std::max({a.z,b.z,c.z})+border-g.minimum.z)/width)));
-            for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){index[{x,z}].push_back(i);if(objects&&t.object)g.objectTiles[t.object].emplace(x,z);}
+            for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){index[{x,z}].push_back(std::uint32_t(i));if(objects&&t.object)g.objectTiles[t.object].emplace(x,z);}
         };
         bin(1.3f,g.tileTriangles,true);
         if(t.terrain||(t.surface>1&&t.area))bin(.025f,g.surfaceTriangles,false);
@@ -1000,7 +1024,7 @@ void IndexSources(Geometry& g,float width) {
             x1=std::min(nx-1,int(std::floor(((c.x+int(c.width))*.3f+border-g.minimum.x)/width))),
             z0=std::max(0,int(std::floor((-(c.y+int(c.height))*.3f-border-g.minimum.z)/width))),
             z1=std::min(nz-1,int(std::floor((-c.y*.3f+border-g.minimum.z)/width)));
-        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){g.tileCeilings[{x,z}].push_back(i);g.objectTiles[c.object].emplace(x,z);}
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){g.tileCeilings[{x,z}].push_back(std::uint32_t(i));g.objectTiles[c.object].emplace(x,z);}
     }
 }
 void IndexSurfaces(Mesh& mesh) {

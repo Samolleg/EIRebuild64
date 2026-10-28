@@ -145,7 +145,8 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
         // Actual world placements are resolved by the zone/party activation.
 
         const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-        GameJournal::Event("NAV","loaded","mpr=%s mob=%s profiles=8 ms=%.3f bytes=%zu generation=%llu",mapName.c_str(),mobName.c_str(),ms,bytes,static_cast<unsigned long long>(generation));
+        double profileDecodeMs=0;for(const auto& time:meshTimes)profileDecodeMs=(std::max)(profileDecodeMs,time[1]);
+        GameJournal::Event("NAV","loaded","mpr=%s mob=%s profiles=8 ms=%.3f bytes=%zu generation=%llu source_read_ms=%.3f source_unpack_ms=%.3f source_arrays_ms=%.3f source_meta_ms=%.3f profile_decode_max_ms=%.3f",mapName.c_str(),mobName.c_str(),ms,bytes,static_cast<unsigned long long>(generation),sourceReadMs,sourceTimes[0],sourceTimes[1],sourceTimes[2],profileDecodeMs);
         return true;
     }catch(const std::exception& e){error=e.what();return false;}
 }

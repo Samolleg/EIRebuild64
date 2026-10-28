@@ -42,7 +42,8 @@ struct Geometry {
     Point minimum, maximum;
     float tileWidth=0;
     // Offline spatial catalogues shared by all profiles; no runtime binning.
-    std::map<std::pair<int,int>,std::vector<size_t>> tileTriangles,surfaceTriangles,tileCeilings;
+    // NSRC indices are bounded uint32 values, also kept compact in memory.
+    std::map<std::pair<int,int>,std::vector<std::uint32_t>> tileTriangles,surfaceTriangles,tileCeilings;
     std::map<int,std::set<std::pair<int,int>>> objectTiles;
     void Bounds();
 };
