@@ -261,7 +261,15 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             record["goal_support"]=projected;
             if(projected)record["support"]={desired.position.x,desired.position.y,desired.position.z,desired.surface};
             Request request;request.source=from;request.goal=goal;request.height=height;request.maxLength=record.value("max_length",1.e6f);
+            const bool flat=record.value("flat_cost",true);
+            if(!flat) {
+                SRouteCostsInfo costs;world.aiMap.GetRouteCosts(unit?unit->GetAIClass():3,costs);
+                for(int i=1;i<16;++i)request.areaCosts[i]=float(costs.pTerrainCosts[i])/1024.f;
+            }
+            record["area_costs"]=request.areaCosts;
             const auto raw=Navigation::Find(mesh,request);record["find_raw"]=StatusName(raw.status);
+            record["planned_cost"]=raw.plannedCost;record["selected_cost"]=raw.cost;
+            record["straight_cost"]=raw.straightCost;record["straightened"]=raw.straightened;
             record["route_points"]=nlohmann::json::array();for(const auto& p:raw.points)record["route_points"].push_back({p.position.x,p.position.y,p.position.z});
             record["route_length"]=raw.length;
             if(placed){request.source=start.position;request.start=&start;record["find_placed"]=StatusName(Navigation::Find(mesh,request).status);}
@@ -325,7 +333,11 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             bool ok=Place(unit,world.aiMap);world.aiMap.AddObject(unit);
             SAIPath path;unsigned wait=0,ticks=0,waitTicks=0,avoidTicks=0,avoidAttempts=0;float maxDelta=0;double detourMaxMs=0;std::string failure="no_path";
             const CPlot3D goal(b[0],b[1],0);
-            ok=ok&&world.aiMap.NewPath(unit,goal,path);
+            const BOOL savedFastPath=unit->bNeedFastPath;
+            unit->bNeedFastPath=record.value("flat_cost",true)?TRUE:FALSE;
+            Navigation::Route decision;
+            ok=ok&&world.aiMap.NewPath(unit,goal,path,1.e6f,0,Navigation::GoalPolicy::Exact,&decision);
+            unit->bNeedFastPath=savedFastPath;
             if(ok)startWalker(unit,path);
             auto routeLength=[](const SAIPath& path) {
                 double length=0;Point last;bool first=true;
@@ -432,7 +444,11 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             if(beside&&avoidAttempts>1){ok=false;failure="unchanged_obstacle_retried";}
             if(ok&&(walkedLength>straightLength*1.05+.003||unplannedTurns)){ok=false;failure="straightness";}
             if(required&&!ok)++requiredFailures;
-            auto result=record;result["complete"]=ok;result["failure"]=failure;result["ticks"]=ticks;result["wait_ticks"]=waitTicks;result["avoid_ticks"]=avoidTicks;result["avoidance_attempts"]=avoidAttempts;result["detour_max_ms"]=detourMaxMs;result["max_delta"]=maxDelta;
+            auto result=record;
+            result["planned_cost"]=decision.plannedCost;result["selected_cost"]=decision.cost;
+            result["straight_cost"]=decision.straightCost;result["straightened"]=decision.straightened;
+            result["unit_used"]=unit->GetID();result["radius_used"]=Radius(unit);result["height_used"]=Height(unit);
+            result["complete"]=ok;result["failure"]=failure;result["ticks"]=ticks;result["wait_ticks"]=waitTicks;result["avoid_ticks"]=avoidTicks;result["avoidance_attempts"]=avoidAttempts;result["detour_max_ms"]=detourMaxMs;result["max_delta"]=maxDelta;
             result["planned_points"]=nlohmann::json::array();for(auto p:plannedPoints)result["planned_points"].push_back({p.x,p.y,p.z});
             result["straight_length"]=straightLength;result["walked_length"]=walkedLength;result["unplanned_turns"]=unplannedTurns;result["positions"]=positions;
             result["finish"]={unit->navLocation.position.x,unit->navLocation.position.y,unit->navLocation.position.z};movementRows.push_back(result);
