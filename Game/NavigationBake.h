@@ -26,6 +26,7 @@ class NavigationBake {
     std::shared_ptr<const owned::FigureCpuAsset> Figure(CFigureManager& manager,const std::string& mask,const char* part);
     const Navigation::BodySize& Body(CWorldServer& world,const std::string& mask,float strength,float grace,float tall);
     Navigation::Geometry Geometry();
+    float GroundHeight(Navigation::Point point);
 public:
     static unsigned tileCells;
     static std::filesystem::path reportDirectory;

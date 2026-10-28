@@ -63,6 +63,20 @@ Bytes Unpack(const void* input,size_t size,size_t expected) {
     Require(Decompress(codec.handle,input,size,output.data(),output.size(),&actual)!=FALSE&&actual==expected,"Nav64: corrupt compressed tiles");
     return output;
 }
+// Byte planes preserve every float/index bit while making repeated source
+// metadata and grid-coordinate exponents adjacent for the lossless codec.
+void SourceArray(Bytes& bytes,size_t offset,size_t count,size_t width,bool encoding) {
+    Require(offset<=bytes.size()&&count<=(bytes.size()-offset)/width,"Nav64: truncated source array");
+    Bytes result(count*width);const auto* input=bytes.data()+offset;
+    // Transpose cache-sized row blocks. A full-column scatter revisits the
+    // entire 36 MB triangle array once per byte and dominates zone entry.
+    for(size_t first=0;first<count;first+=256) {
+        const auto end=std::min(count,first+256);
+        if(encoding)for(size_t c=0;c<width;++c)for(size_t i=first;i<end;++i)result[c*count+i]=input[i*width+c];
+        else for(size_t c=0;c<width;++c)for(size_t i=first;i<end;++i)result[i*width+c]=input[c*count+i];
+    }
+    std::copy(result.begin(),result.end(),bytes.begin()+offset);
+}
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
         p.cellSize==.1f && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
@@ -113,8 +127,8 @@ void CheckTile(const unsigned char* data,size_t size) {
     const auto* polys=reinterpret_cast<const dtPoly*>(data+offset);
     for(int i=0;i<h.polyCount;++i) {
         Require(polys[i].vertCount>=3 && polys[i].vertCount<=DT_VERTS_PER_POLYGON && polys[i].getType()==DT_POLYTYPE_GROUND&&
-            polys[i].getArea()>0&&polys[i].getArea()<16&&polys[i].flags>0&&polys[i].flags<=15&&
-            (polys[i].flags&(polys[i].flags+1))==0,"Nav64: invalid polygon");
+            polys[i].getArea()>0&&polys[i].getArea()<16&&(polys[i].flags&15)>0&&polys[i].flags<=4095&&
+            ((polys[i].flags&15)&((polys[i].flags&15)+1))==0,"Nav64: invalid polygon");
         for(int j=0;j<polys[i].vertCount;++j) {
             Require(polys[i].verts[j]<h.vertCount,"Nav64: invalid vertex index");
             auto nei=polys[i].neis[j];Require((nei&DT_EXT_LINK)?((nei&0xff)<8):(nei<=h.polyCount),"Nav64: invalid neighbour index");
@@ -205,7 +219,7 @@ struct RasterBatch {
     }
 };
 }
-static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1) {
+static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={}) {
     const auto buildStart=std::chrono::steady_clock::now();
     CheckProfile(p);
     const auto& domain=batch?batch->Domain(p):p;
@@ -218,7 +232,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     params.tileWidth=params.tileHeight=tileSize;params.maxTiles=int(dtNextPow2(nx*nz*4));params.maxPolys=32768;
     // Bin once, instead of scanning every triangle/solid again for each tile.
     // The margin is exactly the Recast border used below, including erosion.
-    struct TileInput {std::vector<int> triangles,solids;};
+    struct TileInput {std::vector<int> triangles,solids,ceilings;};
     struct SolidInput {std::vector<float> hull;float low,high;};
     std::vector<TileInput> inputs(nx*nz);std::vector<SolidInput> solids;
     std::vector<float> allVertices;std::vector<int> allIndices;
@@ -249,6 +263,14 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         float minx=input.hull[0],maxx=minx,minz=input.hull[2],maxz=minz;
         for(size_t i=0;i<input.hull.size();i+=3){minx=std::min(minx,input.hull[i]);maxx=std::max(maxx,input.hull[i]);minz=std::min(minz,input.hull[i+2]);maxz=std::max(maxz,input.hull[i+2]);}
         bin(minx,minz,maxx,maxz,int(solids.size()),true);solids.push_back(std::move(input));
+    }
+    for(size_t i=0;i<g.ceilings.size();++i) {
+        const auto& c=g.ceilings[i];
+        const int x0=std::max(0,int(std::floor((c.x*.3f-g.minimum.x-border)/tileSize))),
+            x1=std::min(nx-1,int(std::floor(((c.x+int(c.width))*.3f-g.minimum.x+border)/tileSize))),
+            z0=std::max(0,int(std::floor((-(c.y+int(c.height))*.3f-g.minimum.z-border)/tileSize))),
+            z1=std::min(nz-1,int(std::floor((-c.y*.3f-g.minimum.z+border)/tileSize)));
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)inputs[z*nx+x].ceilings.push_back(int(i));
     }
     // Workers own all Recast state and output blobs. Only the simulation thread
     // mutates Detour, in fixed z/x order, so cache bytes/references stay stable.
@@ -326,36 +348,42 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             const float high[]={std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)};
             rcMarkBoxArea(&context,low,high,15,*r.compact);
         }
-        if(PoseClearance(p)) {
-            auto& chf=*r.compact;
-            const std::vector<unsigned char> material(chf.areas,chf.areas+chf.spanCount);
-            std::vector<unsigned char> tiers(chf.spanCount,0),clearance(chf.spanCount);
-            // Include overlap across a step, so two individually tall spans
-            // cannot connect through a shorter ceiling at their common edge.
-            for(int iz=0;iz<chf.height;++iz)for(int ix=0;ix<chf.width;++ix) {
-                const auto& cell=chf.cells[ix+iz*chf.width];
-                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
-                    const auto& span=chf.spans[j];int free=span.h;
-                    for(int dir=0;dir<4;++dir)if(rcGetCon(span,dir)!=RC_NOT_CONNECTED) {
-                        const int nx=ix+rcGetDirOffsetX(dir),nz=iz+rcGetDirOffsetY(dir);
-                        const auto& other=chf.spans[chf.cells[nx+nz*chf.width].index+rcGetCon(span,dir)];
-                        free=std::min(free,int(std::min(span.y+span.h,other.y+other.h))-int(std::max(span.y,other.y)));
+        std::array<std::pair<unsigned char,unsigned short>,64> permissions{};
+        unsigned permissionCount=0;
+        std::vector<unsigned short> forbidden(r.compact->spanCount,0);
+        auto& sourceField=*r.compact;
+        if(!Levitates(p))for(int ti:inputs[index].triangles) {
+            const auto& t=g.ground[ti];if(!t.terrain)continue;
+            const unsigned short flags=!t.classAreas[1]&&std::max({t.waterDepth.x,t.waterDepth.y,t.waterDepth.z})>0 ? 1u<<5 : 0;
+            if(!flags)continue;
+            const auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+            const float dx=b.x-a.x,dz=b.z-a.z,ex=c.x-a.x,ez=c.z-a.z,det=dx*ez-dz*ex;
+            if(std::abs(det)<1.e-8f)continue;
+            const int x0=std::max(0,int(std::floor((std::min({a.x,b.x,c.x})-cfg.bmin[0])/cfg.cs))),
+                x1=std::min(sourceField.width-1,int(std::floor((std::max({a.x,b.x,c.x})-cfg.bmin[0])/cfg.cs))),
+                z0=std::max(0,int(std::floor((std::min({a.z,b.z,c.z})-cfg.bmin[2])/cfg.cs))),
+                z1=std::min(sourceField.height-1,int(std::floor((std::max({a.z,b.z,c.z})-cfg.bmin[2])/cfg.cs)));
+            for(int iz=z0;iz<=z1;++iz)for(int ix=x0;ix<=x1;++ix) {
+                std::vector<Point> clipped={a,b,c};
+                auto clip=[&](bool xaxis,float edge,bool greater) {
+                    std::vector<Point> out;if(clipped.empty())return;
+                    auto previous=clipped.back();float pv=(xaxis?previous.x:previous.z)-edge;
+                    for(auto current:clipped) {
+                        const float cv=(xaxis?current.x:current.z)-edge;
+                        if((pv>=0)!=(cv>=0)) {const float f=pv/(pv-cv);out.push_back({previous.x+(current.x-previous.x)*f,previous.y+(current.y-previous.y)*f,previous.z+(current.z-previous.z)*f});}
+                        if(greater?cv>=0:cv<=0)out.push_back(current);
+                        previous=current;pv=cv;
                     }
-                    clearance[j]=static_cast<unsigned char>(std::clamp(free,0,255));
-                }
+                    clipped=std::move(out);
+                };
+                clip(true,cfg.bmin[0]+ix*cfg.cs,true);clip(true,cfg.bmin[0]+(ix+1)*cfg.cs,false);
+                clip(false,cfg.bmin[2]+iz*cfg.cs,true);clip(false,cfg.bmin[2]+(iz+1)*cfg.cs,false);
+                if(clipped.size()<3)continue;float top=-FLT_MAX;for(auto point:clipped)top=std::max(top,point.y);
+                const auto& cell=sourceField.cells[ix+iz*sourceField.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j)
+                    if(std::abs(cfg.bmin[1]+sourceField.spans[j].y*cfg.ch-top)<=cfg.ch*1.01f)forbidden[j]|=flags;
             }
-            // Rasterization and compact data are shared by every pose. Erode
-            // each permission at the full agent radius, then split contours at
-            // the resulting clearance boundary. 4 * 15 material IDs fit Recast's
-            // 63 area IDs; Detour receives the original material and pose flags.
-            for(unsigned tier=0;tier<4;++tier) {
-                const int cells=int(std::ceil(ClearanceHeights(p)[tier]/cfg.ch));
-                for(int j=0;j<chf.spanCount;++j)chf.areas[j]=clearance[j]>=cells?material[j]:RC_NULL_AREA;
-                Require(rcErodeWalkableArea(&context,cfg.walkableRadius,chf),"Nav64: pose radius erosion failed");
-                for(int j=0;j<chf.spanCount;++j)if(chf.areas[j])tiers[j]=static_cast<unsigned char>(tier+1);
-            }
-            for(int j=0;j<chf.spanCount;++j)chf.areas[j]=tiers[j]?static_cast<unsigned char>((tiers[j]-1)*15+material[j]):RC_NULL_AREA;
-        } else Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
+        }
         // Recover raster provenance before contours discard the source identity.
         // Match the clipped triangle's raster top, never a Detour polygon Z.
         auto& field=*r.compact;
@@ -395,6 +423,115 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                 }
             }
             for(int j=0;j<field.spanCount;++j)if(!support[j])field.areas[j]=RC_NULL_AREA;
+        }
+        if(layered) {
+            // A thin raised slab can merge with sloping ground in one raster
+            // column. Its voxel top then extends past the real slab edge.
+            // Remove only those mixed edge columns before radius erosion;
+            // separate terrain/floor layers are retained unchanged.
+            std::map<std::uint64_t,std::vector<int>> planes;
+            for(int ti:inputs[index].triangles)if((allAreas[ti]&&g.ground[ti].surface)||g.ground[ti].terrain)planes[g.ground[ti].surface].push_back(ti);
+            auto heightAt=[&](std::uint64_t surface,float x,float y) {
+                float result=-FLT_MAX;
+                for(int ti:planes.at(surface)) {
+                    const auto& t=g.ground[ti];
+                    const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
+                    if(det<=1.e-8f)continue;
+                    const float u=((x-t.a.x)*by-(y-t.a.y)*bx)/det,v=(ax*(y-t.a.y)-ay*(x-t.a.x))/det;
+                    if(u>=-.00001f&&v>=-.00001f&&u+v<=1.00001f)result=std::max(result,t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z));
+                }
+                return result;
+            };
+            if(planes.count(1))for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
+                const auto& cell=field.cells[ix+iz*field.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(field.areas[j]&&support[j]>1) {
+                    auto* raw=r.height->spans[ix+iz*field.width];
+                    while(raw&&raw->smax!=field.spans[j].y)raw=raw->next;
+                    if(!raw)continue;
+                    const float bottom=cfg.bmin[1]+raw->smin*cfg.ch,top=cfg.bmin[1]+raw->smax*cfg.ch;
+                    bool cliff=false;
+                    for(float dz:{.05f,.5f,.95f})for(float dx:{.05f,.5f,.95f}) {
+                        const float x=cfg.bmin[0]+(ix+dx)*cfg.cs,y=-(cfg.bmin[2]+(iz+dz)*cfg.cs);
+                        if(heightAt(support[j],x,y)>-FLT_MAX)continue;
+                        const float ground=heightAt(1,x,y);
+                        if(ground>=bottom-cfg.ch&&ground<top-p.climb-.001f)cliff=true;
+                    }
+                    if(cliff)field.areas[j]=RC_NULL_AREA;
+                }
+            }
+        }
+        // Canopies only cap existing floor spans. They cannot create extra
+        // floors, ledges or regions at their upper side. Above the tallest
+        // pose plus one climb they do not affect this profile at all.
+        for(int ci:inputs[index].ceilings) {
+            const auto& c=g.ceilings[ci];auto& chf=*r.compact;
+            for(unsigned gy=0;gy<c.height;++gy)for(unsigned gx=0;gx<c.width;++gx) {
+                const auto h=c.heights[size_t(gy)*c.width+gx];if(h==0xffff)continue;
+                const float lowX=(c.x+int(gx))*.3f,highX=(c.x+int(gx)+1)*.3f,
+                    lowZ=-(c.y+int(gy)+1)*.3f,highZ=-(c.y+int(gy))*.3f;
+                const int x0=std::max(0,int(std::floor((lowX-cfg.bmin[0])/cfg.cs))),x1=std::min(chf.width-1,int(std::floor((highX-cfg.bmin[0])/cfg.cs))),
+                    z0=std::max(0,int(std::floor((lowZ-cfg.bmin[2])/cfg.cs))),z1=std::min(chf.height-1,int(std::floor((highZ-cfg.bmin[2])/cfg.cs)));
+                const int ceiling=int(std::floor((c.base+h*.05f-cfg.bmin[1])/cfg.ch));
+                const int maximum=int(std::ceil(ClearanceHeights(p).back()/cfg.ch))+cfg.walkableClimb;
+                for(int iz=z0;iz<=z1;++iz)for(int ix=x0;ix<=x1;++ix) {
+                    const auto& cell=chf.cells[ix+iz*chf.width];
+                    for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                        auto& span=chf.spans[j];const int free=ceiling-int(span.y);
+                        if(free<0||free>=maximum)continue;
+                        span.h=static_cast<unsigned char>(std::min(int(span.h),free));
+                        if(free<cfg.walkableHeight)chf.areas[j]=RC_NULL_AREA;
+                    }
+                }
+            }
+        }
+        if(PoseClearance(p)) {
+            auto& chf=*r.compact;
+            const std::vector<unsigned char> material(chf.areas,chf.areas+chf.spanCount);
+            std::vector<unsigned char> tiers(chf.spanCount,0),clearance(chf.spanCount);
+            // Include overlap across a step, so two individually tall spans
+            // cannot connect through a shorter ceiling at their common edge.
+            for(int iz=0;iz<chf.height;++iz)for(int ix=0;ix<chf.width;++ix) {
+                const auto& cell=chf.cells[ix+iz*chf.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                    const auto& span=chf.spans[j];int free=span.h;
+                    for(int dir=0;dir<4;++dir)if(rcGetCon(span,dir)!=RC_NOT_CONNECTED) {
+                        const int nx=ix+rcGetDirOffsetX(dir),nz=iz+rcGetDirOffsetY(dir);
+                        const auto& other=chf.spans[chf.cells[nx+nz*chf.width].index+rcGetCon(span,dir)];
+                        free=std::min(free,int(std::min(span.y+span.h,other.y+other.h))-int(std::max(span.y,other.y)));
+                    }
+                    clearance[j]=static_cast<unsigned char>(std::clamp(free,0,255));
+                }
+            }
+            // Rasterization and compact data are shared by every pose. Erode
+            // each permission at the full agent radius, then split contours at
+            // the resulting clearance boundary. 4 * 15 material IDs fit Recast's
+            // 63 area IDs; Detour receives the original material and pose flags.
+            for(unsigned tier=0;tier<4;++tier) {
+                const int cells=int(std::ceil(ClearanceHeights(p)[tier]/cfg.ch));
+                for(int j=0;j<chf.spanCount;++j)chf.areas[j]=clearance[j]>=cells?material[j]:RC_NULL_AREA;
+                Require(rcErodeWalkableArea(&context,cfg.walkableRadius,chf),"Nav64: pose radius erosion failed");
+                for(int j=0;j<chf.spanCount;++j)if(chf.areas[j])tiers[j]=static_cast<unsigned char>(tier+1);
+            }
+            for(int j=0;j<chf.spanCount;++j) {
+                if(!tiers[j]){chf.areas[j]=RC_NULL_AREA;continue;}
+                const auto value=std::make_pair(material[j],static_cast<unsigned short>(((1u<<tiers[j])-1)|forbidden[j]));
+                unsigned id=1;for(;id<=permissionCount&&permissions[id]!=value;++id){}
+                Require(id<permissions.size(),"Nav64: material/clearance/class area limit");
+                if(id>permissionCount){permissionCount=id;permissions[id]=value;}
+                chf.areas[j]=static_cast<unsigned char>(id);
+            }
+        } else Require(rcErodeWalkableArea(&context,cfg.walkableRadius,*r.compact),"Nav64: radius erosion failed");
+        for(auto point:columns) {
+            const auto nav=ToNav(point);
+            if(int(std::floor((nav.x-g.minimum.x)/tileSize))!=x||int(std::floor((nav.z-g.minimum.z)/tileSize))!=z)continue;
+            const int ix=int(std::floor((nav.x-cfg.bmin[0])/cfg.cs)),iz=int(std::floor((nav.z-cfg.bmin[2])/cfg.cs));
+            for(auto* span=r.height->spans[ix+iz*cfg.width];span;span=span->next)
+                fprintf(stderr,"BAKE_COLUMN_RAW class=%u radius=%.2f tile=%d,%d xy=%.6f,%.6f cell=%d,%d min=%.6f max=%.6f area=%u\n",p.materialClass,p.radius,x,z,point.x,point.y,ix,iz,cfg.bmin[1]+span->smin*cfg.ch,cfg.bmin[1]+span->smax*cfg.ch,unsigned(span->area));
+            const auto& cell=field.cells[ix+iz*field.width];
+            for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                const auto area=field.areas[j];const unsigned flags=area?permissions[area].second:0;
+                fprintf(stderr,"BAKE_COLUMN_COMPACT class=%u radius=%.2f tile=%d,%d xy=%.6f,%.6f floor=%.6f clearance=%.6f flags=%u surface=%llu\n",p.materialClass,p.radius,x,z,point.x,point.y,cfg.bmin[1]+field.spans[j].y*cfg.ch,field.spans[j].h*cfg.ch,flags,static_cast<unsigned long long>(support[j]));
+            }
         }
         std::vector<std::uint64_t> regionSupport;
         auto splitSupports=[&] {
@@ -462,29 +599,56 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             Require(rcBuildRegionsMonotone(&context,*r.compact,cfg.borderSize,cfg.minRegionArea,0),"Nav64: exact monotone region build failed");
             splitSupports();
             // Recast's final merge is also applied when mergeRegionArea is
-            // zero (interior regions still merge). Keep each connected row run
-            // separate on this exceptional tile. Such monotone strips have no
-            // holes; shared region boundaries still connect in Detour.
+            // zero (interior regions still merge). Partition this exceptional
+            // tile into exact connected rectangles. Equal adjacent row runs
+            // coalesce without changing cells, floor identity or permissions.
             auto& field=*r.compact;
             std::vector<unsigned short> regions(field.spanCount);
             for(int i=0;i<field.spanCount;++i)regions[i]=field.spans[i].reg;
             unsigned short nextRegion=0;regionSupport.assign(1,0);
-            for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
-                const auto& cell=field.cells[ix+iz*field.width];
-                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
-                    auto& span=field.spans[j];const auto original=regions[j];
-                    if(!original||(original&RC_BORDER_REG))continue;
-                    unsigned short left=0;
-                    if(ix>0&&rcGetCon(span,0)!=RC_NOT_CONNECTED) {
-                        const auto k=field.cells[ix-1+iz*field.width].index+rcGetCon(span,0);
-                        if(regions[k]==original&&field.areas[k]==field.areas[j])left=field.spans[k].reg;
-                    }
-                    if(left)span.reg=left;
-                    else {
-                        Require(nextRegion+1<RC_BORDER_REG,"Nav64: monotone strip region limit");
-                        span.reg=++nextRegion;regionSupport.push_back(support[j]);
+            struct Run {int x0,x1;unsigned short original;unsigned char area;std::vector<unsigned> spans;};
+            using RunKey=std::tuple<int,int,unsigned short,unsigned char>;
+            std::map<RunKey,unsigned short> previous;
+            std::vector<unsigned> runIndex(field.spanCount,0);
+            for(int iz=0;iz<field.height;++iz) {
+                std::vector<Run> runs;
+                for(int ix=0;ix<field.width;++ix) {
+                    const auto& cell=field.cells[ix+iz*field.width];
+                    for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                        const auto& span=field.spans[j];const auto original=regions[j];
+                        if(!original||(original&RC_BORDER_REG))continue;
+                        unsigned left=0;
+                        if(ix>0&&rcGetCon(span,0)!=RC_NOT_CONNECTED) {
+                            const auto k=field.cells[ix-1+iz*field.width].index+rcGetCon(span,0);
+                            if(regions[k]==original&&field.areas[k]==field.areas[j])left=runIndex[k];
+                        }
+                        if(!left){runs.push_back({ix,ix+1,original,field.areas[j],{}});left=unsigned(runs.size());}
+                        runIndex[j]=left;auto& run=runs[left-1];run.x1=ix+1;run.spans.push_back(j);
                     }
                 }
+                std::map<RunKey,unsigned short> current;
+                for(const auto& run:runs) {
+                    const RunKey key{run.x0,run.x1,run.original,run.area};
+                    const auto found=previous.find(key);unsigned short region=found==previous.end()?0:found->second;
+                    if(region)for(unsigned j:run.spans) {
+                        const auto& span=field.spans[j];
+                        if(rcGetCon(span,3)==RC_NOT_CONNECTED){region=0;break;}
+                    }
+                    // Equal row intervals may share one rectangle only when
+                    // every cell connects to that same rectangle above it.
+                    if(region)for(size_t k=0;k<run.spans.size();++k) {
+                        const auto& span=field.spans[run.spans[k]];
+                        const auto above=field.cells[run.x0+int(k)+(iz-1)*field.width].index+rcGetCon(span,3);
+                        if(field.spans[above].reg!=region){region=0;break;}
+                    }
+                    if(!region) {
+                        Require(nextRegion+1<RC_BORDER_REG,"Nav64: exact rectangle region limit");
+                        region=++nextRegion;regionSupport.push_back(support[run.spans.front()]);
+                    }
+                    for(unsigned j:run.spans)field.spans[j].reg=region;
+                    current.emplace(key,region);
+                }
+                previous=std::move(current);
             }
             field.maxRegions=nextRegion;
             r.contours=rcAllocContourSet();
@@ -535,9 +699,9 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         auto& poly=*r.polys;if(!poly.npolys)return;
         for(int i=0;i<poly.npolys;++i) {
             const unsigned encoded=poly.areas[i];
-            Require(encoded>0&&encoded<=60,"Nav64: invalid clearance area");
-            poly.flags[i]=static_cast<unsigned short>((1u<<((encoded-1)/15+1))-1);
-            poly.areas[i]=static_cast<unsigned char>((encoded-1)%15+1);
+            Require(encoded>0&&encoded<=permissionCount,"Nav64: invalid clearance/class area");
+            poly.flags[i]=permissions[encoded].second;
+            poly.areas[i]=permissions[encoded].first;
         }
         dtNavMeshCreateParams create{};
         create.verts=poly.verts;create.vertCount=poly.nverts;create.polys=poly.polys;
@@ -608,7 +772,7 @@ std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& g,const std::ve
     const unsigned workers=std::max(1u,std::min(8u,std::max(1u,std::thread::hardware_concurrency()/2))/unsigned(std::max(size_t(1),requests.size())));
     try {
         for(const auto& request:requests)pending.push_back(std::async(std::launch::async,[&,request]{
-            try {return BuildProfile(g,request.profile,"",&batch,workers);}
+            try {return BuildProfile(g,request.profile,"",&batch,workers,-1,-1,request.columns);}
             catch(...) {batch.Cancel();throw;}
         }));
     }catch(...) {batch.Cancel();throw;}
@@ -693,15 +857,24 @@ Bytes StoreSources(const Geometry& g) {
     for(const auto& t:g.ground)for(auto p:{t.a,t.b,t.c}) {
         const auto v=vertex(p);if(indices.emplace(v,unsigned(vertices.size())).second)vertices.push_back(v);
     }
-    Wire w;w.U(0x4352534e);w.U(4);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
+    Wire w;w.U(0x4352534e);w.U(6);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
+    const auto vertexStart=w.bytes.size();
     for(const auto& v:vertices)for(auto c:v)w.F(c);
-    w.U(unsigned(g.ground.size()));
+    SourceArray(w.bytes,vertexStart,vertices.size(),12,true);
+    w.U(unsigned(g.ground.size()));const auto triangleStart=w.bytes.size();
     for(const auto& t:g.ground) {
         for(auto p:{t.a,t.b,t.c})w.U(indices.at(vertex(p)));
         w.P(t.waterDepth);
         w.bytes.push_back(t.area);w.bytes.push_back(t.levitateArea);w.bytes.push_back(t.terrain?1:0);
         for(auto area:t.classAreas)w.bytes.push_back(area);
         w.U(t.object);w.U(unsigned(t.surface));w.U(unsigned(t.surface>>32));
+    }
+    SourceArray(w.bytes,triangleStart,g.ground.size(),47,true);
+    w.U(unsigned(g.ceilings.size()));
+    for(const auto& c:g.ceilings) {
+        w.U(c.object);w.U(c.x);w.U(c.y);w.U(c.width);w.U(c.height);w.F(c.base);
+        Require(c.width&&c.height&&c.heights.size()==size_t(c.width)*c.height,"Nav64: invalid canopy grid");
+        for(auto h:c.heights){w.bytes.push_back(std::uint8_t(h));w.bytes.push_back(std::uint8_t(h>>8));}
     }
     w.U(unsigned(g.doors.size()));for(const auto& d:g.doors){w.U(d.object);w.U(d.openState);w.P(d.minimum);w.P(d.maximum);}
     w.U(unsigned(g.connections.size()));for(const auto& c:g.connections) {
@@ -716,7 +889,7 @@ Bytes StoreSources(const Geometry& g) {
             for(auto triangle:entry.second)w.U(unsigned(triangle));
         }
     };
-    catalogue(g.tileTriangles);catalogue(g.surfaceTriangles);
+    catalogue(g.tileTriangles);catalogue(g.surfaceTriangles);catalogue(g.tileCeilings);
     w.U(unsigned(g.objectTiles.size()));
     for(const auto& entry:g.objectTiles) {
         w.U(entry.first);w.U(unsigned(entry.second.size()));for(auto tile:entry.second){w.U(tile.first);w.U(tile.second);}
@@ -728,15 +901,17 @@ Bytes StoreSources(const Geometry& g) {
         const size_t a=w.bytes.size()*i/chunks,b=w.bytes.size()*(i+1)/chunks;
         return Pack(Bytes(w.bytes.begin()+a,w.bytes.begin()+b));
     });
-    Wire out;out.U(0x4352534e);out.U(5);out.U(unsigned(w.bytes.size()));out.U(chunks);
+    Wire out;out.U(0x4352534e);out.U(7);out.U(unsigned(w.bytes.size()));out.U(chunks);
     for(unsigned i=0;i<chunks;++i) {
         auto packed=pending[i].get();out.U(unsigned(w.bytes.size()*(i+1)/chunks-w.bytes.size()*i/chunks));
         out.U(unsigned(packed.size()));out.B(packed.data(),packed.size());
     }
     return std::move(out.bytes);
 }
-std::shared_ptr<Geometry> LoadSources(Bytes bytes) {
-    Wire in;in.bytes=std::move(bytes);Require(in.U()==0x4352534e&&in.U()==5,"Nav64: incompatible source container");
+std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) {
+    const auto begin=std::chrono::steady_clock::now();double arrayMs=0;
+    auto ms=[](auto from){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
+    Wire in;in.bytes=std::move(bytes);Require(in.U()==0x4352534e&&in.U()==7,"Nav64: incompatible source container");
     const auto size=in.U(),count=in.U();Require(size>=4&&size<=512ull*1024*1024&&count==4,"Nav64: source block limits");
     Wire w;w.bytes.resize(size);std::array<std::future<void>,4> pending;size_t offset=0;
     for(unsigned i=0;i<count;++i) {
@@ -749,13 +924,16 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes) {
         });
     }
     Require(offset==size&&in.at==in.bytes.size(),"Nav64: source block size mismatch");
-    for(auto& job:pending)job.get();
-    Require(w.U()==0x4352534e&&w.U()==4,"Nav64: incompatible source section");
+    for(auto& job:pending)job.get();const auto unpacked=std::chrono::steady_clock::now();
+    const double unpackMs=ms(begin);
+    Require(w.U()==0x4352534e&&w.U()==6,"Nav64: incompatible source section");
     auto g=std::make_shared<Geometry>();auto point=[&](){return Point{w.F(),w.F(),w.F()};};
     g->minimum=point();g->maximum=point();auto n=w.U();Require(n<12000000&&n<= (w.bytes.size()-w.at)/12,"Nav64: source vertex limit");
+    auto arrayStart=std::chrono::steady_clock::now();SourceArray(w.bytes,w.at,n,12,false);arrayMs+=ms(arrayStart);
     std::vector<Point> vertices;vertices.reserve(n);
     for(unsigned i=0;i<n;++i)vertices.push_back(point());
     n=w.U();Require(n<4000000,"Nav64: source triangle limit");g->ground.reserve(n);
+    arrayStart=std::chrono::steady_clock::now();SourceArray(w.bytes,w.at,n,47,false);arrayMs+=ms(arrayStart);
     for(unsigned i=0;i<n;++i) {
         auto vertex=[&](){auto j=w.U();Require(j<vertices.size(),"Nav64: invalid source index");return vertices[j];};
         Triangle t;t.a=vertex();t.b=vertex();t.c=vertex();t.waterDepth=point();
@@ -764,31 +942,41 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes) {
         for(auto& area:t.classAreas)area=w.bytes[w.at++];t.object=int(w.U());
         auto low=w.U();t.surface=low|(std::uint64_t(w.U())<<32);g->ground.push_back(t);
     }
+    n=w.U();Require(n<=100000,"Nav64: canopy grid limit");g->ceilings.reserve(n);
+    for(unsigned i=0;i<n;++i) {
+        CeilingGrid c;c.object=int(w.U());c.x=int(w.U());c.y=int(w.U());c.width=w.U();c.height=w.U();c.base=w.F();
+        const auto count=std::uint64_t(c.width)*c.height;
+        Require(c.object>0&&c.width&&c.height&&count<=4000000&&count<=(w.bytes.size()-w.at)/2,"Nav64: invalid canopy grid");
+        c.heights.reserve(size_t(count));
+        for(size_t j=0;j<count;++j){const auto h=w.bytes[w.at]|(unsigned(w.bytes[w.at+1])<<8);w.at+=2;c.heights.push_back(static_cast<std::uint16_t>(h));}
+        g->ceilings.push_back(std::move(c));
+    }
     n=w.U();Require(n<=65536,"Nav64: door count limit");for(unsigned i=0;i<n;++i){Door d;d.object=int(w.U());d.openState=int(w.U());d.minimum=point();d.maximum=point();g->doors.push_back(d);}
     n=w.U();Require(n<=65536,"Nav64: connection count limit");for(unsigned i=0;i<n;++i) {
         OffMesh c;c.from=point();c.to=point();c.radius=w.F();auto low=w.U();c.fromSurface=low|(std::uint64_t(w.U())<<32);
         low=w.U();c.toSurface=low|(std::uint64_t(w.U())<<32);c.flags=w.U();g->connections.push_back(c);
     }
     g->tileWidth=w.F();Require(g->tileWidth>0&&g->tileWidth<=12.8f,"Nav64: invalid source tile width");
-    auto catalogue=[&](auto& index) {
+    auto catalogue=[&](auto& index,size_t limit) {
         auto count=w.U();Require(count<=131072,"Nav64: source catalogue limit");
         for(unsigned i=0;i<count;++i) {
             const int x=int(w.U()),z=int(w.U());auto n=w.U();Require(n<4000000&&n<=(w.bytes.size()-w.at)/4,"Nav64: source index limit");
             auto inserted=index.emplace(std::make_pair(x,z),std::vector<size_t>{});Require(inserted.second,"Nav64: duplicate source tile");
             auto& list=inserted.first->second;list.reserve(n);
-            for(unsigned j=0;j<n;++j){auto triangle=w.U();Require(triangle<g->ground.size(),"Nav64: invalid source triangle");list.push_back(triangle);}
+            for(unsigned j=0;j<n;++j){auto triangle=w.U();Require(triangle<limit,"Nav64: invalid source index");list.push_back(triangle);}
         }
     };
-    catalogue(g->tileTriangles);catalogue(g->surfaceTriangles);
+    catalogue(g->tileTriangles,g->ground.size());catalogue(g->surfaceTriangles,g->ground.size());catalogue(g->tileCeilings,g->ceilings.size());
     n=w.U();Require(n<=100000,"Nav64: source object limit");
     for(unsigned i=0;i<n;++i) {
         const int id=int(w.U());auto count=w.U();Require(count<=131072,"Nav64: object tile limit");
         auto& tiles=g->objectTiles[id];for(unsigned j=0;j<count;++j){const int x=int(w.U()),z=int(w.U());tiles.emplace(x,z);}
     }
-    Require(w.at==w.bytes.size(),"Nav64: trailing source bytes");return g;
+    Require(w.at==w.bytes.size(),"Nav64: trailing source bytes");
+    if(stages)*stages={unpackMs,arrayMs,ms(unpacked)-arrayMs};return g;
 }
 void IndexSources(Geometry& g,float width) {
-    g.tileWidth=width;g.tileTriangles.clear();g.surfaceTriangles.clear();g.objectTiles.clear();
+    g.tileWidth=width;g.tileTriangles.clear();g.surfaceTriangles.clear();g.tileCeilings.clear();g.objectTiles.clear();
     const int nx=int(std::ceil((g.maximum.x-g.minimum.x)/width)),nz=int(std::ceil((g.maximum.z-g.minimum.z)/width));
     for(size_t i=0;i<g.ground.size();++i) {
         const auto& t=g.ground[i];
@@ -800,6 +988,14 @@ void IndexSources(Geometry& g,float width) {
         };
         bin(1.3f,g.tileTriangles,true);
         if(t.terrain||(t.surface>1&&t.area))bin(.025f,g.surfaceTriangles,false);
+    }
+    for(size_t i=0;i<g.ceilings.size();++i) {
+        const auto& c=g.ceilings[i];constexpr float border=1.3f;
+        const int x0=std::max(0,int(std::floor((c.x*.3f-border-g.minimum.x)/width))),
+            x1=std::min(nx-1,int(std::floor(((c.x+int(c.width))*.3f+border-g.minimum.x)/width))),
+            z0=std::max(0,int(std::floor((-(c.y+int(c.height))*.3f-border-g.minimum.z)/width))),
+            z1=std::min(nz-1,int(std::floor((-c.y*.3f+border-g.minimum.z)/width)));
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){g.tileCeilings[{x,z}].push_back(i);g.objectTiles[c.object].emplace(x,z);}
     }
 }
 void IndexSurfaces(Mesh& mesh) {

@@ -34,9 +34,9 @@ struct Mesh {
     std::uint32_t workers = 0;
     std::uint64_t rasterMs = 0, polygonMs = 0, buildMs = 0;
 };
-struct BuildRequest { Profile profile; };
+struct BuildRequest { Profile profile; std::vector<Point> columns; };
 Bytes StoreSources(const Geometry& geometry);
-std::shared_ptr<Geometry> LoadSources(Bytes bytes);
+std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages=nullptr);
 void IndexSurfaces(Mesh& mesh);
 void IndexSources(Geometry& geometry,float tileWidth);
 std::unique_ptr<Mesh> RebuildTile(const Geometry& geometry,const Profile& profile,int x,int z);

@@ -886,7 +886,8 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
         Navigation::Location location;
         const float z=supported?supportZ:server->navLocation.position.z;
         if(theWorldServer.aiMap.Navigation().Support(server,{pos.x,pos.y,z},location))lpUnit->navLocation=location;
-        else return;
+        else if(supported) return;
+        else {pos=lpUnit->GetCP();}
     } else return;
     pos.z = lpUnit->CalcZ(pos.x, pos.y) + lpUnit->fpBaseZ;
     GetWorldBase()->MoveObject(lpUnit, pos);

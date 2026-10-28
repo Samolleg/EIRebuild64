@@ -194,6 +194,20 @@ const Navigation::BodySize& NavigationBake::Body(CWorldServer& world,const std::
     if(!std::isfinite(measured.radius)||measured.radius<=0)throw std::runtime_error("Nav64: missing torso/shoulder geometry: "+mask);
     return bodyTable.samples.emplace(key,measured).first->second;
 }
+float NavigationBake::GroundHeight(Point p) {
+    // Match CMapObject::NewVerticalPos on the client: the MPR surface at
+    // the object's origin, not the averaged half-metre legacy AI cell.
+    if(!terrain.tileWidth) {terrain.Bounds();IndexSources(terrain,9.6f);}
+    const auto found=terrain.tileTriangles.find({int(std::floor((p.x-terrain.minimum.x)/terrain.tileWidth)),int(std::floor((-p.y-terrain.minimum.z)/terrain.tileWidth))});
+    if(found!=terrain.tileTriangles.end())for(auto index:found->second) {
+        const auto& t=terrain.ground[index];
+        const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
+        if(std::abs(det)<1.e-8f)continue;
+        const float u=((p.x-t.a.x)*by-(p.y-t.a.y)*bx)/det,v=(ax*(p.y-t.a.y)-ay*(p.x-t.a.x))/det;
+        if(u>=-.00001f&&v>=-.00001f&&u+v<=1.00001f)return t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);
+    }
+    throw std::runtime_error("Nav64: object origin outside MPR surface at "+std::to_string(p.x)+","+std::to_string(p.y));
+}
 void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(!NavigationObject(object))return;
     const auto idValue=object->GetID();
@@ -204,7 +218,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
         else {
             object->CreateCurrentPlacement();Door d;d.object=idValue;
             d.minimum={FLT_MAX,FLT_MAX,FLT_MAX};d.maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};
-            auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);bool solid=false;
+            auto base=object->GetCP();base.z+=GroundHeight(GamePoint(base));bool solid=false;
             for(INT_PTR i=0;i<object->fbvs.GetSize();++i) {
                 const auto& bv=object->fbvs[i];if(bv.IsIgnored()||bv.GetPassability()!=AI_PASS_NO)continue;
                 solid=true;for(int j=0;j<8;++j) {
@@ -230,12 +244,20 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     auto* specific=static_cast<CMapObjectServer*>(object->GetMapObjectSpecific());
     const CStringArray& parts=specific->szNames.GetSize()?specific->szNames:object->GetBodyPartNames();
     Navigation::Geometry input;
+    bool hasTrunk=false;
+    for(INT_PTR i=0;i<object->fbvs.GetSize();++i) {
+        const auto& bv=object->fbvs[i];
+        if(!bv.IsIgnored()&&!bv.IsBridge()&&bv.GetPassability()==AI_PASS_NO)hasTrunk=true;
+    }
+    constexpr float canopyCell=.3f;
+    std::map<std::pair<int,int>,float> canopy;
     for(INT_PTR n=0;n<parts.GetSize();++n){int i=object->GetFigureIndexByName(parts[n]);if(i<0)continue;
         const auto& bv=object->fbvs[i];
         if(bv.IsIgnored())continue;
         const auto partName=Navigation::ResourceName(parts[n]);
         const bool walkable=bv.IsBridge()||(authored.walkable.count(id)&&authored.walkable.at(id).count(partName));
-        if(!walkable&&bv.GetPassability()!=AI_PASS_NO)continue;
+        const bool foliage=!walkable&&bv.GetPassability()!=AI_PASS_NO;
+        if(foliage&&(kind!=HPC_TREE||!hasTrunk))continue;
         {
             std::ostringstream label;label<<"object NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
             try {
@@ -245,7 +267,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                     weights[s]=1;
                     if(figure->shape_count!=1)for(int axis=0;axis<3;++axis)weights[s]*=(s&(1u<<axis))?shape[axis]:1-shape[axis];
                 }
-                auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
+                auto base=object->GetCP();base.z+=GroundHeight(GamePoint(base));
                 std::vector<Navigation::Point> vertices(figure->components.size());
                 for(size_t j=0;j<vertices.size();++j) {
                     const auto index=figure->components[j].position;CPlot3D p(0,0,0);
@@ -261,6 +283,33 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                 const size_t first=input.ground.size();input.groundSources.emplace(first,label.str());
                 for(size_t j=0;j<figure->indices.size();j+=3) {
                     Triangle t{vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],walkable?map.NavigationBridgeArea():BYTE(0)};
+                    if(foliage) {
+                        // Only the bottom envelope is an obstacle. Clip each
+                        // leaf triangle to the column before taking its minimum;
+                        // a low vertex must not lower the entire crown footprint.
+                        const int x0=int(std::floor((std::min)({t.a.x,t.b.x,t.c.x})/canopyCell)),x1=int(std::floor((std::max)({t.a.x,t.b.x,t.c.x})/canopyCell)),
+                            y0=int(std::floor((std::min)({t.a.y,t.b.y,t.c.y})/canopyCell)),y1=int(std::floor((std::max)({t.a.y,t.b.y,t.c.y})/canopyCell));
+                        for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x) {
+                            std::vector<Point> clipped={t.a,t.b,t.c};
+                            auto clip=[&](bool xaxis,float edge,bool greater) {
+                                std::vector<Point> out;if(clipped.empty())return;
+                                auto previous=clipped.back();float pv=(xaxis?previous.x:previous.y)-edge;
+                                for(auto current:clipped) {
+                                    const float cv=(xaxis?current.x:current.y)-edge;
+                                    if((pv>=0)!=(cv>=0)){const float f=pv/(pv-cv);out.push_back({previous.x+(current.x-previous.x)*f,previous.y+(current.y-previous.y)*f,previous.z+(current.z-previous.z)*f});}
+                                    if(greater?cv>=0:cv<=0)out.push_back(current);
+                                    previous=current;pv=cv;
+                                }
+                                clipped=std::move(out);
+                            };
+                            clip(true,x*canopyCell,true);clip(true,(x+1)*canopyCell,false);
+                            clip(false,y*canopyCell,true);clip(false,(y+1)*canopyCell,false);
+                            if(clipped.size()<3)continue;
+                            float low=FLT_MAX;for(auto p:clipped)low=(std::min)(low,p.z);
+                            auto cell=canopy.emplace(std::make_pair(x,y),low);cell.first->second=(std::min)(cell.first->second,low);
+                        }
+                        continue;
+                    }
                     t.object=id;t.surface=walkable?(std::uint64_t(unsigned(id))<<32)|unsigned(i+2):0;
                     input.ground.push_back(t);
                 }
@@ -269,7 +318,23 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
             }
         }
     }
-    if(input.solids.empty()&&input.ground.empty())objects.erase(id);else objects[id]=std::move(input);
+    if(!canopy.empty()) {
+        CeilingGrid grid;grid.object=id;grid.x=grid.y=INT_MAX;
+        int x1=INT_MIN,y1=INT_MIN;
+        for(const auto& cell:canopy) {
+            grid.x=(std::min)(grid.x,cell.first.first);grid.y=(std::min)(grid.y,cell.first.second);
+            x1=(std::max)(x1,cell.first.first);y1=(std::max)(y1,cell.first.second);
+        }
+        grid.width=unsigned(x1-grid.x+1);grid.height=unsigned(y1-grid.y+1);grid.base=terrain.minimum.y-2;
+        grid.heights.assign(size_t(grid.width)*grid.height,0xffff);
+        for(const auto& cell:canopy) {
+            const int height=int(std::floor((cell.second-grid.base)/Agents[Small].profile.cellHeight));
+            if(height<0||height>=0xffff)throw std::runtime_error("Nav64: canopy height outside grid range");
+            grid.heights[size_t(cell.first.second-grid.y)*grid.width+cell.first.first-grid.x]=static_cast<std::uint16_t>(height);
+        }
+        input.ceilings.push_back(std::move(grid));
+    }
+    if(input.solids.empty()&&input.ground.empty()&&input.ceilings.empty())objects.erase(id);else objects[id]=std::move(input);
 }
 
 Navigation::Geometry NavigationBake::Geometry() {
@@ -280,10 +345,11 @@ Navigation::Geometry NavigationBake::Geometry() {
         for(const auto& source:object.groundSources)input.groundSources.emplace(first+source.first,source.second);
         input.ground.insert(input.ground.end(),object.ground.begin(),object.ground.end());
         input.solids.insert(input.solids.end(),object.solids.begin(),object.solids.end());
+        input.ceilings.insert(input.ceilings.end(),object.ceilings.begin(),object.ceilings.end());
     }
-    // Close only sub-cell gaps between facing boundary edges of the SAME
-    // walkable BASE part. Each half uses its own original plane, so a small
-    // step remains a step; steep side faces are never promoted to a floor.
+    // Close sub-cell gaps between facing walkable BASE edges, including
+    // neighbouring objects. Each half retains its original plane and source;
+    // a small step stays a step, and steep side faces never become floors.
     struct Edge { Point a,b; size_t triangle=0; unsigned count=0; };
     using Vertex=std::array<float,3>;
     using EdgeKey=std::pair<Vertex,Vertex>;
@@ -309,10 +375,20 @@ Navigation::Geometry NavigationBake::Geometry() {
         const float u=((p.x-t.a.x)*by-(p.y-t.a.y)*bx)/det,v=(ax*(p.y-t.a.y)-ay*(p.x-t.a.x))/det;
         p.z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);return p;
     };
-    for(const auto& group:boundaries) {
-        std::vector<Edge> edges;for(const auto& entry:group.second)if(entry.second.count==1)edges.push_back(entry.second);
-        for(size_t i=0;i<edges.size();++i)for(size_t j=i+1;j<edges.size();++j) {
-            const auto a=edges[i],b=edges[j];
+    constexpr float edgeBin=4.f;
+    std::vector<Edge> edges;std::map<std::pair<int,int>,std::vector<size_t>> edgeBins;
+    auto lowBin=[&](const Edge& e){return std::make_pair(int(std::floor(((std::min)(e.a.x,e.b.x)-gapLimit)/edgeBin)),int(std::floor(((std::min)(e.a.y,e.b.y)-gapLimit)/edgeBin)));};
+    for(const auto& group:boundaries)for(const auto& entry:group.second)if(entry.second.count==1) {
+        const auto& e=entry.second;const auto low=lowBin(e);const size_t index=edges.size();edges.push_back(e);
+        const int x1=int(std::floor(((std::max)(e.a.x,e.b.x)+gapLimit)/edgeBin)),y1=int(std::floor(((std::max)(e.a.y,e.b.y)+gapLimit)/edgeBin));
+        for(int y=low.second;y<=y1;++y)for(int x=low.first;x<=x1;++x)edgeBins[{x,y}].push_back(index);
+    }
+    for(const auto& bin:edgeBins) {
+        const auto& candidates=bin.second;
+        for(size_t i=0;i<candidates.size();++i)for(size_t j=i+1;j<candidates.size();++j) {
+            const auto a=edges[candidates[i]],b=edges[candidates[j]];
+            const auto alow=lowBin(a),blow=lowBin(b);
+            if(bin.first!=std::make_pair((std::max)(alow.first,blow.first),(std::max)(alow.second,blow.second)))continue;
             const float length=std::hypot(a.b.x-a.a.x,a.b.y-a.a.y),other=std::hypot(b.b.x-b.a.x,b.b.y-b.a.y);
             if(length<.001f||other<.001f)continue;
             const float dx=(a.b.x-a.a.x)/length,dy=(a.b.y-a.a.y)/length,
@@ -337,7 +413,7 @@ Navigation::Geometry NavigationBake::Geometry() {
             add(ta,ap,mp,mq);add(ta,ap,mq,aq);add(tb,mp,bp,bq);add(tb,mp,bq,mq);
         }
     }
-    if(!seams.empty())input.groundSources.emplace(input.ground.size(),"derived same-BASE sub-cell support seams");
+    if(!seams.empty())input.groundSources.emplace(input.ground.size(),"derived facing-BASE sub-cell support seams");
     input.ground.insert(input.ground.end(),seams.begin(),seams.end());
     input.Bounds();return input;
 }
@@ -398,7 +474,12 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     auto input=Geometry();IndexSources(input,tileCells*.1f);auto sourceBytes=StoreSources(input);
     auto sources=LoadSources(sourceBytes);const auto& geometry=*sources;
     std::vector<Navigation::BuildRequest> requests;
-    for(int type=0;type<AgentCount;++type){auto p=Agents[type].profile;p.tileCells=tileCells;requests.push_back({p});}
+    for(int type=0;type<AgentCount;++type){
+        auto p=Agents[type].profile;p.tileCells=tileCells;BuildRequest request{p,{}};
+        if(mapName=="zone1.mpr"&&mobName=="zone1.mob"&&(type==Small||type==Human))
+            request.columns={{198.75f,112.36f,0},{198.825f,112.36f,0},{198.9f,112.36f,0},{202.75f,112.5f,0},{202.825f,112.5f,0},{202.9f,112.5f,0}};
+        requests.push_back(std::move(request));
+    }
     std::map<int,std::vector<Solid>> initialObjects;
     auto initial=geometry;
     for(const auto& entry:sourceWorld->mapObjects) {
@@ -424,6 +505,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         ready->sources=sources;IndexSurfaces(*ready);built[type]=std::move(ready);
         totalBytes+=outputs[type].size();
     }
+    printf("CANDIDATE_BYTES mpr=%s mob=%s meshes=%llu sources=%zu\n",mapName.c_str(),mobName.c_str(),static_cast<unsigned long long>(totalBytes),sourceBytes.size());fflush(stdout);
     std::filesystem::create_directories(directory);
     // Release-data quality is part of the baker, on the actual map meshes.
     // No standalone test, simulation, game tick, script or renderer runs here.
@@ -491,7 +573,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             {"start_exit",{55.55f,138.78f,19.24f},{78.f,145.f,14.f},Small,Human},
             {"main_gate",{188.f,108.f,6.2f},{188.f,116.f,6.2f},Small,Giant},
             {"elder_entrance",{197.98f,143.7f,6.3f},{197.98f,145.5f,6.3f},Small,Human},
-            {"samvlrmp01",{192.5f,113.9f,6.f},{197.3f,113.8f,7.85f},Small,Human}
+            {"samvlrmp01",{197.592580f,118.819145f,6.199420f},{197.467460f,114.019735f,7.875580f},Small,Human}
         };
         for(const auto& passage:passages)for(int type=passage.first;type<=passage.last;++type) {
             const auto& candidate=*built[type];Location a,b;const float height=type==Giant?6.f:type==Large?3.f:1.6f;
@@ -531,7 +613,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             for(const auto& t:entry.second.ground) {
                 const float x0=(std::min)({t.a.x,t.b.x,t.c.x}),x1=(std::max)({t.a.x,t.b.x,t.c.x}),
                     y0=(std::min)({t.a.y,t.b.y,t.c.y}),y1=(std::max)({t.a.y,t.b.y,t.c.y});
-                if(x1<65.5f||x0>68.f||y1<139.5f||y0>142.f)continue;
+                if((x1<65.5f||x0>68.f||y1<139.5f||y0>142.f)&&(x1<190.f||x0>208.f||y1<111.f||y0>115.f))continue;
                 const auto label=entry.second.groundSources.upper_bound(size_t(&t-entry.second.ground.data()));
                 unsigned part=0;
                 if(t.surface>1)part=unsigned(t.surface)-2;
@@ -550,9 +632,14 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         }
         std::ofstream vegetation(reportDirectory/(stem+".vegetation.csv"));
         vegetation<<"id,model,triangles,walkable,surfaces\n";
+        std::ofstream foliage(reportDirectory/(stem+".foliage-parts.csv"));foliage<<"id,model,part,ignored,passability,min_z,max_z\n";
+        for(const auto& entry:sourceWorld->mapObjects) {
+            auto* object=entry.second;if(object->WhoAmI()!=HPC_TREE)continue;
+            for(INT_PTR i=0;i<object->fbvs.GetSize();++i){const auto& bv=object->fbvs[i];foliage<<entry.first<<','<<object->GetMaskName()<<','<<object->GetBodyPartNames()[i].GetString()<<','<<bv.IsIgnored()<<','<<bv.GetPassability()<<','<<bv.ptMin.z+bv.ptCenter.z+bv.ptBone.z<<','<<bv.ptMax.z+bv.ptCenter.z+bv.ptBone.z<<'\n';}
+        }
         for(const auto& entry:objects) {
             auto* object=sourceWorld->GetMapObject(entry.first);if(!object||object->WhoAmI()!=HPC_TREE)continue;
-            const auto p=object->GetCP();if(std::hypot(p.x-81.2f,p.y-136.1f)>10)continue;
+            const auto p=object->GetCP();(void)p;
             unsigned walkable=0;std::set<unsigned long long> surfaces;
             for(const auto& t:entry.second.ground)if(t.area){++walkable;surfaces.insert(t.surface);}
             vegetation<<entry.first<<','<<object->GetMaskName()<<','<<entry.second.ground.size()<<','<<walkable<<',';
@@ -566,6 +653,10 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         std::ofstream(reportDirectory/(stem+".occupancy.json"))<<occupancy.dump(2);
         struct Walk {const char* name;Point a,b;int first,last;};
         const Walk walks[]={
+            {"r15_video_a",{67.7441f,142.534f,14.5f},{66.4061f,142.845f,14.5f},Small,Human},
+            {"r15_video_b",{65.7843f,143.878f,14.5f},{65.2427f,143.248f,14.5f},Small,Human},
+            {"wallwalk_east",{193.487f,112.524f,7.76405f},{205.953f,112.161f,7.7f},Small,Human},
+            {"wallwalk_west",{205.953f,112.161f,7.7f},{193.487f,112.524f,7.76405f},Small,Human},
             {"forest_video_1",{81.0518f,134.829f,0},{80.1159f,136.388f,0},Small,Human},
             {"forest_video_2",{80.0643f,134.072f,0},{82.925f,137.092f,0},Small,Human},
             {"forest_video_3",{79.7675f,135.033f,0},{83.0217f,137.281f,0},Small,Human},
@@ -577,7 +668,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             {"start_exit",{55.55f,138.78f,19.24f},{78.f,145.f,14.f},Small,Human},
             {"settlement",{188.f,116.f,0},{192.f,135.f,0},Small,Human},
             {"main_gate",{188.f,108.f,6.2f},{188.f,116.f,6.2f},Small,Giant},
-            {"samvlrmp01",{192.5f,113.9f,6.f},{197.3f,113.8f,7.85f},Small,Human},
+            {"samvlrmp01",{197.592580f,118.819145f,6.199420f},{197.467460f,114.019735f,7.875580f},Small,Human},
             {"ruin_wall_video2_a",{66.8446f,140.352f,0},{66.7652f,140.422f,0},Small,Human},
             {"ruin_wall_video2_b",{66.8539f,140.519f,0},{66.9009f,140.942f,0},Small,Human},
             {"ruin_wall_video2_c",{66.5964f,140.981f,0},{67.1842f,140.672f,0},Small,Human},
@@ -634,10 +725,10 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
                 {{70.253365f,142.300003f,14.331959f},Small},
                 {{74.453560f,143.699066f,14.370000f},Human},
                 {{70.249107f,142.399994f,14.343869f},Human},
-                {{195.559174f,113.828857f,7.223805f},Small},
-                {{195.559174f,113.828857f,7.223805f},Human},
-                {{194.589737f,113.851402f,6.837992f},Small},
-                {{194.588196f,113.851440f,6.836030f},Human}
+                {{197.505427f,115.760385f,7.256626f},Small},
+                {{197.505427f,115.760385f,7.256626f},Human},
+                {{197.533046f,116.729691f,6.870812f},Small},
+                {{197.533092f,116.731232f,6.868850f},Human}
             };
             for(const auto& site:sites) {
                 const auto& mesh=*built[site.type];Location at,previous;previous.position=site.point;

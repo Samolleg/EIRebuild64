@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <iomanip>
 #include <future>
 #include <cstdio>
 #include "nlohmann/json.hpp"
@@ -73,29 +74,39 @@ bool NavigationWorld::Load() {return Load({});}
 bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
     if(loaded)return true;
     const auto start=std::chrono::steady_clock::now();
+    auto milliseconds=[](auto from){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
+    std::array<std::array<double,2>,AgentCount> meshTimes{};
+    std::array<double,3> sourceTimes{};
+    double bodyMs=0,catalogueMs=0,sourceReadMs=0,sourceDecodeMs=0;
     try {
         const auto* mod=ModRuntime::Resources();if(!mod)throw std::runtime_error("Nav64: no loaded mod");
         const auto directory=inputDirectory.empty()?std::filesystem::path(mod->Directory())/"Maps"/"Nav64":inputDirectory;
         auto bodiesPending=std::async(std::launch::async,[&] {
+            const auto begin=std::chrono::steady_clock::now();
             auto bytes=Read(directory/Navigation::BodyFilename);const auto size=bytes.size();
-            return std::make_pair(Navigation::LoadBodies(bytes),size);
+            auto result=std::make_pair(Navigation::LoadBodies(bytes),size);bodyMs=milliseconds(begin);return result;
         });
         auto cataloguePending=std::async(std::launch::async,[&] {
+            const auto begin=std::chrono::steady_clock::now();
             const auto bytes=Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navworld"));
-            return nlohmann::json::parse(bytes.begin(),bytes.end());
+            auto result=nlohmann::json::parse(bytes.begin(),bytes.end());catalogueMs=milliseconds(begin);return result;
         });
         // Independent ready meshes and lossless source planes are decoded
         // together; neither depends on the other until IndexSurfaces below.
         auto sourcePending=std::async(std::launch::async,[&] {
-            return LoadSources(Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navgeom")));
+            const auto begin=std::chrono::steady_clock::now();
+            auto bytes=Read(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navgeom"));sourceReadMs=milliseconds(begin);
+            const auto decode=std::chrono::steady_clock::now();auto result=LoadSources(std::move(bytes),&sourceTimes);sourceDecodeMs=milliseconds(decode);return result;
         });
         struct Loaded {std::unique_ptr<Navigation::Mesh> mesh;size_t bytes;};
         std::array<std::future<Loaded>,AgentCount> pending;
         for(int type=0;type<AgentCount;++type)pending[type]=std::async(std::launch::async,[&,type]{
             const auto path=directory/Navigation::MeshFilename(mapName,mobName,type);
             try {
-                auto bytes=Read(path);const auto size=bytes.size();
-                auto mesh=Navigation::Load(std::move(bytes),Agents[type].profile,mapName,mobName,Agents[type].name);
+                const auto begin=std::chrono::steady_clock::now();
+                auto bytes=Read(path);const auto size=bytes.size();meshTimes[type][0]=milliseconds(begin);
+                const auto decode=std::chrono::steady_clock::now();
+                auto mesh=Navigation::Load(std::move(bytes),Agents[type].profile,mapName,mobName,Agents[type].name);meshTimes[type][1]=milliseconds(decode);
                 mesh->generation=generation;
                 return Loaded{std::move(mesh),size};
             }catch(const std::exception& e) {
@@ -120,8 +131,14 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
         for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);}
         sources=sourcePending.get();
         for(auto& mesh:meshes){mesh->sources=sources;IndexSurfaces(*mesh);}
-        loaded=true;SyncObjects(true);
-        const auto initialTiles=sourceDirty.size();UpdateSources(true);
+        const auto syncStart=std::chrono::steady_clock::now();loaded=true;SyncObjects(true);
+        const double syncMs=milliseconds(syncStart);
+        const auto initialTiles=sourceDirty.size();const auto updateStart=std::chrono::steady_clock::now();UpdateSources(true);
+        if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake) {
+            printf("LOAD_STAGES bodies_ms=%.3f catalogue_ms=%.3f source_read_ms=%.3f source_decode_ms=%.3f sync_ms=%.3f update_ms=%.3f\n",bodyMs,catalogueMs,sourceReadMs,sourceDecodeMs,syncMs,milliseconds(updateStart));
+            printf("LOAD_SOURCE_PHASE unpack_ms=%.3f arrays_ms=%.3f parse_ms=%.3f\n",sourceTimes[0],sourceTimes[1],sourceTimes[2]);
+            for(int type=0;type<AgentCount;++type)printf("LOAD_PROFILE type=%s read_ms=%.3f decode_ms=%.3f\n",Agents[type].name,meshTimes[type][0],meshTimes[type][1]);
+        }
         if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake) {
             printf("LOAD_INITIAL_UPDATES profile_tiles=%zu\n",initialTiles);fflush(stdout);
         }
@@ -209,6 +226,17 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
         }
         world.aiMap.MoveObject(probe,originalCP);probe->navLocation=originalLocation;
     }
+    if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
+        std::ofstream sites(NavigationBake::reportDirectory/"r15-sites.csv");
+        sites<<"x,y,profile,project,surface,z\n";
+        std::ofstream water(NavigationBake::reportDirectory/"r15-water-poses.csv");water<<"x,y,height,standing,laying\n";
+        for(const auto p:{Point{102.974f,84.9555f,6.f},Point{103.887f,52.188f,6.f},Point{58.158f,63.208f,4.f}}) {
+            Location standing,laying;const bool s=Project(*meshes[Small],p,.001f,4.f,standing,1.6f,1u<<7),l=Project(*meshes[Small],p,.001f,4.f,laying,.4f,1u<<5);
+            water<<p.x<<','<<p.y<<','<<p.z<<','<<s<<','<<l<<'\n';
+        }
+        for(const auto p:{Point{193.487f,112.524f,7.76405f},Point{194.246f,112.665f,7.76405f},Point{197.751f,112.244f,7.89577f},Point{205.953f,112.161f,7.7f}})
+            for(int type=Small;type<=Human;++type){Location at;const bool ok=Project(*meshes[type],p,.001f,4.f,at,1.6f);sites<<p.x<<','<<p.y<<','<<Agents[type].name<<','<<ok<<','<<at.surface<<','<<std::setprecision(9)<<at.position.z<<'\n';}
+    }
     if(!NavigationBake::replayInput.empty()) {
         const auto input=Read(NavigationBake::replayInput);
         auto records=nlohmann::json::parse(input.begin(),input.end());
@@ -233,7 +261,9 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             record["goal_support"]=projected;
             if(projected)record["support"]={desired.position.x,desired.position.y,desired.position.z,desired.surface};
             Request request;request.source=from;request.goal=goal;request.height=height;request.maxLength=record.value("max_length",1.e6f);
-            record["find_raw"]=StatusName(Navigation::Find(mesh,request).status);
+            const auto raw=Navigation::Find(mesh,request);record["find_raw"]=StatusName(raw.status);
+            record["route_points"]=nlohmann::json::array();for(const auto& p:raw.points)record["route_points"].push_back({p.position.x,p.position.y,p.position.z});
+            record["route_length"]=raw.length;
             if(placed){request.source=start.position;request.start=&start;record["find_placed"]=StatusName(Navigation::Find(mesh,request).status);}
             auto polygons=nlohmann::json::array();
             for(int tileIndex=0;tileIndex<mesh.data->getMaxTiles();++tileIndex) {
@@ -284,6 +314,9 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             if(record.at("scene").at(0)!=mapName||record.at("scene").at(1)!=mobName)continue;
             const bool required=record.value("required",false);
             if(record.at("kind")!="walk"&&!required)continue;
+            // A previous route may have exhausted its budget. Set the clock
+            // before constructing the next route/walker, not on its first step.
+            world.SetSegmentTimeCounter(oldTime);
             if(!human)throw std::runtime_error("Nav64: requested movement release has no standing small body");
             const auto a=record.at("source").get<std::array<float,3>>(),b=record.at("goal").get<std::array<float,3>>();
             const Point from{a[0],a[1],a[2]};auto* unit=human;
@@ -294,6 +327,26 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             const CPlot3D goal(b[0],b[1],0);
             ok=ok&&world.aiMap.NewPath(unit,goal,path);
             if(ok)startWalker(unit,path);
+            auto routeLength=[](const SAIPath& path) {
+                double length=0;Point last;bool first=true;
+                for(const auto* nodes:{&path.curSegment.route,&path.toGo})for(POSITION i=nodes->route.GetHeadPosition();i;) {
+                    const auto& n=nodes->route.GetNext(i);Point p{AITile2Meter(n.point.x),AITile2Meter(n.point.y),n.supportZ};
+                    if(!first)length+=std::hypot(p.x-last.x,p.y-last.y);first=false;last=p;
+                }
+                return length;
+            };
+            double straightLength=ok?routeLength(path):0,walkedLength=0;
+            auto routePoints=[](const SAIPath& path) {
+                std::vector<Point> points;
+                for(const auto* nodes:{&path.curSegment.route,&path.toGo})for(POSITION i=nodes->route.GetHeadPosition();i;) {
+                    const auto& n=nodes->route.GetNext(i);Point p{AITile2Meter(n.point.x),AITile2Meter(n.point.y),n.supportZ};
+                    if(points.empty()||std::hypot(p.x-points.back().x,p.y-points.back().y)>.0001f)points.push_back(p);
+                }
+                return points;
+            };
+            auto plannedPoints=routePoints(path);
+            Point previousDirection;float previousStep=0;unsigned unplannedTurns=0;
+            auto positions=nlohmann::json::array();
             const bool beside=record.value("neighbour",false);
             if(ok&&beside&&neighbour) {
                 auto n=neighbour->GetCP();const auto here=unit->GetCP();
@@ -329,7 +382,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
                     break;
                 }
                 avoidAttempts+=movement.avoidanceAttempts;detourMaxMs=(std::max)(detourMaxMs,movement.detourMs);
-                if(movement.replanned){++avoidTicks;continue;}
+                if(movement.replanned){++avoidTicks;straightLength=walkedLength+routeLength(path);plannedPoints=routePoints(path);previousStep=0;continue;}
                 if(movement.waiting) {
                     ++waitTicks;path.curSegment.Freeze(1);
                     // A standing neighbour holds the corridor through the bounded wait,
@@ -349,6 +402,21 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
                 const float limit=mesh->profile.climb+std::tan(mesh->profile.slope*3.14159265f/180.f)*std::hypot(next.position.x-previous.position.x,next.position.y-previous.position.y)+.001f;
                 ok=delta<=limit&&Support(unit,next.position,displayed)&&Distance(displayed.position,next.position)<.003f&&displayed.surface==next.surface;
                 if(!ok){failure="client_height_or_continuity";break;}
+                const float dx=next.position.x-previous.position.x,dy=next.position.y-previous.position.y,step=std::hypot(dx,dy);
+                if(step>.001f) {
+                    const Point direction{dx/step,dy/step,0};
+                    if(previousStep>.001f&&previousDirection.x*direction.x+previousDirection.y*direction.y<.8660254f) {
+                        bool corner=false;const auto& nodes=plannedPoints;
+                        for(size_t i=1;i+1<nodes.size();++i) {
+                            const auto a=nodes[i-1],b=nodes[i],c=nodes[i+1];
+                            const float ax=b.x-a.x,ay=b.y-a.y,bx=c.x-b.x,by=c.y-b.y;
+                            if(ax*bx+ay*by<.999f*std::hypot(ax,ay)*std::hypot(bx,by)&&std::hypot(b.x-previous.position.x,b.y-previous.position.y)<=step+previousStep+.003f)corner=true;
+                        }
+                        if(!corner)++unplannedTurns;
+                    }
+                    previousDirection=direction;previousStep=step;walkedLength+=step;
+                }
+                positions.push_back({next.position.x,next.position.y,next.position.z});
                 auto position=unit->GetCP();position.x=next.position.x;position.y=next.position.y;
                 ok=world.aiMap.MoveObject(unit,position);unit->navLocation=next;
                 unit->SetOrientationXY(CPlot3D(movement.direction.x,movement.direction.y,0));
@@ -362,8 +430,11 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             if(beside&&(!waitTicks||!avoidAttempts)){ok=false;failure="avoidance_not_exercised";}
             if(record.value("require_detour",false)&&!avoidTicks){ok=false;failure="standing_detour_not_exercised";}
             if(beside&&avoidAttempts>1){ok=false;failure="unchanged_obstacle_retried";}
+            if(ok&&(walkedLength>straightLength*1.05+.003||unplannedTurns)){ok=false;failure="straightness";}
             if(required&&!ok)++requiredFailures;
             auto result=record;result["complete"]=ok;result["failure"]=failure;result["ticks"]=ticks;result["wait_ticks"]=waitTicks;result["avoid_ticks"]=avoidTicks;result["avoidance_attempts"]=avoidAttempts;result["detour_max_ms"]=detourMaxMs;result["max_delta"]=maxDelta;
+            result["planned_points"]=nlohmann::json::array();for(auto p:plannedPoints)result["planned_points"].push_back({p.x,p.y,p.z});
+            result["straight_length"]=straightLength;result["walked_length"]=walkedLength;result["unplanned_turns"]=unplannedTurns;result["positions"]=positions;
             result["finish"]={unit->navLocation.position.x,unit->navLocation.position.y,unit->navLocation.position.z};movementRows.push_back(result);
             world.aiMap.RemoveObject(unit);if(neighbour)world.aiMap.RemoveObject(neighbour);
         }
@@ -414,6 +485,7 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
         request.source.z=map.GetTileSurface(CPlot3D(from.x,from.y,0));
         request.goal.z=map.GetTileSurface(CPlot3D(goal.x,goal.y,0));
     }
+    request.excludedFlags=static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4));
     request.obstacles=queryObstacles;
     if(costs&&!Navigation::Levitates(mesh->profile))std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
@@ -428,7 +500,7 @@ bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) 
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPlace);
     auto* mesh=ForUnit(unit,aiClass);if(!mesh)return false;
     if(Navigation::Levitates(mesh->profile)&&unit)point.z=static_cast<CWorldServer*>(unit->GetWorld())->aiMap.GetTileSurface(CPlot3D(point.x,point.y,0));
-    Navigation::Location location;return Navigation::Project(*mesh,point,.05f,4.f,location,Height(unit,aiClass));
+    Navigation::Location location;return Navigation::Project(*mesh,point,.05f,4.f,location,Height(unit,aiClass),static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4)));
 }
 bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationStep);
@@ -442,7 +514,7 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
         }
     }
     const auto* address=unit?&unit->navLocation:nullptr;
-    const bool accepted=mesh&&(route?Navigation::Follow(*mesh,from,desired,corners,result,Height(unit),&reason,address):Navigation::Constrain(*mesh,from,desired,result,Height(unit),&reason,address));
+    const bool accepted=mesh&&(route?Navigation::Follow(*mesh,from,desired,corners,result,Height(unit),&reason,address,static_cast<unsigned short>(1u<<(unit->GetAIClass()+4))):Navigation::Constrain(*mesh,from,desired,result,Height(unit),&reason,address,static_cast<unsigned short>(1u<<(unit->GetAIClass()+4))));
     if(!accepted) {
         const auto now=GetTickCount64();
         if(stepFailures++<16||now>=nextStepLog) {
@@ -486,7 +558,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
         if(queue.attempted)for(const auto& saved:queue.blockers) {
             auto* other=world.GetUnit(saved.id);
             if(!other||other->IsMoving()||Distance(Position(other,map),saved.position)>.02f||
-                std::abs(Radius(other)+Radius(unit)+.02f-saved.radius)>.001f||
+                std::abs(Radius(other)+Radius(unit)-saved.radius)>.001f||
                 std::abs(Height(other)-saved.height)>.001f) {queue.attempted=false;break;}
         }
         // 27 game ticks at 55 ms: bounded Q1/Q2 wait, then one detour query.
@@ -497,8 +569,10 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
                 if(other==unit||other->IsMoving()||other->IsDead())continue;
                 const auto at=Position(other,map);
                 if(std::hypot(at.x-from.x,at.y-from.y)>24.f)continue;
-                queue.blockers.push_back({at,Radius(other)+Radius(unit)+.02f,Height(other),other->GetID()});
+                queue.blockers.push_back({at,Radius(other)+Radius(unit),Height(other),other->GetID()});
             }
+            if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake)for(const auto& obstacle:queue.blockers)
+                printf("DETOUR_INPUT unit=%d from=(%.6f,%.6f,%.6f) obstacle=%d at=(%.6f,%.6f,%.6f) radius=%.6f start_distance=%.6f\n",unit->GetID(),from.x,from.y,from.z,obstacle.id,obstacle.position.x,obstacle.position.y,obstacle.position.z,obstacle.radius,std::hypot(from.x-obstacle.position.x,from.y-obstacle.position.y));
             SAIPath alternate;
             struct QueryScope {
                 NavigationWorld& owner;
@@ -586,7 +660,7 @@ void NavigationWorld::Advance() {
 bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
     if(!loaded)return false;auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto from=Position(unit,map);Navigation::Location location;
-    if(!Navigation::ResolveLocation(*mesh,from,&unit->navLocation,location,Height(unit))) {
+    if(!Navigation::ResolveLocation(*mesh,from,&unit->navLocation,location,Height(unit),static_cast<unsigned short>(1u<<(unit->GetAIClass()+4)))) {
         if(failures++<16)GameJournal::Event("NAV","placement_failed","unit=%d profile=%s radius=1",unit->GetID(),mesh->profileId.c_str());
         return false;
     }
@@ -601,7 +675,7 @@ bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
 bool NavigationWorld::RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal) {
     auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
-    return Navigation::RandomReachable(*mesh,Position(unit,map),center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal);
+    return Navigation::RandomReachable(*mesh,Position(unit,map),center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal,static_cast<unsigned short>(1u<<(unit->GetAIClass()+4)));
 }
 
 void NavigationWorld::UpdateSources(bool initial) {
@@ -628,6 +702,7 @@ void NavigationWorld::UpdateSources(bool initial) {
         sourceTask=*sourceDirty.begin();sourceDirty.erase(sourceDirty.begin());const auto [type,x,z]=sourceTask;
         auto snapshot=sources;auto absent=absentStatic;auto profile=meshes[type]->profile;
         const auto triangles=sources->tileTriangles[{x,z}];
+        const auto ceilings=sources->tileCeilings[{x,z}];
         std::vector<Solid> boxes;
         const float width=profile.tileCells*profile.cellSize,border=1.3f;
         const float lowX=sources->minimum.x+x*width-border,highX=lowX+width+border*2;
@@ -637,9 +712,10 @@ void NavigationWorld::UpdateSources(bool initial) {
             for(auto p:box.corners){p=ToNav(p);a=(std::min)(a,p.x);b=(std::min)(b,p.z);c=(std::max)(c,p.x);d=(std::max)(d,p.z);}
             if(c>=lowX&&a<=highX&&d>=lowZ&&b<=highZ)boxes.push_back(box);
         }
-        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z,triangles,boxes=std::move(boxes)] {
+        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z,triangles,ceilings,boxes=std::move(boxes)] {
             Geometry input;input.minimum=snapshot->minimum;input.maximum=snapshot->maximum;input.doors=snapshot->doors;input.solids=boxes;
             for(auto index:triangles){const auto& t=snapshot->ground[index];if(!t.object||!absent.count(t.object))input.ground.push_back(t);}
+            for(auto index:ceilings){const auto& c=snapshot->ceilings[index];if(!absent.count(c.object))input.ceilings.push_back(c);}
             return RebuildTile(input,profile,x,z);
         });
     }while(initial);

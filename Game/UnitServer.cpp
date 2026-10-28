@@ -723,6 +723,11 @@ void CUnitServer::L1StandStill()
 void CUnitServer::L1StopMovement(bool bFailed)
 {
     navigationRejects=navigationWait=0;
+    if(path.curSegment.GetMoveType()==CAIFullRoute::Rotate) {
+        const auto facing=-lpUnit->GetYAxis();
+        GameJournal::Event("UNIT","turn_finished","unit=%d failed=%d requested=%.6f actual=%.6f",
+                           lpUnit->GetID(),int(bFailed),std::atan2(curCommand.ptTarget.y,curCommand.ptTarget.x),std::atan2(facing.y,facing.x));
+    }
     L1StandStill();
     L1SetPhase(UL1_NONE);
     bL1MovementFailed = bFailed;
@@ -5937,6 +5942,9 @@ void CUnitServer::InitializeUnit()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
 {
+    const auto facing=-lpUnit->GetYAxis();
+    GameJournal::Event("CMD","rotate","unit=%d requested=%.6f previous=%.6f speed=%.6f",
+                       lpUnit->GetID(),std::atan2(vecDest.y,vecDest.x),std::atan2(facing.y,facing.x),fpAngSpeed);
     nextCommand.Clear();
     nextCommand.cmd = UC_ROTATE;
     nextCommand.ptTarget = vecDest;
