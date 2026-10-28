@@ -95,6 +95,17 @@ template<size_t Width> struct SourceColumns {
     }
     Point P(size_t row,size_t column) const {return {F(row,column),F(row,column+4),F(row,column+8)};}
 };
+// Source decoding has no cross-row dependencies. Fill disjoint ranges in the
+// final vectors; small maps avoid thread startup. Future destruction joins all
+// workers even if an index/float check throws, before the vectors can expire.
+template<class Work> void SourceRows(size_t count,Work work) {
+    if(count<65536){work(0,count);return;}
+    constexpr size_t workers=4;std::array<std::future<void>,workers> pending;
+    for(size_t i=0;i<workers;++i)pending[i]=std::async(std::launch::async,[&,i] {
+        work(count*i/workers,count*(i+1)/workers);
+    });
+    for(auto& job:pending)job.get();
+}
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
         p.cellSize==.1f && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
@@ -955,18 +966,18 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
     auto g=std::make_shared<Geometry>();auto point=[&](){return Point{w.F(),w.F(),w.F()};};
     g->minimum=point();g->maximum=point();auto n=w.U();Require(n<12000000&&n<= (w.bytes.size()-w.at)/12,"Nav64: source vertex limit");
     const auto arrayStart=std::chrono::steady_clock::now();const SourceColumns<12> vertexColumns(w,n);
-    std::vector<Point> vertices;vertices.reserve(n);
-    for(unsigned i=0;i<n;++i)vertices.push_back(vertexColumns.P(i,0));
-    n=w.U();Require(n<4000000,"Nav64: source triangle limit");g->ground.reserve(n);
+    std::vector<Point> vertices(n);
+    SourceRows(n,[&](size_t first,size_t last){for(size_t i=first;i<last;++i)vertices[i]=vertexColumns.P(i,0);});
+    n=w.U();Require(n<4000000,"Nav64: source triangle limit");g->ground.resize(n);
     const SourceColumns<47> triangleColumns(w,n);
-    for(unsigned i=0;i<n;++i) {
+    SourceRows(n,[&](size_t first,size_t last){for(size_t i=first;i<last;++i) {
         auto vertex=[&](size_t column){auto j=triangleColumns.U(i,column);Require(j<vertices.size(),"Nav64: invalid source index");return vertices[j];};
-        Triangle t;t.a=vertex(0);t.b=vertex(4);t.c=vertex(8);t.waterDepth=triangleColumns.P(i,12);
+        auto& t=g->ground[i];t.a=vertex(0);t.b=vertex(4);t.c=vertex(8);t.waterDepth=triangleColumns.P(i,12);
         t.area=triangleColumns.B(i,24);t.levitateArea=triangleColumns.B(i,25);t.terrain=triangleColumns.B(i,26)!=0;
         for(size_t c=0;c<t.classAreas.size();++c)t.classAreas[c]=triangleColumns.B(i,27+c);
         t.object=int(triangleColumns.U(i,35));
-        t.surface=triangleColumns.U(i,39)|(std::uint64_t(triangleColumns.U(i,43))<<32);g->ground.push_back(t);
-    }
+        t.surface=triangleColumns.U(i,39)|(std::uint64_t(triangleColumns.U(i,43))<<32);
+    }});
     arrayMs=ms(arrayStart);
     n=w.U();Require(n<=100000,"Nav64: canopy grid limit");g->ceilings.reserve(n);
     for(unsigned i=0;i<n;++i) {
