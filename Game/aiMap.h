@@ -562,7 +562,7 @@ public:
     NavigationWorld& Navigation() { return navigation; }
     BYTE NavigationBridgeArea() const { return BYTE((tilesInfo[AI_N_ROAD_TYPE_ID].dwTerrains>>12)&15); }
     const char* NavigationLegacyRejection(int unitClass,int x,int y); // Baker report only.
-    bool NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& route, float maxLength=1.e6f, float goalRadius=0, int aiClass=3, Navigation::Location* source=nullptr, Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact);
+    bool NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& route, float maxLength=1.e6f, float goalRadius=0, int aiClass=3, Navigation::Location* source=nullptr, Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact, Navigation::Route* detail=nullptr);
     BOOL Load(LPCSTR pszMapName);
     void Clear();
     int XSize() const { return map.GetXSize(); }
@@ -587,7 +587,7 @@ public:
     // осуществляет поиск обходного пути если проблема возникла сразу в начале пути или если
     // установлен флаг bTryAnyPath
     bool NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength = 1e6f,
-                 float fpMinDistance = 0, Navigation::GoalPolicy goalPolicy = Navigation::GoalPolicy::Exact);
+                 float fpMinDistance = 0, Navigation::GoalPolicy goalPolicy = Navigation::GoalPolicy::Exact, Navigation::Route* detail=nullptr);
     // продолжить мощный поиск пути по успешном завершении очередного сегмента
     bool ContinuePath(CUnit *pUnit, SAIPath &res);
     // получить скорости/стоимости террейнов и разворотов для юнита

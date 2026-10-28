@@ -258,28 +258,49 @@ Route Find(const Mesh& m,const Request& r) {
                            q.finalizeSlicedFindPath(corridor.data(),&count,int(corridor.size()));
     if(Limited(status)){result.status=Status::Limit;return result;}
     if(dtStatusFailed(status)||(!selectedPartial&&dtStatusDetail(status,DT_PARTIAL_RESULT))||!count||corridor[count-1]!=to){result.status=Status::NoPath;return result;}
-    float commonCost=filter.getAreaCost(m.data->getTileByRef(corridor[0])->polys[m.data->decodePolyIdPoly(corridor[0])].getArea());
-    bool uniform=true;
-    for(int i=1;i<count;++i) {
-        unsigned char area=0;m.data->getPolyArea(corridor[i],&area);
-        if(filter.getAreaCost(area)!=commonCost){uniform=false;break;}
+    corridor.resize(count);
+    auto straighten=[&](const std::vector<dtPolyRef>& path,Route& route) {
+        std::vector<float> points(8192*3);std::vector<dtPolyRef> refs(8192);
+        std::vector<unsigned char> flags(8192);int n=0;
+        const auto state=q.findStraightPath(start,end,path.data(),int(path.size()),points.data(),flags.data(),refs.data(),&n,8192,DT_STRAIGHTPATH_ALL_CROSSINGS);
+        if(Limited(state))return Status::Limit;
+        if(dtStatusFailed(state)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END))return Status::NoPath;
+        route.corridor.assign(path.begin(),path.end());
+        if(ingress)route.points.push_back(Address(m,ToNav(actual),from,height,r.source.z));
+        for(int i=0;i<n;++i) {
+            Point p{points[i*3],points[i*3+1],points[i*3+2]};
+            auto at=Address(m,p,refs[i]?refs[i]:to,height,route.points.empty()?r.source.z:route.points.back().position.z);
+            if(!at.surface)return Status::NoPath;
+            if(!route.points.empty()) {
+                const auto& previous=route.points.back();const float length=Distance(previous.position,at.position);
+                route.length+=length;route.cost+=length*filter.getAreaCost(previous.area);
+            }
+            route.points.push_back(at);
+        }
+        return Status::Complete;
+    };
+    result.status=straighten(corridor,result);
+    if(result.status!=Status::Complete){result.points.clear();result.corridor.clear();return result;}
+    result.plannedCost=result.cost;
+    if(count>1) {
+        // A polygon-centre A* corridor may contain needless turns even on a
+        // clear line. Mixed material costs are not a reason to skip visibility:
+        // price both actual portal-crossing paths under the unchanged filter.
+        std::vector<dtPolyRef> visible(512);int visited=0;float t=0,normal[3]{};
+        const auto ray=q.raycast(from,start,end,&filter,&t,normal,visible.data(),&visited,int(visible.size()));
+        if(dtStatusSucceed(ray)&&!Limited(ray)&&t>=1&&visited>0&&visible[visited-1]==to) {
+            visible.resize(visited);Route candidate;
+            if(straighten(visible,candidate)==Status::Complete) {
+                result.straightCost=candidate.cost;
+                const float tolerance=1.e-5f*std::max(1.f,result.cost);
+                if(candidate.cost<=result.cost+tolerance) {
+                    candidate.goalStatus=result.goalStatus;candidate.plannedCost=result.cost;
+                    candidate.straightCost=candidate.cost;candidate.straightened=true;
+                    result=std::move(candidate);
+                }
+            }
+        }
     }
-    if(uniform&&count>1) {
-        dtPolyRef visible[512];int visited=0;float t=0,normal[3]{};
-        const auto ray=q.raycast(from,start,end,&filter,&t,normal,visible,&visited,512);
-        bool direct=dtStatusSucceed(ray)&&!Limited(ray)&&t>=1&&visited>0&&visible[visited-1]==to;
-        for(int i=0;i<visited&&direct;++i){unsigned char area=0;m.data->getPolyArea(visible[i],&area);if(filter.getAreaCost(area)!=commonCost)direct=false;}
-        if(direct){corridor.assign(visible,visible+visited);count=visited;}
-    }
-    std::vector<float> points(8192*3);std::vector<dtPolyRef> refs(8192);std::vector<unsigned char> flags(8192);int n=0;
-    status=q.findStraightPath(start,end,corridor.data(),count,points.data(),flags.data(),refs.data(),&n,8192,DT_STRAIGHTPATH_ALL_CROSSINGS);
-    if(Limited(status)){result.status=Status::Limit;return result;}
-    if(dtStatusFailed(status)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END)){result.status=Status::NoPath;return result;}
-    result.corridor.assign(corridor.begin(),corridor.begin()+count);
-    if(ingress)result.points.push_back(Address(m,ToNav(actual),from,height,r.source.z));
-    for(int i=0;i<n;++i){Point p{points[i*3],points[i*3+1],points[i*3+2]};auto l=Address(m,p,refs[i]?refs[i]:to,height,result.points.empty()?r.source.z:result.points.back().position.z);
-        if(!l.surface){result.points.clear();result.corridor.clear();result.status=Status::NoPath;return result;}
-        if(!result.points.empty())result.length+=Distance(result.points.back().position,l.position);result.points.push_back(l);}
     if(result.length>r.maxLength){result.points.clear();result.corridor.clear();result.status=Status::TooLong;return result;}
     result.status=Status::Complete;return result;
 }
@@ -374,6 +395,7 @@ Route FindAround(const Mesh& mesh,const Request& input) {
         for(const auto& p:edge.points)if(result.points.empty()||Distance(result.points.back().position,p.position)>.00001f)result.points.push_back(p);
         for(auto ref:edge.corridor)if(result.corridor.empty()||result.corridor.back()!=ref)result.corridor.push_back(ref);
         result.length+=edge.length;
+        result.cost+=edge.cost;result.plannedCost+=edge.plannedCost;
     }
     result.goalStatus=direct.goalStatus;result.status=Status::Complete;return result;
 }

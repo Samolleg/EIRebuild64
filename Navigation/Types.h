@@ -70,5 +70,7 @@ struct Route {
     std::vector<Location> points;
     std::vector<std::uint64_t> corridor;
     float length = 0;
+    float cost = 0, plannedCost = 0, straightCost = -1; // Transient query/journal metrics.
+    bool straightened = false;
 };
 }

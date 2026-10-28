@@ -23,6 +23,7 @@
 #include <cctype>
 #include <cmath>
 #include <string>
+#include <sstream>
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 namespace {
@@ -452,8 +453,34 @@ bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPat
     //
     BOOL bSaveFastPath = lpUnit->bNeedFastPath;
     lpUnit->bNeedFastPath = bFastPath;
-    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy);
+    const bool journal=lpUnit->IsHero() && &res==&path;
+    Navigation::Route detail;
+    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr);
     lpUnit->bNeedFastPath = bSaveFastPath;
+    if(bFound&&journal&&!detail.points.empty()) {
+        std::ostringstream points;unsigned turns=0,printed=0;
+        for(size_t i=0;i<detail.points.size();++i) {
+            const auto& current=detail.points[i];
+            if(i&&i+1<detail.points.size()) {
+                const auto& a=detail.points[i-1];const auto& b=detail.points[i+1];
+                const float ax=current.position.x-a.position.x,ay=current.position.y-a.position.y,
+                    bx=b.position.x-current.position.x,by=b.position.y-current.position.y;
+                const float lengths=std::hypot(ax,ay)*std::hypot(bx,by);
+                if(lengths>1.e-10f&&ax*bx+ay*by>0&&std::abs(ax*by-ay*bx)<.052336f*lengths&&
+                    a.area==current.area&&current.area==b.area&&a.surface==current.surface&&current.surface==b.surface)continue;
+                ++turns;
+            }
+            if(printed>=23&&i+1<detail.points.size())continue;
+            if(printed++)points<<';';
+            points<<current.position.x<<','<<current.position.y<<','<<current.position.z<<'/'<<current.area<<'/'<<current.surface;
+        }
+        const auto& from=detail.points.front();const auto& to=detail.points.back();
+        GameJournal::Event("NAV","route_ready","unit=%d mode=%s pose=%d requested=(%.3f,%.3f) from=(%.3f,%.3f,%.3f) accepted=(%.3f,%.3f,%.3f) length=%.3f planned_cost=%.3f selected_cost=%.3f straight_cost=%.3f straightened=%d polygons=%zu points=%zu bends=%u printed=%u corners=%s",
+            lpUnit->GetID(),bFastPath?"flat":"material",int(lpUnit->GetCurrentPose()),ptDest.x,ptDest.y,
+            from.position.x,from.position.y,from.position.z,to.position.x,to.position.y,to.position.z,
+            detail.length,detail.plannedCost,detail.cost,detail.straightCost,int(detail.straightened),
+            detail.corridor.size(),detail.points.size(),turns,printed,GameJournal::Quote(points.str().c_str()).c_str());
+    }
     return bFound;
 }
 /////////////////////////////////////////////////////////////////////////////////////
