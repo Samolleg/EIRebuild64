@@ -180,6 +180,9 @@ Contour construction temporarily colors adjacent regions so Recast treats
 same-material class/floor boundaries as area borders; zero simplification
 error alone does not protect those borders. Real materials are restored
 before polygon serialization. Recast library sources remain unchanged.
+Projection uses its requested horizontal distance as the complete admission
+bound, without an extra millimetre. Strict support projection and movement
+therefore share the same 1 mm numerical boundary limit.
 Find, placement/restore, support, physical steps and random goals use the
 unit's current AI-class exclusion, independently of its shared radius profile.
 Generic queries without an explicit class use the profile's material class;

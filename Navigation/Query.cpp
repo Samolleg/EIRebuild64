@@ -98,7 +98,10 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
         auto at=Address(m,{near[0],near[1],near[2]},refs[i],height,point.z);
         if(!at.surface)continue;
         const float xy=std::hypot(at.position.x-point.x,at.position.y-point.y),dz=std::abs(at.position.z-point.z);
-        if(xy>horizontal+.001f||dz>vertical)continue;
+        // The requested horizontal tolerance is the full admission bound.
+        // Adding another millimetre made strict 1 mm support queries accept
+        // targets that the physical step correctly rejects as outside its mesh.
+        if(xy>horizontal||dz>vertical)continue;
         candidates.emplace_back(refs[i],at);
     }
     float best=1.e30f;bool exact=false;std::uint64_t selectedSurface=0;
