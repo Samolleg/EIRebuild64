@@ -1,5 +1,6 @@
 #pragma once
 #include "ModNpcConsumables.h"
+#include "SettlementMob.h"
 #include "ModStaticLookupCache.h"
 #include "SocialStealthRules.h"
 #include "ModWeaponSkills.h"
@@ -52,7 +53,9 @@ struct ModGenocideConfig {
 };
 // Engine-owned package data; no original EXE addresses or addon DLL loading.
 class CModPackage {
+    Settlement::Catalog settlementCatalog;
 public:
+    const Settlement::Catalog &Settlements() const { return settlementCatalog; }
     struct SaveState;
     void StoreSaveState(SaveSchema::Writer &) const;
     static std::shared_ptr<SaveState> LoadSaveState(SaveSchema::Reader &);

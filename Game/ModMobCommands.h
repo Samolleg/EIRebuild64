@@ -157,14 +157,14 @@ inline CUnit* UnitArg(const SSCCmd&cmd){auto*p=ObjectArg(cmd);return p&&p->WhoAm
 inline CUnitServer* ServerArg(const SSCCmd&cmd){auto*u=UnitArg(cmd);return u?dynamic_cast<CUnitServer*>(u->GetUnitSpecific()):nullptr;}
 inline CPlayerServer* PlayerServer(int number){auto*p=theWorldServer.GetPlayer(number);return p?dynamic_cast<CPlayerServer*>(p->GetPlayerSpecific()):nullptr;}
 inline std::string Join(const SSCCmd&cmd){std::string s;for(int i=0;i<cmd.szParams.GetSize();i++)s+=(LPCSTR)cmd.szParams[i];return s;}
-inline bool Float(SSCCmd&cmd,float&result){
+inline bool Float(SSCCmd&cmd,float&result,CScript* script=nullptr){
  if(!ModRuntime::Current())return false;auto*e=Find(cmd.command);if(!e)return false;
  if(!e->ready||e->format[0]!='F')throw std::runtime_error(std::string("Unported MOB float command: ")+e->name);if(!ValidateDispatch(*e,cmd)){result=0;return true;}
  const char*n=e->name;float a=cmd.params.GetSize()?cmd.params[0]:0;
  if(cmd.command==95){if(cmd.params.GetSize()==1)return false;result=a<cmd.params[1]?random.GetFloat(a,cmd.params[1]):a;return true;}
  if(cmd.command==311){float dx=cmd.params[2]-a,dy=cmd.params[3]-cmd.params[1];result=sqrtf(dx*dx+dy*dy);return true;}
  if(cmd.command==341){result=theWorldServer.GetPlayer(CheckedInt(a))?1.f:0.f;return true;}
- if(cmd.command==315){auto*p=theWorldServer.GetPlayer(CheckedInt(a));result=p?p->party.vars.GetVar(cmd.szParams[0]):0;return true;}
+ if(cmd.command==315){auto*p=theWorldServer.GetPlayer(CheckedInt(a));result=p?p->party.vars.GetVar(script?script->SettlementKey(cmd.szParams[0]).c_str():(LPCSTR)cmd.szParams[0]):0;return true;}
  if(cmd.command==373||cmd.command==375){auto*m=theWorld.GetMusicSystem();result=m?float(cmd.command==373?m->GetScriptNextPlayTime():m->GetScriptForced()):0;return true;}
  if(cmd.command==356){std::string name=cmd.szParams[0];std::replace(name.begin(),name.end(),'\\','/');if(name==".."||name.find("/../")!=std::string::npos||name.rfind("../",0)==0||(name.size()>=3&&name.substr(name.size()-3)=="/.."))throw std::runtime_error("MOB parent path forbidden");std::string path=ModRuntime::Current()->Directory()+"/"+name;auto attrs=GetFileAttributesA(path.c_str());result=attrs!=INVALID_FILE_ATTRIBUTES&&!(attrs&FILE_ATTRIBUTE_DIRECTORY)?1.f:0.f;return true;}
  if(cmd.command==358||cmd.command==368||cmd.command==369||cmd.command==370||cmd.command==362||cmd.command==367){auto*object=ObjectArg(cmd);DWORD flag=cmd.command==358?UNIT_ALREADY_MHOOVER:cmd.command==368?UNIT_FEEBLED:cmd.command==369?UNIT_STUN:UNIT_DONTMOVE;if(cmd.command==362||cmd.command==367){std::uint32_t decoded;if(!(cmd.command==362?ModMobFlagArguments::Mask(a,decoded):ModMobFlagArguments::Bit(a,decoded))){result=0;return true;}flag=decoded;}result=object&&object->CheckFlag(flag)?1.f:0.f;return true;}
@@ -227,10 +227,10 @@ inline bool Float(SSCCmd&cmd,float&result){
  }
  return true;
 }
-inline bool String(SSCCmd&cmd,CString&result){
+inline bool String(SSCCmd&cmd,CString&result,CScript* script=nullptr){
  if(!ModRuntime::Current())return false;auto*e=Find(cmd.command);if(!e)return false;
  if(!e->ready||e->format[0]!='S')throw std::runtime_error(std::string("Unported MOB string command: ")+e->name);Validate(*e,cmd);
- if(cmd.command==303){auto*o=ObjectArg(cmd);if(o)result=std::to_string(o->GetID()).c_str();return true;}
+ if(cmd.command==303){auto*o=ObjectArg(cmd);if(o)result=(script?script->NamespaceWorld().Settlements().ObjectName(script->NamespaceWorld(),script->CurrentSettlement(),o->GetID()):std::to_string(o->GetID())).c_str();return true;}
  if(cmd.command==333){result=cmd.szParams[random.Get(cmd.szParams.GetSize()-1)];return true;}
  if(cmd.command==374){auto*m=theWorld.GetMusicSystem();if(m)result=m->GetScriptMusic();return true;}
  if(cmd.command==377||cmd.command==378)result="";
@@ -279,10 +279,10 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
  if(!ModRuntime::Current())return false;auto*e=Find(cmd.command);if(!e)return false;if(!e->ready||e->format[0]!='G')throw std::runtime_error("Unported MOB group command");Validate(*e,cmd);
  result.Clear();CUnitList list;theWorldServer.aiMap.GetUnitsNear(CPlot3D(cmd.params[0],cmd.params[1],0),list,cmd.params[2]);int flags=CheckedInt(cmd.params[3]);POSITION it=list.GetHeadPosition();while(it){auto*u=list.GetNext(it);if(flags&1)result.Add(u);}return true;
 }
-inline bool Action(SSCCmd&cmd){
+inline bool Action(SSCCmd&cmd,CScript* script=nullptr){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
- case 314:{if(auto*p=PlayerServer(CheckedInt(a)))p->SetVar(cmd.szParams[0],cmd.params[1]);break;}
+ case 314:{if(auto*p=PlayerServer(CheckedInt(a)))p->SetVar(script?script->SettlementKey(cmd.szParams[0]).c_str():(LPCSTR)cmd.szParams[0],cmd.params[1]);break;}
  case 316:{auto*p=theWorldServer.GetPlayer(CheckedInt(a));if(p)theWorldServer.GainExperience(p,cmd.params[1]);break;}
  case 317:if(server){server->GainExperience(a);if(auto*p=unit->GetOwner())if(auto*ps=dynamic_cast<CPlayerServer*>(p->GetPlayerSpecific()))ps->GainExp(unit->GetID(),a);}break;
  case 318:IWorldClient.StartCameraSave(cmd.szParams[0]);break;
@@ -313,7 +313,7 @@ inline bool BranchForward(int&index,int count,bool skip,float amount){
 }
 #include "ModVoiceCommands.h"
 namespace ModMob {
-inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true){
+inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true,CScript* script=nullptr){
  auto*mod=ModRuntime::Current();if(!mod)return false;auto*e=Find(cmd.command);if(!e)return false;
  if(cmd.command==387||cmd.command==390){Validate(*e,cmd);return Voice(cmd,sleep,next);}
  if(cmd.command==394||cmd.command==395){
@@ -340,7 +340,7 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
   if(!ValidateDispatch(*e,cmd))return true;bool skip=cmd.command==392||cmd.params[0]==0;float amount=cmd.params[cmd.command==391?1:0];
   if(!index||!BranchForward(*index,count,skip,amount))return Reject(e->name,"Invalid branch state/offset");return true;
  }
- if(e->ready && cmd.command!=385){if(!ValidateDispatch(*e,cmd))return true;if(Action(cmd))return true;}
+ if(e->ready && cmd.command!=385){if(!ValidateDispatch(*e,cmd))return true;if(Action(cmd,script))return true;}
  if(!e->ready||strcmp(e->name,"RefreshUnitStats"))throw std::runtime_error(std::string("Unported MOB action: ")+e->name);Validate(*e,cmd);
  auto*object=cmd.oParams[0]?cmd.oParams[0]->GetObject():nullptr;
  if(object&&object->WhoAmI()==HPC_UNIT)mod->RefreshUnitStatsFromMob(static_cast<CUnit*>(object));return true;

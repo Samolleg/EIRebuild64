@@ -20,15 +20,16 @@ class CGameBase;
 namespace SaveSchema {
 class Slot;
 using Bytes = std::vector<std::uint8_t>;
-constexpr std::uint32_t Version = 3;
+constexpr std::uint32_t Version = 4;
 constexpr std::uint32_t HeaderBytes = 48;
-// Wire v3 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
+// Wire v4 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
 // u32 fundamentCount/rootBytes/gameCount/reserved, u64 nextId.
 // CFundament descriptor: u32 type, u64 id, u32 bodyBytes.
 // CGameBase descriptor: same + i32 mapId, u32 runtimeType/subtype/flags, u64 ownerId.
 // Root, fundament bodies, game bodies follow in descriptor order.
 // Both registries share one namespace reserved before any factory.
 // v3 defines CStringArray fields (u32 count followed by length-prefixed strings).
+// v4 stores settlement bindings and the namespace of every script thread.
 // References = u64; text/blob = u32 length + bytes; Count = u32.
 
 struct Limits

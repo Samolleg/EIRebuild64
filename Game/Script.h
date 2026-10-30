@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdint>
+#include <string>
+class CWorldServer;
 #include "SaveSchema.h"
 /*==========================================================================================================
 
@@ -426,12 +429,14 @@ struct SScriptThread
 {
     CAArray<SSCCmd, SSCCmd &> commands;
     int nIdx = -1;
+    std::uint32_t settlement = 0;
 
 public:
     void Clear()
     {
         commands.RemoveAll();
         nIdx = -1;
+        settlement = 0;
     }
     void ClearCommands() { commands.RemoveAll(); }
     void Add(SSCCmd &cmd) { commands.Add(cmd); }
@@ -553,6 +558,8 @@ class CScript
     friend struct SaveSchema::ScriptCodec;
     friend struct ModCampReferences::Access;
     bool detachedSaveState = false;
+    CWorldServer *settlementWorld = nullptr;
+    std::uint32_t settlementContext = 0;
     // описатели объектов, управляемых из скрипта
     CAArray<SScriptLightInfo> lights;
     CList<SParticleInfo> particles;
@@ -592,7 +599,7 @@ class CScript
     int nForCount;
     // добавить в имя переменной/скрипта номер вторичного скрипта для поддержания уникальности
     // имен
-    CString SignName(const CString &src);
+    CString SignName(const CString &src, bool group = false);
 
     SScriptError scriptError;
     BOOL __cdecl ScriptError(int nLine, EScriptParserError eError, const char *pszText, ...);
@@ -703,6 +710,23 @@ public:
     // тред начнет выполнятся в порядке общей очереди при вызове CScript::Segment()
     void RunThreadDelayed(SScriptThread *pThread);
 
+    class SettlementScope
+    {
+        CScript &script;
+        std::uint32_t previous;
+    public:
+        SettlementScope(CScript &script, std::uint32_t id);
+        ~SettlementScope();
+        SettlementScope(const SettlementScope &) = delete;
+        SettlementScope &operator=(const SettlementScope &) = delete;
+    };
+    void BindSettlementWorld(CWorldServer *world) { settlementWorld = world; }
+    std::uint32_t CurrentSettlement() const { return settlementContext; }
+    CWorldServer &NamespaceWorld() const;
+    int SettlementObject(const char *reference, bool actorName = false) const;
+    std::string SettlementKey(const char *key) const;
+    bool IsSettlementGroupImport(const char *local) const;
+    void ValidateSettlementContexts() const;
     SScriptVariablesSet &GetGlobalVars() { return globalVars; }
     // получить скрипт по его имени, после добавления новых скриптов указатель может стать
     // некорректным, NULL, если скрипт не найден, функция сама добавляет префикс для вторичных

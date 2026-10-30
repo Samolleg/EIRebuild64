@@ -930,7 +930,7 @@ void retained_static_record_admission(
 }
 
 bool retained_static_restore_source(MobSourceRole role, const char* terrain,
-    const char* mob, const std::vector<RetainedAdmission>& members) noexcept try {
+    const char* mob, const std::vector<RetainedAdmission>& members, bool remapped) noexcept try {
     if (!mob || !*mob || (role == MobSourceRole::main && (!terrain || !*terrain))) return false;
     auto& state = runtime();
     std::unique_lock<std::mutex> guard(state.lock);
@@ -973,7 +973,7 @@ bool retained_static_restore_source(MobSourceRole role, const char* terrain,
     // with this immutable source may claim its static candidates.
     std::map<std::pair<std::uint32_t,std::uint32_t>,std::int32_t> accepted;
     for (const auto& member : members)
-        if (member.signed_id > 0 && member.nid == std::uint32_t(member.signed_id))
+        if (member.signed_id > 0 && (remapped || member.nid == std::uint32_t(member.signed_id)))
             accepted.emplace(std::make_pair(member.nid, member.family), member.signed_id);
     for (const auto& object : snapshot->objects) {
         const auto found = accepted.find({object.nid, object.family});

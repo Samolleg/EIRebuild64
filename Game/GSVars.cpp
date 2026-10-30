@@ -3,6 +3,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "GSVars.h"
+#include "WorldServer.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "GeneralSettings.h"
@@ -96,6 +97,9 @@ void CGSVariableSet::Store(CSave &file)
 // personage ID functions
 int GetPersonageIDByName(const char *pszGlobalName)
 {
+    Settlement::Name qualified;
+    if (Settlement::ParseName(pszGlobalName, qualified))
+        return theWorldServer.Settlements().Object(theWorldServer, 0, pszGlobalName, true);
     const unsigned char *s = (const unsigned char *)pszGlobalName;
     unsigned long h = 0;
     for (; *s; s++)

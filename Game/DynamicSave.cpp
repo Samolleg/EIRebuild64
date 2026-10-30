@@ -746,12 +746,12 @@ struct ScriptCodec
     }
     void Thread(Writer &w, const SScriptThread &t)
     {
-        w.Int32(t.nIdx);
+        w.Int32(t.nIdx);w.UInt32(t.settlement);
         Items(w,t.commands,[&](const SSCCmd &c){Command(w,c);});
     }
     void Thread(Reader &r, SScriptThread &t)
     {
-        t.nIdx=r.Int32();
+        t.nIdx=r.Int32();t.settlement=r.UInt32();
         Items(r,t.commands,[&](SSCCmd &c){Command(r,c);});
     }
     void One(Writer &w, const SOneScript &s)

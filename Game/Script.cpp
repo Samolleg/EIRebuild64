@@ -752,7 +752,7 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, float &re
     EDiplomacy eDiplomacy;
 
     CalcParameters(pScript, vars);
-    if(ModMob::Float(*this,res))return;
+    if(ModMob::Float(*this,res,pScript))return;
     switch (command)
     {
     case SC_ISEQUAL:
@@ -1058,7 +1058,7 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, float &re
             res = 0;
             pPlayer = theWorldServer.GetPlayer((int)params[0]);
             if (pPlayer)
-                res = pPlayer->party.vars.GetVar(szParams[0]);
+                res = pPlayer->party.vars.GetVar(pScript->SettlementKey(szParams[0]).c_str());
         }
         break;
     case SC_ISCAMERAPLAYING:
@@ -1121,7 +1121,7 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, float &re
 void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CString &res)
 {
     CalcParameters(pScript, vars);
-    if(ModMob::String(*this,res))return;
+    if(ModMob::String(*this,res,pScript))return;
     /*switch( command )
             {
                     default:*/
@@ -1140,7 +1140,7 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CScriptOb
     switch (command)
     {
     case SC_GETOBJECT:
-        pMO = theWorldServer.GetMapObject((int)params[0]);
+        pMO = pScript->NamespaceWorld().GetMapObject(pScript->SettlementObject(std::to_string((int)params[0]).c_str()));
         if (pMO == NULL)
             ReportWarning("Object with ID %d not found in function \"%s\".\n", (int)params[0],
                           "GetObject");
@@ -1158,14 +1158,14 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CScriptOb
         res[0]->SetObject(pMO);
         break;
     case SC_GETOBJECTBYNAME:
-        pMO = theWorldServer.GetMapObject(GetPersonageIDByName(szParams[0]));
+        pMO = pScript->NamespaceWorld().GetMapObject(pScript->SettlementObject(szParams[0], true));
         if (pMO == NULL)
             ReportWarning("Object with name %s not found in function \"%s\".\n", szParams[0],
                           "GetObjectByName");
         res[0]->SetObject(pMO);
         break;
     case SC_GETOBJECTBYID:
-        pMO = theWorldServer.GetMapObject(atoi(szParams[0]));
+        pMO = pScript->NamespaceWorld().GetMapObject(pScript->SettlementObject(szParams[0]));
         if (pMO == NULL)
             ReportWarning("Object with ID %s not found in function \"%s\".\n", szParams[0],
                           "GetObjectByID");
@@ -1350,6 +1350,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
     ASSERT(pThread);
     ASSERT(pScript);
     CScript &script = *pScript;
+    CScript::SettlementScope settlementScope(script, pThread->settlement);
     nSegment++;
     if (IsFinished())
         return FALSE;
@@ -1361,7 +1362,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
         SSCCmd *pCmd = &pThread->commands[nCurCommand];
         pCmd->CalcParameters(pScript, variables);
         bNextCommand = TRUE;
-        if(!ModMob::Void(*pCmd,&nCurCommand,pThread->commands.GetSize(),&nSleepStart,&bNextCommand,pScript->CanDeferCommand()))switch (pCmd->command)
+        if(!ModMob::Void(*pCmd,&nCurCommand,pThread->commands.GetSize(),&nSleepStart,&bNextCommand,pScript->CanDeferCommand(),pScript))switch (pCmd->command)
         {
         case SC_WAITSEGMENT:
             if (nSegment < Float2Int(pCmd->params[0]))
@@ -1870,7 +1871,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
                 pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
                 if (pPlayer)
                     ((CPlayerServer *)pPlayer->GetPlayerSpecific())
-                        ->SetVar(pCmd->szParams[0], pCmd->params[1]);
+                        ->SetVar(pScript->SettlementKey(pCmd->szParams[0]).c_str(), pCmd->params[1]);
             }
             break;
         case SC_GSSETVARMAX:
@@ -1878,14 +1879,14 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
                 pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
                 if (pPlayer)
                     ((CPlayerServer *)pPlayer->GetPlayerSpecific())
-                        ->SetVarMax(pCmd->szParams[0], pCmd->params[1]);
+                        ->SetVarMax(pScript->SettlementKey(pCmd->szParams[0]).c_str(), pCmd->params[1]);
             }
             break;
         case SC_GSDELVAR:
             {
                 pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
                 if (pPlayer)
-                    ((CPlayerServer *)pPlayer->GetPlayerSpecific())->DelVar(pCmd->szParams[0]);
+                    ((CPlayerServer *)pPlayer->GetPlayerSpecific())->DelVar(pScript->SettlementKey(pCmd->szParams[0]).c_str());
             }
             break;
         case SC_ADDUNITUNDERCONTROL:
@@ -2292,7 +2293,10 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
                                          Float2Int(pCmd->params[2]));
             break;
         case SC_ADDMOB:
-            theWorldServer.AddSecondaryMob(pCmd->szParams[0]);
+            if (pScript->CurrentSettlement()) {
+                if (!pScript->NamespaceWorld().Settlements().HasMob(pScript->CurrentSettlement(), (LPCSTR)pCmd->szParams[0]))
+                    throw std::runtime_error("Settlement AddMob requires a declared dependency");
+            } else theWorldServer.AddSecondaryMob(pCmd->szParams[0]);
             break;
         case SC_PLAYMUSIC:
             pPlayer = theWorldServer.GetPlayer(pCmd->params[0]);
@@ -2440,6 +2444,7 @@ void SScriptCondition::RunCheck(CScript *pScript, SOneScript *pOneScript)
     float fCheck;
     ASSERT(pActions);
     ASSERT(pConditions);
+    CScript::SettlementScope settlementScope(*pScript, pConditions->settlement);
 
     for (i = 0; i < pConditions->commands.GetSize(); i++)
     {
@@ -2568,6 +2573,12 @@ ReportWarning( "Unknown script %s", (const char*) szRunName );*/
 
 BOOL CScript::IsScriptRunning(const char *pszName)
 {
+    if (CurrentSettlement()) {
+        CString scopedName = SignName(pszName);
+        for (POSITION scoped = runningScripts.GetHeadPosition(); scoped;)
+            if (runningScripts.GetNext(scoped).szScriptName == scopedName) return TRUE;
+        return FALSE;
+    }
     POSITION pos = runningScripts.GetHeadPosition();
     while (pos)
     {
@@ -3034,6 +3045,7 @@ void CScript::StopExecution()
 
 void CScript::Clear()
 {
+    settlementContext = 0;
     if (detachedSaveState) { DiscardSaveState(); return; }
     bLoaded = FALSE;
     nSecondaryCount = 0;
@@ -3243,6 +3255,7 @@ SScriptThread *CScript::AllocateNewThread()
 {
     SScriptThread *pRes = &threads.GetAt(threads.AddTail(SScriptThread()));
     pRes->SetNumber(threads.GetCount());
+    pRes->settlement = CurrentSettlement();
     return pRes;
 }
 
@@ -3250,6 +3263,7 @@ SScriptThread *CScript::AllocateNewWorldThread()
 {
     SScriptThread *pRes = &worldActions.GetAt(worldActions.AddTail(SScriptThread()));
     pRes->SetNumber(worldActions.GetCount() | 0x80000000);
+    pRes->settlement = CurrentSettlement();
     return pRes;
 }
 

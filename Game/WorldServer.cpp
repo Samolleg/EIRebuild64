@@ -221,6 +221,8 @@ CWorldServer::CWorldServer(bool detached) : detachedSave(detached), fieldCamp(st
     pszGameClassName = GetGameClassName();
 #endif
     Clear();
+    script.BindSettlementWorld(this);
+    scriptTemp.BindSettlementWorld(this);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -325,6 +327,7 @@ void CWorldServer::RemoveEffects()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RemoveEverything()
 {
+    settlementMobs.Clear();
     szLoadedMobs.RemoveAll();
     waterLevels.Clear();
     // remove exits from zone
@@ -2280,13 +2283,36 @@ void CWorldServer::BriefingComplete(int nPlayer, const char *pszBriefing)
     CStringArray szParts;
     const SQDBBriefing *pBrief = 0;
     NStrProc::SplitString(pszBriefing, szParts, '.');
-    if (szParts.GetSize() == 3)
-        pBrief = theQuestDatabase.briefings.GetEntry(szParts[2]);
+    const auto settlement = settlementMobs.BriefingOwner(pszBriefing);
+    if (szParts.GetSize() == 3) {
+        if (settlement) {
+            const auto &binding = settlementMobs.ResolveBriefing((LPCSTR)szParts[2]);
+            if (!binding.reward.empty()) {
+                pBrief = theQuestDatabase.briefings.GetEntry(binding.reward.c_str());
+                if (!pBrief) { ReportError("Missing settlement briefing reward: %s\n", binding.reward.c_str()); return; }
+            }
+        } else pBrief = theQuestDatabase.briefings.GetEntry(szParts[2]);
+    }
     CPlayer *pPlayer = GetPlayer(nPlayer);
+    if (settlement && (!pPlayer || pPlayer->party.vars.GetVar(pszBriefing) != 1.f)) return;
+    CString szRunBrf;
+    if (settlement)
+        szRunBrf.Format("WorldScript( #OnBriefingComplete( %i, \"%s\" ) )", nPlayer, pszBriefing);
+    else
+        szRunBrf.Format("WorldScript( GSSetVar( %i,\"%s\",2 ) #OnBriefingComplete( %i, \"%s\" ) )",
+                        nPlayer, pszBriefing, nPlayer, pszBriefing);
+    CScript::SettlementScope settlementScope(script, settlement);
+    if (settlement) {
+        if (!script.LoadText(szRunBrf)) {
+            ReportError("Cannot dispatch briefing completion: %s\n", (LPCSTR)script.GetLastError().text);
+            return;
+        }
+        static_cast<CPlayerServer *>(pPlayer->GetPlayerSpecific())->SetVar(pszBriefing, 2.f);
+    }
     //
     if (pPlayer)
     {
-        OnBriefingCompleteMercs(pPlayer, pszBriefing);
+        if (!settlement) OnBriefingCompleteMercs(pPlayer, pszBriefing);
         //
         if (pBrief)
         {
@@ -2331,11 +2357,8 @@ void CWorldServer::BriefingComplete(int nPlayer, const char *pszBriefing)
         }
     }
     //
-    CString szRunBrf;
-    szRunBrf.Format("WorldScript( GSSetVar( %i,\"%s\",2 ) #OnBriefingComplete( %i, \"%s\" ) )",
-                    nPlayer, pszBriefing, nPlayer, pszBriefing);
-    script.LoadText(szRunBrf);
-    if (curInterface == IFACE_BASE) // CRAP
+    if (!settlement) script.LoadText(szRunBrf);
+    if (!settlement && curInterface == IFACE_BASE) // CRAP
     {
         script.Segment();
         script.Segment();
@@ -2378,6 +2401,9 @@ bool CWorldServer::CheckAddObject(CMapObject *pObj)
 /////////////////////////////////////////////////////////////////////////////////////
 int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
 {
+    if (settlementMobs.Reserved(pMEObject->p_nID) &&
+        (!settlementMobs.Admitting() || GetMapObject(pMEObject->p_nID)))
+        return ReportError("Cannot replace an object owned by a settlement MOB.\n"), -1;
     int nResID;
     assert(bMapLoaded == TRUE);
 
@@ -3385,6 +3411,8 @@ void CWorldServer::FinishZoneLoading()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName)
 {
+    if (pszMobName && settlementMobs.UsesMob(pszMobName))
+        return ReportError("Settlement MOB cannot be added without its namespace.\n");
     // check if one is already loaded
     const auto* mod = ModRuntime::Current();
     if (!(mod && mod->SpellAddon().Feature14() >= 1) ||
@@ -3434,7 +3462,7 @@ CString CWorldServer::GetFullMobName(const char *pszFileName)
 BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
                                CMemorySave &graphChunk, bool bStaticOnly)
 {
-    OwnedRender::E1MobSource ownedSource(pszMprName, pszMobName);
+    auto ownedSource = std::make_unique<OwnedRender::E1MobSource>(pszMprName, pszMobName);
     // load ai map if changed
     if (szZoneFileName.CompareNoCase(pszMprName) != 0)
     {
@@ -3452,7 +3480,12 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
         return FALSE;
 
     // prepare for map objects loading
-    if (szMobFileName.CompareNoCase(pszMobName) == 0)
+    const auto *settlementMod = ModRuntime::Current();
+    bool hasSettlement = !settlementMobs.Empty();
+    if (settlementMod)
+        for (const auto &entry : settlementMod->Settlements().All())
+            hasSettlement |= entry.second.map == Settlement::MapName(pszMprName);
+    if (szMobFileName.CompareNoCase(pszMobName) == 0 && !hasSettlement)
     {
         script.Clear();
         scriptTemp.Clear();
@@ -3487,7 +3520,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
             script.Clear();
             fof.Clear();
         }
-        if (bLoadStatic)
+        if (bLoadStatic && (!hasSettlement || bStaticOnly))
             CreateInitialUpdate();
     }
 
@@ -3498,8 +3531,11 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     }
     bLoadDynamic = true;
     bLoadStatic = true;
+    ownedSource->Succeeded(true);
+    ownedSource.reset(); // Publish the main source before any supplemental MOB.
+    if (!bStaticOnly && !settlementMobs.Load(*this)) return FALSE;
+    if (hasSettlement && !bStaticOnly) CreateInitialUpdate();
     if(auto*mod=ModRuntime::Current())mod->ResetRuntimeState();
-    ownedSource.Succeeded(true);
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////

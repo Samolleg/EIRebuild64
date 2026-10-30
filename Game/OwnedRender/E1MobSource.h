@@ -5,7 +5,7 @@
 
 namespace OwnedRender {
 void E1RestoreSavedWorldSource(const char* terrain, const char* mob,
-    const std::vector<owned::RetainedAdmission>& members) noexcept;
+    const std::vector<owned::RetainedAdmission>& members, bool remapped = false) noexcept;
 // One MOB load reported to the renderer's retained static scene: the source
 // opens before the game's loader runs and closes with its result. The
 // renderer then loads the same MOB through its own resource runtime and

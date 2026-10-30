@@ -1,5 +1,6 @@
 #pragma once
 #include "WorldLoadOrigin.h"
+#include "SettlementMob.h"
 #include "ObjectIdentity.h"
 #include <utility>
 #include <vector>
@@ -46,6 +47,8 @@ public:
 class CWorldServer : public CWorldBase
 {
     friend class SaveSchema::Slot;
+    friend class Settlement::World;
+    Settlement::World settlementMobs;
     struct FieldCampState;
     std::shared_ptr<FieldCampState> fieldCamp;
     void StoreFieldCamp(SaveSchema::Writer &) const;
@@ -73,6 +76,8 @@ private:
     int nLastLightningTime;
 
 public:
+    Settlement::World &Settlements() { return settlementMobs; }
+    const Settlement::World &Settlements() const { return settlementMobs; }
     CHoover *pHoover = nullptr; // just stuff hoover :)
 
     CFileRegistry messages; // server messages data

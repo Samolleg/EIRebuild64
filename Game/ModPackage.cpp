@@ -134,6 +134,7 @@ void CModPackage::Require(const char *name){lua_getglobal(state,"require");lua_p
 void CModPackage::Load(const std::string &directory){
  if(state)throw std::runtime_error("Package already loaded; create a fresh package for reload");
  root=fs::absolute(directory).lexically_normal().string();
+ settlementCatalog.Load(root);
  SpellTextures::Load(root);
  CFileRegistry config;if(!config.Open(Join(root,"config.reg").c_str()))throw std::runtime_error("Cannot open mod config.reg");
  saveInMod=config.GetInt("MOD","GameSaves",1)!=0;

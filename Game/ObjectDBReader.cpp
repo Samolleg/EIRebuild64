@@ -152,10 +152,21 @@ bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript)
     return true;
 }
 
-bool CGameMOBFile::Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &szScript)
+bool CGameMOBFile::ReadModule(CBasicObjectMap &objects, CString &szScript)
 {
+    SDiplomation ignored;
+    bool parsed = false;
+    Read(objects, ignored, szScript, false, &parsed);
+    return parsed;
+}
+
+bool CGameMOBFile::Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &szScript,
+                       bool applyWorldSettings, bool *parsed)
+{
+    if (parsed) *parsed = false;
     bool isMain = true;
-    ReadNextHeader(); // Main section
+    ReadNextHeader();
+    if (!applyWorldSettings && GetID() != ID_OBJECTDBFILE) return false; // Main section
     CChunkTag sSectionChunk(this);
     for (sSectionChunk.ReadNextHeader();; sSectionChunk.ReadNextHeader())
     {
@@ -175,9 +186,11 @@ bool CGameMOBFile::Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &s
                 ws.ambient = sChunk.ReadAsFloat();
                 sChunk.ReadNextHeader();
                 ws.sun_light = sChunk.ReadAsFloat();
-                theWorldServer.SetWorldTime(ws.time);
-                theWorldServer.SetServerWind(ws.wind_dir,
-                                             Min(ws.wind_str, theSettings.fpDefaultWindForce));
+                if (applyWorldSettings) {
+                    theWorldServer.SetWorldTime(ws.time);
+                    theWorldServer.SetServerWind(ws.wind_dir,
+                                                 Min(ws.wind_str, theSettings.fpDefaultWindForce));
+                }
             }
             break;
             case ID_SS_TEXT:
@@ -243,6 +256,10 @@ bool CGameMOBFile::Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &s
                     {
                         pNewObject->SetParentChunk(&sObjChunk);
                         pNewObject->ReadAllSubChunks();
+                        if (!applyWorldSettings && (pNewObject->p_nID < 0 || objects.Seek(pNewObject->p_nID))) {
+                            delete pNewObject;
+                            return false;
+                        }
                         objects.SetAt(pNewObject->p_nID, pNewObject);
                         pNewObject = NULL;
                     }
@@ -269,5 +286,6 @@ bool CGameMOBFile::Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &s
         if (IsAllData())
             break;
     }
+    if (parsed) *parsed = true;
     return isMain;
 }

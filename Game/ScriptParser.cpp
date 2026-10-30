@@ -2,6 +2,8 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Script.h"
+#include "SettlementMob.h"
+#include "WorldServer.h"
 #include "ScriptParser.h"
 #include "RandomGen.h"
 #include "ModMobCommands.h"
@@ -355,11 +357,19 @@ static LPCSTR GetCmdName(ESCCmd cmd)
     return "Unknown command";
 }
 
+static bool OwnsDeclaration(const CString &name, std::uint32_t context)
+{
+    Settlement::Name qualified;
+    return !Settlement::ParseName((LPCSTR)name, qualified) || qualified.settlement == context;
+}
+
 static void GetLexemeCmd(LPCSTR pszLexeme, ESCCmd *pCmd, int *pnTrailer)
 {
     int nMaxFoundLen; // длина самой длиной подход€щей лексемы
     // Check for float digit
-    if (isdigit(static_cast<unsigned char>(*pszLexeme)) || *pszLexeme == '.' || *pszLexeme == '-')
+    Settlement::Name qualified;
+    if (!Settlement::ParseName(pszLexeme, qualified) &&
+        (isdigit(static_cast<unsigned char>(*pszLexeme)) || *pszLexeme == '.' || *pszLexeme == '-'))
     {
         int nPointNum = 0;
         if (*pszLexeme++ == '.')
@@ -716,7 +726,7 @@ BOOL CScript::LoadFunction(SSCCmd &res, POSITION &pos, CLexemeList &lexemes, int
 
         if(*pszParams=='?')++pszParams;else if(*pszParams=='+')--pszParams;
         bFailed = FALSE;
-        lexSigned = SignName(lex); // дл€ обработки глобальных переменных вторичных скриптов
+        lexSigned = SignName(lex, pszParams[0] == 'g'); // дл€ обработки глобальных переменных вторичных скриптов
         switch (pszParams[0])
         {
         case 'f':
@@ -724,7 +734,7 @@ BOOL CScript::LoadFunction(SSCCmd &res, POSITION &pos, CLexemeList &lexemes, int
             scrParam.eType = ptFloat;
             gScrParam.eType = ptFloat;
             scrParam.nVarNumber = vars.fVars.GetVariableIndex(lex);
-            gScrParam.nVarNumber = globalVars.fVars.GetVariableIndex(lex);
+            gScrParam.nVarNumber = CurrentSettlement() ? -1 : globalVars.fVars.GetVariableIndex(lex);
             if (gScrParam.nVarNumber < 0)
                 gScrParam.nVarNumber = globalVars.fVars.GetVariableIndex(lexSigned);
             scrParam.nNumber = nFloatParam;
@@ -741,7 +751,7 @@ BOOL CScript::LoadFunction(SSCCmd &res, POSITION &pos, CLexemeList &lexemes, int
             scrParam.eType = ptString;
             gScrParam.eType = ptString;
             scrParam.nVarNumber = vars.szVars.GetVariableIndex(lex);
-            gScrParam.nVarNumber = globalVars.szVars.GetVariableIndex(lex);
+            gScrParam.nVarNumber = CurrentSettlement() ? -1 : globalVars.szVars.GetVariableIndex(lex);
             if (gScrParam.nVarNumber < 0)
                 gScrParam.nVarNumber = globalVars.szVars.GetVariableIndex(lexSigned);
             scrParam.nNumber = nStringParam;
@@ -758,7 +768,7 @@ BOOL CScript::LoadFunction(SSCCmd &res, POSITION &pos, CLexemeList &lexemes, int
             scrParam.eType = ptObject;
             gScrParam.eType = ptObject;
             scrParam.nVarNumber = vars.oVars.GetVariableIndex(lex);
-            gScrParam.nVarNumber = globalVars.oVars.GetVariableIndex(lex);
+            gScrParam.nVarNumber = CurrentSettlement() ? -1 : globalVars.oVars.GetVariableIndex(lex);
             if (gScrParam.nVarNumber < 0)
                 gScrParam.nVarNumber = globalVars.oVars.GetVariableIndex(lexSigned);
             scrParam.nNumber = nObjectParam;
@@ -771,7 +781,7 @@ BOOL CScript::LoadFunction(SSCCmd &res, POSITION &pos, CLexemeList &lexemes, int
                   // цикле
             scrParam.nVarNumber = -1;
             gScrParam.eType = ptObject;
-            gScrParam.nVarNumber = globalVars.oVars.GetVariableIndex(lex);
+            gScrParam.nVarNumber = CurrentSettlement() ? -1 : globalVars.oVars.GetVariableIndex(lex);
             if (gScrParam.nVarNumber < 0)
                 gScrParam.nVarNumber = globalVars.oVars.GetVariableIndex(lexSigned);
             if (gScrParam.nVarNumber < 0)
@@ -787,7 +797,7 @@ BOOL CScript::LoadFunction(SSCCmd &res, POSITION &pos, CLexemeList &lexemes, int
             scrParam.eType = ptGroup;
             gScrParam.eType = ptGroup;
             scrParam.nVarNumber = vars.gVars.GetVariableIndex(lex);
-            gScrParam.nVarNumber = globalVars.gVars.GetVariableIndex(lex);
+            gScrParam.nVarNumber = CurrentSettlement() ? -1 : globalVars.gVars.GetVariableIndex(lex);
             if (gScrParam.nVarNumber < 0)
                 gScrParam.nVarNumber = globalVars.gVars.GetVariableIndex(lexSigned);
             scrParam.nNumber = nGroupParam;
@@ -989,7 +999,7 @@ BOOL CScript::LoadCommandsList(SScriptThread &res, POSITION &pos, CLexemeList &l
             bRv = FALSE;
             for (i = 0; i < scripts.GetSize(); i++)
             { // может это вызов одного из скриптов ???
-                if (scripts[i].szScriptName == lex || scripts[i].szScriptName == lexSigned)
+                if ((!CurrentSettlement() && scripts[i].szScriptName == lex) || scripts[i].szScriptName == lexSigned)
                 {
                     bRv = TRUE;
                     if (!LoadFunction(command, pos, lexemes, SC_RUNSCRIPT, vars,
@@ -1005,7 +1015,7 @@ BOOL CScript::LoadCommandsList(SScriptThread &res, POSITION &pos, CLexemeList &l
             }
             if (!bRv)
             { // может оператор присвоени€
-                if (globalVars.IsVariableName(lex))
+                if (!CurrentSettlement() && globalVars.IsVariableName(lex))
                     bRv = LoadAssignOperator(command, pos, lexemes, vars, lex);
                 else if (globalVars.IsVariableName(lexSigned))
                     bRv = LoadAssignOperator(command, pos, lexemes, vars, lexSigned);
@@ -1089,11 +1099,19 @@ BOOL CScript::LoadParameters(SOneScript &res, POSITION &pos, CLexemeList &lexeme
         }
         if (!CheckNextLexeme(lexemes, pos, SC_COLON))
             return FALSE;
+        if (bSign && !OwnsDeclaration(lex, CurrentSettlement()))
+            return ScriptError(lexInfo.nLine, SC_UNEXPECTED_SYMBOL, "Declaration belongs to another settlement");
+        const bool groupImport = bSign && IsSettlementGroupImport(lex);
         if (bSign)
-            lex = SignName(lex);
+            lex = SignName(lex, groupImport);
         lexInfo = lexemes.GetNext(pos);
         lex1 = lexInfo.lexeme;
-        if (lex1 == "float")
+        if (groupImport) {
+            if (lex1 != "group" || globalVars.gVars.GetVariableIndex(lex) < 0)
+                return ScriptError(lexInfo.nLine, SC_UNEXPECTED_SYMBOL, "Missing imported group %s", (const char *)lex);
+            bAdded = TRUE; // Share the existing group and its variable index.
+        }
+        else if (lex1 == "float")
             bAdded = res.AddParameter(lex, ptFloat);
         else if (lex1 == "string")
             bAdded = res.AddParameter(lex, ptString);
@@ -1163,12 +1181,24 @@ BOOL CScript::LoadText(CString &szFile, BOOL bRun)
                 return FALSE;
             objScript.vars.SetZeroValues(); // this guarantees that execution will start in
                                             // identical environment every time
+            if (CurrentSettlement()) {
+                auto duplicate = [&](auto &vars) {
+                    for (int i = 0; i < vars.GetSize(); ++i)
+                        if (globalVars.IsVariableName(vars.GetName(i))) return true;
+                    return false;
+                };
+                if (duplicate(objScript.vars.fVars) || duplicate(objScript.vars.szVars) ||
+                    duplicate(objScript.vars.oVars) || duplicate(objScript.vars.gVars))
+                    return ScriptError(lexInfo.nLine, SC_DUPLICATE_PARAMETER_NAME, "Duplicate settlement global variable");
+            }
             globalVars.AddVars(objScript.vars);
             break;
         case SC_DECLARESCRIPT:
             objScript.Clear();
             lexInfo = lexemes.GetNext(pos);
             lex = lexInfo.lexeme;
+            if (!OwnsDeclaration(lex, CurrentSettlement()))
+                return ScriptError(lexInfo.nLine, SC_UNEXPECTED_SYMBOL, "Declaration belongs to another settlement");
             objScript.szScriptName = SignName(lex);
             if (GetScriptIdx(objScript.szScriptName) != -1)
                 return ScriptError(lexInfo.nLine, SC_DUPLICATE_SCRIPT, "Duplicate script %s",
@@ -1183,6 +1213,8 @@ BOOL CScript::LoadText(CString &szFile, BOOL bRun)
             objScript.Clear();
             lexInfo = lexemes.GetNext(pos);
             lex = lexInfo.lexeme;
+            if (!OwnsDeclaration(lex, CurrentSettlement()))
+                return ScriptError(lexInfo.nLine, SC_UNEXPECTED_SYMBOL, "Declaration belongs to another settlement");
             objScript.szScriptName = SignName(lex);
             if (!CheckNextLexeme(lexemes, pos, SC_OPEN_FUNCTION))
                 return FALSE;
@@ -1216,7 +1248,7 @@ BOOL CScript::LoadText(CString &szFile, BOOL bRun)
     if (pWorldActions && bRun)
         RunThreadDelayed(pWorldActions);
     bLoaded = TRUE;
-    nSecondaryCount++;
+    if (!CurrentSettlement()) nSecondaryCount++;
     return TRUE;
 }
 
@@ -1224,7 +1256,7 @@ BOOL CScript::AppendText(CString &szFile)
 {
     if (!LoadText(szFile, FALSE))
         return FALSE;
-    nSecondaryCount--;
+    if (!CurrentSettlement()) nSecondaryCount--;
     return TRUE;
 }
 
@@ -1265,8 +1297,11 @@ int CScript::GetScriptIdx(const char *pszName)
     return -1;
 }
 
-CString CScript::SignName(const CString &src)
+CString CScript::SignName(const CString &src, bool group)
 {
+    Settlement::Name qualified;
+    if (CurrentSettlement() || Settlement::ParseName((LPCSTR)src, qualified))
+        return NamespaceWorld().Settlements().Symbol(CurrentSettlement(), (LPCSTR)src, group).c_str();
     if (nSecondaryCount == 0)
         return src;
     CString res;

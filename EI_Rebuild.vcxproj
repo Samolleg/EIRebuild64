@@ -91,6 +91,7 @@
     <ClCompile Include="Game\DynamicSave.cpp" />
     <ClCompile Include="Game\GameSave.cpp" />
     <ClCompile Include="Game\SaveSlot.cpp" />
+    <ClCompile Include="Game\SettlementMob.cpp" />
     <ClInclude Include="Game\SaveSlot.h" />
     <ClCompile Include="Game\MoviePlayback.cpp" />
     <ClCompile Include="Game\VideoPlayer.cpp" />

@@ -131,7 +131,7 @@ void retained_static_record_admission(std::uint64_t transaction,
 // Rebuild renderer resources from accepted saved-world names and membership;
 // never rerun the game's MOB parser, factories, scripts or simulation.
 bool retained_static_restore_source(MobSourceRole role, const char* terrain,
-    const char* mob, const std::vector<RetainedAdmission>& members) noexcept;
+    const char* mob, const std::vector<RetainedAdmission>& members, bool remapped = false) noexcept;
 void retained_static_finish_source(std::uint64_t transaction,
                                    bool owner_success,
                                    bool common_parser_ran) noexcept;

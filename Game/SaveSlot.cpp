@@ -423,6 +423,7 @@ void Slot::World(Writer &w,const CWorldServer &v)
         for(auto weight:g.vertices[c.kind][c.y][c.x].nWeights)w.Int16(weight);
         w.UInt8(g.places[c.kind][c.y][c.x].nX);w.UInt8(g.places[c.kind][c.y][c.x].nY);w.UInt16(g.colors[c.kind][c.y][c.x]);}
     v.StoreFieldCamp(w);
+    v.Settlements().Store(w,const_cast<CWorldServer &>(v));
 }
 void Slot::World(Reader &r,CWorldServer &v)
 {
@@ -452,7 +453,9 @@ void Slot::World(Reader &r,CWorldServer &v)
         auto px=r.UInt8(),py=r.UInt8();if(px>15||py>15)Invalid("invalid graph node placement");
         g.places[k][y][x].nX=px;g.places[k][y][x].nY=py;g.colors[k][y][x]=r.UInt16();
     }
-    v.LoadFieldCamp(r);v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
+    v.LoadFieldCamp(r);v.Settlements().Restore(r,v);
+    v.script.ValidateSettlementContexts();v.scriptTemp.ValidateSettlementContexts();
+    v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
 }
 
 void Slot::FinalizeWorld(Document &d)
@@ -560,7 +563,7 @@ void Slot::Commit(std::unique_ptr<State> state)
     renderMembers.reserve(current->mapObjects.GetCount());
     for(const auto &x:current->mapObjects){
         const int id=x.second->GetID();
-        if(id>0)renderMembers.push_back({std::uint32_t(id),std::uint32_t(x.second->GetTypeID()),id});
+        if(id>0&&!current->Settlements().Reserved(id))renderMembers.push_back({std::uint32_t(id),std::uint32_t(x.second->GetTypeID()),id});
     }
     // Preparation is reversible: no live disconnect, screen destruction,
     // namespace publication or world ownership changes occur in this scope.
@@ -651,6 +654,7 @@ void Slot::Commit(std::unique_ptr<State> state)
             if(current->szLoadedMobs[i].CompareNoCase(current->szMobFileName)!=0)
                 OwnedRender::E1RestoreSavedWorldSource(nullptr,current->szLoadedMobs[i],renderMembers);
     }
+    current->Settlements().RestoreRenderSources(*current);
     if(active->fullSlot){active->uiState.Apply();theInterface.AdoptSavedInterface();}
     // Audio handles belong to the retired world. This is a non-throwing
     // best-effort stop, after acceptance, never a reason to reject a staged slot.

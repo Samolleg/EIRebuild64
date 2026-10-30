@@ -15,9 +15,9 @@ std::string label;
 
 namespace OwnedRender {
 void E1RestoreSavedWorldSource(const char* terrain, const char* mob,
-    const std::vector<owned::RetainedAdmission>& members) noexcept {
+    const std::vector<owned::RetainedAdmission>& members, bool remapped) noexcept {
     const bool restored = owned::retained_static_restore_source(
-        terrain ? owned::MobSourceRole::main : owned::MobSourceRole::secondary, terrain, mob, members);
+        terrain ? owned::MobSourceRole::main : owned::MobSourceRole::secondary, terrain, mob, members, remapped);
     try {
         GameJournal::Event(restored ? "RENDER" : "ERROR", "saved_mob_source",
             "terrain=%s mob=%s restored=%d members=%zu", terrain ? terrain : "", mob, restored, members.size());
