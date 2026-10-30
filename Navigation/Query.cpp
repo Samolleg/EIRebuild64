@@ -2,6 +2,7 @@
 #include "../external/recastnavigation/Detour/Include/DetourNavMeshQuery.h"
 #include "../external/recastnavigation/Detour/Include/DetourNode.h"
 #include <algorithm>
+#include <iterator>
 #include <unordered_set>
 
 
@@ -552,7 +553,8 @@ bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,flo
     auto accept=[&](dtPolyRef ref,Point point) {
         const auto at=Address(mesh,point,ref,height,source.z);if(!at.surface)return false;
         const auto p=at.position;const float dx=std::abs(p.x-center.x),dy=std::abs(p.y-center.y);
-        if(shape==RandomShape::Square?(dx>radius||dy>radius):(std::hypot(dx,dy)>radius))return false;
+        const float limit=radius==0?.001f:radius;
+        if(shape==RandomShape::Square?(dx>limit||dy>limit):(std::hypot(dx,dy)>limit))return false;
         // Reachable graph polygons alone do not prove a complete route: the
         // same query also enforces source support and bounded Detour results.
         Request request;request.source=source;request.start=address;request.goal=p;request.height=height;request.excludedFlags=excludedFlags;
@@ -576,11 +578,46 @@ bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,flo
     if(std::hypot(seed.position.x-center.x,seed.position.y-center.y)>search+.001f)return false;
     const auto nav=ToNav({center.x,center.y,seed.position.z});
     const float start[]={nav.x,nav.y,nav.z};
+    std::vector<dtPolyRef> refs(4096);int count=0;
+    const auto status=mesh.query->findPolysAroundCircle(seed.polygon,start,search,&filter,refs.data(),nullptr,nullptr,&count,int(refs.size()));
+    if(dtStatusFailed(status)||Limited(status))return false;
+    struct Sample {dtPolyRef ref;Point a,b,c;double end;};
+    std::vector<Sample> samples;double total=0;
+    for(int i=0;i<count;++i) {
+        const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
+        if(dtStatusFailed(mesh.data->getTileAndPolyByRef(refs[i],&tile,&poly))||poly->getType()!=DT_POLYTYPE_GROUND)continue;
+        std::vector<Point> polygon;for(unsigned j=0;j<poly->vertCount;++j){const auto* v=tile->verts+poly->verts[j]*3;polygon.push_back({v[0],v[1],v[2]});}
+        auto clip=[&](bool xaxis,float edge,bool greater) {
+            std::vector<Point> out;if(polygon.empty())return;
+            auto previous=polygon.back();float pv=(xaxis?previous.x:previous.z)-edge;
+            for(auto current:polygon) {
+                const float cv=(xaxis?current.x:current.z)-edge;
+                if((pv>=0)!=(cv>=0)){const float f=pv/(pv-cv);out.push_back({previous.x+(current.x-previous.x)*f,previous.y+(current.y-previous.y)*f,previous.z+(current.z-previous.z)*f});}
+                if(greater?cv>=0:cv<=0)out.push_back(current);
+                previous=current;pv=cv;
+            }
+            polygon=std::move(out);
+        };
+        clip(true,nav.x-radius,true);clip(true,nav.x+radius,false);
+        clip(false,nav.z-radius,true);clip(false,nav.z+radius,false);
+        for(size_t j=2;j<polygon.size();++j) {
+            const auto a=polygon[0],b=polygon[j-1],c=polygon[j];
+            const double area=std::abs((double(b.x)-a.x)*(double(c.z)-a.z)-(double(b.z)-a.z)*(double(c.x)-a.x));
+            if(area<=1.e-12)continue;
+            total+=area;samples.push_back({refs[i],a,b,c,total});
+        }
+    }
+    if(samples.empty())return false;
+    auto fraction=[&](){return std::clamp(random(),0.f,1.f);};
     for(int attempt=0;attempt<8;++attempt) {
-        dtPolyRef ref=0;float point[3]{};
-        const auto status=mesh.query->findRandomPointAroundCircle(seed.polygon,start,search,&filter,random,&ref,point);
-        if(dtStatusFailed(status)||Limited(status)||!ref)return false;
-        if(accept(ref,{point[0],point[1],point[2]}))return true;
+        // Sample the polygon clipped to the requested box, not the whole
+        // Detour polygon (which can be much larger than a small guard area).
+        const double chosen=fraction()*total;
+        auto selected=std::lower_bound(samples.begin(),samples.end(),chosen,[](const Sample& s,double value){return s.end<value;});
+        if(selected==samples.end())selected=std::prev(samples.end());
+        const float u=std::sqrt(fraction()),v=fraction();const auto& t=*selected;
+        const Point p{(1-u)*t.a.x+u*((1-v)*t.b.x+v*t.c.x),(1-u)*t.a.y+u*((1-v)*t.b.y+v*t.c.y),(1-u)*t.a.z+u*((1-v)*t.b.z+v*t.c.z)};
+        if(accept(t.ref,p))return true;
     }
     return false;
 }

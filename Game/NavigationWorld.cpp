@@ -251,6 +251,28 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             if(record.contains("profile"))for(int i=0;i<AgentCount;++i)if(record["profile"]==Agents[i].name)type=i;
             auto& mesh=*meshes[type];const float height=record.value("height",unit?Height(unit):1.6f);
             record["profile_used"]=Agents[type].name;record["height_used"]=height;
+            if(record.at("kind")=="random_goal"||record.at("kind")=="class_support") {
+                const int c=record.value("class",unit?unit->GetAIClass():int(mesh.profile.materialClass));
+                const auto flags=ExcludeClass(c);const bool expected=record.value("expected",true);
+                Location at;Point selected;bool accepted=false;
+                if(record.at("kind")=="class_support") {
+                    accepted=Project(mesh,goal,.001f,4.f,at,height,flags);
+                    if(accepted)selected=at.position;
+                } else {
+                    const auto shape=record.value("shape",std::string("circle"))=="square"?RandomShape::Square:RandomShape::Circle;
+                    const bool placed=ResolveLocation(mesh,from,nullptr,at,height,flags);
+                    accepted=placed&&RandomReachable(mesh,at.position,goal,record.at("radius").get<float>(),height,[](){return ::random.GetFloat(0.f,1.f);},selected,flags,&at,shape);
+                }
+                record["accepted"]=accepted;record["class_used"]=c;
+                if(accepted)record["selected"]={selected.x,selected.y,selected.z};
+                const bool passed=accepted==expected;record["passed"]=passed;output.push_back(record);
+                printf("GOAL_POLICY_RELEASE name=%s kind=%s profile=%s class=%d accepted=%d expected=%d passed=%d\n",record.value("name",std::string("goal")).c_str(),record.at("kind").get<std::string>().c_str(),Agents[type].name,c,int(accepted),int(expected),int(passed));fflush(stdout);
+                if(record.value("required",false)&&!passed) {
+                    std::ofstream(NavigationBake::reportDirectory/"goal-policy-failure.json")<<record.dump(2);
+                    throw std::runtime_error("Nav64: shared goal/class release failed");
+                }
+                continue;
+            }
             Location start,finish,desired;
             const bool placed=ResolveLocation(mesh,from,nullptr,start,height);
             record["placed"]=placed;
@@ -321,6 +343,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
         const auto oldTime=world.GetSegmentTimeCounter();
         for(const auto& record:records) {
             if(record.at("scene").at(0)!=mapName||record.at("scene").at(1)!=mobName)continue;
+            if(record.at("kind")=="random_goal"||record.at("kind")=="class_support")continue;
             const bool required=record.value("required",false);
             if(record.at("kind")!="walk"&&!required)continue;
             // A previous route may have exhausted its budget. Set the clock

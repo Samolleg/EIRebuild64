@@ -190,11 +190,17 @@ original square search region. Candidates come from the source's reachable
 mesh region, use its live support address and require a complete exact route.
 The requested region is seeded by a proven route from the unit, so a small
 region far from its current position is not lost to source-circle sampling.
+Reachable polygons are clipped to the requested square before area-weighted
+sampling; circles additionally reject points outside their radius. Whole
+Detour polygons are never sampled when they exceed the requested region.
 Attempts remain bounded to eight; a zero-radius goal resolves only the given
-point. An unavailable region produces no move. Scripted patrol coordinates,
+point with the existing 1 mm numerical boundary tolerance. An unavailable region produces no move. Scripted patrol coordinates,
 look directions and timing are unchanged.
 
 The baker accepts --replay-input PRIVATE_JSON for journal-derived release inputs.
+The same input accepts required `random_goal` records (radius, circle/square
+shape) and `class_support` records (class, expected admission). They query the
+ready mesh through the production goal/projection API, with no game tick.
 Records are an array: scene [mpr,mob], kind (step_rejected/query_failed/walk),
 unit, source/goal [x,y,z], optional profile/height/max_length. Required walk
 records additionally set name, required=true and optionally neighbour=true.
