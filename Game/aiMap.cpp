@@ -1643,7 +1643,14 @@ CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos)
         const float previous=distanceXY2(pUnit->GetCP(),other->GetCP());
         if(previous<sum*sum&&next>previous+.00001f)continue;
         auto first=navigation.Position(pUnit,*this),second=navigation.Position(other,*this);
-        if(std::abs(first.z-second.z)>2.f)continue;
+        if(pUnit->GetUserUnitStats()->cLocomotion==3||other->GetUserUnitStats()->cLocomotion==3) {
+            // Flying bodies occupy world height; units on the ground below
+            // them do not form an XY wall.
+            Navigation::Location at;
+            if(!navigation.Support(pUnit,{newPos.x,newPos.y,first.z},at))continue;
+            const float low=at.position.z+pUnit->GetCP().z,otherLow=second.z+other->GetCP().z;
+            if(low>=otherLow+other->GetUnitHeight()||otherLow>=low+pUnit->GetUnitHeight())continue;
+        } else if(std::abs(first.z-second.z)>2.f)continue;
         return other;
     }
     return 0;
@@ -2296,6 +2303,12 @@ void CAIMap::CalcSpeeds(CUnit *pUnit, CAIRoute &route)
         float dz=next.supportZ-current.supportZ,angle=std::atan2(std::abs(dz),(std::max)(.001f,distance));
         float multiplier=pUnit->GetAIClass()==0?1.f:std::pow(1+std::pow(std::sin(angle),2.f),2.f);if(dz<0)multiplier=1/std::sqrt(multiplier);
         current.wSpeed256=WORD((std::max)(1,(std::min)(65535,int(speed*N_RT_SPEED/1024.f/multiplier))));
+        if(pUnit->GetUserUnitStats()->cLocomotion==3) {
+            // The existing XY walker consumes 3D travel time through this
+            // horizontal speed, which is serialized with every route node.
+            const float length=std::hypot(distance,dz);
+            if(length>.00001f)current.wSpeed256=WORD((std::max)(1,int(current.wSpeed256*distance/length)));
+        }
         current.SetFlags(false,cost>N_AI_RUN_COST_LIMIT);
     }
 }

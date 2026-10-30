@@ -29,17 +29,17 @@ the baked catalogue are dynamic. Their real solid parts become oriented
 boxes rasterized as non-walkable prisms; they never supply walkable BV tops.
 
 Recast uses 0.1 m cells, 0.05 m vertical cells, climb 0.35 m, slope 40 degrees,
-flight slope 60 degrees. Eight profiles retain four clearance tiers each.
+levitation slope 60 degrees. Six profiles retain four clearance tiers each.
 MPR material/water class areas only restrict traversal. The 40/60 degree
-slope filter applies to terrain and model surfaces for every profile. All profiles bake the losslessly decoded
+slope filter applies to ground and levitation, not flying. All profiles bake the losslessly decoded
 imported source geometry, exactly as runtime support and tile rebuilds do. Ready files
 are decoded by the runtime loader before baker quality queries.
 
 No TileCache layers or DetourTileCache dependency remain. Regular Recast
 compact fields, monotone regions, contours and polygon meshes produce ready
-Detour tiles including multiple elevations. No detail-mesh samples are
-stored: Detour triangulates the polygon fan, but no support or floor query
-uses its height. Before contouring, compact spans are attributed to original
+Detour tiles including multiple elevations. Ground/levitation detail samples
+are not stored: Detour triangulates the polygon fan, but their floor queries
+use original height. Before contouring, compact spans are attributed to original
 walkable triangles and regions are split by terrain/BASE identity. Polygons
 retain that identity, with only directly connected source neighbours admitted
 at voxel boundaries. Height selects the closest original floor after rejecting
@@ -117,17 +117,17 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 9, algorithm 25, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 10, algorithm 26, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   In the expanded tile stream, each tile blob is followed by a u32 polygon
   support count (must equal polyCount). Each polygon has u32 source-count and
   that many u64 source IDs (low/high u32), primary first, connected neighbours
   afterwards. These records belong to that tile's polygon order and move with
-  tile replacement. Algorithm 25 requires rebaking: 24 files lack the complete
-  ground-class masks and cannot be reused with this runtime.
+  tile replacement. Algorithm 26 requires rebaking all six profiles, sources
+  and body tables together; 24/25 data cannot be reused with this runtime.
   No layer section exists. Loader validates exact profile, bounds and ABI.
-- <mpr>--<mob>.navworld: JSON version 3, baked static NIDs and initial dynamic obstacle boxes.
-- <mpr>--<mob>.navgeom: shared NSRC version 7 (four parallel LZMS blocks), inner section 6,
+- <mpr>--<mob>.navworld: JSON version 4, baked static NIDs, ground dynamic boxes and flight_dynamic visual boxes.
+- <mpr>--<mob>.navgeom: shared NSRC version 8 (four parallel LZMS blocks), inner section 7,
   original bounds and indexed common float32 XYZ vertices, losslessly stored;
   per-triangle indices, float32 water depths, byte material/class metadata,
   static object and surface IDs. Centimetre rounding is not used: it changes
@@ -140,7 +140,7 @@ separate from this baker contract.
   Placement/step/restore and the local client resolve original terrain/BASE
   triangles through polygon provenance. Gameplay acceptance remains separate.
   Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 25, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 26, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -231,3 +231,43 @@ unavailable/limited detour waits without repeated queries. Moving/resized bodies
 profile/pose changes and navigation generation changes allow another query.
 Release walk records may set neighbour_distance, release_after_wait (0 keeps
 the neighbour standing) and require_detour. Their results include detour_max_ms.
+
+
+## Six profiles and automatic flight (algorithm 26)
+
+Profiles are small, human, large, giant, levitate and flying. Tiny bodies use
+small; levitating bodies share the remaining 0.5 m levitate profile. Profile
+ordinals change, so nav64/navgeom/navbody must be released together. The wire
+profile now stores Movement (ground=0, levitate=1, flying=2) after materialClass.
+The body table uses ground indices 0..3 and levitate index 4.
+
+Database locomotion 1 remains ground, 2 remains levitation, and 3 selects flying
+with AI class 0. No species names, database assignments or altitude controls are
+introduced. Existing database rows are unchanged. Bindings are an owner step.
+
+Flight bakes a continuous upper envelope of terrain/water, every static visual
+part (including crowns and ignored collision parts), doors and full dynamic-part bounds (including passable/ignored crowns).
+It covers their footprints with the shared 1 m flight radius and a lattice
+margin, then propagates height maxima to form approach/departure ramps. Source
+slope, climb, material and walkable-roof flags cannot block this profile. A
+0.5 m vertical margin accounts for voxel/detail quantization. This is automatic
+flight above obstacles, not free movement in caves or manual altitude selection.
+The flight mesh alone retains a sampled detail surface; its height supplies
+query/step/render support. Ground and levitation keep original triangle support.
+Flight routes sample the detail height every 0.25 m; serialized per-node speeds
+account for 3D length while the existing XY walker and commands remain in use.
+Crowd and melee admission use actual flight height. Ordinary units keep their
+previous rules. World changes rebuild the flying mesh once on the existing
+worker and publish it atomically; ground changes remain scoped to affected tiles.
+
+NavBake validates the released flight detail against original terrain/water and
+visual upper bounds, and traces flight over the real gate, forest and mountain.
+The profile is deliberately conservative: it goes over a visual part's full XY
+bounds, including empty crown gaps. Larger body-clearance policy and in-game
+acceptance must be reviewed with the future database bindings.
+
+Dynamic flight geometry retains all transformed part BVs, independently of
+ground blocking flags, in navworld flight_dynamic. The live-object diff
+compares those bounds too; removing, moving or turning a passable visual part
+queues one worker sky rebuild. Static upper bounds remain measured from FIG.
+Ground collision BVs and their tile rebuild policy are unchanged.

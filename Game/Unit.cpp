@@ -1280,9 +1280,9 @@ float CUnit::CalcZ(float fpX, float fpY)
 {
     const bool supported=navLocation.surface>=1 &&
         std::abs(fpX-navLocation.position.x)<.01f && std::abs(fpY-navLocation.position.y)<.01f;
-    if(supported && rpgUserUnitStats.cLocomotion!=2)return navLocation.position.z;
+    if(supported && rpgUserUnitStats.cLocomotion!=2 && rpgUserUnitStats.cLocomotion!=3)return navLocation.position.z;
     CWorldBase *pWorld = GetWorldBase();
-    if (rpgUserUnitStats.cLocomotion == 2)
+    if ((rpgUserUnitStats.cLocomotion == 2 || rpgUserUnitStats.cLocomotion == 3))
     {
         if (lpUnitSpecific->WhoAmI() == HPC_UNITSERVERSPECIFIC)
             return (supported?navLocation.position.z:pWorld->GetBridgeSurfaceZValue(fpX, fpY)) + cp.z;
@@ -1379,7 +1379,7 @@ void CUnit::RecalcAIParams()
     else
     {
         // NOTE actually on client ai class and attack distance are not of much interest
-        if (rpgUserUnitStats.cLocomotion == 2)
+        if ((rpgUserUnitStats.cLocomotion == 2 || rpgUserUnitStats.cLocomotion == 3))
             nAIClass = 0;
         else
             nAIClass = 3;

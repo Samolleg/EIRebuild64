@@ -9,10 +9,10 @@ inline bool NavigationObject(const CMapObject* object) {
 }
 
 // One transform for offline initial obstacles and live updates.
-inline std::vector<Navigation::Solid> NavigationBoxes(CMapObject* object,CAIMap& map) {
+inline std::vector<Navigation::Solid> NavigationBoxes(CMapObject* object,CAIMap& map,bool visual=false) {
     object->CreateCurrentPlacement();std::vector<Navigation::Solid> boxes;
     for(INT_PTR i=0;i<object->fbvs.GetSize();++i) {
-        const auto& bv=object->fbvs[i];if(bv.IsIgnored()||bv.IsBridge()||bv.GetPassability()!=AI_PASS_NO)continue;
+        const auto& bv=object->fbvs[i];if(!visual&&(bv.IsIgnored()||bv.IsBridge()||bv.GetPassability()!=AI_PASS_NO))continue;
         Navigation::Solid box;auto base=object->GetCP();base.z+=map.GetOriginalTileHeight(base);
         for(int j=0;j<8;++j) {
             CPlot3D corner((j&1)?(std::max)(bv.ptMin.x,bv.ptMax.x):(std::min)(bv.ptMin.x,bv.ptMax.x),

@@ -38,13 +38,17 @@ struct CeilingGrid {
     float base=0;
     std::vector<std::uint16_t> heights;
 };
+// Visual upper bounds, including non-walkable crowns and ignored collision parts.
+struct FlightBox { int object=0; Point minimum,maximum; };
 struct Geometry {
+    std::vector<FlightBox> flightBoxes;
     std::vector<Triangle> ground;
     std::vector<CeilingGrid> ceilings;
     std::vector<Door> doors;
     std::vector<OffMesh> connections;
     std::map<std::size_t,std::string> groundSources; // First triangle of each source sector, diagnostics only.
     std::vector<Solid> solids;
+    std::vector<Solid> flightSolids; // Current visual bounds; dynamic catalogue, not NSRC.
     Point minimum, maximum;
     float tileWidth=0;
     // Offline spatial catalogues shared by all profiles; no runtime binning.

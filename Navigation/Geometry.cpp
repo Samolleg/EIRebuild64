@@ -27,6 +27,10 @@ void Geometry::Bounds() {
         add({t.b.x,t.b.y,t.b.z+t.waterDepth.y});
         add({t.c.x,t.c.y,t.c.z+t.waterDepth.z});
     }
+    for(const auto& box:flightBoxes) {
+        if(!Finite(box.minimum)||!Finite(box.maximum))throw std::runtime_error("Nav64: non-finite flight bounds");
+        maximum.y=std::max(maximum.y,box.maximum.z+.6f);
+    }
     for(const auto& s:solids) {
         if(!s.error.empty())throw std::runtime_error(s.error);
         for(auto p:s.corners)add(p);

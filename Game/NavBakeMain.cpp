@@ -157,7 +157,7 @@ int wmain(int argc,wchar_t** argv) {
                 const auto bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
                 ++completed;
                 printf("MAP_DONE mpr=%s mob=%s import_ms=%lld total_ms=%lld profiles=%u bytes=%llu\n",
-                    map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),8,static_cast<unsigned long long>(bytes));
+                    map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),unsigned(Navigation::AgentCount),static_cast<unsigned long long>(bytes));
             }catch(const std::exception& e) {
                 ++errors;
                 fprintf(stderr,"MAP_ERROR mpr=%s mob=%s code=4 ms=%lld reason=%s\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),e.what());

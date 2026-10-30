@@ -28,6 +28,7 @@ class NavigationWorld {
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
     std::map<int,std::vector<Navigation::Solid>> appliedObjects;
+    std::map<int,std::vector<Navigation::Solid>> liveFlightObjects,appliedFlightObjects;
 
     std::set<int> bakedStatic,dirtyObjects;
     unsigned updateProfile=0;

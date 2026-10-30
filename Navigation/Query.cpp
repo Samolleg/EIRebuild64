@@ -20,6 +20,11 @@ unsigned short ClassFlags(const Mesh& mesh,unsigned short flags) {
 Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenceZ) {
     Location l;l.position=FromNav(p);l.radius=m.profile.radius;l.height=height;l.polygon=ref;l.generation=m.generation;
     unsigned char area=1;m.data->getPolyArea(ref,&area);l.area=area;
+    if(Flies(m.profile)) {
+        float point[]={p.x,p.y,p.z},closest[3]{};
+        if(m.query&&dtStatusSucceed(m.query->closestPointOnPoly(ref,point,closest,nullptr))&&std::hypot(closest[0]-p.x,closest[2]-p.z)<=.001f){l.position=FromNav({closest[0],closest[1],closest[2]});l.surface=1;}
+        return l;
+    }
     const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
     if(!m.sources||dtStatusFailed(m.data->getTileAndPolyByRef(ref,&tile,&poly)))return l;
     const auto key=std::make_pair(tile->header->x,tile->header->y);
@@ -85,8 +90,8 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
     const auto p=ToNav(point);const auto& g=*m.sources;
     // Enumerate overlapping XY polygons through the whole source height range.
     // Detour's fan Z is neither a floor selector nor an admission threshold.
-    const float pos[]={p.x,(g.minimum.y+g.maximum.y)*.5f,p.z};
-    const float ext[]={horizontal,(g.maximum.y-g.minimum.y)*.5f+2,horizontal};
+    const float pos[]={p.x,Flies(m.profile)?0.f:(g.minimum.y+g.maximum.y)*.5f,p.z};
+    const float ext[]={horizontal,Flies(m.profile)?1.e6f:(g.maximum.y-g.minimum.y)*.5f+2,horizontal};
     dtPolyRef refs[2048];int count=0;ref=0;
     const auto status=q.queryPolygons(pos,ext,&filter,refs,&count,2048);
     if(dtStatusFailed(status)||dtStatusDetail(status,DT_BUFFER_TOO_SMALL))return false;
@@ -101,7 +106,7 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
         // The requested horizontal tolerance is the full admission bound.
         // Adding another millimetre made strict 1 mm support queries accept
         // targets that the physical step correctly rejects as outside its mesh.
-        if(xy>horizontal||dz>vertical)continue;
+        if(xy>horizontal||(!Flies(m.profile)&&dz>vertical))continue;
         candidates.emplace_back(refs[i],at);
     }
     float best=1.e30f;bool exact=false;std::uint64_t selectedSurface=0;
@@ -154,12 +159,12 @@ Status ClosestGoal(const Mesh& mesh,dtNavMeshQuery& query,Point point,
                    const dtQueryFilter& filter,float height,Location& result) {
     if(!mesh.sources)return Status::NoGoal;
     const auto nav=ToNav(point);const auto& g=*mesh.sources;
-    const float center[]={nav.x,(g.minimum.y+g.maximum.y)*.5f,nav.z};
+    const float center[]={nav.x,Flies(mesh.profile)?0.f:(g.minimum.y+g.maximum.y)*.5f,nav.z};
     const float maximum=std::max({.15f,std::abs(nav.x-g.minimum.x),std::abs(nav.x-g.maximum.x),
                                 std::abs(nav.z-g.minimum.z),std::abs(nav.z-g.maximum.z)})+mesh.profile.cellSize;
     ClosestGoalQuery closest(mesh,query,point,height);float radius=.15f;
     for(;;) {
-        const float extent[]={radius,(g.maximum.y-g.minimum.y)*.5f+2,radius};
+        const float extent[]={radius,Flies(mesh.profile)?1.e6f:(g.maximum.y-g.minimum.y)*.5f+2,radius};
         const auto status=query.queryPolygons(center,extent,&filter,&closest);
         if(dtStatusFailed(status)||closest.limited)return Status::Limit;
         // An XY circle inside the queried square proves that no unqueried
@@ -307,6 +312,20 @@ Route Find(const Mesh& m,const Request& r) {
                 }
             }
         }
+    }
+    if(Flies(m.profile)&&result.points.size()>1) {
+        std::vector<Location> sampled;sampled.push_back(result.points.front());result.length=0;
+        for(size_t i=1;i<result.points.size();++i) {
+            auto a=result.points[i-1].position,b=result.points[i].position;
+            const int count=std::max(1,int(std::ceil(std::hypot(b.x-a.x,b.y-a.y)/.25f)));
+            if(sampled.size()+count>60000){result.status=Status::Limit;result.points.clear();return result;}
+            for(int k=1;k<=count;++k) {
+                const float f=float(k)/count;Location at;
+                if(!Project(m,{a.x+(b.x-a.x)*f,a.y+(b.y-a.y)*f,a.z+(b.z-a.z)*f},.001f,1.e6f,at,height,r.excludedFlags)){result.status=Status::NoPath;result.points.clear();return result;}
+                result.length+=Distance(sampled.back().position,at.position);sampled.push_back(at);
+            }
+        }
+        result.points=std::move(sampled);result.cost=result.length;
     }
     if(result.length>r.maxLength){result.points.clear();result.corridor.clear();result.status=Status::TooLong;return result;}
     result.status=Status::Complete;return result;
@@ -508,7 +527,7 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     // unrelated wall. Project only onto polygons actually reached in this
     // local traversal, with at most 1 mm of numerical correction.
     float best=1.e30f,bestXY=1.e30f;Location selected;const char* failure="blocked_edge";
-    const float limit=m.profile.climb+std::tan(m.profile.slope*3.14159265f/180.f)*std::hypot(desired.x-from.x,desired.y-from.y)+.001f;
+    const float limit=Flies(m.profile)?1.e30f:m.profile.climb+std::tan(m.profile.slope*3.14159265f/180.f)*std::hypot(desired.x-from.x,desired.y-from.y)+.001f;
     for(int i=0;i<count;++i) {
         float point[3]{};if(dtStatusFailed(q.closestPointOnPoly(visited[i],end,point,nullptr)))continue;
         const float error=std::hypot(point[0]-end[0],point[2]-end[2]);

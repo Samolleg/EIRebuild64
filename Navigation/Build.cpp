@@ -1,4 +1,5 @@
 #include "Build.h"
+#include "Flight.h"
 #include "../external/recastnavigation/Recast/Include/Recast.h"
 #include "../external/recastnavigation/Detour/Include/DetourNavMeshBuilder.h"
 #include "../external/recastnavigation/Detour/Include/DetourCommon.h"
@@ -35,8 +36,8 @@ struct Wire {
     std::uint32_t U(){Require(at<=bytes.size() && bytes.size()-at>=4,"Nav64: truncated field");std::uint32_t n;std::memcpy(&n,bytes.data()+at,4);at+=4;return n;}
     float F(){auto n=U();float v;std::memcpy(&v,&n,4);Require(std::isfinite(v),"Nav64: invalid float");return v;}
     std::string S(){auto n=U();Require(n<=4096 && n<=bytes.size()-at,"Nav64: invalid text");std::string s(reinterpret_cast<const char*>(bytes.data()+at),n);at+=n;return s;}
-    void ProfileOut(const Profile& p){F(p.radius);F(p.height);F(p.slope);F(p.climb);F(p.cellSize);F(p.cellHeight);U(p.tileCells);U(p.materialClass);}
-    Profile ProfileIn(){Profile p;p.radius=F();p.height=F();p.slope=F();p.climb=F();p.cellSize=F();p.cellHeight=F();p.tileCells=U();p.materialClass=U();Require(p.materialClass<8,"Nav64: invalid material class");return p;}
+    void ProfileOut(const Profile& p){F(p.radius);F(p.height);F(p.slope);F(p.climb);F(p.cellSize);F(p.cellHeight);U(p.tileCells);U(p.materialClass);U(unsigned(p.movement));}
+    Profile ProfileIn(){Profile p;p.radius=F();p.height=F();p.slope=F();p.climb=F();p.cellSize=F();p.cellHeight=F();p.tileCells=U();p.materialClass=U();p.movement=Movement(U());Require(unsigned(p.movement)<=2&&p.materialClass<8,"Nav64: invalid material class");return p;}
 };
 // Windows' built-in lossless LZMS codec needs no shipped DLL or
 // third-party source. The entire tile section shares one compression stream.
@@ -108,7 +109,7 @@ template<class Work> void SourceRows(size_t count,Work work) {
 }
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
-        p.cellSize==.1f && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && (p.slope==40||p.slope==60) && p.climb==.35f,"Nav64: unsupported build profile");
+        p.cellSize==.1f && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && ((p.movement==Movement::Ground&&p.slope==40)||(Levitates(p)&&p.slope==60)||(Flies(p)&&p.slope==90)) && p.climb==.35f,"Nav64: unsupported build profile");
 }
 // v1.6.0 addTile does not take bounds for its internal sections. Validate all
 // counts and the exact aligned library layout BEFORE handing it cached bytes.
@@ -247,7 +248,11 @@ struct RasterBatch {
     }
 };
 }
-static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={}) {
+static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false) {
+    if(Flies(p)&&!flightReady) {
+        auto sky=FlightGeometry(g,p);
+        return BuildProfile(sky,p,key,nullptr,workerLimit,onlyX,onlyZ,columns,true);
+    }
     const auto buildStart=std::chrono::steady_clock::now();
     CheckProfile(p);
     const auto& domain=batch?batch->Domain(p):p;
@@ -312,7 +317,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         if((onlyX>=0&&(x!=onlyX||z!=onlyZ))||inputs[index].triangles.empty())return;
         BakeContext context(p,x,z,onlyX<0);auto begin=std::chrono::steady_clock::now();
         rcConfig cfg{};cfg.cs=p.cellSize;cfg.ch=p.cellHeight;cfg.walkableSlopeAngle=p.slope;
-        cfg.walkableHeight=int(std::ceil(p.height/cfg.ch));cfg.walkableClimb=int(std::floor(p.climb/cfg.ch));cfg.walkableRadius=int(std::ceil(p.radius/cfg.cs));
+        cfg.walkableHeight=int(std::ceil(p.height/cfg.ch));cfg.walkableClimb=Flies(p)?int(std::ceil((g.maximum.y-g.minimum.y+4)/cfg.ch)):int(std::floor(p.climb/cfg.ch));cfg.walkableRadius=Flies(p)?0:int(std::ceil(p.radius/cfg.cs));
         cfg.tileSize=p.tileCells;cfg.borderSize=int(std::ceil(domain.radius/p.cellSize))+3;cfg.width=cfg.height=cfg.tileSize+cfg.borderSize*2;
         // A zero error retained every voxel stair in every clearance contour.
         // One cell removes those stairs without removing region/pose borders.
@@ -366,7 +371,9 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             for(auto* span=raw->spans[ix+iz*raw->width];span;span=span->next)
                 Require(rcAddSpan(&context,*r.height,ix,iz,span->smin,span->smax,static_cast<unsigned char>(span->area),0),"Nav64: profile heightfield copy failed");
         raw.reset();
-        rcFilterLedgeSpans(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height);
+        // Flight clearance is already in the upper envelope. Ground ledge and
+        // footprint erosion would remove valid sky beside the map boundary.
+        if(!Flies(p))rcFilterLedgeSpans(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height);
         rcFilterWalkableLowHeightSpans(&context,cfg.walkableHeight,*r.height);
         r.compact=rcAllocCompactHeightfield();Require(r.compact&&rcBuildCompactHeightfield(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height,*r.compact),"Nav64: compact heightfield failed");
         rasterUs.fetch_add(micros(begin));begin=std::chrono::steady_clock::now();
@@ -794,6 +801,12 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         dtNavMeshCreateParams create{};
         create.verts=poly.verts;create.vertCount=poly.nverts;create.polys=poly.polys;
         create.polyAreas=poly.areas;create.polyFlags=poly.flags;create.polyCount=poly.npolys;create.nvp=poly.nvp;
+        if(Flies(p)) {
+            r.detail=rcAllocPolyMeshDetail();
+            Require(r.detail&&rcBuildPolyMeshDetail(&context,poly,*r.compact,.5f,.05f,*r.detail),"Nav64: flight detail mesh failed");
+            create.detailMeshes=r.detail->meshes;create.detailVerts=r.detail->verts;create.detailVertsCount=r.detail->nverts;
+            create.detailTris=r.detail->tris;create.detailTriCount=r.detail->ntris;
+        }
         create.walkableHeight=p.height;create.walkableRadius=p.radius;create.walkableClimb=p.climb;
         create.tileX=x;create.tileY=z;create.tileLayer=0;
         rcVcopy(create.bmin,poly.bmin);rcVcopy(create.bmax,poly.bmax);
@@ -948,7 +961,7 @@ Bytes StoreSources(const Geometry& g) {
     for(const auto& t:g.ground)for(auto p:{t.a,t.b,t.c}) {
         const auto v=vertex(p);if(indices.emplace(v,unsigned(vertices.size())).second)vertices.push_back(v);
     }
-    Wire w;w.U(0x4352534e);w.U(6);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
+    Wire w;w.U(0x4352534e);w.U(7);w.P(g.minimum);w.P(g.maximum);w.U(unsigned(vertices.size()));
     const auto vertexStart=w.bytes.size();
     for(const auto& v:vertices)for(auto c:v)w.F(c);
     SourceArray(w.bytes,vertexStart,vertices.size(),12);
@@ -967,6 +980,8 @@ Bytes StoreSources(const Geometry& g) {
         Require(c.width&&c.height&&c.heights.size()==size_t(c.width)*c.height,"Nav64: invalid canopy grid");
         for(auto h:c.heights){w.bytes.push_back(std::uint8_t(h));w.bytes.push_back(std::uint8_t(h>>8));}
     }
+    w.U(unsigned(g.flightBoxes.size()));
+    for(const auto& box:g.flightBoxes){w.U(box.object);w.P(box.minimum);w.P(box.maximum);}
     w.U(unsigned(g.doors.size()));for(const auto& d:g.doors){w.U(d.object);w.U(d.openState);w.P(d.minimum);w.P(d.maximum);}
     w.U(unsigned(g.connections.size()));for(const auto& c:g.connections) {
         w.P(c.from);w.P(c.to);w.F(c.radius);w.U(unsigned(c.fromSurface));w.U(unsigned(c.fromSurface>>32));
@@ -992,7 +1007,7 @@ Bytes StoreSources(const Geometry& g) {
         const size_t a=w.bytes.size()*i/chunks,b=w.bytes.size()*(i+1)/chunks;
         return Pack(Bytes(w.bytes.begin()+a,w.bytes.begin()+b));
     });
-    Wire out;out.U(0x4352534e);out.U(7);out.U(unsigned(w.bytes.size()));out.U(chunks);
+    Wire out;out.U(0x4352534e);out.U(8);out.U(unsigned(w.bytes.size()));out.U(chunks);
     for(unsigned i=0;i<chunks;++i) {
         auto packed=pending[i].get();out.U(unsigned(w.bytes.size()*(i+1)/chunks-w.bytes.size()*i/chunks));
         out.U(unsigned(packed.size()));out.B(packed.data(),packed.size());
@@ -1002,7 +1017,7 @@ Bytes StoreSources(const Geometry& g) {
 std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) {
     const auto begin=std::chrono::steady_clock::now();double arrayMs=0;
     auto ms=[](auto from){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
-    Wire in;in.bytes=std::move(bytes);Require(in.U()==0x4352534e&&in.U()==7,"Nav64: incompatible source container");
+    Wire in;in.bytes=std::move(bytes);Require(in.U()==0x4352534e&&in.U()==8,"Nav64: incompatible source container");
     const auto size=in.U(),count=in.U();Require(size>=4&&size<=512ull*1024*1024&&count==4,"Nav64: source block limits");
     Wire w;w.bytes.resize(size);std::array<std::future<void>,4> pending;size_t offset=0;
     for(unsigned i=0;i<count;++i) {
@@ -1017,7 +1032,7 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
     Require(offset==size&&in.at==in.bytes.size(),"Nav64: source block size mismatch");
     for(auto& job:pending)job.get();const auto unpacked=std::chrono::steady_clock::now();
     const double unpackMs=ms(begin);
-    Require(w.U()==0x4352534e&&w.U()==6,"Nav64: incompatible source section");
+    Require(w.U()==0x4352534e&&w.U()==7,"Nav64: incompatible source section");
     auto g=std::make_shared<Geometry>();auto point=[&](){return Point{w.F(),w.F(),w.F()};};
     g->minimum=point();g->maximum=point();auto n=w.U();Require(n<12000000&&n<= (w.bytes.size()-w.at)/12,"Nav64: source vertex limit");
     const auto arrayStart=std::chrono::steady_clock::now();const SourceColumns<12> vertexColumns(w,n);
@@ -1044,6 +1059,12 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
         c.heights.resize(size_t(count));const auto sampleBytes=size_t(count)*sizeof(std::uint16_t);
         std::memcpy(c.heights.data(),w.bytes.data()+w.at,sampleBytes);w.at+=sampleBytes;
         g->ceilings.push_back(std::move(c));
+    }
+    n=w.U();Require(n<=1000000,"Nav64: flight box limit");
+    for(unsigned i=0;i<n;++i) {
+        FlightBox box;box.object=int(w.U());box.minimum=point();box.maximum=point();
+        Require(box.object>0&&Finite(box.minimum)&&Finite(box.maximum)&&box.minimum.x<=box.maximum.x&&box.minimum.y<=box.maximum.y&&box.minimum.z<=box.maximum.z,"Nav64: invalid flight box");
+        g->flightBoxes.push_back(box);
     }
     n=w.U();Require(n<=65536,"Nav64: door count limit");for(unsigned i=0;i<n;++i){Door d;d.object=int(w.U());d.openState=int(w.U());d.minimum=point();d.maximum=point();g->doors.push_back(d);}
     n=w.U();Require(n<=65536,"Nav64: connection count limit");for(unsigned i=0;i<n;++i) {
@@ -1127,6 +1148,7 @@ void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z) {
     ++mesh.generation;
 }
 void DoorState(Mesh& mesh,int object,bool open) {
+    if(Flies(mesh.profile))return;
     mesh.doorOpen[object]=open;if(!mesh.sources)return;
     const auto d=std::find_if(mesh.sources->doors.begin(),mesh.sources->doors.end(),[&](const Door& d){return d.object==object;});
     if(d==mesh.sources->doors.end())return;

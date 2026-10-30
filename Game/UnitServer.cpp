@@ -937,7 +937,7 @@ void CUnitServer::L1ExecMove()
             break;
         case AI_LOCK_DYNAMIC:
             // подождем, пока динамический лок от движущегося юнита снимут
-            if (rpgUnitStats.dwLocomotion == 2)
+            if ((rpgUnitStats.dwLocomotion == 2 || rpgUnitStats.dwLocomotion == 3))
                 L0FreezeMovement(true);
             else
                 L0Freeze(true);
@@ -2680,6 +2680,11 @@ bool CUnitServer::IsTargetReachable(const SUnitBasicCmd &cmd)
         return true;
     if (pTarget->IsDead())
         return true;
+    if(lpUnit->GetUserUnitStats()->cLocomotion==3||pTarget->GetUserUnitStats()->cLocomotion==3) {
+        if(cmd.cmd==UC_ATTACK&&IsCurrentWeaponABow())return true;
+        const auto a=lpUnit->GetCP(),b=pTarget->GetCP();
+        return std::abs(lpUnit->CalcZ(a.x,a.y)-pTarget->CalcZ(b.x,b.y))<1.5f;
+    }
     if (pTarget->GetAIClass() != 0)
         return true;
     // now we have to check heights
@@ -4415,7 +4420,7 @@ void CUnitServer::GetCastAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand
         {
             // if this is a levitating unit then it should continue previous animation (rotate)
             // until its possible to play cast animation
-            if (rpgUnitStats.dwLocomotion == 2)
+            if ((rpgUnitStats.dwLocomotion == 2 || rpgUnitStats.dwLocomotion == 3))
             {
                 nHit = GetAnimationHit(pEntry->dwEntryIndex);
                 int nPause = nLength - GetAnimationLength(pEntry->dwEntryIndex);
@@ -5307,7 +5312,7 @@ void CUnitServer::SetRPGStats(SRPGUnitStats *lpRPGNewUnitStats)
 void CUnitServer::RecalcAIClass()
 {
     ASSERT(lpUnit->bv.fpRadius > 0);
-    if (rpgUnitStats.dwLocomotion == 2)
+    if ((rpgUnitStats.dwLocomotion == 2 || rpgUnitStats.dwLocomotion == 3))
     {
         rpgUnitStats.wAIClassLie = 0;
         rpgUnitStats.wAIClassStay = 0;

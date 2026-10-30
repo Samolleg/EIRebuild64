@@ -42,7 +42,7 @@ void NavigationWorld::Scene(const char* mpr,const char* mob) {
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
     loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();queryObstacles=nullptr;
     if(sourceJob.valid())sourceJob.get();sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
-    liveObjects.clear();appliedObjects.clear();bakedStatic.clear();dirtyObjects.clear();
+    liveObjects.clear();appliedObjects.clear();liveFlightObjects.clear();appliedFlightObjects.clear();bakedStatic.clear();dirtyObjects.clear();
     if(baker) {
         authoring={};auto path=std::filesystem::path(ModRuntime::MapPath(mapName.c_str()));path.replace_extension(".navsrc");
         if(std::filesystem::exists(path)) {
@@ -116,7 +116,7 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
         auto bodies=bodiesPending.get();bodyTable=std::move(bodies.first);size_t bytes=bodies.second;
         for(int type=0;type<AgentCount;++type){auto result=pending[type].get();bytes+=result.bytes;meshes[type]=std::move(result.mesh);}
         const auto json=cataloguePending.get();
-        if(json.at("version").get<int>()!=3)throw std::runtime_error("Nav64: incompatible world catalogue");
+        if(json.at("version").get<int>()!=4)throw std::runtime_error("Nav64: incompatible world catalogue");
         for(const auto& entry:json.at("dynamic")) {
             const int id=entry.at("id").get<int>();auto& boxes=appliedObjects[id];dirtyObjects.insert(id);
             for(const auto& value:entry.at("boxes")) {
@@ -128,7 +128,18 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
                 boxes.push_back(box);
             }
         }
-        for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);}
+        for(const auto& entry:json.at("flight_dynamic")) {
+            const int id=entry.at("id").get<int>();auto& boxes=appliedFlightObjects[id];dirtyObjects.insert(id);
+            for(const auto& value:entry.at("boxes")) {
+                if(value.size()!=8)throw std::runtime_error("Nav64: invalid visual obstacle");
+                Solid box;for(size_t i=0;i<8;++i) {
+                    const auto p=value.at(i).get<std::array<float,3>>();box.corners[i]={p[0],p[1],p[2]};
+                    if(!Finite(box.corners[i]))throw std::runtime_error("Nav64: non-finite visual obstacle");
+                }
+                boxes.push_back(box);
+            }
+        }
+        for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);liveFlightObjects.erase(id);}
         sources=sourcePending.get();
         for(auto& mesh:meshes){mesh->sources=sources;IndexSurfaces(*mesh);}
         const auto syncStart=std::chrono::steady_clock::now();loaded=true;SyncObjects(true);
@@ -146,7 +157,7 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
 
         const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
         double profileDecodeMs=0;for(const auto& time:meshTimes)profileDecodeMs=(std::max)(profileDecodeMs,time[1]);
-        GameJournal::Event("NAV","loaded","mpr=%s mob=%s profiles=8 ms=%.3f bytes=%zu generation=%llu source_read_ms=%.3f source_unpack_ms=%.3f source_arrays_ms=%.3f source_meta_ms=%.3f profile_decode_max_ms=%.3f",mapName.c_str(),mobName.c_str(),ms,bytes,static_cast<unsigned long long>(generation),sourceReadMs,sourceTimes[0],sourceTimes[1],sourceTimes[2],profileDecodeMs);
+        GameJournal::Event("NAV","loaded","mpr=%s mob=%s profiles=6 ms=%.3f bytes=%zu generation=%llu source_read_ms=%.3f source_unpack_ms=%.3f source_arrays_ms=%.3f source_meta_ms=%.3f profile_decode_max_ms=%.3f",mapName.c_str(),mobName.c_str(),ms,bytes,static_cast<unsigned long long>(generation),sourceReadMs,sourceTimes[0],sourceTimes[1],sourceTimes[2],profileDecodeMs);
         return true;
     }catch(const std::exception& e){error=e.what();return false;}
 }
@@ -173,8 +184,9 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
         auto* lever=static_cast<CLeverObject*>(object);
         liveDoors[id]=remove?-1:lever->GetCurrentState();
     }
-    if(remove){liveObjects.erase(id);return;}
+    if(remove){liveObjects.erase(id);liveFlightObjects.erase(id);return;}
     liveObjects[id]=NavigationBoxes(object,map);
+    if(!loaded||Dynamic(id))liveFlightObjects[id]=NavigationBoxes(object,map,true);
 }
 std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world) {
     if(!baker)throw std::runtime_error("Nav64: baking requires NavBake tool");
@@ -492,7 +504,7 @@ int NavigationWorld::Type(CUnit* unit,int aiClass) {
     aiClass=std::clamp(aiClass,0,7);
     const float radius=unit?Body(unit).radius:aiClass>=7?1.f:aiClass>=5?.5f:.25f;
 
-    const int type=Navigation::ProfileForRadius(radius,aiClass==0);
+    const int type=unit&&unit->GetUserUnitStats()->cLocomotion==3?Navigation::Flying:Navigation::ProfileForRadius(radius,aiClass==0);
     return type;
 }
 float NavigationWorld::Height(CUnit* unit,int aiClass) {
@@ -531,7 +543,7 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     }
     request.excludedFlags=static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4));
     request.obstacles=queryObstacles;
-    if(costs&&!Navigation::Levitates(mesh->profile))std::copy(costs,costs+16,request.areaCosts);
+    if(costs&&mesh->profile.movement==Navigation::Movement::Ground)std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
     if(route.status==Status::Complete&&route.goalStatus!=Status::Complete&&unit&&unit->IsHero()&&!route.points.empty()) {
         const auto at=route.points.back().position;
@@ -597,6 +609,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     if(!Step(unit,from,move.desired,move.support,&segment.route))return false;
     pos.x=move.support.position.x;pos.y=move.support.position.y;
     if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return true;
+    pos.z=move.support.position.z;
     auto* neighbour=map.CheckCircleCollision(unit,pos);
     if(neighbour) {
         wait=(std::min)(wait+1,1000000u);
@@ -669,13 +682,23 @@ void NavigationWorld::QueueBox(const Solid& box) {
     const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
     const int x0=(std::max)(0,int(std::floor((lowX-border-params->orig[0])/width))),x1=(std::min)(nx-1,int(std::floor((highX+border-params->orig[0])/width)));
     const int z0=(std::max)(0,int(std::floor((lowZ-border-params->orig[2])/width))),z1=(std::min)(nz-1,int(std::floor((highZ+border-params->orig[2])/width)));
-    for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)for(int type=0;type<AgentCount;++type)sourceDirty.emplace(type,x,z);
+    for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)for(int type=0;type<AgentCount;++type)if(type!=Flying)sourceDirty.emplace(type,x,z);
+    sourceDirty.emplace(Flying,-1,-1);
 }
 void NavigationWorld::SyncObjects(bool initial) {
     if(!loaded)return;
     const auto start=std::chrono::steady_clock::now();
     while(!dirtyObjects.empty()) {
         const int id=*dirtyObjects.begin();dirtyObjects.erase(dirtyObjects.begin());
+        auto airOld=appliedFlightObjects.find(id),airLive=liveFlightObjects.find(id);
+        bool sameAir=airOld==appliedFlightObjects.end()?airLive==liveFlightObjects.end():
+            airLive!=liveFlightObjects.end()&&airOld->second.size()==airLive->second.size();
+        if(sameAir&&airOld!=appliedFlightObjects.end())for(size_t i=0;i<airOld->second.size();++i)for(size_t j=0;j<8;++j)
+            if(Distance(airOld->second[i].corners[j],airLive->second[i].corners[j])>.00001f)sameAir=false;
+        if(!sameAir) {
+            if(airLive==liveFlightObjects.end())appliedFlightObjects.erase(id);else appliedFlightObjects[id]=airLive->second;
+            sourceDirty.emplace(Flying,-1,-1);
+        }
         auto door=std::find_if(sources->doors.begin(),sources->doors.end(),[&](const Door& d){return d.object==id;});
         if(door!=sources->doors.end()) {
             const bool open=liveDoors.count(id)?(liveDoors.at(id)<0||liveDoors.at(id)==door->openState):!liveObjects.count(id);
@@ -683,7 +706,8 @@ void NavigationWorld::SyncObjects(bool initial) {
         } else if(!Dynamic(id)) {
             const bool absent=!liveObjects.count(id);const bool changed=absent?absentStatic.insert(id).second:absentStatic.erase(id)!=0;
             if(changed) {
-                for(const auto& tile:sources->objectTiles[id])for(int type=0;type<AgentCount;++type)sourceDirty.emplace(type,tile.first,tile.second);
+                for(const auto& tile:sources->objectTiles[id])for(int type=0;type<AgentCount;++type)if(type!=Flying)sourceDirty.emplace(type,tile.first,tile.second);
+                sourceDirty.emplace(Flying,-1,-1);
                 GameJournal::Event("NAV","static_changed","NID=%d absent=%d queued_profile_tiles=%zu",id,int(absent),sourceDirty.size());
             }
         } else {
@@ -733,7 +757,11 @@ void NavigationWorld::UpdateSources(bool initial) {
             auto replacement=sourceJob.get();const auto [type,x,z]=sourceTask;
             if(!sourceDirty.count(sourceTask)) {
                 const auto start=std::chrono::steady_clock::now();meshes[type]->excludedObjects=absentStatic;
-                ReplaceTile(*meshes[type],*replacement,x,z);
+                if(type==Flying) {
+                    replacement->sources=sources;replacement->generation=meshes[type]->generation+1;
+                    replacement->mapName=mapName;replacement->mobName=mobName;replacement->profileId=Agents[type].name;
+                    meshes[type]=std::move(replacement);
+                } else ReplaceTile(*meshes[type],*replacement,x,z);
                 const auto* params=meshes[type]->data->getParams();const float width=params->tileWidth;
                 for(const auto& door:sources->doors) {
                     const float lx=params->orig[0]+x*width,lz=params->orig[2]+z*width;
@@ -742,7 +770,7 @@ void NavigationWorld::UpdateSources(bool initial) {
                     if(state!=meshes[type]->doorOpen.end())DoorState(*meshes[type],door.object,state->second);
                 }
                 const double applyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-                GameJournal::Event("NAV","source_tile","profile=%d tile=%d,%d worker_ms=%llu apply_ms=%.3f pending=%zu",type,x,z,static_cast<unsigned long long>(replacement->buildMs),applyMs,sourceDirty.size());
+                GameJournal::Event("NAV","source_tile","profile=%d tile=%d,%d worker_ms=%llu apply_ms=%.3f pending=%zu",type,x,z,static_cast<unsigned long long>(type==Flying?meshes[type]->buildMs:replacement->buildMs),applyMs,sourceDirty.size());
             }
         }
         if(sourceDirty.empty())return;
@@ -750,17 +778,24 @@ void NavigationWorld::UpdateSources(bool initial) {
         auto snapshot=sources;auto absent=absentStatic;auto profile=meshes[type]->profile;
         const auto triangles=sources->tileTriangles[{x,z}];
         const auto ceilings=sources->tileCeilings[{x,z}];
-        std::vector<Solid> boxes;
+        std::vector<Solid> boxes,airBoxes;
+        if(Flies(profile))for(const auto& entry:appliedFlightObjects)airBoxes.insert(airBoxes.end(),entry.second.begin(),entry.second.end());
         const float width=profile.tileCells*profile.cellSize,border=1.3f;
         const float lowX=sources->minimum.x+x*width-border,highX=lowX+width+border*2;
         const float lowZ=sources->minimum.z+z*width-border,highZ=lowZ+width+border*2;
         for(const auto& entry:appliedObjects)for(const auto& box:entry.second) {
             float a=FLT_MAX,b=FLT_MAX,c=-FLT_MAX,d=-FLT_MAX;
             for(auto p:box.corners){p=ToNav(p);a=(std::min)(a,p.x);b=(std::min)(b,p.z);c=(std::max)(c,p.x);d=(std::max)(d,p.z);}
-            if(c>=lowX&&a<=highX&&d>=lowZ&&b<=highZ)boxes.push_back(box);
+            if(Flies(profile)||(c>=lowX&&a<=highX&&d>=lowZ&&b<=highZ))boxes.push_back(box);
         }
-        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z,triangles,ceilings,boxes=std::move(boxes)] {
+        sourceJob=std::async(std::launch::async,[snapshot,absent,profile,x,z,triangles,ceilings,boxes=std::move(boxes),airBoxes=std::move(airBoxes)] {
             Geometry input;input.minimum=snapshot->minimum;input.maximum=snapshot->maximum;input.doors=snapshot->doors;input.solids=boxes;
+            if(Flies(profile)) {
+                input.flightSolids=airBoxes;
+                for(const auto& t:snapshot->ground)if(!t.object||!absent.count(t.object))input.ground.push_back(t);
+                for(const auto& box:snapshot->flightBoxes)if(!absent.count(box.object))input.flightBoxes.push_back(box);
+                return Navigation::Build(input,profile,"");
+            }
             for(auto index:triangles){const auto& t=snapshot->ground[index];if(!t.object||!absent.count(t.object))input.ground.push_back(t);}
             for(auto index:ceilings){const auto& c=snapshot->ceilings[index];if(!absent.count(c.object))input.ceilings.push_back(c);}
             return RebuildTile(input,profile,x,z);
