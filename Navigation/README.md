@@ -222,13 +222,20 @@ edges; it retains the 1 mm numerical allowance and original height limits.
 The server publishes frozen route clocks during queue waiting so the client
 does not keep advancing the old route while the server stands still.
 
-Standing-unit queue queries wait 27 game ticks (1.485 s at the default tick),
-then search once around standing bodies using query-local circumscribed rings.
-Each visibility edge is a normal Find corridor, checked against every supplied
-body, with material costs and max length preserved. No mesh flags are changed.
-At most four obstructing rings (50 vertices) bound the secondary query; an
-unavailable/limited detour waits without repeated queries. Moving/resized bodies,
-profile/pose changes and navigation generation changes allow another query.
+A stationary blocking unit triggers a bypass on the first blocked step.
+Moving neighbours retain the bounded 27-tick queue. Circumscribed rings include
+connected neighbouring footprints, including bodies outside the original route;
+a bypass around one body must also be able to route around its whole group.
+Each visibility edge is a normal Find corridor checked against every supplied
+body. Material costs, max length, class/height filters and physical radii remain
+unchanged. At most twelve rings (146 vertices) bound the secondary query. A*
+uses an admissible distance/material-cost bound to avoid unnecessary corridors.
+An unavailable/limited bypass fails the movement command and returns control
+to its owner; queue_detour records the actual query status and endpoints.
+
+A departing zone snapshot stores the camera view without its removed party
+carrier or carrier-dependent FPS flag. Full-slot saves retain the strict map
+reference. Both use the same nullable reference field and save schema v4.
 Release walk records may set neighbour_distance, release_after_wait (0 keeps
 the neighbour standing) and require_detour. Their results include detour_max_ms.
 

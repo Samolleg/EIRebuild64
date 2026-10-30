@@ -380,13 +380,24 @@ Route FindAround(const Mesh& mesh,const Request& input) {
         if(blocks)rings.push_back(&obstacle);
     }
     std::sort(rings.begin(),rings.end(),[&](const Obstacle* a,const Obstacle* b){return Distance(a->position,request.source)<Distance(b->position,request.source);});
-    // Explicit bounded work in dense crowds; a queued unit will wait for an
-    // obstacle change instead of expanding an unbounded secondary search.
-    if(rings.size()>4){Route failed;failed.status=Status::Limit;return failed;}
+    // A neighbouring body can cover every bypass vertex without intersecting
+    // the original route. Include the connected inflated footprints as well;
+    // otherwise the visibility graph cannot route around the whole group.
+    const auto ringRadius=[](const Obstacle& o){return (o.radius+.025f)/.965925826f;};
+    constexpr size_t maxRings=12;
+    if(rings.size()>maxRings){Route failed;failed.status=Status::Limit;return failed;}
+    for(size_t i=0;i<rings.size();++i)for(const auto& obstacle:*request.obstacles) {
+        if(std::find(rings.begin(),rings.end(),&obstacle)!=rings.end()||
+           std::abs(obstacle.position.z-rings[i]->position.z)>2.f)continue;
+        if(std::hypot(obstacle.position.x-rings[i]->position.x,obstacle.position.y-rings[i]->position.y)>
+           ringRadius(obstacle)+ringRadius(*rings[i]))continue;
+        if(rings.size()==maxRings){Route failed;failed.status=Status::Limit;return failed;}
+        rings.push_back(&obstacle);
+    }
     std::vector<Location> nodes{direct.points.front(),direct.points.back()};
     const float height=request.height>0?request.height:mesh.profile.height;
     for(const auto* obstacle:rings)for(int i=0;i<12;++i) {
-        const float angle=float(i)*6.283185307f/12,radius=(obstacle->radius+.025f)/.965925826f;
+        const float angle=float(i)*6.283185307f/12,radius=ringRadius(*obstacle);
         Point p{obstacle->position.x+radius*std::cos(angle),obstacle->position.y+radius*std::sin(angle),obstacle->position.z};
         Location at;
         if(Project(mesh,p,.001f,4.f,at,height,request.excludedFlags)&&clearSegment(at.position,at.position))nodes.push_back(at);
@@ -394,13 +405,20 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     std::vector<float> cost(nodes.size(),1.e30f),length(nodes.size(),0);
     std::vector<int> previous(nodes.size(),-1);std::vector<bool> closed(nodes.size(),false);
     std::vector<Route> incoming(nodes.size());cost[0]=0;
+    // An admissible distance bound avoids searching both sides of every ring.
+    // Edge weights still come from real, class-filtered mesh routes.
+    const float minimumCost=(std::max)(0.f,*std::min_element(std::begin(request.areaCosts),std::end(request.areaCosts)));
     for(size_t iteration=0;iteration<nodes.size();++iteration) {
         size_t from=nodes.size();float best=1.e30f;
-        for(size_t i=0;i<nodes.size();++i)if(!closed[i]&&cost[i]<best){best=cost[i];from=i;}
+        for(size_t i=0;i<nodes.size();++i)if(!closed[i]) {
+            const float estimate=cost[i]+Distance(nodes[i].position,nodes[1].position)*minimumCost;
+            if(estimate<best){best=estimate;from=i;}
+        }
         if(from==nodes.size()||from==1)break;
         closed[from]=true;
         for(size_t to=1;to<nodes.size();++to) {
             if(closed[to]||to==from||!clearSegment(nodes[from].position,nodes[to].position))continue;
+            if(cost[from]+Distance(nodes[from].position,nodes[to].position)*minimumCost>=cost[to])continue;
             Request edge=plain;edge.source=nodes[from].position;edge.start=&nodes[from];
             edge.goal=nodes[to].position;edge.goalRadius=.001f;edge.maxLength=request.maxLength-length[from];
             edge.goalPolicy=GoalPolicy::Exact;

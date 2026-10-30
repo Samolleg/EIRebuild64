@@ -619,7 +619,9 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
         else queue.blocker=neighbour->GetID();
         // A changing neighbour must not restart the bounded wait forever.
         // Its movement flag is not proof that this body can make progress.
-        if(wait>=27&&!move.rotating) {
+        // A stationary body cannot clear the corridor by waiting. Moving
+        // neighbours keep the bounded queue, including mutual congestion.
+        if((!neighbour->IsMoving()||wait>=27)&&!move.rotating) {
             ++move.avoidanceAttempts;
             std::vector<Navigation::Obstacle> blockers;
             for(const auto& entry:world.mapObjects)if(auto* other=dynamic_cast<CUnit*>(entry.second)) {
@@ -637,9 +639,10 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
             } scope{*this};
             queryObstacles=&blockers;
             const auto start=std::chrono::steady_clock::now();
-            const bool found=map.NewPath(unit,path.ptDestination,alternate);
+            Navigation::Route detour;
+            const bool found=map.NewPath(unit,path.ptDestination,alternate,1.e6f,0,Navigation::GoalPolicy::Exact,&detour);
             move.detourMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-            GameJournal::Event("NAV","queue_detour","unit=%d blocker=%d result=%s wait=%u blocker_moving=%d distance=%.3f body_radius=%.3f obstacles=%zu ms=%.3f",unit->GetID(),neighbour->GetID(),found?"ready":"stopped",wait,int(neighbour->IsMoving()),std::hypot(from.x-Position(neighbour,map).x,from.y-Position(neighbour,map).y),Radius(unit)+Radius(neighbour),blockers.size(),move.detourMs);
+            GameJournal::Event("NAV","queue_detour","unit=%d blocker=%d result=%s reason=%s wait=%u blocker_moving=%d distance=%.3f body_radius=%.3f obstacles=%zu ms=%.3f from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f)",unit->GetID(),neighbour->GetID(),found?"ready":"stopped",Navigation::StatusName(detour.status),wait,int(neighbour->IsMoving()),std::hypot(from.x-Position(neighbour,map).x,from.y-Position(neighbour,map).y),Radius(unit)+Radius(neighbour),blockers.size(),move.detourMs,from.x,from.y,from.z,path.ptDestination.x,path.ptDestination.y);
             if(found) {
                 path.curSegment=alternate.curSegment;path.toGo=alternate.toGo;
                 path.ptFinish=alternate.ptFinish;path.bFinished=alternate.bFinished;
