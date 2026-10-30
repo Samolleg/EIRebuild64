@@ -569,13 +569,10 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
         failure = {ResourceFailureCode::parse, "owned resource mount list is empty"};
         return false;
     }
-    for (const auto& root : mounts.loose_roots) {
-        const auto attributes = GetFileAttributesW(root.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            failure = {ResourceFailureCode::file_open, "owned resource loose map root is missing"};
-            return false;
-        }
-    }
+    // Loose roots are search locations, not required containers. A mod may
+    // supply all maps while the base game has no Maps directory. ResourceStore
+    // skips absent loose files and continues through the same ordered mounts;
+    // rejecting an unused root here also disables unrelated UI textures.
     return true;
 }
 
