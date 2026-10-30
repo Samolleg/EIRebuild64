@@ -13,6 +13,9 @@ namespace {
 dtNavMeshQuery* Query(const Mesh& m) {
     return m.query.get();
 }
+unsigned short ClassFlags(const Mesh& mesh,unsigned short flags) {
+    return flags?flags:ExcludeClass(mesh.profile.materialClass);
+}
 Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenceZ) {
     Location l;l.position=FromNav(p);l.radius=m.profile.radius;l.height=height;l.polygon=ref;l.generation=m.generation;
     unsigned char area=1;m.data->getPolyArea(ref,&area);l.area=area;
@@ -196,21 +199,21 @@ Route FindAround(const Mesh&,const Request&);
 bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& result,float height,unsigned short excludedFlags) {
     if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;auto& q=*query;
     height=height>0?height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
-    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(excludedFlags);dtPolyRef ref=0;Point near;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,excludedFlags));dtPolyRef ref=0;Point near;
     if(!Nearest(m,q,p,horizontal,vertical,filter,ref,near,0,height))return false;
     result=Address(m,near,ref,height,p.z);return true;
 }
 bool ResolveLocation(const Mesh& m,Point p,const Location* hint,Location& result,float height,unsigned short excludedFlags) {
     if(!m.query||!m.data||!m.tiles)return false;
     const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
-    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(excludedFlags);dtPolyRef ref=0;Point near;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,excludedFlags));dtPolyRef ref=0;Point near;
     if(!Nearest(m,*m.query,p,1.f,4.f,filter,ref,near,hint?hint->surface:0,height))return false;
     result=Address(m,near,ref,height,p.z);return result.surface!=0;
 }
 bool StartLocation(const Mesh& m,Point p,Location& result,float height,unsigned short excludedFlags) {
     if(!m.data||!m.tiles)return false;auto* query=Query(m);if(!query)return false;
     height=height>0?height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
-    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(excludedFlags);dtPolyRef ref=0;Point near,actual;bool ingress=false;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,excludedFlags));dtPolyRef ref=0;Point near,actual;bool ingress=false;
     if(!Start(m,*query,p,filter,ref,near,actual,ingress,height))return false;
     result=Address(m,ingress?ToNav(actual):near,ref,height,p.z);return true;
 }
@@ -219,7 +222,7 @@ Route Find(const Mesh& m,const Request& r) {
     if(!Finite(r.source)||!Finite(r.goal)||!std::isfinite(r.maxLength)||r.maxLength<0||!std::isfinite(r.goalRadius)||r.goalRadius<0)return result;
     auto* query=Query(m);if(!query){result.status=Status::Limit;return result;}auto& q=*query;
     const float height=r.height>0?r.height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return result;
-    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(r.excludedFlags);for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,r.excludedFlags));for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
     if(r.obstacles&&!r.obstacles->empty())return FindAround(m,r);
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
     if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
@@ -406,7 +409,7 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     if(!Finite(from)||!Finite(desired))return reject("non_finite");
     if(!m.data||!m.tiles)return reject("empty_mesh");auto* query=Query(m);if(!query)return reject("no_query");auto& q=*query;
     height=height>0?height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
-    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(excludedFlags);dtPolyRef ref=0;Point near;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,excludedFlags));dtPolyRef ref=0;Point near;
     Point actual;bool ingress=false;
     if(!Start(m,q,from,filter,ref,near,actual,ingress,height,address))return reject("no_start");
     if(ingress) {
@@ -542,20 +545,42 @@ bool Follow(const Mesh& mesh,Point from,Point desired,const std::vector<Point>& 
     }
     return Constrain(mesh,current,desired,result,height,reason,at.polygon?&at:nullptr,excludedFlags);
 }
-bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,float height,float (*random)(),Point& result,unsigned short excludedFlags) {
-    if(!mesh.query||!Finite(source)||!Finite(center)||!std::isfinite(radius)||radius<=0||!random)return false;
-    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(mesh.profile,height));filter.setExcludeFlags(excludedFlags);
-    dtPolyRef first=0;Point near;
-    if(!Nearest(mesh,*mesh.query,source,.05f,4.f,filter,first,near,0,height))return false;
-    const float start[]={near.x,near.y,near.z};
-    const float search=radius+std::hypot(source.x-center.x,source.y-center.y);
+bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,float height,float (*random)(),Point& result,unsigned short excludedFlags,const Location* address,RandomShape shape) {
+    if(!mesh.query||!mesh.data||!Finite(source)||!Finite(center)||!std::isfinite(radius)||radius<0||!random)return false;
+    const auto mask=ClearanceMask(mesh.profile,height);if(!mask)return false;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(mesh,excludedFlags));
+    auto accept=[&](dtPolyRef ref,Point point) {
+        const auto at=Address(mesh,point,ref,height,source.z);if(!at.surface)return false;
+        const auto p=at.position;const float dx=std::abs(p.x-center.x),dy=std::abs(p.y-center.y);
+        if(shape==RandomShape::Square?(dx>radius||dy>radius):(std::hypot(dx,dy)>radius))return false;
+        // Reachable graph polygons alone do not prove a complete route: the
+        // same query also enforces source support and bounded Detour results.
+        Request request;request.source=source;request.start=address;request.goal=p;request.height=height;request.excludedFlags=excludedFlags;
+        if(Find(mesh,request).status!=Status::Complete)return false;
+        result=p;return true;
+    };
+    if(radius==0) {
+        dtPolyRef ref=0;Point point;
+        return Nearest(mesh,*mesh.query,center,.001f,4.f,filter,ref,point,0,height)&&accept(ref,point);
+    }
+    // Seed the requested region from a proven source route. Sampling a circle
+    // around the source with radius distance+radius almost never hits a small
+    // guard/retreat region when its center is far from the unit.
+    Request approach;approach.source=source;approach.start=address;approach.goal=center;
+    approach.goal.z=source.z;approach.height=height;approach.excludedFlags=excludedFlags;
+    approach.goalPolicy=GoalPolicy::ClosestReachable;
+    const auto route=Find(mesh,approach);
+    if(route.status!=Status::Complete||route.points.empty())return false;
+    const auto seed=route.points.back();
+    const float search=radius*(shape==RandomShape::Square?1.41421356237f:1.f);
+    if(std::hypot(seed.position.x-center.x,seed.position.y-center.y)>search+.001f)return false;
+    const auto nav=ToNav({center.x,center.y,seed.position.z});
+    const float start[]={nav.x,nav.y,nav.z};
     for(int attempt=0;attempt<8;++attempt) {
         dtPolyRef ref=0;float point[3]{};
-        const auto status=mesh.query->findRandomPointAroundCircle(first,start,search,&filter,random,&ref,point);
+        const auto status=mesh.query->findRandomPointAroundCircle(seed.polygon,start,search,&filter,random,&ref,point);
         if(dtStatusFailed(status)||Limited(status)||!ref)return false;
-        const auto at=Address(mesh,{point[0],point[1],point[2]},ref,height,source.z);if(!at.surface)continue;
-        const auto p=at.position;
-        if(std::hypot(p.x-center.x,p.y-center.y)<=radius) {result=p;return true;}
+        if(accept(ref,{point[0],point[1],point[2]}))return true;
     }
     return false;
 }

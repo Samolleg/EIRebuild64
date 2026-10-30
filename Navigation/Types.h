@@ -7,7 +7,7 @@
 
 namespace Navigation {
 constexpr std::uint32_t ContainerVersion = 9;
-constexpr std::uint32_t AlgorithmVersion = 24;
+constexpr std::uint32_t AlgorithmVersion = 25;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -55,6 +55,10 @@ struct Obstacle { Point position; float radius=0,height=0; int id=0; };
 // User movement can approach an unavailable click. Exact internal targets
 // (attacks, placement, visibility-graph edges) keep their original contract.
 enum class GoalPolicy { Exact, ClosestReachable };
+enum class RandomShape { Circle, Square };
+constexpr unsigned short ExcludeClass(unsigned aiClass) {
+    return aiClass<8?static_cast<unsigned short>(1u<<(aiClass+4)):0x0ff0;
+}
 struct Request {
     Point source, goal;
     GoalPolicy goalPolicy = GoalPolicy::Exact;

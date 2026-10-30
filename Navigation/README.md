@@ -117,20 +117,22 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 8, algorithm 21, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 9, algorithm 25, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   In the expanded tile stream, each tile blob is followed by a u32 polygon
   support count (must equal polyCount). Each polygon has u32 source-count and
   that many u64 source IDs (low/high u32), primary first, connected neighbours
   afterwards. These records belong to that tile's polygon order and move with
-  tile replacement. Readers of container 7 must reject container 8.
+  tile replacement. Algorithm 25 requires rebaking: 24 files lack the complete
+  ground-class masks and cannot be reused with this runtime.
   No layer section exists. Loader validates exact profile, bounds and ABI.
 - <mpr>--<mob>.navworld: JSON version 3, baked static NIDs and initial dynamic obstacle boxes.
-- <mpr>--<mob>.navgeom: shared NSRC version 5 (four parallel LZMS blocks), inner section 4,
+- <mpr>--<mob>.navgeom: shared NSRC version 7 (four parallel LZMS blocks), inner section 6,
   original bounds and indexed common float32 XYZ vertices, losslessly stored;
   per-triangle indices, float32 water depths, byte material/class metadata,
   static object and surface IDs. Centimetre rounding is not used: it changes
-  thin BASE planes and slope classification. NSRC 4 is rejected;
+  thin BASE planes and slope classification. Byte columns encode vertices
+  and triangle records; canopy envelopes retain exact uint16 samples;
   door apertures and reserved off-mesh endpoint/surface/radius/flag records.
   Includes precomputed triangle/surface/object tile indices. One copy serves
   all profiles. No source import or spatial binning occurs during gameplay.
@@ -138,7 +140,7 @@ separate from this baker contract.
   Placement/step/restore and the local client resolve original terrain/BASE
   triangles through polygon provenance. Gameplay acceptance remains separate.
   Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 21, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 25, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -160,9 +162,33 @@ and the independently resolved client floor.
 A failed step or discontinuity on a complete route rejects the map. Unreachable
 goals remain explicitly reported as no_path. Shared loader time is measured
 including reconciliation with the imported live objects, without a game tick.
-Runtime performance, save/load, queues/doors, full random-goal coverage,
-common-radius class policy and in-game client floor acceptance remain
+Runtime performance, save/load, queues/doors, class-policy and random-goal
+gameplay acceptance, and in-game client floor acceptance remain
 separate acceptance items. See the private REPORT for measured release data.
+
+## Shared-radius classes and AI goals (algorithm 25)
+
+Each ground profile retains the union of terrain admitted by classes 1..7.
+The profile's material class still selects its representative cost area;
+body radii, pose clearances and movement speeds are unchanged. Bits 0..3
+are nested pose permissions; bits 4..11 forbid the corresponding AI class.
+Terrain exclusions are eroded at the full profile radius independently of
+physical clearance. Contours split at class-mask boundaries without consuming
+additional Recast area IDs or admitting the terrain policy onto a BASE above
+it. Worker rebuilds use the same masks; doors retain them on reopen.
+Find, placement/restore, support, physical steps and random goals use the
+unit's current AI-class exclusion, independently of its shared radius profile.
+Generic queries without an explicit class use the profile's material class;
+the baker's existing quality queries therefore enforce that class as well.
+
+Guard/investigation goals use a circle; both fear/retreat branches use their
+original square search region. Candidates come from the source's reachable
+mesh region, use its live support address and require a complete exact route.
+The requested region is seeded by a proven route from the unit, so a small
+region far from its current position is not lost to source-circle sampling.
+Attempts remain bounded to eight; a zero-radius goal resolves only the given
+point. An unavailable region produces no move. Scripted patrol coordinates,
+look directions and timing are unchanged.
 
 The baker accepts --replay-input PRIVATE_JSON for journal-derived release inputs.
 Records are an array: scene [mpr,mob], kind (step_rejected/query_failed/walk),

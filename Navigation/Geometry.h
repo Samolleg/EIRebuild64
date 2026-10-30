@@ -17,7 +17,13 @@ struct Triangle {
     std::uint64_t surface = 1;
 };
 inline Triangle Surface(Triangle t,const Profile& p) {
-    if(t.terrain)t.area=t.classAreas[p.materialClass];
+    if(t.terrain) {
+        t.area=t.classAreas[p.materialClass];
+        // Radius profiles are shared by different AI classes. Retain every
+        // ground class's floor; eroded polygon flags own class admission.
+        if(!Levitates(p)&&!t.area)
+            for(unsigned c=1;c<8;++c)if(t.classAreas[c]){t.area=t.classAreas[c];break;}
+    }
     if(t.terrain&&Levitates(p)) {t.a.z+=t.waterDepth.x;t.b.z+=t.waterDepth.y;t.c.z+=t.waterDepth.z;t.area=t.levitateArea;}
     return t;
 }

@@ -521,7 +521,7 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
 }
 bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Location& result) {
     auto* mesh=ForUnit(unit);
-    return mesh&&Navigation::Project(*mesh,point,.001f,4.f,result,Height(unit));
+    return mesh&&Navigation::Project(*mesh,point,.001f,4.f,result,Height(unit),Navigation::ExcludeClass(unit?unit->GetAIClass():3));
 }
 bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPlace);
@@ -696,10 +696,10 @@ bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
     unit->navLocation=location;return true;
 }
 
-bool NavigationWorld::RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal) {
+bool NavigationWorld::RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape) {
     auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
-    return Navigation::RandomReachable(*mesh,Position(unit,map),center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal,static_cast<unsigned short>(1u<<(unit->GetAIClass()+4)));
+    return Navigation::RandomReachable(*mesh,Position(unit,map),center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal,Navigation::ExcludeClass(unit->GetAIClass()),&unit->navLocation,shape);
 }
 
 void NavigationWorld::UpdateSources(bool initial) {

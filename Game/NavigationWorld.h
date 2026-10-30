@@ -60,7 +60,7 @@ public:
     bool Load();
     void Advance();
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
-    bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal);
+    bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);
     bool Place(CUnit* unit,CAIMap& map);
     const std::string& Error() const { return error; }
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;

@@ -382,7 +382,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         auto& sourceField=*r.compact;
         if(!Levitates(p))for(int ti:inputs[index].triangles) {
             const auto& t=g.ground[ti];if(!t.terrain)continue;
-            const unsigned short flags=!t.classAreas[1]&&std::max({t.waterDepth.x,t.waterDepth.y,t.waterDepth.z})>0 ? 1u<<5 : 0;
+            unsigned short flags=0;
+            for(unsigned c=1;c<8;++c)if(!t.classAreas[c])flags|=ExcludeClass(c);
             if(!flags)continue;
             const auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
             const float dx=b.x-a.x,dz=b.z-a.z,ex=c.x-a.x,ez=c.z-a.z,det=dx*ez-dz*ex;
@@ -520,6 +521,20 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         if(PoseClearance(p)) {
             auto& chf=*r.compact;
             const std::vector<unsigned char> material(chf.areas,chf.areas+chf.spanCount);
+            // A terrain policy never applies to a separate BASE above it.
+            for(int j=0;j<chf.spanCount;++j)if(support[j]!=1)forbidden[j]=0;
+            const auto originalForbidden=forbidden;
+            // Erosion distributes over intersection: physical pose clearance
+            // and class-permitted terrain are eroded independently, then both
+            // flags must pass. This preserves all eight shared-radius classes
+            // without multiplying meshes or Recast's 63 material/pose areas.
+            if(!Levitates(p))for(unsigned c=1;c<8;++c) {
+                const auto flag=ExcludeClass(c);
+                if(std::none_of(originalForbidden.begin(),originalForbidden.end(),[&](unsigned short f){return (f&flag)!=0;}))continue;
+                for(int j=0;j<chf.spanCount;++j)chf.areas[j]=(originalForbidden[j]&flag)?RC_NULL_AREA:material[j];
+                Require(rcErodeWalkableArea(&context,cfg.walkableRadius,chf),"Nav64: class radius erosion failed");
+                for(int j=0;j<chf.spanCount;++j)if(material[j]&&!chf.areas[j])forbidden[j]|=flag;
+            }
             std::vector<unsigned char> tiers(chf.spanCount,0),clearance(chf.spanCount);
             // Include overlap across a step, so two individually tall spans
             // cannot connect through a shorter ceiling at their common edge.
@@ -547,9 +562,9 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             }
             for(int j=0;j<chf.spanCount;++j) {
                 if(!tiers[j]){chf.areas[j]=RC_NULL_AREA;continue;}
-                const auto value=std::make_pair(material[j],static_cast<unsigned short>(((1u<<tiers[j])-1)|forbidden[j]));
+                const auto value=std::make_pair(material[j],static_cast<unsigned short>((1u<<tiers[j])-1));
                 unsigned id=1;for(;id<=permissionCount&&permissions[id]!=value;++id){}
-                Require(id<permissions.size(),"Nav64: material/clearance/class area limit");
+                Require(id<permissions.size(),"Nav64: material/clearance area limit");
                 if(id>permissionCount){permissionCount=id;permissions[id]=value;}
                 chf.areas[j]=static_cast<unsigned char>(id);
             }
@@ -562,26 +577,27 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                 fprintf(stderr,"BAKE_COLUMN_RAW class=%u radius=%.2f tile=%d,%d xy=%.6f,%.6f cell=%d,%d min=%.6f max=%.6f area=%u\n",p.materialClass,p.radius,x,z,point.x,point.y,ix,iz,cfg.bmin[1]+span->smin*cfg.ch,cfg.bmin[1]+span->smax*cfg.ch,unsigned(span->area));
             const auto& cell=field.cells[ix+iz*field.width];
             for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
-                const auto area=field.areas[j];const unsigned flags=area?permissions[area].second:0;
+                const auto area=field.areas[j];const unsigned flags=area?(permissions[area].second|forbidden[j]):0;
                 fprintf(stderr,"BAKE_COLUMN_COMPACT class=%u radius=%.2f tile=%d,%d xy=%.6f,%.6f floor=%.6f clearance=%.6f flags=%u surface=%llu\n",p.materialClass,p.radius,x,z,point.x,point.y,cfg.bmin[1]+field.spans[j].y*cfg.ch,field.spans[j].h*cfg.ch,flags,static_cast<unsigned long long>(support[j]));
             }
         }
         std::vector<std::uint64_t> regionSupport;
+        std::vector<unsigned short> regionForbidden;
         auto splitSupports=[&] {
             std::vector<unsigned short> old(field.spanCount);for(int j=0;j<field.spanCount;++j)old[j]=field.spans[j].reg;
             std::vector<bool> seen(field.spanCount,false);std::vector<std::tuple<int,int,unsigned>> stack;
-            unsigned short next=0;regionSupport.assign(1,0);
+            unsigned short next=0;regionSupport.assign(1,0);regionForbidden.assign(1,0);
             for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
                 const auto& cell=field.cells[ix+iz*field.width];
                 for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(!seen[j]&&old[j]&&!(old[j]&RC_BORDER_REG)) {
-                    Require(next+1<RC_BORDER_REG,"Nav64: surface region limit");++next;regionSupport.push_back(support[j]);
+                    Require(next+1<RC_BORDER_REG,"Nav64: surface region limit");++next;regionSupport.push_back(support[j]);regionForbidden.push_back(forbidden[j]);
                     seen[j]=true;stack.emplace_back(ix,iz,j);
                     while(!stack.empty()) {
                         const auto [cx,cz,k]=stack.back();stack.pop_back();auto& span=field.spans[k];span.reg=next;
                         for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
                             const int nx=cx+rcGetDirOffsetX(d),nz=cz+rcGetDirOffsetY(d);
                             const unsigned n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
-                            if(!seen[n]&&old[n]==old[j]&&support[n]==support[j]&&field.areas[n]==field.areas[j]){seen[n]=true;stack.emplace_back(nx,nz,n);}
+                            if(!seen[n]&&old[n]==old[j]&&support[n]==support[j]&&forbidden[n]==forbidden[j]&&field.areas[n]==field.areas[j]){seen[n]=true;stack.emplace_back(nx,nz,n);}
                         }
                     }
                 }
@@ -619,7 +635,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         bool holes=false;for(size_t i=1;i<euler.size();++i)if(present[i]&&euler[i]<=0){holes=true;break;}
         // Keep hole boundaries within a quarter cell; one full cell can
         // collapse them to zero signed area and turn holes into outlines.
-        cfg.maxSimplificationError=layered?0.f:holes?.25f:1.f;
+        const bool classBoundaries=std::any_of(forbidden.begin(),forbidden.end(),[](unsigned short flags){return flags!=0;});
+        cfg.maxSimplificationError=(layered||classBoundaries)?0.f:holes?.25f:1.f;
         r.contours=rcAllocContourSet();
         Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
         auto exactContours=[&] {
@@ -638,7 +655,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             auto& field=*r.compact;
             std::vector<unsigned short> regions(field.spanCount);
             for(int i=0;i<field.spanCount;++i)regions[i]=field.spans[i].reg;
-            unsigned short nextRegion=0;regionSupport.assign(1,0);
+            unsigned short nextRegion=0;regionSupport.assign(1,0);regionForbidden.assign(1,0);
             struct Run {int x0,x1;unsigned short original;unsigned char area;std::vector<unsigned> spans;};
             using RunKey=std::tuple<int,int,unsigned short,unsigned char>;
             std::map<RunKey,unsigned short> previous;
@@ -676,7 +693,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                     }
                     if(!region) {
                         Require(nextRegion+1<RC_BORDER_REG,"Nav64: exact rectangle region limit");
-                        region=++nextRegion;regionSupport.push_back(support[run.spans.front()]);
+                        region=++nextRegion;regionSupport.push_back(support[run.spans.front()]);regionForbidden.push_back(forbidden[run.spans.front()]);
                     }
                     for(unsigned j:run.spans)field.spans[j].reg=region;
                     current.emplace(key,region);
@@ -733,7 +750,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         for(int i=0;i<poly.npolys;++i) {
             const unsigned encoded=poly.areas[i];
             Require(encoded>0&&encoded<=permissionCount,"Nav64: invalid clearance/class area");
-            poly.flags[i]=permissions[encoded].second;
+            Require(poly.regs[i]<regionForbidden.size()&&poly.regs[i]>0,"Nav64: polygon has no class policy");
+            poly.flags[i]=permissions[encoded].second|regionForbidden[poly.regs[i]];
             poly.areas[i]=permissions[encoded].first;
         }
         dtNavMeshCreateParams create{};
