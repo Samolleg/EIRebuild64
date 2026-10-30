@@ -133,6 +133,10 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"terrain_lod", kCategories[2], "Terrain level of detail",
      "Distant ground uses simpler geometry. Faster; far terrain is slightly less detailed.",
      nullptr, true, {1, 1, 0, 0}},
+    {"lod", kCategories[7], "Static object LOD",
+     "Simpler geometry for eligible distant static objects.", nullptr, false, {}},
+    {"lod_pixel_error", kCategories[7], "Static LOD pixel limit",
+     "Larger values allow simpler geometry nearer to the camera.", nullptr, false, {}},
     // Water
     {"water_simple", kCategories[3], "Stock-look water",
      "Draw the original-looking animated water. Turn off to use reflections and realistic water. "

@@ -80,7 +80,18 @@ struct VramBudgetSnapshot {
 };
 const char* vram_budget_level_text(unsigned level) noexcept;
 
+struct SamgburLodSnapshot {
+    enum State : std::uint8_t { absent, waiting, ready, unavailable };
+    State state = absent;
+    std::uint32_t instances = 0, instance = 0, record = UINT32_MAX;
+    std::uint32_t levels = 0, first = 0, second = UINT32_MAX, coverage = 0, mode = 0;
+    std::array<std::uint32_t, 4> triangles{};
+    std::uint64_t sample_frame = 0, age_frames = 0;
+    bool visible = false;
+};
+
 struct RendererResourceSnapshot {
+    SamgburLodSnapshot samgbur_lod{};
     std::uint64_t presentation_frame = 0;
     double present_interval_ms = 0.0;
     double present_smoothed_ms = 0.0;
@@ -305,6 +316,7 @@ public:
     // (EI_RENDERER_DEVELOPER=1) F10 keeps the developer cycle and Shift+F10
     // toggles this window. Not persisted.
     bool settings_open() const noexcept;
+    unsigned samgbur_lod_instance() const noexcept;
     // Any ImGui window is drawn this frame (developer mode or settings).
     bool visible() const noexcept;
     // Full window or settings window: the overlay owns keyboard and mouse.
