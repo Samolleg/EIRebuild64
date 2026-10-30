@@ -176,6 +176,10 @@ Terrain exclusions are eroded at the full profile radius independently of
 physical clearance. Contours split at class-mask boundaries without consuming
 additional Recast area IDs or admitting the terrain policy onto a BASE above
 it. Worker rebuilds use the same masks; doors retain them on reopen.
+Contour construction temporarily colors adjacent regions so Recast treats
+same-material class/floor boundaries as area borders; zero simplification
+error alone does not protect those borders. Real materials are restored
+before polygon serialization. Recast library sources remain unchanged.
 Find, placement/restore, support, physical steps and random goals use the
 unit's current AI-class exclusion, independently of its shared radius profile.
 Generic queries without an explicit class use the profile's material class;

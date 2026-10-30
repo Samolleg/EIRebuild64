@@ -583,14 +583,15 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         }
         std::vector<std::uint64_t> regionSupport;
         std::vector<unsigned short> regionForbidden;
+        std::vector<unsigned char> regionArea;
         auto splitSupports=[&] {
             std::vector<unsigned short> old(field.spanCount);for(int j=0;j<field.spanCount;++j)old[j]=field.spans[j].reg;
             std::vector<bool> seen(field.spanCount,false);std::vector<std::tuple<int,int,unsigned>> stack;
-            unsigned short next=0;regionSupport.assign(1,0);regionForbidden.assign(1,0);
+            unsigned short next=0;regionSupport.assign(1,0);regionForbidden.assign(1,0);regionArea.assign(1,0);
             for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
                 const auto& cell=field.cells[ix+iz*field.width];
                 for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(!seen[j]&&old[j]&&!(old[j]&RC_BORDER_REG)) {
-                    Require(next+1<RC_BORDER_REG,"Nav64: surface region limit");++next;regionSupport.push_back(support[j]);regionForbidden.push_back(forbidden[j]);
+                    Require(next+1<RC_BORDER_REG,"Nav64: surface region limit");++next;regionSupport.push_back(support[j]);regionForbidden.push_back(forbidden[j]);regionArea.push_back(field.areas[j]);
                     seen[j]=true;stack.emplace_back(ix,iz,j);
                     while(!stack.empty()) {
                         const auto [cx,cz,k]=stack.back();stack.pop_back();auto& span=field.spans[k];span.reg=next;
@@ -637,8 +638,44 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         // collapse them to zero signed area and turn holes into outlines.
         const bool classBoundaries=std::any_of(forbidden.begin(),forbidden.end(),[](unsigned short flags){return flags!=0;});
         cfg.maxSimplificationError=(layered||classBoundaries)?0.f:holes?.25f:1.f;
+        auto buildContours=[&](float error) {
+            // Same-area region borders are simplified without an error test
+            // even at maxError=0. Temporary adjacent-region colors preserve
+            // class/floor boundaries; stored materials are restored afterwards.
+            std::map<unsigned short,std::set<unsigned short>> adjacent;
+            for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
+                const auto& cell=field.cells[ix+iz*field.width];
+                for(unsigned j=cell.index;j<cell.index+cell.count;++j) {
+                    const auto& span=field.spans[j];if(!span.reg||!field.areas[j])continue;
+                    adjacent[span.reg];
+                    for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
+                        const int nx=ix+rcGetDirOffsetX(d),nz=iz+rcGetDirOffsetY(d);
+                        const auto n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
+                        const auto other=field.spans[n].reg;
+                        if(other&&other!=span.reg&&field.areas[n]){adjacent[span.reg].insert(other);adjacent[other].insert(span.reg);}
+                    }
+                }
+            }
+            std::vector<unsigned short> order;for(const auto& entry:adjacent)order.push_back(entry.first);
+            std::sort(order.begin(),order.end(),[&](auto a,auto b){return adjacent[a].size()!=adjacent[b].size()?adjacent[a].size()>adjacent[b].size():a<b;});
+            std::map<unsigned short,unsigned char> color;
+            for(auto region:order) {
+                bool used[64]{};for(auto neighbour:adjacent[region]){auto c=color.find(neighbour);if(c!=color.end())used[c->second]=true;}
+                unsigned id=1;while(id<64&&used[id])++id;
+                Require(id<64,"Nav64: contour topology color limit");color[region]=static_cast<unsigned char>(id);
+            }
+            const std::vector<unsigned char> areas(field.areas,field.areas+field.spanCount);
+            for(int j=0;j<field.spanCount;++j)if(field.spans[j].reg&&field.areas[j])field.areas[j]=color.at(field.spans[j].reg);
+            const bool built=rcBuildContours(&context,field,error,cfg.maxEdgeLen,*r.contours);
+            std::copy(areas.begin(),areas.end(),field.areas);
+            if(built)for(int i=0;i<r.contours->nconts;++i) {
+                auto& contour=r.contours->conts[i];
+                Require(contour.reg<regionArea.size(),"Nav64: contour has no material policy");contour.area=regionArea[contour.reg];
+            }
+            return built;
+        };
         r.contours=rcAllocContourSet();
-        Require(r.contours&&rcBuildContours(&context,*r.compact,cfg.maxSimplificationError,cfg.maxEdgeLen,*r.contours),"Nav64: contour build failed");
+        Require(r.contours&&buildContours(cfg.maxSimplificationError),"Nav64: contour build failed");
         auto exactContours=[&] {
             // Monotone's merge pass can join sweeps around a narrow hole, and
             // even a quarter-cell error can collapse its contour. Select an
@@ -655,7 +692,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             auto& field=*r.compact;
             std::vector<unsigned short> regions(field.spanCount);
             for(int i=0;i<field.spanCount;++i)regions[i]=field.spans[i].reg;
-            unsigned short nextRegion=0;regionSupport.assign(1,0);regionForbidden.assign(1,0);
+            unsigned short nextRegion=0;regionSupport.assign(1,0);regionForbidden.assign(1,0);regionArea.assign(1,0);
             struct Run {int x0,x1;unsigned short original;unsigned char area;std::vector<unsigned> spans;};
             using RunKey=std::tuple<int,int,unsigned short,unsigned char>;
             std::map<RunKey,unsigned short> previous;
@@ -693,7 +730,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                     }
                     if(!region) {
                         Require(nextRegion+1<RC_BORDER_REG,"Nav64: exact rectangle region limit");
-                        region=++nextRegion;regionSupport.push_back(support[run.spans.front()]);regionForbidden.push_back(forbidden[run.spans.front()]);
+                        region=++nextRegion;regionSupport.push_back(support[run.spans.front()]);regionForbidden.push_back(forbidden[run.spans.front()]);regionArea.push_back(field.areas[run.spans.front()]);
                     }
                     for(unsigned j:run.spans)field.spans[j].reg=region;
                     current.emplace(key,region);
@@ -702,7 +739,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             }
             field.maxRegions=nextRegion;
             r.contours=rcAllocContourSet();
-            Require(r.contours&&rcBuildContours(&context,field,0.f,cfg.maxEdgeLen,*r.contours),"Nav64: exact monotone contour build failed");
+            Require(r.contours&&buildContours(0.f),"Nav64: exact monotone contour build failed");
             if(context.printing)fprintf(stderr,"MONOTONE_TILE class=%u radius=%.2f tile=%d,%d exact=1\n",p.materialClass,p.radius,x,z);
         };
         if(context.multipleOutlines&&context.failure.empty())exactContours();

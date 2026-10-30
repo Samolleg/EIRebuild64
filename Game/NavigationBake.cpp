@@ -558,7 +558,11 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
                 Point to=at.position;to.x+=.02f;Location target;
                 if(Project(mesh,to,.001f,1.f,target,height)) {
                     ++stepCount;Location next;
-                    if(!Constrain(mesh,at.position,to,next,height))++stepFailed;
+                    const char* reason=nullptr;
+                    if(!Constrain(mesh,at.position,to,next,height,&reason)) {
+                        ++stepFailed;
+                        printf("QUALITY_STEP_FAILED profile=%s class=%d from=(%.6f,%.6f,%.6f) to=(%.6f,%.6f,%.6f) reason=%s\n",Agents[type].name,c,at.position.x,at.position.y,at.position.z,to.x,to.y,to.z,reason?reason:"unknown");
+                    }
                     else if(std::hypot(next.position.x-at.position.x,next.position.y-at.position.y)<.001f)++stepStalled;
                 }
             }
