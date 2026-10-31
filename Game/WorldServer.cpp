@@ -1050,9 +1050,10 @@ void CWorldServer::WorldSegment(bool bForceScriptRun, bool runScripts)
     }
     coreSpells.Finish();
     // CRAP - single player only, in mission run script only if party is deployed
-    if (runScripts && (bCanRunScript || bForceScriptRun)) // curInterface != IFACE_MISSION || bCanRunScript )
+    const bool scriptsReady=runScripts && (settlementMobs.Empty() || bCanRunScript);
+    if (scriptsReady && (bCanRunScript || bForceScriptRun)) // curInterface != IFACE_MISSION || bCanRunScript )
     { CorePerf::Scope coreScript(CorePerf::Script); script.Segment(); }
-    if (runScripts) { CorePerf::Scope coreTiming(CorePerf::ScriptTemp);
+    if (scriptsReady) { CorePerf::Scope coreTiming(CorePerf::ScriptTemp);
     scriptTemp.Segment(); }
     // Call segment for map objects
     ActiveObjectsSegment();
@@ -1973,6 +1974,7 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
     if (!settlementMobs.Empty()) {
         script.PartyTravel(pPlayer->party,false);
         scriptTemp.PartyTravel(pPlayer->party,false);
+        bCanRunScript=TRUE;
     }
     if (curInterface == IFACE_BASE || !settlementMobs.Empty())
         RecalcMercBriefings();
@@ -2020,6 +2022,7 @@ void CWorldServer::RemovePlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo)
     // Retain script bindings while these living actors travel outside the map.
     if (!settlementMobs.Empty()) {
         settlementMobs.RememberIds(pPlayer->party);
+        bCanRunScript=FALSE;
         script.PartyTravel(pPlayer->party,true);
         scriptTemp.PartyTravel(pPlayer->party,true);
     }

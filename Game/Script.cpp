@@ -1379,6 +1379,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
     BOOL bNextCommand = TRUE;
     while (!IsFinished() && bNextCommand)
     {
+        if (!theWorldServer.Settlements().Empty() && !theWorldServer.bCanRunScript) break;
         SSCCmd *pCmd = &pThread->commands[nCurCommand];
         pCmd->CalcParameters(pScript, variables);
         bNextCommand = TRUE;
@@ -3192,6 +3193,7 @@ void CScript::PartyTravel(const CParty &party, bool leaving)
 
 void CScript::Segment()
 {
+    if (!theWorldServer.Settlements().Empty() && !theWorldServer.bCanRunScript) return;
     POSITION pos;
     // if script was not loaded it cant be run
     if (!bLoaded)
@@ -3204,6 +3206,7 @@ void CScript::Segment()
         CScriptThreadState &thread = runningThreads.GetNext(pos);
         if (!thread.Segment(this))
             runningThreads.RemoveAt(prevPos);
+        if (!theWorldServer.Settlements().Empty() && !theWorldServer.bCanRunScript) return;
     }
     // execute all scripts checks
     pos = runningScripts.GetHeadPosition();
@@ -3212,6 +3215,7 @@ void CScript::Segment()
         POSITION prevPos = pos;
         SOneScript &s = runningScripts.GetNext(pos);
         s.Segment(this);
+        if (!theWorldServer.Settlements().Empty() && !theWorldServer.bCanRunScript) return;
         if (s.nDelFlag)
         { // скрипту больше не жить :)
             runningScripts.RemoveAt(prevPos);

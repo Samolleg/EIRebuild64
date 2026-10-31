@@ -951,6 +951,7 @@ void World::Restore(SaveSchema::Reader &reader, CWorldServer &world)
         if (entry.second.map == MapName(static_cast<const char *>(world.szZoneFileName)) && !Contains(entry.first))
             Fail("settlement added since save; a new map state is required");
     InitializePeace(world);
+    if (!Empty() && !world.GetPlayer(0)) world.bCanRunScript=FALSE;
 }
 
 }
