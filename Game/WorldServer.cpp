@@ -1000,7 +1000,7 @@ void CWorldServer::StartServer(EServerMode mode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::WorldSegment(bool bForceScriptRun, bool runScripts)
 {
-    if (settlementMobs.DialogueActive()) return;
+    if (settlementMobs.TradeActive()) return;
     CorePerf::Scope coreTiming(CorePerf::WorldSegment);
     POSITION pos;
     CEffect *pEff;

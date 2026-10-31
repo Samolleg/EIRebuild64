@@ -78,11 +78,8 @@ struct CI3DScreenSettlementDialogue::Presentation
         CMapObjectPtr object;
         std::uint64_t identity;
         CPlot3D position, staged;
-        CQuaternion rotation;
-        const SADEntry *animation;
-        std::vector<const SADEntry *> queue;
+        CQuaternion rotation, facing;
         AnimationSwitchCallback callback;
-        float time;
         bool mouth, hidden, visible=false, speaking=false;
         int mouthTicks, mouthState;
     };
@@ -134,9 +131,8 @@ struct CI3DScreenSettlementDialogue::Presentation
         if (specific->dialoguePresentation) throw std::runtime_error("briefing actor already has a presentation");
         auto *animation=unit->GetAnimationSystem2();
         Actor actor{}; actor.object=unit; actor.identity=unit->GetRTID();
-        actor.position=actor.staged=unit->GetCP(); actor.rotation=unit->GetOrientation();
-        actor.animation=animation->lpADEntry; actor.time=animation->fpTime; actor.callback=animation->SwitchCallback;
-        for (POSITION p=animation->entries.GetHeadPosition();p;) actor.queue.push_back(animation->entries.GetNext(p));
+        actor.position=actor.staged=unit->GetCP(); actor.rotation=actor.facing=unit->GetOrientation();
+        actor.callback=animation->SwitchCallback;
         actor.mouth=specific->bMouthSpeakingMode; actor.mouthTicks=specific->nMouthSwitchTicks;
         actor.mouthState=specific->nCurrentMouthState; actor.hidden=specific->bBriefingWeaponForcedHidden;
         actors.emplace(id,std::move(actor));
@@ -161,6 +157,7 @@ struct CI3DScreenSettlementDialogue::Presentation
         unit->SetCP(actor.staged);
         CPlot3D direction=(id==hero?left:right)-actor.staged; direction.z=0;
         if (fabs(direction)>.001f) unit->SetOrientationXY(direction);
+        actor.facing=unit->GetOrientation();
         if (ModRuntime::Current() && ModRuntime::Current()->BriefingWeaponsEnabled() && !weapon)
             static_cast<CUnitClientSpecific *>(unit->GetUnitSpecific())->SetBriefingWeaponHidden(true);
         Animate(actor,2);
@@ -185,6 +182,9 @@ struct CI3DScreenSettlementDialogue::Presentation
     {
         elapsed+=seconds;
         for (auto &entry:actors) if (auto *unit=Live(entry.second)) {
+            const auto &actor=entry.second;
+            unit->SetCP(actor.staged+CPlot3D(0,0,actor.visible?0.f:-100.f));
+            unit->SetOrientation(actor.facing);
             unit->GetAnimationSystem2()->Step(seconds*1000.f/DW_SEGMENT_TIME);
             auto *specific=static_cast<CUnitClientSpecific *>(unit->GetUnitSpecific());
             if (entry.second.speaking && (int(elapsed*6)&1)) specific->MouthOpen();
@@ -246,9 +246,10 @@ struct CI3DScreenSettlementDialogue::Presentation
             unit->SetCP(actor.position); unit->SetOrientation(actor.rotation);
             try {
             auto *animation=unit->GetAnimationSystem2();
-            animation->SwitchCallback=nullptr; animation->entries.RemoveAll();
-            animation->SetAnimation(actor.animation); animation->SetTime(actor.time);
-            for (const auto *queued:actor.queue) animation->entries.AddTail(queued);
+            animation->SwitchCallback=nullptr;
+            // World time kept running: resume the latest authoritative state.
+            specific->NewAnimationWasReceived(theWorld.GetSegmentTimeCounter());
+            specific->NewRouteReceived();
             animation->SwitchCallback=actor.callback;
             specific->SetBriefingWeaponHidden(actor.hidden);
             specific->bMouthSpeakingMode=actor.mouth; specific->nMouthSwitchTicks=actor.mouthTicks;
@@ -288,9 +289,12 @@ void CI3DScreenSettlementDialogue::OnActivate()
         world=&theWorldServer;
         token=world->Settlements().BeginDialogue(*world,0,target);
         if (!token) { Fail("opening conditions changed"); return; }
-        theWorld.SetCombatPause(true);
+        IWorld.CombatPause(false);
+        theWorld.SetCombatPause(false);
         const auto &session=world->Settlements().Dialogue();
         presentation=std::make_unique<Presentation>(session.hero,session.target);
+        presentation->Add(session.hero); presentation->Add(session.target);
+        presentation->Show(session.hero,-1,true); presentation->Show(session.target,-1,true);
         LoadTopics();
         if (!forced.empty()) {
             auto found=std::find_if(topics.begin(),topics.end(),[&](const auto &topic){return topic.key==forced;});
@@ -317,6 +321,8 @@ void CI3DScreenSettlementDialogue::OnDeactivate()
 void CI3DScreenSettlementDialogue::Fail(const char *detail)
 {
     StopVoice(); presentation.reset(); phase=Phase::Error;
+    if (world) world->Settlements().EndDialogue(token);
+    token=0;
     GameJournal::Event("SETTLEMENT","dialogue_error","target=%d detail=%s",target,GameJournal::Quote(detail).c_str());
     topicScroll->Show(FALSE); surfaces[0]->Show(FALSE); text->Show(TRUE); text->SetText(Unavailable());
 }
@@ -444,7 +450,10 @@ void CI3DScreenSettlementDialogue::ReadProgram(const Settlement::DialogueTopic &
         if (manager->GetText(CString("pers ")+local.c_str())) manager->GetLine(command.caption);
         if (command.caption.IsEmpty()) command.caption=Local(L"\u0421\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a");
     }
-    for (int unit:participants) presentation->Add(unit);
+    for (int unit:participants) {
+        if (!world->Settlements().HoldDialogueActor(*world,token,unit)) throw std::runtime_error("briefing actor hold rejected");
+        presentation->Add(unit);
+    }
 }
 
 void CI3DScreenSettlementDialogue::SelectTopic(int index)
@@ -602,7 +611,7 @@ bool CI3DScreenMission::UpdateSettlementDialogue()
     if (distanceXY2(hero->GetCP(),npc->GetCP())<=16) {
         const int target=settlementTalkTarget; const auto topic=settlementForcedTopic; settlementTalkTarget=-1;
         if (!theWorldServer.Settlements().DialogueReady(theWorldServer,0,target)) { Notice(); return false; }
-        // DoModal captures the user's pause BEFORE BeginDialogue takes its lock.
+        // DoModal saves the user's pause; OnActivate resumes this live dialogue.
         pI3D->DoModal(dbgnew CI3DScreenSettlementDialogue(pI3D,target,topic),false,false);
         return true;
     }

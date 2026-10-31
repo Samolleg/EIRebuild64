@@ -81,14 +81,42 @@ std::uint64_t World::BeginDialogue(CWorldServer &world, int player, int target)
     dialogue.token = nextDialogue; dialogue.settlement = name.settlement; dialogue.player = player;
     dialogue.target = target; dialogue.targetIdentity = npc->GetRTID();
     dialogue.hero = hero->GetID(); dialogue.heroIdentity = hero->GetRTID();
-    auto *control = static_cast<CUnitServer *>(hero->GetUnitSpecific());
-    if (control->GetScriptCommand().IsMove() || control->GetNextScriptCommand().IsMove()) {
-        if (auto *playerControl = control->logic.GetPlayer()) playerControl->DoStop(control->logic);
-        control->StopGroupSearchMotion();
+    if (!HoldDialogueActor(world, dialogue.token, dialogue.hero) ||
+        !HoldDialogueActor(world, dialogue.token, dialogue.target)) {
+        dialogue = {};
+        return 0;
     }
     GameJournal::Event("SETTLEMENT", "dialogue_open", "namespace=%s token=%llu target=%d hero=%d",
         Prefix(name.settlement).c_str(), static_cast<unsigned long long>(dialogue.token), target, dialogue.hero);
     return dialogue.token;
+}
+
+bool World::HoldDialogueActor(CWorldServer &world, std::uint64_t token, int actor)
+{
+    if (!DialogueValid(world, token)) return false;
+    auto *unit = world.GetUnit(actor);
+    if (!unit || unit->IsDead() || (actor != dialogue.hero && ModeFor(world, unit) != Mode::Peaceful)) return false;
+    const auto held = dialogue.actors.find(actor);
+    if (held != dialogue.actors.end()) return held->second == unit->GetRTID();
+    auto *control = static_cast<CUnitServer *>(unit->GetUnitSpecific());
+    if (control->GetScriptCommand().IsMove() || control->GetNextScriptCommand().IsMove()) {
+        if (auto *playerControl = control->logic.GetPlayer()) playerControl->DoStop(control->logic);
+        control->StopGroupSearchMotion();
+    }
+    control->logic.StartIdle();
+    auto *other = world.GetUnit(actor == dialogue.hero ? dialogue.target : dialogue.hero);
+    CPlot3D direction = other->GetCP() - unit->GetCP(); direction.z = 0;
+    if (fabs(direction) > .001f) unit->SetOrientationXY(direction);
+    // Retail briefing stops participant commands, rather than the whole world.
+    control->InterruptCommand();
+    dialogue.actors.emplace(actor, unit->GetRTID());
+    return true;
+}
+bool World::IsDialogueActor(CUnit *unit) const
+{
+    if (!DialogueActive() || !unit) return false;
+    const auto held = dialogue.actors.find(unit->GetID());
+    return held != dialogue.actors.end() && held->second == unit->GetRTID();
 }
 
 bool World::DialogueValid(CWorldServer &world, std::uint64_t token) const

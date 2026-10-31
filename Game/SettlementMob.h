@@ -61,6 +61,7 @@ struct DialogueSession
     int player = -1, target = -1, hero = -1;
     std::string topic;
     bool completing = false, consumed = false;
+    std::map<int, std::uint64_t> actors; // Transient AI hold; never stored in saves.
 };
 
 struct Point { float x = 0, y = 0; };
@@ -187,6 +188,8 @@ public:
     bool FinishDialogue(CWorldServer &world, std::uint64_t token);
     bool AcceptDialogueCompletion(int player, const char *key);
     void EndDialogue(std::uint64_t token);
+    bool HoldDialogueActor(CWorldServer &world, std::uint64_t token, int actor);
+    bool IsDialogueActor(CUnit *unit) const;
     bool BeginTrade(CWorldServer &world, std::uint64_t token, const std::string &topic);
     bool TradeValid(CWorldServer &world, std::uint64_t token) const;
     CParty *TradeParty(std::uint64_t token) const;
@@ -196,6 +199,7 @@ public:
                      TradeAction action = TradeAction::Deal, CItem *item = nullptr, CItem **result = nullptr);
     void EndTrade(std::uint64_t token);
     bool DialogueActive() const { return dialogue.token != 0; }
+    bool TradeActive() const { return trade != nullptr; }
     const DialogueSession &Dialogue() const { return dialogue; }
 };
 

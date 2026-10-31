@@ -645,6 +645,7 @@ void CUnitClientSpecific::SetPathParticles(CParticle *pP1, CParticle *pP2)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::NewAnimationWasReceived(float fSegmentTimeCounter)
 {
+    if (dialoguePresentation) return;
     const SADEntry *pEntry = NULL, *pEntryCycle = NULL;
     if (lpUnit->CheckFlag(UNIT_OLDROTATE))
         return;
@@ -863,6 +864,7 @@ bool CUnitClientSpecific::GetCastPointPosition(CPlot3D &position)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
 {
+    if (dialoguePresentation) return;
     int nX, nY;
     CPlot3D pos, vec;
     float fpSpeed;

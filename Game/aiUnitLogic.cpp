@@ -2779,6 +2779,7 @@ static void ModDeathFearUpdate(CAIUnitLogic &logic){
 }
 void CAIUnitLogic::Segment()
 {
+    if (theWorldServer.Settlements().IsDialogueActor(GetUnit())) return;
     int nBestPower, nPower;
     POSITION pos;
     CAIUnitMotivation *pBest;

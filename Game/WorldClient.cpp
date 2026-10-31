@@ -972,13 +972,13 @@ int CWorldClient::Segment()
         pMusicSystem->UnpauseZoneMode();
     //
     // Terrain segment
-    const bool settlementDialogue = theWorldServer.Settlements().DialogueActive();
-    if (pTerrain && !settlementDialogue)
+    const bool settlementTrade = theWorldServer.Settlements().TradeActive();
+    if (pTerrain && !settlementTrade)
         pTerrain->Segment();
     // Sound manager segment
-    if (pMusicSystem && !settlementDialogue)
+    if (pMusicSystem && !settlementTrade)
         pMusicSystem->Segment();
-    if (pSoundManager && !settlementDialogue)
+    if (pSoundManager && !settlementTrade)
         pSoundManager->SegmentAmbient();
     // call segment() for fogs
     if (!IsCombatPause())
@@ -1035,7 +1035,7 @@ int CWorldClient::Segment()
 
     CorePerf::Scope coreParticles(CorePerf::ClientParticles);
     // Particles segment
-    if (pParticleManager && !settlementDialogue)
+    if (pParticleManager && !settlementTrade)
         ((CParticleManager *)pParticleManager)->Segment(IsCombatPause());
     coreParticles.Finish();
     CorePerf::Scope corePrints(CorePerf::ClientPrints);
