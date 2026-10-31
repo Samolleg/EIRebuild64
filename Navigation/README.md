@@ -117,14 +117,14 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 10, algorithm 27, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 10, algorithm 26, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   In the expanded tile stream, each tile blob is followed by a u32 polygon
   support count (must equal polyCount). Each polygon has u32 source-count and
   that many u64 source IDs (low/high u32), primary first, connected neighbours
   afterwards. These records belong to that tile's polygon order and move with
-  tile replacement. Algorithm 27 requires rebaking all six profiles, sources
-  and body tables together; 24/25/26 data cannot be reused with this runtime.
+  tile replacement. Algorithm 26 requires rebaking all six profiles, sources
+  and body tables together; 24/25 data cannot be reused with this runtime.
   No layer section exists. Loader validates exact profile, bounds and ABI.
 - <mpr>--<mob>.navworld: JSON version 4, baked static NIDs, ground dynamic boxes and flight_dynamic visual boxes.
 - <mpr>--<mob>.navgeom: shared NSRC version 8 (four parallel LZMS blocks), inner section 7,
@@ -140,7 +140,7 @@ separate from this baker contract.
   Placement/step/restore and the local client resolve original terrain/BASE
   triangles through polygon provenance. Gameplay acceptance remains separate.
   Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 27, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 26, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -242,7 +242,7 @@ Release walk records may set neighbour_distance, release_after_wait (0 keeps
 the neighbour standing) and require_detour. Their results include detour_max_ms.
 
 
-## Six profiles and automatic flight (algorithm 27)
+## Six profiles and automatic flight (algorithm 26)
 
 Profiles are small, human, large, giant, levitate and flying. Tiny bodies use
 small; levitating bodies share the remaining 0.5 m levitate profile. Profile
