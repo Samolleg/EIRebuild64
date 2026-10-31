@@ -1,8 +1,7 @@
 #pragma once
-// The renderer DLL's neighbour stream, wherever it runs: this process's own
-// stream in standard mode (neighbour_maps.h), the x64 render host's in remote
-// device mode (x64_remote_neighbours.h). Either way the renderer adopts the
-// same NeighbourPiece (neighbour_piece.h); in remote mode no decoded
+// The renderer DLL's neighbour stream: this process's own stream in standard
+// mode (neighbour_maps.h); in core mode the x64 host runs it for its own
+// Renderer and this process only sends the inputs and stops, so no decoded
 // neighbour ever exists in the game process.
 #include "owned_resource_store.h"
 

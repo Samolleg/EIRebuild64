@@ -41,9 +41,7 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
-#include "x64_remote_surfaces.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
 #include <optional>
@@ -159,9 +157,7 @@ HRESULT Renderer::upload(SurfaceImage& i,SurfaceUploadResult* output){
   const HRESULT detached=detach_shared_surface_texture(i,"upload");if(FAILED(detached))return detached;
  }
  ID3D11Texture2D* const shared_before=i.texture_shared?i.texture.Get():nullptr; // compared only, never dereferenced
- // Remote device: the host converts and uploads at once, in ring order.
- SurfaceUploadResult result{};const HRESULT hr=x64remote::remote_active()?upload_surface_image_remote(device_.Get(),false,i,&result):
-  upload_surface_image(device_.Get(),context_.Get(),i,&result);
+ SurfaceUploadResult result{};const HRESULT hr=upload_surface_image(device_.Get(),context_.Get(),i,&result);
  if(shared_before&&i.texture.Get()!=shared_before)unshare_owned_texture(i,shared_before); // recreated (mip layout)
  if(result.uploaded||FAILED(hr))update_surface_memory_accounting(i);if(SUCCEEDED(hr)&&result.uploaded){if(perf_enabled()){++perf_upload_misses_;perf_upload_bytes_+=result.upload_bytes;}profiler_.add_upload(result.upload_bytes);release_uploaded_surface_pixels(i);}if(output)*output=result;return hr;
 }
@@ -233,18 +229,14 @@ HRESULT Renderer::game_upload(SurfaceImage& i,SurfaceUploadResult* output){
   scene_sync("surface_restore_for_upload");
   const HRESULT restored=restore_surface_pixels(i);if(FAILED(restored))return restored;
  }
- // Remote device: no deferred context; the surface steps queue on the host
- // until flush_game_uploads' commit (surface protocol).
- const bool remote=x64remote::remote_active();
- if(!remote&&!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
+ if(!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
  // A published (possibly shared) GPU home is never written in place.
  if(i.texture_shared&&i.texture&&(i.uploaded_generation!=i.generation||i.dirty_full||i.dirty_rect_valid)){
   const HRESULT detached=scene_detach_surface_texture(i,"upload");if(FAILED(detached))return detached;
  }
  ID3D11Texture2D* const shared_before=i.texture_shared?i.texture.Get():nullptr; // compared only, never dereferenced
  SurfaceUploadResult result{};
- const HRESULT hr=remote?upload_surface_image_remote(device_.Get(),true,i,&result):
-  upload_surface_image(device_.Get(),game_upload_context_.Get(),i,&result);
+ const HRESULT hr=upload_surface_image(device_.Get(),game_upload_context_.Get(),i,&result);
  if(shared_before&&i.texture.Get()!=shared_before){i.texture_shared=false;scene_unshare_surface_texture(i.id,shared_before);} // recreated (mip layout)
  if(result.uploaded||FAILED(hr))update_surface_memory_accounting(i);
  if(SUCCEEDED(hr)&&result.uploaded){
@@ -258,27 +250,6 @@ HRESULT Renderer::game_upload(SurfaceImage& i,SurfaceUploadResult* output){
 
 void Renderer::flush_game_uploads() noexcept{
  if(!game_upload_pending_)return;
- if(x64remote::remote_active()){
-  // Surface protocol: the steps of this batch are already on the ring; the
-  // scene thread releases them on the host at this point of its stream,
-  // after any queued output blit that samples their old contents.
-  const frame_acct::Scope upload_scope(frame_acct::ours_surface_upload);
-  game_upload_pending_=false;
-  std::vector<std::uint64_t> surfaces;surfaces.swap(game_upload_surfaces_);
-  const std::uint64_t bytes=game_upload_bytes_;game_upload_bytes_=0;
-  const std::uint64_t batch=x64remote::surface_close_batch();
-  const auto run=[this,surfaces=std::move(surfaces),bytes,batch]{
-   const bool queued=std::any_of(pending_blits_.begin(),pending_blits_.end(),[&](const PendingBlit& blit){
-    return blit.gpu&&blit.source_is_surface&&std::find(surfaces.begin(),surfaces.end(),blit.source_id)!=surfaces.end();});
-   if(queued)(void)render_pending_blits();
-   x64remote::surface_commit(batch);
-   profiler_.add_upload(bytes);
-  };
-  if(scene_thread_->post(run))return;
-  scene_thread_->sync();
-  run();
-  return;
- }
  if(!game_upload_context_)return;
  const frame_acct::Scope upload_scope(frame_acct::ours_surface_upload);
  game_upload_pending_=false;
@@ -329,14 +300,12 @@ bool Renderer::scene_surface_holds(std::uint64_t id,ID3D11Texture2D* texture) co
 HRESULT Renderer::scene_detach_surface_texture(SurfaceImage& image,const char* writer){
  if(!image.texture_shared||!image.texture)return S_OK;
  if(!device_)return E_FAIL;
- const bool remote=x64remote::remote_active(); // surface protocol: a queued host copy step
- if(!remote&&!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
+ if(!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
  D3D11_TEXTURE2D_DESC description{};image.texture->GetDesc(&description);
  ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> srv;
  HRESULT hr=device_->CreateTexture2D(&description,nullptr,&texture);if(FAILED(hr))return hr;
  if(FAILED(hr=device_->CreateShaderResourceView(texture.Get(),nullptr,&srv)))return hr;
- if(remote)x64remote::surface_copy(true,texture.Get(),srv.Get(),image.texture.Get(),true,false);
- else game_upload_context_->CopyResource(texture.Get(),image.texture.Get());
+ game_upload_context_->CopyResource(texture.Get(),image.texture.Get());
  game_upload_pending_=true;
  const ComPtr<ID3D11Texture2D> previous=image.texture;
  image.texture=std::move(texture);image.srv=std::move(srv);++image.texture_serial;
@@ -692,6 +661,20 @@ static bool native_alpha_is_one(const FixedState& state,NativeAlphaEvidence alph
   double(argument(stage[D3DTSS_ALPHAARG2]))>=1.0;
  default:return false;
  }
+}
+
+// Owned figure parts always carry the game's alpha test, also on textures
+// without transparency. With a proved fragment alpha of 1 (every mip of the
+// texture opaque, diffuse alpha 1) and a function that 1 passes for every
+// reference (the shader's reference is at most 255/256), the test rejects
+// nothing: dropping it keeps coverage exact.
+bool native_alpha_test_passes_all(const FixedState& state,NativeAlphaEvidence alpha) noexcept {
+ if(state.render[D3DRENDERSTATE_ALPHATESTENABLE]==FALSE)return false;
+ switch(state.render[D3DRENDERSTATE_ALPHAFUNC]){
+ case D3DCMP_GREATER:case D3DCMP_GREATEREQUAL:case D3DCMP_NOTEQUAL:case D3DCMP_ALWAYS:break;
+ default:return false;
+ }
+ return native_alpha_is_one(state,alpha);
 }
 
 NativeOpacityClass native_opacity_class(const FixedState& state,

@@ -255,11 +255,10 @@ void Renderer::render_wind_trails() {
     if (FAILED(context_->Map(wind_trails_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) return;
     std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(wind_trails_constants_.Get(),0);
 
-    // Runs inside composite_world's state guard; the slots it does not save are restored here.
-    ID3D11ShaderResourceView* saved_vs=nullptr;context_->VSGetShaderResources(0,1,&saved_vs);
-    ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
+    // Runs inside composite_world. It binds every state it reads, restores
+    // nothing and unbinds its views after (every following pass binds its own).
     transition_profile_pass("wind_trails");
-    context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
+    bind_plan_targets(plan_pass("wind_trails",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth))); // depth is read as a texture
     D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(wind_trails_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(wind_trails_blend_.Get(),factor,~0u);
@@ -271,9 +270,8 @@ void Renderer::render_wind_trails() {
     context_->VSSetShaderResources(0,1,ambient_height_srv_.GetAddressOf());context_->PSSetShaderResources(2,1,depth_srv_.GetAddressOf());
     bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
     context_->DrawInstanced(2*(kRibbonSegments+1),count,0,0);
-    context_->VSSetShaderResources(0,1,&saved_vs);context_->PSSetShaderResources(2,1,&saved_ps2);
-    if (saved_vs) saved_vs->Release();
-    if (saved_ps2) saved_ps2->Release();
+    ID3D11ShaderResourceView* no_view=nullptr;
+    context_->VSSetShaderResources(0,1,&no_view);context_->PSSetShaderResources(2,1,&no_view);
     profiler_.add_draw(1,1);profiler_.add_batch(1);
 }
 

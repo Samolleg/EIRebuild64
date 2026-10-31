@@ -140,23 +140,23 @@ HRESULT Renderer::render_ambient_occlusion() noexcept {
     context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(ao_vs_.Get(),nullptr,0);context_->PSSetConstantBuffers(1,1,ao_constants_.GetAddressOf());
     // Compact low-resolution depth, then horizon AO from the finished world depth.
-    context_->OMSetRenderTargets(1,ao_depth_rtv_.GetAddressOf(),nullptr);
+    bind_plan_targets(plan_pass("ao_prepare",ao_depth_rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth)));
     const D3D11_VIEWPORT low_view{0,0,float(low_width),float(low_height),0,1};context_->RSSetViewports(1,&low_view);
     context_->PSSetShaderResources(0,1,depth_srv_.GetAddressOf());
     context_->PSSetShaderResources(2,1,ao_ambient_srv_.GetAddressOf());
     context_->PSSetShader(ao_prepare_ps_.Get(),nullptr,0);context_->Draw(3,0);
-    context_->OMSetRenderTargets(1,ao_raw_rtv_.GetAddressOf(),nullptr);
+    bind_plan_targets(plan_pass("ao_horizon",ao_raw_rtv_.Get(),nullptr));
     context_->PSSetShaderResources(1,1,ao_depth_srv_.GetAddressOf());
     context_->PSSetShader(ao_horizon_ps_.Get(),nullptr,0);context_->Draw(3,0);
     // Depth-aware spatial denoise.
     transition_profile_pass("ambient_occlusion_resolve");
     context_->PSSetShaderResources(1,1,none);
-    context_->OMSetRenderTargets(1,ao_filtered_rtv_.GetAddressOf(),nullptr);
+    bind_plan_targets(plan_pass("ao_denoise",ao_filtered_rtv_.Get(),nullptr));
     context_->PSSetShaderResources(1,1,ao_raw_srv_.GetAddressOf());
     context_->PSSetShader(ao_denoise_ps_.Get(),nullptr,0);context_->Draw(3,0);
     // Depth-aware upsample and removal of the occluded ambient share.
     context_->PSSetShaderResources(1,1,none);
-    context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr);
+    bind_plan_targets(plan_pass("ao_resolve",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth)));
     const D3D11_VIEWPORT full_view{0,0,float(width_),float(height_),0,1};context_->RSSetViewports(1,&full_view);
     ID3D11ShaderResourceView* resolve[2]={ao_srv_.Get(),ao_ambient_srv_.Get()};
     context_->PSSetShaderResources(1,2,resolve);

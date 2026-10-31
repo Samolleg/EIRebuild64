@@ -41,9 +41,7 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
-#include "x64_remote_surfaces.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
 #include <optional>
@@ -177,7 +175,8 @@ HRESULT Renderer::draw_hud_asset_frames(const std::vector<HudAssetFrame>* captur
  state.stage[0][D3DTSS_COLOROP]=state.stage[0][D3DTSS_ALPHAOP]=D3DTOP_MODULATE;
  state.stage[0][D3DTSS_COLORARG1]=state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;
  state.stage[0][D3DTSS_COLORARG2]=state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
- DebugViewStateGuard guard(context_.Get());
+ // draw() binds everything else it reads; nothing found is restored (frame_plan.h).
+ (void)plan_pass("hud_asset_frames",rtv_.Get(),dsv_.Get());
  context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
  const HRESULT hr=draw(D3DPT_TRIANGLELIST,D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_SPECULAR|D3DFVF_TEX1,
              vertices.data(),UINT(vertices.size()),nullptr,0,state,nullptr,SemanticKind::ui,0,0,{},texture.Get());
@@ -306,16 +305,17 @@ HRESULT Renderer::begin_camp_popup(bool clear) {
      FAILED(hr=device_->CreateDepthStencilView(camp_popup_depth_.Get(),nullptr,&camp_popup_dsv_))){reset_camp_popup();return hr;}
   camp_popup_width_=output_width_;camp_popup_height_=output_height_;
  }
+ // The game's target state returns to these at the popup's end. The popup
+ // restores no pipeline state: every pass after it sets its own depth state
+ // and viewport (frame_plan.h).
  camp_popup_saved_rtv_=rtv_;camp_popup_saved_dsv_=dsv_;
- context_->OMGetDepthStencilState(&camp_popup_saved_depth_state_,&camp_popup_stencil_);
- camp_popup_viewport_count_=UINT(camp_popup_viewports_.size());
- context_->RSGetViewports(&camp_popup_viewport_count_,camp_popup_viewports_.data());
  // Prior frame's popup may still be bound for sampling after the UI flush.
  ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(0,1,&empty);
  rtv_=camp_popup_rtv_;dsv_=camp_popup_dsv_;camp_popup_active_=true;camp_popup_ready_=false;
- context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
- if(clear){const float background[]{0,0,0,1};context_->ClearRenderTargetView(rtv_.Get(),background);}
- context_->ClearDepthStencilView(dsv_.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
+ const PlanPass& pass=plan_pass("camp_popup",rtv_.Get(),dsv_.Get());
+ bind_plan_targets(pass);
+ if(clear){const float background[]{0,0,0,1};context_->ClearRenderTargetView(plan_rtv(pass),background);}
+ context_->ClearDepthStencilView(plan_dsv(pass),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
  return S_OK;
 }
 void Renderer::end_camp_popup(bool complete) noexcept {
@@ -324,9 +324,7 @@ void Renderer::end_camp_popup(bool complete) noexcept {
  if(!camp_popup_active_)return;
  rtv_=camp_popup_saved_rtv_;dsv_=camp_popup_saved_dsv_;
  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
- context_->OMSetDepthStencilState(camp_popup_saved_depth_state_.Get(),camp_popup_stencil_);
- context_->RSSetViewports(camp_popup_viewport_count_,camp_popup_viewports_.data());
- camp_popup_saved_rtv_.Reset();camp_popup_saved_dsv_.Reset();camp_popup_saved_depth_state_.Reset();
+ camp_popup_saved_rtv_.Reset();camp_popup_saved_dsv_.Reset();
  camp_popup_active_=false;camp_popup_ready_=complete;
 }
 void Renderer::reset_camp_popup() noexcept {
@@ -489,14 +487,7 @@ HRESULT Renderer::make_scene_blit(const SurfaceImage& source,const RECT& destina
   const bool cachedMatches=mirror!=overlay_mirror_.end()&&mirror->second.surface_id==source.id&&mirror->second.width==(UINT)sw&&mirror->second.height==(UINT)sh&&EqualRect(&mirror->second.source,&sr)&&mirror->second.keyed==(source_key!=nullptr)&&(!source_key||(mirror->second.color_key.dwColorSpaceLowValue==source_key->dwColorSpaceLowValue&&mirror->second.color_key.dwColorSpaceHighValue==source_key->dwColorSpaceHighValue));
   RECT update{};const OverlayRefresh refresh=overlay_refresh(cachedMatches,cachedMatches?mirror->second.generation:0,source,sr,update);const bool cacheHit=refresh==OverlayRefresh::reuse;const bool partial=refresh==OverlayRefresh::partial;if(!partial)update=RECT{0,0,sw,sh};const LONG uw=update.right-update.left,uh=update.bottom-update.top;
   const UINT bytes=std::max<UINT>(1,source.format.dwRGBBitCount/8);const bool directBgra=bytes==4&&source.format.dwRBitMask==0x00ff0000&&source.format.dwGBitMask==0x0000ff00&&source.format.dwBBitMask==0x000000ff;const bool forceOpaqueAlpha=directBgra&&!source_key;std::vector<std::uint32_t> pixels;
-  // Remote device (surface protocol): copy the update's game-format rows;
-  // the host converts them with this blit's key semantics (render_pending_blits).
-  const bool remote_rows=!cacheHit&&x64remote::remote_active();std::vector<std::uint8_t> raw_rows;
-  if(remote_rows){
-   const LONG ux=sr.left+update.left,uy=sr.top+update.top;const std::size_t row_bytes=(size_t)std::max<LONG>(uw,0)*bytes;
-   try{raw_rows.resize(row_bytes*(size_t)std::max<LONG>(uh,0));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
-   for(LONG y=0;y<uh&&row_bytes;++y)std::memcpy(raw_rows.data()+(size_t)y*row_bytes,source.pixels.data()+(size_t)(uy+y)*source.pitch+(size_t)ux*bytes,row_bytes);
-  }else if(!cacheHit){
+  if(!cacheHit){
    const LONG ux=sr.left+update.left,uy=sr.top+update.top;try{pixels.resize((size_t)std::max<LONG>(uw,0)*std::max<LONG>(uh,0));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
    if(uw<=0||uh<=0){}else if(forceOpaqueAlpha){const auto* first=source.pixels.data()+(size_t)uy*source.pitch+(size_t)ux*bytes;copy_direct_bgra_rows(first,source.pitch,pixels.data(),(UINT)uw,(UINT)uh);}
    else{
@@ -509,13 +500,6 @@ HRESULT Renderer::make_scene_blit(const SurfaceImage& source,const RECT& destina
    }
   }
   pending.native_canvas=native_canvas;pending.source_id=source.id;pending.source_is_surface=true;pending.cache_key=cacheKey;pending.generation=source.generation;pending.base_generation=partial?mirror->second.generation:0;pending.partial=partial;pending.update=update;pending.keyed=source_key!=nullptr;pending.cached=cacheHit;pending.force_opaque_alpha=forceOpaqueAlpha;pending.source=sr;if(source_key)pending.color_key=*source_key;pending.destination=clipped;pending.composition=composition;pending.width=(UINT)sw;pending.height=(UINT)sh;pending.pitch=(UINT)std::max<LONG>(uw,1)*4;pending.u0=(float)(clipped.left-destination.left)/dw;pending.v0=(float)(clipped.top-destination.top)/dh;pending.u1=(float)(clipped.right-destination.left)/dw;pending.v1=(float)(clipped.bottom-destination.top)/dh;pending.pixels=std::move(pixels);
-  if(remote_rows){
-   // CPU conversion semantics: a forced-opaque source keeps its bytes as
-   // they are (alpha unused at draw); otherwise alpha comes from the key
-   // alone, compared on the colour bits.
-   pending.raw_rows=std::move(raw_rows);pending.raw_format=source.format;pending.raw_format.dwRGBAlphaBitMask=forceOpaqueAlpha?0xff000000u:0u;
-   pending.pitch=(UINT)std::max<LONG>(uw,1)*bytes;
-  }
   if(!cacheHit){
    try{OverlayMirror next{};next.surface_id=source.id;next.generation=source.generation;next.width=(UINT)sw;next.height=(UINT)sh;next.source=sr;next.keyed=source_key!=nullptr;if(source_key)next.color_key=*source_key;overlay_mirror_[cacheKey]=next;}
    catch(...){overlay_mirror_.clear();}
@@ -883,8 +867,7 @@ HRESULT Renderer::capture(SurfaceImage& destination,const RECT& destination_rect
    scene_ui_pending_=false;scene_native_pending_=false;
    scene_post_frame([this,command,residency=std::move(residency)]{
     const auto* home=residency.find(command.target);
-    HRESULT hr=home?composite_world():E_UNEXPECTED;if(SUCCEEDED(hr))hr=render_pending_blits();
-    ComPtr<ID3D11Texture2D> back;if(SUCCEEDED(hr))hr=swap_->GetBuffer(0,IID_PPV_ARGS(&back));
+    ComPtr<ID3D11Texture2D> back;HRESULT hr=home?capture_source(back):E_UNEXPECTED;
     if(SUCCEEDED(hr)){ID3D11ShaderResourceView* null_view=nullptr;context_->PSSetShaderResources(0,1,&null_view);
      const D3D11_BOX box{command.box_left,command.box_top,0,command.box_right,command.box_bottom,1};
      context_->CopySubresourceRegion(home->texture.Get(),0,command.x,command.y,0,back.Get(),0,&box);}
@@ -896,11 +879,11 @@ HRESULT Renderer::capture(SurfaceImage& destination,const RECT& destination_rect
  SCENE_ENTRY("capture");
  const RECT source_rect{MulDiv(native_source_rect.left,output_width_,canvas_width()),MulDiv(native_source_rect.top,output_height_,canvas_height()),MulDiv(native_source_rect.right,output_width_,canvas_width()),MulDiv(native_source_rect.bottom,output_height_,canvas_height())};
  if(destination.cpu_released)return E_UNEXPECTED;
- const HRESULT composite_hr=composite_world();if(FAILED(composite_hr))return composite_hr;
- if(!swap_||!device_||!context_)return E_FAIL;HRESULT hr=render_pending_blits();if(FAILED(hr))return hr;
+ if(!swap_||!device_||!context_)return E_FAIL;
+ ComPtr<ID3D11Texture2D> back;HRESULT hr=capture_source(back);if(FAILED(hr))return hr;
  const LONG source_width=source_rect.right-source_rect.left,source_height=source_rect.bottom-source_rect.top,destination_width=destination_rect.right-destination_rect.left,destination_height=destination_rect.bottom-destination_rect.top;if(source_width<=0||source_height<=0||destination_width<=0||destination_height<=0)return E_INVALIDARG;
  RECT clipped_destination{std::clamp<LONG>(destination_rect.left,0,(LONG)destination.width),std::clamp<LONG>(destination_rect.top,0,(LONG)destination.height),std::clamp<LONG>(destination_rect.right,0,(LONG)destination.width),std::clamp<LONG>(destination_rect.bottom,0,(LONG)destination.height)};if(clipped_destination.right<=clipped_destination.left||clipped_destination.bottom<=clipped_destination.top)return E_INVALIDARG;
- ID3D11ShaderResourceView* null_view=nullptr;context_->PSSetShaderResources(0,1,&null_view);ComPtr<ID3D11Texture2D> back;hr=swap_->GetBuffer(0,IID_PPV_ARGS(&back));if(FAILED(hr))return hr;
+ ID3D11ShaderResourceView* null_view=nullptr;context_->PSSetShaderResources(0,1,&null_view);
  const bool stretched=source_width!=destination_width||source_height!=destination_height;
  if(!stretched){const POINT source_origin=capture_stretch_source_point(source_rect,destination_rect,clipped_destination.left,clipped_destination.top);const LONG copy_width=std::min<LONG>({clipped_destination.right-clipped_destination.left,(LONG)output_width_-source_origin.x}),copy_height=std::min<LONG>({clipped_destination.bottom-clipped_destination.top,(LONG)output_height_-source_origin.y});if(source_origin.x<0||source_origin.y<0||copy_width<=0||copy_height<=0)return E_INVALIDARG;if(destination.texture_shared&&FAILED(hr=detach_shared_surface_texture(destination,"capture")))return hr;D3D11_TEXTURE2D_DESC td{};if(destination.texture)destination.texture->GetDesc(&td);if(!destination.texture||td.Width!=destination.width||td.Height!=destination.height||td.Format!=DXGI_FORMAT_B8G8R8A8_UNORM){destination.texture.Reset();destination.srv.Reset();update_surface_memory_accounting(destination);td={};td.Width=destination.width;td.Height=destination.height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;if(FAILED(device_->CreateTexture2D(&td,nullptr,&destination.texture)))return E_FAIL;if(FAILED(device_->CreateShaderResourceView(destination.texture.Get(),nullptr,&destination.srv))){update_surface_memory_accounting(destination);return E_FAIL;}update_surface_memory_accounting(destination);}D3D11_BOX box{(UINT)source_origin.x,(UINT)source_origin.y,0,(UINT)(source_origin.x+copy_width),(UINT)(source_origin.y+copy_height),1};context_->CopySubresourceRegion(destination.texture.Get(),0,(UINT)clipped_destination.left,(UINT)clipped_destination.top,0,back.Get(),0,&box);advance_surface_generation(destination,nullptr);destination.uploaded_generation=destination.generation;destination.uploaded_shape=surface_upload_shape(destination);clear_surface_dirty(destination);destination.gpu_captured=true;update_surface_memory_accounting(destination);return S_OK;}
  if(!(destination.format.dwFlags&DDPF_RGB)||destination.format.dwFlags&DDPF_FOURCC)return E_NOTIMPL;if(destination.gpu_captured&&FAILED(hr=readback(destination)))return hr;
@@ -1077,7 +1060,6 @@ HRESULT Renderer::render_pending_blits(){
    if(p.gpu||p.presentation_fill||p.cached||p.text_asset)return false;
    const RECT u=p.partial?p.update:RECT{0,0,(LONG)p.width,(LONG)p.height};
    if(u.right<=u.left||u.bottom<=u.top)return false; // nothing to upload
-   if(!p.raw_rows.empty())return (std::size_t)p.pitch*(std::size_t)(u.bottom-u.top)>p.raw_rows.size();
    return p.pixels.empty();
   };
   std::size_t write=0,omitted=0;
@@ -1095,8 +1077,8 @@ HRESULT Renderer::render_pending_blits(){
      static std::uint64_t reported=0;const auto count=++reported;
      if(count<=8||!(count&(count-1))){
       const auto& p=pending_blits_[index];char detail[224];
-      std::snprintf(detail,sizeof(detail),"source=%llu %ux%u partial=%d retired=%d raw_bytes=%zu count=%llu (the quad is not drawn this frame)",
-       static_cast<unsigned long long>(p.source_id),p.width,p.height,p.partial?1:0,p.source_destroyed?1:0,p.raw_rows.size(),
+      std::snprintf(detail,sizeof(detail),"source=%llu %ux%u partial=%d retired=%d count=%llu (the quad is not drawn this frame)",
+       static_cast<unsigned long long>(p.source_id),p.width,p.height,p.partial?1:0,p.source_destroyed?1:0,
        static_cast<unsigned long long>(count));
       bridge_report_event("ui_quad_omitted",detail);
      }
@@ -1144,19 +1126,7 @@ HRESULT Renderer::render_pending_blits(){
 #endif
     hr=device_->CreateShaderResourceView(cached.texture.Get(),nullptr,&cached.srv);if(FAILED(hr)){cached={};return hr;}
    }
-   if(!pending.cached&&!pending.raw_rows.empty()){
-    // Remote device: the host converts the game-format rows into the cache
-    // texture here, in stream order (surface protocol, immediate step).
-    const RECT u=pending.partial?pending.update:RECT{0,0,(LONG)pending.width,(LONG)pending.height};
-    const UINT uw=(UINT)(u.right-u.left),uh=(UINT)(u.bottom-u.top);
-    if(!uw||!uh||(std::size_t)pending.pitch*uh>pending.raw_rows.size())return E_INVALIDARG;
-    x64remote::SurfaceWrite write{};
-    write.texture=cached.texture.Get();write.x=(UINT)u.left;write.y=(UINT)u.top;write.width=uw;write.height=uh;
-    write.source=pending.raw_rows.data();write.source_pitch=pending.pitch;write.row_bytes=pending.pitch;write.rows=uh;
-    write.format=&pending.raw_format;write.color_key=pending.keyed?&pending.color_key:nullptr;write.key_rgb_only=true;
-    x64remote::surface_write(false,write);
-    cached.surface_id=pending.source_is_surface?pending.source_id:0;cached.generation=pending.generation;cached.revision=pending.revision;cached.source=pending.source;cached.keyed=pending.keyed;cached.color_key=pending.color_key;
-   }else if(!pending.cached){
+   if(!pending.cached){
     const std::uint32_t* upload=pending.pixels.data();
     if(pending.text_asset){
      if(pending.text_asset->identity!=pending.source_id||pending.text_asset->generation!=pending.generation||pending.text_asset->revision!=pending.revision||pending.text_asset->width!=pending.width||pending.text_asset->height!=pending.height||pending.text_asset->coverage.size()!=static_cast<std::size_t>(pending.width)*pending.height||pending.text_asset->coverage.size()>kMaximumCharacterPaneAtlasPixels)return E_INVALIDARG;
@@ -1203,8 +1173,6 @@ HRESULT Renderer::render_pending_blits(){
  }
  if(dynamic_vertex_offset_+vertex_bytes>dynamic_vertex_capacity_){dynamic_vertex_offset_=0;discard_vertices_=true;}
  const UINT vertex_offset=dynamic_vertex_offset_;
- // Remote device: only the appended quads travel (x64_remote_device.h).
- x64remote::declare_map_range(context_.Get(),dynamic_vertices_.Get(),vertex_offset,vertex_bytes);
  D3D11_MAPPED_SUBRESOURCE mapped{};HRESULT hr=context_->Map(dynamic_vertices_.Get(),0,discard_vertices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&mapped);if(FAILED(hr))return hr;
  auto* vertices=reinterpret_cast<Vertex*>(static_cast<std::uint8_t*>(mapped.pData)+vertex_offset);
  for(std::size_t index=0;index<pending_blits_.size();++index){
@@ -1231,7 +1199,7 @@ HRESULT Renderer::render_pending_blits(){
   return upload_draw_constants(&constants,sizeof(constants));
  };
  remember_debug_projection(overlay,SemanticKind::ui);apply_state(overlay,true);
- const UINT stride=sizeof(Vertex);ID3D11Buffer* buffer=dynamic_vertices_.Get();context_->IASetInputLayout(layout_.Get());context_->IASetVertexBuffers(0,1,&buffer,&stride,&vertex_offset);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);bind_draw_constants();D3D11_VIEWPORT viewport{0,0,(float)target_width(),(float)target_height(),0,1};context_->RSSetViewports(1,&viewport);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+ const UINT stride=sizeof(Vertex);ID3D11Buffer* buffer=dynamic_vertices_.Get();context_->IASetInputLayout(layout_.Get());context_->IASetVertexBuffers(0,1,&buffer,&stride,&vertex_offset);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);bind_draw_constants();D3D11_VIEWPORT viewport{0,0,(float)target_width(),(float)target_height(),0,1};context_->RSSetViewports(1,&viewport);bind_plan_targets(plan_pass("ui_composition",rtv_.Get(),dsv_.Get()));
  DWORD current_alpha_operation=0;float current_opacity=-1.f;PerfScope draw_perf(&perf_draw_ticks_);std::size_t physical_draws=0;
  for(std::size_t index=0;index<pending_blits_.size();){
   apply_state(overlay,true,pending_blits_[index].composition);
@@ -1245,8 +1213,7 @@ HRESULT Renderer::render_pending_blits(){
   if(interface_scaled)context_->PSSetShader(interface_scaled_ps_.Get(),nullptr,0);
   if(text_filtered)context_->PSSetShader(interface_text_ps_.Get(),nullptr,0);
   const bool backdrop=pending_blits_[index].backdrop&&backdrop_ps_&&backdrop_sampler_;
-  ID3D11SamplerState* saved_sampler=nullptr;
-  if(backdrop){context_->PSGetSamplers(0,1,&saved_sampler);context_->PSSetShader(backdrop_ps_.Get(),nullptr,0);context_->PSSetSamplers(0,1,backdrop_sampler_.GetAddressOf());}
+  if(backdrop){context_->PSSetShader(backdrop_ps_.Get(),nullptr,0);context_->PSSetSamplers(0,1,backdrop_sampler_.GetAddressOf());}
   std::size_t end=index+1u;
   if(pending_blits_[index].batchable_text)while(end<pending_blits_.size()&&pending_blits_[end].batchable_text&&views[end]==view&&pending_blits_[end].output_space==output_space&&pending_blits_[end].filtered_text==pending_blits_[index].filtered_text&&widescreen::same_composition(pending_blits_[end].composition,pending_blits_[index].composition)&&ui_blit_alpha_operation(pending_blits_[end].force_opaque_alpha)==alpha_operation)++end;
   const std::size_t logical_draws=end-index;
@@ -1254,7 +1221,8 @@ HRESULT Renderer::render_pending_blits(){
   profiler_.add_draw(static_cast<UINT>(logical_draws)*2u,static_cast<UINT>(logical_draws));profiler_.add_batch();
   if(pending_blits_[index].batchable_text){if(logical_draws>(std::numeric_limits<UINT>::max)()/6u)return E_OUTOFMEMORY;context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->Draw(static_cast<UINT>(logical_draws)*6u,vertex_starts[index]);}
   else{context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context_->Draw(vertex_counts[index],vertex_starts[index]);}
-  if(backdrop){context_->PSSetShader(ps_.Get(),nullptr,0);context_->PSSetSamplers(0,1,&saved_sampler);if(saved_sampler)saved_sampler->Release();}
+  // Back to the sampler apply_state chose for this blit (no read-back).
+  if(backdrop){context_->PSSetShader(ps_.Get(),nullptr,0);context_->PSSetSamplers(0,1,&applied_sampler_);}
   if(interface_scaled||text_filtered)context_->PSSetShader(ps_.Get(),nullptr,0);
   ++physical_draws;
 #ifdef EID3D11_TESTING
@@ -1514,8 +1482,7 @@ void Capture::run(Renderer& renderer){
    renderer.core_surfaces_.erase(target.id);Renderer::report_scene_failure("capture",E_FAIL);return;
   }
  }
- HRESULT hr=renderer.composite_world();if(SUCCEEDED(hr))hr=renderer.render_pending_blits();
- ComPtr<ID3D11Texture2D> back;if(SUCCEEDED(hr))hr=renderer.swap_->GetBuffer(0,IID_PPV_ARGS(&back));
+ ComPtr<ID3D11Texture2D> back;HRESULT hr=renderer.capture_source(back);
  if(SUCCEEDED(hr)){
   ID3D11ShaderResourceView* null_view=nullptr;renderer.context_->PSSetShaderResources(0,1,&null_view);
   const D3D11_BOX box{box_left,box_top,0,box_right,box_bottom,1};

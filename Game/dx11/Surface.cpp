@@ -781,15 +781,16 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
         });
         if (FAILED(ready)) return ready;
     }
-    struct Capture { CDXGISurface* surface; bool composed; } capture{this, composedOutput};
-    return facade.VisitOutput(&capture,
-        [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {
+    struct Capture { CDXGISurface* surface; bool composed; bool mask = false; } capture{this, composedOutput};
+    const auto copy = [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {
             auto& request = *static_cast<Capture*>(user);
             auto& self = *request.surface;
             self.captureUsedBoundTarget = self.captureDifferentFromBufferZero = false;
             Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
-            if (request.composed) source = backbuffer;
-            else {
+            if (request.composed || request.mask) {
+                source = backbuffer; // explicit lossless mask, or the composed output
+                self.captureDifferentFromBufferZero = request.mask;
+            } else {
                 const HRESULT selected = OwnedRender::E1CaptureSource(context, backbuffer, source,
                     self.captureUsedBoundTarget, self.captureDifferentFromBufferZero);
                 if (FAILED(selected)) return selected;
@@ -817,7 +818,11 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
             }
             self.ownedSurface.Complete(self.texture.Get());
             return S_OK;
-        });
+        };
+    return facade.Visit([&](owned::Renderer& renderer) {
+        capture.mask = renderer.embedded_hit_test_frame();
+        return renderer.visit_embedded_output(&capture, copy);
+    });
 }
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
                                  D3D11_SUBRESOURCE_DATA *srd, DWORD sourceMmpFormat)

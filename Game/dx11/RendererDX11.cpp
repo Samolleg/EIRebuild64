@@ -607,6 +607,19 @@ bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
     return skyConsumed != 0;
 }
 
+void CDX11::SetC56HitTestFrame(bool begin)
+{
+    const auto access = ownedRenderer.LockFrame();
+    if (!rendererFacade) return;
+    const HRESULT result = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        renderer.hit_test_frame(begin);
+        return S_OK;
+    });
+    if (FAILED(result))
+        GameJournal::Event("RENDER", "global_map_mask_failed", "boundary=%s hr=%08lx",
+            begin ? "begin" : "end", static_cast<unsigned long>(result));
+}
+
 void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
 {
     if (!ownedWorldActive || c56WorldPassRan || !rendererFacade)

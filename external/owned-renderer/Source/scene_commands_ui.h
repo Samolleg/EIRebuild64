@@ -73,9 +73,6 @@ struct Quad {
     std::uint32_t diffuse = 0xffffffffu;
     float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
     std::vector<std::uint32_t> pixels;
-    // Remote mode (surface protocol): game-format rows the host converts.
-    std::vector<std::uint8_t> raw_rows;
-    DDPIXELFORMAT raw_format{};
     SurfaceHandle home;
 };
 
@@ -96,7 +93,6 @@ template <class Blit> void quad_values(Blit& from, Quad& to) {
     to.height = from.height; to.pitch = from.pitch; to.diffuse = from.diffuse;
     to.u0 = from.u0; to.v0 = from.v0; to.u1 = from.u1; to.v1 = from.v1;
     to.pixels = std::move(from.pixels);
-    to.raw_rows = std::move(from.raw_rows); to.raw_format = from.raw_format;
 }
 template <class Blit> void blit_values(Quad& from, Blit& to) {
     to.source_id = from.source_id; to.cache_key = from.cache_key; to.generation = from.generation;
@@ -113,7 +109,6 @@ template <class Blit> void blit_values(Quad& from, Blit& to) {
     to.height = from.height; to.pitch = from.pitch; to.diffuse = from.diffuse;
     to.u0 = from.u0; to.v0 = from.v0; to.u1 = from.u1; to.v1 = from.v1;
     to.pixels = std::move(from.pixels);
-    to.raw_rows = std::move(from.raw_rows); to.raw_format = from.raw_format;
 }
 
 // Core mode (S3): each payload the host runs declares frame_values (whether

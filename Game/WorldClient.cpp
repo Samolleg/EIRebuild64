@@ -3082,6 +3082,7 @@ BOOL CWorldClient::Draw()
             visuals.hoverSerial = hoverSnapshot.resource.serial;
         }
         visuals.worldToClip = frameValues.camera.world_to_clip;
+        visuals.cameraAnchorZ = pCamera->GetAnchorPoint().z;
         visuals.ambient = frameValues.lighting.ambient;
         visuals.sunDiffuse = frameValues.lighting.sunlight_diffuse;
         visuals.sunDirection = frameValues.lighting.sunlight_direction;

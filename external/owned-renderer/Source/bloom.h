@@ -11,12 +11,14 @@ namespace owned {
 
 // Bloom extracts only light above the scene's non-emissive ceiling: the
 // brightest colour a lit, non-emissive surface or the fog can reach this
-// frame (lit white, raised by the volumetric shaft headroom; sky pixels are
-// excluded by depth). Every fogged or lit object, the fog itself and the sky
-// stay below it, so only emissive and additive light (fire, lamps, lava,
-// magic, sun glints) blooms (issue #99). `threshold` is relative to the
-// ceiling (1 = exactly the ceiling). The soft knee starts at the threshold
-// and reaches full rate a quarter of it above.
+// frame. Owned surfaces light with saturate(max(ambient, sun) + lamps +
+// emissive), so a lamp-lit pale surface (a tent beside a cave lamp, a wall by
+// a torch) reaches 1 at any hour; the ceiling is that limit, raised by the
+// volumetric shaft headroom (sky pixels are excluded by depth). Only light
+// above any lit surface blooms: stacked additive effects, lava glow, glints
+// and the glow target (fire and magic particles, without the ceiling).
+// `threshold` is relative to the ceiling (1 = exactly the ceiling). The soft
+// knee starts at the threshold and reaches full rate a quarter of it above.
 // Layout: {start, 2*knee, 0.25/knee, start+knee}.
 inline std::array<float,4> bloom_knee_curve(float ceiling, float threshold) {
     const float start = std::max(ceiling, 1e-2f)*std::max(threshold, 1.f);
@@ -24,14 +26,12 @@ inline std::array<float,4> bloom_knee_curve(float ceiling, float threshold) {
     return {start, 2.f*knee, 0.25f/knee, start+knee};
 }
 
-// Non-emissive ceiling: owned surfaces take max(ambient, sun) clamped to 1
-// (lamps and emissive on top are light), and the fog stays within that lit
-// white, raised by `fog_headroom` where volumetric shafts brighten the haze
-// toward the sun.
-inline float bloom_ceiling(const float ambient[3], const float sun[3], float fog_headroom) {
-    float lit = 0.f;
-    for (int k = 0; k < 3; ++k) lit = std::max(lit, std::clamp(std::max(ambient[k], sun[k]), 0.f, 1.f));
-    return lit*(1.f + std::max(fog_headroom, 0.f));
+// Non-emissive ceiling: the lit-white limit 1 (lamps included), raised by
+// `fog_headroom` where volumetric shafts brighten the haze toward the sun.
+// The old max(ambient, sun) ceiling ignored the lamps: caves (0.49) and night
+// (Gipat 0.62) bloomed every lamp-lit pale surface (candidate 08638187).
+inline float bloom_ceiling(float fog_headroom) {
+    return 1.f + std::max(fog_headroom, 0.f);
 }
 
 // Shader source of BloomPass (also compiled by its regression).

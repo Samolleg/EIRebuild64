@@ -351,7 +351,13 @@ void bridge_set_shadow_settings(std::uint32_t map_side,
         g_owned_shadow_settings.far_shadows == far_shadows &&
         g_owned_shadow_settings.point_shadows == point_shadows &&
         g_owned_shadow_settings.sun_shadows == sun_shadows) return;
-    g_owned_shadow_settings={map_side,close_cascades,far_shadows,point_shadows,sun_shadows};
+    const float close_range=g_owned_shadow_settings.close_range;
+    g_owned_shadow_settings={map_side,close_cascades,far_shadows,point_shadows,sun_shadows,close_range};
+    if (++g_owned_shadow_settings_revision == 0) ++g_owned_shadow_settings_revision;
+}
+void bridge_set_shadow_close_range(float metres) noexcept {
+    if(!std::isfinite(metres)||metres<8||g_owned_shadow_settings.close_range==metres)return;
+    g_owned_shadow_settings.close_range=metres;
     if (++g_owned_shadow_settings_revision == 0) ++g_owned_shadow_settings_revision;
 }
 

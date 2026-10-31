@@ -31,6 +31,8 @@ struct PlateAnchor { std::int32_t id; float x, y; };
 struct SpellList {
     CombatUnitValue unit;
     std::uint64_t epoch=0,frame=0;
+    bool carried=false; // a copy placed for a later pane draw (never sent, never carried again)
+    std::uint64_t source_frame=0; // carried: the frame of the published list it shows
     RECT local{};
     ImVec2 lo{},hi{},clip_lo{},clip_hi{};
     float opacity=1;
@@ -51,7 +53,7 @@ struct State {
     SpellList& spell_list_slot(std::uint64_t frame) { return spell_lists[frame%spell_lists.size()]; }
     const SpellList* current_spell_list() const {
         for (const auto& list:spell_lists)
-            if (list.placed && bridge_character_pane_text_epoch_current(list.epoch,list.frame)) return &list;
+            if (list.placed && bridge_character_pane_list_current(list.epoch,list.frame)) return &list;
         return nullptr;
     }
     std::array<CombatEffectDefinition, 256> catalog{};
@@ -308,6 +310,18 @@ void combat_ui_place_spell_list(std::uint64_t epoch,std::uint64_t frame,
     unsigned width,unsigned height) noexcept {
     auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
     auto& list=s.spell_list_slot(frame);
+    // The game does not call the pane's effect-list routine on every pane draw
+    // (save "regen": every other frame, while the pane text is published every
+    // frame), so the draw being placed may have no list of its own. It then
+    // takes the list of the pane draw just before it (at most two frames older)
+    // instead of showing an empty pane.
+    if (list.epoch!=epoch || list.frame!=frame) {
+        const SpellList* previous=nullptr;
+        for (const auto& other:s.spell_lists)
+            if (other.unit.id && !other.carried && other.epoch<epoch && other.frame<=frame && frame-other.frame<=2 &&
+                (!previous || other.epoch>previous->epoch)) previous=&other;
+        if (previous) { SpellList copy=*previous; copy.source_frame=previous->frame; copy.epoch=epoch; copy.frame=frame; copy.placed=false; copy.carried=true; list=copy; }
+    }
     if (list.epoch!=epoch || list.frame!=frame || source.right<=source.left || source.bottom<=source.top) return;
     const auto x=[&](float pixel) { return widescreen::compose_x(destination.left+
         (pixel-source.left)*float(destination.right-destination.left)/(source.right-source.left),h); };
@@ -467,6 +481,13 @@ bool combat_ui_decode_game(const std::uint8_t* data, std::size_t size) noexcept 
     for (std::size_t i = 0; i < lists.size(); ++i) {
         auto& mine = s.spell_lists[i];
         if (mine.epoch == lists[i].epoch && mine.frame == lists[i].frame && mine.unit.id == lists[i].unit.id) continue;
+        // A placed copy carried to a later pane draw keeps its placement (else
+        // the pane shows nothing until the next placement: flicker); the game's
+        // newer list for the same unit only refreshes its effects.
+        if (mine.carried && mine.placed && mine.unit.id == lists[i].unit.id) {
+            if (lists[i].frame > mine.source_frame) { mine.unit = lists[i].unit; mine.source_frame = lists[i].frame; }
+            continue;
+        }
         mine = lists[i];
     }
     if (catalog) { s.catalog = definitions; s.catalog_revision = catalog_revision; }
@@ -600,6 +621,7 @@ struct CombatUiRenderer::Implementation {
     } popup;
     float popup_wheel=0;
     SpellList spell_list;
+    unsigned spell_list_misses=0; // frames drawn on the last list without a current one
     std::int32_t scroll_unit=0;
     std::uint64_t scroll_incarnation=0;
     float list_scroll=0,list_wheel=0;
@@ -753,8 +775,12 @@ struct CombatUiRenderer::Implementation {
         // Presentation consumes current anchors. Native profiling hooks are
         // optional and cannot own an overlay's lifetime.
         s.plates.clear();
+        // A frame without a current list keeps drawing the last one for up to two
+        // frames: the game redraws the pane only every few frames in some saves
+        // ("regen"), and any frame between them must not blank the list (flicker).
         const auto* current=s.current_spell_list();
-        spell_list=current ? *current : SpellList{};
+        if (current) { spell_list=*current; spell_list_misses=0; }
+        else if (!spell_list.placed || ++spell_list_misses>2) spell_list=SpellList{};
         if (scroll_unit!=spell_list.unit.id || scroll_incarnation!=spell_list.unit.incarnation) {
             scroll_unit=spell_list.unit.id; scroll_incarnation=spell_list.unit.incarnation;
             list_scroll=0; list_wheel=0; list_drag=false;

@@ -63,89 +63,6 @@ std::string impostor_key(const ResourceIdentity& figure, std::uint64_t texture) 
     return figure.key() + "|" + std::to_string(texture);
 }
 
-// Saves and restores the pipeline state the bake changes (it runs inside the
-// world pass, between neighbour uploads).
-class ImpostorStateGuard {
-public:
-    explicit ImpostorStateGuard(ID3D11DeviceContext* context) noexcept : context_(context) {
-        context_->IAGetInputLayout(&layout_);
-        context_->IAGetPrimitiveTopology(&topology_);
-        context_->IAGetIndexBuffer(&index_, &index_format_, &index_offset_);
-        context_->VSGetShader(&vs_, nullptr, nullptr);
-        context_->PSGetShader(&ps_, nullptr, nullptr);
-        context_->HSGetShader(&hs_, nullptr, nullptr);
-        context_->DSGetShader(&ds_, nullptr, nullptr);
-        context_->GSGetShader(&gs_, nullptr, nullptr);
-        constants_.save(context_, 0); // with its ring range (constant_ring.h)
-        context_->VSGetShaderResources(1, 1, &vs_resource_);
-        context_->PSGetShaderResources(0, 1, &ps_resource_);
-        context_->PSGetShaderResources(44, 2, ps_atlas_);
-        context_->PSGetSamplers(0, 1, &sampler_);
-        viewport_count_ = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-        context_->RSGetViewports(&viewport_count_, viewports_);
-        context_->RSGetState(&raster_);
-        context_->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets_, &depth_);
-        context_->OMGetBlendState(&blend_, blend_factor_, &sample_mask_);
-        context_->OMGetDepthStencilState(&depth_state_, &stencil_);
-    }
-    ~ImpostorStateGuard() {
-        ID3D11RenderTargetView* none[2]{};
-        context_->OMSetRenderTargets(2, none, nullptr);
-        context_->IASetInputLayout(layout_);
-        context_->IASetPrimitiveTopology(topology_);
-        context_->IASetIndexBuffer(index_, index_format_, index_offset_);
-        context_->VSSetShader(vs_, nullptr, 0);
-        context_->PSSetShader(ps_, nullptr, 0);
-        context_->HSSetShader(hs_, nullptr, 0);
-        context_->DSSetShader(ds_, nullptr, 0);
-        context_->GSSetShader(gs_, nullptr, 0);
-        constants_.restore(context_, 0);
-        constants_.release();
-        context_->VSSetShaderResources(1, 1, &vs_resource_);
-        context_->PSSetShaderResources(0, 1, &ps_resource_);
-        context_->PSSetShaderResources(44, 2, ps_atlas_);
-        context_->PSSetSamplers(0, 1, &sampler_);
-        context_->RSSetViewports(viewport_count_, viewports_);
-        context_->RSSetState(raster_);
-        context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets_, depth_);
-        context_->OMSetBlendState(blend_, blend_factor_, sample_mask_);
-        context_->OMSetDepthStencilState(depth_state_, stencil_);
-        IUnknown* held[] = {layout_, index_, vs_, ps_, hs_, ds_, gs_, vs_resource_,
-                            ps_resource_, ps_atlas_[0], ps_atlas_[1], sampler_, raster_, depth_, blend_, depth_state_};
-        for (IUnknown* item : held) if (item) item->Release();
-        for (ID3D11RenderTargetView* target : targets_) if (target) target->Release();
-    }
-    ImpostorStateGuard(const ImpostorStateGuard&) = delete;
-    ImpostorStateGuard& operator=(const ImpostorStateGuard&) = delete;
-private:
-    ID3D11DeviceContext* context_;
-    ID3D11InputLayout* layout_ = nullptr;
-    D3D11_PRIMITIVE_TOPOLOGY topology_ = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    ID3D11Buffer* index_ = nullptr;
-    DXGI_FORMAT index_format_ = DXGI_FORMAT_UNKNOWN;
-    UINT index_offset_ = 0;
-    ID3D11VertexShader* vs_ = nullptr;
-    ID3D11PixelShader* ps_ = nullptr;
-    ID3D11HullShader* hs_ = nullptr;
-    ID3D11DomainShader* ds_ = nullptr;
-    ID3D11GeometryShader* gs_ = nullptr;
-    owned::SavedConstantSlot constants_;
-    ID3D11ShaderResourceView* vs_resource_ = nullptr;
-    ID3D11ShaderResourceView* ps_resource_ = nullptr;
-    ID3D11ShaderResourceView* ps_atlas_[2]{};
-    ID3D11SamplerState* sampler_ = nullptr;
-    UINT viewport_count_ = 0;
-    D3D11_VIEWPORT viewports_[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
-    ID3D11RasterizerState* raster_ = nullptr;
-    ID3D11RenderTargetView* targets_[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
-    ID3D11DepthStencilView* depth_ = nullptr;
-    ID3D11BlendState* blend_ = nullptr;
-    FLOAT blend_factor_[4]{};
-    UINT sample_mask_ = 0;
-    ID3D11DepthStencilState* depth_state_ = nullptr;
-    UINT stencil_ = 0;
-};
-
 #endif
 } // namespace
 
@@ -280,7 +197,9 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
         }
     }
     {
-        ImpostorStateGuard guard(context_.Get());
+        // The bake binds every state it reads and restores nothing: each pass
+        // after it (native flushes, legacy draws, the world passes) binds its
+        // own. It runs inside the world pass, between neighbour uploads.
         ID3D11ShaderResourceView* no_atlas[2]{};
         context_->PSSetShaderResources(44, 2, no_atlas);
         context_->IASetInputLayout(nullptr);
@@ -314,6 +233,9 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
             context_->ClearRenderTargetView(albedo_target.Get(), zero);
             context_->ClearRenderTargetView(normal_target.Get(), zero);
             context_->ClearDepthStencilView(impostors_.depth_view.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
+            // Plan record (frame_plan.h): the atlas slice is a view no plan id
+            // names yet; the pass binds both of its targets itself.
+            (void)plan_pass("impostor_bake", albedo_target.Get(), impostors_.depth_view.Get());
             ID3D11RenderTargetView* targets[2] = {albedo_target.Get(), normal_target.Get()};
             context_->OMSetRenderTargets(2, targets, impostors_.depth_view.Get());
             context_->VSSetShaderResources(1, 1, source.vertex_view.GetAddressOf());
@@ -336,8 +258,13 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
             ++impostors_.count;
             ++impostors_.baked;
         }
+        // Unbind what references the upload, which dies after registration.
         ID3D11RenderTargetView* none[2]{};
         context_->OMSetRenderTargets(2, none, nullptr);
+        ID3D11ShaderResourceView* no_view = nullptr;
+        context_->VSSetShaderResources(1, 1, &no_view);
+        context_->PSSetShaderResources(0, 1, &no_view);
+        context_->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
         context_->GenerateMips(impostors_.albedo_srv.Get());
         context_->GenerateMips(impostors_.normal_srv.Get());
     }

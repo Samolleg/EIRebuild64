@@ -307,6 +307,11 @@ struct TextureCpuAsset {
     std::shared_ptr<const std::vector<std::uint8_t>> byte_reservation;
     std::uint32_t texel_offset = 76;
     std::vector<std::uint8_t> user_data;
+    // Core mode, game process only (owned_resource_runtime.cpp): a texture
+    // whose source went to the x64 host keeps no source bytes; mip 0's cut
+    // texels stay as one bit each (texture_alpha_cut_mask; null when mip 0 is
+    // opaque) for the game-process readers of its alpha. Never encoded.
+    std::shared_ptr<const std::vector<std::uint8_t>> alpha_cut_mask;
 };
 // Alpha description of one immutable texture mip.
 bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t mip,
@@ -348,6 +353,18 @@ struct TerrainVertex {
     std::uint16_t lighting_object = UINT16_MAX;
     float depth = 0.0f;
 };
+
+// The fields of a TerrainVertex that height sampling reads (sample_terrain_height).
+// Core mode keeps only these in the game process (TerrainSectorCpuAsset::heights).
+struct TerrainHeightVertex {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    std::uint16_t lighting_object = UINT16_MAX;
+};
+inline TerrainHeightVertex terrain_height_vertex(const TerrainVertex& v) noexcept {
+    return {v.x, v.y, v.z, v.lighting_object};
+}
 
 struct TerrainBounds {
     std::array<float, 3> minimum{};
@@ -431,6 +448,14 @@ struct TerrainSectorCpuAsset {
     // computed by the loader worker for a terrain nothing edits after load
     // (the active map). Empty: computed where they are read.
     std::vector<std::uint32_t> base_slope_normals, base_facet_flatness;
+    // Core mode, game process only (owned_resource_runtime.cpp): a slim
+    // sector keeps no vertices, tiles or slope tables; `heights` holds the
+    // height fields of each vertex in the same order and vertex_count() the
+    // count. Never encoded: the x64 host has the full sector.
+    std::vector<TerrainHeightVertex> heights;
+    std::size_t vertex_count() const noexcept {
+        return vertices.empty() ? heights.size() : vertices.size();
+    }
 };
 
 // Selected terrain page. Only its upload payload is mutable after publication;

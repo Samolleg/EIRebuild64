@@ -118,8 +118,11 @@ public:
     // raster_scale: output pixels per surface pixel this surface is expected
     // to be composed at. Layout, wrapping and the returned heights keep the
     // stock surface metrics; only glyph rasterization uses this size.
+    // letter_spacing: output-size glyphs get a little extra advance (item
+    // card text), placed without changing layout or wrapping.
     bool begin_frame(std::uint32_t width, std::uint32_t height,
-                     float raster_scale = 1.0f) noexcept;
+                     float raster_scale = 1.0f,
+                     bool letter_spacing = false) noexcept;
     int draw(HFONT font, std::uint32_t font_slot, const char* text,
              const RECT& rectangle, UINT format, COLORREF color,
              bool shadow, bool& height_valid) noexcept;
@@ -186,6 +189,9 @@ private:
         UINT format = 0;
         LONG width = 0;
         LONG height = 0;
+        // Letter-spacing wrap (item cards): right bound and raster key.
+        LONG wrap = 0;
+        std::uint32_t spacing = 0;
         std::string text;
         bool operator<(const LayoutKey& other) const noexcept;
     };
@@ -210,17 +216,24 @@ private:
     bool shape_run(HDC dc, const wchar_t* text, std::size_t length,
                    ShapedRun& output) noexcept;
     bool layout(HDC dc, const DisplayText& text, int maximum_width,
-                bool word_break, bool single_line,
-                std::vector<Line>& lines) noexcept;
+                bool word_break, bool single_line, UINT ellipsis,
+                double gap_spacing, std::vector<Line>& lines) noexcept;
+    bool layout_lines(HDC dc, const DisplayText& text, int maximum_width,
+                      bool word_break, bool single_line, bool whole_words,
+                      double gap_spacing, std::vector<Line>& lines) noexcept;
+    bool ellipsize(HDC dc, const DisplayText& text, int maximum_width,
+                   Line& line) noexcept;
     bool draw_line(HDC dc, const DisplayText& text, const Line& line,
                    int x, int baseline, int shift, COLORREF color,
                    const RECT& clip,
                    std::uint32_t font_slot, int underline_offset,
-                   int& underlines) noexcept;
+                   int& underlines, int tracking = 0,
+                   int lead = 0) noexcept;
     bool realize_glyph(HDC dc, std::uint32_t font_slot,
                        std::uint16_t glyph, const GlyphMask*& output) noexcept;
     bool append_glyph(const GlyphMask& glyph, int pen_x, int baseline_y,
-                      int shift, COLORREF color, const RECT& clip) noexcept;
+                      int shift, COLORREF color, const RECT& clip,
+                      int extra = 0) noexcept;
     HFONT raster_font(HFONT font, std::uint32_t font_slot) noexcept;
     void release_raster_fonts() noexcept;
     bool append_line(int left, int right, int y, COLORREF color,
@@ -254,6 +267,7 @@ private:
     std::shared_ptr<const CharacterPaneGlyphAsset> solid_asset_;
     std::size_t glyph_bytes_ = 0;
     float raster_scale_ = 1.0f;
+    bool letter_spacing_ = false;
     std::uint32_t raster_key_ = 0;
     // Owned copies of the engine fonts at raster_scale_, by slot and key.
     std::map<std::pair<std::uint32_t, std::uint32_t>, HFONT> raster_fonts_;
@@ -329,6 +343,7 @@ bool owned_text_consume(Renderer& renderer, std::uint64_t surface,
     std::uint64_t generation, const RECT& destination, const RECT* source,
     HRESULT& result) noexcept;
 bool owned_text_epoch_current(std::uint64_t epoch, std::uint64_t frame) noexcept;
+bool owned_text_pane_list_current(std::uint64_t epoch, std::uint64_t frame) noexcept;
 // False means the cached calls have already been replayed into the current
 // pane recorder. Stock stats need not use this Lua display refresh policy.
 bool owned_text_begin_stats(std::uint64_t unit, const char* displayed_name,

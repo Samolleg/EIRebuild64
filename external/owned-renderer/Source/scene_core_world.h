@@ -38,7 +38,7 @@ template <class A> void fields(A& a, SceneSinkState& v) {
     camp_placement_fields(a, v.camp_state);
 }
 
-template <class A> void fields(A& a, NativeWorldLightingFrame& v) { scene_wire::fields_of(a, v.sampled, v.result, v.lighting); }
+template <class A> void fields(A& a, NativeWorldLightingFrame& v) { scene_wire::fields_of(a, v.sampled, v.result, v.lighting, v.cave); }
 
 template <class A> void fields(A& a, OwnedTerrainFrameInputs& v) {
     scene_wire::fields_of(a, v.source_generation, v.source_revision, v.world_frame_serial, v.terrain_origin,
@@ -131,6 +131,7 @@ struct WorldScene {
     static constexpr bool frame_values = true;
     std::uint64_t world_sequence = 0;  // the game thread's count of world frames sent (wound layers name it)
     std::array<float, 16> world_to_clip{};
+    float camera_anchor_z = 0;  // the game camera's anchor height (NaN unknown)
     NativeFrameState pass{};
     double time = 0;
     std::uint32_t flags = 0;
@@ -152,7 +153,7 @@ struct WorldScene {
     void run(Renderer& renderer);
 };
 template <class A> void fields(A& a, WorldScene& v) {
-    scene_wire::fields_of(a, v.world_sequence, v.world_to_clip, v.pass, v.time, v.flags, v.draw_undetected,
+    scene_wire::fields_of(a, v.world_sequence, v.world_to_clip, v.camera_anchor_z, v.pass, v.time, v.flags, v.draw_undetected,
                           v.shadow_source_revision);
     terrain_frame_fields(a, v.terrain);
     scene_wire::fields_of(a, v.lighting, v.fog, v.fog_ids, v.fog_serials, v.fog_revision, v.terrain_textures, v.terrain_shadow_textures,

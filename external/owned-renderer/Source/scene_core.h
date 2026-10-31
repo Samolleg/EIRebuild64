@@ -85,7 +85,8 @@ namespace scene_core {
     X(camp_icon_request, ::owned::scene_core::CampIconRequest)    \
     X(camp_icon_priority, ::owned::scene_core::CampIconPriority)  \
     X(camp_icon_bind, ::owned::scene_core::CampIconBind)          \
-    X(retire_camp_texture, ::owned::scene_ui::RetireCampTexture)
+    X(retire_camp_texture, ::owned::scene_ui::RetireCampTexture)  \
+    X(hit_test_frame, ::owned::scene_cmd::HitTestFrame)
 
 enum class Command : std::uint16_t {
     none = 0,

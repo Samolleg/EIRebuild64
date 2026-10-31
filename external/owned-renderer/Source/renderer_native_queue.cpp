@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -119,6 +118,31 @@ static void native_opacity_state(FixedState& state,NativeOpacityClass opacity) n
   state.render[D3DRENDERSTATE_ALPHATESTENABLE]=FALSE;
   state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=FALSE;
  }
+}
+
+// The material state and opacity class of one draw. The game's alpha test on
+// a part whose every fragment passes it (native_alpha_test_passes_all: opaque
+// texture, opaque diffuse) is dropped, so the part is opaque: it joins the
+// depth prepass and static LOD and casts without a pixel stage. A sun caster
+// the game cuts out keeps its two-sided silhouette either way. material points
+// at state, or at copy when the draw needs either change (copy may be state).
+static NativeOpacityClass native_material_state(const FixedState& state,float material_alpha,
+ NativeAlphaEvidence alpha,bool shadow,FixedState& copy,const FixedState*& material) noexcept {
+ auto opacity=native_opacity_class(state,material_alpha,alpha);
+ const bool untested=native_alpha_test_passes_all(state,alpha);
+ const bool two_sided=shadow&&opacity==NativeOpacityClass::cutout;
+ material=&state;
+ if(!untested&&!two_sided&&opacity!=NativeOpacityClass::opaque)return opacity;
+ if(&copy!=&state)copy=state;
+ material=&copy;
+ if(two_sided)copy.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
+ if(untested){
+  copy.render[D3DRENDERSTATE_ALPHATESTENABLE]=FALSE;
+  copy.render[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_ALWAYS;copy.render[D3DRENDERSTATE_ALPHAREF]=0;
+  opacity=native_opacity_class(copy,material_alpha,alpha);
+ }
+ native_opacity_state(copy,opacity);
+ return opacity;
 }
 
 // Static LOD: opaque, effectively reorderable rigid records with reduced
@@ -2692,19 +2716,16 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
    std::copy(view.bounds_maximum.begin(),view.bounds_maximum.end(),draw.bounds_max);
    if(FAILED(hr=resolve_native_world_range(view,draw)))return fail(hr,"terrain.world_range");
    const auto& group=native_state_buckets_[draw.state_bucket];
-   const auto opacity=native_opacity_class(state,view.lighting.material_alpha,
-    native_alpha_evidence(view,state,view.owned_texture.identity!=0));
+   FixedState shadow_state;
+   const FixedState* material_state=nullptr;
+   const auto opacity=native_material_state(state,view.lighting.material_alpha,
+    native_alpha_evidence(view,state,view.owned_texture.identity!=0),native_shadow_collecting_,shadow_state,material_state);
    draw.instance.world_geometry=(draw.instance.world_geometry&~(native_world_lod|native_world_impostor))|
     (native_record_takes_lod(view,opacity,draw.mesh->lod_levels)?native_world_lod:0u)|
     (native_record_takes_impostor(view,opacity,draw.mesh->sphere_block)?native_world_impostor:0u);
    if(draw.instance.world_geometry&native_world_impostor)draw.instance.second_morph_offset=view.world.impostor-1;
    else if((draw.instance.world_geometry&native_world_lod)&&!view.world.object_space)
     draw.instance.second_morph_offset=draw.world_base;
-   FixedState resolved_state=state;
-   native_opacity_state(resolved_state,opacity);
-   if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout)
-    resolved_state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
-   const FixedState* material_state=&resolved_state;
    const auto key=native_material_key(*material_state,SemanticKind::terrain,opacity,view.lighting.enabled!=0,
     group.texture_srv!=nullptr,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
    if(!(key==group.material_key)){
@@ -3165,11 +3186,14 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       FixedState state=native_owned_submission_state(frame,source.owned_fixed_state);
       state.render[D3DRENDERSTATE_FOGENABLE]=inherited[0];state.render[D3DRENDERSTATE_FOGCOLOR]=inherited[1];
       state.stage[0][D3DTSS_MIPFILTER]=inherited[2];state.render[D3DRENDERSTATE_SPECULARENABLE]=values.specular_enable;
-      const auto opacity=native_opacity_class(state,values.alpha,
-       native_alpha_evidence(source,state,!wound,&values));
-      native_opacity_state(state,opacity);
-      if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout)
-       state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
+      // The group may hold a dropped test (queue_native_impl); new values
+      // decide again from the part's own test.
+      state.render[D3DRENDERSTATE_ALPHATESTENABLE]=source.owned_fixed_state.alpha_test_enable;
+      state.render[D3DRENDERSTATE_ALPHAFUNC]=source.owned_fixed_state.alpha_func;
+      state.render[D3DRENDERSTATE_ALPHAREF]=source.owned_fixed_state.alpha_ref;
+      const FixedState* material_state=nullptr;
+      const auto opacity=native_material_state(state,values.alpha,
+       native_alpha_evidence(source,state,!wound,&values),native_shadow_collecting_,state,material_state);
       const auto key=native_material_key(state,source.semantic_kind,opacity,values.lighting_enabled!=0,
        group.texture_srv!=nullptr,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
       const auto ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
@@ -3252,9 +3276,12 @@ bool Renderer::set_native_world_lighting(
  NativeWorldLighting shaped=lighting;
  WorldEnvironment environment;
  if(captured)environment=*captured;else bridge_read_world_environment(environment);
+ native_world_cave_=environment.valid&&environment.cave;
+ if(environment.valid){native_world_hour_=environment.hour;native_world_region_=environment.region;}
  if(environment.valid)
   cave_lighting_profile(environment.cave,configured_floating_point(debug_overlay_.config(),
-   "cave_brightness",kDefaultCaveBrightness),shaped.ambient,shaped.sunlight_diffuse);
+   "cave_brightness",kDefaultCaveBrightness),configured_floating_point(debug_overlay_.config(),
+   "cave_ambient_floor",kDefaultCaveAmbientFloor),shaped.ambient,shaped.sunlight_diffuse);
  if(native_world_lighting_valid_&&
     std::memcmp(&native_world_lighting_,&shaped,sizeof(shaped))==0)return true;
  // Pending native commands consume the existing shared constant. Finish that
@@ -3276,8 +3303,14 @@ bool Renderer::set_native_world_lighting(
 void Renderer::refresh_emissive_lights() noexcept try{
  if(emissive_update_frame_==native_frame_index_)return;
  emissive_update_frame_=native_frame_index_;
- const int level=std::clamp(configured_integer(debug_overlay_.config(),"emissive_lights",1),0,2);
- if(level<=0)return;
+ int level=std::clamp(configured_integer(debug_overlay_.config(),"emissive_lights",1),0,2);
+ // With the lava glow lights off, the clusters are still found for the
+ // bounce light (cave_irradiance.h), which never needs that option; they
+ // are not published as point lights then (set_native_point_lights).
+ if(level<=0){
+  if(configured_integer(debug_overlay_.config(),"cave_gi",2)<=0)return;
+  level=1;
+ }
  AmbientWorldSource inputs;
  if(!bridge_ambient_world_source(inputs)||!inputs.terrain)return;
  // Particle textures may fail independently; the CPU tile list is kept either way.
@@ -3541,8 +3574,10 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
    static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture_srv.Get()))));
  const std::uint64_t current_texture_generation=direct_texture_identity?
   direct_texture_generation:(texture_array?0:(texture?texture->generation:0));
- const NativeOpacityClass opacity=native_opacity_class(st,view.lighting.material_alpha,
-  native_alpha_evidence(view,st,direct_texture!=nullptr && texture==nullptr));
+ FixedState shadow_state;
+ const FixedState* material_state=nullptr;
+ const NativeOpacityClass opacity=native_material_state(st,view.lighting.material_alpha,
+  native_alpha_evidence(view,st,direct_texture!=nullptr && texture==nullptr),native_shadow_collecting_,shadow_state,material_state);
  if(native_record_takes_lod(view,opacity,mesh->lod_levels)){
   draw.instance.world_geometry|=native_world_lod;
   if(!view.world.object_space)draw.instance.second_morph_offset=draw.world_base;
@@ -3550,11 +3585,6 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  if(native_record_takes_impostor(view,opacity,mesh->sphere_block)){
   draw.instance.world_geometry|=native_world_impostor;draw.instance.second_morph_offset=view.world.impostor-1;
  }
- FixedState resolved_state=st;
- native_opacity_state(resolved_state,opacity);
- if(native_shadow_collecting_&&opacity==NativeOpacityClass::cutout)
-  resolved_state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
- const FixedState* material_state=&resolved_state;
  const bool native_world=view.semantic_kind==SemanticKind::figure||
   view.semantic_kind==SemanticKind::terrain||
   view.semantic_kind==SemanticKind::simple_geometry;

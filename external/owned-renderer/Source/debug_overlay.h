@@ -278,6 +278,12 @@ public:
     HRESULT initialize_core_input(HWND window, const CoreInputHooks& hooks);
     // Core mode, game process: reload the ini the host saved (keeps the hook).
     void reload_config() noexcept;
+    // Core mode. Game process (hook-only overlay): changes its own paths
+    // would save (HUD layout edit end, a display Apply) go to the host
+    // instead; true once per request (Renderer::core_send_config). Host:
+    // save them with the next maintain(), as its own changes.
+    bool take_core_save_request() noexcept;
+    void request_save() noexcept;
     void shutdown() noexcept;
 
     // Call once, after the renderer's world and game UI passes and immediately
@@ -357,6 +363,7 @@ public:
 
 private:
     bool initialize_host_child_ = false;
+    bool core_save_requested_ = false;  // game process, core mode: a save for the host to make
     std::unique_ptr<Implementation> implementation_;
     RendererConfig config_;
     const char* notice_ = nullptr;

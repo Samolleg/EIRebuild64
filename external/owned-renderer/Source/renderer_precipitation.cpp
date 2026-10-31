@@ -160,10 +160,8 @@ bool Renderer::filter_native_rain_shelter() noexcept {
            reach=(std::min)(32,(std::max)(2,int(3.f*texels+.5f)));
  // Its own profiler pass (the bake's precip_shelter before it).
  transition_profile_pass("precip_shelter_filter");
- ComPtr<ID3D11ComputeShader> saved_cs;context_->CSGetShader(&saved_cs,nullptr,nullptr);
- ComPtr<ID3D11Buffer> saved_cb;context_->CSGetConstantBuffers(0,1,&saved_cb);
- ID3D11ShaderResourceView* saved_srv[2]{};context_->CSGetShaderResources(0,2,saved_srv);
- ID3D11UnorderedAccessView* saved_uav=nullptr;context_->CSGetUnorderedAccessViews(0,1,&saved_uav);
+ // It binds every compute slot it reads and unbinds them after; every other
+ // compute pass sets its own shader, b0, t0-t1 and u0.
  // The pixel stage must not hold the map while it is written.
  ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(70,1,&none);
  context_->CSSetShader(native_shelter_soft_cs_.Get(),nullptr,0);
@@ -187,9 +185,8 @@ bool Renderer::filter_native_rain_shelter() noexcept {
   context_->Dispatch((side+255)/256,side,1); // one 256-texel line segment per group
  }
  ID3D11UnorderedAccessView* no_uav=nullptr;context_->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
- context_->CSSetShaderResources(0,2,saved_srv);for(auto* view:saved_srv)if(view)view->Release();
- context_->CSSetUnorderedAccessViews(0,1,&saved_uav,nullptr);if(saved_uav)saved_uav->Release();
- context_->CSSetConstantBuffers(0,1,saved_cb.GetAddressOf());context_->CSSetShader(saved_cs.Get(),nullptr,0);
+ ID3D11ShaderResourceView* no_inputs[2]{};context_->CSSetShaderResources(0,2,no_inputs);
+ ID3D11Buffer* no_buffer=nullptr;context_->CSSetConstantBuffers(0,1,&no_buffer);context_->CSSetShader(nullptr,nullptr,0);
  return ok;
 }
 
@@ -751,10 +748,10 @@ void Renderer::render_precipitation() {
         return status(true,"Precipitation: constant upload failed");
     std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(precipitation_constants_.Get(),0);
 
-    // Runs inside composite_world's state guard; the slots it does not save are restored here.
-    ID3D11ShaderResourceView* saved_vs=nullptr;context_->VSGetShaderResources(0,1,&saved_vs);
-    ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
-    context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
+    // Runs inside composite_world. It binds every state it reads and restores
+    // nothing; afterwards it unbinds its views and the vertex-stage fog
+    // mirror (every following pass binds its own).
+    bind_plan_targets(plan_pass("precipitation",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth))); // depth is read as a texture
     D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(precipitation_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(precipitation_blend_.Get(),factor,~0u);
@@ -762,28 +759,19 @@ void Renderer::render_precipitation() {
     context_->GSSetShader(nullptr,nullptr,0);
     context_->VSSetConstantBuffers(0,1,precipitation_constants_.GetAddressOf());
     context_->PSSetConstantBuffers(0,1,precipitation_constants_.GetAddressOf());
-    ID3D11ShaderResourceView* saved_vs3=nullptr;context_->VSGetShaderResources(3,1,&saved_vs3);
-    ID3D11ShaderResourceView* saved_vs1=nullptr;context_->VSGetShaderResources(1,1,&saved_vs1);
     {ID3D11ShaderResourceView* base = ambient_ground_srv_ ? ambient_ground_srv_.Get() : ambient_height_srv_.Get();context_->VSSetShaderResources(1,1,&base);}
     context_->VSSetShaderResources(0,1,ambient_height_srv_.GetAddressOf());context_->PSSetShaderResources(2,1,depth_srv_.GetAddressOf());
-    ID3D11ShaderResourceView* saved_ps3=nullptr;context_->PSGetShaderResources(3,1,&saved_ps3);
     {ID3D11ShaderResourceView* map = shelter ? native_rain_srv_.Get() : nullptr;context_->VSSetShaderResources(3,1,&map);context_->PSSetShaderResources(3,1,&map);}
     bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
-    ID3D11ShaderResourceView* saved_ps4=nullptr;context_->PSGetShaderResources(4,1,&saved_ps4);
-    ID3D11SamplerState* saved_s0=nullptr;context_->PSGetSamplers(0,1,&saved_s0);
     {ID3D11ShaderResourceView* flakes=precipitation_flakes_srv_.Get();context_->PSSetShaderResources(4,1,&flakes);}
     context_->PSSetSamplers(0,1,precipitation_sampler_.GetAddressOf());
     // The drops take the atmosphere per corner (precipitationVS): the world
-    // fog frame (b10), fog volume (t11), sky probe (t12) and fog sampler (s7)
-    // just bound for the pixel stage, mirrored into the vertex stage.
-    ComPtr<ID3D11Buffer> saved_vs_fog_frame, fog_frame;ComPtr<ID3D11ShaderResourceView> saved_vs_fog[2], fog_views[2];
-    ComPtr<ID3D11SamplerState> saved_vs_fog_sampler, fog_sampler;
-    context_->VSGetConstantBuffers(10,1,&saved_vs_fog_frame);context_->PSGetConstantBuffers(10,1,&fog_frame);
-    {ID3D11ShaderResourceView* views[2]{};context_->VSGetShaderResources(11,2,views);saved_vs_fog[0].Attach(views[0]);saved_vs_fog[1].Attach(views[1]);
-     context_->PSGetShaderResources(11,2,views);fog_views[0].Attach(views[0]);fog_views[1].Attach(views[1]);
-     ID3D11ShaderResourceView* bind[2]{fog_views[0].Get(),fog_views[1].Get()};context_->VSSetShaderResources(11,2,bind);}
-    context_->VSGetSamplers(7,1,&saved_vs_fog_sampler);context_->PSGetSamplers(7,1,&fog_sampler);
-    context_->VSSetConstantBuffers(10,1,fog_frame.GetAddressOf());context_->VSSetSamplers(7,1,fog_sampler.GetAddressOf());
+    // fog frame (b10), fog volume (t11), sky probe (t12) and fog sampler (s7),
+    // from their owners exactly as bind_world_fog binds them for the pixel stage.
+    {ID3D11ShaderResourceView* fog_views[2]{fog_volume_active_ ? fog_integrated_srv_.Get() : nullptr,
+                                            sky_inputs_active_ ? sky_probe_srv_[sky_index_].Get() : nullptr};
+     context_->VSSetShaderResources(11,2,fog_views);}
+    context_->VSSetConstantBuffers(10,1,fog_frame_constants_.GetAddressOf());context_->VSSetSamplers(7,1,fog_sampler_.GetAddressOf());
     // The veil first (behind every drop), then the drops; each part is its
     // own profiler pass (precipitation_veil / precipitation / _splash).
     transition_profile_pass("precipitation_veil");
@@ -823,18 +811,10 @@ void Renderer::render_precipitation() {
         context_->DrawInstanced(4,splash_slots*tiles,0,0);
         profiler_.add_draw(1,1);profiler_.add_batch(1);
     }
-    context_->VSSetConstantBuffers(10,1,saved_vs_fog_frame.GetAddressOf());context_->VSSetSamplers(7,1,saved_vs_fog_sampler.GetAddressOf());
-    {ID3D11ShaderResourceView* restore[2]{saved_vs_fog[0].Get(),saved_vs_fog[1].Get()};context_->VSSetShaderResources(11,2,restore);}
-    context_->VSSetShaderResources(0,1,&saved_vs);context_->PSSetShaderResources(2,1,&saved_ps2);
-    context_->VSSetShaderResources(3,1,&saved_vs3);context_->VSSetShaderResources(1,1,&saved_vs1);
-    context_->PSSetShaderResources(4,1,&saved_ps4);context_->PSSetSamplers(0,1,&saved_s0);
-    context_->PSSetShaderResources(3,1,&saved_ps3);if (saved_ps3) saved_ps3->Release();
-    if (saved_ps4) saved_ps4->Release();
-    if (saved_s0) saved_s0->Release();
-    if (saved_vs3) saved_vs3->Release();
-    if (saved_vs1) saved_vs1->Release();
-    if (saved_vs) saved_vs->Release();
-    if (saved_ps2) saved_ps2->Release();
+    {ID3D11Buffer* no_buffer=nullptr;ID3D11SamplerState* no_sampler=nullptr;ID3D11ShaderResourceView* no_views[4]{};
+     context_->VSSetConstantBuffers(10,1,&no_buffer);context_->VSSetSamplers(7,1,&no_sampler);
+     context_->VSSetShaderResources(11,2,no_views);context_->VSSetShaderResources(0,2,no_views);context_->VSSetShaderResources(3,1,no_views);
+     context_->PSSetShaderResources(2,3,no_views);}
     profiler_.add_draw(2,2);profiler_.add_batch(2);
     status(stock != nullptr,"Precipitation: %s %.0f%% strength %.2f, %u drops, %u splashes (%u tiles), shelter %s (%llu bakes), snow cover %.0f%%%s%s%s%s",kind_name,
            fall.presence*100.f,strength,unsigned(instances+near_instances),splash_slots*tiles,tiles,shelter ? "baked" : native_shadows_enabled_ ? "pending" : "off (sun shadows off)",

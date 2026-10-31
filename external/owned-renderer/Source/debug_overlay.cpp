@@ -13,7 +13,7 @@
 #include "widescreen.h"
 #include "world_fog.h"
 #include "camp_inventory.h"
-#include "x64_remote_device.h"
+#include "x64_remote_link.h"
 #include "dlss_frame.h"
 
 #include <dxgi1_4.h>
@@ -241,33 +241,6 @@ FigureFallbackReason dominant_figure_fallback(const BridgeProfileSnapshot& bridg
     }
     return result;
 }
-
-struct ExtraShaderStageState {
-    ID3D11HullShader* hull = nullptr;
-    ID3D11DomainShader* domain = nullptr;
-    ID3D11ComputeShader* compute = nullptr;
-
-    explicit ExtraShaderStageState(ID3D11DeviceContext* context) {
-        if (!context) return;
-        context->HSGetShader(&hull, nullptr, nullptr);
-        context->DSGetShader(&domain, nullptr, nullptr);
-        context->CSGetShader(&compute, nullptr, nullptr);
-    }
-
-    void restore(ID3D11DeviceContext* context) {
-        if (context) {
-            context->HSSetShader(hull, nullptr, 0);
-            context->DSSetShader(domain, nullptr, 0);
-            context->CSSetShader(compute, nullptr, 0);
-        }
-        if (hull) hull->Release();
-        if (domain) domain->Release();
-        if (compute) compute->Release();
-        hull = nullptr;
-        domain = nullptr;
-        compute = nullptr;
-    }
-};
 
 // Segoe UI (Tahoma on older Windows) carries Cyrillic; empty when neither exists.
 std::string system_ui_font_path() {
@@ -2533,9 +2506,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     }
     ImGui::Render();
 
-    ExtraShaderStageState extra_state(implementation_->context);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    extra_state.restore(implementation_->context);
     return S_OK;
 }
 
@@ -2562,9 +2533,7 @@ void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total
     }
     ImGui::End();
     ImGui::Render();
-    ExtraShaderStageState extra_state(implementation_->context);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    extra_state.restore(implementation_->context);
 }
 
 // F11 with the overlay hidden: frame timing is off then, so run it for
@@ -2682,6 +2651,13 @@ void DebugOverlay::maintain() noexcept {
     }
     if (g_quit_seen.load()) config_.set_over_budget_pending(false);  // cleared at WM_QUIT
     if (!implementation_->pending_save) return;
+    // Core mode, game process: the host is the only ini writer; the options
+    // and this request go to it with the next config command.
+    if (core_input) {
+        implementation_->pending_save = false;
+        core_save_requested_ = true;
+        return;
+    }
     if (config_.save(implementation_->config_path.c_str())) {
         config_.clear_dirty();
         implementation_->pending_save = false;
@@ -2825,6 +2801,18 @@ void DebugOverlay::finish_display_apply(const DisplaySettings& settings, HRESULT
         else if (options[i].key == "window_height") state.settings_snapshot[i].integer = settings.window_height;
     }
     state.pending_save = true;
+}
+
+bool DebugOverlay::take_core_save_request() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+    const bool requested = core_save_requested_;
+    core_save_requested_ = false;
+    return requested;
+}
+
+void DebugOverlay::request_save() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+    if (implementation_) implementation_->pending_save = true;
 }
 
 void DebugOverlay::set_mode(DebugOverlayMode mode) noexcept {

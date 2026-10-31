@@ -183,18 +183,19 @@ SamplerState terrainNoiseSampler:register(s12); // wrap
 // Layer: cos, sin of the turn (Pythagorean triples), offset (lattice units).
 // The rock streak layers (5, 6) read stretched coordinates: quarter turns
 // only, so their lattice stays aligned with the stretch as before.
-static const float4 terrainNoiseLayers[28]={
+static const float4 terrainNoiseLayers[29]={
  float4(.6,.8,113.7,529.3),float4(.923077,.384615,871.1,77.9),float4(.470588,.882353,344.5,911.2),float4(.96,.28,702.3,268.8),
  float4(-.689655,.724138,51.9,640.4),float4(0,1,455.6,333.1),float4(-1,0,989.4,187.6),float4(-.849057,-.528302,238.2,802.7),
  float4(.983607,.180328,617.8,458.5),float4(.507692,-.861538,26.3,981.9),float4(-.969231,.246154,780.6,610.2),float4(.657534,.753425,398.9,13.4),
  float4(.988235,-.152941,164.1,717.7),float4(-.423529,.905882,934.7,401.5),float4(.438202,-.898876,507.3,145.8),float4(.742268,.670103,289.4,866.6),
  float4(-.6,-.8,666.6,590.1),float4(.384615,-.923077,82.8,344.9),float4(-.882353,.470588,845.2,236.4),float4(.28,-.96,431.7,954.3),
  float4(.724138,.689655,201.5,49.8),float4(-.324324,-.945946,573.9,772.6),float4(-.97561,.219512,12.4,507.1),float4(.528302,-.849057,759.8,690.3),
- float4(-.180328,.983607,362.6,121.7),float4(.861538,.507692,905.5,863.2),float4(-.246154,-.969231,128.9,398.4),float4(-.753425,.657534,644.3,935.9)};
+ float4(-.180328,.983607,362.6,121.7),float4(.861538,.507692,905.5,863.2),float4(-.246154,-.969231,128.9,398.4),float4(-.753425,.657534,644.3,935.9),
+ float4(.6,.8,311.3,577.9)};
 // Layers: 0-2 blend score octaves, 3-4 rock warp, 5-6 rock streaks, 7 rock
 // patches, 8 rock edge, 9-10 field warp, 11-12 fine field warp, 13-24 face
 // warps (three octaves, two planes, two channels), 25 single-vertex edge,
-// 26-27 terrain material macro.
+// 26-27 terrain material macro, 28 map-edge tile handover.
 float terrainNoise(float2 p,uint layer){
  float4 l=terrainNoiseLayers[layer];
  p=float2(l.x*p.x-l.y*p.y,l.y*p.x+l.x*p.y)+l.zw;

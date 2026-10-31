@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -316,11 +315,13 @@ HRESULT Renderer::flush_native_static(const FixedState& frame,const std::array<f
  // Procedural ground cover joins the opaque world here: after terrain (its
  // depth and the cascades are ready), before objects and liquids.
  // Off (level 0) touches no state and creates nothing once released.
+ // Both passes bind what they read and restore nothing (frame_plan.h); the
+ // static flush after them binds its own targets and state.
  if(gc_place_cs_||gc_failed_||configured_integer(debug_overlay_.config(),"ground_cover",2)>0)
-  {const frame_acct::Scope cover(frame_acct::ours_ground_cover);DebugViewStateGuard guard(context_.Get());(void)render_ground_cover(frame,world_to_clip);}
+  {const frame_acct::Scope cover(frame_acct::ours_ground_cover);(void)plan_pass("ground_cover",rtv_.Get(),dsv_.Get());(void)render_ground_cover(frame,world_to_clip);}
  // Ambient critters: opaque, depth-correct, lit like world objects.
  if(critters_||critters_failed_||configured_integer(debug_overlay_.config(),"critters",2)>0||configured_integer(debug_overlay_.config(),"critter_showcase",0)>0)
-  {const frame_acct::Scope critters(frame_acct::ours_critters);DebugViewStateGuard guard(context_.Get());(void)render_critters(frame,world_to_clip);}
+  {const frame_acct::Scope critters(frame_acct::ours_critters);(void)plan_pass("critters",rtv_.Get(),dsv_.Get());(void)render_critters(frame,world_to_clip);}
  const HRESULT hr=flush_native_static_set(native_static_set_,frame);
  if(FAILED(hr))return hr;
  // Neighbour liquids (ordered) wait for composite_world: they draw after the

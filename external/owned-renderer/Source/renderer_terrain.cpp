@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -144,6 +143,7 @@ void Renderer::release_contact_blend_maps() noexcept{
  contact_maps_.tiles.Reset();contact_maps_.texture.Reset();contact_maps_.atlas.Reset();
  contact_maps_.ready=0;contact_maps_.pending=0;contact_maps_.mips=0;
  contact_tile_rows_.clear();contact_tiles_x_=contact_tiles_y_=0;tile_blend_ready_=tile_blend_rows_=false;
+ tile_blend_input_.reset();tile_blend_vertex_.clear();tile_blend_edge_.clear();tile_blend_drawable_.clear();
 }
 namespace {
 
@@ -327,23 +327,13 @@ HRESULT Renderer::apply_terrain_tile_blend(const TerrainTileFamilies& families) 
   bridge_append_probe_event("terrain_tile_blend",(families.source+"; the transitions keep their tile art").c_str());
   return S_OK;
  }
- std::size_t blended=0,plain_materials=0,bed_families=0;
- const auto rows_start=std::chrono::steady_clock::now();
- const auto rows=owned_terrain_tile_blend_rows(owned_terrain_tile_blend_input(terrain,tiles_x,tiles_y),families,blended,plain_materials,bed_families);
- const double rows_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-rows_start).count();
- std::vector<std::array<std::uint32_t,4>> grid(contact_tile_rows_);
- grid.insert(grid.end(),rows.begin(),rows.end());
- D3D11_TEXTURE2D_DESC d{};d.Width=tiles_x;d.Height=tiles_y*2;d.MipLevels=d.ArraySize=1;
- d.Format=DXGI_FORMAT_R32G32B32A32_UINT;d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_IMMUTABLE;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
- const D3D11_SUBRESOURCE_DATA initial{grid.data(),tiles_x*16u,0};
- ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> view;
- HRESULT hr=S_OK;
- if(FAILED(hr=device_->CreateTexture2D(&d,&initial,&texture))||FAILED(hr=device_->CreateShaderResourceView(texture.Get(),nullptr,&view)))return hr;
- contact_maps_.tiles=view;tile_blend_rows_=true;
- char detail[400];
- std::snprintf(detail,sizeof(detail),"%s: %zu of %zu tiles near transitions blend, %zu plain materials, %zu liquid-bed families, rows %.2f ms",
-  families.source.c_str(),blended,rows.size(),plain_materials,bed_families,rows_ms);
- bridge_append_probe_event("terrain_tile_blend",detail);
+ // Kept for rebuilding the rows when a neighbour shares an edge
+ // (update_terrain_tile_blend_seams builds them).
+ auto input=std::make_shared<TerrainTileBlendInput>(owned_terrain_tile_blend_input(terrain,tiles_x,tiles_y));
+ tile_blend_vertex_=owned_terrain_tile_vertex_families(*input,families);
+ tile_blend_drawable_=owned_terrain_tile_blend_drawable(*input,families);
+ tile_blend_input_=std::move(input);tile_blend_edge_.clear();
+ update_terrain_tile_blend_seams();
  return S_OK;
 }catch(...){return E_OUTOFMEMORY;}
 
@@ -380,16 +370,25 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
                                            const std::vector<float>* layer_shifts) noexcept{SCENE_ENTRY("set_native_terrain_frame");
  if(!device_||!context_)return E_FAIL;
  if(layer_shifts){const HRESULT hr=set_native_terrain_layer_shifts(*layer_shifts);if(FAILED(hr))return hr;}
- // The active map's saved-layout origin (once a map): its terrain material
- // layouts use the same frame as when it is drawn as a neighbour.
- if(const auto source=retained_static_terrain_source_snapshot();source.map&&source.map->generation!=terrain_layout_origin_generation_){
+ // The active map's saved-layout origin: its terrain material layouts use
+ // the same frame as when it is drawn as a neighbour. The neighbour stream
+ // reads it (the layout file is known where the addon is loaded), so a new
+ // map starts at 0,0 and takes its frame once the stream has read it; the
+ // shared-edge blend rows then follow (update_terrain_tile_blend_seams).
+ if(const auto source=retained_static_terrain_source_snapshot();source.map&&
+    (source.map->generation!=terrain_layout_origin_generation_||terrain_layout_name_.empty())){
+  const bool fresh=source.map->generation!=terrain_layout_origin_generation_;
   terrain_layout_origin_generation_=source.map->generation;
-  double x=0,y=0;ResourceStoreConfig mounts;
-  const bool listed=owned_resource_runtime_mounts(mounts)&&neighbour_layout_origin(source.map->terrain_resource,mounts,x,y);
-  terrain_layout_origin_={neighbour_layout_tile_origin(x),neighbour_layout_tile_origin(y)};
-  char text[160];std::snprintf(text,sizeof(text),"%s origin=%.2f,%.2f frame=%.0f,%.0f",listed?"layout":"not_in_layout",x,y,
-   terrain_layout_origin_[0],terrain_layout_origin_[1]);
-  bridge_append_probe_event("terrain_layout_frame",text);
+  double x=0,y=0;
+  const bool listed=neighbour_layout_origin(source.map->terrain_resource,x,y);
+  if(fresh||listed){
+   terrain_layout_origin_={neighbour_layout_tile_origin(x),neighbour_layout_tile_origin(y)};
+   terrain_layout_name_=listed?neighbour_map_name(source.map->terrain_resource):std::string();
+   char text[160];std::snprintf(text,sizeof(text),"%s origin=%.2f,%.2f frame=%.0f,%.0f",listed?"layout":"not_in_layout_yet",x,y,
+    terrain_layout_origin_[0],terrain_layout_origin_[1]);
+   bridge_append_probe_event("terrain_layout_frame",text);
+   if(listed&&tile_blend_input_)update_terrain_tile_blend_seams();
+  }
  }
  // The game's border-fog band moves out over the sides that accepted
  // neighbour maps continue, where the neighbour seam curve takes over;

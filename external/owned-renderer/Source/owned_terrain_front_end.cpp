@@ -114,10 +114,49 @@ float owned_terrain_pit_fill(const TerrainCpuAsset& source,
     if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
     const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
     const float z=owned_zone_node(source,x,y)[2];
-    const float across=.5f*(owned_zone_node(source,x-1,y)[2]+owned_zone_node(source,x+1,y)[2])-z;
-    const float along=.5f*(owned_zone_node(source,x,y-1)[2]+owned_zone_node(source,x,y+1)[2])-z;
+    // Up to the lower node of each pair: a pit only where all four neighbours
+    // rise above the vertex. The pair means also raised every floor vertex
+    // at the foot of a 1 m staircase wall (one node of each pair on the wall)
+    // by ~1.5 m in the casters, which drew a lit triangle on the floor at
+    // every step of the wall foot (#201).
+    const float across=(std::min)(owned_zone_node(source,x-1,y)[2],owned_zone_node(source,x+1,y)[2])-z;
+    const float along=(std::min)(owned_zone_node(source,x,y-1)[2],owned_zone_node(source,x,y+1)[2])-z;
     const float fill=(std::min)(across,along);
     return finite_value(fill)&&fill>0?fill:0.f;
+}
+
+float owned_terrain_foot_rise(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept {
+    if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
+    const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
+    const float z=owned_zone_node(source,x,y)[2];
+    float low=z;
+    for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx)low=(std::min)(low,owned_zone_node(source,x+dx,y+dy)[2]);
+    const float rise=z-low;
+    return finite_value(rise)&&rise>0?rise:0.f;
+}
+
+float owned_terrain_wall_above(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept {
+    if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
+    const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
+    // Nearness of a wall, 0..1: the strongest of the nodes within 3 m, each
+    // its wallness (rising 0.35-1.05 m above this vertex, smoothstepped) times
+    // a smooth distance weight (1-(d/3)^2)^2. A maximum (not a sum, which
+    // peaked in every concave corner) of the same falloff around each wall
+    // node gives an even band along a 1 m staircase foot; the 3x3 height
+    // maximum printed the staircase steps onto the floor (fb34bab3, cw5-ao).
+    constexpr int kReach=3;
+    const float z=owned_zone_node(source,x,y)[2];
+    float nearness=0;
+    for(int dy=-kReach;dy<=kReach;++dy)for(int dx=-kReach;dx<=kReach;++dx){
+        const float d2=float(dx*dx+dy*dy)/float(kReach*kReach);
+        if(d2>=1)continue;
+        const float w=(1-d2)*(1-d2);
+        const float t=(std::clamp)((owned_zone_node(source,x+dx,y+dy)[2]-z-.35f)/.7f,0.f,1.f);
+        nearness=(std::max)(nearness,w*t*t*(3-2*t));
+    }
+    return finite_value(nearness)?nearness:0.f;
 }
 
 std::uint32_t owned_terrain_slope_normal(const TerrainCpuAsset& source,

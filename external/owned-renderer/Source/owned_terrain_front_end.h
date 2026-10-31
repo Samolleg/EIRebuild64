@@ -176,10 +176,21 @@ std::uint32_t owned_terrain_slope_normal(const TerrainCpuAsset& source,
 // zone-grid positions, so sector-edge copies agree).
 std::uint32_t owned_terrain_facet_flatness(const TerrainCpuAsset& source,
     const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
-// Depth of a base vertex below both its neighbour pairs (an authored pit that
-// is concave along both grid axes; 0 on slopes, ridges and valleys). The
+// Depth of a base vertex below all four grid neighbours, up to the lowest of
+// them (an authored pit; 0 on slopes, ridges, valleys and wall feet). The
 // one-ring slope normal and the stored lighting normal never see it, so sun
 // and point casters draw the vertex raised by it (L-085). Zone-grid positions.
+// Height of a base vertex over the lowest of its 3x3 grid nodes. Across a
+// face one cell wide (a 1 m staircase riser) both its foot and crest nodes
+// see the floor, so the interpolated value is the pixel's rise above the
+// floor there; the material blend lets the floor climb the wall foot by it.
+float owned_terrain_foot_rise(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
+// Nearness of a wall rising beside a base vertex, 0..1 (the strongest node
+// within 3 m: its rise of 0.35-1.05 m, smoothstepped, times (1-(d/3)^2)^2),
+// for the terrain's wall-foot contact darkening; even along a 1 m staircase.
+float owned_terrain_wall_above(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
 float owned_terrain_pit_fill(const TerrainCpuAsset& source,
     const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
 // Fills every sector's base_slope_normals/base_facet_flatness (several threads),

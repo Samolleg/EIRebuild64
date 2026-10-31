@@ -902,6 +902,11 @@ void CI3DScreenGlobalMap::GenerateHitTestDDS()
     int i, j;
     if (!pHitTestDDS)
         return;
+    struct MaskFrame {
+        CDX11* renderer;
+        explicit MaskFrame(CDX11* value) : renderer(value) { renderer->SetC56HitTestFrame(true); }
+        ~MaskFrame() { renderer->SetC56HitTestFrame(false); }
+    } maskFrame(GetRenderer()->GetD3D());
     CI3DFigure *pFig;
     // set ambients
     for (i = 0; i < nZones; i++)

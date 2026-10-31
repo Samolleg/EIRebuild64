@@ -76,6 +76,17 @@ struct BeginEngineFrame {  // begin_engine_frame, queued (world epoch unchanged)
     std::uint64_t world_epoch = 0;
     void run(Renderer& renderer);
 };
+// The global map's zone hit-test frame (#200): begin before
+// CI3DScreenGlobalMap::GenerateHitTestDDS draws it, end after its capture.
+// Between them the world draws flat default colours into the lossless
+// hit-test target and the game's capture reads that target.
+struct HitTestFrame {
+    static constexpr Pass pass = Pass::frame_begin;
+    static constexpr std::uint32_t writes = target::stream_color | target::stream_depth;
+    static constexpr bool frame_values = true;
+    bool begin = false;
+    void run(Renderer& renderer);
+};
 // The load reveal keeps a copy of this frame (mark_load_picture).
 struct MarkLoadPicture {
     static constexpr Pass pass = Pass::native_queue_state;

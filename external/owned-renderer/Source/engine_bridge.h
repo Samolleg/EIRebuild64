@@ -459,7 +459,7 @@ struct NativeTerrainVertex {
     // high 16 bits are the liquid over this base vertex (liquid_depth is the
     // signed rest depth; the shader adds the shift and clamps at zero).
     std::uint32_t shift_objects = 0xffffffffu;
-    float liquid_drop = 0.0f; // OwnedLiquidFlow: distance below the fall lip (world units)
+    float liquid_drop = 0.0f; // OwnedLiquidFlow: distance below the fall lip (world units); dry material base vertices: owned_terrain_foot_rise
     float liquid_fill = 0.0f; // Liquid vertices: OwnedLiquidFlow pit depth (the shader lifts the surface by it); dry base vertices: owned_terrain_pit_fill (shadow casters only)
 };
 
@@ -1199,6 +1199,14 @@ using EngineFrameBeginFn = bool (*)(void* context) noexcept;
 void bridge_set_engine_frame_begin_sink(void* context, EngineFrameBeginFn begin) noexcept;
 void bridge_clear_engine_frame_begin_sink(void* context) noexcept;
 
+// The global map's zone hit-test frame (#200): the verified call of
+// CI3DScreenGlobalMap::GenerateHitTestDDS calls this with begin true before
+// and false after (its frame and its mask capture run in between). The
+// active device owns it like the frame begin sink.
+using HitTestFrameFn = void (*)(void* context, bool begin) noexcept;
+void bridge_set_hit_test_frame_sink(void* context, HitTestFrameFn frame) noexcept;
+void bridge_clear_hit_test_frame_sink(void* context) noexcept;
+
 // The sink is render-thread-local. A device registers it only while a D3D7
 // scene is active so an unsupported or out-of-lifecycle call falls back to the
 // original engine path.
@@ -1338,10 +1346,12 @@ void bridge_item_card_text_describe(void* panel,
 void bridge_retire_owned_text_surface(std::uint64_t surface_id) noexcept;
 bool bridge_character_pane_text_epoch_current(
     std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept;
+bool bridge_character_pane_list_current(std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept;
 void bridge_profile_begin_frame();
 void bridge_profile_end_frame();
 void bridge_profile_api_entry(const char* kind, const void* caller);
 void bridge_set_profile_enabled(bool enabled);
+void bridge_set_shadow_close_range(float metres) noexcept;
 void bridge_set_shadow_settings(std::uint32_t map_side,
     std::uint8_t close_cascades,bool far_shadows,bool point_shadows,bool sun_shadows = true) noexcept;
 void bridge_set_point_shadow_merge_distance(float distance) noexcept;
@@ -2028,6 +2038,7 @@ struct EmbeddedVisualFrameInputs {
     std::int32_t hover_id = 0;
     std::uint64_t hover_serial = 0;
     std::array<float, 16> world_to_clip{};
+    float camera_anchor_z = NAN;
     NativeWorldLighting lighting{};
     bool lighting_valid = false;
     // Terrain fog alpha at a world position (0 fogged, 255 clear).

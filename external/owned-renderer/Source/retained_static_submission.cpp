@@ -1320,7 +1320,8 @@ bool build_retained_directional_coverage(
     const std::vector<NativeWorldBounds>& receiving_bounds,
     RetainedDirectionalCoverage& result, const TerrainCpuAsset* base_terrain,
     const std::array<float,16>* terrain_to_world,
-    std::uint32_t map_side,std::uint8_t close_cascades,std::uint64_t base_terrain_generation) noexcept {
+    std::uint32_t map_side,std::uint8_t close_cascades,std::uint64_t base_terrain_generation,
+    float close_range,float camera_anchor_z) noexcept {
     result = {};
     if(map_side<1024 || map_side>4096 || (map_side&(map_side-1)) ||
        close_cascades<1 || close_cascades>3)return false;
@@ -1456,27 +1457,34 @@ bool build_retained_directional_coverage(
         for(unsigned axis=0;axis<3;++axis)
             quality_far_distance+=camera_matrix[12+axis]*quality_far[axis];
         if (!(quality_far_distance>near_distance)) return false;
-        // Keep the existing far-range policy; occupied receiver bounds own the
-        // near start, including objects elevated above the base terrain.
-        double working_far=(std::min)(quality_far_distance,
-            (std::min)(160.0,std::ceil((std::max)({48.0,ground_far,
-                2*ground_near})/8)*8));
-        // The close bands, and so the close maps' texel size, follow these
-        // two distances. Panning over uneven ground stepped them back and
-        // forth by one 8-unit (far) or 4-unit (near) step, and every step
-        // forced a full redraw instead of a scroll (L-077). A one-step change
-        // is held: a slightly longer far range only spreads the bands, and
-        // the near start may lag only away from the camera (a nearer start
-        // is taken at once, so no receiver falls in front of map 0).
-        static double held_far=0,held_near=0;
-        if(held_far>near_distance && held_far<=quality_far_distance &&
-           std::abs(working_far-held_far)<=8.5)working_far=held_far;
-        held_far=working_far;
-        if (!(working_far>near_distance)) return false;
-        double working_near=(std::max)(near_distance,(std::min)(useful_near,.5*working_far));
-        if(held_near>=near_distance && held_near<working_near && working_near-held_near<=8.5)
-            working_near=held_near;
-        held_near=working_near;
+        // The close band comes from camera state only, never from the visible
+        // terrain or receivers: its near start where the view's lower edge
+        // meets the horizontal plane through the game camera's anchor (three
+        // quarters of that distance, snapped down to 4 m: nearer ground above
+        // the anchor plane still falls inside map 0), its far end a fixed
+        // close range past that. Panning keeps both, so the maps' radii stay
+        // and the cached layers scroll; only zoom, pitch or the anchor height
+        // move them. The former terrain-fitted band (48-160 m from terrain
+        // rays, 8 m steps, one step held) jumped 16 m and more while panning
+        // and snapped whole regions across the close/far split (#196).
+        double working_near=near_distance;
+        if(std::isfinite(camera_anchor_z)) {
+            double lowest=INFINITY;
+            for(const double x:{-1.0,0.0,1.0}) {
+                ShadowPoint from{},to{};
+                if(!shadow_unproject(inverse,x,-1,0,from) || !shadow_unproject(inverse,x,-1,1,to))continue;
+                const double rise=to[2]-from[2];
+                if(!(rise<0))continue;            // the ray never descends to the plane
+                const double t=(double(camera_anchor_z)-from[2])/rise;
+                if(!(t>0 && t<=1))continue;
+                double distance=camera_matrix[15];
+                for(unsigned axis=0;axis<3;++axis)
+                    distance+=camera_matrix[12+axis]*(from[axis]+t*(to[axis]-from[axis]));
+                lowest=(std::min)(lowest,distance);
+            }
+            if(std::isfinite(lowest))working_near=(std::max)(near_distance,std::floor(.75*lowest/4)*4);
+        }
+        const double working_far=(std::min)(quality_far_distance,working_near+double(close_range));
         if (!(working_near>0 && working_far>working_near)) return false;
         const double focus_fraction=std::clamp(
             (working_far-near_distance)/(quality_far_distance-near_distance),0.0,1.0);

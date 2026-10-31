@@ -517,6 +517,16 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                         if (!water_tile)
                             terrain_vertex.liquid_fill = owned_terrain_pit_fill(
                                 *context->source, *context->sector, source_index);
+                        // Dry material vertices: liquid_drop holds the rise
+                        // over the local floor (the blend's wall-foot band).
+                        if (!water_tile && material_tile)
+                            terrain_vertex.liquid_drop = owned_terrain_foot_rise(
+                                *context->source, *context->sector, source_index);
+                        // ... and liquid_bend the wall rising beside it
+                        // (wall-foot contact darkening).
+                        if (!water_tile && material_tile)
+                            terrain_vertex.liquid_bend = owned_terrain_wall_above(
+                                *context->source, *context->sector, source_index);
                         if (material_tile)
                             terrain_vertex.flags |= native_terrain_material_vertex | fill_flags;
                         else if (long_tile)
@@ -663,23 +673,31 @@ TerrainTileBlendInput owned_terrain_tile_blend_input(const TerrainCpuAsset& terr
  return in;
 }
 
-std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const TerrainTileBlendInput& in,
-    const TerrainTileFamilies& families,std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families){
- const std::uint32_t slots=in.slots;
+namespace {
+// Every tile's world-corner families from its slot and corner lanes.
+std::vector<std::array<std::uint32_t,4>> tile_blend_corners(const TerrainTileBlendInput& in,const TerrainTileFamilies& families){
  std::vector<std::array<std::uint32_t,4>> corners(in.slot.size(),std::array<std::uint32_t,4>{});
+ for(std::size_t t=0;t<corners.size();++t){
+  if(in.slot[t]>=in.slots||in.slot[t]>=families.signatures.size())continue;
+  const auto& g=families.signatures[in.slot[t]];
+  for(unsigned k=0;k<4;++k)corners[t][k]=g[(in.lanes[t]>>(2*k))&3u];
+ }
+ return corners;
+}
+
+// Each family's material cell (its plain slot, else a borrowed one) and the
+// liquid-bed families.
+std::map<std::uint32_t,std::uint32_t> tile_blend_cells(const TerrainTileBlendInput& in,const TerrainTileFamilies& families,
+    const std::vector<std::array<std::uint32_t,4>>& corners,std::set<std::uint32_t>& bed){
+ const std::uint32_t slots=in.slots;
  // Placed tile corners per family, and those under a liquid at rest.
  std::map<std::uint32_t,std::uint32_t> placed,placed_wet;
- for(std::size_t t=0;t<corners.size();++t){
-  if(in.slot[t]>=slots||in.slot[t]>=families.signatures.size())continue;
-  const auto& g=families.signatures[in.slot[t]];
+ for(std::size_t t=0;t<corners.size();++t)
   for(unsigned k=0;k<4;++k){
-   const std::uint32_t f=g[(in.lanes[t]>>(2*k))&3u];
-   corners[t][k]=f;
+   const std::uint32_t f=corners[t][k];
    if(f){++placed[f];if(in.wet[t]&(1u<<k))++placed_wet[f];}
   }
- }
  // Liquid-bed families (terrain_tile_bed_name, kTerrainTileBedShare).
- std::set<std::uint32_t> bed;
  for(const auto& [family,count]:placed){
   const auto name=families.names.find(family);
   if((name!=families.names.end()&&terrain_tile_bed_name(name->second))||float(placed_wet[family])>=kTerrainTileBedShare*float(count))
@@ -700,7 +718,40 @@ std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const Ter
   std::sort(order.begin(),order.end(),[&](std::uint32_t a,std::uint32_t b){return drawn[a]>drawn[b]||(drawn[a]==drawn[b]&&a<b);});
   terrain_tile_borrow_cells(families,order,cells,bed);
  }
- auto rows=terrain_tile_blend_rows(in.tiles_x,in.tiles_y,corners,cells,in.steep,in.heights,in.underwater,families.rock_hard_only);
+ return cells;
+}
+}
+
+std::vector<std::uint32_t> owned_terrain_tile_vertex_families(const TerrainTileBlendInput& in,const TerrainTileFamilies& families){
+ return terrain_tile_vertex_families(in.tiles_x,in.tiles_y,tile_blend_corners(in,families));
+}
+
+std::set<std::string> owned_terrain_tile_blend_drawable(const TerrainTileBlendInput& in,const TerrainTileFamilies& families){
+ std::set<std::uint32_t> bed;
+ std::set<std::string> names;
+ for(const auto& [family,cell]:tile_blend_cells(in,families,tile_blend_corners(in,families),bed)){
+  const auto name=families.names.find(family);
+  if(name!=families.names.end())names.insert(name->second);
+ }
+ return names;
+}
+
+std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const TerrainTileBlendInput& in,
+    const TerrainTileFamilies& families,const std::vector<std::uint32_t>& edge_families,
+    std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families,std::set<std::uint32_t>& unmatched){
+ const auto corners=tile_blend_corners(in,families);
+ std::set<std::uint32_t> bed;
+ const auto cells=tile_blend_cells(in,families,corners,bed);
+ // Shared map edge vertices take the family the edge gives them when this
+ // map has a cell for it; otherwise they keep their own (reported).
+ auto family=terrain_tile_vertex_families(in.tiles_x,in.tiles_y,corners);
+ if(edge_families.size()==family.size())
+  for(std::size_t i=0;i<family.size();++i){
+   const std::uint32_t f=edge_families[i];
+   if(!f||f==family[i])continue;
+   if(cells.count(f))family[i]=f;else unmatched.insert(f);
+  }
+ auto rows=terrain_tile_blend_rows(in.tiles_x,in.tiles_y,corners,family,cells,in.steep,in.heights,in.underwater,families.rock_hard_only);
  blended=0;plain_materials=cells.size();bed_families=bed.size();
  for(const auto& row:rows)blended+=(row[2]&5u)==5u; // known and near a transition
  return rows;

@@ -805,16 +805,13 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
   std::memcpy(mapped.pData,&constants,sizeof(constants));context_->Unmap(water_reflection_constants_.Get(),0);
   clear_water_reflection_bindings();
   ComPtr<ID3D11Resource> source;rtv_->GetResource(&source);
-  // Preserve the exact ordered submission boundary and current history/AO MRT.
-  ID3D11RenderTargetView* targets[3]{};ID3D11DepthStencilView* depth=nullptr;
-  context_->OMGetRenderTargets(3,targets,&depth);
+  // The copy leaves the targets unbound; the native flush (the only caller)
+  // binds its history/AO targets again for the batch that follows.
   context_->OMSetRenderTargets(0,nullptr,nullptr);
   transition_profile_pass("liquid_scene_copy");
   context_->CopySubresourceRegion(water_scene_color_.Get(),D3D11CalcSubresource(0,0,water_scene_levels_),0,0,0,source.Get(),0,nullptr);
   context_->CopyResource(water_scene_depth_.Get(),depth_.Get());
   end_profile_pass();
-  context_->OMSetRenderTargets(targets[2]?3u:targets[1]?2u:1u,targets,depth);
-  for(auto* target:targets)if(target)target->Release();if(depth)depth->Release();
   water_capture_clip_=native_world_clip_;water_capture_ready_=true;
  }
  if(!enabled||!water_capture_ready_)return false;
@@ -837,15 +834,12 @@ void Renderer::capture_water_history() {
  if(!water_scene_srv_||!water_capture_ready_||water_capture_frame_!=native_frame_index_||!rtv_)return;
  clear_water_reflection_bindings();
  ComPtr<ID3D11Resource> source;rtv_->GetResource(&source);
- ID3D11RenderTargetView* targets[3]{};ID3D11DepthStencilView* depth=nullptr;
- context_->OMGetRenderTargets(3,targets,&depth);
+ // Targets stay unbound: the composite steps after it bind their own.
  context_->OMSetRenderTargets(0,nullptr,nullptr);
  transition_profile_pass("liquid_history_copy");
  context_->CopySubresourceRegion(water_scene_color_.Get(),D3D11CalcSubresource(0,1,water_scene_levels_),0,0,0,source.Get(),0,nullptr);
  if(water_scene_levels_>1)context_->GenerateMips(water_history_srv_.Get());
  end_profile_pass();
- context_->OMSetRenderTargets(targets[2]?3u:targets[1]?2u:1u,targets,depth);
- for(auto* target:targets)if(target)target->Release();if(depth)depth->Release();
  water_history_clip_=water_capture_clip_;water_history_inverse_=water_capture_inverse_;water_history_frame_=native_frame_index_;
  // The particle depth this frame wrote goes with its colour; the next
  // frame writes the other slot.
@@ -920,29 +914,23 @@ void Renderer::draw_game_particle_depth(UINT vertex_count) {
   particle_depth_width_=width_;particle_depth_height_=height_;
  }
  transition_profile_pass("particle_reflection_depth");
- ID3D11RenderTargetView* targets[3]{};ID3D11DepthStencilView* depth=nullptr;
- context_->OMGetRenderTargets(3,targets,&depth);
- ID3D11BlendState* blend=nullptr;float factor[4]{};UINT mask=0;context_->OMGetBlendState(&blend,factor,&mask);
- ID3D11DepthStencilState* test=nullptr;UINT reference=0;context_->OMGetDepthStencilState(&test,&reference);
- ID3D11PixelShader* pixel=nullptr;context_->PSGetShader(&pixel,nullptr,nullptr);
+ // The second draw of the game particle it follows (same vertex stage and
+ // inputs). It restores nothing: every following draw binds its own targets,
+ // pixel shader, blend and depth state (draw, draw_game_effect, apply_state,
+ // the native flush and the world passes). Its target is unbound after it.
  ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(28,1,&empty);
  ID3D11RenderTargetView* const output=particle_depth_rtv_[particle_depth_current_].Get();
  if(particle_depth_frame_!=native_frame_index_) {
   const float far_depth[4]={1,1,1,1};context_->ClearRenderTargetView(output,far_depth);
   particle_depth_frame_=native_frame_index_;
  }
- context_->OMSetRenderTargets(1,&output,dsv_.Get());
+ bind_plan_targets(plan_pass("particle_reflection_depth",output,dsv_.Get()));
  context_->OMSetBlendState(particle_depth_blend_.Get(),nullptr,0xffffffffu);
  context_->OMSetDepthStencilState(particle_depth_test_.Get(),0);
  context_->PSSetShader(game_particle_depth_ps_.Get(),nullptr,0);
  context_->Draw(vertex_count,0);
  profiler_.add_draw(vertex_count/3u,1);profiler_.add_batch();
- context_->PSSetShader(pixel,nullptr,0);
- context_->OMSetDepthStencilState(test,reference);
- context_->OMSetBlendState(blend,factor,mask);
- context_->OMSetRenderTargets(targets[2]?3u:targets[1]?2u:1u,targets,depth);
- for(auto* target:targets)if(target)target->Release();
- if(depth)depth->Release();if(blend)blend->Release();if(test)test->Release();if(pixel)pixel->Release();
+ context_->OMSetRenderTargets(0,nullptr,nullptr);
 }
 
 #endif

@@ -848,11 +848,16 @@ bool ResourceStore::locate(const std::string& resource_name,
         failure = {};
         return true;
     }
-    const bool texture =
-        (canonical.size() >= 4 && canonical.compare(canonical.size() - 4, 4, ".mmp") == 0) ||
-        (canonical.compare(0, 17, "ei_atlas_profile_") == 0 &&
-         canonical.size() >= 5 && canonical.compare(canonical.size() - 5, 5, ".json") == 0);
-    const std::uint8_t kind = texture ? kArchiveTextures : kArchiveFigures;
+    // The texture manager's chain serves .mmp textures and the map editor's
+    // terrain data (.json atlas profiles and semantic fields), which the
+    // editor ships beside the MMP pages in a texture archive (Dejavu:
+    // HDPack_Terrain.res, a textures.res entry). Everything else is a figure
+    // manager lookup.
+    const auto ends_with = [&](const char* suffix) {
+        const std::size_t n = std::strlen(suffix);
+        return canonical.size() >= n && canonical.compare(canonical.size() - n, n, suffix) == 0;
+    };
+    const std::uint8_t kind = ends_with(".mmp") || ends_with(".json") ? kArchiveTextures : kArchiveFigures;
     for (const ArchiveMount& archive : impl_->archives) {
         if (!(archive.kinds & kind)) continue;
         std::uint32_t entry_index = 0;

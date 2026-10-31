@@ -30,6 +30,9 @@ struct NativeWorldLightingFrame {
     bool sampled = false;
     FigureFallbackReason result = FigureFallbackReason::unavailable;
     NativeWorldLighting lighting{};
+    // The zone is a cave (the game's GMS_CAVE sky type), read with the light:
+    // no sun light and no sun shadow maps there (cave_lighting.h).
+    bool cave = false;
 };
 extern thread_local NativeWorldLightingFrame g_native_world_lighting_frame;
 
@@ -66,6 +69,7 @@ struct OwnedVisualPartCandidate {
 };
 struct OwnedVisualWorldFrame {
     OwnedVisualDiagnostic diagnostic{};
+    float camera_anchor_z = NAN;  // this frame's game camera anchor height (close shadow band); NaN unknown
     NativeShadowSourceDiagnostics shadow_source_diagnostic{};
     std::shared_ptr<const RetainedVisualFrame> values;
     std::vector<OwnedVisualFramePartState> prepared;
@@ -244,6 +248,7 @@ struct OwnedShadowInputs {
 // them from game state and the copied values).
 struct OwnedSceneCommand {
     std::array<float,16> world_to_clip{};
+    float camera_anchor_z = NAN;  // the game camera's anchor height at the seam; NaN unknown
     OwnedShadowInputs inputs;
     OwnedTerrainRuntimeFrame terrain;
     NativeWorldLightingFrame lighting{};
@@ -411,6 +416,7 @@ struct OwnedShadowSettings {
     bool far_shadows = true;
     bool point_shadows = true;
     bool sun_shadows = true;
+    float close_range = 80;  // close shadow band length (m), shadow_close_range
 };
 
 // These subdivide retained nonqueue; physical flushes and packet/control work

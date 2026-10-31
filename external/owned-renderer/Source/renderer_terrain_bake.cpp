@@ -132,7 +132,7 @@ struct Renderer::TerrainBakeResidency{
  // partial: baked while not entirely inside the view frustum (part of its
  // ground may have been off-screen); view: the wanted set it baked under.
  struct Page{UINT map=0;int cell_x=0,cell_y=0,side=1;bool distant=false,partial=false;unsigned slot_w=0,slot_h=0,gutter=1;float density_x=0,density_y=0;int node=-1;std::uint64_t view=0;
-  std::uint64_t last_wanted=0;bool baked=false,baking=false;unsigned stage_x=0,stage_y=0;};
+  std::uint64_t last_wanted=0;bool baked=false,baking=false,stale=false;unsigned stage_x=0,stage_y=0;};
  std::unordered_map<std::uint64_t,Page> pages;
  std::vector<std::uint64_t> baking; // pages drawn into the staging atlas this frame, finalized the next
  SlotAllocator near_slots,far_slots;unsigned near_width=0,near_height=0,far_width=0,far_height=0;
@@ -704,8 +704,9 @@ void Renderer::finalize_terrain_bake() noexcept{
    }
   }
   page.baking=false;
-  // terrain_bake 2 measures the bake: its pages bake again next frame.
-  page.baked=terrain_bake_mode_!=2;
+  // terrain_bake 2 measures the bake: its pages bake again next frame. A
+  // page whose map's blend rows changed while it baked bakes again too.
+  page.baked=terrain_bake_mode_!=2&&!page.stale;page.stale=false;
  }
  state.baking.clear();state.tables_dirty=true;
  end_terrain_bake_span(span);
@@ -860,6 +861,15 @@ Renderer::TerrainBakeFrame Renderer::update_terrain_bake() noexcept{
  }
  terrain_bake_bound_=true;
  return frame;
+}
+
+// A map's blend rows changed (a shared edge, update_terrain_tile_blend_seams):
+// its resident pages bake again from the new rows.
+void Renderer::terrain_bake_rows_changed(UINT map) noexcept{
+ if(!terrain_bake_state_)return;
+ auto& state=*terrain_bake_state_;
+ for(auto& [key,page]:state.pages)if(page.map==map){if(page.baking)page.stale=true;else page.baked=false;}
+ state.tables_dirty=true;
 }
 
 // Whether a batch with this world XY range can reach a page baking this

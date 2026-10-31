@@ -320,7 +320,9 @@ constexpr int kTerrainTileBlendReach = 2;
 //   y = vertices (0,1) | (1,1) << 16 (terrain_tile_blend_none: no material),
 //   z = bit 0 known (blends; its art is one of the field's materials),
 //       bit 1 plain (all four corners one material), bit 2 active (some
-//       vertex within reach differs, so the field can change here),
+//       vertex within reach differs, so the field can change here; every
+//       tile on the map border, where the field narrows to the edge
+//       vertices an adjoining map shares instead of the tile art),
 //       bit 3 steep (some face past the walk limit: the blend owns its side
 //       projection, so the tile is active), bits 4-7 edge e (0 -x, 1 +x,
 //       2 -y, 3 +y) toward a tile that is not known, bits 8-11 edge e toward
@@ -342,20 +344,16 @@ constexpr int kTerrainTileBlendReach = 2;
 // top and bottom materials; exposed rock is one of those (stone, else
 // ground). `underwater` tiles (a corner under a liquid surface at rest) never
 // give a top or bottom material.
-// A vertex carries a material when the known tiles around it agree on one
-// that has a plain cell; a tile is known when its four corner families are
-// known and every one of its vertices carries a material. Every tile's x/y
-// come from the same vertex values, so neighbours see one field.
-inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::uint32_t width, std::uint32_t height,
-    const std::vector<std::array<std::uint32_t, 4>>& corners, const std::map<std::uint32_t, std::uint32_t>& cells,
-    const std::vector<bool>& steep = {}, const std::vector<float>& heights = {},
-    const std::vector<bool>& underwater = {}, bool rock_hard_only = false) {
-    // Unknown tiles: no flags, no top or bottom material (0xffff).
-    const std::array<std::uint32_t, 4> none{~0u, ~0u, 0xffff0000u, ~0u};
-    std::vector<std::array<std::uint32_t, 4>> rows(std::size_t(width) * height, none);
-    if (corners.size() != rows.size()) return rows;
+// Family of every grid vertex ((width+1) x (height+1), row-major; 0: none)
+// from the tiles around it whose four corner families are known: the family
+// they agree on, or where they disagree the family most of them name (ties:
+// the lower id), so those tiles still blend instead of keeping their
+// hard-edged art.
+inline std::vector<std::uint32_t> terrain_tile_vertex_families(std::uint32_t width, std::uint32_t height,
+    const std::vector<std::array<std::uint32_t, 4>>& corners) {
     const std::uint32_t conflict = ~0u, vw = width + 1;
     std::vector<std::uint32_t> family(std::size_t(vw) * (height + 1), 0u);
+    if (corners.size() != std::size_t(width) * height) return family;
     const auto has_families = [&](std::size_t t) {
         const auto& c = corners[t];
         return c[0] && c[1] && c[2] && c[3];
@@ -386,9 +384,31 @@ inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::ui
             unsigned best = 0;
             for (const auto& [f, n] : votes) if (n > best) { best = n; v = f; }
         }
+    return family;
+}
+
+// A vertex carries a material when its family (terrain_tile_vertex_families,
+// or the family a shared map edge gives it) has a plain cell; a tile is known
+// when its four corner families are known and every one of its vertices
+// carries a material. Every tile's x/y come from the same vertex values, so
+// neighbours see one field.
+inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::uint32_t width, std::uint32_t height,
+    const std::vector<std::array<std::uint32_t, 4>>& corners, const std::vector<std::uint32_t>& family,
+    const std::map<std::uint32_t, std::uint32_t>& cells,
+    const std::vector<bool>& steep = {}, const std::vector<float>& heights = {},
+    const std::vector<bool>& underwater = {}, bool rock_hard_only = false) {
+    // Unknown tiles: no flags, no top or bottom material (0xffff).
+    const std::array<std::uint32_t, 4> none{~0u, ~0u, 0xffff0000u, ~0u};
+    std::vector<std::array<std::uint32_t, 4>> rows(std::size_t(width) * height, none);
+    const std::uint32_t vw = width + 1;
+    if (corners.size() != rows.size() || family.size() != std::size_t(vw) * (height + 1)) return rows;
+    const auto has_families = [&](std::size_t t) {
+        const auto& c = corners[t];
+        return c[0] && c[1] && c[2] && c[3];
+    };
     std::vector<std::uint32_t> vertex(family.size(), terrain_tile_blend_none);
     for (std::size_t i = 0; i < family.size(); ++i) {
-        const auto found = family[i] && family[i] != conflict ? cells.find(family[i]) : cells.end();
+        const auto found = family[i] ? cells.find(family[i]) : cells.end();
         if (found != cells.end()) vertex[i] = found->second;
     }
     const auto at = [&](int x, int y) {
@@ -420,7 +440,8 @@ inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::ui
             };
             const int dx[4] = {-1, 1, 0, 0}, dy[4] = {0, 0, -1, 1};
             const bool faces = t < steep.size() && steep[t];
-            std::uint32_t flags = 1u | (plain[t] ? 2u : 0u) | (active || faces ? 4u : 0u) | (faces ? 8u : 0u);
+            const bool border = x == 0 || y == 0 || x + 1 == width || y + 1 == height;
+            std::uint32_t flags = 1u | (plain[t] ? 2u : 0u) | (active || faces || border ? 4u : 0u) | (faces ? 8u : 0u);
             for (unsigned e = 0; e < 4; ++e) {
                 // The map edge is no unknown tile: the field runs to the edge
                 // vertices an adjoining map shares (the shader narrows it there).

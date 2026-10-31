@@ -6,6 +6,9 @@
 
 #include "owned_asset_loader.h"
 #include "retained_static_scene.h"
+#ifndef EID3D11_EMBEDDED
+#include "retained_publication.h"
+#endif
 #include "neighbour_maps.h"
 #include "neighbour_client.h"
 
@@ -268,6 +271,71 @@ std::shared_ptr<const Asset> visual_asset(
     return nullptr;
 }
 
+#ifndef EID3D11_EMBEDDED
+// Core mode, game process (retained_visual_textures_to_host): the recorder
+// that defines archive textures and map sources on the x64 host while this
+// process keeps slim stand-ins. Null otherwise.
+std::atomic<RetainedPublicationRecorder*> g_core_host_recorder{nullptr};
+
+// Core mode: `full` is defined on the host now (its source bytes go with it)
+// and this process keeps a stand-in without source bytes, which the stream
+// names as that definition (RetainedPublicationRecorder::asset_alias). Mip 0's
+// cut bits stay for the game-process alpha readers (sway classification).
+// Null: keep `full` (no recorder, or the stand-in could not be made).
+std::shared_ptr<const TextureCpuAsset> texture_host_stand_in(
+    const std::shared_ptr<const TextureCpuAsset>& full) noexcept {
+    auto* recorder = g_core_host_recorder.load(std::memory_order_acquire);
+    if (!recorder || !full->source || full->mips.empty()) return nullptr;
+    std::shared_ptr<const TextureCpuAsset> result;
+    try {
+        auto stand_in = std::make_shared<TextureCpuAsset>(*full);
+        stand_in->source.reset();
+        if (!(full->opaque_mips & 1u)) {
+            TextureAlphaPixels alpha;
+            if (!texture_alpha_pixels(*full, 0, alpha)) return nullptr;
+            stand_in->alpha_cut_mask = texture_alpha_cut_mask(alpha);
+            if (!stand_in->alpha_cut_mask) return nullptr;
+        }
+        result = std::move(stand_in);
+    } catch (...) { return nullptr; }
+    if (!recorder->asset_alias(full, result)) return nullptr;
+    return result;
+}
+
+// Core mode (S5b): the loader's map source is defined on the host as it is,
+// and this process keeps a copy whose terrain has no vertices, tiles, slope
+// tables or page bytes. Per sector it keeps what the game half reads: the
+// descriptors (bounds, materials, counts) and the height fields of every
+// vertex (TerrainSectorCpuAsset::heights) for sample_terrain_height. The
+// stream names the copies as the full definitions. Null: keep `full`.
+std::shared_ptr<const OwnedMapSnapshot> core_slim_source(
+    const std::shared_ptr<const OwnedMapSnapshot>& full) noexcept {
+    auto* recorder = g_core_host_recorder.load(std::memory_order_acquire);
+    if (!recorder || !full || !full->terrain) return nullptr;
+    std::shared_ptr<const OwnedMapSnapshot> snapshot;
+    std::shared_ptr<const TerrainCpuAsset> terrain;
+    try {
+        auto slim = std::make_shared<TerrainCpuAsset>(*full->terrain);
+        for (auto& sector : slim->sectors) {
+            sector.heights.reserve(sector.vertices.size());
+            for (const auto& vertex : sector.vertices) sector.heights.push_back(terrain_height_vertex(vertex));
+            std::vector<TerrainVertex>().swap(sector.vertices);
+            std::vector<TerrainTileDescriptor>().swap(sector.tiles);
+            std::vector<std::uint32_t>().swap(sector.base_slope_normals);
+            std::vector<std::uint32_t>().swap(sector.base_facet_flatness);
+        }
+        for (auto& page : slim->pages) page.release_upload_bytes();
+        terrain = std::move(slim);
+        auto copy = std::make_shared<OwnedMapSnapshot>(*full);
+        copy->terrain = terrain;
+        snapshot = std::move(copy);
+    } catch (...) { return nullptr; }
+    if (!recorder->asset_alias(full, snapshot) || !recorder->asset_alias(full->terrain, terrain)) return nullptr;
+    return snapshot;
+}
+
+#endif // !EID3D11_EMBEDDED
+
 template<class Decode>
 std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
     const std::string& key, bool generated, GeneratedTextureEvent event,
@@ -326,9 +394,14 @@ std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
             return nullptr;
         }
         result->value_serial=source.serial;
-        source.asset=result;
+        std::shared_ptr<const TextureCpuAsset> value=std::move(result);
+        // Archive members only: generated values keep their replacement path.
+#ifndef EID3D11_EMBEDDED
+        if(!generated)if(auto stand_in=texture_host_stand_in(value))value=std::move(stand_in);
+#endif
+        source.asset=value;
         failure={};
-        return result;
+        return value;
     } catch (const std::bad_alloc&) {
         if (!generated) state.visual_textures.erase(key);
         failure={ResourceFailureCode::archive_bounds,"visual texture allocation failed"};
@@ -337,30 +410,6 @@ std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
         failure={ResourceFailureCode::archive_bounds,"visual texture allocation failed"};
     }
     return nullptr;
-}
-
-bool environment(const wchar_t* name, std::wstring& value) {
-    const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
-    if (!required) return false;
-    value.assign(required, L'\0');
-    const DWORD copied = GetEnvironmentVariableW(name, value.data(), required);
-    if (!copied || copied >= required) return false;
-    value.resize(copied);
-    return true;
-}
-
-std::vector<std::wstring> split_paths(const std::wstring& value) {
-    std::vector<std::wstring> output;
-    std::size_t begin = 0;
-    while (begin <= value.size()) {
-        const std::size_t end = value.find(L';', begin);
-        std::wstring item = value.substr(begin, end == std::wstring::npos
-            ? std::wstring::npos : end - begin);
-        if (!item.empty()) output.push_back(std::move(item));
-        if (end == std::wstring::npos) break;
-        begin = end + 1;
-    }
-    return output;
 }
 
 bool enabled() {
@@ -523,12 +572,8 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
     mounts = embedded_host_configuration().snapshot().mounts;
     text_mounts = mounts;
 #else
-    std::wstring loose;
-    std::wstring archives;
-    const bool loose_override = environment(L"EI_RENDERER_OWNED_LOADER_LOOSE_ROOTS", loose);
-    const bool archive_override = environment(L"EI_RENDERER_OWNED_LOADER_ARCHIVES", archives);
-    // The launcher overrides visual mounts only. Spell text still follows the
-    // active game's text family and mod precedence, even with both overrides.
+    // The mounts a player install has: the active game's registry paths and
+    // the mod's config.reg, in the game's per-manager order.
     {
         if (!game_registry_key) {
             failure = {ResourceFailureCode::parse, "active game resource registry selection unavailable"};
@@ -554,8 +599,6 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
         if (!derive_owned_resource_mounts(work, resources, addon, config, mounts, failure, &text_mounts))
             return false;
     }
-    if (loose_override) mounts.loose_roots = split_paths(loose);
-    if (archive_override) { mounts.archives = split_paths(archives); mounts.archive_kinds.clear(); }
     // A configured archive that is missing stays in the game's list, empty
     // (CResourceManager::AddArchiveOf ignores the open result): drop it.
     for (std::size_t index = mounts.archives.size(); index-- > 0;) {
@@ -620,7 +663,11 @@ void start_next_load(RuntimeState& state) noexcept {
     request.terrain_resource = state.active.terrain_resource;
     request.mounts = state.mounts;
     request.load_object_assets = false;
-    request.extra_textures = {"tree02", "stone02"}; // ground-cover bark and rock art
+    // Ground-cover bark and rock art, read only from the main map source
+    // (terrain_source_snapshot). A secondary MOB (an AddMob supplement) has
+    // no terrain and nobody reads its textures; loading them there decoded
+    // and streamed ~1.4 MB per supplement again (#203).
+    if (!request.terrain_resource.empty()) request.extra_textures = {"tree02", "stone02"};
     request.prepare_terrain_shading = !request.terrain_resource.empty(); // active map terrain
     ResourceFailure failure{};
     if (!state.loader->request(request, failure, &state.active.token)) {
@@ -772,6 +819,9 @@ void owned_resource_runtime_poll() noexcept {
         return;
     ResourceFailure failure{};
     write_owned_loader_receipt(*snapshot, failure);
+#ifndef EID3D11_EMBEDDED
+    if (auto slim = core_slim_source(snapshot)) snapshot = std::move(slim);
+#endif
     if (!snapshot->mob ||
         (state.active.role == MobSourceRole::main && !snapshot->terrain) ||
         !state.scene.publish_source(state.active.transaction, snapshot)) {
@@ -1035,6 +1085,9 @@ void retained_static_finish_source(
             }
             ResourceFailure failure{};
             write_owned_loader_receipt(*snapshot, failure);
+#ifndef EID3D11_EMBEDDED
+            if (auto slim = core_slim_source(snapshot)) snapshot = std::move(slim);
+#endif
             if (!snapshot->mob || !snapshot->terrain ||
                 !state.scene.publish_source(transaction, snapshot))
                 state.scene.abandon_source(transaction);
@@ -1290,6 +1343,12 @@ ResourceStoreStats owned_visual_resource_stats() noexcept {
     std::lock_guard<std::mutex> guard(state.lock);
     return state.selected_resources.stats();
 }
+
+#ifndef EID3D11_EMBEDDED
+void retained_visual_textures_to_host(RetainedPublicationRecorder* recorder) noexcept {
+    g_core_host_recorder.store(recorder, std::memory_order_release);
+}
+#endif
 
 std::uint64_t owned_visual_texture_source_bytes() noexcept {
     auto& state = runtime();

@@ -11,6 +11,8 @@
 #include "gpu_blit_key.h"
 #include "embedded_device.h"
 #include "embedded_game_effects.h"
+#include "frame_plan.h"
+#include "cave_irradiance.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -401,11 +403,6 @@ HRESULT create_completed_surface_texture(ID3D11Device* device, const SurfaceImag
 HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
                              SurfaceImage& image,
                              SurfaceUploadResult* result = nullptr);
-// Remote device only (surface protocol): the host converts and writes;
-// `queued` steps wait for the scene thread's commit (game-thread uploads).
-HRESULT upload_surface_image_remote(ID3D11Device* device, bool queued,
-                                    SurfaceImage& image,
-                                    SurfaceUploadResult* result = nullptr);
 bool surface_dxgi_format(const DDPIXELFORMAT& format, DXGI_FORMAT& output,
                          UINT& block_bytes) noexcept;
 #ifdef EID3D11_TESTING
@@ -453,6 +450,7 @@ bool native_texture_alpha_opaque(const NativeOwnedTextureView& texture,
                                 std::uint32_t mip_filter) noexcept;
 NativeOpacityClass native_opacity_class(const FixedState& state,
     float material_alpha, NativeAlphaEvidence alpha = {}) noexcept;
+bool native_alpha_test_passes_all(const FixedState& state, NativeAlphaEvidence alpha) noexcept;
 NativeOwnedFixedState native_owned_fixed_state(const FixedState& state) noexcept;
 // Fixed-function state of one render-only neighbour-map record, derived from
 // the current frame state.
@@ -765,6 +763,7 @@ void append_wind_trail_shader_programs(std::vector<ShaderProgram>& out);
 void append_precipitation_shader_programs(std::vector<ShaderProgram>& out);
 void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out);
 void append_critter_shader_programs(std::vector<ShaderProgram>& out);
+void append_cave_irradiance_shader_programs(std::vector<ShaderProgram>& out);
 // The program groups the settings use, one bit per group (feature level 11
 // adds every world group), and the programs of the groups in a mask.
 std::uint32_t shader_groups_for_settings(const RendererConfig& config,bool feature_level_11);
@@ -896,6 +895,7 @@ class Renderer {
     friend struct AmbientMapRegressionAccess;
     // Typed scene commands (scene_commands_world.h) run Renderer internals.
     friend struct scene_cmd::BeginEngineFrame;
+    friend struct scene_cmd::HitTestFrame;
     friend struct scene_cmd::BeginScene;
     friend struct scene_cmd::EndScene;
     friend struct scene_cmd::FlushNative;
@@ -980,6 +980,10 @@ public:
     HRESULT begin_engine_frame();
     HRESULT retire_embedded_world();
     RendererMemoryCounters read_memory_counters();
+    // The global map's zone hit-test frame (#200; bridge hook on the game's
+    // GenerateHitTestDDS call): begin redirects the world target to the
+    // lossless hit-test target, end restores it.
+    void hit_test_frame(bool begin);
     void begin_scene();
     void end_scene();
     HRESULT draw(D3DPRIMITIVETYPE type, DWORD fvf, const void* vertices,
@@ -1102,6 +1106,16 @@ public:
     void release_native_point_shadow(std::uint64_t generation,int slot) noexcept;
     void publish_native_point_shadows(const std::vector<NativePointShadowPublication>& lights,
         const NativePointShadowStats& stats) noexcept;
+    // Bounce light volume (cave_irradiance.h): filled once per map and
+    // quality, then one round-robin slab per frame (colour flushes only),
+    // bound for the native pixel shader (t80-83, s13; its constants are the
+    // tail of the point-light constants, b5), released with the device.
+    void update_cave_irradiance() noexcept;
+    void bind_cave_irradiance() noexcept;
+    void bind_cave_irradiance_stages(bool pixel,bool vertex,bool compute) noexcept;
+    CaveSampleConstants cave_sample_constants() const noexcept;
+    void release_cave_irradiance() noexcept;
+    void draw_cave_exit_glow() noexcept;  // caves: the daylight haze past each exit
     void record_native_shadow_source_diagnostics(std::uint64_t world_serial,
         const NativeShadowSourceDiagnostics& values) noexcept;
     bool end_native_shadows(bool commit) noexcept;
@@ -1290,9 +1304,11 @@ public:
         return owned::visit_embedded_device(device_.Get(), context_.Get(),
             rtv_.Get(), dsv_.Get(), user, visitor);
     }
+    bool embedded_hit_test_frame() const noexcept { return hit_test_active_; }
     HRESULT visit_embedded_output(void* user, EmbeddedOutputVisitor visitor) const {
+        if (hit_test_failed_) return E_FAIL;
         return owned::visit_embedded_output(device_.Get(), context_.Get(),
-            backbuffer_rtv_.Get(), user, visitor);
+            hit_test_active_ ? hit_test_rtv_.Get() : backbuffer_rtv_.Get(), user, visitor);
     }
     // ---- Scene thread (render_thread option; scene_thread.h) ----------------
     // Off (the default): scene_queue() is false everywhere and every call runs
@@ -1377,6 +1393,10 @@ public:
     // Host, core mode: the UI flush dropped cached quads the game process's
     // overlay mirror still claims (core_host publishes it through Control).
     bool take_overlay_mirror_reset() noexcept { return overlay_mirror_reset_.exchange(false, std::memory_order_acq_rel); }
+    // Core-mode host: the game process left through its clean exit
+    // (Control::game_clean_exit); the host, the only ini writer, clears the
+    // over-budget marker as the game's own clean exit does in standard mode.
+    void host_game_exited_cleanly() noexcept { debug_overlay_.clear_over_budget_marker(); }
     // Host, core mode: a pixel-free snapshot of the game surface (id,
     // generation) from the surface table; null (logged) when the host does not
     // hold that generation. Used while decoding a command's surface handles.
@@ -1727,10 +1747,7 @@ private:
     TestInitializationObserver test_initialization_observer_ = nullptr;
     void* test_initialization_observer_context_ = nullptr;
     GpuBlitKey gpu_blit_key_;
-    struct PendingBlit { std::uint64_t source_id{}, cache_key{}, generation{}, base_generation{}, revision{}, ui_epoch{}, frame_serial{}; bool native_canvas{true}; bool output_space{}, filtered_text{}; bool keyed{}, gpu{}, cached{}, partial{}, force_opaque_alpha{}, batchable_text{}, source_is_surface{}, source_destroyed{}, quarter_turn{}, backdrop{}, presentation_fill{}; widescreen::HudComposition composition{}; RECT source{}, destination{}, update{}; DDCOLORKEY color_key{}; UINT width{}, height{}, pitch{}; std::uint32_t diffuse{0xffffffffu}; float u0{}, v0{}, u1{1}, v1{1}; std::vector<std::uint32_t> pixels; std::shared_ptr<const CharacterPaneGlyphAsset> text_asset; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv;
-        // Remote mode (surface protocol): the update as game-format rows (pitch
-        // bytes each) in raw_format; the host converts them, pixels stays empty.
-        std::vector<std::uint8_t> raw_rows; DDPIXELFORMAT raw_format{}; };
+    struct PendingBlit { std::uint64_t source_id{}, cache_key{}, generation{}, base_generation{}, revision{}, ui_epoch{}, frame_serial{}; bool native_canvas{true}; bool output_space{}, filtered_text{}; bool keyed{}, gpu{}, cached{}, partial{}, force_opaque_alpha{}, batchable_text{}, source_is_surface{}, source_destroyed{}, quarter_turn{}, backdrop{}, presentation_fill{}; widescreen::HudComposition composition{}; RECT source{}, destination{}, update{}; DDCOLORKEY color_key{}; UINT width{}, height{}, pitch{}; std::uint32_t diffuse{0xffffffffu}; float u0{}, v0{}, u1{1}, v1{1}; std::vector<std::uint32_t> pixels; std::shared_ptr<const CharacterPaneGlyphAsset> text_asset; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
     struct OverlayTexture { UINT width{}, height{}; std::uint64_t generation{}, revision{}, surface_id{}; RECT source{}; bool keyed{}; DDCOLORKEY color_key{}; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> srv; };
     // Scene mode: the game thread's view of overlay_textures_ (what the cache
     // will hold once its queued blits ran), used to choose cached/partial
@@ -2540,8 +2557,8 @@ private:
     // boundary, output after it.
     UINT canvas_width() const noexcept { return widescreen_interface_owned() ? UINT(widescreen_layout().width) : output_width_; }
     UINT canvas_height() const noexcept { return widescreen_interface_owned() ? UINT(widescreen_layout().height) : output_height_; }
-    UINT target_width() const noexcept { return scene_composited_ ? output_width_ : width_; }
-    UINT target_height() const noexcept { return scene_composited_ ? output_height_ : height_; }
+    UINT target_width() const noexcept { return scene_composited_ || hit_test_active_ ? output_width_ : width_; }
+    UINT target_height() const noexcept { return scene_composited_ || hit_test_active_ ? output_height_ : height_; }
     // The full viewport of the active colour target: always whole pixels.
     // The temporal upscalers' sub-pixel jitter is in the projection instead
     // (jitter_clip): a fractional viewport origin let the rasterizer's
@@ -2557,7 +2574,7 @@ private:
     // without a temporal upscaler. Applied once, where each world pass
     // uploads its camera clip; light-space (shadow) clips never take it.
     bool upscaler_jitter_ndc(float& dx, float& dy) const noexcept {
-        if (scene_composited_ || !temporal_upscaler() || (dlss_jitter_[0] == 0.f && dlss_jitter_[1] == 0.f)) return false;
+        if (scene_composited_ || hit_test_active_ || !temporal_upscaler() || (dlss_jitter_[0] == 0.f && dlss_jitter_[1] == 0.f)) return false;
         dx = 2.f * dlss_jitter_[0] / float(target_width()); dy = -2.f * dlss_jitter_[1] / float(target_height());
         return true;
     }
@@ -2614,6 +2631,7 @@ private:
     UINT swap_flags_=0;bool tearing_supported_=false;
     FrameLimiter frame_limiter_;  // player frame_limit option, paces Present
     std::uint32_t shader_groups_prepared_ = 0;  // prepare_shaders groups already created
+    std::uint32_t shader_table_reported_ = UINT32_MAX;  // reachable groups last reported (shader_table event)
     std::uint32_t shader_on_demand_reported_ = 0;  // shader_cache on-demand compiles already logged
     // The device's prepared shader objects (shader_cache.h create_shader),
     // attached at device creation and detached before the device goes.
@@ -2787,6 +2805,20 @@ private:
     ComPtr<ID3D11DepthStencilView> dsv_;
     ComPtr<ID3D11ShaderResourceView> depth_srv_;
     ComPtr<ID3D11DepthStencilView> world_dsv_;
+    // Zone hit-test frame (#200, hit_test_frame): output-size B8G8R8A8 colour
+    // and its own depth. While active the world draws flat default colours
+    // (nativeCombinerTail) into it, is never composited, and the game's
+    // captures read it (capture_source) instead of the processed back buffer.
+    ComPtr<ID3D11Texture2D> hit_test_color_,hit_test_depth_;
+    ComPtr<ID3D11RenderTargetView> hit_test_rtv_,hit_test_saved_rtv_;
+    ComPtr<ID3D11DepthStencilView> hit_test_dsv_,hit_test_saved_dsv_;
+    UINT hit_test_width_=0,hit_test_height_=0;
+    bool hit_test_active_=false;
+    bool hit_test_failed_=false;
+    void hit_test_frame_apply(bool begin) noexcept;
+    // The capture source: the hit-test target during that frame, else the
+    // composited back buffer (composite_world and the pending UI first).
+    HRESULT capture_source(ComPtr<ID3D11Texture2D>& source);
     ComPtr<ID3D11Texture2D> interface_depth_;
     ComPtr<ID3D11DepthStencilView> interface_dsv_;
     // One colour snapshot at the first liquid batch, owned through target resize.
@@ -2954,6 +2986,7 @@ private:
     // The sun shadow pass (flush_native_shadows, a close map's per-frame layer):
     // the previous frame's cover placement and critters as depth casters.
     void draw_ground_cover_shadows(UINT slice) noexcept;
+    std::uint64_t gc_shadow_caster_mask(int level) const noexcept;
     void draw_critter_shadows(UINT slice) noexcept;
     // Casters that move every frame (critters drawn last frame; swaying cover at
     // ground_cover_shadows 2): the close maps' per-frame layer is redrawn
@@ -3063,6 +3096,7 @@ private:
     ComPtr<ID3D11ComputeShader> gc_finalize_cs_,gc_paint_cs_,gc_fields_cs_;
     // Settings permutations: shade [far maps].
     std::array<ComPtr<ID3D11ComputeShader>,2> gc_shade_cs_;
+    ComPtr<ID3D11ComputeShader> gc_caster_list_cs_; // gcCasterListCS: the sun casters of a pass (per-instance cull)
     // Stage buffers (demand-sized from the count readback): candidates of the
     // cell stage, survivors of the habitat stage, their counts and dispatch
     // arguments (one buffer per producing stage), and the sun shadow inputs
@@ -3085,14 +3119,36 @@ private:
     // reset the shared counts), whether that placement is complete, and the
     // large meshes (level 1: the rule table's widest LOD class).
     std::array<ComPtr<ID3D11VertexShader>,2> gc_shadow_vs_;
-    ComPtr<ID3D11Buffer> gc_shadow_args_,gc_shadow_frame_;
+    // One placement pass's casters (the active map, then each neighbour map):
+    // its per-mesh counts (args; near_args: the far tuft meshes with their near
+    // mesh's indices), its frame constants and ground, and copies of the pools
+    // the later passes overwrite (instances and draw inputs at base, per mesh
+    // in copy_mask). The next frame's shadow pass draws them (gc_record_casters).
+    struct GcCasterPass {
+        ComPtr<ID3D11Buffer> frame;
+        ComPtr<ID3D11ShaderResourceView> ground;
+        bool ready=false;
+    };
+    GcCasterPass gc_main_casters_;
+    std::vector<GcCasterPass> gc_neighbour_casters_;
+    bool gc_record_casters(GcCasterPass& pass,const void* constants,UINT constant_bytes,
+                           ID3D11ShaderResourceView* ground) noexcept;
+    // Sun caster lists (gcCasterListCS): per pool slot the slot of a casting
+    // instance, in the same per-pass regions as the pool, and per pass and mesh
+    // indirect draw arguments (the far tuft meshes with their near mesh's
+    // indices) whose instance count is the list length.
+    ComPtr<ID3D11Buffer> gc_caster_slots_,gc_caster_args_;
+    std::array<ComPtr<ID3D11ShaderResourceView>,3> gc_caster_slot_srv_; // per close map: its third of the slot lists
+    ComPtr<ID3D11UnorderedAccessView> gc_caster_slot_uav_,gc_caster_args_uav_;
+    std::vector<std::array<UINT,5>> gc_caster_args_template_;  // per pass, close map and mesh, the list counts zero
+    UINT gc_caster_args_passes_=0;
     bool gc_shadow_ready_=false;
     std::uint64_t gc_large_mesh_mask_=0;
     ComPtr<ID3D11Buffer> gc_draw_inputs_;ComPtr<ID3D11ShaderResourceView> gc_draw_input_srv_;ComPtr<ID3D11UnorderedAccessView> gc_draw_input_uav_;
     std::array<std::uint8_t,kGroundCoverMeshes> gc_mesh_kind_{};
     ComPtr<ID3D11VertexShader> gc_trail_vs_,gc_trail_full_vs_,gc_object_vs_;ComPtr<ID3D11PixelShader> gc_trail_ps_,gc_trail_decay_ps_,gc_object_ps_;
     ComPtr<ID3D11Buffer> gc_frame_constants_,gc_paint_constants_;
-    std::array<ComPtr<ID3D11Buffer>,kGroundCoverMeshes> gc_draw_constants_; // per mesh pool base; rebuilt with the pool
+    std::vector<std::array<ComPtr<ID3D11Buffer>,kGroundCoverMeshes>> gc_draw_constants_; // per mesh pool base; rebuilt with the pool
     ComPtr<ID3D11Buffer> gc_vertices_,gc_indices_,gc_rules_,gc_args_,gc_counts_,gc_instances_;
     ComPtr<ID3D11ShaderResourceView> gc_vertex_srv_,gc_rule_srv_,gc_instance_srv_,gc_fields_srv_,gc_color_srv_,gc_tiles_srv_;
     ComPtr<ID3D11ShaderResourceView> gc_bark_srv_,gc_stone_srv_,gc_trees_srv_;
@@ -3130,7 +3186,13 @@ private:
     ComPtr<ID3D11RasterizerState> gc_raster_;ComPtr<ID3D11DepthStencilState> gc_depth_;ComPtr<ID3D11BlendState> gc_blend_;
     ComPtr<ID3D11SamplerState> gc_clamp_,gc_wrap_;
     std::array<std::array<UINT,5>,kGroundCoverMeshes> gc_args_template_{};
-    std::array<UINT,kGroundCoverMeshes> gc_mesh_first_index_{},gc_mesh_index_count_{},gc_capacity_{},gc_base_{};
+    std::array<UINT,kGroundCoverMeshes> gc_mesh_first_index_{},gc_mesh_index_count_{};
+    // Per placement pass and mesh: its pool region (base, slots). Every pass
+    // keeps its own instances until the next frame, so the shadow pass draws
+    // each pass's casters in place.
+    std::vector<std::array<UINT,kGroundCoverMeshes>> gc_capacity_,gc_base_;
+    UINT gc_pass_count_=0;   // passes the current partition holds (the active map and every neighbour map)
+    UINT gc_count_passes_=0; // passes the count buffer and its readbacks hold
     std::weak_ptr<const OwnedMapSnapshot> gc_map_;
     std::vector<std::uint8_t> gc_material_state_;          // per atlas material: 0 unused, 1 unpainted, 2 painted
     std::vector<std::array<float,4>> gc_unit_input_;       // per-frame unit list (reused capacity)
@@ -3196,6 +3258,23 @@ private:
     // ready: this map's families were tried; rows: the grid holds blend rows.
     bool tile_blend_ready_=false,tile_blend_rows_=false;float tile_blend_margin_=0;
     HRESULT apply_terrain_tile_blend(const TerrainTileFamilies& families) noexcept;
+    // Shared map edges (update_terrain_tile_blend_seams): the active map's
+    // blend inputs and own vertex families kept for rebuilding its rows when
+    // a neighbour's families arrive, the families it can draw (by name) and
+    // the edge families its rows hold.
+    std::shared_ptr<const TerrainTileBlendInput> tile_blend_input_;
+    std::vector<std::uint32_t> tile_blend_vertex_,tile_blend_edge_;
+    std::set<std::string> tile_blend_drawable_;
+    // On every vertex two or more loaded maps share, each map's blend rows
+    // use the vertex family of the first map by layout name whose family
+    // every map there can draw, matched by editor family name, so the seam
+    // is the same whichever map is active. Without a common family the maps
+    // keep their own there (logged once per map and family name).
+    // Rebuilds the rows of every map whose edge families changed.
+    void update_terrain_tile_blend_seams() noexcept;
+    std::set<std::string> tile_blend_seam_unmatched_; // map/family pairs reported once
+    // Marks the material cache's pages of a map for a new bake (its blend rows changed).
+    void terrain_bake_rows_changed(UINT map) noexcept;
     // The active map's tile families, loaded off the render thread (one job at
     // a time) for ambient_map_generation_ while the material blend or ground
     // cover is on. poll_terrain_tile_families: true once tile_families_ is in.
@@ -3254,12 +3333,19 @@ private:
         TileFamiliesJob families;
         std::vector<std::uint16_t> base_slots;std::vector<std::uint32_t> slot_types;std::vector<std::uint8_t> base_lanes;
         // Terrain material blend of this neighbour's own terrain (its own
-        // families and atlas; terrain_tile_blend.h): until its families load,
-        // the contact grid's rows and the family-independent blend inputs.
-        // contact.tiles always has the blend half (rows [ty,2ty), no material
-        // until the families load), as the active map's grid does.
+        // families and atlas; terrain_tile_blend.h): the contact grid's rows
+        // and the family-independent blend inputs, kept with its families and
+        // own vertex families for rebuilding its rows on a shared edge change
+        // (update_terrain_tile_blend_seams); blend_edge: the edge families
+        // its rows hold. contact.tiles always has the blend half (rows
+        // [ty,2ty), no material until the families load), as the active
+        // map's grid does.
         std::vector<std::array<std::uint32_t,4>> contact_rows;
         std::shared_ptr<TerrainTileBlendInput> blend_input;
+        std::shared_ptr<const TerrainTileFamilies> blend_families;
+        std::vector<std::uint32_t> blend_vertex,blend_edge;
+        std::set<std::string> blend_drawable;
+        bool blend_rows=false;
         // The terrain material cache's cell tables of this neighbour (map-local
         // 8 m cells), built by its stream worker after the weld.
         std::shared_ptr<const TerrainBakeCells> bake_cells;
@@ -3485,9 +3571,6 @@ private:
     ComPtr<ID3D11RenderTargetView> camp_popup_rtv_,camp_popup_saved_rtv_;
     ComPtr<ID3D11ShaderResourceView> camp_popup_srv_;
     ComPtr<ID3D11DepthStencilView> camp_popup_dsv_,camp_popup_saved_dsv_;
-    ComPtr<ID3D11DepthStencilState> camp_popup_saved_depth_state_;
-    UINT camp_popup_stencil_=0,camp_popup_viewport_count_=0;
-    std::array<D3D11_VIEWPORT,D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> camp_popup_viewports_{};
     UINT camp_popup_width_=0,camp_popup_height_=0;
     bool camp_popup_active_=false,camp_popup_ready_=false;
     // Conversion buffers of the last flushed UI batch, reused by the next
@@ -3562,6 +3645,13 @@ private:
     ComPtr<ID3D11DepthStencilState> masked_depth_state_,shadow_mask_depth_state_;
     ComPtr<ID3D11RasterizerState> shadow_mask_raster_;
     std::vector<std::uint8_t> native_prepass_batches_; // per batch of the current flush: drawn in the prepass
+    // Frame plan (frame_plan.h, renderer_frame.cpp): record a pass with the
+    // ids of the given views, resolve an id to its D3D11 view, bind a pass's targets.
+    const PlanPass& plan_pass(const char* name,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
+                              std::uint32_t reads=0) noexcept;
+    ID3D11RenderTargetView* plan_rtv(const PlanPass& pass) const noexcept;
+    ID3D11DepthStencilView* plan_dsv(const PlanPass& pass) const noexcept;
+    void bind_plan_targets(const PlanPass& pass) noexcept;
     HRESULT create_prepass_targets();
     HRESULT resolve_world_shadow_mask() noexcept; // the mask pass over the marked pixels (renderer.cpp)
     // Settings-specialised pixel programs (native_shader.h NATIVE_OFF_*,
@@ -4173,6 +4263,7 @@ private:
     // The active map's saved-layout origin on whole tiles (nativeContactLayout
     // of its batches; 0,0 when the layout does not list it), per map.
     std::array<float,2> terrain_layout_origin_{};
+    std::string terrain_layout_name_; // its layout name (neighbour_map_name); empty: not in the layout
     std::uint64_t terrain_layout_origin_generation_=UINT64_MAX;
     std::vector<float> native_terrain_layer_shifts_;
     std::uint64_t native_terrain_layer_shift_revision_ = 0;
@@ -4203,6 +4294,8 @@ private:
     std::unordered_map<std::uint64_t, ComPtr<ID3D11DepthStencilState>> depth_states_;
     std::unordered_map<std::uint64_t, ComPtr<ID3D11BlendState>> blend_states_;
     std::unordered_map<std::uint64_t, ComPtr<ID3D11SamplerState>> sampler_states_;
+    ID3D11SamplerState* applied_sampler_ = nullptr;  // apply_state's s0 (owned by sampler_states_)
+    FramePlan frame_plan_;  // this frame's passes of the converted file group (frame_plan.h)
     std::unordered_map<std::uint64_t, OverlayTexture> overlay_textures_;
     std::unordered_map<NativeTextureArrayKey, std::vector<NativeTextureArrayPage>,
                        NativeTextureArrayKeyHash> native_texture_arrays_;
@@ -4257,6 +4350,65 @@ private:
     SurfaceTextureResolver surface_texture_resolver_ = nullptr;
     void* surface_texture_resolver_context_ = nullptr;
     NativeWorldLighting native_world_lighting_{};
+    bool native_world_cave_ = false;  // the zone is a cave (set_native_world_lighting)
+    // Cave irradiance volume (renderer_point_shadows.cpp).
+    float native_world_hour_ = 12.f;  // game hour of the world light (cave exit colour)
+    int native_world_region_ = 0;     // fog_region() of the world light
+    // Volume grids: L1 red, green, blue.
+    ComPtr<ID3D11Texture3D> cave_volume_[3];
+    ComPtr<ID3D11ShaderResourceView> cave_volume_srv_[3];
+    ComPtr<ID3D11UnorderedAccessView> cave_volume_uav_[3];
+    ComPtr<ID3D11ComputeShader> cave_inject_cs_;
+    // The lamps' virtual lights (cave_lamp_virtual_lights), demand-sized,
+    // their key (sources, height grid, count) and how many lamps found ground.
+    ComPtr<ID3D11Buffer> cave_vpl_buffer_;
+    ComPtr<ID3D11ShaderResourceView> cave_vpl_srv_;
+    UINT cave_vpl_capacity_ = 0;
+    std::vector<CaveVirtualLight> cave_vpls_;
+    std::uint64_t cave_vpl_key_ = 0;
+    // The cave exit glow pass (kCaveGlowShader).
+    ComPtr<ID3D11VertexShader> cave_glow_vs_;
+    ComPtr<ID3D11PixelShader> cave_glow_ps_;
+    ComPtr<ID3D11Buffer> cave_glow_constants_;
+    ComPtr<ID3D11DepthStencilState> cave_glow_depth_;
+    ComPtr<ID3D11BlendState> cave_glow_blend_;
+    ComPtr<ID3D11RasterizerState> cave_glow_raster_;
+    bool cave_glow_pending_ = false, cave_glow_failed_ = false;
+    // The cave exits (CaveExitGpu) for the glow pass and the border fog (PS t84).
+    ComPtr<ID3D11Buffer> cave_exit_buffer_;
+    ComPtr<ID3D11ShaderResourceView> cave_exit_srv_;
+    UINT cave_exit_capacity_ = 0, cave_exit_count_ = 0;
+    UINT cave_vpl_lit_ = 0;
+    std::vector<NativePointLightValue> cave_sources_uploaded_;  // the sources in the GPU buffers
+    UINT cave_sources_uploaded_capacity_ = 0;
+    PointLightGrid cave_grid_;                    // their bounce grid
+    bool cave_volume_heights_ = false;            // the last update had the height grid
+    ComPtr<ID3D11Buffer> cave_inject_constants_;
+    // Bounce sources (point lights + unpublished emissive clusters), their
+    // bounce-reach grid and the TEMPORARY per-source hit readback (#208).
+    ComPtr<ID3D11Buffer> cave_source_buffer_, cave_grid_buffer_;
+    ComPtr<ID3D11ShaderResourceView> cave_source_srv_, cave_grid_srv_;
+    UINT cave_source_capacity_ = 0, cave_grid_capacity_ = 0;
+    std::vector<NativePointLightValue> cave_sources_;
+    ComPtr<ID3D11SamplerState> cave_volume_sampler_;
+    std::array<std::uint32_t,3> cave_volume_size_{};
+    std::array<float,3> cave_volume_origin_{};
+    float cave_volume_cell_ = 0.f;
+    std::uint32_t cave_volume_slab_ = 0;        // next round-robin slab
+    std::uint64_t cave_volume_frame_ = UINT64_MAX; // the frame of the last update
+    int cave_volume_quality_ = 0;               // quality of the last full fill
+    bool cave_volume_outdoor_ = false;          // the sky grid holds terrain occlusion
+    std::uint64_t cave_volume_map_generation_ = UINT64_MAX;
+    // Cave exits of the active map (map.txt) and the region's outdoor light
+    // table (lights<region>.ini), read once per map / region.
+    std::vector<CavePortalRect> cave_portals_;
+    std::vector<std::array<float,3>> cave_mushrooms_;  // giant mushroom places (glow sources)
+    OutdoorLightTable cave_light_table_;
+    int cave_light_table_region_ = -1;
+    std::array<float,3> cave_terrain_low_{}, cave_terrain_high_{};
+    bool cave_volume_active_ = false, cave_volume_failed_ = false;
+    CaveSampleConstants native_cave_constants_written_{};
+    bool native_point_constants_dirty_ = true;  // the point-light constants need a rewrite
     bool native_world_lighting_valid_ = false;
     bool native_world_lighting_dirty_ = false;
     std::uint64_t native_world_lighting_uploads_ = 0;

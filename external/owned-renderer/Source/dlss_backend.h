@@ -1,9 +1,14 @@
 #pragma once
 // Renderer-owned NGX lifecycle, adapted from upstream Host/dlss.cpp.
-// No remote protocol or resource IDs. Calls are serialized by the renderer.
+// No remote protocol or resource IDs. All NGX calls run on one dedicated thread.
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 struct NVSDK_NGX_Parameter;
 struct NVSDK_NGX_Handle;
@@ -47,8 +52,8 @@ struct DlssFrame {
 class DlssBackend {
 public:
     using Log = void (*)(const char*);
-    DlssBackend() = default;
-    ~DlssBackend() { shutdown(); }
+    DlssBackend();
+    ~DlssBackend();
     DlssBackend(const DlssBackend&) = delete;
     DlssBackend& operator=(const DlssBackend&) = delete;
     // The actual native device; DLL beside EXE, writable NGX data in LocalAppData.
@@ -63,6 +68,28 @@ public:
     void shutdown() noexcept;
     bool evaluate(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept;
 private:
+    bool initialize_owned(ID3D11Device* device, Log log) noexcept;
+    bool optimal_owned(unsigned output_width, unsigned output_height, DlssQuality quality,
+                       unsigned& render_width, unsigned& render_height) noexcept;
+    bool create_feature_owned(ID3D11DeviceContext* context, const DlssShape& shape) noexcept;
+    bool evaluate_owned(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept;
+    void release_feature_owned() noexcept;
+    void device_lost_owned(HRESULT reason) noexcept;
+    void shutdown_owned() noexcept;
+    // The caller waits, so the immediate context is never used concurrently.
+    bool run_raw(void (*job)(void*), void* context) noexcept;
+    template <class F> bool run(F& job) noexcept { return run_raw([](void* f) { (*static_cast<F*>(f))(); }, &job); }
+    void stop_worker() noexcept;
+    std::thread worker_;
+    std::atomic<DWORD> worker_id_{0};
+    std::mutex mutex_;
+    std::condition_variable wake_, done_;
+    void (*job_)(void*) = nullptr;
+    void* job_context_ = nullptr;
+    bool stop_ = false, worker_failed_ = false;
+    // NGX keeps init info/path pointers until shutdown. SDK types stay in .cpp.
+    struct InitStorage;
+    std::unique_ptr<InitStorage> init_storage_;
     void cleanup() noexcept;
     bool fail(const char* operation, std::uint32_t result) noexcept;
     bool device_ready() noexcept;

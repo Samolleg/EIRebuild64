@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -558,9 +557,11 @@ std::string migrate_upscaling(RendererConfig& config) noexcept try{
 
 }  // namespace
 
-// Ensure (the overlay's ini) and core mode's game process (core_ensure,
-// which owns the ini there) run it once after loading.
-void migrate_settings(RendererConfig& config) noexcept try{
+// Ensure (the overlay's ini) runs it once after loading and saves to
+// save_path. Core mode: the game process migrates its copy without saving
+// (null, core_ensure) and the host, the only writer of the ini there,
+// migrates and saves the game's ini (scene_core::Config).
+void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept try{
  const int saved=config.settings_version();
  if(saved>=kSettingsVersion)return;
  const std::string upscaling=saved<3?migrate_upscaling(config):std::string("current");
@@ -578,7 +579,7 @@ void migrate_settings(RendererConfig& config) noexcept try{
   if(old_default&&config.reset_to_default(change.key)){reset+=reset.empty()?"":" ";reset+=change.key;}
  }
  config.set_settings_version(kSettingsVersion);
- if(config.save(renderer_config_path().c_str()))config.clear_dirty();
+ if(save_path&&config.save(save_path))config.clear_dirty();
  char detail[384];
  std::snprintf(detail,sizeof(detail),"settings_version %d -> %d; old defaults reset: %s; preset %s%s; upscaling: %s",saved,kSettingsVersion,
   reset.empty()?"none":reset.c_str(),graphics_preset_name(preset),preset!=GraphicsPreset::custom?" re-applied from the old table":" (no old preset matched)",
@@ -598,40 +599,32 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  if(!embedded_sky().available_to(this))return E_UNEXPECTED;
 #endif
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);camp_inventory_output(canvas_width(),canvas_height());set_world_size();hwnd_=hwnd;if(device_)return rtv_&&scene_composite_.target()?S_OK:E_FAIL;
- // Core mode (EI_RENDERER_X64_CORE=1): the host's Renderer draws; no device here.
+#ifndef EID3D11_EMBEDDED
+ // Core mode (F10 x64_render_host, or the test override EI_RENDERER_X64_CORE=1):
+ // the x64 host's Renderer draws; no device here. A host that never reached
+ // its first frame turned the option off at this start, with a notice
+ // (x64remote::core_wanted, user decision 2026-10-24): the standard device below.
  if(core_mode_)return x64remote::core_active()?S_OK:E_FAIL;
- if(x64remote::core_requested())return core_ensure();
+ if(x64remote::core_wanted())return core_ensure();
+#endif
  // NVIDIA's threaded optimisation retires shader variants on its worker while
  // their background compiles finish on its pool: an ABBA deadlock inside
  // nvwgf2um (dumps of 2026-10-11..13). Ask the driver to keep its internal
  // threads off this device.
  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};HRESULT hr;
- // F10 x64_render_host (or EI_RENDERER_X64_REMOTE=1): proxy device, context
- // and swap chain; the x64 host owns the real device (x64_remote_device.h).
- // A host that does not start turns the option off and this session runs
- // on the local device below, with a notice (user decision 2026-10-24).
- bool remote=x64remote::remote_wanted();
- if(remote){
-  hr=x64remote::create_remote_device(hwnd_,flags,&device_,&feature_level_,&context_);
-  if(FAILED(hr)){remote=false;device_.Reset();context_.Reset();}
- }
- if(!remote){
 #if !defined(EID3D11_EMBEDDED) || !defined(_WIN64)
-  delete_recorded_nvidia_cache();
+ delete_recorded_nvidia_cache();
 #endif
-  hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
- }
+ hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
  if(FAILED(hr))return hr;
- debug_overlay_set_running_renderer(remote?"64-bit host (call stream)":"32-bit in the game process",false);
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ debug_overlay_set_running_renderer("64-bit embedded",false);
  dlss_backend_.initialize(device_.Get(),[](const char* text){bridge_report_event("dlss_backend",text);});
  set_dlss_unavailable_reason(dlss_backend_.capability().available ? nullptr : dlss_backend_.capability().reason);
 #else
+ debug_overlay_set_running_renderer("32-bit in the game process",false);
  // DLSS runs only in the x64 host; the Upscaling option shows why not.
- if(!remote)set_dlss_unavailable_reason("needs the 64-bit render host");
- else{x64remote::DlssCaps caps{};
-  if(!x64remote::dlss_caps(caps))set_dlss_unavailable_reason("the 64-bit host did not answer");
-  else{caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.available?nullptr:(caps.reason[0]?caps.reason:"not available"));}}
+ set_dlss_unavailable_reason("needs the 64-bit render host");
 #endif
  // FSR 2 runs on this device in either mode; the Upscaling list shows why not.
  set_fsr_unavailable_reason(Fsr2Upscaler::unavailable_reason(device_.Get()));
@@ -639,8 +632,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  frame_acct::install_device_counters(device_.Get(),context_.Get());
  detect_device_options();
  report_adapter();
- // NVAPI takes the real device: the host owns it in remote mode.
- if(!remote&&FAILED(hr=disable_nvidia_shader_disk_cache()))return hr;
+ if(FAILED(hr=disable_nvidia_shader_disk_cache()))return hr;
  retained_visual_scene().visual_set_surface_texture_retainer(&Renderer::retain_detached_surface_texture,this);
  set_test_initialization_stage("create-swap-chain");
  if(hwnd_&&FAILED(hr=create_swap_chain()))return hr;
@@ -648,7 +640,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  set_test_initialization_stage("register-renderer-settings");
  register_config_options();
  auto& config=debug_overlay_.config();
- if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config);debug_overlay_.sync_interface_profile();recover_shader_crash();}}
+ if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config,renderer_config_path().c_str());debug_overlay_.sync_interface_profile();recover_shader_crash();}}
  // Record which cache files the driver mapped, for deletion at the next start.
  if(debug_overlay_.initialized()){
   const std::string cache_id=mapped_nvidia_cache_id();
@@ -667,7 +659,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
   set_test_initialization_stage("prepare-shaders");
  prepare_shaders();
  start_liquid_maps_job();
- if(!x64remote::remote_active())neighbour_maps_set_device(device_.Get()); // remote mode: the host runs the stream
+ neighbour_maps_set_device(device_.Get());
  if(FAILED(hr=create_targets()))return hr;if(FAILED(hr=create_pipeline()))return hr;if(FAILED(hr=profiler_.initialize(device_.Get(),context_.Get())))return hr;
  frame_statistics_.reset();
  system_telemetry_snapshot_={};
@@ -696,7 +688,7 @@ config.register_integer("render_scale","Render scale (%)","Graphics",100,kRender
 config.register_integer("camp_ui_layout","Camp layout","Interface",1,0,1,1,false,"Switch the open camp without restarting: original UI comparison or inventory grid. Keeps the current mode and transaction; supports compact 16:10 and wider displays.");
 config.register_integer("ui_language","Menu language","Language",0,0,2,1,false,"Language of the renderer's menus. 0: auto (Russian when the Windows display language is Russian or its ANSI code page is 1251), 1: English, 2: Russian. Applies at the next frame.");
 #ifndef EID3D11_EMBEDDED
-config.register_boolean("x64_render_host","64-bit render host","Display",false,true,"Moves the graphics card and driver into a separate 64-bit process, leaving the game more memory (fewer out-of-memory crashes on big maps). Applies after restarting the game. If the host does not start, the option turns itself off.");
+config.register_boolean("x64_render_host","64-bit render host","Display",false,true,"Runs the renderer and the graphics driver in a separate 64-bit process, leaving the game much more memory (fewer out-of-memory crashes on big maps); DLSS needs it. Applies after restarting the game. If the host does not start, the option turns itself off.");
 #endif
 config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0: borderless fullscreen on the primary monitor, 1: a movable window of the chosen window size. Use Apply display to change this during gameplay.");
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
@@ -770,6 +762,7 @@ for(const auto& type:kCritterTypeSettings){
 config.register_integer("ambient_particles","Ambient particles","Effects",1,0,2,1,false,"Area-tied atmospheric particles: pollen and grass bits over meadows, falling leaves near trees, grey motes in the Dead City, dust and drips in caves, embers and ash over lava, dust in the desert, fireflies on Gipat nights. 0: off, 1: low, 2: high.");
 config.register_floating_point("ambient_particle_density","Ambient particle density","Effects",1.f,0.f,3.f,.05f,false,"Multiplier on the number of ambient particles at the chosen level.");
 config.register_floating_point("ambient_particle_size","Ambient particle size","Effects",1.f,.25f,3.f,.05f,false,"Multiplier on the size of ambient particles.");
+config.register_integer("shadow_close_range","Close shadow range","Shadows",0,0,400,8,false,"Metres covered by the close shadow maps past where the view meets the ground; 0: 64, 80 or 96 by cascade resolution.");
 config.register_integer("shadow_cascade_quality","Cascade resolution","Shadows",1,0,2,1,false,"0: 1024, 1: 2048, 2: 4096 pixels per directional map. Higher quality uses more GPU memory.");
 config.register_integer("shadow_close_cascades","Close cascades","Shadows",3,1,3,1,false,"Use one to three close directional maps; fewer maps reduce shadow draw work.");
 config.register_boolean("shadow_far","Far shadows","Shadows",true,false,"Render the middle and broad directional maps beyond the close cascades.");
@@ -864,7 +857,12 @@ config.register_floating_point("ao_strength","AO strength","Graphics",.75f,.5f,4
 config.register_floating_point("ao_radius","AO radius (m)","Graphics",1.5f,.25f,4.f,.25f,false,"World-space reach of the occlusion search.");
 config.register_floating_point("ao_low_light_boost","AO low-light boost","Graphics",1.6f,1.f,3.f,.1f,false,"Strength multiplier reached when the ambient light dominates the sun (night, overcast); 1 disables. Radius grows up to 25%.");
 config.register_integer("sky_clouds","Sky and clouds","Graphics",2,0,2,1,false,"Owned sky with volumetric clouds, sun, moon, stars and moving cloud shadows on the ground; follows the game hour, rain and snow, and the region. Water reflects it. 0: the game's original sky, 1: low (quarter-resolution clouds), 2: high (half resolution, more detail).");
-config.register_floating_point("cave_brightness","Cave brightness","Graphics",kDefaultCaveBrightness,.25f,1.25f,.05f,false,"Light level in caves and dungeons: scales the cave ambient and the game's fixed cave light together (1 is the game's own cave table). Lava, torches, lamps and glowing objects add on top unchanged. Outdoor zones are not affected.");
+config.register_floating_point("cave_brightness","Cave brightness","Graphics",kDefaultCaveBrightness,.25f,1.25f,.05f,false,"Light level in caves and dungeons: scales the cave ambient (1 is the game's own cave table). Caves have no sun light or sun shadows; lava, torches, lamps and glowing objects light them and add on top unchanged. Outdoor zones are not affected.");
+config.register_floating_point("cave_ambient_floor","Cave darkness floor","Graphics",kDefaultCaveAmbientFloor,0.f,.6f,.02f,false,"Lowest ambient light in caves (brightest channel, 0-1): keeps unlit cave areas visible. 0 lets them go as dark as the cave table and Cave brightness make them; .30 is the default.");
+config.register_integer("cave_gi","Bounce light","Graphics",2,0,2,1,false,"Light from torches, campfires, lamps, lava and other glowing ground bounces once off the ground, rock and walls and lights the surroundings beyond the lamp's direct reach. Outdoors the sun also bounces off the ground; in caves the exits let in the outdoor light of the hour. It only ever adds light. 0: off, 1: low (4 m grid, cheaper), 2: high (2 m grid). A part of it is recomputed every frame.");
+config.register_boolean("bounce_debug","Bounce light view","Diagnostics",false,false,"Shows the bounce light alone, eight times brighter, in place of the lamps' direct light.");
+config.register_floating_point("sun_bounce_strength","Sun bounce strength","Graphics",kDefaultSunBounceStrength,0.f,4.f,.1f,false,"Brightness of the sunlight bounced off the ground outdoors (1: the physical estimate from the painted ground colour).");
+config.register_floating_point("cave_gi_strength","Bounce light strength","Graphics",kDefaultCaveBounceStrength,0.f,8.f,.1f,false,"Brightness of the bounced light of lamps, campfires and lava (1, the default: the physical estimate from the painted ground colour).");
 config.register_floating_point("sky_brightness","Sky brightness","Graphics",1.f,.5f,2.f,.05f,false,"Exposure of the owned sky and clouds.");
 config.register_floating_point("sky_night_brightness","Night sky brightness","Graphics",1.5f,.5f,3.f,.1f,false,"Moonlight, stars and the deep blue night sky. 1 is the physical estimate; higher is brighter and more readable.");
 config.register_floating_point("sky_cloud_shadows","Cloud shadow strength","Graphics",1.f,0.f,1.f,.05f,false,"How much moving cloud shadows dim the direct sun on the ground and objects. 0 disables them.");
@@ -950,6 +948,10 @@ native_shadow_softness_=shadow_softness_constants(configured_integer(config,"sha
 // including when EIRebuild supplies the scene directly.
 bridge_set_shadow_settings(native_shadow_side_,native_close_shadow_cascades_,
  native_far_shadows_enabled_,native_point_shadows_enabled_,native_shadows_enabled_);
+// Core mode, game process: the host applies the shadow switch at its
+// BeginScene (begin_scene_renderer never runs here), so the flag the world
+// capture reads (native_shadows_enabled) follows the same option here (#204).
+if(core_mode_)native_shadows_enabled_=configured_boolean(config,"shadows",true);
 neighbour_maps_enable(configured_boolean(config,"neighbour_maps",true));
 bridge_set_terrain_lod_enabled(configured_boolean(config,"terrain_lod",false));
 bridge_set_owned_sky(configured_integer(config,"sky_clouds",2)>0);
@@ -994,7 +996,7 @@ HRESULT Renderer::ensure_host(HWND window,UINT w,UINT h){
  if(swap_)return S_OK;
  core_host_=true;
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);hwnd_=window;
- debug_overlay_set_running_renderer("64-bit host (core mode)",true);
+ debug_overlay_set_running_renderer("64-bit render host",true);
  // DLSS on this device (the host's NGX instance, host_bridge.cpp).
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  set_dlss_unavailable_reason(dlss_backend_.capability().available ? nullptr : dlss_backend_.capability().reason);
@@ -1853,9 +1855,9 @@ HRESULT Renderer::render_debug_texture(DebugResourceView view) noexcept {
  default:return E_INVALIDARG;
  }
  if(!source||!rtv_||!context_)return E_UNEXPECTED;
- DebugViewStateGuard state(context_.Get());
- ID3D11RenderTargetView* target=rtv_.Get();
- context_->OMSetRenderTargets(1,&target,nullptr);
+ // Binds every state it reads and restores nothing; the overlay and cursor
+ // passes after it bind their own.
+ bind_plan_targets(plan_pass("debug_resource_view",rtv_.Get(),nullptr));
  context_->OMSetBlendState(nullptr,nullptr,0xffffffffu);
  context_->OMSetDepthStencilState(nullptr,0);
  context_->RSSetState(nullptr);
@@ -2068,6 +2070,15 @@ constexpr ShaderGroup kShaderGroups[]={
    }
 #endif
    c.set_integer("upscaler",kUpscalerOff);}},
+ {"cave_gi",append_cave_irradiance_shader_programs,
+  [](const RendererConfig& c){return configured_integer(c,"cave_gi",2)>0;},
+  "cave_gi",[](RendererConfig& c){
+#ifdef EID3D11_EMBEDDED
+   (void)c;bridge_report_event("cave_gi_failed","shader preparation failed; bounce-light pass refused");
+#else
+   c.set_integer("cave_gi",0);
+#endif
+  }},
 };
 static_assert(std::size(kShaderGroups)<=32,"one bit per shader group");
 }  // namespace
@@ -2230,8 +2241,43 @@ void Renderer::register_embedded_shaders() noexcept{
  bridge_report_event("shader_table",text);
 }
 
+namespace {
+// The shader table the given groups reach (DX12 plan M0, pipeline table
+// enumeration): programs per group and stage, and the distinct programs.
+// Pipelines pair these with blend/raster/depth/topology/target states,
+// which are not enumerated yet (unknown).
+void report_shader_table(std::uint32_t groups,std::size_t programs_per_set,std::size_t prebuilt_specialised_sets) noexcept try{
+ std::string per_group;std::vector<ShaderKey> keys;
+ unsigned stages[6]{};const char* const stage_names="vpchdg";
+ std::size_t programs=0;
+ for(std::uint32_t group=0;group<std::size(kShaderGroups);++group){
+  if(!(groups&(1u<<group)))continue;
+  std::vector<ShaderProgram> list;kShaderGroups[group].append(list);
+  programs+=list.size();
+  per_group+=' ';per_group+=kShaderGroups[group].name;per_group+='=';per_group+=std::to_string(list.size());
+  for(const auto& program:list){
+   const ShaderKey key=shader_key(program);
+   if(std::find(keys.begin(),keys.end(),key)!=keys.end())continue;
+   keys.push_back(key);
+   if(const char* stage=std::strchr(stage_names,program.profile[0]))++stages[stage-stage_names];
+  }
+ }
+ char head[256];
+ std::snprintf(head,sizeof(head),"programs=%zu distinct=%zu vs=%u ps=%u cs=%u hs=%u ds=%u gs=%u specialised_ps=up to 8 sets x %zu (prebuilt shipped sets %zu) groups:",
+  programs,keys.size(),stages[0],stages[1],stages[2],stages[3],stages[4],stages[5],
+  programs_per_set,prebuilt_specialised_sets);
+ bridge_report_event("shader_table",(head+per_group).c_str());
+}catch(...){}
+}  // namespace
+
 void Renderer::prepare_shaders() noexcept try{
  namespace detail=shader_cache_detail;
+ // What the current settings can reach, reported once a settings change
+ // (preparation time only, never per frame).
+ if(const std::uint32_t reachable=shader_groups_for_settings(debug_overlay_.config(),feature_level_>=D3D_FEATURE_LEVEL_11_0);
+    reachable!=shader_table_reported_){
+  shader_table_reported_=reachable;report_shader_table(reachable,std::tuple_size<NativeSpecialisedSet>::value,native_spec_files_.size());
+ }
  // A feature compiled outside a preparation (a program the embedded table
  // lacks and the group list misses) is a main-thread FXC stall: name it.
  if(const std::uint32_t on_demand=detail::on_demand_compiles.load();on_demand!=shader_on_demand_reported_){
@@ -2274,8 +2320,8 @@ void Renderer::prepare_shaders() noexcept try{
   while(!preparation.wait_for(std::chrono::seconds(1))){}
  else if(!quick){
   shown=true;
-  ComPtr<ID3D11RenderTargetView> previous_target;ComPtr<ID3D11DepthStencilView> previous_depth;
-  context_->OMGetRenderTargets(1,&previous_target,&previous_depth);
+  // Runs between frames (after Present or at device creation): the targets
+  // stay unbound after it; the next frame's passes bind their own.
   do{
    // Keeps Windows from marking the window as not responding without
    // dispatching anything: queued and sent messages wait for the game's loop.
@@ -2291,8 +2337,6 @@ void Renderer::prepare_shaders() noexcept try{
     swap_->Present(0,tearing_supported_?DXGI_PRESENT_ALLOW_TEARING:0u);
    }
   }while(!preparation.wait_for(std::chrono::milliseconds(16)));
-  ID3D11RenderTargetView* restore=previous_target.Get();
-  context_->OMSetRenderTargets(restore?1:0,restore?&restore:nullptr,previous_depth.Get());
   frame_statistics_.reset();
  }
  shader_groups_prepared_|=groups;
@@ -2438,7 +2482,10 @@ HRESULT Renderer::draw_screen_rectangle(const ScreenRectangleRequest& request,
  if(FAILED(hr=context_->Map(screen_rectangle_vertices_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return hr;
  std::memcpy(mapped.pData,vertices,sizeof(ScreenRectangleVertex)*vertex_count);
  context_->Unmap(screen_rectangle_vertices_.Get(),0);
- DebugViewStateGuard guard(context_.Get());
+ // Binds every state it reads and restores nothing: the interface draws
+ // after it bind their own (draw: IA, shaders, targets, viewport, b0;
+ // apply_state: raster, scissor, blend, depth, s0; the UI blits and the
+ // native flush likewise).
  const UINT stride=sizeof(ScreenRectangleVertex),offset=0;
  ID3D11Buffer* buffer=screen_rectangle_vertices_.Get();
  context_->IASetInputLayout(screen_rectangle_layout_.Get());
@@ -2451,7 +2498,7 @@ HRESULT Renderer::draw_screen_rectangle(const ScreenRectangleRequest& request,
  const D3D11_VIEWPORT target_viewport{0,0,(float)target_width(),(float)target_height(),0,1};
  context_->RSSetViewports(1,&target_viewport);
  context_->RSSetState(screen_rectangle_raster_state_.Get());
- context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr);
+ bind_plan_targets(plan_pass("screen_rectangle",rtv_.Get(),nullptr));
  context_->OMSetBlendState(screen_rectangle_blend_state_.Get(),nullptr,0xffffffffu);
  context_->OMSetDepthStencilState(screen_rectangle_depth_state_.Get(),0);
  context_->Draw(vertex_count,0);
@@ -2697,9 +2744,11 @@ HRESULT Renderer::create_native_pipeline(){
   if(FAILED(hr=device_->CreateBuffer(&shadows,nullptr,&native_shadow_constants_))||FAILED(hr=upload_native_shadow_constants(0)))return hr;
   D3D11_BUFFER_DESC lighting{};lighting.ByteWidth=sizeof(NativeWorldLighting);lighting.Usage=D3D11_USAGE_DYNAMIC;lighting.BindFlags=D3D11_BIND_CONSTANT_BUFFER;lighting.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
   if(FAILED(hr=device_->CreateBuffer(&lighting,nullptr,&native_world_lighting_constants_)))return hr;
-  D3D11_BUFFER_DESC point_count{};point_count.ByteWidth=32;point_count.Usage=D3D11_USAGE_DYNAMIC;point_count.BindFlags=D3D11_BIND_CONSTANT_BUFFER;point_count.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-  const std::array<UINT,8> no_point_lights{};D3D11_SUBRESOURCE_DATA initial_count{};initial_count.pSysMem=no_point_lights.data();
+  // 32 bytes of point-light grid, then the cave volume (cave_irradiance.h).
+  D3D11_BUFFER_DESC point_count{};point_count.ByteWidth=64;point_count.Usage=D3D11_USAGE_DYNAMIC;point_count.BindFlags=D3D11_BIND_CONSTANT_BUFFER;point_count.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+  const std::array<UINT,16> no_point_lights{};D3D11_SUBRESOURCE_DATA initial_count{};initial_count.pSysMem=no_point_lights.data();
   if(FAILED(hr=device_->CreateBuffer(&point_count,&initial_count,&native_point_light_constants_)))return hr;
+  native_point_constants_dirty_=true;
  D3D11_BUFFER_DESC work_range{};work_range.ByteWidth=16;work_range.Usage=D3D11_USAGE_DYNAMIC;
  work_range.BindFlags=D3D11_BIND_CONSTANT_BUFFER;work_range.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
  if(FAILED(hr=device_->CreateBuffer(&work_range,nullptr,&native_work_range_constants_)))return hr;
@@ -3171,11 +3220,21 @@ void Renderer::release() {
  finish_placed_hitch_profile(PlacedHitchFinishReason::renderer_release);
  bridge_set_native_terrain_animation_owned(false);
  flush_native();
+ // The lossless mask targets belong to this device, including saved views.
+ hit_test_active_=hit_test_failed_=false;
+ hit_test_color_.Reset();hit_test_rtv_.Reset();hit_test_depth_.Reset();hit_test_dsv_.Reset();
+ hit_test_saved_rtv_.Reset();hit_test_saved_dsv_.Reset();hit_test_width_=hit_test_height_=0;
  system_telemetry_.stop();
  system_telemetry_active_=false;
  system_telemetry_snapshot_={};
  frame_statistics_.reset();
- debug_overlay_.clear_over_budget_marker(); // the only clean-exit path (~DD)
+ // The only clean-exit path (~DD). Core mode: the host writes the ini; it
+ // clears the marker when it sees this flag after the game process exits.
+#ifndef EID3D11_EMBEDDED
+ if(core_mode_)x64remote::signal_clean_exit();
+ else
+#endif
+ debug_overlay_.clear_over_budget_marker();
  close_shader_marker();
  debug_overlay_.shutdown();
  bridge_set_profile_enabled(false);
@@ -3202,6 +3261,7 @@ void Renderer::release() {
  native_world_lighting_dirty_=false;
  native_point_lights_.clear();native_point_light_inputs_.clear();native_point_lights_dirty_=false;native_point_light_capacity_=0;
  native_point_light_grid_={};native_point_light_grid_inputs_.clear();native_point_light_grid_capacity_=0;
+ release_cave_irradiance();native_world_cave_=false;
  for(auto& layout:native_submission_layouts_)layout={};
  native_static_shadow_bake_={};native_terrain_shadow_bake_={};native_neighbour_shadow_bake_={};native_terrain_shadow_records_.clear();
  native_shadow_work_mask_srv_.Reset();native_shadow_work_mask_.Reset();native_shadow_work_mask_capacity_=0;

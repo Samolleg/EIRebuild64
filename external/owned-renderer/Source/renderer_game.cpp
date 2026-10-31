@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -317,9 +316,10 @@ HRESULT Renderer::queue_present(){
 // fallback (the call-stream mode keeps its own, separately selected).
 
 void retained_publication_attach() noexcept; // retained_publication_client.cpp
+void retained_publication_core_textures() noexcept; // retained_publication_client.cpp
 bool retained_publication_failed() noexcept;   // retained_publication_client.cpp
 void report_game_address_space(std::uint64_t world_epoch) noexcept; // renderer_diagnostics.cpp
-void migrate_settings(RendererConfig& config) noexcept; // renderer_device.cpp
+void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept; // renderer_device.cpp
 void address_space_mb(std::uint64_t& used,std::uint64_t& largest_free,bool walk) noexcept; // renderer_diagnostics.cpp
 const char* core_decode_progress_pixels(const std::string& path,unsigned width,unsigned height,unsigned frames,
  unsigned shown,std::vector<std::vector<std::uint8_t>>& output); // renderer_load_progress.cpp
@@ -331,11 +331,11 @@ HRESULT Renderer::core_ensure(){
  core_mode_=true;
  register_config_options();
  debug_overlay_.load_config_only();
- migrate_settings(debug_overlay_.config());
+ migrate_settings(debug_overlay_.config(),nullptr); // in memory: the host migrates and saves the ini (it alone writes it)
  apply_config_settings();
  char error[192]{};
  const UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
- if(!x64remote::link_start(hwnd_,flags,error,sizeof(error),true)){
+ if(!x64remote::link_start(hwnd_,flags,error,sizeof(error))){
   char reason[256];std::snprintf(reason,sizeof(reason),"core mode: the x64 host did not start: %s",error);
   bridge_report_event("x64_core_failed",reason);
   x64remote::lose_device(reason);
@@ -345,6 +345,7 @@ HRESULT Renderer::core_ensure(){
  // captures there and acks each renderer step (core_present retires them).
  if(harness_enabled())strncpy_s(x64remote::control().harness_directory,harness_directory().c_str(),_TRUNCATE);
  retained_publication_attach(); // the host's retained-scene replica (S2d), which its Renderer prepares from
+ retained_publication_core_textures(); // archive texture bytes live in the host only (S5a)
  // The F10 overlay runs on the host; this process keeps the window hook
  // (camp input, focus swallowing, cursor confinement) and forwards the
  // overlay's messages while it takes input.
@@ -389,13 +390,15 @@ void Renderer::core_send(std::uint16_t command,const std::vector<std::uint8_t>& 
 }
 #endif
 
-// Game thread: every option of the loaded ini, when its revision moved.
+// Game thread: every option of the loaded ini, when its revision moved or
+// this process's overlay has changes to save (the host writes the ini).
 #if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
 void Renderer::core_send_config() noexcept {  }
 #else
 void Renderer::core_send_config() noexcept try{
  const auto& config=debug_overlay_.config();
- if(config.revision()==core_config_revision_)return;
+ const bool save=debug_overlay_.take_core_save_request();
+ if(!save&&config.revision()==core_config_revision_)return;
  core_config_revision_=config.revision();
  scene_core::Config command;
  command.options.reserve(config.options().size());
@@ -408,6 +411,7 @@ void Renderer::core_send_config() noexcept try{
  }
  command.overlay_mode=config.overlay_mode();command.debug_resource_view=config.debug_resource_view();
  command.config_path=renderer_config_path();
+ command.save=save;
  std::vector<std::uint8_t> bytes{0};
  scene_wire::encode_into(bytes,command);
  core_send(static_cast<std::uint16_t>(scene_core::Command::config),bytes);

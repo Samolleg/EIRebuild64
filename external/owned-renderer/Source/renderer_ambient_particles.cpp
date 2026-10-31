@@ -355,11 +355,9 @@ void Renderer::render_ambient_particles() {
         if (fall_shell_vs_ && SUCCEEDED(context_->Map(ambient_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
             std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(ambient_constants_.Get(),0);
             transition_profile_pass("waterfall_shells");
-            ID3D11ShaderResourceView* saved_shell=nullptr;context_->VSGetShaderResources(6,1,&saved_shell);
-            ID3D11ShaderResourceView* saved_detail=nullptr;context_->PSGetShaderResources(7,1,&saved_detail);
-            ID3D11SamplerState* saved_sampler=nullptr;context_->PSGetSamplers(0,1,&saved_sampler);
+            // Binds every state it reads, restores nothing, unbinds its views after.
             ID3D11ShaderResourceView* no_depth=nullptr;context_->PSSetShaderResources(2,1,&no_depth); // depth is bound for testing
-            context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),world_dsv_.Get());
+            bind_plan_targets(plan_pass("waterfall_shells",rtv_.Get(),world_dsv_.Get()));
             D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
             context_->RSSetState(ambient_raster_.Get());context_->OMSetDepthStencilState(fall_shell_depth_.Get(),0);
             const float factor[4]{1,1,1,1};context_->OMSetBlendState(ambient_blend_.Get(),factor,~0u);
@@ -374,20 +372,16 @@ void Renderer::render_ambient_particles() {
             bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
             context_->Draw(ambient_fall_shell_vertices_,0);
             context_->OMSetDepthStencilState(nullptr,0);
-            context_->VSSetShaderResources(6,1,&saved_shell);context_->PSSetShaderResources(7,1,&saved_detail);
-            context_->PSSetSamplers(0,1,&saved_sampler);
-            if (saved_shell) saved_shell->Release();
-            if (saved_detail) saved_detail->Release();
-            if (saved_sampler) saved_sampler->Release();
+            ID3D11ShaderResourceView* no_view=nullptr;
+            context_->VSSetShaderResources(6,1,&no_view);context_->PSSetShaderResources(7,1,&no_view);
             profiler_.add_draw(ambient_fall_shell_vertices_/3u,1);profiler_.add_batch(1);
         }
     }
 
-    // Runs inside composite_world's state guard; the slots it does not save are restored here.
-    ID3D11ShaderResourceView* saved_vs[6]{};context_->VSGetShaderResources(0,6,saved_vs);
-    ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
+    // Runs inside composite_world. It binds every state it reads, restores
+    // nothing and unbinds its views after (every following pass binds its own).
     transition_profile_pass("ambient_particles");
-    context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
+    bind_plan_targets(plan_pass("ambient_particles",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth))); // depth is read as a texture
     D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(ambient_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(ambient_blend_.Get(),factor,~0u);
@@ -475,9 +469,8 @@ void Renderer::render_ambient_particles() {
     status(draws == 0,"Particles L%d: %s | %s, focus %s trees %u | h%.1f night %.2f rain %.2f snow %.2f | %ux%u tiles to %.0f m | env %s | %s",
         level,draws ? "drawn" : "nothing matches here",kZones[zone < zone_count ? zone : 0],kAreas[(at&15u) < area_count ? (at&15u) : 0],
         unsigned(at>>4),environment.hour,night,weather.rain,weather.snow,columns,rows,reach,environment_source,draws ? drawn : "-");
-    context_->VSSetShaderResources(0,6,saved_vs);context_->PSSetShaderResources(2,1,&saved_ps2);
-    for (auto* view : saved_vs) if (view) view->Release();
-    if (saved_ps2) saved_ps2->Release();
+    ID3D11ShaderResourceView* no_views[6]{};
+    context_->VSSetShaderResources(0,6,no_views);context_->PSSetShaderResources(2,1,no_views);
     profiler_.add_draw(draws,draws);profiler_.add_batch(draws);
 }
 

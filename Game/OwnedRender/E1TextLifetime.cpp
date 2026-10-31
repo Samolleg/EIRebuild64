@@ -17,6 +17,9 @@ E1TextDraw::E1TextDraw(E1TextKind kind, const void* owner, std::uint64_t surface
 E1TextDraw::~E1TextDraw() noexcept { owned::owned_text_complete(stamp, complete); }
 }
 namespace owned {
+bool bridge_character_pane_list_current(std::uint64_t epoch, std::uint64_t frame) noexcept {
+    return owned_text_pane_list_current(epoch, frame);
+}
 bool bridge_character_pane_text_epoch_current(std::uint64_t epoch, std::uint64_t frame) noexcept {
     return owned_text_epoch_current(epoch, frame);
 }

@@ -419,6 +419,16 @@ constexpr std::size_t kCameraFlagsOffset = 0x008;
 constexpr std::uint32_t kCameraAlternatePitchLimitsFlag = 0x00000200;
 constexpr std::size_t kCameraSettingsOffset = 0x094;
 constexpr std::size_t kCameraPitchAngleOffset = 0x104;
+// Global map zone hit-test frame (#200), game.exe:
+//   0062F856  call CI3DScreenGlobalMap::GenerateHitTestDDS (e8 15 0e 00 00),
+//             the only call; CI3DScreenGlobalMap's per-frame update makes it
+//             when the zones' mask is stale.
+//   00630670  GenerateHitTestDDS (thiscall, no arguments): flat default zone
+//             colours, NGame::DrawFrame(false, false), then GetFromScreen
+//             (0063084A -> 005FD3D0) into the mask surface.
+constexpr std::uint32_t kGlobalMapHitTestCallRva = 0x0022f856;
+constexpr std::uint32_t kGlobalMapHitTestEntryRva = 0x00230670;
+constexpr std::size_t kGlobalMapHitTestCallBytes = 5;
 constexpr std::size_t kCameraPitchMinimumOffset = 0x1d8;
 constexpr std::size_t kCameraPitchMaximumOffset = 0x1dc;
 constexpr std::size_t kCameraAlternatePitchMinimumOffset = 0x134;
@@ -2347,6 +2357,8 @@ std::array<std::uint8_t, kCameraMouseYawCallBytes> g_camera_mouse_yaw_original{}
 bool g_camera_mouse_yaw_installed = false;
 std::array<std::uint8_t, kCameraMousePitchCallBytes> g_camera_mouse_pitch_original{};
 bool g_camera_mouse_pitch_installed = false;
+std::array<std::uint8_t, kGlobalMapHitTestCallBytes> g_global_map_hit_test_original{};
+std::uint8_t* g_global_map_hit_test_image = nullptr;
 std::array<std::uint8_t, 5> g_camera_mouse_normalize_original{};
 bool g_camera_mouse_normalize_installed = false;
 const std::int32_t* g_camera_mouse_effective_width = nullptr;
@@ -2626,6 +2638,8 @@ BOOL __fastcall test_outer_end_frame(void*, void*) {
 #endif
 thread_local void* g_engine_frame_begin_context = nullptr;
 thread_local EngineFrameBeginFn g_engine_frame_begin_sink = nullptr;
+thread_local void* g_hit_test_frame_context = nullptr;
+thread_local HitTestFrameFn g_hit_test_frame_sink = nullptr;
 
 thread_local LifecycleIdentity g_current_object_plan_identity{};
 thread_local bool g_current_object_plan_identity_valid = false;
@@ -2644,6 +2658,17 @@ void record_owned_patch(const void* address, const void* original, std::size_t b
 #if !defined(EID3D11_EMBEDDED)
 const std::uint8_t* game_image_base() noexcept {
     return reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+}
+// The game camera's anchor height for the close shadow band (#196). CCamera
+// is the static object at 0x79B2A8 and its anchor point sits at +0xE0 (x, y, z;
+// SetAnchorPoint 0040F5C0 stores the point and then takes its height from the
+// terrain): the same object and fields the test harness reads, behind the
+// same verified site group. NaN when those sites do not verify.
+float game_camera_anchor_z() noexcept {
+    if (!game_sites_ok(GameSiteGroup::harness)) return NAN;
+    constexpr std::uintptr_t kCameraObjectRva = 0x0039b2a8, kCameraAnchorZ = 0xe0 + 8;
+    const float z = *reinterpret_cast<const float*>(game_image_base() + kCameraObjectRva + kCameraAnchorZ);
+    return std::isfinite(z) ? z : NAN;
 }
 
 std::size_t game_image_size() noexcept {
@@ -4827,6 +4852,11 @@ FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
     auto& frame = g_world_draw_depth ? g_native_world_lighting_frame : preview;
     if (frame.sampled) return frame.result;
     frame.sampled = true;
+    {
+        WorldEnvironment environment;
+        bridge_read_world_environment(environment);
+        frame.cave = environment.valid && environment.cave;
+    }
 #ifdef EID3D11_EMBEDDED
     if (g_embedded_visual_inputs) {
         if (!g_embedded_visual_inputs->lighting_valid) {
@@ -14389,6 +14419,26 @@ BOOL __fastcall hook_retained_main_loader(
     return result;
 }
 
+// AddSecondaryMob's stock callers (004B9869 script AddMob, 0057C3B7) push
+// the name from EAX, and the entry keeps it there up to the already-loaded
+// check at 00595ABB. The Spelladdon's infiniteaddmobspawn option patches that
+// check to read the name from EAX: names starting with "Auto" keep the
+// game's check (loaded once), others always load. A plain call through the
+// trampoline left EAX holding the trampoline address, so every
+// AutoRunSpellAddon123.mob AddMob skipped the check and loaded again: one
+// Dead City entry ran its 68 KB script compile 16 times, because each
+// re-entry re-runs every stored zone-entry WorldScript and each holds one
+// AddMob (#203). Forward with EAX = name, whatever the compiler generates.
+__declspec(naked) BOOL __stdcall call_secondary_owner(void*, const char*) {
+    __asm {
+        mov ecx, [esp+4]
+        mov eax, [esp+8]
+        push eax
+        call dword ptr [g_retained_secondary_owner]
+        ret 8
+    }
+}
+
 BOOL __fastcall hook_retained_secondary_owner(
     void* self, void*, const char* name) {
     std::array<char, 260> copied{};
@@ -14402,7 +14452,7 @@ BOOL __fastcall hook_retained_secondary_owner(
     BOOL result = FALSE;
     __try {
         result = g_retained_secondary_owner
-            ? g_retained_secondary_owner(self, name) : FALSE;
+            ? call_secondary_owner(self, name) : FALSE;
     } __finally {
         const bool parser_ran = g_retained_common_parser_ran;
         retained_static_finish_source(transaction, result != FALSE, parser_ran);
@@ -15682,7 +15732,7 @@ bool capture_owned_terrain_dynamic(
         const std::uint32_t mesh_count = *reinterpret_cast<const std::uint32_t*>(
             bytes + kSectorMeshArrayOffset + 4);
         if (!terrain || !mesh ||
-            mesh_count != source_sector.vertices.size())
+            mesh_count != source_sector.vertex_count())
             return false;
         TerrainContentGenerations generations{};
         if (!terrain_content_generations(live_sector, generations))
@@ -15920,6 +15970,7 @@ bool queue_owned_visual_scene(void* scene,void* renderer,
         command=std::make_shared<OwnedSceneCommand>();
         command->handoff=g_scene_handoff;
         command->world_to_clip=world_to_clip;
+        command->camera_anchor_z=game_camera_anchor_z();
         capture_owned_world_shadow_inputs(scene,renderer,command->inputs);
         command->lighting=g_native_world_lighting_frame;
         // The game's fog function per entity (a game call). The revision is
@@ -15993,7 +16044,8 @@ bool queue_owned_visual_scene(void* scene,void* renderer,
         try {
             scene_core::WorldScene world;
             world.world_sequence=++g_core_world_sequence;
-            world.world_to_clip=command->world_to_clip;world.pass=command->inputs.pass;world.time=command->inputs.time;
+            world.world_to_clip=command->world_to_clip;world.camera_anchor_z=command->camera_anchor_z;
+            world.pass=command->inputs.pass;world.time=command->inputs.time;
             world.flags=command->inputs.flags;world.draw_undetected=command->inputs.draw_undetected;
             world.shadow_source_revision=command->inputs.shadow_source_revision;
             world.terrain=std::move(command->terrain);world.lighting=command->lighting;
@@ -18800,78 +18852,11 @@ void record_character_pane_stats_text(void* surface, const char* text, const REC
 }
 
 #if !defined(EID3D11_EMBEDDED)
-// TEMPORARY (claude/s3-store, remove once settled): which effects the
-// character pane's effect-list tab (pane mode 3) shows for its unit, each
-// time the unit or its effect ids change (at most 10 lines per load).
-// Settles why an effect the portrait row shows is missing from the pane
-// (save "regen", Ctrl+1 Regeneration). Per effect: catalog id, ticks (+4),
-// whether the catalog names it (the pane's valid test), its catalog name and
-// the whole 0x14-byte record in hex.
-#ifndef EID3D11_EMBEDDED
-void report_pane_effects_once(void* unit,std::int32_t id) noexcept {
-    static std::uint64_t reported_epoch=~std::uint64_t{0};
-    static unsigned reported_lines=0;
-    static std::uint64_t reported_key=0;
-    const auto epoch=bridge_current_world_epoch();
-    if (epoch!=reported_epoch) { reported_epoch=epoch; reported_lines=0; reported_key=0; }
-    if (reported_lines>=10) return;
-    try {
-        int count=0; const void* effects=nullptr;
-        if (!visual_read(unit,0x19c,count) || !visual_read(unit,0x198,effects) || count<0 || count>255 || (count && !effects)) {
-            if (reported_key!=1) { reported_key=1; ++reported_lines;
-                append_bridge_event("pane_effects_temporary","unit effect list unreadable",true); }
-            return;
-        }
-        // The unit and its effect ids (not their ticks, which change every tick).
-        std::uint64_t key=1469598103934665603ull^std::uint32_t(id);
-        key=(key^std::uint32_t(count))*1099511628211ull;
-        for (int i=0;i<count;++i) {
-            std::uint8_t effect=0;
-            if (!visual_read(effects,static_cast<std::size_t>(i)*0x14,effect)) break;
-            key=(key^effect)*1099511628211ull;
-        }
-        key|=2; // never the unreadable or initial key
-        if (key==reported_key) return;
-        reported_key=key; ++reported_lines;
-        const void* begin=nullptr; const void* end=nullptr;
-        const bool catalog=g_visual_game_image && visual_read(g_visual_game_image,0x3c8510,begin) &&
-            visual_read(g_visual_game_image,0x3c8514,end) && begin &&
-            reinterpret_cast<std::uintptr_t>(end)>reinterpret_cast<std::uintptr_t>(begin);
-        const std::size_t records=catalog ? (reinterpret_cast<std::uintptr_t>(end)-reinterpret_cast<std::uintptr_t>(begin))/0x84 : 0;
-        char head[96]; std::snprintf(head,sizeof(head),"epoch=%llu unit=%d count=%d catalog=%zu",
-            static_cast<unsigned long long>(epoch),id,count,records);
-        std::string detail=head;
-        for (int i=0;i<count;++i) {
-            std::uint8_t raw[0x14]{};
-            if (!visual_read_bytes(effects,static_cast<std::size_t>(i)*0x14,raw,sizeof(raw))) { detail+=" | unreadable"; break; }
-            std::uint8_t effect=raw[0]; std::int32_t ticks=0; std::memcpy(&ticks,raw+4,4);
-            char name[33]{};
-            if (effect<records) {
-                const char* text=nullptr;
-                if (visual_read(reinterpret_cast<const std::uint8_t*>(begin)+std::size_t(effect)*0x84,4,text) && text)
-                    for (std::size_t n=0;n+1<sizeof(name);++n) {
-                        char c=0; if (!visual_read(text,n,c) || !c) break;
-                        name[n]=(std::isalnum(static_cast<unsigned char>(c)) || c=='_') ? c : '?';
-                    }
-            }
-            char part[160]; int at=std::snprintf(part,sizeof(part)," | id=%u ticks=%d valid=%d name=%s raw=",
-                unsigned(effect),ticks,name[0]?1:0,name[0]?name:"-");
-            for (std::size_t b=0;b<sizeof(raw) && at>0 && at<int(sizeof(part))-2;++b) at+=std::snprintf(part+at,sizeof(part)-at,"%02x",raw[b]);
-            detail+=part;
-        }
-        append_bridge_event("pane_effects_temporary",detail.c_str(),true);
-    } catch (...) {}
-}
-#endif
-
 void __fastcall hook_character_pane_effects(void* pane,void*,void* unit) {
     auto* invocation=current_character_pane_text_invocation();
     if (!invocation || !invocation->armed || invocation->pane!=pane || !unit) return;
     std::int32_t id=0;
     if (!visual_read(unit,0x0c,id)) return;
-#ifndef EID3D11_EMBEDDED
-    report_pane_effects_once(unit,id);
-#endif
     const auto resource=retained_visual_scene().visual_resource(id);
     publish_combat_unit(unit,id,resource.serial,true);
     RECT viewport{0,35,160,215};
@@ -20112,7 +20097,8 @@ bool begin_item_card_getdc(IDirectDrawSurface7* surface,
     session.surface_id = surface_id;
     adopted->second.height = height;
     g_character_pane_text.begin_frame(width, height * kItemCardRecordRows,
-        adopted->second.scale > 0.f ? adopted->second.scale : raster_scale);
+        adopted->second.scale > 0.f ? adopted->second.scale : raster_scale,
+        true);
     return true;
 }
 
@@ -22448,6 +22434,7 @@ bool uninstall_terrain_hooks(std::uint8_t* image) {
 
 void uninstall_camera_mouse_yaw_hook(std::uint8_t* image);
 void uninstall_camera_mouse_pitch_hook(std::uint8_t* image);
+void uninstall_global_map_hit_test_hook(std::uint8_t* image);
 
 // ---- Renderer-owned cursor ----
 // Fields (verified in the draw/update routines): +0x0C shown, +0x10 current
@@ -22600,6 +22587,59 @@ bool install_camera_mouse_yaw_hook(std::uint8_t* image) {
     if (!patched) return false;
     g_camera_mouse_yaw_installed = true;
     return true;
+}
+
+// The zone hit-test frame (#200): the original GenerateHitTestDDS runs
+// unchanged between the renderer's begin and end.
+void __fastcall hook_global_map_hit_test(void* self, void*) {
+    using GenerateHitTestFn = void(__thiscall*)(void*);
+    const auto original = reinterpret_cast<GenerateHitTestFn>(g_global_map_hit_test_image + kGlobalMapHitTestEntryRva);
+    void* const context = g_hit_test_frame_context;
+    const HitTestFrameFn sink = g_hit_test_frame_sink;
+    if (sink) sink(context, true);
+    original(self);
+    if (sink) sink(context, false);
+}
+
+bool install_global_map_hit_test_hook(std::uint8_t* image) {
+    if (!signature(image + kGlobalMapHitTestEntryRva, {0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb})) return false;
+    auto* call = image + kGlobalMapHitTestCallRva;
+    if (call[0] != 0xe8) return false;
+    std::int32_t relative = 0;
+    std::memcpy(&relative, call + 1, sizeof(relative));
+    if (call + kGlobalMapHitTestCallBytes + relative != image + kGlobalMapHitTestEntryRva) return false;
+    std::memcpy(g_global_map_hit_test_original.data(), call, kGlobalMapHitTestCallBytes);
+    g_global_map_hit_test_image = image;
+    DWORD protection = 0;
+    if (!VirtualProtect(call, kGlobalMapHitTestCallBytes, PAGE_EXECUTE_READWRITE, &protection)) {
+        g_global_map_hit_test_image = nullptr;
+        return false;
+    }
+    const bool patched = write_relative_call(call, reinterpret_cast<const void*>(&hook_global_map_hit_test));
+    DWORD ignored = 0;
+    VirtualProtect(call, kGlobalMapHitTestCallBytes, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), call, kGlobalMapHitTestCallBytes);
+    if (!patched) g_global_map_hit_test_image = nullptr;
+    return patched;
+}
+
+// Restores the call only while it is still ours (a later hook keeps it).
+void uninstall_global_map_hit_test_hook(std::uint8_t* image) {
+    if (!image || g_global_map_hit_test_image != image) return;
+    auto* call = image + kGlobalMapHitTestCallRva;
+    std::int32_t relative = 0;
+    std::memcpy(&relative, call + 1, sizeof(relative));
+    if (call[0] == 0xe8 && call + kGlobalMapHitTestCallBytes + relative ==
+            reinterpret_cast<const std::uint8_t*>(&hook_global_map_hit_test)) {
+        DWORD protection = 0;
+        if (VirtualProtect(call, kGlobalMapHitTestCallBytes, PAGE_EXECUTE_READWRITE, &protection)) {
+            std::memcpy(call, g_global_map_hit_test_original.data(), kGlobalMapHitTestCallBytes);
+            DWORD ignored = 0;
+            VirtualProtect(call, kGlobalMapHitTestCallBytes, protection, &ignored);
+            FlushInstructionCache(GetCurrentProcess(), call, kGlobalMapHitTestCallBytes);
+        }
+    }
+    g_global_map_hit_test_image = nullptr;
 }
 
 bool install_camera_mouse_pitch_hook(std::uint8_t* image) {
@@ -25134,6 +25174,16 @@ bool bridge_character_pane_text_epoch_current(
 #endif // !EID3D11_EMBEDDED
 
 #if !defined(EID3D11_EMBEDDED)
+// The pane's effect list: the latest pane draw's list stays current for two
+// frames, as the game does not redraw the pane every frame (save "regen":
+// every other frame), so an exact frame match left the list empty on the
+// frames between (flicker).
+bool bridge_character_pane_list_current(
+    std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept {
+    return g_character_pane_hooks_installed && ui_epoch && ui_epoch == g_character_pane_ui_epoch &&
+        frame_serial <= g_bridge_frame_serial && g_bridge_frame_serial - frame_serial <= 2;
+}
+
 const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {
     switch (reason) {
     case FigureFallbackReason::none: return "none";
@@ -25282,6 +25332,11 @@ bool EngineBridge::install() {
                camera_mouse_rotation_installed ?
                    "verified_displacement_consumers_and_limits" :
                    "yaw_or_pitch_callsite_or_owner_mismatch");
+        const bool hit_test_installed = install_global_map_hit_test_hook(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(hit_test_installed ? "zone_hit_test_installed" : "zone_hit_test_rejected",
+               hit_test_installed ? "verified_generate_hit_test_call" :
+                                    "hit_test_call_or_entry_mismatch_mask_is_normal_frame");
         const bool camera_mouse_normalize_installed =
             install_camera_mouse_normalize_hook(
                 reinterpret_cast<std::uint8_t*>(image_));
@@ -25629,6 +25684,7 @@ bool EngineBridge::uninstall() {
 #endif
     uninstall_camera_mouse_pitch_hook(image);
     uninstall_camera_mouse_yaw_hook(image);
+    uninstall_global_map_hit_test_hook(image);
     if (!uninstall_highlight_hooks(image)) {
         report("hover_highlight_uninstall_pending","foreign_call_site_owner_preserved");
         restored = false;
@@ -25694,6 +25750,18 @@ void bridge_clear_engine_frame_begin_sink(void* context) noexcept {
     if (g_engine_frame_begin_context == context) {
         g_engine_frame_begin_context = nullptr;
         g_engine_frame_begin_sink = nullptr;
+    }
+}
+
+void bridge_set_hit_test_frame_sink(void* context, HitTestFrameFn frame) noexcept {
+    g_hit_test_frame_context = context;
+    g_hit_test_frame_sink = frame;
+}
+
+void bridge_clear_hit_test_frame_sink(void* context) noexcept {
+    if (g_hit_test_frame_context == context) {
+        g_hit_test_frame_context = nullptr;
+        g_hit_test_frame_sink = nullptr;
     }
 }
 
@@ -27155,6 +27223,7 @@ bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
             report_object_plan_failure("embedded_world_lighting");
             return false;
         }
+        g_owned_visual_world_frame.camera_anchor_z = inputs.camera_anchor_z;
         if (!prepare_owned_world_shadows(&scene_token, nullptr, inputs.world_to_clip)) return false;
         auto& frame = g_owned_visual_world_frame;
         if (!frame.shadow_ready || frame.coverage.world_to_clip != inputs.world_to_clip) {

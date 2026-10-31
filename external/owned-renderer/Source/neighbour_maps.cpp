@@ -30,6 +30,12 @@ std::mutex device_lock;
 // process exit, after the threads that may hold D3D locks were killed.
 ID3D11Device* stream_device = nullptr;
 std::mutex resident_lock;
+// The active map's saved-layout entry as the stream last read it (its name
+// and origin): the layout file is only known where the addon is loaded (the
+// game process), which hands it to the stream.
+std::mutex active_layout_lock;
+std::string active_layout_name;
+double active_layout_x=0,active_layout_y=0;
 std::unordered_set<std::string> resident_textures;
 // Up to kDecoders neighbours decode at once, each on its own loader; at most
 // kDecoders decoded maps exist at a time (in decode, waiting, or in upload),
@@ -280,7 +286,15 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
         if(file.empty())throw std::runtime_error("Neighbour maps: loaded addon unavailable (no layout file)");
         if(!profile_matches(mounts,file))throw std::runtime_error("No verified neighbour resource profile");
         const auto root=file.substr(0,file.find_last_of(L"/\\")+1);
-        const auto neighbours=select_neighbour_layout(parse_neighbour_layout(read_layout(file)),"deja-vu",map_name(active));
+        const auto layout=parse_neighbour_layout(read_layout(file));
+        {
+            const auto& entry=neighbour_layout_active(layout,"deja-vu",map_name(active));
+            if(std::isfinite(entry.x)&&std::isfinite(entry.y)) {
+                std::lock_guard<std::mutex> guard(active_layout_lock);
+                active_layout_name=map_name(active);active_layout_x=entry.x;active_layout_y=entry.y;
+            }
+        }
+        const auto neighbours=select_neighbour_layout(layout,"deja-vu",map_name(active));
         {std::lock_guard<std::mutex> guard(s.lock);if(s.run==id)s.total=neighbours.size();}
         std::size_t next_claim=0; // guarded by s.lock
         // Ordered weld: the decoder holding neighbour `next_weld` welds it
@@ -309,6 +323,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
             const double x=upload.selection.x,y=upload.selection.y;
             neighbour_weld_edge_heights(terrain,x,y,strips);
             neighbour_weld_edge_normals(terrain,x,y,strips);
+            neighbour_weld_edge_shading(terrain,x,y,strips);
             // Its liquid flow reads the active map's liquid across the shared
             // edge (whole-metre offsets only: the grids then share vertices).
             if(x==std::floor(x)&&y==std::floor(y))
@@ -416,6 +431,22 @@ template<class Terrain,class Visit> void each_base_copy(Terrain& terrain,std::ui
         }
     }
 }
+// The (sector, base index) of each stored copy of grid vertex (gx,gy); visit
+// returns true to continue past the first copy.
+template<class Terrain,class Visit> void each_base_slot(Terrain& terrain,std::uint32_t gx,std::uint32_t gy,Visit&& visit) {
+    for(std::uint32_t j=0;j<2;++j) {
+        if(j && (!gy || gy%32))continue;
+        const std::uint32_t sy=gy/32-j;
+        if(sy>=terrain.sector_count_y)continue;
+        for(std::uint32_t i=0;i<2;++i) {
+            if(i && (!gx || gx%32))continue;
+            const std::uint32_t sx=gx/32-i;
+            if(sx>=terrain.sector_count_x)continue;
+            auto& sector=terrain.sectors[std::size_t(sy)*terrain.sector_count_x+sx];
+            if(!visit(sector,(gy-sy*32)*33u+(gx-sx*32)))return;
+        }
+    }
+}
 struct EdgeSide {double line,start;std::uint32_t count;std::uint32_t gx0,gy0,dx,dy;};
 EdgeSide edge_side(const TerrainCpuAsset& terrain,double x,double y,unsigned side) noexcept {
     const std::uint32_t w=terrain.sector_count_x*32,h=terrain.sector_count_y*32;
@@ -433,10 +464,16 @@ std::vector<NeighbourEdgeStrip> neighbour_edge_strips(const TerrainCpuAsset& ter
         const auto edge=edge_side(terrain,x,y,side);
         auto& strip=strips[side];strip.side=side;strip.line=edge.line;strip.start=edge.start;
         strip.normals.resize(edge.count);strip.positions.resize(edge.count);
+        strip.slopes.resize(edge.count);strip.flatness.resize(edge.count);
         for(std::uint32_t k=0;k<edge.count;++k) {
             bool first=true;
             each_base_copy(terrain,edge.gx0+k*edge.dx,edge.gy0+k*edge.dy,[&](const TerrainVertex& v) {
                 if(first){strip.normals[k]={v.normal_x,v.normal_y,v.normal_z};strip.positions[k]={float(v.x+x),float(v.y+y),v.z};}first=false;
+            });
+            each_base_slot(terrain,edge.gx0+k*edge.dx,edge.gy0+k*edge.dy,[&](const TerrainSectorCpuAsset& sector,std::uint32_t base) {
+                strip.slopes[k]=owned_terrain_slope_normal(terrain,sector,base);
+                strip.flatness[k]=owned_terrain_facet_flatness(terrain,sector,base);
+                return false;
             });
         }
     }
@@ -501,17 +538,44 @@ std::size_t neighbour_weld_edge_normals(TerrainCpuAsset& terrain,double x,double
     }
     return welded;
 }
+std::size_t neighbour_weld_edge_shading(TerrainCpuAsset& terrain,double x,double y,
+    const std::vector<NeighbourEdgeStrip>& strips) {
+    // The values of the welded grid (heights already moved onto the strips).
+    owned_terrain_prepare_shading(terrain);
+    std::size_t welded=0;
+    for(unsigned side=0;side<4;++side) {
+        const auto edge=edge_side(terrain,x,y,side);
+        for(const auto& strip:strips) {
+            if(strip.side!=(side^1u) || strip.line!=edge.line || strip.slopes.empty() ||
+               strip.start!=std::floor(strip.start) || edge.start!=std::floor(edge.start))continue;
+            const double last=double(strip.slopes.size()-1);
+            for(std::uint32_t k=0;k<edge.count;++k) {
+                const double along=edge.start+k-strip.start;
+                if(along<0 || along>last)continue;
+                const auto at=std::size_t(along);
+                bool any=false;
+                each_base_slot(terrain,edge.gx0+k*edge.dx,edge.gy0+k*edge.dy,[&](TerrainSectorCpuAsset& sector,std::uint32_t base) {
+                    if(base<sector.base_slope_normals.size())sector.base_slope_normals[base]=strip.slopes[at];
+                    if(base<sector.base_facet_flatness.size())sector.base_facet_flatness[base]=strip.flatness[at];
+                    any=true;
+                    return true;
+                });
+                welded+=any?1u:0u;
+            }
+        }
+    }
+    return welded;
+}
 void neighbour_maps_enable(bool value) noexcept {enabled.store(value,std::memory_order_release);}
 bool neighbour_maps_enabled() noexcept {return enabled.load(std::memory_order_acquire);}
 std::wstring neighbour_layout_file() {return layout_file();}
-bool neighbour_layout_origin(const std::string& mpr,const ResourceStoreConfig& mounts,double& x,double& y) noexcept try {
+std::string neighbour_map_name(const std::string& mpr) {return map_name(mpr);}
+bool neighbour_layout_origin(const std::string& mpr,double& x,double& y) noexcept try {
     x=y=0;
-    const auto file=neighbour_layout_file();
-    if(!profile_matches(mounts,file))return false;
-    const auto layout=parse_neighbour_layout(read_layout(file));
-    const auto& active=neighbour_layout_active(layout,"deja-vu",map_name(mpr));
-    if(!std::isfinite(active.x)||!std::isfinite(active.y))return false;
-    x=active.x;y=active.y;return true;
+    const auto name=map_name(mpr);
+    std::lock_guard<std::mutex> guard(active_layout_lock);
+    if(name.empty()||name!=active_layout_name)return false;
+    x=active_layout_x;y=active_layout_y;return true;
 } catch(...) {x=y=0;return false;}
 void neighbour_texture_resident(const std::string& key,bool resident) noexcept try {
     std::lock_guard<std::mutex> guard(resident_lock);

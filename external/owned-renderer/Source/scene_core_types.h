@@ -128,6 +128,7 @@ template <class A> void fields(A& a, ScenePresentInputs& v) {
 namespace scene_cmd {
 template <class A> void fields(A& a, BeginEngineFrame& v) { scene_wire::field(a, v.world_epoch); }
 template <class A> void fields(A&, MarkLoadPicture&) {}
+template <class A> void fields(A& a, HitTestFrame& v) { scene_wire::field(a, v.begin); }
 template <class A> void fields(A&, BeginScene&) {}
 template <class A> void fields(A&, EndScene&) {}
 template <class A> void fields(A& a, FlushNative& v) { scene_wire::field(a, v.layout_slot); }
@@ -463,9 +464,12 @@ struct Config {
     DebugOverlayMode overlay_mode = DebugOverlayMode::hidden;
     DebugResourceView debug_resource_view = DebugResourceView::disabled;
     std::wstring config_path;  // the game's ini: the host's F10 overlay loads and saves it
+    // The game process changed options it saves (HUD layout edit end, a
+    // display Apply): the host, the only ini writer, saves them.
+    bool save = false;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
-template <class A> void fields(A& a, Config& v) { scene_wire::fields_of(a, v.options, v.overlay_mode, v.debug_resource_view, v.config_path); }
+template <class A> void fields(A& a, Config& v) { scene_wire::fields_of(a, v.options, v.overlay_mode, v.debug_resource_view, v.config_path, v.save); }
 
 // The game's resource mounts (owned_resource_runtime): the host has no
 // registry/configuration of its own, so the passes that open game resources

@@ -74,8 +74,8 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "(at the background frame rate below). Pause: the world stops and the last picture stays on screen.",
      "Keep running\0" "Pause\0", false, {0, 0, 0, 0}},
     {"x64_render_host", kCategories[0], "64-bit render host",
-     "Moves the graphics card and driver into a separate 64-bit process, leaving the game more memory "
-     "(fewer out-of-memory crashes on big maps). Applies after restarting the game. "
+     "Runs the renderer and the graphics driver in a separate 64-bit process, leaving the game much more memory "
+     "(fewer out-of-memory crashes on big maps); DLSS needs it. Applies after restarting the game. "
      "If the host does not start, the option turns itself off.",
      nullptr, false, {0, 0, 0, 0}},
     {"background_frame_limit", kCategories[0], "Background frame rate limit",
@@ -115,6 +115,11 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Off\0" "On\0" "Fine\0", true, {0, 1, 1, 2}},
     {"cave_brightness", kCategories[1], "Cave brightness",
      "Overall light level in caves and dungeons.", nullptr, false, {0, 0, 0, 0}},
+    {"cave_ambient_floor", kCategories[1], "Cave darkness floor",
+     "How dark unlit parts of caves may get. Lower is darker; lamps and lava light the rest.", nullptr, false, {0, 0, 0, 0}},
+    {"cave_gi", kCategories[1], "Bounce light",
+     "Torch, campfire, lamp and lava light bounces off the ground and rock and lights the surroundings; the sun bounces off the ground, and daylight comes in through cave exits.",
+     "Off\0" "Low\0" "High\0", true, {0, 1, 2, 2}},
     // Terrain
     {"terrain_quality", kCategories[2], "Terrain detail",
      "Ground texture quality: less visible tiling and sharper transitions.",

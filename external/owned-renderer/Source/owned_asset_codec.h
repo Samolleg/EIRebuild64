@@ -231,6 +231,19 @@ public:
     template<class T> std::uint64_t id(const std::shared_ptr<T>& value) {
         return id(std::shared_ptr<const T>(value));
     }
+    // Defines `full` (as id()) and hands its id to `replacement`, a stand-in
+    // the caller keeps instead: later references to the replacement name the
+    // full definition, and the id is released when the replacement dies. The
+    // full object may then be dropped without a release.
+    template<class T> std::uint64_t alias(const std::shared_ptr<const T>& full,
+                                          const std::shared_ptr<const T>& replacement) {
+        const std::uint64_t assigned = id(full);
+        if (!assigned || !replacement) return assigned;
+        constexpr AssetKind kind = asset_kind<T>::value;
+        objects_.erase({full.get(), kind});
+        objects_[{replacement.get(), kind}] = {assigned, kind, std::weak_ptr<const void>(replacement)};
+        return assigned;
+    }
     // An id already defined (inside a definition, after dependencies()).
     std::uint64_t known(const void* address, AssetKind kind) const noexcept;
     // Emits one release message for every object that died since the last

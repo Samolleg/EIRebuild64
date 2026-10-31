@@ -34,6 +34,7 @@ static const float tileBlendLoneEdge=.9;     // Single-vertex paint: radius wher
 static const float tileBlendLoneWarp=.18;    // Single-vertex paint: most the warp may shift its edge (tile units). @param 0 0.5
 static const float tileBlendLoneRagged=.4;   // Single-vertex paint: outline wobble (tile units). @param 0 0.6
 static const float tileBlendPlaneKeep=.1;    // The weaker side plane is read from this share of the side up (wide cross-fade, no seam where a face turns). @param 0 0.45
+static const float tileBlendFootBand=.8;     // m: how far the floor material climbs a face (ragged by noise) @param 0 3
 static const float tileBlendEdgeBand=.25;    // Tile units where the blend meets a tile that keeps its art. @param 0 0.5
 static const float tileBlendBorderBand=1.;   // Tile units over which the field narrows to the map edge's own vertices. @param 0 3
 // Decisions (scores, exposed-rock edge) read the materials' texel brightness
@@ -490,7 +491,9 @@ void terrainTileBlendAdd(inout uint4 sc,inout float4 wq,inout float dropped,uint
  sc=slot?v:sc;wq=slot?w:wq;
 }
 // bedDepth: liquid depth over the pixel (signed, at rest plus the live shift).
-float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 facets,float3 t,float bedDepth,out bool faces){
+// footRise: the pixel's height over the local floor (owned_terrain_foot_rise).
+// facetKeep: terrainCliffFacetKeep of the pixel.
+float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 facets,float3 t,float bedDepth,float footRise,float facetKeep,out bool faces){
  faces=false;
  uint gw,gh;contactTiles.GetDimensions(gw,gh);gh/=2;
  float2 s=p.xy*.5;int2 c=int2(floor(s));
@@ -516,7 +519,7 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  // every vertex normal is inside the walk limit, so the planes are top-down.
  float3 planes=float3(0,0,1);
 #else
- float3 planes=nativeTerrainCliff.x>0?terrainCliffProjectionPlanes(slope,facets):float3(0,0,1);
+ float3 planes=nativeTerrainCliff.x>0?terrainCliffFacetPlanes(terrainCliffProjectionPlanes(slope,facets),pDx,pDy,facetKeep):float3(0,0,1);
 #endif
  float2 fw=terrainTileBlendFacePlanes(planes);
  // Materials of this cliff (steep tiles): the material at the top and at
@@ -553,6 +556,16 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  // art there showed baked triangle masks along zone2/zone3obr.)
  float2 edgeT=smoothstep(0,tileBlendBorderBand,float2(min(s.x,float(gw)-s.x),min(s.y,float(gh)-s.y)));
  float edgeKeep=min(edgeT.x,edgeT.y);
+ // The tile terms (cliff sets, exposed rock, tile art) hand over to values
+ // both maps share over a band whose reach varies with world-space noise
+ // between half a tile and one tile (layout frame, so both maps agree): a
+ // fixed band drew the handover contour as a straight line along the edge.
+ // It stays inside the border tiles, which are always active.
+ float tileKeep=1;
+ [branch]if(edgeKeep<1){
+  float2 tileT=smoothstep(0,tileBlendBorderBand,float2(min(s.x,float(gw)-s.x),min(s.y,float(gh)-s.y))*(1+terrainNoise(sw*.6,28)));
+  tileKeep=min(tileT.x,tileT.y);
+ }
  // Warped field lookup: two octaves of world-space displacement.
  float2 q=s+edgeKeep*(tileBlendWarpLarge*(2*terrainNoise2(sw/3,9)-1)
            +(full?tileBlendWarpSmall*(2*terrainNoise2(sw*1.4,11)-1):0)); // fast: large octave only
@@ -661,6 +674,10 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
    bool4 member=sc==(set.x&65535u)||sc==(set.x>>16)||sc==(set.y&65535u)||sc==(set.y>>16)||sc==(set.z&65535u)||sc==(set.z>>16);
    foreign+=member?0:wt;
   }
+  // Toward a near map edge the cliff sets fade out of it (each map holds
+  // only its own tiles' sets, so they differ across the edge): on the line
+  // no material is foreign on either map.
+  foreign*=tileKeep;
   // A single-vertex paint is this tile's own corner: its blob is never
   // faded as foreign (the neighbours' sets cut it along tile lines).
   wq*=sc==loneCell?1-faceShare*foreign*(1-loneCore):1-faceShare*foreign;
@@ -767,7 +784,9 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
  // The slots' own-art shares before the colour reads, so the tile row, the
  // position in the tile and the field weights are not held across them.
  float4 ownQ=0;
- [unroll]for(int i3=0;i3<4;++i3)if(a[i3]>0)ownQ[i3]=terrainTileBlendOwnArt(own,f,sc[i3],wq[i3],plain);
+ // Toward a near map edge the tile art (each map's own tiles) gives way to
+ // the materials both maps draw from the shared edge vertices.
+ [unroll]for(int i3=0;i3<4;++i3)if(a[i3]>0)ownQ[i3]=tileKeep*terrainTileBlendOwnArt(own,f,sc[i3],wq[i3],plain);
  [loop]for(int i2=0;i2<4;++i2){
   [branch]if(a.x>0){
    TerrainCliffCell k;terrainTileBlendCell(sc.x,k);
@@ -789,20 +808,53 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
   // The four tiles' rocks and weights (rows read again here, not held in
   // registers across the material reads; none where the face share is 0).
   uint4 cliffRock=0xffffu;float4 cliffW=0;
+  // Toward a near map edge the tiles' rocks (each map's own tiles) give way
+  // to the stone of the edge's own vertices, which the adjoining map shares
+  // (same family, same class), along the edge between its two nearest
+  // vertices, so both maps expose the same rock on the line.
+  uint4 edgeRock=0xffffu;float4 edgeW=0;
   [branch]if(faceShare>.002){
    int2 b0=int2(floor(q-.5));float2 bf=q-.5-b0;
    [unroll]for(int t4=0;t4<4;++t4){
     int2 o=int2(t4&1,t4>>1);
-    cliffW[t4]=(o.x!=0?bf.x:1-bf.x)*(o.y!=0?bf.y:1-bf.y);
+    cliffW[t4]=tileKeep*(o.x!=0?bf.x:1-bf.x)*(o.y!=0?bf.y:1-bf.y);
     cliffRock[t4]=terrainTileBlendCliffRock(terrainTileBlendCliffRow(b0+o,gw,gh));
+   }
+   [branch]if(tileKeep<1){
+    // The nearer edge: a row (y) or a column (x) of edge vertices.
+    bool row=edgeT.y<=edgeT.x;
+    float along=row?s.x:s.y;uint count=row?gw:gh;
+    int k=clamp(int(floor(along)),0,int(count)-1);float g=saturate(along-k);
+    bool low=row?s.y*2<float(gh):s.x*2<float(gw);
+    int2 tc=row?int2(k,low?0:int(gh)-1):int2(low?0:int(gw)-1,k);
+    uint4 r=terrainTileBlendCliffRow(tc,gw,gh);
+    // Its two edge vertices: (0,0)(1,0) / (0,1)(1,1) of a row tile,
+    // (0,0)(0,1) / (1,0)(1,1) of a column tile.
+    uint2 v=row?(low?uint2(r.x&65535u,r.x>>16):uint2(r.y&65535u,r.y>>16))
+               :(low?uint2(r.x&65535u,r.y&65535u):uint2(r.x>>16,r.y>>16));
+    [unroll]for(int v2=0;v2<2;++v2){
+     uint cell=v[v2];
+     // Stone, or ground unless the row limits rock to stone (bit 12, the
+     // map's rock rule; maps with editor profiles agree on it); never a bed.
+     uint kindV=(cell>>12)&7u;
+     if(cell!=0xffffu&&(kindV==1u||(kindV==0u&&(r.z&4096u)==0u))&&(cell&0x8000u)==0u){
+      edgeRock[v2]=cell;edgeW[v2]=(1-tileKeep)*(v2==0?1-g:g);
+     }
+    }
+    if(edgeRock.y==edgeRock.x){edgeW.x+=edgeW.y;edgeW.y=0;edgeRock.y=0xffffu;}
    }
   }
   [unroll]for(int r4=0;r4<4;++r4)[unroll]for(int r5=r4+1;r5<4;++r5)
    if(cliffRock[r5]==cliffRock[r4]){cliffW[r4]+=cliffW[r5];cliffW[r5]=0;}
+  // An edge rock one of the tiles also has adds to that tile's weight.
+  [unroll]for(int r7=0;r7<2;++r7)[unroll]for(int r8=0;r8<4;++r8)
+   if(edgeW[r7]>0&&edgeRock[r7]==cliffRock[r8]){cliffW[r8]+=edgeW[r7];edgeW[r7]=0;}
   // The cover's classes (from the slot cells, not held across the reads).
   bool4 valid=sc!=0xffffu;uint4 kind=(sc>>12)&7u;
   // One copy of the rock read: tile x is the current one (rotated).
-  [loop]for(int r6=0;r6<4;++r6){
+  // The tiles' four rocks, then the edge's two (rotated into slot x).
+  [loop]for(int r6=0;r6<6;++r6){
+   if(r6==4){cliffRock=edgeRock;cliffW=edgeW;}
    [branch]if(cliffW.x>.001&&cliffRock.x!=0xffffu){
     // Rock shows through the share of the cover that is not stone and not
     // its own class (rock cover stays itself), so it thins out smoothly
@@ -819,6 +871,42 @@ float4 terrainTileBlendColor(float3 p,float3 pDx,float3 pDy,float3 slope,float2 
   }
   cover=lerp(cover,rcSum/max(rcWeight,1e-5),e);share*=1-e;faces=fade>.5;
   rockShown=e;
+  // Wall foot: the ground in front of and below the face climbs it over a
+  // ragged band of tileBlendFootBand. The ground is the field's vertex
+  // material nearest to the plan point moved downhill (smooth slope normal)
+  // by the pixel's rise over the local floor, read there folded up, so the
+  // face continues the floor's texels at the fold and fades into the wall
+  // above. A ground of the face's own winning material changes nothing.
+  // Every input is interpolated per vertex (slope, rise) or a function of
+  // world position, so the band never follows a triangle edge.
+  // Toward a map edge it fades with the field's other terms (edgeKeep), so
+  // the active map and its neighbour meet without it on the shared line;
+  // the folded point is clamped into the grid (where edgeKeep is 0 anyway).
+  [branch]if(faceShare*edgeKeep>.002&&footRise<1.6*tileBlendFootBand&&length(slope.xy)>1e-3){
+   float2 down=normalize(slope.xy);
+   float2 sf=clamp((p.xy+down*footRise)*.5,0,float2(gw,gh)-1e-3);int2 cf=int2(floor(sf));float2 ff=sf-cf;
+   {
+    uint4 r=contactTiles.Load(int3(cf.x,cf.y+int(gh),0));
+    uint4 ground=uint4(r.x&65535u,r.x>>16,r.y&65535u,r.y>>16);
+    float4 gw4=float4((1-ff.x)*(1-ff.y),ff.x*(1-ff.y),(1-ff.x)*ff.y,ff.x*ff.y);
+    float2 along=float2(-down.y,down.x);
+    float edge=tileBlendFootBand*(.55+.9*terrainNoise(float2(dot(pw.xy,along)*1.1,pw.z*.6)+float2(57.3,-19.1),8));
+    float foot=faceShare*edgeKeep*(1-smoothstep(.35*edge,edge,footRise));
+    float2 fs=(pw.xy+down*footRise)*.5;
+    float2 fdx=(pDx.xy+down*pDx.z)*.5,fdy=(pDy.xy+down*pDy.z)*.5;
+    // Each corner of the ground cell by its bilinear weight, less the share
+    // the face already shows of that material (continuous: no step where
+    // the ground or the face's winner changes).
+    float3 g=0;float gsum=0;
+    [unroll]for(int k6=0;k6<4;++k6){
+     uint m=ground[k6];
+     float w=gw4[k6]*(1-dot(sc==m?a:0,1)/total);
+     TerrainCliffCell kg;
+     [branch]if(foot>.002&&m!=0xffffu&&w>.002&&terrainTileBlendCell(m,kg)){g+=w*terrainTileBlendTap(kg,fs,fdx,fdy);gsum+=w;}
+    }
+    [branch]if(gsum>.002){foot*=gsum;cover=lerp(cover,g/gsum,foot);share*=1-foot;}
+   }
+  }
  }
  // Temporary diagnostic (terrain_blend_debug, nativeTerrainTess.y), drawn
  // unlit (alpha -1 tells nativePS): 1 field: R top material weight,

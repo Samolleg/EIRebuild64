@@ -173,14 +173,17 @@ CrPixel crPS(CrOut i){
   if(light.color.w<0){glow+=light.color.rgb*(reachLight*reachLight*(f*.6+.4));continue;} // emissive surfaces
   local+=light.color.rgb*(reachLight*reachLight*f*(light.color.w>0?.65:1));
  }
+ local+=nativeCaveBounce(i.wp,n); // the bounce light (cave_irradiance.h)
  CrPixel result;
  if(visibility<0){result.color=float4(1,0,1,1);result.shadow=float4(1,0,0,1);result.ambient=0;return result;}
  float3 directional=nativeWorldSunDiffuse.rgb*facing*visibility;
  float3 c=alb*(saturate(max(nativeWorldAmbient.rgb,directional)+local)+glow);
  float3 ambientShare=max(c-alb*(saturate(directional+local)+glow),0);
  if(crSwitches.y>0){
-  float f=nativeFogFactor(i.border,i.p);c=lerp(borderFogColor(i.p,crFogColor.rgb),c,f);
-  ambientShare*=f*nativeAtmosphere(c,i.p,crFogColor.rgb);
+  // Caves: the volume's light and the exit glow in the fog, as on terrain.
+  float3 caveFog=nativeCaveFogLight(i.wp)+nativeCaveExitGlow(i.wp);
+  float f=nativeFogFactor(i.border,i.p);c=lerp(saturate(borderFogColor(i.p,crFogColor.rgb)+caveFog),c,f);
+  ambientShare*=f*nativeAtmosphere(c,i.p,saturate(crFogColor.rgb+caveFog));
  }
  result.color=float4(c,1);result.shadow=float4(visibility,0,0,1);result.ambient=float4(ambientShare,1);
  return result;
@@ -4825,6 +4828,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         context_->PSSetConstantBuffers(1, 1, native_world_lighting_constants_.GetAddressOf());
         context_->PSSetConstantBuffers(2, 1, native_shadow_constants_.GetAddressOf());
         context_->PSSetConstantBuffers(5, 1, native_point_light_constants_.GetAddressOf());
+        bind_cave_irradiance(); // the bounce light and the cave fog
         context_->PSSetConstantBuffers(6, 1, shadow_history_constants_.GetAddressOf());
         context_->PSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf()); context_->PSSetShaderResources(64, 1, native_shadow_range_srv_.GetAddressOf());
         ID3D11ShaderResourceView* point_lights = native_point_lights_.empty() ? nullptr : native_point_light_srv_.Get();

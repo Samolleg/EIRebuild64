@@ -5,6 +5,9 @@
 //
 //   shader_embed <output.bin> [--preset-cache]
 //
+// Optional EID3D11_SHADER_STORE=<folder>: compiled programs shared across
+// worktrees and commits (see store_file below).
+//
 // The previous output is the incremental cache: a program whose key it
 // already holds is reused, so only edited programs are compiled again; stale
 // entries are simply not written. A compile error fails the build.
@@ -14,6 +17,7 @@
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <thread>
@@ -31,6 +35,39 @@ bool proxy_publish_camp_texture(IDirectDrawSurface7*, const PreparedCampIcon&,
 
 using namespace owned;
 
+namespace {
+// EID3D11_SHADER_STORE (optional): a folder shared by every worktree's build,
+// one DXBC file per program key. The previous output and the preset folder
+// hold only the last commit's programs, so switching commits recompiled
+// everything the other commit had; the store keeps both. Never pruned here:
+// delete the folder to reclaim its space.
+std::string g_store;
+std::string store_file(const ShaderKey& key) {
+    std::string narrow;
+    for (const wchar_t ch : native_spec_cache_file_name(key)) narrow += static_cast<char>(ch); // hex digits and ".dxbc"
+    return g_store + "\\" + narrow;
+}
+bool store_read(const ShaderKey& key, std::string& code) {
+    if (g_store.empty()) return false;
+    std::ifstream in(store_file(key), std::ios::binary);
+    if (!in) return false;
+    code.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return !code.empty();
+}
+// Written through a temporary name, so a concurrent build never reads a
+// partial file; a failed write only costs a later recompile.
+void store_write(const ShaderKey& key, const void* code, std::size_t size) {
+    if (g_store.empty()) return;
+    const std::string path = store_file(key), temporary = path + "." + std::to_string(GetCurrentThreadId()) + ".tmp";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        out.write(static_cast<const char*>(code), static_cast<std::streamsize>(size));
+        if (!out) { out.close(); DeleteFileA(temporary.c_str()); return; }
+    }
+    if (!MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileA(temporary.c_str());
+}
+} // namespace
+
 int main(int argc, char** argv) {
     const bool preset_cache = argc == 3 && std::strcmp(argv[2], "--preset-cache") == 0;
     if (argc != 2 && !preset_cache) {
@@ -38,6 +75,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string output = argv[1];
+    if (const char* store = std::getenv("EID3D11_SHADER_STORE"); store && *store) {
+        g_store = store;
+        CreateDirectoryA(g_store.c_str(), nullptr);
+    }
     LARGE_INTEGER frequency{}, begin{}, end{};
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&begin);
@@ -82,7 +123,7 @@ int main(int argc, char** argv) {
 #endif
     std::vector<std::pair<ShaderKey, std::string>> table(programs.size());
     std::vector<std::string> errors(programs.size());
-    std::atomic<std::size_t> next{0}, compiled{0};
+    std::atomic<std::size_t> next{0}, compiled{0}, stored{0};
     const auto work = [&]() {
         for (std::size_t i = next++; i < programs.size(); i = next++) {
             const ShaderProgram& program = programs[i];
@@ -91,8 +132,11 @@ int main(int argc, char** argv) {
             std::size_t size = 0;
             if (shader_cache_detail::find(table[i].first, code, size)) {
                 table[i].second.assign(static_cast<const char*>(code), size);
+                if (!g_store.empty() && GetFileAttributesA(store_file(table[i].first).c_str()) == INVALID_FILE_ATTRIBUTES)
+                    store_write(table[i].first, code, size); // seeds the store
                 continue;
             }
+            if (store_read(table[i].first, table[i].second)) { ++stored; continue; }
             Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
             if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
                                   program.entry, program.profile, program.flags, 0, &blob, &messages))) {
@@ -101,6 +145,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             table[i].second.assign(static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize());
+            store_write(table[i].first, blob->GetBufferPointer(), blob->GetBufferSize());
             ++compiled;
         }
     };
@@ -130,8 +175,8 @@ int main(int argc, char** argv) {
         if (!out) { std::fprintf(stderr, "shader_embed: cannot write %s\n", rc.c_str()); return 1; }
     }
     QueryPerformanceCounter(&end);
-    std::printf("shader_embed: %zu programs, %zu compiled, %zu reused, %zu bytes, %.1f s\n", programs.size(),
-                compiled.load(), programs.size() - compiled.load(), bytes.size(),
+    std::printf("shader_embed: %zu programs, %zu compiled, %zu reused (%zu from the store), %zu bytes, %.1f s\n",
+                programs.size(), compiled.load(), programs.size() - compiled.load(), stored.load(), bytes.size(),
                 double(end.QuadPart - begin.QuadPart) / double(frequency.QuadPart));
 
     if (!preset_cache) return 0;
@@ -162,12 +207,17 @@ int main(int argc, char** argv) {
         return directory + "\\" + narrow;
     };
     std::vector<std::string> wanted(special.size()), special_errors(special.size());
-    std::atomic<std::size_t> special_next{0}, special_compiled{0};
+    std::atomic<std::size_t> special_next{0}, special_compiled{0}, special_stored{0};
     const auto special_work = [&]() {
         for (std::size_t i = special_next++; i < special.size(); i = special_next++) {
             const ShaderProgram& program = *special[i];
             wanted[i] = file_of(program);
-            if (GetFileAttributesA(wanted[i].c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+            const ShaderKey key = shader_key(program);
+            if (GetFileAttributesA(wanted[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
+                if (!g_store.empty()) CopyFileA(wanted[i].c_str(), store_file(key).c_str(), TRUE); // seeds the store
+                continue;
+            }
+            if (!g_store.empty() && CopyFileA(store_file(key).c_str(), wanted[i].c_str(), TRUE)) { ++special_stored; continue; }
             Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
             if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
                                   program.entry, program.profile, program.flags, 0, &blob, &messages))) {
@@ -185,6 +235,7 @@ int main(int argc, char** argv) {
                 special_errors[i] = "cannot write " + wanted[i];
                 continue;
             }
+            store_write(key, blob->GetBufferPointer(), blob->GetBufferSize());
             ++special_compiled;
         }
     };
@@ -211,8 +262,8 @@ int main(int argc, char** argv) {
         FindClose(search);
     }
     QueryPerformanceCounter(&end);
-    std::printf("shader_embed: %zu preset keys, %zu specialised programs, %zu compiled, %zu removed, %.1f s\n", lists.size(),
-                special.size(), special_compiled.load(), removed,
+    std::printf("shader_embed: %zu preset keys, %zu specialised programs, %zu compiled, %zu from the store, %zu removed, %.1f s\n",
+                lists.size(), special.size(), special_compiled.load(), special_stored.load(), removed,
                 double(end.QuadPart - begin.QuadPart) / double(frequency.QuadPart));
     return 0;
 }

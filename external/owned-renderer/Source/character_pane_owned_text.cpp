@@ -79,8 +79,13 @@ constexpr std::size_t kMaximumFrameQuads = 16384u;
 constexpr std::uint32_t kDefaultAtlasSide = 256u;
 constexpr std::uint32_t kMaximumAtlasSide = 2048u;
 constexpr std::uint32_t kAtlasGutter = 1u;
+constexpr UINT kEllipsisFlags = DT_END_ELLIPSIS | DT_WORD_ELLIPSIS;
 constexpr UINT kSupportedFlags = DT_LEFT | DT_CENTER | DT_RIGHT |
-    DT_WORDBREAK | DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX;
+    DT_WORDBREAK | DT_SINGLELINE | DT_NOCLIP | DT_NOPREFIX | kEllipsisFlags;
+// Extra advance per output-size glyph when letter spacing is on, in surface
+// pixels (at least one output pixel): the output-size glyphs are wider than
+// the stock hinted advances they are placed at, so letters nearly touch.
+constexpr double kLetterSpacing = 0.3;
 constexpr std::uint64_t kAtlasIdentityBase = 0x5458544100000000ull;
 constexpr std::uint64_t kSolidIdentity = 0x5458544c494e4501ull;
 // A layout survives while it is drawn at least once per sweep interval.
@@ -175,9 +180,11 @@ bool CharacterPaneOwnedText::GlyphKey::operator<(
 
 bool CharacterPaneOwnedText::LayoutKey::operator<(
     const LayoutKey& other) const noexcept {
-    return std::tie(font_generation, font_slot, format, width, height, text) <
+    return std::tie(font_generation, font_slot, format, width, height, wrap,
+                    spacing, text) <
         std::tie(other.font_generation, other.font_slot, other.format,
-                 other.width, other.height, other.text);
+                 other.width, other.height, other.wrap, other.spacing,
+                 other.text);
 }
 
 CharacterPaneOwnedText::~CharacterPaneOwnedText() {
@@ -297,8 +304,10 @@ HFONT CharacterPaneOwnedText::raster_font(
 }
 
 bool CharacterPaneOwnedText::begin_frame(
-    std::uint32_t width, std::uint32_t height, float raster_scale) noexcept {
+    std::uint32_t width, std::uint32_t height, float raster_scale,
+    bool letter_spacing) noexcept {
     abort_frame();
+    letter_spacing_ = letter_spacing;
     sweep_layouts();
     // Bounded by the UI scale range and supported output/canvas ratios.
     if (!std::isfinite(raster_scale) || raster_scale < 0.25f ||
@@ -455,10 +464,87 @@ bool CharacterPaneOwnedText::test_shape_wide(
 }
 #endif
 
+// DrawText ellipses: DT_WORD_ELLIPSIS truncates any word wider than the
+// rectangle and ends it with "..."; DT_END_ELLIPSIS does that at the end of
+// the text only. Either keeps such a word whole instead of breaking it.
+bool CharacterPaneOwnedText::ellipsize(
+    HDC dc, const DisplayText& display, int maximum_width,
+    Line& line) noexcept {
+    try {
+        std::wstring text;
+        ShapedRun best{};
+        std::size_t best_length = 0;
+        bool found = false;
+        const auto shape_prefix = [&](std::size_t kept, ShapedRun& run) {
+            while (kept && display.text[line.start + kept - 1u] == L' ')
+                --kept;
+            text.assign(display.text, line.start, kept);
+            text += L"...";
+            return shape_run(dc, text.data(), text.size(), run);
+        };
+        // Largest prefix whose "prefix..." fits; "..." alone when none does.
+        std::size_t low = 0, high = line.length;
+        while (low <= high) {
+            const std::size_t middle = low + (high - low) / 2u;
+            ShapedRun run{};
+            if (!shape_prefix(middle, run)) return false;
+            if (run.width <= maximum_width) {
+                best = std::move(run);
+                best_length = text.size();
+                found = true;
+                low = middle + 1u;
+            } else {
+                if (!middle) break;
+                high = middle - 1u;
+            }
+        }
+        if (!found) {
+            if (!shape_prefix(0u, best)) return false;
+            best_length = text.size();
+        }
+        // The dots take the truncated characters' display positions.
+        line.length = best_length;
+        line.width = best.width;
+        line.shaped = std::move(best);
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+}
+
 bool CharacterPaneOwnedText::layout(
     HDC dc, const DisplayText& display, int maximum_width,
-    bool word_break, bool single_line, std::vector<Line>& lines) noexcept {
+    bool word_break, bool single_line, UINT ellipsis, double gap_spacing,
+    std::vector<Line>& lines) noexcept {
+    if (!layout_lines(dc, display, maximum_width, word_break, single_line,
+                      ellipsis != 0, gap_spacing, lines))
+        return false;
+    if (!ellipsis) return true;
+    const int width = std::max(maximum_width, 1);
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        Line& line = lines[index];
+        if (line.width <= width ||
+            (!(ellipsis & DT_WORD_ELLIPSIS) && index + 1u != lines.size()))
+            continue;
+        if (!ellipsize(dc, display, width, line)) return false;
+    }
+    return true;
+}
+
+bool CharacterPaneOwnedText::layout_lines(
+    HDC dc, const DisplayText& display, int maximum_width,
+    bool word_break, bool single_line, bool whole_words, double gap_spacing,
+    std::vector<Line>& lines) noexcept {
     lines.clear();
+    // A wrapped line keeps room for its letter spacing.
+    const auto spaced_width = [gap_spacing](const ShapedRun& run) {
+        if (!(gap_spacing > 0.0)) return run.width;
+        int gaps = -1;
+        for (const int advance : run.advances)
+            if (advance > 0) ++gaps;
+        return gaps > 0 ? run.width + static_cast<int>(
+            std::ceil(gap_spacing * gaps)) : run.width;
+    };
     try {
         const auto shaped_line = [&](std::size_t start, std::size_t length,
                                      Line& line) {
@@ -517,7 +603,7 @@ bool CharacterPaneOwnedText::layout(
                             dc, display.text.data() + cursor,
                             trial - cursor, trial_run))
                             return false;
-                        if (trial_run.width <= std::max(maximum_width, 1) ||
+                        if (spaced_width(trial_run) <= std::max(maximum_width, 1) ||
                             best == cursor) {
                             best = trial;
                             best_run = std::move(trial_run);
@@ -530,6 +616,13 @@ bool CharacterPaneOwnedText::layout(
                         last_space != std::wstring::npos &&
                         last_space > cursor) {
                         best = last_space;
+                        reshape = true;
+                    } else if (whole_words && best < paragraph_end &&
+                               display.text[best] != L' ') {
+                        // A word wider than the line stays whole.
+                        while (best < paragraph_end &&
+                               display.text[best] != L' ')
+                            ++best;
                         reshape = true;
                     }
                     if (best == cursor) {
@@ -781,7 +874,7 @@ bool CharacterPaneOwnedText::realize_glyph(
 
 bool CharacterPaneOwnedText::append_glyph(
     const GlyphMask& glyph, int pen_x, int baseline_y, int shift,
-    COLORREF color, const RECT& clip) noexcept {
+    COLORREF color, const RECT& clip, int extra) noexcept {
     if (glyph.width <= 0 || glyph.height <= 0) return true;
     if (glyph.page_index >= pages_.size() || !pages_[glyph.page_index].asset)
         return false;
@@ -789,7 +882,7 @@ bool CharacterPaneOwnedText::append_glyph(
         // Output-size glyph: the renderer places it 1:1 at the snapped output
         // position of the stock pen, so its shape is the same everywhere.
         const double scale = raster_scale_;
-        const double left = pen_x + shift + glyph.left / scale;
+        const double left = pen_x + shift + (glyph.left + extra) / scale;
         const double top = baseline_y + shift - glyph.top / scale;
         const RECT bound{
             std::max<LONG>(clip.left, 0), std::max<LONG>(clip.top, 0),
@@ -813,7 +906,7 @@ bool CharacterPaneOwnedText::append_glyph(
         quad.raster_scale = raster_scale_;
         quad.anchor = {pen_x, baseline_y};
         quad.shift = {shift, shift};
-        quad.offset = {glyph.left, -glyph.top};
+        quad.offset = {glyph.left + extra, -glyph.top};
         quad.clip = bound;
         try {
             quads_.push_back(std::move(quad));
@@ -902,7 +995,7 @@ bool CharacterPaneOwnedText::draw_line(
     HDC dc, const DisplayText& display, const Line& line,
     int x, int baseline, int shift, COLORREF color, const RECT& clip,
     std::uint32_t font_slot, int underline_offset,
-    int& underlines) noexcept {
+    int& underlines, int tracking, int lead) noexcept {
     if (!line.length) return true;
     try {
         const ShapedRun& shaped = line.shaped;
@@ -911,14 +1004,25 @@ bool CharacterPaneOwnedText::draw_line(
             shaped.carets.size() != line.length)
             return false;
         int pen = x;
+        // Letter spacing (output pixels): each advancing glyph moves the
+        // following ones by tracking; lead places the grown line.
+        const auto spacing = [&](std::size_t glyph_index) {
+            int extra = lead;
+            for (std::size_t index = 0; index < glyph_index; ++index)
+                if (shaped.advances[index] > 0) extra += tracking;
+            return extra;
+        };
+        int extra = lead;
         for (std::size_t index = 0; index < shaped.glyphs.size(); ++index) {
             const GlyphMask* glyph = nullptr;
             if (!realize_glyph(dc, font_slot,
                                shaped.glyphs[index],
                                glyph) || !glyph)
                 return false;
-            if (!append_glyph(*glyph, pen, baseline, shift, color, clip))
+            if (!append_glyph(*glyph, pen, baseline, shift, color, clip,
+                              extra))
                 return false;
+            if (shaped.advances[index] > 0) extra += tracking;
             if ((shaped.advances[index] > 0 &&
                  pen > INT_MAX - shaped.advances[index]) ||
                 (shaped.advances[index] < 0 &&
@@ -936,6 +1040,9 @@ bool CharacterPaneOwnedText::draw_line(
             std::int64_t glyph_origin = 0;
             for (std::size_t index = 0; index < glyph_index; ++index)
                 glyph_origin += shaped.advances[index];
+            if (tracking || lead)
+                glyph_origin += std::lround(
+                    spacing(glyph_index) / static_cast<double>(raster_scale_));
             const std::int64_t glyph_end =
                 glyph_origin + shaped.advances[glyph_index];
             const std::int64_t left =
@@ -980,6 +1087,18 @@ int CharacterPaneOwnedText::draw(
     // The glyph cache already names a font by generation and slot. Only a
     // completed supported-format layout is reused; color and shadow are
     // applied when quads are emitted.
+    // Item card text with letter spacing keeps a right padding equal to its
+    // left margin: lines and their spacing end inside it. Taller rectangles
+    // wrap at that padded width, spacing included; a one-line rectangle (a
+    // line the game already wrapped) keeps its line and only spaces less.
+    const bool padded = letter_spacing_ && raster_key_ != kUnitRasterKey &&
+        rectangle.left >= 0 && rectangle.left < static_cast<LONG>(width_) / 2;
+    const LONG left_bound = padded ? rectangle.left : 0;
+    const LONG right_bound = padded
+        ? (std::min)(rectangle.right, static_cast<LONG>(width_) - rectangle.left)
+        : static_cast<LONG>(width_);
+    const int tracking_out = (std::max)(1, static_cast<int>(
+        std::lround(kLetterSpacing * raster_scale_)));
     LayoutKey key{};
     bool keyed = false;
     const TextLayout* shaped = nullptr;
@@ -990,6 +1109,8 @@ int CharacterPaneOwnedText::draw(
             key.format = format;
             key.width = rectangle.right - rectangle.left;
             key.height = rectangle.bottom - rectangle.top;
+            key.wrap = padded ? right_bound : 0;
+            key.spacing = padded ? raster_key_ : 0u;
             key.text.assign(text, length);
             keyed = true;
             const auto found = layouts_.find(key);
@@ -1028,10 +1149,19 @@ int CharacterPaneOwnedText::draw(
         complete = complete && GetTextMetricsA(measure_dc_, &metrics) != FALSE;
         fresh.line_height = metrics.tmHeight;
         fresh.ascent = metrics.tmAscent;
+        const bool tall = padded && metrics.tmHeight > 0 &&
+            rectangle.bottom - rectangle.top >= 2 * metrics.tmHeight;
         complete = complete && layout(
-            measure_dc_, fresh.display, rectangle.right - rectangle.left,
+            measure_dc_, fresh.display,
+            (tall ? right_bound : rectangle.right) - rectangle.left,
             (format & DT_WORDBREAK) != 0 && !(format & DT_SINGLELINE),
-            (format & DT_SINGLELINE) != 0, fresh.lines);
+            (format & DT_SINGLELINE) != 0, format & kEllipsisFlags,
+            tall ? tracking_out / static_cast<double>(raster_scale_) : 0.0,
+            fresh.lines);
+        // More lines than the stock measure: report their height.
+        if (complete && tall)
+            fresh.height = (std::max)(fresh.height, static_cast<int>(
+                fresh.lines.size() * static_cast<std::size_t>(fresh.line_height)));
         shaped = &fresh;
     }
     const int exact_height = shaped->height;
@@ -1060,18 +1190,47 @@ int CharacterPaneOwnedText::draw(
             const int y = rectangle.top +
                 static_cast<int>(index) * shaped->line_height;
             const int baseline = y + shaped->ascent;
+            // Letter spacing for output-size glyphs: the layout, wrapping
+            // and alignment keep the stock advances; the line grows around
+            // its aligned position (centred: both sides), bounded by the
+            // surface, and its clip grows with it.
+            int tracking = 0, lead = 0;
+            RECT line_clip = clip;
+            if (padded) {
+                int gaps = -1;
+                for (const int advance : line.shaped.advances)
+                    if (advance > 0) ++gaps;
+                if (gaps > 0) {
+                    const double scale = raster_scale_;
+                    const LONG left_room = x - left_bound,
+                        right_room = right_bound - (x + line.width);
+                    const LONG room = (format & DT_CENTER)
+                        ? 2 * (std::min)(left_room, right_room)
+                        : (format & DT_RIGHT) ? left_room : right_room;
+                    const int room_out = room > 0
+                        ? static_cast<int>(std::floor(room * scale)) : 0;
+                    tracking = (std::min)(tracking_out, room_out / gaps);
+                    const int growth = tracking * gaps;
+                    lead = (format & DT_CENTER) ? -growth / 2
+                         : (format & DT_RIGHT) ? -growth : 0;
+                    const LONG past = static_cast<LONG>(std::ceil(growth / scale));
+                    if (format & (DT_CENTER | DT_RIGHT)) line_clip.left -= past;
+                    if (!(format & DT_RIGHT)) line_clip.right += past;
+                }
+            }
             int ignored_underlines = 0;
             if (shadow && !draw_line(
                     measure_dc_, shaped->display, line, x, baseline, 1,
-                    RGB(8, 8, 8), clip, font_slot,
-                    1, ignored_underlines)) {
+                    RGB(8, 8, 8), line_clip, font_slot,
+                    1, ignored_underlines, tracking, lead)) {
                 complete = false;
                 break;
             }
             int underlines = 0;
             if (!draw_line(
                     measure_dc_, shaped->display, line, x, baseline, 0,
-                    color, clip, font_slot, 1, underlines)) {
+                    color, line_clip, font_slot, 1, underlines,
+                    tracking, lead)) {
                 complete = false;
                 break;
             }
@@ -1456,6 +1615,11 @@ bool owned_text_consume(Renderer& renderer, std::uint64_t surface,
     }
     if (FAILED(result)) text_failure(CharacterPaneTextFailure::submission);
     return true;
+}
+bool owned_text_pane_list_current(std::uint64_t epoch, std::uint64_t frame) noexcept {
+    const auto& s = text_session();
+    return s.active && epoch && frame && s.pane_epoch.load() == epoch &&
+        frame <= s.frame && s.frame - frame <= 2;
 }
 bool owned_text_epoch_current(std::uint64_t epoch, std::uint64_t frame) noexcept {
     const auto& s = text_session();

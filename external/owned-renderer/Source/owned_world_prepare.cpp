@@ -502,7 +502,8 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         if(reused_coverage)frame.coverage=*reused_coverage;
         else if (!build_retained_directional_coverage(world_to_clip,lighting,receivers,
             frame.coverage,base_source,base_transform,g_owned_shadow_settings.map_side,
-            g_owned_shadow_settings.close_cascades,base_generation)) {
+            g_owned_shadow_settings.close_cascades,base_generation,g_owned_shadow_settings.close_range,
+            frame.camera_anchor_z)) {
             reject_owned_visual("coverage","receiver_coverage");
             report_object_plan_failure("owned_scene_receiver_coverage");
             return false;
@@ -1096,8 +1097,19 @@ void run_owned_visual_scene(OwnedSceneCommand& command) noexcept {
     g_scene_fog_revision=command.fog_revision;
     g_owned_terrain_frame=std::move(command.terrain);
     g_native_world_lighting_frame=command.lighting;
+    // The captured pass is the game thread's view of the shadow switch; the
+    // renderer that draws applied the switch at its own BeginScene and has the
+    // last word (installed sinks' frame state). Shadows off there means no sun
+    // pass at all, so the world never waits for one it refuses (#204).
+    {
+        NativeFrameState executor{};
+        if(command.inputs.pass.shadows_enabled && g_native_sink_frame_state &&
+           g_native_sink_frame_state(g_native_sink_context,executor) && !executor.shadows_enabled)
+            command.inputs.pass.shadows_enabled=false;
+    }
     auto& frame=g_owned_visual_world_frame;
     frame.active=true;frame.shadow_attempted=true;frame.shadow_source_diagnostic={};
+    frame.camera_anchor_z=command.camera_anchor_z;
     bool ready=false;
     try {
         ready=prepare_owned_world_shadows_from(std::move(command.inputs),command.world_to_clip);

@@ -43,6 +43,8 @@
 #include <chrono>
 #include <cstdio>
 #include <deque>
+#include <map>
+#include <set>
 #include <future>
 #include <array>
 #include <cmath>
@@ -61,7 +63,6 @@ constexpr double kGroundCoverSecondsPerSegment = ground_cover::kSecondsPerSegmen
 constexpr float kCellSize = 4.0f;
 constexpr UINT kTrailTexelsPerCell = 32; // 12.5 cm world-anchored texels; R16, GPU-only
 // Count readback words: per mesh pool demand (gcFinalizeCS).
-constexpr UINT kGcCountWords = gm_count;
 // Candidates one class round holds at least (a round never passes its split
 // by more than one cell); the stage buffers hold one round. Rounds per class
 // at most 64 (gcScanCS kGcMaxRounds).
@@ -234,6 +235,9 @@ RWStructuredBuffer<uint4> gcShadeInput:register(u5);
 static const float kGcOverflowRecover=.02;
 
 static const uint kGcWater=6,kGcSwamp=5,kGcSnow=4,kGcDry=2,kGcSand=3,kGcBladesFar=18;
+// Instance extra.z bits 20-29: a near/far mesh crossfade (gcBuildOf): bits
+// 20-27 the dither cut (0-255), 28 the far side, 29 crossfading.
+static const uint kGcFadeFar=0x10000000u,kGcFadeOn=0x20000000u;
 uint gcHash(uint x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return x;}
 float gcRand(inout uint s){s=gcHash(s+0x9e3779b9u);return (s&0xffffffu)*(1.0/16777216.0);}
 float gcLattice(int2 p,uint seed){return (gcHash(uint(p.x)*73856093u^uint(p.y)*19349663u^seed)&0xffffffu)*(1.0/16777216.0);}
@@ -418,6 +422,23 @@ float gcSunGap(uint slice,float3 worldPosition,float2 groundSlope,uint hash){
 // Kept fraction at a distance: full near, thinning to the far LOD density that
 // lasts to the farthest visible ground (cover never fades out of the view).
 float gcKeep(GcRule r,float d){return gcDensityKeep(r.lodNear,r.lodFar,r.farKeep,gcQuality.x,d);}
+// Size share of a thinned instance at eye distance d: it is cut where gcKeep
+// falls to its thinning value (the inverse of gcDensityKeep's smoothstep) and
+// grows in over the 30% of the thinning range nearer than that, several
+// metres of camera travel (issue #196: the former .12 band of keep was 2-3 m
+// and read as popping). Instances the far LOD always keeps stay full size.
+float gcThinGrow(GcRule r,float thin,float d){
+ if(thin<r.farKeep)return 1;
+ const float t=.5-sin(asin(saturate(thin)*2-1)/3); // 3t^2-2t^3 = 1-thin
+ const float n=r.lodNear*gcQuality.x,f=r.lodFar*gcQuality.x,cut=n+t*(f-n);
+ // Large cover (lod_near >= 70 m and cave roots, the renderer's large shadow
+ // casters) stays full size inside lod_near: the growth starts there at the
+ // earliest, over at least 5% of the range (0.7% of instances, those cut
+ // within that of lod_near, start just inside it).
+ const bool large=r.lodNear>=70||r.mesh==22u;
+ const float start=large?min(max(cut-.3*(f-n),n),cut-.05*(f-n)):cut-.3*(f-n);
+ return 1-smoothstep(start,cut,d);
+}
 
 float gcTrailCoverage(float2 p){
  if(gcView.w==0)return 0;
@@ -910,14 +931,18 @@ bool gcHabitatOf(GcCandidate c,out GcSurvivor o){
 #endif
  if((rule.flags&1u)!=0&&!underwater&&gcRand(seed)>(baseType==2||baseType==4||baseType==15?.08:(baseType==7?.3:1)))return false;
  // Grass/road transition tiles keep a grassy ETERRTYPE: meadow and dry
- // grass and flowers thin toward their soil/paving corners, about where the
- // terrain blend shows the road (share .5), with a noisy soft edge.
+ // grass and flowers thin toward their soil/paving corners. The terrain
+ // blend shows the road from about share .5, so cover is mostly gone there
+ // (the noisy band ends by .55-.65) and the grassy side below ~.35 keeps it
+ // all. A soft band, not a cut at .5: the share is bilinear per tile, so a
+ // hard threshold would draw straight tile-aligned edges. Grass keeps the
+ // sparse road-side tufts of fully bare tiles (3%); flowers keep none.
 #if GC_F_EDGE
  if((rule.mesh==0u||cluster==1u)&&(here==1u||here==2u)){
   const float bare=gcBareShare(p);
   if(bare>0){
-   const float road=smoothstep(.3,.75,bare+.3*(gcFbm(p*.7,0x5eed1u)-.5));
-   if(gcRand(seed)>lerp(1,.03,road))return false;
+   const float road=smoothstep(.35,.55,bare+.2*(gcFbm(p*.7,0x5eed1u)-.5));
+   if(gcRand(seed)>lerp(1,cluster==1u?0.0:.03,road))return false;
   }
  }
 #endif
@@ -1006,6 +1031,19 @@ bool gcHabitatOf(GcCandidate c,out GcSurvivor o){
 #ifndef GC_BUILD_TRAILS
 #define GC_BUILD_TRAILS 1
 #endif
+// Pool overflow (the demand readback grows the pool a few frames later)
+// thins a stable subset in the distance thinning's own order instead of
+// dropping whatever the GPU appends last, which differs every frame and
+// flickered. Instances near the cut shrink out and grow back in.
+void gcAppendInstance(uint mesh,GcInstance o,uint4 shade,float order){
+ const uint state=gcPass.x+mesh*8;
+ gcOverflow.InterlockedAdd(state,1);
+ const float kept=1-asfloat(gcOverflow.Load(state+4));
+ if(order>=kept)return;
+ o.root.w*=smoothstep(order,min(order+.12,1.0),kept);
+ uint index;gcArgs.InterlockedAdd(mesh*20+4,1,index);
+ if(index<gcCapacity[mesh>>2][mesh&3]){gcInstanceOut[gcBase[mesh>>2][mesh&3]+index]=o;gcShadeInput[gcBase[mesh>>2][mesh&3]+index]=shade;}
+}
 // Stage 3: the instance of a survivor, appended to its mesh pool.
 void gcBuildOf(GcSurvivor c){
  const uint ri=c.rule;const GcRule rule=gcRules[ri];
@@ -1034,15 +1072,19 @@ void gcBuildOf(GcSurvivor c){
  float sink=rule.sink*s*szs*.4;
  // Thinned survivors grow (the far LOD clumps stay readable); instances near
  // their threshold grow in and shrink out instead of popping.
- s*=min(1/sqrt(max(keep,.05)),rule.growMax)*smoothstep(thin,min(thin+.12,1.0),keep);
+ s*=min(1/sqrt(max(keep,.05)),rule.growMax)*gcThinGrow(rule,thin,length(float3(p,ground)+gcOrigin.xyz-gcEye.xyz));
  if((rule.flags&8u)!=0)s=min(s,.85*depth/szs); // stays below the water surface
  if(rule.bury>0)sink=s*szs*(rule.bury-.2*gcRand(seed)); // of the drawn (grown) height: tips above snow
+ // Far meshes of the dense and tall tufts, by thinning and root leaf width on
+ // screen; inside the crossfade band both meshes (gcTuftFarWeight).
+ uint farMesh=mesh;float farShare=0;
 #if GC_F_FAR
- { // Far meshes of the dense and tall tufts, by root leaf width on screen.
-  const uint farMesh=mesh==0u?kGcBladesFar:mesh==1u?30u:mesh==11u?31u:mesh==12u?32u:mesh==17u?33u:mesh;
+ {
+  farMesh=mesh==0u?kGcBladesFar:mesh==1u?30u:mesh==11u?31u:mesh==12u?32u:mesh==17u?33u:mesh;
   const float leafWidth=mesh==0u?.12:mesh==1u?.1:mesh==17u?.065:.06;
-  if(farMesh!=mesh&&(gcOrigin.w>0||gcTuftUsesFarMesh(keep,gcTuftPixels(gcClip,float3(p,ground)+gcOrigin.xyz,s,gcGrid.w)*leafWidth,
-                                        (gcHash(seed^0x5bd1e995u)&0xffffu)/65535.0)))mesh=farMesh;
+  if(farMesh!=mesh)farShare=gcOrigin.w>0?1:gcTuftFarWeight(keep,gcTuftPixels(gcClip,float3(p,ground)+gcOrigin.xyz,s,gcGrid.w)*leafWidth,
+                                                             (gcHash(seed^0x5bd1e995u)&0xffffu)/65535.0);
+  if(farShare>=1)mesh=farMesh;
  }
 #endif
  const float j=1+(gcRand(seed)*2-1)*rule.jitter;
@@ -1135,19 +1177,17 @@ void gcBuildOf(GcSurvivor c){
  o.extra=uint4(asuint(ground+gcOrigin.z),gcPack2(blend,contact),
   (uint(rule.material)&15u)|(uint(saturate(rule.frost)*15+.5)<<4)|(uint(saturate(rule.align)*15+.5)<<8)|(uint(saturate(normalBlend)*15+.5)<<12)|(tuft?0x10000u:0u)|(parting?0x20000u:0u),
   gcHash(seed));
- // Pool overflow (the demand readback grows the pool a few frames later)
- // thins a stable subset in the distance thinning's own order instead of
- // dropping whatever the GPU appends last, which differs every frame and
- // flickered. Instances near the cut shrink out and grow back in.
- {
-  const uint state=gcPass.x+mesh*8;
-  gcOverflow.InterlockedAdd(state,1);
-  const float kept=1-asfloat(gcOverflow.Load(state+4)),order=thin/max(keep,1e-6);
-  if(order>=kept)return;
-  o.root.w*=smoothstep(order,min(order+.12,1.0),kept);
+ const float order=thin/max(keep,1e-6);
+ if(farShare>0&&farShare<1){
+  // Crossfade: the near mesh keeps the dither values below the cut, the far
+  // mesh the rest (gcCoverClip), so each pixel shows exactly one of them.
+  const uint cut=uint(round((1-farShare)*255));
+  GcInstance nearSide=o;nearSide.extra.z|=kGcFadeOn|(cut<<20);
+  gcAppendInstance(mesh,nearSide,shade,order);
+  o.extra.z|=kGcFadeOn|kGcFadeFar|(cut<<20);
+  mesh=farMesh;
  }
- uint index;gcArgs.InterlockedAdd(mesh*20+4,1,index);
- if(index<gcCapacity[mesh>>2][mesh&3]){gcInstanceOut[gcBase[mesh>>2][mesh&3]+index]=o;gcShadeInput[gcBase[mesh>>2][mesh&3]+index]=shade;}
+ gcAppendInstance(mesh,o,shade,order);
 }
 
 )" R"(
@@ -1267,7 +1307,7 @@ groupshared uint gcRoundFirst[kGcMaxRounds],gcRoundJobs[kGcMaxRounds];
 // Pool demand for the readback (the largest of the frame's placement passes,
 // active map and neighbours; cleared once per frame); draws use the count
 // clamped to the pool. The next frame's keep fraction for this pass keeps
-// the demand within 95% of the pool, rising slowly once it fits again.
+// the demand within 80% of the pool, rising slowly once it fits again.
 // The pass's placed instances for the per-instance passes (gcShadeCS,
 // gcPrepCS): their dispatch arguments (groups, 1, 1), the total, and per
 // mesh the first instance index (exclusive prefix of the clamped counts).
@@ -1281,10 +1321,14 @@ groupshared uint gcWorkCount[64];
   const uint capacity=gcCapacity[lane>>2][lane&3],state=gcPass.x+lane*8;
   uint count=gcArgs.Load(lane*20+4),demand=gcOverflow.Load(state),before;
   gcOverflow.Store(state,0);
-  const float fit=float(capacity)*.95,target=float(demand)>fit?fit/float(demand):1;
+  // Thin to 80% of the pool: a demand jump of up to a quarter in one frame
+  // (a pan revealing denser ground) still fits, so the over-capacity tail
+  // below, dropped in GPU append order (different clumps every frame), is
+  // not reached while the readback grows the pool.
+  const float fit=float(capacity)*.8,target=float(demand)>fit?fit/float(demand):1;
   const float kept=min(target,1-asfloat(gcOverflow.Load(state+4))+kGcOverflowRecover);
   gcOverflow.Store(state+4,asuint(1-saturate(kept)));
-  gcCounts.InterlockedMax(lane*4,demand,before);
+  gcCounts.InterlockedMax((gcPass.x/(uint(gcGrid.z)*8)*uint(gcGrid.z)+lane)*4,demand,before); // this pass's word
   placed=min(count,capacity);
   gcArgs.Store(lane*20+4,placed);
  }
@@ -1306,6 +1350,40 @@ bool gcWorkSlot(uint i,out uint slot){
  return true;
 }
 
+// The sun casters of a pass, culled per instance once at placement instead
+// of per vertex in every close map: each placed instance of a caster mesh
+// (gcPass.y/z: the mesh mask of the ground_cover_shadows level) joins the
+// list of every enabled close map it lies in (its reach and a tenth of the
+// map for the next frame's camera). Map 0 casts it with the near mesh, maps
+// 1 and 2 with the far mesh (their draw arguments), and those two leave out
+// the instances smaller than a texel and a half of theirs: the shape is
+// chosen per map, never per distance, so panning never changes a tuft's
+// shadow in a map and the cascade blend hides the change between maps. A
+// crossfading tuft's far copy stays out (its near copy casts): one caster
+// per tuft and map. Lists: map s at s * gcPass.w (pool slots) + the pass's
+// region; arguments per pass, map and mesh.
+RWByteAddressBuffer gcCasterArgs:register(u6);
+RWStructuredBuffer<uint> gcCasterSlotOut:register(u7);
+[numthreads(64,1,1)]void gcCasterListCS(uint3 id:SV_DispatchThreadID){
+ uint slot;
+ if(!gcWorkSlot(id.x,slot))return;
+ uint mesh=0;
+ [loop]for(uint m=1;m<uint(gcGrid.z);++m)if(id.x>=gcWork.Load(16+m*4))mesh=m;
+ if((((mesh<32u?gcPass.y:gcPass.z)>>(mesh&31u))&1u)==0)return;
+ const GcInstance inst=gcInstanceOut[slot];
+ if((inst.extra.z&kGcFadeFar)!=0)return;
+ const float r=2*inst.root.w+.5;
+ [unroll]for(uint s=0;s<3;++s){
+  const float4x4 light=shadowLight[s];
+  const float4 c=mul(light,float4(inst.root.xyz,1));
+  const float2 reach=abs(mul((float3x3)light,float3(r,0,0)).xy)+abs(mul((float3x3)light,float3(0,r,0)).xy)+
+                     abs(mul((float3x3)light,float3(0,0,r)).xy);
+  if(((shadowControl.x>>s)&1u)==0||any(abs(c.xy)>1.1*c.w+reach))continue;
+  if(s>0&&inst.root.w<1.5*shadowBias[s].x)continue;
+  uint index;gcCasterArgs.InterlockedAdd((((gcPass.x/(uint(gcGrid.z)*8))*3+s)*uint(gcGrid.z)+mesh)*20+4,1,index);
+  gcCasterSlotOut[s*gcPass.w+gcBase[mesh>>2][mesh&3]+index]=slot;
+ }
+}
 // Sun shadow per placed instance (after gcFinalizeCS clamped the counts):
 // the blocker gap at the tuft's mid height (contact hardening) and the full
 // soft visibility with that gap, from the exact placement values.
@@ -1363,8 +1441,11 @@ bool gcWorkSlot(uint i,out uint slot){
   float3 ndc=clip.xyz/clip.w;
   float4 position=float4(float2(ndc.x*.5+.5,.5-ndc.y*.5)/fogScreen.xy,ndc.z,clip.w);
   float f=nativeFogFactor(border,position);
-  float3 added=borderFogColorAt(at,gcFogColor.rgb)*(1-f);
-  float kept=f*nativeAtmosphereAt(added,position,gcFogColor.rgb,at);
+  // Caves: the volume's light and the exit glow in the fog, exactly as the
+  // native pixel shader tints it (0 elsewhere).
+  float3 caveFog=nativeCaveFogLight(at)+nativeCaveExitGlow(at);
+  float3 added=saturate(borderFogColorAt(at,gcFogColor.rgb)+caveFog)*(1-f);
+  float kept=f*nativeAtmosphereAt(added,position,saturate(gcFogColor.rgb+caveFog),at);
   fog=float4(added,kept);
  }
 #endif
@@ -1433,6 +1514,8 @@ struct GcOut{float4 p:SV_Position;float3 wp:TEXCOORD0;float3 n:TEXCOORD1;float3 
  nointerpolation uint shadowSeed:TEXCOORD14;
  // The tuft's contact-hardening sun visibility (placement); -1 none.
  nointerpolation float sunTuft:TEXCOORD15;
+ // Near/far crossfade (gcFadeWord); 0 none.
+ nointerpolation uint fade:TEXCOORD18;
  // Point lamps and emissive glow at the vertex (cover; the snow pile shades
  // per pixel as terrain).
  float3 lamp:TEXCOORD16;float3 glow:TEXCOORD17;};
@@ -1464,8 +1547,14 @@ float3 gcGroundNormalLoop(Texture2D<float> t,float2 p){
 // depth (the material pass tests EQUAL against the depth prepass).
 struct GcVertexFrame{GcVertex v;GcInstance inst;GcDrawInput drawInput;float3 root;float scale;float2 yaw;float2 stretch;
  float3 tn;float3 nn;float3 wp;float4 p;};
-GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){
- GcVertex v=gcVertices[vertexId];GcInstance inst=gcInstances[gcDrawBase+instanceId];
+// The pixel stage's crossfade word: cut (bits 0-7), far side (8), on (9),
+// and the tuft's hash (16-31) offsetting its dither pattern.
+uint gcFadeWord(GcInstance inst){
+ const uint bits=inst.extra.z;
+ return (bits&kGcFadeOn)!=0?((bits>>20)&0x3ffu)|(inst.extra.w&0xffff0000u):0u;
+}
+GcVertexFrame gcVertexFrameAt(uint vertexId,uint slot){
+ GcVertex v=gcVertices[vertexId];GcInstance inst=gcInstances[slot];
  float3 root=inst.root.xyz;float scale=inst.root.w;
  float2 yaw=gcUnpack2(inst.shape.x),stretch=gcUnpack2(inst.shape.y),tn2=gcUnpack2(inst.shape.z),push=gcUnpack2(inst.shape.w);
  float3 tn=float3(tn2,sqrt(saturate(1-dot(tn2,tn2))));
@@ -1482,7 +1571,7 @@ GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){
  float3 nn=normalize(rn.x*tx+rn.y*ty+rn.z*up);
  // Wind (the shared renderer wind): gust bands travelling downwind plus a
  // per-instance flutter; the authored bend weight keeps roots planted.
- const GcDrawInput drawInput=gcDrawInputs[gcDrawBase+instanceId];
+ const GcDrawInput drawInput=gcDrawInputs[slot];
  float bend=v.ex.y*scale;
  offset.xy+=gcWind.xy*bend*gcWind.z*drawInput.extra.y*(1-tint.a);
  // Units and current game-visible tracks part/press blades (per instance).
@@ -1521,6 +1610,7 @@ GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){
  f.wp=wp;f.p=clip;
  return f;
 }
+GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){return gcVertexFrameAt(vertexId,gcDrawBase+instanceId);}
 GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
  const GcVertex v=f.v;const GcInstance inst=f.inst;const GcDrawInput drawInput=f.drawInput;
@@ -1586,23 +1676,28 @@ GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
 #endif
    lamp+=light.color.rgb*(reachLight*reachLight*wrapFacing*pointVisibility*(light.color.w>0?.65:1));
   }
+  // The bounce light (cave_irradiance.h) at the vertex normal, as the
+  // terrain under the cover takes it per pixel.
+  lamp+=nativeCaveBounce(o.wp,n);
  }
 #endif
  o.lamp=lamp;o.glow=glow;
  o.sunGap=f16tof32(inst.color.w&0xffffu);
  o.shadowSeed=inst.extra.w;
  o.sunTuft=(inst.color.w&0x1000000u)!=0?-1:((inst.color.w>>16)&255u)/255.0;
+ o.fade=gcFadeWord(inst);
  return o;
 }
 // Depth prepass: the same placement, only what the alpha test reads.
 struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;nointerpolation float snowHeightScale:TEXCOORD10;
+ nointerpolation uint fade:TEXCOORD18;
 #if GC_PS_KIND==4
  float2 uv:TEXCOORD3; // strands: their alpha-cut edge (gcStrandClip)
 #endif
 };
 GcDepthOut gcDepthVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
- GcDepthOut o;o.p=f.p;o.wp=f.wp;o.snowHeightScale=f.scale*f.stretch.y;
+ GcDepthOut o;o.p=f.p;o.wp=f.wp;o.snowHeightScale=f.scale*f.stretch.y;o.fade=gcFadeWord(f.inst);
 #if GC_PS_KIND==4
  o.uv=f.v.uv;
 #endif
@@ -1613,8 +1708,11 @@ GcDepthOut gcDepthVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
 // flush_native_shadows uploads that slice's index into shadowControl.y).
 // Depth only: the cover's footprint and buried-snow clips are world-space
 // details under props and under the ground, which cast no visible shadow.
+// Sun caster: one instance of this pass's caster list (gcCasterListCS: in
+// a close map, one per tuft, the far tuft meshes drawn with their near mesh).
+StructuredBuffer<uint> gcCasterSlots:register(t66);
 float4 gcShadowVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID):SV_Position{
- const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
+ const GcVertexFrame f=gcVertexFrameAt(vertexId,gcCasterSlots[gcDrawBase+instanceId]);
  return mul(shadowLight[shadowControl.y],float4(f.wp,1));
 }
 float3 gcRectSample(Texture2D t,float4 rect,float2 uv){
@@ -1684,7 +1782,15 @@ float gcPixelSunVisibility(GcOut i,float3 sun,float3 positionDx,float3 positionD
 // The cover's alpha test, shared by the depth prepass and the material pass:
 // fragments over a prop's current footprint (dithered over its margin) and,
 // for the snow pile, buried fragments.
-void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale){
+void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale,uint fade){
+ // Near/far mesh crossfade: one screen-space dither (interleaved gradient
+ // noise, offset per tuft) split at the cut, so the two meshes of a tuft
+ // cover complementary pixels.
+ [branch]if(fade!=0){
+  const float noise=frac(52.9829189*frac(dot(pixel,float2(.06711056,.00583715)))+(fade>>16)/65536.0);
+  const float cut=(fade&255u)/255.0;
+  clip((fade&256u)!=0?noise-cut:cut-noise-1e-6);
+ }
  // A surviving centre can still have blades or debris crossing a prop. Clip
  // their fragments against the same current footprint, including its margin.
  float blocked=gcObjectMask.SampleLevel(gcClamp,(wp.xy-gcObjectWindow.xy)*gcObjectWindow.zw,0);
@@ -1722,7 +1828,7 @@ void gcStrandClip(float2 uv,float pixels){
 float gcDepth24(float z){return round(saturate(z)*16777215.0)/16777215.0;}
 struct GcDepthResult{float4 rest:SV_Target0;float2 normal:SV_Target1;};
 GcDepthResult gcDepthPS(GcDepthOut i){
- gcCoverClip(i.wp,i.p.xy,i.snowHeightScale);
+ gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.fade);
 #if GC_PS_KIND==4
  gcStrandClip(i.uv,gcStrandPixels(i.uv));
 #endif
@@ -1737,7 +1843,7 @@ GcDepthResult gcDepthPS(GcDepthOut i){
 }
 GcPixel gcPS(GcOut i){
  float3 positionDx=ddx(i.wp),positionDy=ddy(i.wp);
- gcCoverClip(i.wp,i.p.xy,i.snowHeightScale);
+ gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.fade);
 #if GC_PS_KIND==4
  const float strandPixels=gcStrandPixels(i.uv);gcStrandClip(i.uv,strandPixels);
 #endif
@@ -2309,7 +2415,8 @@ enum GcProgram : unsigned {
     gp_trail_vs = gp_depth_ps + 3, gp_trail_ps, gp_trail_full_vs, gp_trail_decay_ps, gp_object_vs, gp_object_ps,
     gp_snow_stamp_vs, gp_snow_stamp_ps, gp_snow_recover_ps, gp_snow_tile_vs, 
     gp_shadow_vs,                 // 2: sun shadow casters: cover, snow pile (no trails)
-    gp_count = gp_shadow_vs + 2};
+    gp_caster_list = gp_shadow_vs + 2, // the sun caster lists of a pass
+    gp_count};
 // The placement shader's per-rule features (its GC_F_* guards).
 enum PlaceFeature : unsigned { pf_edge = 1, pf_cluster = 2, pf_far = 4, pf_trail = 8, pf_pal1 = 16, pf_pal23 = 32,
                                pf_wall = 64, pf_beach = 128, pf_pile = 256 };
@@ -2431,12 +2538,13 @@ void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
     // Sun shadow casters (ground_cover_shadows): cover, snow pile without trails.
     add("gcShadowVS", "vs_5_0", list({{"GC_VS", "1"}}));
     add("gcShadowVS", "vs_5_0", list({{"GC_VS", "1"}, {"GC_VS_SNOW", "1"}, {"GC_SNOW_TRAILS", "0"}}));
+    add("gcCasterListCS", "cs_5_0", nullptr);
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_ground_cover() noexcept {
     gc_place_cs_.Reset(); gc_finalize_cs_.Reset(); gc_paint_cs_.Reset(); gc_fields_cs_.Reset();
-    for (auto& value : gc_shade_cs_) value.Reset();
+    for (auto& value : gc_shade_cs_) value.Reset(); gc_caster_list_cs_.Reset();
     gc_cells_cs_.Reset(); gc_scan_cs_.Reset(); gc_neighbour_cs_.Reset(); gc_habitat_all_cs_.Reset(); gc_build_all_cs_.Reset();
     gc_cell_jobs_.Reset(); gc_cell_job_uav_.Reset(); gc_cell_job_srv_.Reset(); gc_cell_job_capacity_ = 0;
     gc_cell_counts_.Reset(); gc_cell_count_uav_.Reset(); gc_cell_count_srv_.Reset();
@@ -2460,7 +2568,7 @@ void Renderer::release_ground_cover() noexcept {
     for (auto& list : gc_class_rules_) list.clear();
     for (auto& value : gc_round_constants_) value.Reset();
     gc_work_.Reset(); gc_work_uav_.Reset(); gc_work_srv_.Reset();
-    gc_frame_constants_.Reset(); for (auto& value : gc_draw_constants_) value.Reset(); gc_paint_constants_.Reset();
+    gc_frame_constants_.Reset(); for (auto& pass : gc_draw_constants_) for (auto& value : pass) value.Reset(); gc_paint_constants_.Reset();
     gc_trail_vs_.Reset(); gc_trail_ps_.Reset(); gc_trail_full_vs_.Reset(); gc_trail_decay_ps_.Reset();
     gc_object_vs_.Reset();gc_object_ps_.Reset();gc_object_mask_.Reset();gc_object_rtv_.Reset();gc_object_srv_.Reset();
     gc_objects_.Reset();gc_object_input_srv_.Reset();std::vector<FootprintSplat>().swap(gc_object_input_);
@@ -2478,7 +2586,9 @@ void Renderer::release_ground_cover() noexcept {
     gc_snow_segments_.Reset(); gc_snow_segment_srv_.Reset(); gc_snow_segment_capacity_ = 0; gc_snow_index_ = 0;
     gc_snow_valid_ = false; gc_snow_seconds_ = -1; gc_snow_tracks_.clear(); snow_terrain_srv_.Reset();
     gc_vertices_.Reset(); gc_vertex_srv_.Reset(); gc_indices_.Reset(); gc_rules_.Reset(); gc_rule_srv_.Reset();
-    gc_args_.Reset(); gc_args_uav_.Reset(); gc_counts_.Reset(); gc_counts_uav_.Reset();
+    gc_args_.Reset(); gc_args_uav_.Reset(); gc_counts_.Reset(); gc_counts_uav_.Reset(); gc_count_passes_ = 0;
+    gc_caster_slots_.Reset(); for (auto& view : gc_caster_slot_srv_) view.Reset(); gc_caster_slot_uav_.Reset();
+    gc_caster_args_.Reset(); gc_caster_args_uav_.Reset(); gc_caster_args_passes_ = 0;
     gc_overflow_.Reset(); gc_overflow_uav_.Reset(); gc_overflow_passes_ = 0;
     for (auto& value : gc_count_readback_) value.Reset();
     gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
@@ -2487,9 +2597,9 @@ void Renderer::release_ground_cover() noexcept {
     gc_zone_pieces_.Reset(); gc_zone_srv_.Reset(); gc_zone_uploaded_.clear();
     gc_raster_.Reset(); gc_depth_.Reset(); gc_blend_.Reset(); gc_clamp_.Reset(); gc_wrap_.Reset();
     for (auto& value : gc_shadow_vs_) value.Reset();
-    gc_shadow_args_.Reset(); gc_shadow_frame_.Reset(); gc_shadow_ready_ = false;
+    gc_main_casters_ = {}; gc_neighbour_casters_.clear(); gc_shadow_ready_ = false;
     gc_map_.reset(); gc_material_state_.clear(); gc_neighbours_.clear();
-    gc_capacity_.fill(0); gc_instance_capacity_ = 0; gc_readback_head_ = gc_readback_pending_ = 0;
+    for (auto& pass : gc_capacity_) pass.fill(0); gc_pass_count_ = 0; gc_instance_capacity_ = 0; gc_readback_head_ = gc_readback_pending_ = 0;
     gc_map_generation_ = 0; gc_failed_ = false; gc_grow_ = false;
     if (gc_compile_.valid()) gc_compile_ = {}; // waits for a running compile
 }
@@ -2509,9 +2619,12 @@ void Renderer::release_ground_cover_world() noexcept {
     gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
     gc_shade_input_.Reset(); gc_shade_input_uav_.Reset();
     gc_draw_inputs_.Reset(); gc_draw_input_srv_.Reset(); gc_draw_input_uav_.Reset();
-    for (auto& value : gc_draw_constants_) value.Reset();
+    gc_caster_slots_.Reset(); for (auto& view : gc_caster_slot_srv_) view.Reset(); gc_caster_slot_uav_.Reset();
+    gc_caster_args_.Reset(); gc_caster_args_uav_.Reset(); gc_caster_args_passes_ = 0;
+    for (auto& pass : gc_draw_constants_) for (auto& value : pass) value.Reset();
+    gc_main_casters_ = {}; gc_neighbour_casters_.clear();
     // Counts still in flight describe the previous map's pools.
-    gc_capacity_.fill(0); gc_instance_capacity_ = 0; gc_grow_ = false; gc_readback_pending_ = 0;
+    for (auto& pass : gc_capacity_) pass.fill(0); gc_pass_count_ = 0; gc_instance_capacity_ = 0; gc_grow_ = false; gc_readback_pending_ = 0;
     std::vector<std::uint32_t>().swap(gc_tile_classes_); gc_tile_classes_key_ = UINT64_MAX;
     std::vector<std::uint8_t>().swap(gc_tree_mask_);
     gc_object_mask_.Reset(); gc_object_rtv_.Reset(); gc_object_srv_.Reset();
@@ -2611,6 +2724,7 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
         if (FAILED(hr = blob_ps(gp_depth_ps + k, gc_depth_ps_[k]))) return hr;
     for (unsigned k = 0; k < gc_shadow_vs_.size(); ++k)
         if (FAILED(hr = blob_vs(gp_shadow_vs + k, gc_shadow_vs_[k]))) return hr;
+    if (FAILED(hr = blob_cs(gp_caster_list, gc_caster_list_cs_))) return hr;
     for (UINT round = 0; round < kGcMaxRounds; ++round) { // GcRun: the round index, bound per round
         const UINT values[4]{round, 0, 0, 0};
         if (FAILED(hr = make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, values, gc_round_constants_[round],
@@ -2742,15 +2856,12 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
     // atomics) and the per-mesh counts read back to size the pools.
     for (unsigned m = 0; m < gm_count; ++m)
         gc_args_template_[m] = {gc_mesh_index_count_[m], 0u, gc_mesh_first_index_[m], 0u, 0u};
+    gc_caster_args_.Reset(); gc_caster_args_uav_.Reset(); gc_caster_args_passes_ = 0; // rebuilt from this template
     if (FAILED(hr = make_buffer(device_.Get(), UINT(sizeof(gc_args_template_)), D3D11_BIND_UNORDERED_ACCESS,
             D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0, gc_args_template_.data(), gc_args_)) ||
-        FAILED(hr = make_raw_uav(device_.Get(), gc_args_.Get(), UINT(sizeof(gc_args_template_)), gc_args_uav_)) ||
-        FAILED(hr = make_buffer(device_.Get(), kGcCountWords * 4, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0,
-            nullptr, gc_counts_)) ||
-        FAILED(hr = make_raw_uav(device_.Get(), gc_counts_.Get(), kGcCountWords * 4, gc_counts_uav_))) return hr;
-    for (auto& readback : gc_count_readback_)
-        if (FAILED(hr = make_buffer(device_.Get(), kGcCountWords * 4, 0, 0, 0, nullptr, readback, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ)))
-            return hr;
+        FAILED(hr = make_raw_uav(device_.Get(), gc_args_.Get(), UINT(sizeof(gc_args_template_)), gc_args_uav_))) return hr;
+    // The per-pass counts and their readbacks are sized by the passes a frame
+    // places (render_ground_cover).
     if (FAILED(hr = make_buffer(device_.Get(), sizeof(GroundCoverConstants), D3D11_BIND_CONSTANT_BUFFER, 0, 0, nullptr,
             gc_frame_constants_, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE)) ||
         FAILED(hr = make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, nullptr, gc_paint_constants_,
@@ -3115,32 +3226,138 @@ void Renderer::apply_neighbour_tile_families(GcNeighbour& n) noexcept try {
     std::vector<std::uint8_t>().swap(n.base_lanes);
     // Terrain material blend: the neighbour's own families and plain cells
     // in the blend half of its contact grid (the same rows the active map
-    // builds). Without them its transitions keep their tile art.
+    // builds; update_terrain_tile_blend_seams). Without them its transitions
+    // keep their tile art.
     if (n.blend_input && n.contact_rows.size() == std::size_t(n.tiles_x) * n.tiles_y) {
         const auto& input = *n.blend_input;
-        char text[480];
         if (families.signatures.size() == input.slots && input.tiles_x == n.tiles_x && input.tiles_y == n.tiles_y) {
-            std::size_t blended = 0, plain = 0, bed = 0;
-            const auto rows_start = std::chrono::steady_clock::now();
-            const auto rows = owned_terrain_tile_blend_rows(input, families, blended, plain, bed);
-            const double rows_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rows_start).count();
-            auto grid = std::move(n.contact_rows);
-            grid.insert(grid.end(), rows.begin(), rows.end());
-            ComPtr<ID3D11ShaderResourceView> tiles;
-            const bool ok = SUCCEEDED(make_grid_srv(device_.Get(), n.tiles_x, n.tiles_y * 2, DXGI_FORMAT_R32G32B32A32_UINT,
-                grid.data(), n.tiles_x * 16u, tiles));
-            if (ok) n.contact.tiles = tiles;
-            std::snprintf(text, sizeof(text), "map=%s terrain_tile_blend=%s %zu of %zu tiles near transitions blend, %zu plain materials, %zu liquid-bed families, rows %.2f ms (%s)",
-                n.name.c_str(), ok ? "ready" : "omitted reason=grid_upload_failed", blended, rows.size(), plain, bed, rows_ms, families.source.c_str());
-        } else {
-            std::snprintf(text, sizeof(text), "map=%s terrain_tile_blend=omitted reason=no_families (%s)", n.name.c_str(), families.source.c_str());
+            n.blend_vertex = owned_terrain_tile_vertex_families(input, families);
+            n.blend_drawable = owned_terrain_tile_blend_drawable(input, families);
+            n.blend_families = std::make_shared<const TerrainTileFamilies>(families);
+            update_terrain_tile_blend_seams();
+            return;
         }
+        char text[320];
+        std::snprintf(text, sizeof(text), "map=%s terrain_tile_blend=omitted reason=no_families (%s)", n.name.c_str(), families.source.c_str());
         bridge_neighbour_diagnostic(text);
     }
     n.blend_input.reset(); std::vector<std::array<std::uint32_t,4>>().swap(n.contact_rows);
 } catch (...) {
     n.blend_input.reset(); std::vector<std::array<std::uint32_t,4>>().swap(n.contact_rows);
+    n.blend_families.reset(); n.blend_vertex.clear(); n.blend_drawable.clear();
     bridge_neighbour_diagnostic("neighbour tile families could not be applied; its transitions keep their tile art");
+}
+
+void Renderer::update_terrain_tile_blend_seams() noexcept try {
+    // Every map whose blend inputs are in: the active map, then the
+    // neighbours. placed: its layout tile origin is known, so it shares edges.
+    struct Map {
+        std::string name; long long x = 0, y = 0; UINT w = 0, h = 0; bool placed = false;
+        const TerrainTileFamilies* families = nullptr; const TerrainTileBlendInput* input = nullptr;
+        const std::vector<std::uint32_t>* vertex = nullptr; std::vector<std::uint32_t>* edge = nullptr;
+        const std::set<std::string>* drawable = nullptr;
+        const std::vector<std::array<std::uint32_t,4>>* contact = nullptr;
+        bool built = false; GcNeighbour* neighbour = nullptr;
+    };
+    std::vector<Map> maps;
+    if (tile_blend_input_ && contact_tile_rows_.size() == std::size_t(contact_tiles_x_) * contact_tiles_y_ &&
+        tile_blend_input_->tiles_x == contact_tiles_x_ && tile_blend_input_->tiles_y == contact_tiles_y_) {
+        Map m; m.name = terrain_layout_name_; m.placed = !m.name.empty();
+        m.x = std::llround(terrain_layout_origin_[0] * .5); m.y = std::llround(terrain_layout_origin_[1] * .5);
+        m.w = contact_tiles_x_; m.h = contact_tiles_y_; m.families = &tile_families_; m.input = tile_blend_input_.get();
+        m.vertex = &tile_blend_vertex_; m.edge = &tile_blend_edge_; m.drawable = &tile_blend_drawable_; m.contact = &contact_tile_rows_; m.built = tile_blend_rows_;
+        maps.push_back(std::move(m));
+    }
+    for (auto& n : gc_neighbours_) {
+        if (!n.blend_input || !n.blend_families || n.blend_vertex.empty()) continue;
+        Map m; m.name = neighbour_map_name(n.name); m.placed = true;
+        m.x = std::llround(n.layout_origin[0] * .5); m.y = std::llround(n.layout_origin[1] * .5);
+        m.w = n.tiles_x; m.h = n.tiles_y; m.families = n.blend_families.get(); m.input = n.blend_input.get();
+        m.vertex = &n.blend_vertex; m.edge = &n.blend_edge; m.drawable = &n.blend_drawable; m.contact = &n.contact_rows; m.built = n.blend_rows; m.neighbour = &n;
+        maps.push_back(std::move(m));
+    }
+    for (auto& self : maps) {
+        // Its edge families: on each perimeter vertex other placed maps also
+        // hold, the vertex family of the first of those maps (itself
+        // included) by name whose family every one of them can draw.
+        std::vector<std::uint32_t> edge;
+        std::size_t shared = 0;
+        if (self.placed) {
+            std::map<std::string, std::uint32_t> ids;
+            for (const auto& [id, name] : self.families->names) ids.emplace(name, id);
+            std::vector<const Map*> here;
+            const auto visit = [&](UINT vx, UINT vy) {
+                const long long X = self.x + vx, Y = self.y + vy;
+                here.assign(1, &self);
+                for (const auto& o : maps)
+                    if (&o != &self && o.placed && X >= o.x && Y >= o.y && X <= o.x + o.w && Y <= o.y + o.h) here.push_back(&o);
+                if (here.size() < 2) return;
+                ++shared;
+                std::sort(here.begin(), here.end(), [](const Map* a, const Map* b) { return a->name < b->name; });
+                const std::string* chosen = nullptr; const std::string* first_name = nullptr;
+                for (const Map* c : here) {
+                    const std::uint32_t f = (*c->vertex)[std::size_t(Y - c->y) * (c->w + 1) + std::size_t(X - c->x)];
+                    const auto name = c->families->names.find(f);
+                    if (!f || name == c->families->names.end()) continue;
+                    if (!first_name) first_name = &name->second;
+                    if (std::all_of(here.begin(), here.end(), [&](const Map* m) { return m->drawable->count(name->second) != 0; })) {
+                        chosen = &name->second; break;
+                    }
+                }
+                if (!chosen) {
+                    // No family every map here can draw: each keeps its own.
+                    if (first_name && tile_blend_seam_unmatched_.insert(self.name + "/" + *first_name).second) {
+                        char text[320];
+                        std::snprintf(text, sizeof(text), "map=%s terrain_tile_seam no_common_family first=\"%s\" from=%s; the maps keep their own families there",
+                            self.name.c_str(), first_name->c_str(), here.front()->name.c_str());
+                        bridge_neighbour_diagnostic(text);
+                    }
+                    return;
+                }
+                const auto id = ids.find(*chosen);
+                if (id == ids.end()) return; // drawable here, so named in its profile
+                if (edge.empty()) edge.assign(std::size_t(self.w + 1) * (self.h + 1), 0u);
+                edge[std::size_t(vy) * (self.w + 1) + vx] = id->second;
+            };
+            for (UINT vx = 0; vx <= self.w; ++vx) { visit(vx, 0); visit(vx, self.h); }
+            for (UINT vy = 1; vy < self.h; ++vy) { visit(0, vy); visit(self.w, vy); }
+        }
+        if (self.built && edge == *self.edge) continue;
+        std::size_t blended = 0, plain = 0, bed = 0;
+        std::set<std::uint32_t> unmatched;
+        const auto rows_start = std::chrono::steady_clock::now();
+        const auto rows = owned_terrain_tile_blend_rows(*self.input, *self.families, edge, blended, plain, bed, unmatched);
+        const double rows_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rows_start).count();
+        for (const auto f : unmatched) {
+            const auto name = self.families->names.find(f);
+            const std::string family = name != self.families->names.end() ? name->second : std::to_string(f);
+            if (!tile_blend_seam_unmatched_.insert(self.name + "/" + family).second) continue;
+            char text[320];
+            std::snprintf(text, sizeof(text), "map=%s terrain_tile_seam unmatched_family=\"%s\" reason=no_plain_cell; its own family stays",
+                self.name.c_str(), family.c_str());
+            bridge_neighbour_diagnostic(text);
+        }
+        std::vector<std::array<std::uint32_t,4>> grid(*self.contact);
+        grid.insert(grid.end(), rows.begin(), rows.end());
+        ComPtr<ID3D11ShaderResourceView> tiles;
+        const bool ok = SUCCEEDED(make_grid_srv(device_.Get(), self.w, self.h * 2, DXGI_FORMAT_R32G32B32A32_UINT,
+            grid.data(), self.w * 16u, tiles));
+        const bool rebuilt = self.built;
+        if (ok) {
+            *self.edge = std::move(edge);
+            if (self.neighbour) { self.neighbour->contact.tiles = tiles; self.neighbour->blend_rows = true; }
+            else { contact_maps_.tiles = tiles; tile_blend_rows_ = true; }
+            if (rebuilt) terrain_bake_rows_changed(self.neighbour ? self.neighbour->contact_map : 0u);
+        }
+        char text[480];
+        std::snprintf(text, sizeof(text), "%s%s terrain_tile_blend=%s %zu of %zu tiles near transitions blend, %zu plain materials, %zu liquid-bed families, shared edge vertices %zu, rows %.2f ms (%s)",
+            self.neighbour ? "map=" : "", self.neighbour ? self.name.c_str() : "active", ok ? (rebuilt ? "rebuilt" : "ready") : "omitted reason=grid_upload_failed",
+            blended, rows.size(), plain, bed, shared, rows_ms, self.families->source.c_str());
+        if (self.neighbour) bridge_neighbour_diagnostic(text);
+        else bridge_append_probe_event("terrain_tile_blend", text);
+    }
+} catch (...) {
+    bridge_neighbour_diagnostic("terrain material blend seams could not be updated; the rows keep their previous edge families");
 }
 
 HRESULT Renderer::prepare_ground_cover_neighbour(GcNeighbour& n) noexcept {
@@ -3393,6 +3610,21 @@ HRESULT Renderer::gc_ensure_cell_jobs(UINT cells) {
     return hr;
 }
 
+// The tuft meshes only the active map places (neighbour passes use their far
+// meshes): the neighbour passes never overwrite these pools.
+constexpr std::uint64_t kGcKeptByNeighbours = (std::uint64_t(1) << gm_blades) | (std::uint64_t(1) << gm_flower) |
+    (std::uint64_t(1) << gm_reed) | (std::uint64_t(1) << gm_cattail) | (std::uint64_t(1) << gm_seagrass);
+// The far mesh of a near tuft mesh (the coarser close maps cast with it); the mesh itself otherwise.
+static unsigned gc_shadow_far_mesh(unsigned mesh) {
+    return mesh == gm_blades ? gm_blades_far : mesh == gm_flower ? gm_flower_far : mesh == gm_reed ? gm_reed_far :
+        mesh == gm_cattail ? gm_cattail_far : mesh == gm_seagrass ? gm_seagrass_far : mesh;
+}
+// The near mesh a far tuft mesh casts with; the mesh itself otherwise.
+static unsigned gc_shadow_near_mesh(unsigned mesh) {
+    return mesh == gm_blades_far ? gm_blades : mesh == gm_flower_far ? gm_flower : mesh == gm_reed_far ? gm_reed :
+        mesh == gm_cattail_far ? gm_cattail : mesh == gm_seagrass_far ? gm_seagrass : mesh;
+}
+
 HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<float,16>& world_to_clip) noexcept {
  PERF06_SCOPE("ground_cover_total");
     const int level = configured_integer(debug_overlay_.config(), "ground_cover", 2);
@@ -3517,7 +3749,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     if(FAILED(update_contact_blend_maps()))
         return fail("EID3D11 snow terrain art unavailable; cover omitted.");
     const Quality quality = quality_level(level);
-    if (level != gc_level_) { gc_level_ = level; gc_capacity_.fill(0); gc_instances_.Reset(); }
+    if (level != gc_level_) { gc_level_ = level; for (auto& pass : gc_capacity_) pass.fill(0); gc_instances_.Reset(); }
 
     // Camera.
     float inverse[16]{};
@@ -3561,21 +3793,76 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         gc_readback_head_ = (gc_readback_head_ + 1) % UINT(gc_count_readback_.size()); --gc_readback_pending_;
         {
             const auto* counts = static_cast<const std::uint32_t*>(mapped.pData);
-            for (unsigned m = 0; m < gm_count; ++m)
-                if (counts[m] > gc_capacity_[m] - gc_capacity_[m] / 10) { // grow at 90%, before the 95% thinning
-                    gc_capacity_[m] = counts[m] + counts[m] / 4 + 64; gc_grow_ = true;
+            // Grow ahead of demand: at 70% of a pass's region (before the 80%
+            // thinning) to one and a half times the demand.
+            for (unsigned p = 0; p < gc_count_passes_ && p < gc_capacity_.size(); ++p)
+                for (unsigned m = 0; m < gm_count; ++m) {
+                    const UINT demand = counts[p * gm_count + m];
+                    auto& capacity = gc_capacity_[p][m];
+                    if (demand > capacity - capacity * 3 / 10) { capacity = demand + demand / 2 + 64; gc_grow_ = true; }
                 }
             context_->Unmap(staging.Get(), 0);
         }
     }
-    if (!gc_instances_ || gc_grow_) {
+    // One pool region per placement pass: the active map and every neighbour map.
+    const UINT placement_passes = UINT(1 + gc_neighbours_.size());
+    if (gc_capacity_.size() < placement_passes) { gc_capacity_.resize(placement_passes); gc_base_.resize(placement_passes); }
+    if (gc_draw_constants_.size() < placement_passes) gc_draw_constants_.resize(placement_passes);
+    // The count buffer (per pass and mesh) and its readbacks follow the passes;
+    // counts still in flight in the smaller buffers are dropped.
+    if (placement_passes > gc_count_passes_) {
+        const UINT bytes = placement_passes * gm_count * 4;
+        gc_counts_.Reset(); gc_counts_uav_.Reset(); gc_count_passes_ = 0;
+        gc_readback_head_ = gc_readback_pending_ = 0;
+        HRESULT hr = make_buffer(device_.Get(), bytes, D3D11_BIND_UNORDERED_ACCESS, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0, nullptr, gc_counts_);
+        if (SUCCEEDED(hr)) hr = make_raw_uav(device_.Get(), gc_counts_.Get(), bytes, gc_counts_uav_);
+        for (auto& readback : gc_count_readback_) {
+            readback.Reset();
+            if (SUCCEEDED(hr)) hr = make_buffer(device_.Get(), bytes, 0, 0, 0, nullptr, readback, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ);
+        }
+        if (FAILED(hr)) return fail("EID3D11 ground cover: count buffer allocation failed; ground cover omitted.");
+        gc_count_passes_ = placement_passes;
+    }
+    // The sun caster lists' draw arguments, per pass, close map and mesh: map 0
+    // draws every tuft with its near mesh, maps 1 and 2 with its far mesh; the
+    // counts start at zero each frame.
+    if (placement_passes > gc_caster_args_passes_) {
+        gc_caster_args_.Reset(); gc_caster_args_uav_.Reset(); gc_caster_args_passes_ = 0;
+        gc_caster_args_template_.assign(std::size_t(placement_passes) * 3 * gm_count, {});
+        for (std::size_t k = 0; k < gc_caster_args_template_.size(); ++k) {
+            const unsigned mesh = unsigned(k % gm_count), map = unsigned(k / gm_count % 3);
+            gc_caster_args_template_[k] = gc_args_template_[map == 0 ? gc_shadow_near_mesh(mesh) : gc_shadow_far_mesh(mesh)];
+        }
+        const UINT bytes = placement_passes * 3 * gm_count * 20;
+        HRESULT hr = make_buffer(device_.Get(), bytes, D3D11_BIND_UNORDERED_ACCESS,
+            D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0, gc_caster_args_template_.data(), gc_caster_args_);
+        if (SUCCEEDED(hr)) hr = make_raw_uav(device_.Get(), gc_caster_args_.Get(), bytes, gc_caster_args_uav_);
+        if (FAILED(hr)) return fail("EID3D11 ground cover: caster argument allocation failed; ground cover omitted.");
+        gc_caster_args_passes_ = placement_passes;
+    }
+    if (!gc_instances_ || gc_grow_ || placement_passes != gc_pass_count_) {
         if (!gc_instances_) for (const auto& rule : rule_table()) { // first estimate (densest rule); demand corrects it
             const float band = .5f * (rule.lod_near + rule.lod_far) * quality.distance;
-            gc_capacity_[rule.mesh] = std::max(gc_capacity_[rule.mesh], UINT(rule.density * quality.density * 3.14159f * band * band * .3f) + 64);
+            gc_capacity_[0][rule.mesh] = std::max(gc_capacity_[0][rule.mesh], UINT(rule.density * quality.density * 3.14159f * band * band * .3f) + 64);
         }
+        // A neighbour pass without a region yet starts from the active map's (its
+        // tufts go to the far meshes, so a far mesh takes its near mesh's share
+        // too); its own demand corrects it within a few frames.
+        for (unsigned p = 1; p < placement_passes; ++p)
+            for (unsigned m = 0; m < gm_count; ++m) {
+                if (gc_capacity_[p][m] || (kGcKeptByNeighbours >> m) & 1u) continue;
+                const unsigned near_mesh = gc_shadow_near_mesh(m);
+                gc_capacity_[p][m] = gc_capacity_[0][m] + (near_mesh != m ? gc_capacity_[0][near_mesh] : 0) + 64;
+            }
         UINT total = 0;
-        for (unsigned m = 0; m < gm_count; ++m) { gc_base_[m] = total; total += gc_capacity_[m]; }
-        if (total > kGcStageLimit) return fail("EID3D11 ground cover: instance pools exceed one shadow dispatch; ground cover omitted.");
+        for (unsigned p = 0; p < placement_passes; ++p) {
+            UINT pass_total = 0;
+            for (unsigned m = 0; m < gm_count; ++m) { gc_base_[p][m] = total + pass_total; pass_total += gc_capacity_[p][m]; }
+            // One pass's instances are one per-instance dispatch.
+            if (pass_total > kGcStageLimit) return fail("EID3D11 ground cover: instance pools exceed one shadow dispatch; ground cover omitted.");
+            total += pass_total;
+        }
+        gc_pass_count_ = placement_passes;
         // The pool buffers keep a quarter more than the assigned slots. A mesh that
         // outgrows its share re-partitions inside them (only the bases move;
         // every slot is rewritten each frame), so the ~135 MB of pool buffers
@@ -3583,7 +3870,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         // one Map or Present 10-20 ms (zone 3 route, frames 2158/2275/2301).
         HRESULT hr = S_OK;
         if (!gc_instances_ || total > gc_instance_capacity_) {
-            const UINT slots = UINT(std::min<std::uint64_t>(kGcStageLimit, std::uint64_t(total) + total / 4));
+            const UINT slots = total + total / 4;
             gc_instance_capacity_ = 0;
             gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
             gc_shade_input_.Reset(); gc_shade_input_uav_.Reset();
@@ -3602,14 +3889,29 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
                 D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 32, nullptr, gc_draw_inputs_);
             if (SUCCEEDED(hr)) hr = make_structured_srv(device_.Get(), gc_draw_inputs_.Get(), slots, gc_draw_input_srv_);
             if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(gc_draw_inputs_.Get(), &u, &gc_draw_input_uav_);
+            // Sun caster lists (gcCasterListCS), 4 bytes per pool slot and close map;
+            // each map's list third has its own view.
+            gc_caster_slots_.Reset(); for (auto& view : gc_caster_slot_srv_) view.Reset(); gc_caster_slot_uav_.Reset();
+            if (SUCCEEDED(hr)) hr = make_buffer(device_.Get(), slots * 12, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 4, nullptr, gc_caster_slots_);
+            for (UINT map = 0; map < 3 && SUCCEEDED(hr); ++map) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{}; v.Format = DXGI_FORMAT_UNKNOWN; v.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+                v.Buffer.FirstElement = map * slots; v.Buffer.NumElements = slots;
+                hr = device_->CreateShaderResourceView(gc_caster_slots_.Get(), &v, &gc_caster_slot_srv_[map]);
+            }
+            if (SUCCEEDED(hr)) {
+                D3D11_UNORDERED_ACCESS_VIEW_DESC lists = u; lists.Buffer.NumElements = slots * 3;
+                hr = device_->CreateUnorderedAccessView(gc_caster_slots_.Get(), &lists, &gc_caster_slot_uav_);
+            }
             if (SUCCEEDED(hr)) gc_instance_capacity_ = slots;
         }
-        // Each mesh's pool base is constant until the pool is partitioned again.
-        for (unsigned mesh = 0; mesh < gm_count && SUCCEEDED(hr); ++mesh) {
-            const std::uint32_t values[4]{gc_base_[mesh], 0, 0, 0};
-            gc_draw_constants_[mesh].Reset();
-            hr = make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, values, gc_draw_constants_[mesh], D3D11_USAGE_IMMUTABLE);
-        }
+        // Each pass and mesh's pool base is constant until the pool is partitioned again.
+        for (unsigned p = 0; p < placement_passes; ++p)
+            for (unsigned mesh = 0; mesh < gm_count && SUCCEEDED(hr); ++mesh) {
+                const std::uint32_t values[4]{gc_base_[p][mesh], 0, 0, 0};
+                gc_draw_constants_[p][mesh].Reset();
+                hr = make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, values, gc_draw_constants_[p][mesh], D3D11_USAGE_IMMUTABLE);
+            }
         if (FAILED(hr)) return fail("EID3D11 ground cover: instance pool allocation failed; ground cover omitted.");
         gc_grow_ = false;
     }
@@ -3904,6 +4206,11 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     c.window[0] = float(x0); c.window[1] = float(y0); c.window[2] = float(x1 - x0); c.window[3] = kCellSize;
     c.grid[0] = float(ambient_tiles_x_); c.grid[1] = float(ambient_tiles_y_);c.grid[2]=float(gm_count);c.grid[3]=float(height_);
     c.quality[0] = quality.distance; c.quality[1] = quality.density; c.quality[2] = 0.f; c.quality[3] = float(ambient_zone_);
+    {   // The caster mesh mask of the ground_cover_shadows level (gcCasterListCS).
+        const std::uint64_t casters = gc_shadow_caster_mask(configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1));
+        c.pass[1] = std::uint32_t(casters); c.pass[2] = std::uint32_t(casters >> 32);
+        c.pass[3] = gc_instance_capacity_; // each close map's list third starts at map * pool slots
+    }
     // The shared renderer wind (weather_wind.h): direction, spells, storms, gusts.
     const WeatherWindGpu& shared_wind = weather_wind();
     const bool sheltered = ambient_zone_ == ambient::zone_cave || ambient_zone_ == ambient::zone_gipat_cave;
@@ -3963,7 +4270,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     const float bark[4]{412 / 512.f, 370 / 512.f, 88 / 512.f, 134 / 512.f}, end[4]{435 / 512.f, 8 / 512.f, 65 / 512.f, 67 / 512.f},
                 stone[4]{0, 64 / 256.f, 200 / 256.f, 192 / 256.f};
     std::memcpy(c.bark_rect, bark, sizeof(bark)); std::memcpy(c.end_rect, end, sizeof(end)); std::memcpy(c.stone_rect, stone, sizeof(stone));
-    for (unsigned k = 0; k < gm_count; ++k) { c.capacity[k] = gc_capacity_[k]; c.base[k] = gc_base_[k]; }
+    for (unsigned k = 0; k < gm_count; ++k) { c.capacity[k] = gc_capacity_[0][k]; c.base[k] = gc_base_[0][k]; }
     c.view[0] = reach;
     // The trail texture spans its whole capacity at fixed world texels from
     // the window origin, so a scroll is an exact whole-texel shift.
@@ -4158,6 +4465,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
 
     // Placement.
     context_->UpdateSubresource(gc_args_.Get(), 0, nullptr, gc_args_template_.data(), 0, 0);
+    if (gc_caster_args_) context_->UpdateSubresource(gc_caster_args_.Get(), 0, nullptr, gc_caster_args_template_.data(), 0, 0);
     const UINT zero_counts[4]{};
     context_->ClearUnorderedAccessViewUint(gc_counts_uav_.Get(), zero_counts);
     ID3D11ShaderResourceView* place_srvs[18]{nullptr, nullptr, ambient_area_srv_.Get(), ambient_height_srv_.Get(), ambient_ground_srv_.Get(),
@@ -4171,34 +4479,16 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     context_->CSSetShaderResources(50, 1, gc_zone_srv_.GetAddressOf());
     context_->CSSetShaderResources(51, 1, &snow_srv);
     // This frame's sun cascades for the per-instance blocker search (gcSunGap).
-    // The compute slots it borrows are restored after placement.
-    ComPtr<ID3D11Buffer> saved_cs_shadow, saved_cs_history; ComPtr<ID3D11SamplerState> saved_cs_gather;
-    context_->CSGetConstantBuffers(2, 1, saved_cs_shadow.GetAddressOf());
-    context_->CSGetConstantBuffers(6, 1, saved_cs_history.GetAddressOf());
-    context_->CSGetSamplers(10, 1, saved_cs_gather.GetAddressOf());
-    // The placement stages also borrow CS u5-u7, t54-t60, b12 and b13, which
-    // fce219b's single pass left untouched (the native flush binds u6 itself).
-    std::array<ComPtr<ID3D11UnorderedAccessView>, 3> saved_cs_uavs; std::array<ComPtr<ID3D11ShaderResourceView>, 8> saved_cs_stage;
-    ComPtr<ID3D11Buffer> saved_cs_place, saved_cs_run;
-    {
-        ID3D11UnorderedAccessView* views[3]{}; context_->CSGetUnorderedAccessViews(5, 3, views);
-        for (unsigned k = 0; k < 3; ++k) saved_cs_uavs[k].Attach(views[k]);
-        ID3D11ShaderResourceView* stage[8]{}; context_->CSGetShaderResources(54, 8, stage);
-        for (unsigned k = 0; k < 8; ++k) saved_cs_stage[k].Attach(stage[k]);
-        context_->CSGetConstantBuffers(12, 1, saved_cs_place.GetAddressOf());
-        context_->CSGetConstantBuffers(13, 1, saved_cs_run.GetAddressOf());
-    }
-    const auto restore_cs_shadow = [&] {
-        context_->CSSetConstantBuffers(2, 1, saved_cs_shadow.GetAddressOf());
-        context_->CSSetConstantBuffers(6, 1, saved_cs_history.GetAddressOf());
-        context_->CSSetSamplers(10, 1, saved_cs_gather.GetAddressOf());
-        ID3D11UnorderedAccessView* views[3]{saved_cs_uavs[0].Get(), saved_cs_uavs[1].Get(), saved_cs_uavs[2].Get()};
-        context_->CSSetUnorderedAccessViews(5, 3, views, nullptr);
-        ID3D11ShaderResourceView* stage[8]{};
-        for (unsigned k = 0; k < 8; ++k) stage[k] = saved_cs_stage[k].Get();
-        context_->CSSetShaderResources(54, 8, stage);
-        context_->CSSetConstantBuffers(12, 1, saved_cs_place.GetAddressOf());
-        context_->CSSetConstantBuffers(13, 1, saved_cs_run.GetAddressOf());
+    // Placement binds every compute slot it reads. Afterwards it unbinds the
+    // borrowed b2, b6, b12, b13 and s10 (the stages unbind u0-u7 and
+    // t54-t61 themselves); every later compute pass binds its own inputs.
+    const auto unbind_cs_placement = [&] {
+        ID3D11Buffer* no_buffer = nullptr; ID3D11SamplerState* no_sampler = nullptr;
+        context_->CSSetConstantBuffers(2, 1, &no_buffer);
+        context_->CSSetConstantBuffers(6, 1, &no_buffer);
+        context_->CSSetConstantBuffers(12, 1, &no_buffer);
+        context_->CSSetConstantBuffers(13, 1, &no_buffer);
+        context_->CSSetSamplers(10, 1, &no_sampler);
     };
     context_->CSSetConstantBuffers(2, 1, native_shadow_constants_.GetAddressOf());
     context_->CSSetShaderResources(9, 1, native_shadow_depth_srv_.GetAddressOf());
@@ -4285,7 +4575,16 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             context_->CSSetShaderResources(55, 1, no_stage);
             ++dispatches;
         }
-        context_->CSSetUnorderedAccessViews(0, 8, no_uavs, nullptr); // u5-u7, t54-t60, b12, b13 return in restore_cs_shadow
+        if (sun_maps && (c.pass[1] | c.pass[2]) && gc_caster_list_cs_ && gc_caster_args_uav_ && gc_caster_slot_uav_) {
+            ID3D11UnorderedAccessView* lists[2]{gc_caster_args_uav_.Get(), gc_caster_slot_uav_.Get()};
+            context_->CSSetUnorderedAccessViews(6, 2, lists, nullptr);
+            context_->CSSetShaderResources(55, 1, gc_work_srv_.GetAddressOf());
+            context_->CSSetShader(gc_caster_list_cs_.Get(), nullptr, 0);
+            context_->DispatchIndirect(gc_work_.Get(), 0);
+            context_->CSSetShaderResources(55, 1, no_stage);
+            ++dispatches;
+        }
+        context_->CSSetUnorderedAccessViews(0, 8, no_uavs, nullptr);
         return dispatches;
     };
     // The active map: each window cell tested once (gcCellsCS) into per-class
@@ -4360,7 +4659,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     context_->CSSetShaderResources(49, 1, no_srvs);
     context_->CSSetShaderResources(51, 1, no_srvs);
     context_->CSSetShaderResources(9, 1, no_srvs);
-    restore_cs_shadow();
+    unbind_cs_placement();
     context_->CSSetShader(nullptr, nullptr, 0);
     perf_native_compute_dispatches_ += place_dispatches; native_frame_stats_.native_compute_dispatches += place_dispatches;
 
@@ -4435,39 +4734,36 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     (void)bind_world_fog();
     // Per instance and frame (gcPrepCS): fog, atmosphere and cloud shadow at
     // the tuft's mid height (the world's fog constants, froxels, sky probe and
-    // cloud shadow) and the wind sway. Runs after each placement pass, before
-    // its draws; the compute slots it borrows are restored after it.
-    ComPtr<ID3D11Buffer> fog_constants; context_->PSGetConstantBuffers(10, 1, fog_constants.GetAddressOf());
-    std::array<ComPtr<ID3D11ShaderResourceView>, 3> fog_views;
-    { ID3D11ShaderResourceView* views[3]{}; context_->PSGetShaderResources(10, 3, views); for (unsigned k = 0; k < 3; ++k) fog_views[k].Attach(views[k]); }
-    ComPtr<ID3D11SamplerState> fog_sampler; context_->PSGetSamplers(7, 1, fog_sampler.GetAddressOf());
+    // cloud shadow, from their owners exactly as bind_world_fog binds them for
+    // the pixel stage) and the wind sway. Runs after each placement pass,
+    // before its draws; it unbinds the compute slots it used.
     const auto prep_pass = [&](bool neighbour) {
         ID3D11ShaderResourceView* no_vs_inputs[2]{};
         context_->VSSetShaderResources(3, 2, no_vs_inputs); // the pool and its draw inputs are written
-        ComPtr<ID3D11Buffer> saved_constants; context_->CSGetConstantBuffers(10, 1, saved_constants.GetAddressOf());
-        ID3D11ShaderResourceView* saved_views[3]{}; context_->CSGetShaderResources(10, 3, saved_views);
-        ComPtr<ID3D11SamplerState> saved_sampler; context_->CSGetSamplers(7, 1, saved_sampler.GetAddressOf());
-        ID3D11UnorderedAccessView* saved_uavs[7]{}; context_->CSGetUnorderedAccessViews(0, 7, saved_uavs);
-        context_->CSSetConstantBuffers(10, 1, fog_constants.GetAddressOf());
+        context_->CSSetConstantBuffers(10, 1, fog_frame_constants_.GetAddressOf());
         context_->CSSetConstantBuffers(11, 1, gc_frame_constants_.GetAddressOf());
-        ID3D11ShaderResourceView* views[3]{fog_views[0].Get(), fog_views[1].Get(), fog_views[2].Get()};
+        ID3D11ShaderResourceView* views[3]{sky_inputs_active_ ? sky_shadow_srv_.Get() : nullptr,
+                                           fog_volume_active_ ? fog_integrated_srv_.Get() : nullptr,
+                                           sky_inputs_active_ ? sky_probe_srv_[sky_index_].Get() : nullptr};
         context_->CSSetShaderResources(10, 3, views);
-        context_->CSSetSamplers(7, 1, fog_sampler.GetAddressOf());
+        context_->CSSetSamplers(7, 1, fog_sampler_.GetAddressOf());
         ID3D11UnorderedAccessView* uavs_prep[7]{gc_instance_uav_.Get(), gc_args_uav_.Get(), nullptr, nullptr, nullptr, nullptr, gc_draw_input_uav_.Get()};
         context_->CSSetUnorderedAccessViews(0, 7, uavs_prep, nullptr);
-        ComPtr<ID3D11ShaderResourceView> saved_work; context_->CSGetShaderResources(55, 1, saved_work.GetAddressOf());
         context_->CSSetShaderResources(55, 1, gc_work_srv_.GetAddressOf());
+        bind_cave_irradiance_stages(false, false, true); // the cave fog light and exit glow
         const unsigned fog_on = c.switches[1] > 0 ? 1u : 0u, cloud_on = fog_cloud_visible_ ? 1u : 0u;
         context_->CSSetShader(gc_prep_cs_[(neighbour ? 4u : 0u) + fog_on * 2 + cloud_on].Get(), nullptr, 0);
         context_->DispatchIndirect(gc_work_.Get(), 0);
         context_->CSSetShader(nullptr, nullptr, 0);
-        context_->CSSetShaderResources(55, 1, saved_work.GetAddressOf());
-        context_->CSSetUnorderedAccessViews(0, 7, saved_uavs, nullptr);
-        context_->CSSetShaderResources(10, 3, saved_views);
-        context_->CSSetConstantBuffers(10, 1, saved_constants.GetAddressOf());
-        context_->CSSetSamplers(7, 1, saved_sampler.GetAddressOf());
-        for (auto* view : saved_views) if (view) view->Release();
-        for (auto* view : saved_uavs) if (view) view->Release();
+        ID3D11ShaderResourceView* no_views[3]{}; ID3D11UnorderedAccessView* no_prep_uavs[7]{};
+        ID3D11Buffer* no_buffer = nullptr; ID3D11SamplerState* no_sampler = nullptr;
+        context_->CSSetShaderResources(55, 1, no_views);
+        context_->CSSetUnorderedAccessViews(0, 7, no_prep_uavs, nullptr);
+        context_->CSSetShaderResources(10, 3, no_views);
+        context_->CSSetConstantBuffers(10, 1, &no_buffer);
+        context_->CSSetSamplers(7, 1, &no_sampler);
+        ID3D11ShaderResourceView* no_cave[5]{};context_->CSSetShaderResources(80, 5, no_cave);
+        context_->CSSetConstantBuffers(5, 1, &no_buffer);
         ++perf_native_compute_dispatches_; ++native_frame_stats_.native_compute_dispatches;
     };
     prep_pass(false);
@@ -4480,6 +4776,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     context_->VSSetShaderResources(17, 1, &point_light_grid);
     context_->VSSetShaderResources(18, 1, &point_lights);
     context_->VSSetConstantBuffers(5, 1, native_point_light_constants_.GetAddressOf());
+    bind_cave_irradiance_stages(true, true, false); // per-vertex bounce, snow piles per pixel
     if (point_shadows) {
         context_->VSSetShaderResources(PointShadowTextureLayout::first_srv, static_cast<UINT>(point_views.size()), point_views.data());
         context_->VSSetConstantBuffers(2, 1, native_shadow_constants_.GetAddressOf());
@@ -4501,12 +4798,12 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         context_->OMSetDepthStencilState(prepass_depth_states_[1].Get(), 0x80); // the cover's LESS_EQUAL; stencil mark 0x80
         context_->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
         for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
-            if (!gc_capacity_[mesh]) continue;
+            if (!gc_capacity_[0][mesh]) continue;
             const bool snow = gc_mesh_kind_[mesh] == 3, strand = gc_mesh_kind_[mesh] == 4;
             context_->VSSetShader(gc_depth_vs_[snow ? 1u + (snow_trails ? 1u : 0u) : strand ? 3u : 0u].Get(), nullptr, 0);
             context_->PSSetShader(gc_depth_ps_[snow ? 1 : strand ? 2 : 0].Get(), nullptr, 0);
-            context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
-            context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
+            context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[0][mesh].GetAddressOf());
+            context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[0][mesh].GetAddressOf());
             context_->DrawIndexedInstancedIndirect(gc_args_.Get(), mesh * 20u);
         }
         if (FAILED(resolve_world_shadow_mask())) masked = false; // nothing marked is read: the unmasked variants below
@@ -4531,29 +4828,25 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     }
     UINT draws = 0;
     for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
-        if (!gc_capacity_[mesh]) continue;
+        if (!gc_capacity_[0][mesh]) continue;
         bind_mesh_shaders(mesh, false);
-        context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
-        context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
+        context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[0][mesh].GetAddressOf());
+        context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[0][mesh].GetAddressOf());
         context_->DrawIndexedInstancedIndirect(gc_args_.Get(), mesh * 20u);
         ++draws;
     }
     if (history && draws) shadow_history_written_ = true;
     // Sun shadow casters (ground_cover_shadows): the next frame's shadow pass
-    // runs before this pass and draws this placement. The neighbour passes
-    // below re-place only the far meshes into the same pool but reset every
-    // count, so the active map's counts and frame constants are kept here.
-    if (configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1) > 0) {
-        if (!gc_shadow_args_ && FAILED(make_buffer(device_.Get(), UINT(sizeof(gc_args_template_)), 0,
-                D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS, 0, nullptr, gc_shadow_args_))) gc_shadow_args_.Reset();
-        if (!gc_shadow_frame_ && FAILED(make_buffer(device_.Get(), sizeof(GroundCoverConstants), D3D11_BIND_CONSTANT_BUFFER, 0, 0,
-                nullptr, gc_shadow_frame_))) gc_shadow_frame_.Reset();
-        if (gc_shadow_args_ && gc_shadow_frame_) {
-            context_->CopyResource(gc_shadow_args_.Get(), gc_args_.Get());
-            context_->UpdateSubresource(gc_shadow_frame_.Get(), 0, nullptr, &c, 0, 0);
-            gc_shadow_ready_ = true;
-        }
-    }
+    // runs before this pass and draws this placement, then each neighbour
+    // map's (gc_record_casters after its draws), under the same rules. Every
+    // pass writes its own pool region and resets only the shared counts, so
+    // each keeps its counts and frame constants and its casters draw in place
+    // (#196 follow-ups: in one shared region the neighbour passes overwrote
+    // the active map's large cover, and neighbour cover cast nothing).
+    const int cover_shadows = configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1);
+    for (auto& pass : gc_neighbour_casters_) pass.ready = false;
+    if (cover_shadows > 0)
+        gc_shadow_ready_ = gc_record_casters(gc_main_casters_, &c, UINT(sizeof(c)), ambient_ground_srv_.Get());
     profiler_.add_draw(draws, draws); profiler_.add_batch(draws);
     // Neighbour maps: the same rules on each neighbour's own grids at its
     // world origin, thinner (kNeighbourCoverDensity) and far meshes only; no
@@ -4581,6 +4874,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             // Nothing where the neighbour seam fog is full (neighbour_fog_hides).
             if (!neighbour_cover_fog_window(n.origin, kCellSize, neighbour_fog_world(), w)) continue;
             GroundCoverConstants nc = c;
+            for (unsigned k = 0; k < gm_count; ++k) { nc.capacity[k] = gc_capacity_[index][k]; nc.base[k] = gc_base_[index][k]; }
             nc.snow_materials[0]=std::uint32_t(n.contact.ready);
             nc.snow_materials[1]=std::uint32_t(n.contact.ready>>32);
             nc.window[0] = float(w.x0); nc.window[1] = float(w.y0); nc.window[2] = float(w.x1 - w.x0);
@@ -4640,14 +4934,16 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             context_->CSSetConstantBuffers(6, 1, shadow_history_constants_.GetAddressOf());
             context_->CSSetConstantBuffers(11, 1, gc_frame_constants_.GetAddressOf());
             context_->CSSetSamplers(8, 1, gc_clamp_.GetAddressOf());
+            if (profiler_.pass_active()) profiler_.sub_scope("neighbour_placement");
             const UINT neighbour_dispatches = neighbour_pass(UINT(w.x1 - w.x0), UINT(w.y1 - w.y0), n.mask_srv.Get());
             context_->CSSetShaderResources(27, 18, no_srvs);
             context_->CSSetShaderResources(47, 1, no_srvs);
             context_->CSSetShaderResources(9, 1, no_srvs);
-            restore_cs_shadow();
+            unbind_cs_placement();
             context_->CSSetShader(nullptr, nullptr, 0);
             perf_native_compute_dispatches_ += neighbour_dispatches; native_frame_stats_.native_compute_dispatches += neighbour_dispatches;
             prep_pass(true);
+            if (profiler_.pass_active()) profiler_.sub_scope("neighbour_draw");
             ID3D11ShaderResourceView* neighbour_vs[7]{n.ground.Get(), n.color.Get(), gc_vertex_srv_.Get(), gc_instance_srv_.Get(),
                                                       gc_draw_input_srv_.Get(), nullptr, nullptr};
             context_->VSSetShaderResources(0, 7, neighbour_vs);
@@ -4659,12 +4955,16 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             ID3D11ShaderResourceView* neighbour_art[2]{n.contact.tiles.Get(),n.contact.atlas.Get()};
             context_->PSSetShaderResources(15,2,neighbour_art);
             for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
-                if (!gc_capacity_[mesh]) continue;
+                if (!gc_capacity_[index][mesh]) continue;
                 bind_mesh_shaders(mesh, true);
-                context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
-                context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
+                context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[index][mesh].GetAddressOf());
+                context_->PSSetConstantBuffers(12, 1, gc_draw_constants_[index][mesh].GetAddressOf());
                 context_->DrawIndexedInstancedIndirect(gc_args_.Get(), mesh * 20u);
                 ++neighbour_draws;
+            }
+            if (cover_shadows > 0) {
+                if (gc_neighbour_casters_.size() < gc_neighbours_.size()) gc_neighbour_casters_.resize(gc_neighbours_.size());
+                gc_record_casters(gc_neighbour_casters_[index - 1], &nc, UINT(sizeof(nc)), n.ground.Get());
             }
         }
         profiler_.add_draw(neighbour_draws, neighbour_draws); profiler_.add_batch(neighbour_draws);
@@ -4721,29 +5021,46 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
 // the large meshes; 2: every mesh except the strands (kelp, seagrass: alpha-
 // cut cards under or at the water) and the far meshes (placed beyond the
 // close maps; the neighbour passes re-place them into the same pool).
+// The cover meshes that cast sun shadows at a ground_cover_shadows level:
+// 1 the large cover, 2 every mesh but strands. At 2 the far tuft pools cast
+// too, with their near mesh (gc_shadow_near_mesh): a tuft's shadow keeps its
+// shape and never vanishes when its visible mesh switches (#196 follow-up).
+std::uint64_t Renderer::gc_shadow_caster_mask(int level) const noexcept {
+    if (level <= 0) return 0;
+    if (level == 1) return gc_large_mesh_mask_;
+    std::uint64_t meshes = 0;
+    for (unsigned mesh = 0; mesh < gm_count; ++mesh)
+        if (gc_mesh_kind_[mesh] != 4) meshes |= std::uint64_t(1) << mesh;
+    return meshes;
+}
+
+// One placement pass's casters for the next frame's shadow pass: its frame
+// constants and ground (its caster list and instances stay in its own pool
+// region). False leaves the pass unready: it casts nothing.
+bool Renderer::gc_record_casters(GcCasterPass& pass, const void* constants, UINT constant_bytes,
+                                 ID3D11ShaderResourceView* ground) noexcept {
+    pass.ready = false;
+    if (!pass.frame && FAILED(make_buffer(device_.Get(), constant_bytes, D3D11_BIND_CONSTANT_BUFFER, 0, 0, nullptr, pass.frame))) {
+        pass.frame.Reset(); return false;
+    }
+    context_->UpdateSubresource(pass.frame.Get(), 0, nullptr, constants, 0, 0);
+    pass.ground = ground;
+    pass.ready = true;
+    return true;
+}
+
 void Renderer::draw_ground_cover_shadows(UINT slice) noexcept {
-    (void)slice; // the slice's constants are bound by the caller
+    // The slice's constants are bound by the caller; its own caster lists are drawn.
+    if (slice >= 3) return;
     const auto& config = debug_overlay_.config();
     const int level = configured_integer(config, "ground_cover_shadows", 1);
-    if (level <= 0 || !gc_shadow_ready_ || configured_integer(config, "ground_cover", 2) <= 0 ||
-        !gc_shadow_vs_[0] || !gc_shadow_vs_[1] || !gc_shadow_args_ || !gc_shadow_frame_ || !gc_instance_srv_ ||
-        !gc_draw_input_srv_ || !gc_vertex_srv_ || !gc_indices_ || !ambient_ground_srv_)
+    if (level <= 0 || configured_integer(config, "ground_cover", 2) <= 0 ||
+        !gc_shadow_vs_[0] || !gc_shadow_vs_[1] || !gc_vertex_srv_ || !gc_indices_)
         return;
-    std::uint64_t meshes = gc_large_mesh_mask_;
-    if (level >= 2) {
-        meshes = 0;
-        for (unsigned mesh = 0; mesh < gm_count; ++mesh)
-            if (gc_mesh_kind_[mesh] != 4) meshes |= std::uint64_t(1) << mesh;
-        for (const unsigned far_mesh : {unsigned(gm_blades_far), unsigned(gm_flower_far), unsigned(gm_reed_far),
-                                        unsigned(gm_cattail_far), unsigned(gm_seagrass_far)})
-            meshes &= ~(std::uint64_t(1) << far_mesh);
-    }
+    const std::uint64_t meshes = gc_shadow_caster_mask(level);
     if (!meshes) return;
     if (profiler_.pass_active()) profiler_.sub_scope(level >= 2 ? "ground_cover_all" : "ground_cover_large");
-    ID3D11ShaderResourceView* inputs[5]{ambient_ground_srv_.Get(), nullptr, gc_vertex_srv_.Get(), gc_instance_srv_.Get(),
-                                        gc_draw_input_srv_.Get()};
-    context_->VSSetShaderResources(0, 5, inputs);
-    context_->VSSetConstantBuffers(11, 1, gc_shadow_frame_.GetAddressOf());
+    context_->VSSetShaderResources(2, 1, gc_vertex_srv_.GetAddressOf());
     context_->IASetInputLayout(nullptr); context_->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
     context_->IASetIndexBuffer(gc_indices_.Get(), DXGI_FORMAT_R32_UINT, 0);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4751,13 +5068,28 @@ void Renderer::draw_ground_cover_shadows(UINT slice) noexcept {
     context_->RSSetState(gc_raster_.Get()); context_->OMSetDepthStencilState(gc_depth_.Get(), 0);
     context_->PSSetShader(nullptr, nullptr, 0);
     UINT draws = 0;
-    for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
-        if (!(meshes & (std::uint64_t(1) << mesh)) || !gc_capacity_[mesh] || !gc_draw_constants_[mesh]) continue;
-        context_->VSSetShader(gc_shadow_vs_[gc_mesh_kind_[mesh] == 3 ? 1 : 0].Get(), nullptr, 0);
-        context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[mesh].GetAddressOf());
-        context_->DrawIndexedInstancedIndirect(gc_shadow_args_.Get(), mesh * 20u);
-        ++draws;
+    // One pass: every caster mesh's list, from its own pool region.
+    ID3D11ShaderResourceView* pool[2]{gc_instance_srv_.Get(), gc_draw_input_srv_.Get()};
+    context_->VSSetShaderResources(3, 2, pool);
+    context_->VSSetShaderResources(66, 1, gc_caster_slot_srv_[slice].GetAddressOf());
+    const auto draw_pass = [&](const GcCasterPass& pass, unsigned index) {
+        if (!pass.ready || !pass.ground || !pass.frame || index >= gc_pass_count_ || index >= gc_caster_args_passes_) return;
+        context_->VSSetShaderResources(0, 1, pass.ground.GetAddressOf());
+        context_->VSSetConstantBuffers(11, 1, pass.frame.GetAddressOf());
+        for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
+            if (!((meshes >> mesh) & 1u) || !gc_capacity_[index][mesh] || !gc_draw_constants_[index][mesh]) continue;
+            context_->VSSetShader(gc_shadow_vs_[gc_mesh_kind_[mesh] == 3 ? 1 : 0].Get(), nullptr, 0);
+            context_->VSSetConstantBuffers(12, 1, gc_draw_constants_[index][mesh].GetAddressOf());
+            context_->DrawIndexedInstancedIndirect(gc_caster_args_.Get(), ((index * 3 + slice) * gm_count + mesh) * 20u);
+            ++draws;
+        }
+    };
+    if (gc_shadow_ready_ && gc_instance_srv_ && gc_draw_input_srv_ && gc_caster_slot_srv_[slice] && gc_caster_args_) {
+        draw_pass(gc_main_casters_, 0);
+        for (std::size_t p = 0; p < gc_neighbour_casters_.size(); ++p) draw_pass(gc_neighbour_casters_[p], unsigned(p + 1));
     }
+    ID3D11ShaderResourceView* no_slots = nullptr;
+    context_->VSSetShaderResources(66, 1, &no_slots);
     if (profiler_.pass_active()) profiler_.add_sub_draw(draws, 0);
     ID3D11ShaderResourceView* empty[5]{};
     context_->VSSetShaderResources(0, 5, empty);

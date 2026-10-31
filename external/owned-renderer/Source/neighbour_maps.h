@@ -180,13 +180,26 @@ void neighbour_weld_edge_heights(TerrainCpuAsset& terrain, double x, double y,
     const std::vector<NeighbourEdgeStrip>& strips);
 std::size_t neighbour_weld_edge_normals(TerrainCpuAsset& terrain, double x, double y,
     const std::vector<NeighbourEdgeStrip>& strips);
+// The terrain shape values (slope normal, facet flatness) drive the cliff
+// side projection and the blend's steepness. Each map computes them from its
+// own grid, one-sided at its edge, so two maps disagreed on their shared edge
+// vertices and the cliff texturing broke along the seam as a hard line
+// (#197, zone3obr against its neighbour). Prepares `terrain`'s values from its
+// welded grid, then gives each base vertex on a side that touches an opposite
+// strip the strip's values (whole-metre alignment only), so both maps
+// interpolate from the same seam values. Returns welded vertices.
+std::size_t neighbour_weld_edge_shading(TerrainCpuAsset& terrain, double x, double y,
+    const std::vector<NeighbourEdgeStrip>& strips);
 void neighbour_maps_enable(bool enabled) noexcept;
 bool neighbour_maps_enabled() noexcept;
 // The map's origin in the saved world layout (its component's frame, the
-// same numbers the neighbour placement subtracts), read from the layout file
-// for the verified profile; false and 0,0 when the map is not in it. A map
-// therefore has the same frame as the active map and as a neighbour.
-bool neighbour_layout_origin(const std::string& mpr, const ResourceStoreConfig& mounts, double& x, double& y) noexcept;
+// same numbers the neighbour placement subtracts), as the neighbour stream
+// read it for this active map from the verified profile's layout file;
+// false and 0,0 until the stream has read it or when the map is not in it.
+// A map therefore has the same frame as the active map and as a neighbour.
+bool neighbour_layout_origin(const std::string& mpr, double& x, double& y) noexcept;
+// A map's name as the layout lists it (file name, lower case, no ".mpr").
+std::string neighbour_map_name(const std::string& mpr);
 // A layout origin snapped to whole 2 m terrain tiles: the frame of the
 // terrain material layouts (noise, hex cells, world-space tile reads), which
 // must keep each tile's world-space read aligned with its own art.

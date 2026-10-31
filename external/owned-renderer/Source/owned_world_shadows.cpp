@@ -1387,6 +1387,14 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
     auto& frame=g_owned_visual_world_frame;
     frame.shadow_attempted=true;
     if(!frame.shadows_enabled || !g_owned_shadow_settings.sun_shadows){frame.shadow_ready=true;return true;}
+    // Caves have no sun (cave_lighting.h): retire the sun maps once on entry
+    // (an empty frame) and schedule no cascade while the zone stays a cave.
+    static thread_local bool cave_sun_retired=false;
+    if(g_native_world_lighting_frame.cave) {
+        if(!cave_sun_retired){retire_owned_shadow_maps();cave_sun_retired=true;}
+        frame.shadow_ready=true;return true;
+    }
+    cave_sun_retired=false;
     const bool traced=startup_begin(StartupStage::shadow);
     bool collecting=false,batch=false;
     try {
@@ -2355,7 +2363,9 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         const bool terrain_enabled=(flags&0x100u)!=0 && g_owned_terrain_frame.source_values.terrain;
         std::vector<NativeWorldBounds> receivers;
         CityRetainedOwnerGuard decision_timing(CityRetainedOwner::shadow_input_decision);
-        const auto configured_domain=pass.shadows_enabled ? shadow_scene.shadow_input_domain() : nullptr;
+        // Caves have no sun; point shadows retain their independent setting.
+        const bool sun=pass.shadows_enabled && g_owned_shadow_settings.sun_shadows && !g_native_world_lighting_frame.cave;
+        const auto configured_domain=sun ? shadow_scene.shadow_input_domain() : nullptr;
         const auto cached=configured_domain && configured_domain->settings_revision==g_owned_shadow_settings_revision
             ? configured_domain : nullptr;
         const auto changes=shadow_scene.shadow_source_changes(cached?cached->source_revision:0);
@@ -2395,7 +2405,7 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         }
         g_world_lamp_memory.camera=g_owned_terrain_frame.front_end.inputs.camera_position;
         g_world_lamp_memory.camera_valid=true;
-        if(pass.shadows_enabled && g_owned_shadow_settings.sun_shadows && terrain_enabled) {
+        if(sun && terrain_enabled) {
             CityRetainedOwnerGuard receiver_timing(CityRetainedOwner::receiver_fitting);
             // Missing terrain material retires only its caster contributions.
             // It must not prevent independent entity samples or color output.
@@ -2418,7 +2428,7 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
             flags,receivers,pass.shadows_enabled,nullptr,changes.full?nullptr:&changes.dirty_visuals,
             cached?cached->source_revision:0,shadow_source_revision))
             throw "owned_shadow_scene_values";
-        frame.persistent_static_shadows=pass.shadows_enabled;
+        frame.persistent_static_shadows=sun;
         frame.shadow_time_active_visuals=changes.time_active_visuals;
         if(pass.shadows_enabled && g_bridge_sample.active)
             ++g_bridge_sample.shadow_receiver_refits;
@@ -2430,7 +2440,7 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         if(!execute_owned_shadow_pass(terrain_enabled,shadow_scene,
             nullptr,&changes,reuse_static?cached.get():nullptr))return false;
         execute_owned_rain_occlusion_pass();
-        if(pass.shadows_enabled) {
+        if(sun) {
             CityRetainedOwnerGuard snapshot_timing(CityRetainedOwner::domain_snapshot);
             // Publication is best effort: GPU success is not contingent on an
             // allocation for next frame's retained value snapshot.

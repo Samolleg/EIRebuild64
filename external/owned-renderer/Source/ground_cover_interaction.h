@@ -17,9 +17,15 @@ float gcTuftPixels(float4x4 clip,float3 root,float size,float screenHeight){
 // Thinned tufts, and tufts drawn so small that their leaves are about a pixel
 // wide at the root (leafPixels: drawn scale times the mesh's root leaf width),
 // use their far mesh of fewer, wider leaves: sub-pixel slivers shade whole
-// 2x2 pixel quads and shimmer. The per-instance variation (0-1) spreads the
-// switch so no line shows.
-bool gcTuftUsesFarMesh(float keep,float leafPixels,float variation){return keep<.45||leafPixels<lerp(1.2,1.92,variation);}
+// 2x2 pixel quads and shimmer. Returns the far mesh's share: 0 near mesh only,
+// 1 far mesh only, between: both drawn with complementary dither (issue #196:
+// the former instant swap at keep .45 changed every tuft's shape on one ring
+// as the camera moved). The per-instance variation (0-1) spreads each tuft's
+// switch point (keep .35-.55, leaf width 1.2-1.92 px) so no ring shows.
+float gcTuftFarWeight(float keep,float leafPixels,float variation){
+ const float atKeep=.35+.2*frac(variation*7.31),atPixels=lerp(1.2,1.92,variation);
+ return max(1-smoothstep(atKeep-.08,atKeep+.08,keep),1-smoothstep(atPixels,atPixels*1.5,leafPixels));
+}
 float gcWindSway(float2 p,float2 direction,float seconds,float travel,float gust,float phase){
  // Eight-metre fronts travel downwind; a longer wave gives them a gradual
  // envelope. Small phase jitter preserves the front while separating tufts.
@@ -30,8 +36,9 @@ float gcWindSway(float2 p,float2 direction,float seconds,float travel,float gust
  float broad=along*.36959914-seconds*travel*.47;
  float storm=saturate((gust-.1)/.9);
  float sway=.32+.06*storm+(.18+.12*min(gust,.1)+.03*storm)*sin(front+.18*sin(phase))+(.10+.06*storm)*sin(broad);
- sway+=.07*sin(phase+seconds*.85+along*.26);
- return sway+.025*sin(phase*1.7+seconds*2.6+along*1.8);
+ // Per-tuft flutter, periods ~2.9 s and ~1.1 s.
+ sway+=.07*sin(phase+seconds*2.2+along*.26);
+ return sway+.025*sin(phase*1.7+seconds*5.5+along*1.8);
 }
 // Clustered cover (flower patches, snow-grass clumps) shares one world-space
 // patch lattice. A lattice cell holds at most one patch, kept wholly inside

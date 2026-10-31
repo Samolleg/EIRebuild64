@@ -153,6 +153,12 @@ RetainedTerrainSourceIdentity retained_static_terrain_source_identity() noexcept
 ResourceStoreStats owned_visual_resource_stats() noexcept;   // temporary: memory attribution
 // Temporary (#142): CPU texture bytes the live visual textures still hold.
 std::uint64_t owned_visual_texture_source_bytes() noexcept;
+// Core mode, game process: archive textures (S5a) and map sources (S5b) are
+// defined on the x64 host through this recorder and kept here slim.
+class RetainedPublicationRecorder;
+#ifndef EID3D11_EMBEDDED
+void retained_visual_textures_to_host(RetainedPublicationRecorder* recorder) noexcept;
+#endif
 
 #ifdef EID3D11_TESTING
 struct OwnedVisualClipReuseTestStats {

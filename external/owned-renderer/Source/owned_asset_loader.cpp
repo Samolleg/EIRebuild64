@@ -1432,6 +1432,17 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
 bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t index,
                           TextureAlphaPixels& input) noexcept {
     input = {};
+    // A core-mode stand-in (TextureCpuAsset::alpha_cut_mask): mip 0 only.
+    if (!texture.source && index == 0 && !texture.mips.empty() &&
+        (texture.alpha_cut_mask || (texture.opaque_mips & 1u))) {
+        input.format = TextureAlphaFormat::cut_bits;
+        input.width = texture.mips[0].width; input.height = texture.mips[0].height;
+        if (texture.alpha_cut_mask) {
+            input.data = texture.alpha_cut_mask->data();
+            input.bytes = texture.alpha_cut_mask->size();
+        }
+        return true;
+    }
     if (!texture.source || index >= texture.mips.size()) return false;
     switch (texture.format) {
     case MmpFormat::dxt1: input.format = TextureAlphaFormat::bc1; break;
@@ -2470,8 +2481,11 @@ bool finalize_terrain_sector_spatial_descriptor(
 
 namespace {
 
-const TerrainVertex* terrain_vertex(const TerrainCpuAsset& terrain,
-                                    int x, int y, bool layer) noexcept {
+// The height fields of one vertex: from the full record, or from a core-mode
+// slim sector's compact copy of the same values (TerrainSectorCpuAsset::heights).
+const TerrainHeightVertex* terrain_vertex(const TerrainCpuAsset& terrain,
+                                          int x, int y, bool layer,
+                                          TerrainHeightVertex& storage) noexcept {
     if (x < 0 || y < 0 ||
         x > static_cast<int>(terrain.sector_count_x * kTerrainCellsPerSector) ||
         y > static_cast<int>(terrain.sector_count_y * kTerrainCellsPerSector))
@@ -2500,18 +2514,23 @@ const TerrainVertex* terrain_vertex(const TerrainCpuAsset& terrain,
     const std::size_t index = static_cast<std::size_t>(local_y) *
         kTerrainVerticesPerSide + static_cast<std::size_t>(local_x) +
         (layer && sector.has_layers ? kTerrainVerticesPerSector : 0u);
-    return index < sector.vertices.size() ? &sector.vertices[index] : nullptr;
+    if (!sector.vertices.empty()) {
+        if (index >= sector.vertices.size()) return nullptr;
+        storage = terrain_height_vertex(sector.vertices[index]);
+        return &storage;
+    }
+    return index < sector.heights.size() ? &sector.heights[index] : nullptr;
 }
 
-float terrain_cross(const TerrainVertex& center, const TerrainVertex& first,
-                    const TerrainVertex& second) noexcept {
+float terrain_cross(const TerrainHeightVertex& center, const TerrainHeightVertex& first,
+                    const TerrainHeightVertex& second) noexcept {
     return (first.x - center.x) * (second.y - center.y) -
         (first.y - center.y) * (second.x - center.x);
 }
 
-float terrain_plane_height(float x, float y, const TerrainVertex& first,
-                           const TerrainVertex& second,
-                           const TerrainVertex& third) noexcept {
+float terrain_plane_height(float x, float y, const TerrainHeightVertex& first,
+                           const TerrainHeightVertex& second,
+                           const TerrainHeightVertex& third) noexcept {
     const float e1 = second.x - first.x;
     const float e2 = second.y - first.y;
     const float e3 = second.z - first.z;
@@ -2541,12 +2560,13 @@ static bool sample_terrain_layer(const TerrainCpuAsset& terrain, float x, float 
     int cell_x = static_cast<int>(std::nearbyint(x));
     int cell_y = static_cast<int>(std::nearbyint(y));
     for (unsigned attempt = 0; attempt < 10u; ++attempt) {
-        const TerrainVertex* lu = terrain_vertex(terrain, cell_x, cell_y, layer);
-        const TerrainVertex* ru = terrain_vertex(terrain, cell_x + 1, cell_y, layer);
-        const TerrainVertex* ld = terrain_vertex(terrain, cell_x, cell_y + 1, layer);
-        const TerrainVertex* rd = terrain_vertex(terrain, cell_x + 1, cell_y + 1, layer);
-        std::array<TerrainVertex,4> current{};
-        const auto shifted=[&](const TerrainVertex*& vertex, unsigned slot) noexcept {
+        std::array<TerrainHeightVertex,4> read{};
+        const TerrainHeightVertex* lu = terrain_vertex(terrain, cell_x, cell_y, layer, read[0]);
+        const TerrainHeightVertex* ru = terrain_vertex(terrain, cell_x + 1, cell_y, layer, read[1]);
+        const TerrainHeightVertex* ld = terrain_vertex(terrain, cell_x, cell_y + 1, layer, read[2]);
+        const TerrainHeightVertex* rd = terrain_vertex(terrain, cell_x + 1, cell_y + 1, layer, read[3]);
+        std::array<TerrainHeightVertex,4> current{};
+        const auto shifted=[&](const TerrainHeightVertex*& vertex, unsigned slot) noexcept {
             if (!vertex || !layer || !shifts) return true;
             current[slot]=*vertex;
             if (vertex->lighting_object!=UINT16_MAX) {

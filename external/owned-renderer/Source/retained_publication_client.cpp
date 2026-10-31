@@ -22,7 +22,7 @@ std::atomic<RetainedPublicationRecorder*> g_recorder{nullptr};
 
 void ring_sink(void*, const std::uint8_t* data, std::size_t bytes, bool last) noexcept {
     const x64remote::RetainedFragment header{static_cast<std::uint32_t>(bytes), last ? 1u : 0u};
-    x64remote::Writer w(x64remote::Op::retained, 0, static_cast<std::uint32_t>(sizeof(header) + bytes));
+    x64remote::Writer w(x64remote::Op::retained, static_cast<std::uint32_t>(sizeof(header) + bytes));
     w.put(header);
     if (bytes) w.put(data, static_cast<std::uint32_t>(bytes));
 }
@@ -45,6 +45,13 @@ void retained_publication_attach() noexcept {
         x64remote::log("retained publication stream attached (fragments of %u bytes)",
                        static_cast<unsigned>(fragment));
     });
+}
+
+// Core mode only (the call-stream mode still uploads from this process):
+// archive textures go to the host with their bytes, and this process keeps
+// stand-ins without them (owned_resource_runtime.cpp, S5a).
+void retained_publication_core_textures() noexcept {
+    retained_visual_textures_to_host(g_recorder.load(std::memory_order_acquire));
 }
 
 // Core mode: the stream stopped, so the host's world would diverge.
